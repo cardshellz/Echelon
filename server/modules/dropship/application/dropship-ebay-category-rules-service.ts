@@ -17,6 +17,7 @@ import {
 } from "../../../../shared/dropship/ebay-category-rules";
 import { DropshipError } from "../domain/errors";
 import { prepareEbayCategoryRules, summarizeEbayCategoryRulesReview } from "./dropship-ebay-category-resolver";
+import { verifyEbayLeafCategories, type EbayCategoryRequest } from "./dropship-ebay-listing-checks";
 import { DROPSHIP_DEFAULT_EBAY_MARKETPLACE_ID } from "./dropship-listing-config-service";
 import type { DropshipListingStoreContext } from "./dropship-listing-preview-service";
 import type { ListingSettingLayers } from "./dropship-listing-setting-layers";
@@ -125,11 +126,14 @@ export class DropshipEbayCategoryRulesService {
   /** What saving the draft would change across the store's selected listings. Nothing is written. */
   async reviewForMember(memberId: string, storeId: unknown, input: unknown): Promise<EbayCategoryRulesReview> {
     const parsed = reviewEbayCategoryRulesInputSchema.parse(input);
-    const identity = await this.ebayIdentity(memberId, storeId);
-    const proposed = await this.compileDraft(identity, parsed.draft);
-    return this.read(memberId, identity.storeConnectionId, async (tx) => {
+    // The current rules first, so a draft of categories they already hold
+    // needs no eBay call (plan P30).
+    const { storeConnectionId, stored } = await this.read(memberId, storeId, async (tx, context) =>
+      ({ storeConnectionId: context.storeConnectionId, stored: await tx.loadState() }));
+    const proposed = await this.compileDraft(memberId, storeConnectionId, stored.profile, parsed.draft);
+    return this.read(memberId, storeConnectionId, async (tx) => {
       const current = await tx.loadState();
-      if (current.revisionId !== parsed.expectedRevisionId) throw versionConflict(identity.storeConnectionId);
+      if (!isUnmovedRevision(current, stored, parsed.expectedRevisionId)) throw versionConflict(storeConnectionId);
       const candidates = await loadSelectedCandidates(tx, this.deps.clock.now(), "category_review");
       // Before and after share one read of the product and category settings, so
       // only the draft can change a listing's category in this review.
@@ -147,15 +151,18 @@ export class DropshipEbayCategoryRulesService {
     const parsed = saveEbayCategoryRulesInputSchema.parse(input);
     const storeConnectionId = storeIdSchema.parse(storeId);
     const requestHash = hashEbayCategoryRulesRequest(storeConnectionId, parsed);
-    // A lost-response retry replays from the database without asking eBay again.
-    const replayed = await this.read(memberId, storeConnectionId, async (tx) =>
-      (await tx.findReplay(parsed.idempotencyKey, requestHash)) ? tx.loadState() : null);
-    if (replayed) {
-      this.logSaved(memberId, storeConnectionId, replayed, true);
-      return { state: replayed, idempotentReplay: true };
+    // A lost-response retry replays from the database without asking eBay
+    // again. Otherwise the same read gives the current rules, so only the
+    // categories they do not hold are checked with eBay (plan P30).
+    const first = await this.read(memberId, storeConnectionId, async (tx) => {
+      const replay = await tx.findReplay(parsed.idempotencyKey, requestHash);
+      return { replay, state: await tx.loadState() };
+    });
+    if (first.replay) {
+      this.logSaved(memberId, storeConnectionId, first.state, true);
+      return { state: first.state, idempotentReplay: true };
     }
-    const identity = await this.ebayIdentity(memberId, storeConnectionId);
-    const profile = await this.compileDraft(identity, parsed.draft);
+    const profile = await this.compileDraft(memberId, storeConnectionId, first.state.profile, parsed.draft);
     const result = await this.deps.repository.execute(
       { memberId, storeConnectionId, mode: "write", idempotencyKey: parsed.idempotencyKey },
       async (tx) => {
@@ -165,7 +172,7 @@ export class DropshipEbayCategoryRulesService {
           return { state: await tx.loadState(), idempotentReplay: true };
         }
         const current = await tx.loadState();
-        if (current.revisionId !== parsed.expectedRevisionId) throw versionConflict(storeConnectionId);
+        if (!isUnmovedRevision(current, first.state, parsed.expectedRevisionId)) throw versionConflict(storeConnectionId);
         await tx.saveProfile({
           expectedRevisionId: parsed.expectedRevisionId,
           profile,
@@ -181,40 +188,68 @@ export class DropshipEbayCategoryRulesService {
   }
 
   /**
-   * Replace every category number with eBay's own name and path. Unknown and
-   * non-leaf categories are refused; nothing from the client is stored as a name.
+   * The stored profile for a draft. A category the current rules already
+   * hold (`stored`) keeps its stored value, which was eBay's answer when it
+   * was first saved. Only the other categories go through the sign-in check
+   * and eBay, so going back to "Card Shellz picks", removing a rule or
+   * re-saving known categories works while eBay needs a sign-in (plan P30).
+   * Nothing from the client is stored as a name.
+   *
+   * `stored` is the newest rules at the request's first read, not the revision
+   * the draft names: a stale draft is refused by the version check, and an id
+   * stored only in an older revision is new here, so it is checked as before.
+   * The version check also refuses a head that moved after that read
+   * (`isUnmovedRevision`), so a stored value is only ever kept on top of the
+   * revision it was read from.
    */
-  private async compileDraft(identity: EbayCategoryIdentity, draft: EbayCategoryRulesDraft): Promise<EbayCategoryRulesProfile> {
-    const categoryIds = [...new Set([draft.defaultCategoryId, ...draft.rules.map((rule) => rule.categoryId)]
-      .filter((categoryId): categoryId is string => categoryId !== null))];
-    const found = categoryIds.length === 0
-      ? new Map<string, EbayCategoryOption>()
-      : await this.callTaxonomy(identity, "verify", () => this.deps.taxonomy.describe(identity, categoryIds));
-    const verified = (categoryId: string, ruleId: string | null): EbayCategory => {
-      const option = found.get(categoryId);
-      if (!option) {
-        throw new DropshipError("DROPSHIP_EBAY_CATEGORY_RULE_INVALID",
-          "That eBay category is not in eBay's current category list. Search again and pick a current category.",
-          { storeConnectionId: identity.storeConnectionId, categoryId, ruleId, reason: "not_found" });
+  private async compileDraft(
+    memberId: string,
+    storeConnectionId: number,
+    stored: EbayCategoryRulesProfile | null,
+    draft: EbayCategoryRulesDraft,
+  ): Promise<EbayCategoryRulesProfile> {
+    const known = storedEbayCategories(stored);
+    const newRequests = draftCategoryRequests(draft).filter((request) => !known.has(request.categoryId));
+    const verified = newRequests.length === 0
+      ? new Map<string, EbayCategory>()
+      : await this.verifyNewCategories(memberId, storeConnectionId, newRequests);
+    const valueFor = (categoryId: string): EbayCategory => {
+      const value = known.get(categoryId) ?? verified.get(categoryId);
+      if (!value) {
+        // Every draft id is either known or was verified above.
+        throw new DropshipError("DROPSHIP_EBAY_CATEGORY_RULES_INVARIANT_FAILED",
+          "An eBay category in the draft was neither stored nor checked with eBay.",
+          { storeConnectionId, categoryId, retryable: false });
       }
-      if (!option.leaf) {
-        throw new DropshipError("DROPSHIP_EBAY_CATEGORY_RULE_INVALID",
-          "Pick a more specific eBay category. eBay accepts listings only in the last level of a category path.",
-          { storeConnectionId: identity.storeConnectionId, categoryId, ruleId, reason: "not_leaf" });
-      }
-      return { categoryId: option.categoryId, categoryName: option.categoryName, path: [...option.path] };
+      return { categoryId: value.categoryId, categoryName: value.categoryName, path: [...value.path] };
     };
     const profile = ebayCategoryRulesProfileSchema.safeParse({
       version: 1,
-      defaultCategory: draft.defaultCategoryId === null ? null : verified(draft.defaultCategoryId, null),
-      rules: draft.rules.map((rule) => ({ id: rule.id, name: rule.name, scope: rule.scope, category: verified(rule.categoryId, rule.id) })),
+      defaultCategory: draft.defaultCategoryId === null ? null : valueFor(draft.defaultCategoryId),
+      rules: draft.rules.map((rule) => ({ id: rule.id, name: rule.name, scope: rule.scope, category: valueFor(rule.categoryId) })),
     });
     if (!profile.success) {
       throw new DropshipError("DROPSHIP_EBAY_CATEGORY_RULE_INVALID",
         "eBay returned a category these rules cannot store. Pick a different category.",
-        { storeConnectionId: identity.storeConnectionId, reason: "invalid_category" });
+        { storeConnectionId, reason: "invalid_category" });
     }
     return profile.data;
+  }
+
+  /**
+   * eBay's value for each new category: the sign-in check first, then one
+   * eBay call for the distinct ids in draft order. Unknown and non-leaf
+   * categories are refused, the first in draft order.
+   */
+  private async verifyNewCategories(
+    memberId: string,
+    storeConnectionId: number,
+    requests: readonly EbayCategoryRequest[],
+  ): Promise<Map<string, EbayCategory>> {
+    const identity = await this.ebayIdentity(memberId, storeConnectionId);
+    const categoryIds = [...new Set(requests.map((request) => request.categoryId))];
+    const described = await this.callTaxonomy(identity, "verify", () => this.deps.taxonomy.describe(identity, categoryIds));
+    return verifyEbayLeafCategories({ storeConnectionId: identity.storeConnectionId, described, requests });
   }
 
   /** Authorize and require a live eBay connection, which every eBay read uses. */
@@ -318,6 +353,45 @@ export function permissionRequired(storeConnectionId: number): DropshipError {
 function categoryNotFound(storeConnectionId: number, categoryId: string | null): DropshipError {
   return new DropshipError("DROPSHIP_EBAY_CATEGORY_NOT_FOUND",
     "That eBay category is not in eBay's current category list.", { storeConnectionId, categoryId });
+}
+
+/**
+ * The version check of a save or review: the newest revision is the one the
+ * request names AND the one its first read saw. The second half matters only
+ * for a request that names a revision which did not exist yet at its first
+ * read (revision ids are one global identity, and a head never points back).
+ * Without it, such a request could keep a category's stored value from the
+ * first read's revision on top of a revision that no longer holds it, with no
+ * eBay check (plan P30).
+ */
+function isUnmovedRevision(
+  current: EbayCategoryRulesState,
+  firstRead: EbayCategoryRulesState,
+  expectedRevisionId: number | null,
+): boolean {
+  return current.revisionId === expectedRevisionId && current.revisionId === firstRead.revisionId;
+}
+
+/** Every category a draft names, in draft order: the store default first, then each rule's. */
+function draftCategoryRequests(draft: EbayCategoryRulesDraft): EbayCategoryRequest[] {
+  return [
+    ...(draft.defaultCategoryId === null ? [] : [{ categoryId: draft.defaultCategoryId, ruleId: null }]),
+    ...draft.rules.map((rule) => ({ categoryId: rule.categoryId, ruleId: rule.id })),
+  ];
+}
+
+/**
+ * The categories a stored profile holds, by id: its store default and every
+ * rule's. A profile holds one value per id (each save copies a known id's
+ * value or asks eBay once per new id), so the first one found is the value.
+ */
+function storedEbayCategories(profile: EbayCategoryRulesProfile | null): Map<string, EbayCategory> {
+  const stored = new Map<string, EbayCategory>();
+  if (!profile) return stored;
+  for (const category of [profile.defaultCategory, ...profile.rules.map((rule) => rule.category)]) {
+    if (category && !stored.has(category.categoryId)) stored.set(category.categoryId, category);
+  }
+  return stored;
 }
 
 function readMarketplaceId(config: DropshipStoreListingConfig | null): string | null {
