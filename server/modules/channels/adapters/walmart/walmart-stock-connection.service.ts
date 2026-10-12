@@ -2,7 +2,7 @@ import { z } from "zod";
 import { getSchedulerDisableReason } from "../../../../infrastructure/scheduler-config";
 import { channelCatalogItemSchema } from "@shared/types/channel-catalog";
 import type { VerifiedListingStockService } from "../../../inventory-planning/application/verified-listing-stock.service";
-import { isActiveSellerShipNode, type WalmartChannelService } from "./walmart-channel.service";
+import { isActiveSellerShipNode, walmartListingAccount, type WalmartChannelService } from "./walmart-channel.service";
 import { WalmartApiError } from "./walmart-client";
 
 const BATCH_SIZE = 50;
@@ -53,16 +53,17 @@ export class WalmartStockConnectionService {
             }
             // SYSTEM_PROBLEM, retired and unknown listings must never gain stock.
             if (item.lifecycleStatus !== "ACTIVE" || item.publishedStatus !== "PUBLISHED" || !item.externalProductId) continue;
-            const result = await this.inventory.connect({ channelId, connectionId: connection.connection_id,
+            const result = await this.channels.withListingWrites(walmartListingAccount(connection), [mapping.channel_sku], () => this.inventory.connect({ channelId, connectionId: connection.connection_id,
               accountId: connection.partner_id, environment: connection.environment, externalScopeId: connection.ship_node_id,
               productVariantId: mapping.product_variant_id, sku: mapping.channel_sku, externalProductId: item.externalProductId,
-              lifecycleStatus: "ACTIVE", publishedStatus: "PUBLISHED", observedAt: this.now().toISOString() });
+              lifecycleStatus: "ACTIVE", publishedStatus: "PUBLISHED", observedAt: this.now().toISOString() }));
             if (result.state === "connected") {
               processed++;
               this.logger.info(JSON.stringify({ event: "walmart_stock_connected", channelId, variantId: mapping.product_variant_id,
                 publicationRows: result.receipt?.publicationRows, quantities: result.quantities }));
             }
           } catch (error) {
+            if (codeOf(error) === "LISTING_PUBLICATION_STOPPED") continue;
             failed++;
             this.logger.error(JSON.stringify({ event: "walmart_stock_connection_failed", code: codeOf(error), channelId, variantId: mapping.product_variant_id }));
           }

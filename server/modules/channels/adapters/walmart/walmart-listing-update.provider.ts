@@ -245,9 +245,11 @@ export class WalmartListingUpdateProvider implements ListingUpdateProvider {
           "LISTING_UPDATE_INVALID",
           "Correct the listing fields before sending.",
         );
-      await beforeSend();
-      entered = true;
-      return await api.submitMaintenance(prepared.payload, correlationId);
+      return await this.channels.withListingWrites(intent.account, [intent.command.sku], async () => {
+        await beforeSend();
+        entered = true;
+        return api.submitMaintenance(prepared.payload, correlationId);
+      });
     } catch (error) {
       const rejected =
         error instanceof WalmartApiError &&

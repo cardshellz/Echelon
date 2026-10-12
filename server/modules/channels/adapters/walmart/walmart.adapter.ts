@@ -3,7 +3,7 @@ import type {
   FulfillmentPayload, CancellationPayload, InventoryPushItem, InventoryPushResult,
   InventoryReadItem, InventoryReadResult, InventoryPublicationContext,
 } from "../../channel-adapter.interface";
-import { WalmartChannelService } from "./walmart-channel.service";
+import { WalmartChannelService, walmartListingAccount } from "./walmart-channel.service";
 import { WalmartApiError } from "./walmart-client";
 import type { InventoryPublicationSupplyReader } from "../../../inventory-planning/application/inventory-publication-supply-read.port";
 
@@ -47,7 +47,8 @@ export class WalmartAdapter implements IChannelAdapter {
             || (item.sku !== null && sku !== item.sku)) {
             throw new WalmartApiError("WALMART_INVENTORY_MAPPING_MISMATCH", "Inventory command must match the explicit Walmart SKU mapping", false);
           }
-          await scope.api.setInventory(sku, scope.connection.ship_node_id, item.allocatedQty);
+          await this.channels.withListingWrites(walmartListingAccount(scope.connection), item.allocatedQty > 0 ? [sku] : [],
+            () => scope.api.setInventory(sku, scope.connection.ship_node_id, item.allocatedQty));
           results.push({ variantId: item.variantId, pushedQty: item.allocatedQty, status: "success" });
         } catch (error) {
           const failure = safeFailure(error);
