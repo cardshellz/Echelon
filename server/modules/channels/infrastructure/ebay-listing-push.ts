@@ -19,7 +19,7 @@ import type { PoolClient } from "pg";
 import { drizzle } from "drizzle-orm/node-postgres";
 import * as schema from "@shared/schema";
 import { EbayAuthService, createEbayAuthConfig } from "../adapters/ebay/ebay-auth.service";
-import { assertEbayPublicationReady } from "../../inventory-planning/quantity-publication";
+import { ensureEbayPublicationReady, InventoryPublicationMembershipError, InventoryPublicationSelectionError } from "../../inventory-planning/quantity-publication";
 
 const repository = new PostgresEbayListingPushRepository(pool, EBAY_CHANNEL_ID, () => new Date(),
   () => getDatabasePoolSnapshot().maximumConnections);
@@ -153,11 +153,22 @@ export async function prepareEbayPublicationCompletion(source: EbayListingSyncId
     variants, listingIds: [], groupKey: identity.groupKey, existingGroupKey: identity.groupKey, quantities });
   assertEbayListingSourceIdentityUnchanged(source, await readEbayPublicationSource(source.productId));
   return { sourceIdentity, identity, inspection, inspect,
-    assertInventoryReady: () => assertEbayPublicationReady(pool, {
-      channelId: source.channelId, connectionId: ctx.connectionId, productId: source.productId,
-      accountId: ctx.account.externalAccountId, environment: ctx.auth.getEnvironment(),
-      variants: identity.variants.map(member => ({ productVariantId: member.variantId, sku: member.sku })),
-    }), draft: { ...draft,
+    assertInventoryReady: async execution => {
+      if (!execution) throw new EbayListingSyncError("EBAY_PUBLICATION_OWNER_REQUIRED", "Automatic stock preparation requires the saved listing job and its authenticated actor.");
+      try {
+        await ensureEbayPublicationReady(pool, {
+          channelId: source.channelId, connectionId: ctx.connectionId, productId: source.productId,
+          accountId: ctx.account.externalAccountId, environment: ctx.auth.getEnvironment(),
+          variants: identity.variants.map(member => ({ productVariantId: member.variantId, sku: member.sku })),
+        }, { ...execution, now: new Date() });
+      } catch (error) {
+        // Only the Inventory owner's validated business error may become a
+        // user-visible listing failure. Unknown SQL/transport errors stay private.
+        if (error instanceof InventoryPublicationMembershipError || error instanceof InventoryPublicationSelectionError)
+          throw new EbayListingSyncError(error.code, error.message, { cause: error });
+        throw error;
+      }
+    }, draft: { ...draft,
     existingOfferIdsByVariantId: Object.fromEntries(identity.variants.map(member => [member.variantId, member.offerId])) },
     client: createEbayRouteListingLifecycleClient(clientInput), resolvePublishedIdentity,
     variants: variants.map(member => ({ variantId: member.id, sku: member.sku, productName: product.name,

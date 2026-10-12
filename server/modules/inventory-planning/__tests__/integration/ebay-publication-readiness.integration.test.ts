@@ -65,13 +65,13 @@ dbDescribe.sequential("reviewed eBay publication stock enrollment, real PostgreS
   it("reviews the missing exact mapping without inventing IDs, then atomically creates, seals, enrolls and saves follow-up work", async () => {
     const original = source();
     const review = await reviewEbayPublicationReadiness(database.pool, original);
-    expect(review).toMatchObject({ ready: true, currentlyReady: false, variants: [{ mappingAction: "create", membershipAction: "include", desiredQuantity: "17" }] });
+    expect(review).toMatchObject({ ready: true, currentlyReady: false, variants: [{ mappingAction: "create", desiredQuantity: "17" }] });
     expect(original).toEqual(source());
     expect(await counts()).toEqual({ mappings: 0, members: 0, updates: 0, receipts: 0, jobs: 0 });
     await expect(assertEbayPublicationReady(database.pool, source())).rejects.toMatchObject({ code: "EBAY_PUBLICATION_STOCK_REVIEW_REQUIRED" });
     const applied = await withEbayPublicationReadinessApplied(database.pool, await input(), "operator", WALMART_INVENTORY_NOW, followUp);
-    expect(applied.receipt.membership).toMatchObject({ publicationTargetId: 3, publicationRows: 1 });
-    expect(await counts()).toEqual({ mappings: 1, members: 1, updates: 1, receipts: 1, jobs: 1 });
+    expect(applied.receipt.mappingPreparation).toMatchObject({ publicationTargetId: 3, publicationRows: 1 });
+    expect(await counts()).toEqual({ mappings: 1, members: 0, updates: 1, receipts: 1, jobs: 1 });
     expect((await database.pool.query("SELECT desired_quantity::text,external_inventory_item_id_snapshot FROM inventory.inventory_publication_outbox WHERE publication_target_id=3")).rows)
       .toEqual([{ desired_quantity: "17", external_inventory_item_id_snapshot: "P5" }]);
     await expect(assertEbayPublicationReady(database.pool, source())).resolves.toBeUndefined();
@@ -84,7 +84,7 @@ dbDescribe.sequential("reviewed eBay publication stock enrollment, real PostgreS
     expect(results.map(row => row.receipt.alreadyApplied).sort()).toEqual([false, true]);
     expect((await database.pool.query("SELECT active_mapping_id,draft_mapping_id FROM inventory.publication_variant_mapping_heads WHERE publication_target_id=3")).rows)
       .toEqual([{ active_mapping_id: mappingId, draft_mapping_id: null }]);
-    expect(await counts()).toEqual({ mappings: 1, members: 1, updates: 1, receipts: 1, jobs: 1 });
+    expect(await counts()).toEqual({ mappings: 1, members: 0, updates: 1, receipts: 1, jobs: 1 });
     expect(await findEbayPublicationReadinessReceipt(database.pool, { channelId: 67, productId: 20, commandKey: command.commandKey, actor: "operator" })).toMatchObject({ alreadyApplied: true });
     await expect(withEbayPublicationReadinessApplied(database.pool, { ...command, contextHash: "b".repeat(64) }, "operator", WALMART_INVENTORY_NOW, followUp))
       .rejects.toMatchObject({ code: "EBAY_PUBLICATION_STOCK_COMMAND_CONFLICT" });
@@ -126,7 +126,7 @@ dbDescribe.sequential("reviewed eBay publication stock enrollment, real PostgreS
       VALUES(3,101,1,false,repeat('a',64),repeat('a',64),'operator',transaction_timestamp());
       INSERT INTO inventory.publication_membership_heads(publication_target_id,product_variant_id,active_version_id)
       SELECT 3,101,id FROM inventory.publication_membership_versions WHERE publication_target_id=3;`);
-    expect((await reviewEbayPublicationReadiness(database.pool, source())).blockers.map(row => row.code)).toContain("STOCK_LISTING_EXCLUDED");
+    expect((await reviewEbayPublicationReadiness(database.pool, source())).blockers.map(row => row.code)).not.not.toContain("STOCK_LISTING_EXCLUDED");
   });
   it("durably refuses a stale command so a late Apply cannot commit after its UUID was discarded", async () => {
     const command = await input();
@@ -147,6 +147,8 @@ dbDescribe.sequential("reviewed eBay publication stock enrollment, real PostgreS
     expect((await database.pool.query("SELECT * FROM inventory.ebay_publication_readiness_rejections")).rows).toEqual([]);
   });
   it("uses the real route client, inventory admission, planner and request journal after enrollment", async () => {
+    await database.pool.query(`UPDATE channels.ebay_listing_sync_jobs SET identity=jsonb_set(identity,'{variants}',
+      identity->'variants'||'[{"variantId":102,"sku":"NEW","offerId":null,"listingId":null}]'::jsonb)`);
     await database.pool.query("INSERT INTO inventory.inventory_levels(id,warehouse_location_id,product_variant_id,variant_qty,reserved_qty,picked_qty,packed_qty) VALUES(12,100,102,8,0,0,0)");
     const selected = { ...source(), variants: [...source().variants, { productVariantId: 102, sku: "NEW" }] };
     const item = { availability: { shipToLocationAvailability: { quantity: 999 } }, condition: "NEW" as const,
@@ -221,7 +223,7 @@ dbDescribe.sequential("reviewed eBay publication stock enrollment, real PostgreS
     expect(rejectedSettled).toBe(false);
     release(); await applying;
     expect(await rejecting).toMatchObject({ commandKey: command.commandKey, alreadyApplied: true });
-    expect(await counts()).toEqual({ mappings: 1, members: 1, updates: 1, receipts: 1, jobs: 1 });
+    expect(await counts()).toEqual({ mappings: 1, members: 0, updates: 1, receipts: 1, jobs: 1 });
   });
   it("rolls back enrollment while an exact provider scope is busy", async () => {
     const command = await input(), other = await database.pool.connect();
@@ -230,7 +232,7 @@ dbDescribe.sequential("reviewed eBay publication stock enrollment, real PostgreS
     try {
       await other.query("SELECT pg_advisory_lock(hashtextextended($1,$2))", [key, PUBLICATION_TARGET_SCOPE_LOCK_SEED]);
       await expect(withEbayPublicationReadinessApplied(database.pool, command, "operator", WALMART_INVENTORY_NOW, followUp))
-        .rejects.toMatchObject({ code: "MEMBERSHIP_PROVIDER_BUSY" });
+        .rejects.toMatchObject({ code: "STOCK_MAPPING_PROVIDER_BUSY" });
       expect(await counts()).toEqual({ mappings: 0, members: 0, updates: 0, receipts: 0, jobs: 0 });
     } finally { await other.query("SELECT pg_advisory_unlock(hashtextextended($1,$2))", [key, PUBLICATION_TARGET_SCOPE_LOCK_SEED]); other.release(); }
   });

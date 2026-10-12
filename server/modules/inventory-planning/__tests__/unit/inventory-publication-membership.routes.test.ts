@@ -31,7 +31,7 @@ describe("inventory membership permission boundary", () => {
       });
       next();
     });
-    registerInventoryPublicationMembershipRoutes(app, service as never);
+    registerInventoryPublicationMembershipRoutes(app);
     server = http.createServer(app);
     await new Promise<void>((resolve) =>
       server.listen(0, "127.0.0.1", resolve),
@@ -54,7 +54,7 @@ describe("inventory membership permission boundary", () => {
     "allows %s with inventory view without activating anything",
     async (path) => {
       const response = await post(`/${path}`);
-      expect(response.status).toBe(200);
+      expect(response.status).toBe(410);
       expect(response.headers.get("cache-control")).toBe("no-store");
       expect(hasPermission).toHaveBeenCalledWith(
         "operator",
@@ -65,30 +65,23 @@ describe("inventory membership permission boundary", () => {
     },
   );
   it("requires activation permission and uses only the authenticated actor", async () => {
-    expect((await post("/apply")).status).toBe(200);
+    expect((await post("/apply")).status).toBe(410);
     expect(hasPermission).toHaveBeenCalledWith(
       "operator",
       "inventory_planning",
       "activate",
     );
-    expect(service.apply).toHaveBeenCalledWith({}, "operator");
+    expect(service.apply).not.toHaveBeenCalled();
   });
   it("rejects unauthorized mutation before the service runs", async () => {
     hasPermission.mockResolvedValue(false);
     expect((await post("/apply")).status).toBe(403);
     expect(service.apply).not.toHaveBeenCalled();
   });
-  it("returns a stale or blocked review as a structured conflict", async () => {
-    service.apply.mockRejectedValue(
-      new InventoryPublicationMembershipError(
-        "MEMBERSHIP_REVIEW_STALE",
-        "Review again.",
-      ),
-    );
+  it("returns directions without invoking a retired owner", async () => {
     const response = await post("/apply");
-    expect(response.status).toBe(409);
-    expect(await response.json()).toEqual({
-      error: { code: "MEMBERSHIP_REVIEW_STALE", message: "Review again." },
-    });
+    expect(response.status).toBe(410);
+    expect(await response.json()).toMatchObject({error:{code:"PUBLICATION_MEMBERSHIP_RETIRED",message:expect.stringContaining("channel listing selection")}});
+    expect(service.apply).not.toHaveBeenCalled();
   });
 });

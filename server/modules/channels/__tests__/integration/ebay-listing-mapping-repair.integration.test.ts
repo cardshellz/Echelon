@@ -801,6 +801,57 @@ const enabled = process.env.ECHELON_TEST_DATABASE_URL && process.env.ECHELON_TES
     } catch (error) { await client.query("ROLLBACK"); throw error; }
     finally { client.release(); }
   }
+  async function failedPartialPreparation() {
+    const publish = await publicationPlan();
+    const source = publish.source.identity;
+    const target = { ...publish.targetIdentity, variants: source.variants.map(member => ({ ...member, externalSku: member.sku })) };
+    const jobs = new PostgresEbayListingSyncRepository(database.pool);
+    const saved = await jobs.enqueue(source, randomUUID(), plan.actor, now, "publish");
+    const claim = await jobs.claim(now, randomUUID(), saved.id);
+    expect(claim).not.toBeNull();
+    try {
+      await jobs.bindPublicationTarget(claim!.job, target, now);
+      await jobs.stage(claim!.job, "inventory-items", "7".repeat(64), "started", now);
+      await jobs.stage(claim!.job, "inventory-items", "7".repeat(64), "completed", now);
+      await jobs.stage(claim!.job, "offers", "8".repeat(64), "started", now);
+      await jobs.stage(claim!.job, "offers", "8".repeat(64), "completed", now);
+      await jobs.finish(claim!.job, { state: "needs_attention", code: "PUBLICATION_LISTING_TARGET_UNMAPPED",
+        message: "Exact stock mappings are missing before group preparation.", result: null, nextAttemptAt: now }, now);
+    } finally { await claim!.release(); }
+    return { jobs, source, target, saved: await jobs.get(saved.id) };
+  }
+  it("retains the exact saved target after partial preparation for a new Publish command and its concurrent replay", async () => {
+    const { jobs, source, target, saved } = await failedPartialPreparation();
+    expect(saved).toMatchObject({ state: "needs_attention", publicationTarget: target, publicationWriteStarted: false });
+    const commandKey = randomUUID();
+    const before = await mappings();
+    const results = await Promise.all([jobs.enqueue(source, commandKey, plan.actor, now, "publish"), jobs.enqueue(source, commandKey, plan.actor, now, "publish")]);
+    expect(results[0].id).not.toBe(saved.id);
+    expect(results[1]).toEqual(results[0]);
+    expect(results[0]).toMatchObject({ publicationTarget: target, publicationWriteStarted: false, publicationAccepted: null, providerIdentity: null });
+    expect(await mappings()).toEqual(before);
+    expect(await jobs.get(saved.id)).toEqual(saved);
+    const receipts = (await database.pool.query("SELECT evidence FROM channels.ebay_listing_sync_events WHERE job_id=$1 AND event='requested'", [commandKey])).rows;
+    expect(receipts).toHaveLength(1);
+    expect(receipts[0].evidence).toMatchObject({ retainedTargetJobId: saved.id, reviewedPublicationTarget: target });
+    const retry = await jobs.claim(now, randomUUID(), commandKey);
+    try { expect(retry?.job.publicationTarget).toEqual(target); }
+    finally { await retry?.release(); }
+  });
+  it("does not inherit a failed target after the exact source mapping changes", async () => {
+    const { jobs, source, saved } = await failedPartialPreparation();
+    const changed = { ...source, variants: source.variants.map(member => ({ ...member, offerId: `${member.offerId}-corrected` })) };
+    const replacement = await jobs.enqueue(changed, randomUUID(), plan.actor, now, "publish");
+    expect(replacement.publicationTarget).toBeNull();
+    expect(await jobs.get(saved.id)).toEqual(saved);
+  });
+  it("refuses a conflicting reviewed group after partial preparation and rolls its new command back", async () => {
+    const { jobs, source, target, saved } = await failedPartialPreparation();
+    const commandKey = randomUUID();
+    await expect(enqueueReviewedTarget(source, { ...target, groupKey: "unrelated-group" }, commandKey)).rejects.toMatchObject({ code: "EBAY_SYNC_IDENTITY_CHANGED" });
+    expect(await jobs.getByCommand(commandKey, source.channelId)).toBeNull();
+    expect(await jobs.get(saved.id)).toEqual(saved);
+  });
   it("retains the reviewed group and known offers at enqueue before any provider group exists", async () => {
     const publish = await publicationPlan();
     const source = publish.source.identity;

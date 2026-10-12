@@ -13,6 +13,7 @@ import { createDropshipListingTierServiceFromEnv } from "../../infrastructure/dr
 import { resolveDropshipOmsChannelIdWithClient } from "../../infrastructure/dropship-order-intake.repository";
 import { PgDropshipSelectionAtpRepository } from "../../infrastructure/dropship-selection-atp.repository";
 import { DropshipError } from "../../domain/errors";
+import { publicationSelectionBusyIssue } from "../../../inventory-planning/publication-selection-work";
 import { requireDropshipAuth } from "./dropship-auth.routes";
 
 export function registerDropshipVendorCatalogRoutes(
@@ -159,6 +160,8 @@ function parseBooleanQuery(value: unknown, fallback: boolean): boolean {
 }
 
 function sendDropshipVendorCatalogError(res: Response, error: unknown) {
+  const busy = publicationSelectionBusyIssue(error);
+  if (busy) return res.status(409).json({ error: busy });
   if (error instanceof DropshipError) {
     return res.status(statusForDropshipVendorCatalogError(error.code)).json({
       error: {

@@ -24,8 +24,8 @@ export function precutoverExclusionCommandHash(input: ApplyPrecutoverExclusion, 
     input: { ...input, exclusions: [...input.exclusions].sort((a, b) =>
       a.publicationTargetId - b.publicationTargetId || a.productVariantId - b.productVariantId) } });
 }
-/** Operator-only, configuration-only amendment. Live removal still belongs to
- * InventoryPublicationMembershipService and retains its hold/verified-zero rule. */
+/** Operator-only historical cutover amendment. Live removal belongs to the
+ * channel listing owner and its durable clearing/withdrawal workflow. */
 export class InventoryPublicationPrecutoverExclusionService {
   constructor(private readonly store: PrecutoverExclusionStore,
     private readonly clock: { now(): Date }) {}

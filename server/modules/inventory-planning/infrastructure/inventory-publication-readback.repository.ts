@@ -14,6 +14,7 @@ import type {
   PublicationReadbackFailure,
   PublicationReadbackTarget,
 } from "../application/inventory-publication-readback.service";
+import { readPublicationStockSelection, selectionRequiresPublication } from "./inventory-publication-selection.reader";
 
 type ClientPool = Pick<Pool, "connect">;
 
@@ -70,7 +71,7 @@ implements InventoryPublicationReadbackStore {
           }),
         };
       }
-      return { kind: "started", readbackRunId: inserted.id, targets: await loadTargets(client) };
+      return { kind: "started", readbackRunId: inserted.id, targets: await loadTargets(client, input.startedAt) };
     });
   }
 
@@ -188,7 +189,7 @@ implements InventoryPublicationReadbackStore {
   }
 }
 
-async function loadTargets(client: PoolClient): Promise<PublicationReadbackTarget[]> {
+async function loadTargets(client: PoolClient, now: Date): Promise<PublicationReadbackTarget[]> {
   const rows = (await client.query<Record<string, unknown>>(
     `SELECT target.id AS publication_target_id, target.revision AS publication_target_revision,
             target.destination_kind,
@@ -199,7 +200,7 @@ async function loadTargets(client: PoolClient): Promise<PublicationReadbackTarge
               WHEN 'dropship_store_connection' THEN dropship_connection.platform
             END AS provider_key,
             target.provider_scope_type, target.external_scope_id,
-            head.product_variant_id, mapping.external_inventory_item_id,
+            variant.product_id, head.product_variant_id, mapping.external_inventory_item_id,
             mapping.external_sku
      FROM inventory.inventory_publication_targets AS target
      JOIN channels.channels AS channel ON channel.id = target.channel_id
@@ -207,6 +208,7 @@ async function loadTargets(client: PoolClient): Promise<PublicationReadbackTarge
        ON dropship_connection.id = target.dropship_store_connection_id
      JOIN inventory.publication_variant_mapping_heads AS head
        ON head.publication_target_id = target.id
+     JOIN catalog.product_variants AS variant ON variant.id = head.product_variant_id
      JOIN inventory.publication_variant_mapping_versions AS mapping
        ON mapping.id = CASE WHEN target.state = 'preview'
          THEN COALESCE(head.draft_mapping_id, head.active_mapping_id)
@@ -214,15 +216,9 @@ async function loadTargets(client: PoolClient): Promise<PublicationReadbackTarge
        END
      WHERE target.publication_authority = 'echelon'
        AND target.state IN ('preview', 'live')
-       AND (target.membership_mode = 'whole_product' OR EXISTS (
-         SELECT 1 FROM inventory.publication_membership_heads member
-         JOIN inventory.publication_membership_versions decision ON decision.id = member.active_version_id
-         WHERE member.publication_target_id = target.id
-           AND member.product_variant_id = head.product_variant_id AND decision.included = true
-       ))
      ORDER BY target.id, head.product_variant_id`,
   )).rows;
-  return rows.map((row) => {
+  const candidates = rows.map((row) => {
     const targetDestinationKind = destinationKind(row.destination_kind);
     const channelConnectionId = nullablePositiveInteger(row.channel_connection_id, "channelConnectionId");
     const dropshipStoreConnectionId = nullablePositiveInteger(
@@ -231,20 +227,41 @@ async function loadTargets(client: PoolClient): Promise<PublicationReadbackTarge
     );
     assertDestination(targetDestinationKind, channelConnectionId, dropshipStoreConnectionId);
     return {
-      publicationTargetId: positiveInteger(row.publication_target_id, "publicationTargetId"),
-      publicationTargetRevision: positiveBigint(row.publication_target_revision, "publicationTargetRevision"),
-      productVariantId: positiveInteger(row.product_variant_id, "productVariantId"),
-      destinationKind: targetDestinationKind,
-      channelId: positiveInteger(row.channel_id, "channelId"),
-      channelConnectionId,
-      dropshipStoreConnectionId,
-      providerKey: nonblank(row.provider_key, "providerKey"),
-      providerScopeType: scope(row.provider_scope_type),
-      externalScopeId: nonblank(row.external_scope_id, "externalScopeId"),
-      externalInventoryItemId: nonblank(row.external_inventory_item_id, "externalInventoryItemId"),
-      externalSku: row.external_sku == null ? null : nonblank(row.external_sku, "externalSku"),
+      productId: positiveInteger(row.product_id, "productId"),
+      target: {
+        publicationTargetId: positiveInteger(row.publication_target_id, "publicationTargetId"),
+        publicationTargetRevision: positiveBigint(row.publication_target_revision, "publicationTargetRevision"),
+        productVariantId: positiveInteger(row.product_variant_id, "productVariantId"),
+        destinationKind: targetDestinationKind,
+        channelId: positiveInteger(row.channel_id, "channelId"),
+        channelConnectionId,
+        dropshipStoreConnectionId,
+        providerKey: nonblank(row.provider_key, "providerKey"),
+        providerScopeType: scope(row.provider_scope_type),
+        externalScopeId: nonblank(row.external_scope_id, "externalScopeId"),
+        externalInventoryItemId: nonblank(row.external_inventory_item_id, "externalInventoryItemId"),
+        externalSku: row.external_sku == null ? null : nonblank(row.external_sku, "externalSku"),
+      },
     };
   });
+  const groups = new Map<string, typeof candidates>();
+  for (const candidate of candidates) {
+    const key = `${candidate.target.publicationTargetId}:${candidate.productId}`;
+    const group = groups.get(key) ?? [];
+    group.push(candidate);
+    groups.set(key, group);
+  }
+  const targets: PublicationReadbackTarget[] = [];
+  for (const group of groups.values()) {
+    const selection = await readPublicationStockSelection(client, group[0].target, {
+      productId: group[0].productId, productVariantIds: group.map(candidate => candidate.target.productVariantId), now,
+    });
+    const required = new Set(selection.variants.filter(variant => selectionRequiresPublication(variant.action)).map(variant => variant.productVariantId));
+    // A deselected but retained destination still needs a zero-stock readback.
+    // Historical observations remain immutable after the owner confirms removal.
+    targets.push(...group.filter(candidate => required.has(candidate.target.productVariantId)).map(candidate => candidate.target));
+  }
+  return targets;
 }
 
 async function lockRunningRun(client: PoolClient, readbackRunId: string): Promise<void> {

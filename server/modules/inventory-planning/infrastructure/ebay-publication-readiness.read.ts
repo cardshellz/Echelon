@@ -4,7 +4,7 @@ import { canonicalJson } from "@shared/utils/canonical-json";
 import { inventoryEbayPublicationReadinessSchema, type InventoryEbayPublicationReadinessInput } from "@shared/types/ebay-publication-readiness";
 import type { PublicationMembershipBlocker } from "@shared/types/inventory-publication-membership";
 import { ebayPublicationMappingRowSchema, reviewEbayPublicationMember, type EbayPublicationMappingRow } from "../domain/ebay-publication-readiness";
-import { captureReview, readTargets, type PublicationMembershipMappingProposal } from "./inventory-publication-membership.repository";
+import { reviewMappingPreparation, readTargets, type PublicationMappingProposal } from "./publication-mapping-preparation.repository";
 import type { ActivePublicationVariantMappingSnapshot } from "../application/inventory-channel-exposure-runtime.service";
 
 export const readinessDigest = (value: unknown): string => createHash("sha256").update(canonicalJson(value)).digest("hex");
@@ -12,7 +12,7 @@ const blocker = (code: string, message: string, productVariantId: number | null 
   action: PublicationMembershipBlocker["action"] = "configure_inventory"): PublicationMembershipBlocker => ({ code, message, action, productVariantId });
 
 /** Read-only proposal: uses the active ATP/model/policy/source owners. Only
- * proposed exact SKU mappings and membership are overlaid, never draft policy. */
+ * proposed exact SKU mappings are overlaid, never selection or draft policy. */
 export async function captureEbayPublicationReadiness(client: PoolClient, source: InventoryEbayPublicationReadinessInput, lock: boolean) {
   const blockers: PublicationMembershipBlocker[] = [];
   const targets = await readTargets(client, source.channelId, source.connectionId, undefined, lock);
@@ -42,7 +42,7 @@ export async function captureEbayPublicationReadiness(client: PoolClient, source
     active.external_inventory_item_id AS active_inventory_id,active.external_sku AS active_sku,
     m.id AS mapping_id,m.version AS mapping_version,m.definition_hash AS mapping_hash,
     m.external_inventory_item_id AS mapping_inventory_id,m.external_sku AS mapping_sku,m.lifecycle_status AS mapping_status,
-    member.included,holds.held_at,
+    holds.held_at,
     ARRAY(SELECT other.product_variant_id FROM inventory.publication_variant_mapping_heads other
       JOIN inventory.publication_variant_mapping_versions om ON om.id=other.active_mapping_id OR om.id=other.draft_mapping_id
       WHERE other.publication_target_id=$1 AND other.product_variant_id<>v.id
@@ -52,11 +52,9 @@ export async function captureEbayPublicationReadiness(client: PoolClient, source
     LEFT JOIN inventory.publication_variant_mapping_heads h ON h.publication_target_id=$1 AND h.product_variant_id=v.id
     LEFT JOIN inventory.publication_variant_mapping_versions m ON m.id=COALESCE(h.draft_mapping_id,h.active_mapping_id)
     LEFT JOIN inventory.publication_variant_mapping_versions active ON active.id=h.active_mapping_id
-    LEFT JOIN inventory.publication_membership_heads mh ON mh.publication_target_id=$1 AND mh.product_variant_id=v.id
-    LEFT JOIN inventory.publication_membership_versions member ON member.id=mh.active_version_id
     LEFT JOIN inventory.inventory_publication_target_variant_holds holds ON holds.publication_target_id=$1 AND holds.product_variant_id=v.id
     WHERE v.id=ANY($3::integer[]) ORDER BY v.id`, [target?.id ?? null, source.channelId, source.variants.map(row => row.productVariantId)])).rows.map(row => ebayPublicationMappingRowSchema.parse(row));
-  const proposal: PublicationMembershipMappingProposal = { mappings: [], newMappingVariantIds: [] };
+  const proposal: PublicationMappingProposal = { mappings: [], newMappingVariantIds: [] };
   const mappings: ActivePublicationVariantMappingSnapshot[] = [], missing: number[] = [];
   const variants = source.variants.map(input => {
     const matches = rows.filter(row => row.id === input.productVariantId);
@@ -70,23 +68,23 @@ export async function captureEbayPublicationReadiness(client: PoolClient, source
     return decision.variant;
   });
   proposal.mappings = mappings; proposal.newMappingVariantIds = missing;
-  let membershipReview = null;
+  let mappingReview = null;
   if (target && blockers.length === 0) {
-    membershipReview = (await captureReview(client, { publicationTargetId: target.id, expectedTargetRevision: target.revision,
-      changes: source.variants.map(row => ({ productVariantId: row.productVariantId, included: true })) }, lock, proposal)).review;
-    blockers.push(...membershipReview.blockers);
+    mappingReview = (await reviewMappingPreparation(client, { publicationTargetId: target.id, expectedTargetRevision: target.revision,
+      productId: source.productId, productVariantIds: source.variants.map(row => row.productVariantId) }, lock, proposal)).review;
+    blockers.push(...mappingReview.blockers);
     for (const variant of variants) {
-      const quantity = membershipReview.quantities.find(row => row.productVariantId === variant.productVariantId);
+      const quantity = mappingReview.quantities.find(row => row.productVariantId === variant.productVariantId);
       if (quantity) variant.desiredQuantity = quantity.desiredQuantity;
       else blockers.push(blocker("STOCK_LISTING_QUANTITY_UNAVAILABLE", "The canonical stock planner did not return this exact SKU. Review its active stock model and policy.", variant.productVariantId));
     }
   }
-  const currentlyReady = blockers.length === 0 && variants.every(row => row.mappingAction === "none" && row.membershipAction === "none");
+  const currentlyReady = blockers.length === 0 && variants.every(row => row.mappingAction === "none");
   const body = { channelId: source.channelId, connectionId: source.connectionId, productId: source.productId,
     publicationTargetId: target?.id ?? null, targetRevision: target?.revision ?? null, ready: blockers.length === 0,
     currentlyReady, variants, blockers, effects: currentlyReady ? ["Use the existing stock mappings and current canonical stock quantities."] :
-      ["Seal only the reviewed exact eBay SKU mappings and include the selected variants in this stock destination.",
+      ["Seal only the verified exact eBay SKU mappings for the existing channel selection.",
         "Recalculate destination quantities with the existing active stock model, source, and policies.", "Save publication work in the same transaction."] };
   return { review: inventoryEbayPublicationReadinessSchema.parse({ ...body,
-    reviewHash: readinessDigest({ source, body, target, rows, membershipReview }) }), target, rows, proposal, membershipReview };
+    reviewHash: readinessDigest({ source, body, target, rows, mappingReview }) }), target, rows, proposal, mappingReview };
 }

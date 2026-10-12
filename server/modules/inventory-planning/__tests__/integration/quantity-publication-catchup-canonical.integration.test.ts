@@ -4,6 +4,7 @@ import { cutoverCompositionBaseSql, cutoverCompositionSeedSql, cutoverCompositio
   installCutoverCompositionMigrations, seedCompositionReviewedDryRun } from "../fixtures/inventory-cutover-composition-database.fixture";
 import { PostgresQuantityPublicationAdmission } from "../../infrastructure/quantity-publication-admission.repository";
 import type { QuantityPublicationScope } from "../../domain/quantity-publication-admission";
+import { installStockSelectionFixture } from "../fixtures/stock-selection.fixture";
 
 vi.mock("../../../../db", () => ({ pool: {} }));
 const databaseUrl = process.env.ECHELON_TEST_DATABASE_URL;
@@ -22,6 +23,10 @@ dbDescribe.sequential("canonical catch-up completion uses exact current outbox l
     await installCutoverCompositionMigrations(database.pool);
     await database.pool.query(cutoverCompositionSeedSql);
     await database.pool.query(cutoverCompositionChannelSeedSql);
+    await installStockSelectionFixture(database.pool);
+    await database.pool.query(`INSERT INTO channels.channel_feeds
+      (channel_id,product_variant_id,channel_variant_id,channel_inventory_item_id,channel_sku)
+      VALUES(36,101,'test-variant','test-item','P5')`);
     const dryRun = await seedCompositionReviewedDryRun(database.pool);
     // Valid constrained fixture state, not a claim that this suite exercises
     // the separate administrator cutover workflow. All real triggers remain on.
@@ -46,6 +51,9 @@ dbDescribe.sequential("canonical catch-up completion uses exact current outbox l
     const productVariantId = 200 + ++sequence;
     const externalInventoryItemId = `CANONICAL-${sequence}`;
     await database.pool.query("INSERT INTO catalog.product_variants(id,product_id,sku) VALUES($1,20,$2)", [productVariantId, externalInventoryItemId]);
+    await database.pool.query(`INSERT INTO channels.channel_feeds
+      (channel_id,product_variant_id,channel_variant_id,channel_inventory_item_id,channel_sku)
+      VALUES(36,$1,$2,$2,$2)`, [productVariantId, externalInventoryItemId]);
     return { destinationKind: "channel_connection", connectionId: 7, providerKey: "shopify", providerScopeType: "location",
       externalScopeId: "test-location", externalInventoryItemId, productId: 20, productVariantId };
   }

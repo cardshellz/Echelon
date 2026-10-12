@@ -4,6 +4,7 @@ import { requirePermission } from "../../../../routes/middleware";
 import type { DropshipListingConfigService } from "../../application/dropship-listing-config-service";
 import { replaceDropshipStoreListingConfigRequestSchema } from "../../application/dropship-listing-config-dtos";
 import { DropshipError } from "../../domain/errors";
+import { publicationSelectionBusyIssue } from "../../../inventory-planning/publication-selection-work";
 import { createDropshipListingConfigServiceFromEnv } from "../../infrastructure/dropship-listing-config.factory";
 import {
   requireDropshipAuth,
@@ -106,6 +107,8 @@ function parseBody<T>(schema: z.ZodType<T, z.ZodTypeDef, unknown>, body: unknown
 }
 
 function sendDropshipListingConfigError(res: Response, error: unknown): Response {
+  const busy = publicationSelectionBusyIssue(error);
+  if (busy) return res.status(409).json({ error: busy });
   if (error instanceof DropshipError) {
     return res.status(statusForDropshipListingConfigError(error.code)).json({
       error: {

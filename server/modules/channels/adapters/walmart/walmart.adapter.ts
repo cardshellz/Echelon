@@ -14,20 +14,20 @@ export class WalmartAdapter implements IChannelAdapter {
   readonly inventoryPublicationScopeTypes = ["location"] as const;
   constructor(private readonly channels: WalmartChannelService, private readonly supply: InventoryPublicationSupplyReader) {}
 
-  private async scope(channelId: number, context?: InventoryPublicationContext) {
+  private async scope(channelId: number, productVariantIds: readonly number[], context?: InventoryPublicationContext) {
     if (!context || context.authority !== "canonical_outbox" || context.providerScopeType !== "location") {
       throw new WalmartApiError("WALMART_PUBLICATION_AUTHORITY_REQUIRED", "Use an approved inventory publication destination", false);
     }
     const connection = await this.channels.connection(channelId, context.channelConnectionId);
     this.channels.requireRuntime(connection);
     if (connection.ship_node_id !== context.externalScopeId) throw new WalmartApiError("WALMART_INVENTORY_SCOPE_MISMATCH", "Inventory destination differs from the configured Walmart fulfillment center", false);
-    const mappings = await this.channels.repository.mappings(channelId);
+    const mappings = await this.channels.repository.inventoryMappings(channelId, productVariantIds);
     return { api: this.channels.api(connection), connection, mappings };
   }
 
   async pushInventory(channelId: number, items: InventoryPushItem[], context?: InventoryPublicationContext): Promise<InventoryPushResult[]> {
     return this.channels.repository.withLock(channelId, async () => {
-      const scope = await this.scope(channelId, context);
+      const scope = await this.scope(channelId, items.map(item => item.variantId), context);
       // A conservative zero must remain publishable after supply is withdrawn.
       // Positive promises require the active, exact warehouse supply binding.
       if (items.some(item => item.allocatedQty > 0)) {
@@ -59,7 +59,7 @@ export class WalmartAdapter implements IChannelAdapter {
   }
 
   async readInventory(channelId: number, items: InventoryReadItem[], context: InventoryPublicationContext): Promise<InventoryReadResult[]> {
-    const scope = await this.scope(channelId, context);
+    const scope = await this.scope(channelId, items.map(item => item.variantId), context);
     const results: InventoryReadResult[] = [];
     for (const item of items) {
       try {

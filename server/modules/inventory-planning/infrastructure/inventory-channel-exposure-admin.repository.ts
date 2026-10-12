@@ -1,7 +1,7 @@
 import { eq, sql } from "drizzle-orm";
 import { inventoryPublicationScopeSchema } from "@shared/types/inventory-publication-scope";
-import { selectDeferredPublicationQuantityVariants, selectPublicationVariants } from "../domain/inventory-publication-scope";
-import { initialPublicationScopeReceiptSchema } from "@shared/types/inventory-publication-initial-scope";
+import type { StockSelectionQueryClient } from "@shared/types/stock-publication-selection";
+import { readPublicationStockSelection, selectionRequiresPublication } from "./inventory-publication-selection.reader";
 
 import {
   channelExposurePolicyHeads,
@@ -1108,7 +1108,7 @@ implements InventoryChannelExposureAdminStore {
         SELECT id, destination_kind, channel_id, channel_connection_id,
                dropship_store_connection_id, provider_scope_type,
                external_scope_id, publication_authority, state, revision,
-               hold_reason, held_at, held_by, membership_mode
+                hold_reason, held_at, held_by
         FROM inventory.inventory_publication_targets
         WHERE id = ${publicationTargetId}
       `));
@@ -1129,50 +1129,26 @@ implements InventoryChannelExposureAdminStore {
         target.dropship_store_connection_id,
         "target.dropshipStoreConnectionId",
       );
-      const sellableVariantRows = rows(await tx.execute(sql`
+      const candidateVariantRows = rows(await tx.execute(sql`
         SELECT id
         FROM catalog.product_variants
         WHERE product_id = ${productId}
-          AND is_active = true
-          AND requires_shipping = true
-          AND COALESCE(track_inventory, true) = true
-          AND sales_eligibility = 'sellable'
         ORDER BY id
       `));
-      const membershipRows = target.membership_mode === "explicit" ? rows(await tx.execute(sql`
-        SELECT head.product_variant_id, version.included
-        FROM inventory.publication_membership_heads head
-        JOIN inventory.publication_membership_versions version ON version.id = head.active_version_id
-        JOIN catalog.product_variants variant ON variant.id = head.product_variant_id
-        WHERE head.publication_target_id = ${publicationTargetId}
-          AND variant.product_id = ${productId}
-        ORDER BY head.product_variant_id
-      `)) : [];
-      const membership = inventoryPublicationScopeSchema.parse(target.membership_mode === "explicit"
-        ? { mode: "explicit",
-          includedVariantIds: membershipRows.filter(row => row.included === true).map(row => positiveInteger(row.product_variant_id, "membership.variantId")),
-          ...(membershipRows.some(row => row.included === false) ? {
-            excludedVariantIds: membershipRows.filter(row => row.included === false).map(row => positiveInteger(row.product_variant_id, "membership.variantId")),
-          } : {}),
-        }
-        : { mode: "whole_product" });
-      const selection = selectPublicationVariants(sellableVariantRows.map(row => ({ id: positiveInteger(row.id, "variant.id") })), membership);
-      const sellableVariantIds = new Set(selection.selected.map(row => row.id));
-      const deferredReceipts = target.destination_kind === "dropship_store_connection"
-        && target.publication_authority === "echelon" && target.membership_mode === "explicit"
-        ? rows(await tx.execute(sql`SELECT receipt FROM inventory.publication_initial_scope_receipts
-          WHERE publication_target_id=${publicationTargetId}`)) : [];
-      const deferredReceipt = deferredReceipts[0]
-        ? initialPublicationScopeReceiptSchema.parse(deferredReceipts[0].receipt) : null;
-      if (deferredReceipt && deferredReceipt.publicationTargetId !== publicationTargetId) {
-        throw new InventoryAvailabilityMasterDataError(409, "DEFERRED_DROPSHIP_TARGET_MISMATCH",
-          "The initial quantity-read receipt belongs to another destination.");
-      }
-      const deferredDropshipQuantityVariantIds = selectDeferredPublicationQuantityVariants(
-        deferredReceipt?.deferredUnpublishedVariantIds ?? [], sellableVariantRows.map(row => positiveInteger(row.id, "variant.id")),
-        membershipRows.map(row => positiveInteger(row.product_variant_id, "membership.variantId")));
-      const previewVariantIds = new Set([...sellableVariantIds, ...deferredDropshipQuantityVariantIds]);
+      const selection = target.publication_authority === "echelon" ? await readPublicationStockSelection(selectionQueryClient(tx), {
+        destinationKind: publicationDestinationKind(target.destination_kind), channelId, channelConnectionId, dropshipStoreConnectionId,
+      }, { productId, productVariantIds: candidateVariantRows.map(row => positiveInteger(row.id, "variant.id")) }) : null;
+      const selectionVariants = selection?.variants ?? [];
+      const publicationVariantIds = new Set(selectionVariants.filter(variant => selectionRequiresPublication(variant.action)).map(variant => variant.productVariantId));
+      const zeroVariantIds = new Set(selectionVariants.filter(variant => variant.action === "zero").map(variant => variant.productVariantId));
+      const readOnlyVariantIds = selectionVariants.filter(variant => variant.action === "read_only").map(variant => variant.productVariantId);
+      const previewVariantIds = new Set([...publicationVariantIds, ...readOnlyVariantIds]);
+      // Compatibility projection only. The channel/store owner above is the
+      // sole selector; immutable cutover membership receipts are not live policy.
+      const membership = inventoryPublicationScopeSchema.parse({ mode: "explicit", includedVariantIds: [...publicationVariantIds] });
+      const deferredDropshipQuantityVariantIds = target.destination_kind === "dropship_store_connection" ? readOnlyVariantIds : [];
       const previewIdentity = {
+        ...(selection ? { selection } : {}),
         membership,
         ...(deferredDropshipQuantityVariantIds.length > 0 ? { deferredDropshipQuantityVariantIds } : {}),
         publicationTargetId,
@@ -1279,7 +1255,7 @@ implements InventoryChannelExposureAdminStore {
         ) AS pointer(pointer_type, mapping_id)
         JOIN inventory.publication_variant_mapping_versions AS mapping ON mapping.id = pointer.mapping_id
         WHERE head.publication_target_id = ${publicationTargetId}
-          AND head.product_variant_id = ANY(${sqlIntegerArray([...sellableVariantIds])})
+          AND head.product_variant_id = ANY(${sqlIntegerArray([...publicationVariantIds])})
         ORDER BY head.product_variant_id,
                  CASE pointer.pointer_type WHEN 'draft' THEN 0 ELSE 1 END
       `));
@@ -1310,11 +1286,10 @@ implements InventoryChannelExposureAdminStore {
         message: "The canonical ATP shadow contains a configuration blocker.",
         context: { shadowRunId: run.runId },
       }));
-      if (selection.unavailableVariantIds.length > 0) blockers.push({
-        code: "PUBLICATION_MEMBER_VARIANT_UNAVAILABLE",
-        message: "An included publication SKU is absent or no longer eligible in the product.",
-        context: { publicationTargetId, productId, productVariantIds: selection.unavailableVariantIds },
-      });
+      for (const variant of selectionVariants) {
+        blockers.push(...variant.blockers.map(blocker => ({ ...blocker,
+          context: { publicationTargetId, productId, productVariantId: variant.productVariantId } })));
+      }
       if (String(target.state) === "disabled") {
         blockers.push({
           code: "PUBLICATION_TARGET_NOT_IN_PREVIEW",
@@ -1432,7 +1407,7 @@ implements InventoryChannelExposureAdminStore {
               hold,
             }];
           }
-          if (sellableVariantIds.has(productVariantId) && resolution.policy.eligible && mapping === null) {
+           if (publicationVariantIds.has(productVariantId) && (zeroVariantIds.has(productVariantId) || resolution.policy.eligible) && mapping === null) {
             blockers.push({
               code: "PUBLICATION_TARGET_VARIANT_MAPPING_MISSING",
               message: "An eligible SKU has no exact provider inventory identity for this publication target.",
@@ -1451,7 +1426,7 @@ implements InventoryChannelExposureAdminStore {
             sharedUnits: calculation.sharedUnits.toString(),
             afterHoldbackUnits: calculation.afterHoldbackUnits.toString(),
             cappedUnits: calculation.cappedUnits.toString(),
-            publishedUnits: calculation.publishedUnits.toString(),
+            publishedUnits: zeroVariantIds.has(productVariantId) ? "0" : calculation.publishedUnits.toString(),
             sourceWarehouseBreakdown,
             policy: resolution.policy,
             mapping,
@@ -1467,7 +1442,7 @@ implements InventoryChannelExposureAdminStore {
         fulfillmentNodeIds,
         warehouseIds,
         selectedPolicies,
-        rows: previewRows.filter(row => sellableVariantIds.has(row.productVariantId)),
+        rows: previewRows,
         blockers: uniqueBlockers(blockers),
       });
     });
@@ -2111,6 +2086,32 @@ function readRuntimeAuthority(
     );
   }
   return { authority: authority.data, revision: revision.data };
+}
+
+/** Bind the listing readers' static positional SQL through this same Drizzle
+ * transaction. Values remain driver parameters; none are interpolated as SQL. */
+function selectionQueryClient(tx: Transaction): StockSelectionQueryClient {
+  return {
+    async query<Row = Record<string, unknown>>(text: string, values: readonly unknown[] = []) {
+      const statement = sql.empty();
+      let position = 0;
+      for (const match of text.matchAll(/\$(\d+)/g)) {
+        const index = Number(match[1]) - 1;
+        if (!Number.isSafeInteger(index) || index < 0 || index >= values.length)
+          throw new Error("A stock selection query parameter is missing.");
+        statement.append(sql.raw(text.slice(position, match.index)));
+        statement.append(sql`${sql.param(values[index])}`);
+        position = match.index! + match[0].length;
+      }
+      statement.append(sql.raw(text.slice(position)));
+      return { rows: rows(await tx.execute(statement)) as Row[] };
+    },
+  };
+}
+
+function publicationDestinationKind(value: unknown): "channel_connection" | "dropship_store_connection" {
+  if (value === "channel_connection" || value === "dropship_store_connection") return value;
+  throw new InventoryAvailabilityMasterDataError(503, "INVENTORY_CHANNEL_EXPOSURE_DESTINATION_INVALID", "The publication destination has an invalid connection kind.");
 }
 
 function rows(result: unknown): Record<string, any>[] {

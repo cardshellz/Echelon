@@ -1,7 +1,11 @@
 import { z } from 'zod';
 import { resolveEbayListingIssue, safeListingDiagnostic } from '@shared/ebay-listing-issue';
+import { publicationSelectionBusyIssue } from '../../modules/inventory-planning/publication-selection-work';
 
 export function listingFailure(error: unknown, productId?: number, jobId?: string) {
+  const busy = publicationSelectionBusyIssue(error);
+  if (busy) return { ...busy, error: busy.message,
+    issue: resolveEbayListingIssue({ code: busy.code, message: busy.message, productId, jobId }) };
   const savedJob = z.string().uuid().safeParse(jobId ?? (error instanceof Error && 'jobId' in error ? error.jobId : undefined));
   const code = error instanceof z.ZodError ? 'EBAY_LISTING_INPUT_INVALID'
     : error instanceof Error && 'code' in error && typeof error.code === 'string' && /^(EBAY_|PUBLICATION_|QUANTITY_)/.test(error.code)
@@ -13,6 +17,7 @@ export function listingFailure(error: unknown, productId?: number, jobId?: strin
   return { code, error: message, issue: resolveEbayListingIssue({ code, message, productId, jobId: savedJob.success ? savedJob.data : undefined }) };
 }
 export function listingFailureStatus(error: unknown): number {
+  if (publicationSelectionBusyIssue(error)) return 409;
   if (error instanceof z.ZodError) return 400;
   const code = error instanceof Error && 'code' in error ? error.code : null;
   if (code === 'EBAY_SYNC_JOB_NOT_FOUND') return 404;

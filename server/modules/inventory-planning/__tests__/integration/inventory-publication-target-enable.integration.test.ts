@@ -21,16 +21,18 @@ dbDescribe("direct account stock-update toggle with real PostgreSQL", () => {
   let database: InventoryCutoverTestDatabase;
   let service: InventoryPublicationTargetEnableService;
   const clock = { now: () => WALMART_INVENTORY_NOW };
-  beforeEach(async () => {
+  async function createAccountFixture(options: { includeWalmartMapping?: boolean } = {}) {
+    await database?.close();
     database = await createInventoryCutoverTestDatabase(databaseUrl, disposable, cutoverCompositionBaseSql);
-    await installWalmartPublicationInventoryFixture(database.pool, { targetState: "preview" });
+    await installWalmartPublicationInventoryFixture(database.pool, { targetState: "preview", ...options });
     await activateWalmartPublicationInventoryFixture(database.pool);
     await installCutoverAdmissionFixturePrerequisites(database.pool);
     await database.pool.query(readFileSync(resolve("migrations/236_inventory_cutover_admission.sql"), "utf8"));
     await database.pool.query(readFileSync(resolve("migrations/0721_inventory_publication_direct_enable.sql"), "utf8"));
     await database.pool.query("UPDATE inventory.inventory_publication_targets SET state='disabled',activated_at=NULL,activated_by=NULL,revision=revision+1 WHERE id=2");
     service = new InventoryPublicationTargetEnableService(new PostgresInventoryPublicationTargetEnableStore(database.pool), clock);
-  }, 30000);
+  }
+  beforeEach(() => createAccountFixture(), 30000);
   afterEach(async () => { await database?.close(); });
   const input = (key = "enable-account") => ({ publicationTargetId: 2, expectedRevision: "3", idempotencyKey: key });
   const readTarget = async (id = 2) => (await database.pool.query(
@@ -38,6 +40,10 @@ dbDescribe("direct account stock-update toggle with real PostgreSQL", () => {
   const enable = () => service.enable(input(), "operator-1");
 
   it("enables a new empty Walmart account without pause history and unlocks initial listing setup", async () => {
+    // This scenario has no selected or previously mapped Walmart listing. The
+    // fixture's retained Shopify destination belongs to a different channel.
+    await createAccountFixture({ includeWalmartMapping: false });
+    await database.pool.query("DELETE FROM channels.channel_feeds WHERE channel_id=36 AND product_variant_id=101");
     expect((await database.pool.query("SELECT * FROM public.audit_events WHERE action LIKE '%stopped'")).rows).toEqual([]);
     const result = await enable();
     expect(result).toMatchObject({ state: "live", revision: "4", publicationRows: 0, initialDefinitionsApplied: 0, providerWriteAttempted: false });
@@ -125,15 +131,7 @@ dbDescribe("direct account stock-update toggle with real PostgreSQL", () => {
     expect((await database.pool.query("SELECT * FROM public.audit_events WHERE action='inventory_availability.publication_target.enabled'")).rows).toHaveLength(1);
   });
 
-  async function includeMappedItem() {
-    await database.pool.query(`INSERT INTO inventory.publication_membership_versions(publication_target_id,product_variant_id,version,included,definition_hash,review_hash,created_by,created_at)
-      VALUES(2,101,1,true,repeat('d',64),repeat('d',64),'operator',$1)`, [WALMART_INVENTORY_NOW]);
-    await database.pool.query(`INSERT INTO inventory.publication_membership_heads SELECT publication_target_id,product_variant_id,id
-      FROM inventory.publication_membership_versions WHERE publication_target_id=2`);
-  }
-
-  it("pause then on queues current quantities for included items only, with no reason or readback step", async () => {
-    await includeMappedItem();
+  it("pause then on queues current quantities for channel-selected items, with no reason or readback step", async () => {
     const first = await enable();
     expect(first.publicationRows).toBe(1);
     const stop = new InventoryPublicationTargetStopService(new PostgresInventoryPublicationTargetStopStore(database.pool), clock);
@@ -147,7 +145,6 @@ dbDescribe("direct account stock-update toggle with real PostgreSQL", () => {
   });
 
   it("keeps global pause and account holds intact", async () => {
-    await includeMappedItem();
     await database.pool.query("UPDATE channels.sync_settings SET global_enabled=false");
     await database.pool.query("UPDATE inventory.inventory_publication_targets SET held_at=$1,held_by='operator',hold_reason='Keep zero',revision=revision+1 WHERE id=2", [WALMART_INVENTORY_NOW]);
     const result = await service.enable({ ...input(), expectedRevision: "4" }, "operator-1");
@@ -157,8 +154,7 @@ dbDescribe("direct account stock-update toggle with real PostgreSQL", () => {
     expect((await database.pool.query("SELECT global_enabled FROM channels.sync_settings")).rows[0].global_enabled).toBe(false);
   });
 
-  it("blocks an included item lacking its listing link and rolls back activation", async () => {
-    await includeMappedItem();
+  it("blocks a channel-selected item lacking its listing link and rolls back activation", async () => {
     await database.pool.query("UPDATE inventory.publication_variant_mapping_heads SET active_mapping_id=NULL,revision=revision+1 WHERE publication_target_id=2");
     await expect(enable()).rejects.toMatchObject({ code: "INVENTORY_PUBLICATION_ENABLE_STOCK_NOT_READY" });
     expect(await readTarget()).toMatchObject({ state: "disabled", revision: "3" });
@@ -180,7 +176,6 @@ dbDescribe("direct account stock-update toggle with real PostgreSQL", () => {
   });
 
   it("rolls back queued quantities too if the enable audit fails", async () => {
-    await includeMappedItem();
     await database.pool.query("CREATE FUNCTION public.reject_enable() RETURNS trigger LANGUAGE plpgsql AS 'BEGIN RAISE EXCEPTION ''audit unavailable''; END'; CREATE TRIGGER reject_enable BEFORE INSERT ON public.audit_events FOR EACH ROW EXECUTE FUNCTION public.reject_enable();");
     await expect(enable()).rejects.toThrow("audit unavailable");
     expect(await readTarget()).toMatchObject({ state: "disabled", revision: "3" });
@@ -189,7 +184,15 @@ dbDescribe("direct account stock-update toggle with real PostgreSQL", () => {
   });
 
   it("does not apply a pending replacement for an already active stock rule", async () => {
-    await database.pool.query("INSERT INTO inventory.channel_exposure_policy_versions(scope_key,channel_id,scope_type,version,supersedes_policy_id,allocation_semantics,eligible,share_bps,holdback_sellable_units,max_publish_mode,min_publish_sellable_units,definition_hash,change_reason,idempotency_key,request_hash,created_by) VALUES('channel:36',36,'channel',2,1,'exposure',true,1000,0,'unlimited',0,repeat('b',64),'Pending','pending-policy',repeat('b',64),'operator'); UPDATE inventory.channel_exposure_policy_heads SET draft_policy_id=(SELECT id FROM inventory.channel_exposure_policy_versions WHERE channel_id=36 AND version=2),revision=revision+1 WHERE channel_id=36;");
+    await database.pool.query(`INSERT INTO inventory.channel_exposure_policy_versions(scope_key,channel_id,scope_type,version,supersedes_policy_id,
+      allocation_semantics,eligible,share_bps,holdback_sellable_units,max_publish_mode,min_publish_sellable_units,
+      definition_hash,change_reason,idempotency_key,request_hash,created_by)
+      SELECT 'channel:36',36,'channel',2,active_policy_id,'exposure',true,1000,0,'unlimited',0,
+        repeat('b',64),'Pending','pending-policy',repeat('b',64),'operator'
+      FROM inventory.channel_exposure_policy_heads WHERE channel_id=36;
+      UPDATE inventory.channel_exposure_policy_heads
+      SET draft_policy_id=(SELECT id FROM inventory.channel_exposure_policy_versions WHERE channel_id=36 AND version=2),revision=revision+1
+      WHERE channel_id=36;`);
     const before = (await database.pool.query("SELECT active_policy_id,draft_policy_id,revision::text FROM inventory.channel_exposure_policy_heads WHERE channel_id=36")).rows;
     expect(await enable()).toMatchObject({ initialDefinitionsApplied: 0 });
     expect((await database.pool.query("SELECT active_policy_id,draft_policy_id,revision::text FROM inventory.channel_exposure_policy_heads WHERE channel_id=36")).rows).toEqual(before);
