@@ -30,11 +30,12 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { buildListingFeedRows } from "./feed-model";
+import { buildListingFeedRows, type ListingFeedRow } from "./feed-model";
 import { MAX_DRAFT_ITEMS } from "./model";
 import { catalogMapping, useChannelCatalog } from "./useChannelCatalog";
 import { ChannelListingFeedRow } from "./ChannelListingFeedRow";
 import { ChannelListingMatchDialog } from "./ChannelListingMatchDialog";
+import { ListingLifecycleDialog, useListingLifecycle } from "./ListingLifecycleActions";
 
 const DISPLAY_INCREMENT = 50;
 // The mapping API accepts at most 100 exact identities in one reviewed action.
@@ -68,7 +69,7 @@ export function ChannelListingFeed(props: ChannelListingFeedProps) {
   const { providerName, canEdit, draftItems, metadata, operations } = props;
   const catalog = useChannelCatalog(props);
   const [displayLimit, setDisplayLimit] = useState(DISPLAY_INCREMENT);
-  const rows = useMemo(
+  const allRows = useMemo(
     () =>
       buildListingFeedRows({
         draftItems,
@@ -79,12 +80,21 @@ export function ChannelListingFeed(props: ChannelListingFeedProps) {
       }),
     [draftItems, metadata, operations, catalog.feed.data, catalog.sku],
   );
+  const lifecycle = useListingLifecycle(props.channelId, allRows.flatMap(row => row.sku ? [row.sku] : []), providerName === "Walmart", catalog.sku);
+  const representedSkus = new Set(allRows.map(row => row.sku));
+  const retainedRows: ListingFeedRow[] = lifecycle.retained.filter(item => !representedSkus.has(item.sku)).map(item => ({
+    key: `sku:${item.sku}`, sku: item.sku, draft: null, catalog: null, remote: null, operation: null, issue: null,
+  }));
+  const combinedRows = [...allRows, ...retainedRows];
+  const removed = (sku: string | null) => sku !== null && lifecycle.bySku.get(sku)?.action === "remove" && lifecycle.bySku.get(sku)?.state === "retired";
+  const rows = lifecycle.showRemoved ? combinedRows : combinedRows.filter(row => !removed(row.sku));
   const visibleRows = rows.slice(0, displayLimit);
   // Bulk linking operates only on visible, unambiguous exact matches. It never
   // adds items to the publication draft or submits a listing operation.
   const matches = visibleRows.filter(
     (row) =>
       !row.draft &&
+      !lifecycle.bySku.has(row.sku ?? "") &&
       !row.issue &&
       row.remote?.mappingStatus === "matched" &&
       row.remote.variant !== null,
@@ -149,12 +159,16 @@ export function ChannelListingFeed(props: ChannelListingFeedProps) {
   };
   return (
     <Card>
+      <ListingLifecycleDialog selection={lifecycle.selection} pending={lifecycle.pending} error={lifecycle.error}
+        onClose={lifecycle.close} onConfirm={lifecycle.confirm} />
       <CardHeader className="px-3 sm:px-6">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <CardTitle className="flex items-center gap-2">
             <Package className="h-5 w-5" />
             Listing Feed
           </CardTitle>
+          {providerName === "Walmart" && <label className="flex items-center gap-2 text-sm"><Checkbox checked={lifecycle.showRemoved}
+            onCheckedChange={value => lifecycle.setShowRemoved(value === true)} />Show removed listings</label>}
           {canEdit && (
             <Button
               disabled={catalog.locked || draftItems.length >= MAX_DRAFT_ITEMS}
@@ -374,7 +388,7 @@ export function ChannelListingFeed(props: ChannelListingFeedProps) {
                       key={row.key}
                       row={row}
                       canEdit={canEdit}
-                      locked={row.draft ? catalog.locked : linkLocked}
+                      locked={(row.draft ? catalog.locked : linkLocked) || lifecycle.pending || lifecycle.checking}
                       selected={
                         row.draft
                           ? props.selectedDraftIds.has(row.draft.variantId)
@@ -393,6 +407,10 @@ export function ChannelListingFeed(props: ChannelListingFeedProps) {
                       onRemove={props.onRemove}
                       onMatch={catalog.chooseVariant}
                       onActivity={props.onActivity}
+                      lifecycle={row.sku ? lifecycle.bySku.get(row.sku) : undefined}
+                      lifecycleReady={lifecycle.ready && !props.dirty}
+                      onLifecycle={providerName === "Walmart" ? lifecycle.open : undefined}
+                      onCheckLifecycle={() => { if (row.sku) lifecycle.check(row.sku); }}
                     />
                   ))}
                 </TableBody>
@@ -416,6 +434,8 @@ export function ChannelListingFeed(props: ChannelListingFeedProps) {
             </div>
           </>
         )}
+        {lifecycle.hasMoreHistory && <Button variant="outline" disabled={lifecycle.loadingHistory} onClick={lifecycle.loadMoreHistory}>Load more saved listings</Button>}
+        {lifecycle.readError && <p role="alert" className="text-sm text-destructive">Listing actions could not load: {lifecycle.readError}</p>}
         {rows.length === 0 && catalog.feed.isSuccess && !catalog.feed.error && (
           <p className="py-8 text-center text-sm text-muted-foreground">
             {catalog.sku

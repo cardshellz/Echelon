@@ -140,6 +140,8 @@ import { logger as platformLogger } from "../platform/observability/logger";
 import { createSourceLockService } from "../modules/channels/source-lock.service";
 import { createShopifyAdapter } from "../modules/channels/adapters/shopify.adapter";
 import { WalmartChannelService } from "../modules/channels/adapters/walmart/walmart-channel.service";
+import { PostgresListingLifecycleRepository } from "../modules/marketplace-listings/infrastructure/pg-listing-lifecycle.repository";
+import { createListingLifecycleService } from "../listing-lifecycle.composition";
 import { WalmartCatalogAdapter } from "../modules/channels/adapters/walmart/walmart-catalog.adapter";
 import { ChannelCatalogService } from "../modules/channels/channel-catalog.service";
 import { PostgresChannelCatalogRepository } from "../modules/channels/channel-catalog.repository";
@@ -398,11 +400,13 @@ export function createServices(
   const sourceLockService = createSourceLockService(db);
   const shopifyAdapter = createShopifyAdapter(db, quantityPublicationAdmission);
   const ebayAdapter = createEbayAdapter(db, new ChannelEbayListingPhotoResolver(databasePool, createCatalogPublicImageUrl(process.env)));
+  const listingLifecycleStore = new PostgresListingLifecycleRepository(databasePool);
   const walmart = new WalmartChannelService(new WalmartConnectionRepository(databasePool),
     AesGcmFulfillmentProviderCredentialCipher.fromEnvOrNull({
       SHIPPING_PROVIDER_CREDENTIAL_ENCRYPTION_KEY: process.env.WALMART_CREDENTIAL_ENCRYPTION_KEY,
       SHIPPING_PROVIDER_CREDENTIAL_KEY_ID: process.env.WALMART_CREDENTIAL_KEY_ID,
     }), { liveEnabled: process.env.WALMART_LIVE_ENABLED !== "false", productionServer: process.env.NODE_ENV === "production",
+      listingWrites: listingLifecycleStore,
       pollingDisabledReason: process.env.WALMART_ORDER_POLLING_ENABLED === "false" ? "WALMART_ORDER_POLLING_ENABLED=false"
         : getSchedulerDisableReason("WALMART_ORDER_POLLING_DISABLED") });
   const channelCatalogRepository = new PostgresChannelCatalogRepository(databasePool);
@@ -416,6 +420,7 @@ export function createServices(
   const walmartAdapter = new WalmartAdapter(walmart, new PostgresInventoryPublicationSupplyReader(databasePool));
   const listingPublication = createListingPublicationService({pool: databasePool, walmart, channelCatalog, quantityAdmission: quantityPublicationAdmission});
   const listingUpdates = createListingUpdateService(databasePool, walmart);
+  const listingLifecycle = createListingLifecycleService(databasePool, walmart, listingLifecycleStore);
   const walmartStockConnection = new WalmartStockConnectionService(walmart,
     new VerifiedListingStockService(new PostgresVerifiedListingStockStore(databasePool)));
   const inventoryPublicationInitialScope = new InventoryPublicationInitialScopeService(new PostgresInitialPublicationScopeStore(databasePool));
@@ -748,6 +753,7 @@ export function createServices(
     listingPublication,
     walmartStockConnection,
     listingUpdates,
+    listingLifecycle,
     inventoryPublicationInitialScope,
   };
 }

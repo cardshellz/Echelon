@@ -672,13 +672,24 @@ for (const product of specialProducts) {
     const select = picker.getByRole("button", { name: `Add Standard option · ${product.sku}`, exact: true });
     await expect(select).toBeEnabled();
     await select.click();
-    await expect(picker.getByRole("alert")).toContainText("selected");
-    if (product.selectionFlow === "membership")
-      await expect(picker.getByRole("alert")).toContainText("Adding a membership to an existing order is not enabled");
+    if (product.selectionFlow === "membership") {
+      await expect(picker.getByRole("alert")).toHaveText(
+        "Memberships must be purchased separately. You can continue editing the other items in this order.",
+      );
+    } else {
+      await expect(picker.getByRole("alert")).toContainText("selected");
+    }
     await assertFitsScreen(page);
     await picker.getByRole("button", { name: "Done", exact: true }).click();
     await expect(page.getByRole("spinbutton", { name: /^Quantity for added/ })).toHaveCount(0);
     await expect(page.getByRole("button", { name: "Review changes", exact: true })).toBeDisabled();
+    if (product.selectionFlow === "membership") {
+      // Rejecting membership must not lock the draft or prevent ordinary additions.
+      await addStorageBox(page);
+      await expect(page.getByRole("spinbutton", { name: /^Quantity for added/ })).toHaveCount(1);
+      await expect(page.getByRole("spinbutton", { name: /^Quantity for added Card Storage Box/ })).toHaveValue("1");
+      await expect(page.getByRole("button", { name: "Review changes", exact: true })).toBeEnabled();
+    }
     expect(fixture.requests.some((request) => /\/(quotes|commit|abandon)$/.test(request.path))).toBe(false);
     expect(fixture.failures).toEqual([]);
   });

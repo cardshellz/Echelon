@@ -4,11 +4,13 @@ import { WalmartChannelService } from "../../adapters/walmart/walmart-channel.se
 import { ChannelInventoryPublicationTransportAdapter } from "../../channel-inventory-publication-transport.adapter";
 import { deriveChannelDestinations } from "../../../inventory-planning/domain/inventory-channel-exposure";
 import type { InventoryPublicationSourceWarehouse } from "../../../inventory-planning/application/inventory-publication-supply-read.port";
+import { WalmartApiError } from "../../adapters/walmart/walmart-client";
 
 function setup() {
   const api = { setInventory: vi.fn(), inventory: vi.fn(async () => 5) };
-  const row = { connection_id: 2, ship_node_id: "NODE", environment: "production", channel_id: 1, warehouse_id: 4 };
+  const row = { connection_id: 2, ship_node_id: "NODE", environment: "production", channel_id: 1, warehouse_id: 4, partner_id: "seller", revision: 1 };
   const service = { connection: vi.fn(async () => row), requireRuntime: vi.fn(), api: () => api,
+    withListingWrites: vi.fn(async (_account: unknown, _skus: readonly string[], work: () => Promise<unknown>) => work()),
     repository: { withLock: vi.fn(async (_id, action) => action()), assertWarehouse: vi.fn(),
       inventoryMappings: vi.fn(async () => [{ product_variant_id: 3, channel_sku: "SKU" }]) } };
   const supply = { getSourceWarehouses: vi.fn(async (): Promise<ReadonlyArray<InventoryPublicationSourceWarehouse>> => [{ warehouseId: 4, isActive: true }]) };
@@ -39,6 +41,17 @@ describe("Walmart exact inventory destination", () => {
     const s = setup();
     await expect(s.adapter.pushInventory(1, [])).rejects.toMatchObject({ code: "WALMART_PUBLICATION_AUTHORITY_REQUIRED" });
     expect(s.api.setInventory).not.toHaveBeenCalled();
+  });
+  it("blocks an already queued positive update after unpublishing but still permits the inventory owner's zero", async () => {
+    const s = setup();
+    s.service.withListingWrites.mockImplementation(async (_account, skus, work) => {
+      if (skus.includes("SKU")) throw new WalmartApiError("LISTING_PUBLICATION_STOPPED", "Stopped", false);
+      return work();
+    });
+    await expect(s.transport.publishAbsolute({ ...request, desiredQuantity: 17 })).rejects.toMatchObject({ code: "LISTING_PUBLICATION_STOPPED", retryable: false });
+    expect(s.api.setInventory).not.toHaveBeenCalled();
+    await expect(s.transport.publishAbsolute(request)).resolves.toMatchObject({ publishedQuantity: 0 });
+    expect(s.api.setInventory).toHaveBeenCalledExactlyOnceWith("SKU", "NODE", 0);
   });
   it.each([
     [], [{ warehouseId: 5, isActive: true }], [{ warehouseId: null, isActive: true }],

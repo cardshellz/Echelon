@@ -13,10 +13,11 @@ function fixture() {
   const catalogItem = vi.fn(async (sku: string) => item(sku));
   const mappings = vi.fn(async () => [1, 2, 3].map(id => ({ product_variant_id: id, channel_sku: `SKU-${id}` })));
   const channels = { repository: { enabledChannels: vi.fn(async () => [104]), mappings },
-    connection: vi.fn(async () => ({ connection_id: 67, partner_id: "seller", ship_node_id: "node", environment: "production" })),
+    connection: vi.fn(async () => ({ channel_id: 104, connection_id: 67, partner_id: "seller", ship_node_id: "node", environment: "production", revision: 1 })),
+    withListingWrites: vi.fn(async (_account: unknown, _skus: readonly string[], work: () => Promise<unknown>) => work()),
     requireRuntime: vi.fn(), api: vi.fn(() => ({ account, catalogItem })) };
   const inventory = { pending: vi.fn(async (_channel: number, _connection: number, ids: number[]) => ids),
-    connect: vi.fn(async () => ({ state: "connected" as const, dryRun: false, receipt: null, quantities: [] })) };
+    connect: vi.fn(async (_input: unknown) => ({ state: "connected" as const, dryRun: false, receipt: null, quantities: [] })) };
   const logger = { info: vi.fn(), error: vi.fn() };
   const service = new WalmartStockConnectionService(channels as unknown as WalmartChannelService, inventory, () => now, logger);
   return { service, channels, inventory, account, catalogItem, mappings, item, logger };
@@ -38,6 +39,18 @@ describe("Walmart stock connection scan", () => {
     expect(await f.service.processDue()).toEqual({ processed: 0, failed: 0 });
     expect(f.account).not.toHaveBeenCalled();
     expect(f.inventory.connect).not.toHaveBeenCalled();
+  });
+  it("never reconnects a stopped SKU even while Walmart still reports it published; other SKUs continue", async () => {
+    const f = fixture();
+    f.channels.withListingWrites.mockImplementation(async (_account, skus, work) => {
+      if (skus.includes("SKU-1")) throw Object.assign(new Error("Stopped"), { code: "LISTING_PUBLICATION_STOPPED" });
+      return work();
+    });
+    expect(await f.service.processDue()).toEqual({ processed: 2, failed: 0 });
+    expect(f.inventory.connect.mock.calls.map(call => call[0])).toEqual([
+      expect.objectContaining({ sku: "SKU-2" }), expect.objectContaining({ sku: "SKU-3" }),
+    ]);
+    expect(f.logger.error).not.toHaveBeenCalled();
   });
   it("rejects a different seller account", async () => {
     const f = fixture();

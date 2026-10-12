@@ -1,6 +1,6 @@
 # Channel selection owns stock publication
 
-Reviewed base: `0b966a56f673b73860fce843ebd0c9862443ee49` (`origin/main`, fetched October 12, 2026). This document describes the proposed branch implementation, not a production repair or deployment.
+Initial reviewed base: `0b966a56f673b73860fce843ebd0c9862443ee49`. Integrated current main `acb78c65c14059ad44e7111835057a5d6daa5851` on October 12, 2026, retaining its Walmart listing lifecycle routes, service, worker, provider guards and tests alongside the removal of independent stock membership. This document describes the proposed branch implementation, not a production repair or deployment.
 
 ## Problem and resulting behavior
 
@@ -40,6 +40,8 @@ Recorded passing runs (overlapping suites are not added together):
 - 22 browser tests: 14 eBay, six Walmart and two Channel Inventory cases. APIs/providers are mocked; these do not prove live provider acceptance.
 - Final production, server-test and client-test TypeScript checks and the application build passed. The build retained its existing large-bundle warning.
 
-Five new PostgreSQL suites are registered in `scripts/ci/postgres-test-manifest.ts` and its coverage guard. Migration prefixes 0743/0744 were checked against the freshly fetched base above.
+Five new PostgreSQL suites are registered in `scripts/ci/postgres-test-manifest.ts` and its coverage guard. Migration prefixes 0743/0744 were rechecked against current main `acb78c65c14059ad44e7111835057a5d6daa5851`; neither prefix is occupied there.
 
-The full local unit run exposed 25 pre-existing Windows text-format failures across 12 suites, reproduced on a separate clean checkout of the exact base above. Two transient HTTP tests reported a blocked random port and passed on isolated rerun. Neither result was hidden by changing unrelated fixtures or weakening tests. Passing local tests, remote CI, merge, deployment and actual provider behavior are separate evidence; this branch makes no claim of a live production repair.
+After integrating current main, 199 affected unit tests, 90 disposable PostgreSQL tests and 16 desktop/mobile Walmart browser tests passed. These include the preserved immutable mapping-preparation receipt check, actual Inventory-owned zero planning during listing removal, lifecycle replay/concurrency, selection-work recovery and the absence of a second stock-selection control. Provider calls and browser API responses remain mocked.
+
+The full local unit run exposed 25 pre-existing Windows text-format failures across 12 suites, reproduced on a separate clean checkout of the initial reviewed base above. Two transient HTTP tests reported a blocked random port and passed on isolated rerun. Neither result was hidden by changing unrelated fixtures or weakening tests. Passing local tests, remote CI, merge, deployment and actual provider behavior are separate evidence; this branch makes no claim of a live production repair.
