@@ -2,6 +2,7 @@ import type { Pool } from "pg";
 import { describe, expect, it, vi } from "vitest";
 import { PgDropshipPricingRulesRepository } from "../../infrastructure/dropship-pricing-rules.repository";
 import type { StoredPricingReview } from "../../application/dropship-pricing-rules-service";
+import { LISTING_SELECTION_LOCK_SQL } from "../../infrastructure/dropship-listing-setting-writes.repository";
 
 vi.mock("../../../../db", () => ({ db: {}, pool: {} }));
 
@@ -78,11 +79,38 @@ describe("PgDropshipPricingRulesRepository store default review loader (migratio
       + "WHERE id = $1 AND vendor_id = $2 AND store_connection_id = $3 AND kind = 'store_default'",
     );
     expect(client.params[loadIndex]).toEqual([STORE_REVIEW_ID, 10, 44]);
-    expect(client.sql[0]).toBe("BEGIN ISOLATION LEVEL SERIALIZABLE");
+    // READ COMMITTED (plan PR 9, P37): a SERIALIZABLE snapshot would predate the store lock.
+    expect(client.sql[0]).toBe("BEGIN");
     expect(client.sql[1]).toContain("hashtext('dropship_listing_push_job')");
     expect(client.sql[2]).toContain("FOR SHARE OF v, sc");
     expect(client.sql.at(-1)).toBe("COMMIT");
     expect(client.release).toHaveBeenCalledOnce();
+    // Reading a review takes no selection lock.
+    expect(client.sql.some((sql) => sql.startsWith("LOCK TABLE"))).toBe(false);
+  });
+
+  it("locks the selection tables only when apply asks, after the store lock and the owner rows", async () => {
+    const client = new ScriptedClient();
+
+    await repositoryFor(client).execute("member-1", 44, async (tx) => {
+      await tx.findApplication({ reviewId: STORE_REVIEW_ID, reviewHash: "a".repeat(64), idempotencyKey: "apply-key-1" });
+      await tx.lockSelection();
+      await tx.loadReview(STORE_REVIEW_ID);
+    });
+
+    const normalized = (sql: string) => sql.replace(/\s+/g, " ").trim();
+    expect(client.sql[0]).toBe("BEGIN");
+    expect(client.sql[1]).toBe("SELECT pg_advisory_xact_lock(hashtext('dropship_listing_push_job'), $1::integer)");
+    expect(client.params[1]).toEqual([44]);
+    expect(client.sql[2]).toContain("FOR SHARE OF v, sc");
+    expect(client.sql[3]).toContain("FROM dropship.dropship_pricing_applications");
+    // The same SHARE locks W9 and the listing-settings wrapper take (one statement, exported once).
+    expect(client.sql[4]).toBe(normalized(LISTING_SELECTION_LOCK_SQL));
+    expect(client.sql[4]).toBe("LOCK TABLE dropship.dropship_catalog_rules, dropship.dropship_vendor_selection_rules, "
+      + "dropship.dropship_vendor_variant_overrides, catalog.product_line_products IN SHARE MODE");
+    expect(client.sql[5]).toContain("FROM dropship.dropship_pricing_reviews");
+    expect(client.sql.slice(6)).toEqual(["COMMIT"]);
+    expect(client.sql.filter((sql) => sql.startsWith("LOCK TABLE"))).toHaveLength(1);
   });
 
   it("reads a review of another kind as not found, never as a store review that fails its contract", async () => {

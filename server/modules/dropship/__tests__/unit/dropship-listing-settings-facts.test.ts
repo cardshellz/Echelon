@@ -4,6 +4,7 @@ import type { SavedListingPriceRevision } from "../../../../../shared/dropship/l
 import {
   listingSettingsPricesResponseSchema,
   listingSettingsProductDetailSchema,
+  listingSettingsProductIdsResponseSchema,
   listingSettingsProductsResponseSchema,
   listingSettingsSummarySchema,
 } from "../../../../../shared/dropship/listing-settings";
@@ -27,6 +28,7 @@ import {
   listingSettingsStockUnits,
   selectListingSettingsPrices,
   selectListingSettingsProduct,
+  selectListingSettingsProductIds,
   selectListingSettingsProducts,
   type ListingSettingsInputs,
 } from "../../application/dropship-listing-settings-facts";
@@ -1115,5 +1117,87 @@ describe("listing settings summary", () => {
     expect(listingSettingsSummarySchema.parse(summary)).toEqual(summary);
     expect(summary).toMatchObject({ catalog: { state: "too_large", limit: 10_000 }, counts: null,
       rail: { state: "too_many_sizes" }, attention: { items: [], total: 0 } });
+  });
+});
+
+describe("listing settings facts: categories and revisions for writes (plan PR 9, section 4.1)", () => {
+  const NONE = { price: null, ebayCategory: null, storeShelf: null, shippingPolicy: null, returnPolicy: null, paymentPolicy: null,
+    textAbove: null, textBelow: null, mainText: null } satisfies ProductListingSettingValues;
+  /** Product 1 (Toploaders, own settings revision 801), product 2 (Toploaders, none), product 3 (Sleeves), product 4 (no category). */
+  const catalog = [
+    candidate({ productId: 1, productVariantId: 11, productName: "Alpha toploader", categoryId: TOPLOADERS_CATEGORY, sku: "A-11" }),
+    candidate({ productId: 1, productVariantId: 12, productName: "Alpha toploader", categoryId: TOPLOADERS_CATEGORY, sku: "A-12",
+      variantName: "Pack of 100" }),
+    candidate({ productId: 2, productVariantId: 21, productName: "Beta toploader", categoryId: TOPLOADERS_CATEGORY, sku: "B-21" }),
+    candidate({ productId: 3, productVariantId: 31, productName: "Gamma sleeve", categoryId: SLEEVES_CATEGORY, sku: "G-31" }),
+    candidate({ productId: 4, productVariantId: 41, productName: "Delta loose", categoryId: null, sku: "D-41",
+      defaultRetailPriceCents: null }),
+  ];
+  const ownRows: ListingSettingLayers = {
+    products: new Map([[1, productListingSettingRowSchema.parse({ storeConnectionId: 5, productId: 1, revisionId: 801,
+      updatedAt: "2026-10-01T00:00:00.000Z", values: { ...NONE, storeShelf: { mode: "none" } } })]]),
+    categories: new Map(),
+  };
+  const facts = () => buildListingSettingsFacts(inputs(catalog, { layers: ownRows }));
+
+  it("puts each product's category and own settings revision beside its row, never inside it", () => {
+    const products = facts().products;
+    expect(products.map((product) => [product.row.productId, product.categoryId, product.settingsRevisionId])).toEqual([
+      [1, TOPLOADERS_CATEGORY, 801], [2, TOPLOADERS_CATEGORY, null], [4, null, null], [3, SLEEVES_CATEGORY, null],
+    ]);
+    for (const product of products) {
+      expect(product.row).not.toHaveProperty("categoryId");
+      expect(product.row).not.toHaveProperty("settingsRevisionId");
+    }
+    // The strict answers still parse: GET /products and GET /products/:id are unchanged.
+    const page = selectListingSettingsProducts(facts(), { search: "", show: "all", page: 0 });
+    expect(listingSettingsProductsResponseSchema.safeParse({ storeConnectionId: 5, page: 0, pageSize: 50, total: page.total,
+      rows: page.rows, generatedAt: GENERATED_AT.toISOString() }).success).toBe(true);
+    const one = selectListingSettingsProduct(facts(), 1)!;
+    expect(listingSettingsProductDetailSchema.safeParse({ storeConnectionId: 5, ...one,
+      sizes: one.sizes.map((size) => ({ ...size, stockUnits: 0 })), stock: { state: "ok", checkedAt: GENERATED_AT.toISOString() },
+      generatedAt: GENERATED_AT.toISOString() }).success).toBe(true);
+  });
+
+  it("narrows the Products and Prices tabs to one Card Shellz category", () => {
+    const built = facts();
+    expect(selectListingSettingsProducts(built, { search: "", show: "all", page: 0, categoryId: TOPLOADERS_CATEGORY }).rows
+      .map((row) => row.productId)).toEqual([1, 2]);
+    expect(selectListingSettingsPrices(built, { search: "", show: "all", page: 0, categoryId: TOPLOADERS_CATEGORY }).rows
+      .map((row) => row.productVariantId)).toEqual([11, 12, 21]);
+    expect(selectListingSettingsPrices(built, { search: "", show: "all", page: 0, categoryId: SLEEVES_CATEGORY }).total).toBe(1);
+    // A category no chosen product is in lists nothing; no category filter lists everything, as before.
+    expect(selectListingSettingsProducts(built, { search: "", show: "all", page: 0, categoryId: 999 }).total).toBe(0);
+    expect(selectListingSettingsPrices(built, { search: "", show: "all", page: 0 }).total).toBe(5);
+    // Filters combine: a category and a search.
+    expect(selectListingSettingsPrices(built, { search: "pack of 100", show: "all", page: 0, categoryId: TOPLOADERS_CATEGORY }).rows
+      .map((row) => row.productVariantId)).toEqual([12]);
+  });
+
+  it("lists every matching product's id and revision, unpaged, with the Products tab's filters", () => {
+    const built = facts();
+    const all = selectListingSettingsProductIds(built, { search: "", show: "all" });
+    expect(all).toEqual({ total: 4, rows: [{ productId: 1, revisionId: 801 }, { productId: 2, revisionId: null },
+      { productId: 4, revisionId: null }, { productId: 3, revisionId: null }] });
+    expect(listingSettingsProductIdsResponseSchema.safeParse(all).success).toBe(true);
+    expect(selectListingSettingsProductIds(built, { search: "", show: "all", categoryId: TOPLOADERS_CATEGORY }).rows
+      .map((row) => row.productId)).toEqual([1, 2]);
+    expect(selectListingSettingsProductIds(built, { search: "", show: "all", productId: 1 })).toEqual({ total: 1,
+      rows: [{ productId: 1, revisionId: 801 }] });
+    expect(selectListingSettingsProductIds(built, { search: "", show: "all", productId: 3, categoryId: TOPLOADERS_CATEGORY }).total).toBe(0);
+    // A search matches a product's name or a size's SKU, as on the Products tab.
+    expect(selectListingSettingsProductIds(built, { search: "beta", show: "all" }).rows.map((row) => row.productId)).toEqual([2]);
+    expect(selectListingSettingsProductIds(built, { search: "a-12", show: "all" }).rows.map((row) => row.productId)).toEqual([1]);
+    // `show` filters as the tab does: products with their own settings, products that cannot be priced.
+    expect(selectListingSettingsProductIds(built, { search: "", show: "cannot_price" }).rows.map((row) => row.productId)).toEqual([4]);
+  });
+
+  it("lists more than a page: every product of a large selection", () => {
+    const many = Array.from({ length: 120 }, (_, index) => candidate({ productId: 1_000 + index, productVariantId: 10_000 + index,
+      productName: `Product ${String(index).padStart(3, "0")}` }));
+    const ids = selectListingSettingsProductIds(buildListingSettingsFacts(inputs(many)), { search: "", show: "all" });
+    expect(ids.total).toBe(120);
+    expect(ids.rows).toHaveLength(120);
+    expect(ids.rows.every((row) => row.revisionId === null)).toBe(true);
   });
 });

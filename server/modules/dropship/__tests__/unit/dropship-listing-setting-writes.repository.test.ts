@@ -6,7 +6,7 @@ import type {
   ListingSettingWriteTransaction,
 } from "../../application/dropship-listing-setting-writes";
 import { DropshipError } from "../../domain/errors";
-import { listingSettingChildKey } from "../../domain/listing-setting-values";
+import { listingSettingChildKey, listingSettingChildKeyPrefix } from "../../domain/listing-setting-values";
 import {
   PgDropshipListingSettingWritesRepository,
   mapListingSettingWriteError,
@@ -82,6 +82,8 @@ class ScriptedClient {
   failRollback = false;
   /** Sizes that exist in the catalog; lockCatalog locks only these. */
   existingVariantIds = new Set([101, 102, 103]);
+  /** What the replay probe (findRequestKeyUse) answers. */
+  probeRows: Array<Record<string, unknown>> = [];
 
   async query<T>(text: string, params: unknown[] = []): Promise<{ rows: T[] }> {
     const sql = text.replace(/\s+/g, " ").trim();
@@ -95,6 +97,7 @@ class ScriptedClient {
       return rows<T>((params[0] as number[]).filter((id) => this.existingVariantIds.has(id)).map((id) => ({ id })));
     }
     if (sql.startsWith("INSERT INTO dropship.dropship_listing_price_revisions")) return rows<T>([{ id: 31 }]);
+    if (sql.startsWith("SELECT 'product' AS source")) return rows<T>(this.probeRows);
     return rows<T>([]);
   }
 
@@ -583,6 +586,8 @@ describe("error mapping (plan 3.9)", () => {
     ["a reused ledger key", { code: "23505", constraint: "dropship_product_listing_setting_requests_key_idx" }, "DROPSHIP_IDEMPOTENCY_CONFLICT", "permanent"],
     ["a reused product revision key", { code: "23505", constraint: "dropship_product_listing_setting_revision_key_uk" }, "DROPSHIP_IDEMPOTENCY_CONFLICT", "permanent"],
     ["a reused category revision key", { code: "23505", constraint: "dropship_category_listing_setting_revision_key_uk" }, "DROPSHIP_IDEMPOTENCY_CONFLICT", "permanent"],
+    // Plan PR 9, P32: another member of the vendor sent the same key at the same time; W9's size child key is unique per vendor.
+    ["a reused size price child key", { code: "23505", constraint: "dropship_listing_price_revision_idempotency_uk" }, "DROPSHIP_IDEMPOTENCY_CONFLICT", "permanent"],
     ["a missing product on a revision", { code: "23503", constraint: "dropship_product_listing_setting_revision_product_fk" }, "DROPSHIP_LISTING_SETTINGS_PRODUCT_NOT_FOUND", "permanent"],
     ["a missing product on a current row", { code: "23503", constraint: "dropship_product_listing_setting_product_fk" }, "DROPSHIP_LISTING_SETTINGS_PRODUCT_NOT_FOUND", "permanent"],
     ["a missing category on a revision", { code: "23503", constraint: "dropship_category_listing_setting_revision_category_fk" }, "DROPSHIP_LISTING_SETTINGS_CATEGORY_NOT_FOUND", "permanent"],
@@ -591,6 +596,11 @@ describe("error mapping (plan 3.9)", () => {
     ["a guard trigger", { code: "23514", message: "Product listing setting predecessor does not match the current setting" }, "DROPSHIP_LISTING_SETTINGS_INVARIANT_FAILED", "fatal"],
     ["a deadlock", { code: "40P01" }, "DROPSHIP_LISTING_SETTINGS_BUSY", "transient"],
     ["a serialization failure", { code: "40001" }, "DROPSHIP_LISTING_SETTINGS_BUSY", "transient"],
+    // A dropped or refused connection: retryable, since a same-key retry is answered by the replay probe (plan P16).
+    ["a dropped connection", { code: "08006" }, "DROPSHIP_LISTING_SETTINGS_BUSY", "transient"],
+    ["an administrator shutdown", { code: "57P01" }, "DROPSHIP_LISTING_SETTINGS_BUSY", "transient"],
+    ["too many connections", { code: "53300" }, "DROPSHIP_LISTING_SETTINGS_BUSY", "transient"],
+    ["a reset socket", { code: "ECONNRESET" }, "DROPSHIP_LISTING_SETTINGS_BUSY", "transient"],
   ])("maps %s after the rollback", async (_label, fields, code, classification) => {
     const { client, repository } = setup();
 
@@ -619,12 +629,36 @@ describe("error mapping (plan 3.9)", () => {
   });
 
   it.each([
-    ["a unique violation on another constraint", { code: "23505", constraint: "dropship_listing_price_revision_idempotency_uk" }],
+    // The size price revision's own identity: no request key is in it, so it is not a key reuse.
+    ["a unique violation on another constraint", { code: "23505", constraint: "dropship_listing_price_revision_identity_uk" }],
     ["a foreign key violation on the owner", { code: "23503", constraint: "dropship_product_listing_setting_owner_fk" }],
     ["a lock timeout", { code: "55P03" }],
   ])("rethrows %s unchanged", (_label, fields) => {
     const error = pgError(fields);
     expect(mapListingSettingWriteError(error)).toBe(error);
+  });
+
+  it("answers a pool that hands out no connection in time, or a refused connection, as BUSY without a statement", async () => {
+    for (const failure of [new Error("timeout exceeded when trying to connect"), pgError({ code: "ECONNREFUSED", message: "connect ECONNREFUSED" }),
+      pgError({ code: "53300", message: "sorry, too many clients already" })]) {
+      const connect = vi.fn(async () => { throw failure; });
+      const repository = new PgDropshipListingSettingWritesRepository({ connect } as unknown as Pool);
+      const operation = vi.fn(async () => "never");
+
+      const error = await repository.execute(INPUT, operation).then(() => null, (reason: unknown) => reason);
+
+      expect(error).toBeInstanceOf(DropshipError);
+      expect(error).toMatchObject({ code: "DROPSHIP_LISTING_SETTINGS_BUSY", context: { retryable: true, classification: "transient" } });
+      expect(operation).not.toHaveBeenCalled();
+    }
+  });
+
+  it("rethrows any other failure to connect unchanged: a wrong password is a fault, not a busy database", async () => {
+    const failure = pgError({ code: "28P01", message: "password authentication failed" });
+    const connect = vi.fn(async () => { throw failure; });
+    const repository = new PgDropshipListingSettingWritesRepository({ connect } as unknown as Pool);
+
+    await expect(repository.execute(INPUT, async () => "never")).rejects.toBe(failure);
   });
 
   it("passes a DropshipError and a plain error through unchanged", async () => {
@@ -689,5 +723,129 @@ describe("PgDropshipListingSettingWritesRepository.executeForSystem", () => {
     await expect(missing.repository.executeForSystem(SYSTEM_INPUT, async () => undefined))
       .rejects.toMatchObject({ code: "DROPSHIP_STORE_CONNECTION_REQUIRED" });
     expect(missing.client.sql.at(-1)).toBe("ROLLBACK");
+  });
+});
+
+describe("the replay probe, findRequestKeyUse (plan PR 9, section 4.6)", () => {
+  const probeIndex = (client: ScriptedClient) => client.sql.findIndex((sql) => sql.startsWith("SELECT 'product' AS source"));
+  const row = (fields: Record<string, unknown>) => ({
+    source: "size", id: 31, store_connection_id: STORE, target_id: 101, request_hash: HASH, request_id: null, operation: null, ...fields,
+  });
+
+  it("is one statement on the transaction's client, every branch the vendor's, with the key and its four child prefixes", async () => {
+    const { client, repository } = setup();
+
+    const use = await repository.execute(INPUT, (tx) => tx.findRequestKeyUse());
+
+    expect(use).toEqual({ productRevision: null, categoryRevision: null, ledger: null, children: [] });
+    const statements = client.sql.filter((sql) => sql.startsWith("SELECT 'product' AS source"));
+    expect(statements).toHaveLength(1);
+    const index = probeIndex(client);
+    expect(client.params[index]).toEqual([VENDOR, KEY,
+      listingSettingChildKeyPrefix(KEY, "size"), listingSettingChildKeyPrefix(KEY, "policy"),
+      listingSettingChildKeyPrefix(KEY, "shelf"), listingSettingChildKeyPrefix(KEY, "content")]);
+    const sql = client.sql[index];
+    const branches = sql.split(" UNION ALL ");
+    expect(branches).toHaveLength(7);
+    for (const branch of branches) expect(branch).toMatch(/WHERE [rq]\.vendor_id = \$1 AND /);
+    // The parent tables by the key itself, the child tables by prefix, compared with left(), never LIKE.
+    expect(branches.slice(0, 3).every((branch) => / [rq]\.idempotency_key = \$2$/.test(branch))).toBe(true);
+    expect(branches.slice(3).map((branch) => /left\(r\.idempotency_key, length\((\$\d)::text\)\) = \1::text$/.exec(branch)?.[1]))
+      .toEqual(["$3", "$4", "$5", "$6"]);
+    expect(sql).not.toMatch(/\b(LIKE|FOR UPDATE|FOR SHARE|LOCK TABLE|pg_advisory)/i);
+    for (const table of ["dropship_product_listing_setting_revisions", "dropship_category_listing_setting_revisions",
+      "dropship_product_listing_setting_requests", "dropship_listing_price_revisions", "dropship_ebay_listing_policy_override_revisions",
+      "dropship_ebay_store_category_assignment_revisions", "dropship_listing_content_revisions"]) {
+      expect(sql).toContain(`FROM dropship.${table} `);
+    }
+    // Between the owner rows and COMMIT, the probe is the only statement.
+    expect(client.afterOwner()).toEqual([sql, "COMMIT"]);
+  });
+
+  it("runs before lockCatalog without taking its place: the catalog can still be locked after it", async () => {
+    const { client, repository } = setup();
+
+    await repository.execute(INPUT, async (tx) => {
+      await tx.findRequestKeyUse();
+      await tx.lockCatalog({ productIds: [7], productVariantIds: [101] });
+    });
+
+    const after = client.afterOwner();
+    expect(after[0]).toMatch(/^SELECT 'product' AS source/);
+    expect(after[1]).toMatch(/^LOCK TABLE/);
+  });
+
+  it("parses every source, bigint ids as strings included, and lists children by kind, size and revision", async () => {
+    const { client, repository } = setup();
+    client.probeRows = [
+      row({ source: "content", id: 90, target_id: 102 }),
+      row({ source: "size", id: 41, target_id: 102 }),
+      row({ source: "size", id: 40, target_id: 101 }),
+      row({ source: "policy", id: 70, target_id: 101 }),
+      row({ source: "shelf", id: 80, target_id: 101 }),
+      row({ source: "product", id: "12", target_id: 7, request_id: null }),
+      row({ source: "category", id: 13, target_id: 3 }),
+      row({ source: "ledger", id: "9007199254740991", target_id: null, operation: "category_settings_clear" }),
+    ];
+
+    const use = await repository.execute(INPUT, (tx) => tx.findRequestKeyUse());
+
+    expect(use).toEqual({
+      productRevision: { revisionId: 12, productId: 7, storeConnectionId: STORE, requestHash: HASH, requestId: null },
+      categoryRevision: { revisionId: 13, categoryId: 3, storeConnectionId: STORE, requestHash: HASH },
+      ledger: { requestId: 9_007_199_254_740_991, operation: "category_settings_clear", storeConnectionId: STORE, requestHash: HASH },
+      children: [
+        { kind: "size", revisionId: 40, productVariantId: 101, storeConnectionId: STORE, requestHash: HASH },
+        { kind: "size", revisionId: 41, productVariantId: 102, storeConnectionId: STORE, requestHash: HASH },
+        { kind: "policy", revisionId: 70, productVariantId: 101, storeConnectionId: STORE, requestHash: HASH },
+        { kind: "shelf", revisionId: 80, productVariantId: 101, storeConnectionId: STORE, requestHash: HASH },
+        { kind: "content", revisionId: 90, productVariantId: 102, storeConnectionId: STORE, requestHash: HASH },
+      ],
+    });
+    expect(client.sql.at(-1)).toBe("COMMIT");
+  });
+
+  it("keeps a product revision's ledger id", async () => {
+    const { client, repository } = setup();
+    client.probeRows = [row({ source: "product", id: 12, target_id: 7, request_id: "55" })];
+    const use = await repository.execute(INPUT, (tx) => tx.findRequestKeyUse());
+    expect(use.productRevision).toMatchObject({ requestId: 55 });
+  });
+
+  it.each([
+    ["an unknown source", row({ source: "listing" }), "source"],
+    ["a zero id", row({ id: 0 }), "id"],
+    ["a fractional id", row({ id: 1.5 }), "id"],
+    ["an id that is not a number", row({ id: "12a" }), "id"],
+    ["a bigint past the safe integers", row({ id: "9007199254740993" }), "id"],
+    ["a missing store", row({ store_connection_id: null }), "store_connection_id"],
+    ["a size with no id", row({ target_id: null }), "target_id"],
+    ["a hash that is not 64 hex characters", row({ request_hash: "A".repeat(64) }), "request_hash"],
+    ["a ledger operation the ledger never holds", row({ source: "ledger", target_id: null, operation: "price_change_apply" }), "operation"],
+    ["a product revision with a bad ledger id", row({ source: "product", target_id: 7, request_id: "0" }), "request_id"],
+  ])("refuses %s as a broken contract, and rolls back", async (_label, bad, column) => {
+    const { client, repository } = setup();
+    client.probeRows = [bad];
+
+    const error = await expectInvariant(repository.execute(INPUT, (tx) => tx.findRequestKeyUse()));
+
+    expect(error.context).toMatchObject({ column });
+    expect(client.sql.at(-1)).toBe("ROLLBACK");
+  });
+
+  it("refuses a second product revision, category revision or ledger row under one key", async () => {
+    for (const source of ["product", "category", "ledger"]) {
+      const { client, repository } = setup();
+      const one = row({ source, target_id: source === "ledger" ? null : 7, operation: source === "ledger" ? "product_settings_bulk" : null });
+      client.probeRows = [one, { ...one, id: 32 }];
+      await expectInvariant(repository.execute(INPUT, (tx) => tx.findRequestKeyUse()));
+    }
+  });
+
+  it("refuses to run after the transaction ended", async () => {
+    const { repository } = setup();
+    let kept: ListingSettingWriteTransaction | undefined;
+    await repository.execute(INPUT, async (tx) => { kept = tx; });
+    await expectInvariant(kept!.findRequestKeyUse());
   });
 });

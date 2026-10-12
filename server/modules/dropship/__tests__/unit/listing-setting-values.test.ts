@@ -24,11 +24,13 @@ import { MAX_EBAY_STORE_SHELVES } from "../../domain/ebay-listing-setup-config";
 import {
   EMPTY_CATEGORY_LISTING_SETTING_VALUES,
   EMPTY_PRODUCT_LISTING_SETTING_VALUES,
+  LISTING_SETTING_CHILD_KINDS,
   applyListingSettingPatch,
   changedListingSettingFields,
   isListingSettingChildKey,
   listingSettingBulkAuditValues,
   listingSettingChildKey,
+  listingSettingChildKeyPrefix,
   listingSettingRequestHash,
 } from "../../domain/listing-setting-values";
 
@@ -348,6 +350,39 @@ describe("listing setting child keys", () => {
     for (const invalid of [0, -5, 5.5, Number.NaN]) {
       expect(isListingSettingChildKey(PARENT_KEY, variantFive, "content", invalid)).toBe(false);
     }
+  });
+});
+
+describe("listing setting child key prefixes (plan PR 9, P16)", () => {
+  it("names the policy and shelf children the replay probe looks for, and keeps ebay_rules the longest kind", () => {
+    expect(LISTING_SETTING_CHILD_KINDS).toEqual(["product", "size", "content", "ebay_rules", "policy", "shelf"]);
+    const longest = Math.max(...LISTING_SETTING_CHILD_KINDS.map((kind) => kind.length));
+    expect(longest).toBe("ebay_rules".length);
+    for (const kind of LISTING_SETTING_CHILD_KINDS) {
+      const key = listingSettingChildKey("p".repeat(200), kind, 2_147_483_647);
+      expect(key.length).toBeLessThanOrEqual(89);
+      expect(LISTING_SETTING_KEY_PATTERN.test(key)).toBe(true);
+    }
+  });
+
+  it("is the start of every child key of its parent and kind, and of no other", () => {
+    for (const kind of LISTING_SETTING_CHILD_KINDS) {
+      const prefix = listingSettingChildKeyPrefix(PARENT_KEY, kind);
+      expect(prefix).toBe(`ls:${createHash("sha256").update(PARENT_KEY).digest("hex")}:${kind}:`);
+      expect(listingSettingChildKey(PARENT_KEY, kind, 101).startsWith(prefix)).toBe(true);
+      for (const other of LISTING_SETTING_CHILD_KINDS.filter((candidate) => candidate !== kind)) {
+        expect(listingSettingChildKey(PARENT_KEY, other, 101).startsWith(prefix)).toBe(false);
+      }
+      expect(listingSettingChildKey(`${PARENT_KEY}x`, kind, 101).startsWith(prefix)).toBe(false);
+      // A child key is never a prefix of another kind's: the kind is followed by ":".
+      expect(isListingSettingChildKey(PARENT_KEY, `${prefix}7`, kind, 7)).toBe(true);
+    }
+  });
+
+  it("refuses a malformed parent key or an unknown kind as a fault", () => {
+    expect(() => listingSettingChildKeyPrefix("short", "size")).toThrow(expect.objectContaining({ code: "DROPSHIP_LISTING_SETTINGS_INVARIANT_FAILED" }));
+    expect(() => listingSettingChildKeyPrefix(PARENT_KEY, "price" as never))
+      .toThrow(expect.objectContaining({ code: "DROPSHIP_LISTING_SETTINGS_INVARIANT_FAILED", context: expect.objectContaining({ kind: "price" }) }));
   });
 });
 

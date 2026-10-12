@@ -12,6 +12,7 @@ import {
   type ListingSettingsAttentionCode, type ListingSettingsFixCode,
   type ListingSettingsPolicyKind, type ListingSettingsPriceIssue, type ListingSettingsPriceLimit,
   type ListingSettingsPriceRule, type ListingSettingsPriceSource, type ListingSettingsPricesInput,
+  type ListingSettingsProductIdsInput, type ListingSettingsProductIdsResponse,
   type ListingSettingsProductRow, type ListingSettingsProductSettings, type ListingSettingsProductsInput,
   type ListingSettingsRailState, type ListingSettingsSettingKey, type ListingSettingsSizePrice, type ListingSettingsSummary,
   type ListingSettingsValueSource,
@@ -117,6 +118,15 @@ export interface ListingSettingsSizeFacts {
 export interface ListingSettingsProductFacts {
   row: Omit<ListingSettingsProductRow, "matchedSize">;
   sizes: readonly ListingSettingsSizeFacts[];
+  /**
+   * The product's Card Shellz category (catalog.product_categories.id), null
+   * for none: what the `categoryId` filters match. This and
+   * `settingsRevisionId` sit beside `row`, never inside it: the answers spread
+   * `row` into strict schemas, which would refuse a field they do not name.
+   */
+  categoryId: number | null;
+  /** The revision of the product's own settings in the load's snapshot; null when it has none. A bulk write sends it back. */
+  settingsRevisionId: number | null;
 }
 
 export interface ListingSettingsFacts {
@@ -496,6 +506,7 @@ function productFacts(sizes: readonly ListingSettingsSizeFacts[], inputs: Listin
     byProduct.set(size.price.productId, list);
   }
   const categories = new Map(inputs.candidates.map((candidate) => [candidate.productId, candidate.category]));
+  const categoryIds = new Map(inputs.candidates.map((candidate) => [candidate.productId, candidate.categoryId]));
   return [...byProduct.entries()].map(([productId, productSizes]) => {
     const prices = productSizes.map((size) => size.price.priceCents).filter((cents): cents is number => cents !== null);
     const sizesTotal = inputs.sizesTotalByProductId.get(productId);
@@ -519,6 +530,8 @@ function productFacts(sizes: readonly ListingSettingsSizeFacts[], inputs: Listin
         fixes: LISTING_SETTINGS_FIX_CODES.filter((code) => fixes.has(code)),
       },
       sizes: productSizes,
+      categoryId: categoryIds.get(productId) ?? null,
+      settingsRevisionId: inputs.layers.products.get(productId)?.revisionId ?? null,
     };
   }).sort((a, b) => NAME_ORDER.compare(a.row.productName, b.row.productName) || a.row.productId - b.row.productId);
 }
@@ -574,9 +587,12 @@ function compareCandidates(a: DropshipListingCatalogCandidate, b: DropshipListin
 export interface ListingSettingsPage<T> { total: number; rows: T[] }
 
 export function selectListingSettingsPrices(facts: ListingSettingsFacts,
-  input: Pick<ListingSettingsPricesInput, "search" | "show" | "page">): ListingSettingsPage<ListingSettingsSizePrice> {
+  input: Pick<ListingSettingsPricesInput, "search" | "show" | "page" | "categoryId">): ListingSettingsPage<ListingSettingsSizePrice> {
   const search = normalizeSearch(input.search);
+  const inCategory = input.categoryId === undefined ? null
+    : new Set(facts.products.filter((product) => product.categoryId === input.categoryId).map((product) => product.row.productId));
   const matching = facts.sizes.map((size) => size.price).filter((price) => {
+    if (inCategory && !inCategory.has(price.productId)) return false;
     if (search && !sizeMatches(price, search) && !textMatches(price.productName, search)) return false;
     switch (input.show) {
       case "all": return true;
@@ -591,24 +607,43 @@ export function selectListingSettingsPrices(facts: ListingSettingsFacts,
 }
 
 export function selectListingSettingsProducts(facts: ListingSettingsFacts,
-  input: Pick<ListingSettingsProductsInput, "search" | "show" | "page">): ListingSettingsPage<ListingSettingsProductRow> {
+  input: Pick<ListingSettingsProductsInput, "search" | "show" | "page" | "categoryId">): ListingSettingsPage<ListingSettingsProductRow> {
   const search = normalizeSearch(input.search);
   const matching: ListingSettingsProductRow[] = [];
   for (const product of facts.products) {
+    if (input.categoryId !== undefined && product.categoryId !== input.categoryId) continue;
     if (!productShown(product, input.show)) continue;
-    if (!search) {
-      matching.push({ ...product.row, matchedSize: null });
-      continue;
-    }
-    if (textMatches(product.row.productName, search)) {
-      matching.push({ ...product.row, matchedSize: null });
-      continue;
-    }
-    const size = product.sizes.find((row) => sizeMatches(row.price, search));
-    if (size) matching.push({ ...product.row,
-      matchedSize: { productVariantId: size.price.productVariantId, sizeName: size.price.sizeName, sku: size.price.sku } });
+    const match = productMatch(product, search);
+    if (match) matching.push({ ...product.row, matchedSize: match.matchedSize });
   }
   return pageOf(matching, input.page);
+}
+
+/**
+ * Every product the Products tab would list for these filters, on every
+ * page, with its own settings' revision (Listing settings design 8.4
+ * `idsOnly`): what "Select all N" and one product's editor send back with a
+ * write. `productId` narrows to that one product.
+ */
+export function selectListingSettingsProductIds(facts: ListingSettingsFacts,
+  input: Pick<ListingSettingsProductIdsInput, "search" | "show" | "categoryId" | "productId">): ListingSettingsProductIdsResponse {
+  const search = normalizeSearch(input.search);
+  const rows = facts.products
+    .filter((product) => (input.productId === undefined || product.row.productId === input.productId)
+      && (input.categoryId === undefined || product.categoryId === input.categoryId)
+      && productShown(product, input.show) && productMatch(product, search) !== null)
+    .map((product) => ({ productId: product.row.productId, revisionId: product.settingsRevisionId }));
+  return { total: rows.length, rows };
+}
+
+/**
+ * Whether a search matches the product: its name (no matched size), else the
+ * first size whose name or SKU matches. An empty search matches every product.
+ */
+function productMatch(product: ListingSettingsProductFacts, search: string): { matchedSize: ListingSettingsProductRow["matchedSize"] } | null {
+  if (!search || textMatches(product.row.productName, search)) return { matchedSize: null };
+  const size = product.sizes.find((row) => sizeMatches(row.price, search));
+  return size ? { matchedSize: { productVariantId: size.price.productVariantId, sizeName: size.price.sizeName, sku: size.price.sku } } : null;
 }
 
 function productShown(product: ListingSettingsProductFacts, show: ListingSettingsProductsInput["show"]): boolean {
