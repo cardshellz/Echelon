@@ -2773,7 +2773,7 @@ export default function PurchaseOrderDetail() {
               Receive
             </Button>
           )}
-          {poId !== null && <PoQuantityAmendment purchaseOrderId={poId} status={po.status} />}
+          {poId !== null && <PoQuantityAmendment key={poId} purchaseOrderId={poId} status={po.status} />}
           {canClosePo && (
             <Button onClick={() => closeMutation.mutate()} disabled={closeMutation.isPending} className="flex-1 sm:flex-none min-h-[44px]">
               <Archive className="h-4 w-4 mr-2" />
