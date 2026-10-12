@@ -45,6 +45,7 @@ import {
   createOrderEditTransport,
   formatOrderEditMoney,
   orderEditCanCommit,
+  orderEditCanRetryOrderLoad,
   orderEditOperationFromSearch,
   orderEditStatusCopy,
   safeOrderEditPaymentUrl,
@@ -1008,6 +1009,9 @@ export default function OrderEdits() {
   });
   const detail = useQuery({
     queryKey: [ORDER_EDITS_API, user?.id, "order", selectedId, orderId],
+    // This screen explains eligibility conflicts and offers its own retry for
+    // read failures. They must not also appear as an unhandled page-load error.
+    meta: { handlesLoadError: true },
     // Returning from a verified cancellation reuses the existing draft. Quote
     // and commit each revalidate its revision against Shopify independently.
     staleTime: Infinity,
@@ -1441,7 +1445,7 @@ export default function OrderEdits() {
             <p role="status">Verifying order eligibility…</p>
           )}
           <ErrorMessage text={detail.error ? message(detail.error) : null} />
-          {detail.isError && (
+          {detail.isError && orderEditCanRetryOrderLoad(detail.error) && (
             <Button variant="outline" onClick={() => void detail.refetch()}>
               Retry order
             </Button>
