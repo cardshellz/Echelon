@@ -5,13 +5,23 @@ import { ebayListingIssueSchema } from "@shared/types/ebay-listing-issue";
 describe("shared eBay issue actions", () => {
   it.each([
     ["EBAY_SYNC_RESPONSE_EVIDENCE_REQUIRED","check_recovery",false],
+    ["EBAY_PUBLICATION_RESPONSE_UNCERTAIN","check_recovery",false],
+    ["EBAY_PUBLICATION_PRIOR_WORK_REQUIRED","check_status",false],
+    ["EBAY_PUBLICATION_RETRY_NOT_ALLOWED","check_status",false],
+    ["EBAY_PUBLICATION_RETRY_REVIEW_CHANGED","check_recovery",false],
     ["EBAY_SYNC_MAPPING_INVALID","review_mapping",false],
     ["EBAY_SYNC_RETAINED_IDENTITY_CHANGED","review_mapping",false],
     ["EBAY_LISTING_REVIEW_CHANGED","review_mapping",false],
     ["EBAY_LISTING_RESTORE_FAILED","review_mapping",false],
     ["EBAY_SYNC_PROVIDER_RESPONSE_INVALID","review_mapping",false],
+    ["EBAY_REGISTRATION_UNPUBLISHED_GROUP_AMBIGUOUS","review_mapping",false],
+    ["EBAY_REGISTRATION_UNPUBLISHED_GROUP_CHANGED","review_mapping",false],
+    ["EBAY_REGISTRATION_UNPUBLISHED_GROUP_MEMBERSHIP_MISMATCH","review_mapping",false],
+    ["EBAY_PUBLICATION_TARGET_UNVERIFIED","review_mapping",false],
+    ["EBAY_PUBLICATION_READBACK_PENDING","check_status",false],
     ["EBAY_CATALOG_PHOTO_REQUIRED","edit_photos",false],
     ["EBAY_SYNC_AUTH_REQUIRED","reconnect",false],
+    ["EBAY_SYNC_ACCOUNT_CHANGED","reconnect",false],
     ["EBAY_AUTH_RESPONSE_INVALID","reconnect",false],
     ["EBAY_QUANTITY_DAILY_LIMIT","check_recovery",false],
     ["PUBLICATION_GLOBAL_DISABLED","edit_listing",false],
@@ -45,12 +55,25 @@ describe("shared eBay issue actions", () => {
     expect(recovering).toMatchObject({ retryable: false,action: { kind: "check_recovery" } });
     expect(attention).toMatchObject({ retryable: true,action: { kind: "retry_sync" } });
   });
+  it.each(["recovering", "needs_attention"])("accepted publication waiting in %s never offers another publication", state => {
+    const issue = resolveEbayListingIssue({ code: "EBAY_PUBLICATION_READBACK_PENDING", state });
+    expect(issue).toMatchObject({ title: "Checking published listing and pictures", retryable: false, action: { kind: "check_status", label: "View publishing status" } });
+    expect(issue.nextStep).toContain("without publishing a second time");
+  });
   it("uses only existing local destinations and never accepts a provider redirect", () => {
     expect(resolveEbayListingIssue({ code: "EBAY_CATALOG_PHOTO_REQUIRED",productId: 20 }).action.href).toBe("/products/20?tab=images");
     expect(resolveEbayListingIssue({ code: "PUBLICATION_GLOBAL_DISABLED" }).action.href).toBe("/channels/inventory");
     const valid = resolveEbayListingIssue({ code: "UNRECOGNIZED_CODE" });
     for (const href of ["//evil.test","https://evil.test","javascript:alert(1)"])
       expect(ebayListingIssueSchema.safeParse({ ...valid,action: { ...valid.action,href } }).success).toBe(false);
+  });
+  it("keeps publication topology changes distinct from unknown quantity outcomes", () => {
+    const changed = resolveEbayListingIssue({ code: "EBAY_REGISTRATION_UNPUBLISHED_GROUP_CHANGED", productId: 232 });
+    expect(changed.action).toEqual({ kind: "review_mapping", label: "Review publication" });
+    expect(changed.nextStep).toContain("every SKU");
+    const unknown = resolveEbayListingIssue({ code: "EBAY_SYNC_RESPONSE_EVIDENCE_REQUIRED", productId: 232 });
+    expect(unknown.action.kind).toBe("check_recovery");
+    expect(resolveEbayListingIssue({ code: "EBAY_SYNC_ACCOUNT_CHANGED" }).action.href).toBe("/channels/ebay#connection");
   });
   it("redacts credentials and bounded provider prose without interpreting it as instructions", () => {
     const value = safeListingDiagnostic("Bearer secret access_token=token https://user:password@example.test/path\n" + "x".repeat(2000));

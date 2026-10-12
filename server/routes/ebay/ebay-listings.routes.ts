@@ -24,7 +24,7 @@ import { ebayListingMappingService } from '../../modules/channels/ebay-listing-m
 import { readEbayPushRecoveryIdentity } from '../../modules/channels/ebay-listing-push';
 import { ebayListingSyncJobSchema } from '@shared/types/ebay-listing-sync';
 import { queueVariantAvailabilityRepair } from "../../modules/channels/variant-availability-sync.service";
-import { selectEbayFeedListingState, type EbayFeedVariantListingState } from "../../modules/channels/ebay-listing-feed-status";
+import { resolveEbayFeedListingState, type EbayFeedVariantListingState } from "../../modules/channels/ebay-listing-feed-status";
 import {
   isValidEbayFixedPriceCents,
   normalizeCents,
@@ -107,7 +107,8 @@ const ebayListingRecovery = new EbayListingRecoveryService(ebayListingSyncServic
               pv.ebay_fulfillment_policy_override AS variant_fulfillment_override,
               pv.ebay_return_policy_override AS variant_return_override,
               pv.ebay_payment_policy_override AS variant_payment_override,
-              cl.id AS listing_id, cl.sync_status AS listing_status, cl.sync_error AS listing_sync_error
+              cl.id AS listing_id, cl.external_product_id AS external_listing_id,
+              cl.sync_status AS listing_status, cl.sync_error AS listing_sync_error
             FROM product_variants pv
             LEFT JOIN channels.channel_variant_overrides cvo ON cvo.product_variant_id = pv.id AND cvo.channel_id = $2
             LEFT JOIN channels.channel_listings cl ON cl.product_variant_id = pv.id AND cl.channel_id = $2
@@ -129,7 +130,8 @@ const ebayListingRecovery = new EbayListingRecoveryService(ebayListingSyncServic
           for (const v of varResult.rows) {
             const pid = v.product_id;
             if (!listingStatesByProduct.has(pid)) listingStatesByProduct.set(pid, []);
-            listingStatesByProduct.get(pid)!.push({ variantId: v.id, listingId: v.listing_id,
+            listingStatesByProduct.get(pid)!.push({ variantId: v.id, listingRecordId: v.listing_id,
+              externalListingId: v.external_listing_id?.trim() || null,
               syncStatus: v.listing_status, syncError: v.listing_sync_error });
             if (!variantsByProduct.has(pid)) variantsByProduct.set(pid, []);
             variantsByProduct.get(pid)!.push({
@@ -245,9 +247,9 @@ const ebayListingRecovery = new EbayListingRecoveryService(ebayListingSyncServic
             };
           });
           const includedVariants = variants.filter((v: any) => v.effectivelyListed);
-          const listingState = selectEbayFeedListingState(listingStatesByProduct.get(row.id) ?? [], includedVariants.map((variant: { id: number }) => variant.id));
-          const isListed = listingState?.syncStatus === "synced";
-          const isEnded = listingState?.syncStatus === "ended" || listingState?.syncStatus === "deleted";
+          const listingState = resolveEbayFeedListingState(listingStatesByProduct.get(row.id) ?? [], includedVariants.map((variant: { id: number }) => variant.id));
+          const isListed = listingState.isListed;
+          const isEnded = listingState.isEnded;
           const isError = listingState?.syncStatus === "error";
           const listingSyncError = listingState?.syncError || null;
           const includedVariantCount = includedVariants.length;
@@ -294,6 +296,7 @@ const ebayListingRecovery = new EbayListingRecoveryService(ebayListingSyncServic
             else status = "ready"; // Can be re-listed
           }
           else if (isListed) status = "listed";
+          else if (listingState.needsPublicationCheck) status = "publication_incomplete";
           else if (isError) status = "error";
           else if (missingAspects.length > 0) status = "missing_specifics";
           else status = "ready";
@@ -356,7 +359,7 @@ const ebayListingRecovery = new EbayListingRecoveryService(ebayListingSyncServic
       res.status(400).json({ error: "Invalid eBay listing request", details: parsed.error.flatten() });
       return;
     }
-    try { res.json(await ebayListingPushService.push(parsed.data)); }
+    try { res.json(await ebayListingPushService.push(parsed.data, { actor: String(req.session.user!.id) })); }
     catch (error) { res.status(listingFailureStatus(error)).json(listingFailure(error)); }
   });
 
@@ -375,6 +378,7 @@ const ebayListingRecovery = new EbayListingRecoveryService(ebayListingSyncServic
     const send = (event: unknown) => { if (!cancelled) res.write(`data: ${JSON.stringify(event)}\n\n`); };
     try {
       const result = await ebayListingPushService.push(parsed.data, {
+        actor: String(req.session.user!.id),
         cancelled: () => cancelled,
         onRateLimit: seconds => send({ type: "rate_limited", waitSeconds: seconds }),
         onProduct: (product, current, total) => send({ ...product, type: "progress", product: product.productName,

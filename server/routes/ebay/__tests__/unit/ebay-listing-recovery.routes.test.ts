@@ -15,7 +15,7 @@ describe("eBay operator recovery HTTP permission boundary", () => {
     hasPermission.mockReset().mockResolvedValue(true);
     vi.spyOn(console,"error").mockImplementation(() => undefined);
     session = { user: { id: "operator" } };
-    service = { inspect: vi.fn(),preview: vi.fn(async () => ({ previewHash: "a".repeat(64),canResume: true,blockReason: null,attempts: [],jobId: id,productId: 20 })),resume: vi.fn(),
+    service = { inspect: vi.fn(),preview: vi.fn(async () => ({ previewHash: "a".repeat(64),canResume: true,blockReason: null,attempts: [],publicationRetry: null,jobId: id,productId: 20 })),resume: vi.fn(),
       inspectProduct: vi.fn(),previewProduct: vi.fn(async () => ({ previewHash: "a".repeat(64),canResume: true,blockReason: null,attempts: [],jobId: null,productId: 20 })),resumeProduct: vi.fn() };
     const app = express(); app.use(express.json());
     app.use((req,_res,next) => { (req as unknown as { session: typeof session }).session = session; next(); });

@@ -24,7 +24,7 @@ const review: EbayListingMappingReview = {
 };
 const result: EbayListingMappingResult = {
   repairStatus: "queued", replayed: false, receipt: { commandKey, productId: 20, reviewHash: command.reviewHash, appliedAt: now },
-  job: { id: commandKey, productId: 20, kind: "sync", state: "queued", code: null, message: null, nextAttemptAt: now, updatedAt: now },
+  job: { id: commandKey, productId: 20, kind: "sync", operation: "sync", state: "queued", code: null, message: null, nextAttemptAt: now, updatedAt: now },
 };
 
 describe("eBay mapping review and repair HTTP boundary", () => {
