@@ -28,4 +28,7 @@ export interface EbayListingInspection {
   readonly publicationIssue: EbayListingInspectionIssue | null;
   readonly groupKey: string | null;
   readonly groupSkus: readonly string[] | null;
+  /** Existing unpublished offers with fully observed, exact group membership.
+   * This is a publication target, never evidence that publication succeeded. */
+  readonly unpublishedTarget?: { readonly groupKey: string | null; readonly skus: readonly string[] } | null;
 }

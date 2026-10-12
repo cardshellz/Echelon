@@ -1,6 +1,8 @@
 import { z } from "zod";
 import { resolveEbayListingIssue } from "@shared/ebay-listing-issue";
 import type { EbayListingIssue } from "@shared/types/ebay-listing-issue";
+import { ebayListingPushCommandSchema } from "@shared/types/ebay-listing-push";
+import type { EbayListingSyncJob } from "@shared/types/ebay-listing-sync";
 import type { EbayListingRebuildPreview } from "./listing-connectors/ebay-listing.connector";
 
 const rebuildPreviewSchema: z.ZodType<EbayListingRebuildPreview> = z.object({
@@ -14,12 +16,18 @@ const rebuildPreviewSchema: z.ZodType<EbayListingRebuildPreview> = z.object({
 }).strict();
 export const ebayListingPushRequestSchema = z.object({
   productIds: z.array(z.number().int().positive().max(2_147_483_647)).min(1).max(500),
+  commands: z.array(ebayListingPushCommandSchema).min(1).max(500).optional(),
   updateExisting: z.object({ mode: z.literal("execute"), preview: rebuildPreviewSchema }).strict().optional(),
   rebuild: z.discriminatedUnion("mode", [z.object({ mode: z.literal("preview") }).strict(),
     z.object({ mode: z.literal("execute"), preview: rebuildPreviewSchema }).strict()]).optional(),
 }).strict().superRefine((value, context) => {
   if (new Set(value.productIds).size !== value.productIds.length)
     context.addIssue({ code: z.ZodIssueCode.custom, path: ["productIds"], message: "Choose each product only once." });
+  if (value.commands && (value.rebuild || value.updateExisting || value.commands.length !== value.productIds.length
+    || new Set(value.commands.map(command => command.productId)).size !== value.commands.length
+    || new Set(value.commands.map(command => command.commandKey)).size !== value.commands.length
+    || value.commands.some(command => !value.productIds.includes(command.productId))))
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["commands"], message: "Provide one distinct publication command per selected product." });
   if ((value.rebuild || value.updateExisting) && value.productIds.length !== 1)
     context.addIssue({ code: z.ZodIssueCode.custom, path: ["productIds"], message: "A reviewed listing change must target exactly one product." });
   if (value.rebuild && value.updateExisting)
@@ -31,7 +39,8 @@ export const ebayListingPushRequestSchema = z.object({
 export type EbayListingPushRequest = z.infer<typeof ebayListingPushRequestSchema>;
 export interface EbayListingPushResult {
   productId: number; productName: string; variantCount: number; success: boolean;
-  status: "success" | "error" | "skipped";
+  status: "success" | "queued" | "error" | "skipped";
+  job?: EbayListingSyncJob;
   listingId?: string; error?: string; code?: string; issue?: EbayListingIssue;
   variantDetails?: Array<{ sku: string; success: boolean; error?: string }>;
   rebuildPreview?: EbayListingRebuildPreview;
@@ -40,12 +49,13 @@ export class EbayListingPushSkipped extends Error {
   readonly code = "EBAY_LISTING_PREFLIGHT_FAILED";
 }
 export interface EbayListingPushProductOwner {
-  execute(productId: number, command: EbayListingPushRequest, onRateLimit?: (seconds: number) => void): Promise<EbayListingPushResult>;
+  execute(productId: number, command: EbayListingPushRequest, onRateLimit?: (seconds: number) => void, actor?: string): Promise<EbayListingPushResult>;
 }
 export interface EbayListingPushProgress {
   onProduct?: (result: EbayListingPushResult, current: number, total: number) => void;
   onRateLimit?: (seconds: number) => void;
   cancelled?: () => boolean;
+  actor?: string;
 }
 
 /** Both HTTP and SSE use this batch boundary: one bad product cannot discard the
@@ -61,7 +71,7 @@ export class EbayListingPushService {
       // a product's local projection while its provider work is finishing.
       if (progress.cancelled?.()) break;
       let result: EbayListingPushResult;
-      try { result = await this.owner.execute(productId, parsed, progress.onRateLimit); }
+      try { result = await this.owner.execute(productId, parsed, progress.onRateLimit, progress.actor); }
       catch (error) { result = ebayListingPushFailure(productId, error); }
       results.push(result);
       progress.onProduct?.(result, results.length, parsed.productIds.length);
@@ -70,6 +80,7 @@ export class EbayListingPushService {
       succeeded: results.filter(result => result.status === "success").length,
       failed: results.filter(result => result.status === "error").length,
       skipped: results.filter(result => result.status === "skipped").length,
+      queued: results.filter(result => result.status === "queued").length,
       total: results.length,
     }, cancelled: progress.cancelled?.() ?? false };
   }
@@ -82,6 +93,7 @@ export function ebayListingPushFailure(productId: number, error: unknown, produc
   // Database/transport exceptions can contain query parameters or credentials.
   // Only classified application/provider diagnostics belong in the public result.
   const issue = resolveEbayListingIssue({ code, productId,
+    ...(error instanceof Error && "jobId" in error && z.string().uuid().safeParse(error.jobId).success ? { jobId: String(error.jobId) } : {}),
     message: code !== "EBAY_LISTING_OPERATION_FAILED" && error instanceof Error ? error.message : undefined });
   return { productId, productName: productName ?? `Product ${productId}`, variantCount: 0, success: false,
     status: error instanceof EbayListingPushSkipped ? "skipped" : "error", error: issue.message, code, issue };

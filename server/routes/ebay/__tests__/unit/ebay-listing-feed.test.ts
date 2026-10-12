@@ -28,7 +28,7 @@ describe("eBay listing feed current content intent", () => {
     fixture.productExcluded = false;
     fixture.variants = [1, 2, 3].map(id => ({ id, product_id: 20, sku: `SKU-${id}`, name: `Variant ${id}`, price_cents: 1000,
       ebay_listing_excluded: id === 3, variant_override_is_listed: id === 3 ? 0 : 1,
-      listing_id: id, listing_status: id === 3 ? "error" : "synced", listing_sync_error: id === 3 ? "Old excluded member failed" : null }));
+      listing_id: id, external_listing_id: "listing-20", listing_status: id === 3 ? "error" : "synced", listing_sync_error: id === 3 ? "Old excluded member failed" : null }));
     fixture.query.mockReset().mockImplementation(async (sql: string) => {
       if (sql.includes("FROM products p")) return { rows: [{ id: 20, name: "Product", sku: "PRODUCT", product_type: "Toploaders", product_type_name: "Toploaders",
         is_active: true, ebay_browse_category_id: "183454", variant_count: "3", image_count: "1", type_listing_enabled: true,
@@ -80,5 +80,37 @@ describe("eBay listing feed current content intent", () => {
     fixture.variants[2].listing_status = "synced"; fixture.variants[2].listing_sync_error = null;
     const { feed } = await (await fetch(url)).json();
     expect(feed[0]).toMatchObject({ status: "ready", isListed: false, syncError: null });
+  });
+
+  it("does not present a quantity-synced offer-only row as a published listing", async () => {
+    for (const variant of fixture.variants.slice(0, 2)) variant.external_listing_id = null;
+    const { feed } = await (await fetch(url)).json();
+    expect(feed[0]).toMatchObject({ status: "publication_incomplete", isListed: false });
+    expect(fixture.query.mock.calls.some(([sql]) => sql.includes("cl.external_product_id AS external_listing_id"))).toBe(true);
+  });
+
+  it("requires publication identity for every included member", async () => {
+    fixture.variants[0].external_listing_id = null;
+    const { feed } = await (await fetch(url)).json();
+    expect(feed[0]).toMatchObject({ status: "publication_incomplete", isListed: false });
+  });
+
+  it("routes conflicting saved listing identities to a fresh publication review", async () => {
+    fixture.variants[0].external_listing_id = "another-listing";
+    const { feed } = await (await fetch(url)).json();
+    expect(feed[0]).toMatchObject({ status: "publication_incomplete", isListed: false });
+  });
+
+  it("does not offer an initial push when one member is ended and another has incomplete publication", async () => {
+    fixture.variants[1].listing_status = "ended";
+    fixture.variants[0].external_listing_id = null;
+    const { feed } = await (await fetch(url)).json();
+    expect(feed[0]).toMatchObject({ status: "publication_incomplete", isListed: false });
+  });
+
+  it("keeps a saved pending mapping out of initial publication even when it has a listing ID", async () => {
+    fixture.variants[0].listing_status = "pending";
+    const { feed } = await (await fetch(url)).json();
+    expect(feed[0]).toMatchObject({ status: "publication_incomplete", isListed: false });
   });
 });

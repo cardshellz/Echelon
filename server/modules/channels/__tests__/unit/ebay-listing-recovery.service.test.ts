@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { EbayListingRecoveryService } from "../../ebay-listing-recovery.service";
-import { EbayListingSyncError, storedEbayListingSyncJobSchema } from "../../ebay-listing-sync.domain";
+import { EbayListingSyncError, storedEbayListingSyncJobSchema, publicationRetryReviewHash } from "../../ebay-listing-sync.domain";
 import { ebayProductSyncResultSchema } from "@shared/types/ebay-listing-sync";
 import { syncIdentity } from "../fixtures/ebay-listing-sync.fixture";
 
@@ -11,7 +11,8 @@ function fixture() {
     message: "A saved request needs review.", nextAttemptAt: "2026-10-09T12:00:00.000Z", updatedAt: "2026-10-09T12:00:00.000Z",
     identity: syncIdentity, providerIdentity: { ...syncIdentity, groupKey: "ACTUAL-EBAY-GROUP" }, revision: "1", claimedRevision: null,
     ownerToken: null, attempts: 0, result: null, verificationIntentHash: null, verificationRevision: null });
-  const jobs = { get: vi.fn(async () => job), getByCommand: vi.fn<() => Promise<typeof job | null>>(async () => null), getAdmission: vi.fn(async () => null) };
+  const jobs = { get: vi.fn(async () => job), getByCommand: vi.fn<() => Promise<typeof job | null>>(async () => null), getAdmission: vi.fn(async () => null), enqueue: vi.fn(async () => ({ ...job, state: "queued" as const })),
+    authorizePublicationRetry: vi.fn<(_input: { commandKey: string }) => Promise<{ job: typeof job; replayed: boolean }>>(async () => ({ job: { ...job, state: "queued" }, replayed: false })) };
   const recovery = {
     preview: vi.fn(async () => ({ previewHash: command.previewHash, canResume: false, blockReason: "no_pending_attempts" as const, attempts: [] })),
     resume: vi.fn(async () => ({ attemptIds: ["16323"], replayed: false, providerWriteAttempted: false as const })),
@@ -20,6 +21,59 @@ function fixture() {
   return { job,jobs,recovery,enqueue,service: new EbayListingRecoveryService(jobs,recovery,enqueue) };
 }
 describe("listing recovery application boundary", () => {
+  it("offers an explicit audited workflow retry when no inventory request was recorded", async () => {
+    const f = fixture(); Object.assign(f.job, { operation: "publish", publicationWriteStarted: true, providerIdentity: null,
+      publicationTarget: { ...f.job.identity, groupKey: "RECORDED-GROUP" } });
+    const preview = await f.service.preview(id, 1);
+    expect(preview).toMatchObject({ canResume: true, blockReason: null, attempts: [], publicationRetry: { reviewHash: publicationRetryReviewHash(f.job) } });
+    f.recovery.resume.mockRejectedValueOnce(new EbayListingSyncError("EBAY_RECOVERY_SCOPE_CHANGED", "No pending requests."));
+    const result = await f.service.resume(id, 1, "operator", { ...command, publicationRetryHash: preview.publicationRetry!.reviewHash });
+    expect(result).toMatchObject({ attemptIds: [], publicationRetryAuthorized: true, providerWriteAttempted: false, job: { operation: "publish", state: "queued" } });
+    expect(f.jobs.authorizePublicationRetry).toHaveBeenCalledWith(expect.objectContaining({ jobId: id, expectedRevision: "1", actor: "operator", commandKey: command.idempotencyKey }));
+    expect(f.jobs.enqueue).not.toHaveBeenCalled();
+  });
+  it("will not authorize a started publication without the exact fresh workflow review", async () => {
+    const f = fixture(); Object.assign(f.job, { operation: "publish", publicationWriteStarted: true, providerIdentity: null });
+    await expect(f.service.resume(id, 1, "operator", command)).rejects.toMatchObject({ code: "EBAY_RECOVERY_PREVIEW_CHANGED" });
+    await expect(f.service.resume(id, 1, "operator", { ...command, publicationRetryHash: "f".repeat(64) })).rejects.toMatchObject({ code: "EBAY_RECOVERY_PREVIEW_CHANGED" });
+    expect(f.jobs.authorizePublicationRetry).not.toHaveBeenCalled(); expect(f.recovery.resume).not.toHaveBeenCalled();
+  });
+  it("replays the inventory receipt after a lost channel authorization and retains the same key", async () => {
+    const f = fixture(); Object.assign(f.job, { operation: "publish", publicationWriteStarted: true, providerIdentity: null });
+    const input = { ...command, publicationRetryHash: publicationRetryReviewHash(f.job) };
+    f.jobs.authorizePublicationRetry.mockRejectedValueOnce(new Error("connection lost"));
+    await expect(f.service.resume(id, 1, "operator", input)).rejects.toMatchObject({ code: "EBAY_RECOVERY_FOLLOWUP_PENDING" });
+    f.recovery.resume.mockResolvedValueOnce({ attemptIds: ["16323"], replayed: true, providerWriteAttempted: false });
+    const result = await f.service.resume(id, 1, "operator", input);
+    expect(result).toMatchObject({ attemptIds: ["16323"], replayed: true, publicationRetryAuthorized: true });
+    expect(f.jobs.authorizePublicationRetry.mock.calls[1][0].commandKey).toBe(command.idempotencyKey);
+  });
+  it("retrieves a committed workflow authorization before stale current-state validation", async () => {
+    const f = fixture(); Object.assign(f.job, { operation: "publish", publicationWriteStarted: false, revision: "2" });
+    f.jobs.getByCommand.mockResolvedValueOnce(f.job); f.jobs.authorizePublicationRetry.mockResolvedValueOnce({ job: f.job, replayed: true });
+    const result = await f.service.resume(id, 1, "operator", { ...command, publicationRetryHash: "d".repeat(64) });
+    expect(result).toMatchObject({ publicationRetryAuthorized: true, replayed: true });
+    expect(f.recovery.resume).not.toHaveBeenCalled(); expect(f.recovery.preview).not.toHaveBeenCalled();
+  });
+  it("does not convert changed inventory evidence into an empty workflow recovery", async () => {
+    const f = fixture(); Object.assign(f.job, { operation: "publish", publicationWriteStarted: true });
+    f.recovery.resume.mockRejectedValueOnce(new EbayListingSyncError("EBAY_RECOVERY_SCOPE_CHANGED", "Changed."));
+    f.recovery.preview.mockResolvedValueOnce({ previewHash: "b".repeat(64), canResume: false, blockReason: "no_pending_attempts", attempts: [] });
+    await expect(f.service.resume(id, 1, "operator", { ...command, publicationRetryHash: publicationRetryReviewHash(f.job) })).rejects.toMatchObject({ code: "EBAY_RECOVERY_PREVIEW_CHANGED" });
+    expect(f.jobs.authorizePublicationRetry).not.toHaveBeenCalled();
+  });
+  it("resumes the exact saved publication and target after recovery without requiring a saved listing ID", async () => {
+    const f = fixture(); f.job.operation = "publish"; f.job.providerIdentity = null;
+    f.job.publicationTarget = { ...f.job.identity, groupKey: "RECORDED-PUBLICATION-GROUP" };
+    await f.service.preview(id, 1);
+    expect(f.recovery.preview).toHaveBeenCalledWith(expect.arrayContaining([
+      expect.objectContaining({ externalInventoryItemId: "group:RECORDED-PUBLICATION-GROUP" }),
+    ]));
+    const result = await f.service.resume(id, 1, "operator", command);
+    expect(f.jobs.enqueue).toHaveBeenCalledWith(f.job.identity, "operator", command.idempotencyKey, "publish");
+    expect(f.enqueue).not.toHaveBeenCalled(); expect(result.job).toMatchObject({ operation: "publish", state: "queued" });
+    expect(f.recovery.resume.mock.invocationCallOrder[0]).toBeLessThan(f.jobs.enqueue.mock.invocationCallOrder[0]);
+  });
   it("finds the exact coalesced command after a lost response without writing or enqueueing", async () => {
     const f = fixture();
     f.jobs.get.mockRejectedValueOnce(new EbayListingSyncError("EBAY_SYNC_JOB_NOT_FOUND", "Missing job."));

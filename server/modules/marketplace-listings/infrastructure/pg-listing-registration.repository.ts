@@ -1,5 +1,7 @@
 import { buildListingRegistrationPlan, type ListingRegistrationVariantCandidate, type MarketplaceObservedListingPublication } from "../domain/listing-registration-plan";
 import type { Pool, PoolClient, QueryResultRow } from "pg";
+import { z } from "zod";
+import { listingOwnerRefSchema } from "../application/dtos";
 import { appendListingVerification } from "./pg-listing-verification-writer";
 
 import { pool as defaultPool } from "../../../db";
@@ -172,7 +174,24 @@ function mappingCompatibilityPlan(input: MappingCompatibilityInput): ListingRegi
   if (plan.owner.kind !== "channel") throw mappingCompatibilityConflict();
   return plan;
 }
-async function lockMappingCompatibilityAccount(client: PoolClient, plan: ListingRegistrationPlan): Promise<void> {
+export interface UnpublishedMappingCompatibilityInput {
+  owner: ListingOwnerRef;
+  providerAccount: { provider: "ebay"; accountNamespace: "production" | "sandbox"; externalAccountId: string };
+  groupKey: string | null;
+  members: readonly {productVariantId:number;sku:string;offerId:string|null}[];
+}
+const unpublishedCompatibilitySchema = z.object({
+  owner:listingOwnerRefSchema,
+  providerAccount:z.object({provider:z.literal("ebay"),accountNamespace:z.enum(["production","sandbox"]),externalAccountId:z.string().trim().min(1).max(255)}).strict(),
+  groupKey:z.string().trim().min(1).max(255).nullable(),
+  members:z.array(z.object({productVariantId:z.number().int().positive().max(2147483647),sku:z.string().trim().min(1).max(255),offerId:z.string().trim().min(1).max(255).nullable()}).strict()).min(1).max(250),
+}).strict().superRefine((input,context)=>{
+  if(input.owner.kind!=="channel" || input.owner.provider!=="ebay" || new Set(input.members.map(member=>member.productVariantId)).size!==input.members.length
+    || new Set(input.members.map(member=>member.sku)).size!==input.members.length
+    || new Set(input.members.map(member=>member.offerId).filter(Boolean)).size!==input.members.filter(member=>member.offerId!==null).length
+    || (input.members.length>1 && input.groupKey===null)) context.addIssue({code:z.ZodIssueCode.custom,message:"Invalid unpublished publication scope."});
+});
+async function lockMappingCompatibilityAccount(client: PoolClient, plan: Pick<ListingRegistrationPlan,"owner"> & {providerAccount:Pick<ListingRegistrationPlan["providerAccount"],"provider"|"accountNamespace"|"externalAccountId">}): Promise<void> {
   if (plan.owner.kind !== "channel") throw mappingCompatibilityConflict();
   await client.query("SELECT id FROM channels.channels WHERE id=$1 FOR UPDATE", [plan.owner.channelId]);
   await lockProviderAccountIdentity(client,plan);
@@ -180,6 +199,39 @@ async function lockMappingCompatibilityAccount(client: PoolClient, plan: Listing
 
 export class PgMarketplaceListingRegistrationRepository implements MarketplaceListingRegistrationRepository {
   constructor(private readonly dbPool: Pool = defaultPool) {}
+
+  async acquireUnpublishedCompatibilityLocks(input: UnpublishedMappingCompatibilityInput, client: PoolClient): Promise<void> {
+    await lockMappingCompatibilityAccount(client,unpublishedCompatibilitySchema.parse(input));
+  }
+
+  /** An unpublished offer cannot replace a canonical publication or consume its
+   * claims. This is an ownership gate, not invented publication evidence. */
+  async assertCompatibleUnpublishedPublication(input: UnpublishedMappingCompatibilityInput, transactionClient?: PoolClient): Promise<void> {
+    const plan=unpublishedCompatibilitySchema.parse(input);
+    if(plan.owner.kind!=="channel") throw mappingCompatibilityConflict();
+    const client=transactionClient??await this.dbPool.connect();
+    try {
+      if(!transactionClient){ await client.query("BEGIN"); await client.query("SET LOCAL lock_timeout='2s'"); await client.query("SET LOCAL statement_timeout='10s'"); }
+      await lockMappingCompatibilityAccount(client,plan);
+      const scope=(await client.query<ScopeRow>(scopeLookupSql(plan.owner),scopeLookupParams(plan.owner))).rows[0];
+      const account=(await client.query(`SELECT id,owner_kind,channel_id FROM marketplace.provider_accounts
+        WHERE provider=$1 AND account_namespace=$2 AND external_account_id=$3 FOR UPDATE`,
+        [plan.providerAccount.provider,plan.providerAccount.accountNamespace,plan.providerAccount.externalAccountId])).rows[0];
+      if(account && (account.owner_kind!=="channel" || account.channel_id!==plan.owner.channelId)) throw mappingCompatibilityConflict();
+      if(scope && (await client.query(`SELECT 1 FROM marketplace.listing_publications WHERE scope_id=$1
+        UNION ALL SELECT 1 FROM marketplace.listing_replacement_operations WHERE scope_id=$1
+        UNION ALL SELECT 1 FROM marketplace.listing_registrations WHERE scope_id=$1`,[scope.id])).rowCount) throw mappingCompatibilityConflict();
+      if(account){
+        const claims=[...(plan.groupKey?[{namespace:"ebay.inventory_item_group",id:plan.groupKey}]:[]),
+          ...plan.members.flatMap(member=>[{namespace:"ebay.inventory_item",id:member.sku},...(member.offerId?[{namespace:"ebay.offer",id:member.offerId}]:[])])];
+        if((await client.query(`SELECT 1 FROM marketplace.provider_identity_claims claim
+          JOIN unnest($2::text[],$3::text[]) wanted(namespace,id) ON wanted.namespace=claim.identity_namespace AND wanted.id=claim.external_id
+          WHERE claim.provider_account_id=$1 LIMIT 1`,[account.id,claims.map(claim=>claim.namespace),claims.map(claim=>claim.id)])).rowCount) throw mappingCompatibilityConflict();
+      }
+      if(!transactionClient) await client.query("COMMIT");
+    }catch(error){if(!transactionClient) await client.query("ROLLBACK");throw error;}
+    finally{if(!transactionClient) client.release();}
+  }
 
   /** Read-only compatibility gate for an owner repairing its local identifiers.
    * The same account lock as registration and scope row lock as replacement keep
@@ -697,7 +749,7 @@ function assertStableOwnerIdentity(
 
 async function lockProviderAccountIdentity(
   client: PoolClient,
-  plan: ListingRegistrationPlan,
+  plan: {providerAccount:Pick<ListingRegistrationPlan["providerAccount"],"provider"|"accountNamespace"|"externalAccountId">},
 ): Promise<void> {
   const account = plan.providerAccount;
   await client.query(

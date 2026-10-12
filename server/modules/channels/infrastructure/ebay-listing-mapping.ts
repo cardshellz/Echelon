@@ -9,6 +9,7 @@ import { createEbayMarketplaceRegistrationAdapters } from "../adapters/ebay/ebay
 import { EBAY_CHANNEL_ID, getAuthService } from "./ebay-api-runtime";
 import { readExistingEbayListingMappingIdentity, readExistingEbayListingMappingSource } from "./ebay-active-listing-sync";
 import { PostgresEbayListingMappingRepairRepository } from "./ebay-listing-mapping.repository";
+import { assertEbayPublicationCompatibility } from "./ebay-publication-compatibility";
 
 const canonicalRegistration = new PgMarketplaceListingRegistrationRepository(pool);
 const store = new PostgresEbayListingMappingRepairRepository(pool, {
@@ -49,6 +50,10 @@ export const ebayListingMappingService = new EbayListingMappingService({
     // Use the same ownership check as the applying transaction so a known
     // conflicting product is explained before an Apply button is offered.
     await store.checkMappingOwnership(provenIdentity);
+  },
+  assertPublishCompatible: async (source, targetIdentity, inspection) => {
+    await assertEbayPublicationCompatibility(source.identity, inspection, targetIdentity);
+    await store.checkMappingOwnership(targetIdentity);
   },
   store,
   reportDiagnosticFailure: event => {

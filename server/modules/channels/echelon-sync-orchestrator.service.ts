@@ -1182,7 +1182,8 @@ class EchelonSyncOrchestrator {
                 .set({
                   lastSyncedPrice: pushItem.priceCents,
                   lastSyncedAt: new Date(),
-                  syncStatus: "synced",
+                  // An accepted eBay price change does not publish its offer.
+                  ...(channel.provider.toLowerCase() === "ebay" ? {} : { syncStatus: "synced" }),
                   updatedAt: new Date(),
                 })
                 .where(
@@ -1736,8 +1737,9 @@ class EchelonSyncOrchestrator {
       .set({
         lastSyncedQty: item.allocatedQty,
         lastSyncedAt: now,
-        syncStatus: "synced",
-        syncError: null,
+        // Inventory acknowledgement cannot complete or clear an eBay listing
+        // operation: unpublished offers also accept quantity updates.
+        ...(channel.provider.toLowerCase() === "ebay" ? {} : { syncStatus: "synced", syncError: null }),
         updatedAt: now,
         ...(refreshedExternalVariantId
           ? { externalVariantId: refreshedExternalVariantId }

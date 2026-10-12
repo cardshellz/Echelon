@@ -48,12 +48,57 @@ function fixture() {
   const readSource = vi.fn(async()=>structuredClone(source));
   const inspect = vi.fn((input:Parameters<typeof observer.inspectExistingPublication>[0])=>observer.inspectExistingPublication(input));
   const assertCompatible = vi.fn(async()=>undefined);
+  const assertPublishCompatible = vi.fn(async()=>undefined);
   const reportDiagnosticFailure = vi.fn();
-  const service = new EbayListingMappingService({readSource,inspect,assertCompatible,store,now:()=>now,reportDiagnosticFailure});
-  return {source,state,transport,observer,readSource,inspect,assertCompatible,store,result,service,reportDiagnosticFailure};
+  const service = new EbayListingMappingService({readSource,inspect,assertCompatible,assertPublishCompatible,store,now:()=>now,reportDiagnosticFailure});
+  return {source,state,transport,observer,readSource,inspect,assertCompatible,assertPublishCompatible,store,result,service,reportDiagnosticFailure};
 }
 
 describe("fresh eBay mapping diagnosis and reviewed repair",()=>{
+  function unpublish(f: ReturnType<typeof fixture>) {
+    for (const offers of f.state.offers.values()) for (const offer of offers) {
+      offer.status="UNPUBLISHED"; delete offer.listing;
+    }
+  }
+  it("finishes the exact saved unpublished offers instead of sending the user to a dead-end mapping review",async()=>{
+    const f=fixture(); unpublish(f);
+    f.source.identity.variants.forEach(member=>{member.externalSku=null;});
+    const before=structuredClone(f.source);
+    const review=await f.service.diagnose(20,67);
+    expect(review).toMatchObject({canApply:true,action:{kind:"finish_publish",label:"Finish publishing"},
+      membership:{groupKey:"ACTUAL-EBAY-GROUP",missingSkus:[],extraSkus:[]}});
+    expect(f.store.apply).not.toHaveBeenCalled();
+    await f.service.apply(20,67,"operator",{reviewHash:review.reviewHash,commandKey});
+    expect(f.store.apply).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({operation:"publish",source:before,
+      targetIdentity:{...before.identity,groupKey:"ACTUAL-EBAY-GROUP"},inspectionEvidence:expect.objectContaining({publication:null})}));
+    expect(f.assertPublishCompatible).toHaveBeenCalledTimes(2);
+    expect(f.assertCompatible).not.toHaveBeenCalled();
+    expect(f.source).toEqual(before);
+  });
+  it("refuses automatic unpublished-offer reassignment when the saved offer ID differs",async()=>{
+    const f=fixture(); unpublish(f); f.source.identity.variants[0]!.offerId="different-saved-offer";
+    expect(await f.service.diagnose(20,67)).toMatchObject({canApply:false,diagnosticCode:"EBAY_MAPPING_SOURCE_INVALID"});
+    expect(f.store.apply).not.toHaveBeenCalled();
+  });
+  it("does not publish an excluded member just because its offer exists",async()=>{
+    const f=fixture(); unpublish(f); f.source.identity.variants[1]!.contentSyncEnabled=false;
+    expect(await f.service.diagnose(20,67)).toMatchObject({canApply:false,diagnosticCode:"EBAY_MAPPING_PRODUCT_NOT_ELIGIBLE"});
+  });
+  it("requires a fresh review when the group or publication state changes before confirmation",async()=>{
+    const f=fixture(); unpublish(f); const review=await f.service.diagnose(20,67);
+    f.state.groupKey="different-group";
+    await expect(f.service.apply(20,67,"operator",{reviewHash:review.reviewHash,commandKey})).rejects.toMatchObject({code:"EBAY_MAPPING_REVIEW_STALE"});
+    expect(f.store.apply).not.toHaveBeenCalled();
+  });
+  it("blocks canonical ownership conflicts before offering Finish publishing",async()=>{
+    const f=fixture(); unpublish(f);
+    f.assertPublishCompatible.mockRejectedValue(new EbayListingSyncError("EBAY_MAPPING_CANONICAL_CONFLICT","existing registered lifecycle"));
+    expect(await f.service.diagnose(20,67)).toMatchObject({canApply:false,action:{kind:"review_registered_listing"}});
+  });
+  it("does not treat a saved prior listing ID as permission to republish an ended listing",async()=>{
+    const f=fixture(); unpublish(f); f.source.identity.variants.forEach(member=>{member.listingId="prior-listing";});
+    expect(await f.service.diagnose(20,67)).toMatchObject({canApply:false,title:"Previously saved listing is no longer published"});
+  });
   it("proves the incident's nullable saved listing IDs are fillable through the complete canonical group",async()=>{
     const f=fixture();const before=structuredClone(f.source);
     const review=await f.service.diagnose(20,67);

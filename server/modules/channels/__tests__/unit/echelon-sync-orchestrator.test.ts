@@ -609,6 +609,10 @@ describe("EchelonSyncOrchestrator", () => {
       expect(
         updateSetValues.some((v: any) => v.externalVariantId === "999888777"),
       ).toBe(true);
+      const acknowledgement = updateSetValues.find((value: any) => value.externalVariantId === "999888777");
+      expect(acknowledgement.lastSyncedQty).toBe(292);
+      expect(acknowledgement).not.toHaveProperty("syncStatus");
+      expect(acknowledgement).not.toHaveProperty("syncError");
     });
   });
 
@@ -793,6 +797,19 @@ describe("EchelonSyncOrchestrator", () => {
       const join = new PgDialect().sqlToQuery(pricingQuery.leftJoin.mock.calls[0][1]);
       expect(join.sql).toContain('"channel_listings"."channel_id" = $1');
       expect(join.params).toEqual([2]);
+    });
+
+    it.each(["ebay", "shopify", "walmart"])("keeps %s price acknowledgement separate from eBay publication", async provider => {
+      if (provider !== "shopify") adapterRegistry.register({ ...createMockAdapter(), providerKey: provider });
+      queuePricing(67, "offer-101");
+      db._selectQueue[0][0].provider = provider;
+      const result = await orchestrator.syncPricingForChannel(67, { dryRun: false });
+      expect(result.variantsPushed).toBe(1);
+      const values = db.update.mock.results.flatMap((call: any) => call.value.set.mock.calls.map((args: any[]) => args[0]));
+      const acknowledged = values.find((value: any) => value.lastSyncedPrice === 999);
+      expect(acknowledged).toBeDefined();
+      if (provider === "ebay") expect(acknowledged).not.toHaveProperty("syncStatus");
+      else expect(acknowledged.syncStatus).toBe("synced");
     });
 
     it("skips pricing without a destination listing even when catalog Shopify ID exists", async () => {

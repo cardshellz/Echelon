@@ -3,11 +3,13 @@ import type { Pool, PoolClient } from "pg";
 import { canonicalJson } from "@shared/utils/canonical-json";
 import { mappingRepairFailureDisposition, ebayListingMappingResultSchema, type EbayListingMappingResult } from "@shared/types/ebay-listing-mapping";
 import { ebayListingSyncJobSchema } from "@shared/types/ebay-listing-sync";
-import { marketplaceObservedListingPublicationSchema, type PgMarketplaceListingRegistrationRepository } from "../../marketplace-listings";
+import { marketplaceObservedListingPublicationSchema, type PgMarketplaceListingRegistrationRepository, type UnpublishedMappingCompatibilityInput } from "../../marketplace-listings";
+import { resolveEbayPublicationTarget } from "../ebay-publication-completion.domain";
 import { assertEbayListingSourceIdentityUnchanged } from "../ebay-existing-listing-identity";
 import { ebayListingSyncIdentitySchema, EbayListingSyncError, syncStageHash } from "../ebay-listing-sync.domain";
 import { EBAY_LISTING_WORKFLOW_LOCK_NAMESPACE, ebayListingWorkflowLockKey } from "../ebay-listing-workflow-lock";
 import type { EbayListingMappingRepairPlan, EbayListingMappingRepairStore, EbayListingMappingSource, EbayListingMappingRejectedCommand } from "../ebay-listing-mapping.service";
+import { assertEbayMappingOwnership } from "./ebay-listing-mapping-ownership";
 import { PostgresEbayListingSyncRepository } from "./ebay-listing-sync.repository";
 
 type MappingCandidateIdentity = Pick<EbayListingMappingSource["candidates"][number], "productVariantId" | "sku" | "isActive">;
@@ -20,7 +22,7 @@ export interface EbayListingMappingRepositoryOptions {
   channelId: number;
   /** Must use this transaction client; this callback performs saved reads only. */
   readSourceInsideTransaction(client: PoolClient, productId: number): Promise<EbayListingMappingSourceSnapshot>;
-  canonicalRegistration: Pick<PgMarketplaceListingRegistrationRepository, "acquireMappingCompatibilityLocks" | "assertCompatiblePublication">;
+  canonicalRegistration: Pick<PgMarketplaceListingRegistrationRepository, "acquireMappingCompatibilityLocks" | "assertCompatiblePublication" | "acquireUnpublishedCompatibilityLocks" | "assertCompatibleUnpublishedPublication">;
 }
 const hash = z.string().regex(/^[a-f0-9]{64}$/);
 const actorSchema = z.string().trim().min(1).max(200);
@@ -79,7 +81,7 @@ export class PostgresEbayListingMappingRepairRepository implements EbayListingMa
 
   async apply(input: EbayListingMappingRepairPlan): Promise<EbayListingMappingResult> {
     const plan = validatePlan(input, this.options.channelId);
-    const identity = plan.provenIdentity;
+    const identity = plan.operation === "publish" ? plan.targetIdentity : plan.provenIdentity;
     const lookup = { productId: identity.productId, channelId: identity.channelId,
       commandKey: plan.commandKey, requestHash: plan.requestHash, actor: plan.actor };
     const client = await this.pool.connect();
@@ -103,7 +105,8 @@ export class PostgresEbayListingMappingRepairRepository implements EbayListingMa
       // Registration takes account identity before catalog variants. Acquire
       // that prefix before either our catalog rows or listing-table write lock;
       // the complete scope check follows the source fence to match verification.
-      await this.options.canonicalRegistration.acquireMappingCompatibilityLocks({
+      if (plan.operation === "publish") await this.options.canonicalRegistration.acquireUnpublishedCompatibilityLocks(unpublishedCompatibilityInput(plan),client);
+      else await this.options.canonicalRegistration.acquireMappingCompatibilityLocks({
         owner: {kind:"channel",channelId:identity.channelId,productId:identity.productId,provider:"ebay",marketplaceId:identity.marketplaceId},
         observation:plan.observation,memberCandidates:plan.source.candidates,
       },client);
@@ -116,7 +119,8 @@ export class PostgresEbayListingMappingRepairRepository implements EbayListingMa
       assertEbayListingSourceIdentityUnchanged(plan.source.identity, current.identity);
       if (current.environment !== plan.source.environment || candidateHash(current.candidates) !== candidateHash(plan.source.candidates))
         throw new EbayListingSyncError("EBAY_MAPPING_REVIEW_CHANGED", "The eBay account environment or product membership changed. Review the mapping again.");
-      await this.options.canonicalRegistration.assertCompatiblePublication({
+      if (plan.operation === "publish") await this.options.canonicalRegistration.assertCompatibleUnpublishedPublication(unpublishedCompatibilityInput(plan),client);
+      else await this.options.canonicalRegistration.assertCompatiblePublication({
         owner: { kind: "channel", channelId: identity.channelId, productId: identity.productId, provider: "ebay", marketplaceId: identity.marketplaceId },
         observation: plan.observation, memberCandidates: plan.source.candidates,
       }, client);
@@ -125,7 +129,7 @@ export class PostgresEbayListingMappingRepairRepository implements EbayListingMa
         WHERE channel_id=$1 AND product_variant_id=ANY($2::integer[]) ORDER BY product_variant_id FOR UPDATE`,
       [identity.channelId,identity.variants.map(member => member.variantId)])).rows.map(row => row.record);
       if (beforeRows.length !== identity.variants.length) throw sourceChanged();
-      for (const member of identity.variants) {
+      if (plan.operation !== "publish") for (const member of identity.variants) {
         const before = plan.source.identity.variants.find(variant => variant.variantId === member.variantId)!;
         const result = await client.query(`UPDATE channels.channel_listings SET external_sku=$3,external_variant_id=$4,external_product_id=$5,
           external_url=$6,updated_at=$7 WHERE channel_id=$1 AND product_variant_id=$2
@@ -137,14 +141,15 @@ export class PostgresEbayListingMappingRepairRepository implements EbayListingMa
       const afterRows = (await client.query(`SELECT to_jsonb(cl) AS record FROM channels.channel_listings cl
         WHERE channel_id=$1 AND product_variant_id=ANY($2::integer[]) ORDER BY product_variant_id`,
       [identity.channelId,identity.variants.map(member => member.variantId)])).rows.map(row => row.record);
-      const job = await this.sync.enqueueInsideTransaction(client, identity, plan.commandKey, plan.actor, plan.now, identity);
+      const job = await this.sync.enqueueInsideTransaction(client, identity, plan.commandKey, plan.actor, plan.now,
+        plan.operation === "publish" ? undefined : identity, plan.operation ?? "sync");
       assertEbayListingSourceIdentityUnchanged(job.identity, identity);
       await client.query(`INSERT INTO channels.ebay_listing_mapping_repairs(command_key,channel_id,connection_id,product_id,
-        environment,request_hash,review_hash,actor,before_identity,after_identity,queued_identity,before_rows,after_rows,observation,job_id,applied_at)
-        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10::jsonb,$11::jsonb,$12::jsonb,$13::jsonb,$14::jsonb,$15,$16)`,
+        environment,request_hash,review_hash,actor,before_identity,after_identity,queued_identity,before_rows,after_rows,observation,job_id,applied_at,operation)
+        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10::jsonb,$11::jsonb,$12::jsonb,$13::jsonb,$14::jsonb,$15,$16,$17)`,
       [plan.commandKey,identity.channelId,identity.connectionId,identity.productId,plan.source.environment,plan.requestHash,plan.reviewHash,
-        plan.actor,canonicalJson(plan.source.identity),canonicalJson(identity),canonicalJson(job.identity),canonicalJson(beforeRows),canonicalJson(afterRows),
-        canonicalJson(plan.observation),job.id,plan.now]);
+        plan.actor,canonicalJson(plan.source.identity),canonicalJson(plan.operation === "publish" ? plan.source.identity : identity),canonicalJson(job.identity),canonicalJson(beforeRows),canonicalJson(afterRows),
+        canonicalJson(plan.operation === "publish" ? {kind:"unpublished_inspection",inspection:plan.inspectionEvidence} : plan.observation),job.id,plan.now,plan.operation ?? "sync"]);
       await client.query("COMMIT");
       return ebayListingMappingResultSchema.parse({ repairStatus: "queued", job, replayed: false,
         receipt: { commandKey: plan.commandKey, productId: identity.productId, reviewHash:plan.reviewHash, appliedAt: plan.now.toISOString() } });
@@ -187,18 +192,7 @@ export class PostgresEbayListingMappingRepairRepository implements EbayListingMa
   async checkMappingOwnership(input: EbayListingMappingSource["identity"], transactionClient?: PoolClient): Promise<void> {
     const identity = ebayListingSyncIdentitySchema.parse(input);
     if (identity.channelId !== this.options.channelId) throw sourceChanged();
-    const client = transactionClient ?? this.pool;
-    const rows = (await client.query(`SELECT product_variant_id,external_sku,external_variant_id,external_product_id FROM channels.channel_listings
-      WHERE channel_id=$1 AND (external_sku=ANY($2::text[]) OR external_variant_id=ANY($3::text[]) OR external_product_id=ANY($4::text[]))
-      ORDER BY product_variant_id`, [identity.channelId,identity.variants.map(member => member.sku),
-      identity.variants.map(member => member.offerId),identity.variants.map(member => member.listingId)])).rows;
-    const owned = new Set(identity.variants.map(member => member.variantId));
-    const conflicts = rows.filter(row => !owned.has(row.product_variant_id) || identity.variants.some(member => member.variantId !== row.product_variant_id
-      && (member.sku === row.external_sku || member.offerId === row.external_variant_id)));
-    if (conflicts.length) {
-      const details = conflicts.slice(0,5).map(row => `variant ${row.product_variant_id ?? "unassigned"}${row.external_sku ? ` (eBay SKU ${row.external_sku})` : ""}`).join(", ");
-      throw new EbayListingSyncError("EBAY_MAPPING_OWNERSHIP_CONFLICT", `The observed eBay identifiers are already mapped to ${details}. Review both mappings before applying a repair.`);
-    }
+    await assertEbayMappingOwnership(identity, transactionClient ?? this.pool);
   }
 
   private async readReplay(db: Pick<Pool, "query"> | PoolClient, lookup: ReplayLookup): Promise<EbayListingMappingResult | null> {
@@ -216,7 +210,7 @@ export class PostgresEbayListingMappingRepairRepository implements EbayListingMa
     if (receipt.channel_id !== lookup.channelId || receipt.product_id !== lookup.productId
       || (lookup.requestHash !== undefined && receipt.request_hash !== lookup.requestHash)
       || (lookup.actor !== undefined && receipt.actor !== lookup.actor)) throw replayConflict();
-    const row = (await db.query(`SELECT id::text,product_id AS "productId",state,error_code AS code,error_message AS message,
+    const row = (await db.query(`SELECT id::text,product_id AS "productId",operation,state,error_code AS code,error_message AS message,
       next_attempt_at AS "nextAttemptAt",updated_at AS "updatedAt" FROM channels.ebay_listing_sync_jobs WHERE id=$1`, [receipt.job_id])).rows[0];
     if (!row) throw new EbayListingSyncError("EBAY_MAPPING_PERSISTENCE_FAILED", "The saved mapping repair is missing its follow-up sync request. Ask support to inspect the repair receipt.");
     const job = ebayListingSyncJobSchema.parse({ ...row, nextAttemptAt: row.nextAttemptAt.toISOString(), updatedAt: row.updatedAt.toISOString() });
@@ -236,6 +230,19 @@ function replayConflict(): EbayListingSyncError {
 }
 function validatePlan(input: EbayListingMappingRepairPlan, channelId: number): EbayListingMappingRepairPlan {
   const source = ebayListingSyncIdentitySchema.parse(input.source.identity);
+  if (input.operation === "publish") {
+    const next = ebayListingSyncIdentitySchema.parse(input.targetIdentity);
+    assertEbayListingSourceIdentityUnchanged(source,next);
+    const target = resolveEbayPublicationTarget(source,input.inspectionEvidence);
+    if (source.channelId !== channelId || input.inspectionEvidence.publication !== null
+      || input.inspectionEvidence.providerAccount.accountNamespace !== input.source.environment
+      || next.groupKey !== target.groupKey || source.variants.some(member => member.mappingExists !== true || member.listingId !== null)
+      || syncStageHash({...source,groupKey:next.groupKey}) !== syncStageHash(next)) throw sourceChanged();
+    if (input.requestHash !== syncStageHash({ productId:source.productId,channelId:source.channelId,
+      actor:actorSchema.parse(input.actor),reviewHash:hash.parse(input.reviewHash) })) throw replayConflict();
+    return {...input,source:{...input.source,identity:source,environment:z.enum(["production","sandbox"]).parse(input.source.environment)},targetIdentity:next,
+      commandKey:z.string().uuid().parse(input.commandKey),reviewHash:hash.parse(input.reviewHash),requestHash:hash.parse(input.requestHash),actor:actorSchema.parse(input.actor),now:z.date().parse(input.now)};
+  }
   const next = ebayListingSyncIdentitySchema.parse(input.provenIdentity);
   const observation = marketplaceObservedListingPublicationSchema.parse(input.observation);
   const scope = (identity: typeof source) => ({ channelId: identity.channelId, connectionId: identity.connectionId,
@@ -253,4 +260,11 @@ function validatePlan(input: EbayListingMappingRepairPlan, channelId: number): E
   return { ...input, source: { ...input.source,identity:source,environment:z.enum(["production","sandbox"]).parse(input.source.environment) },
     provenIdentity:next,observation,commandKey:z.string().uuid().parse(input.commandKey),reviewHash:hash.parse(input.reviewHash),
     requestHash:hash.parse(input.requestHash),actor:actorSchema.parse(input.actor),now:z.date().parse(input.now) };
+}
+
+function unpublishedCompatibilityInput(plan: Extract<EbayListingMappingRepairPlan,{operation:"publish"}>): UnpublishedMappingCompatibilityInput {
+  const identity=plan.targetIdentity;
+  return {owner:{kind:"channel",channelId:identity.channelId,productId:identity.productId,provider:"ebay",marketplaceId:identity.marketplaceId},
+    providerAccount:{provider:"ebay",accountNamespace:plan.source.environment,externalAccountId:identity.accountId},groupKey:identity.groupKey,
+    members:identity.variants.map(member=>({productVariantId:member.variantId,sku:member.sku,offerId:member.offerId}))};
 }

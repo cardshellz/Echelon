@@ -21,11 +21,31 @@ export function resolveEbayListingIssue(input: EbayListingIssueInput): EbayListi
       action: { kind, label, ...(href ? { href } : {}) }, ...(reference ? { reference } : {}),
       ...(input.productId ? { details: [{ label: "Product ID", value: String(input.productId) }] } : {}) });
 
+  if (code === "EBAY_PUBLICATION_RESPONSE_UNCERTAIN")
+    return issue("Publication was interrupted", "Echelon cannot confirm whether an earlier publish request reached eBay.",
+      "Review the saved publication. An inventory administrator can authorize it to check the existing offers and resume using current inventory and catalog pictures.",
+      false, "check_recovery", "Review interrupted publication");
   if (["EBAY_SYNC_RESPONSE_EVIDENCE_REQUIRED", "PUBLICATION_PRIOR_OUTCOME_UNRESOLVED", "PUBLICATION_REQUEST_EVIDENCE_INCOMPLETE",
     "EBAY_QUANTITY_RESPONSE_UNCERTAIN", "QUANTITY_PROVIDER_REQUEST_TIMEOUT"].includes(code))
     return issue("An earlier quantity update needs review", "Echelon cannot confirm the outcome of an earlier eBay quantity request.",
       "Review the saved request and its response. An inventory administrator can authorize a fresh update using current inventory when the old outcome remains unknown.",
       false, "check_recovery", "Review blocked update");
+  if (code === "EBAY_PUBLICATION_READBACK_PENDING")
+    return issue("Checking published listing and pictures", "eBay accepted the publication request. Echelon is still checking the complete listing and its pictures.",
+      "The saved publication will check again automatically without publishing a second time. View its status or refresh the check; completion appears after the listing and pictures are verified.",
+      false, "check_status", "View publishing status");
+  if (code === "EBAY_PUBLICATION_PRIOR_WORK_REQUIRED")
+    return issue("An earlier publication must finish first", "An earlier saved publication may already have reached eBay.",
+      "Open the earlier publishing request to check its result or follow its recovery step before starting another publication.",
+      false, "check_status", "View earlier publication");
+  if (code === "EBAY_PUBLICATION_RETRY_NOT_ALLOWED")
+    return issue("Check the saved publication before retrying", "This publication cannot be authorized for another attempt in its current state.",
+      "View its current status. An accepted publication is checked automatically; do not start another publish while its result is being verified.",
+      false, "check_status", "View publishing status");
+  if (code === "EBAY_PUBLICATION_RETRY_REVIEW_CHANGED")
+    return issue("Review the updated publication", "The saved publication changed after the recovery review.",
+      "Refresh the saved publication details and review the current outcome before confirming its recovery again.",
+      false, "check_recovery", "Review current publication");
   if (["EBAY_RECOVERY_BUSY", "EBAY_RECOVERY_PREVIEW_CHANGED", "EBAY_RECOVERY_STATE_CHANGED", "EBAY_RECOVERY_SCOPE_CHANGED", "EBAY_RECOVERY_REPLAY_CONFLICT"].includes(code))
     return issue("Review the latest request details", "The saved request changed while recovery was being reviewed.",
       "Refresh the request details. If a request is still running, wait for it to finish; otherwise review and confirm the updated recovery preview.",
@@ -79,7 +99,7 @@ export function resolveEbayListingIssue(input: EbayListingIssueInput): EbayListi
       "Use Sync to update the existing listing. This verifies its saved eBay SKU, offer and group before changing it.",
       true, "retry_sync", "Sync existing listing");
   if (["EBAY_SYNC_AUTH_REQUIRED", "EBAY_AUTH_REQUIRED", "EBAY_AUTH_EXPIRED", "EBAY_TOKEN_EXPIRED", "EBAY_NOT_CONNECTED",
-    "EBAY_OAUTH_SCOPE_MISSING", "EBAY_PROVIDER_ACCOUNT_IDENTITY_CONFLICT", "EBAY_PROVIDER_ACCOUNT_IDENTITY_NOT_PERSISTED"].includes(code))
+    "EBAY_OAUTH_SCOPE_MISSING", "EBAY_PROVIDER_ACCOUNT_IDENTITY_CONFLICT", "EBAY_PROVIDER_ACCOUNT_IDENTITY_NOT_PERSISTED", "EBAY_SYNC_ACCOUNT_CHANGED"].includes(code))
     return issue("Reconnect the eBay account", "The saved eBay connection cannot authorize this operation.",
       "Open Connection settings, reconnect the intended eBay account, then return to this product and retry the update.",
       false, "reconnect", "Open connection settings", "/channels/ebay#connection");
@@ -99,6 +119,11 @@ export function resolveEbayListingIssue(input: EbayListingIssueInput): EbayListi
     return issue("eBay returned an incomplete listing response", "Echelon could not validate a required provider response.",
       "Review the current listing and saved request before retrying. A creation or publication may have completed even when its response was incomplete; Echelon must rediscover the exact existing identity first.",
       false, "review_mapping", "Review current listing");
+  if (["EBAY_REGISTRATION_UNPUBLISHED_GROUP_AMBIGUOUS", "EBAY_REGISTRATION_UNPUBLISHED_GROUP_CHANGED",
+    "EBAY_REGISTRATION_UNPUBLISHED_GROUP_MEMBERSHIP_MISMATCH", "EBAY_PUBLICATION_TARGET_UNVERIFIED"].includes(code))
+    return issue("Review the offers before publishing", "eBay did not verify the exact offers and product variants expected by this publishing request.",
+      "Open the publication review to compare the saved offers and every SKU with the current eBay group. Follow its recommended correction, then finish publishing only when that review verifies the intended offers.",
+      false, "review_mapping", "Review publication");
   if (["EBAY_SYNC_IDENTITY_CHANGED", "EBAY_SYNC_OFFER_IDENTITY_CHANGED", "EBAY_SYNC_PROJECTION_IDENTITY_CHANGED", "EBAY_SYNC_PROVIDER_IDENTITY_CHANGED",
     "EBAY_SYNC_OFFER_MISSING", "EBAY_SYNC_SOURCE_INVALID", "EBAY_SYNC_SCOPE_UNAVAILABLE", "PUBLICATION_LISTING_MEMBERSHIP_UNPROVEN",
     "EBAY_SYNC_DRAFT_SCOPE_INVALID", "EBAY_SYNC_PROVIDER_MEMBERSHIP_UNPROVEN", "EBAY_SYNC_MAPPING_INVALID",

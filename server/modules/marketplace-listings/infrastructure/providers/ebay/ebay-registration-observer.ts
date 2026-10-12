@@ -200,7 +200,7 @@ export class EbayMarketplaceRegistrationObserver
 
   /** Inspect every requested SKU using the same credential, pagination, and
    * response validation as registration. This never guesses a Catalog group. */
-  async inspectExistingPublication(input: Omit<ObserveMarketplaceListingInput, "locator">): Promise<EbayListingInspection> {
+  async inspectExistingPublication(input: Omit<ObserveMarketplaceListingInput, "locator"> & { unpublishedGroupKey?: string | null }): Promise<EbayListingInspection> {
     const snapshot = parseObservationSnapshot({ owner: { ...input.owner }, memberCandidates: input.memberCandidates });
     const owner = assertEbayOwner(snapshot.owner);
     const credential = parseReadCredential(await this.credentials.loadFreshCredential(owner));
@@ -222,14 +222,22 @@ export class EbayMarketplaceRegistrationObserver
     let publicationIssue: EbayListingInspectionIssue | null = null;
     let groupKey: string | null = null;
     let groupSkus: readonly string[] | null = null;
+    let unpublishedTarget: EbayListingInspection["unpublishedTarget"] = null;
     if (skus.every(member => member.issue === null)) {
       try {
+        unpublishedTarget = await this.observeUnpublishedTarget(credential, owner.marketplaceId, snapshots, input.unpublishedGroupKey);
+        if (unpublishedTarget) {
+          groupKey = unpublishedTarget.groupKey;
+          groupSkus = unpublishedTarget.groupKey === null ? null : unpublishedTarget.skus;
+        }
+        if (!unpublishedTarget) {
         const listingId = resolveCoherentListingId(snapshots, null);
         const selected = await this.discoverPublicationByListing(credential, owner.marketplaceId, listingId, snapshot.memberCandidates, new Map(snapshots.map(member => [member.sku, member])));
         assertDistinctMemberIdentities(selected.members);
         publication = this.publicationObservation(selected, providerAccount, credential, owner.marketplaceId);
         groupKey = selected.groupKey;
         groupSkus = selected.groupKey === null ? null : selected.groupVariantSkus;
+        }
       } catch (error) {
         publicationIssue = inspectionIssue(error);
         groupKey = publicationIssue.groupKey ?? null;
@@ -239,7 +247,39 @@ export class EbayMarketplaceRegistrationObserver
     const observedAt = this.now();
     if (!(observedAt instanceof Date) || Number.isNaN(observedAt.getTime()))
       throw observationError("EBAY_REGISTRATION_CLOCK_INVALID", "The eBay registration observer clock returned an invalid timestamp.");
-    return { providerAccount, observedAt: new Date(observedAt), skus, publication, publicationIssue, groupKey, groupSkus };
+    return { providerAccount, observedAt: new Date(observedAt), skus, publication, publicationIssue, groupKey, groupSkus, unpublishedTarget };
+  }
+
+  private async observeUnpublishedTarget(credential: EbayRegistrationReadCredential, marketplaceId: string,
+    snapshots: readonly ObservedSku[], plannedGroupKey?: string | null): Promise<EbayListingInspection["unpublishedTarget"]> {
+    const permitsIncompletePreparation = plannedGroupKey !== undefined;
+    if (!snapshots.every(member => (permitsIncompletePreparation || member.inventoryItem !== null)
+      && (member.offers.length === 0 ? permitsIncompletePreparation : member.offers.length === 1
+        && member.offers[0].status === "UNPUBLISHED" && member.offers[0].sku === member.sku
+        && member.offers[0].listing === undefined))) return null;
+    const skus = snapshots.map(member => member.sku).sort(compareCanonicalText);
+    const groupIds = [...new Set(snapshots.flatMap(member => member.inventoryItem?.groupIds ?? []))];
+    if (snapshots.length === 1 && groupIds.length === 0) return { groupKey: null, skus };
+    if (groupIds.length > 1 || (!permitsIncompletePreparation &&
+      (groupIds.length !== 1 || snapshots.some(member => member.inventoryItem!.groupIds.length !== 1)))
+      || (groupIds.length === 0 && !plannedGroupKey))
+      throw observationError("EBAY_REGISTRATION_UNPUBLISHED_GROUP_AMBIGUOUS",
+        "The unpublished offers do not belong to one complete inventory group. Review their eBay group membership before publishing.", { groupVariantSkus: skus });
+    const groupKey = groupIds[0] ?? normalizeProviderText(plannedGroupKey!, "groupKey", 255);
+    if (plannedGroupKey !== undefined && groupKey !== plannedGroupKey)
+      throw observationError("EBAY_REGISTRATION_UNPUBLISHED_GROUP_CHANGED", "The inventory items now belong to a different group than this saved publication target.", { groupKey });
+    const group = await this.getInventoryItemGroup(credential, marketplaceId, groupKey, permitsIncompletePreparation && groupIds.length === 0);
+    if (group === null) return { groupKey, skus };
+    const observedSkus = normalizeUniqueTexts(group.variantSKUs, "variantSKUs", 100).sort(compareCanonicalText);
+    if (group.inventoryItemGroupKey !== undefined && group.inventoryItemGroupKey !== groupKey)
+      throw observationError("EBAY_REGISTRATION_GROUP_KEY_MISMATCH", "eBay returned a different inventory item group than requested.", { requestedGroupKey: groupKey });
+    if (skus.length !== observedSkus.length || skus.some((sku, index) => sku !== observedSkus[index]))
+      throw observationError("EBAY_REGISTRATION_UNPUBLISHED_GROUP_MEMBERSHIP_MISMATCH",
+        "The unpublished inventory group's complete SKU membership differs from the selected product.", { groupKey, groupVariantSkus: observedSkus });
+    const offerIds = snapshots.flatMap(member => member.offers.map(offer => offer.offerId));
+    if (new Set(offerIds).size !== offerIds.length)
+      throw observationError("EBAY_REGISTRATION_MEMBER_IDENTITY_DUPLICATE", "eBay returned the same offer for multiple unpublished SKUs.");
+    return { groupKey, skus };
   }
 
   private publicationObservation(selected: SelectedPublication, providerAccount: MarketplaceProviderAccountObservation,
@@ -554,13 +594,19 @@ export class EbayMarketplaceRegistrationObserver
     credential: EbayRegistrationReadCredential,
     marketplaceId: string,
     groupKey: string,
-  ): Promise<z.infer<typeof inventoryItemGroupResponseSchema>> {
+    allowMissing?: false,
+  ): Promise<z.infer<typeof inventoryItemGroupResponseSchema>>;
+  private async getInventoryItemGroup(credential: EbayRegistrationReadCredential, marketplaceId: string, groupKey: string,
+    allowMissing: boolean): Promise<z.infer<typeof inventoryItemGroupResponseSchema> | null>;
+  private async getInventoryItemGroup(credential: EbayRegistrationReadCredential, marketplaceId: string, groupKey: string,
+    allowMissing = false): Promise<z.infer<typeof inventoryItemGroupResponseSchema> | null> {
     const response = await this.transport.get({
       environment: credential.environment,
       path: `/sell/inventory/v1/inventory_item_group/${encodeURIComponent(groupKey)}`,
       accessToken: credential.accessToken,
       marketplaceId,
     });
+    if (allowMissing && response.status === 404) return null;
     assertSuccessfulRead(response, "inventory_item_group", { groupKey });
     return parseProviderResponse(
       inventoryItemGroupResponseSchema,

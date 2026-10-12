@@ -8,6 +8,7 @@
  */
 
 import { ebayProductSyncResultSchema, ebayListingSyncJobSchema } from "@shared/types/ebay-listing-sync";
+import { EbayListingJobStatusDialog } from "@/components/ebay/EbayListingJobStatusDialog";
 import { ebayListingIssueSchema, type EbayListingIssue } from "@shared/types/ebay-listing-issue";
 import { resolveEbayListingIssue } from "@shared/ebay-listing-issue";
 import { listingSyncIssueFromError } from "@/lib/ebay-listing-issue";
@@ -188,7 +189,7 @@ interface FeedItem {
   ebayBrowseCategoryOverrideId: string | null;
   ebayBrowseCategoryOverrideName: string | null;
   ebayStoreCategoryName: string | null;
-  status: "ready" | "missing_config" | "missing_specifics" | "listed" | "excluded" | "type_disabled" | "ended" | "deleted" | "error";
+  status: "ready" | "missing_config" | "missing_specifics" | "listed" | "publication_incomplete" | "excluded" | "type_disabled" | "ended" | "deleted" | "error";
   missingItems: string[];
   missingAspects: string[];
   isListed: boolean;
@@ -203,6 +204,12 @@ interface FeedItem {
   fulfillmentPolicyOverride: string | null;
   returnPolicyOverride: string | null;
   paymentPolicyOverride: string | null;
+}
+
+function listingNeedsAttention(item: FeedItem, job: z.infer<typeof ebayListingSyncJobSchema> | undefined, hasLocalIssue: boolean): boolean {
+  if (hasLocalIssue || (job && ["needs_attention", "awaiting_evidence"].includes(job.state))) return true;
+  if (job && ["queued", "running", "recovering"].includes(job.state)) return false;
+  return item.status === "error" || item.status === "publication_incomplete";
 }
 
 interface PricingRule {
@@ -681,14 +688,15 @@ export default function EbayChannelPage() {
     },
   });
 
-  // ---- Push to eBay (SSE-based with progress modal) ----
+  // ---- Durable eBay publication ----
   const [pushModalOpen, setPushModalOpen] = useState(false);
   const [syncModalOpen, setSyncModalOpen] = useState(false);
   const [pushProductIds, setPushProductIds] = useState<number[]>([]);
   const [pushRunId, setPushRunId] = useState(0);
 
   const handlePushAll = () => {
-    const readyProducts = feedData?.feed?.filter((f) => f.status === "ready") || [];
+    if (syncJobsQuery.isError || syncJobsQuery.isPending || feedError) return;
+    const readyProducts = feedData?.feed?.filter((f) => f.status === "ready" && !["queued", "running", "recovering"].includes(latestSyncJobs.get(f.id)?.state ?? "")) || [];
     if (readyProducts.length === 0) return;
     const ids = readyProducts.map((f) => f.id);
     setPushProductIds(ids);
@@ -697,13 +705,11 @@ export default function EbayChannelPage() {
   };
 
   const handlePushSingle = (productId: number) => {
+    if (syncJobsQuery.isError || syncJobsQuery.isPending || feedError) {
+      toast({ title: "Refresh saved status first", description: "The latest publishing requests could not be checked. Refresh the saved status in the listing feed before starting another publication." });
+      return;
+    }
     setPushProductIds([productId]);
-    setPushRunId((previous) => previous + 1);
-    setPushModalOpen(true);
-  };
-
-  const handleRetryFailed = (failedIds: number[]) => {
-    setPushProductIds(failedIds);
     setPushRunId((previous) => previous + 1);
     setPushModalOpen(true);
   };
@@ -716,7 +722,7 @@ export default function EbayChannelPage() {
   // ---- Sync Single Product ----
   const [syncingProductIds, setSyncingProductIds] = useState<Set<number>>(new Set());
   const [localSyncIssues, setLocalSyncIssues] = useState<Map<number, { issue: EbayListingIssue; commandKey: string | null }>>(new Map());
-  const [recoveryTarget, setRecoveryTarget] = useState<{ jobId: string | null; productId: number; name: string; issue: EbayListingIssue; mode: "recovery" | "mapping" } | null>(null);
+  const [recoveryTarget, setRecoveryTarget] = useState<{ jobId: string | null; productId: number; name: string; issue: EbayListingIssue | null; mode: "recovery" | "mapping" } | null>(null);
   const uncertainCommands = [...localSyncIssues].flatMap(([productId, local]) => local.commandKey ? [{ productId, commandKey: local.commandKey }] : []);
   const commandReceipts = useQueries({ queries: uncertainCommands.map(({ productId, commandKey }) => ({
     queryKey: ["/api/ebay/listings/sync-jobs", "command", commandKey],
@@ -735,8 +741,7 @@ export default function EbayChannelPage() {
       if (localSyncIssues.get(job.productId)?.commandKey !== commandKey) continue;
       // The server resolves exact command membership, including commands that
       // coalesced into an older active job. A product's old completion is no proof.
-      queryClient.setQueryData<z.infer<typeof ebayListingSyncJobSchema>[]>(["/api/ebay/listings/sync-jobs"], (previous = []) =>
-        [job, ...previous.filter((candidate) => candidate.productId !== job.productId)]);
+      void queryClient.invalidateQueries({ queryKey: ["/api/ebay/listings/sync-jobs"], exact: true });
       setLocalSyncIssues((previous) => {
         if (previous.get(job.productId)?.commandKey !== commandKey) return previous;
         const next = new Map(previous); next.delete(job.productId); return next;
@@ -759,9 +764,9 @@ export default function EbayChannelPage() {
       const errorMessage = data.details.find(detail => !detail.success && detail.error)?.error;
       const failure = data.details.find(detail => !detail.success);
       const savedJob = data.jobs.find((candidate) => candidate.productId === productId);
-      if (savedJob) queryClient.setQueryData<z.infer<typeof ebayListingSyncJobSchema>[]>(["/api/ebay/listings/sync-jobs"], (previous = []) =>
-        [savedJob, ...previous.filter((candidate) => candidate.productId !== productId)]);
       setLocalSyncIssues((previous) => {
+        const current = previous.get(productId);
+        if (current?.commandKey && current.commandKey !== commandKey) return previous;
         const next = new Map(previous);
         if (failure && !savedJob) next.set(productId, { issue: failure.issue ?? resolveEbayListingIssue({ code: failure.code, message: failure.error, productId }), commandKey });
         else next.delete(productId);
@@ -782,7 +787,11 @@ export default function EbayChannelPage() {
     onError: (err: Error, { productId, commandKey }) => {
       setSyncingProductIds((prev) => { const next = new Set(prev); next.delete(productId); return next; });
       const issue = listingSyncIssueFromError(err, productId);
-      setLocalSyncIssues((previous) => new Map(previous).set(productId, { issue, commandKey }));
+      setLocalSyncIssues((previous) => {
+        const current = previous.get(productId);
+        if (current?.commandKey && current.commandKey !== commandKey) return previous;
+        return new Map(previous).set(productId, { issue, commandKey });
+      });
       toast({ title: "Sync Failed", description: `${issue.message} ${issue.nextStep}`, variant: "destructive" });
     },
   });
@@ -792,17 +801,46 @@ export default function EbayChannelPage() {
     syncProductMutation.mutate({ productId, commandKey });
   };
 
+  const handlePublicationReview = (item: FeedItem) => {
+    setRecoveryTarget({ productId: item.id, name: item.name, jobId: null, issue: null, mode: "mapping" });
+  };
+
+  const clearUntrackedLocalIssue = (productId: number) => {
+    setLocalSyncIssues(previous => {
+      // Mapping/recovery completion proves its own command only. An unrelated
+      // unconfirmed sync must keep its exact receipt check and retry identity.
+      if (previous.get(productId)?.commandKey !== null) return previous;
+      const next = new Map(previous); next.delete(productId); return next;
+    });
+  };
+
+  const [publicationStatusTarget, setPublicationStatusTarget] = useState<{ jobId: string; productId: number; name: string } | null>(null);
+
   const handleIssueAction = (issue: EbayListingIssue, productId: number, jobId?: string) => {
     const item = feedData?.feed.find((candidate) => candidate.id === productId);
+    // An admission refusal may point to an older publication that is blocking
+    // this new request. Its explicit reference takes precedence over the refusal.
+    const referencedJobId = issue.reference && /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(issue.reference) ? issue.reference : undefined;
+    if (issue.action.kind === "check_status") {
+      const savedId = referencedJobId ?? jobId ?? latestSyncJobs.get(productId)?.id;
+      if (savedId) setPublicationStatusTarget({ jobId: savedId, productId, name: item?.name ?? `Product ${productId}` });
+      else void syncJobsQuery.refetch().then(result => {
+        const saved = result.data?.find(candidate => candidate.productId === productId);
+        if (saved) setPublicationStatusTarget({ jobId: saved.id, productId, name: item?.name ?? `Product ${productId}` });
+        else toast({ title: "Saved publishing status unavailable", description: "Refresh the listing feed to load this request's reference. No new publication was sent.", variant: "destructive" });
+      });
+      return;
+    }
     if (issue.action.kind === "retry_sync" && issue.retryable) {
       const local = localSyncIssues.get(productId);
       const commandKey = local?.issue.code === issue.code ? local.commandKey ?? undefined : undefined;
-      if (item?.externalListingId) handleSyncProduct(productId, commandKey);
+      if (latestSyncJobs.get(productId)?.operation === "publish" && latestSyncJobs.get(productId)?.state !== "completed") handlePushSingle(productId);
+      else if (item?.externalListingId) handleSyncProduct(productId, commandKey);
       else handlePushSingle(productId);
       return;
     }
     if (issue.action.kind === "check_recovery" || issue.action.kind === "review_mapping") {
-      const savedJobId = jobId ?? latestSyncJobs.get(productId)?.id;
+      const savedJobId = referencedJobId ?? jobId ?? latestSyncJobs.get(productId)?.id;
       setRecoveryTarget({ jobId: savedJobId ?? null, productId, name: item?.name ?? `Product ${productId}`, issue, mode: issue.action.kind === "review_mapping" ? "mapping" : "recovery" });
       return;
     }
@@ -1038,7 +1076,7 @@ export default function EbayChannelPage() {
     } else if (feedFilter === "ended") {
       items = items.filter((i) => i.status === "ended" || i.status === "deleted");
     } else if (feedFilter === "errors") {
-      items = items.filter((i) => i.status === "error" || localSyncIssues.has(i.id) || ["needs_attention", "awaiting_evidence"].includes(latestSyncJobs.get(i.id)?.state ?? ""));
+      items = items.filter((i) => listingNeedsAttention(i, latestSyncJobs.get(i.id), localSyncIssues.has(i.id)));
     } else if (feedFilter !== "all") {
       items = items.filter((i) => i.status === feedFilter);
     }
@@ -1059,13 +1097,13 @@ export default function EbayChannelPage() {
     const feed = feedData.feed.filter((f) => f.status !== "type_disabled");
     return {
       all: feed.length,
-      ready: feed.filter((f) => f.status === "ready").length,
+      ready: feed.filter((f) => f.status === "ready" && !["queued", "running", "recovering"].includes(latestSyncJobs.get(f.id)?.state ?? "")).length,
       missing_config: feed.filter((f) => f.status === "missing_config").length,
       missing_specifics: feed.filter((f) => f.status === "missing_specifics").length,
       listed: feed.filter((f) => f.status === "listed").length,
       excluded: feed.filter((f) => f.status === "excluded").length,
       ended: feed.filter((f) => f.status === "ended" || f.status === "deleted").length,
-      errors: feed.filter((f) => f.status === "error" || localSyncIssues.has(f.id) || ["needs_attention", "awaiting_evidence"].includes(latestSyncJobs.get(f.id)?.state ?? "")).length,
+      errors: feed.filter((f) => listingNeedsAttention(f, latestSyncJobs.get(f.id), localSyncIssues.has(f.id))).length,
     };
   }, [feedData, latestSyncJobs, localSyncIssues]);
 
@@ -1911,7 +1949,7 @@ export default function EbayChannelPage() {
                 variant="outline"
                 size="sm"
                 className="flex-1 sm:flex-none min-h-[44px] sm:min-h-0"
-                disabled={feedCounts.ready === 0}
+                disabled={feedCounts.ready === 0 || !!feedError || syncJobsQuery.isError || syncJobsQuery.isPending}
                 onClick={handlePushAll}
               >
                 <Zap className="h-4 w-4 mr-2" />
@@ -1939,7 +1977,7 @@ export default function EbayChannelPage() {
               {syncJobsQuery.isError && (
                 <div role="alert" className="mb-3 space-y-2 rounded-md border border-amber-300 p-3 text-sm">
                   <p className="font-medium">Saved sync status is unavailable</p>
-                  <p>We cannot tell whether an update is still running or needs your attention. Refresh its status before starting another sync.</p>
+                  <p>We cannot tell whether an update is still running or needs your attention. Refresh its status before starting another sync or publication.</p>
                   <Button variant="outline" size="sm" onClick={() => syncJobsQuery.refetch()}>Refresh sync status</Button>
                 </div>
               )}
@@ -2004,6 +2042,7 @@ export default function EbayChannelPage() {
                     {filteredFeed.map((item) => {
                       const syncJob = latestSyncJobs.get(item.id);
                       const syncPending = syncJob && ["queued","running","recovering"].includes(syncJob.state);
+                      const publicationPending = syncPending && syncJob?.operation === "publish";
                       const syncIssue = localSyncIssues.get(item.id)?.issue ?? (syncJob && ["awaiting_evidence", "needs_attention"].includes(syncJob.state)
                         ? syncJob.issue ?? resolveEbayListingIssue({ code: syncJob.code, message: syncJob.message, productId: item.id, jobId: syncJob.id, state: syncJob.state })
                         : item.status === "error" && item.syncError && !syncPending
@@ -2101,7 +2140,9 @@ export default function EbayChannelPage() {
                             </span>
                             {syncJob && syncJob.state !== "completed" && (
                               <p role="status" aria-label={`Sync status for ${item.name}`} className="text-xs mt-1" title={syncJob.message ?? undefined}>
-                                {syncJob.state === "queued" ? "Sync saved — waiting to run" : syncJob.state === "running" ? "Sync in progress" : syncJob.state === "recovering" ? "Sync saved — recovering automatically" : "Update paused — see the next step below"}
+                                {syncJob.code === "EBAY_PUBLICATION_READBACK_PENDING" ? "Checking published listing and pictures" : syncJob.operation === "publish"
+                                  ? syncJob.state === "queued" ? "Publishing saved — waiting to run" : syncJob.state === "running" ? "Publishing in progress" : syncJob.state === "recovering" ? "Publishing saved — recovering automatically" : "Publishing paused — see the next step below"
+                                  : syncJob.state === "queued" ? "Sync saved — waiting to run" : syncJob.state === "running" ? "Sync in progress" : syncJob.state === "recovering" ? "Sync saved — recovering automatically" : "Update paused — see the next step below"}
                                 {syncPending && syncJob.message && <span className="block text-muted-foreground">{syncJob.message}</span>}
                                 {syncJob.state === "recovering" && <span className="block text-muted-foreground">Next check: {new Date(syncJob.nextAttemptAt).toLocaleString()}</span>}
                               </p>
@@ -2139,13 +2180,19 @@ export default function EbayChannelPage() {
                               <Badge variant="outline" className="text-xs">
                                 {item.productTypeName || item.productType}
                               </Badge>
-                              {item.status === "ready" && (
+                              {publicationPending && <><Badge className="bg-blue-600 text-xs">Publishing</Badge><Button variant="outline" size="sm" className="min-h-[44px] px-3 text-xs" onClick={event => { event.stopPropagation(); setPublicationStatusTarget({ jobId: syncJob.id, productId: item.id, name: item.name }); }}>View publishing status</Button></>}
+                              {item.status === "publication_incomplete" && !publicationPending && <>
+                                <Badge variant="outline" className="text-amber-700 border-amber-300 text-xs">Publication needs checking</Badge>
+                                <Button variant="outline" size="sm" className="min-h-[44px] px-3 text-xs" disabled={!!syncPending} onClick={(event) => { event.stopPropagation(); handlePublicationReview(item); }}>Check publication</Button>
+                              </>}
+                              {item.status === "ready" && !publicationPending && (
                                 <>
                                   <Badge className="bg-green-600 hover:bg-green-600 text-xs py-1 px-2">Ready</Badge>
                                   <Button
                                     variant="outline"
                                     size="sm"
                                     className="min-h-[44px] min-w-[44px] px-3 text-xs"
+                                    disabled={syncJobsQuery.isError || syncJobsQuery.isPending}
                                     onClick={(e) => { e.stopPropagation(); handlePushSingle(item.id); }}
                                   >
                                     <Zap className="h-4 w-4 mr-1" />
@@ -2160,7 +2207,7 @@ export default function EbayChannelPage() {
                                     variant="outline"
                                     size="sm"
                                     className="min-h-[44px] min-w-[44px] px-3 text-xs"
-                                    disabled={syncingProductIds.has(item.id)}
+                                    disabled={syncingProductIds.has(item.id) || syncJobsQuery.isError || syncJobsQuery.isPending}
                                     onClick={(e) => {
                                       e.stopPropagation();
                                       if (item.externalListingId) handleSyncProduct(item.id);
@@ -2186,7 +2233,7 @@ export default function EbayChannelPage() {
                                   Specifics: {item.missingAspects?.slice(0, 3).join(", ")}{item.missingAspects?.length > 3 ? ` +${item.missingAspects.length - 3}` : ""}
                                 </Badge>
                               )}
-                              {item.status === "listed" && (
+                              {item.status === "listed" && !publicationPending && (
                                 <>
                                   <Badge className="bg-blue-600 hover:bg-blue-600 text-xs">{syncIssue ? "Listed · update paused" : "Listed"}</Badge>
                                   <Button
@@ -2275,13 +2322,19 @@ export default function EbayChannelPage() {
                           <TableCell className="hidden sm:table-cell text-center">
                             <div className="flex flex-col items-center gap-1">
                               <div className="flex items-center justify-center gap-1.5 flex-wrap">
-                                {item.status === "ready" && (
+                                {publicationPending && <><Badge className="bg-blue-600 text-xs">Publishing</Badge><Button variant="outline" size="sm" className="min-h-9 text-xs" onClick={event => { event.stopPropagation(); setPublicationStatusTarget({ jobId: syncJob.id, productId: item.id, name: item.name }); }}>View publishing status</Button></>}
+                                {item.status === "publication_incomplete" && !publicationPending && <>
+                                  <Badge variant="outline" className="text-amber-700 border-amber-300 text-xs">Publication needs checking</Badge>
+                                  <Button variant="outline" size="sm" className="min-h-9 text-xs" disabled={!!syncPending} onClick={(event) => { event.stopPropagation(); handlePublicationReview(item); }}>Check publication</Button>
+                                </>}
+                                {item.status === "ready" && !publicationPending && (
                                   <>
                                     <Badge className="bg-green-600 hover:bg-green-600 text-xs">Ready</Badge>
                                     <Button
                                       variant="ghost"
                                       size="sm"
                                       className="h-6 w-6 p-0"
+                                      disabled={syncJobsQuery.isError || syncJobsQuery.isPending}
                                       onClick={(e) => { e.stopPropagation(); handlePushSingle(item.id); }}
                                       title="Push to eBay"
                                     >
@@ -2296,7 +2349,7 @@ export default function EbayChannelPage() {
                                       variant="ghost"
                                       size="sm"
                                       className="h-6 w-6 p-0"
-                                      disabled={syncingProductIds.has(item.id)}
+                                      disabled={syncingProductIds.has(item.id) || syncJobsQuery.isError || syncJobsQuery.isPending}
                                       onClick={(e) => {
                                         e.stopPropagation();
                                         if (item.externalListingId) handleSyncProduct(item.id);
@@ -2322,7 +2375,7 @@ export default function EbayChannelPage() {
                                     Specifics: {item.missingAspects?.slice(0, 2).join(", ")}{item.missingAspects?.length > 2 ? ` +${item.missingAspects.length - 2}` : ""}
                                   </Badge>
                                 )}
-                                {item.status === "listed" && (
+                                {item.status === "listed" && !publicationPending && (
                                   <>
                                     <Badge className="bg-blue-600 hover:bg-blue-600 text-xs">{syncIssue ? "Listed · update paused" : "Listed"}</Badge>
                                     <Button
@@ -2911,6 +2964,11 @@ export default function EbayChannelPage() {
         onIssueAction={handleIssueAction}
       />
 
+      {publicationStatusTarget && <EbayListingJobStatusDialog
+        key={publicationStatusTarget.jobId} jobId={publicationStatusTarget.jobId} productId={publicationStatusTarget.productId}
+        productName={publicationStatusTarget.name} onClose={() => setPublicationStatusTarget(null)} onIssueAction={handleIssueAction}
+      />}
+
       <EbaySyncRecoveryDialog
         jobId={recoveryTarget?.jobId ?? null}
         productId={recoveryTarget?.mode === "recovery" ? recoveryTarget.productId : null}
@@ -2920,7 +2978,7 @@ export default function EbayChannelPage() {
         onClose={() => setRecoveryTarget(null)}
         checking={recoveryTarget ? syncingProductIds.has(recoveryTarget.productId) : false}
         onRecheck={() => { if (recoveryTarget) { if (recoveryTarget.jobId) handleSyncProduct(recoveryTarget.productId); else handlePushSingle(recoveryTarget.productId); } }}
-        onRecovered={() => { if (recoveryTarget) setLocalSyncIssues((previous) => { const next = new Map(previous); next.delete(recoveryTarget.productId); return next; }); }}
+        onRecovered={() => { if (recoveryTarget) clearUntrackedLocalIssue(recoveryTarget.productId); }}
       />
 
       {recoveryTarget?.mode === "mapping" && <EbayMappingRepairDialog
@@ -2929,7 +2987,7 @@ export default function EbayChannelPage() {
         productName={recoveryTarget.name}
         onClose={() => setRecoveryTarget(null)}
         onIssueAction={handleIssueAction}
-        onQueued={(job) => setLocalSyncIssues((previous) => { const next = new Map(previous); next.delete(job.productId); return next; })}
+        onQueued={(job) => clearUntrackedLocalIssue(job.productId)}
         onReviewRegisteredListing={async () => {
           const currentFeed = await refetchFeed();
           const product = currentFeed.data?.feed.find((item) => item.id === recoveryTarget.productId);
@@ -2939,13 +2997,12 @@ export default function EbayChannelPage() {
         }}
       />}
 
-      {/* Push Progress Modal (SSE-based) */}
+      {/* Saved publication progress */}
       <PushProgressModal
         key={pushRunId}
         open={pushModalOpen}
         onClose={() => setPushModalOpen(false)}
         productIds={pushProductIds}
-        onRetryFailed={handleRetryFailed}
         onIssueAction={handleIssueAction}
       />
     </div>
