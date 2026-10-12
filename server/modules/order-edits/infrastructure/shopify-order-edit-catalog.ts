@@ -15,6 +15,7 @@ import {
   type OrderEditCatalogCategoriesInput,
   type OrderEditCatalogProductsInput,
   type OrderEditCatalogVariantsInput,
+  type OrderEditCatalogMode,
 } from "@shared/order-edits/order-edit-catalog";
 import type {
   OrderEditCatalog,
@@ -34,6 +35,9 @@ import {
   stockAvailable,
   supportedVariant,
   supportedCatalogProduct,
+  availableCatalogProduct,
+  availableCatalogVariant,
+  catalogSelectionFlow,
 } from "../domain/order-edit-variant";
 import { shopifyOrderEditVariantSchema } from "./shopify-order-edit-variant";
 import { cents } from "./shopify-order-edit-money";
@@ -125,7 +129,11 @@ export class ShopifyOrderEditCatalog implements OrderEditCatalog {
     });
   }
 
-  async products(connectionId: number, raw: OrderEditCatalogProductsInput) {
+  async products(
+    connectionId: number,
+    raw: OrderEditCatalogProductsInput,
+    mode: OrderEditCatalogMode = "editable",
+  ) {
     const input = orderEditCatalogProductsInputSchema.parse(raw);
     const data = read(
       z.object({
@@ -147,7 +155,9 @@ export class ShopifyOrderEditCatalog implements OrderEditCatalog {
     assertUnique(data.products.nodes.map((entry) => entry.id));
     const candidates = data.products.nodes.filter(
       (entry) =>
-        supportedCatalogProduct(entry) &&
+        (mode === "available"
+          ? availableCatalogProduct(entry)
+          : supportedCatalogProduct(entry)) &&
         (input.category === null ||
           entry.productType.trim() === input.category),
     );
@@ -162,7 +172,7 @@ export class ShopifyOrderEditCatalog implements OrderEditCatalog {
         offset + AVAILABILITY_READ_CONCURRENCY,
       );
       const checks = await Promise.all(
-        batch.map((entry) => this.hasAvailableOption(connectionId, entry)),
+        batch.map((entry) => this.hasAvailableOption(connectionId, entry, mode)),
       );
       available.push(...batch.filter((_entry, index) => checks[index]));
     }
@@ -178,6 +188,7 @@ export class ShopifyOrderEditCatalog implements OrderEditCatalog {
     connectionId: number,
     raw: OrderEditCatalogVariantsInput,
     pricingContext?: OrderEditCatalogPricingContext,
+    mode: OrderEditCatalogMode = "editable",
   ) {
     const input = orderEditCatalogVariantsInputSchema.parse(raw);
     if (input.omsOrderId !== null && !pricingContext)
@@ -207,7 +218,12 @@ export class ShopifyOrderEditCatalog implements OrderEditCatalog {
         after: input.after,
       }),
     );
-    if (!data.product || !supportedCatalogProduct(data.product))
+    if (
+      !data.product ||
+      !(mode === "available"
+        ? availableCatalogProduct(data.product)
+        : supportedCatalogProduct(data.product))
+    )
       throw new OrderEditProviderError(
         "CATALOG_PRODUCT_UNAVAILABLE",
         "This product is no longer available on this store.",
@@ -222,7 +238,11 @@ export class ShopifyOrderEditCatalog implements OrderEditCatalog {
         invalid("A SKU does not belong to the selected product.");
     const selectedProduct = data.product;
     const options = data.product.variants.nodes
-      .filter((entry) => supportedVariant(entry) && stockAvailable(entry, 1))
+      .filter((entry) =>
+        mode === "available"
+          ? availableCatalogVariant(entry, 1)
+          : supportedVariant(entry) && stockAvailable(entry, 1),
+      )
       .map((entry) => {
         const retailPriceCents = cents(entry.price);
         return {
@@ -235,6 +255,9 @@ export class ShopifyOrderEditCatalog implements OrderEditCatalog {
             : retailPriceCents,
           ...(pricingContext ? { retailPriceCents } : {}),
           available: true,
+          ...(mode === "available"
+            ? { selectionFlow: catalogSelectionFlow(entry) }
+            : {}),
         };
       });
     let memberPlan = null;
@@ -278,6 +301,7 @@ export class ShopifyOrderEditCatalog implements OrderEditCatalog {
   private async hasAvailableOption(
     connectionId: number,
     initial: z.infer<typeof productWithAvailability>,
+    mode: OrderEditCatalogMode,
   ): Promise<boolean> {
     let page: z.infer<typeof availabilityPage> = initial.variants;
     let parent: z.infer<typeof product> = initial;
@@ -292,8 +316,10 @@ export class ShopifyOrderEditCatalog implements OrderEditCatalog {
       if (
         page.nodes.some(
           (option) =>
-            supportedVariant({ ...option, product: parent }) &&
-            stockAvailable({ ...option, product: parent }, 1),
+            mode === "available"
+              ? availableCatalogVariant(option, 1)
+              : supportedVariant({ ...option, product: parent }) &&
+                stockAvailable({ ...option, product: parent }, 1),
         )
       )
         return true;
@@ -316,7 +342,11 @@ export class ShopifyOrderEditCatalog implements OrderEditCatalog {
       if (!next.product) return false;
       if (next.product.id !== initial.id)
         invalid("The stock probe belongs to another product.");
-      if (!supportedCatalogProduct(next.product)) return false;
+      if (
+        !(mode === "available"
+          ? availableCatalogProduct(next.product)
+          : supportedCatalogProduct(next.product))
+      ) return false;
       assertCursorProgress(next.product.variants.pageInfo, after);
       parent = next.product;
       page = next.product.variants;

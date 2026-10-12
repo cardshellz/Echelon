@@ -616,6 +616,84 @@ const pricedVariant = (
   },
 ) => variant({ planPrices: { value: JSON.stringify(prices) } });
 
+describe("available storefront discovery independently of edit eligibility", () => {
+  const cases = [
+    ["membership", { membershipVariant: { value: "true" }, sellableOnlineQuantity: 0, inventoryItem: { requiresShipping: false, tracked: false }, product: { ...variant().product, requiresSellingPlan: true } }],
+    ["subscription", { product: { ...variant().product, requiresSellingPlan: true } }],
+    ["gift_card", { inventoryItem: { requiresShipping: false, tracked: false }, product: { ...variant().product, isGiftCard: true } }],
+    ["bundle", { requiresComponents: true }],
+    ["non_shipping", { inventoryItem: { requiresShipping: false, tracked: true } }],
+    ["inventory_review", { inventoryItem: { requiresShipping: true, tracked: false }, sellableOnlineQuantity: 0 }],
+    ["inventory_review", { inventoryPolicy: "CONTINUE" }],
+  ] as const;
+  it.each(cases)("finds available %s products and returns their selection flow instead of hiding them", async (flow, patch) => {
+    const option = variant(patch);
+    const parent = {
+      isGiftCard: option.product.isGiftCard,
+      requiresSellingPlan: option.product.requiresSellingPlan,
+    };
+    const h = harness(products([product({ ...parent, variants: { nodes: [option], pageInfo } })]));
+    const visible = await h.catalog.products(4, { search: ".club", category: null, after: null }, "available");
+    expect(visible.products).toHaveLength(1);
+    expect(h.wire().variables.query).toContain("title:club*");
+    const options = harness(variants([option], parent));
+    const selected = await options.catalog.productVariants(4, { productId, after: null }, undefined, "available");
+    expect(selected.variants).toMatchObject([{ variantId: option.id, available: true, selectionFlow: flow }]);
+    // Older clients retain their physical-only response without new DTO fields.
+    const legacy = harness(variants([option], parent));
+    if (parent.isGiftCard || parent.requiresSellingPlan)
+      await expect(legacy.catalog.productVariants(4, { productId, after: null }))
+        .rejects.toMatchObject({ code: "CATALOG_PRODUCT_UNAVAILABLE" });
+    else
+      expect((await legacy.catalog.productVariants(4, { productId, after: null })).variants).toEqual([]);
+    expect(options.wire().query.trim().startsWith("query ")).toBe(true);
+  });
+  it.each([
+    { availableForSale: false },
+    { sellableOnlineQuantity: 0 },
+    { sellableOnlineQuantity: -1, inventoryPolicy: "CONTINUE" },
+  ])("continues hiding unavailable or sold-out tracked products: %j", async (patch) => {
+    const option = variant(patch);
+    const h = harness(products([product({ variants: { nodes: [option], pageInfo } })]));
+    expect((await h.catalog.products(4, { search: "", category: null, after: null }, "available")).products).toEqual([]);
+    const options = harness(variants([option]));
+    expect((await options.catalog.productVariants(4, { productId, after: null }, undefined, "available")).variants).toEqual([]);
+  });
+  it("keeps unpublished products hidden even when their variants are available", async () => {
+    for (const patch of [{ status: "DRAFT" }, { status: "ARCHIVED" }, { onlineStoreUrl: null }]) {
+      const h = harness(products([product(patch)]));
+      expect((await h.catalog.products(4, { search: "", category: null, after: null }, "available")).products).toEqual([]);
+    }
+  });
+  it("discovers a membership on a later stock page without staging an edit", async () => {
+    const probe = { nodes: [variant({ sellableOnlineQuantity: 0 })], pageInfo: { hasNextPage: true, endCursor: "next" } };
+    const membership = variant({
+      id: "gid://shopify/ProductVariant/21",
+      membershipVariant: { value: "true" },
+      inventoryItem: { requiresShipping: false, tracked: false },
+      sellableOnlineQuantity: 0,
+    });
+    const h = harness(products([product({ variants: probe })]));
+    h.request.mockResolvedValueOnce(new Response(JSON.stringify({ data: products([product({ variants: probe })]) })))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ data: variants([membership]) })));
+    expect((await h.catalog.products(4, { search: ".club", category: null, after: null }, "available")).products).toHaveLength(1);
+    expect(h.request).toHaveBeenCalledTimes(2);
+    expect(h.request.mock.calls.every((call) => JSON.parse(String(call[1]?.body)).query.trim().startsWith("query "))).toBe(true);
+  });
+  it("uses the existing member price resolver for ordinary items while leaving the membership itself at full price", async () => {
+    const reader = { read: vi.fn(async () => clubPresentation) };
+    const option = pricedVariant();
+    const h = harness(variants([option]), {}, reader);
+    const physical = await h.catalog.productVariants(4, scopedInput, memberContext(), "available");
+    expect(physical.variants[0]).toMatchObject({ priceCents: 233, retailPriceCents: 279, selectionFlow: "order_edit" });
+    expect(physical.memberPlan).toEqual(clubPresentation);
+    const membership = harness(variants([variant({ ...option, membershipVariant: { value: "true" } })]), {}, reader);
+    const selected = await membership.catalog.productVariants(4, scopedInput, memberContext(), "available");
+    expect(selected.variants[0]).toMatchObject({ priceCents: 279, retailPriceCents: 279, selectionFlow: "membership" });
+    expect(selected.memberPlan).toBeNull();
+  });
+});
+
 describe("order-scoped catalog member pricing", () => {
   it("uses the same exact-cent checkout projection for the verified customer's plan, with storefront display settings", async () => {
     const reader = { read: vi.fn(async () => clubPresentation) };

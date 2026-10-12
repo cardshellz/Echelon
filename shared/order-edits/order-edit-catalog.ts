@@ -2,6 +2,23 @@ import { z } from "zod";
 import { orderEditVariantSchema } from "./order-edit.contract";
 import { memberPlanPresentationSchema } from "../membership/member-plan-presentation";
 
+// Discovery capability only; pricing and financial commands keep their own checks.
+export const ORDER_EDIT_CATALOG_HEADER = "X-Order-Edit-Catalog";
+export const ORDER_EDIT_CATALOG_VERSION = "available-v1";
+export type OrderEditCatalogMode = "editable" | "available";
+export const orderEditCatalogSelectionFlowSchema = z.enum([
+  "order_edit",
+  "membership",
+  "subscription",
+  "gift_card",
+  "bundle",
+  "non_shipping",
+  "inventory_review",
+]);
+export type OrderEditCatalogSelectionFlow = z.infer<
+  typeof orderEditCatalogSelectionFlowSchema
+>;
+
 // Bound a single catalog read; larger catalogs use cursors rather than truncation.
 export const ORDER_EDIT_CATALOG_PRODUCT_PAGE_SIZE = 20;
 export const ORDER_EDIT_CATALOG_VARIANT_PAGE_SIZE = 50;
@@ -51,6 +68,7 @@ export const orderEditCatalogVariantsInputSchema = z
 export const orderEditCatalogVariantSchema = orderEditVariantSchema
   .extend({
     retailPriceCents: z.number().int().nonnegative().safe().optional(),
+    selectionFlow: orderEditCatalogSelectionFlowSchema.optional(),
   })
   .refine(
     (option) =>

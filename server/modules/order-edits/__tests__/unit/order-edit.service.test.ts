@@ -416,7 +416,7 @@ describe("private order edit orchestration", () => {
       customerId: "gid://shopify/Customer/8",
       memberPlan: planId,
       memberPricingEnabled: true,
-    });
+    }, "editable");
     expect(h.provider.quote).not.toHaveBeenCalled();
     expect(h.provider.commit).not.toHaveBeenCalled();
     expect(h.warehouse.acquire).not.toHaveBeenCalled();
