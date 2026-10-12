@@ -6,6 +6,7 @@ import type { DropshipPricingRulesService } from "../../application/dropship-pri
 import { createDropshipPricingRulesService } from "../../infrastructure/dropship-pricing-rules.factory";
 import { DropshipError } from "../../domain/errors";
 import { requireDropshipAuth } from "./dropship-auth.routes";
+import { PRICING_RULES_TOO_LARGE_MESSAGE, parseDropshipBulkJsonFor } from "./dropship-bulk-json.middleware";
 
 export function registerDropshipPricingRulesRoutes(app: Express,
   service: Pick<DropshipPricingRulesService, "getForMember" | "reviewForMember" | "reviewPageForMember" | "applyForMember" | "targetsForMember"> = createDropshipPricingRulesService()): void {
@@ -19,7 +20,8 @@ export function registerDropshipPricingRulesRoutes(app: Express,
     validateOutput(pricingTargetsResponseSchema, await service.targetsForMember(req.session.dropship!.memberId, parseId(req.params.storeConnectionId), {
       type: req.query.type, search: req.query.search ?? "", page: parsePage(req.query.page),
     }))));
-  app.post(`${path}/reviews`, requireDropshipAuth, limiter, async (req, res) => respond(res, async () =>
+  // A rule set with long lists of single sizes can pass the 100 KB global limit; this route parses up to 1 MiB after auth.
+  app.post(`${path}/reviews`, requireDropshipAuth, limiter, parseDropshipBulkJsonFor(PRICING_RULES_TOO_LARGE_MESSAGE), async (req, res) => respond(res, async () =>
     validateOutput(pricingReviewResponseSchema, await service.reviewForMember(req.session.dropship!.memberId, parseId(req.params.storeConnectionId), req.body))));
   app.get(`${path}/reviews/:reviewId`, requireDropshipAuth, async (req, res) => respond(res, async () =>
     validateOutput(pricingReviewResponseSchema, await service.reviewPageForMember(req.session.dropship!.memberId, parseId(req.params.storeConnectionId),

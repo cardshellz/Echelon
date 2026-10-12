@@ -32,6 +32,13 @@ export interface PricingRulesTransaction {
    * where the listing settings design puts it (plan 4.4).
    */
   loadRuleLayers(candidates: readonly { productId: number; categoryId: number | null }[]): Promise<ListingSettingLayers>;
+  /**
+   * The selection SHARE locks W9 takes (plan PR 9, P37), after the store lock
+   * and the owner rows: from here to commit no selection or exposure rule
+   * changes, so the apply's recompute is what it writes. Apply only, after
+   * the replay check; reviews and reads never take it.
+   */
+  lockSelection(): Promise<void>;
   storeReview(review: StoredPricingReview): Promise<void>;
   loadReview(id: string): Promise<StoredPricingReview | null>;
   findApplication(input: ApplyPricingRulesInput): Promise<{ revisionId: number } | null>;
@@ -79,6 +86,7 @@ export class DropshipPricingRulesService {
     const result = await this.execute(memberId, storeId, async (tx, storeConnectionId) => {
       const replay = await tx.findApplication(parsed);
       if (replay) return { ...replay, idempotentReplay: true };
+      await tx.lockSelection();
       const review = await requireReview(tx, parsed.reviewId);
       if (review.hash !== parsed.reviewHash) throw staleReview();
       if (review.rows.some((row) => row.issues.length > 0)) {

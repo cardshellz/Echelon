@@ -4,6 +4,7 @@ import { ZodError, type z } from "zod";
 import {
   listingSettingsPricesResponseSchema,
   listingSettingsProductDetailSchema,
+  listingSettingsProductIdsResponseSchema,
   listingSettingsProductsResponseSchema,
   listingSettingsSummarySchema,
 } from "../../../../../shared/dropship/listing-settings";
@@ -14,7 +15,7 @@ import { createDropshipListingSettingsService } from "../../infrastructure/drops
 import { requireDropshipAuth } from "./dropship-auth.routes";
 
 type ListingSettingsRouteService = Pick<DropshipListingSettingsService,
-  "getSummaryForMember" | "listPricesForMember" | "listProductsForMember" | "getProductForMember">;
+  "getSummaryForMember" | "listPricesForMember" | "listProductsForMember" | "listProductIdsForMember" | "getProductForMember">;
 
 /** Reads only, so the read budget from the Listing settings design (8.8). */
 export const LISTING_SETTINGS_READS_PER_MINUTE = 120;
@@ -45,6 +46,9 @@ export function registerDropshipListingSettingsRoutes(
     () => service.listPricesForMember(memberId(req), listInput(req))));
   app.get(`${base}/products`, requireDropshipAuth, limiter, (req, res) => respond(req, res, listingSettingsProductsResponseSchema,
     () => service.listProductsForMember(memberId(req), listInput(req))));
+  // Registered before the product route so "ids" never reads as a product id.
+  app.get(`${base}/products/ids`, requireDropshipAuth, limiter, (req, res) => respond(req, res, listingSettingsProductIdsResponseSchema,
+    () => service.listProductIdsForMember(memberId(req), productIdsInput(req))));
   app.get(`${base}/products/:productId`, requireDropshipAuth, limiter, (req, res) => respond(req, res, listingSettingsProductDetailSchema,
     () => service.getProductForMember(memberId(req), {
       storeConnectionId: parseId(req.params.storeConnectionId),
@@ -58,8 +62,24 @@ function listInput(req: Request) {
     storeConnectionId: parseId(req.params.storeConnectionId),
     search: req.query.search,
     show: req.query.show,
-    page: req.query.page === undefined ? undefined : typeof req.query.page === "string" ? parseId(req.query.page) : req.query.page,
+    page: queryId(req.query.page),
+    ...(req.query.categoryId === undefined ? {} : { categoryId: queryId(req.query.categoryId) }),
   };
+}
+
+function productIdsInput(req: Request) {
+  return {
+    storeConnectionId: parseId(req.params.storeConnectionId),
+    search: req.query.search,
+    show: req.query.show,
+    ...(req.query.categoryId === undefined ? {} : { categoryId: queryId(req.query.categoryId) }),
+    ...(req.query.productId === undefined ? {} : { productId: queryId(req.query.productId) }),
+  };
+}
+
+/** A query number as the schema checks it: digits only, else NaN; a repeated key stays an array for the schema to refuse. */
+function queryId(value: unknown): unknown {
+  return value === undefined ? undefined : typeof value === "string" ? parseId(value) : value;
 }
 
 function memberId(req: Request): string {
