@@ -5,6 +5,7 @@ import type {
   OrderEditCatalogProductsInput,
   OrderEditCatalogVariants,
   OrderEditCatalogVariantsInput,
+  OrderEditCatalogMode,
 } from "@shared/order-edits/order-edit-catalog";
 import type { OrderEditSnapshot } from "./order-edit-provider";
 
@@ -22,10 +23,12 @@ export interface OrderEditCatalog {
   products(
     connectionId: number,
     input: OrderEditCatalogProductsInput,
+    mode?: OrderEditCatalogMode,
   ): Promise<OrderEditCatalogProducts>;
   productVariants(
     connectionId: number,
     input: OrderEditCatalogVariantsInput,
     pricingContext?: OrderEditCatalogPricingContext,
+    mode?: OrderEditCatalogMode,
   ): Promise<OrderEditCatalogVariants>;
 }

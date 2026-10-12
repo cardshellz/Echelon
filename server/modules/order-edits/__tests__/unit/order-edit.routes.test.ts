@@ -10,6 +10,7 @@ import {
 } from "@shared/order-edits/order-edit.contract";
 import { registerOrderEditRoutes } from "../../interfaces/order-edit.routes";
 import type { OrderEditService } from "../../application/order-edit.service";
+import { ORDER_EDIT_CATALOG_HEADER, ORDER_EDIT_CATALOG_VERSION } from "@shared/order-edits/order-edit-catalog";
 import {
   previewInput,
   previewCalculation,
@@ -250,7 +251,7 @@ describe("order edit staff HTTP boundary", () => {
       search: "toploader",
       category: null,
       after: null,
-    });
+    }, "editable");
     expect(catalogVariants).toHaveBeenCalledWith(
       4,
       {
@@ -260,6 +261,7 @@ describe("order edit staff HTTP boundary", () => {
         expectedRevision: null,
       },
       "staff",
+      "editable",
     );
     expect(quote).not.toHaveBeenCalled();
   });
@@ -308,9 +310,25 @@ describe("order edit staff HTTP boundary", () => {
         expectedRevision: "baseline",
       },
       "staff",
+      "editable",
     );
     expect(quote).not.toHaveBeenCalled();
   });
+  it.each([undefined, "unknown", ORDER_EDIT_CATALOG_VERSION])("negotiates discovery independently of purchase authority: %s", async (version) => {
+    const headers: Record<string, string> = {};
+    if (version !== undefined) headers[ORDER_EDIT_CATALOG_HEADER] = version;
+    const mode = version === ORDER_EDIT_CATALOG_VERSION ? "available" : "editable";
+    const productResponse = await fetch(`${url}/api/order-edits/admin/catalog/products?connectionId=4&search=club`, { headers });
+    expect(productResponse.status).toBe(200);
+    expect(catalogProducts).toHaveBeenCalledExactlyOnceWith(4, { search: "club", after: null, category: null }, mode);
+    const params = new URLSearchParams({ connectionId: "4", productId: "gid://shopify/Product/10", omsOrderId: "1", expectedRevision: "baseline" });
+    expect((await fetch(`${url}/api/order-edits/admin/catalog/variants?${params}`, { headers })).status).toBe(200);
+    expect(catalogVariants).toHaveBeenCalledExactlyOnceWith(4, { productId: "gid://shopify/Product/10", after: null, omsOrderId: 1, expectedRevision: "baseline" }, "staff", mode);
+    expect(quote).not.toHaveBeenCalled();
+    permission.mockResolvedValue(false);
+    expect((await fetch(`${url}/api/order-edits/admin/catalog/products?connectionId=4`, { headers })).status).toBe(403);
+  });
+
   it("denies customers/anonymous sessions and current staff without orders:edit", async () => {
     loggedIn = false;
     expect((await fetch(`${url}/api/order-edits/admin/state`)).status).toBe(
