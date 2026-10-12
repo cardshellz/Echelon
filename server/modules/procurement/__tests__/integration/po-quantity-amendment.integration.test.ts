@@ -25,6 +25,11 @@ vi.mock("../../../../db", () => ({ db: new Proxy({}, { get(_target, property) {
 import { createPoQuantityAmendmentService } from "../../po-quantity-amendment.service";
 import { registerPoQuantityAmendmentRoutes } from "../../po-quantity-amendment.routes";
 import { createInvoiceQuantityCorrectionService } from "../../invoice-quantity-correction.service";
+import { createPoVarianceApprovalService } from "../../po-variance-approval.service";
+import { registerPoVarianceApprovalRoutes } from "../../po-variance-approval.routes";
+import { readQuantityAmendmentSource } from "../../po-quantity-amendment.repository";
+import { computePurchaseOrderInvoiceMatchSourceFingerprint } from "../../purchase-order-invoice-match";
+import { resolveException, acknowledgeException } from "../../po-exceptions.service";
 import { registerInvoiceQuantityCorrectionRoutes } from "../../invoice-quantity-correction.routes";
 
 const TEST_URL = process.env.ECHELON_TEST_DATABASE_URL;
@@ -36,6 +41,7 @@ databaseTests.sequential("PO quantity amendment real PostgreSQL and HTTP guarant
   let database: ReturnType<typeof drizzle<typeof schema>>;
   let service: ReturnType<typeof createPoQuantityAmendmentService>;
   let invoiceService: ReturnType<typeof createInvoiceQuantityCorrectionService>;
+  let varianceService: ReturnType<typeof createPoVarianceApprovalService>;
   let server: Server;
   let url: string;
   let requestActor: string | null = "admin-user";
@@ -64,6 +70,15 @@ databaseTests.sequential("PO quantity amendment real PostgreSQL and HTTP guarant
     records.invoiceEconomics = (await pool.query("SELECT id,vendor_invoice_id,purchase_order_line_id,qty_invoiced,unit_cost_cents,unit_cost_mills,line_total_cents,cost_component_evidence FROM procurement.vendor_invoice_lines ORDER BY id")).rows;
     return records;
   };
+  async function retryEligible(key: string) {
+    const deadline = Date.now() + 10000;
+    while (true) {
+      const state = await pool.query("SELECT next_attempt_at <= clock_timestamp() AS eligible FROM public.financial_command_results WHERE idempotency_key=$1", [key]);
+      if (state.rows[0].eligible) return;
+      if (Date.now() > deadline) throw new Error("Correction retry did not become eligible.");
+      await new Promise(done => setTimeout(done, 20));
+    }
+  }
   const post = async (request: unknown, key = randomUUID()) => {
     const response = await fetch(`${url}/api/purchase-orders/1/quantity-amendment`, { method: "POST", headers: { "Content-Type": "application/json", "Idempotency-Key": key }, body: JSON.stringify(request) });
     return { status: response.status, body: await response.json(), replayed: response.headers.get("Idempotency-Replayed") };
@@ -92,10 +107,12 @@ databaseTests.sequential("PO quantity amendment real PostgreSQL and HTTP guarant
     database = drizzle(pool, { schema }); connection.database = database;
     service = createPoQuantityAmendmentService(database, () => NOW);
     invoiceService = createInvoiceQuantityCorrectionService(database, () => NOW);
+    varianceService = createPoVarianceApprovalService(database, () => NOW);
     const app = express(); app.use(express.json());
     app.use((req, _res, next) => { (req as unknown as { session: unknown }).session = { user: requestActor ? { id: requestActor, role: "admin" } : undefined }; next(); });
     registerPoQuantityAmendmentRoutes(app, service);
     registerInvoiceQuantityCorrectionRoutes(app, invoiceService);
+    registerPoVarianceApprovalRoutes(app, varianceService);
     server = createServer(app); await new Promise<void>((done) => server.listen(0, "127.0.0.1", done));
     url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
   });
@@ -134,6 +151,31 @@ databaseTests.sequential("PO quantity amendment real PostgreSQL and HTTP guarant
   afterAll(async () => {
     if (server) await new Promise<void>((done, reject) => server.close((error) => error ? reject(error) : done()));
     if (pool) { for (const name of ["procurement", "inventory", "identity"]) await pool.query(`DROP SCHEMA ${name} CASCADE`); await pool.end(); }
+  });
+  it("freezes newly created approval tiers until the reviewed source transaction finishes", async () => {
+    await pool.query("UPDATE inventory.warehouse_settings SET require_approval=true");
+    let release!: () => void, ready!: () => void;
+    const releasePromise = new Promise<void>(resolve => { release = resolve; });
+    const readyPromise = new Promise<void>(resolve => { ready = resolve; });
+    const reader = database.transaction(async tx => {
+      const source = await readQuantityAmendmentSource(tx, 1, "admin-user");
+      ready(); await releasePromise; return source.sourceVersion;
+    });
+    await Promise.race([readyPromise, reader.then(() => { throw new Error("Source transaction finished before the policy lock check."); })]);
+    const writer = await pool.connect();
+    const writerPid = (await writer.query<{ pid: number }>("SELECT pg_backend_pid() AS pid")).rows[0].pid;
+    const insert = writer.query("INSERT INTO procurement.po_approval_tiers(tier_name,threshold_cents,approver_role,active) VALUES('Concurrent finance tier',1000,'Finance Director',1)");
+    try {
+      const deadline = Date.now() + 5000;
+      while (true) {
+        const activity = await pool.query("SELECT wait_event_type FROM pg_stat_activity WHERE pid=$1", [writerPid]);
+        if (activity.rows[0]?.wait_event_type === "Lock") break;
+        if (Date.now() > deadline) throw new Error("The configuration writer was not blocked by the reviewed source lock.");
+        await new Promise(done => setTimeout(done, 20));
+      }
+      expect((await pool.query("SELECT COUNT(*)::int AS count FROM procurement.po_approval_tiers")).rows[0].count).toBe(0);
+    } finally { release(); await reader; await insert; writer.release(); }
+    expect((await pool.query("SELECT COUNT(*)::int AS count FROM procurement.po_approval_tiers")).rows[0].count).toBe(1);
   });
   it("previews without writes, then applies one audited revision and preserves all AP/inventory records", async () => {
     const request = await body(); const before = await evidence(); const protectedBefore = await protectedRecords();
@@ -362,6 +404,67 @@ databaseTests.sequential("PO quantity amendment real PostgreSQL and HTTP guarant
       po: (await pool.query("SELECT * FROM procurement.purchase_orders ORDER BY id")).rows,
       poLines: (await pool.query("SELECT * FROM procurement.purchase_order_lines ORDER BY id")).rows,
     });
+    const economicBody = async (fields = {}): Promise<InvoiceQuantityApprovalRequest> => ({ ...await invoiceBody(), unitCostMills: 10000, lineTotalCents: 2000, ...fields });
+    const stockAndPayments = async () => {
+      const records = await protectedRecords();
+      delete records["procurement.vendor_invoices"]; delete records.invoiceEconomics;
+      return records;
+    };
+    it("corrects quantity and billed amount on a closed paid PO, exposes the unpaid balance, and replays exactly once", async () => {
+      await pool.query("UPDATE procurement.purchase_orders SET status='closed',closed_at='2026-10-01',closed_by='admin-user' WHERE id=1");
+      const closed = (await pool.query("SELECT status,closed_at,closed_by,total_cents FROM procurement.purchase_orders WHERE id=1")).rows[0];
+      const stock = await stockAndPayments(), poLines = (await pool.query("SELECT * FROM procurement.purchase_order_lines")).rows;
+      const request = await economicBody({ closedPurchaseOrderConfirmed: true }), key = randomUUID();
+      const { reason: _reason, approvalConfirmed: _confirmed, ...previewRequest } = request;
+      const preview = await invoiceService.preview(81, previewRequest, "admin-user");
+      expect(preview).toMatchObject({ afterInvoiceAmountCents: 2000, paidAmountCents: 1000, afterBalanceCents: 1000, afterInvoiceStatus: "partially_paid" });
+      const first = await invoicePost(request, key); expect(first.status).toBe(200);
+      expect((await pool.query("SELECT status,invoiced_amount_cents,paid_amount_cents,balance_cents FROM procurement.vendor_invoices WHERE id=71")).rows[0])
+        .toEqual({ status: "partially_paid", invoiced_amount_cents: "2000", paid_amount_cents: "1000", balance_cents: "1000" });
+      expect((await pool.query("SELECT status,closed_at,closed_by,total_cents FROM procurement.purchase_orders WHERE id=1")).rows[0]).toEqual(closed);
+      expect((await pool.query("SELECT financial_status,outstanding_cents FROM procurement.purchase_orders WHERE id=1")).rows[0]).toEqual({ financial_status: "partially_paid", outstanding_cents: "1000" });
+      expect((await pool.query("SELECT * FROM procurement.purchase_order_lines")).rows).toEqual(poLines); expect(await stockAndPayments()).toEqual(stock);
+      expect(await invoicePost(request, key)).toEqual({ ...first, replayed: "true" });
+      expect((await pool.query("SELECT event_type,payload_json FROM procurement.po_events")).rows).toMatchObject([{ event_type: "invoice_line_corrected", payload_json: { closedPurchaseOrderConfirmed: true, approvalEvidence: { actor: { userId: "admin-user" } }, beforeInvoice: { invoicedAmountCents: 1000 }, afterInvoice: { invoicedAmountCents: 2000 } } }]);
+    });
+    it("requires an explicit reviewed closed-PO billing correction instead of a legacy quantity-only request", async () => {
+      await pool.query("UPDATE procurement.purchase_orders SET status='closed',closed_at=now() WHERE id=1");
+      expect((await invoicePost(await invoiceBody())).status).toBe(409);
+      expect((await invoicePost(await economicBody())).status).toBe(409);
+      expect((await pool.query("SELECT qty_invoiced FROM procurement.vendor_invoice_lines WHERE id=81")).rows[0].qty_invoiced).toBe(10);
+    });
+    it("rejects a bill reduction below recorded payments with no financial side effects", async () => {
+      const request = await economicBody({ lineTotalCents: 999 }), before = await evidence(), protectedBefore = await protectedRecords();
+      expect(await invoicePost(request)).toMatchObject({ status: 409, body: { code: "INVOICE_CORRECTION_PAYMENT_REVIEW_REQUIRED" } });
+      expect(await evidence()).toEqual(before); expect(await protectedRecords()).toEqual(protectedBefore);
+    });
+    it("rechecks approval tiers against the new invoice exposure", async () => {
+      await pool.query("UPDATE inventory.warehouse_settings SET require_approval=true; INSERT INTO procurement.po_approval_tiers(tier_name,threshold_cents,approver_role,active) VALUES('Finance',2200,'Finance Director',1)");
+      const request = await economicBody({ lineTotalCents: 2300 }), before = await protectedRecords();
+      expect((await invoicePost(request)).status).toBe(403); expect(await protectedRecords()).toEqual(before);
+    });
+    it("reconciles the full invoice and rejects stale changes to a different line or payment allocation", async () => {
+      await pool.query("INSERT INTO procurement.vendor_invoice_lines(id,vendor_invoice_id,line_number,description,qty_invoiced,unit_cost_cents,line_total_cents,match_status) VALUES(82,71,2,'Other charge',1,0,0,'pending')");
+      const first = await economicBody(); await pool.query("UPDATE procurement.vendor_invoice_lines SET description='Changed other line' WHERE id=82");
+      expect((await invoicePost(first)).status).toBe(409);
+      const second = await economicBody(); await pool.query("UPDATE procurement.ap_payment_allocations SET applied_amount_cents=999 WHERE vendor_invoice_id=71");
+      expect((await invoicePost(second)).status).toBe(409);
+    });
+    it("rolls back line economics, balances, history and matching when the immutable event write fails, then retries safely", async () => {
+      const request = await economicBody(), command = invoiceDescriptor(request), before = await protectedRecords(), history = await evidence();
+      await pool.query("CREATE OR REPLACE FUNCTION procurement.amendment_test_fail() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'test audit failure'; END $$; CREATE TRIGGER amendment_test_failure BEFORE INSERT ON procurement.po_events FOR EACH ROW EXECUTE FUNCTION procurement.amendment_test_fail()");
+      await expect(invoiceService.approve(81, request, "admin-user", command)).rejects.toThrow();
+      expect(await protectedRecords()).toEqual(before); expect(await evidence()).toEqual(history);
+      await pool.query("DROP TRIGGER amendment_test_failure ON procurement.po_events");
+      await retryEligible(command.idempotencyKey);
+      expect((await invoiceService.approve(81, request, "admin-user", command)).httpStatus).toBe(200);
+    });
+    it("serializes financial corrections and records only one economic result", async () => {
+      const request = await economicBody(), other = { ...request, lineTotalCents: 2500 };
+      const results = await Promise.all([invoiceService.approve(81, request, "admin-user", invoiceDescriptor(request)), invoiceService.approve(81, other, "admin-user", invoiceDescriptor(other))]);
+      expect(results.map(row => row.httpStatus).sort()).toEqual([200, 409]);
+      expect((await pool.query("SELECT COUNT(*)::int AS count FROM procurement.po_events WHERE event_type='invoice_line_corrected'")).rows[0].count).toBe(1);
+    });
     it("prefills agreed PO/receipt quantities and previews the changed average without any writes", async () => {
       const before = await evidence(), protectedBefore = await protectedRecords();
       const context = await invoiceService.context(81, "admin-user");
@@ -465,14 +568,89 @@ databaseTests.sequential("PO quantity amendment real PostgreSQL and HTTP guarant
       expect(await evidence()).toEqual(before); expect(await protectedRecords()).toEqual(protectedBefore);
       expect((await pool.query("SELECT COUNT(*)::int AS count FROM public.audit_events WHERE action='procurement.invoice.quantity_corrected'")).rows[0].count).toBe(0);
       await pool.query("DROP TRIGGER amendment_test_failure ON procurement.po_events");
-      const deadline = Date.now() + 10000;
-      while (true) {
-        const state = await pool.query("SELECT next_attempt_at <= clock_timestamp() AS eligible FROM public.financial_command_results WHERE idempotency_key=$1", [command.idempotencyKey]);
-        if (state.rows[0].eligible) break;
-        if (Date.now() > deadline) throw new Error("Correction retry did not become eligible.");
-        await new Promise((done) => setTimeout(done, 20));
-      }
+      await retryEligible(command.idempotencyKey);
       expect((await invoiceService.approve(81, request, "admin-user", command)).httpStatus).toBe(200);
     });
   });
+  describe("administrator approval of current financial variances", () => {
+    async function prepare() {
+      const source = await database.transaction(tx => readQuantityAmendmentSource(tx, 1, "admin-user"));
+      const fingerprint = computePurchaseOrderInvoiceMatchSourceFingerprint({ purchaseOrderId: 1, purchaseOrderLines: source.facts.lines, activeInvoices: source.facts.invoices, invoiceLines: source.facts.invoiceLines });
+      await pool.query("UPDATE procurement.po_exceptions SET status='open',payload=$1 WHERE id=1", [JSON.stringify({ invoiceId: 71, sourceVersion: 1, sourceFingerprint: fingerprint })]);
+      const context = await varianceService.context(1, "admin-user");
+      return { sourceVersion: context.sourceVersion, reason: "Supplier variance reviewed by Administrator", approvalConfirmed: true as const };
+    }
+    function varianceDescriptor(request: unknown, actorId = "admin-user", key = randomUUID()): FinancialCommandDescriptor {
+      return { ...descriptor(request, key, actorId), routeTemplate: "/api/po-exceptions/:id/variance-approval", resourceKey: "po_exception:1", commandName: "purchase_order.variance.approve" };
+    }
+    it("rejects financial acceptance through ordinary exception resolution", async () => {
+      await prepare(); const before = await evidence();
+      await expect(resolveException(1, "lead-user", "Accept current variance")).rejects.toMatchObject({ code: "PO_VARIANCE_ADMIN_APPROVAL_REQUIRED" });
+      expect(await evidence()).toEqual(before);
+    });
+    it("accepts only reviewed current evidence, records the true actor and immutable approval, and replays exactly once", async () => {
+      const request = await prepare(), command = varianceDescriptor(request), protectedBefore = await protectedRecords();
+      const first = await varianceService.approve(1, request, "admin-user", command); expect(first.httpStatus).toBe(200);
+      expect((await pool.query("SELECT status,resolved_by,resolution_note FROM procurement.po_exceptions WHERE id=1")).rows[0]).toEqual({ status: "resolved", resolved_by: "admin-user", resolution_note: request.reason });
+      expect((await pool.query("SELECT event_type,actor_id,payload_json FROM procurement.po_events")).rows).toMatchObject([{ event_type: "match_variance_approved", actor_id: "admin-user", payload_json: { before: { status: "open" }, after: { status: "resolved" }, approvalEvidence: { actor: { userId: "admin-user" } } } }]);
+      expect((await pool.query("SELECT changed_by FROM procurement.po_status_history")).rows).toEqual([{ changed_by: "admin-user" }]);
+      expect(await protectedRecords()).toEqual(protectedBefore);
+      expect(await varianceService.approve(1, request, "admin-user", command)).toMatchObject({ ...first, replayed: true });
+      await expect(pool.query("UPDATE procurement.po_events SET actor_id='forged'")).rejects.toMatchObject({ code: "23514" });
+    });
+    it.each(["lead-user", "custom-user", "scoped-user"])("rejects insufficient live approval authority for %s", async actor => {
+      const request = await prepare(), before = await evidence();
+      const current = await varianceService.context(1, actor); request.sourceVersion = current.sourceVersion;
+      expect((await varianceService.approve(1, request, actor, varianceDescriptor(request, actor))).httpStatus).toBe(403);
+      expect(await evidence()).toEqual(before);
+    });
+    it("rejects permission revocation after review", async () => {
+      const request = await prepare(); await pool.query("DELETE FROM identity.auth_user_roles WHERE user_id='admin-user'");
+      expect((await varianceService.approve(1, request, "admin-user", varianceDescriptor(request))).httpStatus).toBe(403);
+    });
+    it("rejects changed invoice evidence and changed amount tiers after review", async () => {
+      const request = await prepare(); await pool.query("UPDATE procurement.vendor_invoice_lines SET line_total_cents=1001 WHERE id=81");
+      expect((await varianceService.approve(1, request, "admin-user", varianceDescriptor(request))).httpStatus).toBe(409);
+      await pool.query("UPDATE procurement.vendor_invoices SET invoiced_amount_cents=1001,balance_cents=1,status='partially_paid' WHERE id=71");
+      const next = await prepare(); await pool.query("INSERT INTO procurement.po_approval_tiers(tier_name,threshold_cents,approver_role,active) VALUES('New tier',1000,'admin',1)");
+      expect((await varianceService.approve(1, next, "admin-user", varianceDescriptor(next))).httpStatus).toBe(409);
+    });
+    it("rejects stale payment allocations and unreconciled invoice amounts during variance approval", async () => {
+      const request = await prepare(); await pool.query("UPDATE procurement.ap_payment_allocations SET applied_amount_cents=999 WHERE vendor_invoice_id=71");
+      expect((await varianceService.approve(1, request, "admin-user", varianceDescriptor(request))).httpStatus).toBe(409);
+      await expect(varianceService.context(1, "admin-user")).rejects.toMatchObject({ code: "INVOICE_QUANTITY_SOURCE_INVALID" });
+    });
+    it("requires authentication, a valid path, complete confirmation and an idempotency key at HTTP", async () => {
+      const request = await prepare(), before = await evidence();
+      const route = `${url}/api/po-exceptions/1/variance-approval`;
+      expect((await fetch(route, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(request) })).status).toBe(400);
+      expect((await fetch(route, { method: "POST", headers: { "Content-Type": "application/json", "Idempotency-Key": randomUUID() }, body: JSON.stringify({ ...request, approvalConfirmed: false }) })).status).toBe(400);
+      expect((await fetch(`${url}/api/po-exceptions/1e2/variance-approval`)).status).toBe(400);
+      requestActor = null; expect((await fetch(route)).status).toBe(401);
+      expect(await evidence()).toEqual(before);
+      await expect(varianceService.approve(1, request, "admin-user", { ...varianceDescriptor(request), actorId: "lead-user" })).rejects.toMatchObject({ code: "PO_VARIANCE_SCOPE_INVALID" });
+    });
+    it("serializes acknowledgment against financial approval without reversing the PO lock order", async () => {
+      const request = await prepare();
+      const results = await Promise.allSettled([acknowledgeException(1, "admin-user"), varianceService.approve(1, request, "admin-user", varianceDescriptor(request))]);
+      for (const result of results) if (result.status === "rejected") expect(result.reason).toMatchObject({ code: "INVALID_STATUS_TRANSITION" });
+      const status = (await pool.query("SELECT status FROM procurement.po_exceptions WHERE id=1")).rows[0].status;
+      expect(["acknowledged", "resolved"]).toContain(status);
+    });
+    it("serializes acceptance and rejects a second command from the same review", async () => {
+      const request = await prepare();
+      const results = await Promise.all([varianceService.approve(1, request, "admin-user", varianceDescriptor(request)), varianceService.approve(1, request, "admin-user", varianceDescriptor(request))]);
+      expect(results.map(row => row.httpStatus).sort()).toEqual([200, 409]);
+    });
+    it("rolls back acceptance if the immutable audit event fails", async () => {
+      const request = await prepare(), command = varianceDescriptor(request), before = await evidence();
+      await pool.query("CREATE OR REPLACE FUNCTION procurement.amendment_test_fail() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'test audit failure'; END $$; CREATE TRIGGER amendment_test_failure BEFORE INSERT ON procurement.po_events FOR EACH ROW EXECUTE FUNCTION procurement.amendment_test_fail()");
+      await expect(varianceService.approve(1, request, "admin-user", command)).rejects.toThrow(); expect(await evidence()).toEqual(before);
+      expect((await pool.query("SELECT COUNT(*)::int AS count FROM public.audit_events WHERE action='procurement.invoice.variance_approved'")).rows[0].count).toBe(0);
+      await pool.query("DROP TRIGGER amendment_test_failure ON procurement.po_events");
+      await retryEligible(command.idempotencyKey);
+      expect((await varianceService.approve(1, request, "admin-user", command)).httpStatus).toBe(200);
+    });
+  });
+
 });

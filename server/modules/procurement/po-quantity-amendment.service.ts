@@ -6,7 +6,7 @@ import { createDrizzleFinancialCommandRepository } from "../../platform/commands
 import { FinancialCommandError, runTransactionalFinancialCommand, type FinancialCommandDescriptor } from "../../platform/commands/transactional-command.service";
 import { assertQuantityAmendmentAuthority, buildQuantityAmendmentContext, planQuantityAmendment, quantityAmendmentTimestamp, PoQuantityAmendmentError } from "./po-quantity-amendment.policy";
 import { readQuantityAmendmentSource, persistQuantityAmendment, type AmendmentDatabase } from "./po-quantity-amendment.repository";
-import { assertUniqueHighestApprovalTier, buildPurchaseApprovalSnapshot, PurchaseApprovalAuthorityError } from "./purchase-order-approval.policy";
+import { buildCurrentPurchaseApprovalSnapshot, PurchaseApprovalAuthorityError } from "./purchase-order-approval.policy";
 
 function input<T>(schema: z.ZodType<T>, value: unknown): T {
   const parsed = schema.safeParse(value);
@@ -15,11 +15,6 @@ function input<T>(schema: z.ZodType<T>, value: unknown): T {
 }
 function assertVersion(actual: string, expected: string) {
   if (actual !== expected) throw new PoQuantityAmendmentError("The PO, receipts, invoice evidence or approval permissions changed. Reload and review the correction again.", "PO_AMENDMENT_STALE", 409);
-}
-function approvalForPlan(source: Awaited<ReturnType<typeof readQuantityAmendmentSource>>, totalCents: number) {
-  const tiers = source.requireApproval ? source.approvalTiers.filter((tier) => tier.thresholdCents <= totalCents).sort((a, b) => b.thresholdCents - a.thresholdCents || a.id - b.id) : [];
-  assertUniqueHighestApprovalTier(tiers.slice(0, 2));
-  return buildPurchaseApprovalSnapshot({ actor: source.actor, requireApproval: source.requireApproval, tier: tiers[0] ?? null, totalCents });
 }
 export function createPoQuantityAmendmentService(database: AmendmentDatabase, now: () => Date) {
   const repository = createDrizzleFinancialCommandRepository(database);
@@ -39,7 +34,7 @@ export function createPoQuantityAmendmentService(database: AmendmentDatabase, no
         assertQuantityAmendmentAuthority(source.actor);
         assertVersion(source.sourceVersion, request.sourceVersion);
         const plan = planQuantityAmendment(source.facts, request);
-        approvalForPlan(source, plan.preview.afterTotalCents);
+        buildCurrentPurchaseApprovalSnapshot({ ...source, totalCents: plan.preview.afterTotalCents });
         return plan.preview;
       });
     },
@@ -63,7 +58,7 @@ export function createPoQuantityAmendmentService(database: AmendmentDatabase, no
           assertQuantityAmendmentAuthority(source.actor);
           assertVersion(source.sourceVersion, request.sourceVersion);
           const plan = planQuantityAmendment(source.facts, request);
-          const approval = approvalForPlan(source, plan.preview.afterTotalCents);
+          const approval = buildCurrentPurchaseApprovalSnapshot({ ...source, totalCents: plan.preview.afterTotalCents });
           const result = await persistQuantityAmendment(tx, source, plan, actorId, descriptor.idempotencyKey, quantityAmendmentTimestamp(source.facts, now()), approval);
           return { httpStatus: 200, body: poQuantityAmendmentResultSchema.parse(result), resultType: "po_quantity_amendment", resultId: result.auditEventId };
         },

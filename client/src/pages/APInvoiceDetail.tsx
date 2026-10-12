@@ -734,9 +734,9 @@ export default function APInvoiceDetail() {
                           <TableCell className="text-right font-mono font-medium">{formatCents(line.lineTotalCents)}</TableCell>
                           <TableCell>
                             <span className={`text-xs px-1.5 py-0.5 rounded ${match.className}`}>{match.label}</span>
-                            <InvoiceQuantityCorrection lineId={line.id} lineNumber={line.lineNumber} needsCorrection={["qty_discrepancy", "over_billed"].includes(line.matchStatus)} onSaved={invalidate} />
+                            <InvoiceQuantityCorrection lineId={line.id} lineNumber={line.lineNumber} needsCorrection={["qty_discrepancy", "over_billed", "price_discrepancy"].includes(line.matchStatus)} allowMatched={line.purchaseOrderLineId != null && invoice.status !== "voided"} onSaved={invalidate} />
                           </TableCell>
-                          <TableCell>{["qty_discrepancy", "over_billed"].includes(line.matchStatus) ? <span className="text-xs text-muted-foreground">Review quantity first</span> : <InvoiceLineCostReview line={line} currency={invoice.currency} invoiceStatus={invoice.status} onSaved={invalidate} />}</TableCell>
+                          <TableCell>{["qty_discrepancy", "over_billed", "price_discrepancy"].includes(line.matchStatus) ? <span className="text-xs text-muted-foreground">Review invoice or PO first</span> : <InvoiceLineCostReview line={line} currency={invoice.currency} invoiceStatus={invoice.status} onSaved={invalidate} />}</TableCell>
                           {canEdit && (
                             <TableCell>
                               <Button size="sm" variant="ghost" className="h-7 text-muted-foreground"

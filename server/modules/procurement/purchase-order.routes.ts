@@ -1,4 +1,5 @@
 import type { Express, Request, Response } from "express";
+import { registerPoVarianceApprovalRoutes } from './po-variance-approval.routes';
 import { registerPoQuantityAmendmentRoutes } from './po-quantity-amendment.routes';
 import { procurementStorage } from "../procurement";
 import { catalogStorage } from "../catalog";
@@ -293,6 +294,7 @@ function mapPurchaseOrderWithLinesInput(
 
 export function registerPurchaseOrderRoutes(app: Express) {
   registerPoQuantityAmendmentRoutes(app);
+  registerPoVarianceApprovalRoutes(app);
   const { purchasing, shipmentTracking } = app.locals.services;
   const purchaseWorkspace = createPurchaseWorkspaceService(createPurchaseWorkspaceRepository(db));
 
@@ -1163,7 +1165,7 @@ export function registerPurchaseOrderRoutes(app: Express) {
         title,
         message,
         payload: payload ?? {},
-        detectedBy: (req as any).user?.id ? `user:${(req as any).user.id}` : "user",
+        detectedBy: `user:${req.session.user!.id}`,
       });
       res.status(201).json({ exception });
     } catch (error: any) {
@@ -1179,7 +1181,7 @@ export function registerPurchaseOrderRoutes(app: Express) {
   app.post("/api/po-exceptions/:id/acknowledge", requirePermission("purchasing", "view"), async (req, res) => {
     try {
       const id = Number(req.params.id);
-      const userId = (req as any).user?.id ?? "unknown";
+      const userId = req.session.user!.id;
       const exception = await poExceptionsService.acknowledgeException(id, userId);
       res.json({ exception });
     } catch (error: any) {
@@ -1196,7 +1198,7 @@ export function registerPurchaseOrderRoutes(app: Express) {
   app.post("/api/po-exceptions/:id/resolve", requirePermission("purchasing", "edit"), async (req, res) => {
     try {
       const id = Number(req.params.id);
-      const userId = (req as any).user?.id ?? "unknown";
+      const userId = req.session.user!.id;
       const { resolutionNote } = req.body;
 
       if (!resolutionNote || String(resolutionNote).trim().length === 0) {
@@ -1219,7 +1221,7 @@ export function registerPurchaseOrderRoutes(app: Express) {
   app.post("/api/po-exceptions/:id/dismiss", requirePermission("purchasing", "edit"), async (req, res) => {
     try {
       const id = Number(req.params.id);
-      const userId = (req as any).user?.id ?? "unknown";
+      const userId = req.session.user!.id;
       const { reason } = req.body;
       const exception = await poExceptionsService.dismissException(id, userId, reason);
       res.json({ exception });

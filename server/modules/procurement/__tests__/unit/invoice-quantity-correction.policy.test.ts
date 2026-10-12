@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { invoiceAmountPerPiece, invoiceQuantityApprovalRequestSchema, invoiceQuantityPreviewRequestSchema } from "@shared/procurement/invoice-quantity-correction";
 import { invoiceQuantityContext, planInvoiceQuantityCorrection, assertInvoiceQuantityAuthority } from "../../invoice-quantity-correction.policy";
+import type { InvoiceCorrectionFacts } from "../../invoice-quantity-correction.policy";
 import type { AmendmentFacts } from "../../po-quantity-amendment.policy";
 import type { PurchaseApprovalActor } from "../../../identity/domain/purchase-approval-authority";
 
@@ -60,7 +61,7 @@ describe("invoice quantity correction defaults and exact impact", () => {
   it("supports the maximum PostgreSQL quantity without changing money", () => { expect(planInvoiceQuantityCorrection(facts(), 72, request(2_147_483_647)).afterQuantity).toBe(2_147_483_647); });
   it.each(["closed", "cancelled", "short_closed"])("blocks a %s PO", (status) => {
     const source = facts(); source.header.physicalStatus = status;
-    expect(() => planInvoiceQuantityCorrection(source, 72, request())).toThrow(/Reopen/);
+    expect(() => planInvoiceQuantityCorrection(source, 72, request())).toThrow(expect.objectContaining({ code: "INVOICE_QUANTITY_BLOCKED" }));
   });
   it("blocks closed legacy header status even without a closure timestamp", () => {
     const source = facts(); source.header.status = "closed";
@@ -101,5 +102,74 @@ describe("invoice quantity correction defaults and exact impact", () => {
     expect(invoiceAmountPerPiece(1, 3)).toBe("0.003333");
     expect(invoiceAmountPerPiece(1, 6)).toBe("0.001667");
     expect(invoiceAmountPerPiece(Number.MAX_SAFE_INTEGER, 1)).toBe("90071992547409.910000");
+  });
+});
+
+function billingFacts(): InvoiceCorrectionFacts {
+  const source = facts();
+  return { ...source, billing: { invoiceId: 71, purchaseOrderIds: [17], allInvoiceLines: structuredClone(source.invoiceLines),
+    allocations: [{ invoiceId: 71, amountCents: 669375, paymentStatus: "completed", currency: "USD" }] } };
+}
+const financialRequest = (fields = {}) => invoiceQuantityPreviewRequestSchema.parse({ sourceVersion: version, quantityPieces: 25000, unitCostMills: 5355, lineTotalCents: 1338750, ...fields });
+describe("reviewed invoice line economics", () => {
+  it("preserves the supplier piece price, doubles the bill and exposes the resulting unpaid balance without mutating facts", () => {
+    const source = billingFacts(), before = structuredClone(source);
+    const preview = planInvoiceQuantityCorrection(source, 72, financialRequest());
+    expect(preview).toMatchObject({ beforeQuantity: 12500, afterQuantity: 25000, afterUnitCostMills: 5355,
+      invoiceLineAmountCents: 669375, afterLineAmountCents: 1338750, invoiceAmountCents: 669375, afterInvoiceAmountCents: 1338750,
+      paidAmountCents: 669375, afterBalanceCents: 669375, beforeInvoiceStatus: "paid", afterInvoiceStatus: "partially_paid", afterAmountPerPiece: "0.535500",
+      afterMatch: "price_discrepancy" });
+    expect(source).toEqual(before);
+  });
+  it("allows a price and amount change without changing the piece count", () => {
+    expect(planInvoiceQuantityCorrection(billingFacts(), 72, financialRequest({ quantityPieces: 12500 }))).toMatchObject({ afterQuantity: 12500, afterLineAmountCents: 1338750 });
+  });
+  it("requires explicit billing approval for closed purchases while retaining the goods closure", () => {
+    const source = billingFacts(); source.header.status = "closed"; source.header.closedAt = new Date("2026-10-01");
+    expect(() => planInvoiceQuantityCorrection(source, 72, financialRequest())).toThrow(expect.objectContaining({ code: "INVOICE_QUANTITY_BLOCKED" }));
+    expect(planInvoiceQuantityCorrection(source, 72, financialRequest({ closedPurchaseOrderConfirmed: true }))).toMatchObject({ closedPurchaseOrder: true, afterBalanceCents: 669375 });
+    expect(source.header.status).toBe("closed");
+  });
+  it("does not let the explicit closed-PO flag override cancellations or returns", () => {
+    const source = billingFacts(); source.header.cancelledAt = new Date();
+    expect(() => planInvoiceQuantityCorrection(source, 72, financialRequest({ closedPurchaseOrderConfirmed: true }))).toThrow(expect.objectContaining({ code: "INVOICE_QUANTITY_BLOCKED" }));
+  });
+  it("requires complete reconciled invoice and payment evidence", () => {
+    expect(() => planInvoiceQuantityCorrection(facts(), 72, financialRequest())).toThrow(expect.objectContaining({ code: "INVOICE_CORRECTION_BILLING_REQUIRED" }));
+    for (const field of ["invoicedAmountCents", "paidAmountCents", "balanceCents"] as const) {
+      const source = billingFacts(); source.invoices[0][field] += 1;
+      expect(() => planInvoiceQuantityCorrection(source, 72, financialRequest())).toThrow(expect.objectContaining({ code: "INVOICE_QUANTITY_SOURCE_INVALID" }));
+    }
+  });
+  it("rejects payment currency and invoice scope mismatches", () => {
+    const source = billingFacts(); source.billing!.allocations[0].currency = "EUR";
+    expect(() => planInvoiceQuantityCorrection(source, 72, financialRequest())).toThrow(expect.objectContaining({ code: "INVOICE_QUANTITY_SOURCE_INVALID" }));
+    source.billing!.allocations[0].currency = "USD"; source.billing!.allInvoiceLines[0].vendorInvoiceId = 99;
+    expect(() => planInvoiceQuantityCorrection(source, 72, financialRequest())).toThrow(expect.objectContaining({ code: "INVOICE_QUANTITY_SOURCE_INVALID" }));
+  });
+  it("requires the allocation owner when changing amounts on a multi-PO bill", () => {
+    const source = billingFacts(); source.billing!.purchaseOrderIds.push(99);
+    expect(() => planInvoiceQuantityCorrection(source, 72, financialRequest())).toThrow(expect.objectContaining({ code: "INVOICE_CORRECTION_ALLOCATION_REVIEW_REQUIRED" }));
+  });
+  it("rejects reducing the bill below recorded payments", () => {
+    expect(() => planInvoiceQuantityCorrection(billingFacts(), 72, financialRequest({ lineTotalCents: 0 }))).toThrow(expect.objectContaining({ code: "INVOICE_CORRECTION_PAYMENT_REVIEW_REQUIRED" }));
+  });
+  it("ignores voided allocations in the same way as the AP ledger owner", () => {
+    const source = billingFacts(); source.billing!.allocations.push({ invoiceId: 71, amountCents: 99, currency: "USD", paymentStatus: "voided" });
+    expect(planInvoiceQuantityCorrection(source, 72, financialRequest()).afterBalanceCents).toBe(669375);
+  });
+  it("supports zero-price and zero-amount corrections on an unpaid bill", () => {
+    const source = billingFacts(); source.invoices[0].paidAmountCents = 0; source.invoices[0].balanceCents = 669375; source.invoices[0].status = "approved"; source.billing!.allocations = [];
+    expect(planInvoiceQuantityCorrection(source, 72, financialRequest({ unitCostMills: 0, lineTotalCents: 0 }))).toMatchObject({ afterInvoiceAmountCents: 0, afterBalanceCents: 0, afterInvoiceStatus: "paid" });
+  });
+  it.each(["unitCostMills", "lineTotalCents"])("rejects malformed or partial %s fields", field => {
+    for (const invalid of [-1, 1.5, Infinity, Number.MAX_SAFE_INTEGER + 1]) expect(invoiceQuantityPreviewRequestSchema.safeParse({ ...financialRequest(), [field]: invalid }).success).toBe(false);
+    const partial = { ...financialRequest() }; delete partial[field as "unitCostMills" | "lineTotalCents"];
+    expect(invoiceQuantityPreviewRequestSchema.safeParse(partial).success).toBe(false);
+  });
+  it("accepts safe integer limits and rejects a total that exceeds them", () => {
+    expect(planInvoiceQuantityCorrection(billingFacts(), 72, financialRequest({ lineTotalCents: Number.MAX_SAFE_INTEGER })).afterInvoiceAmountCents).toBe(Number.MAX_SAFE_INTEGER);
+    const source = billingFacts(); source.invoiceLines.push({ ...source.invoiceLines[0], id: 73, lineTotalCents: 1 }); source.billing!.allInvoiceLines.push(source.invoiceLines[1]); source.invoices[0].invoicedAmountCents++; source.invoices[0].balanceCents = 1;
+    expect(() => planInvoiceQuantityCorrection(source, 72, financialRequest({ lineTotalCents: Number.MAX_SAFE_INTEGER }))).toThrow(expect.objectContaining({ code: "INVOICE_CORRECTION_AMOUNT_INVALID" }));
   });
 });

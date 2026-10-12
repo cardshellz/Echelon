@@ -9,8 +9,8 @@ function facts(): AmendmentFacts {
   return {
     header: { id: 1, status: "received", physicalStatus: "received", currency: "USD", totalCents: 1100, subtotalCents: 1100, discountCents: 0, taxCents: 0, shippingCostCents: 0, closedAt: null, cancelledAt: null },
     lines: [{ id: 11, purchaseOrderId: 1, lineNumber: 1, productId: 1, productName: "Test product", lineType: "product", parentLineId: null, orderQty: 10, receivedQty: 20, cancelledQty: 0, returnedQty: 0, status: "received", unitCostCents: 100, unitCostMills: 10000, totalProductCostCents: 1000, packagingCostCents: 100, discountCents: 0, taxCents: 0, lineTotalCents: 1100, pricingBasis: "per_piece", quotedUnitCostMills: 10000 }],
-    invoices: [{ id: 71, status: "paid" }],
-    invoiceLines: [{ id: 81, vendorInvoiceId: 71, purchaseOrderLineId: 11, qtyInvoiced: 10, unitCostCents: 100, unitCostMills: 10000 }],
+    invoices: [{ id: 71, status: "paid", invoiceNumber: "TEST-INV-71", currency: "USD" }],
+    invoiceLines: [{ id: 81, lineNumber: 1, lineTotalCents: 1000, productName: "Test product", vendorInvoiceId: 71, purchaseOrderLineId: 11, qtyInvoiced: 10, unitCostCents: 100, unitCostMills: 10000 }],
     recommendationOwned: false,
   } as unknown as AmendmentFacts;
 }
