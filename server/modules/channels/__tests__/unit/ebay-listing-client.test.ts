@@ -15,6 +15,31 @@ import type { EbayQuantityRequestAdmission } from "../../quantity-publication-re
 
 describe("eBay inventory group read response contract", () => {
   beforeEach(() => api.request.mockReset());
+  it("withdrawal composes the real reducing request owner without requiring positive-stock target mappings", async () => {
+    const reducing = vi.fn((_identity: string, _members?: readonly string[]) => undefined);
+    const positive = vi.fn(async (): Promise<never> => { throw new Error("PUBLICATION_LISTING_TARGET_UNMAPPED"); });
+    const admission: EbayQuantityRequestAdmission = { item: positive, group: positive,
+      reducing: async <T>(identity: string, work: () => Promise<T>, members?: readonly string[]): Promise<T> => {
+        reducing(identity, members);
+        return work();
+      } };
+    api.request.mockImplementation(async (method: string, path: string) => {
+      if (method === "GET" && path.includes("inventory_item_group/")) return { variantSKUs: ["OLD-P10", "OLD-C500"] };
+      if (method === "GET" && path.includes("/offer/")) return { sku: "OLD-P10", marketplaceId: "EBAY_US" };
+      return undefined;
+    });
+    const client = createEbayRouteListingLifecycleClient({ accessToken: "test-only", quantityAdmission: async () => admission });
+    await client.withdrawOfferByInventoryItemGroup("OLD", "EBAY_US");
+    await client.withdrawOffer("offer-6");
+    expect(positive).not.toHaveBeenCalled();
+    expect(reducing.mock.calls.map(([identity, members]) => ({ identity, members }))).toEqual([
+      { identity: "group:OLD", members: ["OLD-C500", "OLD-P10"] }, { identity: "OLD-P10", members: undefined },
+    ]);
+    expect(api.request.mock.calls.filter(([method]) => method === "POST").map(([_method, path, _token, body]) => ({ path, body }))).toEqual([
+      { path: "/sell/inventory/v1/offer/withdraw_by_inventory_item_group", body: { inventoryItemGroupKey: "OLD", marketplaceId: "EBAY_US" } },
+      { path: "/sell/inventory/v1/offer/offer-6/withdraw", body: undefined },
+    ]);
+  });
   it("reads the exact requested resource and preserves the captured body without inventing a key", async () => {
     api.request.mockResolvedValue(structuredClone(capturedGroup));
     const client = createEbayRouteListingLifecycleClient({ accessToken: "mock-access-token" });

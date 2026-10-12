@@ -12,12 +12,15 @@ vi.mock("../../../../db", () => ({ db: {}, pool: { query: async () => ({ rows: [
   marketplaceId: "EBAY_US", fulfillmentPolicyId: "shipping", paymentPolicyId: "payment", returnPolicyId: "returns",
 } }] }) }, getDatabasePoolSnapshot: () => ({ maximumConnections: 10 }) }));
 vi.mock("../../infrastructure/ebay-api-runtime", () => ({ EBAY_CHANNEL_ID: 67,
-  getAuthService: () => ({ getVerifiedProviderAccount: async () => ({ externalAccountId: "seller" }), getAccessToken: async () => "test-only" }),
+  getAuthService: () => ({ getVerifiedProviderAccount: async () => ({ externalAccountId: "seller" }), getAccessToken: async () => "test-only", getEnvironment: () => "production" }),
   atpService: { getAtpPerVariant: async () => state.variants.map(variant => ({ productVariantId: variant.id, atpUnits: 17 })) },
   ebayListingPhotoResolver: { resolve: async () => ({
     byVariantId: new Map(state.variants.map(variant => [variant.id, ["https://example.com/shared.jpg"]])), groupImageUrls: ["https://example.com/shared.jpg"],
   }) },
 }));
+// This suite exercises provider identity rediscovery. Real inventory admission
+// and enrollment are covered in the disposable PostgreSQL composition suite.
+vi.mock("../../../inventory-planning/quantity-publication", () => ({ assertEbayPublicationReady: vi.fn(async () => {}) }));
 vi.mock("../../infrastructure/ebay-listing-push.repository", () => ({ PostgresEbayListingPushRepository: class {
   withProductLock(_id: number, work: () => Promise<unknown>) { return work(); }
   async readProduct() { return state.product; }

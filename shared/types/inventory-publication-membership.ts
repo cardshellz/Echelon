@@ -68,6 +68,7 @@ export const publicationMembershipBlockerSchema = z
       "review_variant",
       "hold_and_verify_zero",
       "refresh",
+      "reconnect",
       "review_existing_scope",
     ]),
     productVariantId: id.nullable(),

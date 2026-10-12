@@ -1,13 +1,11 @@
 import { eq } from "drizzle-orm";
 import {
   channelListings,
-  channelProductOverrides,
   channelVariantOverrides,
-  products,
   productVariants,
 } from "@shared/schema";
 import { db, pool } from "../../db";
-import { EBAY_CHANNEL_ID, getAuthService, getChannelConnection } from "./ebay-utils";
+import { EBAY_CHANNEL_ID, getAuthService } from "./ebay-utils";
 import { createEbayRouteListingLifecycleClient } from "./ebay-listing-connector-client";
 export {
   isProductEffectivelyListed,
@@ -39,48 +37,6 @@ function assertPositiveId(value: number, label: string): void {
 
 function normalizeError(err: unknown): string {
   return err instanceof Error ? err.message.substring(0, 1000) : String(err).substring(0, 1000);
-}
-
-async function getEbayMarketplaceId(): Promise<string> {
-  const connection = await getChannelConnection();
-  const metadata = (connection?.metadata as Record<string, unknown>) || {};
-  return typeof metadata.marketplaceId === "string" && metadata.marketplaceId.trim()
-    ? metadata.marketplaceId.trim()
-    : "EBAY_US";
-}
-
-export async function setEbayProductListingIntent(
-  productId: number,
-  listed: boolean,
-  dbArg: DbLike = db,
-): Promise<void> {
-  assertPositiveId(productId, "productId");
-  const excluded = !listed;
-  const isListed = listed ? 1 : 0;
-
-  await dbArg.transaction(async (tx: any) => {
-    await tx
-      .update(products)
-      .set({ ebayListingExcluded: excluded })
-      .where(eq(products.id, productId));
-
-    await tx
-      .insert(channelProductOverrides)
-      .values({
-        channelId: EBAY_CHANNEL_ID,
-        productId,
-        isListed,
-        createdAt: new Date(),
-        updatedAt: new Date(),
-      })
-      .onConflictDoUpdate({
-        target: [channelProductOverrides.channelId, channelProductOverrides.productId],
-        set: {
-          isListed,
-          updatedAt: new Date(),
-        },
-      });
-  });
 }
 
 export async function setEbayVariantListingIntent(
@@ -117,24 +73,6 @@ export async function setEbayVariantListingIntent(
   });
 }
 
-export async function markEbayProductListingsPendingForRelist(productId: number): Promise<void> {
-  assertPositiveId(productId, "productId");
-  await pool.query(
-    `
-      UPDATE channels.channel_listings cl
-      SET sync_status = 'pending',
-          sync_error = NULL,
-          updated_at = NOW()
-      FROM catalog.product_variants pv
-      WHERE cl.product_variant_id = pv.id
-        AND cl.channel_id = $1::integer
-        AND pv.product_id = $2::integer
-        AND cl.sync_status IN ('ended', 'deleted')
-    `,
-    [EBAY_CHANNEL_ID, productId],
-  );
-}
-
 export async function markEbayVariantListingPendingForRelist(variantId: number): Promise<void> {
   assertPositiveId(variantId, "variantId");
   await pool.query(
@@ -148,40 +86,6 @@ export async function markEbayVariantListingPendingForRelist(variantId: number):
         AND sync_status IN ('ended', 'deleted')
     `,
     [EBAY_CHANNEL_ID, variantId],
-  );
-}
-
-async function markProductListingsEnded(productId: number): Promise<void> {
-  await pool.query(
-    `
-      UPDATE channels.channel_listings cl
-      SET sync_status = 'ended',
-          sync_error = NULL,
-          last_synced_qty = 0,
-          last_synced_at = NOW(),
-          updated_at = NOW()
-      FROM catalog.product_variants pv
-      WHERE cl.product_variant_id = pv.id
-        AND cl.channel_id = $1::integer
-        AND pv.product_id = $2::integer
-    `,
-    [EBAY_CHANNEL_ID, productId],
-  );
-}
-
-async function markProductListingsError(productId: number, message: string): Promise<void> {
-  await pool.query(
-    `
-      UPDATE channels.channel_listings cl
-      SET sync_status = 'error',
-          sync_error = $3::text,
-          updated_at = NOW()
-      FROM catalog.product_variants pv
-      WHERE cl.product_variant_id = pv.id
-        AND cl.channel_id = $1::integer
-        AND pv.product_id = $2::integer
-    `,
-    [EBAY_CHANNEL_ID, productId, message],
   );
 }
 
@@ -213,78 +117,6 @@ async function markVariantListingError(variantId: number, message: string): Prom
     `,
     [EBAY_CHANNEL_ID, variantId, message],
   );
-}
-
-export async function withdrawEbayProductListings(productId: number): Promise<EbayRemoteTransitionResult> {
-  assertPositiveId(productId, "productId");
-  const result = await pool.query(
-    `
-      SELECT
-        p.id,
-        p.sku,
-        COUNT(pv.id) FILTER (WHERE pv.sku IS NOT NULL AND pv.is_active = TRUE) AS active_variant_count,
-        ARRAY_REMOVE(ARRAY_AGG(DISTINCT cl.external_product_id), NULL) AS listing_ids,
-        ARRAY_REMOVE(ARRAY_AGG(DISTINCT cl.external_variant_id), NULL) AS offer_ids
-      FROM catalog.products p
-      LEFT JOIN catalog.product_variants pv ON pv.product_id = p.id
-      LEFT JOIN channels.channel_listings cl
-        ON cl.product_variant_id = pv.id
-       AND cl.channel_id = $1::integer
-       AND cl.sync_status = 'synced'
-      WHERE p.id = $2::integer
-      GROUP BY p.id, p.sku
-    `,
-    [EBAY_CHANNEL_ID, productId],
-  );
-
-  if (result.rowCount === 0) {
-    throw new Error(`Product ${productId} not found`);
-  }
-
-  const row = result.rows[0];
-  const offerIds: string[] = row.offer_ids ?? [];
-  const listingIds: string[] = row.listing_ids ?? [];
-  if (offerIds.length === 0 && listingIds.length === 0) {
-    await markProductListingsEnded(productId);
-    return { action: "none", affectedListings: 0, detail: "No active eBay offer/listing IDs found" };
-  }
-
-  const authService = getAuthService();
-  if (!authService) {
-    throw new Error("eBay OAuth not configured");
-  }
-
-  const accessToken = await authService.getAccessToken(EBAY_CHANNEL_ID);
-  const marketplaceId = await getEbayMarketplaceId();
-  const ebayClient = createEbayRouteListingLifecycleClient({ accessToken });
-  const groupKey = row.sku || `PROD-${productId}`;
-  const activeVariantCount = Number(row.active_variant_count ?? 0);
-
-  try {
-    if (activeVariantCount > 1) {
-      await ebayClient.withdrawOfferByInventoryItemGroup(groupKey, marketplaceId);
-      await markProductListingsEnded(productId);
-      return {
-        action: "withdraw_inventory_item_group",
-        affectedListings: listingIds.length || offerIds.length,
-        detail: `Withdrew inventory item group ${groupKey}`,
-      };
-    }
-
-    for (const offerId of offerIds) {
-      await ebayClient.withdrawOffer(offerId);
-    }
-    await markProductListingsEnded(productId);
-    return {
-      action: offerIds.length > 1 ? "withdraw_offers" : "withdraw_offer",
-      affectedListings: offerIds.length,
-      detail: `Withdrew ${offerIds.length} eBay offer(s)`,
-    };
-  } catch (err) {
-    const message = normalizeError(err);
-    await markProductListingsError(productId, message);
-    throw err;
-  }
 }
 
 export async function zeroEbayVariantListing(variantId: number): Promise<EbayRemoteTransitionResult> {

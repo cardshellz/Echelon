@@ -21,6 +21,35 @@ export function resolveEbayListingIssue(input: EbayListingIssueInput): EbayListi
       action: { kind, label, ...(href ? { href } : {}) }, ...(reference ? { reference } : {}),
       ...(input.productId ? { details: [{ label: "Product ID", value: String(input.productId) }] } : {}) });
 
+  if (["STOCK_LISTING_ATP_NOT_READY", "EBAY_PUBLICATION_STOCK_REVIEW_REQUIRED", "EBAY_PUBLICATION_STOCK_REVIEW_STALE", "EBAY_PUBLICATION_STOCK_REVIEW_BLOCKED", "STOCK_LISTING_SOURCE_CHANGED"].includes(code))
+    return issue("Review stock setup before publishing", "The listing's connection to inventory is missing or needs a correction.",
+      "Review each SKU's current quantity and proposed stock connection. Apply Connect stock and publish when the review is ready, or follow the exact correction shown there.",
+      false, "review_publication_stock", "Review stock setup");
+  if (code === "EBAY_PUBLICATION_STOCK_COMMAND_CONFLICT")
+    return issue("Check the saved stock request", "This command reference is already associated with a different stock review or requester.",
+      "Keep the original request reference and check its saved receipt in the stock review. An administrator must compare the referenced product, review and requester before any replacement command is sent.",
+      false, "review_publication_stock", "Check saved stock request");
+  if (code === "EBAY_PUBLICATION_STOCK_SOURCE_CHANGED")
+    return issue("Review the current listing before connecting stock", "The product's account, inclusion or eBay mapping changed after its stock review.",
+      "Refresh the listing and check its current mapping. Then review the current stock setup before publishing.",
+      false, "review_mapping", "Review current listing");
+  if (["EBAY_WITHDRAWAL_IN_PROGRESS", "EBAY_WITHDRAWAL_READBACK_PENDING", "EBAY_WITHDRAWAL_UNVERIFIED"].includes(code))
+    return issue("Checking removal from eBay", "The saved removal has not yet been verified complete on eBay.",
+      "Open the saved removal status. Echelon checks eBay's response and listing state before marking it ended; the product stays excluded while removal is pending.",
+      false, "check_status", "View removal status");
+  if (code === "EBAY_WITHDRAWAL_RESPONSE_UNCERTAIN")
+    return issue("Removal was interrupted", "Echelon cannot confirm whether the earlier removal request reached eBay.",
+      "Review the saved removal. An inventory administrator can authorize that same request to check the exact eBay listing and resume removal if it remains published.",
+      false, "check_recovery", "Review interrupted removal");
+  if (code === "EBAY_WITHDRAWAL_OWNER_REQUIRED")
+    return issue("Removal must use the saved listing request", "This removal did not run through the listing operation owner.",
+      "Return to this product in the listing feed and use its removal action. If this code repeats, copy the request reference for an administrator to inspect the saved job.",
+      false, "edit_listing", "Open listing feed", "/channels/ebay");
+  if (code === "EBAY_EXCLUSION_PERSISTENCE_FAILED")
+    return issue("The removal request's saved result is not confirmed", "Echelon could not confirm the saved inclusion change and its removal job.",
+      "Check the saved request or retry that same request in the inclusion dialog. Echelon reuses the original reference; do not create a replacement command while its outcome is unknown.",
+      true, "retry_sync", "Retry same request");
+
   if (code === "EBAY_PUBLICATION_RESPONSE_UNCERTAIN")
     return issue("Publication was interrupted", "Echelon cannot confirm whether an earlier publish request reached eBay.",
       "Review the saved publication. An inventory administrator can authorize it to check the existing offers and resume using current inventory and catalog pictures.",
@@ -99,7 +128,7 @@ export function resolveEbayListingIssue(input: EbayListingIssueInput): EbayListi
       "Use Sync to update the existing listing. This verifies its saved eBay SKU, offer and group before changing it.",
       true, "retry_sync", "Sync existing listing");
   if (["EBAY_SYNC_AUTH_REQUIRED", "EBAY_AUTH_REQUIRED", "EBAY_AUTH_EXPIRED", "EBAY_TOKEN_EXPIRED", "EBAY_NOT_CONNECTED",
-    "EBAY_OAUTH_SCOPE_MISSING", "EBAY_PROVIDER_ACCOUNT_IDENTITY_CONFLICT", "EBAY_PROVIDER_ACCOUNT_IDENTITY_NOT_PERSISTED", "EBAY_SYNC_ACCOUNT_CHANGED"].includes(code))
+    "EBAY_OAUTH_SCOPE_MISSING", "EBAY_PROVIDER_ACCOUNT_IDENTITY_CONFLICT", "EBAY_PROVIDER_ACCOUNT_IDENTITY_NOT_PERSISTED", "EBAY_SYNC_ACCOUNT_CHANGED", "EBAY_SYNC_ACCOUNT_UNVERIFIED"].includes(code))
     return issue("Reconnect the eBay account", "The saved eBay connection cannot authorize this operation.",
       "Open Connection settings, reconnect the intended eBay account, then return to this product and retry the update.",
       false, "reconnect", "Open connection settings", "/channels/ebay#connection");
@@ -156,7 +185,7 @@ export function resolveEbayListingIssue(input: EbayListingIssueInput): EbayListi
     return issue("Review which variants are included", "This product has no eligible existing listing update.",
       "Check the product and variant inclusion switches in the eBay listing feed. Enable the intended sellable variants; use Publish for a product without an existing eBay listing.",
       false, "edit_listing", "Open listing feed", "/channels/ebay");
-  if (["EBAY_QUANTITY_REJECTED", "EBAY_LISTING_VALIDATION_FAILED", "EBAY_LISTING_PREFLIGHT_FAILED", "STOCK_LISTING_ATP_NOT_READY"].includes(code))
+  if (["EBAY_QUANTITY_REJECTED", "EBAY_LISTING_VALIDATION_FAILED", "EBAY_LISTING_PREFLIGHT_FAILED"].includes(code))
     return issue("Listing details need attention", "The listing does not meet a required eBay or inventory condition.",
       "Review the specific requirement above. Open this product's listing settings to correct its category, item specifics, policies or availability, then retry.",
       false, "edit_listing", "Open listing settings", `${productPath}?tab=channels`);

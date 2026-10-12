@@ -24,6 +24,8 @@ export default defineConfig({
     "ebay-listing-photos.spec.ts",
     "ebay-listing-sync-recovery.spec.ts",
     "ebay-listing-mapping-repair.spec.ts",
+    "ebay-listing-intent.spec.ts",
+    "ebay-publication-stock.spec.ts",
   ],
   fullyParallel: false,
   workers: 1,

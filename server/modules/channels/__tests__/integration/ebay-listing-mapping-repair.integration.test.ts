@@ -13,6 +13,8 @@ import { publicationRetryReviewHash, syncStageHash } from "../../ebay-listing-sy
 import { EbayListingMappingService, type EbayListingMappingRepairPlan } from "../../ebay-listing-mapping.service";
 import { EBAY_LISTING_WORKFLOW_LOCK_NAMESPACE, ebayListingWorkflowLockKey } from "../../ebay-listing-workflow-lock";
 import { markVariantAvailabilitySynced } from "../../variant-availability-sync.repository";
+import { PostgresEbayListingExclusionRepository } from "../../infrastructure/ebay-listing-exclusion.repository";
+import { EbayListingWithdrawalExecution } from "../../ebay-listing-withdrawal.service";
 import { EbayListingSyncService } from "../../ebay-listing-sync.service";
 import { EbayPublicationCompletionExecution, type PreparedEbayPublication } from "../../ebay-publication-completion.service";
 import { resolveEbayPublicationTarget } from "../../ebay-publication-completion.domain";
@@ -41,8 +43,8 @@ const enabled = process.env.ECHELON_TEST_DATABASE_URL && process.env.ECHELON_TES
       CREATE TABLE channels.channel_connections(id integer PRIMARY KEY,channel_id integer REFERENCES channels.channels,metadata jsonb);
       CREATE TABLE ebay.ebay_oauth_tokens(channel_id integer REFERENCES channels.channels,environment text,external_account_id text,
         external_account_identity_scheme text,external_account_verified_at timestamptz,PRIMARY KEY(channel_id,environment));
-      CREATE TABLE catalog.products(id integer PRIMARY KEY,product_type text DEFAULT 'test');
-      CREATE TABLE channels.channel_product_overrides(id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,channel_id integer REFERENCES channels.channels,product_id integer REFERENCES catalog.products,is_listed integer);
+      CREATE TABLE catalog.products(id integer PRIMARY KEY,product_type text DEFAULT 'test',ebay_listing_excluded boolean NOT NULL DEFAULT false);
+      CREATE TABLE channels.channel_product_overrides(id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,channel_id integer REFERENCES channels.channels,product_id integer REFERENCES catalog.products,is_listed integer,created_at timestamptz,updated_at timestamptz,UNIQUE(channel_id,product_id));
       CREATE TABLE catalog.product_variants(id integer PRIMARY KEY,product_id integer REFERENCES catalog.products,sku text,is_active boolean);
       CREATE TABLE channels.channel_variant_overrides(id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,channel_id integer REFERENCES channels.channels,product_variant_id integer REFERENCES catalog.product_variants,is_listed integer);
       CREATE TABLE ebay.ebay_category_mappings(id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,channel_id integer REFERENCES channels.channels,product_type_slug text,listing_enabled boolean);
@@ -76,7 +78,7 @@ const enabled = process.env.ECHELON_TEST_DATABASE_URL && process.env.ECHELON_TES
     const end = syncMigration.indexOf("CREATE TRIGGER publication_response_recoveries_no_truncate", start);
     expect(start).toBeGreaterThan(0); expect(end).toBeGreaterThan(start);
     await database.pool.query(syncMigration.slice(start,end));
-    for (const migration of ["0731_ebay_listing_sync_verification_checkpoint.sql","0732_ebay_listing_sync_identity_admission.sql","0736_ebay_listing_mapping_repairs.sql","0737_ebay_publication_completion.sql"])
+    for (const migration of ["0731_ebay_listing_sync_verification_checkpoint.sql","0732_ebay_listing_sync_identity_admission.sql","0736_ebay_listing_mapping_repairs.sql","0737_ebay_publication_completion.sql","0741_ebay_durable_withdrawal.sql"])
       await database.pool.query(readFileSync(resolve(process.cwd(),"migrations",migration),"utf8"));
     canonical = new PgMarketplaceListingRegistrationRepository(database.pool);
     repository = new PostgresEbayListingMappingRepairRepository(database.pool, { channelId:67,readSourceInsideTransaction:readSource,canonicalRegistration:canonical });
@@ -750,7 +752,7 @@ const enabled = process.env.ECHELON_TEST_DATABASE_URL && process.env.ECHELON_TES
       const connection=await database.pool.connect();let snapshot:EbayListingMappingSourceSnapshot;
       try{snapshot=await readSource(connection,source.productId);}finally{connection.release();}
       const inspection=await inspect();
-      return{sourceIdentity:snapshot.identity,identity:resolveEbayPublicationTarget(source,inspection),client,draft:structuredClone(draft),inspection,inspect,
+      return{sourceIdentity:snapshot.identity,identity:resolveEbayPublicationTarget(source,inspection),client,draft:structuredClone(draft),inspection,inspect,assertInventoryReady:async()=>{},
         resolvePublishedIdentity:async()=>publicationObservation(final),variants:source.variants.map(member=>({variantId:member.variantId,sku:member.sku,
           productName:"Canonical catalog title",priceCents:1249,priceChanged:true}))};
     };
@@ -787,5 +789,178 @@ const enabled = process.env.ECHELON_TEST_DATABASE_URL && process.env.ECHELON_TES
         external_variant_id:member.offerId,external_product_id:member.listingId,last_synced_price:"1249",last_synced_qty:57,sync_status:"synced"});}
     expect(providerState.group?.imageUrls).toEqual(photoUrls);
     expect((await database.pool.query("SELECT count(*)::integer AS count FROM channels.ebay_listing_sync_events WHERE job_id=$1 AND event='stage_started' AND evidence->>'key'='publish'",[saved.job.id])).rows[0].count).toBe(1);
+  });
+  function exclusionOwner(clock=now) { return new PostgresEbayListingExclusionRepository(database.pool,67,async(client,productId)=>(await readSource(client,productId)).identity,()=>clock); }
+  async function enqueueReviewedTarget(source: typeof plan.source.identity, target: typeof plan.source.identity, commandKey = randomUUID()) {
+    const client = await database.pool.connect();
+    try {
+      await client.query("BEGIN");
+      const saved = await new PostgresEbayListingSyncRepository(database.pool).enqueueInsideTransaction(client, source, commandKey, "stock-reviewer", now, undefined, "publish", target);
+      await client.query("COMMIT");
+      return saved;
+    } catch (error) { await client.query("ROLLBACK"); throw error; }
+    finally { client.release(); }
+  }
+  it("retains the reviewed group and known offers at enqueue before any provider group exists", async () => {
+    const publish = await publicationPlan();
+    const source = publish.source.identity;
+    const target = { ...publish.targetIdentity, variants: source.variants.map(member => ({ ...member, externalSku: member.sku })) };
+    const key = randomUUID();
+    const saved = await enqueueReviewedTarget(source, target, key);
+    expect(saved).toMatchObject({ state: "queued", publicationTarget: target, providerIdentity: null, publicationAccepted: null });
+    expect((await enqueueReviewedTarget(source, target, key)).id).toBe(saved.id);
+    const receipts = (await database.pool.query("SELECT evidence FROM channels.ebay_listing_sync_events WHERE job_id=$1 AND event='requested'", [saved.id])).rows;
+    expect(receipts).toHaveLength(1);
+    expect(receipts[0].evidence).toMatchObject({ commandKey: key, actor: "stock-reviewer", reviewedPublicationTarget: target });
+    const jobs = new PostgresEbayListingSyncRepository(database.pool);
+    const claim = await jobs.claim(now, randomUUID(), saved.id);
+    expect(claim?.job.publicationTarget).toEqual(target);
+    try { await jobs.bindPublicationTarget(claim!.job, target, now); }
+    finally { await claim!.release(); }
+    expect((await jobs.get(saved.id)).providerIdentity).toBeNull();
+    await expect(enqueueReviewedTarget(source, { ...target, groupKey: "different-reviewed-group" })).rejects.toMatchObject({ code: "EBAY_SYNC_IDENTITY_CHANGED" });
+    expect((await jobs.get(saved.id)).revision).toBe("1");
+  });
+  it("pins an idle job's previously missing target and rejects unrelated identities without leaking a command", async () => {
+    const publish = await publicationPlan();
+    const source = publish.source.identity;
+    const target = { ...publish.targetIdentity, variants: source.variants.map(member => ({ ...member, externalSku: member.sku })) };
+    const jobs = new PostgresEbayListingSyncRepository(database.pool);
+    const initial = await jobs.enqueue(source, randomUUID(), "original-requester", now, "publish");
+    const saved = await enqueueReviewedTarget(source, target);
+    expect(saved).toMatchObject({ id: initial.id, revision: "2", publicationTarget: target });
+    const invalidKey = randomUUID();
+    await expect(enqueueReviewedTarget(source, { ...target, accountId: "different-account" }, invalidKey)).rejects.toMatchObject({ code: "EBAY_SYNC_PROVIDER_IDENTITY_CHANGED" });
+    expect(await jobs.getByCommand(invalidKey, source.channelId)).toBeNull();
+  });
+  it("rolls back reviewed target admission when its audit receipt fails and refuses an unreceipted target write", async () => {
+    const publish = await publicationPlan();
+    const source = publish.source.identity;
+    const target = { ...publish.targetIdentity, variants: source.variants.map(member => ({ ...member, externalSku: member.sku })) };
+    await database.pool.query(`CREATE FUNCTION channels.test_target_review_failure() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
+      IF NEW.event='requested' AND NEW.evidence ? 'reviewedPublicationTarget' THEN RAISE EXCEPTION 'injected reviewed target audit failure'; END IF; RETURN NEW; END $$;
+      CREATE TRIGGER test_target_review_failure BEFORE INSERT ON channels.ebay_listing_sync_events FOR EACH ROW EXECUTE FUNCTION channels.test_target_review_failure()`);
+    try { await expect(enqueueReviewedTarget(source, target)).rejects.toThrow("injected reviewed target audit failure"); }
+    finally { await database.pool.query("DROP TRIGGER test_target_review_failure ON channels.ebay_listing_sync_events; DROP FUNCTION channels.test_target_review_failure()"); }
+    expect((await counts()).jobs).toBe(0);
+    const saved = await new PostgresEbayListingSyncRepository(database.pool).enqueue(source, randomUUID(), "operator", now, "publish");
+    const client = await database.pool.connect();
+    try {
+      await client.query("BEGIN");
+      await client.query("SELECT pg_advisory_xact_lock(918427,hashtext($1))", [saved.id]);
+      await expect(client.query("UPDATE channels.ebay_listing_sync_jobs SET publication_target=$2::jsonb,publication_target_hash=$3 WHERE id=$1", [saved.id, JSON.stringify(target), "a".repeat(64)])).rejects.toMatchObject({ code: "23514" });
+    } finally { await client.query("ROLLBACK"); client.release(); }
+  });
+  async function exclusionIntent() {
+    return (await database.pool.query(`SELECT p.ebay_listing_excluded,cpo.is_listed FROM catalog.products p
+      LEFT JOIN channels.channel_product_overrides cpo ON cpo.product_id=p.id AND cpo.channel_id=67 WHERE p.id=$1`,[plan.source.identity.productId])).rows[0];
+  }
+  it("atomically excludes and saves withdrawal with immutable receipt; duplicate commands and changed intent replay exactly",async()=>{
+    const owner=exclusionOwner();const command={excluded:true,commandKey:randomUUID()};const before=await mappings();
+    const results=await Promise.all([owner.set(plan.source.identity.productId,command,"operator"),owner.set(plan.source.identity.productId,command,"operator")]);
+    expect(results.map(row=>row.replayed).sort()).toEqual([false,true]);expect(results[0].job?.id).toBe(results[1].job?.id);
+    expect(results[0]).toMatchObject({remoteAction:"queued_withdrawal",job:{operation:"withdraw",state:"queued"}});
+    expect(await exclusionIntent()).toEqual({ebay_listing_excluded:true,is_listed:0});expect(await mappings()).toEqual(before);
+    const saved=await new PostgresEbayListingSyncRepository(database.pool).get(results[0].job!.id);
+    expect(saved.identity.variants.every(member=>member.contentSyncEnabled===false)).toBe(true);expect(saved.requestedBy).toBe("operator");
+    await expect(owner.set(plan.source.identity.productId,{...command,excluded:false},"operator")).rejects.toMatchObject({code:"EBAY_SYNC_REPLAY_CONFLICT"});
+    await expect(owner.set(plan.source.identity.productId,command,"someone else")).rejects.toMatchObject({code:"EBAY_SYNC_REPLAY_CONFLICT"});
+    expect((await owner.get(plan.source.identity.productId,command.commandKey)).job?.id).toBe(saved.id);
+    await expect(database.pool.query("DELETE FROM channels.ebay_listing_exclusion_commands WHERE command_key=$1",[command.commandKey])).rejects.toMatchObject({code:"23514"});
+  });
+  it("rolls back local exclusion and queued work if the immutable intent receipt cannot be committed",async()=>{
+    const before=await exclusionIntent();await database.pool.query(`CREATE FUNCTION channels.test_exclusion_failure() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
+      RAISE EXCEPTION 'injected exclusion audit failure';END $$;
+      CREATE TRIGGER test_exclusion_failure BEFORE INSERT ON channels.ebay_listing_exclusion_commands FOR EACH ROW EXECUTE FUNCTION channels.test_exclusion_failure()`);
+    try{await expect(exclusionOwner().set(plan.source.identity.productId,{excluded:true,commandKey:randomUUID()},"operator")).rejects.toThrow("injected exclusion audit failure");}
+    finally{await database.pool.query("DROP TRIGGER test_exclusion_failure ON channels.ebay_listing_exclusion_commands;DROP FUNCTION channels.test_exclusion_failure()");}
+    expect(await exclusionIntent()).toEqual(before);expect((await counts()).jobs).toBe(0);
+  });
+  it("blocks reinclude and positive publication while withdrawal is pending; a new exclusion command joins its one job",async()=>{
+    const owner=exclusionOwner();const first=await owner.set(plan.source.identity.productId,{excluded:true,commandKey:randomUUID()},"operator");
+    const joined=await owner.set(plan.source.identity.productId,{excluded:true,commandKey:randomUUID()},"operator");expect(joined.job?.id).toBe(first.job?.id);
+    await expect(owner.set(plan.source.identity.productId,{excluded:false,commandKey:randomUUID()},"operator")).rejects.toMatchObject({code:"EBAY_WITHDRAWAL_IN_PROGRESS",jobId:first.job!.id});
+    await expect(new PostgresEbayListingSyncRepository(database.pool).enqueue(plan.source.identity,randomUUID(),"operator",now,"sync")).rejects.toMatchObject({code:"EBAY_WITHDRAWAL_IN_PROGRESS"});
+    expect((await counts()).jobs).toBe(1);expect(await exclusionIntent()).toEqual({ebay_listing_excluded:true,is_listed:0});
+  });
+  it("records local-only exclusion and inclusion without pretending an unknown remote listing ended",async()=>{
+    await database.pool.query("DELETE FROM channels.channel_listings WHERE product_variant_id=ANY($1::integer[])",[plan.source.identity.variants.map(member=>member.variantId)]);
+    const owner=exclusionOwner();const command={excluded:true,commandKey:randomUUID()};const first=await owner.set(plan.source.identity.productId,command,"operator");
+    expect(first).toMatchObject({remoteAction:"local_exclusion",job:null});
+    const included=await owner.set(plan.source.identity.productId,{excluded:false,commandKey:randomUUID()},"operator");expect(included).toMatchObject({remoteAction:"included",job:null});
+    expect((await owner.set(plan.source.identity.productId,command,"operator")).replayed).toBe(true);expect(await exclusionIntent()).toEqual({ebay_listing_excluded:false,is_listed:1});
+    expect((await counts()).jobs).toBe(0);
+  });
+  it("refuses local-only exclusion while an initial publication still owns an unmapped remote outcome", async () => {
+    const publish = await publicationPlan();
+    const jobs = new PostgresEbayListingSyncRepository(database.pool);
+    const pending = await jobs.enqueue(publish.source.identity, randomUUID(), "publisher", now, "publish");
+    await database.pool.query("DELETE FROM channels.channel_listings WHERE product_variant_id=ANY($1::integer[])", [publish.source.identity.variants.map(member => member.variantId)]);
+    const before = await exclusionIntent();
+    await expect(exclusionOwner().set(publish.source.identity.productId, { excluded: true, commandKey: randomUUID() }, "operator"))
+      .rejects.toMatchObject({ code: "EBAY_PUBLICATION_PRIOR_WORK_REQUIRED", jobId: pending.id });
+    expect(await exclusionIntent()).toEqual(before);
+    expect((await counts()).jobs).toBe(1);
+  });
+  it("withdrawal worker survives provider success plus projection rollback without repeating withdrawal or overwriting quantity/history",async()=>{
+    const owner=exclusionOwner();const saved=await owner.set(plan.source.identity.productId,{excluded:true,commandKey:randomUUID()},"operator");
+    const jobs=new PostgresEbayListingSyncRepository(database.pool);const source=(await jobs.get(saved.job!.id)).identity;const before=await mappings();let published=true;
+    const groupKey=`OLD-${source.productId}`;
+    const inspect=async():Promise<EbayListingInspection>=>({providerAccount:plan.observation.providerAccount,observedAt:now,
+      groupKey,groupSkus:source.variants.map(member=>member.sku),publicationIssue:null,unpublishedTarget:published?null:{groupKey,skus:source.variants.map(member=>member.sku)},
+      skus:source.variants.map(member=>({sku:member.sku,inventoryItemExists:true,issue:null,offers:[{sku:member.sku,offerId:member.offerId!,status:published?"PUBLISHED":"UNPUBLISHED",listingId:published?member.listingId:null,listingStatus:published?"ACTIVE":null}]})),
+      publication:published?{...plan.observation,publicationKeyIdentity:{externalId:groupKey,identityNamespace:"ebay.inventory_item_group"},
+        listingIdentity:{externalId:source.variants[0].listingId!,identityNamespace:"ebay.listing"},members:source.variants.map(member=>({sku:member.sku,variantIdentity:null,
+          offerIdentity:{externalId:member.offerId!,identityNamespace:"ebay.offer"},inventoryItemIdentity:{externalId:member.sku,identityNamespace:"ebay.inventory_item"}}))}:null});
+    const client={withdrawOffer:vi.fn(async()=>{published=false;}),withdrawOfferByInventoryItemGroup:vi.fn(async()=>{published=false;})};
+    const recovery={reconcile:vi.fn(async()=>({busy:false,resolved:[],unresolved:[]}))};
+    const execute=new EbayListingWithdrawalExecution(async()=>({sourceIdentity:source,inspect,client}),recovery);
+    const worker=(clock:Date)=>new EbayListingSyncService(new PostgresEbayListingSyncRepository(database.pool),execute,()=>clock,randomUUID);
+    await database.pool.query(`CREATE FUNCTION channels.test_withdraw_completion_failure() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
+      IF NEW.event='completed' THEN RAISE EXCEPTION 'injected withdrawal final audit failure';END IF;RETURN NEW;END $$;
+      CREATE TRIGGER test_withdraw_completion_failure BEFORE INSERT ON channels.ebay_listing_sync_events FOR EACH ROW EXECUTE FUNCTION channels.test_withdraw_completion_failure()`);
+    try{expect(await worker(now).processDue(1,saved.job!.id)).toEqual({processed:0,failed:1});}
+    finally{await database.pool.query("DROP TRIGGER test_withdraw_completion_failure ON channels.ebay_listing_sync_events;DROP FUNCTION channels.test_withdraw_completion_failure()");}
+    expect(await mappings()).toEqual(before);expect(await jobs.get(saved.job!.id)).toMatchObject({state:"recovering",withdrawalWriteCompleted:true,providerIdentity:{groupKey}});
+    expect(await worker(new Date(now.getTime()+10*60_000)).processDue(1,saved.job!.id)).toEqual({processed:1,failed:0});
+    expect((await jobs.get(saved.job!.id)).state).toBe("completed");expect(client.withdrawOfferByInventoryItemGroup).toHaveBeenCalledExactlyOnceWith(groupKey,"EBAY_US");
+    for(const row of await mappings()){const prior=before.find(value=>value.product_variant_id===row.product_variant_id)!;
+      expect(row.sync_status).toBe("ended");for(const column of ["external_sku","external_variant_id","external_product_id","external_url","last_synced_qty","last_synced_price","created_at"])expect(row[column]).toEqual(prior[column]);}
+    const included=await exclusionOwner(new Date(now.getTime()+20*60_000)).set(source.productId,{excluded:false,commandKey:randomUUID()},"operator");
+    expect(included).toMatchObject({remoteAction:"included",job:null});expect((await mappings()).every(row=>row.sync_status==="ended")).toBe(true);
+  });
+  it("never repeats accepted withdrawal after stage receipt loss; reviewed retry is concurrent-safe and cannot bypass completed acceptance",async()=>{
+    const saved=await exclusionOwner().set(plan.source.identity.productId,{excluded:true,commandKey:randomUUID()},"operator");
+    const jobs=new PostgresEbayListingSyncRepository(database.pool);const source=(await jobs.get(saved.job!.id)).identity;
+    let published=true;let visible=false;const groupKey=`OLD-${source.productId}`;
+    const inspect=async():Promise<EbayListingInspection>=>{
+      const active=published||!visible;
+      return{providerAccount:plan.observation.providerAccount,observedAt:now,groupKey,groupSkus:source.variants.map(member=>member.sku),publicationIssue:null,
+        unpublishedTarget:active?null:{groupKey,skus:source.variants.map(member=>member.sku)},
+        skus:source.variants.map(member=>({sku:member.sku,inventoryItemExists:true,issue:null,offers:[{sku:member.sku,offerId:member.offerId!,status:active?"PUBLISHED":"UNPUBLISHED",listingId:active?member.listingId:null,listingStatus:active?"ACTIVE":null}]})),
+        publication:active?{...plan.observation,publicationKeyIdentity:{externalId:groupKey,identityNamespace:"ebay.inventory_item_group"},listingIdentity:{externalId:source.variants[0].listingId!,identityNamespace:"ebay.listing"},
+          members:source.variants.map(member=>({sku:member.sku,variantIdentity:null,offerIdentity:{externalId:member.offerId!,identityNamespace:"ebay.offer"},inventoryItemIdentity:{externalId:member.sku,identityNamespace:"ebay.inventory_item"}}))}:null};
+    };
+    const client={withdrawOffer:vi.fn(async()=>{published=false;}),withdrawOfferByInventoryItemGroup:vi.fn(async()=>{published=false;})};
+    const execute=new EbayListingWithdrawalExecution(async()=>({sourceIdentity:source,inspect,client}),{reconcile:async()=>({busy:false,resolved:[],unresolved:[]})});
+    const worker=(clock:Date)=>new EbayListingSyncService(new PostgresEbayListingSyncRepository(database.pool),execute,()=>clock,randomUUID);
+    await database.pool.query(`CREATE FUNCTION channels.test_withdraw_stage_failure() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
+      IF NEW.event='stage_completed' AND NEW.evidence->>'key'='withdraw' THEN RAISE EXCEPTION 'injected post-response audit failure';END IF;RETURN NEW;END $$;
+      CREATE TRIGGER test_withdraw_stage_failure BEFORE INSERT ON channels.ebay_listing_sync_events FOR EACH ROW EXECUTE FUNCTION channels.test_withdraw_stage_failure()`);
+    try{expect(await worker(now).processDue(1,saved.job!.id)).toEqual({processed:0,failed:1});}
+    finally{await database.pool.query("DROP TRIGGER test_withdraw_stage_failure ON channels.ebay_listing_sync_events;DROP FUNCTION channels.test_withdraw_stage_failure()");}
+    const interrupted=await jobs.get(saved.job!.id);expect(interrupted).toMatchObject({state:"awaiting_evidence",withdrawalWriteStarted:true,withdrawalWriteCompleted:false});
+    expect(await worker(new Date(now.getTime()+10*60_000)).processDue(1,saved.job!.id)).toEqual({processed:0,failed:1});
+    expect(client.withdrawOfferByInventoryItemGroup).toHaveBeenCalledTimes(1);expect((await jobs.get(saved.job!.id)).code).toBe("EBAY_WITHDRAWAL_RESPONSE_UNCERTAIN");
+    const command={jobId:saved.job!.id,channelId:67,expectedRevision:interrupted.revision,reviewHash:publicationRetryReviewHash(interrupted),commandKey:randomUUID(),actor:"inventory-admin"};
+    const authorized=await Promise.all([jobs.authorizePublicationRetry(command,new Date(now.getTime()+11*60_000)),jobs.authorizePublicationRetry(command,new Date(now.getTime()+11*60_000))]);
+    expect(authorized.map(row=>row.replayed).sort()).toEqual([false,true]);expect(authorized[0].job).toMatchObject({id:saved.job!.id,revision:"2",state:"queued",withdrawalWriteStarted:false});
+    expect((await database.pool.query("SELECT count(*)::integer AS n FROM channels.ebay_listing_sync_events WHERE job_id=$1 AND event='withdrawal_retry_authorized'",[saved.job!.id])).rows[0].n).toBe(1);
+    // The explicit retry still inspects first. The now-visible response ends it
+    // without sending another withdrawal or claiming the old request succeeded.
+    visible=true;expect(await worker(new Date(now.getTime()+12*60_000)).processDue(1,saved.job!.id)).toEqual({processed:1,failed:0});
+    expect(client.withdrawOfferByInventoryItemGroup).toHaveBeenCalledTimes(1);expect((await jobs.get(saved.job!.id)).state).toBe("completed");
+    expect((await jobs.authorizePublicationRetry(command,new Date(now.getTime()+13*60_000))).replayed).toBe(true);
+    await expect(jobs.authorizePublicationRetry({...command,commandKey:randomUUID()},new Date(now.getTime()+13*60_000))).rejects.toMatchObject({code:"EBAY_PUBLICATION_RETRY_NOT_ALLOWED"});
   });
 });

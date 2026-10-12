@@ -5,7 +5,7 @@ const syncCount = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
 export const ebayListingSyncJobSchema = z.object({
   id: z.string().uuid(), productId: z.number().int().positive(),
   kind: z.enum(["sync", "admission"]).default("sync"),
-  operation: z.enum(["sync", "publish"]).default("sync"),
+  operation: z.enum(["sync", "publish", "withdraw"]).default("sync"),
   state: z.enum(["queued", "running", "recovering", "awaiting_evidence", "completed", "needs_attention"]),
   code: z.string().max(100).nullable(), message: z.string().max(1000).nullable(),
   nextAttemptAt: z.string().datetime(), updatedAt: z.string().datetime(),

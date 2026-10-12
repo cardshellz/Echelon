@@ -9,6 +9,8 @@
 
 import { ebayProductSyncResultSchema, ebayListingSyncJobSchema } from "@shared/types/ebay-listing-sync";
 import { EbayListingJobStatusDialog } from "@/components/ebay/EbayListingJobStatusDialog";
+import { EbayProductListingIntentControl } from "@/components/ebay/EbayProductListingIntentControl";
+import { EbayWithdrawalIssueCard } from "@/components/ebay/EbayWithdrawalIssueCard";
 import { ebayListingIssueSchema, type EbayListingIssue } from "@shared/types/ebay-listing-issue";
 import { resolveEbayListingIssue } from "@shared/ebay-listing-issue";
 import { listingSyncIssueFromError } from "@/lib/ebay-listing-issue";
@@ -76,6 +78,7 @@ import { PushProgressModal } from "@/components/ebay/PushProgressModal";
 import { SyncProgressModal } from "@/components/ebay/SyncProgressModal";
 import { EbayListingIssueCard } from "@/components/ebay/EbayListingIssueCard";
 import { EbayMappingRepairDialog } from "@/components/ebay/EbayMappingRepairDialog";
+import { EbayPublicationStockDialog } from "@/components/ebay/EbayPublicationStockDialog";
 import { EbaySyncRecoveryDialog } from "@/components/ebay/EbaySyncRecoveryDialog";
 import { MarketplaceListingRegistrationDialog } from "@/components/marketplace/MarketplaceListingRegistrationDialog";
 import { MarketplaceListingChangesDialog } from "@/components/marketplace/MarketplaceListingChangesDialog";
@@ -815,9 +818,39 @@ export default function EbayChannelPage() {
   };
 
   const [publicationStatusTarget, setPublicationStatusTarget] = useState<{ jobId: string; productId: number; name: string } | null>(null);
+  const [publicationStockTarget, setPublicationStockTarget] = useState<{ productId: number; name: string } | null>(null);
+  const [checkingRecovery, setCheckingRecovery] = useState(false);
+  const [withdrawalRetryRequests, setWithdrawalRetryRequests] = useState<Map<number, number>>(new Map());
+  const retryWithdrawal = (productId: number) => setWithdrawalRetryRequests(previous => new Map(previous).set(productId, (previous.get(productId) ?? 0) + 1));
+  const withdrawalRetryHandled = (productId: number, request: number) => setWithdrawalRetryRequests(previous => {
+    if (previous.get(productId) !== request) return previous;
+    const next = new Map(previous); next.delete(productId); return next;
+  });
+  const continueSavedRecovery = async () => {
+    if (!recoveryTarget || checkingRecovery) return;
+    if (!recoveryTarget.jobId) { handlePushSingle(recoveryTarget.productId); return; }
+    setCheckingRecovery(true);
+    try {
+      const { job } = z.object({ job: ebayListingSyncJobSchema }).parse(await (await apiRequest("GET", `/api/ebay/listings/sync-jobs/${recoveryTarget.jobId}`)).json());
+      if (job.id !== recoveryTarget.jobId || job.productId !== recoveryTarget.productId) throw new Error("The saved request does not match this product.");
+      // A withdrawal must never enter ordinary sync or publish. Its exact saved
+      // status owns continuation; a terminal failure offers the removal retry.
+      if (job.operation === "withdraw" || ["queued", "running", "recovering", "completed"].includes(job.state)) {
+        setPublicationStatusTarget({ jobId: job.id, productId: job.productId, name: recoveryTarget.name });
+        setRecoveryTarget(null);
+      } else if (job.operation === "publish") handlePushSingle(job.productId);
+      else handleSyncProduct(job.productId);
+    } catch {
+      toast({ title: "Saved request could not be checked", description: "Refresh this recovery view and try again. No new listing operation was sent.", variant: "destructive" });
+    } finally { setCheckingRecovery(false); }
+  };
 
   const handleIssueAction = (issue: EbayListingIssue, productId: number, jobId?: string) => {
     const item = feedData?.feed.find((candidate) => candidate.id === productId);
+    if (issue.action.kind === "review_publication_stock") {
+      setPublicationStockTarget({ productId, name: item?.name ?? `Product ${productId}` });
+      return;
+    }
     // An admission refusal may point to an older publication that is blocking
     // this new request. Its explicit reference takes precedence over the refusal.
     const referencedJobId = issue.reference && /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(issue.reference) ? issue.reference : undefined;
@@ -834,7 +867,8 @@ export default function EbayChannelPage() {
     if (issue.action.kind === "retry_sync" && issue.retryable) {
       const local = localSyncIssues.get(productId);
       const commandKey = local?.issue.code === issue.code ? local.commandKey ?? undefined : undefined;
-      if (latestSyncJobs.get(productId)?.operation === "publish" && latestSyncJobs.get(productId)?.state !== "completed") handlePushSingle(productId);
+      if (latestSyncJobs.get(productId)?.operation === "withdraw") retryWithdrawal(productId);
+      else if (latestSyncJobs.get(productId)?.operation === "publish" && latestSyncJobs.get(productId)?.state !== "completed") handlePushSingle(productId);
       else if (item?.externalListingId) handleSyncProduct(productId, commandKey);
       else handlePushSingle(productId);
       return;
@@ -868,19 +902,6 @@ export default function EbayChannelPage() {
       const isHtml = raw.includes("<!DOCTYPE") || raw.includes("<html");
       const description = isHtml ? "eBay server returned an error page. Check server logs." : raw.length > 200 ? raw.substring(0, 200) + "…" : raw;
       toast({ title: "Verification Failed", description, variant: "destructive" });
-    },
-  });
-
-  const toggleExclusionMutation = useMutation({
-    mutationFn: async ({ productId, excluded }: { productId: number; excluded: boolean }) => {
-      const resp = await apiRequest("PUT", `/api/ebay/product-exclusion/${productId}`, { excluded });
-      return resp.json();
-    },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["/api/ebay/listing-feed"] });
-    },
-    onError: (err: Error) => {
-      toast({ title: "Error", description: err.message, variant: "destructive" });
     },
   });
 
@@ -2043,11 +2064,12 @@ export default function EbayChannelPage() {
                       const syncJob = latestSyncJobs.get(item.id);
                       const syncPending = syncJob && ["queued","running","recovering"].includes(syncJob.state);
                       const publicationPending = syncPending && syncJob?.operation === "publish";
+                      const withdrawalJob = syncJob?.operation === "withdraw" ? syncJob : null;
                       const syncIssue = localSyncIssues.get(item.id)?.issue ?? (syncJob && ["awaiting_evidence", "needs_attention"].includes(syncJob.state)
                         ? syncJob.issue ?? resolveEbayListingIssue({ code: syncJob.code, message: syncJob.message, productId: item.id, jobId: syncJob.id, state: syncJob.state })
                         : item.status === "error" && item.syncError && !syncPending
                           ? resolveEbayListingIssue({ message: item.syncError, productId: item.id }) : null);
-                      const isExcluded = item.status === "excluded";
+                      const isExcluded = item.isExcluded;
                       const isExpanded = expandedProducts.has(item.id);
                       const hasVariants = item.variants && item.variants.length > 0;
                       const allIncluded = item.includedVariantCount === item.variantCount;
@@ -2121,13 +2143,8 @@ export default function EbayChannelPage() {
                                   <span className="inline-block w-4" />
                                 )}
                               </button>
-                              <Switch
-                                checked={!isExcluded}
-                                onCheckedChange={(checked) =>
-                                  toggleExclusionMutation.mutate({ productId: item.id, excluded: !checked })
-                                }
-                                title={isExcluded ? "Include in eBay listings" : "Exclude from eBay listings"}
-                              />
+                              <EbayProductListingIntentControl productId={item.id} productName={item.name} excluded={isExcluded} currentJob={syncJob}
+                                disabled={syncJobsQuery.isError || syncJobsQuery.isPending} retryRequested={withdrawalRetryRequests.get(item.id)} onRetryHandled={withdrawalRetryHandled} onIssueAction={handleIssueAction} />
                               <span className="text-xs text-muted-foreground sm:hidden">
                                 {isExcluded ? "Excluded" : "Included"}
                               </span>
@@ -2140,7 +2157,7 @@ export default function EbayChannelPage() {
                             </span>
                             {syncJob && syncJob.state !== "completed" && (
                               <p role="status" aria-label={`Sync status for ${item.name}`} className="text-xs mt-1" title={syncJob.message ?? undefined}>
-                                {syncJob.code === "EBAY_PUBLICATION_READBACK_PENDING" ? "Checking published listing and pictures" : syncJob.operation === "publish"
+                                {syncJob.operation === "withdraw" ? syncPending ? "Exclusion saved — removal from eBay is in progress" : "Exclusion saved — removal needs attention below" : syncJob.code === "EBAY_PUBLICATION_READBACK_PENDING" ? "Checking published listing and pictures" : syncJob.operation === "publish"
                                   ? syncJob.state === "queued" ? "Publishing saved — waiting to run" : syncJob.state === "running" ? "Publishing in progress" : syncJob.state === "recovering" ? "Publishing saved — recovering automatically" : "Publishing paused — see the next step below"
                                   : syncJob.state === "queued" ? "Sync saved — waiting to run" : syncJob.state === "running" ? "Sync in progress" : syncJob.state === "recovering" ? "Sync saved — recovering automatically" : "Update paused — see the next step below"}
                                 {syncPending && syncJob.message && <span className="block text-muted-foreground">{syncJob.message}</span>}
@@ -2257,9 +2274,8 @@ export default function EbayChannelPage() {
                                   {item.status === "deleted" ? "Deleted" : "Ended"}
                                 </Badge>
                               )}
-                              {item.status === "excluded" && (
-                                <Badge variant="outline" className="text-muted-foreground text-xs">Excluded</Badge>
-                              )}
+                              {item.status === "excluded" && <Badge variant="outline" className="text-muted-foreground text-xs">{withdrawalJob?.state === "completed" ? "Ended on eBay · excluded" : withdrawalJob ? "Excluded · removal pending" : "Excluded locally"}</Badge>}
+                              {withdrawalJob && <Button variant="outline" size="sm" className="min-h-11 text-xs" onClick={event => { event.stopPropagation(); setPublicationStatusTarget({ jobId: withdrawalJob.id, productId: item.id, name: item.name }); }}>View removal status</Button>}
                               {reconciliationAction && (
                                 <Button
                                   variant="outline"
@@ -2411,9 +2427,8 @@ export default function EbayChannelPage() {
                                     {item.status === "deleted" ? "Deleted" : "Ended"}
                                   </Badge>
                                 )}
-                                {item.status === "excluded" && (
-                                  <Badge variant="outline" className="text-muted-foreground text-xs">Excluded</Badge>
-                                )}
+                                {item.status === "excluded" && <Badge variant="outline" className="text-muted-foreground text-xs">{withdrawalJob?.state === "completed" ? "Ended on eBay · excluded" : withdrawalJob ? "Excluded · removal pending" : "Excluded locally"}</Badge>}
+                                {withdrawalJob && <Button variant="outline" size="sm" className="min-h-9 text-xs" onClick={event => { event.stopPropagation(); setPublicationStatusTarget({ jobId: withdrawalJob.id, productId: item.id, name: item.name }); }}>View removal status</Button>}
                                 {reconciliationAction && (
                                   <Button
                                     variant="outline"
@@ -2447,7 +2462,10 @@ export default function EbayChannelPage() {
                         </TableRow>
                         {syncIssue && <TableRow className="block sm:table-row">
                           <TableCell colSpan={6} className="block sm:table-cell p-3">
-                            <EbayListingIssueCard issue={syncIssue} busy={syncingProductIds.has(item.id)} onAction={(issue) => handleIssueAction(issue, item.id, syncJob?.id)} />
+                            {withdrawalJob && syncIssue.action.kind === "review_mapping" ? <EbayWithdrawalIssueCard issue={syncIssue}
+                              onCheck={() => setPublicationStatusTarget({ jobId: withdrawalJob.id, productId: item.id, name: item.name })}
+                              onRetry={withdrawalJob.state === "needs_attention" ? () => retryWithdrawal(item.id) : undefined} />
+                              : <EbayListingIssueCard issue={syncIssue} busy={syncingProductIds.has(item.id)} onAction={(issue) => handleIssueAction(issue, item.id, syncJob?.id)} />}
                           </TableCell>
                         </TableRow>}
                         {/* Expanded variant rows */}
@@ -2967,6 +2985,12 @@ export default function EbayChannelPage() {
       {publicationStatusTarget && <EbayListingJobStatusDialog
         key={publicationStatusTarget.jobId} jobId={publicationStatusTarget.jobId} productId={publicationStatusTarget.productId}
         productName={publicationStatusTarget.name} onClose={() => setPublicationStatusTarget(null)} onIssueAction={handleIssueAction}
+        onRetryWithdrawal={retryWithdrawal}
+      />}
+
+      {publicationStockTarget && <EbayPublicationStockDialog
+        key={publicationStockTarget.productId} productId={publicationStockTarget.productId} productName={publicationStockTarget.name}
+        onClose={() => setPublicationStockTarget(null)} onQueued={job => clearUntrackedLocalIssue(job.productId)} onIssueAction={handleIssueAction}
       />}
 
       <EbaySyncRecoveryDialog
@@ -2976,8 +3000,9 @@ export default function EbayChannelPage() {
         issue={recoveryTarget?.issue ?? null}
         onIssueAction={handleIssueAction}
         onClose={() => setRecoveryTarget(null)}
-        checking={recoveryTarget ? syncingProductIds.has(recoveryTarget.productId) : false}
-        onRecheck={() => { if (recoveryTarget) { if (recoveryTarget.jobId) handleSyncProduct(recoveryTarget.productId); else handlePushSingle(recoveryTarget.productId); } }}
+        operation={recoveryTarget?.jobId && latestSyncJobs.get(recoveryTarget.productId)?.id === recoveryTarget.jobId ? latestSyncJobs.get(recoveryTarget.productId)?.operation : undefined}
+        checking={checkingRecovery || (recoveryTarget ? syncingProductIds.has(recoveryTarget.productId) : false)}
+        onRecheck={() => void continueSavedRecovery()}
         onRecovered={() => { if (recoveryTarget) clearUntrackedLocalIssue(recoveryTarget.productId); }}
       />
 

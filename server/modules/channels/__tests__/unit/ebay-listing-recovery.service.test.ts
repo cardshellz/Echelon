@@ -21,6 +21,16 @@ function fixture() {
   return { job,jobs,recovery,enqueue,service: new EbayListingRecoveryService(jobs,recovery,enqueue) };
 }
 describe("listing recovery application boundary", () => {
+  it("reviews and authorizes the same interrupted withdrawal without converting it into publication", async () => {
+    const f = fixture(); Object.assign(f.job, { operation: "withdraw", withdrawalWriteStarted: true, withdrawalWriteCompleted: false });
+    const preview = await f.service.preview(id, 1);
+    expect(preview).toMatchObject({ canResume: true, publicationRetry: { message: expect.stringContaining("withdrawal") } });
+    f.recovery.resume.mockRejectedValueOnce(new EbayListingSyncError("EBAY_RECOVERY_SCOPE_CHANGED", "No pending requests."));
+    const resumed = await f.service.resume(id, 1, "operator", { ...command, publicationRetryHash: preview.publicationRetry!.reviewHash });
+    expect(resumed).toMatchObject({ attemptIds: [], publicationRetryAuthorized: true, job: { operation: "withdraw" } });
+    expect(f.jobs.authorizePublicationRetry).toHaveBeenCalledWith(expect.objectContaining({ jobId: id, commandKey: command.idempotencyKey }));
+    expect(f.enqueue).not.toHaveBeenCalled(); expect(f.jobs.enqueue).not.toHaveBeenCalled();
+  });
   it("offers an explicit audited workflow retry when no inventory request was recorded", async () => {
     const f = fixture(); Object.assign(f.job, { operation: "publish", publicationWriteStarted: true, providerIdentity: null,
       publicationTarget: { ...f.job.identity, groupKey: "RECORDED-GROUP" } });

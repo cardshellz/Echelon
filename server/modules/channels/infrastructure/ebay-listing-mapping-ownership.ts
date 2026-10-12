@@ -11,7 +11,7 @@ export async function assertEbayMappingOwnership(input: EbayListingSyncIdentity,
     identity.variants.map(member => member.offerId),identity.variants.map(member => member.listingId)])).rows;
   const owned = new Set(identity.variants.map(member => member.variantId));
   const conflicts = rows.filter(row => !owned.has(row.product_variant_id) || identity.variants.some(member => member.variantId !== row.product_variant_id
-    && (member.sku === row.external_sku || member.offerId === row.external_variant_id)));
+    && (member.sku === row.external_sku || (member.offerId !== null && member.offerId === row.external_variant_id))));
   if (conflicts.length) {
     const details = conflicts.slice(0,5).map(row => `variant ${row.product_variant_id ?? "unassigned"}${row.external_sku ? ` (eBay SKU ${row.external_sku})` : ""}`).join(", ");
     throw new EbayListingSyncError("EBAY_MAPPING_OWNERSHIP_CONFLICT", `The observed eBay identifiers are already mapped to ${details}. Review both mappings before saving this listing.`);

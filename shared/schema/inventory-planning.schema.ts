@@ -12,6 +12,7 @@ import {
   timestamp,
   uniqueIndex,
   varchar,
+  uuid,
   type AnyPgColumn,
 } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
@@ -23,9 +24,27 @@ import { dropshipStoreConnections } from "./dropship.schema";
 import { buildOrders, buildRecipes, inventoryLevels, inventoryLots } from "./inventory.schema";
 import { orderItems, orders } from "./orders.schema";
 import { warehouseLocations, warehouses } from "./warehouse.schema";
-
 const inventoryPlanningSchema = pgSchema("inventory");
 const warehousePlanningSchema = pgSchema("warehouse");
+
+export const ebayPublicationReadinessApplications = inventoryPlanningSchema.table("ebay_publication_readiness_applications", {
+  commandKey: uuid("command_key").primaryKey(),
+  channelId: integer("channel_id").notNull().references(() => channels.id, { onDelete: "restrict" }),
+  productId: integer("product_id").notNull().references(() => products.id, { onDelete: "restrict" }),
+  requestHash: varchar("request_hash", { length: 64 }).notNull(),
+  actor: varchar("actor", { length: 100 }).notNull(),
+  occurredAt: timestamp("occurred_at", { withTimezone: true }).notNull(),
+  source: jsonb("source").notNull(), review: jsonb("review").notNull(), receipt: jsonb("receipt").notNull(),
+}, table => [index("ebay_publication_readiness_product_idx").on(table.channelId, table.productId, table.occurredAt),
+  check("ebay_publication_readiness_request_hash", sql`${table.requestHash} ~ '^[a-f0-9]{64}$'`)]);
+export const ebayPublicationReadinessRejections = inventoryPlanningSchema.table("ebay_publication_readiness_rejections", {
+  commandKey: uuid("command_key").primaryKey(),
+  channelId: integer("channel_id").notNull().references(() => channels.id, { onDelete: "restrict" }),
+  productId: integer("product_id").notNull().references(() => products.id, { onDelete: "restrict" }),
+  actor: varchar("actor", { length: 100 }).notNull(), contextHash: varchar("context_hash", { length: 64 }).notNull(),
+  code: varchar("code", { length: 100 }).notNull(), message: varchar("message", { length: 1000 }).notNull(),
+  occurredAt: timestamp("occurred_at", { withTimezone: true }).notNull(),
+});
 
 export const fulfillmentNodeTypeEnum = [
   "internal_warehouse",

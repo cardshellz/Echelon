@@ -6,3 +6,7 @@ export {
 } from "./infrastructure/quantity-publication-runtime";
 export { EbayPublicationRecoveryService } from "./application/ebay-publication-recovery.service";
 export { PostgresEbayPublicationRecoveryRepository } from "./infrastructure/ebay-publication-recovery.repository";
+export { reviewEbayPublicationReadiness, assertEbayPublicationReady,
+  withEbayPublicationReadinessApplied, findEbayPublicationReadinessReceipt,
+  rejectEbayPublicationReadinessCommand,
+} from "./infrastructure/ebay-publication-readiness.repository";

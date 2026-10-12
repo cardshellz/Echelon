@@ -58,6 +58,8 @@ import type { EbayListingMappingSource } from "../ebay-listing-mapping.service";
 import { EbayListingOperationExecution, EbayPublicationCompletionExecution } from "../ebay-publication-completion.service";
 import { prepareEbayPublicationCompletion } from "./ebay-listing-push";
 import { assertEbayPublicationCompatibility } from "./ebay-publication-compatibility";
+import { EbayListingWithdrawalExecution,EbayWithdrawalOperationExecution } from "../ebay-listing-withdrawal.service";
+import { prepareEbayWithdrawal } from "./ebay-listing-withdrawal";
 export interface SyncFilter {
   productIds?: number[];
   productTypeSlugs?: string[];
@@ -505,12 +507,12 @@ const existingListingConnector = new EbayMarketplaceListingConnector({
 });
 export const ebayListingSyncService = new EbayListingSyncService(
   new PostgresEbayListingSyncRepository(pool),
-  new EbayListingOperationExecution(new EbayExistingListingSyncExecution(
+  new EbayWithdrawalOperationExecution(new EbayListingOperationExecution(new EbayExistingListingSyncExecution(
     prepareActiveEbayListingSync,
     quantityProviderResponseRecovery,
     existingListingConnector,
   ), new EbayPublicationCompletionExecution(prepareEbayPublicationCompletion, quantityProviderResponseRecovery,
-    existingListingConnector, assertEbayPublicationCompatibility)),
+    existingListingConnector, assertEbayPublicationCompatibility)),new EbayListingWithdrawalExecution(prepareEbayWithdrawal,quantityProviderResponseRecovery)),
   () => new Date(),
   randomUUID,
 );

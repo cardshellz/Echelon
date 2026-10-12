@@ -1,5 +1,6 @@
 import {
   customType,
+  boolean,
   bigint,
   bigserial,
   check,
@@ -18,6 +19,18 @@ import {
   channelConnections,
   channelsSchema,
 } from "./channels.schema";
+
+/** Migration 0738 additionally makes these intent receipts immutable. */
+export const ebayListingExclusionCommands = channelsSchema.table("ebay_listing_exclusion_commands", {
+  commandKey: uuid("command_key").primaryKey(),
+  channelId: integer("channel_id").notNull().references(() => channels.id),
+  productId: integer("product_id").notNull().references(() => products.id),
+  actor: text("actor").notNull(),
+  excluded: boolean("excluded").notNull(),
+  jobId: uuid("job_id").references(() => ebayListingSyncJobs.id),
+  beforeIntent: jsonb("before_intent").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
+}, table => [check("ebay_listing_exclusion_commands_actor_check", sql`length(${table.actor}) BETWEEN 1 AND 200`)]);
 
 // Migration 0729 additionally enforces immutable audit and session ownership.
 export const ebayListingSyncJobs = channelsSchema.table(
@@ -58,7 +71,7 @@ export const ebayListingSyncJobs = channelsSchema.table(
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull(),
   },
   (table) => [
-    check("ebay_listing_sync_jobs_operation_check",sql`${table.operation} IN ('sync','publish')`),
+    check("ebay_listing_sync_jobs_operation_check",sql`${table.operation} IN ('sync','publish','withdraw')`),
     check("ebay_sync_publication_target_pair",sql`(${table.publicationTarget} IS NULL)=(${table.publicationTargetHash} IS NULL)`),
     check("ebay_sync_publication_target_operation",sql`${table.publicationTarget} IS NULL OR ${table.operation}='publish'`),
     check("ebay_sync_publication_accepted_pair",sql`(${table.publicationAccepted} IS NULL)=(${table.publicationAcceptedHash} IS NULL)`),

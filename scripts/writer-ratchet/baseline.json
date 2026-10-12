@@ -34,7 +34,6 @@
     "modules/procurement",
     "server/routes/ebay-listing-rules.routes.ts",
     "server/routes/ebay/ebay-config.routes.ts",
-    "server/routes/ebay/ebay-listing-state.ts",
     "server/routes/ebay/ebay-policies.routes.ts"
   ],
   "catalog.shipping_groups": [
@@ -83,8 +82,7 @@
     "modules/channels"
   ],
   "channels.channel_product_overrides": [
-    "modules/channels",
-    "server/routes/ebay/ebay-listing-state.ts"
+    "modules/channels"
   ],
   "channels.channel_reservations": [
     "modules/channels"
@@ -107,6 +105,9 @@
     "modules/dropship",
     "modules/identity",
     "server/routes/pick-priority.routes.ts"
+  ],
+  "channels.ebay_listing_exclusion_commands": [
+    "modules/channels"
   ],
   "channels.ebay_listing_mapping_rejections": [
     "modules/channels"
@@ -580,6 +581,12 @@
     "modules/inventory"
   ],
   "inventory.demand_evidence_snapshots": [
+    "modules/inventory-planning"
+  ],
+  "inventory.ebay_publication_readiness_applications": [
+    "modules/inventory-planning"
+  ],
+  "inventory.ebay_publication_readiness_rejections": [
     "modules/inventory-planning"
   ],
   "inventory.integrity_alert_outbox": [

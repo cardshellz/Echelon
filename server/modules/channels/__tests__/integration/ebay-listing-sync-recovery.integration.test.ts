@@ -77,6 +77,7 @@ const configured =
         "0734_ebay_operator_republication_recovery.sql",
         "0736_ebay_listing_mapping_repairs.sql",
         "0737_ebay_publication_completion.sql",
+        "0741_ebay_durable_withdrawal.sql",
       ])
         await database.pool.query(
           readFileSync(resolve(process.cwd(), "migrations", file), "utf8"),

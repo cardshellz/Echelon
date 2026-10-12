@@ -69,8 +69,8 @@ export class PostgresEbayListingPushRepository {
     }
   }
 
-  async readProduct(productId: number): Promise<EbayPushProduct> {
-    const rows = await this.pool.query(`SELECT p.id, p.name, p.sku, p.description, p.brand, p.product_type, p.ebay_browse_category_id,
+  async readProduct(productId: number, database: Pick<PoolClient, "query"> = this.pool): Promise<EbayPushProduct> {
+    const rows = await database.query(`SELECT p.id, p.name, p.sku, p.description, p.brand, p.product_type, p.ebay_browse_category_id,
       p.ebay_fulfillment_policy_override, p.ebay_return_policy_override, p.ebay_payment_policy_override,
       p.ebay_listing_excluded, cpo.is_listed AS product_override_is_listed
       FROM catalog.products p LEFT JOIN channels.channel_product_overrides cpo
@@ -82,8 +82,8 @@ export class PostgresEbayListingPushRepository {
     return product;
   }
 
-  async readVariants(productId: number): Promise<EbayPushVariant[]> {
-    const rows = await this.pool.query(`SELECT pv.id, COALESCE(cl.external_sku, pv.sku) AS sku, pv.sku AS catalog_sku,
+  async readVariants(productId: number, database: Pick<PoolClient, "query"> = this.pool): Promise<EbayPushVariant[]> {
+    const rows = await database.query(`SELECT pv.id, COALESCE(cl.external_sku, pv.sku) AS sku, pv.sku AS catalog_sku,
       pv.name, pv.option1_name, pv.option1_value, pv.option2_name, pv.option2_value,
       pv.price_cents, pv.compare_at_price_cents, pv.weight_grams::float8 AS weight_grams, pv.barcode,
       COALESCE(cvo.weight_override, pv.weight_grams)::float8 AS ebay_weight_grams,
@@ -102,9 +102,9 @@ export class PostgresEbayListingPushRepository {
     return variants;
   }
 
-  async readCategory(productType: string | null) {
+  async readCategory(productType: string | null, database: Pick<PoolClient, "query"> = this.pool) {
     if (!productType) return null;
-    const result = await this.pool.query(`SELECT ebay_browse_category_id, ebay_store_category_name, listing_enabled,
+    const result = await database.query(`SELECT ebay_browse_category_id, ebay_store_category_name, listing_enabled,
       fulfillment_policy_override, return_policy_override, payment_policy_override FROM ebay.ebay_category_mappings
       WHERE channel_id = $1 AND product_type_slug = $2`, [this.channelId, productType]);
     const category = result.rows[0] ? categorySchema.parse(result.rows[0]) : null;
@@ -126,8 +126,8 @@ export class PostgresEbayListingPushRepository {
     return aspects;
   }
 
-  async currentListingIds(productId: number): Promise<string[]> {
-    const result = await this.pool.query<{ external_product_id: string }>(`SELECT DISTINCT cl.external_product_id
+  async currentListingIds(productId: number, database: Pick<PoolClient, "query"> = this.pool): Promise<string[]> {
+    const result = await database.query<{ external_product_id: string }>(`SELECT DISTINCT cl.external_product_id
       FROM channels.channel_listings cl JOIN catalog.product_variants pv ON pv.id = cl.product_variant_id
       WHERE cl.channel_id = $1 AND pv.product_id = $2 AND cl.external_product_id IS NOT NULL`, [this.channelId, productId]);
     return result.rows.map(row => row.external_product_id);

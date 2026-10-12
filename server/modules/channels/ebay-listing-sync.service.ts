@@ -186,7 +186,7 @@ export interface EbayListingSyncStore {
     commandKey: string,
     actor: string,
     now: Date,
-    operation?: "sync" | "publish",
+    operation?: "sync" | "publish" | "withdraw",
   ): Promise<StoredEbayListingSyncJob>;
   list(channelId: number): Promise<EbayListingSyncJob[]>;
   get(id: string): Promise<StoredEbayListingSyncJob>;
@@ -235,7 +235,12 @@ export interface EbayListingSyncExecution {
   ): Promise<EbayProductSyncResult>;
 }
 export interface EbayListingExecutionContext {
-  operation: "sync" | "publish";
+  jobId?: string;
+  requestedBy?: string;
+  providerIdentity?: EbayListingSyncIdentity | null;
+  withdrawalWriteCompleted?: boolean;
+  withdrawalWriteStarted?: boolean;
+  operation: "sync" | "publish" | "withdraw";
   publicationTarget: EbayListingSyncIdentity | null;
   bindPublicationTarget: (identity: EbayListingSyncIdentity) => Promise<void>;
   publicationAccepted: EbayPublicationAccepted | null;
@@ -249,7 +254,7 @@ export interface EbayListingExecutionContext {
 
 export const ebaySyncAdmissionFailureSchema = z.object({
   channelId: z.number().int().positive(), productId: z.number().int().positive(),
-  operation: z.enum(["sync", "publish"]).default("sync"),
+  operation: z.enum(["sync", "publish", "withdraw"]).default("sync"),
   variantIds: z.array(z.number().int().positive()).max(250),
   actor: z.string().trim().min(1).max(200), commandKey: z.string().uuid(),
   code: z.string().min(1).max(100), message: z.string().min(1).max(1000),
@@ -270,7 +275,7 @@ export class EbayListingSyncService {
     identity: unknown,
     actor: unknown,
     commandKey?: string,
-    operation: "sync" | "publish" = "sync",
+    operation: "sync" | "publish" | "withdraw" = "sync",
   ): Promise<StoredEbayListingSyncJob> {
     return this.store.enqueue(
       ebayListingSyncIdentitySchema.parse(identity),
@@ -280,7 +285,7 @@ export class EbayListingSyncService {
         .parse(commandKey ?? this.uuid()),
       z.string().trim().min(1).max(200).parse(actor),
       this.now(),
-      z.enum(["sync", "publish"]).parse(operation),
+      z.enum(["sync", "publish", "withdraw"]).parse(operation),
     );
   }
   authorizePublicationRetry(input: EbayPublicationRetryAuthorization): Promise<{ job: StoredEbayListingSyncJob; replayed: boolean }> {
@@ -289,7 +294,7 @@ export class EbayListingSyncService {
       commandKey: z.string().uuid(), actor: z.string().trim().min(1).max(200) }).strict().parse(input);
     return this.store.authorizePublicationRetry(parsed, this.now());
   }
-  async recordAdmissionFailure(input: Omit<EbaySyncAdmissionFailure, "commandKey" | "variantIds" | "operation"> & { operation?: "sync" | "publish"; commandKey?: string; variantIds: readonly number[] }): Promise<EbayListingSyncJob> {
+  async recordAdmissionFailure(input: Omit<EbaySyncAdmissionFailure, "commandKey" | "variantIds" | "operation"> & { operation?: "sync" | "publish" | "withdraw"; commandKey?: string; variantIds: readonly number[] }): Promise<EbayListingSyncJob> {
     const parsed = ebaySyncAdmissionFailureSchema.parse({ ...input, commandKey: input.commandKey ?? this.uuid() });
     return this.withIssue(await this.store.recordAdmissionFailure(parsed, this.now()));
   }
@@ -316,24 +321,30 @@ export class EbayListingSyncService {
         const { job } = claim;
         const publicationProgress = { started: job.publicationWriteStarted,
           completed: job.publicationWriteCompleted, accepted: job.publicationAccepted };
+        let withdrawalCompleted = job.withdrawalWriteCompleted;
+        let withdrawalStarted = job.withdrawalWriteStarted;
         try {
           const output = ebayProductSyncResultSchema.parse(
             await this.executor.execute(
               job.identity,
               async (key, hash, work) => {
                 await this.store.stage(job, key, hash, "started", this.now());
+                if (job.operation === "withdraw" && key === "withdraw") withdrawalStarted = true;
                 if (job.operation === "publish" && key === "publish") {
                   publicationProgress.started = true;
                 }
                 await work();
                 await this.store.stage(job, key, hash, "completed", this.now());
                 if (job.operation === "publish" && key === "publish") publicationProgress.completed = true;
+                if (job.operation === "withdraw" && key === "withdraw") withdrawalCompleted = true;
               },
               job.verificationRevision === job.claimedRevision
                 ? job.verificationIntentHash
                 : null,
               (resolved, observation) => this.store.bindProviderIdentity(job, resolved, this.now(), observation),
-              { operation: job.operation, publicationTarget: job.publicationTarget,
+              { operation: job.operation, jobId: job.id, requestedBy: job.requestedBy, providerIdentity: job.providerIdentity, publicationTarget: job.publicationTarget,
+                withdrawalWriteCompleted: job.withdrawalWriteCompleted,
+                withdrawalWriteStarted: job.withdrawalWriteStarted,
                 publicationAccepted: job.publicationAccepted, publicationWriteCompleted: job.publicationWriteCompleted,
                 publicationWriteStarted: job.publicationWriteStarted, publicationAcceptedRevision: job.publicationAcceptedRevision,
                 publicationIntentHash: job.publicationIntentHash,
@@ -364,6 +375,10 @@ export class EbayListingSyncService {
           // must join this job and retain its acceptance/start evidence.
           if (job.operation === "publish" && (publicationProgress.started || publicationProgress.completed || publicationProgress.accepted)) {
             failure.state = publicationProgress.accepted || publicationProgress.completed ? "recovering" : "awaiting_evidence";
+            failure.resetAttempts = true;
+          }
+          if (job.operation === "withdraw" && (withdrawalStarted || withdrawalCompleted)) {
+            failure.state = withdrawalCompleted ? "recovering" : "awaiting_evidence";
             failure.resetAttempts = true;
           }
           // A failed final commit is retained as running. Never overwrite a newer
