@@ -32,6 +32,8 @@ import {
   type PoException,
 } from "@shared/schema";
 import { eq, and, inArray, sql, desc } from "drizzle-orm";
+import { lockInventoryCostGraph } from "../inventory/infrastructure/cost-evidence.repository";
+import type { AmendmentTransaction } from "./po-quantity-amendment.repository";
 import { computePurchaseOrderInvoiceMatchSourceFingerprint } from "./purchase-order-invoice-match";
 
 // ─── Error class ──────────────────────────────────────────────────────────────
@@ -300,6 +302,7 @@ export async function acknowledgeException(
 
     await _writeAuditRow(tx, {
       poId: exc.poId,
+      actorId: userId,
       notes: `Exception acknowledged: ${exc.kind} — ${exc.title} (by ${userId})`,
     });
 
@@ -326,6 +329,7 @@ export async function resolveException(
 
   return await db.transaction(async (tx) => {
     const exc = await _requireException(tx, id);
+    if (exc.kind === "match_mismatch") throw new PoExceptionError("A financial variance requires reviewed Administrator approval.", "PO_VARIANCE_ADMIN_APPROVAL_REQUIRED", 403, { id });
 
     if (exc.status === "resolved" || exc.status === "dismissed") {
       throw new PoExceptionError(
@@ -351,6 +355,7 @@ export async function resolveException(
 
     await _writeAuditRow(tx, {
       poId: exc.poId,
+      actorId: userId,
       notes: `Exception resolved: ${exc.kind} — ${exc.title}. Note: ${resolutionNote.trim()} (by ${userId})`,
     });
 
@@ -394,6 +399,7 @@ export async function dismissException(
 
     await _writeAuditRow(tx, {
       poId: exc.poId,
+      actorId: userId,
       notes: `Exception dismissed: ${exc.kind} — ${exc.title}${note ? `. Reason: ${note.trim()}` : ""} (by ${userId})`,
     });
 
@@ -729,24 +735,18 @@ function _isTerminalPo(po: { physicalStatus?: string | null; financialStatus?: s
 /**
  * Require an exception row to exist, throw if not found.
  */
-async function _requireException(
-  tx: any,
-  id: number,
-): Promise<PoException> {
-  const [exc] = await tx
-    .select()
-    .from(poExceptions)
-    .where(eq(poExceptions.id, id));
-
-  if (!exc) {
-    throw new PoExceptionError(
-      `PO exception #${id} not found`,
-      "EXCEPTION_NOT_FOUND",
-      404,
-      { id },
-    );
+async function _requireException(tx: AmendmentTransaction, id: number): Promise<PoException> {
+  const [scope] = await tx.select({ poId: poExceptions.poId }).from(poExceptions).where(eq(poExceptions.id, id));
+  if (!scope) throw new PoExceptionError(`PO exception #${id} not found`, "EXCEPTION_NOT_FOUND", 404, { id });
+  // Match the financial owners' graph -> PO -> exception order. Locking the
+  // exception first can deadlock its history FK against a PO correction.
+  await lockInventoryCostGraph(tx);
+  const [po] = await tx.select({ id: purchaseOrders.id }).from(purchaseOrders).where(eq(purchaseOrders.id, scope.poId)).for("update");
+  const [exception] = await tx.select().from(poExceptions).where(eq(poExceptions.id, id)).for("update");
+  if (!po || !exception || exception.poId !== scope.poId) {
+    throw new PoExceptionError("The exception scope changed. Reload the PO.", "EXCEPTION_STALE", 409, { id });
   }
-  return exc;
+  return exception;
 }
 
 /**
@@ -758,8 +758,8 @@ async function _requireException(
  * The notes field carries the human-readable event description.
  */
 async function _writeAuditRow(
-  tx: any,
-  opts: { poId: number; notes: string },
+  tx: AmendmentTransaction,
+  opts: { poId: number; notes: string; actorId?: string },
 ): Promise<void> {
   // Look up current PO status for the from/to status fields.
   const [po] = await tx
@@ -773,7 +773,7 @@ async function _writeAuditRow(
     purchaseOrderId: opts.poId,
     fromStatus: currentStatus,
     toStatus: currentStatus,
-    changedBy: null,
+    changedBy: opts.actorId ?? null,
     notes: opts.notes,
   });
 }

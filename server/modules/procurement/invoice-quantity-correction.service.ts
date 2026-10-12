@@ -6,6 +6,13 @@ import type { AmendmentDatabase } from "./po-quantity-amendment.repository";
 import { readInvoiceQuantitySource, persistInvoiceQuantityCorrection, invoiceQuantityCorrectionTime } from "./invoice-quantity-correction.repository";
 import { assertInvoiceQuantityAuthority, invoiceQuantityContext, planInvoiceQuantityCorrection, InvoiceQuantityCorrectionError } from "./invoice-quantity-correction.policy";
 
+import { buildCurrentPurchaseApprovalSnapshot, PurchaseApprovalAuthorityError } from "./purchase-order-approval.policy";
+function correctionApproval(source: Awaited<ReturnType<typeof readInvoiceQuantitySource>>, invoiceTotalCents: number) {
+  if (source.facts.invoices.find(row => row.id === source.facts.billing.invoiceId)?.currency !== source.facts.header.currency) {
+    throw new InvoiceQuantityCorrectionError("Invoice and PO currency differ. Review their currency conversion through the owning workflow.", "INVOICE_CORRECTION_CURRENCY_REVIEW_REQUIRED");
+  }
+  return buildCurrentPurchaseApprovalSnapshot({ ...source, totalCents: Math.max(z.number().int().nonnegative().safe().parse(source.facts.header.totalCents), invoiceTotalCents) });
+}
 function input<T>(schema: z.ZodType<T>, value: unknown): T {
   const parsed = schema.safeParse(value);
   if (!parsed.success) throw new InvoiceQuantityCorrectionError("Enter a positive whole-piece quantity and include a correction reason.", "INVOICE_QUANTITY_INPUT_INVALID", 400);
@@ -30,7 +37,9 @@ export function createInvoiceQuantityCorrectionService(database: AmendmentDataba
       return database.transaction(async (tx) => {
         const source = await readInvoiceQuantitySource(tx, lineId, actorId);
         assertInvoiceQuantityAuthority(source.actor); assertCurrent(source.sourceVersion, request.sourceVersion);
-        return planInvoiceQuantityCorrection(source.facts, lineId, request);
+        const preview = planInvoiceQuantityCorrection(source.facts, lineId, request);
+        correctionApproval(source, preview.afterInvoiceAmountCents!);
+        return preview;
       });
     },
     async approve(id: number, value: unknown, actorId: string, descriptor: FinancialCommandDescriptor) {
@@ -43,6 +52,8 @@ export function createInvoiceQuantityCorrectionService(database: AmendmentDataba
       return runTransactionalFinancialCommand({ repository, descriptor,
         classifyFailure: (error) => error instanceof InvoiceQuantityCorrectionError ? { kind: "rejected", httpStatus: error.statusCode,
           errorCode: error.code, errorMessage: error.message, body: { error: error.message, code: error.code } }
+          : error instanceof PurchaseApprovalAuthorityError ? { kind: "rejected", httpStatus: error.statusCode,
+            errorCode: String(error.details.code), errorMessage: error.message, body: { error: error.message, code: error.details.code } }
           : error instanceof z.ZodError ? { kind: "rejected", httpStatus: 409, errorCode: "INVOICE_QUANTITY_SOURCE_INVALID", errorMessage: "Recorded quantity evidence is invalid.", body: { error: "Recorded quantity evidence is invalid. Reload the source records.", code: "INVOICE_QUANTITY_SOURCE_INVALID" } }
           : { kind: "retryable", errorCode: "INVOICE_QUANTITY_FAILED", errorMessage: "The correction rolled back. Retry the saved confirmation." },
         work: async (tx) => {
@@ -50,7 +61,8 @@ export function createInvoiceQuantityCorrectionService(database: AmendmentDataba
           const source = await readInvoiceQuantitySource(tx, lineId, actorId);
           assertInvoiceQuantityAuthority(source.actor); assertCurrent(source.sourceVersion, request.sourceVersion);
           const preview = planInvoiceQuantityCorrection(source.facts, lineId, request);
-          const result = await persistInvoiceQuantityCorrection(tx, source, preview, actorId, descriptor.idempotencyKey, request.reason, invoiceQuantityCorrectionTime(source, clock()));
+          const approval = correctionApproval(source, preview.afterInvoiceAmountCents!);
+          const result = await persistInvoiceQuantityCorrection(tx, source, preview, actorId, descriptor.idempotencyKey, request.reason, invoiceQuantityCorrectionTime(source, clock()), approval, request.closedPurchaseOrderConfirmed === true);
           return { httpStatus: 200, body: invoiceQuantityResultSchema.parse(result), resultType: "invoice_quantity_correction", resultId: result.auditEventId };
         },
       });

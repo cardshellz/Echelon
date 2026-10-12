@@ -106,7 +106,20 @@ export function buildQuantityAmendmentContext(facts: AmendmentFacts, actor: Purc
   return poQuantityAmendmentContextSchema.parse({
     purchaseOrderId: facts.header.id, currency: facts.header.currency ?? "USD", sourceVersion,
     canApprove: hasQuantityAmendmentAuthority(actor), blockedReason: quantityAmendmentBlockedReason(facts),
-    lines: facts.lines.map((line) => lineView(line, facts)),
+    lines: facts.lines.map((line) => lineView(line, facts)), totalCents: stored(facts.header.totalCents, "PO total"),
+    invoiceIssues: evaluatePurchaseOrderInvoiceMatches({ purchaseOrderLines: facts.lines, invoiceLines: facts.invoiceLines })
+      .filter(match => match.matchStatus !== "matched").map(match => {
+        const invoiceLine = facts.invoiceLines.find(line => line.id === match.id)!;
+        const invoice = facts.invoices.find(value => value.id === invoiceLine.vendorInvoiceId)!;
+        const poLine = facts.lines.find(line => line.id === invoiceLine.purchaseOrderLineId);
+        return { invoiceId: invoice.id, invoiceNumber: invoice.invoiceNumber, invoiceLineId: invoiceLine.id,
+          lineNumber: invoiceLine.lineNumber, poLineId: poLine?.id ?? null, name: invoiceLine.productName || poLine?.productName || `Line ${invoiceLine.lineNumber}`,
+          status: match.matchStatus, invoiceQuantity: stored(invoiceLine.qtyInvoiced, "invoice quantity"),
+          orderedQuantity: poLine ? stored(poLine.orderQty, "ordered quantity") : null,
+          receivedQuantity: poLine ? stored(poLine.receivedQty ?? 0, "received quantity") : null,
+          invoiceLineAmountCents: stored(invoiceLine.lineTotalCents, "invoice line amount"), poLineAmountCents: poLine?.lineTotalCents ?? null, currency: invoice.currency,
+        };
+      }),
   });
 }
 function correctedPricing(line: AmendmentLine, quantityPieces: number, treatment: string) {

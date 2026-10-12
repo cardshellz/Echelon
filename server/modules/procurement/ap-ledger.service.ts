@@ -1,3 +1,4 @@
+import { deriveInvoiceFinancialState } from "./domain/invoice-financial-state";
 import { summarizeInvoiceCostReconciliation } from "./domain/invoice-cost-reconciliation-summary";
 import { costFingerprint, costInteger, lockInventoryCostGraph } from "../inventory/infrastructure/cost-evidence.repository";
 import { reconcilePurchaseCostEvidence } from "./purchase-cost-application.service";
@@ -920,7 +921,7 @@ async function generatePaymentNumber(client: ApLedgerDbClient = db): Promise<str
 
 // ─── Invoice Balance Recalculation ────────────────────────────────────────────
 
-async function recalculateInvoiceBalance(invoiceId: number, client: ApLedgerDbClient = db): Promise<void> {
+async function recalculateInvoiceBalance(invoiceId: number, client: ApLedgerDbClient = db, at: Date = new Date()): Promise<void> {
   const [invoice] = await client
     .select({ invoicedAmountCents: vendorInvoices.invoicedAmountCents, status: vendorInvoices.status })
     .from(vendorInvoices)
@@ -949,30 +950,18 @@ async function recalculateInvoiceBalance(invoiceId: number, client: ApLedgerDbCl
     invoice.invoicedAmountCents,
     `invoice[${invoiceId}].invoicedAmountCents`,
   );
-  const balance = invoicedAmount - paidAmount;
-
-  let newStatus = invoice.status;
-  if (invoice.status !== "voided" && invoice.status !== "disputed") {
-    if (balance <= BigInt(0)) {
-      newStatus = "paid";
-    } else if (paidAmount > BigInt(0)) {
-      newStatus = "partially_paid";
-    } else if (invoice.status === "paid" || invoice.status === "partially_paid") {
-      // Payment was voided, revert to approved
-      newStatus = "approved";
-    }
-  }
+  const projected = deriveInvoiceFinancialState({ status: invoice.status,
+    invoiceAmountCents: bigintMoneyToNumber(invoicedAmount, `invoice[${invoiceId}].invoicedAmountCents`),
+    paidAmountCents: bigintMoneyToNumber(paidAmount, `invoice[${invoiceId}].paidAmountCents`),
+  });
 
   await client
     .update(vendorInvoices)
     .set({
       paidAmountCents: bigintMoneyToNumber(paidAmount, `invoice[${invoiceId}].paidAmountCents`),
-      balanceCents: bigintMoneyToNumber(
-        balance > BigInt(0) ? balance : BigInt(0),
-        `invoice[${invoiceId}].balanceCents`,
-      ),
-      status: newStatus,
-      updatedAt: new Date(),
+      balanceCents: projected.balanceCents,
+      status: projected.status,
+      updatedAt: at,
     })
     .where(eq(vendorInvoices.id, invoiceId));
 }
@@ -2913,6 +2902,7 @@ export async function getInvoiceLines(invoiceId: number) {
 async function recalculateInvoiceFromLines(
   invoiceId: number,
   client: ApLedgerDbClient = db,
+  at: Date = new Date(),
 ) {
   const result = await client
     .select({ total: sql<number>`COALESCE(SUM(${vendorInvoiceLines.lineTotalCents}), 0)` })
@@ -2938,9 +2928,23 @@ async function recalculateInvoiceFromLines(
     .set({
       invoicedAmountCents: linesTotalCents,
       balanceCents: Math.max(0, balance),
-      updatedAt: new Date(),
+      updatedAt: at,
     })
     .where(eq(vendorInvoices.id, invoiceId));
+}
+
+/** Recalculate an explicitly approved invoice revision inside its existing
+ * command transaction. Payments, receiving, stock and cost applications are
+ * untouched; cost evidence review remains a separate operation. */
+export async function recalculateCorrectedInvoiceFinancialsInTransaction(
+  invoiceId: number, client: ApLedgerDbClient, actorId: string, at: Date,
+): Promise<void> {
+  requireCommandId(invoiceId, "invoiceId");
+  await recalculateInvoiceFromLines(invoiceId, client, at);
+  await recalculateInvoiceBalance(invoiceId, client, at);
+  await recomputeLinkedPurchaseOrders(invoiceId, client, {
+    actorId, now: at, reason: `Administrator corrected invoice ${invoiceId}.`,
+  });
 }
 
 // ─── 3-Way Match ──────────────────────────────────────────────────────────────
