@@ -1,5 +1,6 @@
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
+import type { ServiceRegistry } from "../../../../services";
 import express, { type Request, type Response, type NextFunction } from "express";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { supplierDocumentSource } from "../fixtures/supplier-po-document.fixture";
@@ -25,11 +26,27 @@ vi.mock("../../../../routes/middleware", () => ({
 vi.mock("../../../../middleware/idempotency", () => ({ requireIdempotency: () => (_req: Request, _res: Response, next: NextFunction) => next() }));
 import { registerPurchaseOrderRoutes } from "../../purchase-order.routes";
 
+function unusedService(name: string): object {
+  return new Proxy({}, {
+    get(_target, method) {
+      throw new Error(`Supplier document route unexpectedly accessed ${name}.${String(method)}`);
+    },
+  });
+}
+
 describe("supplier document HTTP boundary", () => {
   let server: Server;
   let base: string;
   beforeAll(async () => {
-    const app = express(); app.use(express.json()); app.locals.services = { purchasing: {}, shipmentTracking: {} };
+    const app = express();
+    app.use(express.json());
+    const services = {
+      purchasing: unusedService("purchasing"),
+      shipmentTracking: unusedService("shipmentTracking"),
+    } satisfies Partial<Record<keyof ServiceRegistry, object>>;
+    // Registration captures these services, but document requests use only the
+    // mocked repository. Keep this harness partial and reject unexpected calls.
+    app.locals.services = services as ServiceRegistry;
     registerPurchaseOrderRoutes(app);
     server = createServer(app);
     await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));

@@ -1,12 +1,15 @@
 import { describe, expect, it } from "vitest";
+import type { PurchaseOrderLine } from "@shared/schema/procurement.schema";
 import { buildSupplierPoDocument } from "../../supplier-po-document";
 import { renderPoHtml } from "../../po-document";
 import { supplierDocumentSource } from "../fixtures/supplier-po-document.fixture";
 
+type FixtureLine = Pick<PurchaseOrderLine, keyof ReturnType<typeof supplierDocumentSource>["lines"][number]>;
+
 function sourceWithTargetedDiscount() {
   const source = supplierDocumentSource();
-  const product = { ...source.lines[0], lineNumber: 7 };
-  const discount = {
+  const product: FixtureLine = { ...source.lines[0], lineNumber: 7 };
+  const discount: FixtureLine = {
     ...product, id: 12, lineNumber: 8, lineType: "discount", parentLineId: product.id,
     productId: null, productVariantId: null, sku: null, vendorSku: null, productName: null,
     description: "Agreed discount on the goods", unitCostCents: -100, unitCostMills: -10000,
