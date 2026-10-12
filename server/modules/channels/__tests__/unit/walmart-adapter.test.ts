@@ -12,7 +12,7 @@ function setup() {
   const service = { connection: vi.fn(async () => row), requireRuntime: vi.fn(), api: () => api,
     withListingWrites: vi.fn(async (_account: unknown, _skus: readonly string[], work: () => Promise<unknown>) => work()),
     repository: { withLock: vi.fn(async (_id, action) => action()), assertWarehouse: vi.fn(),
-      mappings: vi.fn(async () => [{ product_variant_id: 3, channel_sku: "SKU" }]) } };
+      inventoryMappings: vi.fn(async () => [{ product_variant_id: 3, channel_sku: "SKU" }]) } };
   const supply = { getSourceWarehouses: vi.fn(async (): Promise<ReadonlyArray<InventoryPublicationSourceWarehouse>> => [{ warehouseId: 4, isActive: true }]) };
   const adapter = new WalmartAdapter(service as unknown as WalmartChannelService, supply);
   return { api, service, supply, adapter, transport: new ChannelInventoryPublicationTransportAdapter(adapter) };
@@ -24,6 +24,7 @@ describe("Walmart exact inventory destination", () => {
     const s = setup();
     expect((await s.transport.publishAbsolute(request)).publishedQuantity).toBe(0);
     expect(s.api.setInventory).toHaveBeenCalledWith("SKU", "NODE", 0);
+    expect(s.service.repository.inventoryMappings).toHaveBeenCalledWith(1, [3]);
     expect(s.supply.getSourceWarehouses).not.toHaveBeenCalled();
     await s.transport.publishAbsolute({ ...request, desiredQuantity: 5 });
     expect(s.supply.getSourceWarehouses).toHaveBeenCalledWith({ channelId: 1, channelConnectionId: 2, providerScopeType: "location", externalScopeId: "NODE" });

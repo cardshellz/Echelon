@@ -693,8 +693,6 @@ export function ChannelListingPublicationWorkspace({
               </TabsList>
               <TabsContent value="publications">
                 <ListingActivity
-                  channelId={channelId}
-                  connectionId={connectionId}
                   operations={workspace.data.operations}
                   canEdit={canEdit}
                   onReconcile={reconcile}

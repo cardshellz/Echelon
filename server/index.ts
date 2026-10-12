@@ -844,7 +844,7 @@ function startEchelonSyncScheduler(
       }
 
       if (!schedulersDisabled("INVENTORY_PUBLICATION_WORKER_DISABLED")) {
-        startInventoryPublicationOutboxWorker(services.inventoryPublicationOutbox);
+        startInventoryPublicationOutboxWorker(services.inventoryPublicationOutbox, services.inventoryPublicationSelectionWork);
         const catchupWorker = startQuantityPublicationCatchupWorker(services.quantityPublicationCatchup);
         httpServer.once("close", () => {
           void catchupWorker.stop().catch(() => {

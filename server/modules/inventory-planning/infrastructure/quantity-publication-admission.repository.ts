@@ -6,6 +6,7 @@ import { listingSetupZeroInspectionInputSchema, type ListingSetupZeroInspectionI
 import { admitListingSetupZeroInsideTransaction, validateListingSetupZeroReadinessInsideTransaction, type ListingSetupReadinessCache } from "./listing-setup-zero-admission";
 import type { InventoryAvailabilityTransactionQueryClient as Client } from "../application/inventory-availability-transaction-query.port";
 import type { QuantityPublicationAdmission, QuantityPublicationCatchup, QuantityPublicationCatchupStore, QuantityPublicationOutboxClaim } from "../application/quantity-publication-admission.port";
+import { readPublicationStockSelection, selectionRequiresPublication } from "./inventory-publication-selection.reader";
 import { QuantityProviderEvidenceCollector } from "../application/quantity-provider-request-evidence";
 import { PostgresQuantityProviderRequestEvidenceStore } from "./quantity-provider-request-evidence.repository";
 import { QuantityPublicationAdmissionError, quantityPublicationScopeSchema, quantityPublicationRecoverySchema,
@@ -619,6 +620,30 @@ export class PostgresQuantityPublicationAdmission implements QuantityPublication
       }
     } else if (row.publication_phase !== "full" || row.run_state !== "active" || row.target_state !== "live") {
       fail("PUBLICATION_OUTBOX_PHASE_INVALID", "Only a current active full publication may run.");
+    }
+    if (row.publication_phase === "full") {
+      // The shared publication gate stays held through provider completion.
+      // Selection mutations take its exclusive side before committing. A stale
+      // queued quantity therefore cannot republish a deselected SKU while the
+      // durable selection invalidation is waiting to produce the clearing row.
+      const product = (await client.query<{ product_id: number }>(
+        "SELECT product_id FROM catalog.product_variants WHERE id=$1", [claim.productVariantId],
+      )).rows[0];
+      if (!product) fail("PUBLICATION_SELECTION_VARIANT_MISSING", "The saved publication variant no longer belongs to a catalog product.");
+      const selection = await readPublicationStockSelection(client, {
+        destinationKind: claim.destinationKind,
+        channelId: Number(row.channel_id_snapshot),
+        channelConnectionId: claim.channelConnectionId,
+        dropshipStoreConnectionId: claim.dropshipStoreConnectionId,
+      }, { productId: product.product_id, productVariantIds: [claim.productVariantId], now: this.clock() });
+      const selected = selection.variants[0];
+      if (!selected || selected.blockers.length > 0 || !selectionRequiresPublication(selected.action)
+        || (BigInt(claim.desiredQuantity) > BigInt(0) && selected.action !== "publish")) {
+        fail("PUBLICATION_SELECTION_CHANGED",
+          "The channel selection changed after this stock update was saved. The saved selection change will recalculate stock automatically.",
+          { productVariantId: claim.productVariantId, action: selected?.action ?? "none",
+            blockers: selected?.blockers ?? [], retryable: true });
+      }
     }
   }
 

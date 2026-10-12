@@ -6,6 +6,7 @@ import { canonicalJson } from "@shared/utils/canonical-json";
 import { pool } from "../../../db";
 import { acquireInventoryCutoverFenceInsideTransaction } from "./inventory-cutover-admission-fence.repository";
 import { releaseQuantityPublicationSuppressionInsideTransaction } from "./quantity-publication-admission.repository";
+import { readPublicationStockSelection } from "./inventory-publication-selection.reader";
 
 export type ClaimedInventoryPublication = {
   outboxId: string;
@@ -212,6 +213,9 @@ export class PostgresInventoryPublicationOutboxRepository {
         await supersedeStaleClaim(client, claim, ownsLease);
         return { status: "superseded" };
       }
+      if (claim.publicationPhase === "full" && claim.providerKey === "ebay"
+        && claim.destinationKind === "channel_connection"
+        && await supersedeStaleClaim(client, claim, true, true)) return { status: "superseded" };
       return { status: "current", value: await work() };
     } catch (error) {
       workError = error;
@@ -408,28 +412,52 @@ async function supersedeStaleClaim(
   client: PoolClient,
   claim: ClaimedInventoryPublication,
   ownsLease: boolean,
-): Promise<void> {
-  await client.query("BEGIN");
+  requireVerifiedWithdrawal = false,
+): Promise<boolean> {
+  await client.query(requireVerifiedWithdrawal ? "BEGIN ISOLATION LEVEL SERIALIZABLE" : "BEGIN");
   try {
+    let errorClass = "SUPERSEDED_BEFORE_PROVIDER_WRITE";
+    let errorMessage = "A newer desired revision exists; no provider request was made.";
+    if (requireVerifiedWithdrawal) {
+      // The pair's session lock is already held by runIfCurrent. TRY the shared
+      // selection gate so this path cannot reverse a selection/configuration lock.
+      const gate = (await client.query<{ acquired: boolean }>(
+        "SELECT pg_try_advisory_xact_lock_shared(918419,0) AS acquired")).rows[0]?.acquired;
+      if (!gate) { await client.query("ROLLBACK"); return false; }
+      const product = (await client.query<{ product_id: number }>(
+        "SELECT product_id FROM catalog.product_variants WHERE id=$1", [claim.productVariantId])).rows[0];
+      if (!product) { await client.query("ROLLBACK"); return false; }
+      const selection = await readPublicationStockSelection(client, {
+        destinationKind: claim.destinationKind, channelId: claim.channelId,
+        channelConnectionId: claim.channelConnectionId, dropshipStoreConnectionId: claim.dropshipStoreConnectionId,
+      }, { productId: product.product_id, productVariantIds: [claim.productVariantId] });
+      const selected = selection.variants[0];
+      const evidence = selected?.retirementEvidence;
+      if (selected?.action !== "none" || selected.blockers.length || !evidence
+        || claim.providerScopeType !== "account" || evidence.externalAccountId !== claim.externalScopeId
+        || evidence.externalSku !== claim.externalInventoryItemId
+        || (claim.externalSku !== null && evidence.externalSku !== claim.externalSku)) {
+        await client.query("ROLLBACK"); return false;
+      }
+      errorClass = "SUPERSEDED_BY_VERIFIED_WITHDRAWAL";
+      errorMessage = `Withdrawal ${evidence.operationId} verified removal of offer ${evidence.externalOfferId} from listing ${evidence.externalListingId}; no provider request was made for this attempt.`;
+    }
     await client.query(
       `INSERT INTO inventory.inventory_publication_attempts (
          outbox_id, attempt_number, outcome, provider_request_key,
          request_hash, response_hash, error_class, error_message,
          started_at, completed_at
-       ) VALUES ($1, $2, 'superseded', $3, $4, NULL,
-         'SUPERSEDED_BEFORE_PROVIDER_WRITE',
-         'A newer desired revision exists; no provider request was made.', $5, transaction_timestamp())`,
+       ) VALUES ($1, $2, 'superseded', $3, $4, NULL, $6, $7, $5, transaction_timestamp())`,
       [claim.outboxId, claim.attemptNumber, providerRequestKey(claim),
-        publicationRequestHash(claim), claim.attemptStartedAt.toISOString()],
+        publicationRequestHash(claim), claim.attemptStartedAt.toISOString(), errorClass, errorMessage],
     );
     if (ownsLease) {
       const updated = await client.query(
         `UPDATE inventory.inventory_publication_outbox
          SET state = 'superseded', lease_token = NULL, lease_expires_at = NULL,
-             last_error_class = 'SUPERSEDED_BEFORE_PROVIDER_WRITE',
-             last_error_message = 'A newer desired revision exists; no provider request was made.'
+             last_error_class = $3, last_error_message = $4
          WHERE id = $1 AND state = 'leased' AND lease_token = $2`,
-        [claim.outboxId, claim.leaseToken],
+        [claim.outboxId, claim.leaseToken, errorClass, errorMessage],
       );
       if (updated.rowCount !== 1) {
         throw new InventoryPublicationOutboxRepositoryError(
@@ -440,6 +468,7 @@ async function supersedeStaleClaim(
       }
     }
     await client.query("COMMIT");
+    return true;
   } catch (error) {
     try {
       await client.query("ROLLBACK");

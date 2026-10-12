@@ -353,6 +353,15 @@ describe("dropship listing config routes", () => {
       });
       expect(consoleError).toHaveBeenCalledTimes(1);
     });
+
+    it.each(["admin", "vendor"] as const)("returns a retryable stock-selection conflict for %s", async kind => {
+      service.error = new Error("private SQL", { cause: { code: "55P03", message: "PUBLICATION_SELECTION_BUSY" } });
+      server = await startServer(buildApp(service, kind));
+      const response = await putJson(`${server.url}${kind === "admin" ? ADMIN_PATH : VENDOR_PATH}`, { ...CONFIG_BODY, expectedRevision: 7 });
+      expect(response.status).toBe(409);
+      expect(response.body).toEqual({ error: { code: "PUBLICATION_SELECTION_BUSY", retryable: true,
+        message: "A stock update is finishing. Your selection was not saved; retry it in a moment." } });
+    });
   });
 });
 

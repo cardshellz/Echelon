@@ -9,7 +9,7 @@ const fail = (code: string, message: string): never => { throw new InventoryPubl
 /** Caller holds the inventory configuration fence. Only a missing inventory
  * mapping is imported; existing mappings and saved drafts are never replaced. */
 export async function prepareVerifiedStockMapping(client: PoolClient, targetId: number, input: VerifiedStockListing,
-  requestHash: string, actor: string, now: Date): Promise<void> {
+  requestHash: string, actor: string, now: Date): Promise<boolean> {
   const global = await client.query("SELECT 1 FROM channels.sync_settings WHERE global_enabled=true FOR SHARE");
   if (global.rowCount !== 1) fail("STOCK_LISTING_GLOBAL_STOP", "Automatic stock updates are paused globally.");
   const connection = await client.query(`SELECT 1 FROM channels.walmart_connections w
@@ -34,7 +34,7 @@ export async function prepareVerifiedStockMapping(client: PoolClient, targetId: 
       || head.external_inventory_item_id !== input.sku || head.external_sku !== input.sku) {
       fail("STOCK_LISTING_MAPPING_REVIEW_REQUIRED", "An existing stock mapping or saved change needs review; it was not overwritten.");
     }
-    return;
+    return false;
   }
   const conflict = await client.query(`SELECT 1 FROM inventory.publication_variant_mapping_versions
     WHERE publication_target_id=$1 AND external_inventory_item_id=$2 AND product_variant_id<>$3 AND lifecycle_status IN ('draft','sealed')`,
@@ -60,4 +60,5 @@ export async function prepareVerifiedStockMapping(client: PoolClient, targetId: 
     VALUES($1,'AUDIT',$2,'inventory_availability.verified_listing_mapping.connected',$3,$4::jsonb,$5::jsonb)`,
   [now, actor, `inventory.inventory_publication_target:${targetId}`, JSON.stringify({ before: null,
     after: { productVariantId: input.productVariantId, mappingId: mapping.id, sku: input.sku, definitionHash } }), JSON.stringify({ requestHash, observation: input })]);
+  return true;
 }

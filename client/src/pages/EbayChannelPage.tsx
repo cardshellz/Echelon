@@ -78,7 +78,6 @@ import { PushProgressModal } from "@/components/ebay/PushProgressModal";
 import { SyncProgressModal } from "@/components/ebay/SyncProgressModal";
 import { EbayListingIssueCard } from "@/components/ebay/EbayListingIssueCard";
 import { EbayMappingRepairDialog } from "@/components/ebay/EbayMappingRepairDialog";
-import { EbayPublicationStockDialog } from "@/components/ebay/EbayPublicationStockDialog";
 import { EbaySyncRecoveryDialog } from "@/components/ebay/EbaySyncRecoveryDialog";
 import { MarketplaceListingRegistrationDialog } from "@/components/marketplace/MarketplaceListingRegistrationDialog";
 import { MarketplaceListingChangesDialog } from "@/components/marketplace/MarketplaceListingChangesDialog";
@@ -818,7 +817,6 @@ export default function EbayChannelPage() {
   };
 
   const [publicationStatusTarget, setPublicationStatusTarget] = useState<{ jobId: string; productId: number; name: string } | null>(null);
-  const [publicationStockTarget, setPublicationStockTarget] = useState<{ productId: number; name: string } | null>(null);
   const [checkingRecovery, setCheckingRecovery] = useState(false);
   const [withdrawalRetryRequests, setWithdrawalRetryRequests] = useState<Map<number, number>>(new Map());
   const retryWithdrawal = (productId: number) => setWithdrawalRetryRequests(previous => new Map(previous).set(productId, (previous.get(productId) ?? 0) + 1));
@@ -848,7 +846,11 @@ export default function EbayChannelPage() {
   const handleIssueAction = (issue: EbayListingIssue, productId: number, jobId?: string) => {
     const item = feedData?.feed.find((candidate) => candidate.id === productId);
     if (issue.action.kind === "review_publication_stock") {
-      setPublicationStockTarget({ productId, name: item?.name ?? `Product ${productId}` });
+      // Compatibility with an older response: current code, not the retired
+      // enrollment action, decides whether to publish or correct inventory.
+      const current = resolveEbayListingIssue({ code: issue.code, message: issue.message, productId, jobId: issue.reference ?? jobId });
+      if (current.action.href) window.location.assign(current.action.href);
+      else handleIssueAction(current, productId, jobId);
       return;
     }
     // An admission refusal may point to an older publication that is blocking
@@ -2986,11 +2988,6 @@ export default function EbayChannelPage() {
         key={publicationStatusTarget.jobId} jobId={publicationStatusTarget.jobId} productId={publicationStatusTarget.productId}
         productName={publicationStatusTarget.name} onClose={() => setPublicationStatusTarget(null)} onIssueAction={handleIssueAction}
         onRetryWithdrawal={retryWithdrawal}
-      />}
-
-      {publicationStockTarget && <EbayPublicationStockDialog
-        key={publicationStockTarget.productId} productId={publicationStockTarget.productId} productName={publicationStockTarget.name}
-        onClose={() => setPublicationStockTarget(null)} onQueued={job => clearUntrackedLocalIssue(job.productId)} onIssueAction={handleIssueAction}
       />}
 
       <EbaySyncRecoveryDialog

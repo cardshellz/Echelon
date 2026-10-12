@@ -8,10 +8,9 @@ import { installWalmartPublicationInventoryFixture, activateWalmartPublicationIn
  * are reduced named-schema read fixtures, not proof of their write workflows. */
 export async function installInitialScopeFixture(pool: Pool, canonical = false): Promise<void> {
   await installWalmartPublicationInventoryFixture(pool);
-  await pool.query(`UPDATE channels.channel_feeds SET channel_inventory_item_id='test-item';
-    UPDATE channels.channels SET provider='shopify' WHERE id=36;
-    CREATE TABLE channels.channel_listings(id bigint PRIMARY KEY,channel_id integer,product_variant_id integer,
-      external_sku text,external_variant_id text,UNIQUE(channel_id,product_variant_id));
+  // Target 1 is the historical Shopify channel35/connection7. Retain target 2
+  // as the distinct Walmart destination; it has no selected feed in this suite.
+  await pool.query(`UPDATE channels.channel_feeds SET channel_id=35,channel_inventory_item_id='test-item';
     CREATE TABLE dropship.dropship_vendor_listings(id bigint PRIMARY KEY,store_connection_id integer,product_variant_id integer,
       status text,external_listing_id text,external_offer_id text);
     CREATE SCHEMA marketplace;
@@ -41,7 +40,7 @@ export async function seedInitialScopeDropship(pool: Pool): Promise<void> {
     INSERT INTO dropship.dropship_store_connections(id,vendor_id,platform,status,external_account_id) VALUES(1,1,'ebay','active','account-one');
     INSERT INTO inventory.inventory_publication_targets(destination_kind,channel_id,dropship_store_connection_id,fulfillment_node_id,
       provider_scope_type,external_scope_id,publication_authority,state,change_reason,created_by)
-      VALUES('dropship_store_connection',36,1,1,'account','account-one','echelon','disabled','Fixture Dropship','operator');
+      VALUES('dropship_store_connection',35,1,1,'account','account-one','echelon','disabled','Fixture Dropship','operator');
     UPDATE inventory.inventory_publication_targets SET state='preview',revision=revision+1,activated_by='operator',activated_at=transaction_timestamp() WHERE id=3;
     INSERT INTO marketplace.listing_scopes VALUES(10,'dropship','ebay');
     INSERT INTO marketplace.dropship_listing_scopes VALUES(10,1);

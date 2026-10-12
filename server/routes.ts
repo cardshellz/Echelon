@@ -245,7 +245,7 @@ export async function registerRoutes(
   registerListingPublicationRoutes(app);
   registerListingUpdateRoutes(app);
   registerListingLifecycleRoutes(app);
-  registerInventoryPublicationMembershipRoutes(app, app.locals.services.inventoryPublicationMembership);
+  registerInventoryPublicationMembershipRoutes(app);
   registerInventoryPublicationInitialScopeRoutes(app, app.locals.services.inventoryPublicationInitialScope);
   registerMarketplaceListingRegistrationRoutes(
     app,

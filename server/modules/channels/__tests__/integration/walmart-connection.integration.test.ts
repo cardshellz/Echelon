@@ -106,6 +106,22 @@ describeWithDisposableDb("Walmart account and order PostgreSQL transactions", ()
     expect((await getTestPool().query("SELECT actor,action FROM public.audit_events")).rows).toEqual([{ actor: "operator", action: "channel_identity.verified_catalog_mapping" }]);
     await expect(save("DIFFERENT")).rejects.toMatchObject({ code: "CHANNEL_MAPPING_CONFLICT" });
   });
+  it("retains exact deselected identities for stock clearing and readback without exposing them to order matching", async () => {
+    const pool = getTestPool();
+    await pool.query("UPDATE channels.channel_feeds SET is_active=0 WHERE channel_id=$1", [channelId]);
+    try {
+      expect(await repository.mappings(channelId)).toEqual([]);
+      expect(await repository.inventoryMappings(channelId, [variantId])).toEqual([
+        { product_variant_id: variantId, channel_sku: "WALMART-SKU" },
+      ]);
+      expect(await repository.inventoryMappings(otherChannelId, [variantId])).toEqual([]);
+      expect(await repository.inventoryMappings(channelId, [variantId + 100000])).toEqual([]);
+      await pool.query("UPDATE channels.channel_feeds SET quarantined_at=$1 WHERE channel_id=$2", [now, channelId]);
+      expect(await repository.inventoryMappings(channelId, [variantId])).toEqual([]);
+    } finally {
+      await pool.query("UPDATE channels.channel_feeds SET is_active=1,quarantined_at=NULL WHERE channel_id=$1", [channelId]);
+    }
+  });
   it("rolls back a whole mapping batch and its audit when a later variant is unavailable", async () => {
     const pool = getTestPool();
     const product = (await pool.query("SELECT product_id FROM catalog.product_variants WHERE id=$1", [variantId])).rows[0].product_id;

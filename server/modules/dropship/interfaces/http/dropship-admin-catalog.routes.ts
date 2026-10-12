@@ -3,6 +3,7 @@ import { requirePermission } from "../../../../routes/middleware";
 import { DropshipCatalogExposureService, makeDropshipCatalogExposureLogger, systemDropshipCatalogExposureClock } from "../../application/dropship-catalog-exposure-service";
 import { PgDropshipCatalogExposureRepository } from "../../infrastructure/dropship-catalog-exposure.repository";
 import { DropshipError } from "../../domain/errors";
+import { publicationSelectionBusyIssue } from "../../../inventory-planning/publication-selection-work";
 
 type SessionUser = {
   id: string;
@@ -153,6 +154,8 @@ function parsePreviewCatalogStatusQuery(value: unknown): "active" | "inactive" |
 }
 
 function sendDropshipCatalogError(res: Response, error: unknown) {
+  const busy = publicationSelectionBusyIssue(error);
+  if (busy) return res.status(409).json({ error: busy });
   if (error instanceof DropshipError) {
     const status = error.code === "DROPSHIP_IDEMPOTENCY_CONFLICT" ? 409 : 400;
     return res.status(status).json({

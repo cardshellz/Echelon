@@ -5,8 +5,14 @@ import { selectPublicationVariants } from "./inventory-publication-scope";
 /** Only mappings consumed by selected publication members require promotion.
  * An excluded mapping stays a draft and cannot accidentally become a listing. */
 export function selectedCutoverPublicationMappings(target: ActiveInventoryPublicationTargetSnapshot): ActivePublicationVariantMappingSnapshot[] {
+  const selectedIds = target.selection?.variants
+    .filter(variant => variant.action === "publish" || variant.action === "zero")
+    .map(variant => variant.productVariantId);
   return selectPublicationVariants(target.mappings.map(mapping => ({ id: mapping.productVariantId, mapping })),
-    target.membership ?? { mode: "whole_product" }).selected.map(row => row.mapping);
+    // Recorded historical snapshots lack owner selection. Their old scope remains
+    // readable, but never overrides a fresh channel selection (including empty).
+    selectedIds ? { mode: "explicit", includedVariantIds: selectedIds }
+      : target.membership ?? { mode: "whole_product" }).selected.map(row => row.mapping);
 }
 
 /** A read-only projection of the exact node transitions the final transaction

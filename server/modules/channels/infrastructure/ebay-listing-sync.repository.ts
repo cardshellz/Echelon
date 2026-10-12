@@ -207,6 +207,34 @@ export class PostgresEbayListingSyncRepository implements EbayListingSyncStore {
         reusable = false;
       }
     }
+    let retainedTarget = reviewedTarget;
+    let retainedTargetJobId: string | null = null;
+    if (operation === "publish" && !reusable) {
+      // A failed preparation can leave real offers before any publish request.
+      // Preserve only the latest job's proven target and only for the same local
+      // source. The worker must still inspect these exact resources before use.
+      const previousRow = (await client.query(rowSql +
+        ` WHERE channel_id=$1 AND product_id=$2 AND operation='publish' ORDER BY created_at DESC,
+          (SELECT max(sequence.id) FROM channels.ebay_listing_sync_events sequence WHERE sequence.job_id=ebay_listing_sync_jobs.id AND sequence.event='requested') DESC,id DESC LIMIT 1`,
+      [identity.channelId, identity.productId])).rows[0];
+      if (previousRow) {
+        const previous = decode(previousRow);
+        if (previous.state === "needs_attention" && previous.publicationTarget) {
+          if (hasPublicationBarrier(previous)) throw this.priorPublicationRequired(previous.id);
+          let sameSource = true;
+          try { assertEbayListingSourceIdentityUnchanged(previous.identity, identity); }
+          catch (error) {
+            if (!(error instanceof EbayListingSyncError) || error.code !== "EBAY_SYNC_IDENTITY_CHANGED") throw error;
+            sameSource = false;
+          }
+          if (sameSource) {
+            if (retainedTarget) assertEbayPublicationTargetUnchanged(previous.publicationTarget, retainedTarget);
+            else retainedTarget = validatePublicationTarget(identity, previous.publicationTarget);
+            retainedTargetJobId = previous.id;
+          }
+        }
+      }
+    }
     if (active && reusable) {
       id = active.id;
       await client.query(
@@ -238,23 +266,23 @@ export class PostgresEbayListingSyncRepository implements EbayListingSyncStore {
     let job = decode(
       (await client.query(rowSql + " WHERE id=$1", [id])).rows[0],
     );
-    if (reviewedTarget) validatePublicationTarget(job.identity, reviewedTarget);
-    if (reviewedTarget && job.publicationTarget) assertEbayPublicationTargetUnchanged(job.publicationTarget, reviewedTarget);
-    if (reviewedTarget && !job.publicationTarget) {
-      // A reviewed stock-enrollment command must retain the same planned group
-      // across the commit/worker boundary. This is preparation, never a claim
-      // that eBay published it. The worker still observes the target before writes.
+    if (retainedTarget) validatePublicationTarget(job.identity, retainedTarget);
+    if (retainedTarget && job.publicationTarget) assertEbayPublicationTargetUnchanged(job.publicationTarget, retainedTarget);
+    if (retainedTarget && !job.publicationTarget) {
+      // Reviewed and previously saved targets use the same preparation receipt.
+      // Neither is a claim that eBay published it; the worker still observes the
+      // exact target before writes.
       for (const key of [job.id, ebayListingWorkflowLockKey(identity.channelId, identity.productId)]) {
         const acquired = (await client.query<{ acquired: boolean }>("SELECT pg_try_advisory_xact_lock($1,hashtext($2)) AS acquired", [LOCK_NAMESPACE, key])).rows[0]?.acquired;
         if (!acquired) throw new EbayListingSyncError("PUBLICATION_SCOPE_BUSY", "A provider operation is running for this listing. Recheck the saved request before applying this publication review.");
       }
       if (job.ownerToken !== null || job.claimedRevision !== null || job.state === "running")
         throw new EbayListingSyncError("PUBLICATION_SCOPE_BUSY", "The listing worker is still preparing this publication. Wait for its current attempt to finish before applying the review.");
-      const targetHash = syncIdentityHash(reviewedTarget);
-      await this.event(client, job, "requested", { commandKey, actor, reviewedPublicationTarget: reviewedTarget, targetHash, sourceIdentityHash: syncIdentityHash(identity),
+      const targetHash = syncIdentityHash(retainedTarget);
+      await this.event(client, job, "requested", { commandKey, actor, reviewedPublicationTarget: retainedTarget, retainedTargetJobId, targetHash, sourceIdentityHash: syncIdentityHash(identity),
         ownerTransactionId: (await client.query("SELECT pg_current_xact_id()::text AS id")).rows[0].id }, now);
       await client.query("UPDATE channels.ebay_listing_sync_jobs SET publication_target=$2::jsonb,publication_target_hash=$3 WHERE id=$1",
-        [job.id, canonicalJson(reviewedTarget), targetHash]);
+        [job.id, canonicalJson(retainedTarget), targetHash]);
       job = decode((await client.query(rowSql + " WHERE id=$1", [job.id])).rows[0]);
     } else await this.event(client, job, "requested", { commandKey, actor }, now);
     return job;

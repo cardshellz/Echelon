@@ -17,6 +17,7 @@ import { PostgresInventoryPromiseSafetyAdminStore } from "../../infrastructure/i
 import { PostgresInventoryChannelExposureAdminStore } from "../../infrastructure/inventory-channel-exposure-admin.repository";
 import { createAuthorityAwareInventoryPublicationService, createTransactionScopedInventoryPublicationService, LATEST_PUBLICATION_ROW_SQL } from "../../infrastructure/inventory-availability-runtime-publication.repository";
 import { installOperationalPublicationPrerequisites } from "../fixtures/shipment-operational-publication";
+import { installStockSelectionFixture } from "../fixtures/stock-selection.fixture";
 import { installUnopenedQuantityLedgerFixture } from "../../../inventory/__tests__/fixtures/pre-opening-quantity-authority.fixture";
 import { PostgresOperationalShipmentDispatchRepository } from "../../../inventory/infrastructure/operational-shipment-dispatch.repository";
 import { WmsOperationalShipmentSourceOwner } from "../../../wms/operational-shipment-source";
@@ -3826,6 +3827,7 @@ describeWithDisposableDb.sequential("inventory availability Slice 1 PostgreSQL g
   });
 
   it("plans and revises canonical runtime publication atomically against PostgreSQL", async () => {
+    await installStockSelectionFixture(pool);
     const scope = await seedProductAndWarehouse([1]);
     const unmappedScope = await seedProductAndWarehouse([1]);
     await pool.query(
@@ -3897,6 +3899,17 @@ describeWithDisposableDb.sequential("inventory availability Slice 1 PostgreSQL g
       "INSERT INTO channels.channel_connections (channel_id) VALUES ($1) RETURNING id",
       [channel.rows[0]!.id],
     );
+    // Both listings are selected by Channels. Only the first has an Inventory
+    // mapping, so the second must still exercise the missing-mapping guard.
+    await pool.query(`UPDATE catalog.product_variants AS variant SET sku=selected.sku
+      FROM (VALUES($1::integer,'RUNTIME-EA'),($2::integer,'UNMAPPED-EA')) AS selected(id,sku)
+      WHERE variant.id=selected.id`,
+    [scope.variantIds[0], unmappedScope.variantIds[0]]);
+    await pool.query(`INSERT INTO channels.channel_feeds
+      (channel_id,product_variant_id,channel_variant_id,channel_inventory_item_id,channel_sku)
+      VALUES($1,$2,'runtime-variant-1','runtime-item-1','RUNTIME-EA'),
+        ($1,$3,'unmapped-variant-1','unmapped-item-1','UNMAPPED-EA')`,
+    [channel.rows[0]!.id, scope.variantIds[0], unmappedScope.variantIds[0]]);
     const node = await pool.query<{ id: number }>(
       `INSERT INTO warehouse.fulfillment_nodes (
          code, name, node_type, warehouse_id, inventory_authority,

@@ -6,6 +6,7 @@ import {
   type InventoryChannelExposureRuntimePlan,
 } from "@shared/types/inventory-channel-exposure";
 import type { SupplySnapshotDto } from "@shared/types/inventory-availability-planner";
+import type { StockPublicationSelection } from "@shared/types/stock-publication-selection";
 
 import {
   applyPublicationHold,
@@ -73,11 +74,13 @@ export interface ActiveInventoryPublicationTargetSnapshot {
   mappings: readonly ActivePublicationVariantMappingSnapshot[];
   /** SKU-level holds among the product's variants; the target hold above wins when both are set. */
   variantHolds: readonly ActivePublicationVariantHoldSnapshot[];
-  /** Omitted only by legacy callers: preserve their whole-product semantics.
-   * Explicit membership narrows output rows, never the ATP supply graph. */
+  /** Current listing-owner decision. Every live database reader supplies this. */
+  selection?: StockPublicationSelection;
+  /** Historical cutover/review inputs only. Live readers never consult the
+   * retired independent membership tables. This cannot override selection. */
   membership?: { mode: "whole_product" } | { mode: "explicit"; includedVariantIds: readonly number[] };
-  /** Only immutable initial-scope deferrals without a later membership decision.
-   * Loaded by the read-only Dropship path, never by a publication planner. */
+  /** Selected Dropship preview candidates may calculate ATP before mapping;
+   * this exception is read-only and cannot authorize a provider request. */
   deferredDropshipQuantityVariantIds?: readonly number[];
 }
 
@@ -202,7 +205,10 @@ export function planInventoryChannelExposureProduct(
   const plannedTargets = context.publicationTargets
     .slice()
     .map(target => deferredDropshipReadTarget(target, purpose))
-    .filter((target) => target.membership?.mode !== "explicit" || target.membership.includedVariantIds.length > 0)
+    .filter((target) => target.selection
+      ? target.selection.variants.some(variant => variant.action === "publish" || variant.action === "zero"
+        || (purpose === "deferred_dropship_quantity_read" && variant.action === "read_only"))
+      : target.membership?.mode !== "explicit" || target.membership.includedVariantIds.length > 0)
     .sort((left, right) => left.publicationTargetId - right.publicationTargetId)
     .map((target) => planTarget(context.supplySnapshot!, validatedProductId, variants, target, purpose));
 
@@ -260,8 +266,16 @@ function planTarget(
   purpose: "publication" | "deferred_dropship_quantity_read",
 ): PlannedTarget {
   const targetBlockers: RuntimeIssue[] = [];
+  if (target.selection && target.selection.productId !== productId) {
+    throw new InventoryChannelExposureRuntimeError("PUBLICATION_SELECTION_PRODUCT_MISMATCH",
+      "Listing selection belongs to another product.", { productId, selectionProductId: target.selection.productId });
+  }
+  const selectedIds = target.selection?.variants.filter(variant => variant.action === "publish" || variant.action === "zero"
+    || (purpose === "deferred_dropship_quantity_read" && variant.action === "read_only"))
+    .map(variant => variant.productVariantId);
   const { selected: selectedVariants, unavailableVariantIds } = selectPublicationVariants(
-    variants, target.membership ?? { mode: "whole_product" },
+    variants, selectedIds ? { mode: "explicit", includedVariantIds: selectedIds }
+      : target.membership ?? { mode: "whole_product" },
   );
   if (unavailableVariantIds.length > 0) {
     targetBlockers.push(issue("PUBLICATION_MEMBER_VARIANT_UNAVAILABLE",
@@ -326,7 +340,9 @@ function planTarget(
     // The hold that zeroes this SKU: the destination-wide hold covers every SKU
     // and wins; otherwise a SKU-level hold covers this one alone.
     const hold = target.hold ?? variantHolds.get(variant.id) ?? null;
-    const blockers: RuntimeIssue[] = [];
+    const selection = target.selection?.variants.find(entry => entry.productVariantId === variant.id);
+    const blockers: RuntimeIssue[] = (selection?.blockers ?? []).map(blocker => issue(blocker.code, blocker.message,
+      { publicationTargetId: target.publicationTargetId, productVariantId: variant.id }));
     const warnings: RuntimeIssue[] = [];
     const sourceOverride = resolveChannelSourceOverride({ channelId: target.channelId, productId, productVariantId: variant.id, policies: target.policies });
     const overrideMembers = sourceOverride ? (target.sourceOverrideMembers ?? [])
@@ -426,7 +442,9 @@ function planTarget(
       sharedUnits: calculation.sharedUnits.toString(),
       afterHoldbackUnits: calculation.afterHoldbackUnits.toString(),
       cappedUnits: calculation.cappedUnits.toString(),
-      publishedUnits: calculation.publishedUnits.toString(),
+      // A deselected retained listing still has a removal duty. Keep its exact
+      // identity and real ATP lineage; only the outgoing quantity becomes zero.
+      publishedUnits: selection?.action === "zero" ? "0" : calculation.publishedUnits.toString(),
       sourceWarehouseBreakdown,
       policy: resolution.policy,
       mapping: mapping ? {
@@ -446,6 +464,8 @@ function planTarget(
     sourceWarehouseIds,
     target: {
       publicationTargetId: target.publicationTargetId,
+      ...(target.selection ? { selection: target.selection } : {}),
+      ...(purpose === "deferred_dropship_quantity_read" ? { readOnly: true } : {}),
       publicationTargetRevision: target.publicationTargetRevision,
       destinationKind: target.destinationKind,
       channelId: target.channelId,
@@ -489,7 +509,10 @@ function deferredDropshipReadTarget(target: ActiveInventoryPublicationTargetSnap
 }
 
 function applyPartitionOverages(targets: PlannedTarget[]): void {
-  const rows = targets.flatMap((planned) => planned.target.rows.flatMap((row) => row.policy ? [{
+  const consumesShare = (target: PlannedTarget["target"], productVariantId: number) =>
+    target.selection?.variants.find(variant => variant.productVariantId === productVariantId)?.action !== "zero";
+  const rows = targets.flatMap((planned) => planned.target.rows.flatMap((row) => row.policy
+    && consumesShare(planned.target, row.productVariantId) ? [{
     productVariantId: row.productVariantId,
     sourceWarehouseIds: row.sourceWarehouseBreakdown.map(source => source.warehouseId),
     policy: row.policy,
@@ -497,7 +520,8 @@ function applyPartitionOverages(targets: PlannedTarget[]): void {
   for (const overage of findPartitionedShareOverages(rows)) {
     for (const planned of targets) {
       const row = planned.target.rows.find((candidate) => candidate.productVariantId === overage.productVariantId);
-      if (!row?.policy || row.policy.allocationSemantics !== "partitioned" || !row.policy.eligible
+      if (!row?.policy || !consumesShare(planned.target, row.productVariantId)
+        || row.policy.allocationSemantics !== "partitioned" || !row.policy.eligible
         || !row.sourceWarehouseBreakdown.some(source => source.warehouseId === overage.warehouseId)) continue;
       row.blockers = uniqueIssues([...row.blockers, issue(
         "PARTITIONED_CHANNEL_SHARE_EXCEEDS_100_PERCENT",

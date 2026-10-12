@@ -73,13 +73,14 @@ dbDescribe.sequential("publication scope in preview and sealed cutover evidence"
     } finally { client.release(); }
   }
 
-  it("does not expand an empty explicit destination to the whole product", async () => {
+  it("uses the selected channel feed despite an empty historical membership scope", async () => {
     const result = await preview.preview(2, 20);
-    expect(result.membership).toEqual({ mode: "explicit", includedVariantIds: [] });
-    expect(result.rows).toEqual([]);
+    expect(result.membership).toEqual({ mode: "explicit", includedVariantIds: [101] });
+    expect(result.selection?.variants.filter(row => row.action === "publish").map(row => row.productVariantId)).toEqual([101]);
+    expect(result.selection?.variants.filter(row => row.action === "read_only").map(row => row.productVariantId)).toEqual([102,103,104,105]);
     expect(result.blockers).toEqual([]);
     const wholeProduct = await preview.preview(1, 20);
-    expect(wholeProduct.membership).toEqual({ mode: "whole_product" });
+    expect(wholeProduct.membership).toEqual({ mode: "explicit", includedVariantIds: [] });
     expect(wholeProduct.rows.map(row => row.productVariantId)).toEqual([101, 102, 103, 104, 105]);
     expect(result).toMatchObject({ runtimeAuthorityChanged: false, providerWriteAttempted: false, outboxEnqueued: false });
     expect((await database.pool.query("SELECT authority FROM inventory.availability_runtime_authority")).rows)
@@ -88,29 +89,31 @@ dbDescribe.sequential("publication scope in preview and sealed cutover evidence"
   });
 
   it("selects one outbound SKU without trimming the captured ATP supply snapshot", async () => {
-    await setMembership(101);
+    await setMembership(101, false);
+    await setMembership(102);
     const result = await preview.preview(2, 20);
     expect(result.membership).toEqual({ mode: "explicit", includedVariantIds: [101] });
-    expect(result.rows.map(row => row.productVariantId)).toEqual([101]);
+    expect(result.selection?.variants.filter(row => row.action === "publish").map(row => row.productVariantId)).toEqual([101]);
+    expect(result.rows.map(row => row.productVariantId)).toEqual([101,102,103,104,105]);
     expect(result.blockers).toEqual([]);
     const shadow = await shadows.getLatestShadowRun(20);
     expect([...new Set(shadow!.results.map(row => row.productVariantId))]).toEqual([101, 102, 103, 104, 105]);
   });
 
   it("still blocks an included SKU without an exact provider mapping", async () => {
-    await setMembership(102);
+    await database.pool.query("INSERT INTO channels.channel_feeds(channel_id,product_variant_id,channel_sku,channel_inventory_item_id) VALUES(36,102,'NEW','NEW')");
     const result = await preview.preview(2, 20);
-    expect(result.rows.map(row => row.productVariantId)).toEqual([102]);
+    expect(result.selection?.variants.find(row => row.productVariantId === 102)?.action).toBe("publish");
     expect(result.blockers.map(row => row.code)).toContain("PUBLICATION_TARGET_VARIANT_MAPPING_MISSING");
   });
-  it("carries the exact excluded identities without producing publication rows", async () => {
+  it("preserves historical excluded identities without letting them override current channel selection", async () => {
     await setMembership(102, false);
     const result = await preview.preview(2, 20);
-    expect(result.membership).toEqual({ mode: "explicit", includedVariantIds: [], excludedVariantIds: [102] });
-    expect(result.rows).toEqual([]);
+    expect(result.membership).toEqual({ mode: "explicit", includedVariantIds: [101] });
+    expect(result.selection?.variants.find(row => row.productVariantId === 102)?.action).toBe("read_only");
     expect(result.blockers).toEqual([]);
     const run = await reviewedRun([]);
-    run.products[0]!.publicationTargetSelections![0]!.membership = result.membership!;
+    run.products[0]!.publicationTargetSelections![0]!.membership = { mode: "explicit", includedVariantIds: [], excludedVariantIds: [102] };
     await expect(verifySelections(run)).resolves.toBeUndefined();
     await setMembership(103, false);
     await expect(verifySelections(run)).rejects.toMatchObject({ code: "ACTIVATION_PUBLICATION_MEMBERSHIP_CHANGED" });
@@ -127,13 +130,14 @@ dbDescribe.sequential("publication scope in preview and sealed cutover evidence"
       providerWriteAttempted: false, outboxEnqueued: false });
   });
 
-  it("does not silently drop an included SKU that becomes inactive", async () => {
-    await setMembership(105);
+  it("retains a clearing duty and reports the missing exact mapping when a channel SKU becomes inactive", async () => {
+    await database.pool.query("INSERT INTO channels.channel_feeds(channel_id,product_variant_id,channel_sku,channel_inventory_item_id) VALUES(36,105,'FUTURE','FUTURE')");
     await database.pool.query("UPDATE catalog.product_variants SET is_active=false WHERE id=105");
     const result = await preview.preview(2, 20);
-    expect(result.membership).toEqual({ mode: "explicit", includedVariantIds: [105] });
-    expect(result.rows).toEqual([]);
-    expect(result.blockers.map(row => row.code)).toContain("PUBLICATION_MEMBER_VARIANT_UNAVAILABLE");
+    expect(result.membership).toEqual({ mode: "explicit", includedVariantIds: [101,105] });
+    expect(result.selection?.variants.find(row => row.productVariantId === 105)?.action).toBe("zero");
+    expect(result.rows.find(row => row.productVariantId === 105)?.publishedUnits).toBe("0");
+    expect(result.blockers.map(row => row.code)).toContain("PUBLICATION_TARGET_VARIANT_MAPPING_MISSING");
   });
 
   it("revalidates a deliberately empty preview destination without requiring publication rows", async () => {

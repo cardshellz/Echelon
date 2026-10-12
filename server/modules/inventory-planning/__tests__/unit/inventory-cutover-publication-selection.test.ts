@@ -35,6 +35,30 @@ describe("cutover publication selection", () => {
     expect(selectedCutoverPublicationMappings({ ...target, membership: { mode: "explicit", includedVariantIds: [999] } })).toEqual([]);
   });
 
+  it.each(["publish", "zero"] as const)("current %s selection overrides retired membership without promoting excluded drafts", action => {
+    const current = { ...target, selection: { productId: 20, fingerprint: "c".repeat(64), variants: [
+      { productVariantId: 101, action: "none" as const, reason: "No longer selected", blockers: [] },
+      { productVariantId: 102, action, reason: "Required by current channel selection", blockers: [] },
+    ] } };
+    const before = JSON.stringify(current);
+    expect(selectedCutoverPublicationMappings(current).map(mapping => mapping.productVariantId)).toEqual([102]);
+    expect(JSON.stringify(current)).toBe(before);
+  });
+
+  it.each(["none", "read_only"] as const)("current %s selection cannot fall back to whole-product mapping promotion", action => {
+    expect(selectedCutoverPublicationMappings({ ...target, membership: { mode: "whole_product" }, selection: {
+      productId: 20, fingerprint: "c".repeat(64), variants: target.mappings.map(mapping => ({
+        productVariantId: mapping.productVariantId, action, reason: "No publication required", blockers: [],
+      })),
+    } })).toEqual([]);
+  });
+
+  it("an empty current selection does not resurrect historical included mappings", () => {
+    expect(selectedCutoverPublicationMappings({ ...target, selection: {
+      productId: 20, fingerprint: "c".repeat(64), variants: [],
+    } })).toEqual([]);
+  });
+
   it("projects only reviewed draft sources, including SKU source overrides, without mutating runtime evidence", () => {
     const input = { ...target, sourceOverrideMembers: target.sourceBinding!.members };
     const before = JSON.stringify(input);

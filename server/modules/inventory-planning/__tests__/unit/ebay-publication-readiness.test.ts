@@ -8,12 +8,12 @@ const row = (): EbayPublicationMappingRow => ({ id: 463, product_id: 232, sku: "
   active_mapping_id: null, draft_mapping_id: 401, head_revision: "1", mapping_id: 401, mapping_version: 1,
   active_inventory_id: null, active_sku: null,
   mapping_hash: calculatePublicationVariantMappingDefinitionHash({ publicationTargetId: 3, productVariantId: 463, externalInventoryItemId: "BLUE-P10", externalSku: "BLUE-P10" }),
-  mapping_inventory_id: "BLUE-P10", mapping_sku: "BLUE-P10", mapping_status: "draft", included: null, held_at: null, conflicts: [] });
+  mapping_inventory_id: "BLUE-P10", mapping_sku: "BLUE-P10", mapping_status: "draft", held_at: null, conflicts: [] });
 describe("exact eBay stock mapping proposal", () => {
   it("reuses the reviewed draft and preserves input", () => {
     const current = row(), before = structuredClone(current);
     expect(reviewEbayPublicationMember({ productId: 232 }, member, 3, [current])).toMatchObject({ blockers: [],
-      variant: { mappingAction: "promote_draft", membershipAction: "include", desiredQuantity: null } });
+      variant: { mappingAction: "promote_draft", desiredQuantity: null } });
     expect(current).toEqual(before);
   });
   it("supports a saved provider SKU alias without renaming the local SKU", () => {
@@ -21,7 +21,7 @@ describe("exact eBay stock mapping proposal", () => {
   });
   it.each([
     [{ product_id: 3 }, "STOCK_LISTING_SOURCE_CHANGED"], [{ eligible: false }, "STOCK_LISTING_SOURCE_CHANGED"],
-    [{ included: false }, "STOCK_LISTING_EXCLUDED"], [{ held_at: new Date("2026-10-12T12:00:00Z") }, "STOCK_LISTING_HELD"],
+    [{ held_at: new Date("2026-10-12T12:00:00Z") }, "STOCK_LISTING_HELD"],
     [{ conflicts: [5, 6] }, "STOCK_LISTING_MAPPING_CONFLICT"], [{ mapping_sku: "CLEAR-P10" }, "STOCK_LISTING_MAPPING_REVIEW_REQUIRED"],
     [{ mapping_hash: "a".repeat(64) }, "STOCK_LISTING_MAPPING_REVIEW_REQUIRED"],
     [{ active_mapping_id: 400, active_inventory_id: "OLD", active_sku: "OLD" }, "STOCK_LISTING_MAPPING_REVIEW_REQUIRED"],

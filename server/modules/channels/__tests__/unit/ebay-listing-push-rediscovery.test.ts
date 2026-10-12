@@ -7,6 +7,7 @@ const state = vi.hoisted(() => ({
   product: {} as Record<string, unknown>, variants: [] as Array<Record<string, unknown>>,
   client: null as EbayListingLifecycleClient | null, transport: null as EbayRegistrationReadTransport | null,
   project: vi.fn(async () => {}), failure: vi.fn(async () => {}), accountId: "seller", extraMember: false, changedOffer: false,
+  ensureStock: vi.fn(async () => {}),
 }));
 vi.mock("../../../../db", () => ({ db: {}, pool: { query: async () => ({ rows: [{ id: 12, metadata: {
   marketplaceId: "EBAY_US", fulfillmentPolicyId: "shipping", paymentPolicyId: "payment", returnPolicyId: "returns",
@@ -20,7 +21,10 @@ vi.mock("../../infrastructure/ebay-api-runtime", () => ({ EBAY_CHANNEL_ID: 67,
 }));
 // This suite exercises provider identity rediscovery. Real inventory admission
 // and enrollment are covered in the disposable PostgreSQL composition suite.
-vi.mock("../../../inventory-planning/quantity-publication", () => ({ assertEbayPublicationReady: vi.fn(async () => {}) }));
+vi.mock("../../../inventory-planning/quantity-publication", async () => ({ ensureEbayPublicationReady: state.ensureStock,
+  InventoryPublicationMembershipError: (await import("../../../inventory-planning/application/inventory-publication-membership.service")).InventoryPublicationMembershipError,
+  InventoryPublicationSelectionError: (await import("../../../inventory-planning/infrastructure/inventory-publication-selection.reader")).InventoryPublicationSelectionError,
+}));
 vi.mock("../../infrastructure/ebay-listing-push.repository", () => ({ PostgresEbayListingPushRepository: class {
   withProductLock(_id: number, work: () => Promise<unknown>) { return work(); }
   async readProduct() { return state.product; }
@@ -49,9 +53,13 @@ import { EbayPublicationCompletionExecution } from "../../ebay-publication-compl
 import { EbayMarketplaceListingConnector } from "../../listing-connectors/ebay-listing.connector";
 import type { EbayListingExecutionContext } from "../../ebay-listing-sync.service";
 import type { EbayListingSyncIdentity } from "../../ebay-listing-sync.domain";
+import { EbayListingSyncError, syncFailure } from "../../ebay-listing-sync.domain";
+import { InventoryPublicationMembershipError } from "../../../inventory-planning/application/inventory-publication-membership.service";
+import { InventoryPublicationSelectionError } from "../../../inventory-planning/infrastructure/inventory-publication-selection.reader";
+import { resolveEbayListingIssue } from "@shared/ebay-listing-issue";
 
 async function runPublication(productId: number): Promise<{ success: boolean; identity: EbayListingSyncIdentity | null; error?: unknown }> {
-  const context: EbayListingExecutionContext = { operation: "publish", publicationTarget: null, publicationAccepted: null,
+  const context: EbayListingExecutionContext = { operation: "publish", jobId: "655ca747-20b9-4940-9c61-019baf1c11c1", requestedBy: "operator", publicationTarget: null, publicationAccepted: null,
     publicationWriteStarted: false, publicationWriteCompleted: false, publicationAcceptedRevision: null, claimedRevision: "1", publicationIntentHash: null,
     bindPublicationTarget: async identity => { context.publicationTarget = identity; }, bindPublicationAccepted: async value => { context.publicationAccepted = value; } };
   let identity: EbayListingSyncIdentity | null = null;
@@ -113,9 +121,42 @@ function provider(example = examples[0], grouped = true) {
   }) };
   return state.client;
 }
-beforeEach(() => { state.project.mockClear(); state.failure.mockClear(); state.accountId = "seller"; state.extraMember = false; state.changedOffer = false; });
+beforeEach(() => { state.project.mockClear(); state.failure.mockClear(); state.ensureStock.mockReset(); state.accountId = "seller"; state.extraMember = false; state.changedOffer = false; });
 
 describe("production initial-publication replay through the canonical provider observer", () => {
+  it("keeps exact connection-selection failures actionable through preparation and the saved worker result", async () => {
+    const client = provider();
+    state.ensureStock.mockRejectedValueOnce(new InventoryPublicationSelectionError("CHANNEL_SELECTION_CONNECTION_UNRESOLVED",
+      "Channel selection requires its one exact saved connection. Review the destination before publishing stock."));
+    const result = await runPublication(3);
+    const failure = syncFailure(result.error, 1, new Date("2026-10-12T12:00:00Z"));
+    expect(result.error).toBeInstanceOf(EbayListingSyncError);
+    expect(failure).toMatchObject({ state: "needs_attention", code: "CHANNEL_SELECTION_CONNECTION_UNRESOLVED",
+      message: "Channel selection requires its one exact saved connection. Review the destination before publishing stock." });
+    expect(resolveEbayListingIssue({ ...failure, productId: 3 })).toMatchObject({ retryable: false,
+      action: { kind: "reconnect", href: "/channels/ebay#connection" } });
+    expect(client.updateOffer).not.toHaveBeenCalled();
+    expect(client.createOrReplaceInventoryItem).not.toHaveBeenCalled();
+    expect(client.publishOfferByInventoryItemGroup).not.toHaveBeenCalled();
+  });
+  it("preserves the Inventory owner's actionable stock message and retries before any provider write", async () => {
+    const client = provider();
+    state.ensureStock.mockRejectedValueOnce(new InventoryPublicationMembershipError("STOCK_MAPPING_PROVIDER_BUSY", "A stock update is running for this listing. The saved request will retry."));
+    const result = await runPublication(3);
+    expect(result.error).toBeInstanceOf(EbayListingSyncError);
+    expect(syncFailure(result.error, 1, new Date("2026-10-12T12:00:00Z"))).toMatchObject({ state: "recovering",
+      code: "STOCK_MAPPING_PROVIDER_BUSY", message: "A stock update is running for this listing. The saved request will retry." });
+    expect(client.updateOffer).not.toHaveBeenCalled();
+    expect(client.createOrReplaceInventoryItem).not.toHaveBeenCalled();
+    expect(client.publishOfferByInventoryItemGroup).not.toHaveBeenCalled();
+  });
+  it("does not expose an untyped persistence error from automatic stock preparation", async () => {
+    provider();
+    state.ensureStock.mockRejectedValueOnce(Object.assign(new Error("private database detail"), { code: "STOCK_MAPPING_PROVIDER_BUSY" }));
+    const result = await runPublication(3);
+    expect(result.error).not.toBeInstanceOf(EbayListingSyncError);
+    expect(syncFailure(result.error, 1, new Date("2026-10-12T12:00:00Z")).message).not.toContain("private database detail");
+  });
   it("recovers a genuine single published offer without creating a catalog group", async () => {
     const client = provider(examples[0], false);
     const result = await runPublication(3);
