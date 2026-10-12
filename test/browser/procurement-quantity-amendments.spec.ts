@@ -34,10 +34,10 @@ function previewFor(body: PoQuantityPreviewRequest, lines: PoQuantityAmendmentCo
     beforeTotalCents: sum(lines.map(value => value.lineTotalCents)), afterTotalCents: sum(lines.map(value => changes.find(change => change.before.id === value.id)?.after.lineTotalCents ?? value.lineTotalCents)),
     beforeStatus: "received", afterStatus: "received", warnings: ["Invoice amounts, invoice quantities and payments stay unchanged."], invoiceMatches: [] };
 }
-async function setup(page: Page, options: { admin?: boolean; stale?: boolean; loseAllResponses?: boolean; closeAfterLost?: boolean; lines?: PoQuantityAmendmentContext["lines"] } = {}) {
+async function setup(page: Page, options: { admin?: boolean; stale?: boolean; loseAllResponses?: boolean; closeAfterLost?: boolean; lines?: PoQuantityAmendmentContext["lines"]; request?: string; openModal?: boolean; wrongContext?: boolean } = {}) {
   const failures = await installFixtures(page);
   const approvals: Captured[] = []; const previews: PoQuantityPreviewRequest[] = [];
-  const context: PoQuantityAmendmentContext = { purchaseOrderId: 17, currency: "USD", sourceVersion: version, canApprove: options.admin !== false, blockedReason: null, lines: options.lines ?? [line] };
+  const context: PoQuantityAmendmentContext = { purchaseOrderId: options.wrongContext ? 99 : 17, currency: "USD", sourceVersion: version, canApprove: options.admin !== false, blockedReason: null, lines: options.lines ?? [line] };
   let lose = options.loseAllResponses ?? false; let committed = false; let denied = false;
   const results = new Map<string, unknown>();
   await page.route("**/api/**", async route => {
@@ -60,8 +60,11 @@ async function setup(page: Page, options: { admin?: boolean; stale?: boolean; lo
     if (lose) return route.abort("failed");
     return route.fulfill({ json: results.get(command.key), headers: { "Idempotency-Replayed": "true" } });
   });
-  await page.goto("/purchase-orders/17"); await page.getByRole("button", { name: "Edit PO", exact: true }).click();
-  await expect(page.getByRole("dialog")).toBeVisible();
+  await page.goto(`/purchase-orders/17${options.request ? `?tab=lines&${options.request}` : ""}`);
+  if (options.openModal !== false) {
+    await page.getByRole("button", { name: "Edit PO", exact: true }).click();
+    await expect(page.getByRole("dialog")).toBeVisible();
+  }
   return { failures, approvals, previews, recover: () => { lose = false; }, deny: (value: boolean) => { denied = value; } };
 }
 async function review(page: Page, keepProductTotal = false) {
@@ -198,4 +201,20 @@ test("missing current price fields block new edits instead of inventing defaults
   await expect(page.getByRole("dialog").getByRole("alert")).toHaveText(/Current line pricing could not be loaded/);
   await expect(page.getByRole("dialog").getByRole("button", { name: "Review changes", exact: true })).toHaveCount(0);
   expect(state.previews).toEqual([]); expect(state.approvals).toEqual([]); expect(state.failures).toEqual([]);
+});
+
+
+for (const request of ["editPo=0", "editPo=1&editPo=1", "editPo=1&editPo=0"]) test(`ignores malformed or duplicate PO editor requests: ${request}`, async ({ page }) => {
+  const state = await setup(page, { request, openModal: false });
+  await expect(page.getByRole("button", { name: "Edit PO", exact: true })).toBeVisible();
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  expect(state.approvals).toEqual([]); expect(state.previews).toEqual([]); expect(state.failures).toEqual([]);
+});
+
+
+test("rejects a context for another PO before exposing editable values", async ({ page }) => {
+  const state = await setup(page, { wrongContext: true });
+  await expect(page.getByRole("dialog").getByRole("alert")).toContainText("does not match this PO");
+  await expect(page.getByRole("dialog").getByLabel("Quantity (pieces)")).toHaveCount(0);
+  expect(state.approvals).toEqual([]); expect(state.previews).toEqual([]); expect(state.failures).toEqual([]);
 });

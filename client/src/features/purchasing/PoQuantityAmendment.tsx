@@ -1,4 +1,6 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { useLocation, useSearch } from "wouter";
+import { PO_EDITOR_QUERY_PARAM } from "@/lib/procurement-navigation";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { z } from "zod";
 import {
@@ -226,13 +228,35 @@ function Editor({ context: loadedContext, storageKey, setBusy, onSaved, onReload
 export function PoQuantityAmendment({ purchaseOrderId, status }: { purchaseOrderId: number; status: string }) {
   const { user } = useAuth();
   const queryClient = useQueryClient();
-  const [open, setOpen] = useState(false);
+  const [path, navigate] = useLocation();
+  const search = useSearch();
+  const editRequests = new URLSearchParams(search).getAll(PO_EDITOR_QUERY_PARAM);
+  const requestedEdit = path === `/purchase-orders/${purchaseOrderId}` && editRequests.length === 1 && editRequests[0] === "1";
+  const [open, setOpen] = useState(requestedEdit);
   const [busy, setBusy] = useState(false);
   const [editorKey, setEditorKey] = useState(0);
+  useEffect(() => { if (requestedEdit) setOpen(true); }, [requestedEdit]);
+  function changeOpen(value: boolean) {
+    if (busy) return;
+    setOpen(value);
+    if (!value) {
+      setEditorKey(key => key + 1);
+      if (requestedEdit) {
+        const params = new URLSearchParams(search);
+        params.delete(PO_EDITOR_QUERY_PARAM);
+        // Consume only this UI request, preserving the invoice's back journey.
+        navigate(`${path}${params.size ? `?${params.toString()}` : ""}`, { replace: true });
+      }
+    }
+  }
   const storageKey = `po-quantity-amendment:${user?.id}:${purchaseOrderId}`;
   const root = `/api/purchase-orders/${purchaseOrderId}/quantity-amendment`;
   const context = useQuery({ queryKey: [root, editorKey], enabled: open, staleTime: 0, refetchOnWindowFocus: false,
-    queryFn: async () => poQuantityAmendmentContextSchema.parse(await financialCommandFetchJson(root, { credentials: "include" })) });
+    queryFn: async () => {
+      const loaded = poQuantityAmendmentContextSchema.parse(await financialCommandFetchJson(root, { credentials: "include" }));
+      if (loaded.purchaseOrderId !== purchaseOrderId) throw new Error("The loaded editor does not match this PO. Reload the purchase order.");
+      return loaded;
+    } });
   const refresh = () => {
     void Promise.all(["", "/history", "/revisions", "/exceptions", "/invoices", "/receive-options", "/quantity-amendment"].map((suffix) => queryClient.invalidateQueries({ queryKey: [`/api/purchase-orders/${purchaseOrderId}${suffix}`] })));
     void queryClient.invalidateQueries({ queryKey: ["/api/vendor-invoices"] });
@@ -248,12 +272,12 @@ export function PoQuantityAmendment({ purchaseOrderId, status }: { purchaseOrder
   if (!editable && !hasRecovery && !open) return null;
   return <>
     <Button variant="outline" className="flex-1 sm:flex-none min-h-[44px]" onClick={() => setOpen(true)}>Edit PO</Button>
-    <Dialog open={open} onOpenChange={(value) => { if (!busy) { setOpen(value); if (!value) setEditorKey((key) => key + 1); } }}>
+    <Dialog open={open} onOpenChange={changeOpen}>
       <DialogContent className="flex max-h-[90dvh] flex-col overflow-hidden sm:max-w-4xl" onEscapeKeyDown={(event) => { if (busy) event.preventDefault(); }} onInteractOutside={(event) => { if (busy) event.preventDefault(); }}>
         <DialogHeader><DialogTitle>Edit purchase order</DialogTitle><DialogDescription>Edit quantities and prices, review the new total, then save with administrator approval.</DialogDescription></DialogHeader>
         {context.isPending && <p>Loading current PO evidence…</p>}
         {context.error && <p role="alert" className="text-sm text-destructive">Could not load correction evidence. {context.error.message}</p>}
-        {context.data && <Editor key={editorKey} context={context.data} storageKey={storageKey} setBusy={setBusy} onSaved={refresh} onReload={() => { setOpen(false); setEditorKey((key) => key + 1); refresh(); }} />}
+        {context.data && <Editor key={editorKey} context={context.data} storageKey={storageKey} setBusy={setBusy} onSaved={refresh} onReload={() => { changeOpen(false); refresh(); }} />}
       </DialogContent>
     </Dialog>
   </>;
