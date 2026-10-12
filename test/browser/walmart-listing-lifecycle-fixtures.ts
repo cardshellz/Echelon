@@ -4,6 +4,7 @@ import type { ListingLifecycleView } from "../../shared/types/channel-listing-li
 export const LIFECYCLE_BASE = "/api/channels/77/listing-lifecycle";
 export function createListingLifecycleMock() {
   return { items: [] as ListingLifecycleView[], writes: [] as { path: string; body: unknown }[], failRequest: false, failCheck: false,
+    failSkus: new Set<string>(),
     lookupRevision: 0, account: { channelId: 77, connectionId: 9, provider: "walmart", market: "us",
       environment: "production", accountId: "10002558022", scopeId: "10002558022", revision: 1 } };
 }
@@ -23,7 +24,7 @@ export async function handleListingLifecycleRequest(route: Route, state: ReturnT
   }
   state.writes.push({ path, body });
   if (path === LIFECYCLE_BASE) {
-    if (state.failRequest || JSON.stringify(body.account) !== JSON.stringify(state.account)) return reply({ error: "Walmart account changed. Refresh and try again." }, 409);
+    if (state.failRequest || state.failSkus.has(body.sku) || JSON.stringify(body.account) !== JSON.stringify(state.account)) return reply({ error: "Walmart account changed. Refresh and try again." }, 409);
     let record = state.items.find(item => item.sku === body.sku);
     if (!record) {
       record = { id: "44444444-4444-4444-8444-444444444444", sku: body.sku, title: `Product ${body.sku}`, action: body.action,

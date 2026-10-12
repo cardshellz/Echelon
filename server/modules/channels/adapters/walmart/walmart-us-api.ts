@@ -2,6 +2,7 @@ import { z } from "zod";
 import { walmartIdentifier } from "@shared/types/walmart-channel";
 import { WalmartApiError, type WalmartClient } from "./walmart-client";
 import type { ChannelCatalogItem, ChannelCatalogPage, ChannelCatalogQuery } from "@shared/types/channel-catalog";
+import { priceFromWalmart } from "./walmart-listing-schema";
 
 const id = walmartIdentifier;
 const quantity = z.object({ unitOfMeasurement: z.enum(["EACH", "EA"]), amount: z.string().regex(/^\d+$/)
@@ -50,6 +51,7 @@ export interface WalmartUsApiPort {
   catalogItem(sku: string): Promise<ChannelCatalogItem>;
 }
 const catalogItemSchema = z.object({ sku: id, mart: z.literal("WALMART_US").optional(),
+  price: z.unknown().optional(),
   productName: z.string().min(1).max(1_000).optional(), wpid: id.nullish(),
   lifecycleStatus: z.string().min(1).max(100).optional(), publishedStatus: z.string().min(1).max(100).optional() });
 const inventoryResponseSchema = z.object({ sku: id, quantity: z.object({ unit: z.literal("EACH"),
@@ -57,7 +59,18 @@ const inventoryResponseSchema = z.object({ sku: id, quantity: z.object({ unit: z
 function catalogItemView(item: z.infer<typeof catalogItemSchema>): ChannelCatalogItem {
   return { sku: item.sku, title: item.productName ?? item.sku, externalProductId: item.wpid ?? null,
     externalVariantId: item.sku, externalInventoryItemId: item.sku,
-    lifecycleStatus: item.lifecycleStatus ?? "UNKNOWN", publishedStatus: item.publishedStatus ?? "UNKNOWN" };
+    lifecycleStatus: item.lifecycleStatus ?? "UNKNOWN", publishedStatus: item.publishedStatus ?? "UNKNOWN",
+    ...catalogPrice(item.sku, item.price) };
+}
+function catalogPrice(sku: string, value: unknown): Pick<ChannelCatalogItem, "priceCents" | "priceError"> {
+  if (value == null) return { priceCents: null };
+  try {
+    return { priceCents: priceFromWalmart(money.parse(value).amount) };
+  } catch {
+    // Optional merchandising data must not hide otherwise valid SKU identities.
+    console.error(JSON.stringify({ code: "WALMART_CATALOG_PRICE_INVALID", operation: "catalog_price", sku }));
+    return { priceCents: null, priceError: "Walmart's price could not be read. Refresh listings to try again." };
+  }
 }
 function parse<T extends z.ZodTypeAny>(schema: T, value: unknown): z.output<T> {
   const result = schema.safeParse(value);

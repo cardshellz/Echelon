@@ -24,4 +24,9 @@ export class WalmartCatalogAdapter implements ChannelCatalogProvider {
   async item(account: ChannelCatalogAccount, sku: string) {
     return (await this.api(account)).catalogItem(sku);
   }
+  async stock(account: ChannelCatalogAccount, sku: string) {
+    const connection = await this.channels.connection(account.channelId, account.connectionId);
+    // Read the configured seller fulfillment center, never Walmart's default node.
+    return this.channels.api(connection).inventory(sku, connection.ship_node_id);
+  }
 }

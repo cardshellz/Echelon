@@ -1,29 +1,29 @@
-import type { ChannelCatalogRow } from "@shared/types/channel-catalog";
-import type { ListingOperationItem } from "@shared/types/channel-listing-publication";
-import { Badge } from "@/components/ui/badge";
+import { Fragment, useId, useState } from "react";
+import {
+  ChevronDown,
+  ChevronRight,
+  MoreHorizontal,
+  Pencil,
+} from "lucide-react";
+import type {
+  ChannelCatalogRow,
+  ChannelCatalogStockItem,
+} from "@shared/types/channel-catalog";
+import type { ListingLifecycleView } from "@shared/types/channel-listing-lifecycle";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
-import { TableCell, TableRow } from "@/components/ui/table";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import type { ListingFeedRow } from "./feed-model";
-import { money, priceSourceLabel } from "./model";
-import type { ListingLifecycleView } from "@shared/types/channel-listing-lifecycle";
-import { ListingLifecycleMenu, ListingLifecycleStatus, type ListingLifecycleSelection } from "./ListingLifecycleActions";
-
-const mappingLabels: Record<ChannelCatalogRow["mappingStatus"], string> = {
-  linked: "Linked",
-  matched: "Exact SKU match",
-  unmatched: "Needs match",
-  conflict: "Conflict",
-  unavailable: "Unavailable",
-};
-const submissionLabels: Record<ListingOperationItem["state"], string> = {
-  queued: "Queued",
-  processing: "Processing",
-  accepted: "Accepted · verification pending",
-  verified: "Item verified",
-  needs_attention: "Needs attention",
-  needs_reconciliation: "Outcome needs verification",
-};
+import { listingPrice, listingStatus, listingTitle } from "./feed-presentation";
+import { money } from "./model";
+import { ListingFeedDetails } from "./ListingFeedDetails";
+import type { ListingLifecycleSelection } from "./ListingLifecycleActions";
 
 export function ChannelListingFeedRow({
   row,
@@ -41,6 +41,9 @@ export function ChannelListingFeedRow({
   lifecycleReady = false,
   onLifecycle,
   onCheckLifecycle,
+  stock,
+  stockLoading,
+  stockError,
 }: {
   row: ListingFeedRow;
   canEdit: boolean;
@@ -57,251 +60,261 @@ export function ChannelListingFeedRow({
   lifecycleReady?: boolean;
   onLifecycle?(selection: ListingLifecycleSelection): void;
   onCheckLifecycle?(): void;
+  stock?: ChannelCatalogStockItem;
+  stockLoading: boolean;
+  stockError?: string;
 }) {
-  const { draft, catalog, remote, operation } = row;
+  const [expanded, setExpanded] = useState(false);
+  const detailsId = useId();
+  const { draft, remote, operation } = row;
+  const title = listingTitle(row, lifecycle);
+  const status = listingStatus(row, lifecycle);
+  const price = listingPrice(row);
+  const identity =
+    row.sku ?? `variant ${draft?.variantId ?? operation?.item.variantId}`;
   const existingListing = remote
     ? remote.lifecycleStatus.toUpperCase() === "ACTIVE"
     : operation && ["accepted", "verified"].includes(operation.item.state);
-  const variantId = draft?.variantId ?? operation?.item.variantId;
-  const title =
-    draft?.title ??
-    catalog?.name ??
-    remote?.title ??
-    lifecycle?.title ??
-    row.sku ??
-    `Variant ${variantId}`;
-  const localVariantName =
-    catalog?.variantName ??
-    (remote?.variant && remote.variant.id === variantId
-      ? remote.variant.name
-      : `Variant ${variantId}`);
-  const showRemoteVariant =
-    remote?.variant &&
-    (variantId === undefined ||
-      remote.variant.id !== variantId ||
-      remote.mappingStatus !== "linked");
+  const canEditExisting =
+    !draft && !lifecycle && existingListing && row.sku && canEdit;
+  const canMatch =
+    remote &&
+    !lifecycle &&
+    canEdit &&
+    !row.issue &&
+    ["matched", "unmatched"].includes(remote.mappingStatus);
+  const canStop =
+    !draft &&
+    row.sku &&
+    canEdit &&
+    onLifecycle &&
+    lifecycle?.action !== "remove";
+  const canCheckStop = canEdit && lifecycle && lifecycle.state !== "retired";
+  const hasMenu = !!(
+    operation ||
+    (draft && canEdit) ||
+    canMatch ||
+    canStop ||
+    canCheckStop
+  );
+  const stockLabel = stockError
+    ? "—"
+    : stock?.quantity != null
+      ? stock.quantity.toLocaleString()
+      : stockLoading
+        ? "Checking…"
+        : "—";
   return (
-    <TableRow className="align-top">
-      {canEdit && (
-        <TableCell className="pt-4">
-          {selectable ? (
+    <Fragment>
+      <tr
+        data-listing-sku={row.sku ?? undefined}
+        data-state={selected ? "selected" : undefined}
+        className={`grid grid-cols-[1.5rem_minmax(0,1fr)_auto] items-center gap-x-2 gap-y-2 border-t p-3 first:border-t-0 @4xl/feed:table-row @4xl/feed:p-0 ${expanded || selected ? "bg-muted/40" : "hover:bg-muted/20"}`}
+      >
+        {canEdit && (
+          <td className="col-start-1 row-start-1 block @4xl/feed:table-cell @4xl/feed:w-10 @4xl/feed:px-3 @4xl/feed:py-3">
             <Checkbox
-              aria-label={`Select ${row.sku ?? `variant ${variantId}`}`}
+              aria-label={`Select ${identity}`}
               checked={selected}
-              disabled={locked}
-              onCheckedChange={(checked) => onSelect(checked === true)}
+              disabled={locked || !selectable}
+              onCheckedChange={(value) => onSelect(value === true)}
             />
-          ) : (
-            <span className="sr-only">
-              No bulk action available for this account listing
+          </td>
+        )}
+        <td
+          className={`${canEdit ? "col-start-2" : "col-span-2 col-start-1"} row-start-1 block min-w-0 @4xl/feed:table-cell @4xl/feed:px-2 @4xl/feed:py-3`}
+        >
+          <p
+            className="line-clamp-2 font-medium leading-5 [overflow-wrap:anywhere]"
+            title={title}
+          >
+            {title}
+          </p>
+          <p className="mt-0.5 font-mono text-[11px] text-muted-foreground [overflow-wrap:anywhere]">
+            {row.sku ?? "SKU unavailable"}
+          </p>
+        </td>
+        <td className="col-start-2 row-start-2 block @4xl/feed:table-cell @4xl/feed:px-3 @4xl/feed:py-3">
+          <span className="inline-flex items-center gap-1.5 text-xs whitespace-nowrap">
+            <span
+              aria-hidden="true"
+              className={`h-1.5 w-1.5 shrink-0 rounded-full ${status.tone === "good" ? "bg-green-600" : status.tone === "attention" ? "bg-destructive" : "bg-muted-foreground"}`}
+            />
+            {status.label}
+          </span>
+          {(row.issue ||
+            (draft?.images === null && !!row.catalog?.imageIssues?.length)) && (
+            <span className="block text-[11px] text-destructive">
+              Review details
             </span>
           )}
-        </TableCell>
-      )}
-      <TableCell className="min-w-44 max-w-72">
-        <p className="break-words font-medium">{title}</p>
-        <p className="mt-1 break-all font-mono text-xs text-muted-foreground">
-          {row.sku ?? "SKU unavailable"}
-        </p>
-        {catalog && (
-          <p className="mt-1 text-xs text-muted-foreground">
-            {catalog.variantName} · {catalog.unitLabel}
-          </p>
-        )}
-        {draft && (
-          <p className="mt-2 text-xs text-muted-foreground">
-            {draft.productType || "Choose product type"} ·{" "}
-            {draft.method === "match" ? "Catalog match" : "Create product"}
-          </p>
-        )}
-      </TableCell>
-      <TableCell className="min-w-44 max-w-72 space-y-2">
-        {lifecycle && <ListingLifecycleStatus control={lifecycle} />}
-        {draft && <Badge variant="secondary">Draft · review required</Badge>}
-        {remote && lifecycle?.state !== "retired" && (
-          <div>
-            <Badge variant="outline">{remote.publishedStatus}</Badge>
-            <p className="mt-1 text-xs text-muted-foreground">
-              Account listing · {remote.lifecycleStatus}
-            </p>
-          </div>
-        )}
-        {operation && (
-          <div>
-            <Badge
-              variant={
-                operation.item.state.startsWith("needs_")
-                  ? "destructive"
-                  : "outline"
-              }
-            >
-              {submissionLabels[operation.item.state]}
-            </Badge>
-            <p className="mt-1 text-xs text-muted-foreground">
-              Latest submission outcome
-            </p>
-            {operation.item.error && (
-              <p className="mt-1 break-words text-xs text-destructive">
-                {operation.item.error}
-              </p>
-            )}
-          </div>
-        )}
-        {row.issue && (
-          <p className="break-words text-xs text-destructive">{row.issue}</p>
-        )}
-        {draft?.images === null && catalog?.imageIssues?.length ? (
-          <p className="break-words text-xs text-destructive">A catalog photo needs attention. Open details to review it.</p>
-        ) : null}
-      </TableCell>
-      <TableCell className="min-w-40 max-w-64">
-        {variantId !== undefined && (
-          <div>
-            <p className="text-xs text-muted-foreground">
-              {draft ? "Draft variant" : "Submitted variant"}
-            </p>
-            <p className="break-words">{localVariantName}</p>
-          </div>
-        )}
-        {showRemoteVariant && remote.variant && (
-          <div className={variantId !== undefined ? "mt-2" : ""}>
-            <p className="text-xs text-muted-foreground">
-              {remote.mappingStatus === "linked"
-                ? "Linked variant"
-                : remote.mappingStatus === "matched"
-                  ? "Suggested variant"
-                  : "Reported variant"}
-            </p>
-            <p className="break-words">{remote.variant.name}</p>
-            <p className="break-all font-mono text-xs text-muted-foreground">
-              {remote.variant.sku}
-            </p>
-          </div>
-        )}
-        {variantId === undefined && !remote?.variant && (
-          <span className="text-muted-foreground">No match</span>
-        )}
-        {remote && (
-          <>
-            <Badge
-              className="mt-2"
-              variant={
-                remote.mappingStatus === "conflict"
-                  ? "destructive"
-                  : remote.mappingStatus === "linked"
-                    ? "default"
-                    : "secondary"
-              }
-            >
-              {mappingLabels[remote.mappingStatus]}
-            </Badge>
-            {remote.mappingStatus === "matched" && (
-              <p className="mt-1 text-xs text-muted-foreground">
-                Suggested variant · not linked
-              </p>
-            )}
-            {remote.message && remote.message !== row.issue && (
-              <p className="mt-1 break-words text-xs">{remote.message}</p>
-            )}
-          </>
-        )}
-        {draft && !catalog && (
-          <p className="mt-1 text-xs text-muted-foreground">
-            Catalog details unavailable
-          </p>
-        )}
-      </TableCell>
-      <TableCell className="min-w-36 space-y-2">
-        {draft && (
-          <div>
-            <p className="font-medium">
-              {money(draft.priceOverrideCents ?? catalog?.priceCents ?? null)}
-            </p>
-            <p className="text-xs text-muted-foreground">
-              Draft price ·{" "}
-              {draft.priceOverrideCents !== null
-                ? "Fixed item price"
-                : priceSourceLabel(catalog?.priceSource)}
-            </p>
-          </div>
-        )}
-        {operation && (
-          <div>
-            <p>{money(operation.item.priceCents)}</p>
-            <p className="text-xs text-muted-foreground">Submitted price</p>
-          </div>
-        )}
-        {!draft && !operation && (
-          <p className="text-xs text-muted-foreground">
-            Account price unavailable
-          </p>
-        )}
-      </TableCell>
-      <TableCell>
-        <div className="flex min-w-28 flex-col items-start gap-2">
-          {draft && (
-            <Button
-              variant="outline"
-              size="sm"
-              disabled={locked}
-              aria-label={`${canEdit ? "Edit" : "View"} ${row.sku ?? `variant ${draft.variantId}`}`}
-              onClick={() => onEdit(draft.variantId)}
-            >
-              {canEdit ? "Edit details" : "View details"}
-            </Button>
+        </td>
+        <td className="col-start-2 row-start-3 block text-xs tabular-nums @4xl/feed:table-cell @4xl/feed:px-3 @4xl/feed:py-3 @4xl/feed:text-right @4xl/feed:text-sm">
+          <span className="mr-1 text-muted-foreground @4xl/feed:hidden">
+            Price
+          </span>
+          <span className="font-medium">
+            {price.cents === null ? "—" : money(price.cents)}
+          </span>
+          {price.source !== "Walmart" && (
+            <span className="ml-1 text-[11px] text-muted-foreground @4xl/feed:ml-0 @4xl/feed:block">
+              {price.source}
+            </span>
           )}
-          {draft && canEdit && (
-            <Button
-              variant="ghost"
-              size="sm"
-              disabled={locked}
-              aria-label={`Remove ${row.sku ?? `variant ${draft.variantId}`} from draft`}
-              onClick={() => onRemove(draft.variantId)}
-            >
-              Remove
-            </Button>
+        </td>
+        <td className="col-start-3 row-start-3 block text-right text-xs tabular-nums @4xl/feed:table-cell @4xl/feed:px-3 @4xl/feed:py-3 @4xl/feed:text-sm">
+          <span className="mr-1 text-muted-foreground @4xl/feed:hidden">
+            Walmart stock
+          </span>
+          <span
+            aria-label={`Walmart stock for ${identity}`}
+            className="font-medium"
+          >
+            {stockLabel}
+          </span>
+          {(stock?.error || stockError) && (
+            <span className="ml-1 text-[11px] text-muted-foreground @4xl/feed:ml-0 @4xl/feed:block">
+              Unavailable
+            </span>
           )}
-          {!draft && !lifecycle && existingListing && row.sku && canEdit && (
-            <Button
-              variant="outline"
-              size="sm"
-              disabled={locked}
-              aria-label={`Edit listing ${row.sku}`}
-              onClick={() => onEditExisting(row.sku!)}
-            >
-              Edit listing
-            </Button>
-          )}
-          {remote &&
-            !lifecycle &&
-            canEdit &&
-            !row.issue &&
-            ["matched", "unmatched"].includes(remote.mappingStatus) && (
+        </td>
+        <td className="col-start-3 row-span-2 row-start-1 block self-start @4xl/feed:table-cell @4xl/feed:align-middle @4xl/feed:px-2 @4xl/feed:py-2">
+          <div className="flex justify-end gap-0.5">
+            {(draft || canEditExisting) && (
               <Button
-                variant="outline"
-                size="sm"
+                variant="ghost"
+                size="icon"
+                className="h-8 w-8"
                 disabled={locked}
-                onClick={() => onMatch(remote)}
+                aria-label={
+                  draft
+                    ? `${canEdit ? "Edit" : "View"} ${identity}`
+                    : `Edit listing ${identity}`
+                }
+                title={draft ? "Edit details" : "Edit listing"}
+                onClick={() =>
+                  draft ? onEdit(draft.variantId) : onEditExisting(row.sku!)
+                }
               >
-                Choose variant
+                <Pencil className="h-4 w-4" />
               </Button>
             )}
-          {operation && (
             <Button
-              variant="outline"
-              size="sm"
-              disabled={locked}
-              onClick={onActivity}
+              variant="ghost"
+              size="icon"
+              className="h-8 w-8"
+              aria-expanded={expanded}
+              aria-controls={detailsId}
+              aria-label={`${expanded ? "Hide" : "Show"} details for ${identity}`}
+              title="Listing details"
+              onClick={() => setExpanded(!expanded)}
             >
-              View activity
+              {expanded ? (
+                <ChevronDown className="h-4 w-4" />
+              ) : (
+                <ChevronRight className="h-4 w-4" />
+              )}
             </Button>
-          )}
-          {!draft && row.sku && canEdit && onLifecycle && <ListingLifecycleMenu sku={row.sku} title={title}
-            control={lifecycle} disabled={locked || !lifecycleReady} onSelect={onLifecycle} />}
-          {canEdit && lifecycle && lifecycle.state !== "retired" && <Button variant="outline" size="sm" disabled={locked || !lifecycleReady}
-            onClick={onCheckLifecycle}>Check unpublish status</Button>}
-        </div>
-      </TableCell>
-    </TableRow>
+            {hasMenu && (
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="h-8 w-8"
+                    disabled={locked}
+                    aria-label={`More actions for ${identity}`}
+                  >
+                    <MoreHorizontal className="h-4 w-4" />
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end">
+                  {operation && (
+                    <DropdownMenuItem onSelect={onActivity}>
+                      View activity
+                    </DropdownMenuItem>
+                  )}
+                  {canMatch && (
+                    <DropdownMenuItem onSelect={() => onMatch(remote)}>
+                      Choose variant
+                    </DropdownMenuItem>
+                  )}
+                  {draft && canEdit && (
+                    <DropdownMenuItem
+                      onSelect={() => onRemove(draft.variantId)}
+                    >
+                      Remove from draft
+                    </DropdownMenuItem>
+                  )}
+                  {canCheckStop && (
+                    <DropdownMenuItem
+                      disabled={!lifecycleReady}
+                      onSelect={onCheckLifecycle}
+                    >
+                      Check unpublish status
+                    </DropdownMenuItem>
+                  )}
+                  {canStop && (
+                    <>
+                      {(operation || canMatch || canCheckStop) && (
+                        <DropdownMenuSeparator />
+                      )}
+                      {!lifecycle && (
+                        <DropdownMenuItem
+                          disabled={!lifecycleReady}
+                          onSelect={() =>
+                            onLifecycle({
+                              sku: row.sku!,
+                              title,
+                              action: "unpublish",
+                            })
+                          }
+                        >
+                          Unpublish from Walmart
+                        </DropdownMenuItem>
+                      )}
+                      <DropdownMenuItem
+                        disabled={!lifecycleReady}
+                        className="text-destructive focus:text-destructive"
+                        onSelect={() =>
+                          onLifecycle({
+                            sku: row.sku!,
+                            title,
+                            action: "remove",
+                          })
+                        }
+                      >
+                        Remove from Echelon
+                      </DropdownMenuItem>
+                    </>
+                  )}
+                </DropdownMenuContent>
+              </DropdownMenu>
+            )}
+          </div>
+        </td>
+      </tr>
+      {expanded && (
+        <tr className="block border-t bg-muted/20 @4xl/feed:table-row">
+          <td
+            colSpan={canEdit ? 6 : 5}
+            className="block min-w-0 p-4 @4xl/feed:table-cell"
+          >
+            <div
+              id={detailsId}
+              role="region"
+              aria-label={`Details for ${identity}`}
+            >
+              <ListingFeedDetails
+                row={row}
+                lifecycle={lifecycle}
+                stock={stock}
+                stockError={stockError}
+              />
+            </div>
+          </td>
+        </tr>
+      )}
+    </Fragment>
   );
 }
