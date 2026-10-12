@@ -10,6 +10,7 @@ import type {
   OrderEditCatalogCategoriesInput,
   OrderEditCatalogProductsInput,
   OrderEditCatalogVariantsInput,
+  OrderEditCatalogMode,
 } from "@shared/order-edits/order-edit-catalog";
 import type {
   OrderEditPreviewScope,
@@ -154,19 +155,26 @@ export class OrderEditService {
   async catalogProducts(
     connectionId: number,
     input: OrderEditCatalogProductsInput,
+    mode: OrderEditCatalogMode = "editable",
   ) {
     await this.store.settings(connectionId);
-    return this.requireCatalog().products(connectionId, input);
+    return this.requireCatalog().products(connectionId, input, mode);
   }
   async catalogVariants(
     connectionId: number,
     input: OrderEditCatalogVariantsInput,
     actorId?: string,
+    mode: OrderEditCatalogMode = "editable",
   ) {
     const settings = await this.store.settings(connectionId);
     const parsed = orderEditCatalogVariantsInputSchema.parse(input);
     if (parsed.omsOrderId === null)
-      return this.requireCatalog().productVariants(connectionId, parsed);
+      return this.requireCatalog().productVariants(
+        connectionId,
+        parsed,
+        undefined,
+        mode,
+      );
     if (!settings.enabled || settings.paymentWindowMinutes === null || !actorId)
       throw new OrderEditError(
         "ORDER_EDIT_CATALOG_UNAVAILABLE",
@@ -204,12 +212,17 @@ export class OrderEditService {
           409,
         );
     }
-    return this.requireCatalog().productVariants(connectionId, parsed, {
-      connectionId: snapshot.connectionId,
-      customerId: snapshot.customerId,
-      memberPlan: snapshot.memberPlan,
-      memberPricingEnabled: snapshot.memberPricingEnabled,
-    });
+    return this.requireCatalog().productVariants(
+      connectionId,
+      parsed,
+      {
+        connectionId: snapshot.connectionId,
+        customerId: snapshot.customerId,
+        memberPlan: snapshot.memberPlan,
+        memberPricingEnabled: snapshot.memberPricingEnabled,
+      },
+      mode,
+    );
   }
   private requireCatalog(): OrderEditCatalog {
     if (!this.catalog)

@@ -11,6 +11,8 @@ export function memberPrice(
 ): number {
   const retail = cents(variant.price);
   if (
+    // The live checkout Function purchases membership variants at full price.
+    variant.membershipVariant?.value === "true" ||
     !snapshot.memberPricingEnabled ||
     !snapshot.memberPlan ||
     !variant.planPrices

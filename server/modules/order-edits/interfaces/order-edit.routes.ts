@@ -15,6 +15,9 @@ import {
 } from "@shared/order-edits/order-edit.contract";
 import type { OrderEditService } from "../application/order-edit.service";
 import {
+  ORDER_EDIT_CATALOG_HEADER,
+  ORDER_EDIT_CATALOG_VERSION,
+  type OrderEditCatalogMode,
   orderEditCatalogCategoriesInputSchema,
   orderEditCatalogCategoriesSchema,
   orderEditCatalogProductsInputSchema,
@@ -40,6 +43,14 @@ const searchQuery = z
   })
   .strict();
 const emptyBody = z.object({}).strict();
+
+function catalogMode(req: Request): OrderEditCatalogMode {
+  // Existing open tabs expect only physical edit-ready options and strict DTOs.
+  // Updated clients request the full available catalog and selection metadata.
+  return req.get(ORDER_EDIT_CATALOG_HEADER) === ORDER_EDIT_CATALOG_VERSION
+    ? "available"
+    : "editable";
+}
 
 function sendLineDisplayResponse<
   T extends { lines: Array<{ variantId?: string | null; added?: boolean }> },
@@ -240,7 +251,7 @@ export function registerOrderEditRoutes(
         .parse(req.query);
       res.json(
         orderEditCatalogProductsSchema.parse(
-          await service.catalogProducts(connectionId, input),
+          await service.catalogProducts(connectionId, input, catalogMode(req)),
         ),
       );
     }),
@@ -255,7 +266,12 @@ export function registerOrderEditRoutes(
       const validated = orderEditCatalogVariantsInputSchema.parse(input);
       res.json(
         orderEditCatalogVariantsSchema.parse(
-          await service.catalogVariants(connectionId, validated, actor),
+          await service.catalogVariants(
+            connectionId,
+            validated,
+            actor,
+            catalogMode(req),
+          ),
         ),
       );
     }),

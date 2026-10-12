@@ -1,5 +1,10 @@
 import { expect, test, type Page } from "@playwright/test";
 import {
+  ORDER_EDIT_CATALOG_HEADER,
+  ORDER_EDIT_CATALOG_VERSION,
+  type OrderEditCatalogSelectionFlow,
+} from "../../shared/order-edits/order-edit-catalog";
+import {
   orderEditPreviewInputSchema,
   orderEditPreviewScopeSchema,
 } from "../../shared/order-edits/order-edit-preview";
@@ -82,6 +87,22 @@ const catalogVariants = [
     available: false,
   },
 ];
+const specialProducts: Array<{
+  productId: string;
+  variantId: string;
+  title: string;
+  category: string;
+  sku: string;
+  priceCents: number;
+  selectionFlow: OrderEditCatalogSelectionFlow;
+}> = [
+  { productId: "gid://shopify/Product/100", variantId: "gid://shopify/ProductVariant/995", title: ".club Annual Membership", category: "Memberships", sku: "CLUB-ANNUAL", priceCents: 9900, selectionFlow: "membership" },
+  { productId: "gid://shopify/Product/101", variantId: "gid://shopify/ProductVariant/996", title: "Monthly Subscription", category: "Subscriptions", sku: "SUB-MONTHLY", priceCents: 1500, selectionFlow: "subscription" },
+  { productId: "gid://shopify/Product/102", variantId: "gid://shopify/ProductVariant/997", title: "Gift Card", category: "Gift Cards", sku: "GIFT-25", priceCents: 2500, selectionFlow: "gift_card" },
+  { productId: "gid://shopify/Product/103", variantId: "gid://shopify/ProductVariant/998", title: "Collector Bundle", category: "Bundles", sku: "BUNDLE", priceCents: 3000, selectionFlow: "bundle" },
+  { productId: "gid://shopify/Product/104", variantId: "gid://shopify/ProductVariant/999", title: "Digital Guide", category: "Digital", sku: "GUIDE", priceCents: 500, selectionFlow: "non_shipping" },
+  { productId: "gid://shopify/Product/105", variantId: "gid://shopify/ProductVariant/1000", title: "Untracked Product", category: "Other", sku: "UNTRACKED", priceCents: 500, selectionFlow: "inventory_review" },
+];
 const order: OrderEditOrder = {
   connectionId: 3,
   omsOrderId: 51,
@@ -135,6 +156,7 @@ async function installFixtures(
     catalogMemberPricing?: boolean;
     soldOutCatalogProduct?: boolean;
     delayedCatalog?: { search: string; response: Promise<void> };
+    includeSpecialProducts?: boolean;
   } = {},
 ) {
   const failures: string[] = [];
@@ -166,6 +188,18 @@ async function installFixtures(
         : options.paymentWindowMinutes,
     enabled: options.connectionEnabled ?? true,
   };
+  const availableProducts = [
+    ...catalogProducts,
+    ...(options.includeSpecialProducts ? specialProducts.map((product) => ({
+      productId: product.productId, title: product.title, category: product.category, imageUrl: null,
+    })) : []),
+  ];
+  const availableVariants = [
+    ...catalogVariants.map((variant) => ({ ...variant, selectionFlow: "order_edit" as const })),
+    ...(options.includeSpecialProducts ? specialProducts.map(({ category: _category, ...product }) => ({
+      ...product, variantTitle: "Standard option", available: true,
+    })) : []),
+  ];
   await page.clock.setFixedTime(new Date("2026-10-05T12:00:00.000Z"));
   page.on("pageerror", (error) => failures.push(error.message));
   await page.route("**/api/**", async (route) => {
@@ -250,6 +284,7 @@ async function installFixtures(
         json: { ...order, activeOperationId: activeOperationId() },
       });
     if (path.startsWith(`${ORDER_EDIT_API}/catalog/`)) {
+      expect(request.headers()[ORDER_EDIT_CATALOG_HEADER.toLowerCase()]).toBe(ORDER_EDIT_CATALOG_VERSION);
       expect(method).toBe("GET");
       expect(url.searchParams.get("connectionId")).toBe("3");
       expect(key).toBeUndefined();
@@ -270,7 +305,7 @@ async function installFixtures(
         };
       };
       if (path.endsWith("/categories")) {
-        const result = paged(["Storage", "Toploaders", "Binders"]);
+        const result = paged(["Storage", "Toploaders", "Binders", ...new Set(options.includeSpecialProducts ? specialProducts.map((product) => product.category) : [])]);
         return route.fulfill({
           json: {
             connectionId: 3,
@@ -297,12 +332,12 @@ async function installFixtures(
             },
           });
         }
-        const matching = catalogProducts.filter(
+        const matching = availableProducts.filter(
           (product) =>
             (!category || product.category === category) &&
             (!search ||
               product.title.toLowerCase().includes(search.toLowerCase()) ||
-              catalogVariants.some(
+              availableVariants.some(
                 (variant) =>
                   variant.productId === product.productId &&
                   variant.sku.toLowerCase().includes(search.toLowerCase()),
@@ -338,7 +373,7 @@ async function installFixtures(
           });
         }
         const result = paged(
-          catalogVariants
+          availableVariants
             .filter((variant) => variant.productId === productId)
             .map(({ productId: _parent, ...variant }) => ({
               ...variant,
@@ -363,7 +398,7 @@ async function installFixtures(
               omsOrderId: 51,
               expectedRevision: "revision-7",
             },
-            product: catalogProducts.find(
+            product: availableProducts.find(
               (product) => product.productId === productId,
             ),
             variants: result.values,
@@ -621,6 +656,32 @@ async function addStorageBox(page: Page) {
     .getByRole("button", { name: "Add White · BOX-WHITE", exact: true })
     .click();
   await picker.getByRole("button", { name: "Done", exact: true }).click();
+}
+
+for (const product of specialProducts) {
+  test(`discovers available ${product.selectionFlow} products and handles requirements after selection`, async ({ page }) => {
+    const fixture = await installFixtures(page, { includeSpecialProducts: true });
+    await chooseOrder(page);
+    await page.getByRole("button", { name: "Add products", exact: true }).click();
+    const picker = page.getByRole("dialog");
+    await picker.getByLabel("Product name or SKU").fill(product.selectionFlow === "membership" ? ".club" : product.sku);
+    await expect(picker.getByRole("button", { name: new RegExp(product.title.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")) })).toBeVisible();
+    await expect(picker.getByRole("alert")).toHaveCount(0);
+    await picker.getByLabel("Category", { exact: true }).selectOption(product.category);
+    await picker.getByRole("button", { name: new RegExp(product.title.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")) }).click();
+    const select = picker.getByRole("button", { name: `Add Standard option · ${product.sku}`, exact: true });
+    await expect(select).toBeEnabled();
+    await select.click();
+    await expect(picker.getByRole("alert")).toContainText("selected");
+    if (product.selectionFlow === "membership")
+      await expect(picker.getByRole("alert")).toContainText("Adding a membership to an existing order is not enabled");
+    await assertFitsScreen(page);
+    await picker.getByRole("button", { name: "Done", exact: true }).click();
+    await expect(page.getByRole("spinbutton", { name: /^Quantity for added/ })).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "Review changes", exact: true })).toBeDisabled();
+    expect(fixture.requests.some((request) => /\/(quotes|commit|abandon)$/.test(request.path))).toBe(false);
+    expect(fixture.failures).toEqual([]);
+  });
 }
 
 test("review groups each SKU and rolls financial detail up without hiding the verified amount due", async ({ page }, testInfo) => {

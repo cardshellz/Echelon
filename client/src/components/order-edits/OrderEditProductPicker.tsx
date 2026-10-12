@@ -7,6 +7,7 @@ import type {
 } from "@shared/order-edits/order-edit-catalog";
 import type { MemberPlanPresentation } from "@shared/membership/member-plan-presentation";
 import { MemberProductPrice } from "@/components/MemberProductPrice";
+import { orderEditCatalogSelectionNotice } from "@/lib/order-edit-catalog-selection";
 import { orderEditCatalogSearchSchema } from "@shared/order-edits/order-edit-catalog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -340,6 +341,10 @@ function VariantOptions(
     onUnavailable(productId: string): void;
   },
 ) {
+  const [selectionNotice, setSelectionNotice] = useState<{
+    variantId: string;
+    message: string;
+  } | null>(null);
   const variants = useInfiniteQuery({
     queryKey: [
       ORDER_EDITS_API,
@@ -448,7 +453,20 @@ function VariantOptions(
                 included ? `${label} already in order` : `Add ${label}`
               }
               disabled={!props.enabled || included || !variant.available}
-              onClick={() => props.onAdd(variant, plan)}
+              onClick={() => {
+                const notice = orderEditCatalogSelectionNotice(
+                  variant.selectionFlow ?? "order_edit",
+                );
+                if (notice) {
+                  setSelectionNotice({
+                    variantId: variant.variantId,
+                    message: notice,
+                  });
+                  return;
+                }
+                setSelectionNotice(null);
+                props.onAdd(variant, plan);
+              }}
             >
               {included ? (
                 "Added / in order"
@@ -459,6 +477,11 @@ function VariantOptions(
                 </>
               )}
             </Button>
+            {selectionNotice?.variantId === variant.variantId && (
+              <p role="alert" className="w-full rounded-md bg-muted p-3 text-sm">
+                {selectionNotice.message}
+              </p>
+            )}
           </div>
         );
       })}
