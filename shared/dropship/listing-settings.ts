@@ -43,6 +43,8 @@ export const listingSettingsProductsInputSchema = z.object({
   search: search.default(""),
   show: z.enum(LISTING_SETTINGS_PRODUCT_FILTERS).default("all"),
   page: page.default(0),
+  /** Only the products in this Card Shellz category (catalog.product_categories.id). */
+  categoryId: id.optional(),
 }).strict();
 
 /** Which sizes the Prices tab lists. `retail_fallback`: sizes whose price source is `retail_fallback`. */
@@ -52,6 +54,21 @@ export const listingSettingsPricesInputSchema = z.object({
   search: search.default(""),
   show: z.enum(LISTING_SETTINGS_PRICE_FILTERS).default("all"),
   page: page.default(0),
+  /** Only the sizes of products in this Card Shellz category. */
+  categoryId: id.optional(),
+}).strict();
+
+/**
+ * Every chosen product the Products tab's filters match, unpaged, with the
+ * revision of its own settings: "Select all N" sends each product's revision
+ * with a bulk change, and one product's editor sends its own (`productId`).
+ */
+export const listingSettingsProductIdsInputSchema = z.object({
+  storeConnectionId: id,
+  search: search.default(""),
+  show: z.enum(LISTING_SETTINGS_PRODUCT_FILTERS).default("all"),
+  categoryId: id.optional(),
+  productId: id.optional(),
 }).strict();
 
 /**
@@ -166,6 +183,18 @@ const pageOf = <T extends z.ZodTypeAny>(row: T) => z.object({
 }).strict();
 export const listingSettingsPricesResponseSchema = pageOf(listingSettingsSizePriceSchema);
 export const listingSettingsProductsResponseSchema = pageOf(listingSettingsProductRowSchema);
+/** `revisionId` is the product's own settings revision; null when the product has none yet. */
+export const listingSettingsProductIdsResponseSchema = z.object({
+  total: count,
+  rows: z.array(z.object({ productId: id, revisionId: id.nullable() }).strict()).max(MAX_NAMED_CATALOG_GROUP_ITEMS),
+}).strict().superRefine((response, context) => {
+  if (response.total !== response.rows.length) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "Every matching product is listed.", path: ["total"] });
+  }
+  if (new Set(response.rows.map((row) => row.productId)).size !== response.rows.length) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "Each product once.", path: ["rows"] });
+  }
+});
 
 // ---------------------------------------------------------------------------
 // One product's settings (GET …/products/:productId)
@@ -387,6 +416,8 @@ export const listingSettingsSummarySchema = z.object({
 }).strict();
 
 export type ListingSettingsProductsInput = z.infer<typeof listingSettingsProductsInputSchema>;
+export type ListingSettingsProductIdsInput = z.infer<typeof listingSettingsProductIdsInputSchema>;
+export type ListingSettingsProductIdsResponse = z.infer<typeof listingSettingsProductIdsResponseSchema>;
 export type ListingSettingsPricesInput = z.infer<typeof listingSettingsPricesInputSchema>;
 export type ListingSettingsPriceSource = (typeof LISTING_SETTINGS_PRICE_SOURCES)[number];
 export type ListingSettingsPriceIssue = (typeof LISTING_SETTINGS_PRICE_ISSUES)[number];

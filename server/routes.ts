@@ -23,6 +23,7 @@ import { registerWalmartChannelRoutes } from "./modules/channels/adapters/walmar
 import { registerChannelCatalogRoutes } from "./modules/channels/channel-catalog.routes";
 import { registerListingPublicationRoutes } from "./modules/marketplace-listings/interfaces/http/listing-publication.routes";
 import { registerListingUpdateRoutes } from "./modules/marketplace-listings/interfaces/http/listing-update.routes";
+import { registerListingLifecycleRoutes } from "./modules/marketplace-listings/interfaces/http/listing-lifecycle.routes";
 import { registerInventoryPublicationMembershipRoutes } from "./modules/inventory-planning/interfaces/http/inventory-publication-membership.routes";
 import { registerInventoryPublicationInitialScopeRoutes } from "./modules/inventory-planning/interfaces/http/inventory-publication-initial-scope.routes";
 import { registerChannelRoutes } from "./modules/channels/channels.routes";
@@ -81,6 +82,7 @@ import { registerDropshipPricingRulesRoutes } from "./modules/dropship/interface
 import { registerDropshipEbayStoreCategoryRoutes } from "./modules/dropship/interfaces/http/dropship-ebay-store-category.routes";
 import { registerDropshipEbayCategoryRulesRoutes } from "./modules/dropship/interfaces/http/dropship-ebay-category-rules.routes";
 import { registerDropshipListingSettingsRoutes } from "./modules/dropship/interfaces/http/dropship-listing-settings.routes";
+import { registerDropshipListingSettingWritesRoutes } from "./modules/dropship/interfaces/http/dropship-listing-setting-writes.routes";
 import { registerDropshipEbayListingSetupRoutes } from "./modules/dropship/interfaces/http/dropship-ebay-listing-setup.routes";
 import { registerDropshipEbayListingPolicyOverrideRoutes } from "./modules/dropship/interfaces/http/dropship-ebay-listing-policy-override.routes";
 import { registerDropshipListingConfigRoutes } from "./modules/dropship/interfaces/http/dropship-listing-config.routes";
@@ -224,6 +226,7 @@ export async function registerRoutes(
   registerDropshipEbayStoreCategoryRoutes(app);
   registerDropshipEbayCategoryRulesRoutes(app);
   registerDropshipListingSettingsRoutes(app);
+  registerDropshipListingSettingWritesRoutes(app);
   registerLocationRoutes(app);
   registerPickingRoutes(app);
   registerOperationsDashboardRoutes(app);
@@ -243,7 +246,8 @@ export async function registerRoutes(
   registerChannelCatalogRoutes(app);
   registerListingPublicationRoutes(app);
   registerListingUpdateRoutes(app);
-  registerInventoryPublicationMembershipRoutes(app, app.locals.services.inventoryPublicationMembership);
+  registerListingLifecycleRoutes(app);
+  registerInventoryPublicationMembershipRoutes(app);
   registerInventoryPublicationInitialScopeRoutes(app, app.locals.services.inventoryPublicationInitialScope);
   registerMarketplaceListingRegistrationRoutes(
     app,

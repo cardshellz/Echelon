@@ -6,6 +6,7 @@ import type { PricingRulesRepository, PricingRulesTransaction, StoredPricingRevi
 import { pricingHash } from "../application/dropship-rule-price";
 import { DropshipError } from "../domain/errors";
 import { selectedCatalogReaderForTransaction } from "./dropship-selected-catalog.reader";
+import { LISTING_SELECTION_LOCK_SQL } from "./dropship-listing-setting-writes.repository";
 import { readListingSettingLayers } from "./dropship-listing-setting-layers.reader";
 import { readPricingProfile } from "./dropship-pricing-profile.reader";
 import { PgShellzClubProductCostAdapter } from "./shellz-club-product-cost.adapter";
@@ -16,9 +17,15 @@ export class PgDropshipPricingRulesRepository implements PricingRulesRepository 
   async execute<T>(memberId: string, storeConnectionId: number, operation: (tx: PricingRulesTransaction) => Promise<T>): Promise<T> {
     const client = await this.dbPool.connect();
     try {
-      // One source snapshot includes selection, existing settings and membership
-      // cost reads. Concurrent write conflicts fail explicitly, never half apply.
-      await client.query("BEGIN ISOLATION LEVEL SERIALIZABLE");
+      // READ COMMITTED (plan PR 9, P37): every statement after the store lock
+      // sees every listing write committed before the lock was granted, and no
+      // listing writer can commit until this one ends (they all take the store
+      // lock). A SERIALIZABLE snapshot would be taken at the lock call, before
+      // the lock is granted, and miss a price change that commits meanwhile.
+      // On apply, lockSelection adds the selection SHARE locks W9 takes, so the
+      // recomputed sizes stay selected until commit. A stale review fails
+      // explicitly, never half applies.
+      await client.query("BEGIN");
       await client.query("SELECT pg_advisory_xact_lock(hashtext('dropship_listing_push_job'), $1::integer)", [storeConnectionId]);
       const owner = await client.query<{ vendor_id: number }>(
         `SELECT v.id AS vendor_id FROM dropship.dropship_vendors v
@@ -32,6 +39,7 @@ export class PgDropshipPricingRulesRepository implements PricingRulesRepository 
         costs: PgShellzClubProductCostAdapter.forTransaction(client),
         loadProfile: () => readPricingProfile(client, storeConnectionId, vendorId),
         loadRuleLayers: (candidates) => readListingSettingLayers(client, { vendorId, storeConnectionId, candidates }),
+        lockSelection: async () => { await client.query(LISTING_SELECTION_LOCK_SQL); },
         storeReview: async (review) => {
           await client.query(`INSERT INTO dropship.dropship_pricing_reviews
             (id, vendor_id, store_connection_id, input, rows, review_hash, actor_id, created_at)

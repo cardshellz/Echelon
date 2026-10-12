@@ -7,7 +7,7 @@ describe("post-selection purchase requirements", () => {
     expect(orderEditCatalogSelectionNotice("order_edit")).toBeNull();
   });
   it.each([
-    ["membership", "Membership selected"],
+    ["membership", "Memberships must be purchased separately."],
     ["subscription", "Subscription selected"],
     ["gift_card", "Gift card selected"],
     ["bundle", "Bundle selected"],

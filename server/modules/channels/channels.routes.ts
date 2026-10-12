@@ -46,6 +46,7 @@ import {
 import { INVENTORY_LEGACY_ADMIN_CONTROLS } from "../inventory-planning/application/inventory-legacy-admin-control.service";
 import { createInventoryLegacyAdminControlService } from "../inventory-planning/infrastructure/inventory-legacy-admin-control.repository";
 import { sendInventoryLegacyAdminControlError } from "../inventory-planning/interfaces/http/inventory-legacy-admin-control.error";
+import { publicationSelectionBusyIssue } from "../inventory-planning/publication-selection-work";
 
 type ChannelRouteTransaction = Pick<typeof db, "select" | "insert" | "update" | "delete" | "execute">;
 
@@ -155,6 +156,8 @@ export function registerChannelRoutes(app: Express) {
       );
     } catch (error: any) {
       console.error("Error enabling channel feed:", error);
+      const busy = publicationSelectionBusyIssue(error);
+      if (busy) return res.status(409).json({ ...busy, error: busy.message });
       if (sendInventoryLegacyAdminControlError(res, error)) return;
       if (error instanceof ChannelIdentityError) return res.status(error.status).json({ code: error.code, error: error.message });
       res.status(500).json({ error: error.message || "Failed to enable feed" });
@@ -1307,6 +1310,8 @@ export function registerChannelRoutes(app: Express) {
       res.json(override);
     } catch (error) {
       console.error("Error saving product override:", error);
+      const busy = publicationSelectionBusyIssue(error);
+      if (busy) return res.status(409).json({ ...busy, error: busy.message });
       res.status(500).json({ error: "Failed to save override" });
     }
   });
@@ -1319,6 +1324,8 @@ export function registerChannelRoutes(app: Express) {
       res.json({ deleted });
     } catch (error) {
       console.error("Error deleting product override:", error);
+      const busy = publicationSelectionBusyIssue(error);
+      if (busy) return res.status(409).json({ ...busy, error: busy.message });
       res.status(500).json({ error: "Failed to delete override" });
     }
   });
@@ -1354,6 +1361,8 @@ export function registerChannelRoutes(app: Express) {
       });
       res.json(override);
     } catch (error) {
+      const busy = publicationSelectionBusyIssue(error);
+      if (busy) return res.status(409).json({ ...busy, error: busy.message });
       res.status(500).json({ error: "Failed to save variant override" });
     }
   });
@@ -1365,6 +1374,8 @@ export function registerChannelRoutes(app: Express) {
       const deleted = await storage.deleteChannelVariantOverride(channelId, variantId);
       res.json({ deleted });
     } catch (error) {
+      const busy = publicationSelectionBusyIssue(error);
+      if (busy) return res.status(409).json({ ...busy, error: busy.message });
       res.status(500).json({ error: "Failed to delete variant override" });
     }
   });

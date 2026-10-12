@@ -9,6 +9,8 @@ import {
   listingSettingsPricesInputSchema,
   listingSettingsPricesResponseSchema,
   listingSettingsProductDetailSchema,
+  listingSettingsProductIdsInputSchema,
+  listingSettingsProductIdsResponseSchema,
   listingSettingsProductInputSchema,
   listingSettingsProductSettingsSchema,
   listingSettingsProductsInputSchema,
@@ -281,5 +283,35 @@ describe("listing settings contracts: product and category values", () => {
     expect(Object.keys(review.bySource)).toEqual(["rule", "store_default", "catalog", "none"]);
     expect(review.bySource).toEqual({ rule: 1, store_default: 2, catalog: 0, none: 0 });
     expect(ebayCategoryRulesReviewSchema.parse(review)).toEqual(review);
+  });
+});
+
+describe("product ids read and category filters (plan PR 9, section 4.2)", () => {
+  it("takes the Products tab's search and filter, an optional category and product, and no page", () => {
+    expect(listingSettingsProductIdsInputSchema.parse({ storeConnectionId: 22 })).toEqual({ storeConnectionId: 22, search: "", show: "all" });
+    expect(listingSettingsProductIdsInputSchema.parse({ storeConnectionId: 22, search: " sleeve ", show: "own_settings", categoryId: 3, productId: 7 }))
+      .toEqual({ storeConnectionId: 22, search: "sleeve", show: "own_settings", categoryId: 3, productId: 7 });
+    for (const bad of [{ page: 0 }, { show: "retail_fallback" }, { categoryId: 0 }, { productId: 2_147_483_648 }, { categoryId: "3" }]) {
+      expect(listingSettingsProductIdsInputSchema.safeParse({ storeConnectionId: 22, ...bad }).success).toBe(false);
+    }
+  });
+
+  it("answers every row once, as many rows as the total, up to 10,000", () => {
+    const rows = (count: number) => Array.from({ length: count }, (_, index) => ({ productId: index + 1, revisionId: index % 2 ? index : null }));
+    expect(listingSettingsProductIdsResponseSchema.safeParse({ total: 10_000, rows: rows(10_000) }).success).toBe(true);
+    expect(listingSettingsProductIdsResponseSchema.safeParse({ total: 0, rows: [] }).success).toBe(true);
+    expect(listingSettingsProductIdsResponseSchema.safeParse({ total: 10_001, rows: rows(10_001) }).success).toBe(false);
+    expect(listingSettingsProductIdsResponseSchema.safeParse({ total: 3, rows: rows(2) }).success).toBe(false);
+    expect(listingSettingsProductIdsResponseSchema.safeParse({ total: 2, rows: [{ productId: 1, revisionId: null }, { productId: 1, revisionId: 4 }] }).success)
+      .toBe(false);
+    expect(listingSettingsProductIdsResponseSchema.safeParse({ total: 1, rows: [{ productId: 1, revisionId: 0 }] }).success).toBe(false);
+    expect(listingSettingsProductIdsResponseSchema.safeParse({ total: 1, rows: [{ productId: 1, revisionId: null, name: "x" }] }).success).toBe(false);
+  });
+
+  it("lets the Products and Prices tabs narrow to a category, and still works without one", () => {
+    expect(listingSettingsProductsInputSchema.parse({ storeConnectionId: 22, categoryId: 3 })).toMatchObject({ categoryId: 3 });
+    expect(listingSettingsPricesInputSchema.parse({ storeConnectionId: 22, categoryId: 3 })).toMatchObject({ categoryId: 3 });
+    expect(listingSettingsProductsInputSchema.parse({ storeConnectionId: 22 })).not.toHaveProperty("categoryId");
+    expect(listingSettingsPricesInputSchema.safeParse({ storeConnectionId: 22, categoryId: -1 }).success).toBe(false);
   });
 });

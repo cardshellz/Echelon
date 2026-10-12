@@ -1,4 +1,4 @@
-import type { Express } from "express";
+import type { Express, Response } from "express";
 import { sendInventoryQuantityError, validateInventoryCommandKey } from "../inventory/interfaces/quantity-command.middleware";
 import { CatalogInventoryCommandError } from "./application/catalog-inventory-command.service";
 import { createCatalogInventoryCommandService } from "./infrastructure/catalog-inventory-command.repository";
@@ -62,8 +62,19 @@ import {
 import { INVENTORY_LEGACY_ADMIN_CONTROLS } from "../inventory-planning/application/inventory-legacy-admin-control.service";
 import { createInventoryLegacyAdminControlService } from "../inventory-planning/infrastructure/inventory-legacy-admin-control.repository";
 import { sendInventoryLegacyAdminControlError } from "../inventory-planning/interfaces/http/inventory-legacy-admin-control.error";
+import { publicationSelectionBusyIssue } from "../inventory-planning/publication-selection-work";
 
 type CatalogRouteTransaction = Pick<typeof db, "select" | "insert" | "update" | "delete" | "execute">;
+
+function sendSelectionBusy(res: Response, error: unknown): boolean {
+  const busy = publicationSelectionBusyIssue(error);
+  if (!busy) return false;
+  // Some legacy catalog commands save multiple records separately. Do not claim
+  // the entire request rolled back when only its selection statement is known to fail.
+  const message = "A stock update is finishing. Refresh this product to check its saved changes, then retry the change that remains.";
+  res.status(409).json({ ...busy, message, error: message });
+  return true;
+}
 
 /**
  * Fields a variant write may no longer set. `dropship_eligible` is retired:
@@ -1017,6 +1028,7 @@ const HAS_SHIPPABLE_VARIANT = sql`EXISTS (
         : await createProduct();
       res.json(created);
     } catch (error: any) {
+      if (sendSelectionBusy(res, error)) return;
       if (error instanceof InventoryTrackingPolicyError) return res.status(error.statusCode).json({ error: error.message, code: error.code });
       if (sendInventoryLegacyAdminControlError(res, error)) return;
       if (error instanceof ProductInventoryStrategyError) {
@@ -1047,6 +1059,7 @@ const HAS_SHIPPABLE_VARIANT = sql`EXISTS (
       if (error instanceof ProductDuplicateError) {
         return res.status(error.statusCode).json({ error: error.message, ...(error.details ?? {}) });
       }
+      if (sendSelectionBusy(res, error)) return;
       console.error("Error duplicating product:", error);
       res.status(500).json({ error: "Failed to duplicate product" });
     }
@@ -1320,6 +1333,7 @@ const HAS_SHIPPABLE_VARIANT = sql`EXISTS (
       const existingVariants = await storage.getProductVariantsByProductId(id);
       res.json({ ...updateResult.product, variants: existingVariants });
     } catch (error: any) {
+      if (sendSelectionBusy(res, error)) return;
       if (error instanceof InventoryTrackingPolicyError) return res.status(error.statusCode).json({ error: error.message, code: error.code });
       if (sendInventoryLegacyAdminControlError(res, error)) return;
       if (error?.code === "23505" || error?.cause?.code === "23505") {
@@ -1429,6 +1443,7 @@ const HAS_SHIPPABLE_VARIANT = sql`EXISTS (
 
       return res.json({ blocked: hasBlockers, dependencies, product: { id: product.id, sku: product.sku, name: product.name } });
     } catch (error) {
+      if (sendSelectionBusy(res, error)) return;
       console.error("Error archiving product:", error);
       if (sendInventoryQuantityError(res, error)) return;
       if (error instanceof CatalogInventoryCommandError) return res.status(error.statusCode).json({ error: error.message, code: error.code });
@@ -1450,6 +1465,7 @@ const HAS_SHIPPABLE_VARIANT = sql`EXISTS (
       }
       res.json({ success: true });
     } catch (error: any) {
+      if (sendSelectionBusy(res, error)) return;
       console.error("Error deleting product:", error);
       if (error.message && error.message.includes("foreign key constraint")) {
         return res.status(400).json({ error: "Cannot completely delete this product because it has historical records linked to it (e.g. cycle counts, transactions, or purchase orders). Please Archive it instead." });
@@ -1650,6 +1666,7 @@ const HAS_SHIPPABLE_VARIANT = sql`EXISTS (
       });
       res.json(variant);
     } catch (error: any) {
+      if (sendSelectionBusy(res, error)) return;
       if (error instanceof InventoryTrackingPolicyError) return res.status(error.statusCode).json({ error: error.message, code: error.code });
       if (Number.isInteger(error?.statusCode)) {
         return res.status(error.statusCode).json({
@@ -1818,6 +1835,7 @@ const HAS_SHIPPABLE_VARIANT = sql`EXISTS (
 
       res.json(updateResult.variant);
     } catch (error: any) {
+      if (sendSelectionBusy(res, error)) return;
       if (error instanceof InventoryTrackingPolicyError) return res.status(error.statusCode).json({ error: error.message, code: error.code });
       if (error?.code === "23505" || error?.cause?.code === "23505") {
         return res.status(409).json({ error: "SKU already exists" });
@@ -2581,6 +2599,7 @@ const HAS_SHIPPABLE_VARIANT = sql`EXISTS (
       return res.json(await owner.execute({ operation: "variant_merge", sourceId, targetVariantId: targetId,
         commandKey: req.body.commandKey, actor: req.session.user?.id ?? "" }));
     } catch (error) {
+      if (sendSelectionBusy(res, error)) return;
       console.error("Error merging variants:", error);
       if (sendInventoryQuantityError(res, error)) return;
       if (error instanceof CatalogInventoryCommandError) return res.status(error.statusCode).json({ error: error.message, code: error.code });
@@ -2648,6 +2667,7 @@ const HAS_SHIPPABLE_VARIANT = sql`EXISTS (
 
       return res.json({ blocked: hasBlockers, dependencies, variant: { id: variant.id, sku: variant.sku, name: variant.name } });
     } catch (error) {
+      if (sendSelectionBusy(res, error)) return;
       console.error("Error archiving variant:", error);
       if (sendInventoryQuantityError(res, error)) return;
       if (error instanceof CatalogInventoryCommandError) return res.status(error.statusCode).json({ error: error.message, code: error.code });
@@ -2664,6 +2684,7 @@ const HAS_SHIPPABLE_VARIANT = sql`EXISTS (
       }
       res.json({ success: true });
     } catch (error) {
+      if (sendSelectionBusy(res, error)) return;
       console.error("Error deleting variant:", error);
       res.status(500).json({ error: "Failed to delete variant" });
     }

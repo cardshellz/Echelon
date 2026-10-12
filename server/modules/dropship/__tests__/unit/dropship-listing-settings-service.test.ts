@@ -180,6 +180,38 @@ describe("listing settings service", () => {
       .rejects.toMatchObject({ code: "DROPSHIP_LISTING_SETTINGS_TOO_LARGE", context: { storeConnectionId: 5 } });
     await expect(service.listProductsForMember("member-1", { storeConnectionId: 5 }))
       .rejects.toMatchObject({ code: "DROPSHIP_LISTING_SETTINGS_TOO_LARGE" });
+    await expect(service.listProductIdsForMember("member-1", { storeConnectionId: 5 }))
+      .rejects.toMatchObject({ code: "DROPSHIP_LISTING_SETTINGS_TOO_LARGE", context: { storeConnectionId: 5 } });
+  });
+
+  it("lists product ids and their settings revisions from the cached views, with the filters (plan PR 9, 4.2)", async () => {
+    const productRow = (productId: number, revisionId: number) => ({ storeConnectionId: 5, productId, revisionId,
+      updatedAt: T0.toISOString(), values: { price: null, ebayCategory: null, storeShelf: { mode: "none" as const }, shippingPolicy: null,
+        returnPolicy: null, paymentPolicy: null, textAbove: null, textBelow: null, mainText: null } });
+    const load = inputs([{ ...candidate(11, 501), categoryId: 3 }, { ...candidate(21, 502), categoryId: 4 }]);
+    repository.next = { state: "ok", fingerprint: "fp-1", costReadFailed: false,
+      inputs: { ...load, layers: { products: new Map([[501, productRow(501, 77)]]), categories: new Map() } } };
+
+    await expect(service.listProductIdsForMember("member-1", { storeConnectionId: 5 }))
+      .resolves.toEqual({ total: 2, rows: [{ productId: 501, revisionId: 77 }, { productId: 502, revisionId: null }] });
+    await expect(service.listProductIdsForMember("member-1", { storeConnectionId: 5, categoryId: 4 }))
+      .resolves.toEqual({ total: 1, rows: [{ productId: 502, revisionId: null }] });
+    await expect(service.listProductIdsForMember("member-1", { storeConnectionId: 5, productId: 501, search: "product 501" }))
+      .resolves.toEqual({ total: 1, rows: [{ productId: 501, revisionId: 77 }] });
+    await expect(service.listPricesForMember("member-1", { storeConnectionId: 5, categoryId: 3 }))
+      .resolves.toMatchObject({ total: 1, rows: [{ productVariantId: 11 }] });
+    await expect(service.listProductsForMember("member-1", { storeConnectionId: 5, categoryId: 3 }))
+      .resolves.toMatchObject({ total: 1, rows: [{ productId: 501 }] });
+    // One snapshot read serves them all (no new database read for the id list).
+    expect(repository.loads).toHaveLength(1);
+  });
+
+  it("refuses id-list input outside its contract", async () => {
+    for (const input of [{ storeConnectionId: 5, page: 0 }, { storeConnectionId: 5, show: "paused" }, { storeConnectionId: 5, productId: 0 },
+      { storeConnectionId: 5, categoryId: Number.NaN }]) {
+      await expect(service.listProductIdsForMember("member-1", input)).rejects.toBeInstanceOf(ZodError);
+    }
+    expect(repository.loads).toHaveLength(0);
   });
 
   it("refuses a store that is not on eBay", async () => {

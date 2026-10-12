@@ -429,7 +429,12 @@ describe("golden listing previews (no product or category settings, no store she
 
     expect(facts.sizes.map(factsSizePin)).toStrictEqual(pins.facts.sizes);
     expect(sha256(JSON.stringify(facts.sizes))).toBe(pins.facts.sizesSha256);
-    expect(sha256(JSON.stringify(facts.products))).toBe(pins.facts.productsSha256);
+    // The pin covers each product's row and sizes, as pinned before PR 9 put its
+    // category and settings revision beside them (no store here has product rows).
+    expect(sha256(JSON.stringify(facts.products.map(({ row, sizes }) => ({ row, sizes }))))).toBe(pins.facts.productsSha256);
+    const categories = new Map(GOLDEN_PREVIEW_CANDIDATES.map((candidate) => [candidate.productId, candidate.categoryId]));
+    expect(facts.products.map((product) => [product.categoryId, product.settingsRevisionId]))
+      .toStrictEqual(facts.products.map((product) => [categories.get(product.row.productId) ?? null, null]));
   });
 
   it.each(stores)("the facts and the preview give each size one price: %s", (_name, _store, pins) => {
@@ -907,6 +912,7 @@ describe("golden listing previews: every path gives the preview's values (8b-G)"
         { vendorId: GOLDEN_PREVIEW_VENDOR_ID, storeConnectionId: storeId, candidates }),
       storeReview: async (review: StoredPricingReview) => { stored = review; },
       loadReview: async () => stored, findApplication: async () => null,
+      lockSelection: async () => { throw new Error("The golden review never applies."); },
       applyReview: async () => { throw new Error("The golden review never applies."); },
     } satisfies PricingRulesTransaction;
     const service = new DropshipPricingRulesService({ repository: { execute: async (_member, _store, operation) => operation(tx) },

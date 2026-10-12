@@ -77,12 +77,12 @@ describe("shared channel catalog identity", () => {
 });
 
 describe("Walmart thin catalog translation", () => {
-  it("translates documented ItemResponse fields and cursor without importing price floats", async () => {
-    const request = vi.fn(async () => ({ ItemResponse: [{ sku: "A/B", productName: "Title", wpid: "W1", price: { amount: 1.23 }, mart: "WALMART_US" }], nextCursor: "abc+/=", totalItems: 51 }));
+  it("translates documented ItemResponse fields and cursor using integer price cents", async () => {
+    const request = vi.fn(async () => ({ ItemResponse: [{ sku: "A/B", productName: "Title", wpid: "W1", price: { currency: "USD", amount: 1.23 }, mart: "WALMART_US" }], nextCursor: "abc+/=", totalItems: 51 }));
     const api = new WalmartUsApi({ request } as never);
     const result = await api.catalogPage({ cursor: "abc+/=" });
     expect(request).toHaveBeenCalledWith("GET", "/v3/items?limit=50&nextCursor=abc%2B%2F%3D");
-    expect(result).toEqual({ items: [{ ...item("A/B"), title: "Title", externalProductId: "W1", lifecycleStatus: "UNKNOWN", publishedStatus: "UNKNOWN" }], nextCursor: "abc+/=", total: 51 });
+    expect(result).toEqual({ items: [{ ...item("A/B"), title: "Title", externalProductId: "W1", lifecycleStatus: "UNKNOWN", publishedStatus: "UNKNOWN", priceCents: 123 }], nextCursor: "abc+/=", total: 51 });
   });
   it("uses exact encoded SKU lookup and rejects a mismatched identity", async () => {
     const request = vi.fn(async () => ({ ItemResponse: [{ sku: "A/B" }] }));

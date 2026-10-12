@@ -42,18 +42,48 @@ describe("shared eBay issue actions", () => {
     ["EBAY_SYNC_PRODUCT_NOT_ELIGIBLE","edit_listing",false],
     ["EBAY_SYNC_PRODUCT_NOT_FOUND","edit_listing",false],
     ["UNRECOGNIZED_CODE","contact_support",false],
-    ["STOCK_LISTING_ATP_NOT_READY","review_publication_stock",false],
-    ["EBAY_PUBLICATION_STOCK_REVIEW_STALE","review_publication_stock",false],
-    ["EBAY_PUBLICATION_STOCK_REVIEW_BLOCKED","review_publication_stock",false],
-    ["STOCK_LISTING_SOURCE_CHANGED","review_publication_stock",false],
+    ["STOCK_LISTING_ATP_NOT_READY","edit_listing",false],
+    ["EBAY_PUBLICATION_STOCK_REVIEW_STALE","retry_sync",true],
+    ["EBAY_PUBLICATION_STOCK_REVIEW_BLOCKED","edit_listing",false],
+    ["STOCK_LISTING_SOURCE_CHANGED","edit_listing",false],
+    ["STOCK_LISTING_ACCOUNT_CHANGED","reconnect",false],
+    ["STOCK_LISTING_TARGET_MISMATCH","edit_listing",false],
+    ["STOCK_LISTING_GLOBAL_STOP","edit_listing",false],
+    ["STOCK_LISTING_HELD","edit_listing",false],
+    ["STOCK_LISTING_QUANTITY_UNAVAILABLE","edit_listing",false],
+    ["STOCK_LISTING_MAPPING_CONFLICT","edit_listing",false],
+    ["STOCK_LISTING_MAPPING_REVIEW_REQUIRED","edit_listing",false],
+    ["STOCK_LISTING_EXCLUDED","retry_sync",true],
+    ["STOCK_LISTING_NOT_SELECTED","edit_listing",false],
+    ["EBAY_PUBLICATION_STOCK_APPLY_RETIRED","retry_sync",true],
+    ["STOCK_MAPPING_CONCURRENT_CHANGE","retry_sync",true],
+    ["STOCK_MAPPING_PROVIDER_BUSY","retry_sync",true],
+    ["STOCK_MAPPING_CLEANUP_UNCERTAIN","retry_sync",true],
+    ["STOCK_MAPPING_REVIEW_STALE","retry_sync",true],
+    ["STOCK_MAPPING_TARGET_CHANGED","retry_sync",true],
+    ["STOCK_MAPPING_COMMAND_CONFLICT","contact_support",false],
+    ["STOCK_MAPPING_NOT_READY","edit_listing",false],
+    ["STOCK_LISTING_TARGET_UNAVAILABLE","edit_listing",false],
+    ["STOCK_MAPPING_SCOPE_TOO_LARGE","edit_listing",false],
+    ["STOCK_MAPPING_AUTHORITY_CHANGED","edit_listing",false],
+    ["PUBLICATION_SELECTION_BUSY","edit_listing",false],
+    ["CHANNEL_SELECTION_CONNECTION_UNRESOLVED","reconnect",false],
+    ["CHANNEL_SELECTION_JOB_SCOPE_CHANGED","review_mapping",false],
+    ["CHANNEL_SELECTION_AMBIGUOUS","review_mapping",false],
+    ["PUBLICATION_SELECTION_IDENTITY_INCOMPLETE","review_mapping",false],
+    ["DROPSHIP_STOCK_SELECTION_AMBIGUOUS","edit_listing",false],
+    ["DROPSHIP_STOCK_STORE_NOT_FOUND","edit_listing",false],
+    ["DROPSHIP_CATALOG_VARIANT_UOM_TYPE_INVALID","edit_listing",false],
+    ["PUBLICATION_SELECTION_DESTINATION_INVALID","edit_listing",false],
+    ["PUBLICATION_SELECTION_CLOCK_INVALID","contact_support",false],
     ["EBAY_PUBLICATION_STOCK_SOURCE_CHANGED","review_mapping",false],
     ["EBAY_WITHDRAWAL_IN_PROGRESS","check_status",false],
     ["EBAY_WITHDRAWAL_READBACK_PENDING","check_status",false],
     ["EBAY_WITHDRAWAL_UNVERIFIED","check_status",false],
     ["EBAY_WITHDRAWAL_RESPONSE_UNCERTAIN","check_recovery",false],
     ["EBAY_WITHDRAWAL_OWNER_REQUIRED","edit_listing",false],
-    ["EBAY_PUBLICATION_STOCK_REVIEW_REQUIRED","review_publication_stock",false],
-    ["EBAY_PUBLICATION_STOCK_COMMAND_CONFLICT","review_publication_stock",false],
+    ["EBAY_PUBLICATION_STOCK_REVIEW_REQUIRED","retry_sync",true],
+    ["EBAY_PUBLICATION_STOCK_COMMAND_CONFLICT","contact_support",false],
     ["EBAY_EXCLUSION_PERSISTENCE_FAILED","retry_sync",true],
     ["EBAY_SYNC_ACCOUNT_UNVERIFIED","reconnect",false],
   ] as const)("%s has an explicit next action and retry policy", (code,action,retryable) => {
@@ -68,6 +98,17 @@ describe("shared eBay issue actions", () => {
     const attention = resolveEbayListingIssue({ code: "EBAY_SYNC_READBACK_PENDING",state: "needs_attention" });
     expect(recovering).toMatchObject({ retryable: false,action: { kind: "check_recovery" } });
     expect(attention).toMatchObject({ retryable: true,action: { kind: "retry_sync" } });
+  });
+  it("uses normal publishing for missing stock preparation but keeps genuine inventory failures out of retry loops", () => {
+    const preparation = resolveEbayListingIssue({ code: "EBAY_PUBLICATION_STOCK_REVIEW_REQUIRED", productId: 20 });
+    expect(preparation).toMatchObject({ retryable: true, action: { kind: "retry_sync", label: "Retry publishing" } });
+    expect(preparation.nextStep).toContain("from your channel selection");
+    for (const code of ["STOCK_LISTING_HELD", "STOCK_LISTING_ATP_NOT_READY", "STOCK_LISTING_MAPPING_CONFLICT"]) {
+      const blocked = resolveEbayListingIssue({ code, productId: 20 });
+      expect(blocked).toMatchObject({ retryable: false, action: { kind: "edit_listing", href: "/channels/inventory?product=20" } });
+      expect(blocked.nextStep).not.toContain("Connect stock and publish");
+    }
+    expect(resolveEbayListingIssue({ code: "STOCK_LISTING_SOURCE_CHANGED", productId: 20 }).action.href).toBe("/products/20?tab=variants");
   });
   it.each(["recovering", "needs_attention"])("accepted publication waiting in %s never offers another publication", state => {
     const issue = resolveEbayListingIssue({ code: "EBAY_PUBLICATION_READBACK_PENDING", state });

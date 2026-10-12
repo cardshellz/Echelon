@@ -89,8 +89,13 @@ function textDigest(text: string): { length: number; sha256: string } {
   return { length: text.length, sha256: createHash("sha256").update(text, "utf8").digest("hex") };
 }
 
-/** What a child request key belongs to: a product row of a bulk change, a size price, a size's content, the store's eBay category rules. */
-export const LISTING_SETTING_CHILD_KINDS = ["product", "size", "content", "ebay_rules"] as const;
+/**
+ * What a child request key belongs to: a product row of a bulk change, a size
+ * price, a size's content, the store's eBay category rules, and a size's
+ * leftover policy or shelf row that a product or category change clears (plan
+ * PR 9, P16: the replay probe names their prefixes).
+ */
+export const LISTING_SETTING_CHILD_KINDS = ["product", "size", "content", "ebay_rules", "policy", "shelf"] as const;
 export type ListingSettingChildKind = (typeof LISTING_SETTING_CHILD_KINDS)[number];
 
 /** Child ids are int4 keys (product, size, store connection). */
@@ -99,10 +104,10 @@ const CHILD_ID_PATTERN = /^[1-9][0-9]{0,9}$/;
 
 /**
  * `ls:<sha256hex(parentKey)>:<kind>:<id>` (plan D10): at most 89 characters
- * for any parent, so it fits every varchar(200) key column and matches
- * LISTING_SETTING_KEY_PATTERN. Appending to the parent instead could reach
- * 219 characters. A malformed parent key or a non-positive integer id is a
- * programming fault.
+ * for any parent (`ebay_rules` is the longest kind), so it fits every
+ * varchar(200) key column and matches LISTING_SETTING_KEY_PATTERN. Appending
+ * to the parent instead could reach 219 characters. A malformed parent key or
+ * a non-positive integer id is a programming fault.
  */
 export function listingSettingChildKey(parentKey: string, kind: ListingSettingChildKind, id: number): string {
   if (!LISTING_SETTING_KEY_PATTERN.test(parentKey)) {
@@ -129,6 +134,21 @@ export function isListingSettingChildKey(parentKey: string, key: string, kind: L
   const idText = key.slice(prefix.length);
   if (!CHILD_ID_PATTERN.test(idText) || Number(idText) > MAX_LISTING_SETTING_CHILD_ID) return false;
   return id === undefined || Number(idText) === id;
+}
+
+/**
+ * Every child key of `parentKey` of this kind starts with this, and no other
+ * key does: the replay probe (plan PR 9, P16) finds what a request wrote by
+ * it. A malformed parent key or an unknown kind is a programming fault.
+ */
+export function listingSettingChildKeyPrefix(parentKey: string, kind: ListingSettingChildKind): string {
+  if (!LISTING_SETTING_KEY_PATTERN.test(parentKey)) {
+    throw listingSettingsInvariantFailed("A listing setting child key prefix needs a valid parent request key.", { kind });
+  }
+  if (!(LISTING_SETTING_CHILD_KINDS as readonly string[]).includes(kind)) {
+    throw listingSettingsInvariantFailed("A listing setting child key prefix needs a known kind.", { kind: String(kind) });
+  }
+  return childKeyPrefix(parentKey, kind);
 }
 
 function childKeyPrefix(parentKey: string, kind: ListingSettingChildKind): string {

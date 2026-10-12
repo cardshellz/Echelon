@@ -5,6 +5,15 @@ import { WalmartApiError, WalmartClient, walmartCredentialsSchema } from "./walm
 import { WalmartUsApi, type WalmartShipNode, type WalmartUsApiPort } from "./walmart-us-api";
 import { WalmartConnectionRepository, type WalmartConnectionRecord } from "./walmart-connection.repository";
 import { WalmartListingApi } from "./walmart-listing-api";
+import { listingAccountSchema, type ListingAccount } from "@shared/types/channel-listing-publication";
+import type { ListingWriteGuard } from "../../../marketplace-listings/application/listing-lifecycle-ports";
+import { ListingPublicationError } from "../../../marketplace-listings/domain/listing-publication";
+
+export function walmartListingAccount(row: WalmartConnectionRecord): ListingAccount {
+  return listingAccountSchema.parse({ channelId: row.channel_id, connectionId: row.connection_id,
+    provider: "walmart", market: "us", environment: row.environment, accountId: row.partner_id,
+    scopeId: row.ship_node_id, revision: row.revision });
+}
 
 export function isActiveSellerShipNode(node: WalmartShipNode): boolean {
   // Walmart's default seller inventory location is VIRTUAL. Settings also
@@ -20,13 +29,21 @@ export class WalmartChannelService {
   constructor(
     readonly repository: WalmartConnectionRepository,
     private readonly cipher: FulfillmentProviderCredentialCipher | null,
-    private readonly policy: { liveEnabled: boolean; productionServer: boolean; pollingDisabledReason?: string | null },
+    private readonly policy: { liveEnabled: boolean; productionServer: boolean; pollingDisabledReason?: string | null; listingWrites?: ListingWriteGuard },
     private readonly now: () => Date = () => new Date(),
     private readonly createApi: (credentials: z.infer<typeof walmartCredentialsSchema>) => WalmartUsApiPort
       = credentials => new WalmartUsApi(new WalmartClient(credentials)),
     private readonly createListingApi: (credentials: z.infer<typeof walmartCredentialsSchema>) => WalmartListingApi
       = credentials => new WalmartListingApi(new WalmartClient(credentials)),
   ) {}
+  async withListingWrites<T>(account: ListingAccount, skus: readonly string[], work: () => Promise<T>): Promise<T> {
+    if (!this.policy.listingWrites) throw new WalmartApiError("WALMART_LISTING_CONTROL_UNAVAILABLE", "Listing publication controls are unavailable. Retry after service configuration is restored.", true);
+    try { return await this.policy.listingWrites.withAllowed(account, skus, work); }
+    catch (error) {
+      if (error instanceof ListingPublicationError) throw new WalmartApiError(error.code, error.message, error.status >= 500, error.status);
+      throw error;
+    }
+  }
   async status(channelId: number) {
     const status = await this.repository.status(channelId);
     if (!status) return null;

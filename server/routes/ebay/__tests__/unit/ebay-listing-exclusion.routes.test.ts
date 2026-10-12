@@ -28,4 +28,11 @@ describe("permissioned durable eBay product exclusion HTTP boundary",()=>{
   it("looks up the exact receipt for recovery without reading or mutating eBay",async()=>{const response=await fetch(`${url}/commands/${commandKey}`);expect(response.headers.get("cache-control")).toBe("no-store");expect(await response.json()).toMatchObject({commandKey,replayed:true});expect(service.get).toHaveBeenCalledExactlyOnceWith(3,commandKey);expect(service.set).not.toHaveBeenCalled();});
   it("preserves the blocking job reference when reinclude is unsafe",async()=>{vi.mocked(service.set).mockRejectedValue(Object.assign(new EbayListingSyncError("EBAY_WITHDRAWAL_IN_PROGRESS","Wait for this saved withdrawal."),{jobId:commandKey}));const response=await put(url,{excluded:false,commandKey});expect(response.status).toBe(409);expect(await response.json()).toMatchObject({code:"EBAY_WITHDRAWAL_IN_PROGRESS",jobId:commandKey});});
   it("does not expose database errors or claim an uncertain receipt failed permanently",async()=>{vi.mocked(service.set).mockRejectedValue(new Error("postgres://secret:password internal SQL"));const response=await put(url,{excluded:true,commandKey});expect(response.status).toBe(500);const text=await response.text();expect(text).not.toContain("password");expect(text).toContain("saved status");});
+  it("returns selection-busy with instructions to retry the original exclusion request",async()=>{
+    vi.mocked(service.set).mockRejectedValue(new Error("private SQL",{cause:{code:"55P03",message:"PUBLICATION_SELECTION_BUSY"}}));
+    const response=await put(url,{excluded:true,commandKey});expect(response.status).toBe(409);
+    const body=await response.json();expect(body).toMatchObject({code:"PUBLICATION_SELECTION_BUSY",retryable:true,
+      issue:{action:{kind:"edit_listing"},nextStep:expect.stringContaining("original request reference")}});
+    expect(JSON.stringify(body)).not.toContain("private SQL");
+  });
 });

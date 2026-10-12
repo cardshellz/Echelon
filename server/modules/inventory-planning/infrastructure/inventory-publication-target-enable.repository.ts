@@ -11,13 +11,14 @@ import { createTransactionScopedInventoryPublicationService } from "./inventory-
 
 import { loadPublicationTargetScopes, PUBLICATION_TARGET_SCOPE_LOCK_SEED, type PublicationTargetScopeSource } from "./inventory-publication-target-stop.repository";
 import { quantityPublicationScopeLockKey } from "./quantity-publication-admission.repository";
+import { readPublicationStockSelection, selectionRequiresPublication } from "./inventory-publication-selection.reader";
 
 // Dedicated command namespace; do not reuse definition-head advisory locks.
 const IDEMPOTENCY_LOCK_NAMESPACE = 918450;
 const MAX_ENABLE_PRODUCTS = 1000;
 const INITIAL_SETUP_ACTION = "Applied initial saved setup when enabling stock updates.";
 type Target = PublicationTargetScopeSource & { id: number; channel_id: number; state: string; revision: string; publication_authority: string;
-  membership_mode: "explicit" | "whole_product"; channel_status: string };
+  destination_kind: "channel_connection" | "dropship_store_connection"; channel_status: string };
 type Definition = { id: number; definition_hash: string; lifecycle_status: string };
 
 /** Enables permission and queues fresh quantities atomically. Historical pause/readback
@@ -51,7 +52,7 @@ export class PostgresInventoryPublicationTargetEnableStore implements InventoryP
          WHERE authority.singleton_key=true AND authority.authority='canonical' AND run.mode='activation' AND run.state='active'`)).rowCount;
       if (activeAuthority !== 1) throw failure("SETUP_REQUIRED", "Complete Channel Inventory setup before starting automatic stock updates.");
       const target = (await client.query<Target>(
-        `SELECT t.id,t.channel_id,t.state,t.revision::text,t.publication_authority,t.membership_mode,c.status AS channel_status,
+        `SELECT t.id,t.channel_id,t.state,t.revision::text,t.publication_authority,c.status AS channel_status,
            t.destination_kind,t.channel_connection_id,t.dropship_store_connection_id,t.provider_scope_type,t.external_scope_id,
            lower(CASE t.destination_kind WHEN 'channel_connection' THEN c.provider ELSE d.platform END) AS provider_key
          FROM inventory.inventory_publication_targets t JOIN channels.channels c ON c.id=t.channel_id
@@ -78,7 +79,7 @@ export class PostgresInventoryPublicationTargetEnableStore implements InventoryP
       const initialDefinitionsApplied = await promoteInventoryCutoverDefinitionsInsideTransaction(client, {
         contractVersion: "inventory_cutover_selection_manifest_v1", productIds: [], publicationTargetIds: [target.id], selections,
       }, { actor: command.actorId, reason: INITIAL_SETUP_ACTION, occurredAt: command.occurredAt });
-      const products = await publicationProducts(client, target);
+      const products = await publicationProducts(client, target, command.occurredAt);
       const updated = await client.query<{ revision: string }>(
         `UPDATE inventory.inventory_publication_targets SET state='live',revision=revision+1,activated_by=$3,activated_at=$4
          WHERE id=$1 AND revision=$2::bigint AND state IN ('disabled','preview') RETURNING revision::text`,
@@ -177,9 +178,9 @@ async function initialSetup(client: PoolClient, target: Target): Promise<Invento
   return selections;
 }
 
-async function publicationProducts(client: PoolClient, target: Target): Promise<number[]> {
+async function publicationProducts(client: PoolClient, target: Target, now: Date): Promise<number[]> {
   // Pausing does not retire identities. Refuse to silently abandon a previously
-  // published identity; explicit exclusion already requires a verified zero.
+  // published identity. A retired inventory checkbox is never removal evidence.
   const orphan = (await client.query(
     `WITH history AS (
        SELECT publication_target_id,product_variant_id,external_inventory_item_id_snapshot FROM inventory.inventory_publication_outbox WHERE publication_target_id=$1
@@ -187,27 +188,40 @@ async function publicationProducts(client: PoolClient, target: Target): Promise<
      ) SELECT 1 FROM history o
      LEFT JOIN inventory.publication_variant_mapping_heads h ON h.publication_target_id=o.publication_target_id AND h.product_variant_id=o.product_variant_id
      LEFT JOIN inventory.publication_variant_mapping_versions m ON m.id=h.active_mapping_id AND m.lifecycle_status='sealed'
-     WHERE o.publication_target_id=$1 AND (m.id IS NULL OR m.external_inventory_item_id<>o.external_inventory_item_id_snapshot)
-       AND NOT ($2='explicit' AND EXISTS (SELECT 1 FROM inventory.publication_membership_heads mh
-         JOIN inventory.publication_membership_versions mv ON mv.id=mh.active_version_id
-         WHERE mh.publication_target_id=$1 AND mh.product_variant_id=o.product_variant_id AND mv.included=false)) LIMIT 1`,
-    [target.id, target.membership_mode])).rowCount;
+     WHERE o.publication_target_id=$1 AND (m.id IS NULL OR m.external_inventory_item_id<>o.external_inventory_item_id_snapshot) LIMIT 1`,
+    [target.id])).rowCount;
   if (orphan) throw failure("LISTING_LINK_CHANGED", "A previously updated listing no longer matches its saved item link. Fix its listing link before restarting stock updates.");
   // Include invalid/inactive identities in the census. The canonical planner must
   // reject them, rather than making them disappear from an apparently successful enable.
   const rows = (await client.query<{ product_id: number; product_variant_id: number; managed: boolean }>(
     `SELECT v.product_id,v.id AS product_variant_id,
        (v.is_active AND v.requires_shipping AND COALESCE(v.track_inventory,true) AND v.sales_eligibility='sellable') AS managed
-     FROM catalog.product_variants v WHERE
-       ($2='explicit' AND EXISTS(SELECT 1 FROM inventory.publication_membership_heads h
-         JOIN inventory.publication_membership_versions m ON m.id=h.active_version_id
-         WHERE h.publication_target_id=$1 AND h.product_variant_id=v.id AND m.included=true))
-       OR ($2='whole_product' AND EXISTS(SELECT 1 FROM inventory.publication_variant_mapping_heads h
-         WHERE h.publication_target_id=$1 AND h.product_variant_id=v.id AND h.active_mapping_id IS NOT NULL))
-     ORDER BY v.product_id,v.id`, [target.id, target.membership_mode])).rows;
-  if (rows.some(row => !row.managed)) throw failure("ITEM_NOT_SELLABLE", "An included item is inactive or no longer tracks stock. Check its catalog and stock selection before enabling updates.");
-  const products = [...new Set(rows.map(row => row.product_id))];
-  if (products.length > MAX_ENABLE_PRODUCTS) throw failure("SCOPE_TOO_LARGE", "This account has too many products for one stock-update change. Contact support to activate it in a planned batch.");
+     FROM catalog.product_variants v WHERE EXISTS(SELECT 1 FROM inventory.publication_variant_mapping_heads h
+       WHERE h.publication_target_id=$1 AND h.product_variant_id=v.id)
+     ORDER BY v.product_id,v.id`, [target.id])).rows;
+  const candidates = new Map<number, typeof rows>();
+  for (const row of rows) {
+    const product = candidates.get(row.product_id) ?? [];
+    product.push(row);
+    candidates.set(row.product_id, product);
+  }
+  if (candidates.size > MAX_ENABLE_PRODUCTS) throw failure("SCOPE_TOO_LARGE", "This account has too many products for one stock-update change. Contact support to activate it in a planned batch.");
+  const products: number[] = [];
+  for (const [productId, variants] of candidates) {
+    const selection = await readPublicationStockSelection(client, {
+      destinationKind: target.destination_kind, channelId: target.channel_id,
+      channelConnectionId: target.channel_connection_id, dropshipStoreConnectionId: target.dropship_store_connection_id,
+    }, { productId, productVariantIds: variants.map(row => row.product_variant_id), now });
+    const required = selection.variants.filter(variant => selectionRequiresPublication(variant.action));
+    if (required.some(variant => variant.blockers.length > 0))
+      throw failure("STOCK_NOT_READY", "A selected or retained listing needs a correction before stock updates can restart.", required.flatMap(variant => variant.blockers.map(blocker => `${blocker.code}: ${blocker.message}`)));
+    // A deselected/inactive item can still require a clearing zero; only positive
+    // publication requires current sale eligibility. The canonical planner keeps
+    // the selected action and rechecks it when enqueueing and sending stock.
+    if (required.some(variant => variant.action === "publish" && !variants.find(row => row.product_variant_id === variant.productVariantId)?.managed))
+      throw failure("ITEM_NOT_SELLABLE", "A selected item is inactive or no longer tracks stock. Check its catalog and channel selection before enabling updates.");
+    if (required.length > 0) products.push(productId);
+  }
   return products;
 }
 

@@ -10,6 +10,7 @@ import { InventoryPublicationTargetResumeService } from "../../application/inven
 import { PostgresInventoryPublicationTargetResumeStore } from "../../infrastructure/inventory-publication-target-resume.repository";
 import { PostgresInventoryChannelExposureAdminStore } from "../../infrastructure/inventory-channel-exposure-admin.repository";
 import { PostgresInventoryPublicationTargetStopStore } from "../../infrastructure/inventory-publication-target-stop.repository";
+import { installStockSelectionFixture } from "../fixtures/stock-selection.fixture";
 import {
   cutoverCompositionBaseSql,
   cutoverCompositionChannelSeedSql,
@@ -317,6 +318,10 @@ dbDescribe.sequential("scoped inventory publication target resume composition", 
     ), "utf8"));
     await database.pool.query(cutoverCompositionSeedSql);
     await database.pool.query(cutoverCompositionChannelSeedSql);
+    await installStockSelectionFixture(database.pool);
+    await database.pool.query(`INSERT INTO channels.channel_feeds
+      (channel_id,product_variant_id,channel_variant_id,channel_inventory_item_id,channel_sku)
+      VALUES(36,101,'test-variant','test-item','P5')`);
     const masterDataClient = await database.pool.connect();
     try {
       await masterDataClient.query("BEGIN");
@@ -627,7 +632,7 @@ dbDescribe.sequential("scoped inventory publication target resume composition", 
       ALTER TABLE channels.channel_connections ADD COLUMN shop_domain text,
         ADD COLUMN shopify_location_id text, ADD COLUMN metadata jsonb;
       ALTER TABLE dropship.dropship_store_connections ADD COLUMN external_account_identity_scheme text;
-      CREATE SCHEMA ebay;
+      CREATE SCHEMA IF NOT EXISTS ebay;
       CREATE TABLE ebay.ebay_oauth_tokens (
         channel_id integer, environment text, external_account_id text,
         external_account_display_name text, external_account_verified_at timestamptz,

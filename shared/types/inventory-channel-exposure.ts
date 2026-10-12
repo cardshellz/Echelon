@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { inventoryPublicationScopeSchema } from "./inventory-publication-scope";
+import { stockPublicationSelectionSchema } from "./stock-publication-selection";
 import {
   inventoryRuntimeAuthorityRevisionSchema,
   inventoryRuntimeAuthoritySchema,
@@ -616,6 +617,7 @@ export const resolvedChannelExposurePolicySchema = z.object({
 }).strict();
 
 export const inventoryChannelExposurePreviewSchema = z.object({
+  selection: stockPublicationSelectionSchema.optional(),
   membership: inventoryPublicationScopeSchema.optional(),
   deferredDropshipQuantityVariantIds: z.array(positiveInteger).optional(),
   publicationTargetId: positiveInteger,
@@ -783,6 +785,8 @@ const inventoryChannelExposureRuntimeRowSchema = z.object({
 });
 
 export const inventoryChannelExposureRuntimeTargetSchema = z.object({
+  selection: stockPublicationSelectionSchema.optional(),
+  readOnly: z.boolean().optional(),
   publicationTargetId: positiveInteger,
   publicationTargetRevision: plannerPositiveQuantitySchema,
   destinationKind: z.enum(["channel_connection", "dropship_store_connection"]),
@@ -809,7 +813,7 @@ export const inventoryChannelExposureRuntimeTargetSchema = z.object({
   publishable: z.boolean(),
 }).strict().superRefine((target, context) => {
   validatePublicationDestination(target, context);
-  const actuallyPublishable = target.rows.length > 0
+  const actuallyPublishable = target.readOnly !== true && target.rows.length > 0
     && target.blockers.length === 0
     && target.rows.every((row) => row.blockers.length === 0
       && row.policy !== null

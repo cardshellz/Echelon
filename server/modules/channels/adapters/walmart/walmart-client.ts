@@ -82,11 +82,11 @@ export class WalmartClient {
     await this.accessToken();
   }
 
-  async request(method: "GET" | "POST" | "PUT", path: string, body?: unknown, options?: WalmartRequestOptions): Promise<unknown> {
+  async request(method: "GET" | "POST" | "PUT" | "DELETE", path: string, body?: unknown, options?: WalmartRequestOptions): Promise<unknown> {
     return (await this.requestWithMetadata(method, path, body, options)).data;
   }
 
-  async requestWithMetadata(method: "GET" | "POST" | "PUT", path: string, body?: unknown, options?: WalmartRequestOptions): Promise<WalmartResponse> {
+  async requestWithMetadata(method: "GET" | "POST" | "PUT" | "DELETE", path: string, body?: unknown, options?: WalmartRequestOptions): Promise<WalmartResponse> {
     // Never follow a provider cursor or redirect to a different origin with credentials.
     if (!path.startsWith("/v3/") || path.includes("\\") || path.includes("#") || /[\r\n]/.test(path)) {
       throw new WalmartApiError("WALMART_INVALID_PATH", "Invalid Walmart API request path", false);

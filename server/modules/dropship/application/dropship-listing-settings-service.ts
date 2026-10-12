@@ -1,11 +1,13 @@
 import {
   LISTING_SETTINGS_PAGE_SIZE,
   listingSettingsPricesInputSchema,
+  listingSettingsProductIdsInputSchema,
   listingSettingsProductInputSchema,
   listingSettingsProductsInputSchema,
   listingSettingsStoreInputSchema,
   type ListingSettingsPricesResponse,
   type ListingSettingsProductDetail,
+  type ListingSettingsProductIdsResponse,
   type ListingSettingsProductsResponse,
   type ListingSettingsSummary,
 } from "../../../../shared/dropship/listing-settings";
@@ -18,6 +20,7 @@ import {
   listingSettingsStockUnits,
   selectListingSettingsPrices,
   selectListingSettingsProduct,
+  selectListingSettingsProductIds,
   selectListingSettingsProducts,
   type ListingSettingsFacts,
   type ListingSettingsInputs,
@@ -117,6 +120,17 @@ export class DropshipListingSettingsService {
     const page = selectListingSettingsProducts(view.facts, parsed);
     return { storeConnectionId: parsed.storeConnectionId, page: parsed.page, pageSize: LISTING_SETTINGS_PAGE_SIZE,
       total: page.total, rows: page.rows, generatedAt: view.builtAt.toISOString() };
+  }
+
+  /**
+   * Every chosen product the filters match, with its own settings' revision,
+   * from the same cached views (no extra read): "Select all N" and one
+   * product's editor send these revisions back with a write.
+   */
+  async listProductIdsForMember(memberId: string, input: unknown): Promise<ListingSettingsProductIdsResponse> {
+    const parsed = listingSettingsProductIdsInputSchema.parse(input);
+    const view = requireSizes(await this.viewFor(memberId, parsed.storeConnectionId), parsed.storeConnectionId);
+    return selectListingSettingsProductIds(view.facts, parsed);
   }
 
   /**

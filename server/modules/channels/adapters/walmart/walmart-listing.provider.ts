@@ -484,18 +484,17 @@ export class WalmartListingProvider implements ListingPublicationProvider {
         }
       }
       this.validateVariantGroups(input.items, feedType);
-      await input.beforeSubmit();
-      writeEntered = true;
-      const receipt = await api.submitFeed(
-        feedType,
-        {
-          MPItemFeedHeader: feedHeader(feedType),
-          MPItem: input.items.map((item) => item.payload),
-        },
-        input.correlationId,
-        admission,
-      );
-      return { submissionId: receipt.feedId };
+      return await this.channels.withListingWrites(account, input.items.map(item => item.sku), async () => {
+        await input.beforeSubmit();
+        writeEntered = true;
+        const receipt = await api.submitFeed(
+          feedType,
+          { MPItemFeedHeader: feedHeader(feedType), MPItem: input.items.map(item => item.payload) },
+          input.correlationId,
+          admission,
+        );
+        return { submissionId: receipt.feedId };
+      });
     } catch (error) {
       const effect = !writeEntered
         ? "not_sent"

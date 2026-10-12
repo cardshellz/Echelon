@@ -3,6 +3,16 @@ import { describe, expect, it, vi } from "vitest";
 import type { CanonicalInventoryPublicationIntent } from "../../application/inventory-availability-runtime-publication.service";
 import { PostgresInventoryAvailabilityRuntimePublicationExecutor } from "../../infrastructure/inventory-availability-runtime-publication.repository";
 
+vi.mock("../../infrastructure/inventory-publication-selection.reader", () => ({
+  readPublicationStockSelection: vi.fn(async (_client, _target, input) => ({
+    productId: input.productId, fingerprint: "a".repeat(64),
+    variants: input.productVariantIds.map((productVariantId: number) => ({
+      productVariantId, action: "zero", reason: "Retained listing removal", blockers: [],
+    })),
+  })),
+  selectionRequiresPublication: (action: string) => action === "publish" || action === "zero",
+}));
+
 describe("PostgresInventoryAvailabilityRuntimePublicationExecutor", () => {
   it("pins legacy authority through the selected publisher and commits afterward", async () => {
     const client = fakeClient({ authority: "legacy", authority_revision: "1", activation_run_id: null });

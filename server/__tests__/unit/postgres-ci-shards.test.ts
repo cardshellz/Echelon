@@ -56,6 +56,11 @@ function runnerFixture() {
 describe("PostgreSQL CI coverage and isolation", () => {
   it("preserves prior coverage with the explicitly retired duplicate invoice owner and reviewed additions", () => {
     const addedSuites = [
+      "server/modules/channels/__tests__/integration/channel-stock-selection.integration.test.ts",
+      "server/modules/dropship/__tests__/integration/dropship-stock-publication-selection.integration.test.ts",
+      "server/modules/inventory-planning/__tests__/integration/publication-selection-work.integration.test.ts",
+      "server/modules/inventory-planning/__tests__/integration/stock-selection-publication-flow.integration.test.ts",
+      "server/modules/inventory-planning/__tests__/integration/inventory-publication-readback-selection.integration.test.ts",
       "server/modules/procurement/__tests__/integration/po-quantity-amendment.integration.test.ts",
       "server/modules/inventory/__tests__/integration/lot-cost-ownership.integration.test.ts",
       "server/modules/inventory-planning/__tests__/integration/inventory-cutover-history-reader.integration.test.ts",
@@ -137,6 +142,8 @@ describe("PostgreSQL CI coverage and isolation", () => {
       "server/modules/dropship/__tests__/integration/dropship-product-category-listing-settings.integration.test.ts",
       "server/modules/dropship/__tests__/integration/dropship-ebay-category-rules.integration.test.ts",
       "server/modules/procurement/__tests__/integration/supplier-po-document.integration.test.ts",
+      "server/modules/marketplace-listings/__tests__/integration/listing-lifecycle.integration.test.ts",
+      "server/modules/dropship/__tests__/integration/dropship-listing-setting-writes.integration.test.ts",
     ];
     const retiredInvoiceSuite = "server/modules/inventory/__tests__/integration/invoice-variance-cogs.integration.test.ts";
     expect(POSTGRES_TEST_FILES).not.toContain(retiredInvoiceSuite);

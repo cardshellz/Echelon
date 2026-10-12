@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { publicationMembershipReceiptSchema } from "@shared/types/inventory-publication-membership";
+import { publicationMappingPreparationReceiptSchema } from "@shared/types/inventory-publication-mapping-preparation";
 import { InventoryPublicationMembershipError } from "./inventory-publication-membership.service";
 
 const id = z.number().int().positive().max(2_147_483_647);
@@ -20,7 +20,7 @@ export const verifiedStockListingSchema = z.object({
 export type VerifiedStockListing = z.infer<typeof verifiedStockListingSchema>;
 const stockConnectionResultSchema = z.object({
   state: z.enum(["connected", "already_connected", "excluded"]), dryRun: z.boolean(),
-  receipt: publicationMembershipReceiptSchema.nullable(),
+  receipt: publicationMappingPreparationReceiptSchema.nullable(),
   quantities: z.array(z.object({ productVariantId: id, desiredQuantity: z.string().regex(/^(0|[1-9][0-9]*)$/) }).strict()),
 }).strict();
 export type VerifiedListingStockResult = z.infer<typeof stockConnectionResultSchema>;

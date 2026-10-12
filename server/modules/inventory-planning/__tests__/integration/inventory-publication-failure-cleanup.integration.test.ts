@@ -12,6 +12,7 @@ import { PostgresInventoryPublicationOutboxRepository } from "../../infrastructu
 import { InventoryPublicationOutboxService } from "../../application/inventory-publication-outbox.service";
 import { InventoryPublicationTransportRegistry, InventoryPublicationTransportError } from "../../application/inventory-publication-transport";
 import { PostgresQuantityPublicationAdmission } from "../../infrastructure/quantity-publication-admission.repository";
+import { installStockSelectionFixture } from "../fixtures/stock-selection.fixture";
 
 vi.mock("../../../../db", () => ({ pool: {} }));
 const url = process.env.ECHELON_TEST_DATABASE_URL;
@@ -30,6 +31,10 @@ dbDescribe.sequential("publication failure cleanup with real admission and publi
     await installCutoverCompositionMigrations(database.pool);
     await database.pool.query(cutoverCompositionSeedSql);
     await database.pool.query(cutoverCompositionChannelSeedSql);
+    await installStockSelectionFixture(database.pool);
+    await database.pool.query(`INSERT INTO channels.channel_feeds
+      (channel_id,product_variant_id,channel_variant_id,channel_inventory_item_id,channel_sku)
+      VALUES(36,101,'test-variant','test-item','P5')`);
     await installCutoverAdmissionFixturePrerequisites(database.pool);
     for (const file of ["236_inventory_cutover_admission.sql", "240_inventory_cutover_verified_opening.sql"]) {
       await database.pool.query(readFileSync(resolve(process.cwd(), "migrations", file), "utf8"));

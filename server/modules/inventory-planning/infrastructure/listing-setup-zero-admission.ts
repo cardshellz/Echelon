@@ -45,7 +45,7 @@ export async function validateListingSetupZeroReadinessInsideTransaction(
     JOIN inventory.availability_activation_runs r ON r.id=a.activation_run_id AND r.mode='activation' AND r.state='active'
     WHERE t.id=$1 AND t.revision=$2::bigint AND t.channel_id=$3 AND t.channel_connection_id=$4
       AND t.destination_kind='channel_connection' AND t.provider_scope_type='location' AND t.external_scope_id=$5
-      AND t.state='live' AND t.publication_authority='echelon' AND t.membership_mode='explicit'
+      AND t.state='live' AND t.publication_authority='echelon'
       AND w.partner_id=$6 AND w.environment=$7 AND w.ship_node_id=$5
     FOR SHARE OF t,c,cc,w,a,r`,
       [
@@ -210,13 +210,10 @@ export async function validateListingSetupZeroReadinessInsideTransaction(
           "The selected SKU's inventory source must match the configured Walmart fulfillment warehouse.",
         );
       }
-      if (
-        configured.membership?.mode !== "explicit" ||
-        configured.membership.includedVariantIds.includes(variant.id)
-      ) {
+      if (configured.mappings.some(mapping => mapping.productVariantId === variant.id)) {
         fail(
           "PUBLICATION_SETUP_ALREADY_MANAGED",
-          "Initial item setup cannot replace an already managed inventory member.",
+          "Initial item setup cannot replace an existing inventory listing mapping.",
         );
       }
     }

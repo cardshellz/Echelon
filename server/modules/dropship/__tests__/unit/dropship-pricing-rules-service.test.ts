@@ -38,7 +38,8 @@ describe("store pricing review and approval", () => {
     tx = { vendorId: 10, catalog, costs: { loadProductCosts: vi.fn(async ({ productVariantIds }) => new Map(productVariantIds.map((id) => [id, currentCost]))) },
       listVariantIds: vi.fn(async (afterId, limit) => candidates.filter((row) => row.productVariantId > afterId).slice(0, limit).map((row) => row.productVariantId)),
       listProductLines: vi.fn(async () => [{ id: 2, name: "Mailing supplies" }]),
-      loadProfile: vi.fn(async () => state), loadRuleLayers: vi.fn(async () => EMPTY_LISTING_SETTING_LAYERS), storeReview: vi.fn(async (review) => { stored = review; }),
+      loadProfile: vi.fn(async () => state), loadRuleLayers: vi.fn(async () => EMPTY_LISTING_SETTING_LAYERS),
+      lockSelection: vi.fn(async () => undefined), storeReview: vi.fn(async (review) => { stored = review; }),
       loadReview: vi.fn(async () => stored), findApplication: vi.fn(async () => null), applyReview: vi.fn(async () => 1) };
     service = new DropshipPricingRulesService({ repository: { execute: async (_member, _store, operation) => operation(tx) },
       clock: { now: () => now }, newId: () => reviewId, logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() } });
@@ -188,6 +189,27 @@ describe("store pricing review and approval", () => {
     expect(await service.applyForMember("member-1", 22, { reviewId, reviewHash: "a".repeat(64), idempotencyKey: "apply-1" }))
       .toEqual({ revisionId: 12, idempotentReplay: true });
     expect(tx.costs.loadProductCosts).not.toHaveBeenCalled(); expect(tx.applyReview).not.toHaveBeenCalled();
+    // A replay re-reads nothing, so it takes no selection lock either (plan PR 9, P37).
+    expect(tx.lockSelection).not.toHaveBeenCalled();
+  });
+  it("locks the selection on apply after the replay miss and before the review and the recompute (plan PR 9, P37)", async () => {
+    const result = await review();
+    vi.mocked(tx.loadReview).mockClear(); vi.mocked(tx.loadProfile).mockClear(); vi.mocked(tx.listVariantIds).mockClear();
+    await service.applyForMember("member-1", 22, { reviewId: result.reviewId, reviewHash: result.reviewHash, idempotencyKey: "apply-1" });
+    expect(tx.lockSelection).toHaveBeenCalledOnce();
+    const order = (fn: unknown) => vi.mocked(fn as () => unknown).mock.invocationCallOrder[0];
+    expect(order(tx.findApplication)).toBeLessThan(order(tx.lockSelection));
+    expect(order(tx.lockSelection)).toBeLessThan(order(tx.loadReview));
+    expect(order(tx.lockSelection)).toBeLessThan(order(tx.loadProfile));
+    expect(order(tx.lockSelection)).toBeLessThan(order(tx.listVariantIds));
+    expect(order(tx.lockSelection)).toBeLessThan(order(tx.applyReview));
+  });
+  it("takes no selection lock to read the profile, review, page a review or list targets", async () => {
+    await service.getForMember("member-1", 22);
+    const result = await review();
+    await service.reviewPageForMember("member-1", 22, result.reviewId, 1);
+    await service.targetsForMember("member-1", 22, { type: "listings", search: "", page: 0 });
+    expect(tx.lockSelection).not.toHaveBeenCalled();
   });
   it("fails authorization before reading costs or catalog selections", async () => {
     vi.mocked(tx.catalog.loadStoreContext).mockResolvedValue(null);
