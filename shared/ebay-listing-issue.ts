@@ -6,6 +6,7 @@ export interface EbayListingIssueInput {
   productId?: number;
   jobId?: string;
   state?: string;
+  quantityBlockerCodes?: readonly string[];
 }
 
 /** One presentation contract for API results, saved work, and older server responses.
@@ -15,13 +16,43 @@ export function resolveEbayListingIssue(input: EbayListingIssueInput): EbayListi
   const productPath = Number.isSafeInteger(input.productId) && input.productId! > 0 ? `/products/${input.productId}` : "/channels/ebay";
   const inventoryPath = Number.isSafeInteger(input.productId) && input.productId! > 0 ? `/channels/inventory?product=${input.productId}` : "/channels/inventory";
   const reference = input.jobId && /^[a-f0-9-]{36}$/i.test(input.jobId) ? input.jobId : undefined;
-  const message = safeListingDiagnostic(input.message);
+  // Read failures can contain database/transport diagnostics. Only our fixed
+  // copy is public; details and references are supplied by the read boundary.
+  const isFeedReadIssue = input.code === "EBAY_LISTING_FEED_UNAVAILABLE" || input.code?.startsWith("EBAY_FEED_QUANTITY_")
+    || input.code?.startsWith("CANONICAL_CHANNEL_QUANTITY_");
+  const message = isFeedReadIssue ? undefined : safeListingDiagnostic(input.message);
   const issue = (title: string, fallback: string, nextStep: string, retryable: boolean,
     kind: EbayListingIssue["action"]["kind"], label: string, href?: string): EbayListingIssue =>
     ebayListingIssueSchema.parse({ code, title, message: message || fallback, nextStep, retryable,
       action: { kind, label, ...(href ? { href } : {}) }, ...(reference ? { reference } : {}),
       ...(input.productId ? { details: [{ label: "Product ID", value: String(input.productId) }] } : {}) });
 
+  if (code === "EBAY_LISTING_FEED_UNAVAILABLE")
+    return issue("Listings could not be loaded", "Echelon could not read the listing feed. Listing status and quantities are unavailable.",
+      "Use Reload listings to try the read again. If it still fails, copy the diagnostic reference for an administrator to investigate the failed read.",
+      false, "contact_support", "Copy diagnostic details");
+  if (code === "EBAY_FEED_QUANTITY_UNAVAILABLE")
+    return issue("Inventory could not be loaded", "Echelon could not read this product's current eBay quantity. Other products can still be viewed.",
+      "Use Reload inventory to try this read again. If it still fails, copy the diagnostic reference for an administrator. Publishing checks current stock separately.",
+      false, "contact_support", "Copy diagnostic details");
+  if (code === "EBAY_FEED_QUANTITY_MISSING")
+    return issue("A variant has no stock destination quantity", "The inventory reader did not return a quantity for one or more selected, inventory-managed variants in this product.",
+      "Open inventory settings for this product and check the eBay destination and variant eligibility. After correcting the reported setup, use Reload inventory. An unavailable quantity is not zero stock.",
+      false, "edit_listing", "Open inventory settings", inventoryPath);
+  if (code === "EBAY_FEED_QUANTITY_INVALID")
+    return issue("Inventory returned an invalid quantity", "The inventory reader returned an invalid or duplicate variant quantity, so this product's stock cannot be displayed reliably.",
+      "Copy the diagnostic reference for an administrator to inspect the inventory result. Do not change stock quantities or listing links to work around this error.",
+      false, "contact_support", "Copy diagnostic details");
+  if (code === "CANONICAL_CHANNEL_QUANTITY_BLOCKED")
+    return issue("Stock setup needs a correction", input.quantityBlockerCodes?.map(blocker => Object.hasOwn(quantityReadBlockerMessages, blocker)
+      ? quantityReadBlockerMessages[blocker] : undefined).find(Boolean)
+      ?? "The inventory source, channel policy or listing selection failed a stock check for this product.",
+      "Open inventory settings for this product and review the reported inventory check and stock destination. Correct the setup, then use Reload inventory.",
+      false, "edit_listing", "Open inventory settings", inventoryPath);
+  if (["CANONICAL_CHANNEL_QUANTITY_TARGET_AMBIGUOUS", "CANONICAL_CHANNEL_QUANTITY_TARGET_DUPLICATE"].includes(code))
+    return issue("More than one stock destination matched", "Echelon found duplicate or conflicting eBay stock destinations for a variant and cannot choose its quantity.",
+      "Open inventory settings for this product. An administrator must correct the duplicate or conflicting eBay destinations, then use Reload inventory.",
+      false, "edit_listing", "Open inventory settings", inventoryPath);
   if (code === "PUBLICATION_SELECTION_BUSY")
     return issue("A stock update is finishing", "Your channel selection was not saved because a stock update is still finishing.",
       "Wait a moment, then retry the same selection change. If the inclusion dialog is open, use its retry button so the original request reference is kept.",
@@ -251,6 +282,18 @@ export function resolveEbayListingIssue(input: EbayListingIssueInput): EbayListi
       : "Copy the diagnostic details and product ID for an administrator. Check the listing feed for its current state before retrying.",
     false, "contact_support", "Copy diagnostic details");
 }
+
+/** Public descriptions of the planner's checks; unknown diagnostics stay private. */
+const quantityReadBlockerMessages: Readonly<Record<string, string>> = {
+  CHANNEL_SOURCE_BINDING_MISSING: "The eBay stock destination has no active source warehouse configured.",
+  CHANNEL_SOURCE_NODE_NOT_ACTIVE: "The eBay stock destination uses a fulfillment location that is inactive.",
+  CHANNEL_SOURCE_WAREHOUSE_DUPLICATE: "The same warehouse is connected more than once to this eBay stock destination.",
+  CHANNEL_SOURCE_WAREHOUSE_NOT_ACTIVE: "A warehouse supplying this eBay stock destination is missing or inactive.",
+  CHANNEL_SOURCE_OVERRIDE_UNAVAILABLE: "This variant's stock source override refers to a missing, duplicate or inactive warehouse.",
+  CHANNEL_EXPOSURE_POLICY_INCOMPLETE: "This product's eBay stock policy is missing settings required to calculate its listing quantity.",
+  PUBLICATION_MEMBER_VARIANT_UNAVAILABLE: "A selected variant is missing or no longer eligible for inventory publication.",
+  PUBLICATION_TARGET_HAS_NO_MANAGED_SKUS: "This product has no active physical variant managed by inventory for this stock destination.",
+};
 
 export function safeListingDiagnostic(value: string | null | undefined): string | undefined {
   if (!value?.trim()) return undefined;

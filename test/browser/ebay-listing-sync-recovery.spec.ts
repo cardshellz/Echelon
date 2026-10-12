@@ -332,12 +332,110 @@ test("failure to read saved status is visible and blocks duplicate sync until re
 
 test("feed failures offer reload instead of claiming there are no listings", async ({ page }) => {
   const state = await setupEbayChannelPage(page);
-  await page.route("**/api/ebay/listing-feed", (route) => route.fulfill({ status: 503, json: { error: "Unavailable" } }));
+  await page.route("**/api/ebay/listing-feed", (route) => route.fulfill({ status: 503, json: { error: "SELECT private_column FROM secret_table", issue: { message: "<html>internal proxy error</html>" } } }));
   await page.reload();
   await expect(page.getByRole("alert")).toContainText("Listings could not be loaded");
   await expect(page.getByRole("button", { name: "Reload listings" })).toBeVisible();
+  await expect(page.getByText("SELECT private_column FROM secret_table")).toHaveCount(0);
+  await expect(page.getByText("internal proxy error", { exact: false })).toHaveCount(0);
+  await expect(page.getByRole("alert")).not.toContainText("No products");
   expect(state.errors).toEqual([]); expect(state.unexpected).toEqual([]);
 });
+
+test("feed failure preserves safe diagnostics and blocks every bulk action on cached rows until read-only reload succeeds", async ({ page }) => {
+  const state = await setupEbayChannelPage(page);
+  const issue = {
+    code: "EBAY_LISTING_FEED_UNAVAILABLE", title: "Listing details are unavailable",
+    message: "Echelon could not read the saved listing details.",
+    nextStep: "Reload the listings. If this continues, copy the reference for support.",
+    reference: "feed-read-42", retryable: false,
+    action: { kind: "contact_support", label: "Copy diagnostic details" },
+  };
+  let failing = true;
+  let reads = 0;
+  await page.route("**/api/ebay/listing-feed", (route) => {
+    reads += 1;
+    return failing ? route.fulfill({ status: 503, json: { code: issue.code, error: "raw internal failure", issue } }) : route.fallback();
+  });
+  // The existing saved-job poll invalidates the loaded feed; this is a failed
+  // background read with cached rows, not a fresh empty-page fixture.
+  await expect(page.getByRole("alert")).toContainText(issue.message, { timeout: 20_000 });
+  await expect(page.getByRole("button", { name: "Sync All (1)", exact: true })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "Verify (1)", exact: true })).toBeDisabled();
+  await expect(page.getByRole("button", { name: /^Push to eBay/ })).toBeDisabled();
+  await expect(page.getByText("raw internal failure", { exact: true })).toHaveCount(0);
+  await expect(page.getByRole("alert")).toContainText(issue.nextStep);
+  await page.getByText("Technical details", { exact: true }).click();
+  await expect(page.getByRole("alert")).toContainText(issue.code);
+  await expect(page.getByRole("alert")).toContainText(issue.reference);
+  failing = false;
+  const beforeReload = reads;
+  await page.getByRole("button", { name: "Reload listings", exact: true }).click();
+  await expect(page.getByText("55PT Toploader Combo Pack", { exact: true })).toBeVisible();
+  await expect(page.getByRole("alert")).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Verify (1)", exact: true })).toBeEnabled();
+  expect(reads).toBeGreaterThan(beforeReload);
+  expect(state.requests).toEqual([]); expect(state.errors).toEqual([]); expect(state.unexpected).toEqual([]);
+});
+
+for (const stockFailure of ["blocked", "legacy_retry", "same_sync"] as const) {
+test(`one unavailable product inventory keeps healthy listings and true zero visible and reloads without publishing (${stockFailure})`, async ({ page }) => {
+  const state = await setupEbayChannelPage(page);
+  const inventoryIssue = stockFailure !== "legacy_retry" ? resolveEbayListingIssue({ code: "CANONICAL_CHANNEL_QUANTITY_BLOCKED", productId: 1 }) : {
+    code: "EBAY_FEED_QUANTITY_UNAVAILABLE", title: "Current inventory is unavailable",
+    message: "Inventory could not be read for this product.",
+    nextStep: "Reload inventory to check its current availability.", retryable: true,
+    // Even a retry-shaped older response must not issue a listing write from
+    // the read-error section. Its explicit Reload inventory action is a GET.
+    action: { kind: "retry_sync", label: "Retry this product" },
+  };
+  const savedIssue = stockFailure === "same_sync" ? inventoryIssue
+    : resolveEbayListingIssue({ code: "EBAY_CATALOG_PHOTO_REQUIRED", productId: 1, message: "The saved listing update still needs a case photo." });
+  state.jobs = stockFailure === "blocked" ? [] : [{ ...job, state: "needs_attention", code: savedIssue.code, message: savedIssue.message, issue: savedIssue }];
+  const product = (id: number, name: string, quantities: (number | null)[]) => ({
+    id, name, sku: `PRODUCT-${id}`, productType: "toploaders", productTypeName: "Toploaders",
+    ebayBrowseCategoryId: null, ebayBrowseCategoryName: null, ebayBrowseCategoryOverrideId: null,
+    ebayBrowseCategoryOverrideName: null, ebayStoreCategoryName: null,
+    status: "listed", missingItems: [], missingAspects: [], isListed: true, isExcluded: false,
+    syncError: null, externalListingId: `listing-${id}`, externalListingIdentityConflict: false,
+    variantCount: quantities.length, includedVariantCount: quantities.length, imageCount: 2,
+    variants: quantities.map((quantity, index) => ({ id: id * 10 + index, sku: `SKU-${id}-${index}`, name: `Variant ${id}-${index}`,
+      priceCents: 500, ebayListingExcluded: false, explicitlyExcluded: false, excludedByProduct: false,
+      effectivelyListed: true, inventoryQuantity: quantity, fulfillmentPolicyOverride: null,
+      returnPolicyOverride: null, paymentPolicyOverride: null })),
+    fulfillmentPolicyOverride: null, returnPolicyOverride: null, paymentPolicyOverride: null,
+  });
+  const failed = { ...product(1, "55PT Toploader Combo Pack", [null]), inventoryIssue };
+  state.feedProducts = [failed, product(2, "Healthy product", [7, 0])];
+  await page.reload();
+  await expect(page.getByText("Healthy product", { exact: true })).toBeVisible();
+  const inventory = page.getByRole("region", { name: "Inventory availability for 55PT Toploader Combo Pack" });
+  await expect(inventory).toContainText(stockFailure === "same_sync" ? "The current inventory read encountered the same issue described above." : inventoryIssue.message);
+  await expect(page.getByText(savedIssue.message, { exact: true })).toHaveCount(stockFailure === "blocked" ? 0 : 1);
+  await page.getByRole("button", { name: "Errors (1)", exact: true }).click();
+  await expect(inventory).toBeVisible();
+  await expect(page.getByText("Healthy product", { exact: true })).toHaveCount(0);
+  await page.getByRole("button", { name: "All (2)", exact: true }).click();
+  if (stockFailure === "blocked") {
+    await expect(inventory.getByRole("link", { name: "Open inventory settings", exact: true })).toHaveAttribute("href", "/channels/inventory?product=1");
+  }
+  await expect(inventory.getByRole("button", { name: "Retry this product", exact: true })).toHaveCount(0);
+  await page.getByText("55PT Toploader Combo Pack", { exact: true }).click();
+  await page.getByText("Healthy product", { exact: true }).click();
+  await expect(page.getByText("Unavailable", { exact: true }).filter({ visible: true })).toHaveCount(1);
+  await expect(page.getByText("7 qty", { exact: true }).filter({ visible: true })).toHaveCount(1);
+  await expect(page.getByText("0 qty", { exact: true }).filter({ visible: true })).toHaveCount(1);
+  state.feedProducts = [product(1, "55PT Toploader Combo Pack", [12]), product(2, "Healthy product", [7, 0])];
+  await inventory.getByRole("button", { name: "Reload inventory", exact: true }).click();
+  await expect(inventory).toHaveCount(0);
+  await expect(page.getByText("12 qty", { exact: true }).filter({ visible: true })).toHaveCount(1);
+  await expect(page.getByText("Unavailable", { exact: true })).toHaveCount(0);
+  await expect(page.getByText(savedIssue.message, { exact: true })).toHaveCount(stockFailure === "blocked" ? 0 : 1);
+  await expect(page.getByRole("button", { name: stockFailure === "blocked" ? "Errors (0)" : "Errors (1)", exact: true })).toBeVisible();
+  expect(state.requests).toEqual([]); expect(state.errors).toEqual([]); expect(state.unexpected).toEqual([]);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+});
+}
 
 test("a stale recovery preview needs a new acknowledgement and does not claim success", async ({ page }) => {
   const state = await setupEbayChannelPage(page); state.jobs = [blockedJob];

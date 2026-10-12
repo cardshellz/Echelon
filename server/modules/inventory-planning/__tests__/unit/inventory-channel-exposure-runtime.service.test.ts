@@ -160,7 +160,7 @@ describe("linked-reserve channel supply", () => {
     configured.membership = { mode: "explicit", includedVariantIds: [] };
     configured.mappings = [];
     configured.deferredDropshipQuantityVariantIds = [173];
-    const result = planInventoryChannelExposureProduct(hubContext([configured]), 10, { warn: vi.fn() }, "deferred_dropship_quantity_read");
+    const result = planInventoryChannelExposureProduct(hubContext([configured]), 10, { warn: vi.fn() }, "channel_quantity_read");
     expect(result.targets).toMatchObject([{ publishable: false, rows: [{ productVariantId: 173,
       canonicalAtpUnits: "1985", publishedUnits: "1985", mapping: null, blockers: [] }] }]);
     expect(result.targets[0].rows).toHaveLength(1);
@@ -182,7 +182,7 @@ describe("audited deferred Dropship ATP reads", () => {
     return selected;
   }
   function read(selected = deferredTarget()) {
-    return planInventoryChannelExposureProduct(canonicalContext([selected]), 10, { warn: vi.fn() }, "deferred_dropship_quantity_read");
+    return planInventoryChannelExposureProduct(canonicalContext([selected]), 10, { warn: vi.fn() }, "channel_quantity_read");
   }
   it("reads the same canonical transformation ATP for only the audited SKU and creates no publication plan", () => {
     const selected = deferredTarget(); const before = structuredClone(selected);
@@ -207,11 +207,14 @@ describe("audited deferred Dropship ATP reads", () => {
     selected.destinationKind = "channel_connection"; selected.channelConnectionId = 1; selected.dropshipStoreConnectionId = null;
     expect(read(selected).targets).toEqual([]);
   });
-  it("does not admit unrelated catalog variants or silently excuse a current member's missing mapping", () => {
+  it("reads selected members without requiring provider mapping while publication keeps that guard", () => {
     const selected = deferredTarget(); selected.membership = { mode: "explicit", includedVariantIds: [101] };
     const result = read(selected);
     expect(result.targets[0]!.rows.map(row => row.productVariantId)).toEqual([101, 102]);
-    expect(result.targets[0]!.rows[0]!.blockers.map(row => row.code)).toContain("PUBLICATION_TARGET_VARIANT_MAPPING_MISSING");
+    expect(result.targets[0]!).toMatchObject({ readOnly: true, publishable: false });
+    expect(result.targets[0]!.rows[0]!.blockers).toEqual([]);
+    expect(planInventoryChannelExposureProduct(canonicalContext([selected]), 10).targets[0]!.rows[0]!.blockers.map(row => row.code))
+      .toContain("PUBLICATION_TARGET_VARIANT_MAPPING_MISSING");
     selected.deferredDropshipQuantityVariantIds = [];
     selected.membership = { mode: "explicit", includedVariantIds: [] };
     expect(read(selected).targets).toEqual([]);
@@ -226,9 +229,24 @@ describe("channel-owned stock selection", () => {
     })) };
     return selected;
   }
-  function plan(selected: ActiveInventoryPublicationTargetSnapshot, purpose: "publication" | "deferred_dropship_quantity_read" = "publication") {
+  function plan(selected: ActiveInventoryPublicationTargetSnapshot, purpose: "publication" | "channel_quantity_read" = "publication") {
     return planInventoryChannelExposureProduct(canonicalContext([selected]), 10, { warn: vi.fn() }, purpose);
   }
+  it.each(["ebay", "shopify", "walmart"])("reads %s quantities without provider mappings, without permitting publication", provider => {
+    const selected = selectedTarget(["publish", "read_only"]);
+    selected.channelProvider = provider;
+    selected.mappings = [];
+    const before = structuredClone(selected);
+    const read = plan(selected, "channel_quantity_read");
+    expect(read.targets[0]).toMatchObject({ readOnly: true, publishable: false, blockers: [], rows: [
+      { productVariantId: 101, canonicalAtpUnits: "25", publishedUnits: "25", mapping: null, blockers: [] },
+      { productVariantId: 102, canonicalAtpUnits: "7", publishedUnits: "7", mapping: null, blockers: [] },
+    ] });
+    expect(plan(selected).targets[0]).toMatchObject({ publishable: false, rows: [
+      { productVariantId: 101, blockers: [{ code: "PUBLICATION_TARGET_VARIANT_MAPPING_MISSING" }] },
+    ] });
+    expect(selected).toEqual(before);
+  });
   it("uses channel selection even when old independent membership excluded every SKU", () => {
     const selected = selectedTarget(["publish", "publish"]);
     selected.membership = { mode: "explicit", includedVariantIds: [] };
@@ -271,7 +289,7 @@ describe("channel-owned stock selection", () => {
     const selected = selectedTarget(["none", "read_only"]);
     selected.destinationKind = "dropship_store_connection"; selected.channelConnectionId = null; selected.dropshipStoreConnectionId = 1;
     selected.mappings = []; selected.deferredDropshipQuantityVariantIds = [102];
-    expect(plan(selected, "deferred_dropship_quantity_read").targets[0]).toMatchObject({ readOnly: true, publishable: false,
+    expect(plan(selected, "channel_quantity_read").targets[0]).toMatchObject({ readOnly: true, publishable: false,
       rows: [{ productVariantId: 102, canonicalAtpUnits: "7", publishedUnits: "7", mapping: null, blockers: [] }] });
     expect(plan(selected).targets).toEqual([]);
   });

@@ -26,6 +26,7 @@ export async function setupEbayChannelPage(page: Page) {
     connectionHealth: "verified" as "verified" | "needs_attention" | "not_connected",
     connectionIssue: null as EbayListingIssue | null,
     syncError: null as string | null,
+    feedProducts: null as unknown[] | null,
     commands: [] as string[],
     requests: [] as string[],
     errors: [] as string[],
@@ -98,8 +99,8 @@ export async function setupEbayChannelPage(page: Page) {
     if (path === "/api/ebay/listing-feed")
       return route.fulfill({
         json: {
-          total: 1,
-          feed: [
+          total: state.feedProducts?.length ?? 1,
+          feed: state.feedProducts ?? [
             {
               id: 1,
               name: "55PT Toploader Combo Pack",
