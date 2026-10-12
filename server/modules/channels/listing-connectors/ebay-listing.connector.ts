@@ -11,6 +11,7 @@ import {
   inventoryItemSyncContent,
   itemGroupSyncContent,
   offerSyncContent,
+  syncContentIntentHash,
 } from "../ebay-listing-sync-content";
 import type {
   BuiltInventoryItem,
@@ -105,6 +106,14 @@ export interface EbayDiscoveredPublishedListing {
 export type EbayPublishedListingIdentityResolver = (
   discovered: EbayDiscoveredPublishedListing,
 ) => Promise<MarketplaceObservedListingPublication>;
+
+async function runPublicationStage<T>(stage: ((key: string, hash: string, work: () => Promise<void>) => Promise<void>) | undefined,
+  key: string, value: unknown, work: () => Promise<T>): Promise<T> {
+  if (!stage) return work();
+  let result: T | undefined;
+  await stage(key, syncStageHash(value), async () => { result = await work(); });
+  return result as T;
+}
 
 export interface EbayExistingListingSyncResult {
   productId: number;
@@ -220,6 +229,7 @@ export class EbayMarketplaceListingConnector {
     client: EbayListingConnectorClient;
     draft: EbayListingConnectorDraft;
     resolvePublishedIdentity?: EbayPublishedListingIdentityResolver;
+    stage?: (key: string, hash: string, work: () => Promise<void>) => Promise<void>;
   }): Promise<EbayListingConnectorResult> {
     validateDraft(input.draft);
 
@@ -260,16 +270,15 @@ export class EbayMarketplaceListingConnector {
     for (const { offer, existingOfferId } of resolvedOffers) {
       if (!existingOfferId) continue;
 
-      await input.client.updateOffer(
-        existingOfferId,
-        withOfferId(offer.payload, existingOfferId),
-      );
+      await runPublicationStage(input.stage, `offer:${offer.variantId}`, offer.payload, () => input.client.updateOffer(
+        existingOfferId, withOfferId(offer.payload, existingOfferId)));
       offerIdsByVariantId[offer.variantId] = existingOfferId;
       await this.delay(this.offerDelayMs);
     }
 
     for (const item of input.draft.inventoryItems) {
-      await input.client.createOrReplaceInventoryItem(item.sku, item.payload);
+      await runPublicationStage(input.stage, `inventory:${item.sku}`, item.payload,
+        () => input.client.createOrReplaceInventoryItem(item.sku, item.payload));
       await this.delay(this.inventoryDelayMs);
     }
 
@@ -277,7 +286,8 @@ export class EbayMarketplaceListingConnector {
     for (const { offer, existingOfferId } of resolvedOffers) {
       if (existingOfferId) continue;
 
-      const offerId = await input.client.createOffer(offer.payload);
+      const offerId = await runPublicationStage(input.stage, `create_offer:${offer.variantId}`, offer.payload,
+        () => input.client.createOffer(offer.payload));
       if (input.draft.updateOfferAfterCreate) {
         await input.client.updateOffer(
           offerId,
@@ -294,6 +304,7 @@ export class EbayMarketplaceListingConnector {
       offerIdsByVariantId,
       firstListingId,
       verifiedPublishedListingId,
+      stage: input.stage,
     });
 
     return {
@@ -1053,6 +1064,7 @@ export class EbayMarketplaceListingConnector {
     offerIdsByVariantId: Record<number, string>;
     firstListingId?: string;
     verifiedPublishedListingId?: string;
+    stage?: (key: string, hash: string, work: () => Promise<void>) => Promise<void>;
   }): Promise<string | undefined> {
     if (input.draft.publishMode === "stage") {
       return (
@@ -1063,16 +1075,16 @@ export class EbayMarketplaceListingConnector {
     }
 
     if (input.draft.itemGroup) {
-      await input.client.createOrReplaceInventoryItemGroup(
-        input.draft.itemGroup.groupKey,
-        input.draft.itemGroup.payload,
-      );
+      const group = input.draft.itemGroup;
+      await runPublicationStage(input.stage, `group:${group.groupKey}`, group.payload,
+        () => input.client.createOrReplaceInventoryItemGroup(group.groupKey, group.payload));
       if (input.verifiedPublishedListingId) return input.verifiedPublishedListingId;
-      const publishResult = await this.publishGroupWithConsistencyRetry({
+      const publishResult = await runPublicationStage(input.stage ? (key, _hash, work) => input.stage!(key, syncContentIntentHash(input.draft), work) : undefined,
+        "publish", { groupKey: group.groupKey, offers: input.offerIdsByVariantId }, () => this.publishGroupWithConsistencyRetry({
         client: input.client,
-        groupKey: input.draft.itemGroup.groupKey,
+        groupKey: group.groupKey,
         marketplaceId: input.draft.marketplaceId,
-      });
+      }));
       return (
         publishResult.listingId ??
         input.draft.existingExternalProductId ??
@@ -1085,7 +1097,8 @@ export class EbayMarketplaceListingConnector {
     if (!offerId) {
       throw new EbayListingSyncError("EBAY_SYNC_PROVIDER_RESPONSE_INVALID", "Cannot publish eBay listing without an offer id. Review the existing provider offers before another publication attempt.");
     }
-    const publishResult = await input.client.publishOffer(offerId);
+    const publishResult = await runPublicationStage(input.stage ? (key, _hash, work) => input.stage!(key, syncContentIntentHash(input.draft), work) : undefined,
+      "publish", { offerId }, () => input.client.publishOffer(offerId));
     return (
       publishResult.listingId ??
       input.draft.existingExternalProductId ??

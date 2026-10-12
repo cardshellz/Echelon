@@ -36,12 +36,30 @@ vi.mock("../../infrastructure/ebay-listing-helpers", async importOriginal => ({
 vi.mock("../../ebay-listing-sync", () => ({ readExistingEbayListingIdentityForProduct: vi.fn() }));
 vi.mock("../../adapters/ebay/ebay-marketplace-registration.factory", async () => {
   const { EbayMarketplaceRegistrationObserver } = await import("../../../marketplace-listings/infrastructure/providers/ebay/ebay-registration-observer");
-  return { createEbayMarketplaceRegistrationAdapters: () => ({ observer: new EbayMarketplaceRegistrationObserver(
+  return { createEbayMarketplaceRegistrationAdapters: () => { const observer = new EbayMarketplaceRegistrationObserver(
     { loadFreshCredential: async () => ({ accessToken: "test-only", environment: "production" }) }, state.transport!,
     { now: () => new Date("2026-10-09T20:00:00Z") },
-  ) }) };
+  ); return { observer, inspector: observer }; } };
 });
-import { ebayListingPushService } from "../../infrastructure/ebay-listing-push";
+import { prepareEbayPublicationCompletion, readEbayPublicationSource } from "../../infrastructure/ebay-listing-push";
+import { EbayPublicationCompletionExecution } from "../../ebay-publication-completion.service";
+import { EbayMarketplaceListingConnector } from "../../listing-connectors/ebay-listing.connector";
+import type { EbayListingExecutionContext } from "../../ebay-listing-sync.service";
+import type { EbayListingSyncIdentity } from "../../ebay-listing-sync.domain";
+
+async function runPublication(productId: number): Promise<{ success: boolean; identity: EbayListingSyncIdentity | null; error?: unknown }> {
+  const context: EbayListingExecutionContext = { operation: "publish", publicationTarget: null, publicationAccepted: null,
+    publicationWriteStarted: false, publicationWriteCompleted: false, publicationAcceptedRevision: null, claimedRevision: "1", publicationIntentHash: null,
+    bindPublicationTarget: async identity => { context.publicationTarget = identity; }, bindPublicationAccepted: async value => { context.publicationAccepted = value; } };
+  let identity: EbayListingSyncIdentity | null = null;
+  const executor = new EbayPublicationCompletionExecution(prepareEbayPublicationCompletion,
+    { reconcile: async () => ({ busy: false, resolved: [], unresolved: [] }) }, new EbayMarketplaceListingConnector(), async () => {});
+  try {
+    const result = await executor.execute(await readEbayPublicationSource(productId), async (_key, _hash, work) => work(), null,
+      async value => { identity = value; }, context);
+    return { success: result.errors === 0, identity };
+  } catch (error) { return { success: false, error, identity }; }
+}
 
 const examples = [
   { productId: 3, catalog: "SHLZ-TOP-180PT-CLR", group: "SHLZ-TOP-180PT", suffixes: ["P10", "C500"], ids: [5, 6], listing: "298148206427", offers: ["136406510011", "136406511011"] },
@@ -51,7 +69,7 @@ function provider(example = examples[0], grouped = true) {
   state.product = { id: example.productId, name: "Current title", sku: example.catalog, product_type: "Toploaders", ebay_browse_category_id: "183454" };
   state.variants = (grouped ? example.ids : example.ids.slice(0, 1)).map((id, index) => ({ id, sku: `${example.group}-${example.suffixes[index]}`,
     catalog_sku: `${example.catalog}-${example.suffixes[index]}`, name: example.suffixes[index], option1_name: "Pack Size", option1_value: example.suffixes[index],
-    price_cents: 1000, weight_grams: 100, external_variant_id: null, external_product_id: null, external_sku: null }));
+    price_cents: 1000, weight_grams: 100, external_variant_id: null, external_product_id: null, external_sku: null, mapping_exists: false }));
   const base = syncProviderFixture();
   const offers = new Map<string, EbayObservedOffer>(state.variants.map((variant, index) => [String(variant.sku), {
     sku: String(variant.sku), offerId: example.offers[index], status: "PUBLISHED", listingId: example.listing,
@@ -59,7 +77,14 @@ function provider(example = examples[0], grouped = true) {
     pricingSummary: { price: { value: "10.00", currency: "USD" } },
     listingPolicies: { paymentPolicyId: "payment", fulfillmentPolicyId: "shipping", returnPolicyId: "returns" },
   }]));
+  const items = new Map(state.variants.map(variant => [String(variant.sku), { ...base.currentItem(), sku: String(variant.sku) }]));
+  let group = { ...base.currentGroup(), variantSKUs: state.variants.map(variant => String(variant.sku)) };
   state.client = { ...base.client,
+    getInventoryItem: vi.fn(async sku => structuredClone(items.get(sku) ?? null)),
+    createOrReplaceInventoryItem: vi.fn(async (sku, payload) => { items.set(sku, { ...structuredClone(payload), sku }); }),
+    getInventoryItemGroup: vi.fn(async () => structuredClone(group)),
+    createOrReplaceInventoryItemGroup: vi.fn(async (_key, payload) => { group = { ...structuredClone(payload), variantSKUs: payload.variantSKUs! }; }),
+    updateOffer: vi.fn(async (id, payload) => { offers.set(payload.sku!, { ...structuredClone(payload), offerId: id, status: "PUBLISHED", listingId: example.listing }); }),
     getOffers: vi.fn(async sku => ({ offers: offers.has(sku) ? [structuredClone(offers.get(sku)!)] : [] })),
     publishOffer: vi.fn(async () => ({ listingId: example.listing })),
     publishOfferByInventoryItemGroup: vi.fn(async () => ({ listingId: example.listing })),
@@ -90,21 +115,21 @@ beforeEach(() => { state.project.mockClear(); state.failure.mockClear(); state.a
 describe("production initial-publication replay through the canonical provider observer", () => {
   it("recovers a genuine single published offer without creating a catalog group", async () => {
     const client = provider(examples[0], false);
-    const result = await ebayListingPushService.push({ productIds: [3] });
-    expect(result.results[0]).toMatchObject({ success: true, listingId: examples[0].listing });
+    const result = await runPublication(3);
+    expect(result).toMatchObject({ success: true, identity: { variants: [expect.objectContaining({ listingId: examples[0].listing })] } });
     expect(client.createOrReplaceInventoryItemGroup).not.toHaveBeenCalled();
     expect(client.publishOfferByInventoryItemGroup).not.toHaveBeenCalled();
     expect(client.publishOffer).not.toHaveBeenCalled();
   });
   it.each(examples)("reuses product $productId's actual published group after local persistence loss and Catalog rename", async example => {
     const client = provider(example);
-    const result = await ebayListingPushService.push({ productIds: [example.productId] });
-    expect(result.results[0]).toMatchObject({ success: true, listingId: example.listing });
+    const result = await runPublication(example.productId);
+    expect(result).toMatchObject({ success: true, identity: { groupKey: example.group } });
     expect(client.createOrReplaceInventoryItemGroup).toHaveBeenCalledWith(example.group, expect.objectContaining({ variantSKUs: state.variants.map(variant => variant.sku) }));
     expect(client.publishOfferByInventoryItemGroup).not.toHaveBeenCalled();
     expect(client.createOffer).not.toHaveBeenCalled();
-    expect(state.project).toHaveBeenCalledWith(example.productId, state.variants,
-      expect.objectContaining({ externalProductId: example.listing, externalOfferIds: Object.fromEntries(example.ids.map((id, index) => [id, example.offers[index]])) }), expect.any(Map), []);
+    expect(state.project).not.toHaveBeenCalled(); // Only the durable finish transaction may project.
+    expect(result.identity?.variants.map(member => member.offerId)).toEqual(example.offers);
   });
 
   it.each(["account", "extra_member", "changed_offer"])("rejects %s mismatch before the first provider write or local success", async mismatch => {
@@ -112,8 +137,8 @@ describe("production initial-publication replay through the canonical provider o
     if (mismatch === "account") state.accountId = "another-seller";
     if (mismatch === "extra_member") state.extraMember = true;
     if (mismatch === "changed_offer") state.changedOffer = true;
-    const result = await ebayListingPushService.push({ productIds: [3] });
-    expect(result.results[0]).toMatchObject({ success: false });
+    const result = await runPublication(3);
+    expect(result).toMatchObject({ success: false });
     expect(client.updateOffer).not.toHaveBeenCalled();
     expect(client.createOrReplaceInventoryItem).not.toHaveBeenCalled();
     expect(client.createOffer).not.toHaveBeenCalled();

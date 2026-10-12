@@ -9,9 +9,17 @@ import { PostgresEbayListingSyncRepository } from "../../infrastructure/ebay-lis
 import { PgMarketplaceListingRegistrationRepository } from "../../../marketplace-listings/infrastructure/pg-listing-registration.repository";
 import { captureExistingEbayListingIdentity } from "../../ebay-existing-listing-identity";
 import { isVariantSellable } from "../../ebay-listing-eligibility";
-import { syncStageHash } from "../../ebay-listing-sync.domain";
+import { publicationRetryReviewHash, syncStageHash } from "../../ebay-listing-sync.domain";
 import { EbayListingMappingService, type EbayListingMappingRepairPlan } from "../../ebay-listing-mapping.service";
 import { EBAY_LISTING_WORKFLOW_LOCK_NAMESPACE, ebayListingWorkflowLockKey } from "../../ebay-listing-workflow-lock";
+import { markVariantAvailabilitySynced } from "../../variant-availability-sync.repository";
+import { EbayListingSyncService } from "../../ebay-listing-sync.service";
+import { EbayPublicationCompletionExecution, type PreparedEbayPublication } from "../../ebay-publication-completion.service";
+import { resolveEbayPublicationTarget } from "../../ebay-publication-completion.domain";
+import { syncContentIntentHash } from "../../ebay-listing-sync-content";
+import { EbayMarketplaceListingConnector, type EbayListingConnectorDraft, type EbayListingLifecycleClient, type EbayObservedOffer } from "../../listing-connectors/ebay-listing.connector";
+import type { EbayInventoryItem, EbayInventoryItemGroup } from "../../adapters/ebay/ebay-types";
+import type { EbayListingInspection } from "../../../marketplace-listings/domain/ebay-listing-inspection";
 vi.mock("../../../../db", () => ({ pool: {} }));
 
 const enabled = process.env.ECHELON_TEST_DATABASE_URL && process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true";
@@ -19,7 +27,7 @@ const enabled = process.env.ECHELON_TEST_DATABASE_URL && process.env.ECHELON_TES
   let database: InventoryCutoverTestDatabase;
   let repository: PostgresEbayListingMappingRepairRepository;
   let canonical: PgMarketplaceListingRegistrationRepository;
-  let plan: EbayListingMappingRepairPlan;
+  let plan: Extract<EbayListingMappingRepairPlan,{operation?:"sync"}>;
   let sequence = 20;
   const now = new Date("2026-10-10T15:00:00Z");
   beforeAll(async () => {
@@ -42,6 +50,11 @@ const enabled = process.env.ECHELON_TEST_DATABASE_URL && process.env.ECHELON_TES
         product_variant_id integer REFERENCES catalog.product_variants,external_sku text,external_variant_id text,external_product_id text,external_url text,
         last_synced_price bigint,last_synced_qty integer,sync_status text,sync_error text,last_synced_at timestamptz,created_at timestamptz,updated_at timestamptz,
         PRIMARY KEY(channel_id,product_variant_id));
+      CREATE TABLE channels.channel_feeds(channel_id integer,product_variant_id integer,channel_variant_id text,channel_inventory_item_id text,channel_sku text,
+        is_active integer,last_synced_qty integer,last_synced_at timestamptz,updated_at timestamptz);
+      CREATE TABLE channels.channel_variant_availability_sync(channel_id integer,product_variant_id integer,revision bigint,status text,lease_token uuid,
+        lease_expires_at timestamptz,next_attempt_at timestamptz,last_synced_quantity integer,last_synced_at timestamptz,completed_at timestamptz,last_error text,updated_at timestamptz,
+        PRIMARY KEY(channel_id,product_variant_id));
       CREATE TABLE marketplace.provider_accounts(id integer PRIMARY KEY,owner_kind text,channel_id integer,provider text,account_namespace text,external_account_id text);
       CREATE TABLE marketplace.listing_scopes(id integer PRIMARY KEY,owner_kind text,provider text,marketplace_id text,product_id integer);
       CREATE TABLE marketplace.channel_listing_scopes(scope_id integer,channel_id integer,product_id integer,marketplace_id text);
@@ -63,7 +76,7 @@ const enabled = process.env.ECHELON_TEST_DATABASE_URL && process.env.ECHELON_TES
     const end = syncMigration.indexOf("CREATE TRIGGER publication_response_recoveries_no_truncate", start);
     expect(start).toBeGreaterThan(0); expect(end).toBeGreaterThan(start);
     await database.pool.query(syncMigration.slice(start,end));
-    for (const migration of ["0731_ebay_listing_sync_verification_checkpoint.sql","0732_ebay_listing_sync_identity_admission.sql","0736_ebay_listing_mapping_repairs.sql"])
+    for (const migration of ["0731_ebay_listing_sync_verification_checkpoint.sql","0732_ebay_listing_sync_identity_admission.sql","0736_ebay_listing_mapping_repairs.sql","0737_ebay_publication_completion.sql"])
       await database.pool.query(readFileSync(resolve(process.cwd(),"migrations",migration),"utf8"));
     canonical = new PgMarketplaceListingRegistrationRepository(database.pool);
     repository = new PostgresEbayListingMappingRepairRepository(database.pool, { channelId:67,readSourceInsideTransaction:readSource,canonicalRegistration:canonical });
@@ -97,7 +110,7 @@ const enabled = process.env.ECHELON_TEST_DATABASE_URL && process.env.ECHELON_TES
     plan.requestHash=syncStageHash({productId,channelId:67,actor:plan.actor,reviewHash:plan.reviewHash});
   });
   async function readSource(client: PoolClient, productId: number): Promise<EbayListingMappingSourceSnapshot> {
-    const rows = (await client.query(`SELECT pv.product_id,pv.id AS variant_id,pv.sku AS variant_sku,pv.is_active,cl.external_sku,cl.external_variant_id,cl.external_product_id
+    const rows = (await client.query(`SELECT pv.product_id,pv.id AS variant_id,pv.sku AS variant_sku,pv.is_active,cl.id IS NOT NULL AS mapping_exists,cl.external_sku,cl.external_variant_id,cl.external_product_id
       FROM catalog.product_variants pv JOIN channels.channel_listings cl ON cl.product_variant_id=pv.id AND cl.channel_id=67 WHERE pv.product_id=$1 ORDER BY pv.id`,[productId])).rows;
     const account=(await client.query("SELECT external_account_id FROM ebay.ebay_oauth_tokens WHERE channel_id=67 AND environment='production'")).rows[0];
     const eligibility=(await client.query(`SELECT pv.id,pv.is_active,cpo.is_listed AS product_is_listed,cvo.is_listed AS variant_is_listed,ecm.listing_enabled
@@ -375,5 +388,404 @@ const enabled = process.env.ECHELON_TEST_DATABASE_URL && process.env.ECHELON_TES
     await expect(repository.apply(plan)).rejects.toMatchObject({code:"EBAY_MAPPING_CANONICAL_CONFLICT"});
     await database.pool.query("DELETE FROM marketplace.listing_replacement_operations");
     expect((await repository.apply(plan)).job.state).toBe("queued");
+  });
+
+  async function publicationPlan(): Promise<Extract<EbayListingMappingRepairPlan,{operation:"publish"}>> {
+    await database.pool.query("UPDATE channels.channel_listings SET external_sku=NULL,external_product_id=NULL WHERE product_variant_id=ANY($1::integer[])",
+      [plan.source.identity.variants.map(member=>member.variantId)]);
+    const client=await database.pool.connect();
+    let snapshot:EbayListingMappingSourceSnapshot;
+    try{snapshot=await readSource(client,plan.source.identity.productId);}finally{client.release();}
+    const source={...snapshot,candidates:snapshot.candidates.map(candidate=>({...candidate,availableQuantity:123}))};
+    const targetIdentity={...source.identity,groupKey:`actual-provider-group-${source.identity.productId}`};
+    return {operation:"publish",source,targetIdentity,commandKey:plan.commandKey,reviewHash:plan.reviewHash,requestHash:plan.requestHash,actor:plan.actor,now,
+      inspectionEvidence:{providerAccount:plan.observation.providerAccount,observedAt:now,publication:null,publicationIssue:null,
+        groupKey:targetIdentity.groupKey,groupSkus:targetIdentity.variants.map(member=>member.sku),
+        unpublishedTarget:{groupKey:targetIdentity.groupKey,skus:targetIdentity.variants.map(member=>member.sku)},
+        skus:targetIdentity.variants.map(member=>({sku:member.sku,inventoryItemExists:true,issue:null,
+          offers:[{sku:member.sku,offerId:member.offerId!,status:"UNPUBLISHED",listingId:null,listingStatus:null}]}))}};
+  }
+  async function claimedPublication() {
+    const publish=await publicationPlan();
+    const saved=await repository.apply(publish);
+    const sync=new PostgresEbayListingSyncRepository(database.pool);
+    const claim=await sync.claim(now,randomUUID(),saved.job.id);expect(claim).not.toBeNull();
+    const target={...publish.targetIdentity,variants:publish.targetIdentity.variants.map(member=>({...member,externalSku:member.sku}))};
+    const final={...target,variants:target.variants.map(member=>({...member,listingId:`published-${target.productId}`}))};
+    const result={synced:target.variants.length,priceChanges:0,qtyChanges:0,policyChanges:0,errors:0,pending:0,jobs:[],
+      details:target.variants.map(member=>({variantId:member.variantId,variantSku:member.sku,success:true,lastSyncedPriceCents:1249}))};
+    return {publish,saved,sync,claim:claim!,target,final,result};
+  }
+  function publicationObservation(identity: typeof plan.provenIdentity) {
+    return { ...plan.observation, publicationKeyIdentity: identity.groupKey === null ? null : { identityNamespace: "ebay.inventory_item_group", externalId: identity.groupKey },
+      listingIdentity: { identityNamespace: "ebay.listing", externalId: identity.variants[0].listingId! },
+      members: identity.variants.map(member => ({ sku: member.sku, variantIdentity: null,
+        offerIdentity: { identityNamespace: "ebay.offer", externalId: member.offerId! },
+        inventoryItemIdentity: { identityNamespace: "ebay.inventory_item", externalId: member.sku } })) };
+  }
+  async function verifyPublication(sync:PostgresEbayListingSyncRepository,job:Awaited<ReturnType<PostgresEbayListingSyncRepository["get"]>>) {
+    await sync.stage(job,"verification","8".repeat(64),"started",now);
+    await sync.stage(job,"verification","8".repeat(64),"completed",now);
+  }
+  it("queues reviewed unpublished saved offers without changing mappings or claiming publication, and replays its receipt",async()=>{
+    const publish=await publicationPlan();const before=await mappings();
+    const saved=await repository.apply(publish);
+    expect(saved.job).toMatchObject({operation:"publish",state:"queued"});expect(await mappings()).toEqual(before);
+    const receipt=(await database.pool.query("SELECT operation,before_identity,after_identity,before_rows,after_rows,observation FROM channels.ebay_listing_mapping_repairs WHERE command_key=$1",[publish.commandKey])).rows[0];
+    expect(receipt).toMatchObject({operation:"publish",before_identity:publish.source.identity,after_identity:publish.source.identity,observation:{kind:"unpublished_inspection"}});
+    expect(receipt.before_rows).toEqual(receipt.after_rows);
+    expect(await repository.findReplay(lookup())).toEqual({...saved,replayed:true});
+    expect((await new PostgresEbayListingSyncRepository(database.pool).list(67)).find(job=>job.id===saved.job.id)?.operation).toBe("publish");
+  });
+  it("keeps publish commands immutable and refuses reuse for maintenance sync",async()=>{
+    const publish=await publicationPlan();const sync=new PostgresEbayListingSyncRepository(database.pool);
+    const saved=await sync.enqueue(publish.targetIdentity,publish.commandKey,publish.actor,now,"publish");
+    await expect(sync.enqueue(publish.targetIdentity,publish.commandKey,publish.actor,now,"sync")).rejects.toMatchObject({code:"EBAY_SYNC_REPLAY_CONFLICT"});
+    await expect(database.pool.query("UPDATE channels.ebay_listing_sync_jobs SET operation='sync' WHERE id=$1",[saved.id])).rejects.toMatchObject({code:"23514"});
+  });
+  it("pins publication target under exact worker ownership and refuses target replacement or unverified completion",async()=>{
+    const fixture=await claimedPublication();const {sync,claim,target,result}=fixture;
+    try{
+      await expect(sync.bindPublicationTarget({...claim.job,ownerToken:randomUUID()},target,now)).rejects.toMatchObject({code:"EBAY_SYNC_OWNER_LOST"});
+      await sync.bindPublicationTarget(claim.job,target,now);
+      await sync.bindPublicationTarget(claim.job,target,now);
+      await expect(sync.bindPublicationTarget(claim.job,{...target,groupKey:"another-group"},now)).rejects.toMatchObject({code:"EBAY_SYNC_PROVIDER_IDENTITY_CHANGED"});
+      await expect(sync.finish(claim.job,{state:"completed",result,code:null,message:null,nextAttemptAt:now},now)).rejects.toMatchObject({code:"EBAY_SYNC_PUBLICATION_UNVERIFIED"});
+      expect((await sync.get(claim.job.id)).state).toBe("running");
+    }finally{await claim.release();}
+  });
+  it("defers projection for a newer requested revision, then completes the latest verified content while preserving quantity",async()=>{
+    const {sync,claim,target,final,result,publish}=await claimedPublication();
+    try{
+      await sync.bindPublicationTarget(claim.job,target,now);await sync.bindProviderIdentity(claim.job,final,now,publicationObservation(final));await verifyPublication(sync,claim.job);
+      const joined=await sync.enqueue(publish.targetIdentity,randomUUID(),plan.actor,now,"publish");expect(joined.id).toBe(claim.job.id);
+      await sync.finish(claim.job,{state:"completed",result,code:null,message:null,nextAttemptAt:now},now);
+      expect((await sync.get(claim.job.id)).state).toBe("queued");expect((await mappings()).every(row=>row.external_product_id===null)).toBe(true);
+      await claim.release();
+      const latest=await sync.claim(now,randomUUID(),claim.job.id);expect(latest).not.toBeNull();
+      try{
+        await expect(sync.finish(latest!.job,{state:"completed",result,code:null,message:null,nextAttemptAt:now},now)).rejects.toMatchObject({code:"EBAY_SYNC_PUBLICATION_UNVERIFIED"});
+        await verifyPublication(sync,latest!.job);await sync.finish(latest!.job,{state:"completed",result:{...result,details:result.details.map(detail=>({...detail,lastSyncedPriceCents:1499}))},code:null,message:null,nextAttemptAt:now},now);}
+      finally{await latest!.release();}
+      expect((await sync.get(claim.job.id)).state).toBe("completed");
+      const rows=await mappings();
+      expect(rows.map(row=>row.external_product_id)).toEqual(final.variants.map(member=>member.listingId));
+      for(const row of rows) expect(row).toMatchObject({last_synced_qty:57,last_synced_price:"1499",sync_status:"synced",sync_error:null,external_url:"https://old.example.test"});
+    }finally{await claim.release();}
+  });
+  it("rejects changed mappings and rolls back every publication projection while preserving verified provider evidence",async()=>{
+    const {sync,claim,target,final,result}=await claimedPublication();
+    try{
+      await sync.bindPublicationTarget(claim.job,target,now);await sync.bindProviderIdentity(claim.job,final,now,publicationObservation(final));await verifyPublication(sync,claim.job);
+      await database.pool.query("UPDATE channels.channel_listings SET external_variant_id='concurrent-other-offer' WHERE product_variant_id=$1",[target.variants[1].variantId]);
+      const before=await mappings();
+      await expect(sync.finish(claim.job,{state:"completed",result,code:null,message:null,nextAttemptAt:now},now)).rejects.toMatchObject({code:"EBAY_SYNC_PROJECTION_IDENTITY_CHANGED"});
+      expect(await mappings()).toEqual(before);expect(await sync.get(claim.job.id)).toMatchObject({state:"running",providerIdentity:final});
+    }finally{await claim.release();}
+  });
+  it.each(["local", "canonical", "account"] as const)("rechecks %s ownership at final publication commit after provider verification", async kind => {
+    const {sync,claim,target,final,result}=await claimedPublication();
+    try {
+      await sync.bindPublicationTarget(claim.job,target,now);
+      await sync.bindProviderIdentity(claim.job,final,now,publicationObservation(final));
+      await verifyPublication(sync,claim.job);
+      if (kind === "canonical") {
+        await database.pool.query("INSERT INTO marketplace.provider_accounts VALUES(1,'channel',67,'ebay','production','account-67')");
+        await database.pool.query("INSERT INTO marketplace.provider_identity_claims VALUES(1,999,999,NULL,'offer_id','ebay.offer',$1)",[final.variants[0].offerId]);
+      } else if (kind === "local") {
+        const otherVariant = target.variants[0].variantId + 900000;
+        await database.pool.query("INSERT INTO catalog.product_variants(id,product_id,sku,is_active) VALUES($1,$2,'unrelated',true)", [otherVariant,target.productId]);
+        await database.pool.query("INSERT INTO channels.channel_listings(channel_id,product_variant_id,external_variant_id) VALUES(67,$1,$2)",[otherVariant,final.variants[0].offerId]);
+      } else {
+        await database.pool.query("UPDATE ebay.ebay_oauth_tokens SET external_account_id='another-account' WHERE channel_id=67");
+      }
+      const before=await mappings();
+      await expect(sync.finish(claim.job,{state:"completed",result,code:null,message:null,nextAttemptAt:now},now)).rejects.toMatchObject({code:
+        kind === "canonical" ? "EBAY_MAPPING_CANONICAL_CONFLICT" : kind === "local" ? "EBAY_MAPPING_OWNERSHIP_CONFLICT" : "EBAY_SYNC_ACCOUNT_CHANGED"});
+      expect(await mappings()).toEqual(before);
+      expect(await sync.get(claim.job.id)).toMatchObject({state:"running",providerIdentity:final});
+    } finally { await claim.release(); }
+  });
+  it("waits for a concurrent legacy mapping writer and rejects its newly committed conflicting offer before publication projection",async()=>{
+    const {sync,claim,target,final,result}=await claimedPublication();const writer=await database.pool.connect();
+    try{
+      await sync.bindPublicationTarget(claim.job,target,now);
+      await sync.bindProviderIdentity(claim.job,final,now,publicationObservation(final));await verifyPublication(sync,claim.job);
+      const other=++sequence;await database.pool.query("INSERT INTO catalog.products(id) VALUES($1)",[other]);
+      await database.pool.query("INSERT INTO catalog.product_variants VALUES($1,$2,'CONCURRENT-OTHER',true)",[other*10,other]);
+      const before=await mappings();
+      await writer.query("BEGIN");
+      await writer.query("INSERT INTO channels.channel_listings(channel_id,product_variant_id,external_variant_id) VALUES(67,$1,$2)",[other*10,final.variants[0].offerId]);
+      const finishing=sync.finish(claim.job,{state:"completed",result,code:null,message:null,nextAttemptAt:now},now).then(()=>null,error=>error);
+      await vi.waitFor(async()=>{
+        const waiting=await database.pool.query("SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND (query LIKE 'LOCK TABLE channels.channel_listings%' OR query LIKE 'SELECT id FROM channels.channels%')");
+        expect(waiting.rowCount).toBe(1);
+      });
+      await writer.query("COMMIT");
+      expect(await finishing).toMatchObject({code:"EBAY_MAPPING_OWNERSHIP_CONFLICT"});
+      expect(await mappings()).toEqual(before);expect(await sync.get(claim.job.id)).toMatchObject({state:"running",providerIdentity:final});
+    }finally{await writer.query("ROLLBACK");writer.release();await claim.release();}
+  });
+  it("rejects incomplete completion and rolls back local projection on completion audit failure",async()=>{
+    const {sync,claim,target,final,result}=await claimedPublication();
+    try{
+      await sync.bindPublicationTarget(claim.job,target,now);await sync.bindProviderIdentity(claim.job,final,now,publicationObservation(final));await verifyPublication(sync,claim.job);
+      await expect(sync.finish(claim.job,{state:"completed",result:{...result,details:result.details.slice(0,1)},code:null,message:null,nextAttemptAt:now},now)).rejects.toMatchObject({code:"EBAY_SYNC_RESULT_SCOPE_INVALID"});
+      const before=await mappings();
+      await database.pool.query(`CREATE FUNCTION channels.test_publish_audit_failure() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
+        IF NEW.event='completed' THEN RAISE EXCEPTION 'injected completion failure';END IF;RETURN NEW;END $$;
+        CREATE TRIGGER test_publish_audit_failure BEFORE INSERT ON channels.ebay_listing_sync_events FOR EACH ROW EXECUTE FUNCTION channels.test_publish_audit_failure()`);
+      try{await expect(sync.finish(claim.job,{state:"completed",result,code:null,message:null,nextAttemptAt:now},now)).rejects.toMatchObject({code:"EBAY_SYNC_PERSISTENCE_FAILED"});
+        expect(await mappings()).toEqual(before);expect((await sync.get(claim.job.id)).state).toBe("running");
+      }finally{await database.pool.query("DROP TRIGGER test_publish_audit_failure ON channels.ebay_listing_sync_events;DROP FUNCTION channels.test_publish_audit_failure()");}
+      await sync.finish(claim.job,{state:"completed",result,code:null,message:null,nextAttemptAt:now},now);
+      expect((await sync.get(claim.job.id)).state).toBe("completed");
+    }finally{await claim.release();}
+  });
+  it("refuses unpublished completion when another canonical scope owns any exact offer or SKU",async()=>{
+    const publish=await publicationPlan();
+    await database.pool.query("INSERT INTO marketplace.provider_accounts VALUES(1,'channel',67,'ebay','production','account-67')");
+    await database.pool.query("INSERT INTO marketplace.provider_identity_claims VALUES(1,999,999,NULL,'offer_id','ebay.offer',$1)",[publish.targetIdentity.variants[0].offerId]);
+    await expect(repository.apply(publish)).rejects.toMatchObject({code:"EBAY_MAPPING_CANONICAL_CONFLICT"});expect(await counts()).toEqual({receipts:0,jobs:0});
+  });
+  it("requires existing canonical publication lifecycle recovery instead of publishing an unpublished replacement",async()=>{
+    await seedCanonical();const publish=await publicationPlan();
+    await expect(repository.apply(publish)).rejects.toMatchObject({code:"EBAY_MAPPING_CANONICAL_CONFLICT"});expect(await counts()).toEqual({receipts:0,jobs:0});
+  });
+  it("retains exact accepted response and publish stage evidence across worker restart, refusing changed response identities",async()=>{
+    const {sync,claim,target,final}=await claimedPublication();
+    try{
+      await sync.bindPublicationTarget(claim.job,target,now);
+      await sync.stage(claim.job,"publish","7".repeat(64),"started",now);
+      expect(await sync.get(claim.job.id)).toMatchObject({publicationWriteStarted:true,publicationWriteCompleted:false,publicationAccepted:null,publicationAcceptedRevision:null});
+      await sync.stage(claim.job,"publish","7".repeat(64),"completed",now);
+      expect(await sync.get(claim.job.id)).toMatchObject({publicationWriteCompleted:true,publicationAcceptedRevision:"1",publicationAccepted:null});
+      const accepted={listingId:final.variants[0].listingId!,offerIds:Object.fromEntries(final.variants.map(member=>[member.variantId,member.offerId!]))};
+      await sync.bindPublicationAccepted(claim.job,accepted,now);
+      await expect(sync.bindPublicationAccepted(claim.job,{...accepted,listingId:"changed"},now)).rejects.toMatchObject({code:"EBAY_SYNC_PROVIDER_IDENTITY_CHANGED"});
+      await expect(sync.bindProviderIdentity(claim.job,{...final,variants:final.variants.map(member=>({...member,listingId:"unrelated"}))},now,publicationObservation(final))).rejects.toMatchObject({code:"EBAY_SYNC_PROVIDER_IDENTITY_CHANGED"});
+      await sync.finish(claim.job,{state:"recovering",result:null,code:"EBAY_SYNC_READBACK_PENDING",message:"Readback pending",nextAttemptAt:now},now);
+      await claim.release();
+      const restarted=new PostgresEbayListingSyncRepository(database.pool);const next=await restarted.claim(now,randomUUID(),claim.job.id);
+      try{expect(next?.job).toMatchObject({publicationTarget:target,publicationAccepted:accepted,publicationWriteCompleted:true,publicationAcceptedRevision:"1"});}
+      finally{await next?.release();}
+    }finally{await claim.release();}
+  });
+  it.each([false,true])("initial publication protects an absent mapping from a concurrent writer (concurrent=%s)",async concurrent=>{
+    const publish=await publicationPlan();const sync=new PostgresEbayListingSyncRepository(database.pool);
+    await database.pool.query("DELETE FROM channels.channel_listings WHERE product_variant_id=ANY($1::integer[])",[publish.targetIdentity.variants.map(member=>member.variantId)]);
+    const source={...publish.targetIdentity,variants:publish.targetIdentity.variants.map(member=>({...member,mappingExists:false,offerId:null}))};
+    const saved=await sync.enqueue(source,randomUUID(),plan.actor,now,"publish");const claim=await sync.claim(now,randomUUID(),saved.id);
+    const target={...source,variants:source.variants.map(member=>({...member,externalSku:member.sku}))};
+    const listingId=`new-listing-${source.productId}`;
+    const final={...target,variants:target.variants.map(member=>({...member,offerId:`new-${member.variantId}`,listingId}))};
+    try{
+      await sync.bindPublicationTarget(claim!.job,target,now);await sync.bindProviderIdentity(claim!.job,final,now,publicationObservation(final));await verifyPublication(sync,claim!.job);
+      if(concurrent) await database.pool.query("INSERT INTO channels.channel_listings(channel_id,product_variant_id) VALUES(67,$1)",[source.variants[1].variantId]);
+      const result={synced:2,priceChanges:0,qtyChanges:0,policyChanges:0,errors:0,pending:0,jobs:[],details:source.variants.map(member=>({variantId:member.variantId,variantSku:member.sku,success:true}))};
+      const action=sync.finish(claim!.job,{state:"completed",result,code:null,message:null,nextAttemptAt:now},now);
+      if(concurrent){await expect(action).rejects.toMatchObject({code:"EBAY_SYNC_PROJECTION_IDENTITY_CHANGED"});expect((await mappings()).length).toBe(1);}
+      else{await action;expect((await mappings()).map(row=>row.external_product_id)).toEqual([listingId,listingId]);expect((await mappings()).every(row=>row.last_synced_qty===null)).toBe(true);}
+    }finally{await claim!.release();}
+  });
+  it.each([false,true])("inventory ACK preserves publication failure and never creates Listed from an offer-only mapping (existing=%s)",async existing=>{
+    const member=plan.source.identity.variants[0];const leaseToken=randomUUID();
+    if(!existing) await database.pool.query("DELETE FROM channels.channel_listings WHERE product_variant_id=$1",[member.variantId]);
+    await database.pool.query("INSERT INTO channels.channel_variant_availability_sync(channel_id,product_variant_id,revision,status,lease_token) VALUES(67,$1,1,'processing',$2)",[member.variantId,leaseToken]);
+    const changed=await markVariantAvailabilitySynced(database.pool,{channelId:67,productVariantId:member.variantId,desiredActive:true,revision:1,attemptCount:1,leaseToken},
+      {quantity:88,feedActive:true,externalProductId:null,externalVariantId:member.offerId,externalInventoryItemId:member.sku,externalSku:member.sku});
+    expect(changed).toBe(true);const row=(await mappings()).find(row=>row.product_variant_id===member.variantId);
+    expect(row).toMatchObject({last_synced_qty:88,sync_status:existing?"error":"pending",sync_error:existing?"old quantity error":null});
+    if(!existing) expect(row.external_product_id).toBeNull();
+  });
+  it("persists publication admission failures with their operation through replay and list/read responses",async()=>{
+    const sync=new PostgresEbayListingSyncRepository(database.pool);
+    const input={channelId:67,productId:plan.source.identity.productId,variantIds:plan.source.identity.variants.map(member=>member.variantId),
+      actor:plan.actor,commandKey:randomUUID(),code:"EBAY_LISTING_PHOTO_UNAVAILABLE",message:"A current catalog photo is required.",operation:"publish" as const};
+    const saved=await sync.recordAdmissionFailure(input,now);
+    expect(saved).toMatchObject({kind:"admission",operation:"publish",state:"needs_attention"});
+    expect(await sync.recordAdmissionFailure(input,now)).toEqual(saved);
+    expect(await sync.getAdmission(input.commandKey,67)).toEqual(saved);
+    expect((await sync.list(67)).find(job=>job.id===saved.id)).toEqual(saved);
+    await expect(sync.recordAdmissionFailure({...input,operation:"sync"},now)).rejects.toMatchObject({code:"EBAY_SYNC_REPLAY_CONFLICT"});
+  });
+  it("preserves excluded retained member content errors while projecting its verified provider identity",async()=>{
+    const excluded=plan.source.identity.variants[1].variantId;
+    await database.pool.query("UPDATE channels.channel_variant_overrides SET is_listed=0 WHERE product_variant_id=$1",[excluded]);
+    const {sync,claim,target,final,result}=await claimedPublication();
+    try{
+      expect(target.variants.find(member=>member.variantId===excluded)?.contentSyncEnabled).toBe(false);
+      await sync.bindPublicationTarget(claim.job,target,now);await sync.bindProviderIdentity(claim.job,final,now,publicationObservation(final));await verifyPublication(sync,claim.job);
+      await sync.finish(claim.job,{state:"completed",result:{...result,synced:1,details:result.details.filter(detail=>detail.variantId!==excluded)},code:null,message:null,nextAttemptAt:now},now);
+      const rows=await mappings();expect(rows.find(row=>row.product_variant_id===excluded)).toMatchObject({external_product_id:final.variants[0].listingId,
+        sync_status:"error",sync_error:"old quantity error",last_synced_price:"999",last_synced_qty:57});
+      expect(rows.find(row=>row.product_variant_id!==excluded)).toMatchObject({sync_status:"synced",sync_error:null,last_synced_price:"1249",last_synced_qty:57});
+    }finally{await claim.release();}
+  });
+  async function interruptedPublication() {
+    const fixture=await claimedPublication();
+    await fixture.sync.bindPublicationTarget(fixture.claim.job,fixture.target,now);
+    await fixture.sync.stage(fixture.claim.job,"publish","7".repeat(64),"started",now);
+    await fixture.sync.finish(fixture.claim.job,{state:"needs_attention",code:"EBAY_PROVIDER_ACCESS_DENIED",message:"Seller permission requires review.",result:null,nextAttemptAt:now},now);
+    await fixture.claim.release();
+    const job=await fixture.sync.get(fixture.claim.job.id);
+    const authorization={jobId:job.id,channelId:67,expectedRevision:job.revision,reviewHash:publicationRetryReviewHash(job),commandKey:randomUUID(),actor:plan.actor};
+    return {...fixture,job,authorization};
+  }
+  it("keeps post-send business failure recoverable and authorizes one audited retry even with no inventory attempts",async()=>{
+    const {sync,job,authorization}=await interruptedPublication();const before=await mappings();
+    expect(job).toMatchObject({state:"awaiting_evidence",code:"EBAY_PROVIDER_ACCESS_DENIED",publicationWriteStarted:true,publicationIntentHash:"7".repeat(64)});
+    const result=await sync.authorizePublicationRetry(authorization,now);
+    expect(result).toMatchObject({replayed:false,job:{id:job.id,state:"queued",revision:"2",publicationWriteStarted:false,publicationIntentHash:null}});
+    expect(await mappings()).toEqual(before);
+    expect(await sync.authorizePublicationRetry({...authorization,expectedRevision:"2"},now)).toEqual({...result,replayed:true});
+    await expect(sync.authorizePublicationRetry({...authorization,actor:"user:99"},now)).rejects.toMatchObject({code:"EBAY_SYNC_REPLAY_CONFLICT"});
+    await expect(sync.authorizePublicationRetry({...authorization,reviewHash:"8".repeat(64)},now)).rejects.toMatchObject({code:"EBAY_SYNC_REPLAY_CONFLICT"});
+    const events=(await database.pool.query("SELECT event,evidence FROM channels.ebay_listing_sync_events WHERE job_id=$1 AND event IN ('stage_started','publication_retry_authorized') ORDER BY id",[job.id])).rows;
+    expect(events).toHaveLength(2);expect(events[0].evidence).toMatchObject({key:"publish",preparedIntentHash:"7".repeat(64)});
+    expect(events[1].evidence).toMatchObject({actor:plan.actor,commandKey:authorization.commandKey,reviewHash:authorization.reviewHash,beforeRevision:"1",publicationIntentHash:"7".repeat(64)});
+    const next=await sync.claim(now,randomUUID(),job.id);expect(next).not.toBeNull();
+    try{
+      await sync.stage(next!.job,"publish","8".repeat(64),"started",now);
+      expect(await sync.get(job.id)).toMatchObject({publicationWriteStarted:true,publicationIntentHash:"8".repeat(64)});
+      await sync.finish(next!.job,{state:"awaiting_evidence",code:"EBAY_SYNC_RESPONSE_EVIDENCE_REQUIRED",message:"Unknown again",result:null,nextAttemptAt:now},now);
+    }finally{await next!.release();}
+    const second=await sync.get(job.id);
+    await expect(sync.authorizePublicationRetry({...authorization,commandKey:randomUUID()},now)).rejects.toMatchObject({code:"EBAY_PUBLICATION_RETRY_REVIEW_CHANGED"});
+    const secondAuth={...authorization,commandKey:randomUUID(),expectedRevision:second.revision,reviewHash:publicationRetryReviewHash(second)};
+    const concurrent=await Promise.all([sync.authorizePublicationRetry(secondAuth,now),sync.authorizePublicationRetry(secondAuth,now)]);
+    expect(concurrent.map(item=>item.replayed).sort()).toEqual([false,true]);
+    expect(concurrent.every(item=>item.job.revision==="3")).toBe(true);
+    expect((await database.pool.query("SELECT count(*)::int AS count FROM channels.ebay_listing_sync_events WHERE job_id=$1 AND event='stage_started' AND evidence->>'key'='publish'",[job.id])).rows[0].count).toBe(2);
+  });
+  it("refuses stale recovery reviews and an active provider owner without inserting a retry command",async()=>{
+    const {sync,job,authorization,publish}=await interruptedPublication();
+    const changed=await sync.enqueue(publish.targetIdentity,randomUUID(),plan.actor,now,"publish");expect(changed.revision).toBe("2");
+    await expect(sync.authorizePublicationRetry(authorization,now)).rejects.toMatchObject({code:"EBAY_PUBLICATION_RETRY_REVIEW_CHANGED"});
+    const current=await sync.get(job.id);const fresh={...authorization,expectedRevision:current.revision,reviewHash:publicationRetryReviewHash(current)};
+    const live=await sync.claim(new Date(now.getTime()+60_000),randomUUID(),job.id);expect(live).not.toBeNull();
+    try{await expect(sync.authorizePublicationRetry(fresh,now)).rejects.toMatchObject({code:"PUBLICATION_SCOPE_BUSY"});}
+    finally{await live!.release();}
+    expect(await sync.getByCommand(authorization.commandKey,67)).toBeNull();
+  });
+  it.each(["completed","accepted"] as const)("never authorizes another send after a %s publish response",async receipt=>{
+    const {sync,claim,target,final}=await claimedPublication();
+    try{
+      await sync.bindPublicationTarget(claim.job,target,now);await sync.stage(claim.job,"publish","7".repeat(64),"started",now);
+      if(receipt==="completed") await sync.stage(claim.job,"publish","7".repeat(64),"completed",now);
+      else await sync.bindPublicationAccepted(claim.job,{listingId:final.variants[0].listingId!,offerIds:Object.fromEntries(final.variants.map(member=>[member.variantId,member.offerId!]))},now);
+      await sync.finish(claim.job,{state:"needs_attention",code:"EBAY_PROVIDER_ACCESS_DENIED",message:"Permission issue",result:null,nextAttemptAt:now},now);
+    }finally{await claim.release();}
+    const job=await sync.get(claim.job.id);expect(job.state).toBe("awaiting_evidence");
+    await expect(sync.authorizePublicationRetry({jobId:job.id,channelId:67,expectedRevision:job.revision,reviewHash:publicationRetryReviewHash(job),commandKey:randomUUID(),actor:plan.actor},now))
+      .rejects.toMatchObject({code:"EBAY_PUBLICATION_RETRY_NOT_ALLOWED"});
+  });
+  it("cannot supersede an uncertain publish with a changed source or a different operation",async()=>{
+    const {sync,job,publish}=await interruptedPublication();
+    const changed={...publish.targetIdentity,variants:publish.targetIdentity.variants.map(member=>({...member,catalogSku:member.catalogSku+"-renamed"}))};
+    await expect(sync.enqueue(changed,randomUUID(),plan.actor,now,"publish")).rejects.toMatchObject({code:"EBAY_PUBLICATION_PRIOR_WORK_REQUIRED"});
+    await expect(sync.enqueue(publish.targetIdentity,randomUUID(),plan.actor,now,"sync")).rejects.toMatchObject({code:"EBAY_PUBLICATION_PRIOR_WORK_REQUIRED"});
+    expect((await sync.get(job.id)).state).toBe("awaiting_evidence");
+  });
+  it("blocks a fresh command after a historical terminal interruption and permits only explicit audited recovery",async()=>{
+    const {sync,job,publish,authorization}=await interruptedPublication();
+    const client=await database.pool.connect();
+    try{
+      await client.query("BEGIN");await client.query("SELECT pg_advisory_xact_lock($1,hashtext($2))",[918427,job.id]);
+      await client.query("UPDATE channels.ebay_listing_sync_jobs SET state='needs_attention' WHERE id=$1",[job.id]);await client.query("COMMIT");
+    }finally{client.release();}
+    await expect(sync.enqueue(publish.targetIdentity,randomUUID(),plan.actor,now,"publish")).rejects.toMatchObject({code:"EBAY_PUBLICATION_PRIOR_WORK_REQUIRED"});
+    await expect(database.pool.query("UPDATE channels.ebay_listing_sync_jobs SET state='queued',revision=revision+1 WHERE id=$1",[job.id])).rejects.toMatchObject({code:"23514"});
+    expect((await sync.authorizePublicationRetry(authorization,now)).job).toMatchObject({id:job.id,state:"queued",revision:"2"});
+  });
+  it("rolls back retry receipt and command if requeue fails, and rejects unowned authorization evidence",async()=>{
+    const {sync,job,authorization}=await interruptedPublication();
+    await expect(database.pool.query("INSERT INTO channels.ebay_listing_sync_events(job_id,revision,event,evidence,created_at) VALUES($1,1,'publication_retry_authorized','{}',$2)",[job.id,now]))
+      .rejects.toMatchObject({code:"23514"});
+    await database.pool.query(`CREATE FUNCTION channels.test_retry_failure() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
+      IF NEW.state='queued' THEN RAISE EXCEPTION 'injected requeue failure'; END IF;RETURN NEW;END $$;
+      CREATE TRIGGER test_retry_failure BEFORE UPDATE ON channels.ebay_listing_sync_jobs FOR EACH ROW EXECUTE FUNCTION channels.test_retry_failure()`);
+    try{await expect(sync.authorizePublicationRetry(authorization,now)).rejects.toMatchObject({code:"EBAY_SYNC_PERSISTENCE_FAILED"});}
+    finally{await database.pool.query("DROP TRIGGER test_retry_failure ON channels.ebay_listing_sync_jobs;DROP FUNCTION channels.test_retry_failure()");}
+    expect(await sync.getByCommand(authorization.commandKey,67)).toBeNull();
+    expect(await sync.get(job.id)).toMatchObject({revision:"1",publicationWriteStarted:true});
+    expect((await database.pool.query("SELECT count(*)::int AS count FROM channels.ebay_listing_sync_events WHERE job_id=$1 AND event='publication_retry_authorized'",[job.id])).rows[0].count).toBe(0);
+  });
+  it("restarts the real publication worker after final audit rollback without republishing or changing its photo intent",async()=>{
+    const publish=await publicationPlan();const saved=await repository.apply(publish);const before=await mappings();
+    const source=publish.targetIdentity;
+    const target={...source,variants:source.variants.map(member=>({...member,externalSku:member.sku}))};
+    const final={...target,variants:target.variants.map(member=>({...member,listingId:`worker-published-${source.productId}`}))};
+    const photoUrls=["https://example.test/shared-product.jpg","https://example.test/shared-detail.jpg"];
+    const draft:EbayListingConnectorDraft={productId:source.productId,marketplaceId:source.marketplaceId,publishMode:"publish",hasExistingExternalIds:false,
+      existingOfferIdsByVariantId:Object.fromEntries(source.variants.map(member=>[member.variantId,member.offerId])),
+      inventoryItems:source.variants.map(member=>({sku:member.sku,payload:{sku:member.sku,condition:"NEW",
+        product:{title:"Canonical catalog title",description:"Canonical catalog description",imageUrls:[...photoUrls]},
+        availability:{shipToLocationAvailability:{quantity:123}}}})),
+      offers:source.variants.map(member=>({sku:member.sku,variantId:member.variantId,payload:{sku:member.sku,marketplaceId:"EBAY_US",format:"FIXED_PRICE",
+        availableQuantity:123,categoryId:"183454",merchantLocationKey:"HQ",listingPolicies:{paymentPolicyId:"payment",returnPolicyId:"return",fulfillmentPolicyId:"fulfillment"},
+        pricingSummary:{price:{value:"12.49",currency:"USD"}}}})),
+      itemGroup:{groupKey:source.groupKey!,payload:{title:"Canonical catalog title",description:"Canonical catalog description",imageUrls:[...photoUrls],aspects:{},
+        variantSKUs:source.variants.map(member=>member.sku),variesBy:{specifications:[{name:"Pack Size",values:["10","500"]}]}}}};
+    let published=false;const providerState:{group:EbayInventoryItemGroup|null}={group:null};
+    const currentItems=new Map<string,EbayInventoryItem>();
+    const currentOffers=new Map<string,EbayObservedOffer>(draft.offers.map(offer=>[offer.sku,{...structuredClone(offer.payload),
+      offerId:source.variants.find(member=>member.variantId===offer.variantId)!.offerId!,status:"UNPUBLISHED"}]));
+    const client:EbayListingLifecycleClient={
+      getInventoryItem:vi.fn(async sku=>structuredClone(currentItems.get(sku)??null)),
+      getOffers:vi.fn(async sku=>({offers:[structuredClone(currentOffers.get(sku)!)]})),
+      getInventoryItemGroup:vi.fn(async()=>structuredClone(providerState.group)),
+      createOrReplaceInventoryItem:vi.fn(async(sku,payload)=>{currentItems.set(sku,structuredClone(payload));}),
+      updateOffer:vi.fn(async(offerId,payload)=>{currentOffers.set(payload.sku,{...structuredClone(payload),offerId,status:published?"PUBLISHED":"UNPUBLISHED",
+        ...(published?{listingId:final.variants[0].listingId!}:{})});}),
+      createOrReplaceInventoryItemGroup:vi.fn(async(_key,payload)=>{providerState.group=structuredClone(payload);}),
+      publishOfferByInventoryItemGroup:vi.fn(async()=>{published=true;for(const [sku,offer]of currentOffers)currentOffers.set(sku,{...offer,status:"PUBLISHED",listingId:final.variants[0].listingId!});return{listingId:final.variants[0].listingId!};}),
+      createOffer:vi.fn(),publishOffer:vi.fn(),withdrawOfferByInventoryItemGroup:vi.fn(),bulkUpdatePriceQuantity:vi.fn(),deleteInventoryItemGroup:vi.fn(),
+    };
+    const inspect=async():Promise<EbayListingInspection>=>({...publish.inspectionEvidence,
+      publication:published?publicationObservation(final):null,unpublishedTarget:published?null:publish.inspectionEvidence.unpublishedTarget,
+      skus:source.variants.map(member=>({sku:member.sku,inventoryItemExists:true,issue:null,offers:[{sku:member.sku,offerId:member.offerId!,
+        status:published?"PUBLISHED":"UNPUBLISHED",listingId:published?final.variants[0].listingId:null,listingStatus:published?"ACTIVE":null}]}))});
+    const prepare=async():Promise<PreparedEbayPublication>=>{
+      const connection=await database.pool.connect();let snapshot:EbayListingMappingSourceSnapshot;
+      try{snapshot=await readSource(connection,source.productId);}finally{connection.release();}
+      const inspection=await inspect();
+      return{sourceIdentity:snapshot.identity,identity:resolveEbayPublicationTarget(source,inspection),client,draft:structuredClone(draft),inspection,inspect,
+        resolvePublishedIdentity:async()=>publicationObservation(final),variants:source.variants.map(member=>({variantId:member.variantId,sku:member.sku,
+          productName:"Canonical catalog title",priceCents:1249,priceChanged:true}))};
+    };
+    const recovery={reconcile:vi.fn(async()=>({busy:false,resolved:[],unresolved:[]}))};
+    const compatible:ConstructorParameters<typeof EbayPublicationCompletionExecution>[3]=async(_source,inspection,identity)=>{
+      if(inspection.publication)await canonical.assertCompatiblePublication({owner:{kind:"channel",channelId:67,productId:source.productId,provider:"ebay",marketplaceId:"EBAY_US"},
+        observation:inspection.publication,memberCandidates:publish.source.candidates});
+      else await canonical.assertCompatibleUnpublishedPublication({owner:{kind:"channel",channelId:67,productId:source.productId,provider:"ebay",marketplaceId:"EBAY_US"},
+        providerAccount:{provider:"ebay",accountNamespace:"production",externalAccountId:inspection.providerAccount!.externalAccountId},
+        groupKey:identity.groupKey,members:identity.variants.map(member=>({productVariantId:member.variantId,sku:member.sku,offerId:member.offerId}))});
+    };
+    const worker=(clock:Date)=>new EbayListingSyncService(new PostgresEbayListingSyncRepository(database.pool),
+      new EbayPublicationCompletionExecution(prepare,recovery,new EbayMarketplaceListingConnector(),compatible),()=>clock,randomUUID);
+    await database.pool.query(`CREATE FUNCTION channels.test_worker_completion_failure() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
+      IF NEW.event='completed' THEN RAISE EXCEPTION 'injected worker completion audit failure';END IF;RETURN NEW;END $$;
+      CREATE TRIGGER test_worker_completion_failure BEFORE INSERT ON channels.ebay_listing_sync_events FOR EACH ROW EXECUTE FUNCTION channels.test_worker_completion_failure()`);
+    try{expect(await worker(now).processDue(1,saved.job.id)).toEqual({processed:0,failed:1});}
+    finally{await database.pool.query("DROP TRIGGER test_worker_completion_failure ON channels.ebay_listing_sync_events;DROP FUNCTION channels.test_worker_completion_failure()");}
+    const sync=new PostgresEbayListingSyncRepository(database.pool);const interrupted=await sync.get(saved.job.id);
+    expect(interrupted).toMatchObject({state:"recovering",publicationTarget:target,providerIdentity:final,publicationWriteStarted:true,publicationWriteCompleted:true,
+      publicationAccepted:{listingId:final.variants[0].listingId,offerIds:Object.fromEntries(final.variants.map(member=>[member.variantId,member.offerId]))},
+      publicationIntentHash:syncContentIntentHash(draft)});
+    expect(await mappings()).toEqual(before);
+    const evidence=(await database.pool.query("SELECT evidence FROM channels.ebay_listing_sync_events WHERE job_id=$1 AND event='stage_completed' AND evidence->>'key'='provider_identity'",[saved.job.id])).rows;
+    expect(evidence).toHaveLength(1);expect(evidence[0].evidence.observation).toMatchObject({listingIdentity:publicationObservation(final).listingIdentity,members:publicationObservation(final).members});
+    const writesBeforeRestart=vi.mocked(client.createOrReplaceInventoryItem).mock.calls.length;
+    expect(await worker(new Date(now.getTime()+10*60_000)).processDue(1,saved.job.id)).toEqual({processed:1,failed:0});
+    expect((await sync.get(saved.job.id)).state).toBe("completed");
+    expect(client.publishOfferByInventoryItemGroup).toHaveBeenCalledExactlyOnceWith(source.groupKey,"EBAY_US");
+    expect(client.publishOffer).not.toHaveBeenCalled();expect(client.createOffer).not.toHaveBeenCalled();
+    expect(client.createOrReplaceInventoryItem).toHaveBeenCalledTimes(writesBeforeRestart);
+    for(const member of final.variants){expect(currentItems.get(member.sku)?.product?.imageUrls).toEqual(photoUrls);
+      expect((await mappings()).find(row=>row.product_variant_id===member.variantId)).toMatchObject({external_sku:member.sku,
+        external_variant_id:member.offerId,external_product_id:member.listingId,last_synced_price:"1249",last_synced_qty:57,sync_status:"synced"});}
+    expect(providerState.group?.imageUrls).toEqual(photoUrls);
+    expect((await database.pool.query("SELECT count(*)::integer AS count FROM channels.ebay_listing_sync_events WHERE job_id=$1 AND event='stage_started' AND evidence->>'key'='publish'",[saved.job.id])).rows[0].count).toBe(1);
   });
 });

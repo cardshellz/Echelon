@@ -1,16 +1,20 @@
 import { z } from "zod";
 import { db, pool, getDatabasePoolSnapshot } from "../../../db";
 import { EBAY_CHANNEL_ID, atpService, ebayListingPhotoResolver, getAuthService } from "./ebay-api-runtime";
-import { createEbayRouteListingClient, createEbayRouteListingLifecycleClient, getExistingEbayListingPhotos } from "./ebay-listing-client";
+import { createEbayRouteListingLifecycleClient, getExistingEbayListingPhotos } from "./ebay-listing-client";
 import { determineVariationAspectName, resolveChannelPrice } from "./ebay-listing-helpers";
 import { buildEbayRouteListingDraft } from "../ebay-listing-draft";
 import { EbayMarketplaceListingConnector, type EbayListingConnectorDraft, type EbayListingConnectorResult, type EbayPublishedListingIdentityResolver } from "../listing-connectors/ebay-listing.connector";
 import { EbayListingSyncError, ebayListingSyncIdentitySchema, type EbayListingSyncIdentity } from "../ebay-listing-sync.domain";
 import { EbayListingPushService, EbayListingPushSkipped, ebayListingPushFailure, type EbayListingPushRequest, type EbayListingPushResult } from "../ebay-listing-push.service";
-import { PostgresEbayListingPushRepository } from "./ebay-listing-push.repository";
+import { PostgresEbayListingPushRepository, type EbayPushProduct, type EbayPushVariant } from "./ebay-listing-push.repository";
 import { readExistingEbayListingIdentityForProduct } from "../ebay-listing-sync";
 import { createEbayMarketplaceRegistrationAdapters } from "../adapters/ebay/ebay-marketplace-registration.factory";
-import { observeExistingEbayPublication } from "../ebay-existing-listing-identity";
+import { observeExistingEbayPublication, assertEbayListingSourceIdentityUnchanged } from "../ebay-existing-listing-identity";
+import { resolveEbayPublicationTarget, assertEbayPublicationTargetUnchanged } from "../ebay-publication-completion.domain";
+import type { PreparedEbayPublication } from "../ebay-publication-completion.service";
+import { admitEbayPublication } from "../ebay-publication-admission.service";
+import { randomUUID } from "node:crypto";
 
 const repository = new PostgresEbayListingPushRepository(pool, EBAY_CHANNEL_ID, () => new Date(),
   () => getDatabasePoolSnapshot().maximumConnections);
@@ -37,7 +41,7 @@ async function context() {
 
 /** Read-only scope source shared with initial publication. A recovery receipt
  * permits fresh canonical inventory; it never manufactures a published listing. */
-export async function readEbayPushRecoveryIdentity(productId: number): Promise<EbayListingSyncIdentity> {
+export async function readEbayPublicationSource(productId: number): Promise<EbayListingSyncIdentity> {
   z.number().int().positive().max(2_147_483_647).parse(productId);
   const ctx = await context();
   const product = await repository.readProduct(productId);
@@ -47,13 +51,112 @@ export async function readEbayPushRecoveryIdentity(productId: number): Promise<E
   const variants = await repository.readVariants(productId);
   return ebayListingSyncIdentitySchema.parse({ channelId: EBAY_CHANNEL_ID, productId,
     connectionId: ctx.connectionId, accountId: ctx.account.externalAccountId, marketplaceId: ctx.metadata.marketplaceId,
-    groupKey: variants.length > 1 ? product.sku || `PROD-${productId}` : null,
+    groupKey: null,
     variants: variants.map(variant => ({ variantId: variant.id, sku: variant.sku, catalogSku: variant.catalog_sku,
-      externalSku: variant.sku, offerId: variant.external_variant_id, listingId: variant.external_product_id, contentSyncEnabled: true })),
+      externalSku: variant.external_sku, offerId: variant.external_variant_id, listingId: variant.external_product_id, contentSyncEnabled: true, mappingExists: variant.mapping_exists })),
   });
 }
 
+/** One draft preparation owner for durable publication and reviewed lifecycle work. */
+async function preparePushDraft(input: { ctx: Awaited<ReturnType<typeof context>>; product: EbayPushProduct;
+  category: Awaited<ReturnType<typeof repository.readCategory>>; variants: EbayPushVariant[];
+  listingIds: string[]; groupKey: string | null; existingGroupKey?: string | null;
+  quantities?: Awaited<ReturnType<typeof atpService.getAtpPerVariant>>;
+  onRateLimit?: (seconds: number) => void }) {
+  const { ctx, product, category, variants, listingIds, groupKey, existingGroupKey, onRateLimit } = input;
+  const productId = product.id;
+  const browseCategoryId = product.ebay_browse_category_id || category?.ebay_browse_category_id;
+  if (!browseCategoryId) throw new EbayListingSyncError("EBAY_LISTING_PREFLIGHT_FAILED", "Choose an eBay browse category for this product or its product type before publishing.");
+  const effectivePolicies = {
+    fulfillmentPolicyId: product.ebay_fulfillment_policy_override || category?.fulfillment_policy_override || ctx.metadata.fulfillmentPolicyId,
+    returnPolicyId: product.ebay_return_policy_override || category?.return_policy_override || ctx.metadata.returnPolicyId,
+    paymentPolicyId: product.ebay_payment_policy_override || category?.payment_policy_override || ctx.metadata.paymentPolicyId,
+  };
+  const accessToken = await ctx.auth.getAccessToken(EBAY_CHANNEL_ID);
+  const photoVariants = variants.map(variant => ({ variantId: variant.id, sku: variant.catalog_sku }));
+  const providerPhotoVariants = variants.map(variant => ({ variantId: variant.id, sku: variant.sku }));
+  const photoPlan = await ebayListingPhotoResolver.resolve({ productId, channelId: EBAY_CHANNEL_ID, variants: photoVariants, mode: "catalog",
+    readExistingPhotos: () => getExistingEbayListingPhotos({ accessToken, groupKey, variants: providerPhotoVariants }) });
+  const prices = new Map<number, number>();
+  for (const variant of variants)
+    prices.set(variant.id, await resolveChannelPrice(db, EBAY_CHANNEL_ID, productId, variant.id, variant.price_cents));
+  const quantities = input.quantities ?? await atpService.getAtpPerVariant(productId);
+  let routeDraft: ReturnType<typeof buildEbayRouteListingDraft>;
+  const isMultiVariant = existingGroupKey === undefined ? variants.length > 1 : existingGroupKey !== null;
+  try {
+    routeDraft = buildEbayRouteListingDraft({ productId, product, variants, photoPlan,
+      aspects: await repository.readAspects(product), isMultiVariant,
+      variationAspectName: isMultiVariant ? determineVariationAspectName(variants) : "",
+      variantPrices: prices, atpByVariantId: new Map(quantities.map(row => [row.productVariantId, row.atpUnits])),
+      marketplaceId: ctx.metadata.marketplaceId, ebayBrowseCategoryId: browseCategoryId, effectivePolicies,
+      storeCategoryNames: category?.ebay_store_category_name ? [category.ebay_store_category_name] : [],
+      merchantLocationKey: ctx.metadata.merchantLocationKey,
+      ...(existingGroupKey === undefined ? {} : { existingGroupKey }),
+    });
+  } catch (error) {
+    if (error && typeof error === "object" && "code" in error) throw error;
+    throw new EbayListingSyncError("EBAY_LISTING_VALIDATION_FAILED", error instanceof Error ? error.message : "The listing payload is invalid.", { cause: error });
+  }
+  const clientInput = { accessToken, onRateLimit, expectedAccountId: ctx.account.externalAccountId, expectedConnectionId: ctx.connectionId };
+  const draft: EbayListingConnectorDraft = { productId, marketplaceId: ctx.metadata.marketplaceId,
+    inventoryItems: routeDraft.inventoryItems, offers: routeDraft.offers, itemGroup: routeDraft.itemGroup,
+    publishMode: "publish", hasExistingExternalIds: listingIds.length > 0,
+    existingExternalProductId: listingIds.length === 1 ? listingIds[0] : undefined,
+    existingOfferIdsByVariantId: Object.fromEntries(variants.map(variant => [variant.id, variant.external_variant_id])),
+  };
+  const resolvePublishedIdentity: EbayPublishedListingIdentityResolver = discovered => observeExistingEbayPublication({
+    owner: { kind: "channel", channelId: EBAY_CHANNEL_ID, productId, provider: "ebay", marketplaceId: ctx.metadata.marketplaceId },
+    locator: { externalListingId: discovered.listingId, providerPublicationKey: null },
+    memberCandidates: draft.offers.map(offer => ({ productVariantId: offer.variantId, sku: offer.sku,
+      isActive: true, availableQuantity: offer.payload.availableQuantity })),
+  }, createEbayMarketplaceRegistrationAdapters({ authService: ctx.auth }).observer, ctx.account.externalAccountId);
+  return { draft, clientInput, prices, resolvePublishedIdentity };
+}
+
+/** Called under the durable worker's product workflow lock, never its own lock. */
+export async function prepareEbayPublicationCompletion(source: EbayListingSyncIdentity,
+  savedTarget: EbayListingSyncIdentity | null): Promise<PreparedEbayPublication> {
+  const sourceIdentity = await readEbayPublicationSource(source.productId);
+  assertEbayListingSourceIdentityUnchanged(source, sourceIdentity);
+  const ctx = await context();
+  const product = await repository.readProduct(source.productId);
+  const category = await repository.readCategory(product.product_type);
+  const variants = await repository.readVariants(source.productId);
+  const observer = createEbayMarketplaceRegistrationAdapters({ authService: ctx.auth }).inspector;
+  const quantities = await atpService.getAtpPerVariant(source.productId);
+  const quantityByVariant = new Map(quantities.map(member => [member.productVariantId, member.atpUnits]));
+  // The canonical ATP reader intentionally omits untracked/non-shipping variants.
+  // Candidate quantities are observer metadata, not a stock publication decision;
+  // the shared draft builder and quantity admission retain their existing policy.
+  const observationInput = { owner: { kind: "channel" as const, channelId: source.channelId,
+    productId: source.productId, provider: "ebay", marketplaceId: source.marketplaceId },
+    memberCandidates: source.variants.map(member => ({ productVariantId: member.variantId, sku: member.sku,
+      isActive: true, availableQuantity: quantityByVariant.get(member.variantId) ?? 0 })) };
+  const inspect = () => observer.inspectExistingPublication(observationInput);
+  let inspection = await inspect();
+  // A first publication can stop between inventory/offer/group writes. Its
+  // recorded target then authorizes checking that same incomplete preparation.
+  // Existing saved offers without a recorded target require complete topology.
+  if (!inspection.publication && !inspection.unpublishedTarget
+    && (savedTarget !== null || source.variants.every(member => member.offerId === null))) {
+    inspection = await observer.inspectExistingPublication({ ...observationInput,
+      unpublishedGroupKey: savedTarget ? savedTarget.groupKey : variants.length > 1 ? product.sku || `PROD-${product.id}` : null });
+  }
+  const identity = resolveEbayPublicationTarget(source, inspection);
+  if (savedTarget) assertEbayPublicationTargetUnchanged(savedTarget, identity);
+  const { draft, clientInput, prices, resolvePublishedIdentity } = await preparePushDraft({ ctx, product, category,
+    variants, listingIds: [], groupKey: identity.groupKey, existingGroupKey: identity.groupKey, quantities });
+  assertEbayListingSourceIdentityUnchanged(source, await readEbayPublicationSource(source.productId));
+  return { sourceIdentity, identity, inspection, inspect, draft: { ...draft,
+    existingOfferIdsByVariantId: Object.fromEntries(identity.variants.map(member => [member.variantId, member.offerId])) },
+    client: createEbayRouteListingLifecycleClient(clientInput), resolvePublishedIdentity,
+    variants: variants.map(member => ({ variantId: member.id, sku: member.sku, productName: product.name,
+      priceCents: prices.get(member.id)!, priceChanged: false })) };
+}
+
 async function executeProduct(productId: number, command: EbayListingPushRequest, onRateLimit?: (seconds: number) => void): Promise<EbayListingPushResult> {
+  if (!command.rebuild && !command.updateExisting)
+    throw new EbayListingSyncError("EBAY_PUBLICATION_OWNER_REQUIRED", "Initial publication must use its saved listing job.");
   return repository.withProductLock(productId, async () => {
     let productName = `Product ${productId}`;
     try {
@@ -63,16 +166,6 @@ async function executeProduct(productId: number, command: EbayListingPushRequest
       const category = await repository.readCategory(product.product_type);
       const variants = await repository.readVariants(productId);
       const listingIds = await repository.currentListingIds(productId);
-      if (!command.rebuild && !command.updateExisting && listingIds.length > 0)
-        throw new EbayListingSyncError("EBAY_LISTING_ALREADY_PUBLISHED", "This product already has an eBay listing. Close Publish and use Sync on its listing row to update its content, photos and inventory.");
-      const browseCategoryId = product.ebay_browse_category_id || category?.ebay_browse_category_id;
-      if (!browseCategoryId) throw new EbayListingSyncError("EBAY_LISTING_PREFLIGHT_FAILED", "Choose an eBay browse category for this product or its product type before publishing.");
-      const effectivePolicies = {
-        fulfillmentPolicyId: product.ebay_fulfillment_policy_override || category?.fulfillment_policy_override || ctx.metadata.fulfillmentPolicyId,
-        returnPolicyId: product.ebay_return_policy_override || category?.return_policy_override || ctx.metadata.returnPolicyId,
-        paymentPolicyId: product.ebay_payment_policy_override || category?.payment_policy_override || ctx.metadata.paymentPolicyId,
-      };
-      const accessToken = await ctx.auth.getAccessToken(EBAY_CHANNEL_ID);
       const reviewedPreview = command.updateExisting?.preview ?? (command.rebuild?.mode === "execute" ? command.rebuild.preview : undefined);
       // Execution revalidates the reviewed snapshot inside the lifecycle connector,
       // including a legitimately withdrawn group after interrupted rebuilding.
@@ -89,55 +182,18 @@ async function executeProduct(productId: number, command: EbayListingPushRequest
       const groupKey = existingIdentity?.groupKey ?? reviewedPreview?.groupKey ?? (product.sku || `PROD-${productId}`);
       if (reviewedPreview && existingIdentity && existingIdentity.groupKey !== reviewedPreview.groupKey)
         throw new EbayListingSyncError("EBAY_SYNC_IDENTITY_CHANGED", "The eBay group changed after this listing review. Analyze the listing again before applying a change.");
-      const photoVariants = variants.map(variant => ({ variantId: variant.id, sku: variant.catalog_sku }));
-      const providerPhotoVariants = variants.map(variant => ({ variantId: variant.id, sku: variant.sku }));
-      const photoPlan = await ebayListingPhotoResolver.resolve({ productId, channelId: EBAY_CHANNEL_ID, variants: photoVariants,
-        readExistingPhotos: () => getExistingEbayListingPhotos({ accessToken, groupKey, variants: providerPhotoVariants }) });
-      const prices = new Map<number, number>();
-      for (const variant of variants)
-        prices.set(variant.id, await resolveChannelPrice(db, EBAY_CHANNEL_ID, productId, variant.id, variant.price_cents));
-      const quantities = await atpService.getAtpPerVariant(productId);
-      let routeDraft: ReturnType<typeof buildEbayRouteListingDraft>;
-      try {
-        routeDraft = buildEbayRouteListingDraft({ productId, product, variants, photoPlan,
-          aspects: await repository.readAspects(product), isMultiVariant: variants.length > 1,
-          variationAspectName: variants.length > 1 ? determineVariationAspectName(variants) : "",
-          variantPrices: prices, atpByVariantId: new Map(quantities.map(row => [row.productVariantId, row.atpUnits])),
-          marketplaceId: ctx.metadata.marketplaceId, ebayBrowseCategoryId: browseCategoryId, effectivePolicies,
-          storeCategoryNames: category?.ebay_store_category_name ? [category.ebay_store_category_name] : [],
-          merchantLocationKey: ctx.metadata.merchantLocationKey,
-          ...(existingIdentity ? { existingGroupKey: existingIdentity.groupKey }
-            : reviewedPreview ? { existingGroupKey: reviewedPreview.groupKey } : {}),
-        });
-      } catch (error) {
-        if (error && typeof error === "object" && "code" in error) throw error;
-        throw new EbayListingSyncError("EBAY_LISTING_VALIDATION_FAILED", error instanceof Error ? error.message : "The listing payload is invalid.", { cause: error });
-      }
-      const clientInput = { accessToken, onRateLimit, expectedAccountId: ctx.account.externalAccountId, expectedConnectionId: ctx.connectionId };
-      const draft: EbayListingConnectorDraft = { productId, marketplaceId: ctx.metadata.marketplaceId,
-        inventoryItems: routeDraft.inventoryItems, offers: routeDraft.offers, itemGroup: routeDraft.itemGroup,
-        publishMode: "publish", hasExistingExternalIds: listingIds.length > 0,
-        existingExternalProductId: listingIds.length === 1 ? listingIds[0] : undefined,
-        existingOfferIdsByVariantId: Object.fromEntries(variants.map(variant => [variant.id, variant.external_variant_id])),
-      };
-      const resolvePublishedIdentity: EbayPublishedListingIdentityResolver = discovered => observeExistingEbayPublication({
-        owner: { kind: "channel", channelId: EBAY_CHANNEL_ID, productId, provider: "ebay", marketplaceId: ctx.metadata.marketplaceId },
-        locator: { externalListingId: discovered.listingId, providerPublicationKey: null },
-        memberCandidates: draft.offers.map(offer => ({ productVariantId: offer.variantId, sku: offer.sku,
-          isActive: true, availableQuantity: offer.payload.availableQuantity })),
-      }, createEbayMarketplaceRegistrationAdapters({ authService: ctx.auth }).observer, ctx.account.externalAccountId);
+      const { draft, clientInput, prices, resolvePublishedIdentity } = await preparePushDraft({ ctx, product, category, variants,
+        listingIds, groupKey, existingGroupKey: existingIdentity?.groupKey ?? reviewedPreview?.groupKey, onRateLimit });
       let result: EbayListingConnectorResult;
-      if (command.rebuild || command.updateExisting) {
-        if (listingIds.length !== 1) throw new EbayListingSyncError("EBAY_SYNC_MAPPING_INVALID", "A reviewed listing change requires exactly one saved eBay listing. Review the product's listing mapping.");
-        const client = createEbayRouteListingLifecycleClient(clientInput);
-        if (command.rebuild?.mode === "preview") {
-          const rebuildPreview = await connector.previewListingRebuild({ client, draft, currentExternalListingId: listingIds[0] });
-          return { productId, productName, variantCount: variants.length, success: true, status: "success", listingId: listingIds[0], rebuildPreview };
-        }
-        result = command.updateExisting
-          ? await connector.updateExistingListing({ client, draft, preview: command.updateExisting.preview })
-          : await connector.executeListingRebuild({ client, draft, resolvePublishedIdentity, preview: command.rebuild!.mode === "execute" ? command.rebuild!.preview : neverPreview() });
-      } else result = await connector.pushListing({ client: createEbayRouteListingClient(clientInput), draft, resolvePublishedIdentity });
+      if (listingIds.length !== 1) throw new EbayListingSyncError("EBAY_SYNC_MAPPING_INVALID", "A reviewed listing change requires exactly one saved eBay listing. Review the product's listing mapping.");
+      const client = createEbayRouteListingLifecycleClient(clientInput);
+      if (command.rebuild?.mode === "preview") {
+        const rebuildPreview = await connector.previewListingRebuild({ client, draft, currentExternalListingId: listingIds[0] });
+        return { productId, productName, variantCount: variants.length, success: true, status: "success", listingId: listingIds[0], rebuildPreview };
+      }
+      result = command.updateExisting
+        ? await connector.updateExistingListing({ client, draft, preview: command.updateExisting.preview })
+        : await connector.executeListingRebuild({ client, draft, resolvePublishedIdentity, preview: command.rebuild!.mode === "execute" ? command.rebuild!.preview : neverPreview() });
       const removedSkus = "removedSkus" in result && Array.isArray(result.removedSkus) ? result.removedSkus as string[] : [];
       try { await repository.projectSuccess(productId, variants, result, prices, removedSkus); }
       catch (error) {
@@ -166,6 +222,15 @@ async function executeProduct(productId: number, command: EbayListingPushRequest
     }
   });
 }
+export const readEbayPushRecoveryIdentity = readEbayPublicationSource;
+
 function neverPreview(): never { throw new Error("Reviewed rebuild execution requires a preview."); }
 
-export const ebayListingPushService = new EbayListingPushService({ execute: executeProduct });
+export const ebayListingPushService = new EbayListingPushService({ execute: async (productId, command, onRateLimit, actor) => {
+  if (command.rebuild || command.updateExisting) return executeProduct(productId, command, onRateLimit);
+  const { ebayListingSyncService } = await import("./ebay-active-listing-sync");
+  return admitEbayPublication({ productId, actor: actor ?? "ebay-listing-publish",
+    commandKey: command.commands?.find(member => member.productId === productId)?.commandKey ?? randomUUID() }, {
+    channelId: EBAY_CHANNEL_ID, jobs: ebayListingSyncService, readSource: readEbayPublicationSource,
+  });
+} });

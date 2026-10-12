@@ -20,6 +20,7 @@ const existingListingRowSchema = z.object({
   external_variant_id: z.string().trim().min(1).max(255).nullable(),
   external_product_id: z.string().trim().min(1).max(255).nullable(),
   content_sync_enabled: z.boolean().optional(),
+  mapping_exists: z.boolean().optional(),
 });
 export type ExistingEbayListingIdentityRow = z.infer<typeof existingListingRowSchema>;
 export interface ExistingEbayListingIdentityContext {
@@ -52,6 +53,7 @@ export function captureExistingEbayListingIdentity(
       variantId: row.variant_id,
       catalogSku: row.variant_sku,
       contentSyncEnabled: row.content_sync_enabled ?? true,
+      ...(row.mapping_exists === undefined ? {} : { mappingExists: row.mapping_exists }),
       sku: row.external_sku ?? row.variant_sku,
       externalSku: row.external_sku,
       offerId: row.external_variant_id,
@@ -83,7 +85,8 @@ export function assertEbayListingSourceIdentityUnchanged(
         || member.offerId !== observed.offerId
         || member.listingId !== observed.listingId
         || (member.catalogSku !== undefined && member.catalogSku !== observed.catalogSku)
-        || (member.contentSyncEnabled !== undefined && member.contentSyncEnabled !== observed.contentSyncEnabled);
+        || (member.contentSyncEnabled !== undefined && member.contentSyncEnabled !== observed.contentSyncEnabled)
+        || (member.mappingExists !== undefined && member.mappingExists !== observed.mappingExists);
     })) {
     throw identityError("EBAY_SYNC_IDENTITY_CHANGED", `Product ${expected.productId}'s saved eBay mapping changed after this sync was requested. Review the mapping and request a new sync.`);
   }

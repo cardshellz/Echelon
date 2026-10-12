@@ -1,4 +1,5 @@
 import { z } from "zod";
+import type { MarketplaceObservedListingPublication } from "../marketplace-listings";
 import type {
   EbayProductSyncResult,
   EbayListingSyncJob,
@@ -11,6 +12,8 @@ import {
   syncIdentityHash,
   type EbayListingSyncIdentity,
   type StoredEbayListingSyncJob,
+  type EbayPublicationAccepted,
+  type EbayPublicationRetryAuthorization,
 } from "./ebay-listing-sync.domain";
 import {
   EbayMarketplaceListingConnector,
@@ -109,13 +112,13 @@ export class EbayExistingListingSyncExecution
     // changes do not invalidate it; new content or a new command revision does.
     if (verificationIntentHash === contentHash) {
       await stage("verification", contentHash, verify);
-      return this.completedResult(prepared, new Set());
+      return completedEbayListingSyncResult(prepared, new Set());
     }
     // Also adopt already-current content after a lost checkpoint or final local
     // commit. This read never substitutes for the response evidence checked above.
     try {
       await stage("inspection", contentHash, verify);
-      return this.completedResult(prepared, new Set());
+      return completedEbayListingSyncResult(prepared, new Set());
     } catch (error) {
       if (
         !(error instanceof EbayListingSyncError) ||
@@ -141,9 +144,10 @@ export class EbayExistingListingSyncExecution
         offerIds: updated.updatedOfferIds,
       }),
     );
-    return this.completedResult(prepared, new Set(updated.policyChangedVariantIds));
+    return completedEbayListingSyncResult(prepared, new Set(updated.policyChangedVariantIds));
   }
-  private completedResult(
+}
+export function completedEbayListingSyncResult(
     prepared: PreparedEbayListingSync,
     policyChanges: ReadonlySet<number>,
   ): EbayProductSyncResult {
@@ -165,7 +169,6 @@ export class EbayExistingListingSyncExecution
         policyChanged: policyChanges.has(member.variantId),
       })),
     });
-  }
 }
 
 export interface EbayListingSyncClaim {
@@ -173,13 +176,17 @@ export interface EbayListingSyncClaim {
   release(): Promise<void>;
 }
 export interface EbayListingSyncStore {
+  authorizePublicationRetry(input: EbayPublicationRetryAuthorization, now: Date): Promise<{ job: StoredEbayListingSyncJob; replayed: boolean }>;
   recordAdmissionFailure(input: EbaySyncAdmissionFailure, now: Date): Promise<EbayListingSyncJob>;
-  bindProviderIdentity(job: StoredEbayListingSyncJob, identity: EbayListingSyncIdentity, now: Date): Promise<void>;
+  bindProviderIdentity(job: StoredEbayListingSyncJob, identity: EbayListingSyncIdentity, now: Date, publicationObservation?: MarketplaceObservedListingPublication): Promise<void>;
+  bindPublicationTarget(job: StoredEbayListingSyncJob, identity: EbayListingSyncIdentity, now: Date): Promise<void>;
+  bindPublicationAccepted(job: StoredEbayListingSyncJob, accepted: EbayPublicationAccepted, now: Date): Promise<void>;
   enqueue(
     identity: EbayListingSyncIdentity,
     commandKey: string,
     actor: string,
     now: Date,
+    operation?: "sync" | "publish",
   ): Promise<StoredEbayListingSyncJob>;
   list(channelId: number): Promise<EbayListingSyncJob[]>;
   get(id: string): Promise<StoredEbayListingSyncJob>;
@@ -223,17 +230,31 @@ export interface EbayListingSyncExecution {
       work: () => Promise<void>,
     ) => Promise<void>,
     verificationIntentHash?: string | null,
-    bindProviderIdentity?: (identity: EbayListingSyncIdentity) => Promise<void>,
+    bindProviderIdentity?: (identity: EbayListingSyncIdentity, publicationObservation?: MarketplaceObservedListingPublication) => Promise<void>,
+    context?: EbayListingExecutionContext,
   ): Promise<EbayProductSyncResult>;
+}
+export interface EbayListingExecutionContext {
+  operation: "sync" | "publish";
+  publicationTarget: EbayListingSyncIdentity | null;
+  bindPublicationTarget: (identity: EbayListingSyncIdentity) => Promise<void>;
+  publicationAccepted: EbayPublicationAccepted | null;
+  publicationWriteCompleted: boolean;
+  publicationWriteStarted: boolean;
+  publicationAcceptedRevision: string | null;
+  publicationIntentHash: string | null;
+  claimedRevision: string;
+  bindPublicationAccepted: (accepted: EbayPublicationAccepted) => Promise<void>;
 }
 
 export const ebaySyncAdmissionFailureSchema = z.object({
   channelId: z.number().int().positive(), productId: z.number().int().positive(),
+  operation: z.enum(["sync", "publish"]).default("sync"),
   variantIds: z.array(z.number().int().positive()).max(250),
   actor: z.string().trim().min(1).max(200), commandKey: z.string().uuid(),
   code: z.string().min(1).max(100), message: z.string().min(1).max(1000),
 }).strict();
-export type EbaySyncAdmissionFailure = z.infer<typeof ebaySyncAdmissionFailureSchema>;
+export type EbaySyncAdmissionFailure = z.input<typeof ebaySyncAdmissionFailureSchema>;
 
 /** One application owner from request to verified completion. The external adapter
  * owns listing primitives; inventory admission owns every quantity-bearing write. */
@@ -249,6 +270,7 @@ export class EbayListingSyncService {
     identity: unknown,
     actor: unknown,
     commandKey?: string,
+    operation: "sync" | "publish" = "sync",
   ): Promise<StoredEbayListingSyncJob> {
     return this.store.enqueue(
       ebayListingSyncIdentitySchema.parse(identity),
@@ -258,9 +280,16 @@ export class EbayListingSyncService {
         .parse(commandKey ?? this.uuid()),
       z.string().trim().min(1).max(200).parse(actor),
       this.now(),
+      z.enum(["sync", "publish"]).parse(operation),
     );
   }
-  async recordAdmissionFailure(input: Omit<EbaySyncAdmissionFailure, "commandKey" | "variantIds"> & { commandKey?: string; variantIds: readonly number[] }): Promise<EbayListingSyncJob> {
+  authorizePublicationRetry(input: EbayPublicationRetryAuthorization): Promise<{ job: StoredEbayListingSyncJob; replayed: boolean }> {
+    const parsed = z.object({ jobId: z.string().uuid(), channelId: z.number().int().positive().max(2147483647),
+      expectedRevision: z.string().regex(/^[1-9][0-9]*$/), reviewHash: z.string().regex(/^[a-f0-9]{64}$/),
+      commandKey: z.string().uuid(), actor: z.string().trim().min(1).max(200) }).strict().parse(input);
+    return this.store.authorizePublicationRetry(parsed, this.now());
+  }
+  async recordAdmissionFailure(input: Omit<EbaySyncAdmissionFailure, "commandKey" | "variantIds" | "operation"> & { operation?: "sync" | "publish"; commandKey?: string; variantIds: readonly number[] }): Promise<EbayListingSyncJob> {
     const parsed = ebaySyncAdmissionFailureSchema.parse({ ...input, commandKey: input.commandKey ?? this.uuid() });
     return this.withIssue(await this.store.recordAdmissionFailure(parsed, this.now()));
   }
@@ -285,19 +314,32 @@ export class EbayListingSyncService {
         );
         if (!claim) break;
         const { job } = claim;
+        const publicationProgress = { started: job.publicationWriteStarted,
+          completed: job.publicationWriteCompleted, accepted: job.publicationAccepted };
         try {
           const output = ebayProductSyncResultSchema.parse(
             await this.executor.execute(
               job.identity,
               async (key, hash, work) => {
                 await this.store.stage(job, key, hash, "started", this.now());
+                if (job.operation === "publish" && key === "publish") {
+                  publicationProgress.started = true;
+                }
                 await work();
                 await this.store.stage(job, key, hash, "completed", this.now());
+                if (job.operation === "publish" && key === "publish") publicationProgress.completed = true;
               },
               job.verificationRevision === job.claimedRevision
                 ? job.verificationIntentHash
                 : null,
-              resolved => this.store.bindProviderIdentity(job, resolved, this.now()),
+              (resolved, observation) => this.store.bindProviderIdentity(job, resolved, this.now(), observation),
+              { operation: job.operation, publicationTarget: job.publicationTarget,
+                publicationAccepted: job.publicationAccepted, publicationWriteCompleted: job.publicationWriteCompleted,
+                publicationWriteStarted: job.publicationWriteStarted, publicationAcceptedRevision: job.publicationAcceptedRevision,
+                publicationIntentHash: job.publicationIntentHash,
+                claimedRevision: job.claimedRevision ?? job.revision,
+                bindPublicationTarget: target => this.store.bindPublicationTarget(job, target, this.now()),
+                bindPublicationAccepted: async accepted => { await this.store.bindPublicationAccepted(job, accepted, this.now()); publicationProgress.accepted = accepted; } },
             ),
           );
           await this.store.finish(
@@ -317,11 +359,18 @@ export class EbayListingSyncService {
           result.processed++;
         } catch (error) {
           result.failed++;
+          const failure = syncFailure(error, job.attempts, this.now());
+          // Never retire a publication's unresolved write barrier. A new command
+          // must join this job and retain its acceptance/start evidence.
+          if (job.operation === "publish" && (publicationProgress.started || publicationProgress.completed || publicationProgress.accepted)) {
+            failure.state = publicationProgress.accepted || publicationProgress.completed ? "recovering" : "awaiting_evidence";
+            failure.resetAttempts = true;
+          }
           // A failed final commit is retained as running. Never overwrite a newer
           // owner's progress after losing this connection or its fencing token.
           await this.store.finish(
             job,
-            { ...syncFailure(error, job.attempts, this.now()), result: null },
+            { ...failure, result: null },
             this.now(),
           );
           console.error(

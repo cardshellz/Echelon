@@ -55,6 +55,9 @@ import {
   delay,
 } from "./ebay-listing-helpers";
 import type { EbayListingMappingSource } from "../ebay-listing-mapping.service";
+import { EbayListingOperationExecution, EbayPublicationCompletionExecution } from "../ebay-publication-completion.service";
+import { prepareEbayPublicationCompletion } from "./ebay-listing-push";
+import { assertEbayPublicationCompatibility } from "./ebay-publication-compatibility";
 export interface SyncFilter {
   productIds?: number[];
   productTypeSlugs?: string[];
@@ -109,6 +112,7 @@ async function readActiveEbaySyncRows(filter: SyncFilter | null, allSavedMembers
   return await readDb
     .select({
       listing_id: channelListings.id,
+      mapping_exists: sql<boolean>`true`,
       product_variant_id: channelListings.productVariantId,
       external_product_id: channelListings.externalProductId,
       external_variant_id: channelListings.externalVariantId,
@@ -209,7 +213,7 @@ function identityFromRows(
   rows: Awaited<ReturnType<typeof readActiveEbaySyncRows>>,
   ctx: Awaited<ReturnType<typeof context>>,
 ): EbayListingSyncIdentity {
-  return captureExistingEbayListingIdentity(rows.map(row => ({ ...row, content_sync_enabled: isVariantSellable({
+  return captureExistingEbayListingIdentity(rows.map(row => ({ ...row, mapping_exists: true, content_sync_enabled: isVariantSellable({
     productActive: row.product_is_active,
     variantActive: row.variant_is_active,
     salesEligibility: row.variant_sales_eligibility,
@@ -501,11 +505,12 @@ const existingListingConnector = new EbayMarketplaceListingConnector({
 });
 export const ebayListingSyncService = new EbayListingSyncService(
   new PostgresEbayListingSyncRepository(pool),
-  new EbayExistingListingSyncExecution(
+  new EbayListingOperationExecution(new EbayExistingListingSyncExecution(
     prepareActiveEbayListingSync,
     quantityProviderResponseRecovery,
     existingListingConnector,
-  ),
+  ), new EbayPublicationCompletionExecution(prepareEbayPublicationCompletion, quantityProviderResponseRecovery,
+    existingListingConnector, assertEbayPublicationCompatibility)),
   () => new Date(),
   randomUUID,
 );

@@ -16,11 +16,14 @@ export const ebayListingInspectionSchema: z.ZodType<EbayListingInspection> = z.o
     offers: z.array(ebayListingMappingOfferSchema).max(10000), issue: issueSchema.nullable() }).strict()).max(250),
   publication: marketplaceObservedListingPublicationSchema.nullable(), publicationIssue: issueSchema.nullable(),
   groupKey: z.string().min(1).max(255).nullable(), groupSkus: z.array(z.string().min(1).max(100)).max(10000).nullable(),
+  unpublishedTarget: z.object({ groupKey: z.string().min(1).max(255).nullable(),
+    skus: z.array(z.string().min(1).max(100)).min(1).max(250) }).strict().nullable().optional(),
 }).strict();
 export interface EbayListingMappingDiagnosis {
   review: EbayListingMappingReview;
   provenIdentity: EbayListingSyncIdentity | null;
   observation: MarketplaceObservedListingPublication | null;
+  publicationPlan?: { targetIdentity: EbayListingSyncIdentity; inspectionEvidence: EbayListingInspection };
 }
 
 export function mappingFailureKind(issue: EbayListingInspectionIssue): "reconnect" | "retry_read" | "manual" {
@@ -116,6 +119,46 @@ export function buildEbayListingMappingDiagnosis(source: EbayListingMappingSourc
     return mappingBlockedReview({ ...base, title: "Connected account differs", explanation: "The live eBay account or environment differs from this channel's verified identity. Reconnect the intended account.", kind: "reconnect" });
   const readIssue = inspection.skus.find(member => member.issue)?.issue;
   if (readIssue) return mappingBlockedReview({ ...base, ...mappingReadFailure(readIssue) });
+  const unpublishedTarget = inspection.unpublishedTarget;
+  if (unpublishedTarget && rows.every(row => row.problem === "unpublished")) {
+    // The canonical observer proves the existing group. Catalog's product SKU
+    // is not evidence of which provider group may be updated or published.
+    const targetSkus = [...unpublishedTarget.skus].sort();
+    if (new Set(targetSkus).size !== targetSkus.length || targetSkus.length !== expectedSkus.length
+      || targetSkus.some((sku,index) => sku !== expectedSkus[index])
+      || (source.identity.variants.length > 1 && unpublishedTarget.groupKey === null))
+      return mappingBlockedReview({ ...base, title: "Listing variants differ", code: "EBAY_SYNC_MEMBERSHIP_CHANGED",
+        explanation: "The unpublished eBay group does not contain exactly these product variants. Review its complete membership before publishing." });
+    if (source.identity.variants.some(member => member.listingId !== null))
+      return mappingBlockedReview({ ...base, title: "Previously saved listing is no longer published",
+        explanation: "Echelon has a saved listing ID, but eBay now reports its offers as unpublished. Review that listing's history before authorizing a new publication; changing its saved IDs will not restore it." });
+    if (source.identity.variants.some(member => member.contentSyncEnabled === false)
+      || source.candidates.some(candidate => !candidate.isActive))
+      return mappingBlockedReview({ ...base, title: "Choose which variants to publish", code: "EBAY_MAPPING_PRODUCT_NOT_ELIGIBLE",
+        explanation: "The unpublished group contains a disabled or excluded variant. Enable the intended variants in the listing feed before finishing this publication." });
+    if (source.identity.variants.some(member => {
+      const offers = bySku.get(member.sku)!.offers;
+      return offers.length !== 1 || offers[0]!.status !== "UNPUBLISHED" || offers[0]!.sku !== member.sku
+        || offers[0]!.listingId !== null || member.offerId !== offers[0]!.offerId;
+    })) return mappingBlockedReview({ ...base, title: "Saved offer differs from eBay", code: "EBAY_MAPPING_SOURCE_INVALID",
+      explanation: "A saved offer ID does not match the one unpublished offer returned for its SKU. Review those exact identifiers before publishing; Echelon will not replace or guess an offer." });
+    const targetIdentity = ebayListingSyncIdentitySchema.parse({ ...source.identity, groupKey: unpublishedTarget.groupKey });
+    const reviewHash = syncStageHash({ operation: "publish", identity: source.identity, environment: source.environment,
+      candidates: source.candidates.map(({ availableQuantity: _quantity, ...candidate }) => candidate).sort((a,b) => a.productVariantId-b.productVariantId),
+      targetIdentity, observed: inspection.skus.map(member => ({ sku: member.sku, inventoryItemExists: member.inventoryItemExists,
+        offers: member.offers })).sort((a,b) => a.sku.localeCompare(b.sku)), targetSkus });
+    return { provenIdentity: null, observation: null, publicationPlan: { targetIdentity, inspectionEvidence: inspection },
+      review: ebayListingMappingReviewSchema.parse({ ...base, observedAt: inspection.observedAt.toISOString(),
+        membership: { expectedSkus, observedSkus: targetSkus, missingSkus: [], extraSkus: [], groupKey: unpublishedTarget.groupKey },
+        rows: rows.map(row => ({ ...row, recommendation: "Reuse this saved offer, update its current catalog content and pictures, then finish publishing it." })),
+        reviewHash, canApply: true, title: "These offers need to be published",
+        explanation: "eBay has the saved offers and the exact expected variants, but reports them as unpublished. A stock update cannot complete this step. Echelon can finish publication using these same offers.",
+        effects: ["Reuse these exact eBay offers and their verified group; do not delete or recreate them.",
+          "Apply current catalog content, shared and variant pictures, channel prices and inventory through the existing publication rules.",
+          "Save the request, finish publishing, and verify the live listing and pictures before showing completion. Retries continue the saved request."],
+        action: { kind: "finish_publish", label: "Finish publishing" }, manualSteps: [],
+      }) };
+  }
   const blockedRows = rows.filter(row => ["missing", "unpublished", "ambiguous", "invalid_response"].includes(row.problem));
   if (blockedRows.length) return mappingBlockedReview({ ...base, title: "Listing needs review", explanation: "The returned offers do not prove one live offer for every saved SKU. Follow the recommendation for each affected variant." });
   const publication = inspection.publication;
