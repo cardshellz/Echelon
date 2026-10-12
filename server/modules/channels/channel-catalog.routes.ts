@@ -22,6 +22,7 @@ export function registerChannelCatalogRoutes(app: Express): void {
   };
   route("get", "", false, (service, id, req) => service.list(id, req.query));
   route("get", "/variants", false, (service, _id, req) => service.searchVariants(req.query.q));
+  route("post", "/stock", false, (service, id, req) => service.stock(id, req.body));
   route("post", "/mappings", true, (service, id, req) => service.link(id, req.body, z.string().min(1).parse(req.session?.user?.id)));
 }
 export function sendCatalogError(res: Response, error: unknown): void {
