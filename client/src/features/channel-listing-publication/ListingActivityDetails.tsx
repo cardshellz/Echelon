@@ -8,6 +8,7 @@ const itemLabels: Record<ListingOperation["items"][number]["state"], string> = {
   verified: "Item verified",
   needs_attention: "Needs attention",
   needs_reconciliation: "Outcome needs verification",
+  superseded: "Recreated in a newer submission",
 };
 export function ListingActivityDetails({
   operation,

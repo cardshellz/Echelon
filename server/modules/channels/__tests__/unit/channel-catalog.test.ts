@@ -74,6 +74,24 @@ describe("shared channel catalog identity", () => {
     expect(s.provider.item).toHaveBeenCalledExactlyOnceWith(account, "SKU-1");
     expect(s.repository.saveMappings).toHaveBeenCalledWith(account, [{ item: item(), productVariantId: 11, expectedLocalSku: "SKU-1" }], "intake", now);
   });
+  it("relinks a recreated SKU only to the freshly verified product and the original local selling variant", async () => {
+    const s = setup();
+    await s.service.linkRecreated(account, { sku: "SKU-1", productVariantId: 11,
+      previousExternalProductId: "OLD-WPID", expectedExternalProductId: "WPID" }, "operator");
+    expect(s.repository.saveMappings).toHaveBeenCalledExactlyOnceWith(account, [{
+      item: item(), productVariantId: 11, expectedLocalSku: "SKU-1", replacesExternalProductId: "OLD-WPID",
+    }], "operator", now);
+  });
+  it.each(["account", "sku", "product", "retired"])("does not persist a recreation mapping after %s changes", async change => {
+    const s = setup();
+    if (change === "account") s.provider.account.mockResolvedValue({ ...account, connectionId: 10 });
+    if (change === "sku") s.provider.item.mockResolvedValue(item("OTHER"));
+    if (change === "product") s.provider.item.mockResolvedValue({ ...item(), externalProductId: "OTHER" });
+    if (change === "retired") s.provider.item.mockResolvedValue({ ...item(), lifecycleStatus: "RETIRED" });
+    await expect(s.service.linkRecreated(account, { sku: "SKU-1", productVariantId: 11,
+      previousExternalProductId: "OLD-WPID", expectedExternalProductId: "WPID" }, "operator")).rejects.toThrow();
+    expect(s.repository.saveMappings).not.toHaveBeenCalled();
+  });
 });
 
 describe("Walmart thin catalog translation", () => {

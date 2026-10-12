@@ -94,6 +94,8 @@ export const listingDraftItemSchema = z
       .default(null),
     priceOverrideCents: publicationMoneySchema.nullable().default(null),
     attributes: listingProviderFieldsSchema.default({}),
+    // Intent only. The server must recheck the exact prior submission and remote SKU.
+    recreateFromOperationId: z.string().uuid().optional(),
   })
   .strict();
 export type ListingDraftItem = z.infer<typeof listingDraftItemSchema>;
@@ -284,6 +286,7 @@ export const listingReviewItemSchema = z.object({
   priceSource: z.string().nullable(),
   issues: z.array(listingIssueSchema),
   schemaVersion: z.string().nullable(),
+  recreating: z.boolean().optional(),
 });
 export const listingReviewSchema = z.object({
   id: z.string().uuid(),
@@ -321,11 +324,15 @@ export const listingOperationItemSchema = z.object({
     "verified",
     "needs_attention",
     "needs_reconciliation",
+    "superseded",
   ]),
   externalProductId: z.string().nullable(),
   error: z.string().nullable(),
   stockState: z.enum(["waiting_for_item", "setup_required", "ready"]),
   canRetry: z.boolean().default(false),
+  title: z.string().max(1000).optional(),
+  missingOnProvider: z.boolean().optional(),
+  recreatedByOperationId: z.string().uuid().optional(),
 });
 export type ListingOperationItem = z.infer<typeof listingOperationItemSchema>;
 export const listingOperationSchema = z.object({
@@ -357,4 +364,16 @@ export const listingCatalogPageSchema = z.object({
   total: z.number().int().nonnegative(),
   offset: z.number().int(),
   limit: z.number().int(),
+});
+export const listingRecreationRequestSchema = z
+  .object({
+    operationId: z.string().uuid(),
+    sku: z.string().trim().min(1).max(50),
+  })
+  .strict();
+export const listingRecreationSchema = z.object({
+  account: listingAccountSchema,
+  item: listingDraftItemSchema,
+  catalog: listingCatalogItemSchema,
+  checkedAt: z.string().datetime(),
 });
