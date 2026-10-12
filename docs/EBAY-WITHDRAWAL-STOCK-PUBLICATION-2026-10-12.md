@@ -26,14 +26,14 @@ Subsequently fetched main: `0c3750b7cd61de127bbe23a0782c336fb6fd5683`.
 
 ## What caused the failures
 
-1. The old `withdrawProductListings` in
-   `server/routes/ebay/ebay-listing-state.ts` filtered by local `synced` status,
-   addressed groups using the current catalog SKU, and projected local ending
+1. The old `withdrawEbayProductListings` in
+   `server/routes/ebay/ebay-listing-state.ts:218` on the fetched main filtered by local `synced` status (line 233),
+   addressed groups using the current catalog SKU (line 260), and projected local ending
    separately from the product exclusion change. Clear's renamed catalog SKU
    is different from its saved eBay identity. The old product toggle also did
    not give the browser a durable provider-operation result to recover.
 2. `planCurrentCanonicalListingQuantity` in
-   `server/modules/inventory-planning/infrastructure/quantity-publication-runtime.ts`
+   `server/modules/inventory-planning/infrastructure/quantity-publication-runtime.ts:45`
    requires exactly one active sealed mapping for the seller, connection, and
    provider SKU. That requirement is correct. Publication could previously
    prepare zero-quantity resources before discovering the missing stock mapping.
@@ -75,6 +75,14 @@ success and refusal receipts share a command lock; an ambiguous response keeps
 the original command, and a definitive refusal cannot race a late successful
 apply behind a discarded command ID.
 
+The reviewed provider target is retained in the existing immutable
+`publication_target` field. `readPreparationTarget` in
+`server/modules/channels/infrastructure/ebay-publication-stock.repository.ts:29`
+reuses an earlier preparation target only after exact source comparison. A
+started/accepted publication opens its original saved job instead. Target
+binding requires the same transaction's command receipt and owned locks; it
+does not fabricate provider acceptance or verified publication identity.
+
 ## Operator flow after deployment
 
 - Clear: turn the product off. The feed shows removal queued/in progress, then
@@ -94,6 +102,25 @@ apply behind a discarded command ID.
   Re-enabling an unwanted listing is not a repair instruction.
 
 ## Validation and remaining limits
+
+Final branch includes fetched main `0c3750b7cd61de127bbe23a0782c336fb6fd5683`.
+The incoming dropship migrations consumed 0738–0740; these migrations were
+renumbered to 0741/0742 before the final PostgreSQL run.
+
+- All four affected disposable PostgreSQL suites: **106 passed**.
+- Focused channel/eBay route/readiness, writer-boundary, and CI-manifest unit
+  run: **1,794 passed across 111 files**.
+- Desktop/mobile browser coverage: **178 unique current cases passed** across
+  the full five-suite run and subsequent affected-suite runs. API responses
+  were mocked and external traffic blocked.
+- Application, server-test, and client-test TypeScript checks passed.
+- Production client/server build passed, with the existing large-bundle warning.
+- Broad unit run: **22,402 passed, 11 failed, 40 skipped**. Ten failures were
+  byte-sensitive migration/golden assertions on Windows CRLF checkout bytes;
+  one unchanged dropship HTTP test failed before its request with `bad port`.
+  After restoring those fixtures to exact committed LF bytes, all five affected
+  suites passed (**175 tests**). No unrelated application or test logic was
+  changed to suppress these failures. This was not a single all-green broad run.
 
 Local tests exercise the application contracts, actual HTTP authorization and
 validation, real disposable PostgreSQL transactions, and desktop/mobile browser
