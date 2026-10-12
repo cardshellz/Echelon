@@ -6,8 +6,8 @@ import { MAX_NAMED_CATALOG_GROUP_ITEMS } from "./catalog-scope";
 
 /**
  * Product and category listing settings (design record
- * DROPSHIP-LISTING-SETTINGS-REDESIGN.md, sections 4 and 8.2, migrations 0737
- * and 0738): the values a vendor sets once for a product, or for a Card Shellz
+ * DROPSHIP-LISTING-SETTINGS-REDESIGN.md, sections 4 and 8.2, migrations 0738
+ * and 0739): the values a vendor sets once for a product, or for a Card Shellz
  * category, and every size follows. Precedence is size (exact price only),
  * then product, then category, then the store default.
  *

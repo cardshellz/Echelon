@@ -1,14 +1,14 @@
--- 0738: a vendor's listing settings for one Card Shellz category, and the
+-- 0739: a vendor's listing settings for one Card Shellz category, and the
 -- category marks behind "Card Shellz updated products" (Listing settings
 -- redesign, M5 / PR 8).
 --
 -- Category settings are keyed by the Card Shellz category id, never its name:
 -- Card Shellz can rename a category and the id stays. A null value means "use
 -- the store default". A category sets what a product sets except the main
--- text (product only, 0737), so there are no body columns, and a category
+-- text (product only, 0738), so there are no body columns, and a category
 -- save is never part of a many-products request, so there is no request id.
 -- The revisions keep the category's name at save for the audit trail; readers
--- show the current name. Same pattern and value checks as 0737: immutable
+-- show the current name. Same pattern and value checks as 0738: immutable
 -- revisions, a current row that only points at its revision, a trigger that
 -- refuses deletes, identity changes and stale predecessors, and value groups
 -- that are all or none without relying on a NULL CHECK result.

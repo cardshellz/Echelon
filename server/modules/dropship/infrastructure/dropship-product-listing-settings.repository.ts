@@ -49,7 +49,7 @@ import {
 
 /**
  * A vendor's own listing settings for Card Shellz products (plan PR 8a,
- * section 3.8; migration 0737): the current-row read, the one-product
+ * section 3.8; migration 0738): the current-row read, the one-product
  * compare-and-set save (W5) and the set-based save for many products (W6, and
  * W12's "Also clear theirs"). Every function runs on the caller's transaction
  * client, assumes the caller holds the locks of plan 3.9 (request key, store,

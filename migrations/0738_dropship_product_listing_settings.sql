@@ -1,9 +1,9 @@
--- 0737: a vendor's own listing settings for one Card Shellz product
+-- 0738: a vendor's own listing settings for one Card Shellz product
 -- (Listing settings redesign, M3 / PR 8).
 --
 -- A null value means "follow the default": for price, eBay category and
 -- description an older group rule that matches comes first; then the
--- product's category setting (0738), else the store default. Every value
+-- product's category setting (0739), else the store default. Every value
 -- lives on an immutable revision. The current row only points at its
 -- revision (the 0660 pattern), and a trigger refuses deletes, identity
 -- changes and stale predecessors, so going back to the default is a new

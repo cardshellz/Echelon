@@ -75,8 +75,8 @@ describeDatabase.sequential("listing price PostgreSQL transaction guarantees", (
     const inheritMigration = qualify(readFileSync(resolve(process.cwd(), "migrations/0735_dropship_listing_price_inherit_mode.sql"), "utf8"));
     await pool.query(inheritMigration);
     await pool.query(inheritMigration);
-    // 0739 adds the review kind the store default review loader filters on; it also runs twice.
-    const reviewKindMigration = qualify(readFileSync(resolve(process.cwd(), "migrations/0739_dropship_pricing_review_kind.sql"), "utf8"));
+    // 0740 adds the review kind the store default review loader filters on; it also runs twice.
+    const reviewKindMigration = qualify(readFileSync(resolve(process.cwd(), "migrations/0740_dropship_pricing_review_kind.sql"), "utf8"));
     await pool.query(reviewKindMigration);
     await pool.query(reviewKindMigration);
     const scopedPool = { connect: async () => { const client = await pool!.connect();

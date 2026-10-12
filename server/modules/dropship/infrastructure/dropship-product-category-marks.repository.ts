@@ -24,12 +24,12 @@ import {
 
 /**
  * Category marks behind "Card Shellz updated products" (W13, plan PR 8a
- * section 3.8; migration 0738). A mark holds the Card Shellz category a chosen
+ * section 3.8; migration 0739). A mark holds the Card Shellz category a chosen
  * product was in when the vendor last confirmed it (null = no category); a
  * chosen product whose category now differs is listed as moved.
  *
  * Marks are history: never deleted, identity never changes, and seen_at never
- * moves back (the 0738 guard). They have no foreign key to the catalog (plan
+ * moves back (the 0739 guard). They have no foreign key to the catalog (plan
  * D13), so both writers select from catalog.products and cannot mark a
  * product that does not exist.
  *
