@@ -6,7 +6,7 @@ import { useAuth } from "@/lib/auth";
 import { apiRequest } from "@/lib/queryClient";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { ChannelWorkspaceHeader } from "@/components/channels/ChannelWorkspaceHeader";
 import WalmartConnectionPanel from "@/components/WalmartConnectionPanel";
@@ -66,9 +66,13 @@ export function WalmartChannelWorkspace({ channelId, navigationDocumentId, activ
     {workbench && !status.data && <div className="space-y-3 p-6"><h1 className="text-lg font-semibold">Edit Walmart listings</h1><p role={status.isLoading ? "status" : "alert"}>{status.isLoading ? "Loading Walmart connection…" : status.error ? status.error.message : "Connect this Walmart channel before editing listings."}</p><a className="underline" href={`/channels/walmart/${channelId}`}>Back to channel setup</a></div>}
     <div hidden={workbench} className="space-y-4 sm:space-y-6">
     <ChannelWorkspaceHeader name="Walmart" description="Store setup, listing feed, pricing, and publication activity" />
-    <Card><CardHeader className="px-3 sm:px-6"><CardTitle className="flex items-center gap-2"><ShieldCheck className="h-5 w-5" />Store Setup</CardTitle>
-      <CardDescription>Walmart US account and seller fulfillment location</CardDescription></CardHeader>
-      <CardContent className="space-y-5 px-3 sm:px-6">
+    <Card><details open={!status.data || undefined}><summary className="flex cursor-pointer flex-wrap items-center gap-2 p-3 text-sm sm:p-4">
+      <ShieldCheck className="h-4 w-4 text-muted-foreground" />
+      <span className="font-medium">{status.data?.partnerName ?? "Walmart connection"}</span>
+      {status.data && <><span className="text-xs text-green-700 dark:text-green-400">Connected</span><span className="text-xs text-muted-foreground">· {warehouse?.name ?? (warehouses.isLoading ? "Loading warehouse…" : "Warehouse unavailable")}</span></>}
+      <span className="ml-auto text-xs text-muted-foreground">Store Setup</span>
+    </summary>
+      <CardContent className="space-y-4 border-t px-3 pt-4 sm:px-4">
         {status.isLoading ? <Loader2 className="h-5 w-5 animate-spin" aria-label="Loading connection" /> : status.error ? <p role="alert" className="text-destructive">{status.error.message}</p> : <>
           <div className="flex flex-wrap items-center gap-3"><Badge variant={status.data ? "default" : "secondary"} className={status.data ? "bg-green-600 gap-1.5" : ""}>
             {status.data && <CheckCircle2 className="h-3.5 w-3.5" />}{status.data ? "Connected" : "Not connected"}</Badge>
@@ -90,7 +94,8 @@ export function WalmartChannelWorkspace({ channelId, navigationDocumentId, activ
           </>}
         </>}
       </CardContent>
-    </Card>
+    </details></Card>
+    {status.data && (status.error || status.data.lastErrorCode || status.data.orderSyncBlockedReason) && <p role="alert" className="text-sm text-destructive">{status.error?.message ?? status.data.orderSyncBlockedReason ?? `Order sync needs attention: ${status.data.lastErrorCode}`}</p>}
     </div>
     {status.data && <ChannelListingPublicationWorkspace navigationDocumentId={documentId} channelId={channelId} connectionId={status.data.connectionId} canEdit={canEdit} providerName="Walmart" active={active} onRetainChange={onRetainChange}
       onMappingsChanged={() => client.invalidateQueries({ queryKey: [base] })} />}

@@ -3,6 +3,8 @@ import { channelCatalogItemSchema, channelCatalogLinkSchema, channelCatalogQuery
   type ChannelCatalogItem, type ChannelCatalogMapping, type ChannelCatalogPage, type ChannelCatalogQuery,
   type ChannelCatalogRow, type ChannelCatalogVariant, type ChannelCatalogView } from "@shared/types/channel-catalog";
 import { ChannelIdentityError } from "./channel-identity.domain";
+import { channelCatalogStockRequestSchema, channelCatalogStockSchema, type ChannelCatalogStockItem } from "@shared/types/channel-catalog";
+import { ChannelProviderError } from "./channel-provider.error";
 
 export interface ChannelCatalogAccount {
   channelId: number;
@@ -14,6 +16,7 @@ export interface ChannelCatalogProvider {
   account(channelId: number): Promise<ChannelCatalogAccount>;
   list(account: ChannelCatalogAccount, query: ChannelCatalogQuery): Promise<ChannelCatalogPage>;
   item(account: ChannelCatalogAccount, sku: string): Promise<ChannelCatalogItem>;
+  stock?(account: ChannelCatalogAccount, sku: string): Promise<number>;
 }
 export interface ChannelCatalogMappingRecord {
   productVariantId: number; sku: string; externalVariantId: string | null;
@@ -73,7 +76,33 @@ export class ChannelCatalogService {
       throw new ChannelIdentityError("CHANNEL_CATALOG_DUPLICATE_SKU", "The provider returned duplicate SKU identities");
     }
     const local = await this.repository.candidates(channelId, items.map(item => item.sku));
-    return { ...page, items: matchChannelCatalog(items, local.variants, local.mappings) };
+    return { ...page, connectionId: account.connectionId, items: matchChannelCatalog(items, local.variants, local.mappings) };
+  }
+
+  /** Read-only marketplace observations. This does not calculate ATP or publish stock. */
+  async stock(channelId: number, input: unknown) {
+    const request = channelCatalogStockRequestSchema.parse(input);
+    const account = await this.provider.account(channelId);
+    if (account.connectionId !== request.connectionId)
+      throw new ChannelIdentityError("CHANNEL_CATALOG_ACCOUNT_CHANGED", "The connection changed. Refresh listings before checking stock.");
+    if (!this.provider.stock)
+      throw new ChannelIdentityError("CHANNEL_CATALOG_STOCK_UNAVAILABLE", "Stock reads are not supported for this channel.");
+    const items: ChannelCatalogStockItem[] = [];
+    // Bound provider traffic. One failed SKU must not hide the other observations.
+    const concurrency = 5;
+    for (let offset = 0; offset < request.skus.length; offset += concurrency) {
+      items.push(...await Promise.all(request.skus.slice(offset, offset + concurrency).map(async sku => {
+        try {
+          const quantity = z.number().int().nonnegative().max(2_147_483_647).parse(await this.provider.stock!(account, sku));
+          return { sku, quantity, checkedAt: this.now().toISOString(), error: null };
+        } catch (error) {
+          const code = error instanceof ChannelProviderError ? error.code : "CHANNEL_CATALOG_STOCK_FAILED";
+          console.error(JSON.stringify({ code, operation: "channel_catalog_stock", channelId, sku }));
+          return { sku, quantity: null, checkedAt: this.now().toISOString(), error: "Could not read stock from Walmart. Refresh listings to try again." };
+        }
+      })));
+    }
+    return channelCatalogStockSchema.parse({ connectionId: account.connectionId, items });
   }
 
   async link(channelId: number, input: unknown, actor: string): Promise<{ linked: number }> {

@@ -5,16 +5,15 @@ import {
   useQuery,
   useQueryClient,
 } from "@tanstack/react-query";
-import { MoreHorizontal } from "lucide-react";
+
 import {
   listingLifecycleHistorySchema,
   listingLifecycleListSchema,
   listingLifecycleViewSchema,
-  type ListingLifecycleView,
 } from "@shared/types/channel-listing-lifecycle";
 import type { ListingAccount } from "@shared/types/channel-listing-publication";
 import { Button } from "@/components/ui/button";
-import { Badge } from "@/components/ui/badge";
+
 import {
   Dialog,
   DialogContent,
@@ -23,12 +22,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
+
 import { publicationRequest } from "./api";
 import { errorMessage } from "./model";
 
@@ -157,6 +151,7 @@ export function useListingLifecycle(
     showRemoved,
     setShowRemoved,
     selection,
+    account: query.data?.account,
     open: (input: ListingLifecycleSelection) => {
       if (!query.data || accountChanged) return;
       action.reset();
@@ -189,79 +184,6 @@ export function useListingLifecycle(
             ? errorMessage(check.error)
             : null,
   };
-}
-
-export function ListingLifecycleMenu({
-  sku,
-  title,
-  control,
-  disabled,
-  onSelect,
-}: {
-  sku: string;
-  title: string;
-  control?: ListingLifecycleView;
-  disabled: boolean;
-  onSelect(selection: ListingLifecycleSelection): void;
-}) {
-  if (control?.action === "remove") return null;
-  return (
-    <DropdownMenu>
-      <DropdownMenuTrigger asChild>
-        <Button
-          variant="outline"
-          size="sm"
-          disabled={disabled}
-          aria-label={`More actions for ${sku}`}
-        >
-          <MoreHorizontal className="h-4 w-4" />
-          <span className="sr-only">Listing actions</span>
-        </Button>
-      </DropdownMenuTrigger>
-      <DropdownMenuContent align="end">
-        {!control && (
-          <DropdownMenuItem
-            onSelect={() => onSelect({ sku, title, action: "unpublish" })}
-          >
-            Unpublish from Walmart
-          </DropdownMenuItem>
-        )}
-        <DropdownMenuItem
-          className="text-destructive focus:text-destructive"
-          onSelect={() => onSelect({ sku, title, action: "remove" })}
-        >
-          Remove from Echelon
-        </DropdownMenuItem>
-      </DropdownMenuContent>
-    </DropdownMenu>
-  );
-}
-
-export function ListingLifecycleStatus({
-  control,
-}: {
-  control: ListingLifecycleView;
-}) {
-  const label =
-    control.state === "retired"
-      ? control.action === "remove"
-        ? "Removed from Echelon"
-        : "Unpublished"
-      : control.state === "failed"
-        ? "Unpublish needs attention"
-        : "Unpublishing";
-  return (
-    <div className="space-y-1">
-      <Badge variant={control.state === "failed" ? "destructive" : "secondary"}>
-        {label}
-      </Badge>
-      {control.message && (
-        <p className="text-xs break-words text-muted-foreground">
-          {control.message}
-        </p>
-      )}
-    </div>
-  );
 }
 
 export function ListingLifecycleDialog({
