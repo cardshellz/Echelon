@@ -6,6 +6,8 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { TableCell, TableRow } from "@/components/ui/table";
 import type { ListingFeedRow } from "./feed-model";
 import { money, priceSourceLabel } from "./model";
+import type { ListingLifecycleView } from "@shared/types/channel-listing-lifecycle";
+import { ListingLifecycleMenu, ListingLifecycleStatus, type ListingLifecycleSelection } from "./ListingLifecycleActions";
 
 const mappingLabels: Record<ChannelCatalogRow["mappingStatus"], string> = {
   linked: "Linked",
@@ -35,6 +37,10 @@ export function ChannelListingFeedRow({
   onRemove,
   onMatch,
   onActivity,
+  lifecycle,
+  lifecycleReady = false,
+  onLifecycle,
+  onCheckLifecycle,
 }: {
   row: ListingFeedRow;
   canEdit: boolean;
@@ -47,6 +53,10 @@ export function ChannelListingFeedRow({
   onRemove(variantId: number): void;
   onMatch(item: ChannelCatalogRow): void;
   onActivity(): void;
+  lifecycle?: ListingLifecycleView;
+  lifecycleReady?: boolean;
+  onLifecycle?(selection: ListingLifecycleSelection): void;
+  onCheckLifecycle?(): void;
 }) {
   const { draft, catalog, remote, operation } = row;
   const existingListing = remote
@@ -57,6 +67,7 @@ export function ChannelListingFeedRow({
     draft?.title ??
     catalog?.name ??
     remote?.title ??
+    lifecycle?.title ??
     row.sku ??
     `Variant ${variantId}`;
   const localVariantName =
@@ -105,8 +116,9 @@ export function ChannelListingFeedRow({
         )}
       </TableCell>
       <TableCell className="min-w-44 max-w-72 space-y-2">
+        {lifecycle && <ListingLifecycleStatus control={lifecycle} />}
         {draft && <Badge variant="secondary">Draft · review required</Badge>}
-        {remote && (
+        {remote && lifecycle?.state !== "retired" && (
           <div>
             <Badge variant="outline">{remote.publishedStatus}</Badge>
             <p className="mt-1 text-xs text-muted-foreground">
@@ -249,7 +261,7 @@ export function ChannelListingFeedRow({
               Remove
             </Button>
           )}
-          {!draft && existingListing && row.sku && canEdit && (
+          {!draft && !lifecycle && existingListing && row.sku && canEdit && (
             <Button
               variant="outline"
               size="sm"
@@ -261,6 +273,7 @@ export function ChannelListingFeedRow({
             </Button>
           )}
           {remote &&
+            !lifecycle &&
             canEdit &&
             !row.issue &&
             ["matched", "unmatched"].includes(remote.mappingStatus) && (
@@ -283,6 +296,10 @@ export function ChannelListingFeedRow({
               View activity
             </Button>
           )}
+          {!draft && row.sku && canEdit && onLifecycle && <ListingLifecycleMenu sku={row.sku} title={title}
+            control={lifecycle} disabled={locked || !lifecycleReady} onSelect={onLifecycle} />}
+          {canEdit && lifecycle && lifecycle.state !== "retired" && <Button variant="outline" size="sm" disabled={locked || !lifecycleReady}
+            onClick={onCheckLifecycle}>Check unpublish status</Button>}
         </div>
       </TableCell>
     </TableRow>

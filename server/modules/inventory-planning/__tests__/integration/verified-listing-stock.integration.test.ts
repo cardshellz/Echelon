@@ -16,6 +16,12 @@ import { WalmartAdapter } from "../../../channels/adapters/walmart/walmart.adapt
 import { WalmartUsApi } from "../../../channels/adapters/walmart/walmart-us-api";
 import { WalmartClient } from "../../../channels/adapters/walmart/walmart-client";
 import type { WalmartChannelService } from "../../../channels/adapters/walmart/walmart-channel.service";
+import { walmartListingAccount } from "../../../channels/adapters/walmart/walmart-channel.service";
+import { WalmartListingLifecycleProvider } from "../../../channels/adapters/walmart/walmart-listing-lifecycle.provider";
+import { ListingLifecycleService } from "../../../marketplace-listings/application/listing-lifecycle.service";
+import { PostgresListingLifecycleRepository } from "../../../marketplace-listings/infrastructure/pg-listing-lifecycle.repository";
+import { InventoryPublicationTargetVariantHoldService } from "../../application/inventory-publication-target-variant-hold.service";
+import { PostgresInventoryPublicationTargetVariantHoldStore } from "../../infrastructure/inventory-publication-target-variant-hold.repository";
 
 const url = process.env.ECHELON_TEST_DATABASE_URL;
 const disposable = process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true";
@@ -77,6 +83,46 @@ dbDescribe.sequential("verified Walmart listing joins canonical ATP", () => {
     expect((await database.pool.query("SELECT * FROM public.audit_events WHERE actor='walmart-stock-connection'")).rows).toEqual([]);
   });
 
+  it("retirement uses the real inventory owner to replace stock with zero and keeps the account live", async () => {
+    await service.connect(input());
+    for (const file of ["0707_channel_listing_publication.sql", "0724_channel_listing_updates.sql", "259_channel_listing_lifecycle.sql"])
+      await database.pool.query(readFileSync(resolve("migrations", file), "utf8"));
+    const store = new PostgresListingLifecycleRepository(database.pool);
+    const row = { channel_id: 36, connection_id: 8, ship_node_id: "test-location", warehouse_id: 1,
+      partner_id: "partner-36", revision: 1, environment: "production" };
+    const account = walmartListingAccount(row as never);
+    let retired = false, retirementRequests = 0;
+    const channels = { connection: async () => row, requireRuntime: () => {},
+      repository: { mappings: async () => [{ product_variant_id: 101, channel_sku: "P5" }],
+        withLock: async <T>(_id: number, work: () => Promise<T>) => work() },
+      listingApi: () => ({ observe: async () => ({ sku: "P5", productName: "Sleeves", lifecycleStatus: retired ? "RETIRED" : "ACTIVE",
+        publishedStatus: retired ? "UNPUBLISHED" : "PUBLISHED" }), retire: async () => { retirementRequests++; } }),
+    } as unknown as WalmartChannelService;
+    const lifecycle = new ListingLifecycleService({ store,
+      provider: new WalmartListingLifecycleProvider(channels, new InventoryPublicationTargetVariantHoldService(
+        new PostgresInventoryPublicationTargetVariantHoldStore(database.pool), { now: () => WALMART_INVENTORY_NOW })),
+      now: () => WALMART_INVENTORY_NOW, uuid: () => "00000000-0000-4000-8000-000000000099" });
+    await lifecycle.request(36, { account, sku: "P5", action: "remove" }, "operator");
+    await expect(store.withAllowed(account, ["P5"], async () => {})).rejects.toMatchObject({ code: "LISTING_PUBLICATION_STOPPED" });
+    expect(await lifecycle.refresh(36, "P5")).toMatchObject({ state: "retiring" });
+    expect(retirementRequests).toBe(1);
+    expect((await database.pool.query(`SELECT publication_target_id,product_variant_id FROM inventory.inventory_publication_target_variant_holds`)).rows)
+      .toEqual([{ publication_target_id: 2, product_variant_id: 101 }]);
+    expect((await database.pool.query("SELECT state FROM inventory.inventory_publication_targets WHERE id=2")).rows[0].state).toBe("live");
+    const latest = async () => (await database.pool.query(`SELECT id,desired_quantity::text FROM inventory.inventory_publication_outbox
+      WHERE publication_target_id=2 ORDER BY id DESC LIMIT 1`)).rows[0];
+    const zero = await latest();
+    expect(zero.desired_quantity).toBe("0");
+    await lifecycle.refresh(36, "P5");
+    expect(await latest()).toEqual(zero); // Lost responses do not enqueue duplicate hold commands.
+    expect(retirementRequests).toBe(1);
+    retired = true;
+    expect(await lifecycle.refresh(36, "P5")).toMatchObject({ state: "retired", action: "remove" });
+    await expect(store.withAllowed(account, ["OTHER-SKU"], async () => "allowed")).resolves.toBe("allowed");
+    await expect(store.withAllowed(account, [], async () => "zero allowed")).resolves.toBe("zero allowed");
+    await expect(store.withAllowed(account, ["P5"], async () => {})).rejects.toMatchObject({ code: "LISTING_PUBLICATION_STOPPED" });
+  });
+
   it.each([
     { source: "hub stock", reserve: false, reserveOnly: false, quantity: 17 },
     { source: "hub and linked reserve stock", reserve: true, reserveOnly: false, quantity: 22 },
@@ -108,7 +154,9 @@ dbDescribe.sequential("verified Walmart listing joins canonical ATP", () => {
           amount: options!.method === "GET" && ++reads === 1 ? 0 : quantity } });
       },
     }));
-    const channels = { connection: async () => ({ connection_id: 8, ship_node_id: "test-location", warehouse_id: 1 }),
+    const channels = { connection: async () => ({ channel_id: 36, connection_id: 8, ship_node_id: "test-location", warehouse_id: 1,
+      partner_id: "partner-36", revision: 1, environment: "production" }),
+      withListingWrites: async <T>(_account: unknown, _skus: readonly string[], work: () => Promise<T>) => work(),
       requireRuntime: () => undefined, api: () => api,
       repository: { mappings: async () => [{ product_variant_id: 101, channel_sku: "P5" }],
         assertWarehouse: async () => undefined, withLock: async <T>(_channel: number, work: () => Promise<T>) => work() },
