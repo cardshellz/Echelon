@@ -40,7 +40,7 @@ async function setup() {
   const inspectCanonicalForIntake = vi.fn(async (_scope: unknown): Promise<CustomerReturnIntakeInspection> => structuredClone(fixture.inspection));
   const inspectForIntake = vi.fn(async (): Promise<CustomerReturnIntakeInspection> => { throw new Error("Display-reference fallback must never run"); });
   const lookupCanonical = vi.fn(async () => structuredClone(fixture.inspection.order));
-  ports.live.mockResolvedValue({ inspectCanonicalForIntake, inspectForIntake, lookupCanonical,
+  ports.live.mockResolvedValue({ inspectCanonicalForIntake, inspectForIntake, lookupCanonical, lookupCanonicalSummary: lookupCanonical,
     getState: async () => ({ shops: [{ channelId: 36 }] }) });
   ports.findOwnedOrder.mockResolvedValue([{ channelId: 36, omsOrderId: 100, externalOrderId: fixture.inspection.local.order.externalOrderId,
     externalOrderNumber: fixture.inspection.local.order.externalOrderNumber, externalCustomerId: "123" }]);
@@ -73,7 +73,7 @@ async function setup() {
   // receive the canonical inspection method through the label-service factory.
   const services = await createCustomerReturnCustomerServices(session);
   const { channelId: _channelId, orderReference: _reference, ...input } = fixture.input;
-  return { services, input, inspectCanonicalForIntake, inspectForIntake, lookupCanonical, requireEnabled, progress,
+  return { services, input, inspectCanonicalForIntake, inspectForIntake, lookupCanonical, lookupCanonicalSummary: lookupCanonical, requireEnabled, progress,
     markAccepted: () => { command!.status = "accepted"; command!.authorizationId = 1; } };
 }
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllEnvs(); });

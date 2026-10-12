@@ -36,6 +36,27 @@ async function reviewInput(service: CustomerReturnLiveService) {
 }
 
 describe("private live order inspection", () => {
+  it("verifies chooser eligibility without requesting optional box measurements", async () => {
+    const s = setupCanonical();
+    addLiveOriginalBox(s.localFacts);
+    const summary = await s.service.lookupCanonicalSummary(s.scope);
+    expect(s.dimensions.read).not.toHaveBeenCalled();
+    expect(s.local.read).toHaveBeenCalledTimes(2);
+    expect(s.shopify.read).toHaveBeenCalledTimes(1);
+    expect(summary.boxOptions).toEqual([]);
+    const full = await s.service.lookupCanonical(s.scope);
+    expect(s.dimensions.read).toHaveBeenCalled();
+    expect(full.boxOptions).toHaveLength(1);
+    expect(summary.lines).toEqual(full.lines);
+    expect(summary.sourceRevision).toBe(full.sourceRevision);
+  });
+
+  it("does not omit ownership verification from the faster chooser inspection", async () => {
+    const s = setupCanonical();
+    s.shopifyFacts.order.customerId = gid("Customer", 902);
+    await expect(s.service.lookupCanonicalSummary(s.scope)).rejects.toMatchObject({ code: "RETURN_LIVE_ORDER_NOT_FOUND" });
+    expect(s.dimensions.read).not.toHaveBeenCalled();
+  });
   it.each(["901", gid("Customer", 901), "900719925474099312345", gid("Customer", "900719925474099312345")])(
     "matches the provider owner and repeats exact canonical local scope without loss for %s", async externalCustomerId => {
     const s = setupCanonical(externalCustomerId);

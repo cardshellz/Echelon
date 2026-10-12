@@ -19,6 +19,9 @@ const REQUEST_TIMEOUT_MS = 15_000;
 const SNAPSHOT_TIMEOUT_MS = 90_000;
 const MAX_REQUESTS = 1_000;
 const MAX_RESPONSE_BYTES = 2_000_000;
+// Share this bound across every collection in one snapshot, including body reads.
+// Cursor pages remain dependent; independent parents can overlap network latency.
+const MAX_CONCURRENT_REQUESTS = 4;
 const LIMIT = CUSTOMER_RETURN_SHOPIFY_COLLECTION_LIMIT;
 const recordSchema = z.record(z.unknown());
 const quantity = z.number().int().nonnegative().safe();
@@ -80,27 +83,33 @@ export class ShopifyCustomerReturnSnapshotReader implements CustomerReturnShopif
     const input = parse(customerReturnShopifySnapshotInputSchema, raw, "RETURN_SHOPIFY_INPUT_INVALID");
     const before = await this.connection(input);
     const orderId = input.externalOrderId.startsWith("gid://") ? input.externalOrderId : `gid://shopify/Order/${input.externalOrderId}`;
-    const request = this.requester(before);
-    const account = await this.account(request, before.shopDomain);
-    const first = await this.observe(request, orderId);
-    // Shopify exposes no transactional snapshot and Return has no updatedAt.
-    // Compare two COMPLETE observations, including child identities/quantities, not just parent totals.
-    const second = await this.observe(request, orderId);
-    if (canonical(first) !== canonical(second)) fail("RETURN_SHOPIFY_SNAPSHOT_CHANGED", "transient");
-    const finalAccount = await this.account(request, before.shopDomain);
-    if (canonical(account) !== canonical(finalAccount)) fail("RETURN_SHOPIFY_CONNECTION_CHANGED", "transient");
-    const after = await this.connection(input);
-    if (canonical(before) !== canonical(after)) fail("RETURN_SHOPIFY_CONNECTION_CHANGED", "transient");
-    let now: Date;
-    try { now = this.dependencies.now(); } catch { fail("RETURN_SHOPIFY_CLOCK_INVALID"); }
-    if (!(now instanceof Date) || !Number.isFinite(now.getTime())) fail("RETURN_SHOPIFY_CLOCK_INVALID");
-    const result = parse(customerReturnShopifySnapshotSchema, {
-      ...second, shop: { ...input.shop, shopId: account.shop.id,
-        scopes: { readOrders: true, readAllOrders: true, readReturns: true } },
-      apiVersion: CUSTOMER_RETURN_SHOPIFY_API_VERSION, observedAt: now.toISOString(),
-    });
-    validateQuantities(result);
-    return result;
+    const operation = this.requester(before);
+    const request = operation.request;
+    try {
+      const account = await this.account(request, before.shopDomain);
+      const first = await this.observe(request, orderId);
+      // Shopify exposes no transactional snapshot and Return has no updatedAt.
+      // Compare two COMPLETE observations, including child identities/quantities, not just parent totals.
+      const second = await this.observe(request, orderId);
+      if (canonical(first) !== canonical(second)) fail("RETURN_SHOPIFY_SNAPSHOT_CHANGED", "transient");
+      const finalAccount = await this.account(request, before.shopDomain);
+      if (canonical(account) !== canonical(finalAccount)) fail("RETURN_SHOPIFY_CONNECTION_CHANGED", "transient");
+      const after = await this.connection(input);
+      if (canonical(before) !== canonical(after)) fail("RETURN_SHOPIFY_CONNECTION_CHANGED", "transient");
+      let now: Date;
+      try { now = this.dependencies.now(); } catch { fail("RETURN_SHOPIFY_CLOCK_INVALID"); }
+      if (!(now instanceof Date) || !Number.isFinite(now.getTime())) fail("RETURN_SHOPIFY_CLOCK_INVALID");
+      const result = parse(customerReturnShopifySnapshotSchema, {
+        ...second, shop: { ...input.shop, shopId: account.shop.id,
+          scopes: { readOrders: true, readAllOrders: true, readReturns: true } },
+        apiVersion: CUSTOMER_RETURN_SHOPIFY_API_VERSION, observedAt: now.toISOString(),
+      });
+      validateQuantities(result);
+      return result;
+    } finally {
+      // A failed sibling must not leave queued reads or provider work running.
+      operation.close();
+    }
   }
 
   private async connection(input: CustomerReturnShopifySnapshotInput): Promise<z.infer<typeof connectionSchema>> {
@@ -113,11 +122,12 @@ export class ShopifyCustomerReturnSnapshotReader implements CustomerReturnShopif
     return connection;
   }
 
-  private requester(connection: z.infer<typeof connectionSchema>): RequestQuery {
+  private requester(connection: z.infer<typeof connectionSchema>): { request: RequestQuery; close: () => void } {
     const url = `https://${connection.shopDomain}/admin/api/${CUSTOMER_RETURN_SHOPIFY_API_VERSION}/graphql.json`;
-    const operationSignal = AbortSignal.timeout(SNAPSHOT_TIMEOUT_MS);
+    const controller = new AbortController();
+    const operationSignal = AbortSignal.any([controller.signal, AbortSignal.timeout(SNAPSHOT_TIMEOUT_MS)]);
     let requests = 0;
-    return async (query, variables) => {
+    const request: RequestQuery = async (query, variables) => {
       try {
         if (++requests > MAX_REQUESTS) fail("RETURN_SHOPIFY_SNAPSHOT_LIMIT");
         if (operationSignal.aborted) fail("RETURN_SHOPIFY_TRANSPORT_FAILED", "transient");
@@ -147,6 +157,7 @@ export class ShopifyCustomerReturnSnapshotReader implements CustomerReturnShopif
         fail("RETURN_SHOPIFY_RESPONSE_INVALID", "transient");
       }
     };
+    return { request: limitSnapshotRequests(request, operationSignal), close: () => controller.abort() };
   }
 
   private async account(request: RequestQuery, domain: string) {
@@ -166,49 +177,82 @@ export class ShopifyCustomerReturnSnapshotReader implements CustomerReturnShopif
     unique(header.fulfillments.map(item => item.id)); unique(header.refunds.map(item => item.id));
     if (header.fulfillmentsCount.count !== header.fulfillments.length) fail("RETURN_SHOPIFY_PAGINATION_INVALID");
     const orderScope = { id: orderId, updatedAt: header.updatedAt };
-    const lines = await paginate(request, queries.lines, orderId, customerReturnShopifyPurchasedLineSchema,
-      node => node.id, data => parentConnection(data, "order", "lineItems", orderScope));
-    const fulfillments: CustomerReturnShopifySnapshot["fulfillments"] = [];
-    for (const fulfillment of header.fulfillments) {
-      const scope = { id: fulfillment.id, updatedAt: fulfillment.updatedAt, order: { id: orderId } };
-      const items = await paginate(request, queries.fulfillmentLines, fulfillment.id, fulfillmentLineSchema, node => node.id,
-        data => parentConnection(data, "fulfillment", "fulfillmentLineItems", scope));
-      const events = await paginate(request, queries.events, fulfillment.id, customerReturnShopifyFulfillmentEventSchema, node => node.id,
-        data => parentConnection(data, "fulfillment", "events", scope));
-      const { trackingInfo, ...fields } = fulfillment;
-      fulfillments.push(parse(customerReturnShopifyFulfillmentSchema, { ...fields, tracking: trackingInfo, lines: items, events }));
-    }
-    const nativeHeaders = await paginate(request, queries.returns, orderId, returnHeaderSchema, node => node.id,
-      data => parentConnection(data, "order", "returns", orderScope));
-    const returns: CustomerReturnShopifySnapshot["returns"] = [];
-    for (const native of nativeHeaders) {
-      if (native.order.id !== orderId) fail("RETURN_SHOPIFY_IDENTITY_MISMATCH");
-      const items = await paginate(request, queries.returnLines, native.id, nativeReturnLineSchema, node => node.id,
-        data => parentConnection(data, "return", "returnLineItems", native));
-      const { order: _order, ...fields } = native;
-      returns.push({ ...fields, lines: items });
-    }
-    const refunds: CustomerReturnShopifySnapshot["refunds"] = [];
-    for (const refund of header.refunds) {
-      const items = await paginate(request, queries.refundLines, refund.id, refundLineSchema,
-        // A nullable provider ID cannot support deduplication. The purchased-line identity must be unique within this refund.
-        node => node.id ?? `line:${node.lineItemId}`,
-        data => parentConnection(data, "refund", "refundLineItems", { ...refund, order: { id: orderId } }));
-      refunds.push({ id: refund.id, updatedAt: refund.updatedAt, returnId: refund.return?.id ?? null, lines: items });
-    }
-    const returnableHeaders = await paginate(request, queries.returnables, orderId, returnableHeaderSchema, node => node.id,
-      data => parse(z.object({ returnableFulfillments: z.unknown() }).strict(), data).returnableFulfillments);
-    const returnableFulfillments: CustomerReturnShopifySnapshot["returnableFulfillments"] = [];
-    for (const returnable of returnableHeaders) {
-      if (returnable.fulfillment.order.id !== orderId) fail("RETURN_SHOPIFY_IDENTITY_MISMATCH");
-      const items = await paginate(request, queries.returnableLines, returnable.id, returnableLineSchema, node => node.fulfillmentLineItemId,
-        data => parentConnection(data, "returnableFulfillment", "returnableFulfillmentLineItems", returnable));
-      returnableFulfillments.push({ id: returnable.id, fulfillmentId: returnable.fulfillment.id, lines: items });
-    }
+    // Each chain validates every page against its observed parent. Only these
+    // independent chains overlap; read() still fences two complete observations.
+    const [lines, fulfillments, returns, refunds, returnableFulfillments] = await Promise.all([
+      paginate(request, queries.lines, orderId, customerReturnShopifyPurchasedLineSchema,
+        node => node.id, data => parentConnection(data, "order", "lineItems", orderScope)),
+      Promise.all(header.fulfillments.map(async fulfillment => {
+        const scope = { id: fulfillment.id, updatedAt: fulfillment.updatedAt, order: { id: orderId } };
+        const [items, events] = await Promise.all([
+          paginate(request, queries.fulfillmentLines, fulfillment.id, fulfillmentLineSchema, node => node.id,
+            data => parentConnection(data, "fulfillment", "fulfillmentLineItems", scope)),
+          paginate(request, queries.events, fulfillment.id, customerReturnShopifyFulfillmentEventSchema, node => node.id,
+            data => parentConnection(data, "fulfillment", "events", scope)),
+        ]);
+        const { trackingInfo, ...fields } = fulfillment;
+        return parse(customerReturnShopifyFulfillmentSchema, { ...fields, tracking: trackingInfo, lines: items, events });
+      })),
+      this.readNativeReturns(request, orderId, orderScope),
+      Promise.all(header.refunds.map(async refund => {
+        const items = await paginate(request, queries.refundLines, refund.id, refundLineSchema,
+          // A nullable provider ID cannot support deduplication. The purchased-line identity must be unique within this refund.
+          node => node.id ?? `line:${node.lineItemId}`,
+          data => parentConnection(data, "refund", "refundLineItems", { ...refund, order: { id: orderId } }));
+        return { id: refund.id, updatedAt: refund.updatedAt, returnId: refund.return?.id ?? null, lines: items };
+      })),
+      this.readReturnableFulfillments(request, orderId),
+    ]);
     const { fulfillments: _fulfillments, refunds: _refunds, fulfillmentsCount: _count, shippingAddress, customer, ...order } = header;
     return { order: { ...order, customerId: customer?.id ?? null, shippingAddress,
       destinationCountryCode: shippingAddress?.countryCodeV2 ?? null }, lines, fulfillments, returns, refunds, returnableFulfillments };
   }
+
+  private async readNativeReturns(request: RequestQuery, orderId: string, orderScope: Record<string, unknown>): Promise<CustomerReturnShopifySnapshot["returns"]> {
+    const nativeHeaders = await paginate(request, queries.returns, orderId, returnHeaderSchema, node => node.id,
+      data => parentConnection(data, "order", "returns", orderScope));
+    return Promise.all(nativeHeaders.map(async native => {
+      if (native.order.id !== orderId) fail("RETURN_SHOPIFY_IDENTITY_MISMATCH");
+      const items = await paginate(request, queries.returnLines, native.id, nativeReturnLineSchema, node => node.id,
+        data => parentConnection(data, "return", "returnLineItems", native));
+      const { order: _order, ...fields } = native;
+      return { ...fields, lines: items };
+    }));
+  }
+
+  private async readReturnableFulfillments(request: RequestQuery, orderId: string): Promise<CustomerReturnShopifySnapshot["returnableFulfillments"]> {
+    const returnableHeaders = await paginate(request, queries.returnables, orderId, returnableHeaderSchema, node => node.id,
+      data => parse(z.object({ returnableFulfillments: z.unknown() }).strict(), data).returnableFulfillments);
+    return Promise.all(returnableHeaders.map(async returnable => {
+      if (returnable.fulfillment.order.id !== orderId) fail("RETURN_SHOPIFY_IDENTITY_MISMATCH");
+      const items = await paginate(request, queries.returnableLines, returnable.id, returnableLineSchema, node => node.fulfillmentLineItemId,
+        data => parentConnection(data, "returnableFulfillment", "returnableFulfillmentLineItems", returnable));
+      return { id: returnable.id, fulfillmentId: returnable.fulfillment.id, lines: items };
+    }));
+  }
+}
+
+/** Request-scoped queue: no cross-customer state, caching, or abandoned reads. */
+function limitSnapshotRequests(request: RequestQuery, signal: AbortSignal): RequestQuery {
+  let active = 0;
+  const pending: Array<{ start: () => void; reject: (error: CustomerReturnShopifySnapshotError) => void }> = [];
+  const cancelled = () => new CustomerReturnShopifySnapshotError("RETURN_SHOPIFY_TRANSPORT_FAILED", "transient");
+  const drain = () => {
+    while (!signal.aborted && active < MAX_CONCURRENT_REQUESTS && pending.length > 0) {
+      pending.shift()!.start();
+    }
+  };
+  signal.addEventListener("abort", () => {
+    for (const operation of pending.splice(0)) operation.reject(cancelled());
+  }, { once: true });
+  return (query, variables) => new Promise((resolve, reject) => {
+    if (signal.aborted) { reject(cancelled()); return; }
+    pending.push({ reject, start: () => {
+      active++;
+      request(query, variables).then(resolve, reject).finally(() => { active--; drain(); });
+    } });
+    drain();
+  });
 }
 
 async function paginate<T>(request: RequestQuery, query: Query, id: string, schema: z.ZodType<T, z.ZodTypeDef, unknown>,

@@ -4,6 +4,7 @@ import express from "express";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { registerCustomerReturnCustomerRoutes, type CustomerReturnCustomerRouteDependencies } from "../../interfaces/http/customer-return-customer.routes";
 import { CustomerReturnCustomerAccessError } from "../../application/customer-return-customer-auth.service";
+import { CustomerReturnCustomerProfileError } from "../../application/customer-return-customer-profile.service";
 
 const principal = { channelId: 36, externalCustomerId: "123", shopDomain: "test.myshopify.com", sessionKey: "a".repeat(43), authenticatedAt: 1, expiresAt: 2 };
 describe("customer returns HTTP boundaries", () => {
@@ -16,12 +17,15 @@ describe("customer returns HTTP boundaries", () => {
   const submit = vi.fn(async () => ({}));
   const artifact = vi.fn(async () => ({ downloadUrl: "https://approved-provider/label.pdf" }));
   const download = vi.fn(async () => new TextEncoder().encode("%PDF-test"));
+  const readProfile = vi.fn(async () => ({ name: "Jane Doe", email: "jane@example.com" }));
+  const profile = vi.fn(async () => ({ read: readProfile }));
   const services = vi.fn(async () => ({ orders: { order, review, list: vi.fn(async () => ({ orders: [] })) },
     operations: { submit, artifact, listReturns: vi.fn(async () => ({ returns: [] })), labelStatus: vi.fn(),
       progressLabels: vi.fn(), submissionStatus: vi.fn(), resumeSubmission: vi.fn() }, download }));
   async function start() {
     vi.clearAllMocks();
     admin.mockResolvedValue(); sessionPrincipal.mockResolvedValue(principal);
+    readProfile.mockResolvedValue({ name: "Jane Doe", email: "jane@example.com" });
     const app = express(); app.use(express.json()); app.use(express.urlencoded({ extended: false }));
     const session = { customerReturnSession: principal, returnLoginBrowserKey: "browser", user: { id: "admin" }, cookie: {},
       save: (done: (error?: Error) => void) => done(), regenerate: (done: (error?: Error) => void) => done() };
@@ -31,6 +35,7 @@ describe("customer returns HTTP boundaries", () => {
         principal: sessionPrincipal, authenticate, start: vi.fn(async () => "https://store.example.com/apps/echelon-returns?state=test"),
       } }) as unknown as Awaited<ReturnType<NonNullable<CustomerReturnCustomerRouteDependencies["context"]>>>,
       services: services as unknown as NonNullable<CustomerReturnCustomerRouteDependencies["services"]>,
+      profile: profile as unknown as NonNullable<CustomerReturnCustomerRouteDependencies["profile"]>,
     });
     app.use((_req, res) => res.send("application shell"));
     server = app.listen(0, "127.0.0.1");
@@ -40,6 +45,34 @@ describe("customer returns HTTP boundaries", () => {
       headers: { "X-Return-Session": principal.sessionKey, ...options.headers } });
   }
   afterEach(async () => { if (server) await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())); });
+  it("reads the verified account profile independently of orders/labels and prevents caching", async () => {
+    const request = await start();
+    const result = await request("/api/returns/customer/profile");
+    expect(result.status).toBe(200);
+    expect(await result.json()).toEqual({ name: "Jane Doe", email: "jane@example.com" });
+    expect(result.headers.get("cache-control")).toBe("private, no-store");
+    expect(readProfile).toHaveBeenCalledWith(principal);
+    expect(services).not.toHaveBeenCalled();
+  });
+  it.each(["private", "unauthenticated", "stale", "missing-header", "query-identity"])(
+    "rejects %s profile requests before reading customer data", async reason => {
+      const request = await start();
+      if (reason === "private") admin.mockRejectedValue(new CustomerReturnCustomerAccessError("PRIVATE", "Private testing", 403));
+      if (reason === "unauthenticated") sessionPrincipal.mockRejectedValue(new CustomerReturnCustomerAccessError("LOGIN", "Sign in", 401));
+      const headers: Record<string, string> = reason === "stale" ? { "X-Return-Session": "b".repeat(43) } : reason === "missing-header" ? { "X-Return-Session": "" } : {};
+      const result = await request(`/api/returns/customer/profile${reason === "query-identity" ? "?customerId=999" : ""}`, { headers });
+      expect(result.status).toBe(reason === "private" ? 403 : reason === "query-identity" ? 400 : 401);
+      expect(profile).not.toHaveBeenCalled(); expect(readProfile).not.toHaveBeenCalled(); expect(services).not.toHaveBeenCalled();
+    });
+  it("keeps a profile failure separate from session/orders", async () => {
+    const request = await start(); readProfile.mockRejectedValue(new CustomerReturnCustomerProfileError());
+    const result = await request("/api/returns/customer/profile");
+    expect(result.status).toBe(503);
+    expect(await result.json()).toEqual({ error: { code: "RETURN_CUSTOMER_PROFILE_UNAVAILABLE",
+      message: "Your account details are temporarily unavailable. Please try again." } });
+    expect((await request("/api/returns/customer/orders/1")).status).toBe(200);
+    expect((await request("/api/returns/customer/session")).status).toBe(200);
+  });
   it("keeps page and API staff-gated during private testing", async () => {
     const request = await start(); admin.mockRejectedValue(new CustomerReturnCustomerAccessError("PRIVATE", "Private testing", 403));
     expect((await request("/customer-returns")).status).toBe(403);

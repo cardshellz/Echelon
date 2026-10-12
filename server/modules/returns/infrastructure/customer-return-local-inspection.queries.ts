@@ -1,7 +1,8 @@
 import { portalInventoryReturnMirrorSql } from "./customer-return-inventory-mirror";
 
 /** Fixed SQL only. Every identity, alias and rejection limit is parameterized.
- * Relations are read separately so joins cannot multiply entitlement claims. */
+ * The snapshot query keeps these relations independently bounded and aggregates
+ * them separately so joins cannot multiply entitlement claims. */
 export const inspectionQueries = Object.freeze({
   shops: `SELECT c.id AS "channelId", cc.id AS "connectionId", c.name AS "displayName",
     LOWER(BTRIM(cc.shop_domain)) AS "shopDomain", c.type, c.provider, c.status,
@@ -47,15 +48,25 @@ export const inspectionQueries = Object.freeze({
     FROM oms.oms_order_lines line LEFT JOIN catalog.product_variants variant ON variant.id = line.product_variant_id
     WHERE line.order_id = $1 ORDER BY line.id LIMIT $2`,
 
-  wmsItems: `SELECT wi.id AS "wmsOrderItemId", wo.id AS "wmsOrderId", wi.oms_order_line_id AS "omsOrderLineId",
+  // Resolve the three exact candidate sets independently. An OR across the
+  // order/line joins forces large unrelated WMS scans; UNION preserves every
+  // contradictory link while emitting an item that matches twice only once.
+  wmsItems: `WITH candidate_items AS (
+    SELECT wi.id FROM oms.oms_order_lines ol JOIN wms.order_items wi ON wi.oms_order_line_id = ol.id
+      WHERE ol.order_id = $1
+    UNION
+    SELECT wi.id FROM wms.orders wo JOIN wms.order_items wi ON wi.order_id = wo.id
+      WHERE wo.oms_fulfillment_order_id = $2
+    UNION
+    SELECT wi.id FROM wms.orders wo JOIN wms.order_items wi ON wi.order_id = wo.id
+      WHERE wo.source_table_id = $2
+    ) SELECT wi.id AS "wmsOrderItemId", wo.id AS "wmsOrderId", wi.oms_order_line_id AS "omsOrderLineId",
     wo.channel_id AS "channelId", wo.source, wo.oms_fulfillment_order_id AS "omsOrderReference",
     wo.source_table_id AS "legacyOrderReference", wo.external_order_id AS "externalOrderId",
     wi.source_item_id AS "externalLineItemId", wi.quantity, wi.fulfilled_quantity AS "fulfilledQuantity",
     wo.warehouse_status AS "warehouseStatus"
-    FROM wms.order_items wi JOIN wms.orders wo ON wo.id = wi.order_id
-    LEFT JOIN oms.oms_order_lines ol ON ol.id = wi.oms_order_line_id
-    WHERE ol.order_id = $1 OR wo.oms_fulfillment_order_id = $2
-      OR wo.source_table_id = $2
+    FROM candidate_items candidate JOIN wms.order_items wi ON wi.id = candidate.id
+    JOIN wms.orders wo ON wo.id = wi.order_id
     ORDER BY wo.id, wi.id LIMIT $3`,
 
   rootClaims: `SELECT aa.id AS "claimId", aa.authorization_id AS "authorizationId",

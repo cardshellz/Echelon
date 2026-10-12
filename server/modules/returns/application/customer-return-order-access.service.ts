@@ -49,6 +49,9 @@ export const customerReturnOrderCandidateSchema = z.object({
   externalOrderId: externalIdSchema,
   externalOrderNumber: z.string().min(1).max(MAX_CUSTOMER_RETURN_ORDER_REFERENCE_LENGTH),
   externalCustomerId: externalIdSchema.nullable(),
+  /** Local cancellation can exclude a list candidate without provider I/O;
+   * absence never establishes return eligibility. */
+  cancelled: z.boolean().optional(),
 }).strict();
 
 export type CustomerReturnOrderCandidate = z.infer<typeof customerReturnOrderCandidateSchema>;

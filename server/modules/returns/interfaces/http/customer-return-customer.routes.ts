@@ -4,18 +4,21 @@ import { rateLimit } from "express-rate-limit";
 import { CUSTOMER_RETURNS_API, CUSTOMER_RETURNS_PAGE } from "@shared/returns/customer-return-access.contract";
 import { createCustomerReturnCustomerAuth } from "../../infrastructure/customer-return-customer-auth.composition";
 import { createCustomerReturnCustomerServices } from "../../infrastructure/customer-return-customer.composition";
+import { createCustomerReturnCustomerProfileService } from "../../infrastructure/customer-return-customer-profile.composition";
 import { registerCustomerReturnShopifyProxyRoutes } from "./customer-return-shopify-proxy.routes";
 import { registerCustomerReturnCustomerAuthRoutes, requireReturnCustomerCommand, requireReturnCustomerSession, returnCustomerError, returnCustomerPrivateResponse,
   type CustomerReturnCustomerAuthRouteDependencies } from "./customer-return-customer-auth.routes";
 
 export interface CustomerReturnCustomerRouteDependencies extends CustomerReturnCustomerAuthRouteDependencies {
   services?: typeof createCustomerReturnCustomerServices;
+  profile?: typeof createCustomerReturnCustomerProfileService;
 }
 const id = (raw: unknown) => z.string().regex(/^[1-9][0-9]*$/).transform(Number).pipe(z.number().int().positive().safe()).parse(raw);
 const cursor = (raw: unknown) => z.object({ before: z.string().optional() }).strict().parse(raw).before;
 export function registerCustomerReturnCustomerRoutes(app: Express, dependencies: CustomerReturnCustomerRouteDependencies = {}) {
   const context = dependencies.context ?? createCustomerReturnCustomerAuth;
   const services = dependencies.services ?? createCustomerReturnCustomerServices;
+  const profile = dependencies.profile ?? createCustomerReturnCustomerProfileService;
   registerCustomerReturnShopifyProxyRoutes(app, { context });
   app.use([CUSTOMER_RETURNS_API, CUSTOMER_RETURNS_PAGE], (_req, res, next) => { returnCustomerPrivateResponse(res); next(); });
   app.use([CUSTOMER_RETURNS_API, CUSTOMER_RETURNS_PAGE], rateLimit({ windowMs: 60_000, limit: 60,
@@ -38,6 +41,15 @@ export function registerCustomerReturnCustomerRoutes(app: Express, dependencies:
   };
   const noQuery = (req: Request) => z.object({}).strict().parse(req.query);
   const emptyCommand = (req: Request) => { noQuery(req); z.object({}).strict().parse(req.body); };
+  app.get(`${CUSTOMER_RETURNS_API}/profile`, async (req, res) => {
+    try {
+      const { auth } = await context();
+      const principal = await auth.principal(req.session.customerReturnSession);
+      requireReturnCustomerSession(req, principal);
+      noQuery(req);
+      res.json(await (await profile()).read(principal));
+    } catch (error) { returnCustomerError(res, error); }
+  });
   app.get(`${CUSTOMER_RETURNS_API}/orders`, handle(false, (req, value) => {
     const before = cursor(req.query);
     return value.orders.list(before === undefined ? {} : { beforeOmsOrderId: id(before) });

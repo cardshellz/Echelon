@@ -5,6 +5,7 @@ import {
   customerReturnSessionStateSchema,
   customerReturnCustomerOrderSchema,
   customerReturnCustomerOrderPageSchema,
+  customerReturnCustomerProfileSchema,
 } from "@shared/returns/customer-return-access.contract";
 import {
   customerReturnCustomerSubmitInputSchema,
@@ -163,6 +164,8 @@ export function createCustomerReturnTransport(
   return {
     session: (signal: AbortSignal) =>
       call("/session", signal, customerReturnSessionStateSchema),
+    profile: (signal: AbortSignal) =>
+      call("/profile", signal, customerReturnCustomerProfileSchema),
     logout: (signal: AbortSignal) =>
       call("/logout", signal, z.object({ ok: z.literal(true) }).strict(), {}),
     async orders(before: number | null, signal: AbortSignal) {

@@ -94,6 +94,199 @@ function connectionPage(data: Record<string, unknown>, root: string, field: stri
 }
 afterEach(() => vi.restoreAllMocks());
 
+interface HeldResponse {
+  operation: string;
+  variables: Variables;
+  observation: number;
+  signal: AbortSignal;
+  released: boolean;
+  cancelled: boolean;
+  release(): void;
+}
+
+/** Real response streams held at the body boundary, without wall-clock sleeps. */
+function controlledSetup(modify?: Modifier) {
+  const requests: HeldResponse[] = [];
+  let observation = 0;
+  let active = 0;
+  let maximumActive = 0;
+  const request = vi.fn<typeof fetch>(async (_url, init) => {
+    const body = JSON.parse(String(init?.body)) as { query: string; variables?: Variables };
+    const operation = /query (\w+)/.exec(body.query)?.[1] ?? "";
+    if (operation === "ReturnSnapshotOrder") observation++;
+    const variables = body.variables ?? {};
+    const data = fixtureData(operation, variables);
+    const result = modify ? modify(data, operation, variables, observation) : data;
+    active++;
+    maximumActive = Math.max(maximumActive, active);
+    let controller: ReadableStreamDefaultController<Uint8Array>;
+    const held: HeldResponse = {
+      operation, variables, observation, signal: init!.signal!, released: false, cancelled: false,
+      release() {
+        if (held.released || held.cancelled) return;
+        held.released = true;
+        active--;
+        controller.enqueue(new TextEncoder().encode(JSON.stringify({ data: result })));
+        controller.close();
+      },
+    };
+    const stream = new ReadableStream<Uint8Array>({
+      start(value) { controller = value; },
+      cancel() { if (!held.released && !held.cancelled) { held.cancelled = true; active--; } },
+    });
+    requests.push(held);
+    return new Response(stream, { headers: { "X-Shopify-API-Version": "2026-07" } });
+  });
+  const resolveConnection = vi.fn(async () => connection());
+  const now = vi.fn(() => new Date(observedAt));
+  const reader = new ShopifyCustomerReturnSnapshotReader({ request, resolveConnection, now });
+  const flush = () => new Promise<void>(resolve => setImmediate(resolve));
+  async function releaseAvailable(hold: (entry: HeldResponse) => boolean = () => false): Promise<number> {
+    let waves = 0;
+    for (let iteration = 0; iteration < 100; iteration++) {
+      await flush();
+      const ready = requests.filter(entry => !entry.released && !entry.cancelled && !hold(entry));
+      if (ready.length === 0) return waves;
+      waves++;
+      for (const entry of ready) entry.release();
+    }
+    throw new Error("Fixture exceeded its bounded response waves.");
+  }
+  return { reader, request, requests, resolveConnection, now, flush, releaseAvailable,
+    maximumActive: () => maximumActive };
+}
+
+describe("bounded Shopify snapshot concurrency", () => {
+  it("overlaps independent response bodies without omitting calls or exceeding four active reads", async () => {
+    const fixture = controlledSetup();
+    const result = fixture.reader.read(input);
+    const waves = await fixture.releaseAvailable();
+    const snapshot = await result;
+    expect(customerReturnShopifySnapshotSchema.safeParse(snapshot).success).toBe(true);
+    expect(fixture.maximumActive()).toBe(4);
+    // The fixture has 42 necessary reads. Concurrent dependency waves, not an
+    // elapsed-time threshold, prove that independent network latency overlaps.
+    expect(waves).toBeLessThanOrEqual(18);
+    expect(fixture.request).toHaveBeenCalledTimes(42);
+    const counts: Record<string, number> = {};
+    for (const entry of fixture.requests) counts[entry.operation] = (counts[entry.operation] ?? 0) + 1;
+    expect(counts).toEqual({ ReturnSnapshotAccount: 2, ReturnSnapshotOrder: 2, ReturnSnapshotPurchasedLines: 4,
+      ReturnSnapshotFulfillmentLines: 6, ReturnSnapshotFulfillmentEvents: 8, ReturnSnapshotReturns: 4,
+      ReturnSnapshotNativeReturnLines: 4, ReturnSnapshotRefundLines: 2, ReturnSnapshotReturnables: 4,
+      ReturnSnapshotReturnableLines: 6 });
+  });
+
+  it("keeps a cursor chain serial while other independent collections advance", async () => {
+    const fixture = controlledSetup();
+    const result = fixture.reader.read(input);
+    await fixture.releaseAvailable(entry => entry.operation === "ReturnSnapshotPurchasedLines" && entry.observation === 1);
+    const held = fixture.requests.filter(entry => !entry.released && !entry.cancelled);
+    expect(held).toHaveLength(1);
+    expect(held[0]).toMatchObject({ operation: "ReturnSnapshotPurchasedLines", variables: { after: null } });
+    expect(fixture.requests.some(entry => entry.operation === "ReturnSnapshotFulfillmentEvents" && entry.variables.after === "cursor:1")).toBe(true);
+    expect(fixture.requests.filter(entry => entry.operation === "ReturnSnapshotPurchasedLines")).toHaveLength(1);
+    held[0].release();
+    await fixture.releaseAvailable();
+    await expect(result).resolves.toMatchObject({ lines: expect.any(Array) });
+  });
+
+  it("does not start observation two or final account checks before the last first-pass child completes", async () => {
+    const fixture = controlledSetup();
+    const result = fixture.reader.read(input);
+    await fixture.releaseAvailable(entry => entry.operation === "ReturnSnapshotReturnableLines"
+      && entry.variables.id === gid("ReturnableFulfillment", 202) && entry.observation === 1);
+    const held = fixture.requests.filter(entry => !entry.released && !entry.cancelled);
+    expect(held).toHaveLength(1);
+    expect(fixture.requests.filter(entry => entry.operation === "ReturnSnapshotOrder")).toHaveLength(1);
+    expect(fixture.requests.filter(entry => entry.operation === "ReturnSnapshotAccount")).toHaveLength(1);
+    expect(fixture.resolveConnection).toHaveBeenCalledTimes(1);
+    held[0].release();
+    await fixture.releaseAvailable();
+    await result;
+    expect(fixture.requests.filter(entry => entry.operation === "ReturnSnapshotOrder")).toHaveLength(2);
+    expect(fixture.resolveConnection).toHaveBeenCalledTimes(2);
+  });
+
+  it("preserves semantic failure classification and cancels stalled siblings and queued reads", async () => {
+    const fixture = controlledSetup((data, operation) => {
+      if (operation === "ReturnSnapshotPurchasedLines") child(data, "order").id = gid("Order", 999);
+      return data;
+    });
+    const result = fixture.reader.read(input).catch(error => error);
+    await fixture.releaseAvailable(entry => !["ReturnSnapshotAccount", "ReturnSnapshotOrder", "ReturnSnapshotPurchasedLines"].includes(entry.operation));
+    expect(await result).toMatchObject({ code: "RETURN_SHOPIFY_SNAPSHOT_CHANGED", failureClass: "transient" });
+    await fixture.flush();
+    const count = fixture.requests.length;
+    expect(fixture.requests.every(entry => entry.signal.aborted)).toBe(true);
+    expect(fixture.requests.filter(entry => !entry.released).every(entry => entry.cancelled)).toBe(true);
+    expect(fixture.requests.filter(entry => entry.operation === "ReturnSnapshotOrder")).toHaveLength(1);
+    expect(fixture.resolveConnection).toHaveBeenCalledTimes(1);
+    await fixture.flush();
+    expect(fixture.request).toHaveBeenCalledTimes(count);
+    expect(count).toBeLessThan(21);
+  });
+
+  it("applies the total deadline to active and queued reads without granting a new window on dequeue", async () => {
+    const deadline = new AbortController();
+    vi.spyOn(AbortSignal, "timeout").mockImplementation(milliseconds => milliseconds === 90_000
+      ? deadline.signal : new AbortController().signal);
+    const fixture = controlledSetup();
+    const result = fixture.reader.read(input).catch(error => error);
+    await fixture.releaseAvailable(entry => !["ReturnSnapshotAccount", "ReturnSnapshotOrder"].includes(entry.operation));
+    expect(fixture.requests.filter(entry => !entry.released)).toHaveLength(4);
+    const count = fixture.requests.length;
+    deadline.abort();
+    expect(await result).toMatchObject({ code: "RETURN_SHOPIFY_TRANSPORT_FAILED", failureClass: "transient" });
+    await fixture.flush();
+    expect(fixture.request).toHaveBeenCalledTimes(count);
+    expect(fixture.requests.every(entry => entry.signal.aborted)).toBe(true);
+  });
+
+  it("does not cache provider evidence across repeated reads on the same reader", async () => {
+    let title = "First observed title";
+    const { reader, request, resolveConnection } = setup((data, operation) => {
+      if (operation === "ReturnSnapshotPurchasedLines") for (const line of connectionPage(data, "order", "lineItems").nodes) line.title = title;
+      return data;
+    });
+    expect((await reader.read(input)).lines[0].title).toBe("First observed title");
+    title = "Changed observed title";
+    expect((await reader.read(input)).lines[0].title).toBe("Changed observed title");
+    expect(request).toHaveBeenCalledTimes(84);
+    expect(resolveConnection).toHaveBeenCalledTimes(4);
+  });
+
+  it("keeps simultaneous reads independent and fully observed", async () => {
+    const fixture = controlledSetup();
+    const results = Promise.all([fixture.reader.read(input), fixture.reader.read(input)]);
+    await fixture.releaseAvailable();
+    const snapshots = await results;
+    expect(snapshots[0]).toEqual(snapshots[1]);
+    expect(fixture.request).toHaveBeenCalledTimes(84);
+    expect(fixture.resolveConnection).toHaveBeenCalledTimes(4);
+    expect(fixture.maximumActive()).toBe(8);
+  });
+
+  it("shares the finite request budget across both complete observations", async () => {
+    const { reader, request } = setup((data, operation, variables) => {
+      if (operation === "ReturnSnapshotOrder") {
+        child(data, "order").fulfillments = Array.from({ length: 200 }, (_, index) => fulfillment(2000 + index, 1));
+        child(data, "order").fulfillmentsCount = { count: 200, precision: "EXACT" };
+        child(data, "order").refunds = Array.from({ length: 200 }, (_, index) => ({ id: gid("Refund", 3000 + index), updatedAt: timestamp, return: null }));
+      }
+      if (operation === "ReturnSnapshotReturns") child(data, "order").returns = page([], null);
+      if (operation === "ReturnSnapshotReturnables") data.returnableFulfillments = page([], null);
+      if (operation === "ReturnSnapshotFulfillmentLines") child(data, "fulfillment").fulfillmentLineItems = page([
+        { id: gid("FulfillmentLineItem", String(variables.id).split("/").at(-1)!), quantity: 1, lineItem: { id: gid("LineItem", 101) } },
+      ], null);
+      if (operation === "ReturnSnapshotFulfillmentEvents") child(data, "fulfillment").events = page([], null);
+      if (operation === "ReturnSnapshotRefundLines") child(data, "refund").return = null;
+      return data;
+    });
+    await expect(reader.read(input)).rejects.toMatchObject({ code: "RETURN_SHOPIFY_SNAPSHOT_LIMIT" });
+    expect(request).toHaveBeenCalledTimes(1000);
+  });
+});
+
 describe("read-only Shopify return snapshots", () => {
   it("collects every nested page and preserves exact split, native-return and refund identities", async () => {
     const { reader, request, resolveConnection } = setup();
