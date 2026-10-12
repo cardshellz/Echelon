@@ -16,6 +16,9 @@ import { replacePurchaseOrderMatchExceptions } from "./purchase-order-match-exce
 import { PoQuantityAmendmentError, type AmendmentPlan } from "./po-quantity-amendment.policy";
 import type { db } from "../../db";
 
+// Changes to reviewed behavior invalidate uncommitted previews; committed receipts still replay.
+const PO_LINE_REVIEW_VERSION = 2;
+
 export type AmendmentDatabase = Pick<typeof db, "transaction">;
 export type AmendmentTransaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
 
@@ -49,7 +52,7 @@ export async function readQuantityAmendmentSource(tx: AmendmentTransaction, purc
   const facts = { header, lines, invoices, invoiceLines, recommendationOwned: handoffs.length > 0 };
   // Full row versions cover price metadata, counters, invoice void/payment changes,
   // receipt evidence and variance approvals. No client amount is authoritative.
-  const sourceVersion = createHash("sha256").update(canonicalJson({ facts, actor, links, handoffs, receipts, exceptions, requireApproval, approvalTiers })).digest("hex");
+  const sourceVersion = createHash("sha256").update(canonicalJson({ reviewVersion: PO_LINE_REVIEW_VERSION, facts, actor, links, handoffs, receipts, exceptions, requireApproval, approvalTiers })).digest("hex");
   return { facts, actor, sourceVersion, exceptions, requireApproval, approvalTiers };
 }
 
@@ -71,7 +74,7 @@ export async function persistQuantityAmendment(
     const before = lines.find((line) => line.id === change.id)!;
     const [updated] = await tx.update(purchaseOrderLines).set({
       ...change.patch,
-      fullyReceivedDate: change.patch.status === "received" ? before.fullyReceivedDate ?? approvedAt : null,
+      fullyReceivedDate: plan.preview.closedPurchaseOrder ? before.fullyReceivedDate : change.patch.status === "received" ? before.fullyReceivedDate ?? approvedAt : null,
       // Keep the original quote reference/dates as document provenance. The
       // event records both quote shapes and the admin's explicit price treatment.
       updatedAt: sql`GREATEST(${approvedAt}::timestamp, ${before.updatedAt}::timestamp + interval '1 millisecond')`,
@@ -95,7 +98,7 @@ export async function persistQuantityAmendment(
     approvalTierId: approvalEvidence.tier?.id ?? null, approvedBy: actorId, approvedAt, approvalNotes: plan.preview.reason,
     receivedLineCount: plan.receivedLineCount,
     status: plan.preview.afterStatus,
-    physicalStatus: plan.preview.afterStatus === "received" ? "received" : plan.preview.afterStatus === "partially_received" ? "receiving" : header.physicalStatus,
+    physicalStatus: plan.preview.closedPurchaseOrder ? header.physicalStatus : plan.preview.afterStatus === "received" ? "received" : plan.preview.afterStatus === "partially_received" ? "receiving" : header.physicalStatus,
     updatedBy: actorId, updatedAt: sql`GREATEST(${approvedAt}::timestamp, ${header.updatedAt}::timestamp + interval '1 millisecond')`,
   }).where(eq(purchaseOrders.id, header.id)).returning();
   if (!afterHeader) throw new PoQuantityAmendmentError("The locked PO could not be updated.", "PO_AMENDMENT_UPDATE_FAILED");
@@ -114,6 +117,7 @@ export async function persistQuantityAmendment(
     payloadJson: {
       contractVersion: 1, commandKey, revisionNumber, reason: plan.preview.reason, approvedAt: approvedAt.toISOString(),
       approvalEvidence: source.actor, approval_authority: approvalEvidence, reviewedSourceVersion: source.sourceVersion,
+      closedPurchaseOrderConfirmed: plan.preview.closedPurchaseOrder === true,
       preview: plan.preview, before: { header, lines }, after: { header: afterHeader, lines: afterLines },
       supersededMatchExceptions: superseded, resultingMatchSourceFingerprint: match.sourceFingerprint,
     },

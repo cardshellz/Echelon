@@ -57,18 +57,23 @@ export function hasQuantityAmendmentAuthority(actor: PurchaseApprovalActor): boo
 export function assertQuantityAmendmentAuthority(actor: PurchaseApprovalActor): void {
   if (!hasQuantityAmendmentAuthority(actor)) throw new PoQuantityAmendmentError("A current Administrator with purchasing approval permission must approve this correction.", "PO_AMENDMENT_ADMIN_REQUIRED", 403);
 }
-export function quantityAmendmentBlockedReason(facts: AmendmentFacts): string | null {
+function closedPurchaseOrder(facts: AmendmentFacts): boolean {
+  return !!facts.header.closedAt || facts.header.status === "closed" || facts.header.physicalStatus === "closed";
+}
+export function quantityAmendmentBlockedReason(facts: AmendmentFacts, allowClosedEdit = false): string | null {
   if (facts.recommendationOwned) return "This PO belongs to an accepted purchasing recommendation. Its accepted quantities and prices are immutable.";
-  if (!["approved", "sent", "acknowledged", "partially_received", "received"].includes(facts.header.status)) {
+  if (facts.header.cancelledAt || ["cancelled", "short_closed"].includes(facts.header.status)
+    || ["cancelled", "short_closed"].includes(facts.header.physicalStatus)) return "Cancelled or short-closed POs require their owning correction workflow.";
+  if (closedPurchaseOrder(facts) && !allowClosedEdit) return "Editing a closed PO requires explicit administrator approval of the commercial changes.";
+  if (!["approved", "sent", "acknowledged", "partially_received", "received", "closed"].includes(facts.header.status)) {
     return "PO edits are available on approved, sent, acknowledged, partially received and received POs. Use the normal editor for a draft PO.";
   }
-  if (facts.header.closedAt || facts.header.cancelledAt || ["closed", "cancelled", "short_closed"].includes(facts.header.physicalStatus)) return "Closed or cancelled POs cannot be amended.";
   return null;
 }
-function lineBlockedReason(line: AmendmentLine, lines: AmendmentLine[]): string | null {
+function lineBlockedReason(line: AmendmentLine, lines: AmendmentLine[], allowClosedEdit = false): string | null {
   if (line.lineType !== "product" && line.orderQty <= 0) return "This charge has an invalid recorded quantity. Review its source first.";
   if (line.lineType === "product" && line.productId === null) return "This product line has no linked product. Review its source first.";
-  if (!["open", "partially_received", "received"].includes(line.status)) return "Closed or cancelled lines cannot be amended.";
+  if (!["open", "partially_received", "received"].includes(line.status) && !(allowClosedEdit && line.status === "closed")) return "Closed or cancelled lines cannot be amended.";
   if (line.parentLineId !== null || lines.some((child) => child.parentLineId === line.id && child.status !== "cancelled")) return "This line has dependent adjustments. Review those adjustments before correcting quantity.";
   if ((line.cancelledQty ?? 0) !== 0 || (line.returnedQty ?? 0) !== 0) return "This line has cancellations or returns. Correct those records through their owning workflow.";
   return null;
@@ -99,13 +104,13 @@ function lineView(line: AmendmentLine, facts: AmendmentFacts) {
     totalProductCostCents: stored(line.totalProductCostCents, "product amount"),
     packagingCostCents: stored(line.packagingCostCents, "packaging amount"), discountCents: stored(line.discountCents, "discount"), taxCents: stored(line.taxCents, "tax"),
     componentTotalCents: componentTotal(line), lineType: line.lineType, pricing: recordedPricing(line),
-    lineTotalCents: z.number().int().safe().parse(line.lineTotalCents), status: line.status, blockedReason: lineBlockedReason(line, facts.lines),
+    lineTotalCents: z.number().int().safe().parse(line.lineTotalCents), status: line.status, blockedReason: lineBlockedReason(line, facts.lines, closedPurchaseOrder(facts)),
   };
 }
 export function buildQuantityAmendmentContext(facts: AmendmentFacts, actor: PurchaseApprovalActor, sourceVersion: string) {
   return poQuantityAmendmentContextSchema.parse({
     purchaseOrderId: facts.header.id, currency: facts.header.currency ?? "USD", sourceVersion,
-    canApprove: hasQuantityAmendmentAuthority(actor), blockedReason: quantityAmendmentBlockedReason(facts),
+    canApprove: hasQuantityAmendmentAuthority(actor), closedPurchaseOrder: closedPurchaseOrder(facts), blockedReason: quantityAmendmentBlockedReason(facts, true),
     lines: facts.lines.map((line) => lineView(line, facts)), totalCents: stored(facts.header.totalCents, "PO total"),
     invoiceIssues: evaluatePurchaseOrderInvoiceMatches({ purchaseOrderLines: facts.lines, invoiceLines: facts.invoiceLines })
       .filter(match => match.matchStatus !== "matched").map(match => {
@@ -139,7 +144,8 @@ function correctedPricing(line: AmendmentLine, quantityPieces: number, treatment
 /** Changes only commercial quantities/economics and their status projection.
  * Posted receipts, AP economics and inventory cost evidence remain independently owned. */
 export function planQuantityAmendment(facts: AmendmentFacts, request: PoQuantityPreviewRequest): AmendmentPlan {
-  const blocked = quantityAmendmentBlockedReason(facts);
+  const closed = closedPurchaseOrder(facts);
+  const blocked = quantityAmendmentBlockedReason(facts, request.closedPurchaseOrderConfirmed === true);
   if (blocked) throw new PoQuantityAmendmentError(blocked, "PO_AMENDMENT_BLOCKED");
   const oldSubtotal = facts.lines.filter((line) => line.status !== "cancelled").reduce((sum, line) => sum + BigInt(z.number().int().safe().parse(line.lineTotalCents)), BigInt(0));
   const oldTotal = oldSubtotal - BigInt(stored(facts.header.discountCents, "PO discount")) + BigInt(stored(facts.header.taxCents, "PO tax")) + BigInt(stored(facts.header.shippingCostCents, "PO freight"));
@@ -154,7 +160,15 @@ export function planQuantityAmendment(facts: AmendmentFacts, request: PoQuantity
   const patches = request.changes.map((change) => {
     const line = facts.lines.find((candidate) => candidate.id === change.lineId);
     if (!line) throw new PoQuantityAmendmentError("The selected line does not belong to this PO.", "PO_AMENDMENT_LINE_NOT_FOUND", 404);
-    const reason = lineBlockedReason(line, facts.lines);
+    const reason = lineBlockedReason(line, facts.lines, closed);
+    if (closed && !["edit_line", "edit_charge"].includes(change.priceTreatment)) {
+      throw new PoQuantityAmendmentError("Review the explicit line values before editing a closed PO.", "PO_AMENDMENT_CLOSED_REVIEW_REQUIRED");
+    }
+    // A commercial correction must never create new receiving work on a closed PO.
+    // Receipts and stock remain owned by receiving. New unreceived quantity is blocked.
+    if (closed && line.lineType === "product" && change.quantityPieces > stored(line.receivedQty ?? 0, "received quantity")) {
+      throw new PoQuantityAmendmentError("This quantity exceeds received goods. Review receiving records before adding unreceived quantity to a closed PO.", "PO_AMENDMENT_CLOSED_RECEIVING_REQUIRED");
+    }
     if (reason) throw new PoQuantityAmendmentError(reason, "PO_AMENDMENT_LINE_BLOCKED");
     if (change.priceTreatment === "edit_charge") {
       if (line.lineType === "product") throw new PoQuantityAmendmentError("Product lines require product and packaging pricing.", "PO_AMENDMENT_PRICING_INVALID", 400);
@@ -201,7 +215,7 @@ export function planQuantityAmendment(facts: AmendmentFacts, request: PoQuantity
       ...normalized, pricingSource: "manual",
       ...(change.priceTreatment === "edit_line" ? { packagingCostCents: packaging, discountCents: discount, taxCents: tax } : {}),
       lineTotalCents,
-      status: received >= change.quantityPieces ? "received" : received > 0 ? "partially_received" : "open",
+      status: closed ? line.status : received >= change.quantityPieces ? "received" : received > 0 ? "partially_received" : "open",
     };
     if (change.quantityPieces === line.orderQty && normalized.totalProductCostCents === product && normalized.unitCostMills === unitMills(line)
       && packaging === line.packagingCostCents && discount === line.discountCents && tax === line.taxCents && patch.lineTotalCents === line.lineTotalCents) throw new PoQuantityAmendmentError("Change a quantity or amount before approving.", "PO_AMENDMENT_NO_CHANGE", 400);
@@ -213,15 +227,15 @@ export function planQuantityAmendment(facts: AmendmentFacts, request: PoQuantity
   const subtotal = activeLines.reduce((sum, line) => sum + BigInt(z.number().int().safe().parse(line.lineTotalCents)), BigInt(0));
   const total = subtotal - BigInt(stored(facts.header.discountCents, "PO discount")) + BigInt(stored(facts.header.taxCents, "PO tax")) + BigInt(stored(facts.header.shippingCostCents, "PO freight"));
   const products = activeLines.filter((line) => line.lineType === "product");
-  const receivedLineCount = products.filter((line) => line.status === "received").length;
-  const afterStatus = products.length > 0 && receivedLineCount === products.length ? "received"
+  const receivedLineCount = closed ? stored(facts.header.receivedLineCount, "received line count") : products.filter((line) => line.status === "received").length;
+  const afterStatus = closed ? facts.header.status : products.length > 0 && receivedLineCount === products.length ? "received"
     : products.some((line) => (line.receivedQty ?? 0) > 0) || facts.header.status === "received" ? "partially_received" : facts.header.status;
   const beforeMatches = evaluatePurchaseOrderInvoiceMatches({ purchaseOrderLines: facts.lines, invoiceLines: facts.invoiceLines });
   const afterMatches = evaluatePurchaseOrderInvoiceMatches({ purchaseOrderLines: afterLines, invoiceLines: facts.invoiceLines });
   const preview = poQuantityAmendmentPreviewSchema.parse({
     purchaseOrderId: facts.header.id, currency: facts.header.currency ?? "USD", sourceVersion: request.sourceVersion, reason: request.reason,
     lines: request.changes.map((change) => ({ before: lineView(facts.lines.find((line) => line.id === change.lineId)!, facts), after: lineView(afterLines.find((line) => line.id === change.lineId)!, { ...facts, lines: afterLines }), priceTreatment: change.priceTreatment })),
-    beforeTotalCents: stored(facts.header.totalCents, "PO total"), afterTotalCents: safeAmount(total), beforeStatus: facts.header.status, afterStatus, warnings: [...warnings],
+    beforeTotalCents: stored(facts.header.totalCents, "PO total"), afterTotalCents: safeAmount(total), beforeStatus: facts.header.status, afterStatus, closedPurchaseOrder: closed, warnings: [...warnings],
     invoiceMatches: afterMatches.map((match) => ({ invoiceId: match.vendorInvoiceId, invoiceLineId: match.id, before: beforeMatches.find((before) => before.id === match.id)!.matchStatus, after: match.matchStatus })),
   });
   return { preview, patches, subtotalCents: safeAmount(subtotal), receivedLineCount };

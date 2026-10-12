@@ -290,6 +290,62 @@ databaseTests.sequential("PO quantity amendment real PostgreSQL and HTTP guarant
       changes: [{ lineId: 11, quantityPieces: 10, priceTreatment: "edit_line", pricing: { basis: "per_piece", quantityPieces: 10, unitCostMills: 15000 }, packagingCostCents: 125, discountCents: 10, taxCents: 5, ...change }],
       reason: "Supplier document confirms the revised PO line values", approvalConfirmed: true,
     });
+    it("saves a closed-PO commercial edit once, even with concurrent retries, without reopening or changing AP/stock", async () => {
+      await pool.query("UPDATE procurement.purchase_orders SET status='closed',closed_at='2026-10-01',closed_by='admin-user' WHERE id=1; UPDATE procurement.purchase_order_lines SET fully_received_date='2026-09-20' WHERE id=11");
+      const closure = (await pool.query("SELECT status,physical_status,closed_at,closed_by,received_line_count,financial_status FROM procurement.purchase_orders WHERE id=1")).rows[0];
+      const lineClosure = (await pool.query("SELECT status,received_qty,fully_received_date FROM procurement.purchase_order_lines WHERE id=11")).rows[0];
+      const context = await service.context(1, "admin-user"); expect(context).toMatchObject({ closedPurchaseOrder: true, canApprove: true, blockedReason: null });
+      const request = { ...await editRequest(), closedPurchaseOrderConfirmed: true as const }, key = randomUUID();
+      const protectedBefore = await protectedRecords();
+      const replies = await Promise.all([post(request, key), post(request, key)]);
+      expect(replies[0].body).toEqual(replies[1].body); expect(replies.map(reply => reply.status)).toEqual([200, 200]);
+      expect(replies.map(reply => reply.replayed).sort()).toEqual(["false", "true"]); expect(replies[0]).toMatchObject({ status: 200, body: { revisionNumber: 1, preview: { afterTotalCents: 1620, beforeStatus: "closed", afterStatus: "closed", closedPurchaseOrder: true } } });
+      expect((await pool.query("SELECT status,physical_status,closed_at,closed_by,received_line_count,financial_status FROM procurement.purchase_orders WHERE id=1")).rows[0]).toEqual(closure);
+      expect((await pool.query("SELECT status,received_qty,fully_received_date FROM procurement.purchase_order_lines WHERE id=11")).rows[0]).toEqual(lineClosure);
+      expect(await protectedRecords()).toEqual(protectedBefore);
+      expect((await pool.query("SELECT actor_id,payload_json FROM procurement.po_events")).rows).toMatchObject([{ actor_id: "admin-user", payload_json: { closedPurchaseOrderConfirmed: true, before: { header: { status: "closed", totalCents: 1100 } }, after: { header: { status: "closed", totalCents: 1620 } } } }]);
+      expect((await pool.query("SELECT COUNT(*)::int AS count FROM procurement.po_events")).rows[0].count).toBe(1);
+    });
+    it("manually corrects both closed PO and invoice values and clears the mismatch without accepting a variance", async () => {
+      await pool.query("UPDATE procurement.purchase_orders SET status='closed',closed_at='2026-10-01',closed_by='admin-user' WHERE id=1");
+      const closure = (await pool.query("SELECT status,physical_status,closed_at,closed_by FROM procurement.purchase_orders WHERE id=1")).rows[0];
+      const protectedBefore = await protectedRecords();
+      const poRequest = { ...await editRequest({ quantityPieces: 20, pricing: { basis: "per_piece", quantityPieces: 20, unitCostMills: 15000 }, packagingCostCents: 100, discountCents: 0, taxCents: 0 }), closedPurchaseOrderConfirmed: true as const };
+      expect(await post(poRequest)).toMatchObject({ status: 200, body: { preview: { afterTotalCents: 3100, afterStatus: "closed" } } });
+      const invoiceContext = await invoiceService.context(81, "admin-user");
+      const invoiceRequest = { sourceVersion: invoiceContext.sourceVersion, quantityPieces: 20, unitCostMills: 15000, lineTotalCents: 3100,
+        closedPurchaseOrderConfirmed: true, approvalConfirmed: true, reason: "Supplier invoice confirms these manually corrected values" };
+      const invoiceReply = await fetch(url + "/api/vendor-invoice-lines/81/quantity-correction", { method: "POST", headers: { "Content-Type": "application/json", "Idempotency-Key": randomUUID() }, body: JSON.stringify(invoiceRequest) });
+      expect(invoiceReply.status).toBe(200); expect(await invoiceReply.json()).toMatchObject({ preview: { afterMatch: "matched", afterBalanceCents: 2100 } });
+      expect((await pool.query("SELECT status,physical_status,closed_at,closed_by FROM procurement.purchase_orders WHERE id=1")).rows[0]).toEqual(closure);
+      expect((await pool.query("SELECT qty_invoiced,unit_cost_mills,line_total_cents,match_status FROM procurement.vendor_invoice_lines WHERE id=81")).rows[0]).toEqual({ qty_invoiced: 20, unit_cost_mills: "15000", line_total_cents: "3100", match_status: "matched" });
+      expect((await pool.query("SELECT invoiced_amount_cents,paid_amount_cents,balance_cents FROM procurement.vendor_invoices WHERE id=71")).rows[0]).toEqual({ invoiced_amount_cents: "3100", paid_amount_cents: "1000", balance_cents: "2100" });
+      expect((await pool.query("SELECT COUNT(*)::int AS count FROM procurement.po_exceptions WHERE kind='match_mismatch' AND status IN ('open','acknowledged')")).rows[0].count).toBe(0);
+      const protectedAfter = await protectedRecords();
+      for (const table of ["procurement.ap_payments", "procurement.ap_payment_allocations", "procurement.po_receipts", "procurement.receiving_orders", "procurement.receiving_lines", "inventory.inventory_lots"]) expect(protectedAfter[table]).toEqual(protectedBefore[table]);
+    });
+    it("rejects a closed-PO edit without explicit approval or with unreceived additional quantity", async () => {
+      await pool.query("UPDATE procurement.purchase_orders SET status='closed',closed_at='2026-10-01' WHERE id=1");
+      const before = await evidence(), protectedBefore = await protectedRecords();
+      expect(await post(await editRequest())).toMatchObject({ status: 409, body: { code: "PO_AMENDMENT_BLOCKED" } });
+      const larger = await editRequest({ quantityPieces: 21, pricing: { basis: "per_piece", quantityPieces: 21, unitCostMills: 15000 } });
+      expect(await post({ ...larger, closedPurchaseOrderConfirmed: true })).toMatchObject({ status: 409, body: { code: "PO_AMENDMENT_CLOSED_RECEIVING_REQUIRED" } });
+      expect(await evidence()).toEqual(before); expect(await protectedRecords()).toEqual(protectedBefore);
+    });
+    it("rechecks revoked admin approval when saving a closed PO", async () => {
+      await pool.query("UPDATE procurement.purchase_orders SET status='closed',closed_at='2026-10-01' WHERE id=1");
+      const request = { ...await editRequest(), closedPurchaseOrderConfirmed: true as const }, before = await evidence();
+      await pool.query("DELETE FROM identity.auth_role_permissions WHERE role_id=1 AND permission_id=1");
+      expect(await post(request)).toMatchObject({ status: 403 }); expect(await evidence()).toEqual(before);
+    });
+    it("rolls back a closed-PO edit completely if its immutable audit cannot be written", async () => {
+      await pool.query("UPDATE procurement.purchase_orders SET status='closed',closed_at='2026-10-01' WHERE id=1");
+      const request = { ...await editRequest(), closedPurchaseOrderConfirmed: true as const }, before = await evidence(), protectedBefore = await protectedRecords();
+      await pool.query("CREATE OR REPLACE FUNCTION public.amendment_test_failure() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'Simulated immutable audit failure'; END $$; CREATE TRIGGER amendment_test_failure BEFORE INSERT ON procurement.po_events FOR EACH ROW EXECUTE FUNCTION public.amendment_test_failure()");
+      const failed = await post(request); expect(failed.status).toBeGreaterThanOrEqual(500);
+      expect(await evidence()).toEqual(before); expect(await protectedRecords()).toEqual(protectedBefore);
+      await pool.query("DROP TRIGGER amendment_test_failure ON procurement.po_events");
+    });
     it("saves a price-only edit with all reviewed components and immutable before/after evidence", async () => {
       const request = await editRequest(), before = await evidence(), protectedBefore = await protectedRecords();
       const preview = await service.preview(1, { sourceVersion: request.sourceVersion, changes: request.changes, reason: request.reason }, "admin-user");

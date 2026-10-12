@@ -8,13 +8,13 @@ import { invoiceQuantityContextSchema, invoiceQuantityPreviewSchema, invoiceQuan
   type InvoiceQuantityContext, type InvoiceQuantityPreview, type InvoiceQuantityApprovalRequest, type InvoiceQuantityResult } from "@shared/procurement/invoice-quantity-correction";
 import { useAuth } from "@/lib/auth";
 import { useToast } from "@/hooks/use-toast";
-import { exactMoneyAsInput, parseExactMoneyInput } from "@/lib/exact-money-input";
+import { invoiceLineDraft } from "./invoice-line-editor";
+import { exactMoneyAsInput } from "@/lib/exact-money-input";
 import { financialCommandFetchJson, FinancialCommandRequestError, shouldRetryFinancialCommand, financialCommandRetryDelay } from "@/lib/financial-command";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Textarea } from "@/components/ui/textarea";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from "@/components/ui/dialog";
 
 const intentSchema = z.object({ key: z.string().uuid(), body: invoiceQuantityApprovalRequestSchema, preview: invoiceQuantityPreviewSchema }).strict();
@@ -34,6 +34,7 @@ export function InvoiceQuantityImpact({ preview, currency }: { preview: InvoiceQ
   const perPiece = (value: string) => currency === "USD" ? `$${value}` : `${value} ${currency}`;
   const rows: [string, string, string][] = [
     ["Invoice quantity", preview.beforeQuantity.toLocaleString("en-US"), preview.afterQuantity.toLocaleString("en-US")],
+    ["Unit price", `${exactMoneyAsInput(preview.recordedUnitCostMills, 4)} ${currency}`, `${exactMoneyAsInput(preview.afterUnitCostMills ?? preview.recordedUnitCostMills, 4)} ${currency}`],
     ["Invoice line amount", amount(preview.invoiceLineAmountCents, currency), amount(afterLineAmount, currency)],
     ["Line amount per piece", perPiece(preview.beforeAmountPerPiece), perPiece(preview.afterAmountPerPiece)],
     ["Invoice total", amount(preview.invoiceAmountCents, currency), amount(afterInvoiceAmount, currency)],
@@ -46,20 +47,25 @@ export function InvoiceQuantityImpact({ preview, currency }: { preview: InvoiceQ
   }
   return <div className="space-y-2">
     <p className="rounded bg-muted p-2 text-sm">PO ordered: <strong>{preview.orderedQuantity.toLocaleString("en-US")}</strong> pieces · Received: <strong>{preview.receivedQuantity.toLocaleString("en-US")}</strong> pieces</p>
-    <table className="w-full table-fixed text-sm" aria-label="Quantity correction impact">
+    <table className="w-full table-fixed text-sm" aria-label="Invoice changes">
       <thead><tr className="border-b"><th className="w-[40%] py-2 text-left">What changes</th><th className="w-[30%] pl-2 text-right">Current</th><th className="w-[30%] pl-2 text-right">After correction</th></tr></thead>
-      <tbody>{rows.map(([name, before, after]) => <tr key={name} className="border-b"><th scope="row" className="py-2 pr-2 text-left font-normal break-words">{name}</th><td className="pl-2 text-right break-words">{before}</td><td className={`pl-2 text-right break-words ${before !== after ? `font-semibold ${(name === "Match result" && preview.afterMatch !== "matched") || (name === "Balance" && afterBalance > 0) ? "text-amber-800 dark:text-amber-300" : "text-green-800 dark:text-green-300"}` : ""}`}>{after}</td></tr>)}</tbody>
+      <tbody>{rows.filter(([name, before, after]) => before !== after || name === "Match result").map(([name, before, after]) => <tr key={name} className="border-b"><th scope="row" className="py-2 pr-2 text-left font-normal break-words">{name}</th><td className="pl-2 text-right break-words">{before}</td><td className={`pl-2 text-right break-words ${before !== after ? `font-semibold ${(name === "Match result" && preview.afterMatch !== "matched") || (name === "Balance" && afterBalance > 0) ? "text-amber-800 dark:text-amber-300" : "text-green-800 dark:text-green-300"}` : ""}`}>{after}</td></tr>)}</tbody>
     </table>
-    <p className="text-xs text-muted-foreground">Line amount per piece is the complete billed amount divided by quantity. Recorded unit price: {exactMoneyAsInput(preview.recordedUnitCostMills, 4)} → {exactMoneyAsInput(preview.afterUnitCostMills ?? preview.recordedUnitCostMills, 4)} {currency}.</p>
+    <div role="group" aria-label="Invoice after changes" className="grid grid-cols-3 gap-2 rounded bg-muted p-2 text-sm">
+      <p>Total <strong className="block">{amount(afterInvoiceAmount, currency)}</strong></p>
+      <p>Paid <strong className="block">{amount(preview.paidAmountCents, currency)}</strong></p>
+      <p>Balance <strong className="block">{amount(afterBalance, currency)}</strong></p>
+    </div>
+    <p className="text-xs text-muted-foreground">Billed amount per piece after saving: {perPiece(preview.afterAmountPerPiece)}. This is the complete line amount divided by quantity.</p>
     <p className="text-xs text-muted-foreground">{moneyChanged ? "Invoice totals and balance are recalculated. Payments, PO lines, received stock and inventory costs stay unchanged." : "Payments, PO lines, received stock and inventory costs stay unchanged."}</p>
-    {preview.closedPurchaseOrder && <p className="text-sm">This corrects billing on a closed PO. The goods closure stays unchanged.</p>}
+    {preview.closedPurchaseOrder && <p className="text-sm">The PO stays closed.</p>}
     {preview.otherInvoicedQuantity > 0 && <p className="text-sm">Other invoice lines already cover {preview.otherInvoicedQuantity.toLocaleString("en-US")} pieces.</p>}
     {preview.remainingIssues.length > 0 && <p className="text-sm text-amber-800 dark:text-amber-300">After this change, {preview.remainingIssues.length} invoice line(s) on this PO still need review.</p>}
-    {preview.warnings.map((warning) => <p key={warning} className="text-sm text-amber-800 dark:text-amber-300">{warning}</p>)}
+    {preview.warnings.length > 0 && <details className="rounded border p-2 text-sm"><summary className="cursor-pointer">Cost and inventory details</summary><ul className="mt-2 list-disc space-y-1 pl-5">{preview.warnings.map(warning => <li key={warning}>{warning}</li>)}</ul></details>}
   </div>;
 }
-function QuantityEditor({ loaded, storageKey, onSaved, setBusy, onReload, onClose }: {
-  loaded: InvoiceQuantityContext; storageKey: string; onSaved: () => void; setBusy: (value: boolean) => void; onReload: () => void; onClose: () => void;
+function QuantityEditor({ loaded, storageKey, onSaved, setBusy, onReload, onClose, onEditPo }: {
+  loaded: InvoiceQuantityContext; storageKey: string; onSaved: () => void; setBusy: (value: boolean) => void; onReload: () => void; onClose: () => void; onEditPo?: () => void;
 }) {
   const [context] = useState(loaded); // Freeze the evidence being reviewed until an explicit reload.
   const root = `/api/vendor-invoice-lines/${context.invoiceLineId}/quantity-correction`;
@@ -80,7 +86,7 @@ function QuantityEditor({ loaded, storageKey, onSaved, setBusy, onReload, onClos
   const [unitPrice, setUnitPrice] = useState(exactMoneyAsInput(context.current.recordedUnitCostMills, 4));
   const [lineAmount, setLineAmount] = useState(exactMoneyAsInput(context.current.invoiceLineAmountCents, 2));
   const supportsEconomics = context.current.afterLineAmountCents !== undefined && context.current.afterInvoiceAmountCents !== undefined && context.current.afterBalanceCents !== undefined;
-  const confirmationLabel = context.closedPurchaseOrder ? "I checked the supplier invoice and approve this billing correction on the closed PO." : "I checked the supplier invoice and reviewed these changes.";
+  const confirmationLabel = context.closedPurchaseOrder ? "I approve these invoice changes on the closed PO." : "I reviewed these invoice changes.";
   const [reason, setReason] = useState(context.suggestedQuantity === null ? "" : "Correct the invoice line using the supplier quantity and amount.");
   const [review, setReview] = useState<InvoiceQuantityPreview | null>(null);
   const [confirmed, setConfirmed] = useState(false);
@@ -121,15 +127,30 @@ function QuantityEditor({ loaded, storageKey, onSaved, setBusy, onReload, onClos
   });
   const blocked = !context.canApprove ? "An Administrator with purchasing approval permission must confirm this correction." : context.blockedReason ?? (!supportsEconomics ? "Current financial evidence is unavailable. Reload the invoice before editing." : null);
   const locked = preview.isPending || approve.isPending || unresolved !== null || saved !== null || stale || recovery.current.error !== null;
-  const impact = saved?.preview ?? unresolved?.preview ?? review ?? context.current;
+  const impact = saved?.preview ?? unresolved?.preview ?? review;
+  const draft = invoiceLineDraft({ quantity, unitPrice, lineAmount }, context.current);
+  const reviewedChange = !!review && (review.afterQuantity !== review.beforeQuantity
+    || (review.afterLineAmountCents ?? review.invoiceLineAmountCents) !== review.invoiceLineAmountCents
+    || (review.afterUnitCostMills ?? review.recordedUnitCostMills) !== review.recordedUnitCostMills);
+  const validReason = reason.trim().length >= 10 && reason.trim().length <= 2000;
+  const canSave = !locked && !blocked && reviewedChange && validReason && confirmed;
+  const guidance = blocked ?? recovery.current.error ?? (stale ? "Reload the invoice and review its latest values."
+    : preview.isPending ? "Reviewing your changes…"
+    : !draft.valid ? draft.message
+    : !draft.changed ? "No changes to save. Edit the quantity, unit price or line amount above."
+    : !review ? "Review your changes before saving."
+    : !validReason ? "Enter a reason of at least 10 characters."
+    : !confirmed ? "Confirm the reviewed changes below to enable Save." : null);
   function updatePreview() {
     if (locked || blocked) return;
-    if (!/^[1-9]\d*$/.test(quantity)) { setError("Enter a positive whole number of pieces."); return; }
-    try { setError(null); preview.mutate({ sourceVersion: context.sourceVersion, quantityPieces: Number(quantity), unitCostMills: parseExactMoneyInput(unitPrice, 4), lineTotalCents: parseExactMoneyInput(lineAmount, 2), ...(context.closedPurchaseOrder ? { closedPurchaseOrderConfirmed: true as const } : {}) }); }
-    catch (failure) { setError(failure instanceof Error ? failure.message : "Review the invoice values."); }
+    if (!draft.valid) { setError(draft.message); return; }
+    if (!draft.changed) return;
+    setError(null);
+    preview.mutate({ sourceVersion: context.sourceVersion, quantityPieces: draft.quantityPieces, unitCostMills: draft.unitCostMills,
+      lineTotalCents: draft.lineTotalCents, ...(context.closedPurchaseOrder ? { closedPurchaseOrderConfirmed: true as const } : {}) });
   }
   function confirm() {
-    if (!review || !confirmed || locked || blocked || active.current || (review.afterQuantity === review.beforeQuantity && (review.afterLineAmountCents ?? review.invoiceLineAmountCents) === review.invoiceLineAmountCents && (review.afterUnitCostMills ?? review.recordedUnitCostMills) === review.recordedUnitCostMills)) return;
+    if (!review || !canSave || active.current) return;
     try {
       const body = invoiceQuantityApprovalRequestSchema.parse({ sourceVersion: context.sourceVersion, quantityPieces: review.afterQuantity, unitCostMills: review.afterUnitCostMills, lineTotalCents: review.afterLineAmountCents,
         ...(context.closedPurchaseOrder ? { closedPurchaseOrderConfirmed: true } : {}), reason, approvalConfirmed: true });
@@ -140,28 +161,36 @@ function QuantityEditor({ loaded, storageKey, onSaved, setBusy, onReload, onClos
   return <div className="flex min-h-0 flex-col">
     <div className="min-h-0 space-y-4 overflow-y-auto pr-1">
     {(blocked || recovery.current.error) && <p role="alert" className="text-sm text-destructive">{blocked ?? recovery.current.error}</p>}
-    {!saved && !unresolved && <fieldset disabled={locked || !!blocked} className="space-y-3">
+    {!impact && onEditPo && <div className="flex flex-wrap items-center justify-between gap-2 rounded border bg-muted/50 p-3">
+      <p className="text-sm">Edit ordered quantities and prices on the PO.</p><Button variant="outline" className="min-h-[44px]" disabled={locked} onClick={onEditPo}>Edit PO</Button>
+    </div>}
+    {!impact && <fieldset disabled={locked || !!blocked} className="space-y-3">
       <div className="grid gap-3 sm:grid-cols-3">
         <div><Label htmlFor={`invoice-quantity-${context.invoiceLineId}`}>Invoice quantity (pieces)</Label><Input id={`invoice-quantity-${context.invoiceLineId}`} inputMode="numeric" value={quantity} onChange={event => { setQuantity(event.target.value); setReview(null); setConfirmed(false); setError(null); }} /></div>
-        <div><Label htmlFor={`invoice-unit-price-${context.invoiceLineId}`}>Recorded unit price ({context.currency})</Label><Input id={`invoice-unit-price-${context.invoiceLineId}`} inputMode="decimal" value={unitPrice} onChange={event => { setUnitPrice(event.target.value); setReview(null); setConfirmed(false); setError(null); }} /></div>
+        <div><Label htmlFor={`invoice-unit-price-${context.invoiceLineId}`}>Unit price ({context.currency})</Label><Input id={`invoice-unit-price-${context.invoiceLineId}`} inputMode="decimal" value={unitPrice} onChange={event => { setUnitPrice(event.target.value); setReview(null); setConfirmed(false); setError(null); }} /></div>
         <div><Label htmlFor={`invoice-line-amount-${context.invoiceLineId}`}>Invoice line amount ({context.currency})</Label><Input id={`invoice-line-amount-${context.invoiceLineId}`} inputMode="decimal" value={lineAmount} onChange={event => { setLineAmount(event.target.value); setReview(null); setConfirmed(false); setError(null); }} /></div>
       </div>
       <p className="text-xs text-muted-foreground">{context.suggestionReason} Check the complete billed line amount against the supplier invoice.</p>
       {context.poUnitCostMills !== undefined && <p className="text-xs text-muted-foreground">PO unit price: {exactMoneyAsInput(context.poUnitCostMills, 4)} {context.currency}{context.poLineAmountCents !== undefined && ` · PO line amount: ${exactMoneyAsInput(context.poLineAmountCents, 2)} ${context.currency}`}</p>}
-      {!review && <Button variant="outline" type="button" disabled={locked || !!blocked} onClick={updatePreview}>{preview.isPending ? "Checking changes…" : "Update preview"}</Button>}
     </fieldset>}
-    <InvoiceQuantityImpact preview={impact} currency={context.currency} />
-    {!saved && !unresolved && <>
-      <div><Label htmlFor={`invoice-quantity-reason-${context.invoiceLineId}`}>Why are you changing it?</Label><Textarea id={`invoice-quantity-reason-${context.invoiceLineId}`} value={reason} rows={2} maxLength={2000} disabled={locked || !!blocked} onChange={(event) => { setReason(event.target.value); setConfirmed(false); }} /></div>
-      <div className="flex items-start gap-2"><Checkbox id={`invoice-quantity-confirm-${context.invoiceLineId}`} checked={confirmed} disabled={locked || !!blocked || !review || (review.beforeQuantity === review.afterQuantity && (review.afterLineAmountCents ?? review.invoiceLineAmountCents) === review.invoiceLineAmountCents && (review.afterUnitCostMills ?? review.recordedUnitCostMills) === review.recordedUnitCostMills)} onCheckedChange={(checked) => setConfirmed(checked === true)} /><Label htmlFor={`invoice-quantity-confirm-${context.invoiceLineId}`}>{confirmationLabel}</Label></div>
-    </>}
-    {(error || preview.error || approve.error) && <p role="alert" className="text-sm text-destructive">{error ?? approve.error?.message ?? preview.error?.message}</p>}
+    {impact ? <InvoiceQuantityImpact preview={impact} currency={context.currency} />
+      : <p className="rounded bg-muted p-2 text-sm">PO ordered: <strong>{context.current.orderedQuantity.toLocaleString("en-US")}</strong> pieces · Received: <strong>{context.current.receivedQuantity.toLocaleString("en-US")}</strong> pieces</p>}
     {saved && <p role="status" className="rounded border border-green-300 bg-green-50 p-3 font-semibold text-green-900">Invoice correction approved and saved. {matchNames[saved.preview.afterMatch]}.</p>}
     </div>
-    <div className="mt-4 shrink-0 border-t pt-3">
-      <div className="flex gap-2">
-        <Button variant="outline" aria-label="Close quantity correction" className="min-h-[44px]" disabled={preview.isPending || approve.isPending} onClick={onClose}>Close</Button>
-        {!saved && !unresolved && <Button className="min-h-[44px] flex-1 bg-green-700 text-white hover:bg-green-800" disabled={locked || !!blocked || !review || !confirmed || (review.beforeQuantity === review.afterQuantity && (review.afterLineAmountCents ?? review.invoiceLineAmountCents) === review.invoiceLineAmountCents && (review.afterUnitCostMills ?? review.recordedUnitCostMills) === review.recordedUnitCostMills)} onClick={confirm}>{approve.isPending ? "Saving correction…" : "Approve & save invoice"}</Button>}
+    <div className="mt-4 shrink-0 space-y-3 border-t pt-3">
+      {(error || preview.error || approve.error) && <p role="alert" className="text-sm text-destructive">{error ?? approve.error?.message ?? preview.error?.message}</p>}
+      {!saved && !unresolved && <>
+        <div><Label htmlFor={`invoice-quantity-reason-${context.invoiceLineId}`}>Why are you changing it?</Label><Input id={`invoice-quantity-reason-${context.invoiceLineId}`} value={reason} maxLength={2000} disabled={locked || !!blocked} onChange={(event) => { setReason(event.target.value); setConfirmed(false); }} /></div>
+        {guidance && <p id={`invoice-save-guidance-${context.invoiceLineId}`} role="status" className="text-sm text-muted-foreground">{guidance}</p>}
+        {review && <div className="flex items-start gap-2"><Checkbox id={`invoice-quantity-confirm-${context.invoiceLineId}`} checked={confirmed} disabled={locked || !!blocked || !reviewedChange || !validReason} onCheckedChange={(checked) => setConfirmed(checked === true)} /><Label htmlFor={`invoice-quantity-confirm-${context.invoiceLineId}`}>{confirmationLabel}</Label></div>}
+      </>}
+      <div className="flex flex-wrap gap-2">
+        <Button variant="outline" aria-label="Close invoice editor" className="min-h-[44px]" disabled={preview.isPending || approve.isPending} onClick={onClose}>Close</Button>
+        {!saved && !unresolved && <>
+          {review && <Button variant="outline" className="min-h-[44px]" disabled={locked || !!blocked} onClick={() => { setReview(null); setConfirmed(false); setError(null); preview.reset(); }}>Keep editing</Button>}
+          {!review && <Button className="min-h-[44px]" disabled={locked || !!blocked || !draft.valid || !draft.changed} onClick={updatePreview}>{preview.isPending ? "Reviewing…" : "Review changes"}</Button>}
+          <Button className="min-h-[44px] flex-1 bg-green-700 text-white hover:bg-green-800" aria-describedby={guidance ? `invoice-save-guidance-${context.invoiceLineId}` : undefined} disabled={!canSave} onClick={confirm}>{approve.isPending ? "Saving correction…" : "Approve & save invoice"}</Button>
+        </>}
         {unresolved && <Button className="min-h-[44px] flex-1" disabled={approve.isPending} onClick={() => approve.mutate(unresolved)}>{approve.isPending ? "Verifying confirmation…" : "Retry saved confirmation"}</Button>}
       </div>
       {stale && !unresolved && <Button className="mt-2 w-full" variant="outline" onClick={onReload}>Reload invoice and review again</Button>}
@@ -202,13 +231,9 @@ export function InvoiceQuantityCorrection({ lineId, lineNumber, needsCorrection,
   // its response. Keep its saved command accessible for verification after reload.
   if (!needsCorrection && !allowMatched && !pendingReceipt && !open) return null;
   return <>
-    <Button size="sm" variant="outline" className="mt-2 min-h-[36px] whitespace-normal text-xs" onClick={() => setOpen(true)} aria-label={`${pendingReceipt && !needsCorrection ? "Verify invoice correction" : "Correct invoice line"} for line ${lineNumber}`}>{pendingReceipt && !needsCorrection ? "Verify invoice correction" : "Correct invoice line"}</Button>
+    <Button size="sm" variant="outline" className="mt-2 min-h-[36px] whitespace-normal text-xs" onClick={() => setOpen(true)} aria-label={`${pendingReceipt && !needsCorrection ? "Verify invoice correction" : "Edit invoice line"} for line ${lineNumber}`}>{pendingReceipt && !needsCorrection ? "Verify invoice correction" : "Edit invoice line"}</Button>
     <Dialog open={open} onOpenChange={changeOpen}><DialogContent className="flex max-h-[90dvh] flex-col overflow-hidden sm:max-w-2xl" onEscapeKeyDown={(event) => { if (busy) event.preventDefault(); }} onInteractOutside={(event) => { if (busy) event.preventDefault(); }}>
-      <DialogHeader><DialogTitle>Correct invoice line · Line {context.data?.lineNumber ?? lineNumber}</DialogTitle><DialogDescription>{context.data && <span className="mb-1 block line-clamp-2 font-medium">{context.data.name}</span>}Enter the supplier invoice values and review the quantity, amount and payment balance before approving.</DialogDescription></DialogHeader>
-      {editPoHref && <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 rounded border bg-muted/50 p-3">
-        <p className="text-sm">Edit ordered quantities and prices on the PO.</p>
-        <Button variant="outline" className="min-h-[44px]" disabled={busy} onClick={() => navigate(editPoHref)}>Edit PO</Button>
-      </div>}
+      <DialogHeader><DialogTitle>Edit invoice line · Line {context.data?.lineNumber ?? lineNumber}</DialogTitle><DialogDescription>{context.data && <span className="mb-1 block line-clamp-2 font-medium">{context.data.name}</span>}Edit the quantity, unit price and amount. Review changes before saving.</DialogDescription></DialogHeader>
       {context.isLoading && <p>Loading the invoice and PO quantities…</p>}
       {context.error && <p role="alert">{context.error.message}</p>}
       {context.data && <QuantityEditor key={`${lineId}:${editorEpoch}`} loaded={context.data} storageKey={storageKey} onSaved={() => {
@@ -224,7 +249,7 @@ export function InvoiceQuantityCorrection({ lineId, lineNumber, needsCorrection,
             || url === `/api/vendor-invoice-lines/${lineId}/quantity-correction`);
         } });
         toast({ title: "Invoice correction saved", description: "Invoice matching and balance were checked. Payments and stock stay unchanged." }); onSaved();
-      }} setBusy={setBusy} onReload={reload} onClose={() => changeOpen(false)} />}
+      }} setBusy={setBusy} onReload={reload} onClose={() => changeOpen(false)} onEditPo={editPoHref ? () => navigate(editPoHref) : undefined} />}
       {!context.data && <Button variant="outline" disabled={busy} onClick={() => setOpen(false)}>Close</Button>}
     </DialogContent></Dialog>
   </>;
