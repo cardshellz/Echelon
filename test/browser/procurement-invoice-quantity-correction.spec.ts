@@ -6,7 +6,7 @@ import { poLineAmountCents, type PoQuantityAmendmentContext, type PoQuantityAmen
 
 const initialVersion = "a".repeat(64), nextVersion = "b".repeat(64);
 const receiptKey = "invoice-quantity-correction:quantity-admin:72";
-async function setup(page: Page, options: { canApprove?: boolean; stale?: boolean; loss?: "once" | "untilReleased"; otherQuantity?: number; disagree?: boolean; openModal?: boolean; multiplePos?: boolean; closedPo?: boolean; poRate?: number } = {}) {
+async function setup(page: Page, options: { canApprove?: boolean; stale?: boolean; loss?: "once" | "untilReleased"; otherQuantity?: number; disagree?: boolean; openModal?: boolean; multiplePos?: boolean; closedPo?: boolean; poRate?: number; poAllocation?: number } = {}) {
   const failures = await installFixtures(page);
   let version = initialVersion, stale = options.stale ?? false, acknowledged = options.loss === undefined;
   const otherQuantity = options.otherQuantity ?? 0;
@@ -27,7 +27,7 @@ async function setup(page: Page, options: { canApprove?: boolean; stale?: boolea
     return { invoiceId: 71, invoiceLineId: 72, purchaseOrderId: 17, sourceVersion: version,
       beforeQuantity: line.qtyInvoiced, afterQuantity: quantity, orderedQuantity: 25000, receivedQuantity: line.poQuantities.receivedQty, otherInvoicedQuantity: otherQuantity,
       invoiceLineAmountCents: line.lineTotalCents, invoiceAmountCents: invoice.invoicedAmountCents, paidAmountCents: invoice.paidAmountCents, balanceCents: invoice.balanceCents, recordedUnitCostMills: line.unitCostMills,
-      afterLineAmountCents: amount, afterInvoiceAmountCents: invoice.invoicedAmountCents - line.lineTotalCents + amount, afterBalanceCents: invoice.invoicedAmountCents - line.lineTotalCents + amount - invoice.paidAmountCents, afterUnitCostMills: unitPrice, beforeInvoiceStatus: invoice.status, afterInvoiceStatus: amount > line.lineTotalCents ? "partially_paid" : invoice.status, closedPurchaseOrder: options.closedPo === true,
+      afterLineAmountCents: amount, afterInvoiceAmountCents: invoice.invoicedAmountCents - line.lineTotalCents + amount, afterBalanceCents: invoice.invoicedAmountCents - line.lineTotalCents + amount - invoice.paidAmountCents, afterUnitCostMills: unitPrice, beforeAllocatedToPoCents: options.poAllocation, afterAllocatedToPoCents: options.poAllocation === invoice.invoicedAmountCents ? invoice.invoicedAmountCents - line.lineTotalCents + amount : options.poAllocation, beforeInvoiceStatus: invoice.status, afterInvoiceStatus: amount > line.lineTotalCents ? "partially_paid" : invoice.status, closedPurchaseOrder: options.closedPo === true,
       beforeAmountPerPiece: invoiceAmountPerPiece(line.lineTotalCents, line.qtyInvoiced), afterAmountPerPiece: invoiceAmountPerPiece(amount, quantity),
       beforeMatch: match(line.qtyInvoiced), afterMatch: match(quantity, unitPrice),
       remainingIssues: match(quantity, unitPrice) === "matched" ? [] : [{ invoiceId: 71, lineId: 72, status: match(quantity, unitPrice) }],
@@ -331,13 +331,14 @@ test("rejects a mismatched invoice-line context before exposing its PO edit acti
 });
 
 test("reviews a paid invoice amount correction on a closed PO and shows the resulting balance", async ({ page }, testInfo) => {
-  const proof = await setup(page, { closedPo: true, poRate: 5000 });
+  const proof = await setup(page, { closedPo: true, poRate: 5000, poAllocation: 669375 });
   await page.getByLabel("Recorded unit price (USD)").fill("0.5355");
   await page.getByLabel("Invoice line amount (USD)").fill("13387.50");
   await page.getByRole("button", { name: "Update preview", exact: true }).click();
   await expect(impactRow(page, "Invoice line amount")).toHaveText("Invoice line amount$6,693.75$13,387.50");
   await expect(impactRow(page, "Balance")).toHaveText("Balance$0.00$6,693.75");
   await expect(impactRow(page, "Match result")).toHaveText("Match resultPrice mismatchPrice mismatch");
+  await expect(impactRow(page, "Allocated to this PO")).toHaveText("Allocated to this PO$6,693.75$13,387.50");
   await page.getByRole("checkbox", { name: "I checked the supplier invoice and approve this billing correction on the closed PO." }).check();
   await page.getByRole("dialog").screenshot({ path: testInfo.outputPath("invoice-amount-correction.png") });
   await page.getByRole("button", { name: "Approve & save invoice", exact: true }).click();

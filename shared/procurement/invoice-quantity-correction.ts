@@ -44,6 +44,8 @@ export const invoiceQuantityPreviewSchema = z.object({
   afterInvoiceAmountCents: money.optional(),
   afterBalanceCents: money.optional(),
   afterUnitCostMills: money.optional(),
+  beforeAllocatedToPoCents: money.nullable().optional(),
+  afterAllocatedToPoCents: money.nullable().optional(),
   beforeInvoiceStatus: z.enum(["received", "approved", "partially_paid", "paid", "disputed", "voided"]).optional(),
   afterInvoiceStatus: z.enum(["received", "approved", "partially_paid", "paid", "disputed", "voided"]).optional(),
   closedPurchaseOrder: z.boolean().optional(),

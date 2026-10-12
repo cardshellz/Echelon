@@ -107,7 +107,7 @@ describe("invoice quantity correction defaults and exact impact", () => {
 
 function billingFacts(): InvoiceCorrectionFacts {
   const source = facts();
-  return { ...source, billing: { invoiceId: 71, purchaseOrderIds: [17], allInvoiceLines: structuredClone(source.invoiceLines),
+  return { ...source, billing: { invoiceId: 71, purchaseOrderIds: [17], purchaseAllocations: [{ purchaseOrderId: 17, amountCents: null }], allInvoiceLines: structuredClone(source.invoiceLines),
     allocations: [{ invoiceId: 71, amountCents: 669375, paymentStatus: "completed", currency: "USD" }] } };
 }
 const financialRequest = (fields = {}) => invoiceQuantityPreviewRequestSchema.parse({ sourceVersion: version, quantityPieces: 25000, unitCostMills: 5355, lineTotalCents: 1338750, ...fields });
@@ -153,6 +153,22 @@ describe("reviewed invoice line economics", () => {
   });
   it("rejects reducing the bill below recorded payments", () => {
     expect(() => planInvoiceQuantityCorrection(billingFacts(), 72, financialRequest({ lineTotalCents: 0 }))).toThrow(expect.objectContaining({ code: "INVOICE_CORRECTION_PAYMENT_REVIEW_REQUIRED" }));
+  });
+  it("preserves existing credit lines when reviewing the net invoice amount", () => {
+    const source = billingFacts();
+    const discount = { ...source.lines[0], id: 19, lineNumber: 2, lineType: "discount", orderQty: 1, receivedQty: 0, unitCostMills: -10000, unitCostCents: -100 };
+    source.lines.push(discount);
+    const credit = { ...source.invoiceLines[0], id: 73, purchaseOrderLineId: 19, qtyInvoiced: 1, unitCostMills: -10000, unitCostCents: -100, lineTotalCents: -100 };
+    source.invoiceLines.push(credit); source.billing!.allInvoiceLines.push(credit);
+    source.invoices[0].invoicedAmountCents -= 100; source.invoices[0].paidAmountCents -= 100; source.billing!.allocations[0].amountCents -= 100;
+    expect(planInvoiceQuantityCorrection(source, 72, financialRequest())).toMatchObject({ afterInvoiceAmountCents: 1338650, paidAmountCents: 669275, afterBalanceCents: 669375 });
+    expect(credit.lineTotalCents).toBe(-100);
+  });
+  it("updates a full single-PO allocation in the preview and rejects partial allocations", () => {
+    const source = billingFacts(); source.billing!.purchaseAllocations[0].amountCents = 669375;
+    expect(planInvoiceQuantityCorrection(source, 72, financialRequest())).toMatchObject({ beforeAllocatedToPoCents: 669375, afterAllocatedToPoCents: 1338750 });
+    source.billing!.purchaseAllocations[0].amountCents = 100;
+    expect(() => planInvoiceQuantityCorrection(source, 72, financialRequest())).toThrow(expect.objectContaining({ code: "INVOICE_CORRECTION_ALLOCATION_REVIEW_REQUIRED" }));
   });
   it("ignores voided allocations in the same way as the AP ledger owner", () => {
     const source = billingFacts(); source.billing!.allocations.push({ invoiceId: 71, amountCents: 99, currency: "USD", paymentStatus: "voided" });

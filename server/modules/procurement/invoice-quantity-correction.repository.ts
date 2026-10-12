@@ -13,6 +13,9 @@ import { replacePurchaseOrderMatchExceptions } from "./purchase-order-match-exce
 
 import type { PurchaseApprovalSnapshot } from "./purchase-order-approval.policy";
 
+// Version the reviewed behavior as well as its data; saved committed receipts still replay.
+const INVOICE_LINE_REVIEW_VERSION = 2;
+
 export async function readInvoiceQuantitySource(tx: AmendmentTransaction, lineId: number, actorId: string) {
   // Discover the scope, then re-read the exact line under the established graph,
   // PO, invoice and identity locks. This lookup never authorizes a write.
@@ -32,10 +35,10 @@ export async function readInvoiceBillingSource(tx: AmendmentTransaction, source:
     .innerJoin(apPayments, eq(apPayments.id, apPaymentAllocations.apPaymentId))
     .where(eq(apPaymentAllocations.vendorInvoiceId, target.vendorInvoiceId)).orderBy(apPaymentAllocations.id).for("share");
   const invoicePoLinks = await tx.select().from(vendorInvoicePoLinks).where(eq(vendorInvoicePoLinks.vendorInvoiceId, target.vendorInvoiceId)).orderBy(vendorInvoicePoLinks.id).for("share");
-  const billing = { purchaseOrderIds: invoicePoLinks.map(row => row.purchaseOrderId), invoiceId: target.vendorInvoiceId, allInvoiceLines,
+  const billing = { purchaseAllocations: invoicePoLinks.map(row => ({ purchaseOrderId: row.purchaseOrderId, amountCents: row.allocatedAmountCents })), purchaseOrderIds: invoicePoLinks.map(row => row.purchaseOrderId), invoiceId: target.vendorInvoiceId, allInvoiceLines,
     allocations: allocations.map(row => ({ invoiceId: row.allocation.vendorInvoiceId, amountCents: row.allocation.appliedAmountCents, paymentStatus: row.payment.status, currency: row.payment.currency })) };
-  return { ...source, facts: { ...source.facts, billing },
-    sourceVersion: createHash("sha256").update(canonicalJson({ sourceVersion: source.sourceVersion, allInvoiceLines, allocations, invoicePoLinks })).digest("hex") };
+  return { ...source, invoicePoLinks, facts: { ...source.facts, billing },
+    sourceVersion: createHash("sha256").update(canonicalJson({ reviewVersion: INVOICE_LINE_REVIEW_VERSION, sourceVersion: source.sourceVersion, allInvoiceLines, allocations, invoicePoLinks })).digest("hex") };
 }
 export function invoiceQuantityCorrectionTime(source: Awaited<ReturnType<typeof readInvoiceQuantitySource>>, now: Date): Date {
   if (!(now instanceof Date) || !Number.isFinite(now.getTime())) throw new Error("Invoice correction clock is invalid.");
@@ -57,7 +60,16 @@ export async function persistInvoiceQuantityCorrection(
     .where(and(eq(vendorInvoiceLines.id, before.id), eq(vendorInvoiceLines.vendorInvoiceId, before.vendorInvoiceId), eq(vendorInvoiceLines.purchaseOrderLineId, before.purchaseOrderLineId!)))
     .returning();
   if (!updated) throw new InvoiceQuantityCorrectionError("The locked invoice line could not be updated.", "INVOICE_QUANTITY_UPDATE_FAILED");
+  if (moneyChanged && preview.beforeAllocatedToPoCents !== preview.afterAllocatedToPoCents) {
+    const link = source.invoicePoLinks.find(row => row.purchaseOrderId === source.facts.header.id);
+    if (!link || preview.afterAllocatedToPoCents === undefined || preview.afterAllocatedToPoCents === null) throw new InvoiceQuantityCorrectionError("The reviewed PO allocation could not be verified.", "INVOICE_CORRECTION_ALLOCATION_REVIEW_REQUIRED");
+    await tx.update(vendorInvoicePoLinks).set({ allocatedAmountCents: preview.afterAllocatedToPoCents }).where(eq(vendorInvoicePoLinks.id, link.id));
+  }
   if (moneyChanged) await recalculateCorrectedInvoiceFinancialsInTransaction(before.vendorInvoiceId, tx, actorId, at);
+  const afterInvoicePoLinks = await tx.select().from(vendorInvoicePoLinks).where(eq(vendorInvoicePoLinks.vendorInvoiceId, before.vendorInvoiceId)).orderBy(vendorInvoicePoLinks.id);
+  if (preview.afterAllocatedToPoCents !== undefined && afterInvoicePoLinks.find(row => row.purchaseOrderId === source.facts.header.id)?.allocatedAmountCents !== preview.afterAllocatedToPoCents) {
+    throw new InvoiceQuantityCorrectionError("The corrected PO allocation does not match the reviewed amount.", "INVOICE_CORRECTION_FINANCIAL_MISMATCH");
+  }
   const [afterInvoice] = await tx.select().from(vendorInvoices).where(eq(vendorInvoices.id, before.vendorInvoiceId));
   const beforeInvoice = source.facts.invoices.find(invoice => invoice.id === before.vendorInvoiceId)!;
   if (!afterInvoice || afterInvoice.invoicedAmountCents !== (preview.afterInvoiceAmountCents ?? preview.invoiceAmountCents)
@@ -70,12 +82,12 @@ export async function persistInvoiceQuantityCorrection(
   if (!after) throw new InvoiceQuantityCorrectionError("The corrected invoice line could not be verified for its audit record.", "INVOICE_QUANTITY_UPDATE_FAILED");
   const [audit] = await tx.insert(auditEvents).values({
     timestamp: at, level: "AUDIT", actor: actorId, action: moneyChanged ? "procurement.invoice.line_corrected" : "procurement.invoice.quantity_corrected", target: `invoice-line:${before.id}`,
-    changes: { before, after, ...(moneyChanged ? { beforeInvoice, afterInvoice } : {}) }, context: { commandKey, reason, preview, approvalAuthority: source.actor, approvalEvidence, closedPurchaseOrderConfirmed, reviewedSourceVersion: source.sourceVersion,
+    changes: { before, after, ...(moneyChanged ? { beforeInvoice, afterInvoice, beforeInvoicePoLinks: source.invoicePoLinks, afterInvoicePoLinks } : {}) }, context: { commandKey, reason, preview, approvalAuthority: source.actor, approvalEvidence, closedPurchaseOrderConfirmed, reviewedSourceVersion: source.sourceVersion,
       supersededMatchExceptions: superseded, resultingMatchSourceFingerprint: match.sourceFingerprint },
   }).returning({ id: auditEvents.id });
   await tx.insert(poEvents).values({ poId: source.facts.header.id, eventType: moneyChanged ? "invoice_line_corrected" : "invoice_quantity_corrected", actorType: "user", actorId, createdAt: at,
     payloadJson: { auditEventId: audit.id, commandKey, invoiceId: before.vendorInvoiceId, invoiceLineId: before.id, reason, preview,
-      contractVersion: 1, before, after, ...(moneyChanged ? { beforeInvoice, afterInvoice } : {}), approvalAuthority: source.actor, approvalEvidence, closedPurchaseOrderConfirmed, approvalConfirmed: true, reviewedSourceVersion: source.sourceVersion,
+      contractVersion: 1, before, after, ...(moneyChanged ? { beforeInvoice, afterInvoice, beforeInvoicePoLinks: source.invoicePoLinks, afterInvoicePoLinks } : {}), approvalAuthority: source.actor, approvalEvidence, closedPurchaseOrderConfirmed, approvalConfirmed: true, reviewedSourceVersion: source.sourceVersion,
       supersededMatchExceptions: superseded, resultingMatchSourceFingerprint: match.sourceFingerprint } });
   await tx.insert(poStatusHistory).values({ purchaseOrderId: source.facts.header.id, fromStatus: source.facts.header.status, toStatus: source.facts.header.status,
     changedBy: actorId, changedAt: at, revisionNumber: source.facts.header.revisionNumber,

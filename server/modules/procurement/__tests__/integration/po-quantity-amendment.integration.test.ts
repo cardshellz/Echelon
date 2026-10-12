@@ -427,6 +427,22 @@ databaseTests.sequential("PO quantity amendment real PostgreSQL and HTTP guarant
       expect(await invoicePost(request, key)).toEqual({ ...first, replayed: "true" });
       expect((await pool.query("SELECT event_type,payload_json FROM procurement.po_events")).rows).toMatchObject([{ event_type: "invoice_line_corrected", payload_json: { closedPurchaseOrderConfirmed: true, approvalEvidence: { actor: { userId: "admin-user" } }, beforeInvoice: { invoicedAmountCents: 1000 }, afterInvoice: { invoicedAmountCents: 2000 } } }]);
     });
+    it("preserves a credit line, recalculates the net bill, and keeps its full PO allocation current", async () => {
+      await pool.query("INSERT INTO procurement.purchase_order_lines(id,purchase_order_id,line_number,line_type,pricing_basis,order_qty,received_qty,status,unit_cost_cents,unit_cost_mills,line_total_cents) VALUES(12,1,2,'discount','not_applicable',1,0,'received',-100,-10000,-100); INSERT INTO procurement.vendor_invoice_lines(id,vendor_invoice_id,purchase_order_line_id,line_number,qty_invoiced,unit_cost_cents,unit_cost_mills,line_total_cents,match_status) VALUES(82,71,12,2,1,-100,-10000,-100,'matched'); UPDATE procurement.purchase_orders SET subtotal_cents=2000,total_cents=2000,line_count=2 WHERE id=1; UPDATE procurement.vendor_invoices SET invoiced_amount_cents=900,paid_amount_cents=900 WHERE id=71; UPDATE procurement.ap_payments SET total_amount_cents=900 WHERE id=91; UPDATE procurement.ap_payment_allocations SET applied_amount_cents=900 WHERE vendor_invoice_id=71; UPDATE procurement.vendor_invoice_po_links SET allocated_amount_cents=900 WHERE vendor_invoice_id=71");
+      const before = await stockAndPayments();
+      const result = await invoicePost(await economicBody());
+      expect(result).toMatchObject({ status: 200, body: { preview: { afterInvoiceAmountCents: 1900, paidAmountCents: 900, afterBalanceCents: 1000, beforeAllocatedToPoCents: 900, afterAllocatedToPoCents: 1900 } } });
+      expect((await pool.query("SELECT line_total_cents,unit_cost_mills,qty_invoiced FROM procurement.vendor_invoice_lines WHERE id=82")).rows[0]).toEqual({ line_total_cents: "-100", unit_cost_mills: "-10000", qty_invoiced: 1 });
+      expect((await pool.query("SELECT allocated_amount_cents FROM procurement.vendor_invoice_po_links WHERE vendor_invoice_id=71")).rows[0].allocated_amount_cents).toBe("1900");
+      expect(await stockAndPayments()).toEqual(before);
+    });
+    it("preserves an unspecified PO allocation and rejects a partial one during amount corrections", async () => {
+      await pool.query("UPDATE procurement.vendor_invoice_po_links SET allocated_amount_cents=500 WHERE vendor_invoice_id=71");
+      expect((await invoicePost(await economicBody())).status).toBe(409);
+      await pool.query("UPDATE procurement.vendor_invoice_po_links SET allocated_amount_cents=NULL WHERE vendor_invoice_id=71");
+      expect((await invoicePost(await economicBody())).status).toBe(200);
+      expect((await pool.query("SELECT allocated_amount_cents FROM procurement.vendor_invoice_po_links WHERE vendor_invoice_id=71")).rows[0].allocated_amount_cents).toBeNull();
+    });
     it("requires an explicit reviewed closed-PO billing correction instead of a legacy quantity-only request", async () => {
       await pool.query("UPDATE procurement.purchase_orders SET status='closed',closed_at=now() WHERE id=1");
       expect((await invoicePost(await invoiceBody())).status).toBe(409);
@@ -452,9 +468,11 @@ databaseTests.sequential("PO quantity amendment real PostgreSQL and HTTP guarant
     });
     it("rolls back line economics, balances, history and matching when the immutable event write fails, then retries safely", async () => {
       const request = await economicBody(), command = invoiceDescriptor(request), before = await protectedRecords(), history = await evidence();
+      const linksBefore = (await pool.query("SELECT * FROM procurement.vendor_invoice_po_links ORDER BY id")).rows;
       await pool.query("CREATE OR REPLACE FUNCTION procurement.amendment_test_fail() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'test audit failure'; END $$; CREATE TRIGGER amendment_test_failure BEFORE INSERT ON procurement.po_events FOR EACH ROW EXECUTE FUNCTION procurement.amendment_test_fail()");
       await expect(invoiceService.approve(81, request, "admin-user", command)).rejects.toThrow();
       expect(await protectedRecords()).toEqual(before); expect(await evidence()).toEqual(history);
+      expect((await pool.query("SELECT * FROM procurement.vendor_invoice_po_links ORDER BY id")).rows).toEqual(linksBefore);
       await pool.query("DROP TRIGGER amendment_test_failure ON procurement.po_events");
       await retryEligible(command.idempotencyKey);
       expect((await invoiceService.approve(81, request, "admin-user", command)).httpStatus).toBe(200);

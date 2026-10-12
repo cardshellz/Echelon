@@ -11,7 +11,7 @@ export class InvoiceQuantityCorrectionError extends Error {
   constructor(message: string, readonly code: string, readonly statusCode = 409) { super(message); this.name = "InvoiceQuantityCorrectionError"; }
 }
 export type InvoiceCorrectionFacts = AmendmentFacts & { billing?: {
-  invoiceId: number; purchaseOrderIds: number[]; allInvoiceLines: AmendmentFacts["invoiceLines"];
+  invoiceId: number; purchaseOrderIds: number[]; purchaseAllocations: { purchaseOrderId: number; amountCents: number | null }[]; allInvoiceLines: AmendmentFacts["invoiceLines"];
   allocations: { invoiceId: number; amountCents: number; paymentStatus: string; currency: string | null }[];
 } };
 const nonnegative = z.number().int().nonnegative().safe();
@@ -53,10 +53,18 @@ export function reviewedInvoiceAmount(facts: InvoiceCorrectionFacts, lineId: num
   if (afterLineAmount !== line.lineTotalCents && (billing.purchaseOrderIds.length !== 1 || billing.purchaseOrderIds[0] !== facts.header.id)) {
     throw new InvoiceQuantityCorrectionError("This bill covers multiple POs. Review its allocations through the invoice workflow before changing billed amounts.", "INVOICE_CORRECTION_ALLOCATION_REVIEW_REQUIRED");
   }
+  const allocation = billing.purchaseAllocations.find(row => row.purchaseOrderId === facts.header.id);
+  if (afterLineAmount !== line.lineTotalCents && (!allocation || (allocation.amountCents !== null && allocation.amountCents !== invoice.invoicedAmountCents))) {
+    throw new InvoiceQuantityCorrectionError("This bill has a partial PO allocation. Review its allocation before changing billed amounts.", "INVOICE_CORRECTION_ALLOCATION_REVIEW_REQUIRED");
+  }
   let lineSum = BigInt(0), paidSum = BigInt(0);
   for (const row of billing.allInvoiceLines) {
     if (row.vendorInvoiceId !== invoice.id) throw new InvoiceQuantityCorrectionError("Invoice line scope is invalid.", "INVOICE_QUANTITY_SOURCE_INVALID");
-    lineSum += BigInt(recorded(row.lineTotalCents, "invoice line amount"));
+    // Other recorded lines can be credits. The AP owner sums signed line amounts;
+    // validate that same net total without changing the credit evidence.
+    const amount = z.number().int().safe().safeParse(row.lineTotalCents);
+    if (!amount.success) throw new InvoiceQuantityCorrectionError("Recorded invoice line amount is invalid.", "INVOICE_QUANTITY_SOURCE_INVALID");
+    lineSum += BigInt(amount.data);
   }
   for (const allocation of billing.allocations) {
     if (allocation.invoiceId !== invoice.id || allocation.currency !== invoice.currency) throw new InvoiceQuantityCorrectionError("Payment scope or currency is invalid.", "INVOICE_QUANTITY_SOURCE_INVALID");
@@ -85,6 +93,10 @@ export function previewInvoiceQuantity(facts: InvoiceCorrectionFacts, lineId: nu
   const explicitEconomics = request.lineTotalCents !== undefined;
   const invoiceAmount = explicitEconomics ? reviewedInvoiceAmount(facts, lineId, afterAmount) : recorded(invoice.invoicedAmountCents, "invoice amount");
   const moneyChanged = amount !== afterAmount || currentUnitCost !== afterUnitCost;
+  const beforeAllocation = facts.billing?.purchaseAllocations.find(row => row.purchaseOrderId === facts.header.id)?.amountCents ?? null;
+  // A sole link assigning the entire bill follows its corrected whole amount.
+  // Partial allocations require the allocation owner; an unspecified link stays unspecified.
+  const afterAllocation = explicitEconomics && beforeAllocation === invoice.invoicedAmountCents ? invoiceAmount : beforeAllocation;
   const afterFinancials = moneyChanged ? deriveInvoiceFinancialState({ status: invoice.status, invoiceAmountCents: invoiceAmount, paidAmountCents: recorded(invoice.paidAmountCents, "paid amount") })
     : { status: invoice.status, balanceCents: recorded(invoice.balanceCents, "invoice balance") };
   const beforeMatches = invoiceMatches(facts, facts.invoiceLines);
@@ -106,6 +118,7 @@ export function previewInvoiceQuantity(facts: InvoiceCorrectionFacts, lineId: nu
     recordedUnitCostMills: line.unitCostMills === null ? Number(BigInt(recorded(line.unitCostCents, "unit price")) * BigInt(100)) : recorded(line.unitCostMills, "unit price"),
     beforeAmountPerPiece: invoiceAmountPerPiece(amount, beforeQuantity), afterAmountPerPiece: invoiceAmountPerPiece(afterAmount, afterQuantity),
     afterLineAmountCents: afterAmount, afterInvoiceAmountCents: invoiceAmount, afterBalanceCents: afterFinancials.balanceCents,
+    beforeAllocatedToPoCents: beforeAllocation, afterAllocatedToPoCents: afterAllocation,
     afterUnitCostMills: afterUnitCost, beforeInvoiceStatus: invoice.status, afterInvoiceStatus: afterFinancials.status, closedPurchaseOrder: isClosedPurchaseOrder(facts),
     beforeMatch: beforeMatches.find((row) => row.id === line.id)!.matchStatus, afterMatch,
     remainingIssues: afterMatches.filter((row) => row.matchStatus !== "matched").map((row) => ({ invoiceId: row.vendorInvoiceId, lineId: row.id, status: row.matchStatus })), warnings,

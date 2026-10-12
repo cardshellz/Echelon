@@ -41,6 +41,9 @@ export function InvoiceQuantityImpact({ preview, currency }: { preview: InvoiceQ
     ["Balance", amount(preview.balanceCents, currency), amount(afterBalance, currency)],
     ["Match result", matchNames[preview.beforeMatch], matchNames[preview.afterMatch]],
   ];
+  if (preview.beforeAllocatedToPoCents != null && preview.afterAllocatedToPoCents != null) {
+    rows.push(["Allocated to this PO", amount(preview.beforeAllocatedToPoCents, currency), amount(preview.afterAllocatedToPoCents, currency)]);
+  }
   return <div className="space-y-2">
     <p className="rounded bg-muted p-2 text-sm">PO ordered: <strong>{preview.orderedQuantity.toLocaleString("en-US")}</strong> pieces · Received: <strong>{preview.receivedQuantity.toLocaleString("en-US")}</strong> pieces</p>
     <table className="w-full table-fixed text-sm" aria-label="Quantity correction impact">
