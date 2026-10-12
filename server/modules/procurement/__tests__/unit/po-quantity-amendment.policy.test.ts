@@ -7,7 +7,7 @@ function facts(): AmendmentFacts {
   // The domain uses these explicit commercial facts; DB defaults/constraints
   // and full row snapshots are separately exercised by the PostgreSQL suite.
   return {
-    header: { id: 1, status: "received", physicalStatus: "received", currency: "USD", totalCents: 1100, subtotalCents: 1100, discountCents: 0, taxCents: 0, shippingCostCents: 0, closedAt: null, cancelledAt: null },
+    header: { id: 1, status: "received", physicalStatus: "received", currency: "USD", totalCents: 1100, subtotalCents: 1100, receivedLineCount: 1, discountCents: 0, taxCents: 0, shippingCostCents: 0, closedAt: null, cancelledAt: null },
     lines: [{ id: 11, purchaseOrderId: 1, lineNumber: 1, productId: 1, productName: "Test product", lineType: "product", parentLineId: null, orderQty: 10, receivedQty: 20, cancelledQty: 0, returnedQty: 0, status: "received", unitCostCents: 100, unitCostMills: 10000, totalProductCostCents: 1000, packagingCostCents: 100, discountCents: 0, taxCents: 0, lineTotalCents: 1100, pricingBasis: "per_piece", quotedUnitCostMills: 10000 }],
     invoices: [{ id: 71, status: "paid", invoiceNumber: "TEST-INV-71", currency: "USD" }],
     invoiceLines: [{ id: 81, lineNumber: 1, lineTotalCents: 1000, productName: "Test product", vendorInvoiceId: 71, purchaseOrderLineId: 11, qtyInvoiced: 10, unitCostCents: 100, unitCostMills: 10000 }],
@@ -60,6 +60,43 @@ describe("audited PO quantity amendment policy", () => {
     expect(() => planQuantityAmendment(source, request(2_147_483_647, "keep_quoted_rate"))).toThrow(/range/);
   });
   it.each(["draft", "pending_approval", "closed", "cancelled", "short_closed"])("blocks unsupported PO status %s", (status) => { const source = facts(); source.header.status = status; expect(quantityAmendmentBlockedReason(source)).not.toBeNull(); expect(() => planQuantityAmendment(source, request())).toThrow(); });
+  it("allows explicit closed-PO commercial edits while preserving closure and receiving state", () => {
+    const source = facts(); source.header.status = "closed"; source.header.closedAt = new Date("2026-10-01");
+    const before = structuredClone(source);
+    const context = buildQuantityAmendmentContext(source, admin, "a".repeat(64));
+    expect(context).toMatchObject({ canApprove: true, closedPurchaseOrder: true, blockedReason: null });
+    expect(() => planQuantityAmendment(source, edit())).toThrow(/explicit administrator approval/);
+    const plan = planQuantityAmendment(source, { ...edit(), closedPurchaseOrderConfirmed: true });
+    expect(plan.preview).toMatchObject({ beforeStatus: "closed", afterStatus: "closed", closedPurchaseOrder: true, afterTotalCents: 2100 });
+    expect(plan.patches[0].patch.status).toBe("received"); expect(plan.receivedLineCount).toBe(1);
+    expect(source).toEqual(before);
+  });
+  it("keeps closed lines and physical closure intact when correcting their recorded values", () => {
+    const source = facts(); source.header.physicalStatus = "closed"; source.lines[0].status = "closed";
+    const plan = planQuantityAmendment(source, { ...edit(), closedPurchaseOrderConfirmed: true });
+    expect(plan.patches[0].patch.status).toBe("closed"); expect(plan.preview.afterStatus).toBe("received");
+  });
+  it("rejects closed-PO changes that require receiving new goods or omit explicit pricing", () => {
+    const source = facts(); source.header.status = "closed";
+    const larger = edit({ quantityPieces: 21, pricing: { basis: "per_piece", quantityPieces: 21, unitCostMills: 10000 } });
+    expect(() => planQuantityAmendment(source, { ...larger, closedPurchaseOrderConfirmed: true })).toThrow(/exceeds received goods/);
+    expect(() => planQuantityAmendment(source, { ...request(), closedPurchaseOrderConfirmed: true })).toThrow(/explicit line values/);
+  });
+  it.each(["cancelled", "short_closed"])("still blocks a %s purchase with closed-edit confirmation", status => {
+    const source = facts(); source.header.status = status;
+    expect(() => planQuantityAmendment(source, { ...edit(), closedPurchaseOrderConfirmed: true })).toThrow(/owning correction workflow/);
+  });
+  it("does not allow closed edits to bypass recommendation, return or cancellation ownership", () => {
+    const source = facts(); source.header.status = "closed";
+    const correction = { ...edit(), closedPurchaseOrderConfirmed: true as const };
+    source.recommendationOwned = true; expect(() => planQuantityAmendment(source, correction)).toThrow(/immutable/);
+    source.recommendationOwned = false; source.lines[0].returnedQty = 1; expect(() => planQuantityAmendment(source, correction)).toThrow(/returns/);
+    source.lines[0].returnedQty = 0; source.lines[0].cancelledQty = 1; expect(() => planQuantityAmendment(source, correction)).toThrow(/cancellations/);
+  });
+  it("rejects forged or false closed-PO confirmation fields", () => {
+    expect(poQuantityPreviewRequestSchema.safeParse({ ...edit(), closedPurchaseOrderConfirmed: false }).success).toBe(false);
+    expect(poQuantityApprovalRequestSchema.safeParse({ ...edit(), closedPurchaseOrderConfirmed: true, approvalConfirmed: false }).success).toBe(false);
+  });
   it("keeps accepted recommendation economics immutable", () => { const source = facts(); source.recommendationOwned = true; expect(() => planQuantityAmendment(source, request())).toThrow(/immutable/); });
   it.each([{ returnedQty: 1 }, { cancelledQty: 1 }, { status: "closed" }, { parentLineId: 2 }, { lineType: "fee" }])("blocks unsupported line ownership/activity %j", (patch) => { const source = facts(); Object.assign(source.lines[0], patch); expect(() => planQuantityAmendment(source, request())).toThrow(); });
   it("rejects foreign lines, no-op quantities and unreconciled source amounts", () => {

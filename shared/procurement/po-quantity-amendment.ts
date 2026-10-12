@@ -35,6 +35,7 @@ export const poAmendmentVersionSchema = z.string().regex(/^[a-f0-9]{64}$/);
 export const poQuantityPreviewRequestSchema = z.object({
   sourceVersion: poAmendmentVersionSchema,
   changes: poQuantityChangesSchema,
+  closedPurchaseOrderConfirmed: z.literal(true).optional(),
   reason: z.string().trim().min(10).max(2000),
 }).strict();
 export const poQuantityApprovalRequestSchema = poQuantityPreviewRequestSchema.extend({ approvalConfirmed: z.literal(true) }).strict();
@@ -61,6 +62,7 @@ export const poQuantityAmendmentContextSchema = z.object({
   currency: z.string(),
   sourceVersion: poAmendmentVersionSchema,
   canApprove: z.boolean(),
+  closedPurchaseOrder: z.boolean().optional(),
   blockedReason: z.string().nullable(),
   lines: z.array(poQuantityLineViewSchema),
   totalCents: money.optional(),
@@ -84,6 +86,7 @@ export const poQuantityAmendmentPreviewSchema = z.object({
   beforeTotalCents: money,
   afterTotalCents: money,
   beforeStatus: z.string(),
+  closedPurchaseOrder: z.boolean().optional(),
   afterStatus: z.string(),
   warnings: z.array(z.string()),
   invoiceMatches: z.array(z.object({
