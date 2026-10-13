@@ -998,6 +998,12 @@ export const inventoryLots = inventorySchema.table("inventory_lots", {
   packagingCostMills: bigint("packaging_cost_mills", { mode: "number" }).notNull().default(0),
   landedCostMills: bigint("landed_cost_mills", { mode: "number" }).notNull().default(0),
   totalUnitCostMills: bigint("total_unit_cost_mills", { mode: "number" }).notNull().default(0),
+  // Extended component amounts are authoritative when present. Unit prices
+  // remain rounded compatibility/display mirrors; a null total preserves v0/v1.
+  costBasisQty: integer("cost_basis_qty"),
+  productTotalCostMills: bigint("product_total_cost_mills", { mode: "number" }),
+  packagingTotalCostMills: bigint("packaging_total_cost_mills", { mode: "number" }),
+  landedTotalCostMills: bigint("landed_total_cost_mills", { mode: "number" }),
   qtyReceived: integer("qty_received").default(0),
   qtyConsumed: integer("qty_consumed").default(0),
   costSource: varchar("cost_source", { length: 20 }).default("manual"), // 'po' | 'manual' | 'landed' | 'legacy'

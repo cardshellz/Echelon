@@ -1,10 +1,11 @@
-import { lotCostNeedsReview, moneyToSafeNumber, normalizeLotCosts, roundedMillsToCents, type LotCostRecord } from "./lot-cost";
+import { lotCostNeedsReview, moneyToSafeNumber, normalizeLotCosts, roundedMillsToCents, hasExactLotCostTotals, nonnegativeMoney, type LotCostRecord } from "./lot-cost";
 
 export interface ValuationLot extends LotCostRecord {
   id: number;
   productVariantId: number;
   quantity: number;
   inboundShipmentId: number | null;
+  availableCostMills?:string;
 }
 export interface ValuationIdentity {
   variantId: number; productId: number; sku: string | null; productName: string; baseSku: string | null;
@@ -21,6 +22,7 @@ export function valueInventory(lots: readonly ValuationLot[], identities: readon
     const identity = identityByVariant.get(lot.productVariantId);
     if (!identity) throw new Error(`Catalog identity missing for valued lot ${lot.id}`);
     const costs = normalizeLotCosts(lot);
+    if (hasExactLotCostTotals(lot) && lot.availableCostMills==null) throw new Error(`Exact quantity cost is missing for valued lot ${lot.id}`);
     const quantity = BigInt(lot.quantity);
     const provisional = lotCostNeedsReview(lot);
     const unknown = lot.cost_source === "unresolved"
@@ -29,13 +31,14 @@ export function valueInventory(lots: readonly ValuationLot[], identities: readon
     const group = groups.get(identity.variantId) ?? { identity, quantity: BigInt(0), mills: BigInt(0),
       zero: BigInt(0), provisional: BigInt(0), unknown: BigInt(0), activeLots: 0, hasLandedPending: false };
     group.quantity += quantity;
-    group.mills += costs.totalMills * quantity;
+    const value=hasExactLotCostTotals(lot)?nonnegativeMoney(lot.availableCostMills,"availableCostMills"):costs.totalMills*quantity;
+    group.mills += value;
     if (costs.totalMills === BigInt(0)) group.zero += quantity;
     if (provisional) group.provisional += quantity;
     if (unknown) group.unknown += quantity;
     group.activeLots += 1;
     group.hasLandedPending ||= pending;
-    if (pending) { landedPendingLots += 1; landedPendingMills += costs.totalMills * quantity; }
+    if (pending) { landedPendingLots += 1; landedPendingMills += value; }
     groups.set(identity.variantId, group);
   }
   const sorted = [...groups.values()].sort((a,b) => a.identity.variantId-b.identity.variantId);

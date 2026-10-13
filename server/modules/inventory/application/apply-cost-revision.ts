@@ -1,4 +1,6 @@
-import { normalizeLotCosts, lotCostNeedsReview } from "../domain/lot-cost";
+import { normalizeLotCosts, lotCostNeedsReview, lotCostTotals, hasExactLotCostTotals } from "../domain/lot-cost";
+import { costForQuantityIntervals, validateCostQuantityIntervals, type CostQuantityInterval } from "../domain/cost-quantity-intervals";
+import { ensureLotCostQuantityBasis } from "../infrastructure/cost-quantity.repository";
 import { sql } from "drizzle-orm";
 import { canonicalJson } from "@shared/utils/canonical-json";
 import { type CostComponent, type CostIssue } from "@shared/procurement/cost-source-contracts";
@@ -21,6 +23,8 @@ export interface CostRevisionApplicationResult {
 }
 export interface CostComponentWriter {
   revalueComponent(lotId: number, component: CostComponent, unitMills: number, reason: string, tx: CostEvidenceTransaction): Promise<{ cogsRowsUpdated: number; totalCogsDeltaCents: number } | null>;
+  revalueExactComponent?(lotId: number, component: CostComponent, totalMills: number, basisQuantity: number,
+    reason: string, actorId: string, tx: CostEvidenceTransaction, recordedAt?: Date): Promise<{ cogsRowsUpdated: number; totalCogsDeltaCents: number } | null>;
 }
 
 /** One inventory owner applies a source revision through the recorded graph.
@@ -102,6 +106,23 @@ export async function applyCostRevision(
     issues.push({ code: "COST_MANUAL_OVERRIDE_REVIEW", message: "A manual correction protects this component. Review its disposition before a source revision may replace it; unrelated components remain independent." });
   }
   const projections = new Map<number, Projection>();
+  const contributionIntervals = new Map<number, CostQuantityInterval[]>();
+  if (issues.length === 0 && writer.revalueExactComponent) {
+    for (const lot of lots.values()) {
+      try { await ensureLotCostQuantityBasis(tx, { ...lot.source, id:lot.id }, actorId, now); }
+      catch (error) {
+        if (!(error instanceof CostEvidenceError)) throw error;
+        issues.push({ code: error.code, message: error.message });
+      }
+    }
+    const mappings = await tx.execute(sql`SELECT mapping.contribution_id,allocation.intervals,allocation.quantity
+      FROM inventory.lot_cost_contribution_allocations mapping
+      JOIN inventory.lot_cost_quantity_allocations allocation ON allocation.id=mapping.allocation_id
+      JOIN inventory.lot_cost_contributions edge ON edge.id=mapping.contribution_id AND edge.source_lot_id=allocation.inventory_lot_id
+      WHERE mapping.contribution_id IN
+        (SELECT value::bigint FROM jsonb_array_elements_text(${JSON.stringify(edgeResult.rows.map(edge=>String(edge.id)))}::jsonb))`);
+    for (const row of mappings.rows) contributionIntervals.set(costInteger(row.contribution_id,"contribution.id",1),row.intervals);
+  }
   if (issues.length === 0 && source.totalMills !== null && source.basePieces !== null) {
     for (const root of roots) {
       const lot = lots.get(Number(root.inventory_lot_id))!;
@@ -132,11 +153,22 @@ export async function applyCostRevision(
           const parent = lots.get(parentId)!;
           const parentProjection = projections.get(parentId);
           const sourceQty = costInteger(edge.source_qty, "sourceQty", 1);
-          if (sourceQty > parent.qtyReceived || parentProjection?.remainderMills) {
+          if (sourceQty > parent.qtyReceived || (!writer.revalueExactComponent && parentProjection?.remainderMills)) {
             issues.push({ code: "COST_TRANSFORM_RESIDUAL_REVIEW", message: `Lot ${parentId} has an unproven source interval or uniform-cost residual.` }); break;
           }
-          const parentCost = parentProjection?.unitMills ?? costInteger(parent.source[componentColumn[source.component]], "parentCost");
-          inputTotal += BigInt(parentCost) * BigInt(sourceQty);
+          if (writer.revalueExactComponent) {
+            const intervals = contributionIntervals.get(costInteger(edge.id,"contribution.id",1));
+            if (!intervals || intervals.reduce((sum,interval)=>sum+interval.quantity,0)!==sourceQty) {
+              issues.push({code:"COST_CONTRIBUTION_INTERVAL_MISSING",message:`Contribution ${edge.id} has no complete quantity-cost allocation.`}); break;
+            }
+            validateCostQuantityIntervals(intervals,parent.qtyReceived);
+            const totals = lotCostTotals(parent.source).totals;
+            const existingTotal = source.component==="product" ? totals.poMills : source.component==="packaging" ? totals.packagingMills : totals.landedMills;
+            inputTotal += costForQuantityIntervals(parentProjection ? BigInt(parentProjection.allocatedMills) : existingTotal,parent.qtyReceived,intervals);
+          } else {
+            const parentCost = parentProjection?.unitMills ?? costInteger(parent.source[componentColumn[source.component]], "parentCost");
+            inputTotal += BigInt(parentCost) * BigInt(sourceQty);
+          }
         }
         if (issues.length > 0) break;
         const lot = lots.get(id)!;
@@ -153,18 +185,24 @@ export async function applyCostRevision(
         }
         pending.delete(id); advanced = true;
       }
-      if (!advanced) issues.push({ code: "COST_GRAPH_INCOMPLETE", message: "The cost contribution graph is cyclic or missing a parent." });
+      if (!advanced && issues.length === 0) issues.push({ code: "COST_GRAPH_INCOMPLETE", message: "The cost contribution graph is cyclic or missing a parent." });
     }
   }
   const targets = [...projections.values()].sort((a,b) => a.lot.id-b.lot.id);
-  if (targets.some((target) => target.remainderMills !== 0)) {
+  if (!writer.revalueExactComponent && targets.some((target) => target.remainderMills !== 0)) {
     issues.push({ code: "COST_UNIFORM_LOT_RESIDUAL_REVIEW", message: "This source cannot be represented exactly by the existing uniform lot cost. Its exact remainder is preserved for review; no partial revaluation was posted." });
   }
-  const identity = { sourceRevisionId: revision.id, lotIds, graph: edgeResult.rows, issues,
-    targets: targets.map((target) => ({ id: target.lot.id, unitMills: target.unitMills, remainderMills: target.remainderMills })) };
+  const identity = { costAllocationVersion: writer.revalueExactComponent ? 2 : 1, sourceRevisionId: revision.id, lotIds, graph: edgeResult.rows, issues,
+    targets: targets.map((target) => ({ id: target.lot.id, unitMills: target.unitMills, remainderMills: target.remainderMills,
+      allocatedMills: target.allocatedMills, quantity: target.quantity })) };
   const planFingerprint = costFingerprint(identity);
   const replay = await tx.execute(sql`SELECT id,status,evidence FROM inventory.cost_applications WHERE source_revision_id = ${revision.id} ORDER BY id DESC LIMIT 1`);
-  const currentComponentsMatch = targets.every((target) => Number(target.lot.source[componentColumn[source.component]]) === target.unitMills);
+  const currentComponentsMatch = targets.every((target) => {
+    if (!writer.revalueExactComponent) return Number(target.lot.source[componentColumn[source.component]]) === target.unitMills;
+    if (!hasExactLotCostTotals(target.lot.source)) return false;
+    const totals = lotCostTotals(target.lot.source).totals;
+    return (source.component==="product" ? totals.poMills : source.component==="packaging" ? totals.packagingMills : totals.landedMills) === BigInt(target.allocatedMills);
+  });
   if (replay.rows[0]?.evidence.planFingerprint === planFingerprint && (issues.length > 0 || currentComponentsMatch)) {
     return { ...replay.rows[0].evidence.result, applicationId: costInteger(replay.rows[0].id, "applicationId", 1), replayed: true };
   }
@@ -174,10 +212,18 @@ export async function applyCostRevision(
   if (issues.length === 0) {
     for (const target of targets) {
       const { lot } = target;
-      const before = { productMills: lot.productMills, packagingMills: lot.packagingMills, landedMills: lot.landedMills };
-      const after = replaceCostComponent({ current: before, component: source.component, unitMills: target.unitMills });
+      const previousTotals = writer.revalueExactComponent ? lotCostTotals(lot.source) : null;
+      const before = { productMills: lot.productMills, packagingMills: lot.packagingMills, landedMills: lot.landedMills,
+        ...(previousTotals ? { basisQuantity:previousTotals.basisQuantity,
+          extendedTotals:Object.fromEntries(Object.entries(previousTotals.totals).map(([key,value])=>[key,value.toString()])) } : {}),
+      };
+      const after = replaceCostComponent({ current: {
+        productMills:lot.productMills, packagingMills:lot.packagingMills, landedMills:lot.landedMills,
+      }, component: source.component, unitMills: target.unitMills });
       if (after.totalMills < 0) throw new CostEvidenceError("COST_NEGATIVE_LOT", "The current lot owner cannot represent a negative total.", { lotId: lot.id });
-      const revalue = await writer.revalueComponent(lot.id, source.component, target.unitMills, `source_revision:${revision.id}`, tx);
+      const revalue = writer.revalueExactComponent
+        ? await writer.revalueExactComponent(lot.id,source.component,target.allocatedMills,target.quantity,`source_revision:${revision.id}`,actorId,tx,now)
+        : await writer.revalueComponent(lot.id, source.component, target.unitMills, `source_revision:${revision.id}`, tx);
       if (!revalue) throw new CostEvidenceError("COST_LOT_DISAPPEARED", "A locked cost application lot was not updated.", { lotId: lot.id });
       result.lotsUpdated++;
       result.cogsRowsUpdated = costInteger((BigInt(result.cogsRowsUpdated) + BigInt(costInteger(revalue.cogsRowsUpdated, "cogsRowsUpdated"))).toString(), "cogsRowsUpdated");

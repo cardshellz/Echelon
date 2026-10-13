@@ -1022,6 +1022,16 @@ function listingSettingValueChecks(prefix: string, table: ListingSettingValueTab
  * Append-only ledger of keyed many-products listing setting requests
  * (migration 0738): one row per vendor and request key, so a retried request
  * is answered from its first outcome. A trigger refuses UPDATE and DELETE.
+ *
+ * Migration 0750 adds W7's `price_change_apply` to the operation CHECK, the
+ * `review_id` column, its pairing CHECK, its foreign key to the pricing
+ * reviews and its one-apply-per-review index. None of that is declared here
+ * (PR 9 plan 9.12 #6: no Drizzle `review_id`; only the apply-only insert and
+ * the by-review read name it), so this declaration is 0738's. A forced
+ * `drizzle-kit push` (scripts/release.sh with RUN_DRIZZLE_PUSH_ON_RELEASE=true,
+ * off by default) would likely narrow the live CHECK back to 0738's three
+ * operations and drop 0750's column, constraints and index (risk R12;
+ * drizzle-kit's exact behavior is not shown in this repository).
  */
 export const dropshipProductListingSettingRequests = dropshipSchema.table("dropship_product_listing_setting_requests", {
   id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
@@ -1041,6 +1051,7 @@ export const dropshipProductListingSettingRequests = dropshipSchema.table("drops
   unique("dropship_product_listing_setting_requests_identity_uk").on(table.id, table.vendorId, table.storeConnectionId),
   uniqueIndex("dropship_product_listing_setting_requests_key_idx").on(table.vendorId, table.idempotencyKey),
   index("dropship_product_listing_setting_requests_store_idx").on(table.storeConnectionId, table.createdAt),
+  // 0738's three operations on purpose: the live CHECK is 0750's four (see the table's comment).
   check("dropship_product_listing_setting_requests_operation_chk",
     sql`${table.operation} IN ('product_settings_bulk', 'category_settings_clear', 'category_moves_acknowledge')`),
   check("dropship_product_listing_setting_requests_count_chk", sql`${table.productCount} BETWEEN 0 AND 10000`),

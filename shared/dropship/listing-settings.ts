@@ -2,7 +2,9 @@ import { z } from "zod";
 import { MAX_NAMED_CATALOG_GROUP_ITEMS } from "./catalog-scope";
 import { ebayCategoryIdSchema } from "./ebay-category-rules";
 import { DROPSHIP_LISTING_ACCESS_BLOCK_CODES, DROPSHIP_LISTING_ACCESS_RESOLUTIONS } from "./listing-access";
+import { MAX_TEMPLATE_TEXT_LENGTH } from "./listing-content";
 import { RULE_PRICE_OUTSIDE_LIMIT_ISSUE, listingAmountCentsSchema, listingPriceBasisSchema, listingPriceCentsSchema } from "./listing-price";
+import { CATEGORY_LISTING_SETTING_FIELDS } from "./listing-setting-values";
 import { pricingRecipeSchema } from "./pricing-rules";
 
 /**
@@ -10,10 +12,11 @@ import { pricingRecipeSchema } from "./pricing-rules";
  * a summary, every chosen size's price, one row per chosen product, and one
  * product's settings in full.
  *
- * They read today's settings only: the store defaults and the values left on
- * single sizes by the current step 2 panels. Category settings, product
- * values and "moved by Card Shellz" join in later PRs. No view calls eBay, so
- * a saved policy is reported by id with `verification: "not_checked"`.
+ * They read the store defaults, the values left on single sizes by the
+ * current step 2 panels, and the product and Card Shellz category settings;
+ * each category's own settings have their own views (PR 9e). "Moved by Card
+ * Shellz" joins in a later PR. No view calls eBay, so a saved policy is
+ * reported by id with `verification: "not_checked"`.
  */
 
 export const LISTING_SETTINGS_PAGE_SIZE = 50;
@@ -415,6 +418,132 @@ export const listingSettingsSummarySchema = z.object({
   generatedAt: z.string().datetime(),
 }).strict();
 
+// ---------------------------------------------------------------------------
+// Card Shellz categories (GET …/categories, GET …/categories/:categoryId)
+// ---------------------------------------------------------------------------
+
+/** One Card Shellz category of the store's chosen products (catalog.product_categories.id). */
+export const listingSettingsCategoryInputSchema = z.object({ storeConnectionId: id, categoryId: id }).strict();
+/** A category's detail names at most this many of its sizes' prices, as examples. */
+export const MAX_LISTING_SETTINGS_CATEGORY_EXAMPLES = 3;
+
+/** A category's own settings, each once, in the stored shape's order (CATEGORY_LISTING_SETTING_FIELDS). */
+const categoryFields = z.array(z.enum(CATEGORY_LISTING_SETTING_FIELDS))
+  .refine((fields) => new Set(fields).size === fields.length, "Each setting once.");
+
+/**
+ * Every Card Shellz category that holds at least one of the store's chosen
+ * products, sorted by its current name, then id. `setFields`: the settings
+ * the category has its own value for, in the stored shape's order.
+ * `revisionId` is the category's settings revision (null when it has none),
+ * which a category save sends back.
+ */
+export const listingSettingsCategoriesResponseSchema = z.object({
+  storeConnectionId: id,
+  categories: z.array(z.object({
+    categoryId: id,
+    /** The category's current Card Shellz name. */
+    name: z.string().min(1),
+    /** The store's chosen products in this category. */
+    productCount: z.number().int().positive(),
+    revisionId: id.nullable(),
+    setFields: categoryFields,
+  }).strict()).max(MAX_NAMED_CATALOG_GROUP_ITEMS),
+  /** Chosen products with no Card Shellz category: they follow the store defaults. */
+  uncategorizedProductCount: count,
+  generatedAt: z.string().datetime(),
+}).strict().superRefine((response, context) => {
+  if (new Set(response.categories.map((category) => category.categoryId)).size !== response.categories.length) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "Each category once.", path: ["categories"] });
+  }
+  response.categories.forEach((category, index) => {
+    if (category.revisionId === null && category.setFields.length > 0) {
+      context.addIssue({ code: z.ZodIssueCode.custom, message: "A category with no settings row sets nothing.", path: ["categories", index] });
+    }
+  });
+});
+
+/**
+ * Where a category's setting comes from: `category` its own value, else
+ * `store_default` the store's, else `none`. A value is given exactly when one
+ * applies. Older group rules are not named: while a store holds any, its
+ * category saves are refused until they are converted (plan P21).
+ */
+export const LISTING_SETTINGS_CATEGORY_SETTING_SOURCES = ["category", "store_default", "none"] as const;
+const sourced = <T extends z.ZodTypeAny>(value: T) => z.object({
+  source: z.enum(LISTING_SETTINGS_CATEGORY_SETTING_SOURCES),
+  value: value.nullable(),
+}).strict().refine((setting) => (setting.source === "none") === (setting.value === null), "A value is given exactly when one applies.");
+
+/** An eBay category by its number, with the name eBay gave it. */
+const categoryEbayCategorySchema = z.object({ categoryId: ebayCategoryIdSchema, categoryName: z.string().min(1) }).strict();
+/** `none`: explicitly no shelf. `own`: the first shelf, then the second, each by id with its path (the store default's included). */
+const categoryStoreShelfSchema = z.discriminatedUnion("mode", [
+  z.object({ mode: z.literal("none") }).strict(),
+  z.object({ mode: z.literal("own"), shelves: z.array(z.object({ id: z.string().min(1), name: z.string().min(1) }).strict()).min(1).max(2) }).strict(),
+]);
+/**
+ * A policy by id, with the name the category's row stores. A store default
+ * comes with its id only (name null), as the summary's storeDefaults name it:
+ * these views do not read the listing config's stored policy names.
+ */
+const categoryPolicySchema = z.object({ id: z.string().min(1), name: z.string().min(1).nullable() }).strict();
+/** Text above or below the main text: `none`, or the text itself. */
+const categoryTemplateTextSchema = z.discriminatedUnion("mode", [
+  z.object({ mode: z.literal("none") }).strict(),
+  z.object({ mode: z.literal("own"), text: z.string().min(1).max(MAX_TEMPLATE_TEXT_LENGTH) }).strict(),
+]);
+
+export const listingSettingsCategorySettingsSchema = z.object({
+  price: sourced(pricingRecipeSchema),
+  ebayCategory: sourced(categoryEbayCategorySchema),
+  storeShelf: sourced(categoryStoreShelfSchema),
+  shippingPolicy: sourced(categoryPolicySchema),
+  returnPolicy: sourced(categoryPolicySchema),
+  paymentPolicy: sourced(categoryPolicySchema),
+  textAbove: sourced(categoryTemplateTextSchema),
+  textBelow: sourced(categoryTemplateTextSchema),
+}).strict();
+
+/**
+ * One category's settings in full, for its editor: each setting with where it
+ * comes from, the chosen products that hold their own value for one (each
+ * with its settings revision, which "Also clear theirs" sends back), and up to
+ * three of its sizes' prices as examples.
+ */
+export const listingSettingsCategoryDetailSchema = z.object({
+  storeConnectionId: id,
+  categoryId: id,
+  name: z.string().min(1),
+  productCount: z.number().int().positive(),
+  revisionId: id.nullable(),
+  settings: listingSettingsCategorySettingsSchema,
+  /**
+   * Chosen products in this category with their own value for a category setting (a size's leftover counts for policies
+   * and the shelf). "Also clear theirs" sends exactly the entries whose `fields` include a cleared setting: the server
+   * derives that set and answers 409 for any other (an entry whose only own value is the price is never in it, since a
+   * clear cannot name the price, plan P34).
+   */
+  ownValues: z.array(z.object({
+    productId: id,
+    /** The product's own settings revision; null when it has none (its own value is a size's leftover). */
+    revisionId: id.nullable(),
+    fields: categoryFields.refine((fields) => fields.length > 0, "At least one setting."),
+  }).strict()).max(MAX_NAMED_CATALOG_GROUP_ITEMS),
+  examples: z.array(listingSettingsSizePriceSchema).max(MAX_LISTING_SETTINGS_CATEGORY_EXAMPLES),
+  generatedAt: z.string().datetime(),
+}).strict().superRefine((detail, context) => {
+  if (detail.revisionId === null && Object.values(detail.settings).some((setting) => setting.source === "category")) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "A category with no settings row has no value of its own.", path: ["settings"] });
+  }
+  if (new Set(detail.ownValues.map((entry) => entry.productId)).size !== detail.ownValues.length) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "Each product once.", path: ["ownValues"] });
+  }
+  if (detail.ownValues.length > detail.productCount) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "More products hold own values than the category has.", path: ["ownValues"] });
+  }
+});
+
 export type ListingSettingsProductsInput = z.infer<typeof listingSettingsProductsInputSchema>;
 export type ListingSettingsProductIdsInput = z.infer<typeof listingSettingsProductIdsInputSchema>;
 export type ListingSettingsProductIdsResponse = z.infer<typeof listingSettingsProductIdsResponseSchema>;
@@ -444,3 +573,8 @@ export type ListingSettingsProductSettings = z.infer<typeof listingSettingsProdu
 export type ListingSettingsSettingKey = keyof ListingSettingsProductSettings;
 export type ListingSettingsProductSize = z.infer<typeof listingSettingsProductSizeSchema>;
 export type ListingSettingsProductDetail = z.infer<typeof listingSettingsProductDetailSchema>;
+export type ListingSettingsCategoryInput = z.infer<typeof listingSettingsCategoryInputSchema>;
+export type ListingSettingsCategoriesResponse = z.infer<typeof listingSettingsCategoriesResponseSchema>;
+export type ListingSettingsCategorySettingSource = (typeof LISTING_SETTINGS_CATEGORY_SETTING_SOURCES)[number];
+export type ListingSettingsCategorySettings = z.infer<typeof listingSettingsCategorySettingsSchema>;
+export type ListingSettingsCategoryDetail = z.infer<typeof listingSettingsCategoryDetailSchema>;

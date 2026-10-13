@@ -1,6 +1,9 @@
 import { lotCostNeedsReview } from "../domain/lot-cost";
 import { lockInventoryCostGraph, recordLotCostContribution } from "./cost-evidence.repository";
+import { allocateLotQuantityCost, mergeLotQuantityCostReferences, readLotCostAllocation, reverseLotQuantityCost } from "./cost-quantity.repository";
+import { hasExactLotCostTotals } from "../domain/lot-cost";
 import { sql } from "drizzle-orm";
+import { z } from "zod";
 import { openOperationalQuantityPosting } from "./operational-quantity-posting";
 import {
   allocateBuildCostLayers,
@@ -117,12 +120,14 @@ function emptyCost(): CostAccumulator {
   };
 }
 
-function addCost(total: CostAccumulator, unit: NormalizedLotCosts, qty: number): void {
+function addCost(total: CostAccumulator, unit: NormalizedLotCosts, qty: number): CostAccumulator {
   const multiplier = BigInt(qty);
-  total.poMills += unit.poMills * multiplier;
-  total.packagingMills += unit.packagingMills * multiplier;
-  total.landedMills += unit.landedMills * multiplier;
-  total.totalMills += unit.totalMills * multiplier;
+  return {
+    poMills: total.poMills + unit.poMills * multiplier,
+    packagingMills: total.packagingMills + unit.packagingMills * multiplier,
+    landedMills: total.landedMills + unit.landedMills * multiplier,
+    totalMills: total.totalMills + unit.totalMills * multiplier,
+  };
 }
 
 function asInteger(value: unknown, field: string): number {
@@ -862,8 +867,9 @@ export class BuildExecutionRepository {
       RETURNING *
     `);
     const run = runResult.rows[0];
-    const consumedCost = emptyCost();
+    let consumedCost = emptyCost();
     const sourceQuantities = new Map<number, number>();
+    const sourceCostAllocationIds=new Map<number,number[]>();
     let outputCostProvisional = 0;
     // Reuse the durable run timestamp; do not sample a second application clock.
     if (!(run.created_at instanceof Date) && typeof run.created_at !== "string") {
@@ -931,7 +937,9 @@ export class BuildExecutionRepository {
                lot.total_unit_cost_mills,
                lot.po_unit_cost_mills,
                lot.packaging_cost_mills,
-               lot.landed_cost_mills
+               lot.landed_cost_mills,lot.cost_precision_version,lot.cost_provisional,lot.cost_source,
+               lot.qty_received,lot.cost_basis_qty,lot.product_total_cost_mills,
+               lot.packaging_total_cost_mills,lot.landed_total_cost_mills
         FROM inventory.build_component_reservations reservation
         JOIN inventory.inventory_lots lot ON lot.id = reservation.inventory_lot_id
         WHERE reservation.build_order_component_id = ${componentId}
@@ -966,8 +974,14 @@ export class BuildExecutionRepository {
 
         const costs = this.dependencies.normalizeBuildLotCosts(reservation);
         if (lotCostNeedsReview(reservation)) outputCostProvisional = 1;
-        addCost(consumedCost, costs, take);
+        const exactAllocation=hasExactLotCostTotals(reservation)
+          ? await allocateLotQuantityCost(tx,asInteger(reservation.id,"sourceLot.id"),take,lineageActor,lineageRecordedAt,
+            {buildRunId:run.id,componentId},`build_consumption:${run.id}:${componentId}:${reservation.id}`) : null;
+        // Exact amounts are already extended. Uniform compatibility prices
+        // retain their existing quantity multiplier until a source is applied.
+        consumedCost = addCost(consumedCost,exactAllocation?.costs??costs,exactAllocation?1:take);
         const sourceLotId = asInteger(reservation.id, "sourceLot.id");
+        if (exactAllocation?.id) sourceCostAllocationIds.set(sourceLotId,[...(sourceCostAllocationIds.get(sourceLotId)??[]),exactAllocation.id]);
         sourceQuantities.set(sourceLotId, (sourceQuantities.get(sourceLotId) ?? 0) + take);
         await tx.execute(sql`
           INSERT INTO inventory.build_run_consumptions
@@ -1076,6 +1090,11 @@ export class BuildExecutionRepository {
       WHERE id = ${outputLevel.id}
     `);
 
+    const sourceReferences=new Map<number,number|null>();
+    for (const [sourceLotId, ids] of sourceCostAllocationIds) {
+      const reference=await mergeLotQuantityCostReferences(tx,ids,lineageActor,lineageRecordedAt,`build_source:${run.id}:${sourceLotId}`);
+      sourceReferences.set(sourceLotId,reference.id);
+    }
     let outputCostOffset = 0;
     for (let index = 0; index < outputLayers.length; index += 1) {
       const layer = outputLayers[index];
@@ -1126,6 +1145,7 @@ export class BuildExecutionRepository {
           sourceLotId,
           outputLotId: asInteger(outputLot.rows[0].id, "outputLot.id"),
           sourceQty,
+          costQuantityAllocationId:sourceReferences.get(sourceLotId),
           outputQty: quantities.outputQty,
           outputStartQty: outputCostOffset,
           operationKind: "build",
@@ -1366,7 +1386,7 @@ export class BuildExecutionRepository {
   async reverseRun(input: ReverseBuildRunInput): Promise<BuildReversalResult> {
     return this.db.transaction(async (tx) => {
       const quantityPosting = await openOperationalQuantityPosting(tx);
-      if (quantityPosting) await lockInventoryCostGraph(tx);
+      await lockInventoryCostGraph(tx);
       await this.assertClaimBuildActionAvailable(tx, input.buildOrderId, "reverse");
       const authorization = await this.validateRetainedAuthorizationIfPresent(tx, input.buildOrderId);
       const order = await this.lockOrder(tx, input.buildOrderId);
@@ -1514,7 +1534,7 @@ export class BuildExecutionRepository {
       const consumptions = await tx.execute(sql`
         SELECT consumption.*, component.component_variant_id, component.source_location_id,
                reservation.id AS reservation_id, reservation.consumed_qty AS reservation_consumed_qty,
-               lot.qty_consumed AS lot_consumed_qty
+               lot.qty_consumed AS lot_consumed_qty,lot.cost_basis_qty AS source_cost_basis_qty
         FROM inventory.build_run_consumptions consumption
         JOIN inventory.build_order_components component
           ON component.id = consumption.build_order_component_id
@@ -1528,6 +1548,7 @@ export class BuildExecutionRepository {
       `);
       let restoredComponentQty = 0;
       const restoredByComponent = new Map<number, number>();
+      const releasedCostAllocations=new Set<number>();
       for (const consumption of consumptions.rows) {
         const qty = Number(consumption.qty);
         if (
@@ -1542,6 +1563,27 @@ export class BuildExecutionRepository {
               inventoryLotId: Number(consumption.inventory_lot_id),
             },
           );
+        }
+        if (consumption.source_cost_basis_qty!=null) {
+          const references=await tx.execute(sql`SELECT DISTINCT mapping.allocation_id
+            FROM inventory.lot_cost_contribution_allocations mapping
+            JOIN inventory.lot_cost_contributions edge ON edge.id=mapping.contribution_id
+            WHERE edge.source_lot_id=${consumption.inventory_lot_id} AND edge.operation_key=${`build_run:${input.buildRunId}`}`);
+          if (references.rows.length===0) throw new BuildDomainError("BUILD_REVERSAL_COST_SOURCE_MISSING","Exact build consumption has no recorded source-cost intervals.");
+          for (const reference of references.rows) {
+            const allocation=await readLotCostAllocation(tx,asInteger(reference.allocation_id,"allocationId"));
+            const ids=allocation.direction===1?[allocation.id]:
+              allocation.source_evidence.sourceAllocationId==null
+                ? z.array(z.number().int().positive().safe()).parse(allocation.source_evidence.sourceAllocationIds)
+                : [asInteger(allocation.source_evidence.sourceAllocationId,"sourceAllocationId")];
+            for (const id of ids) {
+              if (releasedCostAllocations.has(id)) continue;
+              const source=await readLotCostAllocation(tx,id);
+              await reverseLotQuantityCost(tx,id,source.quantity,input.actorId || "system:build_execution",new Date(reversal.created_at),
+                `build_reversal_cost:${reversal.id}:${id}`);
+              releasedCostAllocations.add(id);
+            }
+          }
         }
         const levelResult = await tx.execute(sql`
           SELECT id, variant_qty, reserved_qty

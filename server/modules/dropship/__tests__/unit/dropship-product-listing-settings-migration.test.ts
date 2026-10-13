@@ -57,10 +57,13 @@ const VALUE_MODES = ["none", "own"] as const;
 const REQUEST_KEY_PATTERN = "^[A-Za-z0-9:_-]{8,200}$";
 const REQUEST_HASH_PATTERN = "^[a-f0-9]{64}$";
 type Exact<A, B> = [A] extends [B] ? ([B] extends [A] ? true : false) : false;
-const operationsMatchTheContract: Exact<typeof REQUEST_OPERATIONS[number], ListingSettingRequestOperation> = true;
-// The bulk writer takes two operations and the acknowledge writer the third; together they are the ledger's.
+/** W7's apply, which migration 0750 adds to the operation CHECK (pinned by that migration's own test). */
+const PRICE_CHANGE_APPLY = "price_change_apply";
+// 0738's three operations and 0750's apply are the contract's.
+const operationsMatchTheContract: Exact<typeof REQUEST_OPERATIONS[number] | typeof PRICE_CHANGE_APPLY, ListingSettingRequestOperation> = true;
+// The bulk writer takes two of 0738's operations and W7's apply, and the acknowledge writer the third; together they are the ledger's.
 const operationsMatchTheWriters: Exact<
-  typeof REQUEST_OPERATIONS[number], ProductListingSettingsBulkInput["operation"] | "category_moves_acknowledge"
+  typeof REQUEST_OPERATIONS[number] | typeof PRICE_CHANGE_APPLY, ProductListingSettingsBulkInput["operation"] | "category_moves_acknowledge"
 > = true;
 const actorTypesMatchTheContract: Exact<typeof ACTOR_TYPES[number], ListingSettingActorType> = true;
 const actorTypesMatchThePort: Exact<typeof ACTOR_TYPES[number], ListingSettingActor["actorType"]> = true;
@@ -417,7 +420,8 @@ describe("0738 dropship product listing settings migration", () => {
 
   it("matches the shared listing-setting contracts and the writers' column map, value for value and in order", () => {
     // The tuples above are the contracts' runtime values (their types are pinned at compile time).
-    expect([...LISTING_SETTING_REQUEST_OPERATIONS]).toEqual([...REQUEST_OPERATIONS]);
+    // 0738's operations first, in order, then 0750's apply.
+    expect([...LISTING_SETTING_REQUEST_OPERATIONS]).toEqual([...REQUEST_OPERATIONS, PRICE_CHANGE_APPLY]);
     expect([...LISTING_SETTING_ACTOR_TYPES]).toEqual([...ACTOR_TYPES]);
     expect(LISTING_SETTING_KEY_PATTERN.source).toBe(REQUEST_KEY_PATTERN);
     expect(LISTING_SETTING_KEY_PATTERN.flags).toBe("");

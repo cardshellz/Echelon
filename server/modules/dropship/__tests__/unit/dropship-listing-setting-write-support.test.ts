@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, expectTypeOf, it, vi } from "vitest";
 import { z, ZodError } from "zod";
 import type { DropshipListingStoreContext } from "../../application/dropship-listing-preview-service";
 import {
@@ -14,6 +14,7 @@ import {
   listingSettingKeyConflict,
   listingSettingPricesMoved,
   listingSettingRequestKeyChanged,
+  listingSettingOlderRulesPresent,
   listingSettingStoreIdSchema,
   listingSettingStoreTextLimit,
   listingSettingWriteHash,
@@ -21,7 +22,9 @@ import {
   parseListingSettingInput,
   requestKeyUsePath,
   type ChosenSizeReader,
+  type PricingCatalogCandidate,
 } from "../../application/dropship-listing-setting-write-support";
+import type { ListingPriceChangeSize } from "../../application/dropship-listing-price-change-builder";
 import type { DropshipListingCatalogCandidate } from "../../application/dropship-listing-preview-service";
 import type { ListingSettingWriteTransaction } from "../../application/dropship-listing-setting-writes";
 import { DropshipError } from "../../domain/errors";
@@ -214,7 +217,124 @@ describe("loadChosenSizes (plan PR 9, P12, 6.2 #5)", () => {
   it("reads nothing for no sizes", async () => {
     const none = reader({ sizes: [] });
     await expect(loadChosenSizes(none.tx, [], NOW)).resolves.toEqual([]);
+    await expect(loadChosenSizes(none.tx, [], NOW, { keepCandidates: false, firstOnly: true })).resolves.toEqual([]);
     expect(none.calls).toEqual([]);
+  });
+
+  it("keeps ids only with keepCandidates false: the same sizes, in the same batches, no candidate kept (v3r, C-money-8)", async () => {
+    const sizes = Array.from({ length: 600 }, (_, index) => 1_000 + index);
+    const full = reader({ sizes, hidden: [1_001], disabled: [1_002] });
+    const idsOnly = reader({ sizes, hidden: [1_001], disabled: [1_002] });
+
+    const withCandidates = await loadChosenSizes(full.tx, sizes, NOW);
+    const chosen = await loadChosenSizes(idsOnly.tx, Object.freeze([...sizes].reverse()), NOW, { keepCandidates: false });
+
+    expect(chosen).toEqual(withCandidates.map(({ productVariantId, productId }) => ({ productVariantId, productId })));
+    expect(chosen).toHaveLength(598);
+    expect(chosen.every((size) => !("candidate" in size))).toBe(true);
+    expect(idsOnly.calls).toEqual(full.calls);
+  });
+
+  it("stops after the first batch that holds a chosen size with firstOnly, and reads on past batches with none", async () => {
+    const sizes = Array.from({ length: 600 }, (_, index) => 1_000 + index);
+    // Nothing in the first batch is chosen (hidden by Card Shellz), so the second batch is read, and the third is not.
+    const { tx, calls } = reader({ sizes, hidden: sizes.slice(0, 250) });
+
+    const chosen = await loadChosenSizes(tx, sizes, NOW, { keepCandidates: false, firstOnly: true });
+
+    expect(chosen.map((size) => size.productVariantId)).toEqual(sizes.slice(250, 500));
+    expect(calls).toEqual(["exposureRules", "selectionRules", "candidates:250", "overrides:250", "candidates:250", "overrides:250"]);
+    // Without firstOnly every batch is read.
+    const every = reader({ sizes, hidden: sizes.slice(0, 250) });
+    await expect(loadChosenSizes(every.tx, sizes, NOW, { keepCandidates: false })).resolves.toHaveLength(350);
+    expect(every.calls.filter((call) => call.startsWith("candidates:"))).toHaveLength(3);
+  });
+
+  it("keeps each candidate without its description, item specifics and image URLs in the pricing mode (W7; v2, C-money-12)", async () => {
+    const sizes = Array.from({ length: 600 }, (_, index) => 1_000 + index);
+    const full = reader({ sizes, hidden: [1_001], disabled: [1_002] });
+    const pricing = reader({ sizes, hidden: [1_001], disabled: [1_002] });
+
+    const withCandidates = await loadChosenSizes(full.tx, sizes, NOW);
+    // A bound the 598 chosen sizes stay within: every batch is read.
+    const chosen = await loadChosenSizes(pricing.tx, Object.freeze([...sizes].reverse()), NOW, { keepCandidates: "pricing", stopAbove: 598 });
+
+    // The same sizes, in the same batches and order, each with every other field of its candidate.
+    expect(pricing.calls).toEqual(full.calls);
+    expect(chosen).toHaveLength(598);
+    expect(chosen).toEqual(withCandidates.map(({ productVariantId, productId, candidate: whole }) => {
+      const { description: _description, itemSpecifics: _itemSpecifics, imageUrls: _imageUrls, ...kept } = whole;
+      return { productVariantId, productId, candidate: kept };
+    }));
+    for (const size of chosen) {
+      for (const content of ["description", "itemSpecifics", "imageUrls"]) expect(size.candidate).not.toHaveProperty(content);
+    }
+    // A pricing candidate is what the price-change builder prices (plan 6.4), so W7 passes it as it is.
+    expectTypeOf<PricingCatalogCandidate>().toMatchTypeOf<ListingPriceChangeSize["candidate"]>();
+    // Everything a price, a limit or a review row reads is kept.
+    expect(chosen[0].candidate).toMatchObject({ productVariantId: 1_000, productId: 7, categoryId: 3, category: "Toploaders",
+      productLineIds: [], defaultRetailPriceCents: 1_199, title: "Toploader", sku: "S-1000", variantName: "Pack", unitsPerVariant: 25 });
+  });
+
+  it("stops at the first chosen size over stopAbove in the pricing mode: no later batch is read, nothing past it is kept", async () => {
+    const sizes = Array.from({ length: 900 }, (_, index) => 1_000 + index);
+    // Two hidden sizes in the first batch do not count toward the bound.
+    const { tx, calls } = reader({ sizes, hidden: [1_001, 1_002] });
+
+    const chosen = await loadChosenSizes(tx, sizes, NOW, { keepCandidates: "pricing", stopAbove: 300 });
+
+    // The 301st chosen size is 1,302 (the batch of 250..499); the third and fourth batches are never read.
+    expect(chosen).toHaveLength(301);
+    expect(chosen.at(-1)?.productVariantId).toBe(1_302);
+    expect(chosen.map((size) => size.productVariantId)).toEqual(sizes.filter((id) => id !== 1_001 && id !== 1_002).slice(0, 301));
+    expect(calls).toEqual(["exposureRules", "selectionRules", "candidates:250", "overrides:250", "candidates:250", "overrides:250"]);
+  });
+
+  it("reads every batch in the pricing mode when the chosen sizes are exactly stopAbove, and keeps them all", async () => {
+    const sizes = Array.from({ length: 600 }, (_, index) => 1_000 + index);
+    const { tx, calls } = reader({ sizes, disabled: [1_599] });
+
+    const chosen = await loadChosenSizes(tx, sizes, NOW, { keepCandidates: "pricing", stopAbove: 599 });
+
+    expect(chosen).toHaveLength(599);
+    expect(calls.filter((call) => call.startsWith("candidates:"))).toEqual(["candidates:250", "candidates:250", "candidates:100"]);
+    // One more chosen size is over the bound: the same batches are read, and the one over it is the last kept.
+    const over = reader({ sizes });
+    const refused = await loadChosenSizes(over.tx, sizes, NOW, { keepCandidates: "pricing", stopAbove: 599 });
+    expect(refused).toHaveLength(600);
+    expect(over.calls).toEqual(calls);
+  });
+
+  it("leaves the reader's candidates as they were in the pricing mode", async () => {
+    const kept = candidate(101);
+    const frozen = Object.freeze({ ...kept, itemSpecifics: Object.freeze({ ...kept.itemSpecifics }), imageUrls: Object.freeze([...kept.imageUrls]) });
+    const catalog = {
+      listCatalogExposureRules: async () => [{ id: 1, scopeType: "catalog", action: "include" }],
+      listSelectionRules: async () => [{ id: 2, scopeType: "catalog", action: "include", isActive: true }],
+      listCatalogCandidates: async () => [frozen],
+      listVariantOverrides: async () => [],
+    };
+    const chosen = await loadChosenSizes({ vendorId: VENDOR, catalog } as unknown as ChosenSizeReader, [101], NOW,
+      { keepCandidates: "pricing", stopAbove: 10_000 });
+    expect(chosen).toHaveLength(1);
+    expect(frozen).toEqual(kept);
+    expect(chosen[0].candidate).not.toBe(frozen);
+  });
+
+  it("reads every batch with firstOnly when no size is chosen at all", async () => {
+    const sizes = Array.from({ length: 300 }, (_, index) => 1_000 + index);
+    const { tx, calls } = reader({ sizes, disabled: sizes });
+    await expect(loadChosenSizes(tx, sizes, NOW, { keepCandidates: false, firstOnly: true })).resolves.toEqual([]);
+    expect(calls.filter((call) => call.startsWith("candidates:"))).toEqual(["candidates:250", "candidates:50"]);
+  });
+});
+
+describe("the 9e refusal (plan P21, 8.7)", () => {
+  it("builds OLDER_RULES_PRESENT with the three counts, permanent", () => {
+    const error = listingSettingOlderRulesPresent(STORE, { pricingGroups: 2, contentGroups: 0, ebayCategoryRules: 1 });
+    expect(error.code).toBe("DROPSHIP_LISTING_SETTINGS_OLDER_RULES_PRESENT");
+    expect(error.context).toEqual({ storeConnectionId: STORE, pricingGroups: 2, contentGroups: 0, ebayCategoryRules: 1,
+      retryable: false, classification: "permanent" });
   });
 });
 

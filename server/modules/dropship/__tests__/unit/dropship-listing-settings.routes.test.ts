@@ -4,11 +4,14 @@ import express, { type Request } from "express";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   LISTING_SETTINGS_PAGE_SIZE,
+  listingSettingsCategoryInputSchema,
   listingSettingsPricesInputSchema,
   listingSettingsProductIdsInputSchema,
   listingSettingsProductInputSchema,
   listingSettingsProductsInputSchema,
   listingSettingsStoreInputSchema,
+  type ListingSettingsCategoriesResponse,
+  type ListingSettingsCategoryDetail,
   type ListingSettingsPricesResponse,
   type ListingSettingsProductDetail,
   type ListingSettingsProductsResponse,
@@ -72,6 +75,23 @@ const productDetail: ListingSettingsProductDetail = {
   generatedAt: GENERATED_AT,
 };
 
+const categoriesList: ListingSettingsCategoriesResponse = {
+  storeConnectionId: 22,
+  categories: [{ categoryId: 3, name: "Toploaders", productCount: 2, revisionId: 41, setFields: ["storeShelf"] }],
+  uncategorizedProductCount: 1,
+  generatedAt: GENERATED_AT,
+};
+const none = { source: "none", value: null } as const;
+const categoryDetail: ListingSettingsCategoryDetail = {
+  storeConnectionId: 22, categoryId: 3, name: "Toploaders", productCount: 2, revisionId: 41,
+  settings: { price: none, ebayCategory: none, storeShelf: { source: "category", value: { mode: "none" } },
+    shippingPolicy: { source: "store_default", value: { id: "F1", name: null } }, returnPolicy: none, paymentPolicy: none,
+    textAbove: none, textBelow: none },
+  ownValues: [{ productId: 501, revisionId: 7, fields: ["storeShelf"] }],
+  examples: [productDetail.sizes[0].price],
+  generatedAt: GENERATED_AT,
+};
+
 describe("listing settings HTTP boundary", () => {
   let server: http.Server;
   let base: string;
@@ -83,10 +103,18 @@ describe("listing settings HTTP boundary", () => {
     listingSettingsProductIdsInputSchema.parse(input);
     return { total: 2, rows: [{ productId: 501, revisionId: 7 }, { productId: 502, revisionId: null }] };
   });
+  const listCategoriesForMember = vi.fn(async (_member: string, input: unknown) => {
+    listingSettingsStoreInputSchema.parse(input);
+    return categoriesList;
+  });
+  const getCategoryForMember = vi.fn(async (_member: string, input: unknown) => {
+    listingSettingsCategoryInputSchema.parse(input);
+    return categoryDetail;
+  });
 
   beforeEach(async () => {
     for (const fn of [getSummaryForMember, listPricesForMember, listProductsForMember, getProductForMember, listProductIdsForMember,
-      logged.info, logged.warn, logged.error]) fn.mockClear();
+      listCategoriesForMember, getCategoryForMember, logged.info, logged.warn, logged.error]) fn.mockClear();
     const app = express();
     app.use((req, _res, next) => {
       const memberId = req.header("X-Test-Member");
@@ -94,7 +122,7 @@ describe("listing settings HTTP boundary", () => {
       next();
     });
     registerDropshipListingSettingsRoutes(app, { getSummaryForMember, listPricesForMember, listProductsForMember, getProductForMember,
-      listProductIdsForMember });
+      listProductIdsForMember, listCategoriesForMember, getCategoryForMember });
     server = http.createServer(app);
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
     base = `http://127.0.0.1:${(server.address() as AddressInfo).port}/api/dropship/listings/stores`;
@@ -105,9 +133,12 @@ describe("listing settings HTTP boundary", () => {
     fetch(`${base}${path}`, { headers: member ? { "X-Test-Member": member } : {} });
 
   it.each(["/22/listing-settings/summary", "/22/listing-settings/prices", "/22/listing-settings/products",
-    "/22/listing-settings/products/501", "/22/listing-settings/products/ids"])(
+    "/22/listing-settings/products/501", "/22/listing-settings/products/ids", "/22/listing-settings/categories",
+    "/22/listing-settings/categories/3"])(
     "requires a signed-in member for %s", async (path) => {
       expect((await get(path, null)).status).toBe(401);
+      expect(listCategoriesForMember).not.toHaveBeenCalled();
+      expect(getCategoryForMember).not.toHaveBeenCalled();
       expect(getSummaryForMember).not.toHaveBeenCalled();
       expect(listPricesForMember).not.toHaveBeenCalled();
       expect(listProductsForMember).not.toHaveBeenCalled();
@@ -149,6 +180,45 @@ describe("listing settings HTTP boundary", () => {
     expect((await get("/22/listing-settings/prices?categoryId=5&page=1")).status).toBe(200);
     expect(listPricesForMember).toHaveBeenCalledWith("member-1", { storeConnectionId: 22, search: undefined, show: undefined, page: 1,
       categoryId: 5 });
+  });
+
+  it("lists the categories of the chosen products and gives one category's settings, never cached (plan 8.3)", async () => {
+    const list = await get("/22/listing-settings/categories");
+    expect(list.status).toBe(200);
+    expect(list.headers.get("Cache-Control")).toBe("no-store");
+    expect(await list.json()).toEqual(categoriesList);
+    expect(listCategoriesForMember).toHaveBeenCalledWith("member-1", { storeConnectionId: 22 });
+
+    const one = await get("/22/listing-settings/categories/3");
+    expect(one.status).toBe(200);
+    expect(one.headers.get("Cache-Control")).toBe("no-store");
+    expect(await one.json()).toEqual(categoryDetail);
+    expect(getCategoryForMember).toHaveBeenCalledWith("member-1", { storeConnectionId: 22, categoryId: 3 });
+  });
+
+  it("maps a category with no chosen product to 404, logged with the category, and a selection over 10,000 sizes to 422", async () => {
+    getCategoryForMember.mockRejectedValueOnce(new DropshipError("DROPSHIP_LISTING_SETTINGS_CATEGORY_NOT_FOUND",
+      "None of this category's products is chosen for this store.", { storeConnectionId: 22, categoryId: 9 }));
+    const missing = await get("/22/listing-settings/categories/9");
+    expect(missing.status).toBe(404);
+    expect(await missing.json()).toEqual({ error: { code: "DROPSHIP_LISTING_SETTINGS_CATEGORY_NOT_FOUND",
+      message: "None of this category's products is chosen for this store.", context: { storeConnectionId: 22 } } });
+    expect(logged.info).toHaveBeenCalledWith("dropship.listing_settings.request_refused", expect.objectContaining({
+      error_code: "DROPSHIP_LISTING_SETTINGS_CATEGORY_NOT_FOUND", status: 404, store_connection_id: 22, category_id: 9 }));
+
+    for (const code of ["DROPSHIP_LISTING_SETTINGS_TOO_LARGE", "DROPSHIP_LISTING_SETTINGS_EBAY_ONLY"]) {
+      listCategoriesForMember.mockRejectedValueOnce(new DropshipError(code, "Controlled refusal.", { storeConnectionId: 22 }));
+      getCategoryForMember.mockRejectedValueOnce(new DropshipError(code, "Controlled refusal.", { storeConnectionId: 22 }));
+      expect((await get("/22/listing-settings/categories")).status).toBe(422);
+      expect((await get("/22/listing-settings/categories/3")).status).toBe(422);
+    }
+  });
+
+  it("answers 500 when a category answer breaks its contract", async () => {
+    listCategoriesForMember.mockResolvedValueOnce({ ...categoriesList, categories: [...categoriesList.categories, ...categoriesList.categories] });
+    expect((await get("/22/listing-settings/categories")).status).toBe(500);
+    getCategoryForMember.mockResolvedValueOnce({ ...categoryDetail, revisionId: null });
+    expect((await get("/22/listing-settings/categories/3")).status).toBe(500);
   });
 
   it("returns one product's settings, never cached by the browser", async () => {
@@ -216,6 +286,9 @@ describe("listing settings HTTP boundary", () => {
     ["a price filter on the id list", "/22/listing-settings/products/ids?show=retail_fallback"],
     ["a product id with letters on the id list", "/22/listing-settings/products/ids?productId=7a"],
     ["a category id past int4 on the id list", "/22/listing-settings/products/ids?categoryId=2147483648"],
+    ["a category id with letters", "/22/listing-settings/categories/3x"],
+    ["a category id of 0", "/22/listing-settings/categories/0"],
+    ["a category id past int4", "/22/listing-settings/categories/2147483648"],
   ])("refuses %s with 400", async (_case, path) => {
     const response = await get(path);
     expect(response.status).toBe(400);
@@ -260,6 +333,9 @@ describe("listing settings HTTP boundary", () => {
     // One product's read, stock included, spends the same budget; so does the id list.
     expect((await get("/22/listing-settings/products/501")).status).toBe(429);
     expect((await get("/22/listing-settings/products/ids")).status).toBe(429);
+    // The category reads too (plan P7: one read budget).
+    expect((await get("/22/listing-settings/categories")).status).toBe(429);
+    expect((await get("/22/listing-settings/categories/3")).status).toBe(429);
     expect((await get("/22/listing-settings/summary", "member-2")).status).toBe(200);
   });
 });

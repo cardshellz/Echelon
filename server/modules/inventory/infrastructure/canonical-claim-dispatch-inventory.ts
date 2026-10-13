@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { exactRecordedCostTotalsSchema, recordedCostTotalIsValid } from "@shared/utils/recorded-cost-total";
 import { canonicalClaimDispatchPlanSchema } from "../../../../shared/types/inventory-availability-dispatch";
 import { CanonicalClaimQuantityPosting } from "./canonical-claim-quantity-posting";
 import type {
@@ -22,7 +23,8 @@ const costSchema = z.object({
   productVariantId: databaseId, inventoryLotId: databaseId,
   quantity: databaseQuantity.refine((value) => BigInt(value) > BigInt(0) && BigInt(value) <= POSTGRES_INTEGER_MAX),
   unitCostMills: databaseQuantity, totalCostMills: databaseQuantity,
-}).strict().refine((cost) => BigInt(cost.quantity) * BigInt(cost.unitCostMills) === BigInt(cost.totalCostMills),
+  exactTotals:exactRecordedCostTotalsSchema.nullable().optional(),
+}).strict().refine(recordedCostTotalIsValid,
   "Original pick cost must reconcile exactly in mills");
 
 export class CanonicalClaimInventoryDispatchError extends Error {
@@ -61,15 +63,22 @@ async function readDispatchCosts(
   const result = await client.query(
     `SELECT id, order_id AS "orderId", order_item_id AS "orderItemId",
             product_variant_id AS "productVariantId", inventory_lot_id AS "inventoryLotId",
-            qty AS quantity, unit_cost_mills AS "unitCostMills", total_cost_mills AS "totalCostMills"
-     FROM oms.order_item_costs WHERE id = ANY($1::integer[]) ORDER BY id
+            qty AS quantity, unit_cost_mills AS "unitCostMills", total_cost_mills AS "totalCostMills",
+            CASE WHEN to_jsonb(cost)->>'cost_quantity_allocation_id' IS NULL THEN NULL
+            ELSE jsonb_build_object('quantityAllocationId',to_jsonb(cost)->>'cost_quantity_allocation_id',
+              'productMills',to_jsonb(cost)->>'product_total_cost_mills','packagingMills',to_jsonb(cost)->>'packaging_total_cost_mills',
+              'landedMills',to_jsonb(cost)->>'landed_total_cost_mills') END AS "exactTotals"
+     FROM oms.order_item_costs cost WHERE id = ANY($1::integer[]) ORDER BY id
      ${lock ? "FOR SHARE" : ""}`, [ids]);
   const costs = z.array(costSchema).safeParse(result.rows);
   if (!costs.success || costs.data.length !== ids.length
     || costs.data.some((cost, index) => cost.id !== ids[index])) {
     fail("CLAIM_DISPATCH_COST_EVIDENCE_MISSING", "Every original pick requires exact, valid authoritative COGS evidence.", { costIds: ids });
   }
-  return costs.data;
+  return costs.data.map(cost => {
+    const { exactTotals, ...legacy } = cost;
+    return exactTotals == null ? legacy : cost;
+  });
 }
 
 /**

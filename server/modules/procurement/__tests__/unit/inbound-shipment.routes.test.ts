@@ -340,7 +340,7 @@ describe("inbound shipment routes", () => {
     );
 
     expect(status).toBe(200);
-    expect(shipmentTracking.pushLandedCostsToLots).toHaveBeenCalledWith(12);
+    expect(shipmentTracking.pushLandedCostsToLots).toHaveBeenCalledWith(12,"test-user");
     expect(body).toEqual(pushResult);
   });
 });

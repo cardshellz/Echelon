@@ -46,7 +46,7 @@ databaseTests.sequential("cost contribution physical owners on PostgreSQL", () =
       throw new Error("Cost lineage tests require a separate explicitly disposable local PostgreSQL database.");
     }
     pool = new pg.Pool({ connectionString: databaseUrl, application_name: "echelon-cost-lineage-test", max: 4 });
-    for (const name of ["procurement", "inventory"]) {
+    for (const name of ["procurement", "inventory", "oms"]) {
       await pool.query(`CREATE SCHEMA ${name}`);
       ownedSchemas.push(name);
     }
@@ -54,7 +54,8 @@ databaseTests.sequential("cost contribution physical owners on PostgreSQL", () =
       await pool.query(`CREATE TABLE procurement.${table} (id integer PRIMARY KEY)`);
     }
     for (const table of [schema.inventoryLots, schema.inventoryTransactions, schema.inventoryLevels,
-      schema.buildOrders, schema.buildOrderComponents, schema.buildRuns, schema.buildRunConsumptions, schema.buildComponentReservations]) {
+      schema.buildOrders, schema.buildOrderComponents, schema.buildRuns, schema.buildRunConsumptions, schema.buildComponentReservations,
+      schema.orderItemCosts, schema.buildRunReversals]) {
       await pool.query(tableDdl(table));
     }
     await installPreOpeningQuantityAuthorityFixture(pool);
@@ -65,6 +66,7 @@ databaseTests.sequential("cost contribution physical owners on PostgreSQL", () =
       CREATE UNIQUE INDEX build_run_replay_identity ON inventory.build_runs(idempotency_key);
     `);
     await pool.query(await readFile(resolve(process.cwd(), "migrations/222_procurement_cost_evidence.sql"), "utf8"));
+    await pool.query(await readFile(resolve(process.cwd(), "migrations/0751_exact_inventory_cost_totals.sql"), "utf8"));
     await pool.query(await readFile(resolve(process.cwd(), "migrations/0725_inventory_cost_admission_evidence.sql"), "utf8"));
     database = drizzle(pool, { schema });
   });
@@ -72,7 +74,7 @@ databaseTests.sequential("cost contribution physical owners on PostgreSQL", () =
   beforeEach(async () => {
     await pool.query(`TRUNCATE inventory.lot_cost_contributions, inventory.inventory_transactions,
       inventory.inventory_lots, inventory.inventory_levels, inventory.build_run_consumptions,
-      inventory.build_component_reservations, inventory.build_runs, inventory.build_order_components,
+      inventory.build_component_reservations, inventory.build_runs, inventory.build_run_reversals, inventory.build_order_components,
       inventory.build_orders RESTART IDENTITY CASCADE`);
   });
 
@@ -200,10 +202,13 @@ databaseTests.sequential("cost contribution physical owners on PostgreSQL", () =
     }
   });
 
-  it.each(["confirmed","estimated","unknown"] as const)("preserves %s confidence, all build inputs and remainder layers on replay", async confidence => {
+  it.each(["confirmed","estimated","unknown","confirmed_exact"] as const)("preserves %s confidence, all build inputs and remainder layers on replay", async label => {
+    const exact=label==="confirmed_exact";
+    const confidence=exact?"confirmed":label;
     await seedLot(101, 2, 2); await seedLot(102, 3, 3);
     await pool.query("UPDATE inventory.inventory_lots SET cost_provisional=$1,cost_source=$2 WHERE id=102",
       [confidence === "estimated" ? 1 : 0,confidence === "unknown" ? "unresolved" : "purchase_order"]);
+    if (exact) await pool.query("UPDATE inventory.inventory_lots SET cost_basis_qty=3,product_total_cost_mills=300,packaging_total_cost_mills=60,landed_total_cost_mills=16 WHERE id=102");
     await pool.query(`
       INSERT INTO inventory.inventory_levels(product_variant_id,warehouse_location_id,variant_qty,reserved_qty) VALUES (101,20,5,5);
       INSERT INTO inventory.build_orders(id,system_number,recipe_id,recipe_code,recipe_version,recipe_type,
@@ -225,25 +230,35 @@ databaseTests.sequential("cost contribution physical owners on PostgreSQL", () =
     });
     const command = { buildOrderId: 10, buildsCompleted: 1, idempotencyKey: "build-run-synthetic", actorId: "integration-test" };
     const result = await repository.executeOrder(command);
-    expect(result).toMatchObject({ totalComponentCostMills: "625", outputQty: 4, alreadyPosted: false });
+    expect(result).toMatchObject({ totalComponentCostMills: exact?"626":"625", outputQty: 4, alreadyPosted: false });
     const outputs = (await pool.query("SELECT id,qty_received FROM inventory.inventory_lots WHERE build_run_id=$1 ORDER BY id", [result.buildRunId])).rows;
-    expect(outputs.map((output) => output.qty_received)).toEqual([1, 3]);
+    expect(outputs.map((output) => output.qty_received)).toEqual(exact?[2,2]:[1,3]);
     const edges = (await pool.query("SELECT source_lot_id,output_lot_id,source_qty,output_qty,output_start_qty,operation_kind FROM inventory.lot_cost_contributions ORDER BY output_lot_id,source_lot_id")).rows;
     expect(edges).toEqual(outputs.flatMap((output, index) => [
-      { source_lot_id: 101, output_lot_id: output.id, source_qty: 2, output_qty: 4, output_start_qty: index === 0 ? 0 : 1, operation_kind: "build" },
-      { source_lot_id: 102, output_lot_id: output.id, source_qty: 3, output_qty: 4, output_start_qty: index === 0 ? 0 : 1, operation_kind: "build" },
+      { source_lot_id: 101, output_lot_id: output.id, source_qty: 2, output_qty: 4, output_start_qty: index === 0 ? 0 : exact?2:1, operation_kind: "build" },
+      { source_lot_id: 102, output_lot_id: output.id, source_qty: 3, output_qty: 4, output_start_qty: index === 0 ? 0 : exact?2:1, operation_kind: "build" },
     ]));
-    expect((await pool.query("SELECT SUM(total_unit_cost_mills*qty_received)::text AS total FROM inventory.inventory_lots WHERE build_run_id=$1", [result.buildRunId])).rows[0].total).toBe("625");
+    expect((await pool.query("SELECT SUM(total_unit_cost_mills*qty_received)::text AS total FROM inventory.inventory_lots WHERE build_run_id=$1", [result.buildRunId])).rows[0].total).toBe(exact?"626":"625");
     expect((await pool.query("SELECT cost_provisional FROM inventory.inventory_lots WHERE build_run_id=$1 ORDER BY id",[result.buildRunId])).rows)
       .toEqual(outputs.map(()=>({ cost_provisional: confidence === "confirmed" ? 0 : 1 })));
     expect((await pool.query("SELECT count(*)::integer AS count FROM inventory.lot_cost_follow_ups")).rows[0].count)
       .toBe(confidence === "confirmed" ? 0 : outputs.length);
     expect((await repository.executeOrder(command)).alreadyPosted).toBe(true);
     expect((await pool.query("SELECT count(*)::integer AS count FROM inventory.lot_cost_contributions")).rows[0].count).toBe(edges.length);
+    if (exact) {
+      await repository.reverseRun({buildOrderId:10,buildRunId:result.buildRunId,idempotencyKey:"reverse-exact-build",actorId:"integration-test",reason:"Void untouched output"});
+      const {readUnallocatedLotCosts}=await import("../../infrastructure/cost-quantity.repository");
+      const restored=await database.transaction(async tx=>readUnallocatedLotCosts(tx,(await tx.execute(sql`SELECT * FROM inventory.inventory_lots WHERE id=102`)).rows));
+      expect(restored.get(102)).toMatchObject({quantity:3,costs:{totalMills:BigInt(376)}});
+      expect((await pool.query("SELECT qty_on_hand,qty_reserved FROM inventory.inventory_lots WHERE id=102")).rows[0]).toEqual({qty_on_hand:3,qty_reserved:3});
+    }
   });
 
-  it.each(["break_pack", "assemble_pack", "component_build"] as const)("records canonical %s contributions for committed and surplus cost layers", async (operationType) => {
+  it.each(["break_pack", "assemble_pack", "component_build", "break_pack_exact"] as const)("records canonical %s contributions for committed and surplus cost layers", async (label) => {
+    const exact=label==="break_pack_exact";
+    const operationType=exact?"break_pack":label;
     await seedLot(101, 5, 5);
+    if (exact) await pool.query("UPDATE inventory.inventory_lots SET cost_basis_qty=5,product_total_cost_mills=500,packaging_total_cost_mills=100,landed_total_cost_mills=26 WHERE id=101");
     await pool.query("INSERT INTO inventory.inventory_levels(product_variant_id,warehouse_location_id,variant_qty,reserved_qty) VALUES (101,20,5,5)");
     const writer = new PostgresCanonicalClaimInventoryRepository();
     const client = await pool.connect();
@@ -267,8 +282,8 @@ databaseTests.sequential("cost contribution physical owners on PostgreSQL", () =
       await client.query("COMMIT");
       const edges = (await pool.query("SELECT source_lot_id,source_qty,output_qty,output_start_qty,operation_kind FROM inventory.lot_cost_contributions ORDER BY output_lot_id")).rows;
       expect(edges).toHaveLength(3);
-      expect(edges).toEqual(Array.from({ length: 3 }, (_, index) => ({ source_lot_id: 101, source_qty: 5, output_qty: 4, output_start_qty: [0, 1, 3][index], operation_kind: operationType === "component_build" ? "build" : operationType === "assemble_pack" ? "assembly" : "conversion" })));
-      expect((await pool.query("SELECT SUM(total_unit_cost_mills*qty_received)::text AS total FROM inventory.inventory_lots WHERE warehouse_location_id=30")).rows[0].total).toBe("625");
+      expect(edges).toEqual(Array.from({ length: 3 }, (_, index) => ({ source_lot_id: 101, source_qty: 5, output_qty: 4, output_start_qty: (exact?[0,2,3]:[0,1,3])[index], operation_kind: operationType === "component_build" ? "build" : operationType === "assemble_pack" ? "assembly" : "conversion" })));
+      expect((await pool.query("SELECT SUM(total_unit_cost_mills*qty_received)::text AS total FROM inventory.inventory_lots WHERE warehouse_location_id=30")).rows[0].total).toBe(exact?"626":"625");
     } finally {
       await client.query("ROLLBACK");
       client.release();

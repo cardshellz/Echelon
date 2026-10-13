@@ -167,7 +167,8 @@ const MAX_POSTGRES_INTEGER = 2_147_483_647;
 const adjustmentReplaySchema = z.object({
   orphanedQty: z.number().int().nonnegative(), adjustmentTransactionId: z.number().int().positive(),
   consumedCostCents: z.number().int().nonnegative().optional(), consumedQty: z.number().int().nonnegative().optional(),
-  consumedLots: z.array(z.object({ lotId: z.number().int().positive(), qty: z.number().int().positive() })).optional(),
+  consumedLots: z.array(z.object({ lotId: z.number().int().positive(), qty: z.number().int().positive(),
+    costQuantityAllocationId:z.number().int().positive().safe().optional() })).optional(),
   consumedPoCostMills: z.string().regex(/^\d+$/).optional(), consumedPackagingCostMills: z.string().regex(/^\d+$/).optional(),
   consumedLandedCostMills: z.string().regex(/^\d+$/).optional(), consumedCostProvisional: z.boolean().optional(),
 });
@@ -495,6 +496,7 @@ export class InventoryUseCases {
     const allowNegative = params.allowNegative === true;
 
     const doWork = async (tx: any): Promise<{ lotUnitCostMills: number | null }> => {
+      await lockInventoryCostGraph(tx);
       const quantityPosting = await openOperationalQuantityPosting(tx);
       const quantityKey = `receipt_reversal:${params.reversalId}`;
       const replay = quantityPosting && await quantityPosting.beginOperation(quantityKey, { operation: "receipt_reversal", ...params });
@@ -512,7 +514,7 @@ export class InventoryUseCases {
       // 1. Lots created by this receiving line (resolved through the ledger —
       //    the receipt transaction row carries the exact lot linkage).
       const lotRows = await tx.execute(sql`
-        SELECT l.id, l.qty_on_hand, l.qty_reserved, l.unit_cost_mills
+        SELECT l.id, l.qty_on_hand, l.qty_reserved, l.unit_cost_mills,l.cost_basis_qty
         FROM inventory.inventory_lots l
         JOIN inventory.inventory_transactions t
           ON t.inventory_lot_id = l.id
@@ -553,6 +555,12 @@ export class InventoryUseCases {
             allowNegative ? remainingToReverse : available,
           );
           if (decrement <= 0) continue;
+          if (lot.cost_basis_qty!=null) {
+            const {allocateLotQuantityCost}=await import("../infrastructure/cost-quantity.repository");
+            const costQuantity=Math.min(decrement,Math.max(0,available));
+            if (costQuantity>0) await allocateLotQuantityCost(tx,Number(lot.id),costQuantity,params.userId || "system:receipt-reversal",
+              this.clock(),{kind:"receipt_reversal",reversalId:params.reversalId},`receipt_reversal_cost:${params.reversalId}:${lot.id}`);
+          }
 
           if (lotUnitCostMills === null && lot.unit_cost_mills !== null) {
             lotUnitCostMills = Number(lot.unit_cost_mills);
@@ -683,6 +691,7 @@ export class InventoryUseCases {
     }
 
     const result = await this.db.transaction(async (tx) => {
+      await lockInventoryCostGraph(tx);
       const level = await this.storage.lockInventoryLevel(
         params.warehouseLocationId,
         params.productVariantId,
@@ -775,6 +784,7 @@ export class InventoryUseCases {
     if (!Number.isSafeInteger(params.qty) || params.qty <= 0) throw new Error("qty must be a positive safe integer");
 
     const result = await this.db.transaction(async (tx) => {
+      await lockInventoryCostGraph(tx);
       const level = await this.storage.lockInventoryLevel(
         params.warehouseLocationId,
         params.productVariantId,
@@ -915,6 +925,7 @@ export class InventoryUseCases {
       await assertNoOpenPickCorrection(tx, params.orderItemId);
     }
 
+    await lockInventoryCostGraph(tx);
     const level = await this.storage.lockInventoryLevel(
       params.warehouseLocationId,
       params.productVariantId,
@@ -1076,6 +1087,7 @@ export class InventoryUseCases {
           wl.id
       `);
 
+      await lockInventoryCostGraph(tx);
       let selectedLevel: InventoryLevel | undefined;
       for (const candidate of candidates.rows as Array<{ warehouse_location_id: number }>) {
         const locationId = Number(candidate.warehouse_location_id);
@@ -1208,7 +1220,7 @@ export class InventoryUseCases {
     /** Internal conversion owner requests exact evidence in JSON-safe decimal strings. */
     includeConsumedCostEvidence?: boolean;
     /** Internal conversion output only; supplied from the consumed FIFO owner result. */
-    conversion?: { sourceLots: Array<{ lotId: number; qty: number }>; productMills: bigint; packagingMills: bigint; landedMills: bigint; provisional: boolean; operationKey: string; occurredAt: Date };
+    conversion?: { sourceLots: Array<{ lotId: number; qty: number; costQuantityAllocationId?:number }>; productMills: bigint; packagingMills: bigint; landedMills: bigint; provisional: boolean; operationKey: string; occurredAt: Date };
     /** Internal transaction orchestration hook; effects run only after the caller commits. */
     deferUntilCommit?: (effect: () => Promise<void>) => void;
   }, sharedPosting?: OperationalQuantityPosting): Promise<{
@@ -1227,7 +1239,7 @@ export class InventoryUseCases {
     let orphanedQty = 0;
     let consumedCostCents: number | undefined;
     let consumedQty: number | undefined;
-    let consumedDetail: { consumedLots: Array<{ lotId: number; qty: number }>; consumedPoCostMills: bigint; consumedPackagingCostMills: bigint; consumedLandedCostMills: bigint; consumedCostProvisional: boolean } | undefined;
+    let consumedDetail: { consumedLots: Array<{ lotId: number; qty: number; costQuantityAllocationId?:number }>; consumedPoCostMills: bigint; consumedPackagingCostMills: bigint; consumedLandedCostMills: bigint; consumedCostProvisional: boolean } | undefined;
     let adjustmentTransactionId: number | null = null;
     let replayedResult: z.infer<typeof adjustmentReplaySchema> | undefined;
 
@@ -1240,7 +1252,7 @@ export class InventoryUseCases {
         conversion: params.conversion ? { ...params.conversion, productMills: params.conversion.productMills.toString(),
           packagingMills: params.conversion.packagingMills.toString(), landedMills: params.conversion.landedMills.toString() } : null });
       if (replay) { replayedResult = adjustmentReplaySchema.parse(replay.result); return; }
-      if (quantityPosting || params.conversion || params.includeConsumedCostEvidence) await lockInventoryCostGraph(tx);
+      await lockInventoryCostGraph(tx);
       // Cycle-count adjustments are the ONE mutation allowed on frozen bins
       if (!params.cycleCountId) {
         await this.assertNotFrozen(params.warehouseLocationId, tx);
@@ -1287,7 +1299,7 @@ export class InventoryUseCases {
               landedCostMills: safeMillsNumber(layer.landedMills, "conversion.landedMills"), costSource: "transformation",
               costProvisional: params.conversion.provisional ? 1 : 0, receivedAt: params.conversion.occurredAt, notes: params.reason, quantityPosting });
             for (const source of params.conversion.sourceLots) await recordLotCostContribution(tx, { sourceLotId: source.lotId, outputLotId: output.id,
-              sourceQty: source.qty, outputQty: params.qtyDelta, outputStartQty, operationKind: "conversion", operationKey: params.conversion.operationKey }, params.userId || "system:conversion", params.conversion.occurredAt);
+              sourceQty: source.qty, costQuantityAllocationId:source.costQuantityAllocationId, outputQty: params.qtyDelta, outputStartQty, operationKind: "conversion", operationKey: params.conversion.operationKey }, params.userId || "system:conversion", params.conversion.occurredAt);
             outputStartQty += layer.qty;
           }
         } else {
@@ -1870,6 +1882,7 @@ export class InventoryUseCases {
         });
         for (const source of consumed.consumedLots) await recordLotCostContribution(tx, {
           sourceLotId: source.lotId, outputLotId: outputLot.id, sourceQty: source.qty,
+          costQuantityAllocationId:source.costQuantityAllocationId,
           outputQty: plan.qtyPickUnits, outputStartQty, operationKind: "conversion", operationKey: `replenishment:${params.taskId}`,
         }, params.userId || "system:replenishment", occurredAt);
         outputStartQty += layer.qty;
@@ -2324,6 +2337,7 @@ export class InventoryUseCases {
               notes: params.notes, receivedAt: occurredAt, quantityPosting });
             for (const source of consumed.consumedLots) await recordLotCostContribution(tx, {
               sourceLotId: source.lotId, outputLotId: lot.id, sourceQty: source.qty, outputQty: qtyToConvert,
+              costQuantityAllocationId:source.costQuantityAllocationId,
               outputStartQty, operationKind: "conversion", operationKey: batchId,
             }, params.userId || "system:sku_correction", occurredAt);
             outputStartQty += layer.qty;
