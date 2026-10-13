@@ -35,6 +35,7 @@ type PickerProps = {
   expectedRevision: string;
   enabled: boolean;
   includedVariantIds: ReadonlySet<string>;
+  onSelectionNotice?: (message: string) => void;
   onAdd(
     variant: OrderEditCatalogVariant,
     plan: MemberPlanPresentation | null,
@@ -43,6 +44,7 @@ type PickerProps = {
 
 export function OrderEditProductPicker(props: PickerProps) {
   const [open, setOpen] = useState(false);
+  const [notice, setNotice] = useState<string | null>(null);
   return (
     <Dialog open={open && props.enabled} onOpenChange={setOpen}>
       <DialogTrigger asChild>
@@ -64,7 +66,8 @@ export function OrderEditProductPicker(props: PickerProps) {
               Choose a category, then a product and its pack, box or case SKU.
             </DialogDescription>
           </DialogHeader>
-          <CatalogBrowser {...props} />
+          {notice && <p role="alert" className="shrink-0 rounded-md border border-orange-200 bg-orange-50 p-3 text-sm text-orange-900">{notice}</p>}
+          <CatalogBrowser {...props} onSelectionNotice={setNotice} />
           <div className="flex shrink-0 items-center justify-between gap-3 border-t pt-3">
             <p className="text-xs text-muted-foreground">
               Prices include this customer's applicable club pricing. Review
@@ -458,6 +461,7 @@ function VariantOptions(
                   variant.selectionFlow ?? "order_edit",
                 );
                 if (notice) {
+                  props.onSelectionNotice?.(notice);
                   setSelectionNotice({
                     variantId: variant.variantId,
                     message: notice,

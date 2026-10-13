@@ -235,6 +235,7 @@ export function OrderDraft({
   reviewBlocked = false,
   closedOperationId,
   active = true,
+  audience = "staff",
 }: {
   order: OrderEditOrder;
   api: OrderEditTransport;
@@ -248,6 +249,7 @@ export function OrderDraft({
   closedOperationId?: string;
   /** Retained drafts stay mounted during review, but do not keep requesting background calculations. */
   active?: boolean;
+  audience?: "staff" | "customer";
 }) {
   const [quantities, setQuantities] = useState<Record<string, string>>(() =>
     Object.fromEntries(
@@ -411,23 +413,23 @@ export function OrderDraft({
         <CardTitle>
           <h2>Order {order.orderNumber}</h2>
         </CardTitle>
-        <p className="text-sm text-muted-foreground">
+        {audience === "staff" && <p className="text-sm text-muted-foreground">
           {order.customerName}
           {order.customerEmail ? ` · ${order.customerEmail}` : ""}
-        </p>
+        </p>}
         <div className="flex flex-wrap gap-2">
           <Badge variant="outline">Payment: {order.financialStatus}</Badge>
-          <Badge variant="outline">Warehouse: {order.warehouseStatus}</Badge>
+          <Badge variant="outline">{audience === "customer" ? "Order" : "Warehouse"}: {order.warehouseStatus}</Badge>
         </div>
       </CardHeader>
       <CardContent className="space-y-5">
         {!enabled && (
           <div className="space-y-3 rounded-md border bg-muted/40 p-3">
             <p role="status" className="text-sm">
-              Staff order editing is disabled for this Shopify connection.{" "}
+              {audience === "customer" ? "Order editing is temporarily unavailable. Contact us if you need help with this order." : <>Staff order editing is disabled for this Shopify connection.{" "}
               {onConfigure
                 ? "Choose a payment window and save enabled pilot settings to edit eligible orders."
-                : "Ask an administrator with settings permission to configure and enable staff edits."}
+                : "Ask an administrator with settings permission to configure and enable staff edits."}</>}
             </p>
             {onConfigure && (
               <Button type="button" variant="outline" onClick={onConfigure}>
@@ -596,7 +598,7 @@ export function OrderDraft({
           recalculated for your changes.
         </p>
         <p className="text-xs text-muted-foreground">
-          Shipping address changes are not supported in this pilot.
+          {audience === "customer" ? "To change the shipping address, use Change address on your order page." : "Shipping address changes are not supported in this pilot."}
         </p>
         <ErrorMessage text={validationMessage} />
         <ErrorMessage text={error} />
@@ -726,6 +728,7 @@ export function OrderEditOperationView({
   onCommit,
   onRefresh,
   onAbandon,
+  audience = "staff",
 }: {
   operation: OrderEditOperation;
   now: number;
@@ -735,6 +738,7 @@ export function OrderEditOperationView({
   onCommit(): void;
   onRefresh(): void;
   onAbandon(): void;
+  audience?: "staff" | "customer";
 }) {
   const copy = orderEditStatusCopy[operation.status];
   const payable = operation.balanceDueCents > 0;
@@ -819,7 +823,7 @@ export function OrderEditOperationView({
       <CardContent className="space-y-4">
         <p className="text-sm text-muted-foreground">
           {operation.status === "review_required" && operation.canAbandon
-            ? "This edit needs review. You can cancel this unsubmitted edit, or keep its reference for investigation."
+            ? (audience === "customer" ? "We could not verify these changes. You can cancel this edit and try again, or contact us for help." : "This edit needs review. You can cancel this unsubmitted edit, or keep its reference for investigation.")
             : copy.description}
         </p>
         {showCurrent && (
@@ -854,7 +858,7 @@ export function OrderEditOperationView({
         )}
         {operation.warnings.length > 0 && (
           <ul className="list-disc space-y-1 pl-5 text-sm text-muted-foreground">
-            {operation.warnings.map((warning, index) => (
+            {operation.warnings.filter(warning => audience !== "customer" || !warning.startsWith("Private staff testing.")).map((warning, index) => (
               <li key={index}>{warning}</li>
             ))}
           </ul>
@@ -903,7 +907,7 @@ export function OrderEditOperationView({
           {paymentUrl && (
             <Button asChild variant="outline">
               <a href={paymentUrl} target="_blank" rel="noopener noreferrer">
-                Open Shopify payment
+                {audience === "customer" ? "Pay the difference" : "Open Shopify payment"}
               </a>
             </Button>
           )}
@@ -917,7 +921,7 @@ export function OrderEditOperationView({
           </Button>
         </div>
         <p className="break-all text-xs text-muted-foreground">
-          Operation {operation.operationId}
+          {audience === "customer" ? "Edit reference" : "Operation"} {operation.operationId}
         </p>
       </CardContent>
     </Card>
