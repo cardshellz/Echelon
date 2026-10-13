@@ -1,5 +1,7 @@
 import { lotCostNeedsReview } from "../domain/lot-cost";
 import { lockInventoryCostGraph, recordLotCostContribution } from "./cost-evidence.repository";
+import { allocateLotQuantityCost, mergeLotQuantityCostReferences } from "./cost-quantity.repository";
+import { hasExactLotCostTotals } from "../domain/lot-cost";
 import { sql } from "drizzle-orm";
 import { openOperationalQuantityPosting } from "./operational-quantity-posting";
 import {
@@ -117,12 +119,14 @@ function emptyCost(): CostAccumulator {
   };
 }
 
-function addCost(total: CostAccumulator, unit: NormalizedLotCosts, qty: number): void {
+function addCost(total: CostAccumulator, unit: NormalizedLotCosts, qty: number): CostAccumulator {
   const multiplier = BigInt(qty);
-  total.poMills += unit.poMills * multiplier;
-  total.packagingMills += unit.packagingMills * multiplier;
-  total.landedMills += unit.landedMills * multiplier;
-  total.totalMills += unit.totalMills * multiplier;
+  return {
+    poMills: total.poMills + unit.poMills * multiplier,
+    packagingMills: total.packagingMills + unit.packagingMills * multiplier,
+    landedMills: total.landedMills + unit.landedMills * multiplier,
+    totalMills: total.totalMills + unit.totalMills * multiplier,
+  };
 }
 
 function asInteger(value: unknown, field: string): number {
@@ -862,8 +866,9 @@ export class BuildExecutionRepository {
       RETURNING *
     `);
     const run = runResult.rows[0];
-    const consumedCost = emptyCost();
+    let consumedCost = emptyCost();
     const sourceQuantities = new Map<number, number>();
+    const sourceCostAllocationIds=new Map<number,number[]>();
     let outputCostProvisional = 0;
     // Reuse the durable run timestamp; do not sample a second application clock.
     if (!(run.created_at instanceof Date) && typeof run.created_at !== "string") {
@@ -966,8 +971,14 @@ export class BuildExecutionRepository {
 
         const costs = this.dependencies.normalizeBuildLotCosts(reservation);
         if (lotCostNeedsReview(reservation)) outputCostProvisional = 1;
-        addCost(consumedCost, costs, take);
+        const exactAllocation=hasExactLotCostTotals(reservation)
+          ? await allocateLotQuantityCost(tx,asInteger(reservation.id,"sourceLot.id"),take,lineageActor,lineageRecordedAt,
+            {buildRunId:run.id,componentId},`build_consumption:${run.id}:${componentId}:${reservation.id}`) : null;
+        // Exact amounts are already extended. Uniform compatibility prices
+        // retain their existing quantity multiplier until a source is applied.
+        consumedCost = addCost(consumedCost,exactAllocation?.costs??costs,exactAllocation?1:take);
         const sourceLotId = asInteger(reservation.id, "sourceLot.id");
+        if (exactAllocation?.id) sourceCostAllocationIds.set(sourceLotId,[...(sourceCostAllocationIds.get(sourceLotId)??[]),exactAllocation.id]);
         sourceQuantities.set(sourceLotId, (sourceQuantities.get(sourceLotId) ?? 0) + take);
         await tx.execute(sql`
           INSERT INTO inventory.build_run_consumptions
@@ -1076,6 +1087,11 @@ export class BuildExecutionRepository {
       WHERE id = ${outputLevel.id}
     `);
 
+    const sourceReferences=new Map<number,number|null>();
+    for (const [sourceLotId, ids] of sourceCostAllocationIds) {
+      const reference=await mergeLotQuantityCostReferences(tx,ids,lineageActor,lineageRecordedAt,`build_source:${run.id}:${sourceLotId}`);
+      sourceReferences.set(sourceLotId,reference.id);
+    }
     let outputCostOffset = 0;
     for (let index = 0; index < outputLayers.length; index += 1) {
       const layer = outputLayers[index];
@@ -1126,6 +1142,7 @@ export class BuildExecutionRepository {
           sourceLotId,
           outputLotId: asInteger(outputLot.rows[0].id, "outputLot.id"),
           sourceQty,
+          costQuantityAllocationId:sourceReferences.get(sourceLotId),
           outputQty: quantities.outputQty,
           outputStartQty: outputCostOffset,
           operationKind: "build",

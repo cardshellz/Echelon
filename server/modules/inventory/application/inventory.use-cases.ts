@@ -167,7 +167,8 @@ const MAX_POSTGRES_INTEGER = 2_147_483_647;
 const adjustmentReplaySchema = z.object({
   orphanedQty: z.number().int().nonnegative(), adjustmentTransactionId: z.number().int().positive(),
   consumedCostCents: z.number().int().nonnegative().optional(), consumedQty: z.number().int().nonnegative().optional(),
-  consumedLots: z.array(z.object({ lotId: z.number().int().positive(), qty: z.number().int().positive() })).optional(),
+  consumedLots: z.array(z.object({ lotId: z.number().int().positive(), qty: z.number().int().positive(),
+    costQuantityAllocationId:z.number().int().positive().safe().optional() })).optional(),
   consumedPoCostMills: z.string().regex(/^\d+$/).optional(), consumedPackagingCostMills: z.string().regex(/^\d+$/).optional(),
   consumedLandedCostMills: z.string().regex(/^\d+$/).optional(), consumedCostProvisional: z.boolean().optional(),
 });
@@ -1208,7 +1209,7 @@ export class InventoryUseCases {
     /** Internal conversion owner requests exact evidence in JSON-safe decimal strings. */
     includeConsumedCostEvidence?: boolean;
     /** Internal conversion output only; supplied from the consumed FIFO owner result. */
-    conversion?: { sourceLots: Array<{ lotId: number; qty: number }>; productMills: bigint; packagingMills: bigint; landedMills: bigint; provisional: boolean; operationKey: string; occurredAt: Date };
+    conversion?: { sourceLots: Array<{ lotId: number; qty: number; costQuantityAllocationId?:number }>; productMills: bigint; packagingMills: bigint; landedMills: bigint; provisional: boolean; operationKey: string; occurredAt: Date };
     /** Internal transaction orchestration hook; effects run only after the caller commits. */
     deferUntilCommit?: (effect: () => Promise<void>) => void;
   }, sharedPosting?: OperationalQuantityPosting): Promise<{
@@ -1227,7 +1228,7 @@ export class InventoryUseCases {
     let orphanedQty = 0;
     let consumedCostCents: number | undefined;
     let consumedQty: number | undefined;
-    let consumedDetail: { consumedLots: Array<{ lotId: number; qty: number }>; consumedPoCostMills: bigint; consumedPackagingCostMills: bigint; consumedLandedCostMills: bigint; consumedCostProvisional: boolean } | undefined;
+    let consumedDetail: { consumedLots: Array<{ lotId: number; qty: number; costQuantityAllocationId?:number }>; consumedPoCostMills: bigint; consumedPackagingCostMills: bigint; consumedLandedCostMills: bigint; consumedCostProvisional: boolean } | undefined;
     let adjustmentTransactionId: number | null = null;
     let replayedResult: z.infer<typeof adjustmentReplaySchema> | undefined;
 
@@ -1287,7 +1288,7 @@ export class InventoryUseCases {
               landedCostMills: safeMillsNumber(layer.landedMills, "conversion.landedMills"), costSource: "transformation",
               costProvisional: params.conversion.provisional ? 1 : 0, receivedAt: params.conversion.occurredAt, notes: params.reason, quantityPosting });
             for (const source of params.conversion.sourceLots) await recordLotCostContribution(tx, { sourceLotId: source.lotId, outputLotId: output.id,
-              sourceQty: source.qty, outputQty: params.qtyDelta, outputStartQty, operationKind: "conversion", operationKey: params.conversion.operationKey }, params.userId || "system:conversion", params.conversion.occurredAt);
+              sourceQty: source.qty, costQuantityAllocationId:source.costQuantityAllocationId, outputQty: params.qtyDelta, outputStartQty, operationKind: "conversion", operationKey: params.conversion.operationKey }, params.userId || "system:conversion", params.conversion.occurredAt);
             outputStartQty += layer.qty;
           }
         } else {
@@ -1870,6 +1871,7 @@ export class InventoryUseCases {
         });
         for (const source of consumed.consumedLots) await recordLotCostContribution(tx, {
           sourceLotId: source.lotId, outputLotId: outputLot.id, sourceQty: source.qty,
+          costQuantityAllocationId:source.costQuantityAllocationId,
           outputQty: plan.qtyPickUnits, outputStartQty, operationKind: "conversion", operationKey: `replenishment:${params.taskId}`,
         }, params.userId || "system:replenishment", occurredAt);
         outputStartQty += layer.qty;
@@ -2324,6 +2326,7 @@ export class InventoryUseCases {
               notes: params.notes, receivedAt: occurredAt, quantityPosting });
             for (const source of consumed.consumedLots) await recordLotCostContribution(tx, {
               sourceLotId: source.lotId, outputLotId: lot.id, sourceQty: source.qty, outputQty: qtyToConvert,
+              costQuantityAllocationId:source.costQuantityAllocationId,
               outputStartQty, operationKind: "conversion", operationKey: batchId,
             }, params.userId || "system:sku_correction", occurredAt);
             outputStartQty += layer.qty;

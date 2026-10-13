@@ -46,7 +46,7 @@ databaseTests.sequential("cost contribution physical owners on PostgreSQL", () =
       throw new Error("Cost lineage tests require a separate explicitly disposable local PostgreSQL database.");
     }
     pool = new pg.Pool({ connectionString: databaseUrl, application_name: "echelon-cost-lineage-test", max: 4 });
-    for (const name of ["procurement", "inventory"]) {
+    for (const name of ["procurement", "inventory", "oms"]) {
       await pool.query(`CREATE SCHEMA ${name}`);
       ownedSchemas.push(name);
     }
@@ -54,7 +54,8 @@ databaseTests.sequential("cost contribution physical owners on PostgreSQL", () =
       await pool.query(`CREATE TABLE procurement.${table} (id integer PRIMARY KEY)`);
     }
     for (const table of [schema.inventoryLots, schema.inventoryTransactions, schema.inventoryLevels,
-      schema.buildOrders, schema.buildOrderComponents, schema.buildRuns, schema.buildRunConsumptions, schema.buildComponentReservations]) {
+      schema.buildOrders, schema.buildOrderComponents, schema.buildRuns, schema.buildRunConsumptions, schema.buildComponentReservations,
+      schema.orderItemCosts]) {
       await pool.query(tableDdl(table));
     }
     await installPreOpeningQuantityAuthorityFixture(pool);
@@ -65,6 +66,7 @@ databaseTests.sequential("cost contribution physical owners on PostgreSQL", () =
       CREATE UNIQUE INDEX build_run_replay_identity ON inventory.build_runs(idempotency_key);
     `);
     await pool.query(await readFile(resolve(process.cwd(), "migrations/222_procurement_cost_evidence.sql"), "utf8"));
+    await pool.query(await readFile(resolve(process.cwd(), "migrations/262_exact_inventory_cost_totals.sql"), "utf8"));
     await pool.query(await readFile(resolve(process.cwd(), "migrations/0725_inventory_cost_admission_evidence.sql"), "utf8"));
     database = drizzle(pool, { schema });
   });

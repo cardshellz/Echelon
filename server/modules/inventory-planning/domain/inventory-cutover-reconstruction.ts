@@ -303,7 +303,7 @@ export function planCutoverReconstruction(raw: CutoverReconstructionEvidence): C
       const lot = lots.get(cost.inventoryLotId)!;
       if (cost.productVariantId !== line.targetVariantId || lot.productVariantId !== line.targetVariantId
         || BigInt(cost.quantity) <= BigInt(0) || BigInt(cost.unitCostMills) < BigInt(0)
-        || BigInt(cost.totalCostMills) !== BigInt(cost.quantity) * BigInt(cost.unitCostMills)) {
+        || !recordedCostTotalIsValid(cost)) {
         block("PICK_COST_IDENTITY_INVALID", `cost:${cost.id}`, "Original picked lot/cost evidence is malformed."); continue;
       }
       const allocationLot = lotFor(allocation, lot.id);
@@ -393,3 +393,4 @@ export function planCutoverReconstruction(raw: CutoverReconstructionEvidence): C
   result.ready = result.blockers.length === 0;
   return result;
 }
+import { recordedCostTotalIsValid } from "@shared/utils/recorded-cost-total";

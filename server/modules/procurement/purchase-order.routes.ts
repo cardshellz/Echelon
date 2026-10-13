@@ -448,6 +448,20 @@ export function registerPurchaseOrderRoutes(app: Express) {
     }
   });
 
+  app.get("/api/purchase-orders/:id/shipment-cost-summary",requirePermission("purchasing","view"),async(req,res)=>{
+    const parsed=z.string().regex(/^[1-9]\d*$/).transform(Number).pipe(z.number().int().positive().safe()).safeParse(req.params.id);
+    if (!parsed.success) return res.status(400).json({error:"Invalid purchase order ID"});
+    try {
+      const summary=await purchasing.getPoShipmentCostSummary(parsed.data);
+      if (!summary) return res.status(404).json({error:"Purchase order not found"});
+      res.json(summary);
+    } catch (error:unknown) {
+      console.error(JSON.stringify({event:"procurement.po_shipment_cost_summary_failed",poId:parsed.data,
+        errorType:error instanceof Error?error.name:"unknown"}));
+      res.status(500).json({error:"Shipment costs could not be loaded. Retry to load the latest costs."});
+    }
+  });
+
   app.get("/api/purchase-orders/:id", requirePermission("purchasing", "view"), async (req, res) => {
     try {
       const po = await purchasing.getPurchaseOrderById(Number(req.params.id));
