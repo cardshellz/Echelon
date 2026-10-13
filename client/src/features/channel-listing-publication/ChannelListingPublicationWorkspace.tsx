@@ -10,6 +10,7 @@ import {
   listingOperationSchema,
   listingPriceRuleSchema,
   listingReviewSchema,
+  listingRecreationSchema,
   listingWorkspaceSchema,
   reviewListingDraftSchema,
   saveListingDraftSchema,
@@ -83,7 +84,9 @@ export function ChannelListingPublicationWorkspace({
   const [dirty, setDirty] = useState(false);
   const [picking, setPicking] = useState(false);
   const [editing, setEditing] = useState<number | null>(null);
-  const [editingExistingSku, setEditingExistingSku] = useState<string | null>(null);
+  const [editingExistingSku, setEditingExistingSku] = useState<string | null>(
+    null,
+  );
   const [bulkSelectedIds, setBulkSelectedIds] = useState<ReadonlySet<number>>(
     new Set(),
   );
@@ -104,12 +107,12 @@ export function ChannelListingPublicationWorkspace({
   }, [search]);
   const bulkSelectionMatchesUrl = Boolean(
     requestedBulkIds &&
-    bulkItems?.length === requestedBulkIds.length &&
-    bulkItems.every((item) => requestedBulkIds.includes(item.variantId)),
+      bulkItems?.length === requestedBulkIds.length &&
+      bulkItems.every((item) => requestedBulkIds.includes(item.variantId)),
   );
   const saveInFlight = useRef(false);
   const [busy, setBusy] = useState<
-    "save" | "review" | "submit" | "retry" | null
+    "save" | "review" | "submit" | "retry" | "recreate" | null
   >(null);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
@@ -121,6 +124,9 @@ export function ChannelListingPublicationWorkspace({
   >(new Map());
   const currentDraft = useRef(draft);
   currentDraft.current = draft;
+  const currentConnection = useRef(connectionId);
+  currentConnection.current = connectionId;
+  const recreating = useRef(false);
   const workspace = useQuery({
     queryKey: [base],
     queryFn: () => publicationRequest("GET", base, listingWorkspaceSchema),
@@ -523,6 +529,56 @@ export function ChannelListingPublicationWorkspace({
     }
   }
   const editingItem = draft?.items.find((item) => item.variantId === editing);
+  async function recreateListing(operationId: string, sku: string) {
+    if (!canEdit || busy || recreating.current) return;
+    recreating.current = true;
+    setBusy("recreate");
+    setError("");
+    const expectedConnection = connectionId;
+    try {
+      const result = await publicationRequest(
+        "GET",
+        `${base}/operations/${operationId}/recreation?${new URLSearchParams({ sku })}`,
+        listingRecreationSchema,
+      );
+      if (
+        result.account.connectionId !== expectedConnection ||
+        currentConnection.current !== expectedConnection ||
+        result.account.channelId !== channelId ||
+        result.catalog.sku !== sku ||
+        result.item.variantId !== result.catalog.variantId ||
+        result.item.recreateFromOperationId !== operationId
+      )
+        throw new Error(
+          "The Walmart connection or listing changed. Refresh and prepare the recreation again.",
+        );
+      const latest = currentDraft.current;
+      if (!latest) throw new Error("The draft is still loading.");
+      if (latest.items.some((item) => item.variantId === result.item.variantId))
+        throw new Error(
+          "This item is already in your draft. Its existing edits have been kept.",
+        );
+      if (latest.items.length >= MAX_DRAFT_ITEMS)
+        throw new Error("This draft is full. Submit or remove an item first.");
+      setPickedMetadata((prior) =>
+        new Map(prior).set(result.catalog.variantId, result.catalog),
+      );
+      changeItems([...latest.items, result.item]);
+      setBulkSelectedIds((prior) => new Set(prior).add(result.item.variantId));
+      setEditing(result.item.variantId);
+      setNotice(
+        "Walmart could not find this SKU. Review its details, then save and review the draft to recreate the listing.",
+      );
+      await client.invalidateQueries({
+        queryKey: [`/api/channels/${channelId}/catalog`],
+      });
+    } catch (failure) {
+      setError(errorMessage(failure));
+    } finally {
+      recreating.current = false;
+      setBusy(null);
+    }
+  }
   if (workspace.isLoading)
     return (
       <p role="status" className="text-sm">
@@ -658,6 +714,9 @@ export function ChannelListingPublicationWorkspace({
               onAdd={() => setPicking(true)}
               onEdit={setEditing}
               onEditExisting={setEditingExistingSku}
+              onRecreate={(operationId, sku) =>
+                void recreateListing(operationId, sku)
+              }
               onRemove={(variantId) =>
                 changeItems(
                   draft.items.filter((item) => item.variantId !== variantId),
@@ -687,9 +746,16 @@ export function ChannelListingPublicationWorkspace({
           </TabsContent>
           <TabsContent value="activity">
             <Tabs value={activityTab} onValueChange={setActivityTab}>
-              <TabsList aria-label="Activity history" className="grid h-auto w-full grid-cols-2 gap-1 sm:w-fit">
-                <TabsTrigger value="publications" className="px-2 sm:px-3">Publication activity</TabsTrigger>
-                <TabsTrigger value="changes" className="px-2 sm:px-3">Listing changes</TabsTrigger>
+              <TabsList
+                aria-label="Activity history"
+                className="grid h-auto w-full grid-cols-2 gap-1 sm:w-fit"
+              >
+                <TabsTrigger value="publications" className="px-2 sm:px-3">
+                  Publication activity
+                </TabsTrigger>
+                <TabsTrigger value="changes" className="px-2 sm:px-3">
+                  Listing changes
+                </TabsTrigger>
               </TabsList>
               <TabsContent value="publications">
                 <ListingActivity
@@ -700,7 +766,11 @@ export function ChannelListingPublicationWorkspace({
                 />
               </TabsContent>
               <TabsContent value="changes">
-                <ListingUpdateActivity channelId={channelId} canEdit={canEdit} onEdit={setEditingExistingSku} />
+                <ListingUpdateActivity
+                  channelId={channelId}
+                  canEdit={canEdit}
+                  onEdit={setEditingExistingSku}
+                />
               </TabsContent>
             </Tabs>
           </TabsContent>
@@ -757,8 +827,12 @@ export function ChannelListingPublicationWorkspace({
               setEditingExistingSku(null);
               setActivityTab("changes");
               setTab("activity");
-              setNotice("Listing changes queued. Follow the update in Activity.");
-              void client.invalidateQueries({ queryKey: [`/api/channels/${channelId}/listing-updates`] });
+              setNotice(
+                "Listing changes queued. Follow the update in Activity.",
+              );
+              void client.invalidateQueries({
+                queryKey: [`/api/channels/${channelId}/listing-updates`],
+              });
             }}
           />
         )}

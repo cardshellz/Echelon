@@ -9,6 +9,7 @@ import {
   lifecycleTargets,
   listingPrice,
   listingStatus,
+  listingTitle,
 } from "../feed-presentation";
 const row = (): ListingFeedRow => ({
   key: "sku:A",
@@ -62,6 +63,21 @@ describe("compact listing presentation", () => {
     expect(listingStatus(r).label).toBe("Needs attention");
     r.remote!.publishedStatus = "UNPUBLISHED";
     expect(listingStatus(r).label).toBe("Unpublished");
+  });
+  it("preserves the submitted title and only labels missing after an explicit provider observation", () => {
+    const r = row(); r.remote = null;
+    r.operation = { id: "operation", item: listingOperationItemSchema.parse({
+      variantId: 1, sku: "A", title: "Real product title", state: "accepted", priceCents: 2499,
+      stockState: "waiting_for_item", externalProductId: null, error: null,
+    }) };
+    expect(listingTitle(r)).toBe("Real product title");
+    expect(listingStatus(r).label).toBe("Processing");
+    r.operation.item.missingOnProvider = true;
+    expect(listingStatus(r).label).toBe("Not found on Walmart");
+    r.operation.item.state = "superseded";
+    expect(listingStatus(r).label).toBe("Recreated");
+    r.draft = listingDraftItemSchema.parse({ variantId: 1, recreateFromOperationId: "00000000-0000-4000-8000-000000000003" });
+    expect(listingStatus(r).label).toBe("Recreate draft");
   });
   it("keeps lifecycle transitions ahead of stale published state", () => {
     expect(listingStatus(row(), control("remove")).label).toBe("Unpublishing");

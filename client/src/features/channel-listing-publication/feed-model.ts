@@ -142,7 +142,11 @@ function rowIssue(
     return (
       row.remote.message ?? "This listing has a conflicting Echelon identity."
     );
-  if (row.draft && (row.remote || row.catalog?.alreadyLinked))
+  if (
+    row.draft &&
+    (row.remote ||
+      (row.catalog?.alreadyLinked && !row.draft.recreateFromOperationId))
+  )
     return "This SKU already has a listing. Remove it from the new-listing draft and manage the existing listing.";
   return null;
 }
