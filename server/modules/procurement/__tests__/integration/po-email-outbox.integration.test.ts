@@ -11,7 +11,7 @@ const TEST_DB_URL = process.env.ECHELON_TEST_DATABASE_URL;
 const DISPOSABLE_DB = process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true";
 const describeWithDisposableDb = TEST_DB_URL && DISPOSABLE_DB ? describe : describe.skip;
 const migrationSql = readFileSync(resolve(process.cwd(), "migrations/138_po_email_outbox.sql"), "utf8");
-const documentGateSql = readFileSync(resolve(process.cwd(), "migrations/260_po_email_document_gate.sql"), "utf8");
+const documentGateSql = readFileSync(resolve(process.cwd(), "migrations/261_po_email_document_gate.sql"), "utf8");
 
 async function expectDatabaseError(operation: () => Promise<unknown>, code: string): Promise<void> {
   let error: unknown;

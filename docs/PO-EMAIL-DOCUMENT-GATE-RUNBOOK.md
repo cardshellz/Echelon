@@ -6,7 +6,7 @@ This release changes supplier-document content validation. It does **not** estab
 
 - `buildPurchaseOrderEmail` produces the supplier projection and hashes the final HTML, including the optional message. The outbox stores immutable contract version, HTML SHA-256, source-projection SHA-256, and purpose. The source hash is content identity; it is not an approved historical revision.
 - `enqueuePurchaseOrderEmail` and `replayDeadLetterPurchaseOrderEmail` accept only supported, valid `current_copy` snapshots. PostgreSQL repeats that gate on insert and every lease acquisition/renewal. `processPoEmailOutboxBatch` checks the persisted HTML before the provider call.
-- `260_po_email_document_gate.sql` adds a hold to every legacy queued, processing, and dead-letter record. It preserves the original status, message, recipients, attempts, timestamps, errors, provider evidence, and idempotency key. Completed sent/partially-sent records remain unchanged.
+- `261_po_email_document_gate.sql` adds a hold to every legacy queued, processing, and dead-letter record. It preserves the original status, message, recipients, attempts, timestamps, errors, provider evidence, and idempotency key. Completed sent/partially-sent records remain unchanged.
 - Holds and content metadata cannot be edited or cleared. A held failed record cannot be replayed. Retrying its original enqueue key returns that original held record, which the UI labels explicitly.
 - Existing provider-accepted records remain provider evidence. New UI/history wording says “accepted by provider”; it does not claim recipient delivery. A manual/offline PO status is separate business evidence and is not invented as an SMTP result.
 
