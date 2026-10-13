@@ -47,7 +47,7 @@ export class WalmartAdapter implements IChannelAdapter {
             || (item.sku !== null && sku !== item.sku)) {
             throw new WalmartApiError("WALMART_INVENTORY_MAPPING_MISMATCH", "Inventory command must match the explicit Walmart SKU mapping", false);
           }
-          await this.channels.withListingWrites(walmartListingAccount(scope.connection), item.allocatedQty > 0 ? [sku] : [],
+          await this.channels.withStockWrites(walmartListingAccount(scope.connection), sku, item.allocatedQty,
             () => scope.api.setInventory(sku, scope.connection.ship_node_id, item.allocatedQty));
           results.push({ variantId: item.variantId, pushedQty: item.allocatedQty, status: "success" });
         } catch (error) {

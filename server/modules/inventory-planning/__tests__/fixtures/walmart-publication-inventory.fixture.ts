@@ -30,6 +30,8 @@ export async function installWalmartPublicationInventoryFixture(
     "0709_walmart_quantity_admission.sql",
     "0716_inventory_publication_reconciliation.sql",
     "0746_listing_recreation_stock_continuation.sql",
+    "0747_walmart_listing_initial_stock.sql",
+    "0748_walmart_listing_presence.sql",
   ])
     await pool.query(
       readFileSync(resolve(process.cwd(), "migrations", file), "utf8"),
