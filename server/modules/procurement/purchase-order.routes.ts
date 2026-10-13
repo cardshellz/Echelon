@@ -18,6 +18,8 @@ import * as poExceptionsService from "./po-exceptions.service";
 import { PoExceptionError } from "./po-exceptions.service";
 import * as apLedger from "./ap-ledger.service";
 import { renderPoHtml } from "./po-document";
+import { buildSupplierPoDocument, SupplierPoDocumentError } from "./supplier-po-document";
+import { loadSupplierPoDocumentSource } from "./supplier-po-document.repository";
 import { inArray } from "drizzle-orm";
 import { db } from "../../db";
 import { createPurchaseWorkspaceRepository } from "./purchase-workspace.repository";
@@ -72,10 +74,10 @@ function parsePositivePoEmailId(value: unknown, label: string): number {
 }
 
 function sendPoEmailOutboxError(res: Response, error: unknown): Response {
-  if (error instanceof PoEmailOutboxError) {
+  if (error instanceof PoEmailOutboxError || error instanceof SupplierPoDocumentError) {
     return res.status(error.statusCode).json({
       error: error.message,
-      details: { code: error.code },
+      details: { code: error.code, ...(error instanceof SupplierPoDocumentError ? { context: error.context } : {}) },
     });
   }
   const message = error instanceof Error ? error.message : "Email delivery request failed";
@@ -1255,31 +1257,15 @@ export function registerPurchaseOrderRoutes(app: Express) {
 
   app.get("/api/purchase-orders/:id/document", requirePermission("purchasing", "view"), async (req, res) => {
     try {
-      const poId = Number(req.params.id);
-      const po = await purchasing.getPurchaseOrderById(poId);
-      if (!po) return res.status(404).json({ error: "PO not found" });
-
-      const [lines, vendor, settings] = await Promise.all([
-        purchasing.getPurchaseOrderLines(poId),
-        storage.getVendorById(po.vendorId),
-        storage.getAllSettings(),
-      ]);
-
-      const html = renderPoHtml({
-        po,
-        lines,
-        vendor,
-        companyName: settings.company_name ?? undefined,
-        companyAddress: settings.company_address ?? undefined,
-        companyCity: settings.company_city ?? undefined,
-        companyState: settings.company_state ?? undefined,
-        companyPostalCode: settings.company_postal_code ?? undefined,
-        companyCountry: settings.company_country ?? undefined,
-      });
-
-      res.json({ html });
-    } catch (error: any) {
-      res.status(500).json({ error: error.message });
+      const poId = parsePositivePoEmailId(req.params.id, "Purchase order id");
+      const document = buildSupplierPoDocument(await loadSupplierPoDocumentSource(db, poId));
+      res.json({ html: renderPoHtml(document), purpose: document.purpose, sourceRevision: document.sourceRevision });
+    } catch (error) {
+      if (error instanceof SupplierPoDocumentError) {
+        console.warn(JSON.stringify({ event: "supplier_po_document_rejected", code: error.code,
+          purchaseOrderId: req.params.id, actorId: req.session.user?.id ?? null, context: error.context }));
+      }
+      sendPoEmailOutboxError(res, error);
     }
   });
 

@@ -1,264 +1,141 @@
-/**
- * po-document.ts
- * Renders a self-contained HTML document for a purchase order.
- * Suitable for printing or embedding in an email.
- */
+/** Self-contained supplier HTML. Only the validated external DTO crosses this boundary. */
+import { supplierPoDocumentSchema, type SupplierPoDocument } from "./supplier-po-document";
 
-import { Decimal } from "decimal.js";
-
-function fmtMoney(cents: number | null | undefined): string {
-  if (cents == null) return "$0.00";
-  const n = new Decimal(cents).dividedBy(100);
-  // Show sub-cent precision for unit costs — no rounding
-  if (!n.isInteger() && n.decimalPlaces() > 2) {
-    return `$${n.toString()}`;
-  }
-  return `$${n.toNumber().toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+function esc(value: string | number | null | undefined): string {
+  return String(value ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
 }
 
-function fmtDate(d: string | Date | null | undefined): string {
-  if (!d) return "—";
-  try {
-    const date = typeof d === "string" ? new Date(d) : d;
-    return date.toLocaleDateString("en-US", { year: "numeric", month: "long", day: "numeric" });
-  } catch {
-    return String(d);
-  }
+/** Integer formatting preserves every cent/mill, including large/signed values. */
+function money(value: number, scale: 100 | 10000 = 100): string {
+  const amount = BigInt(value);
+  const magnitude = amount < BigInt(0) ? -amount : amount;
+  const divisor = BigInt(scale);
+  const digits = scale === 100 ? 2 : 4;
+  let fraction = (magnitude % divisor).toString().padStart(digits, "0");
+  if (scale === 10000) fraction = fraction.replace(/0{1,2}$/, "");
+  return `${amount < BigInt(0) ? "−" : ""}$${(magnitude / divisor).toLocaleString("en-US")}.${fraction}`;
+}
+function date(value: string | null): string {
+  return value === null ? "Not recorded" : new Intl.DateTimeFormat("en-US", {
+    year: "numeric", month: "short", day: "numeric", timeZone: "UTC",
+  }).format(new Date(value));
+}
+function address(value: SupplierPoDocument["vendor"]): string {
+  return `<strong>${esc(value.name)}</strong>`
+    + value.addressLines.map(line => `<div>${esc(line)}</div>`).join("")
+    + (value.addressLines.length === 0 ? '<div class="muted">Address not recorded</div>' : "")
+    + [value.contactName, value.email, value.phone].filter(Boolean).map(line => `<div class="muted">${esc(line)}</div>`).join("");
+}
+function lineRow(line: SupplierPoDocument["lines"][number]): string {
+  const product = line.lineType === "product";
+  const price = line.pricing.unitCostMills !== null ? `${money(line.pricing.unitCostMills, 10000)}<small>per ${esc(line.pricing.unitLabel === "pieces" ? "piece" : line.pricing.unitLabel)}</small>`
+    : line.pricing.quotedTotalCents !== null ? `${money(line.pricing.quotedTotalCents)}<small>quoted goods total</small>`
+      : '<span class="muted">Recorded total</span>';
+  const components = product ? [
+    `Goods ${money(line.productAmountCents)}`,
+    ...(line.packagingCents !== 0 ? [`Packaging ${money(line.packagingCents)}`] : []),
+    ...(line.discountCents !== 0 ? [`Discount −${money(line.discountCents)}`] : []),
+    ...(line.taxCents !== 0 ? [`Tax ${money(line.taxCents)}`] : []),
+  ].join(" · ") : "";
+  return `<tr data-line-id="${line.id}">
+    <td class="line-number">${line.lineNumber}</td>
+    <td class="item"><strong>${esc(product ? line.productName || line.description || line.sku : line.description)}</strong>
+      ${line.sku ? `<small>SKU ${esc(line.sku)}</small>` : ""}
+      ${line.vendorSku ? `<small>Supplier SKU ${esc(line.vendorSku)}</small>` : ""}
+      ${product && line.description && line.description !== line.productName ? `<div class="description">${esc(line.description)}</div>` : ""}
+      ${!product ? `<small>${esc(line.lineType)}</small>` : ""}
+      ${line.appliesToLineNumber !== null ? `<small>Applies to line ${line.appliesToLineNumber}</small>` : ""}
+      ${components ? `<small>${esc(components)}</small>` : ""}
+    </td>
+    <td class="quantity">${line.pricing.quantity.toLocaleString("en-US")}<small>${esc(line.pricing.unitLabel)}</small>
+      ${line.pricing.piecesPerPurchaseUom !== null ? `<small>${line.pricing.piecesPerPurchaseUom.toLocaleString("en-US")} pieces each<br>${line.quantityPieces.toLocaleString("en-US")} pieces total</small>` : ""}
+    </td>
+    <td class="price">${price}</td>
+    <td class="amount">${money(line.totalCents)}</td>
+  </tr>`;
 }
 
-export interface PoDocumentData {
-  po: any;
-  lines: any[];
-  vendor?: any;
-  warehouse?: any;
-  companyName?: string;
-  companyAddress?: string;
-  companyCity?: string;
-  companyState?: string;
-  companyPostalCode?: string;
-  companyCountry?: string;
-}
-
-export function renderPoHtml(data: PoDocumentData): string {
-  const { po, lines, vendor, warehouse, companyName, companyAddress, companyCity, companyState, companyPostalCode, companyCountry } = data;
-
-  const companyDisplayName = companyName || "Your Company";
-  const companyAddrLine1 = companyAddress || "";
-  const companyAddrLine2 = [companyCity, companyState, companyPostalCode, companyCountry].filter(Boolean).join(", ");
-
-  const vendorName = vendor?.name || po?.vendor?.name || `Vendor #${po?.vendorId}`;
-  const vendorAddress = vendor?.address || po?.vendor?.address || "";
-  const vendorCity = vendor?.city || po?.vendor?.city || "";
-  const vendorState = vendor?.state || po?.vendor?.state || "";
-  const vendorPostal = vendor?.postalCode || po?.vendor?.postalCode || "";
-  const vendorCountry = vendor?.country || po?.vendor?.country || "";
-  const vendorContact = vendor?.contactName || po?.vendor?.contactName || "";
-  const vendorEmail = vendor?.email || po?.vendor?.email || "";
-  const vendorPhone = vendor?.phone || po?.vendor?.phone || "";
-
-  const warehouseName = warehouse?.name || po?.warehouse?.name || "";
-  const warehouseAddress = warehouse?.address || po?.warehouse?.address || "";
-  const warehouseCity = warehouse?.city || po?.warehouse?.city || "";
-  const warehouseState = warehouse?.state || po?.warehouse?.state || "";
-  const warehousePostal = warehouse?.postalCode || po?.warehouse?.postalCode || "";
-  const warehouseCountry = warehouse?.country || po?.warehouse?.country || "";
-
-  const hasDiscount = po?.discountCents && Number(po.discountCents) > 0;
-  const hasTax = po?.taxCents && Number(po.taxCents) > 0;
-  const hasShipping = po?.shippingCents && Number(po.shippingCents) > 0;
-  const hasVendorNotes = po?.vendorNotes && po.vendorNotes.trim();
-  const hasInternalNotes = po?.internalNotes && po.internalNotes.trim();
-
-  const lineRows = lines.map((line: any, idx: number) => {
-    const sku = line.sku || line.product?.sku || "—";
-    const description = line.description || line.product?.name || line.variant?.name || "—";
-    const qty = Number(line.orderQty ?? 0);
-    const receiveUnits =
-      line.expectedReceiveUnitsPerVariant || line.unitsPerUom || 1;
-    const uom = line.uom || (receiveUnits > 1 ? `RECV/${receiveUnits}` : "EA");
-    const unitCost = line.unitCostCents;
-    const lineTotal = line.lineTotalCents ?? (unitCost * qty);
-    return `
-      <tr>
-        <td style="text-align:center;color:#6b7280;">${idx + 1}</td>
-        <td style="font-family:monospace;font-size:12px;">${esc(sku)}</td>
-        <td>${esc(description)}</td>
-        <td style="text-align:right;">${qty.toLocaleString()}</td>
-        <td style="text-align:center;color:#6b7280;">${esc(uom)}</td>
-        <td style="text-align:right;font-family:monospace;">${fmtMoney(unitCost)}</td>
-        <td style="text-align:right;font-family:monospace;font-weight:600;">${fmtMoney(lineTotal)}</td>
-      </tr>`;
-  }).join("");
-
+export function renderPoHtml(input: SupplierPoDocument): string {
+  const doc = supplierPoDocumentSchema.parse(input);
+  const totals = doc.totals;
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Purchase Order ${esc(po?.poNumber || "")}</title>
+<title>Purchase Order ${esc(doc.poNumber)} — ${esc(doc.purposeLabel)}</title>
 <style>
-  * { box-sizing: border-box; margin: 0; padding: 0; }
-  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Arial, sans-serif; font-size: 13px; color: #111; background: #fff; }
-  .page { max-width: 800px; margin: 0 auto; padding: 32px 24px; }
-  .header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 32px; border-bottom: 2px solid #111; padding-bottom: 20px; }
-  .company-block h1 { font-size: 22px; font-weight: 700; }
-  .company-block p { font-size: 12px; color: #555; line-height: 1.5; }
-  .po-title { text-align: right; }
-  .po-title h2 { font-size: 26px; font-weight: 800; letter-spacing: 1px; color: #111; }
-  .po-title .po-number { font-size: 15px; font-family: monospace; color: #374151; margin-top: 4px; }
-  .po-title .po-date { font-size: 12px; color: #6b7280; margin-top: 2px; }
-  .addresses { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; margin-bottom: 24px; }
-  .address-block h3 { font-size: 10px; font-weight: 700; letter-spacing: 1px; text-transform: uppercase; color: #6b7280; margin-bottom: 6px; }
-  .address-block p { font-size: 13px; line-height: 1.6; }
-  .address-block .contact { font-size: 12px; color: #6b7280; margin-top: 4px; }
-  .details-row { display: grid; grid-template-columns: repeat(5, 1fr); gap: 12px; background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 6px; padding: 14px 16px; margin-bottom: 24px; }
-  .detail-cell h4 { font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; color: #6b7280; margin-bottom: 3px; }
-  .detail-cell p { font-size: 13px; font-weight: 500; }
-  table { width: 100%; border-collapse: collapse; margin-bottom: 24px; }
-  thead th { background: #111; color: #fff; font-size: 11px; font-weight: 600; letter-spacing: 0.5px; text-transform: uppercase; padding: 10px 12px; text-align: left; }
-  tbody td { padding: 9px 12px; border-bottom: 1px solid #e5e7eb; vertical-align: middle; font-size: 13px; }
-  tbody tr:last-child td { border-bottom: none; }
-  tbody tr:nth-child(even) { background: #f9fafb; }
-  .totals { display: flex; justify-content: flex-end; margin-bottom: 24px; }
-  .totals-table { min-width: 260px; }
-  .totals-table td { padding: 5px 12px; font-size: 13px; }
-  .totals-table td:first-child { color: #6b7280; }
-  .totals-table td:last-child { text-align: right; font-family: monospace; font-weight: 500; }
-  .totals-table .grand-total td { border-top: 2px solid #111; font-size: 15px; font-weight: 700; padding-top: 8px; }
-  .totals-table .grand-total td:first-child { color: #111; }
-  .notes { margin-bottom: 24px; }
-  .notes h3 { font-size: 11px; font-weight: 700; letter-spacing: 0.5px; text-transform: uppercase; color: #6b7280; margin-bottom: 6px; }
-  .notes p { font-size: 13px; line-height: 1.6; white-space: pre-wrap; border: 1px solid #e5e7eb; border-radius: 4px; padding: 10px 12px; background: #f9fafb; }
-  .footer { border-top: 1px solid #e5e7eb; padding-top: 16px; font-size: 11px; color: #9ca3af; text-align: center; }
-  @media print {
-    body { font-size: 12px; }
-    .page { padding: 16px; }
-    .no-print { display: none; }
-    @page { margin: 1cm; }
-  }
+  * { box-sizing: border-box; }
+  body { margin: 0; color: #17212c; background: #fff; font: 13px/1.5 Arial, sans-serif; }
+  .page { max-width: 900px; margin: auto; padding: 32px; }
+  h1,h2,h3,p { margin: 0; }
+  .header { display: flex; justify-content: space-between; gap: 24px; padding-bottom: 22px; border-bottom: 2px solid #17212c; }
+  .company { max-width: 48%; overflow-wrap: anywhere; }
+  .company h1 { font-size: 21px; }
+  .company p { color: #536170; }
+  .identity { text-align: right; }
+  .identity h2 { font-size: 23px; letter-spacing: .04em; }
+  .number { font-size: 16px; font-weight: 700; }
+  .muted,small { color: #536170; }
+  small { display: block; font-size: 11px; font-weight: normal; }
+  .notice { margin: 18px 0; padding: 12px 14px; background: #f1f5f9; border-left: 3px solid #536170; }
+  .notice strong { display: block; font-size: 11px; letter-spacing: .06em; margin-bottom: 4px; }
+  .addresses { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; margin: 22px 0; }
+  .addresses section { white-space: pre-line; overflow-wrap: anywhere; }
+  h3 { font-size: 10px; text-transform: uppercase; letter-spacing: .08em; color: #536170; margin-bottom: 6px; }
+  .details { display: grid; grid-template-columns: repeat(4,minmax(0,1fr)); gap: 16px; padding: 14px 0; border-top: 1px solid #d8e0e8; border-bottom: 1px solid #d8e0e8; margin-bottom: 22px; }
+  .details div { overflow-wrap: anywhere; }
+  .table-wrap { width: 100%; overflow-x: auto; }
+  .lines { width: 100%; min-width: 570px; border-collapse: collapse; table-layout: fixed; }
+  .lines th { background: #17212c; color: #fff; font-size: 10px; text-align: left; padding: 10px 8px; text-transform: uppercase; letter-spacing: .03em; }
+  .lines td { border-bottom: 1px solid #d8e0e8; padding: 12px 8px; vertical-align: top; overflow-wrap: anywhere; }
+  .lines .line-number { width: 5%; color: #536170; }
+  .lines .item { width: 39%; }
+  .lines .quantity { width: 15%; text-align: right; }
+  .lines .price { width: 20%; text-align: right; }
+  .lines .amount { width: 21%; text-align: right; font-weight: 700; }
+  .description { margin-top: 4px; white-space: pre-wrap; }
+  .totals { width: 320px; max-width: 100%; margin: 20px 0 24px auto; border-collapse: collapse; break-inside: avoid; }
+  .totals td { padding: 5px 0 5px 16px; }
+  .totals td:last-child { text-align: right; white-space: nowrap; }
+  .total td { padding-top: 12px; border-top: 2px solid #17212c; font-size: 16px; font-weight: 700; }
+  .notes { border-top: 1px solid #d8e0e8; padding-top: 16px; margin-top: 20px; }
+  .notes p { white-space: pre-wrap; overflow-wrap: anywhere; }
+  footer { margin-top: 28px; padding-top: 12px; border-top: 1px solid #d8e0e8; color: #536170; font-size: 10px; overflow-wrap: anywhere; }
+  @media(max-width:600px) { .page { padding: 16px; } .header { gap: 12px; } .company h1 { font-size: 17px; } .identity h2 { font-size: 16px; } .details { grid-template-columns: repeat(2,minmax(0,1fr)); } .addresses { gap: 16px; } }
+  @media print { @page { margin: 14mm; } .page { max-width: none; padding: 0; } .table-wrap { overflow: visible; } .lines { min-width: 0; } thead { display: table-header-group; } tr { break-inside: avoid; page-break-inside: avoid; } .header,.notice,.addresses,.details,.totals { break-inside: avoid; } body { font-size: 11px; } .lines th,.lines td { padding: 8px 5px; } }
 </style>
 </head>
 <body>
-<div class="page">
-  <!-- Header -->
-  <div class="header">
-    <div class="company-block">
-      <h1>${esc(companyDisplayName)}</h1>
-      ${companyAddrLine1 ? `<p>${esc(companyAddrLine1)}</p>` : ""}
-      ${companyAddrLine2 ? `<p>${esc(companyAddrLine2)}</p>` : ""}
-    </div>
-    <div class="po-title">
-      <h2>PURCHASE ORDER</h2>
-      <div class="po-number">${esc(po?.poNumber || "")}</div>
-      <div class="po-date">Date: ${fmtDate(po?.orderDate || po?.createdAt)}</div>
-    </div>
+<main class="page">
+  <header class="header">
+    <div class="company"><h1>${esc(doc.company.name)}</h1>${doc.company.addressLines.map(line => `<p>${esc(line)}</p>`).join("")}</div>
+    <div class="identity"><h2>PURCHASE ORDER</h2><p class="number">${esc(doc.poNumber)}</p><p>Revision ${doc.revisionNumber} · ${doc.currency}</p></div>
+  </header>
+  <aside class="notice"><strong>${esc(doc.purposeLabel)}</strong>${esc(doc.notice)}</aside>
+  <div class="addresses"><section><h3>Supplier</h3>${address(doc.vendor)}</section><section><h3>Ship to</h3>${address(doc.shipTo)}</section></div>
+  <div class="details">
+    <div><h3>${doc.orderDate === null ? "Created" : "Order date"}</h3>${date(doc.orderDate ?? doc.createdAt)}</div>
+    <div><h3>Expected delivery</h3>${date(doc.expectedDeliveryDate)}</div>
+    <div><h3>Payment terms</h3>${esc(doc.paymentTerms ?? "Not recorded")}</div>
+    <div><h3>Incoterms</h3>${esc(doc.incoterms ?? "Not recorded")}</div>
   </div>
-
-  <!-- Addresses -->
-  <div class="addresses">
-    <div class="address-block">
-      <h3>Vendor</h3>
-      <p><strong>${esc(vendorName)}</strong></p>
-      ${vendorAddress ? `<p>${esc(vendorAddress)}</p>` : ""}
-      ${[vendorCity, vendorState, vendorPostal, vendorCountry].filter(Boolean).join(", ") ? `<p>${esc([vendorCity, vendorState, vendorPostal, vendorCountry].filter(Boolean).join(", "))}</p>` : ""}
-      ${vendorContact || vendorEmail || vendorPhone ? `<div class="contact">
-        ${vendorContact ? `<span>${esc(vendorContact)}</span>` : ""}
-        ${vendorEmail ? `<span> · ${esc(vendorEmail)}</span>` : ""}
-        ${vendorPhone ? `<span> · ${esc(vendorPhone)}</span>` : ""}
-      </div>` : ""}
-    </div>
-    <div class="address-block">
-      <h3>Ship To</h3>
-      ${warehouseName ? `<p><strong>${esc(warehouseName)}</strong></p>` : `<p><strong>${esc(companyDisplayName)}</strong></p>`}
-      ${warehouseAddress ? `<p>${esc(warehouseAddress)}</p>` : companyAddrLine1 ? `<p>${esc(companyAddrLine1)}</p>` : ""}
-      ${[warehouseCity, warehouseState, warehousePostal, warehouseCountry].filter(Boolean).join(", ") ? `<p>${esc([warehouseCity, warehouseState, warehousePostal, warehouseCountry].filter(Boolean).join(", "))}</p>` : companyAddrLine2 ? `<p>${esc(companyAddrLine2)}</p>` : ""}
-    </div>
-  </div>
-
-  <!-- PO Details Row -->
-  <div class="details-row">
-    <div class="detail-cell">
-      <h4>Order Date</h4>
-      <p>${fmtDate(po?.orderDate || po?.createdAt)}</p>
-    </div>
-    <div class="detail-cell">
-      <h4>Expected Delivery</h4>
-      <p>${fmtDate(po?.expectedDeliveryDate)}</p>
-    </div>
-    <div class="detail-cell">
-      <h4>Payment Terms</h4>
-      <p>${po?.paymentTerms ? esc(po.paymentTerms) : "—"}</p>
-    </div>
-    <div class="detail-cell">
-      <h4>Incoterms</h4>
-      <p>${po?.incoterms ? esc(po.incoterms) : "—"}</p>
-    </div>
-    <div class="detail-cell">
-      <h4>Currency</h4>
-      <p>${po?.currency ? esc(po.currency) : "USD"}</p>
-    </div>
-  </div>
-
-  <!-- Line Items -->
-  <table>
-    <thead>
-      <tr>
-        <th style="width:40px;text-align:center;">#</th>
-        <th style="width:110px;">SKU</th>
-        <th>Description</th>
-        <th style="width:70px;text-align:right;">Qty</th>
-        <th style="width:70px;text-align:center;">UOM</th>
-        <th style="width:100px;text-align:right;">Unit Cost</th>
-        <th style="width:110px;text-align:right;">Line Total</th>
-      </tr>
-    </thead>
-    <tbody>
-      ${lineRows || '<tr><td colspan="7" style="text-align:center;color:#6b7280;padding:24px;">No line items</td></tr>'}
-    </tbody>
-  </table>
-
-  <!-- Totals -->
-  <div class="totals">
-    <table class="totals-table">
-      <tbody>
-        <tr><td>Subtotal</td><td>${fmtMoney(po?.subtotalCents)}</td></tr>
-        ${hasDiscount ? `<tr><td>Discount</td><td style="color:#16a34a;">−${fmtMoney(po?.discountCents)}</td></tr>` : ""}
-        ${hasTax ? `<tr><td>Tax</td><td>${fmtMoney(po?.taxCents)}</td></tr>` : ""}
-        ${hasShipping ? `<tr><td>Shipping</td><td>${fmtMoney(po?.shippingCents)}</td></tr>` : ""}
-        <tr class="grand-total">
-          <td>Grand Total</td>
-          <td>${fmtMoney(po?.grandTotalCents)}</td>
-        </tr>
-      </tbody>
-    </table>
-  </div>
-
-  ${hasVendorNotes ? `
-  <div class="notes">
-    <h3>Notes to Vendor</h3>
-    <p>${esc(po.vendorNotes)}</p>
-  </div>` : ""}
-
-  ${hasInternalNotes ? `
-  <div class="notes">
-    <h3>Internal Notes</h3>
-    <p style="color:#6b7280;">${esc(po.internalNotes)}</p>
-  </div>` : ""}
-
-  <!-- Footer -->
-  <div class="footer">
-    <p>This is an official purchase order from ${esc(companyDisplayName)}. Please confirm receipt of this order and advise of any discrepancies.</p>
-  </div>
-</div>
+  ${doc.referenceNumber ? `<p style="margin-bottom:12px">Supplier reference: ${esc(doc.referenceNumber)}</p>` : ""}
+  <div class="table-wrap"><table class="lines" aria-label="Purchase order lines">
+    <thead><tr><th class="line-number">#</th><th class="item">Item / terms</th><th class="quantity">Quantity</th><th class="price">Quoted price</th><th class="amount">Line total</th></tr></thead>
+    <tbody>${doc.lines.map(lineRow).join("") || '<tr><td colspan="5">No active line items.</td></tr>'}</tbody>
+  </table></div>
+  <table class="totals" aria-label="Purchase order totals"><tbody>
+    <tr><td>Line subtotal</td><td>${money(totals.subtotalCents)}</td></tr>
+    ${totals.discountCents !== 0 ? `<tr><td>Order discount</td><td>−${money(totals.discountCents)}</td></tr>` : ""}
+    ${totals.taxCents !== 0 ? `<tr><td>Order tax</td><td>${money(totals.taxCents)}</td></tr>` : ""}
+    ${totals.shippingCents !== 0 ? `<tr><td>Shipping</td><td>${money(totals.shippingCents)}</td></tr>` : ""}
+    <tr class="total"><td>Total ${doc.currency}</td><td>${money(totals.totalCents)}</td></tr>
+  </tbody></table>
+  ${doc.vendorNotes?.trim() ? `<section class="notes"><h3>Notes to supplier</h3><p>${esc(doc.vendorNotes)}</p></section>` : ""}
+  <footer>PO ${esc(doc.poNumber)} · Revision ${doc.revisionNumber} · ${esc(doc.purposeLabel)}<br>Document reference: ${doc.sourceRevision}</footer>
+</main>
 </body>
 </html>`;
-}
-
-function esc(s: string | null | undefined): string {
-  if (!s) return "";
-  return String(s)
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;");
 }
