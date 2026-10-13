@@ -33,9 +33,14 @@ export const MAX_LISTING_POLICY_NAME_LENGTH = 200;
 export const MAX_LISTING_SHELF_ID_LENGTH = 40;
 /** Writer bound on a shelf's path name. HYPOTHESIS that it covers eBay's longest path; eBay's limit was not checked. */
 export const MAX_LISTING_SHELF_NAME_LENGTH = 500;
-/** The request ledger's operations (= its CHECK). W7's price apply is PR 9. */
+/**
+ * The request ledger's operations (= its CHECK: 0738's three, and W7's price
+ * apply from migration 0750). Every reader of a ledger row accepts all four;
+ * only a `price_change_apply` row carries a review id (0750's pairing CHECK),
+ * and it is written only by the apply-only insert.
+ */
 export const LISTING_SETTING_REQUEST_OPERATIONS = [
-  "product_settings_bulk", "category_settings_clear", "category_moves_acknowledge",
+  "product_settings_bulk", "category_settings_clear", "category_moves_acknowledge", "price_change_apply",
 ] as const;
 export type ListingSettingRequestOperation = (typeof LISTING_SETTING_REQUEST_OPERATIONS)[number];
 /** Who wrote a revision or ledger row (= the actor CHECKs). */
@@ -138,9 +143,29 @@ export const productListingSettingBulkPatchSchema = productListingSettingPatchSc
     ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["mainText"], message: "Main text can only be reset for many products." });
   }
 });
+/**
+ * The product rows of a W7 price apply (plan PR 9, P23, 9.7): the price (a
+ * recipe, or null for "Use default") of the products a price check names, or
+ * the settings a category's "Also clear theirs" resets (null) on its
+ * products. Every setting but the price only as a reset: the apply carries
+ * no product text, so the heavy-write text budget counts its patch as 0
+ * bytes (plan 3.10 (b)). May be empty here; the bulk writer allows an empty
+ * patch only with no products (a release-only apply, or a category apply
+ * that clears nothing, still writes its ledger row; v2, C-money-4).
+ */
+export const productListingSettingPriceApplyPatchSchema = productListingSettingValuesSchema.partial().strict()
+  .superRefine((patch, ctx) => {
+    for (const field of PRODUCT_LISTING_SETTING_FIELDS) {
+      if (field === "price" || patch[field] == null) continue;
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: [field], message: field === "mainText"
+        ? "Main text can only be reset for many products."
+        : "A price change sets only prices; other settings can only be reset." });
+    }
+  });
 export type ProductListingSettingPatch = z.infer<typeof productListingSettingPatchSchema>;
 export type CategoryListingSettingPatch = z.infer<typeof categoryListingSettingPatchSchema>;
 export type ProductListingSettingBulkPatch = z.infer<typeof productListingSettingBulkPatchSchema>;
+export type ProductListingSettingPriceApplyPatch = z.infer<typeof productListingSettingPriceApplyPatchSchema>;
 
 /**
  * "Got it" for products Card Shellz moved to another category (W13): each

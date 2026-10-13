@@ -7,14 +7,17 @@ import {
   PRODUCT_LISTING_SETTING_FIELDS,
   productListingSettingBulkPatchSchema,
   productListingSettingPatchSchema,
+  productListingSettingPriceApplyPatchSchema,
   productListingSettingRowSchema,
   productListingSettingValuesSchema,
   type ProductListingSettingBulkPatch,
   type ProductListingSettingField,
   type ProductListingSettingPatch,
+  type ProductListingSettingPriceApplyPatch,
   type ProductListingSettingRow,
   type ProductListingSettingValues,
 } from "../../../../shared/dropship/listing-setting-values";
+import { priceChangeReviewIdSchema } from "../../../../shared/dropship/listing-setting-writes";
 import type {
   ProductListingSettingSaveInput,
   ProductListingSettingSaveResult,
@@ -46,6 +49,7 @@ import {
   type StoredListingSettingRevisionColumns,
   type StoredProductListingSettingColumns,
 } from "./dropship-listing-setting-shared.repository";
+import { insertPriceChangeApplyRequestWithClient } from "./dropship-price-change.repository";
 
 /**
  * A vendor's own listing settings for Card Shellz products (plan PR 8a,
@@ -83,10 +87,13 @@ const MAX_REPORTED_ISSUES = 10;
  */
 export const MAX_BULK_REVISION_PAYLOAD_BYTES = 8 * 1024 * 1024;
 const REQUEST_HASH_PATTERN = /^[a-f0-9]{64}$/;
-/** W7's price apply is PR 9 (plan D5, D28): until then a bulk save is one of these. */
+/** W6's and W12's operations; W7's `price_change_apply` has its own request schema below. */
 const BULK_OPERATIONS = ["product_settings_bulk", "category_settings_clear"] as const satisfies readonly ProductListingSettingsBulkInput["operation"][];
 
 const int4Id = z.number().int().positive().max(MAX_INT4_ID);
+const bulkProductSchema = z.object({ productId: int4Id, expectedRevisionId: int4Id.nullable() });
+const eachProductOnce = (products: ReadonlyArray<{ productId: number }>) =>
+  new Set(products.map((product) => product.productId)).size === products.length;
 
 /**
  * A bulk request as the writer accepts it (plan D28, F3): one of the two
@@ -96,10 +103,27 @@ const int4Id = z.number().int().positive().max(MAX_INT4_ID);
  */
 const bulkRequestSchema = z.object({
   operation: z.enum(BULK_OPERATIONS),
-  products: z.array(z.object({ productId: int4Id, expectedRevisionId: int4Id.nullable() }))
-    .min(1).max(MAX_LISTING_SETTING_BULK_PRODUCTS)
-    .refine((products) => new Set(products.map((product) => product.productId)).size === products.length, "Each product once."),
+  products: z.array(bulkProductSchema).min(1).max(MAX_LISTING_SETTING_BULK_PRODUCTS).refine(eachProductOnce, "Each product once."),
   patch: productListingSettingBulkPatchSchema,
+});
+
+/**
+ * W7's apply as the writer accepts it (plan P23, 9.7): the review it applies,
+ * 0 to 10,000 distinct products, and a patch that may set the price, resets
+ * anything else, and is empty only when no product is named (a release-only
+ * apply, or a category apply that clears nothing, still writes its ledger
+ * row; v2, C-money-4). Every refinement is worded, so its issue keeps its
+ * message in the 400.
+ */
+const priceChangeApplyRequestSchema = z.object({
+  operation: z.literal("price_change_apply"),
+  reviewId: priceChangeReviewIdSchema,
+  products: z.array(bulkProductSchema).max(MAX_LISTING_SETTING_BULK_PRODUCTS).refine(eachProductOnce, "Each product once."),
+  patch: productListingSettingPriceApplyPatchSchema,
+}).superRefine((request, context) => {
+  if (request.products.length > 0 && !Object.values(request.patch).some((value) => value !== undefined)) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "Change at least one setting.", path: ["patch"] });
+  }
 });
 
 const VALUE_COLUMN_LIST = PRODUCT_LISTING_SETTING_VALUE_COLUMNS.join(", ");
@@ -170,12 +194,12 @@ interface ProductVersionConflict {
   expectedRevisionId: number | null;
   actualRevisionId: number | null;
 }
-/** A checked bulk request, products in ascending id order. */
-interface BulkRequest {
-  operation: (typeof BULK_OPERATIONS)[number];
-  products: Array<{ productId: number; expectedRevisionId: number | null }>;
-  patch: ProductListingSettingBulkPatch;
-}
+/** A checked bulk request, products in ascending id order; W7's apply with the review it applies. */
+type BulkRequest =
+  | { operation: (typeof BULK_OPERATIONS)[number]; reviewId: null;
+    products: Array<{ productId: number; expectedRevisionId: number | null }>; patch: ProductListingSettingBulkPatch }
+  | { operation: "price_change_apply"; reviewId: string;
+    products: Array<{ productId: number; expectedRevisionId: number | null }>; patch: ProductListingSettingPriceApplyPatch };
 interface ProductChange {
   productId: number;
   before: ProductListingSettingRow | null;
@@ -287,12 +311,14 @@ export async function saveProductListingSettingWithClient(
 }
 
 // ---------------------------------------------------------------------------
-// Many products (W6, W12 "Also clear theirs")
+// Many products (W6, W12 "Also clear theirs", W7's price apply)
 // ---------------------------------------------------------------------------
 
 /**
  * One patch for up to 10,000 products, all or nothing, set-based:
  * 1. the request is checked before any SQL (DROPSHIP_LISTING_SETTINGS_BULK_INVALID);
+ *    W7's `price_change_apply` may name no product, and its ledger row
+ *    carries the review it applies (the apply-only insert, migration 0750);
  * 2. a key already in the ledger is a replay (same store, operation and hash,
  *    else DROPSHIP_IDEMPOTENCY_CONFLICT), answered from the revisions it wrote;
  *    a count that differs from the ledger's is DROPSHIP_LISTING_SETTINGS_REPLAY_INCOMPLETE;
@@ -341,11 +367,14 @@ export async function saveProductListingSettingsBulkWithClient(
   }
 
   // Claims the key: a concurrent first use is 23505 on the ledger key index, which the wrapper maps.
-  const requestId = await insertListingSettingRequestWithClient(client, {
-    vendorId: scope.vendorId, storeConnectionId: scope.storeConnectionId, operation: request.operation,
-    idempotencyKey: scope.requestKey, requestHash: input.requestHash, productCount: changes.length,
-    actor: scope.actor, now: input.now,
-  });
+  // W7's apply also claims its review: a second apply of one review is 23505 on 0750's review index.
+  const ledgerRow = {
+    vendorId: scope.vendorId, storeConnectionId: scope.storeConnectionId, idempotencyKey: scope.requestKey,
+    requestHash: input.requestHash, productCount: changes.length, actor: scope.actor, now: input.now,
+  };
+  const requestId = request.operation === "price_change_apply"
+    ? await insertPriceChangeApplyRequestWithClient(client, { ...ledgerRow, reviewId: request.reviewId })
+    : await insertListingSettingRequestWithClient(client, { ...ledgerRow, operation: request.operation });
   if (changes.length === 0) return { outcome: "unchanged", requestId, changed: [], unchangedProductIds };
 
   const changed = await insertBulkRevisions(client, scope, requestId, input, changes);
@@ -359,6 +388,8 @@ export async function saveProductListingSettingsBulkWithClient(
       product_id: change.productId,
       payload: {
         requestKey: scope.requestKey, requestId, operation: request.operation,
+        // W7's apply names its review, so one query on a review finds the product rows it changed (plan 9.7).
+        ...(request.reviewId === null ? {} : { reviewId: request.reviewId }),
         revisionId: changed[index].revisionId, previousRevisionId: change.before?.revisionId ?? null,
         changedFields: change.changedFields,
         before: listingSettingBulkAuditValues(change.before?.values ?? null, change.changedFields),
@@ -514,19 +545,30 @@ function parseSingleSave(input: ProductListingSettingSaveInput): ProductListingS
  * enum value received, an unrecognized key), so they never reach an error.
  */
 function parseBulkRequest(input: ProductListingSettingsBulkInput): BulkRequest {
-  const parsed = bulkRequestSchema.safeParse({ operation: input.operation, products: input.products, patch: input.patch });
-  if (!parsed.success) {
-    throw new DropshipError("DROPSHIP_LISTING_SETTINGS_BULK_INVALID", "This change for many products is not valid.", {
-      issues: parsed.error.issues.slice(0, MAX_REPORTED_ISSUES).map((issue) => ({
-        path: issue.path.join("."), code: issue.code,
-        ...(issue.code === z.ZodIssueCode.custom ? { message: issue.message } : {}),
-      })),
-      retryable: false, classification: "permanent",
-    });
-  }
   // Ascending ids: rows are locked, compared and written in one order.
-  const products = [...parsed.data.products].sort((left, right) => left.productId - right.productId);
-  return { operation: parsed.data.operation, products, patch: parsed.data.patch };
+  const ascending = (products: ReadonlyArray<{ productId: number; expectedRevisionId: number | null }>) =>
+    [...products].sort((left, right) => left.productId - right.productId);
+  if (input.operation === "price_change_apply") {
+    const parsed = priceChangeApplyRequestSchema.safeParse({
+      operation: input.operation, reviewId: input.reviewId, products: input.products, patch: input.patch,
+    });
+    if (!parsed.success) throw bulkInvalid(parsed.error);
+    return { operation: parsed.data.operation, reviewId: parsed.data.reviewId, products: ascending(parsed.data.products),
+      patch: parsed.data.patch };
+  }
+  const parsed = bulkRequestSchema.safeParse({ operation: input.operation, products: input.products, patch: input.patch });
+  if (!parsed.success) throw bulkInvalid(parsed.error);
+  return { operation: parsed.data.operation, reviewId: null, products: ascending(parsed.data.products), patch: parsed.data.patch };
+}
+
+function bulkInvalid(error: z.ZodError): DropshipError {
+  return new DropshipError("DROPSHIP_LISTING_SETTINGS_BULK_INVALID", "This change for many products is not valid.", {
+    issues: error.issues.slice(0, MAX_REPORTED_ISSUES).map((issue) => ({
+      path: issue.path.join("."), code: issue.code,
+      ...(issue.code === z.ZodIssueCode.custom ? { message: issue.message } : {}),
+    })),
+    retryable: false, classification: "permanent",
+  });
 }
 
 /** A key that already wrote a revision may be replayed only for the same store, product and request, and never a bulk child. */

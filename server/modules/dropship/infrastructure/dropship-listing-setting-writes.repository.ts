@@ -7,17 +7,21 @@ import {
   type ProductListingSettingField,
 } from "../../../../shared/dropship/listing-setting-values";
 import type { ListingPriceTransaction } from "../application/dropship-listing-price-service";
-import { olderGroupRuleCounts } from "../application/dropship-listing-settings-facts";
+import { olderGroupRuleCounts, type OlderGroupRuleCounts } from "../application/dropship-listing-settings-facts";
 import type {
+  CategorySettingFacts,
   ListingSettingActor,
   ListingSettingFacts,
+  ListingSettingFactsInput,
   ListingSettingPreflightTransaction,
+  ListingSettingReviewTransaction,
   ListingSettingSystemTransaction,
   ListingSettingWriteRepository,
   ListingSettingWriteTransaction,
   ListingTextBytes,
   ListingTextBytesInput,
   ProductSettingFacts,
+  StoredPriceChangeReview,
 } from "../application/dropship-listing-setting-writes";
 import { DropshipError } from "../domain/errors";
 import { REQUEST_KEY_CHILD_SOURCES, type RequestKeyChildSource, type RequestKeyUse } from "../domain/listing-setting-request-key-use";
@@ -35,6 +39,7 @@ import { readEbayCategoryRules } from "./dropship-ebay-category-rules.reader";
 import { readContentProfile } from "./dropship-listing-content.reader";
 import { saveListingContentWithClient } from "./dropship-listing-content.repository";
 import { PgDropshipListingPreviewRepository } from "./dropship-listing-preview.repository";
+import { readCatalogCategoryNames } from "./dropship-listing-setting-layers.reader";
 import { listingPriceTransactionForClient } from "./dropship-listing-price.repository";
 import {
   POLICY_FEATURE_LOCK_SQL,
@@ -43,9 +48,16 @@ import {
 } from "./dropship-listing-setting-leftovers.repository";
 import {
   MAX_LISTING_SETTING_ACTOR_ID_LENGTH,
+  listingSettingPriceFromColumns,
   listingSettingsIdempotencyConflict,
   type ListingSettingWriteScope,
 } from "./dropship-listing-setting-shared.repository";
+import {
+  findPriceChangeApplyByReviewWithClient,
+  insertPriceChangeReviewWithClient,
+  loadPriceChangeReviewWithClient,
+  readPriceChangeReviewForMember as readMemberPriceChangeReview,
+} from "./dropship-price-change.repository";
 import {
   acknowledgeCategoryMovesWithClient,
   insertFirstCategoryMarksWithClient,
@@ -93,7 +105,9 @@ import { PgShellzClubProductCostAdapter } from "./shellz-club-product-cost.adapt
  *    the session holds is granted at once.
  *
  * The read-only preflight (plan PR 9, 6.2 #4) takes none of these locks: it
- * reads one snapshot before any eBay call and writes nothing.
+ * reads one snapshot before any eBay call and writes nothing. W7's price
+ * check (executeReview, plan PR 9, 3.9) takes steps 2 and 3 only: no request
+ * key, no lockCatalog, no writer; its one write is the review row.
  *
  * The transaction object enforces what it can of that order and of the plan's
  * key rules; a breach is DROPSHIP_LISTING_SETTINGS_INVARIANT_FAILED, a
@@ -201,26 +215,40 @@ export const PRODUCT_SETTING_FLAG_COLUMNS = {
   textBelow: "text_below_mode",
   mainText: "body_catalog_hash",
 } as const satisfies Record<ProductListingSettingField, string>;
+/** A revision's price group (0738's and 0739's price CHECKs: all four or none). */
+const PRICE_COLUMNS = ["price_basis", "price_markup_bps", "price_flat_cents", "price_rounding"] as const;
+const PRICE_COLUMN_LIST = PRICE_COLUMNS.map((column) => `r.${column}`).join(", ");
 /**
- * Each product's own-field flags (plan PR 9, 8.2; v3r, C-feas-2): one IS NOT
- * NULL flag per setting, never a text, name or path column, so no text
+ * Each product's current revision, own price and own-field flags (plan PR 9,
+ * 8.2; v3r, C-feas-2): the revision id, the four price columns and one IS
+ * NOT NULL flag per setting, never a text, name or path column, so no text
  * enters the heap. The vendor's and the store's rows only; no lock.
  */
-const PRODUCT_SETTING_FACTS_SQL = `SELECT s.product_id,
+const PRODUCT_SETTING_FACTS_SQL = `SELECT s.product_id, s.revision_id, ${PRICE_COLUMN_LIST},
        ${Object.values(PRODUCT_SETTING_FLAG_COLUMNS).map((column) => `r.${column} IS NOT NULL AS set_${column}`).join(", ")}
      FROM dropship.dropship_product_listing_settings s
      JOIN dropship.dropship_product_listing_setting_revisions r ON r.id = s.revision_id AND r.vendor_id = s.vendor_id
        AND r.store_connection_id = s.store_connection_id AND r.product_id = s.product_id
      WHERE s.vendor_id = $1 AND s.store_connection_id = $2 AND s.product_id = ANY($3::int[])
      ORDER BY s.product_id`;
+/** Each category's current revision and own price, the same way: no text, no name, no lock. */
+const CATEGORY_SETTING_FACTS_SQL = `SELECT s.category_id, s.revision_id, ${PRICE_COLUMN_LIST}
+     FROM dropship.dropship_category_listing_settings s
+     JOIN dropship.dropship_category_listing_setting_revisions r ON r.id = s.revision_id AND r.vendor_id = s.vendor_id
+       AND r.store_connection_id = s.store_connection_id AND r.category_id = s.category_id
+     WHERE s.vendor_id = $1 AND s.store_connection_id = $2 AND s.category_id = ANY($3::int[])
+     ORDER BY s.category_id`;
 
 /**
  * The request-key unique constraints of 0738 and 0739, the size price child
- * key of 0657 and the policy, shelf and content child keys of 217, 215 and
- * 0660 (plan PR 9, P32). PR 9's routes never reach these: a vendor has one
- * member, and the request lock is member:key, so a second use of a key waits
- * and the replay probe answers it. Only the policy and shelf keys can be
- * reached otherwise: an older per-size policy or shelf route given a
+ * key of 0657, the policy, shelf and content child keys of 217, 215 and
+ * 0660 (plan PR 9, P32), and 0750's one-apply-per-review index (plan 9.1).
+ * PR 9's routes never reach these: a vendor has one member, and the request
+ * lock is member:key, so a second use of a key waits and the replay probe
+ * answers it. A second apply of one review under another key is serialized
+ * by the store lock, and its by-review read sees the first apply's row, so
+ * the review index is a backstop only (plan 3.7). Only the policy and shelf
+ * keys can be reached otherwise: an older per-size policy or shelf route given a
  * child-key-shaped key, while a PR 9 write under that key is between its
  * probe and its insert, because those writers take no store lock (plan 3.7).
  * That is a key reuse (409), not a fault. The older price and content routes
@@ -238,6 +266,7 @@ const REQUEST_KEY_CONSTRAINTS: ReadonlySet<string> = new Set([
   "dropship_ebay_listing_policy_override_revision_idem_uk",
   "dropship_ebay_store_category_revision_idem_uk",
   "dropship_listing_content_revision_vendor_id_idempotency_key_key",
+  "dropship_product_listing_setting_requests_review_idx",
 ]);
 const PRODUCT_FOREIGN_KEYS: ReadonlySet<string> = new Set([
   "dropship_product_listing_setting_revision_product_fk",
@@ -346,6 +375,42 @@ export class PgDropshipListingSettingWritesRepository implements ListingSettingW
       }, input.memberId);
       return operation(state.transaction());
     });
+  }
+
+  /**
+   * W7's price check (plan PR 9, P22, 3.9): the store lock and the owner rows
+   * FOR SHARE, READ COMMITTED, with no request lock (a review is unkeyed) and
+   * no lockCatalog (a review takes no selection lock, P37). The actor is the
+   * member; the one write is the review row.
+   */
+  async executeReview<T>(
+    input: { memberId: string; storeConnectionId: number },
+    operation: (tx: ListingSettingReviewTransaction) => Promise<T>,
+  ): Promise<T> {
+    assertReviewInput(input);
+    return this.inTransaction(async (client, guarded, isOpen) => {
+      await client.query(STORE_LOCK_SQL, [input.storeConnectionId]);
+      const owner = await client.query<{ vendor_id: unknown }>(VENDOR_OWNER_SQL, [input.memberId, input.storeConnectionId]);
+      const vendorId = ownerVendorId(owner.rows[0], input.storeConnectionId);
+      return operation(reviewTransaction(guarded, isOpen, {
+        vendorId, storeConnectionId: input.storeConnectionId, memberId: input.memberId,
+      }));
+    });
+  }
+
+  /**
+   * The member's stored W7 review, for its pages (plan 9.6): one statement
+   * on the pool, no transaction, no lock, ownership by the member. A failure
+   * is mapped as a write's would be (a lost connection is the retryable BUSY).
+   */
+  async readPriceChangeReviewForMember(
+    input: { memberId: string; storeConnectionId: number; reviewId: string },
+  ): Promise<StoredPriceChangeReview | null> {
+    try {
+      return await readMemberPriceChangeReview(this.dbPool, input);
+    } catch (error) {
+      throw isPoolAcquireTimeout(error) ? databaseUnavailable("pool_acquire_timeout") : mapListingSettingWriteError(error);
+    }
   }
 
   /**
@@ -495,10 +560,7 @@ class WriteTransactionState {
       lockCatalog: (input) => this.lockCatalog(input),
       listProductSizes: async (productIds) => {
         this.assertOpen();
-        const ids = lockIds(productIds, "productIds");
-        if (ids.length === 0) return [];
-        const result = await client.query<{ id: unknown }>(PRODUCT_SIZES_SQL, [ids]);
-        return result.rows.map((row) => storedInt4Id(row.id, "product_variants.id"));
+        return readProductSizes(client, productIds);
       },
       loadPricingProfile: async () => {
         this.assertOpen();
@@ -515,22 +577,25 @@ class WriteTransactionState {
       },
       loadOlderGroupRuleCounts: async () => {
         this.assertOpen();
-        // The three readers' own argument orders differ (store, vendor for pricing).
-        const pricing = await readPricingProfile(client, scope.storeConnectionId, scope.vendorId);
-        const content = await readContentProfile(client, scope.vendorId, scope.storeConnectionId);
-        const ebayCategoryRules = await readEbayCategoryRules(client, scope.vendorId, scope.storeConnectionId);
-        return olderGroupRuleCounts({ pricing, content, ebayCategoryRules });
+        return readOlderGroupRuleCounts(client, target);
       },
       listCategoryProductIds: async (categoryId) => {
         this.assertOpen();
-        if (!isInt4Id(categoryId)) throw listingSettingsInvariantFailed("A category's products are read for a whole-number category id only.");
-        const result = await client.query<{ id: unknown }>(CATEGORY_PRODUCTS_SQL, [categoryId]);
-        return result.rows.map((row) => storedInt4Id(row.id, "products.id"));
+        return readCategoryProductIds(client, categoryId);
       },
       loadLeftoverFields: (productVariantIds) => this.loadLeftoverFields(productVariantIds),
       loadSettingFacts: async (input) => {
         this.assertOpen();
         return readSettingFacts(client, target, input);
+      },
+      // Lock-free reads (plan 9.7 steps 2-4): reviews never change, and under the store lock a second apply sees the first.
+      loadPriceChangeReview: async (reviewId) => {
+        this.assertOpen();
+        return loadPriceChangeReviewWithClient(client, target, reviewId);
+      },
+      findPriceChangeApplyByReview: async (reviewId) => {
+        this.assertOpen();
+        return findPriceChangeApplyByReviewWithClient(client, target, reviewId);
       },
       clearSizeLeftovers: async (input) => {
         this.assertOpen();
@@ -661,28 +726,7 @@ class WriteTransactionState {
     this.leftoverFieldsLoaded = true;
     await this.client.query(POLICY_FEATURE_LOCK_SQL, [this.scope.storeConnectionId]);
     await this.client.query(SHELF_FEATURE_LOCK_SQL, [this.scope.storeConnectionId]);
-    const leftovers = new Map<number, ListingSettingLeftoverField[]>();
-    if (ids.length === 0) return leftovers;
-    const asked = new Set(ids);
-    const result = await this.client.query<Record<string, unknown>>(LEFTOVER_FIELDS_SQL,
-      [this.scope.vendorId, this.scope.storeConnectionId, ids]);
-    const found = new Map<number, Set<ListingSettingLeftoverField>>();
-    for (const row of result.rows) {
-      const productVariantId = storedInt4Id(row.product_variant_id, "product_variant_id");
-      if (!asked.has(productVariantId)) {
-        throw listingSettingsInvariantFailed("A per-size leftover was read for a size that was not asked for.", { productVariantId });
-      }
-      const fields = found.get(productVariantId) ?? new Set<ListingSettingLeftoverField>();
-      for (const [field, column] of Object.entries(LEFTOVER_FLAG_COLUMNS) as Array<[keyof typeof LEFTOVER_FLAG_COLUMNS, string]>) {
-        if (storedFlag(row[column], column)) fields.add(field);
-      }
-      found.set(productVariantId, fields);
-    }
-    for (const [productVariantId, fields] of [...found].sort(([left], [right]) => left - right)) {
-      const ordered = LISTING_SETTING_LEFTOVER_FIELDS.filter((field) => fields.has(field));
-      if (ordered.length > 0) leftovers.set(productVariantId, ordered);
-    }
-    return leftovers;
+    return readLeftoverFields(this.client, this.scope, ids);
   }
 
   /**
@@ -812,6 +856,130 @@ function preflightTransaction(client: QueryClient, isOpen: () => boolean,
 }
 
 /**
+ * W7's price check transaction (plan 9.1): the reads its rows are built from
+ * on this client, and one review insert. Nothing else writes, and nothing
+ * here takes a lock: loadLeftoverFields reads without the feature locks the
+ * write transaction takes (plan 8.2), because the apply derives its clear
+ * set again under them.
+ */
+function reviewTransaction(client: QueryClient, isOpen: () => boolean,
+  scope: { vendorId: number; storeConnectionId: number; memberId: string }): ListingSettingReviewTransaction {
+  const target = { vendorId: scope.vendorId, storeConnectionId: scope.storeConnectionId };
+  let reviewStored = false;
+  const assertOpen = () => {
+    if (!isOpen()) throw transactionEnded();
+  };
+  return {
+    vendorId: scope.vendorId,
+    storeConnectionId: scope.storeConnectionId,
+    catalog: PgDropshipListingPreviewRepository.readerForTransaction(client),
+    loadOlderGroupRuleCounts: async () => {
+      assertOpen();
+      return readOlderGroupRuleCounts(client, target);
+    },
+    loadCategories: async (categoryIds) => {
+      assertOpen();
+      return readCategoryListingSettings(client, { ...target, categoryIds });
+    },
+    loadCatalogCategoryNames: async (categoryIds) => {
+      assertOpen();
+      return readCatalogCategoryNames(client, categoryIds);
+    },
+    listCategoryProductIds: async (categoryId) => {
+      assertOpen();
+      return readCategoryProductIds(client, categoryId);
+    },
+    listProductSizes: async (productIds) => {
+      assertOpen();
+      return readProductSizes(client, productIds);
+    },
+    loadSettingFacts: async (input) => {
+      assertOpen();
+      return readSettingFacts(client, target, input);
+    },
+    loadLeftoverFields: async (productVariantIds) => {
+      assertOpen();
+      return readLeftoverFields(client, target, readIds(productVariantIds, "productVariantIds"));
+    },
+    readListingTextBytes: async (input) => {
+      assertOpen();
+      return readListingTextBytes(client, target, input);
+    },
+    loadPricingProfile: async () => {
+      assertOpen();
+      return readPricingProfile(client, scope.storeConnectionId, scope.vendorId);
+    },
+    loadProductCosts: async (productVariantIds) => {
+      assertOpen();
+      // A SAVEPOINT on this client, never a BEGIN (forTransaction), as in the write transaction.
+      return PgShellzClubProductCostAdapter.forTransaction(client).loadProductCosts({ vendorId: scope.vendorId, productVariantIds });
+    },
+    storePriceChangeReview: async (review) => {
+      assertOpen();
+      if (reviewStored) throw listingSettingsInvariantFailed("A price check stores one review per transaction.");
+      reviewStored = true;
+      return insertPriceChangeReviewWithClient(client, { ...target, actorId: scope.memberId }, review);
+    },
+  };
+}
+
+/** The products' sellable sizes, ascending (PRODUCT_SIZES_SQL); no ids, no query. */
+async function readProductSizes(client: QueryClient, productIds: readonly number[]): Promise<number[]> {
+  const ids = lockIds(productIds, "productIds");
+  if (ids.length === 0) return [];
+  const result = await client.query<{ id: unknown }>(PRODUCT_SIZES_SQL, [ids]);
+  return result.rows.map((row) => storedInt4Id(row.id, "product_variants.id"));
+}
+
+/** D16's counts (plan P21) over the store's three profiles, each read in its own argument order. */
+async function readOlderGroupRuleCounts(client: QueryClient,
+  target: { vendorId: number; storeConnectionId: number }): Promise<OlderGroupRuleCounts> {
+  // The three readers' own argument orders differ (store, vendor for pricing).
+  const pricing = await readPricingProfile(client, target.storeConnectionId, target.vendorId);
+  const content = await readContentProfile(client, target.vendorId, target.storeConnectionId);
+  const ebayCategoryRules = await readEbayCategoryRules(client, target.vendorId, target.storeConnectionId);
+  return olderGroupRuleCounts({ pricing, content, ebayCategoryRules });
+}
+
+/** Every Card Shellz product in the category, ascending (CATEGORY_PRODUCTS_SQL). */
+async function readCategoryProductIds(client: QueryClient, categoryId: number): Promise<number[]> {
+  if (!isInt4Id(categoryId)) throw listingSettingsInvariantFailed("A category's products are read for a whole-number category id only.");
+  const result = await client.query<{ id: unknown }>(CATEGORY_PRODUCTS_SQL, [categoryId]);
+  return result.rows.map((row) => storedInt4Id(row.id, "products.id"));
+}
+
+/**
+ * Which per-size leftovers each size holds (LEFTOVER_FIELDS_SQL), ids and
+ * flags only, in LISTING_SETTING_LEFTOVER_FIELDS order; a size with none is
+ * absent. `ids` are already checked, distinct and ascending. The caller takes
+ * whatever lock it needs first.
+ */
+async function readLeftoverFields(client: QueryClient, target: { vendorId: number; storeConnectionId: number },
+  ids: readonly number[]): Promise<Map<number, ListingSettingLeftoverField[]>> {
+  const leftovers = new Map<number, ListingSettingLeftoverField[]>();
+  if (ids.length === 0) return leftovers;
+  const asked = new Set(ids);
+  const result = await client.query<Record<string, unknown>>(LEFTOVER_FIELDS_SQL, [target.vendorId, target.storeConnectionId, ids]);
+  const found = new Map<number, Set<ListingSettingLeftoverField>>();
+  for (const row of result.rows) {
+    const productVariantId = storedInt4Id(row.product_variant_id, "product_variant_id");
+    if (!asked.has(productVariantId)) {
+      throw listingSettingsInvariantFailed("A per-size leftover was read for a size that was not asked for.", { productVariantId });
+    }
+    const fields = found.get(productVariantId) ?? new Set<ListingSettingLeftoverField>();
+    for (const [field, column] of Object.entries(LEFTOVER_FLAG_COLUMNS) as Array<[keyof typeof LEFTOVER_FLAG_COLUMNS, string]>) {
+      if (storedFlag(row[column], column)) fields.add(field);
+    }
+    found.set(productVariantId, fields);
+  }
+  for (const [productVariantId, fields] of [...found].sort(([left], [right]) => left - right)) {
+    const ordered = LISTING_SETTING_LEFTOVER_FIELDS.filter((field) => fields.has(field));
+    if (ordered.length > 0) leftovers.set(productVariantId, ordered);
+  }
+  return leftovers;
+}
+
+/**
  * The store's saved product text in UTF-8 bytes (LISTING_TEXT_BYTES_SQL). A
  * server that is not UTF8 would miscount, and a sum that is not a safe
  * whole number is a broken row: both are fatal, never a guess.
@@ -844,29 +1012,60 @@ function textByteSum(value: unknown, column: string): number {
 }
 
 /**
- * Products' own-field flags (plan 8.2), one statement, skipped when the list
- * is empty. A row that breaks its contract (a flag that is not a boolean, a
- * duplicate or unasked id) is fatal, never a guess.
+ * Products' and categories' settings facts (plan 8.2), one statement per
+ * list, each skipped when its list is empty. A row that breaks its contract
+ * (a flag that is not a boolean, a duplicate or unasked id, a partial price
+ * group, a recipe out of its contract, a price flag that disagrees with the
+ * price) is fatal, never a guess.
  */
 async function readSettingFacts(client: QueryClient, target: { vendorId: number; storeConnectionId: number },
-  input: { productIds: readonly number[] }): Promise<ListingSettingFacts> {
+  input: ListingSettingFactsInput): Promise<ListingSettingFacts> {
   const productIds = readIds(input.productIds, "productIds");
+  const categoryIds = readIds(input.categoryIds ?? [], "categoryIds");
   const products = new Map<number, ProductSettingFacts>();
-  if (productIds.length === 0) return { products };
-  const asked = new Set(productIds);
-  const result = await client.query<Record<string, unknown>>(PRODUCT_SETTING_FACTS_SQL, [target.vendorId, target.storeConnectionId, productIds]);
-  for (const row of result.rows) {
-    const productId = storedInt4Id(row.product_id, "product_id");
-    if (!asked.has(productId) || products.has(productId)) {
-      throw listingSettingsInvariantFailed("A product's settings facts were read twice or unasked.", { productId });
+  const categories = new Map<number, CategorySettingFacts>();
+  if (productIds.length > 0) {
+    const asked = new Set(productIds);
+    const result = await client.query<Record<string, unknown>>(PRODUCT_SETTING_FACTS_SQL, [target.vendorId, target.storeConnectionId, productIds]);
+    for (const row of result.rows) {
+      const productId = storedInt4Id(row.product_id, "product_id");
+      if (!asked.has(productId) || products.has(productId)) {
+        throw listingSettingsInvariantFailed("A product's settings facts were read twice or unasked.", { productId });
+      }
+      const ownFields = new Set<ProductListingSettingField>();
+      for (const [field, column] of Object.entries(PRODUCT_SETTING_FLAG_COLUMNS) as Array<[ProductListingSettingField, string]>) {
+        if (storedFlag(row[`set_${column}`], `set_${column}`)) ownFields.add(field);
+      }
+      const price = storedFactPrice(row, { productId });
+      if ((price !== null) !== ownFields.has("price")) {
+        throw listingSettingsInvariantFailed("A product's price flag disagrees with its price.", { productId });
+      }
+      products.set(productId, { revisionId: storedInt4Id(row.revision_id, "revision_id"), price, ownFields });
     }
-    const ownFields = new Set<ProductListingSettingField>();
-    for (const [field, column] of Object.entries(PRODUCT_SETTING_FLAG_COLUMNS) as Array<[ProductListingSettingField, string]>) {
-      if (storedFlag(row[`set_${column}`], `set_${column}`)) ownFields.add(field);
-    }
-    products.set(productId, { ownFields });
   }
-  return { products };
+  if (categoryIds.length > 0) {
+    const asked = new Set(categoryIds);
+    const result = await client.query<Record<string, unknown>>(CATEGORY_SETTING_FACTS_SQL,
+      [target.vendorId, target.storeConnectionId, categoryIds]);
+    for (const row of result.rows) {
+      const categoryId = storedInt4Id(row.category_id, "category_id");
+      if (!asked.has(categoryId) || categories.has(categoryId)) {
+        throw listingSettingsInvariantFailed("A category's settings facts were read twice or unasked.", { categoryId });
+      }
+      categories.set(categoryId, { revisionId: storedInt4Id(row.revision_id, "revision_id"), price: storedFactPrice(row, { categoryId }) });
+    }
+  }
+  return { products, categories };
+}
+
+/** A facts row's price group, read as the full row read reads it; a fault names the row's id, never a value. */
+function storedFactPrice(row: Record<string, unknown>, ids: Record<string, number>): ProductSettingFacts["price"] {
+  try {
+    return listingSettingPriceFromColumns(row as Record<(typeof PRICE_COLUMNS)[number], unknown>);
+  } catch (error) {
+    if (error instanceof DropshipError) throw new DropshipError(error.code, error.message, { ...error.context, ...ids });
+    throw error;
+  }
 }
 
 /** A flag PostgreSQL computed (IS NOT NULL); anything but a boolean is a broken row. */
@@ -1116,6 +1315,14 @@ function assertVendorInput(input: { memberId: string; storeConnectionId: number;
     typeof input.idempotencyKey === "string" && LISTING_SETTING_KEY_PATTERN.test(input.idempotencyKey) ? null : "idempotencyKey",
   ].filter((field): field is string => field !== null);
   if (invalid.length > 0) throw listingSettingsInvariantFailed("A listing settings transaction was opened outside its contract.", { invalid });
+}
+
+function assertReviewInput(input: { memberId: string; storeConnectionId: number }): void {
+  const invalid = [
+    isActorId(input.memberId) ? null : "memberId",
+    isInt4Id(input.storeConnectionId) ? null : "storeConnectionId",
+  ].filter((field): field is string => field !== null);
+  if (invalid.length > 0) throw listingSettingsInvariantFailed("A listing settings price check was opened outside its contract.", { invalid });
 }
 
 function assertPreflightInput(input: { memberId: string; storeConnectionId: number; idempotencyKey: string | null }): void {

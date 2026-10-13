@@ -102,7 +102,7 @@ describe("classifyRequestKeyUse (plan PR 9, P16, section 4.6)", () => {
 
   it("a ledger operation the writer never writes is a conflict, whatever the store and hash", () => {
     for (const entry of WRITERS) {
-      const foreign = ["product_settings_bulk", "category_settings_clear", "category_moves_acknowledge"]
+      const foreign = ["product_settings_bulk", "category_settings_clear", "category_moves_acknowledge", "price_change_apply"]
         .filter((operation) => !entry.sources.some((own) => own.source === "ledger" && own.operation === operation));
       for (const operation of foreign) {
         expect(classifyRequestKeyUse(useOf("ledger", { operation }), entry.expected), `${entry.writer} ${operation}`)
@@ -167,10 +167,34 @@ describe("classifyRequestKeyUse (plan PR 9, P16, section 4.6)", () => {
     });
 
     it("W7 apply: a category revision or children with no ledger row are incomplete", () => {
-      // Its ledger operation joins the ledger's CHECK only with its migration (9f); until then no row can carry it.
+      // An apply always writes its ledger row (migration 0750's price_change_apply), even when nothing else changed,
+      // so a category revision or a child under its key without one cannot be what a committed apply left.
       for (const source of ["categoryRevision", "size", "policy", "shelf"] as const) {
         expect(classifyRequestKeyUse(useOf(source), expect_("price_change_apply", { categoryId: CATEGORY })), source).toEqual({ kind: "incomplete" });
       }
+    });
+
+    it("W7 apply: its ledger row replays alone (a release-only or unchanged apply), with its releases, or with its category and clean-ups", () => {
+      const ledger = useOf("ledger", { operation: "price_change_apply" });
+      expect(classifyRequestKeyUse(ledger, expect_("price_change_apply"))).toEqual({ kind: "replay" });
+      const releases = merge(ledger, useOf("size", { productVariantId: 101 }), useOf("size", { productVariantId: 102 }));
+      expect(classifyRequestKeyUse(releases, expect_("price_change_apply"))).toEqual({ kind: "replay" });
+      const category = merge(ledger, useOf("categoryRevision"), useOf("policy"), useOf("shelf"));
+      expect(classifyRequestKeyUse(category, expect_("price_change_apply", { categoryId: CATEGORY }))).toEqual({ kind: "replay" });
+    });
+
+    it("W7 apply: a W6, W12 or W13 ledger row under its key is a key reuse, and a W7 ledger row under theirs", () => {
+      for (const operation of ["product_settings_bulk", "category_settings_clear", "category_moves_acknowledge"]) {
+        expect(classifyRequestKeyUse(useOf("ledger", { operation }), expect_("price_change_apply", { categoryId: CATEGORY })), operation)
+          .toEqual({ kind: "conflict", mismatched: ["ledger.operation"] });
+      }
+      for (const writer of ["product_settings_bulk", "category_settings", "category_moves_acknowledge"] as const) {
+        expect(classifyRequestKeyUse(useOf("ledger", { operation: "price_change_apply" }), expect_(writer, { categoryId: CATEGORY })), writer)
+          .toEqual({ kind: "conflict", mismatched: ["ledger.operation"] });
+      }
+      // A content child: W7 never clears a main text (a category has none).
+      expect(classifyRequestKeyUse(merge(useOf("ledger", { operation: "price_change_apply" }), useOf("content")), expect_("price_change_apply")))
+        .toEqual({ kind: "conflict", mismatched: ["content"] });
     });
 
     it("W7 apply of products: any category revision is a conflict", () => {
