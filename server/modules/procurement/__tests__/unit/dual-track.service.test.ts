@@ -260,7 +260,10 @@ describe("transitionPhysical", () => {
     storage.getPurchaseOrderById.mockResolvedValue(po);
     mockDb._poState = po;
 
-    await svc.transitionPhysical(1, "cancelled", "user-1");
+    svc = createPurchasingService(mockDb, storage, {
+      readCommandActor: async (_tx, userId) => ({ userId, active: true, permissions: ["purchasing:approve"], scopedPermissions: [] }),
+    });
+    await svc.transitionPhysical(1, "cancelled", "user-1", "Supplier withdrew order");
 
     const patch = mockDb._updateCalls[0];
     expect(patch.physicalStatus).toBe("cancelled");

@@ -57,6 +57,7 @@ vi.mock("../../../../routes/middleware", () => {
   };
   return {
     requirePermission: () => pass,
+    requireAnyPermission: () => pass,
     upload: {
       single: () => pass,
     },

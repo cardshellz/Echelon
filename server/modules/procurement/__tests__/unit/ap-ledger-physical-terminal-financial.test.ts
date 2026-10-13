@@ -1,5 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+// Keep the COGS dependency without importing unrelated inventory repository owners.
+vi.mock("../../../inventory", async () => ({
+  COGSService: (await import("../../../inventory/cogs.service")).COGSService,
+}));
+
 // These owner fixtures isolate financial state changes. The real PostgreSQL
 // cost suites verify the shared graph lock and its transaction ordering.
 vi.mock("../../../inventory/infrastructure/cost-evidence.repository", async (importOriginal) => ({

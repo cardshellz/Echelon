@@ -1,5 +1,10 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
+// Keep the COGS dependency without importing unrelated inventory repository owners.
+vi.mock("../../../inventory", async () => ({
+  COGSService: (await import("../../../inventory/cogs.service")).COGSService,
+}));
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Unit tests for Spec D Phase 2 — Add Invoice flow from shipment costs.
 //

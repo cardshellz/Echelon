@@ -12,6 +12,7 @@ const settingsFixture = () => ({
   oneClickReceiveStart: true,
   useNewPoEditor: false,
   useNewReorderCockpit: false,
+  revision: 0,
   futureServerField: { preserved: true },
 });
 const available = ["requireApproval", "hideIncotermsDomestic", "useNewPoEditor", "useNewReorderCockpit"];
@@ -23,7 +24,7 @@ async function setup(page: Page, canEdit = true) {
   const reads: string[] = [];
   await page.route("**/api/auth/me", (route) => route.fulfill({ json: {
     user: { id: "settings-operator", username: "test", role: "admin" },
-    permissions: canEdit ? ["purchasing:view", "inventory:adjust"] : ["purchasing:view"],
+    permissions: canEdit ? ["purchasing:view", "settings:edit"] : ["purchasing:view", "inventory:adjust"],
     roles: ["admin"],
   } }));
   await page.route("**/api/settings/procurement", (route) => {
@@ -44,6 +45,7 @@ test("only proven settings are editable and a save waits for its confirmed respo
     writes.push(route.request().postDataJSON());
     await responseGate;
     saved.requireApproval = true;
+    saved.revision = 1;
     return route.fulfill({ json: saved });
   });
   await page.goto("/settings/procurement");
@@ -68,8 +70,8 @@ test("only proven settings are editable and a save waits for its confirmed respo
   } finally { release(); }
   await expect(approval).toBeChecked();
   await expect(approval).toBeEnabled();
-  expect(writes).toEqual([{ key: "requireApproval", value: true }]);
-  expect(saved).toEqual({ ...settingsFixture(), requireApproval: true });
+  expect(writes).toEqual([{ key: "requireApproval", value: true, expectedRevision: 0 }]);
+  expect(saved).toEqual({ ...settingsFixture(), requireApproval: true, revision: 1 });
   await page.screenshot({ path: testInfo.outputPath("procurement-settings-availability.png"), fullPage: true });
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
   expect(failures).toEqual([]);
@@ -104,18 +106,22 @@ test("a rejected save leaves the saved value visible and refreshes authoritative
   await expect(approval).not.toBeChecked();
   await expect(approval).toBeEnabled();
   expect(reads.length).toBeGreaterThan(before);
-  expect(writes).toEqual([{ key: "requireApproval", value: true }]);
+  expect(writes).toEqual([{ key: "requireApproval", value: true, expectedRevision: 0 }]);
   expect(failures).toEqual([]);
 });
 
 for (const outcome of ["lost response", "malformed response"] as const) {
-  test(`${outcome} reloads a committed setting without sending another write`, async ({ page }) => {
+  test(`${outcome} keeps the exact command for explicit replay after refreshing saved state`, async ({ page }) => {
     const { saved, failures } = await setup(page);
     const writes: unknown[] = [];
+    const keys: string[] = [];
     await page.route("**/api/settings/procurement", (route) => {
       if (route.request().method() !== "PATCH") return route.fallback();
       writes.push(route.request().postDataJSON());
+      keys.push(route.request().headers()["idempotency-key"]);
       saved.requireApproval = true;
+      saved.revision = 1;
+      if (writes.length > 1) return route.fulfill({ json: saved });
       return outcome === "lost response" ? route.abort("failed") : route.fulfill({ json: { requireApproval: true } });
     });
     await page.goto("/settings/procurement");
@@ -123,8 +129,13 @@ for (const outcome of ["lost response", "malformed response"] as const) {
     await approval.click();
     await expect(page.getByRole("alert").filter({ hasText: "The save was not confirmed" })).toBeVisible();
     await expect(approval).toBeChecked();
+    await expect(approval).toBeDisabled();
+    expect(writes).toEqual([{ key: "requireApproval", value: true, expectedRevision: 0 }]);
+    await page.getByRole("button", { name: "Retry saved change", exact: true }).click();
     await expect(approval).toBeEnabled();
-    expect(writes).toEqual([{ key: "requireApproval", value: true }]);
+    expect(writes).toEqual(Array(2).fill({ key: "requireApproval", value: true, expectedRevision: 0 }));
+    expect(keys[0]).toMatch(/^[0-9a-f-]{36}$/);
+    expect(keys[1]).toBe(keys[0]);
     expect(failures).toEqual([]);
   });
 }
@@ -140,5 +151,46 @@ test("malformed settings never appear as default off controls and can be reloade
   await page.getByRole("button", { name: "Retry settings", exact: true }).click();
   await expect(page.getByRole("switch")).toHaveCount(10);
   await expect(page.getByRole("switch", { name: "Require approval", exact: true })).toBeEnabled();
+  expect(failures).toEqual([]);
+});
+
+test("an independently granted settings editor can open the page and navigation without an admin role", async ({ page }) => {
+  const { failures } = await setup(page);
+  await page.route("**/api/auth/me", route => route.fulfill({ json: {
+    user: { id: "settings-operator", username: "test", role: "picker" }, permissions: ["settings:edit"], roles: ["custom-policy-editor"],
+  } }));
+  await page.goto("/settings/procurement");
+  await expect(page.getByRole("switch", { name: "Require approval", exact: true })).toBeEnabled();
+  await page.getByTestId("button-settings-menu").click();
+  await expect(page.getByTestId("link-procurement-settings")).toBeVisible();
+  await expect(page.getByTestId("link-general-settings")).toHaveCount(0);
+  await expect(page.getByTestId("link-roles-permissions")).toHaveCount(0);
+  expect(failures).toEqual([]);
+});
+
+test("a stale policy revision refreshes before an operator makes a new reviewed change", async ({ page }) => {
+  const { saved, failures } = await setup(page);
+  const writes: unknown[] = [];
+  const keys: string[] = [];
+  await page.route("**/api/settings/procurement", route => {
+    if (route.request().method() !== "PATCH") return route.fallback();
+    writes.push(route.request().postDataJSON()); keys.push(route.request().headers()["idempotency-key"]);
+    if (writes.length === 1) {
+      saved.revision = 1; saved.useNewPoEditor = true;
+      return route.fulfill({ status: 409, json: { error: "Procurement settings changed. Refresh and review the saved policy before trying again.", code: "PROCUREMENT_SETTINGS_STALE" } });
+    }
+    saved.revision = 2; saved.requireApproval = true;
+    return route.fulfill({ json: saved });
+  });
+  await page.goto("/settings/procurement");
+  const approval = page.getByRole("switch", { name: "Require approval", exact: true });
+  await approval.click();
+  await expect(page.getByRole("switch", { name: "Use the new PO editor", exact: true })).toBeChecked();
+  await expect(approval).toBeEnabled();
+  expect(writes).toHaveLength(1);
+  await approval.click();
+  await expect(approval).toBeChecked();
+  expect(writes).toEqual([{ key: "requireApproval", value: true, expectedRevision: 0 }, { key: "requireApproval", value: true, expectedRevision: 1 }]);
+  expect(keys[1]).not.toBe(keys[0]);
   expect(failures).toEqual([]);
 });

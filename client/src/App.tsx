@@ -145,10 +145,12 @@ function ProtectedRoute({
   component: Component,
   allowedRoles,
   requiredPermission,
+  anyOfPermissions,
 }: { 
   component: React.ComponentType;
   allowedRoles?: string[];
   requiredPermission?: { resource: string; action: string };
+  anyOfPermissions?: { resource: string; action: string }[];
 }) {
   const { user, isLoading, hasPermission } = useAuth();
   
@@ -171,6 +173,9 @@ function ProtectedRoute({
     requiredPermission
     && !hasPermission(requiredPermission.resource, requiredPermission.action)
   ) {
+    return <Redirect to="/picking" />;
+  }
+  if (anyOfPermissions && !anyOfPermissions.some(permission => hasPermission(permission.resource, permission.action))) {
     return <Redirect to="/picking" />;
   }
   
@@ -607,7 +612,7 @@ function Router() {
           />
         </Route>
         <Route path="/settings/procurement">
-          <ProtectedRoute component={ProcurementSettings} allowedRoles={["admin"]} />
+          <ProtectedRoute component={ProcurementSettings} anyOfPermissions={[{ resource: "purchasing", action: "view" }, { resource: "settings", action: "edit" }]} />
         </Route>
         <Route path="/shipping-settings">
           <ProtectedRoute component={ShippingSettings} allowedRoles={["admin"]} />
