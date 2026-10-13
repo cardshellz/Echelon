@@ -75,6 +75,12 @@ export class InventoryPublicationTransportError extends Error {
   }
 }
 
+/** Only preflight failures qualify; admission independently checks request evidence. */
+export class InventoryPublicationNotSentError extends InventoryPublicationTransportError {
+  readonly effect = "not_sent" as const;
+  override name = "InventoryPublicationNotSentError";
+}
+
 export class InventoryPublicationTransportConfigurationError
   extends InventoryPublicationTransportError
 {

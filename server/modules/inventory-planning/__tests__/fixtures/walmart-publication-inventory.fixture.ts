@@ -29,9 +29,13 @@ export async function installWalmartPublicationInventoryFixture(
   for (const file of [
     "0709_walmart_quantity_admission.sql",
     "0716_inventory_publication_reconciliation.sql",
+    "0729_ebay_listing_sync_recovery.sql",
+    "0733_ebay_provider_response_finality.sql",
+    "0734_ebay_operator_republication_recovery.sql",
     "0746_listing_recreation_stock_continuation.sql",
     "0747_walmart_listing_initial_stock.sql",
     "0748_walmart_listing_presence.sql",
+    "0749_quantity_outbox_preflight_completion.sql",
   ])
     await pool.query(
       readFileSync(resolve(process.cwd(), "migrations", file), "utf8"),

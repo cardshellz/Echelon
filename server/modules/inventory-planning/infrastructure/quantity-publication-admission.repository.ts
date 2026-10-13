@@ -9,6 +9,7 @@ import type { InventoryAvailabilityTransactionQueryClient as Client } from "../a
 import type { QuantityPublicationAdmission, QuantityPublicationCatchup, QuantityPublicationCatchupStore, QuantityPublicationOutboxClaim } from "../application/quantity-publication-admission.port";
 import { readPublicationStockSelection, selectionRequiresPublication } from "./inventory-publication-selection.reader";
 import { QuantityProviderEvidenceCollector } from "../application/quantity-provider-request-evidence";
+import { InventoryPublicationNotSentError } from "../application/inventory-publication-transport";
 import { PostgresQuantityProviderRequestEvidenceStore } from "./quantity-provider-request-evidence.repository";
 import { QuantityPublicationAdmissionError, quantityPublicationScopeSchema, quantityPublicationRecoverySchema,
   type QuantityPublicationScope, type QuantityPublicationDrainProof, type QuantityPublicationRecovery } from "../domain/quantity-publication-admission";
@@ -532,17 +533,18 @@ export class PostgresQuantityPublicationAdmission implements QuantityPublication
         const rejected = requestEvidence.provesTerminalRejection();
         // Only a caught, explicitly classified preflight failure can prove no
         // request. A crashed worker never reaches this branch and stays running.
-        const notSent = setupRequest!==undefined && error instanceof Error && "effect" in error && error.effect==="not_sent"
-          && requestEvidence.provesNoRequestsStarted();
+        const setupNotSent = setupRequest !== undefined && error instanceof Error && "effect" in error && error.effect === "not_sent";
+        const outboxNotSent = claim !== undefined && error instanceof InventoryPublicationNotSentError;
+        const notSent = (setupNotSent || outboxNotSent) && requestEvidence.provesNoRequestsStarted();
         const terminal = rejected || notSent;
         await client.query(`UPDATE inventory.quantity_publication_attempts
           SET state=$4,error_code=$3,completed_at=$5,outcome_hash=$6,resolution_basis=$7
           WHERE id=$1 AND owner_token=$2 AND state='running'`,
         [attemptId, ownerToken, error instanceof Error && "code" in error ? String(error.code) : notSent ? "PROVIDER_PREFLIGHT_NOT_SENT" : "PROVIDER_OUTCOME_UNCERTAIN",
           rejected ? "rejected" : notSent ? "not_sent" : "uncertain", terminal ? now(this.clock()) : null,
-          rejected ? requestEvidence.evidenceHash() : notSent ? hash({intent:setupRequest,outcome:"owner_preflight_no_request",errorCode:error instanceof Error && "code" in error ? error.code : "PROVIDER_PREFLIGHT_NOT_SENT"}) : null,
+          rejected ? requestEvidence.evidenceHash() : notSent ? hash({intent:setupRequest ?? { scope, claim },outcome:"owner_preflight_no_request",errorCode:error instanceof Error && "code" in error ? error.code : "PROVIDER_PREFLIGHT_NOT_SENT"}) : null,
           rejected ? "provider_rejection" : notSent ? "owner_preflight_no_request" : null]);
-        await retainWork(client, gate.activation_run_id, rejected ? "provider_rejected_quantity_write" : "uncertain_provider_outcome");
+        await retainWork(client, gate.activation_run_id, rejected ? "provider_rejected_quantity_write" : notSent ? "provider_preflight_not_sent" : "uncertain_provider_outcome");
         await client.query("COMMIT"); inTransaction = false;
         throw error;
       }

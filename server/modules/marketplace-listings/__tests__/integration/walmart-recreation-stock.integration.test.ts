@@ -26,6 +26,7 @@ import { PostgresVerifiedListingStockStore } from "../../../inventory-planning/i
 import { VerifiedListingStockService } from "../../../inventory-planning/application/verified-listing-stock.service";
 import { PostgresInventoryPublicationOutboxRepository } from "../../../inventory-planning/infrastructure/inventory-publication-outbox.repository";
 import { InventoryPublicationOutboxService } from "../../../inventory-planning/application/inventory-publication-outbox.service";
+import { InventoryPublicationNotSentError } from "../../../inventory-planning/application/inventory-publication-transport";
 import { PostgresInventoryPublicationSupplyReader } from "../../../inventory-planning/infrastructure/inventory-publication-supply-read.repository";
 import { ChannelInventoryPublicationTransportAdapter } from "../../../channels/channel-inventory-publication-transport.adapter";
 import { ChannelListingCatalogRepository } from "../../../channels/channel-listing-catalog.repository";
@@ -40,6 +41,7 @@ import { WalmartChannelService } from "../../../channels/adapters/walmart/walmar
 import { PostgresListingPublicationRepository } from "../../infrastructure/pg-listing-publication.repository";
 import { PostgresListingLifecycleRepository } from "../../infrastructure/pg-listing-lifecycle.repository";
 import { listingHash } from "../../domain/listing-publication";
+import { ListingSubmissionError } from "../../application/listing-publication-provider.port";
 import {
   publicationSnapshot,
   publicationProgress,
@@ -152,7 +154,10 @@ dbDescribe.sequential(
               const file = (options.body as FormData).get("file") as Blob;
               const payload = JSON.parse(await file.text());
               expect(payload.MPItem[0].Orderable.inventory).toEqual([
-                { quantity: expect.any(Number), fulfillmentCenterID: "test-location" },
+                {
+                  quantity: expect.any(Number),
+                  fulfillmentCenterID: "test-location",
+                },
               ]);
               expect(payload.MPItem[0].Visible[productType].mainImageUrl).toBe(
                 "https://example.com/current-photo.jpg",
@@ -176,7 +181,8 @@ dbDescribe.sequential(
                   },
                   { status: 400 },
                 );
-              remote.quantity = payload.MPItem[0].Orderable.inventory[0].quantity;
+              remote.quantity =
+                payload.MPItem[0].Orderable.inventory[0].quantity;
               return Response.json({ feedId: `feed-${remote.feedCalls}` });
             }
             if (endpoint.pathname.startsWith("/v3/feeds/"))
@@ -263,9 +269,10 @@ dbDescribe.sequential(
       const channels = {
         policy: { listingWrites: lifecycle },
         now: () => new Date(),
-        observeListingPresence: WalmartChannelService.prototype.observeListingPresence,
+        observeListingPresence:
+          WalmartChannelService.prototype.observeListingPresence,
         assertListingNotStopped: lifecycle.assertNotStopped.bind(lifecycle),
-        withStockWrites: lifecycle.withStockAllowed.bind(lifecycle),
+        withStockWrites: WalmartChannelService.prototype.withStockWrites,
         connection: async () => ({
           channel_id: 36,
           connection_id: 8,
@@ -373,7 +380,17 @@ dbDescribe.sequential(
       // have a channel link without ever having connected its stock mapping.
       if (seedPriorStock) {
         await stock.connect(stockInput("WPID-OLD"));
-        expect(await publishStock()).toMatchObject({ verified: 1 });
+        const initialStock = await publishStock();
+        expect(
+          initialStock,
+          JSON.stringify(
+            (
+              await database.pool.query(
+                "SELECT last_error_class,last_error_message FROM inventory.inventory_publication_outbox",
+              )
+            ).rows,
+          ),
+        ).toMatchObject({ verified: 1 });
       }
       remote.deleted = true;
       remote.published = false;
@@ -536,7 +553,17 @@ dbDescribe.sequential(
           (await h.store.operation(36, operation.id)).progress.items[0].error,
         ).toBeNull();
         expect(h.remote.feedCalls).toBe(1);
-        expect(h.remote.feedPayloads[0]).toMatchObject({ MPItem: [{ Orderable: { inventory: [{ quantity: 17, fulfillmentCenterID: "test-location" }] } }] });
+        expect(h.remote.feedPayloads[0]).toMatchObject({
+          MPItem: [
+            {
+              Orderable: {
+                inventory: [
+                  { quantity: 17, fulfillmentCenterID: "test-location" },
+                ],
+              },
+            },
+          ],
+        });
         expect(h.remote.inventoryWrites).toEqual([17]);
         expect(
           (await h.store.operation(36, operation.id)).progress.items[0].state,
@@ -633,37 +660,273 @@ dbDescribe.sequential(
       return queued;
     }
     it("detects deletion of a completed listing, keeps its ATP identity, and recreates it with freshly calculated initial stock", async () => {
-      const mappingBefore = (await database.pool.query("SELECT * FROM inventory.publication_listing_recreation_stock_receipts")).rows;
-      expect(await h.channels.observeListingPresence(h.account, "P5")).toMatchObject({ state: "missing" });
+      const mappingBefore = (
+        await database.pool.query(
+          "SELECT * FROM inventory.publication_listing_recreation_stock_receipts",
+        )
+      ).rows;
+      expect(
+        await h.channels.observeListingPresence(h.account, "P5"),
+      ).toMatchObject({ state: "missing" });
       const write = vi.fn(async () => {});
-      await expect(h.channels.withStockWrites(h.account, "P5", 17, write)).rejects.toMatchObject({ code: "LISTING_MISSING_ON_PROVIDER" });
+      await expect(
+        h.channels.withStockWrites(h.account, "P5", 17, write),
+      ).rejects.toMatchObject({ code: "LISTING_MISSING_ON_PROVIDER" });
       expect(write).not.toHaveBeenCalled();
       const { operation } = await h.queue();
-      await database.pool.query("UPDATE inventory.inventory_levels SET variant_qty=12 WHERE id=10");
+      await database.pool.query(
+        "UPDATE inventory.inventory_levels SET variant_qty=12 WHERE id=10",
+      );
       await h.runListing();
       expect(h.remote.feedPayloads).toHaveLength(1);
-      expect(h.remote.feedPayloads[0]).toMatchObject({ MPItem: [{ Orderable: { inventory: [{ quantity: 9, fulfillmentCenterID: "test-location" }] } }] });
-      const attempt = (await database.pool.query("SELECT id,listing_setup_intent FROM inventory.quantity_publication_attempts WHERE listing_setup_intent IS NOT NULL")).rows[0];
-      expect(attempt.listing_setup_intent.items).toEqual([expect.objectContaining({ sku: "P5", quantity: 9 })]);
-      await expect(database.pool.query("UPDATE inventory.quantity_publication_attempts SET listing_setup_intent='{}' WHERE id=$1", [attempt.id])).rejects.toThrow(/immutable/);
-      expect((await database.pool.query("SELECT * FROM inventory.publication_listing_recreation_stock_receipts")).rows).toEqual(mappingBefore);
+      expect(h.remote.feedPayloads[0]).toMatchObject({
+        MPItem: [
+          {
+            Orderable: {
+              inventory: [
+                { quantity: 9, fulfillmentCenterID: "test-location" },
+              ],
+            },
+          },
+        ],
+      });
+      const attempt = (
+        await database.pool.query(
+          "SELECT id,listing_setup_intent FROM inventory.quantity_publication_attempts WHERE listing_setup_intent IS NOT NULL",
+        )
+      ).rows[0];
+      expect(attempt.listing_setup_intent.items).toEqual([
+        expect.objectContaining({ sku: "P5", quantity: 9 }),
+      ]);
+      await expect(
+        database.pool.query(
+          "UPDATE inventory.quantity_publication_attempts SET listing_setup_intent='{}' WHERE id=$1",
+          [attempt.id],
+        ),
+      ).rejects.toThrow(/immutable/);
+      expect(
+        (
+          await database.pool.query(
+            "SELECT * FROM inventory.publication_listing_recreation_stock_receipts",
+          )
+        ).rows,
+      ).toEqual(mappingBefore);
       // A normal refresh during processing cannot remove the missing marker.
-      expect(await h.channels.observeListingPresence(h.account, "P5")).toBeNull();
-      h.remote.deleted = false; h.remote.published = true; h.remote.feedReady = true;
+      expect(
+        await h.channels.observeListingPresence(h.account, "P5"),
+      ).toBeNull();
+      h.remote.deleted = false;
+      h.remote.published = true;
+      h.remote.feedReady = true;
       await h.runListing();
-      expect((await h.lifecycle.presence(h.account, ["P5"]))[0].state).toBe("present");
-      expect((await h.outboxes()).at(-1)).toMatchObject({ state: "queued", desired_quantity: "9" });
+      expect((await h.lifecycle.presence(h.account, ["P5"]))[0].state).toBe(
+        "present",
+      );
+      expect((await h.outboxes()).at(-1)).toMatchObject({
+        state: "queued",
+        desired_quantity: "9",
+      });
       await h.publishStock();
       await h.runListing();
-      expect((await h.store.operation(36, operation.id)).state).toBe("completed");
+      expect((await h.store.operation(36, operation.id)).state).toBe(
+        "completed",
+      );
       expect(h.remote.inventoryWrites).toEqual([17, 9]);
+    });
+    it("does not turn a queued stock update blocked by deletion into uncertainty that prevents recreation", async () => {
+      await database.pool.query(
+        "UPDATE inventory.inventory_levels SET variant_qty=12 WHERE id=10",
+      );
+      const publisher = createAuthorityAwareInventoryPublicationService(
+        database.pool,
+        { channelId: 36 },
+      );
+      await publisher.publishProduct(
+        {
+          productId: 20,
+          publicationTargetId: 2,
+          dryRun: false,
+          triggeredBy: "fixture_stock_change",
+        },
+        async () => {
+          throw new Error("Must use canonical ATP");
+        },
+      );
+      expect((await h.outboxes()).at(-1)).toMatchObject({
+        state: "queued",
+        desired_quantity: "9",
+      });
+      expect(
+        await h.channels.observeListingPresence(h.account, "P5"),
+      ).toMatchObject({ state: "missing" });
+      expect(await h.publishStock()).toMatchObject({ verified: 0, failed: 1 });
+      expect(h.remote.inventoryWrites).toEqual([17]);
+      const blocked = (
+        await database.pool
+          .query(`SELECT id,state,error_code FROM inventory.quantity_publication_attempts
+        WHERE owner_kind='outbox' ORDER BY id DESC LIMIT 1`)
+      ).rows[0];
+      expect(blocked).toMatchObject({
+        state: "not_sent",
+        error_code: "LISTING_MISSING_ON_PROVIDER",
+      });
+      expect(
+        (
+          await database.pool.query(
+            "SELECT id FROM inventory.quantity_provider_requests WHERE attempt_id=$1",
+            [blocked.id],
+          )
+        ).rows,
+      ).toEqual([]);
+      await expect(
+        database.pool.query(
+          "UPDATE inventory.quantity_publication_attempts SET state='succeeded' WHERE id=$1",
+          [blocked.id],
+        ),
+      ).rejects.toThrow(/immutable/);
+      const { operation } = await acceptedRecreation();
+      await h.runListing();
+      expect(h.remote.feedPayloads[0]).toMatchObject({
+        MPItem: [{ Orderable: { inventory: [{ quantity: 9 }] } }],
+      });
+      expect(await h.publishStock()).toMatchObject({ verified: 1 });
+      await h.runListing();
+      expect((await h.store.operation(36, operation.id)).state).toBe(
+        "completed",
+      );
+      expect(h.remote.inventoryWrites).toEqual([17, 9]);
+    });
+    it("does not trust a not-sent transport label when durable evidence proves a stock request started", async () => {
+      await database.pool.query(
+        "UPDATE inventory.inventory_levels SET variant_qty=12 WHERE id=10",
+      );
+      const publisher = createAuthorityAwareInventoryPublicationService(
+        database.pool,
+        { channelId: 36 },
+      );
+      await publisher.publishProduct(
+        {
+          productId: 20,
+          publicationTargetId: 2,
+          dryRun: false,
+          triggeredBy: "fixture_stock_change",
+        },
+        async () => {
+          throw new Error("Must use canonical ATP");
+        },
+      );
+      const publish =
+        ChannelInventoryPublicationTransportAdapter.prototype.publishAbsolute;
+      vi.spyOn(
+        ChannelInventoryPublicationTransportAdapter.prototype,
+        "publishAbsolute",
+      ).mockImplementation(async function (
+        this: ChannelInventoryPublicationTransportAdapter,
+        request,
+      ) {
+        await publish.call(this, request);
+        throw new InventoryPublicationNotSentError(
+          "FIXTURE_MISCLASSIFIED",
+          "Injected incorrect preflight label after HTTP",
+          false,
+        );
+      });
+      expect(await h.publishStock()).toMatchObject({ verified: 0, failed: 1 });
+      expect(h.remote.inventoryWrites).toEqual([17, 9]);
+      const attempt = (
+        await database.pool.query(
+          "SELECT id,state FROM inventory.quantity_publication_attempts WHERE owner_kind='outbox' ORDER BY id DESC LIMIT 1",
+        )
+      ).rows[0];
+      expect(attempt.state).toBe("uncertain");
+      expect(
+        (
+          await database.pool.query(
+            "SELECT id FROM inventory.quantity_provider_requests WHERE attempt_id=$1",
+            [attempt.id],
+          )
+        ).rows,
+      ).toHaveLength(1);
+      await expect(
+        database.pool.query(
+          "UPDATE inventory.quantity_publication_attempts SET state='not_sent',completed_at=clock_timestamp(),outcome_hash=repeat('a',64),resolution_basis='owner_preflight_no_request' WHERE id=$1",
+          [attempt.id],
+        ),
+      ).rejects.toThrow(/immutable/);
     });
     it("uses zero in the initial feed only when current ATP is actually zero", async () => {
       await h.queue();
-      await database.pool.query("UPDATE inventory.inventory_levels SET variant_qty=reserved_qty WHERE id=10");
+      await database.pool.query(
+        "UPDATE inventory.inventory_levels SET variant_qty=reserved_qty WHERE id=10",
+      );
       await h.runListing();
       expect(h.remote.feedCalls).toBe(1);
-      expect(h.remote.feedPayloads[0]).toMatchObject({ MPItem: [{ Orderable: { inventory: [{ quantity: 0, fulfillmentCenterID: "test-location" }] } }] });
+      expect(h.remote.feedPayloads[0]).toMatchObject({
+        MPItem: [
+          {
+            Orderable: {
+              inventory: [
+                { quantity: 0, fulfillmentCenterID: "test-location" },
+              ],
+            },
+          },
+        ],
+      });
+    });
+    it("recalculates ATP on a definitely-unsent retry of the same batch while preserving both attempt snapshots", async () => {
+      const { operation, reviewed } = await h.queue();
+      const stored = await h.store.operation(36, operation.id);
+      const source = stored.snapshot.recreations![0];
+      const initial = {
+        operationId: stored.progress.batches[0].correlationId,
+        publicationTargetId: Number(reviewed.inventory.targetId),
+        expectedTargetRevision: reviewed.inventory.targetRevision!,
+        channelId: h.account.channelId,
+        channelConnectionId: h.account.connectionId,
+        partnerId: h.account.accountId,
+        environment: h.account.environment,
+        shipNodeId: h.account.scopeId,
+        items: [
+          {
+            productVariantId: 101,
+            sku: "P5",
+            quantity: 0,
+            recreation: {
+              sourceOperationId: source.operationId,
+              sourceHash: source.sourceHash,
+              previousExternalProductId: source.previousExternalProductId,
+            },
+          },
+        ],
+      };
+      await expect(
+        h.admission.runListingSetup(initial, async (approved) => {
+          expect(approved.items[0].quantity).toBe(17);
+          throw new ListingSubmissionError(
+            "FIXTURE_PREFLIGHT",
+            "Stopped before HTTP",
+            "not_sent",
+          );
+        }),
+      ).rejects.toMatchObject({ effect: "not_sent" });
+      expect(h.remote.feedCalls).toBe(0);
+      await database.pool.query(
+        "UPDATE inventory.inventory_levels SET variant_qty=12 WHERE id=10",
+      );
+      await h.runListing();
+      expect(h.remote.feedCalls).toBe(1);
+      expect(h.remote.feedPayloads[0]).toMatchObject({
+        MPItem: [{ Orderable: { inventory: [{ quantity: 9 }] } }],
+      });
+      const attempts = await database.pool.query(
+        `SELECT state,listing_setup_intent->'items'->0->>'quantity' AS quantity
+        FROM inventory.quantity_publication_attempts WHERE listing_setup_operation_id=$1 ORDER BY id`,
+        [initial.operationId],
+      );
+      expect(attempts.rows).toEqual([
+        { state: "not_sent", quantity: "17" },
+        { state: "succeeded", quantity: "9" },
+      ]);
     });
     it("connects a missing stock mapping after recreating a legacy linked listing", async () => {
       vi.restoreAllMocks();
@@ -939,7 +1202,9 @@ dbDescribe.sequential(
       h.remote.rejectFeed = false;
       await h.elapseProviderCooldown();
       const second = await h.queue(first.operation.id);
-      await database.pool.query("UPDATE inventory.inventory_levels SET variant_qty=12 WHERE id=10");
+      await database.pool.query(
+        "UPDATE inventory.inventory_levels SET variant_qty=12 WHERE id=10",
+      );
       await h.runListing();
       h.remote.deleted = false;
       h.remote.published = true;
