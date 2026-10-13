@@ -170,6 +170,12 @@ export function ListingItemEditor({
               : "Edit this selected variant’s Walmart listing details."}
           </DialogDescription>
         </DialogHeader>
+        {item.recreateFromOperationId && (
+          <p className="px-4 pb-3 text-sm sm:px-5" role="status">
+            Recreate on Walmart. The exact SKU was not found. Review these
+            details before submitting a new listing.
+          </p>
+        )}
         <nav
           aria-label="Listing editor sections"
           className="flex shrink-0 gap-2 overflow-x-auto border-b px-4 pb-3 sm:px-5"
@@ -208,6 +214,7 @@ export function ListingItemEditor({
                     id={`${prefix}-method`}
                     className={selectClass}
                     value={draft.method}
+                    disabled={Boolean(draft.recreateFromOperationId)}
                     onChange={(event) => {
                       setDraft((previous) => ({
                         ...previous,
@@ -434,8 +441,13 @@ export function ListingItemEditor({
               </section>
             )}
             {images === null && catalog?.imageIssues?.length ? (
-              <ul className="space-y-1 text-sm text-destructive" aria-label="Catalog photo issues">
-                {[...new Set(catalog.imageIssues.map(issue => issue.message))].map(message => (
+              <ul
+                className="space-y-1 text-sm text-destructive"
+                aria-label="Catalog photo issues"
+              >
+                {[
+                  ...new Set(catalog.imageIssues.map((issue) => issue.message)),
+                ].map((message) => (
                   <li key={message}>{message}</li>
                 ))}
               </ul>

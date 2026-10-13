@@ -72,6 +72,7 @@ export interface ListingUpdateStore {
     account: ListingAccount,
     sku: string,
     externalProductId: string,
+    options?: { includeInitial: boolean },
   ): Promise<{ productType: string; changes: ListingUpdateChanges } | null>;
   acceptedPrice(
     account: ListingAccount,

@@ -56,6 +56,12 @@ export function ListingReviewDialog({
             {review.account.scopeId}.
           </DialogDescription>
         </DialogHeader>
+        {review.items.some((item) => item.recreating) && (
+          <p className="text-sm">
+            This review includes recreating a listing deleted from Walmart.
+            Echelon will check the SKU again before sending the new listing.
+          </p>
+        )}
         <div className="rounded-md border p-3 text-sm">
           <p className="font-medium">Stock publishing</p>
           <p className="mt-1 text-muted-foreground">

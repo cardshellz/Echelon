@@ -26,6 +26,7 @@ export interface ListingPublicationInput {
   catalog: ListingCatalogItem;
   draft: ListingDraftItem;
   priceCents: number;
+  recreating?: boolean;
 }
 export interface PreparedListingItem {
   variantId: number;
@@ -47,6 +48,7 @@ export interface ListingSubmissionObservation {
   }>;
 }
 export interface ListingPublicationProvider {
+  assertCanRecreate?(account: ListingAccount, sku: string): Promise<void>;
   account(channelId: number): Promise<ListingAccount>;
   taxonomy(account: ListingAccount): Promise<ListingTaxonomy>;
   requirements(

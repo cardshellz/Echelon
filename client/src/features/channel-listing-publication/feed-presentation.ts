@@ -10,6 +10,7 @@ export function listingTitle(
     row.catalog?.name ??
     row.remote?.title ??
     control?.title ??
+    row.operation?.item.title ??
     row.sku ??
     `Variant ${row.draft?.variantId ?? row.operation?.item.variantId}`
   );
@@ -31,7 +32,11 @@ export function listingStatus(
       tone: control.state === "failed" ? "attention" : "neutral",
     };
   }
-  if (row.draft) return { label: "Draft", tone: "neutral" };
+  if (row.draft)
+    return {
+      label: row.draft.recreateFromOperationId ? "Recreate draft" : "Draft",
+      tone: "neutral",
+    };
   if (row.remote) {
     const published = row.remote.publishedStatus.toUpperCase();
     const lifecycle = row.remote.lifecycleStatus.toUpperCase();
@@ -48,6 +53,9 @@ export function listingStatus(
       return { label: "Needs attention", tone: "attention" };
   }
   const state = row.operation?.item.state;
+  if (state === "superseded") return { label: "Recreated", tone: "neutral" };
+  if (!row.remote && row.operation?.item.missingOnProvider)
+    return { label: "Not found on Walmart", tone: "attention" };
   if (state?.startsWith("needs_"))
     return { label: "Needs attention", tone: "attention" };
   if (state === "verified") return { label: "Last verified", tone: "neutral" };

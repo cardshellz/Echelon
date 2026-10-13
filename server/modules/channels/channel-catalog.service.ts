@@ -26,8 +26,17 @@ export interface VerifiedChannelCatalogMapping {
   item: ChannelCatalogItem;
   productVariantId: number;
   expectedLocalSku: string | null;
+  // Internal recovery command only; never accepted by the ordinary HTTP linking schema.
+  replacesExternalProductId?: string | null;
 }
+export const channelRecreationMappingSchema = z.object({
+  sku: z.string().trim().min(1).max(50), productVariantId: z.number().int().positive(),
+  previousExternalProductId: z.string().min(1).nullable(),
+}).strict();
+export type ChannelRecreationMapping = z.infer<typeof channelRecreationMappingSchema>;
+export interface ChannelRecreationIdentity { externalProductId: string | null }
 export interface ChannelCatalogRepository {
+  checkRecreationMapping?(account: ChannelCatalogAccount, input: ChannelRecreationMapping): Promise<ChannelRecreationIdentity>;
   candidates(channelId: number, skus: readonly string[]): Promise<{
     variants: ChannelCatalogVariant[]; mappings: ChannelCatalogMappingRecord[];
   }>;
@@ -134,6 +143,34 @@ export class ChannelCatalogService {
 
   async searchVariants(query: unknown): Promise<ChannelCatalogVariant[]> {
     return this.repository.searchVariants(z.string().trim().min(2).max(100).parse(query));
+  }
+
+  async checkRecreationMapping(expected: ChannelCatalogAccount, input: ChannelRecreationMapping): Promise<ChannelRecreationIdentity> {
+    const account = await this.provider.account(expected.channelId);
+    if (account.channelId !== expected.channelId || account.provider !== "walmart" || account.connectionId !== expected.connectionId || account.provider !== expected.provider)
+      throw new ChannelIdentityError("CHANNEL_CONNECTION_CHANGED", "The Walmart connection changed. Prepare the recreation again.");
+    if (!this.repository.checkRecreationMapping)
+      throw new ChannelIdentityError("CHANNEL_RECREATION_UNAVAILABLE", "Listing identity recovery is unavailable.");
+    return this.repository.checkRecreationMapping(account, channelRecreationMappingSchema.parse(input));
+  }
+
+  async linkRecreated(expected: ChannelCatalogAccount,
+    input: ChannelRecreationMapping & { expectedExternalProductId: string }, actor: string) {
+    z.string().trim().min(1).max(200).parse(actor);
+    const { expectedExternalProductId, ...source } = input;
+    z.string().min(1).parse(expectedExternalProductId);
+    const mapping = channelRecreationMappingSchema.parse(source);
+    const account = await this.provider.account(expected.channelId);
+    if (account.channelId !== expected.channelId || account.provider !== "walmart" || account.connectionId !== expected.connectionId || account.provider !== expected.provider)
+      throw new ChannelIdentityError("CHANNEL_CONNECTION_CHANGED", "The Walmart connection changed. Refresh before linking.");
+    const item = channelCatalogItemSchema.parse(await this.provider.item(account, mapping.sku));
+    if (item.sku !== mapping.sku || item.externalProductId !== expectedExternalProductId)
+      throw new ChannelIdentityError("CHANNEL_CATALOG_PRODUCT_CHANGED", "Walmart returned a different product than the recreation receipt.");
+    if (item.lifecycleStatus.toUpperCase() !== "ACTIVE" || !["PUBLISHED", "UNPUBLISHED"].includes(item.publishedStatus.toUpperCase()))
+      throw new ChannelIdentityError("CHANNEL_RECREATION_NOT_ACTIVE", "The recreated Walmart item is not ready to link. Check its status again.");
+    await this.repository.saveMappings(account, [{ item, productVariantId: mapping.productVariantId,
+      expectedLocalSku: mapping.sku, replacesExternalProductId: mapping.previousExternalProductId }], actor, this.now());
+    return { linked: 1 };
   }
 
   private async linkForAccount(account: ChannelCatalogAccount, mappings: readonly ChannelCatalogMapping[], actor: string, requireExactSku = false) {

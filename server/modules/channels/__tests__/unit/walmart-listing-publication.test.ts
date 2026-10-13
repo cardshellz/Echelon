@@ -169,6 +169,21 @@ function setup() {
 }
 
 describe("Walmart listing provider", () => {
+  it("prepares the full product content and category for a proven recreation despite its retained local link", async () => {
+    const { provider, api, channels } = setup();
+    const input = { catalog: { ...catalog, alreadyLinked: true }, draft: draft(), priceCents: 1299 };
+    expect((await provider.prepare(account, input)).issues).toContainEqual(expect.objectContaining({ code: "WALMART_VARIANT_INELIGIBLE" }));
+    await provider.assertCanRecreate(account, catalog.sku);
+    const prepared = await provider.prepare(account, { ...input, recreating: true });
+    expect(prepared.issues).toEqual([]);
+    expect(prepared.feedType).toBe("MP_ITEM");
+    expect(prepared.payload).toMatchObject({
+      Orderable: { sku: catalog.sku, price: 12.99, ShippingWeight: 0.1 },
+      Visible: { [type]: { productName: catalog.title, brand: catalog.brand, mainImageUrl: catalog.images[0], pieceCount: 100 } },
+    });
+    expect(channels.withListingWrites).toHaveBeenCalledWith(account, [catalog.sku], expect.any(Function));
+    expect(api.submitFeed).not.toHaveBeenCalled();
+  });
   it("refuses a queued creation after a durable publication stop, without sending a feed", async () => {
     const { provider, api, channels } = setup();
     const item = await provider.prepare(account, { catalog, draft: draft(), priceCents: 1299 });
