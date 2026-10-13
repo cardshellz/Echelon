@@ -8,13 +8,13 @@ The Shopify customer account templates render their own orders immediately. Orde
 
 The exact `/api/returns/shopify/proxy/account` suffix is registered before the existing returns proxy router. It verifies the existing Echelon app's Shopify HMAC, shop, customer, path and timestamp on every request. Shopify forwards POST bodies and strips cookies, so staff cookies and Liquid IDs never authorize it. Inputs use a bounded JSON envelope; no new query parameters or Shopify credentials are exposed in the theme.
 
-Leave `CUSTOMER_RETURN_CUSTOMER_ACCESS` unchanged. This gateway is separately default-off. Configure the following **non-secret** Echelon config value only after choosing testers:
+Leave `CUSTOMER_RETURN_CUSTOMER_ACCESS` unchanged. This gateway is separately default-off. Enable signed-in customers of the configured shop with the following **non-secret** Echelon config value:
 
 ```json
-{"themeId":"174740308127","shops":{"card-shellz.myshopify.com":{"customerIds":["REPLACE_WITH_APPROVED_SHOPIFY_CUSTOMER_ID"]}}}
+{"themeId":"174740308127","shops":{"card-shellz.myshopify.com":{"enabled":true}}}
 ```
 
-The variable is `CUSTOMER_ACCOUNT_STAGING_CONFIG`. IDs must be positive numeric strings, unique within the shop, with at most 50 testers. The example placeholder is intentionally invalid. An absent config denies all staging customers; an invalid config denies requests with a configuration error. Only the signed customer in that allowlist can access their own orders and their own edit operations. The theme ID selects the intended rollout but is not authentication or evidence of a preview session.
+The variable is `CUSTOMER_ACCOUNT_STAGING_CONFIG`. An absent config denies all staging customers; an invalid config denies requests with a configuration error. An enabled shop admits every independently signed-in Shopify customer. Application services restrict each customer to their own orders, edit operations and returns. The theme ID selects the intended rollout but is not authentication or evidence of a preview session. The shared API is available to authenticated customers once enabled; only the staging theme renders its new UI.
 
 The existing connection's order edit setting and payment window still apply. Customer quotes, commits, payments, refunds, recovery, picking holds, discounts, club pricing and shipping calculations are delegated to the existing services. No browser financial calculation authorizes an edit. The existing administration endpoints retain staff permissions.
 
@@ -22,7 +22,7 @@ Migration `0745_customer_account_order_edit_actor.sql` preserves staff user fore
 
 ## Verification and cutover boundaries
 
-- Unit/HTTP tests exercise valid and invalid signatures, anonymous requests, wrong stores/paths, stale proofs, tester allowlists, account switching, foreign orders/operations, command keys and transport confinement.
+- Unit/HTTP tests exercise valid and invalid signatures, anonymous requests, wrong stores/paths, stale proofs, shop enablement, account switching, foreign orders/operations, command keys and transport confinement.
 - Real PostgreSQL tests apply the migration verbatim and exercise audit identity, database constraints, immutable history and concurrent edits alongside existing financial hold tests.
 - Theme browser fixtures exercise desktop/mobile account actions, grouped quantities, collapsed calculations, membership blocking notices and lost-response recovery. These use deterministic mocked backend responses and do not prove deployed Shopify payments or postage.
 - The deployed authenticated roundtrip must verify forwarded Origin/custom headers, account A versus B, picking and delivery gates, quote/apply/payment/recovery, existing label downloads and theme isolation.

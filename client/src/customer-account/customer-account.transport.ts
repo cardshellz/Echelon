@@ -1,7 +1,8 @@
 import { z } from "zod";
 import { CUSTOMER_ACCOUNT_COMMAND_HEADER, customerAccountRequestSchema, customerAccountBootstrapSchema, customerAccountOrderIdentitySchema, customerAccountOrderIdentityInputSchema } from "@shared/customer-account/customer-account.contract";
 import { ORDER_EDIT_API } from "@shared/order-edits/order-edit.contract";
-import { CUSTOMER_RETURNS_API } from "@shared/returns/customer-return-access.contract";
+import { CUSTOMER_RETURNS_API, RETURN_CUSTOMER_SESSION_HEADER } from "@shared/returns/customer-return-access.contract";
+import { PreviewAccessError } from "@/lib/customer-return-preview";
 import { createOrderEditTransport } from "@/lib/order-edits";
 import { createCustomerReturnTransport } from "@/lib/customer-return-customer";
 
@@ -44,6 +45,9 @@ export function createCustomerAccountTransport(raw: CustomerAccountPageConfig, r
       fields[key] = value;
     }
     const headers = new Headers(options?.headers);
+    if (prefix === CUSTOMER_RETURNS_API && headers.get(RETURN_CUSTOMER_SESSION_HEADER) !== sessionKey) {
+      throw new PreviewAccessError("Your signed-in account changed. Refresh this page before continuing.");
+    }
     const key = headers.get("Idempotency-Key");
     return call({ method, path: `${prefix === ORDER_EDIT_API ? "/order-edits" : "/returns"}${url.pathname.slice(prefix.length)}`, query: fields,
       ...(options?.body === undefined ? {} : { body: JSON.parse(z.string().parse(options.body)) }),

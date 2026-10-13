@@ -10,7 +10,7 @@ ALTER TABLE oms.order_edit_operations
     OR (actor_id IS NULL AND customer_actor_channel_id IS NOT NULL
       AND customer_actor_external_id IS NOT NULL
       AND customer_actor_external_id ~ '^[1-9][0-9]*$'
-      AND COALESCE(document->>'actorId','') = 'shopify:' || customer_actor_channel_id::text || ':' || customer_actor_external_id
+      AND COALESCE(document->>'actorId','') = 'customer:' || customer_actor_channel_id::text || ':' || customer_actor_external_id
       AND COALESCE(document#>>'{baseline,channelId}','') = customer_actor_channel_id::text
       AND regexp_replace(COALESCE(document#>>'{baseline,customerId}',''),'^gid://shopify/Customer/','') = customer_actor_external_id)
   );

@@ -10,7 +10,7 @@ const uuid = "11111111-1111-4111-8111-111111111111";
 function setup() {
   const owned = { omsOrderId: 9, channelId: 2, externalOrderId: "99", externalOrderNumber: "#10" };
   const access = { resolve: vi.fn(async () => owned), resolveOwned: vi.fn(async () => owned) };
-  const store = { connections: vi.fn(async () => [connection]), get: vi.fn(async () => ({ actorId: "shopify:2:100", connectionId: 4, omsOrderId: 9, baseline: { channelId: 2, customerId: "gid://shopify/Customer/100" } })) };
+  const store = { connections: vi.fn(async () => [connection]), get: vi.fn(async () => ({ actorId: "customer:2:100", connectionId: 4, omsOrderId: 9, baseline: { channelId: 2, customerId: "gid://shopify/Customer/100" } })) };
   const edits = { order: vi.fn(async () => ({ activeOperationId: null, eligibility: { editable: true, reasons: [] } })), catalogCategories: vi.fn(), catalogProducts: vi.fn(), catalogVariants: vi.fn(), warmPreview: vi.fn(), preview: vi.fn(), quote: vi.fn(), get: vi.fn(), commit: vi.fn(), reconcile: vi.fn(), abandon: vi.fn() };
   const service = new CustomerOrderEditService({ principal, access, store, edits } as unknown as ConstructorParameters<typeof CustomerOrderEditService>[0]);
   return { access, store, edits, service };
@@ -29,7 +29,7 @@ describe("customer order edit ownership", () => {
     await expect(fixture.service.order(4, 9)).rejects.toThrow("owned order unavailable");
     expect(fixture.edits.order).not.toHaveBeenCalled();
   });
-  it.each(["shopify:2:101", "shopify:3:100", "staff-user"])("denies operation creator %s before reads or mutations", async actorId => {
+  it.each(["customer:2:101", "customer:3:100", "staff-user"])("denies operation creator %s before reads or mutations", async actorId => {
     const fixture = setup();
     fixture.store.get.mockResolvedValue({ actorId, connectionId: 4, omsOrderId: 9, baseline: { channelId: 2, customerId: "gid://shopify/Customer/100" } });
     await expect(fixture.service.operation(uuid)).rejects.toMatchObject({ status: 404 });
@@ -40,8 +40,8 @@ describe("customer order edit ownership", () => {
     const fixture = setup();
     await fixture.service.progress(uuid, "commit", uuid);
     expect(fixture.access.resolveOwned).toHaveBeenCalledWith({ omsOrderId: 9 });
-    expect(fixture.edits.commit).toHaveBeenCalledWith(uuid, uuid, "shopify:2:100");
-    fixture.store.get.mockResolvedValue({ actorId: "shopify:2:100", connectionId: 4, omsOrderId: 9, baseline: { channelId: 2, customerId: "gid://shopify/Customer/101" } });
+    expect(fixture.edits.commit).toHaveBeenCalledWith(uuid, uuid, "customer:2:100");
+    fixture.store.get.mockResolvedValue({ actorId: "customer:2:100", connectionId: 4, omsOrderId: 9, baseline: { channelId: 2, customerId: "gid://shopify/Customer/101" } });
     await expect(fixture.service.operation(uuid)).rejects.toMatchObject({ status: 404 });
   });
   it("binds quote keys and scopes pricing previews to the owned order", async () => {
@@ -50,7 +50,7 @@ describe("customer order edit ownership", () => {
     await expect(fixture.service.quote(input, "22222222-2222-4222-8222-222222222222")).rejects.toMatchObject({ code: "ORDER_EDIT_KEY_MISMATCH" });
     expect(fixture.edits.quote).not.toHaveBeenCalled();
     await fixture.service.quote(input, uuid);
-    expect(fixture.edits.quote).toHaveBeenCalledWith(input, "shopify:2:100");
+    expect(fixture.edits.quote).toHaveBeenCalledWith(input, "customer:2:100");
     fixture.access.resolveOwned.mockRejectedValue(new Error("foreign order"));
     await expect(fixture.service.preview({ ...input, requestKey: undefined })).rejects.toThrow();
     expect(fixture.edits.preview).not.toHaveBeenCalled();
@@ -63,35 +63,36 @@ describe("customer order edit ownership", () => {
 });
 describe("external Shopify edit audit identity", () => {
   it("retains staff and system identity without pretending shoppers are staff", () => {
-    expect(customerOrderEditActorId({ channelId: 2, externalCustomerId: "100" })).toBe("shopify:2:100");
-    expect(orderEditAuditActor("shopify:2:100")).toEqual({ staffId: null, customerChannelId: 2, externalCustomerId: "100" });
+    expect(customerOrderEditActorId({ channelId: 2, externalCustomerId: "100" })).toBe("customer:2:100");
+    expect(orderEditAuditActor("customer:2:100")).toEqual({ staffId: null, customerChannelId: 2, externalCustomerId: "100" });
     expect(orderEditAuditActor("staff-user").staffId).toBe("staff-user");
     expect(orderEditAuditActor(null).staffId).toBeNull();
   });
-  it.each(["shopify:0:100", "shopify:2:0", "shopify:2:x", "shopify:9007199254740992:1", `shopify:2:${"1".repeat(31)}`])("rejects malformed reserved actor %s", actor => {
+  it.each(["customer:0:100", "customer:2:0", "customer:2:x", "customer:9007199254740992:1", `customer:2:${"1".repeat(31)}`])("rejects malformed reserved actor %s", actor => {
     expect(() => readCustomerOrderEditActor(actor)).toThrow();
   });
   it("writes customer audit columns inside the supplied transaction", async () => {
     const tx = { query: vi.fn(async () => ({ rows: [], command: "INSERT", rowCount: 1, oid: 0, fields: [] })) };
-    await appendOrderEditAudit(tx, { operationId: uuid, connectionId: 4, actorId: "shopify:2:100", action: "quoted", before: null, after: { status: "ready" }, occurredAt: "2026-10-12T00:00:00Z" });
+    await appendOrderEditAudit(tx, { operationId: uuid, connectionId: 4, actorId: "customer:2:100", action: "quoted", before: null, after: { status: "ready" }, occurredAt: "2026-10-12T00:00:00Z" });
     const [sql, values] = tx.query.mock.calls[0] as unknown as [string, unknown[]];
     expect(sql).toContain("customer_actor_channel_id,customer_actor_external_id");
     expect(sql).toContain("VALUES($1,$2,NULL"); expect(values.slice(-2)).toEqual([2, "100"]);
-    expect(values).not.toContain("shopify:2:100");
+    expect(values).not.toContain("customer:2:100");
   });
 });
 describe("default-off staging access", () => {
-  const config = { themeId: "174740308127", shops: { [principal.shopDomain]: { customerIds: ["100"] } } };
+  const config = { themeId: "174740308127", shops: { [principal.shopDomain]: { enabled: true } } };
   const authConfig = { storageSecret: "x".repeat(32), publicOrigin: "https://backend.test", shops: { [principal.shopDomain]: { proxyUrl: "https://shop.test/apps/echelon-returns", shopifySecret: "fixture-secret" } } };
   const input = { config, authConfig, principal, themeId: config.themeId, expectedCustomerId: "100", origin: "https://shop.test", commandHeader: "1", sessionKey: principal.sessionKey };
-  it("defaults off and rejects malformed allowlists", () => {
+  it("defaults off and rejects malformed shop configuration", () => {
     expect(readCustomerAccountStagingConfig(undefined)).toBeNull();
     expect(() => readCustomerAccountStagingConfig("{}")).toThrow();
-    expect(() => readCustomerAccountStagingConfig(JSON.stringify({ ...config, shops: { [principal.shopDomain]: { customerIds: ["100", "100"] } } }))).toThrow();
+    expect(() => readCustomerAccountStagingConfig(JSON.stringify({ ...config, shops: { [principal.shopDomain]: { enabled: "true" } } }))).toThrow();
     expect(() => requireCustomerAccountStaging({ ...input, config: null })).toThrow();
   });
-  it("requires the allowed signed customer, expected account, exact theme and origin", () => {
+  it("admits all signed customers while requiring the expected account, exact theme and origin", () => {
     expect(() => requireCustomerAccountStaging(input)).not.toThrow();
+    expect(() => requireCustomerAccountStaging({ ...input, principal: { ...principal, externalCustomerId: "101" }, expectedCustomerId: "101" })).not.toThrow();
     for (const override of [{ themeId: "1" }, { expectedCustomerId: "101" }, { sessionKey: "b".repeat(43) }, { origin: "https://evil.test" }, { commandHeader: undefined }, { principal: { ...principal, externalCustomerId: "101" } }]) {
       expect(() => requireCustomerAccountStaging({ ...input, ...override })).toThrow();
     }

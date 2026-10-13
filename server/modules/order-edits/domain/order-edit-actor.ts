@@ -11,12 +11,12 @@ export type OrderEditCustomerActor = z.infer<typeof customerSchema>;
  * This is an audit/cache identity, never a credential or a local staff user. */
 export function customerOrderEditActorId(raw: OrderEditCustomerActor): string {
   const value = customerSchema.parse(raw);
-  return `shopify:${value.channelId}:${value.externalCustomerId}`;
+  return `customer:${value.channelId}:${value.externalCustomerId}`;
 }
 
 export function readCustomerOrderEditActor(actorId: string): OrderEditCustomerActor | null {
-  if (!actorId.startsWith("shopify:")) return null;
-  const match = /^shopify:([1-9][0-9]*):([1-9][0-9]*)$/.exec(actorId);
+  if (!actorId.startsWith("customer:")) return null;
+  const match = /^customer:([1-9][0-9]*):([1-9][0-9]*)$/.exec(actorId);
   const parsed = match ? customerSchema.safeParse({ channelId: Number(match[1]), externalCustomerId: match[2] }) : null;
   if (!parsed?.success) throw new OrderEditError("ORDER_EDIT_ACTOR_INVALID", "The order edit identity could not be verified.", 403);
   return parsed.data;

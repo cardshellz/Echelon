@@ -5,12 +5,13 @@ import express from "express";
 import { beforeEach, afterEach, describe, it, expect, vi } from "vitest";
 import { CUSTOMER_ACCOUNT_PROXY_API, CUSTOMER_ACCOUNT_COMMAND_HEADER } from "@shared/customer-account/customer-account.contract";
 import { CustomerReturnCustomerAuthService } from "../../../returns/application/customer-return-customer-auth.service";
+import type { CustomerReturnCustomerSession } from "../../../returns/application/customer-return-customer-auth.service";
 import { registerCustomerAccountRoutes, type CustomerAccountRouteDependencies } from "../../interfaces/customer-account.routes";
 
 const now = new Date("2026-10-12T12:00:00Z");
 const config = { storageSecret: "fixture-storage-only-secret-32-characters", publicOrigin: "https://backend.test",
   shops: { "fixture.myshopify.com": { proxyUrl: "https://shop.test/apps/echelon-returns", shopifySecret: "fixture-proxy-secret" } } };
-const staging = { themeId: "174740308127", shops: { "fixture.myshopify.com": { customerIds: ["100"] } } };
+const staging = { themeId: "174740308127", shops: { "fixture.myshopify.com": { enabled: true } } };
 function proof(override: Record<string, string> = {}) {
   const values = { shop: "fixture.myshopify.com", logged_in_customer_id: "100", timestamp: String(Math.floor(now.getTime() / 1000)), path_prefix: "/apps/echelon-returns", ...override };
   const signed = Object.entries(values).sort(([a], [b]) => a.localeCompare(b)).map(([key, value]) => `${key}=${value}`).join("");
@@ -21,7 +22,7 @@ function proof(override: Record<string, string> = {}) {
 describe("customer account signed storefront HTTP boundary", () => {
   let server: Server; let base: string;
   const connection = vi.fn(async () => ({ connectionId: 4, channelId: 2, shopDomain: "fixture.myshopify.com", name: "Shopify", enabled: true, paymentWindowMinutes: 30 }));
-  const services = vi.fn(() => ({ edits: { connection }, returns: vi.fn() }));
+  const services = vi.fn((_principal: CustomerReturnCustomerSession) => ({ edits: { connection }, returns: vi.fn() }));
   const report = vi.fn();
   let enabled = true;
   beforeEach(async () => {
@@ -55,12 +56,17 @@ describe("customer account signed storefront HTTP boundary", () => {
   ])("rejects malformed, stale or wrong-proxy proof", async ({ signed }) => {
     expect((await request({}, signed())).status).toBe(401); expect(services).not.toHaveBeenCalled();
   });
-  it("keeps the staging surface off by default and checks tester, origin and account switch", async () => {
+  it("keeps the staging surface off by default and checks origin and account switch", async () => {
     enabled = false; expect((await request()).status).toBe(403); enabled = true;
-    expect((await request({}, proof({ logged_in_customer_id: "101" }))).status).toBe(403);
+    expect((await request({}, proof({ logged_in_customer_id: "101" }))).status).toBe(401);
     expect((await request({ expectedCustomerId: "101" })).status).toBe(401);
     expect((await request({}, proof(), { Origin: "https://other.test" })).status).toBe(403);
     expect(services).not.toHaveBeenCalled();
+  });
+  it("admits any signed customer for the enabled shop without a tester allowlist", async () => {
+    const response = await request({ expectedCustomerId: "101" }, proof({ logged_in_customer_id: "101" }));
+    expect(response.status).toBe(200);
+    expect(services.mock.calls[0]?.[0]).toMatchObject({ externalCustomerId: "101", channelId: 2 });
   });
   it("requires the same customer partition on every resource call", async () => {
     expect((await request({ path: "/account/resolve", method: "POST", body: { orderReference: "#10", externalOrderId: "99" } })).status).toBe(401);

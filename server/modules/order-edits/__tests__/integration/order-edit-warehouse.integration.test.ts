@@ -303,7 +303,7 @@ function inventoryProjection(): CanonicalAvailabilityReservationStatusProjection
     function customerRecord(): OrderEditRecord {
       const original = record();
       return { ...original, id: "88888888-8888-4888-8888-888888888888", omsOrderId: 21,
-        requestKey: "99999999-9999-4999-8999-999999999999", actorId: "shopify:36:100",
+        requestKey: "99999999-9999-4999-8999-999999999999", actorId: "customer:36:100",
         input: { ...original.input, omsOrderId: 21, requestKey: "99999999-9999-4999-8999-999999999999" },
         baseline: { ...original.baseline, customerId: "gid://shopify/Customer/100", orderId: "gid://shopify/Order/2", name: "#2" } };
     }
@@ -315,7 +315,7 @@ function inventoryProjection(): CanonicalAvailabilityReservationStatusProjection
       const store = new PostgresOrderEditStore(database.pool);
       const customer = customerRecord();
       await store.create(customer);
-      expect((await store.get(customer.id)).actorId).toBe("shopify:36:100");
+      expect((await store.get(customer.id)).actorId).toBe("customer:36:100");
       const row = (await database.pool.query("SELECT actor_id,customer_actor_channel_id,customer_actor_external_id FROM oms.order_edit_operations WHERE id=$1", [customer.id])).rows[0];
       expect(row).toEqual({ actor_id: null, customer_actor_channel_id: 36, customer_actor_external_id: "100" });
       const event = (await database.pool.query("SELECT actor_id,customer_actor_channel_id,customer_actor_external_id FROM oms.order_edit_events WHERE operation_id=$1", [customer.id])).rows[0];

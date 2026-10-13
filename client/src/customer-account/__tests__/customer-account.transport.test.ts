@@ -30,4 +30,10 @@ describe("storefront transport reuses canonical clients", () => {
     await expect(api.request("/api/order-edits/admin/settings/4", { method: "PUT" })).rejects.toThrow();
     expect(request).not.toHaveBeenCalled();
   });
+  it("preserves the return client's expected account partition", async () => {
+    const request = vi.fn(async () => Response.json(bootstrap));
+    const api = createCustomerAccountTransport(config, request); await api.bootstrap();
+    await expect(api.returns("b".repeat(43)).order(9, new AbortController().signal)).rejects.toThrow("Your signed-in account changed");
+    expect(request).toHaveBeenCalledTimes(1);
+  });
 });
