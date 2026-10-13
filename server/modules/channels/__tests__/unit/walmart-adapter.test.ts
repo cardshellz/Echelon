@@ -10,7 +10,7 @@ function setup() {
   const api = { setInventory: vi.fn(), inventory: vi.fn(async () => 5) };
   const row = { connection_id: 2, ship_node_id: "NODE", environment: "production", channel_id: 1, warehouse_id: 4, partner_id: "seller", revision: 1 };
   const service = { connection: vi.fn(async () => row), requireRuntime: vi.fn(), api: () => api,
-    withListingWrites: vi.fn(async (_account: unknown, _skus: readonly string[], work: () => Promise<unknown>) => work()),
+    withStockWrites: vi.fn(async (_account: unknown, _sku: string, _quantity: number, work: () => Promise<unknown>) => work()),
     repository: { withLock: vi.fn(async (_id, action) => action()), assertWarehouse: vi.fn(),
       inventoryMappings: vi.fn(async () => [{ product_variant_id: 3, channel_sku: "SKU" }]) } };
   const supply = { getSourceWarehouses: vi.fn(async (): Promise<ReadonlyArray<InventoryPublicationSourceWarehouse>> => [{ warehouseId: 4, isActive: true }]) };
@@ -37,6 +37,22 @@ describe("Walmart exact inventory destination", () => {
     await expect(s.transport.publishAbsolute({ ...request, externalInventoryItemId: "WRONG" })).rejects.toMatchObject({ code: "WALMART_INVENTORY_MAPPING_MISMATCH" });
     expect(s.api.setInventory).not.toHaveBeenCalled();
   });
+  it.each([0, 17])("reports missing-listing rejection as not sent for quantity %s", async quantity => {
+    const s = setup();
+    s.service.withStockWrites.mockRejectedValue(new WalmartApiError("LISTING_MISSING_ON_PROVIDER", "Missing", false));
+    await expect(s.transport.publishAbsolute({ ...request, desiredQuantity: quantity })).rejects.toMatchObject({
+      code: "LISTING_MISSING_ON_PROVIDER", retryable: false, effect: "not_sent",
+    });
+    expect(s.api.setInventory).not.toHaveBeenCalled();
+  });
+  it("never describes a failure after the provider callback starts as not sent", async () => {
+    const s = setup();
+    s.api.setInventory.mockRejectedValue(new WalmartApiError("WALMART_TIMEOUT", "Unknown outcome", true));
+    const failure = await s.transport.publishAbsolute(request).catch(error => error);
+    expect(failure).toMatchObject({ code: "WALMART_TIMEOUT", retryable: true });
+    expect(failure.effect).toBeUndefined();
+    expect(s.api.setInventory).toHaveBeenCalledOnce();
+  });
   it("refuses legacy direct quantity writes", async () => {
     const s = setup();
     await expect(s.adapter.pushInventory(1, [])).rejects.toMatchObject({ code: "WALMART_PUBLICATION_AUTHORITY_REQUIRED" });
@@ -44,8 +60,8 @@ describe("Walmart exact inventory destination", () => {
   });
   it("blocks an already queued positive update after unpublishing but still permits the inventory owner's zero", async () => {
     const s = setup();
-    s.service.withListingWrites.mockImplementation(async (_account, skus, work) => {
-      if (skus.includes("SKU")) throw new WalmartApiError("LISTING_PUBLICATION_STOPPED", "Stopped", false);
+    s.service.withStockWrites.mockImplementation(async (_account, sku, quantity, work) => {
+      if (sku === "SKU" && quantity > 0) throw new WalmartApiError("LISTING_PUBLICATION_STOPPED", "Stopped", false);
       return work();
     });
     await expect(s.transport.publishAbsolute({ ...request, desiredQuantity: 17 })).rejects.toMatchObject({ code: "LISTING_PUBLICATION_STOPPED", retryable: false });

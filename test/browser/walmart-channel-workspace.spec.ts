@@ -102,6 +102,30 @@ async function deletedListing(page: Page) {
   return { state, operationId, response };
 }
 
+test("refresh detects a deleted completed listing, preserves its title and offers recreation without stale stock or editing", async ({ page }, info) => {
+  const { state, operationId, response } = await deletedListing(page);
+  state.publication.operations[0].state = "completed";
+  Object.assign(state.publication.operations[0].items[0], { state: "verified", missingOnProvider: false, error: null, stockState: "ready" });
+  state.remoteRows = [{ ...listing("CARD-1"), title: "Clear card sleeves", priceCents: 2499 }];
+  state.lifecycle.missingOnRefresh.add("CARD-1");
+  await page.route(`**${PUBLICATION_BASE}/operations/${operationId}/recreation?sku=CARD-1`, route => route.fulfill({ json: response }));
+  await page.reload();
+  const row = page.getByRole("row").filter({ hasText: "CARD-1" });
+  await expect(row.getByText("Active", { exact: true })).toBeVisible();
+  await expect(row.getByLabel("Walmart stock for CARD-1", { exact: true })).toHaveText("100");
+  await page.getByRole("button", { name: "Refresh listings", exact: true }).click();
+  await expect(row.getByText("Missing on Walmart", { exact: true })).toBeVisible();
+  await expect(row.getByText("Clear card sleeves", { exact: true })).toBeVisible();
+  await expect(row.getByLabel("Walmart stock for CARD-1", { exact: true })).toHaveText("—");
+  await expect(row.getByRole("button", { name: /Edit listing/ })).toHaveCount(0);
+  expect(state.lifecycle.presenceReads.flat()).toContain("CARD-1");
+  await row.screenshot({ path: info.outputPath("missing-walmart-listing.png") });
+  await row.getByRole("button", { name: "More actions for CARD-1", exact: true }).click();
+  await page.getByRole("menuitem", { name: "Recreate on Walmart", exact: true }).click();
+  await expect(page.getByRole("dialog").getByLabel("Walmart title", { exact: true })).toHaveValue(response.item.title!);
+  expect(state.publication.writes).toEqual([]);
+});
+
 test("recreates a deleted listing through a fresh full draft and review while preserving other draft edits", async ({ page }, info) => {
   const { state, operationId, response } = await deletedListing(page);
   let lookups = 0;
