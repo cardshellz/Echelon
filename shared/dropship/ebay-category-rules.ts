@@ -12,8 +12,10 @@ import { catalogScopeSchema, MAX_NAMED_CATALOG_GROUP_ITEMS, type CatalogScope } 
  *      product-type mapping on the Card Shellz eBay channel);
  *   4. none, which keeps the listing blocked with `ebay_browse_category_required`.
  *
- * Category names and paths are always looked up at eBay by the server. The
- * client submits category numbers only, so a stored name can never be forged.
+ * Category names and paths only ever come from eBay: the server looks a
+ * category up at eBay when a save first adds it, and keeps that stored value
+ * while the rules hold it. The client submits category numbers only, so a
+ * stored name can never be forged.
  */
 
 /** eBay category ids are positive decimal strings; the catalog stores them in varchar(20). */

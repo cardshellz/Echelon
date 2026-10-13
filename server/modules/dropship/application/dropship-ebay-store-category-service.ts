@@ -1,5 +1,6 @@
 import { createHash } from "crypto";
 import { DropshipError } from "../domain/errors";
+import { resolveStoreShelfIds } from "./dropship-ebay-listing-checks";
 import type { DropshipVendorProvisioningService } from "./dropship-vendor-provisioning-service";
 import type { DropshipClock, DropshipLogger } from "./dropship-ports";
 import {
@@ -114,24 +115,18 @@ export class DropshipEbayStoreCategoryService {
     await this.requireConnectedEbayStore(vendor.vendorId, parsed.storeConnectionId);
 
     const categories = await this.loadLeafCategories(vendor.vendorId, parsed.storeConnectionId);
-    const categoriesById = new Map(categories.map((category) => [category.categoryId, category]));
-    const selectedCategories = parsed.storeCategoryIds.map((categoryId) => {
-      const category = categoriesById.get(categoryId);
-      if (!category) {
-        throw new DropshipError(
-          "DROPSHIP_EBAY_STORE_CATEGORY_INVALID",
-          "Select a current leaf category from the connected eBay Store.",
-          {
-            storeConnectionId: parsed.storeConnectionId,
-            productVariantId: parsed.productVariantId,
-            categoryId,
-          },
-        );
-      }
-      return category;
-    });
-    const storeCategoryIds = selectedCategories.map((category) => category.categoryId);
-    const storeCategoryNames = selectedCategories.map((category) => category.path);
+    // This service's own words, naming the size and the first shelf the store does not have.
+    const selectedCategories = resolveStoreShelfIds(parsed.storeCategoryIds, categories, (categoryId) => new DropshipError(
+      "DROPSHIP_EBAY_STORE_CATEGORY_INVALID",
+      "Select a current leaf category from the connected eBay Store.",
+      {
+        storeConnectionId: parsed.storeConnectionId,
+        productVariantId: parsed.productVariantId,
+        categoryId,
+      },
+    ));
+    const storeCategoryIds = selectedCategories.map((category) => category.id);
+    const storeCategoryNames = selectedCategories.map((category) => category.name);
     const requestHash = hashEbayStoreCategoryAssignment({
       storeConnectionId: parsed.storeConnectionId,
       productVariantId: parsed.productVariantId,

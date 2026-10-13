@@ -1,11 +1,10 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
 import { DropshipError } from "../domain/errors";
-import {
-  evaluateDropshipEbayFulfillmentPolicyCompatibility,
-  type DropshipEbayFulfillmentCapability,
-  type DropshipEbayFulfillmentPolicy,
-  type DropshipEbayFulfillmentPolicyIssue,
+import type {
+  DropshipEbayFulfillmentCapability,
+  DropshipEbayFulfillmentPolicy,
+  DropshipEbayFulfillmentPolicyIssue,
 } from "../domain/ebay-fulfillment-policy-compatibility";
 import {
   EBAY_BUSINESS_POLICY_FIELDS,
@@ -22,6 +21,13 @@ import {
 import type {
   DropshipEbayFulfillmentCapabilityProvider,
 } from "./dropship-ebay-fulfillment-capability-service";
+import {
+  CHECKED_LISTING_POLICY_KEYS,
+  buildFulfillmentPolicyOptions,
+  checkListingPolicyIds,
+  listingPolicyNamesFromDiscovery,
+  resolveStoreShelfIds,
+} from "./dropship-ebay-listing-checks";
 import {
   managedMerchantLocationKeyForWarehouse,
   type DropshipEbayManagedLocation,
@@ -501,11 +507,18 @@ export class DropshipEbayListingSetupService {
       ? await this.resolveShelfDefault(vendorId, storeConnectionId, parsed.storeShelfDefault.ids)
       : parsed.storeShelfDefault;
 
-    const policies = validatePolicyChange(parsed, discovery, capability, storeConnectionId);
+    const checked = checkListingPolicyIds(parsed, discovery, capability, storeConnectionId);
+    const policies: Partial<Record<EbayBusinessPolicyField, string>> = {};
+    for (const field of EBAY_BUSINESS_POLICY_FIELDS) {
+      const policy = checked[CHECKED_LISTING_POLICY_KEYS[field]];
+      if (policy) policies[field] = policy.id;
+    }
     const change: ListingSetupChange = {
       marketplaceId: discovery?.marketplaceId ?? marketplaceId,
       policies,
-      discoveredNames: discovery ? namesFromDiscovery(discovery, readSelection(config), policies) : {},
+      // Names for the kept policies too, not only the sent ones: a kept id
+      // eBay lists gets eBay's name now (applyListingSetupChange).
+      discoveredNames: discovery ? listingPolicyNamesFromDiscovery(discovery, readSelection(config), policies) : {},
       storeShelfDefault: shelfDefault,
     };
     // A shipping policy save also points listings at the Card Shellz
@@ -702,7 +715,7 @@ export class DropshipEbayListingSetupService {
       marketplaceId: discovery.marketplaceId,
       merchantLocationKey: selection.merchantLocationKey,
       policies,
-      discoveredNames: namesFromDiscovery(discovery, readSelection(current.config), policies),
+      discoveredNames: listingPolicyNamesFromDiscovery(discovery, readSelection(current.config), policies),
     });
     // Compare-and-set against the revision this writer read. A vendor save
     // that lands in between wins; the caller logs the conflict and the
@@ -788,18 +801,16 @@ export class DropshipEbayListingSetupService {
     ids: readonly string[],
   ): Promise<EbayStoreShelfDefault> {
     const shelves = await this.deps.storeShelves.listLeafCategories({ vendorId, storeConnectionId });
-    const shelvesById = new Map(shelves.map((shelf) => [shelf.categoryId, shelf]));
-    const missing = ids.filter((id) => !shelvesById.has(id));
-    if (missing.length > 0) {
-      throw new DropshipError(
-        "DROPSHIP_EBAY_STORE_SHELF_DEFAULT_INVALID",
-        "That shelf is not in your eBay store anymore. Choose another shelf.",
-        { storeConnectionId, invalidFields: ["storeShelfDefault"], retryable: false },
-      );
-    }
+    // The setup's own words: the vendor picked this shelf as the store
+    // default, so the refusal names that field, not the shelf.
+    const resolved = resolveStoreShelfIds(ids, shelves, () => new DropshipError(
+      "DROPSHIP_EBAY_STORE_SHELF_DEFAULT_INVALID",
+      "That shelf is not in your eBay store anymore. Choose another shelf.",
+      { storeConnectionId, invalidFields: ["storeShelfDefault"], retryable: false },
+    ));
     // eBay takes store categories by name; the path is what an offer sends
     // (dropship-ebay-store-category-service.ts, replaceForMember).
-    return { ids: [...ids], names: ids.map((id) => shelvesById.get(id)!.path) };
+    return { ids: resolved.map((shelf) => shelf.id), names: resolved.map((shelf) => shelf.name) };
   }
 
   /**
@@ -1117,115 +1128,6 @@ function hasOption(
   options: readonly DropshipEbayListingSetupOption[],
 ): boolean {
   return options.some((option) => option.id === selectedId);
-}
-
-/**
- * Each eBay shipping policy with whether it fits Card Shellz shipping. With
- * no capability (Card Shellz shipping could not be read) every policy is
- * unchecked and not compatible, so nothing can pick it until it is checked.
- */
-export function buildFulfillmentPolicyOptions(
-  policies: readonly DropshipEbayFulfillmentPolicy[],
-  capability: DropshipEbayFulfillmentCapability | null,
-): DropshipEbayFulfillmentPolicyOption[] {
-  return policies.map((policy) => {
-    if (!capability) {
-      return {
-        id: policy.id,
-        name: policy.name,
-        compatible: false,
-        compatibilityChecked: false,
-        compatibilityIssues: [],
-      };
-    }
-    const compatibility = evaluateDropshipEbayFulfillmentPolicyCompatibility({
-      capability,
-      policy,
-    });
-    return {
-      id: policy.id,
-      name: policy.name,
-      compatible: compatibility.compatible,
-      compatibilityChecked: true,
-      compatibilityIssues: compatibility.issues,
-    };
-  });
-}
-
-/**
- * Checks each policy the save sends against eBay's current lists (and the
- * shipping policy against Card Shellz shipping). Fields the save leaves out
- * are not checked: they keep their saved value, and the preview's live check
- * reports any that eBay no longer lists.
- */
-function validatePolicyChange(
-  input: ReplaceDropshipEbayListingSetupInput,
-  discovery: DropshipEbayListingSetupDiscovery | null,
-  capability: DropshipEbayFulfillmentCapability | null,
-  storeConnectionId: number,
-): Partial<Record<EbayBusinessPolicyField, string>> {
-  const sent = EBAY_BUSINESS_POLICY_FIELDS.filter((field) => input[field] !== undefined);
-  if (sent.length === 0) return {};
-  if (!discovery) {
-    throw new DropshipError(
-      "DROPSHIP_EBAY_LISTING_SETUP_INVARIANT_FAILED",
-      "eBay's policy lists are required to check a policy save.",
-      { storeConnectionId, retryable: false },
-    );
-  }
-  const fulfillmentPolicies = buildFulfillmentPolicyOptions(discovery.fulfillmentPolicies, capability);
-  const optionsByField: Record<EbayBusinessPolicyField, readonly DropshipEbayListingSetupOption[]> = {
-    fulfillmentPolicyId: fulfillmentPolicies,
-    returnPolicyId: discovery.returnPolicies,
-    paymentPolicyId: discovery.paymentPolicies,
-  };
-  const invalidFields = sent.filter((field) => !hasOption(input[field]!, optionsByField[field]));
-  if (invalidFields.length > 0) {
-    throw new DropshipError(
-      "DROPSHIP_EBAY_LISTING_SETUP_SELECTION_INVALID",
-      "One or more eBay listing setup selections are no longer available.",
-      { storeConnectionId, invalidFields, retryable: false },
-    );
-  }
-  if (input.fulfillmentPolicyId !== undefined) {
-    const selectedFulfillmentPolicy = fulfillmentPolicies.find(
-      (policy) => policy.id === input.fulfillmentPolicyId,
-    );
-    if (!selectedFulfillmentPolicy?.compatibilityChecked || !selectedFulfillmentPolicy.compatible) {
-      throw new DropshipError(
-        "DROPSHIP_EBAY_FULFILLMENT_POLICY_INCOMPATIBLE",
-        "The selected eBay fulfillment policy exceeds Card Shellz fulfillment capabilities.",
-        {
-          storeConnectionId,
-          fulfillmentPolicyId: input.fulfillmentPolicyId,
-          issues: selectedFulfillmentPolicy?.compatibilityIssues ?? [],
-          retryable: false,
-        },
-      );
-    }
-  }
-  return Object.fromEntries(sent.map((field) => [field, input[field]!]));
-}
-
-/** The names eBay lists now for each policy id the config will hold after the change. */
-function namesFromDiscovery(
-  discovery: DropshipEbayListingSetupDiscovery,
-  current: DropshipEbayListingSetupSelection,
-  policies: Partial<Record<EbayBusinessPolicyField, string | null>>,
-): Partial<Record<EbayBusinessPolicyField, string>> {
-  const optionsByField: Record<EbayBusinessPolicyField, readonly DropshipEbayListingSetupOption[]> = {
-    fulfillmentPolicyId: discovery.fulfillmentPolicies,
-    returnPolicyId: discovery.returnPolicies,
-    paymentPolicyId: discovery.paymentPolicies,
-  };
-  const names: Partial<Record<EbayBusinessPolicyField, string>> = {};
-  for (const field of EBAY_BUSINESS_POLICY_FIELDS) {
-    const finalId = policies[field] !== undefined ? policies[field] : current[field];
-    if (!finalId) continue;
-    const name = optionsByField[field].find((option) => option.id === finalId)?.name.trim();
-    if (name) names[field] = name;
-  }
-  return names;
 }
 
 function withManagedLocation(
