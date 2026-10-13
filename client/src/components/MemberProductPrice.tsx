@@ -10,6 +10,7 @@ export function MemberProductPrice(props: {
   priceCents: number;
   retailPriceCents?: number;
   plan: MemberPlanPresentation | null;
+  showSavings?: boolean;
 }) {
   const [failedIcon, setFailedIcon] = useState<string | null>(null);
   const { priceCents, retailPriceCents, plan } = props;
@@ -53,6 +54,9 @@ export function MemberProductPrice(props: {
           )}
         </span>
       </div>
+      {props.showSavings && <span className="cardshellz-unit-savings">
+        Save {formatOrderEditMoney(retailPriceCents - priceCents, "USD")} each
+      </span>}
     </div>
   );
 }

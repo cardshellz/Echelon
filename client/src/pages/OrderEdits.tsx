@@ -27,6 +27,8 @@ import { Badge } from "@/components/ui/badge";
 import { OrderEditProductPicker } from "@/components/order-edits/OrderEditProductPicker";
 import { OrderEditItems } from "@/components/order-edits/OrderEditItems";
 import { MemberProductPrice } from "@/components/MemberProductPrice";
+import { exactOrderEditUnitPrice, groupOrderEditDisplayLines } from "@/lib/order-edit-display";
+import "@/components/order-edits/order-edit-ui.css";
 import { useAuth } from "@/lib/auth";
 import { useDebounce } from "@/hooks/use-debounce";
 import {
@@ -369,6 +371,9 @@ export function OrderDraft({
     valid && draftKey === previewKey
       ? matchingOrderEditPreview(preview.data, input, Date.now())
       : null;
+  const previewLineGroups = useMemo(() => new Map(
+    groupOrderEditDisplayLines(currentPreview?.lines ?? []).map(line => [line.key, line]),
+  ), [currentPreview]);
   async function quote() {
     if (!canEdit || !valid || reviewBlocked || inflight.current) return;
     inflight.current = true;
@@ -408,8 +413,8 @@ export function OrderDraft({
   if (pending)
     return <OrderEditPreviewReview order={order} preview={reviewPreview} />;
   return (
-    <Card>
-      <CardHeader className="space-y-2">
+    <Card className="oe-order-surface">
+      <CardHeader className="oe-order-heading">
         <CardTitle>
           <h2>Order {order.orderNumber}</h2>
         </CardTitle>
@@ -418,11 +423,11 @@ export function OrderDraft({
           {order.customerEmail ? ` · ${order.customerEmail}` : ""}
         </p>}
         <div className="flex flex-wrap gap-2">
-          <Badge variant="outline">Payment: {order.financialStatus}</Badge>
-          <Badge variant="outline">{audience === "customer" ? (order.eligibility.editable ? "Ready to edit" : "Editing unavailable") : `Warehouse: ${order.warehouseStatus}`}</Badge>
+          <Badge variant="outline" className={`oe-status ${order.financialStatus === "Paid" ? "oe-status--paid" : ""}`}>Payment: {order.financialStatus}</Badge>
+          <Badge variant="outline" className="oe-status">{audience === "customer" ? (order.eligibility.editable ? "Ready to edit" : "Editing unavailable") : `Warehouse: ${order.warehouseStatus}`}</Badge>
         </div>
       </CardHeader>
-      <CardContent className="space-y-5">
+      <CardContent className="oe-order-content">
         {!enabled && (
           <div className="space-y-3 rounded-md border bg-muted/40 p-3">
             <p role="status" className="text-sm">
@@ -446,7 +451,9 @@ export function OrderDraft({
             }
           />
         )}
-        <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="oe-edit-layout">
+        <section className="oe-edit-main">
+        <div className="oe-items-heading">
           <div>
             <h3 className="text-sm font-medium">Items in your order</h3>
             <p className="mt-1 text-xs text-muted-foreground">
@@ -492,26 +499,33 @@ export function OrderDraft({
           )}
         </div>
         <div
-          className="divide-y rounded-md border"
+          className="oe-edit-items"
           aria-label="Editable order items"
         >
-          {order.lines.map((line) => (
+          {order.lines.map((line) => {
+            const unitNetCents = exactOrderEditUnitPrice(line.totalCents, line.quantity);
+            const previewGroup = line.variantId &&
+              order.lines.filter(item => item.variantId === line.variantId).length === 1
+              ? previewLineGroups.get(`variant:${line.variantId}`)
+              : null;
+            const previewLine = previewGroup?.quantity === Number(quantities[line.lineItemId]) ? previewGroup : null;
+            return (
             <div
               key={line.lineItemId}
-              className="flex flex-wrap items-center gap-3 p-3"
+              className="oe-edit-item"
             >
               <div className="min-w-0 flex-1">
                 <p className="text-sm font-medium">{line.title}</p>
                 <p className="text-xs text-muted-foreground">
                   {[line.variantTitle, line.sku].filter(Boolean).join(" · ")}
                 </p>
-                <p className="mt-1 text-xs text-muted-foreground">
-                  {line.quantity} originally ·{" "}
-                  {formatOrderEditMoney(line.unitPriceCents, order.currency)}{" "}
-                  each
+                <p className="oe-item-price">
+                  {formatOrderEditMoney(unitNetCents ?? line.totalCents, order.currency)}{" "}
+                  <span>{unitNetCents === null ? "original line total" : line.quantity > 1 ? "avg. each" : "each"}</span>
                 </p>
+                <p className="oe-item-original">Originally {line.quantity}</p>
               </div>
-              <div className="w-24 space-y-1">
+              <div className="oe-item-quantity">
                 <Label htmlFor={`line-${line.lineItemId}`} className="text-xs">
                   Quantity
                 </Label>
@@ -527,13 +541,17 @@ export function OrderDraft({
                     updateQuantity(line.lineItemId, event.target.value)
                   }
                 />
+                {(previewLine || Number(quantities[line.lineItemId]) === line.quantity) && <p className="oe-item-total">
+                  {formatOrderEditMoney(previewLine?.totalCents ?? line.totalCents, order.currency)}
+                  <span>item total</span>
+                </p>}
               </div>
             </div>
-          ))}
+          ); })}
           {additions.map((item, index) => (
             <div
               key={item.variant.variantId}
-              className="flex flex-wrap items-center gap-3 bg-muted/30 p-3"
+              className="oe-edit-item oe-added-item"
             >
               <div className="min-w-0 flex-1">
                 <p className="text-sm font-medium">
@@ -549,14 +567,17 @@ export function OrderDraft({
                     priceCents={item.variant.priceCents}
                     retailPriceCents={item.variant.retailPriceCents}
                     plan={item.plan}
+                    showSavings
                   />
                   <span className="text-xs text-muted-foreground">
                     each · before coupons and rewards
                   </span>
                 </div>
               </div>
+              <div className="oe-item-quantity">
+              <Label htmlFor={`added-${item.variant.variantId}`}>Quantity</Label>
               <Input
-                className="w-24"
+                id={`added-${item.variant.variantId}`}
                 type="number"
                 min={1}
                 step={1}
@@ -590,6 +611,7 @@ export function OrderDraft({
               >
                 Remove
               </Button>
+              </div>
             </div>
           ))}
         </div>
@@ -602,10 +624,12 @@ export function OrderDraft({
         </p>
         <ErrorMessage text={validationMessage} />
         <ErrorMessage text={error} />
+        </section>
+        <aside className="oe-edit-sidebar">
         {valid && active && (
           <p role="status" className="text-xs text-muted-foreground">
             {currentPreview
-              ? "Updated totals are ready. Review verifies them before applying changes."
+              ? "Updated totals are ready."
               : preview.isFetching
                 ? "Preparing updated totals…"
                 : preview.isError
@@ -614,32 +638,35 @@ export function OrderDraft({
           </p>
         )}
         <OrderEditSummary
+          financials={currentPreview?.financials ?? order.financials}
           totals={[
             { label: "Current order total", totalCents: order.totalCents },
             ...(currentPreview
               ? [
                   {
-                    label: "Preview total",
+                    label: "Updated order total",
                     totalCents: currentPreview.financials.totalCents,
                   },
                 ]
               : []),
           ]}
         />
+        </aside>
+        </div>
         <OrderEditCalculationDetails
           columns={[
             ...(order.financials
               ? [{ label: "Current order", financials: order.financials }]
               : []),
             ...(currentPreview
-              ? [{ label: "Preview", financials: currentPreview.financials }]
+              ? [{ label: "With your changes", financials: currentPreview.financials }]
               : []),
           ]}
         />
         {order.settlement && (
           <OrderEditPaymentDetails settlement={order.settlement} />
         )}
-        <div className="flex flex-wrap items-center justify-between gap-3 border-t pt-4">
+        <div className="oe-editor-footer">
           <p className="text-xs text-muted-foreground">
             Review the updated total before applying changes.
           </p>
@@ -668,8 +695,8 @@ export function OrderEditPreviewReview({
   preview: OrderEditPreview | null;
 }) {
   return (
-    <Card>
-      <CardHeader>
+    <Card className="oe-order-surface">
+      <CardHeader className="oe-order-heading">
         <CardTitle>
           <h2>Order {order.orderNumber}</h2>
         </CardTitle>
@@ -677,7 +704,7 @@ export function OrderEditPreviewReview({
           <Badge variant="outline">Verifying changes</Badge>
         </div>
       </CardHeader>
-      <CardContent className="space-y-4" aria-busy="true">
+      <CardContent className="oe-order-content" aria-busy="true">
         <p role="status" className="text-sm text-muted-foreground">
           {preview
             ? "Preview totals are shown below. Checking the current order, stock and shipping before changes can be applied."
@@ -687,6 +714,7 @@ export function OrderEditPreviewReview({
           <>
             <OrderEditItems lines={preview.lines} showAdded />
             <OrderEditSummary
+              financials={preview.financials}
               totals={[
                 { label: "Current order total", totalCents: order.totalCents },
                 {
@@ -817,8 +845,8 @@ export function OrderEditOperationView({
         ? { label: "No additional payment", amountCents: 0 }
         : undefined;
   return (
-    <Card>
-      <CardHeader>
+    <Card className="oe-order-surface">
+      <CardHeader className="oe-order-heading">
         <CardTitle>
           <h2>Order {operation.orderNumber}</h2>
         </CardTitle>
@@ -826,7 +854,7 @@ export function OrderEditOperationView({
           <Badge variant="outline">{title}</Badge>
         </div>
       </CardHeader>
-      <CardContent className="space-y-4">
+      <CardContent className="oe-order-content">
         <p className="text-sm text-muted-foreground">
           {operation.status === "review_required" && operation.canAbandon
             ? (audience === "customer" ? "We could not verify these changes. You can cancel this edit and try again, or contact us for help." : "This edit needs review. You can cancel this unsubmitted edit, or keep its reference for investigation.")
@@ -839,7 +867,8 @@ export function OrderEditOperationView({
           </p>
         )}
         <OrderEditItems lines={operation.lines} showAdded={!showCurrent} />
-        <OrderEditSummary totals={summaryTotals} difference={difference} />
+        <OrderEditSummary totals={summaryTotals} difference={difference}
+          financials={showCurrent ? financials?.current : financials?.quoted ?? financials?.current} />
         <OrderEditCalculationDetails
           columns={totalsColumns}
           shipping={
@@ -882,7 +911,7 @@ export function OrderEditOperationView({
             This quote has expired. Check status before continuing.
           </p>
         )}
-        <div className="flex flex-wrap gap-2 border-t pt-4">
+        <div className="oe-editor-footer">
           {operation.status === "ready" && (
             <>
               <Button

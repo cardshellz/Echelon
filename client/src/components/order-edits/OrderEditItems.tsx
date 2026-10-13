@@ -14,9 +14,9 @@ export function OrderEditItems({
   return (
     <section aria-label="Items in your order">
       <h3 className="mb-3 text-sm font-medium">Items in your order</h3>
-      <ul className="divide-y rounded-md border">
+      <ul className="oe-review-items">
         {groupOrderEditDisplayLines(lines).map((line) => (
-          <li key={line.key} className="flex items-start gap-3 p-3 sm:p-4">
+          <li key={line.key} className="oe-review-item">
             <div className="min-w-0 flex-1">
               <p className="text-sm font-medium">{line.title}</p>
               {line.variantTitle && (

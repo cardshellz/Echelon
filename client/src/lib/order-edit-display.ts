@@ -1,6 +1,24 @@
 import type { OrderEditOperation } from "@shared/order-edits/order-edit.contract";
 
 type DisplayLine = OrderEditOperation["lines"][number];
+
+/** Display only an exact net unit amount. Uneven allocations keep their line
+ * total rather than inventing a rounded price that cannot reconcile. */
+export function exactOrderEditUnitPrice(
+  totalCents: number,
+  quantity: number,
+): number | null {
+  if (
+    !Number.isSafeInteger(totalCents) ||
+    totalCents < 0 ||
+    !Number.isSafeInteger(quantity) ||
+    quantity <= 0
+  )
+    return null;
+  const total = BigInt(totalCents);
+  const count = BigInt(quantity);
+  return total % count === BigInt(0) ? Number(total / count) : null;
+}
 export type OrderEditDisplayGroup = {
   key: string;
   sourceLineIds: string[];
@@ -11,7 +29,10 @@ export type OrderEditDisplayGroup = {
   added: boolean;
 };
 
-function individualLine(line: DisplayLine, index: number): OrderEditDisplayGroup {
+function individualLine(
+  line: DisplayLine,
+  index: number,
+): OrderEditDisplayGroup {
   return {
     key: `line:${index}:${line.id}`,
     sourceLineIds: [line.id],

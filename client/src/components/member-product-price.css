@@ -40,3 +40,7 @@
   max-width: 80px;
   object-fit: contain;
 }
+.cardshellz-catalog-price .cardshellz-unit-savings {
+  color: var(--csz-member-price-color, #15803d);
+  font: 500 12px/1.4 var(--font-body-family, inherit);
+}

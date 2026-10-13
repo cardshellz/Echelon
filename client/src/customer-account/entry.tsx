@@ -36,6 +36,7 @@ function AccountModal({ api, session, choice, onClose }: {
           <p>{choice.kind === "edit" ? "Update quantities or add a product, then review the new total." : "Choose the items and quantities you want to send back."}</p></div>
         <button type="button" className="csz-modal-close" aria-label="Close order tools" disabled={busy} onClick={onClose}>×</button>
       </header>
+      <div className="csz-dialog-body">
       {error && <p role="alert" className="rounded-md border p-3 text-sm text-destructive">{error}</p>}
       <DialogPortalContainerContext.Provider value={portalRoot ?? undefined}>
         {choice.kind === "edit" ? <CustomerOrderEditor api={api} connectionId={session.connection.connectionId} omsOrderId={choice.omsOrderId}
@@ -43,6 +44,7 @@ function AccountModal({ api, session, choice, onClose }: {
           : (choice.returnOrder || choice.returnStatus) && <CustomerWorkspace embedded initialOrder={choice.returnOrder} initialStatus={choice.returnStatus} sessionKey={session.session.sessionKey!}
             transport={returnApi.current} downloadRequest={api.request} onDenied={setError} onSignedOut={onClose} />}
       </DialogPortalContainerContext.Provider>
+      </div>
     </div>
   </dialog>;
 }
