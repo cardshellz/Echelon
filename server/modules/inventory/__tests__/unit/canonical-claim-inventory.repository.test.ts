@@ -679,7 +679,7 @@ describe("PostgresCanonicalClaimInventoryRepository", () => {
     expect(calls.find((call) => call.text.startsWith("UPDATE inventory.inventory_levels"))?.text)
       .toContain("picked_qty = picked_qty + $1");
     expect(calls.find((call) => call.text.startsWith("INSERT INTO oms.order_item_costs"))?.values)
-      .toEqual([70, 71, 51, 101, 3, "1", "4", "125", "375", OCCURRED_AT]);
+      .toEqual([70, 71, 51, 101, 3, "1", "4", "125", "375", OCCURRED_AT, null, null, null, null]);
   });
 
   it("unpick restores an active claim reservation and appends compensating COGS", async () => {
@@ -762,7 +762,7 @@ describe("PostgresCanonicalClaimInventoryRepository", () => {
     expect(calls.find((call) => call.text.startsWith("UPDATE inventory.inventory_levels"))?.values)
       .toEqual([2, 2, 11, OCCURRED_AT]);
     expect(calls.find((call) => call.text.startsWith("INSERT INTO oms.order_item_costs"))?.values)
-      .toEqual([70, 71, 51, 101, -2, "1", "-3", "125", "-250", OCCURRED_AT]);
+      .toEqual([70, 71, 51, 101, -2, "1", "-3", "125", "-250", OCCURRED_AT, null, null, null, null]);
   });
 
   it("locks every level before every lot and releases exact claim-owned quantities", async () => {

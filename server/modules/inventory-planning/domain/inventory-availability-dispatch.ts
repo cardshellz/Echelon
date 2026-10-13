@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
+import { recordedCostTotalIsValid } from "@shared/utils/recorded-cost-total";
 import { canonicalJson } from "@shared/utils/canonical-json";
 import {
   canonicalClaimDispatchCommandSchema, canonicalClaimDispatchEvidenceSchema,
@@ -174,7 +175,7 @@ function validateLineage(evidence: CanonicalClaimDispatchEvidence): Map<string, 
     requireCondition(pick.cost.orderId === claim.orderId && pick.cost.orderItemId === line.orderItemId
       && pick.cost.productVariantId === line.targetVariantId && pick.cost.inventoryLotId === pick.inventoryLotId
       && pick.cost.quantity === pick.quantity
-      && BigInt(pick.cost.totalCostMills) === BigInt(pick.cost.unitCostMills) * BigInt(pick.quantity),
+      && recordedCostTotalIsValid(pick.cost),
     "CLAIM_DISPATCH_COGS_IDENTITY_INVALID", "Original pick cost evidence does not match its immutable owner, quantity and cost");
     picksByLot.set(pick.claimLotAllocationId, [...(picksByLot.get(pick.claimLotAllocationId) ?? []), pick]);
   }

@@ -673,6 +673,9 @@
   "inventory.location_replen_config": [
     "modules/inventory"
   ],
+  "inventory.lot_cost_contribution_allocations": [
+    "modules/inventory"
+  ],
   "inventory.lot_cost_contributions": [
     "modules/inventory"
   ],
@@ -683,6 +686,12 @@
     "modules/inventory"
   ],
   "inventory.lot_cost_origins": [
+    "modules/inventory"
+  ],
+  "inventory.lot_cost_quantity_allocations": [
+    "modules/inventory"
+  ],
+  "inventory.lot_cost_quantity_bases": [
     "modules/inventory"
   ],
   "inventory.opening_capture_chunks": [

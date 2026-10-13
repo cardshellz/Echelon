@@ -29,6 +29,11 @@ export async function installFixtures(page: Page) {
         { provider: "shipstation", configured: false, setup: "ShipStation credentials required." },
       ], references: [],
     };
+    else if (/^\/api\/purchase-orders\/\d+\/shipment-cost-summary$/.test(path)) json = {
+      currency:"USD",shipmentCount:0,chargeCount:0,freightCents:0,dutyCents:0,otherCents:0,totalCents:0,
+      poAmountCents:10000,combinedCostCents:10000,estimatedCents:0,unallocatedChargeCount:0,unsupportedCurrencyCount:0,
+      appliedLines:0,reviewLines:0,pendingLines:0,inventoryCosting:"no_costs",
+    };
     else if (/^\/api\/purchase-orders\/(17|99)$/.test(path)) json = po(Number(path.split("/").at(-1)));
     else if (/\/purchase-orders\/\d+\/shipments$/.test(path)) json = [shipment];
     else if (/\/purchase-orders\/\d+\/receipts$/.test(path)) json = { receipts: [{ id: 1, receivingOrderId: 31, purchaseOrderLineId: 1, qtyReceived: 10 }] };

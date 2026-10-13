@@ -396,6 +396,10 @@ export const orderItemCosts = omsSchema.table("order_item_costs", {
   // (lot mills × qty) in a later PR. *_cents stay as derived display mirrors.
   unitCostMills: bigint("unit_cost_mills", { mode: "number" }).notNull().default(0),
   totalCostMills: bigint("total_cost_mills", { mode: "number" }).notNull().default(0),
+  costQuantityAllocationId: bigint("cost_quantity_allocation_id", { mode: "number" }),
+  productTotalCostMills: bigint("product_total_cost_mills", { mode: "number" }),
+  packagingTotalCostMills: bigint("packaging_total_cost_mills", { mode: "number" }),
+  landedTotalCostMills: bigint("landed_total_cost_mills", { mode: "number" }),
   costPrecisionVersion: integer("cost_precision_version").notNull().default(0),
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
