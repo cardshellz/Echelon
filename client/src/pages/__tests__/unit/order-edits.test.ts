@@ -128,7 +128,7 @@ function renderPage(search = "") {
 }
 function renderOperation(
   value: OrderEditOperation,
-  overrides: { isUncertain?: boolean; busy?: boolean; now?: number } = {},
+  overrides: { isUncertain?: boolean; busy?: boolean; now?: number; audience?: "staff" | "customer"; error?: string | null } = {},
 ) {
   return renderToStaticMarkup(
     createElement(OrderEditOperationView, {
@@ -545,6 +545,28 @@ describe("staff order editor access and resume", () => {
 });
 
 describe("verified order edit review", () => {
+  it("shows only the necessary customer actions on a fresh verified review", () => {
+    const html = renderOperation(operation, { audience: "customer" });
+    expect(html).toContain("Apply changes");
+    expect(html).toContain("Change items");
+    expect(html).not.toContain("Check status");
+  });
+  it("retains the staff status action on a ready review", () => {
+    expect(renderOperation(operation)).toContain("Check status");
+  });
+  it.each([
+    { now: Date.parse(operation.expiresAt!) },
+    { isUncertain: true },
+    { error: "We could not check your edit." },
+  ])("retains customer recovery after an expiry or failed response: %s", (overrides) => {
+    expect(renderOperation(operation, { audience: "customer", ...overrides })).toContain("Check status");
+  });
+  it("retains customer recovery for a server-reported error on a ready review", () => {
+    expect(renderOperation({ ...operation, error: { code: "READBACK_REQUIRED", message: "Check the latest status." } }, { audience: "customer" })).toContain("Check status");
+  });
+  it("retains the customer status action while payment is pending", () => {
+    expect(renderOperation({ ...operation, status: "awaiting_payment" }, { audience: "customer" })).toContain("Check status");
+  });
   it("shows the additional amount and a commit action only at ready", () => {
     const html = renderOperation(operation);
     expect(html).toContain("$10.00 payment due");

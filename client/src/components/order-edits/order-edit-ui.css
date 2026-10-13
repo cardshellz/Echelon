@@ -49,7 +49,7 @@
 .oe-line-pricing .oe-item-total { margin: 0; text-align: right; font-size: 14px; font-weight: 600; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .oe-reviewed-quantity { margin: 0; text-align: center; font-size: 12px; color: var(--oe-muted); }
 .oe-edit-item .oe-item-remove { padding: 0; height: auto; min-height: 0; border: 0; border-radius: 0; background: transparent; color: var(--oe-muted); font-size: 11px; line-height: 1.5; text-decoration: underline; }
-.oe-added-pill { margin-left: 3px; padding: 2px 6px; border: 0; border-radius: 4px; background: #dceefd; color: #285773; font-size: 10px; font-weight: 500; white-space: nowrap; }
+.oe-added-pill { margin-left: 3px; padding: 2px 6px; border: 0; border-radius: 4px; background: #ffeadb; color: #a6470d; font-size: 10px; font-weight: 600; white-space: nowrap; }
 .oe-added-item { background: #f5faf7; }
 .oe-summary { padding: 16px; border: 1px solid #f0d5c1; border-top: 3px solid var(--oe-orange); border-radius: 10px; background: #fffaf5; }
 .oe-summary h3 { margin: 0 0 14px; font: 700 15px/1.4 var(--font-body-family, Arial, sans-serif); }

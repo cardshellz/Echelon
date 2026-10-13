@@ -919,6 +919,11 @@ export function OrderEditOperationView({
     formatOrderEditMoney(value, operation.currency);
   const expired =
     operation.expiresAt !== null && Date.parse(operation.expiresAt) <= now;
+  // A fresh customer review needs only Apply and Change items. Retain the
+  // existing recovery action when payment, expiry, or an uncertain reply needs
+  // a status check; this action can reconcile the edit, so it is never automated.
+  const showStatusCheck = audience !== "customer" || operation.status !== "ready" ||
+    expired || isUncertain || error !== null || operation.error !== null;
   const financials = operation.financials;
   const showCurrent = ["completed", "recovered", "failed", "expired"].includes(
     operation.status,
@@ -1080,14 +1085,14 @@ export function OrderEditOperationView({
               </a>
             </Button>
           )}
-          <Button
+          {showStatusCheck && <Button
             type="button"
             variant="outline"
             disabled={busy}
             onClick={onRefresh}
           >
             {busy ? "Checking…" : "Check status"}
-          </Button>
+          </Button>}
         </div>
         <p className="break-all text-xs text-muted-foreground">
           {audience === "customer" ? "Edit reference" : "Operation"} {operation.operationId}
