@@ -26,7 +26,7 @@ run.sequential("Receiving integrity audit migration", () => {
     // pre-existing data or disables the migration's protection for cleanup.
     await client.query(fixtureTable(auditEvents));
     ownsTable = true;
-    await client.query(readFileSync(resolve(process.cwd(), "migrations/0749_receiving_integrity_audit_guard.sql"), "utf8"));
+    await client.query(readFileSync(resolve(process.cwd(), "migrations/0750_receiving_integrity_audit_guard.sql"), "utf8"));
   });
 
   beforeEach(async () => { await client!.query("BEGIN"); });
