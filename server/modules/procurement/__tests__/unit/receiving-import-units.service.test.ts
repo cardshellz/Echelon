@@ -24,7 +24,7 @@ function receiptLine() {
 type TestLine = ReturnType<typeof receiptLine>;
 type TestOrder = {
   id: number; status: string; sourceType: string; vendorId: number | null;
-  warehouseId: number; purchaseOrderId: number | null; inboundShipmentId: number | null;
+  warehouseId: number | null; purchaseOrderId: number | null; inboundShipmentId: number | null;
   updatedAt: Date;
 };
 type TestVariant = { id: number; sku: string; name: string; productId: number; unitsPerVariant: number; isActive: boolean };
@@ -58,6 +58,8 @@ function harness(options: {
       const rendered = dialect.sqlToQuery(query);
       if (rendered.sql.includes("inventory.cost_graph")) return { rows: [] };
       queries.push(rendered);
+      if (rendered.sql.includes("FROM warehouse.warehouses")) return { rows: [{ isActive: 1 }] };
+      if (rendered.sql.includes("FROM warehouse.warehouse_locations")) return { rows: [{ id: 99, warehouseId: 1, isActive: 1 }] };
       if (rendered.sql.includes("FROM catalog.product_variants")) {
         const existing = variants.find((variant) => variant.id === rendered.params[0]);
         const variant = options.lockedVariant === null ? null : existing ? { ...existing, ...options.lockedVariant } : null;
@@ -207,6 +209,14 @@ describe("ReceivingService imported whole counts", () => {
     expect(test.storage.bulkCreateReceivingLines).toHaveBeenCalledWith([], test.tx);
     expect(test.storage.updateReceivingLine).not.toHaveBeenCalled();
     expect(test.inventory.receiveInventory).not.toHaveBeenCalled();
+  });
+
+  it("imports an unassigned draft before its warehouse is chosen", async () => {
+    const test = harness({ order: { status: "draft", warehouseId: null } });
+    const result = await test.service.bulkImportLines(10, [{ sku: "UNKNOWN", qty: "2" }], ACTOR);
+    expect(result).toMatchObject({ created: 1, updated: 0 });
+    expect(test.state.lines[0].putawayLocationId).toBeNull();
+    expect(test.queries.some((query) => query.sql.includes("FROM warehouse."))).toBe(false);
   });
 
   it("retains partial row acceptance while keeping valid unresolved counts and unknown units", async () => {

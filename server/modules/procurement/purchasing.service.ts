@@ -1,3 +1,5 @@
+import { RECEIVABLE_SHIPMENT_STATUSES } from "./receiving-close-integrity.domain";
+import { readPrimaryReceivingLocations } from "./receiving-close-integrity.repository";
 import type { SupplierPriceList } from "@shared/procurement/supplier-sourcing";
 import { loadSupplierSourcingRecords } from "./supplier-sourcing.repository";
 import { isPurchaseOrderHistoryConstraintViolation, readPurchaseOrderHistoryPresence } from "./purchase-order-history.repository";
@@ -348,7 +350,6 @@ const EDITABLE_STATUSES = new Set(["draft"]);
 const LINE_AMENDABLE_STATUSES = new Set(["draft", "pending_approval", "approved", "sent", "acknowledged", "partially_received"]);
 const CANCELLABLE_FROM = new Set(["draft", "pending_approval", "approved"]);
 const VOIDABLE_FROM = new Set(["sent", "acknowledged"]);
-const RECEIVABLE_SHIPMENT_STATUSES = new Set(["at_port", "customs_clearance", "delivered", "costing", "closed"]);
 const ACTIVE_RECEIPT_STATUSES = new Set(["draft", "open", "receiving", "verified"]);
 const TERMINAL_DELIVERY_SCHEDULE_STATUSES = new Set(["received", "closed", "cancelled", "short_closed"]);
 const PHYSICAL_LIFECYCLE_EVENTS: Partial<Record<PoPhysicalStatus, string>> = {
@@ -3434,21 +3435,7 @@ export function createPurchasingService(
       createdBy: userId,
     }, executor);
 
-    // Auto-assign putaway locations from product_locations if available
-    let productLocationMap = new Map<number, number>(); // productVariantId → warehouseLocationId
-    try {
-      const allProductLocations = await (storage as any).getAllProductLocations?.() ?? [];
-      for (const pl of allProductLocations) {
-        if (pl.productVariantId && pl.warehouseLocationId && pl.status === "active" && pl.isPrimary) {
-          // Only use primary active locations
-          if (!productLocationMap.has(pl.productVariantId)) {
-            productLocationMap.set(pl.productVariantId, pl.warehouseLocationId);
-          }
-        }
-      }
-    } catch {
-      // Non-critical — if product_locations lookup fails, just skip auto-assign
-    }
+    const productLocationMap = await readPrimaryReceivingLocations(executor, po.warehouseId, [...receiptPlans.values()].map((plan) => plan.productVariantId));
 
     // Create receiving lines from PO lines.
     //
@@ -4216,18 +4203,6 @@ export function createPurchasingService(
       const poLine = poLineById.get(sl.purchaseOrderLineId);
       receiptPlans.set(sl.id, await resolveReceiptPlan(poLine, sl.qtyShipped, sl));
     }
-    // Primary putaway locations keyed by receive variant.
-    const productLocationMap = new Map<number, number>();
-    try {
-      const allProductLocations = (await (storage as any).getAllProductLocations?.()) ?? [];
-      for (const pl of allProductLocations) {
-        if (pl.productVariantId && pl.warehouseLocationId && pl.status === "active" && pl.isPrimary) {
-          if (!productLocationMap.has(pl.productVariantId)) {
-            productLocationMap.set(pl.productVariantId, pl.warehouseLocationId);
-          }
-        }
-      }
-    } catch { /* non-critical */ }
 
     // Receipt units come from the selected catalog variant, never carton ratios.
     const receivingLineData = receiptShipmentLines.map((sl: any) => {
@@ -4235,7 +4210,6 @@ export function createPurchasingService(
       const productId = parsePositiveInteger(poLine?.productId);
       const plan = receiptPlans.get(sl.id)!;
       const resolvedVariantId = plan.productVariantId;
-      const autoLocationId = (resolvedVariantId && productLocationMap.get(resolvedVariantId)) || null;
       const hasPoMills =
         typeof poLine?.unitCostMills === "number" &&
         Number.isInteger(poLine.unitCostMills) &&
@@ -4262,7 +4236,7 @@ export function createPurchasingService(
         unitCost,
         unitCostMills,
         costSourceKind: "purchase_order_line",
-        putawayLocationId: autoLocationId,
+        putawayLocationId: null,
         status: "pending",
       };
     });
@@ -4393,9 +4367,11 @@ export function createPurchasingService(
           createdBy: userId,
         }, tx);
 
+        const lockedLocations = await readPrimaryReceivingLocations(tx, po.warehouseId, [...receiptPlans.values()].map((plan) => plan.productVariantId));
         const receivingLinesToCreate = receivingLineData.map((line: any) => ({
           ...line,
           receivingOrderId: receivingOrder.id,
+          putawayLocationId: lockedLocations.get(line.productVariantId) ?? null,
         }));
         await storage.bulkCreateReceivingLines(receivingLinesToCreate as any, tx);
         return receivingOrder;
@@ -4459,7 +4435,21 @@ export function createPurchasingService(
     receivingLines: ReceivingReconciliationLine[],
     userId?: string | null,
   ) {
-    const result = await db.transaction(async (tx: any) => {
+    const result = await db.transaction((tx: any) => onReceivingOrderClosedInTransaction(
+      receivingOrderId, receivingLines, userId, tx, now()));
+    await afterReceivingOrderClosed(result);
+    return result;
+  }
+
+  // The physical receiving owner supplies its transaction so PO counters,
+  // original receipt evidence, inventory and the close share one commit.
+  async function onReceivingOrderClosedInTransaction(
+    receivingOrderId: number,
+    receivingLines: ReceivingReconciliationLine[],
+    userId: string | null | undefined,
+    tx: import("./receiving-close-integrity.repository").ReceivingIntegrityTransaction,
+    recordedAt: Date,
+  ): Promise<import("./purchase-order-receipt-reconciliation.service").ReceiptReconciliationResult> {
       await lockInventoryCostGraph(tx);
       const receivingOrder = await storage.getReceivingOrderById(receivingOrderId, tx);
       let purchaseOrderId = parsePositiveInteger(receivingOrder?.purchaseOrderId);
@@ -4496,6 +4486,7 @@ export function createPurchasingService(
         },
         executor: tx,
         changedBy: userId ?? undefined,
+        now: () => recordedAt,
       });
 
       const expectedReceiptLines = receivingLines.filter(
@@ -4517,8 +4508,9 @@ export function createPurchasingService(
       }
 
       return reconciliation;
-    });
+  }
 
+  async function afterReceivingOrderClosed(result: import("./purchase-order-receipt-reconciliation.service").ReceiptReconciliationResult): Promise<void> {
     if (result.purchaseOrderId && result.poStatusUpdate?.legacyStatus === "received") {
       try {
         await detectQtyVariance(result.purchaseOrderId);
@@ -4526,8 +4518,6 @@ export function createPurchasingService(
         console.error("[po-exceptions] qty variance detection failed after receiving close:", error);
       }
     }
-
-    return result;
   }
 
   // ── PROCUREMENT SETTINGS (Spec A) ───────────────────────────────────────
@@ -8645,6 +8635,8 @@ export function createPurchasingService(
     getPurchaseOrderReceiveOptions,
     getShipmentPoReceiveOptions,
     onReceivingOrderClosed,
+    onReceivingOrderClosedInTransaction,
+    afterReceivingOrderClosed,
 
     // Dual-track lifecycle (migration 0565)
     transitionPhysical,

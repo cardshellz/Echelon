@@ -29,7 +29,7 @@ const TABLES = [
   schema.vendorInvoices, schema.vendorInvoiceLines, schema.poStatusHistory,
   schema.inboundFreightCosts, schema.inboundFreightAllocations,
   schema.landedCostSnapshots, schema.landedCostAdjustments, schema.inboundShipmentStatusHistory,
-  schema.warehouses, schema.warehouseLocations, schema.inventoryLevels,
+  schema.warehouses, schema.warehouseLocations, schema.productLocations, schema.inventoryLevels,
   schema.inventoryLots, schema.inventoryTransactions, schema.orders, schema.orderItems, schema.orderItemCosts,
 ];
 
@@ -191,6 +191,28 @@ audit.sequential("receipt/AP/freight cost revisions with real owners", () => {
       if (lease) { await lease.query("SELECT pg_advisory_unlock(hashtext('echelon.procurement.cost-application-fixture'))"); lease.release(); }
       await pool?.end(); await defaultModulePool?.end();
     }
+  });
+
+  it.each(["po", "shipment"] as const)("defaults %s receipt locations only from active primary slots in the destination warehouse", async (source) => {
+    await pool.query(`INSERT INTO warehouse.warehouses(id,code,name) VALUES(2,'OTHER-WH','Other warehouse');
+      INSERT INTO warehouse.warehouse_locations(id,warehouse_id,code,is_active) VALUES(100,2,'OTHER-DOCK',1),(101,1,'INACTIVE',0);
+      INSERT INTO warehouse.product_locations(product_variant_id,warehouse_location_id,name,location,zone,is_primary,status)
+        VALUES(200,100,'Wrong warehouse','OTHER-DOCK','OTHER',1,'active'),
+          (200,101,'Inactive location','INACTIVE','INACTIVE',1,'active'),
+          (200,99,'Correct warehouse','AUDIT-DOCK','DOCK',1,'active')`);
+    const receipt = source === "po" ? await purchasing.createReceiptFromPO(10, actorId)
+      : await purchasing.createReceiptFromShipment(1, actorId, { purchaseOrderId: 10 });
+    expect((await storage.getReceivingLines(receipt.id)).map((line: { putawayLocationId: number | null }) => line.putawayLocationId)).toEqual([99]);
+  });
+
+  it.each(["po", "shipment"] as const)("leaves %s receipt unassigned when the only primary slot belongs to another warehouse", async (source) => {
+    await pool.query(`INSERT INTO warehouse.warehouses(id,code,name) VALUES(2,'OTHER-WH','Other warehouse');
+      INSERT INTO warehouse.warehouse_locations(id,warehouse_id,code) VALUES(100,2,'OTHER-DOCK');
+      INSERT INTO warehouse.product_locations(product_variant_id,warehouse_location_id,name,location,zone,is_primary,status)
+        VALUES(200,100,'Wrong warehouse','OTHER-DOCK','OTHER',1,'active')`);
+    const receipt = source === "po" ? await purchasing.createReceiptFromPO(10, actorId)
+      : await purchasing.createReceiptFromShipment(1, actorId, { purchaseOrderId: 10 });
+    expect((await storage.getReceivingLines(receipt.id)).map((line: { putawayLocationId: number | null }) => line.putawayLocationId)).toEqual([null]);
   });
 
   async function prepareReceipt() {
