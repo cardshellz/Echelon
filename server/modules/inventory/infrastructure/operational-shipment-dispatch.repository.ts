@@ -1,6 +1,10 @@
 import type { Pool, PoolClient } from "pg";
 import { z } from "zod";
 import { PostgresInventoryQuantityLedger } from "./quantity-ledger.repository";
+import { costEvidenceTransactionFromPg } from "./cost-evidence-pg";
+import { lockInventoryCostGraph } from "./cost-evidence.repository";
+import { allocateLotQuantityCost } from "./cost-quantity.repository";
+import { hasExactLotCostTotals } from "../domain/lot-cost";
 import { loadAndLockRuntimeAuthority } from "../../inventory-planning/infrastructure/inventory-availability-runtime-atp.repository";
 import type { OperationalShipmentBeforeCommit, OperationalShipmentDispatcher, OperationalShipmentSourceOwner } from "../application/operational-shipment-dispatch.port";
 import { OperationalShipmentError, operationalShipmentRequestSchema, planOperationalShipmentConsumption,
@@ -9,6 +13,7 @@ import { OperationalShipmentError, operationalShipmentRequestSchema, planOperati
 const MAX_ATTEMPTS = 3;
 const MAX_LOCATIONS = 1_000;
 const MAX_LOTS = 10_000;
+const MAX_POSTGRES_COST_MILLS = BigInt("9223372036854775807");
 const LEGACY_SHIPMENT_LOCK_NAMESPACE = 918407;
 const positive = z.number().int().positive().max(2_147_483_647);
 function fail(code: string, message: string): never { throw new OperationalShipmentError(code, message); }
@@ -57,6 +62,8 @@ export class PostgresOperationalShipmentDispatchRepository implements Operationa
             (shipment_item_id IS NULL AND shipment_id=$2 AND order_item_id=$3))
           ORDER BY id LIMIT 1`, [request.sourceShipmentItemId, request.outboundShipmentId, source.replacementForOrderItemId]);
         if (prior.rows.length) fail("OPERATIONAL_SHIPMENT_ALREADY_POSTED", "A prior unowned shipment posting requires explicit reconciliation, not another debit.");
+        const costTransaction=costEvidenceTransactionFromPg(client);
+        await lockInventoryCostGraph(costTransaction);
         const levels = (await client.query(`SELECT level.id,level.warehouse_location_id AS location_id,
           level.variant_qty,level.reserved_qty,location.location_type,location.pick_sequence
           FROM inventory.inventory_levels level JOIN warehouse.warehouse_locations location
@@ -72,8 +79,8 @@ export class PostgresOperationalShipmentDispatchRepository implements Operationa
         if (levels.length > MAX_LOCATIONS) fail("OPERATIONAL_SHIPMENT_EVIDENCE_LIMIT", "Available locations exceed the complete-snapshot bound.");
         const locations = levels.map((level) => positive.parse(level.location_id));
         const lots = (await client.query(`SELECT id,warehouse_location_id AS location_id,
-          qty_on_hand,qty_reserved,unit_cost_mills::text,received_at
-          FROM inventory.inventory_lots WHERE product_variant_id=$1
+          qty_on_hand,qty_reserved,unit_cost_mills::text,received_at,to_jsonb(lot)->>'cost_basis_qty' AS cost_basis_qty
+          FROM inventory.inventory_lots lot WHERE product_variant_id=$1
             AND warehouse_location_id=ANY($2::integer[]) AND status='active' AND qty_on_hand>0
           ORDER BY warehouse_location_id,product_variant_id,received_at,id
           LIMIT $3 FOR UPDATE`, [request.productVariantId, locations, MAX_LOTS + 1])).rows;
@@ -93,6 +100,18 @@ export class PostgresOperationalShipmentDispatchRepository implements Operationa
           if (plan) break;
         }
         if (!plan) fail("REPLACEMENT_INVENTORY_UNAVAILABLE", "No single authorized warehouse bin has complete unreserved balance and FIFO stock.");
+        let exactTotal=BigInt(0);
+        const exactPortions=[];
+        for (const portion of plan.lots) {
+          const lot=lots.find(candidate=>candidate.id===portion.lotId)!;
+          const allocation=hasExactLotCostTotals(lot) ? await allocateLotQuantityCost(costTransaction,portion.lotId,portion.quantity,
+            request.actor,occurredAt,{kind:"operational_shipment",sourceShipmentItemId:request.sourceShipmentItemId},
+            `operational_shipment_cost:${request.sourceShipmentItemId}:${portion.lotId}`) : null;
+          exactTotal+=allocation?.costs.totalMills ?? BigInt(portion.quantity)*BigInt(lot.unit_cost_mills);
+          exactPortions.push({...portion,totalCostMills:(allocation?.costs.totalMills ?? BigInt(portion.quantity)*BigInt(lot.unit_cost_mills)).toString()});
+        }
+        if (exactTotal>MAX_POSTGRES_COST_MILLS) fail("OPERATIONAL_SHIPMENT_COST_OVERFLOW","Exact shipment cost exceeds stored money precision.");
+        plan={...plan,totalCostMills:exactTotal.toString(),lots:exactPortions};
         if (quantityLedgerActive) {
           await new PostgresInventoryQuantityLedger().postInsideTransaction(client, {
             contractVersion: "inventory_quantity_v1", idempotencyKey: `operational_shipment:${request.sourceShipmentItemId}`,

@@ -2,12 +2,15 @@
  * Legacy rows have no proof that their default-zero mill columns were populated.
  * Version 1 is written only by a mill-aware owner; it makes zero authoritative.
  */
+import { costForQuantityIntervals, type CostQuantityInterval } from "./cost-quantity-intervals";
+
 export interface LotCostRecord {
   id?: unknown;
   cost_precision_version?: unknown;
   cost_provisional?: unknown;
   cost_source?: unknown;
   qty_received?: unknown;
+  qty_on_hand?: unknown;
   unit_cost_mills?: unknown;
   total_unit_cost_mills?: unknown;
   po_unit_cost_mills?: unknown;
@@ -18,6 +21,10 @@ export interface LotCostRecord {
   po_unit_cost_cents?: unknown;
   packaging_cost_cents?: unknown;
   landed_cost_cents?: unknown;
+  cost_basis_qty?: unknown;
+  product_total_cost_mills?: unknown;
+  packaging_total_cost_mills?: unknown;
+  landed_total_cost_mills?: unknown;
 }
 
 export interface LotCosts {
@@ -25,6 +32,59 @@ export interface LotCosts {
   packagingMills: bigint;
   landedMills: bigint;
   totalMills: bigint;
+}
+
+/** Rounded rates are compatibility/display values. Extended totals retain the
+ * authoritative amounts used for custody, COGS and valuation.
+ */
+export function unitCostMirrorsFromTotals(totals:LotCosts,basisQuantity:number):LotCosts {
+  if (!Number.isSafeInteger(basisQuantity) || basisQuantity<=0) throw new LotCostError("Invalid exact-cost quantity basis.",{});
+  if (totals.poMills<BigInt(0) || totals.packagingMills<BigInt(0) || totals.landedMills<BigInt(0)
+    || totals.poMills+totals.packagingMills+totals.landedMills!==totals.totalMills) throw new LotCostError("Exact component totals do not reconcile.",{});
+  const quantity=BigInt(basisQuantity);
+  const mirror=(amount:bigint)=>(amount*BigInt(2)+quantity)/(quantity*BigInt(2));
+  const poMills=mirror(totals.poMills),packagingMills=mirror(totals.packagingMills),landedMills=mirror(totals.landedMills);
+  return {poMills,packagingMills,landedMills,totalMills:poMills+packagingMills+landedMills};
+}
+
+export function hasExactLotCostTotals(lot: LotCostRecord): boolean {
+  return lot.cost_basis_qty !== null && lot.cost_basis_qty !== undefined;
+}
+
+/** Extended totals, never the rounded unit mirrors, own an exact-cost lot. */
+export function lotCostTotals(lot: LotCostRecord): { basisQuantity: number; totals: LotCosts } {
+  const basis = nonnegativeMoney(hasExactLotCostTotals(lot) ? lot.cost_basis_qty : lot.qty_received, "cost basis quantity");
+  if (basis === BigInt(0) || basis > BigInt(2_147_483_647)) {
+    throw new LotCostError("Lot cost requires a proven original quantity basis.", { lotId: lot.id });
+  }
+  if (!hasExactLotCostTotals(lot)) {
+    const unit = normalizeLotCosts(lot);
+    if (unit.totalMills * basis > MAX_STORED_MONEY) {
+      throw new LotCostError("Extended legacy lot total exceeds stored precision.", {lotId:lot.id});
+    }
+    return { basisQuantity: Number(basis), totals: {
+      poMills: unit.poMills * basis, packagingMills: unit.packagingMills * basis,
+      landedMills: unit.landedMills * basis, totalMills: unit.totalMills * basis,
+    } };
+  }
+  if ([lot.product_total_cost_mills, lot.packaging_total_cost_mills, lot.landed_total_cost_mills].some(value => value == null)
+    || nonnegativeMoney(lot.qty_received, "qty_received") !== basis) {
+    throw new LotCostError("Exact lot cost totals have incomplete or conflicting quantity evidence.", { lotId: lot.id });
+  }
+  const poMills = nonnegativeMoney(lot.product_total_cost_mills, "product_total_cost_mills");
+  const packagingMills = nonnegativeMoney(lot.packaging_total_cost_mills, "packaging_total_cost_mills");
+  const landedMills = nonnegativeMoney(lot.landed_total_cost_mills, "landed_total_cost_mills");
+  const totalMills = poMills + packagingMills + landedMills;
+  if (totalMills > MAX_STORED_MONEY) throw new LotCostError("Exact lot total exceeds stored precision.", { lotId: lot.id });
+  return { basisQuantity: Number(basis), totals: { poMills, packagingMills, landedMills, totalMills } };
+}
+
+export function lotCostsForIntervals(lot: LotCostRecord, intervals: readonly CostQuantityInterval[]): LotCosts {
+  const { basisQuantity, totals } = lotCostTotals(lot);
+  const poMills = costForQuantityIntervals(totals.poMills, basisQuantity, intervals);
+  const packagingMills = costForQuantityIntervals(totals.packagingMills, basisQuantity, intervals);
+  const landedMills = costForQuantityIntervals(totals.landedMills, basisQuantity, intervals);
+  return { poMills, packagingMills, landedMills, totalMills: poMills + packagingMills + landedMills };
 }
 
 export class LotCostError extends Error {
@@ -141,6 +201,7 @@ export function lotCostRecord(row: {
   unitCostMills?: unknown; totalUnitCostMills?: unknown; poUnitCostMills?: unknown;
   packagingCostMills?: unknown; landedCostMills?: unknown; unitCostCents?: unknown;
   totalUnitCostCents?: unknown; poUnitCostCents?: unknown; packagingCostCents?: unknown; landedCostCents?: unknown;
+  costBasisQty?: unknown; productTotalCostMills?: unknown; packagingTotalCostMills?: unknown; landedTotalCostMills?: unknown;
 }): LotCostRecord {
   return {
     id: row.id, cost_precision_version: row.costPrecisionVersion, cost_provisional: row.costProvisional,
@@ -149,5 +210,7 @@ export function lotCostRecord(row: {
     packaging_cost_mills: row.packagingCostMills, landed_cost_mills: row.landedCostMills,
     unit_cost_cents: row.unitCostCents, total_unit_cost_cents: row.totalUnitCostCents,
     po_unit_cost_cents: row.poUnitCostCents, packaging_cost_cents: row.packagingCostCents, landed_cost_cents: row.landedCostCents,
+    cost_basis_qty: row.costBasisQty, product_total_cost_mills: row.productTotalCostMills,
+    packaging_total_cost_mills: row.packagingTotalCostMills, landed_total_cost_mills: row.landedTotalCostMills,
   };
 }

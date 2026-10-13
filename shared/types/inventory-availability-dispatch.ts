@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { exactRecordedCostTotalsSchema } from "../utils/recorded-cost-total";
 
 const id = z.number().int().positive().max(2_147_483_647);
 const quantity = z.string().regex(/^(0|[1-9][0-9]{0,18})$/).pipe(z.string().refine(
@@ -50,7 +51,8 @@ const pickSchema = z.object({
   claimLotAllocationId: positive, inventoryLotId: id, quantity: positive,
   reversedQuantity: quantity, dispatchedQuantity: quantity,
   cost: z.object({ id, orderId: id, orderItemId: id, productVariantId: id, inventoryLotId: id,
-    quantity: positive, unitCostMills: quantity, totalCostMills: quantity }).strict(),
+    quantity: positive, unitCostMills: quantity, totalCostMills: quantity,
+    exactTotals: exactRecordedCostTotalsSchema.nullable().optional() }).strict(),
 }).strict();
 
 export const canonicalClaimDispatchEvidenceSchema = z.object({

@@ -6,6 +6,9 @@ import {
   LISTING_SETTINGS_SETTING_KEYS,
   LISTING_SETTINGS_VALUE_SOURCES,
   MAX_LISTING_SETTINGS_PAGE,
+  listingSettingsCategoriesResponseSchema,
+  listingSettingsCategoryDetailSchema,
+  listingSettingsCategoryInputSchema,
   listingSettingsPricesInputSchema,
   listingSettingsPricesResponseSchema,
   listingSettingsProductDetailSchema,
@@ -313,5 +316,79 @@ describe("product ids read and category filters (plan PR 9, section 4.2)", () =>
     expect(listingSettingsPricesInputSchema.parse({ storeConnectionId: 22, categoryId: 3 })).toMatchObject({ categoryId: 3 });
     expect(listingSettingsProductsInputSchema.parse({ storeConnectionId: 22 })).not.toHaveProperty("categoryId");
     expect(listingSettingsPricesInputSchema.safeParse({ storeConnectionId: 22, categoryId: -1 }).success).toBe(false);
+  });
+});
+
+describe("category reads (plan PR 9, sections 8.3, 8.11)", () => {
+  const GENERATED_AT = "2026-10-06T12:00:00.000Z";
+  const list = (fields: Record<string, unknown> = {}) => ({ storeConnectionId: 5, categories: [
+    { categoryId: 3, name: "Sleeves", productCount: 1, revisionId: null, setFields: [] },
+    { categoryId: 1, name: "Toploaders", productCount: 2, revisionId: 41, setFields: ["price", "storeShelf"] },
+  ], uncategorizedProductCount: 1, generatedAt: GENERATED_AT, ...fields });
+  const none = { source: "none", value: null } as const;
+  const settings = {
+    price: { source: "category", value: { basis: "catalog_retail", markupBps: 0, flatCents: 100, rounding: "cent" } },
+    ebayCategory: { source: "store_default", value: { categoryId: "183438", categoryName: "Toploaders" } },
+    storeShelf: { source: "category", value: { mode: "own", shelves: [{ id: "11", name: "Supplies:Top" }] } },
+    shippingPolicy: { source: "store_default", value: { id: "ship-a", name: null } },
+    returnPolicy: { source: "category", value: { id: "return-a", name: "Thirty days" } },
+    paymentPolicy: none,
+    textAbove: { source: "category", value: { mode: "none" } },
+    textBelow: { source: "store_default", value: { mode: "own", text: "Shipped in a rigid mailer." } },
+  } as const;
+  const detail = (fields: Record<string, unknown> = {}) => ({ storeConnectionId: 5, categoryId: 1, name: "Toploaders", productCount: 2,
+    revisionId: 41, settings, ownValues: [{ productId: 7, revisionId: null, fields: ["shippingPolicy"] }], examples: [sizePrice],
+    generatedAt: GENERATED_AT, ...fields });
+
+  it("takes a store and a category id, and nothing else", () => {
+    expect(listingSettingsCategoryInputSchema.parse({ storeConnectionId: 5, categoryId: 3 })).toEqual({ storeConnectionId: 5, categoryId: 3 });
+    for (const input of [{ storeConnectionId: 5 }, { storeConnectionId: 5, categoryId: 0 }, { storeConnectionId: 5, categoryId: 2_147_483_648 },
+      { storeConnectionId: 5, categoryId: 3, page: 0 }]) {
+      expect(listingSettingsCategoryInputSchema.safeParse(input).success).toBe(false);
+    }
+  });
+
+  it("lists categories strictly: each once, with a positive product count and set fields only on a row", () => {
+    expect(listingSettingsCategoriesResponseSchema.safeParse(list()).success).toBe(true);
+    expect(listingSettingsCategoriesResponseSchema.safeParse(list({ categories: [] })).success).toBe(true);
+    for (const broken of [
+      list({ extra: true }),
+      list({ categories: [{ categoryId: 1, name: "Toploaders", productCount: 2, revisionId: 41, setFields: [], color: "red" }] }),
+      list({ categories: [{ categoryId: 1, name: "A", productCount: 1, revisionId: 41, setFields: [] },
+        { categoryId: 1, name: "B", productCount: 1, revisionId: 42, setFields: [] }] }),
+      list({ categories: [{ categoryId: 1, name: "Toploaders", productCount: 0, revisionId: null, setFields: [] }] }),
+      list({ categories: [{ categoryId: 1, name: "", productCount: 1, revisionId: null, setFields: [] }] }),
+      list({ categories: [{ categoryId: 1, name: "Toploaders", productCount: 1, revisionId: null, setFields: ["price"] }] }),
+      list({ categories: [{ categoryId: 1, name: "Toploaders", productCount: 1, revisionId: 41, setFields: ["mainText"] }] }),
+      list({ categories: [{ categoryId: 1, name: "Toploaders", productCount: 1, revisionId: 41, setFields: ["price", "price"] }] }),
+      list({ uncategorizedProductCount: -1 }),
+    ]) {
+      expect(listingSettingsCategoriesResponseSchema.safeParse(broken).success).toBe(false);
+    }
+  });
+
+  it("gives one category's settings strictly: a value exactly when one applies, own values once each", () => {
+    expect(listingSettingsCategoryDetailSchema.safeParse(detail()).success).toBe(true);
+    // A category with no row: every setting from the store default or none.
+    expect(listingSettingsCategoryDetailSchema.safeParse(detail({ revisionId: null,
+      settings: Object.fromEntries(Object.keys(settings).map((key) => [key, none])), ownValues: [], examples: [] })).success).toBe(true);
+    for (const broken of [
+      detail({ extra: true }),
+      detail({ revisionId: null }),
+      detail({ settings: { ...settings, paymentPolicy: { source: "none", value: { id: "pay-a", name: null } } } }),
+      detail({ settings: { ...settings, paymentPolicy: { source: "category", value: null } } }),
+      detail({ settings: { ...settings, price: { source: "group_rule", value: null } } }),
+      detail({ settings: { ...settings, mainText: none } }),
+      detail({ settings: { ...settings, textAbove: { source: "category", value: { mode: "own", text: "" } } } }),
+      detail({ settings: { ...settings, storeShelf: { source: "category", value: { mode: "own", shelves: [] } } } }),
+      detail({ ownValues: [{ productId: 7, revisionId: null, fields: [] }] }),
+      detail({ ownValues: [{ productId: 7, revisionId: null, fields: ["mainText"] }] }),
+      detail({ ownValues: [{ productId: 7, revisionId: null, fields: ["price"] }, { productId: 7, revisionId: 3, fields: ["price"] }] }),
+      detail({ ownValues: [1, 2, 3].map((productId) => ({ productId, revisionId: null, fields: ["price"] })) }),
+      detail({ examples: [sizePrice, sizePrice, sizePrice, sizePrice] }),
+      detail({ productCount: 0, ownValues: [] }),
+    ]) {
+      expect(listingSettingsCategoryDetailSchema.safeParse(broken).success).toBe(false);
+    }
   });
 });

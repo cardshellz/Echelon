@@ -138,7 +138,10 @@ describe("listing setting stored values", () => {
   });
 
   it("pins the ledger operations, the review kinds and the bulk limit", () => {
-    expect(LISTING_SETTING_REQUEST_OPERATIONS).toEqual(["product_settings_bulk", "category_settings_clear", "category_moves_acknowledge"]);
+    // 0738's three, then W7's price apply (migration 0750, plan PR 9, 9.2).
+    expect(LISTING_SETTING_REQUEST_OPERATIONS).toEqual([
+      "product_settings_bulk", "category_settings_clear", "category_moves_acknowledge", "price_change_apply",
+    ]);
     expect(PRICING_REVIEW_KINDS).toEqual(["store_default", "category_price", "product_prices"]);
     expect(MAX_LISTING_SETTING_BULK_PRODUCTS).toBe(10_000);
   });

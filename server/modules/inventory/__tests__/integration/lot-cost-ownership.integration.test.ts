@@ -82,7 +82,7 @@ suite.sequential("physical return and cost-only recovery ownership on PostgreSQL
         product_variant_id integer,sku text,old_cost_cents bigint,new_cost_cents bigint,delta_cents bigint,
         reason text,created_at timestamp NOT NULL);`);
     await installPreOpeningQuantityAuthorityFixture(pool);
-    for (const name of ["222_procurement_cost_evidence.sql","0725_inventory_cost_admission_evidence.sql","0726_inventory_return_cost_allocations.sql"]) {
+    for (const name of ["222_procurement_cost_evidence.sql","0751_exact_inventory_cost_totals.sql","0725_inventory_cost_admission_evidence.sql","0726_inventory_return_cost_allocations.sql"]) {
       await pool.query(readFileSync(resolve(process.cwd(),"migrations",name),"utf8"));
     }
     database = drizzle(pool,{ schema }); cogs = new COGSService(database,()=>now);
@@ -103,9 +103,9 @@ suite.sequential("physical return and cost-only recovery ownership on PostgreSQL
       INSERT INTO inventory.inventory_lots(id,lot_number,product_variant_id,warehouse_location_id,qty_on_hand,qty_received,
         cost_precision_version,cost_provisional,cost_source,unit_cost_mills,total_unit_cost_mills,
         po_unit_cost_mills,packaging_cost_mills,landed_cost_mills,unit_cost_cents,total_unit_cost_cents,received_at)
-        VALUES(101,'SOLD-A',101,20,1,5,1,0,'purchase_order',149,149,100,20,29,1,1,'2026-10-01T12:00:00Z'),
-          (102,'SOLD-B',101,20,1,5,1,0,'purchase_order',250,250,200,30,20,3,3,'2026-10-01T12:00:00Z'),
-          (103,'DECOY-COST',101,20,1,5,1,0,'purchase_order',999,999,999,0,0,10,10,'2026-10-01T12:00:00Z');
+        VALUES(101,'SOLD-A',101,20,3,5,1,0,'purchase_order',149,149,100,20,29,1,1,'2026-10-01T12:00:00Z'),
+          (102,'SOLD-B',101,20,3,5,1,0,'purchase_order',250,250,200,30,20,3,3,'2026-10-01T12:00:00Z'),
+          (103,'DECOY-COST',101,20,1,11,1,0,'purchase_order',999,999,999,0,0,10,10,'2026-10-01T12:00:00Z');
       INSERT INTO oms.order_item_costs(id,order_id,order_item_id,inventory_lot_id,product_variant_id,qty,
         unit_cost_mills,total_cost_mills,unit_cost_cents,total_cost_cents,cost_precision_version)
         VALUES(1,61,71,101,101,2,149,298,1,3,1),(2,61,71,102,101,2,250,500,3,5,1),
@@ -236,6 +236,7 @@ suite.sequential("physical return and cost-only recovery ownership on PostgreSQL
       unit_cost_mills,total_cost_mills,unit_cost_cents,total_cost_cents,cost_precision_version)
       VALUES(5,61,71,101,101,-1,149,-149,1,-1,1);
       INSERT INTO inventory.availability_claim_pick_movements VALUES(20,1,'pick',2,NULL),(21,5,'unpick',1,20);`);
+    await pool.query("UPDATE inventory.inventory_lots SET qty_on_hand=4 WHERE id=101");
     await restock();
     expect((await returnedLayers()).map(layer=>({ source: layer.source_order_item_cost_id,quantity: layer.qty_on_hand })))
       .toEqual([{ source: 1,quantity: 1 },{ source: 2,quantity: 2 }]);
@@ -258,6 +259,7 @@ suite.sequential("physical return and cost-only recovery ownership on PostgreSQL
       unit_cost_mills,total_cost_mills,unit_cost_cents,total_cost_cents,cost_precision_version)
       VALUES(5,61,71,101,101,-1,149,-149,1,-1,1);
       INSERT INTO inventory.availability_claim_pick_movements VALUES(20,1,'pick',2,NULL),(21,5,'unpick',1,20);`);
+    await pool.query("UPDATE inventory.inventory_lots SET qty_on_hand=4 WHERE id=101");
     const source = await revision();
     const before = await physicalState();
     const applied = await database.transaction(tx => applyCostRevision(tx, source, cogs, "accountant", now));
@@ -378,10 +380,10 @@ suite.sequential("physical return and cost-only recovery ownership on PostgreSQL
       const [lotValuation, cogsValuation] = await Promise.all([
         request("/api/inventory/valuation"), request("/api/cogs/valuation"),
       ]);
-      expect(lotValuation).toMatchObject({ status: 200, body: { total: { qty: 6, valueCents: 14 },
-        totalValueMills: "1398", quantityUnit: "variant", unknownCostQty: 3 } });
-      expect(cogsValuation).toMatchObject({ status: 200, body: { totalQty: 6, totalValueCents: 14,
-        totalValueMills: "1398", quantityUnit: "variant", unknownCostQty: 3 } });
+      expect(lotValuation).toMatchObject({ status: 200, body: { total: { qty: 10, valueCents: 22 },
+        totalValueMills: "2196", quantityUnit: "variant", unknownCostQty: 3 } });
+      expect(cogsValuation).toMatchObject({ status: 200, body: { totalQty: 10, totalValueCents: 22,
+        totalValueMills: "2196", quantityUnit: "variant", unknownCostQty: 3 } });
       const physical = await physicalState();
       await pool.query("UPDATE warehouse.warehouse_locations SET is_active=0 WHERE id=30");
       expect(await request("/api/returns/process", wire)).toEqual(accepted[0]);
@@ -438,6 +440,18 @@ suite.sequential("physical return and cost-only recovery ownership on PostgreSQL
     expect(await financialState()).toEqual(financial);
     // A product correction alone does not certify every historical component.
     expect((await readLotCostFollowUps(database)).items.every(item=>item.state==="review_required")).toBe(true);
+  });
+
+  it("preserves fractional component totals in returned stock", async () => {
+    const source=await revision(1003);
+    const applied=await database.transaction(tx=>applyCostRevision(tx,source,cogs,"accountant",now));
+    expect(applied.status).toBe("applied");
+    expect((await pool.query("SELECT total_cost_mills,product_total_cost_mills FROM oms.order_item_costs WHERE id=1")).rows[0])
+      .toEqual({total_cost_mills:"499",product_total_cost_mills:"401"});
+    await restock(2);
+    expect((await pool.query(`SELECT lot.cost_basis_qty,lot.product_total_cost_mills,lot.packaging_total_cost_mills,lot.landed_total_cost_mills
+      FROM inventory.inventory_lots lot JOIN inventory.return_cost_allocations returned ON returned.returned_lot_id=lot.id`)).rows)
+      .toEqual([{cost_basis_qty:2,product_total_cost_mills:"401",packaging_total_cost_mills:"40",landed_total_cost_mills:"58"}]);
   });
 
   it("persists missing historical basis as review instead of inventing an original intake", async () => {

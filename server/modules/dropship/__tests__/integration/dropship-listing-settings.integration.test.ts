@@ -7,9 +7,16 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vites
 import type {
   CategoryListingSettingPatch, ProductListingSettingPatch,
 } from "../../../../../shared/dropship/listing-setting-values";
-import { listingSettingsProductDetailSchema } from "../../../../../shared/dropship/listing-settings";
+import {
+  listingSettingsCategoriesResponseSchema,
+  listingSettingsCategoryDetailSchema,
+  listingSettingsProductDetailSchema,
+} from "../../../../../shared/dropship/listing-settings";
 import { listingCatalogHash } from "../../application/dropship-listing-content-resolver";
+import { DropshipListingCategorySettingsService } from "../../application/dropship-listing-category-settings-service";
 import { DropshipListingPriceService } from "../../application/dropship-listing-price-service";
+import type { ListingSettingEbayPort } from "../../application/dropship-listing-setting-ebay-values";
+import { ListingSettingHeavyWriteGate } from "../../application/dropship-listing-setting-write-support";
 import { buildListingSettingsFacts, selectListingSettingsProduct } from "../../application/dropship-listing-settings-facts";
 import { DropshipListingSettingsService, type ListingSettingsLoad } from "../../application/dropship-listing-settings-service";
 import { listingSettingRequestHash } from "../../domain/listing-setting-values";
@@ -710,6 +717,118 @@ describeDatabase.sequential("listing settings PostgreSQL read guarantees", () =>
     const covered = tablesIn(fingerprintStatements);
     const uncovered = [...tablesIn(loadStatements)].filter((table) => !covered.has(table) && !NAMED_BY_REVISION_ID.has(table));
     expect(uncovered).toEqual([]);
+  });
+
+  it("reads the category views from the same snapshot with no lock and no write, naming every chosen category live (PR 9e, PG 6)", async () => {
+    await saveCategorySetting(TOPLOADERS, { storeShelf: { mode: "none" }, returnPolicy: { id: "return-c", name: "Category returns" } },
+      "category-view-3");
+    await saveProductSetting(7, { textAbove: { mode: "own", text: "Product above." } }, "category-view-product-7");
+    // A category with no settings row is named too: product 8 moves into Sleeves, which has none (plan 8.11).
+    await execute("UPDATE catalog.products SET category_id = 5 WHERE id = 8");
+    await execute("UPDATE catalog.product_categories SET name = 'Top loaders' WHERE id = 3");
+    const before = await databaseState();
+    const statements: Statement[] = [];
+    const service = new DropshipListingSettingsService({
+      repository: settings({ statements }),
+      stock: { atp: { getVariantAtp: async () => { throw new Error("The category views read no stock."); } },
+        overrides: new PgDropshipListingPreviewRepository(scopedPool()) },
+      clock: { now: () => NOW },
+      logger,
+    });
+
+    const list = await service.listCategoriesForMember("member-1", { storeConnectionId: STORE_RULES });
+    const detail = await service.getCategoryForMember("member-1", { storeConnectionId: STORE_RULES, categoryId: TOPLOADERS });
+
+    expect(listingSettingsCategoriesResponseSchema.parse(list)).toEqual({ storeConnectionId: STORE_RULES, categories: [
+      { categoryId: 5, name: "Sleeves", productCount: 1, revisionId: null, setFields: [] },
+      { categoryId: TOPLOADERS, name: "Top loaders", productCount: 1, revisionId: expect.any(Number), setFields: ["storeShelf", "returnPolicy"] },
+    ], uncategorizedProductCount: 0, generatedAt: NOW.toISOString() });
+    expect(listingSettingsCategoryDetailSchema.parse(detail)).toMatchObject({ categoryId: TOPLOADERS, name: "Top loaders", productCount: 1,
+      settings: {
+        storeShelf: { source: "category", value: { mode: "none" } },
+        returnPolicy: { source: "category", value: { id: "return-c", name: "Category returns" } },
+        shippingPolicy: { source: "store_default", value: { id: "ship-a", name: null } },
+        price: { source: "store_default", value: { basis: "product_cost", markupBps: 3000, flatCents: 100, rounding: "cent" } },
+      },
+      // Product 7 has its own text above, size 101 a shelf and size 102 a shipping policy left by today's panels.
+      ownValues: [{ productId: 7, revisionId: expect.any(Number), fields: ["storeShelf", "shippingPolicy", "textAbove"] }],
+    });
+    expect(detail.examples.map((size) => size.productVariantId)).toEqual([101, 102, 103]);
+    await expect(service.getCategoryForMember("member-1", { storeConnectionId: STORE_RULES, categoryId: 99 }))
+      .rejects.toMatchObject({ code: "DROPSHIP_LISTING_SETTINGS_CATEGORY_NOT_FOUND" });
+
+    // One fingerprint read per request and one load; nothing writes or locks, and nothing changed.
+    expect(statements.filter((statement) => statement.sql.startsWith("BEGIN"))).toHaveLength(1);
+    for (const { sql } of statements) {
+      expect(sql).not.toMatch(/\b(INSERT|UPDATE|DELETE|TRUNCATE|LOCK TABLE|FOR UPDATE|FOR SHARE|pg_advisory\w*)\b/i);
+    }
+    expect(await databaseState()).toEqual(before);
+    // The names come from the load's one category name read, for every chosen category.
+    const nameReads = statements.filter((statement) => /FROM catalog\.product_categories\b/.test(statement.sql));
+    expect(nameReads).toHaveLength(1);
+  });
+
+  it("derives in W12 exactly the clear set the category view shows, so a clear built from the view saves (PR 9e, plan 8.12 #1)", async () => {
+    // The category holds the shelf, a shipping policy and text above, so a clear of all three re-sends stored values (no eBay call).
+    await saveCategorySetting(TOPLOADERS, { storeShelf: { mode: "none" }, shippingPolicy: { id: "ship-c", name: "Category ship" },
+      textAbove: { mode: "none" } }, "round-trip-category");
+    // Product 7: its own text above on its row; the fixture left a shelf on size 101 and a shipping policy on size 102.
+    await saveProductSetting(7, { textAbove: { mode: "own", text: "Product above." } }, "round-trip-product-7");
+    // Product 8 joins the category with no settings row: its only own value is a shipping policy left on size 201.
+    await execute("UPDATE catalog.products SET category_id = $1 WHERE id = 8", [TOPLOADERS]);
+    await setPolicyOverride(201, "ship-p");
+    // Product 10 holds only a return policy of its own, and a shelf on size 1002, which the vendor does not choose:
+    // a leftover on an unchosen size is no own value on either side, so 10 is shown and stays out of the clear.
+    await execute(`INSERT INTO catalog.products (id, sku, name, category, category_id, product_type)
+      VALUES (10, 'TL2', 'Toploader 2', 'Toploaders', $1, 'toploader')`, [TOPLOADERS]);
+    await execute(`INSERT INTO catalog.product_variants (id, product_id, sku, name, sales_eligibility)
+      VALUES (1001, 10, 'TL2-25', 'Pack of 25', 'sellable'), (1002, 10, 'TL2-100', 'Pack of 100', 'sellable')`);
+    await execute(`INSERT INTO dropship.dropship_vendor_selection_rules (id, vendor_id, scope_type, action, product_variant_id, priority)
+      VALUES (4, 10, 'variant', 'exclude', 1002, 10)`);
+    await setShelf(1002, "Unchosen");
+    await saveProductSetting(10, { returnPolicy: { id: "return-p", name: "Product returns" } }, "round-trip-product-10");
+    const reads = new DropshipListingSettingsService({
+      repository: settings(),
+      stock: { atp: { getVariantAtp: async () => { throw new Error("The category views read no stock."); } },
+        overrides: new PgDropshipListingPreviewRepository(scopedPool()) },
+      clock: { now: () => NOW },
+      logger,
+    });
+    const cleared = ["storeShelf", "shippingPolicy", "textAbove"] as const;
+    const meetsClear = (fields: readonly string[]) => fields.some((field) => (cleared as readonly string[]).includes(field));
+
+    const detail = listingSettingsCategoryDetailSchema.parse(
+      await reads.getCategoryForMember("member-1", { storeConnectionId: STORE_RULES, categoryId: TOPLOADERS }));
+    expect([...detail.ownValues].sort((a, b) => a.productId - b.productId)).toEqual([
+      { productId: 7, revisionId: expect.any(Number), fields: ["storeShelf", "shippingPolicy", "textAbove"] },
+      { productId: 8, revisionId: null, fields: ["shippingPolicy"] },
+      { productId: 10, revisionId: expect.any(Number), fields: ["returnPolicy"] },
+    ]);
+    const shown = detail.ownValues.filter((entry) => meetsClear(entry.fields));
+
+    const ebayAsked: ListingSettingEbayPort = {
+      describeCategories: async () => { throw new Error("W12 asked eBay."); },
+      discoverPolicies: async () => { throw new Error("W12 asked eBay."); },
+      loadFulfillmentCapability: async () => { throw new Error("W12 asked eBay."); },
+      listStoreShelves: async () => { throw new Error("W12 asked eBay."); },
+    };
+    const w12 = new DropshipListingCategorySettingsService({ repository: new PgDropshipListingSettingWritesRepository(scopedPool()),
+      ebay: ebayAsked, heavyWrites: new ListingSettingHeavyWriteGate(), clock: { now: () => NOW }, timer: () => 0, log: { info: vi.fn() } });
+    const result = await w12.saveForMember("member-1", STORE_RULES, TOPLOADERS, {
+      idempotencyKey: "category-settings:round-trip", expectedRevisionId: detail.revisionId,
+      patch: { storeShelf: { mode: "none" }, shippingPolicy: { id: "ship-c" }, textAbove: { mode: "none" } },
+      clear: { fields: [...cleared], products: shown.map((entry) => ({ productId: entry.productId, expectedRevisionId: entry.revisionId })) },
+    });
+
+    expect(result).toEqual({ outcome: "changed", categoryId: TOPLOADERS, revisionId: detail.revisionId, clearedProductCount: 2 });
+    // The same service: the write changed the fingerprint, so the next read is rebuilt and shows only product 10.
+    const after = await reads.getCategoryForMember("member-1", { storeConnectionId: STORE_RULES, categoryId: TOPLOADERS });
+    expect(after.ownValues).toEqual([{ productId: 10, revisionId: expect.any(Number), fields: ["returnPolicy"] }]);
+    // The unchosen size's shelf is product 10's, which was not cleared; every cleared product's leftovers are gone.
+    const shelves = await execute("SELECT product_variant_id FROM dropship.dropship_ebay_store_category_assignments ORDER BY 1");
+    expect(shelves.rows).toEqual([{ product_variant_id: 1002 }]);
+    expect((await execute("SELECT count(*)::int AS n FROM dropship.dropship_ebay_listing_policy_overrides WHERE fulfillment_policy_id IS NOT NULL"))
+      .rows[0].n).toBe(0);
   });
 
   it("builds the views without costs when the cost source fails, inside the same snapshot", async () => {

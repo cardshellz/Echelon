@@ -1,4 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
+import { PgDialect } from "drizzle-orm/pg-core";
+import type { SQL } from "drizzle-orm";
+
+function inventoryWrites(db: { execute: { mock: { calls: unknown[][] } } }) {
+  return db.execute.mock.calls.filter(([query]) =>
+    /\b(INSERT|UPDATE|DELETE)\b/i.test(new PgDialect().sqlToQuery(query as SQL).sql));
+}
 
 describe("InventoryLotService — pick idempotency + unpick COGS reversal", () => {
   /**
@@ -53,7 +60,7 @@ describe("InventoryLotService — pick idempotency + unpick COGS reversal", () =
       { lotId: 11, qty: 2, unitCostCents: 700 },
     ]);
     expect(db.insert).not.toHaveBeenCalled();
-    expect(db.execute).not.toHaveBeenCalled();
+    expect(inventoryWrites(db)).toHaveLength(0);
   });
 
   /**
@@ -176,7 +183,7 @@ describe("InventoryLotService — pick idempotency + unpick COGS reversal", () =
       expectedExistingCostQuantity: 1,
     })).resolves.toEqual([{ lotId: 10, qty: 1, unitCostCents: 500 }]);
 
-    expect(db.execute).toHaveBeenCalledOnce();
+    expect(inventoryWrites(db)).toHaveLength(1);
     expect(insertedCosts).toEqual([expect.objectContaining({
       orderId: 100,
       orderItemId: 200,
@@ -218,7 +225,7 @@ describe("InventoryLotService — pick idempotency + unpick COGS reversal", () =
         actualExistingCostQuantity: 1,
       }),
     });
-    expect(db.execute).not.toHaveBeenCalled();
+    expect(inventoryWrites(db)).toHaveLength(0);
     expect(db.insert).not.toHaveBeenCalled();
   });
 
@@ -275,7 +282,7 @@ describe("InventoryLotService — pick idempotency + unpick COGS reversal", () =
         mismatchedInventoryLotIds: [10],
       }),
     });
-    expect(db.execute).not.toHaveBeenCalled();
+    expect(inventoryWrites(db)).toHaveLength(0);
     expect(db.insert).not.toHaveBeenCalled();
   });
 
@@ -326,7 +333,7 @@ describe("InventoryLotService — pick idempotency + unpick COGS reversal", () =
     });
 
     expect(result).toEqual([{ lotId: 10, qty: 1, unitCostCents: 500 }]);
-    expect(db.execute).toHaveBeenCalledTimes(1);
+    expect(inventoryWrites(db)).toHaveLength(1);
   });
 
   it("rejects a COGS mill total that exceeds the safe integer range before inventory moves", async () => {
@@ -374,7 +381,7 @@ describe("InventoryLotService — pick idempotency + unpick COGS reversal", () =
       context: expect.objectContaining({ field: "orderItemCost.totalCostMills" }),
     });
 
-    expect(db.execute).not.toHaveBeenCalled();
+    expect(inventoryWrites(db)).toHaveLength(0);
     expect(db.insert).not.toHaveBeenCalled();
   });
 
@@ -412,7 +419,7 @@ describe("InventoryLotService — pick idempotency + unpick COGS reversal", () =
       allowReservedStock: false,
     })).rejects.toThrow("required 2, available 1");
 
-    expect(db.execute).not.toHaveBeenCalled();
+    expect(inventoryWrites(db)).toHaveLength(0);
   });
 
   /**
@@ -462,8 +469,9 @@ describe("InventoryLotService — pick idempotency + unpick COGS reversal", () =
 
     // Reversed cost = (3 × 500) + (2 × 700) = 2900
     expect(result.reversedCostCents).toBe(2900);
-    // Lot quantities restored via execute (bulk update)
-    expect(db.execute).toHaveBeenCalledTimes(1);
+    // One graph lock and one physical lot update; financial and stock owners
+    // serialize in the same order.
+    expect(db.execute).toHaveBeenCalledTimes(2);
     // COGS rows deleted
     expect(deleteCalled).toBe(true);
   });
@@ -543,7 +551,7 @@ describe("InventoryLotService — pick idempotency + unpick COGS reversal", () =
         availableQuantity: 1,
       }),
     });
-    expect(db.execute).not.toHaveBeenCalled();
+    expect(db.execute).toHaveBeenCalledTimes(1); // transaction graph lock only
     expect(db.delete).not.toHaveBeenCalled();
     expect(db.update).not.toHaveBeenCalled();
   });
