@@ -4,6 +4,7 @@ import {
   listingSettingsCategoriesResponseSchema,
   listingSettingsCategoryDetailSchema,
   listingSettingsProductDetailSchema,
+  listingSettingsUpdatedProductsResponseSchema,
 } from "../../../../../shared/dropship/listing-settings";
 import { DropshipError } from "../../domain/errors";
 import type { DropshipVendorVariantOverride } from "../../domain/vendor-selection";
@@ -48,6 +49,8 @@ function inputs(candidates: DropshipListingCatalogCandidate[]): ListingSettingsI
     content: emptyState, contentSettings: new Map(), pausedSince: new Map(),
     // No product or category rows (plan D1): the summary reads as it did before 8b.
     layers: EMPTY_LISTING_SETTING_LAYERS, categoryNames: new Map(),
+    // No category marks: no product is moved (plan PR 9, 10.1).
+    categoryMoves: { marks: new Map(), fromCategories: new Map(), fromCategoryNames: new Map() },
   };
 }
 
@@ -358,5 +361,58 @@ describe("listing settings service: one product", () => {
     repository.fingerprint = "fp-3";
     repository.next = { state: "not_ebay", fingerprint: "fp-3", store: { ...store, platform: "shopify" } };
     await expect(service.listCategoriesForMember("member-1", { storeConnectionId: 5 })).rejects.toMatchObject({ code: "DROPSHIP_LISTING_SETTINGS_EBAY_ONLY" });
+  });
+});
+
+describe("listing settings service: Card Shellz updated products (plan PR 9, 10.3, 10.6)", () => {
+  /** Product 501 confirmed in no category and now in category 3; product 502 never marked. */
+  function movedLoad(fingerprint: string, marks: Array<[number, number | null]>): ListingSettingsLoad {
+    const base = inputs([{ ...candidate(11), categoryId: 3 }, { ...candidate(12, 502), categoryId: 3 }]);
+    return { state: "ok", fingerprint, costReadFailed: false, inputs: { ...base, categoryNames: new Map([[3, "Toploaders"]]),
+      categoryMoves: { marks: new Map(marks.map(([productId, categoryId]) => [productId,
+        { storeConnectionId: 5, productId, categoryId, seenAt: T0.toISOString() }])), fromCategories: new Map(), fromCategoryNames: new Map() } } };
+  }
+
+  it("gives a page of the moved products and every Got it item from the cached views, read again when a mark changes the fingerprint", async () => {
+    repository.next = movedLoad("fp-1", [[501, null]]);
+
+    const first = await service.listUpdatedProductsForMember("member-1", { storeConnectionId: 5 });
+
+    expect(listingSettingsUpdatedProductsResponseSchema.parse(first)).toEqual({ storeConnectionId: 5, page: 0, pageSize: 50, total: 1,
+      rows: [{ productId: 501, productName: "Product 501", ownTextNeedsCheck: false,
+        move: { from: { categoryId: null, name: null }, to: { categoryId: 3, name: "Toploaders" }, changedFields: [] } }],
+      moves: { total: 1, items: [{ productId: 501, shownCategoryId: 3 }] }, generatedAt: T0.toISOString() });
+    // The summary and the lists share the cached views.
+    await service.getSummaryForMember("member-1", { storeConnectionId: 5 });
+    expect(repository.loads).toHaveLength(1);
+    expect((await service.listUpdatedProductsForMember("member-1", { storeConnectionId: 5, page: 1 })).rows).toEqual([]);
+    expect(repository.loads).toHaveLength(1);
+
+    // A Got it moves the mark: a new fingerprint, so the next read is built again, inside the time limit.
+    repository.fingerprint = "fp-2";
+    repository.next = movedLoad("fp-2", [[501, 3]]);
+    const after = await service.listUpdatedProductsForMember("member-1", { storeConnectionId: 5 });
+    expect(after).toMatchObject({ total: 0, rows: [], moves: { total: 0, items: [] } });
+    expect(repository.loads).toHaveLength(2);
+  });
+
+  it("refuses bad input before reading, a selection over 10,000 sizes and a store not on eBay", async () => {
+    await expect(service.listUpdatedProductsForMember("member-1", { storeConnectionId: 5, page: -1 })).rejects.toBeInstanceOf(ZodError);
+    await expect(service.listUpdatedProductsForMember("member-1", { storeConnectionId: 5, show: "all" })).rejects.toBeInstanceOf(ZodError);
+    await expect(service.listUpdatedProductsForMember("member-1", { storeConnectionId: 0 })).rejects.toBeInstanceOf(ZodError);
+    expect(repository.fingerprintReads).toHaveLength(0);
+    await expect(service.listUpdatedProductsForMember(" ", { storeConnectionId: 5 })).rejects.toMatchObject({ code: "DROPSHIP_AUTH_REQUIRED" });
+    repository.next = { state: "too_large", fingerprint: "fp-1", store,
+      storeLevel: { pricing: emptyState, listingConfig: null, ebayCategoryRules: emptyState, content: emptyState } };
+    await expect(service.listUpdatedProductsForMember("member-1", { storeConnectionId: 5 }))
+      .rejects.toMatchObject({ code: "DROPSHIP_LISTING_SETTINGS_TOO_LARGE", context: { storeConnectionId: 5 } });
+    repository.fingerprint = "fp-2";
+    repository.next = { state: "not_ebay", fingerprint: "fp-2", store: { ...store, platform: "shopify" } };
+    await expect(service.listUpdatedProductsForMember("member-1", { storeConnectionId: 5 }))
+      .rejects.toMatchObject({ code: "DROPSHIP_LISTING_SETTINGS_EBAY_ONLY" });
+    repository.fingerprint = null;
+    await expect(service.listUpdatedProductsForMember("member-1", { storeConnectionId: 5 }))
+      .rejects.toMatchObject({ code: "DROPSHIP_STORE_CONNECTION_REQUIRED" });
+    expect(stock.atpReads).toHaveLength(0);
   });
 });

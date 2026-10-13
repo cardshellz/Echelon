@@ -6,6 +6,7 @@ import {
   listingSettingsProductInputSchema,
   listingSettingsProductsInputSchema,
   listingSettingsStoreInputSchema,
+  listingSettingsUpdatedProductsInputSchema,
   type ListingSettingsCategoriesResponse,
   type ListingSettingsCategoryDetail,
   type ListingSettingsPricesResponse,
@@ -13,6 +14,7 @@ import {
   type ListingSettingsProductIdsResponse,
   type ListingSettingsProductsResponse,
   type ListingSettingsSummary,
+  type ListingSettingsUpdatedProductsResponse,
 } from "../../../../shared/dropship/listing-settings";
 import { DropshipError } from "../domain/errors";
 import {
@@ -27,6 +29,7 @@ import {
   selectListingSettingsProduct,
   selectListingSettingsProductIds,
   selectListingSettingsProducts,
+  selectListingSettingsUpdatedProducts,
   type ListingSettingsFacts,
   type ListingSettingsInputs,
   type ListingSettingsProductSelection,
@@ -188,6 +191,24 @@ export class DropshipListingSettingsService {
         { storeConnectionId: parsed.storeConnectionId, categoryId: parsed.categoryId });
     }
     return { storeConnectionId: parsed.storeConnectionId, ...selection, generatedAt: view.builtAt.toISOString() };
+  }
+
+  /**
+   * "Card Shellz updated products" (plan PR 9, 10.3, 10.6): one page of the
+   * chosen products Card Shellz moved to another category since the vendor
+   * last confirmed it, or whose own text needs a check, and every moved
+   * product's "Got it" item, from the same cached views. The category marks
+   * are in the fingerprint (P29), so a first mark, or a "Got it" that
+   * acknowledges at least one product, shows at once. A move itself is Card
+   * Shellz's, seen within the cache's time limit, and so is a "Got it" whose
+   * products all moved again: it writes no mark (W13 answers them as
+   * `movedAgainProductIds`). Read only: no gate, no lock, no write.
+   */
+  async listUpdatedProductsForMember(memberId: string, input: unknown): Promise<ListingSettingsUpdatedProductsResponse> {
+    const parsed = listingSettingsUpdatedProductsInputSchema.parse(input);
+    const view = requireSizes(await this.viewFor(memberId, parsed.storeConnectionId), parsed.storeConnectionId);
+    return { storeConnectionId: parsed.storeConnectionId, page: parsed.page, pageSize: LISTING_SETTINGS_PAGE_SIZE,
+      ...selectListingSettingsUpdatedProducts(view.facts, parsed), generatedAt: view.builtAt.toISOString() };
   }
 
   private async readStock(store: DropshipListingStoreContext, selection: ListingSettingsProductSelection): Promise<{

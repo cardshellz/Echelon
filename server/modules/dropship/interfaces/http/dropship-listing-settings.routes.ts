@@ -9,6 +9,7 @@ import {
   listingSettingsProductIdsResponseSchema,
   listingSettingsProductsResponseSchema,
   listingSettingsSummarySchema,
+  listingSettingsUpdatedProductsResponseSchema,
 } from "../../../../../shared/dropship/listing-settings";
 import { logger } from "../../../../platform/observability/logger";
 import type { DropshipListingSettingsService } from "../../application/dropship-listing-settings-service";
@@ -18,7 +19,7 @@ import { requireDropshipAuth } from "./dropship-auth.routes";
 
 type ListingSettingsRouteService = Pick<DropshipListingSettingsService,
   "getSummaryForMember" | "listPricesForMember" | "listProductsForMember" | "listProductIdsForMember" | "getProductForMember"
-  | "listCategoriesForMember" | "getCategoryForMember">;
+  | "listCategoriesForMember" | "getCategoryForMember" | "listUpdatedProductsForMember">;
 
 /** Reads only, so the read budget from the Listing settings design (8.8). */
 export const LISTING_SETTINGS_READS_PER_MINUTE = 120;
@@ -64,6 +65,12 @@ export function registerDropshipListingSettingsRoutes(
     () => service.getCategoryForMember(memberId(req), {
       storeConnectionId: parseId(req.params.storeConnectionId),
       categoryId: parseId(req.params.categoryId),
+    })));
+  // Card Shellz updated products (PR 9g): moves and own text to check. Its "Got it" is a write route.
+  app.get(`${base}/updated-products`, requireDropshipAuth, limiter, (req, res) => respond(req, res,
+    listingSettingsUpdatedProductsResponseSchema, () => service.listUpdatedProductsForMember(memberId(req), {
+      storeConnectionId: parseId(req.params.storeConnectionId),
+      page: queryId(req.query.page),
     })));
 }
 

@@ -8,6 +8,7 @@ import {
   MAX_LISTING_SETTING_BULK_PRODUCTS,
   MAX_LISTING_STORE_SHELVES,
   categoryListingSettingValuesSchema,
+  categoryMovesAcknowledgeItemsSchema,
   listingSettingRequestKeySchema,
   listingSettingTemplateTextSchema,
   type ListingSettingTemplateText,
@@ -731,3 +732,51 @@ export type PriceChangeReviewResponse = z.infer<typeof priceChangeReviewResponse
 export type PriceChangeReviewPageInput = z.infer<typeof priceChangeReviewPageInputSchema>;
 export type ApplyPriceChangesInput = z.infer<typeof applyPriceChangesInputSchema>;
 export type ApplyPriceChangesResponse = z.infer<typeof applyPriceChangesResponseSchema>;
+
+// ---------------------------------------------------------------------------
+// W13: "Got it" for products Card Shellz moved (POST …/category-moves/acknowledge)
+// ---------------------------------------------------------------------------
+
+/**
+ * "Got it" (or "Got it for all N"): each moved product once, with the Card
+ * Shellz category the vendor was shown (null = none), 1 to 10,000 items (the
+ * 8a writer's own item contract, reused as it is).
+ */
+export const acknowledgeCategoryMovesInputSchema = z.object({
+  idempotencyKey: listingSettingRequestKeySchema,
+  items: categoryMovesAcknowledgeItemsSchema,
+}).strict();
+
+/** One list of product ids in a W13 answer; the two lists together are capped too (below). */
+const categoryMovesProductIds = z.array(id).max(MAX_LISTING_SETTING_BULK_PRODUCTS);
+
+/**
+ * - `acknowledgedProductIds`: each product still in the category shown now
+ *   follows it (its mark holds that category).
+ * - `movedAgainProductIds`: products Card Shellz moved again since the vendor
+ *   was shown them; their marks are kept, so they stay listed.
+ * - A product no longer in the catalog is in neither list.
+ * - Outcome `acknowledged`: this request did it. Outcome `replayed`: the
+ *   request key already did this; both lists are empty, as the 8a writer
+ *   answers a replay (PR 7 D9), and the page re-reads its views after any
+ *   save (plan P36).
+ */
+export const acknowledgeCategoryMovesResponseSchema = z.object({
+  outcome: z.enum(["acknowledged", "replayed"]),
+  acknowledgedProductIds: categoryMovesProductIds,
+  movedAgainProductIds: categoryMovesProductIds,
+}).strict().superRefine((response, context) => {
+  if (response.outcome === "replayed" && (response.acknowledgedProductIds.length > 0 || response.movedAgainProductIds.length > 0)) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "A replay names no product.", path: ["outcome"] });
+  }
+  const named = [...response.acknowledgedProductIds, ...response.movedAgainProductIds];
+  if (new Set(named).size !== named.length) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "Each product once, in one list.", path: ["movedAgainProductIds"] });
+  }
+  if (named.length > MAX_LISTING_SETTING_BULK_PRODUCTS) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "More products than one request may name.", path: ["movedAgainProductIds"] });
+  }
+});
+
+export type AcknowledgeCategoryMovesInput = z.infer<typeof acknowledgeCategoryMovesInputSchema>;
+export type AcknowledgeCategoryMovesResponse = z.infer<typeof acknowledgeCategoryMovesResponseSchema>;

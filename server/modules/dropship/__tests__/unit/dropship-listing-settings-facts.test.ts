@@ -9,11 +9,13 @@ import {
   listingSettingsProductIdsResponseSchema,
   listingSettingsProductsResponseSchema,
   listingSettingsSummarySchema,
+  listingSettingsUpdatedProductsResponseSchema,
 } from "../../../../../shared/dropship/listing-settings";
 import type { EbayCategoryRulesState } from "../../../../../shared/dropship/ebay-category-rules";
 import {
-  CATEGORY_LISTING_SETTING_FIELDS, PRODUCT_LISTING_SETTING_FIELDS, categoryListingSettingRowSchema, productListingSettingRowSchema,
-  type CategoryListingSettingValues, type ProductListingSettingField, type ProductListingSettingValues,
+  CATEGORY_LISTING_SETTING_FIELDS, PRODUCT_LISTING_SETTING_FIELDS, categoryListingSettingRowSchema, categoryMovesAcknowledgeItemsSchema,
+  productCategoryMarkSchema, productListingSettingRowSchema,
+  type CategoryListingSettingValues, type ProductCategoryMark, type ProductListingSettingField, type ProductListingSettingValues,
 } from "../../../../../shared/dropship/listing-setting-values";
 import type { PricingProfileState } from "../../../../../shared/dropship/pricing-rules";
 import { prepareEbayCategoryRules, resolveEbayListingCategory } from "../../application/dropship-ebay-category-resolver";
@@ -40,6 +42,7 @@ import {
   selectListingSettingsProduct,
   selectListingSettingsProductIds,
   selectListingSettingsProducts,
+  selectListingSettingsUpdatedProducts,
   type ListingSettingsInputs,
 } from "../../application/dropship-listing-settings-facts";
 import { EMPTY_LISTING_SETTING_LAYERS, type ListingSettingLayers } from "../../application/dropship-listing-setting-layers";
@@ -128,6 +131,8 @@ function inputs(candidates: DropshipListingCatalogCandidate[], patch: Partial<Li
     pausedSince: new Map(),
     layers,
     categoryNames: CATEGORY_NAMES,
+    // No category marks: no product is moved (plan PR 9, 10.1).
+    categoryMoves: { marks: new Map(), fromCategories: new Map(), fromCategoryNames: new Map() },
     ...patch,
   };
 }
@@ -1452,5 +1457,189 @@ describe("listing settings facts: the category views (plan PR 9, 8.11)", () => {
     expect(() => selectListingSettingsCategory(nameless, SLEEVES_CATEGORY)).toThrow(DropshipError);
     // The size and product views do not need it.
     expect(selectListingSettingsProduct(nameless, 3)).not.toBeNull();
+  });
+});
+
+describe("listing settings facts: Card Shellz updated products (plan PR 9, 10.6, 10.9)", () => {
+  const SAVED_AT = "2026-10-01T00:00:00.000Z";
+  const MAILERS_CATEGORY = 42;
+  const NONE = { price: null, ebayCategory: null, storeShelf: null, shippingPolicy: null, returnPolicy: null, paymentPolicy: null,
+    textAbove: null, textBelow: null } satisfies CategoryListingSettingValues;
+  const categoryRow = (categoryId: number, values: Partial<CategoryListingSettingValues>, revisionId = 900 + categoryId) =>
+    categoryListingSettingRowSchema.parse({ storeConnectionId: 5, categoryId, revisionId, updatedAt: SAVED_AT, values: { ...NONE, ...values } });
+  const mark = (productId: number, categoryId: number | null): ProductCategoryMark =>
+    productCategoryMarkSchema.parse({ storeConnectionId: 5, productId, categoryId, seenAt: SAVED_AT });
+  /** Product 1 (two sizes) now in Toploaders, product 2 now in Sleeves, product 3 now in no category. */
+  const catalog = [
+    candidate({ productId: 1, productVariantId: 11, productName: "Alpha", categoryId: TOPLOADERS_CATEGORY, sku: "A-11" }),
+    candidate({ productId: 1, productVariantId: 12, productName: "Alpha", categoryId: TOPLOADERS_CATEGORY, sku: "A-12", variantName: "Pack of 100" }),
+    candidate({ productId: 2, productVariantId: 21, productName: "Beta", categoryId: SLEEVES_CATEGORY, sku: "B-21" }),
+    candidate({ productId: 3, productVariantId: 31, productName: "Gamma", categoryId: null, sku: "G-31" }),
+  ];
+  /** Mailers is where product 1 was; it has its own shelf, return policy and price. Toploaders has its own too. */
+  const mailers = categoryRow(MAILERS_CATEGORY, { storeShelf: { mode: "own", shelves: [{ id: "7", name: "Supplies:Mailers" }] },
+    returnPolicy: { id: "R-mailers", name: "Mailer returns" }, price: RETAIL_RECIPE });
+  const toploaders = categoryRow(TOPLOADERS_CATEGORY, { storeShelf: { mode: "none" }, returnPolicy: { id: "R-top", name: "Top returns" } });
+  const layersNow: ListingSettingLayers = { products: new Map(), categories: new Map([[TOPLOADERS_CATEGORY, toploaders]]) };
+  const moved = (patch: Partial<ListingSettingsInputs> = {}, marks: ProductCategoryMark[] = [
+    mark(1, MAILERS_CATEGORY), mark(2, null), mark(3, TOPLOADERS_CATEGORY),
+  ]) => inputs(catalog, {
+    layers: layersNow,
+    categoryMoves: {
+      marks: new Map(marks.map((entry) => [entry.productId, entry])),
+      fromCategories: new Map([[MAILERS_CATEGORY, mailers], [TOPLOADERS_CATEGORY, toploaders]]),
+      fromCategoryNames: new Map([[MAILERS_CATEGORY, "Mailers"], [TOPLOADERS_CATEGORY, "Toploaders"]]),
+    },
+    ...patch,
+  });
+  const facts = (input: ListingSettingsInputs) => buildListingSettingsFacts(input);
+  const moveOf = (input: ListingSettingsInputs, productId: number) => {
+    const product = facts(input).products.find((row) => row.row.productId === productId);
+    if (!product) throw new Error(`expected product ${productId}`);
+    return product.categoryMove;
+  };
+  /** The answer the route sends, through its strict contract and refinements. */
+  const answer = (input: ListingSettingsInputs, page = 0) => listingSettingsUpdatedProductsResponseSchema.parse({ storeConnectionId: 5, page,
+    pageSize: 50, ...selectListingSettingsUpdatedProducts(facts(input), { page }), generatedAt: GENERATED_AT.toISOString() });
+
+  it("lists a product whose mark's category differs, into a category, out of one and between two, with from, to and what changes", () => {
+    const built = answer(moved());
+    expect(built).toEqual({ storeConnectionId: 5, page: 0, pageSize: 50, total: 3, rows: [
+      { productId: 1, productName: "Alpha", ownTextNeedsCheck: false, move: { from: { categoryId: MAILERS_CATEGORY, name: "Mailers" },
+        to: { categoryId: TOPLOADERS_CATEGORY, name: "Toploaders" }, changedFields: ["price", "storeShelf", "returnPolicy"] } },
+      { productId: 2, productName: "Beta", ownTextNeedsCheck: false, move: { from: { categoryId: null, name: null },
+        to: { categoryId: SLEEVES_CATEGORY, name: "Sleeves" }, changedFields: [] } },
+      { productId: 3, productName: "Gamma", ownTextNeedsCheck: false, move: { from: { categoryId: TOPLOADERS_CATEGORY, name: "Toploaders" },
+        to: { categoryId: null, name: null }, changedFields: ["storeShelf", "returnPolicy"] } },
+    ], moves: { total: 3, items: [
+      { productId: 1, shownCategoryId: TOPLOADERS_CATEGORY }, { productId: 2, shownCategoryId: SLEEVES_CATEGORY }, { productId: 3, shownCategoryId: null },
+    ] }, generatedAt: GENERATED_AT.toISOString() });
+    // The Got it items are W13's input as they are.
+    expect(categoryMovesAcknowledgeItemsSchema.parse(built.moves.items)).toEqual(built.moves.items);
+  });
+
+  it.each([
+    ["no mark: a move before the first mark is not reported", []],
+    ["the same category", [mark(1, TOPLOADERS_CATEGORY), mark(2, SLEEVES_CATEGORY), mark(3, null)]],
+  ] as const)("lists nothing for %s", (_label, marks) => {
+    expect(answer(moved({}, [...marks]))).toMatchObject({ total: 0, rows: [], moves: { total: 0, items: [] } });
+  });
+
+  it("lists nothing for a renamed category: the mark keeps the id, and the id is the same", () => {
+    const renamed = moved({ categoryNames: new Map([[TOPLOADERS_CATEGORY, "Top loaders"], [SLEEVES_CATEGORY, "Sleeves"]]) },
+      [mark(1, TOPLOADERS_CATEGORY)]);
+    expect(moveOf(renamed, 1)).toBeNull();
+    expect(answer(renamed).total).toBe(0);
+  });
+
+  it("names a category Card Shellz deleted by its id only, and ignores a mark of a product that is not chosen", () => {
+    const input = moved({}, [mark(1, 77), mark(99, TOPLOADERS_CATEGORY)]);
+    expect(moveOf(input, 1)).toEqual({ fromCategoryId: 77, fromCategoryName: null, toCategoryId: TOPLOADERS_CATEGORY,
+      toCategoryName: "Toploaders", changedFields: ["storeShelf", "returnPolicy"] });
+    expect(answer(input).moves.items).toEqual([{ productId: 1, shownCategoryId: TOPLOADERS_CATEGORY }]);
+  });
+
+  it("masks a setting the product's own row sets", () => {
+    const own = productListingSettingRowSchema.parse({ storeConnectionId: 5, productId: 1, revisionId: 801, updatedAt: SAVED_AT,
+      values: { ...NONE, mainText: null, storeShelf: { mode: "none" }, returnPolicy: { id: "R-own", name: null } } });
+    expect(moveOf(moved({ layers: { ...layersNow, products: new Map([[1, own]]) } }), 1)?.changedFields).toEqual(["price"]);
+  });
+
+  it("masks the price when every chosen size has an exact price, and not when one size follows the rules", () => {
+    const exact = (id: number) => savedPrice(id, { overridePriceCents: 1_499, pricingMode: "fixed" });
+    expect(moveOf(moved({ savedPrices: new Map([[11, exact(11)], [12, exact(12)]]) }), 1)?.changedFields).toEqual(["storeShelf", "returnPolicy"]);
+    expect(moveOf(moved({ savedPrices: new Map([[11, exact(11)]]) }), 1)?.changedFields).toEqual(["price", "storeShelf", "returnPolicy"]);
+  });
+
+  it("masks the price when every chosen size owns its price by a saved setting the rules never reach, whatever its source shows", () => {
+    const exact = (id: number) => savedPrice(id, { overridePriceCents: 1_499, pricingMode: "fixed" });
+    const catalogDefault = (id: number) => savedPrice(id, { pricingMode: "catalog_default" });
+    // A saved catalog default shows the catalog price, as a size with no saved setting does; only the saved one owns it.
+    const owned = moved({ savedPrices: new Map([[11, exact(11)], [12, catalogDefault(12)]]) });
+    expect(facts(owned).sizes.find((size) => size.price.productVariantId === 12)?.price.source).toBe("catalog_price");
+    expect(moveOf(owned, 1)?.changedFields).toEqual(["storeShelf", "returnPolicy"]);
+    // A legacy saved row with no mode never follows the rules either.
+    expect(moveOf(moved({ savedPrices: new Map([[11, catalogDefault(11)], [12, savedPrice(12, {})]]) }), 1)?.changedFields)
+      .toEqual(["storeShelf", "returnPolicy"]);
+    // `rules` and `inherit` follow a category price, and so does a size with no saved setting.
+    for (const followed of [savedPrice(12, { pricingMode: "rules" }), savedPrice(12, { pricingMode: "inherit" }), null]) {
+      const savedPrices = new Map<number, SavedListingPriceRevision>([[11, catalogDefault(11)]]);
+      if (followed !== null) savedPrices.set(12, followed);
+      expect(moveOf(moved({ savedPrices }), 1)?.changedFields).toEqual(["price", "storeShelf", "returnPolicy"]);
+    }
+  });
+
+  it("masks a policy and the shelf every chosen size keeps from today's panels, and not one a size lacks", () => {
+    const leftovers = moved({
+      policyOverrides: new Map([[11, override(11, { returnPolicyId: "R-size" })], [12, override(12, { returnPolicyId: "R-size-2" })]]),
+      shelfAssignments: new Map([[11, ["Supplies:Own"]]]),
+    });
+    expect(moveOf(leftovers, 1)?.changedFields).toEqual(["price", "storeShelf"]);
+    const everyShelf = moved({ shelfAssignments: new Map([[11, ["Supplies:Own"]], [12, ["Supplies:Own"]]]) });
+    expect(moveOf(everyShelf, 1)?.changedFields).toEqual(["price", "returnPolicy"]);
+  });
+
+  it("reads a policy name-only difference as no change, and lists the move with nothing that changes", () => {
+    const sameIds = moved({ layers: { products: new Map(), categories: new Map([[TOPLOADERS_CATEGORY,
+      categoryRow(TOPLOADERS_CATEGORY, { returnPolicy: { id: "R-mailers", name: "Renamed returns" },
+        storeShelf: { mode: "own", shelves: [{ id: "8", name: "Supplies:Mailers" }] }, price: { ...RETAIL_RECIPE } })]]) } },
+    [mark(1, MAILERS_CATEGORY)]);
+    expect(moveOf(sameIds, 1)?.changedFields).toEqual([]);
+    expect(answer(sameIds).rows).toEqual([{ productId: 1, productName: "Alpha", ownTextNeedsCheck: false,
+      move: { from: { categoryId: MAILERS_CATEGORY, name: "Mailers" }, to: { categoryId: TOPLOADERS_CATEGORY, name: "Toploaders" }, changedFields: [] } }]);
+  });
+
+  it("lists a product whose own text needs a check, with no move and no Got it item, and one that has both", () => {
+    const stale: SavedListingContent = { revisionId: 3, customText: "My words", catalogHash: "0".repeat(64), updatedAt: SAVED_AT };
+    const textOnly = moved({ contentSettings: new Map([[21, stale]]) }, []);
+    expect(answer(textOnly)).toMatchObject({ total: 1, moves: { total: 0, items: [] },
+      rows: [{ productId: 2, productName: "Beta", ownTextNeedsCheck: true, move: null }] });
+    const both = answer(moved({ contentSettings: new Map([[11, stale]]) }, [mark(1, MAILERS_CATEGORY)]));
+    expect(both.rows).toEqual([expect.objectContaining({ productId: 1, ownTextNeedsCheck: true, move: expect.objectContaining({ changedFields:
+      ["price", "storeShelf", "returnPolicy"] }) })]);
+    // The summary counts the same products under its own-text line.
+    expect(buildListingSettingsSummary(facts(textOnly), GENERATED_AT).attention.items).toContainEqual(
+      { code: "own_text_needs_check", count: 1, productId: null, productName: null });
+  });
+
+  it("pages the rows 50 at a time in the Products tab's order, and gives every moved product's item on every page", () => {
+    const many = Array.from({ length: 120 }, (_, index) => candidate({ productId: 1_000 + index, productVariantId: 10_000 + index,
+      productName: `Product ${String(index).padStart(3, "0")}`, categoryId: index % 3 === 0 ? null : TOPLOADERS_CATEGORY }));
+    // Every product was confirmed in Mailers; product 1,119's own text needs a check as well.
+    const input = inputs(many, { layers: layersNow,
+      contentSettings: new Map([[10_119, { revisionId: 3, customText: "Words", catalogHash: "0".repeat(64), updatedAt: SAVED_AT }]]),
+      categoryMoves: { marks: new Map(many.map((row) => [row.productId, mark(row.productId, MAILERS_CATEGORY)])),
+        fromCategories: new Map([[MAILERS_CATEGORY, mailers]]), fromCategoryNames: new Map([[MAILERS_CATEGORY, "Mailers"]]) } });
+    const pages = [0, 1, 2, 3].map((page) => answer(input, page));
+    expect(pages.map((page) => page.rows.length)).toEqual([50, 50, 20, 0]);
+    expect(pages.every((page) => page.total === 120)).toBe(true);
+    expect(pages[1].rows[0]).toMatchObject({ productId: 1_050, productName: "Product 050" });
+    expect(pages[2].rows.at(-1)).toMatchObject({ productId: 1_119, ownTextNeedsCheck: true });
+    for (const page of pages) {
+      expect(page.moves.total).toBe(120);
+      expect(page.moves.items).toEqual(many.map((row) => ({ productId: row.productId, shownCategoryId: row.categoryId })));
+    }
+    // Out of Mailers into no category, and into Toploaders: the three settings Mailers sets change either way.
+    expect(pages[0].rows[0].move).toMatchObject({ to: { categoryId: null }, changedFields: ["price", "storeShelf", "returnPolicy"] });
+    expect(pages[0].rows[1].move).toMatchObject({ to: { categoryId: TOPLOADERS_CATEGORY }, changedFields: ["price", "storeShelf", "returnPolicy"] });
+  });
+
+  it("changes no other view: the sizes, rows, categories and summary read the same with marks and without", () => {
+    const withMarks = facts(moved());
+    const without = facts(inputs(catalog, { layers: layersNow }));
+    expect(withMarks.sizes).toEqual(without.sizes);
+    expect(withMarks.products.map(({ categoryMove: _move, ...rest }) => rest)).toEqual(without.products.map(({ categoryMove: _move, ...rest }) => rest));
+    expect(withMarks.categories).toEqual(without.categories);
+    expect(buildListingSettingsSummary(withMarks, GENERATED_AT)).toEqual(buildListingSettingsSummary(without, GENERATED_AT));
+    expect(without.products.every((product) => product.categoryMove === null)).toBe(true);
+    for (const product of withMarks.products) expect(product.row).not.toHaveProperty("categoryMove");
+  });
+
+  it("answers from a frozen facts object, and refuses a moved product's current category with no name as a fault", () => {
+    const frozen = Object.freeze(facts(moved()));
+    expect(selectListingSettingsUpdatedProducts(frozen, { page: 0 }).total).toBe(3);
+    const nameless = facts(moved({ categoryNames: new Map([[TOPLOADERS_CATEGORY, "Toploaders"]]) }));
+    expect(() => selectListingSettingsUpdatedProducts(nameless, { page: 0 })).toThrow(expect.objectContaining({
+      code: "DROPSHIP_LISTING_SETTINGS_INVARIANT_FAILED", context: expect.objectContaining({ productId: 2, categoryId: SLEEVES_CATEGORY }) }));
   });
 });
