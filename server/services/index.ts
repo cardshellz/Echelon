@@ -418,11 +418,12 @@ export function createServices(
     return service;
   } };
   const walmartAdapter = new WalmartAdapter(walmart, new PostgresInventoryPublicationSupplyReader(databasePool));
-  const listingPublication = createListingPublicationService({pool: databasePool, walmart, channelCatalog, quantityAdmission: quantityPublicationAdmission});
+  const walmartVerifiedStock = new VerifiedListingStockService(new PostgresVerifiedListingStockStore(databasePool));
+  const listingPublication = createListingPublicationService({pool: databasePool, walmart, channelCatalog, quantityAdmission: quantityPublicationAdmission, verifiedStock: walmartVerifiedStock});
   const listingUpdates = createListingUpdateService(databasePool, walmart);
   const listingLifecycle = createListingLifecycleService(databasePool, walmart, listingLifecycleStore);
   const walmartStockConnection = new WalmartStockConnectionService(walmart,
-    new VerifiedListingStockService(new PostgresVerifiedListingStockStore(databasePool)));
+    walmartVerifiedStock);
   const inventoryPublicationInitialScope = new InventoryPublicationInitialScopeService(new PostgresInitialPublicationScopeStore(databasePool));
   const adapterRegistry = new ChannelAdapterRegistry();
   adapterRegistry.register(shopifyAdapter);

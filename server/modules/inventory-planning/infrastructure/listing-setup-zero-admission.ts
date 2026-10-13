@@ -87,20 +87,42 @@ export async function validateListingSetupZeroReadinessInsideTransaction(
       "The exact selected local variants and seller SKUs must remain active and unchanged.",
     );
   }
-  const existing = await client.query(
-    `SELECT id FROM channels.channel_feeds WHERE channel_id=$1
-    AND (product_variant_id=ANY($2::integer[]) OR channel_sku=ANY($3::text[])) LIMIT 1`,
+  const existing = await client.query<{
+    product_variant_id: number; channel_sku: string; channel_inventory_item_id: string;
+    channel_product_id: string | null; is_active: number; quarantined_at: Date | null;
+  }>(
+    `SELECT product_variant_id,channel_sku,channel_inventory_item_id,channel_product_id,is_active,quarantined_at
+    FROM channels.channel_feeds WHERE channel_id=$1
+    AND (product_variant_id=ANY($2::integer[]) OR channel_sku=ANY($3::text[])) FOR SHARE`,
     [
       intent.channelId,
       intent.items.map((item) => item.productVariantId),
       intent.items.map((item) => item.sku),
     ],
   );
-  if (existing.rows.length)
-    fail(
-      "PUBLICATION_SETUP_ITEM_ALREADY_LINKED",
-      "An initial zero setup cannot change an existing linked item; reconcile its listing first.",
-    );
+  for (const row of existing.rows) {
+    const item = intent.items.find(value => value.productVariantId === row.product_variant_id && value.sku === row.channel_sku);
+    if (!item?.recreation)
+      return fail("PUBLICATION_SETUP_ITEM_ALREADY_LINKED", "This SKU already has a listing link. Use Recreate on Walmart only after Walmart confirms the old listing is deleted.");
+    if (row.channel_inventory_item_id !== item.sku || row.is_active !== 1 || row.quarantined_at !== null
+      || row.channel_product_id !== item.recreation.previousExternalProductId
+      || existing.rows.filter(value => value.product_variant_id === item.productVariantId || value.channel_sku === item.sku).length !== 1)
+      fail("PUBLICATION_SETUP_RECREATION_IDENTITY_CHANGED", "The retained Walmart link changed after recreation was reviewed. Review this SKU again before publishing.");
+  }
+  const recreatedItems = intent.items.filter(item => item.recreation);
+  if (recreatedItems.length) {
+    const heads = await client.query<{ product_variant_id: number; draft_mapping_id: number | null;
+      lifecycle_status: string | null; external_inventory_item_id: string | null; external_sku: string | null }>(`
+      SELECT h.product_variant_id,h.draft_mapping_id,m.lifecycle_status,m.external_inventory_item_id,m.external_sku
+      FROM inventory.publication_variant_mapping_heads h LEFT JOIN inventory.publication_variant_mapping_versions m ON m.id=h.active_mapping_id
+      WHERE h.publication_target_id=$1 AND h.product_variant_id=ANY($2::integer[]) FOR SHARE OF h`,
+    [intent.publicationTargetId, recreatedItems.map(item => item.productVariantId)]);
+    if (heads.rows.some(head => {
+      const item = recreatedItems.find(item => item.productVariantId === head.product_variant_id)!;
+      return head.draft_mapping_id !== null || head.lifecycle_status !== "sealed"
+        || head.external_inventory_item_id !== item.sku || head.external_sku !== item.sku;
+    })) fail("PUBLICATION_SETUP_RECREATION_MAPPING_REVIEW_REQUIRED", "This SKU has an unfinished or conflicting stock mapping. Review its mapping in Channel Inventory before recreating the Walmart listing.");
+  }
   for (const productId of [
     ...new Set(variants.map((variant) => variant.product_id)),
   ].sort((a, b) => a - b)) {
@@ -210,12 +232,16 @@ export async function validateListingSetupZeroReadinessInsideTransaction(
           "The selected SKU's inventory source must match the configured Walmart fulfillment warehouse.",
         );
       }
-      if (configured.mappings.some(mapping => mapping.productVariantId === variant.id)) {
+      const item = intent.items.find(value => value.productVariantId === variant.id)!;
+      const mappings = configured.mappings.filter(mapping => mapping.productVariantId === variant.id);
+      if (mappings.length && !item.recreation) {
         fail(
           "PUBLICATION_SETUP_ALREADY_MANAGED",
           "Initial item setup cannot replace an existing inventory listing mapping.",
         );
       }
+      if (item.recreation && mappings.some(mapping => mapping.externalInventoryItemId !== item.sku || mapping.externalSku !== item.sku))
+        fail("PUBLICATION_SETUP_RECREATION_IDENTITY_CHANGED", "The retained stock mapping does not match the exact Walmart SKU being recreated. Review its listing mapping.");
     }
   }
 }
@@ -302,8 +328,8 @@ export async function admitListingSetupZeroInsideTransaction(
     } else {
       await client.query(
         `INSERT INTO inventory.publication_listing_setup_scopes
-        (publication_target_id,product_variant_id,external_inventory_item_id,operation_id,request_hash,desired_quantity,target_revision,created_at)
-        VALUES($1,$2,$3,$4,$5,0,$6,$7)`,
+        (publication_target_id,product_variant_id,external_inventory_item_id,operation_id,request_hash,desired_quantity,target_revision,created_at,recreation_evidence)
+        VALUES($1,$2,$3,$4,$5,0,$6,$7,$8::jsonb)`,
         [
           intent.publicationTargetId,
           item.productVariantId,
@@ -312,6 +338,7 @@ export async function admitListingSetupZeroInsideTransaction(
           requestHash,
           intent.expectedTargetRevision,
           now,
+          item.recreation ? JSON.stringify(item.recreation) : null,
         ],
       );
     }

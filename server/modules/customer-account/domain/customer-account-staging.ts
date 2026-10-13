@@ -9,6 +9,15 @@ const configSchema = z.object({
     z.object({ enabled: z.boolean() }).strict()),
 }).strict();
 export type CustomerAccountStagingConfig = z.infer<typeof configSchema>;
+export interface CustomerAccountOriginContext {
+  origin: "primary_storefront" | "shopify_storefront" | "missing" | "rejected";
+  commandHeader: "valid" | "missing" | "rejected";
+}
+export class CustomerAccountOriginAccessError extends CustomerReturnCustomerAccessError {
+  constructor(readonly context: CustomerAccountOriginContext) {
+    super("CUSTOMER_ACCOUNT_ORIGIN_REJECTED", "Open this page from your store account.", 403);
+  }
+}
 export function readCustomerAccountStagingConfig(raw: string | undefined): CustomerAccountStagingConfig | null {
   if (!raw) return null;
   try { return configSchema.parse(JSON.parse(raw)); }
@@ -28,8 +37,18 @@ export function requireCustomerAccountStaging(input: {
     throw new CustomerReturnCustomerAccessError("CUSTOMER_ACCOUNT_TESTING_UNAVAILABLE", "Staging account tools are not enabled yet.", 403);
   }
   const shop = input.authConfig.shops[principal.shopDomain];
-  if (!shop || input.origin !== new URL(shop.proxyUrl).origin || input.commandHeader !== "1") {
-    throw new CustomerReturnCustomerAccessError("CUSTOMER_ACCOUNT_ORIGIN_REJECTED", "Open this page from your store account.", 403);
+  // Shopify serves theme previews on the shop's canonical myshopify host.
+  // This origin comes from the independently verified Shopify principal, not
+  // a client-supplied host or a wildcard across other Shopify stores.
+  const origin: CustomerAccountOriginContext["origin"] = !input.origin ? "missing"
+    : shop && input.origin === new URL(shop.proxyUrl).origin ? "primary_storefront"
+    : shop && input.origin === `https://${principal.shopDomain}` ? "shopify_storefront" : "rejected";
+  const commandHeader: CustomerAccountOriginContext["commandHeader"] = input.commandHeader === "1" ? "valid"
+    : input.commandHeader === undefined ? "missing" : "rejected";
+  if ((origin !== "primary_storefront" && origin !== "shopify_storefront") || commandHeader !== "valid") {
+    // Classifications make transport failures diagnosable without logging raw
+    // headers, signed URLs, customer identifiers or authentication material.
+    throw new CustomerAccountOriginAccessError({ origin, commandHeader });
   }
   if (principal.externalCustomerId !== input.expectedCustomerId ||
       (input.sessionKey !== undefined && input.sessionKey !== principal.sessionKey)) {

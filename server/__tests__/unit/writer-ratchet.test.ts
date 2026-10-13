@@ -169,6 +169,7 @@ describe("writer-ratchet (P2.1)", () => {
         "inventory.publication_initial_scope_receipts",
         "inventory.publication_listing_setup_identities",
         "inventory.publication_listing_setup_scopes",
+        "inventory.publication_listing_recreation_stock_receipts",
         "inventory.publication_membership_applications",
         "inventory.publication_membership_heads",
         "inventory.publication_membership_versions",

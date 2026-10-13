@@ -16,11 +16,13 @@ export const verifiedStockListingSchema = z.object({
   lifecycleStatus: z.literal("ACTIVE"),
   publishedStatus: z.literal("PUBLISHED"),
   observedAt: z.string().datetime(),
+  setupOperationId: z.string().uuid().optional(),
 }).strict();
 export type VerifiedStockListing = z.infer<typeof verifiedStockListingSchema>;
 const stockConnectionResultSchema = z.object({
   state: z.enum(["connected", "already_connected", "excluded"]), dryRun: z.boolean(),
   receipt: publicationMappingPreparationReceiptSchema.nullable(),
+  publicationState: z.enum(["queued", "verified"]).optional(),
   quantities: z.array(z.object({ productVariantId: id, desiredQuantity: z.string().regex(/^(0|[1-9][0-9]*)$/) }).strict()),
 }).strict();
 export type VerifiedListingStockResult = z.infer<typeof stockConnectionResultSchema>;

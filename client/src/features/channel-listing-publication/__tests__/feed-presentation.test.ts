@@ -37,6 +37,16 @@ const control = (
   state: ListingLifecycleView["state"] = "pending",
 ) => ({ action, state }) as ListingLifecycleView;
 describe("compact listing presentation", () => {
+  it("keeps a recreated listing's pending or blocked stock visible until readback succeeds", () => {
+    const r = row();
+    r.operation = { id: "op", item: listingOperationItemSchema.parse({ variantId: 1, sku: "A", priceCents: 2499,
+      state: "accepted", stockState: "queued", externalProductId: "WPID-A", error: "Current stock is queued." }) };
+    expect(listingStatus(r)).toEqual({ label: "Confirming stock", tone: "neutral" });
+    r.operation.item.stockState = "blocked";
+    expect(listingStatus(r)).toEqual({ label: "Stock needs attention", tone: "attention" });
+    r.operation.item.state = "verified"; r.operation.item.stockState = "ready";
+    expect(listingStatus(r)).toEqual({ label: "Active", tone: "good" });
+  });
   it("shows one active status from provider evidence, not accepted submission", () => {
     const r = row();
     r.operation = {

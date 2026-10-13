@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import { createRoot } from "react-dom/client";
+import { createPortal } from "react-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { DialogPortalContainerContext } from "@/components/ui/dialog";
 import { CustomerWorkspace } from "@/pages/CustomerReturnCustomerPortal";
@@ -45,7 +46,7 @@ function AccountModal({ api, session, choice, onClose }: {
     </div>
   </dialog>;
 }
-function CustomerAccount({ root, api }: { root: HTMLElement; api: CustomerAccountTransport }) {
+function CustomerAccount({ root, api, statusTarget }: { root: HTMLElement; api: CustomerAccountTransport; statusTarget: HTMLElement | null }) {
   const [session, setSession] = useState<Bootstrap | null>(null);
   const [choice, setChoice] = useState<Choice | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -105,7 +106,9 @@ function CustomerAccount({ root, api }: { root: HTMLElement; api: CustomerAccoun
           if (address && editResult.value.eligibility.editable) address.hidden = false;
         }
         if (returnResult.status === "fulfilled" && returnResult.value?.order.lines.some(line => line.eligibleQuantity > 0)) bind("return", returnResult.value);
-        if (status) status.textContent = results.some(result => result.status === "rejected") ? "Some order actions could not be checked. Refresh this page to try again." : "";
+        if (status) status.textContent = results.some(result => result.status === "rejected") ? "Some order actions could not be checked. Refresh this page to try again."
+          : editResult.status === "fulfilled" && editResult.value && !editResult.value.eligibility.editable
+            ? editResult.value.eligibility.reasons[0] ?? "This order can no longer be edited." : "";
       } catch (cause) { if (!controller.signal.aborted && status) status.textContent = message(cause); }
     }
     void api.bootstrap(controller.signal).then(result => {
@@ -133,8 +136,9 @@ function CustomerAccount({ root, api }: { root: HTMLElement; api: CustomerAccoun
       setChoice({ kind: "labels", omsOrderId, returnStatus });
     } catch (cause) { setHistoryError(message(cause)); }
   }
+  const accessError = error && <div className="csz-account-notice" role="alert"><span>{error}</span><button type="button" className="csz-action" onClick={() => setAttempt(value => value + 1)}>Retry account tools</button></div>;
   return <QueryClientProvider client={client}>
-    {error && <div className="csz-account-notice" role="status"><span>{error}</span><button type="button" className="csz-action" onClick={() => setAttempt(value => value + 1)}>Retry account tools</button></div>}
+    {accessError && (statusTarget ? createPortal(accessError, statusTarget) : accessError)}
     {choice && session && <AccountModal key={`${choice.kind}:${choice.omsOrderId}:${choice.returnStatus?.authorizationId ?? "intake"}`} api={api} session={session} choice={choice} onClose={close} />}
     {session && <section className="csz-account-returns" aria-label="Your returns"><h2>Your returns</h2>
       {historyError && <p role="status">{historyError}</p>}
@@ -153,13 +157,14 @@ const root = document.querySelector<HTMLElement>("[data-csz-customer-account]");
 const mount = document.getElementById("csz-customer-account-tools");
 const configElement = document.getElementById("csz-customer-account-config");
 if (root && mount && configElement) {
+  const statusTarget = root.querySelector<HTMLElement>("[data-csz-account-tools-status]");
   try {
     const config = customerAccountPageConfigSchema.parse(JSON.parse(configElement.textContent ?? "null"));
     const api = createCustomerAccountTransport(config);
-    createRoot(mount).render(<CustomerAccount root={root} api={api} />);
+    createRoot(mount).render(<CustomerAccount root={root} api={api} statusTarget={statusTarget} />);
   } catch {
-    const notice = document.createElement("p"); notice.setAttribute("role", "status");
+    const notice = document.createElement("p"); notice.setAttribute("role", "alert");
     notice.textContent = "Account tools could not be loaded. Please refresh this page.";
-    mount.append(notice);
+    (statusTarget ?? mount).append(notice);
   }
 }
