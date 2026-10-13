@@ -68,6 +68,19 @@ describe("customer account signed storefront HTTP boundary", () => {
     expect(response.status).toBe(200);
     expect(services.mock.calls[0]?.[0]).toMatchObject({ externalCustomerId: "101", channelId: 2 });
   });
+  it("admits the signed shop's HTTPS preview host while preserving account and signature checks", async () => {
+    const response = await request({}, proof(), { Origin: "https://fixture.myshopify.com" });
+    expect(response.status).toBe(200);
+    expect((await response.json()).session.authenticated).toBe(true);
+    expect((await request({ expectedCustomerId: "101" }, proof(), { Origin: "https://fixture.myshopify.com" })).status).toBe(401);
+    expect((await request({}, proof({ logged_in_customer_id: "" }), { Origin: "https://fixture.myshopify.com" })).status).toBe(401);
+  });
+  it("logs bounded origin/header classifications and rejects another store or a missing command header", async () => {
+    expect((await request({}, proof(), { Origin: "https://other.myshopify.com" })).status).toBe(403);
+    expect(report).toHaveBeenLastCalledWith({ code: "CUSTOMER_ACCOUNT_ORIGIN_REJECTED", path: "/account/bootstrap", context: { origin: "rejected", commandHeader: "valid" } });
+    expect((await request({}, proof(), { Origin: "https://fixture.myshopify.com", [CUSTOMER_ACCOUNT_COMMAND_HEADER]: "" })).status).toBe(403);
+    expect(report).toHaveBeenLastCalledWith({ code: "CUSTOMER_ACCOUNT_ORIGIN_REJECTED", path: "/account/bootstrap", context: { origin: "shopify_storefront", commandHeader: "rejected" } });
+  });
   it("requires the same customer partition on every resource call", async () => {
     expect((await request({ path: "/account/resolve", method: "POST", body: { orderReference: "#10", externalOrderId: "99" } })).status).toBe(401);
     expect(services).not.toHaveBeenCalled();

@@ -92,8 +92,9 @@ describe("default-off staging access", () => {
   });
   it("admits all signed customers while requiring the expected account, exact theme and origin", () => {
     expect(() => requireCustomerAccountStaging(input)).not.toThrow();
+    expect(() => requireCustomerAccountStaging({ ...input, origin: `https://${principal.shopDomain}` })).not.toThrow();
     expect(() => requireCustomerAccountStaging({ ...input, principal: { ...principal, externalCustomerId: "101" }, expectedCustomerId: "101" })).not.toThrow();
-    for (const override of [{ themeId: "1" }, { expectedCustomerId: "101" }, { sessionKey: "b".repeat(43) }, { origin: "https://evil.test" }, { commandHeader: undefined }, { principal: { ...principal, externalCustomerId: "101" } }]) {
+    for (const override of [{ themeId: "1" }, { expectedCustomerId: "101" }, { sessionKey: "b".repeat(43) }, { origin: "https://evil.test" }, { origin: "https://other.myshopify.com" }, { origin: `http://${principal.shopDomain}` }, { origin: `https://${principal.shopDomain}:8443` }, { origin: "null" }, { origin: undefined }, { commandHeader: undefined }, { commandHeader: "0" }, { principal: { ...principal, externalCustomerId: "101" } }]) {
       expect(() => requireCustomerAccountStaging({ ...input, ...override })).toThrow();
     }
   });
