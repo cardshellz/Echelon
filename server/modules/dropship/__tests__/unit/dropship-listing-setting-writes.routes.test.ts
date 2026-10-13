@@ -4,6 +4,7 @@ import express, { type NextFunction, type Request, type Response } from "express
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ZodError } from "zod";
 import {
+  saveCategorySettingsInputSchema,
   saveProductSettingsInputSchema,
   saveProductsBulkInputSchema,
   saveSizePricesInputSchema,
@@ -84,6 +85,27 @@ class FakeProducts {
     parseListingSettingInput(listingSettingStoreIdSchema, storeId);
     parseListingSettingInput(saveProductsBulkInputSchema, input);
     return this.bulkResult;
+  }
+}
+
+const CATEGORY_KEY = "category-settings:7f9c2ba4-e88f-4a5e-9d1b-1c2d3e4f5a6b";
+const CATEGORY_PATH = "/api/dropship/listings/stores/22/listing-settings/categories/3";
+const categoryBody = (fields: Record<string, unknown> = {}) =>
+  ({ idempotencyKey: CATEGORY_KEY, expectedRevisionId: null, patch: { storeShelf: { mode: "none" } }, ...fields });
+const categoryChanged = { outcome: "changed", categoryId: 3, revisionId: 41, clearedProductCount: 0 };
+
+class FakeCategories {
+  calls: Array<{ memberId: string; storeId: unknown; categoryId: unknown; input: unknown }> = [];
+  failure: unknown = null;
+  result: unknown = categoryChanged;
+  async saveForMember(memberId: string, storeId: unknown, categoryId: unknown, input: unknown) {
+    this.calls.push({ memberId, storeId, categoryId, input });
+    if (this.failure) throw this.failure;
+    // The real service's parsing: the vendor's input is refused as DROPSHIP_LISTING_SETTINGS_INVALID_INPUT.
+    parseListingSettingInput(listingSettingStoreIdSchema, storeId);
+    parseListingSettingInput(listingSettingStoreIdSchema, categoryId);
+    parseListingSettingInput(saveCategorySettingsInputSchema, input);
+    return this.result;
   }
 }
 
@@ -624,6 +646,169 @@ describe("POST …/listing-settings/products/bulk (W6, plan PR 9, section 7.3)",
   });
 });
 
+describe("PUT …/listing-settings/categories/:categoryId (W12, plan PR 9, section 8.3)", () => {
+  let sizePrices: FakeSizePrices;
+  let products: FakeProducts;
+  let categories: FakeCategories;
+  let server: { url: string; close: () => Promise<void> } | null;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    sizePrices = new FakeSizePrices();
+    products = new FakeProducts();
+    categories = new FakeCategories();
+    server = null;
+  });
+  afterEach(async () => {
+    await server?.close();
+  });
+
+  const put = (payload: unknown, options: { member?: string | null; path?: string; raw?: string } = {}) =>
+    fetch(`${server!.url}${options.path ?? CATEGORY_PATH}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json", ...(options.member === null ? {} : { "X-Test-Member": options.member ?? "member-1" }) },
+      body: options.raw ?? JSON.stringify(payload),
+    });
+
+  it("refuses a request without a dropship session before the limiter, the parser or the service", async () => {
+    server = await startServer(buildApp(sizePrices, products, categories));
+    expect((await put(categoryBody(), { member: null })).status).toBe(401);
+    expect(categories.calls).toEqual([]);
+  });
+
+  it("answers an anonymous body over 1 MiB with 401, never 413: the 1 MiB parser runs only after sign-in (plan P8)", async () => {
+    server = await startServer(buildApp(sizePrices, products, categories));
+    const response = await put({ ...categoryBody(), padding: "x".repeat(DROPSHIP_BULK_JSON_LIMIT_BYTES + 1) }, { member: null });
+    expect(response.status).toBe(401);
+    expect((await response.json()).error.code).toBe("DROPSHIP_AUTH_REQUIRED");
+    expect(categories.calls).toEqual([]);
+    expect(logger.warn).not.toHaveBeenCalledWith("dropship.bulk_json_body_rejected", expect.anything());
+  });
+
+  it("passes the member, the parsed store and category ids and the body to the W12 service only, never cached", async () => {
+    server = await startServer(buildApp(sizePrices, products, categories));
+    const sent = categoryBody({ expectedRevisionId: 40, clear: { fields: ["storeShelf"], products: [{ productId: 7, expectedRevisionId: 31 }] } });
+    const response = await put(sent);
+    expect(response.status).toBe(200);
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    expect(await response.json()).toEqual(categoryChanged);
+    expect(categories.calls).toEqual([{ memberId: "member-1", storeId: 22, categoryId: 3, input: sent }]);
+    expect(products.calls).toEqual([]);
+    expect(products.bulkCalls).toEqual([]);
+  });
+
+  it.each([
+    ["a category id with letters", { path: "/api/dropship/listings/stores/22/listing-settings/categories/3x" }, categoryBody()],
+    ["a category id of 0", { path: "/api/dropship/listings/stores/22/listing-settings/categories/0" }, categoryBody()],
+    ["a category id past int4", { path: "/api/dropship/listings/stores/22/listing-settings/categories/2147483648" }, categoryBody()],
+    ["a 7-character key", {}, categoryBody({ idempotencyKey: "abcdefg" })],
+    ["a price (plan P34)", {}, categoryBody({ patch: { price: null } })],
+    ["a main text", {}, categoryBody({ patch: { mainText: null } })],
+    ["no change at all", {}, categoryBody({ patch: {} })],
+    ["a cleared setting the patch does not set", {}, categoryBody({ clear: { fields: ["returnPolicy"],
+      products: [{ productId: 7, expectedRevisionId: null }] } })],
+    ["an unknown key", {}, { ...categoryBody(), categoryId: 3 }],
+  ])("answers %s with 400, never a 500", async (_label, options, payload) => {
+    server = await startServer(buildApp(sizePrices, products, categories));
+    const response = await put(payload, options);
+    expect(response.status).toBe(400);
+    expect((await response.json()).error.code).toBe("DROPSHIP_LISTING_SETTINGS_INVALID_INPUT");
+  });
+
+  it("parses a body past the 100 KB global limit (a clear of 10,000 products) and hands it to the service unchanged", async () => {
+    server = await startServer(buildApp(sizePrices, products, categories));
+    const large = categoryBody({ clear: { fields: ["storeShelf"], products: Array.from({ length: 10_000 },
+      (_, index) => ({ productId: 2_000_000_000 + index, expectedRevisionId: 2_000_000_000 + index })) } });
+    const text = JSON.stringify(large);
+    expect(text.length).toBeGreaterThan(100 * 1024);
+    expect(text.length).toBeLessThan(DROPSHIP_BULK_JSON_LIMIT_BYTES);
+
+    const response = await put(undefined, { raw: text });
+
+    expect(response.status).toBe(200);
+    expect(categories.calls).toHaveLength(1);
+    expect(categories.calls[0].input).toEqual(large);
+  });
+
+  it("refuses a body over 1 MiB with 413 in the listing-settings words, never calling the service", async () => {
+    server = await startServer(buildApp(sizePrices, products, categories));
+    const response = await put({ ...categoryBody(), padding: "x".repeat(DROPSHIP_BULK_JSON_LIMIT_BYTES + 1) });
+    expect(response.status).toBe(413);
+    expect(await response.json()).toEqual({ error: { code: "DROPSHIP_REQUEST_TOO_LARGE", message: LISTING_SETTINGS_TOO_LARGE_MESSAGE } });
+    expect(categories.calls).toEqual([]);
+  });
+
+  it.each([
+    [new DropshipError("DROPSHIP_LISTING_SETTINGS_OLDER_RULES_PRESENT", "This store still uses older group rules.", {
+      storeConnectionId: 22, pricingGroups: 2, contentGroups: 0, ebayCategoryRules: 1, retryable: false, classification: "permanent" }), 409],
+    [new DropshipError("DROPSHIP_LISTING_SETTINGS_CATEGORY_NOT_FOUND", "This category has no chosen product in this store.", {
+      storeConnectionId: 22, categoryId: 3, retryable: false, classification: "permanent" }), 404],
+    // 8a's category writer puts the two revisions beside the category id, outside the public allow-list (plan 3.3):
+    // the body names the category only, and the page reloads it.
+    [new DropshipError("DROPSHIP_CATEGORY_LISTING_SETTINGS_VERSION_CONFLICT", "This category's listing settings changed.", {
+      categoryId: 3, retryable: false, classification: "permanent" }), 409],
+    [new DropshipError("DROPSHIP_PRODUCT_LISTING_SETTINGS_VERSION_CONFLICT", "The products in this category changed.", {
+      storeConnectionId: 22, categoryId: 3, conflicts: [{ productId: 12 }], conflictCount: 1, retryable: false, classification: "permanent" }), 409],
+    [new DropshipError("DROPSHIP_LISTING_SETTINGS_BULK_TOO_LARGE", "This change carries too much listing text to save at once.", {
+      storeConnectionId: 22, textBytes: 30_000_001, maxTextBytes: 30_000_000, productCount: 10_000,
+      retryable: false, classification: "permanent" }), 422],
+  ])("answers %s with its status and the public context, logged at DEBUG with the category", async (error, status) => {
+    server = await startServer(buildApp(sizePrices, products, categories));
+    categories.failure = error;
+    const response = await put(categoryBody());
+    expect(response.status).toBe(status);
+    expect(await response.json()).toEqual({ error: { code: error.code, message: error.message, context: error.context } });
+    expect(logger.debug).toHaveBeenCalledWith("dropship.listing_settings.write_refused", expect.objectContaining({
+      store_connection_id: 22, category_id: 3, actor_id: "member-1", status, error_code: error.code,
+      path: "/api/dropship/listings/stores/:storeConnectionId/listing-settings/categories/:categoryId" }));
+  });
+
+  it("answers the heavy-write gate's refusal of a clear with 503 and Retry-After 5, logged at WARN", async () => {
+    server = await startServer(buildApp(sizePrices, products, categories));
+    categories.failure = new DropshipError("DROPSHIP_LISTING_SETTINGS_BUSY", "Another large listing settings change is being saved. Try again in a few seconds.", {
+      reason: "heavy_write_in_progress", retryAfterSeconds: 5, retryable: true, classification: "transient" });
+    const response = await put(categoryBody());
+    expect(response.status).toBe(503);
+    expect(response.headers.get("retry-after")).toBe("5");
+    expect(logger.warn).toHaveBeenCalledWith("dropship.listing_settings.write_deferred", expect.objectContaining({ category_id: 3, status: 503 }));
+  });
+
+  it("answers a replay as the probe saw it, and an answer that breaks the response contract as a 500 with the fixed words", async () => {
+    server = await startServer(buildApp(sizePrices, products, categories));
+    categories.result = { outcome: "replayed", categoryId: 3, revisionId: 41, clearedProductCount: null };
+    expect(await (await put(categoryBody())).json()).toEqual(categories.result);
+    for (const broken of [{ ...categoryChanged, outcome: "replayed" }, { ...categoryChanged, outcome: "unchanged", clearedProductCount: 2 },
+      { ...categoryChanged, requestId: 900 }]) {
+      categories.result = broken;
+      const response = await put(categoryBody());
+      expect(response.status).toBe(500);
+      expect(await response.json()).toEqual({ error: { code: "DROPSHIP_LISTING_SETTINGS_INTERNAL_ERROR",
+        message: "Something went wrong. We couldn't confirm your save." } });
+    }
+  });
+
+  it("spends the single-write budget it shares with W5 (60 a minute), not the bulk one", async () => {
+    server = await startServer(buildApp(sizePrices, products, categories));
+    const half = LISTING_SETTING_SINGLE_WRITES_PER_MINUTE / 2;
+    for (let index = 0; index < half; index += 1) {
+      expect((await put(categoryBody())).status).toBe(200);
+      const product = await fetch(`${server.url}${PRODUCT_PATH}`, { method: "PUT",
+        headers: { "Content-Type": "application/json", "X-Test-Member": "member-1" }, body: JSON.stringify(productBody()) });
+      expect(product.status).toBe(200);
+    }
+    const limited = await put(categoryBody());
+    expect(limited.status).toBe(429);
+    expect(await limited.json()).toEqual({ error: { code: "DROPSHIP_LISTING_SETTINGS_RATE_LIMITED",
+      message: "Too many saves in a minute. Wait a moment and try again." } });
+    expect(categories.calls).toHaveLength(half);
+    // The bulk budget is a separate counter, and another member has their own.
+    const bulk = await fetch(`${server.url}${BULK_PATH}`, { method: "POST",
+      headers: { "Content-Type": "application/json", "X-Test-Member": "member-1" }, body: JSON.stringify(bulkBody()) });
+    expect(bulk.status).toBe(200);
+    expect((await put(categoryBody(), { member: "member-2" })).status).toBe(200);
+  });
+});
+
 /**
  * Every writer the router takes, with the given fakes; any other member is a
  * stub that throws, so a route reaching the wrong service fails here. Each
@@ -637,12 +822,13 @@ function writeServices(overrides: Partial<ListingSettingWriteServices>): Listing
   return {
     sizePrices: unexpected("sizePrices") as unknown as ListingSettingWriteServices["sizePrices"],
     products: unexpected("products") as unknown as ListingSettingWriteServices["products"],
+    categories: unexpected("categories") as unknown as ListingSettingWriteServices["categories"],
     ...overrides,
   };
 }
 
 /** The W8 cases pass no products fake, so a W8 route that reached the W5 service would fail on its throwing stub. */
-function buildApp(sizePrices: FakeSizePrices, products?: FakeProducts): express.Express {
+function buildApp(sizePrices: FakeSizePrices, products?: FakeProducts, categories?: FakeCategories): express.Express {
   const app = express();
   app.use((req: Request, _res: Response, next: NextFunction) => {
     const memberId = req.header("X-Test-Member");
@@ -654,6 +840,7 @@ function buildApp(sizePrices: FakeSizePrices, products?: FakeProducts): express.
   registerDropshipListingSettingWritesRoutes(app, writeServices({
     sizePrices: sizePrices as unknown as ListingSettingWriteServices["sizePrices"],
     ...(products ? { products: products as unknown as ListingSettingWriteServices["products"] } : {}),
+    ...(categories ? { categories: categories as unknown as ListingSettingWriteServices["categories"] } : {}),
   }));
   return app;
 }

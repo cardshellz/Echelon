@@ -1,10 +1,13 @@
 import {
   LISTING_SETTINGS_PAGE_SIZE,
+  listingSettingsCategoryInputSchema,
   listingSettingsPricesInputSchema,
   listingSettingsProductIdsInputSchema,
   listingSettingsProductInputSchema,
   listingSettingsProductsInputSchema,
   listingSettingsStoreInputSchema,
+  type ListingSettingsCategoriesResponse,
+  type ListingSettingsCategoryDetail,
   type ListingSettingsPricesResponse,
   type ListingSettingsProductDetail,
   type ListingSettingsProductIdsResponse,
@@ -18,6 +21,8 @@ import {
   buildListingSettingsSummary,
   buildTooLargeListingSettingsSummary,
   listingSettingsStockUnits,
+  selectListingSettingsCategories,
+  selectListingSettingsCategory,
   selectListingSettingsPrices,
   selectListingSettingsProduct,
   selectListingSettingsProductIds,
@@ -159,6 +164,30 @@ export class DropshipListingSettingsService {
       stock: stock.state,
       generatedAt: view.builtAt.toISOString(),
     };
+  }
+
+  /**
+   * Every Card Shellz category that holds a chosen product, with its own
+   * settings' revision and what it sets, from the same cached views. Read
+   * only: no gate (a vendor who cannot change listings still reads them).
+   */
+  async listCategoriesForMember(memberId: string, input: unknown): Promise<ListingSettingsCategoriesResponse> {
+    const { storeConnectionId } = listingSettingsStoreInputSchema.parse(input);
+    const view = requireSizes(await this.viewFor(memberId, storeConnectionId), storeConnectionId);
+    return { storeConnectionId, ...selectListingSettingsCategories(view.facts), generatedAt: view.builtAt.toISOString() };
+  }
+
+  /** One category's settings in full; 404 when none of the store's chosen products is in it (or it does not exist). */
+  async getCategoryForMember(memberId: string, input: unknown): Promise<ListingSettingsCategoryDetail> {
+    const parsed = listingSettingsCategoryInputSchema.parse(input);
+    const view = requireSizes(await this.viewFor(memberId, parsed.storeConnectionId), parsed.storeConnectionId);
+    const selection = selectListingSettingsCategory(view.facts, parsed.categoryId);
+    if (!selection) {
+      throw new DropshipError("DROPSHIP_LISTING_SETTINGS_CATEGORY_NOT_FOUND",
+        "None of this category's products is chosen for this store.",
+        { storeConnectionId: parsed.storeConnectionId, categoryId: parsed.categoryId });
+    }
+    return { storeConnectionId: parsed.storeConnectionId, ...selection, generatedAt: view.builtAt.toISOString() };
   }
 
   private async readStock(store: DropshipListingStoreContext, selection: ListingSettingsProductSelection): Promise<{

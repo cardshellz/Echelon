@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  CATEGORY_CLEAR_FIELDS,
   LISTING_SETTING_WRITE_ERROR_CODES,
   MAX_BULK_TEXT_BYTES,
   MAX_EBAY_ID_INPUT_LENGTH,
@@ -7,6 +8,8 @@ import {
   MAX_STORE_LISTING_TEXT_BYTES,
   patchTextBytes,
   productSettingsPatchInputSchema,
+  saveCategorySettingsInputSchema,
+  saveCategorySettingsResponseSchema,
   saveProductSettingsInputSchema,
   saveProductSettingsResponseSchema,
   saveProductsBulkInputSchema,
@@ -325,5 +328,102 @@ describe("W6 many products answer", () => {
     ["another outcome", answer({ outcome: "acknowledged" })],
   ])("refuses %s", (_label, value) => {
     expect(saveProductsBulkResponseSchema.safeParse(value).success).toBe(false);
+  });
+});
+
+describe("W12 one category input (plan PR 9, section 8.3)", () => {
+  const CATEGORY_KEY = "category-settings:7f9c2ba4-e88f-4a5e-9d1b-1c2d3e4f5a6b";
+  const RECIPE = { basis: "catalog_retail", markupBps: 0, flatCents: 100, rounding: "cent" };
+  const clearProducts = (count: number) => Array.from({ length: count }, (_, index) => ({ productId: index + 1, expectedRevisionId: null }));
+  const category = (fields: Record<string, unknown> = {}) =>
+    ({ idempotencyKey: CATEGORY_KEY, expectedRevisionId: null, patch: { storeShelf: { mode: "none" } }, ...fields });
+
+  it("names the clearable settings in the stored shape's order: no price (plan P34), no main text", () => {
+    expect(CATEGORY_CLEAR_FIELDS).toEqual(["ebayCategory", "storeShelf", "shippingPolicy", "returnPolicy", "paymentPolicy", "textAbove",
+      "textBelow"]);
+  });
+
+  it("accepts a change with no clear, and a clear of 10,000 products under the 1 MiB body, leaving the input as it was", () => {
+    const input = Object.freeze(category({ expectedRevisionId: 12, patch: Object.freeze({ shippingPolicy: { id: "P1" }, storeShelf: null }) }));
+    const parsed = saveCategorySettingsInputSchema.parse(input);
+    expect(parsed).toEqual({ idempotencyKey: CATEGORY_KEY, expectedRevisionId: 12, patch: { storeShelf: null, shippingPolicy: { id: "P1" } } });
+    // The patch keys come back in the stored shape's order, so the hash does not depend on the order sent.
+    expect(Object.keys(parsed.patch)).toEqual(["storeShelf", "shippingPolicy"]);
+
+    const large = category({ patch: { textAbove: { mode: "own", text: "Above." } },
+      clear: { fields: ["textAbove"], products: Array.from({ length: 10_000 },
+        (_, index) => ({ productId: 2_000_000_000 + index, expectedRevisionId: 2_000_000_000 + index })) } });
+    expect(JSON.stringify(large).length).toBeLessThan(1024 * 1024);
+    expect(saveCategorySettingsInputSchema.parse(Object.freeze(large)).clear?.products).toHaveLength(10_000);
+  });
+
+  it("accepts every clearable setting at once when the patch sets each", () => {
+    const patch = { ebayCategory: { categoryId: "183438" }, storeShelf: { mode: "none" }, shippingPolicy: { id: "P1" },
+      returnPolicy: { id: "P2" }, paymentPolicy: { id: "P3" }, textAbove: { mode: "own", text: "Above." }, textBelow: { mode: "none" } };
+    expect(saveCategorySettingsInputSchema.safeParse(category({ patch,
+      clear: { fields: [...CATEGORY_CLEAR_FIELDS].reverse(), products: clearProducts(1) } })).success).toBe(true);
+  });
+
+  it.each([
+    ["a price, even a reset (plan P34)", category({ patch: { price: null } })],
+    ["a price recipe", category({ patch: { price: RECIPE, storeShelf: null } })],
+    ["a main text", category({ patch: { mainText: null } })],
+    ["no change at all", category({ patch: {} })],
+    ["no patch", { idempotencyKey: CATEGORY_KEY, expectedRevisionId: null }],
+    ["a 7-character key", category({ idempotencyKey: "abcdefg" })],
+    ["no expected revision", { idempotencyKey: CATEGORY_KEY, patch: { storeShelf: null } }],
+    ["an unknown top-level key", { ...category(), categoryId: 3 }],
+    ["an unknown patch key", category({ patch: { storeShelf: null, shelf: null } })],
+    ["an eBay category name", category({ patch: { ebayCategory: { categoryId: "183438", categoryName: "Toploaders" } } })],
+    ["a clear of the price", category({ patch: { storeShelf: { mode: "none" } }, clear: { fields: ["price"], products: clearProducts(1) } })],
+    ["a clear of the main text", category({ clear: { fields: ["mainText"], products: clearProducts(1) } })],
+    ["a clear with no setting", category({ clear: { fields: [], products: clearProducts(1) } })],
+    ["a clear naming a setting twice", category({ clear: { fields: ["storeShelf", "storeShelf"], products: clearProducts(1) } })],
+    ["a clear with no product", category({ clear: { fields: ["storeShelf"], products: [] } })],
+    ["a clear of 10,001 products", category({ clear: { fields: ["storeShelf"], products: clearProducts(10_001) } })],
+    ["a clear naming a product twice", category({ clear: { fields: ["storeShelf"], products: [...clearProducts(1), ...clearProducts(1)] } })],
+    ["a cleared product without its expected revision", category({ clear: { fields: ["storeShelf"], products: [{ productId: 7 }] } })],
+    ["a cleared product with another key", category({ clear: { fields: ["storeShelf"],
+      products: [{ productId: 7, expectedRevisionId: null, categoryId: 3 }] } })],
+    ["a clear with another key", category({ clear: { fields: ["storeShelf"], products: clearProducts(1), all: true } })],
+  ])("refuses %s", (_label, value) => {
+    expect(saveCategorySettingsInputSchema.safeParse(value).success).toBe(false);
+  });
+
+  it.each([
+    ["absent from the patch", { shippingPolicy: { id: "P1" } }],
+    ["reset to the store default in the patch", { storeShelf: null, shippingPolicy: { id: "P1" } }],
+  ])("refuses a cleared setting %s, with our words at the cleared field (plan P20)", (_label, patch) => {
+    const parsed = saveCategorySettingsInputSchema.safeParse(category({ patch,
+      clear: { fields: ["shippingPolicy", "storeShelf"], products: clearProducts(2) } }));
+    expect(parsed.success).toBe(false);
+    expect(parsed.error?.issues).toEqual([expect.objectContaining({ code: "custom", path: ["clear", "fields", 1],
+      message: "Set this on the category to clear it on its products." })]);
+  });
+});
+
+describe("W12 one category answer", () => {
+  const answer = (fields: Record<string, unknown> = {}) =>
+    ({ outcome: "changed", categoryId: 3, revisionId: 41, clearedProductCount: 2, ...fields });
+
+  it("accepts a change, an unchanged save that cleared nothing, and a replay with no count", () => {
+    expect(saveCategorySettingsResponseSchema.safeParse(answer()).success).toBe(true);
+    expect(saveCategorySettingsResponseSchema.safeParse(answer({ clearedProductCount: 0 })).success).toBe(true);
+    expect(saveCategorySettingsResponseSchema.safeParse(answer({ outcome: "unchanged", revisionId: null, clearedProductCount: 0 })).success)
+      .toBe(true);
+    expect(saveCategorySettingsResponseSchema.safeParse(answer({ outcome: "replayed", revisionId: null, clearedProductCount: null })).success)
+      .toBe(true);
+  });
+
+  it.each([
+    ["a replay with a count", answer({ outcome: "replayed" })],
+    ["a change with no count", answer({ clearedProductCount: null })],
+    ["an unchanged save that cleared", answer({ outcome: "unchanged", clearedProductCount: 1 })],
+    ["10,001 cleared products", answer({ clearedProductCount: 10_001 })],
+    ["a category id of 0", answer({ categoryId: 0 })],
+    ["an unknown key", answer({ requestId: 9 })],
+    ["another outcome", answer({ outcome: "acknowledged" })],
+  ])("refuses %s", (_label, value) => {
+    expect(saveCategorySettingsResponseSchema.safeParse(value).success).toBe(false);
   });
 });

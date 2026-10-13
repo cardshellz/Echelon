@@ -364,3 +364,91 @@ export const saveProductsBulkResponseSchema = z.object({
 export type ProductsBulkPatchInput = z.infer<typeof productsBulkPatchInputSchema>;
 export type SaveProductsBulkInput = z.infer<typeof saveProductsBulkInputSchema>;
 export type SaveProductsBulkResponse = z.infer<typeof saveProductsBulkResponseSchema>;
+
+// ---------------------------------------------------------------------------
+// W12: one Card Shellz category (PUT …/listing-settings/categories/:categoryId)
+// ---------------------------------------------------------------------------
+
+/**
+ * The settings "Also clear theirs" can clear on the category's products, in
+ * the stored shape's order: a category's own settings without the price (a
+ * category price goes only through the price check, W7, plan P34) and
+ * without the main text (a category has none).
+ */
+export const CATEGORY_CLEAR_FIELDS = [
+  "ebayCategory", "storeShelf", "shippingPolicy", "returnPolicy", "paymentPolicy", "textAbove", "textBelow",
+] as const;
+export type CategoryClearField = (typeof CATEGORY_CLEAR_FIELDS)[number];
+
+/**
+ * One category's change (W12): W5's ids-only fields without the price (plan
+ * P34: a category price goes through the price check, W7) and without the
+ * main text (a category has none). At least one change: a clear-only change
+ * resends the field's current value, which saves as `unchanged` (plan P20).
+ */
+const categorySettingsPatchInputSchema = productSettingsPatchInputSchema.omit({ price: true, mainText: true }).strict()
+  .superRefine((patch, context) => {
+    if (!Object.values(patch).some((value) => value !== undefined)) {
+      context.addIssue({ code: z.ZodIssueCode.custom, message: "Change at least one setting.", path: [] });
+    }
+  });
+
+/**
+ * "Save" in one category's editor, and with it "Also clear theirs" (plan
+ * P20): the products of the category that hold their own value in a cleared
+ * field lose it, so they all follow the category. `clear.products` is the set
+ * the vendor was shown, each with the settings revision it saw (null when it
+ * had none); the server derives the set itself and refuses another one. Every
+ * cleared field must be set on the category by this change.
+ */
+export const saveCategorySettingsInputSchema = z.object({
+  idempotencyKey: listingSettingRequestKeySchema,
+  /** The category settings revision the vendor saw; null when the category had none. */
+  expectedRevisionId: id.nullable(),
+  patch: categorySettingsPatchInputSchema,
+  clear: z.object({
+    fields: z.array(z.enum(CATEGORY_CLEAR_FIELDS)).min(1).max(CATEGORY_CLEAR_FIELDS.length)
+      .refine((fields) => new Set(fields).size === fields.length, "Each setting once."),
+    products: z.array(z.object({ productId: id, expectedRevisionId: id.nullable() }).strict())
+      .min(1).max(MAX_LISTING_SETTING_BULK_PRODUCTS)
+      .refine((products) => new Set(products.map((product) => product.productId)).size === products.length, "Each product once."),
+  }).strict().optional(),
+}).strict().superRefine((input, context) => {
+  input.clear?.fields.forEach((field, index) => {
+    if (input.patch[field] == null) {
+      context.addIssue({ code: z.ZodIssueCode.custom, message: "Set this on the category to clear it on its products.",
+        path: ["clear", "fields", index] });
+    }
+  });
+});
+
+/**
+ * `changed`: the category's settings, or some product's own value, changed.
+ * `unchanged`: the change set what the category already has and cleared
+ * nothing, so nothing was written (plan D12). `replayed`: the request key
+ * already saved it; the answer names the revision the first answer named,
+ * and nothing is counted (plan P16, P36). The page re-reads its views after
+ * any save.
+ */
+export const saveCategorySettingsResponseSchema = z.object({
+  outcome: z.enum(["changed", "unchanged", "replayed"]),
+  categoryId: id,
+  /**
+   * The category's settings revision after the save; null when it has none. A replay answers the same one: the
+   * revision the key wrote, or for a clear that left the category unchanged the revision the request expected.
+   */
+  revisionId: id.nullable(),
+  /** Products whose own values in the cleared settings were removed; null on a replay. */
+  clearedProductCount: count.nullable(),
+}).strict().superRefine((response, context) => {
+  if ((response.outcome === "replayed") !== (response.clearedProductCount === null)) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "Only a replay leaves the clear count unknown.", path: ["clearedProductCount"] });
+  }
+  if (response.outcome === "unchanged" && response.clearedProductCount !== 0) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "An unchanged save wrote nothing.", path: ["outcome"] });
+  }
+});
+
+export type CategorySettingsPatchInput = z.infer<typeof categorySettingsPatchInputSchema>;
+export type SaveCategorySettingsInput = z.infer<typeof saveCategorySettingsInputSchema>;
+export type SaveCategorySettingsResponse = z.infer<typeof saveCategorySettingsResponseSchema>;

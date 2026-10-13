@@ -34,6 +34,7 @@ export const BULK_JSON_PATHS: ReadonlyArray<{ method: "POST" | "PUT"; pattern: R
   { method: "PUT", pattern: storePath(String.raw`\/listing-settings\/size-prices`) },
   { method: "PUT", pattern: storePath(String.raw`\/listing-settings\/products\/[^/]+`) },
   { method: "POST", pattern: storePath(String.raw`\/listing-settings\/products\/bulk`) },
+  { method: "PUT", pattern: storePath(String.raw`\/listing-settings\/categories\/[^/]+`) },
 ]);
 
 /** The global parser skips these requests; the route parses them after authentication. */

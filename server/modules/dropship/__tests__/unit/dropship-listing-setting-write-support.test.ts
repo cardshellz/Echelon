@@ -14,6 +14,7 @@ import {
   listingSettingKeyConflict,
   listingSettingPricesMoved,
   listingSettingRequestKeyChanged,
+  listingSettingOlderRulesPresent,
   listingSettingStoreIdSchema,
   listingSettingStoreTextLimit,
   listingSettingWriteHash,
@@ -214,7 +215,53 @@ describe("loadChosenSizes (plan PR 9, P12, 6.2 #5)", () => {
   it("reads nothing for no sizes", async () => {
     const none = reader({ sizes: [] });
     await expect(loadChosenSizes(none.tx, [], NOW)).resolves.toEqual([]);
+    await expect(loadChosenSizes(none.tx, [], NOW, { keepCandidates: false, firstOnly: true })).resolves.toEqual([]);
     expect(none.calls).toEqual([]);
+  });
+
+  it("keeps ids only with keepCandidates false: the same sizes, in the same batches, no candidate kept (v3r, C-money-8)", async () => {
+    const sizes = Array.from({ length: 600 }, (_, index) => 1_000 + index);
+    const full = reader({ sizes, hidden: [1_001], disabled: [1_002] });
+    const idsOnly = reader({ sizes, hidden: [1_001], disabled: [1_002] });
+
+    const withCandidates = await loadChosenSizes(full.tx, sizes, NOW);
+    const chosen = await loadChosenSizes(idsOnly.tx, Object.freeze([...sizes].reverse()), NOW, { keepCandidates: false });
+
+    expect(chosen).toEqual(withCandidates.map(({ productVariantId, productId }) => ({ productVariantId, productId })));
+    expect(chosen).toHaveLength(598);
+    expect(chosen.every((size) => !("candidate" in size))).toBe(true);
+    expect(idsOnly.calls).toEqual(full.calls);
+  });
+
+  it("stops after the first batch that holds a chosen size with firstOnly, and reads on past batches with none", async () => {
+    const sizes = Array.from({ length: 600 }, (_, index) => 1_000 + index);
+    // Nothing in the first batch is chosen (hidden by Card Shellz), so the second batch is read, and the third is not.
+    const { tx, calls } = reader({ sizes, hidden: sizes.slice(0, 250) });
+
+    const chosen = await loadChosenSizes(tx, sizes, NOW, { keepCandidates: false, firstOnly: true });
+
+    expect(chosen.map((size) => size.productVariantId)).toEqual(sizes.slice(250, 500));
+    expect(calls).toEqual(["exposureRules", "selectionRules", "candidates:250", "overrides:250", "candidates:250", "overrides:250"]);
+    // Without firstOnly every batch is read.
+    const every = reader({ sizes, hidden: sizes.slice(0, 250) });
+    await expect(loadChosenSizes(every.tx, sizes, NOW, { keepCandidates: false })).resolves.toHaveLength(350);
+    expect(every.calls.filter((call) => call.startsWith("candidates:"))).toHaveLength(3);
+  });
+
+  it("reads every batch with firstOnly when no size is chosen at all", async () => {
+    const sizes = Array.from({ length: 300 }, (_, index) => 1_000 + index);
+    const { tx, calls } = reader({ sizes, disabled: sizes });
+    await expect(loadChosenSizes(tx, sizes, NOW, { keepCandidates: false, firstOnly: true })).resolves.toEqual([]);
+    expect(calls.filter((call) => call.startsWith("candidates:"))).toEqual(["candidates:250", "candidates:50"]);
+  });
+});
+
+describe("the 9e refusal (plan P21, 8.7)", () => {
+  it("builds OLDER_RULES_PRESENT with the three counts, permanent", () => {
+    const error = listingSettingOlderRulesPresent(STORE, { pricingGroups: 2, contentGroups: 0, ebayCategoryRules: 1 });
+    expect(error.code).toBe("DROPSHIP_LISTING_SETTINGS_OLDER_RULES_PRESENT");
+    expect(error.context).toEqual({ storeConnectionId: STORE, pricingGroups: 2, contentGroups: 0, ebayCategoryRules: 1,
+      retryable: false, classification: "permanent" });
   });
 });
 

@@ -1,6 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ZodError } from "zod";
-import { listingSettingsProductDetailSchema } from "../../../../../shared/dropship/listing-settings";
+import {
+  listingSettingsCategoriesResponseSchema,
+  listingSettingsCategoryDetailSchema,
+  listingSettingsProductDetailSchema,
+} from "../../../../../shared/dropship/listing-settings";
 import { DropshipError } from "../../domain/errors";
 import type { DropshipVendorVariantOverride } from "../../domain/vendor-selection";
 import { prepareEbayCategoryRules, resolveEbayListingCategory } from "../../application/dropship-ebay-category-resolver";
@@ -320,5 +324,39 @@ describe("listing settings service: one product", () => {
     await expect(service.getProductForMember("member-1", { storeConnectionId: 5, productId: 501 }))
       .rejects.toMatchObject({ code: "DROPSHIP_LISTING_SETTINGS_EBAY_ONLY" });
     expect(stock.atpReads).toHaveLength(0);
+  });
+
+  it("lists the categories and gives one category's settings from the same cached views, with no stock read (plan 8.3, 8.11)", async () => {
+    const withCategories = inputs([{ ...candidate(11), categoryId: 3 }, { ...candidate(12, 502), categoryId: 3 }, candidate(13, 503)]);
+    repository.next = { state: "ok", fingerprint: "fp-1", costReadFailed: false,
+      inputs: { ...withCategories, categoryNames: new Map([[3, "Toploaders"]]) } };
+
+    const list = await service.listCategoriesForMember("member-1", { storeConnectionId: 5 });
+    const one = await service.getCategoryForMember("member-1", { storeConnectionId: 5, categoryId: 3 });
+
+    expect(listingSettingsCategoriesResponseSchema.parse(list)).toEqual({ storeConnectionId: 5,
+      categories: [{ categoryId: 3, name: "Toploaders", productCount: 2, revisionId: null, setFields: [] }],
+      uncategorizedProductCount: 1, generatedAt: T0.toISOString() });
+    expect(listingSettingsCategoryDetailSchema.parse(one)).toMatchObject({ storeConnectionId: 5, categoryId: 3, name: "Toploaders",
+      productCount: 2, revisionId: null, ownValues: [], generatedAt: T0.toISOString() });
+    expect(one.examples.map((size) => size.productVariantId)).toEqual([11, 12]);
+    expect(repository.loads).toHaveLength(1);
+    expect(stock.atpReads).toHaveLength(0);
+  });
+
+  it("refuses a category no chosen product is in, bad input, a selection over 10,000 sizes and a store not on eBay", async () => {
+    await expect(service.getCategoryForMember("member-1", { storeConnectionId: 5, categoryId: 9 }))
+      .rejects.toMatchObject({ code: "DROPSHIP_LISTING_SETTINGS_CATEGORY_NOT_FOUND", context: { storeConnectionId: 5, categoryId: 9 } });
+    await expect(service.getCategoryForMember("member-1", { storeConnectionId: 5, categoryId: 0 })).rejects.toBeInstanceOf(ZodError);
+    await expect(service.listCategoriesForMember("member-1", { storeConnectionId: 5, page: 0 })).rejects.toBeInstanceOf(ZodError);
+    repository.fingerprint = "fp-2";
+    repository.next = { state: "too_large", fingerprint: "fp-2", store,
+      storeLevel: { pricing: emptyState, listingConfig: null, ebayCategoryRules: emptyState, content: emptyState } };
+    await expect(service.listCategoriesForMember("member-1", { storeConnectionId: 5 })).rejects.toMatchObject({ code: "DROPSHIP_LISTING_SETTINGS_TOO_LARGE" });
+    await expect(service.getCategoryForMember("member-1", { storeConnectionId: 5, categoryId: 3 }))
+      .rejects.toMatchObject({ code: "DROPSHIP_LISTING_SETTINGS_TOO_LARGE" });
+    repository.fingerprint = "fp-3";
+    repository.next = { state: "not_ebay", fingerprint: "fp-3", store: { ...store, platform: "shopify" } };
+    await expect(service.listCategoriesForMember("member-1", { storeConnectionId: 5 })).rejects.toMatchObject({ code: "DROPSHIP_LISTING_SETTINGS_EBAY_ONLY" });
   });
 });

@@ -8,6 +8,7 @@ import { config } from "dotenv";
 import pg, { type Pool } from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { SaveListingPriceInput } from "../../../../../shared/dropship/listing-price";
+import type { ProductListingSettingPatch } from "../../../../../shared/dropship/listing-setting-values";
 import { MAX_EBAY_CATEGORY_NAME_LENGTH, MAX_EBAY_CATEGORY_PATH_DEPTH } from "../../../../../shared/dropship/ebay-category-rules";
 import {
   MAX_LISTING_POLICY_ID_LENGTH,
@@ -22,6 +23,7 @@ import { saveListingPriceInTransaction } from "../../application/dropship-listin
 import { DropshipListingSizePricesService } from "../../application/dropship-listing-size-prices-service";
 import { DropshipListingProductSettingsService } from "../../application/dropship-listing-product-settings-service";
 import { DropshipListingProductsBulkService } from "../../application/dropship-listing-products-bulk-service";
+import { DropshipListingCategorySettingsService } from "../../application/dropship-listing-category-settings-service";
 import { ListingSettingHeavyWriteGate } from "../../application/dropship-listing-setting-write-support";
 import type { ListingSettingEbayPort } from "../../application/dropship-listing-setting-ebay-values";
 import type { DropshipEbayListingSetupDiscovery } from "../../application/dropship-ebay-listing-setup-service";
@@ -29,6 +31,7 @@ import { DropshipPricingRulesService } from "../../application/dropship-pricing-
 import { DropshipError } from "../../domain/errors";
 import { listingSettingChildKey, listingSettingRequestHash } from "../../domain/listing-setting-values";
 import { PgDropshipListingPriceRepository } from "../../infrastructure/dropship-listing-price.repository";
+import { PgDropshipListingContentRepository } from "../../infrastructure/dropship-listing-content.repository";
 import { PgDropshipEbayListingPolicyOverrideRepository } from "../../infrastructure/dropship-ebay-listing-policy-override.repository";
 import {
   PgDropshipListingSettingWritesRepository,
@@ -131,6 +134,28 @@ interface Measurement {
   measurement: string; flows: number; elapsedMs: number; statements: number;
   heapUsedPeakDeltaMiB: number; externalPeakDeltaMiB: number; arrayBuffersPeakDeltaMiB: number;
 }
+
+/** eBay values a seeded row carries (the stored contract's shapes, shared/dropship/listing-setting-values.ts). */
+type EbayRowValues = {
+  category: { categoryId: string; categoryName: string; path: readonly string[] };
+  shelves: ReadonlyArray<{ id: string; name: string }>;
+  shipping: { id: string; name: string }; returns: { id: string; name: string }; payment: { id: string; name: string };
+};
+/**
+ * Names of the length a real store's are (HYPOTHESIS: no production sample was read). W6's combined edge and W12's
+ * PG 8 seed rows with them, so the two heavy writers are measured over the same rows.
+ */
+const EBAY_TYPICAL: EbayRowValues = {
+  category: { categoryId: "183454", categoryName: "Toploaders", path: ["Collectibles", "Trading Cards", "Card Sleeves & Toploaders", "Toploaders"] },
+  shelves: [{ id: "11", name: "Supplies:Top" }],
+  shipping: { id: "ship-a", name: "Ships in one day" }, returns: { id: "return-a", name: "Thirty days" },
+  payment: { id: "pay-a", name: "eBay managed payments" },
+};
+
+/** The UTF-8 bytes of a row's eBay values: what a heavy write copies besides the texts, and the text budget does not count. */
+const ebayValueBytes = (ebay: EbayRowValues) => Buffer.byteLength([ebay.category.categoryId, ebay.category.categoryName,
+  ...ebay.category.path, ...ebay.shelves.flatMap((shelf) => [shelf.id, shelf.name]),
+  ...[ebay.shipping, ebay.returns, ebay.payment].flatMap((policy) => [policy.id, policy.name])].join(""), "utf8");
 
 /**
  * Opt-in heap diagnostics (`DROPSHIP_W6_HEAP_DIAGNOSTICS=1`), off in CI: the
@@ -402,6 +427,24 @@ describeDatabase.sequential("listing-settings writes on PostgreSQL (plan PR 9)",
         heapUsedDeltaMiB: mib(end.heapUsed - start.heapUsed), gcBeforeRun: collectGarbage !== null,
       })}\n`);
     }
+  }
+
+  /**
+   * The heaviest point's live heap (the rule's input, plan 3.10): a full collection right before each revision
+   * insert and before COMMIT, when the stored rows, the merged records and one statement's JSON are all held, so
+   * what is left is what the write keeps, not garbage V8 has not collected yet. The forced collections change the
+   * run's own allocation peak, so this runs apart from the allocated measurement. Shared by W6 and W12's clear.
+   */
+  function liveHeapProbe(): { hook: (sql: string) => void; peakBytes: () => number | null } {
+    let peak: number | null = null;
+    return {
+      hook: (sql) => {
+        if (!collectGarbage || !(sql === "COMMIT" || sql.startsWith("INSERT INTO dropship.dropship_product_listing_setting_revisions"))) return;
+        collectGarbage();
+        peak = Math.max(peak ?? 0, process.memoryUsage().heapUsed);
+      },
+      peakBytes: () => peak,
+    };
   }
 
   /** A typed price for one size through W9's own service (the step 2 box), as a vendor sets one today. */
@@ -1320,19 +1363,6 @@ describeDatabase.sequential("listing-settings writes on PostgreSQL (plan PR 9)",
     const CAP_PART_BYTES = MAX_BULK_TEXT_BYTES / (2 * MAX_LISTING_SETTING_BULK_PRODUCTS);
     const CAP_TWO_BYTE = `${"a".repeat(CAP_PART_BYTES - 3)}’`;
     const CAP_ASCII = "a".repeat(CAP_PART_BYTES);
-    /** eBay values a seeded row carries (the stored contract's shapes, shared/dropship/listing-setting-values.ts). */
-    type EbayRowValues = {
-      category: { categoryId: string; categoryName: string; path: readonly string[] };
-      shelves: ReadonlyArray<{ id: string; name: string }>;
-      shipping: { id: string; name: string }; returns: { id: string; name: string }; payment: { id: string; name: string };
-    };
-    /** Names of the length a real store's are (HYPOTHESIS: no production sample was read). */
-    const EBAY_TYPICAL: EbayRowValues = {
-      category: { categoryId: "183454", categoryName: "Toploaders", path: ["Collectibles", "Trading Cards", "Card Sleeves & Toploaders", "Toploaders"] },
-      shelves: [{ id: "11", name: "Supplies:Top" }],
-      shipping: { id: "ship-a", name: "Ships in one day" }, returns: { id: "return-a", name: "Thirty days" },
-      payment: { id: "pay-a", name: "eBay managed payments" },
-    };
     /** The longest the stored contract and the columns allow: about 4,580 characters a row. */
     const EBAY_LONGEST: EbayRowValues = {
       category: { categoryId: "9".repeat(20), categoryName: "c".repeat(MAX_EBAY_CATEGORY_NAME_LENGTH),
@@ -1343,9 +1373,6 @@ describeDatabase.sequential("listing-settings writes on PostgreSQL (plan PR 9)",
         { id: kind.padEnd(MAX_LISTING_POLICY_ID_LENGTH, "i"), name: kind.padEnd(MAX_LISTING_POLICY_NAME_LENGTH, "n") }])) as
         Pick<EbayRowValues, "shipping" | "returns" | "payment">,
     };
-    const ebayValueBytes = (ebay: EbayRowValues) => Buffer.byteLength([ebay.category.categoryId, ebay.category.categoryName,
-      ...ebay.category.path, ...ebay.shelves.flatMap((shelf) => [shelf.id, shelf.name]),
-      ...[ebay.shipping, ebay.returns, ebay.payment].flatMap((policy) => [policy.id, policy.name])].join(""), "utf8");
     /**
      * `storedRows`: each product already has a settings row with `ebay`'s values when set, and `stored` as its own
      * texts (both `none` when null); `patch` replaces the edge's default patch.
@@ -1403,24 +1430,6 @@ describeDatabase.sequential("listing-settings writes on PostgreSQL (plan PR 9)",
 
     /** Each `_live` run's live peak (MiB over its start), by edge label: the inputs of plan 3.10's rule. */
     const livePeaks = new Map<string, number | null>();
-    /**
-     * The heaviest point's live heap (the rule's input, plan 3.10): a full collection right before each revision
-     * insert and before COMMIT, when the stored rows, the merged records and one statement's JSON are all held, so
-     * what is left is what the write keeps, not garbage V8 has not collected yet. The forced collections change the
-     * run's own allocation peak, so this runs apart from the allocated measurement.
-     */
-    function liveHeapProbe(): { hook: (sql: string) => void; peakBytes: () => number | null } {
-      let peak: number | null = null;
-      return {
-        hook: (sql) => {
-          if (!collectGarbage || !(sql === "COMMIT" || sql.startsWith("INSERT INTO dropship.dropship_product_listing_setting_revisions"))) return;
-          collectGarbage();
-          peak = Math.max(peak ?? 0, process.memoryUsage().heapUsed);
-        },
-        peakBytes: () => peak,
-      };
-    }
-
     async function runEdge(edge: Edge, mode: "rule" | "live" = "rule"): Promise<void> {
       const productIds = await seedCatalogProducts(EDGE_FIRST_PRODUCT, edge.products);
       const revisions = edge.storedRows ? await seedSettingRows(productIds, edge.storedRows.ebay, edge.stored)
@@ -1780,5 +1789,417 @@ describeDatabase.sequential("listing-settings writes on PostgreSQL (plan PR 9)",
       expect(log.info).toHaveBeenLastCalledWith("dropship.listing_settings.products_bulk_saved", expect.objectContaining({
         store_text_bytes: MAX_STORE_LISTING_TEXT_BYTES, text_bytes: ROOM }));
     }, BULK_TEST_TIMEOUT_MS);
+  });
+
+  describe("W12, one category (PUT …/categories/:categoryId, plan PR 9, section 8)", () => {
+    /** A second Toploaders product, with one size; product 9 starts in no category. */
+    const SECOND_PRODUCT = 8;
+    const SECOND_SIZE = 105;
+    const OUTSIDE_PRODUCT = 9;
+    const categoryKey = (label: string) => `category-settings:${label}`;
+    /** One service over one gate, as the factory builds them. */
+    const categories = (repositoryPool: Pool = scopedPool(), heavyWrites = new ListingSettingHeavyWriteGate()) =>
+      new DropshipListingCategorySettingsService({ repository: new PgDropshipListingSettingWritesRepository(repositoryPool), ebay: fakeEbay,
+        heavyWrites, clock: { now: () => NOW }, timer: () => performance.now(), log });
+    const save = (body: Record<string, unknown>, repositoryPool?: Pool, storeId = STORE) =>
+      categories(repositoryPool).saveForMember(MEMBER, storeId, TOPLOADERS, body);
+    const body = (label: string, fields: Record<string, unknown> = {}) =>
+      ({ idempotencyKey: categoryKey(label), expectedRevisionId: null, patch: { storeShelf: { mode: "none" } }, ...fields });
+
+    /** A product's own row through 8a's writer, as a W5 save leaves it; its revision id. */
+    async function saveOwn(productId: number, patch: ProductListingSettingPatch, label: string): Promise<number> {
+      const saved = await new PgDropshipListingSettingWritesRepository(scopedPool()).execute(
+        { memberId: MEMBER, storeConnectionId: STORE, idempotencyKey: `seed-own:${label}` },
+        (tx) => tx.saveProduct({ productId, expectedRevisionId: null, patch, requestHash: "d".repeat(64), now: NOW }));
+      return saved.row!.revisionId;
+    }
+    async function categoryWrites() {
+      return {
+        ...(await allWrites()),
+        categoryRevisions: await count("dropship.dropship_category_listing_setting_revisions"),
+        categoryRows: await count("dropship.dropship_category_listing_settings"),
+        ledger: await count("dropship.dropship_product_listing_setting_requests"),
+        policyRows: await count("dropship.dropship_ebay_listing_policy_overrides"),
+        shelfRows: await count("dropship.dropship_ebay_store_category_assignments"),
+      };
+    }
+
+    beforeEach(async () => {
+      ebayCalls.length = 0;
+      await execute(`INSERT INTO catalog.products (id, sku, name, category, category_id, product_type)
+        VALUES ($1, 'TL-2', 'Toploader 2', 'Toploaders', $3, 'toploader'), ($2, 'SL', 'Sleeves', 'Sleeves', NULL, 'sleeve')`,
+      [SECOND_PRODUCT, OUTSIDE_PRODUCT, TOPLOADERS]);
+      await execute(`INSERT INTO catalog.product_variants (id, product_id, sku, name, sales_eligibility)
+        VALUES ($1, $2, 'TL2-25', 'Pack of 25', 'sellable'), (106, $3, 'SL-25', 'Pack of 25', 'sellable')`,
+      [SECOND_SIZE, SECOND_PRODUCT, OUTSIDE_PRODUCT]);
+    });
+
+    it("clears theirs with the category in one commit with every audit row, and rolls all of it back when a clean-up fails (PG 1)", async () => {
+      // Product 7 holds its own shelf and text above, and size 101 a return policy; product 8 only leftovers on size 105.
+      const own7 = await saveOwn(PRODUCT_7, { storeShelf: { mode: "none" }, textAbove: { mode: "own", text: "Product above." } }, "pg1-7");
+      await seedPolicyOverride({ sizeId: 101, fulfillment: null, returnPolicy: "ret-101", label: "pg1-101" });
+      await seedPolicyOverride({ sizeId: SECOND_SIZE, fulfillment: null, returnPolicy: "ret-105", label: "pg1-105" });
+      await seedShelf({ sizeId: SECOND_SIZE, label: "pg1-105" });
+      const request = body("pg1", { patch: { storeShelf: { mode: "none" }, returnPolicy: { id: "return-new" },
+        textAbove: { mode: "own", text: "Category above." } }, clear: { fields: ["storeShelf", "returnPolicy", "textAbove"],
+        products: [{ productId: SECOND_PRODUCT, expectedRevisionId: null }, { productId: PRODUCT_7, expectedRevisionId: own7 }] } });
+      const before = await categoryWrites();
+
+      // A failure in the shelf clean-up, after the category row, the products' clear and the policy clean-up were written.
+      const failing = scopedPool(undefined, (sql) => {
+        if (sql.startsWith("WITH target AS MATERIALIZED") && sql.includes("dropship_ebay_store_category_assignments a")) {
+          throw new Error("injected shelf clean-up failure");
+        }
+      });
+      await expect(save(request, failing)).rejects.toThrow("injected shelf clean-up failure");
+      expect(await categoryWrites()).toEqual(before);
+      // The failed attempt asked eBay too; count only the retry's calls.
+      ebayCalls.length = 0;
+
+      const statements: string[] = [];
+      const result = await save(request, scopedPool(undefined, (sql) => { statements.push(sql); }));
+
+      expect(result).toEqual({ outcome: "changed", categoryId: TOPLOADERS, revisionId: expect.any(Number), clearedProductCount: 2 });
+      expect(ebayCalls).toEqual(["discover"]);
+      const category = await execute(`SELECT category_name, idempotency_key, shelf_mode, return_policy_id, return_policy_name, text_above
+        FROM dropship.dropship_category_listing_setting_revisions`);
+      expect(category.rows).toEqual([{ category_name: "Toploaders", idempotency_key: categoryKey("pg1"), shelf_mode: "none",
+        return_policy_id: "return-new", return_policy_name: "Thirty days", text_above: "Category above." }]);
+      const ledger = await execute("SELECT operation, product_count FROM dropship.dropship_product_listing_setting_requests");
+      expect(ledger.rows).toEqual([{ operation: "category_settings_clear", product_count: 1 }]);
+      // Product 7's row loses its own values; product 8 had no row, so it has none (a no-op merge, plan P20).
+      const products = await execute(`SELECT r.product_id, r.shelf_mode, r.text_above_mode, r.request_id IS NOT NULL AS bulk
+        FROM dropship.dropship_product_listing_settings s JOIN dropship.dropship_product_listing_setting_revisions r ON r.id = s.revision_id`);
+      expect(products.rows).toEqual([{ product_id: PRODUCT_7, shelf_mode: null, text_above_mode: null, bulk: true }]);
+      expect(await categoryWrites()).toMatchObject({ policyRows: 0, shelfRows: 0, categoryRows: 1 });
+      const audits = await execute(`SELECT event_type, count(*)::int AS n FROM dropship.dropship_audit_events
+        WHERE created_at = $1 AND actor_id = $2 GROUP BY event_type ORDER BY event_type`, [NOW, MEMBER]);
+      expect(audits.rows).toEqual([
+        { event_type: "category_listing_settings_saved", n: 1 },
+        { event_type: "ebay_listing_policy_override_replaced", n: 2 },
+        { event_type: "ebay_store_category_assignment_replaced", n: 1 },
+        // The seeded own row and the clear's.
+        { event_type: "product_listing_settings_saved", n: 2 },
+      ]);
+      // The lock order of plan 8.6: lockCatalog (category, then products), the feature locks, then the rows.
+      const index = (match: (sql: string) => boolean) => statements.findIndex(match);
+      const order = [
+        index((sql) => sql.startsWith("SELECT id FROM catalog.product_categories WHERE id = ANY")),
+        index((sql) => sql.startsWith("SELECT id FROM catalog.products WHERE id = ANY")),
+        index((sql) => sql.includes("hashtext('dropship_ebay_listing_policy_override')")),
+        index((sql) => sql.includes("hashtext('dropship_ebay_store_category_assignment')")),
+        index((sql) => sql.includes("FROM dropship.dropship_category_listing_settings s") && sql.includes("FOR UPDATE OF s")),
+        index((sql) => sql.includes("FROM dropship.dropship_product_listing_settings s") && sql.includes("FOR UPDATE OF s")),
+      ];
+      expect(order.every((position) => position >= 0)).toBe(true);
+      expect([...order].sort((a, b) => a - b)).toEqual(order);
+      expect(log.info).toHaveBeenCalledWith("dropship.listing_settings.category_saved", expect.objectContaining({
+        outcome: "changed", category_id: TOPLOADERS, cleared_product_count: 2, cleared_size_count: 2,
+        cleared_fields: ["storeShelf", "returnPolicy", "textAbove"], ebay_ms: expect.any(Number) }));
+    });
+
+    it("refuses a store that holds older group rules with nothing written (D16, PG 2)", async () => {
+      await setStoreDefault({ ...D1, groups: [{ id: "g1", name: "Group", priority: 1, scope: { type: "product", productId: PRODUCT_7 },
+        recipe: D1.defaultRecipe }] });
+      const before = await categoryWrites();
+      const pricing = await expectDropshipError(save(body("pg2-pricing")), "DROPSHIP_LISTING_SETTINGS_OLDER_RULES_PRESENT");
+      expect(pricing.context).toMatchObject({ pricingGroups: 1, contentGroups: 0, ebayCategoryRules: 0 });
+
+      await setStoreDefault(D1);
+      const revision = await execute(`INSERT INTO dropship.dropship_ebay_category_rule_revisions
+        (vendor_id, store_connection_id, previous_revision_id, profile, idempotency_key, request_hash, actor_id, created_at)
+        VALUES ($1, $2, NULL, $3::jsonb, 'seed-rules', $4, $5, $6) RETURNING id`, [VENDOR, STORE, JSON.stringify({ version: 1,
+        defaultCategory: null, rules: [{ id: "r1", name: "Rule", scope: { type: "product", productId: PRODUCT_7 },
+          category: { categoryId: "183438", categoryName: "Toploaders", path: ["Toploaders"] } }] }), "c".repeat(64), MEMBER, NOW]);
+      await execute(`INSERT INTO dropship.dropship_ebay_category_rule_profiles (vendor_id, store_connection_id, revision_id)
+        VALUES ($1, $2, $3)`, [VENDOR, STORE, revision.rows[0].id]);
+      const rules = await expectDropshipError(save(body("pg2-rules")), "DROPSHIP_LISTING_SETTINGS_OLDER_RULES_PRESENT");
+      expect(rules.context).toMatchObject({ pricingGroups: 0, contentGroups: 0, ebayCategoryRules: 1 });
+      expect({ ...(await categoryWrites()), audit: before.audit }).toEqual({ ...before, audit: before.audit });
+      expect(await count("dropship.dropship_category_listing_setting_revisions")).toBe(0);
+    });
+
+    it("compares and sets the category: a stale revision is a 409 with nothing written, the clear included (PG 3)", async () => {
+      const first = await save(body("pg3-first"));
+      expect(first).toMatchObject({ outcome: "changed", revisionId: expect.any(Number) });
+      const own7 = await saveOwn(PRODUCT_7, { storeShelf: { mode: "none" } }, "pg3-7");
+      const before = await categoryWrites();
+
+      const stale = await expectDropshipError(save(body("pg3-stale", { patch: { storeShelf: { mode: "none" }, textBelow: { mode: "none" } },
+        clear: { fields: ["storeShelf"], products: [{ productId: PRODUCT_7, expectedRevisionId: own7 }] } })),
+      "DROPSHIP_CATEGORY_LISTING_SETTINGS_VERSION_CONFLICT");
+      expect(stale.context).toMatchObject({ categoryId: TOPLOADERS, expectedRevisionId: null, actualRevisionId: first.revisionId });
+      expect(await categoryWrites()).toEqual(before);
+
+      // With the revision it saw, the same change saves.
+      await expect(save(body("pg3-current", { expectedRevisionId: first.revisionId, patch: { storeShelf: { mode: "none" },
+        textBelow: { mode: "none" } }, clear: { fields: ["storeShelf"], products: [{ productId: PRODUCT_7, expectedRevisionId: own7 }] } })))
+        .resolves.toMatchObject({ outcome: "changed", clearedProductCount: 1 });
+    });
+
+    it("answers a clear-only request's retry from its ledger row, in exactly 7 statements, writing nothing (PG 4)", async () => {
+      const first = await save(body("pg4-category"));
+      const own7 = await saveOwn(PRODUCT_7, { storeShelf: { mode: "none" } }, "pg4-7");
+      // Clear only: the category's shelf re-sent (unchanged) and the product's own shelf cleared.
+      const clearOnly = body("pg4-clear", { expectedRevisionId: first.revisionId,
+        clear: { fields: ["storeShelf"], products: [{ productId: PRODUCT_7, expectedRevisionId: own7 }] } });
+      const written = await save(clearOnly);
+      expect(written).toEqual({ outcome: "changed", categoryId: TOPLOADERS, revisionId: first.revisionId, clearedProductCount: 1 });
+      expect(await count("dropship.dropship_category_listing_setting_revisions")).toBe(1);
+      expect(await count("dropship.dropship_product_listing_setting_requests", "idempotency_key = $1", [categoryKey("pg4-clear")])).toBe(1);
+      const before = await categoryWrites();
+
+      const counter: StatementCounter = { statements: 0 };
+      const replay = await save(clearOnly, scopedPool(counter));
+
+      // The key wrote no category revision (the category was unchanged), yet the replay answers what the request answered:
+      // the revision the request expected, which 8a's compare-and-set had found.
+      expect(replay).toEqual({ outcome: "replayed", categoryId: TOPLOADERS, revisionId: written.revisionId, clearedProductCount: null });
+      expect(log.info).toHaveBeenLastCalledWith("dropship.listing_settings.category_saved", expect.objectContaining({
+        outcome: "replayed", before: [], after: [], changed_count: 0 }));
+      expect(counter.statements).toBe(7);
+      expect(await categoryWrites()).toEqual(before);
+      // A key reused for another change is a conflict.
+      await expect(expectDropshipError(save({ ...clearOnly, patch: { storeShelf: null, textAbove: { mode: "none" } },
+        clear: { fields: ["textAbove"], products: [{ productId: PRODUCT_7, expectedRevisionId: own7 }] } }),
+      "DROPSHIP_IDEMPOTENCY_CONFLICT")).resolves.toMatchObject({ context: { mismatched: ["ledger.requestHash"] } });
+    });
+
+    it("clears leftovers for this vendor and store only (PG 5)", async () => {
+      await addVendorStore(24);
+      await seedShelf({ sizeId: 101, label: "pg5-mine" });
+      await seedShelf({ vendorId: 11, storeId: OTHER_VENDOR_STORE, sizeId: 101, label: "pg5-other-vendor" });
+      await seedShelf({ storeId: 24, sizeId: 101, label: "pg5-other-store" });
+      await seedPolicyOverride({ storeId: 24, sizeId: 102, fulfillment: null, returnPolicy: "ret-24", label: "pg5-other-store" });
+
+      await expect(save(body("pg5", { clear: { fields: ["storeShelf"], products: [{ productId: PRODUCT_7, expectedRevisionId: null }] } })))
+        .resolves.toMatchObject({ outcome: "changed", clearedProductCount: 1 });
+
+      const shelves = await execute(`SELECT vendor_id, store_connection_id, product_variant_id FROM dropship.dropship_ebay_store_category_assignments
+        ORDER BY vendor_id, store_connection_id`);
+      expect(shelves.rows).toEqual([{ vendor_id: VENDOR, store_connection_id: 24, product_variant_id: 101 },
+        { vendor_id: 11, store_connection_id: OTHER_VENDOR_STORE, product_variant_id: 101 }]);
+      expect(await count("dropship.dropship_ebay_listing_policy_overrides", "store_connection_id = 24")).toBe(1);
+      expect(await count("dropship.dropship_ebay_store_category_assignment_revisions", "idempotency_key LIKE 'ls:%'")).toBe(1);
+      expect(await count("dropship.dropship_ebay_store_category_assignment_revisions", "idempotency_key LIKE 'ls:%' AND store_connection_id = $1",
+        [STORE])).toBe(1);
+    });
+
+    describe("concurrency (PG 7)", () => {
+      it("(a) makes a Card Shellz category rename wait behind its category FOR SHARE; the revision keeps the committed name", async () => {
+        const paused = gate((sql) => sql.startsWith("SELECT id FROM catalog.products WHERE id = ANY"));
+        const w12 = save(body("pg7a"), scopedPool(undefined, paused.hook));
+        let rename: Promise<unknown> | undefined;
+        try {
+          await within(paused.reached, "W12's product lock");
+          rename = execute("UPDATE catalog.product_categories SET name = 'Renamed toploaders' WHERE id = $1", [TOPLOADERS]);
+          await waitUntilLockWait("Renamed toploaders", 1);
+          paused.open();
+          await expect(within(w12, "W12")).resolves.toMatchObject({ outcome: "changed" });
+          await within(rename, "the rename");
+        } finally {
+          paused.open();
+          await within(Promise.allSettled([w12, ...(rename ? [rename] : [])]), "the rename case's clean-up");
+        }
+        const stored = await execute("SELECT category_name FROM dropship.dropship_category_listing_setting_revisions");
+        expect(stored.rows).toEqual([{ category_name: "Toploaders" }]);
+        const live = await execute("SELECT name FROM catalog.product_categories WHERE id = $1", [TOPLOADERS]);
+        expect(live.rows).toEqual([{ name: "Renamed toploaders" }]);
+      });
+
+      it("(b) sees a description group a content save commits while it waits on the store lock: 409 OLDER_RULES_PRESENT", async () => {
+        let saved!: () => void;
+        const profileSaved = new Promise<void>((done) => { saved = done; });
+        let open!: () => void;
+        const held = new Promise<void>((done) => { open = done; });
+        const content = new PgDropshipListingContentRepository(scopedPool()).execute(
+          { memberId: MEMBER, storeConnectionId: STORE, idempotencyKey: "content-group:pg7b" }, async (tx) => {
+            await tx.saveProfile({ expectedRevisionId: null, idempotencyKey: "content-group:pg7b", profile: {
+              defaultTemplate: { introduction: "", footer: "" },
+              groups: [{ id: "g1", name: "Group", priority: 1, scope: { type: "product", productId: PRODUCT_7 },
+                template: { introduction: "Group above.", footer: "" } }] } }, "e".repeat(64), NOW);
+            saved();
+            await held;
+          });
+        let w12: Promise<unknown> | undefined;
+        let outcome: unknown;
+        try {
+          await within(profileSaved, "the content save");
+          w12 = save(body("pg7b")).then(() => null, (reason: unknown) => reason);
+          await waitUntilLockWait("dropship_listing_push_job", 1);
+          open();
+          await within(content, "the content save's commit");
+          outcome = await within(w12, "W12");
+        } finally {
+          open();
+          await within(Promise.allSettled([content, ...(w12 ? [w12] : [])]), "the content race case's clean-up");
+        }
+        expect(outcome).toMatchObject({ code: "DROPSHIP_LISTING_SETTINGS_OLDER_RULES_PRESENT",
+          context: { pricingGroups: 0, contentGroups: 1, ebayCategoryRules: 0 } });
+        expect(await count("dropship.dropship_category_listing_setting_revisions")).toBe(0);
+      });
+
+      it("(c) answers a product Card Shellz moves into the category between the read and the lock with 409 when clearing", async () => {
+        const own7 = await saveOwn(PRODUCT_7, { storeShelf: { mode: "none" } }, "pg7c-7");
+        let moved = false;
+        const racing = scopedPool(undefined, async (sql) => {
+          if (moved || !sql.startsWith("LOCK TABLE dropship.dropship_catalog_rules")) return;
+          moved = true;
+          await execute("UPDATE catalog.products SET category_id = $1 WHERE id = $2", [TOPLOADERS, OUTSIDE_PRODUCT]);
+        });
+        const before = await categoryWrites();
+
+        const error = await expectDropshipError(save(body("pg7c", { clear: { fields: ["storeShelf"],
+          products: [{ productId: PRODUCT_7, expectedRevisionId: own7 }] } }), racing), "DROPSHIP_PRODUCT_LISTING_SETTINGS_VERSION_CONFLICT");
+
+        expect(moved).toBe(true);
+        expect(error.context).toMatchObject({ categoryId: TOPLOADERS, conflicts: [{ productId: OUTSIDE_PRODUCT }], conflictCount: 1 });
+        expect(await categoryWrites()).toEqual(before);
+      });
+
+      it("(d) holds the feature locks from the leftover read: an old policy writer waits, or commits first and makes the set differ", async () => {
+        await seedPolicyOverride({ sizeId: 101, fulfillment: null, returnPolicy: "ret-101", label: "pg7d-101" });
+        const clearReturns = (label: string) => body(label, { patch: { returnPolicy: { id: "return-new" } },
+          clear: { fields: ["returnPolicy"], products: [{ productId: PRODUCT_7, expectedRevisionId: null }] } });
+        const oldWriter = (label: string, repositoryPool: Pool = scopedPool()) => new PgDropshipEbayListingPolicyOverrideRepository(repositoryPool)
+          .replaceAssignment({ vendorId: VENDOR, storeConnectionId: STORE, productVariantId: SECOND_SIZE, expectedRevisionId: null,
+            fulfillmentPolicyId: null, returnPolicyId: "ret-105", paymentPolicyId: null, idempotencyKey: `old-policy-writer:${label}`,
+            requestHash: "e".repeat(64), actor: { actorType: "vendor", actorId: MEMBER }, now: NOW });
+
+        // 1. W12 holds both feature locks (paused right before its leftover read); the old writer waits on the policy one.
+        const paused = gate((sql) => sql.startsWith("SELECT o.product_variant_id"));
+        const w12 = save(clearReturns("pg7d-wait"), scopedPool(undefined, paused.hook));
+        let writer: Promise<unknown> | undefined;
+        try {
+          await within(paused.reached, "W12's leftover read");
+          writer = oldWriter("wait");
+          await waitUntilLockWait("dropship_ebay_listing_policy_override", 1);
+          paused.open();
+          // W12 commits with the set it derived, and its clean-up's second request for the held locks returned at once.
+          await expect(within(w12, "W12")).resolves.toMatchObject({ outcome: "changed", clearedProductCount: 1 });
+          await expect(within(writer, "the old writer")).resolves.toMatchObject({ idempotentReplay: false });
+        } finally {
+          paused.open();
+          await within(Promise.allSettled([w12, ...(writer ? [writer] : [])]), "the waiting case's clean-up");
+        }
+        const rows = await execute(`SELECT product_variant_id, return_policy_id FROM dropship.dropship_ebay_listing_policy_overrides
+          ORDER BY product_variant_id`);
+        expect(rows.rows).toEqual([{ product_variant_id: SECOND_SIZE, return_policy_id: "ret-105" }]);
+
+        // 2. The old writer commits before W12's leftover read: W12 sees the new leftover, the set differs, 409; no deadlock.
+        await execute("DELETE FROM dropship.dropship_ebay_listing_policy_overrides");
+        await seedPolicyOverride({ sizeId: 101, fulfillment: null, returnPolicy: "ret-101", label: "pg7d-101-again" });
+        let ranFirst = false;
+        const before = scopedPool(undefined, async (sql) => {
+          if (ranFirst || !sql.includes("hashtext('dropship_ebay_listing_policy_override')")) return;
+          ranFirst = true;
+          await within(oldWriter("first"), "the old writer, first");
+        });
+        const error = await expectDropshipError(within(save(clearReturns("pg7d-first"), before), "W12 after the writer"),
+          "DROPSHIP_PRODUCT_LISTING_SETTINGS_VERSION_CONFLICT");
+        expect(ranFirst).toBe(true);
+        expect(error.context).toMatchObject({ conflicts: [{ productId: SECOND_PRODUCT }], conflictCount: 1 });
+        expect(await count("dropship.dropship_ebay_listing_policy_overrides")).toBe(2);
+      });
+
+      it("(e) serializes one key sent twice at once: the same body replays, another body is a conflict, another store too (plan 3.12 #7)", async () => {
+        const request = body("pg7e");
+        const paused = gate((sql) => sql === "COMMIT");
+        const first = save(request, scopedPool(undefined, paused.hook));
+        let second: Promise<unknown> | undefined;
+        let third: Promise<unknown> | undefined;
+        try {
+          await within(paused.reached, "the first save's commit");
+          second = save(request);
+          third = save({ ...request, patch: { storeShelf: null } }).then(() => null, (reason: unknown) => reason);
+          await waitUntilLockWait("dropship_listing_settings_request", 2);
+          paused.open();
+          const written = await within(first, "the first save");
+          expect(written).toMatchObject({ outcome: "changed" });
+          await expect(within(second, "the same body")).resolves.toEqual({ ...(written as object), outcome: "replayed", clearedProductCount: null });
+          await expect(within(third, "another body")).resolves.toMatchObject({ code: "DROPSHIP_IDEMPOTENCY_CONFLICT",
+            context: { mismatched: ["categoryRevision.requestHash"] } });
+        } finally {
+          paused.open();
+          await within(Promise.allSettled([first, ...(second ? [second] : []), ...(third ? [third] : [])]), "the same-key case's clean-up");
+        }
+        expect(await count("dropship.dropship_category_listing_setting_revisions")).toBe(1);
+        await addVendorStore(24);
+        const otherStore = await expectDropshipError(save(request, undefined, 24), "DROPSHIP_IDEMPOTENCY_CONFLICT");
+        expect(otherStore.context?.mismatched).toEqual(["categoryRevision.requestHash", "categoryRevision.storeConnectionId"]);
+      });
+    });
+
+    /*
+     * PG 8 (v3r, C-feas-2): a clear of 10,000 products at the text edge, the budget's bytes stored two-byte (one U+2019 a
+     * text), measured as 9d's edges are (time, statements, heap; its live peak with the opt-in diagnostics, the input of
+     * plan 3.10's rule). Logged, never asserted. W12's worst clear: the rows also hold EBAY_TYPICAL's eBay values (9d's
+     * combined edge's rows), and the clear names the shelf, not a text, so every new revision copies both stored texts
+     * and every other eBay value, and the shelf clean-up runs over all 10,000 products.
+     */
+    const EDGE_PRODUCTS = MAX_LISTING_SETTING_BULK_PRODUCTS;
+    const EDGE_FIRST_PRODUCT = 50_001;
+    const EDGE_FIRST_SIZE = 500_001;
+    const PART_BYTES = MAX_BULK_TEXT_BYTES / (2 * EDGE_PRODUCTS);
+    const TWO_BYTE_TEXT = `${"a".repeat(PART_BYTES - 3)}’`;
+
+    async function runClearEdge(mode: "rule" | "live"): Promise<void> {
+      await execute(`INSERT INTO catalog.products (id, sku, name, category, category_id, product_type)
+        SELECT g, 'CLR-' || g, 'Clear product ' || g, 'Toploaders', $3, 'toploader' FROM generate_series($1::int, $2::int) g`,
+      [EDGE_FIRST_PRODUCT, EDGE_FIRST_PRODUCT + EDGE_PRODUCTS - 1, TOPLOADERS]);
+      await execute(`INSERT INTO catalog.product_variants (id, product_id, sku, name, sales_eligibility)
+        SELECT $1::int + i, $2::int + i, 'CLR-SIZE-' || i, 'Size ' || i, 'sellable' FROM generate_series(0, $3::int - 1) i`,
+      [EDGE_FIRST_SIZE, EDGE_FIRST_PRODUCT, EDGE_PRODUCTS]);
+      const ebay = EBAY_TYPICAL;
+      await execute(`INSERT INTO dropship.dropship_product_listing_setting_revisions
+        (vendor_id, store_connection_id, product_id, previous_revision_id, request_id, text_above_mode, text_above, text_below_mode, text_below,
+         ebay_category_id, ebay_category_name, ebay_category_path, shelf_mode, shelf_ids, shelf_names,
+         fulfillment_policy_id, fulfillment_policy_name, return_policy_id, return_policy_name, payment_policy_id, payment_policy_name,
+         idempotency_key, request_hash, actor_type, actor_id, created_at)
+        SELECT $1, $2, p, NULL, NULL, 'own', $3, 'own', $3, $8, $9, $10::jsonb, 'own', $11::jsonb, $12::jsonb, $13, $14, $15, $16, $17, $18,
+          'seed-clear:' || p, $4, 'vendor', 'seed', $5
+        FROM generate_series($6::int, $7::int) p`,
+      [VENDOR, STORE, TWO_BYTE_TEXT, "d".repeat(64), NOW, EDGE_FIRST_PRODUCT, EDGE_FIRST_PRODUCT + EDGE_PRODUCTS - 1,
+        ebay.category.categoryId, ebay.category.categoryName, JSON.stringify(ebay.category.path),
+        JSON.stringify(ebay.shelves.map((shelf) => shelf.id)), JSON.stringify(ebay.shelves.map((shelf) => shelf.name)),
+        ebay.shipping.id, ebay.shipping.name, ebay.returns.id, ebay.returns.name, ebay.payment.id, ebay.payment.name]);
+      await execute(`INSERT INTO dropship.dropship_product_listing_settings (vendor_id, store_connection_id, product_id, revision_id)
+        SELECT vendor_id, store_connection_id, product_id, id FROM dropship.dropship_product_listing_setting_revisions
+        WHERE idempotency_key LIKE 'seed-clear:%'`);
+      await execute("ANALYZE dropship.dropship_product_listing_settings, dropship.dropship_product_listing_setting_revisions, catalog.products, catalog.product_variants");
+      const revisions = await execute(`SELECT product_id, revision_id FROM dropship.dropship_product_listing_settings
+        WHERE product_id >= $1 ORDER BY product_id`, [EDGE_FIRST_PRODUCT]);
+      const products = revisions.rows.map((row) => ({ productId: row.product_id as number, expectedRevisionId: row.revision_id as number }));
+      const textBytes = EDGE_PRODUCTS * 2 * Buffer.byteLength(TWO_BYTE_TEXT, "utf8");
+      expect(textBytes).toBe(MAX_BULK_TEXT_BYTES);
+
+      const counter: StatementCounter = { statements: 0 };
+      const probe = mode === "live" ? liveHeapProbe() : null;
+      collectGarbage?.();
+      const liveStart = process.memoryUsage().heapUsed;
+      const label = `w12_clear_shelf_rows_ebay_typical_${EDGE_PRODUCTS}_cap_stored_two_byte${mode === "live" ? "_live" : ""}`;
+      const extra: Record<string, unknown> = { products: EDGE_PRODUCTS, textBytes, ebayValueBytesPerRow: ebayValueBytes(ebay) };
+      const result = await measure(label, EDGE_PRODUCTS, counter, async () => {
+        const answer = await save(body(`pg8-${mode}`, { patch: { storeShelf: { mode: "none" } },
+          clear: { fields: ["storeShelf"], products } }), scopedPool(counter, probe?.hook));
+        const peak = probe?.peakBytes() ?? null;
+        if (probe) extra.livePeakDeltaMiB = peak === null ? null : Number(((peak - liveStart) / 1_048_576).toFixed(1));
+        return answer;
+      }, extra);
+
+      expect(result).toMatchObject({ outcome: "changed", clearedProductCount: EDGE_PRODUCTS });
+      // Every cleared product's new revision drops its shelf and carries both stored texts and its other eBay values.
+      const stored = await execute(`SELECT count(*)::int AS n, count(shelf_mode)::int AS shelves, count(ebay_category_id)::int AS categories,
+        count(payment_policy_id)::int AS payments,
+        COALESCE(sum(octet_length(text_above)) + sum(octet_length(text_below)), 0)::bigint AS text_bytes
+        FROM dropship.dropship_product_listing_setting_revisions WHERE request_id IS NOT NULL`);
+      expect(stored.rows[0]).toEqual({ n: EDGE_PRODUCTS, shelves: 0, categories: EDGE_PRODUCTS, payments: EDGE_PRODUCTS,
+        text_bytes: String(textBytes) });
+      expect(log.info).toHaveBeenCalledWith("dropship.listing_settings.category_saved", expect.objectContaining({
+        cleared_product_count: EDGE_PRODUCTS, changed_count: EDGE_PRODUCTS + 1 }));
+    }
+
+    it(`measures a clear of ${EDGE_PRODUCTS} products at the text edge, stored two-byte (PG 8)`, () => runClearEdge("rule"), BULK_TEST_TIMEOUT_MS);
+    it.runIf(HEAP_DIAGNOSTICS)(`measures the live heap of that clear (PG 8, opt-in)`, () => runClearEdge("live"), BULK_TEST_TIMEOUT_MS);
   });
 });
