@@ -1,7 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { canonicalJson } from "@shared/utils/canonical-json";
 import {
-  ORDER_EDIT_PREVIEW_DEBOUNCE_MS,
   ORDER_EDIT_PREVIEW_TTL_MS,
   orderEditPreviewInputSchema,
   type OrderEditPreview,
@@ -24,10 +22,23 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { OrderEditProductPicker } from "@/components/order-edits/OrderEditProductPicker";
-import { OrderEditItems, OrderEditUnitPrice } from "@/components/order-edits/OrderEditItems";
-import { exactOrderEditUnitPrice, groupOrderEditDisplayLines } from "@/lib/order-edit-display";
+import {
+  OrderEditItems,
+  OrderEditUnitPrice,
+} from "@/components/order-edits/OrderEditItems";
+import {
+  exactOrderEditUnitPrice,
+  groupOrderEditDisplayLines,
+} from "@/lib/order-edit-display";
 import { useAuth } from "@/lib/auth";
+import type { MemberPlanPresentation } from "@shared/membership/member-plan-presentation";
+import { useOrderEditPreview } from "@/hooks/use-order-edit-preview";
 import { useDebounce } from "@/hooks/use-debounce";
+import {
+  nextOrderEditPreviewInput,
+  type OrderEditQuantityTarget,
+} from "@/lib/order-edit-preview-cache";
+import { readOrderEditItemPricing } from "@/lib/order-edit-item-pricing";
 import {
   OrderEditSummary,
   OrderEditCalculationDetails,
@@ -53,7 +64,6 @@ import {
   savePendingOrderEditQuote,
   loadPendingOrderEditQuote,
   clearPendingOrderEditQuote,
-  matchingOrderEditPreview,
   type OrderEditTransport,
 } from "@/lib/order-edits";
 
@@ -258,9 +268,12 @@ export function OrderDraft({
   const [additions, setAdditions] = useState<
     Array<{
       variant: OrderEditCatalogVariant;
+      plan: MemberPlanPresentation | null;
       quantity: string;
     }>
   >([]);
+  const [quantityTarget, setQuantityTarget] =
+    useState<OrderEditQuantityTarget | null>(null);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [locked, setLocked] = useState(false);
@@ -278,6 +291,7 @@ export function OrderDraft({
   const canEdit = order.eligibility.editable && enabled;
   const mutable = canEdit && !pending && !locked;
   function updateQuantity(id: string, value: string) {
+    setQuantityTarget({ kind: "line", id });
     command.current = null;
     setError(null);
     setQuantities((current) => ({ ...current, [id]: value }));
@@ -306,70 +320,76 @@ export function OrderDraft({
     !validation.success && changes.length + additions.length > 0
       ? `Check the item quantities: ${validation.error.issues[0]?.message ?? "Enter valid whole numbers."}`
       : null;
-  const draftKey = valid ? canonicalJson(input) : "";
-  const previewKey = useDebounce(draftKey, ORDER_EDIT_PREVIEW_DEBOUNCE_MS);
-  const preview = useQuery({
-    queryKey: [ORDER_EDITS_API, staffId, "preview", previewKey],
-    queryFn: ({ signal }) =>
-      api.preview(
-        orderEditPreviewInputSchema.parse(JSON.parse(previewKey)),
-        signal,
-      ),
-    enabled:
-      active &&
-      mutable &&
-      !reviewBlocked &&
-      !!previewKey &&
-      previewKey === draftKey,
+  const {
+    currentPreview,
+    displayPreview,
+    query: preview,
+  } = useOrderEditPreview({
+    api,
+    actorId: staffId,
+    scope: {
+      connectionId: order.connectionId,
+      omsOrderId: order.omsOrderId,
+      expectedRevision: order.revision,
+    },
+    input: validation.success ? validation.data : null,
+    nextInput:
+      audience === "customer"
+        ? nextOrderEditPreviewInput(order, input, quantityTarget)
+        : null,
+    active: active && mutable && !reviewBlocked,
+  });
+  const originalPricing = useQuery({
+    queryKey: [
+      ORDER_EDITS_API,
+      staffId,
+      "item-pricing",
+      order.connectionId,
+      order.omsOrderId,
+      order.revision,
+    ],
+    queryFn: ({ signal }) => readOrderEditItemPricing(api, order, signal),
+    enabled: audience === "customer" && active && mutable && !reviewBlocked,
+    staleTime: ORDER_EDIT_PREVIEW_TTL_MS,
     retry: false,
-    gcTime: ORDER_EDIT_PREVIEW_TTL_MS,
-    staleTime: (query) =>
-      Math.max(
-        0,
-        Date.parse(query.state.data?.expiresAt ?? "") -
-          query.state.dataUpdatedAt,
-      ) || 0,
   });
   useEffect(() => {
-    if (!active || !canEdit || reviewBlocked || locked) return;
-    const controller = new AbortController();
-    // Warm pricing/provenance before the first change; errors are shown by the preview query and never block Review.
-    void api
-      .warmPreview(
-        {
-          connectionId: order.connectionId,
-          omsOrderId: order.omsOrderId,
-          expectedRevision: order.revision,
-        },
-        controller.signal,
-      )
-      .catch((failure) => {
-        if (!controller.signal.aborted)
-          console.warn(
-            "order_edit_preview_warm_failed",
-            failure instanceof OrderEditRequestError
-              ? failure.code
-              : "PREVIEW_UNAVAILABLE",
-          );
-      });
-    return () => controller.abort();
-  }, [
-    active,
-    canEdit,
-    reviewBlocked,
-    locked,
-    api,
-    order.connectionId,
-    order.omsOrderId,
-    order.revision,
-  ]);
-  const currentPreview =
-    valid && draftKey === previewKey
-      ? matchingOrderEditPreview(preview.data, input, Date.now())
-      : null;
-  const previewLineGroups = useMemo(() => new Map(
-    groupOrderEditDisplayLines(currentPreview?.lines ?? []).map(line => [line.key, line]),
-  ), [currentPreview]);
+    if (originalPricing.error)
+      console.warn(
+        "order_edit_item_pricing_unavailable",
+        originalPricing.error instanceof OrderEditRequestError
+          ? originalPricing.error.code
+          : "CATALOG_UNAVAILABLE",
+      );
+  }, [originalPricing.error]);
+  const originalPriceByLine = useMemo(
+    () => new Map(originalPricing.data ?? []),
+    [originalPricing.data],
+  );
+  const previewLineGroups = useMemo(
+    () =>
+      new Map(
+        groupOrderEditDisplayLines(displayPreview?.lines ?? []).map((line) => [
+          line.key,
+          line,
+        ]),
+      ),
+    [displayPreview],
+  );
+  const previewRetailGroups = useMemo(
+    () =>
+      new Map(
+        groupOrderEditDisplayLines(
+          (displayPreview?.lines ?? []).map((line) => ({
+            ...line,
+            totalCents: displayPreview!.financials.lines.find(
+              (financial) => financial.id === line.id,
+            )!.grossCents,
+          })),
+        ).map((line) => [line.key, line]),
+      ),
+    [displayPreview],
+  );
   async function quote() {
     if (!canEdit || !valid || reviewBlocked || inflight.current) return;
     inflight.current = true;
@@ -414,23 +434,42 @@ export function OrderDraft({
         <CardTitle>
           <h2>Order {order.orderNumber}</h2>
         </CardTitle>
-        {audience === "staff" && <p className="text-sm text-muted-foreground">
-          {order.customerName}
-          {order.customerEmail ? ` · ${order.customerEmail}` : ""}
-        </p>}
+        {audience === "staff" && (
+          <p className="text-sm text-muted-foreground">
+            {order.customerName}
+            {order.customerEmail ? ` · ${order.customerEmail}` : ""}
+          </p>
+        )}
         <div className="flex flex-wrap gap-2">
-          <Badge variant="outline" className={`oe-status ${order.financialStatus === "Paid" ? "oe-status--paid" : ""}`}>Payment: {order.financialStatus}</Badge>
-          <Badge variant="outline" className="oe-status">{audience === "customer" ? (order.eligibility.editable ? "Ready to edit" : "Editing unavailable") : `Warehouse: ${order.warehouseStatus}`}</Badge>
+          <Badge
+            variant="outline"
+            className={`oe-status ${order.financialStatus === "Paid" ? "oe-status--paid" : ""}`}
+          >
+            Payment: {order.financialStatus}
+          </Badge>
+          <Badge variant="outline" className="oe-status">
+            {audience === "customer"
+              ? order.eligibility.editable
+                ? "Ready to edit"
+                : "Editing unavailable"
+              : `Warehouse: ${order.warehouseStatus}`}
+          </Badge>
         </div>
       </CardHeader>
       <CardContent className="oe-order-content">
         {!enabled && (
           <div className="space-y-3 rounded-md border bg-muted/40 p-3">
             <p role="status" className="text-sm">
-              {audience === "customer" ? "Order editing is temporarily unavailable. Contact us if you need help with this order." : <>Staff order editing is disabled for this Shopify connection.{" "}
-              {onConfigure
-                ? "Choose a payment window and save enabled pilot settings to edit eligible orders."
-                : "Ask an administrator with settings permission to configure and enable staff edits."}</>}
+              {audience === "customer" ? (
+                "Order editing is temporarily unavailable. Contact us if you need help with this order."
+              ) : (
+                <>
+                  Staff order editing is disabled for this Shopify connection.{" "}
+                  {onConfigure
+                    ? "Choose a payment window and save enabled pilot settings to edit eligible orders."
+                    : "Ask an administrator with settings permission to configure and enable staff edits."}
+                </>
+              )}
             </p>
             {onConfigure && (
               <Button type="button" variant="outline" onClick={onConfigure}>
@@ -448,207 +487,300 @@ export function OrderDraft({
           />
         )}
         <div className="oe-edit-layout">
-        <section className="oe-edit-main">
-        <div className="oe-items-heading">
-          <div>
-            <h3 className="text-sm font-medium">Items in your order</h3>
-            <p className="mt-1 text-xs text-muted-foreground">
-              Update quantities or add a product.
-            </p>
-          </div>
-          {canEdit && (
-            <OrderEditProductPicker
-              api={api}
-              connectionId={order.connectionId}
-              staffId={staffId}
-              omsOrderId={order.omsOrderId}
-              expectedRevision={order.revision}
-              enabled={mutable && active}
-              includedVariantIds={
-                new Set([
-                  ...order.lines
-                    .map((line) => line.variantId)
-                    .filter((id): id is string => id !== null),
-                  ...additions.map((item) => item.variant.variantId),
-                ])
-              }
-              onAdd={(variant) => {
-                if (
-                  !mutable ||
-                  !variant.available ||
-                  order.lines.some(
-                    (line) => line.variantId === variant.variantId,
-                  )
-                )
-                  return;
-                command.current = null;
-                setError(null);
-                setAdditions((current) =>
-                  current.some(
-                    (item) => item.variant.variantId === variant.variantId,
-                  )
-                    ? current
-                    : [...current, { variant, quantity: "1" }],
-                );
-              }}
-            />
-          )}
-        </div>
-        <div
-          className="oe-edit-items"
-          aria-label="Editable order items"
-        >
-          {order.lines.map((line) => {
-            const previewGroup = line.variantId &&
-              order.lines.filter(item => item.variantId === line.variantId).length === 1
-              ? previewLineGroups.get(`variant:${line.variantId}`)
-              : null;
-            const previewLine = previewGroup?.quantity === Number(quantities[line.lineItemId]) ? previewGroup : null;
-            const displayedTotal = previewLine?.totalCents ?? line.totalCents;
-            const displayedQuantity = previewLine?.quantity ?? line.quantity;
-            const unitNetCents = exactOrderEditUnitPrice(displayedTotal, displayedQuantity);
-            return (
-            <div
-              key={line.lineItemId}
-              className="oe-edit-item"
-            >
-              <div className="min-w-0 flex-1">
-                <p className="text-sm font-medium">{line.title}</p>
-                <p className="text-xs text-muted-foreground">
-                  {[line.variantTitle, line.sku].filter(Boolean).join(" · ")}
+          <section className="oe-edit-main">
+            <div className="oe-items-heading">
+              <div>
+                <h3 className="text-sm font-medium">Items in your order</h3>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  Update quantities or add a product.
                 </p>
               </div>
-              <div className="oe-line-pricing">
-                <OrderEditUnitPrice cents={unitNetCents} currency={order.currency} />
-              <div className="oe-item-quantity">
-                <Label htmlFor={`line-${line.lineItemId}`} className="text-xs">
-                  Quantity
-                </Label>
-                <Input
-                  id={`line-${line.lineItemId}`}
-                  aria-label={`Quantity for ${line.title}${line.variantTitle ? ` ${line.variantTitle}` : ""}`}
-                  type="number"
-                  min={0}
-                  step={1}
-                  value={quantities[line.lineItemId]}
-                  disabled={!mutable}
-                  onChange={(event) =>
-                    updateQuantity(line.lineItemId, event.target.value)
+              {canEdit && (
+                <OrderEditProductPicker
+                  api={api}
+                  connectionId={order.connectionId}
+                  staffId={staffId}
+                  omsOrderId={order.omsOrderId}
+                  expectedRevision={order.revision}
+                  enabled={mutable && active}
+                  includedVariantIds={
+                    new Set([
+                      ...order.lines
+                        .map((line) => line.variantId)
+                        .filter((id): id is string => id !== null),
+                      ...additions.map((item) => item.variant.variantId),
+                    ])
                   }
-                />
-              </div>
-                <p className="oe-item-total" aria-label={`Line total for ${line.title}`}>
-                  {previewLine || Number(quantities[line.lineItemId]) === line.quantity
-                    ? formatOrderEditMoney(previewLine?.totalCents ?? line.totalCents, order.currency)
-                    : <span aria-label="Line total updating">—</span>}
-                </p>
-              </div>
-            </div>
-          ); })}
-          {additions.map((item, index) => {
-            const group = previewLineGroups.get(`variant:${item.variant.variantId}`);
-            const previewLine = group?.quantity === Number(item.quantity) ? group : null;
-            const unitNetCents = previewLine ? exactOrderEditUnitPrice(previewLine.totalCents, previewLine.quantity) : null;
-            return (
-            <div
-              key={item.variant.variantId}
-              className="oe-edit-item oe-added-item"
-            >
-              <div className="min-w-0 flex-1">
-                <p className="text-sm font-medium">
-                  {item.variant.title} <Badge variant="outline" className="oe-added-pill">Added</Badge>
-                </p>
-                <p className="text-xs text-muted-foreground">
-                  {[item.variant.variantTitle, item.variant.sku]
-                    .filter(Boolean)
-                    .join(" · ")}
-                </p>
-                <Button
-                  type="button"
-                  size="sm"
-                  variant="ghost"
-                  className="oe-item-remove"
-                  disabled={!mutable}
-                  onClick={() => {
+                  onAdd={(variant, plan) => {
+                    setQuantityTarget({
+                      kind: "addition",
+                      id: variant.variantId,
+                    });
+                    if (
+                      !mutable ||
+                      !variant.available ||
+                      order.lines.some(
+                        (line) => line.variantId === variant.variantId,
+                      )
+                    )
+                      return;
                     command.current = null;
+                    setError(null);
                     setAdditions((current) =>
-                      current.filter(
-                        (row) => row.variant.variantId !== item.variant.variantId,
-                      ),
+                      current.some(
+                        (item) => item.variant.variantId === variant.variantId,
+                      )
+                        ? current
+                        : [...current, { variant, plan, quantity: "1" }],
                     );
                   }}
-                >
-                  Remove
-                </Button>
-              </div>
-              <div className="oe-line-pricing">
-              <OrderEditUnitPrice cents={unitNetCents} currency={order.currency} />
-              <div className="oe-item-quantity">
-              <Label htmlFor={`added-${item.variant.variantId}`}>Quantity</Label>
-              <Input
-                id={`added-${item.variant.variantId}`}
-                type="number"
-                min={1}
-                step={1}
-                aria-label={`Quantity for added ${[item.variant.title, item.variant.variantTitle, item.variant.sku].filter(Boolean).join(" · ")}`}
-                value={item.quantity}
-                disabled={!mutable}
-                onChange={(event) => {
-                  command.current = null;
-                  setAdditions((current) =>
-                    current.map((row, position) =>
-                      position === index
-                        ? { ...row, quantity: event.target.value }
-                        : row,
-                    ),
-                  );
-                }}
-              />
-              </div>
-              <p className="oe-item-total" aria-label={`Line total for added ${item.variant.title}`}>
-                {previewLine ? formatOrderEditMoney(previewLine.totalCents, order.currency) : <span aria-label="Line total updating">—</span>}
-              </p>
-              </div>
+                />
+              )}
             </div>
-          ); })}
-        </div>
-        <p className="text-xs text-muted-foreground">
-          Set quantity to 0 to remove an item. Discounts, shipping and tax are
-          recalculated for your changes.
-        </p>
-        <p className="text-xs text-muted-foreground">
-          {audience === "customer" ? "To change the shipping address, use Change address on your order page." : "Shipping address changes are not supported in this pilot."}
-        </p>
-        <ErrorMessage text={validationMessage} />
-        <ErrorMessage text={error} />
-        </section>
-        <aside className="oe-edit-sidebar">
-        {valid && active && (
-          <p role="status" className="text-xs text-muted-foreground">
-            {currentPreview
-              ? "Updated totals are ready."
-              : preview.isFetching
-                ? "Preparing updated totals…"
-                : preview.isError
-                  ? "Background totals are unavailable. Review will verify your changes."
-                  : "Updated totals will appear after you finish changing items."}
-          </p>
-        )}
-        <OrderEditSummary
-          financials={currentPreview?.financials ?? order.financials}
-          totals={[
-            { label: "Current order total", totalCents: order.totalCents },
-            ...(currentPreview
-              ? [
-                  {
-                    label: "Updated order total",
-                    totalCents: currentPreview.financials.totalCents,
-                  },
-                ]
-              : []),
-          ]}
-        />
-        </aside>
+            <div className="oe-edit-items" aria-label="Editable order items">
+              {order.lines.map((line) => {
+                const previewGroup =
+                  line.variantId &&
+                  order.lines.filter(
+                    (item) => item.variantId === line.variantId,
+                  ).length === 1
+                    ? previewLineGroups.get(`variant:${line.variantId}`)
+                    : null;
+                const previewLine =
+                  previewGroup?.quantity === Number(quantities[line.lineItemId])
+                    ? previewGroup
+                    : null;
+                const displayedTotal =
+                  previewLine?.totalCents ?? line.totalCents;
+                const displayedQuantity =
+                  previewLine?.quantity ?? line.quantity;
+                const unitNetCents = exactOrderEditUnitPrice(
+                  displayedTotal,
+                  displayedQuantity,
+                );
+                const catalogPrice = originalPriceByLine.get(line.lineItemId);
+                const retail = line.variantId
+                  ? previewRetailGroups.get(`variant:${line.variantId}`)
+                  : null;
+                const retailUnitCents =
+                  previewLine && retail?.quantity === displayedQuantity
+                    ? exactOrderEditUnitPrice(
+                        retail.totalCents,
+                        retail.quantity,
+                      )
+                    : exactOrderEditUnitPrice(
+                        order.financials?.lines.find(
+                          (item) => item.id === line.lineItemId,
+                        )?.grossCents ?? line.totalCents,
+                        line.quantity,
+                      );
+                return (
+                  <div key={line.lineItemId} className="oe-edit-item">
+                    <div className="min-w-0 flex-1">
+                      <p className="text-sm font-medium">{line.title}</p>
+                      <p className="text-xs text-muted-foreground">
+                        {[line.variantTitle, line.sku]
+                          .filter(Boolean)
+                          .join(" · ")}
+                      </p>
+                    </div>
+                    <div className="oe-line-pricing">
+                      <OrderEditUnitPrice
+                        cents={unitNetCents}
+                        currency={order.currency}
+                        retailCents={retailUnitCents}
+                        plan={catalogPrice?.plan ?? null}
+                      />
+                      <div className="oe-item-quantity">
+                        <Label
+                          htmlFor={`line-${line.lineItemId}`}
+                          className="text-xs"
+                        >
+                          Quantity
+                        </Label>
+                        <Input
+                          id={`line-${line.lineItemId}`}
+                          aria-label={`Quantity for ${line.title}${line.variantTitle ? ` ${line.variantTitle}` : ""}`}
+                          type="number"
+                          min={0}
+                          step={1}
+                          value={quantities[line.lineItemId]}
+                          disabled={!mutable}
+                          onChange={(event) =>
+                            updateQuantity(line.lineItemId, event.target.value)
+                          }
+                        />
+                      </div>
+                      <p
+                        className="oe-item-total"
+                        aria-label={`Line total for ${line.title}`}
+                      >
+                        {previewLine ||
+                        Number(quantities[line.lineItemId]) ===
+                          line.quantity ? (
+                          formatOrderEditMoney(
+                            previewLine?.totalCents ?? line.totalCents,
+                            order.currency,
+                          )
+                        ) : (
+                          <span aria-label="Line total updating">—</span>
+                        )}
+                      </p>
+                    </div>
+                  </div>
+                );
+              })}
+              {additions.map((item, index) => {
+                const group = previewLineGroups.get(
+                  `variant:${item.variant.variantId}`,
+                );
+                const previewLine =
+                  group?.quantity === Number(item.quantity) ? group : null;
+                const unitNetCents = previewLine
+                  ? exactOrderEditUnitPrice(
+                      previewLine.totalCents,
+                      previewLine.quantity,
+                    )
+                  : item.variant.priceCents;
+                const retail = previewRetailGroups.get(
+                  `variant:${item.variant.variantId}`,
+                );
+                const retailUnitCents =
+                  previewLine && retail?.quantity === previewLine.quantity
+                    ? exactOrderEditUnitPrice(
+                        retail.totalCents,
+                        retail.quantity,
+                      )
+                    : item.variant.retailPriceCents;
+                return (
+                  <div
+                    key={item.variant.variantId}
+                    className="oe-edit-item oe-added-item"
+                  >
+                    <div className="min-w-0 flex-1">
+                      <p className="text-sm font-medium">
+                        {item.variant.title}{" "}
+                        <Badge variant="outline" className="oe-added-pill">
+                          Added
+                        </Badge>
+                      </p>
+                      <p className="text-xs text-muted-foreground">
+                        {[item.variant.variantTitle, item.variant.sku]
+                          .filter(Boolean)
+                          .join(" · ")}
+                      </p>
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="ghost"
+                        className="oe-item-remove"
+                        disabled={!mutable}
+                        onClick={() => {
+                          command.current = null;
+                          setAdditions((current) =>
+                            current.filter(
+                              (row) =>
+                                row.variant.variantId !==
+                                item.variant.variantId,
+                            ),
+                          );
+                        }}
+                      >
+                        Remove
+                      </Button>
+                    </div>
+                    <div className="oe-line-pricing">
+                      <OrderEditUnitPrice
+                        cents={unitNetCents}
+                        currency={order.currency}
+                        retailCents={retailUnitCents}
+                        plan={item.plan}
+                      />
+                      <div className="oe-item-quantity">
+                        <Label htmlFor={`added-${item.variant.variantId}`}>
+                          Quantity
+                        </Label>
+                        <Input
+                          id={`added-${item.variant.variantId}`}
+                          type="number"
+                          min={1}
+                          step={1}
+                          aria-label={`Quantity for added ${[item.variant.title, item.variant.variantTitle, item.variant.sku].filter(Boolean).join(" · ")}`}
+                          value={item.quantity}
+                          disabled={!mutable}
+                          onChange={(event) => {
+                            setQuantityTarget({
+                              kind: "addition",
+                              id: item.variant.variantId,
+                            });
+                            command.current = null;
+                            setAdditions((current) =>
+                              current.map((row, position) =>
+                                position === index
+                                  ? { ...row, quantity: event.target.value }
+                                  : row,
+                              ),
+                            );
+                          }}
+                        />
+                      </div>
+                      <p
+                        className="oe-item-total"
+                        aria-label={`Line total for added ${item.variant.title}`}
+                      >
+                        {previewLine ? (
+                          formatOrderEditMoney(
+                            previewLine.totalCents,
+                            order.currency,
+                          )
+                        ) : (
+                          <span aria-label="Line total updating">—</span>
+                        )}
+                      </p>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+            <p className="text-xs text-muted-foreground">
+              Set quantity to 0 to remove an item. Discounts, shipping and tax
+              are recalculated for your changes.
+            </p>
+            <p className="text-xs text-muted-foreground">
+              {audience === "customer"
+                ? "To change the shipping address, use Change address on your order page."
+                : "Shipping address changes are not supported in this pilot."}
+            </p>
+            <ErrorMessage text={validationMessage} />
+            <ErrorMessage text={error} />
+          </section>
+          <aside className="oe-edit-sidebar">
+            {valid && active && (
+              <p role="status" className="text-xs text-muted-foreground">
+                {currentPreview
+                  ? "Updated totals are ready."
+                  : preview.isError
+                    ? "Background totals are unavailable. Review will verify your changes."
+                    : "Calculating updated shipping and tax…"}
+              </p>
+            )}
+            <OrderEditSummary
+              financials={displayPreview?.financials ?? order.financials}
+              totals={[
+                { label: "Current order total", totalCents: order.totalCents },
+                ...(displayPreview
+                  ? [
+                      {
+                        label: currentPreview
+                          ? "Updated order total"
+                          : "Last calculated total",
+                        totalCents: displayPreview.financials.totalCents,
+                      },
+                    ]
+                  : []),
+              ]}
+            />
+          </aside>
         </div>
         <OrderEditCalculationDetails
           columns={[
@@ -656,7 +788,12 @@ export function OrderDraft({
               ? [{ label: "Current order", financials: order.financials }]
               : []),
             ...(currentPreview
-              ? [{ label: "With your changes", financials: currentPreview.financials }]
+              ? [
+                  {
+                    label: "With your changes",
+                    financials: currentPreview.financials,
+                  },
+                ]
               : []),
           ]}
         />

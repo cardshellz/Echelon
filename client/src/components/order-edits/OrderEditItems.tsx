@@ -1,6 +1,8 @@
 import React from "react";
 import type { OrderEditOperation } from "@shared/order-edits/order-edit.contract";
 import { Badge } from "@/components/ui/badge";
+import { MemberProductPrice } from "@/components/MemberProductPrice";
+import type { MemberPlanPresentation } from "@shared/membership/member-plan-presentation";
 import { formatOrderEditMoney } from "@/lib/order-edits";
 import {
   exactOrderEditUnitPrice,
@@ -10,20 +12,34 @@ import {
 export function OrderEditUnitPrice({
   cents,
   currency = "USD",
+  retailCents,
+  plan = null,
 }: {
   cents: number | null;
   currency?: string;
+  retailCents?: number | null;
+  plan?: MemberPlanPresentation | null;
 }) {
   return (
-    <p className="oe-item-price">
+    <div className="oe-item-price">
       {cents === null ? (
         <span aria-label="Unit price unavailable">—</span>
+      ) : plan &&
+        retailCents !== null &&
+        retailCents !== undefined &&
+        cents < retailCents ? (
+        <MemberProductPrice
+          priceCents={cents}
+          retailPriceCents={retailCents}
+          plan={plan}
+          layout="compact"
+        />
       ) : (
         <>
           {formatOrderEditMoney(cents, currency)} <span>each</span>
         </>
       )}
-    </p>
+    </div>
   );
 }
 
