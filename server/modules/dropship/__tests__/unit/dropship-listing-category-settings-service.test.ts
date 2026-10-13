@@ -121,8 +121,11 @@ class FakeTransaction {
   readonly loadLeftoverFields = vi.fn(async (_sizeIds: readonly number[]) => { this.calls.push("leftovers"); return this.leftovers; });
   readonly loadSettingFacts = vi.fn(async (input: { productIds: readonly number[] }): Promise<ListingSettingFacts> => {
     this.calls.push("settingFacts");
+    // W12 reads only the own-field flags; the revision and price beside them are W7's (plan 8.2).
     return {
-      products: new Map(input.productIds.filter((id) => this.ownFields.has(id)).map((id) => [id, { ownFields: new Set(this.ownFields.get(id)) }])),
+      products: new Map(input.productIds.filter((id) => this.ownFields.has(id)).map((id) => [id,
+        { revisionId: 100 + id, price: null, ownFields: new Set(this.ownFields.get(id)) }])),
+      categories: new Map(),
     };
   });
   readonly readListingTextBytes = vi.fn(async () => { this.calls.push("textBytes"); return this.textBytes; });
@@ -183,6 +186,8 @@ class FakeRepository implements ListingSettingWriteRepository {
     return operation(this.tx as unknown as ListingSettingWriteTransaction);
   }
   async executeForSystem(): Promise<never> { throw new Error("W12 never runs as the system."); }
+  async executeReview(): Promise<never> { throw new Error("W12 never runs a price check (W7's review)."); }
+  async readPriceChangeReviewForMember(): Promise<never> { throw new Error("W12 never reads a price check's pages."); }
   async preflight<T>(input: { memberId: string; storeConnectionId: number; idempotencyKey: string | null },
     operation: (tx: ListingSettingPreflightTransaction) => Promise<T>): Promise<T> {
     this.order.push(`preflight:${input.idempotencyKey}`);

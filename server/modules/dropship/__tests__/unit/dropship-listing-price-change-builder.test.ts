@@ -10,11 +10,14 @@ import type { DropshipPricingPolicyRecord } from "../../application/dropship-lis
 import type { DropshipProductCost } from "../../application/dropship-product-cost";
 import {
   NO_PRICING_PROFILE_STATE,
+  rulePriceContextFromFacts,
   rulePriceContextOf,
   withRecipes,
   type RulePriceContext,
+  type RulePriceRecipeFacts,
 } from "../../application/dropship-rule-price";
-import { EMPTY_LISTING_SETTING_LAYERS } from "../../application/dropship-listing-setting-layers";
+import { EMPTY_LISTING_SETTING_LAYERS, type ListingSettingLayers } from "../../application/dropship-listing-setting-layers";
+import { EMPTY_CATEGORY_LISTING_SETTING_VALUES, EMPTY_PRODUCT_LISTING_SETTING_VALUES } from "../../domain/listing-setting-values";
 
 /**
  * The pure price-change builder (plan PR 9, section 6.4): before and after for
@@ -214,5 +217,63 @@ describe("withRecipes (plan 6.4)", () => {
     const same = withRecipes(input, {});
     expect(same.productRules).toEqual(input.productRules);
     expect(same.categoryRules).toEqual(input.categoryRules);
+  });
+});
+
+describe("rulePriceContextFromFacts (plan 6.4; v3r, C-feas-2)", () => {
+  const SAVED = "2026-10-01T12:00:00.000Z";
+  /** The same products and categories as layers (with values) and as facts (prices only). */
+  const LAYERS: ListingSettingLayers = deepFreeze({
+    products: new Map([
+      [700, { storeConnectionId: 22, productId: 700, revisionId: 1, updatedAt: SAVED,
+        values: { ...EMPTY_PRODUCT_LISTING_SETTING_VALUES, price: RECIPE, textAbove: { mode: "own" as const, text: "Own words." } } }],
+      [701, { storeConnectionId: 22, productId: 701, revisionId: 2, updatedAt: SAVED,
+        values: { ...EMPTY_PRODUCT_LISTING_SETTING_VALUES, storeShelf: { mode: "none" as const } } }],
+    ]),
+    categories: new Map([
+      [4, { storeConnectionId: 22, categoryId: 4, revisionId: 3, updatedAt: SAVED, values: { ...EMPTY_CATEGORY_LISTING_SETTING_VALUES, price: OTHER_RECIPE } }],
+      [5, { storeConnectionId: 22, categoryId: 5, revisionId: 4, updatedAt: SAVED, values: EMPTY_CATEGORY_LISTING_SETTING_VALUES }],
+    ]),
+  });
+  const FACTS: RulePriceRecipeFacts = deepFreeze({
+    products: new Map([[700, { price: RECIPE }], [701, { price: null }]]),
+    categories: new Map([[4, { price: OTHER_RECIPE }], [5, { price: null }]]),
+  });
+
+  it("builds the context rulePriceContextOf builds from the same rows' layers: recipes only, a null price is no recipe", () => {
+    const fromFacts = rulePriceContextFromFacts(STORE_DEFAULT, FACTS);
+    const fromLayers = rulePriceContextOf(STORE_DEFAULT, LAYERS);
+
+    expect(fromFacts.state).toBe(STORE_DEFAULT);
+    expect([...fromFacts.productRules]).toEqual([...fromLayers.productRules]);
+    expect([...fromFacts.categoryRules]).toEqual([...fromLayers.categoryRules]);
+    expect([...fromFacts.productRules]).toEqual([[700, RECIPE]]);
+    expect([...fromFacts.categoryRules]).toEqual([[4, OTHER_RECIPE]]);
+  });
+
+  it("is a new frozen context that leaves the facts as they were", () => {
+    const context = rulePriceContextFromFacts(NO_PRICING_PROFILE_STATE, FACTS);
+    expect(Object.isFrozen(context)).toBe(true);
+    expect(context.productRules).not.toBe(FACTS.products);
+    expect([...FACTS.products.keys()]).toEqual([700, 701]);
+    const none = rulePriceContextFromFacts(NO_PRICING_PROFILE_STATE, { products: new Map(), categories: new Map() });
+    expect([...none.productRules]).toEqual([]);
+    expect([...none.categoryRules]).toEqual([]);
+  });
+
+  it("prices every size as the layers' context does, before and after a recipe change (the builder's before side)", () => {
+    const sizes = [
+      size(101),
+      size(102, { candidate: { productVariantId: 102, productId: 701, category: "Toploaders", productLineIds: [9], categoryId: 4,
+        defaultRetailPriceCents: RETAIL } }),
+      size(103, { candidate: { productVariantId: 103, productId: 702, category: "Toploaders", productLineIds: [9], categoryId: 5,
+        defaultRetailPriceCents: RETAIL } }),
+    ];
+    const change = { products: new Map<number, PricingRecipe | null>([[701, RECIPE]]) };
+    const fromFacts = rulePriceContextFromFacts(STORE_DEFAULT, FACTS);
+    const fromLayers = rulePriceContextOf(STORE_DEFAULT, LAYERS);
+
+    expect(build({ before: fromFacts, after: withRecipes(fromFacts, change), sizes }))
+      .toEqual(build({ before: fromLayers, after: withRecipes(fromLayers, change), sizes }));
   });
 });
