@@ -1,7 +1,11 @@
 import type { Express, Request, Response } from "express";
 import rateLimit from "express-rate-limit";
 import type { z } from "zod";
-import { LISTING_SETTING_WRITE_ERROR_CODES, saveSizePricesResponseSchema } from "../../../../../shared/dropship/listing-setting-writes";
+import {
+  LISTING_SETTING_WRITE_ERROR_CODES,
+  saveProductSettingsResponseSchema,
+  saveSizePricesResponseSchema,
+} from "../../../../../shared/dropship/listing-setting-writes";
 import { logger } from "../../../../platform/observability/logger";
 import {
   createDropshipListingSettingWriteServices,
@@ -21,6 +25,8 @@ import { listingSettingWriteErrorAnswer } from "./dropship-listing-setting-write
 
 /** Bulk writes and price checks share one budget per member (design 8.8). */
 export const LISTING_SETTING_BULK_WRITES_PER_MINUTE = 30;
+/** Single writes (one product, one category, "Got it") share another (design 8.8; plan P7). */
+export const LISTING_SETTING_SINGLE_WRITES_PER_MINUTE = 60;
 const RATE_LIMIT_WINDOW_MS = 60_000;
 
 export function registerDropshipListingSettingWritesRoutes(
@@ -28,11 +34,16 @@ export function registerDropshipListingSettingWritesRoutes(
   services: ListingSettingWriteServices = createDropshipListingSettingWriteServices(),
 ): void {
   const base = "/api/dropship/listings/stores/:storeConnectionId/listing-settings";
+  // One instance per budget, shared by its routes: memberRateLimit builds a new counter on every call.
   const bulkLimiter = memberRateLimit(LISTING_SETTING_BULK_WRITES_PER_MINUTE);
+  const singleLimiter = memberRateLimit(LISTING_SETTING_SINGLE_WRITES_PER_MINUTE);
   const parseBody = parseDropshipBulkJsonFor(LISTING_SETTINGS_TOO_LARGE_MESSAGE);
 
   app.put(`${base}/size-prices`, requireDropshipAuth, bulkLimiter, parseBody, (req, res) => respond(req, res, saveSizePricesResponseSchema,
     () => services.sizePrices.saveForMember(memberId(req), parseId(req.params.storeConnectionId), req.body)));
+  app.put(`${base}/products/:productId`, requireDropshipAuth, singleLimiter, parseBody, (req, res) => respond(req, res,
+    saveProductSettingsResponseSchema, () => services.products.saveForMember(memberId(req), parseId(req.params.storeConnectionId),
+      parseId(req.params.productId), req.body)));
 }
 
 function memberRateLimit(max: number) {

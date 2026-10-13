@@ -44,6 +44,34 @@ export function rulePriceContextOf(state: PricingProfileState, layers: ListingSe
   return { state, productRules, categoryRules };
 }
 
+/**
+ * `context` with the given products' and categories' recipes set (a recipe)
+ * or removed (null): the "after" side of a price check whose change sets a
+ * product's or a category's own price (plan 6.4). A new, frozen context with
+ * new maps; the input and its maps are never changed. Ids not named keep
+ * their recipe.
+ */
+export function withRecipes(context: RulePriceContext, change: {
+  products?: ReadonlyMap<number, PricingRecipe | null>;
+  categories?: ReadonlyMap<number, PricingRecipe | null>;
+}): RulePriceContext {
+  return Object.freeze({
+    state: context.state,
+    productRules: changedRecipes(context.productRules, change.products),
+    categoryRules: changedRecipes(context.categoryRules, change.categories),
+  });
+}
+
+function changedRecipes(current: ReadonlyMap<number, PricingRecipe>,
+  change: ReadonlyMap<number, PricingRecipe | null> | undefined): ReadonlyMap<number, PricingRecipe> {
+  const next = new Map(current);
+  for (const [id, recipe] of change ?? []) {
+    if (recipe === null) next.delete(id);
+    else next.set(id, recipe);
+  }
+  return next;
+}
+
 export type RulePriceCandidate = PricingRuleCandidate & { defaultRetailPriceCents: number | null };
 
 export interface RulePriceResolver {

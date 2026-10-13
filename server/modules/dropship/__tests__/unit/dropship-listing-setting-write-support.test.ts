@@ -6,13 +6,20 @@ import {
   MAX_ECHOED_ISSUES,
   assertListingSettingMember,
   authorizeListingSettingWrite,
+  listingSettingEbaySignInRequired,
   listingSettingIssues,
   listingSettingKeyConflict,
+  listingSettingPricesMoved,
+  listingSettingRequestKeyChanged,
   listingSettingStoreIdSchema,
+  listingSettingStoreTextLimit,
   listingSettingWriteHash,
+  loadChosenSizes,
   parseListingSettingInput,
   requestKeyUsePath,
+  type ChosenSizeReader,
 } from "../../application/dropship-listing-setting-write-support";
+import type { DropshipListingCatalogCandidate } from "../../application/dropship-listing-preview-service";
 import type { ListingSettingWriteTransaction } from "../../application/dropship-listing-setting-writes";
 import { DropshipError } from "../../domain/errors";
 import { listingSettingRequestHash } from "../../domain/listing-setting-values";
@@ -141,5 +148,92 @@ describe("the route input parser and its issues (plan P5)", () => {
     // 8a's writers report a dotted path; a record without a code or a path is not an issue.
     expect(listingSettingIssues([{ path: "rows.0.priceCents", code: "too_small" }, { path: ["x"] }, { code: "custom" }, 7]))
       .toEqual([{ path: "rows.0.priceCents", code: "too_small" }]);
+  });
+});
+
+describe("loadChosenSizes (plan PR 9, P12, 6.2 #5)", () => {
+  const NOW = new Date("2026-10-12T09:00:00.000Z");
+  function candidate(productVariantId: number, productId = 7): DropshipListingCatalogCandidate {
+    return {
+      productId, productVariantId, productLineIds: [], category: "Toploaders", categoryId: 3,
+      ebayBrowseCategoryId: null, ebayBrowseCategoryName: null, productIsActive: true, variantIsActive: true, variantUomType: "pack",
+      unitsPerVariant: 25, defaultRetailPriceCents: 1_199, sku: `S-${productVariantId}`, productName: "Toploader", variantName: "Pack",
+      title: "Toploader", description: "Rigid card protection.", brand: "Card Shellz", gtin: null, mpn: null, condition: "new",
+      itemSpecifics: { Size: "3x4" }, imageUrls: ["https://example.test/a.jpg"], weightGrams: 100,
+    };
+  }
+
+  /** A catalog with every given size, all exposed by an include-all rule and chosen by the vendor's include-all rule. */
+  function reader(options: { sizes: number[]; hidden?: number[]; disabled?: number[]; notInCatalog?: number[] }) {
+    const calls: string[] = [];
+    const catalog = {
+      listCatalogExposureRules: vi.fn(async () => {
+        calls.push("exposureRules");
+        return [{ id: 1, scopeType: "catalog", action: "include" },
+          ...(options.hidden ?? []).map((id, index) => ({ id: 10 + index, scopeType: "variant", action: "exclude", productVariantId: id }))];
+      }),
+      listSelectionRules: vi.fn(async () => { calls.push("selectionRules"); return [{ id: 2, scopeType: "catalog", action: "include", isActive: true }]; }),
+      listCatalogCandidates: vi.fn(async (ids: readonly number[]) => {
+        calls.push(`candidates:${ids.length}`);
+        // Out of order, as a reader may return them.
+        return ids.filter((id) => !(options.notInCatalog ?? []).includes(id)).map((id) => candidate(id)).reverse();
+      }),
+      listVariantOverrides: vi.fn(async (input: { productVariantIds: readonly number[] }) => {
+        calls.push(`overrides:${input.productVariantIds.length}`);
+        return input.productVariantIds.filter((id) => (options.disabled ?? []).includes(id))
+          .map((productVariantId) => ({ productVariantId, enabledOverride: false }));
+      }),
+    };
+    return { tx: { vendorId: VENDOR, catalog } as unknown as ChosenSizeReader, calls, catalog };
+  }
+
+  it("checks only the given sizes, ascending and once, in batches of 250 with the rules read once", async () => {
+    const sizes = Array.from({ length: 600 }, (_, index) => 1_000 + index);
+    const { tx, calls, catalog } = reader({ sizes });
+    const input = Object.freeze([...sizes].reverse().concat([1_000]));
+
+    const chosen = await loadChosenSizes(tx, input, NOW);
+
+    expect(chosen.map((size) => size.productVariantId)).toEqual(sizes);
+    expect(chosen[0]).toEqual({ productVariantId: 1_000, productId: 7, candidate: candidate(1_000) });
+    expect(calls).toEqual(["exposureRules", "selectionRules", "candidates:250", "overrides:250", "candidates:250", "overrides:250",
+      "candidates:100", "overrides:100"]);
+    expect(catalog.listCatalogCandidates.mock.calls[0][0]).toEqual(sizes.slice(0, 250));
+    expect(catalog.listVariantOverrides).toHaveBeenCalledWith({ vendorId: VENDOR, productVariantIds: sizes.slice(500) });
+  });
+
+  it("keeps only sizes Card Shellz shows and the vendor chose, and none the catalog no longer has", async () => {
+    const { tx } = reader({ sizes: [101, 102, 103, 104], hidden: [102], disabled: [103], notInCatalog: [104] });
+    const chosen = await loadChosenSizes(tx, [104, 103, 102, 101], NOW);
+    expect(chosen).toEqual([{ productVariantId: 101, productId: 7, candidate: candidate(101) }]);
+  });
+
+  it("reads nothing for no sizes", async () => {
+    const none = reader({ sizes: [] });
+    await expect(loadChosenSizes(none.tx, [], NOW)).resolves.toEqual([]);
+    expect(none.calls).toEqual([]);
+  });
+});
+
+describe("the 9c refusals (plan 3.3, 6.8)", () => {
+  it("builds PRICES_MOVED with at most 100 sizes and the full count, permanent", () => {
+    const sizes = Array.from({ length: 150 }, (_, index) => ({ productVariantId: index + 1, expectedPriceCents: 100, priceCents: 200 }));
+    const error = listingSettingPricesMoved(STORE, sizes);
+    expect(error.code).toBe("DROPSHIP_LISTING_PRICES_MOVED");
+    expect(error.message).toBe("Prices changed while you were editing. Reload to see the new prices, then save again.");
+    expect(error.context).toMatchObject({ storeConnectionId: STORE, sizeCount: 150, retryable: false, classification: "permanent" });
+    expect(error.context?.sizes).toHaveLength(100);
+  });
+
+  it("builds the sign-in refusal with the fields, the store text cap with its numbers, and a key change as retryable BUSY", () => {
+    expect(listingSettingEbaySignInRequired(STORE, ["shippingPolicy"])).toMatchObject({
+      code: "DROPSHIP_LISTING_SETTINGS_EBAY_SIGN_IN_REQUIRED",
+      context: { storeConnectionId: STORE, fields: ["shippingPolicy"], retryable: false, classification: "permanent" } });
+    expect(listingSettingStoreTextLimit(STORE, 30_000_001, 30_000_000)).toMatchObject({
+      code: "DROPSHIP_LISTING_SETTINGS_TOO_LARGE",
+      message: "This store's saved listing text is at its limit. Shorten or remove text on other products, or set it once on a category or as the store default.",
+      context: { reason: "store_text_limit", textBytes: 30_000_001, maxTextBytes: 30_000_000, classification: "permanent" } });
+    expect(listingSettingRequestKeyChanged(STORE)).toMatchObject({ code: "DROPSHIP_LISTING_SETTINGS_BUSY",
+      context: { reason: "request_key_changed", retryAfterSeconds: 5, retryable: true, classification: "transient" } });
   });
 });

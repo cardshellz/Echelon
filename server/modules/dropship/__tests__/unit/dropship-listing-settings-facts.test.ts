@@ -17,12 +17,15 @@ import type { PricingProfileState } from "../../../../../shared/dropship/pricing
 import { prepareEbayCategoryRules, resolveEbayListingCategory } from "../../application/dropship-ebay-category-resolver";
 import type { DropshipEbayListingPolicyOverride } from "../../application/dropship-ebay-listing-policy-override-service";
 import { listingCatalogHash, productCatalogHash, resolveListingContent } from "../../application/dropship-listing-content-resolver";
-import type {
-  DropshipListingCatalogCandidate, DropshipListingStoreContext, DropshipPricingPolicyRecord,
+import {
+  evaluateListingPricingPolicy,
+  type DropshipListingCatalogCandidate, type DropshipListingStoreContext, type DropshipPricingPolicyRecord,
 } from "../../application/dropship-listing-preview-service";
+import { createRulePriceResolver, rulePriceContextOf } from "../../application/dropship-rule-price";
 import {
   buildListingSettingsFacts,
   buildListingSettingsStoreDefaults,
+  effectiveSizePrice,
   buildListingSettingsSummary,
   buildTooLargeListingSettingsSummary,
   listingSettingsStockUnits,
@@ -326,6 +329,68 @@ describe("listing settings facts: the price of one size", () => {
   it("reports a size paused by a cost change", () => {
     const price = onlyPrice(inputs([candidate()], { pausedSince: new Map([[101, new Date("2026-10-02T09:30:00.000Z")]]) }));
     expect(price.pausedSince).toBe("2026-10-02T09:30:00.000Z");
+  });
+});
+
+describe("effectiveSizePrice: the facts' size price, extracted for the price-change builder (plan PR 9, 6.4, C-feas-8)", () => {
+  const listing = (vendorRetailPriceCents: number) => new Map([[101, { listingId: 1, productVariantId: 101, status: "active",
+    vendorRetailPriceCents, quantityCap: null, externalListingId: "x" }]]);
+  const tie = pricing({ defaultRecipe: COST_RECIPE, groups: [
+    { id: "a", name: "A", priority: 1, scope: { type: "category", category: "Toploaders" }, recipe: RETAIL_RECIPE },
+    { id: "b", name: "B", priority: 1, scope: { type: "product", productId: 501 }, recipe: RETAIL_RECIPE },
+  ] });
+  const productRecipe = productListingSettingRowSchema.parse({ storeConnectionId: 5, productId: 501, revisionId: 3,
+    updatedAt: "2026-10-01T00:00:00.000Z", values: { price: COST_RECIPE, ebayCategory: null, storeShelf: null, shippingPolicy: null,
+      returnPolicy: null, paymentPolicy: null, textAbove: null, textBelow: null, mainText: null } });
+  /** The facts' price table, case by case: each sets what decides one size's price. */
+  const table: ReadonlyArray<[string, ListingSettingsInputs]> = [
+    ["a typed price", inputs([candidate()], { savedPrices: new Map([[101, savedPrice(101, { overridePriceCents: 1_499, pricingMode: "fixed" })]]),
+      pricing: pricing({ defaultRecipe: RETAIL_RECIPE, groups: [] }) })],
+    ["the store default recipe", inputs([candidate()], { pricing: pricing({ defaultRecipe: COST_RECIPE, groups: [] }), costs: new Map([[101, cost(800)]]) })],
+    ["a tie", inputs([candidate()], { pricing: tie })],
+    ["an unknown cost", inputs([candidate()], { pricing: pricing({ defaultRecipe: COST_RECIPE, groups: [] }), costs: new Map([[101, cost(null)]]) })],
+    ["rules with no rules", inputs([candidate()], { savedPrices: new Map([[101, savedPrice(101, { pricingMode: "rules" })]]) })],
+    ["the last published price", inputs([candidate()], { existingListings: listing(1_350) })],
+    ["the catalog price", inputs([candidate()])],
+    ["no retail price", inputs([candidate({ defaultRetailPriceCents: null })])],
+    ["the catalog price over a published one", inputs([candidate()], {
+      savedPrices: new Map([[101, savedPrice(101, { pricingMode: "catalog_default" })]]), existingListings: listing(1_350) })],
+    ["inherit without rules", inputs([candidate()], { savedPrices: new Map([[101, savedPrice(101, { pricingMode: "inherit" })]]),
+      existingListings: listing(1_350), costs: new Map([[101, cost(800)]]) })],
+    ["inherit by the rules", inputs([candidate()], { savedPrices: new Map([[101, savedPrice(101, { pricingMode: "inherit" })]]),
+      pricing: pricing({ defaultRecipe: COST_RECIPE, groups: [] }), costs: new Map([[101, cost(800)]]) })],
+    ["inherit on a tie", inputs([candidate()], { savedPrices: new Map([[101, savedPrice(101, { pricingMode: "inherit" })]]), pricing: tie })],
+    ["inherit under a blocking limit", inputs([candidate()], { savedPrices: new Map([[101, savedPrice(101, { pricingMode: "inherit" })]]),
+      pricing: pricing({ defaultRecipe: COST_RECIPE, groups: [] }), costs: new Map([[101, cost(600)]]),
+      pricingPolicies: [policy({ id: 7, mode: "block_listing_push", floorPriceCents: 1_000 })] })],
+    ["rules under a blocking limit", inputs([candidate()], { savedPrices: new Map([[101, savedPrice(101, { pricingMode: "rules" })]]),
+      pricing: pricing({ defaultRecipe: COST_RECIPE, groups: [] }), costs: new Map([[101, cost(600)]]),
+      pricingPolicies: [policy({ id: 7, mode: "block_listing_push", floorPriceCents: 1_000 })] })],
+    ["a typed price under every limit kind", inputs([candidate()], {
+      savedPrices: new Map([[101, savedPrice(101, { overridePriceCents: 450, pricingMode: "fixed" })]]),
+      pricingPolicies: [policy({ id: 1, mode: "warn_only", floorPriceCents: 500 }),
+        policy({ id: 2, mode: "block_listing_push", scopeType: "variant", productVariantId: 101, ceilingPriceCents: 4_000 })] })],
+    ["the product's own price in a store with no rules", inputs([candidate()], {
+      layers: { products: new Map([[501, productRecipe]]), categories: new Map() }, costs: new Map([[101, cost(800)]]) })],
+  ];
+  const SOURCE = { override: "exact", rules: "rules", catalog_default: "catalog_price", saved_listing: "last_published", unavailable: "none" } as const;
+
+  it.each(table)("gives the facts' price, source, cost and limits: %s", (_name, input) => {
+    const facts = onlyPrice(input);
+    const size = input.candidates[0];
+    const effective = effectiveSizePrice({
+      candidate: size, saved: input.savedPrices.get(101) ?? null, cost: input.costs.get(101) ?? null,
+      pricingPolicies: input.pricingPolicies, existingListingPriceCents: input.existingListings.get(101)?.vendorRetailPriceCents ?? null,
+      resolver: createRulePriceResolver(rulePriceContextOf(input.pricing, input.layers)),
+    });
+    expect(effective.priceCents).toBe(facts.priceCents);
+    expect(effective.resolved.effectivePriceCents).toBe(facts.priceCents);
+    expect(effective.costCents).toBe(facts.costCents);
+    expect(facts.source === "retail_fallback" ? "catalog_price" : facts.source).toBe(SOURCE[effective.resolved.source]);
+    // The limits are the facts' at that price: a blocking limit is broken exactly when the price has a blocker.
+    const blocked = facts.limits.some((limit) => limit.mode === "block_listing" && limit.breached !== null);
+    expect(blocked).toBe(facts.priceCents !== null
+      && evaluateListingPricingPolicy(size, input.pricingPolicies, effective.priceCents).blockers.length > 0);
   });
 });
 
