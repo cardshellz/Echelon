@@ -5,6 +5,7 @@ import type { AddressInfo } from "node:net";
 import { z } from "zod";
 import { registerListingPublicationRoutes } from "../../interfaces/http/listing-publication.routes";
 import { saveListingDraftSchema } from "@shared/types/channel-listing-publication";
+import { ChannelIdentityError } from "../../../channels/channel-identity.domain";
 
 vi.mock("../../../../routes/middleware", () => ({
   requirePermission:
@@ -32,6 +33,7 @@ describe("listing publication HTTP boundary", () => {
     review: vi.fn(),
     submit: vi.fn(),
     reconcile: vi.fn(),
+    recreation: vi.fn(),
   };
   beforeEach(async () => {
     vi.resetAllMocks();
@@ -75,6 +77,17 @@ describe("listing publication HTTP boundary", () => {
     });
     expect(response.status).toBe(200);
     expect(service.saveDraft).toHaveBeenCalledWith(104, body, "operator-1");
+  });
+  it("requires edit permission for recreation and returns actionable identity conflicts", async () => {
+    const operationId = "00000000-0000-4000-8000-000000000003";
+    const path = `${base}/operations/${operationId}/recreation?sku=SKU%2F1`;
+    expect((await fetch(path, { headers: { "x-permission": "channels:view" } })).status).toBe(403);
+    expect(service.recreation).not.toHaveBeenCalled();
+    service.recreation.mockRejectedValue(new ChannelIdentityError("CHANNEL_RECREATION_MAPPING_CONFLICT", "The saved mapping changed."));
+    const response = await fetch(path, { headers: { "x-permission": "channels:edit" } });
+    expect(response.status).toBe(409);
+    expect(await response.json()).toEqual({ code: "CHANNEL_RECREATION_MAPPING_CONFLICT", error: "The saved mapping changed." });
+    expect(service.recreation).toHaveBeenCalledExactlyOnceWith(104, { operationId, sku: "SKU/1" });
   });
   it("passes the exact selected review scope and authenticated actor to the owner", async () => {
     service.review.mockResolvedValue({ id: "review-1" });

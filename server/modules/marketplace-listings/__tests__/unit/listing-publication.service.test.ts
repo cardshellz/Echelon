@@ -9,6 +9,7 @@ import { ChannelProviderError } from "../../../channels/channel-provider.error";
 import type { ListingPublicationStore } from "../../application/listing-publication-store.port";
 import {
   ListingPublicationError,
+  listingHash,
   summarizeListingProgress,
   type ListingSnapshot,
 } from "../../domain/listing-publication";
@@ -61,6 +62,7 @@ function setup(snapshot = publicationSnapshot()) {
         priceCents: 1299,
       }),
     ),
+    assertCanRecreate: vi.fn(async () => {}),
   } satisfies ListingPublicationProvider;
   const journals: string[] = [];
   const store = {
@@ -97,6 +99,8 @@ function setup(snapshot = publicationSnapshot()) {
     requestReconciliation: vi.fn(),
   } satisfies ListingPublicationStore;
   const link = vi.fn(async () => ({ linked: snapshot.catalog.length }));
+  const linkRecreated = vi.fn(async () => ({ linked: 1 }));
+  const checkRecreationMapping = vi.fn(async (_account: unknown, input: { previousExternalProductId: string | null }) => ({ externalProductId: input.previousExternalProductId }));
   const inventory = {
     inspect: vi.fn<ListingPublicationDependencies["inventory"]["inspect"]>(
       async () => structuredClone(snapshot.review.inventory),
@@ -142,7 +146,7 @@ function setup(snapshot = publicationSnapshot()) {
     store,
     provider: vi.fn(async () => provider),
     catalog,
-    identities: vi.fn(async () => ({ link })),
+    identities: vi.fn(async () => ({ link, linkRecreated, checkRecreationMapping })),
     inventory,
     listingUpdates: { acceptedPrice: vi.fn().mockResolvedValue(null) },
     now: () => new Date(clock),
@@ -157,6 +161,8 @@ function setup(snapshot = publicationSnapshot()) {
     inventory,
     dependencies,
     link,
+    linkRecreated,
+    checkRecreationMapping,
     journals,
     get operation() {
       return operation;
@@ -1094,5 +1100,189 @@ describe("ListingPublicationService asynchronous worker", () => {
     } finally {
       log.mockRestore();
     }
+  });
+});
+
+describe("deleted Walmart listing recreation", () => {
+  function settled() {
+    const h = setup();
+    h.operation.progress.batches[0].state = "processed";
+    h.operation.progress.batches[0].submissionId = "accepted-feed";
+    h.operation.progress.items[0].state = "accepted";
+    h.operation.progress.items[0].externalProductId = "original-wpid";
+    h.provider.observe.mockRejectedValue(new ChannelProviderError("ITEM_NOT_FOUND", "Missing", false, 404));
+    return h;
+  }
+  const request = { operationId: testId(3), sku: "SKU-10" };
+
+  it("prepares the same variant and saved product type without changing claims, drafts, or Walmart", async () => {
+    const h = settled();
+    const result = await h.service.recreation(104, request);
+    expect(result.item).toMatchObject({ variantId: 10, method: "create", productType: "Trading Card Sleeves & Holders", recreateFromOperationId: testId(3), images: null });
+    expect(result.catalog.images).toEqual(["https://example.com/sleeves.jpg"]);
+    expect(result.checkedAt).toBe(fixedNow.toISOString());
+    expect(h.provider.observe).toHaveBeenCalledExactlyOnceWith(h.operation.snapshot.account, "SKU-10");
+    expect(h.provider.submit).not.toHaveBeenCalled();
+    expect(h.store.saveDraft).not.toHaveBeenCalled();
+    expect(h.store.createOperation).not.toHaveBeenCalled();
+  });
+  it("carries accepted content, category, shipping and price corrections into the fresh draft", async () => {
+    const h = settled();
+    const lastSubmitted = vi.fn(async () => ({ productType: "Correct category", changes: {
+      title: "Correct product title", priceCents: 2599, images: ["https://example.com/new.jpg"],
+      attributes: { Orderable: { ShippingWeight: 2 }, Visible: { pieceCount: 100 } },
+    } }));
+    Object.assign(h.dependencies.listingUpdates, { lastSubmitted });
+    const result = await h.service.recreation(104, request);
+    expect(result.item).toMatchObject({ title: "Correct product title", productType: "Correct category", priceOverrideCents: 2599,
+      images: ["https://example.com/new.jpg"], attributes: { Orderable: { ShippingWeight: 2 }, Visible: { pieceCount: 100 } } });
+    expect(lastSubmitted).toHaveBeenCalledWith(h.operation.snapshot.account, "SKU-10", "original-wpid", { includeInitial: false });
+  });
+  it("uses the exact saved mapping to retain accepted edits when the original feed omitted its product ID", async () => {
+    const h = settled();
+    h.operation.progress.items[0].externalProductId = null;
+    h.checkRecreationMapping.mockResolvedValue({ externalProductId: "verified-mapping-wpid" });
+    const lastSubmitted = vi.fn(async () => ({ productType: "Trading Card Sleeves & Holders", changes: { title: "Corrected 100-count title" } }));
+    Object.assign(h.dependencies.listingUpdates, { lastSubmitted });
+    const result = await h.service.recreation(104, request);
+    expect(result.item.title).toBe("Corrected 100-count title");
+    expect(lastSubmitted).toHaveBeenCalledWith(h.operation.snapshot.account, "SKU-10", "verified-mapping-wpid", { includeInitial: false });
+    h.store.draft.mockResolvedValue({ ...h.operation.snapshot.draft, items: [result.item] });
+    await h.service.review(104, { expectedRevision: 1 }, "operator");
+    const snapshot = h.store.saveReview.mock.calls[0][0];
+    expect(snapshot.recreations?.[0].previousExternalProductId).toBe("verified-mapping-wpid");
+    h.store.review.mockResolvedValue(snapshot);
+    h.checkRecreationMapping.mockResolvedValue({ externalProductId: "changed-mapping" });
+    await expect(h.service.submit(104, command(snapshot), "operator")).rejects.toMatchObject({ code: "LISTING_RECREATION_STALE" });
+    expect(h.store.createOperation).not.toHaveBeenCalled();
+  });
+  it.each([401, 403, 429, 500, 503])( "does not interpret HTTP %s as a deleted item", async (status) => {
+    const h = settled();
+    h.provider.observe.mockRejectedValue(new ChannelProviderError("READ_FAILED", "Read failed", true, status));
+    await expect(h.service.recreation(104, request)).rejects.toMatchObject({ code: "READ_FAILED" });
+    expect(h.store.createOperation).not.toHaveBeenCalled();
+  });
+  it.each(["ACTIVE", "RETIRED"])("refuses to recreate a SKU still reported as %s", async (lifecycleStatus) => {
+    const h = settled();
+    h.provider.observe.mockResolvedValue({ item: { sku: "SKU-10", title: "Still exists", externalProductId: "original-wpid",
+      externalVariantId: "SKU-10", externalInventoryItemId: "SKU-10", lifecycleStatus, publishedStatus: "UNPUBLISHED" }, priceCents: 1299 });
+    await expect(h.service.recreation(104, request)).rejects.toMatchObject({ code: "LISTING_RECREATION_ITEM_EXISTS" });
+  });
+  it.each(["queued", "processing", "needs_reconciliation"] as const)("rejects an unsettled %s submission even if Walmart returns 404", async (state) => {
+    const h = settled(); h.operation.progress.items[0].state = state;
+    await expect(h.service.recreation(104, request)).rejects.toMatchObject({ code: "LISTING_RECREATION_NOT_SETTLED" });
+    expect(h.provider.observe).not.toHaveBeenCalled();
+  });
+  it("rejects a changed account, SKU or explicit publishing stop", async () => {
+    const h = settled();
+    h.provider.account.mockResolvedValueOnce({ ...h.operation.snapshot.account, accountId: "another-seller" });
+    await expect(h.service.recreation(104, request)).rejects.toMatchObject({ code: "LISTING_RECREATION_ACCOUNT_CHANGED" });
+    await expect(h.service.recreation(104, { ...request, sku: "OTHER-SKU" })).rejects.toMatchObject({ code: "LISTING_RECREATION_NOT_SETTLED" });
+    h.provider.assertCanRecreate.mockRejectedValueOnce(new ListingPublicationError("LISTING_PUBLICATION_STOPPED", "Stopped"));
+    await expect(h.service.recreation(104, request)).rejects.toMatchObject({ code: "LISTING_PUBLICATION_STOPPED" });
+    expect(h.provider.submit).not.toHaveBeenCalled();
+  });
+  it("reviews linked recreation through full-item preparation and rechecks absence before queueing", async () => {
+    const h = settled();
+    const recovered = await h.service.recreation(104, request);
+    h.store.draft.mockResolvedValue({ ...h.operation.snapshot.draft, items: [recovered.item] });
+    h.catalog.catalog.mockResolvedValue({ items: [{ ...recovered.catalog, alreadyLinked: true }], total: 1, offset: 0, limit: 25 });
+    const review = await h.service.review(104, { expectedRevision: 1 }, "operator");
+    expect(review.canSubmit).toBe(true);
+    expect(review.items[0].recreating).toBe(true);
+    expect(h.provider.prepare).toHaveBeenCalledWith(recovered.account, expect.objectContaining({ recreating: true, catalog: expect.objectContaining({ alreadyLinked: true }) }));
+    const snapshot = h.store.saveReview.mock.calls[0][0];
+    expect(snapshot.recreations?.[0]).toMatchObject({ operationId: testId(3), sku: "SKU-10", sourceHash: listingHash(h.operation.snapshot) });
+    h.store.review.mockResolvedValue(snapshot);
+    h.provider.observe.mockRejectedValueOnce(new ChannelProviderError("RATE_LIMITED", "Try again", true, 429));
+    await expect(h.service.submit(104, command(snapshot), "operator")).rejects.toMatchObject({ code: "RATE_LIMITED" });
+    expect(h.store.createOperation).not.toHaveBeenCalled();
+    await h.service.submit(104, command(snapshot), "operator");
+    expect(h.store.createOperation).toHaveBeenCalledTimes(1);
+    expect(h.provider.submit).not.toHaveBeenCalled();
+  });
+  it("marks exact missing-item readback explicitly while retaining its historical title", async () => {
+    const h = settled();
+    await h.run();
+    expect(h.operation.progress.items[0]).toMatchObject({ state: "accepted", missingOnProvider: true });
+    expect((await h.service.operations(104))[0].items[0].title).toBe("Card sleeves 10");
+  });
+
+  function replacement() {
+    const prior = publicationOperation();
+    prior.id = testId(20);
+    prior.progress.batches[0].state = "processed";
+    prior.progress.batches[0].submissionId = "original-feed";
+    prior.progress.items[0] = { ...prior.progress.items[0], state: "superseded",
+      recreatedByOperationId: testId(3), externalProductId: "original-wpid" };
+    const snapshot = publicationSnapshot();
+    snapshot.draft.items[0].recreateFromOperationId = prior.id;
+    snapshot.recreations = [{ operationId: prior.id, variantId: 10, sku: "SKU-10",
+      previousExternalProductId: "original-wpid", sourceHash: listingHash(prior.snapshot), checkedAt: fixedNow.toISOString() }];
+    const h = setup(snapshot);
+    h.store.operation.mockResolvedValue(prior);
+    h.provider.observe.mockRejectedValueOnce(new ChannelProviderError("ITEM_NOT_FOUND", "Missing", false, 404));
+    h.provider.status.mockResolvedValue({ state: "processed", items: [result("SKU-10", "accepted")] });
+    return { ...h, prior };
+  }
+  it("sends a full-item replacement through the quantity owner and relinks only its verified new product identity", async () => {
+    const h = replacement();
+    await h.run();
+    expect(h.inventory.submitZero).toHaveBeenCalledOnce();
+    expect(h.provider.submit).toHaveBeenCalledWith(h.prior.snapshot.account, expect.objectContaining({
+      items: [expect.objectContaining({ feedType: "MP_ITEM" })],
+      zeroStockAdmission: expect.objectContaining({ items: [{ productVariantId: 10, sku: "SKU-10", quantity: 0 }] }),
+    }));
+    expect(h.linkRecreated).toHaveBeenCalledExactlyOnceWith(h.prior.snapshot.account, {
+      sku: "SKU-10", productVariantId: 10, previousExternalProductId: "original-wpid", expectedExternalProductId: "WPID-SKU-10",
+    }, "listing-publication-worker");
+    expect(h.link).not.toHaveBeenCalled();
+    expect(h.store.saveProgress.mock.calls.at(-1)?.[1].items[0]).toMatchObject({ state: "verified", externalProductId: "WPID-SKU-10", stockState: "setup_required" });
+  });
+  it("can retry a recreation rejected before Walmart received a feed", async () => {
+    const h = replacement();
+    h.prior.progress.batches[0].submissionId = null;
+    await h.run();
+    expect(h.provider.submit).toHaveBeenCalledOnce();
+    expect(h.linkRecreated).toHaveBeenCalledOnce();
+  });
+  it("requires a new review if the SKU reappears before a queued recreation sends", async () => {
+    const h = replacement();
+    h.provider.observe.mockReset().mockResolvedValue({ item: {
+      sku: "SKU-10", title: "Existing", externalProductId: "W1", externalVariantId: "SKU-10",
+      externalInventoryItemId: "SKU-10", lifecycleStatus: "ACTIVE", publishedStatus: "PUBLISHED",
+    }, priceCents: 1299 });
+    await h.run();
+    expect(h.provider.submit).not.toHaveBeenCalled();
+    expect(h.store.saveProgress.mock.calls.at(-1)?.[1].items[0]).toMatchObject({ state: "needs_attention", canRetry: true });
+  });
+  it("does not relink after ownership expires during a provider status read", async () => {
+    const h = settled();
+    h.provider.observe.mockReset().mockResolvedValue({ item: {
+      sku: "SKU-10", title: "Existing", externalProductId: "original-wpid", externalVariantId: "SKU-10",
+      externalInventoryItemId: "SKU-10", lifecycleStatus: "ACTIVE", publishedStatus: "PUBLISHED",
+    }, priceCents: 1299 });
+    h.store.renewLease.mockRejectedValue(new ListingPublicationError("LISTING_LEASE_LOST", "Ownership changed"));
+    await h.run();
+    expect(h.link).not.toHaveBeenCalled();
+    expect(h.linkRecreated).not.toHaveBeenCalled();
+  });
+  it("never reads, submits, or relinks a superseded item when another item keeps its operation running", async () => {
+    const h = settled();
+    h.operation.progress.items[0].state = "superseded";
+    h.operation.progress.items[0].recreatedByOperationId = testId(30);
+    await h.run();
+    expect(h.provider.observe).not.toHaveBeenCalled();
+    expect(h.provider.submit).not.toHaveBeenCalled();
+    expect(h.link).not.toHaveBeenCalled();
+  });
+  it("reports unavailable catalog variants and mapping conflicts without preparing a draft", async () => {
+    const h = settled();
+    h.catalog.catalog.mockResolvedValueOnce({ items: [], total: 0, offset: 0, limit: 25 });
+    await expect(h.service.recreation(104, request)).rejects.toMatchObject({ code: "LISTING_VARIANT_MISSING" });
+    h.checkRecreationMapping.mockRejectedValueOnce(new Error("Mapping changed"));
+    await expect(h.service.recreation(104, request)).rejects.toThrow("Mapping changed");
+    expect(h.store.saveDraft).not.toHaveBeenCalled();
+    expect(h.provider.observe).not.toHaveBeenCalled();
   });
 });

@@ -49,6 +49,7 @@ CREATE TABLE catalog.product_variants(id integer PRIMARY KEY, product_id integer
         ),
       );
       repository = new PostgresListingPublicationRepository(database.pool);
+      await database.pool.query(readFileSync(resolve("migrations/260_channel_listing_recreation.sql"), "utf8"));
     });
     afterAll(async () => {
       await database?.close();
@@ -585,6 +586,81 @@ CREATE TABLE catalog.product_variants(id integer PRIMARY KEY, product_id integer
       },
     );
 
+    async function acceptedRecreation(externalProductId: string | null = "old-wpid") {
+      const original = await repository.createOperation(input(await saveReview()));
+      const claimed = (await repository.claim(fixedNow, testId(60)))!;
+      const progress = structuredClone(claimed.progress);
+      progress.batches[0].state = "processed";
+      progress.batches[0].submissionId = "accepted-feed";
+      progress.items[0].state = "accepted";
+      progress.items[0].externalProductId = externalProductId;
+      const prior = await repository.saveProgress(claimed, progress, { now: fixedNow,
+        nextAttemptAt: new Date(fixedNow.getTime() + 900_000), releaseLease: true, actor: "worker" });
+      const next = publicationSnapshot([10], testAccount, testId(101));
+      next.draft.items[0].recreateFromOperationId = original.id;
+      next.recreations = [{ operationId: original.id, variantId: 10, sku: "SKU-10", previousExternalProductId: "old-wpid",
+        sourceHash: listingHash(original.snapshot), checkedAt: fixedNow.toISOString() }];
+      return { prior, next: await saveReview(next) };
+    }
+
+    it("atomically supersedes an accepted deleted listing, transfers its claim and preserves immutable history", async () => {
+      const { prior, next } = await acceptedRecreation();
+      const replacement = await repository.createOperation(input(next, 102, 103));
+      const old = await repository.operation(104, prior.id);
+      expect(old.snapshot).toEqual(prior.snapshot);
+      expect(old.progress.items[0]).toMatchObject({ state: "superseded", recreatedByOperationId: replacement.id, canRetry: false });
+      expect(old.progress.batches[0].submissionId).toBe("accepted-feed");
+      expect(old.state).toBe("completed");
+      expect((await database.pool.query("SELECT operation_id FROM marketplace.channel_listing_item_claims")).rows[0].operation_id).toBe(replacement.id);
+      expect((await repository.draft(104)).items).toEqual([]);
+      expect((await repository.createOperation(input(next, 102, 103))).id).toBe(replacement.id);
+      expect((await database.pool.query("SELECT action FROM marketplace.channel_listing_publication_events WHERE action LIKE 'deleted_%' ORDER BY id")).rows)
+        .toEqual([{ action: "deleted_listing_recreated" }, { action: "deleted_item_reclaimed" }]);
+    });
+    it("refuses stale identity evidence and an in-flight original worker without consuming the draft", async () => {
+      const { prior, next } = await acceptedRecreation();
+      await database.pool.query("UPDATE marketplace.channel_listing_operations SET lease_token=$2,lease_until=$3 WHERE id=$1",
+        [prior.id, testId(60), new Date(fixedNow.getTime() + 60_000)]);
+      await expect(repository.createOperation(input(next, 102, 103))).rejects.toMatchObject({ code: "LISTING_RECREATION_BUSY" });
+      await database.pool.query("UPDATE marketplace.channel_listing_operations SET lease_token=NULL,lease_until=NULL WHERE id=$1", [prior.id]);
+      const stale = structuredClone(next); stale.review.id = testId(104); stale.recreations![0].previousExternalProductId = "another-product";
+      await repository.saveReview(stale, "operator", fixedNow);
+      await expect(repository.createOperation(input(stale, 105, 106))).rejects.toMatchObject({ code: "LISTING_RECREATION_STALE" });
+      expect((await repository.operation(104, prior.id)).progress.items[0].state).toBe("accepted");
+      expect((await repository.draft(104)).items).toEqual(next.draft.items);
+      expect((await counts()).operations).toBe(1);
+    });
+    it("retains the reviewed mapping identity when an accepted original feed omitted its product ID", async () => {
+      const { prior, next } = await acceptedRecreation(null);
+      const replacement = await repository.createOperation(input(next, 102, 103));
+      expect(replacement.snapshot.recreations?.[0].previousExternalProductId).toBe("old-wpid");
+      expect((await repository.operation(104, prior.id)).progress.items[0]).toMatchObject({ state: "superseded", externalProductId: null });
+    });
+    it("allows only one recreation when two reviewed requests compete for the same SKU", async () => {
+      const { prior, next } = await acceptedRecreation();
+      const competing = structuredClone(next); competing.review.id = testId(104);
+      await repository.saveReview(competing, "other-operator", fixedNow);
+      const results = await Promise.allSettled([
+        repository.createOperation(input(next, 102, 103)), repository.createOperation(input(competing, 105, 106)),
+      ]);
+      expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+      expect(results.filter((result) => result.status === "rejected")).toHaveLength(1);
+      expect((await counts()).operations).toBe(2);
+      const owner = (await database.pool.query("SELECT operation_id FROM marketplace.channel_listing_item_claims")).rows[0].operation_id;
+      expect((await repository.operation(104, prior.id)).progress.items[0].recreatedByOperationId).toBe(owner);
+    });
+    it("rolls back supersession, claim transfer and draft consumption if final audit persistence fails", async () => {
+      const { prior, next } = await acceptedRecreation();
+      await database.pool.query(`CREATE OR REPLACE FUNCTION marketplace.reject_recreation_audit() RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN IF NEW.action='publication_queued' THEN RAISE EXCEPTION 'forced recreation audit failure'; END IF; RETURN NEW; END; $$;
+        CREATE TRIGGER test_reject_event BEFORE INSERT ON marketplace.channel_listing_publication_events
+          FOR EACH ROW EXECUTE FUNCTION marketplace.reject_recreation_audit();`);
+      await expect(repository.createOperation(input(next, 102, 103))).rejects.toThrow("forced recreation audit failure");
+      expect((await repository.operation(104, prior.id)).progress).toEqual(prior.progress);
+      expect((await repository.draft(104)).items).toEqual(next.draft.items);
+      expect((await database.pool.query("SELECT operation_id FROM marketplace.channel_listing_item_claims")).rows[0].operation_id).toBe(prior.id);
+      expect((await counts()).operations).toBe(1);
+    });
     it("protects immutable review, operation intent, claims and audit evidence in PostgreSQL", async () => {
       const snapshot = await saveReview();
       await repository.createOperation(input(snapshot));
@@ -607,7 +683,7 @@ CREATE TABLE catalog.product_variants(id integer PRIMARY KEY, product_id integer
         database.pool.query(
           "UPDATE marketplace.channel_listing_item_claims SET external_sku='OTHER'",
         ),
-      ).rejects.toThrow("definitively rejected");
+      ).rejects.toThrow("identity is immutable");
       await expect(
         database.pool.query(
           "DELETE FROM marketplace.channel_listing_item_claims",

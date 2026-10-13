@@ -1,6 +1,7 @@
 import { ebayListingPushRequestSchema, ebayListingPushService } from "../../modules/channels/ebay-listing-push";
 import { syncActiveListings } from "../../modules/channels/ebay-listing-sync";
 import express, { type NextFunction, type Request, type Response } from "express";
+import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { db, pool } from "../../db";
 import { requireAuth, requireAuthOrInternalApiKey, requirePermission } from "../middleware";
@@ -16,7 +17,9 @@ import {
 import { ebayListingSyncService } from '../../modules/channels/ebay-listing-sync';
 import { EbayListingRecoveryService } from '../../modules/channels/ebay-listing-sync';
 import { EbayPublicationRecoveryService, PostgresEbayPublicationRecoveryRepository } from '../../modules/inventory-planning/quantity-publication';
-import { resolveEbayListingIssue } from '@shared/ebay-listing-issue';
+import { resolveEbayListingIssue, safeListingDiagnostic } from '@shared/ebay-listing-issue';
+import { isInventoryManagedVariant } from '@shared/catalog/variant-inventory-eligibility';
+import { EbayListingFeedInventoryService } from '../../modules/channels/ebay-listing-feed-inventory';
 import { listingFailure, listingFailureStatus } from './ebay-listing-errors';
 import { registerEbayListingRecoveryRoutes } from './ebay-listing-recovery.routes';
 import { registerEbayListingMappingRoutes } from './ebay-listing-mapping.routes';
@@ -38,9 +41,28 @@ import {
 export const router = express.Router();
 const EBAY_LISTING_DEFAULT_MARKETPLACE_ID = "EBAY_US";
 const ebayListingConnector = new EbayMarketplaceListingConnector();
+const feedInventory = new EbayListingFeedInventoryService(atpService, {
+  createReference: randomUUID,
+  reportFailure: ({ error, ...context }) => console.error({ event: "ebay_listing_feed_inventory_failed", ...context,
+    error: error instanceof Error ? safeListingDiagnostic(error.message) : "Unknown inventory read failure" }),
+});
 const ebayListingRecovery = new EbayListingRecoveryService(ebayListingSyncService,
   new EbayPublicationRecoveryService(new PostgresEbayPublicationRecoveryRepository(pool), () => new Date()),
   (productId, actor, commandKey) => syncActiveListings({ productIds: [productId] }, actor, commandKey), readEbayPushRecoveryIdentity);
+
+interface ListingFeedVariant {
+  id: number;
+  sku: string;
+  name: string | null;
+  priceCents: number | null;
+  ebayListingExcluded: boolean;
+  explicitlyExcluded: boolean;
+  excludedByProduct: boolean;
+  effectivelyListed: boolean;
+  fulfillmentPolicyOverride: string | null;
+  returnPolicyOverride: string | null;
+  paymentPolicyOverride: string | null;
+}
 
   // GET /api/ebay/listing-feed — Products with types for listing feed
   // -----------------------------------------------------------------------
@@ -94,8 +116,9 @@ const ebayListingRecovery = new EbayListingRecoveryService(ebayListingSyncServic
 
         // Fetch variants for all products in the feed
         const productIds = result.rows.map((r: any) => r.id);
-        let variantsByProduct: Map<number, any[]> = new Map();
+        const variantsByProduct = new Map<number, ListingFeedVariant[]>();
         const listingStatesByProduct = new Map<number, EbayFeedVariantListingState[]>();
+        const inventoryManagedVariantIds = new Set<number>();
         if (productIds.length > 0) {
           const varResult = await client.query(`
             SELECT
@@ -104,6 +127,8 @@ const ebayListingRecovery = new EbayListingRecoveryService(ebayListingSyncServic
               pv.sku,
               pv.name,
               pv.price_cents,
+              pv.requires_shipping,
+              pv.track_inventory,
               pv.ebay_listing_excluded,
               cvo.is_listed AS variant_override_is_listed,
               pv.ebay_fulfillment_policy_override AS variant_fulfillment_override,
@@ -119,18 +144,11 @@ const ebayListingRecovery = new EbayListingRecoveryService(ebayListingSyncServic
             ORDER BY pv.product_id, pv.position ASC, pv.id ASC
           `, [productIds, EBAY_CHANNEL_ID]);
 
-          // Fetch fungible ATP for all products in the feed
-          const atpByVariantId: Map<number, number> = new Map();
-          const uniqueProductIds = [...new Set(varResult.rows.map((v: any) => v.product_id))];
-          for (const pid of uniqueProductIds) {
-            const variantAtps = await atpService.getAtpPerVariant(pid);
-            for (const va of variantAtps) {
-              atpByVariantId.set(va.productVariantId, va.atpUnits);
-            }
-          }
-
           for (const v of varResult.rows) {
             const pid = v.product_id;
+            if (isInventoryManagedVariant({ requiresShipping: v.requires_shipping, trackInventory: v.track_inventory })) {
+              inventoryManagedVariantIds.add(v.id);
+            }
             if (!listingStatesByProduct.has(pid)) listingStatesByProduct.set(pid, []);
             listingStatesByProduct.get(pid)!.push({ variantId: v.id, listingRecordId: v.listing_id,
               externalListingId: v.external_listing_id?.trim() || null,
@@ -145,7 +163,6 @@ const ebayListingRecovery = new EbayListingRecoveryService(ebayListingSyncServic
               explicitlyExcluded: v.ebay_listing_excluded === true || v.variant_override_is_listed === 0,
               excludedByProduct: false,
               effectivelyListed: true,
-              inventoryQuantity: Math.max(0, atpByVariantId.get(v.id) ?? 0),
               fulfillmentPolicyOverride: v.variant_fulfillment_override || null,
               returnPolicyOverride: v.variant_return_override || null,
               paymentPolicyOverride: v.variant_payment_override || null,
@@ -235,7 +252,7 @@ const ebayListingRecovery = new EbayListingRecoveryService(ebayListingSyncServic
           const isExcluded = productExcludedByIntent;
           const isTypeDisabled = row.type_listing_enabled === false;
 
-          const variants = (variantsByProduct.get(row.id) || []).map((v: any) => {
+          const listingVariants = (variantsByProduct.get(row.id) || []).map((v) => {
             const effectivelyListed = isVariantEffectivelyListed({
               productExcluded: row.ebay_listing_excluded === true,
               productOverrideIsListed: row.product_override_is_listed,
@@ -248,6 +265,14 @@ const ebayListingRecovery = new EbayListingRecoveryService(ebayListingSyncServic
               effectivelyListed,
             };
           });
+          // Reuse the listing and inventory eligibility owners for expected rows.
+          // Read failures are local to this product and never trigger publication.
+          const inventory = await feedInventory.readProduct(row.id,
+            listingVariants.map((variant: { id: number }) => variant.id),
+            listingVariants.filter((variant: { id: number; effectivelyListed: boolean }) => variant.effectivelyListed
+              && inventoryManagedVariantIds.has(variant.id)).map((variant: { id: number }) => variant.id));
+          const variants = listingVariants.map((variant) => ({ ...variant,
+            inventoryQuantity: inventory.quantities.get(variant.id) ?? null }));
           const includedVariants = variants.filter((v: any) => v.effectivelyListed);
           const listingState = resolveEbayFeedListingState(listingStatesByProduct.get(row.id) ?? [], includedVariants.map((variant: { id: number }) => variant.id));
           const isListed = listingState.isListed;
@@ -327,6 +352,7 @@ const ebayListingRecovery = new EbayListingRecoveryService(ebayListingSyncServic
             isListed,
             isExcluded,
             syncError: listingSyncError,
+            inventoryIssue: inventory.issue,
             externalListingId: row.external_product_id_count === 1
               ? row.external_product_id
               : null,
@@ -345,9 +371,12 @@ const ebayListingRecovery = new EbayListingRecoveryService(ebayListingSyncServic
       } finally {
         client.release();
       }
-    } catch (err: any) {
-      console.error("[eBay Listing Feed] Error:", err.message);
-      res.status(500).json({ error: err.message });
+    } catch (error) {
+      const reference = randomUUID();
+      const issue = resolveEbayListingIssue({ code: "EBAY_LISTING_FEED_UNAVAILABLE", jobId: reference });
+      console.error({ event: "ebay_listing_feed_failed", reference,
+        error: error instanceof Error ? safeListingDiagnostic(error.message) : "Unknown listing feed read failure" });
+      res.status(500).json({ code: issue.code, error: issue.message, issue });
     }
   });
 

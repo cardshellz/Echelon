@@ -34,6 +34,7 @@ export function ChannelListingFeedRow({
   onSelect,
   onEdit,
   onEditExisting,
+  onRecreate,
   onRemove,
   onMatch,
   onActivity,
@@ -53,6 +54,7 @@ export function ChannelListingFeedRow({
   onSelect(checked: boolean): void;
   onEdit(variantId: number): void;
   onEditExisting(sku: string): void;
+  onRecreate(operationId: string, sku: string): void;
   onRemove(variantId: number): void;
   onMatch(item: ChannelCatalogRow): void;
   onActivity(): void;
@@ -77,6 +79,13 @@ export function ChannelListingFeedRow({
     : operation && ["accepted", "verified"].includes(operation.item.state);
   const canEditExisting =
     !draft && !lifecycle && existingListing && row.sku && canEdit;
+  const canRecreate =
+    !draft &&
+    !lifecycle &&
+    row.sku &&
+    canEdit &&
+    operation &&
+    ["accepted", "verified"].includes(operation.item.state);
   const canMatch =
     remote &&
     !lifecycle &&
@@ -232,6 +241,13 @@ export function ChannelListingFeedRow({
                   {operation && (
                     <DropdownMenuItem onSelect={onActivity}>
                       View activity
+                    </DropdownMenuItem>
+                  )}
+                  {canRecreate && (
+                    <DropdownMenuItem
+                      onSelect={() => onRecreate(operation!.id, row.sku!)}
+                    >
+                      Recreate on Walmart
                     </DropdownMenuItem>
                   )}
                   {canMatch && (

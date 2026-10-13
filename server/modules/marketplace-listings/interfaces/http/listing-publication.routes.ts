@@ -4,6 +4,7 @@ import { requirePermission } from "../../../../routes/middleware";
 import { ListingPublicationError } from "../../domain/listing-publication";
 import type { ListingPublicationService } from "../../application/listing-publication.service";
 import { ChannelProviderError } from "../../../channels/channel-provider.error";
+import { ChannelIdentityError } from "../../../channels/channel-identity.domain";
 
 export function registerListingPublicationRoutes(app: Express): void {
   function route(
@@ -67,6 +68,16 @@ export function registerListingPublicationRoutes(app: Express): void {
   route("get", "/operations", false, (service, id) => service.operations(id));
   route(
     "get",
+    "/operations/:operationId/recreation",
+    true,
+    (service, id, request) =>
+      service.recreation(id, {
+        operationId: request.params.operationId,
+        sku: request.query.sku,
+      }),
+  );
+  route(
+    "get",
     "/operations/:operationId/retry-items",
     true,
     (service, id, request) =>
@@ -84,6 +95,7 @@ export function registerListingPublicationRoutes(app: Express): void {
 export function sendError(response: Response, error: unknown): void {
   const known =
     error instanceof ListingPublicationError ||
+    error instanceof ChannelIdentityError ||
     error instanceof ChannelProviderError;
   const invalid = error instanceof z.ZodError;
   const code = known
@@ -98,13 +110,15 @@ export function sendError(response: Response, error: unknown): void {
     .status(
       error instanceof ListingPublicationError
         ? error.status
-        : invalid
-          ? 400
-          : error instanceof ChannelProviderError
-            ? error.retryable
-              ? 503
-              : 409
-            : 500,
+        : error instanceof ChannelIdentityError
+          ? 409
+          : invalid
+            ? 400
+            : error instanceof ChannelProviderError
+              ? error.retryable
+                ? 503
+                : 409
+              : 500,
     )
     .json({
       code,

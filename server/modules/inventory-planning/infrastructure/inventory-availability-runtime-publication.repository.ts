@@ -294,7 +294,7 @@ async function createPublicationContext(
       const supplySnapshot = await captureActiveSupplySnapshotInsideTransaction(client, productId);
       const managedSellableVariantIds = await loadManagedSellableVariantIds(client, productId);
       const publicationTargets = await loadChannelExposurePublicationTargets(
-        client, productId, managedSellableVariantIds, channelId, purpose === "deferred_dropship_quantity_read",
+        client, productId, managedSellableVariantIds, channelId, purpose === "channel_quantity_read",
       );
       return planInventoryChannelExposureProduct({
         ...authority, supplySnapshot, managedSellableVariantIds, publicationTargets,

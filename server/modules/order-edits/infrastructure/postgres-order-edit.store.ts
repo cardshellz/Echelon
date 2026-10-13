@@ -17,6 +17,7 @@ import { OrderEditError } from "../domain/order-edit-error";
 import { unchangedFulfilledOrderEdit } from "../application/order-edit-evidence";
 import { finalizeOrderEditWarehouseRelease } from "./order-edit-warehouse.gateway";
 import { appendOrderEditAudit } from "./order-edit-audit.writer";
+import { orderEditAuditActor, readCustomerOrderEditActor } from "../domain/order-edit-actor";
 import {
   orderEditSnapshotSchema,
   orderEditQuoteSchema,
@@ -62,6 +63,11 @@ const documentSchema = z
   })
   .strict()
   .superRefine((record, context) => {
+    const customerActor = readCustomerOrderEditActor(record.actorId);
+    if (customerActor && (customerActor.channelId !== record.baseline.channelId
+      || customerActor.externalCustomerId !== record.baseline.customerId?.replace(/^gid:\/\/shopify\/Customer\//, ""))) {
+      context.addIssue({ code: "custom", message: "The persisted customer actor does not own the certified order." });
+    }
     if (
       record.input.omsOrderId !== record.omsOrderId ||
       record.input.connectionId !== record.connectionId ||
@@ -284,22 +290,27 @@ export class PostgresOrderEditStore implements OrderEditStore {
   }
   async create(record: OrderEditRecord) {
     this.parseRecord(record);
+    const actor = orderEditAuditActor(record.actorId);
     await this.transaction(async (client) => {
       await client.query(
-        `INSERT INTO oms.order_edit_operations(id,oms_order_id,connection_id,request_key,request_hash,actor_id,status,version,document,created_at,updated_at)
-        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+        actor.customerChannelId === null
+          ? `INSERT INTO oms.order_edit_operations(id,oms_order_id,connection_id,request_key,request_hash,actor_id,status,version,document,created_at,updated_at)
+            VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`
+          : `INSERT INTO oms.order_edit_operations(id,oms_order_id,connection_id,request_key,request_hash,actor_id,status,version,document,created_at,updated_at,customer_actor_channel_id,customer_actor_external_id)
+            VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
         [
           record.id,
           record.omsOrderId,
           record.connectionId,
           record.requestKey,
           record.requestHash,
-          record.actorId,
+          actor.staffId,
           record.status,
           record.version,
           JSON.stringify(record),
           record.createdAt,
           record.updatedAt,
+          ...(actor.customerChannelId === null ? [] : [actor.customerChannelId, actor.externalCustomerId]),
         ],
       );
       await this.audit(client, record, null, record.actorId, "created");

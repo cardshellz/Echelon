@@ -1,6 +1,23 @@
 import { ebayListingIssueSchema, type EbayListingIssue } from "@shared/types/ebay-listing-issue";
 import { resolveEbayListingIssue } from "@shared/ebay-listing-issue";
 
+/** Feed reads expose only the server's validated public issue, never raw database
+ * or proxy errors. Reloading this read must not become a listing command retry. */
+export function listingFeedIssueFromError(error: unknown): EbayListingIssue {
+  if (error instanceof Error) {
+    try {
+      const response: unknown = JSON.parse(error.message.replace(/^\d{3}:\s*/, ""));
+      if (typeof response === "object" && response !== null && "issue" in response) {
+        const issue = ebayListingIssueSchema.safeParse(response.issue);
+        if (issue.success) return issue.data;
+      }
+    } catch {
+      // A malformed or older response has no validated public diagnostic.
+    }
+  }
+  return resolveEbayListingIssue({ code: "EBAY_LISTING_FEED_UNAVAILABLE" });
+}
+
 /** apiRequest retains the JSON response in Error.message; validate before rendering it. */
 export function listingIssueFromError(error: unknown, productId?: number): EbayListingIssue {
   const message = error instanceof Error ? error.message : "The listing request could not be completed.";
