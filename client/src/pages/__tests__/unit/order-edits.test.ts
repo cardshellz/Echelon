@@ -221,7 +221,7 @@ describe("order financial presentation", () => {
     expect(summary).toContain("$107.96");
     expect(summary).toContain("Payment required for these changes:");
     expect(summary).toContain("$10.00");
-    expect(html).toContain("Discounts, shipping and tax");
+    expect(html).toContain("How your total is calculated");
     expect(html).toContain("Payments and refunds");
   });
 
@@ -276,7 +276,7 @@ describe("order financial presentation", () => {
       "TEN",
       "10% off eligible items",
       "Reward credit",
-      "$20.00 fixed credit",
+      "$20.00 fixed discount",
       "−$10.00",
       "−$15.00",
       "−$20.00",
@@ -306,9 +306,14 @@ describe("order financial presentation", () => {
         ],
       }),
     );
-    expect(html).toContain("Item discounts");
-    expect(html).not.toContain("10% off eligible items");
-    expect(html).toContain("−$11.99");
+    const previous = html.match(/<section[^>]*aria-label="Before edit"[^>]*>(.*?)<\/section>/)?.[1];
+    const revised = html.match(/<section[^>]*aria-label="After changes"[^>]*>(.*?)<\/section>/)?.[1];
+    // Each card shows only its own proven allocations. The legacy card keeps
+    // its aggregate; the revised card can explain its verified percentage.
+    expect(previous).not.toContain("10% off eligible items");
+    expect(previous).toContain("−$11.99");
+    expect(revised).toContain("10% off eligible items");
+    expect(revised).toContain("−$11.99");
   });
   it("shows before and after discounts, shipping, tax, and the payment required for a change", () => {
     const after: OrderEditFinancials = {
@@ -336,12 +341,10 @@ describe("order financial presentation", () => {
     for (const label of [
       "Before edit",
       "After changes",
-      "Items before discounts",
-      "Item discounts",
+      "Items at regular prices",
       "AMAZZIN",
-      "Shipping discounts",
       "Free shipping",
-      "Shipping after discounts",
+      "Shipping rate",
       "Tax",
       "Order total",
     ])
@@ -393,10 +396,10 @@ describe("order financial presentation", () => {
     for (const label of [
       "Payments received",
       "Refunds issued",
-      "Net paid",
+      "Paid toward this order",
       "Amount to refund",
       "Payment history",
-      "Refund · Pending",
+      "Pending",
     ])
       expect(html).toContain(label);
     expect(html).toContain('dateTime="2026-10-06T12:00:00.000Z"');
@@ -434,7 +437,8 @@ describe("order financial presentation", () => {
       });
       expect(html).toContain("Current order");
       expect(html).not.toContain("After changes");
-      expect(html).toContain("Amount still due");
+      expect(html).toContain("Current order paid in full");
+      expect(html).not.toContain("Amount still due");
       expect(html).not.toContain("quoted differences");
       expect(html).not.toContain("Payment required for these changes");
     },

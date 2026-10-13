@@ -46,7 +46,7 @@ export function OrderEditSummary({
       </dl>
       {difference && (
         <div className="oe-payment-difference">
-          <span>{difference.label}</span>
+          <span>{difference.label}</span>{" "}
           <strong>{money(difference.amountCents)}</strong>
         </div>
       )}
@@ -87,9 +87,18 @@ export function OrderEditCalculationDetails({
     <FinancialDetails label="How your total is calculated">
       {columns.length > 0 && <OrderEditTotals columns={columns} embedded />}
       {shipping && (
-        <p className="oe-shipping-note">
-          {shipping.title} · Recalculated for your updated items.
-        </p>
+        <section className="oe-shipping-rate" aria-label="Recalculated shipping">
+          <h3>{shipping.title}</h3>
+          <dl className="oe-money-list">
+            <dt>Current checkout rate</dt><dd>{money(shipping.grossCents)}</dd>
+            {shipping.discountCents > 0 && <>
+              <dt className="oe-saving">{shipping.discountLabels.join(", ") || "Shipping savings"}</dt>
+              <dd className="oe-saving">−{money(shipping.discountCents)}</dd>
+            </>}
+            <dt className="oe-net">Shipping charged</dt><dd className="oe-net">{money(shipping.netCents)}</dd>
+          </dl>
+          <p className="oe-shipping-note">Included in the shipping amount above.</p>
+        </section>
       )}
     </FinancialDetails>
   );

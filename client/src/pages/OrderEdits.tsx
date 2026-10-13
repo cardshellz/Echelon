@@ -28,7 +28,6 @@ import { OrderEditProductPicker } from "@/components/order-edits/OrderEditProduc
 import { OrderEditItems } from "@/components/order-edits/OrderEditItems";
 import { MemberProductPrice } from "@/components/MemberProductPrice";
 import { exactOrderEditUnitPrice, groupOrderEditDisplayLines } from "@/lib/order-edit-display";
-import "@/components/order-edits/order-edit-ui.css";
 import { useAuth } from "@/lib/auth";
 import { useDebounce } from "@/hooks/use-debounce";
 import {
