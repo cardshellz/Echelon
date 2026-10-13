@@ -118,7 +118,8 @@ function configureImport(selectResults: unknown[][], insertedLine: any) {
 
 function importSelectResults(poLines: any[], existingLines: any[], totalCents: number) {
   return [
-    [{ id: 55, vendorId: 4, status: "received", paidAmountCents: 0 }],
+    [{ id: 55, vendorId: 4, status: "received", paidAmountCents: 0, approvedAt: null, approvedBy: null }],
+    [],
     [{ id: 7, vendorId: 4 }],
     [{ id: 81 }],
     poLines,

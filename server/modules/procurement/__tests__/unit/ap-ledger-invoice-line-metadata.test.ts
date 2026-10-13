@@ -47,7 +47,8 @@ function fixture(overrides: Partial<RecordedLine> = {}): RecordedLine {
 function configure(record: RecordedLine, invoiceStatus = "received", financialReadResults: unknown[][] = []) {
   const selectResults: unknown[][] = [
     [{ vendorInvoiceId: record.vendorInvoiceId, purchaseOrderLineId: null }],
-    [{ id: 12, vendorId: 4, currency: "USD", paidAmountCents: 0, status: invoiceStatus }],
+    [{ id: 12, vendorId: 4, currency: "USD", paidAmountCents: 0, approvedAt: null, approvedBy: null, status: invoiceStatus }],
+    ...(invoiceStatus === "received" || invoiceStatus === "disputed" ? [[]] : []),
     [record],
     ...financialReadResults,
   ];
@@ -59,7 +60,7 @@ function configure(record: RecordedLine, invoiceStatus = "received", financialRe
     if (selectResults.length === 0) throw new Error("Unexpected financial projection read");
     const result = selectResults.shift()!;
     const chain: any = {
-      from: () => chain, where: () => chain, leftJoin: () => chain, innerJoin: () => chain,
+      from: () => chain, where: () => chain, limit: () => chain, leftJoin: () => chain, innerJoin: () => chain,
       for: (lock: string) => { locks.push(lock); return chain; },
       then: (resolve: (value: unknown[]) => unknown, reject: (error: unknown) => unknown) => Promise.resolve(result).then(resolve, reject),
     };

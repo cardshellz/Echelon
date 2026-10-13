@@ -52,6 +52,7 @@ export const POSTGRES_TEST_FILES: readonly string[] = Object.freeze([
   "server/modules/procurement/__tests__/integration/historical-po-supplier-evidence-backfill.integration.test.ts",
   "server/modules/procurement/__tests__/integration/legacy-po-receive-config-remediation.integration.test.ts",
   "server/modules/procurement/__tests__/integration/ap-invoice-line-metadata.integration.test.ts",
+  "server/modules/procurement/__tests__/integration/ap-financial-safeguards.integration.test.ts",
   "server/modules/inventory/__tests__/integration/lot-cost-column-types.integration.test.ts",
   "server/modules/inventory-planning/__tests__/integration/inventory-availability-foundation.integration.test.ts",
   "server/modules/inventory/__tests__/integration/inventory-cutover-encumbrance.integration.test.ts",

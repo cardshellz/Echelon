@@ -147,6 +147,12 @@ describe("reviewed invoice line economics", () => {
     source.billing!.allocations[0].currency = "USD"; source.billing!.allInvoiceLines[0].vendorInvoiceId = 99;
     expect(() => planInvoiceQuantityCorrection(source, 72, financialRequest())).toThrow(expect.objectContaining({ code: "INVOICE_QUANTITY_SOURCE_INVALID" }));
   });
+  it.each(["scheduled", "returned", "unknown"])("requires review of historical payment status %s before changing invoice economics", (paymentStatus) => {
+    const source = billingFacts(); source.billing!.allocations[0].paymentStatus = paymentStatus;
+    const before = structuredClone(source);
+    expect(() => planInvoiceQuantityCorrection(source, 72, financialRequest())).toThrow(expect.objectContaining({ code: "AP_PAYMENT_STATUS_REVIEW_REQUIRED" }));
+    expect(source).toEqual(before);
+  });
   it("requires the allocation owner when changing amounts on a multi-PO bill", () => {
     const source = billingFacts(); source.billing!.purchaseOrderIds.push(99);
     expect(() => planInvoiceQuantityCorrection(source, 72, financialRequest())).toThrow(expect.objectContaining({ code: "INVOICE_CORRECTION_ALLOCATION_REVIEW_REQUIRED" }));
