@@ -43,7 +43,7 @@ export function ListingActivityDetails({
               </div>
             </dl>
             {item.error && (
-              <p className="text-sm text-destructive [overflow-wrap:anywhere]">
+              <p className={`text-sm [overflow-wrap:anywhere] ${item.stockState === "queued" ? "text-muted-foreground" : "text-destructive"}`}>
                 {item.error}
               </p>
             )}

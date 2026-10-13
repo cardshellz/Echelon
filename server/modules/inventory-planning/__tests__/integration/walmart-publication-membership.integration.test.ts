@@ -16,7 +16,7 @@ describe.skipIf(!url||!disposable)("retired membership evidence",()=>{
     await activateWalmartPublicationInventoryFixture(database.pool);
     await installCutoverAdmissionFixturePrerequisites(database.pool);
     await database.pool.query(readFileSync("migrations/236_inventory_cutover_admission.sql","utf8"));
-    await database.pool.query(`ALTER TABLE channels.channel_feeds ADD COLUMN channel_product_id text;
+    await database.pool.query(`
       UPDATE channels.channel_feeds SET channel_product_id='WPID-P5';
       INSERT INTO inventory.publication_membership_versions(publication_target_id,product_variant_id,version,included,definition_hash,review_hash,created_by,created_at)
         VALUES(2,101,1,false,repeat('a',64),repeat('a',64),'historical-operator',transaction_timestamp());

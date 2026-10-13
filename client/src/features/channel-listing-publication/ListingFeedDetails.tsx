@@ -109,7 +109,10 @@ export function ListingFeedDetails({
       </dl>
       {lifecycle?.message && <p>{lifecycle.message}</p>}
       {operation?.item.error && (
-        <p className="text-destructive">{operation.item.error}</p>
+        <p className={operation.item.stockState === "queued" ? "text-muted-foreground" : "text-destructive"}>{operation.item.error}</p>
+      )}
+      {operation?.item.stockErrorCode === "STOCK_RECREATION_OUTCOME_UNCERTAIN" && (
+        <a href="/inventory/cutover" className="block w-fit underline">Review stalled stock requests</a>
       )}
       {row.issue && <p className="text-destructive">{row.issue}</p>}
       {remote?.priceError && <p className="text-destructive">{remote.priceError}</p>}

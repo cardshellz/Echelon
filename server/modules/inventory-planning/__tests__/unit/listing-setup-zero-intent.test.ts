@@ -18,6 +18,17 @@ const intent = () => ({
   items: [{ productVariantId: 101, sku: "PACK", quantity: 0 as const }],
 });
 describe("initial listing zero intent", () => {
+  it("requires exact immutable recreation evidence and never permits a positive setup quantity", () => {
+    const recreation = { sourceOperationId: "00000000-0000-4000-8000-000000000001", sourceHash: "a".repeat(64), previousExternalProductId: "WPID-OLD" };
+    const input = { ...intent(), items: [{ ...intent().items[0], recreation }] };
+    const validated = validateListingSetupZeroIntent(input);
+    expect(Object.isFrozen(validated.items[0].recreation)).toBe(true);
+    recreation.previousExternalProductId = "CHANGED";
+    expect(validated.items[0].recreation?.previousExternalProductId).toBe("WPID-OLD");
+    expect(() => validateListingSetupZeroIntent({ ...input, items: [{ ...input.items[0], quantity: 1 }] })).toThrow();
+    expect(() => validateListingSetupZeroIntent({ ...intent(), items: [{ ...intent().items[0], recreation: true }] })).toThrow();
+    expect(() => validateListingSetupZeroIntent({ ...input, items: [{ ...input.items[0], recreation: { ...recreation, sourceHash: "not-proof" } }] })).toThrow();
+  });
   it("requires exact runtime owner proof; a correctly typed object is insufficient", async () => {
     expect(() => assertListingSetupZeroAdmission(intent())).toThrow(
       /inventory-owned/,

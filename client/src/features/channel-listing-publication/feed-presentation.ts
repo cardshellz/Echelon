@@ -40,6 +40,11 @@ export function listingStatus(
   if (row.remote) {
     const published = row.remote.publishedStatus.toUpperCase();
     const lifecycle = row.remote.lifecycleStatus.toUpperCase();
+    if (row.operation?.item.state === "accepted" && row.operation.item.stockState === "blocked")
+      return { label: "Stock needs attention", tone: "attention" };
+    if (published === "PUBLISHED" && lifecycle === "ACTIVE"
+      && row.operation?.item.stockState === "queued" && row.operation.item.state === "accepted")
+      return { label: "Confirming stock", tone: "neutral" };
     if (published === "PUBLISHED" && lifecycle === "ACTIVE")
       return { label: "Active", tone: "good" };
     if (["RETIRED", "ARCHIVED"].includes(lifecycle))

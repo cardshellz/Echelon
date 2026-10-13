@@ -261,10 +261,11 @@ export async function handlePublicationRequest(
         createdAt: new Date().toISOString(),
         expiresAt: new Date(Date.now() + 300_000).toISOString(),
         inventory: {
-          ready: false,
-          message:
-            "Inventory setup required. Items will remain at zero stock until inventory is ready.",
-          targetId: null,
+          ready: !state.blockedReview,
+          message: state.blockedReview ? "Resolve the listing issues before publishing."
+            : "Items start with zero stock. Echelon sends current inventory automatically after Walmart publishes the item, including when a recreated item's quantity is unchanged.",
+          targetId: "7",
+          targetRevision: "1",
         },
       });
     state.reviews.push(review);
