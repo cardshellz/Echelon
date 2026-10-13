@@ -926,12 +926,12 @@ test("shows the storefront member-price treatment on the correct pack, including
       name: "Quantity for added 35PT 3x4 Premium Toploader · Box of 250 · SHLZ-TOP-35PT-B250",
     }),
   ).toHaveValue("1");
-  const addedMemberPrice = page.getByLabel(
-    ".club member price $29.99; retail $39.99", { exact: true },
-  );
-  await expect(addedMemberPrice).toBeVisible();
-  await expect(addedMemberPrice.locator(".cardshellz-member-price-value"))
-    .toHaveCSS("color", "rgb(74, 138, 58)");
+  // This preview fixture returns a $15.00 net unit amount. The order row must
+  // use that verified amount, rather than repeat the picker's $29.99 price.
+  const addedRow = page.locator(".oe-added-item");
+  await expect(addedRow.getByText("$15.00 each", { exact: true })).toBeVisible();
+  await expect(addedRow.locator(".oe-item-total")).toHaveText("$15.00");
+  await expect(addedRow.getByText("Added", { exact: true })).toBeVisible();
   await assertFitsScreen(page);
   expect(
     fixture.requests.filter((request) =>
