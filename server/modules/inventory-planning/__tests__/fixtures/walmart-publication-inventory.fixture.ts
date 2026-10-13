@@ -29,6 +29,7 @@ export async function installWalmartPublicationInventoryFixture(
   for (const file of [
     "0709_walmart_quantity_admission.sql",
     "0716_inventory_publication_reconciliation.sql",
+    "0746_listing_recreation_stock_continuation.sql",
   ])
     await pool.query(
       readFileSync(resolve(process.cwd(), "migrations", file), "utf8"),
@@ -40,7 +41,7 @@ export async function installWalmartPublicationInventoryFixture(
     CREATE TABLE channels.walmart_connections(channel_id integer PRIMARY KEY,connection_id integer NOT NULL,
       partner_id text NOT NULL,environment text NOT NULL,ship_node_id text NOT NULL,warehouse_id integer NOT NULL);
     CREATE TABLE channels.channel_feeds(id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,channel_id integer NOT NULL,
-      product_variant_id integer NOT NULL,channel_sku text,channel_inventory_item_id text,is_active integer NOT NULL DEFAULT 1,quarantined_at timestamptz);
+      product_variant_id integer NOT NULL,channel_sku text,channel_inventory_item_id text,channel_product_id text,is_active integer NOT NULL DEFAULT 1,quarantined_at timestamptz);
     UPDATE channels.channels SET provider='walmart',status='active' WHERE id=36;
     INSERT INTO channels.channel_connections(id,channel_id) VALUES(8,36);
     INSERT INTO channels.walmart_connections VALUES(36,8,'partner-36','production','test-location',1);

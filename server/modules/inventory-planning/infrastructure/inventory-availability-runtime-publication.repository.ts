@@ -31,6 +31,7 @@ import { InventoryChannelQuantityRuntimeService } from "../application/inventory
 import { readPublicationStockSelection, selectionRequiresPublication } from "./inventory-publication-selection.reader";
 
 type ClientPool = Pick<Pool, "connect"> & { options?: { max?: number } };
+type ReplacementListing = { publicationTargetId: number; productVariantId: number };
 
 interface TargetRow extends Record<string, unknown> {
   publication_target_id: number;
@@ -196,6 +197,7 @@ implements InventoryAvailabilityRuntimePublicationExecutor {
   constructor(
     private readonly client: InventoryAvailabilityTransactionQueryClient,
     private readonly logger?: InventoryAvailabilityRuntimePublicationLogger,
+    private readonly replacementListings: readonly ReplacementListing[] = [],
   ) {}
 
   async execute<T>(
@@ -213,7 +215,7 @@ implements InventoryAvailabilityRuntimePublicationExecutor {
       throw runtimeError("INVENTORY_PUBLICATION_TRANSACTION_REQUIRED",
         "Caller-owned publication requires a SERIALIZABLE read-write transaction.", {});
     }
-    return work(await createPublicationContext(this.client, this.logger, true));
+    return work(await createPublicationContext(this.client, this.logger, true, this.replacementListings));
   }
 }
 
@@ -222,6 +224,10 @@ export function createTransactionScopedInventoryPublicationService(
   options: {
     channelId?: number;
     logger?: InventoryAvailabilityRuntimePublicationLogger;
+    /** Only the durable recreation handoff uses this: prior acknowledgements
+     * belong to the deleted listing. The caller records its replay receipt in
+     * the same transaction; quantities still come from the canonical planner. */
+    replacementListings?: readonly ReplacementListing[];
   } = {},
 ): AuthorityAwareInventoryPublicationService {
   // The enclosing command may still fail after this callback. Never present
@@ -235,7 +241,7 @@ export function createTransactionScopedInventoryPublicationService(
       : console.warn(JSON.stringify({ ...event, transactionState: "pending_commit" })),
   };
   return new AuthorityAwareInventoryPublicationService(
-    new PostgresTransactionScopedInventoryPublicationExecutor(client, logger),
+    new PostgresTransactionScopedInventoryPublicationExecutor(client, logger, options.replacementListings),
     options.channelId,
     logger,
   );
@@ -270,6 +276,7 @@ async function createPublicationContext(
   client: InventoryAvailabilityTransactionQueryClient,
   logger: InventoryAvailabilityRuntimePublicationLogger | undefined,
   requireCanonical: boolean,
+  replacementListings: readonly ReplacementListing[] = [],
 ): Promise<InventoryAvailabilityRuntimePublicationContext> {
   const authority = await loadAndLockRuntimeAuthority(client);
   if (requireCanonical && authority.authority !== "canonical") {
@@ -309,7 +316,7 @@ async function createPublicationContext(
           { activationRunId, pinnedActivationRunId: authority.activationRunId },
         );
       }
-      return enqueueFullPublications(client, activationRunId, intents);
+      return enqueueFullPublications(client, activationRunId, intents, replacementListings);
     },
   };
 }
@@ -639,6 +646,7 @@ async function enqueueFullPublications(
   client: InventoryAvailabilityTransactionQueryClient,
   activationRunId: string,
   intents: readonly CanonicalInventoryPublicationIntent[],
+  replacementListings: readonly ReplacementListing[] = [],
 ): Promise<CanonicalInventoryPublicationEnqueueResult> {
   positiveBigintString(activationRunId, "activationRunId");
   let enqueuedRows = 0;
@@ -668,7 +676,9 @@ async function enqueueFullPublications(
       LATEST_PUBLICATION_ROW_SQL,
       [intent.publicationTargetId, intent.productVariantId],
     )).rows[0];
-    if (latest && reusablePublicationState(latest.state)
+    const replacingListing = replacementListings.some(listing => listing.publicationTargetId === intent.publicationTargetId
+      && listing.productVariantId === intent.productVariantId);
+    if (!replacingListing && latest && reusablePublicationState(latest.state)
       && sameDesiredPublication(latest, activationRunId, intent)) {
       coalescedRows += 1;
       coalescedPublicationKeys.push(publicationKey(intent));

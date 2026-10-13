@@ -10,6 +10,29 @@ import type { WalmartChannelService } from "./modules/channels/adapters/walmart/
 import type { ChannelCatalogDirectory } from "./modules/channels/channel-catalog.routes";
 import type { QuantityPublicationAdmission } from "./modules/inventory-planning/application/quantity-publication-admission.port";
 import { createCatalogPublicImageUrl } from "./modules/catalog/catalog-public-image";
+import type { ListingSnapshot } from "./modules/marketplace-listings/domain/listing-publication";
+import type { VerifiedListingStockService } from "./modules/inventory-planning/application/verified-listing-stock.service";
+import { InventoryPublicationMembershipError } from "./modules/inventory-planning/application/inventory-publication-membership.service";
+import { InventoryAvailabilityRuntimePublicationError } from "./modules/inventory-planning/application/inventory-availability-runtime-publication.service";
+
+function recreationFor(
+  variantId: number,
+  sku: string,
+  recreations: ListingSnapshot["recreations"],
+) {
+  const evidence = recreations?.find(
+    (item) => item.variantId === variantId && item.sku === sku,
+  );
+  return evidence
+    ? {
+        recreation: {
+          sourceOperationId: evidence.operationId,
+          sourceHash: evidence.sourceHash,
+          previousExternalProductId: evidence.previousExternalProductId,
+        },
+      }
+    : {};
+}
 
 /** The composition root connects existing owners; none owns another module's tables. */
 export function createListingPublicationService(input: {
@@ -17,19 +40,23 @@ export function createListingPublicationService(input: {
   walmart: WalmartChannelService;
   channelCatalog: ChannelCatalogDirectory;
   quantityAdmission: QuantityPublicationAdmission;
+  verifiedStock: Pick<VerifiedListingStockService, "connect">;
 }): ListingPublicationService {
   const provider = new WalmartListingProvider(input.walmart);
   return new ListingPublicationService({
     store: new PostgresListingPublicationRepository(input.pool),
     listingUpdates: new PostgresListingUpdateRepository(input.pool),
-    catalog: new ChannelListingCatalogRepository(input.pool, createCatalogPublicImageUrl(process.env)),
+    catalog: new ChannelListingCatalogRepository(
+      input.pool,
+      createCatalogPublicImageUrl(process.env),
+    ),
     provider: async (channelId) => {
       await provider.account(channelId);
       return provider;
     },
     identities: (channelId) => input.channelCatalog.forChannel(channelId),
     inventory: {
-      inspect: async (account, items) => {
+      inspect: async (account, items, recreations) => {
         const inspection =
           await input.quantityAdmission.inspectListingSetupZero({
             channelId: account.channelId,
@@ -41,6 +68,7 @@ export function createListingPublicationService(input: {
               productVariantId: item.variantId,
               sku: item.sku,
               quantity: 0,
+              ...recreationFor(item.variantId, item.sku, recreations),
             })),
           });
         return {
@@ -48,7 +76,7 @@ export function createListingPublicationService(input: {
           targetId: inspection.publicationTargetId?.toString() ?? null,
           targetRevision: inspection.targetRevision,
           message: inspection.ready
-            ? "Items start with zero stock. Once Walmart publishes them, automatic stock updates use your Channel Inventory rules while updates are on."
+            ? "Items start with zero stock. Once Walmart publishes them, Echelon sends current available inventory automatically and checks Walmart received it. Recreated items keep their exact SKU mapping and receive a fresh stock update even if the quantity is unchanged."
             : [
                 ...new Set([
                   ...inspection.blockers.map((blocker) => blocker.message),
@@ -66,6 +94,7 @@ export function createListingPublicationService(input: {
         items,
         reviewedInventory,
         submit,
+        recreations,
       ) => {
         if (!reviewedInventory.targetId || !reviewedInventory.targetRevision) {
           throw new ListingPublicationError(
@@ -87,10 +116,53 @@ export function createListingPublicationService(input: {
               productVariantId: item.variantId,
               sku: item.sku,
               quantity: 0,
+              ...recreationFor(item.variantId, item.sku, recreations),
             })),
           },
           submit,
         );
+      },
+      resumeRecreationStock: async ({
+        account,
+        variantId,
+        setupOperationId,
+        sku,
+        externalProductId,
+        observedAt,
+      }) => {
+        try {
+          const result = await input.verifiedStock.connect({
+            channelId: account.channelId,
+            connectionId: account.connectionId,
+            accountId: account.accountId,
+            environment: account.environment,
+            externalScopeId: account.scopeId,
+            productVariantId: variantId,
+            setupOperationId,
+            sku,
+            externalProductId,
+            observedAt,
+            lifecycleStatus: "ACTIVE",
+            publishedStatus: "PUBLISHED",
+          });
+          return {
+            ready: result.publicationState === "verified",
+            blocked: result.state === "excluded",
+            message:
+              result.state === "excluded"
+                ? "The recreated item is published, but its channel selection excludes stock. Include this variant in the Walmart channel to resume automatic inventory updates."
+                : "The recreated item is published. Current stock is queued; Echelon will confirm Walmart received it automatically. No resubmission is needed.",
+          };
+        } catch (error) {
+          // Preserve inventory's actionable classification at the listing boundary.
+          // Database/transport internals still use the application's safe fallback.
+          if (
+            error instanceof InventoryPublicationMembershipError ||
+            error instanceof InventoryAvailabilityRuntimePublicationError
+          )
+            throw new ListingPublicationError(error.code, error.message);
+          throw error;
+        }
       },
     },
     now: () => new Date(),

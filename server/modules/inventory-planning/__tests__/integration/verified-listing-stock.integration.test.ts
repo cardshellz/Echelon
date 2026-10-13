@@ -49,8 +49,7 @@ dbDescribe.sequential("verified Walmart listing joins canonical ATP", () => {
     database = await createInventoryCutoverTestDatabase(url, disposable, cutoverCompositionBaseSql);
     await installWalmartPublicationInventoryFixture(database.pool, { includeWalmartMapping: false });
     await activateWalmartPublicationInventoryFixture(database.pool);
-    await database.pool.query(`ALTER TABLE channels.channel_feeds ADD COLUMN channel_product_id text;
-      UPDATE channels.channel_feeds SET channel_product_id='WPID-P5' WHERE product_variant_id=101`);
+    await database.pool.query(`UPDATE channels.channel_feeds SET channel_product_id='WPID-P5' WHERE product_variant_id=101`);
     await installCutoverAdmissionFixturePrerequisites(database.pool);
     await database.pool.query(readFileSync(resolve("migrations/236_inventory_cutover_admission.sql"), "utf8"));
     await database.pool.query(readFileSync(resolve("migrations/0721_inventory_publication_direct_enable.sql"), "utf8"));

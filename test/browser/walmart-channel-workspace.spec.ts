@@ -129,6 +129,8 @@ test("recreates a deleted listing through a fresh full draft and review while pr
   expect(state.publication.draft.items.find(item => item.variantId === 1)).toMatchObject(response.item);
   await page.getByRole("button", { name: "Review selected (1)", exact: true }).click();
   await expect(editor.getByText(/This review includes recreating/)).toBeVisible();
+  await expect(editor.getByText(/including when a recreated item's quantity is unchanged/)).toBeVisible();
+  await expect(editor.getByRole("button", { name: "Publish 1 items", exact: true })).toBeEnabled();
   await editor.screenshot({ path: info.outputPath("recreate-listing-review.png") });
   expect(await editor.evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true);
   expect(state.publication.submittedItems).toEqual([]);
@@ -138,6 +140,44 @@ test("recreates a deleted listing through a fresh full draft and review while pr
   expect(state.publication.draft.items.map(item => item.variantId)).toEqual([26]);
   expect(state.publication.operations.some(operation => operation.id === operationId)).toBe(true);
   expect(state.updates.writes).toEqual([]);
+  expect(state.unexpected).toEqual([]); expect(state.errors).toEqual([]);
+});
+
+test("recreated listing distinguishes stock confirmation, a recoverable blocker, and completion", async ({ page }, info) => {
+  const state = await setup(page, { remoteRows: [{ ...listing("CARD-P5"), mappingStatus: "linked" }] });
+  const message = "The recreated item is published. Current stock is queued; Echelon will confirm Walmart received it automatically. No resubmission is needed.";
+  const operation = listingOperationSchema.parse({ id: "22222222-2222-4222-8222-222222222222", channelId: 77,
+    state: "processing", submissionId: "recreated-feed", error: null,
+    createdAt: "2026-10-13T12:00:00.000Z", updatedAt: "2026-10-13T12:01:00.000Z",
+    items: [{ variantId: 11, sku: "CARD-P5", title: "Recreated card sleeves", priceCents: 2499,
+      state: "accepted", stockState: "queued", externalProductId: "WPID-CARD-P5", error: message }] });
+  state.publication.operations = [operation];
+  await page.reload();
+  const row = page.getByRole("row").filter({ hasText: "CARD-P5" });
+  await expect(row.getByText("Confirming stock", { exact: true })).toBeVisible();
+  await row.getByRole("button", { name: "Show details for CARD-P5", exact: true }).click();
+  const details = page.getByRole("region", { name: "Details for CARD-P5", exact: true });
+  await expect(details.getByText(message, { exact: true })).toBeVisible();
+  await expect(details.getByText(message, { exact: true })).not.toHaveClass(/text-destructive/);
+  operation.items[0].stockState = "blocked";
+  operation.items[0].error = "Automatic stock updates are paused globally. Resume stock updates to continue this saved request.";
+  await page.reload();
+  await expect(row.getByText("Stock needs attention", { exact: true })).toBeVisible();
+  await row.getByRole("button", { name: "Show details for CARD-P5", exact: true }).click();
+  await expect(details.getByText(operation.items[0].error, { exact: true })).toBeVisible();
+  await expect(details.getByRole("link", { name: "Manage inventory rules" })).toHaveAttribute("href", "/channels/inventory");
+  operation.items[0].stockErrorCode = "STOCK_RECREATION_OUTCOME_UNCERTAIN";
+  operation.items[0].error = "A prior Walmart stock request has no final response. An inventory administrator must review Stalled publication recovery.";
+  await page.reload();
+  await row.getByRole("button", { name: "Show details for CARD-P5", exact: true }).click();
+  await expect(details.getByRole("link", { name: "Review stalled stock requests" })).toHaveAttribute("href", "/inventory/cutover");
+  await page.screenshot({ path: info.outputPath("recreation-stock-recovery.png"), fullPage: true });
+  operation.items[0].stockState = "ready"; operation.items[0].state = "verified"; operation.items[0].error = null;
+  delete operation.items[0].stockErrorCode;
+  operation.state = "completed";
+  await page.reload();
+  await expect(row.getByText("Active", { exact: true })).toBeVisible();
+  expect(state.publication.writes).toEqual([]);
   expect(state.unexpected).toEqual([]); expect(state.errors).toEqual([]);
 });
 

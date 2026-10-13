@@ -5,6 +5,7 @@ import { InventoryPublicationMembershipError } from "../application/inventory-pu
 import { acquireInventoryCutoverFenceInsideTransaction } from "./inventory-cutover-admission-fence.repository";
 import { readPublicationStockSelection } from "./inventory-publication-selection.reader";
 import { prepareVerifiedStockMapping } from "./verified-listing-stock-mapping.repository";
+import { assertRecreatedListingStockReady, readRecreationStockScope, recordRecreationStockReceipt } from "./listing-recreation-stock.repository";
 import { PublicationMappingPreparationStore, applyMappingPreparation, mappingPreparationDigest, mappingTargetBlockers, readTargets, reviewMappingPreparation } from "./publication-mapping-preparation.repository";
 export class PostgresVerifiedListingStockStore implements VerifiedListingStockStore {
     private readonly transactions: PublicationMappingPreparationStore;
@@ -49,16 +50,26 @@ export class PostgresVerifiedListingStockStore implements VerifiedListingStockSt
             if (decision.action !== "publish")
                 return { state: "excluded", dryRun, receipt: null, quantities: [] };
             const actor = "walmart-stock-connection", requestHash = mappingPreparationDigest({ targetId: target.id, channelId: input.channelId, connectionId: input.connectionId,
-                variantId: input.productVariantId, sku: input.sku, externalProductId: input.externalProductId, actor });
+                variantId: input.productVariantId, sku: input.sku, externalProductId: input.externalProductId, actor,
+                ...(input.setupOperationId ? { setupOperationId: input.setupOperationId } : {}) });
+            const recreation = await readRecreationStockScope(client, target.id, input);
+            if (!input.setupOperationId) await assertRecreatedListingStockReady(client, [{ destinationKind: "channel_connection",
+                connectionId: input.connectionId, providerKey: "walmart", providerScopeType: "location",
+                externalScopeId: input.externalScopeId, externalInventoryItemId: input.sku,
+                productId: owner.productId, productVariantId: input.productVariantId }]);
             const changed = await prepareVerifiedStockMapping(client, target.id, input, requestHash, actor, now);
-            if (!changed)
+            if (recreation?.completed)
+                return { state: "already_connected", dryRun, receipt: null, quantities: [], publicationState: recreation.publicationState };
+            if (!changed && !recreation)
                 return { state: "already_connected", dryRun, receipt: null, quantities: [] };
             const command = { publicationTargetId: target.id, expectedTargetRevision: target.revision, productId: owner.productId, productVariantIds: [input.productVariantId] };
             const { review } = await reviewMappingPreparation(client, command, true);
             if (!review.ready)
                 throw new InventoryPublicationMembershipError("STOCK_LISTING_ATP_NOT_READY", review.blockers.map(row => row.message).join(" "));
-            const receipt = await applyMappingPreparation(client, scopeKeys, { ...command, expectedReviewHash: review.reviewHash, idempotencyKey: `verified-stock:${requestHash}` }, actor, requestHash, now, [input.productVariantId]);
-            return { state: "connected", dryRun, receipt, quantities: review.quantities };
+            const receipt = await applyMappingPreparation(client, scopeKeys, { ...command, expectedReviewHash: review.reviewHash, idempotencyKey: `verified-stock:${requestHash}` }, actor, requestHash, now,
+                changed ? [input.productVariantId] : [], recreation ? [input.productVariantId] : []);
+            if (recreation) await recordRecreationStockReceipt(client, recreation.id, target.id, input, actor, now);
+            return { state: "connected", dryRun, receipt, quantities: review.quantities, ...(recreation ? { publicationState: "queued" as const } : {}) };
         }, dryRun);
     }
 }

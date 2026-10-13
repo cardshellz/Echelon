@@ -29,7 +29,7 @@ dbDescribe.sequential("durable external quantity admission with actual migration
   beforeAll(async () => {
     database = await createInventoryCutoverTestDatabase(databaseUrl, disposable, cutoverCompositionBaseSql);
     await installCutoverCompositionMigrations(database.pool);
-    for (const migration of ["0709_walmart_quantity_admission.sql", "0716_inventory_publication_reconciliation.sql"]) {
+    for (const migration of ["0709_walmart_quantity_admission.sql", "0716_inventory_publication_reconciliation.sql", "0746_listing_recreation_stock_continuation.sql"]) {
       await database.pool.query(readFileSync(resolve(process.cwd(), "migrations", migration), "utf8"));
     }
     await database.pool.query(cutoverCompositionSeedSql);

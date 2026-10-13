@@ -57,6 +57,7 @@ export interface ListingPublicationInventory {
   inspect(
     account: ListingAccount,
     items: readonly ListingCatalogItem[],
+    recreations?: ListingSnapshot["recreations"],
   ): Promise<ListingReview["inventory"]>;
   /** The inventory owner must hold quantity admission for the complete zero-stock request. */
   submitZero(
@@ -67,7 +68,12 @@ export interface ListingPublicationInventory {
     submit: (
       admission: Readonly<ListingSetupZeroIntent>,
     ) => Promise<{ submissionId: string }>,
+    recreations?: ListingSnapshot["recreations"],
   ): Promise<{ submissionId: string }>;
+  resumeRecreationStock(input: {
+    account: ListingAccount; setupOperationId: string; variantId: number;
+    sku: string; externalProductId: string; observedAt: string;
+  }): Promise<{ ready: boolean; blocked?: boolean; message: string }>;
 }
 export interface ListingPublicationDependencies {
   store: ListingPublicationStore;
@@ -311,6 +317,7 @@ export class ListingPublicationService {
     const inventory = await this.dependencies.inventory.inspect(
       account,
       catalog,
+      recreations,
     );
     const issues = inventory.ready
       ? []
@@ -569,6 +576,7 @@ export class ListingPublicationService {
                     this.dependencies.store.renewLease(operation, this.now()),
                 });
               },
+              operation.snapshot.recreations,
             );
             batch.submissionId = z
               .string()
@@ -761,6 +769,45 @@ export class ListingPublicationService {
               },
               "listing-publication-worker",
             );
+            item.externalProductId = observed.item.externalProductId;
+            item.stockState = "setup_required";
+            delete item.stockErrorCode;
+            if (observed.item.publishedStatus.toUpperCase() !== "PUBLISHED") {
+              item.error = "Walmart accepted the recreated item but reports it as unpublished. Review its publication issues in Existing Walmart items. This saved job will connect current stock when Walmart publishes it.";
+              await persist();
+              continue;
+            }
+            // Creating a missing stock mapping can advance the target revision.
+            // Finish every reviewed feed submission before our own handoff can
+            // invalidate the review of another queued family in this operation.
+            if (progress.batches.some(candidate => candidate.state === "queued")) {
+              item.error = "Waiting for the other reviewed items to be submitted before connecting current stock.";
+              await persist();
+              continue;
+            }
+            let stock: { ready: boolean; blocked?: boolean; message: string };
+            try {
+              stock = await this.dependencies.inventory.resumeRecreationStock({
+                account: currentAccount, setupOperationId: batch.correlationId,
+                variantId: item.variantId, sku: item.sku, externalProductId: observed.item.externalProductId,
+                observedAt: this.now().toISOString(),
+              });
+            } catch (error) {
+              item.stockState = "blocked";
+              item.stockErrorCode = safeCode(error);
+              item.error = safeMessage(error);
+              console.error(JSON.stringify({ operation: "listing_recreation_stock", operationId: operation.id,
+                variantId: item.variantId, code: safeCode(error) }));
+              await persist();
+              continue;
+            }
+            delete item.stockErrorCode;
+            if (!stock.ready) {
+              item.stockState = stock.blocked ? "blocked" : "queued";
+              item.error = stock.message;
+              await persist();
+              continue;
+            }
           } else {
             await identities.link(
               operation.channelId,
@@ -779,7 +826,7 @@ export class ListingPublicationService {
           item.externalProductId = observed.item.externalProductId;
           item.state = "verified";
           item.error = null;
-          item.stockState = "setup_required";
+          item.stockState = recreation ? "ready" : "setup_required";
           await persist();
         }
         if (
@@ -848,6 +895,7 @@ export class ListingPublicationService {
     const inventory = await this.dependencies.inventory.inspect(
       snapshot.account,
       current,
+      snapshot.recreations?.filter(item => ids.includes(item.variantId)),
     );
     if (!inventory.ready)
       throw new ListingPublicationError(
