@@ -247,7 +247,7 @@ export class PostgresCanonicalClaimInventoryRepository implements CanonicalClaim
 
     const lotRows = rows(await input.client.query(
       `SELECT id, qty_on_hand, qty_reserved, qty_picked, total_unit_cost_mills,
-        qty_received,cost_basis_qty,product_total_cost_mills,packaging_total_cost_mills,landed_total_cost_mills
+        to_jsonb(inventory_lots)->>'cost_basis_qty' AS cost_basis_qty
        FROM inventory.inventory_lots
        WHERE product_variant_id = $1
          AND warehouse_location_id = $2
