@@ -1,5 +1,6 @@
 import { performance } from "node:perf_hooks";
 import { logger } from "../../../platform/observability/logger";
+import { DropshipListingCategorySettingsService } from "../application/dropship-listing-category-settings-service";
 import { systemDropshipListingPreviewClock } from "../application/dropship-listing-preview-service";
 import { DropshipListingProductSettingsService } from "../application/dropship-listing-product-settings-service";
 import { DropshipListingProductsBulkService } from "../application/dropship-listing-products-bulk-service";
@@ -15,6 +16,8 @@ export interface ListingSettingWriteServices {
   sizePrices: Pick<DropshipListingSizePricesService, "saveForMember">;
   /** W5 (one product) and W6 (many products), two classes behind one member (plan 6.13 #9). */
   products: Pick<DropshipListingProductSettingsService, "saveForMember"> & Pick<DropshipListingProductsBulkService, "saveBulkForMember">;
+  /** W12 (one Card Shellz category, with "Also clear theirs"). */
+  categories: Pick<DropshipListingCategorySettingsService, "saveForMember">;
 }
 
 /** What a test may put in place of the production wiring; everything else is built as in production. */
@@ -32,10 +35,10 @@ const platformWriteLog: ListingSettingWriteLog = {
  * Called once per process, at route registration (the only production call
  * passes no overrides): every writer shares one write repository (the 8a
  * wrapper over the shared pool), the preview clock, a monotonic timer for
- * `elapsed_ms` and the log port. W5 and W6 also get the eBay adapter over
- * today's providers; W8 asks eBay nothing. The one heavy-write gate (plan
- * 3.10 (a)) is built here and injected into every heavy writer, so one
- * process runs one heavy write at a time. `overrides` is the factory test's
+ * `elapsed_ms` and the log port. W5, W6 and W12 also get the eBay adapter
+ * over today's providers; W8 asks eBay nothing. The one heavy-write gate
+ * (plan 3.10 (a)) is built here and injected into every heavy writer (W6, and
+ * W12 when it clears), so one process runs one heavy write at a time. `overrides` is the factory test's
  * seam: an injected repository or eBay port, never a module mock.
  */
 export function createDropshipListingSettingWriteServices(overrides: ListingSettingWriteServiceOverrides = {}): ListingSettingWriteServices {
@@ -50,11 +53,15 @@ export function createDropshipListingSettingWriteServices(overrides: ListingSett
   };
   const product = new DropshipListingProductSettingsService({ ...deps, ebay });
   const productsBulk = new DropshipListingProductsBulkService({ ...deps, ebay, heavyWrites });
+  const category = new DropshipListingCategorySettingsService({ ...deps, ebay, heavyWrites });
   return {
     sizePrices: new DropshipListingSizePricesService(deps),
     products: {
       saveForMember: (memberId, storeId, productId, body) => product.saveForMember(memberId, storeId, productId, body),
       saveBulkForMember: (memberId, storeId, body) => productsBulk.saveBulkForMember(memberId, storeId, body),
+    },
+    categories: {
+      saveForMember: (memberId, storeId, categoryId, body) => category.saveForMember(memberId, storeId, categoryId, body),
     },
   };
 }

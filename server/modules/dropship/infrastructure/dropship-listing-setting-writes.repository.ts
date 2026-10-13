@@ -4,32 +4,48 @@ import {
   LISTING_SETTING_KEY_PATTERN,
   LISTING_SETTING_REQUEST_OPERATIONS,
   type ListingSettingRequestOperation,
+  type ProductListingSettingField,
 } from "../../../../shared/dropship/listing-setting-values";
 import type { ListingPriceTransaction } from "../application/dropship-listing-price-service";
+import { olderGroupRuleCounts } from "../application/dropship-listing-settings-facts";
 import type {
   ListingSettingActor,
+  ListingSettingFacts,
   ListingSettingPreflightTransaction,
   ListingSettingSystemTransaction,
   ListingSettingWriteRepository,
   ListingSettingWriteTransaction,
   ListingTextBytes,
   ListingTextBytesInput,
+  ProductSettingFacts,
 } from "../application/dropship-listing-setting-writes";
 import { DropshipError } from "../domain/errors";
 import { REQUEST_KEY_CHILD_SOURCES, type RequestKeyChildSource, type RequestKeyUse } from "../domain/listing-setting-request-key-use";
 import {
+  LISTING_SETTING_LEFTOVER_FIELDS,
   isListingSettingChildKey,
   listingSettingChildKey,
   listingSettingChildKeyPrefix,
   listingSettingsInvariantFailed,
+  type ListingSettingLeftoverField,
 } from "../domain/listing-setting-values";
 import { readCategoryListingSettings, saveCategoryListingSettingWithClient } from "./dropship-category-listing-settings.repository";
 import { saveEbayCategoryRulesProfileWithClient } from "./dropship-ebay-category-rules.repository";
+import { readEbayCategoryRules } from "./dropship-ebay-category-rules.reader";
+import { readContentProfile } from "./dropship-listing-content.reader";
 import { saveListingContentWithClient } from "./dropship-listing-content.repository";
 import { PgDropshipListingPreviewRepository } from "./dropship-listing-preview.repository";
 import { listingPriceTransactionForClient } from "./dropship-listing-price.repository";
-import { clearSizeLeftoversWithClient } from "./dropship-listing-setting-leftovers.repository";
-import { MAX_LISTING_SETTING_ACTOR_ID_LENGTH, listingSettingsIdempotencyConflict, type ListingSettingWriteScope } from "./dropship-listing-setting-shared.repository";
+import {
+  POLICY_FEATURE_LOCK_SQL,
+  SHELF_FEATURE_LOCK_SQL,
+  clearSizeLeftoversWithClient,
+} from "./dropship-listing-setting-leftovers.repository";
+import {
+  MAX_LISTING_SETTING_ACTOR_ID_LENGTH,
+  listingSettingsIdempotencyConflict,
+  type ListingSettingWriteScope,
+} from "./dropship-listing-setting-shared.repository";
 import {
   acknowledgeCategoryMovesWithClient,
   insertFirstCategoryMarksWithClient,
@@ -69,7 +85,12 @@ import { PgShellzClubProductCostAdapter } from "./shellz-club-product-cost.adapt
  * 7. the per-size leftover clean-ups (clearSizeLeftovers, plan PR 9, P17),
  *    after the parent writer and the size prices: the old per-size writers'
  *    feature locks, policy then shelf, then their rows FOR UPDATE. Those
- *    writers never take the store lock, so this adds no cycle.
+ *    writers never take the store lock, so this adds no cycle. A writer that
+ *    derives a clear set from the leftovers (W12) takes the same two feature
+ *    locks earlier, right after lockCatalog, in loadLeftoverFields (plan 3.9,
+ *    v3r C-money-6): the order PLAN-v2 §3.9 gives feature locks, cycle-free
+ *    for the same reason, and clearSizeLeftovers' second request for a lock
+ *    the session holds is granted at once.
  *
  * The read-only preflight (plan PR 9, 6.2 #4) takes none of these locks: it
  * reads one snapshot before any eBay call and writes nothing.
@@ -139,6 +160,59 @@ const LISTING_TEXT_BYTES_SQL = `SELECT current_setting('server_encoding') = 'UTF
      FROM dropship.dropship_product_listing_settings s
      JOIN dropship.dropship_product_listing_setting_revisions r ON r.id = s.revision_id
      WHERE s.vendor_id = $1 AND s.store_connection_id = $2`;
+
+/** Every Card Shellz product in a category, chosen or not (index 0108 on category_id). */
+const CATEGORY_PRODUCTS_SQL = "SELECT id FROM catalog.products WHERE category_id = $1 ORDER BY id";
+/**
+ * Which per-size leftovers each size holds (plan PR 9, 8.2): the policy ids
+ * its override sets, and a shelf row (a row always holds one or two shelves,
+ * migration 215's CHECK). Ids and flags only; the vendor's and the store's
+ * rows only.
+ */
+const LEFTOVER_FIELDS_SQL = `SELECT o.product_variant_id, o.fulfillment_policy_id IS NOT NULL AS shipping_policy,
+       o.return_policy_id IS NOT NULL AS return_policy, o.payment_policy_id IS NOT NULL AS payment_policy, false AS store_shelf
+     FROM dropship.dropship_ebay_listing_policy_overrides o
+     WHERE o.vendor_id = $1 AND o.store_connection_id = $2 AND o.product_variant_id = ANY($3::int[])
+   UNION ALL SELECT a.product_variant_id, false, false, false, true
+     FROM dropship.dropship_ebay_store_category_assignments a
+     WHERE a.vendor_id = $1 AND a.store_connection_id = $2 AND a.product_variant_id = ANY($3::int[])`;
+/** loadLeftoverFields' flag columns, by leftover field; a size's own main text is not read there (a category has none). */
+const LEFTOVER_FLAG_COLUMNS = {
+  shippingPolicy: "shipping_policy", returnPolicy: "return_policy", paymentPolicy: "payment_policy", storeShelf: "store_shelf",
+} as const satisfies Record<Exclude<ListingSettingLeftoverField, "mainText">, string>;
+
+/**
+ * The revision column that decides whether each product setting is set, under
+ * 8a's column mapping (dropship-listing-setting-shared.repository.ts): a
+ * group's id or mode column, and for the main text its catalog hash. Each
+ * group is all or none by a CHECK of migration 0738 (the price's is
+ * dropship_product_listing_setting_revision_price_chk), so one column of the
+ * group decides it. Exported for the parity test against
+ * readProductListingSettings.
+ */
+export const PRODUCT_SETTING_FLAG_COLUMNS = {
+  price: "price_basis",
+  ebayCategory: "ebay_category_id",
+  storeShelf: "shelf_mode",
+  shippingPolicy: "fulfillment_policy_id",
+  returnPolicy: "return_policy_id",
+  paymentPolicy: "payment_policy_id",
+  textAbove: "text_above_mode",
+  textBelow: "text_below_mode",
+  mainText: "body_catalog_hash",
+} as const satisfies Record<ProductListingSettingField, string>;
+/**
+ * Each product's own-field flags (plan PR 9, 8.2; v3r, C-feas-2): one IS NOT
+ * NULL flag per setting, never a text, name or path column, so no text
+ * enters the heap. The vendor's and the store's rows only; no lock.
+ */
+const PRODUCT_SETTING_FACTS_SQL = `SELECT s.product_id,
+       ${Object.values(PRODUCT_SETTING_FLAG_COLUMNS).map((column) => `r.${column} IS NOT NULL AS set_${column}`).join(", ")}
+     FROM dropship.dropship_product_listing_settings s
+     JOIN dropship.dropship_product_listing_setting_revisions r ON r.id = s.revision_id AND r.vendor_id = s.vendor_id
+       AND r.store_connection_id = s.store_connection_id AND r.product_id = s.product_id
+     WHERE s.vendor_id = $1 AND s.store_connection_id = $2 AND s.product_id = ANY($3::int[])
+     ORDER BY s.product_id`;
 
 /**
  * The request-key unique constraints of 0738 and 0739, the size price child
@@ -371,6 +445,8 @@ class WriteTransactionState {
   /** The products lockCatalog found and locked: the only ones clearSizeLeftovers may clean (plan PR 9, 6.2 #3). */
   private readonly lockedProductIds = new Set<number>();
   private leftoversCleared = false;
+  /** loadLeftoverFields ran (plan 8.2): at most once, and only after lockCatalog. */
+  private leftoverFieldsLoaded = false;
   /**
    * A child key names one revision, so each child target is written at most once (the D30 rule for children).
    * The mainText clean-up writes the same `content` child keys saveListingContent takes, so a transaction
@@ -436,6 +512,25 @@ class WriteTransactionState {
       readListingTextBytes: async (input) => {
         this.assertOpen();
         return readListingTextBytes(client, target, input);
+      },
+      loadOlderGroupRuleCounts: async () => {
+        this.assertOpen();
+        // The three readers' own argument orders differ (store, vendor for pricing).
+        const pricing = await readPricingProfile(client, scope.storeConnectionId, scope.vendorId);
+        const content = await readContentProfile(client, scope.vendorId, scope.storeConnectionId);
+        const ebayCategoryRules = await readEbayCategoryRules(client, scope.vendorId, scope.storeConnectionId);
+        return olderGroupRuleCounts({ pricing, content, ebayCategoryRules });
+      },
+      listCategoryProductIds: async (categoryId) => {
+        this.assertOpen();
+        if (!isInt4Id(categoryId)) throw listingSettingsInvariantFailed("A category's products are read for a whole-number category id only.");
+        const result = await client.query<{ id: unknown }>(CATEGORY_PRODUCTS_SQL, [categoryId]);
+        return result.rows.map((row) => storedInt4Id(row.id, "products.id"));
+      },
+      loadLeftoverFields: (productVariantIds) => this.loadLeftoverFields(productVariantIds),
+      loadSettingFacts: async (input) => {
+        this.assertOpen();
+        return readSettingFacts(client, target, input);
       },
       clearSizeLeftovers: async (input) => {
         this.assertOpen();
@@ -548,6 +643,46 @@ class WriteTransactionState {
       }
     }
     return { lockedProductIds: [...this.lockedProductIds].sort((left, right) => left - right) };
+  }
+
+  /**
+   * The per-size leftovers of these sizes (plan 8.2), under the old per-size
+   * writers' feature locks, policy then shelf, taken first (v3r, C-money-6):
+   * a clear set derived from this read holds until commit. Only after
+   * lockCatalog (the locks follow it in the lock order) and once.
+   */
+  private async loadLeftoverFields(productVariantIds: readonly number[]): Promise<Map<number, ListingSettingLeftoverField[]>> {
+    this.assertOpen();
+    if (!this.catalogLocked) throw listingSettingsInvariantFailed("Per-size leftovers are read only after lockCatalog.");
+    if (this.leftoverFieldsLoaded) {
+      throw listingSettingsInvariantFailed("Per-size leftovers are read at most once per listing settings transaction.");
+    }
+    const ids = readIds(productVariantIds, "productVariantIds");
+    this.leftoverFieldsLoaded = true;
+    await this.client.query(POLICY_FEATURE_LOCK_SQL, [this.scope.storeConnectionId]);
+    await this.client.query(SHELF_FEATURE_LOCK_SQL, [this.scope.storeConnectionId]);
+    const leftovers = new Map<number, ListingSettingLeftoverField[]>();
+    if (ids.length === 0) return leftovers;
+    const asked = new Set(ids);
+    const result = await this.client.query<Record<string, unknown>>(LEFTOVER_FIELDS_SQL,
+      [this.scope.vendorId, this.scope.storeConnectionId, ids]);
+    const found = new Map<number, Set<ListingSettingLeftoverField>>();
+    for (const row of result.rows) {
+      const productVariantId = storedInt4Id(row.product_variant_id, "product_variant_id");
+      if (!asked.has(productVariantId)) {
+        throw listingSettingsInvariantFailed("A per-size leftover was read for a size that was not asked for.", { productVariantId });
+      }
+      const fields = found.get(productVariantId) ?? new Set<ListingSettingLeftoverField>();
+      for (const [field, column] of Object.entries(LEFTOVER_FLAG_COLUMNS) as Array<[keyof typeof LEFTOVER_FLAG_COLUMNS, string]>) {
+        if (storedFlag(row[column], column)) fields.add(field);
+      }
+      found.set(productVariantId, fields);
+    }
+    for (const [productVariantId, fields] of [...found].sort(([left], [right]) => left - right)) {
+      const ordered = LISTING_SETTING_LEFTOVER_FIELDS.filter((field) => fields.has(field));
+      if (ordered.length > 0) leftovers.set(productVariantId, ordered);
+    }
+    return leftovers;
   }
 
   /**
@@ -706,6 +841,44 @@ function textByteSum(value: unknown, column: string): number {
     throw listingSettingsInvariantFailed("A listing text byte count failed its contract.", { column });
   }
   return bytes;
+}
+
+/**
+ * Products' own-field flags (plan 8.2), one statement, skipped when the list
+ * is empty. A row that breaks its contract (a flag that is not a boolean, a
+ * duplicate or unasked id) is fatal, never a guess.
+ */
+async function readSettingFacts(client: QueryClient, target: { vendorId: number; storeConnectionId: number },
+  input: { productIds: readonly number[] }): Promise<ListingSettingFacts> {
+  const productIds = readIds(input.productIds, "productIds");
+  const products = new Map<number, ProductSettingFacts>();
+  if (productIds.length === 0) return { products };
+  const asked = new Set(productIds);
+  const result = await client.query<Record<string, unknown>>(PRODUCT_SETTING_FACTS_SQL, [target.vendorId, target.storeConnectionId, productIds]);
+  for (const row of result.rows) {
+    const productId = storedInt4Id(row.product_id, "product_id");
+    if (!asked.has(productId) || products.has(productId)) {
+      throw listingSettingsInvariantFailed("A product's settings facts were read twice or unasked.", { productId });
+    }
+    const ownFields = new Set<ProductListingSettingField>();
+    for (const [field, column] of Object.entries(PRODUCT_SETTING_FLAG_COLUMNS) as Array<[ProductListingSettingField, string]>) {
+      if (storedFlag(row[`set_${column}`], `set_${column}`)) ownFields.add(field);
+    }
+    products.set(productId, { ownFields });
+  }
+  return { products };
+}
+
+/** A flag PostgreSQL computed (IS NOT NULL); anything but a boolean is a broken row. */
+function storedFlag(value: unknown, column: string): boolean {
+  if (typeof value !== "boolean") throw listingSettingsInvariantFailed("A listing settings flag read in a write failed its contract.", { column });
+  return value;
+}
+
+/** Positive int4 ids for a read, distinct and ascending; anything else is a programming fault. */
+function readIds(ids: readonly number[], field: string): number[] {
+  if (!ids.every(isInt4Id)) throw listingSettingsInvariantFailed("Listing settings reads take positive whole-number ids.", { field });
+  return [...new Set(ids)].sort((left, right) => left - right);
 }
 
 /** An int4 id PostgreSQL returned; anything else is a broken row. */

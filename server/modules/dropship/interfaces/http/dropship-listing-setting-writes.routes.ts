@@ -3,6 +3,7 @@ import rateLimit from "express-rate-limit";
 import type { z } from "zod";
 import {
   LISTING_SETTING_WRITE_ERROR_CODES,
+  saveCategorySettingsResponseSchema,
   saveProductSettingsResponseSchema,
   saveProductsBulkResponseSchema,
   saveSizePricesResponseSchema,
@@ -48,6 +49,10 @@ export function registerDropshipListingSettingWritesRoutes(
   // A heavy write (plan 3.10): the bulk budget here; the service's heavy-write gate wraps its write transaction.
   app.post(`${base}/products/bulk`, requireDropshipAuth, bulkLimiter, parseBody, (req, res) => respond(req, res,
     saveProductsBulkResponseSchema, () => services.products.saveBulkForMember(memberId(req), parseId(req.params.storeConnectionId), req.body)));
+  // One category is a single write; with "Also clear theirs" the service's heavy-write gate wraps its transaction.
+  app.put(`${base}/categories/:categoryId`, requireDropshipAuth, singleLimiter, parseBody, (req, res) => respond(req, res,
+    saveCategorySettingsResponseSchema, () => services.categories.saveForMember(memberId(req), parseId(req.params.storeConnectionId),
+      parseId(req.params.categoryId), req.body)));
 }
 
 function memberRateLimit(max: number) {

@@ -1,6 +1,10 @@
 import type { Pool, PoolClient } from "pg";
 import { beforeEach, describe, expect, expectTypeOf, it, vi } from "vitest";
 import type { SaveListingContentInput } from "../../../../../shared/dropship/listing-content";
+import {
+  PRODUCT_LISTING_SETTING_FIELDS,
+  type ProductListingSettingValues,
+} from "../../../../../shared/dropship/listing-setting-values";
 import type {
   ListingSettingPreflightTransaction,
   ListingSettingSystemTransaction,
@@ -9,9 +13,11 @@ import type {
 import { DropshipError } from "../../domain/errors";
 import { listingSettingChildKey, listingSettingChildKeyPrefix } from "../../domain/listing-setting-values";
 import {
+  PRODUCT_SETTING_FLAG_COLUMNS,
   PgDropshipListingSettingWritesRepository,
   mapListingSettingWriteError,
 } from "../../infrastructure/dropship-listing-setting-writes.repository";
+import { productValuesToColumns } from "../../infrastructure/dropship-listing-setting-shared.repository";
 
 vi.mock("../../../../db", () => ({ db: {}, pool: {} }));
 
@@ -63,7 +69,8 @@ vi.mock("../../infrastructure/dropship-ebay-category-rules.repository", async (i
   ...(await importOriginal<typeof import("../../infrastructure/dropship-ebay-category-rules.repository")>()),
   saveEbayCategoryRulesProfileWithClient: writers.saveEbayCategoryRulesProfileWithClient,
 }));
-vi.mock("../../infrastructure/dropship-listing-setting-leftovers.repository", () => ({
+vi.mock("../../infrastructure/dropship-listing-setting-leftovers.repository", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../infrastructure/dropship-listing-setting-leftovers.repository")>()),
   clearSizeLeftoversWithClient: writers.clearSizeLeftoversWithClient,
 }));
 vi.mock("../../infrastructure/dropship-listing-content.repository", async (importOriginal) => ({
@@ -95,6 +102,16 @@ class ScriptedClient {
   textBytes: Record<string, unknown> = { utf8: true, store_bytes: "1200", kept_store_bytes: "1000", target_bytes: "300" };
   /** What the replay probe (findRequestKeyUse) answers. */
   probeRows: Array<Record<string, unknown>> = [];
+  /** Each category's products, as listCategoryProductIds reads them. */
+  categoryProducts = new Map<number, unknown[]>([[3, [7, 8]]]);
+  /** What the leftover read answers. */
+  leftoverRows: Array<Record<string, unknown>> = [];
+  /** Current product rows with every revision column, as stored; the settings-facts read answers its own SQL's expressions over them. */
+  storedProductRows: Array<Record<string, unknown>> = [];
+  /** Fields laid over every settings-facts answer row, to break its contract. */
+  factRowOverrides: Record<string, unknown> = {};
+  /** What the pricing, content and eBay category rule profile reads answer: none unless set. */
+  profileRows: Record<"pricing" | "content" | "ebay", Array<Record<string, unknown>>> = { pricing: [], content: [], ebay: [] };
 
   async query<T>(text: string, params: unknown[] = []): Promise<{ rows: T[] }> {
     const sql = text.replace(/\s+/g, " ").trim();
@@ -104,6 +121,21 @@ class ScriptedClient {
     if (sql.includes("FROM dropship.dropship_vendors v") || sql.includes("FROM dropship.dropship_store_connections sc")) {
       return rows<T>(this.ownerFound ? [{ vendor_id: VENDOR }] : []);
     }
+    if (sql === "SELECT id FROM catalog.products WHERE category_id = $1 ORDER BY id") {
+      return rows<T>((this.categoryProducts.get(params[0] as number) ?? []).map((id) => ({ id })));
+    }
+    if (sql.startsWith("SELECT o.product_variant_id, o.fulfillment_policy_id IS NOT NULL")) return rows<T>(this.leftoverRows);
+    if (sql.startsWith("SELECT s.product_id, r.price_basis IS NOT NULL AS set_price_basis")) {
+      // The statement's own `r.<column> IS NOT NULL AS <alias>` expressions, evaluated over the stored rows.
+      const flags = [...sql.matchAll(/r\.(\w+) IS NOT NULL AS (\w+)/g)].map((match) => [match[1], match[2]] as const);
+      return rows<T>(this.storedProductRows.filter((row) => (params[2] as number[]).includes(row.product_id as number)).map((row) => ({
+        product_id: row.product_id, ...Object.fromEntries(flags.map(([column, alias]) => [alias, row[column] !== null])),
+        ...this.factRowOverrides,
+      })));
+    }
+    if (sql.includes("FROM dropship.dropship_pricing_profiles p")) return rows<T>(this.profileRows.pricing);
+    if (sql.includes("FROM dropship.dropship_content_profiles p")) return rows<T>(this.profileRows.content);
+    if (sql.includes("FROM dropship.dropship_ebay_category_rule_profiles p")) return rows<T>(this.profileRows.ebay);
     if (sql.startsWith("SELECT id FROM catalog.product_variants WHERE product_id = ANY")) {
       return rows<T>((params[0] as number[]).flatMap((productId) => this.productSizes.get(productId) ?? []).sort((a, b) => a - b)
         .map((id) => ({ id })));
@@ -1126,5 +1158,209 @@ describe("PgDropshipListingSettingWritesRepository.preflight (plan PR 9, 6.2 #4)
     await repository.preflight(PREFLIGHT, async (tx) => { kept = tx; });
     await expectInvariant(kept!.loadProducts([7]));
     await expectInvariant(kept!.findRequestKeyUse());
+  });
+});
+
+describe("the W12 reads (plan PR 9, 8.2)", () => {
+  const SAVED = new Date("2026-10-01T00:00:00.000Z");
+  const NO_VALUES: ProductListingSettingValues = { price: null, ebayCategory: null, storeShelf: null, shippingPolicy: null,
+    returnPolicy: null, paymentPolicy: null, textAbove: null, textBelow: null, mainText: null };
+  const SET: ProductListingSettingValues = {
+    price: { basis: "catalog_retail", markupBps: 0, flatCents: 100, rounding: "cent" },
+    ebayCategory: { categoryId: "183438", categoryName: "Toploaders", path: ["Collectibles", "Toploaders"] },
+    storeShelf: { mode: "own", shelves: [{ id: "11", name: "Supplies:Top" }] }, shippingPolicy: { id: "F1", name: null },
+    returnPolicy: { id: "R1", name: "Returns" }, paymentPolicy: { id: "P1", name: null }, textAbove: { mode: "none" },
+    textBelow: { mode: "own", text: "Below." }, mainText: { text: "Own words.", catalogHash: "c".repeat(64) },
+  };
+  /** A stored current row with every revision column, as 8a writes it. */
+  const storedRow = (productId: number, revisionId: number, values: ProductListingSettingValues) =>
+    ({ product_id: productId, revision_id: revisionId, ...productValuesToColumns(values), created_at: SAVED });
+
+  it("counts the store's older group rules from its three profiles, each read on this client in its own argument order", async () => {
+    const { client, repository } = setup();
+    client.profileRows = {
+      pricing: [{ id: 4, created_at: SAVED, profile: { defaultRecipe: SET.price, groups: [
+        { id: "g1", name: "G1", priority: 1, scope: { type: "product", productId: 1 }, recipe: SET.price },
+        { id: "g2", name: "G2", priority: 2, scope: { type: "product", productId: 2 }, recipe: SET.price }] } }],
+      content: [{ id: 5, created_at: SAVED, profile: { defaultTemplate: { introduction: "", footer: "" }, groups: [] } }],
+      ebay: [{ id: 6, created_at: SAVED, profile: { version: 1, defaultCategory: null, rules: [{ id: "r1", name: "R1",
+        scope: { type: "product", productId: 1 }, category: SET.ebayCategory }] } }],
+    };
+
+    const counts = await repository.execute(INPUT, (tx) => tx.loadOlderGroupRuleCounts());
+
+    expect(counts).toEqual({ pricingGroups: 2, contentGroups: 0, ebayCategoryRules: 1 });
+    const after = client.afterOwner();
+    expect(after).toHaveLength(4);
+    expect(client.params[client.sql.indexOf(after[0])]).toEqual([STORE, VENDOR]);
+    expect(after[1]).toContain("FROM dropship.dropship_content_profiles p");
+    expect(client.params[client.sql.indexOf(after[1])]).toEqual([VENDOR, STORE]);
+    expect(after[2]).toContain("FROM dropship.dropship_ebay_category_rule_profiles p");
+    expect(client.params[client.sql.indexOf(after[2])]).toEqual([VENDOR, STORE]);
+    expect(after.some((sql) => /FOR (SHARE|UPDATE)|pg_advisory/.test(sql))).toBe(false);
+
+    const none = setup();
+    await expect(none.repository.execute(INPUT, (tx) => tx.loadOlderGroupRuleCounts()))
+      .resolves.toEqual({ pricingGroups: 0, contentGroups: 0, ebayCategoryRules: 0 });
+  });
+
+  it("lists a category's products ascending, every one, with no lock; refuses a bad id before any statement", async () => {
+    const { client, repository } = setup();
+    await expect(repository.execute(INPUT, (tx) => tx.listCategoryProductIds(3))).resolves.toEqual([7, 8]);
+    const after = client.afterOwner();
+    expect(after).toEqual(["SELECT id FROM catalog.products WHERE category_id = $1 ORDER BY id", "COMMIT"]);
+    expect(client.params[client.sql.indexOf(after[0])]).toEqual([3]);
+
+    for (const id of [0, 2_147_483_648, 1.5]) {
+      const bad = setup();
+      await expectInvariant(bad.repository.execute(INPUT, (tx) => tx.listCategoryProductIds(id)));
+      expect(bad.client.afterOwner()).toEqual(["ROLLBACK"]);
+    }
+    const broken = setup();
+    broken.client.categoryProducts = new Map([[3, ["7"]]]);
+    await expectInvariant(broken.repository.execute(INPUT, (tx) => tx.listCategoryProductIds(3)));
+  });
+
+  it("reads leftovers after lockCatalog under the policy, then the shelf feature lock, vendor and store scoped, ids only", async () => {
+    const { client, repository } = setup();
+    client.leftoverRows = [
+      { product_variant_id: 102, shipping_policy: false, return_policy: true, payment_policy: false, store_shelf: false },
+      { product_variant_id: 101, shipping_policy: true, return_policy: false, payment_policy: true, store_shelf: false },
+      { product_variant_id: 102, shipping_policy: false, return_policy: false, payment_policy: false, store_shelf: true },
+      // A policy row whose ids are all reset is no leftover.
+      { product_variant_id: 103, shipping_policy: false, return_policy: false, payment_policy: false, store_shelf: false },
+    ];
+
+    const leftovers = await repository.execute(INPUT, async (tx) => {
+      await tx.lockCatalog({ productIds: [7] });
+      return tx.loadLeftoverFields(Object.freeze([103, 102, 101, 102]));
+    });
+
+    expect([...leftovers]).toEqual([[101, ["shippingPolicy", "paymentPolicy"]], [102, ["returnPolicy", "storeShelf"]]]);
+    const after = client.afterOwner();
+    expect(after.slice(2, 4)).toEqual([
+      "SELECT pg_advisory_xact_lock(hashtext('dropship_ebay_listing_policy_override'), $1::integer)",
+      "SELECT pg_advisory_xact_lock(hashtext('dropship_ebay_store_category_assignment'), $1::integer)",
+    ]);
+    expect(client.params[client.sql.indexOf(after[2])]).toEqual([STORE]);
+    const read = after[4];
+    expect(read).toMatch(/^SELECT o\.product_variant_id/);
+    expect(client.params[client.sql.indexOf(read)]).toEqual([VENDOR, STORE, [101, 102, 103]]);
+    // Both branches are the vendor's and the store's rows; no row lock, no text, no names.
+    expect(read.match(/WHERE \w\.vendor_id = \$1 AND \w\.store_connection_id = \$2 AND \w\.product_variant_id = ANY\(\$3::int\[\]\)/g))
+      .toHaveLength(2);
+    expect(read).not.toMatch(/FOR (SHARE|UPDATE)|store_category_names|custom_text/);
+    expect(after.at(-1)).toBe("COMMIT");
+  });
+
+  it("refuses leftovers before lockCatalog and a second time, takes the locks even for no sizes, and refuses a broken row", async () => {
+    const before = setup();
+    await expectInvariant(before.repository.execute(INPUT, (tx) => tx.loadLeftoverFields([101])));
+    expect(before.client.sql.some((sql) => sql.includes("dropship_ebay_listing_policy_override'"))).toBe(false);
+
+    const twice = setup();
+    await expectInvariant(twice.repository.execute(INPUT, async (tx) => {
+      await tx.lockCatalog({ productIds: [7] });
+      await tx.loadLeftoverFields([101]);
+      await tx.loadLeftoverFields([101]);
+    }));
+
+    const empty = setup();
+    await expect(empty.repository.execute(INPUT, async (tx) => {
+      await tx.lockCatalog({ productIds: [7] });
+      return tx.loadLeftoverFields([]);
+    })).resolves.toEqual(new Map());
+    expect(empty.client.afterOwner().slice(2)).toEqual([
+      "SELECT pg_advisory_xact_lock(hashtext('dropship_ebay_listing_policy_override'), $1::integer)",
+      "SELECT pg_advisory_xact_lock(hashtext('dropship_ebay_store_category_assignment'), $1::integer)",
+      "COMMIT",
+    ]);
+
+    for (const row of [
+      { product_variant_id: 999, shipping_policy: true, return_policy: false, payment_policy: false, store_shelf: false },
+      { product_variant_id: 101, shipping_policy: "t", return_policy: false, payment_policy: false, store_shelf: false },
+    ]) {
+      const broken = setup();
+      broken.client.leftoverRows = [row];
+      await expectInvariant(broken.repository.execute(INPUT, async (tx) => {
+        await tx.lockCatalog({ productIds: [7] });
+        return tx.loadLeftoverFields([101]);
+      }));
+    }
+  });
+
+  it("asks clearSizeLeftovers for the feature locks again after loadLeftoverFields: the clean-up runs as before", async () => {
+    const { client, repository } = setup();
+    await repository.execute(INPUT, async (tx) => {
+      await tx.lockCatalog({ productIds: [7] });
+      await tx.loadLeftoverFields([101]);
+      await tx.clearSizeLeftovers({ productIds: [7], fields: ["shippingPolicy", "storeShelf"], requestHash: HASH, now: NOW });
+    });
+    expect(writers.clearSizeLeftoversWithClient).toHaveBeenCalledOnce();
+    expect(client.sql.at(-2)).toBe("-- writer: clearSizeLeftovers");
+  });
+
+  it("reads products' own-field flags in one statement, vendor and store scoped, selecting no text", async () => {
+    const { client, repository } = setup();
+    client.storedProductRows = [storedRow(8, 31, SET), storedRow(7, 30, NO_VALUES)];
+
+    const facts = await repository.execute(INPUT, (tx) => tx.loadSettingFacts({ productIds: Object.freeze([8, 7, 8]) }));
+
+    expect([...facts.products.keys()]).toEqual([8, 7]);
+    expect(facts.products.get(8)).toEqual({ ownFields: new Set(PRODUCT_LISTING_SETTING_FIELDS) });
+    expect(facts.products.get(7)).toEqual({ ownFields: new Set() });
+    const after = client.afterOwner();
+    expect(after).toHaveLength(2);
+    expect(client.params[client.sql.indexOf(after[0])]).toEqual([VENDOR, STORE, [7, 8]]);
+    expect(after[0]).toMatch(/WHERE s\.vendor_id = \$1 AND s\.store_connection_id = \$2 AND s\.product_id = ANY\(\$3::int\[\]\)/);
+    // Only the product id and one IS NOT NULL flag per setting: no text, name, path or value column is selected.
+    expect(after[0].slice(0, after[0].indexOf(" FROM "))).toBe(`SELECT s.product_id, ${Object.values(PRODUCT_SETTING_FLAG_COLUMNS)
+      .map((column) => `r.${column} IS NOT NULL AS set_${column}`).join(", ")}`);
+    expect(after[0]).not.toMatch(/FOR (SHARE|UPDATE)|r\.\*/);
+
+    const none = setup();
+    await expect(none.repository.execute(INPUT, (tx) => tx.loadSettingFacts({ productIds: [] }))).resolves.toEqual({ products: new Map() });
+    expect(none.client.afterOwner()).toEqual(["COMMIT"]);
+  });
+
+  it("flags a product field as its own exactly when readProductListingSettings reads its value as set, for every field (parity)", async () => {
+    const actual = await vi.importActual<typeof import("../../infrastructure/dropship-product-listing-settings.repository")>(
+      "../../infrastructure/dropship-product-listing-settings.repository");
+    const cases: ProductListingSettingValues[] = [NO_VALUES, SET,
+      ...PRODUCT_LISTING_SETTING_FIELDS.map((field) => ({ ...NO_VALUES, [field]: SET[field] })),
+      ...PRODUCT_LISTING_SETTING_FIELDS.map((field) => ({ ...SET, [field]: null }))];
+    expect(Object.keys(PRODUCT_SETTING_FLAG_COLUMNS).sort()).toEqual([...PRODUCT_LISTING_SETTING_FIELDS].sort());
+    for (const [index, values] of cases.entries()) {
+      const stored = storedRow(7, 100 + index, values);
+      const read = await actual.readProductListingSettings({ query: async () => ({ rows: [stored] }) } as unknown as Pick<PoolClient, "query">,
+        { vendorId: VENDOR, storeConnectionId: STORE, productIds: [7] });
+      const full = read.get(7)!.values;
+      const { client, repository } = setup();
+      client.storedProductRows = [stored];
+      const facts = (await repository.execute(INPUT, (tx) => tx.loadSettingFacts({ productIds: [7] }))).products.get(7)!;
+      for (const field of PRODUCT_LISTING_SETTING_FIELDS) {
+        expect({ index, field, own: facts.ownFields.has(field) }).toEqual({ index, field, own: full[field] !== null });
+      }
+    }
+  });
+
+  it("refuses a flag that is not a boolean, a row it did not ask for, a row read twice and a bad id, as broken contracts", async () => {
+    const notBoolean = setup();
+    notBoolean.client.storedProductRows = [storedRow(7, 30, NO_VALUES)];
+    notBoolean.client.factRowOverrides = { set_shelf_mode: "t" };
+    await expectInvariant(notBoolean.repository.execute(INPUT, (tx) => tx.loadSettingFacts({ productIds: [7] })));
+
+    const unasked = setup();
+    unasked.client.storedProductRows = [storedRow(7, 30, NO_VALUES)];
+    unasked.client.factRowOverrides = { product_id: 9 };
+    await expectInvariant(unasked.repository.execute(INPUT, (tx) => tx.loadSettingFacts({ productIds: [7] })));
+
+    const twice = setup();
+    twice.client.storedProductRows = [storedRow(7, 30, NO_VALUES), storedRow(7, 31, SET)];
+    await expectInvariant(twice.repository.execute(INPUT, (tx) => tx.loadSettingFacts({ productIds: [7] })));
+
+    const badIds = setup();
+    await expectInvariant(badIds.repository.execute(INPUT, (tx) => tx.loadSettingFacts({ productIds: [0] })));
+    expect(badIds.client.afterOwner()).toEqual(["ROLLBACK"]);
   });
 });

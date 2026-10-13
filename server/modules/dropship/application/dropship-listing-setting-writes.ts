@@ -16,6 +16,7 @@ import type { ListingSettingLeftoverField } from "../domain/listing-setting-valu
 import type { SaveEbayCategoryRulesProfileInput } from "./dropship-ebay-category-rules-service";
 import type { ListingPriceCatalogReader, ListingPriceTransaction } from "./dropship-listing-price-service";
 import type { DropshipListingPreviewRepository } from "./dropship-listing-preview-service";
+import type { OlderGroupRuleCounts } from "./dropship-listing-settings-facts";
 import type { DropshipProductCost } from "./dropship-product-cost";
 import type { SelectedCatalogReader } from "./dropship-selected-catalog";
 
@@ -144,6 +145,21 @@ export interface ListingTextBytes {
   targetBytes: number;
 }
 
+/**
+ * A product's settings as W12's clear set needs them, with no text (plan PR
+ * 9, 8.2; v3r, C-feas-2): which settings its own row sets. `ownFields` has a
+ * field exactly when the full reader's `values[field]` is not null (the
+ * parity test pins it). Plan 8.2's revision, price recipe and categories
+ * half have no caller in 9e; W7 (9f) adds them with its caller.
+ */
+export interface ProductSettingFacts {
+  ownFields: ReadonlySet<ProductListingSettingField>;
+}
+/** By product id; a product with no settings row is absent. */
+export interface ListingSettingFacts {
+  products: ReadonlyMap<number, ProductSettingFacts>;
+}
+
 export interface ListingSettingReadTransaction {
   readonly vendorId: number;
   readonly storeConnectionId: number;
@@ -206,6 +222,31 @@ export interface ListingSettingWriteTransaction extends ListingSettingReadTransa
   loadProductCosts(productVariantIds: readonly number[]): Promise<ReadonlyMap<number, DropshipProductCost>>;
   /** The store's saved product text in UTF-8 bytes, one statement, no text read (plan 6.2 #6). */
   readListingTextBytes(input: ListingTextBytesInput): Promise<ListingTextBytes>;
+  /**
+   * D16 (plan P21): the store's older group rules, from its pricing profile,
+   * content profile and eBay category rules, read on this client and counted
+   * by the read model's own olderGroupRuleCounts. The three writers that add
+   * groups take the store lock, so the answer holds until commit.
+   */
+  loadOlderGroupRuleCounts(): Promise<OlderGroupRuleCounts>;
+  /** Every Card Shellz product in the category, chosen or not, ascending; no lock (W12 locks them next, plan 8.5). */
+  listCategoryProductIds(categoryId: number): Promise<number[]>;
+  /**
+   * Which per-size leftovers each size holds, by size: the policy ids its
+   * override sets and its shelf row, the vendor's and the store's rows only,
+   * ids only (plan 8.2). First takes the old per-size writers' feature locks,
+   * policy then shelf (v3r, C-money-6), so no old writer can add or remove a
+   * leftover before commit; clearSizeLeftovers asks for the same locks again.
+   * Only after lockCatalog, at most once per transaction; otherwise
+   * DROPSHIP_LISTING_SETTINGS_INVARIANT_FAILED. A size with none is absent.
+   */
+  loadLeftoverFields(productVariantIds: readonly number[]): Promise<Map<number, ListingSettingLeftoverField[]>>;
+  /**
+   * Products' own-field flags, the vendor's and the store's rows only,
+   * selecting no text (plan 8.2; v3r, C-feas-2): one statement, skipped when
+   * the list is empty, no lock (every listing writer holds the store lock).
+   */
+  loadSettingFacts(input: { productIds: readonly number[] }): Promise<ListingSettingFacts>;
   saveProduct(input: ProductListingSettingSaveInput): Promise<ProductListingSettingSaveResult>;
   saveProductsBulk(input: ProductListingSettingsBulkInput): Promise<ProductListingSettingsBulkResult>;
   saveCategory(input: CategoryListingSettingSaveInput): Promise<CategoryListingSettingSaveResult>;

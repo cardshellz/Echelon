@@ -161,9 +161,12 @@ export class PgDropshipListingSettingsRepository implements ListingSettingsRepos
 
     const ids = candidates.map((row) => row.productVariantId);
     // The product and category settings, once, for every resolver below (plan D26), and the live names of
-    // the categories that have settings (plan D19). Plain reads in this snapshot, like everything else here.
+    // every chosen size's category (plan D19), which the category views show (PR 9e, plan 8.11): one read
+    // either way, and a superset of the categories with settings. Plain reads in this snapshot, like
+    // everything else here.
     const layers = await readListingSettingLayers(client, { vendorId, storeConnectionId, candidates });
-    const categoryNames = await readCatalogCategoryNames(client, [...layers.categories.keys()]);
+    const categoryNames = await readCatalogCategoryNames(client,
+      [...new Set(candidates.flatMap((row) => row.categoryId === null ? [] : [row.categoryId]))]);
     let costReadFailed = false;
     const costs = await PgShellzClubProductCostAdapter.forTransaction(client, (failure) => {
       costReadFailed = true;
