@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { ListingRecreationService } from "./listing-recreation.service";
 import {
   listingAccountSchema,
   listingCatalogPageSchema,
@@ -72,10 +73,18 @@ export interface ListingPublicationDependencies {
   store: ListingPublicationStore;
   catalog: ListingPublicationCatalog;
   provider(channelId: number): Promise<ListingPublicationProvider>;
-  identities(channelId: number): Promise<Pick<ChannelCatalogService, "link">>;
+  identities(
+    channelId: number,
+  ): Promise<
+    Pick<
+      ChannelCatalogService,
+      "link" | "linkRecreated" | "checkRecreationMapping"
+    >
+  >;
   inventory: ListingPublicationInventory;
   /** Read only accepted maintenance intent; never adopt an arbitrary provider price. */
-  listingUpdates?: Pick<ListingUpdateStore, "acceptedPrice">;
+  listingUpdates?: Pick<ListingUpdateStore, "acceptedPrice"> &
+    Partial<Pick<ListingUpdateStore, "lastSubmitted">>;
   now(): Date;
   uuid(): string;
 }
@@ -86,6 +95,12 @@ const actorSchema = z.string().trim().min(1).max(200);
 /** Provider-neutral orchestration. All external effects follow a saved exact review. */
 export class ListingPublicationService {
   constructor(private readonly dependencies: ListingPublicationDependencies) {}
+  recreation(channelId: number, input: unknown) {
+    return new ListingRecreationService(this.dependencies).context(
+      channelId,
+      input,
+    );
+  }
   async workspace(channelId: number) {
     await this.provider(channelId);
     const [draft, operations, pricingRule] = await Promise.all([
@@ -210,6 +225,7 @@ export class ListingPublicationService {
       draft.items.map((item) => item.variantId),
     );
     const prepared: PreparedListingItem[] = [];
+    const recreations: NonNullable<ListingSnapshot["recreations"]> = [];
     const items: ListingReview["items"] = [];
     for (const item of draft.items) {
       const source = catalog.find(
@@ -221,6 +237,14 @@ export class ListingPublicationService {
           "A selected catalog variant no longer exists",
         );
       const price = item.priceOverrideCents ?? source.priceCents;
+      const recreation = item.recreateFromOperationId
+        ? await new ListingRecreationService(this.dependencies).verify(
+            account,
+            item,
+            source,
+          )
+        : null;
+      if (recreation) recreations.push(recreation);
       const issues = [];
       if (item.images === null) issues.push(...(source.imageIssues ?? []));
       if (!source.eligible || !source.sku.trim())
@@ -230,7 +254,7 @@ export class ListingPublicationService {
             "This variant is not eligible for marketplace fulfillment",
           ),
         );
-      if (source.alreadyLinked)
+      if (source.alreadyLinked && !recreation)
         issues.push(
           listingIssue(
             "LISTING_ALREADY_EXISTS",
@@ -252,6 +276,7 @@ export class ListingPublicationService {
             catalog: source,
             draft: item,
             priceCents: price,
+            ...(recreation ? { recreating: true } : {}),
           }),
         );
         if (
@@ -280,6 +305,7 @@ export class ListingPublicationService {
             : source.priceSource,
         issues,
         schemaVersion: candidate?.schemaVersion ?? null,
+        ...(recreation ? { recreating: true } : {}),
       });
     }
     const inventory = await this.dependencies.inventory.inspect(
@@ -297,7 +323,15 @@ export class ListingPublicationService {
         ),
       );
     const now = this.now();
-    const evidence = { account, draft, catalog, prepared, inventory };
+    const recovery = recreations.length ? { recreations } : {};
+    const evidence = {
+      account,
+      draft,
+      catalog,
+      prepared,
+      inventory,
+      ...recovery,
+    };
     const review = listingReviewSchema.parse({
       id: this.uuid(),
       draftRevision: draft.revision,
@@ -314,7 +348,7 @@ export class ListingPublicationService {
       inventory,
     });
     await this.dependencies.store.saveReview(
-      { review, account, draft, catalog, prepared },
+      { review, account, draft, catalog, prepared, ...recovery },
       actorSchema.parse(actor),
       now,
     );
@@ -426,9 +460,13 @@ export class ListingPublicationService {
         .map((item) => item.variantId),
     );
     return {
-      items: operation.snapshot.draft.items.filter((item) =>
-        retryIds.has(item.variantId),
-      ),
+      items: operation.snapshot.draft.items
+        .filter((item) => retryIds.has(item.variantId))
+        .map((item) =>
+          item.recreateFromOperationId
+            ? { ...item, recreateFromOperationId: operation.id }
+            : item,
+        ),
     };
   }
 
@@ -492,7 +530,11 @@ export class ListingPublicationService {
         const batch = progress.batches[index];
         if (batch.state === "queued") {
           try {
-            await this.assertCurrent(operation.snapshot, batch.variantIds);
+            await this.assertCurrent(
+              operation.snapshot,
+              batch.variantIds,
+              operation.id,
+            );
           } catch (error) {
             if (!invalidatesReviewedBatch(error)) throw error;
             // Only definitive preflight evidence invalidates this unsent batch.
@@ -582,7 +624,8 @@ export class ListingPublicationService {
                 "LISTING_PROVIDER_SCOPE_CHANGED",
                 "Provider results contain an item outside the reviewed selection",
               );
-            if (item.state === "verified") continue;
+            if (item.state === "verified" || item.state === "superseded")
+              continue;
             item.state = result.state;
             item.externalProductId = result.externalProductId;
             item.canRetry =
@@ -606,7 +649,8 @@ export class ListingPublicationService {
               if (
                 batch.variantIds.includes(item.variantId) &&
                 !observedSkus.has(item.sku) &&
-                item.state !== "verified"
+                item.state !== "verified" &&
+                item.state !== "superseded"
               ) {
                 batch.state = "processing";
                 item.state = "needs_attention";
@@ -635,18 +679,25 @@ export class ListingPublicationService {
               error.status !== 404
             )
               throw error;
-            item.error = "Waiting for Walmart to expose the submitted item.";
+            item.missingOnProvider = true;
+            item.error =
+              "Walmart cannot find this SKU. If you deleted it in Seller Center, use Recreate on Walmart.";
             await persist();
             continue;
           }
+          item.missingOnProvider = false;
           // A reviewed maintenance price may supersede initial setup while Walmart
           // is still activating the item. It must belong to this exact seller SKU
           // and WPID, follow this creation, and be confirmed by the current readback.
-          const editedPrice = observed.item.sku === item.sku && observed.item.externalProductId
-            ? await this.dependencies.listingUpdates?.acceptedPrice(
-                currentAccount, item.sku, observed.item.externalProductId, new Date(operation.createdAt),
-              )
-            : null;
+          const editedPrice =
+            observed.item.sku === item.sku && observed.item.externalProductId
+              ? await this.dependencies.listingUpdates?.acceptedPrice(
+                  currentAccount,
+                  item.sku,
+                  observed.item.externalProductId,
+                  new Date(operation.createdAt),
+                )
+              : null;
           if (
             observed.item.sku !== item.sku ||
             observed.priceCents !== (editedPrice ?? item.priceCents)
@@ -691,21 +742,40 @@ export class ListingPublicationService {
             await persist();
             continue;
           }
-          await (
-            await this.dependencies.identities(operation.channelId)
-          ).link(
+          const identities = await this.dependencies.identities(
             operation.channelId,
-            {
-              mappings: [
-                {
-                  sku: item.sku,
-                  productVariantId: item.variantId,
-                  expectedExternalProductId: observed.item.externalProductId,
-                },
-              ],
-            },
-            "listing-publication-worker",
           );
+          // A slow read must not let an expired worker relink a superseded item.
+          await this.dependencies.store.renewLease(operation, this.now());
+          const recreation = operation.snapshot.recreations?.find(
+            (entry) => entry.variantId === item.variantId,
+          );
+          if (recreation) {
+            await identities.linkRecreated(
+              currentAccount,
+              {
+                sku: item.sku,
+                productVariantId: item.variantId,
+                previousExternalProductId: recreation.previousExternalProductId,
+                expectedExternalProductId: observed.item.externalProductId,
+              },
+              "listing-publication-worker",
+            );
+          } else {
+            await identities.link(
+              operation.channelId,
+              {
+                mappings: [
+                  {
+                    sku: item.sku,
+                    productVariantId: item.variantId,
+                    expectedExternalProductId: observed.item.externalProductId,
+                  },
+                ],
+              },
+              "listing-publication-worker",
+            );
+          }
           item.externalProductId = observed.item.externalProductId;
           item.state = "verified";
           item.error = null;
@@ -740,6 +810,7 @@ export class ListingPublicationService {
   private async assertCurrent(
     snapshot: ListingSnapshot,
     ids: number[],
+    successorId?: string,
   ): Promise<void> {
     const provider = await this.provider(snapshot.account.channelId);
     assertAccount(
@@ -756,6 +827,24 @@ export class ListingPublicationService {
       )
     )
       stale();
+    for (const source of current) {
+      const draft = snapshot.draft.items.find(
+        (item) => item.variantId === source.variantId,
+      )!;
+      const evidence = snapshot.recreations?.find(
+        (item) => item.variantId === source.variantId,
+      );
+      if (draft.recreateFromOperationId) {
+        if (!evidence) stale();
+        await new ListingRecreationService(this.dependencies).verify(
+          snapshot.account,
+          draft,
+          source,
+          evidence,
+          successorId,
+        );
+      } else if (evidence) stale();
+    }
     const inventory = await this.dependencies.inventory.inspect(
       snapshot.account,
       current,
@@ -807,6 +896,13 @@ function invalidatesReviewedBatch(error: unknown): boolean {
       "LISTING_ACCOUNT_CHANGED",
       "LISTING_STOCK_SETUP_REQUIRED",
       "LISTING_CURRENCY_UNSUPPORTED",
+      "LISTING_RECREATION_ITEM_EXISTS",
+      "LISTING_RECREATION_ACCOUNT_CHANGED",
+      "LISTING_RECREATION_IDENTITY_CHANGED",
+      "LISTING_RECREATION_STALE",
+      "LISTING_RECREATION_NOT_SETTLED",
+      "LISTING_RECREATION_INVALID",
+      "LISTING_PUBLICATION_STOPPED",
     ].includes(error.code)
   );
 }

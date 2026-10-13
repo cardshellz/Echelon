@@ -182,6 +182,7 @@ export class PostgresListingUpdateRepository implements ListingUpdateStore {
     account: ListingAccount,
     sku: string,
     externalProductId: string,
+    options: { includeInitial: boolean } = { includeInitial: true },
   ) {
     return this.read(async (client) => {
       // A receipt and matching product identity distinguish submitted values from abandoned reviews.
@@ -203,7 +204,7 @@ export class PostgresListingUpdateRepository implements ListingUpdateStore {
       ).rows[0];
       let productType = "";
       let base: Record<string, unknown> = {};
-      if (row?.payload) {
+      if (options.includeInitial && row?.payload) {
         const visible = asObject(row.payload.Visible);
         productType = Object.keys(visible)[0] ?? "";
         const fields = asObject(visible[productType]);

@@ -12,6 +12,7 @@ const submissionLabels: Record<ListingOperationItem["state"], string> = {
   verified: "Item verified",
   needs_attention: "Needs attention",
   needs_reconciliation: "Outcome needs verification",
+  superseded: "Recreated in a newer submission",
 };
 const mappingLabels = {
   linked: "Linked",

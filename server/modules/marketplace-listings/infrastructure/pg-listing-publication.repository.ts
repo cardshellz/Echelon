@@ -6,6 +6,7 @@ import {
 } from "@shared/types/channel-listing-publication";
 import { VARIANT_SALES_ELIGIBILITY_LOCK_NAMESPACE } from "@shared/catalog/variant-sales-eligibility";
 import type { ListingPublicationStore } from "../application/listing-publication-store.port";
+import { assertRecreationEvidence } from "../domain/listing-recreation";
 import {
   ListingPublicationError,
   listingAccountKey,
@@ -287,6 +288,16 @@ export class PostgresListingPublicationRepository
             now,
           ],
         );
+        if (
+          claimed.rowCount === 1 &&
+          snapshot.recreations?.some(
+            (entry) => entry.variantId === item.variantId,
+          )
+        )
+          throw new ListingPublicationError(
+            "LISTING_RECREATION_STALE",
+            "The original SKU claim is unavailable. Refresh the listing before recreating it.",
+          );
         if (claimed.rowCount !== 1) {
           const prior = (
             await client.query<
@@ -309,7 +320,51 @@ export class PostgresListingPublicationRepository
             )
           ).rows[0];
           const previous = prior ? operationRow(prior) : null;
-          if (
+          const recreation = snapshot.recreations?.find(
+            (entry) =>
+              entry.variantId === item.variantId && entry.sku === item.sku,
+          );
+          if (recreation) {
+            if (!previous)
+              throw new ListingPublicationError(
+                "LISTING_RECREATION_BUSY",
+                "The previous submission is being checked or has changed. Refresh its status and review again.",
+              );
+            assertRecreationEvidence(recreation, previous, snapshot.account);
+            const progress = structuredClone(previous.progress);
+            const replaced = progress.items.find(
+              (entry) =>
+                entry.variantId === item.variantId && entry.sku === item.sku,
+            )!;
+            replaced.state = "superseded";
+            replaced.canRetry = false;
+            replaced.recreatedByOperationId = input.id;
+            replaced.error =
+              "Recreated in a new reviewed submission. Original feed history is retained.";
+            const updated = (
+              await client.query<OperationRow>(
+                `UPDATE marketplace.channel_listing_operations SET progress=$2,state=$3,version=version+1,
+               lease_token=NULL,lease_until=NULL,updated_at=$4 WHERE id=$1 RETURNING *`,
+                [
+                  previous.id,
+                  JSON.stringify(progress),
+                  summarizeListingProgress(progress),
+                  now,
+                ],
+              )
+            ).rows[0];
+            await event(
+              client,
+              snapshot.account.channelId,
+              previous.id,
+              updated.version,
+              "deleted_listing_recreated",
+              input.actor,
+              previous.progress,
+              progress,
+              now,
+            );
+          } else if (
             !previous?.progress.items.some(
               (candidate) =>
                 candidate.variantId === item.variantId &&
@@ -337,7 +392,7 @@ export class PostgresListingPublicationRepository
             snapshot.account.channelId,
             null,
             null,
-            "rejected_item_reclaimed",
+            recreation ? "deleted_item_reclaimed" : "rejected_item_reclaimed",
             input.actor,
             {
               operationId: previous.id,

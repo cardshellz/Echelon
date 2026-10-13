@@ -240,6 +240,7 @@ export async function handlePublicationRequest(
             title: item.title ?? catalog.title,
             unitLabel: catalog.unitLabel,
             method: item.method,
+            ...(item.recreateFromOperationId ? { recreating: true } : {}),
             productType: item.productType,
             priceCents: item.priceOverrideCents ?? catalog.priceCents,
             priceSource: "catalog_variant",
