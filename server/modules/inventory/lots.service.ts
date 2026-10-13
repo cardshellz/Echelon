@@ -839,7 +839,8 @@ export class InventoryLotService {
     const lots = await this.db
       .select({ id: inventoryLots.id, qtyOnHand: inventoryLots.qtyOnHand,
         qtyReserved: inventoryLots.qtyReserved, qtyPicked: inventoryLots.qtyPicked,
-        receivedAt: inventoryLots.receivedAt, status: inventoryLots.status })
+        receivedAt: inventoryLots.receivedAt, status: inventoryLots.status,
+        costBasisQty:sql<string|null>`to_jsonb(inventory_lots)->>'cost_basis_qty'` })
       .from(inventoryLots)
       .where(
         and(
@@ -859,7 +860,16 @@ export class InventoryLotService {
           productVariantId: params.productVariantId, warehouseLocationId: params.warehouseLocationId,
         });
     }
-    const plan = planShipmentLotDepletion(params, lots);
+    const plan = planShipmentLotDepletion(params, lots.map((lot:Record<string,unknown>)=>{
+      const {costBasisQty,...position}=lot;
+      return position;
+    }));
+    for (const portion of plan) {
+      if (portion.fromOnHand>0 && lots.find((lot:{id:number})=>lot.id===portion.lotId)?.costBasisQty!=null) {
+        await allocateLotQuantityCost(this.db,portion.lotId,portion.fromOnHand,"system:shipment-lot-depletion",this.clock(),
+          {kind:"legacy_shipment",warehouseLocationId:params.warehouseLocationId});
+      }
+    }
     const updated = await this.db.execute(sql`
       WITH updates AS (
         SELECT * FROM jsonb_to_recordset(${JSON.stringify(plan)}::jsonb)

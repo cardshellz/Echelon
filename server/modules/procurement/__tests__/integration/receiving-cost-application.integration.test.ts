@@ -790,6 +790,38 @@ audit.sequential("receipt/AP/freight cost revisions with real owners", () => {
     expect((await pool.query("SELECT count(*)::integer AS n FROM inventory.lot_cost_quantity_allocations WHERE inventory_lot_id=$1",[lotId])).rows[0].n).toBe(3);
   });
 
+  it.each(["shipment","cycle_count"] as const)("conserves exact remaining value after an on-hand %s loss",async(kind)=>{
+    const lotId=await exactPieceLot();
+    if (kind==="shipment") {
+      const {InventoryLotService}=await import("../../../inventory/lots.service");
+      await database.transaction(async tx=>{
+        await lockInventoryCostGraph(tx);
+        await new InventoryLotService(tx,()=>NOW).shipFromLots({
+          productVariantId:201,warehouseLocationId:99,qty:30000,fromOnHand:30000,fromPicked:0,reservedToRelease:0,
+        });
+      });
+    } else {
+      const level=(await pool.query("INSERT INTO inventory.inventory_levels(product_variant_id,warehouse_location_id,variant_qty) VALUES(201,99,80000) RETURNING id")).rows[0];
+      const {PostgresCanonicalClaimInventoryRepository}=await import("../../../inventory/infrastructure/canonical-claim-inventory.repository");
+      const client=await pool.connect();
+      try {
+        await client.query("BEGIN");
+        const result=await new PostgresCanonicalClaimInventoryRepository().applyCycleCountAdjustment({
+          client,inventoryLevelId:Number(level.id),productVariantId:201,warehouseLocationId:99,
+          quantityBefore:80000,countedQty:50000,cycleCountId:1,cycleCountItemId:1,actor:actorId,reason:"Verified stock loss",occurredAt:NOW,
+        });
+        expect(result.consumedCostMills).toBe(BigInt(19465200));
+        await client.query("COMMIT");
+      } catch(error) {await client.query("ROLLBACK");throw error;}
+      finally {client.release();}
+    }
+    const {readUnallocatedLotCosts}=await import("../../../inventory/infrastructure/cost-quantity.repository");
+    const remaining=await database.transaction(async tx=>readUnallocatedLotCosts(tx,
+      (await tx.execute(sql`SELECT * FROM inventory.inventory_lots WHERE id=${lotId}`)).rows.map(row=>({...row,id:row.id}))));
+    expect(remaining.get(lotId)).toMatchObject({quantity:50000,costs:{totalMills:BigInt(32442000),landedMills:BigInt(7442000)}});
+    expect((await pool.query("SELECT qty_on_hand FROM inventory.inventory_lots WHERE id=$1",[lotId])).rows[0].qty_on_hand).toBe(50000);
+  });
+
   it("real AP audit failure rolls back invoice evidence, lot layers, consumed COGS and adjustment log", async () => {
     await receive(); await seedConsumedCost(); const before = await state();
     await failAudit(async () => { await expect(approveEvidence()).rejects.toThrow(/cost audit injected AP audit failure/); });

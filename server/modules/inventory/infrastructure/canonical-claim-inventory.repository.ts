@@ -223,6 +223,8 @@ export class PostgresCanonicalClaimInventoryRepository implements CanonicalClaim
       );
     }
 
+    const costTransaction=costEvidenceTransactionFromPg(input.client);
+    await lockInventoryCostGraph(costTransaction);
     const level = await lockLevel(input.client, inventoryLevelId);
     if (!level
       || positiveInteger(level.product_variant_id, "inventoryLevel.productVariantId") !== productVariantId
@@ -244,7 +246,8 @@ export class PostgresCanonicalClaimInventoryRepository implements CanonicalClaim
     }
 
     const lotRows = rows(await input.client.query(
-      `SELECT id, qty_on_hand, qty_reserved, qty_picked, total_unit_cost_mills
+      `SELECT id, qty_on_hand, qty_reserved, qty_picked, total_unit_cost_mills,
+        qty_received,cost_basis_qty,product_total_cost_mills,packaging_total_cost_mills,landed_total_cost_mills
        FROM inventory.inventory_lots
        WHERE product_variant_id = $1
          AND warehouse_location_id = $2
@@ -308,6 +311,10 @@ export class PostgresCanonicalClaimInventoryRepository implements CanonicalClaim
         const take = Math.min(Math.max(0, qtyOnHand - qtyReserved), remaining);
         if (take === 0) continue;
         const unitCostMills = postgresBigInt(BigInt(String(lot.total_unit_cost_mills ?? 0)), "inventoryLot.totalUnitCostMills");
+        const exact=hasExactLotCostTotals(lot) ? await allocateLotQuantityCost(costTransaction,lotId,take,
+          input.actor,input.occurredAt,{cycleCountId,cycleCountItemId,kind:"cycle_count_loss"},
+          `cycle_count_cost:${cycleCountId}:${cycleCountItemId}:${lotId}`) : null;
+        const totalCostMills=exact?.costs.totalMills ?? BigInt(take)*unitCostMills;
         const updated = quantityPosting ? null : await input.client.query(
           `UPDATE inventory.inventory_lots
            SET qty_on_hand = qty_on_hand - $1,
@@ -327,12 +334,12 @@ export class PostgresCanonicalClaimInventoryRepository implements CanonicalClaim
         }
         remaining -= take;
         consumedQty += BigInt(take);
-        consumedCostMills += BigInt(take) * unitCostMills;
+        consumedCostMills += totalCostMills;
         lotEffects.push({
           inventoryLotId: lotId,
           quantityDelta: -take,
           unitCostMills,
-          totalCostMills: BigInt(take) * unitCostMills,
+          totalCostMills,
         });
       }
       if (remaining !== 0) {
@@ -600,7 +607,7 @@ export class PostgresCanonicalClaimInventoryRepository implements CanonicalClaim
               unit_cost_cents, po_unit_cost_cents, packaging_cost_cents,
               landed_cost_cents, total_unit_cost_cents, unit_cost_mills,
               po_unit_cost_mills, packaging_cost_mills, landed_cost_mills,
-              total_unit_cost_mills, cost_precision_version, cost_provisional, cost_source, qty_received
+              total_unit_cost_mills, cost_precision_version, cost_provisional, cost_source, qty_received, to_jsonb(inventory_lots)->>'cost_basis_qty' AS cost_basis_qty
        FROM inventory.inventory_lots
        WHERE product_variant_id = $1
          AND warehouse_location_id = $2
@@ -945,7 +952,7 @@ export class PostgresCanonicalClaimInventoryRepository implements CanonicalClaim
               cost_provisional, cost_source, unit_cost_cents, po_unit_cost_cents,
               packaging_cost_cents, landed_cost_cents, total_unit_cost_cents,
               unit_cost_mills, po_unit_cost_mills, packaging_cost_mills,
-              landed_cost_mills, total_unit_cost_mills, cost_precision_version, qty_received
+              landed_cost_mills, total_unit_cost_mills, cost_precision_version, qty_received, to_jsonb(inventory_lots)->>'cost_basis_qty' AS cost_basis_qty
        FROM inventory.inventory_lots
        WHERE id = ANY($1::integer[])
           OR (product_variant_id = $2 AND warehouse_location_id = $3 AND status = 'active')
@@ -1929,7 +1936,7 @@ export class PostgresCanonicalClaimInventoryRepository implements CanonicalClaim
               qty_picked, status, received_at, unit_cost_cents, po_unit_cost_cents,
               packaging_cost_cents, landed_cost_cents, total_unit_cost_cents,
               unit_cost_mills, po_unit_cost_mills, packaging_cost_mills,
-              landed_cost_mills, total_unit_cost_mills, cost_precision_version, cost_provisional, cost_source, qty_received
+              landed_cost_mills, total_unit_cost_mills, cost_precision_version, cost_provisional, cost_source, qty_received, to_jsonb(inventory_lots)->>'cost_basis_qty' AS cost_basis_qty
        FROM inventory.inventory_lots
        WHERE id = ANY($1::integer[])
        ORDER BY warehouse_location_id, product_variant_id, received_at, id
@@ -2581,7 +2588,7 @@ async function lockPickInventory(
             qty_picked, status, received_at, unit_cost_cents, po_unit_cost_cents,
             packaging_cost_cents, landed_cost_cents, total_unit_cost_cents,
             unit_cost_mills, po_unit_cost_mills, packaging_cost_mills,
-            landed_cost_mills, total_unit_cost_mills, cost_precision_version, cost_provisional, cost_source, qty_received
+            landed_cost_mills, total_unit_cost_mills, cost_precision_version, cost_provisional, cost_source, qty_received, to_jsonb(inventory_lots)->>'cost_basis_qty' AS cost_basis_qty
      FROM inventory.inventory_lots
      WHERE id = ANY($1::integer[])
      ORDER BY warehouse_location_id, product_variant_id, received_at, id

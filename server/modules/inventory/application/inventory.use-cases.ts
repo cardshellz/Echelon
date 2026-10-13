@@ -496,6 +496,7 @@ export class InventoryUseCases {
     const allowNegative = params.allowNegative === true;
 
     const doWork = async (tx: any): Promise<{ lotUnitCostMills: number | null }> => {
+      await lockInventoryCostGraph(tx);
       const quantityPosting = await openOperationalQuantityPosting(tx);
       const quantityKey = `receipt_reversal:${params.reversalId}`;
       const replay = quantityPosting && await quantityPosting.beginOperation(quantityKey, { operation: "receipt_reversal", ...params });
@@ -513,7 +514,7 @@ export class InventoryUseCases {
       // 1. Lots created by this receiving line (resolved through the ledger —
       //    the receipt transaction row carries the exact lot linkage).
       const lotRows = await tx.execute(sql`
-        SELECT l.id, l.qty_on_hand, l.qty_reserved, l.unit_cost_mills
+        SELECT l.id, l.qty_on_hand, l.qty_reserved, l.unit_cost_mills,l.cost_basis_qty
         FROM inventory.inventory_lots l
         JOIN inventory.inventory_transactions t
           ON t.inventory_lot_id = l.id
@@ -554,6 +555,12 @@ export class InventoryUseCases {
             allowNegative ? remainingToReverse : available,
           );
           if (decrement <= 0) continue;
+          if (lot.cost_basis_qty!=null) {
+            const {allocateLotQuantityCost}=await import("../infrastructure/cost-quantity.repository");
+            const costQuantity=Math.min(decrement,Math.max(0,available));
+            if (costQuantity>0) await allocateLotQuantityCost(tx,Number(lot.id),costQuantity,params.userId || "system:receipt-reversal",
+              this.clock(),{kind:"receipt_reversal",reversalId:params.reversalId},`receipt_reversal_cost:${params.reversalId}:${lot.id}`);
+          }
 
           if (lotUnitCostMills === null && lot.unit_cost_mills !== null) {
             lotUnitCostMills = Number(lot.unit_cost_mills);
@@ -684,6 +691,7 @@ export class InventoryUseCases {
     }
 
     const result = await this.db.transaction(async (tx) => {
+      await lockInventoryCostGraph(tx);
       const level = await this.storage.lockInventoryLevel(
         params.warehouseLocationId,
         params.productVariantId,
@@ -776,6 +784,7 @@ export class InventoryUseCases {
     if (!Number.isSafeInteger(params.qty) || params.qty <= 0) throw new Error("qty must be a positive safe integer");
 
     const result = await this.db.transaction(async (tx) => {
+      await lockInventoryCostGraph(tx);
       const level = await this.storage.lockInventoryLevel(
         params.warehouseLocationId,
         params.productVariantId,
@@ -916,6 +925,7 @@ export class InventoryUseCases {
       await assertNoOpenPickCorrection(tx, params.orderItemId);
     }
 
+    await lockInventoryCostGraph(tx);
     const level = await this.storage.lockInventoryLevel(
       params.warehouseLocationId,
       params.productVariantId,
@@ -1077,6 +1087,7 @@ export class InventoryUseCases {
           wl.id
       `);
 
+      await lockInventoryCostGraph(tx);
       let selectedLevel: InventoryLevel | undefined;
       for (const candidate of candidates.rows as Array<{ warehouse_location_id: number }>) {
         const locationId = Number(candidate.warehouse_location_id);
@@ -1241,7 +1252,7 @@ export class InventoryUseCases {
         conversion: params.conversion ? { ...params.conversion, productMills: params.conversion.productMills.toString(),
           packagingMills: params.conversion.packagingMills.toString(), landedMills: params.conversion.landedMills.toString() } : null });
       if (replay) { replayedResult = adjustmentReplaySchema.parse(replay.result); return; }
-      if (quantityPosting || params.conversion || params.includeConsumedCostEvidence) await lockInventoryCostGraph(tx);
+      await lockInventoryCostGraph(tx);
       // Cycle-count adjustments are the ONE mutation allowed on frozen bins
       if (!params.cycleCountId) {
         await this.assertNotFrozen(params.warehouseLocationId, tx);

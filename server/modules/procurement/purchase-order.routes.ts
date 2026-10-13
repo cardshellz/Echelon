@@ -449,7 +449,7 @@ export function registerPurchaseOrderRoutes(app: Express) {
   });
 
   app.get("/api/purchase-orders/:id/shipment-cost-summary",requirePermission("purchasing","view"),async(req,res)=>{
-    const parsed=z.string().regex(/^[1-9]\d*$/).transform(Number).pipe(z.number().int().positive().safe()).safeParse(req.params.id);
+    const parsed=z.string().regex(/^[1-9]\d*$/).transform(Number).pipe(z.number().int().positive().max(2_147_483_647)).safeParse(req.params.id);
     if (!parsed.success) return res.status(400).json({error:"Invalid purchase order ID"});
     try {
       const summary=await purchasing.getPoShipmentCostSummary(parsed.data);
