@@ -10,7 +10,7 @@ import { createCustomerReturnCustomerAuth } from "../../returns/infrastructure/c
 import { returnCustomerError, returnCustomerPrivateResponse } from "../../returns/interfaces/http/customer-return-customer-auth.routes";
 import { OrderEditError } from "../../order-edits/domain/order-edit-error";
 import { OrderEditProviderError } from "../../order-edits/application/order-edit-provider";
-import { readCustomerAccountStagingConfig, requireCustomerAccountStaging, type CustomerAccountStagingConfig } from "../domain/customer-account-staging";
+import { CustomerAccountOriginAccessError, readCustomerAccountStagingConfig, requireCustomerAccountStaging, type CustomerAccountOriginContext, type CustomerAccountStagingConfig } from "../domain/customer-account-staging";
 import type { customerAccountServices } from "../infrastructure/customer-account.composition";
 
 type Services = ReturnType<ReturnType<typeof customerAccountServices>>;
@@ -18,7 +18,7 @@ export interface CustomerAccountRouteDependencies {
   services: (principal: CustomerReturnCustomerSession) => Services;
   context?: typeof createCustomerReturnCustomerAuth;
   staging?: () => CustomerAccountStagingConfig | null;
-  report: (event: { code: string; path: string }) => void;
+  report: (event: { code: string; path: string; context?: CustomerAccountOriginContext }) => void;
 }
 const id = z.coerce.number().int().positive().safe();
 const empty = z.object({}).strict();
@@ -40,7 +40,7 @@ export function registerCustomerAccountRoutes(app: Express, dependencies: Custom
   const failed = (res: Response, error: unknown, path: string) => {
     const known = error instanceof OrderEditError || error instanceof OrderEditProviderError;
     const code = error instanceof z.ZodError ? "CUSTOMER_ACCOUNT_INVALID_REQUEST" : known || error instanceof CustomerReturnCustomerAccessError ? error.code : "CUSTOMER_ACCOUNT_REQUEST_FAILED";
-    dependencies.report({ code, path });
+    dependencies.report({ code, path, ...(error instanceof CustomerAccountOriginAccessError ? { context: error.context } : {}) });
     if (known) res.status(error instanceof OrderEditError ? error.status : 409).json({ error: { code: error.code, message: error.message } });
     else returnCustomerError(res, error);
   };
