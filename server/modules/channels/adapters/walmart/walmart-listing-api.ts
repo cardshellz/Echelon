@@ -93,6 +93,9 @@ const itemObservationSchema = z.object({
         upc: z.string().max(32).nullish(),
         lifecycleStatus: z.string().min(1).max(100),
         publishedStatus: z.string().min(1).max(100),
+        unpublishedReasons: z
+          .object({ reason: z.array(z.string().max(10_000)).max(200).nullish() })
+          .nullish(),
         price: z
           .object({
             currency: z.literal("USD"),

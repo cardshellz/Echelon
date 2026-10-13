@@ -55,7 +55,8 @@ export function listingErrorDescription(value: string | undefined): string {
   // bodies. Bound display text and redact authentication-shaped fragments.
   return (
     value
-      ?.replace(/[\u0000-\u001f\u007f]/g, " ")
+      ?.replace(/\|\|([^|]+?)@@@([^|]+?)\|\|/g, "$1 ($2)")
+      .replace(/[\u0000-\u001f\u007f]/g, " ")
       .replace(/(?:Bearer|Basic)\s+[A-Za-z0-9+/_=.-]+/gi, "[redacted]")
       .replace(
         /(client[_ -]?secret|access[_ -]?token|authorization)\s*[:=]\s*[^\s,;]+/gi,
@@ -607,6 +608,11 @@ export class WalmartListingProvider implements ListingPublicationProvider {
         publishedStatus: item.publishedStatus,
       },
       priceCents: item.price ? priceFromWalmart(item.price.amount) : null,
+      issues: (item.unpublishedReasons?.reason ?? [])
+        .filter((reason) => reason.trim().length > 0)
+        .map((reason) =>
+          issue("WALMART_ITEM_UNPUBLISHED", listingErrorDescription(reason)),
+        ),
     };
   }
 

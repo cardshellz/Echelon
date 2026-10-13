@@ -721,7 +721,15 @@ export class ListingPublicationService {
               observed.item.publishedStatus.toUpperCase(),
             )
           ) {
-            item.error = "Waiting for Walmart to finish item activation.";
+            // Feed acceptance does not erase a later publication block. Keep
+            // observing the accepted item so provider-side recovery can complete
+            // normally, without granting permission to send a duplicate listing.
+            item.error = observed.issues?.length
+              ? observed.issues
+                  .map((issue) => issue.message)
+                  .join("; ")
+                  .slice(0, 2000)
+              : "Waiting for Walmart to finish item activation.";
             await persist();
             continue;
           }

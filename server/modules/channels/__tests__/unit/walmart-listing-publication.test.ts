@@ -758,6 +758,40 @@ describe("Walmart listing response validation", () => {
     remainingTokens: null,
     nextReplenishmentAt: null,
   };
+  it("preserves and sanitizes publication reasons through the item API and provider", async () => {
+    const { provider, channels } = setup();
+    const requestWithMetadata = vi.fn().mockResolvedValue({
+      data: { ItemResponse: [{ sku: catalog.sku, mart: "WALMART_US", wpid: "WPID-1",
+        lifecycleStatus: "ACTIVE", publishedStatus: "SYSTEM_PROBLEM", productType: "default",
+        price: { currency: "USD", amount: "12.99" },
+        unpublishedReasons: { reason: ["Check ||Prohibited Product Policy@@@https://marketplacelearn.walmart.com/policy||.\naccess_token=private-value", " "] },
+      }] }, metadata,
+    });
+    channels.listingApi.mockReturnValue(new WalmartListingApi({ requestWithMetadata }));
+    expect(await provider.observe(account, catalog.sku)).toMatchObject({
+      item: { sku: catalog.sku, publishedStatus: "SYSTEM_PROBLEM" },
+      priceCents: 1299,
+      issues: [{ code: "WALMART_ITEM_UNPUBLISHED", field: null,
+        message: "Check Prohibited Product Policy (https://marketplacelearn.walmart.com/policy). access_token: [redacted]" }],
+    });
+  });
+  it.each([undefined, null, {}, { reason: null }, { reason: [] }])("accepts item observations without publication reasons (%j)", async (unpublishedReasons) => {
+    const { provider, channels } = setup();
+    const requestWithMetadata = vi.fn().mockResolvedValue({ data: { ItemResponse: [{
+      sku: catalog.sku, mart: "WALMART_US", lifecycleStatus: "ACTIVE", publishedStatus: "PUBLISHED", unpublishedReasons,
+    }] }, metadata });
+    channels.listingApi.mockReturnValue(new WalmartListingApi({ requestWithMetadata }));
+    expect((await provider.observe(account, catalog.sku)).issues).toEqual([]);
+  });
+  it.each([{ reason: [42] }, { reason: ["x".repeat(10_001)] }, { reason: Array(201).fill("Reason") }])(
+    "rejects malformed or oversized publication reasons", async (unpublishedReasons) => {
+      const requestWithMetadata = vi.fn().mockResolvedValue({ data: { ItemResponse: [{
+        sku: catalog.sku, mart: "WALMART_US", lifecycleStatus: "ACTIVE", publishedStatus: "SYSTEM_PROBLEM", unpublishedReasons,
+      }] }, metadata });
+      await expect(new WalmartListingApi({ requestWithMetadata }).observe(catalog.sku))
+        .rejects.toMatchObject({ code: "WALMART_LISTING_RESPONSE_INVALID" });
+    },
+  );
   it("rejects partial requirements rather than validating against an incomplete spec", async () => {
     const requestWithMetadata = vi.fn().mockResolvedValue({
       data: { schema: createSchema, errors: ["invalid type"] },
