@@ -69,6 +69,7 @@ dbDescribe.sequential(
       );
       await installWalmartPublicationInventoryFixture(database.pool, {
         includeWalmartMapping: false,
+        includeQuantityRecoveryMigrations: true,
       });
       await activateWalmartPublicationInventoryFixture(database.pool);
       await installCutoverAdmissionFixturePrerequisites(database.pool);
