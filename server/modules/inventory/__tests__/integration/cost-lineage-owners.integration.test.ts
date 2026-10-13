@@ -66,7 +66,7 @@ databaseTests.sequential("cost contribution physical owners on PostgreSQL", () =
       CREATE UNIQUE INDEX build_run_replay_identity ON inventory.build_runs(idempotency_key);
     `);
     await pool.query(await readFile(resolve(process.cwd(), "migrations/222_procurement_cost_evidence.sql"), "utf8"));
-    await pool.query(await readFile(resolve(process.cwd(), "migrations/0750_exact_inventory_cost_totals.sql"), "utf8"));
+    await pool.query(await readFile(resolve(process.cwd(), "migrations/0751_exact_inventory_cost_totals.sql"), "utf8"));
     await pool.query(await readFile(resolve(process.cwd(), "migrations/0725_inventory_cost_admission_evidence.sql"), "utf8"));
     database = drizzle(pool, { schema });
   });

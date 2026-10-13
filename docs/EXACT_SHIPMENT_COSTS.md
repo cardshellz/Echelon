@@ -10,7 +10,7 @@ failures remain visible.
 ## Financial authority
 
 Amounts remain integer cents or integer 1/10,000-dollar units (the existing
-mill columns). Migration 750 adds nullable product, packaging and landed
+mill columns). Migration 751 adds nullable product, packaging and landed
 extended totals plus the original variant quantity to inventory lots.
 These totals own financial calculations. Rounded per-unit fields remain
 compatibility/display mirrors.
@@ -37,7 +37,7 @@ quantity-times-unit-rate validation.
 
 ## Historical records and rollout
 
-Apply migration 750 before running this application version. It does not blindly
+Apply migration 751 before running this application version. It does not blindly
 backfill historical costs or change physical inventory. Historical positions
 are established from recorded consumption, transformation and explicitly
 linked reversal/return quantities, ordered deterministically. Missing quantity
