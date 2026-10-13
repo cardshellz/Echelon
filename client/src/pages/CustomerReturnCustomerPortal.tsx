@@ -121,18 +121,28 @@ export default function CustomerReturnCustomerPortal() {
   );
 }
 
-function CustomerWorkspace({
+export function CustomerWorkspace({
   sessionKey,
   onDenied,
   onSignedOut,
+  transport,
+  initialOrder,
+  initialStatus,
+  downloadRequest = fetch,
+  embedded = false,
 }: {
   sessionKey: string;
   onDenied: (message: string) => void;
   onSignedOut: () => void;
+  transport?: ReturnType<typeof createCustomerReturnTransport>;
+  initialOrder?: CustomerReturnCustomerOrder;
+  initialStatus?: CustomerReturnCustomerLabelStatus;
+  downloadRequest?: typeof fetch;
+  embedded?: boolean;
 }) {
   const api = useMemo(
-    () => createCustomerReturnTransport(fetch, sessionKey),
-    [sessionKey],
+    () => transport ?? createCustomerReturnTransport(fetch, sessionKey),
+    [sessionKey, transport],
   );
   const [commands] = useState(() => {
     let storage: Storage | null = null;
@@ -156,10 +166,10 @@ function CustomerWorkspace({
   });
   const [historyError, setHistoryError] = useState<string | null>(null);
   const [selected, setSelected] = useState<CustomerReturnCustomerOrder | null>(
-    null,
+    initialOrder ?? null,
   );
   const [historicalStatus, setHistoricalStatus] =
-    useState<CustomerReturnCustomerLabelStatus | null>(null);
+    useState<CustomerReturnCustomerLabelStatus | null>(initialStatus ?? null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
@@ -202,7 +212,7 @@ function CustomerWorkspace({
   );
 
   useEffect(() => {
-    if (command.record) return;
+    if (command.record || embedded) return;
     void run(async (signal) => {
       const [page, prior] = await Promise.allSettled([
         api.orders(null, signal),
@@ -234,9 +244,10 @@ function CustomerWorkspace({
       }
     });
     return () => operation.current?.abort();
-  }, [api, run, attempt, command.record !== null]);
+  }, [api, run, attempt, command.record !== null, embedded]);
 
   function chooseAnother(reason?: string) {
+    if (embedded) { onSignedOut(); return; }
     operation.current?.abort();
     setBusy(false);
     setSelected(null);
@@ -280,7 +291,7 @@ function CustomerWorkspace({
   const status = command.record ? command.status : historicalStatus;
   const showStatus = command.record !== null || historicalStatus !== null;
   const inProgress = busy || command.busy;
-  const signOut = (
+  const signOut = embedded ? null : (
     <Button
       variant="ghost"
       disabled={inProgress}
@@ -302,6 +313,7 @@ function CustomerWorkspace({
         parcelId,
         sessionKey,
         signal,
+        downloadRequest,
       );
       if (signal.aborted) return;
       const url = URL.createObjectURL(blob);

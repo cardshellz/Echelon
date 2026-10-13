@@ -153,6 +153,21 @@ export class CustomerReturnCustomerAuthService {
     return result.data;
   }
 
+  /** Shopify app proxies strip cookies. Verify Shopify's signed customer on
+   * every storefront request instead of trusting the Liquid page or a staff session. */
+  async storefrontPrincipal(rawQuery: string): Promise<CustomerReturnCustomerSession> {
+    const proof = this.verifyProof(rawQuery, this.now());
+    if (!proof.customerId) throw customerAuthenticationRequired();
+    const shop = await this.requireShop(proof.shop);
+    const acceptedAt = this.now();
+    this.verifyProof(rawQuery, acceptedAt);
+    return customerReturnCustomerSessionSchema.parse({
+      channelId: shop.channelId, externalCustomerId: proof.customerId, shopDomain: proof.shop,
+      sessionKey: this.storageKey(proof.shop, proof.customerId), authenticatedAt: acceptedAt.getTime(),
+      expiresAt: acceptedAt.getTime() + RETURN_SESSION_LIFETIME_MS,
+    });
+  }
+
   private verifyProof(rawQuery: string, now: Date): CustomerReturnShopifyProof {
     if (typeof rawQuery !== "string" || Buffer.byteLength(rawQuery, "utf8") > MAX_PROXY_QUERY_BYTES) throw customerAuthenticationRequired();
     // The unverified shop is solely a credential lookup hint. The verifier

@@ -1,0 +1,20 @@
+import type { Pool } from "pg";
+import type { OrderEditService } from "../../order-edits/application/order-edit.service";
+import type { CustomerReturnCustomerSession } from "../../returns/application/customer-return-customer-auth.service";
+import { CustomerReturnOrderAccessService } from "../../returns/application/customer-return-order-access.service";
+import { PostgresCustomerReturnOrderAccessRepository } from "../../returns/infrastructure/customer-return-order-access.repository";
+import { createCustomerReturnCustomerServices } from "../../returns/infrastructure/customer-return-customer.composition";
+import { PostgresOrderEditStore } from "../../order-edits/infrastructure/postgres-order-edit.store";
+import { CustomerOrderEditService } from "../application/customer-order-edit.service";
+
+export function customerAccountServices(pool: Pool, edits: OrderEditService) {
+  const store = new PostgresOrderEditStore(pool);
+  return (principal: CustomerReturnCustomerSession) => ({
+    edits: new CustomerOrderEditService({ principal, edits, store,
+      access: new CustomerReturnOrderAccessService({ channelId: principal.channelId,
+        principalReader: { getVerifiedPrincipal: async () => ({ kind: "customer", channelId: principal.channelId, externalCustomerId: principal.externalCustomerId }) },
+        repository: new PostgresCustomerReturnOrderAccessRepository(pool) }) }),
+    // Bootstrap/catalog reads do not initialize shipping providers or inspect returns.
+    returns: () => createCustomerReturnCustomerServices(principal),
+  });
+}
