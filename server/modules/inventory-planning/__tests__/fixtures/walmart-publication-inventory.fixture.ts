@@ -13,7 +13,13 @@ export const WALMART_INVENTORY_NOW = new Date("2026-09-27T12:00:00.000Z");
  * uniquely created disposable test database. This does not test global cutover. */
 export async function installWalmartPublicationInventoryFixture(
   pool: Pool,
-  options: { targetState?: "preview" | "live"; includeWalmartMapping?: boolean } = {},
+  options: {
+    targetState?: "preview" | "live";
+    includeWalmartMapping?: boolean;
+    /** Full transport tests need the real recovery guards. Read-model fixtures
+     * deliberately supply reduced eBay owner tables through stock-selection. */
+    includeQuantityRecoveryMigrations?: boolean;
+  } = {},
 ): Promise<void> {
   await installCutoverCompositionMigrations(pool);
   await pool.query(cutoverCompositionSeedSql);
@@ -29,7 +35,19 @@ export async function installWalmartPublicationInventoryFixture(
   for (const file of [
     "0709_walmart_quantity_admission.sql",
     "0716_inventory_publication_reconciliation.sql",
+    ...(options.includeQuantityRecoveryMigrations
+      ? [
+          "0729_ebay_listing_sync_recovery.sql",
+          "0733_ebay_provider_response_finality.sql",
+          "0734_ebay_operator_republication_recovery.sql",
+        ]
+      : []),
     "0746_listing_recreation_stock_continuation.sql",
+    "0747_walmart_listing_initial_stock.sql",
+    "0748_walmart_listing_presence.sql",
+    ...(options.includeQuantityRecoveryMigrations
+      ? ["0749_quantity_outbox_preflight_completion.sql"]
+      : []),
   ])
     await pool.query(
       readFileSync(resolve(process.cwd(), "migrations", file), "utf8"),

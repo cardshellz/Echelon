@@ -78,7 +78,7 @@ export function ChannelListingFeedRow({
     ? remote.lifecycleStatus.toUpperCase() === "ACTIVE"
     : operation && ["accepted", "verified"].includes(operation.item.state);
   const canEditExisting =
-    !draft && !lifecycle && existingListing && row.sku && canEdit;
+    !draft && !lifecycle && !row.missingOnWalmart && existingListing && row.sku && canEdit;
   const canRecreate =
     !draft &&
     !lifecycle &&
@@ -89,6 +89,7 @@ export function ChannelListingFeedRow({
   const canMatch =
     remote &&
     !lifecycle &&
+    !row.missingOnWalmart &&
     canEdit &&
     !row.issue &&
     ["matched", "unmatched"].includes(remote.mappingStatus);
@@ -106,7 +107,7 @@ export function ChannelListingFeedRow({
     canStop ||
     canCheckStop
   );
-  const stockLabel = stockError
+  const stockLabel = stockError || row.missingOnWalmart
     ? "—"
     : stock?.quantity != null
       ? stock.quantity.toLocaleString()

@@ -3,6 +3,7 @@ import { InventoryPublicationConfigurationError } from "./channel-adapter.interf
 import {
   InventoryPublicationTransportConfigurationError,
   InventoryPublicationTransportError,
+  InventoryPublicationNotSentError,
   type AbsoluteInventoryPublicationRequest,
   type AbsoluteInventoryPublicationResult,
   type AbsoluteInventoryReadRequest,
@@ -42,7 +43,9 @@ export class ChannelInventoryPublicationTransportAdapter
       });
       const result = singleResult(results, request.productVariantId, "publication");
       if (result.status !== "success" || result.pushedQty !== request.desiredQuantity) {
-        throw new InventoryPublicationTransportError(
+        const Failure = result.status !== "success" && result.effect === "not_sent"
+          ? InventoryPublicationNotSentError : InventoryPublicationTransportError;
+        throw new Failure(
           result.errorCode ?? "PROVIDER_PUBLICATION_REJECTED",
           result.error ?? `Provider reported ${result.status} for inventory publication.`,
           result.retryable !== false,

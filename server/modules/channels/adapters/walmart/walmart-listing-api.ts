@@ -5,9 +5,9 @@ import { listingLifecycleSkuSchema } from "@shared/types/channel-listing-lifecyc
 import type { WalmartClient, WalmartResponseMetadata } from "./walmart-client";
 import { WalmartApiError } from "./walmart-client";
 import {
-  assertListingSetupZeroAdmission,
-  type ListingSetupZeroIntent,
-} from "../../../inventory-planning/application/listing-setup-zero-intent";
+  assertListingSetupAdmission,
+  type ListingSetupIntent,
+} from "../../../inventory-planning/application/listing-setup-intent";
 import { priceForWalmart } from "./walmart-listing-schema";
 import { normalizeWalmartListingTaxonomy } from "./walmart-listing-taxonomy";
 
@@ -267,11 +267,11 @@ export class WalmartListingApi {
     feedType: WalmartListingFeedType,
     payload: Record<string, unknown>,
     correlationId: string,
-    admission: Readonly<ListingSetupZeroIntent>,
+    admission: Readonly<ListingSetupIntent>,
   ): Promise<{ feedId: string; metadata: WalmartResponseMetadata }> {
     walmartListingFeedTypeSchema.parse(feedType);
     z.string().uuid().parse(correlationId);
-    assertListingSetupZeroAdmission(admission);
+    assertListingSetupAdmission(admission);
     const batch = z
       .object({ MPItem: z.array(z.record(z.unknown())).min(1).max(100) })
       .parse(payload);
@@ -290,7 +290,7 @@ export class WalmartListingApi {
             .array(
               z
                 .object({
-                  quantity: z.literal(0),
+                  quantity: z.number().int().min(0).max(2_147_483_647),
                   fulfillmentCenterID: z.literal(admission.shipNodeId),
                 })
                 .strict(),
@@ -300,7 +300,7 @@ export class WalmartListingApi {
         .parse(item[feedType === "MP_ITEM" ? "Orderable" : "Item"]);
       if (
         seen.has(offer.sku) ||
-        !admission.items.some((member) => member.sku === offer.sku)
+        !admission.items.some((member) => member.sku === offer.sku && member.quantity === offer.inventory[0].quantity)
       ) {
         throw new WalmartApiError(
           "WALMART_LISTING_ADMISSION_MISMATCH",

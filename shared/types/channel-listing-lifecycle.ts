@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { listingAccountSchema } from "./channel-listing-publication";
+import { listingPresenceSchema } from "./channel-listing-presence";
 
 // Preserve seller identities byte-for-byte. Dot-only path segments cannot be
 // represented safely by the provider's SKU-in-path endpoint.
@@ -35,6 +36,7 @@ export const listingLifecycleListSchema = z
   .object({
     account: listingAccountSchema,
     items: z.array(listingLifecycleViewSchema).max(250),
+    presence: z.array(listingPresenceSchema).max(250).default([]),
   })
   .strict();
 export type ListingLifecycleView = z.infer<typeof listingLifecycleViewSchema>;
