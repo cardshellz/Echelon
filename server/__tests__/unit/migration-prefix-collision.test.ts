@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import { readdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { join, dirname } from "node:path";
+import { validateMigrationDirectory } from "../../../scripts/migrations/migration-policy.mjs";
 
 /**
  * Migration prefix collision guard — the CI twin of the check in
@@ -12,8 +13,9 @@ import { join, dirname } from "node:path";
  * the deploy — provided the branch is up to date with main (enable "Require
  * branches to be up to date before merging" so GitHub forces the re-run).
  *
- * Mirrors run-migrations.ts exactly: top-level *.sql files, numeric prefix
- * per /^(\d+)_/, compared as strings.
+ * The release runner and pre-install CI command use the same policy validator.
+ * Existing prefixes remain frozen; new migrations use PR-owned identifiers
+ * with dependency generations so independent branches cannot claim one ID.
  */
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -27,20 +29,6 @@ describe("migration prefix collision guard", () => {
 
     expect(files.length).toBeGreaterThan(100); // sanity: we found the real dir
 
-    const prefixMap = new Map<string, string>();
-    const collisions: string[] = [];
-    for (const file of files) {
-      const match = file.match(/^(\d+)_/);
-      if (!match) continue;
-      const prefix = match[1];
-      const existing = prefixMap.get(prefix);
-      if (existing) {
-        collisions.push(`${existing} vs ${file}`);
-      } else {
-        prefixMap.set(prefix, file);
-      }
-    }
-
-    expect(collisions, `Duplicate migration prefixes (rename yours to the next free number): ${collisions.join("; ")}`).toEqual([]);
+    expect(validateMigrationDirectory(migrationsDir)).toEqual(files);
   });
 });
