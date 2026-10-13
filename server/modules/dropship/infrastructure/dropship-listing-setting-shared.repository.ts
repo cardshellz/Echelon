@@ -16,6 +16,7 @@ import {
   type ProductListingSettingRow,
   type ProductListingSettingValues,
 } from "../../../../shared/dropship/listing-setting-values";
+import { pricingRecipeSchema, type PricingRecipe } from "../../../../shared/dropship/pricing-rules";
 import type { ListingSettingActor } from "../application/dropship-listing-setting-writes";
 import { DropshipError } from "../domain/errors";
 import { listingSettingsInvariantFailed } from "../domain/listing-setting-values";
@@ -187,18 +188,35 @@ export function categoryListingSettingRowFromColumns(
   }, "category listing setting row"));
 }
 
+/**
+ * A revision's own price recipe from its four price columns alone (plan PR
+ * 9, 8.2), read exactly as the full row read reads it: all or none (a partial
+ * group is refused), then parsed with pricingRecipeSchema, the values
+ * schema's price. Lets a heavy write read prices with no text column.
+ */
+export function listingSettingPriceFromColumns(row: Readonly<Record<
+  "price_basis" | "price_markup_bps" | "price_flat_cents" | "price_rounding", unknown>>): PricingRecipe | null {
+  requireColumns(row, ["price_basis", "price_markup_bps", "price_flat_cents", "price_rounding"]);
+  const raw = rawPrice(row);
+  return raw === null ? null : parseStored(pricingRecipeSchema, raw, "listing setting price");
+}
+
 /*
  * Each group is read as all-or-none, as its CHECK writes it. A partial group
  * means a writer bypassed the CHECKs: it is refused, never completed with a
  * guess. The values schema then checks every bound.
  */
 
+function rawPrice(row: Readonly<Record<"price_basis" | "price_markup_bps" | "price_flat_cents" | "price_rounding", unknown>>) {
+  return allOrNone("price", [row.price_basis, row.price_markup_bps, row.price_flat_cents, row.price_rounding], () => ({
+    basis: row.price_basis, markupBps: row.price_markup_bps, flatCents: row.price_flat_cents, rounding: row.price_rounding,
+  }));
+}
+
 function rawCategoryValues(row: StoredCategoryListingSettingColumns): Record<string, unknown> {
   requireColumns(row, CATEGORY_LISTING_SETTING_VALUE_COLUMNS);
   return {
-    price: allOrNone("price", [row.price_basis, row.price_markup_bps, row.price_flat_cents, row.price_rounding], () => ({
-      basis: row.price_basis, markupBps: row.price_markup_bps, flatCents: row.price_flat_cents, rounding: row.price_rounding,
-    })),
+    price: rawPrice(row),
     ebayCategory: allOrNone("ebayCategory", [row.ebay_category_id, row.ebay_category_name, row.ebay_category_path], () => ({
       categoryId: row.ebay_category_id, categoryName: row.ebay_category_name, path: row.ebay_category_path,
     })),
@@ -300,7 +318,7 @@ function parseStored<S extends z.ZodTypeAny>(schema: S, value: unknown, what: st
 // Request ledger (dropship_product_listing_setting_requests, append-only)
 // ---------------------------------------------------------------------------
 
-/** One ledger row: a bulk change, a category's "Also clear theirs", or a "Got it" for moved products. */
+/** One ledger row: a bulk change, a category's "Also clear theirs", a "Got it" for moved products, or W7's price apply. */
 export interface ListingSettingRequestRecord {
   id: number;
   vendorId: number;
@@ -348,13 +366,25 @@ export async function findListingSettingRequestWithClient(
   return row ? mapListingSettingRequestRow(row) : null;
 }
 
-/** Claims the key for this request and returns the ledger id. A key already used is 23505 on the key index, which the wrapper maps. */
+/**
+ * The operations 0738's insert writes. W7's `price_change_apply` carries a
+ * review id (0750's pairing CHECK), so it has its own apply-only insert
+ * (insertPriceChangeApplyRequestWithClient); this insert never writes it.
+ */
+export type ListingSettingLedgerInsertOperation = Exclude<ListingSettingRequestOperation, "price_change_apply">;
+
+/**
+ * Claims the key for this request and returns the ledger id. A key already
+ * used is 23505 on the key index, which the wrapper maps. Refuses
+ * `price_change_apply` before any SQL (plan PR 9, P23): this statement names
+ * no review id, so such a row would break 0750's pairing CHECK.
+ */
 export async function insertListingSettingRequestWithClient(
   client: QueryClient,
   input: {
     vendorId: number;
     storeConnectionId: number;
-    operation: ListingSettingRequestOperation;
+    operation: ListingSettingLedgerInsertOperation;
     idempotencyKey: string;
     requestHash: string;
     productCount: number;
@@ -400,11 +430,32 @@ export function listingSettingsIdempotencyConflict(context: Record<string, unkno
     { ...context, retryable: false, classification: "permanent" });
 }
 
+/**
+ * 0738's insert: one of its three operations, never `price_change_apply`.
+ * The ledger's operation list holds the apply (readers accept its rows), so
+ * the apply is refused here explicitly (plan PR 9, 9.2), not by the list.
+ */
 function assertLedgerInput(input: {
   operation: string; idempotencyKey: string; requestHash: string; productCount: number; actor: ListingSettingActor; now: Date;
 }): void {
   const invalid = [
-    (LISTING_SETTING_REQUEST_OPERATIONS as readonly string[]).includes(input.operation) ? null : "operation",
+    ...((LISTING_SETTING_REQUEST_OPERATIONS as readonly string[]).includes(input.operation)
+      && input.operation !== "price_change_apply" ? [] : ["operation"]),
+    ...listingSettingLedgerRowFaults(input),
+  ];
+  if (invalid.length > 0) throw listingSettingsInvariantFailed("A listing setting request breaks the ledger contract.", { invalid });
+}
+
+/**
+ * The fields of a ledger row, other than its operation, that break the
+ * ledger's contract (its key, hash, count, actor and time CHECKs), by name.
+ * Shared by 0738's insert and W7's apply-only insert, which check their
+ * operation (and review) themselves.
+ */
+export function listingSettingLedgerRowFaults(input: {
+  idempotencyKey: string; requestHash: string; productCount: number; actor: ListingSettingActor; now: Date;
+}): string[] {
+  return [
     LISTING_SETTING_KEY_PATTERN.test(input.idempotencyKey) ? null : "idempotencyKey",
     REQUEST_HASH_PATTERN.test(input.requestHash) ? null : "requestHash",
     Number.isSafeInteger(input.productCount) && input.productCount >= 0
@@ -414,7 +465,6 @@ function assertLedgerInput(input: {
     input.actor.actorId.length <= MAX_LISTING_SETTING_ACTOR_ID_LENGTH ? null : "actorIdLength",
     input.now instanceof Date && Number.isFinite(input.now.getTime()) ? null : "now",
   ].filter((field): field is string => field !== null);
-  if (invalid.length > 0) throw listingSettingsInvariantFailed("A listing setting request breaks the ledger contract.", { invalid });
 }
 
 /** A stored request that breaks its contract is refused with its ledger id. */

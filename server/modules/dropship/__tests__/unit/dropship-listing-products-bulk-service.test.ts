@@ -100,6 +100,8 @@ class FakeRepository implements ListingSettingWriteRepository {
     return operation(this.tx as unknown as ListingSettingWriteTransaction);
   }
   async executeForSystem(): Promise<never> { throw new Error("W6 never runs as the system."); }
+  async executeReview(): Promise<never> { throw new Error("W6 never runs a price check (W7's review)."); }
+  async readPriceChangeReviewForMember(): Promise<never> { throw new Error("W6 never reads a price check's pages."); }
   async preflight<T>(input: { memberId: string; storeConnectionId: number; idempotencyKey: string | null },
     operation: (tx: ListingSettingPreflightTransaction) => Promise<T>): Promise<T> {
     this.order.push(`preflight:${input.idempotencyKey}`);

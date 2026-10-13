@@ -35,6 +35,9 @@ export const BULK_JSON_PATHS: ReadonlyArray<{ method: "POST" | "PUT"; pattern: R
   { method: "PUT", pattern: storePath(String.raw`\/listing-settings\/products\/[^/]+`) },
   { method: "POST", pattern: storePath(String.raw`\/listing-settings\/products\/bulk`) },
   { method: "PUT", pattern: storePath(String.raw`\/listing-settings\/categories\/[^/]+`) },
+  // W7's price check and its apply (9f): a check may name 10,000 products.
+  { method: "POST", pattern: storePath(String.raw`\/listing-settings\/price-changes\/review`) },
+  { method: "POST", pattern: storePath(String.raw`\/listing-settings\/price-changes\/apply`) },
 ]);
 
 /** The global parser skips these requests; the route parses them after authentication. */

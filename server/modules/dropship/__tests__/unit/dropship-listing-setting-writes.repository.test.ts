@@ -6,9 +6,14 @@ import {
   type ProductListingSettingValues,
 } from "../../../../../shared/dropship/listing-setting-values";
 import type {
+  CategoryListingSettingValues,
+} from "../../../../../shared/dropship/listing-setting-values";
+import type {
   ListingSettingPreflightTransaction,
+  ListingSettingReviewTransaction,
   ListingSettingSystemTransaction,
   ListingSettingWriteTransaction,
+  StoredPriceChangeReview,
 } from "../../application/dropship-listing-setting-writes";
 import { DropshipError } from "../../domain/errors";
 import { listingSettingChildKey, listingSettingChildKeyPrefix } from "../../domain/listing-setting-values";
@@ -17,7 +22,7 @@ import {
   PgDropshipListingSettingWritesRepository,
   mapListingSettingWriteError,
 } from "../../infrastructure/dropship-listing-setting-writes.repository";
-import { productValuesToColumns } from "../../infrastructure/dropship-listing-setting-shared.repository";
+import { categoryValuesToColumns, productValuesToColumns } from "../../infrastructure/dropship-listing-setting-shared.repository";
 
 vi.mock("../../../../db", () => ({ db: {}, pool: {} }));
 
@@ -108,6 +113,16 @@ class ScriptedClient {
   leftoverRows: Array<Record<string, unknown>> = [];
   /** Current product rows with every revision column, as stored; the settings-facts read answers its own SQL's expressions over them. */
   storedProductRows: Array<Record<string, unknown>> = [];
+  /** Current category rows with every revision column, as stored; the category facts read answers its own columns from them. */
+  storedCategoryRows: Array<Record<string, unknown>> = [];
+  /** What W7's review reads (by vendor and store, or by member) answer, as PostgreSQL returns a row. */
+  reviewRows: Array<Record<string, unknown>> = [];
+  /** What PostgreSQL answers for the review insert's RETURNING octet_length(rows::text). */
+  reviewRowsBytes: unknown = 321;
+  /** What W7's by-review ledger read answers. */
+  applyRows: Array<Record<string, unknown>> = [];
+  /** Card Shellz categories, as readCatalogCategoryNames reads them. */
+  categoryNames = new Map<number, unknown>([[3, "Toploaders"]]);
   /** Fields laid over every settings-facts answer row, to break its contract. */
   factRowOverrides: Record<string, unknown> = {};
   /** What the pricing, content and eBay category rule profile reads answer: none unless set. */
@@ -125,13 +140,31 @@ class ScriptedClient {
       return rows<T>((this.categoryProducts.get(params[0] as number) ?? []).map((id) => ({ id })));
     }
     if (sql.startsWith("SELECT o.product_variant_id, o.fulfillment_policy_id IS NOT NULL")) return rows<T>(this.leftoverRows);
-    if (sql.startsWith("SELECT s.product_id, r.price_basis IS NOT NULL AS set_price_basis")) {
-      // The statement's own `r.<column> IS NOT NULL AS <alias>` expressions, evaluated over the stored rows.
-      const flags = [...sql.matchAll(/r\.(\w+) IS NOT NULL AS (\w+)/g)].map((match) => [match[1], match[2]] as const);
+    if (sql.startsWith("SELECT s.product_id, s.revision_id, r.price_basis")) {
+      // The statement's own select list, evaluated over the stored rows: `r.<column> IS NOT NULL AS <alias>` flags,
+      // and the plain `s.`/`r.` columns as stored.
+      const list = sql.slice("SELECT ".length, sql.indexOf(" FROM "));
+      const flags = [...list.matchAll(/r\.(\w+) IS NOT NULL AS (\w+)/g)].map((match) => [match[1], match[2]] as const);
+      const plain = list.split(", ").filter((item) => /^[sr]\.\w+$/.test(item)).map((item) => item.slice(2));
       return rows<T>(this.storedProductRows.filter((row) => (params[2] as number[]).includes(row.product_id as number)).map((row) => ({
-        product_id: row.product_id, ...Object.fromEntries(flags.map(([column, alias]) => [alias, row[column] !== null])),
+        ...Object.fromEntries(plain.map((column) => [column, row[column]])),
+        ...Object.fromEntries(flags.map(([column, alias]) => [alias, row[column] !== null])),
         ...this.factRowOverrides,
       })));
+    }
+    if (sql.startsWith("SELECT s.category_id, s.revision_id, r.price_basis")) {
+      const list = sql.slice("SELECT ".length, sql.indexOf(" FROM "));
+      const plain = list.split(", ").map((item) => item.slice(2));
+      return rows<T>(this.storedCategoryRows.filter((row) => (params[2] as number[]).includes(row.category_id as number))
+        .map((row) => ({ ...Object.fromEntries(plain.map((column) => [column, row[column]])), ...this.factRowOverrides })));
+    }
+    if (sql.startsWith("SELECT r.id, r.kind, r.input, r.rows, r.review_hash, r.created_at")) return rows<T>(this.reviewRows);
+    if (sql.startsWith("INSERT INTO dropship.dropship_pricing_reviews")) return rows<T>([{ rows_bytes: this.reviewRowsBytes }]);
+    if (sql.startsWith("SELECT id, operation, idempotency_key FROM dropship.dropship_product_listing_setting_requests")) {
+      return rows<T>(this.applyRows);
+    }
+    if (sql.startsWith("SELECT id, name FROM catalog.product_categories")) {
+      return rows<T>((params[0] as number[]).filter((id) => this.categoryNames.has(id)).map((id) => ({ id, name: this.categoryNames.get(id) })));
     }
     if (sql.includes("FROM dropship.dropship_pricing_profiles p")) return rows<T>(this.profileRows.pricing);
     if (sql.includes("FROM dropship.dropship_content_profiles p")) return rows<T>(this.profileRows.content);
@@ -647,6 +680,9 @@ describe("error mapping (plan 3.9)", () => {
     ["a reused shelf child key", { code: "23505", constraint: "dropship_ebay_store_category_revision_idem_uk" }, "DROPSHIP_IDEMPOTENCY_CONFLICT", "permanent"],
     // 0660 leaves it unnamed; PostgreSQL's generated name, read from pg_constraint by the PostgreSQL suite.
     ["a reused content child key", { code: "23505", constraint: "dropship_listing_content_revision_vendor_id_idempotency_key_key" }, "DROPSHIP_IDEMPOTENCY_CONFLICT", "permanent"],
+    // 0750's one-apply-per-review index: a second apply of one review under another key (plan 9.1). The store lock
+    // serializes two applies and the second one's by-review read sees the first, so this is a backstop (plan 3.7).
+    ["a second apply of one review", { code: "23505", constraint: "dropship_product_listing_setting_requests_review_idx" }, "DROPSHIP_IDEMPOTENCY_CONFLICT", "permanent"],
     ["a missing product on a revision", { code: "23503", constraint: "dropship_product_listing_setting_revision_product_fk" }, "DROPSHIP_LISTING_SETTINGS_PRODUCT_NOT_FOUND", "permanent"],
     ["a missing product on a current row", { code: "23503", constraint: "dropship_product_listing_setting_product_fk" }, "DROPSHIP_LISTING_SETTINGS_PRODUCT_NOT_FOUND", "permanent"],
     ["a missing category on a revision", { code: "23503", constraint: "dropship_category_listing_setting_revision_category_fk" }, "DROPSHIP_LISTING_SETTINGS_CATEGORY_NOT_FOUND", "permanent"],
@@ -691,6 +727,9 @@ describe("error mapping (plan 3.9)", () => {
     // The size price revision's own identity: no request key is in it, so it is not a key reuse.
     ["a unique violation on another constraint", { code: "23505", constraint: "dropship_listing_price_revision_identity_uk" }],
     ["a foreign key violation on the owner", { code: "23503", constraint: "dropship_product_listing_setting_owner_fk" }],
+    // An apply names a review it loaded by vendor and store under the store lock, and reviews are never deleted: a fault.
+    ["a review of another store on an apply row", { code: "23503", constraint: "dropship_product_listing_setting_requests_review_fk" }],
+    // The pairing CHECK is a CHECK: mapped as every CHECK is (INVARIANT_FAILED), so it is not here.
     ["a lock timeout", { code: "55P03" }],
   ])("rethrows %s unchanged", (_label, fields) => {
     const error = pgError(fields);
@@ -864,6 +903,18 @@ describe("the replay probe, findRequestKeyUse (plan PR 9, section 4.6)", () => {
     expect(client.sql.at(-1)).toBe("COMMIT");
   });
 
+  it("parses W7's price apply ledger row (migration 0750), the operation the ledger's list now holds", async () => {
+    const { client, repository } = setup();
+    client.probeRows = [row({ source: "ledger", id: "9007199254740991", target_id: null, operation: "price_change_apply" }),
+      row({ source: "category", id: 12, target_id: 3 }), row({ source: "size", id: 41, target_id: 102 })];
+
+    const use = await repository.execute(INPUT, (tx) => tx.findRequestKeyUse());
+
+    expect(use.ledger).toEqual({ requestId: 9_007_199_254_740_991, operation: "price_change_apply", storeConnectionId: STORE, requestHash: HASH });
+    expect(use.categoryRevision).toMatchObject({ revisionId: 12, categoryId: 3 });
+    expect(use.children).toEqual([{ kind: "size", revisionId: 41, productVariantId: 102, storeConnectionId: STORE, requestHash: HASH }]);
+  });
+
   it("keeps a product revision's ledger id", async () => {
     const { client, repository } = setup();
     client.probeRows = [row({ source: "product", id: 12, target_id: 7, request_id: "55" })];
@@ -880,7 +931,7 @@ describe("the replay probe, findRequestKeyUse (plan PR 9, section 4.6)", () => {
     ["a missing store", row({ store_connection_id: null }), "store_connection_id"],
     ["a size with no id", row({ target_id: null }), "target_id"],
     ["a hash that is not 64 hex characters", row({ request_hash: "A".repeat(64) }), "request_hash"],
-    ["a ledger operation the ledger never holds", row({ source: "ledger", target_id: null, operation: "price_change_apply" }), "operation"],
+    ["a ledger operation the ledger never holds", row({ source: "ledger", target_id: null, operation: "store_default" }), "operation"],
     ["a product revision with a bad ledger id", row({ source: "product", target_id: 7, request_id: "0" }), "request_id"],
   ])("refuses %s as a broken contract, and rolls back", async (_label, bad, column) => {
     const { client, repository } = setup();
@@ -1175,6 +1226,11 @@ describe("the W12 reads (plan PR 9, 8.2)", () => {
   /** A stored current row with every revision column, as 8a writes it. */
   const storedRow = (productId: number, revisionId: number, values: ProductListingSettingValues) =>
     ({ product_id: productId, revision_id: revisionId, ...productValuesToColumns(values), created_at: SAVED });
+  /** A stored current category row with every revision column, as 8a writes it (the product values without the main text). */
+  const categoryRow = (categoryId: number, revisionId: number, values: CategoryListingSettingValues | ProductListingSettingValues) => {
+    const { mainText: _mainText, ...category } = values as ProductListingSettingValues;
+    return { category_id: categoryId, revision_id: revisionId, ...categoryValuesToColumns(category), created_at: SAVED };
+  };
 
   it("counts the store's older group rules from its three profiles, each read on this client in its own argument order", async () => {
     const { client, repository } = setup();
@@ -1300,27 +1356,73 @@ describe("the W12 reads (plan PR 9, 8.2)", () => {
     expect(client.sql.at(-2)).toBe("-- writer: clearSizeLeftovers");
   });
 
-  it("reads products' own-field flags in one statement, vendor and store scoped, selecting no text", async () => {
+  it("reads products' revisions, prices and own-field flags in one statement, vendor and store scoped, selecting no text", async () => {
     const { client, repository } = setup();
     client.storedProductRows = [storedRow(8, 31, SET), storedRow(7, 30, NO_VALUES)];
 
     const facts = await repository.execute(INPUT, (tx) => tx.loadSettingFacts({ productIds: Object.freeze([8, 7, 8]) }));
 
     expect([...facts.products.keys()]).toEqual([8, 7]);
-    expect(facts.products.get(8)).toEqual({ ownFields: new Set(PRODUCT_LISTING_SETTING_FIELDS) });
-    expect(facts.products.get(7)).toEqual({ ownFields: new Set() });
+    expect(facts.products.get(8)).toEqual({ revisionId: 31, price: SET.price, ownFields: new Set(PRODUCT_LISTING_SETTING_FIELDS) });
+    expect(facts.products.get(7)).toEqual({ revisionId: 30, price: null, ownFields: new Set() });
+    expect(facts.categories).toEqual(new Map());
     const after = client.afterOwner();
     expect(after).toHaveLength(2);
     expect(client.params[client.sql.indexOf(after[0])]).toEqual([VENDOR, STORE, [7, 8]]);
     expect(after[0]).toMatch(/WHERE s\.vendor_id = \$1 AND s\.store_connection_id = \$2 AND s\.product_id = ANY\(\$3::int\[\]\)/);
-    // Only the product id and one IS NOT NULL flag per setting: no text, name, path or value column is selected.
-    expect(after[0].slice(0, after[0].indexOf(" FROM "))).toBe(`SELECT s.product_id, ${Object.values(PRODUCT_SETTING_FLAG_COLUMNS)
-      .map((column) => `r.${column} IS NOT NULL AS set_${column}`).join(", ")}`);
-    expect(after[0]).not.toMatch(/FOR (SHARE|UPDATE)|r\.\*/);
+    // The product id, its revision, the four price columns and one IS NOT NULL flag per setting: no text, name or path column.
+    expect(after[0].slice(0, after[0].indexOf(" FROM "))).toBe("SELECT s.product_id, s.revision_id, r.price_basis, r.price_markup_bps, "
+      + `r.price_flat_cents, r.price_rounding, ${Object.values(PRODUCT_SETTING_FLAG_COLUMNS)
+        .map((column) => `r.${column} IS NOT NULL AS set_${column}`).join(", ")}`);
+    expect(after[0]).not.toMatch(/FOR (SHARE|UPDATE)|r\.\*|r\.(text_above|text_below|body_text|ebay_category_name|ebay_category_path|shelf_names|\w+_policy_name)\b(?! IS NOT NULL)/);
 
     const none = setup();
-    await expect(none.repository.execute(INPUT, (tx) => tx.loadSettingFacts({ productIds: [] }))).resolves.toEqual({ products: new Map() });
+    await expect(none.repository.execute(INPUT, (tx) => tx.loadSettingFacts({ productIds: [] })))
+      .resolves.toEqual({ products: new Map(), categories: new Map() });
     expect(none.client.afterOwner()).toEqual(["COMMIT"]);
+  });
+
+  it("reads categories' revisions and prices in a second statement, only when asked, vendor and store scoped, selecting no text", async () => {
+    const { client, repository } = setup();
+    const CATEGORY_SET: CategoryListingSettingValues = { ...SET, price: { basis: "product_cost", markupBps: 2_500, flatCents: 0, rounding: "up_99" } };
+    delete (CATEGORY_SET as Partial<ProductListingSettingValues>).mainText;
+    client.storedCategoryRows = [categoryRow(4, 41, CATEGORY_SET), categoryRow(3, 40, { ...CATEGORY_SET, price: null })];
+
+    const facts = await repository.execute(INPUT, (tx) => tx.loadSettingFacts({ productIds: [], categoryIds: Object.freeze([4, 3, 4]) }));
+
+    expect([...facts.categories]).toEqual([[4, { revisionId: 41, price: CATEGORY_SET.price }], [3, { revisionId: 40, price: null }]]);
+    expect(facts.products).toEqual(new Map());
+    const after = client.afterOwner();
+    expect(after).toEqual([`SELECT s.category_id, s.revision_id, r.price_basis, r.price_markup_bps, r.price_flat_cents, r.price_rounding `
+      + "FROM dropship.dropship_category_listing_settings s JOIN dropship.dropship_category_listing_setting_revisions r "
+      + "ON r.id = s.revision_id AND r.vendor_id = s.vendor_id AND r.store_connection_id = s.store_connection_id "
+      + "AND r.category_id = s.category_id WHERE s.vendor_id = $1 AND s.store_connection_id = $2 AND s.category_id = ANY($3::int[]) "
+      + "ORDER BY s.category_id", "COMMIT"]);
+    expect(client.params[client.sql.indexOf(after[0])]).toEqual([VENDOR, STORE, [3, 4]]);
+
+    // Both lists: products first, then categories.
+    const both = setup();
+    both.client.storedProductRows = [storedRow(7, 30, SET)];
+    both.client.storedCategoryRows = [categoryRow(3, 40, CATEGORY_SET)];
+    const read = await both.repository.execute(INPUT, (tx) => tx.loadSettingFacts({ productIds: [7], categoryIds: [3] }));
+    expect([read.products.get(7)?.revisionId, read.categories.get(3)?.revisionId]).toEqual([30, 40]);
+    expect(both.client.afterOwner().map((sql) => sql.slice(0, 20))).toEqual(["SELECT s.product_id,", "SELECT s.category_id", "COMMIT"]);
+  });
+
+  it("reads each category's revision and price exactly as readCategoryListingSettings reads them (parity)", async () => {
+    const actual = await vi.importActual<typeof import("../../infrastructure/dropship-category-listing-settings.repository")>(
+      "../../infrastructure/dropship-category-listing-settings.repository");
+    const { mainText: _mainText, ...categorySet } = SET;
+    for (const [index, values] of [categorySet, { ...categorySet, price: null }, { ...categorySet, price: { basis: "product_cost" as const,
+      markupBps: 1_000_000, flatCents: 2_147_483_647, rounding: "cent" as const } }].entries()) {
+      const stored = categoryRow(3, 200 + index, values);
+      const read = await actual.readCategoryListingSettings({ query: async () => ({ rows: [stored] }) } as unknown as Pick<PoolClient, "query">,
+        { vendorId: VENDOR, storeConnectionId: STORE, categoryIds: [3] });
+      const { client, repository } = setup();
+      client.storedCategoryRows = [stored];
+      const facts = (await repository.execute(INPUT, (tx) => tx.loadSettingFacts({ productIds: [], categoryIds: [3] }))).categories.get(3)!;
+      expect(facts).toEqual({ revisionId: read.get(3)!.revisionId, price: read.get(3)!.values.price });
+    }
   });
 
   it("flags a product field as its own exactly when readProductListingSettings reads its value as set, for every field (parity)", async () => {
@@ -1341,6 +1443,8 @@ describe("the W12 reads (plan PR 9, 8.2)", () => {
       for (const field of PRODUCT_LISTING_SETTING_FIELDS) {
         expect({ index, field, own: facts.ownFields.has(field) }).toEqual({ index, field, own: full[field] !== null });
       }
+      // The revision and the price are the full reader's too.
+      expect({ index, revisionId: facts.revisionId, price: facts.price }).toEqual({ index, revisionId: read.get(7)!.revisionId, price: full.price });
     }
   });
 
@@ -1362,5 +1466,206 @@ describe("the W12 reads (plan PR 9, 8.2)", () => {
     const badIds = setup();
     await expectInvariant(badIds.repository.execute(INPUT, (tx) => tx.loadSettingFacts({ productIds: [0] })));
     expect(badIds.client.afterOwner()).toEqual(["ROLLBACK"]);
+    const badCategoryIds = setup();
+    await expectInvariant(badCategoryIds.repository.execute(INPUT, (tx) => tx.loadSettingFacts({ productIds: [], categoryIds: [1.5] })));
+    expect(badCategoryIds.client.afterOwner()).toEqual(["ROLLBACK"]);
+  });
+
+  it("refuses a partial or out-of-contract price, a price flag that disagrees with it, and a bad revision, naming only ids", async () => {
+    for (const [label, overrides, context] of [
+      ["a partial price group", { price_rounding: null }, { group: "price", productId: 7 }],
+      ["a recipe out of its contract", { price_markup_bps: 1.5 }, { productId: 7 }],
+      ["a price flag that disagrees", { set_price_basis: false }, { productId: 7 }],
+      ["a revision that is not an id", { revision_id: "30" }, { column: "revision_id" }],
+    ] as const) {
+      const { client, repository } = setup();
+      client.storedProductRows = [storedRow(7, 30, SET)];
+      client.factRowOverrides = overrides;
+      const error = await expectInvariant(repository.execute(INPUT, (tx) => tx.loadSettingFacts({ productIds: [7] })));
+      expect({ label, context: error.context }).toMatchObject({ label, context });
+      expect(JSON.stringify(error.context)).not.toContain("Own words.");
+    }
+    for (const [overrides, context] of [
+      [{ price_basis: null }, { group: "price", categoryId: 3 }],
+      [{ category_id: 9 }, { categoryId: 9 }],
+    ] as const) {
+      const { client, repository } = setup();
+      client.storedCategoryRows = [categoryRow(3, 40, { ...SET, price: { basis: "catalog_retail", markupBps: 0, flatCents: 0, rounding: "cent" } })];
+      client.factRowOverrides = overrides;
+      const error = await expectInvariant(repository.execute(INPUT, (tx) => tx.loadSettingFacts({ productIds: [], categoryIds: [3] })));
+      expect(error.context).toMatchObject(context);
+    }
+  });
+});
+
+describe("W7's price check and apply reads (plan PR 9, 9.1, P22)", () => {
+  const REVIEW_INPUT = { memberId: MEMBER, storeConnectionId: STORE };
+  const REVIEW_ID = "7d1b5e0a-3c4f-4a8b-9e2d-0f1a2b3c4d5e";
+  const REVIEW: StoredPriceChangeReview = {
+    id: REVIEW_ID, kind: "product_prices", input: { productIds: [7], releaseExactPrices: true },
+    rows: [{ productVariantId: 101, title: "Toploader", sku: null, previousPriceCents: 1_199, priceCents: 1_199, productCostCents: 800,
+      ruleName: null, preserved: false, issues: [], settingRevisionId: 51, evidenceHash: "e".repeat(64), productId: 7, released: true,
+      refusal: null }],
+    reviewHash: "b".repeat(64), createdAt: NOW,
+  };
+  const storedReview = { id: REVIEW.id, kind: REVIEW.kind, input: REVIEW.input, rows: REVIEW.rows, review_hash: REVIEW.reviewHash,
+    created_at: REVIEW.createdAt, rows_bytes: 321 };
+
+  it("opens executeReview as READ COMMITTED with the store lock and the owner rows FOR SHARE, and no request lock", async () => {
+    const { client, repository } = setup();
+
+    await expect(repository.executeReview(REVIEW_INPUT, async (tx) => [tx.vendorId, tx.storeConnectionId])).resolves.toEqual([VENDOR, STORE]);
+
+    expect(client.sql).toEqual([
+      "BEGIN",
+      "SELECT pg_advisory_xact_lock(hashtext('dropship_listing_push_job'), $1::integer)",
+      expect.stringContaining("WHERE v.member_id::text = $1 AND sc.id = $2 FOR SHARE OF v, sc"),
+      "COMMIT",
+    ]);
+    expect(client.params.slice(1, 3)).toEqual([[STORE], [MEMBER, STORE]]);
+    expect(client.sql.some((sql) => sql.includes("dropship_listing_settings_request") || sql.includes("ISOLATION LEVEL"))).toBe(false);
+    expect(client.release).toHaveBeenCalledOnce();
+  });
+
+  it("gives the review no request key, no probe, no lockCatalog, no selection lock and no writer", async () => {
+    const { client, repository } = setup();
+    let seen: ListingSettingReviewTransaction | undefined;
+    await repository.executeReview(REVIEW_INPUT, async (tx) => { seen = tx; });
+    const keys = Object.keys(seen!);
+    for (const absent of ["requestKey", "actor", "findRequestKeyUse", "lockCatalog", "sizePrice", "saveProduct", "saveProductsBulk",
+      "saveCategory", "acknowledgeCategoryMoves", "clearSizeLeftovers", "saveListingContent", "saveEbayCategoryRulesProfile",
+      "loadPriceChangeReview", "findPriceChangeApplyByReview"]) {
+      expect(keys).not.toContain(absent);
+    }
+    expect(keys.sort()).toEqual(["catalog", "listCategoryProductIds", "listProductSizes", "loadCatalogCategoryNames", "loadCategories",
+      "loadLeftoverFields", "loadOlderGroupRuleCounts", "loadPricingProfile", "loadProductCosts", "loadSettingFacts",
+      "readListingTextBytes", "storePriceChangeReview", "storeConnectionId", "vendorId"].sort());
+    expect(client.sql.some((sql) => sql.startsWith("LOCK TABLE"))).toBe(false);
+    expectTypeOf<ListingSettingReviewTransaction["catalog"]>().toEqualTypeOf<ListingSettingWriteTransaction["catalog"]>();
+  });
+
+  it("runs every read on the transaction's client, vendor and store scoped, and leftovers without the feature locks", async () => {
+    const { client, repository } = setup();
+    client.leftoverRows = [{ product_variant_id: 101, shipping_policy: true, return_policy: false, payment_policy: false, store_shelf: true }];
+
+    const read = await repository.executeReview(REVIEW_INPUT, async (tx) => ({
+      names: await tx.loadCatalogCategoryNames([3, 9]),
+      categories: await tx.loadCategories([3]),
+      products: await tx.listCategoryProductIds(3),
+      sizes: await tx.listProductSizes([8, 7]),
+      leftovers: await tx.loadLeftoverFields([102, 101]),
+      counts: await tx.loadOlderGroupRuleCounts(),
+      text: await tx.readListingTextBytes({ productIds: [7], replacedFields: { textAbove: false, textBelow: false, mainText: false } }),
+    }));
+
+    expect(read.names).toEqual(new Map([[3, "Toploaders"]]));
+    expect(read.products).toEqual([7, 8]);
+    expect(read.sizes).toEqual([101, 102, 103]);
+    expect([...read.leftovers]).toEqual([[101, ["shippingPolicy", "storeShelf"]]]);
+    expect(read.counts).toEqual({ pricingGroups: 0, contentGroups: 0, ebayCategoryRules: 0 });
+    expect(read.text).toEqual({ storeBytes: 1_200, keptStoreBytes: 1_000, targetBytes: 300 });
+    expect(writers.readCategoryListingSettings).toHaveBeenCalledWith(expect.anything(), { vendorId: VENDOR, storeConnectionId: STORE, categoryIds: [3] });
+    expect(client.sql.some((sql) => /pg_advisory_xact_lock\(hashtext\('dropship_ebay_|FOR (UPDATE|SHARE) *$|LOCK TABLE/.test(sql))).toBe(false);
+    const leftoverRead = client.sql.findIndex((sql) => sql.startsWith("SELECT o.product_variant_id"));
+    expect(client.params[leftoverRead]).toEqual([VENDOR, STORE, [101, 102]]);
+    expect(client.params[client.sql.findIndex((sql) => sql.startsWith("SELECT id, name FROM catalog.product_categories"))]).toEqual([[3, 9]]);
+  });
+
+  it("stores the review once, as the member, on the transaction's client, answering the rows' stored size", async () => {
+    const { client, repository } = setup();
+
+    await expect(repository.executeReview(REVIEW_INPUT, (tx) => tx.storePriceChangeReview(REVIEW))).resolves.toEqual({ rowsBytes: 321 });
+
+    const insert = client.sql.findIndex((sql) => sql.startsWith("INSERT INTO dropship.dropship_pricing_reviews"));
+    expect(client.params[insert]).toEqual([REVIEW_ID, VENDOR, STORE, "product_prices", JSON.stringify(REVIEW.input),
+      JSON.stringify(REVIEW.rows), REVIEW.reviewHash, MEMBER, NOW]);
+    expect(client.sql.at(-1)).toBe("COMMIT");
+
+    const twice = setup();
+    await expectInvariant(twice.repository.executeReview(REVIEW_INPUT, async (tx) => {
+      await tx.storePriceChangeReview(REVIEW);
+      await tx.storePriceChangeReview(REVIEW);
+    }));
+    expect(twice.client.sql.filter((sql) => sql.startsWith("INSERT INTO dropship.dropship_pricing_reviews"))).toHaveLength(1);
+    expect(twice.client.sql.at(-1)).toBe("ROLLBACK");
+  });
+
+  it("answers another member's store as not found, refuses a bad input before a connection, and every call once it ended", async () => {
+    const missing = setup();
+    missing.client.ownerFound = false;
+    await expect(missing.repository.executeReview(REVIEW_INPUT, async () => "never"))
+      .rejects.toMatchObject({ code: "DROPSHIP_STORE_CONNECTION_REQUIRED" });
+    expect(missing.client.sql.at(-1)).toBe("ROLLBACK");
+
+    for (const input of [{ ...REVIEW_INPUT, memberId: " " }, { ...REVIEW_INPUT, storeConnectionId: 0 }]) {
+      const { connect, repository } = setup();
+      await expectInvariant(repository.executeReview(input, async () => "never"));
+      expect(connect).not.toHaveBeenCalled();
+    }
+
+    const { client, repository } = setup();
+    let kept: ListingSettingReviewTransaction | undefined;
+    await repository.executeReview(REVIEW_INPUT, async (tx) => { kept = tx; });
+    const statements = client.sql.length;
+    await expectInvariant(kept!.listProductSizes([7]));
+    await expectInvariant(kept!.storePriceChangeReview(REVIEW));
+    expect(client.sql).toHaveLength(statements);
+  });
+
+  it("maps a database failure of the review transaction after its rollback, as the write transaction does", async () => {
+    const { client, repository } = setup();
+    const error = await repository.executeReview(REVIEW_INPUT, async () => {
+      throw Object.assign(new Error("deadlock"), { code: "40P01" });
+    }).then(() => null, (reason: unknown) => reason);
+    expect(error).toMatchObject({ code: "DROPSHIP_LISTING_SETTINGS_BUSY", context: { classification: "transient" } });
+    expect(client.sql.at(-1)).toBe("ROLLBACK");
+  });
+
+  it("loads the apply's review and its by-review ledger row with no lock, before lockCatalog, leaving it open", async () => {
+    const { client, repository } = setup();
+    client.reviewRows = [storedReview];
+    client.applyRows = [{ id: "88", operation: "price_change_apply", idempotency_key: "price-changes:other-key" }];
+
+    const read = await repository.execute(INPUT, async (tx) => {
+      const review = await tx.loadPriceChangeReview(REVIEW_ID);
+      const applied = await tx.findPriceChangeApplyByReview(REVIEW_ID);
+      await tx.lockCatalog({ productIds: [7] });
+      return { review, applied };
+    });
+
+    // With the rows' stored size, from the same statement (plan 9.7's memory stop rule).
+    expect(read).toEqual({ review: { ...REVIEW, rowsBytes: 321 }, applied: { requestId: 88, idempotencyKey: "price-changes:other-key" } });
+    const after = client.afterOwner();
+    expect(after[0]).toMatch(/^SELECT r\.id, r\.kind/);
+    expect(client.params[client.sql.indexOf(after[0])]).toEqual([REVIEW_ID, VENDOR, STORE]);
+    expect(after[1]).toMatch(/^SELECT id, operation, idempotency_key/);
+    expect(client.params[client.sql.indexOf(after[1])]).toEqual([VENDOR, STORE, REVIEW_ID]);
+    expect(after[2]).toMatch(/^LOCK TABLE/);
+    expect(after.slice(0, 2).some((sql) => /FOR (UPDATE|SHARE)/.test(sql))).toBe(false);
+
+    const none = setup();
+    await expect(none.repository.execute(INPUT, async (tx) => [await tx.loadPriceChangeReview(REVIEW_ID),
+      await tx.findPriceChangeApplyByReview(REVIEW_ID)])).resolves.toEqual([null, null]);
+  });
+
+  it("reads a review page on the pool, never on a transaction, and maps a lost connection as BUSY", async () => {
+    const query = vi.fn(async () => ({ rows: [storedReview] }));
+    const connect = vi.fn();
+    const repository = new PgDropshipListingSettingWritesRepository({ query, connect } as unknown as Pool);
+
+    await expect(repository.readPriceChangeReviewForMember({ memberId: MEMBER, storeConnectionId: STORE, reviewId: REVIEW_ID }))
+      .resolves.toEqual(REVIEW);
+    expect(connect).not.toHaveBeenCalled();
+    expect(query).toHaveBeenCalledOnce();
+    expect(query.mock.calls[0]).toEqual([expect.stringContaining("v.member_id::text = $3"), [REVIEW_ID, STORE, MEMBER]]);
+
+    const lost = new PgDropshipListingSettingWritesRepository({ query: async () => { throw Object.assign(new Error("reset"), { code: "ECONNRESET" }); } } as unknown as Pool);
+    await expect(lost.readPriceChangeReviewForMember({ memberId: MEMBER, storeConnectionId: STORE, reviewId: REVIEW_ID }))
+      .rejects.toMatchObject({ code: "DROPSHIP_LISTING_SETTINGS_BUSY", context: { classification: "transient" } });
+    const timeout = new PgDropshipListingSettingWritesRepository({ query: async () => { throw new Error("timeout exceeded when trying to connect"); } } as unknown as Pool);
+    await expect(timeout.readPriceChangeReviewForMember({ memberId: MEMBER, storeConnectionId: STORE, reviewId: REVIEW_ID }))
+      .rejects.toMatchObject({ code: "DROPSHIP_LISTING_SETTINGS_BUSY", context: { failure: "pool_acquire_timeout" } });
+    const broken = new PgDropshipListingSettingWritesRepository({ query: async () => ({ rows: [{ ...storedReview, rows: "x" }] }) } as unknown as Pool);
+    await expectInvariant(broken.readPriceChangeReviewForMember({ memberId: MEMBER, storeConnectionId: STORE, reviewId: REVIEW_ID }));
   });
 });

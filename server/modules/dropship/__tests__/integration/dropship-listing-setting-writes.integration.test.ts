@@ -24,10 +24,12 @@ import { DropshipListingSizePricesService } from "../../application/dropship-lis
 import { DropshipListingProductSettingsService } from "../../application/dropship-listing-product-settings-service";
 import { DropshipListingProductsBulkService } from "../../application/dropship-listing-products-bulk-service";
 import { DropshipListingCategorySettingsService } from "../../application/dropship-listing-category-settings-service";
+import { DropshipListingPriceChangesService } from "../../application/dropship-listing-price-changes-service";
 import { ListingSettingHeavyWriteGate } from "../../application/dropship-listing-setting-write-support";
 import type { ListingSettingEbayPort } from "../../application/dropship-listing-setting-ebay-values";
 import type { DropshipEbayListingSetupDiscovery } from "../../application/dropship-ebay-listing-setup-service";
 import { DropshipPricingRulesService } from "../../application/dropship-pricing-rules-service";
+import type { ListingSettingWriteTransaction, StoredPriceChangeReview } from "../../application/dropship-listing-setting-writes";
 import { DropshipError } from "../../domain/errors";
 import { listingSettingChildKey, listingSettingRequestHash } from "../../domain/listing-setting-values";
 import { PgDropshipListingPriceRepository } from "../../infrastructure/dropship-listing-price.repository";
@@ -94,6 +96,8 @@ const REAL_MIGRATIONS = [
   "215_dropship_ebay_product_category_scope.sql", "217_dropship_ebay_listing_policy_overrides.sql",
   "0738_dropship_product_listing_settings.sql", "0739_dropship_category_listing_settings.sql",
   "0740_dropship_pricing_review_kind.sql",
+  // W7's apply ledger (plan PR 9, 9.3): the review id, its pairing CHECK, foreign key and one-apply index.
+  "0750_dropship_price_change_apply_ledger.sql",
 ];
 
 const MEMBER = "member-1";
@@ -433,13 +437,15 @@ describeDatabase.sequential("listing-settings writes on PostgreSQL (plan PR 9)",
    * The heaviest point's live heap (the rule's input, plan 3.10): a full collection right before each revision
    * insert and before COMMIT, when the stored rows, the merged records and one statement's JSON are all held, so
    * what is left is what the write keeps, not garbage V8 has not collected yet. The forced collections change the
-   * run's own allocation peak, so this runs apart from the allocated measurement. Shared by W6 and W12's clear.
+   * run's own allocation peak, so this runs apart from the allocated measurement. Shared by W6 and W12's clear;
+   * W7 also names its review insert, where a price check holds its rows and their JSON (`alsoAt`).
    */
-  function liveHeapProbe(): { hook: (sql: string) => void; peakBytes: () => number | null } {
+  function liveHeapProbe(alsoAt: readonly string[] = []): { hook: (sql: string) => void; peakBytes: () => number | null } {
     let peak: number | null = null;
+    const points = ["INSERT INTO dropship.dropship_product_listing_setting_revisions", ...alsoAt];
     return {
       hook: (sql) => {
-        if (!collectGarbage || !(sql === "COMMIT" || sql.startsWith("INSERT INTO dropship.dropship_product_listing_setting_revisions"))) return;
+        if (!collectGarbage || !(sql === "COMMIT" || points.some((point) => sql.startsWith(point)))) return;
         collectGarbage();
         peak = Math.max(peak ?? 0, process.memoryUsage().heapUsed);
       },
@@ -2201,5 +2207,606 @@ describeDatabase.sequential("listing-settings writes on PostgreSQL (plan PR 9)",
 
     it(`measures a clear of ${EDGE_PRODUCTS} products at the text edge, stored two-byte (PG 8)`, () => runClearEdge("rule"), BULK_TEST_TIMEOUT_MS);
     it.runIf(HEAP_DIAGNOSTICS)(`measures the live heap of that clear (PG 8, opt-in)`, () => runClearEdge("live"), BULK_TEST_TIMEOUT_MS);
+  });
+
+  describe("W7's apply ledger, migration 0750 (plan PR 9, 9.3, 9.13 PG 1-4)", () => {
+    const LEDGER = "dropship_product_listing_setting_requests";
+    const LEDGER_TABLE = `dropship.${LEDGER}`;
+    const RECIPE = { basis: "catalog_retail", markupBps: 2_000, flatCents: 0, rounding: "up_99" } as const;
+    const CATEGORY_RECIPE = { basis: "product_cost", markupBps: 4_000, flatCents: 0, rounding: "cent" } as const;
+    const W7_HASH = "c".repeat(64);
+    const writes = (pool?: Pool) => new PgDropshipListingSettingWritesRepository(pool ?? scopedPool());
+    const review = (fields: Partial<StoredPriceChangeReview> = {}): StoredPriceChangeReview => ({
+      id: randomUUID(), kind: "product_prices", input: { productIds: [PRODUCT_7], price: RECIPE }, rows: [], reviewHash: "b".repeat(64),
+      createdAt: NOW, ...fields } as StoredPriceChangeReview);
+    /** A review stored through W7's own transaction, as its review step will (plan 9.5 step 3.7), with every statement recorded. */
+    async function storeReview(stored: StoredPriceChangeReview, storeConnectionId = STORE, memberId = MEMBER): Promise<string[]> {
+      const statements: string[] = [];
+      await writes(scopedPool(undefined, (sql) => { statements.push(sql); }))
+        .executeReview({ memberId, storeConnectionId }, (tx) => tx.storePriceChangeReview(stored));
+      return statements;
+    }
+    function apply(input: { key: string; reviewId: string; storeConnectionId?: number; products?: Array<{ productId: number; expectedRevisionId: number | null }>;
+      patch?: Record<string, unknown> }) {
+      return writes().execute({ memberId: MEMBER, storeConnectionId: input.storeConnectionId ?? STORE, idempotencyKey: input.key },
+        (tx) => tx.saveProductsBulk({ operation: "price_change_apply", reviewId: input.reviewId, products: input.products ?? [],
+          patch: (input.patch ?? {}) as never, requestHash: W7_HASH, now: NOW }));
+    }
+    /** Every ledger constraint and index, as PostgreSQL holds them: name, kind, validated, definition. */
+    async function ledgerShape() {
+      const constraints = await pool.query(`SELECT conname, contype, convalidated, pg_get_constraintdef(oid) AS definition
+        FROM pg_constraint WHERE conrelid = $1::regclass ORDER BY conname`, [`"${schema}"."${LEDGER}"`]);
+      const indexes = await pool.query(`SELECT indexname, indexdef FROM pg_indexes WHERE schemaname = $1 AND tablename = $2 ORDER BY indexname`,
+        [schema, LEDGER]);
+      const columns = await pool.query(`SELECT column_name, data_type, is_nullable FROM information_schema.columns
+        WHERE table_schema = $1 AND table_name = $2 ORDER BY ordinal_position`, [schema, LEDGER]);
+      return { constraints: constraints.rows, indexes: indexes.rows, columns: columns.rows };
+    }
+    async function pgError(promise: Promise<unknown>): Promise<{ code?: string; constraint?: string }> {
+      const error = await promise.then(() => null, (reason: unknown) => reason);
+      expect(error).toBeInstanceOf(Error);
+      expect(error).not.toBeInstanceOf(DropshipError);
+      return error as { code?: string; constraint?: string };
+    }
+    const rawLedgerRow = (fields: { operation: string; reviewId: string | null; key: string; storeConnectionId?: number }) =>
+      execute(`INSERT INTO ${LEDGER_TABLE} (vendor_id, store_connection_id, operation, review_id, idempotency_key, request_hash,
+        product_count, actor_type, actor_id, created_at) VALUES ($1, $2, $3, $4, $5, $6, 0, 'vendor', $7, $8)`,
+      [VENDOR, fields.storeConnectionId ?? STORE, fields.operation, fields.reviewId, fields.key, W7_HASH, MEMBER, NOW]);
+
+    it("re-runs over rows of all four operations: no error, every constraint still validated, the rows as they were (PG 1)", async () => {
+      // A price check's transaction: the store lock and the owner rows only (no request, catalog or feature lock), one insert.
+      const priced = review();
+      const reviewStatements = await storeReview(priced);
+      expect(reviewStatements.filter((sql) => sql.startsWith("SELECT pg_advisory_xact_lock"))).toEqual([
+        "SELECT pg_advisory_xact_lock(hashtext('dropship_listing_push_job'), $1::integer)"]);
+      expect(reviewStatements.some((sql) => sql.startsWith("LOCK TABLE") || sql.includes("dropship_listing_settings_request"))).toBe(false);
+      expect(reviewStatements.filter((sql) => sql.startsWith("INSERT"))).toHaveLength(1);
+      const storedReview = await execute("SELECT kind, actor_id, review_hash FROM dropship.dropship_pricing_reviews WHERE id = $1", [priced.id]);
+      expect(storedReview.rows).toEqual([{ kind: "product_prices", actor_id: MEMBER, review_hash: priced.reviewHash }]);
+
+      // W6, then W12 with its category save and clear, then W13, then W7's apply of the review, each through its writer.
+      const run = <T>(key: string, work: (tx: ListingSettingWriteTransaction) => Promise<T>) =>
+        writes().execute({ memberId: MEMBER, storeConnectionId: STORE, idempotencyKey: key }, work);
+      await run("pg-0750:w6", (tx) => tx.saveProductsBulk({ operation: "product_settings_bulk",
+        products: [{ productId: PRODUCT_7, expectedRevisionId: null }], patch: { storeShelf: { mode: "none" } }, requestHash: W7_HASH, now: NOW }));
+      const afterW6 = (await execute("SELECT revision_id FROM dropship.dropship_product_listing_settings WHERE product_id = $1", [PRODUCT_7]))
+        .rows[0].revision_id as number;
+      await run("pg-0750:w12", async (tx) => {
+        await tx.saveCategory({ categoryId: TOPLOADERS, expectedRevisionId: null, patch: { price: CATEGORY_RECIPE, storeShelf: { mode: "none" } },
+          requestHash: W7_HASH, now: NOW });
+        return tx.saveProductsBulk({ operation: "category_settings_clear", products: [{ productId: PRODUCT_7, expectedRevisionId: afterW6 }],
+          patch: { storeShelf: null }, requestHash: W7_HASH, now: NOW });
+      });
+      await run("pg-0750:w13", (tx) => tx.acknowledgeCategoryMoves({ items: [{ productId: PRODUCT_7, shownCategoryId: TOPLOADERS }],
+        requestHash: W7_HASH, now: NOW }));
+      const afterW12 = (await execute("SELECT revision_id FROM dropship.dropship_product_listing_settings WHERE product_id = $1", [PRODUCT_7]))
+        .rows[0].revision_id as number;
+      const applied = await apply({ key: "pg-0750:w7", reviewId: priced.id, products: [{ productId: PRODUCT_7, expectedRevisionId: afterW12 }],
+        patch: { price: RECIPE } });
+      expect(applied.outcome).toBe("changed");
+      // The product's own price and revision, and the category's, as the text-free facts read them on PostgreSQL (plan 8.2).
+      const facts = await run("pg-0750:facts", (tx) => tx.loadSettingFacts({ productIds: [PRODUCT_7], categoryIds: [TOPLOADERS] }));
+      expect(facts.products.get(PRODUCT_7)).toEqual({ revisionId: applied.changed[0].revisionId, price: RECIPE, ownFields: new Set(["price"]) });
+      expect(facts.categories.get(TOPLOADERS)).toMatchObject({ price: CATEGORY_RECIPE });
+
+      const rowsBefore = await execute(`SELECT operation, review_id, idempotency_key FROM ${LEDGER_TABLE} ORDER BY id`);
+      expect(rowsBefore.rows).toEqual([
+        { operation: "product_settings_bulk", review_id: null, idempotency_key: "pg-0750:w6" },
+        { operation: "category_settings_clear", review_id: null, idempotency_key: "pg-0750:w12" },
+        { operation: "category_moves_acknowledge", review_id: null, idempotency_key: "pg-0750:w13" },
+        { operation: "price_change_apply", review_id: priced.id, idempotency_key: "pg-0750:w7" },
+      ]);
+      // The apply's audit rows name the review (plan 9.7, C-money-5).
+      const audits = await execute(`SELECT payload->>'reviewId' AS review_id, payload->>'operation' AS operation FROM dropship.dropship_audit_events
+        WHERE event_type = 'product_listing_settings_saved' ORDER BY id`);
+      expect(audits.rows.map((row: Row) => [row.operation, row.review_id])).toEqual([
+        ["product_settings_bulk", null], ["category_settings_clear", null], ["price_change_apply", priced.id]]);
+      const shapeBefore = await ledgerShape();
+
+      await execute(readFileSync(resolve(process.cwd(), "migrations", "0750_dropship_price_change_apply_ledger.sql"), "utf8"));
+
+      const shapeAfter = await ledgerShape();
+      expect(shapeAfter).toEqual(shapeBefore);
+      expect(shapeAfter.constraints.length).toBeGreaterThanOrEqual(10);
+      expect(shapeAfter.constraints.every((constraint: Row) => constraint.convalidated === true)).toBe(true);
+      expect(shapeAfter.constraints.map((constraint: Row) => constraint.conname)).toEqual(expect.arrayContaining([
+        `${LEDGER}_operation_chk`, `${LEDGER}_review_chk`, `${LEDGER}_review_fk`]));
+      expect(shapeAfter.constraints.find((constraint: Row) => constraint.conname === `${LEDGER}_operation_chk`)?.definition)
+        .toContain("'price_change_apply'");
+      expect(shapeAfter.indexes.find((index: Row) => index.indexname === `${LEDGER}_review_idx`)?.indexdef)
+        .toMatch(/CREATE UNIQUE INDEX \w+ ON .+ USING btree \(review_id\) WHERE \(review_id IS NOT NULL\)/);
+      expect(shapeAfter.columns.find((column: Row) => column.column_name === "review_id")).toEqual({
+        column_name: "review_id", data_type: "uuid", is_nullable: "YES" });
+      expect((await execute(`SELECT operation, review_id, idempotency_key FROM ${LEDGER_TABLE} ORDER BY id`)).rows).toEqual(rowsBefore.rows);
+    });
+
+    it("refuses an apply row without a review, and any other operation with one, by the pairing CHECK (23514, PG 2)", async () => {
+      const priced = review();
+      await storeReview(priced);
+
+      for (const [operation, reviewId] of [["price_change_apply", null], ["product_settings_bulk", priced.id],
+        ["category_settings_clear", priced.id], ["category_moves_acknowledge", priced.id]] as const) {
+        const error = await pgError(rawLedgerRow({ operation, reviewId, key: `pg-0750:pair-${operation}` }));
+        expect({ operation, code: error.code, constraint: error.constraint })
+          .toEqual({ operation, code: "23514", constraint: `${LEDGER}_review_chk` });
+      }
+      // The wrapper answers a CHECK as the fatal INVARIANT_FAILED, as for every CHECK (plan 3.9).
+      expect(mapListingSettingWriteError(await pgError(rawLedgerRow({ operation: "price_change_apply", reviewId: null, key: "pg-0750:pair-map" }))))
+        .toMatchObject({ code: "DROPSHIP_LISTING_SETTINGS_INVARIANT_FAILED", context: { constraint: `${LEDGER}_review_chk`, classification: "fatal" } });
+      // The well-paired rows are accepted.
+      await rawLedgerRow({ operation: "price_change_apply", reviewId: priced.id, key: "pg-0750:pair-ok" });
+      await rawLedgerRow({ operation: "product_settings_bulk", reviewId: null, key: "pg-0750:pair-ok-w6" });
+      expect(await count(LEDGER_TABLE)).toBe(2);
+    });
+
+    it("refuses an apply of another store's or another vendor's review by the foreign key (23503), writing nothing (PG 3)", async () => {
+      const OTHER_STORE = 24;
+      await addVendorStore(OTHER_STORE);
+      const ownStore = review();
+      await storeReview(ownStore);
+      const otherVendor = review();
+      await storeReview(otherVendor, OTHER_VENDOR_STORE, "member-2");
+
+      // Store 22's review applied on the same vendor's store 24, and vendor 11's review applied by vendor 10.
+      for (const [reviewId, storeConnectionId, label] of [[ownStore.id, OTHER_STORE, "store"], [otherVendor.id, STORE, "vendor"]] as const) {
+        const error = await pgError(apply({ key: `pg-0750:fk-${label}`, reviewId, storeConnectionId }));
+        // Left unmapped (a fault: the apply loads its review by vendor and store first), so it is the database's own error.
+        expect({ label, code: error.code, constraint: error.constraint }).toEqual({ label, code: "23503", constraint: `${LEDGER}_review_fk` });
+      }
+      expect(await count(LEDGER_TABLE)).toBe(0);
+      // Scoped reads never see another store's or vendor's review, nor its apply.
+      await apply({ key: "pg-0750:fk-own", reviewId: ownStore.id });
+      const scoped = await writes().execute({ memberId: MEMBER, storeConnectionId: OTHER_STORE, idempotencyKey: "pg-0750:fk-read" },
+        async (tx) => [await tx.loadPriceChangeReview(ownStore.id), await tx.findPriceChangeApplyByReview(ownStore.id),
+          await tx.loadPriceChangeReview(otherVendor.id)]);
+      expect(scoped).toEqual([null, null, null]);
+      await expect(writes().readPriceChangeReviewForMember({ memberId: "member-2", storeConnectionId: STORE, reviewId: ownStore.id }))
+        .resolves.toBeNull();
+      await expect(writes().readPriceChangeReviewForMember({ memberId: MEMBER, storeConnectionId: STORE, reviewId: ownStore.id }))
+        .resolves.toEqual(ownStore);
+    });
+
+    it("refuses a second apply row for one review by its unique index (23505), mapped to the key conflict (PG 4)", async () => {
+      const priced = review({ kind: "category_price", input: { categoryId: TOPLOADERS, expectedRevisionId: null, patch: { price: CATEGORY_RECIPE } } });
+      await storeReview(priced);
+      const first = await apply({ key: "pg-0750:once-a", reviewId: priced.id });
+      expect(first).toMatchObject({ outcome: "unchanged", changed: [] });
+
+      const found = await writes().execute({ memberId: MEMBER, storeConnectionId: STORE, idempotencyKey: "pg-0750:once-read" },
+        async (tx) => ({ review: await tx.loadPriceChangeReview(priced.id), applied: await tx.findPriceChangeApplyByReview(priced.id) }));
+      // The load carries the rows' stored size: octet_length('[]') for a review with no row (plan 9.7's memory stop rule).
+      expect(found).toEqual({ review: { ...priced, rowsBytes: 2 }, applied: { requestId: first.requestId, idempotencyKey: "pg-0750:once-a" } });
+
+      // The index's name is what PostgreSQL reports, so the wrapper's map knows it.
+      const raw = await pgError(rawLedgerRow({ operation: "price_change_apply", reviewId: priced.id, key: "pg-0750:once-raw" }));
+      expect({ code: raw.code, constraint: raw.constraint }).toEqual({ code: "23505", constraint: `${LEDGER}_review_idx` });
+      // Through the writer under another key: the 23505 is the permanent key conflict (a backstop, plan 3.7).
+      const conflict = await expectDropshipError(apply({ key: "pg-0750:once-b", reviewId: priced.id }), "DROPSHIP_IDEMPOTENCY_CONFLICT");
+      expect(conflict.context).toMatchObject({ constraint: `${LEDGER}_review_idx`, retryable: false, classification: "permanent" });
+      expect((await execute(`SELECT idempotency_key FROM ${LEDGER_TABLE} WHERE review_id = $1`, [priced.id])).rows)
+        .toEqual([{ idempotency_key: "pg-0750:once-a" }]);
+    });
+  });
+
+  describe("W7, the price check and its apply (plan PR 9, 9.5-9.7, 9.13 PG 5-10)", () => {
+    /** A second Toploaders product with one size, a retail price and an .ops cost. */
+    const SECOND_PRODUCT = 8;
+    const SECOND_SIZE = 105;
+    /** 800-ish costs x 1.5: product 7's sizes 101-104 cost 8.09, 24.00, 44.00 and 80.00. */
+    const RECIPE = { basis: "product_cost", markupBps: 5_000, flatCents: 0, rounding: "cent" } as const;
+    const CATEGORY_RECIPE = { basis: "product_cost", markupBps: 2_500, flatCents: 0, rounding: "cent" } as const;
+    const applyKey = (label: string) => `price-changes:${label}`;
+    /** One service over one gate, as the factory builds them; a second instance stands for a second dyno. */
+    const priceChanges = (repositoryPool: Pool = scopedPool(), heavyWrites = new ListingSettingHeavyWriteGate()) =>
+      new DropshipListingPriceChangesService({ repository: new PgDropshipListingSettingWritesRepository(repositoryPool), ebay: fakeEbay,
+        heavyWrites, clock: { now: () => NOW }, timer: () => performance.now(), log, newId: () => randomUUID() });
+    const check = (body: Record<string, unknown>, repositoryPool?: Pool) => priceChanges(repositoryPool).reviewForMember(MEMBER, STORE, body);
+    const applyOf = (review: { reviewId: string; reviewHash: string }, label: string, repositoryPool?: Pool, heavyWrites?: ListingSettingHeavyWriteGate) =>
+      priceChanges(repositoryPool, heavyWrites).applyForMember(MEMBER, STORE,
+        { reviewId: review.reviewId, reviewHash: review.reviewHash, idempotencyKey: applyKey(label) });
+
+    /** A product's own row through 8a's writer, as a W5 save leaves it; its revision id. */
+    async function ownRow(productId: number, patch: ProductListingSettingPatch, label: string): Promise<number> {
+      const saved = await new PgDropshipListingSettingWritesRepository(scopedPool()).execute(
+        { memberId: MEMBER, storeConnectionId: STORE, idempotencyKey: `seed-own:${label}` },
+        (tx) => tx.saveProduct({ productId, expectedRevisionId: null, patch, requestHash: "d".repeat(64), now: NOW }));
+      return saved.row!.revisionId;
+    }
+    async function maxAuditId(): Promise<number> {
+      return (await execute("SELECT COALESCE(max(id), 0)::int AS id FROM dropship.dropship_audit_events")).rows[0].id as number;
+    }
+    /**
+     * The correlation (plan 9.7, v3r C-money-5): from one review id, every audit row its apply wrote. The ledger row
+     * names the review and the key K; the category and clean-up audits name K, the bulk audits the review, and each
+     * release's audit its revision, found by K's size child prefix (listingSettingChildKeyPrefix(K, "size")).
+     */
+    async function auditsOfReview(reviewId: string): Promise<number[]> {
+      const result = await execute(`WITH ledger AS (
+          SELECT vendor_id, idempotency_key, 'ls:' || encode(sha256(convert_to(idempotency_key, 'UTF8')), 'hex') || ':size:' AS size_prefix
+          FROM dropship.dropship_product_listing_setting_requests WHERE review_id = $1::uuid),
+        released AS (
+          SELECT r.id FROM dropship.dropship_listing_price_revisions r JOIN ledger l ON r.vendor_id = l.vendor_id
+          WHERE left(r.idempotency_key, length(l.size_prefix)) = l.size_prefix)
+        SELECT a.id FROM dropship.dropship_audit_events a JOIN ledger l ON a.vendor_id = l.vendor_id
+        WHERE a.payload->>'requestKey' = l.idempotency_key
+           OR a.payload->>'reviewId' = $2::text
+           OR (a.entity_type = 'dropship_listing_price_setting' AND (a.payload->'after'->>'revisionId')::bigint IN (SELECT id FROM released))
+        ORDER BY a.id`, [reviewId, reviewId]);
+      return result.rows.map((row: Row) => row.id as number);
+    }
+    async function auditIdsAfter(id: number): Promise<number[]> {
+      return (await execute("SELECT id FROM dropship.dropship_audit_events WHERE id > $1 ORDER BY id", [id])).rows.map((row: Row) => row.id as number);
+    }
+    async function w7Writes() {
+      return {
+        ...(await allWrites()),
+        reviews: await count("dropship.dropship_pricing_reviews"),
+        ledger: await count("dropship.dropship_product_listing_setting_requests"),
+        categoryRevisions: await count("dropship.dropship_category_listing_setting_revisions"),
+      };
+    }
+
+    beforeEach(async () => {
+      await execute(`INSERT INTO catalog.products (id, sku, name, category, category_id, product_type, shopify_product_id)
+        VALUES ($1, 'TL-2', 'Toploader 2', 'Toploaders', $2, 'toploader', '8000000008')`, [SECOND_PRODUCT, TOPLOADERS]);
+      await execute(`INSERT INTO catalog.product_variants (id, product_id, sku, name, shopify_variant_id, weight_grams, sales_eligibility)
+        VALUES ($1, $2, 'TL2-25', 'Pack of 25', '7000000105', 120, 'sellable')`, [SECOND_SIZE, SECOND_PRODUCT]);
+      await execute(`INSERT INTO public.shopify_variants VALUES ('7000000105', '8000000008', 'TL2-25', 12.99)`);
+      await execute(`INSERT INTO membership.plan_variant_overrides VALUES ('ops-105', 'ops', '7000000105', '8000000008', 'fixed_price', 10.00, NULL, true)`);
+    });
+
+    it("applies a products check end to end: the product rows, the ledger row naming the review, 200 releases, one commit (PG 5)", async () => {
+      const BIG_PRODUCT = 30_001;
+      const sizeIds = await seedProductSizes(BIG_PRODUCT, 300_001, 200);
+      // 200 typed prices, as W8 saves them (one request).
+      await sizePrices().saveForMember(MEMBER, STORE, { idempotencyKey: key("pg5-typed"), rows: sizeIds.map((id) => row(id, 1_499)) });
+      const reviewStatements: string[] = [];
+      const review = await check({ kind: "product_prices", productIds: [BIG_PRODUCT, PRODUCT_7], price: RECIPE, releaseExactPrices: true },
+        scopedPool(undefined, (sql) => { reviewStatements.push(sql); }));
+      expect(review.summary).toEqual({ total: 204, changed: 204, released: 200, refused: 0 });
+      // The check took the store lock and the owner rows, no request, catalog or feature lock, and wrote one row.
+      expect(reviewStatements.filter((sql) => sql.startsWith("SELECT pg_advisory_xact_lock"))).toEqual([
+        "SELECT pg_advisory_xact_lock(hashtext('dropship_listing_push_job'), $1::integer)"]);
+      expect(reviewStatements.some((sql) => sql.startsWith("LOCK TABLE") || /FOR UPDATE/.test(sql))).toBe(false);
+      expect(reviewStatements.filter((sql) => sql.startsWith("INSERT"))).toEqual([expect.stringContaining("dropship.dropship_pricing_reviews")]);
+      const stored = await execute("SELECT kind, actor_id, review_hash, jsonb_array_length(rows) AS rows FROM dropship.dropship_pricing_reviews WHERE id = $1",
+        [review.reviewId]);
+      expect(stored.rows).toEqual([{ kind: "product_prices", actor_id: MEMBER, review_hash: review.reviewHash, rows: 204 }]);
+
+      const auditBefore = await maxAuditId();
+      const counter: StatementCounter = { statements: 0 };
+      const statements: string[] = [];
+      const applied = await measure("w7_apply_products_200_releases", 200, counter,
+        () => applyOf(review, "pg5", scopedPool(counter, (sql) => { statements.push(sql); })));
+
+      expect(applied).toEqual({ outcome: "changed", reviewId: review.reviewId, requestId: expect.any(Number), changedProductCount: 2,
+        releasedSizeCount: 200, categoryRevisionId: null });
+      expect(statements.filter((sql) => sql === "BEGIN" || sql === "COMMIT" || sql === "ROLLBACK")).toEqual(["BEGIN", "COMMIT"]);
+      const requestHash = listingSettingRequestHash({ operation: "price_change_apply_v1", storeConnectionId: STORE, reviewId: review.reviewId,
+        reviewHash: review.reviewHash });
+      const ledger = await execute(`SELECT id, operation, review_id, idempotency_key, request_hash, product_count, actor_id
+        FROM dropship.dropship_product_listing_setting_requests`);
+      expect(ledger.rows).toEqual([{ id: String(applied.requestId), operation: "price_change_apply", review_id: review.reviewId,
+        idempotency_key: applyKey("pg5"), request_hash: requestHash, product_count: 2, actor_id: MEMBER }]);
+      const products = await execute(`SELECT r.product_id, r.price_basis, r.price_markup_bps, r.request_id FROM dropship.dropship_product_listing_settings s
+        JOIN dropship.dropship_product_listing_setting_revisions r ON r.id = s.revision_id ORDER BY r.product_id`);
+      expect(products.rows).toEqual([PRODUCT_7, BIG_PRODUCT].map((productId) => ({ product_id: productId, price_basis: "product_cost",
+        price_markup_bps: 5_000, request_id: String(applied.requestId) })));
+      // Each release through W9's own flow, under its size child key, judged against the new product price.
+      const released = await execute(`SELECT s.product_variant_id, s.pricing_mode, s.override_price_cents, r.idempotency_key, r.request_hash
+        FROM dropship.dropship_listing_price_settings s JOIN dropship.dropship_listing_price_revisions r ON r.id = s.revision_id
+        WHERE s.product_variant_id >= 300001 ORDER BY s.product_variant_id`);
+      expect(released.rows).toHaveLength(200);
+      released.rows.forEach((setting: Row, index) => expect(setting).toEqual({ product_variant_id: sizeIds[index], pricing_mode: "inherit",
+        override_price_cents: null, idempotency_key: listingSettingChildKey(applyKey("pg5"), "size", sizeIds[index]), request_hash: requestHash }));
+
+      // Every audit row the apply wrote, and only those, by the one-join correlation from the review (C-money-5).
+      const written = await auditIdsAfter(auditBefore);
+      expect(written).toHaveLength(2 + 200);
+      expect(await count("dropship.dropship_audit_events", "id > $1 AND event_type = 'listing_price_saved'", [auditBefore])).toBe(200);
+      expect(await count("dropship.dropship_audit_events", "id > $1 AND payload->>'reviewId' = $2", [auditBefore, review.reviewId])).toBe(2);
+      expect(await auditsOfReview(review.reviewId)).toEqual(written);
+      // W8's 200 earlier audits are not this review's.
+      expect(await count("dropship.dropship_audit_events", "id <= $1", [auditBefore])).toBe(200);
+      expect(log.info).toHaveBeenCalledWith("dropship.listing_settings.price_change_applied", expect.objectContaining({
+        outcome: "changed", review_id: review.reviewId, request_id: applied.requestId, request_key: applyKey("pg5"),
+        changed_product_count: 2, released_size_count: 200, size_count: 200 }));
+    }, BULK_TEST_TIMEOUT_MS);
+
+    it("applies a release-only check: the ledger row with no product, the typed sizes released (PG 6)", async () => {
+      const typed101 = await typePrice(101, 1_299, "pg6-101");
+      await typePrice(102, 3_299, "pg6-102");
+      const review = await check({ kind: "product_prices", productIds: [PRODUCT_7], releaseExactPrices: true });
+      expect(review.rows.filter((entry) => entry.released).map((entry) => [entry.productVariantId, entry.settingRevisionId]))
+        .toEqual([[101, typed101], [102, typed101 + 1]]);
+
+      const applied = await applyOf(review, "pg6");
+
+      expect(applied).toMatchObject({ outcome: "changed", changedProductCount: 0, releasedSizeCount: 2, categoryRevisionId: null });
+      expect((await execute(`SELECT operation, review_id, product_count FROM dropship.dropship_product_listing_setting_requests`)).rows)
+        .toEqual([{ operation: "price_change_apply", review_id: review.reviewId, product_count: 0 }]);
+      expect(await count("dropship.dropship_product_listing_setting_revisions")).toBe(0);
+      expect((await execute(`SELECT product_variant_id, pricing_mode FROM dropship.dropship_listing_price_settings ORDER BY product_variant_id`)).rows)
+        .toEqual([{ product_variant_id: 101, pricing_mode: "inherit" }, { product_variant_id: 102, pricing_mode: "inherit" }]);
+    });
+
+    it("applies a category check: the category row, the cleared products, the clean-ups, every audit found from the review (PG 7)", async () => {
+      // Product 7 holds its own price and shelf, and size 101 a shelf; product 8 has no row, only a shelf on size 105.
+      const own7 = await ownRow(PRODUCT_7, { price: RECIPE, storeShelf: { mode: "none" } }, "pg7-7");
+      await seedShelf({ sizeId: 101, label: "pg7-101" });
+      await seedShelf({ sizeId: SECOND_SIZE, label: "pg7-105" });
+      const body = { kind: "category_price", categoryId: TOPLOADERS, expectedRevisionId: null,
+        patch: { price: CATEGORY_RECIPE, storeShelf: { mode: "none" } },
+        clear: { fields: ["storeShelf", "price"], products: [{ productId: SECOND_PRODUCT, expectedRevisionId: null },
+          { productId: PRODUCT_7, expectedRevisionId: own7 }] } };
+      const review = await check(body);
+      expect(review.summary).toMatchObject({ total: 5, refused: 0 });
+      const auditBefore = await maxAuditId();
+
+      const applied = await applyOf(review, "pg7");
+
+      expect(applied).toEqual({ outcome: "changed", reviewId: review.reviewId, requestId: expect.any(Number), changedProductCount: 1,
+        releasedSizeCount: 0, categoryRevisionId: expect.any(Number) });
+      const category = await execute(`SELECT r.id, r.price_basis, r.price_markup_bps, r.shelf_mode, r.idempotency_key FROM dropship.dropship_category_listing_settings s
+        JOIN dropship.dropship_category_listing_setting_revisions r ON r.id = s.revision_id`);
+      expect(category.rows).toEqual([{ id: applied.categoryRevisionId, price_basis: "product_cost", price_markup_bps: 2_500, shelf_mode: "none",
+        idempotency_key: applyKey("pg7") }]);
+      // Product 7's own price and shelf are reset; product 8 had nothing on its row, so it wrote no revision.
+      const product = await execute(`SELECT r.product_id, r.price_basis, r.shelf_mode FROM dropship.dropship_product_listing_settings s
+        JOIN dropship.dropship_product_listing_setting_revisions r ON r.id = s.revision_id ORDER BY r.product_id`);
+      expect(product.rows).toEqual([{ product_id: PRODUCT_7, price_basis: null, shelf_mode: null }]);
+      expect(await count("dropship.dropship_ebay_store_category_assignments")).toBe(0);
+      const written = await auditIdsAfter(auditBefore);
+      // The category, product 7, and the two shelf clean-ups.
+      expect(written).toHaveLength(4);
+      expect(await auditsOfReview(review.reviewId)).toEqual(written);
+      expect((await execute(`SELECT event_type FROM dropship.dropship_audit_events WHERE id > $1 ORDER BY id`, [auditBefore])).rows
+        .map((entry: Row) => entry.event_type)).toEqual(["category_listing_settings_saved", "product_listing_settings_saved",
+        "ebay_store_category_assignment_replaced", "ebay_store_category_assignment_replaced"]);
+    });
+
+    it("answers a retry from the probe as replayed in exactly 8 statements, and the key with another review as a conflict (PG 8)", async () => {
+      await typePrice(101, 1_299, "pg8-101");
+      const review = await check({ kind: "product_prices", productIds: [PRODUCT_7], price: RECIPE, releaseExactPrices: true });
+      const first = await applyOf(review, "pg8");
+      const before = await w7Writes();
+
+      const counter: StatementCounter = { statements: 0 };
+      const replay = await applyOf(review, "pg8", scopedPool(counter));
+
+      expect(replay).toEqual({ ...first, outcome: "replayed", changedProductCount: null });
+      // BEGIN, the request lock, the store lock, the owner rows, the gate, the probe, the review (the classifier's category), COMMIT.
+      expect(counter.statements).toBe(8);
+      expect(await w7Writes()).toEqual(before);
+      expect(log.info).toHaveBeenLastCalledWith("dropship.listing_settings.price_change_applied", expect.objectContaining({
+        outcome: "replayed", review_id: review.reviewId, released_size_count: 1 }));
+
+      const other = await check({ kind: "product_prices", productIds: [PRODUCT_7], price: null });
+      const conflict = await expectDropshipError(applyOf(other, "pg8"), "DROPSHIP_IDEMPOTENCY_CONFLICT");
+      expect(conflict.context?.mismatched).toEqual(["ledger.requestHash", "size.requestHash"]);
+      expect(await w7Writes()).toEqual({ ...before, reviews: before.reviews + 1 });
+    });
+
+    describe("concurrency (PG 9)", () => {
+      it("(a) P3's race: a W9 save that commits while the apply waits on the store lock moves the prices: 409, nothing written", async () => {
+        const review = await check({ kind: "product_prices", productIds: [PRODUCT_7], price: RECIPE });
+        let saved!: () => void;
+        const savedHere = new Promise<void>((done) => { saved = done; });
+        let open!: () => void;
+        const held = new Promise<void>((done) => { open = done; });
+        const typed = new PgDropshipListingPriceRepository(scopedPool()).execute(
+          { memberId: MEMBER, storeConnectionId: STORE, productVariantId: 101, idempotencyKey: "pg9a-typed" },
+          async (tx) => {
+            const result = await saveListingPriceInTransaction(tx, { storeConnectionId: STORE, productVariantId: 101 },
+              { priceCents: 1_299, pricingMode: "fixed", expectedRevisionId: null, idempotencyKey: "pg9a-typed" }, "d".repeat(64), NOW);
+            saved();
+            await held;
+            return result;
+          });
+        let apply: Promise<unknown> | undefined;
+        let outcome: unknown;
+        try {
+          await within(savedHere, "the W9 save");
+          apply = applyOf(review, "pg9a").then(() => null, (reason: unknown) => reason);
+          await waitUntilLockWait("dropship_listing_push_job", 1);
+          open();
+          await within(typed, "the W9 save's commit");
+          outcome = await within(apply, "the W7 apply");
+        } finally {
+          open();
+          await within(Promise.allSettled([typed, ...(apply ? [apply] : [])]), "the race case's clean-up");
+        }
+        // Under READ COMMITTED the recompute after the store lock sees the typed price, which the review did not show.
+        expect(outcome).toBeInstanceOf(DropshipError);
+        expect(outcome).toMatchObject({ code: "DROPSHIP_LISTING_PRICES_MOVED", context: { sizeCount: 1, sizes: [{ productVariantId: 101,
+          priceCents: 1_299 }] } });
+        expect(await count("dropship.dropship_product_listing_setting_requests")).toBe(0);
+        expect(await count("dropship.dropship_product_listing_setting_revisions")).toBe(0);
+      });
+
+      it("(b) two applies of one review under two keys at once: one commits, the other is 409 from the by-review read (C-money-1)", async () => {
+        const review = await check({ kind: "product_prices", productIds: [PRODUCT_7], price: RECIPE });
+        const paused = gate((sql) => sql === "COMMIT");
+        const first = applyOf(review, "pg9b-first", scopedPool(undefined, paused.hook));
+        let second: Promise<unknown> | undefined;
+        try {
+          await within(paused.reached, "the first apply's commit");
+          // Another dyno's gate: the second waits on the store lock, not on the first one's request lock (another key).
+          second = applyOf(review, "pg9b-second", scopedPool(), new ListingSettingHeavyWriteGate()).then(() => null, (reason: unknown) => reason);
+          await waitUntilLockWait("dropship_listing_push_job", 1);
+          paused.open();
+          await expect(within(first, "the first apply")).resolves.toMatchObject({ outcome: "changed", changedProductCount: 1 });
+          const refused = await within(second, "the second apply");
+          expect(refused).toMatchObject({ code: "DROPSHIP_IDEMPOTENCY_CONFLICT", context: { reviewId: review.reviewId, classification: "permanent" } });
+          // Not the index's 23505: the by-review read saw the first apply's committed row (the store lock serialized them).
+          expect((refused as DropshipError).context).not.toHaveProperty("constraint");
+        } finally {
+          paused.open();
+          await within(Promise.allSettled([first, ...(second ? [second] : [])]), "the two-key case's clean-up");
+        }
+        expect((await execute("SELECT idempotency_key FROM dropship.dropship_product_listing_setting_requests")).rows)
+          .toEqual([{ idempotency_key: applyKey("pg9b-first") }]);
+      });
+
+      it("(c) a W1 apply and a W7 apply on one store are serialized: W1 waits, then sees W7's prices and answers stale", async () => {
+        const profileBefore = (await execute("SELECT revision_id FROM dropship.dropship_pricing_profiles WHERE store_connection_id = $1", [STORE]))
+          .rows[0].revision_id as number;
+        const w1Review = await pricingRules().reviewForMember(MEMBER, STORE, { profile: D2, expectedRevisionId: profileBefore, releaseFixedOverrides: false });
+        const review = await check({ kind: "product_prices", productIds: [PRODUCT_7], price: RECIPE });
+        const paused = gate((sql) => sql === "COMMIT");
+        const w7 = applyOf(review, "pg9c", scopedPool(undefined, paused.hook));
+        let w1: Promise<unknown> | undefined;
+        try {
+          await within(paused.reached, "the W7 apply's commit");
+          w1 = pricingRules().applyForMember(MEMBER, STORE, { reviewId: w1Review.reviewId, reviewHash: w1Review.reviewHash,
+            idempotencyKey: "pg9c-w1" }).then(() => null, (reason: unknown) => reason);
+          await waitUntilLockWait("dropship_listing_push_job", 1);
+          paused.open();
+          await expect(within(w7, "the W7 apply")).resolves.toMatchObject({ outcome: "changed" });
+          // Product 7's own price now beats the store default W1 reviewed, so its recompute differs.
+          await expect(within(w1, "the W1 apply")).resolves.toMatchObject({ code: "DROPSHIP_PRICING_REVIEW_STALE" });
+        } finally {
+          paused.open();
+          await within(Promise.allSettled([w7, ...(w1 ? [w1] : [])]), "the W1 and W7 case's clean-up");
+        }
+        expect((await execute("SELECT revision_id FROM dropship.dropship_pricing_profiles WHERE store_connection_id = $1", [STORE]))
+          .rows[0].revision_id).toBe(profileBefore);
+        expect(await count("dropship.dropship_pricing_applications")).toBe(0);
+        expect(await count("dropship.dropship_product_listing_setting_requests")).toBe(1);
+      });
+    });
+
+    /*
+     * PG 10 (v3r, C-money-8, C-feas-2): W7 at the text edge. 10,000 products, one chosen size each, each product's row
+     * holding its own shelf and both texts, two-byte (one U+2019 a text; W12's PG 8 rows without eBay values). A
+     * products check sets a price on all of them and its apply rewrites every row (copying both texts); a category
+     * check of their category clears the shelf on all of them. Each review and each apply logs elapsed_ms, statements
+     * and the heap growth; the opt-in live runs (DROPSHIP_W6_HEAP_DIAGNOSTICS=1) log the live peak at the review
+     * insert, each revision insert and COMMIT, which plan 9.7's memory stop rule judges (9d's live rule).
+     *
+     * The stop rule is in force (PR 9f): at the full 30,000,000 B of text this apply peaked at 132.5-132.9 MiB live,
+     * over 128. So the review's rows, as PostgreSQL stores them, count toward the budget beside the text, and the
+     * edge is the text that fills what the rows leave: a check of the same body first measures its stored rows, then
+     * the rows are seeded with the texts that fit. Logged, never asserted.
+     */
+    const W7_EDGE_PRODUCTS = MAX_LISTING_SETTING_BULK_PRODUCTS;
+    const W7_EDGE_FIRST_PRODUCT = 60_001;
+    const W7_EDGE_FIRST_SIZE = 600_001;
+    const W7_EDGE_CATEGORY = 4;
+    const W7_LIVE_POINTS = ["INSERT INTO dropship.dropship_pricing_reviews"] as const;
+    const LIMIT_MIB = 128;
+    /** A text of `bytes` UTF-8 bytes with one U+2019 (3 bytes), so V8 holds it two-byte. */
+    const twoByteText = (bytes: number) => `${"a".repeat(bytes - 3)}’`;
+    const edgeBody = (kind: "product_prices" | "category_price", clear?: Array<{ productId: number; expectedRevisionId: number }>) =>
+      kind === "product_prices"
+        ? { kind, productIds: Array.from({ length: W7_EDGE_PRODUCTS }, (_, index) => W7_EDGE_FIRST_PRODUCT + index), price: RECIPE }
+        : { kind, categoryId: W7_EDGE_CATEGORY, expectedRevisionId: null, patch: { price: CATEGORY_RECIPE, storeShelf: { mode: "none" } },
+          ...(clear ? { clear: { fields: ["storeShelf"], products: clear } } : {}) };
+
+    /** The edge's catalog: 10,000 products in their own category, one sellable size each with a retail price and an .ops cost. */
+    async function seedPriceEdgeCatalog(): Promise<void> {
+      const last = W7_EDGE_FIRST_PRODUCT + W7_EDGE_PRODUCTS - 1;
+      await execute("INSERT INTO catalog.product_categories (id, name) VALUES ($1, 'Edge category')", [W7_EDGE_CATEGORY]);
+      await execute(`INSERT INTO catalog.products (id, sku, name, category, category_id, product_type, shopify_product_id)
+        SELECT g, 'W7E-' || g, 'Price edge product ' || g, 'Edge category', $3, 'toploader', (9300000000 + g)::text
+        FROM generate_series($1::int, $2::int) g`, [W7_EDGE_FIRST_PRODUCT, last, W7_EDGE_CATEGORY]);
+      await execute(`INSERT INTO catalog.product_variants (id, product_id, sku, name, shopify_variant_id, weight_grams, sales_eligibility)
+        SELECT $1::int + i, $2::int + i, 'W7E-SIZE-' || i, 'Size ' || i, (7300000000 + i)::text, 100, 'sellable'
+        FROM generate_series(0, $3::int - 1) i`, [W7_EDGE_FIRST_SIZE, W7_EDGE_FIRST_PRODUCT, W7_EDGE_PRODUCTS]);
+      await execute(`INSERT INTO public.shopify_variants (id, product_id, sku, price)
+        SELECT (7300000000 + i)::text, (9300000000 + $2::int + i)::text, 'W7E-SIZE-' || i, 9.99 FROM generate_series(0, $1::int - 1) i`,
+      [W7_EDGE_PRODUCTS, W7_EDGE_FIRST_PRODUCT]);
+      await execute(`INSERT INTO membership.plan_variant_overrides
+        SELECT 'ops-w7e-' || i, 'ops', (7300000000 + i)::text, (9300000000 + $2::int + i)::text, 'fixed_price', 6.00, NULL, true
+        FROM generate_series(0, $1::int - 1) i`, [W7_EDGE_PRODUCTS, W7_EDGE_FIRST_PRODUCT]);
+    }
+
+    /** Each edge product's row: its own shelf and both texts `text`; the products with their current revisions. */
+    async function seedPriceEdgeRows(text: string): Promise<Array<{ productId: number; expectedRevisionId: number }>> {
+      const last = W7_EDGE_FIRST_PRODUCT + W7_EDGE_PRODUCTS - 1;
+      await execute(`INSERT INTO dropship.dropship_product_listing_setting_revisions
+        (vendor_id, store_connection_id, product_id, previous_revision_id, request_id, text_above_mode, text_above, text_below_mode, text_below,
+         shelf_mode, shelf_ids, shelf_names, idempotency_key, request_hash, actor_type, actor_id, created_at)
+        SELECT $1, $2, p, NULL, NULL, 'own', $3, 'own', $3, 'own', '["11"]'::jsonb, '["Supplies:Top"]'::jsonb, 'seed-w7e:' || p, $4, 'vendor', 'seed', $5
+        FROM generate_series($6::int, $7::int) p`, [VENDOR, STORE, text, "d".repeat(64), NOW, W7_EDGE_FIRST_PRODUCT, last]);
+      await execute(`INSERT INTO dropship.dropship_product_listing_settings (vendor_id, store_connection_id, product_id, revision_id)
+        SELECT vendor_id, store_connection_id, product_id, id FROM dropship.dropship_product_listing_setting_revisions
+        WHERE idempotency_key LIKE 'seed-w7e:%'`);
+      await execute(`ANALYZE dropship.dropship_product_listing_settings, dropship.dropship_product_listing_setting_revisions, catalog.products,
+        catalog.product_variants, public.shopify_variants, membership.plan_variant_overrides`);
+      const rows = await execute(`SELECT product_id, revision_id FROM dropship.dropship_product_listing_settings WHERE product_id >= $1
+        ORDER BY product_id`, [W7_EDGE_FIRST_PRODUCT]);
+      return rows.rows.map((entry: Row) => ({ productId: entry.product_id as number, expectedRevisionId: entry.revision_id as number }));
+    }
+    async function storedRowsBytes(reviewId: string): Promise<number> {
+      return (await execute("SELECT octet_length(rows::text)::int AS bytes FROM dropship.dropship_pricing_reviews WHERE id = $1", [reviewId]))
+        .rows[0].bytes as number;
+    }
+
+    /** One measured step; with `live`, its live peak over a collected start (the stop rule's input). */
+    async function measured<T>(label: string, live: boolean, work: (pool: Pool) => Promise<T>, extra: Record<string, unknown>): Promise<T> {
+      const counter: StatementCounter = { statements: 0 };
+      const probe = live ? liveHeapProbe(W7_LIVE_POINTS) : null;
+      collectGarbage?.();
+      const liveStart = process.memoryUsage().heapUsed;
+      const fields: Record<string, unknown> = { ...extra };
+      return measure(live ? `${label}_live` : label, W7_EDGE_PRODUCTS, counter, async () => {
+        const answer = await work(scopedPool(counter, probe?.hook));
+        if (probe) {
+          const peak = probe.peakBytes();
+          const growth = peak === null ? null : Number(((peak - liveStart) / 1_048_576).toFixed(1));
+          fields.livePeakDeltaMiB = growth;
+          fields.overStopRuleLimit = growth === null ? null : growth > LIMIT_MIB;
+        }
+        return answer;
+      }, fields);
+    }
+
+    async function runPriceEdge(kind: "product_prices" | "category_price", mode: "rule" | "live"): Promise<void> {
+      await seedPriceEdgeCatalog();
+      // The rows' stored size, from a check of the same rows before any text is stored (a shelf clear changes no price).
+      const sizing = await check(edgeBody(kind));
+      const rowsBytes = await storedRowsBytes(sizing.reviewId);
+      const partBytes = Math.floor((MAX_BULK_TEXT_BYTES - rowsBytes) / (2 * W7_EDGE_PRODUCTS));
+      const products = await seedPriceEdgeRows(twoByteText(partBytes));
+      const textBytes = W7_EDGE_PRODUCTS * 2 * partBytes;
+      expect(textBytes + rowsBytes).toBeLessThanOrEqual(MAX_BULK_TEXT_BYTES);
+      const extra = { products: W7_EDGE_PRODUCTS, sizes: W7_EDGE_PRODUCTS, textBytes, reviewRowsBytes: rowsBytes,
+        countedBytes: textBytes + rowsBytes, kind };
+      const label = `w7_${kind === "product_prices" ? "products" : "category_clear"}_${W7_EDGE_PRODUCTS}_budget_stored_two_byte`;
+      const review = await measured(`${label}_review`, mode === "live", (pool) => check(edgeBody(kind, products), pool), extra);
+      expect(review.summary).toMatchObject({ total: W7_EDGE_PRODUCTS, refused: 0 });
+      expect(await storedRowsBytes(review.reviewId)).toBe(rowsBytes);
+      const applied = await measured(`${label}_apply`, mode === "live", (pool) => applyOf(review, `pg10-${kind}-${mode}`, pool), extra);
+      expect(applied).toMatchObject({ outcome: "changed", changedProductCount: W7_EDGE_PRODUCTS, releasedSizeCount: 0 });
+      expect(log.info).toHaveBeenLastCalledWith("dropship.listing_settings.price_change_applied", expect.objectContaining({
+        text_bytes: textBytes, review_rows_bytes: rowsBytes }));
+      // Every rewritten row carries both stored texts, counted by PostgreSQL.
+      const stored = await execute(`SELECT count(*)::int AS n, COALESCE(sum(octet_length(text_above) + octet_length(text_below)), 0)::bigint AS bytes
+        FROM dropship.dropship_product_listing_setting_revisions WHERE request_id = $1`, [applied.requestId]);
+      expect(stored.rows[0]).toEqual({ n: W7_EDGE_PRODUCTS, bytes: String(textBytes) });
+    }
+
+    it(`measures a products check and apply of ${W7_EDGE_PRODUCTS} products at the budget, stored two-byte (PG 10)`,
+      () => runPriceEdge("product_prices", "rule"), BULK_TEST_TIMEOUT_MS);
+    it(`measures a category check and apply clearing ${W7_EDGE_PRODUCTS} products at the budget (PG 10)`,
+      () => runPriceEdge("category_price", "rule"), BULK_TEST_TIMEOUT_MS);
+    it.runIf(HEAP_DIAGNOSTICS)("measures the live heap of the products check and apply (PG 10, opt-in; plan 9.7's stop rule)",
+      () => runPriceEdge("product_prices", "live"), BULK_TEST_TIMEOUT_MS);
+    it.runIf(HEAP_DIAGNOSTICS)("measures the live heap of the category check and apply (PG 10, opt-in; plan 9.7's stop rule)",
+      () => runPriceEdge("category_price", "live"), BULK_TEST_TIMEOUT_MS);
+
+    it("refuses a check whose stored text fills the budget once its rows count, storing nothing (PG 10, the stop rule)", async () => {
+      await seedPriceEdgeCatalog();
+      // The text alone is at the budget (2 x 1,500 B a product), so only the rows take it over.
+      const products = await seedPriceEdgeRows(twoByteText(MAX_BULK_TEXT_BYTES / (2 * W7_EDGE_PRODUCTS)));
+      const before = await count("dropship.dropship_pricing_reviews");
+      const error = await expectDropshipError(check(edgeBody("category_price", products)), "DROPSHIP_LISTING_SETTINGS_BULK_TOO_LARGE");
+      // `reason` says that `textBytes` is the text and the rows together.
+      expect(error.context).toMatchObject({ reason: "price_check_rows", maxTextBytes: MAX_BULK_TEXT_BYTES, productCount: W7_EDGE_PRODUCTS });
+      expect(error.context?.textBytes as number).toBeGreaterThan(MAX_BULK_TEXT_BYTES);
+      // Refused after its insert, in its transaction: the row rolled back with it.
+      expect(await count("dropship.dropship_pricing_reviews")).toBe(before);
+    }, BULK_TEST_TIMEOUT_MS);
   });
 });
