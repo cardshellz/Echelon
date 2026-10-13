@@ -648,7 +648,7 @@ describe("ShipmentTrackingService.pushLandedCostsToLots", () => {
 
     // Transitioned to closed AND pushed finalized landed cost through the COGS authority.
     expect(storage.updateInboundShipment).toHaveBeenCalled();
-    expect(applyShipmentCostRevisions).toHaveBeenCalledWith(expect.any(Object), 1, expect.any(Object), "system:shipment-costs", expect.any(Date));
+    expect(applyShipmentCostRevisions).toHaveBeenCalledWith(expect.any(Object), 1, expect.any(Object), "user-1", expect.any(Date));
     expect(cogs.updateLotLandedCostMills).not.toHaveBeenCalled();
     expect(db.execute).not.toHaveBeenCalled();
   });

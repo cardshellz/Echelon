@@ -1,4 +1,4 @@
-BEGIN;
+-- The release executor owns the transaction and its migration-record insert.
 
 -- Preserve exact extended amounts independently of rounded per-unit mirrors.
 -- Nulls retain historical v0/v1 behavior; there is deliberately no blind backfill.
@@ -94,4 +94,3 @@ BEGIN
 END;
 $$;
 
-COMMIT;

@@ -81,7 +81,7 @@ audit.sequential("receipt/AP/freight cost revisions with real owners", () => {
         reason VARCHAR(100), created_at TIMESTAMP NOT NULL DEFAULT NOW()
       )`);
     await pool.query(readFileSync(resolve(process.cwd(), "migrations/222_procurement_cost_evidence.sql"), "utf8"));
-    await pool.query(readFileSync(resolve(process.cwd(), "migrations/262_exact_inventory_cost_totals.sql"), "utf8"));
+    await pool.query(readFileSync(resolve(process.cwd(), "migrations/0750_exact_inventory_cost_totals.sql"), "utf8"));
     await pool.query(readFileSync(resolve(process.cwd(), "migrations/0725_inventory_cost_admission_evidence.sql"), "utf8"));
     await pool.query(readFileSync(resolve(process.cwd(), "migrations/231_receipt_cost_recovery.sql"), "utf8"));
     // The log is runtime DDL in server/db.ts:997, with money types aligned by migration0576.
@@ -786,7 +786,7 @@ audit.sequential("receipt/AP/freight cost revisions with real owners", () => {
     expect((await pool.query("SELECT count(*)::integer AS n FROM inventory.lot_cost_quantity_allocations WHERE inventory_lot_id=$1",[lotId])).rows[0].n).toBe(3);
     await expect(pool.query("UPDATE inventory.lot_cost_quantity_allocations SET quantity=1 WHERE id=$1",[allocation.id])).rejects.toThrow();
     await expect(pool.query("DELETE FROM inventory.lot_cost_quantity_bases WHERE inventory_lot_id=$1",[lotId])).rejects.toThrow();
-    await pool.query(readFileSync(resolve(process.cwd(),"migrations/262_exact_inventory_cost_totals.sql"),"utf8"));
+    await pool.query(readFileSync(resolve(process.cwd(),"migrations/0750_exact_inventory_cost_totals.sql"),"utf8"));
     expect((await pool.query("SELECT count(*)::integer AS n FROM inventory.lot_cost_quantity_allocations WHERE inventory_lot_id=$1",[lotId])).rows[0].n).toBe(3);
   });
 
