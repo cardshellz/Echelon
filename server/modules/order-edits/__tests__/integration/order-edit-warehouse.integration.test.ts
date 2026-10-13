@@ -278,6 +278,7 @@ function inventoryProjection(): CanonicalAvailabilityReservationStatusProjection
         { isConfigured: () => true, synchronizeOrderEditShipment: vi.fn() },
         vi.fn(),
       );
+      await database.pool.query(await readFile(new URL("../../../../../migrations/0745_customer_account_order_edit_actor.sql", import.meta.url), "utf8"));
     }, 30000);
     afterAll(async () => {
       await database?.close();
@@ -297,6 +298,55 @@ function inventoryProjection(): CanonicalAvailabilityReservationStatusProjection
       await database.pool
         .query(`INSERT INTO inventory.availability_claims VALUES(1,10,'active',1,'satisfied',1,1,repeat('f',64));
       INSERT INTO inventory.availability_claim_lines VALUES(1,1,40,100,1,1,0,0,0,0);`);
+    });
+
+    function customerRecord(): OrderEditRecord {
+      const original = record();
+      return { ...original, id: "88888888-8888-4888-8888-888888888888", omsOrderId: 21,
+        requestKey: "99999999-9999-4999-8999-999999999999", actorId: "customer:36:100",
+        input: { ...original.input, omsOrderId: 21, requestKey: "99999999-9999-4999-8999-999999999999" },
+        baseline: { ...original.baseline, customerId: "gid://shopify/Customer/100", orderId: "gid://shopify/Order/2", name: "#2" } };
+    }
+    async function customerParent() {
+      await database.pool.query("INSERT INTO oms.oms_orders(id,channel_id,external_order_id,status,financial_status,updated_at) VALUES(21,36,'2','open','paid','2026-10-05T00:00:00Z')");
+    }
+    it("persists a Shopify customer actor without a staff user and retains immutable audit evidence", async () => {
+      await customerParent();
+      const store = new PostgresOrderEditStore(database.pool);
+      const customer = customerRecord();
+      await store.create(customer);
+      expect((await store.get(customer.id)).actorId).toBe("customer:36:100");
+      const row = (await database.pool.query("SELECT actor_id,customer_actor_channel_id,customer_actor_external_id FROM oms.order_edit_operations WHERE id=$1", [customer.id])).rows[0];
+      expect(row).toEqual({ actor_id: null, customer_actor_channel_id: 36, customer_actor_external_id: "100" });
+      const event = (await database.pool.query("SELECT actor_id,customer_actor_channel_id,customer_actor_external_id FROM oms.order_edit_events WHERE operation_id=$1", [customer.id])).rows[0];
+      expect(event).toEqual(row);
+      await expect(database.pool.query("UPDATE oms.order_edit_events SET action='tampered' WHERE operation_id=$1", [customer.id])).rejects.toMatchObject({ code: "23514" });
+    });
+    it("rejects an actor/baseline mismatch before the financial transaction writes anything", async () => {
+      await customerParent();
+      const customer = customerRecord();
+      await expect(new PostgresOrderEditStore(database.pool).create({ ...customer, baseline: { ...customer.baseline, customerId: "gid://shopify/Customer/101" } })).rejects.toThrow();
+      expect((await database.pool.query("SELECT count(*)::int AS count FROM oms.order_edit_operations WHERE oms_order_id=21")).rows[0].count).toBe(0);
+    });
+    it("enforces customer identities and the original staff foreign key in PostgreSQL", async () => {
+      await customerParent();
+      const customer = customerRecord();
+      await new PostgresOrderEditStore(database.pool).create(customer);
+      for (const column of ["customer_actor_external_id=NULL", "customer_actor_external_id='101'", "customer_actor_external_id='invalid'"]) {
+        await expect(database.pool.query(`UPDATE oms.order_edit_operations SET ${column} WHERE id=$1`, [customer.id])).rejects.toMatchObject({ code: "23514" });
+      }
+      await expect(database.pool.query("UPDATE oms.order_edit_operations SET actor_id='nonexistent-staff',customer_actor_channel_id=NULL,customer_actor_external_id=NULL WHERE id=$1", [customer.id])).rejects.toMatchObject({ code: "23503" });
+    });
+    it("allows only one concurrent customer edit on an order", async () => {
+      await customerParent();
+      const customer = customerRecord();
+      const other = { ...customer, id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", requestKey: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        input: { ...customer.input, requestKey: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb" } };
+      const store = new PostgresOrderEditStore(database.pool);
+      const results = await Promise.allSettled([store.create(customer), store.create(other)]);
+      expect(results.filter(result => result.status === "fulfilled")).toHaveLength(1);
+      expect((await database.pool.query("SELECT count(*)::int AS count FROM oms.order_edit_operations WHERE oms_order_id=21")).rows[0].count).toBe(1);
+      expect((await database.pool.query("SELECT count(*)::int AS count FROM oms.order_edit_events WHERE operation_id=ANY($1::uuid[])", [[customer.id, other.id]])).rows[0].count).toBe(1);
     });
 
     async function persistedState() {

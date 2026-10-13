@@ -15,6 +15,8 @@ import {
   fixedNow,
   testAccount,
   testId,
+  publicationSnapshot,
+  publicationProgress,
 } from "../fixtures/listing-publication.fixture";
 
 const url = process.env.ECHELON_TEST_DATABASE_URL;
@@ -282,6 +284,36 @@ const fixtureSql = `CREATE SCHEMA channels; CREATE SCHEMA catalog;
       expect((await repository.get(104, record.view.id)).view.state).toBe(
         "reviewed",
       );
+    });
+    it("can read only accepted maintenance edits without copying stale initial catalog images into a recreation", async () => {
+      const snapshot = publicationSnapshot();
+      const initial = snapshot.prepared[0];
+      initial.payload = { ...initial.payload, Visible: { [updateSource.productType]: {
+        productName: "Old catalog title", mainImageUrl: "https://example.com/old-photo.jpg", brand: "Shellz",
+      } } };
+      const progress = publicationProgress(snapshot);
+      progress.items[0].state = "accepted";
+      progress.items[0].externalProductId = updateSource.externalProductId;
+      progress.batches[0].state = "processed";
+      progress.batches[0].submissionId = "original-feed";
+      await database.pool.query(`INSERT INTO marketplace.channel_listing_reviews
+        (id,channel_id,draft_revision,review_hash,snapshot,created_by,created_at,expires_at)
+        VALUES ($1,104,1,$2,$3,'operator',$4,$5)`,
+        [snapshot.review.id, snapshot.review.reviewHash, JSON.stringify(snapshot), fixedNow, snapshot.review.expiresAt]);
+      await database.pool.query(`INSERT INTO marketplace.channel_listing_operations
+        (id,channel_id,account_key,command_key,request_hash,review_id,state,snapshot,progress,next_attempt_at,created_by,created_at,updated_at)
+        VALUES ($1,104,$2,$3,$4,$5,'processing',$6,$7,$8,'operator',$8,$8)`,
+        [testId(30), listingAccountKey(testAccount), testId(31), "a".repeat(64), snapshot.review.id,
+          JSON.stringify(snapshot), JSON.stringify(progress), fixedNow]);
+      expect(await repository.lastSubmitted(testAccount, updateSource.sku, updateSource.externalProductId))
+        .toMatchObject({ changes: { title: "Old catalog title", images: ["https://example.com/old-photo.jpg"] } });
+      expect(await repository.lastSubmitted(testAccount, updateSource.sku, updateSource.externalProductId, { includeInitial: false })).toBeNull();
+      const record = await processing();
+      await repository.progress(record, "accepted", "feed-1", "Accepted", fixedNow, true);
+      const edits = await repository.lastSubmitted(testAccount, updateSource.sku, updateSource.externalProductId, { includeInitial: false });
+      expect(edits).toMatchObject({ productType: updateSource.productType, changes: { priceCents: 2799 } });
+      expect(edits?.changes).not.toHaveProperty("images");
+      expect(edits?.changes).not.toHaveProperty("title");
     });
     it("reconstructs accepted fields only for the exact seller account and product identity", async () => {
       const record = await processing();

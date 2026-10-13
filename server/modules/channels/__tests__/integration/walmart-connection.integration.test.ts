@@ -156,6 +156,32 @@ describeWithDisposableDb("Walmart account and order PostgreSQL transactions", ()
     expect(results.filter(result => result.status === "rejected")).toHaveLength(1);
     expect((await pool.query("SELECT id FROM public.audit_events WHERE actor='race'")).rowCount).toBe(1);
   });
+  it("rebinds only the proven old Walmart product, retains SKU identity and audits once under concurrent replay", async () => {
+    const pool = getTestPool();
+    const product = (await pool.query("SELECT product_id FROM catalog.product_variants WHERE id=$1", [variantId])).rows[0].product_id;
+    const id = (await pool.query("INSERT INTO catalog.product_variants(product_id,sku,name) VALUES($1,'RECREATE','Recreated') RETURNING id", [product])).rows[0].id;
+    const account = { channelId, connectionId: (await repository.get(channelId))!.connection_id, provider: "walmart" };
+    const item = { sku: "RECREATE", title: "Recreated", externalProductId: "OLD-RECREATE", externalVariantId: "RECREATE",
+      externalInventoryItemId: "RECREATE", lifecycleStatus: "ACTIVE", publishedStatus: "PUBLISHED" };
+    const entry = { item, productVariantId: id, expectedLocalSku: "RECREATE" };
+    await catalog.saveMappings(account, [entry], "initial-mapping", now);
+    const original = (await pool.query("SELECT id,created_at FROM channels.channel_feeds WHERE channel_id=$1 AND product_variant_id=$2", [channelId, id])).rows[0];
+    const input = { sku: "RECREATE", productVariantId: id, previousExternalProductId: "OLD-RECREATE" };
+    await expect(catalog.checkRecreationMapping(account, input)).resolves.toEqual({ externalProductId: "OLD-RECREATE" });
+    await expect(catalog.checkRecreationMapping(account, { ...input, previousExternalProductId: null })).resolves.toEqual({ externalProductId: "OLD-RECREATE" });
+    await expect(catalog.checkRecreationMapping(account, { ...input, previousExternalProductId: "WRONG" })).rejects.toMatchObject({ code: "CHANNEL_RECREATION_MAPPING_CONFLICT" });
+    await pool.query("UPDATE channels.channel_feeds SET quarantined_at=$3 WHERE channel_id=$1 AND product_variant_id=$2", [channelId, id, now]);
+    await expect(catalog.checkRecreationMapping(account, input)).rejects.toMatchObject({ code: "CHANNEL_RECREATION_MAPPING_CONFLICT" });
+    await pool.query("UPDATE channels.channel_feeds SET quarantined_at=NULL WHERE channel_id=$1 AND product_variant_id=$2", [channelId, id]);
+    const recreated = { ...entry, item: { ...item, externalProductId: "NEW-RECREATE" } };
+    await expect(catalog.saveMappings(account, [recreated], "ordinary-link", now)).rejects.toMatchObject({ code: "CHANNEL_MAPPING_CONFLICT" });
+    await expect(catalog.saveMappings(account, [{ ...recreated, replacesExternalProductId: "WRONG" }], "wrong-recovery", now)).rejects.toMatchObject({ code: "CHANNEL_MAPPING_CONFLICT" });
+    await Promise.all([1, 2].map(() => catalog.saveMappings(account, [{ ...recreated, replacesExternalProductId: "OLD-RECREATE" }], "recovery", now)));
+    const result = (await pool.query("SELECT id,created_at,channel_product_id,channel_sku,channel_variant_id,channel_inventory_item_id FROM channels.channel_feeds WHERE channel_id=$1 AND product_variant_id=$2", [channelId, id])).rows[0];
+    expect(result).toEqual({ ...original, channel_product_id: "NEW-RECREATE", channel_sku: "RECREATE", channel_variant_id: "RECREATE", channel_inventory_item_id: "RECREATE" });
+    expect((await pool.query("SELECT external_product_id FROM channels.channel_listings WHERE channel_id=$1 AND product_variant_id=$2", [channelId, id])).rows[0].external_product_id).toBe("NEW-RECREATE");
+    expect((await pool.query("SELECT action FROM public.audit_events WHERE actor='recovery'")).rows).toEqual([{ action: "channel_identity.recreated_catalog_mapping" }]);
+  });
   it("uses the existing channel pause control regardless of the legacy intake flag", async () => {
     await getTestPool().query("UPDATE channels.channels SET status='paused' WHERE id=$1", [channelId]);
     expect((await repository.status(channelId))?.ordersEnabled).toBe(false);

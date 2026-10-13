@@ -49,7 +49,7 @@ interface NormalizedInventoryChannelQuantityTarget {
   externalScopeId?: string;
 }
 
-type PublicationRouter = Pick<AuthorityAwareInventoryPublicationService, "publishProduct" | "readDropshipProductQuantities">;
+type PublicationRouter = Pick<AuthorityAwareInventoryPublicationService, "readProductQuantities">;
 
 export class InventoryChannelQuantityRuntimeError extends Error {
   constructor(
@@ -83,9 +83,7 @@ export class InventoryChannelQuantityRuntimeService {
     const target = normalizeTarget(request.target);
     const triggeredBy = nonblank(request.triggeredBy, "triggeredBy", 200);
     const router = this.publicationForChannel(channelId);
-    const routed = target.destinationKind === "dropship_store_connection"
-      ? await router.readDropshipProductQuantities({ productId, dryRun: true, triggeredBy }, legacyReader)
-      : await router.publishProduct({ productId, dryRun: true, triggeredBy }, legacyReader);
+    const routed = await router.readProductQuantities({ productId, dryRun: true, triggeredBy }, legacyReader);
 
     if (routed.authority === "legacy") {
       return {
@@ -109,13 +107,11 @@ export class InventoryChannelQuantityRuntimeService {
 
     const rows = routed.publication.rows.filter((row) =>
       row.channelId === channelId && targetMatches(row, target));
-    if (target.destinationKind === "dropship_store_connection") {
-      const blocked = rows.find(row => row.blockerCodes.length > 0);
-      if (blocked) throw runtimeError("CANONICAL_CHANNEL_QUANTITY_BLOCKED",
-        "The Dropship warehouse or channel policy cannot resolve a quantity.",
-        { productId, channelId, publicationTargetId: blocked.publicationTargetId,
-          productVariantId: blocked.productVariantId, blockerCodes: blocked.blockerCodes });
-    }
+    const blocked = rows.find(row => row.blockerCodes.length > 0);
+    if (blocked) throw runtimeError("CANONICAL_CHANNEL_QUANTITY_BLOCKED",
+      "The selected warehouse, channel policy or listing selection cannot resolve a quantity.",
+      { productId, channelId, publicationTargetId: blocked.publicationTargetId,
+        productVariantId: blocked.productVariantId, blockerCodes: blocked.blockerCodes });
     return {
       authority: "canonical",
       productId,

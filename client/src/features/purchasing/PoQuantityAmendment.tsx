@@ -22,7 +22,7 @@ import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Label } from "@/components/ui/label";
-import { Textarea } from "@/components/ui/textarea";
+import { Input } from "@/components/ui/input";
 
 const savedIntentSchema = z.object({
   key: z.string().uuid(), body: poQuantityApprovalRequestSchema, preview: poQuantityAmendmentPreviewSchema,
@@ -186,7 +186,7 @@ function Editor({ context: loadedContext, storageKey, setBusy, onSaved, onReload
         const change = lineChange(line, drafts[line.id]);
         return hasChangedLine(line, change) ? [change] : [];
       });
-      const parsed = poQuantityPreviewRequestSchema.safeParse({ sourceVersion: context.sourceVersion, changes, reason });
+      const parsed = poQuantityPreviewRequestSchema.safeParse({ sourceVersion: context.sourceVersion, changes, reason, ...(context.closedPurchaseOrder ? { closedPurchaseOrderConfirmed: true } : {}) });
       if (!parsed.success) throw new Error("Edit at least one line and enter a reason of at least 10 characters.");
       setValidationError(null); previewMutation.mutate(parsed.data);
     } catch (error) { setValidationError(error instanceof Error ? error.message : "Review the correction fields."); }
@@ -204,6 +204,7 @@ function Editor({ context: loadedContext, storageKey, setBusy, onSaved, onReload
   const impact = saved?.preview ?? unresolved?.preview ?? review?.preview;
   return <div className="flex min-h-0 flex-col"><div className="min-h-0 space-y-4 overflow-y-auto pr-1">
     {blocked && <p role="alert" className="text-sm text-destructive">{blocked}</p>}
+    {context.closedPurchaseOrder && !blocked && <p className="rounded bg-muted p-2 text-sm">Editing a closed PO. Saving keeps it closed and does not change receipts, invoices or payments.</p>}
     {(context.invoiceIssues?.length ?? 0) > 0 && <details open={context.invoiceIssues!.length === 1} className="rounded border border-amber-300 bg-amber-50/50 p-3 text-sm">
       <summary className="cursor-pointer font-semibold">Invoice issues ({context.invoiceIssues!.length})</summary>
       {context.invoiceIssues!.map(issue => <div key={issue.invoiceLineId} className="mt-2 flex flex-wrap items-center justify-between gap-2 border-t border-amber-200 pt-2">
@@ -217,17 +218,19 @@ function Editor({ context: loadedContext, storageKey, setBusy, onSaved, onReload
     {!impact && !blocked && <fieldset disabled={locked} className="space-y-3">
       <p className="text-xs text-muted-foreground">Enter product price and packaging separately.</p>
       <PoAmendmentLineTable disabled={locked} lines={context.lines} drafts={drafts} currency={context.currency} onChange={updateDraft} totalLabel={newTotalLabel} />
-      <div><Label htmlFor="quantity-correction-reason">Reason for editing / supplier reference</Label><Textarea id="quantity-correction-reason" value={reason} maxLength={2000} onChange={(event) => setReason(event.target.value)} /></div>
     </fieldset>}
     {impact && <Impact preview={impact} />}
-    {review && !unresolved && !saved && <div className="flex items-start gap-2"><Checkbox id="quantity-approval-confirm" checked={confirmed} disabled={locked} onCheckedChange={(checked) => setConfirmed(checked === true)} /><Label htmlFor="quantity-approval-confirm">I reviewed these changes and the new PO total.</Label></div>}
-    {(validationError || previewMutation.error || approveMutation.error) && <p role="alert" className="text-sm text-destructive">{validationError ?? approveMutation.error?.message ?? previewMutation.error?.message}</p>}
     {saved && <p role="status" className="rounded bg-green-50 p-3 font-semibold text-green-800">PO edit approved and saved as revision {saved.revisionNumber}.</p>}
-    </div><div className="mt-4 flex shrink-0 flex-wrap gap-2 border-t pt-3">
+    </div><div className="mt-4 shrink-0 space-y-3 border-t pt-3">
+      {(validationError || previewMutation.error || approveMutation.error) && <p role="alert" className="text-sm text-destructive">{validationError ?? approveMutation.error?.message ?? previewMutation.error?.message}</p>}
+      {!impact && !blocked && <div><Label htmlFor="quantity-correction-reason">Reason for editing / supplier reference</Label><Input id="quantity-correction-reason" value={reason} maxLength={2000} disabled={locked} onChange={(event) => setReason(event.target.value)} /></div>}
+      {review && !unresolved && !saved && <div className="flex items-start gap-2"><Checkbox id="quantity-approval-confirm" checked={confirmed} disabled={locked} onCheckedChange={(checked) => setConfirmed(checked === true)} /><Label htmlFor="quantity-approval-confirm">{context.closedPurchaseOrder ? "I approve these changes to the closed PO and its total." : "I reviewed these changes and the new PO total."}</Label></div>}
+      <div className="flex flex-wrap gap-2">
       {!impact && !blocked && <Button className="min-h-[44px]" disabled={locked} onClick={preview}>{previewMutation.isPending ? "Reviewing…" : "Review changes"}</Button>}
       {review && !unresolved && !saved && <><Button variant="outline" className="min-h-[44px]" disabled={locked} onClick={() => { setReview(null); setConfirmed(false); approveMutation.reset(); }}>Keep editing</Button><Button className="min-h-[44px] bg-green-700 hover:bg-green-800 text-white" disabled={!confirmed || locked || !!blocked} onClick={approve}>Approve &amp; save PO</Button></>}
       {unresolved && <Button disabled={approveMutation.isPending} onClick={() => approveMutation.mutate(unresolved)}>{approveMutation.isPending ? "Confirming…" : "Retry saved approval"}</Button>}
       {stale && !unresolved && <Button variant="outline" onClick={onReload}>Discard review and reload PO</Button>}
+      </div>
     </div>
   </div>;
 }
@@ -269,12 +272,12 @@ export function PoQuantityAmendment({ purchaseOrderId, status }: { purchaseOrder
     // Detail keys use the invoice ID in their first string segment.
     void queryClient.invalidateQueries({ predicate: (query) => typeof query.queryKey[0] === "string" && query.queryKey[0].startsWith("/api/vendor-invoices/") });
   };
-  const editable = ["approved", "sent", "acknowledged", "partially_received", "received"].includes(status);
+  const editable = ["approved", "sent", "acknowledged", "partially_received", "received", "closed"].includes(status);
   let hasRecovery: boolean;
   try { hasRecovery = sessionStorage.getItem(storageKey) !== null; }
   catch { hasRecovery = true; }
-  // A terminal PO still exposes recovery for its saved command. New corrections
-  // remain blocked by the server; a completed command can be replayed exactly.
+  // Closed POs expose the audited commercial editor. Cancelled purchases only
+  // expose recovery; the server still decides whether a new edit is allowed.
   if (!editable && !hasRecovery && !open) return null;
   return <>
     <Button variant="outline" className="flex-1 sm:flex-none min-h-[44px]" onClick={() => setOpen(true)}>Edit PO</Button>

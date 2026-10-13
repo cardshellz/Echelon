@@ -3,13 +3,13 @@ import type { AddressInfo } from "node:net";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const fixture = vi.hoisted(() => ({ variants: [] as Array<Record<string, unknown>>,
-  query: vi.fn(), release: vi.fn(), productExcluded: false,
+  query: vi.fn(), release: vi.fn(), getQuantities: vi.fn(), productExcluded: false, secondProduct: false,
 }));
 vi.mock("../../../../db", () => ({ db: {}, pool: { connect: async () => ({ query: fixture.query, release: fixture.release }) } }));
 vi.mock("../../../middleware", () => ({ requireAuth: (_req: unknown, _res: unknown, next: () => void) => next(),
   requireAuthOrInternalApiKey: (_req: unknown, _res: unknown, next: () => void) => next(), requirePermission: () => (_req: unknown, _res: unknown, next: () => void) => next() }));
 vi.mock("../../ebay-utils", () => ({ EBAY_CHANNEL_ID: 67, getAuthService: vi.fn(), getChannelConnection: vi.fn(),
-  atpService: { getAtpPerVariant: async () => fixture.variants.map(variant => ({ productVariantId: variant.id, atpUnits: 17 })) } }));
+  atpService: { getAtpPerVariant: fixture.getQuantities } }));
 vi.mock("../../../../modules/channels/infrastructure/ebay-listing-helpers", () => ({ resolveChannelPrice: async () => 1000 }));
 vi.mock("../../../../modules/channels/ebay-listing-push", () => ({ ebayListingPushRequestSchema: {}, ebayListingPushService: {}, readEbayPushRecoveryIdentity: vi.fn() }));
 vi.mock("../../../../modules/channels/ebay-listing-sync", () => ({ syncActiveListings: vi.fn(), ebayListingSyncService: {}, EbayListingRecoveryService: class {} }));
@@ -20,21 +20,28 @@ vi.mock("../../ebay-listing-recovery.routes", () => ({ registerEbayListingRecove
 vi.mock("../../../../modules/channels/ebay-listing-mapping", () => ({ ebayListingMappingService: {} }));
 vi.mock("../../ebay-listing-mapping.routes", () => ({ registerEbayListingMappingRoutes: vi.fn() }));
 import { router } from "../../ebay-listings.routes";
+import { InventoryChannelQuantityRuntimeError } from "../../../../modules/inventory-planning/application/inventory-channel-quantity-runtime.service";
+import { ebayListingIssueSchema } from "@shared/types/ebay-listing-issue";
 
 describe("eBay listing feed current content intent", () => {
   let server: ReturnType<ReturnType<typeof express>["listen"]>;
   let url: string;
   beforeEach(async () => {
     fixture.productExcluded = false;
+    fixture.secondProduct = false;
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    fixture.getQuantities.mockReset().mockImplementation(async (productId: number) => fixture.variants
+      .filter(variant => variant.product_id === productId).map(variant => ({ productVariantId: variant.id, atpUnits: 17 })));
     fixture.variants = [1, 2, 3].map(id => ({ id, product_id: 20, sku: `SKU-${id}`, name: `Variant ${id}`, price_cents: 1000,
+      requires_shipping: true, track_inventory: true,
       ebay_listing_excluded: id === 3, variant_override_is_listed: id === 3 ? 0 : 1,
       listing_id: id, external_listing_id: "listing-20", listing_status: id === 3 ? "error" : "synced", listing_sync_error: id === 3 ? "Old excluded member failed" : null }));
     fixture.query.mockReset().mockImplementation(async (sql: string) => {
-      if (sql.includes("FROM products p")) return { rows: [{ id: 20, name: "Product", sku: "PRODUCT", product_type: "Toploaders", product_type_name: "Toploaders",
+      if (sql.includes("FROM products p")) return { rows: (fixture.secondProduct ? [20, 21] : [20]).map(id => ({ id, name: `Product ${id}`, sku: `PRODUCT-${id}`, product_type: "Toploaders", product_type_name: "Toploaders",
         is_active: true, ebay_browse_category_id: "183454", variant_count: "3", image_count: "1", type_listing_enabled: true,
         ebay_listing_excluded: fixture.productExcluded, product_override_is_listed: 1, external_product_id: "listing-20", external_product_id_count: 1,
         // The former product-wide selector picked this retained member error.
-        listing_id: 3, listing_status: "error", listing_sync_error: "Old excluded member failed" }] };
+        listing_id: 3, listing_status: "error", listing_sync_error: "Old excluded member failed" })) };
       if (sql.includes("FROM product_variants pv")) return { rows: fixture.variants };
       return { rows: [] };
     });
@@ -47,6 +54,7 @@ describe("eBay listing feed current content intent", () => {
   afterEach(async () => {
     server.closeAllConnections();
     await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+    vi.restoreAllMocks();
   });
 
   it("shows the successful included members without clearing an excluded member's saved error", async () => {
@@ -112,5 +120,75 @@ describe("eBay listing feed current content intent", () => {
     fixture.variants[0].listing_status = "pending";
     const { feed } = await (await fetch(url)).json();
     expect(feed[0]).toMatchObject({ status: "publication_incomplete", isListed: false });
+  });
+
+  it("keeps a failed product visible with unavailable stock and preserves other products' real zero stock", async () => {
+    fixture.secondProduct = true;
+    fixture.variants.push({ ...fixture.variants[0], id: 4, product_id: 21, sku: "HEALTHY", external_listing_id: "listing-21" });
+    fixture.getQuantities.mockImplementation(async (productId: number) => {
+      if (productId === 20) throw new InventoryChannelQuantityRuntimeError("CANONICAL_CHANNEL_QUANTITY_BLOCKED",
+        "private runtime diagnostic", { productVariantId: 1, publicationTargetId: 67, blockerCodes: ["CHANNEL_EXPOSURE_POLICY_INCOMPLETE"] });
+      return [{ productVariantId: 4, atpUnits: 0 }];
+    });
+    const response = await fetch(url);
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body.total).toBe(2);
+    expect(body.feed[0]).toMatchObject({ status: "listed", syncError: null,
+      inventoryIssue: { code: "CANONICAL_CHANNEL_QUANTITY_BLOCKED", action: { kind: "edit_listing", href: "/channels/inventory?product=20" } } });
+    expect(body.feed[0].variants.map((variant: { inventoryQuantity: unknown }) => variant.inventoryQuantity)).toEqual([null, null, null]);
+    expect(body.feed[1]).toMatchObject({ inventoryIssue: null, variants: [{ id: 4, inventoryQuantity: 0 }] });
+    expect(ebayListingIssueSchema.safeParse(body.feed[0].inventoryIssue).success).toBe(true);
+    expect(JSON.stringify(body)).not.toContain("private runtime diagnostic");
+    expect(fixture.query.mock.calls.every(([sql]) => !/^\s*(UPDATE|INSERT|DELETE)/i.test(sql))).toBe(true);
+    expect(fixture.release).toHaveBeenCalledOnce();
+  });
+
+  it("does not display missing quantity rows as zero and reloads current quantities without changing listing state", async () => {
+    fixture.getQuantities.mockResolvedValueOnce([{ productVariantId: 1, atpUnits: 8 }]);
+    const first = await (await fetch(url)).json();
+    expect(first.feed[0]).toMatchObject({ status: "listed", inventoryIssue: { code: "EBAY_FEED_QUANTITY_MISSING" } });
+    expect(first.feed[0].variants.map((variant: { inventoryQuantity: unknown }) => variant.inventoryQuantity)).toEqual([8, null, null]);
+    const second = await (await fetch(url)).json();
+    expect(second.feed[0]).toMatchObject({ status: "listed", inventoryIssue: null });
+    expect(second.feed[0].variants.every((variant: { inventoryQuantity: unknown }) => variant.inventoryQuantity === 17)).toBe(true);
+  });
+
+  it("does not require a stock row for an excluded variant that has no retained provider identity", async () => {
+    fixture.variants[2].listing_id = null;
+    fixture.variants[2].external_listing_id = null;
+    fixture.getQuantities.mockResolvedValueOnce([{ productVariantId: 1, atpUnits: 17 }, { productVariantId: 2, atpUnits: 9 }]);
+    const { feed } = await (await fetch(url)).json();
+    expect(feed[0]).toMatchObject({ inventoryIssue: null, status: "listed" });
+    expect(feed[0].variants.map((variant: { inventoryQuantity: unknown }) => variant.inventoryQuantity)).toEqual([17, 9, null]);
+  });
+
+  it.each(["requires_shipping", "track_inventory"])("does not require stock for a selected variant with %s disabled", async field => {
+    fixture.variants[1][field] = false;
+    fixture.getQuantities.mockResolvedValueOnce([{ productVariantId: 1, atpUnits: 17 }]);
+    const { feed } = await (await fetch(url)).json();
+    expect(feed[0].inventoryIssue).toBeNull();
+    expect(feed[0].variants[0].inventoryQuantity).toBe(17);
+    expect(feed[0].variants[1].inventoryQuantity).toBeNull();
+  });
+
+  it("shows an excluded product with no stock rows without creating a false inventory error", async () => {
+    fixture.productExcluded = true;
+    fixture.getQuantities.mockResolvedValueOnce([]);
+    const { feed } = await (await fetch(url)).json();
+    expect(feed[0]).toMatchObject({ status: "excluded", inventoryIssue: null });
+  });
+
+  it("returns safe diagnostics and a reference when the feed itself cannot be read", async () => {
+    fixture.query.mockRejectedValueOnce(new Error("SELECT secret_column FROM private_table password=private-value"));
+    const response = await fetch(url);
+    expect(response.status).toBe(500);
+    const body = await response.json();
+    expect(body).toMatchObject({ code: "EBAY_LISTING_FEED_UNAVAILABLE", issue: { code: "EBAY_LISTING_FEED_UNAVAILABLE",
+      action: { kind: "contact_support" } } });
+    expect(ebayListingIssueSchema.safeParse(body.issue).success).toBe(true);
+    expect(body.issue.reference).toMatch(/^[a-f0-9-]{36}$/);
+    expect(JSON.stringify(body)).not.toMatch(/secret_column|private_table|private-value/);
+    expect(fixture.release).toHaveBeenCalledOnce();
   });
 });

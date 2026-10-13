@@ -3,6 +3,8 @@ import { startWalmartOrderPolling } from "./modules/channels/adapters/walmart/wa
 import { startWalmartStockConnectionWorker } from "./modules/channels/adapters/walmart/walmart-stock-connection.service";
 import { createOrderEditService } from "./modules/order-edits/order-edit.composition";
 import { registerOrderEditRoutes } from "./modules/order-edits/interfaces/order-edit.routes";
+import { registerCustomerAccountRoutes } from "./modules/customer-account/interfaces/customer-account.routes";
+import { customerAccountServices } from "./modules/customer-account/infrastructure/customer-account.composition";
 import { startOrderEditScheduler } from "./modules/order-edits/infrastructure/order-edit-scheduler";
 import { hasPermission } from "./modules/identity";
 import { startListingPublicationWorker } from "./modules/marketplace-listings/application/listing-publication-worker";
@@ -705,9 +707,13 @@ function startEchelonSyncScheduler(
     console.log(`[SyncRecovery] Scheduled recovery disabled (${reason}).`);
   }
 
+  const orderEdits = createOrderEditService(dbPool, services);
+  // Register the exact account suffix before the existing returns proxy's 404.
+  // Its default-off gate does not change staff APIs or public return access.
+  registerCustomerAccountRoutes(app, { services: customerAccountServices(dbPool, orderEdits),
+    report: event => console.error(JSON.stringify({ event: "customer_account_request_failed", ...event })) });
   await registerRoutes(httpServer, app);
 
-  const orderEdits = createOrderEditService(dbPool, services);
   registerOrderEditRoutes(app, { service: orderEdits, hasPermission,
     report: event => console.error(JSON.stringify({ event: "order_edit_request_failed", ...event })) });
   if (!schedulersDisabled("ORDER_EDIT_SCHEDULER_DISABLED")) {

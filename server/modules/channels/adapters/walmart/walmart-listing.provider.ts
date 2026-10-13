@@ -138,7 +138,7 @@ export class WalmartListingProvider implements ListingPublicationProvider {
     if (
       draft.variantId !== input.catalog.variantId ||
       !input.catalog.eligible ||
-      input.catalog.alreadyLinked
+      (input.catalog.alreadyLinked && !input.recreating)
     ) {
       issues.push(
         issue(
@@ -603,6 +603,12 @@ export class WalmartListingProvider implements ListingPublicationProvider {
       },
       priceCents: item.price ? priceFromWalmart(item.price.amount) : null,
     };
+  }
+
+  async assertCanRecreate(account: ListingAccount, sku: string): Promise<void> {
+    await this.api(account);
+    // An explicit Echelon stop must not be bypassed by deleting an item elsewhere.
+    await this.channels.withListingWrites(account, [sku], async () => {});
   }
 
   private async api(

@@ -73,6 +73,21 @@ export const listingSnapshotSchema = z.object({
   draft: listingDraftSchema,
   catalog: z.array(listingCatalogItemSchema),
   prepared: z.array(preparedListingItemSchema),
+  recreations: z
+    .array(
+      z
+        .object({
+          operationId: z.string().uuid(),
+          variantId: z.number().int().positive(),
+          sku: z.string().min(1).max(50),
+          previousExternalProductId: z.string().min(1).nullable(),
+          sourceHash: z.string().length(64),
+          checkedAt: z.string().datetime(),
+        })
+        .strict(),
+    )
+    .max(100)
+    .optional(),
 });
 export type ListingSnapshot = z.infer<typeof listingSnapshotSchema>;
 
@@ -154,7 +169,12 @@ export function listingOperationView(
     channelId: operation.channelId,
     state: operation.state,
     submissionId: submissions.length === 1 ? submissions[0] : null,
-    items: operation.progress.items,
+    items: operation.progress.items.map((item) => ({
+      ...item,
+      title: operation.snapshot.review.items.find(
+        (source) => source.variantId === item.variantId,
+      )?.title,
+    })),
     error: operation.progress.error,
     createdAt: operation.createdAt,
     updatedAt: operation.updatedAt,
@@ -179,7 +199,11 @@ export function summarizeListingProgress(
     )
   )
     return "processing";
-  if (progress.items.every((item) => item.state === "verified"))
+  if (
+    progress.items.every(
+      (item) => item.state === "verified" || item.state === "superseded",
+    )
+  )
     return "completed";
   return progress.items.some((item) => item.state === "verified")
     ? "partially_completed"

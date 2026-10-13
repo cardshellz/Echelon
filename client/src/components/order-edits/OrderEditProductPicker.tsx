@@ -40,11 +40,13 @@ type PickerProps = {
     plan: MemberPlanPresentation | null,
   ): void;
 };
+type CatalogBrowserProps = PickerProps & { onSelectionNotice(message: string): void };
 
 export function OrderEditProductPicker(props: PickerProps) {
   const [open, setOpen] = useState(false);
+  const [notice, setNotice] = useState<string | null>(null);
   return (
-    <Dialog open={open && props.enabled} onOpenChange={setOpen}>
+    <Dialog open={open && props.enabled} onOpenChange={value => { setOpen(value); setNotice(null); }}>
       <DialogTrigger asChild>
         <Button
           type="button"
@@ -64,7 +66,8 @@ export function OrderEditProductPicker(props: PickerProps) {
               Choose a category, then a product and its pack, box or case SKU.
             </DialogDescription>
           </DialogHeader>
-          <CatalogBrowser {...props} />
+          {notice && <p role="alert" className="shrink-0 rounded-md border border-orange-200 bg-orange-50 p-3 text-sm text-orange-900">{notice}</p>}
+          <CatalogBrowser {...props} onSelectionNotice={setNotice} />
           <div className="flex shrink-0 items-center justify-between gap-3 border-t pt-3">
             <p className="text-xs text-muted-foreground">
               Prices include this customer's applicable club pricing. Review
@@ -80,7 +83,7 @@ export function OrderEditProductPicker(props: PickerProps) {
   );
 }
 
-function CatalogBrowser(props: PickerProps) {
+function CatalogBrowser(props: CatalogBrowserProps) {
   const id = useId();
   const [text, setText] = useState("");
   const [category, setCategory] = useState<string | null>(null);
@@ -278,7 +281,7 @@ function CatalogBrowser(props: PickerProps) {
 }
 
 function ProductOptions(
-  props: PickerProps & {
+  props: CatalogBrowserProps & {
     product: OrderEditCatalogProduct;
     expanded: boolean;
     onToggle(): void;
@@ -336,15 +339,11 @@ function ProductOptions(
 }
 
 function VariantOptions(
-  props: PickerProps & {
+  props: CatalogBrowserProps & {
     product: OrderEditCatalogProduct;
     onUnavailable(productId: string): void;
   },
 ) {
-  const [selectionNotice, setSelectionNotice] = useState<{
-    variantId: string;
-    message: string;
-  } | null>(null);
   const variants = useInfiniteQuery({
     queryKey: [
       ORDER_EDITS_API,
@@ -458,13 +457,9 @@ function VariantOptions(
                   variant.selectionFlow ?? "order_edit",
                 );
                 if (notice) {
-                  setSelectionNotice({
-                    variantId: variant.variantId,
-                    message: notice,
-                  });
+                  props.onSelectionNotice(notice);
                   return;
                 }
-                setSelectionNotice(null);
                 props.onAdd(variant, plan);
               }}
             >
@@ -477,11 +472,6 @@ function VariantOptions(
                 </>
               )}
             </Button>
-            {selectionNotice?.variantId === variant.variantId && (
-              <p role="alert" className="w-full rounded-md bg-muted p-3 text-sm">
-                {selectionNotice.message}
-              </p>
-            )}
           </div>
         );
       })}

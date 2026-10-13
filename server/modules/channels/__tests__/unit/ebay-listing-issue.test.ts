@@ -4,6 +4,13 @@ import { ebayListingIssueSchema } from "@shared/types/ebay-listing-issue";
 
 describe("shared eBay issue actions", () => {
   it.each([
+    ["EBAY_LISTING_FEED_UNAVAILABLE","contact_support",false],
+    ["EBAY_FEED_QUANTITY_UNAVAILABLE","contact_support",false],
+    ["EBAY_FEED_QUANTITY_MISSING","edit_listing",false],
+    ["EBAY_FEED_QUANTITY_INVALID","contact_support",false],
+    ["CANONICAL_CHANNEL_QUANTITY_BLOCKED","edit_listing",false],
+    ["CANONICAL_CHANNEL_QUANTITY_TARGET_AMBIGUOUS","edit_listing",false],
+    ["CANONICAL_CHANNEL_QUANTITY_TARGET_DUPLICATE","edit_listing",false],
     ["EBAY_SYNC_RESPONSE_EVIDENCE_REQUIRED","check_recovery",false],
     ["EBAY_PUBLICATION_RESPONSE_UNCERTAIN","check_recovery",false],
     ["EBAY_PUBLICATION_PRIOR_WORK_REQUIRED","check_status",false],

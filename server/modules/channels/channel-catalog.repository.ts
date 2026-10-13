@@ -5,6 +5,7 @@ import { persistAuditEvent } from "../../infrastructure/auditLogger";
 import { VARIANT_SALES_ELIGIBILITY_LOCK_NAMESPACE } from "@shared/catalog/variant-sales-eligibility";
 import { channelCatalogItemSchema, channelCatalogLinkSchema, type ChannelCatalogVariant } from "@shared/types/channel-catalog";
 import type { ChannelCatalogAccount, ChannelCatalogRepository, VerifiedChannelCatalogMapping } from "./channel-catalog.service";
+import { channelRecreationMappingSchema, type ChannelRecreationMapping, type ChannelRecreationIdentity } from "./channel-catalog.service";
 import { ChannelIdentityError } from "./channel-identity.domain";
 
 const positiveId = z.number().int().positive().max(2_147_483_647);
@@ -57,6 +58,31 @@ export class PostgresChannelCatalogRepository implements ChannelCatalogRepositor
     return this.read(async client => (await client.query(`SELECT ${variantColumns} FROM catalog.product_variants
       WHERE sku ILIKE $1 OR name ILIKE $1 ORDER BY sku,id LIMIT 50`, [`%${term}%`])).rows.map(variantView));
   }
+  async checkRecreationMapping(account: ChannelCatalogAccount, input: ChannelRecreationMapping): Promise<ChannelRecreationIdentity> {
+    const mapping = channelRecreationMappingSchema.parse(input);
+    positiveId.parse(account.channelId);
+    return this.read(async (client) => {
+      const rows = (await client.query<{
+        owner: string; variant_id: number; sku: string | null; variant_key: string | null;
+        inventory_key: string | null; product_key: string | null; active: boolean;
+      }>(`SELECT 'feed' AS owner,product_variant_id AS variant_id,channel_sku AS sku,channel_variant_id AS variant_key,
+          channel_inventory_item_id AS inventory_key,channel_product_id AS product_key,
+          (is_active=1 AND quarantined_at IS NULL AND channel_type='walmart') AS active
+        FROM channels.channel_feeds WHERE channel_id=$1 AND (product_variant_id=$2 OR channel_sku=$3)
+        UNION ALL SELECT 'listing',product_variant_id,external_sku,external_variant_id,external_sku,external_product_id,true
+        FROM channels.channel_listings WHERE channel_id=$1 AND (product_variant_id=$2 OR external_sku=$3)`,
+        [account.channelId, mapping.productVariantId, mapping.sku])).rows;
+      const productIds = new Set(rows.map((row) => row.product_key).filter((id): id is string => id !== null));
+      if (productIds.size > 1 || rows.filter((row) => row.owner === "feed").length > 1 || rows.filter((row) => row.owner === "listing").length > 1
+        || rows.some((row) => row.variant_id !== mapping.productVariantId || row.sku !== mapping.sku
+          || row.variant_key !== mapping.sku || row.inventory_key !== mapping.sku || !row.active
+          || (mapping.previousExternalProductId !== null && row.product_key !== null && row.product_key !== mapping.previousExternalProductId)))
+        throw new ChannelIdentityError("CHANNEL_RECREATION_MAPPING_CONFLICT", "The saved Walmart mapping belongs to a different or disabled identity. Resolve that mapping before recreating this listing.");
+      // Feed results may omit WPID. The exact existing mapping can supply it;
+      // SKU, variant, active status and agreement between both projections above are mandatory.
+      return { externalProductId: mapping.previousExternalProductId ?? [...productIds][0] ?? null };
+    });
+  }
   async saveMappings(account: ChannelCatalogAccount,
     items: readonly VerifiedChannelCatalogMapping[], actor: string, now: Date): Promise<void> {
     positiveId.parse(account.channelId); positiveId.parse(account.connectionId);
@@ -79,7 +105,13 @@ export class PostgresChannelCatalogRepository implements ChannelCatalogRepositor
     finally { client.release(); }
   }
   private async saveOne(client: PoolClient, account: ChannelCatalogAccount,
-    { item, productVariantId, expectedLocalSku }: VerifiedChannelCatalogMapping, actor: string, now: Date) {
+    { item, productVariantId, expectedLocalSku, replacesExternalProductId }: VerifiedChannelCatalogMapping, actor: string, now: Date) {
+    if (replacesExternalProductId !== undefined) {
+      z.string().min(1).nullable().parse(replacesExternalProductId);
+      if (account.provider !== "walmart") throw new ChannelIdentityError("CHANNEL_RECREATION_UNAVAILABLE", "Only Walmart supports this recreation command.");
+    }
+    const conflictingProduct = (id: string | null) => id && id !== item.externalProductId
+      && (replacesExternalProductId === undefined || id !== replacesExternalProductId);
     const variant = (await client.query(`SELECT ${variantColumns} FROM catalog.product_variants WHERE id=$1 FOR SHARE`, [productVariantId])).rows[0];
     if (!variant || !variantView(variant).eligible) throw new ChannelIdentityError("CHANNEL_VARIANT_UNAVAILABLE", "Select an active, sellable fulfillment variant");
     if (expectedLocalSku !== null && variant.sku !== expectedLocalSku) {
@@ -94,7 +126,7 @@ export class PostgresChannelCatalogRepository implements ChannelCatalogRepositor
     [account.channelId, productVariantId, item.sku, item.externalVariantId, item.externalInventoryItemId])).rows;
     if (feeds.length > 1 || feeds.some(feed => feed.product_variant_id !== productVariantId || feed.channel_sku !== item.sku
       || feed.channel_variant_id !== item.externalVariantId || feed.channel_inventory_item_id !== item.externalInventoryItemId
-      || feed.channel_type !== account.provider || (feed.channel_product_id && feed.channel_product_id !== item.externalProductId))) {
+      || feed.channel_type !== account.provider || conflictingProduct(feed.channel_product_id))) {
       throw new ChannelIdentityError("CHANNEL_MAPPING_CONFLICT", "A SKU or variant is already linked to a different identity");
     }
     if (feeds.some(feed => feed.is_active !== 1 || feed.quarantined_at !== null)) {
@@ -105,7 +137,7 @@ export class PostgresChannelCatalogRepository implements ChannelCatalogRepositor
     [account.channelId, productVariantId, item.sku, item.externalVariantId])).rows;
     if (listings.length > 1 || listings.some(listing => listing.product_variant_id !== productVariantId
       || listing.external_sku !== item.sku || listing.external_variant_id !== item.externalVariantId
-      || (listing.external_product_id && listing.external_product_id !== item.externalProductId))) {
+      || conflictingProduct(listing.external_product_id))) {
       throw new ChannelIdentityError("CHANNEL_LISTING_CONFLICT", "The existing listing projection disagrees with the verified SKU");
     }
     if (feeds.length === 1 && listings.length === 1 && feeds[0].channel_product_id === item.externalProductId
@@ -120,7 +152,8 @@ export class PostgresChannelCatalogRepository implements ChannelCatalogRepositor
       ON CONFLICT (channel_id,product_variant_id) DO UPDATE SET external_product_id=EXCLUDED.external_product_id,
       sync_status='synced',last_synced_at=EXCLUDED.last_synced_at,updated_at=EXCLUDED.updated_at`,
     [account.channelId,productVariantId,item.externalProductId,item.externalVariantId,item.sku,now]);
-    await persistAuditEvent(drizzle(client), { actor, action: "channel_identity.verified_catalog_mapping",
+    await persistAuditEvent(drizzle(client), { actor, action: replacesExternalProductId === undefined
+      ? "channel_identity.verified_catalog_mapping" : "channel_identity.recreated_catalog_mapping",
       target: `channel:${account.channelId}:variant:${productVariantId}`,
       changes: { before: { feed: feeds[0] ?? null, listing: listings[0] ?? null },
         after: { productVariantId, ...item } }, context: { ...account } }, { timestamp: now, emitStructuredLog: false });
