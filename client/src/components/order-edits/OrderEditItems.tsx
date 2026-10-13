@@ -2,7 +2,30 @@ import React from "react";
 import type { OrderEditOperation } from "@shared/order-edits/order-edit.contract";
 import { Badge } from "@/components/ui/badge";
 import { formatOrderEditMoney } from "@/lib/order-edits";
-import { groupOrderEditDisplayLines } from "@/lib/order-edit-display";
+import {
+  exactOrderEditUnitPrice,
+  groupOrderEditDisplayLines,
+} from "@/lib/order-edit-display";
+
+export function OrderEditUnitPrice({
+  cents,
+  currency = "USD",
+}: {
+  cents: number | null;
+  currency?: string;
+}) {
+  return (
+    <p className="oe-item-price">
+      {cents === null ? (
+        <span aria-label="Unit price unavailable">—</span>
+      ) : (
+        <>
+          {formatOrderEditMoney(cents, currency)} <span>each</span>
+        </>
+      )}
+    </p>
+  );
+}
 
 export function OrderEditItems({
   lines,
@@ -18,21 +41,26 @@ export function OrderEditItems({
         {groupOrderEditDisplayLines(lines).map((line) => (
           <li key={line.key} className="oe-review-item">
             <div className="min-w-0 flex-1">
-              <p className="text-sm font-medium">{line.title}</p>
+              <p className="text-sm font-medium">
+                {line.title}{" "}
+                {showAdded && line.added && (
+                  <Badge variant="outline" className="oe-added-pill">
+                    Added
+                  </Badge>
+                )}
+              </p>
               {line.variantTitle && (
                 <p className="mt-1 text-xs text-muted-foreground">
                   {line.variantTitle}
                 </p>
               )}
-              {showAdded && line.added && (
-                <Badge variant="outline" className="mt-2">
-                  Added
-                </Badge>
-              )}
             </div>
-            <div className="shrink-0 text-right text-sm">
-              <p className="text-xs text-muted-foreground">Qty {line.quantity}</p>
-              <p className="mt-1 font-medium tabular-nums">
+            <div className="oe-line-pricing">
+              <OrderEditUnitPrice
+                cents={exactOrderEditUnitPrice(line.totalCents, line.quantity)}
+              />
+              <p className="oe-reviewed-quantity">Qty {line.quantity}</p>
+              <p className="oe-item-total">
                 {formatOrderEditMoney(line.totalCents, "USD")}
               </p>
             </div>

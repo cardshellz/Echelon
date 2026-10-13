@@ -18,15 +18,13 @@ import {
   type OrderEditState,
 } from "@shared/order-edits/order-edit.contract";
 import type { OrderEditCatalogVariant } from "@shared/order-edits/order-edit-catalog";
-import type { MemberPlanPresentation } from "@shared/membership/member-plan-presentation";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { OrderEditProductPicker } from "@/components/order-edits/OrderEditProductPicker";
-import { OrderEditItems } from "@/components/order-edits/OrderEditItems";
-import { MemberProductPrice } from "@/components/MemberProductPrice";
+import { OrderEditItems, OrderEditUnitPrice } from "@/components/order-edits/OrderEditItems";
 import { exactOrderEditUnitPrice, groupOrderEditDisplayLines } from "@/lib/order-edit-display";
 import { useAuth } from "@/lib/auth";
 import { useDebounce } from "@/hooks/use-debounce";
@@ -260,7 +258,6 @@ export function OrderDraft({
   const [additions, setAdditions] = useState<
     Array<{
       variant: OrderEditCatalogVariant;
-      plan: MemberPlanPresentation | null;
       quantity: string;
     }>
   >([]);
@@ -475,7 +472,7 @@ export function OrderDraft({
                   ...additions.map((item) => item.variant.variantId),
                 ])
               }
-              onAdd={(variant, plan) => {
+              onAdd={(variant) => {
                 if (
                   !mutable ||
                   !variant.available ||
@@ -491,7 +488,7 @@ export function OrderDraft({
                     (item) => item.variant.variantId === variant.variantId,
                   )
                     ? current
-                    : [...current, { variant, plan, quantity: "1" }],
+                    : [...current, { variant, quantity: "1" }],
                 );
               }}
             />
@@ -502,7 +499,6 @@ export function OrderDraft({
           aria-label="Editable order items"
         >
           {order.lines.map((line) => {
-            const originalUnitCents = exactOrderEditUnitPrice(line.totalCents, line.quantity);
             const previewGroup = line.variantId &&
               order.lines.filter(item => item.variantId === line.variantId).length === 1
               ? previewLineGroups.get(`variant:${line.variantId}`)
@@ -521,14 +517,9 @@ export function OrderDraft({
                 <p className="text-xs text-muted-foreground">
                   {[line.variantTitle, line.sku].filter(Boolean).join(" · ")}
                 </p>
-                <p className="oe-item-price">
-                  {formatOrderEditMoney(unitNetCents ?? displayedTotal, order.currency)}{" "}
-                  <span>{unitNetCents === null ? "line total" : displayedQuantity > 1 ? "avg. each" : "each"}
-                    {!previewLine && Number(quantities[line.lineItemId]) !== line.quantity ? " · original price" : ""}</span>
-                </p>
-                <p className="oe-item-original">Originally {line.quantity}{previewLine && displayedQuantity !== line.quantity && originalUnitCents !== null
-                  ? ` at ${formatOrderEditMoney(originalUnitCents, order.currency)} each` : ""}</p>
               </div>
+              <div className="oe-line-pricing">
+                <OrderEditUnitPrice cents={unitNetCents} currency={order.currency} />
               <div className="oe-item-quantity">
                 <Label htmlFor={`line-${line.lineItemId}`} className="text-xs">
                   Quantity
@@ -545,16 +536,19 @@ export function OrderDraft({
                     updateQuantity(line.lineItemId, event.target.value)
                   }
                 />
-                {(previewLine || Number(quantities[line.lineItemId]) === line.quantity) && <p className="oe-item-total">
-                  {formatOrderEditMoney(previewLine?.totalCents ?? line.totalCents, order.currency)}
-                  <span>item total</span>
-                </p>}
+              </div>
+                <p className="oe-item-total" aria-label={`Line total for ${line.title}`}>
+                  {previewLine || Number(quantities[line.lineItemId]) === line.quantity
+                    ? formatOrderEditMoney(previewLine?.totalCents ?? line.totalCents, order.currency)
+                    : <span aria-label="Line total updating">—</span>}
+                </p>
               </div>
             </div>
           ); })}
           {additions.map((item, index) => {
             const group = previewLineGroups.get(`variant:${item.variant.variantId}`);
             const previewLine = group?.quantity === Number(item.quantity) ? group : null;
+            const unitNetCents = previewLine ? exactOrderEditUnitPrice(previewLine.totalCents, previewLine.quantity) : null;
             return (
             <div
               key={item.variant.variantId}
@@ -562,25 +556,33 @@ export function OrderDraft({
             >
               <div className="min-w-0 flex-1">
                 <p className="text-sm font-medium">
-                  {item.variant.title} <Badge variant="outline">Added</Badge>
+                  {item.variant.title} <Badge variant="outline" className="oe-added-pill">Added</Badge>
                 </p>
                 <p className="text-xs text-muted-foreground">
                   {[item.variant.variantTitle, item.variant.sku]
                     .filter(Boolean)
                     .join(" · ")}
                 </p>
-                <div className="mt-2 flex flex-wrap items-center gap-2">
-                  <MemberProductPrice
-                    priceCents={item.variant.priceCents}
-                    retailPriceCents={item.variant.retailPriceCents}
-                    plan={item.plan}
-                    showSavings
-                  />
-                  <span className="text-xs text-muted-foreground">
-                    each · before coupons and rewards
-                  </span>
-                </div>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="ghost"
+                  className="oe-item-remove"
+                  disabled={!mutable}
+                  onClick={() => {
+                    command.current = null;
+                    setAdditions((current) =>
+                      current.filter(
+                        (row) => row.variant.variantId !== item.variant.variantId,
+                      ),
+                    );
+                  }}
+                >
+                  Remove
+                </Button>
               </div>
+              <div className="oe-line-pricing">
+              <OrderEditUnitPrice cents={unitNetCents} currency={order.currency} />
               <div className="oe-item-quantity">
               <Label htmlFor={`added-${item.variant.variantId}`}>Quantity</Label>
               <Input
@@ -602,25 +604,10 @@ export function OrderDraft({
                   );
                 }}
               />
-              <Button
-                type="button"
-                size="sm"
-                variant="ghost"
-                disabled={!mutable}
-                onClick={() => {
-                  command.current = null;
-                  setAdditions((current) =>
-                    current.filter(
-                      (row) => row.variant.variantId !== item.variant.variantId,
-                    ),
-                  );
-                }}
-              >
-                Remove
-              </Button>
-              {previewLine && <p className="oe-item-total">
-                {formatOrderEditMoney(previewLine.totalCents, order.currency)}<span>item total</span>
-              </p>}
+              </div>
+              <p className="oe-item-total" aria-label={`Line total for added ${item.variant.title}`}>
+                {previewLine ? formatOrderEditMoney(previewLine.totalCents, order.currency) : <span aria-label="Line total updating">—</span>}
+              </p>
               </div>
             </div>
           ); })}
