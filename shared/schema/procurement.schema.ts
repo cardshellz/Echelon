@@ -852,6 +852,13 @@ export const poEmailOutbox = procurementSchema.table("po_email_outbox", {
   subject: varchar("subject", { length: 500 }).notNull(),
   htmlBody: text("html_body").notNull(),
   textBody: text("text_body"),
+  // Content verification only; legacy/completed snapshots retain null metadata.
+  documentContractVersion: integer("document_contract_version"),
+  documentHash: varchar("document_hash", { length: 64 }),
+  documentSourceRevision: varchar("document_source_revision", { length: 64 }),
+  documentPurpose: varchar("document_purpose", { length: 32 }),
+  documentHoldReason: varchar("document_hold_reason", { length: 100 }),
+  documentHeldAt: timestamp("document_held_at", { withTimezone: true }),
   messageId: varchar("message_id", { length: 255 }).notNull(),
   attemptCount: integer("attempt_count").default(0).notNull(),
   maxAttempts: integer("max_attempts").default(10).notNull(),

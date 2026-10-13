@@ -2,13 +2,14 @@ import { randomUUID } from "crypto";
 import { pool } from "../../db";
 import { sendEmail, type EmailDeliveryResult } from "../notifications/email.service";
 import type { PoEmailOutboxDbPool } from "./po-email-outbox.service";
+import { inspectPoEmailDocument, type PoEmailDocumentMetadata, type PoEmailDocumentHoldReason } from "./po-email-document-contract";
 
 const DEFAULT_INTERVAL_MS = 15_000;
 const DEFAULT_BATCH_SIZE = 10;
 const DEFAULT_LEASE_SECONDS = 120;
 const LOG_PREFIX = "[PO Email Outbox]";
 
-interface ClaimedDelivery {
+interface ClaimedDelivery extends PoEmailDocumentMetadata {
   id: number;
   purchaseOrderId: number;
   toEmail: string;
@@ -87,7 +88,7 @@ export async function processPoEmailOutboxBatch(dependencies: {
   batchSize?: number;
   leaseSeconds?: number;
   now?: Date;
-} = {}): Promise<{ claimed: number; sent: number; retried: number; deadLettered: number }> {
+} = {}): Promise<{ claimed: number; sent: number; retried: number; deadLettered: number; held: number }> {
   const dbPool = dependencies.dbPool ?? pool;
   const deliver = dependencies.deliver ?? sendEmail;
   const batchSize = dependencies.batchSize
@@ -99,8 +100,17 @@ export async function processPoEmailOutboxBatch(dependencies: {
   let sent = 0;
   let retried = 0;
   let deadLettered = 0;
+  let held = 0;
 
   await Promise.all(claimed.map(async (delivery) => {
+    // Recheck the exact persisted bytes immediately before the external call.
+    // A future/old worker or test adapter must not turn an unsupported snapshot into a send.
+    const holdReason = inspectPoEmailDocument({ ...delivery, html: delivery.htmlBody });
+    if (holdReason) {
+      await holdClaimedDocument(dbPool, delivery, holdReason, now);
+      held += 1;
+      return;
+    }
     try {
       const result = await deliver({
         to: delivery.toEmail,
@@ -125,15 +135,17 @@ export async function processPoEmailOutboxBatch(dependencies: {
       sent,
       retried,
       deadLettered,
+      held,
     });
   }
-  return { claimed: claimed.length, sent, retried, deadLettered };
+  return { claimed: claimed.length, sent, retried, deadLettered, held };
 }
 
 export async function claimDeliveries(
   dbPool: PoEmailOutboxDbPool,
   input: { batchSize: number; leaseSeconds: number; now: Date },
 ): Promise<ClaimedDelivery[]> {
+  await holdUnsupportedDocuments(dbPool, input.now);
   await dbPool.query(
     `UPDATE procurement.po_email_outbox
      SET status = 'dead_letter',
@@ -145,7 +157,8 @@ export async function claimDeliveries(
          updated_at = $1
      WHERE status = 'processing'
        AND lease_expires_at <= $1
-       AND attempt_count >= max_attempts`,
+       AND attempt_count >= max_attempts
+       AND document_hold_reason IS NULL`,
     [input.now],
   );
 
@@ -160,6 +173,9 @@ export async function claimDeliveries(
          (status = 'processing' AND lease_expires_at <= $1)
        )
          AND attempt_count < max_attempts
+         AND document_hold_reason IS NULL
+         AND procurement.po_email_document_is_verified(document_contract_version, document_hash,
+           document_source_revision, document_purpose, html_body, document_hold_reason)
        ORDER BY next_attempt_at ASC, id ASC
        FOR UPDATE SKIP LOCKED
        LIMIT $2
@@ -184,10 +200,77 @@ export async function claimDeliveries(
        outbox.attempt_count AS "attemptCount",
        outbox.max_attempts AS "maxAttempts",
        outbox.lease_token AS "leaseToken",
-       outbox.created_by AS "createdBy"`,
+       outbox.created_by AS "createdBy",
+       outbox.document_contract_version AS "contractVersion",
+       outbox.document_hash AS "documentHash",
+       outbox.document_source_revision AS "sourceRevision",
+       outbox.document_purpose AS "documentPurpose",
+       outbox.document_hold_reason AS "documentHoldReason"`,
     [input.now, input.batchSize, leaseToken, input.leaseSeconds],
   );
   return result.rows as unknown as ClaimedDelivery[];
+}
+
+async function holdUnsupportedDocuments(dbPool: PoEmailOutboxDbPool, now: Date): Promise<void> {
+  // Preserve status, attempts and transport evidence. A failed legacy delivery is
+  // still failed; the additional hold makes its unsafe snapshot non-replayable.
+  const result = await dbPool.query(
+    `UPDATE procurement.po_email_outbox
+     SET document_hold_reason = CASE
+           WHEN document_contract_version IS NULL THEN 'LEGACY_DOCUMENT_UNVERIFIED'
+           WHEN document_contract_version <> 1 THEN 'DOCUMENT_CONTRACT_UNSUPPORTED'
+           WHEN document_purpose <> 'current_copy' THEN 'DOCUMENT_PURPOSE_NOT_ISSUABLE'
+           ELSE 'DOCUMENT_HASH_MISMATCH'
+         END,
+         document_held_at = $1
+     WHERE status IN ('queued', 'processing', 'dead_letter')
+       AND document_hold_reason IS NULL
+       AND NOT procurement.po_email_document_is_verified(document_contract_version, document_hash,
+         document_source_revision, document_purpose, html_body, document_hold_reason)
+     RETURNING id AS "deliveryId", purchase_order_id AS "poId",
+       document_hold_reason AS "newHoldReason", document_held_at AS "heldAt"`,
+    [now],
+  );
+  // Emit one bounded event per newly held row, never a saved snapshot or a
+  // potentially unbounded aggregate payload. Unchanged holds return no rows.
+  for (const row of result.rows) logDocumentHold(row as unknown as DocumentHoldAuditRow);
+}
+
+async function holdClaimedDocument(
+  dbPool: PoEmailOutboxDbPool, delivery: ClaimedDelivery,
+  reason: PoEmailDocumentHoldReason, now: Date,
+): Promise<void> {
+  const result = await dbPool.query(
+    `UPDATE procurement.po_email_outbox
+     SET document_hold_reason = $3, document_held_at = $4
+     WHERE id = $1 AND status = 'processing' AND lease_token = $2
+       AND document_hold_reason IS NULL
+     RETURNING id AS "deliveryId", purchase_order_id AS "poId",
+       document_hold_reason AS "newHoldReason", document_held_at AS "heldAt"`,
+    [delivery.id, delivery.leaseToken, reason, now],
+  );
+  if (result.rowCount !== 1) throw new Error(`Delivery ${delivery.id} lost its lease while recording a document hold`);
+  logDocumentHold(result.rows[0] as unknown as DocumentHoldAuditRow);
+}
+
+interface DocumentHoldAuditRow {
+  deliveryId: number;
+  poId: number;
+  newHoldReason: string;
+  heldAt: Date;
+}
+
+function logDocumentHold(row: DocumentHoldAuditRow): void {
+  console.warn(JSON.stringify({
+    event: "po_email_document_hold_applied",
+    actorType: "system",
+    actorId: "po_email_outbox_worker",
+    deliveryId: row.deliveryId,
+    poId: row.poId,
+    previousHold: null,
+    newHoldReason: row.newHoldReason,
+    heldAt: row.heldAt.toISOString(),
+  }));
 }
 
 async function markDeliverySent(
@@ -235,7 +318,7 @@ async function markDeliverySent(
       [
         delivery.purchaseOrderId,
         delivery.createdBy,
-        `Email ${partiallySent ? "partially accepted" : "delivered"} to ${delivery.toEmail}${delivery.ccEmail ? `, cc: ${delivery.ccEmail}` : ""} (delivery #${delivery.id})${deliveryWarning ? `; ${deliveryWarning}` : ""}`,
+        `Email ${partiallySent ? "partially accepted by provider" : "accepted by provider"} to ${delivery.toEmail}${delivery.ccEmail ? `, cc: ${delivery.ccEmail}` : ""} (delivery #${delivery.id})${deliveryWarning ? `; ${deliveryWarning}` : ""}`,
       ],
     );
     await client.query("COMMIT");

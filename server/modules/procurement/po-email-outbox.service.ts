@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "crypto";
 import { pool } from "../../db";
 import { buildPurchaseOrderEmail } from "../notifications/email.service";
+import { inspectPoEmailDocument, type PoEmailDocumentMetadata } from "./po-email-document-contract";
 
 export type PoEmailDeliveryStatus = "queued" | "processing" | "sent" | "partially_sent" | "dead_letter";
 
@@ -19,7 +20,8 @@ export interface PoEmailOutboxDbPool {
   connect(): Promise<PoEmailOutboxDbClient>;
 }
 
-export interface PoEmailDelivery {
+export interface PoEmailDelivery extends PoEmailDocumentMetadata {
+  documentHeldAt: Date | null;
   id: number;
   purchaseOrderId: number;
   status: PoEmailDeliveryStatus;
@@ -76,7 +78,13 @@ const PUBLIC_COLUMNS = `
   dead_lettered_at AS "deadLetteredAt",
   replay_of_id AS "replayOfId",
   created_at AS "createdAt",
-  updated_at AS "updatedAt"
+  updated_at AS "updatedAt",
+  document_contract_version AS "contractVersion",
+  document_hash AS "documentHash",
+  document_source_revision AS "sourceRevision",
+  document_purpose AS "documentPurpose",
+  document_hold_reason AS "documentHoldReason",
+  document_held_at AS "documentHeldAt"
 `;
 
 export async function enqueuePurchaseOrderEmail(
@@ -108,7 +116,15 @@ export async function enqueuePurchaseOrderEmail(
       poId: input.purchaseOrderId,
       message: normalized.message ?? undefined,
     });
+    assertVerifiedSnapshot(snapshot);
   } catch (error) {
+    const rejectionCode = error !== null && typeof error === "object" && "code" in error && typeof error.code === "string"
+      ? error.code : "PURCHASE_ORDER_DOCUMENT_BUILD_FAILED";
+    console.warn("[PO Email Outbox] Enqueue rejected", {
+      code: rejectionCode,
+      purchaseOrderId: input.purchaseOrderId,
+      actorId: input.createdBy ?? null,
+    });
     if (error instanceof Error && error.message === "Purchase order not found") {
       throw new PoEmailOutboxError(error.message, 404, "PURCHASE_ORDER_NOT_FOUND");
     }
@@ -119,8 +135,9 @@ export async function enqueuePurchaseOrderEmail(
     `INSERT INTO procurement.po_email_outbox (
        purchase_order_id, idempotency_key, request_hash, status,
        to_email, cc_email, subject, html_body, text_body, message_id,
-       created_by
-     ) VALUES ($1, $2, $3, 'queued', $4, $5, $6, $7, $8, $9, $10)
+       created_by, document_contract_version, document_hash,
+       document_source_revision, document_purpose
+     ) VALUES ($1, $2, $3, 'queued', $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
      ON CONFLICT (purchase_order_id, idempotency_key) DO NOTHING
      RETURNING ${PUBLIC_COLUMNS}`,
     [
@@ -134,6 +151,10 @@ export async function enqueuePurchaseOrderEmail(
       snapshot.text,
       messageId,
       input.createdBy ?? null,
+      snapshot.contractVersion,
+      snapshot.documentHash,
+      snapshot.sourceRevision,
+      snapshot.documentPurpose,
     ],
   );
   if (inserted.rows[0]) {
@@ -172,7 +193,7 @@ export async function replayDeadLetterPurchaseOrderEmail(input: {
 }): Promise<{ delivery: PoEmailDelivery; replayed: boolean }> {
   const dbPool = input.dbPool ?? pool;
   const sourceResult = await dbPool.query(
-    `SELECT id, status
+    `SELECT ${PUBLIC_COLUMNS}, html_body AS "html"
      FROM procurement.po_email_outbox
      WHERE id = $1 AND purchase_order_id = $2`,
     [input.deliveryId, input.purchaseOrderId],
@@ -189,6 +210,8 @@ export async function replayDeadLetterPurchaseOrderEmail(input: {
     );
   }
 
+  assertVerifiedSnapshot(source as unknown as PoEmailDocumentMetadata & { html: string });
+
   const requestHash = sha256(JSON.stringify({
     purchaseOrderId: input.purchaseOrderId,
     replayOfId: input.deliveryId,
@@ -203,14 +226,19 @@ export async function replayDeadLetterPurchaseOrderEmail(input: {
     `INSERT INTO procurement.po_email_outbox (
        purchase_order_id, idempotency_key, request_hash, status,
        to_email, cc_email, subject, html_body, text_body, message_id,
-       created_by, replay_of_id
+       created_by, replay_of_id, document_contract_version, document_hash,
+       document_source_revision, document_purpose
      )
      SELECT
        purchase_order_id, $3, $4, 'queued',
        to_email, cc_email, subject, html_body, text_body, $5,
-       $6, id
+       $6, id, document_contract_version, document_hash,
+       document_source_revision, document_purpose
      FROM procurement.po_email_outbox
      WHERE id = $1 AND purchase_order_id = $2 AND status = 'dead_letter'
+       AND document_hold_reason IS NULL
+       AND procurement.po_email_document_is_verified(document_contract_version, document_hash,
+         document_source_revision, document_purpose, html_body, document_hold_reason)
      ON CONFLICT (purchase_order_id, idempotency_key) DO NOTHING
      RETURNING ${PUBLIC_COLUMNS}`,
     [
@@ -228,10 +256,34 @@ export async function replayDeadLetterPurchaseOrderEmail(input: {
 
   const concurrent = await findByIntent(dbPool, input.purchaseOrderId, input.idempotencyKey);
   if (!concurrent) {
-    throw new Error("Email replay conflicted but the existing delivery could not be loaded");
+    // A document may have acquired a hold after the initial source read.
+    const refreshed = await dbPool.query(
+      `SELECT ${PUBLIC_COLUMNS}, html_body AS "html" FROM procurement.po_email_outbox
+       WHERE id = $1 AND purchase_order_id = $2`,
+      [input.deliveryId, input.purchaseOrderId],
+    );
+    if (refreshed.rows[0]) {
+      assertVerifiedSnapshot(refreshed.rows[0] as unknown as PoEmailDocumentMetadata & { html: string });
+    }
+    throw new PoEmailOutboxError(
+      "The saved delivery changed before replay could be queued. Reload its current state.",
+      409,
+      "DELIVERY_REPLAY_CONFLICT",
+    );
   }
   assertSameIntent(concurrent.requestHash, requestHash);
   return { delivery: concurrent.delivery, replayed: true };
+}
+
+function assertVerifiedSnapshot(snapshot: PoEmailDocumentMetadata & { html: string }): void {
+  const reason = inspectPoEmailDocument(snapshot);
+  if (reason) {
+    throw new PoEmailOutboxError(
+      "This document cannot be emailed or replayed. Review the current purchase order and create a new verified document.",
+      409,
+      reason === "DOCUMENT_PURPOSE_NOT_ISSUABLE" ? "PURCHASE_ORDER_DOCUMENT_NOT_ISSUABLE" : "PURCHASE_ORDER_DOCUMENT_UNVERIFIED",
+    );
+  }
 }
 
 async function findByIntent(

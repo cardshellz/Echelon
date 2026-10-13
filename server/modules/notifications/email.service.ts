@@ -12,11 +12,10 @@
 
 import nodemailer from "nodemailer";
 import { renderPoHtml } from "../procurement/po-document";
-import { createPurchasingService } from "../procurement/purchasing.service";
-import { procurementStorage } from "../procurement";
-import { warehouseStorage } from "../warehouse";
-import { catalogStorage } from "../catalog";
-const storage = { ...procurementStorage, ...warehouseStorage, ...catalogStorage };
+import { createHash } from "node:crypto";
+import { z } from "zod";
+import { buildSupplierPoDocument, SupplierPoDocumentError } from "../procurement/supplier-po-document";
+import { loadSupplierPoDocumentSource } from "../procurement/supplier-po-document.repository";
 import { db } from "../../db";
 
 export function isSmtpConfigured(): boolean {
@@ -79,35 +78,31 @@ export interface PurchaseOrderEmailSnapshot {
   html: string;
   text: string;
   poNumber: string;
+  contractVersion: 1;
+  documentHash: string;
+  sourceRevision: string;
+  documentPurpose: "draft_preview" | "current_copy";
 }
+
+const purchaseOrderEmailInput = z.object({
+  poId: z.number().int().positive().max(2_147_483_647),
+  message: z.string().trim().max(10_000).optional(),
+}).strict();
 
 export async function buildPurchaseOrderEmail(opts: {
   poId: number;
   message?: string;
 }): Promise<PurchaseOrderEmailSnapshot> {
-  const purchasing = createPurchasingService(db, storage);
-  const po = await purchasing.getPurchaseOrderById(opts.poId);
-  if (!po) throw new Error("Purchase order not found");
+  const parsed = purchaseOrderEmailInput.safeParse(opts);
+  if (!parsed.success) throw new SupplierPoDocumentError("INVALID_EMAIL_REQUEST", "The supplier email request is invalid.", 400);
+  const document = buildSupplierPoDocument(await loadSupplierPoDocumentSource(db, parsed.data.poId));
+  if (document.purpose !== "current_copy") {
+    throw new SupplierPoDocumentError("PURCHASE_ORDER_DOCUMENT_NOT_ISSUABLE",
+      "This PO is a draft preview. Complete the purchasing approval workflow before emailing a supplier copy.");
+  }
+  let html = renderPoHtml(document);
 
-  const [lines, vendor, settings] = await Promise.all([
-    purchasing.getPurchaseOrderLines(opts.poId),
-    storage.getVendorById(po.vendorId),
-    storage.getAllSettings(),
-  ]);
-
-  let html = renderPoHtml({
-    po,
-    lines,
-    vendor,
-    companyName: settings.company_name ?? undefined,
-    companyAddress: settings.company_address ?? undefined,
-    companyCity: settings.company_city ?? undefined,
-    companyState: settings.company_state ?? undefined,
-    companyPostalCode: settings.company_postal_code ?? undefined,
-    companyCountry: settings.company_country ?? undefined,
-  });
-
-  const personalMessage = opts.message?.trim() ?? "";
+  const personalMessage = parsed.data.message ?? "";
   if (personalMessage) {
     const msgHtml = `<div style="font-family:-apple-system,Arial,sans-serif;font-size:14px;color:#111;margin-bottom:24px;padding:16px;background:#f9fafb;border:1px solid #e5e7eb;border-radius:6px;">
       <p style="white-space:pre-wrap;">${escHtml(personalMessage)}</p>
@@ -115,15 +110,22 @@ export async function buildPurchaseOrderEmail(opts: {
     html = html.replace("<body>", `<body>${msgHtml}`);
   }
 
-  const companyName = settings.company_name || "Your Company";
-  const subject = `Purchase Order ${po.poNumber} — ${companyName}`;
+  const companyName = document.company.name;
+  const subject = `Purchase Order ${document.poNumber} — revision ${document.revisionNumber} — ${companyName}`;
   const text = [
     personalMessage,
-    `Purchase Order ${po.poNumber} from ${companyName}.`,
+    `Purchase Order ${document.poNumber} from ${companyName}, revision ${document.revisionNumber}.`,
+    document.notice,
     "The complete purchase order is included in the HTML version of this email.",
   ].filter(Boolean).join("\n\n");
 
-  return { subject, html, text, poNumber: po.poNumber };
+  return {
+    subject, html, text, poNumber: document.poNumber,
+    contractVersion: document.contractVersion,
+    documentHash: createHash("sha256").update(html).digest("hex"),
+    sourceRevision: document.sourceRevision,
+    documentPurpose: document.purpose,
+  };
 }
 
 export async function sendPurchaseOrder(opts: {
