@@ -37,6 +37,7 @@ export function ListingFeedDetails({
   return (
     <div className="space-y-3 text-xs [overflow-wrap:anywhere]">
       <p className="text-sm font-medium">{listingTitle(row, lifecycle)}</p>
+      {row.missingOnWalmart && <p className="text-destructive">Walmart could not find this SKU. Listing and stock updates are stopped. Your Echelon product and inventory settings are retained. Use Recreate on Walmart to submit it again.</p>}
       <dl className="grid gap-x-6 gap-y-3 sm:grid-cols-3 [&_dt]:text-muted-foreground [&_dd]:mt-1">
         <div>
           <dt>Echelon variant</dt>
@@ -51,7 +52,7 @@ export function ListingFeedDetails({
         <div>
           <dt>Walmart status</dt>
           <dd>
-            {remote
+            {row.missingOnWalmart ? "Missing on Walmart" : remote
               ? `${remote.publishedStatus} · ${remote.lifecycleStatus}`
               : "Not reported in this account page"}
           </dd>
@@ -59,7 +60,7 @@ export function ListingFeedDetails({
         <div>
           <dt>{stockError ? "Last successful stock read" : "Walmart stock"}</dt>
           <dd>
-            {stock?.quantity != null
+            {!row.missingOnWalmart && stock?.quantity != null
               ? `${stock.quantity.toLocaleString()} selling units at the connected fulfillment center`
               : "Quantity unavailable"}
           </dd>

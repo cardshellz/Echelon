@@ -146,6 +146,7 @@ describe("PostgreSQL CI coverage and isolation", () => {
       "server/modules/dropship/__tests__/integration/dropship-ebay-category-rules.integration.test.ts",
       "server/modules/procurement/__tests__/integration/supplier-po-document.integration.test.ts",
       "server/modules/marketplace-listings/__tests__/integration/listing-lifecycle.integration.test.ts",
+      "server/modules/marketplace-listings/__tests__/integration/listing-presence.integration.test.ts",
       "server/modules/dropship/__tests__/integration/dropship-listing-setting-writes.integration.test.ts",
     ];
     const retiredInvoiceSuite = "server/modules/inventory/__tests__/integration/invoice-variance-cogs.integration.test.ts";

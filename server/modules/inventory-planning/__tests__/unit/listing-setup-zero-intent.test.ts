@@ -1,9 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
-  assertListingSetupZeroAdmission,
-  runWithListingSetupZeroAdmission,
-  validateListingSetupZeroIntent,
-} from "../../application/listing-setup-zero-intent";
+  assertListingSetupAdmission,
+  runWithListingSetupAdmission,
+  validateListingSetupIntent,
+  listingSetupRequestSchema,
+} from "../../application/listing-setup-intent";
 import { isQuantityProviderRequestPath } from "../../application/quantity-provider-request-evidence";
 
 const intent = () => ({
@@ -17,53 +18,53 @@ const intent = () => ({
   shipNodeId: "10002558022",
   items: [{ productVariantId: 101, sku: "PACK", quantity: 0 as const }],
 });
-describe("initial listing zero intent", () => {
-  it("requires exact immutable recreation evidence and never permits a positive setup quantity", () => {
+describe("initial listing inventory intent", () => {
+  it("requires immutable recreation evidence and prevents callers selecting their own quantity", () => {
     const recreation = { sourceOperationId: "00000000-0000-4000-8000-000000000001", sourceHash: "a".repeat(64), previousExternalProductId: "WPID-OLD" };
     const input = { ...intent(), items: [{ ...intent().items[0], recreation }] };
-    const validated = validateListingSetupZeroIntent(input);
+    const validated = validateListingSetupIntent(input);
     expect(Object.isFrozen(validated.items[0].recreation)).toBe(true);
     recreation.previousExternalProductId = "CHANGED";
     expect(validated.items[0].recreation?.previousExternalProductId).toBe("WPID-OLD");
-    expect(() => validateListingSetupZeroIntent({ ...input, items: [{ ...input.items[0], quantity: 1 }] })).toThrow();
-    expect(() => validateListingSetupZeroIntent({ ...intent(), items: [{ ...intent().items[0], recreation: true }] })).toThrow();
-    expect(() => validateListingSetupZeroIntent({ ...input, items: [{ ...input.items[0], recreation: { ...recreation, sourceHash: "not-proof" } }] })).toThrow();
+    expect(() => listingSetupRequestSchema.parse({ ...input, items: [{ ...input.items[0], quantity: 1 }] })).toThrow();
+    expect(() => validateListingSetupIntent({ ...intent(), items: [{ ...intent().items[0], recreation: true }] })).toThrow();
+    expect(() => validateListingSetupIntent({ ...input, items: [{ ...input.items[0], recreation: { ...recreation, sourceHash: "not-proof" } }] })).toThrow();
   });
   it("requires exact runtime owner proof; a correctly typed object is insufficient", async () => {
-    expect(() => assertListingSetupZeroAdmission(intent())).toThrow(
+    expect(() => assertListingSetupAdmission(intent())).toThrow(
       /inventory-owned/,
     );
-    await runWithListingSetupZeroAdmission(
-      validateListingSetupZeroIntent(intent()),
+    await runWithListingSetupAdmission(
+      validateListingSetupIntent(intent()),
       async () => {
-        expect(() => assertListingSetupZeroAdmission(intent())).not.toThrow();
+        expect(() => assertListingSetupAdmission(intent())).not.toThrow();
         expect(() =>
-          assertListingSetupZeroAdmission({
+          assertListingSetupAdmission({
             ...intent(),
             shipNodeId: "another-node",
           }),
         ).toThrow();
         expect(() =>
-          assertListingSetupZeroAdmission({
+          assertListingSetupAdmission({
             ...intent(),
             operationId: "another-operation",
           }),
         ).toThrow();
         expect(() =>
-          assertListingSetupZeroAdmission({
+          assertListingSetupAdmission({
             ...intent(),
             items: [{ productVariantId: 102, sku: "PACK", quantity: 0 }],
           }),
         ).toThrow();
       },
     );
-    expect(() => assertListingSetupZeroAdmission(intent())).toThrow();
+    expect(() => assertListingSetupAdmission(intent())).toThrow();
   });
-  it("rejects positive quantities, duplicates, unexpected fields and invalid identifiers", () => {
+  it("rejects invalid quantities, duplicates, unexpected fields and invalid identifiers", () => {
     for (const bad of [
       {
         ...intent(),
-        items: [{ productVariantId: 101, sku: "PACK", quantity: 1 }],
+        items: [{ productVariantId: 101, sku: "PACK", quantity: -1 }],
       },
       { ...intent(), items: [...intent().items, ...intent().items] },
       {
@@ -76,7 +77,16 @@ describe("initial listing zero intent", () => {
       { ...intent(), expectedTargetRevision: "0" },
       { ...intent(), quantity: 0 },
     ])
-      expect(() => validateListingSetupZeroIntent(bad)).toThrow();
+      expect(() => validateListingSetupIntent(bad)).toThrow();
+  });
+  it.each([0, 1, 2_147_483_647])("binds the exact inventory-owned quantity %s to transport admission", async quantity => {
+    const approved = validateListingSetupIntent({ ...intent(), items: [{ ...intent().items[0], quantity }] });
+    await runWithListingSetupAdmission(approved, async () => {
+      expect(() => assertListingSetupAdmission(approved)).not.toThrow();
+      expect(() => assertListingSetupAdmission({ ...approved, items: [{ ...approved.items[0], quantity: quantity === 0 ? 1 : 0 }] })).toThrow();
+    });
+    for (const invalid of [-1, 1.5, 2_147_483_648, NaN, Infinity])
+      expect(() => validateListingSetupIntent({ ...intent(), items: [{ ...intent().items[0], quantity: invalid }] })).toThrow();
   });
   it("sorts a detached immutable intent without mutating caller data", () => {
     const input = {
@@ -86,7 +96,7 @@ describe("initial listing zero intent", () => {
         ...intent().items,
       ],
     };
-    const validated = validateListingSetupZeroIntent(input);
+    const validated = validateListingSetupIntent(input);
     expect(input.items.map((row) => row.productVariantId)).toEqual([102, 101]);
     expect(validated.items.map((row) => row.productVariantId)).toEqual([
       101, 102,
@@ -98,11 +108,11 @@ describe("initial listing zero intent", () => {
   it("rejects nested owners and keeps concurrent scopes isolated", async () => {
     await Promise.all(
       [intent(), { ...intent(), operationId: "two" }].map((input) =>
-        runWithListingSetupZeroAdmission(input, async () => {
+        runWithListingSetupAdmission(input, async () => {
           await Promise.resolve();
-          expect(() => assertListingSetupZeroAdmission(input)).not.toThrow();
+          expect(() => assertListingSetupAdmission(input)).not.toThrow();
           expect(() =>
-            runWithListingSetupZeroAdmission(input, async () => undefined),
+            runWithListingSetupAdmission(input, async () => undefined),
           ).toThrow(/nested/);
         }),
       ),

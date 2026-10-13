@@ -106,8 +106,8 @@ function setup(snapshot = publicationSnapshot()) {
     inspect: vi.fn<ListingPublicationDependencies["inventory"]["inspect"]>(
       async () => structuredClone(snapshot.review.inventory),
     ),
-    submitZero: vi.fn<
-      ListingPublicationDependencies["inventory"]["submitZero"]
+    submitInitialStock: vi.fn<
+      ListingPublicationDependencies["inventory"]["submitInitialStock"]
     >(async (account, operationId, items, _review, submit) =>
       submit({
         operationId,
@@ -375,7 +375,7 @@ describe("ListingPublicationService exact reviewed intent", () => {
       undefined,
     );
     expect(h.provider.submit).not.toHaveBeenCalled();
-    expect(h.inventory.submitZero).not.toHaveBeenCalled();
+    expect(h.inventory.submitInitialStock).not.toHaveBeenCalled();
     expect(snapshot.draft.items.map((item) => item.variantId)).toEqual([
       10, 11,
     ]);
@@ -442,7 +442,7 @@ describe("ListingPublicationService exact reviewed intent", () => {
   it("passes only the immutable selected scope to the worker and zero-stock admission", async () => {
     const h = setup(publicationSnapshot([11]));
     await h.run();
-    expect(h.inventory.submitZero).toHaveBeenCalledExactlyOnceWith(
+    expect(h.inventory.submitInitialStock).toHaveBeenCalledExactlyOnceWith(
       h.operation.snapshot.account,
       h.operation.progress.batches[0].correlationId,
       h.operation.snapshot.prepared,
@@ -450,7 +450,7 @@ describe("ListingPublicationService exact reviewed intent", () => {
       expect.any(Function),
       undefined,
     );
-    expect(h.provider.submit.mock.calls[0][1].zeroStockAdmission.items).toEqual(
+    expect(h.provider.submit.mock.calls[0][1].stockAdmission.items).toEqual(
       [{ productVariantId: 11, sku: "SKU-11", quantity: 0 }],
     );
     expect(
@@ -603,12 +603,12 @@ describe("ListingPublicationService asynchronous worker", () => {
     await h.run();
     expect(h.journals[0]).toBe("submitting");
     expect(h.store.saveProgress.mock.invocationCallOrder[0]).toBeLessThan(
-      h.inventory.submitZero.mock.invocationCallOrder[0],
+      h.inventory.submitInitialStock.mock.invocationCallOrder[0],
     );
     expect(h.provider.submit.mock.calls[0][1]).toMatchObject({
       operationId: testId(2),
       correlationId: testId(2),
-      zeroStockAdmission: {
+      stockAdmission: {
         items: [{ productVariantId: 10, sku: "SKU-10", quantity: 0 }],
       },
     });
@@ -632,14 +632,14 @@ describe("ListingPublicationService asynchronous worker", () => {
       .mockResolvedValueOnce({ submissionId: "feed-create" })
       .mockResolvedValueOnce({ submissionId: "feed-match" });
     await h.run();
-    expect(h.inventory.submitZero.mock.calls.map((call) => call[1])).toEqual([
+    expect(h.inventory.submitInitialStock.mock.calls.map((call) => call[1])).toEqual([
       testId(2),
       testId(12),
     ]);
     expect(
       h.provider.submit.mock.calls.map((call) => [
         call[1].operationId,
-        call[1].zeroStockAdmission.operationId,
+        call[1].stockAdmission.operationId,
       ]),
     ).toEqual([
       [testId(2), testId(2)],
@@ -711,7 +711,7 @@ describe("ListingPublicationService asynchronous worker", () => {
           (item) => item.state === "queued" && !item.canRetry,
         ),
       ).toBe(true);
-      expect(h.inventory.submitZero).not.toHaveBeenCalled();
+      expect(h.inventory.submitInitialStock).not.toHaveBeenCalled();
       expect(h.provider.submit).not.toHaveBeenCalled();
       expect(h.operation.leaseToken).toBeNull();
 
@@ -982,7 +982,7 @@ describe("ListingPublicationService asynchronous worker", () => {
     expect(h.operation.state).toBe("completed");
     expect(h.dependencies.listingUpdates.acceptedPrice).toHaveBeenCalledWith(h.operation.snapshot.account, "SKU-10", "WPID-SKU-10", new Date(h.operation.createdAt));
     expect(h.operation.progress.items[0].priceCents).toBe(1299);
-    expect(h.inventory.submitZero).toHaveBeenCalledOnce();
+    expect(h.inventory.submitInitialStock).toHaveBeenCalledOnce();
     expect(h.link).toHaveBeenCalledOnce();
   });
   it("still waits when provider price does not match the accepted maintenance price", async () => {
@@ -1034,7 +1034,7 @@ describe("ListingPublicationService asynchronous worker", () => {
   );
   it("does not quarantine a quantity admission denial before the provider callback was entered", async () => {
     const h = setup();
-    h.inventory.submitZero.mockRejectedValueOnce(
+    h.inventory.submitInitialStock.mockRejectedValueOnce(
       new Error("Admission scope is paused"),
     );
     await h.run();
@@ -1089,7 +1089,7 @@ describe("ListingPublicationService asynchronous worker", () => {
     expect(h.operation.state).toBe("needs_attention");
     expect(h.operation.progress.items[0].canRetry).toBe(true);
     expect(h.provider.submit).not.toHaveBeenCalled();
-    expect(h.inventory.submitZero).not.toHaveBeenCalled();
+    expect(h.inventory.submitInitialStock).not.toHaveBeenCalled();
   });
   it("does not overwrite progress after losing the worker lease", async () => {
     const h = setup();
@@ -1231,10 +1231,10 @@ describe("deleted Walmart listing recreation", () => {
   it("sends a full-item replacement through the quantity owner and relinks only its verified new product identity", async () => {
     const h = replacement();
     await h.run();
-    expect(h.inventory.submitZero).toHaveBeenCalledOnce();
+    expect(h.inventory.submitInitialStock).toHaveBeenCalledOnce();
     expect(h.provider.submit).toHaveBeenCalledWith(h.prior.snapshot.account, expect.objectContaining({
       items: [expect.objectContaining({ feedType: "MP_ITEM" })],
-      zeroStockAdmission: expect.objectContaining({ items: [{ productVariantId: 10, sku: "SKU-10", quantity: 0 }] }),
+      stockAdmission: expect.objectContaining({ items: [{ productVariantId: 10, sku: "SKU-10", quantity: 0 }] }),
     }));
     expect(h.linkRecreated).toHaveBeenCalledExactlyOnceWith(h.prior.snapshot.account, {
       sku: "SKU-10", productVariantId: 10, previousExternalProductId: "original-wpid", expectedExternalProductId: "WPID-SKU-10",
