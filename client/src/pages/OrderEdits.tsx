@@ -503,12 +503,15 @@ export function OrderDraft({
           aria-label="Editable order items"
         >
           {order.lines.map((line) => {
-            const unitNetCents = exactOrderEditUnitPrice(line.totalCents, line.quantity);
+            const originalUnitCents = exactOrderEditUnitPrice(line.totalCents, line.quantity);
             const previewGroup = line.variantId &&
               order.lines.filter(item => item.variantId === line.variantId).length === 1
               ? previewLineGroups.get(`variant:${line.variantId}`)
               : null;
             const previewLine = previewGroup?.quantity === Number(quantities[line.lineItemId]) ? previewGroup : null;
+            const displayedTotal = previewLine?.totalCents ?? line.totalCents;
+            const displayedQuantity = previewLine?.quantity ?? line.quantity;
+            const unitNetCents = exactOrderEditUnitPrice(displayedTotal, displayedQuantity);
             return (
             <div
               key={line.lineItemId}
@@ -520,10 +523,12 @@ export function OrderDraft({
                   {[line.variantTitle, line.sku].filter(Boolean).join(" · ")}
                 </p>
                 <p className="oe-item-price">
-                  {formatOrderEditMoney(unitNetCents ?? line.totalCents, order.currency)}{" "}
-                  <span>{unitNetCents === null ? "original line total" : line.quantity > 1 ? "avg. each" : "each"}</span>
+                  {formatOrderEditMoney(unitNetCents ?? displayedTotal, order.currency)}{" "}
+                  <span>{unitNetCents === null ? "line total" : displayedQuantity > 1 ? "avg. each" : "each"}
+                    {!previewLine && Number(quantities[line.lineItemId]) !== line.quantity ? " · original price" : ""}</span>
                 </p>
-                <p className="oe-item-original">Originally {line.quantity}</p>
+                <p className="oe-item-original">Originally {line.quantity}{previewLine && displayedQuantity !== line.quantity && originalUnitCents !== null
+                  ? ` at ${formatOrderEditMoney(originalUnitCents, order.currency)} each` : ""}</p>
               </div>
               <div className="oe-item-quantity">
                 <Label htmlFor={`line-${line.lineItemId}`} className="text-xs">
@@ -548,7 +553,10 @@ export function OrderDraft({
               </div>
             </div>
           ); })}
-          {additions.map((item, index) => (
+          {additions.map((item, index) => {
+            const group = previewLineGroups.get(`variant:${item.variant.variantId}`);
+            const previewLine = group?.quantity === Number(item.quantity) ? group : null;
+            return (
             <div
               key={item.variant.variantId}
               className="oe-edit-item oe-added-item"
@@ -611,9 +619,12 @@ export function OrderDraft({
               >
                 Remove
               </Button>
+              {previewLine && <p className="oe-item-total">
+                {formatOrderEditMoney(previewLine.totalCents, order.currency)}<span>item total</span>
+              </p>}
               </div>
             </div>
-          ))}
+          ); })}
         </div>
         <p className="text-xs text-muted-foreground">
           Set quantity to 0 to remove an item. Discounts, shipping and tax are
