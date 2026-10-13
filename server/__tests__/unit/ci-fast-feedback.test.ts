@@ -1,5 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { requireSuccessfulJobs } from "../../../scripts/ci/require-success.mjs";
@@ -38,6 +39,31 @@ function testFilesIn(directory: string, name: RegExp): string[] {
     .filter((file) => name.test(file))
     .map((file) => directory + file)
     .sort();
+}
+
+// Execute the aggregate's actual shell body, including its ordering of migration
+// validation, selection, and safe-skip checks. Git for Windows supplies Bash on
+// local Windows checkouts; hosted CI uses the same script with runner Bash.
+function runBrowserAggregate(jobText: string, evidence: Record<string, string>) {
+  const lines = jobText.split(/\r?\n/);
+  const start = lines.indexOf("        run: |");
+  expect(start).toBeGreaterThanOrEqual(0);
+  let end = start + 1;
+  while (end < lines.length && /^ {10}/.test(lines[end])) end++;
+  const script = lines.slice(start + 1, end).map((line) => line.slice(10)).join("\n");
+  let bash = "bash";
+  if (process.platform === "win32") {
+    const git = spawnSync("git", ["--exec-path"], { encoding: "utf8" });
+    expect(git.status).toBe(0);
+    bash = resolve(git.stdout.trim(), "../../../bin/bash.exe");
+    expect(existsSync(bash), "Git for Windows Bash is required for workflow contract tests").toBe(true);
+  }
+  return spawnSync(bash, ["--noprofile", "--norc", "-s"], {
+    input: script,
+    encoding: "utf8",
+    env: { ...process.env, ...evidence },
+    timeout: 10_000,
+  });
 }
 
 describe("parallel CI required-check aggregation", () => {
@@ -91,6 +117,87 @@ describe("parallel CI required-check aggregation", () => {
 
 describe("fast CI preserves coverage and required checks", () => {
   const workflow = source(".github/workflows/ci.yml");
+
+  it.each([
+    ["ci", "preflight"], ["procurement-navigation", "select"],
+    ["dropship-pricing", "select"], ["order-edits", "select"],
+    ["inventory-availability", "preflight"], ["returns-preview", "preflight"],
+  ])("validates migrations without installed dependencies in %s", (file, gateName) => {
+    const gate = job(source(".github/workflows/" + file + ".yml"), gateName);
+    const checkout = gate.indexOf("uses: actions/checkout@v4");
+    const migrationGuard = gate.indexOf("run: node scripts/migrations/check-migrations.mjs --ci");
+    expect(checkout).toBeGreaterThanOrEqual(0);
+    expect(migrationGuard).toBeGreaterThan(checkout);
+    expect(gate.slice(checkout, migrationGuard)).toContain("fetch-depth: 0");
+    expect(gate.slice(checkout, migrationGuard)).toContain("persist-credentials: false");
+    for (const setup of ["uses: actions/setup-node@", "run: npm ci", "playwright install", "services:"]) {
+      const setupPosition = gate.indexOf(setup);
+      if (setupPosition !== -1) expect(setupPosition, setup).toBeGreaterThan(migrationGuard);
+    }
+    expect(gate).not.toContain("continue-on-error:");
+  });
+
+  it.each(["procurement-navigation", "dropship-pricing", "order-edits"])(
+    "blocks %s browser setup after invalid migrations while preserving selector uncertainty coverage",
+    (file) => {
+      const browserWorkflow = source(".github/workflows/" + file + ".yml");
+      const select = job(browserWorkflow, "select");
+      expect(select).toContain("migrations: ${{ steps.migrations.outcome }}");
+      expect(select).toContain("- id: migrations");
+      const browser = job(browserWorkflow, "browser");
+      expect(browser).toContain("needs: select");
+      expect(browser).toContain("if: ${{ !cancelled() && needs.select.outputs.migrations == 'success' && (needs.select.result != 'success' || needs.select.outputs.run != 'false') }}");
+      const aggregate = job(browserWorkflow, "result");
+      expect(aggregate).toContain("needs: [select, browser]");
+      expect(aggregate).toContain("if: ${{ always() }}");
+      expect(aggregate).toContain("MIGRATIONS_RESULT: ${{ needs.select.outputs.migrations }}");
+      expect(aggregate).toContain("SELECT_RESULT: ${{ needs.select.result }}");
+      expect(aggregate).toContain("RUN_SUITE: ${{ needs.select.outputs.run }}");
+      expect(aggregate).toMatch(/(?:SHARD_RESULT|BROWSER_RESULT): \$\{\{ needs\.browser\.result \}\}/);
+      for (const [migrations, selection, run, shards, exitStatus] of [
+        ["success", "success", "true", "success", 0],
+        ["success", "success", "false", "skipped", 0],
+        ["failure", "failure", "", "skipped", 1],
+        ["failure", "success", "false", "skipped", 1],
+        ["skipped", "success", "false", "skipped", 1],
+        ["", "success", "false", "skipped", 1],
+        ["cancelled", "cancelled", "", "skipped", 1],
+        ["success", "failure", "false", "skipped", 1],
+        ["success", "success", "", "success", 1],
+        ["success", "success", "true", "failure", 1],
+        ["success", "success", "true", "cancelled", 1],
+        ["success", "success", "true", "skipped", 1],
+        ["success", "success", "false", "success", 1],
+      ] as const) {
+        const result = runBrowserAggregate(aggregate, {
+          MIGRATIONS_RESULT: migrations, SELECT_RESULT: selection, RUN_SUITE: run,
+          SHARD_RESULT: shards, BROWSER_RESULT: shards,
+        });
+        expect(result.error).toBeUndefined();
+        expect(result.status, JSON.stringify({ migrations, selection, run, shards })).toBe(exitStatus);
+        if (exitStatus === 1) expect(result.stdout).toContain("::error::");
+      }
+    },
+  );
+
+  it.each(["inventory-availability", "returns-preview"])("gates every %s shard and its aggregate on preflight", (file) => {
+    const browserWorkflow = source(".github/workflows/" + file + ".yml");
+    const preflight = job(browserWorkflow, "preflight");
+    expect(preflight).not.toMatch(/setup-node|npm ci|playwright install|services:/);
+    const shards = job(browserWorkflow, "browser-shard");
+    expect(shards).toContain("needs: preflight");
+    expect(shards.slice(0, shards.indexOf("    steps:"))).not.toContain("if:");
+    expect(shards).toContain("shard: [1, 2, 3, 4]");
+    const aggregate = job(browserWorkflow, "browser");
+    expect(aggregate).toContain("needs: [preflight, browser-shard]");
+    expect(aggregate).toContain("if: ${{ always() }}");
+    expect(aggregate).toContain("CI_NEEDS: ${{ toJSON(needs) }}");
+    expect(aggregate).toContain("node scripts/ci/require-success.mjs preflight browser-shard");
+    for (const result of ["failure", "cancelled", "skipped", "", undefined]) {
+      expect(() => requireSuccessfulJobs({ preflight: { result }, "browser-shard": success() }, ["preflight", "browser-shard"]))
+        .toThrow("CI jobs did not all succeed: preflight");
+    }
+  });
 
   it("runs cheap coverage and migration guards before expensive core jobs", () => {
     const preflight = job(workflow, "preflight");
@@ -234,10 +341,10 @@ describe("fast CI preserves coverage and required checks", () => {
     expect(shards).toContain("name: returns-preview-browser-results-${{ matrix.shard }}");
     const gate = job(returns, "browser");
     expect(gate).toContain("name: Returns preview browser journeys\n");
-    expect(gate).toContain("needs: [browser-shard]");
+    expect(gate).toContain("needs: [preflight, browser-shard]");
     expect(gate).toContain("if: ${{ always() }}");
     expect(gate).toContain("CI_NEEDS: ${{ toJSON(needs) }}");
-    expect(gate).toContain("node scripts/ci/require-success.mjs browser-shard");
+    expect(gate).toContain("node scripts/ci/require-success.mjs preflight browser-shard");
     expect(returns).not.toMatch(/continue-on-error:|paths(?:-ignore)?:/);
   });
 
