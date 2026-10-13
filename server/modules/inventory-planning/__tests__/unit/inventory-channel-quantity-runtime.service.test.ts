@@ -5,11 +5,11 @@ import {
   InventoryChannelQuantityRuntimeService,
 } from "../../application/inventory-channel-quantity-runtime.service";
 import type {
-  CanonicalInventoryPublicationIntent,
-  InventoryPublicationRouteResult,
+  CanonicalInventoryChannelQuantity,
+  InventoryChannelQuantityRouteResult,
 } from "../../application/inventory-availability-runtime-publication.service";
 
-function canonicalRow(overrides: Partial<CanonicalInventoryPublicationIntent> = {}): CanonicalInventoryPublicationIntent {
+function canonicalRow(overrides: Partial<CanonicalInventoryChannelQuantity> = {}): CanonicalInventoryChannelQuantity {
   return {
     publicationTargetId: 11,
     publicationTargetRevision: "7",
@@ -24,30 +24,46 @@ function canonicalRow(overrides: Partial<CanonicalInventoryPublicationIntent> = 
     providerKey: "ebay",
     providerScopeType: "account",
     externalScopeId: "account-1",
-    externalInventoryItemId: "SKU-101",
-    externalSku: "SKU-101",
     sourceWarehouseIds: [1],
     blockerCodes: [],
     ...overrides,
   };
 }
 
-function serviceWith<T>(result: InventoryPublicationRouteResult<T>) {
-  const publishProduct = vi.fn(async (_input, legacyReader) => {
+function serviceWith<T>(result: InventoryChannelQuantityRouteResult<T>) {
+  const readProductQuantities = vi.fn(async (_input: { productId: number; dryRun: true; triggeredBy: string }, legacyReader: () => Promise<T>) => {
     if (result.authority === "legacy") {
-      return { authority: "legacy", legacyResult: await legacyReader() } as InventoryPublicationRouteResult<T>;
+      return { authority: "legacy", legacyResult: await legacyReader() } as InventoryChannelQuantityRouteResult<T>;
     }
     return result;
   });
   return {
-    service: new InventoryChannelQuantityRuntimeService(() => ({ publishProduct, readDropshipProductQuantities: publishProduct } as never)),
-    publishProduct,
+    service: new InventoryChannelQuantityRuntimeService(() => ({ readProductQuantities } as never)),
+    readProductQuantities,
   };
 }
 
 describe("InventoryChannelQuantityRuntimeService", () => {
+  it.each(["channel_connection", "dropship_store_connection"] as const)("reports blocked %s quantities as unavailable instead of returning a false zero", async destinationKind => {
+    const row = canonicalRow({ destinationKind, desiredQuantity: "0", blockerCodes: ["CHANNEL_SOURCE_BINDING_MISSING"],
+      channelConnectionId: destinationKind === "channel_connection" ? 34 : null,
+      dropshipStoreConnectionId: destinationKind === "dropship_store_connection" ? 91 : null });
+    const { service } = serviceWith({ authority: "canonical", publication: { authority: "canonical", authorityRevision: "2",
+      activationRunId: "5", dryRun: true, productId: 10, rows: [row], enqueuedRows: 0, coalescedRows: 0,
+      enqueuedPublicationKeys: [], coalescedPublicationKeys: [] } });
+    await expect(service.readProduct({ productId: 10, channelId: 67, target: { destinationKind }, triggeredBy: "listing_read" }, async () => []))
+      .rejects.toMatchObject({ code: "CANONICAL_CHANNEL_QUANTITY_BLOCKED", context: { productVariantId: 101,
+        publicationTargetId: 11, blockerCodes: ["CHANNEL_SOURCE_BINDING_MISSING"] } });
+  });
+  it("preserves a genuine canonical zero when source and policy evidence are valid", async () => {
+    const { service } = serviceWith({ authority: "canonical", publication: { authority: "canonical", authorityRevision: "2",
+      activationRunId: "5", dryRun: true, productId: 10, rows: [canonicalRow({ desiredQuantity: "0" })], enqueuedRows: 0, coalescedRows: 0,
+      enqueuedPublicationKeys: [], coalescedPublicationKeys: [] } });
+    expect(await service.readProduct({ productId: 10, channelId: 67, target: { destinationKind: "channel_connection" }, triggeredBy: "listing_read" }, async () => []))
+      .toMatchObject({ rows: [{ productVariantId: 101, quantity: 0 }] });
+  });
   it("runs and validates the deployed legacy reader under the publication authority boundary", async () => {
-    const { service, publishProduct } = serviceWith({
+    const { service, readProductQuantities } = serviceWith({
       authority: "legacy",
       legacyResult: [] as readonly { productVariantId: number; quantity: number }[],
     });
@@ -69,7 +85,7 @@ describe("InventoryChannelQuantityRuntimeService", () => {
         { productVariantId: 102, quantity: 0, publicationTargetIds: [] },
       ],
     });
-    expect(publishProduct).toHaveBeenCalledWith(
+    expect(readProductQuantities).toHaveBeenCalledWith(
       { productId: 10, dryRun: true, triggeredBy: "test" },
       legacyReader,
     );

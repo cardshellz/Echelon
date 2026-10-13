@@ -13,7 +13,7 @@ import { EbayProductListingIntentControl } from "@/components/ebay/EbayProductLi
 import { EbayWithdrawalIssueCard } from "@/components/ebay/EbayWithdrawalIssueCard";
 import { ebayListingIssueSchema, type EbayListingIssue } from "@shared/types/ebay-listing-issue";
 import { resolveEbayListingIssue } from "@shared/ebay-listing-issue";
-import { listingSyncIssueFromError } from "@/lib/ebay-listing-issue";
+import { listingFeedIssueFromError, listingSyncIssueFromError } from "@/lib/ebay-listing-issue";
 import { z } from "zod";
 import React, { useState, useEffect, useCallback, useMemo } from "react";
 import { useQuery, useQueries, useMutation, useQueryClient } from "@tanstack/react-query";
@@ -174,7 +174,7 @@ interface FeedVariant {
   explicitlyExcluded: boolean;
   excludedByProduct: boolean;
   effectivelyListed: boolean;
-  inventoryQuantity: number;
+  inventoryQuantity: number | null;
   fulfillmentPolicyOverride: string | null;
   returnPolicyOverride: string | null;
   paymentPolicyOverride: string | null;
@@ -197,6 +197,7 @@ interface FeedItem {
   isListed: boolean;
   isExcluded: boolean;
   syncError: string | null;
+  inventoryIssue?: EbayListingIssue | null;
   externalListingId: string | null;
   externalListingIdentityConflict: boolean;
   variantCount: number;
@@ -209,7 +210,7 @@ interface FeedItem {
 }
 
 function listingNeedsAttention(item: FeedItem, job: z.infer<typeof ebayListingSyncJobSchema> | undefined, hasLocalIssue: boolean): boolean {
-  if (hasLocalIssue || (job && ["needs_attention", "awaiting_evidence"].includes(job.state))) return true;
+  if (item.inventoryIssue || hasLocalIssue || (job && ["needs_attention", "awaiting_evidence"].includes(job.state))) return true;
   if (job && ["queued", "running", "recovering"].includes(job.state)) return false;
   return item.status === "error" || item.status === "publication_incomplete";
 }
@@ -398,10 +399,11 @@ export default function EbayChannelPage() {
   });
 
   // ---- Listing feed ----
-  const { data: feedData, isLoading: feedLoading, error: feedError, refetch: refetchFeed } = useQuery<{ feed: FeedItem[]; total: number }>({
+  const { data: feedData, isLoading: feedLoading, isFetching: feedFetching, error: feedError, refetch: refetchFeed } = useQuery<{ feed: FeedItem[]; total: number }>({
     queryKey: ["/api/ebay/listing-feed"],
     enabled: !!config?.connected,
   });
+  const feedReadIssue = useMemo(() => feedError ? listingFeedIssueFromError(feedError) : null, [feedError]);
   const syncJobsQuery = useQuery({
     queryKey: ["/api/ebay/listings/sync-jobs"],
     queryFn: async () => z.array(ebayListingSyncJobSchema).parse(await (await apiRequest("GET", "/api/ebay/listings/sync-jobs")).json()),
@@ -1958,7 +1960,7 @@ export default function EbayChannelPage() {
                 variant="outline"
                 size="sm"
                 className="flex-1 sm:flex-none min-h-[44px] sm:min-h-0"
-                disabled={feedCounts.listed === 0 || reconcileMutation.isPending}
+                disabled={feedCounts.listed === 0 || !!feedError || reconcileMutation.isPending}
                 onClick={() => reconcileMutation.mutate()}
               >
                 {reconcileMutation.isPending ? (
@@ -1986,9 +1988,8 @@ export default function EbayChannelPage() {
             <p className="text-sm text-muted-foreground">Connect to eBay first.</p>
           ) : feedError ? (
             <div role="alert" className="space-y-2 rounded-md border border-red-300 p-3 text-sm">
-              <p className="font-medium">Listings could not be loaded</p>
-              <p>Your listings are not confirmed up to date. Reload the listing feed before starting another update.</p>
-              <Button variant="outline" size="sm" onClick={() => refetchFeed()}>Reload listings</Button>
+              {feedReadIssue && <EbayListingIssueCard issue={feedReadIssue} />}
+              <Button variant="outline" size="sm" disabled={feedFetching} onClick={() => refetchFeed()}>{feedFetching ? "Reloading listings…" : "Reload listings"}</Button>
             </div>
           ) : feedLoading ? (
             <div className="flex items-center gap-2 text-sm text-muted-foreground py-8">
@@ -2470,6 +2471,21 @@ export default function EbayChannelPage() {
                               : <EbayListingIssueCard issue={syncIssue} busy={syncingProductIds.has(item.id)} onAction={(issue) => handleIssueAction(issue, item.id, syncJob?.id)} />}
                           </TableCell>
                         </TableRow>}
+                        {item.inventoryIssue && <TableRow className="block sm:table-row">
+                          <TableCell colSpan={6} className="block sm:table-cell p-3">
+                            <section aria-label={`Inventory availability for ${item.name}`} className="space-y-2">
+                              <p className="text-sm font-medium">Current inventory availability</p>
+                              {syncIssue?.code === item.inventoryIssue.code && syncIssue.message === item.inventoryIssue.message
+                                && syncIssue.reference === item.inventoryIssue.reference
+                                && JSON.stringify(syncIssue.details) === JSON.stringify(item.inventoryIssue.details)
+                                ? <p className="text-sm">The current inventory read encountered the same issue described above. Reload inventory after correcting it.</p>
+                                : <EbayListingIssueCard issue={item.inventoryIssue}
+                                onAction={["review_mapping", "check_status"].includes(item.inventoryIssue.action.kind)
+                                  ? (issue) => handleIssueAction(issue, item.id, syncJob?.id) : undefined} />}
+                              <Button variant="outline" size="sm" disabled={feedFetching} onClick={() => refetchFeed()}>{feedFetching ? "Reloading inventory…" : "Reload inventory"}</Button>
+                            </section>
+                          </TableCell>
+                        </TableRow>}
                         {/* Expanded variant rows */}
                         {isExpanded && hasVariants && item.variants.map((variant) => (
                           <React.Fragment key={`v-${variant.id}`}>
@@ -2516,7 +2532,7 @@ export default function EbayChannelPage() {
                             </TableCell>
                             {/* Qty — desktop */}
                             <TableCell className="hidden sm:table-cell py-1.5">
-                              <span className="text-xs">{variant.inventoryQuantity} qty</span>
+                              <span className="text-xs">{variant.inventoryQuantity === null ? "Unavailable" : `${variant.inventoryQuantity} qty`}</span>
                             </TableCell>
                             {/* Policy toggle — desktop */}
                             <TableCell className="hidden sm:table-cell py-1.5">
@@ -2547,7 +2563,7 @@ export default function EbayChannelPage() {
                                   return <span>{formatPrice(variant.priceCents)}</span>;
                                 })()}
                                 <span>·</span>
-                                <span>{variant.inventoryQuantity} qty</span>
+                                <span>{variant.inventoryQuantity === null ? "Unavailable" : `${variant.inventoryQuantity} qty`}</span>
                                 <button
                                   className={`p-1 rounded hover:bg-muted min-w-[44px] min-h-[44px] flex items-center justify-center ${
                                     (variant.fulfillmentPolicyOverride || variant.returnPolicyOverride || variant.paymentPolicyOverride)

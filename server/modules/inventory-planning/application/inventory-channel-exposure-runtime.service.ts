@@ -149,7 +149,7 @@ export function planInventoryChannelExposureProduct(
   context: InventoryChannelExposureRuntimeContext,
   productId: number,
   logger: InventoryChannelExposureRuntimeLogger = defaultLogger,
-  purpose: "publication" | "deferred_dropship_quantity_read" = "publication",
+  purpose: "publication" | "channel_quantity_read" = "publication",
 ): InventoryChannelExposureRuntimePlan {
   const validatedProductId = positiveInteger(productId, "productId");
   if (context.authority === "legacy") {
@@ -207,7 +207,7 @@ export function planInventoryChannelExposureProduct(
     .map(target => deferredDropshipReadTarget(target, purpose))
     .filter((target) => target.selection
       ? target.selection.variants.some(variant => variant.action === "publish" || variant.action === "zero"
-        || (purpose === "deferred_dropship_quantity_read" && variant.action === "read_only"))
+        || (purpose === "channel_quantity_read" && variant.action === "read_only"))
       : target.membership?.mode !== "explicit" || target.membership.includedVariantIds.length > 0)
     .sort((left, right) => left.publicationTargetId - right.publicationTargetId)
     .map((target) => planTarget(context.supplySnapshot!, validatedProductId, variants, target, purpose));
@@ -263,7 +263,7 @@ function planTarget(
   productId: number,
   variants: SupplySnapshotDto["variants"],
   target: ActiveInventoryPublicationTargetSnapshot,
-  purpose: "publication" | "deferred_dropship_quantity_read",
+  purpose: "publication" | "channel_quantity_read",
 ): PlannedTarget {
   const targetBlockers: RuntimeIssue[] = [];
   if (target.selection && target.selection.productId !== productId) {
@@ -271,7 +271,7 @@ function planTarget(
       "Listing selection belongs to another product.", { productId, selectionProductId: target.selection.productId });
   }
   const selectedIds = target.selection?.variants.filter(variant => variant.action === "publish" || variant.action === "zero"
-    || (purpose === "deferred_dropship_quantity_read" && variant.action === "read_only"))
+    || (purpose === "channel_quantity_read" && variant.action === "read_only"))
     .map(variant => variant.productVariantId);
   const { selected: selectedVariants, unavailableVariantIds } = selectPublicationVariants(
     variants, selectedIds ? { mode: "explicit", includedVariantIds: selectedIds }
@@ -385,10 +385,10 @@ function planTarget(
       ));
     }
     const mapping = mappings.get(variant.id) ?? null;
-    const deferredRead = purpose === "deferred_dropship_quantity_read"
-      && target.destinationKind === "dropship_store_connection"
-      && target.deferredDropshipQuantityVariantIds?.includes(variant.id) === true;
-    if (!mapping && !deferredRead) {
+    // Provider identity governs publication, not target-aware ATP calculation.
+    // Read plans remain explicitly non-publishable and retain every source,
+    // policy, hold and listing-selection guard below.
+    if (!mapping && purpose === "publication") {
       blockers.push(issue(
         "PUBLICATION_TARGET_VARIANT_MAPPING_MISSING",
         "The SKU has no active exact provider inventory identity for this publication target.",
@@ -465,7 +465,7 @@ function planTarget(
     target: {
       publicationTargetId: target.publicationTargetId,
       ...(target.selection ? { selection: target.selection } : {}),
-      ...(purpose === "deferred_dropship_quantity_read" ? { readOnly: true } : {}),
+      ...(purpose === "channel_quantity_read" ? { readOnly: true } : {}),
       publicationTargetRevision: target.publicationTargetRevision,
       destinationKind: target.destinationKind,
       channelId: target.channelId,
@@ -500,8 +500,8 @@ function planTarget(
 }
 
 function deferredDropshipReadTarget(target: ActiveInventoryPublicationTargetSnapshot,
-  purpose: "publication" | "deferred_dropship_quantity_read"): ActiveInventoryPublicationTargetSnapshot {
-  if (purpose !== "deferred_dropship_quantity_read" || target.destinationKind !== "dropship_store_connection"
+  purpose: "publication" | "channel_quantity_read"): ActiveInventoryPublicationTargetSnapshot {
+  if (purpose !== "channel_quantity_read" || target.destinationKind !== "dropship_store_connection"
     || target.membership?.mode !== "explicit" || !target.deferredDropshipQuantityVariantIds?.length) return target;
   return { ...target, membership: { mode: "explicit", includedVariantIds: uniqueNumbers([
     ...target.membership.includedVariantIds, ...target.deferredDropshipQuantityVariantIds,

@@ -50,7 +50,7 @@ export interface CanonicalInventoryPublicationEnqueueResult {
   coalescedPublicationKeys: string[];
 }
 
-/** A read result for a deferred Dropship listing is not a provider-write intent. */
+/** A channel quantity read has no provider inventory identity or write authority. */
 export type CanonicalInventoryChannelQuantity = Omit<CanonicalInventoryPublicationIntent,
   "externalInventoryItemId" | "externalSku">;
 export type InventoryChannelQuantityRouteResult<T> =
@@ -67,7 +67,7 @@ export interface InventoryAvailabilityRuntimePublicationContext {
   /** Retained identities for variants no longer eligible for positive stock. */
   listUnmanagedPublicationVariantIds?(productId: number): Promise<number[]>;
   planProduct(productId: number, channelId?: number,
-    purpose?: "publication" | "deferred_dropship_quantity_read"): Promise<InventoryChannelExposureRuntimePlan>;
+    purpose?: "publication" | "channel_quantity_read"): Promise<InventoryChannelExposureRuntimePlan>;
   loadActivePublicationTargets(input: {
     productId: number;
     productVariantIds: readonly number[];
@@ -148,9 +148,10 @@ export class AuthorityAwareInventoryPublicationService {
     return this.executor.execute(async (context) => context.authority);
   }
 
-  /** Selected Dropship candidates can preview canonical ATP before a listing
-   * mapping exists. This read never authorizes a provider write. */
-  async readDropshipProductQuantities<T>(input: {
+  /** Display and listing preparation use the same target-aware quantity planner
+   * without constructing publication intents or visiting retained-stock cleanup.
+   * An exact provider mapping is required later by the publication command. */
+  async readProductQuantities<T>(input: {
     productId: number; dryRun: true; triggeredBy: string;
   }, legacyReader: () => Promise<T>): Promise<InventoryChannelQuantityRouteResult<T>> {
     const productId = positiveInteger(input.productId, "productId");
@@ -160,14 +161,13 @@ export class AuthorityAwareInventoryPublicationService {
     return this.executor.execute(async context => {
       if (context.authority === "legacy") return { authority: "legacy", legacyResult: await legacyReader() };
       const activationRunId = canonicalActivationRunId(context);
-      const plan = await context.planProduct(productId, this.channelId, "deferred_dropship_quantity_read");
+      const plan = await context.planProduct(productId, this.channelId, "channel_quantity_read");
       if (plan.authority !== "canonical" || plan.productId !== productId
         || plan.authorityRevision !== context.authorityRevision || plan.activationRunId !== activationRunId) {
         throw publicationError("CANONICAL_CHANNEL_QUANTITY_PLAN_MISMATCH",
           "The channel quantity plan does not match its pinned authority and product.", context, { productId });
       }
       const rows: CanonicalInventoryChannelQuantity[] = plan.targets
-        .filter(target => target.destinationKind === "dropship_store_connection")
         .flatMap(target => target.rows.map(row => ({
           publicationTargetId: target.publicationTargetId,
           publicationTargetRevision: target.publicationTargetRevision,
