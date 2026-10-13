@@ -36,7 +36,7 @@ databaseTests.sequential("AP financial safeguards with actual0620 and status con
       CREATE UNIQUE INDEX ap_payment_allocations_pay_inv_idx ON procurement.ap_payment_allocations(ap_payment_id,vendor_invoice_id);
       CREATE UNIQUE INDEX vendor_invoice_po_links_inv_po_idx ON procurement.vendor_invoice_po_links(vendor_invoice_id,purchase_order_id)`);
     await pool.query(readFileSync("migrations/0620_vendor_invoice_unit_cost_mills_repair.sql", "utf8"));
-    await pool.query(readFileSync("migrations/0748_ap_payment_completed_status_guard.sql", "utf8"));
+    await pool.query(readFileSync("migrations/0751_ap_payment_completed_status_guard.sql", "utf8"));
     const guards = (await pool.query("SELECT count(*)::int AS count FROM pg_trigger WHERE tgrelid='procurement.vendor_invoice_lines'::regclass AND NOT tgisinternal AND tgenabled='O' AND tgname IN ('vendor_invoice_lines_require_mills_on_insert','vendor_invoice_lines_require_mills_on_financial_update')")).rows[0].count;
     expect(guards).toBe(2);
     if (process.env.DATABASE_URL || process.env.EXTERNAL_DATABASE_URL) throw new Error("Unexpected application database URL in probe process");
@@ -169,7 +169,7 @@ databaseTests.sequential("AP financial safeguards with actual0620 and status con
     await pool.query(`INSERT INTO procurement.ap_payments(id,payment_number,vendor_id,payment_date,payment_method,total_amount_cents,status) VALUES(90,'LEGACY',5,'2026-10-01','ach',2000,'scheduled');
       INSERT INTO procurement.ap_payment_allocations(ap_payment_id,vendor_invoice_id,applied_amount_cents) VALUES(90,71,2000);
       UPDATE procurement.vendor_invoices SET paid_amount_cents=2000,balance_cents=8000,status='partially_paid' WHERE id=71`);
-    await pool.query(readFileSync("migrations/0748_ap_payment_completed_status_guard.sql", "utf8"));
+    await pool.query(readFileSync("migrations/0751_ap_payment_completed_status_guard.sql", "utf8"));
     await expect(pool.query("INSERT INTO procurement.ap_payments(payment_number,vendor_id,payment_date,payment_method,total_amount_cents,status) VALUES('BAD',5,'2026-10-01','ach',1,'returned')")).rejects.toMatchObject({ code: "23514" });
     await expect(pay(1000)).rejects.toMatchObject({ details: { code: "AP_PAYMENT_STATUS_REVIEW_REQUIRED" } });
     await expect(service.voidPayment(90, "Synthetic change", actor)).rejects.toMatchObject({ details: { code: "AP_PAYMENT_STATUS_REVIEW_REQUIRED" } });
