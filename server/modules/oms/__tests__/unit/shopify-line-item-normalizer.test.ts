@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { normalizeShopifyLineItems } from "../../shopify-line-item-normalizer";
 
 describe("normalizeShopifyLineItems", () => {
-  it("keeps donation lines gross and moves misplaced Shopify allocations onto eligible products", () => {
+  it("keeps each line exactly the discount Shopify allocated, donations included", () => {
     const discountApplications = [
       {
         type: "manual",
@@ -52,26 +52,24 @@ describe("normalizeShopifyLineItems", () => {
     const product = lines.find((line) => line.sku === "ESS-TOP-STD-SLV-CLR-C1000");
     const donation = lines.find((line) => line.sku === "SHOPIFY-62621541925023");
 
-    // #57215 showed why this exists: Shopify can allocate the club workaround
-    // discount onto a donation even though the business rule says donations and
-    // gift cards are not discountable. OMS keeps the donation at $1.00 and moves
-    // the misplaced $0.22 to the shippable product so the order total remains
-    // $473.78 without turning the donation into $0.78.
+    // Shopify's allocation is commercial truth. Echelon used to move the
+    // donation's $0.22 onto the product (6b336d74); that override priced a free
+    // binder at -$1.00 on OMS order 1071127 (2026-10-12). Keep what Shopify sent;
+    // exclude donations from a discount in Shopify if they should not get one.
     expect(donation).toMatchObject({
-      paidPriceCents: 100,
-      totalCents: 100,
-      discountCents: 0,
-      planDiscountCents: 0,
+      paidPriceCents: 78,
+      totalCents: 78,
+      discountCents: 22,
+      planDiscountCents: 22,
       couponDiscountCents: 0,
       requiresShipping: false,
     });
 
     expect(product).toMatchObject({
-      discountCents: 12716,
-      planDiscountCents: 12716,
+      discountCents: 12694,
+      planDiscountCents: 12694,
       couponDiscountCents: 0,
-      totalCents: 47278,
-      paidPriceCents: 7880,
+      totalCents: 47300,
       requiresShipping: true,
     });
 
@@ -108,7 +106,7 @@ describe("normalizeShopifyLineItems", () => {
     });
   });
 
-  it("does not discount gift cards when Shopify sends an allocation on them", () => {
+  it("keeps a gift card's Shopify allocation on the gift card", () => {
     const lines = normalizeShopifyLineItems(
       [
         {
@@ -142,15 +140,14 @@ describe("normalizeShopifyLineItems", () => {
     );
 
     expect(lines.find((line) => line.sku === "GIFT-CARD")).toMatchObject({
-      paidPriceCents: 1000,
-      totalCents: 1000,
-      discountCents: 0,
+      paidPriceCents: 800,
+      totalCents: 800,
+      discountCents: 200,
     });
     expect(lines.find((line) => line.sku === "PHYSICAL-SKU")).toMatchObject({
-      paidPriceCents: 2300,
-      totalCents: 2300,
-      discountCents: 200,
-      couponDiscountCents: 200,
+      paidPriceCents: 2500,
+      totalCents: 2500,
+      discountCents: 0,
     });
   });
 
@@ -174,4 +171,18 @@ describe("normalizeShopifyLineItems", () => {
       });
     },
   );
+});
+
+describe("a rewards-paid donation with a free product (OMS order 1071127)", () => {
+  it("never prices a line below zero", () => {
+    const apps = [{ type: "discount_code", code: "SHELLZ-REWARDS" }];
+    const [donation, binder] = normalizeShopifyLineItems([
+      { id: 1, sku: "SHOPIFY-WWP", title: "Donation to Wounded Warrior Project", price: "1.00", quantity: 1,
+        discount_allocations: [{ amount: "1.00", discount_application_index: 0 }] },
+      { id: 2, sku: "SHLZ-BNDR-TOP-9PCK-BLK-P1", title: "Binder", price: "35.99", quantity: 1,
+        discount_allocations: [{ amount: "35.99", discount_application_index: 0 }] },
+    ], apps);
+    expect(donation).toMatchObject({ paidPriceCents: 0, totalCents: 0, couponDiscountCents: 100 });
+    expect(binder).toMatchObject({ paidPriceCents: 0, totalCents: 0, couponDiscountCents: 3599 });
+  });
 });
