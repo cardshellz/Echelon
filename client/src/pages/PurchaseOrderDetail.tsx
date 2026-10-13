@@ -1,6 +1,7 @@
 import { PoVarianceApproval, hasPendingPoVarianceApproval } from "@/features/purchasing/PoVarianceApproval";
 import { parseShipmentReceiptResolution, requiresReceiptUnitReview } from "@/lib/shipment-receipt-units";
 import React from "react";
+import { poEmailDeliveryPresentation } from "@/lib/po-email-delivery";
 import { PoQuantityAmendment } from '@/features/purchasing/PoQuantityAmendment';
 import { useAuth } from "@/lib/auth";
 import { createShipmentLineCommandClient, createShipmentLineRecoveryStore } from "@/lib/shipment-line-command";
@@ -921,6 +922,8 @@ function genPoEmailIdempotencyKey(): string {
 
 type PoEmailDelivery = {
   id: number;
+  documentHoldReason: string | null;
+  documentHeldAt: string | null;
   status: "queued" | "processing" | "sent" | "partially_sent" | "dead_letter";
   toEmail: string;
   ccEmail: string | null;
@@ -1041,6 +1044,33 @@ export default function PurchaseOrderDetail() {
   const [invoiceForm, setInvoiceForm] = useState({ invoiceNumber: "", amountDollars: "", invoiceDate: "", dueDate: "", notes: "" });
   const [docHtml, setDocHtml] = useState<string | null>(null);
   const [docLoading, setDocLoading] = useState(false);
+  const [docError, setDocError] = useState<string | null>(null);
+  const documentRequest = React.useRef(0);
+  useEffect(() => {
+    documentRequest.current += 1;
+    setDocHtml(null);
+    setDocError(null);
+    setDocLoading(false);
+    setShowDocDialog(false);
+  }, [poId]);
+
+  const loadDocumentPreview = async () => {
+    const request = ++documentRequest.current;
+    setDocLoading(true);
+    setDocHtml(null);
+    setDocError(null);
+    try {
+      const response = await fetch(`/api/purchase-orders/${poId}/document`);
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || "Unable to load the purchase order document.");
+      if (typeof result.html !== "string" || !result.html) throw new Error("The document response is incomplete. Please retry.");
+      if (request === documentRequest.current) setDocHtml(result.html);
+    } catch (error) {
+      if (request === documentRequest.current) setDocError(error instanceof Error ? error.message : "Unable to load the purchase order document.");
+    } finally {
+      if (request === documentRequest.current) setDocLoading(false);
+    }
+  };
   const [emailForm, setEmailForm] = useState({ toEmail: "", ccEmail: "", message: "" });
   const [emailSending, setEmailSending] = useState(false);
   const [emailIdempotencyKey, setEmailIdempotencyKey] = useState(genPoEmailIdempotencyKey);
@@ -1526,9 +1556,7 @@ export default function PurchaseOrderDetail() {
       // Open email dialog with vendor email pre-filled
       setEmailForm(f => ({ ...f, toEmail: updatedPo.vendor?.email || po?.vendor?.email || po?.vendorContactEmail || "" }));
       // Fetch doc HTML for the email
-      fetch(`/api/purchase-orders/${poId}/document`).then(r => r.json()).then(data => {
-        setDocHtml(data.html);
-      }).catch(() => {});
+      void loadDocumentPreview();
       setShowEmailDialog(true);
     },
     onError: (err: Error) => {
@@ -2112,9 +2140,11 @@ export default function PurchaseOrderDetail() {
       await queryClient.invalidateQueries({
         queryKey: [`/api/purchase-orders/${poId}/email-deliveries`],
       });
+      const presentation = poEmailDeliveryPresentation(data.delivery);
       toast({
-        title: data.replayed ? "Replay already queued" : "Replay queued",
-        description: `A new delivery attempt was queued from delivery #${deliveryId}`,
+        title: presentation.label,
+        description: presentation.description,
+        variant: presentation.needsAttention ? "destructive" : "default",
       });
     } catch (error) {
       toast({
@@ -2788,17 +2818,8 @@ export default function PurchaseOrderDetail() {
           )}
           {["approved", "sent", "acknowledged", "partially_received", "received", "closed"].includes(po.status) && (
             <Button variant="outline" onClick={async () => {
-              setDocLoading(true);
               setShowDocDialog(true);
-              try {
-                const res = await fetch(`/api/purchase-orders/${poId}/document`);
-                const data = await res.json();
-                setDocHtml(data.html);
-              } catch {
-                setDocHtml("<p>Failed to load document.</p>");
-              } finally {
-                setDocLoading(false);
-              }
+              await loadDocumentPreview();
             }} className="flex-1 sm:flex-none min-h-[44px]">
               <Printer className="h-4 w-4 mr-2" />
               View / Print
@@ -4838,21 +4859,24 @@ export default function PurchaseOrderDetail() {
       </Dialog>
 
       {/* ── PO Document Dialog ── */}
-      <Dialog open={showDocDialog} onOpenChange={(open) => { setShowDocDialog(open); if (!open) setDocHtml(null); }}>
+      <Dialog open={showDocDialog} onOpenChange={(open) => {
+        setShowDocDialog(open);
+        if (!open) { documentRequest.current += 1; setDocHtml(null); setDocError(null); setDocLoading(false); }
+      }}>
         <DialogContent className="max-w-4xl w-[95vw] h-[90vh] flex flex-col p-0">
-          <DialogHeader className="px-6 py-4 border-b flex-row items-center justify-between space-y-0">
-            <DialogTitle className="text-base font-semibold">
+          <DialogHeader className="px-6 py-4 border-b flex-col items-start gap-3 sm:flex-row sm:items-center sm:justify-between space-y-0">
+            <DialogTitle className="text-base font-semibold pr-8">
               Purchase Order — {po?.poNumber}
             </DialogTitle>
-            <div className="flex gap-2">
-              <Button size="sm" variant="outline" onClick={() => {
+            <div className="flex gap-2 self-end sm:self-auto">
+              <Button size="sm" variant="outline" disabled={docLoading || !docHtml || !!docError} onClick={() => {
                 setEmailForm(f => ({ ...f, toEmail: po?.vendor?.email || po?.vendorContactEmail || "" }));
                 setShowEmailDialog(true);
               }}>
                 <Mail className="h-4 w-4 mr-2" />
                 Email to Vendor
               </Button>
-              <Button size="sm" onClick={() => {
+              <Button size="sm" disabled={docLoading || !docHtml || !!docError} onClick={() => {
                 const iframe = document.getElementById("po-doc-iframe") as HTMLIFrameElement | null;
                 iframe?.contentWindow?.print();
               }}>
@@ -4865,6 +4889,12 @@ export default function PurchaseOrderDetail() {
             {docLoading ? (
               <div className="flex items-center justify-center h-full">
                 <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary" />
+              </div>
+            ) : docError ? (
+              <div role="alert" className="p-6 space-y-3">
+                <p className="font-medium">The supplier document could not be generated.</p>
+                <p className="text-sm text-muted-foreground">{docError}</p>
+                <Button variant="outline" onClick={() => void loadDocumentPreview()}>Retry document</Button>
               </div>
             ) : docHtml ? (
               <iframe
@@ -4929,13 +4959,7 @@ export default function PurchaseOrderDetail() {
                 <Label>Recent deliveries</Label>
                 <div className="max-h-36 space-y-2 overflow-y-auto">
                   {emailDeliveriesData!.deliveries.slice(0, 5).map((delivery) => {
-                    const statusLabel = {
-                      queued: "Queued",
-                      processing: "Sending",
-                      sent: "Delivered",
-                      partially_sent: "Partial delivery",
-                      dead_letter: "Needs attention",
-                    }[delivery.status];
+                    const presentation = poEmailDeliveryPresentation(delivery);
                     const hasActiveReplay = emailDeliveriesData!.deliveries.some(
                       (candidate) => candidate.replayOfId === delivery.id
                         && ["queued", "processing", "sent", "partially_sent"].includes(candidate.status),
@@ -4945,23 +4969,26 @@ export default function PurchaseOrderDetail() {
                         <div className="flex items-center justify-between gap-2">
                           <span className="truncate font-medium">{delivery.toEmail}</span>
                           <Badge
-                            variant={delivery.status === "dead_letter" ? "destructive" : delivery.status === "sent" ? "default" : "secondary"}
+                            variant={presentation.needsAttention ? "destructive" : delivery.status === "sent" ? "default" : "secondary"}
                             className={`shrink-0 text-[10px] ${delivery.status === "partially_sent" ? "border-amber-300 bg-amber-50 text-amber-800" : ""}`}
                           >
-                            {statusLabel}
+                            {presentation.label}
                           </Badge>
                         </div>
                         <div className="mt-1 text-muted-foreground">
                           {format(new Date(delivery.sentAt || delivery.createdAt), "MMM d, h:mm a")}
                           {delivery.attemptCount > 0 ? ` · attempt ${delivery.attemptCount}/${delivery.maxAttempts}` : ""}
                         </div>
+                        {delivery.documentHoldReason ? (
+                          <div className="mt-1 text-destructive" role="status">{presentation.description}</div>
+                        ) : null}
                         {delivery.status === "dead_letter" && delivery.lastErrorMessage ? (
                           <div className="mt-1 text-destructive">{delivery.lastErrorMessage}</div>
                         ) : null}
                         {delivery.status === "partially_sent" && delivery.lastErrorMessage ? (
                           <div className="mt-1 text-amber-700">{delivery.lastErrorMessage}</div>
                         ) : null}
-                        {delivery.status === "dead_letter" && !hasActiveReplay ? (
+                        {presentation.canReplay && !hasActiveReplay ? (
                           <Button
                             type="button"
                             size="sm"
@@ -5001,12 +5028,14 @@ export default function PurchaseOrderDetail() {
                     });
                     const data = await res.json();
                     if (!res.ok) throw new Error(data.error);
+                    const presentation = poEmailDeliveryPresentation(data.delivery);
                     toast({
-                      title: data.replayed ? "Email already queued" : "Email queued",
-                      description: `Reliable delivery to ${emailForm.toEmail} is now being processed`,
+                      title: presentation.label,
+                      description: presentation.description,
+                      variant: presentation.needsAttention ? "destructive" : "default",
                     });
                     setEmailIdempotencyKey(genPoEmailIdempotencyKey());
-                    setShowEmailDialog(false);
+                    if (!presentation.needsAttention) setShowEmailDialog(false);
                     queryClient.invalidateQueries({ queryKey: [`/api/purchase-orders/${poId}/email-deliveries`] });
                   } catch (err: any) {
                     toast({ title: "Failed to queue email", description: err.message, variant: "destructive" });
