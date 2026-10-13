@@ -135,7 +135,7 @@ function CustomerAccount({ root, api }: { root: HTMLElement; api: CustomerAccoun
   }
   return <QueryClientProvider client={client}>
     {error && <div className="csz-account-notice" role="status"><span>{error}</span><button type="button" className="csz-action" onClick={() => setAttempt(value => value + 1)}>Retry account tools</button></div>}
-    {choice && session && <AccountModal key={`${choice.kind}:${choice.omsOrderId}`} api={api} session={session} choice={choice} onClose={close} />}
+    {choice && session && <AccountModal key={`${choice.kind}:${choice.omsOrderId}:${choice.returnStatus?.authorizationId ?? "intake"}`} api={api} session={session} choice={choice} onClose={close} />}
     {session && <section className="csz-account-returns" aria-label="Your returns"><h2>Your returns</h2>
       {historyError && <p role="status">{historyError}</p>}
       {history?.returns.length === 0 && <p>You don’t have any returns yet.</p>}

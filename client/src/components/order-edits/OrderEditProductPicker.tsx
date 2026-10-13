@@ -35,18 +35,18 @@ type PickerProps = {
   expectedRevision: string;
   enabled: boolean;
   includedVariantIds: ReadonlySet<string>;
-  onSelectionNotice?: (message: string) => void;
   onAdd(
     variant: OrderEditCatalogVariant,
     plan: MemberPlanPresentation | null,
   ): void;
 };
+type CatalogBrowserProps = PickerProps & { onSelectionNotice(message: string): void };
 
 export function OrderEditProductPicker(props: PickerProps) {
   const [open, setOpen] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   return (
-    <Dialog open={open && props.enabled} onOpenChange={setOpen}>
+    <Dialog open={open && props.enabled} onOpenChange={value => { setOpen(value); setNotice(null); }}>
       <DialogTrigger asChild>
         <Button
           type="button"
@@ -83,7 +83,7 @@ export function OrderEditProductPicker(props: PickerProps) {
   );
 }
 
-function CatalogBrowser(props: PickerProps) {
+function CatalogBrowser(props: CatalogBrowserProps) {
   const id = useId();
   const [text, setText] = useState("");
   const [category, setCategory] = useState<string | null>(null);
@@ -281,7 +281,7 @@ function CatalogBrowser(props: PickerProps) {
 }
 
 function ProductOptions(
-  props: PickerProps & {
+  props: CatalogBrowserProps & {
     product: OrderEditCatalogProduct;
     expanded: boolean;
     onToggle(): void;
@@ -339,15 +339,11 @@ function ProductOptions(
 }
 
 function VariantOptions(
-  props: PickerProps & {
+  props: CatalogBrowserProps & {
     product: OrderEditCatalogProduct;
     onUnavailable(productId: string): void;
   },
 ) {
-  const [selectionNotice, setSelectionNotice] = useState<{
-    variantId: string;
-    message: string;
-  } | null>(null);
   const variants = useInfiniteQuery({
     queryKey: [
       ORDER_EDITS_API,
@@ -461,14 +457,9 @@ function VariantOptions(
                   variant.selectionFlow ?? "order_edit",
                 );
                 if (notice) {
-                  props.onSelectionNotice?.(notice);
-                  setSelectionNotice({
-                    variantId: variant.variantId,
-                    message: notice,
-                  });
+                  props.onSelectionNotice(notice);
                   return;
                 }
-                setSelectionNotice(null);
                 props.onAdd(variant, plan);
               }}
             >
@@ -481,11 +472,6 @@ function VariantOptions(
                 </>
               )}
             </Button>
-            {selectionNotice?.variantId === variant.variantId && (
-              <p role="alert" className="w-full rounded-md bg-muted p-3 text-sm">
-                {selectionNotice.message}
-              </p>
-            )}
           </div>
         );
       })}

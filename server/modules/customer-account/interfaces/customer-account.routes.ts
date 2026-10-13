@@ -23,6 +23,8 @@ export interface CustomerAccountRouteDependencies {
 const id = z.coerce.number().int().positive().safe();
 const empty = z.object({}).strict();
 const connectionQuery = z.object({ connectionId: id }).strict();
+type VerifiedAccountRequest = { input: CustomerAccountRequest; principal: CustomerReturnCustomerSession };
+const ACCOUNT_REQUESTS_PER_MINUTE = 90;
 
 /** A dedicated, gated storefront surface. It neither relaxes the existing staff
  * APIs nor enables the public returns portal. All URL parameters stay in JSON:
@@ -30,9 +32,19 @@ const connectionQuery = z.object({ connectionId: id }).strict();
 export function registerCustomerAccountRoutes(app: Express, dependencies: CustomerAccountRouteDependencies): void {
   const context = dependencies.context ?? createCustomerReturnCustomerAuth;
   app.use(CUSTOMER_ACCOUNT_PROXY_API, (_req, res, next) => { returnCustomerPrivateResponse(res); next(); });
-  app.use(CUSTOMER_ACCOUNT_PROXY_API, rateLimit({ windowMs: 60_000, limit: 90, standardHeaders: "draft-7", legacyHeaders: false,
-    message: { error: { code: "CUSTOMER_ACCOUNT_RATE_LIMITED", message: "Please wait a moment before trying again." } } }));
-  app.post(CUSTOMER_ACCOUNT_PROXY_API, async (req, res) => {
+  const limiter = rateLimit({ windowMs: 60_000, limit: ACCOUNT_REQUESTS_PER_MINUTE, standardHeaders: "draft-7", legacyHeaders: false,
+    // Shopify's transport IP is shared by shoppers. This key is used only
+    // after independently authenticating and approving the signed customer.
+    keyGenerator: (_req, res) => { const { principal } = res.locals.customerAccount as VerifiedAccountRequest; return `${principal.channelId}:${principal.externalCustomerId}`; },
+    message: { error: { code: "CUSTOMER_ACCOUNT_RATE_LIMITED", message: "Please wait a moment before trying again." } } });
+  const failed = (res: Response, error: unknown, path: string) => {
+    const known = error instanceof OrderEditError || error instanceof OrderEditProviderError;
+    const code = error instanceof z.ZodError ? "CUSTOMER_ACCOUNT_INVALID_REQUEST" : known || error instanceof CustomerReturnCustomerAccessError ? error.code : "CUSTOMER_ACCOUNT_REQUEST_FAILED";
+    dependencies.report({ code, path });
+    if (known) res.status(error instanceof OrderEditError ? error.status : 409).json({ error: { code: error.code, message: error.message } });
+    else returnCustomerError(res, error);
+  };
+  app.post(CUSTOMER_ACCOUNT_PROXY_API, async (req, res, next) => {
     let path = "/account";
     try {
       if (!req.is("application/json")) throw new CustomerReturnCustomerAccessError("CUSTOMER_ACCOUNT_INVALID_REQUEST", "The account request is invalid.", 400);
@@ -46,17 +58,19 @@ export function registerCustomerAccountRoutes(app: Express, dependencies: Custom
       if (input.path !== "/account/bootstrap" && input.sessionKey !== principal.sessionKey) {
         throw new CustomerReturnCustomerAccessError("CUSTOMER_ACCOUNT_IDENTITY_CHANGED", "Reload your account page before continuing.", 401);
       }
+      res.locals.customerAccount = { input, principal } satisfies VerifiedAccountRequest;
+      next();
+    } catch (error) { failed(res, error, path); }
+  }, limiter, async (_req, res) => {
+    const { input, principal } = res.locals.customerAccount as VerifiedAccountRequest;
+    try {
       const result = await dispatch(input, principal, dependencies.services(principal));
       if (result instanceof Uint8Array) {
         res.type("application/pdf").setHeader("Content-Disposition", 'attachment; filename="return-label.pdf"');
         res.send(Buffer.from(result));
       } else res.json(result);
     } catch (error) {
-      const known = error instanceof OrderEditError || error instanceof OrderEditProviderError;
-      const code = error instanceof z.ZodError ? "CUSTOMER_ACCOUNT_INVALID_REQUEST" : known || error instanceof CustomerReturnCustomerAccessError ? error.code : "CUSTOMER_ACCOUNT_REQUEST_FAILED";
-      dependencies.report({ code, path });
-      if (known) res.status(error instanceof OrderEditError ? error.status : 409).json({ error: { code: error.code, message: error.message } });
-      else returnCustomerError(res, error);
+      failed(res, error, input.path);
     }
   });
   app.use(CUSTOMER_ACCOUNT_PROXY_API, (_req, res) => unavailable(res));

@@ -419,7 +419,7 @@ export function OrderDraft({
         </p>}
         <div className="flex flex-wrap gap-2">
           <Badge variant="outline">Payment: {order.financialStatus}</Badge>
-          <Badge variant="outline">{audience === "customer" ? "Order" : "Warehouse"}: {order.warehouseStatus}</Badge>
+          <Badge variant="outline">{audience === "customer" ? (order.eligibility.editable ? "Ready to edit" : "Editing unavailable") : `Warehouse: ${order.warehouseStatus}`}</Badge>
         </div>
       </CardHeader>
       <CardContent className="space-y-5">
@@ -741,6 +741,12 @@ export function OrderEditOperationView({
   audience?: "staff" | "customer";
 }) {
   const copy = orderEditStatusCopy[operation.status];
+  const title = audience === "customer" && operation.status === "review_required" ? "Review needed" : copy.title;
+  const description = audience === "customer" && operation.status === "review_required"
+    ? "We need to check these changes. Contact us with the edit reference below."
+    : audience === "customer" && operation.status === "synchronizing"
+      ? "Your order is being updated. Check its status again shortly."
+      : copy.description;
   const payable = operation.balanceDueCents > 0;
   const refundable = operation.refundDueCents > 0;
   const paymentUrl =
@@ -817,14 +823,14 @@ export function OrderEditOperationView({
           <h2>Order {operation.orderNumber}</h2>
         </CardTitle>
         <div>
-          <Badge variant="outline">{copy.title}</Badge>
+          <Badge variant="outline">{title}</Badge>
         </div>
       </CardHeader>
       <CardContent className="space-y-4">
         <p className="text-sm text-muted-foreground">
           {operation.status === "review_required" && operation.canAbandon
             ? (audience === "customer" ? "We could not verify these changes. You can cancel this edit and try again, or contact us for help." : "This edit needs review. You can cancel this unsubmitted edit, or keep its reference for investigation.")
-            : copy.description}
+            : description}
         </p>
         {showCurrent && (
           <p className="text-xs text-muted-foreground">
