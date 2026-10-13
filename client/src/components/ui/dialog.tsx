@@ -12,6 +12,10 @@ const DialogPortal = DialogPrimitive.Portal
 
 const DialogClose = DialogPrimitive.Close
 
+// Embedded storefront editors provide their own styled portal root. Staff
+// pages keep Radix's document-body default.
+export const DialogPortalContainerContext = React.createContext<HTMLElement | undefined>(undefined)
+
 const DialogOverlay = React.forwardRef<
   React.ElementRef<typeof DialogPrimitive.Overlay>,
   React.ComponentPropsWithoutRef<typeof DialogPrimitive.Overlay>
@@ -31,7 +35,7 @@ const DialogContent = React.forwardRef<
   React.ElementRef<typeof DialogPrimitive.Content>,
   React.ComponentPropsWithoutRef<typeof DialogPrimitive.Content>
 >(({ className, children, ...props }, ref) => (
-  <DialogPortal>
+  <DialogPortal container={React.useContext(DialogPortalContainerContext)}>
     <DialogOverlay />
     <div className="fixed inset-0 z-50 overflow-y-auto flex items-center justify-center p-4 pointer-events-none">
       <DialogPrimitive.Content
