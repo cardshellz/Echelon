@@ -22,6 +22,7 @@ import {
   type ListingSettingWriteScope,
 } from "../../infrastructure/dropship-listing-setting-shared.repository";
 import {
+  MAX_BULK_REVISION_PAYLOAD_BYTES,
   readProductListingSettings,
   saveProductListingSettingWithClient,
   saveProductListingSettingsBulkWithClient,
@@ -44,8 +45,8 @@ const SCOPE: ListingSettingWriteScope = {
 const normalize = (sql: string) => sql.replace(/\s+/g, " ").trim();
 const VALUE_COLUMNS = PRODUCT_LISTING_SETTING_VALUE_COLUMNS.join(", ");
 const JSONB_COLUMNS = new Set(["ebay_category_path", "shelf_ids", "shelf_names"]);
-/** The bulk revision insert's payload bound (the writer's MAX_BULK_REVISION_PAYLOAD_BYTES). */
-const MAX_PAYLOAD_BYTES = 64 * 1024 * 1024;
+/** The bulk revision insert's payload bound, imported so the test cannot drift from the writer (plan PR 9, P9 (c)). */
+const MAX_PAYLOAD_BYTES = MAX_BULK_REVISION_PAYLOAD_BYTES;
 const REVISIONS_TABLE = "dropship.dropship_product_listing_setting_revisions";
 
 const SQL = {
@@ -563,8 +564,9 @@ describe("saveProductListingSettingsBulkWithClient", () => {
     const revisions = client.callTo("INSERT INTO dropship.dropship_product_listing_setting_revisions");
     expect(revisions.sql).toBe(SQL.bulkRevisionInsert);
     expect(revisions.params.slice(0, 7)).toEqual([VENDOR, STORE, 900, HASH, "vendor", "member-1", NOW]);
-    // 10,000 products with short stored texts are far under the payload bound: one statement.
-    expect(Buffer.byteLength(String(revisions.params[7]), "utf8")).toBeLessThan(MAX_PAYLOAD_BYTES / 4);
+    // 10,000 products with short stored texts fit the 8 MiB payload bound: one statement (writtenTables above).
+    expect(MAX_PAYLOAD_BYTES).toBe(8 * 1024 * 1024);
+    expect(Buffer.byteLength(String(revisions.params[7]), "utf8")).toBeLessThanOrEqual(MAX_PAYLOAD_BYTES);
     const records = JSON.parse(String(revisions.params[7])) as Array<Record<string, unknown>>;
     expect(records).toHaveLength(9_000);
     expect(records.map((record) => record.product_id)).toEqual(ids.filter((id) => id % 10 !== 0));
@@ -612,7 +614,8 @@ describe("saveProductListingSettingsBulkWithClient", () => {
     const values = largestValues();
     // One stored-columns object shared by every row, so the test holds each long text once.
     const columns = storedColumns(values);
-    const ids = Array.from({ length: 1_500 }, (_, index) => index + 1);
+    // About 92 KB a record: 250 products are over twice the 8 MiB bound.
+    const ids = Array.from({ length: 250 }, (_, index) => index + 1);
     for (const id of ids) client.current.set(id, { product_id: id, revision_id: id + 100_000, ...columns, created_at: EARLIER });
 
     // "Also clear theirs" for one policy: every other stored value is copied into the new revisions.

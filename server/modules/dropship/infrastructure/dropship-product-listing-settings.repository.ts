@@ -67,16 +67,21 @@ const MAX_REPORTED_CONFLICTS = 100;
 /** Issues an error reports: enough to find the fault, small enough to log. */
 const MAX_REPORTED_ISSUES = 10;
 /**
- * UTF-8 bytes of record JSON one bulk revision insert carries. PostgreSQL
- * refuses a jsonb array whose elements total more than 268,435,455 bytes
- * (54000), and a product at the stored contract's largest values (20,000-
- * character main text, 4,000-character text above and below, 3-byte
- * characters) is a record of about 100 KB, so 10,000 of them are several
- * times past it. A quarter of the limit leaves room for jsonb's own per-value
- * overhead over the JSON text (escapes only shrink). 10,000 products stay one
- * statement while their records average under 6.7 KB (short stored texts).
+ * UTF-8 bytes of record JSON one bulk revision insert carries (plan PR 9, P9
+ * (c)). The writer holds one statement's JSON at a time, as its parts and
+ * then the joined text, so this bounds the JSON in the heap at about two
+ * chunks whatever the product count: up to 32 MiB, since a string with any
+ * character above U+00FF is held at two bytes per character (the earlier
+ * 64 MiB allowed about 256 MiB). PostgreSQL refuses a jsonb array whose
+ * elements total more than 268,435,455 bytes (54000), far above this. A
+ * product at the stored contract's largest values (20,000-character
+ * main text, 4,000-character text above and below, 3-byte characters) is a
+ * record of about 100 KB, so a statement holds at least 80 of them; 10,000
+ * products stay one statement while their records average under about 830 B
+ * (a record with no stored value is about 650 B). Exported so its test reads
+ * the same number.
  */
-const MAX_BULK_REVISION_PAYLOAD_BYTES = 64 * 1024 * 1024;
+export const MAX_BULK_REVISION_PAYLOAD_BYTES = 8 * 1024 * 1024;
 const REQUEST_HASH_PATTERN = /^[a-f0-9]{64}$/;
 /** W7's price apply is PR 9 (plan D5, D28): until then a bulk save is one of these. */
 const BULK_OPERATIONS = ["product_settings_bulk", "category_settings_clear"] as const satisfies readonly ProductListingSettingsBulkInput["operation"][];
@@ -122,10 +127,10 @@ const SINGLE_AUDIT_SQL = `INSERT INTO dropship.dropship_audit_events
      VALUES ($1, $2, 'dropship_product_listing_setting', $3, 'product_listing_settings_saved', $4, $5, 'info', $6::jsonb, $7)`;
 
 /**
- * One statement for every changed product (plan 3.8 step 6), or one per
- * MAX_BULK_REVISION_PAYLOAD_BYTES of records. Each record carries its
- * product, predecessor, value columns and child key; the request, hash, actor
- * and clock are shared parameters.
+ * One statement per MAX_BULK_REVISION_PAYLOAD_BYTES of records (plan 3.8
+ * step 6): one for every changed product when their records are short.
+ * Each record carries its product, predecessor, value columns and child key;
+ * the request, hash, actor and clock are shared parameters.
  */
 const BULK_REVISION_INSERT_SQL = `INSERT INTO dropship.dropship_product_listing_setting_revisions
        (${REVISION_INSERT_COLUMNS})
@@ -293,12 +298,12 @@ export async function saveProductListingSettingWithClient(
  *    a count that differs from the ledger's is DROPSHIP_LISTING_SETTINGS_REPLAY_INCOMPLETE;
  * 3. every product's current row FOR UPDATE must be the revision the vendor
  *    saw; one mismatch refuses the whole request, naming the products;
- * 4. merged in TypeScript, then four statements whatever the product count:
- *    the ledger row (always, even when nothing changed, so a replay is exact,
- *    plan D12), one revision insert, one current-row upsert and one audit
- *    insert. Only records over MAX_BULK_REVISION_PAYLOAD_BYTES in all (long
- *    stored texts across thousands of products) split the revision insert
- *    into more statements, in the same transaction.
+ * 4. merged in TypeScript, then the ledger row (always, even when nothing
+ *    changed, so a replay is exact, plan D12), the revision insert, one
+ *    current-row upsert and one audit insert. The revision insert is one
+ *    statement per MAX_BULK_REVISION_PAYLOAD_BYTES (8 MiB) of records, in
+ *    the same transaction: one for short records (10,000 products with no
+ *    stored text), more when stored or set texts are long.
  * Each revision carries its child key (plan D10) and the parent's hash. Audit
  * rows carry only the changed settings, texts by digest (plan D28); the full
  * texts are in the revisions the audit rows name.
@@ -390,10 +395,12 @@ async function replayBulk(
 }
 
 /**
- * One statement per MAX_BULK_REVISION_PAYLOAD_BYTES of records (one unless
- * stored texts are long), in product order; the returned ids must cover
- * exactly the changed products. RETURNING order is not guaranteed, so the
- * result is rebuilt in `changes` order: entry i is the revision of changes[i].
+ * One statement per MAX_BULK_REVISION_PAYLOAD_BYTES of records (one while
+ * the records are short, more when texts are long), in product order, so
+ * only one statement's JSON is in the heap at a time; the returned ids must
+ * cover exactly the changed products. RETURNING order is not guaranteed, so
+ * the result is rebuilt in `changes` order: entry i is the revision of
+ * changes[i].
  */
 async function insertBulkRevisions(
   client: QueryClient,

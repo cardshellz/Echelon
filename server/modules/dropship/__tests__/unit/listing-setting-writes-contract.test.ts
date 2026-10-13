@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   LISTING_SETTING_WRITE_ERROR_CODES,
+  MAX_BULK_TEXT_BYTES,
   MAX_EBAY_ID_INPUT_LENGTH,
   MAX_SIZE_PRICES_PER_REQUEST,
   MAX_STORE_LISTING_TEXT_BYTES,
@@ -8,6 +9,8 @@ import {
   productSettingsPatchInputSchema,
   saveProductSettingsInputSchema,
   saveProductSettingsResponseSchema,
+  saveProductsBulkInputSchema,
+  saveProductsBulkResponseSchema,
   saveSizePricesInputSchema,
   saveSizePricesResponseSchema,
 } from "../../../../../shared/dropship/listing-setting-writes";
@@ -106,7 +109,8 @@ describe("W5 one product input", () => {
     expect(LISTING_SETTING_WRITE_ERROR_CODES.pricesMoved).toBe("DROPSHIP_LISTING_PRICES_MOVED");
     expect(LISTING_SETTING_WRITE_ERROR_CODES.ebaySignInRequired).toBe("DROPSHIP_LISTING_SETTINGS_EBAY_SIGN_IN_REQUIRED");
     expect(MAX_EBAY_ID_INPUT_LENGTH).toBe(100);
-    expect(MAX_STORE_LISTING_TEXT_BYTES).toBe(30_000_000);
+    // The store cap moves with the bulk text budget (plan 3.10 (e)).
+    expect(MAX_STORE_LISTING_TEXT_BYTES).toBe(MAX_BULK_TEXT_BYTES);
   });
 
   it("fills an absent patch and size prices, and keeps the patch in the stored shape's key order", () => {
@@ -219,5 +223,107 @@ describe("patchTextBytes (plan 3.10 (b), (e))", () => {
     expect(patchTextBytes({})).toBe(0);
     expect(patchTextBytes({ textAbove: { mode: "none" }, textBelow: null, mainText: null })).toBe(0);
     expect(patchTextBytes(Object.freeze({ mainText: Object.freeze({ text: "abc", catalogHash: "a".repeat(64) }) }))).toBe(3);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// W6 (plan PR 9, section 7.3)
+// ---------------------------------------------------------------------------
+
+const BULK_KEY = "products-bulk:7f9c2ba4-e88f-4a5e-9d1b-1c2d3e4f5a6b";
+const products = (count: number) => Array.from({ length: count }, (_, index) =>
+  ({ productId: 2_000_000_000 + index, expectedRevisionId: index % 2 === 0 ? null : 2_000_000_000 + index }));
+const bulk = (fields: Record<string, unknown> = {}) =>
+  ({ idempotencyKey: BULK_KEY, products: products(2), patch: { storeShelf: { mode: "none" } }, ...fields });
+
+describe("W6 many products input", () => {
+  it("names the bulk text budget: plan 3.10's live-heap rule's output, at P9's 30,000,000 ceiling", () => {
+    expect(MAX_BULK_TEXT_BYTES).toBe(30_000_000);
+  });
+
+  it("accepts 1 and 10,000 products, under the 1 MiB body, and leaves the input as it was", () => {
+    const input = Object.freeze(bulk({ products: Object.freeze(products(10_000).map((entry) => Object.freeze(entry))) }));
+    const parsed = saveProductsBulkInputSchema.parse(input);
+    expect(parsed.products).toHaveLength(10_000);
+    expect(JSON.stringify(input).length).toBeLessThan(600_000);
+    expect(saveProductsBulkInputSchema.parse(bulk({ products: products(1) })).products).toEqual(products(1));
+  });
+
+  it("keeps the patch in the stored shape's key order", () => {
+    const parsed = saveProductsBulkInputSchema.parse(bulk({ patch: { textBelow: null, mainText: null, shippingPolicy: { id: "P1" } } }));
+    expect(Object.keys(parsed.patch)).toEqual(["shippingPolicy", "textBelow", "mainText"]);
+  });
+
+  it.each([
+    ["no products", bulk({ products: [] })],
+    ["10,001 products", bulk({ products: products(10_001) })],
+    ["the same product twice", bulk({ products: [...products(1), ...products(1)] })],
+    ["a product without its expected revision", bulk({ products: [{ productId: 7 }] })],
+    ["a product with another key", bulk({ products: [{ productId: 7, expectedRevisionId: null, categoryId: 3 }] })],
+    ["a product id of 0", bulk({ products: [{ productId: 0, expectedRevisionId: null }] })],
+    ["a product id past int4", bulk({ products: [{ productId: 2_147_483_648, expectedRevisionId: null }] })],
+    ["a 7-character key", bulk({ idempotencyKey: "abcdefg" })],
+    ["an unknown top-level key", { ...bulk(), storeConnectionId: 22 }],
+    ["an unknown patch key", bulk({ patch: { storeShelf: null, shelf: null } })],
+    ["an eBay category name", bulk({ patch: { ebayCategory: { categoryId: "183438", categoryName: "Toploaders" } } })],
+    ["shelf names", bulk({ patch: { storeShelf: { mode: "own", shelves: [{ id: "1", name: "Top" }] } } })],
+    ["an empty own text below", bulk({ patch: { textBelow: { mode: "own", text: " " } } })],
+    ["no patch", { idempotencyKey: BULK_KEY, products: products(1) }],
+  ])("refuses %s", (_label, value) => {
+    expect(saveProductsBulkInputSchema.safeParse(value).success).toBe(false);
+  });
+
+  it.each([
+    ["a price, even a reset", { price: null }, ["price"], "Change prices for many products with a price check."],
+    ["a price recipe", { price: RECIPE, storeShelf: null }, ["price"], "Change prices for many products with a price check."],
+    ["a main text value", { mainText: { text: "Own words." } }, ["mainText"], "Main text can only be reset for many products."],
+    ["no change at all", {}, [], "Change at least one setting."],
+  ])("refuses %s with the stored bulk contract's words", (_label, patch, path, message) => {
+    const parsed = saveProductsBulkInputSchema.safeParse(bulk({ patch }));
+    expect(parsed.success).toBe(false);
+    expect(parsed.error?.issues).toEqual([expect.objectContaining({ code: "custom", path: ["patch", ...path], message })]);
+  });
+
+  it.each([
+    ["a shelf none", { storeShelf: { mode: "none" } }],
+    ["every reset", { ebayCategory: null, storeShelf: null, shippingPolicy: null, returnPolicy: null, paymentPolicy: null,
+      textAbove: null, textBelow: null, mainText: null }],
+    ["every eBay field by id and own texts", { ebayCategory: { categoryId: "183438" }, storeShelf: { mode: "own", shelfIds: ["1", "2"] },
+      shippingPolicy: { id: "P1" }, returnPolicy: { id: "P2" }, paymentPolicy: { id: "P3" },
+      textAbove: { mode: "own", text: "Above." }, textBelow: { mode: "none" } }],
+  ])("accepts %s", (_label, patch) => {
+    expect(saveProductsBulkInputSchema.safeParse(Object.freeze(bulk({ patch: Object.freeze(patch) }))).success).toBe(true);
+  });
+});
+
+describe("W6 many products answer", () => {
+  const answer = (fields: Record<string, unknown> = {}) =>
+    ({ outcome: "changed", requestId: 9_007_199_254, productCount: 3, changedProductCount: 2, clearedSizeCount: 5, ...fields });
+
+  it("accepts a change, an unchanged save that wrote nothing, and a replay with no counts", () => {
+    expect(saveProductsBulkResponseSchema.safeParse(answer()).success).toBe(true);
+    expect(saveProductsBulkResponseSchema.safeParse(answer({ changedProductCount: 0 })).success).toBe(true);
+    expect(saveProductsBulkResponseSchema.safeParse(answer({ outcome: "unchanged", changedProductCount: 0, clearedSizeCount: 0 })).success)
+      .toBe(true);
+    expect(saveProductsBulkResponseSchema.safeParse(answer({ outcome: "replayed", changedProductCount: null, clearedSizeCount: null }))
+      .success).toBe(true);
+    // The ledger id is a bigint identity: past int4 is allowed.
+    expect(saveProductsBulkResponseSchema.safeParse(answer({ requestId: 2_147_483_648 })).success).toBe(true);
+  });
+
+  it.each([
+    ["a replay with counts", answer({ outcome: "replayed" })],
+    ["a replay with one count", answer({ outcome: "replayed", changedProductCount: null })],
+    ["a change with no counts", answer({ changedProductCount: null, clearedSizeCount: null })],
+    ["an unchanged save that changed a product", answer({ outcome: "unchanged", changedProductCount: 1, clearedSizeCount: 0 })],
+    ["an unchanged save that cleared", answer({ outcome: "unchanged", changedProductCount: 0, clearedSizeCount: 1 })],
+    ["more changed products than named", answer({ changedProductCount: 4 })],
+    ["no product named", answer({ productCount: 0, changedProductCount: 0 })],
+    ["10,001 products named", answer({ productCount: 10_001 })],
+    ["a request id of 0", answer({ requestId: 0 })],
+    ["an unknown key", answer({ sizes: [] })],
+    ["another outcome", answer({ outcome: "acknowledged" })],
+  ])("refuses %s", (_label, value) => {
+    expect(saveProductsBulkResponseSchema.safeParse(value).success).toBe(false);
   });
 });

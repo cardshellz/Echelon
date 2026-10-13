@@ -2,10 +2,13 @@ import { describe, expect, it, vi } from "vitest";
 import { z, ZodError } from "zod";
 import type { DropshipListingStoreContext } from "../../application/dropship-listing-preview-service";
 import {
+  HEAVY_WRITE_RETRY_AFTER_SECONDS,
   LISTING_SETTING_INVALID_INPUT_MESSAGE,
+  ListingSettingHeavyWriteGate,
   MAX_ECHOED_ISSUES,
   assertListingSettingMember,
   authorizeListingSettingWrite,
+  listingSettingBulkTooLarge,
   listingSettingEbaySignInRequired,
   listingSettingIssues,
   listingSettingKeyConflict,
@@ -235,5 +238,56 @@ describe("the 9c refusals (plan 3.3, 6.8)", () => {
       context: { reason: "store_text_limit", textBytes: 30_000_001, maxTextBytes: 30_000_000, classification: "permanent" } });
     expect(listingSettingRequestKeyChanged(STORE)).toMatchObject({ code: "DROPSHIP_LISTING_SETTINGS_BUSY",
       context: { reason: "request_key_changed", retryAfterSeconds: 5, retryable: true, classification: "transient" } });
+  });
+});
+
+describe("the 9d heavy-write gate and text budget refusal (plan P9, 3.10 (a), (b))", () => {
+  /** A promise and the functions that settle it, so a test holds the gate as long as it wants. */
+  function deferred<T>() {
+    let resolve!: (value: T) => void;
+    let reject!: (reason: unknown) => void;
+    const promise = new Promise<T>((done, fail) => { resolve = done; reject = fail; });
+    return { promise, resolve, reject };
+  }
+
+  it("refuses a second run while the first holds it, as retryable BUSY with five seconds, and never starts the second", async () => {
+    const gate = new ListingSettingHeavyWriteGate();
+    const held = deferred<string>();
+    const second = vi.fn(async () => "second");
+    const first = gate.run(() => held.promise);
+
+    const busy = await refusal(gate.run(second));
+
+    expect(HEAVY_WRITE_RETRY_AFTER_SECONDS).toBe(5);
+    expect(busy).toMatchObject({ code: "DROPSHIP_LISTING_SETTINGS_BUSY", context: {
+      reason: "heavy_write_in_progress", retryAfterSeconds: 5, retryable: true, classification: "transient" } });
+    expect(second).not.toHaveBeenCalled();
+    held.resolve("first");
+    await expect(first).resolves.toBe("first");
+    // Released on success: the next run goes through.
+    await expect(gate.run(second)).resolves.toBe("second");
+  });
+
+  it("releases after the work throws, synchronously or later", async () => {
+    const gate = new ListingSettingHeavyWriteGate();
+    await expect(gate.run(async () => { throw new Error("rolled back"); })).rejects.toThrow("rolled back");
+    await expect(gate.run(() => { throw new Error("thrown at once"); })).rejects.toThrow("thrown at once");
+    await expect(gate.run(async () => "after")).resolves.toBe("after");
+  });
+
+  it("claims in the same step as the check: of two runs started together, exactly one works", async () => {
+    const gate = new ListingSettingHeavyWriteGate();
+    const work = vi.fn(async () => "done");
+    const results = await Promise.allSettled([gate.run(work), gate.run(work)]);
+    expect(work).toHaveBeenCalledTimes(1);
+    expect(results.map((result) => result.status).sort()).toEqual(["fulfilled", "rejected"]);
+  });
+
+  it("builds the bulk text refusal with its numbers, permanent", () => {
+    expect(listingSettingBulkTooLarge(STORE, 30_000_001, 30_000_000, 3_750)).toMatchObject({
+      code: "DROPSHIP_LISTING_SETTINGS_BULK_TOO_LARGE",
+      context: { storeConnectionId: STORE, textBytes: 30_000_001, maxTextBytes: 30_000_000, productCount: 3_750,
+        retryable: false, classification: "permanent" },
+    });
   });
 });

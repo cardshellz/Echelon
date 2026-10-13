@@ -2,14 +2,27 @@ import { createHash, randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { performance } from "node:perf_hooks";
+import { setFlagsFromString } from "node:v8";
+import { runInNewContext } from "node:vm";
 import { config } from "dotenv";
 import pg, { type Pool } from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { SaveListingPriceInput } from "../../../../../shared/dropship/listing-price";
-import { MAX_STORE_LISTING_TEXT_BYTES } from "../../../../../shared/dropship/listing-setting-writes";
+import { MAX_EBAY_CATEGORY_NAME_LENGTH, MAX_EBAY_CATEGORY_PATH_DEPTH } from "../../../../../shared/dropship/ebay-category-rules";
+import {
+  MAX_LISTING_POLICY_ID_LENGTH,
+  MAX_LISTING_POLICY_NAME_LENGTH,
+  MAX_LISTING_SETTING_BULK_PRODUCTS,
+  MAX_LISTING_SHELF_ID_LENGTH,
+  MAX_LISTING_SHELF_NAME_LENGTH,
+  MAX_LISTING_STORE_SHELVES,
+} from "../../../../../shared/dropship/listing-setting-values";
+import { MAX_BULK_TEXT_BYTES, MAX_STORE_LISTING_TEXT_BYTES } from "../../../../../shared/dropship/listing-setting-writes";
 import { saveListingPriceInTransaction } from "../../application/dropship-listing-price-service";
 import { DropshipListingSizePricesService } from "../../application/dropship-listing-size-prices-service";
 import { DropshipListingProductSettingsService } from "../../application/dropship-listing-product-settings-service";
+import { DropshipListingProductsBulkService } from "../../application/dropship-listing-products-bulk-service";
+import { ListingSettingHeavyWriteGate } from "../../application/dropship-listing-setting-write-support";
 import type { ListingSettingEbayPort } from "../../application/dropship-listing-setting-ebay-values";
 import type { DropshipEbayListingSetupDiscovery } from "../../application/dropship-ebay-listing-setup-service";
 import { DropshipPricingRulesService } from "../../application/dropship-pricing-rules-service";
@@ -113,6 +126,41 @@ const D2 = { defaultRecipe: { basis: "product_cost", markupBps: 5_000, flatCents
 
 type Row = Record<string, unknown>;
 interface StatementCounter { statements: number }
+/** One measured run, as logged (plan 3.11, 7.12 PG 1-2): heap growth peaks over the run's start, in MiB. */
+interface Measurement {
+  measurement: string; flows: number; elapsedMs: number; statements: number;
+  heapUsedPeakDeltaMiB: number; externalPeakDeltaMiB: number; arrayBuffersPeakDeltaMiB: number;
+}
+
+/**
+ * Opt-in heap diagnostics (`DROPSHIP_W6_HEAP_DIAGNOSTICS=1`), off in CI: the
+ * forced collections below, W6's live-heap runs (the inputs of plan 3.10's
+ * rule, which judges the live heap and needs the forced collections) and
+ * W6's diagnostic runs. They add over half a minute of 10,000-product runs
+ * that assert nothing about the heap, and setting a V8 flag after start is
+ * documented as unpredictable, which a one-off measurement accepts and a
+ * permanent suite need not. 9d's measurements of the rule were taken with
+ * them on; in CI the stop-rule line logs the allocated figures only.
+ */
+const HEAP_DIAGNOSTICS = process.env.DROPSHIP_W6_HEAP_DIAGNOSTICS === "1";
+
+/**
+ * With the diagnostics on, a full collection before each measurement, so its
+ * baseline is the live heap and not an earlier case's garbage. The runner
+ * starts Node without --expose-gc; V8 exposes `gc` to a new context once the
+ * flag is set. Off, or when that fails, there is no collection and the
+ * numbers stay indicative, as they always are: nothing asserts them.
+ */
+const collectGarbage: (() => void) | null = HEAP_DIAGNOSTICS ? (() => {
+  try {
+    setFlagsFromString("--expose-gc");
+    const gc: unknown = runInNewContext("gc");
+    return typeof gc === "function" ? (gc as () => void) : null;
+  } catch (error) {
+    process.stdout.write(`${JSON.stringify({ measurement: "gc_unavailable", error: String(error) })}\n`);
+    return null;
+  }
+})() : null;
 
 describeDatabase.sequential("listing-settings writes on PostgreSQL (plan PR 9)", () => {
   const schema = `dropship_listing_setting_write_routes_${process.pid}`;
@@ -310,11 +358,27 @@ describeDatabase.sequential("listing-settings writes on PostgreSQL (plan PR 9)",
     };
   }
 
-  /** Elapsed time, statements and heap growth of `work`, written to stdout for the PR body (plan 4.4); nothing asserts them. */
-  async function measure<T>(label: string, flows: number, counter: StatementCounter, work: () => Promise<T>): Promise<T> {
-    const heapBefore = process.memoryUsage().heapUsed;
-    let heapPeak = heapBefore;
-    const sampler = setInterval(() => { heapPeak = Math.max(heapPeak, process.memoryUsage().heapUsed); }, HEAP_SAMPLE_INTERVAL_MS);
+  /** Every measurement of this run, in order, for the heavy-write stop rule (plan 3.10). */
+  const measurements: Measurement[] = [];
+
+  /**
+   * Elapsed time, statements and the growth of heapUsed, external and
+   * arrayBuffers of `work` (each sampled every 20 ms, peak over the start),
+   * written to stdout for the PR body (plan 4.4, 3.11); nothing asserts them.
+   */
+  async function measure<T>(label: string, flows: number, counter: StatementCounter, work: () => Promise<T>,
+    extra: Record<string, unknown> = {}): Promise<T> {
+    collectGarbage?.();
+    const start = process.memoryUsage();
+    const peak = { heapUsed: start.heapUsed, external: start.external, arrayBuffers: start.arrayBuffers };
+    const sample = () => {
+      const now = process.memoryUsage();
+      peak.heapUsed = Math.max(peak.heapUsed, now.heapUsed);
+      peak.external = Math.max(peak.external, now.external);
+      peak.arrayBuffers = Math.max(peak.arrayBuffers, now.arrayBuffers);
+      return now;
+    };
+    const sampler = setInterval(sample, HEAP_SAMPLE_INTERVAL_MS);
     const before = counter.statements;
     const started = process.hrtime.bigint();
     try {
@@ -322,14 +386,20 @@ describeDatabase.sequential("listing-settings writes on PostgreSQL (plan PR 9)",
     } finally {
       const elapsedMs = Number(process.hrtime.bigint() - started) / 1e6;
       clearInterval(sampler);
-      const heapAfter = process.memoryUsage().heapUsed;
-      heapPeak = Math.max(heapPeak, heapAfter);
+      const end = sample();
       const statements = counter.statements - before;
-      process.stdout.write(`${JSON.stringify({
+      const mib = (bytes: number) => Number((bytes / 1_048_576).toFixed(1));
+      const record: Measurement = {
         measurement: label, flows, elapsedMs: Math.round(elapsedMs), statements,
+        heapUsedPeakDeltaMiB: mib(peak.heapUsed - start.heapUsed),
+        externalPeakDeltaMiB: mib(peak.external - start.external),
+        arrayBuffersPeakDeltaMiB: mib(peak.arrayBuffers - start.arrayBuffers),
+      };
+      measurements.push(record);
+      process.stdout.write(`${JSON.stringify({
+        ...record, ...extra,
         statementsPerFlow: Number((statements / flows).toFixed(1)), elapsedMsPerFlow: Number((elapsedMs / flows).toFixed(2)),
-        heapUsedDeltaMiB: Number(((heapAfter - heapBefore) / 1_048_576).toFixed(1)),
-        heapUsedPeakDeltaMiB: Number(((heapPeak - heapBefore) / 1_048_576).toFixed(1)),
+        heapUsedDeltaMiB: mib(end.heapUsed - start.heapUsed), gcBeforeRun: collectGarbage !== null,
       })}\n`);
     }
   }
@@ -1154,6 +1224,561 @@ describeDatabase.sequential("listing-settings writes on PostgreSQL (plan PR 9)",
       expect(shortened).toMatchObject({ outcome: "changed" });
       expect(log.info).toHaveBeenCalledWith("dropship.listing_settings.product_saved", expect.objectContaining({
         store_text_bytes: MAX_STORE_LISTING_TEXT_BYTES - PART + 5 }));
+    }, BULK_TEST_TIMEOUT_MS);
+  });
+
+  describe("W6, many products (POST …/products/bulk, plan PR 9, section 7)", () => {
+    /** Catalog products the edges and the cap case seed, clear of the fixture's 7 and the W5 cases' ids. */
+    const EDGE_FIRST_PRODUCT = 40_001;
+    const SECOND_PRODUCT = 8;
+    const MISSING_PRODUCT = 999_999;
+    const bulkKey = (label: string) => `products-bulk:${label}`;
+    /** One service over one gate, as the factory builds them; a second instance stands for a second dyno (R13). */
+    const bulk = (repositoryPool: Pool = scopedPool(), heavyWrites = new ListingSettingHeavyWriteGate()) => new DropshipListingProductsBulkService({
+      repository: new PgDropshipListingSettingWritesRepository(repositoryPool), ebay: fakeEbay, heavyWrites, clock: { now: () => NOW },
+      timer: () => performance.now(), log });
+    const own = (text: string) => ({ mode: "own", text });
+
+    async function ledgerRows(): Promise<number> {
+      return count("dropship.dropship_product_listing_setting_requests");
+    }
+    /** `total` catalog products from `first` (no sizes: W6 has no chosen check, plan P11). */
+    async function seedCatalogProducts(first: number, total: number): Promise<number[]> {
+      await execute(`INSERT INTO catalog.products (id, sku, name, category, category_id, product_type)
+        SELECT g, 'EDGE-' || g, 'Edge product ' || g, 'Toploaders', $3, 'toploader' FROM generate_series($1::int, $2::int) g`,
+      [first, first + total - 1, TOPLOADERS]);
+      return Array.from({ length: total }, (_, index) => first + index);
+    }
+    /** A current settings row for each product with own texts above and below, as an earlier save left them; the revision ids, by product. */
+    async function seedStoredTexts(productIds: readonly number[], above: string, below: string): Promise<Map<number, number>> {
+      await execute(`INSERT INTO dropship.dropship_product_listing_setting_revisions
+        (vendor_id, store_connection_id, product_id, previous_revision_id, request_id, text_above_mode, text_above, text_below_mode, text_below,
+         idempotency_key, request_hash, actor_type, actor_id, created_at)
+        SELECT $1, $2, p, NULL, NULL, 'own', $3, 'own', $4, 'seed-text:' || p, $5, 'vendor', 'seed', $6 FROM unnest($7::int[]) p`,
+      [VENDOR, STORE, above, below, "d".repeat(64), NOW, productIds]);
+      await execute(`INSERT INTO dropship.dropship_product_listing_settings (vendor_id, store_connection_id, product_id, revision_id)
+        SELECT vendor_id, store_connection_id, product_id, id FROM dropship.dropship_product_listing_setting_revisions
+        WHERE idempotency_key LIKE 'seed-text:%' AND product_id = ANY($1::int[])`, [productIds]);
+      const rows = await execute(`SELECT product_id, revision_id FROM dropship.dropship_product_listing_settings WHERE product_id = ANY($1::int[])`,
+        [productIds]);
+      return new Map(rows.rows.map((row): [number, number] => [row.product_id as number, row.revision_id as number]));
+    }
+    /** As autovacuum would have it in production: the planner knows the settings tables' sizes (the probe-load case's precedent). */
+    async function analyzeSettings(): Promise<void> {
+      await execute("ANALYZE dropship.dropship_product_listing_settings, dropship.dropship_product_listing_setting_revisions");
+    }
+    /**
+     * A current settings row for each product with `text` as its own text above and below (both `none` when null), and
+     * with no other value or with `ebay`'s category, shelves and three policies; the revision ids, by product.
+     */
+    async function seedSettingRows(productIds: readonly number[], ebay: EbayRowValues | null, text: string | null): Promise<Map<number, number>> {
+      await execute(`INSERT INTO dropship.dropship_product_listing_setting_revisions
+        (vendor_id, store_connection_id, product_id, previous_revision_id, request_id, text_above_mode, text_above, text_below_mode, text_below,
+         ebay_category_id, ebay_category_name, ebay_category_path, shelf_mode, shelf_ids, shelf_names,
+         fulfillment_policy_id, fulfillment_policy_name, return_policy_id, return_policy_name, payment_policy_id, payment_policy_name,
+         idempotency_key, request_hash, actor_type, actor_id, created_at)
+        SELECT $1, $2, p, NULL, NULL, $18, $19, $18, $19, $6, $7, $8::jsonb, $9, $10::jsonb, $11::jsonb, $12, $13, $14, $15, $16, $17,
+          'seed-row:' || p, $3, 'vendor', 'seed', $4 FROM unnest($5::int[]) p`,
+      [VENDOR, STORE, "d".repeat(64), NOW, productIds,
+        ebay?.category.categoryId ?? null, ebay?.category.categoryName ?? null, ebay ? JSON.stringify(ebay.category.path) : null,
+        ebay ? "own" : null, ebay ? JSON.stringify(ebay.shelves.map((shelf) => shelf.id)) : null,
+        ebay ? JSON.stringify(ebay.shelves.map((shelf) => shelf.name)) : null,
+        ebay?.shipping.id ?? null, ebay?.shipping.name ?? null, ebay?.returns.id ?? null, ebay?.returns.name ?? null,
+        ebay?.payment.id ?? null, ebay?.payment.name ?? null, text === null ? "none" : "own", text]);
+      await execute(`INSERT INTO dropship.dropship_product_listing_settings (vendor_id, store_connection_id, product_id, revision_id)
+        SELECT vendor_id, store_connection_id, product_id, id FROM dropship.dropship_product_listing_setting_revisions
+        WHERE idempotency_key LIKE 'seed-row:%'`);
+      const rows = await execute(`SELECT product_id, revision_id FROM dropship.dropship_product_listing_settings WHERE product_id = ANY($1::int[])`,
+        [productIds]);
+      return new Map(rows.rows.map((row): [number, number] => [row.product_id as number, row.revision_id as number]));
+    }
+    const named = (productIds: readonly number[], revisions = new Map<number, number>()) =>
+      productIds.map((productId) => ({ productId, expectedRevisionId: revisions.get(productId) ?? null }));
+    beforeEach(async () => {
+      ebayCalls.length = 0;
+      await execute(`INSERT INTO catalog.products (id, sku, name, category, category_id, product_type, shopify_product_id)
+        VALUES ($1, 'TL-2', 'Toploader 2', 'Toploaders', $2, 'toploader', '8000000008')`, [SECOND_PRODUCT, TOPLOADERS]);
+    });
+
+    /*
+     * PG 1 and 2: the heavy-write measurements (plan 3.10's computed rule, 7.12 PG 2). Each runs the whole W6 service on
+     * a fresh store: the no-text runs give the fixed part at each product count (PG 1 at 10,000 is P0), and the six text
+     * edges carry the budget's bytes. The rule judges their live heap (the `_live` re-runs, opt-in, see liveHeapProbe);
+     * their allocated peaks are logged too. The text edges:
+     * - (a), (b) P9's own: 2 x 4,000 characters with one U+2019 per text (8,004 B a product), stored. P9's 3,750
+     *   products are 30,015,000 B, over a 30,000,000 budget (P9 counted the U+2019 as one byte), so (a) runs at the most
+     *   products the budget admits, after 3,750 is refused; (b) at P9's 3,000;
+     * - (c1), (c2) the budget's bytes stored over the 10,000-product cap, with and without a U+2019 per text;
+     * - (d1), (d2) the same bytes set by the patch on 10,000 products with nothing stored.
+     * A string with any character above U+00FF is held at two bytes per character, so the U+2019 edges are the heap's worst.
+     */
+    const P9_TEXT = `${"a".repeat(3_999)}’`;
+    const P9_PRODUCT_BYTES = 2 * Buffer.byteLength(P9_TEXT, "utf8");
+    const P9_PRODUCTS = Math.floor(MAX_BULK_TEXT_BYTES / P9_PRODUCT_BYTES);
+    const P9_SMALLER = 3_000 * P9_PRODUCT_BYTES <= MAX_BULK_TEXT_BYTES ? 3_000 : Math.floor(0.8 * P9_PRODUCTS);
+    /** Bytes per text so that 10,000 products of two texts carry the budget exactly. */
+    const CAP_PART_BYTES = MAX_BULK_TEXT_BYTES / (2 * MAX_LISTING_SETTING_BULK_PRODUCTS);
+    const CAP_TWO_BYTE = `${"a".repeat(CAP_PART_BYTES - 3)}’`;
+    const CAP_ASCII = "a".repeat(CAP_PART_BYTES);
+    /** eBay values a seeded row carries (the stored contract's shapes, shared/dropship/listing-setting-values.ts). */
+    type EbayRowValues = {
+      category: { categoryId: string; categoryName: string; path: readonly string[] };
+      shelves: ReadonlyArray<{ id: string; name: string }>;
+      shipping: { id: string; name: string }; returns: { id: string; name: string }; payment: { id: string; name: string };
+    };
+    /** Names of the length a real store's are (HYPOTHESIS: no production sample was read). */
+    const EBAY_TYPICAL: EbayRowValues = {
+      category: { categoryId: "183454", categoryName: "Toploaders", path: ["Collectibles", "Trading Cards", "Card Sleeves & Toploaders", "Toploaders"] },
+      shelves: [{ id: "11", name: "Supplies:Top" }],
+      shipping: { id: "ship-a", name: "Ships in one day" }, returns: { id: "return-a", name: "Thirty days" },
+      payment: { id: "pay-a", name: "eBay managed payments" },
+    };
+    /** The longest the stored contract and the columns allow: about 4,580 characters a row. */
+    const EBAY_LONGEST: EbayRowValues = {
+      category: { categoryId: "9".repeat(20), categoryName: "c".repeat(MAX_EBAY_CATEGORY_NAME_LENGTH),
+        path: Array.from({ length: MAX_EBAY_CATEGORY_PATH_DEPTH }, (_, index) => `${index}`.padEnd(MAX_EBAY_CATEGORY_NAME_LENGTH, "p")) },
+      shelves: Array.from({ length: MAX_LISTING_STORE_SHELVES }, (_, index) => ({ id: `${index}`.padEnd(MAX_LISTING_SHELF_ID_LENGTH, "s"),
+        name: `${index}`.padEnd(MAX_LISTING_SHELF_NAME_LENGTH, "n") })),
+      ...Object.fromEntries((["shipping", "returns", "payment"] as const).map((kind) => [kind,
+        { id: kind.padEnd(MAX_LISTING_POLICY_ID_LENGTH, "i"), name: kind.padEnd(MAX_LISTING_POLICY_NAME_LENGTH, "n") }])) as
+        Pick<EbayRowValues, "shipping" | "returns" | "payment">,
+    };
+    const ebayValueBytes = (ebay: EbayRowValues) => Buffer.byteLength([ebay.category.categoryId, ebay.category.categoryName,
+      ...ebay.category.path, ...ebay.shelves.flatMap((shelf) => [shelf.id, shelf.name]),
+      ...[ebay.shipping, ebay.returns, ebay.payment].flatMap((policy) => [policy.id, policy.name])].join(""), "utf8");
+    /**
+     * `storedRows`: each product already has a settings row with `ebay`'s values when set, and `stored` as its own
+     * texts (both `none` when null); `patch` replaces the edge's default patch.
+     */
+    type Edge = {
+      label: string; products: number; stored: string | null; set: string | null;
+      storedRows?: { ebay: EbayRowValues | null }; patch?: Record<string, unknown>;
+    };
+    const NO_TEXT_RUNS: readonly Edge[] = [...new Set([MAX_LISTING_SETTING_BULK_PRODUCTS, P9_PRODUCTS, P9_SMALLER])]
+      .map((products) => ({ label: `w6_no_text_${products}`, products, stored: null, set: null }));
+    /**
+     * EBAY_TYPICAL with another shelf of the same length, so a patch that sets EBAY_TYPICAL's shelf (the one shelf
+     * fakeEbay lists, "11", stored under its path "Supplies:Top") changes every row and leaves it holding all of
+     * EBAY_TYPICAL.
+     */
+    const EBAY_TYPICAL_OTHER_SHELF: EbayRowValues = { ...EBAY_TYPICAL, shelves: [{ id: "12", name: "Supplies:Bin" }] };
+    /**
+     * The realistic worst combination: rows with typical eBay values and (c1)'s stored texts at the budget, over the
+     * 10,000-product cap. The patch sets a shelf (one eBay call, outside the gate), so every new revision carries its
+     * two stored texts and all of its eBay values.
+     */
+    const COMBINED_EDGE: Edge = {
+      label: `w6_rows_ebay_typical_c1_cap_stored_two_byte_${MAX_LISTING_SETTING_BULK_PRODUCTS}`,
+      products: MAX_LISTING_SETTING_BULK_PRODUCTS, stored: CAP_TWO_BYTE, set: null,
+      storedRows: { ebay: EBAY_TYPICAL_OTHER_SHELF }, patch: { storeShelf: { mode: "own", shelfIds: [EBAY_TYPICAL.shelves[0].id] } },
+    };
+    /**
+     * Not inputs of the rule (opt-in, HEAP_DIAGNOSTICS): what a stored edge carries apart from its text bytes. Rows with
+     * no text (both texts `none`), and rows whose two own texts are one character each, so the second minus the first is
+     * the cost of having own texts at all (see the stop-rule line). Then rows with no text that hold an eBay category,
+     * shelves and three policies, which the bulk writer also reads, parses and copies and the text budget does not
+     * count, at typical and at the longest lengths; their patch (`textAbove: null`) changes no eBay value, so every
+     * new revision copies them all. Last, COMBINED_EDGE.
+     */
+    const DIAGNOSTIC_RUNS: readonly Edge[] = [
+      { label: `w6_rows_no_text_${MAX_LISTING_SETTING_BULK_PRODUCTS}`, products: MAX_LISTING_SETTING_BULK_PRODUCTS, stored: null, set: null,
+        storedRows: { ebay: null } },
+      { label: `w6_rows_one_character_texts_${MAX_LISTING_SETTING_BULK_PRODUCTS}`, products: MAX_LISTING_SETTING_BULK_PRODUCTS, stored: "a",
+        set: null },
+      { label: `w6_rows_ebay_typical_${MAX_LISTING_SETTING_BULK_PRODUCTS}`, products: MAX_LISTING_SETTING_BULK_PRODUCTS, stored: null, set: null,
+        storedRows: { ebay: EBAY_TYPICAL }, patch: { textAbove: null } },
+      { label: `w6_rows_ebay_longest_${MAX_LISTING_SETTING_BULK_PRODUCTS}`, products: MAX_LISTING_SETTING_BULK_PRODUCTS, stored: null, set: null,
+        storedRows: { ebay: EBAY_LONGEST }, patch: { textAbove: null } },
+      COMBINED_EDGE,
+    ];
+    const TEXT_EDGES: readonly Edge[] = [
+      { label: "w6_edge_a_p9_stored_two_byte", products: P9_PRODUCTS, stored: P9_TEXT, set: null },
+      { label: "w6_edge_b_p9_smaller_stored_two_byte", products: P9_SMALLER, stored: P9_TEXT, set: null },
+      { label: "w6_edge_c1_cap_stored_two_byte", products: MAX_LISTING_SETTING_BULK_PRODUCTS, stored: CAP_TWO_BYTE, set: null },
+      { label: "w6_edge_c2_cap_stored_ascii", products: MAX_LISTING_SETTING_BULK_PRODUCTS, stored: CAP_ASCII, set: null },
+      { label: "w6_edge_d1_cap_set_two_byte", products: MAX_LISTING_SETTING_BULK_PRODUCTS, stored: null, set: CAP_TWO_BYTE },
+      { label: "w6_edge_d2_cap_set_ascii", products: MAX_LISTING_SETTING_BULK_PRODUCTS, stored: null, set: CAP_ASCII },
+    ];
+    const textBytesOf = (edge: Edge) => edge.products * 2 * Buffer.byteLength(edge.stored ?? edge.set ?? "", "utf8");
+
+    /** Each `_live` run's live peak (MiB over its start), by edge label: the inputs of plan 3.10's rule. */
+    const livePeaks = new Map<string, number | null>();
+    /**
+     * The heaviest point's live heap (the rule's input, plan 3.10): a full collection right before each revision
+     * insert and before COMMIT, when the stored rows, the merged records and one statement's JSON are all held, so
+     * what is left is what the write keeps, not garbage V8 has not collected yet. The forced collections change the
+     * run's own allocation peak, so this runs apart from the allocated measurement.
+     */
+    function liveHeapProbe(): { hook: (sql: string) => void; peakBytes: () => number | null } {
+      let peak: number | null = null;
+      return {
+        hook: (sql) => {
+          if (!collectGarbage || !(sql === "COMMIT" || sql.startsWith("INSERT INTO dropship.dropship_product_listing_setting_revisions"))) return;
+          collectGarbage();
+          peak = Math.max(peak ?? 0, process.memoryUsage().heapUsed);
+        },
+        peakBytes: () => peak,
+      };
+    }
+
+    async function runEdge(edge: Edge, mode: "rule" | "live" = "rule"): Promise<void> {
+      const productIds = await seedCatalogProducts(EDGE_FIRST_PRODUCT, edge.products);
+      const revisions = edge.storedRows ? await seedSettingRows(productIds, edge.storedRows.ebay, edge.stored)
+        : edge.stored !== null ? await seedStoredTexts(productIds, edge.stored, edge.stored) : new Map<number, number>();
+      await analyzeSettings();
+      // A stored edge's patch changes only the shelf, so every new revision carries its stored texts.
+      const patch = edge.patch ?? (edge.set === null ? { storeShelf: { mode: "none" } } : { textAbove: own(edge.set), textBelow: own(edge.set) });
+      const textBytes = textBytesOf(edge);
+      expect(textBytes).toBeLessThanOrEqual(MAX_BULK_TEXT_BYTES);
+      const counter: StatementCounter = { statements: 0 };
+      const probe = mode === "live" ? liveHeapProbe() : null;
+      collectGarbage?.();
+      const liveStart = process.memoryUsage().heapUsed;
+      // Filled in while the write runs; measure() logs it after.
+      const extra: Record<string, unknown> = { products: edge.products, textBytes,
+        ...(edge.storedRows?.ebay ? { ebayValueBytesPerRow: ebayValueBytes(edge.storedRows.ebay) } : {}) };
+      const result = await measure(mode === "live" ? `${edge.label}_live` : edge.label, edge.products, counter, async () => {
+        const answer = await bulk(scopedPool(counter, probe?.hook)).saveBulkForMember(MEMBER, STORE,
+          { idempotencyKey: bulkKey(edge.label), products: named(productIds, revisions), patch });
+        const peak = probe?.peakBytes() ?? null;
+        if (probe) {
+          const live = peak === null ? null : Number(((peak - liveStart) / 1_048_576).toFixed(1));
+          extra.livePeakDeltaMiB = live;
+          livePeaks.set(edge.label, live);
+        }
+        return answer;
+      }, extra);
+
+      expect(result).toMatchObject({ outcome: "changed", productCount: edge.products, changedProductCount: edge.products, clearedSizeCount: 0 });
+      expect(log.info).toHaveBeenCalledWith("dropship.listing_settings.products_bulk_saved", expect.objectContaining({
+        text_bytes: textBytes, product_count: edge.products, changed_count: edge.products }));
+      // Every new revision carries the texts (copied or set), counted by PostgreSQL, not read back.
+      const stored = await execute(`SELECT count(*)::int AS n, COALESCE(sum(octet_length(text_above) + octet_length(text_below)), 0)::bigint AS bytes
+        FROM dropship.dropship_product_listing_setting_revisions WHERE request_id = $1`, [result.requestId]);
+      expect(stored.rows[0]).toEqual({ n: edge.products, bytes: String(textBytes) });
+      const ebay = edge.storedRows?.ebay;
+      if (ebay) {
+        // And the eBay values: the category and policies copied, the shelf copied or set by the patch.
+        const carried = await execute(`SELECT count(*)::int AS n FROM dropship.dropship_product_listing_setting_revisions
+          WHERE request_id = $1 AND ebay_category_id = $2 AND fulfillment_policy_id = $3 AND return_policy_id = $4
+            AND payment_policy_id = $5 AND shelf_mode = 'own'`,
+        [result.requestId, ebay.category.categoryId, ebay.shipping.id, ebay.returns.id, ebay.payment.id]);
+        expect(carried.rows[0]).toEqual({ n: edge.products });
+      }
+    }
+
+    for (const edge of NO_TEXT_RUNS) {
+      const p0 = edge.products === MAX_LISTING_SETTING_BULK_PRODUCTS ? ", P0" : "";
+      it(`measures ${edge.products} products with nothing stored (PG 1${p0})`, () => runEdge(edge), BULK_TEST_TIMEOUT_MS);
+    }
+    for (const edge of DIAGNOSTIC_RUNS) {
+      it.runIf(HEAP_DIAGNOSTICS)(`measures ${edge.label} (PG 1, diagnostic)`, () => runEdge(edge), BULK_TEST_TIMEOUT_MS);
+    }
+
+    it("refuses P9's 3,750 products of 2 x 4,000 characters over the budget, before any lock or write (PG 2 (a))", async () => {
+      const productIds = await seedCatalogProducts(EDGE_FIRST_PRODUCT, 3_750);
+      const revisions = await seedStoredTexts(productIds, P9_TEXT, P9_TEXT);
+      const before = await allWrites();
+      const statements: string[] = [];
+      const error = await expectDropshipError(bulk(scopedPool(undefined, (sql) => { statements.push(sql); })).saveBulkForMember(MEMBER, STORE,
+        { idempotencyKey: bulkKey("p9-3750"), products: named(productIds, revisions), patch: { storeShelf: { mode: "none" } } }),
+      "DROPSHIP_LISTING_SETTINGS_BULK_TOO_LARGE");
+      expect(error.context).toMatchObject({ textBytes: 3_750 * P9_PRODUCT_BYTES, maxTextBytes: MAX_BULK_TEXT_BYTES, productCount: 3_750 });
+      expect(3_750 * P9_PRODUCT_BYTES).toBeGreaterThan(MAX_BULK_TEXT_BYTES);
+      expect(statements.some((sql) => sql.startsWith("LOCK TABLE") || /FOR UPDATE/.test(sql))).toBe(false);
+      expect(await allWrites()).toEqual(before);
+      expect(await ledgerRows()).toBe(0);
+    }, BULK_TEST_TIMEOUT_MS);
+
+    for (const edge of TEXT_EDGES) {
+      it(`measures edge ${edge.label} at ${edge.products} products (PG 2)`, () => runEdge(edge), BULK_TEST_TIMEOUT_MS);
+    }
+    // The same runs again for their live heap at the heaviest point (opt-in; the rule's inputs, see liveHeapProbe).
+    for (const edge of [...NO_TEXT_RUNS, ...DIAGNOSTIC_RUNS, ...TEXT_EDGES]) {
+      it.runIf(HEAP_DIAGNOSTICS)(`measures the live heap of ${edge.label} (PG 2, opt-in)`, () => runEdge(edge, "live"), BULK_TEST_TIMEOUT_MS);
+    }
+
+    it("computes the heavy-write stop rule from this run's measurements (plan 3.10; logged, not asserted)", () => {
+      const LIMIT_MIB = 128;
+      /** P9's budget and the rule's ceiling: the rule never raises the budget above it. */
+      const CEILING_BYTES = 30_000_000;
+      const allocatedOf = (label: string) => measurements.find((entry) => entry.measurement === label)?.heapUsedPeakDeltaMiB ?? null;
+      const liveOf = (label: string) => livePeaks.get(label) ?? null;
+      const p0Label = `w6_no_text_${MAX_LISTING_SETTING_BULK_PRODUCTS}`;
+      // Whole bytes first, so floating-point noise at an exact million cannot floor it to the million below.
+      const floorToMillion = (bytes: number) => Math.floor(Math.round(bytes) / 1_000_000) * 1_000_000;
+      /**
+       * P0, h and floor_to_1,000,000((128 - P0) / h) from one kind of peak: h is the worst, over the text edges, of (the
+       * edge's peak - the no-text peak at the same product count) / its text bytes. Null when a case did not run
+       * (filtered out, or a live run with the diagnostics off). `ruleBytes` is null when no edge grows with its text.
+       */
+      function stopRule(peakOf: (label: string) => number | null) {
+        const p0 = peakOf(p0Label);
+        const edges = TEXT_EDGES.map((edge) => {
+          const peak = peakOf(edge.label);
+          const fixed = peakOf(`w6_no_text_${edge.products}`);
+          return { label: edge.label, products: edge.products, textBytes: textBytesOf(edge), peak, fixed,
+            heapMiBPerTextByte: peak === null || fixed === null ? null : (peak - fixed) / textBytesOf(edge) };
+        });
+        if (p0 === null || edges.some((edge) => edge.heapMiBPerTextByte === null)) return null;
+        const h = Math.max(...edges.map((edge) => edge.heapMiBPerTextByte as number));
+        return { p0MiB: p0, worstHeapMiBPerTextByte: h, worstEdge: edges.find((edge) => edge.heapMiBPerTextByte === h)?.label ?? null,
+          anyEdgeOverLimit: p0 > LIMIT_MIB || edges.some((edge) => (edge.peak as number) > LIMIT_MIB),
+          ruleBytes: h > 0 ? floorToMillion((LIMIT_MIB - p0) / h) : null, edges };
+      }
+      // The rule in force judges the live heap, capped at the ceiling. It needs the forced collections, so it is null
+      // with the diagnostics off.
+      const live = stopRule(liveOf);
+      const liveRule = live && { ...live, computedMaxBulkTextBytes: Math.min(CEILING_BYTES, live.ruleBytes ?? CEILING_BYTES) };
+      // Logged for comparison only: plan 3.10 as first written, on the allocated peak and with no ceiling. Without the
+      // forced collections a baseline can hold an earlier case's garbage, so these figures are not comparable with the
+      // recorded ones; `gcBeforeRuns` says which kind this line is.
+      const allocated = stopRule(allocatedOf);
+      const allocatedRule = allocated && { ...allocated, computedMaxBulkTextBytes: allocated.ruleBytes };
+      if (!liveRule && !allocatedRule) return;
+
+      // Diagnostic, not a rule input: the realistic worst combination, with all of its live growth over P0 charged to
+      // its text bytes, and what the live rule would give were it one of the edges.
+      const combinedLive = liveOf(COMBINED_EDGE.label);
+      const combinedH = liveRule && combinedLive !== null ? (combinedLive - liveRule.p0MiB) / textBytesOf(COMBINED_EDGE) : null;
+      const combinedEdge = { label: COMBINED_EDGE.label, products: COMBINED_EDGE.products, textBytes: textBytesOf(COMBINED_EDGE),
+        ebayValueBytesPerRow: ebayValueBytes(EBAY_TYPICAL), allocatedPeakMiB: allocatedOf(COMBINED_EDGE.label), livePeakMiB: combinedLive,
+        liveOverLimit: combinedLive === null ? null : combinedLive > LIMIT_MIB, liveHeapMiBPerTextByteOverP0: combinedH,
+        liveRuleBytesIfAnEdge: liveRule && combinedH !== null ? Math.min(CEILING_BYTES,
+          floorToMillion((LIMIT_MIB - liveRule.p0MiB) / Math.max(liveRule.worstHeapMiBPerTextByte, combinedH))) : null };
+      // Diagnostic (allocated): the 10,000-product stored edges over a baseline that has rows with own texts of one
+      // character, so the cost of having own texts is not counted per byte.
+      const textRowsBaseline = allocatedOf(`w6_rows_one_character_texts_${MAX_LISTING_SETTING_BULK_PRODUCTS}`);
+      const allocatedStoredEdgesOverTextRows = textRowsBaseline === null ? null : TEXT_EDGES.filter((edge) => edge.stored !== null
+        && edge.products === MAX_LISTING_SETTING_BULK_PRODUCTS).map((edge) => ({ label: edge.label,
+        heapMiBPerTextByte: ((allocatedOf(edge.label) as number) - textRowsBaseline) / textBytesOf(edge) }));
+      process.stdout.write(`${JSON.stringify({ measurement: "w6_stop_rule", gcBeforeRuns: collectGarbage !== null,
+        maxBulkTextBytes: MAX_BULK_TEXT_BYTES, limitMiB: LIMIT_MIB, ceilingBytes: CEILING_BYTES,
+        liveRule, allocatedRule, combinedEdge, allocatedStoredEdgesOverTextRows,
+        diagnosticRuns: DIAGNOSTIC_RUNS.map((edge) => ({ label: edge.label, allocatedPeakMiB: allocatedOf(edge.label),
+          livePeakMiB: liveOf(edge.label) })) })}\n`);
+    });
+
+    it("rolls back on a stale product, and on a failed clean-up the revisions, the ledger, the audits and every clean-up (PG 3)", async () => {
+      await seedPolicyOverride({ sizeId: 101, fulfillment: "ship-a", label: "101" });
+      await seedShelf({ sizeId: 102, label: "102" });
+      await seedContent({ sizeId: 103, text: "Own words.", label: "103" });
+      await bulk().saveBulkForMember(MEMBER, STORE, { idempotencyKey: bulkKey("seed"), products: named([SECOND_PRODUCT]),
+        patch: { textAbove: own("Seeded.") } });
+      const revision = (await execute("SELECT revision_id FROM dropship.dropship_product_listing_settings WHERE product_id = $1", [SECOND_PRODUCT]))
+        .rows[0].revision_id as number;
+      const before = await allWrites();
+      const ledgerBefore = await ledgerRows();
+      // A shelf none changes both products; the policy, shelf and main text resets clean a leftover each.
+      const patch = { shippingPolicy: null, storeShelf: { mode: "none" }, mainText: null };
+
+      // Stale: the vendor saw product 8 before its row; one stale product refuses all, before any write.
+      const stale = await expectDropshipError(bulk().saveBulkForMember(MEMBER, STORE, { idempotencyKey: bulkKey("stale"),
+        products: named([PRODUCT_7, SECOND_PRODUCT]), patch }), "DROPSHIP_PRODUCT_LISTING_SETTINGS_VERSION_CONFLICT");
+      expect(stale.context).toMatchObject({ conflictCount: 1,
+        conflicts: [{ productId: SECOND_PRODUCT, expectedRevisionId: null, actualRevisionId: revision }] });
+      expect(await allWrites()).toEqual(before);
+      expect(await ledgerRows()).toBe(ledgerBefore);
+
+      // The last clean-up fails after the ledger, the revisions, the audits, the policy and the shelf clean-ups: all roll back.
+      const fresh = named([PRODUCT_7, SECOND_PRODUCT], new Map([[SECOND_PRODUCT, revision]]));
+      const failing = scopedPool(undefined, (sql) => {
+        if (sql.startsWith("WITH target AS MATERIALIZED") && sql.includes("FROM dropship.dropship_listing_content_settings s")) {
+          throw new Error("injected content clean-up failure");
+        }
+      });
+      await expect(bulk(failing).saveBulkForMember(MEMBER, STORE, { idempotencyKey: bulkKey("rolled-back"), products: fresh, patch }))
+        .rejects.toThrow("injected content clean-up failure");
+      expect(await allWrites()).toEqual(before);
+      expect(await ledgerRows()).toBe(ledgerBefore);
+      expect(await count("dropship.dropship_ebay_listing_policy_overrides", "fulfillment_policy_id = 'ship-a'")).toBe(1);
+      expect(await count("dropship.dropship_ebay_store_category_assignments")).toBe(1);
+
+      // The same change then commits as one: one ledger row, two revisions with their audits, one row and audit per cleared size.
+      const saved = await bulk().saveBulkForMember(MEMBER, STORE, { idempotencyKey: bulkKey("committed"), products: fresh, patch });
+      expect(saved).toMatchObject({ outcome: "changed", productCount: 2, changedProductCount: 2, clearedSizeCount: 3 });
+      expect(await allWrites()).toEqual({ ...before, productRevisions: before.productRevisions + 2, policyRevisions: before.policyRevisions + 1,
+        shelfRevisions: before.shelfRevisions + 1, contentRevisions: before.contentRevisions + 1, audit: before.audit + 2 + 3 });
+      expect(await ledgerRows()).toBe(ledgerBefore + 1);
+    });
+
+    it("answers a retry from the probe's ledger row as replayed, in exactly 7 statements, writing nothing (PG 4)", async () => {
+      await seedShelf({ sizeId: 101, label: "101" });
+      const body = { idempotencyKey: bulkKey("retry"), products: named([SECOND_PRODUCT, PRODUCT_7]), patch: { storeShelf: { mode: "none" } } };
+      const first = await bulk().saveBulkForMember(MEMBER, STORE, body);
+      expect(first).toMatchObject({ outcome: "changed", productCount: 2, changedProductCount: 2, clearedSizeCount: 1 });
+      // Product 7's row moves after the commit; the retry is answered from the ledger, not checked again.
+      const current = (await execute("SELECT revision_id FROM dropship.dropship_product_listing_settings WHERE product_id = $1", [PRODUCT_7]))
+        .rows[0].revision_id as number;
+      await bulk().saveBulkForMember(MEMBER, STORE, { idempotencyKey: bulkKey("later"), products: named([PRODUCT_7], new Map([[PRODUCT_7, current]])),
+        patch: { textBelow: own("Later.") } });
+      const moved = await allWrites();
+      const counter: StatementCounter = { statements: 0 };
+
+      const retry = await bulk(scopedPool(counter)).saveBulkForMember(MEMBER, STORE, body);
+
+      expect(retry).toEqual({ outcome: "replayed", requestId: first.requestId, productCount: 2, changedProductCount: null, clearedSizeCount: null });
+      expect(await allWrites()).toEqual(moved);
+      expect(await ledgerRows()).toBe(2);
+      // BEGIN, request lock, store lock, owner rows, the gate's store read, the probe, COMMIT.
+      expect(counter.statements).toBe(7);
+    });
+
+    it("leaves another vendor's and another store's per-size rows untouched (PG 5)", async () => {
+      await addVendorStore(24);
+      for (const [vendorId, storeId] of [[VENDOR, STORE], [11, OTHER_VENDOR_STORE], [VENDOR, 24]] as const) {
+        await seedPolicyOverride({ vendorId, storeId, sizeId: 101, fulfillment: "ship-a", label: `${storeId}` });
+        await seedShelf({ vendorId, storeId, sizeId: 102, label: `${storeId}` });
+        await seedContent({ vendorId, storeId, sizeId: 103, text: "Own words.", label: `${storeId}` });
+      }
+      const result = await bulk().saveBulkForMember(MEMBER, STORE, { idempotencyKey: bulkKey("scoped"), products: named([PRODUCT_7]),
+        patch: { shippingPolicy: null, storeShelf: null, mainText: null } });
+
+      expect(result).toMatchObject({ outcome: "changed", clearedSizeCount: 3 });
+      for (const storeId of [OTHER_VENDOR_STORE, 24]) {
+        expect(await count("dropship.dropship_ebay_listing_policy_overrides", "store_connection_id = $1 AND fulfillment_policy_id = 'ship-a'", [storeId])).toBe(1);
+        expect(await count("dropship.dropship_ebay_store_category_assignments", "store_connection_id = $1", [storeId])).toBe(1);
+        expect(await count("dropship.dropship_listing_content_revisions", "store_connection_id = $1", [storeId])).toBe(1);
+      }
+      expect(await count("dropship.dropship_ebay_listing_policy_overrides", "store_connection_id = $1", [STORE])).toBe(0);
+      expect(await count("dropship.dropship_ebay_store_category_assignments", "store_connection_id = $1", [STORE])).toBe(0);
+    });
+
+    it("refuses a paused store and another vendor's store, writing nothing (PG 6)", async () => {
+      await execute("UPDATE dropship.dropship_store_connections SET status = 'paused' WHERE id = $1", [STORE]);
+      const body = { idempotencyKey: bulkKey("paused"), products: named([PRODUCT_7]), patch: { storeShelf: { mode: "none" } } };
+      const paused = await expectDropshipError(bulk().saveBulkForMember(MEMBER, STORE, body), "DROPSHIP_LISTING_STORE_BLOCKED");
+      expect(paused.context).toMatchObject({ storeConnectionId: STORE, reason: "paused", classification: "permanent" });
+      await expectDropshipError(bulk().saveBulkForMember(MEMBER, OTHER_VENDOR_STORE, { ...body, idempotencyKey: bulkKey("not-mine") }),
+        "DROPSHIP_STORE_CONNECTION_REQUIRED");
+      expect(await allWrites()).toEqual({ productRevisions: 0, priceRevisions: 0, policyRevisions: 0, shelfRevisions: 0, contentRevisions: 0, audit: 0 });
+      expect(await ledgerRows()).toBe(0);
+    });
+
+    describe("concurrency (PG 7)", () => {
+      it("(a) answers a second W6 through the same service with BUSY while the first holds the gate, without taking a connection", async () => {
+        let connections = 0;
+        const paused = gate((sql) => sql === "COMMIT");
+        const inner = scopedPool(undefined, paused.hook);
+        const counting = { ...inner, connect: async () => { connections += 1; return inner.connect(); } } as unknown as Pool;
+        const service = bulk(counting);
+        const first = service.saveBulkForMember(MEMBER, STORE, { idempotencyKey: bulkKey("held"), products: named([PRODUCT_7]),
+          patch: { storeShelf: { mode: "none" } } });
+        try {
+          await within(paused.reached, "the first W6's commit");
+          const busy = await expectDropshipError(service.saveBulkForMember(MEMBER, STORE, { idempotencyKey: bulkKey("refused"),
+            products: named([SECOND_PRODUCT]), patch: { storeShelf: { mode: "none" } } }), "DROPSHIP_LISTING_SETTINGS_BUSY");
+          expect(busy.context).toMatchObject({ reason: "heavy_write_in_progress", retryAfterSeconds: 5, classification: "transient" });
+          expect(connections).toBe(1);
+          paused.open();
+          await expect(within(first, "the first W6")).resolves.toMatchObject({ outcome: "changed" });
+        } finally {
+          paused.open();
+          await within(Promise.allSettled([first]), "the gate case's clean-up");
+        }
+        expect(await ledgerRows()).toBe(1);
+      });
+
+      it("(b) makes a W5 on one of its products wait on the store lock, then see the W6 commit", async () => {
+        const paused = gate((sql) => sql === "COMMIT");
+        const w6 = bulk(scopedPool(undefined, paused.hook)).saveBulkForMember(MEMBER, STORE, { idempotencyKey: bulkKey("before-w5"),
+          products: named([PRODUCT_7, SECOND_PRODUCT]), patch: { storeShelf: { mode: "none" } } });
+        let w5: Promise<unknown> | undefined;
+        let outcome: unknown;
+        try {
+          await within(paused.reached, "the W6 commit");
+          w5 = products().saveForMember(MEMBER, STORE, PRODUCT_7, { idempotencyKey: productKey("after-w6"), expectedRevisionId: null,
+            patch: { storeShelf: null } }).then(() => null, (reason: unknown) => reason);
+          await waitUntilLockWait("dropship_listing_push_job", 1);
+          paused.open();
+          await expect(within(w6, "W6")).resolves.toMatchObject({ outcome: "changed", changedProductCount: 2 });
+          outcome = await within(w5, "W5");
+        } finally {
+          paused.open();
+          await within(Promise.allSettled([w6, ...(w5 ? [w5] : [])]), "the W5-after-W6 case's clean-up");
+        }
+        const written = (await execute("SELECT revision_id FROM dropship.dropship_product_listing_settings WHERE product_id = $1", [PRODUCT_7]))
+          .rows[0].revision_id as number;
+        expect(outcome).toMatchObject({ code: "DROPSHIP_PRODUCT_LISTING_SETTINGS_VERSION_CONFLICT",
+          context: { conflicts: [{ productId: PRODUCT_7, expectedRevisionId: null, actualRevisionId: written }] } });
+      });
+
+      it("(c) serializes one key sent twice at once: the same body replays from the ledger, another body is a conflict, another store too", async () => {
+        const body = { idempotencyKey: bulkKey("twice"), products: named([PRODUCT_7]), patch: { storeShelf: { mode: "none" } } };
+        const paused = gate((sql) => sql === "COMMIT");
+        const first = bulk(scopedPool(undefined, paused.hook)).saveBulkForMember(MEMBER, STORE, body);
+        let second: Promise<unknown> | undefined;
+        let third: Promise<unknown> | undefined;
+        try {
+          await within(paused.reached, "the first W6's commit");
+          // Other service instances, each with its own gate (as on a second dyno), so they reach the request lock.
+          second = bulk().saveBulkForMember(MEMBER, STORE, body);
+          third = bulk().saveBulkForMember(MEMBER, STORE, { ...body, patch: { storeShelf: null } }).then(() => null, (reason: unknown) => reason);
+          await waitUntilLockWait("dropship_listing_settings_request", 2);
+          paused.open();
+          const written = await within(first, "the first W6");
+          expect(written).toMatchObject({ outcome: "changed" });
+          await expect(within(second, "the same body")).resolves.toEqual({ ...(written as object), outcome: "replayed",
+            changedProductCount: null, clearedSizeCount: null });
+          await expect(within(third, "another body")).resolves.toMatchObject({ code: "DROPSHIP_IDEMPOTENCY_CONFLICT",
+            context: { mismatched: ["ledger.requestHash"] } });
+        } finally {
+          paused.open();
+          await within(Promise.allSettled([first, ...(second ? [second] : []), ...(third ? [third] : [])]), "the same-key case's clean-up");
+        }
+        expect(await ledgerRows()).toBe(1);
+
+        await addVendorStore(24);
+        const otherStore = await expectDropshipError(bulk().saveBulkForMember(MEMBER, 24, body), "DROPSHIP_IDEMPOTENCY_CONFLICT");
+        expect(otherStore.context?.mismatched).toEqual(["ledger.requestHash", "ledger.storeConnectionId"]);
+      });
+    });
+
+    it("answers a reset naming a product Card Shellz deleted without a fault: left out of the write and the clean-up (PG 8)", async () => {
+      await seedPolicyOverride({ sizeId: 101, fulfillment: "ship-a", label: "101" });
+      const withOthers = await bulk().saveBulkForMember(MEMBER, STORE, { idempotencyKey: bulkKey("deleted-and-7"),
+        products: named([PRODUCT_7, MISSING_PRODUCT]), patch: { shippingPolicy: null } });
+      expect(withOthers).toMatchObject({ outcome: "changed", productCount: 2, changedProductCount: 0, clearedSizeCount: 1 });
+
+      const alone = await bulk().saveBulkForMember(MEMBER, STORE, { idempotencyKey: bulkKey("deleted-alone"),
+        products: named([MISSING_PRODUCT]), patch: { shippingPolicy: null, mainText: null } });
+      expect(alone).toMatchObject({ outcome: "unchanged", productCount: 1, changedProductCount: 0, clearedSizeCount: 0 });
+      // The ledger row is written either way (plan D12), so a retry replays.
+      expect(await ledgerRows()).toBe(2);
+      expect(log.info).toHaveBeenLastCalledWith("dropship.listing_settings.products_bulk_saved", expect.objectContaining({ outcome: "unchanged" }));
+
+      // A value for the deleted product is the writer's foreign key, answered as not found, naming it; nothing written.
+      const before = { ...(await allWrites()), ledger: await ledgerRows() };
+      const value = await expectDropshipError(bulk().saveBulkForMember(MEMBER, STORE, { idempotencyKey: bulkKey("deleted-value"),
+        products: named([PRODUCT_7, MISSING_PRODUCT]), patch: { textAbove: own("Above.") } }), "DROPSHIP_LISTING_SETTINGS_PRODUCT_NOT_FOUND");
+      expect(value.context).toMatchObject({ productId: MISSING_PRODUCT, classification: "permanent" });
+      expect({ ...(await allWrites()), ledger: await ledgerRows() }).toEqual(before);
+    });
+
+    it("refuses a set text that carries the store to exactly cap + 1, writing nothing, and saves it on one product fewer, at the cap (PG 9)", async () => {
+      const ROWS = 10_000;
+      const ROOM = 10;
+      const PART = MAX_STORE_LISTING_TEXT_BYTES / ROWS / 2;
+      expect(Number.isInteger(PART)).toBe(true);
+      const seeded = await seedCatalogProducts(EDGE_FIRST_PRODUCT, ROWS);
+      await seedStoredTexts(seeded.slice(1), "a".repeat(PART), "b".repeat(PART));
+      // The first product is ROOM bytes short, so the store sits ROOM bytes under the cap.
+      await seedStoredTexts(seeded.slice(0, 1), "a".repeat(PART), "b".repeat(PART - ROOM));
+      // A one-byte text on ROOM + 1 products is one byte over; on ROOM products it lands exactly at the cap.
+      const targets = await seedCatalogProducts(EDGE_FIRST_PRODUCT + ROWS, ROOM + 1);
+      const before = { ...(await allWrites()), ledger: await ledgerRows() };
+
+      const refused = await expectDropshipError(bulk().saveBulkForMember(MEMBER, STORE, { idempotencyKey: bulkKey("over-cap"),
+        products: named(targets), patch: { textAbove: own("S") } }), "DROPSHIP_LISTING_SETTINGS_TOO_LARGE");
+      expect(refused.context).toMatchObject({ reason: "store_text_limit", textBytes: MAX_STORE_LISTING_TEXT_BYTES + 1,
+        maxTextBytes: MAX_STORE_LISTING_TEXT_BYTES });
+      expect({ ...(await allWrites()), ledger: await ledgerRows() }).toEqual(before);
+
+      const saved = await bulk().saveBulkForMember(MEMBER, STORE, { idempotencyKey: bulkKey("at-cap"),
+        products: named(targets.slice(0, ROOM)), patch: { textAbove: own("S") } });
+      expect(saved).toMatchObject({ outcome: "changed", changedProductCount: ROOM });
+      expect(log.info).toHaveBeenLastCalledWith("dropship.listing_settings.products_bulk_saved", expect.objectContaining({
+        store_text_bytes: MAX_STORE_LISTING_TEXT_BYTES, text_bytes: ROOM }));
     }, BULK_TEST_TIMEOUT_MS);
   });
 });
