@@ -1,4 +1,5 @@
 import { AsyncLocalStorage } from "node:async_hooks";
+import { assertRecreatedListingStockReady } from "./listing-recreation-stock.repository";
 import { createHash, randomUUID } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
 import { canonicalJson } from "@shared/utils/canonical-json";
@@ -483,6 +484,7 @@ export class PostgresQuantityPublicationAdmission implements QuantityPublication
         await client.query("COMMIT"); inTransaction = false;
         fail("PUBLICATION_PRIOR_OUTCOME_UNRESOLVED", "A prior provider quantity outcome requires reconciliation.", { attemptId: unresolved.id });
       }
+      if (!setupZero) await assertRecreatedListingStockReady(client, [scope, ...memberScopes]);
       const cooldown = (await client.query<{ retry_not_before: Date }>(`SELECT MAX(retry_not_before) AS retry_not_before
         FROM inventory.quantity_publication_cooldowns c
         JOIN jsonb_to_recordset($1::jsonb) AS incoming("providerKey" text,"providerScopeType" text,"externalScopeId" text,"externalInventoryItemId" text)

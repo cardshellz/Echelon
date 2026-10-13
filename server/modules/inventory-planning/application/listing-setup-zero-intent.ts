@@ -30,6 +30,13 @@ export const listingSetupZeroIntentSchema = z
             productVariantId: id,
             sku: z.string().trim().min(1).max(100),
             quantity: z.literal(0),
+            // Supplied only by the listing owner after verifying a settled prior
+            // operation, its exact retained identity, and a fresh provider 404.
+            recreation: z.object({
+              sourceOperationId: z.string().uuid(),
+              sourceHash: z.string().regex(/^[a-f0-9]{64}$/),
+              previousExternalProductId: text.nullable(),
+            }).strict().optional(),
           })
           .strict(),
       )
@@ -83,7 +90,10 @@ export function validateListingSetupZeroIntent(
   parsed.items.sort(
     (left, right) => left.productVariantId - right.productVariantId,
   );
-  parsed.items.forEach(Object.freeze);
+  parsed.items.forEach(item => {
+    if (item.recreation) Object.freeze(item.recreation);
+    Object.freeze(item);
+  });
   Object.freeze(parsed.items);
   return Object.freeze(parsed);
 }

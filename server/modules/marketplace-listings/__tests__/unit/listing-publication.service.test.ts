@@ -102,6 +102,7 @@ function setup(snapshot = publicationSnapshot()) {
   const linkRecreated = vi.fn(async () => ({ linked: 1 }));
   const checkRecreationMapping = vi.fn(async (_account: unknown, input: { previousExternalProductId: string | null }) => ({ externalProductId: input.previousExternalProductId }));
   const inventory = {
+    resumeRecreationStock: vi.fn<ListingPublicationDependencies["inventory"]["resumeRecreationStock"]>(async () => ({ ready: true, message: "Stock confirmed" })),
     inspect: vi.fn<ListingPublicationDependencies["inventory"]["inspect"]>(
       async () => structuredClone(snapshot.review.inventory),
     ),
@@ -341,6 +342,7 @@ describe("ListingPublicationService exact reviewed intent", () => {
     expect(h.inventory.inspect).toHaveBeenCalledExactlyOnceWith(
       snapshot.account,
       [snapshot.catalog[1]],
+      [],
     );
     const saved = h.store.saveReview.mock.calls[0][0];
     expect(saved.draft).toEqual({
@@ -370,6 +372,7 @@ describe("ListingPublicationService exact reviewed intent", () => {
     expect(h.inventory.inspect).toHaveBeenCalledExactlyOnceWith(
       snapshot.account,
       [snapshot.catalog[1]],
+      undefined,
     );
     expect(h.provider.submit).not.toHaveBeenCalled();
     expect(h.inventory.submitZero).not.toHaveBeenCalled();
@@ -445,6 +448,7 @@ describe("ListingPublicationService exact reviewed intent", () => {
       h.operation.snapshot.prepared,
       h.operation.snapshot.review.inventory,
       expect.any(Function),
+      undefined,
     );
     expect(h.provider.submit.mock.calls[0][1].zeroStockAdmission.items).toEqual(
       [{ productVariantId: 11, sku: "SKU-11", quantity: 0 }],
@@ -1208,14 +1212,13 @@ describe("deleted Walmart listing recreation", () => {
     expect((await h.service.operations(104))[0].items[0].title).toBe("Card sleeves 10");
   });
 
-  function replacement() {
+  function replacement(snapshot = publicationSnapshot()) {
     const prior = publicationOperation();
     prior.id = testId(20);
     prior.progress.batches[0].state = "processed";
     prior.progress.batches[0].submissionId = "original-feed";
     prior.progress.items[0] = { ...prior.progress.items[0], state: "superseded",
       recreatedByOperationId: testId(3), externalProductId: "original-wpid" };
-    const snapshot = publicationSnapshot();
     snapshot.draft.items[0].recreateFromOperationId = prior.id;
     snapshot.recreations = [{ operationId: prior.id, variantId: 10, sku: "SKU-10",
       previousExternalProductId: "original-wpid", sourceHash: listingHash(prior.snapshot), checkedAt: fixedNow.toISOString() }];
@@ -1237,7 +1240,7 @@ describe("deleted Walmart listing recreation", () => {
       sku: "SKU-10", productVariantId: 10, previousExternalProductId: "original-wpid", expectedExternalProductId: "WPID-SKU-10",
     }, "listing-publication-worker");
     expect(h.link).not.toHaveBeenCalled();
-    expect(h.store.saveProgress.mock.calls.at(-1)?.[1].items[0]).toMatchObject({ state: "verified", externalProductId: "WPID-SKU-10", stockState: "setup_required" });
+    expect(h.store.saveProgress.mock.calls.at(-1)?.[1].items[0]).toMatchObject({ state: "verified", externalProductId: "WPID-SKU-10", stockState: "ready" });
   });
   it("can retry a recreation rejected before Walmart received a feed", async () => {
     const h = replacement();
@@ -1245,6 +1248,24 @@ describe("deleted Walmart listing recreation", () => {
     await h.run();
     expect(h.provider.submit).toHaveBeenCalledOnce();
     expect(h.linkRecreated).toHaveBeenCalledOnce();
+  });
+  it("submits other reviewed feed families before a recreation handoff can advance the stock target revision", async () => {
+    const snapshot = publicationSnapshot([10, 11]);
+    snapshot.prepared[1].feedType = "MP_ITEM_MATCH";
+    const h = replacement(snapshot);
+    h.operation.progress.batches = [
+      { ...h.operation.progress.batches[0], variantIds: [10] },
+      { ...h.operation.progress.batches[0], key: "match-batch", correlationId: testId(9), variantIds: [11] },
+    ];
+    h.provider.status.mockResolvedValueOnce({ state: "processed", items: [result("SKU-10", "accepted")] })
+      .mockResolvedValue({ state: "processed", items: [result("SKU-11", "accepted")] });
+    await h.run();
+    expect(h.provider.submit).toHaveBeenCalledTimes(2);
+    expect(h.inventory.resumeRecreationStock).not.toHaveBeenCalled();
+    expect(h.store.saveProgress.mock.calls.at(-1)?.[1].items[0]).toMatchObject({ state: "accepted", stockState: "setup_required" });
+    await h.run();
+    expect(h.inventory.resumeRecreationStock).toHaveBeenCalledOnce();
+    expect(h.store.saveProgress.mock.calls.at(-1)?.[1].items[0]).toMatchObject({ state: "verified", stockState: "ready" });
   });
   it("requires a new review if the SKU reappears before a queued recreation sends", async () => {
     const h = replacement();

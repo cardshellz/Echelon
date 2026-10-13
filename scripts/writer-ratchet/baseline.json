@@ -721,6 +721,9 @@
   "inventory.publication_initial_scope_receipts": [
     "modules/inventory-planning"
   ],
+  "inventory.publication_listing_recreation_stock_receipts": [
+    "modules/inventory-planning"
+  ],
   "inventory.publication_listing_setup_identities": [
     "modules/inventory-planning"
   ],

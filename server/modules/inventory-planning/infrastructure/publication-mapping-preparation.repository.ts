@@ -155,7 +155,7 @@ export async function applyMappingPreparation(client: PoolClient, scopeKeys: str
     productVariantIds: readonly number[];
     expectedReviewHash: string;
     idempotencyKey: string;
-}, actor: string, requestHash: string, now: Date, changedVariantIds: readonly number[]): Promise<PublicationMappingPreparationReceipt> {
+}, actor: string, requestHash: string, now: Date, changedVariantIds: readonly number[], replacementListingVariantIds: readonly number[] = []): Promise<PublicationMappingPreparationReceipt> {
     await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))", [`mapping-preparation:${input.idempotencyKey}`]);
     const previous = (await client.query<{
         request_hash: string;
@@ -199,7 +199,8 @@ export async function applyMappingPreparation(client: PoolClient, scopeKeys: str
     const productIds = changedVariantIds.length ? [...new Set([input.productId, ...(await readCatalogStockVariantOwners(client, mappingIds)).map(row => row.productId)])].sort((a, b) => a - b) : [input.productId];
     if (productIds.length > 1000)
         fail("STOCK_MAPPING_SCOPE_TOO_LARGE", "The complete stock destination exceeds the preparation limit. No partial mapping was applied.");
-    const publisher = createTransactionScopedInventoryPublicationService(client, { channelId: target.channel_id });
+    const publisher = createTransactionScopedInventoryPublicationService(client, { channelId: target.channel_id,
+        replacementListings: replacementListingVariantIds.map(productVariantId => ({ publicationTargetId: target.id, productVariantId })) });
     let publicationRows = 0;
     for (const productId of productIds) {
         const result = await publisher.publishProduct({ productId, publicationTargetId: target.id, dryRun: false, triggeredBy: "listing_mapping_preparation" }, async () => null);
