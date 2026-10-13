@@ -47,7 +47,7 @@ dbDescribe.sequential("verified Walmart listing joins canonical ATP", () => {
   };
   beforeEach(async () => {
     database = await createInventoryCutoverTestDatabase(url, disposable, cutoverCompositionBaseSql);
-    await installWalmartPublicationInventoryFixture(database.pool, { includeWalmartMapping: false });
+    await installWalmartPublicationInventoryFixture(database.pool, { includeWalmartMapping: false, includeQuantityRecoveryMigrations: true });
     await activateWalmartPublicationInventoryFixture(database.pool);
     await database.pool.query(`UPDATE channels.channel_feeds SET channel_product_id='WPID-P5' WHERE product_variant_id=101`);
     await installCutoverAdmissionFixturePrerequisites(database.pool);
@@ -164,7 +164,7 @@ dbDescribe.sequential("verified Walmart listing joins canonical ATP", () => {
     }));
     const channels = { connection: async () => ({ channel_id: 36, connection_id: 8, ship_node_id: "test-location", warehouse_id: 1,
       partner_id: "partner-36", revision: 1, environment: "production" }),
-      withListingWrites: async <T>(_account: unknown, _skus: readonly string[], work: () => Promise<T>) => work(),
+      withStockWrites: async <T>(_account: unknown, _sku: string, _quantity: number, work: () => Promise<T>) => work(),
       requireRuntime: () => undefined, api: () => api,
       repository: { inventoryMappings: async () => [{ product_variant_id: 101, channel_sku: "P5" }],
         assertWarehouse: async () => undefined, withLock: async <T>(_channel: number, work: () => Promise<T>) => work() },

@@ -22,5 +22,6 @@ export function createListingLifecycleService(
     ),
     now: () => new Date(),
     uuid: randomUUID,
+    checkPresence: (account, sku) => walmart.observeListingPresence(account, sku),
   });
 }

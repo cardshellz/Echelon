@@ -97,7 +97,11 @@ export function ChannelListingFeed(props: ChannelListingFeedProps) {
       operation: null,
       issue: null,
     }));
-  const combinedRows = [...allRows, ...retainedRows];
+  const combinedRows = [...allRows, ...retainedRows].map(row => {
+    if (!row.sku || !lifecycle.missingSkus.has(row.sku)) return row;
+    return { ...row, missingOnWalmart: true,
+      operation: row.operation ? { ...row.operation, item: { ...row.operation.item, missingOnProvider: true } } : null };
+  });
   const removed = (sku: string | null) =>
     sku !== null &&
     lifecycle.bySku.get(sku)?.action === "remove" &&
@@ -319,9 +323,10 @@ export function ChannelListingFeed(props: ChannelListingFeedProps) {
             variant="outline"
             className="h-9 w-9 shrink-0 px-0 sm:w-auto sm:px-3"
             aria-label="Refresh listings"
-            disabled={linkLocked}
+            disabled={linkLocked || lifecycle.refreshingPresence}
             onClick={() => {
               catalog.refresh();
+              lifecycle.refreshPresence();
               if (stock.data || stock.error) void stock.refetch();
             }}
           >

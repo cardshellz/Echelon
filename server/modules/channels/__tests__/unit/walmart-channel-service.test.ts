@@ -1,7 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 import type { WalmartChannelStatus } from "@shared/types/walmart-channel";
 import type { FulfillmentProviderCredentialCipher } from "../../../shipping-engine/application/connected-fulfillment-method-catalog.service";
-import { WalmartChannelService } from "../../adapters/walmart/walmart-channel.service";
+import { WalmartChannelService, walmartListingAccount } from "../../adapters/walmart/walmart-channel.service";
+import { WalmartApiError } from "../../adapters/walmart/walmart-client";
+import type { ListingWriteGuard } from "../../../marketplace-listings/application/listing-lifecycle-ports";
+import type { ListingPresence } from "@shared/types/channel-listing-presence";
 import { WalmartConnectionRepository, type WalmartConnectionRecord } from "../../adapters/walmart/walmart-connection.repository";
 import { WalmartUsApi, type WalmartShipNode } from "../../adapters/walmart/walmart-us-api";
 
@@ -13,7 +16,7 @@ const node = (nodeType: string, status = "ACTIVE", shipNode = "NODE-1"): Walmart
   shipNode, shipNodeName: "Seller location", nodeType, status,
 });
 
-function setup(nodes: WalmartShipNode[], partnerId = command.expectedPartnerId) {
+function setup(nodes: WalmartShipNode[], partnerId = command.expectedPartnerId, listingWrites?: ListingWriteGuard) {
   // Exercise the provider response parser as well as the service policy. No live
   // API or database calls are allowed by this fixture.
   const request = vi.fn(async (method: string, path: string): Promise<unknown> => {
@@ -49,10 +52,42 @@ function setup(nodes: WalmartShipNode[], partnerId = command.expectedPartnerId) 
   const save = vi.spyOn(repository, "save").mockResolvedValue();
   const control = vi.spyOn(repository, "control").mockResolvedValue();
   vi.spyOn(repository, "assertWarehouse").mockResolvedValue();
-  const service = new WalmartChannelService(repository, cipher, { liveEnabled: true, productionServer: true },
+  const service = new WalmartChannelService(repository, cipher, { liveEnabled: true, productionServer: true, listingWrites },
     () => now, () => api);
-  return { service, repository, request, save, control };
+  return { service, repository, request, save, control, row };
 }
+
+describe("Walmart exact SKU presence observations", () => {
+  function presenceFixture() {
+    const observePresence = vi.fn(async (_account: unknown, _sku: string, observe: () => Promise<ListingPresence>) => observe());
+    const guard: ListingWriteGuard = { withAllowed: async (_account, _skus, work) => work(), observePresence };
+    const f = setup([node("VIRTUAL")], command.expectedPartnerId, guard);
+    return { ...f, observePresence, account: walmartListingAccount(f.row) };
+  }
+  it("records a definite exact-item 404 as missing and sends no provider writes", async () => {
+    const f = presenceFixture();
+    f.request.mockRejectedValue(new WalmartApiError("ITEM_NOT_FOUND", "Missing", false, 404));
+    expect(await f.service.observeListingPresence(f.account, "SKU")).toEqual({ sku: "SKU", state: "missing", externalProductId: null, checkedAt: now.toISOString() });
+    expect(f.request).toHaveBeenCalledExactlyOnceWith("GET", "/v3/items/SKU?productIdType=SKU");
+  });
+  it.each([401, 429, 500])("preserves uncertainty instead of reporting deletion for HTTP %s", async status => {
+    const f = presenceFixture();
+    const error = new WalmartApiError("HTTP_ERROR", "Unavailable", status >= 500, status);
+    f.request.mockRejectedValue(error);
+    await expect(f.service.observeListingPresence(f.account, "SKU")).rejects.toBe(error);
+  });
+  it("rejects timeout, malformed success, wrong SKU and an unconfirmed recreation", async () => {
+    const f = presenceFixture();
+    f.request.mockRejectedValueOnce(new Error("socket timeout"));
+    await expect(f.service.observeListingPresence(f.account, "SKU")).rejects.toThrow("socket timeout");
+    f.request.mockResolvedValueOnce({ unexpected: "response" });
+    await expect(f.service.observeListingPresence(f.account, "SKU")).rejects.toThrow();
+    f.request.mockResolvedValueOnce({ ItemResponse: [{ sku: "WRONG", wpid: "WPID", productName: "Sleeves", lifecycleStatus: "ACTIVE", publishedStatus: "PUBLISHED" }] });
+    await expect(f.service.observeListingPresence(f.account, "SKU")).rejects.toThrow();
+    f.request.mockRejectedValueOnce(new WalmartApiError("ITEM_NOT_FOUND", "Missing", false, 404));
+    await expect(f.service.observeListingPresence(f.account, "SKU", { operationId: "00000000-0000-4000-8000-000000000001", externalProductId: "WPID" })).rejects.toMatchObject({ status: 404 });
+  });
+});
 
 describe("Walmart seller fulfillment-center eligibility", () => {
   it("allows credential replacement after the original import boundary ages past 180 days", async () => {
