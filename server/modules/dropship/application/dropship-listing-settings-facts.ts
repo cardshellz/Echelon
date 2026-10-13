@@ -36,14 +36,14 @@ import {
 import {
   applyEbayListingPolicyOverride, pricingPolicyMatchesCandidate, withRulePriceLimitCheck,
   type DropshipExistingVendorListing, type DropshipListingCatalogCandidate,
-  type DropshipListingStoreContext, type DropshipPricingPolicyRecord,
+  type DropshipListingStoreContext, type DropshipPricingPolicyCandidate, type DropshipPricingPolicyRecord,
 } from "./dropship-listing-preview-service";
 import {
   layersFor, mergeListingPolicyOverride, resolveListingStoreShelf, type ListingSettingLayers, type ListingSettingLayerValues,
 } from "./dropship-listing-setting-layers";
 import type { DropshipStoreListingConfig } from "./dropship-marketplace-listing-provider";
 import type { DropshipProductCost } from "./dropship-product-cost";
-import { createRulePriceResolver, rulePriceContextOf } from "./dropship-rule-price";
+import { createRulePriceResolver, rulePriceContextOf, type RulePriceCandidate, type RulePriceResolver } from "./dropship-rule-price";
 import type { DropshipAtpSnapshot } from "./dropship-selection-atp-service";
 
 /**
@@ -203,20 +203,52 @@ export function buildListingSettingsFacts(inputs: ListingSettingsInputs): Listin
   };
 }
 
-function sizePriceFacts(candidate: DropshipListingCatalogCandidate, inputs: ListingSettingsInputs,
-  resolver: ReturnType<typeof createRulePriceResolver>): ListingSettingsSizePrice {
-  const id = candidate.productVariantId;
-  const saved = inputs.savedPrices.get(id) ?? null;
-  const cost = inputs.costs.get(id) ?? null;
+/** One size's price as the page shows it (its "Now"), from the inputs every price writer and reader shares. */
+export interface EffectiveSizePrice {
+  /** The .ops cost when it is known and a valid amount, else null. */
+  costCents: number | null;
+  /** The rule price with its Card Shellz limit check; null when nothing can price the size by rule. */
+  rulePrice: (RulePriceResult & { blockedByLimit: boolean }) | null;
+  resolved: Pick<ListingPriceSetting, "effectivePriceCents" | "source">;
+  priceCents: number | null;
+}
+
+/**
+ * A size's effective price: its .ops cost, its rule price (only when a rule
+ * covers it, with the Card Shellz limit check that sends a blocked `inherit`
+ * size to retail, L1), then the shared resolver over the saved setting, the
+ * rule price, the retail price and an earlier push's price. The read model's
+ * size price and the W5/W7 price-change builder both call this one function,
+ * so a builder's "before" is the page's "Now" by construction (plan 6.4). Pure.
+ */
+export function effectiveSizePrice(input: {
+  candidate: RulePriceCandidate & DropshipPricingPolicyCandidate;
+  saved: Pick<SavedListingPriceRevision, "overridePriceCents" | "pricingMode"> | null;
+  cost: DropshipProductCost | null;
+  pricingPolicies: readonly DropshipPricingPolicyRecord[];
+  existingListingPriceCents: number | null;
+  resolver: RulePriceResolver;
+}): EffectiveSizePrice {
+  const { candidate, saved, cost, resolver } = input;
   const costCents = cost?.status === "available" ? validAmount(cost.unitCostCents) : null;
   // A size nothing can price by rule has no rule price, as in the preview and the per-size price.
   const rulePrice = resolver.covers(candidate)
-    ? withRulePriceLimitCheck(candidate, inputs.pricingPolicies, resolver.priceAtCost(candidate, costCents))
+    ? withRulePriceLimitCheck(candidate, input.pricingPolicies, resolver.priceAtCost(candidate, costCents))
     : null;
-  const ruleOwned = listingPriceFollowsRules({ saved, rulePrice });
   const resolved = resolveListingPrice({ saved, rulePrice, defaultPriceCents: candidate.defaultRetailPriceCents,
-    existingListingPriceCents: inputs.existingListings.get(id)?.vendorRetailPriceCents ?? null });
-  const priceCents = resolved.effectivePriceCents;
+    existingListingPriceCents: input.existingListingPriceCents });
+  return { costCents, rulePrice, resolved, priceCents: resolved.effectivePriceCents };
+}
+
+function sizePriceFacts(candidate: DropshipListingCatalogCandidate, inputs: ListingSettingsInputs,
+  resolver: RulePriceResolver): ListingSettingsSizePrice {
+  const id = candidate.productVariantId;
+  const saved = inputs.savedPrices.get(id) ?? null;
+  const { costCents, rulePrice, resolved, priceCents } = effectiveSizePrice({
+    candidate, saved, cost: inputs.costs.get(id) ?? null, pricingPolicies: inputs.pricingPolicies,
+    existingListingPriceCents: inputs.existingListings.get(id)?.vendorRetailPriceCents ?? null, resolver,
+  });
+  const ruleOwned = listingPriceFollowsRules({ saved, rulePrice });
   // An `inherit` size the rules give no usable price uses the retail price
   // (owner decisions A3 and L1). The vendor sees that it is a fallback, and why.
   const retailFallback = saved?.pricingMode === "inherit" && resolved.source === "catalog_default";

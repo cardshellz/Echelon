@@ -8,9 +8,12 @@ import {
 import type { ListingPriceTransaction } from "../application/dropship-listing-price-service";
 import type {
   ListingSettingActor,
+  ListingSettingPreflightTransaction,
   ListingSettingSystemTransaction,
   ListingSettingWriteRepository,
   ListingSettingWriteTransaction,
+  ListingTextBytes,
+  ListingTextBytesInput,
 } from "../application/dropship-listing-setting-writes";
 import { DropshipError } from "../domain/errors";
 import { REQUEST_KEY_CHILD_SOURCES, type RequestKeyChildSource, type RequestKeyUse } from "../domain/listing-setting-request-key-use";
@@ -23,7 +26,9 @@ import {
 import { readCategoryListingSettings, saveCategoryListingSettingWithClient } from "./dropship-category-listing-settings.repository";
 import { saveEbayCategoryRulesProfileWithClient } from "./dropship-ebay-category-rules.repository";
 import { saveListingContentWithClient } from "./dropship-listing-content.repository";
+import { PgDropshipListingPreviewRepository } from "./dropship-listing-preview.repository";
 import { listingPriceTransactionForClient } from "./dropship-listing-price.repository";
+import { clearSizeLeftoversWithClient } from "./dropship-listing-setting-leftovers.repository";
 import { MAX_LISTING_SETTING_ACTOR_ID_LENGTH, listingSettingsIdempotencyConflict, type ListingSettingWriteScope } from "./dropship-listing-setting-shared.repository";
 import {
   acknowledgeCategoryMovesWithClient,
@@ -35,7 +40,9 @@ import {
   saveProductListingSettingWithClient,
   saveProductListingSettingsBulkWithClient,
 } from "./dropship-product-listing-settings.repository";
+import { readPricingProfile } from "./dropship-pricing-profile.reader";
 import { selectedCatalogReaderForTransaction } from "./dropship-selected-catalog.reader";
+import { PgShellzClubProductCostAdapter } from "./shellz-club-product-cost.adapter";
 
 /**
  * The one transaction PR 9's listing-settings services write through (plan PR
@@ -58,7 +65,14 @@ import { selectedCatalogReaderForTransaction } from "./dropship-selected-catalog
  *    (categories before products, the order a Card Shellz rename writes them).
  *    The replay probe (findRequestKeyUse) takes no lock and may run before it;
  * 5. the target rows FOR UPDATE, inside the writers;
- * 6. the writes: ledger, revisions, current rows, audit.
+ * 6. the writes: ledger, revisions, current rows, audit;
+ * 7. the per-size leftover clean-ups (clearSizeLeftovers, plan PR 9, P17),
+ *    after the parent writer and the size prices: the old per-size writers'
+ *    feature locks, policy then shelf, then their rows FOR UPDATE. Those
+ *    writers never take the store lock, so this adds no cycle.
+ *
+ * The read-only preflight (plan PR 9, 6.2 #4) takes none of these locks: it
+ * reads one snapshot before any eBay call and writes nothing.
  *
  * The transaction object enforces what it can of that order and of the plan's
  * key rules; a breach is DROPSHIP_LISTING_SETTINGS_INVARIANT_FAILED, a
@@ -78,6 +92,12 @@ const STORE_LOCK_SQL = "SELECT pg_advisory_xact_lock(hashtext('dropship_listing_
 const VENDOR_OWNER_SQL = `SELECT v.id AS vendor_id FROM dropship.dropship_vendors v
        JOIN dropship.dropship_store_connections sc ON sc.vendor_id = v.id
        WHERE v.member_id::text = $1 AND sc.id = $2 FOR SHARE OF v, sc`;
+/** The preflight's owner read: PostgreSQL refuses a row lock in a read-only transaction, and the preflight holds none. */
+const PREFLIGHT_OWNER_SQL = `SELECT v.id AS vendor_id FROM dropship.dropship_vendors v
+       JOIN dropship.dropship_store_connections sc ON sc.vendor_id = v.id
+       WHERE v.member_id::text = $1 AND sc.id = $2`;
+/** A snapshot with no lock, as the listing-settings read load opens (dropship-listing-settings.repository.ts). */
+const PREFLIGHT_BEGIN_SQL = "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY";
 const SYSTEM_OWNER_SQL = `SELECT sc.vendor_id FROM dropship.dropship_store_connections sc
        JOIN dropship.dropship_vendors v ON v.id = sc.vendor_id
        WHERE sc.id = $1 FOR SHARE OF v, sc`;
@@ -91,19 +111,59 @@ export const LISTING_SELECTION_LOCK_SQL = `LOCK TABLE dropship.dropship_catalog_
 const CATEGORY_LOCK_SQL = "SELECT id FROM catalog.product_categories WHERE id = ANY($1::int[]) ORDER BY id FOR SHARE";
 const PRODUCT_LOCK_SQL = "SELECT id FROM catalog.products WHERE id = ANY($1::int[]) ORDER BY id FOR SHARE";
 const VARIANT_LOCK_SQL = "SELECT id FROM catalog.product_variants WHERE id = ANY($1::int[]) ORDER BY id FOR SHARE";
+/**
+ * The sizes of the products a vendor could choose: the selected-catalog
+ * scan's sellable filter (dropship-selected-catalog.reader.ts), as the read
+ * side counts a product's sizes (countOfferedSizes).
+ */
+const PRODUCT_SIZES_SQL = `SELECT id FROM catalog.product_variants WHERE product_id = ANY($1::int[]) AND requires_shipping = true
+       AND COALESCE(track_inventory, true) = true AND sales_eligibility = 'sellable' ORDER BY id`;
+/**
+ * The store's saved product text in UTF-8 bytes (plan 6.2 #6): every product
+ * row, the same without the replaced fields of $3, and $3's own. One
+ * statement, no text selected, no lock (every product-text writer holds the
+ * store lock). octet_length(text) is the UTF-8 byte count only on a UTF8
+ * server, so the statement returns that check with the sums.
+ */
+const LISTING_TEXT_BYTES_SQL = `SELECT current_setting('server_encoding') = 'UTF8' AS utf8,
+       COALESCE(sum(COALESCE(octet_length(r.text_above), 0) + COALESCE(octet_length(r.text_below), 0)
+         + COALESCE(octet_length(r.body_text), 0)), 0)::text AS store_bytes,
+       COALESCE(sum(CASE WHEN s.product_id = ANY($3::int[]) THEN
+           (CASE WHEN $4::boolean THEN 0 ELSE COALESCE(octet_length(r.text_above), 0) END)
+         + (CASE WHEN $5::boolean THEN 0 ELSE COALESCE(octet_length(r.text_below), 0) END)
+         + (CASE WHEN $6::boolean THEN 0 ELSE COALESCE(octet_length(r.body_text), 0) END)
+         ELSE COALESCE(octet_length(r.text_above), 0) + COALESCE(octet_length(r.text_below), 0)
+           + COALESCE(octet_length(r.body_text), 0) END), 0)::text AS kept_store_bytes,
+       COALESCE(sum(CASE WHEN s.product_id = ANY($3::int[]) THEN COALESCE(octet_length(r.text_above), 0)
+         + COALESCE(octet_length(r.text_below), 0) + COALESCE(octet_length(r.body_text), 0) END), 0)::text AS target_bytes
+     FROM dropship.dropship_product_listing_settings s
+     JOIN dropship.dropship_product_listing_setting_revisions r ON r.id = s.revision_id
+     WHERE s.vendor_id = $1 AND s.store_connection_id = $2`;
 
 /**
- * The request-key unique constraints of 0738 and 0739, and the size price
- * child key of 0657 (plan PR 9, P32): two members of one vendor sending one
- * key hold different request locks, so both can miss the replay probe and the
- * second insert is a key reuse, not a fault. A 23505 on any other constraint
- * is not a key reuse and is rethrown.
+ * The request-key unique constraints of 0738 and 0739, the size price child
+ * key of 0657 and the policy, shelf and content child keys of 217, 215 and
+ * 0660 (plan PR 9, P32). PR 9's routes never reach these: a vendor has one
+ * member, and the request lock is member:key, so a second use of a key waits
+ * and the replay probe answers it. Only the policy and shelf keys can be
+ * reached otherwise: an older per-size policy or shelf route given a
+ * child-key-shaped key, while a PR 9 write under that key is between its
+ * probe and its insert, because those writers take no store lock (plan 3.7).
+ * That is a key reuse (409), not a fault. The older price and content routes
+ * take the store lock, which a PR 9 write holds from before its probe to its
+ * commit, so for the size and content keys the 409 is a backstop only. A
+ * 23505 on any other constraint is not a key reuse and is rethrown. The
+ * content key is unnamed in 0660; its name is PostgreSQL's (pinned by the
+ * PostgreSQL suite).
  */
 const REQUEST_KEY_CONSTRAINTS: ReadonlySet<string> = new Set([
   "dropship_product_listing_setting_requests_key_idx",
   "dropship_product_listing_setting_revision_key_uk",
   "dropship_category_listing_setting_revision_key_uk",
   "dropship_listing_price_revision_idempotency_uk",
+  "dropship_ebay_listing_policy_override_revision_idem_uk",
+  "dropship_ebay_store_category_revision_idem_uk",
+  "dropship_listing_content_revision_vendor_id_idempotency_key_key",
 ]);
 const PRODUCT_FOREIGN_KEYS: ReadonlySet<string> = new Set([
   "dropship_product_listing_setting_revision_product_fk",
@@ -239,15 +299,38 @@ export class PgDropshipListingSettingWritesRepository implements ListingSettingW
   }
 
   /**
-   * BEGIN (READ COMMITTED), the body, COMMIT; on any failure ROLLBACK, then
-   * the mapped error. The body gets the raw client for the wrapper's own locks
-   * and a guarded client for the transaction object. The transaction is open
-   * only while the body runs: once it returns or throws, the transaction
-   * object refuses every call, so one kept past `execute` can never write on
-   * a connection the pool has handed on.
+   * The read-only preflight (plan PR 9, 6.2 #4): one REPEATABLE READ READ
+   * ONLY snapshot, the owner rows without a row lock, no advisory lock and no
+   * writer. A write reads here, before any eBay call, which eBay ids are new
+   * and whether its key was used, and asks eBay nothing inside a write
+   * transaction. Nothing read here is trusted by the write: its transaction
+   * reads again under the locks.
+   */
+  async preflight<T>(
+    input: { memberId: string; storeConnectionId: number; idempotencyKey: string | null },
+    operation: (tx: ListingSettingPreflightTransaction) => Promise<T>,
+  ): Promise<T> {
+    assertPreflightInput(input);
+    return this.inTransaction(async (client, guarded, isOpen) => {
+      const owner = await client.query<{ vendor_id: unknown }>(PREFLIGHT_OWNER_SQL, [input.memberId, input.storeConnectionId]);
+      const vendorId = ownerVendorId(owner.rows[0], input.storeConnectionId);
+      return operation(preflightTransaction(guarded, isOpen, { vendorId, storeConnectionId: input.storeConnectionId,
+        requestKey: input.idempotencyKey }));
+    }, PREFLIGHT_BEGIN_SQL);
+  }
+
+  /**
+   * BEGIN (READ COMMITTED unless `begin` says otherwise), the body, COMMIT;
+   * on any failure ROLLBACK, then the mapped error. The body gets the raw
+   * client for the wrapper's own locks and a guarded client for the
+   * transaction object. The transaction is open only while the body runs:
+   * once it returns or throws, the transaction object refuses every call, so
+   * one kept past `execute` can never write on a connection the pool has
+   * handed on.
    */
   private async inTransaction<T>(
     body: (client: QueryClient, guarded: QueryClient, isOpen: () => boolean) => Promise<T>,
+    begin = "BEGIN",
   ): Promise<T> {
     let client: PoolClient;
     try {
@@ -259,7 +342,7 @@ export class PgDropshipListingSettingWritesRepository implements ListingSettingW
     let open = true;
     const isOpen = () => open;
     try {
-      await client.query("BEGIN");
+      await client.query(begin);
       const result = await body(client, guardedClient(client, isOpen), isOpen).finally(() => { open = false; });
       await client.query("COMMIT");
       return result;
@@ -285,9 +368,17 @@ class WriteTransactionState {
   private ledgerWriter: ParentKeyWriter | null = null;
   private readonly lockedVariantIds = new Set<number>();
   private readonly missingVariantIds = new Set<number>();
-  /** A child key names one revision, so each child target is written at most once (the D30 rule for children). */
+  /** The products lockCatalog found and locked: the only ones clearSizeLeftovers may clean (plan PR 9, 6.2 #3). */
+  private readonly lockedProductIds = new Set<number>();
+  private leftoversCleared = false;
+  /**
+   * A child key names one revision, so each child target is written at most once (the D30 rule for children).
+   * The mainText clean-up writes the same `content` child keys saveListingContent takes, so a transaction
+   * does one or the other, never both (review round, I1).
+   */
   private ebayRulesSaved = false;
   private readonly contentSavedVariantIds = new Set<number>();
+  private contentLeftoversCleared = false;
   private readonly priceSteps = new Map<number, PriceStep>();
 
   constructor(
@@ -326,6 +417,44 @@ class WriteTransactionState {
         return readRequestKeyUse(client, { vendorId: scope.vendorId, requestKey: scope.requestKey });
       },
       lockCatalog: (input) => this.lockCatalog(input),
+      listProductSizes: async (productIds) => {
+        this.assertOpen();
+        const ids = lockIds(productIds, "productIds");
+        if (ids.length === 0) return [];
+        const result = await client.query<{ id: unknown }>(PRODUCT_SIZES_SQL, [ids]);
+        return result.rows.map((row) => storedInt4Id(row.id, "product_variants.id"));
+      },
+      loadPricingProfile: async () => {
+        this.assertOpen();
+        return readPricingProfile(client, scope.storeConnectionId, scope.vendorId);
+      },
+      loadProductCosts: async (productVariantIds) => {
+        this.assertOpen();
+        // A SAVEPOINT on this client, never a BEGIN (forTransaction); a failed read gives "unavailable" costs, as W9's does.
+        return PgShellzClubProductCostAdapter.forTransaction(client).loadProductCosts({ vendorId: scope.vendorId, productVariantIds });
+      },
+      readListingTextBytes: async (input) => {
+        this.assertOpen();
+        return readListingTextBytes(client, target, input);
+      },
+      clearSizeLeftovers: async (input) => {
+        this.assertOpen();
+        if (this.leftoversCleared) {
+          throw listingSettingsInvariantFailed("Per-size leftovers are cleared at most once per listing settings transaction.");
+        }
+        if (input.fields.length === 0) throw listingSettingsInvariantFailed("A per-size leftover clean-up needs at least one field.");
+        if (input.productIds.length === 0 || !input.productIds.every((productId) => this.lockedProductIds.has(productId))) {
+          throw listingSettingsInvariantFailed("Per-size leftovers are cleared only for products lockCatalog locked.");
+        }
+        const clearsContent = input.fields.includes("mainText");
+        if (clearsContent && this.contentSavedVariantIds.size > 0) {
+          throw listingSettingsInvariantFailed("A main-text clean-up and a size's description save share content child keys: one per transaction.");
+        }
+        this.leftoversCleared = true;
+        this.contentLeftoversCleared = clearsContent;
+        this.targetsTouched = true;
+        return clearSizeLeftoversWithClient(client, scope, input);
+      },
       saveProduct: async (input) => {
         this.beginParentKeyWrite("saveProduct");
         return saveProductListingSettingWithClient(client, scope, input);
@@ -368,6 +497,11 @@ class WriteTransactionState {
             productVariantId: String(productVariantId),
           });
         }
+        if (this.contentLeftoversCleared) {
+          throw listingSettingsInvariantFailed("A main-text clean-up and a size's description save share content child keys: one per transaction.", {
+            productVariantId: String(productVariantId),
+          });
+        }
         this.contentSavedVariantIds.add(productVariantId);
         this.targetsTouched = true;
         return saveListingContentWithClient(client, contentTarget, productVariantId, save, hash, now);
@@ -375,10 +509,14 @@ class WriteTransactionState {
     };
   }
 
-  /** One call per transaction, with every id, so the order holds across kinds; only before any target lock or write. */
+  /**
+   * One call per transaction, with every id, so the order holds across kinds;
+   * only before any target lock or write. Returns the products it found and
+   * locked, ascending: a product Card Shellz deleted is not among them.
+   */
   private async lockCatalog(input: {
     categoryIds?: readonly number[]; productIds?: readonly number[]; productVariantIds?: readonly number[];
-  }): Promise<void> {
+  }): Promise<{ lockedProductIds: number[] }> {
     this.assertOpen();
     if (this.catalogLocked) {
       throw listingSettingsInvariantFailed("lockCatalog runs once per listing settings transaction, with every id it needs.");
@@ -392,7 +530,12 @@ class WriteTransactionState {
     this.catalogLocked = true;
     await this.client.query(LISTING_SELECTION_LOCK_SQL);
     if (categoryIds.length > 0) await this.client.query(CATEGORY_LOCK_SQL, [categoryIds]);
-    if (productIds.length > 0) await this.client.query(PRODUCT_LOCK_SQL, [productIds]);
+    if (productIds.length > 0) {
+      const locked = await this.client.query<{ id: unknown }>(PRODUCT_LOCK_SQL, [productIds]);
+      for (const row of locked.rows) {
+        if (typeof row.id === "number") this.lockedProductIds.add(row.id);
+      }
+    }
     if (productVariantIds.length > 0) {
       // Only sizes that exist are locked, so only they are write targets; a size
       // missing from the catalog is remembered and answered as not available.
@@ -404,6 +547,7 @@ class WriteTransactionState {
         if (!this.lockedVariantIds.has(productVariantId)) this.missingVariantIds.add(productVariantId);
       }
     }
+    return { lockedProductIds: [...this.lockedProductIds].sort((left, right) => left - right) };
   }
 
   /**
@@ -499,6 +643,75 @@ class WriteTransactionState {
   private assertOpen(): void {
     if (!this.isOpen()) throw transactionEnded();
   }
+}
+
+/**
+ * The preflight's transaction object: the gate's and the eBay values' reads
+ * on the snapshot's client, no lock (no `forUpdate`), no writer, and a
+ * replay probe only when the request has a key.
+ */
+function preflightTransaction(client: QueryClient, isOpen: () => boolean,
+  scope: { vendorId: number; storeConnectionId: number; requestKey: string | null }): ListingSettingPreflightTransaction {
+  const target = { vendorId: scope.vendorId, storeConnectionId: scope.storeConnectionId };
+  const assertOpen = () => {
+    if (!isOpen()) throw transactionEnded();
+  };
+  return {
+    vendorId: scope.vendorId,
+    storeConnectionId: scope.storeConnectionId,
+    catalog: PgDropshipListingPreviewRepository.readerForTransaction(client),
+    findRequestKeyUse: async () => {
+      assertOpen();
+      if (scope.requestKey === null) throw listingSettingsInvariantFailed("A preflight without a request key has no replay probe.");
+      return readRequestKeyUse(client, { vendorId: scope.vendorId, requestKey: scope.requestKey });
+    },
+    loadProducts: async (productIds) => {
+      assertOpen();
+      return readProductListingSettings(client, { ...target, productIds });
+    },
+    loadCategories: async (categoryIds) => {
+      assertOpen();
+      return readCategoryListingSettings(client, { ...target, categoryIds });
+    },
+  };
+}
+
+/**
+ * The store's saved product text in UTF-8 bytes (LISTING_TEXT_BYTES_SQL). A
+ * server that is not UTF8 would miscount, and a sum that is not a safe
+ * whole number is a broken row: both are fatal, never a guess.
+ */
+async function readListingTextBytes(client: QueryClient, target: { vendorId: number; storeConnectionId: number },
+  input: ListingTextBytesInput): Promise<ListingTextBytes> {
+  const productIds = lockIds(input.productIds, "productIds");
+  const flags = input.replacedFields;
+  const result = await client.query<{ utf8: unknown; store_bytes: unknown; kept_store_bytes: unknown; target_bytes: unknown }>(
+    LISTING_TEXT_BYTES_SQL, [target.vendorId, target.storeConnectionId, productIds,
+      flags.textAbove === true, flags.textBelow === true, flags.mainText === true]);
+  const row = result.rows[0];
+  if (row?.utf8 !== true) {
+    throw listingSettingsInvariantFailed("Listing text bytes are counted only on a UTF8 database.", { utf8: row?.utf8 === false ? false : null });
+  }
+  return {
+    storeBytes: textByteSum(row.store_bytes, "store_bytes"),
+    keptStoreBytes: textByteSum(row.kept_store_bytes, "kept_store_bytes"),
+    targetBytes: textByteSum(row.target_bytes, "target_bytes"),
+  };
+}
+
+/** A numeric sum sent as text; anything but a safe non-negative whole number is refused, never coerced. */
+function textByteSum(value: unknown, column: string): number {
+  const bytes = typeof value === "string" && /^\d{1,16}$/.test(value) ? Number(value) : Number.NaN;
+  if (!Number.isSafeInteger(bytes) || bytes < 0) {
+    throw listingSettingsInvariantFailed("A listing text byte count failed its contract.", { column });
+  }
+  return bytes;
+}
+
+/** An int4 id PostgreSQL returned; anything else is a broken row. */
+function storedInt4Id(value: unknown, column: string): number {
+  if (!isInt4Id(value)) throw listingSettingsInvariantFailed("A catalog id read in a listing settings write failed its contract.", { column });
+  return value;
 }
 
 /** The system job's transaction: reads and first marks, nothing a vendor writes. */
@@ -622,7 +835,9 @@ export function mapListingSettingWriteError(error: unknown): unknown {
   if (!pgError) return error;
   const { code, constraint } = pgError;
   if (code === UNIQUE_VIOLATION && constraint !== undefined && REQUEST_KEY_CONSTRAINTS.has(constraint)) {
-    // Two first uses of one key that both missed the replay read (another member of the vendor, the same key).
+    // PR 9's routes never reach this (one member per vendor, the request lock is member:key); an older
+    // per-size policy or shelf route given a child-key-shaped key can, between a PR 9 write's probe and
+    // its insert (those take no store lock). For the other keys it is a backstop (REQUEST_KEY_CONSTRAINTS).
     return listingSettingsIdempotencyConflict({ constraint });
   }
   if (code === FOREIGN_KEY_VIOLATION && constraint !== undefined && PRODUCT_FOREIGN_KEYS.has(constraint)) {
@@ -728,6 +943,16 @@ function assertVendorInput(input: { memberId: string; storeConnectionId: number;
     typeof input.idempotencyKey === "string" && LISTING_SETTING_KEY_PATTERN.test(input.idempotencyKey) ? null : "idempotencyKey",
   ].filter((field): field is string => field !== null);
   if (invalid.length > 0) throw listingSettingsInvariantFailed("A listing settings transaction was opened outside its contract.", { invalid });
+}
+
+function assertPreflightInput(input: { memberId: string; storeConnectionId: number; idempotencyKey: string | null }): void {
+  const invalid = [
+    isActorId(input.memberId) ? null : "memberId",
+    isInt4Id(input.storeConnectionId) ? null : "storeConnectionId",
+    input.idempotencyKey === null
+      || (typeof input.idempotencyKey === "string" && LISTING_SETTING_KEY_PATTERN.test(input.idempotencyKey)) ? null : "idempotencyKey",
+  ].filter((field): field is string => field !== null);
+  if (invalid.length > 0) throw listingSettingsInvariantFailed("A listing settings preflight was opened outside its contract.", { invalid });
 }
 
 function assertSystemInput(input: { storeConnectionId: number; jobKey: string }): void {

@@ -3,7 +3,7 @@ import type { AddressInfo } from "node:net";
 import express, { type NextFunction, type Request, type Response } from "express";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ZodError } from "zod";
-import { saveSizePricesInputSchema } from "../../../../../shared/dropship/listing-setting-writes";
+import { saveProductSettingsInputSchema, saveSizePricesInputSchema } from "../../../../../shared/dropship/listing-setting-writes";
 import { listingSettingStoreIdSchema, parseListingSettingInput } from "../../application/dropship-listing-setting-write-support";
 import { DropshipError } from "../../domain/errors";
 import type { ListingSettingWriteServices } from "../../infrastructure/dropship-listing-setting-writes.factory";
@@ -18,6 +18,7 @@ vi.mock("../../../../platform/observability/logger", () => ({
 import { DROPSHIP_BULK_JSON_LIMIT_BYTES, LISTING_SETTINGS_TOO_LARGE_MESSAGE } from "../../interfaces/http/dropship-bulk-json.middleware";
 import {
   LISTING_SETTING_BULK_WRITES_PER_MINUTE,
+  LISTING_SETTING_SINGLE_WRITES_PER_MINUTE,
   registerDropshipListingSettingWritesRoutes,
 } from "../../interfaces/http/dropship-listing-setting-writes.routes";
 
@@ -42,6 +43,27 @@ class FakeSizePrices {
       parseListingSettingInput(listingSettingStoreIdSchema, storeId);
       parseListingSettingInput(saveSizePricesInputSchema, input);
     }
+    return this.result;
+  }
+}
+
+const PRODUCT_KEY = "product-settings:7f9c2ba4-e88f-4a5e-9d1b-1c2d3e4f5a6b";
+const PRODUCT_PATH = "/api/dropship/listings/stores/22/listing-settings/products/7";
+const productBody = (fields: Record<string, unknown> = {}) =>
+  ({ idempotencyKey: PRODUCT_KEY, expectedRevisionId: null, patch: { storeShelf: { mode: "none" } }, ...fields });
+const productChanged = { outcome: "changed", productId: 7, revisionId: 31, sizes: [], clearedSizeCount: 0 };
+
+class FakeProducts {
+  calls: Array<{ memberId: string; storeId: unknown; productId: unknown; input: unknown }> = [];
+  failure: unknown = null;
+  result: unknown = productChanged;
+  async saveForMember(memberId: string, storeId: unknown, productId: unknown, input: unknown) {
+    this.calls.push({ memberId, storeId, productId, input });
+    if (this.failure) throw this.failure;
+    // The real service's parsing: the vendor's input is refused as DROPSHIP_LISTING_SETTINGS_INVALID_INPUT.
+    parseListingSettingInput(listingSettingStoreIdSchema, storeId);
+    parseListingSettingInput(listingSettingStoreIdSchema, productId);
+    parseListingSettingInput(saveProductSettingsInputSchema, input);
     return this.result;
   }
 }
@@ -279,7 +301,164 @@ describe("listing-settings write routes (plan PR 9, sections 3.2-3.5, 4.2)", () 
   });
 });
 
-function buildApp(sizePrices: FakeSizePrices): express.Express {
+describe("PUT …/listing-settings/products/:productId (W5, plan PR 9, section 6.3)", () => {
+  let sizePrices: FakeSizePrices;
+  let products: FakeProducts;
+  let server: { url: string; close: () => Promise<void> } | null;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    sizePrices = new FakeSizePrices();
+    products = new FakeProducts();
+    server = null;
+  });
+  afterEach(async () => {
+    await server?.close();
+  });
+
+  const put = (payload: unknown, options: { member?: string | null; path?: string; raw?: string } = {}) =>
+    fetch(`${server!.url}${options.path ?? PRODUCT_PATH}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json", ...(options.member === null ? {} : { "X-Test-Member": options.member ?? "member-1" }) },
+      body: options.raw ?? JSON.stringify(payload),
+    });
+
+  it("refuses a request without a dropship session before the limiter, the parser or the service", async () => {
+    server = await startServer(buildApp(sizePrices, products));
+    const response = await put(productBody(), { member: null });
+    expect(response.status).toBe(401);
+    expect(products.calls).toEqual([]);
+  });
+
+  it("passes the member, the parsed store and product ids and the body through, answers the schema's shape, never cached", async () => {
+    server = await startServer(buildApp(sizePrices, products));
+    const sent = productBody({ patch: { price: { basis: "product_cost", markupBps: 3_000, flatCents: 0, rounding: "cent" } },
+      sizePrices: [{ productVariantId: 101, pricingMode: "inherit", expectedRevisionId: 4 }],
+      expectedPrices: [{ productVariantId: 101, priceCents: 1_499 }] });
+    const response = await put(sent);
+    expect(response.status).toBe(200);
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    expect(await response.json()).toEqual(productChanged);
+    expect(products.calls).toEqual([{ memberId: "member-1", storeId: 22, productId: 7, input: sent }]);
+    expect(sizePrices.calls).toEqual([]);
+  });
+
+  it.each([
+    ["a product id with letters", { path: "/api/dropship/listings/stores/22/listing-settings/products/7x" }, productBody()],
+    ["a product id of 0", { path: "/api/dropship/listings/stores/22/listing-settings/products/0" }, productBody()],
+    ["a product id past int4", { path: "/api/dropship/listings/stores/22/listing-settings/products/2147483648" }, productBody()],
+    ["a 7-character key", {}, productBody({ idempotencyKey: "abcdefg" })],
+    ["no change at all", {}, productBody({ patch: {} })],
+    ["an eBay category name sent by the client", {}, productBody({ patch: { ebayCategory: { categoryId: "183438", categoryName: "X" } } })],
+    ["a price change without the shown prices", {}, productBody({ patch: { price: null } })],
+    ["an unknown key", {}, { ...productBody(), storeConnectionId: 22 }],
+  ])("answers %s with 400, never a 500", async (_label, options, payload) => {
+    server = await startServer(buildApp(sizePrices, products));
+    const response = await put(payload, options);
+    expect(response.status).toBe(400);
+    expect((await response.json()).error.code).toBe("DROPSHIP_LISTING_SETTINGS_INVALID_INPUT");
+  });
+
+  it("parses a body past the 100 KB global limit (10,000 shown prices) and hands it to the service unchanged", async () => {
+    server = await startServer(buildApp(sizePrices, products));
+    const large = productBody({ patch: { price: null }, expectedPrices: Array.from({ length: 10_000 },
+      (_, index) => ({ productVariantId: 2_000_000_000 + index, priceCents: 2_000_000_000 + index })) });
+    const text = JSON.stringify(large);
+    expect(text.length).toBeGreaterThan(100 * 1024);
+    expect(text.length).toBeLessThan(DROPSHIP_BULK_JSON_LIMIT_BYTES);
+
+    const response = await put(undefined, { raw: text });
+
+    expect(response.status).toBe(200);
+    expect(products.calls).toHaveLength(1);
+    expect(products.calls[0].input).toEqual(large);
+  });
+
+  it("refuses a body over 1 MiB with 413 in the listing-settings words, never calling the service", async () => {
+    server = await startServer(buildApp(sizePrices, products));
+    const response = await put({ ...productBody(), padding: "x".repeat(DROPSHIP_BULK_JSON_LIMIT_BYTES + 1) });
+    expect(response.status).toBe(413);
+    expect(await response.json()).toEqual({ error: { code: "DROPSHIP_REQUEST_TOO_LARGE", message: LISTING_SETTINGS_TOO_LARGE_MESSAGE } });
+    expect(products.calls).toEqual([]);
+  });
+
+  it("answers a replay as the probe saw it, and an answer that breaks the response contract as a 500 with the fixed words", async () => {
+    server = await startServer(buildApp(sizePrices, products));
+    products.result = { outcome: "replayed", productId: 7, revisionId: 31, sizes: [{ productVariantId: 101, revisionId: 55 }],
+      clearedSizeCount: null };
+    expect(await (await put(productBody())).json()).toEqual(products.result);
+
+    // A replay always leaves the clean-up count unknown; an unchanged save wrote nothing.
+    for (const broken of [{ ...productChanged, outcome: "replayed" }, { ...productChanged, outcome: "unchanged", clearedSizeCount: 2 },
+      { ...productChanged, sizes: [{ productVariantId: 101, revisionId: 1 }, { productVariantId: 101, revisionId: 2 }] }]) {
+      products.result = broken;
+      const response = await put(productBody());
+      expect(response.status).toBe(500);
+      expect(await response.json()).toEqual({ error: { code: "DROPSHIP_LISTING_SETTINGS_INTERNAL_ERROR",
+        message: "Something went wrong. We couldn't confirm your save." } });
+    }
+  });
+
+  it.each([
+    [new DropshipError("DROPSHIP_LISTING_PRICES_MOVED", "Prices changed while you were editing.", {
+      storeConnectionId: 22, sizeCount: 1, sizes: [{ productVariantId: 101, expectedPriceCents: 1_499, priceCents: 1_599 }],
+      retryable: false, classification: "permanent" }), 409],
+    [new DropshipError("DROPSHIP_LISTING_SETTINGS_EBAY_SIGN_IN_REQUIRED", "Sign in to eBay again.", {
+      storeConnectionId: 22, fields: ["shippingPolicy"], retryable: false, classification: "permanent" }), 403],
+    [new DropshipError("DROPSHIP_LISTING_SETTINGS_TOO_LARGE", "This store's saved listing text is at its limit.", {
+      storeConnectionId: 22, reason: "store_text_limit", textBytes: 30_000_001, maxTextBytes: 30_000_000,
+      retryable: false, classification: "permanent" }), 422],
+    [new DropshipError("DROPSHIP_EBAY_STORE_CATEGORIES_ACCESS_DENIED", "eBay refused access.", { storeConnectionId: 22 }), 403],
+    [new DropshipError("DROPSHIP_EBAY_FULFILLMENT_ROUTING_UNAVAILABLE", "Routing unavailable.", { storeConnectionId: 22 }), 503],
+  ])("answers %s with its status and the public context, logged with the product", async (error, status) => {
+    server = await startServer(buildApp(sizePrices, products));
+    products.failure = error;
+    const response = await put(productBody());
+    expect(response.status).toBe(status);
+    expect(await response.json()).toEqual({ error: { code: error.code, message: error.message, context: error.context } });
+    const line = status === 503 ? logger.warn : logger.debug;
+    expect(line).toHaveBeenCalledWith(status === 503 ? "dropship.listing_settings.write_deferred" : "dropship.listing_settings.write_refused",
+      expect.objectContaining({ store_connection_id: 22, product_id: 7, actor_id: "member-1", status, error_code: error.code,
+        path: "/api/dropship/listings/stores/:storeConnectionId/listing-settings/products/:productId" }));
+  });
+
+  it("limits each member to the single-write budget a minute, on its own counter: the bulk budget is not spent", async () => {
+    server = await startServer(buildApp(sizePrices, products));
+    expect(LISTING_SETTING_SINGLE_WRITES_PER_MINUTE).toBe(60);
+    for (let index = 0; index < LISTING_SETTING_SINGLE_WRITES_PER_MINUTE; index += 1) {
+      expect((await put(productBody())).status).toBe(200);
+    }
+    const limited = await put(productBody());
+    expect(limited.status).toBe(429);
+    expect(await limited.json()).toEqual({ error: { code: "DROPSHIP_LISTING_SETTINGS_RATE_LIMITED",
+      message: "Too many saves in a minute. Wait a moment and try again." } });
+    expect(products.calls).toHaveLength(LISTING_SETTING_SINGLE_WRITES_PER_MINUTE);
+    // The bulk route has its own budget, and another member has their own.
+    const bulk = await fetch(`${server.url}${PATH}`, { method: "PUT",
+      headers: { "Content-Type": "application/json", "X-Test-Member": "member-1" }, body: JSON.stringify(body([row(101)])) });
+    expect(bulk.status).toBe(200);
+    expect((await put(productBody(), { member: "member-2" })).status).toBe(200);
+  });
+});
+
+/**
+ * Every writer the router takes, with the given fakes; any other member is a
+ * stub that throws, so a route reaching the wrong service fails here. Each
+ * later sub-PR adds its member (plan 6.1, C-feas-6).
+ */
+function writeServices(overrides: Partial<ListingSettingWriteServices>): ListingSettingWriteServices {
+  const unexpected = (name: string) => ({
+    saveForMember: async (): Promise<never> => { throw new Error(`The ${name} service was not expected here.`); },
+  });
+  return {
+    sizePrices: unexpected("sizePrices") as unknown as ListingSettingWriteServices["sizePrices"],
+    products: unexpected("products") as unknown as ListingSettingWriteServices["products"],
+    ...overrides,
+  };
+}
+
+/** The W8 cases pass no products fake, so a W8 route that reached the W5 service would fail on its throwing stub. */
+function buildApp(sizePrices: FakeSizePrices, products?: FakeProducts): express.Express {
   const app = express();
   app.use((req: Request, _res: Response, next: NextFunction) => {
     const memberId = req.header("X-Test-Member");
@@ -288,7 +467,10 @@ function buildApp(sizePrices: FakeSizePrices): express.Express {
   });
   // The production order: the global 100 KB parser skips this route, which parses its own body after sign-in.
   installGlobalJsonBodyParser(app);
-  registerDropshipListingSettingWritesRoutes(app, { sizePrices: sizePrices as unknown as ListingSettingWriteServices["sizePrices"] });
+  registerDropshipListingSettingWritesRoutes(app, writeServices({
+    sizePrices: sizePrices as unknown as ListingSettingWriteServices["sizePrices"],
+    ...(products ? { products: products as unknown as ListingSettingWriteServices["products"] } : {}),
+  }));
   return app;
 }
 

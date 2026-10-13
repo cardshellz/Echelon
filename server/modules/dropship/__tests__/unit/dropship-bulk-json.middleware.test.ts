@@ -29,6 +29,9 @@ describe("the bulk JSON path table (plan PR 9, P8, section 3.6)", () => {
     ["PUT", `${STORE}/content-profile`],
     ["PUT", `${STORE}/listing-settings/size-prices`],
     ["put", `${STORE}/listing-settings/size-prices/`],
+    // W5, one product (9c).
+    ["PUT", `${STORE}/listing-settings/products/7`],
+    ["PUT", `${STORE}/listing-settings/products/7/`],
     ["POST", "/api/dropship/listings/stores/anything/pricing-rules/reviews"],
   ])("skips the global parser for %s %s", (method, path) => {
     expect(isDropshipBulkJsonRequest(method, path)).toBe(true);
@@ -44,13 +47,17 @@ describe("the bulk JSON path table (plan PR 9, P8, section 3.6)", () => {
     ["PUT", `${STORE}/listing-settings/size-prices/extra`],
     ["PUT", `/api/dropship/listings/stores/22/x/listing-settings/size-prices`],
     ["PUT", `/admin${STORE}/listing-settings/size-prices`],
-    ["PUT", `${STORE}/listing-settings/products/7`],
+    // Only W5's PUT: the read router's GETs and another verb keep the global parser.
+    ["GET", `${STORE}/listing-settings/products/7`],
+    ["GET", `${STORE}/listing-settings/products/ids`],
+    ["POST", `${STORE}/listing-settings/products/7`],
+    ["PUT", `${STORE}/listing-settings/products/7/sizes`],
   ])("leaves %s %s to the global parser", (method, path) => {
     expect(isDropshipBulkJsonRequest(method, path)).toBe(false);
   });
 
-  it("lists five routes, each one method and one path", () => {
-    expect(BULK_JSON_PATHS.map((entry) => entry.method)).toEqual(["PUT", "POST", "POST", "PUT", "PUT"]);
+  it("lists six routes, each one method and one path", () => {
+    expect(BULK_JSON_PATHS.map((entry) => entry.method)).toEqual(["PUT", "POST", "POST", "PUT", "PUT", "PUT"]);
     expect(Object.isFrozen(BULK_JSON_PATHS)).toBe(true);
   });
 

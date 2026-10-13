@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { performance } from "node:perf_hooks";
@@ -6,13 +6,21 @@ import { config } from "dotenv";
 import pg, { type Pool } from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { SaveListingPriceInput } from "../../../../../shared/dropship/listing-price";
+import { MAX_STORE_LISTING_TEXT_BYTES } from "../../../../../shared/dropship/listing-setting-writes";
 import { saveListingPriceInTransaction } from "../../application/dropship-listing-price-service";
 import { DropshipListingSizePricesService } from "../../application/dropship-listing-size-prices-service";
+import { DropshipListingProductSettingsService } from "../../application/dropship-listing-product-settings-service";
+import type { ListingSettingEbayPort } from "../../application/dropship-listing-setting-ebay-values";
+import type { DropshipEbayListingSetupDiscovery } from "../../application/dropship-ebay-listing-setup-service";
 import { DropshipPricingRulesService } from "../../application/dropship-pricing-rules-service";
 import { DropshipError } from "../../domain/errors";
 import { listingSettingChildKey, listingSettingRequestHash } from "../../domain/listing-setting-values";
 import { PgDropshipListingPriceRepository } from "../../infrastructure/dropship-listing-price.repository";
-import { PgDropshipListingSettingWritesRepository } from "../../infrastructure/dropship-listing-setting-writes.repository";
+import { PgDropshipEbayListingPolicyOverrideRepository } from "../../infrastructure/dropship-ebay-listing-policy-override.repository";
+import {
+  PgDropshipListingSettingWritesRepository,
+  mapListingSettingWriteError,
+} from "../../infrastructure/dropship-listing-setting-writes.repository";
 import { PgDropshipPricingRulesRepository } from "../../infrastructure/dropship-pricing-rules.repository";
 
 vi.mock("../../../../db", () => ({ pool: {}, db: {} }));
@@ -77,6 +85,8 @@ const VENDOR = 10;
 const STORE = 22;
 const OTHER_VENDOR_STORE = 23; // vendor 11
 const TOPLOADERS = 3;
+/** The product the fixture's four sizes belong to. */
+const PRODUCT_7 = 7;
 /** Product 7's sizes, each with a retail price and an .ops cost. */
 const SIZES = [101, 102, 103, 104] as const;
 const BULK_FIRST_PRODUCT = 1_001;
@@ -114,21 +124,48 @@ describeDatabase.sequential("listing-settings writes on PostgreSQL (plan PR 9)",
   });
   const execute = (sql: string, values?: unknown[]) => pool.query(qualify(sql), values);
 
-  /** The repositories' own SQL against the isolated schema; `counter` counts every statement a pooled client runs (plan 3.11). */
-  function scopedPool(counter?: StatementCounter): Pool {
+  /**
+   * The repositories' own SQL against the isolated schema; `counter` counts
+   * every statement a pooled client runs (plan 3.11). `hook` runs before each
+   * statement, so a concurrency case can pause a transaction at a chosen one
+   * (gate) or record what each connection ran.
+   */
+  function scopedPool(counter?: StatementCounter, hook?: (sql: string, connection: number) => Promise<void> | void): Pool {
+    let connections = 0;
     return {
       query: (sql: string, values?: unknown[]) => pool.query(qualify(sql), values),
       connect: async () => {
         const client = await pool.connect();
+        const connection = connections++;
         return {
-          query: (sql: string, values?: unknown[]) => {
+          query: async (sql: string, values?: unknown[]) => {
             if (counter) counter.statements += 1;
+            if (hook) await hook(sql, connection);
             return client.query(qualify(sql), values);
           },
           release: (destroy?: boolean | Error) => client.release(destroy),
         };
       },
     } as unknown as Pool;
+  }
+
+  /** Pauses the first statement `match` accepts until `open()`; `reached` resolves when it is paused. */
+  function gate(match: (sql: string) => boolean) {
+    let reachedGate!: () => void;
+    const reached = new Promise<void>((done) => { reachedGate = done; });
+    let openGate!: () => void;
+    const opened = new Promise<void>((done) => { openGate = done; });
+    let fired = false;
+    return {
+      reached,
+      open: () => openGate(),
+      hook: async (sql: string) => {
+        if (fired || !match(sql)) return;
+        fired = true;
+        reachedGate();
+        await opened;
+      },
+    };
   }
 
   const log = { info: vi.fn() };
@@ -138,6 +175,97 @@ describeDatabase.sequential("listing-settings writes on PostgreSQL (plan PR 9)",
   const pricingRules = () => new DropshipPricingRulesService({ repository: new PgDropshipPricingRulesRepository(scopedPool()),
     clock: { now: () => NOW }, newId: () => randomUUID(), logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() } });
   const key = (label: string) => `size-prices:${label}`;
+
+  /** eBay as W5's eBay step sees it: one policy of each kind and two shelves, recorded. */
+  const ebayCalls: string[] = [];
+  const EBAY_DISCOVERY: DropshipEbayListingSetupDiscovery = { marketplaceId: "EBAY_US", merchantLocations: [], fulfillmentPolicies: [],
+    returnPolicies: [{ id: "return-new", name: "Thirty days" }], paymentPolicies: [] };
+  const fakeEbay: ListingSettingEbayPort = {
+    describeCategories: async () => { ebayCalls.push("describe"); return new Map(); },
+    discoverPolicies: async () => { ebayCalls.push("discover"); return EBAY_DISCOVERY; },
+    loadFulfillmentCapability: async () => { ebayCalls.push("capability"); throw new Error("not used"); },
+    listStoreShelves: async () => { ebayCalls.push("shelves"); return [{ categoryId: "11", categoryName: "Top", path: "Supplies:Top", level: 2 }]; },
+  };
+  const products = (repositoryPool: Pool = scopedPool()) => new DropshipListingProductSettingsService({
+    repository: new PgDropshipListingSettingWritesRepository(repositoryPool), ebay: fakeEbay, clock: { now: () => NOW },
+    timer: () => performance.now(), log });
+  const productKey = (label: string) => `product-settings:${label}`;
+  /** The store default's price of 101-104 after D1 (cost x 1.3 + $1.00), as the server answers them. */
+  async function shownPrices(productId: number, body: Record<string, unknown>): Promise<Array<{ productVariantId: number; priceCents: number | null }>> {
+    // A request that can only be refused as moved, naming every chosen size with the price the server computes; it writes nothing.
+    const probe = await expectDropshipError(products().saveForMember(MEMBER, STORE, productId, { ...body,
+      idempotencyKey: productKey(`shown-${randomUUID()}`), expectedPrices: [{ productVariantId: 2_000_000_000, priceCents: null }] }),
+    "DROPSHIP_LISTING_PRICES_MOVED");
+    return (probe.context?.sizes as Array<{ productVariantId: number; priceCents?: number | null }>)
+      .filter((size) => size.productVariantId !== 2_000_000_000)
+      .map((size) => ({ productVariantId: size.productVariantId, priceCents: size.priceCents ?? null }));
+  }
+  async function allWrites() {
+    return {
+      productRevisions: await count("dropship.dropship_product_listing_setting_revisions"),
+      priceRevisions: await count("dropship.dropship_listing_price_revisions"),
+      policyRevisions: await count("dropship.dropship_ebay_listing_policy_override_revisions"),
+      shelfRevisions: await count("dropship.dropship_ebay_store_category_assignment_revisions"),
+      contentRevisions: await count("dropship.dropship_listing_content_revisions"),
+      audit: await count("dropship.dropship_audit_events"),
+    };
+  }
+
+  /** One product with `total` sellable sizes, each with a retail price and an .ops cost, all chosen by vendor 10's catalog rule. */
+  async function seedProductSizes(productId: number, firstSize: number, total: number): Promise<number[]> {
+    await execute(`INSERT INTO catalog.products (id, sku, name, category, category_id, product_type, shopify_product_id)
+      VALUES ($1::int, 'BIG-' || $1::text, 'Big product', 'Toploaders', $2, 'toploader', (9100000000 + $1::int)::text)`, [productId, TOPLOADERS]);
+    await execute(`INSERT INTO catalog.product_variants (id, product_id, sku, name, shopify_variant_id, weight_grams, sales_eligibility)
+      SELECT $1::int + i, $3::int, 'BIG-SIZE-' || i, 'Size ' || i, (7200000000 + i)::text, 100, 'sellable'
+      FROM generate_series(0, $2::int - 1) i`, [firstSize, total, productId]);
+    await execute(`INSERT INTO public.shopify_variants (id, product_id, sku, price)
+      SELECT (7200000000 + i)::text, (9100000000 + $2::int)::text, 'BIG-SIZE-' || i, 9.99 FROM generate_series(0, $1::int - 1) i`, [total, productId]);
+    await execute(`INSERT INTO membership.plan_variant_overrides
+      SELECT 'ops-big-' || i, 'ops', (7200000000 + i)::text, (9100000000 + $2::int)::text, 'fixed_price', 6.00, NULL, true
+      FROM generate_series(0, $1::int - 1) i`, [total, productId]);
+    return Array.from({ length: total }, (_, index) => firstSize + index);
+  }
+
+  /** Per-size leftovers as today's per-size panels leave them, for one vendor's store (revision and current row each). */
+  async function seedPolicyOverride(input: { vendorId?: number; storeId?: number; sizeId: number; fulfillment: string | null;
+    returnPolicy?: string | null; label: string }): Promise<void> {
+    const vendorId = input.vendorId ?? VENDOR;
+    const storeId = input.storeId ?? STORE;
+    const revision = await execute(`INSERT INTO dropship.dropship_ebay_listing_policy_override_revisions
+      (vendor_id, store_connection_id, product_variant_id, idempotency_key, request_hash, fulfillment_policy_id, return_policy_id,
+       actor_type, actor_id, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7, 'vendor', 'seed', $8) RETURNING id`,
+    [vendorId, storeId, input.sizeId, `seed-policy:${input.label}`, "d".repeat(64), input.fulfillment, input.returnPolicy ?? null, NOW]);
+    await execute(`INSERT INTO dropship.dropship_ebay_listing_policy_overrides
+      (vendor_id, store_connection_id, product_variant_id, revision_id, fulfillment_policy_id, return_policy_id, created_at, updated_at)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $7)`,
+    [vendorId, storeId, input.sizeId, revision.rows[0].id, input.fulfillment, input.returnPolicy ?? null, NOW]);
+  }
+  async function seedShelf(input: { vendorId?: number; storeId?: number; sizeId: number; label: string }): Promise<void> {
+    const vendorId = input.vendorId ?? VENDOR;
+    const storeId = input.storeId ?? STORE;
+    const revision = await execute(`INSERT INTO dropship.dropship_ebay_store_category_assignment_revisions
+      (vendor_id, store_connection_id, product_variant_id, idempotency_key, request_hash, store_category_ids, store_category_names,
+       actor_type, actor_id, created_at) VALUES ($1, $2, $3, $4, $5, '["11"]'::jsonb, '["Supplies:Top"]'::jsonb, 'vendor', 'seed', $6)
+      RETURNING id`, [vendorId, storeId, input.sizeId, `seed-shelf:${input.label}`, "d".repeat(64), NOW]);
+    await execute(`INSERT INTO dropship.dropship_ebay_store_category_assignments
+      (vendor_id, store_connection_id, product_variant_id, revision_id, store_category_ids, store_category_names, created_at, updated_at)
+      VALUES ($1, $2, $3, $4, '["11"]'::jsonb, '["Supplies:Top"]'::jsonb, $5, $5)`, [vendorId, storeId, input.sizeId, revision.rows[0].id, NOW]);
+  }
+  async function seedContent(input: { vendorId?: number; storeId?: number; sizeId: number; text: string | null; label: string }): Promise<number> {
+    const vendorId = input.vendorId ?? VENDOR;
+    const storeId = input.storeId ?? STORE;
+    const revision = await execute(`INSERT INTO dropship.dropship_listing_content_revisions
+      (vendor_id, store_connection_id, product_variant_id, previous_revision_id, custom_text, catalog_hash, idempotency_key, request_hash,
+       actor_id, created_at) VALUES ($1, $2, $3, NULL, $4, $5, $6, $7, 'seed', $8) RETURNING id`,
+    [vendorId, storeId, input.sizeId, input.text, "c".repeat(64), `seed-content:${input.label}`, "d".repeat(64), NOW]);
+    await execute(`INSERT INTO dropship.dropship_listing_content_settings (vendor_id, store_connection_id, product_variant_id, revision_id)
+      VALUES ($1, $2, $3, $4)`, [vendorId, storeId, input.sizeId, revision.rows[0].id]);
+    return revision.rows[0].id as number;
+  }
+  async function addVendorStore(storeId: number, vendorId = VENDOR): Promise<void> {
+    await execute(`INSERT INTO dropship.dropship_store_connections (id, vendor_id, platform, access_token_ref, refresh_token_ref, status, setup_status)
+      VALUES ($1, $2, 'ebay', 'vault:a', 'vault:r', 'connected', 'ready')`, [storeId, vendorId]);
+  }
   const row = (productVariantId: number, priceCents = 1_499, expectedRevisionId: number | null = null) =>
     ({ productVariantId, priceCents, expectedRevisionId });
   const requestHashOf = (rows: ReturnType<typeof row>[]) => listingSettingRequestHash({ operation: "size_prices_v1", storeConnectionId: STORE,
@@ -637,5 +765,395 @@ describeDatabase.sequential("listing-settings writes on PostgreSQL (plan PR 9)",
       expect((await execute("SELECT revision_id FROM dropship.dropship_pricing_profiles WHERE store_connection_id = $1", [STORE]))
         .rows[0].revision_id).toBe(applied.revisionId);
     });
+  });
+
+  describe("W5, one product (PUT …/products/:productId, plan PR 9, section 6)", () => {
+    const BIG_PRODUCT = 3_000;
+    const BIG_FIRST_SIZE = 300_000;
+    beforeEach(() => { ebayCalls.length = 0; });
+
+    it("saves a product with 200 size prices and its clean-ups in one commit with every audit row, measured (PG 1, 8)", async () => {
+      const sizes = await seedProductSizes(BIG_PRODUCT, BIG_FIRST_SIZE, 200);
+      // Leftovers: 20 sizes keep a return policy after the shipping one is cleared, 10 lose their only id, 15 shelves, 5 own texts
+      // and 2 sizes on the Card Shellz text (nothing to clear).
+      for (const sizeId of sizes.slice(0, 20)) await seedPolicyOverride({ sizeId, fulfillment: "ship-a", returnPolicy: "ret-a", label: `kept-${sizeId}` });
+      for (const sizeId of sizes.slice(20, 30)) await seedPolicyOverride({ sizeId, fulfillment: "ship-a", label: `gone-${sizeId}` });
+      for (const sizeId of sizes.slice(30, 45)) await seedShelf({ sizeId, label: `${sizeId}` });
+      for (const sizeId of sizes.slice(50, 55)) await seedContent({ sizeId, text: `Own words for ${sizeId}. Cards’ “best”.`, label: `${sizeId}` });
+      for (const sizeId of sizes.slice(55, 57)) await seedContent({ sizeId, text: null, label: `${sizeId}` });
+      const before = await allWrites();
+      const counter: StatementCounter = { statements: 0 };
+      const body = { idempotencyKey: productKey("two-hundred"), expectedRevisionId: null,
+        patch: { shippingPolicy: null, storeShelf: { mode: "none" }, mainText: null },
+        sizePrices: sizes.map((productVariantId) => ({ productVariantId, pricingMode: "fixed", priceCents: 1_499, expectedRevisionId: null })),
+        expectedPrices: sizes.map((productVariantId) => ({ productVariantId, priceCents: 1_499 })) };
+
+      const result = await measure("w5_200_sizes_with_clean_ups", 200, counter,
+        () => products(scopedPool(counter)).saveForMember(MEMBER, STORE, BIG_PRODUCT, body));
+
+      expect(result).toMatchObject({ outcome: "changed", productId: BIG_PRODUCT, clearedSizeCount: 50 });
+      expect(result.sizes.map((size) => size.productVariantId)).toEqual(sizes);
+      expect(await allWrites()).toEqual({ productRevisions: before.productRevisions + 1, priceRevisions: before.priceRevisions + 200,
+        policyRevisions: before.policyRevisions + 30, shelfRevisions: before.shelfRevisions + 15, contentRevisions: before.contentRevisions + 5,
+        audit: before.audit + 1 + 200 + 30 + 15 + 5 });
+      // The policy rows: the shipping id cleared, the return id kept on 20; the 10 with no id left are gone.
+      const policies = await execute(`SELECT product_variant_id, fulfillment_policy_id, return_policy_id FROM dropship.dropship_ebay_listing_policy_overrides
+        WHERE store_connection_id = $1 ORDER BY product_variant_id`, [STORE]);
+      expect(policies.rows).toEqual(sizes.slice(0, 20).map((id) => ({ product_variant_id: id, fulfillment_policy_id: null, return_policy_id: "ret-a" })));
+      expect(await count("dropship.dropship_ebay_store_category_assignments", "store_connection_id = $1", [STORE])).toBe(0);
+      const content = await execute(`SELECT s.product_variant_id, r.custom_text, r.previous_revision_id IS NOT NULL AS has_previous
+        FROM dropship.dropship_listing_content_settings s JOIN dropship.dropship_listing_content_revisions r ON r.id = s.revision_id
+        WHERE s.store_connection_id = $1 ORDER BY s.product_variant_id`, [STORE]);
+      expect(content.rows).toEqual([...sizes.slice(50, 55).map((id) => ({ product_variant_id: id, custom_text: null, has_previous: true })),
+        ...sizes.slice(55, 57).map((id) => ({ product_variant_id: id, custom_text: null, has_previous: false }))]);
+      // Every child under the request's own prefixes, with the parent hash.
+      const hashes = await execute(`SELECT DISTINCT request_hash FROM dropship.dropship_ebay_listing_policy_override_revisions
+        WHERE idempotency_key LIKE 'ls:%'`);
+      expect(hashes.rows).toHaveLength(1);
+      const productRevision = await execute(`SELECT request_hash, shelf_mode, fulfillment_policy_id FROM dropship.dropship_product_listing_setting_revisions
+        WHERE product_id = $1`, [BIG_PRODUCT]);
+      expect(productRevision.rows).toEqual([{ request_hash: hashes.rows[0].request_hash, shelf_mode: "none", fulfillment_policy_id: null }]);
+      expect(log.info).toHaveBeenCalledWith("dropship.listing_settings.product_saved", expect.objectContaining({
+        outcome: "changed", product_id: BIG_PRODUCT, size_count: 200, cleared_size_count: 50,
+        cleared_by_kind: { policy: 30, shelf: 15, content: 5 } }));
+    }, BULK_TEST_TIMEOUT_MS);
+
+    it("writes nothing when a size is refused, and rolls back the product row and the size prices when a clean-up fails (PG 1)", async () => {
+      await seedShelf({ sizeId: 101, label: "101" });
+      await execute(`INSERT INTO dropship.dropship_pricing_policies (id, scope_type, product_variant_id, mode, floor_price_cents)
+        VALUES (9, 'variant', 103, 'block_listing_push', 5000)`);
+      const before = await allWrites();
+      const body = { idempotencyKey: productKey("refused"), expectedRevisionId: null, patch: { storeShelf: { mode: "none" } },
+        sizePrices: [101, 103].map((productVariantId) => ({ productVariantId, pricingMode: "fixed", priceCents: 1_499, expectedRevisionId: null })) };
+      const shown = await shownPrices(PRODUCT_7, body);
+
+      const refused = await expectDropshipError(products().saveForMember(MEMBER, STORE, PRODUCT_7, { ...body, expectedPrices: shown }),
+        "DROPSHIP_LISTING_PRICE_OUTSIDE_LIMIT");
+      expect(refused.context).toMatchObject({ sizeCount: 1, sizes: [{ productVariantId: 103, refusal: "DROPSHIP_LISTING_PRICE_OUTSIDE_LIMIT" }] });
+      expect(await allWrites()).toEqual(before);
+
+      // A failure after the product row and the size prices are written rolls all of it back, audit rows included.
+      await execute("DELETE FROM dropship.dropship_pricing_policies WHERE id = 9");
+      const failing = scopedPool(undefined, (sql) => {
+        if (sql.startsWith("WITH target AS MATERIALIZED") && sql.includes("dropship.dropship_ebay_store_category_assignments a")) {
+          throw new Error("injected clean-up failure");
+        }
+      });
+      await expect(products(failing).saveForMember(MEMBER, STORE, PRODUCT_7, { ...body, idempotencyKey: productKey("rolled-back"),
+        expectedPrices: shown })).rejects.toThrow("injected clean-up failure");
+      expect(await allWrites()).toEqual(before);
+      expect(await count("dropship.dropship_ebay_store_category_assignments")).toBe(1);
+    });
+
+    it("commits a recipe change with a release: W9 judges the release against the new recipe, and commits the prices shown (PG 1)", async () => {
+      // P14's write order on a real database (review round, M1): the product row first, so W9's in-transaction layer read
+      // sees the new recipe. 101 is typed at 25.00 today; D1 (809 x 1.3 + 1.00) and retail (8.99) are both under a 20.00
+      // blocking floor, so W9 could accept the release only by reading the recipe written earlier in the same transaction.
+      const typed = await new PgDropshipListingPriceRepository(scopedPool()).execute(
+        { memberId: MEMBER, storeConnectionId: STORE, productVariantId: 101, idempotencyKey: "typed-101" }, (tx) =>
+          saveListingPriceInTransaction(tx, { storeConnectionId: STORE, productVariantId: 101 },
+            { priceCents: 2_500, pricingMode: "fixed", expectedRevisionId: null, idempotencyKey: "typed-101" }, "e".repeat(64), NOW));
+      await execute(`INSERT INTO dropship.dropship_pricing_policies (id, scope_type, product_variant_id, mode, floor_price_cents)
+        VALUES (11, 'variant', 101, 'block_listing_push', 2000)`);
+      // The new product recipe: retail x 3 (8.99 becomes 26.97 on 101), over the floor.
+      const recipe = { basis: "catalog_retail", markupBps: 20_000, flatCents: 0, rounding: "cent" };
+      const release = [{ productVariantId: 101, pricingMode: "inherit", expectedRevisionId: typed.price.revisionId }];
+
+      // Control: the release alone leaves 101 on D1 / retail, under the floor, so the builder refuses it before any write.
+      const before = await allWrites();
+      const releaseOnly = { idempotencyKey: productKey("release-only"), expectedRevisionId: null, patch: {}, sizePrices: release };
+      const refused = await expectDropshipError(products().saveForMember(MEMBER, STORE, PRODUCT_7,
+        { ...releaseOnly, expectedPrices: await shownPrices(PRODUCT_7, releaseOnly) }), "DROPSHIP_LISTING_PRICE_WOULD_BE_LOST");
+      expect(refused.context).toMatchObject({ sizeCount: 1, sizes: [{ productVariantId: 101, beforePriceCents: 2_500, afterPriceCents: 899,
+        refusal: "DROPSHIP_LISTING_PRICE_WOULD_BE_LOST", blockers: ["pricing:below_floor:policy_11"] }] });
+      expect(await allWrites()).toEqual(before);
+
+      const body = { idempotencyKey: productKey("recipe-release"), expectedRevisionId: null, patch: { price: recipe }, sizePrices: release };
+      const shown = await shownPrices(PRODUCT_7, body);
+      expect(shown).toEqual([{ productVariantId: 101, priceCents: 2_697 }, { productVariantId: 102, priceCents: 8_997 },
+        { productVariantId: 103, priceCents: 16_497 }, { productVariantId: 104, priceCents: 29_997 }]);
+
+      const result = await products().saveForMember(MEMBER, STORE, PRODUCT_7, { ...body, expectedPrices: shown });
+
+      expect(result).toMatchObject({ outcome: "changed", productId: PRODUCT_7, sizes: [{ productVariantId: 101 }] });
+      const stored = await execute(`SELECT pricing_mode, override_price_cents FROM dropship.dropship_listing_price_settings
+        WHERE store_connection_id = $1 AND product_variant_id = 101`, [STORE]);
+      expect(stored.rows).toEqual([{ pricing_mode: "inherit", override_price_cents: null }]);
+      // After the commit, the server prices the same recipe exactly as the vendor was shown.
+      expect(await shownPrices(PRODUCT_7, { idempotencyKey: "after", expectedRevisionId: result.revisionId, patch: { price: recipe } }))
+        .toEqual(shown);
+    });
+
+    it("answers a retry from the probe as replayed, in exactly 7 statements, writing nothing (PG 2)", async () => {
+      await seedPolicyOverride({ sizeId: 102, fulfillment: "ship-a", label: "102" });
+      const body = { idempotencyKey: productKey("retry"), expectedRevisionId: null, patch: { shippingPolicy: null, storeShelf: { mode: "none" } },
+        sizePrices: [{ productVariantId: 101, pricingMode: "fixed", priceCents: 1_250, expectedRevisionId: null }] };
+      const sent = { ...body, expectedPrices: await shownPrices(PRODUCT_7, body) };
+      const first = await products().saveForMember(MEMBER, STORE, PRODUCT_7, sent);
+      expect(first).toMatchObject({ outcome: "changed", clearedSizeCount: 1 });
+      const after = await allWrites();
+      // Limits move after the commit; the retry is answered from what the request wrote.
+      await execute(`INSERT INTO dropship.dropship_pricing_policies (id, scope_type, product_variant_id, mode, floor_price_cents)
+        VALUES (6, 'variant', 101, 'block_listing_push', 5000)`);
+      const counter: StatementCounter = { statements: 0 };
+
+      const retry = await products(scopedPool(counter)).saveForMember(MEMBER, STORE, PRODUCT_7, sent);
+
+      expect(retry).toEqual({ outcome: "replayed", productId: PRODUCT_7, revisionId: first.revisionId, sizes: first.sizes, clearedSizeCount: null });
+      expect(await allWrites()).toEqual(after);
+      // BEGIN, request lock, store lock, owner rows, the gate's store read, the probe, COMMIT.
+      expect(counter.statements).toBe(7);
+    });
+
+    it("leaves another vendor's and another store's leftover rows untouched (PG 3)", async () => {
+      await addVendorStore(24);
+      for (const [vendorId, storeId] of [[VENDOR, STORE], [11, OTHER_VENDOR_STORE], [VENDOR, 24]] as const) {
+        await seedPolicyOverride({ vendorId, storeId, sizeId: 101, fulfillment: "ship-a", label: `${storeId}` });
+        await seedShelf({ vendorId, storeId, sizeId: 101, label: `${storeId}` });
+        await seedContent({ vendorId, storeId, sizeId: 101, text: "Own words.", label: `${storeId}` });
+      }
+      const result = await products().saveForMember(MEMBER, STORE, PRODUCT_7, { idempotencyKey: productKey("scoped"), expectedRevisionId: null,
+        patch: { shippingPolicy: null, storeShelf: null, mainText: null } });
+
+      expect(result).toMatchObject({ outcome: "changed", clearedSizeCount: 1 });
+      for (const storeId of [OTHER_VENDOR_STORE, 24]) {
+        expect(await count("dropship.dropship_ebay_listing_policy_overrides", "store_connection_id = $1 AND fulfillment_policy_id = 'ship-a'", [storeId])).toBe(1);
+        expect(await count("dropship.dropship_ebay_store_category_assignments", "store_connection_id = $1", [storeId])).toBe(1);
+        expect(await count("dropship.dropship_listing_content_revisions", "store_connection_id = $1", [storeId])).toBe(1);
+      }
+      expect(await count("dropship.dropship_ebay_listing_policy_overrides", "store_connection_id = $1", [STORE])).toBe(0);
+      expect(await count("dropship.dropship_ebay_store_category_assignments", "store_connection_id = $1", [STORE])).toBe(0);
+    });
+
+    it("resets an own main text with a successor revision the coherence trigger accepts, audited by bytes and digest (PG 4)", async () => {
+      const text = "Own words for the toploader. Cards’ “best” 🃏";
+      const previous = await seedContent({ sizeId: 102, text, label: "102" });
+
+      await products().saveForMember(MEMBER, STORE, PRODUCT_7, { idempotencyKey: productKey("content-reset"), expectedRevisionId: null,
+        patch: { mainText: null } });
+
+      const current = await execute(`SELECT r.id, r.previous_revision_id, r.custom_text, r.catalog_hash, r.idempotency_key
+        FROM dropship.dropship_listing_content_settings s JOIN dropship.dropship_listing_content_revisions r ON r.id = s.revision_id
+        WHERE s.store_connection_id = $1 AND s.product_variant_id = 102`, [STORE]);
+      expect(current.rows[0]).toMatchObject({ previous_revision_id: previous, custom_text: null, catalog_hash: "c".repeat(64),
+        idempotency_key: listingSettingChildKey(productKey("content-reset"), "content", 102) });
+      const audit = await execute(`SELECT actor_type, actor_id, payload FROM dropship.dropship_audit_events WHERE event_type = 'listing_content_saved'`);
+      expect(audit.rows).toEqual([{ actor_type: "vendor", actor_id: MEMBER, payload: {
+        revisionId: current.rows[0].id, previousRevisionId: previous, after: null, requestKey: productKey("content-reset"),
+        before: { bytes: Buffer.byteLength(text, "utf8"), sha256: createHash("sha256").update(text, "utf8").digest("hex") } } }]);
+      expect(JSON.stringify(audit.rows)).not.toContain("Own words");
+    });
+
+    it("pins PostgreSQL's name for the content revision key, and maps a real 23505 on it to the key conflict (PG 5)", async () => {
+      const names = await pool.query<{ conname: string }>(`SELECT c.conname FROM pg_constraint c JOIN pg_class t ON t.oid = c.conrelid
+        JOIN pg_namespace n ON n.oid = t.relnamespace WHERE n.nspname = $1 AND c.contype = 'u'
+          AND t.relname IN ('dropship_listing_content_revisions', 'dropship_ebay_listing_policy_override_revisions',
+            'dropship_ebay_store_category_assignment_revisions') ORDER BY c.conname`, [schema]);
+      expect(names.rows.map((row) => row.conname)).toEqual(expect.arrayContaining([
+        "dropship_listing_content_revision_vendor_id_idempotency_key_key",
+        "dropship_ebay_listing_policy_override_revision_idem_uk",
+        "dropship_ebay_store_category_revision_idem_uk",
+      ]));
+      process.stdout.write(`${JSON.stringify({ measurement: "content_revision_key_constraint", names: names.rows.map((row) => row.conname) })}\n`);
+
+      await seedContent({ sizeId: 101, text: "Own words.", label: "dup" });
+      const failure = await execute(`INSERT INTO dropship.dropship_listing_content_revisions
+        (vendor_id, store_connection_id, product_variant_id, previous_revision_id, custom_text, catalog_hash, idempotency_key, request_hash,
+         actor_id, created_at) VALUES (10, 22, 102, NULL, NULL, $1, 'seed-content:dup', $2, 'seed', $3)`, ["c".repeat(64), "d".repeat(64), NOW])
+        .then(() => null, (error: unknown) => error);
+      expect(failure).toMatchObject({ code: "23505", constraint: "dropship_listing_content_revision_vendor_id_idempotency_key_key" });
+      expect(mapListingSettingWriteError(failure)).toMatchObject({ code: "DROPSHIP_IDEMPOTENCY_CONFLICT",
+        context: { constraint: "dropship_listing_content_revision_vendor_id_idempotency_key_key", classification: "permanent" } });
+    });
+
+    describe("concurrency (PG 6)", () => {
+      it("(a) waits for an old per-size policy writer that holds its feature lock; both finish, no deadlock", async () => {
+        await seedPolicyOverride({ sizeId: 101, fulfillment: "ship-a", returnPolicy: "ret-a", label: "101" });
+        const paused = gate((sql) => sql.includes("INSERT INTO dropship.dropship_ebay_listing_policy_override_revisions"));
+        const oldWriter = new PgDropshipEbayListingPolicyOverrideRepository(scopedPool(undefined, paused.hook)).replaceAssignment({
+          vendorId: VENDOR, storeConnectionId: STORE, productVariantId: 102, expectedRevisionId: null, fulfillmentPolicyId: null,
+          returnPolicyId: "ret-b", paymentPolicyId: null, idempotencyKey: "old-policy-writer:1", requestHash: "e".repeat(64),
+          actor: { actorType: "vendor", actorId: MEMBER }, now: NOW });
+        let w5: Promise<unknown> | undefined;
+        try {
+          await within(paused.reached, "the old writer's revision insert");
+          w5 = products().saveForMember(MEMBER, STORE, PRODUCT_7, { idempotencyKey: productKey("feature-lock"), expectedRevisionId: null,
+            patch: { shippingPolicy: null } });
+          await waitUntilLockWait("dropship_ebay_listing_policy_override", 1);
+          paused.open();
+          await expect(within(oldWriter, "the old writer")).resolves.toMatchObject({ idempotentReplay: false });
+          await expect(within(w5, "W5")).resolves.toMatchObject({ outcome: "changed", clearedSizeCount: 1 });
+        } finally {
+          paused.open();
+          await within(Promise.allSettled([oldWriter, ...(w5 ? [w5] : [])]), "the feature-lock case's clean-up");
+        }
+        const rows = await execute(`SELECT product_variant_id, fulfillment_policy_id, return_policy_id FROM dropship.dropship_ebay_listing_policy_overrides
+          ORDER BY product_variant_id`);
+        expect(rows.rows).toEqual([{ product_variant_id: 101, fulfillment_policy_id: null, return_policy_id: "ret-a" },
+          { product_variant_id: 102, fulfillment_policy_id: null, return_policy_id: "ret-b" }]);
+      });
+
+      it("(b) sees a W9 save that commits while it waits on the store lock: 409 PRICES_MOVED, nothing written", async () => {
+        const recipe = { basis: "catalog_retail", markupBps: 1_000, flatCents: 0, rounding: "cent" };
+        const body = { idempotencyKey: productKey("w9-race"), expectedRevisionId: null, patch: { price: recipe } };
+        const shown = await shownPrices(PRODUCT_7, body);
+        let saved!: () => void;
+        const priceSaved = new Promise<void>((done) => { saved = done; });
+        let open!: () => void;
+        const held = new Promise<void>((done) => { open = done; });
+        const w9 = new PgDropshipListingPriceRepository(scopedPool()).execute(
+          { memberId: MEMBER, storeConnectionId: STORE, productVariantId: 101, idempotencyKey: "typed-101-race" }, async (tx) => {
+            const result = await saveListingPriceInTransaction(tx, { storeConnectionId: STORE, productVariantId: 101 },
+              { priceCents: 1_299, pricingMode: "fixed", expectedRevisionId: null, idempotencyKey: "typed-101-race" }, "f".repeat(64), NOW);
+            saved();
+            await held;
+            return result;
+          });
+        let w5: Promise<unknown> | undefined;
+        let outcome: unknown;
+        try {
+          await within(priceSaved, "the W9 save");
+          w5 = products().saveForMember(MEMBER, STORE, PRODUCT_7, { ...body, expectedPrices: shown }).then(() => null, (reason: unknown) => reason);
+          await waitUntilLockWait("dropship_listing_push_job", 1);
+          open();
+          await within(w9, "W9");
+          outcome = await within(w5, "W5");
+        } finally {
+          open();
+          await within(Promise.allSettled([w9, ...(w5 ? [w5] : [])]), "the W9 race case's clean-up");
+        }
+        expect(outcome).toBeInstanceOf(DropshipError);
+        expect(outcome).toMatchObject({ code: "DROPSHIP_LISTING_PRICES_MOVED", context: { sizeCount: 1,
+          sizes: [{ productVariantId: 101, priceCents: 1_299, expectedPriceCents: shown.find((row) => row.productVariantId === 101)!.priceCents }] } });
+        expect(await count("dropship.dropship_product_listing_setting_revisions")).toBe(0);
+      });
+
+      it("(c) serializes one key sent twice at once: the same body replays, another body is a conflict, another store is a conflict", async () => {
+        const body = { idempotencyKey: productKey("twice"), expectedRevisionId: null, patch: { storeShelf: { mode: "none" } } };
+        const paused = gate((sql) => sql === "COMMIT");
+        const first = products(scopedPool(undefined, paused.hook)).saveForMember(MEMBER, STORE, PRODUCT_7, body);
+        let second: Promise<unknown> | undefined;
+        let third: Promise<unknown> | undefined;
+        try {
+          await within(paused.reached, "the first save's commit");
+          second = products().saveForMember(MEMBER, STORE, PRODUCT_7, body);
+          third = products().saveForMember(MEMBER, STORE, PRODUCT_7, { ...body, patch: { storeShelf: null } })
+            .then(() => null, (reason: unknown) => reason);
+          await waitUntilLockWait("dropship_listing_settings_request", 2);
+          paused.open();
+          const written = await within(first, "the first save");
+          expect(written).toMatchObject({ outcome: "changed" });
+          await expect(within(second, "the same body")).resolves.toEqual({ ...(written as object), outcome: "replayed", clearedSizeCount: null });
+          await expect(within(third, "another body")).resolves.toMatchObject({ code: "DROPSHIP_IDEMPOTENCY_CONFLICT",
+            context: { mismatched: ["productRevision.requestHash"] } });
+        } finally {
+          paused.open();
+          await within(Promise.allSettled([first, ...(second ? [second] : []), ...(third ? [third] : [])]), "the same-key case's clean-up");
+        }
+        expect(await count("dropship.dropship_product_listing_setting_revisions")).toBe(1);
+
+        // The member's second store, the same key: the probe sees the first store's row.
+        await addVendorStore(24);
+        const otherStore = await expectDropshipError(products().saveForMember(MEMBER, 24, PRODUCT_7, body), "DROPSHIP_IDEMPOTENCY_CONFLICT");
+        expect(otherStore.context?.mismatched).toEqual(["productRevision.requestHash", "productRevision.storeConnectionId"]);
+      });
+
+      it("(d) answers a size Card Shellz adds between the size read and lockCatalog as PRICES_MOVED, naming it", async () => {
+        const body = { idempotencyKey: productKey("new-size"), expectedRevisionId: null,
+          patch: { price: { basis: "catalog_retail", markupBps: 0, flatCents: 0, rounding: "cent" } } };
+        const shown = await shownPrices(PRODUCT_7, body);
+        let inserted = false;
+        const racing = scopedPool(undefined, async (sql) => {
+          if (inserted || !sql.startsWith("LOCK TABLE dropship.dropship_catalog_rules")) return;
+          inserted = true;
+          await execute(`INSERT INTO catalog.product_variants (id, product_id, sku, name, shopify_variant_id, weight_grams, sales_eligibility)
+            VALUES (105, 7, 'TL-1000', 'Pack of 1000', '7000000105', 4800, 'sellable')`);
+        });
+
+        const error = await expectDropshipError(products(racing).saveForMember(MEMBER, STORE, PRODUCT_7, { ...body, expectedPrices: shown }),
+          "DROPSHIP_LISTING_PRICES_MOVED");
+
+        expect(inserted).toBe(true);
+        expect(error.context).toMatchObject({ sizeCount: 1, sizes: [{ productVariantId: 105 }] });
+        expect(await count("dropship.dropship_product_listing_setting_revisions")).toBe(0);
+      });
+    });
+
+    it("reads the preflight in a read-only snapshot with no lock, asks eBay for the new id only, and stores eBay's name (PG 7)", async () => {
+      const statements: Array<{ connection: number; sql: string }> = [];
+      const recording = scopedPool(undefined, (sql, connection) => { statements.push({ connection, sql }); });
+
+      const result = await products(recording).saveForMember(MEMBER, STORE, PRODUCT_7, { idempotencyKey: productKey("preflight"),
+        expectedRevisionId: null, patch: { returnPolicy: { id: "return-new" } } });
+
+      expect(result).toMatchObject({ outcome: "changed" });
+      expect(ebayCalls).toEqual(["discover"]);
+      const preflight = statements.filter((row) => row.connection === 0).map((row) => row.sql);
+      expect(preflight[0]).toBe("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
+      expect(preflight.at(-1)).toBe("COMMIT");
+      expect(preflight.some((sql) => /pg_advisory|FOR SHARE|FOR UPDATE|LOCK TABLE|INSERT|UPDATE dropship/.test(sql))).toBe(false);
+      expect(statements.filter((row) => row.connection === 1)[0].sql).toBe("BEGIN");
+      const stored = await execute(`SELECT return_policy_id, return_policy_name FROM dropship.dropship_product_listing_setting_revisions
+        WHERE product_id = $1`, [PRODUCT_7]);
+      expect(stored.rows).toEqual([{ return_policy_id: "return-new", return_policy_name: "Thirty days" }]);
+      // Why the preflight's owner read has no FOR SHARE: PostgreSQL refuses a row lock in a read-only transaction.
+      const client = await pool.connect();
+      try {
+        await client.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
+        await expect(client.query(`SELECT id FROM "${schema}".dropship_vendors FOR SHARE`)).rejects.toMatchObject({ code: "25006" });
+      } finally {
+        await client.query("ROLLBACK");
+        client.release();
+      }
+    });
+
+    it("refuses a W5 that raises a store at the text cap, accepts one that shortens, and times the count over 10,000 rows (PG 9)", async () => {
+      const BULK_TEXT_FIRST_PRODUCT = 20_000;
+      const ROWS = 10_000;
+      const PART = MAX_STORE_LISTING_TEXT_BYTES / ROWS / 2;
+      expect(Number.isInteger(PART)).toBe(true);
+      await execute(`INSERT INTO catalog.products (id, sku, name, category, category_id, product_type)
+        SELECT g, 'TEXT-' || g, 'Text product ' || g, 'Toploaders', $3, 'toploader' FROM generate_series($1::int, $2::int) g`,
+      [BULK_TEXT_FIRST_PRODUCT, BULK_TEXT_FIRST_PRODUCT + ROWS - 2, TOPLOADERS]);
+      // Product 7 and 9,999 others, each with text above and below of PART ASCII bytes: the store sits exactly at the cap.
+      await execute(`INSERT INTO dropship.dropship_product_listing_setting_revisions
+        (vendor_id, store_connection_id, product_id, previous_revision_id, request_id, text_above_mode, text_above, text_below_mode, text_below,
+         idempotency_key, request_hash, actor_type, actor_id, created_at)
+        SELECT $1, $2, p.id, NULL, NULL, 'own', repeat('a', $3), 'own', repeat('b', $3), 'seed-text:' || p.id, $4, 'vendor', 'seed', $5
+        FROM (SELECT 7 AS id UNION ALL SELECT g FROM generate_series($6::int, $7::int) g) p`,
+      [VENDOR, STORE, PART, "d".repeat(64), NOW, BULK_TEXT_FIRST_PRODUCT, BULK_TEXT_FIRST_PRODUCT + ROWS - 2]);
+      await execute(`INSERT INTO dropship.dropship_product_listing_settings (vendor_id, store_connection_id, product_id, revision_id)
+        SELECT vendor_id, store_connection_id, product_id, id FROM dropship.dropship_product_listing_setting_revisions`);
+      const encoding = (await pool.query<{ server_encoding: string }>("SHOW server_encoding")).rows[0].server_encoding;
+      expect(encoding).toBe("UTF8");
+      const repository = new PgDropshipListingSettingWritesRepository(scopedPool());
+      const timedMs: number[] = [];
+      for (let run = 0; run < 3; run += 1) {
+        const bytes = await repository.execute({ memberId: MEMBER, storeConnectionId: STORE, idempotencyKey: productKey(`count-${run}`) },
+          async (tx) => {
+            const started = performance.now();
+            const counted = await tx.readListingTextBytes({ productIds: [PRODUCT_7], replacedFields: { textAbove: true, textBelow: false, mainText: false } });
+            timedMs.push(performance.now() - started);
+            return counted;
+          });
+        expect(bytes).toEqual({ storeBytes: MAX_STORE_LISTING_TEXT_BYTES, keptStoreBytes: MAX_STORE_LISTING_TEXT_BYTES - PART, targetBytes: 2 * PART });
+      }
+      process.stdout.write(`${JSON.stringify({ measurement: "read_listing_text_bytes_at_cap", rows: ROWS, bytes: MAX_STORE_LISTING_TEXT_BYTES,
+        serverEncoding: encoding, elapsedMs: timedMs.map((ms) => Number(ms.toFixed(1))) })}\n`);
+      const revision = (await execute(`SELECT revision_id FROM dropship.dropship_product_listing_settings WHERE product_id = 7`)).rows[0].revision_id as number;
+      const before = await allWrites();
+
+      const refused = await expectDropshipError(products().saveForMember(MEMBER, STORE, PRODUCT_7, { idempotencyKey: productKey("adds-text"),
+        expectedRevisionId: revision, patch: { mainText: { text: "Own words." } } }), "DROPSHIP_LISTING_SETTINGS_TOO_LARGE");
+      expect(refused.context).toMatchObject({ reason: "store_text_limit", textBytes: MAX_STORE_LISTING_TEXT_BYTES + 10,
+        maxTextBytes: MAX_STORE_LISTING_TEXT_BYTES });
+      expect(await allWrites()).toEqual(before);
+
+      const shortened = await products().saveForMember(MEMBER, STORE, PRODUCT_7, { idempotencyKey: productKey("shortens"),
+        expectedRevisionId: revision, patch: { textAbove: { mode: "own", text: "Short" } } });
+      expect(shortened).toMatchObject({ outcome: "changed" });
+      expect(log.info).toHaveBeenCalledWith("dropship.listing_settings.product_saved", expect.objectContaining({
+        store_text_bytes: MAX_STORE_LISTING_TEXT_BYTES - PART + 5 }));
+    }, BULK_TEST_TIMEOUT_MS);
   });
 });

@@ -1,7 +1,8 @@
 import type { Pool, PoolClient } from "pg";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, expectTypeOf, it, vi } from "vitest";
 import type { SaveListingContentInput } from "../../../../../shared/dropship/listing-content";
 import type {
+  ListingSettingPreflightTransaction,
   ListingSettingSystemTransaction,
   ListingSettingWriteTransaction,
 } from "../../application/dropship-listing-setting-writes";
@@ -40,6 +41,7 @@ const writers = vi.hoisted(() => {
     insertFirstCategoryMarksWithClient: vi.fn(),
     saveEbayCategoryRulesProfileWithClient: vi.fn(),
     saveListingContentWithClient: vi.fn(),
+    clearSizeLeftoversWithClient: vi.fn(),
   };
 });
 
@@ -60,6 +62,9 @@ vi.mock("../../infrastructure/dropship-product-category-marks.repository", () =>
 vi.mock("../../infrastructure/dropship-ebay-category-rules.repository", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../infrastructure/dropship-ebay-category-rules.repository")>()),
   saveEbayCategoryRulesProfileWithClient: writers.saveEbayCategoryRulesProfileWithClient,
+}));
+vi.mock("../../infrastructure/dropship-listing-setting-leftovers.repository", () => ({
+  clearSizeLeftoversWithClient: writers.clearSizeLeftoversWithClient,
 }));
 vi.mock("../../infrastructure/dropship-listing-content.repository", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../infrastructure/dropship-listing-content.repository")>()),
@@ -82,6 +87,12 @@ class ScriptedClient {
   failRollback = false;
   /** Sizes that exist in the catalog; lockCatalog locks only these. */
   existingVariantIds = new Set([101, 102, 103]);
+  /** Products that exist in the catalog; lockCatalog locks only these. */
+  existingProductIds = new Set([7, 8]);
+  /** Each product's sellable sizes, as listProductSizes reads them. */
+  productSizes = new Map<number, number[]>([[7, [101, 102]], [8, [103]]]);
+  /** What the store text byte count answers. */
+  textBytes: Record<string, unknown> = { utf8: true, store_bytes: "1200", kept_store_bytes: "1000", target_bytes: "300" };
   /** What the replay probe (findRequestKeyUse) answers. */
   probeRows: Array<Record<string, unknown>> = [];
 
@@ -93,9 +104,17 @@ class ScriptedClient {
     if (sql.includes("FROM dropship.dropship_vendors v") || sql.includes("FROM dropship.dropship_store_connections sc")) {
       return rows<T>(this.ownerFound ? [{ vendor_id: VENDOR }] : []);
     }
+    if (sql.startsWith("SELECT id FROM catalog.product_variants WHERE product_id = ANY")) {
+      return rows<T>((params[0] as number[]).flatMap((productId) => this.productSizes.get(productId) ?? []).sort((a, b) => a - b)
+        .map((id) => ({ id })));
+    }
     if (sql.startsWith("SELECT id FROM catalog.product_variants")) {
       return rows<T>((params[0] as number[]).filter((id) => this.existingVariantIds.has(id)).map((id) => ({ id })));
     }
+    if (sql.startsWith("SELECT id FROM catalog.products")) {
+      return rows<T>((params[0] as number[]).filter((id) => this.existingProductIds.has(id)).map((id) => ({ id })));
+    }
+    if (sql.startsWith("SELECT current_setting('server_encoding')")) return rows<T>([this.textBytes]);
     if (sql.startsWith("INSERT INTO dropship.dropship_listing_price_revisions")) return rows<T>([{ id: 31 }]);
     if (sql.startsWith("SELECT 'product' AS source")) return rows<T>(this.probeRows);
     return rows<T>([]);
@@ -159,6 +178,8 @@ beforeEach(() => {
   writers.insertFirstCategoryMarksWithClient.mockImplementation(writers.marker("insertFirstCategoryMarks", { insertedProductIds: [7] }));
   writers.saveEbayCategoryRulesProfileWithClient.mockImplementation(writers.marker("saveEbayCategoryRulesProfile", { revisionId: 4 }));
   writers.saveListingContentWithClient.mockImplementation(writers.marker("saveListingContent", undefined));
+  writers.clearSizeLeftoversWithClient.mockImplementation(writers.marker("clearSizeLeftovers",
+    { clearedSizeCount: 1, byKind: { policy: 1, shelf: 0, content: 0 }, productVariantIds: [101] }));
 });
 
 describe("PgDropshipListingSettingWritesRepository.execute", () => {
@@ -586,8 +607,14 @@ describe("error mapping (plan 3.9)", () => {
     ["a reused ledger key", { code: "23505", constraint: "dropship_product_listing_setting_requests_key_idx" }, "DROPSHIP_IDEMPOTENCY_CONFLICT", "permanent"],
     ["a reused product revision key", { code: "23505", constraint: "dropship_product_listing_setting_revision_key_uk" }, "DROPSHIP_IDEMPOTENCY_CONFLICT", "permanent"],
     ["a reused category revision key", { code: "23505", constraint: "dropship_category_listing_setting_revision_key_uk" }, "DROPSHIP_IDEMPOTENCY_CONFLICT", "permanent"],
-    // Plan PR 9, P32: another member of the vendor sent the same key at the same time; W9's size child key is unique per vendor.
+    // Plan PR 9, P32: PR 9's routes never reach these (one member per vendor, the request lock is member:key); an older
+    // per-size policy or shelf route given a child-key-shaped key can, between a PR 9 write's probe and its insert (no
+    // store lock); the size and content keys are a backstop (their older routes take the store lock). Real constraint names.
     ["a reused size price child key", { code: "23505", constraint: "dropship_listing_price_revision_idempotency_uk" }, "DROPSHIP_IDEMPOTENCY_CONFLICT", "permanent"],
+    ["a reused policy child key", { code: "23505", constraint: "dropship_ebay_listing_policy_override_revision_idem_uk" }, "DROPSHIP_IDEMPOTENCY_CONFLICT", "permanent"],
+    ["a reused shelf child key", { code: "23505", constraint: "dropship_ebay_store_category_revision_idem_uk" }, "DROPSHIP_IDEMPOTENCY_CONFLICT", "permanent"],
+    // 0660 leaves it unnamed; PostgreSQL's generated name, read from pg_constraint by the PostgreSQL suite.
+    ["a reused content child key", { code: "23505", constraint: "dropship_listing_content_revision_vendor_id_idempotency_key_key" }, "DROPSHIP_IDEMPOTENCY_CONFLICT", "permanent"],
     ["a missing product on a revision", { code: "23503", constraint: "dropship_product_listing_setting_revision_product_fk" }, "DROPSHIP_LISTING_SETTINGS_PRODUCT_NOT_FOUND", "permanent"],
     ["a missing product on a current row", { code: "23503", constraint: "dropship_product_listing_setting_product_fk" }, "DROPSHIP_LISTING_SETTINGS_PRODUCT_NOT_FOUND", "permanent"],
     ["a missing category on a revision", { code: "23503", constraint: "dropship_category_listing_setting_revision_category_fk" }, "DROPSHIP_LISTING_SETTINGS_CATEGORY_NOT_FOUND", "permanent"],
@@ -846,6 +873,258 @@ describe("the replay probe, findRequestKeyUse (plan PR 9, section 4.6)", () => {
     const { repository } = setup();
     let kept: ListingSettingWriteTransaction | undefined;
     await repository.execute(INPUT, async (tx) => { kept = tx; });
+    await expectInvariant(kept!.findRequestKeyUse());
+  });
+});
+
+describe("lockCatalog's locked products (plan PR 9, 6.2 #3, C-money-2)", () => {
+  it("returns exactly the products the lock statement found, ascending: a deleted product is not among them", async () => {
+    const { client, repository } = setup();
+    client.existingProductIds = new Set([7]);
+
+    const locked = await repository.execute(INPUT, (tx) => tx.lockCatalog({ productIds: [9, 7, 7] }));
+
+    expect(locked).toEqual({ lockedProductIds: [7] });
+    expect(await repository.execute(INPUT, (tx) => tx.lockCatalog({ productVariantIds: [101] }))).toEqual({ lockedProductIds: [] });
+  });
+});
+
+describe("clearSizeLeftovers (plan PR 9, P17, 6.2 #3)", () => {
+  const clear = { productIds: [7], fields: ["storeShelf"] as const, requestHash: HASH, now: NOW };
+
+  it("runs the clean-up on the transaction's client with its scope, for products lockCatalog locked", async () => {
+    const { client, repository } = setup();
+
+    const result = await repository.execute(INPUT, async (tx) => {
+      await tx.lockCatalog({ productIds: [7, 8] });
+      return tx.clearSizeLeftovers({ ...clear, productIds: [7, 8] });
+    });
+
+    expect(result).toEqual({ clearedSizeCount: 1, byKind: { policy: 1, shelf: 0, content: 0 }, productVariantIds: [101] });
+    expect(writers.clearSizeLeftoversWithClient).toHaveBeenCalledWith(expect.anything(),
+      { vendorId: VENDOR, storeConnectionId: STORE, actor: { actorType: "vendor", actorId: MEMBER }, requestKey: KEY },
+      { ...clear, productIds: [7, 8] });
+    expect(client.sql.at(-2)).toBe("-- writer: clearSizeLeftovers");
+    expect(client.sql.at(-1)).toBe("COMMIT");
+  });
+
+  it("is refused a second time, with no fields, with no products, and for a product lockCatalog did not lock", async () => {
+    const twice = setup();
+    await expectInvariant(twice.repository.execute(INPUT, async (tx) => {
+      await tx.lockCatalog({ productIds: [7] });
+      await tx.clearSizeLeftovers(clear);
+      await tx.clearSizeLeftovers(clear);
+    }));
+    expect(writers.clearSizeLeftoversWithClient).toHaveBeenCalledTimes(1);
+
+    for (const input of [{ ...clear, fields: [] }, { ...clear, productIds: [] }, { ...clear, productIds: [7, 9] }]) {
+      vi.mocked(writers.clearSizeLeftoversWithClient).mockClear();
+      const { client, repository } = setup();
+      client.existingProductIds = new Set([7]);
+      await expectInvariant(repository.execute(INPUT, async (tx) => {
+        await tx.lockCatalog({ productIds: [7, 9] });
+        await tx.clearSizeLeftovers(input);
+      }));
+      expect(writers.clearSizeLeftoversWithClient).not.toHaveBeenCalled();
+    }
+
+    // Without lockCatalog nothing is locked, so nothing may be cleaned.
+    const unlocked = setup();
+    await expectInvariant(unlocked.repository.execute(INPUT, (tx) => tx.clearSizeLeftovers(clear)));
+  });
+
+  it("never shares a transaction's content child keys: a main-text clean-up and a description save refuse each other (D30)", async () => {
+    const content = (id: number) => contentSave(listingSettingChildKey(KEY, "content", id));
+    const mainText = { ...clear, fields: ["mainText"] as const };
+
+    const saveFirst = setup();
+    await expectInvariant(saveFirst.repository.execute(INPUT, async (tx) => {
+      await tx.lockCatalog({ productIds: [7], productVariantIds: [101] });
+      await tx.saveListingContent(101, content(101), HASH, NOW);
+      await tx.clearSizeLeftovers(mainText);
+    }));
+    expect(writers.clearSizeLeftoversWithClient).not.toHaveBeenCalled();
+
+    vi.clearAllMocks();
+    const clearFirst = setup();
+    const refused = await expectInvariant(clearFirst.repository.execute(INPUT, async (tx) => {
+      await tx.lockCatalog({ productIds: [7], productVariantIds: [101] });
+      await tx.clearSizeLeftovers(mainText);
+      await tx.saveListingContent(101, content(101), HASH, NOW);
+    }));
+    expect(refused.context).toMatchObject({ productVariantId: "101" });
+    expect(writers.saveListingContentWithClient).not.toHaveBeenCalled();
+
+    vi.clearAllMocks();
+    // A clean-up that leaves the main text alone writes no content key, so a description save may share its transaction.
+    const other = setup();
+    await other.repository.execute(INPUT, async (tx) => {
+      await tx.lockCatalog({ productIds: [7], productVariantIds: [101] });
+      await tx.saveListingContent(101, content(101), HASH, NOW);
+      await tx.clearSizeLeftovers(clear);
+    });
+    expect(writers.saveListingContentWithClient).toHaveBeenCalledTimes(1);
+    expect(writers.clearSizeLeftoversWithClient).toHaveBeenCalledTimes(1);
+  });
+
+  it("ends lockCatalog's window: a clean-up is a write", async () => {
+    const { repository } = setup();
+    await expectInvariant(repository.execute(INPUT, async (tx) => {
+      await tx.lockCatalog({ productIds: [7] });
+      await tx.clearSizeLeftovers(clear);
+      await tx.lockCatalog({});
+    }));
+  });
+});
+
+describe("the W5 reads (plan PR 9, 6.2 #1, #2, #6)", () => {
+  it("lists the products' sellable sizes ascending with the selected-catalog scan's filter, and reads nothing for no products", async () => {
+    const { client, repository } = setup();
+
+    const sizes = await repository.execute(INPUT, (tx) => tx.listProductSizes([8, 7, 8]));
+
+    expect(sizes).toEqual([101, 102, 103]);
+    const index = client.sql.findIndex((sql) => sql.startsWith("SELECT id FROM catalog.product_variants WHERE product_id"));
+    expect(client.sql[index]).toBe("SELECT id FROM catalog.product_variants WHERE product_id = ANY($1::int[]) AND requires_shipping = true "
+      + "AND COALESCE(track_inventory, true) = true AND sales_eligibility = 'sellable' ORDER BY id");
+    expect(client.params[index]).toEqual([[7, 8]]);
+    expect(client.sql[index]).not.toMatch(/FOR (SHARE|UPDATE)/);
+
+    const none = setup();
+    await expect(none.repository.execute(INPUT, (tx) => tx.listProductSizes([]))).resolves.toEqual([]);
+    expect(none.client.afterOwner()).toEqual(["COMMIT"]);
+  });
+
+  it("refuses a size id the catalog read returned out of contract", async () => {
+    const { client, repository } = setup();
+    client.productSizes = new Map([[7, [0]]]);
+    await expectInvariant(repository.execute(INPUT, (tx) => tx.listProductSizes([7])));
+  });
+
+  it("reads the pricing profile and the .ops costs on the transaction's client, the costs in a savepoint, never a BEGIN", async () => {
+    const { client, repository } = setup();
+
+    await repository.execute(INPUT, async (tx) => {
+      await expect(tx.loadPricingProfile()).resolves.toEqual({ revisionId: null, profile: null, updatedAt: null });
+      await tx.loadProductCosts([101]);
+    });
+
+    const after = client.afterOwner();
+    expect(after[0]).toContain("FROM dropship.dropship_pricing_profiles p");
+    expect(client.params[client.sql.indexOf(after[0])]).toEqual([STORE, VENDOR]);
+    expect(after).toContain("SAVEPOINT dropship_product_cost_read");
+    expect(after.filter((sql) => sql.startsWith("BEGIN"))).toEqual([]);
+    expect(after.at(-1)).toBe("COMMIT");
+  });
+
+  it("counts the store's saved product text in one statement: vendor and store scoped, no text selected, the UTF8 check returned", async () => {
+    const { client, repository } = setup();
+
+    const bytes = await repository.execute(INPUT, (tx) => tx.readListingTextBytes({ productIds: [8, 7],
+      replacedFields: { textAbove: true, textBelow: false, mainText: true } }));
+
+    expect(bytes).toEqual({ storeBytes: 1_200, keptStoreBytes: 1_000, targetBytes: 300 });
+    const index = client.sql.findIndex((sql) => sql.startsWith("SELECT current_setting('server_encoding')"));
+    const sql = client.sql[index];
+    expect(client.params[index]).toEqual([VENDOR, STORE, [7, 8], true, false, true]);
+    expect(sql).toMatch(/WHERE s\.vendor_id = \$1 AND s\.store_connection_id = \$2$/);
+    // Lengths only: every text column appears inside octet_length(...), none is selected.
+    expect(sql.replace(/octet_length\(r\.(text_above|text_below|body_text)\)/g, "")).not.toMatch(/text_above|text_below|body_text/);
+    expect(sql).not.toMatch(/convert_to|FOR (SHARE|UPDATE)/);
+    expect(client.afterOwner()).toEqual([sql, "COMMIT"]);
+  });
+
+  it.each([
+    ["a server that is not UTF8", { utf8: false }],
+    ["a missing encoding check", { utf8: null }],
+    ["a sum that is not a whole number", { store_bytes: "12.5" }],
+    ["a negative sum", { kept_store_bytes: "-1" }],
+    ["a sum past the safe integers", { target_bytes: "90071992547409930" }],
+    ["a sum sent as a number", { store_bytes: 12 }],
+  ])("refuses %s as a broken contract", async (_label, fields) => {
+    const { client, repository } = setup();
+    client.textBytes = { ...client.textBytes, ...fields };
+    await expectInvariant(repository.execute(INPUT, (tx) => tx.readListingTextBytes({ productIds: [7],
+      replacedFields: { textAbove: false, textBelow: false, mainText: false } })));
+    expect(client.sql.at(-1)).toBe("ROLLBACK");
+  });
+
+  it("types tx.catalog without the five readers that commit on the transaction's client (plan 6.2 #2, R9)", () => {
+    type Catalog = ListingSettingWriteTransaction["catalog"];
+    expectTypeOf<keyof Catalog>().toEqualTypeOf<"loadStoreContext" | "listCatalogCandidates" | "listCatalogExposureRules"
+      | "listSelectionRules" | "listVariantOverrides" | "listExistingListings" | "listSavedListingPrices" | "listPricingPolicies"
+      | "getStoreListingConfig">();
+    expectTypeOf<keyof ListingSettingPreflightTransaction["catalog"]>().toEqualTypeOf<"loadStoreContext" | "getStoreListingConfig">();
+    // Never called: these lines are checked by the compiler (npm run check:tests), each a self-committing reader.
+    const unreachable = (catalog: Catalog) => [
+      // @ts-expect-error loadRulePrices runs its own BEGIN ... COMMIT on the transaction's client.
+      catalog.loadRulePrices,
+      // @ts-expect-error loadListingSettingLayers runs its own BEGIN ... COMMIT on the transaction's client.
+      catalog.loadListingSettingLayers,
+      // @ts-expect-error loadListingContents runs its own BEGIN ... COMMIT on the transaction's client.
+      catalog.loadListingContents,
+      // @ts-expect-error loadEbayCategories runs its own BEGIN ... COMMIT on the transaction's client.
+      catalog.loadEbayCategories,
+      // @ts-expect-error createListingPushJob runs its own BEGIN ... COMMIT on the transaction's client.
+      catalog.createListingPushJob,
+    ];
+    expect(typeof unreachable).toBe("function");
+  });
+});
+
+describe("PgDropshipListingSettingWritesRepository.preflight (plan PR 9, 6.2 #4)", () => {
+  const PREFLIGHT = { memberId: MEMBER, storeConnectionId: STORE, idempotencyKey: KEY };
+
+  it("opens a read-only snapshot, reads the owner rows without a lock, and takes no advisory lock", async () => {
+    const { client, repository } = setup();
+
+    await repository.preflight(PREFLIGHT, async (tx) => {
+      expect({ vendorId: tx.vendorId, storeConnectionId: tx.storeConnectionId }).toEqual({ vendorId: VENDOR, storeConnectionId: STORE });
+      await tx.findRequestKeyUse();
+      await tx.loadProducts([7]);
+      await tx.loadCategories([3]);
+    });
+
+    expect(client.sql[0]).toBe("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
+    expect(client.sql[1]).toBe("SELECT v.id AS vendor_id FROM dropship.dropship_vendors v "
+      + "JOIN dropship.dropship_store_connections sc ON sc.vendor_id = v.id WHERE v.member_id::text = $1 AND sc.id = $2");
+    expect(client.params[1]).toEqual([MEMBER, STORE]);
+    expect(client.sql[2]).toMatch(/^SELECT 'product' AS source/);
+    expect(client.sql.slice(3)).toEqual(["-- writer: readProducts", "-- writer: readCategories", "COMMIT"]);
+    expect(client.sql.some((sql) => /pg_advisory|FOR SHARE|FOR UPDATE|LOCK TABLE/.test(sql))).toBe(false);
+    expect(writers.readProductListingSettings).toHaveBeenCalledWith(expect.anything(), { vendorId: VENDOR, storeConnectionId: STORE, productIds: [7] });
+    expect(client.release).toHaveBeenCalledOnce();
+  });
+
+  it("has no writer, no lockCatalog and no size price, and refuses the probe without a key", async () => {
+    const { repository } = setup();
+    let seen: ListingSettingPreflightTransaction | undefined;
+    await repository.preflight({ ...PREFLIGHT, idempotencyKey: null }, async (tx) => { seen = tx; });
+    for (const absent of ["saveProduct", "saveProductsBulk", "saveCategory", "lockCatalog", "sizePrice", "clearSizeLeftovers",
+      "readListingTextBytes"]) {
+      expect(Object.keys(seen!)).not.toContain(absent);
+    }
+    await expectInvariant(repository.preflight({ ...PREFLIGHT, idempotencyKey: null }, (tx) => tx.findRequestKeyUse()));
+  });
+
+  it("answers another member's store as not found, and refuses a bad input before taking a connection", async () => {
+    const missing = setup();
+    missing.client.ownerFound = false;
+    await expect(missing.repository.preflight(PREFLIGHT, async () => "never")).rejects.toMatchObject({ code: "DROPSHIP_STORE_CONNECTION_REQUIRED" });
+    expect(missing.client.sql.at(-1)).toBe("ROLLBACK");
+
+    for (const input of [{ ...PREFLIGHT, memberId: " " }, { ...PREFLIGHT, storeConnectionId: 0 }, { ...PREFLIGHT, idempotencyKey: "short" }]) {
+      const { connect, repository } = setup();
+      await expectInvariant(repository.preflight(input, async () => "never"));
+      expect(connect).not.toHaveBeenCalled();
+    }
+  });
+
+  it("refuses every call once it ended", async () => {
+    const { repository } = setup();
+    let kept: ListingSettingPreflightTransaction | undefined;
+    await repository.preflight(PREFLIGHT, async (tx) => { kept = tx; });
+    await expectInvariant(kept!.loadProducts([7]));
     await expectInvariant(kept!.findRequestKeyUse());
   });
 });
