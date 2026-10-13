@@ -169,7 +169,7 @@ export function OrderEditTotals({
                   {discounts.map((discount) => (
                     <React.Fragment key={discount.key}>
                       <dt className="oe-saving">
-                        {discount.label}
+                        <span>{discount.label}</span>
                         {discount.detail && <small>{discount.detail}</small>}
                       </dt>
                       <dd className="oe-saving">
