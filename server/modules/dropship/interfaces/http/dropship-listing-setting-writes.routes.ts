@@ -4,6 +4,7 @@ import type { z } from "zod";
 import {
   LISTING_SETTING_WRITE_ERROR_CODES,
   saveProductSettingsResponseSchema,
+  saveProductsBulkResponseSchema,
   saveSizePricesResponseSchema,
 } from "../../../../../shared/dropship/listing-setting-writes";
 import { logger } from "../../../../platform/observability/logger";
@@ -44,6 +45,9 @@ export function registerDropshipListingSettingWritesRoutes(
   app.put(`${base}/products/:productId`, requireDropshipAuth, singleLimiter, parseBody, (req, res) => respond(req, res,
     saveProductSettingsResponseSchema, () => services.products.saveForMember(memberId(req), parseId(req.params.storeConnectionId),
       parseId(req.params.productId), req.body)));
+  // A heavy write (plan 3.10): the bulk budget here; the service's heavy-write gate wraps its write transaction.
+  app.post(`${base}/products/bulk`, requireDropshipAuth, bulkLimiter, parseBody, (req, res) => respond(req, res,
+    saveProductsBulkResponseSchema, () => services.products.saveBulkForMember(memberId(req), parseId(req.params.storeConnectionId), req.body)));
 }
 
 function memberRateLimit(max: number) {

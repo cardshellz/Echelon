@@ -194,6 +194,64 @@ export function listingSettingStoreTextLimit(storeConnectionId: number, textByte
     });
 }
 
+/**
+ * The text a heavy write would carry passes MAX_BULK_TEXT_BYTES (plan P9 (b),
+ * 3.10 (b)): fewer products, or shorter text, fit. Permanent: the same
+ * request is refused again.
+ */
+export function listingSettingBulkTooLarge(storeConnectionId: number, textBytes: number, maxTextBytes: number,
+  productCount: number): DropshipError {
+  return permanent("DROPSHIP_LISTING_SETTINGS_BULK_TOO_LARGE",
+    "This change carries too much listing text to save at once. Choose fewer products, or set the text once on a category or as the store default.", {
+      storeConnectionId, textBytes, maxTextBytes, productCount,
+    });
+}
+
+/** Seconds a vendor waits before resending a heavy write the gate refused (plan 3.10 (a)). */
+export const HEAVY_WRITE_RETRY_AFTER_SECONDS = 5;
+
+/**
+ * One heavy write at a time in this process (plan P9 (a), 3.10 (a)): W6, and
+ * later W12 with a clear list and W7's review and apply. Explicitly stateful:
+ * `run` refuses while another heavy write holds the gate, with the transient
+ * DROPSHIP_LISTING_SETTINGS_BUSY (503, Retry-After 5), and releases in
+ * `finally`, so a failed write never keeps it. The check and the claim run in
+ * the same synchronous step, so two calls cannot both pass.
+ *
+ * It wraps the write transaction only (repository.execute), never the
+ * preflight or an eBay call, so an eBay timeout never holds it. A refused
+ * write never opens its write transaction (that takes a pool connection,
+ * then the store lock, so a queue there would hold connections; the pool has
+ * 20, server/db.ts). A write whose patch sets an eBay id has already run its
+ * read-only preflight (one pooled connection, released) and its eBay calls
+ * when the gate refuses it, and its retry runs both again. Nothing bounds how
+ * long a write holds the gate but the write itself: its transaction sets no
+ * lock or statement timeout. Precedent: the manual sync runner's overlap guard
+ * (server/modules/channels/manual-sync-runner.ts). One instance per process,
+ * built by the services factory and shared by every heavy writer. Two web
+ * dynos would mean two gates, still one heavy write per heap (HYPOTHESIS:
+ * one web dyno, server/db.ts).
+ */
+export class ListingSettingHeavyWriteGate {
+  private held = false;
+
+  async run<T>(work: () => Promise<T>): Promise<T> {
+    if (this.held) {
+      throw new DropshipError(LISTING_SETTING_WRITE_ERROR_CODES.busy,
+        "Another large listing settings change is being saved. Try again in a few seconds.", {
+          reason: "heavy_write_in_progress", retryAfterSeconds: HEAVY_WRITE_RETRY_AFTER_SECONDS,
+          retryable: true, classification: "transient",
+        });
+    }
+    this.held = true;
+    try {
+      return await work();
+    } finally {
+      this.held = false;
+    }
+  }
+}
+
 /** Seconds a vendor waits before resending a write whose request key changed under it. */
 const REQUEST_KEY_CHANGED_RETRY_AFTER_SECONDS = 5;
 

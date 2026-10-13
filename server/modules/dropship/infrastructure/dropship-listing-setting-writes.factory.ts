@@ -2,7 +2,10 @@ import { performance } from "node:perf_hooks";
 import { logger } from "../../../platform/observability/logger";
 import { systemDropshipListingPreviewClock } from "../application/dropship-listing-preview-service";
 import { DropshipListingProductSettingsService } from "../application/dropship-listing-product-settings-service";
-import type { ListingSettingWriteLog } from "../application/dropship-listing-setting-write-support";
+import { DropshipListingProductsBulkService } from "../application/dropship-listing-products-bulk-service";
+import type { ListingSettingEbayPort } from "../application/dropship-listing-setting-ebay-values";
+import { ListingSettingHeavyWriteGate, type ListingSettingWriteLog } from "../application/dropship-listing-setting-write-support";
+import type { ListingSettingWriteRepository } from "../application/dropship-listing-setting-writes";
 import { DropshipListingSizePricesService } from "../application/dropship-listing-size-prices-service";
 import { createDropshipListingSettingEbayAdapterFromEnv } from "./dropship-listing-setting-ebay.adapter";
 import { PgDropshipListingSettingWritesRepository } from "./dropship-listing-setting-writes.repository";
@@ -10,8 +13,14 @@ import { PgDropshipListingSettingWritesRepository } from "./dropship-listing-set
 /** One member per listing-settings writer; each later sub-PR adds its own (plan PR 9, section 3.1). */
 export interface ListingSettingWriteServices {
   sizePrices: Pick<DropshipListingSizePricesService, "saveForMember">;
-  /** W5 (one product); W6 joins it in 9d (plan 6.13 #9). */
-  products: Pick<DropshipListingProductSettingsService, "saveForMember">;
+  /** W5 (one product) and W6 (many products), two classes behind one member (plan 6.13 #9). */
+  products: Pick<DropshipListingProductSettingsService, "saveForMember"> & Pick<DropshipListingProductsBulkService, "saveBulkForMember">;
+}
+
+/** What a test may put in place of the production wiring; everything else is built as in production. */
+export interface ListingSettingWriteServiceOverrides {
+  repository?: ListingSettingWriteRepository;
+  ebay?: ListingSettingEbayPort;
 }
 
 /** The services' success lines, through the platform logger (it merges the request's correlation context). */
@@ -20,21 +29,32 @@ const platformWriteLog: ListingSettingWriteLog = {
 };
 
 /**
- * Called once per process, at route registration: every writer shares one
- * write repository (the 8a wrapper over the shared pool), the preview clock,
- * a monotonic timer for `elapsed_ms` and the log port. W5 also gets the eBay
- * adapter over today's providers; W8 asks eBay nothing.
+ * Called once per process, at route registration (the only production call
+ * passes no overrides): every writer shares one write repository (the 8a
+ * wrapper over the shared pool), the preview clock, a monotonic timer for
+ * `elapsed_ms` and the log port. W5 and W6 also get the eBay adapter over
+ * today's providers; W8 asks eBay nothing. The one heavy-write gate (plan
+ * 3.10 (a)) is built here and injected into every heavy writer, so one
+ * process runs one heavy write at a time. `overrides` is the factory test's
+ * seam: an injected repository or eBay port, never a module mock.
  */
-export function createDropshipListingSettingWriteServices(): ListingSettingWriteServices {
-  const repository = new PgDropshipListingSettingWritesRepository();
+export function createDropshipListingSettingWriteServices(overrides: ListingSettingWriteServiceOverrides = {}): ListingSettingWriteServices {
+  const repository = overrides.repository ?? new PgDropshipListingSettingWritesRepository();
+  const ebay = overrides.ebay ?? createDropshipListingSettingEbayAdapterFromEnv();
+  const heavyWrites = new ListingSettingHeavyWriteGate();
   const deps = {
     repository,
     clock: systemDropshipListingPreviewClock,
     timer: () => performance.now(),
     log: platformWriteLog,
   };
+  const product = new DropshipListingProductSettingsService({ ...deps, ebay });
+  const productsBulk = new DropshipListingProductsBulkService({ ...deps, ebay, heavyWrites });
   return {
     sizePrices: new DropshipListingSizePricesService(deps),
-    products: new DropshipListingProductSettingsService({ ...deps, ebay: createDropshipListingSettingEbayAdapterFromEnv() }),
+    products: {
+      saveForMember: (memberId, storeId, productId, body) => product.saveForMember(memberId, storeId, productId, body),
+      saveBulkForMember: (memberId, storeId, body) => productsBulk.saveBulkForMember(memberId, storeId, body),
+    },
   };
 }

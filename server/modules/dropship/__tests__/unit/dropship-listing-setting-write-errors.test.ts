@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 import { z, ZodError } from "zod";
-import { MAX_ECHOED_ISSUES, parseListingSettingInput } from "../../application/dropship-listing-setting-write-support";
+import {
+  ListingSettingHeavyWriteGate,
+  MAX_ECHOED_ISSUES,
+  listingSettingBulkTooLarge,
+  parseListingSettingInput,
+} from "../../application/dropship-listing-setting-write-support";
 import { DropshipError } from "../../domain/errors";
 import { selectRateBookAssignment, type RateBookAssignmentCandidate } from "../../../shipping-engine/domain/rate-book";
 import {
@@ -149,6 +154,28 @@ describe("listing-settings write errors (plan PR 9, section 3.3)", () => {
     expect(bigint.internalContext).toEqual({ unloggable: expect.any(String) });
     const large = listingSettingWriteErrorAnswer(new DropshipError("DROPSHIP_LISTING_SETTINGS_INVARIANT_FAILED", "x", { ids: "1".repeat(10_000) }));
     expect((large.internalContext?.truncated as string).length).toBe(MAX_LOGGED_CONTEXT_CHARS);
+  });
+});
+
+describe("the 9d refusals answer through existing rows (plan 3.3: 9d adds no status row)", () => {
+  it("answers the heavy-write gate's refusal 503 transient with Retry-After 5 and its reason", async () => {
+    const gate = new ListingSettingHeavyWriteGate();
+    let release!: () => void;
+    const held = gate.run(() => new Promise<void>((done) => { release = done; }));
+    const busy = await gate.run(async () => undefined).then(() => null, (error: unknown) => error);
+    release();
+    await held;
+
+    const answer = listingSettingWriteErrorAnswer(busy);
+    expect(answer).toMatchObject({ status: 503, errorClass: "transient", code: "DROPSHIP_LISTING_SETTINGS_BUSY", retryAfterSeconds: 5 });
+    expect(answer.body.error.context).toEqual({ reason: "heavy_write_in_progress", retryable: true, classification: "transient" });
+  });
+
+  it("answers the bulk text refusal 422 permanent with its numbers", () => {
+    const answer = listingSettingWriteErrorAnswer(listingSettingBulkTooLarge(22, 30_000_001, 30_000_000, 3_750));
+    expect(answer).toMatchObject({ status: 422, errorClass: "permanent", code: "DROPSHIP_LISTING_SETTINGS_BULK_TOO_LARGE", retryAfterSeconds: null });
+    expect(answer.body.error.context).toEqual({ storeConnectionId: 22, textBytes: 30_000_001, maxTextBytes: 30_000_000, productCount: 3_750,
+      retryable: false, classification: "permanent" });
   });
 });
 

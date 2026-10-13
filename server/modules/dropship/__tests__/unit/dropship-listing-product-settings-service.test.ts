@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 import type { ListingPriceSetting, SavedListingPriceRevision } from "../../../../../shared/dropship/listing-price";
 import type { ProductListingSettingRow, ProductListingSettingValues } from "../../../../../shared/dropship/listing-setting-values";
+import { MAX_STORE_LISTING_TEXT_BYTES } from "../../../../../shared/dropship/listing-setting-writes";
 import type { PricingProfileState } from "../../../../../shared/dropship/pricing-rules";
 import { productCatalogHash } from "../../application/dropship-listing-content-resolver";
 import type {
@@ -469,10 +470,12 @@ describe("DropshipListingProductSettingsService.saveForMember (W5, plan PR 9, 6.
 
   describe("the store text cap (plan 3.10 (e), 6.5 step 10a)", () => {
     it("refuses a change that raises the store's saved text past the cap, before any write", async () => {
-      repository.tx.textBytes = { storeBytes: 29_999_990, keptStoreBytes: 29_999_990, targetBytes: 0 };
+      // The cap moved with the bulk text budget in 9d (plan 3.10 (e)); the case stays one byte over it.
+      repository.tx.textBytes = { storeBytes: MAX_STORE_LISTING_TEXT_BYTES - 10, keptStoreBytes: MAX_STORE_LISTING_TEXT_BYTES - 10, targetBytes: 0 };
       const error = await refusal(save(body({ patch: { textAbove: { mode: "own", text: "Eleven char" } } })));
       expect(error.code).toBe("DROPSHIP_LISTING_SETTINGS_TOO_LARGE");
-      expect(error.context).toMatchObject({ reason: "store_text_limit", textBytes: 30_000_001, maxTextBytes: 30_000_000 });
+      expect(error.context).toMatchObject({ reason: "store_text_limit", textBytes: MAX_STORE_LISTING_TEXT_BYTES + 1,
+        maxTextBytes: MAX_STORE_LISTING_TEXT_BYTES });
       expect(repository.tx.readListingTextBytes).toHaveBeenCalledWith({ productIds: [PRODUCT],
         replacedFields: { textAbove: true, textBelow: false, mainText: false } });
       expectNothingWritten(repository.tx);

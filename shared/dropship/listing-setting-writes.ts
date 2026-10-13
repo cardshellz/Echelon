@@ -57,14 +57,42 @@ export const LISTING_SETTING_WRITE_ERROR_CODES = Object.freeze({
 export const MAX_EBAY_ID_INPUT_LENGTH = 100;
 
 /**
+ * UTF-8 bytes of product text one heavy write may carry (plan P9 (b), 3.10
+ * (b)): the stored text above, text below and main text of every product it
+ * names, plus the text its patch sets, once per product. The bulk writer
+ * reads each named product's whole row and builds a revision record from it,
+ * so this bounds the text the write holds in the heap.
+ *
+ * The value is the output of plan 3.10's computed rule, judged on the live
+ * (retained) heap: the heap V8 collects down to before it would fail, which
+ * is what sets the risk of running out of memory. Most of the allocated peak
+ * of a 10,000-product write is collectable garbage of its per-row work, not
+ * text, so the rule does not judge that. The rule is the smaller of
+ * 30,000,000 and floor to a million of (128 MiB - P0) / h, where the live
+ * peak is measured with a full collection before each revision insert and
+ * before COMMIT; P0 is the live peak of 10,000 products with no text; and h
+ * is the worst, over the measured text edges, of (the edge's live peak - the
+ * no-text live peak at the same product count) / the edge's text bytes.
+ * 30,000,000 is P9's value and the ceiling: the rule never raises the budget
+ * above it. The measurements and the arithmetic are in the description of
+ * the pull request that set it (PR 9d). A safe, reversible bound, like P38.
+ *
+ * Raising it is always safe. Lowering it refuses, with 422, the same-key
+ * retry of a W6 committed under the higher value whose patch total lies
+ * between the two: W6's pure pre-check runs before the replay probe (plan
+ * 7.5 #2), so the retry never reaches the probe that would answer it.
+ */
+export const MAX_BULK_TEXT_BYTES = 30_000_000;
+
+/**
  * UTF-8 bytes of product text (text above, text below and main text, over
  * every product row) one store may keep saved (plan 3.10 (e)). Every read of
  * a store's listing settings loads all of it, so the cap bounds the heap of
  * each read. A write is refused only when it raises the store's total past
  * the cap, so a store over it can always shorten or remove text. Equal to the
- * bulk text budget (MAX_BULK_TEXT_BYTES, 9d) and lowered with it.
+ * bulk text budget, and moved with it.
  */
-export const MAX_STORE_LISTING_TEXT_BYTES = 30_000_000;
+export const MAX_STORE_LISTING_TEXT_BYTES = MAX_BULK_TEXT_BYTES;
 
 /** The parts of a patch that carry product text; any listing-settings patch, route or stored, has this shape. */
 export interface ListingSettingTextPatch {
@@ -262,3 +290,77 @@ export const saveProductSettingsResponseSchema = z.object({
 
 export type SaveProductSettingsInput = z.infer<typeof saveProductSettingsInputSchema>;
 export type SaveProductSettingsResponse = z.infer<typeof saveProductSettingsResponseSchema>;
+
+// ---------------------------------------------------------------------------
+// W6: many products, no price (POST …/listing-settings/products/bulk)
+// ---------------------------------------------------------------------------
+
+/**
+ * The ids-only patch for many products (plan 7.3): W5's, with the stored bulk
+ * contract's rules and words (productListingSettingBulkPatchSchema): never a
+ * price, not even null (a price for many products goes through the price
+ * check, W7), the main text only as a reset (one patch cannot carry each
+ * product's own catalog hash), and at least one change.
+ */
+const productsBulkPatchInputSchema = productSettingsPatchInputSchema.superRefine((patch, context) => {
+  if (!Object.values(patch).some((value) => value !== undefined)) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "Change at least one setting.", path: [] });
+  }
+  if (patch.price !== undefined) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "Change prices for many products with a price check.", path: ["price"] });
+  }
+  if (patch.mainText != null) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "Main text can only be reset for many products.", path: ["mainText"] });
+  }
+});
+
+/**
+ * "Set for selected" or "Use default" for many products at once (W6): one
+ * patch, all or none, each product with the settings revision the vendor saw
+ * (null when it had none; the page reads them from GET …/products/ids).
+ */
+export const saveProductsBulkInputSchema = z.object({
+  idempotencyKey: listingSettingRequestKeySchema,
+  products: z.array(z.object({ productId: id, expectedRevisionId: id.nullable() }).strict())
+    .min(1).max(MAX_LISTING_SETTING_BULK_PRODUCTS)
+    .refine((products) => new Set(products.map((product) => product.productId)).size === products.length, "Each product once."),
+  patch: productsBulkPatchInputSchema,
+}).strict();
+
+/** Counts of rows; the request ledger's id is a bigint identity, so it is bounded by the safe integers, not int4. */
+const count = z.number().int().nonnegative().max(MAX_LISTING_SETTING_BULK_PRODUCTS);
+const requestId = z.number().int().positive().max(Number.MAX_SAFE_INTEGER);
+
+/**
+ * `changed`: some product's settings or some size's leftover changed.
+ * `unchanged`: the patch set what every product already has, and no size had
+ * a leftover to clear (the ledger row is written either way, plan D12).
+ * `replayed`: the request key already saved it, and nothing is counted (plan
+ * P16, P36). The page re-reads its views after any save.
+ */
+export const saveProductsBulkResponseSchema = z.object({
+  outcome: z.enum(["changed", "unchanged", "replayed"]),
+  /** The request's ledger row. */
+  requestId,
+  /** Products the request named. */
+  productCount: count.min(1),
+  /** Products whose settings changed; null on a replay. */
+  changedProductCount: count.nullable(),
+  /** Sizes whose own leftover policy, shelf or main text the save cleared; null on a replay. */
+  clearedSizeCount: z.number().int().nonnegative().nullable(),
+}).strict().superRefine((response, context) => {
+  const replayed = response.outcome === "replayed";
+  if (replayed !== (response.changedProductCount === null) || replayed !== (response.clearedSizeCount === null)) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "Only a replay leaves the counts unknown.", path: ["outcome"] });
+  }
+  if (response.changedProductCount !== null && response.changedProductCount > response.productCount) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "More products changed than were named.", path: ["changedProductCount"] });
+  }
+  if (response.outcome === "unchanged" && (response.changedProductCount !== 0 || response.clearedSizeCount !== 0)) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "An unchanged save wrote nothing.", path: ["outcome"] });
+  }
+});
+
+export type ProductsBulkPatchInput = z.infer<typeof productsBulkPatchInputSchema>;
+export type SaveProductsBulkInput = z.infer<typeof saveProductsBulkInputSchema>;
+export type SaveProductsBulkResponse = z.infer<typeof saveProductsBulkResponseSchema>;
