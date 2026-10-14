@@ -252,7 +252,8 @@ export class ListingPublicationService {
         : null;
       if (recreation) recreations.push(recreation);
       const issues = [];
-      if (item.images === null) issues.push(...(source.imageIssues ?? []));
+      if (item.method === "create" && item.images === null)
+        issues.push(...(source.imageIssues ?? []));
       if (!source.eligible || !source.sku.trim())
         issues.push(
           listingIssue(

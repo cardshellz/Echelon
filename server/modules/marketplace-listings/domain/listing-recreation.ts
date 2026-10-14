@@ -67,7 +67,12 @@ export function recreationSource(
       "LISTING_RECREATION_NOT_SETTLED",
       "The previous submission must finish before this listing can be recreated. Check its Walmart status first.",
     );
-  return { item, draft, sourceHash: listingHash(operation.snapshot) };
+  return {
+    item,
+    draft,
+    identifier: draft.identifier ?? catalog.identifier,
+    sourceHash: listingHash(operation.snapshot),
+  };
 }
 
 /** Retain explicit listing overrides, apply accepted maintenance edits, and leave

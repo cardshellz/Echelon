@@ -1,0 +1,27 @@
+{
+  "items": [
+    {
+      "feedType": "MP_ITEM_MATCH",
+      "version": "4.2",
+      "itemSpecPayload": {
+        "MPItemFeedHeader": {
+          "sellingChannel": "mpsetupbymatch",
+          "locale": "en",
+          "version": "4.2",
+          "subset": "external"
+        },
+        "MPItem": [
+          {
+            "Item": {
+              "productIdentifiers": {
+                "productId": "00850025354769",
+                "productIdType": "GTIN"
+              },
+              "productCategory": "Toys"
+            }
+          }
+        ]
+      }
+    }
+  ]
+}

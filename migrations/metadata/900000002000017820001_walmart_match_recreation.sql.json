@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "migration": "900000002000017820001_walmart_match_recreation.sql",
+  "generation": 2,
+  "pr": 1782,
+  "ordinal": 1,
+  "after": [
+    "260_channel_listing_recreation.sql",
+    "900000001000017780001_ap_payment_completed_status_guard.sql"
+  ]
+}

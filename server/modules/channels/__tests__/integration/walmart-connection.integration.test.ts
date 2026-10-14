@@ -173,6 +173,14 @@ describeWithDisposableDb("Walmart account and order PostgreSQL transactions", ()
     await pool.query("UPDATE channels.channel_feeds SET quarantined_at=$3 WHERE channel_id=$1 AND product_variant_id=$2", [channelId, id, now]);
     await expect(catalog.checkRecreationMapping(account, input)).rejects.toMatchObject({ code: "CHANNEL_RECREATION_MAPPING_CONFLICT" });
     await pool.query("UPDATE channels.channel_feeds SET quarantined_at=NULL WHERE channel_id=$1 AND product_variant_id=$2", [channelId, id]);
+    // Matching the unchanged GTIN may return the original Walmart product ID.
+    // Keeping that verified identity must remain safe under worker replay.
+    await Promise.all([1, 2].map(() => catalog.saveMappings(account,
+      [{ ...entry, replacesExternalProductId: "OLD-RECREATE" }], "same-product-recreation", now)));
+    expect((await pool.query("SELECT id,created_at,channel_product_id FROM channels.channel_feeds WHERE channel_id=$1 AND product_variant_id=$2", [channelId, id])).rows)
+      .toEqual([{ ...original, channel_product_id: "OLD-RECREATE" }]);
+    expect((await pool.query("SELECT external_product_id FROM channels.channel_listings WHERE channel_id=$1 AND product_variant_id=$2", [channelId, id])).rows)
+      .toEqual([{ external_product_id: "OLD-RECREATE" }]);
     const recreated = { ...entry, item: { ...item, externalProductId: "NEW-RECREATE" } };
     await expect(catalog.saveMappings(account, [recreated], "ordinary-link", now)).rejects.toMatchObject({ code: "CHANNEL_MAPPING_CONFLICT" });
     await expect(catalog.saveMappings(account, [{ ...recreated, replacesExternalProductId: "WRONG" }], "wrong-recovery", now)).rejects.toMatchObject({ code: "CHANNEL_MAPPING_CONFLICT" });
