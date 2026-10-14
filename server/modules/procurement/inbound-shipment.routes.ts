@@ -1,3 +1,4 @@
+import { createShipmentCreateCommands, shipmentCreateScope, SHIPMENT_CREATE_PRINCIPAL } from "./shipment-create-commands";
 import { shipmentLineResourceIdSchema } from "@shared/procurement/shipment-line-command";
 import { createShipmentLineCommands, shipmentLineCommandScope, SHIPMENT_LINE_COMMAND_PRINCIPAL, type ShipmentLineCommand } from "./shipment-line-commands";
 import type { Express, Request, Response } from "express";
@@ -19,6 +20,7 @@ function getActorId(req: any): string | undefined {
 export function registerInboundShipmentRoutes(app: Express) {
   const { shipmentTracking } = app.locals.services;
   const shipmentCostCommands = createShipmentCostCommands(shipmentTracking);
+  const shipmentCreateCommands = createShipmentCreateCommands(shipmentTracking);
   const shipmentLineCommands = createShipmentLineCommands(shipmentTracking);
 
   async function handleCostCommand(req: Request, res: Response, operation: ShipmentCostCommand["operation"]) {
@@ -138,6 +140,33 @@ export function registerInboundShipmentRoutes(app: Express) {
     } catch (error: any) {
       if (error instanceof ShipmentTrackingError) return res.status(error.statusCode).json({ error: error.message });
       res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.post("/api/inbound-shipments/from-po", requirePermission("purchasing", "create"), requirePermission("purchasing", "edit"), async (req, res) => {
+    try {
+      const purchaseOrderId = shipmentLineResourceIdSchema.parse(req.body?.source?.purchaseOrderId);
+      const actorId = getActorId(req);
+      if (!actorId) throw new FinancialCommandError("An authenticated actor is required", 401, "SHIPMENT_CREATE_ACTOR_REQUIRED");
+      const descriptor = financialCommandFromRequest(req, {
+        actorType: "service", actorId: SHIPMENT_CREATE_PRINCIPAL, ...shipmentCreateScope(purchaseOrderId),
+      });
+      const result = await shipmentCreateCommands.execute(req.body, actorId, descriptor);
+      res.setHeader("Idempotency-Replayed", result.replayed ? "true" : "false");
+      // The client may discard its saved intent only for a rejection that the
+      // command owner durably recorded, not an auth/proxy/preflight failure.
+      const body = result.terminalState === "rejected"
+        ? { ...(result.body as Record<string, unknown>), commandStatus: "rejected" } : result.body;
+      return res.status(result.httpStatus).json(body);
+    } catch (error) {
+      if (error instanceof FinancialCommandError) {
+        for (const [name, value] of Object.entries(error.responseHeaders ?? {})) res.setHeader(name, value);
+        return res.status(error.statusCode).json({ code: error.code, error: error.message, details: error.details });
+      }
+      if (error instanceof z.ZodError) return res.status(400).json({ code: "SHIPMENT_CREATE_INPUT_INVALID", error: "A valid purchase order ID is required." });
+      console.error(JSON.stringify({ event: "procurement.shipment.create_from_po_failed", actorId: getActorId(req) ?? null,
+        purchaseOrderId: req.body?.source?.purchaseOrderId, errorType: error instanceof Error ? error.name : typeof error }));
+      return res.status(500).json({ code: "SHIPMENT_CREATE_TRANSIENT_FAILURE", error: "Shipment creation could not be confirmed. Retry the original request with the same command key." });
     }
   });
 

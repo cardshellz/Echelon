@@ -22,7 +22,7 @@ describe("createShipment — 409 on duplicate shipment number", () => {
   });
 
   it("throws ShipmentTrackingError with 409 on unique violation", async () => {
-    const mockDb = {};
+    const mockDb = { transaction: (work: (tx: unknown) => Promise<unknown>) => work({ execute: vi.fn() }) };
     const mockStorage = {
       generateShipmentNumber: vi.fn().mockResolvedValue("SHP-20260503-001"),
       createInboundShipment: vi.fn().mockRejectedValue({ code: "23505", constraint: "inbound_shipments_shipment_number_active_uidx" }),
@@ -77,7 +77,7 @@ describe("createShipment — 409 on duplicate shipment number", () => {
   });
 
   it("re-throws non-23505 errors unchanged", async () => {
-    const mockDb = {};
+    const mockDb = { transaction: (work: (tx: unknown) => Promise<unknown>) => work({ execute: vi.fn() }) };
     const mockStorage = {
       generateShipmentNumber: vi.fn().mockResolvedValue("SHP-20260503-001"),
       createInboundShipment: vi.fn().mockRejectedValue(new Error("connection refused")),

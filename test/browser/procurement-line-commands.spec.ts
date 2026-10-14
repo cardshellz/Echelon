@@ -1,5 +1,6 @@
 import { expect, test, type Page, type Route } from "@playwright/test";
 import { installFixtures, po } from "./procurement-fixtures";
+import { shipmentCreateFromPoSchema, type ShipmentCreatedFromPo } from "../../shared/procurement/shipment-create-from-po";
 
 const version = "a".repeat(64);
 const nextVersion = "b".repeat(64);
@@ -10,20 +11,26 @@ const fixtureLine = (id = 7) => ({ id, inboundShipmentId: 42, version, sku: `PAR
 type Line = ReturnType<typeof fixtureLine>;
 type Captured = { method: string; path: string; key: string; body: Record<string, any> };
 
-async function setup(page: Page, options: { conflict?: boolean; lostImport?: boolean; dimensions?: boolean; failSecondDimension?: boolean; delayPatch?: boolean; delayImport?: boolean; allocateSiblings?: boolean; poCaller?: boolean; lostAdd?: boolean; failRefresh?: boolean } = {}) {
+async function setup(page: Page, options: { conflict?: boolean; lostImport?: boolean; dimensions?: boolean; failSecondDimension?: boolean; delayPatch?: boolean; delayImport?: boolean; allocateSiblings?: boolean; poCaller?: boolean; lostCreation?: boolean; rejectCreation?: boolean; delayShippable?: boolean; emptyShippable?: boolean; failRefresh?: boolean } = {}) {
   const failures = await installFixtures(page);
   const state = { lines: options.dimensions ? [{ ...fixtureLine(), lengthCm: "0.00" }, { ...fixtureLine(8), lengthCm: "0.00" }] : [fixtureLine()],
-    status: "booked", commands: [] as Captured[], committed: false, detailReads: 0, nextId: 10, released: false };
+    status: "booked", commands: [] as Captured[], createdShipments: 0, legacyCreationRequests: [] as Captured[], committed: false, detailReads: 0, nextId: 10, released: false };
   let release!: () => void;
   const gate = new Promise<void>((resolve) => { release = resolve; });
-  const replays = new Map<string, unknown>(); let lost = false; let conflicted = false; let secondFailed = false;
+  const replays = new Map<string, unknown>();
+  const creationReplays = new Map<string, { status: number; body: unknown }>();
+  let lost = false; let conflicted = false; let secondFailed = false; let creationRejected = false;
   await page.route("**/api/**", async (route: Route) => {
     const request = route.request(); const path = new URL(request.url()).pathname;
     if (request.method() === "GET") {
       if (options.poCaller && path === "/api/purchase-orders/17") return route.fulfill({ json: { ...po(17), lines: [{ id: 15, purchaseOrderId: 17, lineType: "product", lineNumber: 1, sku: "PO-REMAINING", productName: "PO product", orderQty: 1000, receivedQty: 0, unitCostCents: 10, subtotalCents: 10000 }] } });
       if (path === "/api/vendors") return route.fulfill({ json: [{ id: 2, name: "Test vendor" }] });
       if (path === "/api/purchase-orders") return route.fulfill({ json: { purchaseOrders: [{ id: 17, poNumber: "TEST-PO-17" }] } });
-      if (path === "/api/purchase-orders/17/shippable-lines") return route.fulfill({ json: { lines: [{ id: 15, sku: "PO-REMAINING", remainingQty: 501, orderQty: 1000 }], reviewRequiredLines: [{ id: 16, sku: "REVIEW-PO", remainingQty: null, code: "SOURCE_REVIEW_REQUIRED", error: "Finish or cancel the pending receipt, then review this line." }] } });
+      if (path === "/api/purchase-orders/17/shippable-lines") {
+        if (options.delayShippable && !state.released) await gate;
+        return route.fulfill({ json: { lines: options.emptyShippable ? [] : [{ id: 15, sku: "PO-REMAINING", remainingQty: 501, orderQty: 1000 }],
+          reviewRequiredLines: [{ id: 16, sku: "REVIEW-PO", remainingQty: null, code: "SOURCE_REVIEW_REQUIRED", error: "Finish or cancel the pending receipt, then review this line." }] } });
+      }
       if (path === "/api/inbound-shipments/42" || path === "/api/inbound-shipments/43") {
         state.detailReads += 1;
         if (options.failRefresh && state.committed) return route.fulfill({ status: 503, json: { error: "Fixture refresh failed" } });
@@ -39,7 +46,33 @@ async function setup(page: Page, options: { conflict?: boolean; lostImport?: boo
       } });
       return route.fallback();
     }
-    if (options.poCaller && path === "/api/inbound-shipments" && request.method() === "POST") { state.lines = []; return route.fulfill({ status: 201, json: { id: 42, shipmentNumber: "TEST-SHIP-42" } }); }
+    if (options.poCaller && path === "/api/inbound-shipments" && request.method() === "POST") {
+      state.legacyCreationRequests.push({ method: request.method(), path, key: request.headers()["idempotency-key"], body: request.postDataJSON() });
+      return route.fulfill({ status: 400, json: { error: "PO creation must use the atomic command" } });
+    }
+    if (options.poCaller && path === "/api/inbound-shipments/from-po" && request.method() === "POST") {
+      const command: Captured = { method: request.method(), path, key: request.headers()["idempotency-key"], body: request.postDataJSON() };
+      state.commands.push(command);
+      if (!command.key) return route.fulfill({ status: 400, json: { error: "Missing command key" } });
+      const replay = creationReplays.get(command.key);
+      if (replay) return route.fulfill({ status: replay.status, json: replay.body });
+      const input = shipmentCreateFromPoSchema.parse(command.body);
+      if (options.rejectCreation && !creationRejected) {
+        creationRejected = true;
+        const rejection = { status: 409, body: { commandStatus: "rejected", code: "SHIPMENT_LINE_QUANTITY_EXCEEDED", error: "PO line 15 has 400 pieces available; requested 501." } };
+        creationReplays.set(command.key, rejection);
+        return route.fulfill({ status: rejection.status, json: rejection.body });
+      }
+      state.lines = input.source.lineSelections!.map((selected) => ({ ...fixtureLine(state.nextId++), purchaseOrderId: input.source.purchaseOrderId,
+        purchaseOrderLineId: selected.poLineId, qtyShipped: selected.qty, version: nextVersion }));
+      state.createdShipments += 1;
+      state.committed = true;
+      const result: ShipmentCreatedFromPo = { shipment: { id: 42, shipmentNumber: "TEST-SHIP-42" }, purchaseOrderId: input.source.purchaseOrderId,
+        lines: state.lines.map(({ id, inboundShipmentId, purchaseOrderId, purchaseOrderLineId, qtyShipped }) => ({ id, inboundShipmentId, purchaseOrderId, purchaseOrderLineId, qtyShipped })) };
+      creationReplays.set(command.key, { status: 201, body: result });
+      if (options.lostCreation && !lost) { lost = true; return route.abort("connectionreset"); }
+      return route.fulfill({ status: 201, json: result });
+    }
     if (!/^\/api\/inbound-shipments\/(42\/lines\/(from-po|import-packing-list|resolve-dimensions)|lines\/\d+)$/.test(path)) return route.fallback();
     const command = { method: request.method(), path, key: request.headers()["idempotency-key"], body: request.postDataJSON() };
     state.commands.push(command);
@@ -72,7 +105,7 @@ async function setup(page: Page, options: { conflict?: boolean; lostImport?: boo
     } else result = { updated: 1, total: state.lines.length };
     if (options.allocateSiblings && command.method === "PATCH") state.lines.forEach((line) => { line.version = nextVersion; });
     state.committed = true; replays.set(command.key, result);
-    if ((options.lostImport && path.endsWith("/import-packing-list") || options.lostAdd && path.endsWith("/from-po")) && !lost) { lost = true; return route.abort("connectionreset"); }
+    if ((options.lostImport && path.endsWith("/import-packing-list")) && !lost) { lost = true; return route.abort("connectionreset"); }
     return route.fulfill({ json: result });
   });
   await page.goto("/shipments/42?tab=lines");
@@ -246,21 +279,88 @@ test("dimension batch adopts only allocation-induced sibling versions without ma
   expect(state.lines.every((line) => line.qtyShipped === 501)).toBe(true); expect(failures).toEqual([]);
 });
 
-test("PO shipment creation appends explicit pieces and hands uncertain append recovery to the shipment", async ({ page }) => {
-  const { state, failures } = await setup(page, { poCaller: true, lostAdd: true });
+async function openPoCreation(page: Page) {
   await page.goto("/purchase-orders/17?tab=shipments");
   await page.getByRole("button", { name: "Create Shipment", exact: true }).click();
+  await expect(page.getByRole("dialog").getByRole("heading", { name: "Create Inbound Shipment", exact: true })).toBeVisible();
+}
+const creationBody = (qty = 501) => ({ header: { mode: "sea_fcl", shipperName: "Test vendor" },
+  source: { purchaseOrderId: 17, lineSelections: [{ poLineId: 15, qty }] } });
+const savedCreation = (page: Page) => page.evaluate(() => sessionStorage.getItem("echelon:po-shipment:v1:test-user:17"));
+
+test("PO shipment creation sends header and explicit pieces in one command", async ({ page }) => {
+  const { state, failures } = await setup(page, { poCaller: true });
+  await openPoCreation(page);
   await expect(page.getByRole("dialog").getByText(/REVIEW-PO: Finish or cancel/)).toBeVisible();
   await expect(page.getByRole("dialog").getByRole("spinbutton")).toHaveValue("501");
   await page.getByRole("dialog").getByRole("button", { name: "Create Shipment", exact: true }).click();
   await expect(page.getByRole("heading", { name: "TEST-SHIP-42", exact: true })).toBeVisible();
-  await page.getByRole("button", { name: "Review pending line command", exact: true }).click();
-  await page.getByRole("button", { name: "Retry original line command", exact: true }).click();
-  await expect(page.getByRole("dialog")).not.toBeVisible();
-  expect(state.commands).toHaveLength(2);
-  expect(state.commands[0].body).toEqual({ purchaseOrderId: 17, lineSelections: [{ poLineId: 15, qty: 501 }] });
-  expect(state.commands[1].key).toBe(state.commands[0].key);
-  expect(state.lines).toHaveLength(1); expect(state.lines[0].qtyShipped).toBe(501); expect(failures).toEqual([]);
+  expect(state.commands).toHaveLength(1);
+  expect(state.commands[0]).toMatchObject({ method: "POST", path: "/api/inbound-shipments/from-po", body: creationBody() });
+  expect(state.commands[0].key).toMatch(/^po-shipment-/);
+  expect(state.createdShipments).toBe(1); expect(state.legacyCreationRequests).toEqual([]);
+  expect(state.lines).toHaveLength(1); expect(state.lines[0].qtyShipped).toBe(501);
+  expect(await savedCreation(page)).toBeNull(); expect(failures).toEqual([]);
+});
+
+test("PO shipment creation retains an uncertain request through reload and retries its original body and key", async ({ page }) => {
+  const { state, failures } = await setup(page, { poCaller: true, lostCreation: true });
+  await openPoCreation(page);
+  await page.getByRole("dialog").getByRole("button", { name: "Create Shipment", exact: true }).click();
+  await expect(page.getByRole("dialog").getByText(/previous shipment request still needs confirmation/)).toBeVisible();
+  await expect(page.getByRole("dialog").getByRole("spinbutton")).not.toBeVisible();
+  await expect(page).toHaveURL(/\/purchase-orders\/17/);
+  expect(state.commands).toHaveLength(1); expect(state.createdShipments).toBe(1);
+  const saved = JSON.parse((await savedCreation(page))!);
+  expect(saved).toMatchObject({ key: state.commands[0].key, input: creationBody() });
+  await page.getByRole("dialog").getByRole("button", { name: "Cancel", exact: true }).click();
+  await page.reload();
+  await page.getByRole("button", { name: "Create Shipment", exact: true }).click();
+  await expect(page.getByRole("dialog").getByText("PO line 15: 501 pieces", { exact: true })).toBeVisible();
+  await page.getByRole("dialog").getByRole("button", { name: "Retry saved shipment request", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "TEST-SHIP-42", exact: true })).toBeVisible();
+  expect(state.commands).toHaveLength(2); expect(state.commands[1]).toEqual(state.commands[0]);
+  expect(state.createdShipments).toBe(1); expect(state.lines).toHaveLength(1);
+  expect(state.legacyCreationRequests).toEqual([]); expect(await savedCreation(page)).toBeNull(); expect(failures).toEqual([]);
+});
+
+test("PO shipment creation keeps the form on a recorded rejection and permits a corrected selection", async ({ page }) => {
+  const { state, failures } = await setup(page, { poCaller: true, rejectCreation: true });
+  await openPoCreation(page);
+  await page.getByRole("dialog").getByRole("button", { name: "Create Shipment", exact: true }).click();
+  await expect(page.getByRole("dialog").getByRole("alert").filter({ hasText: "400 pieces available" })).toBeVisible();
+  await expect(page).toHaveURL(/\/purchase-orders\/17/);
+  expect(state.createdShipments).toBe(0); expect(await savedCreation(page)).toBeNull();
+  await page.getByRole("dialog").getByRole("spinbutton").fill("400");
+  await page.getByRole("dialog").getByRole("button", { name: "Create Shipment", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "TEST-SHIP-42", exact: true })).toBeVisible();
+  expect(state.commands).toHaveLength(2); expect(state.commands[1].body).toEqual(creationBody(400));
+  expect(state.commands[1].key).not.toBe(state.commands[0].key);
+  expect(state.createdShipments).toBe(1); expect(state.legacyCreationRequests).toEqual([]); expect(failures).toEqual([]);
+});
+
+test("PO shipment creation waits for loaded lines and requires a checked positive quantity", async ({ page }) => {
+  const { state, failures, release } = await setup(page, { poCaller: true, delayShippable: true });
+  await openPoCreation(page);
+  const create = page.getByRole("dialog").getByRole("button", { name: "Create Shipment", exact: true });
+  await expect(page.getByRole("dialog").getByRole("status")).toContainText("Loading eligible purchase order lines");
+  await expect(create).toBeDisabled(); expect(state.commands).toEqual([]); release();
+  await expect(create).toBeEnabled();
+  await page.getByRole("dialog").getByRole("button", { name: "Deselect all", exact: true }).click();
+  await expect(create).toBeDisabled();
+  await page.getByRole("dialog").getByRole("button", { name: "Select all", exact: true }).click();
+  await page.getByRole("dialog").getByRole("spinbutton").fill("0"); await expect(create).toBeDisabled();
+  await page.getByRole("dialog").getByRole("spinbutton").fill("502"); await expect(create).toBeDisabled();
+  await page.getByRole("dialog").getByRole("spinbutton").fill("501"); await expect(create).toBeEnabled();
+  expect(state.commands).toEqual([]); expect(state.createdShipments).toBe(0); expect(failures).toEqual([]);
+});
+
+test("PO shipment creation cannot save an empty selection when no lines are eligible", async ({ page }) => {
+  const { state, failures } = await setup(page, { poCaller: true, emptyShippable: true });
+  await openPoCreation(page);
+  await expect(page.getByRole("dialog").getByText(/No purchase lines are currently eligible/)).toBeVisible();
+  await expect(page.getByRole("dialog").getByRole("button", { name: "Create Shipment", exact: true })).toBeDisabled();
+  expect(state.commands).toEqual([]); expect(state.createdShipments).toBe(0); expect(failures).toEqual([]);
 });
 
 test("failed import optional values can be cleared before retrying only rejected rows", async ({ page }) => {
