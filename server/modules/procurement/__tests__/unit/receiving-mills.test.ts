@@ -155,7 +155,7 @@ function buildService(
     productId: 1, unitsPerVariantSnapshot: opts.unitsPerVariant ?? 1, ...line, updatedAt }));
   const updateReceivingLineCalls: Array<{ id: number; updates: any }> = [];
   const receiveInventoryCalls: Array<any> = [];
-  const order = { id: 1, status: "open", vendorId: null, purchaseOrderId: 123,
+  const order = { id: 1, status: "open", vendorId: null, warehouseId: 1, purchaseOrderId: lines.some((line) => line.purchaseOrderLineId) ? 123 : null,
     inboundShipmentId: opts.inboundShipmentId ?? null, updatedAt };
   const costRequests: Array<{ id: number; purchase_order_line_id: number }> = [];
   const costAttempts: Array<{ requestId: number; state: string; result: any }> = [];
@@ -168,6 +168,7 @@ function buildService(
     updateReceivingOrder: vi.fn(async (_id: number, patch: any) => { Object.assign(order, patch); return { ...order }; }),
     updateReceivingLine: vi.fn((id: number, updates: any) => {
       updateReceivingLineCalls.push({ id, updates });
+      Object.assign(versionedLines.find((line) => line.id === id)!, updates);
       return Promise.resolve({});
     }),
     getProductVariantBySku: vi.fn(),
@@ -183,6 +184,19 @@ function buildService(
   const upvRows = { rows: [{ id: 11, product_id: 1, units_per_variant: opts.unitsPerVariant ?? 1, is_active: true }] };
   const execute = async (query: any) => {
     const rendered = new PgDialect().sqlToQuery(query);
+    if (rendered.sql.includes("FROM warehouse.warehouses")) return { rows: [{ isActive: 1 }] };
+    if (rendered.sql.includes("FROM warehouse.warehouse_locations")) return { rows: [{ id: 22, warehouseId: 1, isActive: 1 }] };
+    if (rendered.sql.includes("SELECT status FROM procurement.purchase_orders")) return { rows: [{ status: "sent" }] };
+    if (rendered.sql.includes('purchase_order_id AS "purchaseOrderId"') && rendered.sql.includes("FROM procurement.purchase_order_lines")) {
+      return { rows: versionedLines.filter((line) => line.purchaseOrderLineId).map((line) => ({ id: line.purchaseOrderLineId,
+        purchaseOrderId: 123, productId: 1, lineType: "product", status: "open", orderQty: 10000, receivedQty: 0, cancelledQty: 0 })) };
+    }
+    if (rendered.sql.includes("FROM procurement.inbound_shipments")) return { rows: [{ status: "delivered" }] };
+    if (rendered.sql.includes("FROM procurement.inbound_shipment_lines")) {
+      return { rows: versionedLines.filter((line) => line.purchaseOrderLineId).map((line) => ({ id: line.id + 1000,
+        inboundShipmentId: opts.inboundShipmentId, purchaseOrderId: 123, purchaseOrderLineId: line.purchaseOrderLineId,
+        inbound_shipment_id: opts.inboundShipmentId, purchase_order_id: 123, purchase_order_line_id: line.purchaseOrderLineId, qty_shipped: 10000 })) };
+    }
     if (rendered.sql.includes("INSERT INTO procurement.receipt_cost_requests")) {
       const lineId = Number(rendered.params[1]);
       if (!costRequests.some((request) => request.purchase_order_line_id === lineId)) costRequests.push({ id: costRequests.length + 1, purchase_order_line_id: lineId });
@@ -245,7 +259,7 @@ function buildService(
     inventoryCore,
     channelSync,
     storage,
-    { onReceivingOrderClosed: vi.fn(async (_id: number, receivedLines: any[]) => ({
+    { onReceivingOrderClosedInTransaction: vi.fn(async (_id: number, receivedLines: any[]) => ({
       appliedLines: receivedLines.length, existingReceiptLines: 0, skippedLines: 0, issues: [],
     })) } as any,
     shipmentTracking as any,

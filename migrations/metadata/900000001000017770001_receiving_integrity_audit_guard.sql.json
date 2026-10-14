@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "migration": "900000001000017770001_receiving_integrity_audit_guard.sql",
+  "generation": 1,
+  "pr": 1777,
+  "ordinal": 1,
+  "after": [
+    "261_po_email_document_gate.sql"
+  ]
+}

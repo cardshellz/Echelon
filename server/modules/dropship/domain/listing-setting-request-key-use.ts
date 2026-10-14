@@ -39,12 +39,13 @@ export type RequestKeyUseDecision =
 
 /**
  * What each writer may have written under its key (plan 4.6 table), and what
- * a replay needs. The ledger operations are strings because W7 apply's
- * `price_change_apply` joins the ledger's CHECK only with its migration (9f):
- * until then no stored row can carry it, so that writer can never replay.
+ * a replay needs. W7 apply's `price_change_apply` is a ledger operation from
+ * migration 0750 on: its apply replays from its ledger row, with the
+ * category revision (category kind) and the size, policy and shelf children
+ * (releases, clean-ups) that request wrote.
  */
 interface WriterScope {
-  ledgerOperations: readonly string[];
+  ledgerOperations: readonly ListingSettingRequestOperation[];
   productRevision: boolean;
   categoryRevision: boolean;
   childKinds: readonly RequestKeyChildSource[];

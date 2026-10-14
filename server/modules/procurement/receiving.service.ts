@@ -1,6 +1,7 @@
 import { enqueueReceiptCostRequests, processReceiptCostRequests } from "./receipt-cost-queue.service";
 import { RECEIPT_COST_RECOVERY_ACTOR } from "./receipt-cost-recovery.domain";
 import { lockInventoryCostGraph } from "../inventory/infrastructure/cost-evidence.repository";
+import { readReceivingSourceResolution, validateReceivingLocations, type ReceivingIntegrityTransaction } from "./receiving-close-integrity.repository";
 /**
  * Receiving service for Echelon WMS.
  *
@@ -31,9 +32,9 @@ import {
 import {
   type ReceivingCloseReconciliation,
   type ReceivingReconciliationFailureReporter,
+  type ReceivingOrchestrationPurchasing,
   reconcileLinkedPurchaseOrder,
 } from "./receiving-orchestration.service";
-import type { ReceiptReconciliationResult } from "./purchase-order-receipt-reconciliation.service";
 
 interface InventoryCore {
   receiveInventory(params: {
@@ -73,15 +74,7 @@ interface ChannelSync {
   queueSyncAfterInventoryChange(variantId: number): Promise<void>;
 }
 
-interface Purchasing {
-  onReceivingOrderClosed(receivingOrderId: number, receivingLines: Array<{
-    receivingLineId: number;
-    purchaseOrderLineId?: number;
-    receivedQty: number;
-    damagedQty?: number;
-    unitCost?: number;
-    unitCostMills?: number;
-  }>, userId?: string | null): Promise<ReceiptReconciliationResult | void>;
+interface Purchasing extends ReceivingOrchestrationPurchasing {
   // Typed-lines allocator (Option C, 2026-04-28). Returns per-product-line
   // landed unit cost after spreading non-product line totals
   // (discount / fee / tax / rebate / adjustment) across the product lines.
@@ -538,7 +531,8 @@ export class ReceivingService {
     return lines;
   }
 
-  private async reconcileLinkedPurchaseOrder(orderId: number, order: any, lines: any[], userId?: string | null) {
+  private async reconcileLinkedPurchaseOrder(orderId: number, order: any, lines: any[], userId?: string | null,
+    transaction?: { executor: ReceivingIntegrityTransaction; recordedAt: Date }) {
     return await reconcileLinkedPurchaseOrder({
       receivingOrderId: orderId,
       receivingOrder: order,
@@ -546,7 +540,16 @@ export class ReceivingService {
       purchasing: this.purchasing,
       userId,
       recordReconciliationFailure: this.reconciliationFailureReporter,
+      transaction,
     });
+  }
+
+  private async validateLocations(tx: ReceivingIntegrityTransaction, order: { id: number; warehouseId?: number | null; receivingLocationId?: number | null },
+    lines: readonly { id?: number; putawayLocationId?: number | null }[]): Promise<void> {
+    const references = lines.filter((line) => line.putawayLocationId != null)
+      .map((line) => ({ receivingLineId: line.id, locationId: line.putawayLocationId! }));
+    await validateReceivingLocations(tx, { receivingOrderId: order.id, warehouseId: order.warehouseId ?? null,
+      references: [...references, ...(order.receivingLocationId ? [{ locationId: order.receivingLocationId }] : [])] });
   }
 
   private buildCloseResult(
@@ -851,13 +854,17 @@ export class ReceivingService {
     }
   }
 
-  async updateOrderDetails(orderId: number, input: Record<string, unknown>) {
-    assertOnlyAllowedFields(input, RECEIVING_ORDER_EDITABLE_FIELDS, "Receiving order update");
-    if (Object.keys(input).length === 0) {
+  async updateOrderDetails(orderId: number, input: Record<string, unknown>, actorId?: string | null) {
+    const { applyDefaultToUnassigned, ...fields } = input;
+    if (applyDefaultToUnassigned !== undefined && typeof applyDefaultToUnassigned !== "boolean") {
+      throw new ReceivingError("applyDefaultToUnassigned must be a boolean", 400);
+    }
+    assertOnlyAllowedFields(fields, RECEIVING_ORDER_EDITABLE_FIELDS, "Receiving order update");
+    if (Object.keys(fields).length === 0) {
       throw new ReceivingError("Receiving order update requires at least one field", 400);
     }
 
-    const updates: Record<string, unknown> = { ...input };
+    const updates: Record<string, unknown> = { ...fields };
     if ("warehouseId" in updates) {
       updates.warehouseId = normalizeOptionalPositiveId(updates.warehouseId, "warehouseId");
     }
@@ -866,6 +873,12 @@ export class ReceivingService {
         updates.receivingLocationId,
         "receivingLocationId",
       );
+    }
+    if (applyDefaultToUnassigned === true && !updates.receivingLocationId) {
+      throw new ReceivingError("Applying a default requires an explicit receiving location", 400);
+    }
+    if (applyDefaultToUnassigned === true && !actorId?.trim()) {
+      throw new ReceivingError("An authenticated actor is required to apply receipt locations", 401);
     }
     if (typeof updates.expectedDate === "string") {
       const expectedDate = new Date(updates.expectedDate);
@@ -878,7 +891,37 @@ export class ReceivingService {
     return await this.db.transaction(async (tx) => {
       const order = await this.lockReceivingOrder(tx, orderId);
       this.assertReceivingOrderMutable(order);
-      return await this.storage.updateReceivingOrder(orderId, updates, tx);
+      const changesDestination = "warehouseId" in updates || "receivingLocationId" in updates;
+      if (changesDestination) {
+        await tx.execute(sql`SELECT id FROM procurement.receiving_lines WHERE receiving_order_id=${orderId} ORDER BY id FOR UPDATE`);
+      }
+      const lines = changesDestination ? await this.storage.getReceivingLines(orderId, tx) : [];
+      if (changesDestination) {
+        const next = { ...order, ...updates };
+        if (next.warehouseId || next.receivingLocationId || lines.some((line: any) => line.putawayLocationId)) {
+          await this.validateLocations(tx, next, lines);
+        }
+      }
+      const assigned: Array<{ receivingLineId: number; before: null; after: number }> = [];
+      if (applyDefaultToUnassigned === true) {
+        for (const line of lines) {
+          if (line.putawayLocationId != null) continue;
+          await this.storage.updateReceivingLine(line.id, { putawayLocationId: updates.receivingLocationId }, tx);
+          assigned.push({ receivingLineId: line.id, before: null, after: Number(updates.receivingLocationId) });
+        }
+      }
+      const previousFields = Object.fromEntries(Object.keys(updates).map((key) => [key, order[key]]));
+      if (applyDefaultToUnassigned === true && assigned.length === 0 && canonicalJson(previousFields) === canonicalJson(updates)) {
+        return order;
+      }
+      const updated = await this.storage.updateReceivingOrder(orderId, updates, tx);
+      if (applyDefaultToUnassigned === true) {
+        await tx.execute(sql`INSERT INTO public.audit_events(timestamp,level,actor,action,target,changes,context)
+          VALUES(${this.clock()},'AUDIT',${actorId},'procurement.receiving.default_location_applied',${`receiving-order:${orderId}`},
+            ${JSON.stringify({ before: previousFields, after: Object.fromEntries(Object.keys(updates).map((key) => [key, updated[key]])), lines: assigned })}::jsonb,
+            ${JSON.stringify({ receivingOrderId: orderId })}::jsonb)`);
+      }
+      return updated;
     });
   }
 
@@ -906,6 +949,7 @@ export class ReceivingService {
         });
       }
       const unitsPerVariantSnapshot = unitData?.unitsPerVariant ?? null;
+      if (lineData.putawayLocationId) await this.validateLocations(tx, order, [{ putawayLocationId: Number(lineData.putawayLocationId) }]);
       const counts = { expectedQty: 0, receivedQty: 0, damagedQty: 0, ...lineData };
       for (const field of ["expectedQty", "receivedQty", "damagedQty"] as const) receiptInteger(counts[field], field);
       if (unitsPerVariantSnapshot !== null) this.validateReceiptBaseCounts(counts, unitsPerVariantSnapshot);
@@ -1035,6 +1079,7 @@ export class ReceivingService {
         throw new ReceivingError("Expected pieces come from the shipment source. Record the actual count without rewriting the source expectation.", 409, { code: "RECEIVING_EXPECTED_SOURCE_IMMUTABLE" });
       }
       const next = { ...line, ...updates };
+      if ("putawayLocationId" in updates && next.putawayLocationId) await this.validateLocations(tx, order, [next]);
       if (changesUnits && next.unitsPerVariantSnapshot != null) this.validateReceiptBaseCounts(next, next.unitsPerVariantSnapshot);
       if ("receivedQty" in updates || "expectedQty" in updates) updates.status = this.receivingLineStatus(Number(next.receivedQty), Number(next.expectedQty));
       const now = this.clock();
@@ -1229,7 +1274,10 @@ export class ReceivingService {
         throw new ReceivingError("Order already cancelled");
       }
       if (lockedOrder.status === "closed") {
-        return { updated: lockedOrder, replayed: true };
+        const currentLines = await this.storage.getReceivingLines(orderId, tx);
+        const reconciliation = await this.reconcileLinkedPurchaseOrder(orderId, lockedOrder, currentLines, userId,
+          { executor: tx, recordedAt: closeAt });
+        return { updated: lockedOrder, replayed: true, poReconciliation: reconciliation };
       }
       if (orderSnapshot !== canonicalJson(lockedOrder)) {
         throw new ReceivingError(
@@ -1240,6 +1288,7 @@ export class ReceivingService {
       }
       order = lockedOrder;
 
+      await tx.execute(sql`SELECT id FROM procurement.receiving_lines WHERE receiving_order_id=${orderId} ORDER BY id FOR UPDATE`);
       const lockedLines = await this.storage.getReceivingLines(orderId, tx);
       if (lineSnapshot !== receivingLinesSnapshot(lockedLines)) {
         throw new ReceivingError(
@@ -1261,6 +1310,9 @@ export class ReceivingService {
       for (const variantId of [...new Set<number>(lines.filter((line: any) => line.receivedQty > 0).map((line: any) => Number(line.productVariantId)))].sort((a, b) => a - b)) {
         receiveVariants.set(variantId, await this.loadReceiveVariant(tx, variantId));
       }
+      // Preserve the established frozen-unit and explicit-source errors. In
+      // particular, a corrupt exact shipment link must never be repaired by
+      // inference from another PO or shipment line.
       for (const line of lines.filter((line: any) => line.receivedQty > 0)) {
         const variant = receiveVariants.get(line.productVariantId)!;
         if (line.unitsPerVariantSnapshot == null) {
@@ -1271,6 +1323,31 @@ export class ReceivingService {
         }
         this.validateReceiptBaseCounts(line, line.unitsPerVariantSnapshot);
         await this.assertReceiptSourceProduct(tx, line, order, variant.productId);
+      }
+      await this.validateLocations(tx, order, lines);
+      const sources = await readReceivingSourceResolution(tx, {
+        receivingOrderId: orderId, purchaseOrderId: order.purchaseOrderId ?? null, inboundShipmentId: order.inboundShipmentId ?? null,
+        lines: lines.map((line: any) => ({ id: line.id, productId: receiveVariants.get(line.productVariantId)?.productId ?? line.productId ?? null,
+          purchaseOrderLineId: line.purchaseOrderLineId ?? null, inboundShipmentLineId: line.inboundShipmentLineId ?? null,
+          receivedQty: line.receivedQty, damagedQty: line.damagedQty })),
+      });
+      const sourceByLine = new Map(sources.map((source) => [source.receivingLineId, source]));
+      for (const line of lines) {
+        const source = sourceByLine.get(line.id);
+        if (!source || (line.purchaseOrderLineId === source.purchaseOrderLineId &&
+          (line.inboundShipmentLineId ?? null) === source.inboundShipmentLineId)) continue;
+        const before = { purchaseOrderLineId: line.purchaseOrderLineId ?? null, inboundShipmentLineId: line.inboundShipmentLineId ?? null };
+        const after = { purchaseOrderLineId: source.purchaseOrderLineId, inboundShipmentLineId: source.inboundShipmentLineId };
+        await this.storage.updateReceivingLine(line.id, after, tx);
+        await tx.execute(sql`INSERT INTO public.audit_events(timestamp,level,actor,action,target,changes,context)
+          VALUES(${closeAt},'AUDIT',${userId || "system:receiving"},'procurement.receiving.source_resolved',${`receiving-line:${line.id}`},
+            ${JSON.stringify({ before, after })}::jsonb,${JSON.stringify({ receivingOrderId: orderId })}::jsonb)`);
+      }
+      // Re-read our persisted source assignments before cost origin and inventory
+      // posting. No temporary DTO-only source can reach the physical owner.
+      lines = await this.storage.getReceivingLines(orderId, tx);
+      for (const line of lines.filter((line: any) => line.receivedQty > 0)) {
+        await this.assertReceiptSourceProduct(tx, line, order, receiveVariants.get(line.productVariantId)!.productId);
       }
 
       for (const line of lines) {
@@ -1395,7 +1472,10 @@ export class ReceivingService {
       receivedLineCount: linesReceived,
       receivedTotalUnits: totalReceived,
     }, tx);
-    return { updated, replayed: false };
+    const reconciledLines = await this.storage.getReceivingLines(orderId, tx);
+    const poReconciliation = await this.reconcileLinkedPurchaseOrder(orderId, updated, reconciledLines, userId,
+      { executor: tx, recordedAt: closeAt });
+    return { updated, replayed: false, poReconciliation };
     });
 
     const updated = closeResult.updated;
@@ -1410,7 +1490,8 @@ export class ReceivingService {
     }
 
     const closedLines = await this.storage.getReceivingLines(orderId);
-    const poReconciliation = await this.reconcileLinkedPurchaseOrder(orderId, updated, closedLines, userId);
+    const poReconciliation = closeResult.poReconciliation;
+    if (poReconciliation.required) await this.purchasing?.afterReceivingOrderClosed?.(poReconciliation);
 
     // Spec D, Part 2: receive-time validation warnings. Advisory only —
     // evaluation or persistence failures must never fail the close.
@@ -1879,6 +1960,16 @@ export class ReceivingService {
         );
       }
       const currentById = new Map(currentLines.map((line: any) => [line.id, line]));
+      const importLocations = [
+        ...currentLines.filter((line: any) => !linesToUpdate.some((item) => item.id === line.id)),
+        ...linesToUpdate.map((item) => ({ id: item.id, putawayLocationId: item.updates.putawayLocationId as number | null })),
+        ...linesToCreate.map((line: any) => ({ putawayLocationId: line.putawayLocationId })),
+      ];
+      // Unassigned drafts may be imported before a destination is chosen. Once
+      // a location is present, warehouse ownership is mandatory and locked.
+      if (lockedOrder.warehouseId || lockedOrder.receivingLocationId || importLocations.some((line) => line.putawayLocationId)) {
+        await this.validateLocations(tx, lockedOrder, importLocations);
+      }
       const importedVariants = new Map<number, { id: number; productId: number; unitsPerVariant: number }>();
       const importedRows = [...linesToCreate, ...linesToUpdate.map((item) => item.updates)];
       for (const id of [...new Set<number>(importedRows.filter((row: any) => row.productVariantId).map((row: any) => Number(row.productVariantId)))].sort((a, b) => a - b)) importedVariants.set(id, await this.loadReceiveVariant(tx, id));

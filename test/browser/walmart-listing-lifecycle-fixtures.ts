@@ -1,10 +1,11 @@
 import type { Route } from "@playwright/test";
 import type { ListingLifecycleView } from "../../shared/types/channel-listing-lifecycle";
+import type { ListingPresence } from "../../shared/types/channel-listing-presence";
 
 export const LIFECYCLE_BASE = "/api/channels/77/listing-lifecycle";
 export function createListingLifecycleMock() {
   return { items: [] as ListingLifecycleView[], writes: [] as { path: string; body: unknown }[], failRequest: false, failCheck: false,
-    failSkus: new Set<string>(),
+    failSkus: new Set<string>(), presence: [] as ListingPresence[], missingOnRefresh: new Set<string>(), presenceReads: [] as string[][],
     lookupRevision: 0, account: { channelId: 77, connectionId: 9, provider: "walmart", market: "us",
       environment: "production", accountId: "10002558022", scopeId: "10002558022", revision: 1 } };
 }
@@ -15,7 +16,13 @@ export async function handleListingLifecycleRequest(route: Route, state: ReturnT
   const reply = async (json: unknown, status = 200) => { await route.fulfill({ json, status }); return true; };
   if (path.endsWith("/lookup")) {
     state.lookupRevision = state.account.revision;
-    return reply({ account: state.account, items: state.items.filter(item => body.skus.includes(item.sku)) });
+    return reply({ account: state.account, items: state.items.filter(item => body.skus.includes(item.sku)), presence: state.presence });
+  }
+  if (path.endsWith("/presence")) {
+    state.presenceReads.push(body.skus);
+    state.presence = body.skus.map((sku: string) => ({ sku, state: state.missingOnRefresh.has(sku) ? "missing" : "present",
+      externalProductId: state.missingOnRefresh.has(sku) ? null : `WPID-${sku}`, checkedAt: "2026-10-13T12:00:00.000Z" }));
+    return reply({ account: state.account, items: state.items, presence: state.presence });
   }
   if (path.endsWith("/history")) {
     const items = [...state.items].filter(item => (!body.sku || item.sku === body.sku) && (!body.afterSku || item.sku > body.afterSku))

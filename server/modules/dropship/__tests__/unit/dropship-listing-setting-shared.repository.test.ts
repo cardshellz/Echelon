@@ -16,6 +16,8 @@ import {
   categoryValuesToColumns,
   findListingSettingRequestWithClient,
   insertListingSettingRequestWithClient,
+  listingSettingLedgerRowFaults,
+  listingSettingPriceFromColumns,
   productColumnsToValues,
   productListingSettingRowFromColumns,
   productValuesToColumns,
@@ -250,8 +252,16 @@ describe("listing setting request ledger", () => {
     await expect(findListingSettingRequestWithClient(asClient(new ScriptedClient()), { vendorId: 10, idempotencyKey: KEY })).resolves.toBeNull();
   });
 
+  it("reads W7's price apply row (migration 0750): the ledger's readers accept all four operations (plan PR 9, 9.2)", async () => {
+    const client = new ScriptedClient(() => [{ ...ledgerRow, operation: "price_change_apply", product_count: 0 }]);
+    await expect(findListingSettingRequestWithClient(asClient(client), { vendorId: 10, idempotencyKey: KEY }))
+      .resolves.toMatchObject({ operation: "price_change_apply", productCount: 0, id: 9_007_199_254_740_991 });
+    // The read names its columns: never the review id, so 8a's PostgreSQL suite (up to 0740) keeps running it.
+    expect(client.sql[0]).not.toContain("review_id");
+  });
+
   it.each([
-    ["an unknown operation", { operation: "price_change_apply" }],
+    ["an unknown operation", { operation: "store_default" }],
     ["an id past the safe integer range", { id: "9007199254740993" }],
     ["a negative count", { product_count: -1 }],
     ["an unknown actor", { actor_type: "robot" }],
@@ -263,7 +273,7 @@ describe("listing setting request ledger", () => {
   });
 
   it.each<[string, Record<string, unknown>, Record<string, unknown>]>([
-    ["an unknown operation", { operation: "price_change_apply" }, {}],
+    ["an unknown operation", { operation: "store_default" }, {}],
     ["a negative count", { product_count: -1 }, { column: "product_count" }],
     ["a vendor id as a fraction", { vendor_id: 1.5 }, { column: "vendor_id" }],
     ["a missing time", { created_at: null }, { column: "created_at" }],
@@ -292,7 +302,9 @@ describe("listing setting request ledger", () => {
   });
 
   it.each([
-    ["an unknown operation", { operation: "price_change_apply" }],
+    // The apply-only operation: it is a ledger operation (0750), but this insert names no review id (plan PR 9, P23, 9.2).
+    ["the apply-only operation", { operation: "price_change_apply" }],
+    ["an unknown operation", { operation: "store_default" }],
     ["a short key", { idempotencyKey: "short" }],
     ["a malformed hash", { requestHash: "B".repeat(64) }],
     ["10,001 products", { productCount: 10_001 }],
@@ -308,6 +320,25 @@ describe("listing setting request ledger", () => {
       requestHash: HASH, productCount: 1, actor, now: NOW, ...overrides,
     } as Parameters<typeof insertListingSettingRequestWithClient>[1])).rejects.toMatchObject({ code: "DROPSHIP_LISTING_SETTINGS_INVARIANT_FAILED" });
     expect(client.sql).toEqual([]);
+  });
+
+  it("refuses the apply-only operation by name, not because the ledger's list lacks it", async () => {
+    const error = await insertListingSettingRequestWithClient(asClient(new ScriptedClient(() => [{ id: "1" }])), {
+      vendorId: 10, storeConnectionId: 44, operation: "price_change_apply" as unknown as "product_settings_bulk",
+      idempotencyKey: KEY, requestHash: HASH, productCount: 0, actor, now: NOW,
+    }).then(() => null, (reason: unknown) => reason);
+    expect(error).toMatchObject({ code: "DROPSHIP_LISTING_SETTINGS_INVARIANT_FAILED", context: { invalid: ["operation"] } });
+  });
+
+  it("names the ledger row's faults other than its operation, for both inserts", () => {
+    const row = { idempotencyKey: KEY, requestHash: HASH, productCount: 0, actor, now: NOW };
+    expect(listingSettingLedgerRowFaults(row)).toEqual([]);
+    expect(listingSettingLedgerRowFaults({ ...row, productCount: 10_000 })).toEqual([]);
+    expect(listingSettingLedgerRowFaults({
+      idempotencyKey: "short", requestHash: "B".repeat(64), productCount: 10_001,
+      actor: { actorType: "robot" as "vendor", actorId: " " }, now: new Date("not a time"),
+    })).toEqual(["idempotencyKey", "requestHash", "productCount", "actorType", "actorId", "now"]);
+    expect(listingSettingLedgerRowFaults({ ...row, actor: { actorType: "system", actorId: "j".repeat(256) } })).toEqual(["actorIdLength"]);
   });
 
   it("refuses an insert that returns no identity", async () => {
@@ -334,5 +365,34 @@ describe("listing setting request ledger", () => {
         context: { mismatched: [field], retryable: false, classification: "permanent" },
       }));
     }
+  });
+});
+
+describe("listingSettingPriceFromColumns (plan PR 9, 8.2)", () => {
+  const PRICE = { basis: "product_cost", markupBps: 3_500, flatCents: 25, rounding: "up_99" } as const;
+  const columns = (price: Record<string, unknown>) => ({
+    price_basis: price.basis ?? null, price_markup_bps: price.markupBps ?? null,
+    price_flat_cents: price.flatCents ?? null, price_rounding: price.rounding ?? null,
+  });
+
+  it("reads the price exactly as the full row read reads it: a recipe, or null when the group is empty", () => {
+    const stored = storedColumns();
+    expect(listingSettingPriceFromColumns(stored)).toEqual(productColumnsToValues(stored).price);
+    expect(listingSettingPriceFromColumns(columns(PRICE))).toEqual(PRICE);
+    expect(listingSettingPriceFromColumns(columns({}))).toBeNull();
+    const none = storedColumns(columns({}));
+    expect(listingSettingPriceFromColumns(none)).toEqual(productColumnsToValues(none).price);
+  });
+
+  it.each<[string, Record<string, unknown>, Record<string, unknown>]>([
+    ["a partial group", { ...columns(PRICE), price_rounding: null }, { group: "price" }],
+    ["an unknown basis", columns({ ...PRICE, basis: "shelf_price" }), {}],
+    ["a fractional markup", columns({ ...PRICE, markupBps: 1.5 }), {}],
+    ["a missing column", { price_basis: "product_cost", price_markup_bps: 0, price_flat_cents: 0 }, { missing: ["price_rounding"] }],
+  ])("refuses %s as a broken contract", (_label, row, context) => {
+    let error: unknown;
+    try { listingSettingPriceFromColumns(row as Parameters<typeof listingSettingPriceFromColumns>[0]); } catch (caught) { error = caught; }
+    expect(error).toBeInstanceOf(DropshipError);
+    expect(error).toMatchObject({ code: "DROPSHIP_LISTING_SETTINGS_INVARIANT_FAILED", context: { ...context, classification: "fatal" } });
   });
 });

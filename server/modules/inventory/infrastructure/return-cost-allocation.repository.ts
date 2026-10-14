@@ -4,18 +4,24 @@ import { resolveCost } from "../cost-resolver";
 import { normalizeLotCosts, recordedUnitCostMills, lotCostNeedsReview, type LotCosts } from "../domain/lot-cost";
 import { costInteger, CostEvidenceError, type CostEvidenceTransaction } from "./cost-evidence.repository";
 import { returnableCostQuantities, ReturnCostQuantityError } from "../domain/return-cost-quantity";
+import { remainingCostAllocationIntervals, referenceLotQuantityCost } from "./cost-quantity.repository";
+import { sliceCostQuantityIntervals } from "../domain/cost-quantity-intervals";
 
 export interface ReturnCostAllocationInput {
   wmsOrderId: number;
   wmsOrderItemId: number | null;
   productVariantId: number;
   quantity: number;
+  actor?:string;
+  now?:Date;
 }
 export interface ReturnCostLayer {
   quantity: number;
   sourceOrderItemCostId: number | null;
   sourceLotId: number | null;
   costs: LotCosts | null;
+  exactTotals?:LotCosts;
+  costQuantityAllocationId?:number;
   evidenceState: CostSourceRevision["evidence"];
   sourceEvidence: Record<string, unknown>;
 }
@@ -26,7 +32,8 @@ type ReturnCostExecutor = CostEvidenceTransaction & { select: (...args: any[]) =
  * enter the WMS COGS lookup; repeated SKU lines remain distinct.
  */
 export async function allocateReturnCosts(tx: ReturnCostExecutor, input: ReturnCostAllocationInput): Promise<ReturnCostLayer[]> {
-  for (const [field,value] of Object.entries(input)) if (value !== null) costInteger(value,field,1);
+  for (const [field,value] of Object.entries({wmsOrderId:input.wmsOrderId,wmsOrderItemId:input.wmsOrderItemId,
+    productVariantId:input.productVariantId,quantity:input.quantity})) if (value !== null) costInteger(value,field,1);
   const result = input.wmsOrderItemId === null ? { rows: [] } : await tx.execute(sql`
     SELECT cost.* FROM oms.order_item_costs cost
     WHERE cost.order_id=${input.wmsOrderId} AND cost.order_item_id=${input.wmsOrderItemId}
@@ -82,10 +89,18 @@ export async function allocateReturnCosts(tx: ReturnCostExecutor, input: ReturnC
     // If the sold total is known but its component history conflicts, retain
     // that exact total as a provisional compatibility layer. Its source evidence
     // explicitly requires component review; do not certify an invented breakdown.
+    if (cost.cost_quantity_allocation_id!=null && (!input.actor?.trim() || !(input.now instanceof Date) || !Number.isFinite(input.now.getTime()))) {
+      throw new CostEvidenceError("COST_AUDIT_IDENTITY_REQUIRED","An exact return cost needs its owning actor and timestamp.");
+    }
+    const exact=cost.cost_quantity_allocation_id==null ? null
+      : await referenceLotQuantityCost(tx,costInteger(cost.cost_quantity_allocation_id,"sourceCostAllocationId",1),
+        sliceCostQuantityIntervals(await remainingCostAllocationIntervals(tx,costInteger(cost.cost_quantity_allocation_id,"sourceCostAllocationId",1)),returnedQty,take),
+        input.actor!,input.now!,`return_cost_reference:${costId}:${returnedQty}:${take}`);
     layers.push({ quantity: take, sourceOrderItemCostId: costId, sourceLotId,
       costs, evidenceState, sourceEvidence: { cost, sourceLot: sourceLot ?? null, netSoldQuantity: soldQty,
         unpicks: reversalResult.rows.filter(reversal=>Number(reversal.original_cost_id)===costId),
-        componentHistoryKnown: evidenceState !== "review_required" } });
+        componentHistoryKnown: evidenceState !== "review_required" },
+      ...(exact?.id ? {exactTotals:exact.costs,costQuantityAllocationId:exact.id} : {}) });
     remaining-=take;
   }
   if (remaining > 0 && result.rows.length > 0) {

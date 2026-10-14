@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { exactRecordedCostTotalsSchema } from "../utils/recorded-cost-total";
 import { retiredHistoryEvidenceSchema } from "./inventory-cutover-history";
 import { wmsCutoverDemandOrderSchema, wmsCutoverDemandItemSchema,
   wmsCutoverSourceItemSchema, wmsCutoverPhysicalItemSchema } from "./inventory-cutover-demand";
@@ -54,6 +55,7 @@ export const cutoverReconstructionJournalSchema = z.object({
 export const cutoverReconstructionCostSchema = z.object({
   id, orderId: id, orderItemId: id, inventoryLotId: id, productVariantId: id,
   quantity: raw, unitCostMills: raw, totalCostMills: raw,
+  exactTotals: exactRecordedCostTotalsSchema.nullable().optional(),
   occurredAt: z.string().datetime(),
 }).strict();
 export const cutoverReconstructionVariantSchema = z.object({

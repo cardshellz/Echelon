@@ -98,6 +98,17 @@ function textDigest(text: string): { length: number; sha256: string } {
 export const LISTING_SETTING_CHILD_KINDS = ["product", "size", "content", "ebay_rules", "policy", "shelf"] as const;
 export type ListingSettingChildKind = (typeof LISTING_SETTING_CHILD_KINDS)[number];
 
+/**
+ * The settings a size can also hold on its own in today's per-size tables
+ * (policy overrides, store shelf, own main text), in that order. Such a
+ * leftover beats the product's and the category's value, so a product or
+ * category change that touches one of these fields clears the sizes' rows
+ * (plan PR 9, P17). Price has its own per-size flow (W9); eBay category,
+ * text above and text below have no per-size table.
+ */
+export const LISTING_SETTING_LEFTOVER_FIELDS = ["shippingPolicy", "returnPolicy", "paymentPolicy", "storeShelf", "mainText"] as const;
+export type ListingSettingLeftoverField = (typeof LISTING_SETTING_LEFTOVER_FIELDS)[number];
+
 /** Child ids are int4 keys (product, size, store connection). */
 const MAX_LISTING_SETTING_CHILD_ID = 2_147_483_647;
 const CHILD_ID_PATTERN = /^[1-9][0-9]{0,9}$/;

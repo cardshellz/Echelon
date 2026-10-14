@@ -20,7 +20,8 @@ dbDescribe.sequential("explicit eBay republication recovery on disposable Postgr
     database=await createInventoryCutoverTestDatabase(process.env.ECHELON_TEST_DATABASE_URL,true,cutoverCompositionBaseSql);
     await installCutoverCompositionMigrations(database.pool);
     for(const file of ["0709_walmart_quantity_admission.sql","0716_inventory_publication_reconciliation.sql",
-      "0729_ebay_listing_sync_recovery.sql","0733_ebay_provider_response_finality.sql","0734_ebay_operator_republication_recovery.sql"]){
+      "0729_ebay_listing_sync_recovery.sql","0733_ebay_provider_response_finality.sql","0734_ebay_operator_republication_recovery.sql",
+      "0749_quantity_outbox_preflight_completion.sql"]){
       await database.pool.query(readFileSync(resolve(process.cwd(),"migrations",file),"utf8"));
     }
     await database.pool.query(cutoverCompositionSeedSql);

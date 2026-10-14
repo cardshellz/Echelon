@@ -7,7 +7,7 @@ import {
   type ListingDraftItem,
 } from "@shared/types/channel-listing-publication";
 import { ChannelProviderError } from "../../channels/channel-provider.error";
-import { ListingPublicationError } from "../domain/listing-publication";
+import { ListingPublicationError, listingHash } from "../domain/listing-publication";
 import {
   assertRecreationEvidence,
   recreationDraft,
@@ -43,7 +43,7 @@ export class ListingRecreationService {
     const catalog = listingCatalogItemSchema.parse(current);
     const evidence = await this.verify(
       account,
-      recreationDraft(prior.draft, source.id, null),
+      { ...recreationDraft(prior.draft, source.id, null), identifier: prior.identifier },
       catalog,
     );
     const maintenance = evidence.previousExternalProductId
@@ -54,7 +54,9 @@ export class ListingRecreationService {
           { includeInitial: false },
         )) ?? null)
       : null;
-    const item = recreationDraft(prior.draft, source.id, maintenance);
+    // Pin the selling-unit identifier from the original reviewed submission.
+    // Current catalog inheritance must not silently change which product returns.
+    const item = { ...recreationDraft(prior.draft, source.id, maintenance), identifier: prior.identifier };
     return listingRecreationSchema.parse({
       account,
       item,
@@ -70,10 +72,10 @@ export class ListingRecreationService {
     expected?: ListingRecreationEvidence,
     successorId?: string,
   ): Promise<ListingRecreationEvidence> {
-    if (!draft.recreateFromOperationId || draft.method !== "create")
+    if (!draft.recreateFromOperationId)
       throw new ListingPublicationError(
         "LISTING_RECREATION_INVALID",
-        "Recreation requires a full new-item submission.",
+        "Recreation requires the previous listing submission.",
       );
     const source = await this.dependencies.store.operation(
       account.channelId,
@@ -88,6 +90,11 @@ export class ListingRecreationService {
       throw new ListingPublicationError(
         "LISTING_RECREATION_IDENTITY_CHANGED",
         "The catalog SKU or selling variant changed. Prepare the listing again.",
+      );
+    if (!prior.identifier || listingHash(draft.identifier ?? catalog.identifier) !== listingHash(prior.identifier))
+      throw new ListingPublicationError(
+        "LISTING_RECREATION_IDENTITY_CHANGED",
+        "Recreation must keep the original selling-unit identifier (GTIN, UPC, EAN or ISBN).",
       );
     if (expected)
       assertRecreationEvidence(expected, source, account, successorId);

@@ -32,6 +32,14 @@ export const BULK_JSON_PATHS: ReadonlyArray<{ method: "POST" | "PUT"; pattern: R
   { method: "POST", pattern: storePath(String.raw`\/pricing-rules\/reviews`) },
   { method: "PUT", pattern: storePath(String.raw`\/content-profile`) },
   { method: "PUT", pattern: storePath(String.raw`\/listing-settings\/size-prices`) },
+  { method: "PUT", pattern: storePath(String.raw`\/listing-settings\/products\/[^/]+`) },
+  { method: "POST", pattern: storePath(String.raw`\/listing-settings\/products\/bulk`) },
+  { method: "PUT", pattern: storePath(String.raw`\/listing-settings\/categories\/[^/]+`) },
+  // W7's price check and its apply (9f): a check may name 10,000 products.
+  { method: "POST", pattern: storePath(String.raw`\/listing-settings\/price-changes\/review`) },
+  { method: "POST", pattern: storePath(String.raw`\/listing-settings\/price-changes\/apply`) },
+  // W13's "Got it for all N" (9g): up to 10,000 products.
+  { method: "POST", pattern: storePath(String.raw`\/listing-settings\/category-moves\/acknowledge`) },
 ]);
 
 /** The global parser skips these requests; the route parses them after authentication. */

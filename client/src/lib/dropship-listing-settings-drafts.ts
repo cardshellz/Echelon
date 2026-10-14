@@ -1,5 +1,6 @@
 import { DropshipApiError } from "./dropship-ops-surface";
 import { LISTING_SETUP_RELOAD_MESSAGE, listingSetupSaveErrorMessage } from "./dropship-ebay-listing-setup";
+import { LISTING_SETTINGS_EDIT_WORDS, productNotFoundWords } from "./dropship-listing-settings-words";
 import { describeLeavePrompt } from "./dropship-unsaved-changes";
 
 /**
@@ -147,6 +148,8 @@ export const LISTING_SETTINGS_KEY_PREFIXES = Object.freeze({
   category: "ls-category",
   description: "ls-text",
   sizePrice: "ls-price",
+  // W5, one product's own settings (plan PR 10, D5).
+  productSettings: "ls-product",
 } as const);
 
 /** The words every editor shares (R:535-545). */
@@ -309,7 +312,13 @@ export type ListingSettingsDraftAction =
   | { type: "startSave"; attempt: SaveAttempt }
   | { type: "saved"; key: string; nowMs: number; viewStale?: boolean }
   | { type: "failure"; key: string; failure: WriteFailure }
-  | { type: "rebase"; latest: DraftValue }
+  /**
+   * `marked`: the fields to mark, when the editor knows them better than a
+   * field-by-field comparison can (a product's settings, whose saved values
+   * sit in one field of the draft; `rebaseProductSettingsDraft`). Absent: the
+   * fields both changed (`bothChangedFields`).
+   */
+  | { type: "rebase"; latest: DraftValue; marked?: readonly string[] }
   | { type: "close" }
   | { type: "discard" }
   | { type: "tick"; nowMs: number };
@@ -393,7 +402,7 @@ export function reduceListingSettingsDraft(
         ...draft,
         base: action.latest,
         changes: changedFields(action.latest, draft.value).length,
-        marked: bothChangedFields(draft.base, draft.value, action.latest),
+        marked: action.marked ? [...action.marked] : bothChangedFields(draft.base, draft.value, action.latest),
         phase: "editing",
         message: LISTING_SETTINGS_SAVE_WORDS.rebased,
         code: null,
@@ -445,9 +454,10 @@ function answersAttempt(draft: ListingSettingsDraft | null, key: string): draft 
  * The step's writers (plan 4.5): W1 the store price (pricing review apply),
  * W2 the eBay listing setup (policies and store shelf), W3 eBay category
  * rules, W4 the description profile, W9 one size's price, W10 the ship-from
- * repair.
+ * repair; and the PR 9 writers as PR 10 adds them: W5 one product's own
+ * settings (plan PR 10, 4.6).
  */
-export type ListingSettingsWriter = "W1" | "W2" | "W3" | "W4" | "W9" | "W10";
+export type ListingSettingsWriter = "W1" | "W2" | "W3" | "W4" | "W5" | "W9" | "W10";
 
 export interface WriteFailure {
   phase: WriteFailurePhase;
@@ -456,11 +466,19 @@ export interface WriteFailure {
   code: string | null;
   /** HTTP status, or null when no answer arrived. */
   status: number | null;
+  /**
+   * The fields the refusal names (`context.invalidFields` / `context.fields`,
+   * plus the field a code is about), for a PR 9 writer only (plan 3.3); absent
+   * for the PR 7 writers, whose failures stay as they were.
+   */
+  fields?: readonly string[];
 }
 
 export interface ClassifyWriteFailureOptions {
   /** W3: the eBay category the vendor picked, to tell a bad pick from an older rule's category. */
   pickedEbayCategoryId?: string | null;
+  /** W5: the store's name, for "This product isn't chosen for <store>." */
+  storeName?: string;
 }
 
 interface WriterCodes {
@@ -474,8 +492,11 @@ interface WriterCodes {
 
 const NONE: ReadonlySet<string> = new Set();
 
+/** The PR 7 writers, classified by the table below; the PR 9 writers have their own rules (`classifyPr9WriteFailure`). */
+type Pr7Writer = Exclude<ListingSettingsWriter, Pr9Writer>;
+
 /** The codes each writer's routes send (plan 4.5; status maps in each `*.routes.ts`). */
-const WRITER_CODES: Readonly<Record<ListingSettingsWriter, WriterCodes>> = (() => {
+const WRITER_CODES: Readonly<Record<Pr7Writer, WriterCodes>> = (() => {
   // W2 and W10 share one route file (`dropship-ebay-listing-setup.routes.ts`).
   const listingSetup: WriterCodes = {
     conflict: new Set(["DROPSHIP_LISTING_CONFIG_REVISION_CONFLICT"]),
@@ -588,6 +609,7 @@ export function classifyWriteFailure(
   error: unknown,
   options: ClassifyWriteFailureOptions = {},
 ): WriteFailure {
+  if (isPr9Writer(writer)) return classifyPr9WriteFailure(writer, error, options);
   if (!(error instanceof DropshipApiError)) {
     return { phase: "uncertain", message: LISTING_SETTINGS_SAVE_WORDS.uncertain, code: null, status: null };
   }
@@ -610,14 +632,14 @@ export function classifyWriteFailure(
   return failure("uncertain", LISTING_SETTINGS_SAVE_WORDS.uncertain);
 }
 
-function unreachableWords(writer: ListingSettingsWriter, error: DropshipApiError): string {
+function unreachableWords(writer: Pr7Writer, error: DropshipApiError): string {
   if ((writer === "W2" || writer === "W10") && error.code !== null && CARD_SHELLZ_SHIPPING_CODE.test(error.code)) {
     return listingSetupSaveErrorMessage(error, LISTING_SETTINGS_SAVE_WORDS.uncertain, writer === "W10" ? "ship_from_repair" : "save");
   }
   return LISTING_SETTINGS_SAVE_WORDS.unreachable;
 }
 
-function refusedWords(writer: ListingSettingsWriter, error: DropshipApiError, options: ClassifyWriteFailureOptions): string {
+function refusedWords(writer: Pr7Writer, error: DropshipApiError, options: ClassifyWriteFailureOptions): string {
   const code = error.code;
   if (code === "DROPSHIP_IDEMPOTENCY_CONFLICT" || code === "DROPSHIP_LISTING_CONFIG_IDEMPOTENCY_CONFLICT") {
     return LISTING_SETTINGS_SAVE_WORDS.keyReused;
@@ -665,6 +687,214 @@ function refusesAnOlderRule(error: DropshipApiError, pickedCategoryId: string | 
   const named = error.context?.categoryId;
   if (typeof named !== "string" && typeof named !== "number") return false;
   return pickedCategoryId === null || String(named) !== pickedCategoryId;
+}
+
+// ---------------------------------------------------------------------------
+// Failed saves of the PR 9 writers (plan PR 10, 3.3, 4.7, D7, D8)
+// ---------------------------------------------------------------------------
+
+type Pr9Writer = "W5";
+const PR9_WRITERS: ReadonlySet<ListingSettingsWriter> = new Set<Pr9Writer>(["W5"]);
+
+function isPr9Writer(writer: ListingSettingsWriter): writer is Pr9Writer {
+  return PR9_WRITERS.has(writer);
+}
+
+interface Pr9WriterCodes {
+  conflict: ReadonlySet<string>;
+  /**
+   * 4xx codes the write routes list that this writer can't answer to a
+   * request this page builds (3.3 row 22): refused with the "couldn't be
+   * saved" words, never `uncertain`.
+   */
+  cannotHappen: ReadonlySet<string>;
+}
+
+/** Each PR 9 writer's own codes (dropship-listing-setting-write-errors.ts lists every code with its status). */
+const PR9_WRITER_CODES: Readonly<Record<Pr9Writer, Pr9WriterCodes>> = {
+  W5: {
+    conflict: new Set(["DROPSHIP_PRODUCT_LISTING_SETTINGS_VERSION_CONFLICT"]),
+    cannotHappen: new Set([
+      // This page's W5 never carries a price, a size price or the prices shown (D1).
+      "DROPSHIP_LISTING_PRICE_WOULD_BE_LOST", "DROPSHIP_LISTING_PRICE_OUTSIDE_LIMIT", "DROPSHIP_PRICING_RULES_NOT_CONFIGURED",
+      "DROPSHIP_LISTING_PRICE_RELEASE_LIMIT", "DROPSHIP_LISTING_PRICES_MOVED", "DROPSHIP_LISTING_PRICE_VERSION_CONFLICT",
+      "DROPSHIP_LISTING_PRICE_NOT_AVAILABLE",
+      // Other writers' refusals: W5 is not refused by older group rules (P21) and checks no category or review.
+      "DROPSHIP_CATEGORY_LISTING_SETTINGS_VERSION_CONFLICT", "DROPSHIP_LISTING_SETTINGS_OLDER_RULES_PRESENT",
+      "DROPSHIP_LISTING_SETTINGS_BULK_TOO_LARGE", "DROPSHIP_LISTING_SETTINGS_CATEGORY_NOT_FOUND", "DROPSHIP_PRICING_REVIEW_NOT_FOUND",
+    ]),
+  },
+};
+
+const HTTP_UNAUTHORIZED = 401;
+const HTTP_CONFLICT = 409;
+const HTTP_INTERNAL_ERROR = 500;
+const BUSY_CODE = "DROPSHIP_LISTING_SETTINGS_BUSY";
+/** BUSY reasons that are refused before anything is written: the same key may be sent again (D7a). */
+const BUSY_HEAVY_WRITE = "heavy_write_in_progress";
+const BUSY_REQUEST_KEY_CHANGED = "request_key_changed";
+/**
+ * 500s with their own code: a broken contract or a replay that can't be
+ * answered. The same key would repeat them forever, so they are final (D7c);
+ * REPLAY_INCOMPLETE follows a recorded save, so the words never say nothing was saved.
+ */
+const FATAL_CODES: ReadonlySet<string> = new Set([
+  "DROPSHIP_LISTING_SETTINGS_INVARIANT_FAILED",
+  "DROPSHIP_LISTING_SETTINGS_REPLAY_INCOMPLETE",
+  "DROPSHIP_LISTING_PRICE_INVARIANT_FAILED",
+]);
+/** eBay's token step answers 503 before the write transaction opens (3.3 row 7). */
+const EBAY_TOKEN_CODES: ReadonlySet<string> = new Set([
+  "DROPSHIP_EBAY_TOKEN_REFRESH_FAILED", "DROPSHIP_EBAY_REFRESH_LOCK_UNAVAILABLE", "DROPSHIP_CREDENTIAL_CHANGED",
+  "DROPSHIP_EBAY_TOKEN_REFRESH_INVALID_RESPONSE", "DROPSHIP_EBAY_OAUTH_NOT_CONFIGURED",
+]);
+/** Another eBay site: the banner says so (3.3 row 12). */
+const OTHER_SITE_CODES: ReadonlySet<string> = new Set([
+  "DROPSHIP_EBAY_FULFILLMENT_MARKETPLACE_UNSUPPORTED", "DROPSHIP_EBAY_CATEGORY_MARKETPLACE_UNSUPPORTED",
+]);
+const SIGN_IN_REQUIRED_CODE = "DROPSHIP_LISTING_SETTINGS_EBAY_SIGN_IN_REQUIRED";
+/**
+ * Blocks a banner explains (3.3 row 16). The PR 9 gate names the vendor, .ops
+ * or store status in `reason`, which the banner does not read: the step reads
+ * the account, summary and setup again and the banner follows from them.
+ */
+const PR9_BLOCKED_CODES: ReadonlySet<string> = new Set([
+  "DROPSHIP_LISTING_VENDOR_BLOCKED", "DROPSHIP_LISTING_ENTITLEMENT_BLOCKED", "DROPSHIP_LISTING_STORE_BLOCKED",
+  "DROPSHIP_STORE_CONNECTION_REQUIRED", "DROPSHIP_STORE_CONNECTION_NOT_CONNECTED", "DROPSHIP_EBAY_LISTING_SETUP_ACCESS_TOKEN_REQUIRED",
+  "DROPSHIP_LISTING_SETTINGS_EBAY_ONLY",
+  "DROPSHIP_EBAY_LISTING_SETUP_PERMISSION_REQUIRED", "DROPSHIP_EBAY_STORE_CATEGORIES_PERMISSION_REQUIRED",
+  "DROPSHIP_EBAY_CATEGORIES_PERMISSION_REQUIRED",
+  "DROPSHIP_EBAY_LISTING_SETUP_ACCESS_DENIED", "DROPSHIP_EBAY_STORE_CATEGORIES_ACCESS_DENIED", "DROPSHIP_EBAY_CATEGORIES_ACCESS_DENIED",
+]);
+const UNREADABLE_REQUEST_CODES: ReadonlySet<string> = new Set([
+  "DROPSHIP_LISTING_SETTINGS_INVALID_INPUT", "DROPSHIP_LISTING_SETTINGS_BULK_INVALID", "DROPSHIP_REQUEST_JSON_INVALID",
+]);
+const IDEMPOTENCY_CONFLICT_CODE = "DROPSHIP_IDEMPOTENCY_CONFLICT";
+const PRODUCT_NOT_FOUND_CODE = "DROPSHIP_LISTING_SETTINGS_PRODUCT_NOT_FOUND";
+const TOO_LARGE_CODE = "DROPSHIP_LISTING_SETTINGS_TOO_LARGE";
+const STORE_TEXT_LIMIT = "store_text_limit";
+
+/** The fields a refusal names, once each (`fields` from the sign-in refusal, `invalidFields` from eBay's value checks). */
+function namedFields(error: DropshipApiError, also: readonly string[] = []): string[] {
+  const named = [error.context?.invalidFields, error.context?.fields]
+    .flatMap((list) => (Array.isArray(list) ? list : []))
+    .filter((name): name is string => typeof name === "string");
+  return [...new Set([...named, ...also])];
+}
+
+function contextReason(error: DropshipApiError): string | null {
+  const reason = error.context?.reason;
+  return typeof reason === "string" ? reason : null;
+}
+
+/**
+ * A PR 9 writer's failed save (plan 3.3, rules top to bottom; 4.7 for W5).
+ * Classified by code, not status: a status with no code the table names is a
+ * gateway's or a proxy's, which may follow a commit, so a 5xx without a known
+ * code is `uncertain`. `TOO_LARGE` is a refusal here, never a banner (D8).
+ */
+function classifyPr9WriteFailure(writer: Pr9Writer, error: unknown, options: ClassifyWriteFailureOptions): WriteFailure {
+  const words = LISTING_SETTINGS_EDIT_WORDS;
+  if (!(error instanceof DropshipApiError)) {
+    // No answer arrived (row 9): the save may have happened.
+    return { phase: "uncertain", message: LISTING_SETTINGS_SAVE_WORDS.uncertain, code: null, status: null, fields: [] };
+  }
+  const { status, code } = error;
+  const codes = PR9_WRITER_CODES[writer];
+  const failure = (phase: WriteFailurePhase, message: string, also: readonly string[] = []): WriteFailure =>
+    ({ phase, message, code, status, fields: namedFields(error, also) });
+
+  if (status === HTTP_TOO_MANY_REQUESTS) return failure("rate_limited", LISTING_SETTINGS_SAVE_WORDS.rateLimited);
+  if (status === HTTP_UNAUTHORIZED && code === "DROPSHIP_AUTH_REQUIRED") return failure("refused", words.signedOut);
+  if (code === BUSY_CODE) {
+    // A busy answer without a reason is a lost connection, which may follow a cut-off COMMIT (D7a).
+    const reason = contextReason(error);
+    if (reason === BUSY_HEAVY_WRITE) return failure("unreachable", words.busyHeavy);
+    if (reason === BUSY_REQUEST_KEY_CHANGED) return failure("unreachable", words.busyKeyChanged);
+    return failure("uncertain", LISTING_SETTINGS_SAVE_WORDS.uncertain);
+  }
+  if ((status === HTTP_BAD_GATEWAY || status === HTTP_SERVICE_UNAVAILABLE) && code !== null && CARD_SHELLZ_SHIPPING_CODE.test(code)) {
+    // Card Shellz shipping, read before the write (3.3 row 6): its own words and a reference.
+    return failure("unreachable", listingSetupSaveErrorMessage(error, LISTING_SETTINGS_SAVE_WORDS.uncertain, "save"));
+  }
+  if ((status === HTTP_BAD_GATEWAY && code !== null) || (status === HTTP_SERVICE_UNAVAILABLE && code !== null && EBAY_TOKEN_CODES.has(code))) {
+    // eBay runs before the write transaction (3.3 row 7).
+    return failure("unreachable", LISTING_SETTINGS_SAVE_WORDS.unreachable);
+  }
+  if (status === HTTP_INTERNAL_ERROR && code !== null && FATAL_CODES.has(code)) return failure("refused", words.fatal);
+  if (status >= 500) return failure("uncertain", LISTING_SETTINGS_SAVE_WORDS.uncertain);
+  if (status < 400) return failure("uncertain", LISTING_SETTINGS_SAVE_WORDS.uncertain);
+
+  if (code !== null && codes.conflict.has(code)) return failure("conflict", LISTING_SETTINGS_SAVE_WORDS.conflict);
+  if (code === IDEMPOTENCY_CONFLICT_CODE) return failure("refused", LISTING_SETTINGS_SAVE_WORDS.keyReused);
+  if (code !== null && OTHER_SITE_CODES.has(code)) return failure("blocked", LISTING_SETTINGS_SAVE_WORDS.blocked);
+  if (status === HTTP_CONFLICT && code !== null && CARD_SHELLZ_SHIPPING_CODE.test(code)) {
+    // Card Shellz can't back a new shipping policy yet (3.3 row 11): plain words and a reference.
+    return failure("refused", listingSetupSaveErrorMessage(error, error.message, "save"), ["shippingPolicy"]);
+  }
+  if (status === HTTP_PAYLOAD_TOO_LARGE) return failure("refused", words.tooBig);
+  if (code !== null && UNREADABLE_REQUEST_CODES.has(code)) return failure("refused", words.invalid);
+  if (code === SIGN_IN_REQUIRED_CODE) return failure("blocked", LISTING_SETTINGS_SAVE_WORDS.blocked);
+  if (code !== null && PR9_BLOCKED_CODES.has(code)) return failure("blocked", LISTING_SETTINGS_SAVE_WORDS.blocked);
+  switch (code) {
+    case "DROPSHIP_EBAY_LISTING_SETUP_SELECTION_INVALID":
+      return failure("refused", words.policyGone);
+    case "DROPSHIP_EBAY_FULFILLMENT_POLICY_INCOMPATIBLE":
+      return failure("refused", LISTING_SETTINGS_SAVE_WORDS.shippingPolicyIncompatible, ["shippingPolicy"]);
+    case "DROPSHIP_EBAY_CATEGORY_RULE_INVALID":
+      return failure("refused", contextReason(error) === "not_leaf" ? LISTING_SETTINGS_SAVE_WORDS.pickFinalCategory : words.categoryGone,
+        ["ebayCategory"]);
+    case "DROPSHIP_EBAY_STORE_CATEGORY_INVALID":
+      return failure("refused", contextReason(error) === "too_long" ? words.shelfTooLong : LISTING_SETTINGS_SAVE_WORDS.shelfGone,
+        ["storeShelf"]);
+    case TOO_LARGE_CODE:
+      return failure("refused", contextReason(error) === STORE_TEXT_LIMIT ? words.storeTextLimit : error.message);
+    case PRODUCT_NOT_FOUND_CODE:
+      if (writer === "W5") return failure("refused", productNotFoundWords(options.storeName ?? ""));
+      break;
+    default:
+      break;
+  }
+  if (code !== null && codes.cannotHappen.has(code)) return failure("refused", words.invalid);
+  return failure("refused", error.message);
+}
+
+/**
+ * The PR 9 write gate's refusals (`authorizeListingSettingWrite`, and the
+ * wrapper's store check before it): the vendor, .ops, the store's status or
+ * platform. Every PR 9 writer runs the gate before its replay probe, in the
+ * preflight and in the transaction (`S/application/dropship-listing-product-settings-service.ts`
+ * `readPreflight`, `write`), so one of these says nothing about a save sent
+ * earlier with the same key. Every other block (eBay's sign-in or access, the
+ * eBay site) is asked only for a key not used yet, so it does.
+ */
+const PR9_GATE_CODES: ReadonlySet<string> = new Set([
+  "DROPSHIP_STORE_CONNECTION_REQUIRED", "DROPSHIP_LISTING_VENDOR_BLOCKED", "DROPSHIP_LISTING_ENTITLEMENT_BLOCKED",
+  "DROPSHIP_LISTING_STORE_BLOCKED", "DROPSHIP_LISTING_SETTINGS_EBAY_ONLY",
+]);
+
+/**
+ * A Check again keeps its doubt (D7b): a resend of an unconfirmed save that
+ * is answered "not now" (eBay or Card Shellz not answering, busy, too many
+ * saves) or by the write gate (a paused account, .ops or store, refused before
+ * the replay probe) says nothing about the first send, which may have saved.
+ * It stays `uncertain`, locked with the same key, and the words say why it
+ * couldn't be checked; after a gate refusal the banner says why, and [Check
+ * again] comes back with the right. Any other answer stands as it is. For the
+ * PR 9 writers' runners, which still hand a gate refusal to the banner.
+ */
+export function failureAfterUnconfirmed(wasUncertain: boolean, failure: WriteFailure): WriteFailure {
+  if (!wasUncertain) return failure;
+  const words = LISTING_SETTINGS_EDIT_WORDS;
+  if (failure.phase === "blocked" && failure.code !== null && PR9_GATE_CODES.has(failure.code)) {
+    return { ...failure, phase: "uncertain", message: LISTING_SETTINGS_SAVE_WORDS.uncertain };
+  }
+  if (failure.phase !== "unreachable" && failure.phase !== "rate_limited") return failure;
+  return {
+    ...failure,
+    phase: "uncertain",
+    message: failure.phase === "rate_limited" ? words.stillUnconfirmedRateLimited : words.stillUnconfirmed,
+  };
 }
 
 // ---------------------------------------------------------------------------

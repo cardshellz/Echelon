@@ -10,7 +10,8 @@ config({ path: resolve(process.cwd(), ".env.test") });
 const TEST_DB_URL = process.env.ECHELON_TEST_DATABASE_URL;
 const databaseTests = TEST_DB_URL && process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true" ? describe : describe.skip;
 const TABLES = [schema.vendors, schema.purchaseOrders, schema.purchaseOrderLines,
-  schema.vendorInvoices, schema.vendorInvoiceLines, schema.vendorInvoicePoLinks];
+  schema.vendorInvoices, schema.vendorInvoiceLines, schema.vendorInvoicePoLinks,
+  schema.apPayments, schema.apPaymentAllocations];
 
 databaseTests.sequential("AP invoice line metadata PostgreSQL integrity", () => {
   const actorId = `ap-line-metadata-${randomUUID()}`;
@@ -34,6 +35,7 @@ databaseTests.sequential("AP invoice line metadata PostgreSQL integrity", () => 
     for (const table of TABLES) await pool.query(fixtureTable(table));
     for (const statement of fixtureForeignKeys(TABLES)) await pool.query(statement);
     await pool.query("CREATE UNIQUE INDEX metadata_invoice_po_link_unique ON procurement.vendor_invoice_po_links(vendor_invoice_id,purchase_order_id)");
+    await pool.query("CREATE UNIQUE INDEX metadata_payment_allocation_unique ON procurement.ap_payment_allocations(ap_payment_id,vendor_invoice_id)");
     if (!(await pool.query("SELECT to_regclass('public.audit_events') AS relation")).rows[0].relation) {
       await pool.query(fixtureTable(schema.auditEvents)); ownsAudit = true;
     }
@@ -92,7 +94,7 @@ databaseTests.sequential("AP invoice line metadata PostgreSQL integrity", () => 
   }
   async function relatedState() {
     const result = [];
-    for (const table of ["purchase_orders", "purchase_order_lines", "vendor_invoices", "vendor_invoice_po_links"]) {
+    for (const table of ["purchase_orders", "purchase_order_lines", "vendor_invoices", "vendor_invoice_po_links", "ap_payments", "ap_payment_allocations"]) {
       result.push((await pool.query(`SELECT * FROM procurement.${table} ORDER BY id`)).rows);
     }
     return result;
@@ -166,5 +168,14 @@ databaseTests.sequential("AP invoice line metadata PostgreSQL integrity", () => 
       expect((await pool.query("SELECT notes FROM procurement.vendor_invoice_lines WHERE id=72")).rows).toEqual([{ notes: "Before note" }]);
       expect((await pool.query("SELECT count(*)::int AS count FROM public.audit_events WHERE actor=$1", [actorId])).rows[0].count).toBe(0);
     } finally { if (open) await holder.query("ROLLBACK"); holder.release(); await pending; }
+  });
+
+  it.each(["completed", "voided"])("preserves all rows when %s payment history blocks a generic metadata edit", async (status) => {
+    await pool.query(`INSERT INTO procurement.ap_payments(id,payment_number,vendor_id,payment_date,payment_method,total_amount_cents,status)
+      VALUES(81,'META-PAYMENT',5,'2026-10-13','ach',100,$1)`, [status]);
+    await pool.query("INSERT INTO procurement.ap_payment_allocations(ap_payment_id,vendor_invoice_id,applied_amount_cents) VALUES(81,71,100)");
+    const before = await fullState();
+    await expect(updateInvoiceLine(72, { notes: "Must retain financial history" }, actorId)).rejects.toMatchObject({ statusCode: 409, details: { code: "AP_INVOICE_FINANCIAL_HISTORY" } });
+    expect(await fullState()).toEqual(before);
   });
 });

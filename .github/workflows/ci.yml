@@ -24,6 +24,11 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Validate migration identities before dependency setup
+        run: node scripts/migrations/check-migrations.mjs --ci
       - uses: actions/setup-node@v4
         with:
           node-version: 20
@@ -175,6 +180,9 @@ jobs:
           client/src/pages/dropship/__tests__/ListingSettingsTabs.test.ts
           client/src/lib/__tests__/dropship-listing-settings-drawer.test.ts
           client/src/pages/dropship/__tests__/ListingSettingsProductDrawer.test.ts
+          client/src/lib/__tests__/dropship-listing-settings-product-edit.test.ts
+          client/src/lib/__tests__/dropship-listing-settings-product-requests.test.ts
+          client/src/pages/dropship/__tests__/ListingSettingsDrawerEdit.test.ts
           client/src/lib/__tests__/dropship-listing-settings-attention.test.ts
           client/src/pages/dropship/__tests__/ListingSettingsHeaderBannerStrip.test.ts
           client/src/pages/dropship/__tests__/ListingSettingsStep.test.ts

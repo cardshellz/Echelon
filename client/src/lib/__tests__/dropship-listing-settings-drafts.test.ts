@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { DropshipApiError } from "../dropship-ops-surface";
 import { LISTING_SETUP_RELOAD_MESSAGE } from "../dropship-ebay-listing-setup";
+import { LISTING_SETTINGS_EDIT_WORDS } from "../dropship-listing-settings-words";
 import {
   LISTING_SETTINGS_GUARD_ID_PREFIX,
   LISTING_SETTINGS_KEY_PREFIXES,
@@ -16,6 +17,7 @@ import {
   decideOpen,
   describeLeavePrompt,
   describeListingSettingsBar,
+  failureAfterUnconfirmed,
   isDraftDirty,
   isDraftLocked,
   isSavedFlashVisible,
@@ -23,6 +25,7 @@ import {
   productEditorId,
   reduceListingSettingsDraft,
   sameDraftValue,
+  type ClassifyWriteFailureOptions,
   type ListingSettingsDraft,
   type ListingSettingsDraftAction,
   type ListingSettingsWriter,
@@ -82,7 +85,7 @@ describe("store default rows", () => {
   it("uses the plan's request key prefixes", () => {
     expect(LISTING_SETTINGS_KEY_PREFIXES).toEqual({
       policy: "ls-policy", shelf: "ls-shelf", shipFrom: "ls-ship-from", pricingApply: "ls-apply",
-      category: "ls-category", description: "ls-text", sizePrice: "ls-price",
+      category: "ls-category", description: "ls-text", sizePrice: "ls-price", productSettings: "ls-product",
     });
   });
 });
@@ -324,6 +327,19 @@ describe("reduceListingSettingsDraft", () => {
     });
   });
 
+  it("marks the fields the editor names on Load latest, when it names them (PR 10, C20)", () => {
+    const base = { shippingPolicy: { mode: "leave" }, own: { shippingPolicy: { id: "F2" } }, expectedRevisionId: 5 };
+    const mine = { ...base, shippingPolicy: { mode: "set", value: { id: "F9" } } };
+    const latest = { ...base, own: { shippingPolicy: { id: "F3" } }, expectedRevisionId: 6 };
+    const open: ListingSettingsDraftAction = { type: "open", editor: "product:11", place: "Sleeves", base };
+    const draft = run([open, { type: "edit", value: mine }, { type: "edit", value: { ...mine, own: latest.own, expectedRevisionId: 6 } },
+      { type: "rebase", latest, marked: ["shippingPolicy"] }]);
+    expect(draft).toMatchObject({ changes: 1, marked: ["shippingPolicy"], phase: "editing", base: latest });
+    // Without `marked`, the field-by-field comparison decides, as before.
+    expect(run([open, { type: "edit", value: mine }, { type: "edit", value: { ...mine, own: latest.own, expectedRevisionId: 6 } },
+      { type: "rebase", latest }])?.marked).toEqual([]);
+  });
+
   it("closes an unchanged editor for good, and keeps a closed draft with changes", () => {
     expect(run([openShipping, { type: "close" }])).toBeNull();
     expect(run([openShipping, pickB, { type: "close" }])).toMatchObject({ open: false, changes: 1 });
@@ -338,8 +354,11 @@ describe("reduceListingSettingsDraft", () => {
   });
 });
 
+/** The PR 7 writers; W5 (PR 10) has its own table below. */
+type Pr7Writer = Exclude<ListingSettingsWriter, "W5">;
+
 describe("classifyWriteFailure", () => {
-  const writers: readonly ListingSettingsWriter[] = ["W1", "W2", "W3", "W4", "W9", "W10"];
+  const writers: readonly Pr7Writer[] = ["W1", "W2", "W3", "W4", "W9", "W10"];
 
   it("treats a dropped connection as unconfirmed for every writer", () => {
     for (const writer of writers) {
@@ -351,7 +370,7 @@ describe("classifyWriteFailure", () => {
   });
 
   it("gives every writer the same too-many-saves words on a 429", () => {
-    const codes: Record<ListingSettingsWriter, string> = {
+    const codes: Record<Pr7Writer, string> = {
       W1: "DROPSHIP_PRICING_RATE_LIMITED", W2: "DROPSHIP_EBAY_LISTING_SETUP_RATE_LIMITED", W10: "DROPSHIP_EBAY_LISTING_SETUP_RATE_LIMITED",
       W3: "DROPSHIP_EBAY_CATEGORY_RATE_LIMITED", W4: "DROPSHIP_CONTENT_RATE_LIMITED", W9: "DROPSHIP_LISTING_PRICE_RATE_LIMITED",
     };
@@ -363,7 +382,7 @@ describe("classifyWriteFailure", () => {
   });
 
   /** [status, code, phase, words or null for the server's message] per writer, from each writer's routes. */
-  const TABLE: Record<ListingSettingsWriter, ReadonlyArray<readonly [number, string | null, WriteFailurePhase, string | null]>> = {
+  const TABLE: Record<Pr7Writer, ReadonlyArray<readonly [number, string | null, WriteFailurePhase, string | null]>> = {
     W1: [
       [500, "DROPSHIP_PRICING_INTERNAL_ERROR", "uncertain", "We couldn't confirm your save."],
       [502, null, "uncertain", "We couldn't confirm your save."],
@@ -514,6 +533,94 @@ describe("classifyWriteFailure", () => {
         expect(message.length).toBeGreaterThan(0);
       }
     }
+  });
+});
+
+describe("classifyWriteFailure for W5 (PR 10, plan 3.3, D7)", () => {
+  const W5 = (status: number, code: string | null, context?: Record<string, unknown>, options?: ClassifyWriteFailureOptions) =>
+    classifyWriteFailure("W5", apiError(status, code, "Server words.", context), options);
+
+  it("splits a busy answer by its reason: nothing written, or maybe written (D7a)", () => {
+    expect(W5(503, "DROPSHIP_LISTING_SETTINGS_BUSY", { reason: "heavy_write_in_progress", retryAfterSeconds: 5 })).toEqual({
+      phase: "unreachable", message: LISTING_SETTINGS_EDIT_WORDS.busyHeavy, code: "DROPSHIP_LISTING_SETTINGS_BUSY", status: 503, fields: [],
+    });
+    expect(W5(503, "DROPSHIP_LISTING_SETTINGS_BUSY", { reason: "request_key_changed" })).toMatchObject({ phase: "unreachable", message: LISTING_SETTINGS_EDIT_WORDS.busyKeyChanged });
+    // A lost connection: the public context drops its `failure`, and a cut-off COMMIT may have saved.
+    expect(W5(503, "DROPSHIP_LISTING_SETTINGS_BUSY")).toMatchObject({ phase: "uncertain", message: "We couldn't confirm your save." });
+    expect(W5(503, "DROPSHIP_LISTING_SETTINGS_BUSY", { reason: 7 })).toMatchObject({ phase: "uncertain" });
+  });
+
+  it("makes the three fatal codes a final refusal that doesn't say nothing was saved (D7c)", () => {
+    for (const code of ["DROPSHIP_LISTING_SETTINGS_INVARIANT_FAILED", "DROPSHIP_LISTING_SETTINGS_REPLAY_INCOMPLETE", "DROPSHIP_LISTING_PRICE_INVARIANT_FAILED"]) {
+      expect(W5(500, code)).toEqual({ phase: "refused", message: LISTING_SETTINGS_EDIT_WORDS.fatal, code, status: 500, fields: [] });
+    }
+    expect(LISTING_SETTINGS_EDIT_WORDS.fatal).not.toMatch(/Nothing was saved/);
+    expect(W5(500, "DROPSHIP_LISTING_SETTINGS_INTERNAL_ERROR").phase).toBe("uncertain");
+  });
+
+  it("names the refused fields for a PR 9 writer only, so the PR 7 answers stay as they were", () => {
+    expect(W5(422, "DROPSHIP_EBAY_LISTING_SETUP_SELECTION_INVALID", { invalidFields: ["returnPolicy", 7, "returnPolicy"] }).fields).toEqual(["returnPolicy"]);
+    expect(W5(403, "DROPSHIP_LISTING_SETTINGS_EBAY_SIGN_IN_REQUIRED", { fields: ["shippingPolicy", "paymentPolicy"] }))
+      .toMatchObject({ phase: "blocked", fields: ["shippingPolicy", "paymentPolicy"] });
+    expect(W5(409, "DROPSHIP_EBAY_FULFILLMENT_RATE_TABLE_REQUIRED").fields).toEqual(["shippingPolicy"]);
+    expect(W5(422, "DROPSHIP_LISTING_SETTINGS_EBAY_ONLY").fields).toEqual([]);
+    expect(classifyWriteFailure("W5", new TypeError("Failed to fetch"))).toEqual({
+      phase: "uncertain", message: "We couldn't confirm your save.", code: null, status: null, fields: [],
+    });
+    for (const writer of ["W1", "W2", "W3", "W4", "W9", "W10"] as const) {
+      expect(classifyWriteFailure(writer, apiError(422, "X", "x", { invalidFields: ["a"] }))).not.toHaveProperty("fields");
+    }
+  });
+
+  it("names the store in a product's 404 (plan 4.7)", () => {
+    expect(W5(404, "DROPSHIP_LISTING_SETTINGS_PRODUCT_NOT_FOUND", undefined, { storeName: "Marz Cards" }).message)
+      .toBe("This product isn't chosen for Marz Cards. Choose it in step 1.");
+    expect(W5(404, "DROPSHIP_LISTING_SETTINGS_PRODUCT_NOT_FOUND").message).toBe("This product isn't chosen for your eBay store. Choose it in step 1.");
+  });
+});
+
+describe("failureAfterUnconfirmed (D7b)", () => {
+  const answer = (phase: WriteFailurePhase): WriteFailure => ({ phase, message: `words for ${phase}`, code: "C", status: 503, fields: [] });
+
+  it("keeps a Check again unconfirmed when the answer only says not now", () => {
+    expect(failureAfterUnconfirmed(true, answer("unreachable"))).toEqual({ ...answer("unreachable"), phase: "uncertain", message: LISTING_SETTINGS_EDIT_WORDS.stillUnconfirmed });
+    expect(failureAfterUnconfirmed(true, answer("rate_limited"))).toEqual({
+      ...answer("rate_limited"), phase: "uncertain", message: LISTING_SETTINGS_EDIT_WORDS.stillUnconfirmedRateLimited,
+    });
+    for (const words of [LISTING_SETTINGS_EDIT_WORDS.stillUnconfirmed, LISTING_SETTINGS_EDIT_WORDS.stillUnconfirmedRateLimited]) {
+      expect(words.startsWith("We couldn't confirm your save.")).toBe(true);
+      expect(words).not.toMatch(/Nothing was saved/);
+    }
+  });
+
+  it("leaves every other answer, and any answer to a first send, as it is", () => {
+    for (const phase of ["uncertain", "conflict", "refused", "blocked", "reload_required"] as const) {
+      expect(failureAfterUnconfirmed(true, answer(phase))).toEqual(answer(phase));
+    }
+    expect(failureAfterUnconfirmed(false, answer("unreachable"))).toEqual(answer("unreachable"));
+    expect(failureAfterUnconfirmed(false, answer("rate_limited"))).toEqual(answer("rate_limited"));
+  });
+
+  it("keeps a Check again unconfirmed when the write gate refuses it, before the replay probe; no other block", () => {
+    const block = (code: string | null): WriteFailure => ({ phase: "blocked", message: "Nothing was saved.", code, status: 403, fields: [] });
+    for (const code of [
+      "DROPSHIP_LISTING_VENDOR_BLOCKED", "DROPSHIP_LISTING_ENTITLEMENT_BLOCKED", "DROPSHIP_LISTING_STORE_BLOCKED",
+      "DROPSHIP_STORE_CONNECTION_REQUIRED", "DROPSHIP_LISTING_SETTINGS_EBAY_ONLY",
+    ]) {
+      expect(failureAfterUnconfirmed(true, block(code))).toEqual({ ...block(code), phase: "uncertain", message: LISTING_SETTINGS_SAVE_WORDS.uncertain });
+      expect(failureAfterUnconfirmed(false, block(code))).toEqual(block(code));
+    }
+    // eBay's checks run only for a key not used yet: their block shows the first send saved nothing.
+    for (const code of ["DROPSHIP_LISTING_SETTINGS_EBAY_SIGN_IN_REQUIRED", "DROPSHIP_EBAY_LISTING_SETUP_ACCESS_DENIED", "DROPSHIP_EBAY_FULFILLMENT_MARKETPLACE_UNSUPPORTED", null]) {
+      expect(failureAfterUnconfirmed(true, block(code))).toEqual(block(code));
+    }
+  });
+
+  it("keeps the request key, so the next Check again resends the same request", () => {
+    const sent = run([{ type: "failure", key: ATTEMPT.key, failure: failure("uncertain") }, startSave], savingDraft());
+    const still = run([{ type: "failure", key: ATTEMPT.key, failure: failureAfterUnconfirmed(true, answer("unreachable")) }], sent);
+    expect(still).toMatchObject({ phase: "uncertain", attempt: ATTEMPT });
+    expect(isDraftLocked(still)).toBe(true);
   });
 });
 

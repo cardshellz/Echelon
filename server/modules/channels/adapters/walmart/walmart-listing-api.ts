@@ -5,9 +5,9 @@ import { listingLifecycleSkuSchema } from "@shared/types/channel-listing-lifecyc
 import type { WalmartClient, WalmartResponseMetadata } from "./walmart-client";
 import { WalmartApiError } from "./walmart-client";
 import {
-  assertListingSetupZeroAdmission,
-  type ListingSetupZeroIntent,
-} from "../../../inventory-planning/application/listing-setup-zero-intent";
+  assertListingSetupAdmission,
+  type ListingSetupIntent,
+} from "../../../inventory-planning/application/listing-setup-intent";
 import { priceForWalmart } from "./walmart-listing-schema";
 import { normalizeWalmartListingTaxonomy } from "./walmart-listing-taxonomy";
 
@@ -18,6 +18,13 @@ export const WALMART_LISTING_SPEC = {
   MP_ITEM_MATCH: "5.0.20260607-22_38_54-api",
   MP_MAINTENANCE: "5.0.20260803-17_50_56-api",
 } as const;
+// Catalog search still returns 4.2 templates. We use them only to verify the
+// selling-unit match; outgoing offers use the pinned 5.x schema above.
+// https://developer.walmart.com/us-marketplace/docs/create-an-offer-for-an-existing-walmart-item
+const CATALOG_MATCH_TEMPLATE_VERSIONS = new Set<string>([
+  "4.2",
+  WALMART_LISTING_SPEC.MP_ITEM_MATCH,
+]);
 export type WalmartListingFeedType = "MP_ITEM" | "MP_ITEM_MATCH";
 export type WalmartItemSchemaFeedType = keyof typeof WALMART_LISTING_SPEC;
 export const walmartListingFeedTypeSchema = z.enum([
@@ -249,7 +256,14 @@ export class WalmartListingApi {
     );
     const match = parsed.items?.[0];
     if (!match) return null;
-    if (match.version !== WALMART_LISTING_SPEC[match.feedType]) {
+    const header = parse(
+      z.object({ MPItemFeedHeader: z.object({ version: z.string() }) }),
+      match.itemSpecPayload,
+    ).MPItemFeedHeader;
+    const supportedVersion = match.feedType === "MP_ITEM_MATCH"
+      ? CATALOG_MATCH_TEMPLATE_VERSIONS.has(match.version)
+      : match.version === WALMART_LISTING_SPEC[match.feedType];
+    if (!supportedVersion || header.version !== match.version) {
       throw new WalmartApiError(
         "WALMART_SPEC_VERSION_MISMATCH",
         "Walmart catalog matching uses a different specification version; refresh listing requirements",
@@ -267,11 +281,11 @@ export class WalmartListingApi {
     feedType: WalmartListingFeedType,
     payload: Record<string, unknown>,
     correlationId: string,
-    admission: Readonly<ListingSetupZeroIntent>,
+    admission: Readonly<ListingSetupIntent>,
   ): Promise<{ feedId: string; metadata: WalmartResponseMetadata }> {
     walmartListingFeedTypeSchema.parse(feedType);
     z.string().uuid().parse(correlationId);
-    assertListingSetupZeroAdmission(admission);
+    assertListingSetupAdmission(admission);
     const batch = z
       .object({ MPItem: z.array(z.record(z.unknown())).min(1).max(100) })
       .parse(payload);
@@ -290,7 +304,7 @@ export class WalmartListingApi {
             .array(
               z
                 .object({
-                  quantity: z.literal(0),
+                  quantity: z.number().int().min(0).max(2_147_483_647),
                   fulfillmentCenterID: z.literal(admission.shipNodeId),
                 })
                 .strict(),
@@ -300,7 +314,7 @@ export class WalmartListingApi {
         .parse(item[feedType === "MP_ITEM" ? "Orderable" : "Item"]);
       if (
         seen.has(offer.sku) ||
-        !admission.items.some((member) => member.sku === offer.sku)
+        !admission.items.some((member) => member.sku === offer.sku && member.quantity === offer.inventory[0].quantity)
       ) {
         throw new WalmartApiError(
           "WALMART_LISTING_ADMISSION_MISMATCH",

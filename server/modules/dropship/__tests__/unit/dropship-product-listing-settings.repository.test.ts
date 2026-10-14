@@ -12,7 +12,11 @@ import {
   type ProductListingSettingPatch,
   type ProductListingSettingValues,
 } from "../../../../../shared/dropship/listing-setting-values";
-import type { ProductListingSettingsBulkInput } from "../../application/dropship-listing-setting-writes";
+import type {
+  PriceChangeApplyBulkInput,
+  ProductListingSettingsBulkInput,
+  ProductListingSettingsBulkSaveInput,
+} from "../../application/dropship-listing-setting-writes";
 import { DropshipError } from "../../domain/errors";
 import { EMPTY_PRODUCT_LISTING_SETTING_VALUES, listingSettingChildKey } from "../../domain/listing-setting-values";
 import {
@@ -22,6 +26,7 @@ import {
   type ListingSettingWriteScope,
 } from "../../infrastructure/dropship-listing-setting-shared.repository";
 import {
+  MAX_BULK_REVISION_PAYLOAD_BYTES,
   readProductListingSettings,
   saveProductListingSettingWithClient,
   saveProductListingSettingsBulkWithClient,
@@ -44,8 +49,8 @@ const SCOPE: ListingSettingWriteScope = {
 const normalize = (sql: string) => sql.replace(/\s+/g, " ").trim();
 const VALUE_COLUMNS = PRODUCT_LISTING_SETTING_VALUE_COLUMNS.join(", ");
 const JSONB_COLUMNS = new Set(["ebay_category_path", "shelf_ids", "shelf_names"]);
-/** The bulk revision insert's payload bound (the writer's MAX_BULK_REVISION_PAYLOAD_BYTES). */
-const MAX_PAYLOAD_BYTES = 64 * 1024 * 1024;
+/** The bulk revision insert's payload bound, imported so the test cannot drift from the writer (plan PR 9, P9 (c)). */
+const MAX_PAYLOAD_BYTES = MAX_BULK_REVISION_PAYLOAD_BYTES;
 const REVISIONS_TABLE = "dropship.dropship_product_listing_setting_revisions";
 
 const SQL = {
@@ -239,8 +244,8 @@ function saveOne(client: ScriptedClient, patch: ProductListingSettingPatch, over
 function bulkInput(
   products: Array<{ productId: number; expectedRevisionId: number | null }>,
   patch: ProductListingSettingBulkPatch,
-  overrides: Partial<ProductListingSettingsBulkInput> = {},
-): ProductListingSettingsBulkInput {
+  overrides: Partial<ProductListingSettingsBulkSaveInput> = {},
+): ProductListingSettingsBulkSaveInput {
   return { operation: "product_settings_bulk", products, patch, requestHash: HASH, now: NOW, ...overrides };
 }
 
@@ -487,9 +492,9 @@ describe("saveProductListingSettingsBulkWithClient", () => {
     ["a price reset", bulkInput(products([3]), { price: null } as unknown as ProductListingSettingBulkPatch)],
     ["own main text", bulkInput(products([3]), { mainText: { text: "Words", catalogHash: CATALOG_HASH } } as unknown as ProductListingSettingBulkPatch)],
     ["an empty change", bulkInput(products([3]), {})],
-    ["an unknown operation", bulkInput(products([3]), { storeShelf: { mode: "none" } }, {
-      operation: "price_change_apply" as unknown as ProductListingSettingsBulkInput["operation"],
-    })],
+    // W7's apply needs the review it applies (plan P23): without one it is refused like any bad request.
+    ["a price apply with no review", { operation: "price_change_apply", products: products([3]), patch: { price: null },
+      requestHash: HASH, now: NOW } as unknown as ProductListingSettingsBulkInput],
   ])("refuses %s before any SQL", async (_label, input) => {
     const client = new ScriptedClient();
 
@@ -519,7 +524,7 @@ describe("saveProductListingSettingsBulkWithClient", () => {
     const error = await caught(saveProductListingSettingsBulkWithClient(asClient(new ScriptedClient()), SCOPE, bulkInput(
       products([3]),
       { storeShelf: { mode: "none" }, "secret vendor words": true } as unknown as ProductListingSettingBulkPatch,
-      { operation: "VENDOR-TYPED-TEXT" as unknown as ProductListingSettingsBulkInput["operation"] },
+      { operation: "VENDOR-TYPED-TEXT" as unknown as ProductListingSettingsBulkSaveInput["operation"] },
     )));
 
     expect(error.code).toBe("DROPSHIP_LISTING_SETTINGS_BULK_INVALID");
@@ -563,8 +568,9 @@ describe("saveProductListingSettingsBulkWithClient", () => {
     const revisions = client.callTo("INSERT INTO dropship.dropship_product_listing_setting_revisions");
     expect(revisions.sql).toBe(SQL.bulkRevisionInsert);
     expect(revisions.params.slice(0, 7)).toEqual([VENDOR, STORE, 900, HASH, "vendor", "member-1", NOW]);
-    // 10,000 products with short stored texts are far under the payload bound: one statement.
-    expect(Buffer.byteLength(String(revisions.params[7]), "utf8")).toBeLessThan(MAX_PAYLOAD_BYTES / 4);
+    // 10,000 products with short stored texts fit the 8 MiB payload bound: one statement (writtenTables above).
+    expect(MAX_PAYLOAD_BYTES).toBe(8 * 1024 * 1024);
+    expect(Buffer.byteLength(String(revisions.params[7]), "utf8")).toBeLessThanOrEqual(MAX_PAYLOAD_BYTES);
     const records = JSON.parse(String(revisions.params[7])) as Array<Record<string, unknown>>;
     expect(records).toHaveLength(9_000);
     expect(records.map((record) => record.product_id)).toEqual(ids.filter((id) => id % 10 !== 0));
@@ -612,7 +618,8 @@ describe("saveProductListingSettingsBulkWithClient", () => {
     const values = largestValues();
     // One stored-columns object shared by every row, so the test holds each long text once.
     const columns = storedColumns(values);
-    const ids = Array.from({ length: 1_500 }, (_, index) => index + 1);
+    // About 92 KB a record: 250 products are over twice the 8 MiB bound.
+    const ids = Array.from({ length: 250 }, (_, index) => index + 1);
     for (const id of ids) client.current.set(id, { product_id: id, revision_id: id + 100_000, ...columns, created_at: EARLIER });
 
     // "Also clear theirs" for one policy: every other stored value is copied into the new revisions.
@@ -835,5 +842,160 @@ describe("saveProductListingSettingsBulkWithClient", () => {
     expect(error.code).toBe("DROPSHIP_LISTING_SETTINGS_INVARIANT_FAILED");
     expect(error.context).toMatchObject({ expectedCount: 2, returnedCount: 1 });
     expect(client.calls.some((call) => call.sql.startsWith("INSERT INTO dropship.dropship_audit_events"))).toBe(false);
+  });
+});
+
+describe("saveProductListingSettingsBulkWithClient, W7's price apply (plan PR 9, P23, 9.7)", () => {
+  const REVIEW = "7d1b5e0a-3c4f-4a8b-9e2d-0f1a2b3c4d5e";
+  const RECIPE = { basis: "catalog_retail", markupBps: 2_000, flatCents: 0, rounding: "up_99" } as const;
+  const products = (ids: number[]) => ids.map((productId) => ({ productId, expectedRevisionId: null }));
+  const applyInput = (overrides: Partial<PriceChangeApplyBulkInput> = {}): PriceChangeApplyBulkInput => ({
+    operation: "price_change_apply", reviewId: REVIEW, products: products([3, 4]), patch: { price: RECIPE },
+    requestHash: HASH, now: NOW, ...overrides,
+  });
+  /** The apply-only insert: 0738's columns with the review id, the operation a literal. */
+  const APPLY_INSERT = normalize(`INSERT INTO dropship.dropship_product_listing_setting_requests
+    (vendor_id, store_connection_id, operation, review_id, idempotency_key, request_hash, product_count,
+    actor_type, actor_id, created_at)
+    VALUES ($1, $2, 'price_change_apply', $3, $4, $5, $6, $7, $8, $9)
+    RETURNING id`);
+
+  it("writes a price for the products through the apply-only ledger insert, never 0738's, with the review in each audit row", async () => {
+    const client = new ScriptedClient();
+    client.current.set(4, currentRow(4, 40, storedValues()));
+    const input = Object.freeze(applyInput({ products: Object.freeze([{ productId: 4, expectedRevisionId: 40 }, { productId: 3, expectedRevisionId: null }]) }));
+
+    const result = await saveProductListingSettingsBulkWithClient(asClient(client), SCOPE, input);
+
+    expect(client.writtenTables()).toEqual([
+      "dropship.dropship_product_listing_setting_requests", REVISIONS_TABLE,
+      "dropship.dropship_product_listing_settings", "dropship.dropship_audit_events",
+    ]);
+    const ledger = client.callTo("INSERT INTO dropship.dropship_product_listing_setting_requests");
+    expect(ledger.sql).toBe(APPLY_INSERT);
+    expect(ledger.params).toEqual([VENDOR, STORE, REVIEW, KEY, HASH, 2, "vendor", "member-1", NOW]);
+    // 0738's insert (operation as a parameter, no review id) is never sent.
+    expect(client.calls.filter((call) => call.sql.startsWith("INSERT INTO dropship.dropship_product_listing_setting_requests")))
+      .toHaveLength(1);
+    const records = JSON.parse(String(client.callTo(`INSERT INTO ${REVISIONS_TABLE}`).params[7])) as Array<Record<string, unknown>>;
+    expect(records.map((record) => [record.product_id, record.price_basis, record.price_markup_bps, record.price_rounding]))
+      .toEqual([[3, "catalog_retail", 2_000, "up_99"], [4, "catalog_retail", 2_000, "up_99"]]);
+    // A price-only apply copies every other stored value, texts included (what the text budget counts, plan 3.10 (b)).
+    expect(records[1]).toMatchObject({ text_above: "Ships in 1 day.", body_text: "Private vendor words.", shelf_mode: "own" });
+    const audits = JSON.parse(String(client.callTo("INSERT INTO dropship.dropship_audit_events").params[5])) as
+      Array<{ product_id: number; payload: Record<string, unknown> }>;
+    expect(audits.map((audit) => audit.payload)).toEqual([
+      expect.objectContaining({ requestKey: KEY, requestId: 900, operation: "price_change_apply", reviewId: REVIEW,
+        changedFields: ["price"], previousRevisionId: null, before: null, after: { price: RECIPE } }),
+      expect.objectContaining({ operation: "price_change_apply", reviewId: REVIEW, changedFields: ["price"], previousRevisionId: 40,
+        before: { price: storedValues().price }, after: { price: RECIPE } }),
+    ]);
+    // reviewId sits right after the operation, as the plan's correlation join reads it.
+    expect(Object.keys(audits[0].payload).slice(0, 4)).toEqual(["requestKey", "requestId", "operation", "reviewId"]);
+    expect(result).toMatchObject({ outcome: "changed", requestId: 900, unchangedProductIds: [] });
+    expect(input.products.map((product) => product.productId)).toEqual([4, 3]);
+  });
+
+  it("resets the products' price (Use default), and an apply that sets what is stored writes only its ledger row", async () => {
+    const reset = new ScriptedClient();
+    reset.current.set(4, currentRow(4, 40, storedValues()));
+    const changed = await saveProductListingSettingsBulkWithClient(asClient(reset), SCOPE,
+      applyInput({ products: [{ productId: 4, expectedRevisionId: 40 }], patch: { price: null } }));
+    expect(changed.outcome).toBe("changed");
+    const record = (JSON.parse(String(reset.callTo(`INSERT INTO ${REVISIONS_TABLE}`).params[7])) as Array<Record<string, unknown>>)[0];
+    expect([record.price_basis, record.price_markup_bps, record.price_flat_cents, record.price_rounding]).toEqual([null, null, null, null]);
+
+    const same = new ScriptedClient();
+    same.current.set(4, currentRow(4, 40, storedValues({ price: RECIPE })));
+    const unchanged = await saveProductListingSettingsBulkWithClient(asClient(same), SCOPE,
+      applyInput({ products: [{ productId: 4, expectedRevisionId: 40 }] }));
+    expect(unchanged).toEqual({ outcome: "unchanged", requestId: 900, changed: [], unchangedProductIds: [4] });
+    expect(same.writtenTables()).toEqual(["dropship.dropship_product_listing_setting_requests"]);
+    expect(same.callTo("INSERT INTO dropship.dropship_product_listing_setting_requests").params[5]).toBe(0);
+  });
+
+  it("writes the ledger row of an apply that names no product, with an empty patch (v2, C-money-4): no product read", async () => {
+    const client = new ScriptedClient();
+
+    const result = await saveProductListingSettingsBulkWithClient(asClient(client), SCOPE, applyInput({ products: [], patch: {} }));
+
+    expect(result).toEqual({ outcome: "unchanged", requestId: 900, changed: [], unchangedProductIds: [] });
+    // The replay read by key, then the apply-only insert: no current-row read for no products.
+    expect(client.calls.map((call) => call.sql.split(" ").slice(0, 4).join(" "))).toEqual([
+      "SELECT id, vendor_id, store_connection_id,", "INSERT INTO dropship.dropship_product_listing_setting_requests (vendor_id,",
+    ]);
+    expect(client.callTo("INSERT INTO dropship.dropship_product_listing_setting_requests").params).toEqual([
+      VENDOR, STORE, REVIEW, KEY, HASH, 0, "vendor", "member-1", NOW,
+    ]);
+  });
+
+  it("clears a category apply's settings on its products: the price and other settings, each only as a reset", async () => {
+    const client = new ScriptedClient();
+    client.current.set(4, currentRow(4, 40, storedValues()));
+
+    const result = await saveProductListingSettingsBulkWithClient(asClient(client), SCOPE, applyInput({
+      products: [{ productId: 4, expectedRevisionId: 40 }],
+      patch: { price: null, storeShelf: null, shippingPolicy: null, textAbove: null, mainText: null },
+    }));
+
+    expect(result.outcome).toBe("changed");
+    const record = (JSON.parse(String(client.callTo(`INSERT INTO ${REVISIONS_TABLE}`).params[7])) as Array<Record<string, unknown>>)[0];
+    expect(record).toMatchObject({ price_basis: null, shelf_mode: null, fulfillment_policy_id: null, text_above_mode: null, text_above: null,
+      body_text: null, return_policy_id: "6200000002", text_below_mode: "none" });
+  });
+
+  it.each<[string, Partial<PriceChangeApplyBulkInput>, Array<Record<string, unknown>>]>([
+    ["an empty patch with products", { patch: {} }, [{ path: "patch", code: "custom", message: "Change at least one setting." }]],
+    ["own main text", { patch: { mainText: { text: "Words", catalogHash: CATALOG_HASH } } },
+      [{ path: "patch.mainText", code: "custom", message: "Main text can only be reset for many products." }]],
+    ["a shelf set", { patch: { price: null, storeShelf: { mode: "none" } } },
+      [{ path: "patch.storeShelf", code: "custom", message: "A price change sets only prices; other settings can only be reset." }]],
+    ["own text above set", { patch: { textAbove: { mode: "own", text: "Words" } } },
+      [{ path: "patch.textAbove", code: "custom", message: "A price change sets only prices; other settings can only be reset." }]],
+    ["a review id that is not the server's (upper case)", { reviewId: REVIEW.toUpperCase() }, [{ path: "reviewId", code: "invalid_string" }]],
+    ["no review id", { reviewId: undefined as unknown as string }, [{ path: "reviewId", code: "invalid_type" }]],
+    ["10,001 products", { products: products(Array.from({ length: 10_001 }, (_, index) => index + 1)) },
+      [{ path: "products", code: "too_big" }]],
+    ["a product twice", { products: products([3, 4, 3]) }, [{ path: "products", code: "custom", message: "Each product once." }]],
+    ["an unknown setting", { patch: { price: null, "secret vendor words": true } as unknown as PriceChangeApplyBulkInput["patch"] },
+      [{ path: "patch", code: "unrecognized_keys" }]],
+  ])("refuses %s before any SQL, naming the field", async (_label, overrides, issues) => {
+    const client = new ScriptedClient();
+
+    const error = await caught(saveProductListingSettingsBulkWithClient(asClient(client), SCOPE, applyInput(overrides)));
+
+    expect(error.code).toBe("DROPSHIP_LISTING_SETTINGS_BULK_INVALID");
+    expect(error.context).toMatchObject({ issues, retryable: false, classification: "permanent" });
+    expect(JSON.stringify(error.context)).not.toMatch(/secret vendor words|Words/);
+    expect(client.calls).toEqual([]);
+  });
+
+  it("replays an apply from its ledger row without writing, and refuses another request under the key", async () => {
+    const client = new ScriptedClient();
+    client.ledger = ledgerRow({ operation: "price_change_apply", product_count: 1 });
+    client.replayRows = [{ product_id: 3, id: 501 }];
+
+    const replay = await saveProductListingSettingsBulkWithClient(asClient(client), SCOPE, applyInput());
+    expect(replay).toEqual({ outcome: "replayed", requestId: 900, changed: [{ productId: 3, revisionId: 501 }], unchangedProductIds: [4] });
+    expect(client.writes()).toEqual([]);
+
+    const other = new ScriptedClient();
+    other.ledger = ledgerRow({ operation: "price_change_apply", request_hash: OTHER_HASH });
+    const conflict = await caught(saveProductListingSettingsBulkWithClient(asClient(other), SCOPE, applyInput()));
+    expect(conflict).toMatchObject({ code: "DROPSHIP_IDEMPOTENCY_CONFLICT", context: { mismatched: ["requestHash"] } });
+    // A W6 request under the apply's key is a reuse of the key, never a replay.
+    const w6 = new ScriptedClient();
+    w6.ledger = ledgerRow({ operation: "product_settings_bulk" });
+    expect(await caught(saveProductListingSettingsBulkWithClient(asClient(w6), SCOPE, applyInput())))
+      .toMatchObject({ code: "DROPSHIP_IDEMPOTENCY_CONFLICT", context: { mismatched: ["operation"] } });
+  });
+
+  it("keeps W6's and W12's audit rows without a review id", async () => {
+    const client = new ScriptedClient();
+    await saveProductListingSettingsBulkWithClient(asClient(client), SCOPE, bulkInput(products([3]), { storeShelf: { mode: "none" } }));
+    const audits = JSON.parse(String(client.callTo("INSERT INTO dropship.dropship_audit_events").params[5])) as
+      Array<{ payload: Record<string, unknown> }>;
+    expect(audits[0].payload).not.toHaveProperty("reviewId");
+    expect(client.callTo("INSERT INTO dropship.dropship_product_listing_setting_requests").sql).not.toContain("review_id");
   });
 });

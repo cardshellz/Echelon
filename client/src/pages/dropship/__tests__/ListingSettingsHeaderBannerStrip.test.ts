@@ -202,15 +202,15 @@ const BANNERS: Readonly<Record<ConnectionBannerKind, BannerExpectation>> = {
   },
   other_site: { message: "Card Shellz lists on eBay US only. Marz Cards is set up for another eBay site. Contact support.", ...SUPPORT },
   selling_paused: {
-    message: "Selling is paused on your account. Prices, eBay categories and descriptions can't be changed until it resumes.",
+    message: "Selling is paused on your account. Prices, products and categories can't be changed until it resumes.",
     button: "Go to Wallet", href: "/dropship-portal/wallet",
   },
   ops_inactive: {
-    message: "Your Shellz Club .ops access is inactive, so prices, eBay categories and descriptions can't be changed. Contact support.",
+    message: "Your Shellz Club .ops access is inactive, so prices, products and categories can't be changed. Contact support.",
     ...SUPPORT,
   },
   sign_in: {
-    message: "eBay needs you to sign in again for Marz Cards. Your settings are safe. Until you do, you can still change prices and descriptions.",
+    message: "eBay needs you to sign in again for Marz Cards. You can still change prices, text and defaults.",
     button: "Reconnect eBay", href: "/dropship-portal/onboarding",
   },
   access_denied: { message: "eBay won't let Card Shellz read Marz Cards. Signing in again won't fix this. Contact support.", ...SUPPORT },

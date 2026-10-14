@@ -1,6 +1,6 @@
 import type { QuantityPublicationScope } from "../domain/quantity-publication-admission";
-import type { ListingSetupZeroIntent, ListingSetupZeroInspectionInput, ListingSetupZeroInspection } from "./listing-setup-zero-intent";
-export type { ListingSetupZeroIntent } from "./listing-setup-zero-intent";
+import type { ListingSetupIntent, ListingSetupInspectionInput, ListingSetupInspection } from "./listing-setup-intent";
+export type { ListingSetupIntent } from "./listing-setup-intent";
 
 export interface QuantityPublicationOutboxClaim {
   outboxId: string; activationRunId: string; publicationTargetId: number;
@@ -13,8 +13,8 @@ export interface QuantityPublicationOutboxClaim {
 
 /** No provider callback is ever accepted by a caller-owned transaction API. */
 export interface QuantityPublicationAdmission {
-  inspectListingSetupZero(input: ListingSetupZeroInspectionInput): Promise<ListingSetupZeroInspection>;
-  runListingSetupZero<T>(input: ListingSetupZeroIntent, work: (validated: Readonly<ListingSetupZeroIntent>) => Promise<T>): Promise<T>;
+  inspectListingSetup(input: ListingSetupInspectionInput): Promise<ListingSetupInspection>;
+  runListingSetup<T>(input: ListingSetupIntent, work: (validated: Readonly<ListingSetupIntent>) => Promise<T>): Promise<T>;
   run<T>(scope: QuantityPublicationScope, work: () => Promise<T>): Promise<T>;
   runListing<T>(scope: QuantityPublicationScope,
     resolveCurrentPlan: () => Promise<{ outboxId: string; quantity: number }>,

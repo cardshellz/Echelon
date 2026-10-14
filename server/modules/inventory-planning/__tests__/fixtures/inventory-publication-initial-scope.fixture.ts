@@ -13,7 +13,7 @@ export async function installInitialScopeFixture(pool: Pool, canonical = false):
   await pool.query(`UPDATE channels.channel_feeds SET channel_id=35,channel_inventory_item_id='test-item';
     CREATE TABLE dropship.dropship_vendor_listings(id bigint PRIMARY KEY,store_connection_id integer,product_variant_id integer,
       status text,external_listing_id text,external_offer_id text);
-    CREATE SCHEMA marketplace;
+    CREATE SCHEMA IF NOT EXISTS marketplace;
     CREATE TABLE marketplace.listing_scopes(id bigint PRIMARY KEY,owner_kind text,provider text);
     CREATE TABLE marketplace.channel_listing_scopes(scope_id bigint,channel_id integer);
     CREATE TABLE marketplace.dropship_listing_scopes(scope_id bigint,store_connection_id integer);

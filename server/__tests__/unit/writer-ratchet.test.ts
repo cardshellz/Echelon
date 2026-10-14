@@ -71,6 +71,13 @@ describe("writer-ratchet (P2.1)", () => {
     expect(currentIncludingScripts["channels.channel_product_identities"]).toEqual(["modules/channels"]);
     expect(baseline["channels.channel_product_identities"]).toEqual(["modules/channels"]);
   });
+  it.each(["marketplace.channel_listing_presence", "marketplace.channel_listing_presence_events"])(
+    "%s has only the Marketplace Listings owning writer", table => {
+      expect(current[table]).toEqual(["modules/marketplace-listings"]);
+      expect(currentIncludingScripts[table]).toEqual(["modules/marketplace-listings"]);
+      expect(baseline[table]).toEqual(["modules/marketplace-listings"]);
+    },
+  );
 
   it.each([
     ["oms.order_edit_events", "modules/order-edits"],

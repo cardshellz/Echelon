@@ -42,7 +42,7 @@ databaseTests.sequential("procurement policy real PostgreSQL command guarantees"
     await pool.query("CREATE UNIQUE INDEX warehouse_settings_code_test_uidx ON inventory.warehouse_settings(warehouse_code)");
     // Install production policy revision migration against the preceding shape.
     await pool.query("INSERT INTO inventory.warehouse_settings(warehouse_code) VALUES('DEFAULT'); ALTER TABLE inventory.warehouse_settings DROP COLUMN IF EXISTS procurement_policy_revision");
-    for (const file of ["0107_audit_events.sql", "136_financial_command_results.sql", "140_financial_command_operations.sql", "262_procurement_policy_revision.sql"]) {
+    for (const file of ["0107_audit_events.sql", "136_financial_command_results.sql", "140_financial_command_operations.sql", "900000003000017710001_procurement_policy_revision.sql"]) {
       await pool.query(readFileSync(resolve(process.cwd(), "migrations", file), "utf8"));
     }
     database = drizzle(pool, { schema });

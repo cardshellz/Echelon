@@ -9,7 +9,7 @@ This release closes cancellation permission aliases and replaces the per-key pro
 - The PATCH request needs `Idempotency-Key` and either `{key,value,expectedRevision}` or `{updates:[{key,value}],expectedRevision}`. Retrying an uncertain result must retain the exact key and body. Reusing a key with different input is rejected. A stale revision requires a fresh read and a newly reviewed command.
 - Purchasing decisions read the same DEFAULT policy. Missing DEFAULT, a warehouse assignment on DEFAULT, or invalid stored values produce a configuration error; they do not select another warehouse or invent approval defaults.
 - Generic warehouse writes reject procurement fields and the policy revision. DEFAULT cannot be renamed, assigned to a warehouse, deleted, or replaced by renaming another row. Ordinary warehouse settings remain editable.
-- Migration `262_procurement_policy_revision.sql` adds the nonnegative revision and protects `procurement.settings.updated` audit records against UPDATE and DELETE. Once this history exists, TRUNCATE of the entire audit table is rejected because TRUNCATE cannot preserve selected rows. Unrelated audit rows retain their existing UPDATE/DELETE behavior. Database-owner privileges can disable triggers; these are application-write protections, not a claim of protection from a database administrator.
+- Migration `900000003000017710001_procurement_policy_revision.sql` adds the nonnegative revision and protects `procurement.settings.updated` audit records against UPDATE and DELETE. Once this history exists, TRUNCATE of the entire audit table is rejected because TRUNCATE cannot preserve selected rows. Unrelated audit rows retain their existing UPDATE/DELETE behavior. Database-owner privileges can disable triggers; these are application-write protections, not a claim of protection from a database administrator.
 
 ## Deployment and verification
 
@@ -23,7 +23,7 @@ This release closes cancellation permission aliases and replaces the per-key pro
    FROM inventory.warehouse_settings WHERE warehouse_code = 'DEFAULT';
    ```
 
-2. Use the normal migration owner to apply migration262 before the matching application. The migration preserves all existing policy values and initializes revisions to zero. Drain old application instances before permitting policy edits; old code lacks the new command contract and generic-write guard.
+2. Use the normal migration owner to apply `900000003000017710001_procurement_policy_revision.sql` before the matching application. The migration preserves all existing policy values and initializes revisions to zero. Drain old application instances before permitting policy edits; old code lacks the new command contract and generic-write guard.
 3. Confirm GET `/api/settings/procurement` returns all ten booleans and a nonnegative `revision`. A purchasing viewer may read; a settings editor may edit. Existing `inventory:adjust` alone no longer grants policy-edit authority.
 4. Validate migration, permission revocation, concurrent edits, audit rollback/immutability, cancellation aliases and ordinary warehouse compatibility in the disposable PostgreSQL suites listed in `scripts/ci/postgres-test-manifest.ts`. Browser fixtures cover desktop/mobile permission display and uncertain response recovery. These fixtures do not prove production acceptance.
 5. For a deployment rollback, preserve the revision and audit history. Do not drop the guards or erase command results to restore legacy editing. Restore compatible application code and investigate the recorded error instead.

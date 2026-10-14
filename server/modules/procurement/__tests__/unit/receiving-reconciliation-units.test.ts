@@ -46,6 +46,14 @@ describe("PO receipt reconciliation frozen counts", () => {
       expect(test.recalculateTotals).not.toHaveBeenCalled();
     });
 
+  it("does not rewrite purchase totals or timestamps when the original receipt already exists", async () => {
+    const test = harness();
+    test.storage.reconcilePoReceiptLine.mockImplementation(async () => ({ applied: false, receipt: { id: 9 } }));
+    expect(await test.run()).toMatchObject({ appliedLines: 0, existingReceiptLines: 1, issues: [] });
+    expect(test.recalculateTotals).not.toHaveBeenCalled();
+    expect(test.storage.updatePurchaseOrderStatusWithHistory).not.toHaveBeenCalled();
+  });
+
   it("preserves an explicitly recorded zero damaged count", async () => {
     const test = harness({ receivedQty: 2, damagedQty: 0 });
     await test.run({ damagedQty: 0 });

@@ -2,7 +2,7 @@ import { sql, type SQL } from "drizzle-orm";
 import { allocateReturnCosts } from "../infrastructure/return-cost-allocation.repository";
 import { lockInventoryCostGraph, recordLotCostContribution } from "../infrastructure/cost-evidence.repository";
 import { recordLotCostFollowUp } from "../infrastructure/lot-cost-follow-up.repository";
-import { roundedMillsToCents, moneyToSafeNumber } from "../domain/lot-cost";
+import { roundedMillsToCents, moneyToSafeNumber, unitCostMirrorsFromTotals } from "../domain/lot-cost";
 import { canonicalJson } from "@shared/utils/canonical-json";
 import { openOperationalQuantityPosting } from "../infrastructure/operational-quantity-posting";
 
@@ -175,6 +175,7 @@ export async function applyReturnedStock(executor: ReturnRestockExecutor, input:
   const layers = await allocateReturnCosts(costTx,{
     wmsOrderId: input.wmsOrderId,wmsOrderItemId: input.wmsOrderItemId,
     productVariantId: input.productVariantId,quantity: input.quantity,
+    actor:input.actor,now:input.now,
   });
   const inventoryLotIds: number[] = [];
   const inventoryTransactionIds: number[] = [];
@@ -184,10 +185,11 @@ export async function applyReturnedStock(executor: ReturnRestockExecutor, input:
     // Existing numeric columns are compatibility mirrors when financial evidence
     // is unknown. The authoritative return allocation stores a null price and an
     // explicit unknown state; zero is never certified as a known cost in that case.
-    const totalMills = layer.costs?.totalMills ?? BigInt(0);
-    const poMills = layer.costs?.poMills ?? BigInt(0);
-    const packagingMills = layer.costs?.packagingMills ?? BigInt(0);
-    const landedMills = layer.costs?.landedMills ?? BigInt(0);
+    const mirrors=layer.exactTotals ? unitCostMirrorsFromTotals(layer.exactTotals,layer.quantity) : layer.costs;
+    const totalMills = mirrors?.totalMills ?? BigInt(0);
+    const poMills = mirrors?.poMills ?? BigInt(0);
+    const packagingMills = mirrors?.packagingMills ?? BigInt(0);
+    const landedMills = mirrors?.landedMills ?? BigInt(0);
     const cents = moneyToSafeNumber(roundedMillsToCents(totalMills),"return.unitCostCents");
     const lotNumber = layers.length === 1 ? input.lotNumberPrefix
       : `${input.lotNumberPrefix.slice(0,40)}-L${index+1}`;
@@ -196,13 +198,16 @@ export async function applyReturnedStock(executor: ReturnRestockExecutor, input:
         lot_number,product_variant_id,warehouse_location_id,unit_cost_cents,po_unit_cost_cents,
         packaging_cost_cents,landed_cost_cents,total_unit_cost_cents,unit_cost_mills,po_unit_cost_mills,
         packaging_cost_mills,landed_cost_mills,total_unit_cost_mills,qty_on_hand,qty_reserved,qty_picked,
-        qty_received,qty_consumed,received_at,status,cost_provisional,cost_source,notes,created_at,cost_precision_version
+        qty_received,qty_consumed,received_at,status,cost_provisional,cost_source,notes,created_at,cost_precision_version,
+        cost_basis_qty,product_total_cost_mills,packaging_total_cost_mills,landed_total_cost_mills
       ) VALUES (${lotNumber},${input.productVariantId},${input.warehouseLocationId},${cents},
         ${roundedMillsToCents(poMills).toString()},${roundedMillsToCents(packagingMills).toString()},${roundedMillsToCents(landedMills).toString()},${cents},
         ${totalMills.toString()},${poMills.toString()},${packagingMills.toString()},${landedMills.toString()},${totalMills.toString()},
         ${quantityPosting ? 0 : layer.quantity},0,0,${layer.quantity},0,${input.now},'active',
         ${layer.evidenceState === "confirmed" ? 0 : 1},${layer.sourceOrderItemCostId !== null ? "order_cogs" : layer.costs ? "return_estimate" : "unresolved"},
-        ${input.notes},${input.now},${layer.costs === null ? 0 : 1}) RETURNING id
+        ${input.notes},${input.now},${layer.costs === null ? 0 : 1},${layer.exactTotals?layer.quantity:null},
+        ${layer.exactTotals?.poMills.toString()??null}::bigint,${layer.exactTotals?.packagingMills.toString()??null}::bigint,
+        ${layer.exactTotals?.landedMills.toString()??null}::bigint) RETURNING id
     `));
     if (!lot) throw integrity("RETURN_RESTOCK_LOT_INSERT_FAILED","Return inventory lot was not created.",input);
     const inventoryLotId = readPositiveInteger(lot.id,"return inventory lot id");
@@ -214,6 +219,7 @@ export async function applyReturnedStock(executor: ReturnRestockExecutor, input:
         ${input.productVariantId},${layer.quantity},${layer.evidenceState},${canonicalJson(layer.sourceEvidence)}::jsonb,${input.actor},${input.now})`);
     if (layer.sourceLotId !== null) await recordLotCostContribution(costTx,{
       sourceLotId: layer.sourceLotId,outputLotId: inventoryLotId,sourceQty: layer.quantity,outputQty: layer.quantity,
+      costQuantityAllocationId:layer.costQuantityAllocationId,
       operationKind: "return",operationKey: input.operationKey,
     },input.actor,input.now);
     if (layer.evidenceState !== "confirmed") await recordLotCostFollowUp(costTx,{

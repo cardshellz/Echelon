@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { allocateIntegerCostInterval } from "@shared/utils/integer-cost-interval";
 import {
   costApplicationEvidenceSchema,
   costComponentAmountsSchema,
@@ -92,9 +93,7 @@ export function allocateCostByBasePieceInterval(input: CostBasePieceInterval): C
       basePieces: parsed.basePieces,
     });
   }
-  const magnitude = total < ZERO ? -total : total;
-  const allocatedMagnitude = magnitude * end / denominator - magnitude * start / denominator;
-  const allocated = total < ZERO ? -allocatedMagnitude : allocatedMagnitude;
+  const allocated = allocateIntegerCostInterval(total, denominator, start, quantity);
   const numerator = total * quantity;
   return {
     allocatedMills: toSafeInteger(allocated, "allocatedMills"),

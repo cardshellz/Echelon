@@ -1,0 +1,185 @@
+import pg from "pg";
+import { readFileSync } from "node:fs";
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import * as schema from "@shared/schema";
+import { fixtureForeignKeys, fixtureTable, qualifiedTable } from "./shipment-line-fixture";
+
+// Regression fixture: actual participating columns/FKs, unique indexes and financial triggers.
+// Unrelated user/WMS tables and the full production migration chain are outside this fixture.
+// Actual SQL and application owners; only the module-global DB transport is redirected.
+const url = process.env.ECHELON_TEST_DATABASE_URL;
+const databaseTests = url && process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true" ? describe : describe.skip;
+const tables = [schema.vendors, schema.inboundShipments, schema.purchaseOrders, schema.purchaseOrderLines,
+  schema.vendorInvoices, schema.vendorInvoiceLines, schema.vendorInvoicePoLinks, schema.inboundFreightCosts,
+  schema.apPayments, schema.apPaymentAllocations, schema.poStatusHistory, schema.vendorInvoiceAttachments];
+databaseTests.sequential("AP financial safeguards with actual0620 and status constraint (real PostgreSQL)", () => {
+  let pool: pg.Pool; let modulePool: pg.Pool; let db: any;
+  let service: typeof import("../../ap-ledger.service");
+  let ownsSchema = false;
+  const actor = "review-ap-unhappy-path";
+  beforeAll(async () => {
+    if (!url || !["localhost", "127.0.0.1"].includes(new URL(url).hostname)
+      || [process.env.DATABASE_URL, process.env.EXTERNAL_DATABASE_URL].filter(Boolean).includes(url)) {
+      throw new Error("Probe requires a separate explicitly disposable local database");
+    }
+    pool = new pg.Pool({ connectionString: url, ssl: false, max: 6, statement_timeout: 10000 });
+    await pool.query("CREATE SCHEMA procurement"); ownsSchema = true;
+    for (const table of tables) await pool.query(fixtureTable(table));
+    for (const statement of fixtureForeignKeys(tables)) await pool.query(statement);
+    await pool.query(fixtureTable(schema.auditEvents));
+    // Relevant actual constraints (schema's status columns have no enum/check).
+    await pool.query(`
+      CREATE UNIQUE INDEX vendor_invoices_vendor_invoice_idx ON procurement.vendor_invoices(vendor_id,invoice_number);
+      ALTER TABLE procurement.vendor_invoices ADD CHECK(currency='USD');
+      ALTER TABLE procurement.ap_payments ADD CHECK(currency='USD');
+      CREATE UNIQUE INDEX ap_payments_payment_number_active_uidx ON procurement.ap_payments(payment_number) WHERE voided_at IS NULL;
+      CREATE UNIQUE INDEX ap_payment_allocations_pay_inv_idx ON procurement.ap_payment_allocations(ap_payment_id,vendor_invoice_id);
+      CREATE UNIQUE INDEX vendor_invoice_po_links_inv_po_idx ON procurement.vendor_invoice_po_links(vendor_invoice_id,purchase_order_id)`);
+    await pool.query(readFileSync("migrations/0620_vendor_invoice_unit_cost_mills_repair.sql", "utf8"));
+    await pool.query(readFileSync("migrations/900000001000017780001_ap_payment_completed_status_guard.sql", "utf8"));
+    const guards = (await pool.query("SELECT count(*)::int AS count FROM pg_trigger WHERE tgrelid='procurement.vendor_invoice_lines'::regclass AND NOT tgisinternal AND tgenabled='O' AND tgname IN ('vendor_invoice_lines_require_mills_on_insert','vendor_invoice_lines_require_mills_on_financial_update')")).rows[0].count;
+    expect(guards).toBe(2);
+    if (process.env.DATABASE_URL || process.env.EXTERNAL_DATABASE_URL) throw new Error("Unexpected application database URL in probe process");
+    const dbModule = await import("../../../../db");
+    modulePool = dbModule.pool; db = dbModule.db;
+    modulePool.query = pool.query.bind(pool) as any;
+    modulePool.connect = pool.connect.bind(pool) as any;
+    service = await import("../../ap-ledger.service");
+  });
+  beforeEach(async () => {
+    await pool.query(`TRUNCATE ${tables.map(qualifiedTable).join(",")} RESTART IDENTITY CASCADE`);
+    await pool.query("TRUNCATE public.audit_events RESTART IDENTITY");
+    await pool.query(`INSERT INTO procurement.vendors(id,code,name) VALUES(5,'AP-PROBE','Synthetic vendor');
+      INSERT INTO procurement.inbound_shipments(id,shipment_number,status) VALUES(9,'AP-PROBE-SHIP','costing');
+      INSERT INTO procurement.vendor_invoices(id,invoice_number,vendor_id,status,invoiced_amount_cents,balance_cents,due_date)
+        VALUES(71,'AP-PROBE-INV',5,'approved',10000,10000,'2026-09-01')`);
+  });
+  afterAll(async () => {
+    if (ownsSchema) { await pool.query("DROP SCHEMA procurement CASCADE"); await pool.query("DROP TABLE public.audit_events"); }
+    await pool?.end(); await modulePool?.end();
+  });
+  const pay = (amount: number, status = "completed") => db.transaction((tx: any) =>
+    service.executeApPaymentCommandInTransaction("record_payment", { userId: actor, payment: {
+      vendorId: 5, paymentDate: new Date("2026-10-13T12:00:00Z"), paymentMethod: "ach",
+      totalAmountCents: amount, status, allocations: [{ vendorInvoiceId: 71, appliedAmountCents: amount }], createdBy: actor,
+    } }, tx));
+  const invoiceCommand = (command: "dispute_invoice" | "void_invoice" | "approve_invoice") => db.transaction((tx: any) =>
+    service.executeApInvoiceCommandInTransaction(command, { invoiceId: 71, userId: actor, reason: "Synthetic review reason" }, tx));
+  const invoice = async () => (await pool.query("SELECT status,invoiced_amount_cents,paid_amount_cents,balance_cents FROM procurement.vendor_invoices WHERE id=71")).rows[0];
+
+  async function unrecognized() {
+    await pool.query("UPDATE procurement.vendor_invoices SET status='received',approved_at=NULL,approved_by=NULL WHERE id=71");
+  }
+  async function recognizedDispute() {
+    await unrecognized();
+    await invoiceCommand("approve_invoice");
+    await invoiceCommand("dispute_invoice");
+  }
+  async function lineAndLinks() {
+    await pool.query(`INSERT INTO procurement.purchase_orders(id,po_number,vendor_id,status,total_cents) VALUES(10,'PO-A',5,'received',10000);
+      INSERT INTO procurement.vendor_invoice_po_links(vendor_invoice_id,purchase_order_id) VALUES(71,10);
+      INSERT INTO procurement.inbound_freight_costs(id,inbound_shipment_id,cost_type,vendor_id,actual_cents,vendor_invoice_id,cost_status) VALUES(81,9,'freight',5,10000,71,'invoiced');
+      INSERT INTO procurement.vendor_invoice_lines(id,vendor_invoice_id,line_number,qty_invoiced,unit_cost_cents,unit_cost_mills,line_total_cents) VALUES(72,71,1,1,10000,1000000,10000)`);
+  }
+  const historyRejection = { statusCode: 409, details: { code: "AP_INVOICE_FINANCIAL_HISTORY" } };
+
+  it.each(["returned", "scheduled", "arbitrary_status", "voided"])("rejects new %s payment atomically", async status => {
+    await expect(pay(10000, status)).rejects.toMatchObject({ statusCode: 400, details: { code: "AP_PAYMENT_STATUS_INVALID" } });
+    expect(await invoice()).toMatchObject({ paid_amount_cents: "0", balance_cents: "10000" });
+    expect((await pool.query("SELECT count(*)::int AS count FROM procurement.ap_payments")).rows[0].count).toBe(0);
+    expect((await pool.query("SELECT count(*)::int AS count FROM public.audit_events")).rows[0].count).toBe(0);
+  });
+  it("keeps completed settlement and dashboard totals consistent", async () => {
+    await pool.query(`INSERT INTO procurement.purchase_orders(id,po_number,vendor_id,status,total_cents) VALUES(10,'PO-A',5,'received',10000);
+      INSERT INTO procurement.vendor_invoice_po_links(vendor_invoice_id,purchase_order_id) VALUES(71,10)`);
+    await pay(8000);
+    expect(await invoice()).toMatchObject({ status: "partially_paid", paid_amount_cents: "8000", balance_cents: "2000" });
+    expect(await service.getApSummary({ now: new Date("2026-10-13T12:00:00Z") })).toMatchObject({ paidAllTimeCents: 8000, paidThisMonthCents: 8000, totalOutstandingCents: 2000 });
+    expect(await service.getPaymentsForPo(10)).toEqual([expect.objectContaining({ appliedAmountCents: 8000, paymentStatus: "completed" })]);
+  });
+  it("rejects header reduction after payment and dispute without changing balances or adding mutation audit", async () => {
+    await pay(8000); await invoiceCommand("dispute_invoice");
+    await expect(service.updateInvoice(71, { invoicedAmountCents: 5000 }, actor)).rejects.toMatchObject(historyRejection);
+    expect(await invoice()).toEqual({ status: "disputed", invoiced_amount_cents: "10000", paid_amount_cents: "8000", balance_cents: "2000" });
+    expect((await pool.query("SELECT count(*)::int AS count FROM public.audit_events WHERE action='ap_ledger.invoice_updated'")).rows[0].count).toBe(0);
+  });
+  it("rejects removal of the last valid-mills line after payment and dispute", async () => {
+    await pool.query("INSERT INTO procurement.vendor_invoice_lines(id,vendor_invoice_id,line_number,qty_invoiced,unit_cost_cents,unit_cost_mills,line_total_cents) VALUES(72,71,1,1,10000,1000000,10000)");
+    await pay(8000); await invoiceCommand("dispute_invoice");
+    await expect(service.removeInvoiceLine(72, actor)).rejects.toMatchObject(historyRejection);
+    expect((await pool.query("SELECT line_total_cents FROM procurement.vendor_invoice_lines WHERE id=72")).rows[0].line_total_cents).toBe("10000");
+    expect((await invoice()).invoiced_amount_cents).toBe("10000");
+  });
+  it("approval evidence survives dispute and blocks every generic financial edit owner", async () => {
+    await recognizedDispute(); await lineAndLinks();
+    const operations = [
+      () => service.updateInvoice(71, { notes: "rewrite" }, actor),
+      () => service.addInvoiceLine(71, { qtyInvoiced: 1, unitCostMills: 10000 }, actor),
+      () => service.updateInvoiceLine(72, { description: "rewrite" }, actor),
+      () => service.removeInvoiceLine(72, actor),
+      () => service.linkPoToInvoice(71, 10, undefined, undefined, actor),
+      () => service.unlinkPoFromInvoice(71, 10, actor),
+      () => service.importLinesFromPO(71, 10, actor),
+      () => service.linkCostToInvoice(81, 71, actor),
+      () => service.unlinkCostFromInvoice(81, actor),
+    ];
+    for (const operation of operations) await expect(operation()).rejects.toMatchObject(historyRejection);
+    expect((await invoice()).invoiced_amount_cents).toBe("10000");
+    expect((await pool.query("SELECT count(*)::int AS count FROM procurement.vendor_invoice_po_links")).rows[0].count).toBe(1);
+    expect((await pool.query("SELECT vendor_invoice_id FROM procurement.inbound_freight_costs WHERE id=81")).rows[0].vendor_invoice_id).toBe(71);
+  });
+  it("voided payment allocations still lock generic editing even without approval markers", async () => {
+    const payment = await pay(8000);
+    await db.transaction((tx: any) => service.executeApPaymentCommandInTransaction("void_payment", { paymentId: payment.id, reason: "Synthetic reversal", userId: actor }, tx));
+    await invoiceCommand("dispute_invoice");
+    expect((await invoice()).paid_amount_cents).toBe("0");
+    await expect(service.updateInvoice(71, { invoicedAmountCents: 5000 }, actor)).rejects.toMatchObject(historyRejection);
+    expect(await service.getInvoiceById(71)).toMatchObject({ capabilities: { edit: { allowed: false, code: "AP_INVOICE_FINANCIAL_HISTORY" } }, paymentReviewRequired: false,
+      payments: [expect.objectContaining({ paymentStatus: "voided" })] });
+  });
+  it("unrecognized invoices remain editable before and after dispute", async () => {
+    await unrecognized();
+    expect(await service.getInvoiceById(71)).toMatchObject({ capabilities: { edit: { allowed: true, code: "AP_INVOICE_EDITABLE" } } });
+    await service.updateInvoice(71, { invoicedAmountCents: 9000 }, actor);
+    await invoiceCommand("dispute_invoice");
+    await service.updateInvoice(71, { invoicedAmountCents: 8000 }, actor);
+    expect(await invoice()).toMatchObject({ status: "disputed", invoiced_amount_cents: "8000", balance_cents: "8000" });
+  });
+  it("keeps disputed debt in outstanding, overdue, aging and explicit dispute totals", async () => {
+    await pay(3000); await invoiceCommand("dispute_invoice");
+    const summary = await service.getApSummary({ now: new Date("2026-10-13T12:00:00Z") });
+    expect(summary).toMatchObject({ totalOutstandingCents: 7000, openInvoiceCount: 1, overdueCents: 7000, disputedOutstandingCents: 7000, disputedInvoiceCount: 1 });
+    expect(summary.vendorAging[0].total).toBe(7000);
+    expect(summary.agingBuckets.days31_60).toBe(7000);
+  });
+  it("serializes payment, dispute and generic edit without erasing the obligation", async () => {
+    await unrecognized(); await invoiceCommand("approve_invoice");
+    const outcomes = await Promise.allSettled([pay(8000), invoiceCommand("dispute_invoice"), service.updateInvoice(71, { invoicedAmountCents: 5000 }, actor)]);
+    expect(outcomes[1].status).toBe("fulfilled");
+    expect(outcomes[2].status).toBe("rejected");
+    const current = await invoice();
+    expect(current.status).toBe("disputed");
+    expect(current.invoiced_amount_cents).toBe("10000");
+    const paid = (await pool.query("SELECT COALESCE(sum(a.applied_amount_cents),0)::text AS total FROM procurement.ap_payment_allocations a JOIN procurement.ap_payments p ON p.id=a.ap_payment_id WHERE p.status='completed'")).rows[0].total;
+    expect(current.paid_amount_cents).toBe(paid);
+    expect(BigInt(current.balance_cents)).toBe(BigInt(10000) - BigInt(paid));
+  });
+  it("actual NOT VALID constraint preserves legacy records while blocking new unsupported states", async () => {
+    await pool.query("ALTER TABLE procurement.ap_payments DROP CONSTRAINT ap_payments_recorded_status_check");
+    await pool.query(`INSERT INTO procurement.ap_payments(id,payment_number,vendor_id,payment_date,payment_method,total_amount_cents,status) VALUES(90,'LEGACY',5,'2026-10-01','ach',2000,'scheduled');
+      INSERT INTO procurement.ap_payment_allocations(ap_payment_id,vendor_invoice_id,applied_amount_cents) VALUES(90,71,2000);
+      UPDATE procurement.vendor_invoices SET paid_amount_cents=2000,balance_cents=8000,status='partially_paid' WHERE id=71`);
+    await pool.query(readFileSync("migrations/900000001000017780001_ap_payment_completed_status_guard.sql", "utf8"));
+    await expect(pool.query("INSERT INTO procurement.ap_payments(payment_number,vendor_id,payment_date,payment_method,total_amount_cents,status) VALUES('BAD',5,'2026-10-01','ach',1,'returned')")).rejects.toMatchObject({ code: "23514" });
+    await expect(pay(1000)).rejects.toMatchObject({ details: { code: "AP_PAYMENT_STATUS_REVIEW_REQUIRED" } });
+    await expect(service.voidPayment(90, "Synthetic change", actor)).rejects.toMatchObject({ details: { code: "AP_PAYMENT_STATUS_REVIEW_REQUIRED" } });
+    expect(await invoice()).toMatchObject({ paid_amount_cents: "2000", balance_cents: "8000" });
+    expect((await pool.query("SELECT status FROM procurement.ap_payments WHERE id=90")).rows[0].status).toBe("scheduled");
+    expect((await pool.query("SELECT count(*)::int AS count FROM procurement.ap_payments")).rows[0].count).toBe(1);
+    expect(await service.getInvoiceById(71)).toMatchObject({ capabilities: { edit: { allowed: false } }, paymentReviewRequired: true,
+      payments: [expect.objectContaining({ paymentStatus: "scheduled" })] });
+    await pool.query(`INSERT INTO procurement.purchase_orders(id,po_number,vendor_id,status,total_cents) VALUES(10,'PO-LEGACY',5,'received',10000);
+      INSERT INTO procurement.vendor_invoice_po_links(vendor_invoice_id,purchase_order_id) VALUES(71,10)`);
+    expect(await service.getPaymentsForPo(10)).toEqual([]);
+  });
+});

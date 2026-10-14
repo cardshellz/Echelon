@@ -8,6 +8,14 @@ import { WalmartListingApi } from "./walmart-listing-api";
 import { listingAccountSchema, type ListingAccount } from "@shared/types/channel-listing-publication";
 import type { ListingWriteGuard } from "../../../marketplace-listings/application/listing-lifecycle-ports";
 import { ListingPublicationError } from "../../../marketplace-listings/domain/listing-publication";
+import { channelCatalogItemSchema } from "@shared/types/channel-catalog";
+import type { ListingSetupIntent } from "../../../inventory-planning/application/listing-setup-intent";
+
+function listingControlError(error: unknown): unknown {
+  return error instanceof ListingPublicationError
+    ? new WalmartApiError(error.code, error.message, error.status >= 500, error.status)
+    : error;
+}
 
 export function walmartListingAccount(row: WalmartConnectionRecord): ListingAccount {
   return listingAccountSchema.parse({ channelId: row.channel_id, connectionId: row.connection_id,
@@ -36,13 +44,42 @@ export class WalmartChannelService {
     private readonly createListingApi: (credentials: z.infer<typeof walmartCredentialsSchema>) => WalmartListingApi
       = credentials => new WalmartListingApi(new WalmartClient(credentials)),
   ) {}
-  async withListingWrites<T>(account: ListingAccount, skus: readonly string[], work: () => Promise<T>): Promise<T> {
+  async withListingWrites<T>(account: ListingAccount, skus: readonly string[], work: () => Promise<T>, initialStock?: Readonly<ListingSetupIntent>): Promise<T> {
     if (!this.policy.listingWrites) throw new WalmartApiError("WALMART_LISTING_CONTROL_UNAVAILABLE", "Listing publication controls are unavailable. Retry after service configuration is restored.", true);
-    try { return await this.policy.listingWrites.withAllowed(account, skus, work); }
+    try { return await this.policy.listingWrites.withAllowed(account, skus, work, initialStock); }
     catch (error) {
-      if (error instanceof ListingPublicationError) throw new WalmartApiError(error.code, error.message, error.status >= 500, error.status);
-      throw error;
+      throw listingControlError(error);
     }
+  }
+  async assertListingNotStopped(account: ListingAccount, sku: string): Promise<void> {
+    if (!this.policy.listingWrites?.assertNotStopped) throw new WalmartApiError("WALMART_LISTING_CONTROL_UNAVAILABLE", "Listing controls are unavailable.", true);
+    try { await this.policy.listingWrites.assertNotStopped(account, sku); }
+    catch (error) { throw listingControlError(error); }
+  }
+  async withStockWrites<T>(account: ListingAccount, sku: string, quantity: number, work: () => Promise<T>): Promise<T> {
+    if (!this.policy.listingWrites?.withStockAllowed) throw new WalmartApiError("WALMART_LISTING_CONTROL_UNAVAILABLE", "Stock controls are unavailable.", true);
+    try { return await this.policy.listingWrites.withStockAllowed(account, sku, quantity, work); }
+    catch (error) { throw listingControlError(error); }
+  }
+  async observeListingPresence(account: ListingAccount, sku: string,
+    completing?: { operationId: string; externalProductId: string }) {
+    const guard = this.policy.listingWrites;
+    if (!guard?.observePresence) throw new WalmartApiError("WALMART_LISTING_CONTROL_UNAVAILABLE", "Listing checks are unavailable.", true);
+    const connection = await this.connection(account.channelId, account.connectionId);
+    if (connection.partner_id !== account.accountId || connection.environment !== account.environment || connection.ship_node_id !== account.scopeId)
+      throw new WalmartApiError("WALMART_ACCOUNT_CHANGED", "The Walmart account changed. Refresh before continuing.", false);
+    return guard.observePresence(account, sku, async () => {
+      try {
+        const item = channelCatalogItemSchema.parse(await this.api(connection).catalogItem(sku));
+        if (item.sku !== sku) throw new WalmartApiError("WALMART_ITEM_IDENTITY_CHANGED", "Walmart returned a different SKU.", false);
+        if (completing && (item.externalProductId !== completing.externalProductId || item.lifecycleStatus !== "ACTIVE" || item.publishedStatus !== "PUBLISHED"))
+          throw new WalmartApiError("WALMART_ITEM_NOT_PUBLISHED", "Wait for Walmart to publish the exact submitted item before confirming stock.", true);
+        return { sku, state: "present", externalProductId: item.externalProductId, checkedAt: this.now().toISOString() };
+      } catch (error) {
+        if (completing || !(error instanceof WalmartApiError) || error.status !== 404) throw error;
+        return { sku, state: "missing", externalProductId: null, checkedAt: this.now().toISOString() };
+      }
+    }, completing?.operationId);
   }
   async status(channelId: number) {
     const status = await this.repository.status(channelId);
