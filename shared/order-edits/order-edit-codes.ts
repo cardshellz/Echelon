@@ -9,7 +9,7 @@ export const orderEditCodeSchema = z
   .max(255)
   .refine(
     (value) => !/[\u0000-\u001f\u007f]/.test(value),
-    "Enter a valid coupon or rewards code.",
+    "Enter a valid discount code.",
   );
 export const orderEditRequestedCodesSchema = z
   .array(orderEditCodeSchema)
@@ -39,7 +39,7 @@ export const orderEditCodeValueSchema = z.discriminatedUnion("type", [
   orderEditDiscountValueSchema.options[1],
 ]);
 
-/** Server-verified issued terms; a browser never supplies amounts or permissions. */
+/** Shopify terms are read on the server; a browser never supplies amounts or permissions. */
 export const orderEditCodeRuleSchema = z
   .object({
     discountId: z
@@ -50,9 +50,24 @@ export const orderEditCodeRuleSchema = z
     combinesWith: orderEditCombinesWithSchema,
     value: orderEditCodeValueSchema,
     fingerprint: z.string().regex(/^[a-f0-9]{64}$/),
-    redemption: z.enum(["unlimited", "single_use_reward"]),
+    // The first two values only describe persisted operations from the legacy
+    // receipt integration. New coupon entry never infers a points reward from
+    // customer eligibility, a fixed amount, or a single-use restriction.
+    redemption: z.enum(["unlimited", "single_use_reward", "shopify_coupon"]),
+    usageLimit: z.number().int().positive().safe().nullable().optional(),
+    appliesOncePerCustomer: z.boolean().optional(),
   })
-  .strict();
+  .strict()
+  .superRefine((rule, context) => {
+    if (
+      rule.redemption === "shopify_coupon" &&
+      (rule.usageLimit === undefined || rule.appliesOncePerCustomer === undefined)
+    )
+      context.addIssue({
+        code: "custom",
+        message: "A Shopify coupon must retain its native usage restrictions.",
+      });
+  });
 
 export const orderEditCodeApplicationSchema = z
   .object({

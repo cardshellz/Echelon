@@ -157,6 +157,8 @@ async function installFixtures(
     soldOutCatalogProduct?: boolean;
     delayedCatalog?: { search: string; response: Promise<void> };
     includeSpecialProducts?: boolean;
+    codeEntryAvailable?: boolean;
+    codeRejection?: { code: string; message: string };
   } = {},
 ) {
   const failures: string[] = [];
@@ -281,7 +283,13 @@ async function installFixtures(
     }
     if (path === `${ORDER_EDIT_API}/orders/51`)
       return route.fulfill({
-        json: { ...order, activeOperationId: activeOperationId() },
+        json: {
+          ...order,
+          activeOperationId: activeOperationId(),
+          ...(options.codeEntryAvailable !== undefined
+            ? { codeEntryAvailable: options.codeEntryAvailable, appliedCodes: [] }
+            : {}),
+        },
       });
     if (path.startsWith(`${ORDER_EDIT_API}/catalog/`)) {
       expect(request.headers()[ORDER_EDIT_CATALOG_HEADER.toLowerCase()]).toBe(ORDER_EDIT_CATALOG_VERSION);
@@ -444,6 +452,11 @@ async function installFixtures(
     if (path === `${ORDER_EDIT_API}/previews`) {
       const input = orderEditPreviewInputSchema.parse(body);
       expect(key).toBeUndefined();
+      if (input.discountCodes?.length && options.codeRejection)
+        return route.fulfill({
+          status: 422,
+          json: { error: options.codeRejection },
+        });
       await options.previewResponse;
       if (options.rejectPreview)
         return route.fulfill({
@@ -656,6 +669,53 @@ async function addStorageBox(page: Page) {
     .getByRole("button", { name: "Add White · BOX-WHITE", exact: true })
     .click();
   await picker.getByRole("button", { name: "Done", exact: true }).click();
+}
+
+for (const rejection of [
+  {
+    code: "ORDER_EDIT_CODE_INELIGIBLE",
+    message:
+      "Shopify did not apply this code to your order. It may not qualify or combine with your existing discounts. Your order has not changed.",
+  },
+  {
+    code: "ORDER_EDIT_NATIVE_COUPON_REDEMPTION_UNAVAILABLE",
+    message:
+      "Shopify can calculate this discount, but this code cannot currently be redeemed on an existing order. Your order has not changed and the code has not been used.",
+  },
+]) {
+  test(`discount entry preserves the draft after ${rejection.code} without a points request`, async ({ page }) => {
+    const fixture = await installFixtures(page, {
+      codeEntryAvailable: true,
+      codeRejection: rejection,
+    });
+    await chooseOrder(page);
+    const field = page.getByRole("textbox", { name: "Discount code", exact: true });
+    await field.fill("SHELLZ_10");
+    await page.getByRole("button", { name: "Apply code", exact: true }).click();
+    await expect(page.getByRole("alert")).toContainText(rejection.message);
+    await expect(field).toHaveValue("SHELLZ_10");
+    expect(
+      fixture.requests.filter((request) =>
+        request.path.endsWith("/previews") &&
+        (request.body as { discountCodes?: string[] }).discountCodes?.includes("SHELLZ_10"),
+      ),
+    ).toHaveLength(1);
+    await expect(
+      page.getByRole("textbox", { name: "Coupon or rewards code", exact: true }),
+    ).toHaveCount(0);
+    await field.fill("");
+    await page.getByRole("spinbutton", {
+      name: "Quantity for Toploader Binder Pages Black · 1 Binder",
+    }).fill("3");
+    await expect(
+      page.getByRole("button", { name: "Review changes", exact: true }),
+    ).toBeEnabled();
+    expect(
+      fixture.requests.some((request) => /\/(quotes|commit|abandon)$/.test(request.path)),
+    ).toBe(false);
+    expect(fixture.failures).toEqual([]);
+    await assertFitsScreen(page);
+  });
 }
 
 for (const product of specialProducts) {

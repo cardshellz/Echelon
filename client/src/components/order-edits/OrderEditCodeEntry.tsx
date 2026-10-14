@@ -54,7 +54,7 @@ export function OrderEditCodeEntry({
   async function apply() {
     await run(async () => {
       const parsed = orderEditCodeSchema.safeParse(value);
-      if (!parsed.success) throw new Error("Enter a coupon or rewards code.");
+      if (!parsed.success) throw new Error("Enter a discount code.");
       const code = parsed.data.toUpperCase();
       if (codes.some((existing) => existing.toUpperCase() === code))
         throw new Error("This code has already been added.");
@@ -67,7 +67,7 @@ export function OrderEditCodeEntry({
   return (
     <section className="oe-code-entry" aria-labelledby={`${id}-label`}>
       <label id={`${id}-label`} htmlFor={id}>
-        Coupon or rewards code
+        Discount code
       </label>
       <div className="oe-code-entry-controls">
         <Input

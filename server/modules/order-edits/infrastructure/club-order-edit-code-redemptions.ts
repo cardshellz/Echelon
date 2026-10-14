@@ -2,7 +2,7 @@ import { z } from "zod";
 import type { OrderEditCodeRedemptions } from "../application/order-edit-code-redemptions";
 import { OrderEditProviderError } from "../application/order-edit-provider";
 
-/** Reuses the existing cross-service key. The Club app is the only rewards writer. */
+/** Finishes receipts created by the legacy integration; never validates new coupons. */
 export class ClubOrderEditCodeRedemptions implements OrderEditCodeRedemptions {
   constructor(
     private readonly baseUrl: string | undefined,
@@ -24,9 +24,6 @@ export class ClubOrderEditCodeRedemptions implements OrderEditCodeRedemptions {
     } catch {
       return false;
     }
-  }
-  validate(input: Parameters<OrderEditCodeRedemptions["validate"]>[0]) {
-    return this.request("validate", input);
   }
   reserve(id: string) {
     return this.command(id, "reserve");
@@ -87,10 +84,8 @@ export class ClubOrderEditCodeRedemptions implements OrderEditCodeRedemptions {
     }
     throw new OrderEditProviderError(
       "ORDER_EDIT_CODE_RESULT_UNCERTAIN",
-      path === "validate"
-        ? "We couldn't check this code right now. Please try again. Your order has not changed."
-        : "The code result could not be verified. Check this order before trying again.",
-      path === "validate" ? "rejected" : "unknown",
+      "The code result could not be verified. Check this order before trying again.",
+      "unknown",
     );
   }
 }
