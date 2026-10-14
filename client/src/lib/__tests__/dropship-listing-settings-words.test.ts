@@ -35,7 +35,12 @@ import {
   ownSettingsSentence,
   ownSettingsWords,
   fieldEditorLabel,
+  sizesDifferPickLabel,
+  descriptionPendingWords,
+  fromCategorySettingsWords,
   pendingSettingWords,
+  textLengthWords,
+  textTooLongWords,
   productNotFoundWords,
   productStatusWords,
   rightReasonLine,
@@ -373,7 +378,8 @@ describe("the product drawer (C16, C17)", () => {
     expect(drawerDescriptionTemplateValue({ hasIntroduction: false, hasFooter: false, groupConflict: true })).toBe("Two older rules tie, so no text is added");
     expect(drawerDescriptionTemplateValue({ hasIntroduction: true, hasFooter: false, groupConflict: false })).toBe("Card Shellz text, with your text above");
     expect(drawerMainTextValue({ own: false })).toBe("Main text: Card Shellz text");
-    expect(drawerMainTextValue({ own: true })).toBe("Main text: your own (set in step 3)");
+    // The drawer edits the main text from 10b, so it never says "set in step 3" (plan 5.7).
+    expect(drawerMainTextValue({ own: true })).toBe("Main text: your own");
   });
 
   it("names a product's own policy from its own read when eBay wasn't read, or doesn't have it (PR 10, G2)", () => {
@@ -444,13 +450,55 @@ describe("editing a product's own settings (PR 10 proposals, plan 12.2)", () => 
       defaultOnlyLine: "You can't pick a new one right now. You can still use the default.",
       finishEditorFirst: "Press Done or Cancel first.",
       cantBuild: "This change can't be saved as it is. Check it and save again.",
+      // 10b (plan 5.3-5.5, 12.2).
+      sizesDifferPick: "Sizes differ. Pick one for all sizes.",
+      useForAllSizes: "Use for all sizes",
+      useDefaultForAllSizes: "Use default for all sizes",
+      sizesDifferChange: "Sizes differ. Use Change to pick one for all sizes.",
+      useCardShellzText: "Use Card Shellz text",
+      keepMyText: "Keep my text",
+      ownTextCheck: "Card Shellz changed this product. Check your text still fits.",
+      textEmpty: "Enter the text, or choose None.",
+      mainTextEmpty: "Enter your text, or use the Card Shellz text.",
+      // 10b proposals beyond plan 12.2 (BUILD-NOTES).
+      none: "None",
+      ownText: "Own text",
+      textAbove: "Text above",
+      textBelow: "Text below",
+      mainText: "Main text",
+      textBadCharacters: "This text has characters that can't be saved. Paste it as plain text.",
+      ownShelves: "Own shelves",
+      pickShelf: "Pick a shelf",
+      clearShelf: "Clear this shelf",
+      // The review round's (review CE4).
+      descriptionConflictBoth: "Set both text above and text below, your own or None, to fix this.",
     });
     for (const words of Object.values(LISTING_SETTINGS_EDIT_WORDS)) expectPlain(words);
     expect(pendingSettingWords("Free Standard US")).toBe("→ Free Standard US · Not saved");
     expect(fieldEditorLabel("Shipping policy", "Penny Sleeves")).toBe("Shipping policy for Penny Sleeves");
     expect(fieldEditorLabel("Return policy", " ")).toBe("Return policy");
+    // A "Sizes differ" quick pick is read out with its value and the product (plan 3.4, 5.3).
+    expect(sizesDifferPickLabel("use_this", "USPS Priority Mail", "Penny Sleeves")).toBe("Use USPS Priority Mail for all sizes of Penny Sleeves");
+    expect(sizesDifferPickLabel("use_default", "USPS Ground Advantage", "Penny Sleeves")).toBe("Use default for all sizes of Penny Sleeves");
+    expect(sizesDifferPickLabel("use_this", " ", " ")).toBe("Use this for all sizes");
     expect(productNotFoundWords("Marz Cards")).toBe("This product isn't chosen for Marz Cards. Choose it in step 1.");
     expect(productNotFoundWords(" ")).toBe("This product isn't chosen for your eBay store. Choose it in step 1.");
+  });
+
+  it("words the text limits, counters and the description's pending change (plan 5.4, 5.5)", () => {
+    expect(textTooLongWords(4_000)).toBe("Shorten it to 4,000 characters or fewer.");
+    expect(textTooLongWords(20_000)).toBe("Shorten it to 20,000 characters or fewer.");
+    // The store default description's counter form (R:582).
+    expect(textLengthWords(12, 4_000)).toBe("12 / 4,000");
+    expect(textLengthWords(20_001, 20_000)).toBe("20,001 / 20,000");
+    expect(fromCategorySettingsWords(" Sleeves ")).toBe("From your Sleeves settings");
+    expect(descriptionPendingWords([])).toBeNull();
+    expect(descriptionPendingWords([{ part: "textAbove", to: "own" }])).toBe("→ Text above: your own · Not saved");
+    expect(descriptionPendingWords([{ part: "textBelow", to: "none" }, { part: "mainText", to: "default" }]))
+      .toBe("→ Text below: None, main text: Card Shellz text · Not saved");
+    expect(descriptionPendingWords([{ part: "textAbove", to: "default" }, { part: "mainText", to: "own" }]))
+      .toBe("→ Text above: Use default, main text: your own · Not saved");
+    for (const words of [textTooLongWords(4_000), descriptionPendingWords([{ part: "mainText", to: "own" }])]) expectPlain(words);
   });
 });
 

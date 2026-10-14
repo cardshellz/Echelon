@@ -1,7 +1,8 @@
 // This page distinguishes settings with runtime consumers from retained options.
 // Saved values remain readable even when their feature is unavailable.
-import React, { useRef } from "react";
-import { z } from "zod";
+import React, { useRef, useState } from "react";
+import { procurementSettingsSnapshotSchema as settingsSchema, type ProcurementSettingKey, type ProcurementSettings } from "@shared/procurement/procurement-settings";
+import { financialCommandFetchJson, FinancialCommandRequestError } from "@/lib/financial-command";
 import { useAuth } from "@/lib/auth";
 import { Button } from "@/components/ui/button";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
@@ -13,33 +14,7 @@ import { useToast } from "@/hooks/use-toast";
 import { Settings2 } from "lucide-react";
 import { Link } from "wouter";
 
-type ProcurementSettings = {
-  requireApproval: boolean;
-  autoSendOnApprove: boolean;
-  requireAcknowledgeBeforeReceive: boolean;
-  hideIncotermsDomestic: boolean;
-  enableShipmentTracking: boolean;
-  autoPutawayLocation: boolean;
-  autoCloseOnReconcile: boolean;
-  oneClickReceiveStart: boolean;
-  useNewPoEditor: boolean;
-  useNewReorderCockpit: boolean;
-};
-
-// Preserve additional server fields in the shared query cache while validating
-// every setting that this page displays. Never render a malformed value as off.
-const settingsSchema = z.object({
-  requireApproval: z.boolean(),
-  autoSendOnApprove: z.boolean(),
-  requireAcknowledgeBeforeReceive: z.boolean(),
-  hideIncotermsDomestic: z.boolean(),
-  enableShipmentTracking: z.boolean(),
-  autoPutawayLocation: z.boolean(),
-  autoCloseOnReconcile: z.boolean(),
-  oneClickReceiveStart: z.boolean(),
-  useNewPoEditor: z.boolean(),
-  useNewReorderCockpit: z.boolean(),
-}).passthrough();
+type SettingsIntent = { key: ProcurementSettingKey; value: boolean; expectedRevision: number; idempotencyKey: string };
 
 type SettingMeta = {
   key: keyof ProcurementSettings;
@@ -150,9 +125,10 @@ const CATEGORY_ORDER: SettingMeta["category"][] = [
 export default function ProcurementSettings() {
   const { toast } = useToast();
   const { hasPermission } = useAuth();
-  const canEdit = hasPermission("inventory", "adjust"); // Matches the existing PATCH route.
+  const canEdit = hasPermission("settings", "edit");
   const qc = useQueryClient();
   const pendingWrite = useRef(false);
+  const [unresolvedIntent, setUnresolvedIntent] = useState<SettingsIntent | null>(null);
 
   const query = useQuery({
     queryKey: ["/api/settings/procurement"],
@@ -168,26 +144,31 @@ export default function ProcurementSettings() {
   const loadFailed = query.isError || (query.data !== undefined && !parsedSettings.success);
 
   const patchMutation = useMutation({
-    mutationFn: async ({ key, value }: { key: keyof ProcurementSettings; value: boolean }) => {
+    mutationFn: async ({ key, value, expectedRevision, idempotencyKey }: SettingsIntent) => {
       await qc.cancelQueries({ queryKey: ["/api/settings/procurement"] });
-      const res = await fetch("/api/settings/procurement", {
+      const body = await financialCommandFetchJson<unknown>("/api/settings/procurement", {
         method: "PATCH",
         credentials: "include",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ key, value }),
+        headers: { "Content-Type": "application/json", "Idempotency-Key": idempotencyKey },
+        body: JSON.stringify({ key, value, expectedRevision }),
       });
-      const body: unknown = await res.json();
-      if (!res.ok) {
-        const message = typeof body === "object" && body !== null && "error" in body && typeof body.error === "string"
-          ? body.error : "Failed to update setting";
-        throw new Error(message);
+      const parsed = settingsSchema.safeParse(body);
+      if (!parsed.success) {
+        throw new FinancialCommandRequestError("The saved response was incomplete. Retry the saved change to recover its confirmed result.", {
+          status: 200, code: "PROCUREMENT_SETTINGS_RESPONSE_INVALID", retryable: true, ambiguous: true,
+        });
       }
-      return settingsSchema.parse(body);
+      return parsed.data;
     },
     onSuccess: (data) => {
+      setUnresolvedIntent(null);
       qc.setQueryData(["/api/settings/procurement"], data);
+      // A replay is the original result; another administrator may since have
+      // changed policy. Refresh before offering another edit.
+      void qc.invalidateQueries({ queryKey: ["/api/settings/procurement"] });
     },
-    onError: async (error: Error) => {
+    onError: async (error: Error, intent) => {
+      setUnresolvedIntent(error instanceof FinancialCommandRequestError && error.ambiguous ? intent : null);
       toast({ title: "Could not confirm setting change", description: error.message, variant: "destructive" });
       // A failed response might follow a committed write. Read saved state;
       // never leave an optimistic or guessed value displayed as confirmed.
@@ -198,9 +179,9 @@ export default function ProcurementSettings() {
 
   function onToggle(key: keyof ProcurementSettings, next: boolean) {
     const available = SETTING_META.find((meta) => meta.key === key)?.active === true;
-    if (!canEdit || !available || !settings || loadFailed || query.isFetching || pendingWrite.current) return;
+    if (!canEdit || !available || !settings || loadFailed || query.isFetching || pendingWrite.current || unresolvedIntent) return;
     pendingWrite.current = true;
-    patchMutation.mutate({ key, value: next });
+    patchMutation.mutate({ key, value: next, expectedRevision: settings.revision, idempotencyKey: crypto.randomUUID() });
   }
 
   return (
@@ -240,6 +221,16 @@ export default function ProcurementSettings() {
       )}
       {patchMutation.isPending && <p role="status" className="text-sm">Confirming saved setting…</p>}
       {patchMutation.isError && <p role="alert" className="text-sm text-destructive">The save was not confirmed. Review the current saved value before trying again.</p>}
+      {unresolvedIntent && (
+        <div className="rounded border p-3 text-sm space-y-2">
+          <p>A previous change has an uncertain outcome. Recover that result before making another change.</p>
+          <Button disabled={!canEdit || patchMutation.isPending} onClick={() => {
+            if (pendingWrite.current) return;
+            pendingWrite.current = true;
+            patchMutation.mutate(unresolvedIntent);
+          }}>Retry saved change</Button>
+        </div>
+      )}
 
       {settings && CATEGORY_ORDER.map((category) => {
         const items = SETTING_META.filter((meta) => meta.category === category);
@@ -265,7 +256,7 @@ export default function ProcurementSettings() {
                       <Switch
                         id={settingId}
                         checked={value}
-                        disabled={!meta.active || !canEdit || patchMutation.isPending || query.isFetching || loadFailed}
+                        disabled={!meta.active || !canEdit || patchMutation.isPending || query.isFetching || loadFailed || unresolvedIntent !== null}
                         onCheckedChange={(checked) => onToggle(meta.key, checked)}
                         aria-label={meta.label}
                         aria-describedby={`${settingId}-description${meta.active ? "" : ` ${settingId}-availability`}`}

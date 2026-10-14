@@ -19,6 +19,9 @@ vi.mock("../../po-email-outbox.service", () => ({
   PoEmailOutboxError: class extends Error { constructor(message: string, readonly statusCode: number, readonly code: string) { super(message); } },
 }));
 vi.mock("../../../../routes/middleware", () => ({
+  requireAnyPermission: () => (req: Request, _res: Response, next: NextFunction) => {
+    req.session = { user: { id: "document-reader" } } as typeof req.session; next();
+  },
   requirePermission: () => (req: Request, _res: Response, next: NextFunction) => {
     req.session = { user: { id: "document-reader" } } as typeof req.session; next();
   },

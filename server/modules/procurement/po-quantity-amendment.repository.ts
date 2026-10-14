@@ -7,7 +7,7 @@ import {
 } from "@shared/schema/procurement.schema";
 import { canonicalJson } from "@shared/utils/canonical-json";
 import { warehouseSettings } from "@shared/schema/inventory.schema";
-import { z } from "zod";
+import { readProcurementSettings } from "./procurement-settings.repository";
 import type { PurchaseApprovalSnapshot } from "./purchase-order-approval.policy";
 import { readPurchaseApprovalActor } from "../identity/infrastructure/purchase-approval-access.repository";
 import { lockInventoryCostGraph } from "../inventory/infrastructure/cost-evidence.repository";
@@ -43,16 +43,13 @@ export async function readQuantityAmendmentSource(tx: AmendmentTransaction, purc
   // Row locks do not cover newly inserted tiers or a new DEFAULT settings row.
   // Freeze policy creation as well as edits until this short command finishes.
   await tx.execute(sql`LOCK TABLE ${warehouseSettings}, ${poApprovalTiers} IN SHARE MODE`);
-  const settingsRows = await tx.select({ requireApproval: warehouseSettings.requireApproval }).from(warehouseSettings).where(eq(warehouseSettings.warehouseCode, "DEFAULT")).limit(1).for("share");
-  const fallback = settingsRows.length ? settingsRows : await tx.select({ requireApproval: warehouseSettings.requireApproval }).from(warehouseSettings).limit(1).for("share");
-  // Mirrors the procurement setting owner and schema DEFAULT false. Disabling
-  // ordinary PO approval never disables this feature's administrator gate.
-  const requireApproval = fallback.length ? z.boolean().parse(fallback[0].requireApproval) : false;
+  const policy = (await readProcurementSettings(tx, "share")).settings;
+  const requireApproval = policy.requireApproval;
   const approvalTiers = await tx.select().from(poApprovalTiers).where(eq(poApprovalTiers.active, 1)).orderBy(asc(poApprovalTiers.id)).for("share");
   const facts = { header, lines, invoices, invoiceLines, recommendationOwned: handoffs.length > 0 };
   // Full row versions cover price metadata, counters, invoice void/payment changes,
   // receipt evidence and variance approvals. No client amount is authoritative.
-  const sourceVersion = createHash("sha256").update(canonicalJson({ reviewVersion: PO_LINE_REVIEW_VERSION, facts, actor, links, handoffs, receipts, exceptions, requireApproval, approvalTiers })).digest("hex");
+  const sourceVersion = createHash("sha256").update(canonicalJson({ reviewVersion: PO_LINE_REVIEW_VERSION, facts, actor, links, handoffs, receipts, exceptions, requireApproval, procurementPolicyRevision: policy.revision, approvalTiers })).digest("hex");
   return { facts, actor, sourceVersion, exceptions, requireApproval, approvalTiers };
 }
 

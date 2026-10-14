@@ -275,6 +275,13 @@ describe("changedListingSettingFields", () => {
     expect(changedListingSettingFields(before, swapped, PRODUCT_LISTING_SETTING_FIELDS)).toEqual(["storeShelf"]);
   });
 
+  it("counts the same main text stamped with a new catalog hash as a change (PR 10b A2: [Keep my text] saves, and the check clears)", () => {
+    const before = fullValues();
+    const restamped = { ...fullValues(), mainText: { text: before.mainText!.text, catalogHash: "b".repeat(64) } };
+    expect(changedListingSettingFields(before, restamped, PRODUCT_LISTING_SETTING_FIELDS)).toEqual(["mainText"]);
+    expect(changedListingSettingFields(before, fullValues(), PRODUCT_LISTING_SETTING_FIELDS)).toEqual([]);
+  });
+
   it("reads no stored row as every setting following the default", () => {
     expect(changedListingSettingFields(null, allNull(), PRODUCT_LISTING_SETTING_FIELDS)).toEqual([]);
     expect(changedListingSettingFields(null, { ...allNull(), storeShelf: { mode: "none" } }, PRODUCT_LISTING_SETTING_FIELDS))

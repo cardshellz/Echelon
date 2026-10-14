@@ -14,7 +14,10 @@ import {
 import { DRAWER_WORDS } from "../dropship-listing-settings-drawer";
 import {
   emptyChoices,
+  ownTextCheckChoices,
+  PRODUCT_SETTINGS_REQUEST_INVALID,
   productSettingsDraftValue,
+  productSettingsEditAction,
   type ProductOwnSettings,
   type ProductSettingsChoices,
   type ProductSettingsSaveBody,
@@ -51,11 +54,16 @@ function own(revisionId: number | null, shippingId: string | null): ProductOwnSe
 }
 
 const OWN = own(5, "F2");
-/** The product's settings in full, as far as the drawer's reload reads them: every policy from the product or the store. */
+/**
+ * The product's settings in full, as far as the drawer's reload reads them (the fields a size can keep a
+ * leftover for): every policy from the product or the store, no shelf, the Card Shellz text.
+ */
 const DETAIL_SETTINGS = {
   shippingPolicy: [{ value: { policyId: "F2" }, sources: [{ source: "product", ruleName: null, productVariantIds: [101] }] }],
   returnPolicy: [{ value: { policyId: "R1" }, sources: [{ source: "product", ruleName: null, productVariantIds: [101] }] }],
   paymentPolicy: [{ value: { policyId: "P1" }, sources: [{ source: "store_default", ruleName: null, productVariantIds: [101] }] }],
+  storeShelf: [{ value: { names: [] }, sources: [{ source: "none", ruleName: null, productVariantIds: [101] }] }],
+  mainText: [{ value: { own: false }, sources: [{ source: "catalog", ruleName: null, productVariantIds: [101] }] }],
 };
 const PICK: ProductSettingsChoices = { ...emptyChoices(), shippingPolicy: { mode: "set", value: { id: "F9" } }, returnPolicy: { mode: "default" } };
 const SENT: ProductSettingsSaveBody = { idempotencyKey: "ls-product:1", expectedRevisionId: 5, patch: { shippingPolicy: { id: "F9" }, returnPolicy: null } };
@@ -87,8 +95,8 @@ function reducerDrafts(start: ListingSettingsDraft) {
   return drafts;
 }
 
-function setup(overrides: Partial<ProductSettingsSaveRun> = {}) {
-  const drafts = reducerDrafts(settingsDraft());
+function setup(overrides: Partial<ProductSettingsSaveRun> = {}, start: ListingSettingsDraft = settingsDraft()) {
+  const drafts = reducerDrafts(start);
   const sent: ProductSettingsSaveBody[] = [];
   const callbacks = { onSaveStarted: vi.fn(), onSaveSettled: vi.fn() };
   const answers: Array<unknown | Error> = [];
@@ -502,5 +510,117 @@ describe("W5's answers, code by code, through the runner (plan 3.3, 4.7)", () =>
       kind: "failed", failure: { phase: "uncertain", message: UNCONFIRMED, code: null, status: null, fields: [] },
     });
     expect(run.drafts.current().attempt?.key).toBe("ls-product:1");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 10b: the eBay category, the shelf and the text (plan 5.2-5.6)
+// ---------------------------------------------------------------------------
+
+describe("10b's fields through the runner (plan 5.4-5.6; 3.3 rows 19-21)", () => {
+  /** A product with its own text above and main text, the main text written before Card Shellz changed the product. */
+  const TEXTED = listingSettingsProductOwnSettingsSchema.parse({
+    storeConnectionId: STORE, productId: PRODUCT, revisionId: 8,
+    own: {
+      price: null, ebayCategory: null, storeShelf: null, shippingPolicy: null, returnPolicy: null, paymentPolicy: null,
+      textAbove: { mode: "own", text: "Ships in 1 day." }, textBelow: { mode: "own", text: "Thanks!" },
+      mainText: { text: "Our own words.", needsCheck: true },
+    },
+    generatedAt: "2026-10-14T12:00:00.000Z",
+  });
+  const draftOn = (base: ProductOwnSettings, choices: Partial<ProductSettingsChoices>): ListingSettingsDraft => {
+    const opened = reduceListingSettingsDraft(null, { type: "open", editor: EDITOR, place: "Easy Glide Soft Sleeves", base: productSettingsDraftValue(base) });
+    return reduceListingSettingsDraft(opened, { type: "edit", value: productSettingsDraftValue(base, { ...emptyChoices(), ...choices }) })!;
+  };
+
+  it("sends the eBay category and shelves by id, text as the server stores it, None as none and the default as null", async () => {
+    const run = setup({}, draftOn(TEXTED, {
+      ebayCategory: { mode: "set", value: { categoryId: "183454", categoryName: "Card Sleeves" } },
+      storeShelf: { mode: "set", value: { mode: "own", shelfIds: ["S2", "S1"] } },
+      textAbove: { mode: "set", value: { mode: "own", text: "  Ships today.\r\n" } },
+      textBelow: { mode: "set", value: { mode: "none" } },
+      mainText: { mode: "default" },
+    }));
+    await expect(run.save()).resolves.toEqual({ kind: "saved", viewStale: false });
+    expect(run.sent).toEqual([{
+      idempotencyKey: "ls-product:1", expectedRevisionId: 8,
+      patch: {
+        ebayCategory: { categoryId: "183454" },
+        storeShelf: { mode: "own", shelfIds: ["S2", "S1"] },
+        textAbove: { mode: "own", text: "Ships today." },
+        textBelow: { mode: "none" },
+        mainText: null,
+      },
+    }]);
+    expect(saveProductSettingsInputSchema.safeParse(run.sent[0]).success).toBe(true);
+    // Never a name, a catalog hash or a price (D1, P13).
+    expect(JSON.stringify(run.sent[0])).not.toMatch(/Card Sleeves|catalogHash|price|sizePrices|expectedPrices/);
+  });
+
+  it("sends Use default as null for the eBay category, the shelf and text above: the choice a sign-in leaves (D4, review T2)", async () => {
+    const owned = listingSettingsProductOwnSettingsSchema.parse({ ...TEXTED, own: { ...TEXTED.own,
+      ebayCategory: { categoryId: "183454", categoryName: "Card Sleeves" },
+      storeShelf: { mode: "own", shelves: [{ id: "S1", name: "Sleeves" }] } } });
+    const run = setup({}, draftOn(owned, { ebayCategory: { mode: "default" }, storeShelf: { mode: "default" }, textAbove: { mode: "default" } }));
+    await expect(run.save()).resolves.toEqual({ kind: "saved", viewStale: false });
+    expect(run.sent).toEqual([{ idempotencyKey: "ls-product:1", expectedRevisionId: 8, patch: { ebayCategory: null, storeShelf: null, textAbove: null } }]);
+    expect(saveProductSettingsInputSchema.safeParse(run.sent[0]).success).toBe(true);
+  });
+
+  it("[Keep my text] resends the same text, so the server checks it against the product as it is now (5.4, A2)", async () => {
+    const check = ownTextCheckChoices(TEXTED)!;
+    const action = productSettingsEditAction({ draft: null, editor: EDITOR, own: TEXTED, field: "mainText", choice: check.keep! });
+    expect(action.kind).toBe("start");
+    if (action.kind !== "start") return;
+    const opened = reduceListingSettingsDraft(null, { type: "open", editor: EDITOR, place: "Easy Glide Soft Sleeves", base: action.base });
+    const run = setup({}, reduceListingSettingsDraft(opened, { type: "edit", value: action.value })!);
+    await expect(run.save()).resolves.toEqual({ kind: "saved", viewStale: false });
+    expect(run.sent).toEqual([{ idempotencyKey: "ls-product:1", expectedRevisionId: 8, patch: { mainText: { text: "Our own words." } } }]);
+  });
+
+  it("refuses text over its limit before sending: nothing is sent, and the next try gets a new key", async () => {
+    for (const choices of [
+      { textAbove: { mode: "set", value: { mode: "own", text: "x".repeat(4_001) } } },
+      { textBelow: { mode: "set", value: { mode: "own", text: "x".repeat(4_001) } } },
+      { mainText: { mode: "set", value: { text: "x".repeat(20_001) } } },
+      // Over as typed with a CRLF, though stored it would be at the limit (review T1).
+      { textAbove: { mode: "set", value: { mode: "own", text: `${"x".repeat(1_999)}\r\n${"x".repeat(2_000)}` } } },
+      { mainText: { mode: "set", value: { text: `${"x".repeat(9_999)}\r\n${"x".repeat(10_000)}` } } },
+    ] as Array<Partial<ProductSettingsChoices>>) {
+      const run = setup({}, draftOn(TEXTED, choices));
+      await expect(run.save()).resolves.toEqual({
+        kind: "failed", failure: { phase: "refused", message: WORDS.cantBuild, code: PRODUCT_SETTINGS_REQUEST_INVALID, status: null, fields: [] },
+      });
+      expect(run.send).not.toHaveBeenCalled();
+      expect(run.drafts.current().attempt).toBeNull();
+    }
+    // At the limit it is sent: text above or below at 4,000, the main text at 20,000 (review T1).
+    const atLimit = setup({}, draftOn(TEXTED, { textAbove: { mode: "set", value: { mode: "own", text: "x".repeat(4_000) } } }));
+    await expect(atLimit.save()).resolves.toEqual({ kind: "saved", viewStale: false });
+    const mainAtLimit = setup({}, draftOn(TEXTED, { mainText: { mode: "set", value: { text: "x".repeat(20_000) } } }));
+    await expect(mainAtLimit.save()).resolves.toEqual({ kind: "saved", viewStale: false });
+    expect(mainAtLimit.sent[0]).toMatchObject({ patch: { mainText: { text: "x".repeat(20_000) } } });
+  });
+
+  it("lands eBay's category and shelf refusals on their fields, and the store text cap on words, never the banner (rows 19-21, D8)", async () => {
+    const cases: Array<[Partial<ProductSettingsChoices>, DropshipApiError, string, string[]]> = [
+      [{ ebayCategory: { mode: "set", value: { categoryId: "99" } } },
+        apiError(422, "DROPSHIP_EBAY_CATEGORY_RULE_INVALID", { reason: "not_leaf", invalidFields: ["ebayCategory"] }), "Pick a final eBay category.", ["ebayCategory"]],
+      [{ ebayCategory: { mode: "set", value: { categoryId: "99" } } },
+        apiError(422, "DROPSHIP_EBAY_CATEGORY_RULE_INVALID", { reason: "not_found", invalidFields: ["ebayCategory"] }), WORDS.categoryGone, ["ebayCategory"]],
+      [{ storeShelf: { mode: "set", value: { mode: "own", shelfIds: ["S9"] } } },
+        apiError(422, "DROPSHIP_EBAY_STORE_CATEGORY_INVALID", { reason: "not_found", invalidFields: ["storeShelf"] }), "That shelf is gone from your eBay store.", ["storeShelf"]],
+      [{ storeShelf: { mode: "set", value: { mode: "own", shelfIds: ["S9"] } } },
+        apiError(422, "DROPSHIP_EBAY_STORE_CATEGORY_INVALID", { reason: "too_long", invalidFields: ["storeShelf"] }), WORDS.shelfTooLong, ["storeShelf"]],
+      [{ textAbove: { mode: "set", value: { mode: "own", text: "Longer words." } } },
+        apiError(422, "DROPSHIP_LISTING_SETTINGS_TOO_LARGE", { reason: "store_text_limit", textBytes: 30_000_100, maxTextBytes: 30_000_000 }), WORDS.storeTextLimit, []],
+    ];
+    for (const [choices, error, words, fields] of cases) {
+      const run = setup({}, draftOn(TEXTED, choices));
+      run.answers.push(error);
+      await expect(run.save()).resolves.toEqual({ kind: "failed", failure: { phase: "refused", message: words, code: error.code, status: 422, fields } });
+      expect(run.input.onBlocked).not.toHaveBeenCalled();
+      expect(run.drafts.current()).toMatchObject({ phase: "refused", changes: 1, attempt: null });
+    }
   });
 });

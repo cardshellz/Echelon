@@ -1,14 +1,20 @@
 import { expect, test, type Page } from "@playwright/test";
 import type { CategoryListingSettingValues, ProductListingSettingValues } from "../../shared/dropship/listing-setting-values";
+import type { ListingSettingsSummary } from "../../shared/dropship/listing-settings";
 import {
   ENVELOPE,
   LAYERED_SAMPLE,
+  STUB_PRODUCT_CATALOG_HASH,
+  TOPLOADERS,
   categoryKey,
+  defaultStubState,
   listingSetup,
   listingSetupWithAnotherShippingPolicy,
+  liveListingSettingsSummary,
   productKey,
   shot,
   sizeKey,
+  type StoreShelfFixture,
   type StubState,
   type WriteAnswer,
 } from "./dropship-policy-catalog-stubs";
@@ -25,6 +31,7 @@ import {
   expectNoHorizontalScroll,
   expectNothingUnexpected,
   expectSheetLayout,
+  openProductRow,
   openStep,
   phone,
 } from "./dropship-policy-listing-settings-helpers";
@@ -35,11 +42,13 @@ import {
 test.use({ serviceWorkers: "allow" });
 
 /**
- * The product drawer's policy rows (Listing settings PR 10, part 10a; plan 4.9): a product's own
- * shipping, return and payment policy is changed, or set back to the default, in the drawer and
- * saved through W5 from the product's own settings read. Every save is checked against the
- * shared contract by the stub (ids only, compare-and-set on the product's revision, keyed), and
- * every journey ends with nothing unexpected asked and no page error. Desktop and phone.
+ * The product drawer's setting rows (Listing settings PR 10, parts 10a and 10b; plan 4.9, 5.6): a
+ * product's own shipping, return and payment policy (10a), and its eBay category, store shelf,
+ * text above and below and main text (10b), are changed, or set back to the default, in the drawer
+ * and saved through W5 from the product's own settings read; "Sizes differ" is fixed with one
+ * button, and own text Card Shellz changed under is checked. Every save is checked against the
+ * shared contract by the stub (ids and text only, compare-and-set on the product's revision,
+ * keyed), and every journey ends with nothing unexpected asked and no page error. Desktop and phone.
  */
 
 const PRODUCT_PATH = `${LISTINGS}/listing-settings/products/${ENVELOPE.productId}`;
@@ -70,17 +79,29 @@ function ownNoReturns(): StubState["productSettings"] {
   return { [productKey(STORE, ENVELOPE.productId)]: { revisionId: 7, values: { ...NO_VALUES, returnPolicy: { ...NO_RETURNS } } } };
 }
 
-function settingRow(page: Page, key: "shippingPolicy" | "returnPolicy" | "paymentPolicy") {
+type PolicyRow = "shippingPolicy" | "returnPolicy" | "paymentPolicy";
+type RowKey = PolicyRow | "ebayCategory" | "storeShelf" | "descriptionTemplate";
+const ROW_SETTING: Record<RowKey, string> = {
+  shippingPolicy: "shipping policy", returnPolicy: "return policy", paymentPolicy: "payment policy",
+  ebayCategory: "eBay category", storeShelf: "store shelf", descriptionTemplate: "description",
+};
+
+function settingRow(page: Page, key: RowKey) {
   return drawer(page).getByTestId(`drawer-setting-${key}`);
 }
 
-function changeButton(page: Page, key: "shippingPolicy" | "returnPolicy" | "paymentPolicy", productName = ENVELOPE.productName) {
-  const setting = { shippingPolicy: "shipping policy", returnPolicy: "return policy", paymentPolicy: "payment policy" }[key];
-  return settingRow(page, key).getByRole("button", { name: `Change ${setting} for ${productName}`, exact: true });
+function changeButton(page: Page, key: RowKey, productName = ENVELOPE.productName) {
+  return settingRow(page, key).getByRole("button", { name: `Change ${ROW_SETTING[key]} for ${productName}`, exact: true });
 }
 
-function fieldEditor(page: Page, key: "shippingPolicy" | "returnPolicy" | "paymentPolicy") {
+/** A row's open editor: a policy's, the eBay category's, the shelf's, or the description's. */
+function fieldEditor(page: Page, key: PolicyRow | "ebayCategory" | "storeShelf" | "description") {
   return drawer(page).getByTestId(`drawer-field-editor-${key}`);
+}
+
+/** One part of the open description editor: text above, the main text or text below. */
+function descriptionPart(page: Page, part: "textAbove" | "mainText" | "textBelow") {
+  return fieldEditor(page, "description").getByTestId(`drawer-description-${part}`);
 }
 
 function footer(page: Page) {
@@ -92,12 +113,12 @@ function bar(page: Page) {
 }
 
 /** A policy in the open field editor; its label also carries its Card Shellz fit line. */
-function policyRadio(page: Page, key: "shippingPolicy" | "returnPolicy" | "paymentPolicy", name: string) {
+function policyRadio(page: Page, key: PolicyRow, name: string) {
   return fieldEditor(page, key).getByRole("radio", { name: new RegExp(`^${name}`) });
 }
 
 /** Opens the field editor, picks a choice and puts it in the draft with Done. */
-async function pick(page: Page, key: "shippingPolicy" | "returnPolicy" | "paymentPolicy", name: string) {
+async function pick(page: Page, key: PolicyRow, name: string) {
   await changeButton(page, key).click();
   await expect(fieldEditor(page, key)).toBeVisible();
   await policyRadio(page, key, name).check();
@@ -475,5 +496,327 @@ test("on a phone the drawer fills the screen, a field editor opens inside it, an
   await drawerSave(page).click();
   await expect(footer(page)).toContainText("Saved");
   expect(state.productSettingsWrites).toHaveLength(1);
+  expectNothingUnexpected(state);
+});
+
+// ---------------------------------------------------------------------------
+// 10b: the eBay category, store shelf, "Sizes differ" and the description (plan 5.6)
+// ---------------------------------------------------------------------------
+
+/** Product 11 with these values of its own at revision 7 (a new object for each journey, as ownNoReturns). */
+function ownValues(values: Partial<ProductListingSettingValues>): StubState["productSettings"] {
+  return { [productKey(STORE, ENVELOPE.productId)]: { revisionId: 7, values: { ...NO_VALUES, ...values } } };
+}
+
+/** Two of the store's eBay shelves (`GET /api/dropship/ebay/store-categories/:id`), named by eBay's path. */
+function twoShelves(): Record<number, StoreShelfFixture[]> {
+  return { [STORE]: [
+    { categoryId: "11", categoryName: "Sleeves", path: "Supplies:Sleeves", level: 2 },
+    { categoryId: "12", categoryName: "Sale", path: "Sale", level: 1 },
+  ] };
+}
+
+test("the eBay category is picked from eBay's own list in the drawer and saved by its number alone, which never shows", async ({ page }) => {
+  const state = await openStep(page, {}, `${SETUP_PATH}?product=11`);
+  await expect(settingRow(page, "ebayCategory")).toContainText("Card Sleeves");
+  await expect(settingRow(page, "ebayCategory")).toContainText("Card Shellz picks");
+
+  await changeButton(page, "ebayCategory").click();
+  const editor = fieldEditor(page, "ebayCategory");
+  // The product has none of its own: the editor opens on Use default, focused (plan 3.4).
+  await expect(editor.getByRole("radio", { name: "Use default" })).toBeFocused();
+  await editor.getByRole("button", { name: "Pick an eBay category" }).click();
+  const search = editor.getByRole("textbox", { name: "Search eBay categories" });
+  await expect(search).toBeFocused();
+  await search.fill("Toploaders");
+  await editor.getByRole("button", { name: "Use this category" }).click();
+  // The pick is the product's own category now, focused, by name only.
+  await expect(editor.getByRole("radio", { name: TOPLOADERS.categoryName })).toBeChecked();
+  await expect(editor.getByRole("radio", { name: TOPLOADERS.categoryName })).toBeFocused();
+  await expect(editor).not.toContainText(TOPLOADERS.categoryId);
+  await editor.getByRole("button", { name: "Done" }).click();
+  await expect(changeButton(page, "ebayCategory")).toBeFocused();
+  await expect(settingRow(page, "ebayCategory")).toContainText("→ Toploaders · Not saved");
+  await expect(bar(page)).toHaveText(`Not saved · 1 change in ${ENVELOPE.productName}`);
+
+  await drawerSave(page).click();
+  await expect(footer(page)).toContainText("Saved");
+  expect(state.productSettingsWrites).toEqual([{ method: "PUT", path: PRODUCT_PATH,
+    body: { idempotencyKey: KEY("ls-product"), expectedRevisionId: null, patch: { ebayCategory: { categoryId: TOPLOADERS.categoryId } } } }]);
+  expect(state.categorySearches).toContain("Toploaders");
+  await expect(settingRow(page, "ebayCategory")).toContainText("Toploaders");
+  await expect(settingRow(page, "ebayCategory")).toContainText("Set for this product");
+  await expect(drawer(page)).not.toContainText(TOPLOADERS.categoryId);
+  expectNothingUnexpected(state);
+});
+
+test("two store shelves are picked for a product, first and second, saved by id, and the row then names both", async ({ page }, testInfo) => {
+  const state = await openStep(page, { storeShelves: twoShelves() }, `${SETUP_PATH}?product=11`);
+  await expect(settingRow(page, "storeShelf")).toContainText("None");
+  await changeButton(page, "storeShelf").click();
+  const editor = fieldEditor(page, "storeShelf");
+  await expect(editor.getByRole("radio", { name: "Use default" })).toBeChecked();
+  await editor.getByRole("combobox", { name: `Shelf for ${ENVELOPE.productName}` }).click();
+  await page.getByRole("option", { name: "Supplies › Sleeves", exact: true }).click();
+  // The first box's list has closed before the second opens.
+  await expect(page.getByRole("option")).toHaveCount(0);
+  // Picking a shelf chooses "Own shelves"; the second box opens once a first is picked.
+  await expect(editor.getByRole("radio", { name: "Own shelves" })).toBeChecked();
+  await editor.getByRole("combobox", { name: `Second shelf (optional) for ${ENVELOPE.productName}` }).click();
+  await page.getByRole("option", { name: "Sale", exact: true }).click();
+  await expect(page.getByRole("option")).toHaveCount(0);
+  await expect(editor).not.toContainText("Store category");
+  if (phone(testInfo)) await expectNoHorizontalScroll(page);
+  await editor.getByRole("button", { name: "Done" }).click();
+  await expect(settingRow(page, "storeShelf")).toContainText("→ Supplies › Sleeves · second: Sale · Not saved");
+
+  await drawerSave(page).click();
+  await expect(footer(page)).toContainText("Saved");
+  expect(state.productSettingsWrites).toEqual([{ method: "PUT", path: PRODUCT_PATH,
+    body: { idempotencyKey: KEY("ls-product"), expectedRevisionId: null, patch: { storeShelf: { mode: "own", shelfIds: ["11", "12"] } } } }]);
+  await expect(settingRow(page, "storeShelf")).toContainText("Supplies › Sleeves · second: Sale");
+  await expect(settingRow(page, "storeShelf")).toContainText("Set for this product");
+  await expect(settingRow(page, "storeShelf")).not.toContainText("Not saved");
+  expectNothingUnexpected(state);
+});
+
+test("sizes that differ get Use default for all sizes, which sends one null and gives every size the default", async ({ page }) => {
+  const product = LAYERED_SAMPLE;
+  const state = await openStep(page, {
+    catalog: [ENVELOPE, product],
+    listingSetups: { [STORE]: listingSetupWithAnotherShippingPolicy(STORE) },
+    // Today's per-size settings left "USPS Priority Mail" on the Pack of 500; the product has nothing of its own.
+    sizeLeftovers: { [sizeKey(STORE, 302)]: { shippingPolicyId: "priority" } },
+  }, `${SETUP_PATH}?product=${product.productId}`);
+  const row = settingRow(page, "shippingPolicy");
+  await expect(row).toContainText("Sizes differ. Pick one for all sizes.");
+  // One button beside each value, read out with the value and the product (plan 3.4, 5.3).
+  await expect(row.getByRole("button", { name: `Use USPS Priority Mail for all sizes of ${product.productName}` })).toHaveText("Use for all sizes");
+  await row.getByRole("button", { name: `Use default for all sizes of ${product.productName}` }).click();
+  await expect(row).toContainText("→ Use default · Not saved");
+  await expect(bar(page)).toHaveText(`Not saved · 1 change in ${product.productName}`);
+
+  await drawerSave(page).click();
+  await expect(footer(page)).toContainText("Saved");
+  expect(state.productSettingsWrites).toEqual([{ method: "PUT", path: `${LISTINGS}/listing-settings/products/${product.productId}`,
+    body: { idempotencyKey: KEY("ls-product"), expectedRevisionId: null, patch: { shippingPolicy: null } } }]);
+  expect(state.sizeLeftovers[sizeKey(STORE, 302)]).toEqual({});
+  await expect(row).not.toContainText("Sizes differ");
+  await expect(row).toContainText("USPS Ground Advantage");
+  await expect(row).not.toContainText("USPS Priority Mail");
+  await expect(row.getByRole("button", { name: /for all sizes/ })).toHaveCount(0);
+  expectNothingUnexpected(state);
+});
+
+test("own text above is written in the description editor, counted as typed, and saved as text", async ({ page }, testInfo) => {
+  const state = await openStep(page, {}, `${SETUP_PATH}?product=11`);
+  await expect(settingRow(page, "descriptionTemplate")).toContainText("Main text: Card Shellz text");
+  await changeButton(page, "descriptionTemplate").click();
+  const above = descriptionPart(page, "textAbove");
+  await expect(above.getByRole("radio", { name: "Use default" })).toBeFocused();
+  await above.getByRole("radio", { name: "Own text" }).check();
+  const box = above.getByRole("textbox", { name: `Text above for ${ENVELOPE.productName}` });
+  await box.fill("Ships in a rigid mailer.");
+  await expect(above).toContainText("24 / 4,000");
+  if (phone(testInfo)) await expectNoHorizontalScroll(page);
+  await fieldEditor(page, "description").getByRole("button", { name: "Done" }).click();
+  await expect(changeButton(page, "descriptionTemplate")).toBeFocused();
+  await expect(settingRow(page, "descriptionTemplate")).toContainText("→ Text above: your own · Not saved");
+
+  await drawerSave(page).click();
+  await expect(footer(page)).toContainText("Saved");
+  expect(state.productSettingsWrites).toEqual([{ method: "PUT", path: PRODUCT_PATH,
+    body: { idempotencyKey: KEY("ls-product"), expectedRevisionId: null, patch: { textAbove: { mode: "own", text: "Ships in a rigid mailer." } } } }]);
+  await expect(settingRow(page, "descriptionTemplate")).toContainText("Card Shellz text, with your text above");
+  await expect(settingRow(page, "descriptionTemplate")).toContainText("Set for this product");
+  expectNothingUnexpected(state);
+});
+
+test("None takes the product's own text below away, sent as none", async ({ page }) => {
+  const state = await openStep(page, { productSettings: ownValues({ textBelow: { mode: "own", text: "Thanks for buying!" } }) }, `${SETUP_PATH}?product=11`);
+  await expect(settingRow(page, "descriptionTemplate")).toContainText("Card Shellz text, with your text below");
+  await changeButton(page, "descriptionTemplate").click();
+  const below = descriptionPart(page, "textBelow");
+  // The product's own text below, prefilled.
+  await expect(below.getByRole("radio", { name: "Own text" })).toBeChecked();
+  await expect(below.getByRole("textbox")).toHaveValue("Thanks for buying!");
+  await below.getByRole("radio", { name: "None" }).check();
+  await expect(below.getByRole("textbox")).toHaveCount(0);
+  await fieldEditor(page, "description").getByRole("button", { name: "Done" }).click();
+  await expect(settingRow(page, "descriptionTemplate")).toContainText("→ Text below: None · Not saved");
+
+  await drawerSave(page).click();
+  await expect(footer(page)).toContainText("Saved");
+  expect(state.productSettingsWrites).toEqual([{ method: "PUT", path: PRODUCT_PATH,
+    body: { idempotencyKey: KEY("ls-product"), expectedRevisionId: 7, patch: { textBelow: { mode: "none" } } } }]);
+  await expect(settingRow(page, "descriptionTemplate")).not.toContainText("your text below");
+  expect(state.productSettings[productKey(STORE, ENVELOPE.productId)].values.textBelow).toEqual({ mode: "none" });
+  expectNothingUnexpected(state);
+});
+
+test("the product's own main text opens prefilled with its counter, and the edit is saved as typed", async ({ page }) => {
+  const state = await openStep(page, { productSettings: ownValues({ mainText: { text: "Our own words.", catalogHash: STUB_PRODUCT_CATALOG_HASH } }) },
+    `${SETUP_PATH}?product=11`);
+  await expect(settingRow(page, "descriptionTemplate")).toContainText("Main text: your own");
+  // Up to date with Card Shellz's product: nothing to check.
+  await expect(settingRow(page, "descriptionTemplate")).not.toContainText("Check your text still fits");
+  await changeButton(page, "descriptionTemplate").click();
+  const main = descriptionPart(page, "mainText");
+  await expect(main.getByRole("radio", { name: "Own text" })).toBeChecked();
+  const box = main.getByRole("textbox", { name: `Main text for ${ENVELOPE.productName}` });
+  await expect(box).toHaveValue("Our own words.");
+  await expect(main).toContainText("14 / 20,000");
+  await box.fill("Our own words, now longer.");
+  await expect(main).toContainText("26 / 20,000");
+  await fieldEditor(page, "description").getByRole("button", { name: "Done" }).click();
+  await expect(settingRow(page, "descriptionTemplate")).toContainText("→ Main text: your own · Not saved");
+
+  await drawerSave(page).click();
+  await expect(footer(page)).toContainText("Saved");
+  expect(state.productSettingsWrites).toEqual([{ method: "PUT", path: PRODUCT_PATH,
+    body: { idempotencyKey: KEY("ls-product"), expectedRevisionId: 7, patch: { mainText: { text: "Our own words, now longer." } } } }]);
+  expect(state.productSettings[productKey(STORE, ENVELOPE.productId)].values.mainText)
+    .toEqual({ text: "Our own words, now longer.", catalogHash: STUB_PRODUCT_CATALOG_HASH });
+  expectNothingUnexpected(state);
+});
+
+test("Keep my text saves the same main text again, checked against Card Shellz's product now, and the notice goes", async ({ page }) => {
+  const state = await openStep(page, { productSettings: ownValues({ mainText: { text: "Our own words.", catalogHash: "b".repeat(64) } }) },
+    `${SETUP_PATH}?product=11`);
+  const row = settingRow(page, "descriptionTemplate");
+  await expect(row).toContainText("Card Shellz changed this product. Check your text still fits.");
+  await expect(page.getByTestId("listing-settings-attention")).toContainText("Card Shellz updated 1 product that has your own text.");
+  await row.getByRole("button", { name: `Keep my text for ${ENVELOPE.productName}` }).click();
+  // The answer is in the draft: the row says so instead of asking, and focus goes to its Change, never the page (plan 3.4).
+  await expect(row).not.toContainText("Check your text still fits");
+  await expect(row).toContainText("→ Main text: your own · Not saved");
+  await expect(changeButton(page, "descriptionTemplate")).toBeFocused();
+
+  await drawerSave(page).click();
+  await expect(footer(page)).toContainText("Saved");
+  expect(state.productSettingsWrites).toEqual([{ method: "PUT", path: PRODUCT_PATH,
+    body: { idempotencyKey: KEY("ls-product"), expectedRevisionId: 7, patch: { mainText: { text: "Our own words." } } } }]);
+  // Read again: the text is stamped with the product as it is now, so nothing is left to check.
+  await expect(row).toContainText("Main text: your own");
+  await expect(row).not.toContainText("Check your text still fits");
+  await expect(row).not.toContainText("Not saved");
+  await expect(page.getByTestId("listing-settings-attention")).not.toContainText("has your own text");
+  expectNothingUnexpected(state);
+});
+
+test("Keep my text in the open Description editor goes in with the text typed above, and steps back while the main text is edited", async ({ page }) => {
+  const state = await openStep(page, { productSettings: ownValues({ mainText: { text: "Our own words.", catalogHash: "b".repeat(64) } }) },
+    `${SETUP_PATH}?product=11`);
+  await changeButton(page, "descriptionTemplate").click();
+  const above = descriptionPart(page, "textAbove");
+  await above.getByRole("radio", { name: "Own text" }).check();
+  await above.getByRole("textbox", { name: `Text above for ${ENVELOPE.productName}` }).fill("Ships in a rigid mailer.");
+  const main = descriptionPart(page, "mainText");
+  await expect(main).toContainText("Card Shellz changed this product. Check your text still fits.");
+  // An edit of the main text is the answer itself: the notice steps back, so Keep can't drop it; as it opened, it asks again.
+  const box = main.getByRole("textbox", { name: `Main text for ${ENVELOPE.productName}` });
+  await box.fill("Our own words, shorter.");
+  await expect(main).not.toContainText("Check your text still fits");
+  await box.fill("Our own words.");
+  await main.getByRole("button", { name: `Keep my text for ${ENVELOPE.productName}` }).click();
+  // The answer goes in with the other parts, as Done would put them, and the editor closes to its Change.
+  await expect(fieldEditor(page, "description")).toHaveCount(0);
+  await expect(changeButton(page, "descriptionTemplate")).toBeFocused();
+  await expect(settingRow(page, "descriptionTemplate")).toContainText("→ Text above: your own, main text: your own · Not saved");
+
+  await drawerSave(page).click();
+  await expect(footer(page)).toContainText("Saved");
+  expect(state.productSettingsWrites).toEqual([{ method: "PUT", path: PRODUCT_PATH, body: { idempotencyKey: KEY("ls-product"), expectedRevisionId: 7,
+    patch: { textAbove: { mode: "own", text: "Ships in a rigid mailer." }, mainText: { text: "Our own words." } } } }]);
+  await expect(settingRow(page, "descriptionTemplate")).not.toContainText("Check your text still fits");
+  expectNothingUnexpected(state);
+});
+
+test("while eBay needs a sign-in, the shelf row offers None and Use default, and Use default still saves as null (D4)", async ({ page }) => {
+  const state = await openStep(page, {
+    productSettings: ownValues({ storeShelf: { mode: "own", shelves: [{ id: "11", name: "Supplies:Sleeves" }] } }),
+    storeShelves: twoShelves(),
+    setupReadError: { status: 403, code: "DROPSHIP_EBAY_LISTING_SETUP_PERMISSION_REQUIRED", message: "eBay needs the store to be connected again.",
+      context: { storeConnectionId: STORE, retryable: false } },
+  }, `${SETUP_PATH}?product=11`);
+  await expect(banner(page)).toHaveAttribute("data-kind", "sign_in");
+  const row = settingRow(page, "storeShelf");
+  await expect(row).toContainText("Supplies › Sleeves");
+  await expect(row).toContainText("Sign in to eBay again to pick a new one. You can still use the default.");
+  await changeButton(page, "storeShelf").click();
+  const editor = fieldEditor(page, "storeShelf");
+  // No new shelf can be picked: no boxes, only None and Use default.
+  await expect(editor.getByRole("radio")).toHaveCount(2);
+  await expect(editor.getByRole("combobox")).toHaveCount(0);
+  await editor.getByRole("radio", { name: "Use default" }).check();
+  await editor.getByRole("button", { name: "Done" }).click();
+  await expect(row).toContainText("→ Use default · Not saved");
+
+  await drawerSave(page).click();
+  await expect(footer(page)).toContainText("Saved");
+  expect(state.productSettingsWrites).toEqual([{ method: "PUT", path: PRODUCT_PATH,
+    body: { idempotencyKey: KEY("ls-product"), expectedRevisionId: 7, patch: { storeShelf: null } } }]);
+  expect(state.productSettings[productKey(STORE, ENVELOPE.productId)].values.storeShelf).toBeNull();
+  expectNothingUnexpected(state);
+});
+
+test("Fix on a product's tied description rules opens the drawer on its Description editor, once", async ({ page }) => {
+  const live = liveListingSettingsSummary(defaultStubState(), STORE);
+  const summary: ListingSettingsSummary = { ...live, attention: { total: 1, items: [
+    { code: "description_group_conflict", count: 1, productId: ENVELOPE.productId, productName: ENVELOPE.productName }] } };
+  const state = await openStep(page, { summaries: { [STORE]: summary } });
+  const strip = page.getByTestId("listing-settings-attention");
+  await expect(strip).toContainText(`${ENVELOPE.productName}: two of your older description rules apply, so neither is used. Set its description.`);
+  await strip.locator("li[data-code='description_group_conflict']").getByRole("button", { name: "Fix" }).click();
+  await expect(drawer(page)).toBeVisible();
+  await expect(page).toHaveURL(/[?&]product=11$/);
+  // The Description row's editor is open, with focus in it.
+  await expect(fieldEditor(page, "description")).toBeVisible();
+  await expect(changeButton(page, "descriptionTemplate")).toHaveAttribute("aria-expanded", "true");
+  await expect(descriptionPart(page, "textAbove").getByRole("radio", { name: "Use default" })).toBeFocused();
+  // Esc closes the editor, not the drawer (plan 3.4).
+  await page.keyboard.press("Escape");
+  await expect(fieldEditor(page, "description")).toHaveCount(0);
+  await expect(changeButton(page, "descriptionTemplate")).toBeFocused();
+
+  // Closed and opened again from the list, the drawer opens as usual: the Fix is not remembered.
+  await drawer(page).getByRole("button", { name: /^(Close|Back)$/ }).click();
+  await expect(drawer(page)).toHaveCount(0);
+  await openProductRow(page, ENVELOPE.productId, ENVELOPE.productName);
+  await expect(settingRow(page, "descriptionTemplate")).toBeVisible();
+  await expect(fieldEditor(page, "description")).toHaveCount(0);
+  expectNothingUnexpected(state);
+});
+
+test("text over its limit is caught before anything is sent, and the store's text cap is said in the drawer, not as a banner", async ({ page }) => {
+  const cap: WriteAnswer = { status: 422, code: "DROPSHIP_LISTING_SETTINGS_TOO_LARGE",
+    message: "This store's saved listing text is at its limit. Shorten or remove text on other products, or set it once on a category or as the store default.",
+    context: { storeConnectionId: STORE, reason: "store_text_limit", textBytes: 2_000_001, maxTextBytes: 2_000_000, retryable: false, classification: "permanent" } };
+  const state = await openStep(page, { productSettingsWriteAnswers: [cap] }, `${SETUP_PATH}?product=11`);
+  await changeButton(page, "descriptionTemplate").click();
+  const above = descriptionPart(page, "textAbove");
+  await above.getByRole("radio", { name: "Own text" }).check();
+  const box = above.getByRole("textbox", { name: `Text above for ${ENVELOPE.productName}` });
+  // Nothing stops the typing at the limit, so a paste is never cut: the counter says it is over.
+  await box.fill("a".repeat(4_001));
+  await expect(above).toContainText("4,001 / 4,000");
+  await expect(box).toHaveAttribute("aria-invalid", "true");
+  await fieldEditor(page, "description").getByRole("button", { name: "Done" }).click();
+  await expect(above.getByRole("alert")).toHaveText("Shorten it to 4,000 characters or fewer.");
+  // Nothing went in the draft: the editor stays, and nothing is waiting to be saved.
+  await expect(fieldEditor(page, "description")).toBeVisible();
+  await expect(bar(page)).toHaveText("All saved");
+  await box.fill("Ships in a rigid mailer.");
+  await expect(above.getByRole("alert")).toHaveCount(0);
+  await fieldEditor(page, "description").getByRole("button", { name: "Done" }).click();
+  await expect(settingRow(page, "descriptionTemplate")).toContainText("→ Text above: your own · Not saved");
+
+  await drawerSave(page).click();
+  await expect(footer(page)).toContainText("Your store has too much saved text. Shorten text on other products, or set it once on a category or as your store default.");
+  await expect(banner(page)).toHaveCount(0);
+  // The change is kept for the vendor to shorten; only the text that fits was ever sent.
+  await expect(settingRow(page, "descriptionTemplate")).toContainText("→ Text above: your own · Not saved");
+  expect(state.productSettingsWrites).toEqual([{ method: "PUT", path: PRODUCT_PATH,
+    body: { idempotencyKey: KEY("ls-product"), expectedRevisionId: null, patch: { textAbove: { mode: "own", text: "Ships in a rigid mailer." } } } }]);
   expectNothingUnexpected(state);
 });
