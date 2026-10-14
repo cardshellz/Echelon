@@ -43,6 +43,7 @@ export interface OrderEditRefund {
 
 /** JSON-safe persisted evidence. Amounts are exact USD integer cents. */
 export interface OrderEditSnapshot {
+  codePricing?: import("@shared/order-edits/order-edit-codes").OrderEditCodePricing;
   /** Optional read-only pricing evidence for provisional previews; excluded from legacy fingerprints. */
   previewProductDiscounts?: Array<{
     lineId: string;
@@ -89,6 +90,7 @@ export interface OrderEditSnapshot {
 export interface OrderEditPlan {
   changes: Array<{ lineItemId: string; quantity: number }>;
   additions: Array<{ variantId: string; quantity: number }>;
+  discountCodes?: string[];
 }
 
 export interface OrderEditExpectedLine {
@@ -106,6 +108,7 @@ export interface OrderEditExpectedLine {
 }
 
 export interface OrderEditQuote {
+  codePricing?: import("@shared/order-edits/order-edit-codes").OrderEditCodePricing;
   shippingRepricing?: import("@shared/order-edits/order-edit-shipping").OrderEditShippingRepricing;
   financials?: OrderEditFinancials;
   connectionId: number;
@@ -199,6 +202,7 @@ export interface OrderEditProvider {
     connectionId: number,
     quote: OrderEditQuote,
     operationId: string,
+    beforeCommitRequest?: () => Promise<void>,
   ): Promise<OrderEditSnapshot>;
   reconcileCommit(
     connectionId: number,

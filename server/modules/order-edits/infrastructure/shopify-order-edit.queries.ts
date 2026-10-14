@@ -139,6 +139,11 @@ export const DISCOUNT_MUTATION = `mutation EchelonEditMemberPrice($id: ID!, $lin
 export const COMMIT_MUTATION = `mutation EchelonEditCommit($id: ID!, $staffNote: String!) {
   orderEditCommit(id: $id, notifyCustomer: false, staffNote: $staffNote) { order { id } userErrors { field message } }
 }`;
+export const REMOVE_DISCOUNT_MUTATION = `mutation EchelonEditRemoveDiscount($id: ID!, $discountApplicationId: ID!) {
+  orderEditRemoveDiscount(id: $id, discountApplicationId: $discountApplicationId) {
+    calculatedOrder { ${CALCULATED_FIELDS} } userErrors { field message }
+  }
+}`;
 export const REMOVE_SHIPPING_MUTATION = `mutation EchelonEditRemoveShipping($id: ID!, $shippingLineId: ID!) {
   orderEditRemoveShippingLine(id: $id, shippingLineId: $shippingLineId) {
     calculatedOrder { ${CALCULATED_FIELDS} } userErrors { field message }

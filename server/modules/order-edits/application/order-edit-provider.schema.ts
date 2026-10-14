@@ -1,4 +1,12 @@
 import { z } from "zod";
+import {
+  orderEditRequestedCodesSchema,
+  orderEditCodePricingSchema,
+} from "@shared/order-edits/order-edit-codes";
+import {
+  resolveOrderEditLinePlan,
+  orderEditAdditionSourceKey,
+} from "../domain/order-edit-line-plan";
 import { orderEditFinancialsSchema } from "@shared/order-edits/order-edit-financials";
 import { SHOPIFY_CALCULATED_LINE_ID_PATTERN } from "@shared/order-edits/shopify-edit-identity";
 import { orderEditShippingRepricingSchema } from "@shared/order-edits/order-edit-shipping";
@@ -91,6 +99,7 @@ const line = z
 
 export const orderEditSnapshotSchema: z.ZodType<OrderEditSnapshot> = z
   .object({
+    codePricing: orderEditCodePricingSchema.optional(),
     previewProductDiscounts: z
       .array(
         z
@@ -300,6 +309,7 @@ export const orderEditSnapshotSchema: z.ZodType<OrderEditSnapshot> = z
 
 const plan = z
   .object({
+    discountCodes: orderEditRequestedCodesSchema.optional(),
     changes: z
       .array(
         z
@@ -330,6 +340,7 @@ const plan = z
   .strict();
 export const orderEditQuoteSchema: z.ZodType<OrderEditQuote> = z
   .object({
+    codePricing: orderEditCodePricingSchema.optional(),
     shippingRepricing: orderEditShippingRepricingSchema.optional(),
     financials: orderEditFinancialsSchema.optional(),
     connectionId: connection,
@@ -472,6 +483,144 @@ export const orderEditQuoteSchema: z.ZodType<OrderEditQuote> = z
         code: "custom",
         message: "Duplicate planned line identities",
       });
+    if (value.codePricing) {
+      const proof = value.codePricing;
+      const positive = value.lines.filter((line) => line.quantity > 0);
+      const originals = value.baseline.lines.filter(
+        (line) => line.quantity > 0 || changes.has(line.id),
+      );
+      let valid = Boolean(
+        value.financials &&
+          proof.lines.length === positive.length &&
+          JSON.stringify(proof.newCodes.map((code) => code.toUpperCase())) ===
+            JSON.stringify(
+              (value.plan.discountCodes ?? []).map((code) =>
+                code.toUpperCase(),
+              ),
+            ) &&
+          proof.applications.every((application) =>
+            value.financials!.itemDiscounts?.some(
+              (discount) =>
+                discount.key === `code:${application.code}` &&
+                discount.amountCents === application.amountCents,
+            ),
+          ) &&
+          proof.lines.every((line) =>
+            positive.some(
+              (native) =>
+                native.calculatedLineId === line.id &&
+                native.variantId === line.variantId &&
+                native.quantity === line.quantity &&
+                native.originalUnitPriceCents === line.retailCents &&
+                native.totalCents === line.netCents &&
+                value.financials!.lines.some(
+                  (amount) =>
+                    amount.id === line.id && amount.netCents === line.netCents,
+                ),
+            ),
+          ),
+      );
+      try {
+        const resolved = resolveOrderEditLinePlan({
+          originals: originals.map((line) => ({
+            id: line.id,
+            variantId: line.variantId,
+            quantity: line.quantity,
+          })),
+          changes: value.plan.changes.map((line) => ({
+            ...line,
+            lineItemId: canonical("LineItem", line.lineItemId),
+          })),
+          additions: value.plan.additions.map((line) => ({
+            ...line,
+            variantId: canonical("ProductVariant", line.variantId),
+          })),
+          protectedLineIds: (value.baseline.previewProductDiscounts ?? [])
+            .filter((line) => line.automaticCents > 0)
+            .map((line) => line.lineId),
+        });
+        const sources = new Map<
+          string,
+          { variantId: string; quantity: number; retailCents?: number }
+        >();
+        for (const original of originals)
+          sources.set(original.id, {
+            variantId: original.variantId,
+            quantity:
+              resolved.changes.find((line) => line.lineItemId === original.id)
+                ?.quantity ?? original.quantity,
+            retailCents: original.originalUnitPriceCents,
+          });
+        for (const addition of resolved.additions)
+          sources.set(orderEditAdditionSourceKey(addition.variantId), {
+            variantId: addition.variantId,
+            quantity: addition.quantity,
+          });
+        for (const [sourceId, source] of sources) {
+          const allocated = proof.lines.filter(
+            (line) => line.sourceId === sourceId,
+          );
+          if (
+            allocated.reduce(
+              (sum, line) => sum + BigInt(line.quantity),
+              BigInt(0),
+            ) !== BigInt(source.quantity) ||
+            allocated.some(
+              (line) =>
+                line.variantId !== source.variantId ||
+                (source.retailCents !== undefined &&
+                  line.retailCents !== source.retailCents),
+            )
+          )
+            valid = false;
+        }
+        if (proof.lines.some((line) => !sources.has(line.sourceId)))
+          valid = false;
+        const retained = value.lines.filter(
+          (line) => line.originalLineId !== null,
+        );
+        if (
+          retained.length !== originals.length ||
+          new Set(retained.map((line) => line.originalLineId)).size !==
+            retained.length ||
+          originals.some(
+            (original) =>
+              !retained.some(
+                (line) =>
+                  line.originalLineId === original.id &&
+                  line.variantId === original.variantId &&
+                  line.originalUnitPriceCents ===
+                    original.originalUnitPriceCents &&
+                  (line.quantity === 0
+                    ? sources.get(original.id)?.quantity === 0
+                    : proof.lines.some(
+                        (priced) =>
+                          priced.id === line.calculatedLineId &&
+                          priced.sourceId === original.id,
+                      )),
+              ),
+          )
+        )
+          valid = false;
+        if (
+          value.lines.some(
+            (line) =>
+              line.quantity === 0 &&
+              (line.originalLineId === null || line.totalCents !== 0),
+          )
+        )
+          valid = false;
+      } catch {
+        valid = false;
+      }
+      if (!valid)
+        context.addIssue({
+          code: "custom",
+          message:
+            "The code allocation must preserve the complete requested commercial quantities, prices, and native line bindings.",
+        });
+      return;
+    }
     const expectedOriginals = value.lines.filter(
       (entry) => entry.originalLineId !== null,
     );

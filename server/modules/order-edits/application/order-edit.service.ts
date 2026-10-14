@@ -48,6 +48,7 @@ import type {
   OrderEditWarehouse,
 } from "./order-edit-store";
 import { OrderEditError } from "../domain/order-edit-error";
+import type { OrderEditCodeRedemptions } from "./order-edit-code-redemptions";
 
 const terminal = new Set(["completed", "recovered", "failed", "expired"]);
 // Bound each scheduler pass so one store cannot monopolize the worker.
@@ -72,6 +73,7 @@ export class OrderEditService {
     }) => void,
     private readonly previews?: OrderEditPreviewService,
     private readonly catalog?: OrderEditCatalog,
+    private readonly codeRedemptions?: OrderEditCodeRedemptions,
   ) {}
 
   async warmPreview(input: OrderEditPreviewScope, actorId: string) {
@@ -233,7 +235,11 @@ export class OrderEditService {
       );
     return this.catalog;
   }
-  async order(connectionId: number, omsOrderId: number) {
+  async order(
+    connectionId: number,
+    omsOrderId: number,
+    codeEntryVersion?: "v1",
+  ) {
     const reference = await this.store.orderReference(connectionId, omsOrderId);
     const snapshot = await this.provider.readOrder(
       connectionId,
@@ -246,6 +252,12 @@ export class OrderEditService {
       ...orderEditEligibilityReasons(snapshot),
     ];
     return orderEditOrderSchema.parse({
+      ...(codeEntryVersion === "v1"
+        ? {
+            codeEntryAvailable: this.codeRedemptions?.available() === true,
+            appliedCodes: snapshot.codePricing?.applications ?? [],
+          }
+        : {}),
       omsOrderId,
       connectionId,
       orderNumber: snapshot.name,
@@ -360,7 +372,13 @@ export class OrderEditService {
           this.provider.quote(
             record.connectionId,
             baseline,
-            { changes: input.changes, additions: input.additions },
+            {
+              changes: input.changes,
+              additions: input.additions,
+              ...(input.discountCodes !== undefined
+                ? { discountCodes: input.discountCodes }
+                : {}),
+            },
             record.id,
           ),
         ]);
@@ -380,7 +398,22 @@ export class OrderEditService {
           quote.operationId !== record.id ||
           quote.orderId !== baseline.orderId ||
           quote.connectionId !== record.connectionId ||
-          quote.baselineFingerprint !== baseline.fingerprint
+          quote.baselineFingerprint !== baseline.fingerprint ||
+          JSON.stringify({
+            changes: quote.plan.changes,
+            additions: quote.plan.additions,
+            ...(quote.plan.discountCodes !== undefined
+              ? { discountCodes: quote.plan.discountCodes }
+              : {}),
+          }) !==
+            JSON.stringify({
+              changes: input.changes,
+              additions: input.additions,
+              ...(input.discountCodes !== undefined
+                ? { discountCodes: input.discountCodes }
+                : {}),
+            }) ||
+          (input.discountCodes?.length && !quote.codePricing)
         )
           throw new OrderEditError(
             "ORDER_EDIT_QUOTE_IDENTITY_INVALID",
@@ -403,8 +436,8 @@ export class OrderEditService {
       return this.present(record);
     });
   }
-  async get(id: string) {
-    return this.present(await this.store.get(id));
+  async get(id: string, codeEntryVersion?: "v1") {
+    return this.present(await this.store.get(id), codeEntryVersion);
   }
   async commit(id: string, key: string, actorId: string) {
     return this.locked(id, async (initial) => {
@@ -458,6 +491,7 @@ export class OrderEditService {
           record.connectionId,
           record.quote!,
           record.id,
+          () => this.codes(record, "reserve"),
         );
         record = await this.update(
           record,
@@ -568,6 +602,7 @@ export class OrderEditService {
           actorId,
           "recovery_observed",
         );
+        await this.codes(record, "release");
         const proof = await this.warehouse.reconcileAndRelease(
           record.omsOrderId,
           record.id,
@@ -698,6 +733,7 @@ export class OrderEditService {
             actorId,
             "recovery_observed",
           );
+          await this.codes(record, "release");
           const proof = await this.warehouse.reconcileAndRelease(
             record.omsOrderId,
             record.id,
@@ -776,6 +812,7 @@ export class OrderEditService {
             "The order payment could not be verified.",
           ),
         );
+      await this.codes(record, "finalize");
       const proof = await this.warehouse.reconcileAndRelease(
         record.omsOrderId,
         record.id,
@@ -877,6 +914,7 @@ export class OrderEditService {
       "refund_confirmed",
     );
     try {
+      await this.codes(record, "finalize");
       const proof = await this.warehouse.reconcileAndRelease(
         record.omsOrderId,
         record.id,
@@ -930,6 +968,7 @@ export class OrderEditService {
           ),
         ),
       );
+    await this.codes(record, "release");
     const proof = fulfilled
       ? await this.warehouse.releaseFulfilledUnsubmitted(
           record.omsOrderId,
@@ -956,6 +995,19 @@ export class OrderEditService {
     return this.store.withOrderLock(record.omsOrderId, async () =>
       work(await this.store.get(id)),
     );
+  }
+  private async codes(
+    record: OrderEditRecord,
+    action: "reserve" | "finalize" | "release",
+  ): Promise<void> {
+    if (!record.quote?.codePricing?.newCodes.length) return;
+    if (!this.codeRedemptions?.available())
+      throw new OrderEditError(
+        "ORDER_EDIT_CODES_UNAVAILABLE",
+        "The code redemption service is unavailable. The order remains held until its code result is verified.",
+        503,
+      );
+    await this.codeRedemptions[action](record.id);
   }
   private async update(
     record: OrderEditRecord,
@@ -997,7 +1049,10 @@ export class OrderEditService {
             "This order edit needs verification. Check its status before trying again.",
         };
   }
-  private present(record: OrderEditRecord): OrderEditOperation {
+  private present(
+    record: OrderEditRecord,
+    codeEntryVersion?: "v1",
+  ): OrderEditOperation {
     const snapshot = record.lastSnapshot ?? record.baseline;
     const quote = record.quote;
     const useCurrent = terminal.has(record.status);
@@ -1013,6 +1068,18 @@ export class OrderEditService {
         .map((line) => line.variantId),
     );
     return orderEditOperationSchema.parse({
+      ...(record.input.discountCodes !== undefined || codeEntryVersion === "v1"
+        ? {
+            codeEntryAvailable: this.codeRedemptions?.available() === true,
+            appliedCodes: quote?.codePricing?.applications ?? [],
+            requestedPlan: {
+              changes: record.input.changes,
+              additions: record.input.additions,
+              discountCodes: record.input.discountCodes ?? [],
+            },
+            expectedRevision: record.input.expectedRevision,
+          }
+        : {}),
       operationId: record.id,
       orderNumber: record.baseline.name,
       currency: record.baseline.currency,
@@ -1034,7 +1101,8 @@ export class OrderEditService {
               id: line.calculatedLineId,
               variantId: line.variantId,
               added:
-                line.variantId !== null && !originalVariants.has(line.variantId),
+                line.variantId !== null &&
+                !originalVariants.has(line.variantId),
               title: line.title,
               variantTitle: line.variantTitle,
               quantity: line.quantity,
@@ -1047,7 +1115,8 @@ export class OrderEditService {
               id: line.id,
               variantId: line.variantId,
               added:
-                line.variantId !== null && !originalVariants.has(line.variantId),
+                line.variantId !== null &&
+                !originalVariants.has(line.variantId),
               title: line.title,
               variantTitle: line.variantTitle,
               quantity: line.quantity,

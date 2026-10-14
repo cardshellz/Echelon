@@ -1,11 +1,12 @@
 .csz-account-dialog { width: min(940px, calc(100vw - 32px)); max-height: calc(100dvh - 32px); margin: auto; padding: 0; border: 1px solid #dedede; border-radius: 14px; overflow: auto; color: #171717; background: #fff; }
 .csz-account-dialog::backdrop { background: #0009; }
-.csz-account-ui { --background: 0 0% 100%; --foreground: 0 0% 9%; --card: 0 0% 100%; --card-foreground: 0 0% 9%; --primary: 24 89% 50%; --primary-foreground: 0 0% 100%; --secondary: 0 0% 96%; --secondary-foreground: 0 0% 9%; --muted: 0 0% 96%; --muted-foreground: 0 0% 40%; --accent: 24 100% 96%; --accent-foreground: 0 0% 9%; --destructive: 0 72% 42%; --border: 0 0% 88%; --input: 0 0% 85%; --ring: 24 89% 50%; --radius: 8px; padding: 24px; font: 16px/1.5 var(--font-body-family, Arial, sans-serif); }
-.csz-dialog-heading { display: flex; justify-content: space-between; align-items: start; gap: 24px; padding-bottom: 20px; margin-bottom: 20px; border-bottom: 1px solid #ddd; }
-.csz-dialog-heading h2 { margin: 0 0 4px; font-size: 24px; font-weight: 700; }
-.csz-dialog-heading p { margin: 0; font-size: 14px; color: #666; }
-.csz-modal-close { flex: 0 0 40px; width: 40px; height: 40px; border: 1px solid #ddd; border-radius: 8px; background: #fff; cursor: pointer; font-size: 26px; }
+.csz-account-ui { --background: 0 0% 100%; --foreground: 0 0% 9%; --card: 0 0% 100%; --card-foreground: 0 0% 9%; --primary: 24 89% 50%; --primary-foreground: 0 0% 100%; --secondary: 0 0% 96%; --secondary-foreground: 0 0% 9%; --muted: 0 0% 96%; --muted-foreground: 0 0% 40%; --accent: 24 100% 96%; --accent-foreground: 0 0% 9%; --destructive: 0 72% 42%; --border: 0 0% 88%; --input: 0 0% 85%; --ring: 24 89% 50%; --radius: 8px; font: 16px/1.5 var(--font-body-family, Arial, sans-serif); }
+.csz-dialog-body { padding: 20px; }
+.csz-dialog-heading { display: flex; justify-content: space-between; align-items: start; gap: 24px; padding: 20px 24px; margin: 0; color: #fff; background: #142033; border-top: 3px solid #e77724; }
+.csz-dialog-heading h2 { margin: 0 0 4px; color: #fff; font-size: 24px; font-weight: 700; }
+.csz-dialog-heading p { margin: 0; font-size: 13px; color: #c5d0df; }
+.csz-modal-close { flex: 0 0 40px; width: 40px; height: 40px; border: 1px solid #ffffff40; border-radius: 8px; background: #ffffff0d; color: #fff; cursor: pointer; font-size: 26px; }
 .csz-modal-close:disabled { opacity: .4; cursor: wait; }
 .csz-account-ui [data-slot="card"] { box-shadow: none; }
 .csz-account-notice { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; padding: 14px 16px; margin: 16px 0; border: 1px solid #e9d5bf; border-radius: 8px; background: #fff8f1; font-size: 14px; }
-@media (max-width: 600px) { .csz-account-dialog { width: calc(100vw - 16px); max-height: calc(100dvh - 16px); } .csz-account-ui { padding: 16px; } .csz-dialog-heading h2 { font-size: 21px; } }
+@media (max-width: 600px) { .csz-account-dialog { width: calc(100vw - 16px); max-height: calc(100dvh - 16px); } .csz-dialog-body { padding: 14px; } .csz-dialog-heading { padding: 16px; gap: 12px; } .csz-dialog-heading h2 { font-size: 21px; } }

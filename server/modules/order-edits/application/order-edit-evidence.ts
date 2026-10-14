@@ -78,13 +78,23 @@ function preservesRecoveryDiscountRules(
   observed: OrderEditSnapshot,
   baseline: OrderEditSnapshot,
   shippingReplaced = false,
+  codeRecovery?: OrderEditQuote,
 ): boolean {
   if (!baseline.discountRules) return true;
   if (!observed.discountRules) return false;
   const wanted = new Set(
     baseline.discountRules
       .filter(
-        (rule) => !shippingReplaced || rule.targetType !== "SHIPPING_LINE",
+        (rule) =>
+          (!shippingReplaced || rule.targetType !== "SHIPPING_LINE") &&
+          !(
+            codeRecovery?.codePricing &&
+            rule.targetType === "LINE_ITEM" &&
+            [
+              "AutomaticDiscountApplication",
+              "ManualDiscountApplication",
+            ].includes(rule.type)
+          ),
       )
       .map((rule) => canonicalJson(rule)),
   );
@@ -109,7 +119,19 @@ function preservesRecoveryDiscountRules(
       (historicalAddedLine &&
         rule.type === "ManualDiscountApplication" &&
         rule.targetType === "LINE_ITEM" &&
-        rule.label === "Echelon member pricing"),
+        rule.label === "Echelon member pricing") ||
+      (Boolean(codeRecovery?.codePricing) &&
+        rule.targetType === "LINE_ITEM" &&
+        ((rule.type === "AutomaticDiscountApplication" &&
+          baseline.discountRules?.some(
+            (original) => canonicalJson(original) === canonicalJson(rule),
+          )) ||
+          (rule.type === "ManualDiscountApplication" &&
+            [
+              "Echelon member pricing",
+              baseline.codePricing?.description,
+              codeRecovery?.codePricing?.description,
+            ].includes(rule.label)))),
   );
 }
 
@@ -193,7 +215,12 @@ export function matchesOrderEditQuote(
             (!shippingWasReplaced(quote) ||
               rule.targetType !== "SHIPPING_LINE") &&
             (rule.type === "DiscountCodeApplication" ||
-              rule.type === "AutomaticDiscountApplication" ||
+              (rule.type === "AutomaticDiscountApplication" &&
+                !(
+                  rule.targetType === "LINE_ITEM" &&
+                  (quote.codePricing ||
+                    quote.evidence.codeDiscountRecovery === true)
+                )) ||
               rule.targetType === "SHIPPING_LINE"),
         )
         .some(
@@ -218,10 +245,17 @@ export function matchesOrderEditQuote(
         !used.has(line.id) &&
         (expected.originalLineId
           ? line.id === expected.originalLineId
-          : !originalIds.has(line.id) && line.variantId === expected.variantId),
+          : !originalIds.has(line.id) &&
+            line.variantId === expected.variantId &&
+            (!quote.codePricing ||
+              (line.quantity === expected.quantity &&
+                line.originalUnitPriceCents ===
+                  expected.originalUnitPriceCents &&
+                line.totalCents === expected.totalCents))),
     );
-    if (candidates.length !== 1) return false;
-    const line = candidates[0];
+    if (!candidates.length || (candidates.length !== 1 && !quote.codePricing))
+      return false;
+    const line = candidates.sort((a, b) => a.id.localeCompare(b.id))[0];
     used.add(line.id);
     if (
       line.variantId !== expected.variantId ||
@@ -280,7 +314,12 @@ export function isUnpaidRecoveryRestored(
     observed.subtotalCents !== baseline.subtotalCents ||
     observed.taxCents !== baseline.taxCents ||
     !matchesOrderEditFinancials(observed.financials, financials) ||
-    !preservesRecoveryDiscountRules(observed, baseline, replaced) ||
+    !preservesRecoveryDiscountRules(
+      observed,
+      baseline,
+      replaced,
+      originalQuote?.codePricing ? originalQuote : undefined,
+    ) ||
     observed.outstandingCents !== 0 ||
     observed.netPaidCents !== baseline.netPaidCents ||
     observed.capturableCents !== 0 ||
@@ -308,8 +347,18 @@ export function isUnpaidRecoveryRestored(
             entry.quantity === line.quantity &&
             entry.unfulfilledQuantity === line.unfulfilledQuantity &&
             entry.originalUnitPriceCents === line.originalUnitPriceCents &&
-            entry.discountedUnitPriceCents === line.discountedUnitPriceCents &&
-            entry.totalCents === line.totalCents,
+            (originalQuote?.codePricing
+              ? baseline.financials?.lines.some(
+                  (financial) =>
+                    financial.id === line.id &&
+                    BigInt(entry.discountedUnitPriceCents) *
+                      BigInt(line.quantity) ===
+                      BigInt(financial.netCents) &&
+                    entry.totalCents === financial.netCents,
+                )
+              : entry.discountedUnitPriceCents ===
+                  line.discountedUnitPriceCents &&
+                entry.totalCents === line.totalCents),
         ) &&
         (!baseline.financials ||
           observed.financials?.lines.find((entry) => entry.id === line.id)
