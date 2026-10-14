@@ -40,6 +40,7 @@ import { queryErrorMessage, type DropshipEbayListingSetupResponse } from "@/lib/
 import { cn } from "@/lib/utils";
 import { EditorSurface } from "./EditorSurface";
 import { useListingSettingsDrafts } from "./ListingSettingsDraftsProvider";
+import { PolicyChoiceList } from "./PolicyChoiceList";
 import { StoreDefaultRow } from "./StoreDefaultRow";
 
 // ---------------------------------------------------------------------------
@@ -529,44 +530,16 @@ function PolicyEditorBody({
           {needs && <ShippingNeeds needs={needs} />}
         </div>
       )}
-      <fieldset disabled={locked} className="space-y-2">
-        <legend className="sr-only">{STORE_DEFAULT_LABELS[kind]}</legend>
-        {draft?.marked.includes("policyId") && (
-          <p className="text-xs font-medium text-amber-900">{STORE_DEFAULT_EDITOR_WORDS.changedElsewhereToo}</p>
-        )}
-        {choices.map((choice) => {
-          const checked = picked === choice.id;
-          const suggested = checked && choice.id === suggestion && base !== suggestion;
-          return (
-            <label
-              key={choice.id}
-              className={cn(
-                "flex min-h-11 items-start gap-3 rounded-md border border-zinc-200 bg-white p-3 text-sm",
-                choice.choosable ? "cursor-pointer" : "cursor-not-allowed bg-zinc-50",
-                checked && "border-[#C060E0]",
-              )}
-            >
-              <input
-                type="radio"
-                name={groupName}
-                className="mt-0.5 h-4 w-4 shrink-0 accent-[#C060E0]"
-                checked={checked}
-                disabled={!choice.choosable}
-                onChange={() => onPick(choice.id)}
-              />
-              <span className="min-w-0">
-                <span className="block break-words font-medium text-zinc-900">{choice.name}</span>
-                {choice.fit && (
-                  <span className={cn("block text-xs", choice.fit.fit === "works" ? "text-emerald-800" : choice.fit.fit === "cant_use" ? "text-rose-800" : "text-zinc-600")}>
-                    {choice.fit.line}
-                  </span>
-                )}
-                {suggested && <span className="block text-xs font-medium text-amber-800">{STORE_DEFAULT_EDITOR_WORDS.suggested}</span>}
-              </span>
-            </label>
-          );
-        })}
-      </fieldset>
+      <PolicyChoiceList
+        name={groupName}
+        legend={STORE_DEFAULT_LABELS[kind]}
+        choices={choices}
+        picked={picked}
+        disabled={locked}
+        marked={draft?.marked.includes("policyId") === true}
+        suggestedId={suggestion !== null && base !== suggestion ? suggestion : null}
+        onPick={onPick}
+      />
       {needs && !noneFits && (
         <details className="text-sm text-zinc-700">
           <summary className="cursor-pointer font-medium text-zinc-900">{needs.title} ›</summary>

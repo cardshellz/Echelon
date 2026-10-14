@@ -3,6 +3,7 @@ import rateLimit from "express-rate-limit";
 import type { z } from "zod";
 import {
   LISTING_SETTING_WRITE_ERROR_CODES,
+  acknowledgeCategoryMovesResponseSchema,
   applyPriceChangesResponseSchema,
   priceChangeReviewIdSchema,
   priceChangeReviewResponseSchema,
@@ -80,6 +81,11 @@ export function registerDropshipListingSettingWritesRoutes(
   app.post(`${base}/price-changes/apply`, requireDropshipAuth, bulkLimiter, parseBody, (req, res) => respond(req, res,
     applyPriceChangesResponseSchema, () => services.priceChanges.applyForMember(memberId(req), parseId(req.params.storeConnectionId), req.body),
     W7_BODY_IDS));
+  // W13 (plan 10.3): one vendor action ("Got it", or "Got it for all N" with up to 10,000 products), so the single
+  // budget it shares with W5 and W12 (plan P7); the 1 MiB parser, as a 10,000-item body is about 530 KB.
+  app.post(`${base}/category-moves/acknowledge`, requireDropshipAuth, singleLimiter, parseBody, (req, res) => respond(req, res,
+    acknowledgeCategoryMovesResponseSchema, () => services.categoryMoves.acknowledgeForMember(memberId(req),
+      parseId(req.params.storeConnectionId), req.body)));
 }
 
 /** One budget per call: build each once and share it (plan 3.5). The words are the write's unless a read's are given. */

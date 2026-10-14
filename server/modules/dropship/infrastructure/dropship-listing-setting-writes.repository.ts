@@ -409,7 +409,7 @@ export class PgDropshipListingSettingWritesRepository implements ListingSettingW
     try {
       return await readMemberPriceChangeReview(this.dbPool, input);
     } catch (error) {
-      throw isPoolAcquireTimeout(error) ? databaseUnavailable("pool_acquire_timeout") : mapListingSettingWriteError(error);
+      throw mapListingSettingDatabaseError(error);
     }
   }
 
@@ -476,7 +476,7 @@ export class PgDropshipListingSettingWritesRepository implements ListingSettingW
       client = await this.dbPool.connect();
     } catch (error) {
       // No transaction was opened, so nothing to roll back; a pool timeout or a refused connection is retryable.
-      throw isPoolAcquireTimeout(error) ? databaseUnavailable("pool_acquire_timeout") : mapListingSettingWriteError(error);
+      throw mapListingSettingDatabaseError(error);
     }
     let open = true;
     const isOpen = () => open;
@@ -1241,6 +1241,16 @@ export function mapListingSettingWriteError(error: unknown): unknown {
     return databaseUnavailable(code);
   }
   return error;
+}
+
+/**
+ * A failure outside a write transaction's body (taking a connection, or a
+ * read on the pool), mapped as a write's would be; a pool with no free
+ * connection in time is the retryable BUSY too. Used by the reads here and by
+ * the first-mark job's reads (dropship-category-marks-job.source.ts).
+ */
+export function mapListingSettingDatabaseError(error: unknown): unknown {
+  return isPoolAcquireTimeout(error) ? databaseUnavailable("pool_acquire_timeout") : mapListingSettingWriteError(error);
 }
 
 /** The connection failures above as the retryable BUSY answer (503 with Retry-After). */

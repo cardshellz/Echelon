@@ -36,7 +36,7 @@ import { ListingSettingsHeader } from "./ListingSettingsHeader";
 import { ListingSettingsTabs, type ListingSettingsProductTarget, type ListingSettingsTabsRequest } from "./ListingSettingsTabs";
 import { PolicyDefaultRow, liveSetup } from "./PolicyDefaultRow";
 import { PriceDefaultRow } from "./PriceDefaultRow";
-import { ProductDrawer } from "./ProductDrawer";
+import { ProductDrawer, type DrawerLandingRequest } from "./ProductDrawer";
 import { ShelfDefaultRow } from "./ShelfDefaultRow";
 import { ShipFromRepairNote } from "./ShipFromRepairNote";
 import { StoreDefaultsCard } from "./StoreDefaultsCard";
@@ -135,6 +135,11 @@ export function ListingSettingsStep(props: ListingSettingsStepProps) {
   // from the banner, or until they leave the step (the step is keyed by store and unmounts).
   const [blocked, setBlocked] = useState<ConnectionBanner | null>(null);
   const [tabsRequest, setTabsRequest] = useState<ListingSettingsTabsRequest | null>(null);
+  // A drawer row an attention [Fix] lands on (plan 5.2); one request per press, forgotten once the drawer handled it or closed.
+  const [landing, setLanding] = useState<DrawerLandingRequest | null>(null);
+  useEffect(() => {
+    if (drawerTarget === null) setLanding(null);
+  }, [drawerTarget]);
   const defaultsRef = useRef<HTMLDivElement | null>(null);
   const tabsRef = useRef<HTMLDivElement | null>(null);
   const drawerOpener = useRef<HTMLElement | null>(null);
@@ -218,8 +223,12 @@ export function ListingSettingsStep(props: ListingSettingsStepProps) {
    * drawer on that size (plan 2F): the product is read first, under the
    * drawer's own key, so the drawer opens from that answer.
    */
-  const openProductFix = useCallback(async (productId: number, fix: Extract<AttentionAction, { kind: "open_product" }>["fix"]) => {
+  const openProductFix = useCallback(async (action: Extract<AttentionAction, { kind: "open_product" }>) => {
+    const { productId, fix } = action;
     if (fix !== "size_cannot_be_priced") {
+      // The description conflict lands on the Description row and opens it (plan 5.2).
+      const row = action.row;
+      if (row !== undefined) setLanding((previous) => ({ productId, row, requestId: (previous?.requestId ?? 0) + 1 }));
       openDrawer({ productId });
       return;
     }
@@ -255,7 +264,7 @@ export function ListingSettingsStep(props: ListingSettingsStepProps) {
         tabsRef.current?.scrollIntoView?.({ block: "start" });
         return;
       case "open_product":
-        void openProductFix(action.productId, action.fix);
+        void openProductFix(action);
         return;
     }
   }, [openPolicyEditor, openProductFix]);
@@ -373,6 +382,10 @@ export function ListingSettingsStep(props: ListingSettingsStepProps) {
         target={drawerTarget}
         rights={rights}
         setup={{ data: setupQuery.data, error: setupQuery.error }}
+        // The shelf editor lists the shelves only while their read answers (rights.shelfPick says the same).
+        shelves={shelves.data !== undefined && (shelves.error === undefined || shelves.error === null) ? shelves.data.categories : null}
+        landing={landing}
+        onLanded={() => setLanding(null)}
         summaryRecipe={summary.data?.storeDefaults.price.recipe}
         onClose={closeDrawer}
         saveCallbacks={saveCallbacks}

@@ -25,6 +25,8 @@ import { DropshipListingProductSettingsService } from "../../application/dropshi
 import { DropshipListingProductsBulkService } from "../../application/dropship-listing-products-bulk-service";
 import { DropshipListingCategorySettingsService } from "../../application/dropship-listing-category-settings-service";
 import { DropshipListingPriceChangesService } from "../../application/dropship-listing-price-changes-service";
+import { DropshipListingCategoryMovesService } from "../../application/dropship-listing-category-moves-service";
+import { DropshipCategoryMarksJobService } from "../../application/dropship-category-marks-job-service";
 import { ListingSettingHeavyWriteGate } from "../../application/dropship-listing-setting-write-support";
 import type { ListingSettingEbayPort } from "../../application/dropship-listing-setting-ebay-values";
 import type { DropshipEbayListingSetupDiscovery } from "../../application/dropship-ebay-listing-setup-service";
@@ -40,6 +42,7 @@ import {
   mapListingSettingWriteError,
 } from "../../infrastructure/dropship-listing-setting-writes.repository";
 import { PgDropshipPricingRulesRepository } from "../../infrastructure/dropship-pricing-rules.repository";
+import { PgDropshipCategoryMarksJobSource } from "../../infrastructure/dropship-category-marks-job.source";
 
 vi.mock("../../../../db", () => ({ pool: {}, db: {} }));
 config({ path: resolve(process.cwd(), ".env.test") });
@@ -1061,6 +1064,40 @@ describeDatabase.sequential("listing-settings writes on PostgreSQL (plan PR 9)",
         revisionId: current.rows[0].id, previousRevisionId: previous, after: null, requestKey: productKey("content-reset"),
         before: { bytes: Buffer.byteLength(text, "utf8"), sha256: createHash("sha256").update(text, "utf8").digest("hex") } } }]);
       expect(JSON.stringify(audit.rows)).not.toContain("Own words");
+    });
+
+    it("re-saves the same own main text against Card Shellz's product as it is now: changed with a new revision, then unchanged (PR 10b A2)", async () => {
+      const text = "Own words for the toploader.";
+      const OLD_HASH = "e".repeat(64);
+      // Product 7's own main text, written against an older Card Shellz product; no size keeps text of its own.
+      await execute(`INSERT INTO dropship.dropship_product_listing_setting_revisions
+        (vendor_id, store_connection_id, product_id, previous_revision_id, request_id, body_text, body_catalog_hash,
+         idempotency_key, request_hash, actor_type, actor_id, created_at)
+        VALUES ($1, $2, $3, NULL, NULL, $4, $5, 'seed-body:7', $6, 'vendor', 'seed', $7)`, [VENDOR, STORE, PRODUCT_7, text, OLD_HASH, "d".repeat(64), NOW]);
+      await execute(`INSERT INTO dropship.dropship_product_listing_settings (vendor_id, store_connection_id, product_id, revision_id)
+        SELECT vendor_id, store_connection_id, product_id, id FROM dropship.dropship_product_listing_setting_revisions WHERE idempotency_key = 'seed-body:7'`);
+      const seeded = (await execute(`SELECT revision_id FROM dropship.dropship_product_listing_settings WHERE store_connection_id = $1 AND product_id = $2`,
+        [STORE, PRODUCT_7])).rows[0].revision_id as number;
+      const current = async () => (await execute(`SELECT r.id, r.previous_revision_id, r.body_text, r.body_catalog_hash
+        FROM dropship.dropship_product_listing_settings s JOIN dropship.dropship_product_listing_setting_revisions r ON r.id = s.revision_id
+        WHERE s.store_connection_id = $1 AND s.product_id = $2`, [STORE, PRODUCT_7])).rows[0];
+
+      // [Keep my text]: the same text, sent alone; W5 stamps the product as it is now, and the repository's
+      // comparison (hash included) calls it a change, so a new revision is written (plan 5.4, A2).
+      const kept = await products().saveForMember(MEMBER, STORE, PRODUCT_7, { idempotencyKey: productKey("keep-text"),
+        expectedRevisionId: seeded, patch: { mainText: { text } } });
+      expect(kept).toMatchObject({ outcome: "changed", clearedSizeCount: 0 });
+      expect(kept.revisionId).not.toBe(seeded);
+      const stamped = await current();
+      expect(stamped).toMatchObject({ id: kept.revisionId, previous_revision_id: seeded, body_text: text });
+      expect(stamped.body_catalog_hash).toMatch(/^[a-f0-9]{64}$/);
+      expect(stamped.body_catalog_hash).not.toBe(OLD_HASH);
+
+      // The stamp is the product's hash now: the same text again is no change, and no revision is written.
+      const again = await products().saveForMember(MEMBER, STORE, PRODUCT_7, { idempotencyKey: productKey("keep-text-again"),
+        expectedRevisionId: kept.revisionId, patch: { mainText: { text } } });
+      expect(again).toMatchObject({ outcome: "unchanged", revisionId: kept.revisionId });
+      expect(await current()).toEqual(stamped);
     });
 
     it("pins PostgreSQL's name for the content revision key, and maps a real 23505 on it to the key conflict (PG 5)", async () => {
@@ -2807,6 +2844,318 @@ describeDatabase.sequential("listing-settings writes on PostgreSQL (plan PR 9)",
       expect(error.context?.textBytes as number).toBeGreaterThan(MAX_BULK_TEXT_BYTES);
       // Refused after its insert, in its transaction: the row rolled back with it.
       expect(await count("dropship.dropship_pricing_reviews")).toBe(before);
+    }, BULK_TEST_TIMEOUT_MS);
+  });
+
+  describe("W13, \"Got it\" (POST …/category-moves/acknowledge), and the first-mark job (plan PR 9, 10.4, 10.5, 10.9)", () => {
+    const LATER = new Date("2026-10-12T10:30:00.000Z");
+    const JOB_KEY = "category-marks:2026-10-12T09";
+    const SLEEVES = 5;
+    const SECOND_PRODUCT = 8;
+    const MISSING_PRODUCT = 999;
+    const movesKey = (label: string) => `category-moves:${label}`;
+    const moves = (repositoryPool: Pool = scopedPool(), now = LATER) => new DropshipListingCategoryMovesService({
+      repository: new PgDropshipListingSettingWritesRepository(repositoryPool), clock: { now: () => now }, timer: () => performance.now(), log });
+    const jobLog = { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+    /** The job as production wires it (dropship-category-marks.factory.ts), over the isolated schema: the real source and wrapper. */
+    const job = (repositoryPool: Pool = scopedPool(), now = NOW) => new DropshipCategoryMarksJobService({
+      source: new PgDropshipCategoryMarksJobSource(repositoryPool), repository: new PgDropshipListingSettingWritesRepository(repositoryPool),
+      clock: { now: () => now }, timer: () => performance.now(), log: jobLog });
+    const marksOf = async (storeId: number) => (await execute(`SELECT product_id, category_id, seen_at FROM dropship.dropship_product_category_seen
+      WHERE store_connection_id = $1 ORDER BY product_id`, [storeId])).rows;
+    const markWrites = async () => ({
+      marks: await count("dropship.dropship_product_category_seen"),
+      ledger: await count("dropship.dropship_product_listing_setting_requests"),
+      audit: await count("dropship.dropship_audit_events"),
+    });
+    /** A Toploaders product with one sellable size: chosen by every vendor whose rules choose the catalog. */
+    async function seedChosenProduct(productId: number, sizeId: number): Promise<void> {
+      await execute(`INSERT INTO catalog.products (id, sku, name, category, category_id, product_type, shopify_product_id)
+        VALUES ($1::int, 'MARK-' || $1::text, 'Product ' || $1::text, 'Toploaders', $2, 'toploader', (8100000000 + $1::int)::text)`,
+      [productId, TOPLOADERS]);
+      await execute(`INSERT INTO catalog.product_variants (id, product_id, sku, name, shopify_variant_id, weight_grams, sales_eligibility)
+        VALUES ($1::int, $2::int, 'MARK-SIZE-' || $1::text, 'One', (7400000000 + $1::int)::text, 100, 'sellable')`, [sizeId, productId]);
+    }
+    const requestHashOfMoves = (storeConnectionId: number, items: Array<{ productId: number; shownCategoryId: number | null }>) =>
+      listingSettingRequestHash({ operation: "category_moves_acknowledge_v1", storeConnectionId,
+        items: [...items].sort((left, right) => left.productId - right.productId) });
+
+    beforeEach(async () => {
+      for (const mock of Object.values(jobLog)) mock.mockClear();
+      await execute("INSERT INTO catalog.product_categories (id, name) VALUES (5, 'Sleeves')");
+      // A second chosen product of the Toploaders category.
+      await seedChosenProduct(SECOND_PRODUCT, 801);
+    });
+
+    it("acknowledges through the real wrapper: the shown category, a product moved again, one gone, with its ledger and audit rows", async () => {
+      await job().runOnce();
+      expect(await marksOf(STORE)).toEqual([{ product_id: PRODUCT_7, category_id: TOPLOADERS, seen_at: NOW },
+        { product_id: SECOND_PRODUCT, category_id: TOPLOADERS, seen_at: NOW }]);
+      // Card Shellz moves both to Sleeves; product 8 moves again (to no category) before the vendor confirms.
+      await execute("UPDATE catalog.products SET category_id = $1 WHERE id IN (7, 8)", [SLEEVES]);
+      await execute("UPDATE catalog.products SET category_id = NULL WHERE id = 8");
+      const items = [{ productId: MISSING_PRODUCT, shownCategoryId: SLEEVES }, { productId: SECOND_PRODUCT, shownCategoryId: SLEEVES },
+        { productId: PRODUCT_7, shownCategoryId: SLEEVES }];
+
+      const result = await moves().acknowledgeForMember(MEMBER, STORE, { idempotencyKey: movesKey("got-it"), items });
+
+      expect(result).toEqual({ outcome: "acknowledged", acknowledgedProductIds: [PRODUCT_7], movedAgainProductIds: [SECOND_PRODUCT] });
+      expect(await marksOf(STORE)).toEqual([{ product_id: PRODUCT_7, category_id: SLEEVES, seen_at: LATER },
+        { product_id: SECOND_PRODUCT, category_id: TOPLOADERS, seen_at: NOW }]);
+      // Vendor 11's store keeps its own marks.
+      expect(await marksOf(OTHER_VENDOR_STORE)).toEqual([{ product_id: PRODUCT_7, category_id: TOPLOADERS, seen_at: NOW },
+        { product_id: SECOND_PRODUCT, category_id: TOPLOADERS, seen_at: NOW }]);
+      const ledger = await execute(`SELECT vendor_id, store_connection_id, operation, idempotency_key, request_hash, product_count, actor_type, actor_id
+        FROM dropship.dropship_product_listing_setting_requests`);
+      expect(ledger.rows).toEqual([{ vendor_id: VENDOR, store_connection_id: STORE, operation: "category_moves_acknowledge",
+        idempotency_key: movesKey("got-it"), request_hash: requestHashOfMoves(STORE, items), product_count: 1, actor_type: "vendor",
+        actor_id: MEMBER }]);
+      const audit = await execute(`SELECT event_type, actor_type, actor_id, payload FROM dropship.dropship_audit_events
+        WHERE event_type = 'category_moves_acknowledged'`);
+      expect(audit.rows).toEqual([{ event_type: "category_moves_acknowledged", actor_type: "vendor", actor_id: MEMBER,
+        payload: expect.objectContaining({ requestKey: movesKey("got-it"),
+          acknowledged: [{ productId: PRODUCT_7, hadMark: true, from: TOPLOADERS, to: SLEEVES }], acknowledgedCount: 1,
+          movedAgain: [SECOND_PRODUCT], movedAgainCount: 1, notInCatalog: [MISSING_PRODUCT], notInCatalogCount: 1 }) }]);
+      expect(log.info).toHaveBeenCalledWith("dropship.listing_settings.category_moves_acknowledged", expect.objectContaining({
+        outcome: "acknowledged", vendor_id: VENDOR, store_connection_id: STORE, item_count: 3, acknowledged_count: 1, moved_again_count: 1,
+        acknowledged_product_ids: [PRODUCT_7], moved_again_product_ids: [SECOND_PRODUCT] }));
+    });
+
+    it("answers a retry from the probe's ledger row as replayed, in exactly 7 statements, writing nothing", async () => {
+      await job().runOnce();
+      await execute("UPDATE catalog.products SET category_id = $1 WHERE id = 7", [SLEEVES]);
+      const body = { idempotencyKey: movesKey("retry"), items: [{ productId: PRODUCT_7, shownCategoryId: SLEEVES }] };
+      await expect(moves().acknowledgeForMember(MEMBER, STORE, body)).resolves.toMatchObject({ outcome: "acknowledged" });
+      // Card Shellz moves it again after the commit; the retry is answered from the ledger, not checked again.
+      await execute("UPDATE catalog.products SET category_id = NULL WHERE id = 7");
+      const before = await markWrites();
+      const counter: StatementCounter = { statements: 0 };
+
+      const retry = await moves(scopedPool(counter)).acknowledgeForMember(MEMBER, STORE, body);
+
+      expect(retry).toEqual({ outcome: "replayed", acknowledgedProductIds: [], movedAgainProductIds: [] });
+      expect(await markWrites()).toEqual(before);
+      // BEGIN, request lock, store lock, owner rows, the gate's store read, the probe, COMMIT: no writer.
+      expect(counter.statements).toBe(7);
+    });
+
+    it("refuses a key a W8 save used with the permanent 409, writing nothing", async () => {
+      const shared = "shared-key:7f9c2ba4-e88f-4a5e-9d1b-1c2d3e4f5a6b";
+      await sizePrices().saveForMember(MEMBER, STORE, { idempotencyKey: shared, rows: [row(101)] });
+      const before = await markWrites();
+
+      const error = await expectDropshipError(moves().acknowledgeForMember(MEMBER, STORE, { idempotencyKey: shared,
+        items: [{ productId: PRODUCT_7, shownCategoryId: TOPLOADERS }] }), "DROPSHIP_IDEMPOTENCY_CONFLICT");
+
+      expect(error.context).toMatchObject({ storeConnectionId: STORE, mismatched: ["size", "size.requestHash"], classification: "permanent" });
+      expect(await markWrites()).toEqual(before);
+    });
+
+    it("rolls the marks and the ledger row back with a failed audit row, then commits the same request once (3.12 #7)", async () => {
+      await job().runOnce();
+      await execute("UPDATE catalog.products SET category_id = $1 WHERE id IN (7, 8)", [SLEEVES]);
+      const before = await markWrites();
+      const marks = await marksOf(STORE);
+      const body = { idempotencyKey: movesKey("atomic"), items: [{ productId: PRODUCT_7, shownCategoryId: SLEEVES },
+        { productId: SECOND_PRODUCT, shownCategoryId: SLEEVES }] };
+      // The audit row is the writer's last statement: the marks' upsert and the ledger row are written by then.
+      const failing = scopedPool(undefined, (sql) => {
+        if (sql.includes("'category_moves_acknowledged'")) throw new Error("injected audit failure");
+      });
+
+      await expect(moves(failing).acknowledgeForMember(MEMBER, STORE, body)).rejects.toThrow("injected audit failure");
+
+      expect(await markWrites()).toEqual(before);
+      expect(await marksOf(STORE)).toEqual(marks);
+      expect(log.info).not.toHaveBeenCalled();
+
+      // The rolled-back attempt spent no key: the same request commits once.
+      await expect(moves().acknowledgeForMember(MEMBER, STORE, body)).resolves.toEqual({ outcome: "acknowledged",
+        acknowledgedProductIds: [PRODUCT_7, SECOND_PRODUCT], movedAgainProductIds: [] });
+      expect(await markWrites()).toEqual({ marks: before.marks, ledger: before.ledger + 1, audit: before.audit + 1 });
+      expect(await marksOf(STORE)).toEqual([{ product_id: PRODUCT_7, category_id: SLEEVES, seen_at: LATER },
+        { product_id: SECOND_PRODUCT, category_id: SLEEVES, seen_at: LATER }]);
+    });
+
+    it("refuses another vendor's store (the owner check) and a paused store (the gate), writing nothing", async () => {
+      const body = { idempotencyKey: movesKey("gate"), items: [{ productId: PRODUCT_7, shownCategoryId: TOPLOADERS }] };
+      await expectDropshipError(moves().acknowledgeForMember(MEMBER, OTHER_VENDOR_STORE, body), "DROPSHIP_STORE_CONNECTION_REQUIRED");
+      await execute("UPDATE dropship.dropship_store_connections SET status = 'paused' WHERE id = $1", [STORE]);
+      const paused = await expectDropshipError(moves().acknowledgeForMember(MEMBER, STORE, body), "DROPSHIP_LISTING_STORE_BLOCKED");
+      expect(paused.context).toMatchObject({ reason: "paused", classification: "permanent" });
+      expect(await markWrites()).toEqual({ marks: 0, ledger: 0, audit: 0 });
+    });
+
+    it("serializes one key sent twice at once: the same body replays, another body is a conflict, another store too", async () => {
+      const body = { idempotencyKey: movesKey("twice"), items: [{ productId: PRODUCT_7, shownCategoryId: TOPLOADERS }] };
+      const paused = gate((sql) => sql === "COMMIT");
+      const first = moves(scopedPool(undefined, paused.hook)).acknowledgeForMember(MEMBER, STORE, body);
+      let second: Promise<unknown> | undefined;
+      let third: Promise<unknown> | undefined;
+      try {
+        await within(paused.reached, "the first Got it's commit");
+        second = moves().acknowledgeForMember(MEMBER, STORE, body);
+        third = moves().acknowledgeForMember(MEMBER, STORE, { ...body, items: [{ productId: PRODUCT_7, shownCategoryId: null }] })
+          .then(() => null, (reason: unknown) => reason);
+        await waitUntilLockWait("dropship_listing_settings_request", 2);
+        paused.open();
+        await expect(within(first, "the first Got it")).resolves.toEqual({ outcome: "acknowledged", acknowledgedProductIds: [PRODUCT_7],
+          movedAgainProductIds: [] });
+        await expect(within(second, "the same body")).resolves.toEqual({ outcome: "replayed", acknowledgedProductIds: [],
+          movedAgainProductIds: [] });
+        await expect(within(third, "another body")).resolves.toMatchObject({ code: "DROPSHIP_IDEMPOTENCY_CONFLICT",
+          context: { mismatched: ["ledger.requestHash"] } });
+      } finally {
+        paused.open();
+        await within(Promise.allSettled([first, ...(second ? [second] : []), ...(third ? [third] : [])]), "the same-key case's clean-up");
+      }
+      expect(await count("dropship.dropship_product_listing_setting_requests")).toBe(1);
+
+      // The member's second store, the same key: the probe sees the first store's ledger row.
+      await addVendorStore(24);
+      const otherStore = await expectDropshipError(moves().acknowledgeForMember(MEMBER, 24, body), "DROPSHIP_IDEMPOTENCY_CONFLICT");
+      expect(otherStore.context?.mismatched).toEqual(["ledger.requestHash", "ledger.storeConnectionId"]);
+    });
+
+    it("marks the chosen products of every eligible store once; a rerun in the same hour inserts and audits nothing", async () => {
+      // Vendor 10's other stores: one needing a sign-in and one whose token refresh failed (marked), paused and Shopify (skipped).
+      for (const [storeId, platform, status] of [[24, "ebay", "needs_reauth"], [25, "ebay", "refresh_failed"], [26, "ebay", "paused"],
+        [27, "shopify", "connected"]] as const) {
+        await execute(`INSERT INTO dropship.dropship_store_connections (id, vendor_id, platform, access_token_ref, refresh_token_ref, status, setup_status)
+          VALUES ($1, $2, $3, 'vault:a', 'vault:r', $4, 'ready')`, [storeId, VENDOR, platform, status]);
+      }
+      // A closed vendor's store (skipped) and an onboarding vendor's store (marked), each choosing the whole catalog.
+      await execute(`INSERT INTO membership.member_subscriptions VALUES ('sub-3', 'member-3', 'ops'), ('sub-4', 'member-4', 'ops');
+        INSERT INTO dropship.dropship_vendors (id, member_id, current_subscription_id, current_plan_id, status, entitlement_status)
+          VALUES (12, 'member-3', 'sub-3', 'ops', 'closed', 'active'), (13, 'member-4', 'sub-4', 'ops', 'onboarding', 'active');
+        INSERT INTO dropship.dropship_store_connections (id, vendor_id, platform, access_token_ref, refresh_token_ref, status, setup_status)
+          VALUES (28, 12, 'ebay', 'vault:a', 'vault:r', 'connected', 'ready'), (29, 13, 'ebay', 'vault:a', 'vault:r', 'connected', 'ready');
+        INSERT INTO dropship.dropship_vendor_selection_rules (id, vendor_id, scope_type, action, priority)
+          VALUES (3, 12, 'catalog', 'include', 0), (4, 13, 'catalog', 'include', 0);`);
+      // Product 9's only size is not sellable (no one chooses it); vendor 10 leaves product 10 out.
+      await execute(`INSERT INTO catalog.products (id, sku, name, category, category_id, product_type, shopify_product_id)
+          VALUES (9, 'NS', 'Not for sale', 'Toploaders', 3, 'toploader', '8000000009');
+        INSERT INTO catalog.product_variants (id, product_id, sku, name, shopify_variant_id, weight_grams, sales_eligibility)
+          VALUES (901, 9, 'NS-1', 'One', '7000000901', 100, 'not_sellable');`);
+      await seedChosenProduct(10, 1001);
+      await execute(`INSERT INTO dropship.dropship_vendor_selection_rules (id, vendor_id, scope_type, action, product_id, priority)
+        VALUES (5, 10, 'product', 'exclude', 10, 0)`);
+
+      const result = await job().runOnce();
+
+      expect(result).toMatchObject({ jobKey: JOB_KEY, storesScanned: 5, vendorsScanned: 3, vendorsFailed: 0, storesFailed: 0, insertedCount: 12 });
+      const marked = await execute(`SELECT store_connection_id, array_agg(product_id ORDER BY product_id) AS products
+        FROM dropship.dropship_product_category_seen GROUP BY store_connection_id ORDER BY store_connection_id`);
+      expect(marked.rows).toEqual([
+        { store_connection_id: STORE, products: [PRODUCT_7, SECOND_PRODUCT] },
+        { store_connection_id: OTHER_VENDOR_STORE, products: [PRODUCT_7, SECOND_PRODUCT, 10] },
+        { store_connection_id: 24, products: [PRODUCT_7, SECOND_PRODUCT] },
+        { store_connection_id: 25, products: [PRODUCT_7, SECOND_PRODUCT] },
+        { store_connection_id: 29, products: [PRODUCT_7, SECOND_PRODUCT, 10] },
+      ]);
+      expect(await count("dropship.dropship_product_category_seen", "seen_at <> $1 OR category_id <> $2", [NOW, TOPLOADERS])).toBe(0);
+      const audit = await execute(`SELECT store_connection_id, entity_type, actor_type, actor_id, payload->>'insertedCount' AS inserted
+        FROM dropship.dropship_audit_events WHERE event_type = 'category_marks_seeded' ORDER BY store_connection_id`);
+      expect(audit.rows).toEqual([[STORE, 2], [OTHER_VENDOR_STORE, 3], [24, 2], [25, 2], [29, 3]].map(([storeId, inserted]) => ({
+        store_connection_id: storeId, entity_type: "dropship_store_connection", actor_type: "system", actor_id: JOB_KEY,
+        inserted: String(inserted) })));
+      expect(jobLog.info).toHaveBeenCalledWith("dropship.listing_settings.category_marks_tick", expect.objectContaining({
+        outcome: "completed", inserted_count: 12 }));
+      const before = await markWrites();
+
+      // Restarted later in the same hour (or a second dyno once the lock frees): the same key, nothing to insert.
+      jobLog.info.mockClear();
+      const rerun = await job(scopedPool(), new Date("2026-10-12T09:45:00.000Z")).runOnce();
+
+      expect(rerun).toMatchObject({ jobKey: JOB_KEY, storesScanned: 5, insertedCount: 0, storesFailed: 0, vendorsFailed: 0 });
+      expect(await markWrites()).toEqual(before);
+      expect(jobLog.info).not.toHaveBeenCalled();
+      expect(jobLog.debug).toHaveBeenCalledWith("dropship.listing_settings.category_marks_tick", expect.objectContaining({ inserted_count: 0 }));
+    });
+
+    describe("concurrency", () => {
+      it("(a) makes the job's insert wait for a listing write holding the store lock, then marks", async () => {
+        const paused = gate((sql) => sql === "COMMIT");
+        const w5 = products(scopedPool(undefined, paused.hook)).saveForMember(MEMBER, STORE, PRODUCT_7, {
+          idempotencyKey: productKey("before-marks"), expectedRevisionId: null, patch: { storeShelf: { mode: "none" } } });
+        let tick: Promise<unknown> | undefined;
+        try {
+          await within(paused.reached, "the W5 commit");
+          tick = job().runOnce();
+          await waitUntilLockWait("dropship_listing_push_job", 1);
+          expect(await count("dropship.dropship_product_category_seen")).toBe(0);
+          paused.open();
+          await expect(within(w5, "W5")).resolves.toMatchObject({ outcome: "changed" });
+          await expect(within(tick, "the tick")).resolves.toMatchObject({ insertedCount: 4, storesFailed: 0 });
+        } finally {
+          paused.open();
+          await within(Promise.allSettled([w5, ...(tick ? [tick] : [])]), "the store-lock case's clean-up");
+        }
+        expect(await marksOf(STORE)).toEqual([{ product_id: PRODUCT_7, category_id: TOPLOADERS, seen_at: NOW },
+          { product_id: SECOND_PRODUCT, category_id: TOPLOADERS, seen_at: NOW }]);
+      });
+
+      it("(b) inserts nothing for a product a Got it marked while the job's insert waited", async () => {
+        const paused = gate((sql) => sql === "COMMIT");
+        const gotIt = moves(scopedPool(undefined, paused.hook)).acknowledgeForMember(MEMBER, STORE, { idempotencyKey: movesKey("during-tick"),
+          items: [{ productId: PRODUCT_7, shownCategoryId: TOPLOADERS }] });
+        let tick: Promise<unknown> | undefined;
+        try {
+          await within(paused.reached, "the Got it's commit");
+          tick = job().runOnce();
+          await waitUntilLockWait("dropship_listing_push_job", 1);
+          paused.open();
+          await expect(within(gotIt, "the Got it")).resolves.toMatchObject({ outcome: "acknowledged", acknowledgedProductIds: [PRODUCT_7] });
+          // Store 22: only product 8 is new; store 23 (vendor 11): both.
+          await expect(within(tick, "the tick")).resolves.toMatchObject({ insertedCount: 3, storesFailed: 0 });
+        } finally {
+          paused.open();
+          await within(Promise.allSettled([gotIt, ...(tick ? [tick] : [])]), "the Got-it-during-tick case's clean-up");
+        }
+        // The Got it's mark is kept as it wrote it (its time, not the job's), and the job's audit names product 8 only.
+        expect(await marksOf(STORE)).toEqual([{ product_id: PRODUCT_7, category_id: TOPLOADERS, seen_at: LATER },
+          { product_id: SECOND_PRODUCT, category_id: TOPLOADERS, seen_at: NOW }]);
+        const seeded = await execute(`SELECT payload FROM dropship.dropship_audit_events
+          WHERE event_type = 'category_marks_seeded' AND store_connection_id = $1`, [STORE]);
+        expect(seeded.rows).toEqual([{ payload: { jobKey: JOB_KEY, insertedCount: 1, productIds: [SECOND_PRODUCT] } }]);
+      });
+    });
+
+    it("measures the job over 10,000 chosen products in one store, then one Got it for all 10,000 (logged, not asserted)", async () => {
+      const PRODUCTS = MAX_LISTING_SETTING_BULK_PRODUCTS;
+      const FIRST_PRODUCT = 20_001;
+      const FIRST_SIZE = 300_001;
+      // One store: vendor 11's is disconnected, so the tick scans one vendor and inserts in one store.
+      await execute("UPDATE dropship.dropship_store_connections SET status = 'disconnected' WHERE id = $1", [OTHER_VENDOR_STORE]);
+      await execute(`INSERT INTO catalog.products (id, sku, name, category, category_id, product_type, shopify_product_id)
+        SELECT g, 'MARK-' || g, 'Marked product ' || g, 'Toploaders', $3, 'toploader', (9200000000 + g)::text
+        FROM generate_series($1::int, $2::int) g`, [FIRST_PRODUCT, FIRST_PRODUCT + PRODUCTS - 1, TOPLOADERS]);
+      await execute(`INSERT INTO catalog.product_variants (id, product_id, sku, name, shopify_variant_id, weight_grams, sales_eligibility)
+        SELECT $1::int + i, $3::int + i, 'MARK-SIZE-' || i, 'Size ' || i, (7300000000 + i)::text, 100, 'sellable'
+        FROM generate_series(0, $2::int - 1) i`, [FIRST_SIZE, PRODUCTS, FIRST_PRODUCT]);
+      const counter: StatementCounter = { statements: 0 };
+
+      const result = await measure(`first-mark job, ${PRODUCTS} chosen products`, PRODUCTS, counter, () => job(scopedPool(counter)).runOnce());
+
+      // Product 7, product 8 and the 10,000.
+      expect(result).toMatchObject({ storesScanned: 1, vendorsScanned: 1, insertedCount: PRODUCTS + 2, storesFailed: 0, vendorsFailed: 0 });
+      expect(await count("dropship.dropship_product_category_seen", "store_connection_id = $1", [STORE])).toBe(PRODUCTS + 2);
+      process.stdout.write(`${JSON.stringify({ measurement: "first-mark job tick", elapsed_ms: result.elapsedMs,
+        inserted_count: result.insertedCount, statements: counter.statements })}\n`);
+
+      // Card Shellz moves all of them; "Got it for all N" (plan 10.8 #1) at W13's bound, 10,000 items in one request.
+      await execute("UPDATE catalog.products SET category_id = $1 WHERE id BETWEEN $2 AND $3",
+        [SLEEVES, FIRST_PRODUCT, FIRST_PRODUCT + PRODUCTS - 1]);
+      const items = Array.from({ length: PRODUCTS }, (_, index) => ({ productId: FIRST_PRODUCT + index, shownCategoryId: SLEEVES }));
+      const gotItCounter: StatementCounter = { statements: 0 };
+
+      const acknowledged = await measure(`W13 Got it for all ${PRODUCTS}`, PRODUCTS, gotItCounter,
+        () => moves(scopedPool(gotItCounter)).acknowledgeForMember(MEMBER, STORE, { idempotencyKey: movesKey("all-10000"), items }));
+
+      expect(acknowledged.acknowledgedProductIds).toHaveLength(PRODUCTS);
+      expect(acknowledged.movedAgainProductIds).toEqual([]);
+      expect(await count("dropship.dropship_product_category_seen", "store_connection_id = $1 AND category_id = $2 AND seen_at = $3",
+        [STORE, SLEEVES, LATER])).toBe(PRODUCTS);
     }, BULK_TEST_TIMEOUT_MS);
   });
 });

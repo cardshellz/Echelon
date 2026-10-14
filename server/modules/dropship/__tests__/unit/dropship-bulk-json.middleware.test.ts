@@ -42,6 +42,9 @@ describe("the bulk JSON path table (plan PR 9, P8, section 3.6)", () => {
     ["POST", `${STORE}/listing-settings/price-changes/review`],
     ["post", `${STORE}/listing-settings/price-changes/review/`],
     ["POST", `${STORE}/listing-settings/price-changes/apply`],
+    // W13, "Got it" (9g).
+    ["POST", `${STORE}/listing-settings/category-moves/acknowledge`],
+    ["post", `${STORE}/listing-settings/category-moves/acknowledge/`],
     ["POST", "/api/dropship/listings/stores/anything/pricing-rules/reviews"],
   ])("skips the global parser for %s %s", (method, path) => {
     expect(isDropshipBulkJsonRequest(method, path)).toBe(true);
@@ -60,6 +63,8 @@ describe("the bulk JSON path table (plan PR 9, P8, section 3.6)", () => {
     // Only W5's PUT: the read router's GETs and another verb keep the global parser.
     ["GET", `${STORE}/listing-settings/products/7`],
     ["GET", `${STORE}/listing-settings/products/ids`],
+    // One product's own settings (PR 10): a read, with no body.
+    ["GET", `${STORE}/listing-settings/products/7/own`],
     ["POST", `${STORE}/listing-settings/products/7`],
     ["PUT", `${STORE}/listing-settings/products/7/sizes`],
     // Only W6's POST: the read router's GET of the same path, and a longer path, keep the global parser.
@@ -78,12 +83,17 @@ describe("the bulk JSON path table (plan PR 9, P8, section 3.6)", () => {
     ["PUT", `${STORE}/listing-settings/price-changes/apply`],
     ["POST", `${STORE}/listing-settings/price-changes/apply/extra`],
     ["POST", `${STORE}/listing-settings/price-changes/reviews`],
+    // Only W13's POST: another verb, the bare prefix and a longer path keep the global parser.
+    ["GET", `${STORE}/listing-settings/category-moves/acknowledge`],
+    ["PUT", `${STORE}/listing-settings/category-moves/acknowledge`],
+    ["POST", `${STORE}/listing-settings/category-moves`],
+    ["POST", `${STORE}/listing-settings/category-moves/acknowledge/extra`],
   ])("leaves %s %s to the global parser", (method, path) => {
     expect(isDropshipBulkJsonRequest(method, path)).toBe(false);
   });
 
-  it("lists ten routes, each one method and one path", () => {
-    expect(BULK_JSON_PATHS.map((entry) => entry.method)).toEqual(["PUT", "POST", "POST", "PUT", "PUT", "PUT", "POST", "PUT", "POST", "POST"]);
+  it("lists eleven routes, each one method and one path", () => {
+    expect(BULK_JSON_PATHS.map((entry) => entry.method)).toEqual(["PUT", "POST", "POST", "PUT", "PUT", "PUT", "POST", "PUT", "POST", "POST", "POST"]);
     expect(Object.isFrozen(BULK_JSON_PATHS)).toBe(true);
   });
 

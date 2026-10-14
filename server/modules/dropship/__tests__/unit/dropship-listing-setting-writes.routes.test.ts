@@ -4,6 +4,7 @@ import express, { type NextFunction, type Request, type Response } from "express
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ZodError } from "zod";
 import {
+  acknowledgeCategoryMovesInputSchema,
   applyPriceChangesInputSchema,
   priceChangeReviewPageInputSchema,
   reviewPriceChangesInputSchema,
@@ -158,6 +159,26 @@ class FakePriceChanges {
     parseListingSettingInput(listingSettingStoreIdSchema, storeId);
     parseListingSettingInput(applyPriceChangesInputSchema, input);
     return this.applyResult;
+  }
+}
+
+const MOVES_KEY = "category-moves:7f9c2ba4-e88f-4a5e-9d1b-1c2d3e4f5a6b";
+const MOVES_PATH = "/api/dropship/listings/stores/22/listing-settings/category-moves/acknowledge";
+const movesBody = (fields: Record<string, unknown> = {}) =>
+  ({ idempotencyKey: MOVES_KEY, items: [{ productId: 7, shownCategoryId: 3 }], ...fields });
+const acknowledged = { outcome: "acknowledged", acknowledgedProductIds: [7], movedAgainProductIds: [] };
+
+class FakeCategoryMoves {
+  calls: Array<{ memberId: string; storeId: unknown; input: unknown }> = [];
+  failure: unknown = null;
+  result: unknown = acknowledged;
+  async acknowledgeForMember(memberId: string, storeId: unknown, input: unknown) {
+    this.calls.push({ memberId, storeId, input });
+    if (this.failure) throw this.failure;
+    // The real service's parsing: the vendor's input is refused as DROPSHIP_LISTING_SETTINGS_INVALID_INPUT.
+    parseListingSettingInput(listingSettingStoreIdSchema, storeId);
+    parseListingSettingInput(acknowledgeCategoryMovesInputSchema, input);
+    return this.result;
   }
 }
 
@@ -1110,10 +1131,192 @@ describe("POST …/price-changes/review, GET …/price-changes/reviews/:reviewId
   });
 });
 
+describe("POST …/listing-settings/category-moves/acknowledge (W13, plan PR 9, 10.3)", () => {
+  let sizePrices: FakeSizePrices;
+  let products: FakeProducts;
+  let categories: FakeCategories;
+  let moves: FakeCategoryMoves;
+  let server: { url: string; close: () => Promise<void> } | null;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    sizePrices = new FakeSizePrices();
+    products = new FakeProducts();
+    categories = new FakeCategories();
+    moves = new FakeCategoryMoves();
+    server = null;
+  });
+  afterEach(async () => {
+    await server?.close();
+  });
+
+  const start = async () => { server = await startServer(buildApp(sizePrices, products, categories, undefined, moves)); };
+  const post = (payload: unknown, options: { member?: string | null; path?: string; raw?: string } = {}) =>
+    fetch(`${server!.url}${options.path ?? MOVES_PATH}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...(options.member === null ? {} : { "X-Test-Member": options.member ?? "member-1" }) },
+      body: options.raw ?? JSON.stringify(payload),
+    });
+  /** "Got it for all N" at the contract's bound: 10,000 products, each with the largest ids. */
+  const allMoved = (count: number) => Array.from({ length: count }, (_, index) => ({ productId: 2_000_000_000 + index,
+    shownCategoryId: index % 3 === 0 ? null : 2_147_483_647 }));
+
+  it("refuses a request without a dropship session before the limiter, the parser or the service", async () => {
+    await start();
+    expect((await post(movesBody(), { member: null })).status).toBe(401);
+    expect(moves.calls).toEqual([]);
+  });
+
+  it("answers an anonymous body over 1 MiB with 401, never 413: the 1 MiB parser runs only after sign-in (plan P8)", async () => {
+    await start();
+    const response = await post({ ...movesBody(), padding: "x".repeat(DROPSHIP_BULK_JSON_LIMIT_BYTES + 1) }, { member: null });
+    expect(response.status).toBe(401);
+    expect((await response.json()).error.code).toBe("DROPSHIP_AUTH_REQUIRED");
+    expect(moves.calls).toEqual([]);
+    expect(logger.warn).not.toHaveBeenCalledWith("dropship.bulk_json_body_rejected", expect.anything());
+  });
+
+  it("passes the member, the parsed store id and the body to the W13 service only, answers the schema's shape, never cached", async () => {
+    await start();
+    const sent = movesBody({ items: [{ productId: 9, shownCategoryId: null }, { productId: 7, shownCategoryId: 3 }] });
+    moves.result = { outcome: "acknowledged", acknowledgedProductIds: [7], movedAgainProductIds: [9] };
+
+    const response = await post(sent);
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    expect(await response.json()).toEqual(moves.result);
+    expect(moves.calls).toEqual([{ memberId: "member-1", storeId: 22, input: sent }]);
+    expect([products.calls, products.bulkCalls, categories.calls, sizePrices.calls]).toEqual([[], [], [], []]);
+  });
+
+  it("parses 10,000 items past the 100 KB global limit (about 530 KB) and hands them to the service unchanged", async () => {
+    await start();
+    const large = movesBody({ items: allMoved(10_000) });
+    const text = JSON.stringify(large);
+    expect(text.length).toBeGreaterThan(100 * 1024);
+    expect(text.length).toBeLessThan(DROPSHIP_BULK_JSON_LIMIT_BYTES);
+
+    const response = await post(undefined, { raw: text });
+
+    expect(response.status).toBe(200);
+    expect(moves.calls).toHaveLength(1);
+    expect(moves.calls[0].input).toEqual(large);
+  });
+
+  it("accepts a product shown with no category (null)", async () => {
+    await start();
+    expect((await post(movesBody({ items: [{ productId: 7, shownCategoryId: null }] }))).status).toBe(200);
+  });
+
+  it.each([
+    ["10,001 items", movesBody({ items: allMoved(10_001) })],
+    ["no item", movesBody({ items: [] })],
+    ["a product twice", movesBody({ items: [{ productId: 7, shownCategoryId: 3 }, { productId: 7, shownCategoryId: null }] })],
+    ["a shown category of 0", movesBody({ items: [{ productId: 7, shownCategoryId: 0 }] })],
+    ["a shown category past int4", movesBody({ items: [{ productId: 7, shownCategoryId: 2_147_483_648 }] })],
+    ["an item without its shown category", movesBody({ items: [{ productId: 7 }] })],
+    ["an item with an unknown key", movesBody({ items: [{ productId: 7, shownCategoryId: 3, name: "Sleeves" }] })],
+    ["a 7-character key", movesBody({ idempotencyKey: "abcdefg" })],
+    ["an unknown key", { ...movesBody(), storeConnectionId: 22 }],
+  ])("answers %s with 400, never a 500", async (_label, payload) => {
+    await start();
+    const response = await post(payload);
+    expect(response.status).toBe(400);
+    expect((await response.json()).error.code).toBe("DROPSHIP_LISTING_SETTINGS_INVALID_INPUT");
+  });
+
+  it("answers a store id that is not digits with 400", async () => {
+    await start();
+    const response = await post(movesBody(), { path: "/api/dropship/listings/stores/22x/listing-settings/category-moves/acknowledge" });
+    expect(response.status).toBe(400);
+    expect((await response.json()).error.code).toBe("DROPSHIP_LISTING_SETTINGS_INVALID_INPUT");
+  });
+
+  it("refuses a body over 1 MiB with 413 in the listing-settings words, never calling the service", async () => {
+    await start();
+    const response = await post({ ...movesBody(), padding: "x".repeat(DROPSHIP_BULK_JSON_LIMIT_BYTES + 1) });
+    expect(response.status).toBe(413);
+    expect(await response.json()).toEqual({ error: { code: "DROPSHIP_REQUEST_TOO_LARGE", message: LISTING_SETTINGS_TOO_LARGE_MESSAGE } });
+    expect(moves.calls).toEqual([]);
+  });
+
+  it.each([
+    [new DropshipError("DROPSHIP_IDEMPOTENCY_CONFLICT", "This request key was already used for a different listing settings change.", {
+      storeConnectionId: 22, mismatched: ["ledger.requestHash"], retryable: false, classification: "permanent" }), 409,
+    { storeConnectionId: 22, retryable: false, classification: "permanent" }],
+    [new DropshipError("DROPSHIP_LISTING_ENTITLEMENT_BLOCKED", "An active .ops entitlement is required to change listing settings.", {
+      storeConnectionId: 22, reason: "lapsed", retryable: false, classification: "permanent" }), 403,
+    { storeConnectionId: 22, reason: "lapsed", retryable: false, classification: "permanent" }],
+  ])("answers %s with its status and the public context, logged at DEBUG with the route", async (error, status, context) => {
+    await start();
+    moves.failure = error;
+    const response = await post(movesBody());
+    expect(response.status).toBe(status);
+    expect(await response.json()).toEqual({ error: { code: error.code, message: error.message, context } });
+    expect(logger.debug).toHaveBeenCalledWith("dropship.listing_settings.write_refused", expect.objectContaining({
+      store_connection_id: 22, actor_id: "member-1", status, error_code: error.code, method: "POST",
+      path: "/api/dropship/listings/stores/:storeConnectionId/listing-settings/category-moves/acknowledge" }));
+  });
+
+  it("answers a busy store lock with 503 and Retry-After, logged at WARN", async () => {
+    await start();
+    moves.failure = new DropshipError("DROPSHIP_LISTING_SETTINGS_BUSY", "Listing settings are being changed by another request. Try again.", {
+      sqlState: "40P01", retryable: true, classification: "transient" });
+    const response = await post(movesBody());
+    expect(response.status).toBe(503);
+    expect(response.headers.get("retry-after")).toBe("5");
+    expect(logger.warn).toHaveBeenCalledWith("dropship.listing_settings.write_deferred", expect.objectContaining({ status: 503 }));
+  });
+
+  it("answers a replay as the probe saw it, and an answer that breaks the response contract as a 500 with the fixed words", async () => {
+    await start();
+    moves.result = { outcome: "replayed", acknowledgedProductIds: [], movedAgainProductIds: [] };
+    expect(await (await post(movesBody())).json()).toEqual(moves.result);
+    for (const broken of [
+      { outcome: "replayed", acknowledgedProductIds: [7], movedAgainProductIds: [] },
+      { outcome: "acknowledged", acknowledgedProductIds: [7], movedAgainProductIds: [7] },
+      { outcome: "acknowledged", acknowledgedProductIds: [7, 7], movedAgainProductIds: [] },
+      { ...acknowledged, requestId: 900 },
+    ]) {
+      moves.result = broken;
+      const response = await post(movesBody());
+      expect(response.status).toBe(500);
+      expect(await response.json()).toEqual({ error: { code: "DROPSHIP_LISTING_SETTINGS_INTERNAL_ERROR",
+        message: "Something went wrong. We couldn't confirm your save." } });
+    }
+    expect(logger.error).toHaveBeenCalledWith("dropship.listing_settings.write_failed", expect.objectContaining({ status: 500 }));
+  });
+
+  it("spends the one single-write budget it shares with W5 and W12 (60 a minute), not the bulk one", async () => {
+    await start();
+    const third = LISTING_SETTING_SINGLE_WRITES_PER_MINUTE / 3;
+    const send = (path: string, payload: unknown, method = "PUT") => fetch(`${server!.url}${path}`, { method,
+      headers: { "Content-Type": "application/json", "X-Test-Member": "member-1" }, body: JSON.stringify(payload) });
+    for (let index = 0; index < third; index += 1) {
+      expect((await post(movesBody())).status).toBe(200);
+      expect((await send(PRODUCT_PATH, productBody())).status).toBe(200);
+      expect((await send(CATEGORY_PATH, categoryBody())).status).toBe(200);
+    }
+    const limited = await post(movesBody());
+    expect(limited.status).toBe(429);
+    expect(await limited.json()).toEqual({ error: { code: "DROPSHIP_LISTING_SETTINGS_RATE_LIMITED",
+      message: "Too many saves in a minute. Wait a moment and try again." } });
+    expect(moves.calls).toHaveLength(third);
+    // W5 and W12 are out of budget too: one instance, not one per route.
+    expect((await send(PRODUCT_PATH, productBody())).status).toBe(429);
+    expect((await send(CATEGORY_PATH, categoryBody())).status).toBe(429);
+    // The bulk budget is a separate counter, and another member has their own.
+    expect((await send(BULK_PATH, bulkBody(), "POST")).status).toBe(200);
+    expect((await post(movesBody(), { member: "member-2" })).status).toBe(200);
+  });
+});
+
 /**
  * Every writer the router takes, with the given fakes; any other member is a
  * stub that throws, so a route reaching the wrong service fails here. Each
- * later sub-PR adds its member (plan 6.1, C-feas-6); 9f adds `priceChanges`.
+ * later sub-PR adds its member (plan 6.1, C-feas-6); 9f adds `priceChanges`,
+ * 9g `categoryMoves`.
  */
 function writeServices(overrides: Partial<ListingSettingWriteServices>): ListingSettingWriteServices {
   const unexpected = (name: string) => ({
@@ -1122,19 +1325,21 @@ function writeServices(overrides: Partial<ListingSettingWriteServices>): Listing
     reviewForMember: async (): Promise<never> => { throw new Error(`The ${name} review was not expected here.`); },
     reviewPageForMember: async (): Promise<never> => { throw new Error(`The ${name} review page was not expected here.`); },
     applyForMember: async (): Promise<never> => { throw new Error(`The ${name} apply was not expected here.`); },
+    acknowledgeForMember: async (): Promise<never> => { throw new Error(`The ${name} "Got it" was not expected here.`); },
   });
   return {
     sizePrices: unexpected("sizePrices") as unknown as ListingSettingWriteServices["sizePrices"],
     products: unexpected("products") as unknown as ListingSettingWriteServices["products"],
     categories: unexpected("categories") as unknown as ListingSettingWriteServices["categories"],
     priceChanges: unexpected("priceChanges") as unknown as ListingSettingWriteServices["priceChanges"],
+    categoryMoves: unexpected("categoryMoves") as unknown as ListingSettingWriteServices["categoryMoves"],
     ...overrides,
   };
 }
 
 /** The W8 cases pass no products fake, so a W8 route that reached the W5 service would fail on its throwing stub. */
 function buildApp(sizePrices: FakeSizePrices, products?: FakeProducts, categories?: FakeCategories,
-  priceChanges?: FakePriceChanges): express.Express {
+  priceChanges?: FakePriceChanges, categoryMoves?: FakeCategoryMoves): express.Express {
   const app = express();
   app.use((req: Request, _res: Response, next: NextFunction) => {
     const memberId = req.header("X-Test-Member");
@@ -1148,6 +1353,7 @@ function buildApp(sizePrices: FakeSizePrices, products?: FakeProducts, categorie
     ...(products ? { products: products as unknown as ListingSettingWriteServices["products"] } : {}),
     ...(categories ? { categories: categories as unknown as ListingSettingWriteServices["categories"] } : {}),
     ...(priceChanges ? { priceChanges: priceChanges as unknown as ListingSettingWriteServices["priceChanges"] } : {}),
+    ...(categoryMoves ? { categoryMoves: categoryMoves as unknown as ListingSettingWriteServices["categoryMoves"] } : {}),
   }));
   return app;
 }

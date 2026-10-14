@@ -9,6 +9,8 @@ import {
   MAX_PRICE_RELEASES_PER_APPLY,
   PRICE_CHANGE_CLEAR_FIELDS,
   PRICE_CHANGE_REVIEW_KINDS,
+  acknowledgeCategoryMovesInputSchema,
+  acknowledgeCategoryMovesResponseSchema,
   applyPriceChangesInputSchema,
   applyPriceChangesResponseSchema,
   priceChangeReviewPageInputSchema,
@@ -696,5 +698,62 @@ describe("W7 price check and apply contracts (plan PR 9, 9.4)", () => {
       ]);
       expect(productListingSettingPriceApplyPatchSchema.safeParse({ price: RECIPE, note: "x" }).success).toBe(false);
     });
+  });
+});
+
+describe("W13 \"Got it\" contracts (plan PR 9, 10.3)", () => {
+  const MOVES_KEY = "category-moves:7f9c2ba4-e88f-4a5e-9d1b-1c2d3e4f5a6b";
+  const items = (count: number) => Array.from({ length: count }, (_, index) =>
+    ({ productId: index + 1, shownCategoryId: index % 2 === 0 ? 3 : null }));
+  const input = (fields: Record<string, unknown> = {}) => ({ idempotencyKey: MOVES_KEY, items: items(1), ...fields });
+  const answer = (fields: Record<string, unknown> = {}) =>
+    ({ outcome: "acknowledged", acknowledgedProductIds: [1, 2], movedAgainProductIds: [3], ...fields });
+
+  it("accepts 1 and 10,000 items, a shown category or none, and keeps the items as sent", () => {
+    expect(acknowledgeCategoryMovesInputSchema.parse(input())).toEqual(input());
+    const parsed = acknowledgeCategoryMovesInputSchema.parse(input({ items: items(10_000) }));
+    expect(parsed.items).toHaveLength(10_000);
+    expect(parsed.items.slice(0, 2)).toEqual([{ productId: 1, shownCategoryId: 3 }, { productId: 2, shownCategoryId: null }]);
+  });
+
+  it.each([
+    ["10,001 items", input({ items: items(10_001) })],
+    ["no item", input({ items: [] })],
+    ["a product twice", input({ items: [{ productId: 7, shownCategoryId: 3 }, { productId: 7, shownCategoryId: 4 }] })],
+    ["a shown category of 0", input({ items: [{ productId: 7, shownCategoryId: 0 }] })],
+    ["a product id of 0", input({ items: [{ productId: 0, shownCategoryId: 3 }] })],
+    ["a product id past int4", input({ items: [{ productId: 2_147_483_648, shownCategoryId: 3 }] })],
+    ["a missing shown category", input({ items: [{ productId: 7 }] })],
+    ["an unknown item key", input({ items: [{ productId: 7, shownCategoryId: 3, categoryName: "Sleeves" }] })],
+    ["a 7-character key", input({ idempotencyKey: "abcdefg" })],
+    ["no key", { items: items(1) }],
+    ["an unknown key", input({ storeConnectionId: 22 })],
+  ])("refuses an input with %s", (_label, value) => {
+    expect(acknowledgeCategoryMovesInputSchema.safeParse(value).success).toBe(false);
+  });
+
+  it("accepts an answer with both lists, with empty lists, and a replay with empty lists", () => {
+    expect(acknowledgeCategoryMovesResponseSchema.safeParse(answer()).success).toBe(true);
+    expect(acknowledgeCategoryMovesResponseSchema.safeParse(answer({ acknowledgedProductIds: [], movedAgainProductIds: [] })).success)
+      .toBe(true);
+    expect(acknowledgeCategoryMovesResponseSchema.safeParse({ outcome: "replayed", acknowledgedProductIds: [], movedAgainProductIds: [] })
+      .success).toBe(true);
+    const all = Array.from({ length: 10_000 }, (_, index) => index + 1);
+    expect(acknowledgeCategoryMovesResponseSchema.safeParse(answer({ acknowledgedProductIds: all, movedAgainProductIds: [] })).success)
+      .toBe(true);
+  });
+
+  it.each([
+    ["a replay naming a product", answer({ outcome: "replayed" })],
+    ["a product in both lists", answer({ movedAgainProductIds: [2] })],
+    ["a product twice in one list", answer({ acknowledgedProductIds: [1, 1] })],
+    ["more than 10,000 products over both lists", answer({ acknowledgedProductIds: Array.from({ length: 10_000 }, (_, index) => index + 1),
+      movedAgainProductIds: [10_001] })],
+    ["10,001 acknowledged", answer({ acknowledgedProductIds: Array.from({ length: 10_001 }, (_, index) => index + 1), movedAgainProductIds: [] })],
+    ["a product id of 0", answer({ acknowledgedProductIds: [0] })],
+    ["another outcome", answer({ outcome: "changed" })],
+    ["an unknown key", answer({ requestId: 900 })],
+  ])("refuses an answer with %s", (_label, value) => {
+    expect(acknowledgeCategoryMovesResponseSchema.safeParse(value).success).toBe(false);
   });
 });
