@@ -1,4 +1,4 @@
-import { expect, test, type Page } from "playwright/test";
+import { expect, test, type Page } from "@playwright/test";
 import { resolve } from "node:path";
 import { contentCandidate, noContentProfile } from "../../server/modules/dropship/__tests__/fixtures/listing-content.fixture";
 import { resolveListingContent, listingCatalogHash } from "../../server/modules/dropship/application/dropship-listing-content-resolver";

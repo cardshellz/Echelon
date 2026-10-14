@@ -1,4 +1,4 @@
-import { test, expect, type Page } from "playwright/test";
+import { test, expect, type Page } from "@playwright/test";
 import { resolve } from "node:path";
 import { BULK_INVENTORY_TRACKING_PATH, type BulkInventoryTrackingApply, type BulkInventoryTrackingRequest } from "../../shared/catalog/bulk-inventory-tracking";
 

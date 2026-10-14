@@ -1,4 +1,4 @@
-import { defineConfig } from "playwright/test";
+import { defineConfig } from "@playwright/test";
 export default defineConfig({
   testDir: "./test/browser", testMatch: ["dropship-pricing-*.spec.ts", "dropship-content-*.spec.ts", "dropship-policy-*.spec.ts", "dropship-shipping-estimate.spec.ts", "dropship-wallet.spec.ts", "dropship-orders.spec.ts", "dropship-finance.spec.ts", "dropship-onboarding.spec.ts", "shared-shipping-configuration.spec.ts", "bounded-page-loading.spec.ts", "catalog-conversions.spec.ts"], fullyParallel: false, workers: 1,
   timeout: 45_000, expect: { timeout: 15_000 },

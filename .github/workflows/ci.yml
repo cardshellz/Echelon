@@ -34,14 +34,15 @@ jobs:
           node-version: 20
           cache: npm
       - run: npm ci
-      # Catch manifest drift and migration collisions before the long checks.
+      # Catch manifest drift, test-exclusion drift and migration collisions early.
       # These are also retained in the full unit suite.
-      - name: Validate CI coverage and migration numbering
+      - name: Validate CI coverage, test exclusions and migration numbering
         run: >-
           npx vitest run
           server/__tests__/unit/postgres-ci-shards.test.ts
           server/__tests__/unit/migration-prefix-collision.test.ts
           server/__tests__/unit/browser-ci-selection.test.ts
+          server/__tests__/unit/test-typecheck-ratchet.test.ts
           server/__tests__/unit/ci-fast-feedback.test.ts
           --allowOnly=false --passWithNoTests=false
 

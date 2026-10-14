@@ -5,7 +5,7 @@ export default defineConfig({
   testMatch: "procurement-*.spec.ts",
   // Page-local fixtures allow test-level sharding instead of uneven file groups.
   fullyParallel: true,
-  workers: 1,
+  workers: 2,
   timeout: 45_000,
   expect: { timeout: 15_000 },
   use: {

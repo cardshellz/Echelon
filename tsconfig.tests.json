@@ -48,7 +48,6 @@
     "client/src/pages/__tests__/unit/purchase-order-error-navigation.test.ts",
     "client/src/pages/warehouse-work/__tests__/unit/assembly-work-page.test.ts",
     "client/src/pages/warehouse-work/__tests__/unit/work-configuration-page.test.ts",
-    "server/__tests__/unit/browser-ci-selection.test.ts",
     "server/__tests__/unit/database-pool-config.test.ts",
     "server/__tests__/unit/marketplace-listing-registration.composition.test.ts",
     "server/__tests__/unit/writer-ratchet.test.ts",

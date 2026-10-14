@@ -1,4 +1,4 @@
-import { expect, test, type Locator, type Page, type TestInfo } from "playwright/test";
+import { expect, test, type Locator, type Page, type TestInfo } from "@playwright/test";
 import { join, resolve } from "node:path";
 
 // Playwright's serviceWorkers:block init script reads navigator.serviceWorker in

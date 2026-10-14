@@ -1,4 +1,4 @@
-import { expect, type Locator, type Page, type TestInfo } from "playwright/test";
+import { expect, type Locator, type Page, type TestInfo } from "@playwright/test";
 import { CATALOG_PATH, MARZ, openCatalog, type StubState } from "./dropship-policy-catalog-stubs";
 
 /**

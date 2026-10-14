@@ -1,4 +1,4 @@
-import { expect, test, type Page, type Route } from "playwright/test";
+import { expect, test, type Page, type Route } from "@playwright/test";
 import { resolve } from "node:path";
 import type { EbayCategoryOption, EbayCategoryRulesProfile, EbayCategoryRulesState } from "../../shared/dropship/ebay-category-rules";
 
