@@ -7,6 +7,7 @@ import {
   afterAll,
   beforeAll,
   beforeEach,
+  describe,
   expect,
   it,
   vi,
@@ -232,6 +233,99 @@ async function waitForBarrier(
     if (timeout !== undefined) clearTimeout(timeout);
   }
 }
+
+/** Keep retry ordering independent of runner speed. Initial contenders still
+ * overlap and produce real PostgreSQL conflicts; each retry wave starts only
+ * after every physical transaction in the previous wave releases its client.
+ * The production delay/exhaustion policy is covered by its workflow unit tests. */
+function retryAfterTransactionsDrain(basePool: Pick<Pool, "connect">): {
+  readonly pool: Pick<Pool, "connect">;
+  readonly waitForRetry: (delayMs: number) => Promise<void>;
+} {
+  let activeClients = 0;
+  let drained = Promise.resolve();
+  let resolveDrain: (() => void) | undefined;
+  return {
+    pool: {
+      connect: async () => {
+        const client = await basePool.connect();
+        if (activeClients === 0) drained = new Promise<void>(resolve => { resolveDrain = resolve; });
+        activeClients += 1;
+        let released = false;
+        return {
+          query: client.query.bind(client),
+          release: (error?: Error | boolean) => {
+            if (released) throw new Error('Split relabel test client released more than once');
+            released = true;
+            try { client.release(error); }
+            finally {
+              activeClients -= 1;
+              if (activeClients === 0) resolveDrain?.();
+            }
+          },
+        } as unknown as PoolClient;
+      },
+    } as Pick<Pool, "connect">,
+    waitForRetry: async () => {
+      await waitForBarrier(drained, 'split relabel active transactions to release before retry');
+    },
+  };
+}
+
+describe('controlled split relabel retry scheduling', () => {
+  it('waits for every active client, including rollback, and resets for a new wave', async () => {
+    const release = vi.fn();
+    const client = { query: vi.fn(), release } as unknown as PoolClient;
+    const gate = retryAfterTransactionsDrain({ connect: async () => client } as Pick<Pool, "connect">);
+    const first = await gate.pool.connect();
+    const second = await gate.pool.connect();
+    const resumed = vi.fn();
+    const retry = gate.waitForRetry(50).then(resumed);
+    const rollback = Object.assign(new Error('real transaction rolled back'), { code: '40001' });
+    first.release(rollback);
+    expect(() => first.release()).toThrow('Split relabel test client released more than once');
+    // A task boundary drains the entire async promise chain; one microtask
+    // would miss an incorrectly resolved Promise.race/waitForRetry chain.
+    await new Promise<void>(resolve => setImmediate(resolve));
+    expect(resumed).not.toHaveBeenCalled();
+    second.release();
+    await retry;
+    expect(resumed).toHaveBeenCalledTimes(1);
+    expect(release.mock.calls).toEqual([[rollback], [undefined]]);
+
+    const next = await gate.pool.connect();
+    const nextRetry = gate.waitForRetry(100).then(resumed);
+    await new Promise<void>(resolve => setImmediate(resolve));
+    expect(resumed).toHaveBeenCalledTimes(1);
+    next.release();
+    await nextRetry;
+    expect(resumed).toHaveBeenCalledTimes(2);
+  });
+
+  it('preserves a release failure and does not strand other retry waiters', async () => {
+    const failure = new Error('test client release failed');
+    const client = { query: vi.fn(), release: () => { throw failure; } } as unknown as PoolClient;
+    const gate = retryAfterTransactionsDrain({ connect: async () => client } as Pick<Pool, "connect">);
+    const active = await gate.pool.connect();
+    const retry = gate.waitForRetry(50);
+    expect(() => active.release()).toThrow(failure);
+    await expect(retry).resolves.toBeUndefined();
+  });
+
+  it('fails with an actionable error when a physical transaction never releases', async () => {
+    vi.useFakeTimers();
+    try {
+      const client = { query: vi.fn(), release: vi.fn() } as unknown as PoolClient;
+      const gate = retryAfterTransactionsDrain({ connect: async () => client } as Pick<Pool, "connect">);
+      const active = await gate.pool.connect();
+      const failure = expect(gate.waitForRetry(50)).rejects.toThrow(
+        'Timed out waiting for split relabel active transactions to release before retry');
+      await vi.advanceTimersByTimeAsync(BARRIER_TIMEOUT_MS);
+      await failure;
+      active.release();
+    } finally { vi.useRealTimers(); }
+  });
+});
 
 function firstWaveBarrier(
   label: string,
@@ -1022,8 +1116,10 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
       const snapshotBarrier = firstWaveBarrier('split relabel first-wave snapshots',
         ({ text }) => concurrentWave && /SELECT physical_shipment_id\s+FROM wms\.ebay_label_replacement_work/.test(text),
         'SELECT COUNT(*) FROM wms.ebay_label_replacement_work', 3);
+      const retrySchedule = retryAfterTransactionsDrain(instrumentedPool(pool, telemetry, snapshotBarrier));
       const workflow = createPackageAllocationLabelCommercialWorkflow({
-        pool: mode === 'concurrent' ? instrumentedPool(pool, telemetry, snapshotBarrier) : pool, clock, logger,
+        pool: mode === 'concurrent' ? retrySchedule.pool : pool, clock, logger,
+        waitForRetry: mode === 'concurrent' ? retrySchedule.waitForRetry : undefined,
       });
       let failBeforeCommit = false;
       const splitReviews = vi.fn();

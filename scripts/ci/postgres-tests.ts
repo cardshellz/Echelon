@@ -5,6 +5,8 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import pg from "pg";
 import { POSTGRES_SHARD_COUNT, POSTGRES_TEST_FILES } from "./postgres-test-manifest";
+import { planPostgresShards } from "./postgres-shard-planner";
+import { POSTGRES_TEST_DURATION_MS } from "./postgres-test-timings";
 
 export interface PostgresShard {
   readonly index: number;
@@ -29,6 +31,7 @@ export const POSTGRES_REPOSITORY_ROOT = resolve(dirname(fileURLToPath(import.met
 const ADMIN_CONNECTION_TIMEOUT_MS = 10_000;
 const ADMIN_STATEMENT_TIMEOUT_MS = 60_000;
 const ADMIN_QUERY_TIMEOUT_MS = ADMIN_STATEMENT_TIMEOUT_MS + 5_000;
+const SHARD_PLAN = planPostgresShards(POSTGRES_TEST_FILES, POSTGRES_TEST_DURATION_MS, POSTGRES_SHARD_COUNT);
 
 export function parsePostgresShard(args: readonly string[]): PostgresShard {
   const match = args.length === 1 ? /^([1-9]\d*)\/([1-9]\d*)$/.exec(args[0]) : null;
@@ -92,8 +95,7 @@ export function validatePostgresManifest(root: string, files: readonly string[])
 
 export function selectPostgresShardFiles(shard: PostgresShard): readonly string[] {
   const validated = parsePostgresShard([shard.index + "/" + shard.count]);
-  // Stable, inspectable assignment; no timing cache or platform-dependent order.
-  return POSTGRES_TEST_FILES.filter((_, index) => index % validated.count === validated.index - 1);
+  return SHARD_PLAN.shards[validated.index - 1].files;
 }
 
 export function buildPostgresVitestArgs(shard: PostgresShard, file: string): string[] {
@@ -247,7 +249,11 @@ export async function runPostgresShard(
   validatePostgresTestEnvironment(env);
   validatePostgresManifest(POSTGRES_REPOSITORY_ROOT, POSTGRES_TEST_FILES);
   const files = selectPostgresShardFiles(shard);
-  dependencies.info(JSON.stringify({ event: "postgres_ci_shard_start", shard: shard.index, count: shard.count, files }));
+  dependencies.info(JSON.stringify({ event: "postgres_ci_shard_start", shard: shard.index, count: shard.count, files,
+    estimatedDurationMs: SHARD_PLAN.shards[shard.index - 1].estimatedDurationMs,
+    fallbackDurationMs: SHARD_PLAN.fallbackDurationMs,
+    unmeasuredFiles: SHARD_PLAN.unmeasuredFiles.filter((file) => files.includes(file)),
+    unusedTimingFiles: SHARD_PLAN.unusedTimingFiles }));
   let failedFiles = 0;
   for (const file of files) {
     if (!await runPostgresFile(shard, file, env, dependencies)) failedFiles += 1;

@@ -62,7 +62,7 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npx playwright install --with-deps chromium
-      # Keep one worker inside each runner; shards have isolated browser/server state.
+      # Two page-isolated workers per runner; the four shards retain separate servers.
       - run: npx playwright test --config playwright.procurement.config.ts --shard=${{ matrix.shard }}/4
       - uses: actions/upload-artifact@v4
         if: failure()

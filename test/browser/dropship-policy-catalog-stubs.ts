@@ -1,4 +1,4 @@
-import { expect, type Page, type Route, type TestInfo } from "playwright/test";
+import { expect, type Page, type Route, type TestInfo } from "@playwright/test";
 import { join, resolve } from "node:path";
 import { z } from "zod";
 import {

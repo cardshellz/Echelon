@@ -3,6 +3,8 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { POSTGRES_SHARD_COUNT, POSTGRES_TEST_FILES } from "../../../scripts/ci/postgres-test-manifest";
+import { MAX_POSTGRES_FILE_DURATION_MS, planPostgresShards } from "../../../scripts/ci/postgres-shard-planner";
+import { POSTGRES_TEST_DURATION_MS, POSTGRES_TIMING_SNAPSHOT, parsePostgresTimingSnapshot } from "../../../scripts/ci/postgres-test-timings";
 import {
   POSTGRES_REPOSITORY_ROOT,
   buildPostgresVitestArgs,
@@ -16,7 +18,7 @@ import {
   type PostgresRunnerDependencies,
 } from "../../../scripts/ci/postgres-tests";
 
-const firstShardFileCount = Math.ceil(POSTGRES_TEST_FILES.length / POSTGRES_SHARD_COUNT);
+const firstShardFileCount = selectPostgresShardFiles({ index: 1, count: POSTGRES_SHARD_COUNT }).length;
 const disposableEnvironment: NodeJS.ProcessEnv = {
   ECHELON_TEST_DATABASE_URL: "postgresql://postgres:secret@127.0.0.1:5432/echelon_test",
   ECHELON_TEST_DATABASE_DISPOSABLE: "true",
@@ -174,15 +176,89 @@ describe("PostgreSQL CI coverage and isolation", () => {
     expect(() => validatePostgresManifest(POSTGRES_REPOSITORY_ROOT, POSTGRES_TEST_FILES)).not.toThrow();
   });
 
-  it("assigns every file exactly once across 8 deterministic balanced shards", () => {
+  it("assigns every manifest file exactly once across 8 deterministic nonempty shards", () => {
     const shards = Array.from({ length: POSTGRES_SHARD_COUNT }, (_, index) => selectPostgresShardFiles({ index: index + 1, count: 8 }));
-    expect(shards.map((files) => files.length)).toEqual(Array.from({ length: POSTGRES_SHARD_COUNT }, (_, index) => Math.floor(POSTGRES_TEST_FILES.length / POSTGRES_SHARD_COUNT) + (index < POSTGRES_TEST_FILES.length % POSTGRES_SHARD_COUNT ? 1 : 0)));
+    expect(shards.every((files) => files.length > 0)).toBe(true);
     expect(shards.flat().sort()).toEqual([...POSTGRES_TEST_FILES].sort());
     expect(new Set(shards.flat()).size).toBe(POSTGRES_TEST_FILES.length);
     expect(selectPostgresShardFiles({ index: 1, count: 8 })).toEqual(shards[0]);
-    expect(shards[0][0]).toBe(POSTGRES_TEST_FILES[0]);
-    expect(shards[0][1]).toBe(POSTGRES_TEST_FILES[8]);
     expect(() => selectPostgresShardFiles({ index: 0, count: 8 })).toThrow();
+  });
+
+  it("reduces the measured longest shard without changing the measured work or coverage", () => {
+    // Compare the two assignments using the same recorded successful run. This
+    // is a planning regression, not a promise about GitHub queue/runtime speed.
+    const measuredFiles = POSTGRES_TEST_FILES.filter((file) => Object.hasOwn(POSTGRES_TEST_DURATION_MS, file));
+    const plan = planPostgresShards(measuredFiles, POSTGRES_TEST_DURATION_MS, 8);
+    // Reconstruct the former modulo planner, rather than assuming later timing
+    // refreshes were collected before duration balancing was introduced.
+    const oldLoads = Array.from({ length: 8 }, (_, shard) => measuredFiles
+      .filter((_, index) => index % 8 === shard).reduce((sum, file) => sum + POSTGRES_TEST_DURATION_MS[file], 0));
+    const newLoads = plan.shards.map((shard) => shard.estimatedDurationMs);
+    expect(newLoads.reduce((sum, value) => sum + value, 0)).toBe(oldLoads.reduce((sum, value) => sum + value, 0));
+    expect(Math.max(...newLoads)).toBeLessThan(Math.max(...oldLoads) * 0.75);
+    expect(Math.max(...newLoads) - Math.min(...newLoads)).toBeLessThan(1000);
+    expect(plan.shards.flatMap((shard) => shard.files).sort()).toEqual([...measuredFiles].sort());
+    expect(plan.unmeasuredFiles).toEqual([]);
+  });
+
+  it("keeps placement and tie breaks deterministic without mutating manifest or timing inputs", () => {
+    const files = Object.freeze([...POSTGRES_TEST_FILES]);
+    const weights = Object.freeze({ ...POSTGRES_TEST_DURATION_MS });
+    const originalFiles = [...files];
+    const originalWeights = { ...weights };
+    const plan = planPostgresShards(files, weights, 8);
+    expect(planPostgresShards([...files].reverse(), Object.fromEntries(Object.entries(weights).reverse()), 8)).toEqual(plan);
+    expect(files).toEqual(originalFiles);
+    expect(weights).toEqual(originalWeights);
+
+    const tied = ["a", "b", "c", "d"].map((name) => `server/modules/example/__tests__/integration/${name}.test.ts`);
+    expect(planPostgresShards([...tied].reverse(), Object.fromEntries(tied.map((file) => [file, 100])), 2).shards
+      .map((shard) => shard.files)).toEqual([[tied[0], tied[2]], [tied[1], tied[3]]]);
+  });
+
+  it("includes new or renamed suites with the slowest observed fallback and never restores retired coverage", () => {
+    const known = POSTGRES_TEST_FILES.slice(0, 8);
+    const newFile = "server/modules/example/__tests__/integration/new-coverage.test.ts";
+    const retiredFile = "server/modules/example/__tests__/integration/retired-coverage.test.ts";
+    const weights = { ...Object.fromEntries(known.map((file, index) => [file, (index + 1) * 100])), [retiredFile]: 900 };
+    const plan = planPostgresShards([...known, newFile], weights, 8);
+    expect(plan.fallbackDurationMs).toBe(900);
+    expect(plan.unmeasuredFiles).toEqual([newFile]);
+    expect(plan.unusedTimingFiles).toEqual([retiredFile]);
+    expect(plan.shards.flatMap((shard) => shard.files).sort()).toEqual([...known, newFile].sort());
+    expect(plan.shards.some((shard) => shard.files.includes(retiredFile))).toBe(false);
+    expect(plan.shards.find((shard) => shard.files.includes(newFile))?.estimatedDurationMs).toBeGreaterThanOrEqual(900);
+    expect(plan.shards.every((shard) => shard.files.length > 0)).toBe(true);
+  });
+
+  it.each([0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, MAX_POSTGRES_FILE_DURATION_MS + 1])(
+    "rejects invalid timing weight %s before any shard runs", (duration) => {
+      expect(() => planPostgresShards(POSTGRES_TEST_FILES, { [POSTGRES_TEST_FILES[0]]: duration }, 8)).toThrow(/timing weights/);
+    },
+  );
+
+  it("rejects empty weights, malformed paths, duplicate coverage, and impossible shard counts", () => {
+    expect(() => planPostgresShards(POSTGRES_TEST_FILES, {}, 8)).toThrow(/timing weights/);
+    expect(() => planPostgresShards(POSTGRES_TEST_FILES, { "../outside.test.ts": 100 }, 8)).toThrow(/timing weights/);
+    for (const count of [0, -1, 1.5, Number.NaN, POSTGRES_TEST_FILES.length + 1]) {
+      expect(() => planPostgresShards(POSTGRES_TEST_FILES, POSTGRES_TEST_DURATION_MS, count)).toThrow();
+    }
+    expect(() => planPostgresShards([...POSTGRES_TEST_FILES, POSTGRES_TEST_FILES[0]], POSTGRES_TEST_DURATION_MS, 8)).toThrow();
+    expect(() => planPostgresShards(["../outside.test.ts"], POSTGRES_TEST_DURATION_MS, 1)).toThrow();
+  });
+
+  it("rejects malformed, duplicated, or untraceable checked-in timing evidence", () => {
+    const valid = POSTGRES_TIMING_SNAPSHOT;
+    expect(() => parsePostgresTimingSnapshot({ ...valid, version: 0 })).toThrow();
+    expect(() => parsePostgresTimingSnapshot({ ...valid, measurements: [] })).toThrow();
+    expect(() => parsePostgresTimingSnapshot({ ...valid, source: { ...valid.source, headSha: "unverified" } })).toThrow();
+    expect(() => parsePostgresTimingSnapshot({ ...valid, source: { ...valid.source, conclusion: "failure" } })).toThrow();
+    expect(() => parsePostgresTimingSnapshot({ ...valid, source: { ...valid.source, jobIds: [...valid.source.jobIds, valid.source.jobIds[0]] } })).toThrow(/duplicate job/);
+    expect(() => parsePostgresTimingSnapshot({ ...valid, measurements: [...valid.measurements, valid.measurements[0]] })).toThrow(/duplicate suite/);
+    expect(() => parsePostgresTimingSnapshot({ ...valid, measurements: [{ ...valid.measurements[0], jobId: 1 }] })).toThrow(/unrecorded source job/);
+    expect(() => parsePostgresTimingSnapshot({ ...valid, source: { ...valid.source, jobIds: [...valid.source.jobIds, 1] } })).toThrow(/no measurements/);
+    expect(() => parsePostgresTimingSnapshot({ ...valid, measurements: [{ ...valid.measurements[0], durationMs: 0 }] })).toThrow();
   });
 
   it.each([[], ["0/8"], ["9/8"], ["1/0"], ["1/4"], ["01/8"], ["1/08"], ["1.5/8"], ["NaN/8"], ["1/8", "--passWithNoTests"], ["1/8; echo unsafe"], ["9007199254740992/8"]])("rejects invalid shard input %j", (...args: string[]) => {
@@ -206,7 +282,8 @@ describe("PostgreSQL CI coverage and isolation", () => {
       }
     }
     expect(new Set(reports).size).toBe(POSTGRES_TEST_FILES.length);
-    expect(() => buildPostgresVitestArgs({ index: 1, count: 8 }, POSTGRES_TEST_FILES[1])).toThrow();
+    const anotherShardFile = selectPostgresShardFiles({ index: 2, count: 8 })[0];
+    expect(() => buildPostgresVitestArgs({ index: 1, count: 8 }, anotherShardFile)).toThrow();
     const source = readFileSync(resolve(POSTGRES_REPOSITORY_ROOT, "scripts/ci/postgres-tests.ts"), "utf8");
     expect(source).toContain("spawnSync(process.execPath, [...args]");
     expect(source).toContain("shell: false");
