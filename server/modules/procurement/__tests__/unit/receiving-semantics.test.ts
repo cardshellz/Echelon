@@ -102,7 +102,8 @@ describe("ReceivingService - open receipt unit contract", () => {
 describe("ReceivingService - completeAllLines semantics", () => {
   it("preserves positive partial entries and fills untouched zero counts using confirmed units", async () => {
     const now = new Date("2026-09-06T12:00:00.000Z");
-    const tx = { execute: vi.fn().mockResolvedValue({ rows: [{ id: 1, product_id: 1, units_per_variant: 1, is_active: true }] }) };
+    const tx = { execute: vi.fn(async (query: any) => ({ rows: sqlToStr(query).includes("receiving_quarantine_")
+      ? [] : [{ id: 1, product_id: 1, units_per_variant: 1, is_active: true }] })) };
     let lines = [
       { id: 1, expectedQty: 10, receivedQty: 5, status: "pending" },
       { id: 2, expectedQty: 20, receivedQty: 0, status: "pending" },
@@ -300,7 +301,7 @@ describe("ReceivingService - close reconciliation semantics", () => {
       getReceivingOrderById: vi.fn().mockResolvedValue(order),
       getReceivingLines: vi.fn().mockResolvedValue(lines),
     };
-    const db = { transaction: vi.fn() };
+    const db = { execute: vi.fn().mockResolvedValue({ rows: [] }), transaction: vi.fn() };
     const inventoryCore = { receiveInventory: vi.fn() };
     const service = new ReceivingService(
       db as any,
@@ -545,6 +546,8 @@ describe("ReceivingService - close reconciliation semantics", () => {
         if (text.includes("from procurement.receiving_orders") && text.includes("for update")) {
           return { rows: [{ id: order.id }] };
         }
+        if (text.includes("procurement.receiving_custody_fence")) return { rows: [{ singleton: true }] };
+        if (text.includes("procurement.receiving_quarantine_")) return { rows: [] };
         if (text.includes("units_per_variant")) {
           return { rows: [{ id: 5, product_id: 1, units_per_variant: 1, is_active: true }] };
         }
@@ -624,6 +627,8 @@ describe("ReceivingService - close reconciliation semantics", () => {
         if (text.includes("from procurement.receiving_orders") && text.includes("for update")) {
           return { rows: [{ id: order.id }] };
         }
+        if (text.includes("procurement.receiving_custody_fence")) return { rows: [{ singleton: true }] };
+        if (text.includes("procurement.receiving_quarantine_")) return { rows: [] };
         if (text.includes("from warehouse.warehouses")) return { rows: [{ isActive: 1 }] };
         if (text.includes("from warehouse.warehouse_locations")) return { rows: [12, 13, 14].map((id) => ({ id, warehouseId: 1, isActive: 1 })) };
         if (text.includes("from procurement.purchase_order_lines")) return { rows: lines.map((line) => ({ id: line.id, purchaseOrderId: 1,

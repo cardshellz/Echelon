@@ -1,8 +1,9 @@
 import { lockInventoryCostGraph, recordReceiptCostOrigin, recordLotCostContribution } from "../infrastructure/cost-evidence.repository";
 import { assertShipmentNotRetired } from "../../inventory-planning/infrastructure/inventory-cutover-retired-work";
 import { assertNoOpenPickCorrection } from "../../wms/pick-correction.repository";
-import { openOperationalQuantityPosting, type OperationalQuantityPosting } from "../infrastructure/operational-quantity-posting";
+import { openOperationalQuantityPosting, quantityTransactionFromDrizzle, type OperationalQuantityPosting } from "../infrastructure/operational-quantity-posting";
 import { assertLegacyQuantityImportAllowed } from "./legacy-quantity-import";
+import { assertReceivingCustodyCountable } from "./receiving-custody-count-guard";
 import { sql } from "drizzle-orm";
 import { z } from "zod";
 import { createHash } from "node:crypto";
@@ -276,6 +277,11 @@ export class InventoryUseCases {
     });
   }
 
+  /** Caller-owned counts/imports invoke this before physical row locks. */
+  async assertCountableCustody(input: { productVariantId: number; warehouseLocationId: number }): Promise<void> {
+    await assertReceivingCustodyCountable(quantityTransactionFromDrizzle(this.db), input);
+  }
+
   // ---------------------------------------------------------------------------
   // RECEIVE
   // ---------------------------------------------------------------------------
@@ -316,6 +322,11 @@ export class InventoryUseCases {
         : params.receivingOrderId ? `receiving_order:${params.receivingOrderId}:${params.productVariantId}:${params.warehouseLocationId}` : undefined);
       if (quantityPosting && await quantityPosting.beginOperation(quantityKey, { operation: "receive", ...params,
         costRecordedAt: params.costRecordedAt?.toISOString() ?? null })) { replayed = true; return; }
+      if (!params.receivingLineId && !params.receivingOrderId) {
+        await assertReceivingCustodyCountable(quantityTransactionFromDrizzle(tx), {
+          productVariantId: params.productVariantId, warehouseLocationId: params.warehouseLocationId,
+        });
+      }
       await this.assertNotFrozen(params.warehouseLocationId, tx);
       await lockInventoryCostGraph(tx);
 
@@ -1252,6 +1263,13 @@ export class InventoryUseCases {
         conversion: params.conversion ? { ...params.conversion, productMills: params.conversion.productMills.toString(),
           packagingMills: params.conversion.packagingMills.toString(), landedMills: params.conversion.landedMills.toString() } : null });
       if (replay) { replayedResult = adjustmentReplaySchema.parse(replay.result); return; }
+      // Exact transformations consume recorded source lots. An ordinary positive
+      // adjustment (including a picker recount) must not recognize held goods.
+      if (params.qtyDelta > 0 && !params.conversion) {
+        await assertReceivingCustodyCountable(quantityTransactionFromDrizzle(tx), {
+          productVariantId: params.productVariantId, warehouseLocationId: params.warehouseLocationId,
+        });
+      }
       await lockInventoryCostGraph(tx);
       // Cycle-count adjustments are the ONE mutation allowed on frozen bins
       if (!params.cycleCountId) {
@@ -1440,6 +1458,9 @@ export class InventoryUseCases {
     if (!actor || actor.length > 100) throw new Error("actor must contain between 1 and 100 characters");
     if (!reason || reason.length > 1000) throw new Error("reason must contain between 1 and 1000 characters");
     return this.db.transaction(async (tx) => {
+      await assertReceivingCustodyCountable(quantityTransactionFromDrizzle(tx), {
+        productVariantId: params.productVariantId, warehouseLocationId: params.warehouseLocationId,
+      });
       const transaction = await this.storage.createInventoryTransaction({
         productVariantId: params.productVariantId,
         fromLocationId: params.warehouseLocationId,

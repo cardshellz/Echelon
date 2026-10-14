@@ -131,7 +131,9 @@ If we build and own it → published interface, one owner, no swap.
 
 ### Procurement
 **Owns:** Purchase orders, vendors, receiving, accounts payable
-**Tables:** `purchase_orders`, `purchase_order_lines`, `receiving_orders`, `receiving_lines`, `vendors`, `vendor_products`, `vendor_invoices`, `ap_payments`, `po_receipts`, `po_status_history`
+**Tables:** `purchase_orders`, `purchase_order_lines`, `receiving_orders`, `receiving_lines`, `receiving_custody_fence`, `receiving_quarantine_observations`, `receiving_quarantine_acceptances`, `receiving_quarantine_dispositions`, `vendors`, `vendor_products`, `vendor_invoices`, `ap_payments`, `po_receipts`, `po_status_history`
+
+Receiving quarantine records pending physical custody without inventory or AP recognition. Its command owner prepares normal receipt acceptance and completes custody only in the receiving close transaction. Inventory count writers consume the transaction-scoped `receiving-custody-public.ts` reader; they never update procurement custody. Held goods are excluded from saleable stock and block ambiguous counts at their holding location.
 
 **Handoff to WMS:** When a receiving order is closed, calls `inventoryCore.receiveInventory()` for each line
 **Does NOT:**

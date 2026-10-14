@@ -155,6 +155,10 @@ describe("PostgreSQL CI coverage and isolation", () => {
       "server/modules/marketplace-listings/__tests__/integration/listing-presence.integration.test.ts",
       "server/modules/dropship/__tests__/integration/dropship-listing-setting-writes.integration.test.ts",
     ];
+    addedSuites.push(
+      "server/modules/procurement/__tests__/integration/receiving-quarantine.integration.test.ts",
+      "server/modules/inventory/__tests__/integration/receiving-custody-count-guard.integration.test.ts",
+    );
     const retiredInvoiceSuite = "server/modules/inventory/__tests__/integration/invoice-variance-cogs.integration.test.ts";
     expect(POSTGRES_TEST_FILES).not.toContain(retiredInvoiceSuite);
     const priorSuiteCount = 69;

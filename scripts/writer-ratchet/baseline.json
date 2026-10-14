@@ -1236,10 +1236,22 @@
   "procurement.receipt_reversals": [
     "modules/procurement"
   ],
+  "procurement.receiving_custody_fence": [
+    "modules/procurement"
+  ],
   "procurement.receiving_lines": [
     "modules/procurement"
   ],
   "procurement.receiving_orders": [
+    "modules/procurement"
+  ],
+  "procurement.receiving_quarantine_acceptances": [
+    "modules/procurement"
+  ],
+  "procurement.receiving_quarantine_dispositions": [
+    "modules/procurement"
+  ],
+  "procurement.receiving_quarantine_observations": [
     "modules/procurement"
   ],
   "procurement.request_for_quote_lines": [

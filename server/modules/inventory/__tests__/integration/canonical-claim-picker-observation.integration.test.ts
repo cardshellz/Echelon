@@ -1,5 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { installLotCostAdmissionFixture } from "../fixtures/lot-cost-admission.fixture";
+import { emptyReceivingCustodyFixtureSql } from "../fixtures/empty-receiving-custody.fixture";
 import { resolve } from "node:path";
 
 import { config } from "dotenv";
@@ -29,11 +30,15 @@ describeWithDisposableDb.sequential("canonical claim picker-observation PostgreS
     inventory: `claim_observation_inventory_${suffix}`,
     warehouse: `claim_observation_warehouse_${suffix}`,
     wms: `claim_observation_wms_${suffix}`,
+    procurement: `claim_observation_procurement_${suffix}`,
+    catalog: `claim_observation_catalog_${suffix}`,
   } as const;
 
   const qualify = (statement: string) => statement
     .replaceAll("inventory.", `"${schemas.inventory}".`)
     .replaceAll("warehouse.", `"${schemas.warehouse}".`)
+    .replaceAll("procurement.", `"${schemas.procurement}".`)
+    .replaceAll("catalog.", `"${schemas.catalog}".`)
     .replaceAll("wms.", `"${schemas.wms}".`);
 
   const observationInput = (client: { query: (text: string, values?: unknown[]) => Promise<any> }) => ({
@@ -88,6 +93,10 @@ describeWithDisposableDb.sequential("canonical claim picker-observation PostgreS
       CREATE SCHEMA "${schemas.warehouse}";
       CREATE SCHEMA "${schemas.inventory}";
       CREATE SCHEMA "${schemas.wms}";
+      CREATE SCHEMA "${schemas.procurement}";
+      CREATE SCHEMA "${schemas.catalog}";
+      CREATE TABLE "${schemas.catalog}".product_variants(id integer PRIMARY KEY,product_id integer NOT NULL);
+      INSERT INTO "${schemas.catalog}".product_variants(id,product_id) VALUES(105,1),(205,2);
       CREATE TABLE "${schemas.inventory}".quantity_ledger_opening (
         singleton_key boolean PRIMARY KEY, command_id bigint NOT NULL
       );
@@ -233,6 +242,7 @@ describeWithDisposableDb.sequential("canonical claim picker-observation PostgreS
     }
     await pool.query(qualify(costMigration.slice(contributionStart, contributionEnd)));
     await installLotCostAdmissionFixture(pool,{ qualify,cogs: false });
+    await pool.query(qualify(emptyReceivingCustodyFixtureSql));
   }, 300_000);
 
   afterAll(async () => {
@@ -241,6 +251,8 @@ describeWithDisposableDb.sequential("canonical claim picker-observation PostgreS
       DROP SCHEMA IF EXISTS "${schemas.inventory}" CASCADE;
       DROP SCHEMA IF EXISTS "${schemas.warehouse}" CASCADE;
       DROP SCHEMA IF EXISTS "${schemas.wms}" CASCADE;
+      DROP SCHEMA IF EXISTS "${schemas.procurement}" CASCADE;
+      DROP SCHEMA IF EXISTS "${schemas.catalog}" CASCADE;
     `);
     await pool.end();
   });

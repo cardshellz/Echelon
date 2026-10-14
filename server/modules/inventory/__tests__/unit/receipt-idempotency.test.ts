@@ -139,4 +139,9 @@ describe("Receipt idempotency (H4)", () => {
   });
 });
 // Explicit pre-opening compatibility fixture. Active posting is covered against PostgreSQL.
-vi.mock("../../infrastructure/operational-quantity-posting", () => ({ openOperationalQuantityPosting: vi.fn(async () => null) }));
+vi.mock("../../infrastructure/operational-quantity-posting", async importOriginal => ({
+  ...await importOriginal<typeof import("../../infrastructure/operational-quantity-posting")>(),
+  openOperationalQuantityPosting: vi.fn(async () => null),
+}));
+// The receipt replay fixture has no held goods; real custody evidence has its own suite.
+vi.mock("../../../procurement/receiving-custody-public", () => ({ readUnresolvedReceivingCustody: vi.fn(async () => []) }));

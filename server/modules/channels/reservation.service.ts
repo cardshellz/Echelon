@@ -1571,6 +1571,10 @@ class ReservationService implements ReservationServiceContract {
         throw new Error(`Cycle count item ${command.cycleCountItemId} is not approvable from status ${item.status}`);
       }
 
+      const inventory = this.inventoryCore.withTx(dbh);
+      await inventory.assertCountableCustody({
+        productVariantId: command.productVariantId, warehouseLocationId: command.warehouseLocationId,
+      });
       const levelResult = await dbh.execute(sql`
         SELECT id, variant_qty
         FROM inventory.inventory_levels
@@ -1585,7 +1589,6 @@ class ReservationService implements ReservationServiceContract {
       const quantityDelta = command.countedQty - quantityBefore;
       let adjustmentTransactionId: number | null = null;
       const displacedOrderIds: number[] = [];
-      const inventory = this.inventoryCore.withTx(dbh);
       if (quantityDelta !== 0) {
         const adjustment = await inventory.adjustInventory({
           productVariantId: command.productVariantId,
