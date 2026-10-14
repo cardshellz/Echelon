@@ -33,12 +33,17 @@ import {
 import { useAuth } from "@/lib/auth";
 import type { MemberPlanPresentation } from "@shared/membership/member-plan-presentation";
 import { useOrderEditPreview } from "@/hooks/use-order-edit-preview";
+import { canonicalJson } from "@shared/utils/canonical-json";
+import { OrderEditCodeEntry } from "@/components/order-edits/OrderEditCodeEntry";
 import { useDebounce } from "@/hooks/use-debounce";
 import {
   nextOrderEditPreviewInput,
   type OrderEditQuantityTarget,
 } from "@/lib/order-edit-preview-cache";
-import { readOrderEditItemPricing } from "@/lib/order-edit-item-pricing";
+import {
+  readOrderEditItemPricing,
+  readOrderEditPricingTargets,
+} from "@/lib/order-edit-item-pricing";
 import {
   OrderEditSummary,
   OrderEditCalculationDetails,
@@ -245,6 +250,9 @@ export function OrderDraft({
   closedOperationId,
   active = true,
   audience = "staff",
+  discountCodes: controlledCodes,
+  onDiscountCodesChange,
+  initialOperation,
 }: {
   order: OrderEditOrder;
   api: OrderEditTransport;
@@ -259,19 +267,58 @@ export function OrderDraft({
   /** Retained drafts stay mounted during review, but do not keep requesting background calculations. */
   active?: boolean;
   audience?: "staff" | "customer";
+  discountCodes?: string[];
+  onDiscountCodesChange?: (codes: string[]) => void;
+  /** Hydrate an existing review from its persisted plan, never from baseline quantities. */
+  initialOperation?: OrderEditOperation | null;
 }) {
+  const queryClient = useQueryClient();
+  const [localCodes, setLocalCodes] = useState<string[]>([]);
+  const [codeEditing, setCodeEditing] = useState(false);
+  const discountCodes = controlledCodes ?? localCodes;
+  const changeCodes = onDiscountCodesChange ?? setLocalCodes;
   const [quantities, setQuantities] = useState<Record<string, string>>(() =>
     Object.fromEntries(
-      order.lines.map((line) => [line.lineItemId, String(line.quantity)]),
+      order.lines.map((line) => [
+        line.lineItemId,
+        String(
+          initialOperation?.requestedPlan?.changes.find(
+            (change) => change.lineItemId === line.lineItemId,
+          )?.quantity ?? line.quantity,
+        ),
+      ]),
     ),
   );
   const [additions, setAdditions] = useState<
     Array<{
-      variant: OrderEditCatalogVariant;
+      variant: Pick<
+        OrderEditCatalogVariant,
+        "variantId" | "title" | "variantTitle" | "sku"
+      > & {
+        priceCents: number | null;
+        retailPriceCents?: number | null;
+      };
       plan: MemberPlanPresentation | null;
       quantity: string;
     }>
-  >([]);
+  >(() =>
+    (initialOperation?.requestedPlan?.additions ?? []).map((addition) => {
+      const line = initialOperation?.lines.find(
+        (item) => item.variantId === addition.variantId,
+      );
+      return {
+        variant: {
+          variantId: addition.variantId,
+          title: line?.title ?? "Added product",
+          variantTitle: line?.variantTitle ?? null,
+          sku: null,
+          priceCents: null,
+        },
+        plan: null,
+        quantity: String(addition.quantity),
+      };
+    }),
+  );
   const [quantityTarget, setQuantityTarget] =
     useState<OrderEditQuantityTarget | null>(null);
   const [pending, setPending] = useState(false);
@@ -305,6 +352,7 @@ export function OrderDraft({
         : Number.NaN,
     }));
   const input = {
+    ...(order.codeEntryAvailable ? { discountCodes } : {}),
     connectionId: order.connectionId,
     omsOrderId: order.omsOrderId,
     expectedRevision: order.revision,
@@ -366,6 +414,51 @@ export function OrderDraft({
     () => new Map(originalPricing.data ?? []),
     [originalPricing.data],
   );
+  const unpricedAdditions = additions.filter(
+    (item) => item.variant.priceCents === null,
+  );
+  const restoredPricing = useQuery({
+    queryKey: [
+      ORDER_EDITS_API,
+      staffId,
+      "restored-item-pricing",
+      order.connectionId,
+      order.omsOrderId,
+      order.revision,
+      unpricedAdditions.map((item) => item.variant.variantId),
+    ],
+    queryFn: ({ signal }) =>
+      readOrderEditPricingTargets(
+        api,
+        order,
+        unpricedAdditions.map((item) => ({
+          key: item.variant.variantId,
+          ...item.variant,
+          quantity: 1,
+        })),
+        signal,
+      ),
+    enabled:
+      audience === "customer" &&
+      active &&
+      mutable &&
+      !reviewBlocked &&
+      unpricedAdditions.length > 0,
+    staleTime: ORDER_EDIT_PREVIEW_TTL_MS,
+    retry: false,
+  });
+  useEffect(() => {
+    if (!restoredPricing.data?.length) return;
+    const prices = new Map(restoredPricing.data);
+    setAdditions((current) =>
+      current.map((item) => {
+        const pricing = prices.get(item.variant.variantId);
+        return pricing && item.variant.priceCents === null
+          ? { ...item, variant: pricing.variant, plan: pricing.plan }
+          : item;
+      }),
+    );
+  }, [restoredPricing.data]);
   const previewLineGroups = useMemo(
     () =>
       new Map(
@@ -391,7 +484,8 @@ export function OrderDraft({
     [displayPreview],
   );
   async function quote() {
-    if (!canEdit || !valid || reviewBlocked || inflight.current) return;
+    if (!canEdit || !valid || reviewBlocked || codeEditing || inflight.current)
+      return;
     inflight.current = true;
     setReviewPreview(currentPreview);
     setPending(true);
@@ -426,8 +520,27 @@ export function OrderDraft({
       setPending(false);
     }
   }
+  async function applyCode(code: string) {
+    const next = orderEditPreviewInputSchema.parse({
+      ...input,
+      discountCodes: [...discountCodes, code],
+    });
+    const verified = await api.preview(next);
+    queryClient.setQueryData(
+      [ORDER_EDITS_API, staffId, "preview", canonicalJson(next)],
+      verified,
+    );
+    command.current = null;
+    changeCodes(next.discountCodes!);
+  }
   if (pending)
-    return <OrderEditPreviewReview order={order} preview={reviewPreview} audience={audience} />;
+    return (
+      <OrderEditPreviewReview
+        order={order}
+        preview={reviewPreview}
+        audience={audience}
+      />
+    );
   return (
     <Card className="oe-order-surface">
       <CardHeader className="oe-order-heading">
@@ -744,6 +857,20 @@ export function OrderDraft({
               Set quantity to 0 to remove an item. Discounts, shipping and tax
               are recalculated for your changes.
             </p>
+            <OrderEditCodeEntry
+              codes={discountCodes}
+              applications={currentPreview?.appliedCodes ?? []}
+              available={order.codeEntryAvailable === true}
+              disabled={!mutable || reviewBlocked}
+              onEditing={setCodeEditing}
+              onApply={applyCode}
+              onRemove={(code) => {
+                command.current = null;
+                changeCodes(
+                  discountCodes.filter((existing) => existing !== code),
+                );
+              }}
+            />
             <p className="text-xs text-muted-foreground">
               {audience === "customer"
                 ? "To change the shipping address, use Change address on your order page."
@@ -804,7 +931,9 @@ export function OrderDraft({
           </p>
           <Button
             type="button"
-            disabled={!canEdit || !valid || pending || reviewBlocked}
+            disabled={
+              !canEdit || !valid || pending || reviewBlocked || codeEditing
+            }
             onClick={quote}
           >
             {pending
@@ -893,6 +1022,7 @@ export function OrderEditOperationView({
   onRefresh,
   onAbandon,
   audience = "staff",
+  onCodesChange,
 }: {
   operation: OrderEditOperation;
   now: number;
@@ -903,14 +1033,20 @@ export function OrderEditOperationView({
   onRefresh(): void;
   onAbandon(): void;
   audience?: "staff" | "customer";
+  onCodesChange?: (codes: string[]) => Promise<void>;
 }) {
+  const [codeEditing, setCodeEditing] = useState(false);
   const copy = orderEditStatusCopy[operation.status];
-  const title = audience === "customer" && operation.status === "review_required" ? "Review needed" : copy.title;
-  const description = audience === "customer" && operation.status === "review_required"
-    ? "We need to check these changes. Contact us with the edit reference below."
-    : audience === "customer" && operation.status === "synchronizing"
-      ? "Your order is being updated. Check its status again shortly."
-      : copy.description;
+  const title =
+    audience === "customer" && operation.status === "review_required"
+      ? "Review needed"
+      : copy.title;
+  const description =
+    audience === "customer" && operation.status === "review_required"
+      ? "We need to check these changes. Contact us with the edit reference below."
+      : audience === "customer" && operation.status === "synchronizing"
+        ? "Your order is being updated. Check its status again shortly."
+        : copy.description;
   const payable = operation.balanceDueCents > 0;
   const refundable = operation.refundDueCents > 0;
   const paymentUrl =
@@ -924,8 +1060,13 @@ export function OrderEditOperationView({
   // A fresh customer review needs only Apply and Change items. Retain the
   // existing recovery action when payment, expiry, or an uncertain reply needs
   // a status check; this action can reconcile the edit, so it is never automated.
-  const showStatusCheck = audience !== "customer" || operation.status !== "ready" ||
-    expired || isUncertain || error !== null || operation.error !== null;
+  const showStatusCheck =
+    audience !== "customer" ||
+    operation.status !== "ready" ||
+    expired ||
+    isUncertain ||
+    error !== null ||
+    operation.error !== null;
   const financials = operation.financials;
   const showCurrent = ["completed", "recovered", "failed", "expired"].includes(
     operation.status,
@@ -958,7 +1099,10 @@ export function OrderEditOperationView({
             },
           ]
         : [
-            { label: "Original total", totalCents: operation.previousTotalCents },
+            {
+              label: "Original total",
+              totalCents: operation.previousTotalCents,
+            },
             {
               label: showCurrent ? "Current order total" : "Quoted total",
               totalCents: operation.updatedTotalCents,
@@ -1000,7 +1144,9 @@ export function OrderEditOperationView({
       <CardContent className="oe-order-content">
         <p className="text-sm text-muted-foreground">
           {operation.status === "review_required" && operation.canAbandon
-            ? (audience === "customer" ? "We could not verify these changes. You can cancel this edit and try again, or contact us for help." : "This edit needs review. You can cancel this unsubmitted edit, or keep its reference for investigation.")
+            ? audience === "customer"
+              ? "We could not verify these changes. You can cancel this edit and try again, or contact us for help."
+              : "This edit needs review. You can cancel this unsubmitted edit, or keep its reference for investigation."
             : description}
         </p>
         {showCurrent && (
@@ -1010,8 +1156,39 @@ export function OrderEditOperationView({
           </p>
         )}
         <OrderEditItems lines={operation.lines} showAdded={!showCurrent} />
-        <OrderEditSummary totals={summaryTotals} difference={difference}
-          financials={showCurrent ? financials?.current : financials?.quoted ?? financials?.current} />
+        {operation.status === "ready" &&
+          onCodesChange &&
+          operation.requestedPlan?.discountCodes !== undefined && (
+            <OrderEditCodeEntry
+              codes={operation.requestedPlan.discountCodes}
+              applications={operation.appliedCodes ?? []}
+              available={operation.codeEntryAvailable === true}
+              disabled={busy || expired || isUncertain}
+              onEditing={setCodeEditing}
+              onApply={(code) =>
+                onCodesChange([
+                  ...operation.requestedPlan!.discountCodes!,
+                  code,
+                ])
+              }
+              onRemove={(code) =>
+                onCodesChange(
+                  operation.requestedPlan!.discountCodes!.filter(
+                    (existing) => existing !== code,
+                  ),
+                )
+              }
+            />
+          )}
+        <OrderEditSummary
+          totals={summaryTotals}
+          difference={difference}
+          financials={
+            showCurrent
+              ? financials?.current
+              : (financials?.quoted ?? financials?.current)
+          }
+        />
         <OrderEditCalculationDetails
           columns={totalsColumns}
           shipping={
@@ -1036,9 +1213,15 @@ export function OrderEditOperationView({
         )}
         {operation.warnings.length > 0 && (
           <ul className="list-disc space-y-1 pl-5 text-sm text-muted-foreground">
-            {operation.warnings.filter(warning => audience !== "customer" || !warning.startsWith("Private staff testing.")).map((warning, index) => (
-              <li key={index}>{warning}</li>
-            ))}
+            {operation.warnings
+              .filter(
+                (warning) =>
+                  audience !== "customer" ||
+                  !warning.startsWith("Private staff testing."),
+              )
+              .map((warning, index) => (
+                <li key={index}>{warning}</li>
+              ))}
           </ul>
         )}
         {operation.error && <ErrorMessage text={operation.error.message} />}
@@ -1060,7 +1243,10 @@ export function OrderEditOperationView({
               <Button
                 type="button"
                 disabled={
-                  busy || isUncertain || !orderEditCanCommit(operation, now)
+                  busy ||
+                  isUncertain ||
+                  codeEditing ||
+                  !orderEditCanCommit(operation, now)
                 }
                 onClick={onCommit}
               >
@@ -1085,21 +1271,26 @@ export function OrderEditOperationView({
           {paymentUrl && (
             <Button asChild variant="outline">
               <a href={paymentUrl} target="_blank" rel="noopener noreferrer">
-                {audience === "customer" ? "Pay the difference" : "Open Shopify payment"}
+                {audience === "customer"
+                  ? "Pay the difference"
+                  : "Open Shopify payment"}
               </a>
             </Button>
           )}
-          {showStatusCheck && <Button
-            type="button"
-            variant="outline"
-            disabled={busy}
-            onClick={onRefresh}
-          >
-            {busy ? "Checking…" : "Check status"}
-          </Button>}
+          {showStatusCheck && (
+            <Button
+              type="button"
+              variant="outline"
+              disabled={busy}
+              onClick={onRefresh}
+            >
+              {busy ? "Checking…" : "Check status"}
+            </Button>
+          )}
         </div>
         <p className="break-all text-xs text-muted-foreground">
-          {audience === "customer" ? "Edit reference" : "Operation"} {operation.operationId}
+          {audience === "customer" ? "Edit reference" : "Operation"}{" "}
+          {operation.operationId}
         </p>
       </CardContent>
     </Card>

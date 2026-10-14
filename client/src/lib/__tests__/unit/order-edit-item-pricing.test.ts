@@ -2,7 +2,10 @@ import { describe, expect, it, vi } from "vitest";
 import { orderEditOrderSchema } from "@shared/order-edits/order-edit.contract";
 import { orderEditCatalogVariantsInputSchema } from "@shared/order-edits/order-edit-catalog";
 import type { OrderEditTransport } from "@/lib/order-edits";
-import { readOrderEditItemPricing } from "@/lib/order-edit-item-pricing";
+import {
+  readOrderEditItemPricing,
+  readOrderEditPricingTargets,
+} from "@/lib/order-edit-item-pricing";
 
 const variantId = "gid://shopify/ProductVariant/10";
 const product = {
@@ -71,6 +74,21 @@ function catalog() {
 }
 
 describe("owned order item pricing metadata", () => {
+  it("restores additions through title discovery and exact owned variant identity without inventing a price", async () => {
+    const api = catalog();
+    const result = await readOrderEditPricingTargets(
+      api,
+      order,
+      [{ key: variantId, variantId, sku: null, title: "Sleeves", quantity: 1 }],
+      new AbortController().signal,
+    );
+    expect(result).toEqual([[variantId, { variant: option, plan: null }]]);
+    expect(api.catalogProducts).toHaveBeenCalledWith(
+      4,
+      { search: "Sleeves", category: null, after: null },
+      expect.any(AbortSignal),
+    );
+  });
   it("uses SKU only for discovery and matches the exact variant under the owned order revision", async () => {
     const api = catalog();
     api.catalogVariants.mockImplementation(async (connectionId, input) => ({

@@ -5,6 +5,7 @@ import {
 } from "./order-edit.contract";
 import { orderEditFinancialsSchema } from "./order-edit-financials";
 import { orderEditShippingRepricingSchema } from "./order-edit-shipping";
+import { orderEditCodeApplicationSchema } from "./order-edit-codes";
 
 // A preview is an expiring calculation, never a command or an authority to apply an edit.
 export const ORDER_EDIT_PREVIEW_DEBOUNCE_MS = 400;
@@ -15,10 +16,14 @@ export const orderEditPreviewScopeSchema = orderEditQuoteInputSchema
 export const orderEditPreviewInputSchema = orderEditQuoteInputSchema
   .innerType()
   .omit({ requestKey: true })
+  .extend({ operationId: z.string().uuid().optional() })
   .superRefine((input, context) => {
     const checked = orderEditPlanInputSchema.safeParse({
       changes: input.changes,
       additions: input.additions,
+      ...(input.discountCodes === undefined
+        ? {}
+        : { discountCodes: input.discountCodes }),
     });
     if (!checked.success)
       for (const issue of checked.error.issues) context.addIssue(issue);
@@ -32,6 +37,7 @@ export const orderEditPreviewWarmSchema = z
 export const orderEditPreviewSchema = z
   .object({
     phase: z.literal("preview"),
+    appliedCodes: z.array(orderEditCodeApplicationSchema).optional(),
     input: orderEditPreviewInputSchema,
     calculatedAt: z.string().datetime(),
     expiresAt: z.string().datetime(),

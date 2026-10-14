@@ -206,7 +206,10 @@ export function registerOrderEditRoutes(
     `${ORDER_EDIT_API}/orders/:omsOrderId`,
     handle(false, async (req, res) => {
       const query = z
-        .object({ connectionId: positiveId })
+        .object({
+          connectionId: positiveId,
+          codeEntryVersion: z.literal("v1").optional(),
+        })
         .strict()
         .parse(req.query);
       res.json(
@@ -214,6 +217,7 @@ export function registerOrderEditRoutes(
           await service.order(
             query.connectionId,
             positiveId.parse(req.params.omsOrderId),
+            query.codeEntryVersion,
           ),
         ),
       );
@@ -332,11 +336,18 @@ export function registerOrderEditRoutes(
   app.get(
     `${ORDER_EDIT_API}/operations/:operationId`,
     handle(false, async (req, res) => {
+      const query = z
+        .object({ codeEntryVersion: z.literal("v1").optional() })
+        .strict()
+        .parse(req.query);
       sendLineDisplayResponse(
         req,
         res,
         orderEditOperationSchema.parse(
-          await service.get(operationId.parse(req.params.operationId)),
+          await service.get(
+            operationId.parse(req.params.operationId),
+            query.codeEntryVersion,
+          ),
         ),
       );
     }),
@@ -355,7 +366,11 @@ export function registerOrderEditRoutes(
                 actor,
               )
             : await service[action](id, actor);
-        sendLineDisplayResponse(req, res, orderEditOperationSchema.parse(result));
+        sendLineDisplayResponse(
+          req,
+          res,
+          orderEditOperationSchema.parse(result),
+        );
       }),
     );
   }

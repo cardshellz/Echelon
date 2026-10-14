@@ -527,7 +527,7 @@ describe("staff order editor access and resume", () => {
     const signal = new AbortController().signal;
     await (query.queryFn as Function)({ signal });
     expect(request).toHaveBeenCalledWith(
-      `/api/order-edits/admin/operations/${id}`,
+      `/api/order-edits/admin/operations/${id}?codeEntryVersion=v1`,
       expect.objectContaining({ credentials: "include", signal }),
     );
   });

@@ -20,284 +20,15 @@ import {
   OrderEditProviderError,
 } from "../../application/order-edit-provider";
 
-const OP = "11111111-1111-4111-8111-111111111111";
-const KEY = "22222222-2222-4222-8222-222222222222";
-const REFUND_KEY = "33333333-3333-4333-8333-333333333333";
-const START = Date.parse("2026-10-05T12:00:00.000Z");
-const proof: OrderEditReleaseProof = {
-  allocationRequired: true,
-  wmsOrderIds: [9],
-  shipmentIds: [7],
-  contentFingerprint: "release-proof",
-};
-
-function baseline(): OrderEditSnapshot {
-  return {
-    connectionId: 4,
-    channelId: 36,
-    orderId: "gid://shopify/Order/100",
-    name: "#100",
-    customerId: "gid://shopify/Customer/8",
-    currency: "USD",
-    updatedAt: new Date(START).toISOString(),
-    editable: true,
-    editableErrors: [],
-    cancelled: false,
-    closed: false,
-    fullyPaid: true,
-    totalCents: 2000,
-    outstandingCents: 0,
-    subtotalCents: 2000,
-    taxCents: 0,
-    netPaidCents: 2000,
-    capturableCents: 0,
-    shippingCents: 0,
-    paymentUrl: null,
-    memberPlan: null,
-    memberPricingEnabled: false,
-    discountsPresent: false,
-    lines: [
-      {
-        id: "gid://shopify/LineItem/1",
-        variantId: "gid://shopify/ProductVariant/10",
-        title: "Product",
-        variantTitle: "Single",
-        sku: "TEST",
-        quantity: 2,
-        unfulfilledQuantity: 2,
-        originalUnitPriceCents: 1000,
-        discountedUnitPriceCents: 1000,
-        totalCents: 2000,
-        discountFingerprint: "none",
-        unsupported: false,
-      },
-    ],
-    transactions: [],
-    refunds: [],
-    contentFingerprint: "contents-original",
-    fingerprint: "baseline",
-    evidence: { countryCode: "US" },
-  };
-}
-
-export function serviceHarness(
-  quantity = 3,
-  catalog?: import("../../application/order-edit-catalog").OrderEditCatalog,
-) {
-  let now = START;
-  let current = baseline();
-  let saved: OrderEditRecord | null = null;
-  let enabled = true;
-  let locked = false;
-  const events: Array<{
-    action: string;
-    releaseProof?: OrderEditReleaseProof;
-  }> = [];
-  const connection = () => ({
-    connectionId: 4,
-    channelId: 36,
-    name: "Test store",
-    shopDomain: "test.myshopify.com",
-    paymentWindowMinutes: 30,
-    enabled,
-  });
-  const input: OrderEditQuoteInput = {
-    connectionId: 4,
-    omsOrderId: 1,
-    expectedRevision: "baseline",
-    requestKey: KEY,
-    changes: [{ lineItemId: current.lines[0].id, quantity }],
-    additions: [],
-  };
-  const store: OrderEditStore = {
-    connections: async () => [connection()],
-    settings: async () => connection(),
-    saveSettings: async () => connection(),
-    findOrders: async () => [],
-    orderReference: async () => ({
-      omsOrderId: 1,
-      channelId: 36,
-      connectionId: 4,
-      externalOrderId: "100",
-      externalCustomerId: "8",
-      orderNumber: "#100",
-      customerName: "Test",
-      customerEmail: null,
-      activeOperationId: saved?.id ?? null,
-    }),
-    withOrderLock: async (_id, work) => {
-      if (locked) throw new OrderEditError("ORDER_EDIT_BUSY", "Busy");
-      locked = true;
-      try {
-        return await work();
-      } finally {
-        locked = false;
-      }
-    },
-    findByRequestKey: async (key) =>
-      saved?.requestKey === key ? structuredClone(saved) : null,
-    get: async () => {
-      if (!saved) throw new Error("missing");
-      return structuredClone(saved);
-    },
-    create: async (record) => {
-      if (saved) throw new Error("one active operation");
-      saved = structuredClone(record);
-    },
-    save: async (record, version, _actor, action, releaseProof) => {
-      if (!saved || saved.version !== version) throw new Error("stale version");
-      if (
-        ["completed", "recovered", "expired"].includes(record.status) &&
-        !releaseProof
-      )
-        throw new Error("missing proof");
-      saved = structuredClone(record);
-      events.push({ action, releaseProof });
-    },
-    pending: async () => (saved ? [saved.id] : []),
-  };
-  const quote: OrderEditQuote = {
-    connectionId: 4,
-    channelId: 36,
-    orderId: current.orderId,
-    operationId: OP,
-    calculatedOrderId: "gid://shopify/CalculatedOrder/1",
-    sessionId: "gid://shopify/OrderEditSession/1",
-    baselineFingerprint: current.fingerprint,
-    baseline: baseline(),
-    plan: input,
-    lines: [
-      {
-        title: "Product",
-        variantTitle: "Single",
-        originalLineId: current.lines[0].id,
-        calculatedLineId: "gid://shopify/CalculatedLineItem/1",
-        variantId: current.lines[0].variantId,
-        quantity,
-        originalUnitPriceCents: 1000,
-        discountedUnitPriceCents: 1000,
-        totalCents: quantity * 1000,
-      },
-    ],
-    totalCents: quantity * 1000,
-    outstandingCents: (quantity - 2) * 1000,
-    deltaCents: (quantity - 2) * 1000,
-    shippingCents: 0,
-    createdAt: new Date(START).toISOString(),
-    evidence: {},
-  };
-  const provider = {
-    readOrder: vi.fn(async () => structuredClone(current)),
-    searchVariants: vi.fn(async () => []),
-    quote: vi.fn(async () => structuredClone(quote)),
-    commit: vi.fn(async () => {
-      current = {
-        ...current,
-        lines: [{ ...current.lines[0], quantity, totalCents: quantity * 1000 }],
-        totalCents: quantity * 1000,
-        subtotalCents: quantity * 1000,
-        outstandingCents: (quantity - 2) * 1000,
-        fullyPaid: quantity <= 2,
-        contentFingerprint: "contents-edited",
-        fingerprint: "edited",
-        paymentUrl: "https://test.myshopify.com/pay",
-      };
-      return structuredClone(current);
-    }),
-    reconcileCommit: vi.fn(async () => ({
-      status: "applied" as const,
-      snapshot: structuredClone(current),
-    })),
-    prepareRefund: vi.fn(async () => ({
-      connectionId: 4,
-      channelId: 36,
-      orderId: current.orderId,
-      operationId: OP,
-      idempotencyKey: REFUND_KEY,
-      currency: "USD" as const,
-      amountCents: 2000 - quantity * 1000,
-      parentTransactionId: "gid://shopify/OrderTransaction/1",
-      gateway: "shopify_payments",
-      note: "refund",
-      contentFingerprint: current.contentFingerprint,
-    })),
-    refund: vi.fn<OrderEditProvider["refund"]>(async () => {
-      current = {
-        ...current,
-        netPaidCents: current.totalCents,
-        outstandingCents: 0,
-      };
-      return {
-        status: "succeeded" as const,
-        refundId: "gid://shopify/Refund/1",
-        evidence: {
-          id: "gid://shopify/Refund/1",
-          note: "refund",
-          amountCents: 1000,
-          transactions: [],
-        },
-      };
-    }),
-    recoverUnpaid: vi.fn(async () => {
-      current = baseline();
-      return structuredClone(current);
-    }),
-    reconcileRecovery: vi.fn<OrderEditProvider["reconcileRecovery"]>(
-      async () => ({
-        status: "restored" as const,
-        snapshot: structuredClone(current),
-      }),
-    ),
-  } satisfies OrderEditProvider;
-  const warehouse = {
-    inspect: vi.fn(async () => ({
-      editable: true,
-      reasons: [],
-      wmsOrderIds: [9],
-    })),
-    acquire: vi.fn(async () => {}),
-    assertHeld: vi.fn(async () => {}),
-    reconcileAndRelease: vi.fn(async () => proof),
-    releaseUnchanged: vi.fn(async () => proof),
-    releaseFulfilledUnsubmitted: vi.fn(async () => ({
-      ...proof,
-      allocationRequired: false,
-      fulfilledCancellation: true,
-    })),
-  } satisfies OrderEditWarehouse;
-  let uuidCount = 0;
-  const report = vi.fn();
-  const service = new OrderEditService(
-    store,
-    provider,
-    warehouse,
-    () => new Date(now),
-    () => (uuidCount++ === 0 ? OP : REFUND_KEY),
-    report,
-    undefined,
-    catalog,
-  );
-  return {
-    service,
-    provider,
-    warehouse,
-    input,
-    events,
-    report,
-    store,
-    record: () => saved!,
-    snapshot: () => current,
-    setCurrent: (patch: Partial<OrderEditSnapshot>) => {
-      current = { ...current, ...patch };
-    },
-    advance: (ms: number) => {
-      now += ms;
-    },
-    disable: () => {
-      enabled = false;
-    },
-  };
-}
+import {
+  serviceHarness,
+  baseline,
+  OP,
+  KEY,
+  REFUND_KEY,
+  START,
+  proof,
+} from "../fixtures/order-edit-service.fixture";
 
 describe("private order edit orchestration", () => {
   it("presents verified variant identities and marks only a new product added, keeping Shopify source lines intact", async () => {
@@ -306,18 +37,74 @@ describe("private order edit orchestration", () => {
     const sourceLine = originalQuote.lines[0];
     const lines = [
       { ...sourceLine, quantity: 2, totalCents: 2000 },
-      { ...sourceLine, calculatedLineId: "gid://shopify/CalculatedLineItem/2", originalLineId: null, quantity: 1, totalCents: 1000 },
-      { ...sourceLine, calculatedLineId: "gid://shopify/CalculatedLineItem/3", originalLineId: null, variantId: "gid://shopify/ProductVariant/20", quantity: 1, totalCents: 5000 },
+      {
+        ...sourceLine,
+        calculatedLineId: "gid://shopify/CalculatedLineItem/2",
+        originalLineId: null,
+        quantity: 1,
+        totalCents: 1000,
+      },
+      {
+        ...sourceLine,
+        calculatedLineId: "gid://shopify/CalculatedLineItem/3",
+        originalLineId: null,
+        variantId: "gid://shopify/ProductVariant/20",
+        quantity: 1,
+        totalCents: 5000,
+      },
     ];
-    h.provider.quote.mockResolvedValueOnce({ ...originalQuote, lines, totalCents: 8000, outstandingCents: 6000, deltaCents: 6000 });
-    const result = await h.service.quote({
-      ...h.input,
-      additions: [{ variantId: "gid://shopify/ProductVariant/20", quantity: 1 }],
-    }, "staff");
-    expect(result.lines.map(({ id, variantId, added, quantity, totalCents }) => ({ id, variantId, added, quantity, totalCents }))).toEqual([
-      { id: sourceLine.calculatedLineId, variantId: "gid://shopify/ProductVariant/10", added: false, quantity: 2, totalCents: 2000 },
-      { id: "gid://shopify/CalculatedLineItem/2", variantId: "gid://shopify/ProductVariant/10", added: false, quantity: 1, totalCents: 1000 },
-      { id: "gid://shopify/CalculatedLineItem/3", variantId: "gid://shopify/ProductVariant/20", added: true, quantity: 1, totalCents: 5000 },
+    h.provider.quote.mockResolvedValueOnce({
+      ...originalQuote,
+      lines,
+      totalCents: 8000,
+      outstandingCents: 6000,
+      deltaCents: 6000,
+      plan: {
+        changes: h.input.changes,
+        additions: [
+          { variantId: "gid://shopify/ProductVariant/20", quantity: 1 },
+        ],
+      },
+    });
+    const result = await h.service.quote(
+      {
+        ...h.input,
+        additions: [
+          { variantId: "gid://shopify/ProductVariant/20", quantity: 1 },
+        ],
+      },
+      "staff",
+    );
+    expect(
+      result.lines.map(({ id, variantId, added, quantity, totalCents }) => ({
+        id,
+        variantId,
+        added,
+        quantity,
+        totalCents,
+      })),
+    ).toEqual([
+      {
+        id: sourceLine.calculatedLineId,
+        variantId: "gid://shopify/ProductVariant/10",
+        added: false,
+        quantity: 2,
+        totalCents: 2000,
+      },
+      {
+        id: "gid://shopify/CalculatedLineItem/2",
+        variantId: "gid://shopify/ProductVariant/10",
+        added: false,
+        quantity: 1,
+        totalCents: 1000,
+      },
+      {
+        id: "gid://shopify/CalculatedLineItem/3",
+        variantId: "gid://shopify/ProductVariant/20",
+        added: true,
+        quantity: 1,
+        totalCents: 5000,
+      },
     ]);
     expect(h.record().quote!.lines).toEqual(lines);
     expect(h.provider.commit).not.toHaveBeenCalled();
@@ -411,12 +198,17 @@ describe("private order edit orchestration", () => {
     };
     await h.service.catalogVariants(4, input, "staff-a");
     expect(h.provider.readOrder).toHaveBeenCalledExactlyOnceWith(4, "100");
-    expect(productVariants).toHaveBeenCalledExactlyOnceWith(4, input, {
-      connectionId: 4,
-      customerId: "gid://shopify/Customer/8",
-      memberPlan: planId,
-      memberPricingEnabled: true,
-    }, "editable");
+    expect(productVariants).toHaveBeenCalledExactlyOnceWith(
+      4,
+      input,
+      {
+        connectionId: 4,
+        customerId: "gid://shopify/Customer/8",
+        memberPlan: planId,
+        memberPricingEnabled: true,
+      },
+      "editable",
+    );
     expect(h.provider.quote).not.toHaveBeenCalled();
     expect(h.provider.commit).not.toHaveBeenCalled();
     expect(h.warehouse.acquire).not.toHaveBeenCalled();

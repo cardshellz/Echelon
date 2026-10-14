@@ -42,6 +42,12 @@ const inputSchema = z
       )
       .max(MAX_ORDER_ITEMS * MAX_ORDER_DISCOUNTS)
       .optional(),
+    // Native calculation can approve a total whose penny distribution is not
+    // exposed on line discountedTotalSet. It must still obey every line's bounds.
+    approvedTotals: z
+      .array(z.object({ ruleKey: identity, amountCents: cents }).strict())
+      .max(MAX_ORDER_DISCOUNTS)
+      .optional(),
   })
   .strict();
 export type OrderEditDiscountEngineInput = z.infer<typeof inputSchema>;
@@ -116,6 +122,50 @@ function allocationKey(lineId: string, ruleKey: string): string {
   return JSON.stringify([lineId, ruleKey]);
 }
 
+function allocateApprovedPercentage(
+  total: number,
+  percentage: string,
+  lines: readonly { id: string; subtotalCents: number }[],
+  alreadyAllocated: Map<string, number>,
+): Map<string, number> {
+  const shares = lines.map((line) => ({
+    ...line,
+    ...roundedRange(line.subtotalCents, percentage),
+  }));
+  const minimum = sumOrderEditCents(shares.map((share) => share.floor));
+  const maximum = sumOrderEditCents(shares.map((share) => share.ceil));
+  if (total < minimum || total > maximum)
+    reject(
+      "ORDER_EDIT_PERCENTAGE_DISCOUNT_MISMATCH",
+      "The native percentage saving is outside its exact rounding bounds.",
+    );
+  let remaining = total - minimum;
+  const result = new Map<string, number>();
+  for (const share of [...shares].sort((left, right) =>
+    left.id < right.id ? -1 : left.id > right.id ? 1 : 0,
+  )) {
+    const capacity = share.subtotalCents - alreadyAllocated.get(share.id)!;
+    const amount =
+      share.floor +
+      (remaining > 0 && share.ceil > share.floor && capacity > share.floor
+        ? 1
+        : 0);
+    if (amount > capacity)
+      reject(
+        "ORDER_EDIT_DISCOUNT_OVERALLOCATED",
+        "Combined discounts exceed an item's eligible amount.",
+      );
+    remaining -= amount - share.floor;
+    result.set(share.id, amount);
+  }
+  if (remaining !== 0)
+    reject(
+      "ORDER_EDIT_DISCOUNT_OVERALLOCATED",
+      "The native percentage saving cannot fit the eligible items.",
+    );
+  return result;
+}
+
 /** Exact proportional allocation with stable identity-based penny distribution. */
 function allocateFixed(
   amountCents: number,
@@ -159,8 +209,8 @@ function allocateFixed(
 }
 
 /**
- * Prices only discounts already applied to the order. The adapter proves each
- * rule's identity, scope and value against Shopify before invoking this engine.
+ * Prices proven original discounts or newly approved native code amounts. The
+ * adapter proves each rule's identity, scope and value before invoking this engine.
  * Stacking preserves that accepted combination: percentages share the same
  * post-product-discount base; fixed credits are single budgets across the order.
  * An observed percentage may use either adjacent cent, but never a wider
@@ -175,7 +225,16 @@ export function priceOrderEditDiscounts(
       "ORDER_EDIT_DISCOUNT_INPUT_INVALID",
       "Discount rules, allocations and item amounts must be complete and valid.",
     );
-  const { rules, lines, observations } = parsed.data;
+  const { rules, lines, observations, approvedTotals } = parsed.data;
+  if (observations !== undefined && approvedTotals !== undefined)
+    reject(
+      "ORDER_EDIT_DISCOUNT_INPUT_INVALID",
+      "Use either native line allocations or approved totals, not both.",
+    );
+  unique(
+    (approvedTotals ?? []).map((entry) => entry.ruleKey),
+    "approved discount totals",
+  );
   unique(
     rules.map((rule) => rule.key),
     "discount identities",
@@ -191,6 +250,14 @@ export function priceOrderEditDiscounts(
     "item discount allocations",
   );
   const ruleKeys = new Set(rules.map((rule) => rule.key));
+  if (approvedTotals?.some((entry) => !ruleKeys.has(entry.ruleKey)))
+    reject(
+      "ORDER_EDIT_DISCOUNT_IDENTITY_INVALID",
+      "An approved total references an unknown discount.",
+    );
+  const approved = new Map(
+    (approvedTotals ?? []).map((entry) => [entry.ruleKey, entry.amountCents]),
+  );
   const lineIds = new Set(lines.map((line) => line.id));
   if (
     observations?.some(
@@ -244,12 +311,23 @@ export function priceOrderEditDiscounts(
       "The combined order percentages exceed 100 percent.",
     );
   for (const rule of percentages) {
+    const approvedAmount = approved.get(rule.key);
+    const approvedShares =
+      approvedAmount === undefined
+        ? null
+        : allocateApprovedPercentage(
+            approvedAmount,
+            rule.value.percentage,
+            lines,
+            allocatedByLine,
+          );
     const amounts = lines.map((line) => {
       const range = roundedRange(line.subtotalCents, rule.value.percentage);
       const already = allocatedByLine.get(line.id)!;
       const amount =
         observations === undefined
-          ? Math.min(range.nearest, line.subtotalCents - already)
+          ? (approvedShares?.get(line.id) ??
+            Math.min(range.nearest, line.subtotalCents - already))
           : (observed.get(allocationKey(line.id, rule.key)) ?? 0);
       if (amount < range.floor || amount > range.ceil)
         reject(
@@ -289,6 +367,11 @@ export function priceOrderEditDiscounts(
     );
   for (const rule of fixed) {
     const wanted = Math.min(rule.value.amountCents, remaining);
+    if (approved.has(rule.key) && approved.get(rule.key) !== wanted)
+      reject(
+        "ORDER_EDIT_FIXED_DISCOUNT_MISMATCH",
+        "The native fixed saving does not match its single credit budget.",
+      );
     const targets =
       observations === undefined
         ? allocateFixed(

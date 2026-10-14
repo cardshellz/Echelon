@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { ShopifyOrderEditProvider } from "../../infrastructure/shopify-order-edit.provider";
 import { isUnpaidRecoveryRestored } from "../../application/order-edit-evidence";
 import { orderEditQuoteSchema } from "../../application/order-edit-provider.schema";
+import { PostgresOrderEditCodeHistory } from "../../infrastructure/postgres-order-edit-code-history";
 import type { OrderEditShippingCalculator } from "../../application/order-edit-shipping";
 import {
   OrderEditCommitNotSentError,
@@ -295,6 +296,253 @@ function shippingCalculated(
   };
 }
 
+function newCodeLookup() {
+  return {
+    codeDiscountNodeByCode: {
+      id: id("DiscountCodeNode", 1),
+      codeDiscount: {
+        __typename: "DiscountCodeBasic",
+        title: "TEN",
+        status: "ACTIVE",
+        startsAt: "2026-10-01T00:00:00Z",
+        endsAt: null,
+        usageLimit: null,
+        appliesOncePerCustomer: false,
+        asyncUsageCount: 0,
+        discountClasses: ["ORDER"],
+        codes: { nodes: [{ code: "TEN" }], pageInfo: { hasNextPage: false } },
+        codesCount: { count: 1, precision: "EXACT" },
+        combinesWith: {
+          productDiscounts: true,
+          orderDiscounts: true,
+          shippingDiscounts: true,
+        },
+        context: { __typename: "DiscountBuyerSelectionAll" },
+        customerGets: {
+          items: { __typename: "AllDiscountItems", allItems: true },
+          value: { __typename: "DiscountPercentage", percentage: 0.1 },
+        },
+        minimumRequirement: null,
+      },
+    },
+  };
+}
+const nativeCodeCalculation = () => ({
+  draftOrderCalculate: {
+    userErrors: [],
+    calculatedDraftOrder: {
+      subtotalPriceSet: bag("18.00"),
+      lineItemsSubtotalPrice: bag("20.00"),
+      lineItems: [
+        {
+          variant: { id: id("ProductVariant", 10) },
+          quantity: 2,
+          discountedTotalSet: bag("20.00"),
+        },
+      ],
+      platformDiscounts: [
+        {
+          code: "TEN",
+          discountClasses: ["ORDER"],
+          totalAmountPriceSet: bag("2.00"),
+        },
+      ],
+    },
+  },
+});
+const emptyCombinationMetadata = () => ({
+  shopifyFunctions: { nodes: [], pageInfo: { hasNextPage: false } },
+  discountNodes: { nodes: [], pageInfo: { hasNextPage: false } },
+});
+describe("new coupon native edit path", () => {
+  function codeHarness() {
+    let quote: OrderEditQuote | null = null;
+    const responses: unknown[] = [
+      shippingOrder(),
+      shippingOrder(),
+      { nodes: [variant(10, "10.00")] },
+      newCodeLookup(),
+      nativeCodeCalculation(),
+      begin(shippingCalculated()),
+    ];
+    responses.push(
+      (request: { variables: { discount: { description: string } } }) => {
+        const changed = calcLine(1, 10, 2, "10.00", "9.00");
+        changed.calculatedDiscountAllocations[0].discountApplication.description =
+          request.variables.discount.description;
+        return {
+          orderEditAddLineItemDiscount: {
+            userErrors: [],
+            calculatedOrder: shippingCalculated(
+              "24.35",
+              "5.00",
+              "1.35",
+              "18.00",
+              "-2.15",
+              [changed],
+            ),
+          },
+        };
+      },
+    );
+    responses.push(emptyCombinationMetadata(), refundCapacity());
+    const redemptions = {
+      available: () => true,
+      validate: vi.fn(async () => {}),
+      reserve: vi.fn(async () => {}),
+      finalize: vi.fn(async () => {}),
+      release: vi.fn(async () => {}),
+    };
+    const history = new PostgresOrderEditCodeHistory({
+      query: async () => ({ rows: quote ? [{ quote }] : [] }),
+    } as unknown as import("pg").Pool);
+    const h = harness(responses, {}, undefined, {
+      codeRedemptions: redemptions,
+      codeHistory: history,
+    });
+    return {
+      ...h,
+      responses,
+      redemptions,
+      save: (value: OrderEditQuote) => {
+        quote = value;
+      },
+    };
+  }
+  it("stages a code-only adjustment, revalidates it, and proves the saved net price and coupon breakdown", async () => {
+    const h = codeHarness();
+    const baseline = await h.provider.readOrder(4, "100");
+    const quote = await h.provider.quote(
+      4,
+      baseline,
+      { changes: [], additions: [], discountCodes: ["TEN"] },
+      "code-only",
+    );
+    h.save(quote);
+    expect(quote).toMatchObject({
+      totalCents: 2435,
+      deltaCents: -215,
+      financials: { itemsNetCents: 1800, taxCents: 135 },
+      codePricing: { applications: [{ code: "TEN", amountCents: 200 }] },
+    });
+    expect(
+      h.requests.some((request) => request.query.includes("orderEditCommit")),
+    ).toBe(false);
+    const before = vi.fn(async () => {});
+    h.responses.push(
+      shippingOrder(),
+      newCodeLookup(),
+      nativeCodeCalculation(),
+      emptyCombinationMetadata(),
+      refundCapacity(),
+      { orderEditCommit: { userErrors: [], order: { id: id("Order", 100) } } },
+      () => {
+        const description = quote.codePricing!.description;
+        return rawOrder({
+          currentTotalPriceSet: bag("24.35"),
+          currentSubtotalPriceSet: bag("18.00"),
+          currentShippingPriceSet: bag("5.00"),
+          currentTotalTaxSet: bag("1.35"),
+          netPaymentSet: bag("26.50"),
+          totalOutstandingSet: bag("-2.15"),
+          fullyPaid: true,
+          transactions: [tx(1, "26.50")],
+          discountApplications: {
+            nodes: [
+              {
+                __typename: "ManualDiscountApplication",
+                index: 0,
+                targetType: "LINE_ITEM",
+                allocationMethod: "EACH",
+                targetSelection: "EXPLICIT",
+                title: description,
+                value: {
+                  __typename: "MoneyV2",
+                  amount: "1.00",
+                  currencyCode: "USD",
+                },
+              },
+            ],
+            pageInfo: { hasNextPage: false },
+          },
+          lineItems: {
+            nodes: [
+              {
+                ...line(1, 10, 2, "10.00"),
+                discountedUnitPriceSet: bag("9.00"),
+                unfulfilledDiscountedTotalSet: bag("18.00"),
+                priceAfterAllDiscountsBeforeTaxesSet: bag("18.00"),
+                discountAllocations: [
+                  {
+                    allocatedAmountSet: bag("2.00"),
+                    discountApplication: { index: 0 },
+                  },
+                ],
+              },
+            ],
+            pageInfo: { hasNextPage: false },
+          },
+          shippingLines: shippingOrder().order.shippingLines,
+        });
+      },
+    );
+    const observed = await h.provider.commit(4, quote, "code-only", before);
+    expect(before).toHaveBeenCalledTimes(1);
+    expect(observed.financials?.itemDiscounts).toEqual([
+      {
+        key: "code:TEN",
+        label: "TEN",
+        amountCents: 200,
+        value: { type: "percentage", percentage: "10" },
+      },
+    ]);
+    expect(observed.codePricing?.newCodes).toEqual([]);
+    expect(observed.lines[0].discountedUnitPriceCents).toBe(900);
+  });
+  it("refuses to submit a new-code quote without its reservation boundary", async () => {
+    const h = codeHarness();
+    const baseline = await h.provider.readOrder(4, "100");
+    const quote = await h.provider.quote(
+      4,
+      baseline,
+      { changes: [], additions: [], discountCodes: ["TEN"] },
+      "code-only",
+    );
+    await expect(
+      h.provider.commit(4, quote, "code-only"),
+    ).rejects.toBeInstanceOf(OrderEditCommitNotSentError);
+    expect(
+      h.requests.some((request) => request.query.includes("orderEditCommit")),
+    ).toBe(false);
+  });
+  it("does not open an edit session if Shopify omits the requested code saving", async () => {
+    const h = codeHarness();
+    h.responses[4] = {
+      draftOrderCalculate: {
+        userErrors: [],
+        calculatedDraftOrder: {
+          lineItems: [],
+          platformDiscounts: [],
+          subtotalPriceSet: bag("20.00"),
+          lineItemsSubtotalPrice: bag("20.00"),
+        },
+      },
+    };
+    const baseline = await h.provider.readOrder(4, "100");
+    await expect(
+      h.provider.quote(
+        4,
+        baseline,
+        { changes: [], additions: [], discountCodes: ["TEN"] },
+        "bad-code",
+      ),
+    ).rejects.toThrow(/complete code savings/);
+    expect(
+      h.requests.some((request) => request.query.includes("orderEditBegin")),
+    ).toBe(false);
+  });
+});
+
 function harness(
   responses: Array<unknown>,
   credentialOverrides: Record<string, unknown> = {},
@@ -312,13 +560,19 @@ function harness(
       discountLabels: snapshot.financials?.shippingDiscountLabels ?? [],
     }),
   },
+  codeOptions: Pick<
+    ConstructorParameters<typeof ShopifyOrderEditProvider>[0],
+    "codeRedemptions" | "codeHistory"
+  > = {},
 ) {
   const requests: Array<{ query: string; variables: Record<string, unknown> }> =
     [];
   const fetchImpl = vi.fn(
     async (_url: string | URL | Request, init?: RequestInit) => {
       requests.push(JSON.parse(String(init?.body)));
-      const response = responses.shift();
+      const next = responses.shift();
+      const response =
+        typeof next === "function" ? next(requests[requests.length - 1]) : next;
       if (response instanceof Error) throw response;
       if (response instanceof Response) return response;
       if (response === undefined) throw new Error("Unexpected request");
@@ -331,6 +585,7 @@ function harness(
   const reports =
     vi.fn<(event: { operationId: string; code: string }) => void>();
   const provider = new ShopifyOrderEditProvider({
+    ...codeOptions,
     shippingCalculator,
     clock: () => NOW,
     fetch: fetchImpl as typeof fetch,
@@ -4211,7 +4466,12 @@ describe("calculation-only background order previews", () => {
     expect(result.financials.totalCents).toBe(3680);
     expect(result.financials.itemsNetCents).toBe(3000);
     expect(result.lines).toMatchObject([
-      { variantId: id("ProductVariant", 10), added: false, quantity: 3, totalCents: 3000 },
+      {
+        variantId: id("ProductVariant", 10),
+        added: false,
+        quantity: 3,
+        totalCents: 3000,
+      },
     ]);
     expect(calculatePreview).toHaveBeenCalledWith(snapshot, [
       { variantId: id("ProductVariant", 10), quantity: 3, netCents: 3000 },
@@ -4260,7 +4520,9 @@ describe("calculation-only background order previews", () => {
       additions: [{ variantId: id("ProductVariant", 20), quantity: 1 }],
     });
     expect(result.financials.itemsNetCents).toBe(2500);
-    expect(result.lines.map(({ variantId, added }) => ({ variantId, added }))).toEqual([
+    expect(
+      result.lines.map(({ variantId, added }) => ({ variantId, added })),
+    ).toEqual([
       { variantId: id("ProductVariant", 10), added: false },
       { variantId: id("ProductVariant", 20), added: true },
     ]);
