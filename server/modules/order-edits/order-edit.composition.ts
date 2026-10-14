@@ -31,7 +31,6 @@ export function createOrderEditService(
   );
   const provider = new ShopifyOrderEditProvider({
     clock,
-    codeRedemptions,
     codeHistory: new PostgresOrderEditCodeHistory(pool),
     memberPresentation: createMemberPlanPresentationReader(pool),
     report: (event) =>

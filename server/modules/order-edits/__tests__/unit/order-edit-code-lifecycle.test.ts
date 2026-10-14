@@ -5,10 +5,12 @@ import { OrderEditCommitNotSentError } from "../../application/order-edit-provid
 import type { OrderEditCodeRedemptions } from "../../application/order-edit-code-redemptions";
 
 const key = "44444444-4444-4444-8444-444444444444";
-function harness(quantity = 2) {
+function harness(
+  quantity = 2,
+  source: "unlimited" | "shopify_coupon" = "unlimited",
+) {
   const codes = {
-    available: () => true,
-    validate: vi.fn(async () => {}),
+    available: (): boolean => true,
     reserve: vi.fn(async () => {}),
     finalize: vi.fn(async () => {}),
     release: vi.fn(async () => {}),
@@ -37,7 +39,10 @@ function harness(quantity = 2) {
         },
         value: { type: "percentage", percentage: "10" },
         fingerprint: "a".repeat(64),
-        redemption: "unlimited",
+        redemption: source,
+        ...(source === "shopify_coupon"
+          ? { usageLimit: null, appliesOncePerCustomer: false }
+          : {}),
       },
     ],
     ["TEN"],
@@ -86,6 +91,31 @@ function harness(quantity = 2) {
   return { ...h, codes };
 }
 describe("code settlement boundaries in order editing", () => {
+  it("applies an unlimited Shopify coupon independently of the rewards service", async () => {
+    const h = harness(2, "shopify_coupon");
+    h.codes.available = () => false;
+    const review = await h.service.quote(h.input, "staff");
+    expect(review.codeEntryAvailable).toBe(true);
+    const result = await h.service.commit(h.record().id, key, "staff");
+    expect(result.status).toBe("completed");
+    expect(h.codes.reserve).not.toHaveBeenCalled();
+    expect(h.codes.finalize).not.toHaveBeenCalled();
+    expect(h.codes.release).not.toHaveBeenCalled();
+  });
+  it("recovers an unpaid coupon-only adjustment without touching points or reward receipts", async () => {
+    const h = harness(3, "shopify_coupon");
+    await h.service.quote(h.input, "staff");
+    expect((await h.service.commit(h.record().id, key, "staff")).status).toBe(
+      "awaiting_payment",
+    );
+    h.advance(31 * 60_000);
+    expect((await h.service.reconcile(h.record().id, "staff")).status).toBe(
+      "recovered",
+    );
+    expect(h.codes.reserve).not.toHaveBeenCalled();
+    expect(h.codes.finalize).not.toHaveBeenCalled();
+    expect(h.codes.release).not.toHaveBeenCalled();
+  });
   it("propagates requested codes and presents the original resumable plan", async () => {
     const h = harness();
     const result = await h.service.quote(h.input, "staff");
