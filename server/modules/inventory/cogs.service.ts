@@ -1,7 +1,9 @@
 import { readLotCostFollowUps } from "./infrastructure/lot-cost-follow-up.repository";
 import { readInventoryValuation } from "./application/read-inventory-valuation";
-import { normalizeLotCosts, recordedUnitCostMills, moneyToSafeNumber, roundedSignedMillsToCents } from "./domain/lot-cost";
-import { costInteger, lockInventoryCostGraph } from "./infrastructure/cost-evidence.repository";
+import { normalizeLotCosts, recordedUnitCostMills, moneyToSafeNumber, roundedSignedMillsToCents,
+  lotCostTotals, hasExactLotCostTotals, lotCostsForIntervals, unitCostMirrorsFromTotals, type LotCostRecord } from "./domain/lot-cost";
+import { ensureLotCostQuantityBasis, readLotCostAllocation } from "./infrastructure/cost-quantity.repository";
+import { costInteger, lockInventoryCostGraph, CostEvidenceError } from "./infrastructure/cost-evidence.repository";
 import type { CostComponent } from "@shared/procurement/cost-source-contracts";
 /**
  * FIFO COGS Engine for Echelon WMS.
@@ -118,6 +120,54 @@ export class COGSService {
     }, tx);
   }
 
+  async revalueExactComponent(lotId: number, component: CostComponent, totalMills: number, basisQuantity: number,
+    reason: string, actorId: string, tx: any, recordedAt?: Date) {
+    const amount = BigInt(costInteger(totalMills,"component.totalMills"));
+    const quantity = BigInt(costInteger(basisQuantity,"component.basisQuantity",1));
+    const unitMills = moneyToSafeNumber((amount * BigInt(2) + quantity) / (quantity * BigInt(2)),"component.unitMirror");
+    return this.revalueLotCostMills({lotId,reason,actorId,recordedAt,costSource:"cost_revision",clearProvisional:false,
+      productCostMills:component==="product"?unitMills:undefined,
+      packagingCostMills:component==="packaging"?unitMills:undefined,
+      landedCostMills:component==="landed"?unitMills:undefined,
+      exactComponent:{component,totalMills,basisQuantity},
+    },tx);
+  }
+
+  private async cascadeRecostExactQuantities(lotId: number, lot: LotCostRecord, tx: any): Promise<{rowsUpdated:number;totalDeltaCents:number}> {
+    const rows = await tx.execute(sql`SELECT id,qty,unit_cost_mills,unit_cost_cents,total_cost_mills,total_cost_cents,
+      cost_precision_version,cost_quantity_allocation_id,product_total_cost_mills,packaging_total_cost_mills,landed_total_cost_mills
+      FROM oms.order_item_costs WHERE inventory_lot_id=${lotId} ORDER BY id FOR UPDATE`);
+    const unitMirror = moneyToSafeNumber(normalizeLotCosts(lot).totalMills,"cogs.unitMirror");
+    let rowsUpdated = 0;
+    let deltaCents = BigInt(0);
+    for (const row of rows.rows) {
+      if (row.cost_quantity_allocation_id == null) throw new CostEvidenceError("COST_COGS_ALLOCATION_MISSING", "Exact COGS revaluation requires a recorded quantity allocation.", {lotId, costId:row.id});
+      const allocation = await readLotCostAllocation(tx,costInteger(row.cost_quantity_allocation_id,"allocationId",1));
+      const qty = costInteger(row.qty,"cogs.quantity",-2_147_483_647);
+      if (Math.abs(qty)!==allocation.quantity || allocation.inventory_lot_id!==lotId
+        || (qty<0 && allocation.direction!==-1) || (qty>0 && allocation.direction===-1)) {
+        throw new CostEvidenceError("COST_COGS_ALLOCATION_CONFLICT", "COGS quantity and its source intervals identify different allocations.", {lotId, costId:row.id});
+      }
+      const amount = lotCostsForIntervals(lot,allocation.intervals);
+      const sign = qty<0?BigInt(-1):BigInt(1);
+      const total = amount.totalMills * sign;
+      const prior = Number(row.cost_precision_version)===1 ? BigInt(String(row.total_cost_mills))
+        : recordedUnitCostMills(row)*BigInt(qty);
+      if (prior===total && Number(row.unit_cost_mills)===unitMirror
+        && row.product_total_cost_mills!=null && BigInt(String(row.product_total_cost_mills))===amount.poMills*sign
+        && row.packaging_total_cost_mills!=null && BigInt(String(row.packaging_total_cost_mills))===amount.packagingMills*sign
+        && row.landed_total_cost_mills!=null && BigInt(String(row.landed_total_cost_mills))===amount.landedMills*sign) continue;
+      deltaCents += roundedSignedMillsToCents(total)-roundedSignedMillsToCents(prior);
+      await tx.execute(sql`UPDATE oms.order_item_costs SET unit_cost_mills=${unitMirror},unit_cost_cents=${millsToCents(unitMirror)},
+        total_cost_mills=${total.toString()}::bigint,total_cost_cents=${roundedSignedMillsToCents(total).toString()}::bigint,
+        product_total_cost_mills=${(amount.poMills*sign).toString()}::bigint,
+        packaging_total_cost_mills=${(amount.packagingMills*sign).toString()}::bigint,
+        landed_total_cost_mills=${(amount.landedMills*sign).toString()}::bigint,cost_precision_version=1 WHERE id=${row.id}`);
+      rowsUpdated++;
+    }
+    return {rowsUpdated,totalDeltaCents:costInteger(deltaCents.toString(),"cogs.totalDeltaCents",-Number.MAX_SAFE_INTEGER)};
+  }
+
   private assertNonNegativeMills(value: number, field: string) {
     if (!Number.isSafeInteger(value) || value < 0) {
       throw new Error(`${field} must be a non-negative safe integer mills value`);
@@ -190,10 +240,12 @@ export class COGSService {
     preserveExistingCostSourceUnlessPo?: boolean;
     clearProvisional?: boolean;
     requiredCostSource?: string;
+    exactComponent?: {component:CostComponent;totalMills:number;basisQuantity:number};
+    recordedAt?: Date;
   }, client?: any): Promise<LotCostRevalueResult | null> {
     const revalue = async (tx: any): Promise<LotCostRevalueResult | null> => {
       await lockInventoryCostGraph(tx);
-      const now = this.clock();
+      const now = params.recordedAt ?? this.clock();
       if (!Number.isFinite(now.getTime())) throw new Error("Invalid lot cost clock");
       const result = await tx.execute(sql`
         SELECT il.*, pv.sku
@@ -212,9 +264,31 @@ export class COGSService {
       const currentProductMills = moneyToSafeNumber(current.poMills,"productCostMills");
       const currentPackagingMills = moneyToSafeNumber(current.packagingMills,"packagingCostMills");
       const currentLandedMills = moneyToSafeNumber(current.landedMills,"landedCostMills");
-      const productCostMills = params.productCostMills ?? currentProductMills;
-      const packagingCostMills = params.packagingCostMills ?? currentPackagingMills;
-      const landedCostMills = params.landedCostMills ?? currentLandedMills;
+      let productCostMills = params.productCostMills ?? currentProductMills;
+      let packagingCostMills = params.packagingCostMills ?? currentPackagingMills;
+      let landedCostMills = params.landedCostMills ?? currentLandedMills;
+      let extended: ReturnType<typeof lotCostTotals> | null = null;
+      if (params.exactComponent || hasExactLotCostTotals(lot)) {
+        extended = lotCostTotals(lot);
+        const basis = BigInt(extended.basisQuantity);
+        if (params.exactComponent && params.exactComponent.basisQuantity!==extended.basisQuantity) throw new CostEvidenceError("COST_QUANTITY_BASIS_CHANGED", "Exact cost quantity conflicts with the original lot quantity.", {lotId:params.lotId});
+        const totals = {...extended.totals,
+          poMills:params.productCostMills===undefined?extended.totals.poMills:BigInt(params.productCostMills)*basis,
+          packagingMills:params.packagingCostMills===undefined?extended.totals.packagingMills:BigInt(params.packagingCostMills)*basis,
+          landedMills:params.landedCostMills===undefined?extended.totals.landedMills:BigInt(params.landedCostMills)*basis};
+        if (params.exactComponent) {
+          const field = params.exactComponent.component==="product"?"poMills":params.exactComponent.component==="packaging"?"packagingMills":"landedMills";
+          totals[field]=BigInt(costInteger(params.exactComponent.totalMills,"component.totalMills"));
+        }
+        totals.totalMills=totals.poMills+totals.packagingMills+totals.landedMills;
+        for (const [field,amount] of Object.entries(totals)) costInteger(amount.toString(),`extended.${field}`);
+        extended={basisQuantity:extended.basisQuantity,totals};
+        const mirrors = unitCostMirrorsFromTotals(totals, extended.basisQuantity);
+        productCostMills = moneyToSafeNumber(mirrors.poMills, "cost.productMirror");
+        packagingCostMills = moneyToSafeNumber(mirrors.packagingMills, "cost.packagingMirror");
+        landedCostMills = moneyToSafeNumber(mirrors.landedMills, "cost.landedMirror");
+        await ensureLotCostQuantityBasis(tx,lot,params.actorId??"system:inventory-cost",now);
+      }
 
       this.assertNonNegativeMills(productCostMills, "productCostMills");
       this.assertNonNegativeMills(packagingCostMills, "packagingCostMills");
@@ -263,10 +337,20 @@ export class COGSService {
             unit_cost_cents = ${newCostCents},
             cost_provisional = CASE WHEN ${params.clearProvisional === false ? 0 : 1} = 1 THEN 0 ELSE cost_provisional END,
             cost_source = ${costSource}, cost_precision_version=1
+            ,cost_basis_qty=${extended?.basisQuantity ?? null},
+            product_total_cost_mills=${extended?.totals.poMills.toString() ?? null}::bigint,
+            packaging_total_cost_mills=${extended?.totals.packagingMills.toString() ?? null}::bigint,
+            landed_total_cost_mills=${extended?.totals.landedMills.toString() ?? null}::bigint
         WHERE id = ${params.lotId}
       `);
 
-      const cascade = await this.cascadeRecostForLotMills(params.lotId, totalUnitCostMills, tx);
+      const exactLot = extended ? {...lot,cost_basis_qty:extended.basisQuantity,
+        product_total_cost_mills:extended.totals.poMills.toString(),packaging_total_cost_mills:extended.totals.packagingMills.toString(),
+        landed_total_cost_mills:extended.totals.landedMills.toString(),po_unit_cost_mills:productCostMills,
+        packaging_cost_mills:packagingCostMills,landed_cost_mills:landedCostMills,
+        total_unit_cost_mills:totalUnitCostMills,unit_cost_mills:totalUnitCostMills,cost_precision_version:1} : null;
+      const cascade = exactLot ? await this.cascadeRecostExactQuantities(params.lotId,exactLot,tx)
+        : await this.cascadeRecostForLotMills(params.lotId, totalUnitCostMills, tx);
 
       await tx.execute(sql`
         INSERT INTO inventory.cost_adjustment_log

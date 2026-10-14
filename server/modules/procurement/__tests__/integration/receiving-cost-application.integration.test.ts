@@ -12,6 +12,7 @@ import pg from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import * as schema from "@shared/schema";
 import { lockInventoryCostGraph } from "../../../inventory/infrastructure/cost-evidence.repository";
+import { readPoShipmentCostSummary } from "../../po-shipment-cost-summary.repository";
 import { installPreOpeningQuantityAuthorityFixture } from "../../../inventory/__tests__/fixtures/pre-opening-quantity-authority.fixture";
 import { receivingUnitVersion } from "../../receiving-unit-contract";
 import { fixtureForeignKeys, fixtureTable, qualifiedTable } from "./shipment-line-fixture";
@@ -29,7 +30,7 @@ const TABLES = [
   schema.vendorInvoices, schema.vendorInvoiceLines, schema.poStatusHistory,
   schema.inboundFreightCosts, schema.inboundFreightAllocations,
   schema.landedCostSnapshots, schema.landedCostAdjustments, schema.inboundShipmentStatusHistory,
-  schema.warehouses, schema.warehouseLocations, schema.inventoryLevels,
+  schema.warehouses, schema.warehouseLocations, schema.productLocations, schema.inventoryLevels,
   schema.inventoryLots, schema.inventoryTransactions, schema.orders, schema.orderItems, schema.orderItemCosts,
 ];
 
@@ -80,6 +81,7 @@ audit.sequential("receipt/AP/freight cost revisions with real owners", () => {
         reason VARCHAR(100), created_at TIMESTAMP NOT NULL DEFAULT NOW()
       )`);
     await pool.query(readFileSync(resolve(process.cwd(), "migrations/222_procurement_cost_evidence.sql"), "utf8"));
+    await pool.query(readFileSync(resolve(process.cwd(), "migrations/0751_exact_inventory_cost_totals.sql"), "utf8"));
     await pool.query(readFileSync(resolve(process.cwd(), "migrations/0725_inventory_cost_admission_evidence.sql"), "utf8"));
     await pool.query(readFileSync(resolve(process.cwd(), "migrations/231_receipt_cost_recovery.sql"), "utf8"));
     // The log is runtime DDL in server/db.ts:997, with money types aligned by migration0576.
@@ -193,6 +195,28 @@ audit.sequential("receipt/AP/freight cost revisions with real owners", () => {
     }
   });
 
+  it.each(["po", "shipment"] as const)("defaults %s receipt locations only from active primary slots in the destination warehouse", async (source) => {
+    await pool.query(`INSERT INTO warehouse.warehouses(id,code,name) VALUES(2,'OTHER-WH','Other warehouse');
+      INSERT INTO warehouse.warehouse_locations(id,warehouse_id,code,is_active) VALUES(100,2,'OTHER-DOCK',1),(101,1,'INACTIVE',0);
+      INSERT INTO warehouse.product_locations(product_variant_id,warehouse_location_id,name,location,zone,is_primary,status)
+        VALUES(200,100,'Wrong warehouse','OTHER-DOCK','OTHER',1,'active'),
+          (200,101,'Inactive location','INACTIVE','INACTIVE',1,'active'),
+          (200,99,'Correct warehouse','AUDIT-DOCK','DOCK',1,'active')`);
+    const receipt = source === "po" ? await purchasing.createReceiptFromPO(10, actorId)
+      : await purchasing.createReceiptFromShipment(1, actorId, { purchaseOrderId: 10 });
+    expect((await storage.getReceivingLines(receipt.id)).map((line: { putawayLocationId: number | null }) => line.putawayLocationId)).toEqual([99]);
+  });
+
+  it.each(["po", "shipment"] as const)("leaves %s receipt unassigned when the only primary slot belongs to another warehouse", async (source) => {
+    await pool.query(`INSERT INTO warehouse.warehouses(id,code,name) VALUES(2,'OTHER-WH','Other warehouse');
+      INSERT INTO warehouse.warehouse_locations(id,warehouse_id,code) VALUES(100,2,'OTHER-DOCK');
+      INSERT INTO warehouse.product_locations(product_variant_id,warehouse_location_id,name,location,zone,is_primary,status)
+        VALUES(200,100,'Wrong warehouse','OTHER-DOCK','OTHER',1,'active')`);
+    const receipt = source === "po" ? await purchasing.createReceiptFromPO(10, actorId)
+      : await purchasing.createReceiptFromShipment(1, actorId, { purchaseOrderId: 10 });
+    expect((await storage.getReceivingLines(receipt.id)).map((line: { putawayLocationId: number | null }) => line.putawayLocationId)).toEqual([null]);
+  });
+
   async function prepareReceipt() {
     const receipt = await purchasing.createReceiptFromShipment(1, actorId, { purchaseOrderId: 10 });
     const [line] = await storage.getReceivingLines(receipt.id);
@@ -219,10 +243,11 @@ audit.sequential("receipt/AP/freight cost revisions with real owners", () => {
       FROM inventory.inventory_lots ORDER BY id`)).rows[0];
   }
   async function seedConsumedCost() {
-    await pool.query(`INSERT INTO oms.order_item_costs(order_id,order_item_id,inventory_lot_id,product_variant_id,qty,
-      unit_cost_cents,total_cost_cents,unit_cost_mills,total_cost_mills)
-      SELECT 1,1,id,product_variant_id,1,total_unit_cost_cents,total_unit_cost_cents,total_unit_cost_mills,total_unit_cost_mills
-      FROM inventory.inventory_lots`);
+    const { InventoryLotService }=await import("../../../inventory/lots.service");
+    const source=(await pool.query("SELECT product_variant_id,warehouse_location_id FROM inventory.inventory_lots ORDER BY id LIMIT 1")).rows[0];
+    await database.transaction(tx=>new InventoryLotService(tx,()=>NOW).pickFromLots({
+      productVariantId:Number(source.product_variant_id),warehouseLocationId:Number(source.warehouse_location_id),qty:1,orderId:1,orderItemId:1,
+    }));
   }
   async function approveEvidence(tx: any = undefined) {
     const apply = async (client: any) => {
@@ -235,9 +260,12 @@ audit.sequential("receipt/AP/freight cost revisions with real owners", () => {
     return tx ? apply(tx) : database.transaction(apply);
   }
   async function state() {
-    const relations = [...TABLES.map(qualifiedTable), "inventory.cost_adjustment_log"];
+    const relations = [...TABLES.map(qualifiedTable), "inventory.cost_adjustment_log",
+      "inventory.lot_cost_quantity_allocations"];
     const values = [];
     for (const relation of relations) values.push((await pool.query(`SELECT * FROM ${relation} ORDER BY id`)).rows);
+    values.push((await pool.query("SELECT * FROM inventory.lot_cost_quantity_bases ORDER BY inventory_lot_id")).rows);
+    values.push((await pool.query("SELECT * FROM inventory.lot_cost_contribution_allocations ORDER BY contribution_id")).rows);
     values.push((await pool.query("SELECT * FROM public.audit_events WHERE actor=$1 ORDER BY id", [actorId])).rows);
     return values;
   }
@@ -581,9 +609,13 @@ audit.sequential("receipt/AP/freight cost revisions with real owners", () => {
       VALUES(1001,'SPLIT-A',201,99,1,1,1,1,0,0,1,'transformation','2026-09-06'),(1002,'SPLIT-B',201,99,1,1,1,1,0,0,1,'transformation','2026-09-06'),(1003,'SPLIT-C',201,99,1,1,1,1,0,0,1,'transformation','2026-09-06')`);
     await pool.query(`INSERT INTO oms.order_item_costs(order_id,order_item_id,inventory_lot_id,product_variant_id,qty,unit_cost_cents,total_cost_cents,unit_cost_mills,total_cost_mills)
       VALUES(1,1,1003,201,1,0,0,1,1)`);
+    await pool.query("UPDATE inventory.inventory_lots SET qty_on_hand=qty_on_hand-1 WHERE id=$1",[root.id]);
+    await pool.query("UPDATE inventory.inventory_lots SET qty_on_hand=0,qty_picked=1 WHERE id=1003");
     await database.transaction(async (tx) => {
+      const { allocateLotQuantityCost }=await import("../../../inventory/infrastructure/cost-quantity.repository");
+      const allocated=await allocateLotQuantityCost(tx,Number(root.id),1,actorId,NOW);
       for (let index=0;index<3;index++) await recordLotCostContribution(tx, { sourceLotId: Number(root.id),outputLotId: 1001+index,sourceQty: 1,
-        outputQty: 3,outputStartQty: index,operationKind: "conversion",operationKey: "synthetic-three-layer-build" }, actorId, NOW);
+        costQuantityAllocationId:allocated.id,outputQty: 3,outputStartQty: index,operationKind: "conversion",operationKey: "synthetic-three-layer-build" }, actorId, NOW);
       const revision = await recordCostRevision(tx, { contractVersion: 1,component: "product",scope:{ kind:"purchase_order_line",purchaseOrderId:10,purchaseOrderLineId:21 },
         sources:[{ kind:"purchase_order_line",documentId:10,lineId:21,version:"a".repeat(64) }],currency:"USD",totalMills:28,basePieces:200,
         evidence:"confirmed",packagingTreatment:"separate",issue:null,manualOverride:null }, actorId,NOW);
@@ -597,8 +629,9 @@ audit.sequential("receipt/AP/freight cost revisions with real owners", () => {
     await receive();
     await pool.query("INSERT INTO warehouse.warehouse_locations(id,warehouse_id,code) VALUES(100,1,'AUDIT-PICK')");
     await inventory.transfer({productVariantId:200,fromLocationId:99,toLocationId:100,qty:1,userId:actorId});
-    await pool.query(`INSERT INTO oms.order_item_costs(order_id,order_item_id,inventory_lot_id,product_variant_id,qty,unit_cost_cents,total_cost_cents,unit_cost_mills,total_cost_mills)
-      SELECT 1,1,id,product_variant_id,1,total_unit_cost_cents,total_unit_cost_cents,total_unit_cost_mills,total_unit_cost_mills FROM inventory.inventory_lots WHERE warehouse_location_id=100`);
+    const {InventoryLotService}=await import("../../../inventory/lots.service");
+    await database.transaction(tx=>new InventoryLotService(tx,()=>NOW).pickFromLots({productVariantId:200,
+      warehouseLocationId:100,qty:1,orderId:1,orderItemId:1}));
     await approveEvidence(); await shipment.finalizeAllocations(1,actorId); await shipment.pushLandedCostsToLots(1);
     expect((await pool.query("SELECT total_unit_cost_mills::text AS total FROM inventory.inventory_lots ORDER BY id")).rows).toEqual([{total:"900000"},{total:"900000"}]);
     expect((await pool.query("SELECT total_cost_mills::text AS cost FROM oms.order_item_costs")).rows).toEqual([{cost:"900000"}]);
@@ -656,7 +689,7 @@ audit.sequential("receipt/AP/freight cost revisions with real owners", () => {
     expect((await pool.query("SELECT sum(variant_qty)::int AS qty FROM inventory.inventory_levels")).rows[0].qty).toBe(2);
   });
 
-  it("preserves unrepresentable uniform-lot residuals as review without partial changes", async () => {
+  it("applies uniform-lot residuals while preserving their exact extended cost", async () => {
     await receive();
     await pool.query(`UPDATE procurement.vendor_invoice_lines SET line_total_cents=26001,
       cost_component_evidence='{"contractVersion":1,"packagingTreatment":"separate","productMills":2400100,"packagingMills":200000,"adjustmentMills":0,"source":"operator_review"}' WHERE id=72`);
@@ -671,10 +704,144 @@ audit.sequential("receipt/AP/freight cost revisions with real owners", () => {
       const revision = await recordCostRevision(tx, {contractVersion:1,component:"product",scope:{kind:"purchase_order_line",purchaseOrderId:10,purchaseOrderLineId:21},
         sources:[{kind:"purchase_order_line",documentId:10,lineId:21,version:"b".repeat(64)}],currency:"USD",totalMills:6,basePieces:200,evidence:"confirmed",packagingTreatment:"separate",issue:null,manualOverride:null}, actorId,NOW);
       const application = await applyCostRevision(tx,revision,cogs,actorId,NOW);
-      expect(application).toMatchObject({status:"review_required",lotsUpdated:0});
-      expect(application.issues.some(issue=>issue.code==="COST_UNIFORM_LOT_RESIDUAL_REVIEW")).toBe(true);
+      expect(application).toMatchObject({status:"applied",lotsUpdated:1,issues:[]});
     });
-    expect(await lot()).toEqual(beforeReview);
+    expect(await lot()).not.toEqual(beforeReview);
+    expect((await pool.query("SELECT product_total_cost_mills::text AS amount,cost_basis_qty FROM inventory.inventory_lots ORDER BY id")).rows)
+      .toEqual([{amount:"3",cost_basis_qty:2}]);
+  });
+
+  it("reads shipment charges and costing readiness without changing supplier totals or writing records", async () => {
+    await pool.query("UPDATE procurement.purchase_orders SET total_cents=22000 WHERE id=10");
+    const before = await state();
+    expect(await readPoShipmentCostSummary(database,10)).toMatchObject({
+      freightCents:0,combinedCostCents:null,unallocatedChargeCount:1,inventoryCosting:"pending",
+    });
+    expect(await state()).toEqual(before);
+    await shipment.finalizeAllocations(1,actorId);
+    expect(await readPoShipmentCostSummary(database,10)).toMatchObject({
+      freightCents:5000,totalCents:5000,poAmountCents:22000,combinedCostCents:27000,
+    });
+    await receive();
+    await shipment.pushLandedCostsToLots(1,actorId);
+    expect(await readPoShipmentCostSummary(database,10)).toMatchObject({
+      freightCents:5000,appliedLines:1,inventoryCosting:"applied",
+    });
+    expect((await pool.query("SELECT total_cents,shipping_cost_cents,tax_cents FROM procurement.purchase_orders WHERE id=10")).rows[0])
+      .toEqual({total_cents:"22000",shipping_cost_cents:"0",tax_cents:"0"});
+    expect(await readPoShipmentCostSummary(database,999999)).toBeNull();
+  });
+
+  async function exactPieceLot() {
+    const {InventoryLotService}=await import("../../../inventory/lots.service");
+    const created=await database.transaction(tx=>new InventoryLotService(tx,()=>NOW).createLot({
+      productVariantId:201,warehouseLocationId:99,qty:80_000,unitCostCents:5,unitCostMills:500,costSource:"po",receivedAt:NOW,
+    }));
+    await database.transaction(tx=>cogs.revalueExactComponent(created.id,"landed",11_907_200,80_000,"confirmed shipment charge",actorId,tx));
+    return created.id;
+  }
+
+  it("preserves a 1,190.72 shipment charge across large partial picks",async()=>{
+    const lotId=await exactPieceLot();
+    const {InventoryLotService}=await import("../../../inventory/lots.service");
+    await database.transaction(tx=>new InventoryLotService(tx,()=>NOW).pickFromLots({
+      productVariantId:201,warehouseLocationId:99,qty:30_000,orderId:1,orderItemId:1,expectedExistingCostQuantity:0,
+    }));
+    const {loadCanonicalDispatchCosts}=await import("../../../inventory/infrastructure/canonical-claim-dispatch-inventory");
+    const selected=(await pool.query("SELECT id FROM oms.order_item_costs WHERE inventory_lot_id=$1",[lotId])).rows.map(row=>Number(row.id));
+    expect(await loadCanonicalDispatchCosts({client:pool,costIds:selected})).toMatchObject([{
+      quantity:"30000",unitCostMills:"649",totalCostMills:"19465200",
+      exactTotals:{productMills:"15000000",packagingMills:"0",landedMills:"4465200"},
+    }]);
+    await database.transaction(tx=>new InventoryLotService(tx,()=>NOW).pickFromLots({
+      productVariantId:201,warehouseLocationId:99,qty:50_000,orderId:1,orderItemId:1,expectedExistingCostQuantity:30_000,
+    }));
+    expect((await pool.query("SELECT SUM(landed_total_cost_mills)::text AS freight,SUM(total_cost_mills)::text AS total FROM oms.order_item_costs WHERE inventory_lot_id=$1",[lotId])).rows)
+      .toEqual([{freight:"11907200",total:"51907200"}]);
+    expect((await pool.query("SELECT qty_on_hand FROM inventory.inventory_lots WHERE id=$1",[lotId])).rows).toEqual([{qty_on_hand:0}]);
+  });
+
+  it("restores exact cost after a partial unpick and conserves value on repick",async()=>{
+    const lotId=await exactPieceLot();
+    const {InventoryLotService}=await import("../../../inventory/lots.service");
+    await database.transaction(tx=>new InventoryLotService(tx,()=>NOW).pickFromLots({
+      productVariantId:201,warehouseLocationId:99,qty:30_000,orderId:1,orderItemId:1,expectedExistingCostQuantity:0,
+    }));
+    await database.transaction(tx=>new InventoryLotService(tx,()=>NOW).unpickFromLots({
+      productVariantId:201,warehouseLocationId:99,qty:20_000,orderId:1,orderItemId:1,
+    }));
+    expect((await pool.query("SELECT qty,total_cost_mills::text AS total,landed_total_cost_mills::text AS freight FROM oms.order_item_costs")).rows)
+      .toEqual([{qty:10_000,total:"6488400",freight:"1488400"}]);
+    await database.transaction(tx=>new InventoryLotService(tx,()=>NOW).pickFromLots({
+      productVariantId:201,warehouseLocationId:99,qty:70_000,orderId:1,orderItemId:1,expectedExistingCostQuantity:10_000,
+    }));
+    expect((await pool.query("SELECT SUM(total_cost_mills)::text AS total,SUM(landed_total_cost_mills)::text AS freight FROM oms.order_item_costs WHERE inventory_lot_id=$1",[lotId])).rows)
+      .toEqual([{total:"51907200",freight:"11907200"}]);
+  });
+
+  it("serializes competing picks without overlapping exact cost quantities",async()=>{
+    const lotId=await exactPieceLot();
+    const {InventoryLotService}=await import("../../../inventory/lots.service");
+    const pick=()=>database.transaction(tx=>new InventoryLotService(tx,()=>NOW).pickFromLots({
+      productVariantId:201,warehouseLocationId:99,qty:60_000,orderId:1,orderItemId:1,expectedExistingCostQuantity:0,
+    }));
+    const results=await Promise.allSettled([pick(),pick()]);
+    expect(results.filter(result=>result.status==="fulfilled")).toHaveLength(1);
+    expect(results.filter(result=>result.status==="rejected")).toHaveLength(1);
+    expect((await pool.query("SELECT qty_on_hand FROM inventory.inventory_lots WHERE id=$1",[lotId])).rows).toEqual([{qty_on_hand:20_000}]);
+    expect((await pool.query("SELECT SUM(quantity)::int AS quantity FROM inventory.lot_cost_quantity_allocations WHERE inventory_lot_id=$1 AND direction=1",[lotId])).rows)
+      .toEqual([{quantity:60_000}]);
+  });
+
+  it("replays cost references and reversals without allocating twice and rejects conflicting reuse", async () => {
+    const lotId=await exactPieceLot();
+    const {allocateLotQuantityCost,referenceLotQuantityCost,reverseLotQuantityCost}=await import("../../../inventory/infrastructure/cost-quantity.repository");
+    const allocation=await database.transaction(tx=>allocateLotQuantityCost(tx,lotId,100,actorId,NOW,{},"cost:test:positive"));
+    const reference=await database.transaction(tx=>referenceLotQuantityCost(tx,allocation.id!,[{start:0,quantity:50}],actorId,NOW,"cost:test:reference"));
+    expect(await database.transaction(tx=>referenceLotQuantityCost(tx,allocation.id!,[{start:0,quantity:50}],actorId,NOW,"cost:test:reference")))
+      .toEqual(reference);
+    await expect(database.transaction(tx=>referenceLotQuantityCost(tx,allocation.id!,[{start:0,quantity:49}],actorId,NOW,"cost:test:reference")))
+      .rejects.toMatchObject({code:"COST_ALLOCATION_REPLAY_CONFLICT"});
+    const reversal=await database.transaction(tx=>reverseLotQuantityCost(tx,allocation.id!,50,actorId,NOW,"cost:test:reverse"));
+    expect(await database.transaction(tx=>reverseLotQuantityCost(tx,allocation.id!,50,actorId,NOW,"cost:test:reverse")))
+      .toEqual(reversal);
+    expect((await pool.query("SELECT count(*)::integer AS n FROM inventory.lot_cost_quantity_allocations WHERE inventory_lot_id=$1",[lotId])).rows[0].n).toBe(3);
+    await expect(pool.query("UPDATE inventory.lot_cost_quantity_allocations SET quantity=1 WHERE id=$1",[allocation.id])).rejects.toThrow();
+    await expect(pool.query("DELETE FROM inventory.lot_cost_quantity_bases WHERE inventory_lot_id=$1",[lotId])).rejects.toThrow();
+    await pool.query(readFileSync(resolve(process.cwd(),"migrations/0751_exact_inventory_cost_totals.sql"),"utf8"));
+    expect((await pool.query("SELECT count(*)::integer AS n FROM inventory.lot_cost_quantity_allocations WHERE inventory_lot_id=$1",[lotId])).rows[0].n).toBe(3);
+  });
+
+  it.each(["shipment","cycle_count"] as const)("conserves exact remaining value after an on-hand %s loss",async(kind)=>{
+    const lotId=await exactPieceLot();
+    if (kind==="shipment") {
+      const {InventoryLotService}=await import("../../../inventory/lots.service");
+      await database.transaction(async tx=>{
+        await lockInventoryCostGraph(tx);
+        await new InventoryLotService(tx,()=>NOW).shipFromLots({
+          productVariantId:201,warehouseLocationId:99,qty:30000,fromOnHand:30000,fromPicked:0,reservedToRelease:0,
+        });
+      });
+    } else {
+      const level=(await pool.query("INSERT INTO inventory.inventory_levels(product_variant_id,warehouse_location_id,variant_qty) VALUES(201,99,80000) RETURNING id")).rows[0];
+      const {PostgresCanonicalClaimInventoryRepository}=await import("../../../inventory/infrastructure/canonical-claim-inventory.repository");
+      const client=await pool.connect();
+      try {
+        await client.query("BEGIN");
+        const result=await new PostgresCanonicalClaimInventoryRepository().applyCycleCountAdjustment({
+          client,inventoryLevelId:Number(level.id),productVariantId:201,warehouseLocationId:99,
+          quantityBefore:80000,countedQty:50000,cycleCountId:1,cycleCountItemId:1,actor:actorId,reason:"Verified stock loss",occurredAt:NOW,
+        });
+        expect(result.consumedCostMills).toBe(BigInt(19465200));
+        await client.query("COMMIT");
+      } catch(error) {await client.query("ROLLBACK");throw error;}
+      finally {client.release();}
+    }
+    const {readUnallocatedLotCosts}=await import("../../../inventory/infrastructure/cost-quantity.repository");
+    const remaining=await database.transaction(async tx=>readUnallocatedLotCosts(tx,
+      (await tx.execute(sql`SELECT * FROM inventory.inventory_lots WHERE id=${lotId}`)).rows.map(row=>({...row,id:row.id}))));
+    expect(remaining.get(lotId)).toMatchObject({quantity:50000,costs:{totalMills:BigInt(32442000),landedMills:BigInt(7442000)}});
+    expect((await pool.query("SELECT qty_on_hand FROM inventory.inventory_lots WHERE id=$1",[lotId])).rows[0].qty_on_hand).toBe(50000);
   });
 
   it("real AP audit failure rolls back invoice evidence, lot layers, consumed COGS and adjustment log", async () => {

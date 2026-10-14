@@ -3,7 +3,15 @@ import type { AddressInfo } from "node:net";
 import express, { type NextFunction, type Request, type Response } from "express";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ZodError } from "zod";
-import { saveSizePricesInputSchema } from "../../../../../shared/dropship/listing-setting-writes";
+import {
+  applyPriceChangesInputSchema,
+  priceChangeReviewPageInputSchema,
+  reviewPriceChangesInputSchema,
+  saveCategorySettingsInputSchema,
+  saveProductSettingsInputSchema,
+  saveProductsBulkInputSchema,
+  saveSizePricesInputSchema,
+} from "../../../../../shared/dropship/listing-setting-writes";
 import { listingSettingStoreIdSchema, parseListingSettingInput } from "../../application/dropship-listing-setting-write-support";
 import { DropshipError } from "../../domain/errors";
 import type { ListingSettingWriteServices } from "../../infrastructure/dropship-listing-setting-writes.factory";
@@ -18,6 +26,8 @@ vi.mock("../../../../platform/observability/logger", () => ({
 import { DROPSHIP_BULK_JSON_LIMIT_BYTES, LISTING_SETTINGS_TOO_LARGE_MESSAGE } from "../../interfaces/http/dropship-bulk-json.middleware";
 import {
   LISTING_SETTING_BULK_WRITES_PER_MINUTE,
+  LISTING_SETTING_REVIEW_PAGE_READS_PER_MINUTE,
+  LISTING_SETTING_SINGLE_WRITES_PER_MINUTE,
   registerDropshipListingSettingWritesRoutes,
 } from "../../interfaces/http/dropship-listing-setting-writes.routes";
 
@@ -43,6 +53,111 @@ class FakeSizePrices {
       parseListingSettingInput(saveSizePricesInputSchema, input);
     }
     return this.result;
+  }
+}
+
+const PRODUCT_KEY = "product-settings:7f9c2ba4-e88f-4a5e-9d1b-1c2d3e4f5a6b";
+const PRODUCT_PATH = "/api/dropship/listings/stores/22/listing-settings/products/7";
+const productBody = (fields: Record<string, unknown> = {}) =>
+  ({ idempotencyKey: PRODUCT_KEY, expectedRevisionId: null, patch: { storeShelf: { mode: "none" } }, ...fields });
+const productChanged = { outcome: "changed", productId: 7, revisionId: 31, sizes: [], clearedSizeCount: 0 };
+
+const BULK_KEY = "products-bulk:7f9c2ba4-e88f-4a5e-9d1b-1c2d3e4f5a6b";
+const BULK_PATH = "/api/dropship/listings/stores/22/listing-settings/products/bulk";
+const bulkBody = (fields: Record<string, unknown> = {}) =>
+  ({ idempotencyKey: BULK_KEY, products: [{ productId: 7, expectedRevisionId: null }], patch: { storeShelf: { mode: "none" } }, ...fields });
+const bulkChanged = { outcome: "changed", requestId: 900, productCount: 1, changedProductCount: 1, clearedSizeCount: 0 };
+
+class FakeProducts {
+  calls: Array<{ memberId: string; storeId: unknown; productId: unknown; input: unknown }> = [];
+  bulkCalls: Array<{ memberId: string; storeId: unknown; input: unknown }> = [];
+  failure: unknown = null;
+  result: unknown = productChanged;
+  bulkResult: unknown = bulkChanged;
+  async saveForMember(memberId: string, storeId: unknown, productId: unknown, input: unknown) {
+    this.calls.push({ memberId, storeId, productId, input });
+    if (this.failure) throw this.failure;
+    // The real service's parsing: the vendor's input is refused as DROPSHIP_LISTING_SETTINGS_INVALID_INPUT.
+    parseListingSettingInput(listingSettingStoreIdSchema, storeId);
+    parseListingSettingInput(listingSettingStoreIdSchema, productId);
+    parseListingSettingInput(saveProductSettingsInputSchema, input);
+    return this.result;
+  }
+  async saveBulkForMember(memberId: string, storeId: unknown, input: unknown) {
+    this.bulkCalls.push({ memberId, storeId, input });
+    if (this.failure) throw this.failure;
+    parseListingSettingInput(listingSettingStoreIdSchema, storeId);
+    parseListingSettingInput(saveProductsBulkInputSchema, input);
+    return this.bulkResult;
+  }
+}
+
+const CATEGORY_KEY = "category-settings:7f9c2ba4-e88f-4a5e-9d1b-1c2d3e4f5a6b";
+const CATEGORY_PATH = "/api/dropship/listings/stores/22/listing-settings/categories/3";
+const categoryBody = (fields: Record<string, unknown> = {}) =>
+  ({ idempotencyKey: CATEGORY_KEY, expectedRevisionId: null, patch: { storeShelf: { mode: "none" } }, ...fields });
+const categoryChanged = { outcome: "changed", categoryId: 3, revisionId: 41, clearedProductCount: 0 };
+
+class FakeCategories {
+  calls: Array<{ memberId: string; storeId: unknown; categoryId: unknown; input: unknown }> = [];
+  failure: unknown = null;
+  result: unknown = categoryChanged;
+  async saveForMember(memberId: string, storeId: unknown, categoryId: unknown, input: unknown) {
+    this.calls.push({ memberId, storeId, categoryId, input });
+    if (this.failure) throw this.failure;
+    // The real service's parsing: the vendor's input is refused as DROPSHIP_LISTING_SETTINGS_INVALID_INPUT.
+    parseListingSettingInput(listingSettingStoreIdSchema, storeId);
+    parseListingSettingInput(listingSettingStoreIdSchema, categoryId);
+    parseListingSettingInput(saveCategorySettingsInputSchema, input);
+    return this.result;
+  }
+}
+
+const REVIEW_ID = "6f1b1d7e-6d0e-4d43-9a43-2f9d3c0b7c11";
+const REVIEW_HASH = "b".repeat(64);
+const CHECK_PATH = "/api/dropship/listings/stores/22/listing-settings/price-changes/review";
+const APPLY_PATH = "/api/dropship/listings/stores/22/listing-settings/price-changes/apply";
+const PAGE_PATH = `/api/dropship/listings/stores/22/listing-settings/price-changes/reviews/${REVIEW_ID}`;
+const APPLY_KEY = "price-changes:7f9c2ba4-e88f-4a5e-9d1b-1c2d3e4f5a6b";
+const checkBody = (fields: Record<string, unknown> = {}) =>
+  ({ kind: "product_prices", productIds: [7], price: null, ...fields });
+const applyBody = (fields: Record<string, unknown> = {}) =>
+  ({ reviewId: REVIEW_ID, reviewHash: REVIEW_HASH, idempotencyKey: APPLY_KEY, ...fields });
+const reviewAnswer = (fields: Record<string, unknown> = {}) => ({
+  reviewId: REVIEW_ID, reviewHash: REVIEW_HASH, createdAt: "2026-10-13T09:00:00.000Z", kind: "product_prices",
+  summary: { total: 0, changed: 0, released: 0, refused: 0 }, rows: [], page: 0, ...fields,
+});
+const applied = { outcome: "changed", reviewId: REVIEW_ID, requestId: 900, changedProductCount: 1, releasedSizeCount: 0, categoryRevisionId: null };
+
+class FakePriceChanges {
+  reviews: Array<{ memberId: string; storeId: unknown; input: unknown }> = [];
+  pages: Array<{ memberId: string; storeId: unknown; reviewId: unknown; page: unknown }> = [];
+  applies: Array<{ memberId: string; storeId: unknown; input: unknown }> = [];
+  failure: unknown = null;
+  reviewResult: unknown = reviewAnswer();
+  pageResult: unknown = reviewAnswer({ page: 1 });
+  applyResult: unknown = applied;
+  async reviewForMember(memberId: string, storeId: unknown, input: unknown) {
+    this.reviews.push({ memberId, storeId, input });
+    if (this.failure) throw this.failure;
+    // The real service's parsing: the vendor's input is refused as DROPSHIP_LISTING_SETTINGS_INVALID_INPUT.
+    parseListingSettingInput(listingSettingStoreIdSchema, storeId);
+    parseListingSettingInput(reviewPriceChangesInputSchema, input);
+    return this.reviewResult;
+  }
+  async reviewPageForMember(memberId: string, storeId: unknown, reviewId: unknown, page: unknown) {
+    this.pages.push({ memberId, storeId, reviewId, page });
+    if (this.failure) throw this.failure;
+    parseListingSettingInput(listingSettingStoreIdSchema, storeId);
+    parseListingSettingInput(priceChangeReviewPageInputSchema, { reviewId, page });
+    return this.pageResult;
+  }
+  async applyForMember(memberId: string, storeId: unknown, input: unknown) {
+    this.applies.push({ memberId, storeId, input });
+    if (this.failure) throw this.failure;
+    parseListingSettingInput(listingSettingStoreIdSchema, storeId);
+    parseListingSettingInput(applyPriceChangesInputSchema, input);
+    return this.applyResult;
   }
 }
 
@@ -279,7 +394,747 @@ describe("listing-settings write routes (plan PR 9, sections 3.2-3.5, 4.2)", () 
   });
 });
 
-function buildApp(sizePrices: FakeSizePrices): express.Express {
+describe("PUT …/listing-settings/products/:productId (W5, plan PR 9, section 6.3)", () => {
+  let sizePrices: FakeSizePrices;
+  let products: FakeProducts;
+  let server: { url: string; close: () => Promise<void> } | null;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    sizePrices = new FakeSizePrices();
+    products = new FakeProducts();
+    server = null;
+  });
+  afterEach(async () => {
+    await server?.close();
+  });
+
+  const put = (payload: unknown, options: { member?: string | null; path?: string; raw?: string } = {}) =>
+    fetch(`${server!.url}${options.path ?? PRODUCT_PATH}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json", ...(options.member === null ? {} : { "X-Test-Member": options.member ?? "member-1" }) },
+      body: options.raw ?? JSON.stringify(payload),
+    });
+
+  it("refuses a request without a dropship session before the limiter, the parser or the service", async () => {
+    server = await startServer(buildApp(sizePrices, products));
+    const response = await put(productBody(), { member: null });
+    expect(response.status).toBe(401);
+    expect(products.calls).toEqual([]);
+  });
+
+  it("answers an anonymous body over 1 MiB with 401, never 413: the 1 MiB parser runs only after sign-in (plan P8)", async () => {
+    server = await startServer(buildApp(sizePrices, products));
+    const response = await put({ ...productBody(), padding: "x".repeat(DROPSHIP_BULK_JSON_LIMIT_BYTES + 1) }, { member: null });
+    expect(response.status).toBe(401);
+    expect((await response.json()).error.code).toBe("DROPSHIP_AUTH_REQUIRED");
+    expect(products.calls).toEqual([]);
+    expect(logger.warn).not.toHaveBeenCalledWith("dropship.bulk_json_body_rejected", expect.anything());
+  });
+
+  it("passes the member, the parsed store and product ids and the body through, answers the schema's shape, never cached", async () => {
+    server = await startServer(buildApp(sizePrices, products));
+    const sent = productBody({ patch: { price: { basis: "product_cost", markupBps: 3_000, flatCents: 0, rounding: "cent" } },
+      sizePrices: [{ productVariantId: 101, pricingMode: "inherit", expectedRevisionId: 4 }],
+      expectedPrices: [{ productVariantId: 101, priceCents: 1_499 }] });
+    const response = await put(sent);
+    expect(response.status).toBe(200);
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    expect(await response.json()).toEqual(productChanged);
+    expect(products.calls).toEqual([{ memberId: "member-1", storeId: 22, productId: 7, input: sent }]);
+    expect(sizePrices.calls).toEqual([]);
+  });
+
+  it.each([
+    ["a product id with letters", { path: "/api/dropship/listings/stores/22/listing-settings/products/7x" }, productBody()],
+    ["a product id of 0", { path: "/api/dropship/listings/stores/22/listing-settings/products/0" }, productBody()],
+    ["a product id past int4", { path: "/api/dropship/listings/stores/22/listing-settings/products/2147483648" }, productBody()],
+    ["a 7-character key", {}, productBody({ idempotencyKey: "abcdefg" })],
+    ["no change at all", {}, productBody({ patch: {} })],
+    ["an eBay category name sent by the client", {}, productBody({ patch: { ebayCategory: { categoryId: "183438", categoryName: "X" } } })],
+    ["a price change without the shown prices", {}, productBody({ patch: { price: null } })],
+    ["an unknown key", {}, { ...productBody(), storeConnectionId: 22 }],
+  ])("answers %s with 400, never a 500", async (_label, options, payload) => {
+    server = await startServer(buildApp(sizePrices, products));
+    const response = await put(payload, options);
+    expect(response.status).toBe(400);
+    expect((await response.json()).error.code).toBe("DROPSHIP_LISTING_SETTINGS_INVALID_INPUT");
+  });
+
+  it("parses a body past the 100 KB global limit (10,000 shown prices) and hands it to the service unchanged", async () => {
+    server = await startServer(buildApp(sizePrices, products));
+    const large = productBody({ patch: { price: null }, expectedPrices: Array.from({ length: 10_000 },
+      (_, index) => ({ productVariantId: 2_000_000_000 + index, priceCents: 2_000_000_000 + index })) });
+    const text = JSON.stringify(large);
+    expect(text.length).toBeGreaterThan(100 * 1024);
+    expect(text.length).toBeLessThan(DROPSHIP_BULK_JSON_LIMIT_BYTES);
+
+    const response = await put(undefined, { raw: text });
+
+    expect(response.status).toBe(200);
+    expect(products.calls).toHaveLength(1);
+    expect(products.calls[0].input).toEqual(large);
+  });
+
+  it("refuses a body over 1 MiB with 413 in the listing-settings words, never calling the service", async () => {
+    server = await startServer(buildApp(sizePrices, products));
+    const response = await put({ ...productBody(), padding: "x".repeat(DROPSHIP_BULK_JSON_LIMIT_BYTES + 1) });
+    expect(response.status).toBe(413);
+    expect(await response.json()).toEqual({ error: { code: "DROPSHIP_REQUEST_TOO_LARGE", message: LISTING_SETTINGS_TOO_LARGE_MESSAGE } });
+    expect(products.calls).toEqual([]);
+  });
+
+  it("answers a replay as the probe saw it, and an answer that breaks the response contract as a 500 with the fixed words", async () => {
+    server = await startServer(buildApp(sizePrices, products));
+    products.result = { outcome: "replayed", productId: 7, revisionId: 31, sizes: [{ productVariantId: 101, revisionId: 55 }],
+      clearedSizeCount: null };
+    expect(await (await put(productBody())).json()).toEqual(products.result);
+
+    // A replay always leaves the clean-up count unknown; an unchanged save wrote nothing.
+    for (const broken of [{ ...productChanged, outcome: "replayed" }, { ...productChanged, outcome: "unchanged", clearedSizeCount: 2 },
+      { ...productChanged, sizes: [{ productVariantId: 101, revisionId: 1 }, { productVariantId: 101, revisionId: 2 }] }]) {
+      products.result = broken;
+      const response = await put(productBody());
+      expect(response.status).toBe(500);
+      expect(await response.json()).toEqual({ error: { code: "DROPSHIP_LISTING_SETTINGS_INTERNAL_ERROR",
+        message: "Something went wrong. We couldn't confirm your save." } });
+    }
+  });
+
+  it.each([
+    [new DropshipError("DROPSHIP_LISTING_PRICES_MOVED", "Prices changed while you were editing.", {
+      storeConnectionId: 22, sizeCount: 1, sizes: [{ productVariantId: 101, expectedPriceCents: 1_499, priceCents: 1_599 }],
+      retryable: false, classification: "permanent" }), 409],
+    [new DropshipError("DROPSHIP_LISTING_SETTINGS_EBAY_SIGN_IN_REQUIRED", "Sign in to eBay again.", {
+      storeConnectionId: 22, fields: ["shippingPolicy"], retryable: false, classification: "permanent" }), 403],
+    [new DropshipError("DROPSHIP_LISTING_SETTINGS_TOO_LARGE", "This store's saved listing text is at its limit.", {
+      storeConnectionId: 22, reason: "store_text_limit", textBytes: 30_000_001, maxTextBytes: 30_000_000,
+      retryable: false, classification: "permanent" }), 422],
+    [new DropshipError("DROPSHIP_EBAY_STORE_CATEGORIES_ACCESS_DENIED", "eBay refused access.", { storeConnectionId: 22 }), 403],
+    [new DropshipError("DROPSHIP_EBAY_FULFILLMENT_ROUTING_UNAVAILABLE", "Routing unavailable.", { storeConnectionId: 22 }), 503],
+  ])("answers %s with its status and the public context, logged with the product", async (error, status) => {
+    server = await startServer(buildApp(sizePrices, products));
+    products.failure = error;
+    const response = await put(productBody());
+    expect(response.status).toBe(status);
+    expect(await response.json()).toEqual({ error: { code: error.code, message: error.message, context: error.context } });
+    const line = status === 503 ? logger.warn : logger.debug;
+    expect(line).toHaveBeenCalledWith(status === 503 ? "dropship.listing_settings.write_deferred" : "dropship.listing_settings.write_refused",
+      expect.objectContaining({ store_connection_id: 22, product_id: 7, actor_id: "member-1", status, error_code: error.code,
+        path: "/api/dropship/listings/stores/:storeConnectionId/listing-settings/products/:productId" }));
+  });
+
+  it("limits each member to the single-write budget a minute, on its own counter: the bulk budget is not spent", async () => {
+    server = await startServer(buildApp(sizePrices, products));
+    expect(LISTING_SETTING_SINGLE_WRITES_PER_MINUTE).toBe(60);
+    for (let index = 0; index < LISTING_SETTING_SINGLE_WRITES_PER_MINUTE; index += 1) {
+      expect((await put(productBody())).status).toBe(200);
+    }
+    const limited = await put(productBody());
+    expect(limited.status).toBe(429);
+    expect(await limited.json()).toEqual({ error: { code: "DROPSHIP_LISTING_SETTINGS_RATE_LIMITED",
+      message: "Too many saves in a minute. Wait a moment and try again." } });
+    expect(products.calls).toHaveLength(LISTING_SETTING_SINGLE_WRITES_PER_MINUTE);
+    // The bulk route has its own budget, and another member has their own.
+    const bulk = await fetch(`${server.url}${PATH}`, { method: "PUT",
+      headers: { "Content-Type": "application/json", "X-Test-Member": "member-1" }, body: JSON.stringify(body([row(101)])) });
+    expect(bulk.status).toBe(200);
+    expect((await put(productBody(), { member: "member-2" })).status).toBe(200);
+  });
+});
+
+describe("POST …/listing-settings/products/bulk (W6, plan PR 9, section 7.3)", () => {
+  let sizePrices: FakeSizePrices;
+  let products: FakeProducts;
+  let server: { url: string; close: () => Promise<void> } | null;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    sizePrices = new FakeSizePrices();
+    products = new FakeProducts();
+    server = null;
+  });
+  afterEach(async () => {
+    await server?.close();
+  });
+
+  const post = (payload: unknown, options: { member?: string | null; path?: string; raw?: string } = {}) =>
+    fetch(`${server!.url}${options.path ?? BULK_PATH}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...(options.member === null ? {} : { "X-Test-Member": options.member ?? "member-1" }) },
+      body: options.raw ?? JSON.stringify(payload),
+    });
+
+  it("refuses a request without a dropship session before the limiter, the parser or the service", async () => {
+    server = await startServer(buildApp(sizePrices, products));
+    const response = await post(bulkBody(), { member: null });
+    expect(response.status).toBe(401);
+    expect(products.bulkCalls).toEqual([]);
+  });
+
+  it("answers an anonymous body over 1 MiB with 401, never 413: the 1 MiB parser runs only after sign-in (plan P8)", async () => {
+    server = await startServer(buildApp(sizePrices, products));
+    const response = await post({ ...bulkBody(), padding: "x".repeat(DROPSHIP_BULK_JSON_LIMIT_BYTES + 1) }, { member: null });
+    expect(response.status).toBe(401);
+    expect((await response.json()).error.code).toBe("DROPSHIP_AUTH_REQUIRED");
+    expect(products.bulkCalls).toEqual([]);
+    expect(logger.warn).not.toHaveBeenCalledWith("dropship.bulk_json_body_rejected", expect.anything());
+  });
+
+  it("passes the member, the parsed store id and the body to the W6 service only, answers the schema's shape, never cached", async () => {
+    server = await startServer(buildApp(sizePrices, products));
+    const sent = bulkBody({ products: [{ productId: 9, expectedRevisionId: 49 }, { productId: 7, expectedRevisionId: null }] });
+    const response = await post(sent);
+    expect(response.status).toBe(200);
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    expect(await response.json()).toEqual(bulkChanged);
+    expect(products.bulkCalls).toEqual([{ memberId: "member-1", storeId: 22, input: sent }]);
+    expect(products.calls).toEqual([]);
+    expect(sizePrices.calls).toEqual([]);
+  });
+
+  it.each([
+    ["a store id with letters", { path: "/api/dropship/listings/stores/22x/listing-settings/products/bulk" }, bulkBody()],
+    ["a 7-character key", {}, bulkBody({ idempotencyKey: "abcdefg" })],
+    ["a price", {}, bulkBody({ patch: { price: null } })],
+    ["a main text value", {}, bulkBody({ patch: { mainText: { text: "Own words." } } })],
+    ["no products", {}, bulkBody({ products: [] })],
+    ["an unknown key", {}, { ...bulkBody(), storeConnectionId: 22 }],
+  ])("answers %s with 400, never a 500", async (_label, options, payload) => {
+    server = await startServer(buildApp(sizePrices, products));
+    const response = await post(payload, options);
+    expect(response.status).toBe(400);
+    expect((await response.json()).error.code).toBe("DROPSHIP_LISTING_SETTINGS_INVALID_INPUT");
+  });
+
+  it("parses a body past the 100 KB global limit (10,000 products) and hands it to the service unchanged", async () => {
+    server = await startServer(buildApp(sizePrices, products));
+    const large = bulkBody({ products: Array.from({ length: 10_000 },
+      (_, index) => ({ productId: 2_000_000_000 + index, expectedRevisionId: 2_000_000_000 + index })) });
+    const text = JSON.stringify(large);
+    expect(text.length).toBeGreaterThan(100 * 1024);
+    expect(text.length).toBeLessThan(DROPSHIP_BULK_JSON_LIMIT_BYTES);
+
+    const response = await post(undefined, { raw: text });
+
+    expect(response.status).toBe(200);
+    expect(products.bulkCalls).toHaveLength(1);
+    expect(products.bulkCalls[0].input).toEqual(large);
+  });
+
+  it("refuses a body over 1 MiB with 413 in the listing-settings words, never calling the service", async () => {
+    server = await startServer(buildApp(sizePrices, products));
+    const response = await post({ ...bulkBody(), padding: "x".repeat(DROPSHIP_BULK_JSON_LIMIT_BYTES + 1) });
+    expect(response.status).toBe(413);
+    expect(await response.json()).toEqual({ error: { code: "DROPSHIP_REQUEST_TOO_LARGE", message: LISTING_SETTINGS_TOO_LARGE_MESSAGE } });
+    expect(products.bulkCalls).toEqual([]);
+  });
+
+  it("answers the heavy-write gate's refusal with 503 and Retry-After 5, logged at WARN with the store", async () => {
+    server = await startServer(buildApp(sizePrices, products));
+    products.failure = new DropshipError("DROPSHIP_LISTING_SETTINGS_BUSY", "Another large listing settings change is being saved. Try again in a few seconds.", {
+      reason: "heavy_write_in_progress", retryAfterSeconds: 5, retryable: true, classification: "transient" });
+    const response = await post(bulkBody());
+    expect(response.status).toBe(503);
+    expect(response.headers.get("retry-after")).toBe("5");
+    expect(await response.json()).toEqual({ error: { code: "DROPSHIP_LISTING_SETTINGS_BUSY",
+      message: "Another large listing settings change is being saved. Try again in a few seconds.",
+      context: { reason: "heavy_write_in_progress", retryable: true, classification: "transient" } } });
+    expect(logger.warn).toHaveBeenCalledWith("dropship.listing_settings.write_deferred", expect.objectContaining({
+      store_connection_id: 22, actor_id: "member-1", status: 503, error_code: "DROPSHIP_LISTING_SETTINGS_BUSY",
+      path: "/api/dropship/listings/stores/:storeConnectionId/listing-settings/products/bulk" }));
+  });
+
+  it.each([
+    [new DropshipError("DROPSHIP_LISTING_SETTINGS_BULK_TOO_LARGE", "This change carries too much listing text to save at once.", {
+      storeConnectionId: 22, textBytes: 30_000_001, maxTextBytes: 30_000_000, productCount: 3_750,
+      retryable: false, classification: "permanent" }), 422],
+    [new DropshipError("DROPSHIP_LISTING_SETTINGS_TOO_LARGE", "This store's saved listing text is at its limit.", {
+      storeConnectionId: 22, reason: "store_text_limit", textBytes: 30_000_005, maxTextBytes: 30_000_000,
+      retryable: false, classification: "permanent" }), 422],
+    [new DropshipError("DROPSHIP_PRODUCT_LISTING_SETTINGS_VERSION_CONFLICT", "Listing settings changed after you opened them.", {
+      storeConnectionId: 22, conflicts: [{ productId: 9, expectedRevisionId: 49, actualRevisionId: 50 }], conflictCount: 1,
+      retryable: false, classification: "permanent" }), 409],
+    [new DropshipError("DROPSHIP_LISTING_SETTINGS_PRODUCT_NOT_FOUND", "This Card Shellz product was not found.", {
+      productId: 999, retryable: false, classification: "permanent" }), 404],
+  ])("answers %s with its status and the public context, logged at DEBUG", async (error, status) => {
+    server = await startServer(buildApp(sizePrices, products));
+    products.failure = error;
+    const response = await post(bulkBody());
+    expect(response.status).toBe(status);
+    expect(await response.json()).toEqual({ error: { code: error.code, message: error.message, context: error.context } });
+    expect(logger.debug).toHaveBeenCalledWith("dropship.listing_settings.write_refused", expect.objectContaining({
+      store_connection_id: 22, status, error_code: error.code }));
+  });
+
+  it("answers an answer that breaks the response contract as a 500 with the fixed words", async () => {
+    server = await startServer(buildApp(sizePrices, products));
+    for (const broken of [{ ...bulkChanged, outcome: "replayed" }, { ...bulkChanged, outcome: "unchanged" },
+      { ...bulkChanged, changedProductCount: 2 }]) {
+      products.bulkResult = broken;
+      const response = await post(bulkBody());
+      expect(response.status).toBe(500);
+      expect(await response.json()).toEqual({ error: { code: "DROPSHIP_LISTING_SETTINGS_INTERNAL_ERROR",
+        message: "Something went wrong. We couldn't confirm your save." } });
+    }
+  });
+
+  it("spends the bulk budget it shares with the size prices route (30 a minute), not the single-write one", async () => {
+    server = await startServer(buildApp(sizePrices, products));
+    const half = LISTING_SETTING_BULK_WRITES_PER_MINUTE / 2;
+    for (let index = 0; index < half; index += 1) {
+      expect((await post(bulkBody())).status).toBe(200);
+      const sizes = await fetch(`${server.url}${PATH}`, { method: "PUT",
+        headers: { "Content-Type": "application/json", "X-Test-Member": "member-1" }, body: JSON.stringify(body([row(101)])) });
+      expect(sizes.status).toBe(200);
+    }
+    const limited = await post(bulkBody());
+    expect(limited.status).toBe(429);
+    expect(products.bulkCalls).toHaveLength(half);
+    // The single-write budget is a separate counter: W5 still saves.
+    const single = await fetch(`${server.url}${PRODUCT_PATH}`, { method: "PUT",
+      headers: { "Content-Type": "application/json", "X-Test-Member": "member-1" }, body: JSON.stringify(productBody()) });
+    expect(single.status).toBe(200);
+  });
+});
+
+describe("PUT …/listing-settings/categories/:categoryId (W12, plan PR 9, section 8.3)", () => {
+  let sizePrices: FakeSizePrices;
+  let products: FakeProducts;
+  let categories: FakeCategories;
+  let server: { url: string; close: () => Promise<void> } | null;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    sizePrices = new FakeSizePrices();
+    products = new FakeProducts();
+    categories = new FakeCategories();
+    server = null;
+  });
+  afterEach(async () => {
+    await server?.close();
+  });
+
+  const put = (payload: unknown, options: { member?: string | null; path?: string; raw?: string } = {}) =>
+    fetch(`${server!.url}${options.path ?? CATEGORY_PATH}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json", ...(options.member === null ? {} : { "X-Test-Member": options.member ?? "member-1" }) },
+      body: options.raw ?? JSON.stringify(payload),
+    });
+
+  it("refuses a request without a dropship session before the limiter, the parser or the service", async () => {
+    server = await startServer(buildApp(sizePrices, products, categories));
+    expect((await put(categoryBody(), { member: null })).status).toBe(401);
+    expect(categories.calls).toEqual([]);
+  });
+
+  it("answers an anonymous body over 1 MiB with 401, never 413: the 1 MiB parser runs only after sign-in (plan P8)", async () => {
+    server = await startServer(buildApp(sizePrices, products, categories));
+    const response = await put({ ...categoryBody(), padding: "x".repeat(DROPSHIP_BULK_JSON_LIMIT_BYTES + 1) }, { member: null });
+    expect(response.status).toBe(401);
+    expect((await response.json()).error.code).toBe("DROPSHIP_AUTH_REQUIRED");
+    expect(categories.calls).toEqual([]);
+    expect(logger.warn).not.toHaveBeenCalledWith("dropship.bulk_json_body_rejected", expect.anything());
+  });
+
+  it("passes the member, the parsed store and category ids and the body to the W12 service only, never cached", async () => {
+    server = await startServer(buildApp(sizePrices, products, categories));
+    const sent = categoryBody({ expectedRevisionId: 40, clear: { fields: ["storeShelf"], products: [{ productId: 7, expectedRevisionId: 31 }] } });
+    const response = await put(sent);
+    expect(response.status).toBe(200);
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    expect(await response.json()).toEqual(categoryChanged);
+    expect(categories.calls).toEqual([{ memberId: "member-1", storeId: 22, categoryId: 3, input: sent }]);
+    expect(products.calls).toEqual([]);
+    expect(products.bulkCalls).toEqual([]);
+  });
+
+  it.each([
+    ["a category id with letters", { path: "/api/dropship/listings/stores/22/listing-settings/categories/3x" }, categoryBody()],
+    ["a category id of 0", { path: "/api/dropship/listings/stores/22/listing-settings/categories/0" }, categoryBody()],
+    ["a category id past int4", { path: "/api/dropship/listings/stores/22/listing-settings/categories/2147483648" }, categoryBody()],
+    ["a 7-character key", {}, categoryBody({ idempotencyKey: "abcdefg" })],
+    ["a price (plan P34)", {}, categoryBody({ patch: { price: null } })],
+    ["a main text", {}, categoryBody({ patch: { mainText: null } })],
+    ["no change at all", {}, categoryBody({ patch: {} })],
+    ["a cleared setting the patch does not set", {}, categoryBody({ clear: { fields: ["returnPolicy"],
+      products: [{ productId: 7, expectedRevisionId: null }] } })],
+    ["an unknown key", {}, { ...categoryBody(), categoryId: 3 }],
+  ])("answers %s with 400, never a 500", async (_label, options, payload) => {
+    server = await startServer(buildApp(sizePrices, products, categories));
+    const response = await put(payload, options);
+    expect(response.status).toBe(400);
+    expect((await response.json()).error.code).toBe("DROPSHIP_LISTING_SETTINGS_INVALID_INPUT");
+  });
+
+  it("parses a body past the 100 KB global limit (a clear of 10,000 products) and hands it to the service unchanged", async () => {
+    server = await startServer(buildApp(sizePrices, products, categories));
+    const large = categoryBody({ clear: { fields: ["storeShelf"], products: Array.from({ length: 10_000 },
+      (_, index) => ({ productId: 2_000_000_000 + index, expectedRevisionId: 2_000_000_000 + index })) } });
+    const text = JSON.stringify(large);
+    expect(text.length).toBeGreaterThan(100 * 1024);
+    expect(text.length).toBeLessThan(DROPSHIP_BULK_JSON_LIMIT_BYTES);
+
+    const response = await put(undefined, { raw: text });
+
+    expect(response.status).toBe(200);
+    expect(categories.calls).toHaveLength(1);
+    expect(categories.calls[0].input).toEqual(large);
+  });
+
+  it("refuses a body over 1 MiB with 413 in the listing-settings words, never calling the service", async () => {
+    server = await startServer(buildApp(sizePrices, products, categories));
+    const response = await put({ ...categoryBody(), padding: "x".repeat(DROPSHIP_BULK_JSON_LIMIT_BYTES + 1) });
+    expect(response.status).toBe(413);
+    expect(await response.json()).toEqual({ error: { code: "DROPSHIP_REQUEST_TOO_LARGE", message: LISTING_SETTINGS_TOO_LARGE_MESSAGE } });
+    expect(categories.calls).toEqual([]);
+  });
+
+  it.each([
+    [new DropshipError("DROPSHIP_LISTING_SETTINGS_OLDER_RULES_PRESENT", "This store still uses older group rules.", {
+      storeConnectionId: 22, pricingGroups: 2, contentGroups: 0, ebayCategoryRules: 1, retryable: false, classification: "permanent" }), 409],
+    [new DropshipError("DROPSHIP_LISTING_SETTINGS_CATEGORY_NOT_FOUND", "This category has no chosen product in this store.", {
+      storeConnectionId: 22, categoryId: 3, retryable: false, classification: "permanent" }), 404],
+    // 8a's category writer puts the two revisions beside the category id, outside the public allow-list (plan 3.3):
+    // the body names the category only, and the page reloads it.
+    [new DropshipError("DROPSHIP_CATEGORY_LISTING_SETTINGS_VERSION_CONFLICT", "This category's listing settings changed.", {
+      categoryId: 3, retryable: false, classification: "permanent" }), 409],
+    [new DropshipError("DROPSHIP_PRODUCT_LISTING_SETTINGS_VERSION_CONFLICT", "The products in this category changed.", {
+      storeConnectionId: 22, categoryId: 3, conflicts: [{ productId: 12 }], conflictCount: 1, retryable: false, classification: "permanent" }), 409],
+    [new DropshipError("DROPSHIP_LISTING_SETTINGS_BULK_TOO_LARGE", "This change carries too much listing text to save at once.", {
+      storeConnectionId: 22, textBytes: 30_000_001, maxTextBytes: 30_000_000, productCount: 10_000,
+      retryable: false, classification: "permanent" }), 422],
+  ])("answers %s with its status and the public context, logged at DEBUG with the category", async (error, status) => {
+    server = await startServer(buildApp(sizePrices, products, categories));
+    categories.failure = error;
+    const response = await put(categoryBody());
+    expect(response.status).toBe(status);
+    expect(await response.json()).toEqual({ error: { code: error.code, message: error.message, context: error.context } });
+    expect(logger.debug).toHaveBeenCalledWith("dropship.listing_settings.write_refused", expect.objectContaining({
+      store_connection_id: 22, category_id: 3, actor_id: "member-1", status, error_code: error.code,
+      path: "/api/dropship/listings/stores/:storeConnectionId/listing-settings/categories/:categoryId" }));
+  });
+
+  it("answers the heavy-write gate's refusal of a clear with 503 and Retry-After 5, logged at WARN", async () => {
+    server = await startServer(buildApp(sizePrices, products, categories));
+    categories.failure = new DropshipError("DROPSHIP_LISTING_SETTINGS_BUSY", "Another large listing settings change is being saved. Try again in a few seconds.", {
+      reason: "heavy_write_in_progress", retryAfterSeconds: 5, retryable: true, classification: "transient" });
+    const response = await put(categoryBody());
+    expect(response.status).toBe(503);
+    expect(response.headers.get("retry-after")).toBe("5");
+    expect(logger.warn).toHaveBeenCalledWith("dropship.listing_settings.write_deferred", expect.objectContaining({ category_id: 3, status: 503 }));
+  });
+
+  it("answers a replay as the probe saw it, and an answer that breaks the response contract as a 500 with the fixed words", async () => {
+    server = await startServer(buildApp(sizePrices, products, categories));
+    categories.result = { outcome: "replayed", categoryId: 3, revisionId: 41, clearedProductCount: null };
+    expect(await (await put(categoryBody())).json()).toEqual(categories.result);
+    for (const broken of [{ ...categoryChanged, outcome: "replayed" }, { ...categoryChanged, outcome: "unchanged", clearedProductCount: 2 },
+      { ...categoryChanged, requestId: 900 }]) {
+      categories.result = broken;
+      const response = await put(categoryBody());
+      expect(response.status).toBe(500);
+      expect(await response.json()).toEqual({ error: { code: "DROPSHIP_LISTING_SETTINGS_INTERNAL_ERROR",
+        message: "Something went wrong. We couldn't confirm your save." } });
+    }
+  });
+
+  it("spends the single-write budget it shares with W5 (60 a minute), not the bulk one", async () => {
+    server = await startServer(buildApp(sizePrices, products, categories));
+    const half = LISTING_SETTING_SINGLE_WRITES_PER_MINUTE / 2;
+    for (let index = 0; index < half; index += 1) {
+      expect((await put(categoryBody())).status).toBe(200);
+      const product = await fetch(`${server.url}${PRODUCT_PATH}`, { method: "PUT",
+        headers: { "Content-Type": "application/json", "X-Test-Member": "member-1" }, body: JSON.stringify(productBody()) });
+      expect(product.status).toBe(200);
+    }
+    const limited = await put(categoryBody());
+    expect(limited.status).toBe(429);
+    expect(await limited.json()).toEqual({ error: { code: "DROPSHIP_LISTING_SETTINGS_RATE_LIMITED",
+      message: "Too many saves in a minute. Wait a moment and try again." } });
+    expect(categories.calls).toHaveLength(half);
+    // The bulk budget is a separate counter, and another member has their own.
+    const bulk = await fetch(`${server.url}${BULK_PATH}`, { method: "POST",
+      headers: { "Content-Type": "application/json", "X-Test-Member": "member-1" }, body: JSON.stringify(bulkBody()) });
+    expect(bulk.status).toBe(200);
+    expect((await put(categoryBody(), { member: "member-2" })).status).toBe(200);
+  });
+});
+
+describe("POST …/price-changes/review, GET …/price-changes/reviews/:reviewId, POST …/price-changes/apply (W7, plan PR 9, 9.4)", () => {
+  let sizePrices: FakeSizePrices;
+  let products: FakeProducts;
+  let priceChanges: FakePriceChanges;
+  let server: { url: string; close: () => Promise<void> } | null;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    sizePrices = new FakeSizePrices();
+    products = new FakeProducts();
+    priceChanges = new FakePriceChanges();
+    server = null;
+  });
+  afterEach(async () => {
+    await server?.close();
+  });
+
+  const send = (method: "POST" | "GET", path: string, payload?: unknown, options: { member?: string | null; raw?: string } = {}) =>
+    fetch(`${server!.url}${path}`, {
+      method,
+      headers: { "Content-Type": "application/json", ...(options.member === null ? {} : { "X-Test-Member": options.member ?? "member-1" }) },
+      ...(method === "GET" ? {} : { body: options.raw ?? JSON.stringify(payload) }),
+    });
+  const start = async () => { server = await startServer(buildApp(sizePrices, products, undefined, priceChanges)); };
+
+  it("refuses a request without a dropship session before the limiter, the parser or the service, even over 1 MiB", async () => {
+    await start();
+    const padding = "x".repeat(DROPSHIP_BULK_JSON_LIMIT_BYTES + 1);
+    for (const [method, path, payload] of [["POST", CHECK_PATH, { ...checkBody(), padding }], ["POST", APPLY_PATH, { ...applyBody(), padding }],
+      ["GET", PAGE_PATH, undefined]] as const) {
+      const response = await send(method, path, payload, { member: null });
+      expect(response.status).toBe(401);
+      expect((await response.json()).error.code).toBe("DROPSHIP_AUTH_REQUIRED");
+    }
+    expect([priceChanges.reviews, priceChanges.pages, priceChanges.applies]).toEqual([[], [], []]);
+    expect(logger.warn).not.toHaveBeenCalledWith("dropship.bulk_json_body_rejected", expect.anything());
+  });
+
+  it("passes the member, the parsed store id and the body or the page to the W7 service only, never cached", async () => {
+    await start();
+    const check = await send("POST", CHECK_PATH, checkBody());
+    expect(check.status).toBe(200);
+    expect(check.headers.get("cache-control")).toBe("no-store");
+    expect(await check.json()).toEqual(reviewAnswer());
+    const page = await send("GET", `${PAGE_PATH}?page=1`);
+    expect(page.status).toBe(200);
+    expect(page.headers.get("cache-control")).toBe("no-store");
+    expect(await page.json()).toEqual(reviewAnswer({ page: 1 }));
+    const apply = await send("POST", APPLY_PATH, applyBody());
+    expect(apply.status).toBe(200);
+    expect(await apply.json()).toEqual(applied);
+    expect(priceChanges.reviews).toEqual([{ memberId: "member-1", storeId: 22, input: checkBody() }]);
+    expect(priceChanges.pages).toEqual([{ memberId: "member-1", storeId: 22, reviewId: REVIEW_ID, page: 1 }]);
+    expect(priceChanges.applies).toEqual([{ memberId: "member-1", storeId: 22, input: applyBody() }]);
+    expect(products.calls).toEqual([]);
+    expect(products.bulkCalls).toEqual([]);
+  });
+
+  it("reads a missing page as page 0, as W1 does, and refuses a page that is not digits with 400", async () => {
+    await start();
+    expect((await send("GET", PAGE_PATH)).status).toBe(200);
+    expect(priceChanges.pages[0].page).toBe(0);
+    for (const query of ["?page=-1", "?page=1.5", "?page=abc", "?page=201", "?page=1e2"]) {
+      const response = await send("GET", `${PAGE_PATH}${query}`);
+      expect({ query, status: response.status }).toEqual({ query, status: 400 });
+      expect((await response.json()).error.code).toBe("DROPSHIP_LISTING_SETTINGS_INVALID_INPUT");
+    }
+  });
+
+  it.each([
+    ["a check with neither a price nor a release", CHECK_PATH, { kind: "product_prices", productIds: [7] }],
+    ["a check of 10,001 products", CHECK_PATH, checkBody({ productIds: Array.from({ length: 10_001 }, (_, index) => index + 1) })],
+    ["a category check without a price", CHECK_PATH, { kind: "category_price", categoryId: 3, expectedRevisionId: null,
+      patch: { storeShelf: { mode: "none" } } }],
+    ["an apply with a 7-character key", APPLY_PATH, applyBody({ idempotencyKey: "abcdefg" })],
+    ["an apply with an unknown key", APPLY_PATH, { ...applyBody(), kind: "product_prices" }],
+  ])("answers %s with 400, never a 500", async (_label, path, payload) => {
+    await start();
+    const text = JSON.stringify(payload);
+    expect(text.length).toBeLessThan(DROPSHIP_BULK_JSON_LIMIT_BYTES);
+    const response = await send("POST", path, payload);
+    expect(response.status).toBe(400);
+    expect((await response.json()).error.code).toBe("DROPSHIP_LISTING_SETTINGS_INVALID_INPUT");
+  });
+
+  it("answers an apply with a 10,000-element junk array past the 100 KB global limit with 400, not a 413 or a 500", async () => {
+    await start();
+    // 10-digit numbers: about 110 KB, past the global parser's 100 KB and under 1 MiB (plan 3.6).
+    const payload = { ...applyBody(), junk: Array.from({ length: 10_000 }, (_, index) => 2_000_000_000 + index) };
+    const text = JSON.stringify(payload);
+    expect(text.length).toBeGreaterThan(100 * 1024);
+    expect(text.length).toBeLessThan(DROPSHIP_BULK_JSON_LIMIT_BYTES);
+    const response = await send("POST", APPLY_PATH, undefined, { raw: text });
+    expect(response.status).toBe(400);
+    expect((await response.json()).error.code).toBe("DROPSHIP_LISTING_SETTINGS_INVALID_INPUT");
+    expect(priceChanges.applies).toHaveLength(1);
+  });
+
+  it("parses a check of 10,000 products past the 100 KB global limit and hands it to the service unchanged", async () => {
+    await start();
+    const large = checkBody({ productIds: Array.from({ length: 10_000 }, (_, index) => 2_000_000_000 + index) });
+    const text = JSON.stringify(large);
+    expect(text.length).toBeGreaterThan(100 * 1024);
+    expect(text.length).toBeLessThan(DROPSHIP_BULK_JSON_LIMIT_BYTES);
+
+    const response = await send("POST", CHECK_PATH, undefined, { raw: text });
+
+    expect(response.status).toBe(200);
+    expect(priceChanges.reviews[0].input).toEqual(large);
+  });
+
+  it("refuses a body over 1 MiB on either POST with 413 in the listing-settings words, never calling the service", async () => {
+    await start();
+    const padding = "x".repeat(DROPSHIP_BULK_JSON_LIMIT_BYTES + 1);
+    for (const [path, payload] of [[CHECK_PATH, { ...checkBody(), padding }], [APPLY_PATH, { ...applyBody(), padding }]] as const) {
+      const response = await send("POST", path, payload);
+      expect(response.status).toBe(413);
+      expect(await response.json()).toEqual({ error: { code: "DROPSHIP_REQUEST_TOO_LARGE", message: LISTING_SETTINGS_TOO_LARGE_MESSAGE } });
+    }
+    expect([priceChanges.reviews, priceChanges.applies]).toEqual([[], []]);
+  });
+
+  it.each([
+    [new DropshipError("DROPSHIP_PRICING_REVIEW_NOT_FOUND", "This price check was not found for this store. Check prices again.", {
+      storeConnectionId: 22, reviewId: REVIEW_ID, retryable: false, classification: "permanent" }), 404],
+    [new DropshipError("DROPSHIP_LISTING_PRICES_MOVED", "Prices changed while you were editing. Reload to see the new prices, then save again.", {
+      storeConnectionId: 22, sizes: [{ productVariantId: 101, expectedPriceCents: 1_200, priceCents: 1_350 }], sizeCount: 1,
+      retryable: false, classification: "permanent" }), 409],
+    [new DropshipError("DROPSHIP_IDEMPOTENCY_CONFLICT", "This price check was already applied. Check prices again to make another change.", {
+      storeConnectionId: 22, reviewId: REVIEW_ID, retryable: false, classification: "permanent" }), 409],
+    [new DropshipError("DROPSHIP_LISTING_PRICE_WOULD_BE_LOST", "1 size would be left without a price it can be listed at.", {
+      storeConnectionId: 22, sizes: [{ productVariantId: 103, beforePriceCents: 1_140, afterPriceCents: null,
+        refusal: "DROPSHIP_LISTING_PRICE_WOULD_BE_LOST", blockers: ["vendor_retail_price_required"] }], sizeCount: 1,
+      retryable: false, classification: "permanent" }), 422],
+    [new DropshipError("DROPSHIP_LISTING_PRICE_RELEASE_LIMIT", "This price check would release 201 exact prices.", {
+      storeConnectionId: 22, releaseCount: 201, maxReleases: 200, retryable: false, classification: "permanent" }), 422],
+    [new DropshipError("DROPSHIP_LISTING_SETTINGS_TOO_LARGE", "This price check covers more than 10,000 sizes. Choose fewer products.", {
+      storeConnectionId: 22, retryable: false, classification: "permanent" }), 422],
+    [new DropshipError("DROPSHIP_LISTING_SETTINGS_BULK_TOO_LARGE",
+      "This price check covers too many sizes and too much listing text to apply at once. Choose fewer products.", {
+        storeConnectionId: 22, reason: "price_check_rows", textBytes: 30_000_001, maxTextBytes: 30_000_000, productCount: 10_000,
+        retryable: false, classification: "permanent" }), 422],
+  ])("answers %s with its status and the public context, logged at DEBUG with the review id from the body", async (error, status) => {
+    await start();
+    priceChanges.failure = error;
+    const response = await send("POST", APPLY_PATH, applyBody());
+    expect(response.status).toBe(status);
+    expect(await response.json()).toEqual({ error: { code: error.code, message: error.message, context: error.context } });
+    expect(logger.debug).toHaveBeenCalledWith("dropship.listing_settings.write_refused", expect.objectContaining({
+      store_connection_id: 22, actor_id: "member-1", status, error_code: error.code, review_id: REVIEW_ID,
+      path: "/api/dropship/listings/stores/:storeConnectionId/listing-settings/price-changes/apply" }));
+  });
+
+  it("logs a category check's refusal with the category id from its body, and leaves out ids out of their contract", async () => {
+    await start();
+    priceChanges.failure = new DropshipError("DROPSHIP_LISTING_SETTINGS_OLDER_RULES_PRESENT", "This store still has older group rules.", {
+      storeConnectionId: 22, retryable: false, classification: "permanent" });
+    const category = { kind: "category_price", categoryId: 3, expectedRevisionId: null, patch: { price: null } };
+    expect((await send("POST", CHECK_PATH, category)).status).toBe(409);
+    expect(logger.debug).toHaveBeenLastCalledWith("dropship.listing_settings.write_refused", expect.objectContaining({ category_id: 3 }));
+    expect(vi.mocked(logger.debug).mock.lastCall?.[1]).not.toHaveProperty("review_id");
+    // Log-only and never a decision: an upper-case review id, a fractional or negative category id are not logged.
+    for (const body of [applyBody({ reviewId: REVIEW_ID.toUpperCase() }), { ...category, categoryId: 3.5 }, { ...category, categoryId: -3 }]) {
+      const response = await send("POST", "reviewId" in body ? APPLY_PATH : CHECK_PATH, body);
+      expect(response.status).toBe(409);
+      expect(vi.mocked(logger.debug).mock.lastCall?.[1]).not.toHaveProperty("review_id");
+      expect(vi.mocked(logger.debug).mock.lastCall?.[1]).not.toHaveProperty("category_id");
+    }
+    // Only W7's POSTs read ids from the body: a W6 body's stray categoryId is refused (400) and never logged as one.
+    expect((await send("POST", BULK_PATH, { ...bulkBody(), categoryId: 3 })).status).toBe(400);
+    expect(vi.mocked(logger.debug).mock.lastCall?.[1]).toMatchObject({ error_code: "DROPSHIP_LISTING_SETTINGS_INVALID_INPUT" });
+    expect(vi.mocked(logger.debug).mock.lastCall?.[1]).not.toHaveProperty("category_id");
+  });
+
+  it("logs a page's refusal with the review id from its path", async () => {
+    await start();
+    priceChanges.failure = new DropshipError("DROPSHIP_PRICING_REVIEW_NOT_FOUND", "This price check was not found for this store. Check prices again.", {
+      storeConnectionId: 22, reviewId: REVIEW_ID, retryable: false, classification: "permanent" });
+    expect((await send("GET", PAGE_PATH)).status).toBe(404);
+    expect(logger.debug).toHaveBeenCalledWith("dropship.listing_settings.write_refused", expect.objectContaining({
+      review_id: REVIEW_ID, path: "/api/dropship/listings/stores/:storeConnectionId/listing-settings/price-changes/reviews/:reviewId" }));
+  });
+
+  it("answers the heavy-write gate's refusal with 503 and Retry-After 5, logged at WARN", async () => {
+    await start();
+    priceChanges.failure = new DropshipError("DROPSHIP_LISTING_SETTINGS_BUSY", "Another large listing settings change is being saved. Try again in a few seconds.", {
+      reason: "heavy_write_in_progress", retryAfterSeconds: 5, retryable: true, classification: "transient" });
+    for (const path of [CHECK_PATH, APPLY_PATH]) {
+      const response = await send("POST", path, path === CHECK_PATH ? checkBody() : applyBody());
+      expect(response.status).toBe(503);
+      expect(response.headers.get("retry-after")).toBe("5");
+    }
+    expect(logger.warn).toHaveBeenCalledWith("dropship.listing_settings.write_deferred", expect.objectContaining({ status: 503 }));
+  });
+
+  it("answers an answer that breaks its response contract as a 500 with the fixed words, logged at ERROR", async () => {
+    await start();
+    const broken: Array<[string, "POST" | "GET", unknown, () => void]> = [
+      [CHECK_PATH, "POST", checkBody(), () => { priceChanges.reviewResult = reviewAnswer({ kind: "store_default" }); }],
+      [PAGE_PATH, "GET", undefined, () => { priceChanges.pageResult = reviewAnswer({ summary: { total: 1, changed: 2, released: 0, refused: 0 } }); }],
+      [APPLY_PATH, "POST", applyBody(), () => { priceChanges.applyResult = { ...applied, outcome: "replayed" }; }],
+      [APPLY_PATH, "POST", applyBody(), () => { priceChanges.applyResult = { ...applied, outcome: "unchanged" }; }],
+    ];
+    for (const [path, method, payload, arrange] of broken) {
+      arrange();
+      const response = await send(method, path, payload);
+      expect(response.status).toBe(500);
+      expect(await response.json()).toEqual({ error: { code: "DROPSHIP_LISTING_SETTINGS_INTERNAL_ERROR",
+        message: "Something went wrong. We couldn't confirm your save." } });
+    }
+    expect(logger.error).toHaveBeenCalledWith("dropship.listing_settings.write_failed", expect.objectContaining({ status: 500 }));
+  });
+
+  it("spends the bulk budget on the check and the apply (30 a minute, shared with W6 and W8), not on the pages", async () => {
+    await start();
+    const third = LISTING_SETTING_BULK_WRITES_PER_MINUTE / 3;
+    for (let index = 0; index < third; index += 1) {
+      expect((await send("POST", CHECK_PATH, checkBody())).status).toBe(200);
+      expect((await send("POST", APPLY_PATH, applyBody())).status).toBe(200);
+      const bulk = await send("POST", "/api/dropship/listings/stores/22/listing-settings/products/bulk", bulkBody());
+      expect(bulk.status).toBe(200);
+    }
+    const limited = await send("POST", APPLY_PATH, applyBody());
+    expect(limited.status).toBe(429);
+    expect(await limited.json()).toEqual({ error: { code: "DROPSHIP_LISTING_SETTINGS_RATE_LIMITED",
+      message: "Too many saves in a minute. Wait a moment and try again." } });
+    expect((await send("POST", CHECK_PATH, checkBody())).status).toBe(429);
+    // The pages have their own budget, and another member has their own.
+    expect((await send("GET", PAGE_PATH)).status).toBe(200);
+    expect((await send("POST", CHECK_PATH, checkBody(), { member: "member-2" })).status).toBe(200);
+  });
+
+  it("limits each member to 120 pages a minute in the read router's words, on a counter of its own", async () => {
+    await start();
+    expect(LISTING_SETTING_REVIEW_PAGE_READS_PER_MINUTE).toBe(120);
+    for (let index = 0; index < LISTING_SETTING_REVIEW_PAGE_READS_PER_MINUTE; index += 1) {
+      expect((await send("GET", PAGE_PATH)).status).toBe(200);
+    }
+    const limited = await send("GET", PAGE_PATH);
+    expect(limited.status).toBe(429);
+    expect(await limited.json()).toEqual({ error: { code: "DROPSHIP_LISTING_SETTINGS_RATE_LIMITED",
+      message: "Too many listing settings requests. Try again in a minute." } });
+    expect(priceChanges.pages).toHaveLength(LISTING_SETTING_REVIEW_PAGE_READS_PER_MINUTE);
+    // The bulk budget is untouched, and another member's pages are their own.
+    expect((await send("POST", CHECK_PATH, checkBody())).status).toBe(200);
+    expect((await send("GET", PAGE_PATH, undefined, { member: "member-2" })).status).toBe(200);
+  });
+});
+
+/**
+ * Every writer the router takes, with the given fakes; any other member is a
+ * stub that throws, so a route reaching the wrong service fails here. Each
+ * later sub-PR adds its member (plan 6.1, C-feas-6); 9f adds `priceChanges`.
+ */
+function writeServices(overrides: Partial<ListingSettingWriteServices>): ListingSettingWriteServices {
+  const unexpected = (name: string) => ({
+    saveForMember: async (): Promise<never> => { throw new Error(`The ${name} service was not expected here.`); },
+    saveBulkForMember: async (): Promise<never> => { throw new Error(`The ${name} bulk service was not expected here.`); },
+    reviewForMember: async (): Promise<never> => { throw new Error(`The ${name} review was not expected here.`); },
+    reviewPageForMember: async (): Promise<never> => { throw new Error(`The ${name} review page was not expected here.`); },
+    applyForMember: async (): Promise<never> => { throw new Error(`The ${name} apply was not expected here.`); },
+  });
+  return {
+    sizePrices: unexpected("sizePrices") as unknown as ListingSettingWriteServices["sizePrices"],
+    products: unexpected("products") as unknown as ListingSettingWriteServices["products"],
+    categories: unexpected("categories") as unknown as ListingSettingWriteServices["categories"],
+    priceChanges: unexpected("priceChanges") as unknown as ListingSettingWriteServices["priceChanges"],
+    ...overrides,
+  };
+}
+
+/** The W8 cases pass no products fake, so a W8 route that reached the W5 service would fail on its throwing stub. */
+function buildApp(sizePrices: FakeSizePrices, products?: FakeProducts, categories?: FakeCategories,
+  priceChanges?: FakePriceChanges): express.Express {
   const app = express();
   app.use((req: Request, _res: Response, next: NextFunction) => {
     const memberId = req.header("X-Test-Member");
@@ -288,7 +1143,12 @@ function buildApp(sizePrices: FakeSizePrices): express.Express {
   });
   // The production order: the global 100 KB parser skips this route, which parses its own body after sign-in.
   installGlobalJsonBodyParser(app);
-  registerDropshipListingSettingWritesRoutes(app, { sizePrices: sizePrices as unknown as ListingSettingWriteServices["sizePrices"] });
+  registerDropshipListingSettingWritesRoutes(app, writeServices({
+    sizePrices: sizePrices as unknown as ListingSettingWriteServices["sizePrices"],
+    ...(products ? { products: products as unknown as ListingSettingWriteServices["products"] } : {}),
+    ...(categories ? { categories: categories as unknown as ListingSettingWriteServices["categories"] } : {}),
+    ...(priceChanges ? { priceChanges: priceChanges as unknown as ListingSettingWriteServices["priceChanges"] } : {}),
+  }));
   return app;
 }
 

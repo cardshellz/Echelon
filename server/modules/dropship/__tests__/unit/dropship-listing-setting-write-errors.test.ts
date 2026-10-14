@@ -1,7 +1,15 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import { z, ZodError } from "zod";
-import { MAX_ECHOED_ISSUES, parseListingSettingInput } from "../../application/dropship-listing-setting-write-support";
+import {
+  ListingSettingHeavyWriteGate,
+  MAX_ECHOED_ISSUES,
+  listingSettingBulkTooLarge,
+  parseListingSettingInput,
+} from "../../application/dropship-listing-setting-write-support";
 import { DropshipError } from "../../domain/errors";
+import { selectRateBookAssignment, type RateBookAssignmentCandidate } from "../../../shipping-engine/domain/rate-book";
 import {
   DEFAULT_RETRY_AFTER_SECONDS,
   LISTING_SETTINGS_INTERNAL_MESSAGE,
@@ -20,12 +28,21 @@ const TABLE: ReadonlyArray<[number, "permanent" | "transient" | "fatal", readonl
   [401, "permanent", ["DROPSHIP_AUTH_REQUIRED"]],
   [403, "permanent", ["DROPSHIP_LISTING_VENDOR_BLOCKED", "DROPSHIP_LISTING_ENTITLEMENT_BLOCKED", "DROPSHIP_LISTING_STORE_BLOCKED",
     "DROPSHIP_LISTING_SETTINGS_EBAY_SIGN_IN_REQUIRED", "DROPSHIP_EBAY_LISTING_SETUP_PERMISSION_REQUIRED",
-    "DROPSHIP_EBAY_STORE_CATEGORIES_PERMISSION_REQUIRED", "DROPSHIP_EBAY_CATEGORIES_PERMISSION_REQUIRED"]],
+    "DROPSHIP_EBAY_STORE_CATEGORIES_PERMISSION_REQUIRED", "DROPSHIP_EBAY_CATEGORIES_PERMISSION_REQUIRED",
+    // 9c: eBay refused the store's grant for a read the eBay values step makes.
+    "DROPSHIP_EBAY_LISTING_SETUP_ACCESS_DENIED", "DROPSHIP_EBAY_STORE_CATEGORIES_ACCESS_DENIED", "DROPSHIP_EBAY_CATEGORIES_ACCESS_DENIED"]],
   [404, "permanent", ["DROPSHIP_STORE_CONNECTION_REQUIRED", "DROPSHIP_LISTING_SETTINGS_PRODUCT_NOT_FOUND",
     "DROPSHIP_LISTING_SETTINGS_CATEGORY_NOT_FOUND", "DROPSHIP_LISTING_PRICE_NOT_AVAILABLE", "DROPSHIP_PRICING_REVIEW_NOT_FOUND"]],
   [409, "permanent", ["DROPSHIP_IDEMPOTENCY_CONFLICT", "DROPSHIP_PRODUCT_LISTING_SETTINGS_VERSION_CONFLICT",
     "DROPSHIP_CATEGORY_LISTING_SETTINGS_VERSION_CONFLICT", "DROPSHIP_LISTING_PRICE_VERSION_CONFLICT", "DROPSHIP_LISTING_PRICES_MOVED",
-    "DROPSHIP_LISTING_SETTINGS_OLDER_RULES_PRESENT"]],
+    "DROPSHIP_LISTING_SETTINGS_OLDER_RULES_PRESENT",
+    // 9c: the store paused while eBay was asked, no token, and the Card Shellz shipping checks behind a new shipping policy.
+    "DROPSHIP_STORE_CONNECTION_NOT_CONNECTED", "DROPSHIP_EBAY_LISTING_SETUP_ACCESS_TOKEN_REQUIRED",
+    "DROPSHIP_EBAY_FULFILLMENT_MARKETPLACE_UNSUPPORTED", "DROPSHIP_EBAY_FULFILLMENT_SERVICES_REQUIRED",
+    "DROPSHIP_EBAY_FULFILLMENT_ROUTING_REQUIRED", "DROPSHIP_EBAY_FULFILLMENT_ROUTING_MISMATCH",
+    "DROPSHIP_EBAY_FULFILLMENT_WAREHOUSE_REQUIRED", "DROPSHIP_EBAY_FULFILLMENT_SLA_REQUIRED",
+    "DROPSHIP_EBAY_FULFILLMENT_RATE_TABLE_REQUIRED", "DROPSHIP_EBAY_FULFILLMENT_DESTINATION_COVERAGE_REQUIRED",
+    "DROPSHIP_EBAY_FULFILLMENT_NO_RATE_BOOK", "DROPSHIP_EBAY_FULFILLMENT_AMBIGUOUS_RATE_BOOK"]],
   [413, "permanent", ["DROPSHIP_REQUEST_TOO_LARGE"]],
   [422, "permanent", ["DROPSHIP_LISTING_PRICE_WOULD_BE_LOST", "DROPSHIP_LISTING_PRICE_OUTSIDE_LIMIT", "DROPSHIP_PRICING_RULES_NOT_CONFIGURED",
     "DROPSHIP_LISTING_PRICE_RELEASE_LIMIT", "DROPSHIP_LISTING_SETTINGS_EBAY_ONLY", "DROPSHIP_LISTING_SETTINGS_TOO_LARGE",
@@ -38,7 +55,7 @@ const TABLE: ReadonlyArray<[number, "permanent" | "transient" | "fatal", readonl
     "DROPSHIP_EBAY_MANAGED_LOCATION_UNAVAILABLE", "DROPSHIP_EBAY_MANAGED_LOCATION_INVALID_RESPONSE",
     "DROPSHIP_EBAY_MANAGED_LOCATION_CREATE_CONFLICT", "DROPSHIP_EBAY_STORE_CATEGORIES_UNAVAILABLE",
     "DROPSHIP_EBAY_STORE_CATEGORIES_INVALID_RESPONSE"]],
-  [503, "transient", ["DROPSHIP_LISTING_SETTINGS_BUSY", "DROPSHIP_EBAY_TOKEN_REFRESH_FAILED", "DROPSHIP_EBAY_REFRESH_LOCK_UNAVAILABLE",
+  [503, "transient", ["DROPSHIP_LISTING_SETTINGS_BUSY", "DROPSHIP_EBAY_FULFILLMENT_ROUTING_UNAVAILABLE", "DROPSHIP_EBAY_TOKEN_REFRESH_FAILED", "DROPSHIP_EBAY_REFRESH_LOCK_UNAVAILABLE",
     "DROPSHIP_CREDENTIAL_CHANGED", "DROPSHIP_EBAY_TOKEN_REFRESH_INVALID_RESPONSE", "DROPSHIP_EBAY_OAUTH_NOT_CONFIGURED"]],
   [500, "fatal", ["DROPSHIP_LISTING_SETTINGS_INVARIANT_FAILED", "DROPSHIP_LISTING_SETTINGS_REPLAY_INCOMPLETE",
     "DROPSHIP_LISTING_PRICE_INVARIANT_FAILED"]],
@@ -142,7 +159,103 @@ describe("listing-settings write errors (plan PR 9, section 3.3)", () => {
   });
 });
 
+describe("the 9d refusals answer through existing rows (plan 3.3: 9d adds no status row)", () => {
+  it("answers the heavy-write gate's refusal 503 transient with Retry-After 5 and its reason", async () => {
+    const gate = new ListingSettingHeavyWriteGate();
+    let release!: () => void;
+    const held = gate.run(() => new Promise<void>((done) => { release = done; }));
+    const busy = await gate.run(async () => undefined).then(() => null, (error: unknown) => error);
+    release();
+    await held;
+
+    const answer = listingSettingWriteErrorAnswer(busy);
+    expect(answer).toMatchObject({ status: 503, errorClass: "transient", code: "DROPSHIP_LISTING_SETTINGS_BUSY", retryAfterSeconds: 5 });
+    expect(answer.body.error.context).toEqual({ reason: "heavy_write_in_progress", retryable: true, classification: "transient" });
+  });
+
+  it("answers the bulk text refusal 422 permanent with its numbers", () => {
+    const answer = listingSettingWriteErrorAnswer(listingSettingBulkTooLarge(22, 30_000_001, 30_000_000, 3_750));
+    expect(answer).toMatchObject({ status: 422, errorClass: "permanent", code: "DROPSHIP_LISTING_SETTINGS_BULK_TOO_LARGE", retryAfterSeconds: null });
+    expect(answer.body.error.context).toEqual({ storeConnectionId: 22, textBytes: 30_000_001, maxTextBytes: 30_000_000, productCount: 3_750,
+      retryable: false, classification: "permanent" });
+  });
+});
+
+describe("W7's codes answer through existing rows with plan 9.9's statuses (9f adds no status row)", () => {
+  const service = readFileSync(resolve(__dirname, "../../application/dropship-listing-price-changes-service.ts"), "utf8");
+  /** Every code W7 raises itself, as its source names it, and the 9.9 status each answers. */
+  const W7_CODES: Record<string, number> = {
+    DROPSHIP_PRICING_REVIEW_NOT_FOUND: 404, DROPSHIP_IDEMPOTENCY_CONFLICT: 409,
+    DROPSHIP_LISTING_SETTINGS_CATEGORY_NOT_FOUND: 404, DROPSHIP_CATEGORY_LISTING_SETTINGS_VERSION_CONFLICT: 409,
+    DROPSHIP_PRODUCT_LISTING_SETTINGS_VERSION_CONFLICT: 409, DROPSHIP_LISTING_SETTINGS_TOO_LARGE: 422,
+    DROPSHIP_LISTING_PRICE_RELEASE_LIMIT: 422, DROPSHIP_LISTING_PRICE_WOULD_BE_LOST: 422,
+    // Plan 9.7's stop rule: the text and the review's rows over the budget (9d's code, W7's words and reason).
+    DROPSHIP_LISTING_SETTINGS_BULK_TOO_LARGE: 422,
+    // Named only in its list of W9's size refusals, which W7 passes on with the size.
+    DROPSHIP_LISTING_PRICE_NOT_AVAILABLE: 404, DROPSHIP_LISTING_PRICE_OUTSIDE_LIMIT: 422, DROPSHIP_LISTING_PRICE_VERSION_CONFLICT: 409,
+    DROPSHIP_PRICING_RULES_NOT_CONFIGURED: 422,
+  };
+
+  it("names only codes the write table lists, each with its 9.9 status, and never W1's stale or blocked review codes", () => {
+    const named = [...new Set(service.match(/"DROPSHIP_[A-Z_]+"/g)?.map((code) => code.slice(1, -1)) ?? [])].sort();
+    expect(named).toEqual(Object.keys(W7_CODES).sort());
+    for (const [code, status] of Object.entries(W7_CODES)) expect({ code, status: LISTING_SETTING_WRITE_STATUS.get(code) }).toEqual({ code, status });
+    // Not in the write table, so they would answer 500 (plan 9.9, map-9f §1.1).
+    expect(service).not.toMatch(/PRICING_REVIEW_STALE|PRICING_REVIEW_BLOCKED/);
+    expect(LISTING_SETTING_WRITE_STATUS.has("DROPSHIP_PRICING_REVIEW_STALE")).toBe(false);
+    expect(LISTING_SETTING_WRITE_STATUS.has("DROPSHIP_PRICING_REVIEW_BLOCKED")).toBe(false);
+  });
+
+  it("answers the release limit and a refused size with their numbers in the public context", () => {
+    const limit = listingSettingWriteErrorAnswer(new DropshipError("DROPSHIP_LISTING_PRICE_RELEASE_LIMIT", "Too many releases.", {
+      storeConnectionId: 22, releaseCount: 201, maxReleases: 200, retryable: false, classification: "permanent" }));
+    expect(limit).toMatchObject({ status: 422, errorClass: "permanent" });
+    expect(limit.body.error.context).toEqual({ storeConnectionId: 22, releaseCount: 201, maxReleases: 200, retryable: false,
+      classification: "permanent" });
+    const lost = listingSettingWriteErrorAnswer(new DropshipError("DROPSHIP_LISTING_PRICE_WOULD_BE_LOST", "1 size would lose its price.", {
+      storeConnectionId: 22, sizes: [{ productVariantId: 103, beforePriceCents: 1_140, afterPriceCents: null,
+        refusal: "DROPSHIP_LISTING_PRICE_WOULD_BE_LOST", blockers: ["vendor_retail_price_required"], title: "dropped" }], sizeCount: 1,
+      reviewId: "6f1b1d7e-6d0e-4d43-9a43-2f9d3c0b7c11", retryable: false, classification: "permanent" }));
+    expect(lost.body.error.context).toEqual({ storeConnectionId: 22, sizes: [{ productVariantId: 103, beforePriceCents: 1_140,
+      afterPriceCents: null, refusal: "DROPSHIP_LISTING_PRICE_WOULD_BE_LOST", blockers: ["vendor_retail_price_required"] }], sizeCount: 1,
+      reviewId: "6f1b1d7e-6d0e-4d43-9a43-2f9d3c0b7c11", retryable: false, classification: "permanent" });
+  });
+});
+
+describe("rate-book refusals (review round, finding H1)", () => {
+  // The capability provider throws `DROPSHIP_EBAY_FULFILLMENT_${selectRateBookAssignment(...).code}`
+  // (dropship-ebay-fulfillment-capability.provider.ts), so a new rate-book code cannot fall to 500 unnoticed.
+  const context = { pricingChannel: "dropship", purpose: "vendor_fulfillment_charge", originWarehouseId: 5 } as const;
+  const candidate = (assignmentId: number): RateBookAssignmentCandidate => ({
+    ...context, assignmentId, rateBookId: assignmentId, rateBookCode: `book-${assignmentId}`, zoneSetId: 1,
+  });
+
+  it.each([
+    ["no rate book", [] as RateBookAssignmentCandidate[]],
+    ["two warehouse rate books", [candidate(1), candidate(2)]],
+  ])("answers %s 409 permanent with its own code, never the reason sentence", (_name, candidates) => {
+    const selected = selectRateBookAssignment(candidates, context);
+    if (selected.ok) throw new Error("expected a refusal");
+    const answer = listingSettingWriteErrorAnswer(new DropshipError(`DROPSHIP_EBAY_FULFILLMENT_${selected.code}`,
+      "A unique active dropship fulfillment rate book is required.",
+      { storeConnectionId: 22, originWarehouseId: 5, reason: selected.message, retryable: false }));
+    expect(answer).toMatchObject({ status: 409, errorClass: "permanent", code: `DROPSHIP_EBAY_FULFILLMENT_${selected.code}` });
+    expect(answer.body.error.context).toEqual({ storeConnectionId: 22, retryable: false });
+  });
+});
+
 describe("publicListingSettingContext (the allow-list)", () => {
+  it("passes reason only as one of our enum words", () => {
+    expect(publicListingSettingContext({ reason: "store_text_limit" })).toEqual({ reason: "store_text_limit" });
+    expect(publicListingSettingContext({ reason: "needs_reauth" })).toEqual({ reason: "needs_reauth" });
+    // W7's stop-rule refusal (PR 9f): its textBytes is the text and the review's rows together.
+    expect(publicListingSettingContext({ reason: "price_check_rows", textBytes: 30_000_001 })).toEqual({ reason: "price_check_rows", textBytes: 30_000_001 });
+    expect(publicListingSettingContext({ reason: "eBay returned an empty category tree." })).toBeUndefined();
+    expect(publicListingSettingContext({ reason: "no active rate book is assigned to dropship/vendor_fulfillment_charge for warehouse 5" })).toBeUndefined();
+    expect(publicListingSettingContext({ reason: "x".repeat(65) })).toBeUndefined();
+    expect(publicListingSettingContext({ reason: 3 })).toBeUndefined();
+  });
+
   it("passes ids, counts, flags and enum words, and drops everything else", () => {
     expect(publicListingSettingContext({
       storeConnectionId: 22, productId: 7, categoryId: 3, productVariantId: 101, reviewId: "6f1b1d7e-6d0e-4d43-9a43-2f9d3c0b7c11",

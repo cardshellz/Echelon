@@ -21,6 +21,8 @@ const CODES_BY_STATUS: ReadonlyArray<readonly [number, readonly string[]]> = [
     // The three eBay providers' sign-in refusals, if a store loses its grant mid-request.
     "DROPSHIP_EBAY_LISTING_SETUP_PERMISSION_REQUIRED", "DROPSHIP_EBAY_STORE_CATEGORIES_PERMISSION_REQUIRED",
     "DROPSHIP_EBAY_CATEGORIES_PERMISSION_REQUIRED",
+    // eBay refused the store's grant for the read (the setup routes answer the first two 403).
+    "DROPSHIP_EBAY_LISTING_SETUP_ACCESS_DENIED", "DROPSHIP_EBAY_STORE_CATEGORIES_ACCESS_DENIED", "DROPSHIP_EBAY_CATEGORIES_ACCESS_DENIED",
   ]],
   [404, [
     "DROPSHIP_STORE_CONNECTION_REQUIRED", "DROPSHIP_LISTING_SETTINGS_PRODUCT_NOT_FOUND", "DROPSHIP_LISTING_SETTINGS_CATEGORY_NOT_FOUND",
@@ -30,6 +32,16 @@ const CODES_BY_STATUS: ReadonlyArray<readonly [number, readonly string[]]> = [
     "DROPSHIP_IDEMPOTENCY_CONFLICT", "DROPSHIP_PRODUCT_LISTING_SETTINGS_VERSION_CONFLICT",
     "DROPSHIP_CATEGORY_LISTING_SETTINGS_VERSION_CONFLICT", "DROPSHIP_LISTING_PRICE_VERSION_CONFLICT",
     "DROPSHIP_LISTING_PRICES_MOVED", "DROPSHIP_LISTING_SETTINGS_OLDER_RULES_PRESENT",
+    // The store was paused or disconnected while the eBay step ran, or has no token for it (the setup routes' 409s).
+    "DROPSHIP_STORE_CONNECTION_NOT_CONNECTED", "DROPSHIP_EBAY_LISTING_SETUP_ACCESS_TOKEN_REQUIRED",
+    // Card Shellz shipping cannot back a new shipping policy until the setup is fixed (the capability check, W2's 409s).
+    "DROPSHIP_EBAY_FULFILLMENT_MARKETPLACE_UNSUPPORTED", "DROPSHIP_EBAY_FULFILLMENT_SERVICES_REQUIRED",
+    "DROPSHIP_EBAY_FULFILLMENT_ROUTING_REQUIRED", "DROPSHIP_EBAY_FULFILLMENT_ROUTING_MISMATCH",
+    "DROPSHIP_EBAY_FULFILLMENT_WAREHOUSE_REQUIRED", "DROPSHIP_EBAY_FULFILLMENT_SLA_REQUIRED",
+    "DROPSHIP_EBAY_FULFILLMENT_RATE_TABLE_REQUIRED", "DROPSHIP_EBAY_FULFILLMENT_DESTINATION_COVERAGE_REQUIRED",
+    // Built from selectRateBookAssignment's failure code (`DROPSHIP_EBAY_FULFILLMENT_${code}`, the capability provider),
+    // so a literal grep misses them; the error-map test builds them the same way.
+    "DROPSHIP_EBAY_FULFILLMENT_NO_RATE_BOOK", "DROPSHIP_EBAY_FULFILLMENT_AMBIGUOUS_RATE_BOOK",
   ]],
   [413, ["DROPSHIP_REQUEST_TOO_LARGE"]],
   [422, [
@@ -51,7 +63,7 @@ const CODES_BY_STATUS: ReadonlyArray<readonly [number, readonly string[]]> = [
     "DROPSHIP_EBAY_STORE_CATEGORIES_UNAVAILABLE", "DROPSHIP_EBAY_STORE_CATEGORIES_INVALID_RESPONSE",
   ]],
   [503, [
-    "DROPSHIP_LISTING_SETTINGS_BUSY",
+    "DROPSHIP_LISTING_SETTINGS_BUSY", "DROPSHIP_EBAY_FULFILLMENT_ROUTING_UNAVAILABLE",
     "DROPSHIP_EBAY_TOKEN_REFRESH_FAILED", "DROPSHIP_EBAY_REFRESH_LOCK_UNAVAILABLE", "DROPSHIP_CREDENTIAL_CHANGED",
     "DROPSHIP_EBAY_TOKEN_REFRESH_INVALID_RESPONSE", "DROPSHIP_EBAY_OAUTH_NOT_CONFIGURED",
   ]],
@@ -185,9 +197,16 @@ function retryAfterSeconds(value: unknown): number {
 /** Scalars that may leave the server: ids, counts, flags and our own enum words. */
 const SCALAR_KEYS = [
   "storeConnectionId", "productId", "categoryId", "productVariantId", "reviewId", "conflictCount", "sizeCount", "productCount",
-  "reason", "pricingGroups", "contentGroups", "ebayCategoryRules", "textBytes", "maxTextBytes", "releaseCount", "maxReleases",
+  "pricingGroups", "contentGroups", "ebayCategoryRules", "textBytes", "maxTextBytes", "releaseCount", "maxReleases",
   "retryable", "classification",
 ] as const;
+/**
+ * `reason` passes only as one of our own enum words (plan 3.3: "our enum words
+ * only"). Some providers put a sentence there: the capability provider's rate
+ * book refusal names the pricing channel and the warehouse id, and the
+ * taxonomy's invalid-response reasons are sentences. Those stay out of the body.
+ */
+const REASON_WORD = /^[a-z][a-z0-9_]{0,63}$/;
 /** Lists of field names. */
 const NAME_LIST_KEYS = ["fields", "invalidFields"] as const;
 const CONFLICT_KEYS = ["productVariantId", "productId", "categoryId", "expectedRevisionId", "actualRevisionId"] as const;
@@ -200,6 +219,7 @@ export function publicListingSettingContext(context: Record<string, unknown> | u
   for (const key of SCALAR_KEYS) {
     if (isScalar(context[key])) safe[key] = context[key];
   }
+  if (typeof context.reason === "string" && REASON_WORD.test(context.reason)) safe.reason = context.reason;
   for (const key of NAME_LIST_KEYS) {
     const names = context[key];
     if (Array.isArray(names)) safe[key] = names.filter((name): name is string => typeof name === "string").slice(0, MAX_LISTED_ITEMS);

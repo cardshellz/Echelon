@@ -6,6 +6,7 @@ import { describe, expect, it } from "vitest";
 
 import APInvoiceDetail from "../../APInvoiceDetail";
 import { useProcurementNavigation } from "../../../hooks/use-procurement-navigation";
+import { AuthProvider } from "../../../lib/auth";
 
 const invoice = {
   id: 71,
@@ -71,7 +72,9 @@ function renderInvoice(href: string, state: "loaded" | "loading" | "error" | "mi
     });
   }
   try {
-    return renderAt(href, createElement(QueryClientProvider, { client: queryClient }, createElement(APInvoiceDetail)));
+    return renderAt(href, createElement(QueryClientProvider, { client: queryClient },
+      createElement(AuthProvider, { children: createElement(APInvoiceDetail) }),
+    ));
   } finally {
     queryClient.clear();
   }

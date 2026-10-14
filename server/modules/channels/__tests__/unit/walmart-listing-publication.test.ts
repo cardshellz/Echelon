@@ -22,9 +22,9 @@ import {
   validProductIdentifier,
 } from "../../adapters/walmart/walmart-listing-schema";
 import {
-  runWithListingSetupZeroAdmission,
-  type ListingSetupZeroIntent,
-} from "../../../inventory-planning/application/listing-setup-zero-intent";
+  runWithListingSetupAdmission,
+  type ListingSetupIntent,
+} from "../../../inventory-planning/application/listing-setup-intent";
 // Official recommended schemas, 2026-09-27, with documentation annotations removed.
 // MP_ITEM is restricted to its real Trading Card Sleeves & Holders branch; its
 // validation keywords, enums, required fields and conditionals are unchanged.
@@ -99,7 +99,7 @@ const draft = () =>
       },
     },
   });
-const intent = (): ListingSetupZeroIntent => ({
+const intent = (): ListingSetupIntent => ({
   operationId,
   publicationTargetId: 3,
   expectedTargetRevision: "1",
@@ -147,6 +147,7 @@ function setup() {
     taxonomy: vi.fn(),
   };
   const channels = {
+    assertListingNotStopped: vi.fn(async () => {}),
     withListingWrites: vi.fn(async (_account: unknown, _skus: readonly string[], work: () => Promise<unknown>) => work()),
     connection: vi.fn().mockResolvedValue({
       channel_id: 104,
@@ -181,17 +182,17 @@ describe("Walmart listing provider", () => {
       Orderable: { sku: catalog.sku, price: 12.99, ShippingWeight: 0.1 },
       Visible: { [type]: { productName: catalog.title, brand: catalog.brand, mainImageUrl: catalog.images[0], pieceCount: 100 } },
     });
-    expect(channels.withListingWrites).toHaveBeenCalledWith(account, [catalog.sku], expect.any(Function));
+    expect(channels.assertListingNotStopped).toHaveBeenCalledWith(account, catalog.sku);
     expect(api.submitFeed).not.toHaveBeenCalled();
   });
   it("refuses a queued creation after a durable publication stop, without sending a feed", async () => {
     const { provider, api, channels } = setup();
     const item = await provider.prepare(account, { catalog, draft: draft(), priceCents: 1299 });
     channels.withListingWrites.mockRejectedValue(new WalmartApiError("LISTING_PUBLICATION_STOPPED", "Stopped", false));
-    await expect(runWithListingSetupZeroAdmission(intent(), () => provider.submit(account, {
-      operationId, correlationId, items: [item], zeroStockAdmission: intent(), beforeSubmit: async () => {},
+    await expect(runWithListingSetupAdmission(intent(), () => provider.submit(account, {
+      operationId, correlationId, items: [item], stockAdmission: intent(), beforeSubmit: async () => {},
     }))).rejects.toMatchObject({ code: "LISTING_PUBLICATION_STOPPED", effect: "not_sent" });
-    expect(channels.withListingWrites).toHaveBeenCalledWith(account, [item.sku], expect.any(Function));
+    expect(channels.withListingWrites).toHaveBeenCalledWith(account, [item.sku], expect.any(Function), intent());
     expect(api.submitFeed).not.toHaveBeenCalled();
   });
   it("includes an uploaded catalog photo as the third secondary image and preserves explicit listing overrides", async () => {
@@ -263,8 +264,8 @@ describe("Walmart listing provider", () => {
     const offer = item.payload.Orderable as Record<string, unknown>;
     offer.specProductType = selector;
     const beforeSubmit = vi.fn();
-    await expect(runWithListingSetupZeroAdmission(intent(), () => provider.submit(account, {
-      operationId, correlationId, items: [item], zeroStockAdmission: intent(), beforeSubmit,
+    await expect(runWithListingSetupAdmission(intent(), () => provider.submit(account, {
+      operationId, correlationId, items: [item], stockAdmission: intent(), beforeSubmit,
     }))).rejects.toMatchObject({ code: "WALMART_LISTING_REVIEW_STALE", effect: "not_sent" });
     expect(api.submitFeed).not.toHaveBeenCalled();
   });
@@ -287,8 +288,8 @@ describe("Walmart listing provider", () => {
     expect(item.issues).toEqual([]);
     const store = { start: vi.fn().mockResolvedValue("request-1"), finish: vi.fn().mockResolvedValue(undefined) };
     const collector = new QuantityProviderEvidenceCollector(store, () => new Date("2026-10-05T12:00:00Z"));
-    await collector.run(() => runWithListingSetupZeroAdmission(intent(), () => provider.submit(account, {
-      operationId, correlationId, items: [item], zeroStockAdmission: intent(), beforeSubmit: async () => {},
+    await collector.run(() => runWithListingSetupAdmission(intent(), () => provider.submit(account, {
+      operationId, correlationId, items: [item], stockAdmission: intent(), beforeSubmit: async () => {},
     })));
     collector.assertSingleCompletedRequest("POST", ["/v3/feeds?feedType=MP_ITEM"]);
     expect(fetchMock).toHaveBeenCalledTimes(5);
@@ -410,7 +411,7 @@ describe("Walmart listing provider", () => {
   });
 
   it("matches an exact check-digit-verified identifier and uses the match schema", async () => {
-    const { provider } = setup();
+    const { provider, api } = setup();
     const item = draft();
     item.method = "match";
     item.productType = "";
@@ -426,6 +427,13 @@ describe("Walmart listing provider", () => {
       productIdentifiers: { productIdType: "UPC", productId: "036000291452" },
     });
     expect(prepared.payload.Item).not.toHaveProperty("specProductType");
+    const approved = { ...intent(), items: [{ ...intent().items[0], quantity: 23 }] };
+    await runWithListingSetupAdmission(approved, () => provider.submit(account, {
+      operationId, correlationId, items: [prepared], stockAdmission: approved, beforeSubmit: async () => {},
+    }));
+    expect(api.submitFeed).toHaveBeenCalledWith("MP_ITEM_MATCH", expect.objectContaining({ MPItem: [expect.objectContaining({
+      Item: expect.objectContaining({ inventory: [{ quantity: 23, fulfillmentCenterID: account.scopeId }] }),
+    })] }), correlationId, approved);
   });
 
   it("blocks a provider match for another identifier", async () => {
@@ -472,18 +480,18 @@ describe("Walmart listing provider", () => {
         operationId,
         correlationId,
         items: [item],
-        zeroStockAdmission: intent(),
+        stockAdmission: intent(),
         beforeSubmit: async () => {},
       }),
     ).rejects.toMatchObject({ code: "PUBLICATION_SETUP_ADMISSION_REQUIRED" });
     expect(api.submitFeed).not.toHaveBeenCalled();
     await expect(
-      runWithListingSetupZeroAdmission(intent(), () =>
+      runWithListingSetupAdmission(intent(), () =>
         provider.submit(account, {
           operationId,
           correlationId,
           items: [item],
-          zeroStockAdmission: intent(),
+          stockAdmission: intent(),
           beforeSubmit: async () => {},
         }),
       ),
@@ -491,7 +499,7 @@ describe("Walmart listing provider", () => {
     expect(api.submitFeed).toHaveBeenCalledTimes(1);
   });
 
-  it("rejects positive stock or another fulfillment node even inside an admitted batch", async () => {
+  it("uses the current admitted quantity instead of the saved review quantity without mutating the review", async () => {
     const { provider, api } = setup();
     const item = await provider.prepare(account, {
       catalog,
@@ -501,18 +509,27 @@ describe("Walmart listing provider", () => {
     (item.payload.Orderable as Record<string, unknown>).inventory = [
       { quantity: 1, fulfillmentCenterID: "12345" },
     ];
+    const approved = { ...intent(), items: [{ ...intent().items[0], quantity: 17 }] };
     await expect(
-      runWithListingSetupZeroAdmission(intent(), () =>
+      runWithListingSetupAdmission(approved, () =>
         provider.submit(account, {
           operationId,
           correlationId,
           items: [item],
-          zeroStockAdmission: intent(),
+          stockAdmission: approved,
           beforeSubmit: async () => {},
         }),
       ),
-    ).rejects.toMatchObject({ code: "WALMART_LISTING_STOCK_INVALID" });
-    expect(api.submitFeed).not.toHaveBeenCalled();
+    ).resolves.toEqual({ submissionId: "feed@US" });
+    expect(api.submitFeed).toHaveBeenCalledWith("MP_ITEM", expect.objectContaining({ MPItem: [expect.objectContaining({
+      Orderable: expect.objectContaining({ inventory: [{ quantity: 17, fulfillmentCenterID: account.scopeId }] }),
+    })] }), correlationId, approved);
+    expect((item.payload.Orderable as Record<string, unknown>).inventory).toEqual([{ quantity: 1, fulfillmentCenterID: account.scopeId }]);
+    (item.payload.Orderable as Record<string, unknown>).inventory = [{ quantity: 17, fulfillmentCenterID: "wrong-node" }];
+    await expect(runWithListingSetupAdmission(approved, () => provider.submit(account, {
+      operationId, correlationId, items: [item], stockAdmission: approved, beforeSubmit: async () => {},
+    }))).rejects.toMatchObject({ code: "WALMART_LISTING_STOCK_INVALID" });
+    expect(api.submitFeed).toHaveBeenCalledTimes(1);
   });
 
   it("does not treat processed feeds with pending items as completed listings", async () => {
@@ -584,12 +601,12 @@ describe("Walmart listing provider", () => {
         Object.assign(new Error("Lease lost"), { code: "LISTING_LEASE_LOST" }),
       );
     await expect(
-      runWithListingSetupZeroAdmission(intent(), () =>
+      runWithListingSetupAdmission(intent(), () =>
         provider.submit(account, {
           operationId,
           correlationId,
           items: [item],
-          zeroStockAdmission: intent(),
+          stockAdmission: intent(),
           beforeSubmit,
         }),
       ),
@@ -624,12 +641,12 @@ describe("Walmart listing provider", () => {
         ),
       );
       await expect(
-        runWithListingSetupZeroAdmission(intent(), () =>
+        runWithListingSetupAdmission(intent(), () =>
           provider.submit(account, {
             operationId,
             correlationId,
             items: [item],
-            zeroStockAdmission: intent(),
+            stockAdmission: intent(),
             beforeSubmit: async () => {},
           }),
         ),
@@ -652,12 +669,12 @@ describe("Walmart listing provider", () => {
       new WalmartApiError("WALMART_HTTP_429", "No recorded receipt", true, 429),
     );
     await expect(
-      runWithListingSetupZeroAdmission(intent(), () =>
+      runWithListingSetupAdmission(intent(), () =>
         provider.submit(account, {
           operationId,
           correlationId,
           items: [item],
-          zeroStockAdmission: intent(),
+          stockAdmission: intent(),
           beforeSubmit: async () => {},
         }),
       ),
@@ -711,12 +728,12 @@ describe("Walmart listing provider", () => {
     });
     api.observe.mockResolvedValue({ sku: catalog.sku });
     await expect(
-      runWithListingSetupZeroAdmission(intent(), () =>
+      runWithListingSetupAdmission(intent(), () =>
         provider.submit(account, {
           operationId,
           correlationId,
           items: [item],
-          zeroStockAdmission: intent(),
+          stockAdmission: intent(),
           beforeSubmit: async () => {},
         }),
       ),

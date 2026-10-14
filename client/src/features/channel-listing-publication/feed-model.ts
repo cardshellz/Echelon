@@ -14,6 +14,7 @@ export interface ListingFeedRow {
   remote: ChannelCatalogRow | null;
   operation: { id: string; item: ListingOperationItem } | null;
   issue: string | null;
+  missingOnWalmart?: boolean;
 }
 
 export interface ListingFeedInput {

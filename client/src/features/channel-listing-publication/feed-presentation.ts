@@ -37,6 +37,7 @@ export function listingStatus(
       label: row.draft.recreateFromOperationId ? "Recreate draft" : "Draft",
       tone: "neutral",
     };
+  if (row.missingOnWalmart) return { label: "Missing on Walmart", tone: "attention" };
   if (row.remote) {
     const published = row.remote.publishedStatus.toUpperCase();
     const lifecycle = row.remote.lifecycleStatus.toUpperCase();
@@ -77,6 +78,8 @@ export function listingPrice(row: ListingFeedRow): {
       cents: row.draft.priceOverrideCents ?? row.catalog?.priceCents ?? null,
       source: "Draft",
     };
+  if (row.missingOnWalmart && row.operation)
+    return { cents: row.operation.item.priceCents, source: "Submitted" };
   if (row.remote?.priceCents != null)
     return { cents: row.remote.priceCents, source: "Walmart" };
   if (row.operation)

@@ -26,7 +26,7 @@ import { createPurchasingService, PurchasingError } from "../../purchasing.servi
 //   3.  transitionFinancial — valid transitions accepted
 //   4.  transitionFinancial — invalid transitions rejected
 //   5.  recomputeFinancialAggregates — delegates to the AP-owned audited writer
-//   8.  onReceivingOrderClosed — auto-match by product_id when single open line
+//   8.  onReceivingOrderClosed — rejects unpersisted source even with one matching line
 //   9.  onReceivingOrderClosed — leaves unlinked when zero matching lines
 //   10. onReceivingOrderClosed — leaves unlinked when multiple open lines (ambiguous)
 //   11. Legacy status field stays in sync when transitionPhysical fires (sent)
@@ -557,7 +557,7 @@ describe("recomputeFinancialAggregates", () => {
   });
 });
 
-describe("onReceivingOrderClosed — auto-match", () => {
+describe("onReceivingOrderClosed — persisted source reconciliation", () => {
   let svc: ReturnType<typeof createPurchasingService>;
   let storage: ReturnType<typeof buildMockStorage>;
 
@@ -567,7 +567,7 @@ describe("onReceivingOrderClosed — auto-match", () => {
     svc = createPurchasingService(buildMockDb(), storage);
   });
 
-  it("(8) auto-matches unlinked receiving line to single open PO line by product_id", async () => {
+  it("(8) rejects unpersisted PO source even when a unique product could match", async () => {
     const productId = 42;
     const poLine = {
       id: 100,
@@ -606,29 +606,11 @@ describe("onReceivingOrderClosed — auto-match", () => {
     storage.getProductVariantById.mockResolvedValue({ id: 5, productId, unitsPerVariant: 1 });
 
     const receivingLines = [{ receivingLineId: 201, receivedQty: 3, unitCost: 0, purchaseOrderLineId: undefined }];
-    await svc.onReceivingOrderClosed(99, receivingLines);
-
-    expect(storage.reconcilePoReceiptLine).toHaveBeenCalledOnce();
-    expect(storage.reconcilePoReceiptLine).toHaveBeenCalledWith(
-      expect.objectContaining({
-        purchaseOrderLineId: 100,
-        receivingLineId: 201,
-        lineUpdates: expect.objectContaining({
-          receivedQty: 3,
-          status: "partially_received",
-        }),
-        receipt: expect.objectContaining({
-          purchaseOrderId: 1,
-          purchaseOrderLineId: 100,
-          receivingOrderId: 99,
-          receivingLineId: 201,
-          qtyReceived: 3,
-          actualUnitCostCents: 0,
-          varianceCents: -500,
-        }),
-      }),
-      expect.any(Object),
-    );
+    await expect(svc.onReceivingOrderClosed(99, receivingLines)).rejects.toMatchObject({ statusCode: 409,
+      details: { reconciliation: { skippedLines: 1, autoMatchedLines: 0,
+        issues: [expect.objectContaining({ receivingLineId: 201, reason: "unlinked_receiving_line" })] } } });
+    expect(storage.reconcilePoReceiptLine).not.toHaveBeenCalled();
+    expect(storage.updatePurchaseOrder).not.toHaveBeenCalled();
     expect(receivingLines[0].purchaseOrderLineId).toBeUndefined();
   });
 

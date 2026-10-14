@@ -34,6 +34,7 @@ import {
   type DropshipEbayManagedLocationProvider,
 } from "./dropship-ebay-managed-location-service";
 import type { DropshipEbayStoreCategory } from "./dropship-ebay-store-category-service";
+import type { DropshipStoreListingConfig } from "./dropship-marketplace-listing-provider";
 import type { DropshipLogger } from "./dropship-ports";
 import {
   dropshipListingConfigIdempotencyKeySchema,
@@ -1010,7 +1011,12 @@ function sortJsonValue(value: unknown): unknown {
     }, {});
 }
 
-function resolveMarketplaceId(config: DropshipStoreListingConfigRecord | null): string {
+/**
+ * The store's eBay marketplace from its listing config, else EBAY_US.
+ * Exported for the listing-settings preflight (plan PR 9, 6.5 step 2), which
+ * reads the base config without the record's revision fields.
+ */
+export function resolveMarketplaceId(config: Pick<DropshipStoreListingConfig, "marketplaceConfig"> | null): string {
   const configured = config ? normalizedString(config.marketplaceConfig.marketplaceId) : null;
   return configured ?? DROPSHIP_DEFAULT_EBAY_MARKETPLACE_ID;
 }

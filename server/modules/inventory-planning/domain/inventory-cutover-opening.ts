@@ -182,7 +182,7 @@ export function evaluateCutoverOpening(rawEvidence: unknown, input: OpeningVerif
           if (!cost || selectedCosts.has(costId) || cost.orderId !== owner.orderId || cost.orderItemId !== item.id
             || cost.inventoryLotId !== lot.id || cost.productVariantId !== lot.productVariantId
             || BigInt(cost.quantity) <= BigInt(0) || BigInt(cost.unitCostMills) < BigInt(0)
-            || BigInt(cost.totalCostMills) !== BigInt(cost.quantity)*BigInt(cost.unitCostMills)) {
+            || !recordedCostTotalIsValid(cost)) {
             block("OPENING_PICK_COST_INVALID", `cost:${costId}`, "Current picked stock requires distinct existing original order/item/lot cost rows with exact quantities and amounts."); continue;
           }
           selectedCosts.add(costId); originalCosts.push(cost);
@@ -260,3 +260,4 @@ export function evaluateCutoverOpening(rawEvidence: unknown, input: OpeningVerif
 }
 
 function compare(left: string, right: string): number { return left < right ? -1 : left > right ? 1 : 0; }
+import { recordedCostTotalIsValid } from "@shared/utils/recorded-cost-total";

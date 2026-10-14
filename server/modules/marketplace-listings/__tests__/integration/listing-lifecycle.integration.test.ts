@@ -23,7 +23,7 @@ const disposable = process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true";
   beforeAll(async () => {
     database = await createInventoryCutoverTestDatabase(url, disposable, `CREATE SCHEMA channels; CREATE SCHEMA catalog;
       CREATE TABLE channels.channels(id integer PRIMARY KEY); CREATE TABLE catalog.product_variants(id integer PRIMARY KEY);`);
-    for (const file of ["0707_channel_listing_publication.sql", "0724_channel_listing_updates.sql", "259_channel_listing_lifecycle.sql"])
+    for (const file of ["0707_channel_listing_publication.sql", "0724_channel_listing_updates.sql", "259_channel_listing_lifecycle.sql", "0748_walmart_listing_presence.sql"])
       await database.pool.query(readFileSync(resolve("migrations", file), "utf8"));
     repository = new PostgresListingLifecycleRepository(database.pool);
   });

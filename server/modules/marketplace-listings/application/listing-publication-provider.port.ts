@@ -8,7 +8,7 @@ import type {
 } from "@shared/types/channel-listing-publication";
 import type { ChannelCatalogItem } from "@shared/types/channel-catalog";
 import { ChannelProviderError } from "../../channels/channel-provider.error";
-import type { ListingSetupZeroIntent } from "../../inventory-planning/application/listing-setup-zero-intent";
+import type { ListingSetupIntent } from "../../inventory-planning/application/listing-setup-intent";
 
 /** Only adapter evidence may distinguish a terminal rejection from an unknown write. */
 export class ListingSubmissionError extends ChannelProviderError {
@@ -67,7 +67,7 @@ export interface ListingPublicationProvider {
       operationId: string;
       correlationId: string;
       items: PreparedListingItem[];
-      zeroStockAdmission: Readonly<ListingSetupZeroIntent>;
+      stockAdmission: Readonly<ListingSetupIntent>;
       /** Recheck the durable worker lease immediately before the HTTP write. */
       beforeSubmit(): Promise<void>;
     },

@@ -1,4 +1,6 @@
 import { deriveInvoiceFinancialState } from "./domain/invoice-financial-state";
+import { invoiceEditCapability } from "./domain/ap-invoice-edit-policy";
+import { classifyApPaymentState, COMPLETED_AP_PAYMENT_STATUS, isRecordableApPaymentStatus } from "./domain/ap-payment-state";
 import { summarizeInvoiceCostReconciliation } from "./domain/invoice-cost-reconciliation-summary";
 import { costFingerprint, costInteger, lockInventoryCostGraph } from "../inventory/infrastructure/cost-evidence.repository";
 import { reconcilePurchaseCostEvidence } from "./purchase-cost-application.service";
@@ -549,6 +551,8 @@ async function lockEditableInvoice(
       currency: vendorInvoices.currency,
       status: vendorInvoices.status,
       paidAmountCents: vendorInvoices.paidAmountCents,
+      approvedAt: vendorInvoices.approvedAt,
+      approvedBy: vendorInvoices.approvedBy,
     })
     .from(vendorInvoices)
     .where(eq(vendorInvoices.id, invoiceId))
@@ -557,16 +561,17 @@ async function lockEditableInvoice(
   if (!invoice) {
     throw new ApLedgerError("Invoice not found", 404, { code: "AP_INVOICE_NOT_FOUND" });
   }
-  if (!["received", "disputed"].includes(invoice.status)) {
-    throw new ApLedgerError(
-      "Only received or disputed invoices can be edited",
-      409,
-      {
-        code: "AP_INVOICE_IMMUTABLE",
-        invoiceId,
-        status: invoice.status,
-      },
-    );
+  const headerCapability = invoiceEditCapability({ ...invoice, hasPaymentHistory: false });
+  if (!headerCapability.allowed) {
+    throw new ApLedgerError(headerCapability.reason, 409, { code: headerCapability.code, invoiceId, status: invoice.status });
+  }
+  // The cost-graph lock and header lock serialize this check with payment,
+  // approval, dispute and reviewed-correction owners. Voids retain history.
+  const [paymentHistory] = await client.select({ id: apPaymentAllocations.id })
+    .from(apPaymentAllocations).where(eq(apPaymentAllocations.vendorInvoiceId, invoiceId)).limit(1);
+  const capability = invoiceEditCapability({ ...invoice, hasPaymentHistory: !!paymentHistory });
+  if (!capability.allowed) {
+    throw new ApLedgerError(capability.reason, 409, { code: capability.code, invoiceId, status: invoice.status });
   }
 
   return invoice;
@@ -930,17 +935,22 @@ async function recalculateInvoiceBalance(invoiceId: number, client: ApLedgerDbCl
 
   if (!invoice) return;
 
-  // Sum all non-voided payment allocations
+  // Only completed payments settle invoices. Unknown legacy states block
+  // recalculation so a command cannot silently rewrite historical balances.
   const allocResult = await client
-    .select({ total: sql<number>`COALESCE(SUM(${apPaymentAllocations.appliedAmountCents}), 0)` })
+    .select({
+      total: sql<number>`COALESCE(SUM(CASE WHEN ${apPayments.status} = ${COMPLETED_AP_PAYMENT_STATUS} THEN ${apPaymentAllocations.appliedAmountCents} ELSE 0 END), 0)`,
+      reviewRequiredCount: sql<number>`COUNT(*) FILTER (WHERE ${apPayments.status} NOT IN ('completed', 'voided'))`,
+    })
     .from(apPaymentAllocations)
     .innerJoin(apPayments, eq(apPaymentAllocations.apPaymentId, apPayments.id))
-    .where(
-      and(
-        eq(apPaymentAllocations.vendorInvoiceId, invoiceId),
-        ne(apPayments.status, "voided"),
-      )
-    );
+    .where(eq(apPaymentAllocations.vendorInvoiceId, invoiceId));
+
+  if (Number(allocResult[0]?.reviewRequiredCount ?? 0) > 0) {
+    throw new ApLedgerError("This invoice has a payment with an unsupported historical status. Review the payment evidence before changing its balance.", 409, {
+      code: "AP_PAYMENT_STATUS_REVIEW_REQUIRED", invoiceId,
+    });
+  }
 
   const paidAmount = databaseMoneyToBigInt(
     allocResult[0]?.total ?? 0,
@@ -1174,7 +1184,9 @@ export async function getInvoiceById(id: number) {
     .where(eq(vendorInvoiceAttachments.vendorInvoiceId, id))
     .orderBy(desc(vendorInvoiceAttachments.uploadedAt));
 
-  return { ...invoice, poLinks, payments, lines: lines.map((line) => ({ ...line, costReviewVersion: invoiceCostReviewVersion(line) })), attachments };
+  return { ...invoice, capabilities: { edit: invoiceEditCapability({ ...invoice, hasPaymentHistory: payments.length > 0 }) },
+    paymentReviewRequired: payments.some((payment) => classifyApPaymentState(payment.paymentStatus) === "review_required"),
+    poLinks, payments, lines: lines.map((line) => ({ ...line, costReviewVersion: invoiceCostReviewVersion(line) })), attachments };
 }
 
 export async function listInvoices(filters: {
@@ -1752,7 +1764,7 @@ export async function getInvoicesForPo(purchaseOrderId: number) {
  *   vendor_invoice_po_links → vendor_invoices → ap_payment_allocations → ap_payments
  *
  * Columns: paymentDate, paymentMethod, appliedAmountCents, invoiceNumber, referenceNumber
- * Only non-voided payments are returned.
+ * Only completed settlements are returned. The invoice/payment detail retains full history.
  */
 export async function getPaymentsForPo(purchaseOrderId: number) {
   // Step 1: find all vendor invoice IDs linked to this PO
@@ -1765,7 +1777,7 @@ export async function getPaymentsForPo(purchaseOrderId: number) {
 
   const invoiceIds = invoiceLinks.map((l) => l.vendorInvoiceId);
 
-  // Step 2: fetch all non-voided payment allocations for those invoices
+  // Step 2: fetch completed payment allocations for those invoices
   const rows = await db
     .select({
       allocationId: apPaymentAllocations.id,
@@ -1785,7 +1797,7 @@ export async function getPaymentsForPo(purchaseOrderId: number) {
     .where(
       and(
         inArray(apPaymentAllocations.vendorInvoiceId, invoiceIds),
-        ne(apPayments.status, "voided"),
+        eq(apPayments.status, COMPLETED_AP_PAYMENT_STATUS),
       ),
     )
     .orderBy(desc(apPayments.paymentDate));
@@ -1801,6 +1813,11 @@ type PaymentMutationResult<T> = {
 };
 
 function validateRecordPaymentInput(data: RecordApPaymentInput): void {
+  if (!isRecordableApPaymentStatus(data.status)) {
+    throw new ApLedgerError("Record payment only accepts completed payments. Scheduled, returned or other payment states require their own workflow.", 400, {
+      code: "AP_PAYMENT_STATUS_INVALID",
+    });
+  }
   requireUsdFinancialDocumentCurrency(data.currency, "currency");
   if (!Number.isSafeInteger(data.vendorId) || data.vendorId <= 0) {
     throw new ApLedgerError("vendorId must be a positive integer", 400, {
@@ -1940,7 +1957,7 @@ async function recordPaymentInTransaction(
         bankAccountLabel: data.bankAccountLabel,
         totalAmountCents: data.totalAmountCents,
         currency: paymentCurrency,
-        status: data.status ?? "completed",
+        status: COMPLETED_AP_PAYMENT_STATUS,
         notes: data.notes,
         createdBy: data.createdBy,
         updatedBy: data.createdBy,
@@ -2078,6 +2095,11 @@ async function voidPaymentInTransaction(
     .for("update");
   if (!payment) throw new ApLedgerError("Payment not found", 404);
   if (payment.status === "voided") throw new ApLedgerError("Payment is already voided", 409);
+  if (classifyApPaymentState(payment.status) === "review_required") {
+    throw new ApLedgerError("This payment has an unsupported historical status. Review its evidence before changing it.", 409, {
+      code: "AP_PAYMENT_STATUS_REVIEW_REQUIRED", paymentId: id,
+    });
+  }
 
   await tx
     .update(apPayments)
@@ -2245,7 +2267,7 @@ export async function getApSummary(options: { now?: Date } = {}) {
       code: "AP_SUMMARY_CLOCK_INVALID",
     });
   }
-  const openStatuses = ["received", "approved", "partially_paid"];
+  const openStatuses = ["received", "approved", "partially_paid", "disputed"];
 
   const allOpen = await db
     .select({
@@ -2263,6 +2285,8 @@ export async function getApSummary(options: { now?: Date } = {}) {
   let totalOutstanding = BigInt(0);
   let overdue = BigInt(0);
   let dueSoon = BigInt(0);
+  let disputedOutstanding = BigInt(0);
+  let disputedInvoiceCount = 0;
 
   const agingBuckets = {
     current: BigInt(0),
@@ -2289,6 +2313,10 @@ export async function getApSummary(options: { now?: Date } = {}) {
       `openInvoices[${index}].balanceCents`,
     );
     totalOutstanding += balance;
+    if (inv.status === "disputed") {
+      disputedOutstanding += balance;
+      disputedInvoiceCount += 1;
+    }
 
     if (inv.dueDate && inv.dueDate < in7Days) dueSoon += balance;
 
@@ -2323,10 +2351,10 @@ export async function getApSummary(options: { now?: Date } = {}) {
   const [paidThisMonthResult, paidAllTimeResult] = await Promise.all([
     db.select({ total: sql<number>`COALESCE(SUM(${apPayments.totalAmountCents}), 0)` })
       .from(apPayments)
-      .where(and(eq(apPayments.status, "completed"), gte(apPayments.paymentDate, startOfMonth))),
+      .where(and(eq(apPayments.status, COMPLETED_AP_PAYMENT_STATUS), gte(apPayments.paymentDate, startOfMonth))),
     db.select({ total: sql<number>`COALESCE(SUM(${apPayments.totalAmountCents}), 0)` })
       .from(apPayments)
-      .where(eq(apPayments.status, "completed")),
+      .where(eq(apPayments.status, COMPLETED_AP_PAYMENT_STATUS)),
   ]);
 
   const paidThisMonthCents = bigintMoneyToNumber(
@@ -2375,6 +2403,8 @@ export async function getApSummary(options: { now?: Date } = {}) {
 
   return {
     totalOutstandingCents: bigintMoneyToNumber(totalOutstanding, "totalOutstandingCents"),
+    disputedOutstandingCents: bigintMoneyToNumber(disputedOutstanding, "disputedOutstandingCents"),
+    disputedInvoiceCount,
     overdueCents: bigintMoneyToNumber(overdue, "overdueCents"),
     dueSoonCents: bigintMoneyToNumber(dueSoon, "dueSoonCents"),
     paidThisMonthCents,

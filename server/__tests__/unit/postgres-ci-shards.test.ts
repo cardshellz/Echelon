@@ -77,6 +77,8 @@ describe("PostgreSQL CI coverage and isolation", () => {
       "server/modules/inventory-planning/__tests__/integration/inventory-opening-capture.integration.test.ts",
       "server/modules/inventory/__tests__/integration/cost-report-reads.integration.test.ts",
       "server/modules/procurement/__tests__/integration/shipment-purchase-orders.integration.test.ts",
+      "server/modules/procurement/__tests__/integration/receiving-close-integrity.integration.test.ts",
+      "server/modules/procurement/__tests__/integration/receiving-audit-immutability.integration.test.ts",
       "server/modules/procurement/__tests__/integration/procurement-rfq-controlled-acceptance.integration.test.ts",
       "server/modules/procurement/__tests__/integration/procurement-flow-cost-controlled-acceptance.integration.test.ts",
       "server/modules/procurement/__tests__/integration/procurement-payment-controlled-acceptance.integration.test.ts",
@@ -137,6 +139,7 @@ describe("PostgreSQL CI coverage and isolation", () => {
       "server/modules/dropship/__tests__/integration/dropship-listing-settings.integration.test.ts",
       "server/modules/dropship/__tests__/integration/dropship-catalog-retail-price.integration.test.ts",
       "server/modules/procurement/__tests__/integration/invoice-po-quantities.integration.test.ts",
+      "server/modules/procurement/__tests__/integration/ap-financial-safeguards.integration.test.ts",
       "server/modules/dropship/__tests__/integration/dropship-listing-config-revision.integration.test.ts",
       "server/modules/channels/__tests__/integration/ebay-listing-mapping-repair.integration.test.ts",
       "server/modules/channels/__tests__/integration/ebay-publication-stock.integration.test.ts",
@@ -145,6 +148,7 @@ describe("PostgreSQL CI coverage and isolation", () => {
       "server/modules/dropship/__tests__/integration/dropship-ebay-category-rules.integration.test.ts",
       "server/modules/procurement/__tests__/integration/supplier-po-document.integration.test.ts",
       "server/modules/marketplace-listings/__tests__/integration/listing-lifecycle.integration.test.ts",
+      "server/modules/marketplace-listings/__tests__/integration/listing-presence.integration.test.ts",
       "server/modules/dropship/__tests__/integration/dropship-listing-setting-writes.integration.test.ts",
     ];
     const retiredInvoiceSuite = "server/modules/inventory/__tests__/integration/invoice-variance-cogs.integration.test.ts";

@@ -965,6 +965,7 @@ describe("PostgresInventoryAvailabilityClaimRepository", () => {
         return {
           rows: [{
             id: "31",
+            order_item_cost_id: 301,
             claim_resource_id: "12",
             claim_lot_allocation_id: "21",
             inventory_lot_id: 51,

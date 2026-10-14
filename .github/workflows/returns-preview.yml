@@ -13,8 +13,21 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  preflight:
+    name: Returns migration preflight
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Validate migration identities before dependency setup
+        run: node scripts/migrations/check-migrations.mjs --ci
+
   browser-shard:
     name: Returns preview browser journeys (${{ matrix.shard }}/4)
+    needs: preflight
     runs-on: ubuntu-latest
     timeout-minutes: 15
     strategy:
@@ -43,7 +56,7 @@ jobs:
 
   browser:
     name: Returns preview browser journeys
-    needs: [browser-shard]
+    needs: [preflight, browser-shard]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -52,4 +65,4 @@ jobs:
       - name: Require every Returns shard
         env:
           CI_NEEDS: ${{ toJSON(needs) }}
-        run: node scripts/ci/require-success.mjs browser-shard
+        run: node scripts/ci/require-success.mjs preflight browser-shard

@@ -1,5 +1,6 @@
 import { dollarsToCents } from "@shared/utils/money";
 import React, { useState } from "react";
+import { useAuth } from "@/lib/auth";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Link, useLocation } from "wouter";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -78,6 +79,7 @@ const COMMAND_LABELS: Record<string, string> = {
 };
 
 export default function APPayments() {
+  const { hasPermission } = useAuth();
   const { toast } = useToast();
   const queryClient = useQueryClient();
   const [recordPaymentIntent] = useState(() =>
@@ -240,10 +242,10 @@ export default function APPayments() {
           <h1 className="text-2xl font-bold">AP Payments</h1>
           <p className="text-muted-foreground text-sm">Payment disbursement ledger</p>
         </div>
-        <Button size="sm" onClick={() => setShowPaymentDialog(true)}>
+        {hasPermission("purchasing", "approve") && <Button size="sm" onClick={() => setShowPaymentDialog(true)}>
           <Plus className="h-4 w-4 mr-2" />
           Record Payment
-        </Button>
+        </Button>}
       </div>
 
       <div className="relative w-72">
@@ -298,7 +300,8 @@ export default function APPayments() {
                       </span>
                     </TableCell>
                     <TableCell>
-                      {p.status !== "voided" && (
+                      {p.status !== "voided" && p.status !== "completed" && <span className="text-xs text-amber-700">Historical status requires review</span>}
+                      {p.status === "completed" && hasPermission("purchasing", "approve") && (
                         <Button size="sm" variant="ghost" className="h-7 text-muted-foreground"
                           onClick={() => setShowVoidDialog(p.id)}>
                           <XCircle className="h-3.5 w-3.5" />

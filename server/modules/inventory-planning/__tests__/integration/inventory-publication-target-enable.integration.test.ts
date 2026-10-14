@@ -48,7 +48,7 @@ dbDescribe("direct account stock-update toggle with real PostgreSQL", () => {
     const result = await enable();
     expect(result).toMatchObject({ state: "live", revision: "4", publicationRows: 0, initialDefinitionsApplied: 0, providerWriteAttempted: false });
     const admission = new PostgresQuantityPublicationAdmission(database.pool, () => WALMART_INVENTORY_NOW);
-    const readiness = await admission.inspectListingSetupZero({ channelId: 36, channelConnectionId: 8, partnerId: "partner-36",
+    const readiness = await admission.inspectListingSetup({ channelId: 36, channelConnectionId: 8, partnerId: "partner-36",
       environment: "production", shipNodeId: "test-location", items: [{ productVariantId: 102, sku: "NEW", quantity: 0 }] });
     expect(readiness).toMatchObject({ ready: true, targetRevision: "4" });
     expect((await database.pool.query("SELECT * FROM inventory.publication_membership_heads")).rows).toEqual([]);

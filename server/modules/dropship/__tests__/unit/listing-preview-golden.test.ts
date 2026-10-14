@@ -16,7 +16,10 @@ import {
   type DropshipListingPreviewResult,
   type DropshipListingPreviewRow,
 } from "../../application/dropship-listing-preview-service";
-import { buildListingSettingsFacts, type ListingSettingsFacts, type ListingSettingsInputs, type ListingSettingsSizeFacts } from "../../application/dropship-listing-settings-facts";
+import {
+  buildListingSettingsFacts, buildListingSettingsStoreDefaults, olderGroupRuleCounts,
+  type ListingSettingsFacts, type ListingSettingsInputs, type ListingSettingsSizeFacts,
+} from "../../application/dropship-listing-settings-facts";
 import { DropshipListingPriceService, type ListingPriceTransaction } from "../../application/dropship-listing-price-service";
 import { DropshipPricingRulesService, type PricingRulesTransaction, type StoredPricingReview } from "../../application/dropship-pricing-rules-service";
 import type { DropshipProductCost } from "../../application/dropship-product-cost";
@@ -281,8 +284,8 @@ async function runGoldenPreview(store: GoldenPreviewStore, options: GoldenPrevie
 /**
  * The listing-settings facts over the same stored rows, with the inputs read
  * as the listing-settings load reads them (`loadInSnapshot`): the product and
- * category layers once, the live names of the categories that have settings,
- * and eBay categories prepared with the same layers.
+ * category layers once, the live names of every chosen size's category (PR
+ * 9e), and eBay categories prepared with the same layers.
  */
 async function runGoldenFacts(store: GoldenPreviewStore, layerRows: GoldenLayerRows = NO_LAYER_ROWS): Promise<ListingSettingsFacts> {
   const client = new GoldenStoreClient(store, layerRows).asPgClient();
@@ -309,7 +312,8 @@ async function runGoldenFacts(store: GoldenPreviewStore, layerRows: GoldenLayerR
     contentSettings: await readListingContentSettings(client, GOLDEN_PREVIEW_VENDOR_ID, storeId, VARIANT_IDS),
     pausedSince: new Map<number, Date>(),
     layers,
-    categoryNames: await readCatalogCategoryNames(client, [...layers.categories.keys()]),
+    categoryNames: await readCatalogCategoryNames(client,
+      [...new Set(candidates.flatMap((row) => row.categoryId === null ? [] : [row.categoryId]))]),
   };
   return buildListingSettingsFacts(inputs);
 }
@@ -435,6 +439,35 @@ describe("golden listing previews (no product or category settings, no store she
     const categories = new Map(GOLDEN_PREVIEW_CANDIDATES.map((candidate) => [candidate.productId, candidate.categoryId]));
     expect(facts.products.map((product) => [product.categoryId, product.settingsRevisionId]))
       .toStrictEqual(facts.products.map((product) => [categories.get(product.row.productId) ?? null, null]));
+  });
+
+  it.each(stores)("the writers' older group rule counts are the summary's, read by the same readers (plan 8.2, D16): %s", async (_name, store) => {
+    const client = new GoldenStoreClient(store).asPgClient();
+    const storeId = store.context.storeConnectionId;
+    const pricing = await readPricingProfile(client, storeId, GOLDEN_PREVIEW_VENDOR_ID);
+    const content = await readContentProfile(client, GOLDEN_PREVIEW_VENDOR_ID, storeId);
+    const ebayCategoryRules = await readEbayCategoryRules(client, GOLDEN_PREVIEW_VENDOR_ID, storeId);
+
+    const counts = olderGroupRuleCounts({ pricing, content, ebayCategoryRules });
+    const defaults = buildListingSettingsStoreDefaults({ pricing, content, ebayCategoryRules, listingConfig: structuredClone(store.config) });
+    expect(counts).toEqual({ pricingGroups: defaults.price.groupRules, contentGroups: defaults.description.groupRules,
+      ebayCategoryRules: defaults.ebayCategory.groupRules });
+    // And the facts the pinned summary is built from count the same.
+    const facts = await runGoldenFacts(store);
+    expect([facts.storeDefaults.price.groupRules, facts.storeDefaults.description.groupRules, facts.storeDefaults.ebayCategory.groupRules])
+      .toEqual([counts.pricingGroups, counts.contentGroups, counts.ebayCategoryRules]);
+  });
+
+  it("holds older group rules in the rules store and none in the other, so the parity case counts real rules", async () => {
+    const [rules, noRules] = await Promise.all(GOLDEN_PREVIEW_STORES.map(async (store) => {
+      const client = new GoldenStoreClient(store).asPgClient();
+      const storeId = store.context.storeConnectionId;
+      return olderGroupRuleCounts({ pricing: await readPricingProfile(client, storeId, GOLDEN_PREVIEW_VENDOR_ID),
+        content: await readContentProfile(client, GOLDEN_PREVIEW_VENDOR_ID, storeId),
+        ebayCategoryRules: await readEbayCategoryRules(client, GOLDEN_PREVIEW_VENDOR_ID, storeId) });
+    }));
+    expect(Object.values(rules).some((count) => count > 0)).toBe(true);
+    expect(noRules).toEqual({ pricingGroups: 0, contentGroups: 0, ebayCategoryRules: 0 });
   });
 
   it.each(stores)("the facts and the preview give each size one price: %s", (_name, _store, pins) => {

@@ -52,6 +52,7 @@ export class ListingLifecycleService {
       provider: ListingLifecycleProvider;
       now(): Date;
       uuid(): string;
+      checkPresence?(account: ListingAccount, sku: string): Promise<unknown>;
     },
   ) {}
   private now(): Date {
@@ -67,7 +68,15 @@ export class ListingLifecycleService {
     return listingLifecycleListSchema.parse({
       account,
       items: await this.dependencies.store.list(account, skus),
+      presence: await this.dependencies.store.presence?.(account, skus) ?? [],
     });
+  }
+  async refreshPresence(channelId: number, rawSkus: unknown) {
+    const skus = z.array(listingLifecycleSkuSchema).max(250).parse(rawSkus);
+    const account = listingAccountSchema.parse(await this.dependencies.provider.account(channelIdSchema.parse(channelId)));
+    if (!this.dependencies.checkPresence) throw new ListingPublicationError("LISTING_PRESENCE_UNAVAILABLE", "Listing checks are unavailable.", 503);
+    for (const sku of new Set(skus)) await this.dependencies.checkPresence(account, sku);
+    return this.list(channelId, skus);
   }
   async request(channelId: number, raw: unknown, actorInput: string) {
     const command = listingLifecycleCommandSchema.parse(raw);

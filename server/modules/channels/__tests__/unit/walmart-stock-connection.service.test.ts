@@ -15,6 +15,7 @@ function fixture() {
   const channels = { repository: { enabledChannels: vi.fn(async () => [104]), mappings },
     connection: vi.fn(async () => ({ channel_id: 104, connection_id: 67, partner_id: "seller", ship_node_id: "node", environment: "production", revision: 1 })),
     withListingWrites: vi.fn(async (_account: unknown, _skus: readonly string[], work: () => Promise<unknown>) => work()),
+    observeListingPresence: vi.fn(async (_account: unknown, sku: string) => ({ sku, state: "present" as "present" | "missing", externalProductId: `WPID-${sku}`, checkedAt: now.toISOString() })),
     requireRuntime: vi.fn(), api: vi.fn(() => ({ account, catalogItem })) };
   const inventory = { pending: vi.fn(async (_channel: number, _connection: number, ids: number[]) => ids),
     connect: vi.fn(async (_input: unknown) => ({ state: "connected" as const, dryRun: false, receipt: null, quantities: [] })) };
@@ -33,12 +34,19 @@ describe("Walmart stock connection scan", () => {
       environment: "production", externalScopeId: "node", productVariantId: 1, sku: "SKU-1", externalProductId: "WPID-SKU-1",
       lifecycleStatus: "ACTIVE", publishedStatus: "PUBLISHED", observedAt: now.toISOString() });
   });
-  it("makes no provider calls when inventory reports no pending enabled listings", async () => {
+  it("checks established listings for deletion even when stock is already connected", async () => {
     const f = fixture();
     f.inventory.pending.mockResolvedValue([]);
     expect(await f.service.processDue()).toEqual({ processed: 0, failed: 0 });
-    expect(f.account).not.toHaveBeenCalled();
+    expect(f.channels.observeListingPresence.mock.calls.map(([, sku]) => sku)).toEqual(["SKU-1", "SKU-2", "SKU-3"]);
+    expect(f.catalogItem).not.toHaveBeenCalled();
     expect(f.inventory.connect).not.toHaveBeenCalled();
+  });
+  it("does not reconnect a missing listing and continues checking other SKUs", async () => {
+    const f = fixture();
+    f.channels.observeListingPresence.mockResolvedValueOnce({ sku: "SKU-1", state: "missing", externalProductId: "WPID-SKU-1", checkedAt: now.toISOString() });
+    expect(await f.service.processDue()).toEqual({ processed: 2, failed: 0 });
+    expect(f.catalogItem.mock.calls.map(([sku]) => sku)).toEqual(["SKU-2", "SKU-3"]);
   });
   it("never reconnects a stopped SKU even while Walmart still reports it published; other SKUs continue", async () => {
     const f = fixture();

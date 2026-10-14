@@ -88,6 +88,8 @@ export interface InventoryPushResult {
   error?: string;
   errorCode?: string;
   retryable?: boolean;
+  /** Explicit preflight rejection before the provider write callback started. */
+  effect?: "not_sent";
   /** Retains whether absolute convergence required a mutation or an exact provider read. */
   providerResponse?: unknown;
   /**

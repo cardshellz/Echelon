@@ -40,6 +40,7 @@ export class WalmartAdapter implements IChannelAdapter {
       }
       const results: InventoryPushResult[] = [];
       for (const item of items) {
+        let providerWriteStarted = false;
         try {
           const sku = scope.mappings.find(mapping => mapping.product_variant_id === item.variantId)?.channel_sku;
           if (!sku || sku !== item.externalInventoryItemId
@@ -47,12 +48,17 @@ export class WalmartAdapter implements IChannelAdapter {
             || (item.sku !== null && sku !== item.sku)) {
             throw new WalmartApiError("WALMART_INVENTORY_MAPPING_MISMATCH", "Inventory command must match the explicit Walmart SKU mapping", false);
           }
-          await this.channels.withListingWrites(walmartListingAccount(scope.connection), item.allocatedQty > 0 ? [sku] : [],
-            () => scope.api.setInventory(sku, scope.connection.ship_node_id, item.allocatedQty));
+          await this.channels.withStockWrites(walmartListingAccount(scope.connection), sku, item.allocatedQty,
+            () => {
+              providerWriteStarted = true;
+              return scope.api.setInventory(sku, scope.connection.ship_node_id, item.allocatedQty);
+            });
           results.push({ variantId: item.variantId, pushedQty: item.allocatedQty, status: "success" });
         } catch (error) {
           const failure = safeFailure(error);
-          results.push({ variantId: item.variantId, pushedQty: 0, status: "error", ...failure });
+          results.push({ variantId: item.variantId, pushedQty: 0, status: "error", ...failure,
+            // Once the callback starts, only durable HTTP evidence may settle its outcome.
+            ...(!providerWriteStarted ? { effect: "not_sent" as const } : {}) });
         }
       }
       return results;

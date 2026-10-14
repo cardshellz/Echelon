@@ -81,6 +81,7 @@ export interface LotCostContribution {
   sourceQty: number;
   outputQty: number;
   outputStartQty?: number;
+  costQuantityAllocationId?: number | null;
   operationKind: "transfer" | "conversion" | "assembly" | "build" | "return";
   operationKey: string;
 }
@@ -130,10 +131,20 @@ export async function recordLotCostContribution(
     ) SELECT id FROM descendants WHERE id = ${contribution.sourceLotId} LIMIT 1
   `);
   if (cycle.rows.length > 0) throw new CostEvidenceError("COST_LINEAGE_CYCLE", "Cost lineage would form a cycle.");
-  await tx.execute(sql`
+  const inserted = await tx.execute(sql`
     INSERT INTO inventory.lot_cost_contributions
       (source_lot_id,output_lot_id,operation_kind,operation_key,source_qty,output_qty,output_start_qty,recorded_by,recorded_at)
     VALUES (${contribution.sourceLotId},${contribution.outputLotId},${contribution.operationKind},${contribution.operationKey},
-      ${contribution.sourceQty},${contribution.outputQty},${outputStartQty},${actorId},${now})
+      ${contribution.sourceQty},${contribution.outputQty},${outputStartQty},${actorId},${now}) RETURNING id
   `);
+  if (contribution.costQuantityAllocationId != null) {
+    const { readLotCostAllocation, linkLotCostContribution } = await import("./cost-quantity.repository");
+    const allocation = await readLotCostAllocation(tx,costInteger(contribution.costQuantityAllocationId,"costQuantityAllocationId",1));
+    if (allocation.inventory_lot_id!==contribution.sourceLotId || allocation.quantity!==contribution.sourceQty || allocation.direction===-1) {
+      throw new CostEvidenceError("COST_CONTRIBUTION_ALLOCATION_CONFLICT", "Contribution quantity differs from its exact source allocation.");
+    }
+    await linkLotCostContribution(tx,costInteger(inserted.rows[0]?.id,"contribution.id",1),allocation.id,actorId,now);
+  } else if (row.cost_basis_qty != null) {
+    throw new CostEvidenceError("COST_CONTRIBUTION_ALLOCATION_REQUIRED", "An exact-cost source requires captured financial quantity custody.");
+  }
 }
