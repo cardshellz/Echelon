@@ -2,6 +2,8 @@
 
 Reviewed base: `9c3ab37bb63fd437bad631426721b52ec453a441`, fetched on 2026-10-14. The feature remains a separate branch. Purchasing PR1771 and CI PR1784 deployment is operator-confirmed; this batch has no production deployment evidence.
 
+Publication incorporates main `3aa15cd601e1e77a09f6c5e1487a967e8ba58340`; the only intervening changes are the Shopify line-item discount normalizer and its test. Draft PR1789 allocates `900000004000017890001_receiving_quarantine.sql` with generated ownership/dependency metadata. Its SHA256 remains `14e13ba62f62a52e54ab86c52bda668b960b7d7d2237dfbb30e7ceb9b11f7ea2`, identical to the fully tested candidate.
+
 ## Changes and assumptions
 
 The new receiving panel records accepted/held counts, unidentified goods and immutable custody evidence. Normal receiving owns acceptance and cost posting. Physical returns do not create supplier credits. Inventory counts/manual additions cannot turn held physical goods into available stock. See `RECEIVING-QUARANTINE-WORKFLOW.md` for release sequencing and recovery.
@@ -27,9 +29,11 @@ No historical damaged-count interpretation is assumed. Operators must explicitly
 | Application, server-test and client-test TypeScript projects | Passed |
 | Direct strict typing of new browser fixture/spec | Passed |
 | Production client/server build | Passed; existing large-bundle warning remains |
-| Migration catalog and whitespace checks | Passed before final PR namespace allocation |
+| Migration catalog and whitespace checks | Allocated catalog passes: 514 migrations, base `origin/main`, owner PR1789 |
 
 The PostgreSQL total is 167 tests across eight suites. Every database run used an explicitly disposable local database, with server identity checked and the owned database removed afterward. Local PostgreSQL is version17; hosted PostgreSQL CI is separate evidence. Browser tests mock API boundaries; real PostgreSQL tests exercise backend owners independently.
+
+After PR1789 allocation and the current-main merge, all six suites that load the renamed SQL passed again: 116 PostgreSQL tests (20 custody, 12 receiving integrity, 26 frozen-unit/reversal, 45 cost, three complete-flow and ten count/fence cases). The six early/writer guard suites plus the incoming Shopify normalizer regression passed 213 tests, and the server-test TypeScript project passed again. Both the SQL SHA256 and Git blob identity match the approved candidate; Git records a 100% rename. No application behavior was changed by allocation.
 
 The final procurement unit command was `npx vitest run server/modules/procurement/__tests__/unit --maxWorkers=2 --allowOnly=false --passWithNoTests=false`. TypeScript checks use sufficient heap for the repository's existing large graph; a default4GB attempt exhausted memory before completing. The subsequent8GB application and server-test checks passed. No typecheck failure was suppressed.
 
@@ -48,4 +52,4 @@ The final procurement unit command was `npx vitest run server/modules/procuremen
 
 The persisted custody fence follows the existing global cost-graph lock; throughput was not benchmarked. The migration must precede new code, and old count/receiving writers must be drained before custody operations begin. Rollback after custody exists requires preserving its protections and history.
 
-The candidate migration must receive its actual draft PR namespace before merge/deployment; this allocation changes identity/metadata, not tested SQL semantics. Hosted CI, a deployment, controlled live workflow acceptance, historical data remediation, supplier financial resolution and recognized-lot quarantine are not established by these local checks. The overall procurement remediation remains broader than this batch.
+The migration has its actual PR1789 namespace; allocation changed identity/metadata and fixture references while preserving SQL bytes. Hosted CI, a deployment, controlled live workflow acceptance, historical data remediation, supplier financial resolution and recognized-lot quarantine are not established by these local checks. The overall procurement remediation remains broader than this batch.

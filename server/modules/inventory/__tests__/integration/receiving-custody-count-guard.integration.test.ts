@@ -40,7 +40,7 @@ run.sequential("Receiving custody count protection with real PostgreSQL snapshot
   let database: InventoryCutoverTestDatabase;
   beforeEach(async () => {
     database = await createInventoryCutoverTestDatabase(databaseUrl, true, schema);
-    await database.pool.query(readFileSync(resolve(process.cwd(), "migrations/pending/receiving_quarantine.sql"), "utf8"));
+    await database.pool.query(readFileSync(resolve(process.cwd(), "migrations/900000004000017890001_receiving_quarantine.sql"), "utf8"));
   }, 30_000);
   afterEach(async () => { await database?.close(); });
 

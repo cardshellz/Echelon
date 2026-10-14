@@ -130,7 +130,7 @@ databaseTests.sequential("receiving frozen units PostgreSQL guarantees", () => {
     migrationEvidence = { before, after, replay };
     await pool.query(readFileSync(resolve(process.cwd(), "migrations/222_procurement_cost_evidence.sql"), "utf8"));
     for (const statement of fixtureForeignKeys(TABLES)) await pool.query(statement);
-    await pool.query(readFileSync(resolve(process.cwd(), "migrations/pending/receiving_quarantine.sql"), "utf8"));
+    await pool.query(readFileSync(resolve(process.cwd(), "migrations/900000004000017890001_receiving_quarantine.sql"), "utf8"));
     await pool.query(`
       CREATE UNIQUE INDEX po_receipts_po_line_rcv_line_idx ON procurement.po_receipts(purchase_order_line_id,receiving_line_id);
       CREATE UNIQUE INDEX receipt_reversals_idempotency_key_idx ON procurement.receipt_reversals(idempotency_key);

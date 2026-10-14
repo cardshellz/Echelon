@@ -85,7 +85,7 @@ audit.sequential("receipt/AP/freight cost revisions with real owners", () => {
     await pool.query(readFileSync(resolve(process.cwd(), "migrations/0751_exact_inventory_cost_totals.sql"), "utf8"));
     await pool.query(readFileSync(resolve(process.cwd(), "migrations/0725_inventory_cost_admission_evidence.sql"), "utf8"));
     await pool.query(readFileSync(resolve(process.cwd(), "migrations/231_receipt_cost_recovery.sql"), "utf8"));
-    await pool.query(readFileSync(resolve(process.cwd(), "migrations/pending/receiving_quarantine.sql"), "utf8"));
+    await pool.query(readFileSync(resolve(process.cwd(), "migrations/900000004000017890001_receiving_quarantine.sql"), "utf8"));
     // The log is runtime DDL in server/db.ts:997, with money types aligned by migration0576.
     if (!(await pool.query("SELECT to_regclass('public.audit_events') AS relation")).rows[0].relation) {
       await pool.query(fixtureTable(schema.auditEvents)); ownsAudit = true;

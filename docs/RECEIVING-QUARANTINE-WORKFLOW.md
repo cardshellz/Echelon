@@ -1,6 +1,6 @@
 # Receiving quarantine: pending physical custody
 
-This batch starts at main `d5964e3b90a3665f37e30c9a97c00058c1195002` and was refreshed to `9c3ab37bb63fd437bad631426721b52ec453a441` before final validation. Purchasing PR1771 and CI PR1784 are merged; their deployment was confirmed by the operator. This document does not certify a production readback.
+This batch starts at main `d5964e3b90a3665f37e30c9a97c00058c1195002` and was refreshed to `9c3ab37bb63fd437bad631426721b52ec453a441` before full local validation. Publication also incorporates main `3aa15cd601e1e77a09f6c5e1487a967e8ba58340`, whose only intervening changes are the Shopify line-item discount normalizer and its test. Purchasing PR1771 and CI PR1784 are merged; their deployment was confirmed by the operator. This document does not certify a production readback.
 
 ## Operator workflow
 
@@ -29,7 +29,7 @@ This is pending-recognition intake. It does not move an already posted lot into 
 
 ## Release order and recovery
 
-The candidate SQL is staged at `migrations/pending/receiving_quarantine.sql` until an actual draft PR number is available. It must be allocated with the repository migration tool, with its metadata and all test/runbook references updated, before review is marked ready. Do not deploy a branch containing an unallocated pending migration.
+Draft PR1789 owns `migrations/900000004000017890001_receiving_quarantine.sql` and its generated sidecar under `migrations/metadata/`. It depends on `900000003000017710001_procurement_policy_revision.sql`. Allocation preserved the tested SQL bytes (SHA256 `14e13ba62f62a52e54ab86c52bda668b960b7d7d2237dfbb30e7ceb9b11f7ea2`); all fixtures load the allocated filename. The migration catalog check passes against current main with PR1789 ownership.
 
 Use a maintenance window that drains receiving and inventory-count/manual-stock writers across every application and worker instance. Apply the allocated migration before starting the new code. Resume only the new fleet: an older binary does not enforce the custody reader and must not continue writing counts after custody is recorded.
 

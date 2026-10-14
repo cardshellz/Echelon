@@ -40,7 +40,7 @@ run.sequential("Receipt integrity with the activated quantity ledger", () => {
     await pool.query("DROP TABLE procurement.receiving_quarantine_observations, procurement.receiving_custody_fence");
     for (const table of tables) await pool.query(fixtureTable(table));
     for (const statement of fixtureForeignKeys(tables)) await pool.query(statement);
-    await pool.query(readFileSync(resolve(process.cwd(), "migrations/pending/receiving_quarantine.sql"), "utf8"));
+    await pool.query(readFileSync(resolve(process.cwd(), "migrations/900000004000017890001_receiving_quarantine.sql"), "utf8"));
     await pool.query(`CREATE UNIQUE INDEX review_po_receipt_identity ON procurement.po_receipts(purchase_order_line_id,receiving_line_id);
       INSERT INTO warehouse.warehouses(id,code,name,is_active) VALUES(2,'OTHER','Other warehouse',1);
       INSERT INTO warehouse.warehouse_locations(id,warehouse_id,code) VALUES(105,1,'DEFAULT-DOCK');
