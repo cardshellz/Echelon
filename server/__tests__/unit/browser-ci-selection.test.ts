@@ -1,5 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
+import { createRequire } from "node:module";
+import type { JSONReport } from "@playwright/test/reporter";
 import { describe, expect, it } from "vitest";
 import {
   BROWSER_SUITES, dependencyClosure, parseChangedFiles, runSelection, selectBrowserSuite,
@@ -30,6 +32,14 @@ function fixture(extra: Record<string, string> = {}) {
 
 function selection(file: string, suite = "procurement", extra: Record<string, string> = {}) {
   return selectBrowserSuite({ suite, changes: [{ status: "M", paths: [file] }], ...fixture(extra) });
+}
+
+function repositorySources() {
+  // Include new, non-ignored dependencies when running before a commit too.
+  const files = new Set(execFileSync(
+    "git", ["ls-files", "-z", "--cached", "--others", "--exclude-standard"], { encoding: "utf8" },
+  ).split("\0").filter(Boolean));
+  return { files, readSource: (file: string) => readFileSync(file, "utf8") };
 }
 
 describe("browser CI impact selection", () => {
@@ -174,23 +184,62 @@ describe("browser CI impact selection", () => {
   });
 
   it("preserves the current real application startup graph for packaging-only changes", () => {
-    // Validate the current working-tree graph before commit as well as in CI;
-    // newly added, non-ignored dependencies must be resolvable by this test.
-    const files = new Set(execFileSync(
-      "git",
-      ["ls-files", "-z", "--cached", "--others", "--exclude-standard"],
-      { encoding: "utf8" },
-    ).split("\0").filter(Boolean));
     const result = selectBrowserSuite({ suite: "procurement", changes: [{ status: "M", paths: ["client/src/components/shipping/BoxSuitesPanel.tsx"] }],
-      files, readSource: (file: string) => readFileSync(file, "utf8") });
+      ...repositorySources() });
     expect(result).toEqual({ run: true, reason: "Transitive suite dependency: client/src/components/shipping/BoxSuitesPanel.tsx" });
   });
 
+  it.each([
+    "docs/migration-allocation.md",
+    "server/modules/procurement/purchase-order-receipt-reconciliation.service.ts",
+    "migrations/261_po_email_document_gate.sql",
+  ])("skips Dropship for unrelated modifications after resolving the real dependency graph: %s", (file) => {
+    expect(selectBrowserSuite({ suite: "dropship", changes: [{ status: "M", paths: [file] }], ...repositorySources() })).toEqual({
+      run: false, reason: "Only known paths outside this suite's dependency graph changed",
+    });
+  });
+
+  it.each([
+    ["client/src/features/inventory-builds/ProductConversionCard.tsx", "Transitive suite dependency"],
+    ["test/browser/fixtures/catalog-conversion-harness.tsx", "Transitive suite dependency"],
+    ["test/browser/catalog-conversions.spec.ts", "Suite-owned path"],
+    ["client/src/App.tsx", "Shared UI or toolchain"],
+    ["server/modules/dropship/application/dropship-listing-content-resolver.ts", "Suite-owned path"],
+  ])("keeps Dropship coverage for relevant real repository changes: %s", (file, reason) => {
+    expect(selectBrowserSuite({ suite: "dropship", changes: [{ status: "M", paths: [file] }], ...repositorySources() })).toEqual({
+      run: true, reason: `${reason}: ${file}`,
+    });
+  });
+
+  it("runs Dropship when a reachable dependency becomes unresolvable, even for unrelated changes", () => {
+    const sources = repositorySources();
+    const brokenRoot = "test/browser/fixtures/catalog-conversion-harness.tsx";
+    const result = selectBrowserSuite({ suite: "dropship", changes: [{ status: "M", paths: ["docs/migration-allocation.md"] }],
+      ...sources, readSource: (file: string) => file === brokenRoot
+        ? `${sources.readSource(file)}\nimport "#unconfigured-browser-alias";`
+        : sources.readSource(file) });
+    expect(result).toEqual({ run: true, reason: `Dependency analysis was uncertain: Unknown package or alias #unconfigured-browser-alias in ${brokenRoot}` });
+  });
+
+  it("includes every spec actually discovered by the Dropship Playwright configuration", () => {
+    // Playwright owns testMatch semantics; list tests without starting browsers or
+    // the web server so a config addition cannot silently bypass impact selection.
+    const report: JSONReport = JSON.parse(execFileSync(process.execPath, [
+      createRequire(import.meta.url).resolve("@playwright/test/cli"), "test",
+      "--config", BROWSER_SUITES.dropship.config, "--list", "--reporter=json",
+    ], { encoding: "utf8", maxBuffer: 16 * 1024 * 1024, timeout: 30_000 }));
+    expect(report.errors).toEqual([]);
+    const discovered = report.suites.map((suite) => `test/browser/${suite.file}`);
+    expect(discovered.length).toBeGreaterThan(0);
+    const selected = [...repositorySources().files].filter((file) => file.endsWith(".spec.ts") && BROWSER_SUITES.dropship.tests.test(file));
+    expect([...new Set(discovered)].sort()).toEqual(selected.sort());
+  });
+
   it("registers every current HTML-injected dropship harness as a dependency root", () => {
-    const files = execFileSync("git", ["ls-files", "-z", "--cached", "--others", "--exclude-standard"], { encoding: "utf8" }).split("\0").filter(Boolean);
+    const { files, readSource } = repositorySources();
     const harnesses = new Set<string>();
-    for (const file of files.filter((file) => BROWSER_SUITES.dropship.tests.test(file))) {
-      const source = readFileSync(file, "utf8");
+    for (const file of [...files].filter((file) => BROWSER_SUITES.dropship.tests.test(file))) {
+      const source = readSource(file);
       for (const match of source.matchAll(/["'](test\/browser\/fixtures\/[^"']+\.tsx)["']/g)) harnesses.add(match[1]);
     }
     expect([...harnesses].sort()).toEqual([...BROWSER_SUITES.dropship.roots].sort());

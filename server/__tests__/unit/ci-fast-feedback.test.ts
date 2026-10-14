@@ -348,10 +348,10 @@ describe("fast CI preserves coverage and required checks", () => {
     expect(returns).not.toMatch(/continue-on-error:|paths(?:-ignore)?:/);
   });
 
-  it.each(["returns-preview", "procurement"])("balances %s by test while retaining one worker per runner", (suite) => {
+  it.each([["returns-preview", 1], ["procurement", 2]] as const)("balances %s by test with %i bounded workers per runner", (suite, workers) => {
     const config = source("playwright." + suite + ".config.ts");
     expect(config).toContain("fullyParallel: true");
-    expect(config).toContain("workers: 1");
+    expect(config).toContain(`workers: ${workers}`);
     expect(config).toContain('name: "desktop"');
     expect(config).toContain('name: "mobile"');
   });

@@ -1,4 +1,4 @@
-import { expect, test, type Page } from "playwright/test";
+import { expect, test, type Page } from "@playwright/test";
 import { resolve } from "node:path";
 import { DEFAULT_DROPSHIP_COST_CHANGE_POLICY } from "../../shared/dropship/cost-change-policy";
 

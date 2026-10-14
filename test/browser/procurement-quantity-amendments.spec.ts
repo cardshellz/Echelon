@@ -1,5 +1,6 @@
 import { expect, test, type Page } from "@playwright/test";
 import { installFixtures, po } from "./procurement-fixtures";
+import { expectFinancialRetryBoundaries, installFinancialRetryClock } from "./procurement-retry-clock";
 import { poLineAmountCents, type PoQuantityAmendmentContext, type PoQuantityAmendmentPreview, type PoQuantityApprovalRequest, type PoQuantityPreviewRequest } from "@shared/procurement/po-quantity-amendment";
 import { normalizePoLinePricing } from "@shared/utils/po-line-pricing";
 
@@ -108,9 +109,12 @@ test("stale evidence requires discard and reload before approval", async ({ page
   expect(state.approvals).toEqual([]); expect(state.failures).toEqual([]);
 });
 for (const closeAfterLost of [false, true]) test(`lost approval responses survive reload and retry the same body and key${closeAfterLost ? " after PO closure" : ""}`, async ({ page }) => {
+  await installFinancialRetryClock(page);
   const state = await setup(page, { loseAllResponses: true, closeAfterLost }); const modal = await review(page);
-  await modal.getByLabel("I reviewed these changes and the new PO total.").check(); await modal.getByRole("button", { name: "Approve & save PO", exact: true }).click();
-  await expect.poll(() => state.approvals.length, { timeout: 20000 }).toBe(4);
+  await modal.getByLabel("I reviewed these changes and the new PO total.").check();
+  await expectFinancialRetryBoundaries(page,
+    () => modal.getByRole("button", { name: "Approve & save PO", exact: true }).click(),
+    () => state.approvals.length);
   await expect(modal.getByRole("button", { name: "Retry saved approval", exact: true })).toBeEnabled();
   const original = state.approvals[0]; expect(state.approvals.every((command) => JSON.stringify(command) === JSON.stringify(original))).toBe(true);
   state.recover(); await page.reload(); await page.getByRole("button", { name: "Edit PO", exact: true }).click();
@@ -119,9 +123,12 @@ for (const closeAfterLost of [false, true]) test(`lost approval responses surviv
   expect(state.approvals.at(-1)).toEqual(original); expect(state.previews).toHaveLength(1); expect(state.failures).toEqual([]);
 });
 test("permission denial before a replay preserves the unresolved approval key", async ({ page }) => {
+  await installFinancialRetryClock(page);
   const state = await setup(page, { loseAllResponses: true }); const modal = await review(page);
-  await modal.getByLabel("I reviewed these changes and the new PO total.").check(); await modal.getByRole("button", { name: "Approve & save PO", exact: true }).click();
-  await expect.poll(() => state.approvals.length, { timeout: 20000 }).toBe(4);
+  await modal.getByLabel("I reviewed these changes and the new PO total.").check();
+  await expectFinancialRetryBoundaries(page,
+    () => modal.getByRole("button", { name: "Approve & save PO", exact: true }).click(),
+    () => state.approvals.length);
   await expect(modal.getByRole("button", { name: "Retry saved approval", exact: true })).toBeEnabled();
   const original = state.approvals[0]; state.recover(); state.deny(true);
   await modal.getByRole("button", { name: "Retry saved approval", exact: true }).click(); await expect(modal.getByRole("alert")).toHaveText(/Permission denied/);

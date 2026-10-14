@@ -1,4 +1,4 @@
-import { test, expect, type Page } from "playwright/test";
+import { test, expect, type Page } from "@playwright/test";
 import { resolve } from "node:path";
 import type { ProductInventoryStrategy } from "../../shared/catalog/inventory-strategy";
 import type { SupplyTransformationsAdminView, TransformationAdminModel } from "../../shared/types/inventory-availability-admin";
