@@ -24,6 +24,9 @@ import {
   listingSettingsQueryKey,
 } from "@/lib/dropship-listing-settings";
 import { DropshipApiError } from "@/lib/dropship-ops-surface";
+import type { ListingSettingsRight } from "@/lib/dropship-listing-settings-access";
+import { emptySelection } from "@/lib/dropship-listing-settings-selection";
+import { ListingSettingsDraftsProvider } from "../listing-settings/ListingSettingsDraftsProvider";
 import {
   ListingSettingsTabs,
   initialListingSettingsTabsView,
@@ -31,6 +34,7 @@ import {
   listingSettingsTabLabels,
   reduceListingSettingsTabsView,
   searchText,
+  type ListingSettingsTabsBulk,
   type ListingSettingsTabsProps,
   type ListingSettingsTabsView,
 } from "../listing-settings/ListingSettingsTabs";
@@ -215,8 +219,10 @@ function newClient(): QueryClient {
 function render(node: React.ReactElement, client = newClient(), inspect?: (client: QueryClient) => void): string {
   vi.stubGlobal("React", React);
   try {
+    // The tabs host "Set for selected", whose sheet holds its change in the step's one draft (PR 10, D16).
     const markup = renderToStaticMarkup(React.createElement(Router, { ssrPath: "/dropship-portal/catalog/setup",
-      children: React.createElement(QueryClientProvider, { client }, node) }));
+      children: React.createElement(QueryClientProvider, { client },
+        React.createElement(ListingSettingsDraftsProvider, { storeConnectionId: STORE, children: node })) }));
     inspect?.(client);
     return text(markup);
   } finally {
@@ -239,9 +245,18 @@ function seedPrices(client: QueryClient, query: { search?: string; show?: PriceS
   client.setQueryData(listingSettingsPricesQueryOptions(STORE, query).queryKey, answer);
 }
 
+const EDITABLE: ListingSettingsRight = { editable: true, reason: null };
+
+/** "Set for selected" as the step hands it over (PR 10, plan 6.3): closed, every right on. */
+const BULK: ListingSettingsTabsBulk = {
+  open: false, onOpen: noop, onClose: noop,
+  rights: { bulkSettings: EDITABLE, shipping: EDITABLE, policies: EDITABLE, ebayCategory: EDITABLE, shelfPick: EDITABLE },
+  setup: {}, shelves: null, saveCallbacks: { onSaveStarted: noop, onSaveSettled: noop }, onSaved: noop,
+};
+
 function tabs(overrides: Partial<ListingSettingsTabsProps> = {}): React.ReactElement {
   return React.createElement(ListingSettingsTabs, {
-    storeConnectionId: STORE, summary: SUMMARY, readOnly: false, onOpenProduct: noop, onGoToStep1: noop, ...overrides,
+    storeConnectionId: STORE, summary: SUMMARY, readOnly: false, onOpenProduct: noop, onGoToStep1: noop, bulk: BULK, ...overrides,
   });
 }
 
@@ -255,7 +270,8 @@ const HANDLERS = {
 
 function productsTab(overrides: Partial<ProductsTabProps> = {}): React.ReactElement {
   return React.createElement(ProductsTab, {
-    ...HANDLERS, storeConnectionId: STORE, summary: SUMMARY, view: listView<ProductShowChip>("all"), compact: false, listsOff: false, ...overrides,
+    ...HANDLERS, storeConnectionId: STORE, summary: SUMMARY, view: listView<ProductShowChip>("all"), compact: false, listsOff: false,
+    selection: emptySelection(STORE), onSelect: noop, onSetForSelected: noop, bulkRight: EDITABLE, saved: null, heldSave: false, ...overrides,
   });
 }
 
@@ -592,6 +608,15 @@ describe("ListingSettingsTabs, rendered", () => {
     seedProducts(client, {}, productsAnswer([TOPLOADER, TEAM_BAGS, EASY_GLIDE, PENNY, UNPRICED], 312));
     const markup = render(tabs(), client);
     for (const column of ["Product", "Sizes", "Price", "Own settings", "Status"]) expect(markup).toContain(`<th scope="col" class="px-3 py-2">${column}</th>`);
+    // PR 10 (plan 6.3): a first column of checkboxes, its header ticking the page; six header cells in all.
+    expect(count(markup, "<th ")).toBe(6);
+    expect(markup).toMatch(/<th scope="col" class="w-10 px-3 py-2" data-testid="listing-settings-select-page"><input type="checkbox" aria-label="Select every product on this page"/);
+    expect(markup.indexOf('data-testid="listing-settings-select-page"')).toBeLessThan(markup.indexOf(">Product</th>"));
+    for (const name of ["Shellz Pro Toploader 35pt", "Team Bags 100 ct", "Easy Glide Soft Sleeves", "Penny Sleeves 100 ct", "Shellz Pro Case"]) {
+      expect(markup).toContain(`aria-label="Select ${name}"`);
+    }
+    // Nothing is ticked yet, so there is no selection bar.
+    expect(markup).not.toContain('data-testid="listing-settings-selection-bar"');
 
     const row = (id: number) => markup.slice(markup.indexOf(`data-testid="listing-settings-product-${id}"`)).split("</tr>")[0];
     expect(row(11)).toContain("Shellz Pro Toploader 35pt");
@@ -640,6 +665,15 @@ describe("ListingSettingsTabs, rendered", () => {
     expect(markup).toContain('<option value="exact_prices">Exact prices</option>');
     expect(markup).not.toContain("<table");
     expect(markup).toContain('data-testid="listing-settings-product-cards"');
+    // PR 10 (plan 6.3): each card's checkbox sits beside its button, never inside it, and the button's name still starts with the product.
+    const card = markup.slice(markup.indexOf('data-testid="listing-settings-product-11"')).split("</li>")[0];
+    expect(card).toMatch(/^data-testid="listing-settings-product-11" class="flex items-stretch gap-2"><label[^>]*><input type="checkbox" aria-label="Select Shellz Pro Toploader 35pt"[^>]*\/><\/label><button/);
+    expect(card.slice(card.indexOf("<button"))).not.toContain('type="checkbox"');
+    expect(card.slice(card.indexOf("<button"))).toMatch(/^<button[^>]*><span class="min-w-0"><span class="block break-words font-medium text-zinc-900">Shellz Pro Toploader 35pt<\/span>/);
+    // A phone has no header: one box above the cards ticks every card shown.
+    expect(markup).toContain('data-testid="listing-settings-select-shown"');
+    expect(markup).toContain("Select all shown");
+    expect(markup.indexOf("Select all shown")).toBeLessThan(markup.indexOf('data-testid="listing-settings-product-cards"'));
     expect(markup).toContain("3 sizes · $6.99–$39.99");
     expect(markup).toContain("● Needs a fix: no eBay category");
     expect(markup).toContain("2 of 4 sizes · $3.99–$29.99");
@@ -700,6 +734,7 @@ describe("Products tab states", () => {
     const actions = { ...ACTIONS };
     const page = (state: Parameters<typeof ProductsPageView>[0]["state"]) => render(React.createElement(ProductsPageView, {
       state, compact: false, last: true, actions, onPage: noop, onLoadMore: noop, onOpenProduct: noop,
+      ticks: { selection: emptySelection(STORE), onSelect: noop },
     }));
     const limited = page({ kind: "rate_limited" });
     expect(limited).toContain(LISTING_SETTINGS_LIST_WORDS.rateLimited);

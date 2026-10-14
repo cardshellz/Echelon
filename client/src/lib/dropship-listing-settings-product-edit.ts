@@ -381,6 +381,11 @@ function isSetValue(field: ProductEditField, value: unknown): boolean {
   }
 }
 
+/** Whether `value` is a choice of this field's shape (leave, default, or a `set` of its value); "Set for selected" checks its own with it. */
+export function isProductFieldChoice(field: ProductEditField, value: unknown): value is FieldChoice<ProductEditValues[ProductEditField]> {
+  return isChoiceFor(field, value);
+}
+
 function isChoiceFor(field: ProductEditField, value: unknown): value is AnyChoice {
   if (typeof value !== "object" || value === null) return false;
   const choice = value as { mode?: unknown; value?: unknown };
@@ -582,6 +587,16 @@ function canonical(value: unknown): unknown {
 }
 
 /**
+ * A patch's sent fields in the stored shape's order, each value canonical:
+ * the part of a request signature W5 and W6 share (W6: "Set for selected").
+ */
+export function patchSignatureEntries(patch: ProductSettingsPatchInput): Array<[string, unknown]> {
+  return PATCH_KEY_ORDER
+    .filter((field) => patch[field as keyof ProductSettingsPatchInput] !== undefined)
+    .map((field) => [field, canonical(patch[field as keyof ProductSettingsPatchInput])]);
+}
+
+/**
  * Everything a W5 request sends except its key: the same request always
  * reuses its key (a retry is answered by the first save), and any edit, or a
  * new revision after "Load latest", gets a new one. Shelf order counts (first,
@@ -593,10 +608,7 @@ export function productSettingsSignature(
   expectedRevisionId: number | null,
   patch: ProductSettingsPatchInput,
 ): string {
-  const entries = PATCH_KEY_ORDER
-    .filter((field) => patch[field as keyof ProductSettingsPatchInput] !== undefined)
-    .map((field) => [field, canonical(patch[field as keyof ProductSettingsPatchInput])]);
-  return JSON.stringify(["listing-settings-product-settings-v1", storeConnectionId, productId, expectedRevisionId, entries]);
+  return JSON.stringify(["listing-settings-product-settings-v1", storeConnectionId, productId, expectedRevisionId, patchSignatureEntries(patch)]);
 }
 
 // ---------------------------------------------------------------------------
@@ -1052,6 +1064,12 @@ export interface DescriptionEditorModel {
   canDefault: boolean;
   /** Text above and below can be set to "None". */
   canNone: boolean;
+  /**
+   * Whether the main text offers "Own text"; absent means it does whenever
+   * `canSet` says so. "Set for selected" sets it false: for many products the
+   * main text is only a reset to the Card Shellz text (`SW` productsBulkPatchInputSchema).
+   */
+  mainTextOwn?: boolean;
   /** The main text's check and its two answers; null when nothing needs a check or the draft already answers it. */
   check: OwnTextCheck | null;
   /**
@@ -1143,7 +1161,7 @@ export type DescriptionEditorResult =
  * only [Keep my text] does (`ownTextCheckChoices`).
  */
 export function descriptionEditorResult(
-  model: Pick<DescriptionEditorModel, "initial" | "canSet" | "canDefault" | "canNone">,
+  model: Pick<DescriptionEditorModel, "initial" | "canSet" | "canDefault" | "canNone" | "mainTextOwn">,
   state: DescriptionEditorState,
 ): DescriptionEditorResult {
   const picks: Record<string, AnyChoice> = {};
@@ -1162,7 +1180,7 @@ export function descriptionEditorResult(
   const main = state.mainText;
   if (!samePart(main, model.initial.mainText) && main.mode !== "leave") {
     if (main.mode === "default" && model.canDefault) picks.mainText = DEFAULT;
-    else if (main.mode === "own" && model.canSet) {
+    else if (main.mode === "own" && model.canSet && model.mainTextOwn !== false) {
       const problem = mainTextProblem(main.text);
       if (problem !== null) problems.mainText = problem;
       else picks.mainText = { mode: "set", value: { text: main.text } };

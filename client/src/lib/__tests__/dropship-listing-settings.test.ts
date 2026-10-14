@@ -3,6 +3,7 @@ import { keepPreviousData } from "@tanstack/react-query";
 import {
   listingSettingsPricesResponseSchema,
   listingSettingsProductDetailSchema,
+  listingSettingsProductIdsResponseSchema,
   listingSettingsProductOwnSettingsSchema,
   listingSettingsProductsResponseSchema,
   type ListingSettingsPricesResponse,
@@ -17,6 +18,7 @@ import {
   LISTING_SETTINGS_OFF_CONTRACT,
   ListingSettingsReadError,
   listingSettingsPricesQueryOptions,
+  listingSettingsProductIdsQueryOptions,
   listingSettingsProductOwnQueryOptions,
   listingSettingsProductQueryOptions,
   listingSettingsProductsQueryOptions,
@@ -309,6 +311,73 @@ describe("listing settings own settings query (the drawer's editors, PR 10)", ()
       stubFetch({ error: { code, message: "Refused." } }, status);
       await expect(listingSettingsProductOwnQueryOptions(22, 11).queryFn({ signal })).rejects.toBeInstanceOf(DropshipApiError);
       await expect(listingSettingsProductOwnQueryOptions(22, 11).queryFn({ signal })).rejects.toMatchObject({ status, code });
+    }
+  });
+});
+
+describe("listing settings product ids query (Set for selected, PR 10c, plan 6.4, D6)", () => {
+  const ids = listingSettingsProductIdsResponseSchema.parse({ total: 2, rows: [{ productId: 11, revisionId: 5 }, { productId: 12, revisionId: null }] });
+
+  it("reads every matching product's id and revision under the store's prefix, fresh each time the sheet opens", async () => {
+    const fetchMock = stubFetch(ids);
+    const options = listingSettingsProductIdsQueryOptions(22, {});
+    expect(options.queryKey).toEqual(["/api/dropship/listings/stores", 22, "listing-settings", "product-ids", { search: "", show: "all" }]);
+    expect(options.queryKey.slice(0, 3)).toEqual(listingSettingsQueryKey(22));
+    await expect(options.queryFn({ signal })).resolves.toEqual(ids);
+    expect(fetchMock.mock.calls[0][0]).toBe("/api/dropship/listings/stores/22/listing-settings/products/ids?search=&show=all");
+    expect(fetchMock.mock.calls[0][1]).toMatchObject({ credentials: "include", signal });
+    // Never kept once the sheet closes: the next opening reads afresh, so it never opens on an older answer.
+    expect(options).toMatchObject({ enabled: true, retry: false, staleTime: 0, gcTime: 0 });
+    // Never "products" pages or one product's detail: their own keys.
+    expect(options.queryKey[3]).not.toBe("products");
+    expect(options.queryKey).not.toEqual(listingSettingsProductQueryOptions(22, 11).queryKey);
+  });
+
+  it("encodes the search and the filter, keys by the trimmed request, and narrows by category or product when asked", async () => {
+    const fetchMock = stubFetch(ids);
+    const options = listingSettingsProductIdsQueryOptions(22, { search: "  top & \"load\" ", show: "needs_fix" });
+    expect(options.queryKey[4]).toEqual({ search: "top & \"load\"", show: "needs_fix" });
+    expect(listingSettingsProductIdsQueryOptions(22, { search: "top & \"load\"", show: "needs_fix" }).queryKey).toEqual(options.queryKey);
+    await options.queryFn({ signal });
+    expect(fetchMock.mock.calls[0][0]).toBe("/api/dropship/listings/stores/22/listing-settings/products/ids?search=top+%26+%22load%22&show=needs_fix");
+    const narrowed = listingSettingsProductIdsQueryOptions(22, { categoryId: 40, productId: 11 });
+    expect(narrowed.queryKey[4]).toEqual({ search: "", show: "all", categoryId: 40, productId: 11 });
+    await narrowed.queryFn({ signal });
+    expect(fetchMock.mock.calls[1][0]).toBe("/api/dropship/listings/stores/22/listing-settings/products/ids?search=&show=all&categoryId=40&productId=11");
+  });
+
+  it("runs only for a request inside the contract while the sheet is open", async () => {
+    expect(listingSettingsProductIdsQueryOptions(22, {}, { enabled: false }).enabled).toBe(false);
+    const fetchMock = stubFetch(ids);
+    for (const [store, request] of [
+      [0, {}], [22, { search: "x".repeat(101) }], [22, { show: "paused" as never }], [22, { categoryId: 0 }], [22, { productId: 1.5 }],
+    ] as const) {
+      const options = listingSettingsProductIdsQueryOptions(store, request);
+      expect(options.enabled).toBe(false);
+      await expect(options.queryFn({ signal })).rejects.toMatchObject({ code: LISTING_SETTINGS_INVALID_REQUEST, context: { read: "product-ids" } });
+    }
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("refuses an answer outside the strict contract: a total that isn't the rows, a product twice, an extra key", async () => {
+    for (const answer of [
+      { total: 3, rows: ids.rows },
+      { total: 2, rows: [{ productId: 11, revisionId: 5 }, { productId: 11, revisionId: 6 }] },
+      { ...ids, generatedAt: GENERATED_AT },
+      { total: 1, rows: [{ productId: 11, revisionId: 0 }] },
+      { total: 1, rows: [{ productId: 11 }] },
+    ]) {
+      stubFetch(answer);
+      await expect(listingSettingsProductIdsQueryOptions(22, {}).queryFn({ signal })).rejects.toMatchObject({
+        code: LISTING_SETTINGS_OFF_CONTRACT, context: { read: "product-ids" },
+      });
+    }
+  });
+
+  it("passes the server's refusals on, for the sheet's read words and the too-large banner", async () => {
+    for (const [status, code] of [[422, "DROPSHIP_LISTING_SETTINGS_TOO_LARGE"], [429, "DROPSHIP_LISTING_SETTINGS_RATE_LIMITED"], [404, "DROPSHIP_STORE_CONNECTION_REQUIRED"]] as const) {
+      stubFetch({ error: { code, message: "Refused." } }, status);
+      await expect(listingSettingsProductIdsQueryOptions(22, {}).queryFn({ signal })).rejects.toMatchObject({ status, code });
     }
   });
 });

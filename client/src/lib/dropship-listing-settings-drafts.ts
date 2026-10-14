@@ -1,6 +1,11 @@
 import { DropshipApiError } from "./dropship-ops-surface";
 import { LISTING_SETUP_RELOAD_MESSAGE, listingSetupSaveErrorMessage } from "./dropship-ebay-listing-setup";
-import { LISTING_SETTINGS_EDIT_WORDS, productNotFoundWords } from "./dropship-listing-settings-words";
+import {
+  bulkConflictWords,
+  LISTING_SETTINGS_BULK_WORDS,
+  LISTING_SETTINGS_EDIT_WORDS,
+  productNotFoundWords,
+} from "./dropship-listing-settings-words";
 import { describeLeavePrompt } from "./dropship-unsaved-changes";
 
 /**
@@ -60,9 +65,13 @@ export const STORE_DEFAULTS_CARD_WORDS = Object.freeze({
 
 /**
  * Who holds the step's one draft: a Store defaults row, the ship-from repair
- * under Shipping, or the product drawer of one product.
+ * under Shipping, the product drawer of one product, or "Set for selected"
+ * (`bulk`, many products at once; plan PR 10, D16).
  */
-export type EditorId = StoreDefaultField | "shipFrom" | `product:${number}`;
+export type EditorId = StoreDefaultField | "shipFrom" | `product:${number}` | "bulk";
+
+/** "Set for selected"'s editor id: one sheet for the ticked products (plan PR 10, 6.2, D16). */
+export const BULK_EDITOR_ID = "bulk" satisfies EditorId;
 
 /** The drawer's editor id for one product. Refuses an id that is not a positive whole number. */
 export function productEditorId(productId: number): EditorId {
@@ -150,6 +159,8 @@ export const LISTING_SETTINGS_KEY_PREFIXES = Object.freeze({
   sizePrice: "ls-price",
   // W5, one product's own settings (plan PR 10, D5).
   productSettings: "ls-product",
+  // W6, "Set for selected": many products' settings, never a price (plan PR 10, D5).
+  bulkSettings: "ls-bulk",
 } as const);
 
 /** The words every editor shares (R:535-545). */
@@ -455,9 +466,10 @@ function answersAttempt(draft: ListingSettingsDraft | null, key: string): draft 
  * W2 the eBay listing setup (policies and store shelf), W3 eBay category
  * rules, W4 the description profile, W9 one size's price, W10 the ship-from
  * repair; and the PR 9 writers as PR 10 adds them: W5 one product's own
- * settings (plan PR 10, 4.6).
+ * settings (plan PR 10, 4.6), W6 many products' settings ("Set for
+ * selected", plan PR 10, 6.4).
  */
-export type ListingSettingsWriter = "W1" | "W2" | "W3" | "W4" | "W5" | "W9" | "W10";
+export type ListingSettingsWriter = "W1" | "W2" | "W3" | "W4" | "W5" | "W6" | "W9" | "W10";
 
 export interface WriteFailure {
   phase: WriteFailurePhase;
@@ -693,8 +705,8 @@ function refusesAnOlderRule(error: DropshipApiError, pickedCategoryId: string | 
 // Failed saves of the PR 9 writers (plan PR 10, 3.3, 4.7, D7, D8)
 // ---------------------------------------------------------------------------
 
-type Pr9Writer = "W5";
-const PR9_WRITERS: ReadonlySet<ListingSettingsWriter> = new Set<Pr9Writer>(["W5"]);
+type Pr9Writer = "W5" | "W6";
+const PR9_WRITERS: ReadonlySet<ListingSettingsWriter> = new Set<Pr9Writer>(["W5", "W6"]);
 
 function isPr9Writer(writer: ListingSettingsWriter): writer is Pr9Writer {
   return PR9_WRITERS.has(writer);
@@ -722,6 +734,21 @@ const PR9_WRITER_CODES: Readonly<Record<Pr9Writer, Pr9WriterCodes>> = {
       // Other writers' refusals: W5 is not refused by older group rules (P21) and checks no category or review.
       "DROPSHIP_CATEGORY_LISTING_SETTINGS_VERSION_CONFLICT", "DROPSHIP_LISTING_SETTINGS_OLDER_RULES_PRESENT",
       "DROPSHIP_LISTING_SETTINGS_BULK_TOO_LARGE", "DROPSHIP_LISTING_SETTINGS_CATEGORY_NOT_FOUND", "DROPSHIP_PRICING_REVIEW_NOT_FOUND",
+    ]),
+  },
+  W6: {
+    // The bulk writer's compare-and-set, one stale product refusing all (`I/dropship-product-listing-settings.repository.ts`
+    // assertExpectedRevisions), with `conflictCount` (plan 6.5).
+    conflict: new Set(["DROPSHIP_PRODUCT_LISTING_SETTINGS_VERSION_CONFLICT"]),
+    cannotHappen: new Set([
+      // W6 never carries a price, not even null (D1; `SW` productsBulkPatchInputSchema), so no price check can refuse it.
+      "DROPSHIP_LISTING_PRICE_WOULD_BE_LOST", "DROPSHIP_LISTING_PRICE_OUTSIDE_LIMIT", "DROPSHIP_PRICING_RULES_NOT_CONFIGURED",
+      "DROPSHIP_LISTING_PRICE_RELEASE_LIMIT", "DROPSHIP_LISTING_PRICES_MOVED", "DROPSHIP_LISTING_PRICE_VERSION_CONFLICT",
+      "DROPSHIP_LISTING_PRICE_NOT_AVAILABLE",
+      // Other writers' refusals: W6 checks no older group rules, no category and no review
+      // (`S/application/dropship-listing-products-bulk-service.ts`).
+      "DROPSHIP_CATEGORY_LISTING_SETTINGS_VERSION_CONFLICT", "DROPSHIP_LISTING_SETTINGS_OLDER_RULES_PRESENT",
+      "DROPSHIP_LISTING_SETTINGS_CATEGORY_NOT_FOUND", "DROPSHIP_PRICING_REVIEW_NOT_FOUND",
     ]),
   },
 };
@@ -772,6 +799,7 @@ const UNREADABLE_REQUEST_CODES: ReadonlySet<string> = new Set([
 const IDEMPOTENCY_CONFLICT_CODE = "DROPSHIP_IDEMPOTENCY_CONFLICT";
 const PRODUCT_NOT_FOUND_CODE = "DROPSHIP_LISTING_SETTINGS_PRODUCT_NOT_FOUND";
 const TOO_LARGE_CODE = "DROPSHIP_LISTING_SETTINGS_TOO_LARGE";
+const BULK_TOO_LARGE_CODE = "DROPSHIP_LISTING_SETTINGS_BULK_TOO_LARGE";
 const STORE_TEXT_LIMIT = "store_text_limit";
 
 /** The fields a refusal names, once each (`fields` from the sign-in refusal, `invalidFields` from eBay's value checks). */
@@ -787,8 +815,14 @@ function contextReason(error: DropshipApiError): string | null {
   return typeof reason === "string" ? reason : null;
 }
 
+/** How many products a W6 version conflict names in all (`conflictCount`); null when the answer gives none. Never the list's length (`WE:93`). */
+function conflictCountOf(error: DropshipApiError): number | null {
+  const count = error.context?.conflictCount;
+  return typeof count === "number" && Number.isSafeInteger(count) && count > 0 ? count : null;
+}
+
 /**
- * A PR 9 writer's failed save (plan 3.3, rules top to bottom; 4.7 for W5).
+ * A PR 9 writer's failed save (plan 3.3, rules top to bottom; 4.7 for W5, 6.5 for W6).
  * Classified by code, not status: a status with no code the table names is a
  * gateway's or a proxy's, which may follow a commit, so a 5xx without a known
  * code is `uncertain`. `TOO_LARGE` is a refusal here, never a banner (D8).
@@ -825,7 +859,11 @@ function classifyPr9WriteFailure(writer: Pr9Writer, error: unknown, options: Cla
   if (status >= 500) return failure("uncertain", LISTING_SETTINGS_SAVE_WORDS.uncertain);
   if (status < 400) return failure("uncertain", LISTING_SETTINGS_SAVE_WORDS.uncertain);
 
-  if (code !== null && codes.conflict.has(code)) return failure("conflict", LISTING_SETTINGS_SAVE_WORDS.conflict);
+  if (code !== null && codes.conflict.has(code)) {
+    // W6: "3 of the selected products changed in another window." (plan 6.5), as the server counts them.
+    const count = writer === "W6" ? conflictCountOf(error) : null;
+    return failure("conflict", count === null ? LISTING_SETTINGS_SAVE_WORDS.conflict : bulkConflictWords(count));
+  }
   if (code === IDEMPOTENCY_CONFLICT_CODE) return failure("refused", LISTING_SETTINGS_SAVE_WORDS.keyReused);
   if (code !== null && OTHER_SITE_CODES.has(code)) return failure("blocked", LISTING_SETTINGS_SAVE_WORDS.blocked);
   if (status === HTTP_CONFLICT && code !== null && CARD_SHELLZ_SHIPPING_CODE.test(code)) {
@@ -849,9 +887,16 @@ function classifyPr9WriteFailure(writer: Pr9Writer, error: unknown, options: Cla
         ["storeShelf"]);
     case TOO_LARGE_CODE:
       return failure("refused", contextReason(error) === STORE_TEXT_LIMIT ? words.storeTextLimit : error.message);
+    case BULK_TOO_LARGE_CODE:
+      // W6's text budget (plan 6.5; `S/application/dropship-listing-setting-write-support.ts` listingSettingBulkTooLarge).
+      if (writer === "W6") return failure("refused", LISTING_SETTINGS_BULK_WORDS.tooMuchText);
+      break;
     case PRODUCT_NOT_FOUND_CODE:
       if (writer === "W5") return failure("refused", productNotFoundWords(options.storeName ?? ""));
-      break;
+      // W6: a product Card Shellz deleted since the ids read, with a value set (the writer's foreign key, plan 6.5).
+      // A conflict, not a refusal: the same products would be refused again under every key, so the sheet offers
+      // Load latest, whose new ids read no longer lists the product (CLAUDE.md §6: never retry a permanent error).
+      return failure("conflict", LISTING_SETTINGS_BULK_WORDS.productGone);
     default:
       break;
   }
