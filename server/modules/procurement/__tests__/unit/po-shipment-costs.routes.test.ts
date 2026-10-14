@@ -9,20 +9,29 @@ import express, {
 } from "express";
 import http from "node:http";
 import type { AddressInfo } from "node:net";
+import type { PermissionGrant } from "../../../../routes/middleware";
 import type { ServiceRegistry } from "../../../../services";
 import type { PoShipmentCosts } from "@shared/procurement/po-shipment-costs";
 
 vi.mock("../../../../routes/middleware", () => {
-  const permission =
-    (resource: string, action: string) =>
-    (req: Request, res: Response, next: NextFunction) => {
-      if (req.headers["x-test-permission"] !== `${resource}:${action}`)
+  const anyPermission = (...grants: PermissionGrant[]) => {
+    if (grants.length === 0)
+      throw new Error("requireAnyPermission requires at least one grant");
+    return (req: Request, res: Response, next: NextFunction) => {
+      const allowed = grants.some(
+        ([resource, action]) =>
+          req.headers["x-test-permission"] === `${resource}:${action}`,
+      );
+      if (!allowed)
         return res.status(403).json({ error: "Permission denied" });
       next();
     };
+  };
   const pass = (_req: Request, _res: Response, next: NextFunction) => next();
   return {
-    requirePermission: permission,
+    requirePermission: (resource: string, action: string) =>
+      anyPermission([resource, action]),
+    requireAnyPermission: anyPermission,
     requireAuth: pass,
     requireInternalApiKey: pass,
     upload: { single: () => pass },
@@ -125,10 +134,13 @@ describe("PO shipment costs read endpoint", () => {
     permission = "purchasing:view",
   ) => fetch(url + path, { headers: { "x-test-permission": permission } });
 
-  it("requires purchasing view permission before reading data", async () => {
-    expect((await read(undefined, "inventory:view")).status).toBe(403);
-    expect(getCosts).not.toHaveBeenCalled();
-  });
+  it.each(["inventory:view", "settings:edit", "purchasing:approve"])(
+    "requires purchasing view permission before reading data with %s",
+    async (permission) => {
+      expect((await read(undefined, permission)).status).toBe(403);
+      expect(getCosts).not.toHaveBeenCalled();
+    },
+  );
   it("passes a validated PO identifier to the application service", async () => {
     const payload = emptyCosts();
     getCosts.mockResolvedValue(payload);
