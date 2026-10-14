@@ -199,11 +199,11 @@ describe("fast CI preserves coverage and required checks", () => {
     }
   });
 
-  it("runs cheap coverage and migration guards before expensive core jobs", () => {
+  it("runs cheap coverage, test-exclusion and migration guards before expensive core jobs", () => {
     const preflight = job(workflow, "preflight");
     for (const file of [
       "postgres-ci-shards.test.ts", "migration-prefix-collision.test.ts",
-      "browser-ci-selection.test.ts", "ci-fast-feedback.test.ts",
+      "browser-ci-selection.test.ts", "test-typecheck-ratchet.test.ts", "ci-fast-feedback.test.ts",
     ]) expect(preflight).toContain(file);
     expect(preflight).toContain("--allowOnly=false --passWithNoTests=false");
     for (const name of ["typecheck", "unit-tests", "contracts", "postgres-hardening-shard"]) {
