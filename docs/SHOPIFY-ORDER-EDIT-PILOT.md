@@ -159,6 +159,60 @@ manual compensating credit, which could bypass the original combination rules.
 These boundaries follow [Shopify's order-edit rules](https://help.shopify.com/en/manual/fulfillment/managing-orders/editing-orders/considerations)
 and [discount combination rules](https://help.shopify.com/en/manual/discounts/discount-combinations).
 
+### Required combination checks for new-code entry
+
+New coupon/rewards entry is not implemented. Its release must include the
+following checks; this section does not enable code entry or redemption.
+
+- Reuse the existing discount lookup and configured Shopify combination rules.
+  Read the actual discount identity, classes, scope and combination settings for
+  the newly entered code and each discount it would combine with. Coupons and
+  rewards follow the same admission rules; a percentage or fixed amount is not
+  evidence of its discount class or permission to stack.
+- Require reciprocal permission for every proposed combination, including
+  automatic club product pricing, other coupon/rewards codes and shipping
+  benefits. A discount spanning multiple classes must permit all relevant
+  classes in both directions. Class flags alone do not authorize combinations
+  Shopify does not support, such as multiple shipping discounts; native
+  calculation must also verify the final supported combination and allocations.
+- Use the issued code's actual configuration when redeeming it. The Club app's
+  `resolveRewardsCombinesWith` sets policy when a rewards code is created; it
+  must not be used to invent different redemption terms from a member's current
+  plan. Missing, incomplete or unsupported rule evidence must block the new code.
+- Check on the server during code validation and authoritative quoting, and
+  recheck before committing the order or consuming a code. Expiring preview
+  caches, browser flags and a previously accepted quote are not proof that the
+  current combination remains permitted. A changed rule requires a new review.
+- Keep the accepted discounts and total unchanged when a new code conflicts or
+  validation fails. Explain the specific conflict in regular customer language,
+  for example, "This code can't be combined with your .club pricing." Do not
+  silently remove an existing benefit, consume rewards, or apply an adjustment.
+  Replacing an existing discount is a separate explicit change whose support
+  must be proven before offering that action.
+- Enforce these checks before any manual discount adjustment. Shopify documents
+  that manual discounts bypass combination settings; a successful adjustment is
+  therefore not proof that the original code was allowed to stack. Financial
+  allocation and one-use redemption remain separate required checks.
+
+Verified local source evidence: the Club app's `ShopifyService.lookupDiscountCode`
+(`server/shopify.ts`) reads `combinesWith`; the
+`POST /api/storefront/validate-discount` handler
+(`server/routes/storefront.ts`) exposes member-pricing and free-shipping
+conflict flags. That cart helper treats missing flags as permissive and is not
+an authoritative new-order-edit admission check. Echelon's
+`ShopifyOrderEditProvider.verifyExistingPromotions` verifies discounts already
+accepted on the original order; it does not validate newly entered codes.
+
+Required acceptance coverage before activation: both sides allow a combination;
+either side individually disallows it; coupon plus rewards; code plus club
+pricing; code plus shipping benefit; multi-class codes; two shipping discounts;
+missing metadata; duplicate code entry; and rule, quantity, scope or minimum-spend
+changes between preview and commit. A rejected compatibility check must not
+consume a code or change the order's accepted money amounts. An uncertain command
+response must retain its original idempotency key and reconcile the outcome;
+never assume the adjustment did not apply or retry with a new key. These are
+release criteria, not claims that new-code tests or runtime support already exist.
+
 ## Recovery and diagnostics
 
 `oms.order_edit_operations` contains the current state, original snapshot,
