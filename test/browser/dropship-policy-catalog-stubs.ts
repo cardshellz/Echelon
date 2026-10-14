@@ -11,9 +11,14 @@ import {
 import { decideDropshipListingAccess } from "../../shared/dropship/listing-access";
 import { contentProfileStateSchema, saveContentProfileInputSchema, type ContentProfileState } from "../../shared/dropship/listing-content";
 import {
+  MAX_BULK_TEXT_BYTES,
+  patchTextBytes,
   saveProductSettingsInputSchema,
   saveProductSettingsResponseSchema,
+  saveProductsBulkInputSchema,
+  saveProductsBulkResponseSchema,
   type ProductSettingsPatchInput,
+  type SaveProductsBulkInput,
 } from "../../shared/dropship/listing-setting-writes";
 import {
   listingPriceResponseSchema,
@@ -29,11 +34,15 @@ import {
   LISTING_SETTINGS_VALUE_SOURCES,
   listingSettingsPricesResponseSchema,
   listingSettingsProductDetailSchema,
+  listingSettingsProductIdsInputSchema,
+  listingSettingsProductIdsResponseSchema,
   listingSettingsProductOwnSettingsSchema,
   listingSettingsProductsResponseSchema,
   listingSettingsSummarySchema,
   type ListingSettingsFixCode,
   type ListingSettingsProductDetail,
+  type ListingSettingsProductIdsInput,
+  type ListingSettingsProductIdsResponse,
   type ListingSettingsProductOwnSettings,
   type ListingSettingsProductRow,
   type ListingSettingsProductSettings,
@@ -275,6 +284,22 @@ export const ENVELOPE: ProductFixture = {
   sizes: [{ productVariantId: ROW.productVariantId, sizeName: ROW.variantName, sku: ROW.variantSku, retailCents: 699, costCents: 410, stockUnits: 25 }],
 };
 
+/**
+ * A catalog of `count` products for "Set for selected" (plan PR 10, 6.6: "Select all 312"), ids 1001
+ * on: one size each, odd ones "Penny Sleeves 0001", even ones "Team Bags 0002", so a search for "team"
+ * finds half. A new list each call: a journey's catalog is its own.
+ */
+export function bulkCatalog(count: number): ProductFixture[] {
+  return Array.from({ length: count }, (_, index) => {
+    const n = index + 1;
+    return {
+      productId: 1_000 + n, productName: `${n % 2 === 0 ? "Team Bags" : "Penny Sleeves"} ${String(n).padStart(4, "0")}`,
+      productSku: `BLK-${n}`, category: "Sleeves",
+      sizes: [{ productVariantId: 100_000 + n, sizeName: "Pack of 100", sku: `BLK-${n}-100`, retailCents: 299 + (n % 50), costCents: 150, stockUnits: 10 }],
+    };
+  });
+}
+
 /** A size's saved price setting (W9): what the vendor chose, and its revision. */
 export interface SavedSizePrice {
   revisionId: number;
@@ -432,11 +457,14 @@ export interface StubState {
   /** W5 saves of one product's own settings (PUT …/listing-settings/products/:id; plan PR 10, 4.6), and how the next ones answer. */
   productSettingsWrites: StubWrite[];
   productSettingsWriteAnswers: WriteAnswer[];
+  /** W6 saves of many products' settings ("Set for selected", POST …/listing-settings/products/bulk; plan PR 10, 6.4), and how the next ones answer. */
+  productsBulkWrites: StubWrite[];
+  productsBulkWriteAnswers: WriteAnswer[];
   /** The checks W1 made, by review id, for paging and saving. */
   reviews: Record<string, { storeConnectionId: number; input: ReviewPricingRulesInput; review: PricingReviewResponse }>;
   /** Request keys the keyed writers saw, with the body and the answer, so a retry is answered from the first save. */
   keyedAnswers: Record<string, { body: string; json: Record<string, unknown> }>;
-  /** The next revision a keyed writer saves (W1, W3, W4, W5, W9 share one counter, as ids). */
+  /** The next revision a keyed writer saves (W1, W3, W4, W5, W6, W9 share one counter, as ids; W6's request ids too). */
   nextRevision: number;
   unexpected: string[];
   errors: string[];
@@ -837,12 +865,15 @@ function pageOf<T>(rows: T[], page: number): T[] {
   return rows.slice(page * LISTING_SETTINGS_PAGE_SIZE, (page + 1) * LISTING_SETTINGS_PAGE_SIZE);
 }
 
-/** The Products tab's answer: the catalog's products, searched, filtered and paged as the route does. */
-export function listingSettingsProducts(state: StubState, storeConnectionId: number, query: URLSearchParams) {
-  const page = Number(query.get("page") ?? 0);
-  const search = (query.get("search") ?? "").trim().toLowerCase();
-  const show = query.get("show") ?? "all";
-  const rows: ListingSettingsProductRow[] = [];
+/**
+ * The catalog's products the Products tab's search and filter match, in catalog order, each with its
+ * row: what the list pages (listingSettingsProducts) and the ids read (listingSettingsProductIds) both
+ * list, as the server's facts select both from one rule.
+ */
+function matchingProducts(state: StubState, storeConnectionId: number, filter: { search: string; show: string }) {
+  const search = filter.search.trim().toLowerCase();
+  const { show } = filter;
+  const matched: Array<{ product: ProductFixture; row: ListingSettingsProductRow }> = [];
   for (const product of state.catalog) {
     const { prices, row } = productFacts(state, storeConnectionId, product);
     const productMatches = search === "" || textMatches(product.productName, search) || textMatches(product.productSku, search);
@@ -854,10 +885,32 @@ export function listingSettingsProducts(state: StubState, storeConnectionId: num
       || (show === "cannot_price" && prices.some((price) => price.priceCents === null))
       || (show === "own_settings" && row.ownSettings.length > 0) || (show === "sizes_differ" && row.sizesDiffer.length > 0);
     if (!listed) continue;
-    rows.push({ ...row, matchedSize: size ? { productVariantId: size.productVariantId, sizeName: size.sizeName, sku: size.sku } : null });
+    matched.push({ product, row: { ...row, matchedSize: size ? { productVariantId: size.productVariantId, sizeName: size.sizeName, sku: size.sku } : null } });
   }
+  return matched;
+}
+
+/** The Products tab's answer: the catalog's products, searched, filtered and paged as the route does. */
+export function listingSettingsProducts(state: StubState, storeConnectionId: number, query: URLSearchParams) {
+  const page = Number(query.get("page") ?? 0);
+  const rows = matchingProducts(state, storeConnectionId, { search: query.get("search") ?? "", show: query.get("show") ?? "all" })
+    .map(({ row }) => row);
   return listingSettingsProductsResponseSchema.parse({ storeConnectionId, page, pageSize: LISTING_SETTINGS_PAGE_SIZE, total: rows.length,
     rows: pageOf(rows, page), generatedAt: STAMP });
+}
+
+/**
+ * The ids read (`GET …/products/ids`, plan PR 10, 6.4): every product the Products tab would list for
+ * the filters, on every page, with its own settings' revision (the product layer's; null with none),
+ * as selectListingSettingsProductIds gives it; `categoryId` and `productId` narrow it.
+ */
+export function listingSettingsProductIds(state: StubState, storeConnectionId: number,
+  input: Pick<ListingSettingsProductIdsInput, "search" | "show" | "categoryId" | "productId">): ListingSettingsProductIdsResponse {
+  const rows = matchingProducts(state, storeConnectionId, input)
+    .filter(({ product }) => (input.productId === undefined || product.productId === input.productId)
+      && (input.categoryId === undefined || (product.categoryId ?? null) === input.categoryId))
+    .map(({ product }) => ({ productId: product.productId, revisionId: productLayerOf(state, storeConnectionId, product.productId)?.revisionId ?? null }));
+  return listingSettingsProductIdsResponseSchema.parse({ total: rows.length, rows });
 }
 
 /** The Prices tab's answer: every chosen size, searched, filtered and paged as the route does. */
@@ -1118,45 +1171,19 @@ function sameShelfIds(ids: readonly string[], stored: ProductListingSettingValue
 }
 
 /**
- * W5 as dropship-listing-product-settings-service.ts saves it, for every field the drawer sends:
- * compare-and-set on the product's settings revision (8a's 409). An id the product's own row
- * doesn't hold already asks eBay, which a sign-in stops (D4): a policy is named from eBay's list
- * (the setup answer) or refused (422 SELECTION_INVALID); an eBay category must be a last-level one
- * of the stub's tree (422 CATEGORY_RULE_INVALID, `not_found` / `not_leaf`); a shelf must be in the
- * store's shelves, named by its path (422 STORE_CATEGORY_INVALID, `not_found`). Text is kept as the
- * shared schema gave it, and a main text is stamped with the product's catalog hash now
- * (STUB_PRODUCT_CATALOG_HASH), so a re-save of the same text clears its check (plan 5.4, A2).
- * null sets the field back to the default. Any field saved clears that field's leftovers on the
- * product's sizes (`clearedSizeCount`). Nothing changed is `unchanged`.
+ * A drawer patch on a product's own values (W5 and W6 alike), checking what eBay would: an id in
+ * `asksEbay` must be one eBay has now. A policy is named from eBay's list (the setup answer) or
+ * refused (422 SELECTION_INVALID); an eBay category must be a last-level one of the stub's tree (422
+ * CATEGORY_RULE_INVALID, `not_found` / `not_leaf`); a shelf must be in the store's shelves, named by
+ * its path (422 STORE_CATEGORY_INVALID, `not_found`). An id not asked about is the product's own
+ * already and is kept. Text is kept as the shared schema gave it, and a main text is stamped with the
+ * product's catalog hash now (STUB_PRODUCT_CATALOG_HASH), so a re-save of the same text clears its
+ * check (plan 5.4, A2). null sets the field back to the default. Pure: the values come back new.
  */
-function saveProductSettings(state: StubState, storeConnectionId: number, product: ProductFixture,
-  input: { expectedRevisionId: number | null; patch: ProductDrawerPatch }): Record<string, unknown> | ScriptedError {
-  const key = productKey(storeConnectionId, product.productId);
-  const current = productLayerOf(state, storeConnectionId, product.productId);
-  if (input.expectedRevisionId !== (current?.revisionId ?? null)) {
-    return { status: 409, code: "DROPSHIP_PRODUCT_LISTING_SETTINGS_VERSION_CONFLICT",
-      message: "Listing settings changed after you opened them. Reload them before saving again.",
-      context: { storeConnectionId, conflicts: [{ productId: product.productId, expectedRevisionId: input.expectedRevisionId,
-        actualRevisionId: current?.revisionId ?? null }], conflictCount: 1, retryable: false, classification: "permanent" } };
-  }
-  const values: ProductListingSettingValues = { ...(current?.values ?? NO_PRODUCT_VALUES) };
+function patchedValues(state: StubState, storeConnectionId: number, before: ProductListingSettingValues,
+  patch: ProductDrawerPatch, asksEbay: readonly string[]): ProductListingSettingValues | ScriptedError {
+  const values: ProductListingSettingValues = { ...before };
   const setup = setupOf(state, storeConnectionId);
-  const { patch } = input;
-  const fields = PRODUCT_POLICY_FIELDS.filter((field) => patch[field] !== undefined);
-  const saved = PRODUCT_DRAWER_FIELDS.filter((field) => patch[field] !== undefined);
-  // An id the product's own row doesn't hold already asks eBay, which a sign-in stops (D4, P13).
-  const asksEbay: string[] = [];
-  if (patch.ebayCategory && patch.ebayCategory.categoryId !== values.ebayCategory?.categoryId) asksEbay.push("ebayCategory");
-  if (patch.storeShelf?.mode === "own" && !sameShelfIds(patch.storeShelf.shelfIds, values.storeShelf)) asksEbay.push("storeShelf");
-  for (const field of fields) {
-    const sent = patch[field];
-    if (sent !== null && sent !== undefined && values[field]?.id !== sent.id) asksEbay.push(field);
-  }
-  if (asksEbay.length > 0 && state.setupReadError !== null) {
-    return { status: 403, code: "DROPSHIP_LISTING_SETTINGS_EBAY_SIGN_IN_REQUIRED",
-      message: "Sign in to eBay again to choose new eBay values. Settings that keep their saved eBay values can still be saved.",
-      context: { storeConnectionId, fields: asksEbay } };
-  }
   const permanent = { storeConnectionId, retryable: false, classification: "permanent" } as const;
   if (patch.ebayCategory !== undefined) {
     const sent = patch.ebayCategory;
@@ -1191,21 +1218,26 @@ function saveProductSettings(state: StubState, storeConnectionId: number, produc
   if (patch.mainText !== undefined) {
     values.mainText = patch.mainText === null ? null : { text: patch.mainText.text, catalogHash: STUB_PRODUCT_CATALOG_HASH };
   }
-  for (const field of fields) {
+  for (const field of PRODUCT_POLICY_FIELDS) {
     const sent = patch[field];
-    if (sent === null || sent === undefined) {
+    if (sent === undefined) continue;
+    if (sent === null) {
       values[field] = null;
       continue;
     }
     const listed = (setup.options[POLICY_OPTIONS[field]] as Array<{ id: string; name: string }>).find((option) => option.id === sent.id);
     if (!listed) {
-      if (values[field]?.id === sent.id) continue;
+      if (!asksEbay.includes(field)) continue;
       return { status: 422, code: "DROPSHIP_EBAY_LISTING_SETUP_SELECTION_INVALID", message: "That policy is not one of the store's eBay policies.",
         context: { storeConnectionId, retryable: false, classification: "permanent", invalidFields: [field] } };
     }
     values[field] = { id: listed.id, name: listed.name };
   }
-  // Saving a field clears what today's per-size panels left on this product's sizes for it.
+  return values;
+}
+
+/** Saving a field clears what today's per-size panels left on the product's sizes for it; the sizes cleared. */
+function clearSizeLeftovers(state: StubState, storeConnectionId: number, product: ProductFixture, saved: readonly string[]): number {
   let clearedSizeCount = 0;
   for (const size of product.sizes) {
     const sizeId = sizeKey(storeConnectionId, size.productVariantId);
@@ -1218,7 +1250,56 @@ function saveProductSettings(state: StubState, storeConnectionId: number, produc
       state.sizeLeftovers[sizeId] = kept;
     }
   }
-  const changed = JSON.stringify(values) !== JSON.stringify(current?.values ?? NO_PRODUCT_VALUES);
+  return clearedSizeCount;
+}
+
+/** The 409 the writers' compare-and-set gives (assertExpectedRevisions): every stale product, the first 100 listed. */
+function versionConflict(storeConnectionId: number, conflicts: Array<{ productId: number; expectedRevisionId: number | null; actualRevisionId: number | null }>): ScriptedError {
+  return { status: 409, code: "DROPSHIP_PRODUCT_LISTING_SETTINGS_VERSION_CONFLICT",
+    message: "Listing settings changed after you opened them. Reload them before saving again.",
+    context: { storeConnectionId, conflicts: conflicts.slice(0, 100), conflictCount: conflicts.length, retryable: false, classification: "permanent" } };
+}
+
+/** W5 and W6 stop a new eBay value while eBay needs a sign-in (D4, P13). */
+function signInRequired(state: StubState, storeConnectionId: number, asksEbay: readonly string[]): ScriptedError | null {
+  if (asksEbay.length === 0 || state.setupReadError === null) return null;
+  return { status: 403, code: "DROPSHIP_LISTING_SETTINGS_EBAY_SIGN_IN_REQUIRED",
+    message: "Sign in to eBay again to choose new eBay values. Settings that keep their saved eBay values can still be saved.",
+    context: { storeConnectionId, fields: [...asksEbay] } };
+}
+
+/**
+ * W5 as dropship-listing-product-settings-service.ts saves it, for every field the drawer sends:
+ * compare-and-set on the product's settings revision (8a's 409). An id the product's own row
+ * doesn't hold already asks eBay, which a sign-in stops (D4); the values as `patchedValues` makes
+ * them. Any field saved clears that field's leftovers on the product's sizes (`clearedSizeCount`).
+ * Nothing changed is `unchanged`.
+ */
+function saveProductSettings(state: StubState, storeConnectionId: number, product: ProductFixture,
+  input: { expectedRevisionId: number | null; patch: ProductDrawerPatch }): Record<string, unknown> | ScriptedError {
+  const key = productKey(storeConnectionId, product.productId);
+  const current = productLayerOf(state, storeConnectionId, product.productId);
+  if (input.expectedRevisionId !== (current?.revisionId ?? null)) {
+    return versionConflict(storeConnectionId, [{ productId: product.productId, expectedRevisionId: input.expectedRevisionId,
+      actualRevisionId: current?.revisionId ?? null }]);
+  }
+  const before = current?.values ?? NO_PRODUCT_VALUES;
+  const { patch } = input;
+  const saved = PRODUCT_DRAWER_FIELDS.filter((field) => patch[field] !== undefined);
+  // An id the product's own row doesn't hold already asks eBay, which a sign-in stops (D4, P13).
+  const asksEbay: string[] = [];
+  if (patch.ebayCategory && patch.ebayCategory.categoryId !== before.ebayCategory?.categoryId) asksEbay.push("ebayCategory");
+  if (patch.storeShelf?.mode === "own" && !sameShelfIds(patch.storeShelf.shelfIds, before.storeShelf)) asksEbay.push("storeShelf");
+  for (const field of PRODUCT_POLICY_FIELDS) {
+    const sent = patch[field];
+    if (sent !== null && sent !== undefined && before[field]?.id !== sent.id) asksEbay.push(field);
+  }
+  const signIn = signInRequired(state, storeConnectionId, asksEbay);
+  if (signIn) return signIn;
+  const values = patchedValues(state, storeConnectionId, before, patch, asksEbay);
+  if ("status" in values) return values as ScriptedError;
+  const clearedSizeCount = clearSizeLeftovers(state, storeConnectionId, product, saved);
+  const changed = JSON.stringify(values) !== JSON.stringify(before);
   let revisionId = current?.revisionId ?? null;
   if (changed) {
     revisionId = state.nextRevision++;
@@ -1232,6 +1313,66 @@ function saveProductSettings(state: StubState, storeConnectionId: number, produc
 /** A W5 replay says so in its `outcome`, with no clean-up count (saveProductSettingsResponseSchema). */
 const PRODUCT_SETTINGS_ANSWER: KeyedAnswerShape = (json, replayed) =>
   saveProductSettingsResponseSchema.parse(replayed ? { ...json, outcome: "replayed", clearedSizeCount: null } : json);
+
+// ---------------------------------------------------------------------------
+// W6: many products' settings, "Set for selected" (plan PR 10, 6.4, 6.5)
+// ---------------------------------------------------------------------------
+
+/**
+ * W6 as dropship-listing-products-bulk-service.ts saves it, all or none: compare-and-set on every
+ * product's revision (one stale product refuses the whole save, with `conflictCount`); every id the
+ * patch sets asks eBay, since none is known for many products, so a sign-in stops it (D4); a product
+ * the catalog no longer has is the writer's foreign key 404 when a value is set, and left out of a
+ * reset. Each product's values as `patchedValues` makes them, its sizes' leftovers of the fields saved
+ * cleared, and a new revision for each product that changed. The text budget is checked before
+ * this, as the server's pure pre-check runs before its replay probe.
+ */
+function saveProductsBulk(state: StubState, storeConnectionId: number,
+  input: Pick<SaveProductsBulkInput, "products" | "patch">): Record<string, unknown> | ScriptedError {
+  const conflicts = input.products
+    .map((product) => ({ ...product, actualRevisionId: productLayerOf(state, storeConnectionId, product.productId)?.revisionId ?? null }))
+    .filter((product) => product.expectedRevisionId !== product.actualRevisionId);
+  if (conflicts.length > 0) return versionConflict(storeConnectionId, conflicts);
+  const patch: ProductDrawerPatch = input.patch;
+  const saved = PRODUCT_DRAWER_FIELDS.filter((field) => patch[field] !== undefined);
+  const asksEbay: string[] = [];
+  if (patch.ebayCategory) asksEbay.push("ebayCategory");
+  if (patch.storeShelf?.mode === "own") asksEbay.push("storeShelf");
+  for (const field of PRODUCT_POLICY_FIELDS) if (patch[field]) asksEbay.push(field);
+  const signIn = signInRequired(state, storeConnectionId, asksEbay);
+  if (signIn) return signIn;
+  const named = input.products.map((product) => state.catalog.find((entry) => entry.productId === product.productId) ?? null);
+  const setsAValue = saved.some((field) => patch[field] !== null);
+  if (named.some((product) => product === null) && setsAValue) {
+    return { status: 404, code: "DROPSHIP_LISTING_SETTINGS_PRODUCT_NOT_FOUND", message: "A product in this change is no longer in the catalog.",
+      context: { storeConnectionId, retryable: false, classification: "permanent" } };
+  }
+  // Every product's new values first, so a refusal writes nothing.
+  const writes: Array<{ product: ProductFixture; values: ProductListingSettingValues; current: ProductSettingsLayer | null }> = [];
+  for (const product of named) {
+    if (product === null) continue;
+    const current = productLayerOf(state, storeConnectionId, product.productId);
+    const values = patchedValues(state, storeConnectionId, current?.values ?? NO_PRODUCT_VALUES, patch, asksEbay);
+    if ("status" in values) return values as ScriptedError;
+    writes.push({ product, values, current });
+  }
+  let changedProductCount = 0;
+  let clearedSizeCount = 0;
+  for (const { product, values, current } of writes) {
+    clearedSizeCount += clearSizeLeftovers(state, storeConnectionId, product, saved);
+    if (JSON.stringify(values) === JSON.stringify(current?.values ?? NO_PRODUCT_VALUES)) continue;
+    changedProductCount += 1;
+    state.productSettings[productKey(storeConnectionId, product.productId)] = productSettingsLayerSchema.parse({ revisionId: state.nextRevision++, values });
+  }
+  return saveProductsBulkResponseSchema.parse({
+    outcome: changedProductCount > 0 || clearedSizeCount > 0 ? "changed" : "unchanged", requestId: state.nextRevision++,
+    productCount: input.products.length, changedProductCount, clearedSizeCount,
+  });
+}
+
+/** A W6 replay says so in its `outcome`, with nothing counted (saveProductsBulkResponseSchema). */
+const PRODUCTS_BULK_ANSWER: KeyedAnswerShape = (json, replayed) =>
+  saveProductsBulkResponseSchema.parse(replayed ? { ...json, outcome: "replayed", changedProductCount: null, clearedSizeCount: null } : json);
 
 function findSize(state: StubState, productVariantId: number): SizeFixture | null {
   return findProductOf(state, productVariantId)?.sizes.find((entry) => entry.productVariantId === productVariantId) ?? null;
@@ -1255,6 +1396,7 @@ export const defaultStubState = (): StubState => ({
   contentProfiles: {}, pricingReviews: [], pricingReviewAnswers: [], pricingApplies: [], pricingApplyAnswers: [],
   categoryWrites: [], categoryWriteAnswers: [], categorySearches: [], contentWrites: [], contentWriteAnswers: [],
   priceWrites: [], priceWriteAnswers: [], productSettingsWrites: [], productSettingsWriteAnswers: [],
+  productsBulkWrites: [], productsBulkWriteAnswers: [],
   reviews: {}, keyedAnswers: {}, nextRevision: 40, unexpected: [], errors: [],
 });
 
@@ -1369,7 +1511,7 @@ function answerSetupWrite(state: StubState, route: Route, storeId: number, metho
   return route.fulfill({ json: { ...answered, outcome: answer && "outcome" in answer ? answer.outcome : "changed" } });
 }
 
-/** W1 (price check and save), W3, W4, W5 and W9: NOT_MINE when the request is none of them. */
+/** W1 (price check and save), W3, W4, W5, W6 and W9: NOT_MINE when the request is none of them. */
 async function answerListingWrite(state: StubState, route: Route, storeId: number, listings: string, method: string, path: string, url: URL) {
   const json = () => route.request().postDataJSON() as Record<string, unknown>;
   if (method === "POST" && path === `${listings}/pricing-rules/reviews`) {
@@ -1474,6 +1616,25 @@ async function answerListingWrite(state: StubState, route: Route, storeId: numbe
     return keyedWrite(state, route, parsed.data.idempotencyKey, body, state.productSettingsWriteAnswers,
       () => saveProductSettings(state, storeId, product, { expectedRevisionId: parsed.data.expectedRevisionId, patch }), PRODUCT_SETTINGS_ANSWER);
   }
+  if (method === "POST" && path === `${listings}/listing-settings/products/bulk`) {
+    const body = json();
+    state.productsBulkWrites.push({ method, path, body });
+    // The shared contract refuses a price (even null), own main text, an empty patch and a product twice (D1).
+    const parsed = saveProductsBulkInputSchema.safeParse(body);
+    if (!parsed.success) return refuseBody(state, route, method, path, parsed.error.message);
+    const fields = Object.keys(parsed.data.patch).filter((name) => !(PRODUCT_DRAWER_FIELDS as readonly string[]).includes(name));
+    if (fields.length > 0) return refuseBody(state, route, method, path, `Set for selected sends ids and text only, not ${fields.join(", ")}`);
+    const { products, patch } = parsed.data;
+    // The server's pure text pre-check, before its replay probe (dropship-listing-products-bulk-service.ts).
+    const textBytes = products.length * patchTextBytes(patch);
+    if (textBytes > MAX_BULK_TEXT_BYTES) {
+      return fulfillError(route, { status: 422, code: "DROPSHIP_LISTING_SETTINGS_BULK_TOO_LARGE",
+        message: "This change carries too much listing text to save at once. Choose fewer products, or set the text once on a category or as the store default.",
+        context: { storeConnectionId: storeId, textBytes, maxTextBytes: MAX_BULK_TEXT_BYTES, productCount: products.length } });
+    }
+    return keyedWrite(state, route, parsed.data.idempotencyKey, body, state.productsBulkWriteAnswers,
+      () => saveProductsBulk(state, storeId, { products, patch }), PRODUCTS_BULK_ANSWER);
+  }
   const pricePath = new RegExp(`^${listings}/variants/(\\d+)/price$`).exec(path);
   if (method === "PUT" && pricePath) {
     const body = json();
@@ -1538,6 +1699,21 @@ async function answerStoreRead(state: StubState, route: Route, storeId: number, 
     if (state.tooLarge) return fulfillTooLarge(route);
     return route.fulfill({ json: listingSettingsPrices(state, storeId, url.searchParams) });
   }
+  // "Set for selected"'s ids read (plan PR 10, 6.4): refused while too large, as the server refuses every list read (D18).
+  if (path === `${listings}/listing-settings/products/ids`) {
+    if (state.tooLarge) return fulfillTooLarge(route);
+    const query = url.searchParams;
+    const named = (key: string) => (query.has(key) ? { [key]: Number(query.get(key)) } : {});
+    const parsed = listingSettingsProductIdsInputSchema.safeParse({ storeConnectionId: storeId,
+      ...(query.has("search") ? { search: query.get("search") } : {}), ...(query.has("show") ? { show: query.get("show") } : {}),
+      ...named("categoryId"), ...named("productId") });
+    const unknown = [...query.keys()].filter((key) => !["search", "show", "categoryId", "productId"].includes(key));
+    if (!parsed.success || unknown.length > 0) {
+      state.unexpected.push(`GET ${path}${url.search} (query off contract)`);
+      return route.fulfill({ status: 400, json: { error: { code: "STUB_INVALID_INPUT", message: "The query is not what the route takes." } } });
+    }
+    return route.fulfill({ json: listingSettingsProductIds(state, storeId, parsed.data) });
+  }
   // One product's own settings row (plan PR 10, 4.2): refused while too large, as the server refuses every list read.
   const ownPath = new RegExp(`^${listings}/listing-settings/products/(\\d+)/own$`).exec(path);
   if (ownPath) {
@@ -1594,7 +1770,7 @@ async function answerStoreRead(state: StubState, route: Route, storeId: number, 
   return NOT_MINE;
 }
 
-/** More than 10,000 sizes chosen: the lists, the product read and its own settings are refused (dropship-listing-settings.routes.ts). */
+/** More than 10,000 sizes chosen: the lists, the ids read, the product read and its own settings are refused (dropship-listing-settings.routes.ts). */
 function fulfillTooLarge(route: Route) {
   return fulfillError(route, { status: 422, code: "DROPSHIP_LISTING_SETTINGS_TOO_LARGE",
     message: "More than 10,000 sizes are chosen.", context: { limit: 10_000 } });
@@ -1686,6 +1862,27 @@ export function oldSetupPanel(page: Page) {
   if (!("status" in notLeaf) || notLeaf.code !== "DROPSHIP_EBAY_CATEGORY_RULE_INVALID" || (notLeaf as ScriptedError).context?.reason !== "not_leaf") {
     throw new Error(`The stub's W5 eBay category check changed: ${JSON.stringify(notLeaf)}`);
   }
+  // W6 (plan PR 10, 6.4, 6.5): the ids read gives each product's revision; one save on those revisions sets a policy for both
+  // products and clears the size leftover it covers; its replay answer is on contract; a stale revision refuses it all.
+  const bulk: StubState = { ...layered, productSettings: { ...layered.productSettings }, sizeLeftovers: { ...layered.sizeLeftovers } };
+  const bulkIds = listingSettingsProductIds(bulk, store, { search: "", show: "all" });
+  if (JSON.stringify(bulkIds.rows) !== JSON.stringify([{ productId: ENVELOPE.productId, revisionId: null }, { productId: LAYERED_SAMPLE.productId, revisionId: 7 }])
+    || listingSettingsProductIds(bulk, store, { search: "penny", show: "all" }).total !== 1) {
+    throw new Error(`The stub's ids read changed: ${JSON.stringify(bulkIds)}`);
+  }
+  const bulkProducts = bulkIds.rows.map((row) => ({ productId: row.productId, expectedRevisionId: row.revisionId }));
+  const bulkSaved = saveProductsBulk(bulk, store, { products: bulkProducts, patch: { shippingPolicy: { id: "ground" } } });
+  if ("status" in bulkSaved || bulkSaved.changedProductCount !== 2 || bulkSaved.clearedSizeCount !== 1 || PRODUCTS_BULK_ANSWER(bulkSaved, true).outcome !== "replayed"
+    || productLayerOf(bulk, store, ENVELOPE.productId)?.values.shippingPolicy?.name !== "USPS Ground Advantage") {
+    throw new Error(`The stub's W6 save changed: ${JSON.stringify(bulkSaved)}`);
+  }
+  const stale = saveProductsBulk(bulk, store, { products: bulkProducts, patch: { returnPolicy: null } });
+  if (!("status" in stale) || stale.status !== 409 || (stale as ScriptedError).context?.conflictCount !== 2) {
+    throw new Error(`The stub's W6 compare-and-set changed: ${JSON.stringify(stale)}`);
+  }
+  saveProductsBulkInputSchema.parse({ idempotencyKey: "ls-bulk:load-time-check", products: bulkProducts, patch: { mainText: null } });
+  listingSettingsProductIds({ ...defaultStubState(), catalog: bulkCatalog(312) }, store, { search: "team", show: "all" });
+
   // The resolver's order, pinned once here: size, then product, then category (named), then the store default.
   const sample = layeredSettings(layered, store, LAYERED_SAMPLE.productId) as LayeredProduct;
   const got = sample.sizes.map(({ values }) => [values.shippingPolicy.source, values.returnPolicy.source,

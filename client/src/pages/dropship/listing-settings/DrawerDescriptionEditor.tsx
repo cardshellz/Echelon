@@ -1,6 +1,7 @@
 import { useId, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
+import { bulkDescriptionEditorResult, type BulkPicks } from "@/lib/dropship-listing-settings-bulk";
 import {
   descriptionEditorAnswer,
   descriptionEditorCheck,
@@ -16,12 +17,12 @@ import {
   type ProductSettingsPicks,
   type TemplateTextEditorState,
 } from "@/lib/dropship-listing-settings-product-edit";
-import { fieldEditorLabel, LISTING_SETTINGS_EDIT_WORDS, textLengthWords } from "@/lib/dropship-listing-settings-words";
+import { fieldEditorLabel, LISTING_SETTINGS_BULK_WORDS, LISTING_SETTINGS_EDIT_WORDS, textLengthWords } from "@/lib/dropship-listing-settings-words";
 import { cn } from "@/lib/utils";
 import { ChoiceRadio, FieldEditorFrame } from "./DrawerFieldEditor";
 
-export interface DrawerDescriptionEditorProps {
-  /** Where each part starts and what can be chosen (`descriptionFieldEditor`). */
+interface DescriptionEditorBaseProps {
+  /** Where each part starts and what can be chosen (`descriptionFieldEditor`, or `bulkDescriptionFieldEditor`). */
   model: DescriptionEditorModel;
   /** The row's name ("Description"). */
   title: string;
@@ -29,11 +30,27 @@ export interface DrawerDescriptionEditorProps {
   productName: string;
   /** Why [Done] didn't take the change ("Save or discard your other change first."); null for nothing. */
   message: string | null;
-  /** Puts the parts the vendor changed in the drawer's draft; nothing is sent until Save. */
-  onDone: (picks: Pick<ProductSettingsPicks, DescriptionEditField>) => void;
   /** Closes the editor and drops what was typed; Esc does the same (the drawer routes it here). */
   onCancel: () => void;
 }
+
+export type DrawerDescriptionEditorProps = DescriptionEditorBaseProps & (
+  | {
+    /** The drawer's (one product). */
+    bulk?: false;
+    /** Puts the parts the vendor changed in the drawer's draft; nothing is sent until Save. */
+    onDone: (picks: Pick<ProductSettingsPicks, DescriptionEditField>) => void;
+  }
+  | {
+    /**
+     * "Set for selected"'s mode (PR 10 plan 6.3): each part also offers "Leave
+     * as is" (a part taken back to it is no change), and the main text only "Use
+     * Card Shellz text" (the model's `mainTextOwn: false`).
+     */
+    bulk: true;
+    /** Puts the parts the vendor changed in the sheet's draft; nothing is sent until Save. */
+    onDone: (picks: Pick<BulkPicks, DescriptionEditField>) => void;
+  });
 
 type Problems = Partial<Record<DescriptionEditField, string>>;
 
@@ -50,7 +67,9 @@ type Problems = Partial<Record<DescriptionEditField, string>>;
  * edited (5.4). Every decision is the lib's (`descriptionEditorResult`,
  * `descriptionEditorCheck`).
  */
-export function DrawerDescriptionEditor({ model, title, productName, message, onDone, onCancel }: DrawerDescriptionEditorProps) {
+export function DrawerDescriptionEditor(props: DrawerDescriptionEditorProps) {
+  const { model, title, productName, message, onCancel } = props;
+  const bulk = props.bulk === true;
   const [state, setState] = useState<DescriptionEditorState>(model.initial);
   const [problems, setProblems] = useState<Problems>({});
   const groupId = useId();
@@ -66,7 +85,17 @@ export function DrawerDescriptionEditor({ model, title, productName, message, on
     });
   };
   const finish = (result: ReturnType<typeof descriptionEditorResult>) => {
-    if (result.ok) onDone(result.picks);
+    if (props.bulk === true) return;
+    if (result.ok) props.onDone(result.picks);
+    else setProblems(result.problems);
+  };
+  const done = () => {
+    if (props.bulk !== true) {
+      finish(descriptionEditorResult(model, state));
+      return;
+    }
+    const result = bulkDescriptionEditorResult(model, state);
+    if (result.ok) props.onDone(result.picks);
     else setProblems(result.problems);
   };
 
@@ -77,7 +106,7 @@ export function DrawerDescriptionEditor({ model, title, productName, message, on
       productName={productName}
       message={message}
       doneDisabled={false}
-      onDone={() => finish(descriptionEditorResult(model, state))}
+      onDone={done}
       onCancel={onCancel}
     >
       {model.conflictLine !== null && (
@@ -90,6 +119,7 @@ export function DrawerDescriptionEditor({ model, title, productName, message, on
         productName={productName}
         model={model}
         state={state.textAbove}
+        bulk={bulk}
         problem={problems.textAbove ?? null}
         onChange={(next) => change("textAbove", next)}
       />
@@ -98,6 +128,7 @@ export function DrawerDescriptionEditor({ model, title, productName, message, on
         productName={productName}
         model={model}
         state={state.mainText}
+        bulk={bulk}
         check={descriptionEditorCheck(model, state)}
         problem={problems.mainText ?? null}
         onChange={(next) => change("mainText", next)}
@@ -110,6 +141,7 @@ export function DrawerDescriptionEditor({ model, title, productName, message, on
         productName={productName}
         model={model}
         state={state.textBelow}
+        bulk={bulk}
         problem={problems.textBelow ?? null}
         onChange={(next) => change("textBelow", next)}
       />
@@ -118,19 +150,24 @@ export function DrawerDescriptionEditor({ model, title, productName, message, on
 }
 
 /** Text above or below: Use default / None / Own text, and the box for own text. */
-function TemplatePart({ name, field, label, productName, model, state, problem, onChange }: {
+function TemplatePart({ name, field, label, productName, model, state, bulk, problem, onChange }: {
   name: string;
   field: "textAbove" | "textBelow";
   label: string;
   productName: string;
   model: DescriptionEditorModel;
   state: TemplateTextEditorState;
+  /** "Set for selected": "Leave as is" comes first. */
+  bulk: boolean;
   problem: string | null;
   onChange: (next: TemplateTextEditorState) => void;
 }) {
   return (
     <fieldset className="space-y-2" data-testid={`drawer-description-${field}`}>
       <legend className="text-sm font-medium text-zinc-900">{label}</legend>
+      {bulk && (
+        <ChoiceRadio name={name} label={LISTING_SETTINGS_BULK_WORDS.leaveAsIs} checked={state.mode === "leave"} onPick={() => onChange({ ...state, mode: "leave" })} />
+      )}
       {model.canDefault && (
         <ChoiceRadio name={name} label={LISTING_SETTINGS_EDIT_WORDS.useDefault} checked={state.mode === "default"} onPick={() => onChange({ ...state, mode: "default" })} />
       )}
@@ -155,11 +192,13 @@ function TemplatePart({ name, field, label, productName, model, state, problem, 
 }
 
 /** The main text: Use Card Shellz text / Own text, the box for own text, and the check when Card Shellz changed the product. */
-function MainTextPart({ name, productName, model, state, check, problem, onChange, onAnswer }: {
+function MainTextPart({ name, productName, model, state, bulk, check, problem, onChange, onAnswer }: {
   name: string;
   productName: string;
   model: DescriptionEditorModel;
   state: MainTextEditorState;
+  /** "Set for selected": "Leave as is" comes first. */
+  bulk: boolean;
   /** The check's notice while the main text is as it opened (`descriptionEditorCheck`); null otherwise. */
   check: OwnTextCheck | null;
   problem: string | null;
@@ -167,17 +206,22 @@ function MainTextPart({ name, productName, model, state, check, problem, onChang
   onAnswer: (answer: FieldChoice<MainTextChoiceValue>) => void;
 }) {
   const label = LISTING_SETTINGS_EDIT_WORDS.mainText;
+  // For many products the main text is only a reset (`mainTextOwn: false`): one text can't carry each product's catalog hash.
+  const ownOffered = model.canSet && model.mainTextOwn !== false;
   return (
     <fieldset className="space-y-2" data-testid="drawer-description-mainText">
       <legend className="text-sm font-medium text-zinc-900">{label}</legend>
       {check !== null && <OwnTextCheckNotice check={check} productName={productName} disabled={false} onAnswer={onAnswer} />}
+      {bulk && (
+        <ChoiceRadio name={name} label={LISTING_SETTINGS_BULK_WORDS.leaveAsIs} checked={state.mode === "leave"} onPick={() => onChange({ ...state, mode: "leave" })} />
+      )}
       {model.canDefault && (
         <ChoiceRadio name={name} label={LISTING_SETTINGS_EDIT_WORDS.useCardShellzText} checked={state.mode === "default"} onPick={() => onChange({ ...state, mode: "default" })} />
       )}
-      {model.canSet && (
+      {ownOffered && (
         <ChoiceRadio name={name} label={LISTING_SETTINGS_EDIT_WORDS.ownText} checked={state.mode === "own"} onPick={() => onChange({ ...state, mode: "own" })} />
       )}
-      {model.canSet && state.mode === "own" && (
+      {ownOffered && state.mode === "own" && (
         <TextBox
           field="mainText"
           label={fieldEditorLabel(label, productName)}

@@ -47,9 +47,9 @@ export const CONNECTION_BANNER_KINDS = [
   "too_large",
   /** The store is on an eBay site other than eBay US. */
   "other_site",
-  /** Selling is paused on the account: prices, a product's own settings, eBay categories and descriptions are locked. */
+  /** Selling is paused on the account: prices, products' own settings (one or many), eBay categories and descriptions are locked. */
   "selling_paused",
-  /** The .ops entitlement is not active: prices, a product's own settings, eBay categories and descriptions are locked. */
+  /** The .ops entitlement is not active: prices, products' own settings (one or many), eBay categories and descriptions are locked. */
   "ops_inactive",
   /** eBay needs the vendor to sign in again: choices that read eBay are locked. */
   "sign_in",
@@ -307,11 +307,14 @@ function firstOf(kinds: Map<ConnectionBannerKind, string | null>, order: readonl
  * - `ebayCategory` (W3) and `description` (W4);
  * - `productSettings` (W5, one product's own settings; plan PR 10, D3). A field
  *   of it that names a new eBay value also needs that field's W2 right
- *   (`productFieldRights`, dropship-listing-settings-product-edit.ts).
+ *   (`productFieldRights`, dropship-listing-settings-product-edit.ts);
+ * - `bulkSettings` (W6, "Set for selected": many products' settings, never a
+ *   price; plan PR 10, D3), with the same rule for each field (`bulkFieldRights`,
+ *   dropship-listing-settings-bulk.ts).
  */
 export const LISTING_SETTINGS_RIGHTS = [
   "price", "exactPrice", "policies", "shipping", "shelfPick", "shelfNone", "shipFrom", "ebayCategory", "description",
-  "productSettings",
+  "productSettings", "bulkSettings",
 ] as const;
 export type ListingSettingsRightName = (typeof LISTING_SETTINGS_RIGHTS)[number];
 
@@ -354,10 +357,12 @@ const ALL_RIGHTS: readonly ListingSettingsRightName[] = LISTING_SETTINGS_RIGHTS;
 /**
  * W1, W9, W3 and W4 need an active or onboarding vendor and an active .ops
  * entitlement, and so does every PR 9 writer (`authorizeListingSettingWrite`):
- * W5 here. A sign-in or eBay not answering doesn't lock W5: resets and saved
- * eBay values need no eBay call (plan D3, D4).
+ * W5 and W6 here. A sign-in or eBay not answering doesn't lock them: resets
+ * need no eBay call (plan D3, D4).
  */
-const LISTING_WRITER_RIGHTS: readonly ListingSettingsRightName[] = ["price", "exactPrice", "ebayCategory", "description", "productSettings"];
+const LISTING_WRITER_RIGHTS: readonly ListingSettingsRightName[] = [
+  "price", "exactPrice", "ebayCategory", "description", "productSettings", "bulkSettings",
+];
 /** Choices that read eBay: the W2 policies and shelves, W10, and W3's category check. */
 const EBAY_RIGHTS: readonly ListingSettingsRightName[] = ["policies", "shipping", "shelfPick", "shelfNone", "shipFrom", "ebayCategory"];
 /** Choices that save against the live setup read's revision (W2, W10). */

@@ -1,7 +1,7 @@
 import { STORE_DEFAULT_EDITOR_WORDS, type PolicyEditorChoice } from "@/lib/dropship-listing-settings-store-requests";
 import { cn } from "@/lib/utils";
 
-/** One more choice in the same radio group after eBay's policies, such as the drawer's "Use default". */
+/** One more choice in the same radio group beside eBay's policies, such as the drawer's "Use default". */
 export interface PolicyChoiceExtra {
   label: string;
   checked: boolean;
@@ -26,6 +26,8 @@ export interface PolicyChoiceListProps {
   onPick: (policyId: string) => void;
   /** A choice after eBay's in the same group; left out, nothing more is drawn. */
   extra?: PolicyChoiceExtra;
+  /** A choice before eBay's in the same group ("Set for selected"'s "Leave as is", PR 10 plan 6.3); left out, nothing is drawn. */
+  leading?: PolicyChoiceExtra;
 }
 
 /**
@@ -36,13 +38,14 @@ export interface PolicyChoiceListProps {
  * editor (DrawerFieldEditor, W5; PR 10 plan 4.3). Stateless: the caller owns
  * the pick. No id is ever shown.
  */
-export function PolicyChoiceList({ name, legend, choices, picked, disabled, marked, suggestedId, onPick, extra }: PolicyChoiceListProps) {
+export function PolicyChoiceList({ name, legend, choices, picked, disabled, marked, suggestedId, onPick, extra, leading }: PolicyChoiceListProps) {
   return (
     <fieldset disabled={disabled} className="space-y-2">
       <legend className="sr-only">{legend}</legend>
       {marked && (
         <p className="text-xs font-medium text-amber-900">{STORE_DEFAULT_EDITOR_WORDS.changedElsewhereToo}</p>
       )}
+      {leading && <ExtraChoice name={name} choice={leading} />}
       {choices.map((choice) => {
         const checked = picked === choice.id;
         const suggested = checked && choice.id === suggestedId;
@@ -75,23 +78,28 @@ export function PolicyChoiceList({ name, legend, choices, picked, disabled, mark
           </label>
         );
       })}
-      {extra && (
-        <label
-          className={cn(
-            "flex min-h-11 cursor-pointer items-start gap-3 rounded-md border border-zinc-200 bg-white p-3 text-sm",
-            extra.checked && "border-[#C060E0]",
-          )}
-        >
-          <input
-            type="radio"
-            name={name}
-            className="mt-0.5 h-4 w-4 shrink-0 accent-[#C060E0]"
-            checked={extra.checked}
-            onChange={extra.onPick}
-          />
-          <span className="min-w-0 break-words font-medium text-zinc-900">{extra.label}</span>
-        </label>
-      )}
+      {extra && <ExtraChoice name={name} choice={extra} />}
     </fieldset>
+  );
+}
+
+/** A choice of the group that names no eBay policy ("Use default", "Leave as is"). */
+function ExtraChoice({ name, choice }: { name: string; choice: PolicyChoiceExtra }) {
+  return (
+    <label
+      className={cn(
+        "flex min-h-11 cursor-pointer items-start gap-3 rounded-md border border-zinc-200 bg-white p-3 text-sm",
+        choice.checked && "border-[#C060E0]",
+      )}
+    >
+      <input
+        type="radio"
+        name={name}
+        className="mt-0.5 h-4 w-4 shrink-0 accent-[#C060E0]"
+        checked={choice.checked}
+        onChange={choice.onPick}
+      />
+      <span className="min-w-0 break-words font-medium text-zinc-900">{choice.label}</span>
+    </label>
   );
 }
