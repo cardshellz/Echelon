@@ -545,6 +545,39 @@ describe("staff order editor access and resume", () => {
 });
 
 describe("verified order edit review", () => {
+  it("omits the redundant customer status chip while keeping the verified review and payment amount", () => {
+    const html = renderOperation(operation, { audience: "customer" });
+    expect(html).not.toContain("Ready to apply");
+    expect(html).toContain("Review the verified totals");
+    expect(html).toContain("$10.00 payment due");
+    expect(renderOperation(operation)).toContain("Ready to apply");
+  });
+  it("keeps actionable customer error messages after removing the status chip", () => {
+    const html = renderOperation({
+      ...operation,
+      status: "review_required",
+      error: { code: "ORDER_CHANGED", message: "Your order changed. Refresh it before trying again." },
+    }, { audience: "customer" });
+    expect(html).not.toContain(">Review needed</");
+    expect(html).toContain("Your order changed. Refresh it before trying again.");
+    expect(html).toContain("Cancel edit");
+  });
+  it("omits customer draft payment and readiness chips without hiding eligibility blockers", () => {
+    const html = renderToStaticMarkup(createElement(OrderDraft, {
+      order: { ...order, eligibility: { editable: false, reasons: ["This order has shipped and can no longer be edited."] } },
+      api: createOrderEditTransport(vi.fn()),
+      enabled: true,
+      staffId: "customer-1",
+      audience: "customer",
+      onQuote: vi.fn(),
+      onLock: vi.fn(),
+    }));
+    expect(html).not.toContain("Payment:");
+    expect(html).not.toContain("Ready to edit");
+    expect(html).not.toContain("Editing unavailable");
+    expect(html).toContain("This order has shipped and can no longer be edited.");
+    expect(html).toContain("Binder");
+  });
   it("shows only the necessary customer actions on a fresh verified review", () => {
     const html = renderOperation(operation, { audience: "customer" });
     expect(html).toContain("Apply changes");
@@ -734,6 +767,15 @@ describe("verified order edit review", () => {
 });
 
 describe("immediate preliminary review", () => {
+  it("uses the in-progress explanation without a customer header chip", () => {
+    const html = renderToStaticMarkup(createElement(OrderEditPreviewReview, {
+      order, preview: null, audience: "customer",
+    }));
+    expect(html).not.toContain(">Verifying changes</");
+    expect(html).toContain("calculating discounts, shipping and tax");
+    expect(html).toContain("aria-busy=\"true\"");
+    expect(html).not.toContain("Apply changes");
+  });
   it("shows a clearly provisional breakdown and keeps every action disabled during authoritative verification", () => {
     const preview = {
       phase: "preview" as const,

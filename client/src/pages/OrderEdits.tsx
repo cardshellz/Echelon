@@ -427,7 +427,7 @@ export function OrderDraft({
     }
   }
   if (pending)
-    return <OrderEditPreviewReview order={order} preview={reviewPreview} />;
+    return <OrderEditPreviewReview order={order} preview={reviewPreview} audience={audience} />;
   return (
     <Card className="oe-order-surface">
       <CardHeader className="oe-order-heading">
@@ -440,21 +440,19 @@ export function OrderDraft({
             {order.customerEmail ? ` · ${order.customerEmail}` : ""}
           </p>
         )}
-        <div className="flex flex-wrap gap-2">
-          <Badge
-            variant="outline"
-            className={`oe-status ${order.financialStatus === "Paid" ? "oe-status--paid" : ""}`}
-          >
-            Payment: {order.financialStatus}
-          </Badge>
-          <Badge variant="outline" className="oe-status">
-            {audience === "customer"
-              ? order.eligibility.editable
-                ? "Ready to edit"
-                : "Editing unavailable"
-              : `Warehouse: ${order.warehouseStatus}`}
-          </Badge>
-        </div>
+        {audience === "staff" && (
+          <div className="flex flex-wrap gap-2">
+            <Badge
+              variant="outline"
+              className={`oe-status ${order.financialStatus === "Paid" ? "oe-status--paid" : ""}`}
+            >
+              Payment: {order.financialStatus}
+            </Badge>
+            <Badge variant="outline" className="oe-status">
+              Warehouse: {order.warehouseStatus}
+            </Badge>
+          </div>
+        )}
       </CardHeader>
       <CardContent className="oe-order-content">
         {!enabled && (
@@ -824,9 +822,11 @@ export function OrderDraft({
 export function OrderEditPreviewReview({
   order,
   preview,
+  audience = "staff",
 }: {
   order: OrderEditOrder;
   preview: OrderEditPreview | null;
+  audience?: "staff" | "customer";
 }) {
   return (
     <Card className="oe-order-surface">
@@ -834,9 +834,11 @@ export function OrderEditPreviewReview({
         <CardTitle>
           <h2>Order {order.orderNumber}</h2>
         </CardTitle>
-        <div>
-          <Badge variant="outline">Verifying changes</Badge>
-        </div>
+        {audience === "staff" && (
+          <div>
+            <Badge variant="outline">Verifying changes</Badge>
+          </div>
+        )}
       </CardHeader>
       <CardContent className="oe-order-content" aria-busy="true">
         <p role="status" className="text-sm text-muted-foreground">
@@ -989,9 +991,11 @@ export function OrderEditOperationView({
         <CardTitle>
           <h2>Order {operation.orderNumber}</h2>
         </CardTitle>
-        <div>
-          <Badge variant="outline">{title}</Badge>
-        </div>
+        {audience === "staff" && (
+          <div>
+            <Badge variant="outline">{title}</Badge>
+          </div>
+        )}
       </CardHeader>
       <CardContent className="oe-order-content">
         <p className="text-sm text-muted-foreground">
