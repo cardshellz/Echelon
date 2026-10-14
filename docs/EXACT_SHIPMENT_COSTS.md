@@ -7,6 +7,23 @@ an incomplete combined total. Confirmed charge evidence uses the same supplier
 invoice resolver as cost application. Estimates and inventory application
 failures remain visible.
 
+The headline Freight and Tax / Duties cards include supplier charges plus this
+PO's allocated shipment charges, with each amount shown separately underneath.
+Total cost includes the supplier PO amount and all allocated shipment charges;
+editing a supplier charge still changes only that supplier field. Missing
+allocations, unsupported currencies and failed reads never substitute a complete
+zero-cost total.
+
+The read-only `shipment-costs` endpoint supplies the cards and inventory cost
+review from one repeatable-read snapshot. It identifies shipment lines by SKU,
+records the latest application ID/time and shows preserved source/application
+reasons. The existing `shipment-cost-summary` response remains available.
+Deployment does not erase an earlier failed attempt. The review panel exposes a
+checked retry through the existing `push-costs-to-lots` owner, restricted to
+`purchasing:approve`. It then reloads persisted results, including any remaining
+failures. A retry can revalue stock and cost of sold stock for all linked POs in
+that shipment; opening the PO or review panel performs no financial writes.
+
 ## Financial authority
 
 Amounts remain integer cents or integer 1/10,000-dollar units (the existing

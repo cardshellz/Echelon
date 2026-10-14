@@ -12,7 +12,7 @@ import pg from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import * as schema from "@shared/schema";
 import { lockInventoryCostGraph } from "../../../inventory/infrastructure/cost-evidence.repository";
-import { readPoShipmentCostSummary } from "../../po-shipment-cost-summary.repository";
+import { readPoShipmentCostSummary, readPoShipmentCosts } from "../../po-shipment-cost-summary.repository";
 import { installPreOpeningQuantityAuthorityFixture } from "../../../inventory/__tests__/fixtures/pre-opening-quantity-authority.fixture";
 import { receivingUnitVersion } from "../../receiving-unit-contract";
 import { fixtureForeignKeys, fixtureTable, qualifiedTable } from "./shipment-line-fixture";
@@ -730,6 +730,39 @@ audit.sequential("receipt/AP/freight cost revisions with real owners", () => {
     expect((await pool.query("SELECT total_cents,shipping_cost_cents,tax_cents FROM procurement.purchase_orders WHERE id=10")).rows[0])
       .toEqual({total_cents:"22000",shipping_cost_cents:"0",tax_cents:"0"});
     expect(await readPoShipmentCostSummary(database,999999)).toBeNull();
+  });
+
+  it("reads persistent line reasons and supplier plus shipment cards in a read-only snapshot", async () => {
+    await shipment.finalizeAllocations(1, actorId);
+    await receive();
+    await shipment.pushLandedCostsToLots(1, actorId);
+    await pool.query("UPDATE procurement.purchase_orders SET shipping_cost_cents=300,tax_cents=200,total_cents=22500 WHERE id=10");
+    const recorded = await readPoShipmentCosts(database, 10);
+    const recordedLine = recorded?.lines[0];
+    expect(recordedLine?.applicationId).toBeGreaterThan(0);
+    const issue = { code: "COST_UNIFORM_LOT_RESIDUAL_REVIEW", message: "The earlier attempt could not represent the exact remainder." };
+    // Seed a newer historical attempt. Application records remain immutable.
+    const { costFingerprint } = await import("../../../inventory/infrastructure/cost-evidence.repository");
+    const applicationKey = costFingerprint({ fixture: "shipment-cost-review", priorApplicationId: recordedLine?.applicationId });
+    const result = { applicationId: 0, status: "review_required", lotsUpdated: 0, cogsRowsUpdated: 0,
+      totalCogsDeltaCents: 0, issues: [issue], replayed: false };
+    const inserted = await pool.query(`INSERT INTO inventory.cost_applications
+      (source_revision_id,application_key,status,evidence,recorded_by,recorded_at)
+      SELECT source_revision_id,$1,'review_required',jsonb_set(evidence,'{result}',$2::jsonb),$3,$4
+      FROM inventory.cost_applications WHERE id=$5 RETURNING id`,
+      [applicationKey, JSON.stringify(result), actorId, NOW, recordedLine?.applicationId]);
+    expect(inserted.rowCount).toBe(1);
+    const before = await state();
+    const costs = await readPoShipmentCosts(database, 10);
+    expect(costs).toMatchObject({ supplier: { freightCents: 300, dutyCents: 200 },
+      totals: { freightCents: 5300, dutyCents: 200, combinedCostCents: 27500 },
+      summary: { reviewLines: 1, inventoryCosting: "review_required" },
+      lines: [{ lineId: recordedLine?.lineId, shipmentId: 1, status: "review_required", issues: [issue] }],
+    });
+    expect(costs?.lines[0].applicationId).toBeGreaterThan(0);
+    expect(costs?.lines[0].recordedAt).toBeTruthy();
+    expect(await state()).toEqual(before);
+    expect(await readPoShipmentCostSummary(database, 10)).toEqual(costs?.summary);
   });
 
   async function exactPieceLot() {
