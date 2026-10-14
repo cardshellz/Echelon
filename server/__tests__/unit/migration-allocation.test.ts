@@ -83,6 +83,39 @@ function commitFixture(root: string): string {
   git(root, "commit", "-m", "fixture");
   return git(root, "rev-parse", "HEAD");
 }
+function prMergeFixture(options: { migrationOwner?: number; mutateMain?: "sql" | "sidecar" } = {}) {
+  const { root, migrationsDir } = fixture();
+  const eventBase = commitFixture(root);
+  git(root, "branch", "-M", "fixture-main");
+  const mainMigration = allocateMigration({ migrationsDir, pr: 1801, name: "merged_on_main" });
+  git(root, "add", "migrations");
+  git(root, "commit", "-m", "Advance main with another PR migration");
+  const effectiveBase = git(root, "rev-parse", "HEAD");
+
+  // Ordinary PRs still branch from the event-era base. A PR that edits newly
+  // merged history first includes that history, then changes its SQL/sidecar.
+  git(root, "checkout", "-b", "fixture-pr", options.mutateMain ? effectiveBase : eventBase);
+  if (options.migrationOwner !== undefined) allocateMigration({ migrationsDir, pr: options.migrationOwner, name: "pr_change" });
+  if (options.mutateMain === "sql") writeFileSync(path.join(migrationsDir, mainMigration.migration), "SELECT 'changed after merge';\n");
+  if (options.mutateMain === "sidecar") {
+    writeFileSync(path.join(migrationsDir, "metadata", `${mainMigration.migration}.json`), JSON.stringify(mainMigration, null, 4));
+  }
+  writeFileSync(path.join(root, "pr-change.txt"), "A change outside migrations.\n");
+  git(root, "add", "migrations", "pr-change.txt");
+  git(root, "commit", "-m", "PR changes");
+  const head = git(root, "rev-parse", "HEAD");
+  git(root, "checkout", "fixture-main");
+  git(root, "merge", "--no-ff", "--no-edit", "fixture-pr");
+  const merge = git(root, "rev-parse", "HEAD");
+  const event = { number: 1800, pull_request: { base: { sha: eventBase }, head: { sha: head } } };
+  const eventFile = path.join(root, "event.json");
+  writeFileSync(eventFile, JSON.stringify(event));
+  const environment: NodeJS.ProcessEnv = {
+    GITHUB_EVENT_NAME: "pull_request", GITHUB_EVENT_PATH: eventFile,
+    GITHUB_REF: "refs/pull/1800/merge", GITHUB_SHA: merge,
+  };
+  return { root, migrationsDir, eventBase, effectiveBase, head, merge, event, eventFile, environment, mainMigration };
+}
 function expectCode(action: () => unknown, code: string): void {
   try { action(); throw new Error("Expected rejection"); }
   catch (error) { expect(error).toBeInstanceOf(MigrationPolicyError); expect((error as MigrationPolicyError).code).toBe(code); }
@@ -318,13 +351,89 @@ describe("migration CI provenance and immutability", () => {
   });
   it("uses event-backed PR, push, and merge-group bases; manual dispatch only checks the catalog", () => {
     const sha = "a".repeat(40);
-    expect(ciMigrationContext("pull_request", { number: 1800, pull_request: { base: { sha } } })).toEqual({ base: sha, pr: 1800 });
+    const head = "b".repeat(40);
+    expect(ciMigrationContext("pull_request", { number: 1800, pull_request: { base: { sha }, head: { sha: head } } })).toEqual({ base: sha, pr: 1800, head });
+    expect(ciMigrationContext("pull_request", { number: 1800, pull_request: { base: { sha: "a".repeat(64) }, head: { sha: "b".repeat(64) } } }))
+      .toEqual({ base: "a".repeat(64), pr: 1800, head: "b".repeat(64) });
     expect(ciMigrationContext("push", { before: sha })).toEqual({ base: sha, pr: undefined });
     expect(ciMigrationContext("merge_group", { merge_group: { base_sha: sha } })).toEqual({ base: sha, pr: undefined });
     expect(ciMigrationContext("workflow_dispatch", {})).toEqual({});
     expectCode(() => ciMigrationContext("push", { before: "0".repeat(40) }), "MISSING_MIGRATION_BASE");
     expectCode(() => ciMigrationContext("pull_request", { number: 1800 }), "MISSING_MIGRATION_BASE");
     expectCode(() => ciMigrationContext("pull_request_target", {}), "UNSUPPORTED_MIGRATION_CI_EVENT");
+  });
+  it.each([undefined, null, "", "not-a-sha", "0".repeat(40), "b".repeat(39)])("rejects missing or invalid PR head evidence: %s", (head) => {
+    expectCode(() => ciMigrationContext("pull_request", { number: 1800, pull_request: {
+      base: { sha: "a".repeat(40) }, head: { sha: head },
+    } }), "MISSING_MIGRATION_HEAD");
+  });
+  it.each([undefined, 1800])("does not claim another PR's newly merged migration when the event base is stale (own migration: %s)", (migrationOwner) => {
+    const context = prMergeFixture({ migrationOwner });
+    expect(git(context.root, "rev-list", "--parents", "-n", "1", "HEAD").split(" "))
+      .toEqual([context.merge, context.effectiveBase, context.head]);
+    const before = git(context.root, "status", "--porcelain");
+    expect(runMigrationCheck(["--ci"], context.root, context.environment)).toMatchObject({
+      event: "migration_policy_validated", migrations: migrationOwner === undefined ? 4 : 5,
+      base: context.effectiveBase, eventBase: context.eventBase, pr: 1800,
+    });
+    expect(git(context.root, "status", "--porcelain")).toBe(before);
+  });
+  it("still rejects a new PR migration allocated to somebody else after main advances", () => {
+    const context = prMergeFixture({ migrationOwner: 1802 });
+    expectCode(() => runMigrationCheck(["--ci"], context.root, context.environment), "MIGRATION_PR_OWNERSHIP");
+  });
+  it.each(["sql", "sidecar"] as const)("protects newly merged main %s from edits in the PR", (mutateMain) => {
+    const context = prMergeFixture({ mutateMain });
+    expect(() => validateMigrationDirectory(context.migrationsDir)).not.toThrow();
+    expectCode(() => runMigrationCheck(["--ci"], context.root, context.environment), "MERGED_MIGRATION_IMMUTABLE");
+  });
+  it("rejects absent or mismatched CI checkout identity instead of guessing a base", () => {
+    const context = prMergeFixture();
+    for (const override of [
+      { GITHUB_REF: undefined }, { GITHUB_REF: "refs/pull/1801/merge" }, { GITHUB_REF: "refs/heads/fixture-pr" },
+      { GITHUB_SHA: undefined }, { GITHUB_SHA: "not-a-sha" }, { GITHUB_SHA: "0".repeat(40) }, { GITHUB_SHA: context.head },
+    ]) {
+      expectCode(() => runMigrationCheck(["--ci"], context.root, { ...context.environment, ...override }), "MIGRATION_PR_CHECKOUT_MISMATCH");
+    }
+    writeFileSync(context.eventFile, JSON.stringify({ ...context.event, pull_request: {
+      ...context.event.pull_request, head: { sha: context.effectiveBase },
+    } }));
+    expectCode(() => runMigrationCheck(["--ci"], context.root, context.environment), "MIGRATION_PR_CHECKOUT_MISMATCH");
+  });
+  it("rejects head-only, reversed-parent, and extra-parent checkouts even when their catalog is valid", () => {
+    const context = prMergeFixture();
+    const tree = git(context.root, "rev-parse", "HEAD^{tree}");
+    const reversed = git(context.root, "commit-tree", tree, "-p", context.head, "-p", context.effectiveBase, "-m", "Wrong parent order");
+    const extraParent = git(context.root, "commit-tree", tree, "-p", context.effectiveBase, "-p", context.head, "-p", context.eventBase, "-m", "Not a PR merge");
+    for (const sha of [context.head, reversed, extraParent]) {
+      git(context.root, "checkout", "--detach", sha);
+      expect(() => validateMigrationDirectory(context.migrationsDir)).not.toThrow();
+      expectCode(() => runMigrationCheck(["--ci"], context.root, { ...context.environment, GITHUB_SHA: sha }), "MIGRATION_PR_CHECKOUT_MISMATCH");
+    }
+  });
+  it("requires the event base to be an ancestor of the verified merge's first parent", () => {
+    const context = prMergeFixture();
+    const tree = git(context.root, "rev-parse", "HEAD^{tree}");
+    const unrelated = git(context.root, "commit-tree", tree, "-m", "Unrelated root with an identical tree");
+    const merge = git(context.root, "commit-tree", tree, "-p", unrelated, "-p", context.head, "-m", "Merge from unrelated base history");
+    git(context.root, "checkout", "--detach", merge);
+    expectCode(() => runMigrationCheck(["--ci"], context.root, { ...context.environment, GITHUB_SHA: merge }), "MIGRATION_PR_BASE_MISMATCH");
+  });
+  it("rejects a divergent recorded base even when it shares history with the merge's first parent", () => {
+    const context = prMergeFixture();
+    const tree = git(context.root, "rev-parse", "HEAD^{tree}");
+    const divergent = git(context.root, "commit-tree", tree, "-p", context.eventBase, "-m", "Divergent base branch");
+    writeFileSync(context.eventFile, JSON.stringify({ ...context.event, pull_request: {
+      ...context.event.pull_request, base: { sha: divergent },
+    } }));
+    expectCode(() => runMigrationCheck(["--ci"], context.root, context.environment), "MIGRATION_PR_BASE_MISMATCH");
+  });
+  it("fails closed when the recorded event base is validly shaped but unavailable locally", () => {
+    const context = prMergeFixture();
+    writeFileSync(context.eventFile, JSON.stringify({ ...context.event, pull_request: {
+      ...context.event.pull_request, base: { sha: "f".repeat(40) },
+    } }));
+    expectCode(() => runMigrationCheck(["--ci"], context.root, context.environment), "MIGRATION_GIT_EVIDENCE_UNAVAILABLE");
   });
   it("fails closed on missing event/base evidence and propagates CLI status without dependencies", () => {
     const { root } = fixture();
@@ -341,20 +450,20 @@ describe("migration CI provenance and immutability", () => {
     expect(fail.status).toBe(1); expect(fail.stderr).toContain("MIGRATION_GIT_EVIDENCE_UNAVAILABLE");
   });
   it("executes actual PR and push event files with ownership checks before any package installation", () => {
-    const { root, migrationsDir } = fixture(); const base = commitFixture(root);
-    allocateMigration({ migrationsDir, pr: 1800, name: "ci" });
-    const eventFile = path.join(root, "event.json");
+    const context = prMergeFixture({ migrationOwner: 1800 });
+    const { root, eventFile } = context;
     const isolatedTools = path.join(root, "scripts", "migrations"); mkdirSync(isolatedTools, { recursive: true });
     for (const file of ["check-migrations.mjs", "migration-policy.mjs"]) writeFileSync(path.join(isolatedTools, file), readFileSync(path.join(toolRoot, file)));
-    function check(eventName: string, event: unknown) {
+    function check(eventName: string, event: unknown, pr = 1800) {
       writeFileSync(eventFile, JSON.stringify(event));
       return spawnSync(process.execPath, [path.join(isolatedTools, "check-migrations.mjs"), "--ci"], {
-        cwd: root, env: { ...process.env, NODE_PATH: undefined, GITHUB_EVENT_NAME: eventName, GITHUB_EVENT_PATH: eventFile }, encoding: "utf8",
+        cwd: root, env: { ...process.env, ...context.environment, NODE_PATH: undefined,
+          GITHUB_EVENT_NAME: eventName, GITHUB_REF: `refs/pull/${pr}/merge` }, encoding: "utf8",
       });
     }
-    expect(check("pull_request", { number: 1800, pull_request: { base: { sha: base } } }).status).toBe(0);
-    const wrongOwner = check("pull_request", { number: 1801, pull_request: { base: { sha: base } } });
+    expect(check("pull_request", context.event).status).toBe(0);
+    const wrongOwner = check("pull_request", { ...context.event, number: 1802 }, 1802);
     expect(wrongOwner.status).toBe(1); expect(wrongOwner.stderr).toContain("MIGRATION_PR_OWNERSHIP");
-    expect(check("push", { before: base }).status).toBe(0);
+    expect(check("push", { before: context.eventBase }).status).toBe(0);
   });
 });
