@@ -7,6 +7,7 @@ import {
   listingSettingsPricesResponseSchema,
   listingSettingsProductDetailSchema,
   listingSettingsProductIdsResponseSchema,
+  listingSettingsProductOwnSettingsSchema,
   listingSettingsProductsResponseSchema,
   listingSettingsSummarySchema,
   listingSettingsUpdatedProductsResponseSchema,
@@ -36,6 +37,7 @@ import {
   olderGroupRuleCounts,
   ownCategoryFields,
   productOwnFieldsOf,
+  productOwnSettingsView,
   selectListingSettingsCategories,
   selectListingSettingsCategory,
   selectListingSettingsPrices,
@@ -1641,5 +1643,97 @@ describe("listing settings facts: Card Shellz updated products (plan PR 9, 10.6,
     const nameless = facts(moved({ categoryNames: new Map([[TOPLOADERS_CATEGORY, "Toploaders"]]) }));
     expect(() => selectListingSettingsUpdatedProducts(nameless, { page: 0 })).toThrow(expect.objectContaining({
       code: "DROPSHIP_LISTING_SETTINGS_INVARIANT_FAILED", context: expect.objectContaining({ productId: 2, categoryId: SLEEVES_CATEGORY }) }));
+  });
+});
+
+describe("productOwnSettingsView: one product's own settings (plan PR 10, 4.2)", () => {
+  const SAVED_AT = "2026-10-01T00:00:00.000Z";
+  const catalog = (patch: Partial<DropshipListingCatalogCandidate> = {}) => {
+    const { productId, description, brand, condition, itemSpecifics } = candidate(patch);
+    return { productId, description, brand, condition, itemSpecifics };
+  };
+  /** A current row as PR 8a's reader returns it, parsed with the stored contract so a fixture can't hold a value no row can. */
+  const row = (values: Partial<ProductListingSettingValues>, productId = 501) => productListingSettingRowSchema.parse({
+    storeConnectionId: 5, productId, revisionId: 77, updatedAt: SAVED_AT,
+    values: { price: null, ebayCategory: null, storeShelf: null, shippingPolicy: null, returnPolicy: null, paymentPolicy: null,
+      textAbove: null, textBelow: null, mainText: null, ...values },
+  });
+  const everything = (catalogHash = productCatalogHash(catalog())) => row({
+    price: COST_RECIPE,
+    ebayCategory: { categoryId: "261328", categoryName: "Card Sleeves", path: ["Collectibles", "Card Sleeves"] },
+    storeShelf: { mode: "own", shelves: [{ id: "11", name: "Supplies:Toploaders" }, { id: "12", name: "Sale" }] },
+    shippingPolicy: { id: "F9", name: "Free shipping" },
+    returnPolicy: { id: "R9", name: null },
+    paymentPolicy: { id: "P9", name: "Pay now" },
+    textAbove: { mode: "own", text: "Ships in a rigid mailer." },
+    textBelow: { mode: "none" },
+    mainText: { text: "Our own words.", catalogHash },
+  });
+  const answer = (selection: ReturnType<typeof productOwnSettingsView>) =>
+    listingSettingsProductOwnSettingsSchema.parse({ storeConnectionId: 5, ...selection, generatedAt: GENERATED_AT.toISOString() });
+
+  it("gives only the product's own values, with the names and texts its row stores, and the row's revision", () => {
+    const view = productOwnSettingsView({ productId: 501, row: everything(), catalog: catalog() });
+    expect(answer(view)).toEqual({ storeConnectionId: 5, productId: 501, revisionId: 77, generatedAt: GENERATED_AT.toISOString(), own: {
+      price: COST_RECIPE,
+      ebayCategory: { categoryId: "261328", categoryName: "Card Sleeves" },
+      storeShelf: { mode: "own", shelves: [{ id: "11", name: "Supplies:Toploaders" }, { id: "12", name: "Sale" }] },
+      shippingPolicy: { id: "F9", name: "Free shipping" },
+      returnPolicy: { id: "R9", name: null },
+      paymentPolicy: { id: "P9", name: "Pay now" },
+      textAbove: { mode: "own", text: "Ships in a rigid mailer." },
+      textBelow: { mode: "none" },
+      mainText: { text: "Our own words.", needsCheck: false },
+    } });
+    // The catalog hash and the eBay path stay on the server.
+    expect(JSON.stringify(view)).not.toContain("catalogHash");
+    expect(view.own.ebayCategory).not.toHaveProperty("path");
+  });
+
+  it("gives every value as null and no revision for a product with no row, reading no catalog", () => {
+    expect(answer(productOwnSettingsView({ productId: 501, row: null, catalog: null }))).toEqual({
+      storeConnectionId: 5, productId: 501, revisionId: null, generatedAt: GENERATED_AT.toISOString(), own: {
+        price: null, ebayCategory: null, storeShelf: null, shippingPolicy: null, returnPolicy: null, paymentPolicy: null,
+        textAbove: null, textBelow: null, mainText: null,
+      } });
+  });
+
+  it("keeps a row's explicit None apart from following the default, and a reset row's revision", () => {
+    const view = productOwnSettingsView({ productId: 501, row: row({ storeShelf: { mode: "none" }, textAbove: { mode: "none" } }), catalog: null });
+    expect(view).toMatchObject({ revisionId: 77, own: { storeShelf: { mode: "none" }, textAbove: { mode: "none" }, textBelow: null, mainText: null } });
+    // Every setting reset: the row and its revision stay, every value follows the default.
+    expect(productOwnSettingsView({ productId: 501, row: row({}), catalog: null })).toMatchObject({ revisionId: 77,
+      own: { price: null, shippingPolicy: null, mainText: null } });
+  });
+
+  it("says the main text needs a check once the catalog facts it was written against change, as the size's fix does", () => {
+    expect(productOwnSettingsView({ productId: 501, row: everything(), catalog: catalog() }).own.mainText).toEqual({ text: "Our own words.", needsCheck: false });
+    for (const changed of [{ description: "New catalog text." }, { brand: "Other" }, { condition: "used" }, { itemSpecifics: { Size: ["35pt"] } }]) {
+      expect(productOwnSettingsView({ productId: 501, row: everything(), catalog: catalog(changed) }).own.mainText)
+        .toEqual({ text: "Our own words.", needsCheck: true });
+    }
+    // Another size's candidate gives the same product facts: a size-only fact asks for no check.
+    expect(productOwnSettingsView({ productId: 501, row: everything(),
+      catalog: candidate({ productVariantId: 999, sku: "TL-CASE", variantName: "Case", gtin: "0123" }) }).own.mainText?.needsCheck).toBe(false);
+  });
+
+  it("hands out new objects and never changes the stored row", () => {
+    const stored = everything();
+    const before = structuredClone(stored);
+    const view = productOwnSettingsView({ productId: 501, row: stored, catalog: catalog() });
+    expect(view.own.price).not.toBe(stored.values.price);
+    expect(view.own.shippingPolicy).not.toBe(stored.values.shippingPolicy);
+    expect(view.own.storeShelf).not.toBe(stored.values.storeShelf);
+    expect(view.own.textAbove).not.toBe(stored.values.textAbove);
+    (view.own.shippingPolicy as { name: string | null }).name = "changed";
+    expect(stored).toEqual(before);
+  });
+
+  it("refuses a row or catalog facts of another product, and a main text without its catalog facts, as faults", () => {
+    const fault = (productId: number) => expect.objectContaining({ code: "DROPSHIP_LISTING_SETTINGS_INVARIANT_FAILED",
+      context: expect.objectContaining({ productId }) });
+    expect(() => productOwnSettingsView({ productId: 502, row: everything(), catalog: null })).toThrow(fault(502));
+    expect(() => productOwnSettingsView({ productId: 501, row: row({}), catalog: catalog({ productId: 502 }) })).toThrow(fault(501));
+    expect(() => productOwnSettingsView({ productId: 501, row: everything(), catalog: null })).toThrow(fault(501));
   });
 });

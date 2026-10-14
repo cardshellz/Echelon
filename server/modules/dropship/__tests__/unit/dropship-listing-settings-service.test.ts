@@ -4,8 +4,11 @@ import {
   listingSettingsCategoriesResponseSchema,
   listingSettingsCategoryDetailSchema,
   listingSettingsProductDetailSchema,
+  listingSettingsProductOwnSettingsSchema,
   listingSettingsUpdatedProductsResponseSchema,
 } from "../../../../../shared/dropship/listing-settings";
+import { productListingSettingRowSchema, type ProductListingSettingValues } from "../../../../../shared/dropship/listing-setting-values";
+import { productCatalogHash } from "../../application/dropship-listing-content-resolver";
 import { DropshipError } from "../../domain/errors";
 import type { DropshipVendorVariantOverride } from "../../domain/vendor-selection";
 import { prepareEbayCategoryRules, resolveEbayListingCategory } from "../../application/dropship-ebay-category-resolver";
@@ -15,6 +18,7 @@ import { EMPTY_LISTING_SETTING_LAYERS } from "../../application/dropship-listing
 import {
   DropshipListingSettingsService,
   type ListingSettingsLoad,
+  type ListingSettingsProductOwnRead,
   type ListingSettingsRepository,
   type ListingSettingsStockSource,
 } from "../../application/dropship-listing-settings-service";
@@ -59,13 +63,25 @@ class FakeRepository implements ListingSettingsRepository {
   next: ListingSettingsLoad | null = { state: "ok", fingerprint: "fp-1", inputs: inputs([candidate(11)]), costReadFailed: false };
   fingerprintReads: Array<{ memberId: string; storeConnectionId: number }> = [];
   loads: Array<{ memberId: string; storeConnectionId: number; now: Date }> = [];
+  /** While set, a load waits for it (reads that miss the cache together); `loadError` makes a load fail. */
+  gate: Promise<void> | null = null;
+  loadError: Error | null = null;
   async readFingerprint(input: { memberId: string; storeConnectionId: number }) {
     this.fingerprintReads.push(input);
     return this.fingerprint;
   }
   async load(input: { memberId: string; storeConnectionId: number; now: Date }) {
     this.loads.push(input);
+    if (this.gate) await this.gate;
+    if (this.loadError) throw this.loadError;
     return this.next;
+  }
+  ownRead: ListingSettingsProductOwnRead | Error = { row: null, catalog: null };
+  ownReads: Array<{ vendorId: number; storeConnectionId: number; productId: number; productVariantIds: readonly number[] }> = [];
+  async readProductOwnSettings(input: { vendorId: number; storeConnectionId: number; productId: number; productVariantIds: readonly number[] }) {
+    this.ownReads.push(input);
+    if (this.ownRead instanceof Error) throw this.ownRead;
+    return this.ownRead;
   }
 }
 
@@ -143,6 +159,40 @@ describe("listing settings service", () => {
     now = new Date(T0.getTime() + 60_000);
     await service.getSummaryForMember("member-1", { storeConnectionId: 5 });
     expect(repository.loads).toHaveLength(2);
+  });
+
+  it("shares one load between reads that miss the cache at the same time, and keeps no failed one (PR 10)", async () => {
+    let open: () => void = () => undefined;
+    repository.gate = new Promise((resolve) => { open = resolve; });
+    // The drawer's two reads and the step's summary, all at once on an empty cache.
+    const reads = Promise.all([
+      service.getProductForMember("member-1", { storeConnectionId: 5, productId: 501 }),
+      service.getProductOwnSettings("member-1", { storeConnectionId: 5, productId: 501 }),
+      service.getSummaryForMember("member-1", { storeConnectionId: 5 }),
+    ]);
+    await vi.waitFor(() => expect(repository.fingerprintReads).toHaveLength(3));
+    open();
+    const [detail, own, summary] = await reads;
+    expect([detail.product.productId, own.productId, summary.catalog]).toEqual([501, 501, { state: "ok", products: 1, sizes: 1 }]);
+    expect(repository.loads).toHaveLength(1);
+    // Then cached: one more read loads nothing.
+    await service.getSummaryForMember("member-1", { storeConnectionId: 5 });
+    expect(repository.loads).toHaveLength(1);
+
+    // A failed build fails every read that joined it, and the next read loads again.
+    repository.gate = null;
+    repository.fingerprint = "fp-2";
+    repository.loadError = new Error("connection reset");
+    const failed = await Promise.allSettled([
+      service.getSummaryForMember("member-1", { storeConnectionId: 5 }),
+      service.getProductOwnSettings("member-1", { storeConnectionId: 5, productId: 501 }),
+    ]);
+    expect(failed.map((result) => (result.status === "rejected" ? String(result.reason) : "ok"))).toEqual(["Error: connection reset", "Error: connection reset"]);
+    expect(repository.loads).toHaveLength(2);
+    repository.loadError = null;
+    repository.next = { state: "ok", fingerprint: "fp-2", inputs: inputs([candidate(11)]), costReadFailed: false };
+    await service.getSummaryForMember("member-1", { storeConnectionId: 5 });
+    expect(repository.loads).toHaveLength(3);
   });
 
   it("keeps each member's and store's views apart", async () => {
@@ -414,5 +464,101 @@ describe("listing settings service: Card Shellz updated products (plan PR 9, 10.
     await expect(service.listUpdatedProductsForMember("member-1", { storeConnectionId: 5 }))
       .rejects.toMatchObject({ code: "DROPSHIP_STORE_CONNECTION_REQUIRED" });
     expect(stock.atpReads).toHaveLength(0);
+  });
+});
+
+describe("listing settings service: one product's own settings (plan PR 10, 4.2)", () => {
+  const T1 = new Date(T0.getTime() + 30_000);
+  const values = (patch: Partial<ProductListingSettingValues>): ProductListingSettingValues => ({ price: null, ebayCategory: null,
+    storeShelf: null, shippingPolicy: null, returnPolicy: null, paymentPolicy: null, textAbove: null, textBelow: null, mainText: null, ...patch });
+  const ownRow = (revisionId: number, patch: Partial<ProductListingSettingValues>) => productListingSettingRowSchema.parse({
+    storeConnectionId: 5, productId: 501, revisionId, updatedAt: T0.toISOString(), values: values(patch) });
+  const catalogOf = (row: DropshipListingCatalogCandidate) =>
+    ({ productId: row.productId, description: row.description, brand: row.brand, condition: row.condition, itemSpecifics: row.itemSpecifics });
+
+  it("gives the product's own values, stored names and revision from its row read now, never from the cached views", async () => {
+    repository.next = { state: "ok", fingerprint: "fp-1", inputs: inputs([candidate(12), candidate(11), candidate(21, 502)]), costReadFailed: false };
+    repository.ownRead = { row: ownRow(77, { shippingPolicy: { id: "F9", name: "Free shipping" }, returnPolicy: { id: "R9", name: null },
+      storeShelf: { mode: "none" } }), catalog: null };
+
+    const own = await service.getProductOwnSettings("member-1", { storeConnectionId: 5, productId: 501 });
+
+    expect(listingSettingsProductOwnSettingsSchema.parse(own)).toEqual({ storeConnectionId: 5, productId: 501, revisionId: 77,
+      own: { price: null, ebayCategory: null, storeShelf: { mode: "none" }, shippingPolicy: { id: "F9", name: "Free shipping" },
+        returnPolicy: { id: "R9", name: null }, paymentPolicy: null, textAbove: null, textBelow: null, mainText: null },
+      generatedAt: T0.toISOString() });
+    // The store's vendor, the product and its chosen sizes (as the views list them) go to the one row read.
+    expect(repository.ownReads).toEqual([{ vendorId: 7, storeConnectionId: 5, productId: 501, productVariantIds: [11, 12] }]);
+
+    // A save between two reads shows at once: the row is read on every request, the views once.
+    now = T1;
+    repository.ownRead = { row: ownRow(78, { shippingPolicy: null }), catalog: null };
+    const after = await service.getProductOwnSettings("member-1", { storeConnectionId: 5, productId: 501 });
+    expect(after).toMatchObject({ revisionId: 78, own: { shippingPolicy: null }, generatedAt: T1.toISOString() });
+    expect(repository.loads).toHaveLength(1);
+    expect(repository.ownReads).toHaveLength(2);
+  });
+
+  it("gives nulls and no revision for a product with no own row", async () => {
+    const own = await service.getProductOwnSettings("member-1", { storeConnectionId: 5, productId: 501 });
+    expect(own).toMatchObject({ productId: 501, revisionId: null, own: { price: null, storeShelf: null, mainText: null } });
+    expect(listingSettingsProductOwnSettingsSchema.safeParse(own).success).toBe(true);
+  });
+
+  it("checks a main text against the catalog facts read with the row", async () => {
+    const row = candidate(11);
+    repository.ownRead = { row: ownRow(77, { mainText: { text: "Our words.", catalogHash: productCatalogHash(row) } }), catalog: catalogOf(row) };
+    expect((await service.getProductOwnSettings("member-1", { storeConnectionId: 5, productId: 501 })).own.mainText)
+      .toEqual({ text: "Our words.", needsCheck: false });
+    repository.ownRead = { row: ownRow(77, { mainText: { text: "Our words.", catalogHash: productCatalogHash(row) } }),
+      catalog: catalogOf({ ...row, description: "Card Shellz changed this." }) };
+    expect((await service.getProductOwnSettings("member-1", { storeConnectionId: 5, productId: 501 })).own.mainText)
+      .toEqual({ text: "Our words.", needsCheck: true });
+  });
+
+  it("refuses a product whose chosen sizes the catalog no longer lists while its main text needs them", async () => {
+    repository.ownRead = { row: ownRow(77, { mainText: { text: "Our words.", catalogHash: "a".repeat(64) } }), catalog: null };
+    await expect(service.getProductOwnSettings("member-1", { storeConnectionId: 5, productId: 501 }))
+      .rejects.toMatchObject({ code: "DROPSHIP_LISTING_SETTINGS_PRODUCT_NOT_FOUND", context: { storeConnectionId: 5, productId: 501 } });
+  });
+
+  it("refuses a product none of whose sizes is chosen, with the product detail's 404, before reading its row", async () => {
+    await expect(service.getProductOwnSettings("member-1", { storeConnectionId: 5, productId: 999 }))
+      .rejects.toMatchObject({ code: "DROPSHIP_LISTING_SETTINGS_PRODUCT_NOT_FOUND", context: { storeConnectionId: 5, productId: 999 } });
+    await expect(service.getProductForMember("member-1", { storeConnectionId: 5, productId: 999 }))
+      .rejects.toMatchObject({ code: "DROPSHIP_LISTING_SETTINGS_PRODUCT_NOT_FOUND", context: { storeConnectionId: 5, productId: 999 } });
+    expect(repository.ownReads).toHaveLength(0);
+  });
+
+  it("refuses bad input, a store it does not own, a selection over 10,000 sizes and a store not on eBay, before reading a row", async () => {
+    await expect(service.getProductOwnSettings("member-1", { storeConnectionId: 5, productId: Number.NaN })).rejects.toBeInstanceOf(ZodError);
+    await expect(service.getProductOwnSettings("member-1", { storeConnectionId: 5, productId: 501, extra: 1 })).rejects.toBeInstanceOf(ZodError);
+    await expect(service.getProductOwnSettings(" ", { storeConnectionId: 5, productId: 501 })).rejects.toMatchObject({ code: "DROPSHIP_AUTH_REQUIRED" });
+    expect(repository.fingerprintReads).toHaveLength(0);
+    repository.fingerprint = null;
+    await expect(service.getProductOwnSettings("member-1", { storeConnectionId: 5, productId: 501 }))
+      .rejects.toMatchObject({ code: "DROPSHIP_STORE_CONNECTION_REQUIRED", context: { storeConnectionId: 5 } });
+    repository.fingerprint = "fp-1";
+    repository.next = { state: "too_large", fingerprint: "fp-1", store,
+      storeLevel: { pricing: emptyState, listingConfig: null, ebayCategoryRules: emptyState, content: emptyState } };
+    await expect(service.getProductOwnSettings("member-1", { storeConnectionId: 5, productId: 501 }))
+      .rejects.toMatchObject({ code: "DROPSHIP_LISTING_SETTINGS_TOO_LARGE", context: { storeConnectionId: 5 } });
+    repository.fingerprint = "fp-2";
+    repository.next = { state: "not_ebay", fingerprint: "fp-2", store: { ...store, platform: "shopify" } };
+    await expect(service.getProductOwnSettings("member-1", { storeConnectionId: 5, productId: 501 }))
+      .rejects.toMatchObject({ code: "DROPSHIP_LISTING_SETTINGS_EBAY_ONLY" });
+    expect(repository.ownReads).toHaveLength(0);
+  });
+
+  it("fails the request when the row read fails, and reads nothing else: no stock, no eBay, no write", async () => {
+    repository.ownRead = new Error("connection reset");
+    await expect(service.getProductOwnSettings("member-1", { storeConnectionId: 5, productId: 501 })).rejects.toThrow("connection reset");
+    // The read service has no eBay port and its repository no write; the only calls are the three reads.
+    expect(Object.getOwnPropertyNames(Object.getPrototypeOf(repository)).filter((name) => name !== "constructor").sort())
+      .toEqual(["load", "readFingerprint", "readProductOwnSettings"]);
+    expect([repository.fingerprintReads.length, repository.loads.length, repository.ownReads.length]).toEqual([1, 1, 1]);
+    expect(stock.atpReads).toHaveLength(0);
+    expect(stock.capReads).toHaveLength(0);
+    expect(warnings).toEqual([]);
   });
 });

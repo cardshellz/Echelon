@@ -17,9 +17,11 @@ import { DropshipApiError, type DropshipEbayFulfillmentCapability, type Dropship
 import {
   CHECKING_EBAY,
   GROUP_RULE_ORDER_NOTE,
+  LISTING_SETTINGS_EDIT_WORDS,
   NOT_SET_NEEDED_TO_LIST,
   SIZES_DIFFER_WORDS,
   WORKS_WITH_CARD_SHELLZ_SHIPPING,
+  changeSettingLabel,
   connectionBannerWords,
   drawerDescriptionTemplateValue,
   drawerEbayCategoryValue,
@@ -32,6 +34,9 @@ import {
   fulfillmentIssueReasons,
   ownSettingsSentence,
   ownSettingsWords,
+  fieldEditorLabel,
+  pendingSettingWords,
+  productNotFoundWords,
   productStatusWords,
   rightReasonLine,
   shippingPolicyFit,
@@ -86,9 +91,10 @@ describe("connection banner words (plan 4.4)", () => {
     expect(say("store_disconnected").message).toBe("MyShop is disconnected, so its settings can't be changed now.");
     expect(say("too_large").message).toBe("You've chosen more than 10,000 sizes. Settings can't be checked until you choose 10,000 or fewer.");
     expect(say("other_site").message).toBe("Card Shellz lists on eBay US only. MyShop is set up for another eBay site. Contact support.");
-    expect(say("selling_paused").message).toBe("Selling is paused on your account. Prices, eBay categories and descriptions can't be changed until it resumes.");
-    expect(say("ops_inactive").message).toBe("Your Shellz Club .ops access is inactive, so prices, eBay categories and descriptions can't be changed. Contact support.");
-    expect(say("sign_in").message).toBe("eBay needs you to sign in again for MyShop. Your settings are safe. Until you do, you can still change prices and descriptions.");
+    // PR 10's words (plan 12.2): a product's own settings join what a pause locks, and a sign-in leaves the defaults.
+    expect(say("selling_paused").message).toBe("Selling is paused on your account. Prices, products and categories can't be changed until it resumes.");
+    expect(say("ops_inactive").message).toBe("Your Shellz Club .ops access is inactive, so prices, products and categories can't be changed. Contact support.");
+    expect(say("sign_in").message).toBe("eBay needs you to sign in again for MyShop. You can still change prices, text and defaults.");
     expect(say("access_denied", "8d1c7f0e-2b8b").message).toBe("eBay won't let Card Shellz read MyShop. Signing in again won't fix this. Contact support and give this code: 8d1c7f0e-2b8b.");
     expect(say("access_denied").message).toBe("eBay won't let Card Shellz read MyShop. Signing in again won't fix this. Contact support.");
     expect(say("unreachable").message).toBe("Can't reach eBay right now. Your saved settings still apply.");
@@ -128,7 +134,7 @@ describe("connection banner words (plan 4.4)", () => {
       accessDenied: paused({ setup: { error: refused(403, "DROPSHIP_EBAY_LISTING_SETUP_ACCESS_DENIED") } }),
       unreachable: paused({ setup: { error: refused(502, "DROPSHIP_EBAY_LISTING_SETUP_UNAVAILABLE") } }),
     };
-    const message = "Selling is paused on your account. Prices, eBay categories and descriptions can't be changed until it resumes.";
+    const message = "Selling is paused on your account. Prices, products and categories can't be changed until it resumes.";
     for (const [name, cell] of Object.entries(cells)) {
       const shown = chooseConnectionBanner(cell);
       expect(shown?.kind, name).toBe("selling_paused");
@@ -145,7 +151,7 @@ describe("connection banner words (plan 4.4)", () => {
     expect(connectionBannerWords({ kind: "store_paused", diagnosticReference: null }, "  ").message)
       .toBe("Your eBay store is paused, so its settings can't be changed now.");
     expect(connectionBannerWords({ kind: "sign_in", diagnosticReference: null }, "").message)
-      .toBe("eBay needs you to sign in again for your eBay store. Your settings are safe. Until you do, you can still change prices and descriptions.");
+      .toBe("eBay needs you to sign in again for your eBay store. You can still change prices, text and defaults.");
   });
 });
 
@@ -335,15 +341,15 @@ describe("the product drawer (C16, C17)", () => {
         expectPlain(words.note);
       }
     }
-    // Product and category values (interim tags, R:§3.7). A category is named by the server.
-    expect(drawerSourceWords("shippingPolicy", { source: "product", ruleName: null })).toEqual({ tag: "This product", note: null });
+    // Product and category values (PR 10 tags, plan 12.2). A category is named by the server.
+    expect(drawerSourceWords("shippingPolicy", { source: "product", ruleName: null })).toEqual({ tag: "Set for this product", note: null });
     expect(drawerSourceWords("storeShelf", { source: "category", ruleName: "Sleeves" })).toEqual({ tag: "From category: Sleeves", note: null });
     expect(drawerSourceWords("ebayCategory", { source: "category", ruleName: null }).tag).toBe("From its Card Shellz category");
     expect(drawerSourceWords("shippingPolicy", { source: "store_default", ruleName: null })).toEqual({ tag: "Store default", note: null });
     expect(drawerSourceWords("descriptionTemplate", { source: "group_rule", ruleName: "Envelopes" }))
       .toEqual({ tag: "From your older group rule “Envelopes”", note: GROUP_RULE_ORDER_NOTE });
-    expect(GROUP_RULE_ORDER_NOTE).toBe("Older group rules come after a product's own settings and before your store defaults.");
-    expect(drawerSourceWords("storeShelf", { source: "size", ruleName: null }).tag).toBe("Set on each size");
+    expect(GROUP_RULE_ORDER_NOTE).toBe("Older group rules come after a product's own settings and before category settings and store defaults.");
+    expect(drawerSourceWords("storeShelf", { source: "size", ruleName: null }).tag).toBe("Set on this size");
     expect(drawerSourceWords("ebayCategory", { source: "catalog", ruleName: null }).tag).toBe("Card Shellz picks");
     expect(drawerSourceWords("mainText", { source: "catalog", ruleName: null }).tag).toBeNull();
     expect(drawerSourceWords("paymentPolicy", { source: "none", ruleName: null }).tag).toBeNull();
@@ -370,6 +376,18 @@ describe("the product drawer (C16, C17)", () => {
     expect(drawerMainTextValue({ own: true })).toBe("Main text: your own (set in step 3)");
   });
 
+  it("names a product's own policy from its own read when eBay wasn't read, or doesn't have it (PR 10, G2)", () => {
+    const readOnly = policySetup({ checks: { ebay: "not_checked", fulfillment: { status: "not_checked" } } });
+    expect(drawerPolicyValue("returnPolicy", { policyId: "R7" }, { data: readOnly }, "60 days")).toBe("60 days");
+    expect(drawerPolicyValue("returnPolicy", { policyId: "R7" }, { error: new Error("down") }, "60 days")).toBe("60 days");
+    expect(drawerPolicyValue("returnPolicy", { policyId: "R7" }, { data: policySetup() }, "60 days")).toBe("60 days (no longer on eBay)");
+    // eBay's live name wins, and a blank stored name is no name.
+    expect(drawerPolicyValue("returnPolicy", { policyId: "R1" }, { data: policySetup() }, "Old name")).toBe("30 days");
+    expect(drawerPolicyValue("returnPolicy", { policyId: "R7" }, { error: new Error("down") }, "  ")).toBe("Set");
+    // Loading: as before, eBay is being checked.
+    expect(drawerPolicyValue("returnPolicy", { policyId: "R7" }, {}, "60 days")).toBe(CHECKING_EBAY);
+  });
+
   it("never prints a policy id or a category number", () => {
     const values = [
       drawerPolicyValue("returnPolicy", { policyId: "R7-6110958000" }, { data: policySetup() }),
@@ -387,6 +405,52 @@ describe("the product drawer (C16, C17)", () => {
     expect(usedByWords(["A", "B", "C"])).toBe("used by A, B and C");
     expect(usedByWords(["A", "B", "C", "D", "E"])).toBe("used by A, B, C and 2 more");
     expect(usedByWords([])).toBe("used by no chosen size");
+  });
+});
+
+describe("editing a product's own settings (PR 10 proposals, plan 12.2)", () => {
+  it("keeps every word plain, with no code, id or snake_case", () => {
+    for (const [name, words] of Object.entries(LISTING_SETTINGS_EDIT_WORDS)) {
+      expect({ name, plain: RAW_CODE.test(words) || words.trim() !== words || words.length === 0 }).toEqual({ name, plain: false });
+    }
+  });
+
+  it("names the product in a drawer row's Change (plan 3.4)", () => {
+    expect(changeSettingLabel("Shipping policy", "Penny Sleeves")).toBe("Change shipping policy for Penny Sleeves");
+    expect(changeSettingLabel("eBay category", " Penny Sleeves ")).toBe("Change eBay category for Penny Sleeves");
+    expect(changeSettingLabel("Return policy", "  ")).toBe("Change return policy");
+  });
+
+  it("uses the plan's words", () => {
+    expect(LISTING_SETTINGS_EDIT_WORDS).toMatchObject({
+      useDefault: "Use default",
+      done: "Done",
+      otherChangeFirst: "Save or discard your other change first.",
+      ownReadFailed: "Couldn't load this product's settings. Try again.",
+      signInFieldLine: "Sign in to eBay again to pick a new one. You can still use the default.",
+      busyHeavy: "Another big change is saving. Nothing was saved. Try again in a few seconds.",
+      busyKeyChanged: "Listing settings are busy. Nothing was saved. Try again in a few seconds.",
+      signedOut: "You're signed out. Sign in again, then save.",
+      fatal: "Something went wrong on our side. Reload to see what's saved. If it happens again, contact support.",
+      tooBig: "This change is too big to send at once. Choose fewer products.",
+      invalid: "This change couldn't be saved. Reload the page and try again.",
+      policyGone: "That policy is no longer on eBay. Pick another one.",
+      categoryGone: "eBay no longer accepts that category. Search again and pick another.",
+      shelfTooLong: "eBay names this shelf in a way we can't use. Pick another shelf.",
+      storeTextLimit: "Your store has too much saved text. Shorten text on other products, or set it once on a category or as your store default.",
+      // Proposals beyond plan 12.2 (BUILD-NOTES): a Check again that keeps its doubt (D7b), and the review round's.
+      stillUnconfirmed: "We couldn't confirm your save. Wait a few seconds, then check again.",
+      stillUnconfirmedRateLimited: "We couldn't confirm your save. Too many saves in a minute. Wait a moment, then check again.",
+      defaultOnlyLine: "You can't pick a new one right now. You can still use the default.",
+      finishEditorFirst: "Press Done or Cancel first.",
+      cantBuild: "This change can't be saved as it is. Check it and save again.",
+    });
+    for (const words of Object.values(LISTING_SETTINGS_EDIT_WORDS)) expectPlain(words);
+    expect(pendingSettingWords("Free Standard US")).toBe("→ Free Standard US · Not saved");
+    expect(fieldEditorLabel("Shipping policy", "Penny Sleeves")).toBe("Shipping policy for Penny Sleeves");
+    expect(fieldEditorLabel("Return policy", " ")).toBe("Return policy");
+    expect(productNotFoundWords("Marz Cards")).toBe("This product isn't chosen for Marz Cards. Choose it in step 1.");
+    expect(productNotFoundWords(" ")).toBe("This product isn't chosen for your eBay store. Choose it in step 1.");
   });
 });
 
