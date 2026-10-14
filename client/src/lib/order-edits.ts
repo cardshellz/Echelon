@@ -56,6 +56,18 @@ export class OrderEditRequestError extends Error {
   }
 }
 
+/** Eligibility conflicts need a different order or staff action, not a repeat read. */
+export function orderEditCanRetryOrderLoad(error: unknown): boolean {
+  return !(
+    error instanceof OrderEditRequestError &&
+    !error.uncertain &&
+    error.status === 409 &&
+    ["ORDER_EDIT_SHIPMENT_NOT_EDITABLE", "ORDER_EDIT_PICKING_CUTOFF"].includes(
+      error.code,
+    )
+  );
+}
+
 const serverError = z.object({
   error: z
     .union([

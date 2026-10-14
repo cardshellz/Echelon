@@ -26,7 +26,11 @@ function ready() {
   };
 }
 function fixture() {
-  const orders = [{ ...ready(), order_edit_operation_id: OPERATION }];
+  const orders: Array<ReturnType<typeof ready>> = [{ ...ready(), order_edit_operation_id: OPERATION }];
+  const shipments: Array<{
+    id: number; order_id: number; provider_order_id: number | null;
+    shipping_engine: string | null; status: string; held: boolean; requires_review: boolean;
+  }> = [];
   const items: OrderEditWarehouseItem[] = [
     {
       id: 1,
@@ -83,7 +87,7 @@ function fixture() {
       return { rows: structuredClone(orders) };
     if (text.includes("FROM oms.order_edit_operations"))
       return { rows: [{ id: OPERATION }] };
-    if (text.includes("FROM wms.outbound_shipments")) return { rows: [] };
+    if (text.includes("FROM wms.outbound_shipments")) return { rows: structuredClone(shipments) };
     if (text.includes("FROM wms.order_items"))
       return { rows: structuredClone(items) };
     if (text.includes("FROM oms.oms_order_lines"))
@@ -100,6 +104,7 @@ function fixture() {
   };
   return {
     orders,
+    shipments,
     items,
     commands,
     client,
@@ -109,10 +114,42 @@ function fixture() {
 }
 
 describe("order edit warehouse cutoff", () => {
+  it("returns plain shipped eligibility even when no active shipment row is present", async () => {
+    const f = fixture();
+    f.orders[0].warehouse_status = "shipped";
+    f.orders[0].order_edit_operation_id = null;
+    await expect(f.gateway.inspect(20)).resolves.toMatchObject({
+      editable: false,
+      reasons: ["This order has shipped and can no longer be edited."],
+    });
+    await expect(f.gateway.acquire(20, OPERATION)).rejects.toMatchObject({
+      code: "ORDER_EDIT_PICKING_CUTOFF",
+      message: "This order has shipped and can no longer be edited.",
+    });
+    expect(f.provider.synchronizeOrderEditShipment).not.toHaveBeenCalled();
+    expect(f.commands.some((sql) => sql.includes("UPDATE wms.orders"))).toBe(false);
+  });
+
+  it("preserves the shipment conflict code and stops before acquiring a hold for a shipped order", async () => {
+    const f = fixture();
+    f.orders[0].warehouse_status = "shipped";
+    f.shipments.push({
+      id: 7, order_id: 10, provider_order_id: 9, shipping_engine: "shipstation",
+      status: "shipped", held: false, requires_review: false,
+    });
+    for (const action of [() => f.gateway.inspect(20), () => f.gateway.acquire(20, OPERATION)])
+      await expect(action()).rejects.toMatchObject({
+        code: "ORDER_EDIT_SHIPMENT_NOT_EDITABLE",
+        message: "This order has shipped and can no longer be edited.",
+      });
+    expect(f.commands).toContain("ROLLBACK");
+    expect(f.provider.synchronizeOrderEditShipment).not.toHaveBeenCalled();
+    expect(f.commands.some((sql) => sql.includes("UPDATE wms.orders"))).toBe(false);
+  });
+
   it("allows an untouched ready order without removing a manual hold", () => {
-    expect(orderEditWarehouseBlockers([{ ...ready(), on_hold: 1 }])).toEqual(
-      [],
-    );
+    const manuallyHeldOrder = { ...ready(), on_hold: 1 };
+    expect(orderEditWarehouseBlockers([manuallyHeldOrder])).toEqual([]);
   });
   it.each([
     { started_at: new Date("2026-10-05T00:00:00Z") },

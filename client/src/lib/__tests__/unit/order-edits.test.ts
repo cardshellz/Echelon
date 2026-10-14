@@ -6,6 +6,8 @@ import {
   orderEditOperationFromSearch,
   orderEditRequest,
   orderEditCanCommit,
+  orderEditCanRetryOrderLoad,
+  OrderEditRequestError,
   safeOrderEditPaymentUrl,
   savePendingOrderEditQuote,
   loadPendingOrderEditQuote,
@@ -55,6 +57,24 @@ const operation: OrderEditOperation = {
   canAbandon: true,
 };
 const jsonResponse = (value: unknown) => new Response(JSON.stringify(value));
+
+describe("order load retry", () => {
+  it.each(["ORDER_EDIT_SHIPMENT_NOT_EDITABLE", "ORDER_EDIT_PICKING_CUTOFF"])(
+    "does not offer retry for a verified %s eligibility conflict",
+    (code) => {
+      expect(orderEditCanRetryOrderLoad(new OrderEditRequestError("Blocked", code, 409, false))).toBe(false);
+    },
+  );
+  it.each([
+    new OrderEditRequestError("Offline", "ORDER_EDIT_CONNECTION_FAILED", null, false),
+    new OrderEditRequestError("Unavailable", "ORDER_EDIT_UNAVAILABLE", 503, false),
+    new OrderEditRequestError("Unknown conflict", "UNRECOGNIZED", 409, false),
+    new OrderEditRequestError("Unknown result", "ORDER_EDIT_SHIPMENT_NOT_EDITABLE", 503, true),
+    new Error("Unknown failure"),
+  ])("retains recovery for transient, unknown, or uncertain failures: %s", (error) => {
+    expect(orderEditCanRetryOrderLoad(error)).toBe(true);
+  });
+});
 
 describe("order edit product catalog transport", () => {
   const productId = "gid://shopify/Product/10";

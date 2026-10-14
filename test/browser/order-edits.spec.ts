@@ -157,6 +157,8 @@ async function installFixtures(
     soldOutCatalogProduct?: boolean;
     delayedCatalog?: { search: string; response: Promise<void> };
     includeSpecialProducts?: boolean;
+    orderLoadError?: { code: string; message: string; status: number };
+    orderEligibility?: OrderEditOrder["eligibility"];
   } = {},
 ) {
   const failures: string[] = [];
@@ -279,10 +281,15 @@ async function installFixtures(
         },
       });
     }
-    if (path === `${ORDER_EDIT_API}/orders/51`)
+    if (path === `${ORDER_EDIT_API}/orders/51`) {
+      if (options.orderLoadError) {
+        const { status, code, message } = options.orderLoadError;
+        return route.fulfill({ status, json: { error: { code, message } } });
+      }
       return route.fulfill({
-        json: { ...order, activeOperationId: activeOperationId() },
+        json: { ...order, eligibility: options.orderEligibility ?? order.eligibility, activeOperationId: activeOperationId() },
       });
+    }
     if (path.startsWith(`${ORDER_EDIT_API}/catalog/`)) {
       expect(request.headers()[ORDER_EDIT_CATALOG_HEADER.toLowerCase()]).toBe(ORDER_EDIT_CATALOG_VERSION);
       expect(method).toBe("GET");
@@ -657,6 +664,59 @@ async function addStorageBox(page: Page) {
     .click();
   await picker.getByRole("button", { name: "Done", exact: true }).click();
 }
+
+test("shipped orders explain the cutoff without offering Retry order or starting an edit", async ({ page }) => {
+  const fixture = await installFixtures(page, {
+    orderLoadError: {
+      status: 409, code: "ORDER_EDIT_SHIPMENT_NOT_EDITABLE",
+      message: "This order has shipped and can no longer be edited.",
+    },
+  });
+  await page.goto("/order-edits");
+  await page.getByLabel("Find an order").fill("60000");
+  await page.getByRole("button", { name: /#60000 Test Customer/ }).click();
+  await expect(page.getByRole("alert")).toHaveText("This order has shipped and can no longer be edited.");
+  await expect(page.getByRole("button", { name: "Retry order", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Retry failed loads", exact: true })).toHaveCount(0);
+  await expect(page.getByText("Some data on this page could not be loaded.", { exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Add products", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Review changes", exact: true })).toHaveCount(0);
+  await expect(page.getByLabel("Find an order")).toBeEnabled();
+  await assertFitsScreen(page);
+  expect(fixture.requests.filter((request) => request.path.endsWith("/orders/51"))).toHaveLength(1);
+  expect(fixture.requests.some((request) => request.method !== "GET" && request.path.startsWith(ORDER_EDIT_API))).toBe(false);
+  expect(fixture.failures).toEqual([]);
+});
+
+test("an order already being prepared uses regular language and disables editing", async ({ page }) => {
+  const fixture = await installFixtures(page, {
+    orderEligibility: {
+      editable: false,
+      reasons: ["We're already preparing this order, so it can no longer be edited."],
+    },
+  });
+  await chooseOrder(page);
+  await expect(page.getByRole("alert")).toHaveText("We're already preparing this order, so it can no longer be edited.");
+  await expect(page.getByRole("spinbutton", { name: /Quantity/ })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "Review changes", exact: true })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "Add products", exact: true })).toHaveCount(0);
+  expect(fixture.requests.some((request) => request.method !== "GET" && request.path.startsWith(ORDER_EDIT_API))).toBe(false);
+  expect(fixture.failures).toEqual([]);
+});
+
+test("a temporary order-load failure still offers Retry order", async ({ page }) => {
+  const fixture = await installFixtures(page, {
+    orderLoadError: { status: 503, code: "ORDER_EDIT_UNAVAILABLE", message: "The order editor is temporarily unavailable. Please try again." },
+  });
+  await page.goto("/order-edits");
+  await page.getByLabel("Find an order").fill("60000");
+  await page.getByRole("button", { name: /#60000 Test Customer/ }).click();
+  await expect(page.getByRole("alert")).toHaveText("The order editor is temporarily unavailable. Please try again.");
+  await page.getByRole("button", { name: "Retry order", exact: true }).click();
+  await expect.poll(() => fixture.requests.filter((request) => request.path.endsWith("/orders/51")).length).toBe(2);
+  expect(fixture.requests.some((request) => request.method !== "GET" && request.path.startsWith(ORDER_EDIT_API))).toBe(false);
+  expect(fixture.failures).toEqual([]);
+});
 
 for (const product of specialProducts) {
   test(`discovers available ${product.selectionFlow} products and handles requirements after selection`, async ({ page }) => {

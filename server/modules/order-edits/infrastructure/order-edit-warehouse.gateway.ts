@@ -5,6 +5,11 @@ import { z } from "zod";
 import { createHash } from "node:crypto";
 import { wmsOmsOrderIdSql } from "../../oms/oms-wms-order-link.sql";
 import { OrderEditError } from "../domain/order-edit-error";
+import {
+  orderEditWarehouseBlockers,
+  orderEditWarehouseShipmentBlocker,
+} from "../domain/order-edit-warehouse-eligibility";
+export { orderEditWarehouseBlockers } from "../domain/order-edit-warehouse-eligibility";
 import type { OrderEditSnapshot } from "../application/order-edit-provider";
 import { orderEditSnapshotSchema } from "../application/order-edit-provider.schema";
 import type { OrderEditReleaseProof } from "../application/order-edit-store";
@@ -498,39 +503,6 @@ export async function finalizeOrderEditWarehouseRelease(
     );
 }
 
-/** Pure pre-picking cutoff. A prior pick/unpick still has started_at and stays blocked. */
-export function orderEditWarehouseBlockers(
-  rows: readonly WarehouseOrder[],
-  operationId?: string,
-): string[] {
-  const reasons = new Set<string>();
-  if (!rows.length) reasons.add("Warehouse order is not available.");
-  for (const row of rows) {
-    if (
-      row.cancelled ||
-      !["pending", "ready", "on_hold"].includes(row.warehouse_status)
-    )
-      reasons.add("The order is no longer waiting to be picked.");
-    if (
-      row.started_at !== null ||
-      row.assigned_picker_id !== null ||
-      row.picked_count !== 0 ||
-      row.has_pick_work
-    )
-      reasons.add("Picking has already started.");
-    if (row.has_label)
-      reasons.add("A shipping label or shipment already exists.");
-    if (row.combined_group_id !== null)
-      reasons.add("Combined warehouse orders require staff review.");
-    if (
-      row.order_edit_operation_id !== null &&
-      row.order_edit_operation_id !== operationId
-    )
-      reasons.add("Another order edit holds this order.");
-  }
-  return [...reasons];
-}
-
 /**
  * The operation record is the durable retry owner; provider uncertainty never
  * clears this dedicated hold. Manual order/shipment holds are never changed.
@@ -613,18 +585,11 @@ export class OrderEditWarehouseGateway {
         )
       ).rows,
     );
-    if (
-      shipments.some(
-        (shipment) =>
-          shipment.requires_review ||
-          !["planned", "queued", "on_hold"].includes(shipment.status) ||
-          (shipment.shipping_engine !== null &&
-            shipment.shipping_engine !== "shipstation"),
-      )
-    ) {
+    const shipmentBlocker = orderEditWarehouseShipmentBlocker(orders, shipments);
+    if (shipmentBlocker) {
       throw new OrderEditError(
         "ORDER_EDIT_SHIPMENT_NOT_EDITABLE",
-        "A warehouse shipment requires review or is no longer editable.",
+        shipmentBlocker,
       );
     }
     return { orders, shipments };
