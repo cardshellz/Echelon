@@ -1,6 +1,7 @@
 import { normalizeLotCosts, lotCostNeedsReview, lotCostTotals, hasExactLotCostTotals } from "../domain/lot-cost";
 import { costForQuantityIntervals, validateCostQuantityIntervals, type CostQuantityInterval } from "../domain/cost-quantity-intervals";
 import { ensureLotCostQuantityBasis } from "../infrastructure/cost-quantity.repository";
+import { readCostQuantityReview } from "./cost-quantity-review";
 import { sql } from "drizzle-orm";
 import { canonicalJson } from "@shared/utils/canonical-json";
 import { type CostComponent, type CostIssue } from "@shared/procurement/cost-source-contracts";
@@ -70,6 +71,7 @@ export async function applyCostRevision(
     ) SELECT id FROM descendants ORDER BY id LIMIT ${MAX_APPLICATION_LOTS + 1}
   `);
   const lotIds = graph.rows.map((row) => costInteger(row.id, "graph.lotId", 1));
+  const applicationLotIds = new Set(lotIds);
   if (lotIds.length > MAX_APPLICATION_LOTS) issues.push({ code: "COST_APPLICATION_LIMIT", message: "The complete cost graph exceeds the application limit." });
   const edgeResult = lotIds.length === 0 ? { rows: [] } : await tx.execute(sql`
     SELECT edge.* FROM inventory.lot_cost_contributions edge
@@ -107,11 +109,21 @@ export async function applyCostRevision(
   }
   const projections = new Map<number, Projection>();
   const contributionIntervals = new Map<number, CostQuantityInterval[]>();
+  let quantityPreparation = false;
   if (issues.length === 0 && writer.revalueExactComponent) {
+    await tx.execute(sql`SAVEPOINT cost_quantity_preparation`);
+    quantityPreparation = true;
     for (const lot of lots.values()) {
-      try { await ensureLotCostQuantityBasis(tx, { ...lot.source, id:lot.id }, actorId, now); }
+      await tx.execute(sql`SAVEPOINT cost_quantity_import`);
+      try {
+        await ensureLotCostQuantityBasis(tx, { ...lot.source, id:lot.id }, actorId, now,
+          { retainUnresolvedQuantity: applicationLotIds.has(lot.id), verifyOnHand: true });
+        await tx.execute(sql`RELEASE SAVEPOINT cost_quantity_import`);
+      }
       catch (error) {
         if (!(error instanceof CostEvidenceError)) throw error;
+        await tx.execute(sql`ROLLBACK TO SAVEPOINT cost_quantity_import`);
+        await tx.execute(sql`RELEASE SAVEPOINT cost_quantity_import`);
         issues.push({ code: error.code, message: error.message });
       }
     }
@@ -192,7 +204,21 @@ export async function applyCostRevision(
   if (!writer.revalueExactComponent && targets.some((target) => target.remainderMills !== 0)) {
     issues.push({ code: "COST_UNIFORM_LOT_RESIDUAL_REVIEW", message: "This source cannot be represented exactly by the existing uniform lot cost. Its exact remainder is preserved for review; no partial revaluation was posted." });
   }
-  const identity = { costAllocationVersion: writer.revalueExactComponent ? 2 : 1, sourceRevisionId: revision.id, lotIds, graph: edgeResult.rows, issues,
+  if (quantityPreparation) {
+    // A graph that cannot be valued must not leave behind imports for only
+    // some of its lots. Successful custody and costing commit together below.
+    if (issues.length > 0) await tx.execute(sql`ROLLBACK TO SAVEPOINT cost_quantity_preparation`);
+    await tx.execute(sql`RELEASE SAVEPOINT cost_quantity_preparation`);
+  }
+  const quantityReviews: CostIssue[] = [];
+  if (issues.length === 0 && writer.revalueExactComponent) {
+    for (const target of targets) quantityReviews.push(...await readCostQuantityReview(tx, {
+      lotId: target.lot.id, lotNumber: String(target.lot.source.lot_number ?? target.lot.id),
+      basisQuantity: target.quantity, component: source.component, totalMills: target.allocatedMills, currency: source.currency!,
+    }));
+  }
+  const allIssues = [...issues, ...quantityReviews];
+  const identity = { costAllocationVersion: writer.revalueExactComponent ? 3 : 1, sourceRevisionId: revision.id, lotIds, graph: edgeResult.rows, issues: allIssues,
     targets: targets.map((target) => ({ id: target.lot.id, unitMills: target.unitMills, remainderMills: target.remainderMills,
       allocatedMills: target.allocatedMills, quantity: target.quantity })) };
   const planFingerprint = costFingerprint(identity);
@@ -207,7 +233,7 @@ export async function applyCostRevision(
     return { ...replay.rows[0].evidence.result, applicationId: costInteger(replay.rows[0].id, "applicationId", 1), replayed: true };
   }
   const applicationKey = costFingerprint({ planFingerprint, priorApplicationId: replay.rows[0]?.id ?? null });
-  const result: CostRevisionApplicationResult = { applicationId: 0, status: issues.length > 0 ? "review_required" : "applied", lotsUpdated: 0, cogsRowsUpdated: 0, totalCogsDeltaCents: 0, issues, replayed: false };
+  const result: CostRevisionApplicationResult = { applicationId: 0, status: allIssues.length > 0 ? "review_required" : "applied", lotsUpdated: 0, cogsRowsUpdated: 0, totalCogsDeltaCents: 0, issues: allIssues, replayed: false };
   const changes: Array<{ lotId: number; before: unknown; after: unknown }> = [];
   if (issues.length === 0) {
     for (const target of targets) {
@@ -240,9 +266,11 @@ export async function applyCostRevision(
     INSERT INTO inventory.cost_application_lots(application_id,inventory_lot_id,before_state,after_state)
     VALUES (${result.applicationId},${change.lotId},${canonicalJson(change.before)}::jsonb,${canonicalJson(change.after)}::jsonb)
   `);
-  if (result.status === "applied") await tx.execute(sql`
+  if (issues.length === 0) await tx.execute(sql`
     INSERT INTO inventory.cost_reporting_events(application_id,contract_version,payload,recorded_at)
-    VALUES (${result.applicationId},1,${canonicalJson({ contractVersion: 1, currency: source.currency, sourceRevisionId: revision.id, sourceFingerprint: source.fingerprint, component: source.component, changes, cogsDeltaCents: result.totalCogsDeltaCents, actorId, recordedAt: now.toISOString() })}::jsonb,${now})
+    VALUES (${result.applicationId},1,${canonicalJson({ contractVersion: 1, currency: source.currency, sourceRevisionId: revision.id, sourceFingerprint: source.fingerprint, component: source.component, changes, cogsDeltaCents: result.totalCogsDeltaCents, actorId, recordedAt: now.toISOString(),
+      ...(quantityReviews.length === 0 ? {} : { unresolvedQuantities: quantityReviews.map(issue => issue.unresolvedQuantity!) }),
+    })}::jsonb,${now})
   `);
   if (allLotIds.length > 0) {
     const refreshed = await tx.execute(sql`SELECT * FROM inventory.inventory_lots

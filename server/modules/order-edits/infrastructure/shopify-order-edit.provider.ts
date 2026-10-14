@@ -34,12 +34,17 @@ import { supportedVariant, stockAvailable } from "../domain/order-edit-variant";
 import { shopifyOrderEditVariantSchema as VARIANT } from "./shopify-order-edit-variant";
 import { cents } from "./shopify-order-edit-money";
 import {
+  MAX_ORDER_EDIT_CODES,
   orderEditRequestedCodesSchema,
   type OrderEditCodePricing,
 } from "@shared/order-edits/order-edit-codes";
-import type { OrderEditCodeRedemptions } from "../application/order-edit-code-redemptions";
 import type { OrderEditCodeHistory } from "../application/order-edit-code-history";
 import { ShopifyOrderEditCodes } from "./shopify-order-edit-codes";
+import {
+  assertCouponAdjustmentSupported,
+  requiresLegacyCodeReceipt,
+} from "../domain/order-edit-coupon-boundary";
+import { OrderEditError } from "../domain/order-edit-error";
 import {
   priceOrderEditCodes,
   splitOrderEditCodeLine,
@@ -297,7 +302,6 @@ export class ShopifyOrderEditProvider
       shippingCalculator?: OrderEditShippingCalculator;
       report?: (event: { operationId: string; code: string }) => void;
       memberPresentation?: MemberPlanPresentationReader;
-      codeRedemptions?: OrderEditCodeRedemptions;
       codeHistory?: OrderEditCodeHistory;
     },
   ) {
@@ -650,16 +654,9 @@ export class ShopifyOrderEditProvider
   }
 
   private async codes(connectionId: number): Promise<ShopifyOrderEditCodes> {
-    if (!this.options.codeRedemptions?.available())
-      fail(
-        "ORDER_EDIT_CODES_UNAVAILABLE",
-        "Coupon and rewards codes are temporarily unavailable. Your order has not changed.",
-      );
     const credentials = await this.credentials(connectionId);
     return new ShopifyOrderEditCodes(
       (query, variables) => this.request(credentials, query, variables),
-      this.options.clock,
-      this.options.codeRedemptions,
     );
   }
   private async codePricing(
@@ -670,15 +667,18 @@ export class ShopifyOrderEditProvider
     const newCodes = plan.discountCodes ?? [];
     const retained = snapshot.codePricing?.rules ?? [];
     if (!newCodes.length && !retained.length) return undefined;
-    if (newCodes.length + retained.length > 5)
+    if (newCodes.length + retained.length > MAX_ORDER_EDIT_CODES)
       fail(
         "ORDER_EDIT_CODES_LIMIT",
-        "An order can have up to five coupon or rewards codes.",
+        `An order can have up to ${MAX_ORDER_EDIT_CODES} discount codes.`,
       );
     const gateway = await this.codes(snapshot.connectionId);
     const rules = newCodes.length
       ? await gateway.rules(snapshot, newCodes)
       : [];
+    // Reject unsupported usage restrictions before calculating or opening an
+    // edit. A manual adjustment cannot consume a native Shopify redemption.
+    assertCouponAdjustmentSupported(rules, retained);
     const approved = rules.length
       ? await gateway.verifyNativeCalculation(snapshot, lines, rules)
       : undefined;
@@ -1720,7 +1720,7 @@ export class ShopifyOrderEditProvider
     try {
       if (
         mode === "edit" &&
-        quote.codePricing?.newCodes.length &&
+        requiresLegacyCodeReceipt(quote.codePricing) &&
         !beforeCommitRequest
       )
         fail(
@@ -1739,7 +1739,8 @@ export class ShopifyOrderEditProvider
       // response or failed readback after mutate must retain its unknown outcome.
       if (mode === "edit")
         throw new OrderEditCommitNotSentError(
-          error instanceof OrderEditProviderError
+          error instanceof OrderEditProviderError ||
+          error instanceof OrderEditError
             ? error.code
             : "ORDER_EDIT_CODE_RESERVATION_FAILED",
           error instanceof Error
@@ -1790,7 +1791,20 @@ export class ShopifyOrderEditProvider
         const expected = quote.codePricing.rules.filter((rule) =>
           added.some((code) => code.toUpperCase() === rule.code.toUpperCase()),
         );
-        if (canonicalJson(rules) !== canonicalJson(expected))
+        // Persisted pre-separation operations retain their receipt lifecycle.
+        // Only compare their original terms; never classify new coupon entry
+        // as a points reward in order to make an old enum shape match.
+        const comparable = rules.map((rule) => {
+          const previous = expected.find((entry) => entry.code === rule.code);
+          if (!previous || previous.redemption === "shopify_coupon") return rule;
+          const {
+            usageLimit: _limit,
+            appliesOncePerCustomer: _once,
+            ...terms
+          } = rule;
+          return { ...terms, redemption: previous.redemption };
+        });
+        if (canonicalJson(comparable) !== canonicalJson(expected))
           fail(
             "ORDER_EDIT_CODE_TERMS_CHANGED",
             "The code's eligibility or combination rules changed after review. Review the code again.",
@@ -1801,13 +1815,14 @@ export class ShopifyOrderEditProvider
             ...line,
             grossCents: multiply(line.retailCents, line.quantity),
           })),
-          rules,
+          expected,
           quote.codePricing.applications.filter((application) =>
             added.some(
               (code) => code.toUpperCase() === application.code.toUpperCase(),
             ),
           ),
         );
+        assertCouponAdjustmentSupported(expected);
       }
       await gateway.assertCombinations(
         current,

@@ -1,30 +1,20 @@
-import { useQuery } from "@tanstack/react-query";
-import { poShipmentCostSummarySchema } from "@shared/procurement/po-shipment-cost-summary";
+import { useState } from "react";
 import { formatIntegerCents } from "@shared/utils/format-integer-cents";
-import { apiRequest } from "@/lib/queryClient";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
+import { usePoShipmentCosts } from "./use-po-shipment-costs";
+import { PoShipmentCostReview } from "./PoShipmentCostReview";
 
 export function PoShipmentCostSummary({
   purchaseOrderId,
+  query,
   onViewShipments,
 }: {
   purchaseOrderId: number;
+  query: ReturnType<typeof usePoShipmentCosts>;
   onViewShipments: () => void;
 }) {
-  const query = useQuery({
-    queryKey: [
-      `/api/purchase-orders/${purchaseOrderId}`,
-      "shipment-cost-summary",
-    ],
-    queryFn: async () => {
-      const response = await apiRequest(
-        "GET",
-        `/api/purchase-orders/${purchaseOrderId}/shipment-cost-summary`,
-      );
-      return poShipmentCostSummarySchema.parse(await response.json());
-    },
-  });
+  const [showReview, setShowReview] = useState(false);
   if (query.isPending)
     return (
       <p className="text-sm text-muted-foreground" role="status">
@@ -47,15 +37,9 @@ export function PoShipmentCostSummary({
         </Button>
       </div>
     );
-  const costs = query.data;
+  const costs = query.data.summary;
   if (costs.shipmentCount === 0) return null;
   const money = (cents: number) => formatIntegerCents(cents, costs.currency);
-  const amounts = [
-    ["Shipment freight", costs.freightCents],
-    ["Shipment duties / tax", costs.dutyCents],
-    ["Other shipment charges", costs.otherCents],
-    ["PO + shipment costs", costs.combinedCostCents],
-  ] as const;
   return (
     <Card>
       <CardContent className="p-3 space-y-3">
@@ -71,21 +55,17 @@ export function PoShipmentCostSummary({
             View shipments
           </Button>
         </div>
-        <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
-          {amounts.map(([label, amount]) => (
-            <div key={label}>
-              <div className="text-xs text-muted-foreground">{label}</div>
-              <div className="font-mono font-semibold">
-                {amount === null ? "Incomplete" : money(amount)}
-              </div>
-            </div>
-          ))}
-        </div>
         <div className="space-y-1 text-sm" role="status">
           <p>
             Allocated shipment charges:{" "}
             <strong>{money(costs.totalCents)}</strong>
           </p>
+          {costs.otherCents !== 0 && (
+            <p>
+              Other shipment charges included in total cost:{" "}
+              <strong>{money(costs.otherCents)}</strong>
+            </p>
+          )}
           {costs.estimatedCents !== 0 && (
             <p className="text-amber-700 dark:text-amber-400">
               {money(costs.estimatedCents)} is estimated or awaiting
@@ -95,8 +75,7 @@ export function PoShipmentCostSummary({
           {costs.unallocatedChargeCount > 0 && (
             <p className="text-amber-700 dark:text-amber-400">
               {costs.unallocatedChargeCount} charge
-              {costs.unallocatedChargeCount === 1 ? "" : "s"}{" "}
-              {costs.unallocatedChargeCount === 1 ? "needs" : "need"}{" "}
+              {costs.unallocatedChargeCount === 1 ? " needs" : "s need"}{" "}
               allocation. The combined cost is incomplete.
             </p>
           )}
@@ -108,11 +87,9 @@ export function PoShipmentCostSummary({
           )}
           {costs.inventoryCosting === "review_required" && (
             <p className="text-destructive">
-              Inventory costing needs review
               {costs.reviewLines > 0
-                ? ` on ${costs.reviewLines} shipment line${costs.reviewLines === 1 ? "" : "s"}`
-                : ""}
-              . Open the shipments to review or retry the cost update.
+                ? `${costs.reviewLines} shipment line${costs.reviewLines === 1 ? " has" : "s have"} a recorded cost update that needs review.`
+                : "Shipment charge evidence needs review before inventory costs can be updated."}
             </p>
           )}
           {costs.inventoryCosting === "pending" && (
@@ -127,6 +104,26 @@ export function PoShipmentCostSummary({
             </p>
           )}
         </div>
+        {(costs.reviewLines > 0 || costs.pendingLines > 0 || showReview) && (
+          <Button
+            size="sm"
+            variant="outline"
+            aria-expanded={showReview}
+            onClick={() => setShowReview(!showReview)}
+          >
+            {showReview
+              ? "Hide cost review"
+              : costs.reviewLines > 0
+                ? `Review ${costs.reviewLines} line${costs.reviewLines === 1 ? "" : "s"}`
+                : "Review inventory costs"}
+          </Button>
+        )}
+        {showReview && (
+          <PoShipmentCostReview
+            purchaseOrderId={purchaseOrderId}
+            costs={query.data}
+          />
+        )}
       </CardContent>
     </Card>
   );

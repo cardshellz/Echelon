@@ -17,7 +17,7 @@ import {
   PurchaseApprovalAuthorityError,
 } from "./purchase-order-approval.policy";
 import { lockInventoryCostGraph } from "../inventory/infrastructure/cost-evidence.repository";
-import { readPoShipmentCostSummary } from "./po-shipment-cost-summary.repository";
+import { readPoShipmentCostSummary, readPoShipmentCosts } from "./po-shipment-cost-summary.repository";
 /**
  * Purchasing service for Echelon WMS.
  *
@@ -8538,6 +8538,7 @@ export function createPurchasingService(
     getPurchaseOrderById: (id: number) => storage.getPurchaseOrderById(id),
     getPurchaseOrderByPoNumber: (poNumber: string) => storage.getPurchaseOrderByPoNumber(poNumber),
     getPoShipmentCostSummary:(id:number)=>readPoShipmentCostSummary(db,id),
+    getPoShipmentCosts: (id: number) => readPoShipmentCosts(db, id),
 
     // Lines
     addLine: hardenedAddLine,

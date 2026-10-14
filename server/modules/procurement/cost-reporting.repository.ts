@@ -1,4 +1,4 @@
-import { costSourceRevisionSchema } from "@shared/procurement/cost-source-contracts";
+import { costIssueSchema, costSourceRevisionSchema } from "@shared/procurement/cost-source-contracts";
 import type { Pool, PoolClient } from "pg";
 import { canonicalJson } from "@shared/utils/canonical-json";
 import { costReportEnvelopeSchema, retryCostReportSchema, type CostReportAcknowledgement, type CostReportEnvelope } from "@shared/procurement/cost-report-delivery";
@@ -51,11 +51,19 @@ export class CostReportingRepository {
             purchaseOrderId:row.purchaseOrderId,purchaseOrderLineId:row.purchaseOrderLineId,payload:row.payload });
           const payload = envelope.payload;
           const source = costSourceRevisionSchema.safeParse(row.sourceContract);
+          const reviewIssues = costIssueSchema.array().safeParse(row.outcome?.issues);
+          // A retained historical gap is explicit evidence, not an applied
+          // write-off. Only this classified review may accompany posted costs.
+          const appliedWithReview = row.status === "review_required" && row.outcome?.status === "review_required"
+            && payload.unresolvedQuantities !== undefined && reviewIssues.success && reviewIssues.data.length > 0
+            && reviewIssues.data.every(issue => issue.code === "COST_UNRESOLVED_QUANTITY_RETAINED" && issue.unresolvedQuantity !== undefined)
+            && reportHash(reviewIssues.data.map(issue => issue.unresolvedQuantity)) === reportHash(payload.unresolvedQuantities);
+          const appliedWithoutReview = row.status === "applied" && row.outcome?.status === "applied" && payload.unresolvedQuantities === undefined;
           if (!source.success || source.data.fingerprint !== row.fingerprint || source.data.component !== row.component
             || source.data.scope.purchaseOrderId !== row.purchaseOrderId || source.data.scope.purchaseOrderLineId !== row.purchaseOrderLineId
             || (source.data.scope.kind === "shipment_line" ? source.data.scope.inboundShipmentLineId : null) !== row.shipmentLineId
             || row.applicationActor !== payload.actorId || instant(row.applicationRecordedAt) !== instant(payload.recordedAt)
-            || row.contract_version !== 1 || row.status !== "applied" || row.outcome?.status !== "applied"
+            || row.contract_version !== 1 || (!appliedWithReview && !appliedWithoutReview)
             || row.outcome.lotsUpdated !== payload.changes.length || row.outcome.totalCogsDeltaCents !== payload.cogsDeltaCents
             || String(payload.sourceRevisionId) !== row.sourceRevisionId || payload.sourceFingerprint !== row.fingerprint
             || payload.component !== row.component || payload.currency !== row.currency || instant(row.recorded_at) !== instant(payload.recordedAt)

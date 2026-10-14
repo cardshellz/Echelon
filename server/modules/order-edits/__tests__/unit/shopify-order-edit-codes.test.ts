@@ -33,6 +33,17 @@ const lines = [
 function harness() {
   // Captured response shape from a calculation-only request on #64043:
   // line discount base $2.33, platform saving $0.11, final subtotal $2.22.
+  const platformDiscounts: Array<{
+    code: string | null;
+    discountClasses: string[];
+    totalAmountPriceSet: ReturnType<typeof bag>;
+  }> = [
+    {
+      code: "FIVE",
+      discountClasses: ["ORDER"],
+      totalAmountPriceSet: bag("0.11"),
+    },
+  ];
   const calculation = {
     lineItems: [
       {
@@ -41,13 +52,7 @@ function harness() {
         discountedTotalSet: bag("2.33"),
       },
     ],
-    platformDiscounts: [
-      {
-        code: "FIVE",
-        discountClasses: ["ORDER"],
-        totalAmountPriceSet: bag("0.11"),
-      },
-    ],
+    platformDiscounts,
     lineItemsSubtotalPrice: bag("2.33"),
     subtotalPriceSet: bag("2.22"),
   };
@@ -59,20 +64,65 @@ function harness() {
       },
     }),
   );
-  const codes = new ShopifyOrderEditCodes(
-    request,
-    () => new Date("2026-10-14T12:00:00Z"),
-    {
-      available: () => true,
-      validate: async () => {},
-      reserve: async () => {},
-      finalize: async () => {},
-      release: async () => {},
-    },
-  );
+  const codes = new ShopifyOrderEditCodes(request);
   return { codes, request, calculation };
 }
 describe("new-code native calculation totals", () => {
+  it("sends the real customer and variants to Shopify with automatic discounts enabled", async () => {
+    const h = harness();
+    const nativeRule: OrderEditCodeRule = {
+      ...rule,
+      redemption: "shopify_coupon",
+      usageLimit: null,
+      appliesOncePerCustomer: false,
+    };
+    const snapshot = {
+      ...baseline(),
+      customerId: "gid://shopify/Customer/123",
+    };
+    await h.codes.verifyNativeCalculation(snapshot, lines, [nativeRule]);
+    expect(h.request.mock.calls[0][1]).toEqual({
+      input: {
+        purchasingEntity: { customerId: snapshot.customerId },
+        presentmentCurrencyCode: "USD",
+        acceptAutomaticDiscounts: true,
+        discountCodes: ["FIVE"],
+        lineItems: [{ variantId: lines[0].variantId, quantity: 1 }],
+      },
+    });
+  });
+  it("accepts Shopify's automatic member savings alongside an approved coupon", async () => {
+    const h = harness();
+    h.calculation.platformDiscounts.push({
+      code: null,
+      discountClasses: ["PRODUCT"],
+      totalAmountPriceSet: bag("0.46"),
+    });
+    expect(
+      await h.codes.verifyNativeCalculation(baseline(), lines, [
+        {
+          ...rule,
+          redemption: "shopify_coupon",
+          usageLimit: 1,
+          appliesOncePerCustomer: false,
+        },
+      ]),
+    ).toEqual([{ code: "FIVE", amountCents: 11 }]);
+  });
+  it("reports Shopify's rejection without inventing a rewards eligibility error", async () => {
+    const h = harness();
+    h.calculation.platformDiscounts = [];
+    await expect(
+      h.codes.verifyNativeCalculation(baseline(), lines, [
+        {
+          ...rule,
+          redemption: "shopify_coupon",
+          usageLimit: 1,
+          appliesOncePerCustomer: false,
+        },
+      ]),
+    ).rejects.toMatchObject({ code: "ORDER_EDIT_CODE_INELIGIBLE" });
+  });
   it("uses the native approved cent while separately proving product prices and the post-code subtotal", async () => {
     const h = harness();
     const approved = await h.codes.verifyNativeCalculation(baseline(), lines, [

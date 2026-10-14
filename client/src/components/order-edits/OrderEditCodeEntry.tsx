@@ -54,7 +54,7 @@ export function OrderEditCodeEntry({
   async function apply() {
     await run(async () => {
       const parsed = orderEditCodeSchema.safeParse(value);
-      if (!parsed.success) throw new Error("Enter a coupon or rewards code.");
+      if (!parsed.success) throw new Error("Enter a discount code.");
       const code = parsed.data.toUpperCase();
       if (codes.some((existing) => existing.toUpperCase() === code))
         throw new Error("This code has already been added.");
@@ -67,7 +67,7 @@ export function OrderEditCodeEntry({
   return (
     <section className="oe-code-entry" aria-labelledby={`${id}-label`}>
       <label id={`${id}-label`} htmlFor={id}>
-        Coupon or rewards code
+        Discount code
       </label>
       <div className="oe-code-entry-controls">
         <Input
@@ -78,7 +78,7 @@ export function OrderEditCodeEntry({
           autoCapitalize="characters"
           spellCheck={false}
           placeholder="Enter code"
-          aria-describedby={error ? `${id}-error` : `${id}-help`}
+          aria-describedby={`${id}-help${error ? ` ${id}-error` : ""}`}
           aria-invalid={error !== null}
           disabled={disabled || pending || !available}
           onChange={(event) => {
@@ -101,11 +101,24 @@ export function OrderEditCodeEntry({
           {pending ? "Checking…" : "Apply code"}
         </Button>
       </div>
+      {error && value.trim() && (
+        <button
+          type="button"
+          className="oe-code-clear"
+          disabled={disabled || pending}
+          onClick={() => {
+            setValue("");
+            setError(null);
+          }}
+        >
+          Clear code
+        </button>
+      )}
       <p id={`${id}-help`} className="oe-code-help">
         {available
           ? value.trim()
             ? "Apply this code or clear it before continuing."
-            : "Eligible codes follow the same combination rules as checkout."
+            : "Codes with usage limits must be used at checkout. Other eligible codes follow your existing discount combination rules."
           : "Codes are temporarily unavailable. Your order has not changed."}
       </p>
       {codes.length > 0 && (

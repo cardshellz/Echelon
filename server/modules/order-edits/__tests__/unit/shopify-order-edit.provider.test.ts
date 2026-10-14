@@ -4,6 +4,7 @@ import { ShopifyOrderEditProvider } from "../../infrastructure/shopify-order-edi
 import { isUnpaidRecoveryRestored } from "../../application/order-edit-evidence";
 import { orderEditQuoteSchema } from "../../application/order-edit-provider.schema";
 import { PostgresOrderEditCodeHistory } from "../../infrastructure/postgres-order-edit-code-history";
+import { OrderEditError } from "../../domain/order-edit-error";
 import type { OrderEditShippingCalculator } from "../../application/order-edit-shipping";
 import {
   OrderEditCommitNotSentError,
@@ -386,30 +387,21 @@ describe("new coupon native edit path", () => {
       },
     );
     responses.push(emptyCombinationMetadata(), refundCapacity());
-    const redemptions = {
-      available: () => true,
-      validate: vi.fn(async () => {}),
-      reserve: vi.fn(async () => {}),
-      finalize: vi.fn(async () => {}),
-      release: vi.fn(async () => {}),
-    };
     const history = new PostgresOrderEditCodeHistory({
       query: async () => ({ rows: quote ? [{ quote }] : [] }),
     } as unknown as import("pg").Pool);
     const h = harness(responses, {}, undefined, {
-      codeRedemptions: redemptions,
       codeHistory: history,
     });
     return {
       ...h,
       responses,
-      redemptions,
       save: (value: OrderEditQuote) => {
         quote = value;
       },
     };
   }
-  it("stages a code-only adjustment, revalidates it, and proves the saved net price and coupon breakdown", async () => {
+  it.each(["shopify_coupon", "legacy"])("stages, revalidates and reads back a %s adjustment without a points-validation dependency", async (source) => {
     const h = codeHarness();
     const baseline = await h.provider.readOrder(4, "100");
     const quote = await h.provider.quote(
@@ -418,6 +410,14 @@ describe("new coupon native edit path", () => {
       { changes: [], additions: [], discountCodes: ["TEN"] },
       "code-only",
     );
+    if (source === "legacy") {
+      const {
+        usageLimit: _limit,
+        appliesOncePerCustomer: _once,
+        ...terms
+      } = quote.codePricing!.rules[0];
+      quote.codePricing!.rules[0] = { ...terms, redemption: "unlimited" };
+    }
     h.save(quote);
     expect(quote).toMatchObject({
       totalCents: 2435,
@@ -498,8 +498,71 @@ describe("new coupon native edit path", () => {
     ]);
     expect(observed.codePricing?.newCodes).toEqual([]);
     expect(observed.lines[0].discountedUnitPriceCents).toBe(900);
+    const calculationRequests = h.requests.filter((request) =>
+      request.query.includes("EchelonEditCodeCalculate"),
+    );
+    expect(calculationRequests.at(-1)?.variables.input).toMatchObject({
+      acceptAutomaticDiscounts: source !== "legacy",
+    });
   });
-  it("refuses to submit a new-code quote without its reservation boundary", async () => {
+  it.each([
+    { usageLimit: 1, appliesOncePerCustomer: false },
+    { usageLimit: 100, appliesOncePerCustomer: false },
+    { usageLimit: null, appliesOncePerCustomer: true },
+  ])("rejects restricted coupon %j before calculating or opening an edit", async (restrictions) => {
+    const h = codeHarness();
+    const lookup = newCodeLookup();
+    Object.assign(lookup.codeDiscountNodeByCode.codeDiscount, restrictions);
+    h.responses[3] = lookup;
+    const baseline = await h.provider.readOrder(4, "100");
+    await expect(h.provider.quote(
+      4,
+      baseline,
+      { changes: [], additions: [], discountCodes: ["TEN"] },
+      "limited-code",
+    )).rejects.toMatchObject({
+      code: "ORDER_EDIT_NATIVE_COUPON_REDEMPTION_UNAVAILABLE",
+    });
+    expect(
+      h.requests.some((request) => request.query.includes("draftOrderCalculate")),
+    ).toBe(false);
+    expect(
+      h.requests.some((request) => request.query.includes("orderEditBegin")),
+    ).toBe(false);
+  });
+  it.each(["usage_limit", "once_per_customer", "stacking", "expired", "saving_changed"])(
+    "does not submit an unrestricted-code adjustment when %s changes after review",
+    async (change) => {
+      const h = codeHarness();
+      const baseline = await h.provider.readOrder(4, "100");
+      const quote = await h.provider.quote(4, baseline,
+        { changes: [], additions: [], discountCodes: ["TEN"] }, "changed-code");
+      const lookup = newCodeLookup();
+      const terms = lookup.codeDiscountNodeByCode.codeDiscount;
+      const calculation = nativeCodeCalculation();
+      let expectedCode = "ORDER_EDIT_CODE_TERMS_CHANGED";
+      if (change === "usage_limit")
+        (terms as Record<string, unknown>).usageLimit = 10;
+      if (change === "once_per_customer") terms.appliesOncePerCustomer = true;
+      if (change === "stacking") terms.combinesWith.productDiscounts = false;
+      if (change === "expired") {
+        terms.status = "EXPIRED";
+        calculation.draftOrderCalculate.calculatedDraftOrder.platformDiscounts = [];
+        expectedCode = "ORDER_EDIT_CODE_INELIGIBLE";
+      }
+      if (change === "saving_changed") {
+        calculation.draftOrderCalculate.calculatedDraftOrder.platformDiscounts[0].totalAmountPriceSet = bag("1.99");
+        expectedCode = "ORDER_EDIT_CODE_NATIVE_MISMATCH";
+      }
+      h.responses.push(shippingOrder(), lookup, calculation);
+      const before = vi.fn(async () => {});
+      await expect(h.provider.commit(4, quote, "changed-code", before))
+        .rejects.toMatchObject({ code: expectedCode, outcome: "rejected" });
+      expect(before).not.toHaveBeenCalled();
+      expect(h.requests.some((request) => request.query.includes("orderEditCommit"))).toBe(false);
+    },
+  );
+  it("retains the reservation boundary for an already-persisted legacy receipt quote", async () => {
     const h = codeHarness();
     const baseline = await h.provider.readOrder(4, "100");
     const quote = await h.provider.quote(
@@ -508,9 +571,42 @@ describe("new coupon native edit path", () => {
       { changes: [], additions: [], discountCodes: ["TEN"] },
       "code-only",
     );
+    quote.codePricing!.rules[0].redemption = "unlimited";
     await expect(
       h.provider.commit(4, quote, "code-only"),
     ).rejects.toBeInstanceOf(OrderEditCommitNotSentError);
+    expect(
+      h.requests.some((request) => request.query.includes("orderEditCommit")),
+    ).toBe(false);
+  });
+  it("preserves a classified domain failure before commit without submitting the edit", async () => {
+    const h = codeHarness();
+    const baseline = await h.provider.readOrder(4, "100");
+    const quote = await h.provider.quote(
+      4,
+      baseline,
+      { changes: [], additions: [], discountCodes: ["TEN"] },
+      "code-only",
+    );
+    h.responses.push(
+      shippingOrder(),
+      newCodeLookup(),
+      nativeCodeCalculation(),
+      emptyCombinationMetadata(),
+      refundCapacity(),
+    );
+    await expect(
+      h.provider.commit(4, quote, "code-only", async () => {
+        throw new OrderEditError(
+          "ORDER_EDIT_CODES_UNAVAILABLE",
+          "Receipt unavailable.",
+          503,
+        );
+      }),
+    ).rejects.toMatchObject({
+      name: "OrderEditCommitNotSentError",
+      code: "ORDER_EDIT_CODES_UNAVAILABLE",
+    });
     expect(
       h.requests.some((request) => request.query.includes("orderEditCommit")),
     ).toBe(false);
@@ -536,7 +632,7 @@ describe("new coupon native edit path", () => {
         { changes: [], additions: [], discountCodes: ["TEN"] },
         "bad-code",
       ),
-    ).rejects.toThrow(/complete code savings/);
+    ).rejects.toThrow(/Shopify did not apply/);
     expect(
       h.requests.some((request) => request.query.includes("orderEditBegin")),
     ).toBe(false);
@@ -562,7 +658,7 @@ function harness(
   },
   codeOptions: Pick<
     ConstructorParameters<typeof ShopifyOrderEditProvider>[0],
-    "codeRedemptions" | "codeHistory"
+    "codeHistory"
   > = {},
 ) {
   const requests: Array<{ query: string; variables: Record<string, unknown> }> =

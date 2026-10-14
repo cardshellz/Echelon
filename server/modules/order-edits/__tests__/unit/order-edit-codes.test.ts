@@ -44,7 +44,6 @@ const order = {
   classes: coupon.classes,
   combinesWith: allow,
 };
-const now = new Date("2026-10-14T12:00:00Z");
 function native() {
   return {
     codeDiscountNodeByCode: {
@@ -263,44 +262,91 @@ describe("new-code admission and exact pricing", () => {
   it("reads actual issued terms and hashes changes to combinability", () => {
     const input = native();
     const before = structuredClone(input);
-    const first = readOrderEditCodeRule(
-      input,
-      "ten",
-      "gid://shopify/Customer/1",
-      now,
-    );
+    const first = readOrderEditCodeRule(input, "ten");
     expect(first.value).toEqual({ type: "percentage", percentage: "10" });
-    expect(first.redemption).toBe("unlimited");
+    expect(first.redemption).toBe("shopify_coupon");
     expect(input).toEqual(before);
     input.codeDiscountNodeByCode.codeDiscount.combinesWith.orderDiscounts = false;
     expect(
-      readOrderEditCodeRule(input, "TEN", "gid://shopify/Customer/1", now)
+      readOrderEditCodeRule(input, "TEN")
         .fingerprint,
     ).not.toBe(first.fingerprint);
   });
+  it("does not depend on usage counters or coupon-batch size for unrestricted adjustments", () => {
+    const input = native();
+    const discount = input.codeDiscountNodeByCode.codeDiscount as Record<string, unknown>;
+    delete discount.asyncUsageCount;
+    delete discount.codesCount;
+    expect(readOrderEditCodeRule(input, "TEN")).toMatchObject({
+      usageLimit: null,
+      appliesOncePerCustomer: false,
+    });
+  });
+  it.each(["usageLimit", "appliesOncePerCustomer"])("blocks missing %s instead of assuming unrestricted usage", (field) => {
+    const input = native();
+    delete (input.codeDiscountNodeByCode.codeDiscount as Record<string, unknown>)[field];
+    expect(() => readOrderEditCodeRule(input, "TEN")).toThrow(
+      expect.objectContaining({ code: "ORDER_EDIT_CODE_RULES_UNAVAILABLE" }),
+    );
+  });
   it.each([1, 10, 100])(
-    "rejects shared finite usage limit %s",
+    "preserves shared finite usage limit %s as a Shopify coupon, never a points reward",
     (usageLimit) => {
       const input = native();
       (
         input.codeDiscountNodeByCode.codeDiscount as Record<string, unknown>
       ).usageLimit = usageLimit;
-      expect(() =>
-        readOrderEditCodeRule(input, "TEN", "gid://shopify/Customer/1", now),
-      ).toThrow(/usage limit/);
+      expect(readOrderEditCodeRule(input, "TEN")).toMatchObject({
+        redemption: "shopify_coupon",
+        usageLimit,
+        appliesOncePerCustomer: false,
+      });
     },
   );
-  it("rejects once-per-customer public codes, missing combinations, expired and unsupported scopes", () => {
-    const cases = [native(), native(), native(), native()];
-    cases[0].codeDiscountNodeByCode.codeDiscount.appliesOncePerCustomer = true;
+  it("delegates once-per-customer, customer segments and current eligibility to Shopify", () => {
+    const input = native();
+    input.codeDiscountNodeByCode.codeDiscount.appliesOncePerCustomer = true;
+    input.codeDiscountNodeByCode.codeDiscount.context.__typename =
+      "DiscountCustomerSegments";
+    input.codeDiscountNodeByCode.codeDiscount.status = "EXPIRED";
+    expect(readOrderEditCodeRule(input, "TEN")).toMatchObject({
+      redemption: "shopify_coupon",
+      appliesOncePerCustomer: true,
+    });
+  });
+  it("keeps even a fixed, customer-locked, single-use coupon independent of rewards issuance", () => {
+    const input = native();
+    const discount = input.codeDiscountNodeByCode.codeDiscount as Record<
+      string,
+      unknown
+    >;
+    discount.usageLimit = 1;
+    discount.context = {
+      __typename: "DiscountCustomers",
+      customers: [{ id: "gid://shopify/Customer/1" }],
+    };
+    discount.customerGets = {
+      items: { __typename: "AllDiscountItems", allItems: true },
+      value: {
+        __typename: "DiscountAmount",
+        amount: { amount: "19.00", currencyCode: "USD" },
+        appliesOnEachItem: false,
+      },
+    };
+    expect(readOrderEditCodeRule(input, "TEN")).toMatchObject({
+      redemption: "shopify_coupon",
+      value: { type: "fixed", amountCents: 1900 },
+    });
+  });
+  it("rejects missing combination evidence and unsupported adjustment scopes", () => {
+    const cases = [native(), native()];
     (
-      cases[1].codeDiscountNodeByCode.codeDiscount as Record<string, unknown>
+      cases[0].codeDiscountNodeByCode.codeDiscount as Record<string, unknown>
     ).combinesWith = null;
-    cases[2].codeDiscountNodeByCode.codeDiscount.status = "EXPIRED";
-    cases[3].codeDiscountNodeByCode.codeDiscount.discountClasses = ["PRODUCT"];
+    cases[1].codeDiscountNodeByCode.codeDiscount.discountClasses = ["PRODUCT"];
     for (const value of cases)
       expect(() =>
-        readOrderEditCodeRule(value, "TEN", "gid://shopify/Customer/1", now),
+        readOrderEditCodeRule(value, "TEN"),
       ).toThrow();
   });
 });
