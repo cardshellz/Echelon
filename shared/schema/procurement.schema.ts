@@ -1970,6 +1970,7 @@ export const apPayments = procurementSchema.table("ap_payments", {
 }, (table) => [
   uniqueIndex("ap_payments_payment_number_active_uidx").on(table.paymentNumber).where(sql`voided_at IS NULL`),
   check("ap_payments_currency_usd_chk", sql`${table.currency} = 'USD'`),
+  check("ap_payments_recorded_status_check", sql`${table.status} IN ('completed', 'voided')`),
 ]);
 
 export const insertApPaymentSchema = createInsertSchema(apPayments).omit({

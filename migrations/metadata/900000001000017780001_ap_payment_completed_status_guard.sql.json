@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "migration": "900000001000017780001_ap_payment_completed_status_guard.sql",
+  "generation": 1,
+  "pr": 1778,
+  "ordinal": 1,
+  "after": [
+    "261_po_email_document_gate.sql"
+  ]
+}

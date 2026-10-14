@@ -79,9 +79,9 @@ export default function APInvoices() {
   });
 
   const statusFilter: Record<string, string[] | undefined> = {
-    open: ["received", "approved", "partially_paid"],
+    open: ["received", "approved", "partially_paid", "disputed"],
     needs_approval: ["received"],
-    overdue: ["received", "approved", "partially_paid"],
+    overdue: ["received", "approved", "partially_paid", "disputed"],
     paid: ["paid"],
     voided: ["voided"],
     all: undefined,

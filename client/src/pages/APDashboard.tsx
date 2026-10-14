@@ -83,6 +83,9 @@ export default function APDashboard() {
               <div>
                 <p className="text-sm text-muted-foreground">Total Outstanding</p>
                 <p className="text-2xl font-bold mt-1">{formatCents(summary?.totalOutstandingCents)}</p>
+                {(summary?.disputedInvoiceCount ?? 0) > 0 && (
+                  <p className="text-xs text-amber-700 mt-1">Includes {formatCents(summary.disputedOutstandingCents)} in {summary.disputedInvoiceCount} disputed invoice{summary.disputedInvoiceCount !== 1 ? "s" : ""}, on hold for review.</p>
+                )}
                 {(summary?.openInvoiceCount ?? 0) > 0 && (
                   <p className="text-xs text-muted-foreground mt-1">{summary.openInvoiceCount} open invoice{summary.openInvoiceCount !== 1 ? "s" : ""}</p>
                 )}
