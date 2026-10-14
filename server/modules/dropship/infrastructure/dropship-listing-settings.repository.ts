@@ -5,7 +5,9 @@ import { evaluateDropshipCatalogExposure } from "../domain/catalog-exposure";
 import { DropshipError } from "../domain/errors";
 import { prepareEbayCategoryRules, resolveEbayListingCategory } from "../application/dropship-ebay-category-resolver";
 import type { ListingSettingsInputs } from "../application/dropship-listing-settings-facts";
-import type { ListingSettingsLoad, ListingSettingsRepository } from "../application/dropship-listing-settings-service";
+import type {
+  ListingSettingsLoad, ListingSettingsProductOwnRead, ListingSettingsRepository,
+} from "../application/dropship-listing-settings-service";
 import { loadSelectedCandidates } from "../application/dropship-selected-catalog";
 import { readCategoryListingSettings } from "./dropship-category-listing-settings.repository";
 import { readEbayCategoryRules } from "./dropship-ebay-category-rules.reader";
@@ -14,6 +16,7 @@ import { PgDropshipListingPreviewRepository } from "./dropship-listing-preview.r
 import { readCatalogCategoryNames, readListingSettingLayers } from "./dropship-listing-setting-layers.reader";
 import { readPricingProfile } from "./dropship-pricing-profile.reader";
 import { readProductCategoryMarks } from "./dropship-product-category-marks.repository";
+import { readProductListingSettings } from "./dropship-product-listing-settings.repository";
 import { selectedCatalogReaderForTransaction } from "./dropship-selected-catalog.reader";
 import { PgShellzClubProductCostAdapter } from "./shellz-club-product-cost.adapter";
 
@@ -145,6 +148,29 @@ export class PgDropshipListingSettingsRepository implements ListingSettingsRepos
     }
   }
 
+  async readProductOwnSettings(input: {
+    vendorId: number; storeConnectionId: number; productId: number; productVariantIds: readonly number[];
+  }): Promise<ListingSettingsProductOwnRead> {
+    const client = await this.dbPool.connect();
+    try {
+      // One snapshot, no locks, as the load: the row and the catalog facts its main text is checked against agree.
+      await client.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
+      const rows = await readProductListingSettings(client, {
+        vendorId: input.vendorId, storeConnectionId: input.storeConnectionId, productIds: [input.productId],
+      });
+      const row = rows.get(input.productId) ?? null;
+      // Only a main text is checked against the catalog, so a product without one reads no catalog.
+      const catalog = row?.values.mainText != null ? await readProductCatalog(client, input.productId, input.productVariantIds) : null;
+      await client.query("COMMIT");
+      return { row, catalog };
+    } catch (error) {
+      await rollbackQuietly(client);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
   private async loadInSnapshot(client: Reader, input: { memberId: string; storeConnectionId: number; now: Date }): Promise<ListingSettingsLoad | null> {
     // The fingerprint is read first, so it describes exactly the snapshot everything else is read from.
     const owner = await readOwnerFingerprint(client, input);
@@ -241,6 +267,25 @@ async function readCategoryMoveInputs(client: Reader, input: {
     fromCategories: fromCategoryIds.length === 0 ? new Map()
       : await readCategoryListingSettings(client, { vendorId, storeConnectionId, categoryIds: fromCategoryIds }),
     fromCategoryNames: await readCatalogCategoryNames(client, fromCategoryIds),
+  };
+}
+
+/**
+ * The product's catalog facts its own main text is checked against
+ * (productCatalogHash), from the same catalog read the views and W5 use
+ * (listCatalogCandidates), so the check here is the one they make. Every fact
+ * is a product column, so the size with the lowest id the catalog still lists
+ * gives them; null when it lists none of `productVariantIds` for the product.
+ * Only those facts are kept: a description can be long.
+ */
+async function readProductCatalog(client: Reader, productId: number, productVariantIds: readonly number[]):
+  Promise<ListingSettingsProductOwnRead["catalog"]> {
+  const candidates = await PgDropshipListingPreviewRepository.readerForTransaction(client).listCatalogCandidates(productVariantIds);
+  const first = candidates.filter((candidate) => candidate.productId === productId)
+    .sort((left, right) => left.productVariantId - right.productVariantId)[0];
+  return first === undefined ? null : {
+    productId: first.productId, description: first.description, brand: first.brand, condition: first.condition,
+    itemSpecifics: first.itemSpecifics,
   };
 }
 

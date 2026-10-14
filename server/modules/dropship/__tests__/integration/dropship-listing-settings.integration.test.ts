@@ -11,9 +11,10 @@ import {
   listingSettingsCategoriesResponseSchema,
   listingSettingsCategoryDetailSchema,
   listingSettingsProductDetailSchema,
+  listingSettingsProductOwnSettingsSchema,
   listingSettingsUpdatedProductsResponseSchema,
 } from "../../../../../shared/dropship/listing-settings";
-import { listingCatalogHash } from "../../application/dropship-listing-content-resolver";
+import { listingCatalogHash, productCatalogHash } from "../../application/dropship-listing-content-resolver";
 import { DropshipListingCategoryMovesService } from "../../application/dropship-listing-category-moves-service";
 import { DropshipListingCategorySettingsService } from "../../application/dropship-listing-category-settings-service";
 import { DropshipListingPriceService } from "../../application/dropship-listing-price-service";
@@ -708,6 +709,102 @@ describeDatabase.sequential("listing settings PostgreSQL read guarantees", () =>
         sizes: selection.sizes.map((size) => ({ ...size, stockUnits: 0 })),
         stock: { state: "ok", checkedAt: NOW.toISOString() }, generatedAt: NOW.toISOString() }).success).toBe(true);
     }
+  });
+
+  it("gives one product's own settings from its own row, read now in one read-only snapshot with no lock and no write (PR 10, plan 4.2)", async () => {
+    const [sleevesSize] = await new PgDropshipListingPreviewRepository(scopedPool()).listCatalogCandidates([201]);
+    const saved = await saveProductSetting(8, {
+      price: { basis: "catalog_retail", markupBps: 1_000, flatCents: 0, rounding: "cent" },
+      ebayCategory: { categoryId: "261328", categoryName: "Card Sleeves", path: ["Collectibles", "Card Sleeves"] },
+      storeShelf: { mode: "own", shelves: [{ id: "12", name: "Supplies:Sleeves" }] },
+      shippingPolicy: { id: "ship-p", name: "Free shipping" },
+      returnPolicy: { id: "return-p", name: null },
+      textAbove: { mode: "own", text: "Ships in a rigid mailer." },
+      textBelow: { mode: "none" },
+      mainText: { text: "Our product words.", catalogHash: productCatalogHash(sleevesSize) },
+    }, "own-read-product-8");
+    // Product 7 has none of its own: its category's value and its sizes' leftovers (beforeEach) are not its own.
+    await saveCategorySetting(TOPLOADERS, { returnPolicy: { id: "return-c", name: "Category returns" } }, "own-read-category-3");
+    const statements: Statement[] = [];
+    const modes: Array<{ connection: number; isolation: string; readOnly: string }> = [];
+    let connection = 0;
+    const service = new DropshipListingSettingsService({
+      repository: settings({ statements, afterStatement: async (sql, client) => {
+        if (!sql.startsWith("BEGIN")) return;
+        connection = statements.at(-1)!.connection;
+        // Asked on the read's own connection inside its transaction; not recorded.
+        modes.push({ connection, isolation: (await client.query("SHOW transaction_isolation")).rows[0].transaction_isolation,
+          readOnly: (await client.query("SHOW transaction_read_only")).rows[0].transaction_read_only });
+      } }),
+      stock: { atp: { getVariantAtp: async () => { throw new Error("The own read reads no stock."); } },
+        overrides: { listVariantOverrides: async () => { throw new Error("The own read reads no stock."); } } },
+      clock: { now: () => NOW },
+      logger,
+    });
+    const before = await databaseState();
+
+    const own = await service.getProductOwnSettings("member-1", { storeConnectionId: STORE_RULES, productId: 8 });
+
+    expect(listingSettingsProductOwnSettingsSchema.parse(own)).toEqual({ storeConnectionId: STORE_RULES, productId: 8,
+      revisionId: saved.row!.revisionId, generatedAt: NOW.toISOString(), own: {
+        price: { basis: "catalog_retail", markupBps: 1_000, flatCents: 0, rounding: "cent" },
+        ebayCategory: { categoryId: "261328", categoryName: "Card Sleeves" },
+        storeShelf: { mode: "own", shelves: [{ id: "12", name: "Supplies:Sleeves" }] },
+        shippingPolicy: { id: "ship-p", name: "Free shipping" },
+        returnPolicy: { id: "return-p", name: null },
+        paymentPolicy: null,
+        textAbove: { mode: "own", text: "Ships in a rigid mailer." },
+        textBelow: { mode: "none" },
+        // The product's own text, not its size's (beforeEach), checked against the catalog read with it.
+        mainText: { text: "Our product words.", needsCheck: false },
+      } });
+    // The revision a product save sends back is the one the id list gives.
+    expect((await service.listProductIdsForMember("member-1", { storeConnectionId: STORE_RULES, productId: 8 })).rows)
+      .toEqual([{ productId: 8, revisionId: own.revisionId }]);
+    expect(await databaseState()).toEqual(before);
+    for (const { sql } of statements) {
+      expect(sql).not.toMatch(/\b(INSERT|UPDATE|DELETE|TRUNCATE|LOCK TABLE|FOR UPDATE|FOR SHARE|pg_advisory\w*)\b/i);
+    }
+    // The views' snapshot (connection 1), then the own read's: the row, then its catalog facts, on one connection.
+    const ownRead = statements.filter((statement) => statement.connection === 2).map((statement) => statement.sql);
+    expect(ownRead[0]).toBe("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
+    expect(ownRead.at(-1)).toBe("COMMIT");
+    expect(ownRead).toHaveLength(4);
+    expect(ownRead[1]).toMatch(/FROM dropship\.dropship_product_listing_settings s\b/);
+    expect(ownRead[2]).toMatch(/FROM catalog\.product_variants pv\b/);
+    expect(modes.filter((mode) => mode.connection === 2)).toEqual([{ connection: 2, isolation: "repeatable read", readOnly: "on" }]);
+    // Every Dropship table it reads is in the fingerprint (or named by a revision id the fingerprint holds).
+    const fingerprintStatements: Statement[] = [];
+    await settings({ statements: fingerprintStatements }).readFingerprint({ memberId: "member-1", storeConnectionId: STORE_RULES });
+    const tablesIn = (rows: string[]) => new Set(rows.flatMap((sql) => [...sql.matchAll(/\bdropship\.([a-z_]+)/g)].map((match) => match[1])));
+    const covered = tablesIn(fingerprintStatements.map((statement) => statement.sql));
+    expect([...tablesIn(ownRead)].filter((table) => !covered.has(table) && !NAMED_BY_REVISION_ID.has(table))).toEqual([]);
+
+    // Card Shellz changes the product's description: the main text needs a check at once, inside the views' time limit.
+    await execute("UPDATE catalog.products SET description = 'New sleeves text.' WHERE id = 8");
+    const changed = await databaseState();
+    const loads = statements.filter((statement) => statement.sql.startsWith("BEGIN")).length;
+    expect((await service.getProductOwnSettings("member-1", { storeConnectionId: STORE_RULES, productId: 8 })).own.mainText)
+      .toEqual({ text: "Our product words.", needsCheck: true });
+    expect(statements.filter((statement) => statement.sql.startsWith("BEGIN"))).toHaveLength(loads + 1);
+
+    // No row of its own: every value null, no revision, and no catalog read.
+    const firstBlank = statements.length;
+    expect(await service.getProductOwnSettings("member-1", { storeConnectionId: STORE_RULES, productId: 7 })).toEqual({
+      storeConnectionId: STORE_RULES, productId: 7, revisionId: null, generatedAt: NOW.toISOString(), own: { price: null, ebayCategory: null,
+        storeShelf: null, shippingPolicy: null, returnPolicy: null, paymentPolicy: null, textAbove: null, textBelow: null, mainText: null } });
+    expect(statements.slice(firstBlank).some((statement) => /\bcatalog\./.test(statement.sql))).toBe(false);
+
+    // A product with no chosen size (product 9 does not exist): the product detail's 404.
+    await expect(service.getProductOwnSettings("member-1", { storeConnectionId: STORE_RULES, productId: 9 }))
+      .rejects.toMatchObject({ code: "DROPSHIP_LISTING_SETTINGS_PRODUCT_NOT_FOUND" });
+    // Another vendor's store: the ownership check alone (one statement on the pool), no read of its rows.
+    const firstForeign = statements.length;
+    await expect(service.getProductOwnSettings("member-1", { storeConnectionId: STORE_OTHER_VENDOR, productId: 8 }))
+      .rejects.toMatchObject({ code: "DROPSHIP_STORE_CONNECTION_REQUIRED" });
+    expect(statements.slice(firstForeign).map((statement) => [statement.connection, statement.sql.trimStart().slice(0, 10)]))
+      .toEqual([[0, "WITH owner"]]);
+    expect(await databaseState()).toEqual(changed);
   });
 
   it("gives a size priced by its category's own price the price the per-size price read gives, in a store without rules", async () => {

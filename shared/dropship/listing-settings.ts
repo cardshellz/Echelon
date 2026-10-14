@@ -2,7 +2,7 @@ import { z } from "zod";
 import { MAX_NAMED_CATALOG_GROUP_ITEMS } from "./catalog-scope";
 import { ebayCategoryIdSchema } from "./ebay-category-rules";
 import { DROPSHIP_LISTING_ACCESS_BLOCK_CODES, DROPSHIP_LISTING_ACCESS_RESOLUTIONS } from "./listing-access";
-import { MAX_TEMPLATE_TEXT_LENGTH } from "./listing-content";
+import { MAX_DESCRIPTION_TEXT_LENGTH, MAX_TEMPLATE_TEXT_LENGTH } from "./listing-content";
 import { RULE_PRICE_OUTSIDE_LIMIT_ISSUE, listingAmountCentsSchema, listingPriceBasisSchema, listingPriceCentsSchema } from "./listing-price";
 import { CATEGORY_LISTING_SETTING_FIELDS } from "./listing-setting-values";
 import { pricingRecipeSchema } from "./pricing-rules";
@@ -16,7 +16,8 @@ import { pricingRecipeSchema } from "./pricing-rules";
  * current step 2 panels, and the product and Card Shellz category settings;
  * each category's own settings have their own views (PR 9e), and the products
  * Card Shellz moved to another category, or whose own text needs a check,
- * have theirs ("Card Shellz updated products", PR 9g). No existing view
+ * have theirs ("Card Shellz updated products", PR 9g), and so does one
+ * product's own settings row, for its editor (PR 10). No existing view
  * changes shape for them (plan P27). No view calls eBay, so a saved policy is
  * reported by id with `verification: "not_checked"`.
  */
@@ -477,10 +478,15 @@ const sourced = <T extends z.ZodTypeAny>(value: T) => z.object({
   value: value.nullable(),
 }).strict().refine((setting) => (setting.source === "none") === (setting.value === null), "A value is given exactly when one applies.");
 
+/*
+ * The value shapes below are shared by a category's view and one product's
+ * own settings (GET …/products/:productId/own, PR 10): both show what a
+ * settings row stores, with its stored names and texts.
+ */
 /** An eBay category by its number, with the name eBay gave it. */
-const categoryEbayCategorySchema = z.object({ categoryId: ebayCategoryIdSchema, categoryName: z.string().min(1) }).strict();
+export const categoryEbayCategorySchema = z.object({ categoryId: ebayCategoryIdSchema, categoryName: z.string().min(1) }).strict();
 /** `none`: explicitly no shelf. `own`: the first shelf, then the second, each by id with its path (the store default's included). */
-const categoryStoreShelfSchema = z.discriminatedUnion("mode", [
+export const categoryStoreShelfSchema = z.discriminatedUnion("mode", [
   z.object({ mode: z.literal("none") }).strict(),
   z.object({ mode: z.literal("own"), shelves: z.array(z.object({ id: z.string().min(1), name: z.string().min(1) }).strict()).min(1).max(2) }).strict(),
 ]);
@@ -489,9 +495,9 @@ const categoryStoreShelfSchema = z.discriminatedUnion("mode", [
  * comes with its id only (name null), as the summary's storeDefaults name it:
  * these views do not read the listing config's stored policy names.
  */
-const categoryPolicySchema = z.object({ id: z.string().min(1), name: z.string().min(1).nullable() }).strict();
+export const categoryPolicySchema = z.object({ id: z.string().min(1), name: z.string().min(1).nullable() }).strict();
 /** Text above or below the main text: `none`, or the text itself. */
-const categoryTemplateTextSchema = z.discriminatedUnion("mode", [
+export const categoryTemplateTextSchema = z.discriminatedUnion("mode", [
   z.object({ mode: z.literal("none") }).strict(),
   z.object({ mode: z.literal("own"), text: z.string().min(1).max(MAX_TEMPLATE_TEXT_LENGTH) }).strict(),
 ]);
@@ -543,6 +549,45 @@ export const listingSettingsCategoryDetailSchema = z.object({
   }
   if (detail.ownValues.length > detail.productCount) {
     context.addIssue({ code: z.ZodIssueCode.custom, message: "More products hold own values than the category has.", path: ["ownValues"] });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// One product's own settings (GET …/products/:productId/own, PR 10)
+// ---------------------------------------------------------------------------
+
+/**
+ * What one product's own settings row stores, for its editor (the drawer): each
+ * setting's own value, or null when the product follows the default (its
+ * category's setting, else the store default), with the names and texts the
+ * row stores, and the row's revision, which a product save (W5) sends back as
+ * `expectedRevisionId`. Only the product's own values: never a size's
+ * leftover, a category's or the store default's, and never its category.
+ * A policy's `name` is the one stored at save; null when it was not known.
+ * The main text comes without its catalog hash: `needsCheck` says whether it
+ * was written against Card Shellz facts that have since changed. Like every
+ * view here, it calls no eBay and writes nothing.
+ */
+export const listingSettingsProductOwnSettingsSchema = z.object({
+  storeConnectionId: id,
+  productId: id,
+  /** The product's own settings revision; null when it has none yet. */
+  revisionId: id.nullable(),
+  own: z.object({
+    price: pricingRecipeSchema.nullable(),
+    ebayCategory: categoryEbayCategorySchema.nullable(),
+    storeShelf: categoryStoreShelfSchema.nullable(),
+    shippingPolicy: categoryPolicySchema.nullable(),
+    returnPolicy: categoryPolicySchema.nullable(),
+    paymentPolicy: categoryPolicySchema.nullable(),
+    textAbove: categoryTemplateTextSchema.nullable(),
+    textBelow: categoryTemplateTextSchema.nullable(),
+    mainText: z.object({ text: z.string().min(1).max(MAX_DESCRIPTION_TEXT_LENGTH), needsCheck: z.boolean() }).strict().nullable(),
+  }).strict(),
+  generatedAt: z.string().datetime(),
+}).strict().superRefine((settings, context) => {
+  if (settings.revisionId === null && Object.values(settings.own).some((value) => value !== null)) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "A product with no settings row has no value of its own.", path: ["own"] });
   }
 });
 
@@ -659,5 +704,6 @@ export type ListingSettingsCategoriesResponse = z.infer<typeof listingSettingsCa
 export type ListingSettingsCategorySettingSource = (typeof LISTING_SETTINGS_CATEGORY_SETTING_SOURCES)[number];
 export type ListingSettingsCategorySettings = z.infer<typeof listingSettingsCategorySettingsSchema>;
 export type ListingSettingsCategoryDetail = z.infer<typeof listingSettingsCategoryDetailSchema>;
+export type ListingSettingsProductOwnSettings = z.infer<typeof listingSettingsProductOwnSettingsSchema>;
 export type ListingSettingsUpdatedProductsInput = z.infer<typeof listingSettingsUpdatedProductsInputSchema>;
 export type ListingSettingsUpdatedProductsResponse = z.infer<typeof listingSettingsUpdatedProductsResponseSchema>;

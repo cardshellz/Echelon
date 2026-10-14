@@ -5,12 +5,14 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { listingPriceSettingSchema, type ListingPriceSetting } from "@shared/dropship/listing-price";
 import {
   listingSettingsProductDetailSchema,
+  listingSettingsProductOwnSettingsSchema,
   listingSettingsSizePriceSchema,
   type ListingSettingsProductDetail,
+  type ListingSettingsProductOwnSettings,
   type ListingSettingsSizePrice,
 } from "@shared/dropship/listing-settings";
 import type { PricingRecipe } from "@shared/dropship/pricing-rules";
-import { listingSettingsProductQueryOptions } from "@/lib/dropship-listing-settings";
+import { listingSettingsProductOwnQueryOptions, listingSettingsProductQueryOptions } from "@/lib/dropship-listing-settings";
 import type { ListingSettingsReadState, ListingSettingsRight } from "@/lib/dropship-listing-settings-access";
 import { productEditorId, reduceListingSettingsDraft, type ListingSettingsDraft } from "@/lib/dropship-listing-settings-drafts";
 import {
@@ -22,7 +24,7 @@ import {
   sizePriceQueryKey,
   type DrawerSizeLine,
 } from "@/lib/dropship-listing-settings-drawer";
-import type { PolicySetupFacts } from "@/lib/dropship-listing-settings-words";
+import type { PolicySetupFacts } from "@/lib/dropship-listing-settings-store-requests";
 import { DropshipApiError } from "@/lib/dropship-ops-surface";
 import { UnsavedChangesProvider } from "../catalog/UnsavedChangesGuard";
 import { DrawerPriceSection, type DrawerPriceSectionProps } from "../listing-settings/DrawerPriceSection";
@@ -33,6 +35,7 @@ import { DrawerFooterBar, PRODUCT_DRAWER_CLASS, ProductDrawer, type ProductDrawe
 /**
  * Radix renders a sheet into a portal, which a static render leaves out. This
  * stand-in renders the sheet in place and keeps the props the test checks.
+ * It exports every name the sheet module has that the step uses (plan 3.1).
  */
 vi.mock("@/components/ui/sheet", async () => {
   const { createElement } = await vi.importActual<typeof import("react")>("react");
@@ -41,7 +44,9 @@ vi.mock("@/components/ui/sheet", async () => {
     Sheet: ({ open, children }: Props) => (open ? createElement("div", { "data-mock": "sheet" }, children) : null),
     SheetContent: ({ side, children, className, "data-testid": testId }: Props) =>
       createElement("div", { "data-mock": "sheet-content", "data-side": side, "data-testid": testId, className }, children),
+    SheetHeader: ({ children }: Props) => createElement("div", { "data-mock": "sheet-header" }, children),
     SheetTitle: ({ children, className }: Props) => createElement("h2", { "data-mock": "sheet-title", className }, children),
+    SheetDescription: ({ children }: Props) => createElement("p", { "data-mock": "sheet-description" }, children),
   };
 });
 
@@ -52,6 +57,8 @@ const SIZE_B = 102;
 const GENERATED_AT = "2026-10-09T12:00:00.000Z";
 const RETAIL_20_UP: PricingRecipe = { basis: "catalog_retail", markupBps: 2000, flatCents: 0, rounding: "up_99" };
 const EDITABLE: ListingSettingsRight = { editable: true, reason: null };
+/** Every right the drawer reads (PR 10): a size's exact price, the product's own settings, and the eBay policy picks. */
+const RIGHTS: ProductDrawerProps["rights"] = { exactPrice: EDITABLE, productSettings: EDITABLE, shipping: EDITABLE, policies: EDITABLE };
 const noop = () => undefined;
 
 afterEach(() => {
@@ -133,9 +140,18 @@ const SETUP: ListingSettingsReadState<PolicySetupFacts> = {
       paymentPolicies: [{ id: "pay-1", name: "eBay payments" }],
     },
     checks: { ebay: "checked", fulfillment: { status: "checked" } },
+    fulfillmentCapability: null,
   },
   error: null,
 };
+
+/** The product's own settings read with nothing of its own saved. */
+const NO_OWN: ListingSettingsProductOwnSettings = listingSettingsProductOwnSettingsSchema.parse({
+  storeConnectionId: STORE, productId: PRODUCT, revisionId: null,
+  own: { price: null, ebayCategory: null, storeShelf: null, shippingPolicy: null, returnPolicy: null, paymentPolicy: null,
+    textAbove: null, textBelow: null, mainText: null },
+  generatedAt: GENERATED_AT,
+});
 
 function w9(overrides: Partial<ListingPriceSetting> = {}): ListingPriceSetting {
   return listingPriceSettingSchema.parse({
@@ -164,11 +180,13 @@ interface RenderOptions {
   detail?: ListingSettingsProductDetail | { error: unknown } | null;
   /** The size's own price read (W9), cached under its key. */
   sizePrice?: ListingPriceSetting;
+  /** The product's own settings read (PR 10): an answer, an error, or nothing yet. */
+  own?: ListingSettingsProductOwnSettings | { error: unknown } | null;
   inspect?: (client: QueryClient) => void;
 }
 
 /** The drawer inside the providers the step gives it, with a query cache the test fills and checks before it is cleared. */
-function renderDrawer({ props = {}, detail = DETAIL, sizePrice: price, inspect }: RenderOptions = {}): string {
+function renderDrawer({ props = {}, detail = DETAIL, sizePrice: price, own = NO_OWN, inspect }: RenderOptions = {}): string {
   // A failed read stays failed on mount, as it does between a failure and [Try again].
   const client = new QueryClient({ defaultOptions: { queries: { retry: false, retryOnMount: false } } });
   const detailOptions = listingSettingsProductQueryOptions(STORE, PRODUCT);
@@ -179,6 +197,13 @@ function renderDrawer({ props = {}, detail = DETAIL, sizePrice: price, inspect }
     client.setQueryData(detailOptions.queryKey, detail);
   }
   if (price) client.setQueryData(sizePriceQueryKey({ storeConnectionId: STORE, productVariantId: price.productVariantId }), price);
+  const ownOptions = listingSettingsProductOwnQueryOptions(STORE, PRODUCT);
+  if (own && "error" in own) {
+    const query = client.getQueryCache().build(client, ownOptions);
+    query.setState({ status: "error", error: own.error as Error, fetchStatus: "idle", errorUpdatedAt: 1, errorUpdateCount: 1 });
+  } else if (own) {
+    client.setQueryData(ownOptions.queryKey, own);
+  }
   try {
     const markup = render(React.createElement(QueryClientProvider, { client },
       React.createElement(UnsavedChangesProvider, null,
@@ -189,7 +214,7 @@ function renderDrawer({ props = {}, detail = DETAIL, sizePrice: price, inspect }
             storeConnectionId: STORE,
             storeName: "Marz Cards",
             target: { productId: PRODUCT },
-            rights: { exactPrice: EDITABLE },
+            rights: RIGHTS,
             setup: SETUP,
             summaryRecipe: RETAIL_20_UP,
             onClose: noop,
@@ -222,7 +247,7 @@ describe("ProductDrawer", () => {
     expect(renderDrawer({ props: { target: null } })).toBe("");
   });
 
-  it("shows the header, the PRICE section and the read-only rows (R:591, R:245-266)", () => {
+  it("shows the header, the PRICE section and the setting rows (R:591, R:245-266)", () => {
     const markup = renderDrawer();
     const words = text(markup);
     expect(markup).toContain('data-testid="product-drawer"');
@@ -254,8 +279,9 @@ describe("ProductDrawer", () => {
     expect(words).not.toContain("Everything else uses your store defaults.");
   });
 
-  it("shows every other setting read-only, with where it comes from (C17)", () => {
-    const words = text(renderDrawer());
+  it("shows every other setting with where it comes from; only the policy rows have Change (C17, PR 10)", () => {
+    const markup = renderDrawer();
+    const words = text(markup);
     for (const label of ["Shipping policy", "Return policy", "Payment policy", "eBay category", "Store shelf", "Description"]) {
       expect(words).toContain(label);
     }
@@ -265,8 +291,48 @@ describe("ProductDrawer", () => {
     expect(words).toContain("Card Sleeves Card Shellz picks");
     expect(words).toContain("Card Shellz text, with your text above Store default");
     expect(words).toContain("Main text: Card Shellz text");
-    // Read-only: no buttons for the settings, and no ids or codes.
-    expect(words).not.toMatch(/Set for this product|Change|261328|ship-1|pay-1|DROPSHIP_/);
+    // The three policy rows can be changed (W5); each [Change] names the product. The rest stay read-only (10b).
+    for (const setting of ["shipping policy", "return policy", "payment policy"]) {
+      expect(markup).toMatch(new RegExp(`<button[^>]*aria-label="Change ${setting} for Easy Glide Soft Sleeves"[^>]*>Change</button>`));
+    }
+    expect(markup.match(/>Change<\/button>/g)).toHaveLength(3);
+    for (const key of ["ebayCategory", "storeShelf", "descriptionTemplate"]) {
+      // The whole row, up to the next row (or the end of the rows).
+      const start = markup.indexOf(`data-testid="drawer-setting-${key}"`);
+      expect(start).toBeGreaterThan(-1);
+      const rest = markup.slice(start + 1);
+      const next = /data-testid="drawer-setting-[A-Za-z]+"/.exec(rest);
+      const row = markup.slice(start, next === null ? markup.indexOf("</section>", start) : start + 1 + next.index);
+      expect(row).toContain("</h4>");
+      expect(row).not.toContain(">Change</button>");
+    }
+    // No ids or codes.
+    expect(words).not.toMatch(/Set for this product|261328|ship-1|pay-1|DROPSHIP_/);
+  });
+
+  it("keeps Change off with Checking… until the product's own settings are read (4.8)", () => {
+    const markup = renderDrawer({ own: null });
+    expect(markup.match(/<button[^>]*disabled=""[^>]*>Change<\/button>/g)).toHaveLength(3);
+    expect(markup.match(/data-testid="drawer-setting-[a-zA-Z]+-line">Checking…/g)).toHaveLength(3);
+  });
+
+  it("says once when the product's own settings couldn't be read, with Try again, and keeps Change off (4.8)", () => {
+    const markup = renderDrawer({ own: { error: new TypeError("Failed to fetch") } });
+    const problem = markup.slice(markup.indexOf('data-testid="drawer-own-read-problem"'));
+    expect(text(problem.slice(0, problem.indexOf("</div>")))).toContain("Couldn't load this product's settings. Try again.");
+    expect(problem.slice(0, problem.indexOf("</div>"))).toContain(">Try again</button>");
+    expect(markup.match(/<button[^>]*disabled=""[^>]*>Change<\/button>/g)).toHaveLength(3);
+    expect(markup.match(/Couldn&#x27;t load this product&#x27;s settings/g)).toHaveLength(1);
+  });
+
+  it("names the product's own policy by the name it stored when eBay can't be read (G2)", () => {
+    const own = listingSettingsProductOwnSettingsSchema.parse({ ...NO_OWN, revisionId: 4,
+      own: { ...NO_OWN.own, shippingPolicy: { id: "ship-9", name: "Fast Free" } } });
+    const detail = listingSettingsProductDetailSchema.parse({ ...DETAIL, product: { ...DETAIL.product, ownSettings: ["shipping_policy"] },
+      settings: { ...DETAIL.settings, shippingPolicy: [{ value: { policyId: "ship-9" }, sources: [{ source: "product", ruleName: null, productVariantIds: [SIZE_A, SIZE_B] }] }] } });
+    const words = text(renderDrawer({ detail, own, props: { setup: { data: undefined, error: new Error("down") } } }));
+    expect(words).toContain("Fast Free Set for this product");
+    expect(words).not.toContain("ship-9");
   });
 
   it("starts with nothing to save", () => {
@@ -318,7 +384,7 @@ describe("ProductDrawer", () => {
   });
 
   it("says why exact prices can't be changed, with every box read-only", () => {
-    const markup = renderDrawer({ props: { rights: { exactPrice: { editable: false, reason: "loading" } } } });
+    const markup = renderDrawer({ props: { rights: { ...RIGHTS, exactPrice: { editable: false, reason: "loading" } } } });
     expect(text(markup)).toContain("Checking…");
     expect(markup.match(/readOnly=""/gi)?.length ?? 0).toBe(2);
     expect(markup).toMatch(/<button[^>]*disabled=""[^>]*aria-label="Use the price above"|aria-label="Use the price above"[^>]*disabled=""/);
@@ -341,7 +407,7 @@ describe("ProductDrawer reads (D8)", () => {
   it("does not read it while W9 would refuse a save", () => {
     let reads: ReturnType<typeof sizePriceReads> = [];
     renderDrawer({
-      props: { target: { productId: PRODUCT, productVariantId: SIZE_B }, rights: { exactPrice: { editable: false, reason: "banner" } } },
+      props: { target: { productId: PRODUCT, productVariantId: SIZE_B }, rights: { ...RIGHTS, exactPrice: { editable: false, reason: "banner" } } },
       inspect: (client) => { reads = sizePriceReads(client); },
     });
     expect(reads).toEqual([{ key: ["/api/dropship/listings/stores/22/variants/102/price"], enabled: false }]);
@@ -463,7 +529,7 @@ describe("DrawerSettingRow", () => {
     const words = text(render(React.createElement(DrawerSettingRow, { row: shipping })));
     expect(words).toContain("Sizes have different values. Each size keeps its own for now.");
     expect(words).toContain("Free Standard US Store default used by Box of 5 Packs of 100");
-    expect(words).toContain("A policy that's no longer on eBay Set on each size used by Pack of 100");
+    expect(words).toContain("A policy that's no longer on eBay Set on this size used by Pack of 100");
   });
 });
 

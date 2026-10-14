@@ -7,6 +7,7 @@ import {
 } from "@shared/dropship/listing-price";
 import {
   listingSettingsProductDetailSchema,
+  listingSettingsProductOwnSettingsSchema,
   listingSettingsSizePriceSchema,
   type ListingSettingsProductDetail,
   type ListingSettingsProductSize,
@@ -27,12 +28,15 @@ import {
   DRAWER_SIZES_SHOWN_FIRST,
   DRAWER_WORDS,
   drawerCategoryLine,
+  drawerDraftState,
   drawerFooter,
+  drawerOwnReadProblem,
   drawerOwnSettingsLine,
   drawerPhoneSummary,
   drawerReadProblem,
   drawerSearch,
   drawerSettingRows,
+  shownFieldEditor,
   drawerSizeEditState,
   drawerSizeLine,
   drawerSizeList,
@@ -66,8 +70,19 @@ import {
   type SizePriceSaveDrafts,
 } from "../dropship-listing-settings-drawer";
 import { DropshipApiError } from "../dropship-ops-surface";
-import type { ListingSettingsReadState } from "../dropship-listing-settings-access";
-import type { PolicySetupFacts } from "../dropship-listing-settings-words";
+import {
+  listingSettingsEditRights,
+  type ListingSettingsReadState,
+  type ListingSettingsRightsInput,
+  type ListingSetupFacts,
+} from "../dropship-listing-settings-access";
+import { LISTING_SETTINGS_EDIT_WORDS, type PolicySetupFacts } from "../dropship-listing-settings-words";
+import {
+  emptyChoices,
+  productSettingsDraftValue,
+  type ProductOwnSettings,
+  type ProductSettingsChoices,
+} from "../dropship-listing-settings-product-edit";
 
 const STORE = 22;
 const PRODUCT = 11;
@@ -1082,7 +1097,7 @@ describe("drawerSettingRows", () => {
       entries: [
         { value: "Free Standard US", tags: ["Store default"], usedBy: "used by Box of 5 Packs of 100" },
         // ship-2 is not among eBay's policies.
-        { value: "A policy that's no longer on eBay", tags: ["Set on each size"], usedBy: "used by Pack of 100" },
+        { value: "A policy that's no longer on eBay", tags: ["Set on this size"], usedBy: "used by Pack of 100" },
       ],
     }]);
   });
@@ -1097,7 +1112,7 @@ describe("drawerSettingRows", () => {
       { differ: null, entries: [{ value: "Card Shellz text, with your text above", tags: ["From your older group rule “Sleeves text”"], usedBy: null }] },
       { differ: null, entries: [{ value: "Main text: Card Shellz text", tags: [], usedBy: null }] },
     ]);
-    expect(description.notes).toEqual(["Older group rules come after a product's own settings and before your store defaults."]);
+    expect(description.notes).toEqual(["Older group rules come after a product's own settings and before category settings and store defaults."]);
     expect(row("shippingPolicy").notes).toEqual([]);
     expect(JSON.stringify(rows)).not.toMatch(/261328|ship-1|pay-1|DROPSHIP_/);
   });
@@ -1126,3 +1141,206 @@ describe("drawerSettingRows", () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// Editing the rows (PR 10, plan 4.3, 4.4, 4.8; D2, D3, D4)
+// ---------------------------------------------------------------------------
+
+describe("the drawer with a product's own settings (PR 10)", () => {
+  const OWN: ProductOwnSettings = listingSettingsProductOwnSettingsSchema.parse({
+    storeConnectionId: STORE, productId: PRODUCT, revisionId: 5,
+    own: {
+      price: null, ebayCategory: null, storeShelf: null,
+      shippingPolicy: { id: "ship-9", name: "Fast Free" }, returnPolicy: null, paymentPolicy: { id: "pay-7", name: "Managed payments" },
+      textAbove: null, textBelow: null, mainText: null,
+    },
+    generatedAt: GENERATED_AT,
+  });
+  // The product's own shipping policy, and a return policy its Card Shellz category sets.
+  const EDITED = listingSettingsProductDetailSchema.parse({
+    ...DETAIL,
+    product: { ...DETAIL.product, sizesDiffer: [] },
+    settings: {
+      ...DETAIL.settings,
+      shippingPolicy: [{ value: { policyId: "ship-9" }, sources: [{ source: "product", ruleName: null, productVariantIds: [SIZE_A, SIZE_B] }] }],
+      returnPolicy: [{ value: { policyId: "ret-4" }, sources: [{ source: "category", ruleName: "Sleeves", productVariantIds: [SIZE_A, SIZE_B] }] }],
+    },
+  });
+  const setupFacts: ListingSetupFacts = {
+    access: { canEdit: true, reason: null }, revision: 4, checks: { ebay: "checked", fulfillment: { status: "checked" } }, missingFields: [],
+  };
+  const rights = (overrides: Partial<ListingSettingsRightsInput> = {}) => listingSettingsEditRights({
+    account: { status: "active", entitlementStatus: "active" },
+    summary: { storeStatus: "connected", catalog: { state: "ok", products: 3, sizes: 9 } },
+    setup: { data: setupFacts, error: null },
+    shelves: { data: { categories: [] }, error: null },
+    blocked: null,
+    ...overrides,
+  });
+  const settingsDraft = (choices: Partial<ProductSettingsChoices>): ListingSettingsDraft => {
+    const opened = reduceListingSettingsDraft(null, { type: "open", editor: EDITOR, place: "Easy Glide Soft Sleeves", base: productSettingsDraftValue(OWN) });
+    return reduceListingSettingsDraft(opened, { type: "edit", value: productSettingsDraftValue(OWN, { ...emptyChoices(), ...choices }) })!;
+  };
+  const rowsWith = (edit: Partial<Parameters<typeof drawerSettingRows>[2] & object> = {}, setup = SETUP) => drawerSettingRows(EDITED, setup, {
+    own: { data: OWN, error: null }, rights: rights(), draft: null, editor: EDITOR, openField: null, failure: null, ...edit,
+  });
+  const edit = (rows: ReturnType<typeof drawerSettingRows>, key: string) => rows.find((row) => row.key === key)!.edit!;
+
+  it("gives the three policy rows their edit state, and no other row; none without edit facts", () => {
+    const rows = rowsWith();
+    expect(rows.map((row) => row.edit?.field ?? null)).toEqual(["shippingPolicy", "returnPolicy", "paymentPolicy", null, null, null]);
+    expect(edit(rows, "shippingPolicy")).toEqual({
+      field: "shippingPolicy", canSet: true, canDefault: true, change: { shown: true, disabled: false }, line: null, open: false,
+      choice: { mode: "leave" }, pending: null, marked: false, fieldError: null,
+    });
+    expect(drawerSettingRows(EDITED, SETUP).every((row) => row.edit === null)).toBe(true);
+  });
+
+  it("says where each value comes from, a category by name, and names the product's own policy from its own read", () => {
+    const rows = rowsWith({}, { data: undefined, error: new Error("down") });
+    expect(rows[0].groups[0].entries).toEqual([{ value: "Fast Free", tags: ["Set for this product"], usedBy: null }]);
+    expect(rows[1].groups[0].entries).toEqual([{ value: "Set", tags: ["From category: Sleeves"], usedBy: null }]);
+    // eBay read: the product's own policy isn't in eBay's list any more.
+    expect(rowsWith()[0].groups[0].entries[0].value).toBe("Fast Free (no longer on eBay)");
+    expect(JSON.stringify(rowsWith())).not.toMatch(/ship-9|ret-4|DROPSHIP_/);
+  });
+
+  it("keeps [Change] off while the own read loads, and says the failure once for the drawer", () => {
+    const loading = edit(rowsWith({ own: { data: undefined, error: null } }), "returnPolicy");
+    expect(loading).toMatchObject({ change: { shown: true, disabled: true }, line: "Checking…" });
+    const failed = edit(rowsWith({ own: { data: OWN, error: new Error("down") } }), "returnPolicy");
+    expect(failed).toMatchObject({ change: { shown: true, disabled: true }, line: null });
+    expect(drawerOwnReadProblem(new TypeError("Failed to fetch"), "Marz Cards")).toEqual({ kind: "failed", message: LISTING_SETTINGS_EDIT_WORDS.ownReadFailed });
+    const limited = new DropshipApiError({ message: "x", status: 429, code: "DROPSHIP_LISTING_SETTINGS_RATE_LIMITED" });
+    expect(drawerOwnReadProblem(limited, "Marz Cards")).toEqual({ kind: "rate_limited", message: DRAWER_WORDS.readRateLimited });
+    const tooLarge = new DropshipApiError({ message: "x", status: 422, code: "DROPSHIP_LISTING_SETTINGS_TOO_LARGE" });
+    expect(drawerOwnReadProblem(tooLarge, "Marz Cards")).toEqual({ kind: "too_large", message: DRAWER_WORDS.readTooLarge });
+    const notFound = new DropshipApiError({ message: "x", status: 404, code: "DROPSHIP_LISTING_SETTINGS_PRODUCT_NOT_FOUND" });
+    expect(drawerOwnReadProblem(notFound, "Marz Cards").kind).toBe("not_found");
+  });
+
+  it("offers only Use default under a sign-in, and nothing under a banner that takes W5 away (D3, D4)", () => {
+    const signIn = edit(rowsWith({ rights: rights({ blocked: { kind: "sign_in", diagnosticReference: null } }) }), "paymentPolicy");
+    expect(signIn).toMatchObject({ canSet: false, canDefault: true, change: { shown: true, disabled: false }, line: LISTING_SETTINGS_EDIT_WORDS.signInFieldLine });
+    const down = edit(rowsWith({ rights: rights({ setup: { error: new DropshipApiError({ message: "x", status: 502, code: "DROPSHIP_EBAY_LISTING_SETUP_UNAVAILABLE" }) } }) }), "paymentPolicy");
+    expect(down).toMatchObject({ canSet: false, canDefault: true, line: "Can't check eBay right now." });
+    // eBay refusing access: the banner says why, and the row says only the default is left (the editor lists it alone).
+    const denied = rights({ setup: { error: new DropshipApiError({ message: "x", status: 403, code: "DROPSHIP_EBAY_LISTING_SETUP_ACCESS_DENIED" }) } });
+    for (const field of ["shippingPolicy", "returnPolicy", "paymentPolicy"]) {
+      expect(edit(rowsWith({ rights: denied }), field)).toMatchObject({ canSet: false, canDefault: true, change: { shown: true }, line: LISTING_SETTINGS_EDIT_WORDS.defaultOnlyLine });
+    }
+    for (const account of [{ status: "paused", entitlementStatus: "active" }, { status: "active", entitlementStatus: "lapsed" }]) {
+      for (const field of ["shippingPolicy", "returnPolicy", "paymentPolicy"]) {
+        expect(edit(rowsWith({ rights: rights({ account }) }), field)).toMatchObject({ canSet: false, canDefault: false, change: { shown: false }, line: null });
+      }
+    }
+  });
+
+  it("shows the draft's choice as not saved, by name, and the default by its word", () => {
+    const draft = settingsDraft({ shippingPolicy: { mode: "set", value: { id: "ship-1" } }, paymentPolicy: { mode: "default" } });
+    const rows = rowsWith({ draft, openField: "paymentPolicy" });
+    expect(edit(rows, "shippingPolicy")).toMatchObject({ choice: { mode: "set", value: { id: "ship-1" } }, pending: "→ Free Standard US · Not saved", open: false });
+    expect(edit(rows, "paymentPolicy")).toMatchObject({ choice: { mode: "default" }, pending: "→ Use default · Not saved", open: true });
+    expect(edit(rows, "returnPolicy")).toMatchObject({ choice: { mode: "leave" }, pending: null });
+    // Once saved, the rows show what the server says, not the draft's choices.
+    const sent = reduceListingSettingsDraft(draft, { type: "startSave", attempt: { signature: "s", key: "k" } })!;
+    expect(edit(rowsWith({ draft: sent }), "shippingPolicy").pending).toBe("→ Free Standard US · Not saved");
+    for (const viewStale of [false, true]) {
+      const saved = reduceListingSettingsDraft(sent, { type: "saved", key: "k", nowMs: 1_000, viewStale })!;
+      expect(edit(rowsWith({ draft: saved }), "shippingPolicy")).toMatchObject({ choice: { mode: "leave" }, pending: null, change: { disabled: false } });
+    }
+  });
+
+  it("waits for a size's price (D2), and locks while a save is out", () => {
+    const size = draftFor(BASE_A, "12.00");
+    expect(edit(rowsWith({ draft: size }), "shippingPolicy")).toMatchObject({ change: { shown: true, disabled: true }, line: "Save or discard your other change first." });
+    const saving = reduceListingSettingsDraft(settingsDraft({ paymentPolicy: { mode: "default" } }), { type: "startSave", attempt: { signature: "s", key: "k" } })!;
+    expect(edit(rowsWith({ draft: saving }), "shippingPolicy")).toMatchObject({ change: { disabled: true }, line: null });
+    // Another product's draft holds nothing of this one.
+    expect(edit(rowsWith({ draft: { ...size, editor: productEditorId(12) } }), "shippingPolicy").change.disabled).toBe(false);
+  });
+
+  it("marks the fields both windows changed, and puts a refusal on the fields it names", () => {
+    const draft = reduceListingSettingsDraft(settingsDraft({ shippingPolicy: { mode: "set", value: { id: "ship-1" } } }), {
+      type: "rebase", latest: productSettingsDraftValue(OWN), marked: ["shippingPolicy"],
+    })!;
+    const rows = rowsWith({ draft, failure: { message: "That policy is no longer on eBay. Pick another one.", fields: ["returnPolicy"] } });
+    expect(edit(rows, "shippingPolicy")).toMatchObject({ marked: true, fieldError: null });
+    expect(edit(rows, "returnPolicy")).toMatchObject({ marked: false, fieldError: "That policy is no longer on eBay. Pick another one." });
+  });
+
+  it("holds a size's price back while the product's settings hold a change (D2)", () => {
+    const draft = settingsDraft({ paymentPolicy: { mode: "default" } });
+    expect(decideSizeEdit(draft, EDITOR, EXACT_A, null, "12.00")).toEqual({ kind: "wait" });
+    expect(drawerSizeEditState(draft, EDITOR, EXACT_A)).toEqual({ text: "14.99", changed: false, waiting: true, marked: false });
+    // An unchanged settings draft holds nothing: typing starts a price draft.
+    const unchanged = settingsDraft({});
+    expect(decideSizeEdit(unchanged, EDITOR, EXACT_A, null, "12.00").kind).toBe("start");
+    expect(drawerSizeEditState(unchanged, EDITOR, EXACT_A).waiting).toBe(false);
+  });
+
+  it("shows the opened field's editor only while its row offers a choice and the own read is there", () => {
+    expect(shownFieldEditor(rowsWith(), "returnPolicy", true)).toBe("returnPolicy");
+    expect(shownFieldEditor(rowsWith(), null, true)).toBeNull();
+    // The own read failed on a refetch, or a banner took W5 away: it closes.
+    expect(shownFieldEditor(rowsWith(), "returnPolicy", false)).toBeNull();
+    expect(shownFieldEditor(rowsWith({ rights: rights({ account: { status: "paused", entitlementStatus: "active" } }) }), "returnPolicy", true)).toBeNull();
+    // A row 10a doesn't edit has no editor.
+    expect(shownFieldEditor([{ edit: null }], "returnPolicy", true)).toBeNull();
+    // A size's price typed meanwhile keeps it open, so Done can say why it waits (D2).
+    expect(shownFieldEditor(rowsWith({ draft: draftFor(BASE_A, "12.00") }), "returnPolicy", true)).toBe("returnPolicy");
+  });
+
+  it("holds Save while a field editor is open, and says so once the draft holds a change", () => {
+    const base = { editable: true, busy: false, clear: null, savedFlashVisible: false, compact: false, fieldEditorOpen: true };
+    const draft = settingsDraft({ paymentPolicy: { mode: "default" } });
+    expect(drawerFooter({ ...base, draft })).toMatchObject({
+      primary: { action: "save", disabled: true }, discardDisabled: false, message: { text: LISTING_SETTINGS_EDIT_WORDS.finishEditorFirst, tone: "status" },
+    });
+    // Nothing to save yet: Save is off anyway, and nothing needs saying.
+    expect(drawerFooter({ ...base, draft: null })).toMatchObject({ primary: { disabled: true }, message: null });
+    // A size's price typed while the editor is open waits the same way.
+    expect(drawerFooter({ ...base, draft: draftFor(BASE_A, "12.00") })).toMatchObject({ primary: { disabled: true }, message: { text: LISTING_SETTINGS_EDIT_WORDS.finishEditorFirst } });
+    // Closed, Save is back; the PR 7 footer is the same without the flag.
+    expect(drawerFooter({ ...base, draft, fieldEditorOpen: false })).toMatchObject({ primary: { disabled: false }, message: null });
+    const sent = reduceListingSettingsDraft(draft, { type: "startSave", attempt: { signature: "s", key: "k" } })!;
+    const conflict = reduceListingSettingsDraft(sent, { type: "failure", key: "k",
+      failure: { phase: "conflict", message: "This changed in another window.", code: "C", status: 409, fields: [] } })!;
+    expect(drawerFooter({ ...base, draft: conflict }).primary).toMatchObject({ action: "load_latest", disabled: true });
+  });
+
+  it("works out which writer the draft is for, the right the footer saves with, and what Esc does (D2, plan 3.4)", () => {
+    const allowed = { editable: true as const, reason: null };
+    const off = { editable: false as const, reason: "banner" as const };
+    const state = (draft: ListingSettingsDraft | null, overrides: Partial<Parameters<typeof drawerDraftState>[0]> = {}) =>
+      drawerDraftState({ draft, editor: EDITOR, rights: { exactPrice: allowed, productSettings: off }, failure: null, ...overrides });
+    expect(state(null)).toEqual({ writer: "W9", footerDraft: null, editable: true, settingsHoldChange: false, showRefusal: false, escapeKeepsOpen: false });
+    const size = draftFor(BASE_A, "12.00");
+    expect(state(size)).toEqual({ writer: "W9", footerDraft: size, editable: true, settingsHoldChange: false, showRefusal: false, escapeKeepsOpen: false });
+    const settings = settingsDraft({ paymentPolicy: { mode: "default" } });
+    expect(state(settings)).toEqual({ writer: "W5", footerDraft: settings, editable: false, settingsHoldChange: true, showRefusal: true, escapeKeepsOpen: false });
+    // An unchanged settings draft is still W5's, but holds no size back.
+    expect(state(settingsDraft({}))).toMatchObject({ writer: "W5", settingsHoldChange: false });
+    // A refusal that names a row is told there, not in the footer.
+    expect(state(settings, { failure: { fields: ["returnPolicy"] } }).showRefusal).toBe(false);
+    expect(state(settings, { failure: { fields: ["price"] } }).showRefusal).toBe(true);
+    // Out or unconfirmed: Esc keeps the drawer, and the sizes still wait. A size's price keeps PR 7's Esc.
+    const saving = reduceListingSettingsDraft(settings, { type: "startSave", attempt: { signature: "s", key: "k" } })!;
+    expect(state(saving)).toMatchObject({ writer: "W5", settingsHoldChange: true, escapeKeepsOpen: true });
+    const uncertain = reduceListingSettingsDraft(saving, { type: "failure", key: "k",
+      failure: { phase: "uncertain", message: "We couldn't confirm your save.", code: null, status: null, fields: [] } })!;
+    expect(state(uncertain).escapeKeepsOpen).toBe(true);
+    const sizeSaving = reduceListingSettingsDraft(size, { type: "startSave", attempt: { signature: "s", key: "k" } })!;
+    expect(state(sizeSaving)).toMatchObject({ writer: "W9", escapeKeepsOpen: false });
+    // Another product's draft or another editor's is not this drawer's.
+    expect(state({ ...settings, editor: productEditorId(12) })).toEqual(state(null));
+  });
+
+  it("tells a settings refusal that names no field in the footer, when asked", () => {
+    const saving = reduceListingSettingsDraft(settingsDraft({ paymentPolicy: { mode: "default" } }), { type: "startSave", attempt: { signature: "s", key: "k" } })!;
+    const refused = reduceListingSettingsDraft(saving, { type: "failure", key: "k", failure: { phase: "refused", message: LISTING_SETTINGS_EDIT_WORDS.fatal, code: "F", status: 500 } })!;
+    const base = { editable: true, busy: false, clear: null, savedFlashVisible: false, compact: false };
+    expect(drawerFooter({ ...base, draft: refused }).message).toBeNull();
+    expect(drawerFooter({ ...base, draft: refused, showRefusal: true }).message).toEqual({ text: LISTING_SETTINGS_EDIT_WORDS.fatal, tone: "alert" });
+    expect(drawerFooter({ ...base, draft: refused, showRefusal: true }).primary).toMatchObject({ action: "save", label: "Save product", disabled: false });
+  });
+});

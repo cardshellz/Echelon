@@ -7,6 +7,7 @@ import {
   listingSettingsPricesResponseSchema,
   listingSettingsProductDetailSchema,
   listingSettingsProductIdsResponseSchema,
+  listingSettingsProductOwnSettingsSchema,
   listingSettingsProductsResponseSchema,
   listingSettingsSummarySchema,
   listingSettingsUpdatedProductsResponseSchema,
@@ -19,7 +20,7 @@ import { requireDropshipAuth } from "./dropship-auth.routes";
 
 type ListingSettingsRouteService = Pick<DropshipListingSettingsService,
   "getSummaryForMember" | "listPricesForMember" | "listProductsForMember" | "listProductIdsForMember" | "getProductForMember"
-  | "listCategoriesForMember" | "getCategoryForMember" | "listUpdatedProductsForMember">;
+  | "getProductOwnSettings" | "listCategoriesForMember" | "getCategoryForMember" | "listUpdatedProductsForMember">;
 
 /** Reads only, so the read budget from the Listing settings design (8.8). */
 export const LISTING_SETTINGS_READS_PER_MINUTE = 120;
@@ -28,7 +29,8 @@ export const LISTING_SETTINGS_READS_PER_MINUTE = 120;
  * Read-only listing settings views (Listing settings design 8.4). No route
  * here writes or calls eBay. Inputs are checked by the service's schemas and
  * every answer by its response schema. One product's view also reads its
- * sizes' stock, through the same budget.
+ * sizes' stock, and one product's own settings its own row, through the same
+ * budget.
  */
 export function registerDropshipListingSettingsRoutes(
   app: Express,
@@ -55,6 +57,13 @@ export function registerDropshipListingSettingsRoutes(
     () => service.listProductIdsForMember(memberId(req), productIdsInput(req))));
   app.get(`${base}/products/:productId`, requireDropshipAuth, limiter, (req, res) => respond(req, res, listingSettingsProductDetailSchema,
     () => service.getProductForMember(memberId(req), {
+      storeConnectionId: parseId(req.params.storeConnectionId),
+      productId: parseId(req.params.productId),
+    })));
+  // One product's own settings row, for its editor (PR 10). One segment longer than the product route, so neither
+  // route can answer the other's path; "ids" here is not a product id and is refused (400).
+  app.get(`${base}/products/:productId/own`, requireDropshipAuth, limiter, (req, res) => respond(req, res,
+    listingSettingsProductOwnSettingsSchema, () => service.getProductOwnSettings(memberId(req), {
       storeConnectionId: parseId(req.params.storeConnectionId),
       productId: parseId(req.params.productId),
     })));

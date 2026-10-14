@@ -12,10 +12,12 @@ import {
   type ListingSettingsPricesResponse,
   type ListingSettingsProductDetail,
   type ListingSettingsProductIdsResponse,
+  type ListingSettingsProductOwnSettings,
   type ListingSettingsProductsResponse,
   type ListingSettingsSummary,
   type ListingSettingsUpdatedProductsResponse,
 } from "../../../../shared/dropship/listing-settings";
+import type { ProductListingSettingRow } from "../../../../shared/dropship/listing-setting-values";
 import { DropshipError } from "../domain/errors";
 import {
   buildListingSettingsFacts,
@@ -23,6 +25,7 @@ import {
   buildListingSettingsSummary,
   buildTooLargeListingSettingsSummary,
   listingSettingsStockUnits,
+  productOwnSettingsView,
   selectListingSettingsCategories,
   selectListingSettingsCategory,
   selectListingSettingsPrices,
@@ -32,6 +35,7 @@ import {
   selectListingSettingsUpdatedProducts,
   type ListingSettingsFacts,
   type ListingSettingsInputs,
+  type ListingSettingsProductCatalog,
   type ListingSettingsProductSelection,
 } from "./dropship-listing-settings-facts";
 import type { DropshipListingPreviewRepository, DropshipListingStoreContext } from "./dropship-listing-preview-service";
@@ -43,7 +47,8 @@ import type { DropshipAtpProvider } from "./dropship-selection-atp-service";
  * writes or calls eBay. Each request reads the store's settings fingerprint
  * (one small query) and reuses the views built for that fingerprint, so a
  * save on any server shows on the next read. One product's view adds its
- * sizes' stock, read live and never cached.
+ * sizes' stock, read live and never cached; one product's own settings add
+ * its own settings row, read live and never cached (PR 10).
  */
 
 /** Costs and catalog facts have no revision to key on; the design lets them be this old. */
@@ -71,6 +76,23 @@ export interface ListingSettingsRepository {
    * read-only snapshot. Null when the member's vendor does not own the store.
    */
   load(input: { memberId: string; storeConnectionId: number; now: Date }): Promise<ListingSettingsLoad | null>;
+  /**
+   * One product's own settings row (null when it has none), read with PR 8a's
+   * reader, and, only when that row holds a main text, the product's catalog
+   * facts from one of `productVariantIds` the catalog still lists for it (each
+   * gives the same product facts; null when it lists none), both in one
+   * read-only snapshot with no lock (plan PR 10, 4.2). The cached views keep
+   * no product row, only its revision.
+   */
+  readProductOwnSettings(input: {
+    vendorId: number; storeConnectionId: number; productId: number; productVariantIds: readonly number[];
+  }): Promise<ListingSettingsProductOwnRead>;
+}
+
+/** What one product's own settings are built from: its row and, for a main text, its catalog facts, from one snapshot. */
+export interface ListingSettingsProductOwnRead {
+  row: ProductListingSettingRow | null;
+  catalog: ListingSettingsProductCatalog | null;
 }
 
 /** The reads one product's stock needs: the same quantity source and vendor caps the preview uses. */
@@ -97,6 +119,14 @@ interface CacheEntry { fingerprint: string; cachedAtMs: number; sizes: number; v
 
 export class DropshipListingSettingsService {
   private readonly cache = new Map<string, CacheEntry>();
+  /**
+   * The builds in flight, by member, store and fingerprint. Reads that miss
+   * the cache together (the drawer's detail and own read, PR 10; the step's
+   * summary and lists) share one load and build instead of each running the
+   * heaviest read here. An entry goes when its build settles, so a failed one
+   * is never reused; a new fingerprint never joins an older build.
+   */
+  private readonly building = new Map<string, Promise<ListingSettingsView>>();
   private cachedSizes = 0;
   private readonly ttlMs: number;
   private readonly maxSizes: number;
@@ -150,11 +180,7 @@ export class DropshipListingSettingsService {
     const parsed = listingSettingsProductInputSchema.parse(input);
     const view = requireSizes(await this.viewFor(memberId, parsed.storeConnectionId), parsed.storeConnectionId);
     const selection = selectListingSettingsProduct(view.facts, parsed.productId);
-    if (!selection) {
-      throw new DropshipError("DROPSHIP_LISTING_SETTINGS_PRODUCT_NOT_FOUND",
-        "None of this product's sizes is chosen for this store.",
-        { storeConnectionId: parsed.storeConnectionId, productId: parsed.productId });
-    }
+    if (!selection) throw productNotFound(parsed);
     const stock = await this.readStock(view.facts.store, selection);
     return {
       storeConnectionId: parsed.storeConnectionId,
@@ -166,6 +192,37 @@ export class DropshipListingSettingsService {
       })),
       stock: stock.state,
       generatedAt: view.builtAt.toISOString(),
+    };
+  }
+
+  /**
+   * One chosen product's own settings, for its editor (plan PR 10, 4.2): the
+   * same member check, cached views, 404 and 422 as the product's settings in
+   * full. Its values, stored names and texts and its revision come from one
+   * read of its own row made now, never from the cache, so a save shows at
+   * once and the editor sends back the revision of the values it shows (W5's
+   * `expectedRevisionId`). A main text is checked against the catalog facts
+   * read in that same snapshot. No stock read, no eBay call, no write.
+   */
+  async getProductOwnSettings(memberId: string, input: unknown): Promise<ListingSettingsProductOwnSettings> {
+    const parsed = listingSettingsProductInputSchema.parse(input);
+    const view = requireSizes(await this.viewFor(memberId, parsed.storeConnectionId), parsed.storeConnectionId);
+    const product = view.facts.products.find((row) => row.row.productId === parsed.productId);
+    if (!product) throw productNotFound(parsed);
+    const generatedAt = this.deps.clock.now();
+    const read = await this.deps.repository.readProductOwnSettings({
+      vendorId: view.facts.store.vendorId,
+      storeConnectionId: parsed.storeConnectionId,
+      productId: parsed.productId,
+      productVariantIds: product.sizes.map((size) => size.price.productVariantId),
+    });
+    // The catalog no longer lists any of the sizes the cached views chose (Card Shellz changed them within the
+    // views' time limit): the product is not chosen now, as the next build of the views will say too.
+    if (read.row?.values.mainText != null && read.catalog === null) throw productNotFound(parsed);
+    return {
+      storeConnectionId: parsed.storeConnectionId,
+      ...productOwnSettingsView({ productId: parsed.productId, row: read.row, catalog: read.catalog }),
+      generatedAt: generatedAt.toISOString(),
     };
   }
 
@@ -248,6 +305,17 @@ export class DropshipListingSettingsService {
       this.touch(key, cached);
       return cached.view;
     }
+    const flightKey = `${key}:${fingerprint}`;
+    const running = this.building.get(flightKey);
+    if (running) return running;
+    // One chain, returned to every caller that joins it, so its failure is always handled by them.
+    const build = this.buildAndCache(memberId, storeConnectionId, key).finally(() => this.building.delete(flightKey));
+    this.building.set(flightKey, build);
+    return build;
+  }
+
+  /** Loads and builds the views, and caches them unless their costs couldn't be read. */
+  private async buildAndCache(memberId: string, storeConnectionId: number, key: string): Promise<ListingSettingsView> {
     const now = this.deps.clock.now();
     const load = await this.deps.repository.load({ memberId, storeConnectionId, now });
     if (!load) throw storeNotFound(storeConnectionId);
@@ -320,6 +388,11 @@ function requiredUnits(units: ReadonlyMap<number, number>, productVariantId: num
   const value = units.get(productVariantId);
   if (value === undefined) throw new Error(`Listing settings has no stock for size ${productVariantId}.`);
   return value;
+}
+
+function productNotFound(input: { storeConnectionId: number; productId: number }): DropshipError {
+  return new DropshipError("DROPSHIP_LISTING_SETTINGS_PRODUCT_NOT_FOUND", "None of this product's sizes is chosen for this store.",
+    { storeConnectionId: input.storeConnectionId, productId: input.productId });
 }
 
 function storeNotFound(storeConnectionId: number): DropshipError {

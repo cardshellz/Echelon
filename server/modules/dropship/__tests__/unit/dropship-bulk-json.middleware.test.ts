@@ -63,6 +63,8 @@ describe("the bulk JSON path table (plan PR 9, P8, section 3.6)", () => {
     // Only W5's PUT: the read router's GETs and another verb keep the global parser.
     ["GET", `${STORE}/listing-settings/products/7`],
     ["GET", `${STORE}/listing-settings/products/ids`],
+    // One product's own settings (PR 10): a read, with no body.
+    ["GET", `${STORE}/listing-settings/products/7/own`],
     ["POST", `${STORE}/listing-settings/products/7`],
     ["PUT", `${STORE}/listing-settings/products/7/sizes`],
     // Only W6's POST: the read router's GET of the same path, and a longer path, keep the global parser.
