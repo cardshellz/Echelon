@@ -765,20 +765,23 @@ test("review groups each SKU and rolls financial detail up without hiding the ve
   await expect(summary.getByText("$60.00", { exact: true })).toBeVisible();
   await expect(summary.getByText("$40.00", { exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "Apply changes · $40.00 payment due", exact: true })).toBeEnabled();
-  const calculations = page.locator("details").filter({ has: page.locator("summary", { hasText: "Discounts, shipping and tax" }) });
-  const payments = page.locator("details").filter({ has: page.locator("summary", { hasText: "Payments and refunds" }) });
+  const calculations = page.locator("details").filter({ has: page.locator("summary", { hasText: "How your total is calculated" }) });
+  const payments = page.locator("details").filter({ has: page.locator("summary", { hasText: "Payment history" }) });
   await expect(calculations).not.toHaveAttribute("open");
   await expect(payments).not.toHaveAttribute("open");
-  await expect(calculations.getByRole("table")).not.toBeVisible();
-  await expect(payments.getByText("Payment history", { exact: true })).not.toBeVisible();
+  await expect(calculations.getByRole("region", { name: "Order financial breakdown", exact: true })).not.toBeVisible();
+  await expect(payments.getByRole("list", { name: "Payment activity", exact: true })).not.toBeVisible();
   await assertFitsScreen(page);
   await page.screenshot({ path: testInfo.outputPath("order-review-collapsed.png"), fullPage: true });
   await calculations.locator("summary").click();
-  await expect(calculations.getByRole("table")).toBeVisible();
-  await expect(calculations.getByText("TEN", { exact: true })).toBeVisible();
-  await expect(calculations.getByText("−$3.00", { exact: true })).toBeVisible();
+  await expect(calculations.getByRole("region", { name: "Order financial breakdown", exact: true })).toBeVisible();
+  await expect(calculations.getByRole("table")).toHaveCount(0);
+  const changedTotals = calculations.getByRole("region", { name: "After changes", exact: true });
+  await expect(changedTotals.getByText("TEN", { exact: true })).toBeVisible();
+  await expect(changedTotals.getByText("−$3.00", { exact: true })).toBeVisible();
   await payments.locator("summary").click();
-  await expect(payments.getByText("Payment · Succeeded", { exact: true })).toBeVisible();
+  await expect(payments.getByRole("list", { name: "Payment activity", exact: true }).getByText("Payment received", { exact: true })).toBeVisible();
+  await expect(payments.getByRole("list", { name: "Payment activity", exact: true }).getByText("$20.00", { exact: true })).toBeVisible();
   await assertFitsScreen(page);
   expect(fixture.requests.some((request) => /\/(quotes|commit|abandon)$/.test(request.path))).toBe(false);
   expect(fixture.failures).toEqual([]);
@@ -923,12 +926,12 @@ test("shows the storefront member-price treatment on the correct pack, including
       name: "Quantity for added 35PT 3x4 Premium Toploader · Box of 250 · SHLZ-TOP-35PT-B250",
     }),
   ).toHaveValue("1");
-  const addedMemberPrice = page.getByLabel(
-    ".club member price $29.99; retail $39.99", { exact: true },
-  );
-  await expect(addedMemberPrice).toBeVisible();
-  await expect(addedMemberPrice.locator(".cardshellz-member-price-value"))
-    .toHaveCSS("color", "rgb(74, 138, 58)");
+  // This preview fixture returns a $15.00 net unit amount. The order row must
+  // use that verified amount, rather than repeat the picker's $29.99 price.
+  const addedRow = page.locator(".oe-added-item");
+  await expect(addedRow.getByText("$15.00 each", { exact: true })).toBeVisible();
+  await expect(addedRow.locator(".oe-item-total")).toHaveText("$15.00");
+  await expect(addedRow.getByText("Added", { exact: true })).toBeVisible();
   await assertFitsScreen(page);
   expect(
     fixture.requests.filter((request) =>

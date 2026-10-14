@@ -1,6 +1,10 @@
 import { z } from "zod";
 import { orderEditShippingRepricingSchema } from "./order-edit-shipping";
 import {
+  orderEditRequestedCodesSchema,
+  orderEditCodeApplicationSchema,
+} from "./order-edit-codes";
+import {
   orderEditFinancialsSchema,
   orderEditSettlementSchema,
 } from "./order-edit-financials";
@@ -97,6 +101,8 @@ export const orderEditOrderSchema = orderEditOrderSummarySchema
     warehouseStatus: z.string(),
     financials: orderEditFinancialsSchema.optional(),
     settlement: orderEditSettlementSchema.optional(),
+    codeEntryAvailable: z.boolean().optional(),
+    appliedCodes: z.array(orderEditCodeApplicationSchema).optional(),
   })
   .strict();
 export const orderEditVariantSchema = z
@@ -118,6 +124,8 @@ export const orderEditQuoteInputSchema = z
     omsOrderId: id,
     expectedRevision: z.string().min(1).max(200),
     requestKey: z.string().uuid(),
+    // Omit for legacy commands: defaulting this field changes persisted request hashes.
+    discountCodes: orderEditRequestedCodesSchema.optional(),
     changes: z
       .array(
         z
@@ -147,17 +155,23 @@ export const orderEditQuoteInputSchema = z
 // Read-only previews and financial quotes validate the same commercial plan.
 export const orderEditPlanInputSchema = orderEditQuoteInputSchema
   .innerType()
-  .pick({ changes: true, additions: true })
+  .pick({ changes: true, additions: true, discountCodes: true })
   .superRefine(validateOrderEditPlan);
 
 function validateOrderEditPlan(
   input: {
     changes: Array<{ lineItemId: string }>;
     additions: Array<{ variantId: string }>;
+    discountCodes?: string[];
   },
   context: z.RefinementCtx,
 ): void {
-  if (input.changes.length + input.additions.length === 0)
+  if (
+    input.changes.length +
+      input.additions.length +
+      (input.discountCodes?.length ?? 0) ===
+    0
+  )
     context.addIssue({
       code: "custom",
       message: "Choose at least one change.",
@@ -176,8 +190,12 @@ function validateOrderEditPlan(
 }
 export const orderEditOperationSchema = z
   .object({
+    codeEntryAvailable: z.boolean().optional(),
     shippingRepricing: orderEditShippingRepricingSchema.nullable().optional(),
     operationId: z.string().uuid(),
+    appliedCodes: z.array(orderEditCodeApplicationSchema).optional(),
+    requestedPlan: orderEditPlanInputSchema.optional(),
+    expectedRevision: z.string().min(1).max(200).optional(),
     orderNumber: z.string(),
     currency: z.literal("USD"),
     canAbandon: z.boolean(),

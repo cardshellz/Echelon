@@ -17,16 +17,26 @@ import {
 } from "@/lib/dropship-listing-settings-access";
 import type { AttentionAction } from "@/lib/dropship-listing-settings-attention";
 import {
+  BULK_EDITOR_ID,
+  LISTING_SETTINGS_GUARD_ID_PREFIX,
   STORE_DEFAULT_LABELS,
   countOlderSettingsDrafts,
+  decideOpen,
   describeListingSettingsBar,
   isDraftDirty,
 } from "@/lib/dropship-listing-settings-drafts";
-import { drawerSearch, drawerTargetFromSearch, firstSizeNeedingFix, type DrawerTarget } from "@/lib/dropship-listing-settings-drawer";
+import {
+  drawerSearch,
+  drawerTargetFromSearch,
+  firstSizeNeedingFix,
+  sheetFromSearch,
+  sheetSearch,
+  type DrawerTarget,
+} from "@/lib/dropship-listing-settings-drawer";
 import { isStoreDefaultPolicyEditor, policyEditorBase } from "@/lib/dropship-listing-settings-store-requests";
 import type { DropshipEbayStoreCategoryResponse, DropshipStoreConnectionSummary } from "@/lib/dropship-ops-surface";
 import { CatalogActionBar, type CatalogNextStepAction } from "../catalog/CatalogActionBar";
-import { useUnsavedDrafts } from "../catalog/UnsavedChangesGuard";
+import { useLeaveGuard, useUnsavedDrafts } from "../catalog/UnsavedChangesGuard";
 import { AttentionStrip } from "./AttentionStrip";
 import { ConnectionBannerView } from "./ConnectionBanner";
 import { DescriptionDefaultRow } from "./DescriptionDefaultRow";
@@ -52,7 +62,9 @@ import { StoreDefaultsCard } from "./StoreDefaultsCard";
  * It decides nothing about saving. Each row owns its writer; this shell reads
  * the facts every row shares (the live eBay setup, the summary, the store
  * shelves), turns them into edit rights and the one banner, and routes the
- * strip's buttons and the address (`?product=&size=`) to the right place.
+ * strip's buttons and the address (`?product=&size=`, and from PR 10
+ * `?sheet=bulk` for "Set for selected") to the right place, one surface at a
+ * time (D20).
  */
 
 /** The onboarding read the page and portal shell share; its vendor status and entitlement gate every writer. */
@@ -130,6 +142,8 @@ export function ListingSettingsStep(props: ListingSettingsStepProps) {
   const [location, navigate] = useLocation();
   const search = useSearch();
   const drawerTarget = useMemo(() => drawerTargetFromSearch(search), [search]);
+  const sheet = useMemo(() => sheetFromSearch(search), [search]);
+  const guard = useLeaveGuard();
 
   // A block a save reported during this visit (plan 4.3). It stays until the vendor checks again
   // from the banner, or until they leave the step (the step is keyed by store and unmounts).
@@ -143,6 +157,7 @@ export function ListingSettingsStep(props: ListingSettingsStepProps) {
   const defaultsRef = useRef<HTMLDivElement | null>(null);
   const tabsRef = useRef<HTMLDivElement | null>(null);
   const drawerOpener = useRef<HTMLElement | null>(null);
+  const bulkOpener = useRef<HTMLElement | null>(null);
   const mounted = useRef(false);
   useEffect(() => {
     mounted.current = true;
@@ -212,6 +227,38 @@ export function ListingSettingsStep(props: ListingSettingsStepProps) {
     navigate(`${path}${drawerSearch(query, null)}`, { replace: true });
   }, [navigate]);
 
+  /**
+   * [Set for selected] puts its sheet in the address (D21), so Back closes it. Another editor's unsaved
+   * change is asked about first (D16), and the drawer's address goes with it: one surface at a time (D20).
+   */
+  const openBulkSheet = useCallback(() => {
+    // The opener ([Set for selected]) is taken now: after the leave question, focus sits on its dialog's button.
+    const active = typeof document === "undefined" ? null : document.activeElement;
+    const opener = active instanceof HTMLElement ? active : null;
+    const show = () => {
+      bulkOpener.current = opener;
+      const { location: path, search: query } = latest.current;
+      navigate(`${path}${sheetSearch(drawerSearch(query, null), "bulk")}`);
+    };
+    const decision = decideOpen(drafts.draft, BULK_EDITOR_ID);
+    // Another editor's save is in flight: nothing opens until it settles.
+    if (decision === "refuse") return;
+    if (decision === "ask") {
+      guard(() => {
+        drafts.discard();
+        show();
+      }, [`${LISTING_SETTINGS_GUARD_ID_PREFIX}${storeConnectionId}`]);
+      return;
+    }
+    show();
+  }, [drafts, guard, navigate, storeConnectionId]);
+
+  /** Closing takes the sheet off the address in place, so Back doesn't open it again. */
+  const closeBulkSheet = useCallback(() => {
+    const { location: path, search: query } = latest.current;
+    navigate(`${path}${sheetSearch(query, null)}`, { replace: true });
+  }, [navigate]);
+
   const openProduct = useCallback((target: ListingSettingsProductTarget) => {
     openDrawer(target.productVariantId === undefined
       ? { productId: target.productId }
@@ -271,6 +318,8 @@ export function ListingSettingsStep(props: ListingSettingsStepProps) {
 
   const saved = summary.data?.storeDefaults ?? null;
   const goToStep1 = () => goToStep("choose");
+  // The shelf editors list the shelves only while their read answers (rights.shelfPick says the same).
+  const shelfOptions = shelves.data !== undefined && (shelves.error === undefined || shelves.error === null) ? shelves.data.categories : null;
 
   return (
     <div data-testid="listing-settings-step">
@@ -374,6 +423,19 @@ export function ListingSettingsStep(props: ListingSettingsStepProps) {
           request={tabsRequest}
           // A list refused as too large shows the banner even before the summary says so (plan 4.4).
           onTooLarge={onWriteBlocked}
+          bulk={{
+            // One surface at a time (D20): the drawer, when the address opens both.
+            open: sheet === "bulk" && drawerTarget === null,
+            onOpen: openBulkSheet,
+            onClose: closeBulkSheet,
+            rights,
+            setup: { data: setupQuery.data, error: setupQuery.error },
+            shelves: shelfOptions,
+            saveCallbacks,
+            onSaved: onSettingsSaved,
+            onBlocked: onWriteBlocked,
+            returnFocusTo: bulkOpener,
+          }}
         />
       </div>
       <ProductDrawer
@@ -382,8 +444,7 @@ export function ListingSettingsStep(props: ListingSettingsStepProps) {
         target={drawerTarget}
         rights={rights}
         setup={{ data: setupQuery.data, error: setupQuery.error }}
-        // The shelf editor lists the shelves only while their read answers (rights.shelfPick says the same).
-        shelves={shelves.data !== undefined && (shelves.error === undefined || shelves.error === null) ? shelves.data.categories : null}
+        shelves={shelfOptions}
         landing={landing}
         onLanded={() => setLanding(null)}
         summaryRecipe={summary.data?.storeDefaults.price.recipe}

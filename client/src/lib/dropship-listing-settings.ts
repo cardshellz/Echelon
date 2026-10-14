@@ -6,6 +6,8 @@ import {
   listingSettingsPricesInputSchema,
   listingSettingsPricesResponseSchema,
   listingSettingsProductDetailSchema,
+  listingSettingsProductIdsInputSchema,
+  listingSettingsProductIdsResponseSchema,
   listingSettingsProductInputSchema,
   listingSettingsProductOwnSettingsSchema,
   listingSettingsProductsInputSchema,
@@ -13,6 +15,7 @@ import {
   listingSettingsSummarySchema,
   type ListingSettingsPricesResponse,
   type ListingSettingsProductDetail,
+  type ListingSettingsProductIdsResponse,
   type ListingSettingsProductOwnSettings,
   type ListingSettingsProductsResponse,
   type ListingSettingsSummary,
@@ -57,7 +60,7 @@ export class ListingSettingsReadError extends Error {
   }
 }
 
-type ListingSettingsRead = "summary" | "products" | "prices" | "product" | "product-own";
+type ListingSettingsRead = "summary" | "products" | "prices" | "product" | "product-own" | "product-ids";
 
 /** At most this many contract issues are kept on the error: enough to find the field, never the values. */
 const MAX_REPORTED_ISSUES = 5;
@@ -246,6 +249,67 @@ export function listingSettingsProductOwnQueryOptions(
     enabled: (options.enabled ?? true) && parsed.success,
     // The editor starts from what is saved now.
     staleTime: 0,
+    retry: false,
+  } as const;
+}
+
+/**
+ * Which products' ids and revisions a "Set for selected" sheet reads
+ * (`GET …/products/ids`, PR 10 plan 6.4): the Products tab's search and
+ * filter for "Select all N", else every chosen product (the ticks are picked
+ * from it, `pickSelected`). `categoryId` and `productId` narrow it further.
+ */
+export interface ListingSettingsProductIdsRequest {
+  search?: string;
+  show?: ListingSettingsProductFilter;
+  categoryId?: number;
+  productId?: number;
+}
+
+/**
+ * Every product the request matches, unpaged (up to 10,000), each with its
+ * own settings' revision: W6 sends each one back (D6). Read fresh when the
+ * sheet opens (staleTime 0), so the revisions are the ones the save compares.
+ * The key is built from the checked request, as the lists' are.
+ */
+export function listingSettingsProductIdsQueryOptions(
+  storeConnectionId: number,
+  request: ListingSettingsProductIdsRequest,
+  options: ListingSettingsReadOptions = {},
+) {
+  const raw = {
+    storeConnectionId,
+    search: request.search ?? "",
+    show: request.show ?? "all",
+    ...(request.categoryId === undefined ? {} : { categoryId: request.categoryId }),
+    ...(request.productId === undefined ? {} : { productId: request.productId }),
+  };
+  const parsed = listingSettingsProductIdsInputSchema.safeParse(raw);
+  const source = parsed.success ? parsed.data : raw;
+  const asked = {
+    search: source.search,
+    show: source.show,
+    ...(source.categoryId === undefined ? {} : { categoryId: source.categoryId }),
+    ...(source.productId === undefined ? {} : { productId: source.productId }),
+  };
+  return {
+    queryKey: [...listingSettingsQueryKey(storeConnectionId), "product-ids", asked] as const,
+    queryFn: async ({ signal }: { signal: AbortSignal }): Promise<ListingSettingsProductIdsResponse> => {
+      if (!parsed.success) throw invalidRequest("product-ids", parsed.error);
+      const input = parsed.data;
+      const params = new URLSearchParams({ search: input.search, show: input.show });
+      if (input.categoryId !== undefined) params.set("categoryId", String(input.categoryId));
+      if (input.productId !== undefined) params.set("productId", String(input.productId));
+      return readListingSettings("product-ids", `${listingSettingsPath(input.storeConnectionId)}/products/ids?${params.toString()}`,
+        listingSettingsProductIdsResponseSchema, signal);
+    },
+    enabled: (options.enabled ?? true) && parsed.success,
+    // The sheet's revisions are the ones read as it opens (D6).
+    staleTime: 0,
+    // Dropped as soon as the sheet closes (its fetchQuery calls pass the same gcTime, which query-core would
+    // otherwise raise to 5 minutes), so the next opening reads again; the sheet also waits for a read made
+    // after it opened before it sets up its draft.
+    gcTime: 0,
     retry: false,
   } as const;
 }

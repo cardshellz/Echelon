@@ -17,6 +17,7 @@ import { DropshipApiError, type DropshipEbayFulfillmentCapability, type Dropship
 import {
   CHECKING_EBAY,
   GROUP_RULE_ORDER_NOTE,
+  LISTING_SETTINGS_BULK_WORDS,
   LISTING_SETTINGS_EDIT_WORDS,
   NOT_SET_NEEDED_TO_LIST,
   SIZES_DIFFER_WORDS,
@@ -51,6 +52,20 @@ import {
   storeDefaultPolicyValue,
   storeShelfValue,
   usedByWords,
+  bulkConflictWords,
+  bulkSheetTitleWords,
+  checkingProductsWords,
+  leftOutWords,
+  matchMovedWords,
+  pageAllSelectedWords,
+  saveForWords,
+  savedForProductsWords,
+  savedForSelectedWords,
+  heldSaveWords,
+  selectionAnnouncementWords,
+  selectAllWords,
+  selectedCountWords,
+  selectProductLabel,
 } from "../dropship-listing-settings-words";
 
 /** A raw code or enum value leaking into vendor words: snake_case or a DROPSHIP_ code. */
@@ -499,6 +514,66 @@ describe("editing a product's own settings (PR 10 proposals, plan 12.2)", () => 
     expect(descriptionPendingWords([{ part: "textAbove", to: "default" }, { part: "mainText", to: "own" }]))
       .toBe("→ Text above: Use default, main text: your own · Not saved");
     for (const words of [textTooLongWords(4_000), descriptionPendingWords([{ part: "mainText", to: "own" }])]) expectPlain(words);
+  });
+});
+
+describe("Set for selected (PR 10c proposals, plan 6.3, 6.5, 12.2)", () => {
+  it("uses the record's and the plan's words, every one plain", () => {
+    expect(LISTING_SETTINGS_BULK_WORDS).toEqual({
+      // The record's (REC:971) and R:§3.3 M5's.
+      setForSelected: "Set for selected",
+      intro: "These become each product's own values.",
+      // Plan 12.2.
+      clear: "Clear",
+      leaveAsIs: "Leave as is",
+      noneChosen: "None of these products is chosen any more.",
+      tooMuchText: "Too much text for this many products. Choose fewer products, or set the text once on a category or as your store default.",
+      productGone: "A selected product is no longer in the Card Shellz catalog. Load the list again.",
+      // Proposals beyond plan 12.2 (BUILD-NOTES).
+      readFailed: "Couldn't check the selected products. Try again.",
+      selectPage: "Select every product on this page",
+      selectShown: "Select all shown",
+      selectedProducts: "the selected products",
+      carried: "Your unsaved change from before is kept for these products.",
+    });
+    for (const words of Object.values(LISTING_SETTINGS_BULK_WORDS)) expectPlain(words);
+  });
+
+  it("counts products in the bar, the sheet and its refusals, one or many, with thousands marked", () => {
+    expect(selectedCountWords(3)).toBe("3 selected");
+    expect(selectedCountWords(1_240)).toBe("1,240 selected");
+    expect(pageAllSelectedWords(50, false)).toBe("All 50 on this page are selected.");
+    expect(pageAllSelectedWords(100, true)).toBe("All 100 shown are selected.");
+    // REC:820 "Select all N".
+    expect(selectAllWords(312)).toBe("Select all 312");
+    expect(selectAllWords(10_000)).toBe("Select all 10,000");
+    expect(selectProductLabel(" Penny Sleeves ")).toBe("Select Penny Sleeves");
+    expect(selectProductLabel(" ")).toBe("Select this product");
+    expect(savedForSelectedWords(312)).toBe("Saved for 312 products. Still selected.");
+    expect(savedForSelectedWords(1)).toBe("Saved for 1 product. Still selected.");
+    expect(bulkSheetTitleWords(312)).toBe("Set for 312 products");
+    expect(bulkSheetTitleWords(1)).toBe("Set for 1 product");
+    expect(saveForWords(312)).toBe("Save for 312 products");
+    expect(saveForWords(1)).toBe("Save for 1 product");
+    expect(checkingProductsWords(312)).toBe("Checking 312 products…");
+    expect(checkingProductsWords(1)).toBe("Checking 1 product…");
+    expect(matchMovedWords(312, 310)).toBe("312 now match (was 310).");
+    expect(matchMovedWords(1, 2)).toBe("1 now matches (was 2).");
+    expect(leftOutWords(2)).toBe("2 products are no longer chosen and are left out.");
+    expect(leftOutWords(1)).toBe("1 product is no longer chosen and is left out.");
+    expect(bulkConflictWords(3)).toBe("3 of the selected products changed in another window.");
+    expect(bulkConflictWords(1_204)).toBe("1,204 of the selected products changed in another window.");
+    expect(savedForProductsWords(1_204)).toBe("Saved for 1,204 products.");
+    expect(savedForProductsWords(1)).toBe("Saved for 1 product.");
+    expect(heldSaveWords(2)).toBe("This save is for the 2 products it was sent for.");
+    expect(heldSaveWords(1)).toBe("This save is for the 1 product it was sent for.");
+    expect(selectionAnnouncementWords({ count: "3 selected", offer: null, status: null })).toBe("3 selected.");
+    expect(selectionAnnouncementWords({ count: "50 selected", offer: { line: "All 50 on this page are selected.", label: "Select all 312" }, status: "Saved for 2 products." }))
+      .toBe("50 selected. All 50 on this page are selected. Select all 312 is available. Saved for 2 products.");
+    for (const words of [selectedCountWords(3), pageAllSelectedWords(50, false), savedForSelectedWords(2), matchMovedWords(3, 2), leftOutWords(2), bulkConflictWords(2),
+      savedForProductsWords(2), heldSaveWords(2), selectionAnnouncementWords({ count: "3 selected", offer: null, status: null })]) {
+      expectPlain(words);
+    }
   });
 });
 

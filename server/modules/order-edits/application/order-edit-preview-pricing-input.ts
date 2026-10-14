@@ -32,14 +32,16 @@ export function toOrderEditPreviewPricingInput(
           unsupported: line.unsupported,
         })),
       previewProductDiscounts: snapshot.previewProductDiscounts,
-      discountRules: (snapshot.discountRules ?? []).map((rule) => ({
-        type: rule.type,
-        targetType: rule.targetType,
-        allocationMethod: rule.allocationMethod,
-        targetSelection: rule.targetSelection,
-        label: rule.label,
-        value: rule.value,
-      })),
+      discountRules: (snapshot.discountRules ?? [])
+        .filter((rule) => rule.label !== snapshot.codePricing?.description)
+        .map((rule) => ({
+          type: rule.type,
+          targetType: rule.targetType,
+          allocationMethod: rule.allocationMethod,
+          targetSelection: rule.targetSelection,
+          label: rule.label,
+          value: rule.value,
+        })),
     },
     variants: context.variants,
   });

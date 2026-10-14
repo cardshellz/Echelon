@@ -4,43 +4,51 @@ import type {
   OrderEditFinancials,
   OrderEditSettlement,
 } from "@shared/order-edits/order-edit-financials";
-import { formatOrderEditMoney } from "@/lib/order-edits";
 import type { OrderEditShippingRepricing } from "@shared/order-edits/order-edit-shipping";
+import { formatOrderEditMoney } from "@/lib/order-edits";
 
 type FinancialColumn = { label: string; financials: OrderEditFinancials };
+const money = (amount: number) => formatOrderEditMoney(amount, "USD");
 
 export function OrderEditSummary({
   totals,
   difference,
+  financials,
 }: {
   totals: Array<{ label: string; totalCents: number }>;
   difference?: { label: string; amountCents: number };
+  financials?: OrderEditFinancials | null;
 }) {
   return (
-    <section aria-label="Order summary" className="rounded-md bg-muted/40 p-4">
-      <dl className="grid grid-cols-[minmax(0,1fr)_auto] gap-x-4 gap-y-3 text-sm">
+    <section aria-label="Order summary" className="oe-summary">
+      <h3>Your order total</h3>
+      {financials && (
+        <dl className="oe-money-list oe-summary-items">
+          <dt>Items after discounts</dt>
+          <dd>{money(financials.itemsNetCents)}</dd>
+          <dt>Shipping</dt>
+          <dd>{money(financials.shippingCents)}</dd>
+          <dt>{financials.taxesIncluded ? "Tax (included)" : "Tax"}</dt>
+          <dd>{money(financials.taxCents)}</dd>
+        </dl>
+      )}
+      <dl className="oe-money-list oe-summary-totals">
         {totals.map((total, index) => (
           <React.Fragment key={total.label}>
-            <dt
-              className={index === totals.length - 1 ? "font-medium" : "text-muted-foreground"}
-            >
+            <dt className={index === totals.length - 1 ? "oe-total-label" : ""}>
               {total.label}
             </dt>
-            <dd
-              className={`text-right tabular-nums ${index === totals.length - 1 ? "font-semibold" : "text-muted-foreground"}`}
-            >
-              {formatOrderEditMoney(total.totalCents, "USD")}
+            <dd className={index === totals.length - 1 ? "oe-total-value" : ""}>
+              {money(total.totalCents)}
             </dd>
           </React.Fragment>
         ))}
       </dl>
       {difference && (
-        <p className="mt-4 flex flex-wrap justify-between gap-2 border-t pt-4 text-sm font-semibold">
+        <div className="oe-payment-difference">
           <span>{difference.label}</span>{" "}
-          <span className="tabular-nums">
-            {formatOrderEditMoney(difference.amountCents, "USD")}
-          </span>
-        </p>
+          <strong>{money(difference.amountCents)}</strong>
+        </div>
       )}
     </section>
   );
@@ -56,16 +64,13 @@ function FinancialDetails({
   children: React.ReactNode;
 }) {
   return (
-    <details className="group rounded-md border">
-      <summary className="flex cursor-pointer list-none items-center gap-3 rounded-md p-4 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring [&::-webkit-details-marker]:hidden">
-        <span className="min-w-0 flex-1 font-medium">{label}</span>
-        {note && <span className="text-xs text-muted-foreground">{note}</span>}
-        <ChevronDown
-          className="h-4 w-4 shrink-0 group-open:rotate-180"
-          aria-hidden="true"
-        />
+    <details className="oe-details group">
+      <summary>
+        <span>{label}</span>
+        {note && <small>{note}</small>}
+        <ChevronDown className="group-open:rotate-180" aria-hidden="true" />
       </summary>
-      <div className="space-y-4 border-t p-3 sm:p-4">{children}</div>
+      <div className="oe-details-body">{children}</div>
     </details>
   );
 }
@@ -79,34 +84,20 @@ export function OrderEditCalculationDetails({
 }) {
   if (columns.length === 0 && !shipping) return null;
   return (
-    <FinancialDetails label="Discounts, shipping and tax">
+    <FinancialDetails label="How your total is calculated">
       {columns.length > 0 && <OrderEditTotals columns={columns} embedded />}
       {shipping && (
-        <section
-          aria-label="Recalculated shipping"
-          className="border-t pt-4 text-sm"
-        >
-          <h3 className="font-medium">
-            Recalculated shipping · {shipping.title}
-          </h3>
-          <dl className="mt-3 grid grid-cols-[minmax(0,1fr)_auto] gap-x-4 gap-y-2">
-            <dt>Current checkout rate</dt>
-            <dd className="text-right tabular-nums">
-              {formatOrderEditMoney(shipping.grossCents, "USD")}
-            </dd>
-            {shipping.discountCents > 0 && (
-              <>
-                <dt>{shipping.discountLabels.join(", ") || "Shipping benefit"}</dt>
-                <dd className="text-right tabular-nums">
-                  −{formatOrderEditMoney(shipping.discountCents, "USD")}
-                </dd>
-              </>
-            )}
-            <dt className="font-medium">Shipping charged</dt>
-            <dd className="text-right font-medium tabular-nums">
-              {formatOrderEditMoney(shipping.netCents, "USD")}
-            </dd>
+        <section className="oe-shipping-rate" aria-label="Recalculated shipping">
+          <h3>{shipping.title}</h3>
+          <dl className="oe-money-list">
+            <dt>Current checkout rate</dt><dd>{money(shipping.grossCents)}</dd>
+            {shipping.discountCents > 0 && <>
+              <dt className="oe-saving">{shipping.discountLabels.join(", ") || "Shipping savings"}</dt>
+              <dd className="oe-saving">−{money(shipping.discountCents)}</dd>
+            </>}
+            <dt className="oe-net">Shipping charged</dt><dd className="oe-net">{money(shipping.netCents)}</dd>
           </dl>
+          <p className="oe-shipping-note">Included in the shipping amount above.</p>
         </section>
       )}
     </FinancialDetails>
@@ -122,8 +113,8 @@ export function OrderEditPaymentDetails({
 }) {
   return (
     <FinancialDetails
-      label="Payments and refunds"
-      note={`${formatOrderEditMoney(settlement.netPaidCents, "USD")} net paid`}
+      label="Payment history"
+      note={`${money(settlement.netPaidCents)} paid`}
     >
       <OrderEditPayments
         settlement={settlement}
@@ -141,150 +132,91 @@ export function OrderEditTotals({
   columns: FinancialColumn[];
   embedded?: boolean;
 }) {
-  const money = (amount: number) => formatOrderEditMoney(amount, "USD");
-  const itemLabels = [
-    ...new Set(
-      columns.flatMap((column) => column.financials.itemDiscountLabels),
-    ),
-  ].join(", ");
-  const shippingLabels = [
-    ...new Set(
-      columns.flatMap((column) => column.financials.shippingDiscountLabels),
-    ),
-  ].join(", ");
-  // Older saved quotes do not have proven per-code amounts. Keep their complete
-  // aggregate rather than presenting missing evidence as a zero-dollar discount.
-  const detailed = columns.every(
-    (column) => column.financials.itemDiscounts !== undefined,
-  );
-  const discounts = new Map(
-    columns
-      .flatMap((column) => column.financials.itemDiscounts ?? [])
-      .map((discount) => [discount.key, discount]),
-  );
-  const discountRows =
-    detailed && discounts.size > 0
-      ? [...discounts.values()].map((discount) => ({
-          label: discount.label,
-          detail:
-            discount.value.type === "percentage"
-              ? `${discount.value.percentage}% off eligible items`
-              : discount.value.type === "fixed"
-                ? `${money(discount.value.amountCents)} fixed credit`
-                : undefined,
-          amounts: columns.map(
-            (column) =>
-              column.financials.itemDiscounts!.find(
-                (entry) => entry.key === discount.key,
-              )?.amountCents ?? 0,
-          ),
-          discount: true,
-        }))
-      : [
-          {
-            label: "Item discounts",
-            detail: itemLabels,
-            amounts: columns.map(
-              (column) => column.financials.itemsDiscountCents,
-            ),
-            discount: true,
-          },
-        ];
-  const rows: Array<{
-    label: string;
-    detail?: string;
-    amounts: number[];
-    discount?: boolean;
-    strong?: boolean;
-  }> = [
-    {
-      label: "Items before discounts",
-      amounts: columns.map((column) => column.financials.itemsGrossCents),
-    },
-    ...discountRows,
-    {
-      label: "Items after discounts",
-      amounts: columns.map((column) => column.financials.itemsNetCents),
-    },
-    {
-      label: "Shipping before discounts",
-      amounts: columns.map((column) => column.financials.shippingGrossCents),
-    },
-    {
-      label: "Shipping discounts",
-      detail: shippingLabels,
-      amounts: columns.map((column) => column.financials.shippingDiscountCents),
-      discount: true,
-    },
-    {
-      label: "Shipping after discounts",
-      amounts: columns.map((column) => column.financials.shippingCents),
-    },
-    {
-      label: columns.every((column) => column.financials.taxesIncluded)
-        ? "Tax included in prices"
-        : "Tax",
-      amounts: columns.map((column) => column.financials.taxCents),
-    },
-    {
-      label: "Order total",
-      amounts: columns.map((column) => column.financials.totalCents),
-      strong: true,
-    },
-  ];
   return (
     <section
       aria-label="Order financial breakdown"
-      className={embedded ? "" : "rounded-md border p-3 sm:p-4"}
+      className={`oe-calculations ${embedded ? "" : "oe-panel"}`}
     >
-      <h3 className="mb-3 text-sm font-semibold">Order financial breakdown</h3>
-      <table className="w-full table-fixed text-xs sm:text-sm">
-        <thead>
-          <tr>
-            <th scope="col" className="w-[45%] pb-2 text-left font-medium">
-              Breakdown
-            </th>
-            {columns.map((column) => (
-              <th
-                key={column.label}
-                scope="col"
-                className="pb-2 pl-3 text-right align-bottom font-medium leading-tight"
-              >
-                {column.label}
-              </th>
-            ))}
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map((row) => (
-            <tr
-              key={row.label}
-              className={row.strong ? "border-t font-semibold" : ""}
-            >
-              <th
-                scope="row"
-                className={`py-2 pr-3 text-left align-top ${row.strong ? "font-semibold" : "font-normal"}`}
-              >
-                {row.label}
-                {row.detail && (
-                  <span className="mt-1 block break-words text-xs font-normal text-muted-foreground">
-                    {row.detail}
-                  </span>
-                )}
-              </th>
-              {row.amounts.map((amount, index) => (
-                <td
-                  key={columns[index].label}
-                  className="py-2 pl-3 text-right align-top tabular-nums"
-                >
-                  {row.discount && amount > 0 ? "−" : ""}
-                  {money(amount)}
-                </td>
-              ))}
-            </tr>
-          ))}
-        </tbody>
-      </table>
+      {columns.map(({ label, financials: values }) => {
+        // Legacy quotes expose an exact aggregate only. Never invent per-code
+        // amounts, or show an absent allocation as a zero-dollar discount.
+        const discounts =
+          values.itemDiscounts?.map((discount) => ({
+            key: discount.key,
+            label: discount.label,
+            amountCents: discount.amountCents,
+            detail:
+              discount.value.type === "percentage"
+                ? `${discount.value.percentage}% off eligible items`
+                : discount.value.type === "fixed"
+                  ? `${money(discount.value.amountCents)} fixed discount`
+                  : undefined,
+          })) ??
+          (values.itemsDiscountCents > 0
+            ? [
+                {
+                  key: "aggregate",
+                  label:
+                    values.itemDiscountLabels.join(", ") || "Product savings",
+                  amountCents: values.itemsDiscountCents,
+                  detail: undefined,
+                },
+              ]
+            : []);
+        return (
+          <section
+            key={label}
+            className="oe-calculation-card"
+            aria-label={label}
+          >
+            <h3>{label}</h3>
+            <dl className="oe-money-list">
+              {values.itemsDiscountCents > 0 && (
+                <>
+                  <dt>Items at regular prices</dt>
+                  <dd>{money(values.itemsGrossCents)}</dd>
+                  {discounts.map((discount) => (
+                    <React.Fragment key={discount.key}>
+                      <dt className="oe-saving">
+                        <span>{discount.label}</span>
+                        {discount.detail && <small>{discount.detail}</small>}
+                      </dt>
+                      <dd className="oe-saving">
+                        −{money(discount.amountCents)}
+                      </dd>
+                    </React.Fragment>
+                  ))}
+                </>
+              )}
+              <dt className="oe-net">
+                {values.itemsDiscountCents > 0
+                  ? "Items after discounts"
+                  : "Items"}
+              </dt>
+              <dd className="oe-net">{money(values.itemsNetCents)}</dd>
+              {values.shippingDiscountCents > 0 && (
+                <>
+                  <dt>Shipping rate</dt>
+                  <dd>{money(values.shippingGrossCents)}</dd>
+                  <dt className="oe-saving">
+                    {values.shippingDiscountLabels.join(", ") ||
+                      "Shipping savings"}
+                  </dt>
+                  <dd className="oe-saving">
+                    −{money(values.shippingDiscountCents)}
+                  </dd>
+                </>
+              )}
+              <dt>Shipping</dt>
+              <dd>{money(values.shippingCents)}</dd>
+              <dt>{values.taxesIncluded ? "Tax (included)" : "Tax"}</dt>
+              <dd>{money(values.taxCents)}</dd>
+              <dt className="oe-total-label">Order total</dt>
+              <dd className="oe-total-value">{money(values.totalCents)}</dd>
+            </dl>
+          </section>
+        );
+      })}
     </section>
   );
 }
@@ -298,19 +230,21 @@ export function OrderEditPayments({
   pendingChanges?: boolean;
   embedded?: boolean;
 }) {
-  const money = (amount: number) => formatOrderEditMoney(amount, "USD");
   const kindLabels: Record<
     OrderEditSettlement["activity"][number]["kind"],
     string
   > = {
-    payment: "Payment",
+    payment: "Payment received",
     refund: "Refund",
     authorization: "Authorization",
-    void: "Void",
+    void: "Payment void",
     adjustment: "Adjustment",
   };
-  const statuses: Record<string, string> = {
-    SUCCESS: "Succeeded",
+  const statuses: Record<
+    OrderEditSettlement["activity"][number]["status"],
+    string
+  > = {
+    SUCCESS: "Complete",
     PENDING: "Pending",
     AWAITING_RESPONSE: "Awaiting confirmation",
     UNKNOWN: "Needs verification",
@@ -320,62 +254,66 @@ export function OrderEditPayments({
   return (
     <section
       aria-label="Payments and refunds"
-      className={embedded ? "" : "rounded-md border p-3 sm:p-4"}
+      className={`oe-payments ${embedded ? "" : "oe-panel"}`}
     >
-      <h3 className="mb-3 text-sm font-semibold">Payments and refunds</h3>
       {pendingChanges && (
-        <p className="mb-3 text-xs text-muted-foreground">
-          Recorded on the current order. The quoted changes have not been
-          applied.
+        <p className="oe-payment-note">
+          These payments are on your current order. Your changes have not been
+          applied yet.
         </p>
       )}
-      <dl className="grid grid-cols-[minmax(0,1fr)_auto] gap-x-4 gap-y-2 text-sm">
+      <dl className="oe-money-list">
         <dt>Payments received</dt>
-        <dd className="text-right tabular-nums">
-          {money(settlement.receivedCents)}
-        </dd>
-        <dt>Refunds issued</dt>
-        <dd className="text-right tabular-nums">
-          {money(settlement.refundedCents)}
-        </dd>
-        <dt>Net paid</dt>
-        <dd className="text-right tabular-nums">
-          {money(settlement.netPaidCents)}
-        </dd>
-        <dt className="font-semibold">
-          {settlement.outstandingCents < 0
-            ? "Amount to refund"
-            : "Amount still due"}
-        </dt>
-        <dd className="text-right font-semibold tabular-nums">
-          {money(Math.abs(settlement.outstandingCents))}
-        </dd>
+        <dd>{money(settlement.receivedCents)}</dd>
+        {settlement.refundedCents > 0 && (
+          <>
+            <dt>Refunds issued</dt>
+            <dd>{money(settlement.refundedCents)}</dd>
+            <dt>Paid toward this order</dt>
+            <dd>{money(settlement.netPaidCents)}</dd>
+          </>
+        )}
+        {settlement.outstandingCents !== 0 && (
+          <>
+            <dt className="oe-net">
+              {settlement.outstandingCents < 0
+                ? "Amount to refund"
+                : "Amount still due"}
+            </dt>
+            <dd className="oe-net">
+              {money(Math.abs(settlement.outstandingCents))}
+            </dd>
+          </>
+        )}
       </dl>
-      {settlement.activity.length > 0 && (
-        <div className="mt-4 border-t pt-3">
-          <h4 className="mb-2 text-xs font-medium">Payment history</h4>
-          <ul className="divide-y">
-            {settlement.activity.map((entry) => (
-              <li key={entry.id} className="flex gap-3 py-2 text-sm">
-                <div className="min-w-0 flex-1">
-                  <p>
-                    {kindLabels[entry.kind]} ·{" "}
-                    {statuses[entry.status] ?? entry.status}
-                  </p>
-                  {entry.processedAt && (
-                    <time
-                      dateTime={entry.processedAt}
-                      className="text-xs text-muted-foreground"
-                    >
-                      {new Date(entry.processedAt).toLocaleString()}
-                    </time>
-                  )}
-                </div>
-                <span className="tabular-nums">{money(entry.amountCents)}</span>
-              </li>
-            ))}
-          </ul>
-        </div>
+      {settlement.outstandingCents === 0 && (
+        <p className="oe-paid-status">Current order paid in full</p>
+      )}
+      {settlement.activity.length > 0 ? (
+        <ul className="oe-payment-history" aria-label="Payment activity">
+          {settlement.activity.map((entry) => (
+            <li key={entry.id}>
+              <div>
+                <span className="oe-payment-kind">
+                  {entry.kind === "payment" && entry.status !== "SUCCESS"
+                    ? "Payment"
+                    : kindLabels[entry.kind]}
+                </span>
+                {entry.processedAt && (
+                  <time dateTime={entry.processedAt}>
+                    {new Date(entry.processedAt).toLocaleString()}
+                  </time>
+                )}
+              </div>
+              <div className="oe-payment-event-amount">
+                <strong>{money(entry.amountCents)}</strong>
+                <span data-status={entry.status}>{statuses[entry.status]}</span>
+              </div>
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <p className="oe-payment-note">No payment activity recorded yet.</p>
       )}
     </section>
   );

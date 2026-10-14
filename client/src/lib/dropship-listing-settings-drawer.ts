@@ -250,6 +250,46 @@ export function drawerSearch(search: string, target: DrawerTarget | null): strin
 }
 
 // ---------------------------------------------------------------------------
+// The sheets in the page address (?sheet=bulk; plan PR 10, D21)
+// ---------------------------------------------------------------------------
+
+export const LISTING_SETTINGS_SHEET_PARAM = "sheet";
+/** The sheets the page address opens, each added in its part: "Set for selected" (10c). */
+export const LISTING_SETTINGS_SHEETS = ["bulk"] as const;
+export type ListingSettingsSheet = (typeof LISTING_SETTINGS_SHEETS)[number];
+
+function isListingSettingsSheet(value: string): value is ListingSettingsSheet {
+  return (LISTING_SETTINGS_SHEETS as readonly string[]).includes(value);
+}
+
+/**
+ * The sheet a page address opens, or null: one `sheet` parameter naming a
+ * sheet this page has; a repeated or unknown one opens nothing. Browser Back
+ * to an address without it closes the sheet, and its draft is kept (D21).
+ */
+export function sheetFromSearch(search: string): ListingSettingsSheet | null {
+  const values = new URLSearchParams(search).getAll(LISTING_SETTINGS_SHEET_PARAM);
+  return values.length === 1 && isListingSettingsSheet(values[0]) ? values[0] : null;
+}
+
+/**
+ * The page address with `sheet` open, or closed with null (D21: pushed on
+ * open, replaced on close). Every other parameter is kept as it was, the
+ * drawer's included (K15); one surface at a time (D20) is the page's to
+ * keep. Returns "" or "?…".
+ */
+export function sheetSearch(search: string, sheet: ListingSettingsSheet | null): string {
+  const params = new URLSearchParams(search);
+  params.delete(LISTING_SETTINGS_SHEET_PARAM);
+  if (sheet !== null) {
+    if (!isListingSettingsSheet(sheet)) throw new Error("The page address opens only a sheet this page has.");
+    params.set(LISTING_SETTINGS_SHEET_PARAM, sheet);
+  }
+  const text = params.toString();
+  return text ? `?${text}` : "";
+}
+
+// ---------------------------------------------------------------------------
 // The header (R:591)
 // ---------------------------------------------------------------------------
 
@@ -1124,6 +1164,8 @@ export interface DrawerFooterInput {
    * the draft holds a change.
    */
   fieldEditorOpen?: boolean;
+  /** The wide Save's words when they aren't "Save product" ("Save for 312 products", PR 10 plan 6.3); a phone says "Save". */
+  saveLabel?: string;
 }
 
 /** The drawer's footer from its draft (R:535-545). */
@@ -1131,7 +1173,7 @@ export function drawerFooter(input: DrawerFooterInput): DrawerFooter {
   const { draft } = input;
   const dirty = isDraftDirty(draft);
   const busy = input.busy || input.fieldEditorOpen === true;
-  const saveLabel = input.compact ? DRAWER_WORDS.save : DRAWER_WORDS.saveProduct;
+  const saveLabel = input.compact ? DRAWER_WORDS.save : input.saveLabel ?? DRAWER_WORDS.saveProduct;
   const notSaved = dirty && draft
     ? input.compact
       ? `● ${LISTING_SETTINGS_SAVE_WORDS.notSaved} · ${draft.changes}`
@@ -1237,7 +1279,8 @@ export interface DrawerSettingGroup {
 export type DrawerFieldTarget = PolicyEditField | "ebayCategory" | "storeShelf";
 export type DrawerEditTarget = DrawerFieldTarget | "description";
 
-const ROW_TARGETS: Readonly<Record<DrawerSettingRowKey, DrawerEditTarget>> = {
+/** What each row's [Change] opens (also the "Set for selected" rows', PR 10 plan 6.3). */
+export const DRAWER_ROW_TARGETS: Readonly<Record<DrawerSettingRowKey, DrawerEditTarget>> = {
   shippingPolicy: "shippingPolicy",
   returnPolicy: "returnPolicy",
   paymentPolicy: "paymentPolicy",
@@ -1419,8 +1462,11 @@ function shelfName(id: string, own: ProductOwnSettings | null, shelves: readonly
   return live === null ? UNNAMED_SHELF : shelfPathWords(live.path) || live.categoryName.trim() || UNNAMED_SHELF;
 }
 
-/** A one-field row's change before Save, by name only (never an id). */
-function fieldPendingWords(
+/**
+ * A one-field row's change before Save, by name only (never an id). Also the
+ * "Set for selected" rows' (PR 10 plan 6.3), with no product's own row (`own` null).
+ */
+export function fieldPendingWords(
   field: DrawerFieldTarget,
   choice: ProductFieldChoice<DrawerFieldTarget>,
   setup: ListingSettingsReadState<PolicySetupFacts>,
@@ -1451,8 +1497,8 @@ function fieldPendingWords(
   }
 }
 
-/** The Description row's change before Save: each part it changes, never the text itself. */
-function descriptionPending(choices: Pick<ProductSettingsChoices, DescriptionEditField>): string | null {
+/** The Description row's change before Save: each part it changes, never the text itself. Also the "Set for selected" row's. */
+export function descriptionPending(choices: Pick<ProductSettingsChoices, DescriptionEditField>): string | null {
   const parts: DescriptionPendingPart[] = [];
   for (const part of DESCRIPTION_EDIT_FIELDS) {
     const choice = choices[part];
@@ -1606,7 +1652,7 @@ export function drawerSettingRows(
   const sizeNames = new Map(detail.sizes.map((size) => [size.price.productVariantId, size.price.sizeName]));
   const own = edit === null || edit.own.error != null ? null : edit.own.data ?? null;
   return DRAWER_SETTING_ROWS.map(({ key, label }) => {
-    const model = edit === null ? null : rowEdit(ROW_TARGETS[key], edit, setup, detail);
+    const model = edit === null ? null : rowEdit(DRAWER_ROW_TARGETS[key], edit, setup, detail);
     // A quick pick shows only where the row's [Change] does, and waits as it does and while an editor is open.
     const differFacts: DifferFacts = model === null || !model.change.shown ? null : { rights: model, disabled: model.picksDisabled };
     const keys: ListingSettingsSettingKey[] = key === "descriptionTemplate" ? ["descriptionTemplate", "mainText"] : [key];

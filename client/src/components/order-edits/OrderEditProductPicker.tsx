@@ -59,19 +59,18 @@ export function OrderEditProductPicker(props: PickerProps) {
         </Button>
       </DialogTrigger>
       {open && props.enabled && (
-        <DialogContent className="flex max-h-[90dvh] max-w-4xl flex-col overflow-hidden p-4 sm:p-6">
-          <DialogHeader className="shrink-0 pr-6 text-left">
+        <DialogContent className="oe-picker">
+          <DialogHeader className="oe-picker-heading">
             <DialogTitle>Add products</DialogTitle>
             <DialogDescription>
-              Choose a category, then a product and its pack, box or case SKU.
+              Find a product, then choose a pack size.
             </DialogDescription>
           </DialogHeader>
           {notice && <p role="alert" className="shrink-0 rounded-md border border-orange-200 bg-orange-50 p-3 text-sm text-orange-900">{notice}</p>}
           <CatalogBrowser {...props} onSelectionNotice={setNotice} />
-          <div className="flex shrink-0 items-center justify-between gap-3 border-t pt-3">
+          <div className="oe-picker-footer">
             <p className="text-xs text-muted-foreground">
-              Prices include this customer's applicable club pricing. Review
-              changes verifies coupons, rewards, shipping and tax.
+              Prices shown for your account. Review verifies the final total.
             </p>
             <DialogClose asChild>
               <Button type="button">Done</Button>
@@ -144,8 +143,8 @@ function CatalogBrowser(props: CatalogBrowserProps) {
   ].filter((product) => !unavailableProducts.has(product.productId));
   return (
     <>
-      <div className="shrink-0 space-y-2">
-        <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_15rem]">
+      <div className="oe-picker-search">
+        <div className="oe-picker-filters">
           <div className="space-y-1.5">
             <Label htmlFor={`${id}-search`}>Product name or SKU</Label>
             <div className="relative">
@@ -209,13 +208,9 @@ function CatalogBrowser(props: CatalogBrowserProps) {
             Load more categories
           </Button>
         )}
-        <p className="text-xs text-muted-foreground">
-          {category ?? "All categories"} <span aria-hidden="true">›</span>{" "}
-          Products <span aria-hidden="true">›</span> Pack sizes and SKUs
-        </p>
       </div>
       <div
-        className="min-h-0 flex-1 overflow-y-auto rounded-md border"
+        className="oe-picker-results"
         aria-label="Product results"
         aria-busy={!currentSearch || products.isFetching}
       >
@@ -296,12 +291,12 @@ function ProductOptions(
     >
       <button
         type="button"
-        className="flex w-full items-center gap-3 p-3 text-left hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
+        className="oe-product-toggle"
         aria-expanded={props.expanded}
         aria-controls={`${id}-options`}
         onClick={props.onToggle}
       >
-        <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded border bg-muted/20">
+        <div className="oe-product-image">
           {props.product.imageUrl ? (
             <img
               src={props.product.imageUrl}
@@ -322,8 +317,7 @@ function ProductOptions(
             {props.product.title}
           </p>
           <p className="text-xs text-muted-foreground">
-            {props.product.category ?? "Other products"} · Choose pack size /
-            SKU
+            {props.product.category ?? "Other products"}
           </p>
         </div>
         <ChevronDown
@@ -397,7 +391,7 @@ function VariantOptions(
   }, [noAvailableOptions, props.onUnavailable, props.product.productId]);
   return (
     <div
-      className="space-y-2 border-t bg-muted/20 p-3 sm:pl-[4.5rem]"
+      className="oe-variant-options"
       aria-busy={variants.isFetching}
     >
       {variants.isPending && (
@@ -429,9 +423,9 @@ function VariantOptions(
         return (
           <div
             key={variant.variantId}
-            className="flex flex-wrap items-center gap-3 rounded-md border bg-background p-3"
+            className="oe-variant-row"
           >
-            <div className="min-w-0 basis-36 flex-1">
+            <div className="oe-variant-label">
               <p className="break-words text-sm font-medium">
                 {variant.variantTitle ?? "Standard option"}
               </p>
@@ -443,6 +437,7 @@ function VariantOptions(
               priceCents={variant.priceCents}
               retailPriceCents={variant.retailPriceCents}
               plan={plan}
+              showSavings
             />
             <Button
               type="button"
@@ -464,7 +459,7 @@ function VariantOptions(
               }}
             >
               {included ? (
-                "Added / in order"
+                "In order"
               ) : (
                 <>
                   <Plus className="mr-1 h-3.5 w-3.5" aria-hidden="true" />

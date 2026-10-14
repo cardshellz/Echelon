@@ -1,4 +1,4 @@
-import { useEffect, useReducer } from "react";
+import { useCallback, useEffect, useReducer, useState } from "react";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { SM_MIN_WIDTH_PX, useMinWidth } from "@/hooks/use-min-width";
 import {
@@ -6,6 +6,15 @@ import {
   MAX_LISTING_SETTINGS_SEARCH_LENGTH,
   type ListingSettingsSummary,
 } from "@shared/dropship/listing-settings";
+import { bulkAfterSave, bulkHoldsSave, type BulkSavedFor, type BulkSavedStatus } from "@/lib/dropship-listing-settings-bulk";
+import {
+  emptySelection,
+  reduceListingSettingsSelection,
+  selectionCount,
+  type ListingSettingsSelectionAction,
+} from "@/lib/dropship-listing-settings-selection";
+import { BulkSettingsSheet, type BulkSettingsSheetProps } from "./BulkSettingsSheet";
+import { useListingSettingsDrafts } from "./ListingSettingsDraftsProvider";
 import { PricesTab, type PriceShowOption } from "./PricesTab";
 import {
   ProductsTab,
@@ -25,8 +34,14 @@ export type { ListingSettingsProductTarget } from "./ProductsTab";
  *
  * Products is the default tab, and its first read is the only new read on
  * mount (`…/products?search=&show=all&page=0`, plan 4.2). The Prices tab
- * reads only while it is shown. Nothing here saves: a row opens the product
- * drawer through `onOpenProduct`.
+ * reads only while it is shown. A row opens the product drawer through
+ * `onOpenProduct`.
+ *
+ * From PR 10 (plan 6.2, D22) the tabs also hold the products ticked for "Set
+ * for selected" beside the Products view: kept after a save and across search
+ * and filter changes ("Select all N" falls back to the ticks then), cleared by
+ * [Clear], another store, or leaving the step (this unmounts). The sheet that
+ * saves them (`BulkSettingsSheet`) opens from the address the step keeps.
  */
 
 /** Typing pauses this long before the list is searched (plan 2D). */
@@ -172,6 +187,16 @@ export interface ListingSettingsTabsProps {
   request?: ListingSettingsTabsRequest | null;
   /** A list read refused because more than 10,000 sizes are chosen: the step shows the banner (plan 4.4). */
   onTooLarge?: (error: unknown) => void;
+  /** "Set for selected" (PR 10, plan 6.3): what its sheet needs from the step, and the address it opens at. */
+  bulk: ListingSettingsTabsBulk;
+}
+
+/** "Set for selected" as the step hands it to the tabs: the sheet's facts, and its place in the address (D20, D21). */
+export interface ListingSettingsTabsBulk extends Omit<BulkSettingsSheetProps, "storeConnectionId" | "selection" | "onSavedFor" | "open"> {
+  /** The address says `?sheet=bulk` and no other surface is open. */
+  open: boolean;
+  /** [Set for selected]: the step asks about another editor's changes first (D16), then puts the sheet in the address. */
+  onOpen: () => void;
 }
 
 /**
@@ -193,6 +218,41 @@ export function ListingSettingsTabs(props: ListingSettingsTabsProps) {
   const [view, dispatch] = useReducer(reduceListingSettingsTabsView, undefined, initialListingSettingsTabsView);
   const listsOff = listingSettingsListsOff(props);
   const labels = listingSettingsTabLabels(props.summary);
+  const { storeConnectionId, bulk } = props;
+
+  // The ticks for "Set for selected" (D22), and the last confirmed save, until the ticks change.
+  const [selection, select] = useReducer(reduceListingSettingsSelection, storeConnectionId, emptySelection);
+  const [saved, setSaved] = useState<BulkSavedStatus | null>(null);
+  const onSelect = useCallback((action: ListingSettingsSelectionAction) => {
+    setSaved(null);
+    select(action);
+  }, []);
+  // A confirmed save: the sheet closed itself and the ticks stay (D22); "Select all N" counts what the save matched.
+  const onSavedFor = useCallback((savedFor: BulkSavedFor) => {
+    const after = bulkAfterSave(savedFor);
+    if (after.action !== null) select(after.action);
+    setSaved(after.status);
+  }, []);
+  // A save out or unconfirmed outlives the ticks (Clear, leaving the step): the sheet still opens on it (D21).
+  const heldSave = bulkHoldsSave(useListingSettingsDrafts().draft);
+  useEffect(() => {
+    select({ type: "store", storeConnectionId });
+  }, [storeConnectionId]);
+  // A new search or filter keeps the ticks; "Select all N" falls back to them (D22).
+  const productsSearch = view.products.search;
+  const productsShow = view.products.show;
+  useEffect(() => {
+    select({ type: "onListChange", filter: { search: productsSearch, show: productsShow } });
+  }, [productsSearch, productsShow]);
+
+  // The sheet shows only with something to set it for (ticks, or a save to check); an address that opens it with
+  // neither (a reload, another store) has it taken off, so Back never lands on it again.
+  const nothingToSet = selectionCount(selection) === 0 && !heldSave;
+  const sheetOpen = bulk.open && !nothingToSet;
+  const { open: sheetAsked, onClose: closeSheet } = bulk;
+  useEffect(() => {
+    if (sheetAsked && nothingToSet) closeSheet();
+  }, [sheetAsked, nothingToSet, closeSheet]);
 
   useSearchPause("products", view.products.searchInput, dispatch);
   useSearchPause("prices", view.prices.searchInput, dispatch);
@@ -235,6 +295,12 @@ export function ListingSettingsTabs(props: ListingSettingsTabsProps) {
             compact={compact}
             listsOff={listsOff}
             onShow={(show) => dispatch({ type: "show_products", show })}
+            selection={selection}
+            onSelect={onSelect}
+            onSetForSelected={bulk.onOpen}
+            bulkRight={bulk.rights.bulkSettings}
+            saved={saved}
+            heldSave={heldSave}
           />
         </TabsContent>
         <TabsContent value="prices" className="mt-3">
@@ -248,6 +314,20 @@ export function ListingSettingsTabs(props: ListingSettingsTabsProps) {
           />
         </TabsContent>
       </Tabs>
+      <BulkSettingsSheet
+        storeConnectionId={storeConnectionId}
+        open={sheetOpen}
+        selection={selection}
+        rights={bulk.rights}
+        setup={bulk.setup}
+        shelves={bulk.shelves}
+        saveCallbacks={bulk.saveCallbacks}
+        onSaved={bulk.onSaved}
+        onClose={bulk.onClose}
+        onSavedFor={onSavedFor}
+        onBlocked={bulk.onBlocked}
+        returnFocusTo={bulk.returnFocusTo}
+      />
     </section>
   );
 }

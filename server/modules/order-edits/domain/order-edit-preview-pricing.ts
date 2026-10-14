@@ -2,7 +2,10 @@ import Decimal from "decimal.js";
 import { z } from "zod";
 import { orderEditPlanInputSchema } from "@shared/order-edits/order-edit.contract";
 import { priceOrderEditDiscounts } from "./order-edit-discount-engine";
-import { resolveOrderEditLinePlan } from "./order-edit-line-plan";
+import {
+  resolveOrderEditLinePlan,
+  orderEditAdditionSourceKey,
+} from "./order-edit-line-plan";
 import { sumOrderEditCents } from "./order-edit-financials";
 import { OrderEditError } from "./order-edit-error";
 
@@ -227,7 +230,7 @@ export function priceOrderEditPreviewItems(
         );
     }
     lines.push({
-      id: `preview:add:${variant.variantId}`,
+      id: orderEditAdditionSourceKey(variant.variantId),
       title: variant.title,
       variantTitle: variant.variantTitle,
       variantId: variant.variantId,

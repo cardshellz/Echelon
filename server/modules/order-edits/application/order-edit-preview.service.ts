@@ -39,10 +39,15 @@ export class OrderEditPreviewService {
   private readonly contexts: OrderEditPreviewCache<OrderEditPreviewContext>;
   private readonly results: OrderEditPreviewCache<OrderEditPreview>;
   constructor(
-    private readonly store: Pick<OrderEditStore, "settings" | "orderReference">,
+    private readonly store: Pick<
+      OrderEditStore,
+      "settings" | "orderReference"
+    > &
+      Partial<Pick<OrderEditStore, "get">>,
     private readonly provider: Pick<OrderEditProvider, "readOrder"> &
       OrderEditPreviewProvider,
-    private readonly warehouse: Pick<OrderEditWarehouse, "inspect">,
+    private readonly warehouse: Pick<OrderEditWarehouse, "inspect"> &
+      Partial<Pick<OrderEditWarehouse, "assertHeld">>,
     private readonly clock: () => Date,
   ) {
     this.contexts = new OrderEditPreviewCache(
@@ -84,8 +89,13 @@ export class OrderEditPreviewService {
       expectedRevision: input.expectedRevision,
     });
     // Check current settings and OMS ownership even on a cache hit. Cached context is only provisional.
-    const reference = await this.reference(scope);
-    const context = await this.context(scope, reference, actorId);
+    const reference = await this.reference(scope, input.operationId, actorId);
+    const context = await this.context(
+      scope,
+      reference,
+      actorId,
+      input.operationId,
+    );
     const key = previewCacheKey([
       actorId,
       input,
@@ -97,6 +107,9 @@ export class OrderEditPreviewService {
         const calculation = await this.provider.preview(context.value, {
           changes: input.changes,
           additions: input.additions,
+          ...(input.discountCodes !== undefined
+            ? { discountCodes: input.discountCodes }
+            : {}),
         });
         const value = orderEditPreviewSchema.parse({
           phase: "preview",
@@ -111,6 +124,8 @@ export class OrderEditPreviewService {
   }
   private async reference(
     scope: OrderEditPreviewScope,
+    operationId?: string,
+    actorId?: string,
   ): Promise<OrderEditOrderReference> {
     const settings = await this.store.settings(scope.connectionId);
     if (!settings.enabled || settings.paymentWindowMinutes === null)
@@ -122,7 +137,27 @@ export class OrderEditPreviewService {
       scope.connectionId,
       scope.omsOrderId,
     );
-    if (reference.activeOperationId)
+    if (operationId) {
+      const record = this.store.get ? await this.store.get(operationId) : null;
+      if (
+        !record ||
+        reference.activeOperationId !== operationId ||
+        record.actorId !== actorId ||
+        record.omsOrderId !== scope.omsOrderId ||
+        record.connectionId !== scope.connectionId ||
+        record.baseline.fingerprint !== scope.expectedRevision ||
+        record.status !== "ready" ||
+        record.commitStartedAt ||
+        record.commitKey ||
+        Date.parse(record.quoteDeadline) <= this.clock().getTime() ||
+        !this.warehouse.assertHeld
+      )
+        throw new OrderEditError(
+          "ORDER_EDIT_PREVIEW_OPERATION_UNAVAILABLE",
+          "This review can no longer be changed. Check the order before trying again.",
+        );
+      await this.warehouse.assertHeld(scope.omsOrderId, operationId);
+    } else if (reference.activeOperationId)
       throw new OrderEditError(
         "ORDER_EDIT_ALREADY_ACTIVE",
         "Close or resume the current edit before preparing another preview.",
@@ -133,10 +168,16 @@ export class OrderEditPreviewService {
     scope: OrderEditPreviewScope,
     reference: OrderEditOrderReference,
     actorId: string,
+    operationId?: string,
   ) {
     z.string().min(1).max(200).parse(actorId);
     // Scope includes the server-owned channel/customer/order mapping, not just a browser's order number.
-    const key = previewCacheKey([actorId, scope, reference]);
+    const key = previewCacheKey([
+      actorId,
+      scope,
+      reference,
+      ...(operationId ? [operationId] : []),
+    ]);
     return this.contexts.getOrLoad(key, async () => {
       const expiresAt = this.clock().getTime() + ORDER_EDIT_PREVIEW_TTL_MS;
       const snapshot = await this.provider.readOrder(
@@ -149,7 +190,9 @@ export class OrderEditPreviewService {
           "ORDER_EDIT_ORDER_CHANGED",
           "The order changed. Refresh it before reviewing changes.",
         );
-      const warehouse = await this.warehouse.inspect(scope.omsOrderId);
+      const warehouse = operationId
+        ? { editable: true, reasons: [] }
+        : await this.warehouse.inspect(scope.omsOrderId);
       const reasons = [
         ...warehouse.reasons,
         ...orderEditEligibilityReasons(snapshot),

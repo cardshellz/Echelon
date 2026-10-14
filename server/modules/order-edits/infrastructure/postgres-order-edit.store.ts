@@ -17,7 +17,10 @@ import { OrderEditError } from "../domain/order-edit-error";
 import { unchangedFulfilledOrderEdit } from "../application/order-edit-evidence";
 import { finalizeOrderEditWarehouseRelease } from "./order-edit-warehouse.gateway";
 import { appendOrderEditAudit } from "./order-edit-audit.writer";
-import { orderEditAuditActor, readCustomerOrderEditActor } from "../domain/order-edit-actor";
+import {
+  orderEditAuditActor,
+  readCustomerOrderEditActor,
+} from "../domain/order-edit-actor";
 import {
   orderEditSnapshotSchema,
   orderEditQuoteSchema,
@@ -64,9 +67,20 @@ const documentSchema = z
   .strict()
   .superRefine((record, context) => {
     const customerActor = readCustomerOrderEditActor(record.actorId);
-    if (customerActor && (customerActor.channelId !== record.baseline.channelId
-      || customerActor.externalCustomerId !== record.baseline.customerId?.replace(/^gid:\/\/shopify\/Customer\//, ""))) {
-      context.addIssue({ code: "custom", message: "The persisted customer actor does not own the certified order." });
+    if (
+      customerActor &&
+      (customerActor.channelId !== record.baseline.channelId ||
+        customerActor.externalCustomerId !==
+          record.baseline.customerId?.replace(
+            /^gid:\/\/shopify\/Customer\//,
+            "",
+          ))
+    ) {
+      context.addIssue({
+        code: "custom",
+        message:
+          "The persisted customer actor does not own the certified order.",
+      });
     }
     if (
       record.input.omsOrderId !== record.omsOrderId ||
@@ -83,6 +97,9 @@ const documentSchema = z
             JSON.stringify({
               changes: record.input.changes,
               additions: record.input.additions,
+              ...(record.input.discountCodes !== undefined
+                ? { discountCodes: record.input.discountCodes }
+                : {}),
             }))) ||
       (record.refundIntent !== null &&
         (record.refundIntent.operationId !== record.id ||
@@ -310,7 +327,9 @@ export class PostgresOrderEditStore implements OrderEditStore {
           JSON.stringify(record),
           record.createdAt,
           record.updatedAt,
-          ...(actor.customerChannelId === null ? [] : [actor.customerChannelId, actor.externalCustomerId]),
+          ...(actor.customerChannelId === null
+            ? []
+            : [actor.customerChannelId, actor.externalCustomerId]),
         ],
       );
       await this.audit(client, record, null, record.actorId, "created");

@@ -785,3 +785,140 @@ export function ownSettingsSentence(row: Pick<ListingSettingsProductRow, "ownSet
     ? `Everything uses ${rest}.`
     : `Own settings: ${parts.join(", ")}. Everything else uses ${rest}.`;
 }
+
+// ---------------------------------------------------------------------------
+// "Set for selected": the Products tab's ticks and its sheet (plan PR 10, 6.3, 6.5, 12.2)
+// ---------------------------------------------------------------------------
+
+/**
+ * Words for ticking products and for the "Set for selected" sheet (W6).
+ * "Set for selected" and "Select all N" are the record's (REC:971, REC:820),
+ * and "These become each product's own values." is R:§3.3 M5 (PLAN3:128);
+ * every other one is a proposal (plan 12.2), kept here so a later PR changes
+ * it in one place. None names a code or an id.
+ */
+export const LISTING_SETTINGS_BULK_WORDS = Object.freeze({
+  // The record's name for the bar's button, the sheet, and the place the step's bar names (REC:971).
+  setForSelected: "Set for selected",
+  // Interim (PR 10 PROPOSAL): the bar's button that unticks every product (6.3).
+  clear: "Clear",
+  // R:§3.3 M5 (PLAN3:128): the sheet's intro.
+  intro: "These become each product's own values.",
+  // Interim (PR 10 PROPOSAL): a row the sheet doesn't change, and the choice that takes a row back to no change (REC:854 "Leave").
+  leaveAsIs: "Leave as is",
+  // Interim (PR 10 PROPOSAL): none of the products the sheet opened for is chosen any more (6.3).
+  noneChosen: "None of these products is chosen any more.",
+  // Interim (PR 10 PROPOSAL): 422 BULK_TOO_LARGE, and the same check before sending, with Save off (6.5).
+  tooMuchText: "Too much text for this many products. Choose fewer products, or set the text once on a category or as your store default.",
+  // Interim (PR 10 PROPOSAL): W6's 404 PRODUCT_NOT_FOUND, a product Card Shellz deleted since the sheet opened (6.5).
+  productGone: "A selected product is no longer in the Card Shellz catalog. Load the list again.",
+  // Interim (PR 10 PROPOSAL, beyond 12.2): the sheet's ids read failed (3.7); [Try again] reads it again.
+  readFailed: "Couldn't check the selected products. Try again.",
+  // Interim (PR 10 PROPOSAL, beyond 12.2): the Products tab's header checkbox, read out (3.4).
+  selectPage: "Select every product on this page",
+  // Interim (PR 10 PROPOSAL, beyond 12.2): a phone has no table header, so this box above the cards ticks every card shown (3.4).
+  selectShown: "Select all shown",
+  // Interim (PR 10 PROPOSAL, beyond 12.2): whose setting the sheet's [Change] and editors change, read out (3.4):
+  // "Change shipping policy for the selected products".
+  selectedProducts: "the selected products",
+  // Interim (PR 10 PROPOSAL, beyond 12.2): the sheet reopened on other ticks, and the change kept from before now goes to these products.
+  carried: "Your unsaved change from before is kept for these products.",
+} as const);
+
+function productsWord(count: number): string {
+  return count === 1 ? "product" : "products";
+}
+
+/** "3 selected": the bar's count (6.3). Interim (PR 10 PROPOSAL). */
+export function selectedCountWords(count: number): string {
+  return `${TEXT_NUMBER.format(count)} selected`;
+}
+
+/**
+ * After a whole page is ticked (6.3): wide "All 50 on this page are
+ * selected.", phone "All 100 shown are selected." Interim (PR 10 PROPOSAL).
+ */
+export function pageAllSelectedWords(count: number, compact: boolean): string {
+  return compact ? `All ${TEXT_NUMBER.format(count)} shown are selected.` : `All ${TEXT_NUMBER.format(count)} on this page are selected.`;
+}
+
+/** "Select all 312": every product the search and filter match (REC:820 "Select all N"). */
+export function selectAllWords(total: number): string {
+  return `Select all ${TEXT_NUMBER.format(total)}`;
+}
+
+/** A row's checkbox, read out with its product (plan 3.4): "Select Penny Sleeves". Interim (PR 10 PROPOSAL). */
+export function selectProductLabel(productName: string): string {
+  const product = productName.trim();
+  return product ? `Select ${product}` : "Select this product";
+}
+
+/** "Saved for 312 products. Still selected.": the status after a confirmed save; the ticks stay (D22). Interim (PR 10 PROPOSAL). */
+export function savedForSelectedWords(count: number): string {
+  return `Saved for ${TEXT_NUMBER.format(count)} ${productsWord(count)}. Still selected.`;
+}
+
+/**
+ * "Saved for 312 products.": the status after a confirmed save once the
+ * products it named aren't the selection (the ticks changed, or an earlier
+ * unconfirmed save was checked). Interim (PR 10 PROPOSAL, beyond 12.2).
+ */
+export function savedForProductsWords(count: number): string {
+  return `Saved for ${TEXT_NUMBER.format(count)} ${productsWord(count)}.`;
+}
+
+/**
+ * "This save is for the 2 products it was sent for.": the sheet reopened on a
+ * save that is out or unconfirmed, whatever is ticked now (D21). Interim (PR 10 PROPOSAL, beyond 12.2).
+ */
+export function heldSaveWords(count: number): string {
+  return `This save is for the ${TEXT_NUMBER.format(count)} ${productsWord(count)} it was sent for.`;
+}
+
+/**
+ * What the Products tab's status region reads out when the selection bar
+ * changes (plan 3.4): "3 selected.", then the "Select all N" offer and a
+ * save's status. Interim (PR 10 PROPOSAL, beyond 12.2).
+ */
+export function selectionAnnouncementWords(input: { count: string; offer: { line: string; label: string } | null; status: string | null }): string {
+  const parts = [`${input.count}.`];
+  if (input.offer !== null) parts.push(input.offer.line, `${input.offer.label} is available.`);
+  if (input.status !== null) parts.push(input.status);
+  return parts.join(" ");
+}
+
+/** "Set for 312 products": the sheet's title (6.3). Interim (PR 10 PROPOSAL). */
+export function bulkSheetTitleWords(count: number): string {
+  return `Set for ${TEXT_NUMBER.format(count)} ${productsWord(count)}`;
+}
+
+/** "Save for 312 products": the sheet's wide Save (6.3); the phone says "Save". Interim (PR 10 PROPOSAL). */
+export function saveForWords(count: number): string {
+  return `Save for ${TEXT_NUMBER.format(count)} ${productsWord(count)}`;
+}
+
+/** "Checking 312 products…": while the sheet's ids read answers (6.3). Interim (PR 10 PROPOSAL). */
+export function checkingProductsWords(count: number): string {
+  return `Checking ${TEXT_NUMBER.format(count)} ${productsWord(count)}…`;
+}
+
+/** "312 now match (was 310).": "Select all N" when the ids read counts otherwise (6.3, CC-C26). Interim (PR 10 PROPOSAL). */
+export function matchMovedWords(now: number, before: number): string {
+  return `${TEXT_NUMBER.format(now)} now ${now === 1 ? "matches" : "match"} (was ${TEXT_NUMBER.format(before)}).`;
+}
+
+/** "2 products are no longer chosen and are left out." (6.3). Interim (PR 10 PROPOSAL). */
+export function leftOutWords(count: number): string {
+  return count === 1
+    ? "1 product is no longer chosen and is left out."
+    : `${TEXT_NUMBER.format(count)} products are no longer chosen and are left out.`;
+}
+
+/**
+ * W6's version conflict (6.5): "3 of the selected products changed in
+ * another window.", counted by the server (`conflictCount`), never by the
+ * list. Interim (PR 10 PROPOSAL).
+ */
+export function bulkConflictWords(conflictCount: number): string {
+  return `${TEXT_NUMBER.format(conflictCount)} of the selected products changed in another window.`;
+}

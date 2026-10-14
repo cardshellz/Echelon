@@ -33,6 +33,18 @@ import { priceOrderEditPreviewItems } from "../domain/order-edit-preview-pricing
 import { supportedVariant, stockAvailable } from "../domain/order-edit-variant";
 import { shopifyOrderEditVariantSchema as VARIANT } from "./shopify-order-edit-variant";
 import { cents } from "./shopify-order-edit-money";
+import {
+  orderEditRequestedCodesSchema,
+  type OrderEditCodePricing,
+} from "@shared/order-edits/order-edit-codes";
+import type { OrderEditCodeRedemptions } from "../application/order-edit-code-redemptions";
+import type { OrderEditCodeHistory } from "../application/order-edit-code-history";
+import { ShopifyOrderEditCodes } from "./shopify-order-edit-codes";
+import {
+  priceOrderEditCodes,
+  splitOrderEditCodeLine,
+  presentOrderEditCodeFinancials,
+} from "../domain/order-edit-code-pricing";
 import { ShopifyOrderEditCatalog } from "./shopify-order-edit-catalog";
 import { memberPrice } from "./shopify-order-edit-member-price";
 import type { MemberPlanPresentationReader } from "../../membership";
@@ -285,6 +297,8 @@ export class ShopifyOrderEditProvider
       shippingCalculator?: OrderEditShippingCalculator;
       report?: (event: { operationId: string; code: string }) => void;
       memberPresentation?: MemberPlanPresentationReader;
+      codeRedemptions?: OrderEditCodeRedemptions;
+      codeHistory?: OrderEditCodeHistory;
     },
   ) {
     this.fetchImpl = options.fetch ?? fetch;
@@ -488,6 +502,27 @@ export class ShopifyOrderEditProvider
       memberPlan: snapshot.memberPlan,
       memberPricingEnabled,
     });
+    if (this.options.codeHistory) {
+      const descriptions = new Map(
+        order.lineItems.nodes
+          .filter((line) => line.currentQuantity > 0)
+          .map((line) => [
+            line.id,
+            line.discountAllocations
+              .filter((allocation) => money(allocation.allocatedAmountSet) > 0)
+              .flatMap((allocation) => {
+                const rule = snapshot.discountRules?.find(
+                  (rule) => rule.index === allocation.discountApplication.index,
+                );
+                return rule ? [rule.label] : [];
+              }),
+          ]),
+      );
+      return parse(
+        orderEditSnapshotSchema,
+        await this.options.codeHistory.enrich(snapshot, descriptions),
+      );
+    }
     return parse(orderEditSnapshotSchema, snapshot);
   }
 
@@ -537,6 +572,18 @@ export class ShopifyOrderEditProvider
       toOrderEditPreviewPricingInput({ snapshot: context.snapshot, variants }),
       plan,
     );
+    const codePricing = await this.codePricing(
+      context.snapshot,
+      plan,
+      pricing.lines,
+    );
+    const previewLines = codePricing
+      ? pricing.lines.map((line) => ({
+          ...line,
+          netCents: codePricing.lines.find((priced) => priced.id === line.id)!
+            .netCents,
+        }))
+      : pricing.lines;
     if (!this.shippingCalculator.calculatePreview)
       fail(
         "ORDER_EDIT_PREVIEW_UNAVAILABLE",
@@ -545,20 +592,20 @@ export class ShopifyOrderEditProvider
     const { shippingRepricing, taxCents, totalCents } =
       await this.shippingCalculator.calculatePreview(
         context.snapshot,
-        pricing.lines.map((line) => ({
+        previewLines.map((line) => ({
           variantId: line.variantId,
           quantity: line.quantity,
           netCents: line.netCents,
         })),
       );
-    const financials = buildOrderEditFinancials({
-      lines: pricing.lines.map((line) => ({
+    let financials = buildOrderEditFinancials({
+      lines: previewLines.map((line) => ({
         id: line.id,
         grossCents: line.grossCents,
         netCents: line.netCents,
       })),
-      itemsNetCents: pricing.itemsNetCents,
-      itemDiscounts: pricing.discounts,
+      itemsNetCents: sum(previewLines.map((line) => line.netCents)),
+      ...(codePricing ? {} : { itemDiscounts: pricing.discounts }),
       itemDiscountLabels: pricing.discounts.map((d) => d.label),
       shippingGrossCents: shippingRepricing.grossCents,
       shippingCents: shippingRepricing.netCents,
@@ -567,10 +614,27 @@ export class ShopifyOrderEditProvider
       taxesIncluded: context.snapshot.financials!.taxesIncluded,
       totalCents,
     });
+    if (codePricing) {
+      await (
+        await this.codes(context.snapshot.connectionId)
+      ).assertCombinations(
+        context.snapshot,
+        codePricing.rules,
+        codePricing.lines.some(
+          (line) =>
+            multiply(line.retailCents, line.quantity) > line.productNetCents,
+        ),
+        shippingRepricing.discountLabels,
+      );
+      financials = presentOrderEditCodeFinancials(financials, codePricing);
+    }
     return {
+      ...(plan.discountCodes !== undefined
+        ? { appliedCodes: codePricing?.applications ?? [] }
+        : {}),
       financials,
       shippingRepricing,
-      lines: pricing.lines.map((line) => ({
+      lines: previewLines.map((line) => ({
         id: line.id,
         variantId: line.variantId,
         added: !context.snapshot.lines.some(
@@ -583,6 +647,47 @@ export class ShopifyOrderEditProvider
         totalCents: line.netCents,
       })),
     };
+  }
+
+  private async codes(connectionId: number): Promise<ShopifyOrderEditCodes> {
+    if (!this.options.codeRedemptions?.available())
+      fail(
+        "ORDER_EDIT_CODES_UNAVAILABLE",
+        "Coupon and rewards codes are temporarily unavailable. Your order has not changed.",
+      );
+    const credentials = await this.credentials(connectionId);
+    return new ShopifyOrderEditCodes(
+      (query, variables) => this.request(credentials, query, variables),
+      this.options.clock,
+      this.options.codeRedemptions,
+    );
+  }
+  private async codePricing(
+    snapshot: OrderEditSnapshot,
+    plan: OrderEditPlan,
+    lines: Parameters<typeof priceOrderEditCodes>[0],
+  ): Promise<OrderEditCodePricing | undefined> {
+    const newCodes = plan.discountCodes ?? [];
+    const retained = snapshot.codePricing?.rules ?? [];
+    if (!newCodes.length && !retained.length) return undefined;
+    if (newCodes.length + retained.length > 5)
+      fail(
+        "ORDER_EDIT_CODES_LIMIT",
+        "An order can have up to five coupon or rewards codes.",
+      );
+    const gateway = await this.codes(snapshot.connectionId);
+    const rules = newCodes.length
+      ? await gateway.rules(snapshot, newCodes)
+      : [];
+    const approved = rules.length
+      ? await gateway.verifyNativeCalculation(snapshot, lines, rules)
+      : undefined;
+    return priceOrderEditCodes(
+      lines,
+      [...retained, ...rules],
+      newCodes,
+      approved,
+    );
   }
 
   private async previewVariants(
@@ -688,13 +793,16 @@ export class ShopifyOrderEditProvider
     }
     if (variantCheck.status === "rejected") throw variantCheck.reason;
     const pricingProvenance = promotionCheck.value;
-    const quote = await this.stage(
-      connectionId,
-      fresh,
-      plan,
-      operationId,
-      variantCheck.value,
-    );
+    const quote =
+      plan.discountCodes?.length || fresh.codePricing
+        ? await this.stageCodes(connectionId, fresh, plan, operationId)
+        : await this.stage(
+            connectionId,
+            fresh,
+            plan,
+            operationId,
+            variantCheck.value,
+          );
     assertRecoveryLineage(quote);
     // Establish financial eligibility while the order is still unchanged. A
     // successful edit must not discover only afterwards that its refund is unsupported.
@@ -712,6 +820,337 @@ export class ShopifyOrderEditProvider
     return parse(orderEditQuoteSchema, {
       ...quote,
       evidence: { ...quote.evidence, pricingProvenance, refundPreflight },
+    });
+  }
+
+  /** Native manual discounts replace the line's previous discount. Reproduce the full
+   * approved member + code price, then verify every native cent before committing.
+   */
+  private async stageCodes(
+    connectionId: number,
+    baseline: OrderEditSnapshot,
+    plan: OrderEditPlan,
+    operationId: string,
+  ): Promise<OrderEditQuote> {
+    if (
+      (baseline.discountRules ?? []).some(
+        (rule) =>
+          rule.type === "DiscountCodeApplication" &&
+          rule.targetType === "LINE_ITEM",
+      )
+    )
+      fail(
+        "ORDER_EDIT_CODE_EXISTING_NATIVE_UNSUPPORTED",
+        "Adding a code to this order requires our help verifying the existing code.",
+      );
+    const credentials = await this.credentials(connectionId);
+    const variants = await this.previewVariants(baseline, [
+      ...new Set([
+        ...baseline.lines
+          .filter((line) => line.quantity > 0)
+          .map((line) => line.variantId),
+        ...plan.additions.map((line) => line.variantId),
+      ]),
+    ]);
+    const basis = priceOrderEditPreviewItems(
+      toOrderEditPreviewPricingInput({ snapshot: baseline, variants }),
+      plan,
+    );
+    const pricing = (await this.codePricing(baseline, plan, basis.lines))!;
+    const begin = await this.mutate(
+      credentials,
+      gql.BEGIN_MUTATION,
+      { id: baseline.orderId },
+      "orderEditBegin",
+    );
+    let calculated = readCalculated(begin.calculatedOrder, baseline.orderId);
+    const initial = verifyCalculatedFinancials(calculated, baseline);
+    if (
+      !initial ||
+      initial.totalCents !== baseline.totalCents ||
+      initial.itemsNetCents !== baseline.subtotalCents ||
+      initial.taxCents !== baseline.taxCents
+    )
+      fail(
+        "QUOTE_BASELINE_MISMATCH",
+        "Shopify did not preserve the original order amounts before this edit.",
+      );
+    const originalCalculated = new Map<
+      string,
+      z.infer<typeof CALCULATED_LINE>
+    >();
+    const used = new Set<string>();
+    for (const original of baseline.lines.filter((line) => line.quantity > 0)) {
+      const matches = calculated.lineItems.nodes.filter(
+        (line) =>
+          !used.has(line.id) &&
+          line.variant?.id === original.variantId &&
+          line.quantity === original.quantity &&
+          money(line.originalUnitPriceSet) ===
+            original.originalUnitPriceCents &&
+          money(line.discountedUnitPriceSet) ===
+            original.discountedUnitPriceCents,
+      );
+      if (matches.length !== 1)
+        fail(
+          "LINE_IDENTITY_UNPROVEN",
+          "The original order items could not be identified safely.",
+        );
+      originalCalculated.set(original.id, matches[0]);
+      used.add(matches[0].id);
+    }
+    if (
+      calculated.addedLineItems.nodes.some((line) => line.quantity > 0) ||
+      calculated.lineItems.nodes.some(
+        (line) => line.quantity > 0 && !used.has(line.id),
+      )
+    )
+      fail(
+        "UNEXPECTED_STAGED_LINES",
+        "Shopify returned unexpected items before this edit.",
+      );
+    const expected: OrderEditExpectedLine[] = [];
+    const proofLines: OrderEditCodePricing["lines"] = [];
+    const updateQuantity = async (lineItemId: string, quantity: number) => {
+      calculated = readCalculated(
+        (
+          await this.mutate(
+            credentials,
+            gql.QUANTITY_MUTATION,
+            { id: calculated.id, lineItemId, quantity },
+            "orderEditSetQuantity",
+          )
+        ).calculatedOrder,
+        baseline.orderId,
+      );
+    };
+    const add = async (
+      variantId: string,
+      quantity: number,
+    ): Promise<string> => {
+      const result = await this.mutate(
+        credentials,
+        gql.ADD_MUTATION,
+        { id: calculated.id, variantId, quantity },
+        "orderEditAddVariant",
+      );
+      calculated = readCalculated(result.calculatedOrder, baseline.orderId);
+      return gid(
+        "CalculatedLineItem",
+        parse(z.object({ id: TEXT }), result.calculatedLineItem).id,
+      );
+    };
+    for (const original of baseline.lines.filter(
+      (line) =>
+        line.quantity > 0 &&
+        !pricing.lines.some((priced) => priced.id === line.id),
+    )) {
+      const native = originalCalculated.get(original.id)!;
+      await updateQuantity(native.id, 0);
+      expected.push({
+        title: original.title,
+        variantTitle: original.variantTitle,
+        originalLineId: original.id,
+        calculatedLineId: native.id,
+        variantId: original.variantId,
+        quantity: 0,
+        originalUnitPriceCents: original.originalUnitPriceCents,
+        discountedUnitPriceCents: original.discountedUnitPriceCents,
+        totalCents: 0,
+      });
+    }
+    for (const priced of pricing.lines) {
+      const original = baseline.lines.find((line) => line.id === priced.id);
+      const groups = splitOrderEditCodeLine(priced);
+      for (let index = 0; index < groups.length; index++) {
+        const group = groups[index];
+        const native =
+          index === 0 && original ? originalCalculated.get(original.id)! : null;
+        const calcId =
+          native?.id ?? (await add(priced.variantId, group.quantity));
+        if (native && native.quantity !== group.quantity)
+          await updateQuantity(calcId, group.quantity);
+        const actual = [
+          ...calculated.lineItems.nodes,
+          ...calculated.addedLineItems.nodes,
+        ].find((line) => line.id === calcId);
+        if (
+          !actual ||
+          actual.variant?.id !== priced.variantId ||
+          actual.quantity !== group.quantity ||
+          money(actual.originalUnitPriceSet) !== priced.retailCents
+        )
+          fail(
+            "ORDER_EDIT_CODE_VARIANT_PRICE_CHANGED",
+            "Shopify changed an item's price while preparing its code saving.",
+          );
+        const discountCents = priced.retailCents - group.unitCents;
+        if (discountCents > 0)
+          calculated = readCalculated(
+            (
+              await this.mutate(
+                credentials,
+                gql.DISCOUNT_MUTATION,
+                {
+                  id: calculated.id,
+                  lineItemId: calcId,
+                  discount: {
+                    description: pricing.description,
+                    fixedValue: {
+                      amount: decimal(discountCents),
+                      currencyCode: "USD",
+                    },
+                  },
+                },
+                "orderEditAddLineItemDiscount",
+              )
+            ).calculatedOrder,
+            baseline.orderId,
+          );
+        else if (money(actual.discountedUnitPriceSet) !== priced.retailCents) {
+          const discounts = actual.calculatedDiscountAllocations.filter(
+            (allocation) =>
+              allocation.discountApplication.__typename ===
+              "CalculatedManualDiscountApplication",
+          );
+          if (
+            discounts.some(
+              (allocation) =>
+                allocation.discountApplication.description !==
+                baseline.codePricing?.description,
+            )
+          )
+            fail(
+              "ORDER_EDIT_CODE_PRICE_UNREPRESENTABLE",
+              "The revised code allocation cannot be represented safely on this item. Please contact us for help.",
+            );
+          for (const id of new Set(
+            discounts.map((allocation) => allocation.discountApplication.id),
+          ))
+            calculated = readCalculated(
+              (
+                await this.mutate(
+                  credentials,
+                  gql.REMOVE_DISCOUNT_MUTATION,
+                  { id: calculated.id, discountApplicationId: id },
+                  "orderEditRemoveDiscount",
+                )
+              ).calculatedOrder,
+              baseline.orderId,
+            );
+        }
+        expected.push({
+          title: original?.title ?? actual.title,
+          variantTitle: original?.variantTitle ?? actual.variantTitle,
+          originalLineId: native ? original!.id : null,
+          calculatedLineId: calcId,
+          variantId: priced.variantId,
+          quantity: group.quantity,
+          originalUnitPriceCents: priced.retailCents,
+          discountedUnitPriceCents: group.unitCents,
+          totalCents: group.netCents,
+        });
+        proofLines.push({
+          ...priced,
+          id: calcId,
+          quantity: group.quantity,
+          netCents: group.netCents,
+          productNetCents: group.productNetCents,
+        });
+      }
+    }
+    const codePricing = { ...pricing, lines: proofLines };
+    // Verify item amounts before asking the current checkout shipping/tax calculator.
+    const nativeItems = verifyCalculatedFinancials(calculated, baseline, true);
+    if (
+      !nativeItems ||
+      nativeItems.itemsNetCents !== sum(proofLines.map((line) => line.netCents))
+    )
+      fail(
+        "ORDER_EDIT_CODE_NATIVE_MISMATCH",
+        "Shopify's item prices do not match the approved code saving.",
+      );
+    const shippingRepricing = await this.shippingCalculator.calculate(
+      baseline,
+      shippingItems(calculated, nativeItems),
+    );
+    await (
+      await this.codes(connectionId)
+    ).assertCombinations(
+      baseline,
+      pricing.rules,
+      proofLines.some(
+        (line) =>
+          multiply(line.retailCents, line.quantity) > line.productNetCents,
+      ),
+      shippingRepricing.discountLabels,
+    );
+    let shippingFinancials = {
+      grossCents: baseline.financials!.shippingGrossCents,
+      netCents: baseline.shippingCents,
+      discountLabels: baseline.financials!.shippingDiscountLabels,
+    };
+    if (
+      shippingRepricing.netCents !== baseline.shippingCents ||
+      shippingRepricing.title !== baseline.shippingContext?.lines[0]?.title
+    ) {
+      calculated = await this.replaceShipping(
+        credentials,
+        calculated,
+        shippingRepricing.title,
+        shippingRepricing.netCents,
+      );
+      shippingFinancials = {
+        grossCents: shippingRepricing.netCents,
+        netCents: shippingRepricing.netCents,
+        discountLabels: [],
+      };
+    }
+    verifyCalculated(
+      calculated,
+      expected,
+      baseline,
+      shippingFinancials.grossCents,
+    );
+    const rawFinancials = verifyCalculatedFinancials(
+      calculated,
+      baseline,
+      true,
+      shippingFinancials,
+    )!;
+    const financials = presentOrderEditCodeFinancials(
+      {
+        ...rawFinancials,
+        lines: rawFinancials.lines.filter((line) =>
+          expected.some((wanted) => wanted.calculatedLineId === line.id),
+        ),
+      },
+      codePricing,
+    );
+    const totalCents = money(calculated.totalPriceSet);
+    return parse(orderEditQuoteSchema, {
+      connectionId,
+      channelId: baseline.channelId,
+      orderId: baseline.orderId,
+      operationId,
+      calculatedOrderId: calculated.id,
+      sessionId: gid(
+        "OrderEditSession",
+        parse(z.object({ id: TEXT }), begin.orderEditSession).id,
+      ),
+      baselineFingerprint: baseline.fingerprint,
+      baseline,
+      plan: structuredClone(plan),
+      lines: expected,
+      totalCents,
+      outstandingCents: money(calculated.totalOutstandingSet, true),
+      deltaCents: subtract(totalCents, baseline.totalCents),
+      shippingCents: shippingRepricing.netCents,
+      shippingRepricing,
+      financials,
+      codePricing,
+      createdAt: this.now().toISOString(),
+      evidence: { calculated },
     });
   }
 
@@ -1259,8 +1698,15 @@ export class ShopifyOrderEditProvider
     connectionId: number,
     quote: OrderEditQuote,
     operationId: string,
+    beforeCommitRequest?: () => Promise<void>,
   ): Promise<OrderEditSnapshot> {
-    return this.applyQuote(connectionId, quote, operationId, "edit");
+    return this.applyQuote(
+      connectionId,
+      quote,
+      operationId,
+      "edit",
+      beforeCommitRequest,
+    );
   }
 
   private async applyQuote(
@@ -1268,23 +1714,38 @@ export class ShopifyOrderEditProvider
     quote: OrderEditQuote,
     operationId: string,
     mode: "edit" | "recovery",
+    beforeCommitRequest?: () => Promise<void>,
   ): Promise<OrderEditSnapshot> {
     let credentials: OrderEditCredentials;
     try {
+      if (
+        mode === "edit" &&
+        quote.codePricing?.newCodes.length &&
+        !beforeCommitRequest
+      )
+        fail(
+          "ORDER_EDIT_CODE_RESERVATION_REQUIRED",
+          "This edit requires a verified code reservation before it can be applied.",
+        );
       credentials = await this.prepareCommit(
         connectionId,
         quote,
         operationId,
         mode,
       );
+      if (mode === "edit") await beforeCommitRequest?.();
     } catch (error) {
       // Only this boundary can prove that no commit request was sent. A rejected
       // response or failed readback after mutate must retain its unknown outcome.
-      if (mode === "edit" && error instanceof OrderEditProviderError)
+      if (mode === "edit")
         throw new OrderEditCommitNotSentError(
-          error.code,
-          error.message,
-          error.context,
+          error instanceof OrderEditProviderError
+            ? error.code
+            : "ORDER_EDIT_CODE_RESERVATION_FAILED",
+          error instanceof Error
+            ? error.message
+            : "The code reservation could not be verified. No order change was submitted.",
+          error instanceof OrderEditProviderError ? error.context : {},
         );
       throw error;
     }
@@ -1321,6 +1782,43 @@ export class ShopifyOrderEditProvider
     if (!unchangedOrderEditSnapshot(current, quote.baseline))
       fail("ORDER_CHANGED", "The order changed after the quote was prepared.");
     assertEditable(current);
+    if (mode === "edit" && quote.codePricing) {
+      const gateway = await this.codes(connectionId);
+      const added = quote.codePricing.newCodes;
+      if (added.length) {
+        const rules = await gateway.rules(current, added);
+        const expected = quote.codePricing.rules.filter((rule) =>
+          added.some((code) => code.toUpperCase() === rule.code.toUpperCase()),
+        );
+        if (canonicalJson(rules) !== canonicalJson(expected))
+          fail(
+            "ORDER_EDIT_CODE_TERMS_CHANGED",
+            "The code's eligibility or combination rules changed after review. Review the code again.",
+          );
+        await gateway.verifyNativeCalculation(
+          current,
+          quote.codePricing.lines.map((line) => ({
+            ...line,
+            grossCents: multiply(line.retailCents, line.quantity),
+          })),
+          rules,
+          quote.codePricing.applications.filter((application) =>
+            added.some(
+              (code) => code.toUpperCase() === application.code.toUpperCase(),
+            ),
+          ),
+        );
+      }
+      await gateway.assertCombinations(
+        current,
+        quote.codePricing.rules,
+        quote.codePricing.lines.some(
+          (line) =>
+            multiply(line.retailCents, line.quantity) > line.productNetCents,
+        ),
+        quote.shippingRepricing!.discountLabels,
+      );
+    }
     if (mode === "edit") {
       assertRecoveryLineage(quote);
       if (quote.shippingRepricing) {
@@ -1785,7 +2283,15 @@ export class ShopifyOrderEditProvider
     const initialFinancials = verifyCalculatedFinancials(calculated, current);
     if (
       initialFinancials &&
-      !sameFinancialEvidence(initialFinancials, current.financials)
+      !sameFinancialEvidence(
+        originalQuote.codePricing
+          ? presentOrderEditCodeFinancials(
+              initialFinancials,
+              originalQuote.codePricing,
+            )
+          : initialFinancials,
+        current.financials,
+      )
     ) {
       fail(
         "EXPIRY_PRICING_CONFLICT",
@@ -1836,6 +2342,76 @@ export class ShopifyOrderEditProvider
           ).calculatedOrder,
           current.orderId,
         );
+      let recoveryUnit =
+        original?.discountedUnitPriceCents ?? before.discountedUnitPriceCents;
+      let recoveryTotal = original?.totalCents ?? 0;
+      if (originalQuote.codePricing && original && change.quantity > 0) {
+        const net = baseline.financials?.lines.find(
+          (line) => line.id === original.id,
+        )?.netCents;
+        if (
+          net === undefined ||
+          BigInt(net) % BigInt(change.quantity) !== BigInt(0)
+        )
+          fail(
+            "EXPIRY_CODE_PRICE_UNREPRESENTABLE",
+            "The original discounted unit price cannot be restored exactly.",
+            "unknown",
+          );
+        recoveryUnit = Number(BigInt(net) / BigInt(change.quantity));
+        recoveryTotal = net;
+        const discountCents = original.originalUnitPriceCents - recoveryUnit;
+        if (discountCents > 0)
+          calculated = readCalculated(
+            (
+              await this.mutate(
+                credentials,
+                gql.DISCOUNT_MUTATION,
+                {
+                  id: calculated.id,
+                  lineItemId: matched.id,
+                  discount: {
+                    description:
+                      baseline.codePricing?.description ??
+                      "Echelon member pricing",
+                    fixedValue: {
+                      amount: decimal(discountCents),
+                      currencyCode: "USD",
+                    },
+                  },
+                },
+                "orderEditAddLineItemDiscount",
+              )
+            ).calculatedOrder,
+            current.orderId,
+          );
+        else {
+          const currentLine = calculated.lineItems.nodes.find(
+            (line) => line.id === matched.id,
+          )!;
+          for (const application of currentLine.calculatedDiscountAllocations
+            .map((allocation) => allocation.discountApplication)
+            .filter(
+              (application) =>
+                application.__typename ===
+                "CalculatedManualDiscountApplication",
+            ))
+            calculated = readCalculated(
+              (
+                await this.mutate(
+                  credentials,
+                  gql.REMOVE_DISCOUNT_MUTATION,
+                  {
+                    id: calculated.id,
+                    discountApplicationId: application.id,
+                  },
+                  "orderEditRemoveDiscount",
+                )
+              ).calculatedOrder,
+              current.orderId,
+            );
+        }
+      }
       expected.push({
         title: before.title,
         variantTitle: before.variantTitle,
@@ -1845,9 +2421,8 @@ export class ShopifyOrderEditProvider
         quantity: change.quantity,
         originalUnitPriceCents:
           original?.originalUnitPriceCents ?? before.originalUnitPriceCents,
-        discountedUnitPriceCents:
-          original?.discountedUnitPriceCents ?? before.discountedUnitPriceCents,
-        totalCents: original?.totalCents ?? 0,
+        discountedUnitPriceCents: recoveryUnit,
+        totalCents: recoveryTotal,
       });
     }
     const restoredFinancials = recoveryFinancials(baseline, originalQuote);
@@ -1888,12 +2463,38 @@ export class ShopifyOrderEditProvider
       );
     }
     verifyNativeOrderDiscounts(calculated, baseline, nativeDiscounts);
-    const financials = verifyCalculatedFinancials(calculated, baseline, false, {
+    let financials = verifyCalculatedFinancials(calculated, baseline, false, {
       grossCents:
         restoredFinancials?.shippingGrossCents ?? baseline.shippingCents,
       netCents: baseline.shippingCents,
       discountLabels: restoredFinancials?.shippingDiscountLabels ?? [],
     });
+    const restoredCodePricing = baseline.codePricing
+      ? {
+          ...baseline.codePricing,
+          newCodes: [],
+          lines: baseline.codePricing.lines.map((line) => ({
+            ...line,
+            sourceId: line.id,
+            id: expected.find(
+              (expected) => expected.originalLineId === line.id,
+            )!.calculatedLineId,
+          })),
+        }
+      : undefined;
+    if (financials && restoredCodePricing)
+      financials = presentOrderEditCodeFinancials(
+        financials,
+        restoredCodePricing,
+      );
+    if (financials && originalQuote.codePricing)
+      financials = {
+        ...financials,
+        itemDiscountLabels: restoredFinancials!.itemDiscountLabels,
+        lines: financials.lines.filter((line) =>
+          expected.some((wanted) => wanted.calculatedLineId === line.id),
+        ),
+      };
     if (
       financials &&
       (!sameFinancialEvidence(financials, restoredFinancials) ||
@@ -1946,8 +2547,13 @@ export class ShopifyOrderEditProvider
           }
         : {}),
       financials,
+      ...(restoredCodePricing ? { codePricing: restoredCodePricing } : {}),
       createdAt: this.now().toISOString(),
-      evidence: { calculated, compensationFor: baseline.orderId },
+      evidence: {
+        calculated,
+        compensationFor: baseline.orderId,
+        ...(originalQuote.codePricing ? { codeDiscountRecovery: true } : {}),
+      },
     };
   }
 
@@ -2238,6 +2844,7 @@ function marker(value: string) {
 function validatePlan(plan: OrderEditPlan) {
   const parsed = z
     .object({
+      discountCodes: orderEditRequestedCodesSchema.optional(),
       changes: z.array(z.object({ lineItemId: TEXT, quantity: INTEGER })),
       additions: z.array(
         z.object({ variantId: TEXT, quantity: INTEGER.positive() }),
@@ -2247,7 +2854,10 @@ function validatePlan(plan: OrderEditPlan) {
     .safeParse(plan);
   if (
     !parsed.success ||
-    plan.changes.length + plan.additions.length === 0 ||
+    plan.changes.length +
+      plan.additions.length +
+      (plan.discountCodes?.length ?? 0) ===
+      0 ||
     plan.changes.length + plan.additions.length > MAX_GRAPHQL_INPUTS
   )
     fail(

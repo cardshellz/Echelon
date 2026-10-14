@@ -1,6 +1,7 @@
 import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { EbayStoreCategoryCombobox } from "@/components/dropship/EbayStoreCategoryCombobox";
 import { Button } from "@/components/ui/button";
+import { bulkFieldChoiceReady, bulkStoreShelfEditorChoice } from "@/lib/dropship-listing-settings-bulk";
 import { EBAY_CATEGORY_DEFAULT_WORDS } from "@/lib/dropship-listing-settings-content-requests";
 import { LISTING_SETTINGS_SAVE_WORDS } from "@/lib/dropship-listing-settings-drafts";
 import {
@@ -19,7 +20,7 @@ import {
   type StoreShelfFieldEditorModel,
 } from "@/lib/dropship-listing-settings-product-edit";
 import { STORE_DEFAULT_EDITOR_WORDS } from "@/lib/dropship-listing-settings-store-requests";
-import { fieldEditorLabel, LISTING_SETTINGS_EDIT_WORDS } from "@/lib/dropship-listing-settings-words";
+import { fieldEditorLabel, LISTING_SETTINGS_BULK_WORDS, LISTING_SETTINGS_EDIT_WORDS } from "@/lib/dropship-listing-settings-words";
 import { cn } from "@/lib/utils";
 import { DropshipEbayCategoryPicker } from "../DropshipEbayCategoryPicker";
 import { PolicyChoiceList } from "./PolicyChoiceList";
@@ -34,6 +35,12 @@ interface FieldEditorBaseProps {
   message: string | null;
   /** Closes the editor and drops the pick; Esc does the same (the drawer routes it here). */
   onCancel: () => void;
+  /**
+   * "Set for selected"'s mode (PR 10 plan 6.3, UX-m5): the editor also offers
+   * "Leave as is" (REC:854's Leave), which [Done] takes to put the row back to
+   * no change, and opens on it while the row holds none. Left out, the drawer's.
+   */
+  bulk?: boolean;
 }
 
 export interface DrawerFieldEditorProps extends FieldEditorBaseProps {
@@ -125,7 +132,7 @@ export function ChoiceRadio({ name, label, checked, disabled = false, onPick, ch
  * setting, else the store default; REC:854, REC:857). [Done] puts the
  * choice in the drawer's one draft; nothing is sent until the drawer's Save.
  */
-export function DrawerFieldEditor({ model, title, productName, message, onDone, onCancel }: DrawerFieldEditorProps) {
+export function DrawerFieldEditor({ model, title, productName, message, onDone, onCancel, bulk = false }: DrawerFieldEditorProps) {
   const group = useId();
   const [choice, setChoice] = useState<FieldChoice<PolicyChoiceValue>>(model.initial);
   const picked = choice.mode === "set" ? choice.value.id : null;
@@ -135,7 +142,7 @@ export function DrawerFieldEditor({ model, title, productName, message, onDone, 
       title={title}
       productName={productName}
       message={message}
-      doneDisabled={!fieldChoiceReady(model, choice)}
+      doneDisabled={!(bulk ? bulkFieldChoiceReady(model, choice) : fieldChoiceReady(model, choice))}
       onDone={() => onDone(choice)}
       onCancel={onCancel}
     >
@@ -149,6 +156,9 @@ export function DrawerFieldEditor({ model, title, productName, message, onDone, 
         marked={false}
         suggestedId={null}
         onPick={(policyId) => setChoice({ mode: "set", value: { id: policyId } })}
+        leading={bulk
+          ? { label: LISTING_SETTINGS_BULK_WORDS.leaveAsIs, checked: choice.mode === "leave", onPick: () => setChoice({ mode: "leave" }) }
+          : undefined}
         extra={model.canDefault
           ? { label: LISTING_SETTINGS_EDIT_WORDS.useDefault, checked: choice.mode === "default", onPick: () => setChoice({ mode: "default" }) }
           : undefined}
@@ -173,7 +183,9 @@ export interface DrawerEbayCategoryEditorProps extends FieldEditorBaseProps {
  * sign-in only "Use default" is left, and the row says why. Focus moves into
  * the picker's search when it opens, and to the picked category after a pick.
  */
-export function DrawerEbayCategoryEditor({ model, storeConnectionId, title, productName, message, onDone, onCancel }: DrawerEbayCategoryEditorProps) {
+export function DrawerEbayCategoryEditor({
+  model, storeConnectionId, title, productName, message, onDone, onCancel, bulk = false,
+}: DrawerEbayCategoryEditorProps) {
   const group = useId();
   const [choice, setChoice] = useState<FieldChoice<EbayCategoryChoiceValue>>(model.initial);
   // The category of its own the editor offers: the one it opened on, else the last one picked here.
@@ -197,13 +209,16 @@ export function DrawerEbayCategoryEditor({ model, storeConnectionId, title, prod
       title={title}
       productName={productName}
       message={message}
-      doneDisabled={!ebayCategoryChoiceReady(model, choice)}
+      doneDisabled={!(bulk ? bulkFieldChoiceReady(model, choice) : ebayCategoryChoiceReady(model, choice))}
       onDone={() => onDone(choice)}
       onCancel={onCancel}
     >
       <div ref={areaRef} className="space-y-3">
         <fieldset className="space-y-2">
           <legend className="sr-only">{fieldEditorLabel(title, productName)}</legend>
+          {bulk && (
+            <ChoiceRadio name={group} label={LISTING_SETTINGS_BULK_WORDS.leaveAsIs} checked={choice.mode === "leave"} onPick={() => setChoice({ mode: "leave" })} />
+          )}
           {own !== null && model.canSet && (
             <ChoiceRadio
               name={group}
@@ -269,10 +284,10 @@ export interface DrawerShelfEditorProps extends FieldEditorBaseProps {
  * "Use default". Picking a shelf chooses "Own shelves". "None" and "Use
  * default" name no eBay value, so they stay while eBay needs a sign-in (D4).
  */
-export function DrawerShelfEditor({ model, title, productName, message, onDone, onCancel }: DrawerShelfEditorProps) {
+export function DrawerShelfEditor({ model, title, productName, message, onDone, onCancel, bulk = false }: DrawerShelfEditorProps) {
   const group = useId();
   const [state, setState] = useState<StoreShelfEditorState>(model.initial);
-  const result = storeShelfEditorChoice(model, state);
+  const result = bulk ? bulkStoreShelfEditorChoice(model, state) : storeShelfEditorChoice(model, state);
   const options = model.options;
   const canPick = model.canSet && options !== null && options.length > 0;
   const pickShelves = (next: Pick<StoreShelfEditorState, "first" | "second">) => setState({ mode: "own", ...next });
@@ -288,6 +303,9 @@ export function DrawerShelfEditor({ model, title, productName, message, onDone, 
     >
       <fieldset className="space-y-2">
         <legend className="sr-only">{fieldEditorLabel(title, productName)}</legend>
+        {bulk && (
+          <ChoiceRadio name={group} label={LISTING_SETTINGS_BULK_WORDS.leaveAsIs} checked={state.mode === "leave"} onPick={() => setState({ ...state, mode: "leave" })} />
+        )}
         {canPick && (
           <>
             <ChoiceRadio name={group} label={LISTING_SETTINGS_EDIT_WORDS.ownShelves} checked={state.mode === "own"} onPick={() => setState({ ...state, mode: "own" })} />

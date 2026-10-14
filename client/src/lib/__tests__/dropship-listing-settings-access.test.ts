@@ -106,9 +106,11 @@ function oracle(vendor: string, entitlement: string, store: string, outcome: Set
   // W5 (PR 10, D3): the PR 9 gate (vendor, .ops, a store that isn't paused or disconnected, eBay US);
   // a sign-in or eBay not answering doesn't take it away (resets need no eBay call, D4).
   const productSettings = price;
+  // W6 (PR 10c, D3): the same PR 9 gate as W5 (`authorizeListingSettingWrite`).
+  const bulkSettings = price;
   return {
     price, exactPrice: price, description: price, ebayCategory,
-    policies, shelfNone: policies, shelfPick: policies, shipping, shipFrom: shipping, productSettings,
+    policies, shelfNone: policies, shelfPick: policies, shipping, shipFrom: shipping, productSettings, bulkSettings,
   };
 }
 
@@ -154,7 +156,7 @@ describe("edit rights: reasons", () => {
     const setupLoading = listingSettingsEditRights(input({ setup: { data: undefined, error: null } }));
     expect(setupLoading.policies).toEqual({ editable: false, reason: "checking_ebay" });
     // Prices, the eBay category and the description never wait for eBay's setup read.
-    expect(editableRights(setupLoading)).toEqual(["price", "exactPrice", "ebayCategory", "description", "productSettings"]);
+    expect(editableRights(setupLoading)).toEqual(["price", "exactPrice", "ebayCategory", "description", "productSettings", "bulkSettings"]);
     const shelvesLoading = listingSettingsEditRights(input({ shelves: { data: undefined, error: null } }));
     expect(shelvesLoading.shelfPick).toEqual({ editable: false, reason: "checking_ebay" });
     expect(shelvesLoading.shelfNone.editable).toBe(true);
@@ -173,7 +175,7 @@ describe("edit rights: reasons", () => {
       input({ shelves: { error: apiError(403, "DROPSHIP_EBAY_STORE_CATEGORIES_PERMISSION_REQUIRED") } }),
     ]) {
       const rights = listingSettingsEditRights(cell);
-      expect(editableRights(rights)).toEqual(["price", "exactPrice", "description", "productSettings"]);
+      expect(editableRights(rights)).toEqual(["price", "exactPrice", "description", "productSettings", "bulkSettings"]);
       for (const right of ["policies", "shipping", "shelfPick", "shelfNone", "shipFrom", "ebayCategory"] as const) {
         expect(rights[right]).toEqual({ editable: false, reason: "sign_in" });
       }
@@ -184,7 +186,7 @@ describe("edit rights: reasons", () => {
   it("eBay unreachable keeps every choice that needs no setup read (R:502)", () => {
     const cell = input({ setup: { error: apiError(503, "DROPSHIP_EBAY_TOKEN_REFRESH_FAILED") } });
     const rights = listingSettingsEditRights(cell);
-    expect(editableRights(rights)).toEqual(["price", "exactPrice", "ebayCategory", "description", "productSettings"]);
+    expect(editableRights(rights)).toEqual(["price", "exactPrice", "ebayCategory", "description", "productSettings", "bulkSettings"]);
     expect(rights.policies).toEqual({ editable: false, reason: "unreachable" });
     expect(chooseConnectionBanner(cell)).toEqual({ kind: "unreachable", diagnosticReference: null });
   });
@@ -214,7 +216,9 @@ describe("edit rights: reasons", () => {
     const unfinished = listingSettingsEditRights(input({ setup: { data: setupChecked({ missingFields: ["merchantLocationKey"], checks: { ebay: "checked", fulfillment: { status: "unavailable", reference: "R-1", kind: "setup_incomplete" } } }) } }));
     expect(unfinished.shipping).toEqual({ editable: false, reason: "shipping_setup" });
     expect(unfinished.shipFrom).toEqual({ editable: false, reason: "shipping_setup" });
-    expect(editableRights(unfinished)).toEqual(["price", "exactPrice", "policies", "shelfPick", "shelfNone", "ebayCategory", "description", "productSettings"]);
+    expect(editableRights(unfinished)).toEqual([
+      "price", "exactPrice", "policies", "shelfPick", "shelfNone", "ebayCategory", "description", "productSettings", "bulkSettings",
+    ]);
     const outage = listingSettingsEditRights(input({ setup: { data: setupChecked({ checks: { ebay: "checked", fulfillment: { status: "unavailable", reference: "R-2", kind: "temporary" } } }) } }));
     expect(outage.shipping).toEqual({ editable: false, reason: "shipping_unavailable" });
   });
@@ -271,19 +275,21 @@ describe("edit rights: reasons", () => {
     expect(chooseConnectionBanner(entitlement)?.kind).toBe("ops_inactive");
   });
 
-  it("a product's own settings (W5) are taken away by exactly the plan's banners (PR 10, D3)", () => {
-    const takesW5Away: ReadonlySet<ConnectionBannerKind> = new Set([
+  it("a product's own settings (W5) and Set for selected (W6) are taken away by exactly the plan's banners (PR 10, D3)", () => {
+    const takesPr9WritersAway: ReadonlySet<ConnectionBannerKind> = new Set([
       "account_inactive", "store_paused", "store_disconnecting", "store_disconnected", "too_large", "other_site", "selling_paused", "ops_inactive",
     ]);
-    for (const kind of CONNECTION_BANNER_KINDS) {
-      const right = listingSettingsEditRights(input({ blocked: { kind, diagnosticReference: null } })).productSettings;
-      expect({ kind, editable: right.editable }).toEqual({ kind, editable: !takesW5Away.has(kind) });
-      if (!right.editable) expect({ kind, reason: right.reason }).toEqual({ kind, reason: "banner" });
+    for (const name of ["productSettings", "bulkSettings"] as const) {
+      for (const kind of CONNECTION_BANNER_KINDS) {
+        const right = listingSettingsEditRights(input({ blocked: { kind, diagnosticReference: null } }))[name];
+        expect({ name, kind, editable: right.editable }).toEqual({ name, kind, editable: !takesPr9WritersAway.has(kind) });
+        if (!right.editable) expect({ name, kind, reason: right.reason }).toEqual({ name, kind, reason: "banner" });
+      }
+      // It needs no eBay read: a sign-in, eBay not answering or a loading setup leave it (resets need no eBay call, D4).
+      expect(listingSettingsEditRights(input({ setup: { data: undefined, error: null }, shelves: { data: undefined, error: null } }))[name])
+        .toEqual({ editable: true, reason: null });
+      expect(listingSettingsEditRights(input({ account: null }))[name]).toEqual({ editable: false, reason: "loading" });
     }
-    // It needs no eBay read: a sign-in, eBay not answering or a loading setup leave it (resets need no eBay call, D4).
-    expect(listingSettingsEditRights(input({ setup: { data: undefined, error: null }, shelves: { data: undefined, error: null } })).productSettings)
-      .toEqual({ editable: true, reason: null });
-    expect(listingSettingsEditRights(input({ account: null })).productSettings).toEqual({ editable: false, reason: "loading" });
   });
 
   it("never mutates its input and returns a frozen answer", () => {

@@ -10,6 +10,8 @@ import { OrderEditOmsSynchronizer } from "./infrastructure/order-edit-oms-synchr
 import { OrderEditPaidProjection } from "../oms/order-edit-paid-projection";
 import { OrderEditPreviewService } from "./application/order-edit-preview.service";
 import { createMemberPlanPresentationReader } from "../membership";
+import { ClubOrderEditCodeRedemptions } from "./infrastructure/club-order-edit-code-redemptions";
+import { PostgresOrderEditCodeHistory } from "./infrastructure/postgres-order-edit-code-history";
 
 const credentialSchema = z.object({
   connectionId: z.number().int().positive(),
@@ -23,8 +25,14 @@ export function createOrderEditService(
   services: Pick<ServiceRegistry, "shipStation" | "wmsSync" | "reservation">,
 ): OrderEditService {
   const clock = () => new Date();
+  const codeRedemptions = new ClubOrderEditCodeRedemptions(
+    process.env.SHELLZ_CLUB_API_URL,
+    process.env.INTERNAL_API_KEY,
+  );
   const provider = new ShopifyOrderEditProvider({
     clock,
+    codeRedemptions,
+    codeHistory: new PostgresOrderEditCodeHistory(pool),
     memberPresentation: createMemberPlanPresentationReader(pool),
     report: (event) =>
       console.error(
@@ -75,5 +83,6 @@ export function createOrderEditService(
       ),
     new OrderEditPreviewService(store, provider, warehouse, clock),
     provider.catalog,
+    codeRedemptions,
   );
 }

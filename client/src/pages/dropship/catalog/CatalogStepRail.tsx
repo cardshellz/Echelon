@@ -1,3 +1,4 @@
+import { useEffect, useRef } from "react";
 import { CheckCircle2, Circle, CircleDashed } from "lucide-react";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { formatStatus } from "@/lib/dropship-ops-surface";
@@ -40,6 +41,31 @@ const TICK_TEXT: Readonly<Record<CatalogStepTick, string>> = {
   unknown: "not known yet",
 };
 
+/**
+ * The rail's height, set on its parent (the catalog page) while it is shown,
+ * so a part of a step that also sticks at the top on a phone (Listing
+ * settings' selection bar, PR 10) sits below the rail instead of under it.
+ */
+export const CATALOG_STEP_RAIL_HEIGHT_VAR = "--catalog-step-rail-height";
+
+/** Keeps `CATALOG_STEP_RAIL_HEIGHT_VAR` on the rail's parent equal to the rail's height, as it wraps or grows. */
+function usePublishedRailHeight(rail: { current: HTMLElement | null }): void {
+  useEffect(() => {
+    const element = rail.current;
+    const host = element?.parentElement ?? null;
+    // No ResizeObserver (an old browser): nothing is published, and the bar sticks at the top as before.
+    if (element === null || host === null || typeof ResizeObserver === "undefined") return undefined;
+    const publish = () => host.style.setProperty(CATALOG_STEP_RAIL_HEIGHT_VAR, `${Math.ceil(element.getBoundingClientRect().height)}px`);
+    publish();
+    const observer = new ResizeObserver(publish);
+    observer.observe(element);
+    return () => {
+      observer.disconnect();
+      host.style.removeProperty(CATALOG_STEP_RAIL_HEIGHT_VAR);
+    };
+  }, [rail]);
+}
+
 /** The three steps, each ticked from saved server state, and the one store the page works on. */
 export function CatalogStepRail({
   actions = {},
@@ -53,8 +79,11 @@ export function CatalogStepRail({
   storeOptions,
   ticks,
 }: CatalogStepRailProps) {
+  const railRef = useRef<HTMLDivElement | null>(null);
+  usePublishedRailHeight(railRef);
   return (
     <div
+      ref={railRef}
       className="sticky top-0 z-20 -mx-4 mt-4 border-b border-zinc-200 bg-white/95 px-4 py-2 backdrop-blur sm:-mx-6 sm:px-6 sm:py-3"
       data-testid="catalog-step-rail"
     >

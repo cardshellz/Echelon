@@ -825,7 +825,8 @@ function ProductDrawerBody(props: ProductDrawerBodyProps) {
   );
 }
 
-function CloseButton({ phone = false, onClick }: { phone?: boolean; onClick: () => void }) {
+/** The header's × (wide) or ← (phone, R:412); also "Set for selected"'s. */
+export function CloseButton({ phone = false, onClick }: { phone?: boolean; onClick: () => void }) {
   return (
     <Button type="button" variant="ghost" size="icon" className="h-9 w-9 shrink-0" aria-label={phone ? DRAWER_WORDS.back : DRAWER_WORDS.close} onClick={onClick}>
       {phone ? <ArrowLeft aria-hidden="true" className="h-4 w-4" /> : <X aria-hidden="true" className="h-4 w-4" />}
@@ -935,22 +936,27 @@ function DrawerContent({
   );
 }
 
-/** The drawer's sticky footer (R:272): "● Not saved · 1 change" [Discard] [Save product]. Stateless, so every state renders in tests. */
-export function DrawerFooterBar({ footer, message, onDiscard, onPrimary }: {
+/**
+ * The drawer's sticky footer (R:272): "● Not saved · 1 change" [Discard] [Save product]; also "Set for selected"'s
+ * ([Save for 312 products], PR 10 plan 6.3). Stateless, so every state renders in tests.
+ */
+export function DrawerFooterBar({ footer, message, onDiscard, onPrimary, testIdPrefix = "product-drawer" }: {
   footer: DrawerFooter;
   /** Words outside the draft (a save that didn't start, a read that failed); they replace the draft's. */
   message: string | null;
   onDiscard: () => void;
   onPrimary: () => void;
+  /** The surface's test ids: `<prefix>-footer`, `<prefix>-not-saved`; the drawer's when left out. */
+  testIdPrefix?: string;
 }) {
   const shown = message !== null ? { text: message, tone: "alert" as const } : footer.message;
   return (
     <div
       className="sticky bottom-0 flex flex-wrap items-center justify-end gap-2 border-t border-zinc-200 bg-background px-4 py-3 sm:px-6"
-      data-testid="product-drawer-footer"
+      data-testid={`${testIdPrefix}-footer`}
     >
       {footer.notSaved && (
-        <span className="mr-auto text-sm font-medium text-amber-900" data-testid="product-drawer-not-saved">{footer.notSaved}</span>
+        <span className="mr-auto text-sm font-medium text-amber-900" data-testid={`${testIdPrefix}-not-saved`}>{footer.notSaved}</span>
       )}
       {shown && (
         <span role={shown.tone === "alert" ? "alert" : "status"} className={`text-sm ${shown.tone === "alert" ? "text-amber-900" : "text-zinc-700"}`}>
