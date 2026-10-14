@@ -103,9 +103,12 @@ function oracle(vendor: string, entitlement: string, store: string, outcome: Set
   const setupAnswered = outcome === "checked" || outcome === "shipping_unchecked";
   const policies = configVendor && listingStore && !signIn && setupAnswered && !anotherSite;
   const shipping = policies && outcome === "checked";
+  // W5 (PR 10, D3): the PR 9 gate (vendor, .ops, a store that isn't paused or disconnected, eBay US);
+  // a sign-in or eBay not answering doesn't take it away (resets need no eBay call, D4).
+  const productSettings = price;
   return {
     price, exactPrice: price, description: price, ebayCategory,
-    policies, shelfNone: policies, shelfPick: policies, shipping, shipFrom: shipping,
+    policies, shelfNone: policies, shelfPick: policies, shipping, shipFrom: shipping, productSettings,
   };
 }
 
@@ -151,7 +154,7 @@ describe("edit rights: reasons", () => {
     const setupLoading = listingSettingsEditRights(input({ setup: { data: undefined, error: null } }));
     expect(setupLoading.policies).toEqual({ editable: false, reason: "checking_ebay" });
     // Prices, the eBay category and the description never wait for eBay's setup read.
-    expect(editableRights(setupLoading)).toEqual(["price", "exactPrice", "ebayCategory", "description"]);
+    expect(editableRights(setupLoading)).toEqual(["price", "exactPrice", "ebayCategory", "description", "productSettings"]);
     const shelvesLoading = listingSettingsEditRights(input({ shelves: { data: undefined, error: null } }));
     expect(shelvesLoading.shelfPick).toEqual({ editable: false, reason: "checking_ebay" });
     expect(shelvesLoading.shelfNone.editable).toBe(true);
@@ -170,7 +173,7 @@ describe("edit rights: reasons", () => {
       input({ shelves: { error: apiError(403, "DROPSHIP_EBAY_STORE_CATEGORIES_PERMISSION_REQUIRED") } }),
     ]) {
       const rights = listingSettingsEditRights(cell);
-      expect(editableRights(rights)).toEqual(["price", "exactPrice", "description"]);
+      expect(editableRights(rights)).toEqual(["price", "exactPrice", "description", "productSettings"]);
       for (const right of ["policies", "shipping", "shelfPick", "shelfNone", "shipFrom", "ebayCategory"] as const) {
         expect(rights[right]).toEqual({ editable: false, reason: "sign_in" });
       }
@@ -181,7 +184,7 @@ describe("edit rights: reasons", () => {
   it("eBay unreachable keeps every choice that needs no setup read (R:502)", () => {
     const cell = input({ setup: { error: apiError(503, "DROPSHIP_EBAY_TOKEN_REFRESH_FAILED") } });
     const rights = listingSettingsEditRights(cell);
-    expect(editableRights(rights)).toEqual(["price", "exactPrice", "ebayCategory", "description"]);
+    expect(editableRights(rights)).toEqual(["price", "exactPrice", "ebayCategory", "description", "productSettings"]);
     expect(rights.policies).toEqual({ editable: false, reason: "unreachable" });
     expect(chooseConnectionBanner(cell)).toEqual({ kind: "unreachable", diagnosticReference: null });
   });
@@ -211,7 +214,7 @@ describe("edit rights: reasons", () => {
     const unfinished = listingSettingsEditRights(input({ setup: { data: setupChecked({ missingFields: ["merchantLocationKey"], checks: { ebay: "checked", fulfillment: { status: "unavailable", reference: "R-1", kind: "setup_incomplete" } } }) } }));
     expect(unfinished.shipping).toEqual({ editable: false, reason: "shipping_setup" });
     expect(unfinished.shipFrom).toEqual({ editable: false, reason: "shipping_setup" });
-    expect(editableRights(unfinished)).toEqual(["price", "exactPrice", "policies", "shelfPick", "shelfNone", "ebayCategory", "description"]);
+    expect(editableRights(unfinished)).toEqual(["price", "exactPrice", "policies", "shelfPick", "shelfNone", "ebayCategory", "description", "productSettings"]);
     const outage = listingSettingsEditRights(input({ setup: { data: setupChecked({ checks: { ebay: "checked", fulfillment: { status: "unavailable", reference: "R-2", kind: "temporary" } } }) } }));
     expect(outage.shipping).toEqual({ editable: false, reason: "shipping_unavailable" });
   });
@@ -266,6 +269,21 @@ describe("edit rights: reasons", () => {
     expect(chooseConnectionBanner(store)?.kind).toBe("store_disconnected");
     const entitlement = input({ account: { status: "active", entitlementStatus: "not_entitled" } });
     expect(chooseConnectionBanner(entitlement)?.kind).toBe("ops_inactive");
+  });
+
+  it("a product's own settings (W5) are taken away by exactly the plan's banners (PR 10, D3)", () => {
+    const takesW5Away: ReadonlySet<ConnectionBannerKind> = new Set([
+      "account_inactive", "store_paused", "store_disconnecting", "store_disconnected", "too_large", "other_site", "selling_paused", "ops_inactive",
+    ]);
+    for (const kind of CONNECTION_BANNER_KINDS) {
+      const right = listingSettingsEditRights(input({ blocked: { kind, diagnosticReference: null } })).productSettings;
+      expect({ kind, editable: right.editable }).toEqual({ kind, editable: !takesW5Away.has(kind) });
+      if (!right.editable) expect({ kind, reason: right.reason }).toEqual({ kind, reason: "banner" });
+    }
+    // It needs no eBay read: a sign-in, eBay not answering or a loading setup leave it (resets need no eBay call, D4).
+    expect(listingSettingsEditRights(input({ setup: { data: undefined, error: null }, shelves: { data: undefined, error: null } })).productSettings)
+      .toEqual({ editable: true, reason: null });
+    expect(listingSettingsEditRights(input({ account: null })).productSettings).toEqual({ editable: false, reason: "loading" });
   });
 
   it("never mutates its input and returns a frozen answer", () => {
@@ -378,10 +396,14 @@ describe("bannerFromWriteError (plan 4.5 blocked codes)", () => {
     [403, "DROPSHIP_EBAY_CATEGORY_RULES_NOT_ALLOWED", undefined, null],
     [403, "DROPSHIP_EBAY_STORE_CONNECTION_BLOCKED", { status: "disconnected" }, "store_disconnected"],
     [422, "DROPSHIP_EBAY_CATEGORY_MARKETPLACE_UNSUPPORTED", undefined, "other_site"],
-    // W9
+    // W5: new eBay values while the store needs a sign-in (PR 10, D4).
+    [403, "DROPSHIP_LISTING_SETTINGS_EBAY_SIGN_IN_REQUIRED", { fields: ["shippingPolicy"] }, "sign_in"],
+    // W9, and every PR 9 writer's gate
     [403, "DROPSHIP_LISTING_VENDOR_BLOCKED", undefined, null],
     [403, "DROPSHIP_LISTING_ENTITLEMENT_BLOCKED", undefined, "ops_inactive"],
     [403, "DROPSHIP_LISTING_STORE_BLOCKED", undefined, null],
+    // The PR 9 gate names the store status in `reason`, not `status`: the reads say which banner (CC-C18).
+    [403, "DROPSHIP_LISTING_STORE_BLOCKED", { reason: "paused" }, null],
     // The lists
     [422, "DROPSHIP_LISTING_SETTINGS_TOO_LARGE", undefined, "too_large"],
     // Not blocks

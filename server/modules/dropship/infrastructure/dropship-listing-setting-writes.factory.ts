@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { performance } from "node:perf_hooks";
 import { logger } from "../../../platform/observability/logger";
+import { DropshipListingCategoryMovesService } from "../application/dropship-listing-category-moves-service";
 import { DropshipListingCategorySettingsService } from "../application/dropship-listing-category-settings-service";
 import { DropshipListingPriceChangesService } from "../application/dropship-listing-price-changes-service";
 import { systemDropshipListingPreviewClock } from "../application/dropship-listing-preview-service";
@@ -22,6 +23,8 @@ export interface ListingSettingWriteServices {
   categories: Pick<DropshipListingCategorySettingsService, "saveForMember">;
   /** W7 (the price check, its pages and its apply). */
   priceChanges: Pick<DropshipListingPriceChangesService, "reviewForMember" | "reviewPageForMember" | "applyForMember">;
+  /** W13 ("Got it" for products Card Shellz moved). */
+  categoryMoves: Pick<DropshipListingCategoryMovesService, "acknowledgeForMember">;
 }
 
 /** What a test may put in place of the production wiring; everything else is built as in production. */
@@ -40,7 +43,7 @@ const platformWriteLog: ListingSettingWriteLog = {
  * passes no overrides): every writer shares one write repository (the 8a
  * wrapper over the shared pool), the preview clock, a monotonic timer for
  * `elapsed_ms` and the log port. W5, W6, W12 and W7 also get the eBay adapter
- * over today's providers; W8 asks eBay nothing. The one heavy-write gate
+ * over today's providers; W8 and W13 ask eBay nothing. The one heavy-write gate
  * (plan 3.10 (a)) is built here and injected into every heavy writer (W6, W12
  * when it clears, and W7's check and apply), so one process runs one heavy
  * write at a time. W7's review ids are randomUUID (W1's pattern,
@@ -61,6 +64,8 @@ export function createDropshipListingSettingWriteServices(overrides: ListingSett
   const productsBulk = new DropshipListingProductsBulkService({ ...deps, ebay, heavyWrites });
   const category = new DropshipListingCategorySettingsService({ ...deps, ebay, heavyWrites });
   const priceChanges = new DropshipListingPriceChangesService({ ...deps, ebay, heavyWrites, newId: () => randomUUID() });
+  // A single write (plan 3.10): never heavy, so never behind the gate.
+  const categoryMoves = new DropshipListingCategoryMovesService(deps);
   return {
     sizePrices: new DropshipListingSizePricesService(deps),
     products: {
@@ -74,6 +79,9 @@ export function createDropshipListingSettingWriteServices(overrides: ListingSett
       reviewForMember: (memberId, storeId, body) => priceChanges.reviewForMember(memberId, storeId, body),
       reviewPageForMember: (memberId, storeId, reviewId, page) => priceChanges.reviewPageForMember(memberId, storeId, reviewId, page),
       applyForMember: (memberId, storeId, body) => priceChanges.applyForMember(memberId, storeId, body),
+    },
+    categoryMoves: {
+      acknowledgeForMember: (memberId, storeId, body) => categoryMoves.acknowledgeForMember(memberId, storeId, body),
     },
   };
 }

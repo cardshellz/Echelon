@@ -6,6 +6,10 @@ import {
   LISTING_SETTINGS_SETTING_KEYS,
   LISTING_SETTINGS_VALUE_SOURCES,
   MAX_LISTING_SETTINGS_PAGE,
+  categoryEbayCategorySchema,
+  categoryPolicySchema,
+  categoryStoreShelfSchema,
+  categoryTemplateTextSchema,
   listingSettingsCategoriesResponseSchema,
   listingSettingsCategoryDetailSchema,
   listingSettingsCategoryInputSchema,
@@ -15,11 +19,16 @@ import {
   listingSettingsProductIdsInputSchema,
   listingSettingsProductIdsResponseSchema,
   listingSettingsProductInputSchema,
+  listingSettingsProductOwnSettingsSchema,
   listingSettingsProductSettingsSchema,
   listingSettingsProductsInputSchema,
   listingSettingsSizePriceSchema,
   listingSettingsSummarySchema,
+  listingSettingsUpdatedProductsInputSchema,
+  listingSettingsUpdatedProductsResponseSchema,
 } from "../../../../../shared/dropship/listing-settings";
+import { MAX_DESCRIPTION_TEXT_LENGTH, MAX_TEMPLATE_TEXT_LENGTH } from "../../../../../shared/dropship/listing-content";
+import { categoryMovesAcknowledgeItemsSchema, productListingSettingValuesSchema } from "../../../../../shared/dropship/listing-setting-values";
 import { RULE_PRICE_LEVELS, listingPriceSettingSchema } from "../../../../../shared/dropship/listing-price";
 import { pricingImpactRowSchema, resolvePricingRule, type PricingProfile } from "../../../../../shared/dropship/pricing-rules";
 import { ebayCategoryRulesReviewSchema, ebayCategorySourceValues } from "../../../../../shared/dropship/ebay-category-rules";
@@ -390,5 +399,144 @@ describe("category reads (plan PR 9, sections 8.3, 8.11)", () => {
     ]) {
       expect(listingSettingsCategoryDetailSchema.safeParse(broken).success).toBe(false);
     }
+  });
+});
+
+describe("one product's own settings (plan PR 10, 4.2)", () => {
+  const GENERATED_AT = "2026-10-06T12:00:00.000Z";
+  const own = {
+    price: { basis: "catalog_retail", markupBps: 0, flatCents: 100, rounding: "cent" },
+    ebayCategory: { categoryId: "261328", categoryName: "Card Sleeves" },
+    storeShelf: { mode: "own", shelves: [{ id: "11", name: "Supplies:Top" }, { id: "12", name: "Sale" }] },
+    shippingPolicy: { id: "ship-p", name: "Free shipping" },
+    returnPolicy: { id: "return-p", name: null },
+    paymentPolicy: null,
+    textAbove: { mode: "own", text: "Shipped in a rigid mailer." },
+    textBelow: { mode: "none" },
+    mainText: { text: "Our own words.", needsCheck: false },
+  } as const;
+  const answer = (fields: Record<string, unknown> = {}) => ({ storeConnectionId: 5, productId: 7, revisionId: 41, own,
+    generatedAt: GENERATED_AT, ...fields });
+  const withOwn = (fields: Record<string, unknown>) => answer({ own: { ...own, ...fields } });
+
+  it("accepts a product's own values with stored names and texts, and a product with no row with every value null", () => {
+    expect(listingSettingsProductOwnSettingsSchema.parse(answer())).toEqual(answer());
+    const nothing = Object.fromEntries(Object.keys(own).map((key) => [key, null]));
+    expect(listingSettingsProductOwnSettingsSchema.safeParse(answer({ revisionId: null, own: nothing })).success).toBe(true);
+    // A row whose every setting was reset keeps its revision.
+    expect(listingSettingsProductOwnSettingsSchema.safeParse(answer({ own: nothing })).success).toBe(true);
+    expect(listingSettingsProductOwnSettingsSchema.safeParse(withOwn({ mainText: { text: "x".repeat(MAX_DESCRIPTION_TEXT_LENGTH), needsCheck: true },
+      textAbove: { mode: "own", text: "y".repeat(MAX_TEMPLATE_TEXT_LENGTH) } })).success).toBe(true);
+  });
+
+  it.each([
+    ["an unknown key", answer({ extra: true })],
+    ["no store", answer({ storeConnectionId: undefined })],
+    ["an own value with no row", answer({ revisionId: null })],
+    ["the product's category", withOwn({ categoryId: 3 })],
+    ["a setting left out", answer({ own: { ...own, paymentPolicy: undefined } })],
+    ["a main text with its catalog hash", withOwn({ mainText: { text: "Our own words.", needsCheck: false, catalogHash: "a".repeat(64) } })],
+    ["a main text without its check", withOwn({ mainText: { text: "Our own words." } })],
+    ["an empty main text", withOwn({ mainText: { text: "", needsCheck: false } })],
+    ["a main text over 20,000 characters", withOwn({ mainText: { text: "x".repeat(MAX_DESCRIPTION_TEXT_LENGTH + 1), needsCheck: false } })],
+    ["text above over 4,000 characters", withOwn({ textAbove: { mode: "own", text: "y".repeat(MAX_TEMPLATE_TEXT_LENGTH + 1) } })],
+    ["empty own text below", withOwn({ textBelow: { mode: "own", text: "" } })],
+    ["a policy given as a bare id", withOwn({ shippingPolicy: "ship-p" })],
+    ["a policy without its name key", withOwn({ returnPolicy: { id: "return-p" } })],
+    ["three shelves", withOwn({ storeShelf: { mode: "own", shelves: ["1", "2", "3"].map((id) => ({ id, name: `Shelf ${id}` })) } })],
+    ["a shelf without its id", withOwn({ storeShelf: { mode: "own", shelves: [{ name: "Supplies:Top" }] } })],
+    ["an eBay category with its path", withOwn({ ebayCategory: { categoryId: "261328", categoryName: "Card Sleeves", path: ["Card Sleeves"] } })],
+    ["an eBay category that is not a number", withOwn({ ebayCategory: { categoryId: "sleeves", categoryName: "Card Sleeves" } })],
+    ["a price in dollars", withOwn({ price: { basis: "catalog_retail", markupBps: 0, flatCents: 1.5, rounding: "cent" } })],
+    ["a revision of 0", answer({ revisionId: 0 })],
+  ])("refuses %s", (_case, input) => {
+    expect(listingSettingsProductOwnSettingsSchema.safeParse(input).success).toBe(false);
+  });
+
+  it("names every product setting the stored row has, and nothing else", () => {
+    const shape = listingSettingsProductOwnSettingsSchema.innerType().shape.own.shape;
+    expect(Object.keys(shape)).toEqual(Object.keys(productListingSettingValuesSchema.shape));
+  });
+
+  it("shares its value shapes with the category view, which reads exactly as before", () => {
+    const shape = listingSettingsProductOwnSettingsSchema.innerType().shape.own.shape;
+    expect(shape.ebayCategory.unwrap()).toBe(categoryEbayCategorySchema);
+    expect(shape.storeShelf.unwrap()).toBe(categoryStoreShelfSchema);
+    expect(shape.shippingPolicy.unwrap()).toBe(categoryPolicySchema);
+    expect(shape.textAbove.unwrap()).toBe(categoryTemplateTextSchema);
+    // The product's settings in full gain nothing: its own values have their own read.
+    expect(listingSettingsProductDetailSchema.innerType().shape).not.toHaveProperty("own");
+    expect(listingSettingsProductDetailSchema.innerType().shape).not.toHaveProperty("revisionId");
+  });
+});
+
+describe("Card Shellz updated products (plan PR 9, 10.3)", () => {
+  const moveRow = (productId: number, toCategoryId: number | null, patch: Record<string, unknown> = {}) => ({
+    productId, productName: `Product ${productId}`, ownTextNeedsCheck: false,
+    move: { from: { categoryId: 3, name: "Toploaders" }, to: { categoryId: toCategoryId, name: toCategoryId === null ? null : "Sleeves" },
+      changedFields: ["storeShelf", "returnPolicy"] }, ...patch,
+  });
+  const response = (patch: Record<string, unknown> = {}) => ({
+    storeConnectionId: 5, page: 0, pageSize: 50, total: 2,
+    rows: [moveRow(7, 5), { productId: 8, productName: "Product 8", ownTextNeedsCheck: true, move: null }],
+    moves: { total: 1, items: [{ productId: 7, shownCategoryId: 5 }] },
+    generatedAt: "2026-10-06T12:00:00.000Z", ...patch,
+  });
+  const ok = (value: unknown) => listingSettingsUpdatedProductsResponseSchema.safeParse(value).success;
+
+  it("takes a store and a page, defaults the page to the first, and nothing else", () => {
+    expect(listingSettingsUpdatedProductsInputSchema.parse({ storeConnectionId: 5 })).toEqual({ storeConnectionId: 5, page: 0 });
+    expect(listingSettingsUpdatedProductsInputSchema.parse({ storeConnectionId: 5, page: MAX_LISTING_SETTINGS_PAGE }).page)
+      .toBe(MAX_LISTING_SETTINGS_PAGE);
+    for (const bad of [{ storeConnectionId: 5, page: MAX_LISTING_SETTINGS_PAGE + 1 }, { storeConnectionId: 5, page: -1 },
+      { storeConnectionId: 5, page: 1.5 }, { storeConnectionId: 0 }, { storeConnectionId: 5, show: "all" }, { storeConnectionId: 5, page: [1] }]) {
+      expect(listingSettingsUpdatedProductsInputSchema.safeParse(bad).success).toBe(false);
+    }
+  });
+
+  it("accepts a page of moved products and own text to check, with every Got it item in W13's item shape", () => {
+    const parsed = listingSettingsUpdatedProductsResponseSchema.parse(response());
+    expect(categoryMovesAcknowledgeItemsSchema.parse(parsed.moves.items)).toEqual(parsed.moves.items);
+    // A move into no category, a category Card Shellz deleted (named by its id only) and no settings that change.
+    expect(ok(response({ rows: [moveRow(7, null, { move: { from: { categoryId: 9, name: null }, to: { categoryId: null, name: null },
+      changedFields: [] } })], moves: { total: 1, items: [{ productId: 7, shownCategoryId: null }] }, total: 1 }))).toBe(true);
+    // Nothing updated.
+    expect(ok(response({ rows: [], total: 0, moves: { total: 0, items: [] } }))).toBe(true);
+    // A moved product listed on another page keeps its item here.
+    expect(ok(response({ rows: [], moves: { total: 1, items: [{ productId: 7, shownCategoryId: 5 }] } }))).toBe(true);
+  });
+
+  it.each([
+    ["an unknown key", response({ extra: 1 })],
+    ["an unknown key on a row", response({ rows: [moveRow(7, 5, { extra: 1 })] })],
+    ["an unknown key on a move", response({ rows: [moveRow(7, 5, { move: { ...moveRow(7, 5).move, extra: 1 } })] })],
+    ["another page size", response({ pageSize: 25 })],
+    ["51 rows", response({ rows: Array.from({ length: 51 }, (_, index) => ({ productId: 100 + index, productName: "P",
+      ownTextNeedsCheck: true, move: null })) })],
+    ["a moves total that is not the list's length", response({ moves: { total: 2, items: [{ productId: 7, shownCategoryId: 5 }] } })],
+    ["a moved product twice", response({ moves: { total: 2, items: [{ productId: 7, shownCategoryId: 5 }, { productId: 7, shownCategoryId: 5 }] } })],
+    ["a product twice", response({ rows: [moveRow(7, 5), moveRow(7, 5)] })],
+    ["a row with neither a move nor a text check", response({ rows: [{ productId: 8, productName: "P", ownTextNeedsCheck: false, move: null }] })],
+    ["a move to the category it came from", response({ rows: [moveRow(7, 3, { move: { from: { categoryId: 3, name: "Toploaders" },
+      to: { categoryId: 3, name: "Toploaders" }, changedFields: [] } })], moves: { total: 1, items: [{ productId: 7, shownCategoryId: 3 }] } })],
+    ["no category with a name", response({ rows: [moveRow(7, 5, { move: { ...moveRow(7, 5).move, from: { categoryId: null, name: "Ghost" } } })] })],
+    ["a current category with no name", response({ rows: [moveRow(7, 5, { move: { ...moveRow(7, 5).move, to: { categoryId: 5, name: null } } })] })],
+    ["a moved row with no Got it item", response({ moves: { total: 0, items: [] } })],
+    ["a Got it item showing another category than the row", response({ moves: { total: 1, items: [{ productId: 7, shownCategoryId: 3 }] } })],
+    ["a row without its move whose product has a Got it item", response({ rows: [{ productId: 7, productName: "P", ownTextNeedsCheck: true,
+      move: null }] })],
+    ["a changed setting twice", response({ rows: [moveRow(7, 5, { move: { ...moveRow(7, 5).move, changedFields: ["price", "price"] } })] })],
+    ["the main text as a changed setting (not a category setting)", response({ rows: [moveRow(7, 5, { move: { ...moveRow(7, 5).move,
+      changedFields: ["mainText"] } })] })],
+    ["a category id of 0", response({ moves: { total: 1, items: [{ productId: 7, shownCategoryId: 0 }] },
+      rows: [moveRow(7, 0)] })],
+  ])("refuses %s", (_label, value) => {
+    expect(ok(value)).toBe(false);
+  });
+
+  it("lists up to 10,000 Got it items and refuses one more", () => {
+    const items = (count: number) => Array.from({ length: count }, (_, index) => ({ productId: index + 1, shownCategoryId: null }));
+    expect(ok(response({ rows: [], total: 0, moves: { total: 10_000, items: items(10_000) } }))).toBe(true);
+    expect(ok(response({ rows: [], total: 0, moves: { total: 10_001, items: items(10_001) } }))).toBe(false);
   });
 });

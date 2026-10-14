@@ -52,8 +52,10 @@ export interface ListingSettingsDraftsValue {
   /**
    * "Load latest and keep my changes": the latest saved value becomes the base, and fields both changed are
    * marked. A draft with no changes takes the latest value as it is (nothing of the vendor's to keep on top).
+   * `marked` names the fields to mark when a field-by-field comparison can't (a product's settings keep their
+   * saved values in one field, PR 10); left out, the fields both changed are marked, as in PR 7.
    */
-  rebase: (latest: DraftValue) => void;
+  rebase: (latest: DraftValue, marked?: readonly string[]) => void;
   /** Drops the draft. */
   discard: () => void;
   /** Hides the editor; a draft with changes is kept (browser Back, the drawer). */
@@ -212,7 +214,9 @@ export function ListingSettingsDraftsProvider({
     else apply({ type: "saved", key, nowMs: nowRef.current(), viewStale: settlement.kind === "saved_view_stale" });
   }, [apply]);
 
-  const rebase = useCallback((latest: DraftValue) => apply({ type: "rebase", latest }), [apply]);
+  const rebase = useCallback((latest: DraftValue, marked?: readonly string[]) => {
+    apply(marked === undefined ? { type: "rebase", latest } : { type: "rebase", latest, marked });
+  }, [apply]);
   const close = useCallback(() => apply({ type: "close" }), [apply]);
 
   const requestClose = useCallback(() => {

@@ -440,6 +440,8 @@ describe("the price-change builder gives the golden rule prices (plan PR 9, 6.4,
       ebayCategories: new Map(candidates.map((row) => [row.productVariantId, resolveEbayListingCategory(row, ebayCategories)])),
       content: { revisionId: null, profile: null, updatedAt: null }, contentSettings: new Map(), pausedSince: new Map(),
       layers: EMPTY_LISTING_SETTING_LAYERS, categoryNames: GOLDEN_CATEGORY_NAMES,
+      // No category marks: no product is moved (plan PR 9, 10.1).
+      categoryMoves: { marks: new Map(), fromCategories: new Map(), fromCategoryNames: new Map() },
     };
   }
 
@@ -619,6 +621,8 @@ function v2SettingsInputs(input: GoldenRulePriceV2Case): ListingSettingsInputs {
     ebayCategories: new Map([[catalog.productVariantId, resolveEbayListingCategory(catalog, ebayCategories)]]),
     content: { revisionId: null, profile: null, updatedAt: null }, contentSettings: new Map(), pausedSince: new Map(),
     layers, categoryNames: GOLDEN_CATEGORY_NAMES,
+    // No category marks: no product is moved (plan PR 9, 10.1).
+    categoryMoves: { marks: new Map(), fromCategories: new Map(), fromCategoryNames: new Map() },
   };
 }
 /** A rule price's pinned fields, `ruleLevel` null when it is absent (the resolver test also pins that the key is absent). */

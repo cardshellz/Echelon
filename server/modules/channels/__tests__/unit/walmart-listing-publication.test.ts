@@ -32,6 +32,7 @@ import {
 // https://developer.walmart.com/file/mp/us/MP_ITEM_MATCH_Consolidated_Schema.zip
 import createSchema from "../fixtures/walmart-listing-sleeves.schema.json";
 import matchSchema from "../fixtures/walmart-listing-match.schema.json";
+import legacyCatalogMatch from "../fixtures/walmart-catalog-match-4.2.response.json";
 import { createCatalogPublicImageUrl } from "../../../catalog/catalog-public-image";
 import { QuantityProviderEvidenceCollector } from "../../../inventory-planning/application/quantity-provider-request-evidence";
 
@@ -309,6 +310,96 @@ describe("Walmart listing provider", () => {
     expect(sent.MPItemFeedHeader.version).toBe(WALMART_LISTING_SPEC.MP_ITEM);
     expect(request.headers["Content-Type"]).toBeUndefined();
     expect(fetchMock.mock.calls[2][1].headers["Content-Type"]).toBe("application/json");
+  });
+
+  it("recreates an offer from the actual 4.2 catalog match using the same GTIN and a valid 5.x multipart feed", async () => {
+    const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
+    const fetchMock = vi.fn(async (url: string, request: RequestInit) => {
+      const target = new URL(url);
+      if (target.pathname === "/v3/token") return json({ access_token: "test-token", expires_in: 900 });
+      if (target.pathname === `/v3/items/${catalog.sku}`) return json({}, 404);
+      if (target.pathname === "/v3/items/walmart/search") {
+        expect(target.searchParams.get("gtin")).toBe("00850025354769");
+        return json(legacyCatalogMatch);
+      }
+      if (target.pathname === "/v3/items/spec") {
+        expect(JSON.parse(request.body as string)).toEqual({ feedType: "MP_ITEM_MATCH", version: WALMART_LISTING_SPEC.MP_ITEM_MATCH });
+        return json({ schema: matchSchema });
+      }
+      if (target.pathname === "/v3/feeds" && request.method === "POST") return json({ feedId: "matched-feed@US" });
+      throw new Error(`Unexpected test request ${request.method} ${target.pathname}`);
+    });
+    const api = new WalmartListingApi(new WalmartClient({ clientId: "test", clientSecret: "test", environment: "production", market: "us" },
+      { fetch: fetchMock as typeof fetch, now: () => new Date("2026-10-14T00:00:00Z"), correlationId: () => correlationId }));
+    const { channels } = setup();
+    const provider = new WalmartListingProvider({ ...channels, listingApi: () => api } as unknown as WalmartChannelService);
+    const identifier = { type: "GTIN" as const, value: "00850025354769" };
+    const item = await provider.prepare(account, {
+      catalog: { ...catalog, identifier, alreadyLinked: true, images: [], imageIssues: [{ code: "PHOTO_UNAVAILABLE", message: "Missing local photo", field: "images" }] },
+      draft: { ...draft(), identifier, method: "match", recreateFromOperationId: operationId,
+        attributes: { Orderable: { ShippingWeight: 3, condition: "New" } } },
+      priceCents: 2499, recreating: true,
+    });
+    expect(item.issues).toEqual([]);
+    const approved = { ...intent(), items: [{ ...intent().items[0], quantity: 37 }] };
+    const original = structuredClone(item);
+    const store = { start: vi.fn().mockResolvedValue("request-1"), finish: vi.fn().mockResolvedValue(undefined) };
+    const collector = new QuantityProviderEvidenceCollector(store, () => new Date("2026-10-14T00:00:00Z"));
+    await collector.run(() => runWithListingSetupAdmission(approved, () => provider.submit(account, {
+      operationId, correlationId, items: [item], stockAdmission: approved, beforeSubmit: async () => {},
+    })));
+    collector.assertSingleCompletedRequest("POST", ["/v3/feeds?feedType=MP_ITEM_MATCH"]);
+    const writes = fetchMock.mock.calls.filter(([url]) => new URL(url).pathname === "/v3/feeds");
+    expect(writes).toHaveLength(1);
+    const sent = JSON.parse(await ((writes[0][1].body as FormData).get("file") as Blob).text());
+    expect(sent).toEqual({
+      MPItemFeedHeader: { businessUnit: "WALMART_US", locale: "en", version: WALMART_LISTING_SPEC.MP_ITEM_MATCH },
+      MPItem: [{ Item: { sku: catalog.sku, productIdentifiers: { productIdType: "GTIN", productId: identifier.value },
+        price: 24.99, condition: "New", ShippingWeight: 3, inventory: [{ quantity: 37, fulfillmentCenterID: account.scopeId }] } }],
+    });
+    expect(compileListingSchema(matchSchema)(sent)).toBe(true);
+    expect(item).toEqual(original);
+    expect(fetchMock.mock.calls.filter(([url]) => new URL(url).pathname === "/v3/items/walmart/search")).toHaveLength(2);
+  });
+
+  it.each(["missing", "different identifier", "wrong feed", "malformed", "rate limited"])("does not send when the reviewed catalog match becomes %s", async failure => {
+    const { provider, api, channels } = setup();
+    const item = await provider.prepare(account, { catalog, draft: { ...draft(), method: "match", attributes: { Orderable: { ShippingWeight: 1, condition: "New" } } }, priceCents: 1299 });
+    expect(item.issues).toEqual([]);
+    if (failure === "missing") api.match.mockResolvedValue(null);
+    if (failure === "different identifier") api.match.mockResolvedValue({ feedType: "MP_ITEM_MATCH", payload: { MPItem: [{ Item: { productIdentifiers: { productIdType: "GTIN", productId: "00850025354769" } } }] } });
+    if (failure === "wrong feed") api.match.mockResolvedValue({ feedType: "MP_ITEM", payload: {} });
+    if (failure === "malformed") api.match.mockResolvedValue({ feedType: "MP_ITEM_MATCH", payload: { MPItem: [] } });
+    if (failure === "rate limited") api.match.mockRejectedValue(new WalmartApiError("WALMART_HTTP_429", "Retry later", true, 429));
+    await expect(runWithListingSetupAdmission(intent(), () => provider.submit(account, {
+      operationId, correlationId, items: [item], stockAdmission: intent(), beforeSubmit: async () => {},
+    }))).rejects.toMatchObject({ effect: "not_sent" });
+    expect(api.submitFeed).not.toHaveBeenCalled();
+    expect(channels.withListingWrites).not.toHaveBeenCalled();
+  });
+
+  it("retains offer-specific photos when the matched condition requires them", async () => {
+    const { provider } = setup();
+    const prepared = await provider.prepare(account, {
+      catalog,
+      draft: { ...draft(), method: "match", attributes: { Orderable: { ShippingWeight: 1, condition: "Pre-Owned: Good" } } },
+      priceCents: 1299,
+    });
+    expect(prepared.issues).toEqual([]);
+    expect(prepared.payload.Item).toMatchObject({ condition: "Pre-Owned: Good", mainImageUrl: catalog.images[0] });
+  });
+
+  it.each(["missing photo", "failed inherited photo"])("blocks a non-new catalog offer with a %s", async failure => {
+    const { provider, api } = setup();
+    const photoIssue = { code: "CATALOG_IMAGE_UNAVAILABLE", message: "Missing local photo", field: "images" };
+    const prepared = await provider.prepare(account, {
+      catalog: { ...catalog, images: [], imageIssues: failure === "failed inherited photo" ? [photoIssue] : [] },
+      draft: { ...draft(), method: "match", attributes: { Orderable: { ShippingWeight: 1, condition: "Pre-Owned: Good" } } },
+      priceCents: 1299,
+    });
+    expect(prepared.issues.length).toBeGreaterThan(0);
+    if (failure === "failed inherited photo") expect(prepared.issues).toContainEqual(photoIssue);
+    expect(api.submitFeed).not.toHaveBeenCalled();
   });
 
   it("shows writable nested requirements without exposing quantity, identity or price controls", async () => {

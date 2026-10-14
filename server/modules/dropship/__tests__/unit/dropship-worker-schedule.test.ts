@@ -12,6 +12,10 @@ describe("resolveDropshipWorkerSchedule", () => {
     expect(resolveDropshipWorkerSchedule("returnIntake", environment).initialDelayMs).toBe(90_000);
     expect(resolveDropshipWorkerSchedule("returnsMaintenance", environment).initialDelayMs).toBe(150_000);
     expect(resolveDropshipWorkerSchedule("usdcWatcher", environment).initialDelayMs).toBe(45_000);
+    // The first-mark job (plan PR 9, 10.5): hourly, after the 150 s maintenance phase, on a delay no other worker uses.
+    expect(resolveDropshipWorkerSchedule("categoryMarks", environment)).toEqual({
+      initialDelayMs: 180_000, initialDelayEnvironmentVariable: "DROPSHIP_CATEGORY_MARKS_WORKER_INITIAL_DELAY_MS",
+    });
   });
 
   it("accepts a non-negative per-worker environment override", () => {

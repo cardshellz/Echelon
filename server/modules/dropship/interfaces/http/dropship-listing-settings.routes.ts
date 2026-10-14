@@ -7,8 +7,10 @@ import {
   listingSettingsPricesResponseSchema,
   listingSettingsProductDetailSchema,
   listingSettingsProductIdsResponseSchema,
+  listingSettingsProductOwnSettingsSchema,
   listingSettingsProductsResponseSchema,
   listingSettingsSummarySchema,
+  listingSettingsUpdatedProductsResponseSchema,
 } from "../../../../../shared/dropship/listing-settings";
 import { logger } from "../../../../platform/observability/logger";
 import type { DropshipListingSettingsService } from "../../application/dropship-listing-settings-service";
@@ -18,7 +20,7 @@ import { requireDropshipAuth } from "./dropship-auth.routes";
 
 type ListingSettingsRouteService = Pick<DropshipListingSettingsService,
   "getSummaryForMember" | "listPricesForMember" | "listProductsForMember" | "listProductIdsForMember" | "getProductForMember"
-  | "listCategoriesForMember" | "getCategoryForMember">;
+  | "getProductOwnSettings" | "listCategoriesForMember" | "getCategoryForMember" | "listUpdatedProductsForMember">;
 
 /** Reads only, so the read budget from the Listing settings design (8.8). */
 export const LISTING_SETTINGS_READS_PER_MINUTE = 120;
@@ -27,7 +29,8 @@ export const LISTING_SETTINGS_READS_PER_MINUTE = 120;
  * Read-only listing settings views (Listing settings design 8.4). No route
  * here writes or calls eBay. Inputs are checked by the service's schemas and
  * every answer by its response schema. One product's view also reads its
- * sizes' stock, through the same budget.
+ * sizes' stock, and one product's own settings its own row, through the same
+ * budget.
  */
 export function registerDropshipListingSettingsRoutes(
   app: Express,
@@ -57,6 +60,13 @@ export function registerDropshipListingSettingsRoutes(
       storeConnectionId: parseId(req.params.storeConnectionId),
       productId: parseId(req.params.productId),
     })));
+  // One product's own settings row, for its editor (PR 10). One segment longer than the product route, so neither
+  // route can answer the other's path; "ids" here is not a product id and is refused (400).
+  app.get(`${base}/products/:productId/own`, requireDropshipAuth, limiter, (req, res) => respond(req, res,
+    listingSettingsProductOwnSettingsSchema, () => service.getProductOwnSettings(memberId(req), {
+      storeConnectionId: parseId(req.params.storeConnectionId),
+      productId: parseId(req.params.productId),
+    })));
   // The Card Shellz categories of the chosen products, and one category's settings (PR 9e); the category save is a write route.
   app.get(`${base}/categories`, requireDropshipAuth, limiter, (req, res) => respond(req, res, listingSettingsCategoriesResponseSchema,
     () => service.listCategoriesForMember(memberId(req), { storeConnectionId: parseId(req.params.storeConnectionId) })));
@@ -64,6 +74,12 @@ export function registerDropshipListingSettingsRoutes(
     () => service.getCategoryForMember(memberId(req), {
       storeConnectionId: parseId(req.params.storeConnectionId),
       categoryId: parseId(req.params.categoryId),
+    })));
+  // Card Shellz updated products (PR 9g): moves and own text to check. Its "Got it" is a write route.
+  app.get(`${base}/updated-products`, requireDropshipAuth, limiter, (req, res) => respond(req, res,
+    listingSettingsUpdatedProductsResponseSchema, () => service.listUpdatedProductsForMember(memberId(req), {
+      storeConnectionId: parseId(req.params.storeConnectionId),
+      page: queryId(req.query.page),
     })));
 }
 

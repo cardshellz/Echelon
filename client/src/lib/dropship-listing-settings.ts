@@ -7,11 +7,13 @@ import {
   listingSettingsPricesResponseSchema,
   listingSettingsProductDetailSchema,
   listingSettingsProductInputSchema,
+  listingSettingsProductOwnSettingsSchema,
   listingSettingsProductsInputSchema,
   listingSettingsProductsResponseSchema,
   listingSettingsSummarySchema,
   type ListingSettingsPricesResponse,
   type ListingSettingsProductDetail,
+  type ListingSettingsProductOwnSettings,
   type ListingSettingsProductsResponse,
   type ListingSettingsSummary,
 } from "@shared/dropship/listing-settings";
@@ -55,7 +57,7 @@ export class ListingSettingsReadError extends Error {
   }
 }
 
-type ListingSettingsRead = "summary" | "products" | "prices" | "product";
+type ListingSettingsRead = "summary" | "products" | "prices" | "product" | "product-own";
 
 /** At most this many contract issues are kept on the error: enough to find the field, never the values. */
 const MAX_REPORTED_ISSUES = 5;
@@ -213,6 +215,37 @@ export function listingSettingsProductQueryOptions(
     },
     enabled: (options.enabled ?? true) && parsed.success,
     staleTime: LISTING_SETTINGS_STALE_MS,
+    retry: false,
+  } as const;
+}
+
+/**
+ * One product's own settings, for its editor (the drawer, PR 10 plan 4.3):
+ * what its own row stores, with stored names and texts, and the revision a
+ * product save sends back. Read fresh whenever the drawer is open (staleTime
+ * 0): the drawer's start and revision come from this one answer. An answer for
+ * another store or product is off the contract.
+ */
+export function listingSettingsProductOwnQueryOptions(
+  storeConnectionId: number,
+  productId: number,
+  options: ListingSettingsReadOptions = {},
+) {
+  const parsed = listingSettingsProductInputSchema.safeParse({ storeConnectionId, productId });
+  return {
+    queryKey: [...listingSettingsQueryKey(storeConnectionId), "product-own", productId] as const,
+    queryFn: async ({ signal }: { signal: AbortSignal }): Promise<ListingSettingsProductOwnSettings> => {
+      if (!parsed.success) throw invalidRequest("product-own", parsed.error);
+      const { storeConnectionId: store, productId: product } = parsed.data;
+      return readListingSettings("product-own", `${listingSettingsPath(store)}/products/${product}/own`,
+        listingSettingsProductOwnSettingsSchema.refine(
+          (answer) => answer.storeConnectionId === store && answer.productId === product,
+          { message: "The answer is for another store or product.", path: ["productId"] },
+        ), signal);
+    },
+    enabled: (options.enabled ?? true) && parsed.success,
+    // The editor starts from what is saved now.
+    staleTime: 0,
     retry: false,
   } as const;
 }
