@@ -38,14 +38,18 @@ export function EbayListingJobStatusDialog({ jobId, productId, productName, onCl
   }, [status.data, productId, queryClient]);
   const job = status.data;
   const withdrawal = job?.operation === "withdraw";
+  const sync = job?.operation === "sync";
+  const title = withdrawal ? "Removal status" : sync ? "Listing update status" : "Publishing status";
+  const operation = withdrawal ? "removal" : sync ? "listing update" : "publication";
+  const refreshLabel = withdrawal ? "Refresh removal status" : sync ? "Refresh update status" : "Refresh publishing status";
   const issue = job && job.state !== "completed" && job.code
     ? job.issue ?? resolveEbayListingIssue({ code: job.code, message: job.message, productId, jobId, state: job.state }) : null;
   return <Dialog open onOpenChange={value => { if (!value) onClose(); }}><DialogContent className="max-w-xl max-h-[90vh] overflow-y-auto">
-    <DialogHeader><DialogTitle>{withdrawal ? "Removal status" : "Publishing status"}</DialogTitle><DialogDescription>{productName}. This view checks the saved request without starting another {withdrawal ? "removal" : "publication"}.</DialogDescription></DialogHeader>
+    <DialogHeader><DialogTitle>{title}</DialogTitle><DialogDescription>{productName}. This view checks the saved request without starting another {operation}.</DialogDescription></DialogHeader>
     {status.isLoading && <p role="status">Loading saved publishing status…</p>}
     {status.isError && <p role="alert">The saved publishing status could not be loaded. Refresh below to check this same request. No new publication was sent.</p>}
     {job && <div className="space-y-3 text-sm">
-      <p role="status">{job.state === "completed" ? withdrawal ? "Removed from eBay. The provider's listing state is verified." : job.operation === "publish" ? "Published. Listing and pictures verified." : "Listing update verified." : issue?.title ?? (withdrawal ? "Removal is queued or running. The listing has not been confirmed ended." : "Publishing is queued or running. Completion is not yet confirmed.")}</p>
+      <p role="status">{job.state === "completed" ? withdrawal ? "Removed from eBay. The provider's listing state is verified." : job.operation === "publish" ? "Published. Listing and pictures verified." : "Listing update and pictures verified." : issue?.title ?? (withdrawal ? "Removal is queued or running. The listing has not been confirmed ended." : sync ? "The listing update is queued or running. Listing and pictures are not yet verified." : "Publishing is queued or running. Completion is not yet confirmed.")}</p>
       {issue && withdrawal && issue.action.kind === "review_mapping" ? <EbayWithdrawalIssueCard issue={issue} busy={status.isFetching}
         onCheck={() => void status.refetch()} onRetry={job.state === "needs_attention" && onRetryWithdrawal ? () => { onClose(); onRetryWithdrawal(productId); } : undefined} /> : issue && <EbayListingIssueCard issue={issue} busy={status.isFetching} onAction={next => {
         if (next.action.kind === "check_status") void status.refetch();
@@ -55,6 +59,6 @@ export function EbayListingJobStatusDialog({ jobId, productId, productName, onCl
       {job.state === "recovering" && <p>Next automatic check: {new Date(job.nextAttemptAt).toLocaleString()}</p>}
     </div>}
     <p className="text-xs text-muted-foreground break-all">Request reference: {jobId}</p>
-    <div className="flex flex-wrap gap-2"><Button variant="outline" className="min-h-11" disabled={status.isFetching} onClick={() => void status.refetch()}>{withdrawal ? "Refresh removal status" : "Refresh publishing status"}</Button><Button variant="outline" className="min-h-11" onClick={onClose}>Close</Button></div>
+    <div className="flex flex-wrap gap-2"><Button variant="outline" className="min-h-11" disabled={status.isFetching} onClick={() => void status.refetch()}>{refreshLabel}</Button><Button variant="outline" className="min-h-11" onClick={onClose}>Close</Button></div>
   </DialogContent></Dialog>;
 }

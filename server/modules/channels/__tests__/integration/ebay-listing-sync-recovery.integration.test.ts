@@ -91,7 +91,9 @@ const configured =
       INSERT INTO channels.channel_listings VALUES(1,101,'P5','offer-101','listing-20',999,999,'error','original block',NULL,NULL)`);
     }, 60000);
     beforeEach(async () => {
-      timestamp = new Date("2026-10-09T12:00:00.000Z");
+      // Jobs are immutable and retained between cases. Keep newer test requests
+      // newer than the prior case's retries when exercising the latest-job feed.
+      timestamp = new Date(Date.parse("2026-10-09T12:00:00.000Z") + sequence * 24 * 60 * 60_000);
       identity = {
         ...structuredClone(syncIdentity),
         accountId: `verified-account-${++sequence}`,
@@ -117,7 +119,7 @@ const configured =
     const advance = () => {
       timestamp = new Date(timestamp.getTime() + 20 * 60_000);
     };
-    function fixture() {
+    function fixture(options: { beforeGroup?: () => Promise<void>; photoUrls?: readonly string[] } = {}) {
       const provider = syncProviderFixture(),
         admission = new PostgresQuantityPublicationAdmission(
           database.pool,
@@ -136,15 +138,20 @@ const configured =
             },
             work,
           ),
-        group: (key, skus, work) =>
-          admission.runListingGroup(
+        group: async (key, skus, work) => {
+          // Inject the canonical planner's pre-send failure at the same boundary
+          // where production admits the shared-gallery update. Provider HTTP is
+          // mocked; durable jobs, receipts, ownership and recovery use real PG.
+          await options.beforeGroup?.();
+          return admission.runListingGroup(
             scope(`group:${key}`),
             skus.map(scope),
             async () => {
               throw new Error("Legacy must not plan canonical quantities");
             },
             work,
-          ),
+          );
+        },
         reducing: (sku, work, members) =>
           admission.runQuantityReducingLifecycle(
             scope(sku),
@@ -226,11 +233,15 @@ const configured =
             raw,
           ),
       };
-      const prepare = vi.fn(async () => ({
-        ...(await provider.prepare()),
-        identity: structuredClone(identity),
-        client,
-      }));
+      const prepare = vi.fn(async () => {
+        const prepared = await provider.prepare();
+        if (options.photoUrls) {
+          for (const item of prepared.draft.inventoryItems)
+            item.payload.product.imageUrls = [...options.photoUrls];
+          prepared.draft.itemGroup!.payload.imageUrls = [...options.photoUrls];
+        }
+        return { ...prepared, identity: structuredClone(identity), client };
+      });
       const executor = new EbayExistingListingSyncExecution(
         prepare,
         recovery,
@@ -258,6 +269,95 @@ const configured =
         },
       };
     }
+    const targetBusy = () => Object.assign(new Error("Publication target is busy; retry the complete owning transaction."), {
+      code: "INVENTORY_PUBLICATION_TARGET_BUSY", context: { retryable: true },
+    });
+    const galleryPhotos = ["https://example.com/current-front.jpg", "https://example.com/current-back.jpg"];
+
+    it("retains partial photo sync through repeated target contention, restart and competing workers, then verifies the same listing", async () => {
+      let busy = true;
+      let release!: () => void, entered!: () => void;
+      const gate = new Promise<void>(resolve => { release = resolve; });
+      const started = new Promise<void>(resolve => { entered = resolve; });
+      const f = fixture({ photoUrls: galleryPhotos, beforeGroup: async () => {
+        if (busy) throw targetBusy();
+        entered(); await gate;
+      } });
+      const oldGallery = structuredClone(f.provider.currentGroup().imageUrls);
+      const commandKey = randomUUID();
+      const job = await f.service.enqueue(identity, "operator", commandKey);
+      // Contention may last longer than the normal failure budget. Each retry
+      // must release ownership and retain the saved command for a later pass.
+      for (let attempt = 0; attempt < 6; attempt++) {
+        expect(await f.service.processDue(1, job.id)).toEqual({ processed: 0, failed: 1 });
+        expect(await f.store.get(job.id)).toMatchObject({ state: "recovering", attempts: 0,
+          code: "INVENTORY_PUBLICATION_TARGET_BUSY", verificationIntentHash: null });
+        expect(f.provider.currentItem().product.imageUrls).toEqual(galleryPhotos);
+        expect(f.provider.currentGroup().imageUrls).toEqual(oldGallery);
+        expect(await f.service.processDue(1, job.id)).toEqual({ processed: 0, failed: 0 });
+        advance();
+      }
+      expect(f.mutations.some(request => request.path.includes("inventory_item_group"))).toBe(false);
+      expect((await database.pool.query("SELECT sync_status FROM channels.channel_listings")).rows[0].sync_status).toBe("error");
+      expect((await database.pool.query(`SELECT count(*)::int AS count FROM inventory.quantity_publication_attempts
+        WHERE scope->>'externalScopeId'=$1 AND state IN ('running','uncertain')`, [identity.accountId])).rows[0].count).toBe(0);
+
+      busy = false;
+      f.provider.setQuantity(3);
+      const restarted = new EbayListingSyncService(new PostgresEbayListingSyncRepository(database.pool), f.executor, clock, randomUUID);
+      const running = restarted.processDue(1, job.id);
+      await started;
+      try {
+        expect(await f.service.processDue(1, job.id)).toEqual({ processed: 0, failed: 0 });
+      } finally { release(); }
+      expect(await running).toEqual({ processed: 1, failed: 0 });
+      expect(await f.store.get(job.id)).toMatchObject({ state: "completed", result: { synced: 1, errors: 0 } });
+      expect(f.provider.currentGroup().imageUrls).toEqual(galleryPhotos);
+      expect(f.provider.currentItem().availability.shipToLocationAvailability.quantity).toBe(3);
+      expect(f.mutations.filter(request => request.path.includes("inventory_item_group"))).toHaveLength(1);
+      expect(f.provider.client.createOffer).not.toHaveBeenCalled();
+      expect(f.provider.client.publishOfferByInventoryItemGroup).not.toHaveBeenCalled();
+      const count = f.mutations.length;
+      expect((await f.service.enqueue(identity, "operator", commandKey)).id).toBe(job.id);
+      expect(await restarted.processDue(1, job.id)).toEqual({ processed: 0, failed: 0 });
+      expect(f.mutations).toHaveLength(count);
+      expect((await database.pool.query(`SELECT count(*)::int AS count FROM channels.ebay_listing_sync_events
+        WHERE job_id=$1 AND event='recovering' AND evidence->>'code'='INVENTORY_PUBLICATION_TARGET_BUSY'`, [job.id])).rows[0].count).toBe(6);
+    });
+
+    it("retries an older terminal contention failure through normal enqueue without changing its immutable audit history", async () => {
+      let busy = true;
+      const f = fixture({ photoUrls: galleryPhotos, beforeGroup: async () => { if (busy) throw targetBusy(); } });
+      const original = await f.service.enqueue(identity, "operator");
+      const finish = f.store.finish.bind(f.store);
+      // Reproduce the earlier classifier's terminal result through the actual
+      // owned finish transaction, without weakening the database's audit guard.
+      const legacy = vi.spyOn(f.store, "finish").mockImplementationOnce((job, outcome, now) => finish(job, {
+        ...outcome, state: "needs_attention", resetAttempts: false,
+        message: "The listing update could not finish. Inspect the saved sync job before retrying.",
+      }, now));
+      await f.service.processDue(1, original.id);
+      legacy.mockRestore();
+      const oldJob = await f.store.get(original.id);
+      const oldEvents = (await database.pool.query("SELECT * FROM channels.ebay_listing_sync_events WHERE job_id=$1 ORDER BY id", [original.id])).rows;
+      expect(oldJob).toMatchObject({ state: "needs_attention", code: "INVENTORY_PUBLICATION_TARGET_BUSY" });
+      expect((await f.service.list(identity.channelId)).find(job => job.id === original.id)?.issue)
+        .toMatchObject({ retryable: true, action: { kind: "retry_sync" } });
+      busy = false;
+      advance();
+      const commandKey = randomUUID();
+      const retry = await f.service.enqueue(identity, "operator", commandKey);
+      expect(retry.id).not.toBe(original.id);
+      expect((await f.service.enqueue(identity, "operator", commandKey)).id).toBe(retry.id);
+      await f.service.processDue(1, retry.id);
+      expect(await f.store.get(retry.id)).toMatchObject({ state: "completed", result: { synced: 1, errors: 0 } });
+      expect(f.provider.currentGroup().imageUrls).toEqual(galleryPhotos);
+      expect(await f.store.get(original.id)).toEqual(oldJob);
+      expect((await database.pool.query("SELECT * FROM channels.ebay_listing_sync_events WHERE job_id=$1 ORDER BY id", [original.id])).rows).toEqual(oldEvents);
+      expect(f.provider.client.createOffer).not.toHaveBeenCalled();
+      expect(f.provider.client.publishOfferByInventoryItemGroup).not.toHaveBeenCalled();
+    });
+
     it("recovers a final 500 after partial work, restarts, replans current quantities, verifies and completes atomically", async () => {
       const f = fixture();
       f.fail("response");

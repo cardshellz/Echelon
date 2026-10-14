@@ -23,6 +23,43 @@ const pending = {
 };
 const statusName = "Sync status for 55PT Toploader Combo Pack";
 
+test("inventory contention explains the photo interruption, retries the existing listing, and exposes read-only automatic progress", async ({ page }, info) => {
+  const state = await setupEbayChannelPage(page);
+  const busyJob = { ...job, operation: "sync", state: "needs_attention", code: "INVENTORY_PUBLICATION_TARGET_BUSY",
+    message: "The listing update could not finish. Inspect the saved sync job before retrying." };
+  state.jobs = [busyJob];
+  state.feedStatus = "error";
+  await page.reload();
+  await expect(page.getByText("An inventory update interrupted this sync", { exact: true })).toBeVisible();
+  await expect(page.getByText(busyJob.message, { exact: true })).toHaveCount(0);
+  await expect(page.getByText("Another inventory update was using this listing. Its pictures and listing details have not all been verified.", { exact: true })).toBeVisible();
+  const recovering = { ...busyJob, id: "39120da0-0208-4eb6-80ba-a4d5dfc879cd", state: "recovering",
+    message: "An inventory update is using this listing. The saved listing update will retry automatically." };
+  state.response = { ...pending, jobs: [recovering] };
+  await page.getByRole("button", { name: "Retry this product", exact: true }).click();
+  await expect(page.getByRole("status", { name: statusName })).toContainText("recovering automatically");
+  await expect(page.getByRole("status", { name: statusName })).toContainText(recovering.message);
+  expect(state.requests).toEqual(["/api/ebay/listings/sync-product/1"]);
+  expect(state.commands[0]).toMatch(/^[a-f0-9-]{36}$/);
+  await page.getByRole("button", { name: "View update status", exact: true }).click();
+  const dialog = page.getByRole("dialog");
+  await expect(dialog.getByRole("heading", { name: "Listing update status", exact: true })).toBeVisible();
+  await expect(dialog).toContainText("Next automatic check");
+  await expect(dialog).toContainText("Your saved update will retry automatically, then check the listing and pictures on eBay");
+  await expect(dialog.getByRole("button", { name: "Retry this product", exact: true })).toHaveCount(0);
+  await dialog.getByRole("button", { name: "Refresh update status", exact: true }).click();
+  expect(state.requests).toHaveLength(1);
+  await page.screenshot({ path: info.outputPath("ebay-photos-inventory-contention.png"), fullPage: true });
+  state.jobs = [{ ...recovering, state: "completed", code: null, message: null }];
+  state.feedStatus = "listed";
+  await dialog.getByRole("button", { name: "Refresh update status", exact: true }).click();
+  await expect(dialog).toContainText("Listing update and pictures verified");
+  expect(state.requests).toHaveLength(1);
+  expect(state.errors).toEqual([]);
+  expect(state.unexpected).toEqual([]);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+});
+
 test("saved sync survives reload, shows recovery, and clears only after verified server completion", async ({
   page,
 }, info) => {
