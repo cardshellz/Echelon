@@ -24,7 +24,7 @@ Closed-shipment adjustments retain the full before/after total difference while 
 
 ## Release and recovery
 
-1. Allocate `migrations/pending/shipment_exact_value_basis.sql` to the actual draft PR using the repository migration allocator. Preserve SQL bytes, add generated metadata, and update the integration fixture reference. A pending candidate is not a deployable migration.
+1. PR1792 allocates `migrations/900000005000017920001_shipment_exact_value_basis.sql`, with generated ownership/dependency metadata and the integration fixture referencing that file. Its SQL bytes are identical to the reviewed candidate.
 2. Drain old procurement writers, apply the allocated forward migration, then run the new application code. It adds nullable JSON evidence columns and version checks; no historical allocation, inventory lot or COGS value is rewritten.
 3. For an affected shipment, review the PO source and the displayed allocation blockers. Correct invalid source records through their existing owner. Use **Re-run allocation** to calculate new allocation evidence, then **Finalize** to replace the current landed snapshot. Closing also finalizes through the existing command path.
 4. Review **Push Costs to Lots** results separately. Shipment closure alone is not proof that financial application completed. Use the existing retry command after resolving reported review issues; do not fabricate a source value or apply manual rounding corrections.

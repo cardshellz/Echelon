@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "migration": "900000005000017920001_shipment_exact_value_basis.sql",
+  "generation": 5,
+  "pr": 1792,
+  "ordinal": 1,
+  "after": [
+    "900000004000017890001_receiving_quarantine.sql"
+  ]
+}

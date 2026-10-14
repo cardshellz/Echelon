@@ -27,7 +27,7 @@ integration.sequential("exact shipment product-value allocation through real fin
 
   beforeEach(async () => {
     harness = await createFlowCostHarness(url!);
-    await harness.pool.query(readFileSync(resolve(process.cwd(), "migrations/pending/shipment_exact_value_basis.sql"), "utf8"));
+    await harness.pool.query(readFileSync(resolve(process.cwd(), "migrations/900000005000017920001_shipment_exact_value_basis.sql"), "utf8"));
     await seedFlowMasterData(harness);
     // Commercial source fixtures only: every allocation, snapshot, receipt,
     // inventory cost and sale below goes through its real application owner.
