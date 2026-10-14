@@ -49,6 +49,7 @@ import type {
 } from "./order-edit-store";
 import { OrderEditError } from "../domain/order-edit-error";
 import type { OrderEditCodeRedemptions } from "./order-edit-code-redemptions";
+import { requiresLegacyCodeReceipt } from "../domain/order-edit-coupon-boundary";
 
 const terminal = new Set(["completed", "recovered", "failed", "expired"]);
 // Bound each scheduler pass so one store cannot monopolize the worker.
@@ -254,7 +255,7 @@ export class OrderEditService {
     return orderEditOrderSchema.parse({
       ...(codeEntryVersion === "v1"
         ? {
-            codeEntryAvailable: this.codeRedemptions?.available() === true,
+            codeEntryAvailable: true,
             appliedCodes: snapshot.codePricing?.applications ?? [],
           }
         : {}),
@@ -1000,7 +1001,7 @@ export class OrderEditService {
     record: OrderEditRecord,
     action: "reserve" | "finalize" | "release",
   ): Promise<void> {
-    if (!record.quote?.codePricing?.newCodes.length) return;
+    if (!requiresLegacyCodeReceipt(record.quote?.codePricing)) return;
     if (!this.codeRedemptions?.available())
       throw new OrderEditError(
         "ORDER_EDIT_CODES_UNAVAILABLE",
@@ -1070,7 +1071,7 @@ export class OrderEditService {
     return orderEditOperationSchema.parse({
       ...(record.input.discountCodes !== undefined || codeEntryVersion === "v1"
         ? {
-            codeEntryAvailable: this.codeRedemptions?.available() === true,
+            codeEntryAvailable: true,
             appliedCodes: quote?.codePricing?.applications ?? [],
             requestedPlan: {
               changes: record.input.changes,

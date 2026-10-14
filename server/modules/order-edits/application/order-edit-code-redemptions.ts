@@ -1,13 +1,9 @@
-import type { OrderEditCodeRule } from "@shared/order-edits/order-edit-codes";
-
-/** The membership application owns issued rewards and their redemption ledger. */
+/**
+ * Compatibility adapter for already-persisted coupon/reward receipt operations.
+ * New Shopify coupon entry does not depend on this service or the points ledger.
+ */
 export interface OrderEditCodeRedemptions {
   available(): boolean;
-  validate(input: {
-    customerId: string;
-    orderId: string;
-    rules: OrderEditCodeRule[];
-  }): Promise<void>;
   reserve(operationId: string): Promise<void>;
   finalize(operationId: string): Promise<void>;
   release(operationId: string): Promise<void>;

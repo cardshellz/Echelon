@@ -21,7 +21,6 @@ import {
   OrderEditProviderError,
   type OrderEditSnapshot,
 } from "../application/order-edit-provider";
-import type { OrderEditCodeRedemptions } from "../application/order-edit-code-redemptions";
 import type { OrderEditCodePricingLine } from "../domain/order-edit-code-pricing";
 
 const money = z.object({ amount: z.string(), currencyCode: z.literal("USD") });
@@ -64,13 +63,12 @@ const lookupSchema = z.object({
           precision: z.enum(["EXACT", "AT_LEAST"]),
         }),
         combinesWith: orderEditCombinesWithSchema,
-        context: z.union([
-          z.object({ __typename: z.literal("DiscountBuyerSelectionAll") }),
-          z.object({
-            __typename: z.literal("DiscountCustomers"),
-            customers: z.array(z.object({ id: z.string() })),
-          }),
-        ]),
+        // Eligibility belongs to Shopify's calculation with the actual buyer.
+        // Customer segments and customer-specific coupons are not points rewards.
+        context: z.object({
+          __typename: z.string().min(1),
+          customers: z.array(z.object({ id: z.string() })).optional(),
+        }),
         customerGets: z.object({
           items: z.object({
             __typename: z.literal("AllDiscountItems"),
@@ -131,25 +129,14 @@ function parse<T>(schema: z.ZodType<T>, value: unknown): T {
 export function readOrderEditCodeRule(
   raw: unknown,
   code: string,
-  customerId: string,
-  now: Date,
 ): OrderEditCodeRule {
   const node = parse(lookupSchema, raw).codeDiscountNodeByCode;
   if (!node)
     fail(
       "ORDER_EDIT_CODE_NOT_FOUND",
-      "This coupon or rewards code was not found. Check the code and try again.",
+      "This discount code was not found. Check the code and try again.",
     );
   const discount = node.codeDiscount;
-  if (
-    discount.status !== "ACTIVE" ||
-    Date.parse(discount.startsAt) > now.getTime() ||
-    (discount.endsAt && Date.parse(discount.endsAt) <= now.getTime())
-  )
-    fail(
-      "ORDER_EDIT_CODE_EXPIRED",
-      "This code is expired or is not currently active.",
-    );
   const normalized = code.trim().toUpperCase();
   if (
     !discount.codes.nodes.some(
@@ -168,32 +155,6 @@ export function readOrderEditCodeRule(
       "ORDER_EDIT_CODE_SCOPE_UNSUPPORTED",
       "This type of discount cannot be added to an existing order. No code was applied.",
     );
-  const customers =
-    discount.context.__typename === "DiscountCustomers"
-      ? discount.context.customers
-      : null;
-  if (customers && !customers.some((customer) => customer.id === customerId))
-    fail(
-      "ORDER_EDIT_CODE_CUSTOMER_MISMATCH",
-      "This code belongs to a different customer.",
-    );
-  const singleUse =
-    discount.usageLimit === 1 &&
-    customers?.length === 1 &&
-    discount.codesCount.precision === "EXACT" &&
-    discount.codesCount.count === 1 &&
-    !discount.codes.pageInfo.hasNextPage &&
-    discount.codes.nodes.length === 1;
-  if (
-    !singleUse &&
-    (discount.usageLimit !== null || discount.appliesOncePerCustomer)
-  )
-    fail(
-      "ORDER_EDIT_CODE_USAGE_UNSUPPORTED",
-      "This code's usage limit cannot be enforced on an order edit. Please contact us for help applying it.",
-    );
-  if (singleUse && discount.asyncUsageCount > 0)
-    fail("ORDER_EDIT_CODE_USED", "This code has already been used.");
   const value =
     discount.customerGets.value.__typename === "DiscountPercentage"
       ? {
@@ -230,26 +191,19 @@ export function readOrderEditCodeRule(
     fingerprint: createHash("sha256")
       .update(canonicalJson(terms))
       .digest("hex"),
-    redemption: singleUse ? "single_use_reward" : "unlimited",
+    redemption: "shopify_coupon",
+    usageLimit: discount.usageLimit,
+    appliesOncePerCustomer: discount.appliesOncePerCustomer,
   });
 }
 
 export class ShopifyOrderEditCodes {
-  constructor(
-    private readonly request: Request,
-    private readonly clock: () => Date,
-    private readonly redemptions: OrderEditCodeRedemptions,
-  ) {}
+  constructor(private readonly request: Request) {}
 
   async rules(
     snapshot: OrderEditSnapshot,
     codes: string[],
   ): Promise<OrderEditCodeRule[]> {
-    if (!this.redemptions.available())
-      fail(
-        "ORDER_EDIT_CODES_UNAVAILABLE",
-        "Coupon and rewards codes are temporarily unavailable. Your order has not changed.",
-      );
     if (!snapshot.customerId)
       fail(
         "ORDER_EDIT_CODE_CUSTOMER_MISSING",
@@ -274,16 +228,9 @@ export class ShopifyOrderEditCodes {
             search: `"${code.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`,
           }),
           code,
-          snapshot.customerId!,
-          this.clock(),
         ),
       ),
     );
-    await this.redemptions.validate({
-      customerId: snapshot.customerId,
-      orderId: snapshot.orderId,
-      rules: results,
-    });
     return results;
   }
 
@@ -447,6 +394,9 @@ export class ShopifyOrderEditCodes {
     expected?: { code: string; amountCents: number }[],
   ): Promise<Array<{ code: string; amountCents: number }>> {
     if (!rules.length) return [];
+    const nativeCoupons = rules.every(
+      (rule) => rule.redemption === "shopify_coupon",
+    );
     const result = parse(
       z.object({
         draftOrderCalculate: z.object({
@@ -477,18 +427,33 @@ export class ShopifyOrderEditCodes {
         input: {
           purchasingEntity: { customerId: snapshot.customerId },
           presentmentCurrencyCode: "USD",
-          acceptAutomaticDiscounts: false,
+          acceptAutomaticDiscounts: nativeCoupons,
           discountCodes: rules.map((rule) => rule.code),
-          customAttributes: [
-            { key: "csz_suppress_member_pricing", value: "true" },
-          ],
-          lineItems: shippingCalculationLines(
-            lines.map((line) => ({
-              variantId: line.variantId,
-              quantity: line.quantity,
-              netCents: line.productNetCents,
-            })),
-          ),
+          // Use actual variants and buyer identity. Sending member prices as
+          // custom prices would hide that discount from Shopify's combination
+          // decision and could make an incompatible coupon appear eligible.
+          ...(nativeCoupons
+            ? {
+                lineItems: lines.map((line) => ({
+                  variantId: line.variantId,
+                  quantity: line.quantity,
+                })),
+              }
+            : {
+                // Finish/recover operations quoted before this separation with
+                // their original calculation contract. Never use this branch
+                // for a newly entered Shopify coupon.
+                customAttributes: [
+                  { key: "csz_suppress_member_pricing", value: "true" },
+                ],
+                lineItems: shippingCalculationLines(
+                  lines.map((line) => ({
+                    variantId: line.variantId,
+                    quantity: line.quantity,
+                    netCents: line.productNetCents,
+                  })),
+                ),
+              }),
         },
       }),
     );
@@ -500,6 +465,13 @@ export class ShopifyOrderEditCodes {
       );
     const amounts = new Map<string, number>();
     for (const discount of calculation.platformDiscounts) {
+      // Automatic product discounts are already in each native line's net.
+      if (
+        discount.code === null &&
+        discount.discountClasses.length === 1 &&
+        discount.discountClasses[0] === "PRODUCT"
+      )
+        continue;
       if (
         !discount.code ||
         discount.discountClasses.length !== 1 ||
@@ -522,7 +494,13 @@ export class ShopifyOrderEditCodes {
     }
     if (
       amounts.size !== rules.length ||
-      rules.some((rule) => !amounts.has(rule.code.toUpperCase())) ||
+      rules.some((rule) => !amounts.has(rule.code.toUpperCase()))
+    )
+      fail(
+        "ORDER_EDIT_CODE_INELIGIBLE",
+        "Shopify did not apply this code to your order. It may not qualify or combine with your existing discounts. Your order has not changed.",
+      );
+    if (
       expected?.some(
         (application) =>
           amounts.get(application.code.toUpperCase()) !==
