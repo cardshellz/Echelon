@@ -314,6 +314,8 @@ async function runGoldenFacts(store: GoldenPreviewStore, layerRows: GoldenLayerR
     layers,
     categoryNames: await readCatalogCategoryNames(client,
       [...new Set(candidates.flatMap((row) => row.categoryId === null ? [] : [row.categoryId]))]),
+    // No category marks: no product is moved, so the pinned projections are as before (plan PR 9, 10.1).
+    categoryMoves: { marks: new Map(), fromCategories: new Map(), fromCategoryNames: new Map() },
   };
   return buildListingSettingsFacts(inputs);
 }

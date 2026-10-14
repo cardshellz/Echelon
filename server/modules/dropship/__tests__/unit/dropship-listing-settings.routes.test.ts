@@ -10,12 +10,14 @@ import {
   listingSettingsProductInputSchema,
   listingSettingsProductsInputSchema,
   listingSettingsStoreInputSchema,
+  listingSettingsUpdatedProductsInputSchema,
   type ListingSettingsCategoriesResponse,
   type ListingSettingsCategoryDetail,
   type ListingSettingsPricesResponse,
   type ListingSettingsProductDetail,
   type ListingSettingsProductsResponse,
   type ListingSettingsSummary,
+  type ListingSettingsUpdatedProductsResponse,
   type ListingSettingsValueSource,
 } from "../../../../../shared/dropship/listing-settings";
 import { DropshipError } from "../../domain/errors";
@@ -92,6 +94,18 @@ const categoryDetail: ListingSettingsCategoryDetail = {
   generatedAt: GENERATED_AT,
 };
 
+/** Product 501 moved from Toploaders to no category; product 502's own text needs a check. */
+const updatedProducts = (page: number): ListingSettingsUpdatedProductsResponse => ({
+  storeConnectionId: 22, page, pageSize: LISTING_SETTINGS_PAGE_SIZE, total: 2,
+  rows: page === 0 ? [
+    { productId: 501, productName: "Toploader 35pt", ownTextNeedsCheck: false,
+      move: { from: { categoryId: 3, name: "Toploaders" }, to: { categoryId: null, name: null }, changedFields: ["storeShelf"] } },
+    { productId: 502, productName: "Sleeves", ownTextNeedsCheck: true, move: null },
+  ] : [],
+  moves: { total: 1, items: [{ productId: 501, shownCategoryId: null }] },
+  generatedAt: GENERATED_AT,
+});
+
 describe("listing settings HTTP boundary", () => {
   let server: http.Server;
   let base: string;
@@ -111,10 +125,12 @@ describe("listing settings HTTP boundary", () => {
     listingSettingsCategoryInputSchema.parse(input);
     return categoryDetail;
   });
+  const listUpdatedProductsForMember = vi.fn(async (_member: string, input: unknown) =>
+    updatedProducts(listingSettingsUpdatedProductsInputSchema.parse(input).page));
 
   beforeEach(async () => {
     for (const fn of [getSummaryForMember, listPricesForMember, listProductsForMember, getProductForMember, listProductIdsForMember,
-      listCategoriesForMember, getCategoryForMember, logged.info, logged.warn, logged.error]) fn.mockClear();
+      listCategoriesForMember, getCategoryForMember, listUpdatedProductsForMember, logged.info, logged.warn, logged.error]) fn.mockClear();
     const app = express();
     app.use((req, _res, next) => {
       const memberId = req.header("X-Test-Member");
@@ -122,7 +138,7 @@ describe("listing settings HTTP boundary", () => {
       next();
     });
     registerDropshipListingSettingsRoutes(app, { getSummaryForMember, listPricesForMember, listProductsForMember, getProductForMember,
-      listProductIdsForMember, listCategoriesForMember, getCategoryForMember });
+      listProductIdsForMember, listCategoriesForMember, getCategoryForMember, listUpdatedProductsForMember });
     server = http.createServer(app);
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
     base = `http://127.0.0.1:${(server.address() as AddressInfo).port}/api/dropship/listings/stores`;
@@ -134,9 +150,10 @@ describe("listing settings HTTP boundary", () => {
 
   it.each(["/22/listing-settings/summary", "/22/listing-settings/prices", "/22/listing-settings/products",
     "/22/listing-settings/products/501", "/22/listing-settings/products/ids", "/22/listing-settings/categories",
-    "/22/listing-settings/categories/3"])(
+    "/22/listing-settings/categories/3", "/22/listing-settings/updated-products"])(
     "requires a signed-in member for %s", async (path) => {
       expect((await get(path, null)).status).toBe(401);
+      expect(listUpdatedProductsForMember).not.toHaveBeenCalled();
       expect(listCategoriesForMember).not.toHaveBeenCalled();
       expect(getCategoryForMember).not.toHaveBeenCalled();
       expect(getSummaryForMember).not.toHaveBeenCalled();
@@ -214,6 +231,47 @@ describe("listing settings HTTP boundary", () => {
     }
   });
 
+  it("lists the products Card Shellz updated, a page at a time, with every move's Got it item, never cached (plan 10.3)", async () => {
+    const first = await get("/22/listing-settings/updated-products");
+    expect(first.status).toBe(200);
+    expect(first.headers.get("Cache-Control")).toBe("no-store");
+    expect(await first.json()).toEqual(updatedProducts(0));
+    expect(listUpdatedProductsForMember).toHaveBeenCalledWith("member-1", { storeConnectionId: 22, page: undefined });
+
+    const second = await get("/22/listing-settings/updated-products?page=1");
+    expect(second.status).toBe(200);
+    // The full moves list is on every page.
+    expect(await second.json()).toEqual(updatedProducts(1));
+    expect(listUpdatedProductsForMember).toHaveBeenLastCalledWith("member-1", { storeConnectionId: 22, page: 1 });
+  });
+
+  it.each([
+    ["DROPSHIP_LISTING_SETTINGS_TOO_LARGE", 422],
+    ["DROPSHIP_LISTING_SETTINGS_EBAY_ONLY", 422],
+    ["DROPSHIP_STORE_CONNECTION_REQUIRED", 404],
+  ])("maps %s on the updated products to %s, logged as a refusal", async (code, status) => {
+    listUpdatedProductsForMember.mockRejectedValueOnce(new DropshipError(String(code), "Controlled refusal.", { storeConnectionId: 22 }));
+    const response = await get("/22/listing-settings/updated-products");
+    expect(response.status).toBe(status);
+    expect(await response.json()).toEqual({ error: { code, message: "Controlled refusal.", context: { storeConnectionId: 22 } } });
+    expect(logged.info).toHaveBeenCalledWith("dropship.listing_settings.request_refused", expect.objectContaining({
+      error_code: code, status, store_connection_id: 22, path: "/api/dropship/listings/stores/:storeConnectionId/listing-settings/updated-products" }));
+  });
+
+  it.each([
+    ["a moves total that is not the list's length", { moves: { total: 2, items: [{ productId: 501, shownCategoryId: null }] } }],
+    ["a row with neither a move nor a text check", { rows: [{ productId: 502, productName: "Sleeves", ownTextNeedsCheck: false, move: null }] }],
+    ["a move to the category it came from", { rows: [{ productId: 501, productName: "Toploader 35pt", ownTextNeedsCheck: false,
+      move: { from: { categoryId: 3, name: "Toploaders" }, to: { categoryId: 3, name: "Toploaders" }, changedFields: [] } }],
+    moves: { total: 1, items: [{ productId: 501, shownCategoryId: 3 }] } }],
+    ["an unknown key", { extra: true }],
+  ])("answers 500 when the updated products break their contract: %s", async (_case, patch) => {
+    listUpdatedProductsForMember.mockResolvedValueOnce({ ...updatedProducts(0), ...patch } as ListingSettingsUpdatedProductsResponse);
+    const response = await get("/22/listing-settings/updated-products");
+    expect(response.status).toBe(500);
+    expect(logged.error).toHaveBeenCalledWith("dropship.listing_settings.request_failed", expect.objectContaining({ error_class: "fatal" }));
+  });
+
   it("answers 500 when a category answer breaks its contract", async () => {
     listCategoriesForMember.mockResolvedValueOnce({ ...categoriesList, categories: [...categoriesList.categories, ...categoriesList.categories] });
     expect((await get("/22/listing-settings/categories")).status).toBe(500);
@@ -289,6 +347,9 @@ describe("listing settings HTTP boundary", () => {
     ["a category id with letters", "/22/listing-settings/categories/3x"],
     ["a category id of 0", "/22/listing-settings/categories/0"],
     ["a category id past int4", "/22/listing-settings/categories/2147483648"],
+    ["an updated products page that is not a whole number", "/22/listing-settings/updated-products?page=1.5"],
+    ["an updated products page past the last", "/22/listing-settings/updated-products?page=200"],
+    ["a repeated updated products page", "/22/listing-settings/updated-products?page=1&page=2"],
   ])("refuses %s with 400", async (_case, path) => {
     const response = await get(path);
     expect(response.status).toBe(400);
@@ -336,6 +397,9 @@ describe("listing settings HTTP boundary", () => {
     // The category reads too (plan P7: one read budget).
     expect((await get("/22/listing-settings/categories")).status).toBe(429);
     expect((await get("/22/listing-settings/categories/3")).status).toBe(429);
+    // And the updated products (plan 10.3: the read router, the read budget).
+    expect((await get("/22/listing-settings/updated-products")).status).toBe(429);
+    expect(listUpdatedProductsForMember).not.toHaveBeenCalled();
     expect((await get("/22/listing-settings/summary", "member-2")).status).toBe(200);
   });
 });

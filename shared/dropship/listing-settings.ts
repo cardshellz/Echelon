@@ -14,8 +14,10 @@ import { pricingRecipeSchema } from "./pricing-rules";
  *
  * They read the store defaults, the values left on single sizes by the
  * current step 2 panels, and the product and Card Shellz category settings;
- * each category's own settings have their own views (PR 9e). "Moved by Card
- * Shellz" joins in a later PR. No view calls eBay, so a saved policy is
+ * each category's own settings have their own views (PR 9e), and the products
+ * Card Shellz moved to another category, or whose own text needs a check,
+ * have theirs ("Card Shellz updated products", PR 9g). No existing view
+ * changes shape for them (plan P27). No view calls eBay, so a saved policy is
  * reported by id with `verification: "not_checked"`.
  */
 
@@ -544,6 +546,85 @@ export const listingSettingsCategoryDetailSchema = z.object({
   }
 });
 
+// ---------------------------------------------------------------------------
+// Card Shellz updated products (GET …/updated-products, PR 9g)
+// ---------------------------------------------------------------------------
+
+/** One page of the products Card Shellz updated. */
+export const listingSettingsUpdatedProductsInputSchema = z.object({ storeConnectionId: id, page: page.default(0) }).strict();
+
+/** A Card Shellz category by id with its current name; no category is `{ categoryId: null, name: null }`. */
+const updatedProductCategorySchema = z.object({
+  categoryId: id.nullable(),
+  /** Null for no category, and for a category Card Shellz has since deleted (a mark keeps its id, plan D13). */
+  name: z.string().min(1).nullable(),
+}).strict().refine((category) => category.categoryId !== null || category.name === null, "Only a category has a name.");
+
+/**
+ * One product to "Got it" for (W13's item shape, `categoryMovesAcknowledgeItemsSchema`): the category the vendor is shown now,
+ * which the page sends back unchanged.
+ */
+const updatedProductMoveItemSchema = z.object({ productId: id, shownCategoryId: id.nullable() }).strict();
+
+/**
+ * The chosen products Card Shellz updated, in the Products tab's order (name,
+ * then id), 50 a page:
+ * - `move`: Card Shellz moved the product to another category since the
+ *   vendor last confirmed it (its mark), with the category it came from, the
+ *   one it is in now (current names), and the category settings that differ
+ *   between the two and that the product's own values or its sizes' do not
+ *   cover (`changedFields`, in the stored shape's order; may be empty). It
+ *   compares category settings only: in a store with older group rules
+ *   scoped to a category (matched by its name), a move can also change the
+ *   listing through those rules, which `changedFields` does not show;
+ * - `ownTextNeedsCheck`: own text written against Card Shellz facts that
+ *   have since changed.
+ * `moves` lists every moved product, on every page ("Got it for all N" sends
+ * it to W13 as it is, plan 10.8 #1).
+ */
+export const listingSettingsUpdatedProductsResponseSchema = z.object({
+  storeConnectionId: id,
+  page,
+  pageSize: z.literal(LISTING_SETTINGS_PAGE_SIZE),
+  total: count,
+  rows: z.array(z.object({
+    productId: id,
+    productName: z.string(),
+    ownTextNeedsCheck: z.boolean(),
+    move: z.object({
+      from: updatedProductCategorySchema,
+      to: updatedProductCategorySchema,
+      changedFields: categoryFields,
+    }).strict().nullable(),
+  }).strict()).max(LISTING_SETTINGS_PAGE_SIZE),
+  moves: z.object({
+    total: count,
+    items: z.array(updatedProductMoveItemSchema).max(MAX_NAMED_CATALOG_GROUP_ITEMS),
+  }).strict(),
+  generatedAt: z.string().datetime(),
+}).strict().superRefine((response, context) => {
+  const issue = (message: string, path: (string | number)[]) => context.addIssue({ code: z.ZodIssueCode.custom, message, path });
+  if (response.moves.total !== response.moves.items.length) issue("Every moved product is listed.", ["moves", "total"]);
+  if (new Set(response.moves.items.map((item) => item.productId)).size !== response.moves.items.length) {
+    issue("Each moved product once.", ["moves", "items"]);
+  }
+  if (new Set(response.rows.map((row) => row.productId)).size !== response.rows.length) issue("Each product once.", ["rows"]);
+  const shown = new Map(response.moves.items.map((item) => [item.productId, item.shownCategoryId]));
+  response.rows.forEach((row, index) => {
+    if (row.move === null && !row.ownTextNeedsCheck) issue("A product is listed only when Card Shellz updated it.", ["rows", index]);
+    if (row.move === null) {
+      if (shown.has(row.productId)) issue("A product with a Got it item is listed with its move.", ["rows", index, "move"]);
+      return;
+    }
+    if (row.move.from.categoryId === row.move.to.categoryId) issue("A moved product is in another category now.", ["rows", index, "move"]);
+    // The category a product is in now exists in the same snapshot (a delete sets its products' category to null).
+    if (row.move.to.categoryId !== null && row.move.to.name === null) issue("The current category is named.", ["rows", index, "move", "to"]);
+    if (!shown.has(row.productId) || shown.get(row.productId) !== row.move.to.categoryId) {
+      issue("A moved product's Got it item shows its current category.", ["rows", index, "move"]);
+    }
+  });
+});
+
 export type ListingSettingsProductsInput = z.infer<typeof listingSettingsProductsInputSchema>;
 export type ListingSettingsProductIdsInput = z.infer<typeof listingSettingsProductIdsInputSchema>;
 export type ListingSettingsProductIdsResponse = z.infer<typeof listingSettingsProductIdsResponseSchema>;
@@ -578,3 +659,5 @@ export type ListingSettingsCategoriesResponse = z.infer<typeof listingSettingsCa
 export type ListingSettingsCategorySettingSource = (typeof LISTING_SETTINGS_CATEGORY_SETTING_SOURCES)[number];
 export type ListingSettingsCategorySettings = z.infer<typeof listingSettingsCategorySettingsSchema>;
 export type ListingSettingsCategoryDetail = z.infer<typeof listingSettingsCategoryDetailSchema>;
+export type ListingSettingsUpdatedProductsInput = z.infer<typeof listingSettingsUpdatedProductsInputSchema>;
+export type ListingSettingsUpdatedProductsResponse = z.infer<typeof listingSettingsUpdatedProductsResponseSchema>;

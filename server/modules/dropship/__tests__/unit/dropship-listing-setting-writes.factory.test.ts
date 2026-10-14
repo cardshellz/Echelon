@@ -312,7 +312,7 @@ describe("createDropshipListingSettingWriteServices (plan 3.10 (a), 7.12)", () =
     }
   });
 
-  it("never gates the single writers: a W5 and a W8 sent while a W6 holds the gate reach their transactions", async () => {
+  it("never gates the single writers: a W5, a W8 and a W13 sent while a W6 holds the gate reach their transactions", async () => {
     const services = createDropshipListingSettingWriteServices({ repository, ebay });
     const heavy = services.products.saveBulkForMember(MEMBER, STORE, w6Body());
     await repository.opened;
@@ -321,9 +321,11 @@ describe("createDropshipListingSettingWriteServices (plan 3.10 (a), 7.12)", () =
         idempotencyKey: "product-settings:7f9c2ba4-e88f-4a5e-9d1b-1c2d3e4f5a6b", expectedRevisionId: null, patch: { storeShelf: { mode: "none" } } }));
       const w8 = await failure(services.sizePrices.saveForMember(MEMBER, STORE, {
         idempotencyKey: "size-prices:7f9c2ba4-e88f-4a5e-9d1b-1c2d3e4f5a6b", rows: [{ productVariantId: 101, priceCents: 1_499, expectedRevisionId: null }] }));
-      expect([w5.code, w8.code]).toEqual([NOT_GATED, NOT_GATED]);
+      const w13 = await failure(services.categoryMoves.acknowledgeForMember(MEMBER, STORE, {
+        idempotencyKey: "category-moves:7f9c2ba4-e88f-4a5e-9d1b-1c2d3e4f5a6b", items: [{ productId: 7, shownCategoryId: 3 }] }));
+      expect([w5.code, w8.code, w13.code]).toEqual([NOT_GATED, NOT_GATED, NOT_GATED]);
       expect(repository.executed).toEqual([W6_KEY, "product-settings:7f9c2ba4-e88f-4a5e-9d1b-1c2d3e4f5a6b",
-        "size-prices:7f9c2ba4-e88f-4a5e-9d1b-1c2d3e4f5a6b"]);
+        "size-prices:7f9c2ba4-e88f-4a5e-9d1b-1c2d3e4f5a6b", "category-moves:7f9c2ba4-e88f-4a5e-9d1b-1c2d3e4f5a6b"]);
     } finally {
       repository.releaseAll();
       await heavy;

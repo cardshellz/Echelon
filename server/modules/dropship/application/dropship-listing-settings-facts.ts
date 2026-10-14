@@ -16,18 +16,19 @@ import {
   type ListingSettingsProductIdsInput, type ListingSettingsProductIdsResponse,
   type ListingSettingsProductRow, type ListingSettingsProductSettings, type ListingSettingsProductsInput,
   type ListingSettingsRailState, type ListingSettingsSettingKey, type ListingSettingsSizePrice, type ListingSettingsSummary,
-  type ListingSettingsValueSource,
+  type ListingSettingsUpdatedProductsInput, type ListingSettingsUpdatedProductsResponse, type ListingSettingsValueSource,
 } from "../../../../shared/dropship/listing-settings";
 import {
   CATEGORY_LISTING_SETTING_FIELDS, PRODUCT_LISTING_SETTING_FIELDS,
   type CategoryListingSettingField, type CategoryListingSettingRow, type ListingSettingMainText,
-  type ProductListingSettingField, type ProductListingSettingValues,
+  type ProductCategoryMark, type ProductListingSettingField, type ProductListingSettingValues,
 } from "../../../../shared/dropship/listing-setting-values";
 import {
   PRODUCT_PRICE_RULE_NAME, pricingBasisCents, type PricingProfileState, type RulePriceResult,
 } from "../../../../shared/dropship/pricing-rules";
 import type { EbayCategoryRulesState } from "../../../../shared/dropship/ebay-category-rules";
 import type { DescriptionTemplate } from "../../../../shared/dropship/listing-content";
+import { categoryMoveChangedFields, categoryMoveMaskedFields } from "../domain/category-move-changes";
 import { readEbayStoreShelfDefault, type EbayStoreShelfDefault } from "../domain/ebay-listing-setup-config";
 import { LISTING_SETTING_LEFTOVER_FIELDS, listingSettingsInvariantFailed, type ListingSettingLeftoverField } from "../domain/listing-setting-values";
 import { evaluateListingPriceAgainstCost } from "../domain/listing-price-cost";
@@ -98,6 +99,23 @@ export interface ListingSettingsInputs {
    * only; never hashed.
    */
   categoryNames: ReadonlyMap<number, string>;
+  /**
+   * What "Card Shellz updated products" reads (PR 9g, plan 10.6), apart from
+   * `layers` and `categoryNames` so the views above read exactly what they
+   * read before: each chosen product's category mark, and, only for the
+   * categories moved products came from, their settings rows and live names.
+   */
+  categoryMoves: ListingSettingsCategoryMoveInputs;
+}
+
+/** The category marks of the chosen products and what their moves need, read in the load's snapshot. */
+export interface ListingSettingsCategoryMoveInputs {
+  /** Each chosen product's mark (the category the vendor last confirmed), by product id; a product with no mark is absent. */
+  marks: ReadonlyMap<number, ProductCategoryMark>;
+  /** The settings rows of the categories moved products came from, by category id; a category with no row is absent. */
+  fromCategories: ReadonlyMap<number, CategoryListingSettingRow>;
+  /** The current names of those categories; one Card Shellz has deleted is absent (a mark has no foreign key, plan D13). */
+  fromCategoryNames: ReadonlyMap<number, string>;
 }
 
 /**
@@ -141,6 +159,25 @@ export interface ListingSettingsProductFacts {
    * which no clear names, plan P34). Beside `row`, as the two fields above.
    */
   ownCategoryFields: readonly CategoryListingSettingField[];
+  /** Card Shellz moved the product since the vendor last confirmed its category; null otherwise. Beside `row` (no golden repin). */
+  categoryMove: ListingSettingsCategoryMove | null;
+}
+
+/**
+ * A chosen product whose mark's category IS DISTINCT FROM its current one
+ * (plan 10.6): where it came from and where it is now, with the names read in
+ * the load's snapshot, and the category settings that change for its listing
+ * (categoryMoveChangedFields). A product with no mark is never moved: a move
+ * before its first mark is not reported (design record 8.12).
+ */
+export interface ListingSettingsCategoryMove {
+  fromCategoryId: number | null;
+  /** Null for no category, and for a category Card Shellz has since deleted. */
+  fromCategoryName: string | null;
+  toCategoryId: number | null;
+  /** Null for no category; null for a category means the inputs lack its name, which the updated products view refuses as a fault. */
+  toCategoryName: string | null;
+  changedFields: readonly CategoryListingSettingField[];
 }
 
 /** One Card Shellz category of the chosen products, for the category views (PR 9e). */
@@ -583,6 +620,10 @@ function productFacts(sizes: readonly ListingSettingsSizeFacts[], inputs: Listin
       throw new Error(`Listing settings has no valid size count for product ${productId}.`);
     }
     const fixes = new Set(productSizes.flatMap((size) => size.fixes));
+    const productOwnFields = productOwnFieldsOf(inputs.layers.products.get(productId)?.values ?? null);
+    // 9e's per-size own-field facts, read once for both uses below.
+    const sizeLeftovers = productSizes.map((size) => sizeLeftoverFieldsOf(inputs, size.price.productVariantId));
+    const categoryId = categoryIds.get(productId) ?? null;
     return {
       row: {
         productId,
@@ -599,12 +640,10 @@ function productFacts(sizes: readonly ListingSettingsSizeFacts[], inputs: Listin
         fixes: LISTING_SETTINGS_FIX_CODES.filter((code) => fixes.has(code)),
       },
       sizes: productSizes,
-      categoryId: categoryIds.get(productId) ?? null,
+      categoryId,
       settingsRevisionId: inputs.layers.products.get(productId)?.revisionId ?? null,
-      ownCategoryFields: ownCategoryFields({
-        productOwnFields: productOwnFieldsOf(inputs.layers.products.get(productId)?.values ?? null),
-        sizeLeftovers: productSizes.map((size) => sizeLeftoverFieldsOf(inputs, size.price.productVariantId)),
-      }),
+      ownCategoryFields: ownCategoryFields({ productOwnFields, sizeLeftovers }),
+      categoryMove: categoryMoveOf({ inputs, productId, categoryId, productOwnFields, productSizes, sizeLeftovers }),
     };
   }).sort((a, b) => NAME_ORDER.compare(a.row.productName, b.row.productName) || a.row.productId - b.row.productId);
 }
@@ -634,6 +673,55 @@ function categoryFacts(products: readonly ListingSettingsProductFacts[], inputs:
       setFields: row === null ? [] : CATEGORY_LISTING_SETTING_FIELDS.filter((field) => row.values[field] !== null),
     };
   }).sort((a, b) => NAME_ORDER.compare(a.name ?? "", b.name ?? "") || a.categoryId - b.categoryId);
+}
+
+/**
+ * The product's move, when its mark's category differs from its current one
+ * (null against an id counts: into or out of a category). The "from" row and
+ * name come from `categoryMoves`, the current ones from `layers` and
+ * `categoryNames`, which hold every chosen product's category.
+ */
+function categoryMoveOf(input: {
+  inputs: ListingSettingsInputs;
+  productId: number;
+  categoryId: number | null;
+  productOwnFields: ReadonlySet<ProductListingSettingField>;
+  /** The product's chosen sizes, and each one's leftovers at the same index. */
+  productSizes: readonly ListingSettingsSizeFacts[];
+  sizeLeftovers: ReadonlyArray<readonly ListingSettingLeftoverField[]>;
+}): ListingSettingsCategoryMove | null {
+  const { inputs, productId, categoryId } = input;
+  const mark = inputs.categoryMoves.marks.get(productId);
+  if (mark === undefined || mark.categoryId === categoryId) return null;
+  const sizes = input.productSizes.map((size, index) => ({
+    ownsPrice: sizeOwnsPrice(inputs.savedPrices.get(size.price.productVariantId) ?? null),
+    leftovers: input.sizeLeftovers[index],
+  }));
+  const fromCategoryId = mark.categoryId;
+  const from = fromCategoryId === null ? null : inputs.categoryMoves.fromCategories.get(fromCategoryId)?.values ?? null;
+  const to = categoryId === null ? null : inputs.layers.categories.get(categoryId)?.values ?? null;
+  return {
+    fromCategoryId,
+    fromCategoryName: fromCategoryId === null ? null : inputs.categoryMoves.fromCategoryNames.get(fromCategoryId) ?? null,
+    toCategoryId: categoryId,
+    toCategoryName: categoryId === null ? null : inputs.categoryNames.get(categoryId) ?? null,
+    changedFields: categoryMoveChangedFields({ from, to,
+      masked: categoryMoveMaskedFields({ productOwnFields: input.productOwnFields, sizes }) }),
+  };
+}
+
+/**
+ * A size owns its price when its saved setting never follows the rules, so no
+ * category price (a category rule, dropship-rule-price.ts) can reach it: a
+ * typed price (`fixed`), the catalog default, or a legacy row with no mode.
+ * `rules` follows them, `inherit` does whenever they give a usable price, and
+ * a size with no saved setting does whenever a rule covers it
+ * (shared/dropship/listing-price.ts listingPriceFollowsRules). The price
+ * source alone cannot tell: a saved catalog default and a size no rule covers
+ * both show the catalog price.
+ */
+function sizeOwnsPrice(saved: Pick<SavedListingPriceRevision, "pricingMode"> | null): boolean {
+  return saved !== null && saved.pricingMode !== "rules" && saved.pricingMode !== "inherit";
 }
 
 /** The fields a product's own row sets: a field is the product's own exactly when its stored value is not null. */
@@ -960,6 +1048,57 @@ function requiredCategoryName(category: ListingSettingsCategoryFacts): string {
     });
   }
   return category.name;
+}
+
+// ---------------------------------------------------------------------------
+// Card Shellz updated products (PR 9g)
+// ---------------------------------------------------------------------------
+
+export type ListingSettingsUpdatedProductsSelection =
+  Omit<ListingSettingsUpdatedProductsResponse, "storeConnectionId" | "page" | "pageSize" | "generatedAt">;
+
+/**
+ * The chosen products Card Shellz moved to another category since the vendor
+ * last confirmed it, or whose own text needs a check (the `own_text_needs_check`
+ * fix, as the summary counts it), in the facts' product order, one page of
+ * them; and every moved product on every page, as W13's items ("Got it for
+ * all N", plan 10.8 #1). New objects: the cached facts are never handed out.
+ */
+export function selectListingSettingsUpdatedProducts(facts: ListingSettingsFacts,
+  input: Pick<ListingSettingsUpdatedProductsInput, "page">): ListingSettingsUpdatedProductsSelection {
+  const updated = facts.products.filter((product) => product.categoryMove !== null || ownTextNeedsCheck(product));
+  const moved = facts.products.flatMap((product) => product.categoryMove === null ? [] : [{ product, move: product.categoryMove }]);
+  for (const { product, move } of moved) {
+    // The current category is read with every chosen category's name in the same snapshot (plan 8.11).
+    if (move.toCategoryId !== null && move.toCategoryName === null) {
+      throw listingSettingsInvariantFailed("Listing settings has no Card Shellz name for a moved product's current category.", {
+        productId: product.row.productId, categoryId: move.toCategoryId,
+      });
+    }
+  }
+  const page = pageOf(updated, input.page);
+  return {
+    total: page.total,
+    rows: page.rows.map((product) => ({
+      productId: product.row.productId,
+      productName: product.row.productName,
+      ownTextNeedsCheck: ownTextNeedsCheck(product),
+      move: product.categoryMove === null ? null : {
+        from: { categoryId: product.categoryMove.fromCategoryId, name: product.categoryMove.fromCategoryName },
+        to: { categoryId: product.categoryMove.toCategoryId, name: product.categoryMove.toCategoryName },
+        changedFields: [...product.categoryMove.changedFields],
+      },
+    })),
+    moves: {
+      total: moved.length,
+      items: moved.map(({ product, move }) => ({ productId: product.row.productId, shownCategoryId: move.toCategoryId })),
+    },
+  };
+}
+
+/** The product's own text (or a size's) was written against Card Shellz facts that have since changed. */
+function ownTextNeedsCheck(product: ListingSettingsProductFacts): boolean {
+  return product.row.fixes.includes("own_text_needs_check");
 }
 
 /** Each setting: the category's own value, else the store default, else none. New objects: the cached facts are never handed out. */
