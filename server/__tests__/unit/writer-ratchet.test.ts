@@ -36,6 +36,10 @@ describe("writer-ratchet (P2.1)", () => {
 
   it.each([
     ["wms.picking_commands", "modules/wms"],
+    ["procurement.receiving_custody_fence", "modules/procurement"],
+    ["procurement.receiving_quarantine_observations", "modules/procurement"],
+    ["procurement.receiving_quarantine_acceptances", "modules/procurement"],
+    ["procurement.receiving_quarantine_dispositions", "modules/procurement"],
     ["inventory.replen_followups", "modules/inventory"],
     ["inventory.replen_transfer_credits", "modules/inventory"],
     ["inventory.replen_trigger_receipts", "modules/inventory"],

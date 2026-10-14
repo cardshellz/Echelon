@@ -4,6 +4,7 @@ import { warehouseStorage } from "../warehouse";
 import { inventoryStorage } from "../inventory";
 const storage = { ...warehouseStorage, ...inventoryStorage };
 import { requirePermission, requireAuth } from "../../routes/middleware";
+import { sendInventoryQuantityError } from "../inventory/interfaces/quantity-command.middleware";
 
 export function registerSettingsRoutes(app: Express) {
   // ============================================
@@ -366,6 +367,7 @@ export function registerSettingsRoutes(app: Express) {
         { reasonCode: req.body.reasonCode, notes: req.body.notes, approvedBy: req.session.user?.id },
       ));
     } catch (error: any) {
+      if (sendInventoryQuantityError(res, error)) return;
       if (error.statusCode) return res.status(error.statusCode).json({ error: error.message });
       console.error("Error approving variance:", error);
       res.status(500).json({ error: "Failed to approve variance" });

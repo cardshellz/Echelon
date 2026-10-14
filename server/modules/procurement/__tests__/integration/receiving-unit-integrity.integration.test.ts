@@ -10,6 +10,7 @@ import * as schema from "@shared/schema";
 import { receivingUnitVersion } from "../../receiving-unit-contract";
 import { readClosedShipmentReceivedBaseQtyByLine } from "../../receiving-shipment-coverage";
 import { fixtureForeignKeys, fixtureTable, qualifiedTable } from "./shipment-line-fixture";
+import { resetFixtureWithEmptyReceivingCustody } from "./receiving-custody-fixture";
 import { installPreOpeningQuantityAuthorityFixture } from "../../../inventory/__tests__/fixtures/pre-opening-quantity-authority.fixture";
 
 config({ path: resolve(process.cwd(), ".env.test") });
@@ -97,7 +98,10 @@ databaseTests.sequential("receiving frozen units PostgreSQL guarantees", () => {
       reportPid(Number(backend.rows[0].pid));
       return callback(tx);
     }) });
-    return { pid, result: outcome(work(observer)) };
+    const result = outcome(work(observer));
+    return { pid: Promise.race([pid, result.then(() => {
+      throw new Error("Observed receiving command finished before entering its transaction");
+    })]), result };
   }
 
   beforeAll(async () => {
@@ -126,6 +130,7 @@ databaseTests.sequential("receiving frozen units PostgreSQL guarantees", () => {
     migrationEvidence = { before, after, replay };
     await pool.query(readFileSync(resolve(process.cwd(), "migrations/222_procurement_cost_evidence.sql"), "utf8"));
     for (const statement of fixtureForeignKeys(TABLES)) await pool.query(statement);
+    await pool.query(readFileSync(resolve(process.cwd(), "migrations/900000004000017890001_receiving_quarantine.sql"), "utf8"));
     await pool.query(`
       CREATE UNIQUE INDEX po_receipts_po_line_rcv_line_idx ON procurement.po_receipts(purchase_order_line_id,receiving_line_id);
       CREATE UNIQUE INDEX receipt_reversals_idempotency_key_idx ON procurement.receipt_reversals(idempotency_key);
@@ -173,7 +178,7 @@ databaseTests.sequential("receiving frozen units PostgreSQL guarantees", () => {
 
   beforeEach(async () => {
     if (ownedSchemas.length !== 4) throw new Error("Receiving fixture schema ownership not established");
-    await pool.query(`TRUNCATE ${TABLES.map(qualifiedTable).join(",")} RESTART IDENTITY CASCADE`);
+    await resetFixtureWithEmptyReceivingCustody(pool, `TRUNCATE ${TABLES.map(qualifiedTable).join(",")} RESTART IDENTITY CASCADE`);
     await pool.query("DELETE FROM public.audit_events WHERE actor=$1", [actorId]);
     await pool.query(`
       INSERT INTO catalog.products(id,sku,name) VALUES(100,'TEST-PRODUCT','Receiving test product');
@@ -191,7 +196,7 @@ databaseTests.sequential("receiving frozen units PostgreSQL guarantees", () => {
       INSERT INTO procurement.receiving_orders(id,receipt_number,source_type,status,warehouse_id,updated_at)
         VALUES(50,'TEST-RECEIPT','blind','open',1,'2026-09-05T12:00:00Z');
       INSERT INTO procurement.receiving_lines(id,receiving_order_id,product_id,product_variant_id,sku,expected_qty,received_qty,damaged_qty,units_per_variant_snapshot,putaway_location_id,unit_cost,unit_cost_mills,status,updated_at)
-        VALUES(51,50,100,200,'TEST-CASE',4,2,1,250,99,4,375,'partial','2026-09-05T12:00:00Z')`);
+        VALUES(51,50,100,200,'TEST-CASE',4,2,0,250,99,4,375,'partial','2026-09-05T12:00:00Z')`);
   });
 
   afterAll(async () => {
@@ -214,6 +219,7 @@ databaseTests.sequential("receiving frozen units PostgreSQL guarantees", () => {
   });
 
   it("converts exact units atomically with unchanged per-piece cost and matching audit actor/time", async () => {
+    await pool.query("UPDATE procurement.receiving_lines SET damaged_qty=1 WHERE id=51");
     const result = await service.updateLine(51, { productVariantId: 201, expectedUnitVersion: receivingUnitVersion(await line()) }, actorId);
     expect(result).toMatchObject({ expectedQty: 1000, receivedQty: 500, damagedQty: 250, unitsPerVariantSnapshot: 1, unitCost: 4, unitCostMills: 375, updatedAt: NOW });
     const audit = (await pool.query("SELECT timestamp,actor,changes FROM public.audit_events WHERE actor=$1", [actorId])).rows;
@@ -416,7 +422,7 @@ databaseTests.sequential("receiving frozen units PostgreSQL guarantees", () => {
   });
 
   it("explicitly confirms an unposted legacy unit without changing any recorded count", async () => {
-    await pool.query("UPDATE procurement.receiving_lines SET units_per_variant_snapshot=NULL WHERE id=51");
+    await pool.query("UPDATE procurement.receiving_lines SET units_per_variant_snapshot=NULL,damaged_qty=1 WHERE id=51");
     const token = receivingUnitVersion(await line());
     const before = await state();
     await expect(service.updateLine(51, { productVariantId: 200, expectedUnitVersion: token }, actorId))
@@ -461,7 +467,7 @@ databaseTests.sequential("receiving frozen units PostgreSQL guarantees", () => {
   });
 
   it("rejects legacy confirmation when the displayed catalog pack changes before its shared lock", async () => {
-    await pool.query("UPDATE procurement.receiving_lines SET units_per_variant_snapshot=NULL WHERE id=51");
+    await pool.query("UPDATE procurement.receiving_lines SET units_per_variant_snapshot=NULL,damaged_qty=1 WHERE id=51");
     const token = receivingUnitVersion(await line());
     const holder = await pool.connect();
     let open = false;

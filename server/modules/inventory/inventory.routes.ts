@@ -403,15 +403,17 @@ export function registerInventoryRoutes(app: Express) {
             continue;
           }
 
-          // Find existing level by variantId (source of truth)
-          const existingLevel = await storage.getInventoryLevelByLocationAndVariant(warehouseLocation.id, variant.id);
-          const variantQtyBefore = existingLevel ? (existingLevel.variantQty || 0) : 0;
-          const variantQtyDelta = targetQty - variantQtyBefore;
-
           // M6 fix: the level mutation and its ledger row must be atomic — a
           // failure between them would leave a level change with no audit row
           // (silent on-hand drift). Wrap both in one transaction.
           await db.transaction(async (tx: any) => {
+            const { inventoryCore } = req.app.locals.services;
+            await inventoryCore.withTx(tx).assertCountableCustody({
+              productVariantId: variant.id, warehouseLocationId: warehouseLocation.id,
+            });
+            const existingLevel = await storage.getInventoryLevelByLocationAndVariant(warehouseLocation.id, variant.id, tx);
+            const variantQtyBefore = existingLevel ? (existingLevel.variantQty || 0) : 0;
+            const variantQtyDelta = targetQty - variantQtyBefore;
             if (existingLevel) {
               await storage.adjustInventoryLevel(existingLevel.id, {
                 variantQty: variantQtyDelta,
@@ -2517,43 +2519,53 @@ export function registerInventoryRoutes(app: Express) {
             continue;
           }
           
-          const existingLevel = await storage.getInventoryLevelByLocationAndVariant(location.id, variant.id);
-
-          if (existingLevel) {
-            const currentQty = existingLevel.variantQty || 0;
-            const delta = variantQty - currentQty;
-            if (delta !== 0) {
-              const { inventoryCore: csvAdjCore } = req.app.locals.services;
-              await csvAdjCore.adjustInventory({
+          const effects: Array<() => Promise<void>> = [];
+          const rowOutcome = await db.transaction(async (tx: any) => {
+            const { inventoryCore } = req.app.locals.services;
+            const csvAdjCore = inventoryCore.withTx(tx);
+            await csvAdjCore.assertCountableCustody({
+              productVariantId: variant.id, warehouseLocationId: location.id,
+            });
+            const existingLevel = await storage.getInventoryLevelByLocationAndVariant(location.id, variant.id, tx);
+            if (existingLevel) {
+              const currentQty = existingLevel.variantQty || 0;
+              const delta = variantQty - currentQty;
+              if (delta !== 0) {
+                await csvAdjCore.adjustInventory({
+                  productVariantId: variant.id,
+                  warehouseLocationId: location.id,
+                  qtyDelta: delta,
+                  reason: "CSV_UPLOAD",
+                  userId,
+                  deferUntilCommit: (effect: () => Promise<void>) => effects.push(effect),
+                });
+                return "updated" as const;
+              }
+              return "unchanged" as const;
+            } else {
+              await storage.createInventoryLevel({
                 productVariantId: variant.id,
                 warehouseLocationId: location.id,
-                qtyDelta: delta,
-                reason: "CSV_UPLOAD",
-                userId,
-              });
-              csvResults.updated++;
-            }
-          } else {
-            await storage.createInventoryLevel({
-              productVariantId: variant.id,
-              warehouseLocationId: location.id,
-              variantQty: variantQty,
-              reservedQty: 0,
-            });
+                variantQty: variantQty,
+                reservedQty: 0,
+              }, tx);
 
-            await storage.createInventoryTransaction({
-              productVariantId: variant.id,
-              toLocationId: location.id,
-              transactionType: "csv_upload",
-              variantQtyDelta: variantQty,
-              sourceState: "external",
-              targetState: "on_hand",
-              notes: "Initial inventory from CSV import",
-              userId,
-            });
-            
-            csvResults.created++;
-          }
+              await storage.createInventoryTransaction({
+                productVariantId: variant.id,
+                toLocationId: location.id,
+                transactionType: "csv_upload",
+                variantQtyDelta: variantQty,
+                sourceState: "external",
+                targetState: "on_hand",
+                notes: "Initial inventory from CSV import",
+                userId,
+              }, tx);
+              return "created" as const;
+            }
+          });
+          if (rowOutcome === "created") csvResults.created++;
+          if (rowOutcome === "updated") csvResults.updated++;
+          for (const effect of effects) await effect();
           
           csvResults.processed++;
         } catch (rowError) {

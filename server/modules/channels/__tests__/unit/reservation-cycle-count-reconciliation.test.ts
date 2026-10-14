@@ -1,10 +1,33 @@
 import { describe, expect, it, vi } from "vitest";
 
 import { createReservationService } from "../../reservation.service";
+import { InventoryQuantityError } from "../../../inventory/domain/quantity-ledger";
 
 const OCCURRED_AT = new Date("2026-09-03T12:00:00.000Z");
 
 describe("legacy cycle-count reconciliation", () => {
+  it("blocks pending custody before reading or changing physical inventory", async () => {
+    const execute = vi.fn()
+      .mockResolvedValueOnce({ rows: [{ id: 8, status: "in_progress" }] })
+      .mockResolvedValueOnce({ rows: [{ id: 81, cycle_count_id: 8, warehouse_location_id: 2,
+        product_variant_id: 101, counted_qty: 10, status: "variance", adjustment_transaction_id: null }] });
+    const assertCountableCustody = vi.fn(async () => {
+      throw new InventoryQuantityError("RECEIVING_CUSTODY_COUNT_CONFLICT", "Resolve held receipt 77 before counting");
+    });
+    const adjustInventory = vi.fn();
+    const approveCycleCountItemReconciliation = vi.fn();
+    const service = createReservationService({ transaction: async (work: (tx: unknown) => Promise<unknown>) => work({ execute }) } as any,
+      { withTx: () => ({ assertCountableCustody, adjustInventory, approveCycleCountItemReconciliation }) },
+      { queueSyncAfterInventoryChange: vi.fn() }, {} as any, undefined, () => OCCURRED_AT);
+    await expect(service.reconcileCycleCountInventory({ cycleCountId: 8, cycleCountItemId: 81,
+      productVariantId: 101, warehouseLocationId: 2, countedQty: 10,
+      reasonCode: "verified", actor: "user:7", reason: "physical count" })).rejects.toMatchObject({ code: "RECEIVING_CUSTODY_COUNT_CONFLICT" });
+    expect(assertCountableCustody).toHaveBeenCalledWith({ productVariantId: 101, warehouseLocationId: 2 });
+    expect(execute).toHaveBeenCalledTimes(2);
+    expect(adjustInventory).not.toHaveBeenCalled();
+    expect(approveCycleCountItemReconciliation).not.toHaveBeenCalled();
+  });
+
   it("commits adjustment and item approval before running registered effects", async () => {
     let committed = false;
     const postCommitEffect = vi.fn(async () => {
@@ -33,7 +56,7 @@ describe("legacy cycle-count reconciliation", () => {
     });
     const approveCycleCountItemReconciliation = vi.fn(async () => undefined);
     const inventoryCore = {
-      withTx: vi.fn(() => ({ adjustInventory, approveCycleCountItemReconciliation })),
+      withTx: vi.fn(() => ({ assertCountableCustody: vi.fn(async () => undefined), adjustInventory, approveCycleCountItemReconciliation })),
     };
     const service = createReservationService(
       { transaction } as any,
@@ -111,7 +134,7 @@ describe("legacy cycle-count reconciliation", () => {
     });
     const approveCycleCountItemReconciliation = vi.fn(async () => undefined);
     const inventoryCore = {
-      withTx: vi.fn(() => ({ adjustInventory, approveCycleCountItemReconciliation })),
+      withTx: vi.fn(() => ({ assertCountableCustody: vi.fn(async () => undefined), adjustInventory, approveCycleCountItemReconciliation })),
     };
     const service = createReservationService(
       { transaction } as any,
@@ -221,6 +244,7 @@ describe("legacy cycle-count reconciliation", () => {
     const approveCycleCountItemReconciliation = vi.fn(async () => undefined);
     const inventoryCore = {
       withTx: vi.fn(() => ({
+        assertCountableCustody: vi.fn(async () => undefined),
         adjustInventory,
         recordCycleCountReconciliationNoop,
         approveCycleCountItemReconciliation,

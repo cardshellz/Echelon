@@ -184,6 +184,8 @@ function buildService(
   const upvRows = { rows: [{ id: 11, product_id: 1, units_per_variant: opts.unitsPerVariant ?? 1, is_active: true }] };
   const execute = async (query: any) => {
     const rendered = new PgDialect().sqlToQuery(query);
+    if (rendered.sql.includes("procurement.receiving_custody_fence")) return { rows: [{ singleton: true }] };
+    if (rendered.sql.includes("procurement.receiving_quarantine_")) return { rows: [] };
     if (rendered.sql.includes("FROM warehouse.warehouses")) return { rows: [{ isActive: 1 }] };
     if (rendered.sql.includes("FROM warehouse.warehouse_locations")) return { rows: [{ id: 22, warehouseId: 1, isActive: 1 }] };
     if (rendered.sql.includes("SELECT status FROM procurement.purchase_orders")) return { rows: [{ status: "sent" }] };

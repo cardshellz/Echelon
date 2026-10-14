@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "migration": "900000004000017890001_receiving_quarantine.sql",
+  "generation": 4,
+  "pr": 1789,
+  "ordinal": 1,
+  "after": [
+    "900000003000017710001_procurement_policy_revision.sql"
+  ]
+}
