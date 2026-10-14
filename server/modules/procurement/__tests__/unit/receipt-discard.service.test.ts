@@ -202,7 +202,8 @@ describe("ReceivingService.discardDraftReceivingOrder", () => {
           if (queryStr.includes("from procurement.receiving_orders") && queryStr.includes("for update")) {
             return { rows: [{ id: order.id }] };
           }
-          if (queryStr.includes("select")) {
+          if (queryStr.includes("from procurement.receiving_quarantine_")) return { rows: [] };
+          if (queryStr.includes("from procurement.purchase_orders")) {
             selectCallCount++;
             return { rows: selectRows };
           }

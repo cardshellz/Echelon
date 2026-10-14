@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 
 import { describe, expect, it, vi } from "vitest";
 import { WarehouseWorkError } from "../../../warehouse/work/domain/work-configuration";
+import { InventoryQuantityError } from "../../../inventory/domain/quantity-ledger";
 
 import { canonicalJson } from "@shared/utils/canonical-json";
 import {
@@ -31,6 +32,7 @@ function createPool(handler: (text: string, values: unknown[]) => Promise<any>) 
 
 function createInventoryWriter() {
   return {
+    assertCountableCustody: vi.fn(async () => undefined),
     ensureInventoryLevel: vi.fn(),
     applyCycleCountAdjustment: vi.fn(),
     recordCycleCountNoop: vi.fn(async () => ({ adjustmentTransactionId: 900 })),
@@ -3025,6 +3027,34 @@ describe("PostgresInventoryAvailabilityClaimRepository", () => {
       actor: "test-user",
       reason: "unit test",
     })).rejects.toEqual(expect.objectContaining({ code: "IDEMPOTENCY_KEY_REUSED" }));
+  });
+
+  it("rejects pending custody before locking levels, displacing claims or approving a count", async () => {
+    const fake = createPool(async text => {
+      if (text.startsWith("BEGIN") || text === "ROLLBACK") return { rows: [] };
+      if (text.includes("FROM inventory.availability_runtime_authority")) {
+        return { rows: [{ authority: "canonical", activation_run_id: "9", revision: "2" }] };
+      }
+      if (text.includes("FROM inventory.cycle_counts")) return { rows: [{ id: 8, status: "in_progress" }] };
+      if (text.includes("FROM inventory.cycle_count_items")) return { rows: [{
+        id: 81, cycle_count_id: 8, warehouse_location_id: 2, product_variant_id: 101,
+        counted_qty: 10, status: "variance", adjustment_transaction_id: null,
+      }] };
+      throw new Error(`Unexpected query after custody rejection: ${text}`);
+    });
+    const writer = createInventoryWriter();
+    writer.assertCountableCustody.mockRejectedValueOnce(new InventoryQuantityError(
+      "RECEIVING_CUSTODY_COUNT_CONFLICT", "Resolve held receipt 77 before counting"));
+    const repository = new PostgresInventoryAvailabilityClaimRepository(writer, fake.pool, () => FIXED_TIME);
+    await expect(repository.reconcileCycleCount({ cycleCountId: 8, cycleCountItemId: 81,
+      productVariantId: 101, warehouseLocationId: 2, countedQty: 10,
+      reasonCode: "verified", actor: "user:7", reason: "physical count" })).rejects.toMatchObject({ code: "RECEIVING_CUSTODY_COUNT_CONFLICT" });
+    expect(writer.assertCountableCustody).toHaveBeenCalledWith({ client: expect.any(Object), productVariantId: 101, warehouseLocationId: 2 });
+    expect(writer.applyCycleCountAdjustment).not.toHaveBeenCalled();
+    expect(writer.recordCycleCountNoop).not.toHaveBeenCalled();
+    expect(writer.releaseResources).not.toHaveBeenCalled();
+    expect(writer.approveCycleCountItem).not.toHaveBeenCalled();
+    expect(fake.query).toHaveBeenCalledWith("ROLLBACK");
   });
 
   it("approves an unchanged cycle count without an inventory mutation", async () => {

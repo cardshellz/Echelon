@@ -45,6 +45,10 @@ export async function installFixtures(page: Page) {
     else if (path === "/api/inbound-shipments/42/allocation-status") json = { issues: [], costs: [], status: "allocated", blockerCount: 0, warningCount: 0, lineCount: 1, allocatableCostCount: 1, effectiveCostCents: 10000, unallocatedCents: 0 };
     else if (path === "/api/inbound-shipments/42/invoices") json = { invoices: [invoice], summary: { invoiceCount: 1 } };
     else if (path === "/api/vendor-invoices/71") json = invoice;
+    else if (/^\/api\/receiving\/\d+\/quarantine$/.test(path)) json = {
+      receivingOrderId: Number(path.split("/")[3]), warehouseId: 1,
+      canRecord: { allowed: true, reason: null }, canAcceptAll: { allowed: true, reason: null }, observations: [],
+    };
     else if (/^\/api\/receiving\/\d+$/.test(path)) json = receipt(Number(path.split("/").at(-1)));
     else if (path.endsWith("/validation-warnings")) json = { warnings: [] };
     else if (path.endsWith("/reversals")) json = { reversals: [] };

@@ -184,6 +184,13 @@ export type CanonicalClaimCycleCountAdjustmentResult = {
 };
 
 export interface CanonicalClaimInventoryMutationPort {
+  /** Locks pending physical custody before count reconciliation takes level locks. */
+  assertCountableCustody(input: {
+    client: CanonicalClaimTransactionClient;
+    productVariantId: number;
+    warehouseLocationId: number;
+  }): Promise<void>;
+
   ensureInventoryLevel(input: {
     client: CanonicalClaimTransactionClient;
     productVariantId: number;

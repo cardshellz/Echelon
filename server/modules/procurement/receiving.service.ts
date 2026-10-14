@@ -2,6 +2,17 @@ import { enqueueReceiptCostRequests, processReceiptCostRequests } from "./receip
 import { RECEIPT_COST_RECOVERY_ACTOR } from "./receipt-cost-recovery.domain";
 import { lockInventoryCostGraph } from "../inventory/infrastructure/cost-evidence.repository";
 import { readReceivingSourceResolution, validateReceivingLocations, type ReceivingIntegrityTransaction } from "./receiving-close-integrity.repository";
+import {
+  assertNoReceivingCustodyHistory, assertReceivingQuarantineLineEditable,
+  readReceiptCustodyPresence, completeReceivingQuarantineAcceptances,
+} from "./receiving-quarantine.repository";
+import { lockReceivingCustodyFence } from "./receiving-custody-public";
+import { receivingQuarantineSourceVersion } from "./receiving-quarantine-receiving.port";
+import { ReceivingQuarantineError } from "./domain/receiving-quarantine";
+import type {
+  ReviewQuarantineIntakeInput, ReviewedQuarantineIntake, PrepareReceivingQuarantineAcceptanceInput,
+  PreparedReceivingQuarantineAcceptance,
+} from "./receiving-quarantine-receiving.port";
 /**
  * Receiving service for Echelon WMS.
  *
@@ -638,6 +649,7 @@ export class ReceivingService {
       if (order.status !== "draft") {
         throw new ReceivingError("Cannot discard a started receipt", 409);
       }
+      await assertNoReceivingCustodyHistory(tx, { receivingOrderId });
 
       const lines = await this.storage.getReceivingLines(receivingOrderId, tx);
       if (lines.some((line: any) => (Number(line.receivedQty) || 0) > 0)) {
@@ -733,6 +745,8 @@ export class ReceivingService {
         });
       }
 
+      await assertNoReceivingCustodyHistory(tx, { receivingOrderId });
+
       const summary = await this.getZeroPostSummary(receivingOrderId, tx);
       const hasPostedEffects =
         summary.receivedQty > 0 ||
@@ -803,6 +817,199 @@ export class ReceivingService {
   }
 
   // ─── Create and edit ──────────────────────────────────────────
+
+  /** Internal composition boundary: the custody owner already owns the cost
+   * graph and commits the observation together with this explicit recount. */
+  async reviewQuarantineIntakeInTransaction(tx: ReceivingIntegrityTransaction, input: ReviewQuarantineIntakeInput,
+    actorId: string, recordedAt: Date): Promise<ReviewedQuarantineIntake> {
+    this.assertQuarantineAuditContext(actorId, recordedAt);
+    receiptInteger(input.receivingOrderId, "Receiving order ID", true);
+    receiptInteger(input.receivingLineId, "Receiving line ID", true);
+    receiptInteger(input.acceptedQty, "Accepted quantity");
+    receiptInteger(input.heldQty, "Held quantity", true);
+    const { line, order } = await this.lockReceivingLineAndOrder(tx, input.receivingLineId);
+    if (order.id !== input.receivingOrderId) throw new ReceivingQuarantineError("RECEIVING_CUSTODY_SOURCE_MISMATCH",
+      "The receiving line does not belong to this receipt.");
+    await assertReceivingQuarantineLineEditable(tx, line.id, ["receivedQty", "damagedQty"]);
+    if (receivingUnitVersion(line) !== input.expectedUnitVersion) throw new ReceivingQuarantineError("RECEIVING_CUSTODY_STALE",
+      "Receipt counts or units changed. Refresh and review accepted and held quantities again.");
+    if (!line.productVariantId || line.unitsPerVariantSnapshot == null) throw new ReceivingQuarantineError("RECEIVING_CUSTODY_UNIT_REQUIRED",
+      "Confirm the recorded receive unit before separating accepted and held goods.");
+    // Resolve legacy source links before making the observation immutable.
+    // Held goods are physical evidence even when acceptedQty is zero.
+    if (order.purchaseOrderId) {
+      await tx.execute(sql`SELECT id FROM procurement.purchase_orders WHERE id=${order.purchaseOrderId} FOR UPDATE`);
+      await tx.execute(sql`SELECT id FROM procurement.purchase_order_lines WHERE purchase_order_id=${order.purchaseOrderId} ORDER BY id FOR UPDATE`);
+    }
+    const variant = await this.loadReceiveVariant(tx, line.productVariantId, line.productId);
+    if (variant.unitsPerVariant !== line.unitsPerVariantSnapshot) throw new ReceivingQuarantineError("RECEIVING_CUSTODY_UNIT_CHANGED",
+      "The catalog pack changed. Review the receive unit before recording quarantine.");
+    this.validateReceiptBaseCounts({ ...line, receivedQty: input.acceptedQty, damagedQty: input.heldQty }, variant.unitsPerVariant);
+    await this.validateLocations(tx, order, [{ putawayLocationId: input.holdingLocationId }]);
+    await this.assertReceiptSourceProduct(tx, line, order, variant.productId);
+    const sources = await readReceivingSourceResolution(tx, { receivingOrderId: order.id,
+      purchaseOrderId: order.purchaseOrderId ?? null, inboundShipmentId: order.inboundShipmentId ?? null,
+      lines: [{ id: line.id, productId: variant.productId, purchaseOrderLineId: line.purchaseOrderLineId ?? null,
+        inboundShipmentLineId: line.inboundShipmentLineId ?? null, receivedQty: input.acceptedQty, damagedQty: input.heldQty }] });
+    const resolved = sources.find(source => source.receivingLineId === line.id);
+    const updated = await this.storage.updateReceivingLine(line.id, {
+      productId: variant.productId, receivedQty: input.acceptedQty, damagedQty: 0, updatedAt: recordedAt,
+      purchaseOrderLineId: resolved?.purchaseOrderLineId ?? line.purchaseOrderLineId ?? null,
+      inboundShipmentLineId: resolved?.inboundShipmentLineId ?? line.inboundShipmentLineId ?? null,
+      status: this.receivingLineStatus(input.acceptedQty, line.expectedQty),
+    }, tx);
+    await this.updateReceivingOrderTotals(order.id, tx);
+    await tx.execute(sql`INSERT INTO public.audit_events(timestamp,level,actor,action,target,changes,context)
+      VALUES(${recordedAt},'AUDIT',${actorId},'procurement.receiving.quarantine_recount',${`receiving-line:${line.id}`},
+        ${JSON.stringify({ before: line, after: updated })}::jsonb,
+        ${JSON.stringify({ receivingOrderId: order.id, reviewedAcceptedQty: input.acceptedQty, reviewedHeldQty: input.heldQty })}::jsonb)`);
+    return { order, lineBefore: line, lineAfter: updated, productId: variant.productId,
+      productVariantId: variant.id, unitsPerVariantSnapshot: variant.unitsPerVariant };
+  }
+
+  /** Prepare a dedicated, protected normal receipt line. No quantity, lot,
+   * valuation, PO receipt, supplier credit or publication is posted here. */
+  async prepareQuarantineAcceptanceInTransaction(tx: ReceivingIntegrityTransaction, input: PrepareReceivingQuarantineAcceptanceInput,
+    actorId: string, recordedAt: Date): Promise<PreparedReceivingQuarantineAcceptance> {
+    this.assertQuarantineAuditContext(actorId, recordedAt);
+    receiptInteger(input.sourceReceivingOrderId, "Source receiving order ID", true);
+    receiptInteger(input.acceptedVariantQty, "Accepted receive quantity", true);
+    receiptInteger(input.expectedUnitsPerVariant, "Reviewed receive pack size", true);
+    receiptInteger(input.observationId, "Quarantine observation ID", true);
+    const orderIds = [...new Set([input.sourceReceivingOrderId, input.targetReceivingOrderId].filter((id): id is number => id !== null))].sort((a, b) => a-b);
+    const orders = new Map<number, any>();
+    for (const id of orderIds) {
+      receiptInteger(id, "Receiving order ID", true);
+      orders.set(id, await this.lockReceivingOrder(tx, id));
+    }
+    const source = orders.get(input.sourceReceivingOrderId)!;
+    if (source.status === "cancelled") throw new ReceivingQuarantineError("RECEIVING_CUSTODY_SOURCE_CANCELLED",
+      "The quarantine source receipt is cancelled. Review its history before accepting goods.");
+    let target = input.targetReceivingOrderId === null ? source : orders.get(input.targetReceivingOrderId)!;
+    if (input.targetReceivingOrderId !== null) this.assertReceivingOrderMutable(target);
+    const createsReceipt = input.targetReceivingOrderId === null && source.status === "closed";
+    if (!createsReceipt) this.assertReceivingOrderMutable(target);
+    receiptInteger(input.targetSourceReceivingLineId, "Reviewed source receiving line ID", true);
+    await tx.execute(sql`SELECT id FROM procurement.receiving_lines WHERE id=${input.targetSourceReceivingLineId}
+      AND receiving_order_id=${target.id} FOR UPDATE`);
+    const templateLine = await this.storage.getReceivingLineById(input.targetSourceReceivingLineId, tx);
+    if (!templateLine || templateLine.receivingOrderId !== target.id ||
+      receivingQuarantineSourceVersion(templateLine) !== input.expectedTargetUnitVersion) {
+      throw new ReceivingQuarantineError("RECEIVING_CUSTODY_TARGET_CHANGED",
+        "The selected receiving source changed. Refresh and review its exact line and units before accepting quarantine.");
+    }
+    const priorAcceptance = await tx.execute(sql`SELECT id FROM procurement.receiving_quarantine_acceptances
+      WHERE receiving_line_id=${templateLine.id} LIMIT 1`);
+    if (priorAcceptance.rows.length > 0) throw new ReceivingQuarantineError("RECEIVING_CUSTODY_TARGET_PROTECTED",
+      "This line already records a quarantine acceptance. Select an original reviewed receiving source instead.");
+    if (templateLine.productVariantId !== input.productVariantId ||
+      templateLine.unitsPerVariantSnapshot !== input.expectedUnitsPerVariant ||
+      (templateLine.purchaseOrderLineId ?? null) !== input.purchaseOrderLineId ||
+      (templateLine.inboundShipmentLineId ?? null) !== input.inboundShipmentLineId) {
+      throw new ReceivingQuarantineError("RECEIVING_CUSTODY_TARGET_CHANGED",
+        "The reviewed receive unit and purchase/shipment source must match the selected receiving line.");
+    }
+    if (!source.warehouseId || target.warehouseId !== source.warehouseId) throw new ReceivingQuarantineError("RECEIVING_CUSTODY_WAREHOUSE_MISMATCH",
+      "Accept quarantined goods into a receipt in their recorded warehouse. A warehouse transfer is a separate action.");
+    if (target.purchaseOrderId && input.purchaseOrderLineId === null) throw new ReceivingQuarantineError("RECEIVING_CUSTODY_PURCHASE_SOURCE_REQUIRED",
+      "Select the exact purchase line before accepting quarantined goods into this receipt.");
+    if ((!target.purchaseOrderId && input.purchaseOrderLineId !== null) ||
+      (!target.inboundShipmentId && input.inboundShipmentLineId !== null) ||
+      (target.inboundShipmentId && input.inboundShipmentLineId === null)) {
+      throw new ReceivingQuarantineError("RECEIVING_CUSTODY_SOURCE_MISMATCH",
+        "Select a receipt and exact purchase/shipment lines that belong to the same source.");
+    }
+    if (target.purchaseOrderId) {
+      await tx.execute(sql`SELECT id FROM procurement.purchase_orders WHERE id=${target.purchaseOrderId} FOR UPDATE`);
+      await tx.execute(sql`SELECT id FROM procurement.purchase_order_lines WHERE purchase_order_id=${target.purchaseOrderId} ORDER BY id FOR UPDATE`);
+    }
+    const variant = await this.loadReceiveVariant(tx, input.productVariantId);
+    if (variant.unitsPerVariant !== input.expectedUnitsPerVariant) throw new ReceivingQuarantineError("RECEIVING_CUSTODY_UNIT_CHANGED",
+      "The selected catalog pack changed. Review the acceptance conversion again.");
+    const counts = { expectedQty: input.acceptedVariantQty, receivedQty: input.acceptedVariantQty, damagedQty: 0 };
+    this.validateReceiptBaseCounts(counts, variant.unitsPerVariant);
+    await this.validateLocations(tx, target, [{ putawayLocationId: input.putawayLocationId }]);
+    const sourceLine = { id: 0, productId: variant.productId, purchaseOrderLineId: input.purchaseOrderLineId,
+      inboundShipmentLineId: input.inboundShipmentLineId, ...counts };
+    await this.assertReceiptSourceProduct(tx, sourceLine, target, variant.productId);
+    await readReceivingSourceResolution(tx, { receivingOrderId: target.id, purchaseOrderId: target.purchaseOrderId ?? null,
+      inboundShipmentId: target.inboundShipmentId ?? null, lines: [sourceLine] });
+    if (createsReceipt) {
+      if (target.inboundShipmentId && target.purchaseOrderId) {
+        const active = await tx.execute(sql`SELECT id FROM procurement.receiving_orders
+          WHERE inbound_shipment_id=${target.inboundShipmentId} AND purchase_order_id=${target.purchaseOrderId}
+            AND status IN ('draft','open','receiving','verified') ORDER BY id`);
+        if (active.rows.length > 0) throw new ReceivingQuarantineError("RECEIVING_CUSTODY_TARGET_REQUIRED",
+          "An active receipt already exists for this shipment. Select that receipt before preparing acceptance.", 409,
+          { receivingOrderIds: active.rows.map((row) => (row as { id: number }).id) });
+      }
+      target = await this.storage.createReceivingOrder({
+        receiptNumber: await this.storage.generateReceiptNumber(tx), sourceType: source.sourceType,
+        vendorId: source.vendorId ?? null, warehouseId: source.warehouseId,
+        poNumber: source.poNumber ?? null, purchaseOrderId: source.purchaseOrderId ?? null,
+        inboundShipmentId: source.inboundShipmentId ?? null, asnNumber: source.asnNumber ?? null,
+        status: "draft", createdBy: actorId, createdAt: recordedAt, updatedAt: recordedAt,
+        notes: `Acceptance from quarantine observation ${input.observationId}. ${input.reason}`,
+      }, tx);
+    }
+    const catalogVariant = await this.storage.getProductVariantById(variant.id, tx);
+    const unitCostMills = templateLine.unitCostMills == null ? null : requireNonNegativeInteger(templateLine.unitCostMills, "Reviewed unit cost mills");
+    const unitCost = templateLine.unitCost == null ? null : requireNonNegativeInteger(templateLine.unitCost, "Reviewed unit cost cents");
+    if (unitCostMills !== null && unitCost !== null && millsToCents(unitCostMills) !== unitCost) {
+      throw new ReceivingQuarantineError("RECEIVING_CUSTODY_COST_REVIEW_REQUIRED",
+        "The selected receipt line's cost amounts disagree. Correct its source cost before preparing acceptance.");
+    }
+    const line = await this.storage.createReceivingLine({
+      receivingOrderId: target.id, productId: variant.productId, productVariantId: variant.id,
+      sku: catalogVariant?.sku ?? null, productName: catalogVariant?.name ?? null,
+      unitsPerVariantSnapshot: variant.unitsPerVariant, ...counts,
+      purchaseOrderLineId: input.purchaseOrderLineId, inboundShipmentLineId: input.inboundShipmentLineId,
+      putawayLocationId: input.putawayLocationId, putawayComplete: 0, status: "complete",
+      // Copy reviewed per-piece evidence exactly. The ordinary close owner
+      // resolves confirmed PO sources; manual/legacy evidence stays provisional.
+      unitCost, unitCostMills, costSourceKind: templateLine.costSourceKind ?? null,
+      costSourceEvidence: templateLine.costSourceEvidence ?? null,
+      notes: `Prepared from quarantine observation ${input.observationId}. ${input.reason}`,
+      createdAt: recordedAt, updatedAt: recordedAt,
+    }, tx);
+    await this.updateReceivingOrderTotals(target.id, tx);
+    await tx.execute(sql`INSERT INTO public.audit_events(timestamp,level,actor,action,target,changes,context)
+      VALUES(${recordedAt},'AUDIT',${actorId},'procurement.receiving.quarantine_acceptance_prepared',${`receiving-line:${line.id}`},
+        ${JSON.stringify({ before: null, after: line })}::jsonb,
+        ${JSON.stringify({ observationId: input.observationId, sourceReceivingOrderId: source.id, receivingOrderId: target.id })}::jsonb)`);
+    return { receivingOrderId: target.id, receivingLineId: line.id, productId: variant.productId,
+      productVariantId: variant.id, unitsPerVariantSnapshot: variant.unitsPerVariant, acceptedVariantQty: input.acceptedVariantQty };
+  }
+
+  /** Only the custody owner may cancel its locked, unposted acceptance. Keep
+   * the source line and FK history; a zero count cannot become available stock. */
+  async cancelQuarantineAcceptanceInTransaction(tx: ReceivingIntegrityTransaction,
+    input: { receivingOrderId: number; receivingLineId: number; acceptanceId: number }, actorId: string, recordedAt: Date): Promise<void> {
+    this.assertQuarantineAuditContext(actorId, recordedAt);
+    const { line, order } = await this.lockReceivingLineAndOrder(tx, input.receivingLineId);
+    if (order.id !== input.receivingOrderId || line.putawayComplete === 1) throw new ReceivingQuarantineError("RECEIVING_CUSTODY_ACCEPTANCE_POSTED",
+      "This acceptance has already been posted or changed source. Use the recorded receipt correction workflow.");
+    const acceptance = await tx.execute(sql`SELECT id FROM procurement.receiving_quarantine_acceptances
+      WHERE id=${input.acceptanceId} AND receiving_order_id=${order.id} AND receiving_line_id=${line.id}
+        AND status='awaiting_receipt' FOR UPDATE`);
+    if (acceptance.rows.length !== 1) throw new ReceivingQuarantineError("RECEIVING_CUSTODY_ACCEPTANCE_CHANGED",
+      "The prepared acceptance changed. Refresh quarantine before cancelling it.");
+    const updated = await this.storage.updateReceivingLine(line.id, {
+      receivedQty: 0, expectedQty: 0, damagedQty: 0, status: "pending", updatedAt: recordedAt,
+    }, tx);
+    await this.updateReceivingOrderTotals(order.id, tx);
+    await tx.execute(sql`INSERT INTO public.audit_events(timestamp,level,actor,action,target,changes,context)
+      VALUES(${recordedAt},'AUDIT',${actorId},'procurement.receiving.quarantine_acceptance_cancelled',${`receiving-line:${line.id}`},
+        ${JSON.stringify({ before: line, after: updated })}::jsonb,
+        ${JSON.stringify({ acceptanceId: input.acceptanceId, receivingOrderId: order.id })}::jsonb)`);
+  }
+
+  private assertQuarantineAuditContext(actorId: string, recordedAt: Date): void {
+    if (!actorId?.trim() || actorId !== actorId.trim() || actorId.length > 100 ||
+      !(recordedAt instanceof Date) || !Number.isFinite(recordedAt.getTime())) {
+      throw new ReceivingQuarantineError("RECEIVING_CUSTODY_AUDIT_REQUIRED", "A verified actor and valid time are required for custody changes.", 400);
+    }
+  }
 
   async createOrder(input: Record<string, unknown>, userId?: string | null) {
     assertOnlyAllowedFields(input, RECEIVING_ORDER_CREATE_FIELDS, "Receiving order create");
@@ -891,6 +1098,9 @@ export class ReceivingService {
     return await this.db.transaction(async (tx) => {
       const order = await this.lockReceivingOrder(tx, orderId);
       this.assertReceivingOrderMutable(order);
+      if ("warehouseId" in updates && updates.warehouseId !== order.warehouseId) {
+        await assertNoReceivingCustodyHistory(tx, { receivingOrderId: orderId });
+      }
       const changesDestination = "warehouseId" in updates || "receivingLocationId" in updates;
       if (changesDestination) {
         await tx.execute(sql`SELECT id FROM procurement.receiving_lines WHERE receiving_order_id=${orderId} ORDER BY id FOR UPDATE`);
@@ -1041,6 +1251,7 @@ export class ReceivingService {
 
     return await this.db.transaction(async (tx) => {
       const { line, order } = await this.lockReceivingLineAndOrder(tx, lineId);
+      await assertReceivingQuarantineLineEditable(tx, lineId, Object.keys(fields));
       if (changesUnits && receivingUnitVersion(line) !== expectedUnitVersion) {
         throw new ReceivingError("Receipt counts or units changed. Refresh, review the current line, and save again.", 409, { code: "RECEIVING_UNIT_VERSION_CONFLICT", receivingLineId: lineId });
       }
@@ -1107,6 +1318,7 @@ export class ReceivingService {
   async deleteLine(lineId: number): Promise<boolean> {
     return await this.db.transaction(async (tx) => {
       const { line } = await this.lockReceivingLineAndOrder(tx, lineId);
+      await assertNoReceivingCustodyHistory(tx, { receivingLineId: lineId });
       const deleted = await this.storage.deleteReceivingLine(lineId, tx);
       if (deleted) {
         await this.updateReceivingOrderTotals(line.receivingOrderId, tx);
@@ -1119,6 +1331,7 @@ export class ReceivingService {
     return await this.db.transaction(async (tx) => {
       const order = await this.lockReceivingOrder(tx, orderId);
       this.assertReceivingOrderMutable(order);
+      await assertNoReceivingCustodyHistory(tx, { receivingOrderId: orderId });
       return await this.storage.deleteReceivingOrder(orderId, tx);
     });
   }
@@ -1197,10 +1410,17 @@ export class ReceivingService {
     const orderSnapshot = canonicalJson(order);
     let lines = await this.storage.getReceivingLines(orderId);
     const lineSnapshot = receivingLinesSnapshot(lines);
+    // Historical damage counts do not prove whether those units were included
+    // in receivedQty. Require an explicit accepted/held recount before posting.
+    if (lines.some((line: any) => Number(line.damagedQty) > 0)) {
+      throw new ReceivingQuarantineError("RECEIVING_DAMAGE_CUSTODY_REQUIRED",
+        "Review accepted and held quantities in quarantine before closing a receipt with damaged goods.");
+    }
     if (
       order.sourceType === "shipment" &&
       lines.length > 0 &&
-      lines.every((line: any) => (Number(line.receivedQty) || 0) <= 0)
+      lines.every((line: any) => (Number(line.receivedQty) || 0) <= 0) &&
+      !await readReceiptCustodyPresence(this.db, orderId)
     ) {
       throw new ReceivingError(
         "Shipment receipts cannot be finalized with zero received quantity. Enter received quantities or void the zero-post receipt.",
@@ -1269,6 +1489,7 @@ export class ReceivingService {
 
     const closeResult = await this.db.transaction(async (tx) => {
       await lockInventoryCostGraph(tx);
+      await lockReceivingCustodyFence(tx, "write");
       const lockedOrder = await this.lockReceivingOrder(tx, orderId);
       if (lockedOrder.status === "cancelled") {
         throw new ReceivingError("Order already cancelled");
@@ -1475,6 +1696,11 @@ export class ReceivingService {
     const reconciledLines = await this.storage.getReceivingLines(orderId, tx);
     const poReconciliation = await this.reconcileLinkedPurchaseOrder(orderId, updated, reconciledLines, userId,
       { executor: tx, recordedAt: closeAt });
+    // The stock, PO acceptance and pending-custody completion share one commit.
+    // Preparation alone never removes physical goods from quarantine custody.
+    await completeReceivingQuarantineAcceptances(tx, {
+      receivingOrderId: orderId, actorId: userId || "system:receiving", recordedAt: closeAt,
+    });
     return { updated, replayed: false, poReconciliation };
     });
 
@@ -1539,6 +1765,7 @@ export class ReceivingService {
     const result = await this.db.transaction(async (tx) => {
       const order = await this.lockReceivingOrder(tx, orderId);
       this.assertReceivingOrderMutable(order);
+      await assertNoReceivingCustodyHistory(tx, { receivingOrderId: orderId });
       const lines = await this.storage.getReceivingLines(orderId, tx);
       if (!lines.length) throw new ReceivingError("No lines found for this order", 404);
       const supplied = input && typeof input === "object" && !Array.isArray(input) ? input as Record<string, unknown> : {};
