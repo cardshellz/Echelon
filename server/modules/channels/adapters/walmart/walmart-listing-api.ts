@@ -18,6 +18,13 @@ export const WALMART_LISTING_SPEC = {
   MP_ITEM_MATCH: "5.0.20260607-22_38_54-api",
   MP_MAINTENANCE: "5.0.20260803-17_50_56-api",
 } as const;
+// Catalog search still returns 4.2 templates. We use them only to verify the
+// selling-unit match; outgoing offers use the pinned 5.x schema above.
+// https://developer.walmart.com/us-marketplace/docs/create-an-offer-for-an-existing-walmart-item
+const CATALOG_MATCH_TEMPLATE_VERSIONS = new Set<string>([
+  "4.2",
+  WALMART_LISTING_SPEC.MP_ITEM_MATCH,
+]);
 export type WalmartListingFeedType = "MP_ITEM" | "MP_ITEM_MATCH";
 export type WalmartItemSchemaFeedType = keyof typeof WALMART_LISTING_SPEC;
 export const walmartListingFeedTypeSchema = z.enum([
@@ -249,7 +256,14 @@ export class WalmartListingApi {
     );
     const match = parsed.items?.[0];
     if (!match) return null;
-    if (match.version !== WALMART_LISTING_SPEC[match.feedType]) {
+    const header = parse(
+      z.object({ MPItemFeedHeader: z.object({ version: z.string() }) }),
+      match.itemSpecPayload,
+    ).MPItemFeedHeader;
+    const supportedVersion = match.feedType === "MP_ITEM_MATCH"
+      ? CATALOG_MATCH_TEMPLATE_VERSIONS.has(match.version)
+      : match.version === WALMART_LISTING_SPEC[match.feedType];
+    if (!supportedVersion || header.version !== match.version) {
       throw new WalmartApiError(
         "WALMART_SPEC_VERSION_MISMATCH",
         "Walmart catalog matching uses a different specification version; refresh listing requirements",

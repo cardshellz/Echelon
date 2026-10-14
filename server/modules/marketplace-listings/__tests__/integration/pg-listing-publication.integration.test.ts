@@ -586,7 +586,7 @@ CREATE TABLE catalog.product_variants(id integer PRIMARY KEY, product_id integer
       },
     );
 
-    async function acceptedRecreation(externalProductId: string | null = "old-wpid") {
+    async function acceptedRecreation(externalProductId: string | null = "old-wpid", method: "create" | "match" = "create") {
       const original = await repository.createOperation(input(await saveReview()));
       const claimed = (await repository.claim(fixedNow, testId(60)))!;
       const progress = structuredClone(claimed.progress);
@@ -598,16 +598,24 @@ CREATE TABLE catalog.product_variants(id integer PRIMARY KEY, product_id integer
         nextAttemptAt: new Date(fixedNow.getTime() + 900_000), releaseLease: true, actor: "worker" });
       const next = publicationSnapshot([10], testAccount, testId(101));
       next.draft.items[0].recreateFromOperationId = original.id;
+      next.draft.items[0].method = method;
+      next.review.items[0].method = method;
+      if (method === "match") {
+        next.prepared[0].feedType = "MP_ITEM_MATCH";
+        next.prepared[0].payload = { Item: next.prepared[0].payload.Orderable };
+      }
       next.recreations = [{ operationId: original.id, variantId: 10, sku: "SKU-10", previousExternalProductId: "old-wpid",
         sourceHash: listingHash(original.snapshot), checkedAt: fixedNow.toISOString() }];
       return { prior, next: await saveReview(next) };
     }
 
-    it("atomically supersedes an accepted deleted listing, transfers its claim and preserves immutable history", async () => {
-      const { prior, next } = await acceptedRecreation();
+    it.each(["create", "match"] as const)("atomically supersedes an accepted deleted listing with %s, transfers its claim and preserves immutable history", async method => {
+      const { prior, next } = await acceptedRecreation("old-wpid", method);
       const replacement = await repository.createOperation(input(next, 102, 103));
       const old = await repository.operation(104, prior.id);
       expect(old.snapshot).toEqual(prior.snapshot);
+      expect(replacement.snapshot.draft.items[0].method).toBe(method);
+      expect(replacement.snapshot.draft.items[0].identifier).toEqual(prior.snapshot.draft.items[0].identifier);
       expect(old.progress.items[0]).toMatchObject({ state: "superseded", recreatedByOperationId: replacement.id, canRetry: false });
       expect(old.progress.batches[0].submissionId).toBe("accepted-feed");
       expect(old.state).toBe("completed");
@@ -636,8 +644,8 @@ CREATE TABLE catalog.product_variants(id integer PRIMARY KEY, product_id integer
       expect(replacement.snapshot.recreations?.[0].previousExternalProductId).toBe("old-wpid");
       expect((await repository.operation(104, prior.id)).progress.items[0]).toMatchObject({ state: "superseded", externalProductId: null });
     });
-    it("allows only one recreation when two reviewed requests compete for the same SKU", async () => {
-      const { prior, next } = await acceptedRecreation();
+    it.each(["create", "match"] as const)("allows only one %s recreation when two reviewed requests compete for the same SKU", async method => {
+      const { prior, next } = await acceptedRecreation("old-wpid", method);
       const competing = structuredClone(next); competing.review.id = testId(104);
       await repository.saveReview(competing, "other-operator", fixedNow);
       const results = await Promise.allSettled([
@@ -649,8 +657,8 @@ CREATE TABLE catalog.product_variants(id integer PRIMARY KEY, product_id integer
       const owner = (await database.pool.query("SELECT operation_id FROM marketplace.channel_listing_item_claims")).rows[0].operation_id;
       expect((await repository.operation(104, prior.id)).progress.items[0].recreatedByOperationId).toBe(owner);
     });
-    it("rolls back supersession, claim transfer and draft consumption if final audit persistence fails", async () => {
-      const { prior, next } = await acceptedRecreation();
+    it.each(["create", "match"] as const)("rolls back %s supersession, claim transfer and draft consumption if final audit persistence fails", async method => {
+      const { prior, next } = await acceptedRecreation("old-wpid", method);
       await database.pool.query(`CREATE OR REPLACE FUNCTION marketplace.reject_recreation_audit() RETURNS trigger LANGUAGE plpgsql AS $$
         BEGIN IF NEW.action='publication_queued' THEN RAISE EXCEPTION 'forced recreation audit failure'; END IF; RETURN NEW; END; $$;
         CREATE TRIGGER test_reject_event BEFORE INSERT ON marketplace.channel_listing_publication_events

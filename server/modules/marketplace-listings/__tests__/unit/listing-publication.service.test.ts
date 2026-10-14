@@ -1142,6 +1142,37 @@ describe("deleted Walmart listing recreation", () => {
       images: ["https://example.com/new.jpg"], attributes: { Orderable: { ShippingWeight: 2 }, Visible: { pieceCount: 100 } } });
     expect(lastSubmitted).toHaveBeenCalledWith(h.operation.snapshot.account, "SKU-10", "original-wpid", { includeInitial: false });
   });
+  it("pins the originally inherited GTIN even when the current catalog identifier has changed", async () => {
+    const h = settled();
+    const identifier = { type: "GTIN" as const, value: "00850025354769" };
+    h.operation.snapshot.draft.items[0].identifier = null;
+    h.operation.snapshot.catalog[0].identifier = identifier;
+    const catalog = { ...h.operation.snapshot.catalog[0], identifier: { type: "GTIN" as const, value: "10850025354162" } };
+    h.catalog.catalog.mockResolvedValue({ items: [catalog], total: 1, offset: 0, limit: 25 });
+    const recovered = await h.service.recreation(104, request);
+    expect(recovered.item.identifier).toEqual(identifier);
+    h.store.draft.mockResolvedValue({ ...h.operation.snapshot.draft, items: [{ ...recovered.item, method: "match" }] });
+    const review = await h.service.review(104, { expectedRevision: 1 }, "operator");
+    expect(review.canSubmit).toBe(true);
+    expect(h.provider.prepare).toHaveBeenCalledWith(recovered.account, expect.objectContaining({ draft: expect.objectContaining({ identifier }) }));
+  });
+  it.each(["create", "match"] as const)("rejects a changed selling-unit identifier during %s recreation before preparing an offer", async method => {
+    const h = settled();
+    const recovered = await h.service.recreation(104, request);
+    h.store.draft.mockResolvedValue({ ...h.operation.snapshot.draft, items: [{ ...recovered.item, method,
+      identifier: { type: "GTIN", value: "00850025354769" } }] });
+    await expect(h.service.review(104, { expectedRevision: 1 }, "operator")).rejects.toMatchObject({ code: "LISTING_RECREATION_IDENTITY_CHANGED" });
+    expect(h.provider.prepare).not.toHaveBeenCalled();
+    expect(h.provider.submit).not.toHaveBeenCalled();
+  });
+  it("reviews a catalog match without requiring replacement local product photos", async () => {
+    const h = settled();
+    const recovered = await h.service.recreation(104, request);
+    h.store.draft.mockResolvedValue({ ...h.operation.snapshot.draft, items: [{ ...recovered.item, method: "match" }] });
+    h.catalog.catalog.mockResolvedValue({ items: [{ ...recovered.catalog, imageIssues: [{ code: "CATALOG_IMAGE_UNAVAILABLE", message: "Missing local photo", field: "images" }] }], total: 1, offset: 0, limit: 25 });
+    expect((await h.service.review(104, { expectedRevision: 1 }, "operator")).canSubmit).toBe(true);
+    expect(h.provider.prepare).toHaveBeenCalledOnce();
+  });
   it("uses the exact saved mapping to retain accepted edits when the original feed omitted its product ID", async () => {
     const h = settled();
     h.operation.progress.items[0].externalProductId = null;
@@ -1186,15 +1217,16 @@ describe("deleted Walmart listing recreation", () => {
     await expect(h.service.recreation(104, request)).rejects.toMatchObject({ code: "LISTING_PUBLICATION_STOPPED" });
     expect(h.provider.submit).not.toHaveBeenCalled();
   });
-  it("reviews linked recreation through full-item preparation and rechecks absence before queueing", async () => {
+  it.each(["create", "match"] as const)("reviews linked recreation through %s preparation and rechecks absence before queueing", async method => {
     const h = settled();
     const recovered = await h.service.recreation(104, request);
+    recovered.item.method = method;
     h.store.draft.mockResolvedValue({ ...h.operation.snapshot.draft, items: [recovered.item] });
     h.catalog.catalog.mockResolvedValue({ items: [{ ...recovered.catalog, alreadyLinked: true }], total: 1, offset: 0, limit: 25 });
     const review = await h.service.review(104, { expectedRevision: 1 }, "operator");
     expect(review.canSubmit).toBe(true);
     expect(review.items[0].recreating).toBe(true);
-    expect(h.provider.prepare).toHaveBeenCalledWith(recovered.account, expect.objectContaining({ recreating: true, catalog: expect.objectContaining({ alreadyLinked: true }) }));
+    expect(h.provider.prepare).toHaveBeenCalledWith(recovered.account, expect.objectContaining({ recreating: true, draft: expect.objectContaining({ method, identifier: recovered.item.identifier }), catalog: expect.objectContaining({ alreadyLinked: true }) }));
     const snapshot = h.store.saveReview.mock.calls[0][0];
     expect(snapshot.recreations?.[0]).toMatchObject({ operationId: testId(3), sku: "SKU-10", sourceHash: listingHash(h.operation.snapshot) });
     h.store.review.mockResolvedValue(snapshot);
@@ -1228,12 +1260,15 @@ describe("deleted Walmart listing recreation", () => {
     h.provider.status.mockResolvedValue({ state: "processed", items: [result("SKU-10", "accepted")] });
     return { ...h, prior };
   }
-  it("sends a full-item replacement through the quantity owner and relinks only its verified new product identity", async () => {
-    const h = replacement();
+  it.each(["create", "match"] as const)("sends a %s replacement through the quantity owner and relinks only its verified product identity", async method => {
+    const snapshot = publicationSnapshot();
+    snapshot.draft.items[0].method = method;
+    snapshot.prepared[0].feedType = method === "match" ? "MP_ITEM_MATCH" : "MP_ITEM";
+    const h = replacement(snapshot);
     await h.run();
     expect(h.inventory.submitInitialStock).toHaveBeenCalledOnce();
     expect(h.provider.submit).toHaveBeenCalledWith(h.prior.snapshot.account, expect.objectContaining({
-      items: [expect.objectContaining({ feedType: "MP_ITEM" })],
+      items: [expect.objectContaining({ feedType: method === "match" ? "MP_ITEM_MATCH" : "MP_ITEM" })],
       stockAdmission: expect.objectContaining({ items: [{ productVariantId: 10, sku: "SKU-10", quantity: 0 }] }),
     }));
     expect(h.linkRecreated).toHaveBeenCalledExactlyOnceWith(h.prior.snapshot.account, {

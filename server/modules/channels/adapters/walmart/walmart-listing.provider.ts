@@ -21,6 +21,7 @@ import {
   listingJsonHash,
   walmartListingFeedTypeSchema,
   type WalmartListingFeedType,
+  type WalmartListingIdentifier,
   type WalmartListingSchema,
 } from "./walmart-listing-api";
 import {
@@ -258,47 +259,9 @@ export class WalmartListingProvider implements ListingPublicationProvider {
         throw error;
     }
     if (feedType === "MP_ITEM_MATCH") {
-      const matched = await api.match(identifier);
-      if (!matched || matched.feedType !== "MP_ITEM_MATCH") {
-        issues.push(
-          issue(
-            "WALMART_CATALOG_MATCH_REQUIRED",
-            "No existing Walmart product was confirmed for this identifier; use new item setup",
-            "identifier",
-          ),
-        );
-        return result;
-      }
-      const parsed = z
-        .object({
-          MPItem: z
-            .array(
-              z.object({
-                Item: z.object({
-                  productIdentifiers: z.object({
-                    productIdType: z.enum(["GTIN", "UPC", "EAN", "ISBN"]),
-                    productId: z.string(),
-                  }),
-                }),
-              }),
-            )
-            .length(1),
-        })
-        .safeParse(matched.payload);
-      if (
-        !parsed.success ||
-        !sameProductIdentifier(identifier, {
-          type: parsed.data.MPItem[0].Item.productIdentifiers.productIdType,
-          value: parsed.data.MPItem[0].Item.productIdentifiers.productId,
-        })
-      ) {
-        issues.push(
-          issue(
-            "WALMART_CATALOG_IDENTIFIER_MISMATCH",
-            "The Walmart catalog match has a different selling-unit identifier",
-            "identifier",
-          ),
-        );
+      const matchIssue = await this.catalogMatchIssue(api, identifier);
+      if (matchIssue) {
+        issues.push(matchIssue);
         return result;
       }
     }
@@ -307,7 +270,12 @@ export class WalmartListingProvider implements ListingPublicationProvider {
     const title = draft.title ?? input.catalog.title;
     const description = draft.description ?? input.catalog.description;
     const brand = draft.brand ?? input.catalog.brand;
-    const images = draft.images ?? input.catalog.images;
+    // A new-condition catalog offer reuses Walmart's existing product content.
+    // Other conditions can require offer-specific images under the match schema.
+    const reusesCatalogContent = feedType === "MP_ITEM_MATCH" && orderable.condition === "New";
+    const images = reusesCatalogContent ? [] : draft.images ?? input.catalog.images;
+    if (feedType === "MP_ITEM_MATCH" && !reusesCatalogContent && draft.images === null)
+      issues.push(...(input.catalog.imageIssues ?? []));
     const imageUrls = z
       .array(
         z
@@ -341,7 +309,6 @@ export class WalmartListingProvider implements ListingPublicationProvider {
         ? {
             Item: {
               ...offer,
-              productName: title,
               ...(images.length ? { mainImageUrl: images[0] } : {}),
             },
           }
@@ -487,6 +454,18 @@ export class WalmartListingProvider implements ListingPublicationProvider {
           if (!(error instanceof WalmartApiError) || error.status !== 404)
             throw error;
         }
+        if (feedType === "MP_ITEM_MATCH") {
+          const identifier = z.object({
+            productIdType: z.enum(["GTIN", "UPC", "EAN", "ISBN"]),
+            productId: z.string(),
+          }).parse(offer.productIdentifiers);
+          const matchIssue = await this.catalogMatchIssue(api, {
+            type: identifier.productIdType,
+            value: identifier.productId,
+          });
+          if (matchIssue)
+            throw new WalmartApiError(matchIssue.code, matchIssue.message, false);
+        }
       }
       this.validateVariantGroups(items, feedType);
       return await this.channels.withListingWrites(account, input.items.map(item => item.sku), async () => {
@@ -521,6 +500,41 @@ export class WalmartListingProvider implements ListingPublicationProvider {
           : "The listing submission could not complete. Review its recorded outcome before trying again.";
       throw new ListingSubmissionError(code, message, effect);
     }
+  }
+
+  /** Recheck the exact identifier at review and before sending. A catalog lookup
+   * template never supplies our SKU, price, inventory, or outgoing schema. */
+  private async catalogMatchIssue(
+    api: WalmartListingApi,
+    identifier: WalmartListingIdentifier,
+  ): Promise<ListingIssue | null> {
+    const matched = await api.match(identifier);
+    if (!matched || matched.feedType !== "MP_ITEM_MATCH")
+      return issue(
+        "WALMART_CATALOG_MATCH_REQUIRED",
+        "No existing Walmart product was confirmed for this identifier; use new item setup",
+        "identifier",
+      );
+    const parsed = z.object({
+      MPItem: z.array(z.object({
+        Item: z.object({
+          productIdentifiers: z.object({
+            productIdType: z.enum(["GTIN", "UPC", "EAN", "ISBN"]),
+            productId: z.string(),
+          }),
+        }),
+      })).length(1),
+    }).safeParse(matched.payload);
+    if (!parsed.success || !sameProductIdentifier(identifier, {
+      type: parsed.data.MPItem[0].Item.productIdentifiers.productIdType,
+      value: parsed.data.MPItem[0].Item.productIdentifiers.productId,
+    }))
+      return issue(
+        "WALMART_CATALOG_IDENTIFIER_MISMATCH",
+        "The Walmart catalog match has a different selling-unit identifier",
+        "identifier",
+      );
+    return null;
   }
 
   async status(
