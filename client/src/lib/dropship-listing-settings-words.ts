@@ -108,23 +108,24 @@ export function connectionBannerWords(banner: ConnectionBanner, store: string): 
     case "other_site":
       return { message: `Card Shellz lists on eBay US only. ${capitalize(name)} is set up for another eBay site. Contact support.`, action: SUPPORT };
     case "selling_paused":
-      // Interim (C5): the record has no words for a paused account on this step. It names only
-      // what the pause locks: an eBay sign-in, an eBay refusal or eBay not answering can lock the
+      // Interim (PR 10 PROPOSAL): the record has no words for a paused account on this step. It
+      // names only what the pause locks (prices, a product's own settings, eBay categories and
+      // descriptions); an eBay sign-in, an eBay refusal or eBay not answering can lock the store
       // policies and the shelf too, and those rows then say so on their own line.
       return {
-        message: "Selling is paused on your account. Prices, eBay categories and descriptions can't be changed until it resumes.",
+        message: "Selling is paused on your account. Prices, products and categories can't be changed until it resumes.",
         action: WALLET,
       };
     case "ops_inactive":
-      // Interim: R:506 widened, since eBay categories and descriptions are refused too.
+      // Interim (PR 10 PROPOSAL): R:506 widened, since products, eBay categories and descriptions are refused too.
       return {
-        message: "Your Shellz Club .ops access is inactive, so prices, eBay categories and descriptions can't be changed. Contact support.",
+        message: "Your Shellz Club .ops access is inactive, so prices, products and categories can't be changed. Contact support.",
         action: SUPPORT,
       };
     case "sign_in":
-      // Interim (C1): R:500 without the resets that come with PR 9.
+      // Interim (PR 10 PROPOSAL): R:500 with the resets PR 9 brought (a product's setting can still use the default, D4).
       return {
-        message: `eBay needs you to sign in again for ${name}. Your settings are safe. Until you do, you can still change prices and descriptions.`,
+        message: `eBay needs you to sign in again for ${name}. You can still change prices, text and defaults.`,
         action: RECONNECT_EBAY,
       };
     case "access_denied":
@@ -244,7 +245,7 @@ export function storeDefaultPolicyValue(input: {
 // Interim: an eBay category whose name was not resolved; the number is never shown.
 const UNNAMED_EBAY_CATEGORY = "An eBay category";
 // Interim: a saved shelf with no name stored and none on eBay.
-const UNNAMED_SHELF = "A shelf";
+export const UNNAMED_SHELF = "A shelf";
 
 /** The eBay category store default (R:580). Names and paths only, never the number. */
 export function storeDefaultEbayCategoryValue(category: { categoryName: string; path?: readonly string[] } | null): string {
@@ -416,8 +417,13 @@ export function shippingPolicyNeeds(
 // The product drawer: values and where they come from (C16, C17)
 // ---------------------------------------------------------------------------
 
-/** Explains an older group rule's place in the order (C17). */
-export const GROUP_RULE_ORDER_NOTE = "Older group rules come after a product's own settings and before your store defaults.";
+/**
+ * Explains an older group rule's place in the order (C17): after the product's
+ * own settings, before its category's and the store defaults (closest setting
+ * wins, REC:993; older rules sit between product and category until PR 11).
+ */
+// Interim (PR 10 PROPOSAL).
+export const GROUP_RULE_ORDER_NOTE = "Older group rules come after a product's own settings and before category settings and store defaults.";
 /** Interim (C16): a setting whose value is not the same on every chosen size. */
 export const SIZES_DIFFER_WORDS = "Sizes have different values. Each size keeps its own for now.";
 
@@ -452,12 +458,11 @@ export function drawerSourceWords(
         note: GROUP_RULE_ORDER_NOTE,
       };
     case "size":
-      // Interim: the values left on single sizes by today's per-size settings.
-      return { tag: "Set on each size", note: null };
-    // Interim tags (R:§3.7) until the full drawer (PR 10). The server sends these
-    // sources only once product or category settings are saved (PR 9).
+      // Interim (PR 10 PROPOSAL): a value left on a size by the older per-size settings.
+      return { tag: "Set on this size", note: null };
     case "product":
-      return { tag: "This product", note: null };
+      // Interim (PR 10 PROPOSAL): the product's own value (W5).
+      return { tag: "Set for this product", note: null };
     case "category":
       // The server names the category; a nameless one still says where the value comes from.
       return { tag: source.ruleName ? `From category: ${source.ruleName}` : "From its Card Shellz category", note: null };
@@ -472,21 +477,28 @@ export function drawerSourceWords(
 const DRAWER_POLICY_KIND = { shippingPolicy: "shipping", returnPolicy: "return", paymentPolicy: "payment" } as const;
 
 /**
- * A policy in the drawer, by name only (A4): eBay's live name, or the name
- * stored for the store default; "<name> (no longer on eBay)" or "A policy
- * that's no longer on eBay" when eBay was read and doesn't have it.
+ * A policy in the drawer, by name only (A4): eBay's live name, else the name
+ * stored for the store default, else `storedName`, the name the product's own
+ * settings row stored for this id (its own read, PR 10; filled only when the
+ * product's own policy is this one). "<name> (no longer on eBay)" or "A policy
+ * that's no longer on eBay" when eBay was read and doesn't have it. Without
+ * eBay's read the stored names are all there is, so the product's own policy
+ * reads by name even then (gap G2).
  */
 export function drawerPolicyValue(
   key: keyof typeof DRAWER_POLICY_KIND,
   value: ListingSettingsPolicyValue,
   setup: ListingSettingsReadState<PolicySetupFacts>,
+  storedName: string | null = null,
 ): string {
   if (value.policyId === null) return "Not set";
+  const ownName = nonBlank(storedName);
   const failed = setup.error !== undefined && setup.error !== null;
-  if (failed) return POLICY_SET_UNNAMED;
+  if (failed) return ownName ?? POLICY_SET_UNNAMED;
   if (setup.data === undefined) return CHECKING_EBAY;
-  const { name, onEbay } = policyName(setup.data, POLICY_FIELD[DRAWER_POLICY_KIND[key]], value.policyId);
-  if (onEbay === false) {
+  const found = policyName(setup.data, POLICY_FIELD[DRAWER_POLICY_KIND[key]], value.policyId);
+  const name = found.name ?? ownName;
+  if (found.onEbay === false) {
     // Interim.
     return name ? `${name} (no longer on eBay)` : "A policy that's no longer on eBay";
   }
@@ -513,9 +525,186 @@ export function drawerDescriptionTemplateValue(value: ListingSettingsDescription
   return storeDefaultDescriptionValue(value);
 }
 
-/** The main text in the drawer (interim). */
+// ---------------------------------------------------------------------------
+// Editing a product's own settings, and the PR 9 writers' save words (PR 10)
+// ---------------------------------------------------------------------------
+
+/**
+ * Words for the drawer's setting editors and the save answers of the PR 9
+ * writers (plan PR 10, 3.3, 4.7, 4.8, D2, D4, D7). Every one is a proposal the
+ * record does not give (plan 12.2), kept here so a later PR changes it in one
+ * place. None names a code or an id.
+ */
+export const LISTING_SETTINGS_EDIT_WORDS = Object.freeze({
+  // The record's word for following the next level down (REC:854, REC:857).
+  useDefault: "Use default",
+  // Interim (PR 10 PROPOSAL): a drawer field editor's button that puts the choice in the draft (plan 4.5); nothing is sent until Save.
+  done: "Done",
+  // Interim (PR 10 PROPOSAL): one kind of change per Save (D2).
+  otherChangeFirst: "Save or discard your other change first.",
+  // Interim (PR 10 PROPOSAL): the product's own settings read failed (4.8).
+  ownReadFailed: "Couldn't load this product's settings. Try again.",
+  // Interim (PR 10 PROPOSAL): a field under the sign-in banner offers the default only (D4, 3.3 row 15).
+  signInFieldLine: "Sign in to eBay again to pick a new one. You can still use the default.",
+  // Interim (PR 10 PROPOSAL): a field that offers the default only while a banner says why no new pick can be made
+  // (eBay refusing access, say), so the editor's lone "Use default" is not left unexplained (D4).
+  defaultOnlyLine: "You can't pick a new one right now. You can still use the default.",
+  // Interim (PR 10 PROPOSAL): Save waits while a field editor holds a pick that isn't in the draft yet.
+  finishEditorFirst: "Press Done or Cancel first.",
+  // Interim (PR 10 PROPOSAL): a save body this page could not build; it was never sent.
+  cantBuild: "This change can't be saved as it is. Check it and save again.",
+  // Interim (PR 10 PROPOSAL): 503 BUSY while another heavy write runs; true for this send (D7a).
+  busyHeavy: "Another big change is saving. Nothing was saved. Try again in a few seconds.",
+  // Interim (PR 10 PROPOSAL): 503 BUSY when the request key changed under the write (D7a).
+  busyKeyChanged: "Listing settings are busy. Nothing was saved. Try again in a few seconds.",
+  // Interim (PR 10 PROPOSAL): a Check again answered by a refusal that only says "not now" (D7b);
+  // the first send may still have saved, so these never say "Nothing was saved".
+  stillUnconfirmed: "We couldn't confirm your save. Wait a few seconds, then check again.",
+  // Interim (PR 10 PROPOSAL): as above, after too many saves in a minute (D7b).
+  stillUnconfirmedRateLimited: "We couldn't confirm your save. Too many saves in a minute. Wait a moment, then check again.",
+  // Interim (PR 10 PROPOSAL): 401 (3.3 row 2).
+  signedOut: "You're signed out. Sign in again, then save.",
+  // Interim (PR 10 PROPOSAL): the three fatal codes; a final answer, never Check again (D7c).
+  fatal: "Something went wrong on our side. Reload to see what's saved. If it happens again, contact support.",
+  // Interim (PR 10 PROPOSAL): 413 (3.3 row 13).
+  tooBig: "This change is too big to send at once. Choose fewer products.",
+  // Interim (PR 10 PROPOSAL): a request the server can't read (3.3 rows 14 and 22).
+  invalid: "This change couldn't be saved. Reload the page and try again.",
+  // Interim (PR 10 PROPOSAL): eBay no longer lists a picked policy (3.3 row 17).
+  policyGone: "That policy is no longer on eBay. Pick another one.",
+  // Interim (PR 10 PROPOSAL): eBay no longer accepts a picked category (3.3 row 19).
+  categoryGone: "eBay no longer accepts that category. Search again and pick another.",
+  // Interim (PR 10 PROPOSAL): a shelf whose eBay name is too long to store (3.3 row 20).
+  shelfTooLong: "eBay names this shelf in a way we can't use. Pick another shelf.",
+  // Interim (PR 10 PROPOSAL): the store's saved text is at its cap (3.3 row 21).
+  storeTextLimit: "Your store has too much saved text. Shorten text on other products, or set it once on a category or as your store default.",
+  // Interim (PR 10 PROPOSAL): a setting whose sizes differ, with a quick pick beside its values (plan 5.3, 12.2).
+  sizesDifferPick: "Sizes differ. Pick one for all sizes.",
+  // Interim (PR 10 PROPOSAL): the quick pick that sets this value for the product, so every size uses it (5.3).
+  useForAllSizes: "Use for all sizes",
+  // Interim (PR 10 PROPOSAL): the quick pick that gives every size the default back (5.3; CC-C17).
+  useDefaultForAllSizes: "Use default for all sizes",
+  // Interim (PR 10 PROPOSAL): the store shelf or the description differ by size; its [Change] picks one (5.3).
+  sizesDifferChange: "Sizes differ. Use Change to pick one for all sizes.",
+  // The store default shelf editor's word for explicitly no shelf (R:581), and for no text above or below.
+  none: "None",
+  // Interim (PR 10 PROPOSAL): the description editor's choice to write the product's own text (5.2).
+  ownText: "Own text",
+  // Interim (PR 10 PROPOSAL): the shelf editor's choice to pick one or two shelves for the product (5.2).
+  ownShelves: "Own shelves",
+  // Interim (PR 10 PROPOSAL): an empty shelf box in the drawer's shelf editor.
+  pickShelf: "Pick a shelf",
+  // Interim (PR 10 PROPOSAL): the shelf box's choice that empties it again.
+  clearShelf: "Clear this shelf",
+  // Interim (PR 10 PROPOSAL): the description editor's parts (5.2), as the store default editor names the first and last.
+  textAbove: "Text above",
+  textBelow: "Text below",
+  mainText: "Main text",
+  // Interim (PR 10 PROPOSAL): the main text's default, and the check's second answer (5.4, 12.2).
+  useCardShellzText: "Use Card Shellz text",
+  // Interim (PR 10 PROPOSAL): the check's first answer: the same text, saved again (5.4, 12.2).
+  keepMyText: "Keep my text",
+  // Interim (PR 10 PROPOSAL): the main text's check (5.4, 12.2).
+  ownTextCheck: "Card Shellz changed this product. Check your text still fits.",
+  // Interim (PR 10 PROPOSAL): the description editor while two older description rules tie for the product; only the
+  // product's own text above and below (each own text or None) takes the tie away.
+  descriptionConflictBoth: "Set both text above and text below, your own or None, to fix this.",
+  // The shared schema's own words for empty own text above or below (`SH/listing-setting-values.ts` ownTemplateText; 5.5).
+  textEmpty: "Enter the text, or choose None.",
+  // Interim (PR 10 PROPOSAL): empty own main text (5.5, 12.2).
+  mainTextEmpty: "Enter your text, or use the Card Shellz text.",
+  // Interim (PR 10 PROPOSAL): own text with a control character the shared schema refuses (a paste can bring one).
+  textBadCharacters: "This text has characters that can't be saved. Paste it as plain text.",
+} as const);
+
+const TEXT_NUMBER = new Intl.NumberFormat("en-US");
+
+/** "Shorten it to 4,000 characters or fewer.": own text over its limit (5.4). Interim (PR 10 PROPOSAL). */
+export function textTooLongWords(max: number): string {
+  return `Shorten it to ${TEXT_NUMBER.format(max)} characters or fewer.`;
+}
+
+/**
+ * A text box's counter, "12 / 4,000": the raw text's length (UTF-16 units,
+ * as the server counts it, 5.4), in the store default description's form
+ * (R:582, `descriptionLengthWords`).
+ */
+export function textLengthWords(count: number, max: number): string {
+  return `${TEXT_NUMBER.format(count)} / ${TEXT_NUMBER.format(max)}`;
+}
+
+/** "From your Sleeves settings": the drawer header's part for a value its Card Shellz category sets (R:591, via `drawerCategoryLine`). */
+export function fromCategorySettingsWords(category: string): string {
+  return `From your ${category.trim()} settings`;
+}
+
+/** One part of a pending description change, for `descriptionPendingWords`. */
+export type DescriptionPendingPart = { part: "textAbove" | "textBelow" | "mainText"; to: "default" | "none" | "own" };
+
+/**
+ * The Description row's change before Save, every part it changes in one
+ * line: "→ Text above: your own, main text: Card Shellz text · Not saved".
+ * The text itself is never repeated there. Interim (PR 10 PROPOSAL).
+ */
+export function descriptionPendingWords(parts: readonly DescriptionPendingPart[]): string | null {
+  if (parts.length === 0) return null;
+  const words = parts.map(({ part, to }, index) => {
+    const label = LISTING_SETTINGS_EDIT_WORDS[part];
+    const name = index === 0 ? label : label.charAt(0).toLowerCase() + label.slice(1);
+    const value = to === "own" ? "your own"
+      : to === "none" ? LISTING_SETTINGS_EDIT_WORDS.none
+        : part === "mainText" ? "Card Shellz text" : LISTING_SETTINGS_EDIT_WORDS.useDefault;
+    return `${name}: ${value}`;
+  });
+  return pendingSettingWords(words.join(", "));
+}
+
+/** The product read's and a product save's 404: the product isn't chosen for this store (any more). The words name the store (C27). */
+export function productNotFoundWords(store: string): string {
+  return `This product isn't chosen for ${storeName(store)}. Choose it in step 1.`;
+}
+
+/**
+ * A drawer row's [Change], named with its product so a screen reader tells
+ * one product's from a store default's (plan 3.4): "Change shipping policy
+ * for Penny Sleeves". Interim (PR 10 PROPOSAL).
+ */
+export function changeSettingLabel(label: string, productName: string): string {
+  const product = productName.trim();
+  const setting = label.charAt(0).toLowerCase() + label.slice(1);
+  return product ? `Change ${setting} for ${product}` : `Change ${setting}`;
+}
+
+/**
+ * A "Sizes differ" quick pick's name, read out with the value and the product
+ * (plan 3.4, 5.3): "Use USPS Priority Mail for all sizes of Penny Sleeves",
+ * or "Use default for all sizes of Penny Sleeves". The button shows only
+ * "Use for all sizes" / "Use default for all sizes". Interim (PR 10 PROPOSAL).
+ */
+export function sizesDifferPickLabel(action: "use_default" | "use_this", value: string, productName: string): string {
+  const product = productName.trim();
+  const what = action === "use_default" ? "default" : value.trim() || "this";
+  return product ? `Use ${what} for all sizes of ${product}` : `Use ${what} for all sizes`;
+}
+
+/**
+ * The open field editor's name ("Shipping policy for Penny Sleeves"), read
+ * out for its group (plan 3.4). Interim (PR 10 PROPOSAL).
+ */
+export function fieldEditorLabel(label: string, productName: string): string {
+  const product = productName.trim();
+  return product ? `${label} for ${product}` : label;
+}
+
+/** "→ Free Standard US · Not saved": a setting's change before Save, in the form of a size's (R:250). */
+// Interim (PR 10 PROPOSAL).
+export function pendingSettingWords(value: string): string {
+  return `→ ${value} · Not saved`;
+}
+
+/** The main text in the drawer (interim): the drawer edits it now, so it no longer points at step 3 (plan 5.2). */
 export function drawerMainTextValue(value: ListingSettingsMainTextValue): string {
-  return value.own ? "Main text: your own (set in step 3)" : "Main text: Card Shellz text";
+  return value.own ? "Main text: your own" : "Main text: Card Shellz text";
 }
 
 // ---------------------------------------------------------------------------

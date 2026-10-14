@@ -128,7 +128,7 @@ function renderPage(search = "") {
 }
 function renderOperation(
   value: OrderEditOperation,
-  overrides: { isUncertain?: boolean; busy?: boolean; now?: number } = {},
+  overrides: { isUncertain?: boolean; busy?: boolean; now?: number; audience?: "staff" | "customer"; error?: string | null } = {},
 ) {
   return renderToStaticMarkup(
     createElement(OrderEditOperationView, {
@@ -221,7 +221,7 @@ describe("order financial presentation", () => {
     expect(summary).toContain("$107.96");
     expect(summary).toContain("Payment required for these changes:");
     expect(summary).toContain("$10.00");
-    expect(html).toContain("Discounts, shipping and tax");
+    expect(html).toContain("How your total is calculated");
     expect(html).toContain("Payments and refunds");
   });
 
@@ -276,7 +276,7 @@ describe("order financial presentation", () => {
       "TEN",
       "10% off eligible items",
       "Reward credit",
-      "$20.00 fixed credit",
+      "$20.00 fixed discount",
       "−$10.00",
       "−$15.00",
       "−$20.00",
@@ -306,9 +306,14 @@ describe("order financial presentation", () => {
         ],
       }),
     );
-    expect(html).toContain("Item discounts");
-    expect(html).not.toContain("10% off eligible items");
-    expect(html).toContain("−$11.99");
+    const previous = html.match(/<section[^>]*aria-label="Before edit"[^>]*>(.*?)<\/section>/)?.[1];
+    const revised = html.match(/<section[^>]*aria-label="After changes"[^>]*>(.*?)<\/section>/)?.[1];
+    // Each card shows only its own proven allocations. The legacy card keeps
+    // its aggregate; the revised card can explain its verified percentage.
+    expect(previous).not.toContain("10% off eligible items");
+    expect(previous).toContain("−$11.99");
+    expect(revised).toContain("10% off eligible items");
+    expect(revised).toContain("−$11.99");
   });
   it("shows before and after discounts, shipping, tax, and the payment required for a change", () => {
     const after: OrderEditFinancials = {
@@ -336,12 +341,10 @@ describe("order financial presentation", () => {
     for (const label of [
       "Before edit",
       "After changes",
-      "Items before discounts",
-      "Item discounts",
+      "Items at regular prices",
       "AMAZZIN",
-      "Shipping discounts",
       "Free shipping",
-      "Shipping after discounts",
+      "Shipping rate",
       "Tax",
       "Order total",
     ])
@@ -393,10 +396,10 @@ describe("order financial presentation", () => {
     for (const label of [
       "Payments received",
       "Refunds issued",
-      "Net paid",
+      "Paid toward this order",
       "Amount to refund",
       "Payment history",
-      "Refund · Pending",
+      "Pending",
     ])
       expect(html).toContain(label);
     expect(html).toContain('dateTime="2026-10-06T12:00:00.000Z"');
@@ -434,7 +437,8 @@ describe("order financial presentation", () => {
       });
       expect(html).toContain("Current order");
       expect(html).not.toContain("After changes");
-      expect(html).toContain("Amount still due");
+      expect(html).toContain("Current order paid in full");
+      expect(html).not.toContain("Amount still due");
       expect(html).not.toContain("quoted differences");
       expect(html).not.toContain("Payment required for these changes");
     },
@@ -523,7 +527,7 @@ describe("staff order editor access and resume", () => {
     const signal = new AbortController().signal;
     await (query.queryFn as Function)({ signal });
     expect(request).toHaveBeenCalledWith(
-      `/api/order-edits/admin/operations/${id}`,
+      `/api/order-edits/admin/operations/${id}?codeEntryVersion=v1`,
       expect.objectContaining({ credentials: "include", signal }),
     );
   });
@@ -541,6 +545,61 @@ describe("staff order editor access and resume", () => {
 });
 
 describe("verified order edit review", () => {
+  it("omits the redundant customer status chip while keeping the verified review and payment amount", () => {
+    const html = renderOperation(operation, { audience: "customer" });
+    expect(html).not.toContain("Ready to apply");
+    expect(html).toContain("Review the verified totals");
+    expect(html).toContain("$10.00 payment due");
+    expect(renderOperation(operation)).toContain("Ready to apply");
+  });
+  it("keeps actionable customer error messages after removing the status chip", () => {
+    const html = renderOperation({
+      ...operation,
+      status: "review_required",
+      error: { code: "ORDER_CHANGED", message: "Your order changed. Refresh it before trying again." },
+    }, { audience: "customer" });
+    expect(html).not.toContain(">Review needed</");
+    expect(html).toContain("Your order changed. Refresh it before trying again.");
+    expect(html).toContain("Cancel edit");
+  });
+  it("omits customer draft payment and readiness chips without hiding eligibility blockers", () => {
+    const html = renderToStaticMarkup(createElement(OrderDraft, {
+      order: { ...order, eligibility: { editable: false, reasons: ["This order has shipped and can no longer be edited."] } },
+      api: createOrderEditTransport(vi.fn()),
+      enabled: true,
+      staffId: "customer-1",
+      audience: "customer",
+      onQuote: vi.fn(),
+      onLock: vi.fn(),
+    }));
+    expect(html).not.toContain("Payment:");
+    expect(html).not.toContain("Ready to edit");
+    expect(html).not.toContain("Editing unavailable");
+    expect(html).toContain("This order has shipped and can no longer be edited.");
+    expect(html).toContain("Binder");
+  });
+  it("shows only the necessary customer actions on a fresh verified review", () => {
+    const html = renderOperation(operation, { audience: "customer" });
+    expect(html).toContain("Apply changes");
+    expect(html).toContain("Change items");
+    expect(html).not.toContain("Check status");
+  });
+  it("retains the staff status action on a ready review", () => {
+    expect(renderOperation(operation)).toContain("Check status");
+  });
+  it.each([
+    { now: Date.parse(operation.expiresAt!) },
+    { isUncertain: true },
+    { error: "We could not check your edit." },
+  ])("retains customer recovery after an expiry or failed response: %s", (overrides) => {
+    expect(renderOperation(operation, { audience: "customer", ...overrides })).toContain("Check status");
+  });
+  it("retains customer recovery for a server-reported error on a ready review", () => {
+    expect(renderOperation({ ...operation, error: { code: "READBACK_REQUIRED", message: "Check the latest status." } }, { audience: "customer" })).toContain("Check status");
+  });
+  it("retains the customer status action while payment is pending", () => {
+    expect(renderOperation({ ...operation, status: "awaiting_payment" }, { audience: "customer" })).toContain("Check status");
+  });
   it("shows the additional amount and a commit action only at ready", () => {
     const html = renderOperation(operation);
     expect(html).toContain("$10.00 payment due");
@@ -708,6 +767,15 @@ describe("verified order edit review", () => {
 });
 
 describe("immediate preliminary review", () => {
+  it("uses the in-progress explanation without a customer header chip", () => {
+    const html = renderToStaticMarkup(createElement(OrderEditPreviewReview, {
+      order, preview: null, audience: "customer",
+    }));
+    expect(html).not.toContain(">Verifying changes</");
+    expect(html).toContain("calculating discounts, shipping and tax");
+    expect(html).toContain("aria-busy=\"true\"");
+    expect(html).not.toContain("Apply changes");
+  });
   it("shows a clearly provisional breakdown and keeps every action disabled during authoritative verification", () => {
     const preview = {
       phase: "preview" as const,

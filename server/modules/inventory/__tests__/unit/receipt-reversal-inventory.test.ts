@@ -56,6 +56,7 @@ function makeHarness(opts: {
       state.ledgerRows.push(params);
       return { rows: [{ id: 1 }] };
     }
+    if (t.includes("pg_advisory_xact_lock")) return {rows:[]};
     throw new Error(`Unrouted SQL in test harness: ${t.slice(0, 140)}`);
   };
 

@@ -714,7 +714,7 @@ export function createShipmentTrackingService(
     });
     let costApplication: Awaited<ReturnType<typeof pushLandedCostsToLots>> | { status: "retry_required"; code: string };
     try {
-      costApplication = await pushLandedCostsToLots(id);
+      costApplication = await pushLandedCostsToLots(id, userId);
     } catch (e: any) {
       costApplication = { status: "retry_required", code: "SHIPMENT_LOT_COST_PUSH_FAILED" };
       console.warn(JSON.stringify({
@@ -1563,11 +1563,11 @@ export function createShipmentTrackingService(
    * Apply the exact current shipment-line revision through recorded lot lineage.
    * Called when closing the shipment or manually triggered.
    */
-  async function pushLandedCostsToLots(shipmentId: number) {
+  async function pushLandedCostsToLots(shipmentId: number, actorId = "system:shipment-costs") {
     return runInTransaction(async (tx) => {
       const shipment = await lockShipment(tx, shipmentId);
       if (shipment.status === "cancelled") throw new ShipmentTrackingError("Cannot push landed costs for a cancelled shipment");
-      return applyShipmentCostRevisions(tx, shipmentId, new COGSService(tx), "system:shipment-costs", finalizationTime());
+      return applyShipmentCostRevisions(tx, shipmentId, new COGSService(tx), actorId, finalizationTime());
     });
   }
 

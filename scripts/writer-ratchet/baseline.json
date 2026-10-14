@@ -673,6 +673,9 @@
   "inventory.location_replen_config": [
     "modules/inventory"
   ],
+  "inventory.lot_cost_contribution_allocations": [
+    "modules/inventory"
+  ],
   "inventory.lot_cost_contributions": [
     "modules/inventory"
   ],
@@ -683,6 +686,12 @@
     "modules/inventory"
   ],
   "inventory.lot_cost_origins": [
+    "modules/inventory"
+  ],
+  "inventory.lot_cost_quantity_allocations": [
+    "modules/inventory"
+  ],
+  "inventory.lot_cost_quantity_bases": [
     "modules/inventory"
   ],
   "inventory.opening_capture_chunks": [
@@ -883,6 +892,12 @@
     "modules/marketplace-listings"
   ],
   "marketplace.channel_listing_operations": [
+    "modules/marketplace-listings"
+  ],
+  "marketplace.channel_listing_presence": [
+    "modules/marketplace-listings"
+  ],
+  "marketplace.channel_listing_presence_events": [
     "modules/marketplace-listings"
   ],
   "marketplace.channel_listing_publication_events": [

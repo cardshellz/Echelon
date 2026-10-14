@@ -33,7 +33,10 @@ import {
 } from "./domain/inventory.domain";
 import { millsToCents, centsToMills } from "@shared/utils/money";
 import { AppError, IntegrityError, ValidationError } from "../../../shared/errors";
-import { normalizeLotCosts as normalizeBuildLotCosts, lotCostRecord, recordedUnitCostMills } from "./domain/lot-cost";
+import { normalizeLotCosts as normalizeBuildLotCosts, lotCostRecord, recordedUnitCostMills,
+  hasExactLotCostTotals, moneyToSafeNumber, unitCostMirrorsFromTotals, type LotCosts } from "./domain/lot-cost";
+import { allocateLotQuantityCost, reverseLotQuantityCost, remainingCostAllocationIntervals, referenceLotQuantityCost,
+  type LotQuantityCostAllocation } from "./infrastructure/cost-quantity.repository";
 import { planShipmentLotDepletion, ShipmentLotConflictError, shipmentLotDepletionRequestSchema,
   type ShipmentLotDepletionRequest } from "./domain/shipment-lot-depletion";
 
@@ -78,14 +81,14 @@ type DrizzleDb = {
 };
 
 export class InventoryLotService {
-  constructor(private readonly db: DrizzleDb) {}
+  constructor(private readonly db: DrizzleDb, private readonly clock: () => Date = () => new Date()) {}
 
   // ---------------------------------------------------------------------------
   // LOT NUMBER GENERATION
   // ---------------------------------------------------------------------------
 
   async generateLotNumber(): Promise<string> {
-    const now = new Date();
+    const now = this.clock();
     const datePart = now.toISOString().slice(0, 10).replace(/-/g, "");
     const prefix = `LOT-${datePart}-`;
 
@@ -133,6 +136,7 @@ export class InventoryLotService {
     receivedAt?: Date;
     notes?: string;
     quantityPosting?: OperationalQuantityPosting | null;
+    exactTotals?: LotCosts;
   }): Promise<InventoryLot> {
     const lotNumber = await this.generateLotNumber();
 
@@ -142,9 +146,16 @@ export class InventoryLotService {
     // (millsToCents, half-up) for UI / GL. Callers pass mills directly (the receive
     // path) or only cents (manual / case-break), in which case we lift cents → mills
     // exactly (× 100).
-    const totalUnitCostMills = params.unitCostMills ?? centsToMills(params.unitCostCents);
-    const packagingCostMills = params.packagingCostMills ?? centsToMills(params.packagingCostCents ?? 0);
-    const landedCostMills = params.landedCostMills ?? 0;
+    let totalUnitCostMills = params.unitCostMills ?? centsToMills(params.unitCostCents);
+    let packagingCostMills = params.packagingCostMills ?? centsToMills(params.packagingCostCents ?? 0);
+    let landedCostMills = params.landedCostMills ?? 0;
+    if (params.exactTotals) {
+      assertPositiveSafeInteger(params.qty,"qty");
+      const mirrors = unitCostMirrorsFromTotals(params.exactTotals, params.qty);
+      packagingCostMills = moneyToSafeNumber(mirrors.packagingMills, "lot.packagingMirror");
+      landedCostMills = moneyToSafeNumber(mirrors.landedMills, "lot.landedMirror");
+      totalUnitCostMills = moneyToSafeNumber(mirrors.totalMills, "lot.totalMirror");
+    }
     // PO (product) cost = remainder, so the breakdown always reconciles to total. This
     // also fixes the old double-count: landed used to be derived as (unitCost − product),
     // which counted packaging twice whenever unitCost was the product+packaging blend.
@@ -179,13 +190,17 @@ export class InventoryLotService {
         landedCostMills,
         totalUnitCostMills,
         costPrecisionVersion: 1,
+        costBasisQty:params.exactTotals?params.qty:null,
+        productTotalCostMills:params.exactTotals?moneyToSafeNumber(params.exactTotals.poMills,"lot.productTotal"):null,
+        packagingTotalCostMills:params.exactTotals?moneyToSafeNumber(params.exactTotals.packagingMills,"lot.packagingTotal"):null,
+        landedTotalCostMills:params.exactTotals?moneyToSafeNumber(params.exactTotals.landedMills,"lot.landedTotal"):null,
         qtyReceived: params.qty,
         costSource: params.costSource ?? ((params.poLineId || params.purchaseOrderId) ? "po" : "manual"),
         poLineId: params.poLineId ?? null,
         qtyOnHand: params.quantityPosting ? 0 : params.qty,
         qtyReserved: 0,
         qtyPicked: 0,
-        receivedAt: params.receivedAt ?? new Date(),
+        receivedAt: params.receivedAt ?? this.clock(),
         receivingOrderId: params.receivingOrderId ?? null,
         purchaseOrderId: params.purchaseOrderId ?? null,
         inboundShipmentId: params.inboundShipmentId ?? null,
@@ -502,6 +517,7 @@ export class InventoryLotService {
       }
     }
 
+    await lockInventoryCostGraph(this.db);
     const lots = await this.db
       .select()
       .from(inventoryLots)
@@ -553,14 +569,20 @@ export class InventoryLotService {
 
       pickUpdates.push({ lotId: lot.id, take, fromReserved });
 
+      // Every exact-cost consumption owns quantity intervals, including
+      // replacement picks that intentionally do not post another COGS row.
+      const exactAllocation = hasExactLotCostTotals(lotCostRecord(lot))
+        ? await allocateLotQuantityCost(this.db, lot.id, take, "system:lot-pick", this.clock(), {
+            orderId: params.orderId, orderItemId: params.orderItemId,
+          })
+        : null;
       // Record cost for this lot allocation
       if (params.recordOrderItemCosts !== false && params.orderItemId) {
-        // COGS in MILLS (lot.unitCostMills mirrors the lot's total per-variant-unit
-        // cost). cents columns are derived mirrors (half-up), so the period COGS stays
-        // exact when summed in mills (take × per-unit-mills, rounded once at display).
+        // Exact extended amounts own COGS. Unit rates remain rounded mirrors;
+        // legacy lots retain their existing uniform-price behavior.
         const lotUnitMills = safeMillsNumber(normalizeBuildLotCosts(lotCostRecord(lot)).totalMills,"lot.unitCostMills");
         const totalCostMills = safeMillsNumber(
-          BigInt(take) * BigInt(lotUnitMills),
+          exactAllocation?.costs.totalMills ?? BigInt(take) * BigInt(lotUnitMills),
           "orderItemCost.totalCostMills",
         );
         newCosts.push({
@@ -573,6 +595,10 @@ export class InventoryLotService {
           totalCostCents: millsToCents(totalCostMills),
           unitCostMills: lotUnitMills,
           totalCostMills,
+          costQuantityAllocationId:exactAllocation?.id ?? null,
+          productTotalCostMills:exactAllocation?moneyToSafeNumber(exactAllocation.costs.poMills,"cogs.productTotal"):null,
+          packagingTotalCostMills:exactAllocation?moneyToSafeNumber(exactAllocation.costs.packagingMills,"cogs.packagingTotal"):null,
+          landedTotalCostMills:exactAllocation?moneyToSafeNumber(exactAllocation.costs.landedMills,"cogs.landedTotal"):null,
           costPrecisionVersion: 1,
         });
       }
@@ -632,6 +658,7 @@ export class InventoryLotService {
     assertPositiveSafeInteger(params.productVariantId, "productVariantId");
     assertPositiveSafeInteger(params.warehouseLocationId, "warehouseLocationId");
     assertPositiveSafeInteger(params.qty, "qty");
+    await lockInventoryCostGraph(this.db);
 
     // Find the COGS rows written by the original pick
     const cogsRows = await this.db
@@ -654,7 +681,7 @@ export class InventoryLotService {
     const restoreByLot = new Map<number, number>();
     const fullCostIds: number[] = [];
     let partialCost:
-      | { id: number; originalQty: number; remainingQty: number; unitCostMills: number }
+      | { id: number; originalQty: number; remainingQty: number; unitCostMills: number; exactAllocation?:LotQuantityCostAllocation }
       | null = null;
 
     // Reverse the newest pick allocations first. This preserves FIFO ownership
@@ -689,15 +716,25 @@ export class InventoryLotService {
         orderItemId: params.orderItemId,
         orderItemCostId: costId,
       });
-      reversedCostMills += BigInt(restore) * BigInt(unitCostMills);
+      const exactReversal=row.costQuantityAllocationId==null ? null
+        : await reverseLotQuantityCost(this.db,row.costQuantityAllocationId,restore,"system:lot-unpick",this.clock());
+      reversedCostMills += exactReversal?.costs.totalMills ?? BigInt(restore) * BigInt(unitCostMills);
       if (restore === rowQuantity) {
         fullCostIds.push(costId);
       } else {
+        const exactAllocation = exactReversal
+          ? await referenceLotQuantityCost(
+              this.db, row.costQuantityAllocationId!,
+              await remainingCostAllocationIntervals(this.db, row.costQuantityAllocationId!),
+              "system:lot-unpick", this.clock(),
+            )
+          : undefined;
         partialCost = {
           id: costId,
           originalQty: rowQuantity,
           remainingQty: rowQuantity - restore,
           unitCostMills,
+          ...(exactAllocation ? { exactAllocation } : {}),
         };
       }
       remaining -= restore;
@@ -749,7 +786,7 @@ export class InventoryLotService {
     }
     if (partialCost) {
       const totalCostMills = safeMillsNumber(
-        BigInt(partialCost.remainingQty) * BigInt(partialCost.unitCostMills),
+        partialCost.exactAllocation?.costs.totalMills ?? BigInt(partialCost.remainingQty) * BigInt(partialCost.unitCostMills),
         "orderItemCost.totalCostMills",
       );
       const updated = await this.db
@@ -759,6 +796,12 @@ export class InventoryLotService {
           totalCostMills,
           costPrecisionVersion: 1,
           totalCostCents: millsToCents(totalCostMills),
+          ...(partialCost.exactAllocation ? {
+            costQuantityAllocationId:partialCost.exactAllocation.id,
+            productTotalCostMills:moneyToSafeNumber(partialCost.exactAllocation.costs.poMills,"cogs.productTotal"),
+            packagingTotalCostMills:moneyToSafeNumber(partialCost.exactAllocation.costs.packagingMills,"cogs.packagingTotal"),
+            landedTotalCostMills:moneyToSafeNumber(partialCost.exactAllocation.costs.landedMills,"cogs.landedTotal"),
+          } : {}),
         })
         .where(and(
           eq(orderItemCosts.id, partialCost.id),
@@ -796,7 +839,8 @@ export class InventoryLotService {
     const lots = await this.db
       .select({ id: inventoryLots.id, qtyOnHand: inventoryLots.qtyOnHand,
         qtyReserved: inventoryLots.qtyReserved, qtyPicked: inventoryLots.qtyPicked,
-        receivedAt: inventoryLots.receivedAt, status: inventoryLots.status })
+        receivedAt: inventoryLots.receivedAt, status: inventoryLots.status,
+        costBasisQty:sql<string|null>`to_jsonb(inventory_lots)->>'cost_basis_qty'` })
       .from(inventoryLots)
       .where(
         and(
@@ -816,7 +860,16 @@ export class InventoryLotService {
           productVariantId: params.productVariantId, warehouseLocationId: params.warehouseLocationId,
         });
     }
-    const plan = planShipmentLotDepletion(params, lots);
+    const plan = planShipmentLotDepletion(params, lots.map((lot:Record<string,unknown>)=>{
+      const {costBasisQty,...position}=lot;
+      return position;
+    }));
+    for (const portion of plan) {
+      if (portion.fromOnHand>0 && lots.find((lot:{id:number})=>lot.id===portion.lotId)?.costBasisQty!=null) {
+        await allocateLotQuantityCost(this.db,portion.lotId,portion.fromOnHand,"system:shipment-lot-depletion",this.clock(),
+          {kind:"legacy_shipment",warehouseLocationId:params.warehouseLocationId});
+      }
+    }
     const updated = await this.db.execute(sql`
       WITH updates AS (
         SELECT * FROM jsonb_to_recordset(${JSON.stringify(plan)}::jsonb)
@@ -862,7 +915,7 @@ export class InventoryLotService {
     notes?: string;
     quantityPosting?: OperationalQuantityPosting | null;
   }): Promise<{
-    consumedLots: Array<{ lotId: number; qty: number }>;
+    consumedLots: Array<{ lotId: number; qty: number; costQuantityAllocationId?:number }>;
     consumedCostCents: number;
     consumedQty: number;
     consumedPoCostMills: bigint;
@@ -874,6 +927,9 @@ export class InventoryLotService {
       throw new Error("adjustLots only supports releasing reserved quantity during adjustments");
     }
 
+    // All quantity owners acquire the graph lock before individual lot locks;
+    // approved revaluations use the same order.
+    await lockInventoryCostGraph(this.db);
     if (params.qtyDelta > 0) {
       const resolved = await resolveCost(
         this.db,
@@ -914,7 +970,8 @@ export class InventoryLotService {
     let consumedPackagingCostMills = BigInt(0);
     let consumedLandedCostMills = BigInt(0);
     let consumedCostProvisional = false;
-    const adjustUpdates: Array<{ lotId: number; take: number; reservedRelease: number }> = [];
+    const adjustUpdates: Array<{ lotId: number; take: number; reservedRelease: number; costQuantityAllocationId?:number }> = [];
+    let usesExactAmounts=false;
     for (const lot of lots) {
       if (remaining <= 0) break;
 
@@ -929,12 +986,17 @@ export class InventoryLotService {
       if (take <= 0) continue;
 
       const normalizedCosts = normalizeBuildLotCosts(lotCostRecord(lot));
-      adjustUpdates.push({ lotId: lot.id, take, reservedRelease: reservedTake });
+      const exactAllocation=hasExactLotCostTotals(lotCostRecord(lot))
+        ? await allocateLotQuantityCost(this.db,lot.id,take,"system:lot-consumption",this.clock(),{
+          productVariantId:params.productVariantId,warehouseLocationId:params.warehouseLocationId}) : null;
+      usesExactAmounts ||= exactAllocation!==null;
+      adjustUpdates.push({ lotId: lot.id, take, reservedRelease: reservedTake,
+        ...(exactAllocation?.id ? {costQuantityAllocationId:exactAllocation.id} : {}) });
       consumedCostCents += take * lot.unitCostCents;
       consumedQty += take;
-      consumedPoCostMills += normalizedCosts.poMills * BigInt(take);
-      consumedPackagingCostMills += normalizedCosts.packagingMills * BigInt(take);
-      consumedLandedCostMills += normalizedCosts.landedMills * BigInt(take);
+      consumedPoCostMills += exactAllocation?.costs.poMills ?? normalizedCosts.poMills * BigInt(take);
+      consumedPackagingCostMills += exactAllocation?.costs.packagingMills ?? normalizedCosts.packagingMills * BigInt(take);
+      consumedLandedCostMills += exactAllocation?.costs.landedMills ?? normalizedCosts.landedMills * BigInt(take);
       consumedCostProvisional ||= lot.costProvisional === 1;
       remaining -= take;
       reservedReleaseRemaining -= reservedTake;
@@ -988,8 +1050,9 @@ export class InventoryLotService {
     }
 
     return {
-      consumedLots: adjustUpdates.map((update) => ({ lotId: update.lotId, qty: update.take })),
-      consumedCostCents,
+      consumedLots: adjustUpdates.map((update) => ({ lotId: update.lotId, qty: update.take,
+        ...(update.costQuantityAllocationId ? {costQuantityAllocationId:update.costQuantityAllocationId} : {}) })),
+      consumedCostCents:usesExactAmounts?moneyToSafeNumber((consumedPoCostMills+consumedPackagingCostMills+consumedLandedCostMills+BigInt(50))/BigInt(100),"consumedCostCents"):consumedCostCents,
       consumedQty,
       consumedPoCostMills,
       consumedPackagingCostMills,
@@ -1052,6 +1115,7 @@ export class InventoryLotService {
       totalUnitCostMills: number;
       packagingCostMills: number;
       landedCostMills: number;
+      exactAllocation?:LotQuantityCostAllocation;
     }> = [];
 
     for (const lot of lots) {
@@ -1062,6 +1126,9 @@ export class InventoryLotService {
 
       const take = Math.min(available, remaining);
       const normalizedCosts = normalizeBuildLotCosts(lotCostRecord(lot));
+      const exactAllocation=hasExactLotCostTotals(lotCostRecord(lot))
+        ? await allocateLotQuantityCost(this.db,lot.id,take,params.actorId,params.occurredAt,
+          {operationKey:params.operationKey ?? "inventory_transfer"}) : null;
       layers.push({
         lotId: lot.id,
         take,
@@ -1076,6 +1143,7 @@ export class InventoryLotService {
         totalUnitCostMills: safeMillsNumber(normalizedCosts.totalMills, "transfer.totalUnitCostMills"),
         packagingCostMills: safeMillsNumber(normalizedCosts.packagingMills, "transfer.packagingCostMills"),
         landedCostMills: safeMillsNumber(normalizedCosts.landedMills, "transfer.landedCostMills"),
+        ...(exactAllocation?{exactAllocation}:{}),
       });
       remaining -= take;
     }
@@ -1145,11 +1213,13 @@ export class InventoryLotService {
         receivedAt: layer.receivedAt,
         notes: params.notes ?? "Transfer",
         quantityPosting: params.quantityPosting,
+        exactTotals:layer.exactAllocation?.costs,
       });
       await recordLotCostContribution(this.db, {
         sourceLotId: layer.lotId,
         outputLotId: outputLot.id,
         sourceQty: layer.take,
+        costQuantityAllocationId:layer.exactAllocation?.id,
         outputQty: layer.take,
         operationKind: "transfer",
         operationKey: params.operationKey ?? `inventory_transfer:${layer.lotId}:${outputLot.id}`,

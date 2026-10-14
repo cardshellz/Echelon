@@ -138,7 +138,10 @@ describe("listing setting stored values", () => {
   });
 
   it("pins the ledger operations, the review kinds and the bulk limit", () => {
-    expect(LISTING_SETTING_REQUEST_OPERATIONS).toEqual(["product_settings_bulk", "category_settings_clear", "category_moves_acknowledge"]);
+    // 0738's three, then W7's price apply (migration 0750, plan PR 9, 9.2).
+    expect(LISTING_SETTING_REQUEST_OPERATIONS).toEqual([
+      "product_settings_bulk", "category_settings_clear", "category_moves_acknowledge", "price_change_apply",
+    ]);
     expect(PRICING_REVIEW_KINDS).toEqual(["store_default", "category_price", "product_prices"]);
     expect(MAX_LISTING_SETTING_BULK_PRODUCTS).toBe(10_000);
   });
@@ -270,6 +273,13 @@ describe("changedListingSettingFields", () => {
     expect(changedListingSettingFields(before, reordered, PRODUCT_LISTING_SETTING_FIELDS)).toEqual([]);
     const swapped = { ...fullValues(), storeShelf: { mode: "own" as const, shelves: [{ id: "202", name: "Sleeves:Standard" }, { id: "101", name: "Sleeves" }] } };
     expect(changedListingSettingFields(before, swapped, PRODUCT_LISTING_SETTING_FIELDS)).toEqual(["storeShelf"]);
+  });
+
+  it("counts the same main text stamped with a new catalog hash as a change (PR 10b A2: [Keep my text] saves, and the check clears)", () => {
+    const before = fullValues();
+    const restamped = { ...fullValues(), mainText: { text: before.mainText!.text, catalogHash: "b".repeat(64) } };
+    expect(changedListingSettingFields(before, restamped, PRODUCT_LISTING_SETTING_FIELDS)).toEqual(["mainText"]);
+    expect(changedListingSettingFields(before, fullValues(), PRODUCT_LISTING_SETTING_FIELDS)).toEqual([]);
   });
 
   it("reads no stored row as every setting following the default", () => {

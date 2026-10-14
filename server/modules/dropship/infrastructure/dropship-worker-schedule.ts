@@ -10,7 +10,8 @@ export type DropshipWorkerScheduleName =
   | "returnIntake"
   | "returnsMaintenance"
   | "usdcWatcher"
-  | "costDetection";
+  | "costDetection"
+  | "categoryMarks";
 
 interface DropshipWorkerScheduleDefinition {
   initialDelayEnvironmentVariable: string;
@@ -56,6 +57,12 @@ const SCHEDULE_DEFINITIONS: Record<
   costDetection: {
     initialDelayEnvironmentVariable: "DROPSHIP_COST_DETECTION_WORKER_INITIAL_DELAY_MS",
     defaultInitialDelayMs: 120_000,
+  },
+  // The listing settings first-mark job (category marks) runs hourly; it
+  // boots after the maintenance sweep, in a phase of its own.
+  categoryMarks: {
+    initialDelayEnvironmentVariable: "DROPSHIP_CATEGORY_MARKS_WORKER_INITIAL_DELAY_MS",
+    defaultInitialDelayMs: 180_000,
   },
 };
 

@@ -631,6 +631,7 @@ export const warehouseSettings = inventorySchema.table("warehouse_settings", {
   // Only requireApproval + autoSendOnApprove affect Spec A's PO send flow.
   // The rest are scaffolded for Specs B/C so admins manage everything in one
   // settings page from the start.
+  procurementPolicyRevision: integer("procurement_policy_revision").notNull().default(0),
   requireApproval: boolean("require_approval").notNull().default(false),
   autoSendOnApprove: boolean("auto_send_on_approve").notNull().default(true),
   requireAcknowledgeBeforeReceive: boolean("require_acknowledge_before_receive").notNull().default(false),
@@ -655,6 +656,7 @@ export const warehouseSettings = inventorySchema.table("warehouse_settings", {
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 }, (table) => [
   check("warehouse_settings_purchasing_forecast_method_chk", sql`${table.purchasingForecastMethod} IN ('recent_order_velocity_v1', 'weighted_blend_v1')`),
+  check("warehouse_settings_procurement_policy_revision_chk", sql`${table.procurementPolicyRevision} >= 0`),
   check("warehouse_settings_purchasing_forecast_windows_chk", sql`
     ${table.purchasingForecastShortWindowDays} BETWEEN 1 AND 60
     AND ${table.velocityLookbackDays} BETWEEN 7 AND 180
@@ -998,6 +1000,12 @@ export const inventoryLots = inventorySchema.table("inventory_lots", {
   packagingCostMills: bigint("packaging_cost_mills", { mode: "number" }).notNull().default(0),
   landedCostMills: bigint("landed_cost_mills", { mode: "number" }).notNull().default(0),
   totalUnitCostMills: bigint("total_unit_cost_mills", { mode: "number" }).notNull().default(0),
+  // Extended component amounts are authoritative when present. Unit prices
+  // remain rounded compatibility/display mirrors; a null total preserves v0/v1.
+  costBasisQty: integer("cost_basis_qty"),
+  productTotalCostMills: bigint("product_total_cost_mills", { mode: "number" }),
+  packagingTotalCostMills: bigint("packaging_total_cost_mills", { mode: "number" }),
+  landedTotalCostMills: bigint("landed_total_cost_mills", { mode: "number" }),
   qtyReceived: integer("qty_received").default(0),
   qtyConsumed: integer("qty_consumed").default(0),
   costSource: varchar("cost_source", { length: 20 }).default("manual"), // 'po' | 'manual' | 'landed' | 'legacy'

@@ -1,11 +1,43 @@
 import { describe, expect, it } from "vitest";
-import { groupOrderEditDisplayLines } from "../../order-edit-display";
+import {
+  exactOrderEditUnitPrice,
+  groupOrderEditDisplayLines,
+} from "../../order-edit-display";
 import {
   orderEditOperationSchema,
   type OrderEditOperation,
 } from "@shared/order-edits/order-edit.contract";
 
 type Line = OrderEditOperation["lines"][number];
+
+describe("exact net unit price presentation", () => {
+  it.each([
+    [233, 1, 233],
+    [932, 4, 233],
+    [0, 3, 0],
+    [Number.MAX_SAFE_INTEGER, 1, Number.MAX_SAFE_INTEGER],
+  ])(
+    "uses the verified %i-cent net total for %i units",
+    (total, quantity, expected) => {
+      expect(exactOrderEditUnitPrice(total, quantity)).toBe(expected);
+    },
+  );
+  it.each([
+    [700, 3],
+    [233, 0],
+    [233, -1],
+    [-1, 1],
+    [1.5, 1],
+    [233, 1.5],
+    [NaN, 1],
+    [Number.MAX_SAFE_INTEGER + 1, 1],
+  ])(
+    "never invents a rounded unit price for total %s and quantity %s",
+    (total, quantity) => {
+      expect(exactOrderEditUnitPrice(total, quantity)).toBeNull();
+    },
+  );
+});
 const line: Line = {
   id: "original",
   variantId: "gid://shopify/ProductVariant/10",
@@ -18,7 +50,10 @@ const line: Line = {
 
 describe("order edit display grouping", () => {
   it("shows the original pack and three added packs as quantity four with their exact net total", () => {
-    const input = [line, { ...line, id: "increase", quantity: 3, totalCents: 699 }];
+    const input = [
+      line,
+      { ...line, id: "increase", quantity: 3, totalCents: 699 },
+    ];
     const before = structuredClone(input);
     expect(groupOrderEditDisplayLines(input)).toEqual([
       {
@@ -90,7 +125,8 @@ describe("order edit display grouping", () => {
       const result = groupOrderEditDisplayLines(inputs);
       expect(result).toHaveLength(2);
       expect(result.map((row) => row[field])).toEqual([
-        Number.MAX_SAFE_INTEGER, 1,
+        Number.MAX_SAFE_INTEGER,
+        1,
       ]);
     },
   );
@@ -107,7 +143,8 @@ describe("order edit display grouping", () => {
       { ...line, id: "increase" },
     ]);
     expect(result.map((row) => row.sourceLineIds)).toEqual([
-      ["original", "increase"], ["new"],
+      ["original", "increase"],
+      ["new"],
     ]);
     expect(result.map((row) => row.totalCents)).toEqual([233, 0]);
   });
@@ -121,11 +158,17 @@ describe("display metadata boundary", () => {
     expect(lineSchema.parse(legacy)).toEqual(legacy);
   });
   it("rejects incorrect variant identity and unsafe quantities", () => {
-    expect(lineSchema.safeParse({
-      ...line, variantId: "gid://shopify/Product/10",
-    }).success).toBe(false);
-    expect(lineSchema.safeParse({
-      ...line, quantity: Number.MAX_SAFE_INTEGER + 1,
-    }).success).toBe(false);
+    expect(
+      lineSchema.safeParse({
+        ...line,
+        variantId: "gid://shopify/Product/10",
+      }).success,
+    ).toBe(false);
+    expect(
+      lineSchema.safeParse({
+        ...line,
+        quantity: Number.MAX_SAFE_INTEGER + 1,
+      }).success,
+    ).toBe(false);
   });
 });

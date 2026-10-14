@@ -18,11 +18,15 @@ jobs:
     timeout-minutes: 5
     outputs:
       run: ${{ steps.impact.outputs.run }}
+      migrations: ${{ steps.migrations.outcome }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
           persist-credentials: false
+      - id: migrations
+        name: Validate migration identities before dependency setup
+        run: node scripts/migrations/check-migrations.mjs --ci
       - uses: actions/setup-node@v4
         with:
           node-version: 20
@@ -40,8 +44,8 @@ jobs:
   browser:
     name: Procurement browser journeys (${{ matrix.shard }}/4)
     needs: select
-    # A missing output or failed selector must never silently bypass coverage.
-    if: ${{ !cancelled() && (needs.select.result != 'success' || needs.select.outputs.run != 'false') }}
+    # Invalid migrations stop setup; later selector uncertainty still runs coverage.
+    if: ${{ !cancelled() && needs.select.outputs.migrations == 'success' && (needs.select.result != 'success' || needs.select.outputs.run != 'false') }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     strategy:
@@ -58,7 +62,7 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npx playwright install --with-deps chromium
-      # Keep one worker inside each runner; shards have isolated browser/server state.
+      # Two page-isolated workers per runner; the four shards retain separate servers.
       - run: npx playwright test --config playwright.procurement.config.ts --shard=${{ matrix.shard }}/4
       - uses: actions/upload-artifact@v4
         if: failure()
@@ -75,10 +79,15 @@ jobs:
     steps:
       - name: Require complete browser coverage or an explicit safe skip
         env:
+          MIGRATIONS_RESULT: ${{ needs.select.outputs.migrations }}
           SELECT_RESULT: ${{ needs.select.result }}
           RUN_SUITE: ${{ needs.select.outputs.run }}
           SHARD_RESULT: ${{ needs.browser.result }}
         run: |
+          if [ "$MIGRATIONS_RESULT" != "success" ]; then
+            echo "::error::Migration validation did not pass"
+            exit 1
+          fi
           if [ "$SELECT_RESULT" != "success" ]; then
             echo "::error::Browser coverage selection failed"
             exit 1

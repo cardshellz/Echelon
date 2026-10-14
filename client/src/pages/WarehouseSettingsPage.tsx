@@ -1,3 +1,4 @@
+import { warehouseSettingsPayload } from "@/lib/warehouse-settings-payload";
 import { useState, useEffect } from "react";
 import { useAuth } from "@/lib/auth";
 import { useParams, Link } from "wouter";
@@ -172,10 +173,7 @@ export default function WarehouseSettingsPage() {
   const saveMutation = useMutation({
     mutationFn: async () => {
       if (!form) throw new Error("No form data");
-      // Strip server-managed immutables before sending. Drizzle rejects updates
-      // that try to set id/createdAt, and they're meaningless on insert too.
-      const { id: _id, createdAt: _createdAt, updatedAt: _updatedAt, ...payload } =
-        form as any;
+      const payload = warehouseSettingsPayload(form as Record<string, unknown>, current?.id ? "update" : "create");
       const {
         channelSyncEnabled: _legacyChannelSyncEnabled,
         channelSyncIntervalMinutes: _legacyChannelSyncIntervalMinutes,

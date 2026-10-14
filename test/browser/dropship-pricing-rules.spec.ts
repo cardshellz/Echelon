@@ -1,4 +1,4 @@
-import { expect, test, type Page } from "playwright/test";
+import { expect, test, type Page } from "@playwright/test";
 import { resolve } from "node:path";
 import type { PricingProfile, ReviewPricingRulesInput } from "../../shared/dropship/pricing-rules";
 

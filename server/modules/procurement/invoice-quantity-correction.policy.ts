@@ -1,4 +1,5 @@
 import { deriveInvoiceFinancialState } from "./domain/invoice-financial-state";
+import { classifyApPaymentState } from "./domain/ap-payment-state";
 import { centsToMills, millsToCents } from "@shared/utils/money";
 import { z } from "zod";
 import { invoiceQuantityContextSchema, invoiceQuantityPreviewSchema, invoiceQuantityIdSchema, invoiceAmountPerPiece, type InvoiceQuantityPreviewRequest } from "@shared/procurement/invoice-quantity-correction";
@@ -68,7 +69,9 @@ export function reviewedInvoiceAmount(facts: InvoiceCorrectionFacts, lineId: num
   }
   for (const allocation of billing.allocations) {
     if (allocation.invoiceId !== invoice.id || allocation.currency !== invoice.currency) throw new InvoiceQuantityCorrectionError("Payment scope or currency is invalid.", "INVOICE_QUANTITY_SOURCE_INVALID");
-    if (allocation.paymentStatus !== "voided") paidSum += BigInt(recorded(allocation.amountCents, "payment allocation"));
+    const paymentState = classifyApPaymentState(allocation.paymentStatus);
+    if (paymentState === "review_required") throw new InvoiceQuantityCorrectionError("A payment has an unsupported historical status. Review its evidence before correcting the bill.", "AP_PAYMENT_STATUS_REVIEW_REQUIRED");
+    if (paymentState === "settled") paidSum += BigInt(recorded(allocation.amountCents, "payment allocation"));
   }
   if (!billing.allInvoiceLines.some(row => row.id === lineId) || lineSum !== BigInt(recorded(invoice.invoicedAmountCents, "invoice total"))
     || paidSum !== BigInt(recorded(invoice.paidAmountCents, "paid amount"))) throw new InvoiceQuantityCorrectionError("Invoice totals or payment allocations do not reconcile. Review those records before changing the bill.", "INVOICE_QUANTITY_SOURCE_INVALID");

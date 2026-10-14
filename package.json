@@ -42,6 +42,8 @@
     "wms:remediate-lot-drift": "tsx scripts/remediate-lot-drift.ts",
     "dropship:dogfood-status": "tsx scripts/dropship-dogfood-status.ts",
     "db:push": "drizzle-kit push",
+    "migration:check": "node scripts/migrations/check-migrations.mjs",
+    "migration:create": "node scripts/migrations/create-migration.mjs",
     "test": "vitest run",
     "test:coverage": "vitest run unit --coverage",
     "test:db:setup": "docker compose -f docker-compose.test.yml up -d",

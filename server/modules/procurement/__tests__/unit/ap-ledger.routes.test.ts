@@ -57,6 +57,7 @@ vi.mock("../../../../routes/middleware", () => {
   };
   return {
     requirePermission: () => pass,
+    requireAnyPermission: () => pass,
     upload: {
       single: () => pass,
     },
@@ -130,6 +131,27 @@ describe("AP ledger routes", () => {
     buildApp();
 
     expect(mocks.requireIdempotency).toHaveBeenCalledTimes(4);
+  });
+
+  it("returns the owner's protected-history rejection without converting it to a server error", async () => {
+    mocks.apLedger.updateInvoice.mockRejectedValue(Object.assign(new Error("Invoice has approval or payment history"), {
+      name: "ApLedgerError", statusCode: 409, details: { code: "AP_INVOICE_FINANCIAL_HISTORY", invoiceId: 71 },
+    }));
+    server = await startServer(buildApp());
+    const response = await requestJson(server.url, "PATCH", "/api/vendor-invoices/71", { invoicedAmountCents: 5000 });
+    expect(response).toMatchObject({ status: 409, body: { details: { code: "AP_INVOICE_FINANCIAL_HISTORY", invoiceId: 71 } } });
+  });
+
+  it("returns a durable command rejection for an unsupported record-payment status", async () => {
+    mocks.apPaymentCommands.recordPayment.mockResolvedValue({ httpStatus: 400, replayed: false, body: {
+      error: "Record payment only accepts completed payments", details: { code: "AP_PAYMENT_STATUS_INVALID" },
+    } });
+    server = await startServer(buildApp());
+    const response = await requestJson(server.url, "POST", "/api/ap-payments", {
+      vendorId: 4, paymentDate: "2026-10-13", paymentMethod: "ach", totalAmountCents: 1000, status: "scheduled", allocations: [],
+    });
+    expect(response).toMatchObject({ status: 400, body: { details: { code: "AP_PAYMENT_STATUS_INVALID" } } });
+    expect(mocks.apPaymentCommands.recordPayment.mock.calls[0][0].payment.status).toBe("scheduled");
   });
 
   it("lists vendor invoices with parsed filters", async () => {

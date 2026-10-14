@@ -10,6 +10,7 @@ export interface OrderEditPreviewContext {
   variants: OrderEditPreviewVariant[];
 }
 export interface OrderEditPreviewCalculation {
+  appliedCodes?: import("@shared/order-edits/order-edit-codes").OrderEditCodeApplication[];
   financials: OrderEditFinancials;
   shippingRepricing: OrderEditShippingRepricing;
   lines: OrderEditPreview["lines"];

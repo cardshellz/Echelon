@@ -44,6 +44,30 @@ export function rulePriceContextOf(state: PricingProfileState, layers: ListingSe
   return { state, productRules, categoryRules };
 }
 
+/** The recipes a price check reads with no text (plan 8.2's loadSettingFacts): each product's and category's own price, by id. */
+export interface RulePriceRecipeFacts {
+  products: ReadonlyMap<number, { price: PricingRecipe | null }>;
+  categories: ReadonlyMap<number, { price: PricingRecipe | null }>;
+}
+
+/**
+ * The store's profile with the price recipes `facts` holds (plan 6.4; v3r,
+ * C-feas-2): the context rulePriceContextOf builds from layers, built from
+ * the text-free facts a heavy write reads instead, so a price check over
+ * 10,000 products never loads their texts. A product or category with no
+ * row, or with a null price, has no recipe. Pure; a new, frozen context.
+ */
+export function rulePriceContextFromFacts(state: PricingProfileState, facts: RulePriceRecipeFacts): RulePriceContext {
+  const recipes = (rows: ReadonlyMap<number, { price: PricingRecipe | null }>) => {
+    const found = new Map<number, PricingRecipe>();
+    for (const [id, row] of rows) {
+      if (row.price !== null) found.set(id, row.price);
+    }
+    return found as ReadonlyMap<number, PricingRecipe>;
+  };
+  return Object.freeze({ state, productRules: recipes(facts.products), categoryRules: recipes(facts.categories) });
+}
+
 /**
  * `context` with the given products' and categories' recipes set (a recipe)
  * or removed (null): the "after" side of a price check whose change sets a

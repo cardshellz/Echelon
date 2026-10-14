@@ -103,7 +103,7 @@ export function ListingReviewDialog({
                     {item.method === "match"
                       ? "Match existing catalog product"
                       : "Create product"}
-                    {item.productType ? ` · ${item.productType}` : ""}
+                    {item.method === "create" && item.productType ? ` · ${item.productType}` : ""}
                   </p>
                 </div>
                 <div className="text-right">

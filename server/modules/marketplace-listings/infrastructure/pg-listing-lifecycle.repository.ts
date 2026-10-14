@@ -1,5 +1,14 @@
 import type { Pool, PoolClient, QueryResultRow } from "pg";
 import { z } from "zod";
+import type { ListingPresence } from "@shared/types/channel-listing-presence";
+import {
+  assertListingSetupAdmission,
+  type ListingSetupIntent,
+} from "../../inventory-planning/application/listing-setup-intent";
+import {
+  readListingPresence,
+  recordListingPresence,
+} from "./listing-presence.repository";
 import {
   listingAccountSchema,
   type ListingAccount,
@@ -79,9 +88,7 @@ async function audit(
   );
 }
 
-export class PostgresListingLifecycleRepository
-  implements ListingLifecycleStore
-{
+export class PostgresListingLifecycleRepository implements ListingLifecycleStore {
   constructor(private readonly pool: Pick<Pool, "connect">) {}
   private async read<T>(work: (client: PoolClient) => Promise<T>): Promise<T> {
     const client = await this.pool.connect();
@@ -107,7 +114,7 @@ export class PostgresListingLifecycleRepository
     raw: ListingAccount,
     skus: readonly string[],
     shared: boolean,
-    work: (session: ListingLifecycleSession) => Promise<T>,
+    work: (session: ListingLifecycleSession, client: PoolClient) => Promise<T>,
   ): Promise<T> {
     const account = listingAccountSchema.parse(raw);
     const key = listingAccountKey(account);
@@ -137,7 +144,7 @@ export class PostgresListingLifecycleRepository
           );
         acquired.push(lockKey);
       }
-      return await work(new LifecycleSession(client, account));
+      return await work(new LifecycleSession(client, account), client);
     } finally {
       for (const lockKey of acquired.reverse()) {
         try {
@@ -170,13 +177,69 @@ export class PostgresListingLifecycleRepository
       client.release(discard);
     }
   }
+  assertNotStopped(account: ListingAccount, sku: string): Promise<void> {
+    return this.withLocks(
+      account,
+      [listingLifecycleSkuSchema.parse(sku)],
+      true,
+      async (session) => {
+        if (await session.find(sku))
+          throw new ListingPublicationError(
+            "LISTING_PUBLICATION_STOPPED",
+            "This listing was unpublished or removed in Echelon.",
+          );
+      },
+    );
+  }
+  withStockAllowed<T>(
+    account: ListingAccount,
+    sku: string,
+    quantity: number,
+    work: () => Promise<T>,
+  ): Promise<T> {
+    z.number().int().min(0).max(2_147_483_647).parse(quantity);
+    if (quantity > 0) return this.withAllowed(account, [sku], work);
+    return this.withLocks(
+      account,
+      [listingLifecycleSkuSchema.parse(sku)],
+      true,
+      async (_session, client) => {
+        if (
+          (
+            await readListingPresence(client, listingAccountKey(account), [sku])
+          ).some((item) => item.state === "missing")
+        )
+          throw new ListingPublicationError(
+            "LISTING_MISSING_ON_PROVIDER",
+            "This listing is missing on Walmart. No stock update was sent.",
+          );
+        // A zero still drains stock for an explicit Echelon unpublish command.
+        return work();
+      },
+    );
+  }
   async withAllowed<T>(
     account: ListingAccount,
     input: readonly string[],
     work: () => Promise<T>,
+    initialStock?: Readonly<ListingSetupIntent>,
   ): Promise<T> {
     const skus = z.array(listingLifecycleSkuSchema).max(500).parse(input);
-    return this.withLocks(account, skus, true, async (session) => {
+    return this.withLocks(account, skus, true, async (session, client) => {
+      if (initialStock) {
+        assertListingSetupAdmission(initialStock);
+        if (
+          initialStock.channelId !== account.channelId ||
+          initialStock.channelConnectionId !== account.connectionId ||
+          initialStock.partnerId !== account.accountId ||
+          initialStock.environment !== account.environment ||
+          initialStock.shipNodeId !== account.scopeId
+        )
+          throw new ListingPublicationError(
+            "LISTING_STOCK_ACCOUNT_CHANGED",
+            "The admitted inventory account changed.",
+          );
+      }
       for (const sku of new Set(skus))
         if (await session.find(sku)) {
           throw new ListingPublicationError(
@@ -184,7 +247,104 @@ export class PostgresListingLifecycleRepository
             `Publication is stopped for ${sku}. This listing was unpublished or removed in Echelon.`,
           );
         }
+      const missing = await readListingPresence(
+        client,
+        listingAccountKey(account),
+        skus,
+      );
+      if (
+        missing.some(
+          (item) =>
+            item.state === "missing" &&
+            !initialStock?.items.some(
+              (member) => member.sku === item.sku && member.recreation,
+            ),
+        )
+      )
+        throw new ListingPublicationError(
+          "LISTING_MISSING_ON_PROVIDER",
+          "This listing is missing on Walmart. Use Recreate on Walmart to publish it again.",
+        );
       return work();
+    });
+  }
+  presence(
+    account: ListingAccount,
+    skus: readonly string[],
+  ): Promise<ListingPresence[]> {
+    return this.read((client) =>
+      readListingPresence(client, listingAccountKey(account), skus),
+    );
+  }
+  observePresence(
+    account: ListingAccount,
+    sku: string,
+    observe: () => Promise<ListingPresence>,
+    completingOperationId?: string,
+  ): Promise<ListingPresence | null> {
+    listingLifecycleSkuSchema.parse(sku);
+    return this.withLocks(account, [sku], false, async (session, client) => {
+      if (await session.find(sku)) return null; // Explicit operator stops retain authority.
+      const known = await client.query<{ channel_product_id: string | null }>(
+        `SELECT channel_product_id FROM channels.channel_feeds
+          WHERE channel_id=$1 AND channel_sku=$2 AND is_active=1 AND quarantined_at IS NULL`,
+        [account.channelId, sku],
+      );
+      if (!known.rowCount) return null; // Unsubmitted drafts are not deleted listings.
+      if (!completingOperationId) {
+        if (await session.hasPendingFeed(sku)) return null;
+        // A processed feed can still be waiting for first item activation.
+        // Its temporary 404 is not evidence of a seller deletion.
+        const pending = await client.query(
+          `SELECT 1 FROM marketplace.channel_listing_operations o,
+            jsonb_array_elements(o.progress->'items') i
+            WHERE o.account_key=$1 AND o.state IN ('queued','submitting','processing','needs_reconciliation')
+              AND i->>'sku'=$2 AND i->>'state' IN ('queued','processing','accepted','needs_reconciliation') LIMIT 1`,
+          [listingAccountKey(account), sku],
+        );
+        if (pending.rowCount) return null;
+      }
+      if (completingOperationId) {
+        const active = await client.query(
+          `SELECT 1 FROM marketplace.channel_listing_operations o,
+            jsonb_array_elements(o.progress->'items') i, jsonb_array_elements(o.progress->'batches') b
+            WHERE b->>'correlationId'=$1 AND o.account_key=$2 AND o.state IN ('queued','submitting','processing')
+              AND i->>'sku'=$3 AND b->'variantIds' @> jsonb_build_array((i->>'variantId')::integer)`,
+          [
+            z.string().uuid().parse(completingOperationId),
+            listingAccountKey(account),
+            sku,
+          ],
+        );
+        if (!active.rowCount)
+          throw new ListingPublicationError(
+            "LISTING_PRESENCE_OPERATION_CHANGED",
+            "The listing submission is no longer current.",
+          );
+      }
+      const observed = await observe();
+      if (observed.sku !== sku)
+        throw new ListingPublicationError(
+          "LISTING_PRESENCE_SKU_CHANGED",
+          "Walmart returned a different SKU.",
+        );
+      if (
+        observed.state === "present" &&
+        known.rows.some(
+          (row) =>
+            row.channel_product_id &&
+            row.channel_product_id !== observed.externalProductId,
+        )
+      )
+        throw new ListingPublicationError(
+          "LISTING_PRESENCE_IDENTITY_CHANGED",
+          "Walmart returned a different item identity. Reconcile the listing before resuming updates.",
+        );
+      return recordListingPresence(
+        client,
+        listingAccountKey(account),
+        observed,
+      );
     });
   }
   list(

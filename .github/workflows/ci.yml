@@ -24,19 +24,25 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Validate migration identities before dependency setup
+        run: node scripts/migrations/check-migrations.mjs --ci
       - uses: actions/setup-node@v4
         with:
           node-version: 20
           cache: npm
       - run: npm ci
-      # Catch manifest drift and migration collisions before the long checks.
+      # Catch manifest drift, test-exclusion drift and migration collisions early.
       # These are also retained in the full unit suite.
-      - name: Validate CI coverage and migration numbering
+      - name: Validate CI coverage, test exclusions and migration numbering
         run: >-
           npx vitest run
           server/__tests__/unit/postgres-ci-shards.test.ts
           server/__tests__/unit/migration-prefix-collision.test.ts
           server/__tests__/unit/browser-ci-selection.test.ts
+          server/__tests__/unit/test-typecheck-ratchet.test.ts
           server/__tests__/unit/ci-fast-feedback.test.ts
           --allowOnly=false --passWithNoTests=false
 
@@ -175,6 +181,9 @@ jobs:
           client/src/pages/dropship/__tests__/ListingSettingsTabs.test.ts
           client/src/lib/__tests__/dropship-listing-settings-drawer.test.ts
           client/src/pages/dropship/__tests__/ListingSettingsProductDrawer.test.ts
+          client/src/lib/__tests__/dropship-listing-settings-product-edit.test.ts
+          client/src/lib/__tests__/dropship-listing-settings-product-requests.test.ts
+          client/src/pages/dropship/__tests__/ListingSettingsDrawerEdit.test.ts
           client/src/lib/__tests__/dropship-listing-settings-attention.test.ts
           client/src/pages/dropship/__tests__/ListingSettingsHeaderBannerStrip.test.ts
           client/src/pages/dropship/__tests__/ListingSettingsStep.test.ts

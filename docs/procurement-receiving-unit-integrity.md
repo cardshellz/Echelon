@@ -1,5 +1,7 @@
 # Procurement receiving unit and source integrity (W02a)
 
+Historical release record: the physical/PO transaction split and temporary source matching described below are superseded by [receiving close and destination integrity](procurement-receiving-close-integrity.md). Its migration, recovery limits and tests describe the current corrective slice; the dated results below remain historical evidence.
+
 Baseline: `bb21c9647647682756e5663a022f40bb4a8afe77`, the merge of shipment-line controls PR #1383. This change follows that deployed slice. Verification uses code, fictional browser responses and an explicitly disposable PostgreSQL database. No production business records or settings were read or changed.
 
 ## Summary of changes

@@ -27,7 +27,7 @@ import type {
 import { ListingSubmissionError } from "./listing-publication-provider.port";
 import type { ListingPublicationStore } from "./listing-publication-store.port";
 import type { ListingUpdateStore } from "./listing-update-ports";
-import type { ListingSetupZeroIntent } from "../../inventory-planning/application/listing-setup-zero-intent";
+import type { ListingSetupIntent } from "../../inventory-planning/application/listing-setup-intent";
 import {
   ListingPublicationError,
   listingAccountKey,
@@ -59,14 +59,14 @@ export interface ListingPublicationInventory {
     items: readonly ListingCatalogItem[],
     recreations?: ListingSnapshot["recreations"],
   ): Promise<ListingReview["inventory"]>;
-  /** The inventory owner must hold quantity admission for the complete zero-stock request. */
-  submitZero(
+  /** Inventory resolves and admits current stock for the complete listing request. */
+  submitInitialStock(
     account: ListingAccount,
     operationId: string,
     items: PreparedListingItem[],
     reviewedInventory: ListingReview["inventory"],
     submit: (
-      admission: Readonly<ListingSetupZeroIntent>,
+      admission: Readonly<ListingSetupIntent>,
     ) => Promise<{ submissionId: string }>,
     recreations?: ListingSnapshot["recreations"],
   ): Promise<{ submissionId: string }>;
@@ -252,7 +252,8 @@ export class ListingPublicationService {
         : null;
       if (recreation) recreations.push(recreation);
       const issues = [];
-      if (item.images === null) issues.push(...(source.imageIssues ?? []));
+      if (item.method === "create" && item.images === null)
+        issues.push(...(source.imageIssues ?? []));
       if (!source.eligible || !source.sku.trim())
         issues.push(
           listingIssue(
@@ -558,7 +559,7 @@ export class ListingPublicationService {
           await persist();
           let providerEntered = false;
           try {
-            const submitted = await this.dependencies.inventory.submitZero(
+            const submitted = await this.dependencies.inventory.submitInitialStock(
               currentAccount,
               // Each feed family has its own immutable admission command. The
               // parent operation durably retains this correlation identity.
@@ -571,7 +572,7 @@ export class ListingPublicationService {
                   operationId: batch.correlationId,
                   correlationId: batch.correlationId,
                   items,
-                  zeroStockAdmission: admission,
+                  stockAdmission: admission,
                   beforeSubmit: () =>
                     this.dependencies.store.renewLease(operation, this.now()),
                 });

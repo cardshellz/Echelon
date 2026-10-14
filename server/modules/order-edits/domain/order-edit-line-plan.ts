@@ -30,6 +30,11 @@ export interface OrderEditStagedAddition {
   quantityIncreaseOfLineId?: string;
 }
 
+/** Provisional calculation identity only; never sent to Shopify as a native line ID. */
+export function orderEditAdditionSourceKey(variantId: string): string {
+  return `preview:add:${variantId}`;
+}
+
 /** Preserve the commercial request while resolving Shopify's protected-line constraint. */
 export function resolveOrderEditLinePlan(input: z.input<typeof inputSchema>): {
   changes: Array<{ lineItemId: string; quantity: number }>;

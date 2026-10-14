@@ -58,7 +58,7 @@ export function createListingPublicationService(input: {
     inventory: {
       inspect: async (account, items, recreations) => {
         const inspection =
-          await input.quantityAdmission.inspectListingSetupZero({
+          await input.quantityAdmission.inspectListingSetup({
             channelId: account.channelId,
             channelConnectionId: account.connectionId,
             partnerId: account.accountId,
@@ -76,7 +76,7 @@ export function createListingPublicationService(input: {
           targetId: inspection.publicationTargetId?.toString() ?? null,
           targetRevision: inspection.targetRevision,
           message: inspection.ready
-            ? "Items start with zero stock. Once Walmart publishes them, Echelon sends current available inventory automatically and checks Walmart received it. Recreated items keep their exact SKU mapping and receive a fresh stock update even if the quantity is unchanged."
+            ? "Echelon includes current available inventory when submitting each item, using your Walmart stock rules. It confirms the stock Walmart received and keeps it updated automatically."
             : [
                 ...new Set([
                   ...inspection.blockers.map((blocker) => blocker.message),
@@ -88,7 +88,7 @@ export function createListingPublicationService(input: {
               "Complete the Walmart destination in Channel Inventory.",
         };
       },
-      submitZero: async (
+      submitInitialStock: async (
         account,
         operationId,
         items,
@@ -102,7 +102,7 @@ export function createListingPublicationService(input: {
             "Review the exact inventory destination before publishing",
           );
         }
-        return input.quantityAdmission.runListingSetupZero(
+        return input.quantityAdmission.runListingSetup(
           {
             operationId,
             publicationTargetId: Number(reviewedInventory.targetId),
@@ -131,6 +131,7 @@ export function createListingPublicationService(input: {
         observedAt,
       }) => {
         try {
+          await input.walmart.observeListingPresence(account, sku, { operationId: setupOperationId, externalProductId });
           const result = await input.verifiedStock.connect({
             channelId: account.channelId,
             connectionId: account.connectionId,

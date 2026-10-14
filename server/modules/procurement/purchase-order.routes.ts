@@ -1,3 +1,4 @@
+import { procurementSettingsCommands, PROCUREMENT_SETTINGS_COMMAND_SCOPE } from "./procurement-settings.commands";
 import type { Express, Request, Response } from "express";
 import { registerPoVarianceApprovalRoutes } from './po-variance-approval.routes';
 import { registerPoQuantityAmendmentRoutes } from './po-quantity-amendment.routes';
@@ -7,7 +8,7 @@ import { warehouseStorage } from "../warehouse";
 import { inventoryStorage } from "../inventory";
 import { ordersStorage } from "../orders";
 const storage = { ...procurementStorage, ...catalogStorage, ...warehouseStorage, ...inventoryStorage, ...ordersStorage };
-import { requirePermission } from "../../routes/middleware";
+import { requirePermission, requireAnyPermission } from "../../routes/middleware";
 import { requireIdempotency } from "../../middleware/idempotency";
 import {
   PurchasingError,
@@ -448,6 +449,20 @@ export function registerPurchaseOrderRoutes(app: Express) {
     }
   });
 
+  app.get("/api/purchase-orders/:id/shipment-cost-summary",requirePermission("purchasing","view"),async(req,res)=>{
+    const parsed=z.string().regex(/^[1-9]\d*$/).transform(Number).pipe(z.number().int().positive().max(2_147_483_647)).safeParse(req.params.id);
+    if (!parsed.success) return res.status(400).json({error:"Invalid purchase order ID"});
+    try {
+      const summary=await purchasing.getPoShipmentCostSummary(parsed.data);
+      if (!summary) return res.status(404).json({error:"Purchase order not found"});
+      res.json(summary);
+    } catch (error:unknown) {
+      console.error(JSON.stringify({event:"procurement.po_shipment_cost_summary_failed",poId:parsed.data,
+        errorType:error instanceof Error?error.name:"unknown"}));
+      res.status(500).json({error:"Shipment costs could not be loaded. Retry to load the latest costs."});
+    }
+  });
+
   app.get("/api/purchase-orders/:id", requirePermission("purchasing", "view"), async (req, res) => {
     try {
       const po = await purchasing.getPurchaseOrderById(Number(req.params.id));
@@ -721,54 +736,37 @@ export function registerPurchaseOrderRoutes(app: Express) {
     },
   );
 
-  // Spec A: procurement settings CRUD.
   app.get(
     "/api/settings/procurement",
-    requirePermission("purchasing", "view"),
+    requireAnyPermission(["purchasing", "view"], ["settings", "edit"]),
     async (_req, res) => {
       try {
-        const settings = await purchasing.getProcurementSettings();
-        res.json(settings);
-      } catch (error: any) {
+        res.json(await purchasing.getProcurementSettings());
+      } catch (error: unknown) {
         if (error instanceof PurchasingError) {
-          return res.status(error.statusCode).json({ error: error.message });
+          return res.status(error.statusCode).json({ error: error.message, details: error.details });
         }
-        res.status(500).json({ error: error.message });
+        console.error(JSON.stringify({ event: "procurement.settings.read_failed", errorType: error instanceof Error ? error.name : typeof error }));
+        return res.status(500).json({ error: "Procurement settings could not be loaded.", code: "PROCUREMENT_SETTINGS_READ_FAILED" });
       }
     },
   );
 
   app.patch(
     "/api/settings/procurement",
-    requirePermission("inventory", "adjust"), // admin-scope gate (reuse existing admin perm)
+    requirePermission("settings", "edit"),
     async (req, res) => {
       try {
-        const userId = req.session.user?.id;
-        // Accept either { key, value } or { updates: [{ key, value }, ...] }.
-        const updates: Array<{ key: string; value: boolean }> = [];
-        if (req.body && typeof req.body.key === "string") {
-          updates.push({ key: req.body.key, value: req.body.value });
-        }
-        if (Array.isArray(req.body?.updates)) {
-          for (const u of req.body.updates) {
-            if (u && typeof u.key === "string") {
-              updates.push({ key: u.key, value: u.value });
-            }
-          }
-        }
-        if (updates.length === 0) {
-          return res.status(400).json({ error: "Request must include { key, value } or { updates: [...] }" });
-        }
-        let latest: any = null;
-        for (const u of updates) {
-          latest = await purchasing.updateProcurementSetting(u.key, u.value, userId);
-        }
-        res.json(latest);
-      } catch (error: any) {
-        if (error instanceof PurchasingError) {
-          return res.status(error.statusCode).json({ error: error.message });
-        }
-        res.status(500).json({ error: error.message });
+        const descriptor = financialCommandFromRequest(req, {
+          ...PROCUREMENT_SETTINGS_COMMAND_SCOPE,
+          actorId: req.session.user?.id,
+        });
+        const result = await procurementSettingsCommands.update(req.body, descriptor.actorId, descriptor);
+        return sendFinancialCommandResult(res, result);
+      } catch (error: unknown) {
+        if (error instanceof FinancialCommandError) return sendFinancialCommandError(res, error);
+        console.error(JSON.stringify({ event: "procurement.settings.command_failed", actorId: req.session.user?.id, errorType: error instanceof Error ? error.name : typeof error }));
+        return res.status(500).json({ error: "Procurement settings could not be saved. Retry the same command.", code: "PROCUREMENT_SETTINGS_COMMAND_FAILED" });
       }
     },
   );
@@ -1023,11 +1021,11 @@ export function registerPurchaseOrderRoutes(app: Express) {
     await handleLifecycleCommand(req, res, "acknowledge");
   });
 
-  app.post("/api/purchase-orders/:id/cancel", requirePermission("purchasing", "cancel"), async (req, res) => {
+  app.post("/api/purchase-orders/:id/cancel", requireAnyPermission(["purchasing", "cancel"], ["purchasing", "approve"]), async (req, res) => {
     await handleLifecycleCommand(req, res, "cancel");
   });
 
-  app.post("/api/purchase-orders/:id/void", requirePermission("purchasing", "approve"), async (req, res) => {
+  app.post("/api/purchase-orders/:id/void", requireAnyPermission(["purchasing", "cancel"], ["purchasing", "approve"]), async (req, res) => {
     await handleLifecycleCommand(req, res, "cancel");
   });
 

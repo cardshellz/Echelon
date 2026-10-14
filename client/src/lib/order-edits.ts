@@ -301,7 +301,7 @@ export function createOrderEditTransport(request: typeof fetch = fetch) {
     operationId.parse(id);
     // The operation UUID is also its stable command key across reloads. Actions are separately scoped server-side.
     const result = await orderEditRequest(
-      `/operations/${encodeURIComponent(id)}${action ? `/${action}` : ""}`,
+      `/operations/${encodeURIComponent(id)}${action ? `/${action}` : "?codeEntryVersion=v1"}`,
       orderEditOperationSchema,
       action ? { method: "POST", key: id, body: {} } : { signal },
       request,
@@ -424,7 +424,7 @@ export function createOrderEditTransport(request: typeof fetch = fetch) {
       signal?: AbortSignal,
     ) => {
       const result = await read(
-        `/orders/${positiveId.parse(omsOrderId)}?connectionId=${positiveId.parse(connectionId)}`,
+        `/orders/${positiveId.parse(omsOrderId)}?connectionId=${positiveId.parse(connectionId)}&codeEntryVersion=v1`,
         orderEditOrderSchema,
         signal,
       );

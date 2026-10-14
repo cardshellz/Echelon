@@ -1,5 +1,6 @@
-import { expect, type Page, type Route, type TestInfo } from "playwright/test";
+import { expect, type Page, type Route, type TestInfo } from "@playwright/test";
 import { join, resolve } from "node:path";
+import { z } from "zod";
 import {
   ebayCategoryRulesStateSchema,
   saveEbayCategoryRulesInputSchema,
@@ -10,25 +11,48 @@ import {
 import { decideDropshipListingAccess } from "../../shared/dropship/listing-access";
 import { contentProfileStateSchema, saveContentProfileInputSchema, type ContentProfileState } from "../../shared/dropship/listing-content";
 import {
+  saveProductSettingsInputSchema,
+  saveProductSettingsResponseSchema,
+  type ProductSettingsPatchInput,
+} from "../../shared/dropship/listing-setting-writes";
+import {
   listingPriceResponseSchema,
   saveListingPriceInputSchema,
   type ListingPriceSetting,
   type ListingPricingMode,
 } from "../../shared/dropship/listing-price";
 import {
+  LISTING_SETTINGS_FIELD_SETTINGS,
+  LISTING_SETTINGS_FIELDS,
+  LISTING_SETTINGS_FIX_CODES,
   LISTING_SETTINGS_PAGE_SIZE,
+  LISTING_SETTINGS_VALUE_SOURCES,
   listingSettingsPricesResponseSchema,
   listingSettingsProductDetailSchema,
+  listingSettingsProductOwnSettingsSchema,
   listingSettingsProductsResponseSchema,
   listingSettingsSummarySchema,
   type ListingSettingsFixCode,
   type ListingSettingsProductDetail,
+  type ListingSettingsProductOwnSettings,
   type ListingSettingsProductRow,
+  type ListingSettingsProductSettings,
+  type ListingSettingsSettingKey,
   type ListingSettingsSizePrice,
   type ListingSettingsSummary,
+  type ListingSettingsValueSource,
 } from "../../shared/dropship/listing-settings";
 import {
+  categoryListingSettingValuesSchema,
+  productListingSettingValuesSchema,
+  type CategoryListingSettingValues,
+  type ListingSettingTemplateText,
+  type ProductListingSettingValues,
+} from "../../shared/dropship/listing-setting-values";
+import {
+  CATEGORY_PRICE_RULE_NAME,
   PRICING_REVIEW_PAGE_SIZE,
+  PRODUCT_PRICE_RULE_NAME,
   applyPricingRulesInputSchema,
   calculateRulePrice,
   pricingBasisCents,
@@ -57,6 +81,10 @@ import {
  *
  * Money is integer cents throughout; rule prices come from the shared resolver
  * (`calculateRulePrice`), so a price here is the price the server would give.
+ *
+ * A size's settings come from one resolver (`layeredSettings`) over the store defaults and the
+ * product, category and size layers in `StubState`, closest first, as the server's facts do;
+ * the product detail, the lists, the live summary and the product's own settings read all use it.
  */
 
 /** Where screenshots go when CATALOG_SHOTS_DIR is set (never in CI). */
@@ -217,11 +245,29 @@ export interface ProductFixture {
   productId: number;
   productName: string;
   productSku: string | null;
+  /** The Card Shellz category's current name, which a value from its settings is shown under. */
   category: string | null;
+  /**
+   * The Card Shellz category's id (catalog.product_categories.id), whose settings
+   * (`categorySettings`) the product follows; null or left out for none, as today's fixtures.
+   */
+  categoryId?: number | null;
   /** Every size the vendor could choose; defaults to the chosen ones. */
   sizesTotal?: number;
   sizes: SizeFixture[];
 }
+
+/**
+ * A product in a Card Shellz category with two sizes, for the layered resolver's load-time check
+ * (and for journeys that want one): $3.99 and $8.99 retail.
+ */
+export const LAYERED_SAMPLE: ProductFixture = {
+  productId: 21, productName: "Penny Sleeves", productSku: "PSL", category: "Sleeves", categoryId: 40,
+  sizes: [
+    { productVariantId: 301, sizeName: "Pack of 100", sku: "PSL-100", retailCents: 399, costCents: 210, stockUnits: 40 },
+    { productVariantId: 302, sizeName: "Pack of 500", sku: "PSL-500", retailCents: 899, costCents: 610, stockUnits: 9 },
+  ],
+};
 
 /** Product 11 and its one chosen size, as ROW: $6.99 retail, $4.10 cost (the price stub's numbers). */
 export const ENVELOPE: ProductFixture = {
@@ -235,6 +281,51 @@ export interface SavedSizePrice {
   pricingMode: ListingPricingMode;
   /** Set exactly when `pricingMode` is `fixed`. */
   overridePriceCents: number | null;
+}
+
+/**
+ * The layers a size's settings come from besides the store defaults (plan PR 10, 3.2, CI-M6):
+ * each product's own row (W5, W6), each Card Shellz category's row (W12), and what today's
+ * per-size panels left on single sizes. They are stored in the server's own shapes and parsed
+ * with its stored contract each time a read uses them (productLayerOf, categoryLayerOf,
+ * sizeLeftoverOf), because test/ is not type-checked in CI: a fixture that drifts fails the
+ * journey with the schema's words.
+ */
+export interface ProductSettingsLayer { revisionId: number; values: ProductListingSettingValues }
+export interface CategorySettingsLayer { revisionId: number; values: CategoryListingSettingValues }
+/** What today's per-size panels left on one size: policy ids (an override), one or two shelf names, its own main text. */
+export interface SizeLeftoverLayer {
+  shippingPolicyId?: string;
+  returnPolicyId?: string;
+  paymentPolicyId?: string;
+  shelfNames?: string[];
+  mainText?: string;
+}
+
+const revisionIdSchema = z.number().int().positive().max(2_147_483_647);
+const productSettingsLayerSchema = z.object({ revisionId: revisionIdSchema, values: productListingSettingValuesSchema }).strict();
+const categorySettingsLayerSchema = z.object({ revisionId: revisionIdSchema, values: categoryListingSettingValuesSchema }).strict();
+const sizeLeftoverLayerSchema = z.object({
+  shippingPolicyId: z.string().min(1).optional(),
+  returnPolicyId: z.string().min(1).optional(),
+  paymentPolicyId: z.string().min(1).optional(),
+  // A per-size shelf row always holds one or two names (migration 215).
+  shelfNames: z.array(z.string().min(1)).min(1).max(2).optional(),
+  mainText: z.string().min(1).optional(),
+}).strict();
+
+/**
+ * The product-level catalog hash every fixture product's facts give (productCatalogHash on the
+ * server): a product main text saved with it is up to date; with any other hash it needs a check.
+ */
+export const STUB_PRODUCT_CATALOG_HASH = "a".repeat(64);
+
+export function productKey(storeConnectionId: number, productId: number): string {
+  return `${storeConnectionId}:${productId}`;
+}
+
+export function categoryKey(storeConnectionId: number, categoryId: number): string {
+  return `${storeConnectionId}:${categoryId}`;
 }
 
 /** The name `resolvePricingRule` gives the store default recipe (shared/dropship/pricing-rules.ts). */
@@ -307,6 +398,12 @@ export interface StubState {
   catalog: ProductFixture[];
   /** Saved size prices (W9) by sizeKey(store, size). */
   sizePrices: Record<string, SavedSizePrice>;
+  /** Each product's own settings row by productKey(store, product); a product left out has none (plan PR 10, 3.2). */
+  productSettings: Record<string, ProductSettingsLayer>;
+  /** Each Card Shellz category's settings row by categoryKey(store, category); a category left out has none. */
+  categorySettings: Record<string, CategorySettingsLayer>;
+  /** What today's per-size panels left on single sizes, by sizeKey(store, size); a size left out has none. */
+  sizeLeftovers: Record<string, SizeLeftoverLayer>;
   /** The store's eBay shelves by store; a store left out has none. */
   storeShelves: Record<number, StoreShelfFixture[]>;
   /** The shelves read is refused with this while it is set. */
@@ -332,11 +429,14 @@ export interface StubState {
   /** W9 saves (PUT …/variants/:id/price), and how the next ones answer. */
   priceWrites: StubWrite[];
   priceWriteAnswers: WriteAnswer[];
+  /** W5 saves of one product's own settings (PUT …/listing-settings/products/:id; plan PR 10, 4.6), and how the next ones answer. */
+  productSettingsWrites: StubWrite[];
+  productSettingsWriteAnswers: WriteAnswer[];
   /** The checks W1 made, by review id, for paging and saving. */
   reviews: Record<string, { storeConnectionId: number; input: ReviewPricingRulesInput; review: PricingReviewResponse }>;
   /** Request keys the keyed writers saw, with the body and the answer, so a retry is answered from the first save. */
   keyedAnswers: Record<string, { body: string; json: Record<string, unknown> }>;
-  /** The next revision a keyed writer saves (W1, W3, W4, W9 share one counter, as ids). */
+  /** The next revision a keyed writer saves (W1, W3, W4, W5, W9 share one counter, as ids). */
   nextRevision: number;
   unexpected: string[];
   errors: string[];
@@ -405,6 +505,218 @@ function storeRecipe(state: StubState, storeConnectionId: number): PricingRecipe
   return state.pricingRules[storeConnectionId]?.profile?.defaultRecipe ?? null;
 }
 
+// ---------------------------------------------------------------------------
+// The layers, resolved as the server resolves them (plan PR 10, 3.2, CI-M6)
+// ---------------------------------------------------------------------------
+
+/** A layer as a read uses it, parsed with the stored contract (a copy; the state is never changed). */
+function productLayerOf(state: StubState, storeConnectionId: number, productId: number): ProductSettingsLayer | null {
+  const layer = state.productSettings[productKey(storeConnectionId, productId)];
+  return layer === undefined ? null : productSettingsLayerSchema.parse(layer);
+}
+
+function categoryLayerOf(state: StubState, storeConnectionId: number, categoryId: number): CategorySettingsLayer | null {
+  const layer = state.categorySettings[categoryKey(storeConnectionId, categoryId)];
+  return layer === undefined ? null : categorySettingsLayerSchema.parse(layer);
+}
+
+function sizeLeftoverOf(state: StubState, storeConnectionId: number, productVariantId: number): SizeLeftoverLayer {
+  const layer = state.sizeLeftovers[sizeKey(storeConnectionId, productVariantId)];
+  return layer === undefined ? {} : sizeLeftoverLayerSchema.parse(layer);
+}
+
+/** The recipe that prices a size by rule, closest first: the product's own price, its category's, the store's. */
+export interface LayeredPrice {
+  recipe: PricingRecipe;
+  /** `kind` and `name` as the size price's `rule` names them (listingSettingsPriceRuleSchema). */
+  kind: "product" | "category" | "store_default";
+  name: string;
+}
+
+/** One size's value for one setting and where it gets it (the facts' ListingSettingsSizeValue). Equal keys are equal values. */
+export interface LayeredValue<V> { key: string; value: V; source: ListingSettingsValueSource; ruleName: string | null }
+type SettingValue<K extends ListingSettingsSettingKey> = ListingSettingsProductSettings[K][number]["value"];
+export type LayeredSizeValues = { [K in ListingSettingsSettingKey]: LayeredValue<SettingValue<K>> };
+
+export interface LayeredSize {
+  size: SizeFixture;
+  values: LayeredSizeValues;
+  /** The size uses the product's own main text, written against other catalog facts (the `own_text_needs_check` fix). */
+  ownTextNeedsCheck: boolean;
+}
+
+export interface LayeredProduct {
+  product: ProductFixture;
+  /** The product's own settings row; null when it has none. */
+  own: ProductSettingsLayer | null;
+  /** The product's Card Shellz category and its settings row (null when it has none); null for no category. */
+  category: { categoryId: number; name: string; layer: CategorySettingsLayer | null } | null;
+  /** What prices the product's sizes by rule; null when nothing does. */
+  price: LayeredPrice | null;
+  /** Its chosen sizes, in the fixture's order. */
+  sizes: LayeredSize[];
+}
+
+/** The template part sources, closest first (resolveContentTemplate's order); the closer of a size's two is its value's source. */
+const TEMPLATE_PART_SOURCES = ["product", "group_rule", "category", "store_default", "none"] as const;
+const POLICY_LEFTOVER = { shippingPolicy: "shippingPolicyId", returnPolicy: "returnPolicyId", paymentPolicy: "paymentPolicyId" } as const;
+const POLICY_DEFAULT = { shippingPolicy: "fulfillmentPolicyId", returnPolicy: "returnPolicyId", paymentPolicy: "paymentPolicyId" } as const;
+
+function layeredValue<V>(key: string, value: V, source: ListingSettingsValueSource, ruleName: string | null = null): LayeredValue<V> {
+  return { key, value, source, ruleName };
+}
+
+/**
+ * One product's settings, size by size, from the layers: the closest setting wins, size (a
+ * leftover; for prices only an exact price, which `sizePrices` holds) → product → category →
+ * store default (REC:993), as dropship-listing-settings-facts.ts sizeValues resolves them. A
+ * value from the category is named by the category's current name. With every layer empty each
+ * value is the store-level one these reads gave before the layers existed; two store-level reads
+ * keep today's stub words on purpose (the store shelf default is not read; a store template
+ * with no text is no source). Older group rules are not modelled here. Null when not chosen.
+ */
+export function layeredSettings(state: StubState, storeConnectionId: number, productId: number): LayeredProduct | null {
+  const product = state.catalog.find((entry) => entry.productId === productId);
+  return product ? layeredProduct(state, storeConnectionId, product) : null;
+}
+
+/** The product's Card Shellz category with its settings row; a category id without a name is a fixture fault. */
+function categoryOf(state: StubState, storeConnectionId: number, product: ProductFixture): LayeredProduct["category"] {
+  const categoryId = product.categoryId ?? null;
+  if (categoryId === null) return null;
+  if (product.category === null) {
+    throw new Error(`Fixture product ${product.productId} has a category id but no category name to show its values under.`);
+  }
+  return { categoryId, name: product.category, layer: categoryLayerOf(state, storeConnectionId, categoryId) };
+}
+
+function layeredProduct(state: StubState, storeConnectionId: number, product: ProductFixture): LayeredProduct {
+  const own = productLayerOf(state, storeConnectionId, product.productId);
+  const category = categoryOf(state, storeConnectionId, product);
+  const ownValues = own?.values ?? null;
+  const categoryValues = category?.layer?.values ?? null;
+  const categoryName = category?.name ?? null;
+  const selection = setupOf(state, storeConnectionId).selection as Record<string, string | null | undefined>;
+  const storeCategory = state.categoryRules[storeConnectionId]?.profile?.defaultCategory ?? null;
+  const template = state.contentProfiles[storeConnectionId]?.profile?.defaultTemplate ?? null;
+  const storeHasText = template !== null && (template.introduction !== "" || template.footer !== "");
+
+  const policy = (setting: keyof typeof POLICY_LEFTOVER, leftover: SizeLeftoverLayer): LayeredValue<{ policyId: string | null }> => {
+    const sizeId = leftover[POLICY_LEFTOVER[setting]] ?? null;
+    if (sizeId !== null) return layeredValue(sizeId, { policyId: sizeId }, "size");
+    const productPolicy = ownValues?.[setting]?.id ?? null;
+    if (productPolicy !== null) return layeredValue(productPolicy, { policyId: productPolicy }, "product");
+    const categoryPolicy = categoryValues?.[setting]?.id ?? null;
+    if (categoryPolicy !== null) return layeredValue(categoryPolicy, { policyId: categoryPolicy }, "category", categoryName);
+    const storePolicy = selection[POLICY_DEFAULT[setting]] ?? null;
+    return storePolicy ? layeredValue(storePolicy, { policyId: storePolicy }, "store_default") : layeredValue("", { policyId: null }, "none");
+  };
+  const ebayCategory = (): LayeredSizeValues["ebayCategory"] => {
+    const set = ownValues?.ebayCategory ?? null;
+    const fromCategory = categoryValues?.ebayCategory ?? null;
+    const [chosen, source] = set ? [set, "product" as const] : fromCategory ? [fromCategory, "category" as const]
+      : storeCategory ? [storeCategory, "store_default" as const] : [CARD_SHELLZ_CATEGORY, "catalog" as const];
+    return layeredValue(chosen.categoryId, { categoryId: chosen.categoryId, categoryName: chosen.categoryName }, source,
+      source === "category" ? categoryName : null);
+  };
+  const shelf = (leftover: SizeLeftoverLayer): LayeredSizeValues["storeShelf"] => {
+    const names = (value: { mode: "none" } | { mode: "own"; shelves: Array<{ name: string }> }) =>
+      value.mode === "none" ? [] : value.shelves.map((entry) => entry.name);
+    const [chosen, source]: [string[], ListingSettingsValueSource] = leftover.shelfNames ? [[...leftover.shelfNames], "size"]
+      : ownValues?.storeShelf ? [names(ownValues.storeShelf), "product"]
+        : categoryValues?.storeShelf ? [names(categoryValues.storeShelf), "category"]
+          // Today's stub reads no store shelf default here (PR 7's fixture); kept, so no journey's shelf row moves.
+          : [[], "none"];
+    return layeredValue(JSON.stringify(chosen), { names: chosen }, source, source === "category" ? categoryName : null);
+  };
+  const templatePart = (setting: "textAbove" | "textBelow", storeText: string) => {
+    const text = (value: ListingSettingTemplateText) => (value.mode === "own" ? value.text : "");
+    if (ownValues?.[setting]) return { text: text(ownValues[setting]), source: "product" as const };
+    if (categoryValues?.[setting]) return { text: text(categoryValues[setting]), source: "category" as const };
+    return storeHasText ? { text: storeText, source: "store_default" as const } : { text: storeText, source: "none" as const };
+  };
+  const descriptionTemplate = (): LayeredSizeValues["descriptionTemplate"] => {
+    const above = templatePart("textAbove", template?.introduction ?? "");
+    const below = templatePart("textBelow", template?.footer ?? "");
+    const source = TEMPLATE_PART_SOURCES.find((entry) => entry === above.source || entry === below.source) ?? "none";
+    return layeredValue(JSON.stringify([above.text, below.text]),
+      { hasIntroduction: above.text !== "", hasFooter: below.text !== "", groupConflict: false }, source,
+      source === "category" ? categoryName : null);
+  };
+
+  const sizes = product.sizes.map((size): LayeredSize => {
+    const leftover = sizeLeftoverOf(state, storeConnectionId, size.productVariantId);
+    // A size's own text, else the product's, else the Card Shellz text; equal texts are one value.
+    const productText = leftover.mainText === undefined ? ownValues?.mainText ?? null : null;
+    const mainText: LayeredSizeValues["mainText"] = leftover.mainText !== undefined
+      ? layeredValue(`text:${leftover.mainText}`, { own: true }, "size")
+      : productText !== null ? layeredValue(`text:${productText.text}`, { own: true }, "product")
+        : layeredValue("catalog", { own: false }, "catalog");
+    return {
+      size,
+      values: {
+        shippingPolicy: policy("shippingPolicy", leftover),
+        returnPolicy: policy("returnPolicy", leftover),
+        paymentPolicy: policy("paymentPolicy", leftover),
+        ebayCategory: ebayCategory(),
+        storeShelf: shelf(leftover),
+        descriptionTemplate: descriptionTemplate(),
+        mainText,
+      },
+      ownTextNeedsCheck: productText !== null && productText.catalogHash !== STUB_PRODUCT_CATALOG_HASH,
+    };
+  });
+  return { product, own, category, price: layeredPrice(state, storeConnectionId, product, own, category), sizes };
+}
+
+/** The product's own price, else its category's, else the store's recipe (resolvePricingRule's levels). */
+function layeredPrice(state: StubState, storeConnectionId: number, product: ProductFixture,
+  own: ProductSettingsLayer | null, category: LayeredProduct["category"]): LayeredPrice | null {
+  if (own?.values.price) return { recipe: own.values.price, kind: "product", name: product.productName.trim() ? product.productName : PRODUCT_PRICE_RULE_NAME };
+  if (category?.layer?.values.price) return { recipe: category.layer.values.price, kind: "category", name: category.name };
+  const recipe = storeRecipe(state, storeConnectionId);
+  return recipe === null ? null : { recipe, kind: "store_default", name: STORE_DEFAULT_RULE_NAME };
+}
+
+function priceOf(state: StubState, storeConnectionId: number, product: ProductFixture): LayeredPrice | null {
+  return layeredPrice(state, storeConnectionId, product, productLayerOf(state, storeConnectionId, product.productId),
+    categoryOf(state, storeConnectionId, product));
+}
+
+/** The closest source first, as the facts order a value's sources. */
+const SOURCE_ORDER: ReadonlyMap<ListingSettingsValueSource, number> = new Map(LISTING_SETTINGS_VALUE_SOURCES.map((source, index) => [source, index]));
+
+/**
+ * A setting's distinct values among the sizes, the most used first (ties in size order), each
+ * with its sizes grouped by where they get it, closest first (the facts' settingValues).
+ */
+function settingEntries<K extends ListingSettingsSettingKey>(sizes: readonly LayeredSize[], key: K): ListingSettingsProductSettings[K] {
+  const byKey = new Map<string, { value: SettingValue<K>; firstIndex: number; count: number;
+    sources: Map<string, { source: ListingSettingsValueSource; ruleName: string | null; productVariantIds: number[] }> }>();
+  sizes.forEach((entry, index) => {
+    const value = entry.values[key] as LayeredValue<SettingValue<K>>;
+    let option = byKey.get(value.key);
+    if (!option) {
+      option = { value: value.value, firstIndex: index, count: 0, sources: new Map() };
+      byKey.set(value.key, option);
+    }
+    option.count += 1;
+    const sourceId = JSON.stringify([value.source, value.ruleName]);
+    const from = option.sources.get(sourceId) ?? { source: value.source, ruleName: value.ruleName, productVariantIds: [] };
+    from.productVariantIds.push(entry.size.productVariantId);
+    option.sources.set(sourceId, from);
+  });
+  return [...byKey.values()].sort((a, b) => b.count - a.count || a.firstIndex - b.firstIndex)
+    .map((option) => ({ value: option.value, sources: [...option.sources.values()].sort((a, b) =>
+      (SOURCE_ORDER.get(a.source) ?? 0) - (SOURCE_ORDER.get(b.source) ?? 0) || (a.ruleName ?? "").localeCompare(b.ruleName ?? "")) })) as ListingSettingsProductSettings[K];
+}
+
+const OWN_VALUE_SOURCES: ReadonlySet<ListingSettingsValueSource> = new Set<ListingSettingsValueSource>(["size", "product"]);
+
+// ---------------------------------------------------------------------------
+// Prices, as the server works them out (with the layers' recipes)
+// ---------------------------------------------------------------------------
+
 function basisCentsFor(recipe: PricingRecipe, size: SizeFixture): number | null {
   return pricingBasisCents(recipe.basis, { productCostCents: size.costCents, catalogRetailCents: size.retailCents });
 }
@@ -414,14 +726,15 @@ function rulePriceFor(recipe: PricingRecipe | null, size: SizeFixture) {
   return recipe === null ? null : calculateRulePrice(recipe, basisCentsFor(recipe, size));
 }
 
-/** One size's price fact (`listingSettingsSizePriceSchema`), from its saved setting and the store's rules. */
+/** One size's price fact (`listingSettingsSizePriceSchema`), from its saved setting and the recipe that prices it by rule. */
 export function sizePriceFact(state: StubState, storeConnectionId: number, product: ProductFixture, size: SizeFixture): ListingSettingsSizePrice {
   const saved = state.sizePrices[sizeKey(storeConnectionId, size.productVariantId)] ?? null;
-  const recipe = storeRecipe(state, storeConnectionId);
+  const layered = priceOf(state, storeConnectionId, product);
+  const recipe = layered?.recipe ?? null;
   const rule = rulePriceFor(recipe, size);
   const ruleOwned = (priceCents: number) => ({
     priceCents, source: "rules" as const, issue: null,
-    rule: { kind: "store_default" as const, name: STORE_DEFAULT_RULE_NAME, recipe: recipe as PricingRecipe },
+    rule: { kind: (layered as LayeredPrice).kind, name: (layered as LayeredPrice).name, recipe: recipe as PricingRecipe },
     basis: (recipe as PricingRecipe).basis, basisAmountCents: basisCentsFor(recipe as PricingRecipe, size),
   });
   const noRule = { rule: null, basis: null, basisAmountCents: null };
@@ -454,7 +767,9 @@ export function sizePriceFact(state: StubState, storeConnectionId: number, produ
 /** One size's own price read (W9 `GET …/variants/:id/price`), as the route projects it. */
 export function sizePriceSetting(state: StubState, storeConnectionId: number, size: SizeFixture): ListingPriceSetting {
   const saved = state.sizePrices[sizeKey(storeConnectionId, size.productVariantId)] ?? null;
-  const recipe = storeRecipe(state, storeConnectionId);
+  const product = findProductOf(state, size.productVariantId);
+  const layered = product === null ? null : priceOf(state, storeConnectionId, product);
+  const recipe = layered?.recipe ?? null;
   const rule = rulePriceFor(recipe, size);
   const mode: ListingPricingMode = saved?.pricingMode ?? (recipe ? "rules" : "catalog_default");
   let effective: number | null;
@@ -469,33 +784,49 @@ export function sizePriceSetting(state: StubState, storeConnectionId: number, si
     effective = size.retailCents;
     source = effective === null ? "unavailable" : "catalog_default";
   }
+  // A product's or a category's own price is named by its level, as resolvePricingRule names it.
+  const ruleName = layered === null ? null : layered.kind === "product" ? PRODUCT_PRICE_RULE_NAME
+    : layered.kind === "category" ? CATEGORY_PRICE_RULE_NAME : STORE_DEFAULT_RULE_NAME;
   return {
     storeConnectionId, productVariantId: size.productVariantId, revisionId: saved?.revisionId ?? null,
     overridePriceCents: mode === "fixed" ? saved?.overridePriceCents ?? null : null,
     effectivePriceCents: effective, defaultPriceCents: size.retailCents, source, pricingMode: mode,
-    ruleName: recipe ? STORE_DEFAULT_RULE_NAME : null, pricingIssue: rule?.issue ?? null, rulePriceCents: rule?.priceCents ?? null,
+    ruleName, pricingIssue: rule?.issue ?? null, rulePriceCents: rule?.priceCents ?? null,
     rulesConfigured: recipe !== null, ruleBasis: recipe?.basis ?? null, productCostCents: size.costCents,
     updatedAt: saved ? STAMP : null,
+    ...(layered && layered.kind !== "store_default" ? { ruleLevel: layered.kind } : {}),
   };
 }
 
-function sizeFixes(price: ListingSettingsSizePrice): ListingSettingsFixCode[] {
-  return price.priceCents === null ? ["size_cannot_be_priced"] : [];
+/** A size's fixes, in the contract's order: it can't be priced, or it uses the product's own text, which needs a check. */
+function sizeFixes(price: ListingSettingsSizePrice, size: LayeredSize): ListingSettingsFixCode[] {
+  const fixes = new Set<ListingSettingsFixCode>();
+  if (price.priceCents === null) fixes.add("size_cannot_be_priced");
+  if (size.ownTextNeedsCheck) fixes.add("own_text_needs_check");
+  return LISTING_SETTINGS_FIX_CODES.filter((code) => fixes.has(code));
 }
 
 function productFacts(state: StubState, storeConnectionId: number, product: ProductFixture) {
+  const layered = layeredProduct(state, storeConnectionId, product);
   const prices = product.sizes.map((size) => sizePriceFact(state, storeConnectionId, product, size));
+  const sizeFixList = layered.sizes.map((size, index) => sizeFixes(prices[index], size));
   const priced = prices.map((price) => price.priceCents).filter((cents): cents is number => cents !== null);
-  const fixes = [...new Set(prices.flatMap(sizeFixes))];
+  const fixes = new Set(sizeFixList.flat());
+  // Each field's settings, as the facts read them: own when a size or the product holds its own
+  // value; sizes differ when the sizes' values are not all the same.
+  const sizeValues = layered.sizes.map((size) => size.values);
   const row: Omit<ListingSettingsProductRow, "matchedSize"> = {
     productId: product.productId, productName: product.productName, category: product.category,
     sizesChosen: product.sizes.length, sizesTotal: product.sizesTotal ?? product.sizes.length,
     priceRange: priced.length === 0 ? null : { minCents: Math.min(...priced), maxCents: Math.max(...priced) },
     exactPriceCount: prices.filter((price) => price.source === "exact").length,
-    // Today's per-size policies, shelves and texts are not in the fixture: every size uses the store's.
-    ownSettings: [], sizesDiffer: [], fixes,
+    ownSettings: LISTING_SETTINGS_FIELDS.filter((field) => LISTING_SETTINGS_FIELD_SETTINGS[field]
+      .some((setting) => sizeValues.some((values) => OWN_VALUE_SOURCES.has(values[setting].source)))),
+    sizesDiffer: LISTING_SETTINGS_FIELDS.filter((field) => LISTING_SETTINGS_FIELD_SETTINGS[field]
+      .some((setting) => new Set(sizeValues.map((values) => values[setting].key)).size > 1)),
+    fixes: LISTING_SETTINGS_FIX_CODES.filter((code) => fixes.has(code)),
   };
-  return { prices, row };
+  return { prices, row, layered, sizeFixes: sizeFixList };
 }
 
 function textMatches(text: string | null, search: string): boolean {
@@ -517,9 +848,11 @@ export function listingSettingsProducts(state: StubState, storeConnectionId: num
     const productMatches = search === "" || textMatches(product.productName, search) || textMatches(product.productSku, search);
     const size = productMatches ? null : product.sizes.find((entry) => textMatches(entry.sizeName, search) || textMatches(entry.sku, search));
     if (!productMatches && !size) continue;
+    // `own_settings` and `sizes_differ` follow the layers only, as the live summary counts them (exact prices are not counted here).
     const listed = show === "all" || (show === "needs_fix" && row.fixes.length > 0) || (show === "exact_prices" && row.exactPriceCount > 0)
       || (show === "below_cost" && prices.some((price) => price.belowCostByCents !== null))
-      || (show === "cannot_price" && prices.some((price) => price.priceCents === null));
+      || (show === "cannot_price" && prices.some((price) => price.priceCents === null))
+      || (show === "own_settings" && row.ownSettings.length > 0) || (show === "sizes_differ" && row.sizesDiffer.length > 0);
     if (!listed) continue;
     rows.push({ ...row, matchedSize: size ? { productVariantId: size.productVariantId, sizeName: size.sizeName, sku: size.sku } : null });
   }
@@ -548,44 +881,65 @@ export function listingSettingsPrices(state: StubState, storeConnectionId: numbe
     rows: pageOf(rows, page), generatedAt: STAMP });
 }
 
-/** One product's settings in full (the drawer), or null when it is not chosen. */
+/** One product's settings in full (the drawer), from the layers, or null when it is not chosen. */
 export function listingSettingsProductDetail(state: StubState, storeConnectionId: number, productId: number): ListingSettingsProductDetail | null {
   const product = state.catalog.find((entry) => entry.productId === productId);
   if (!product) return null;
-  const { prices, row } = productFacts(state, storeConnectionId, product);
-  const ids = product.sizes.map((size) => size.productVariantId);
-  const one = <V>(value: V, source: "store_default" | "catalog" | "none") => [{ value, sources: [{ source, ruleName: null, productVariantIds: ids }] }];
-  const selection = setupOf(state, storeConnectionId).selection;
-  const policy = (policyId: string | null) => one({ policyId }, policyId === null ? "none" : "store_default");
-  const category = state.categoryRules[storeConnectionId]?.profile?.defaultCategory ?? null;
-  const template = state.contentProfiles[storeConnectionId]?.profile?.defaultTemplate ?? null;
-  const hasText = template !== null && (template.introduction !== "" || template.footer !== "");
+  const { prices, row, layered, sizeFixes: fixes } = productFacts(state, storeConnectionId, product);
   return listingSettingsProductDetailSchema.parse({
     storeConnectionId,
     product: row,
     settings: {
-      shippingPolicy: policy(selection.fulfillmentPolicyId ?? null),
-      returnPolicy: policy(selection.returnPolicyId ?? null),
-      paymentPolicy: policy(selection.paymentPolicyId ?? null),
-      ebayCategory: category
-        ? one({ categoryId: category.categoryId, categoryName: category.categoryName }, "store_default")
-        : one({ ...CARD_SHELLZ_CATEGORY }, "catalog"),
-      // The store shelf default reaches listings in PR 8 (A2): the size's own shelf shows, and these sizes have none.
-      storeShelf: one({ names: [] }, "none"),
-      descriptionTemplate: one({ hasIntroduction: (template?.introduction ?? "") !== "", hasFooter: (template?.footer ?? "") !== "",
-        groupConflict: false }, hasText ? "store_default" : "none"),
-      mainText: one({ own: false }, "catalog"),
+      shippingPolicy: settingEntries(layered.sizes, "shippingPolicy"),
+      returnPolicy: settingEntries(layered.sizes, "returnPolicy"),
+      paymentPolicy: settingEntries(layered.sizes, "paymentPolicy"),
+      ebayCategory: settingEntries(layered.sizes, "ebayCategory"),
+      storeShelf: settingEntries(layered.sizes, "storeShelf"),
+      descriptionTemplate: settingEntries(layered.sizes, "descriptionTemplate"),
+      mainText: settingEntries(layered.sizes, "mainText"),
     },
-    sizes: product.sizes.map((size, index) => ({ price: prices[index], fixes: sizeFixes(prices[index]), stockUnits: size.stockUnits })),
+    sizes: product.sizes.map((size, index) => ({ price: prices[index], fixes: fixes[index], stockUnits: size.stockUnits })),
     stock: { state: "ok", checkedAt: STAMP },
     generatedAt: STAMP,
   });
 }
 
 /**
+ * One product's own settings row (`GET …/products/:productId/own`, plan PR 10, 4.2) as the
+ * server's productOwnSettingsView gives it: only the product layer's values, with their stored
+ * names and texts and its revision; null when the product is not chosen. A main text needs a
+ * check when it was saved with another hash than STUB_PRODUCT_CATALOG_HASH.
+ */
+export function listingSettingsProductOwn(state: StubState, storeConnectionId: number, productId: number): ListingSettingsProductOwnSettings | null {
+  const layered = layeredSettings(state, storeConnectionId, productId);
+  if (layered === null) return null;
+  const values = layered.own?.values ?? null;
+  return listingSettingsProductOwnSettingsSchema.parse({
+    storeConnectionId, productId, revisionId: layered.own?.revisionId ?? null,
+    own: {
+      price: values?.price ?? null,
+      ebayCategory: values?.ebayCategory ? { categoryId: values.ebayCategory.categoryId, categoryName: values.ebayCategory.categoryName } : null,
+      storeShelf: values?.storeShelf ?? null,
+      shippingPolicy: values?.shippingPolicy ?? null,
+      returnPolicy: values?.returnPolicy ?? null,
+      paymentPolicy: values?.paymentPolicy ?? null,
+      textAbove: values?.textAbove ?? null,
+      textBelow: values?.textBelow ?? null,
+      mainText: values?.mainText ? { text: values.mainText.text, needsCheck: values.mainText.catalogHash !== STUB_PRODUCT_CATALOG_HASH } : null,
+    },
+    generatedAt: STAMP,
+  });
+}
+
+/** Per-product attention lines, in the order the facts name a product's problems (PRODUCT_ATTENTION_FIXES). */
+const PRODUCT_ATTENTION_FIXES = ["no_ebay_category", "size_cannot_be_priced", "description_group_conflict"] as const;
+
+/**
  * The summary as the server works it out from what the stub holds (`liveSummary`), in the
  * order and with the counts `buildListingSettingsSummary` gives (dropship-listing-settings-facts.ts):
- * the shared listing access decision, then missing policies, then each product's first fix.
+ * the shared listing access decision, then missing policies, then own text to check, then each
+ * product's first fix. `productsWithOwnSettings` counts the layers' own values only (exact prices
+ * are not counted, as before the layers).
  */
 export function liveListingSettingsSummary(state: StubState, storeConnectionId: number): ListingSettingsSummary {
   const setup = setupOf(state, storeConnectionId);
@@ -606,8 +960,12 @@ export function liveListingSettingsSummary(state: StubState, storeConnectionId: 
   if (reconnect) items.push({ code: "reconnect_store", count: 1, productId: null, productName: null });
   const missingCount = policyIds.filter((id) => !id).length;
   if (missingCount > 0) items.push({ code: "choose_store_policies", count: missingCount, productId: null, productName: null });
-  for (const product of needingFix) {
-    items.push({ code: "size_cannot_be_priced", count: product.prices.filter((price) => price.priceCents === null).length,
+  const ownText = products.filter((product) => product.row.fixes.includes("own_text_needs_check")).length;
+  if (ownText > 0) items.push({ code: "own_text_needs_check", count: ownText, productId: null, productName: null });
+  for (const product of products) {
+    const code = PRODUCT_ATTENTION_FIXES.find((fix) => product.row.fixes.includes(fix));
+    if (!code) continue;
+    items.push({ code, count: product.sizeFixes.filter((fixes) => fixes.includes(code)).length,
       productId: product.row.productId, productName: product.row.productName });
   }
   const railState = state.tooLarge ? "too_many_sizes" : reconnect ? "reconnect_store"
@@ -627,7 +985,9 @@ export function liveListingSettingsSummary(state: StubState, storeConnectionId: 
         hasFooter: (contentProfile?.defaultTemplate.footer ?? "") !== "", groupRules: contentProfile?.groups.length ?? 0 },
     },
     counts: state.tooLarge ? null : {
-      productsNeedingFix: needingFix.length, productsWithSizesDiffer: 0, productsWithOwnSettings: 0,
+      productsNeedingFix: needingFix.length,
+      productsWithSizesDiffer: products.filter((product) => product.row.sizesDiffer.length > 0).length,
+      productsWithOwnSettings: products.filter((product) => product.row.ownSettings.length > 0).length,
       exactPrices: prices.filter((price) => price.source === "exact").length,
       belowCost: prices.filter((price) => price.belowCostByCents !== null).length,
       cannotPrice: prices.filter((price) => price.priceCents === null).length, paused: 0,
@@ -647,6 +1007,14 @@ function reviewIdFor(count: number): string {
 }
 
 function buildReview(state: StubState, storeConnectionId: number, input: ReviewPricingRulesInput, count: number): PricingReviewResponse {
+  // A size a product's or category's own price prices keeps it through a store price change; this check
+  // does not model that yet (PR 10d, 10f), so a journey that needs it fails here instead of being answered wrong.
+  if (state.catalog.some((product) => {
+    const kind = priceOf(state, storeConnectionId, product)?.kind;
+    return kind === "product" || kind === "category";
+  })) {
+    throw new Error("The stub's W1 price check does not price products or categories that have their own price.");
+  }
   const recipe = input.profile.defaultRecipe;
   const rows: PricingImpactRow[] = [];
   for (const product of state.catalog) {
@@ -693,19 +1061,25 @@ function refuseBody(state: StubState, route: Route, method: string, path: string
   return route.fulfill({ status: 400, json: { error: { code: "STUB_INVALID_INPUT", message: "The request body is not what the route takes." } } });
 }
 
+/** How a keyed writer words its answer: first save or replay. PR 7's writers carry `idempotentReplay`. */
+type KeyedAnswerShape = (json: Record<string, unknown>, replayed: boolean) => Record<string, unknown>;
+const WITH_REPLAY_FLAG: KeyedAnswerShape = (json, replayed) => ({ ...json, idempotentReplay: replayed });
+
 /**
- * A keyed write (W1 apply, W3, W4, W9): the same key with the same body is answered from the
- * first save as a replay; the same key with another body is refused, as the routes do.
+ * A keyed write (W1 apply, W3, W4, W5, W9): the same key with the same body is answered from the
+ * first save as a replay; the same key with another body is refused, as the routes do. `shape`
+ * words the answer (W5's contract says a replay with its `outcome`, not a flag).
  */
 async function keyedWrite(state: StubState, route: Route, key: string, body: Record<string, unknown>,
-  answers: WriteAnswer[], save: () => Promise<Record<string, unknown> | ScriptedError> | Record<string, unknown> | ScriptedError) {
+  answers: WriteAnswer[], save: () => Promise<Record<string, unknown> | ScriptedError> | Record<string, unknown> | ScriptedError,
+  shape: KeyedAnswerShape = WITH_REPLAY_FLAG) {
   const sent = JSON.stringify(body);
   const earlier = state.keyedAnswers[key];
   if (earlier) {
     if (earlier.body !== sent) {
       return fulfillError(route, { status: 409, code: "DROPSHIP_IDEMPOTENCY_CONFLICT", message: "This request key was used for another request." });
     }
-    return route.fulfill({ json: { ...earlier.json, idempotentReplay: true } });
+    return route.fulfill({ json: shape(earlier.json, true) });
   }
   const answer = answers.shift();
   if (answer && answer !== "drop") return fulfillError(route, answer);
@@ -715,15 +1089,156 @@ async function keyedWrite(state: StubState, route: Route, key: string, body: Rec
   state.keyedAnswers[key] = { body: sent, json };
   // The save reached the server, but its answer never came back.
   if (answer === "drop") return route.abort("connectionreset");
-  return route.fulfill({ json: { ...json, idempotentReplay: false } });
+  return route.fulfill({ json: shape(json, false) });
 }
 
-function findSize(state: StubState, productVariantId: number): SizeFixture | null {
-  for (const product of state.catalog) {
-    const size = product.sizes.find((entry) => entry.productVariantId === productVariantId);
-    if (size) return size;
+// ---------------------------------------------------------------------------
+// W5: one product's own settings (plan PR 10, 4.6, 4.9)
+// ---------------------------------------------------------------------------
+
+/** The policy fields the drawer saves (10a). */
+const PRODUCT_POLICY_FIELDS = ["shippingPolicy", "returnPolicy", "paymentPolicy"] as const;
+/** Every field the drawer saves (10a's policies, 10b's eBay category, shelf and text); the W5 stub refuses any other, a price above all (D1). */
+const PRODUCT_DRAWER_FIELDS = [...PRODUCT_POLICY_FIELDS, "ebayCategory", "storeShelf", "textAbove", "textBelow", "mainText"] as const;
+/** The patch the drawer sends: ids and text only, never a price (D1). */
+type ProductDrawerPatch = Pick<ProductSettingsPatchInput, (typeof PRODUCT_DRAWER_FIELDS)[number]>;
+const POLICY_OPTIONS = { shippingPolicy: "fulfillmentPolicies", returnPolicy: "returnPolicies", paymentPolicy: "paymentPolicies" } as const;
+/** No value of its own on any field: a product with no row reads this way. */
+const NO_PRODUCT_VALUES: ProductListingSettingValues = {
+  price: null, ebayCategory: null, storeShelf: null, shippingPolicy: null, returnPolicy: null, paymentPolicy: null,
+  textAbove: null, textBelow: null, mainText: null,
+};
+
+/** Each leftover field's key in a size's leftovers (LISTING_SETTING_LEFTOVER_FIELDS on the server). */
+const LEFTOVER_KEYS = { ...POLICY_LEFTOVER, storeShelf: "shelfNames", mainText: "mainText" } as const;
+
+/** The same shelves in the same order (newListingSettingEbayFields compares the id lists in order). */
+function sameShelfIds(ids: readonly string[], stored: ProductListingSettingValues["storeShelf"]): boolean {
+  return stored !== null && stored.mode === "own" && JSON.stringify(stored.shelves.map((shelf) => shelf.id)) === JSON.stringify(ids);
+}
+
+/**
+ * W5 as dropship-listing-product-settings-service.ts saves it, for every field the drawer sends:
+ * compare-and-set on the product's settings revision (8a's 409). An id the product's own row
+ * doesn't hold already asks eBay, which a sign-in stops (D4): a policy is named from eBay's list
+ * (the setup answer) or refused (422 SELECTION_INVALID); an eBay category must be a last-level one
+ * of the stub's tree (422 CATEGORY_RULE_INVALID, `not_found` / `not_leaf`); a shelf must be in the
+ * store's shelves, named by its path (422 STORE_CATEGORY_INVALID, `not_found`). Text is kept as the
+ * shared schema gave it, and a main text is stamped with the product's catalog hash now
+ * (STUB_PRODUCT_CATALOG_HASH), so a re-save of the same text clears its check (plan 5.4, A2).
+ * null sets the field back to the default. Any field saved clears that field's leftovers on the
+ * product's sizes (`clearedSizeCount`). Nothing changed is `unchanged`.
+ */
+function saveProductSettings(state: StubState, storeConnectionId: number, product: ProductFixture,
+  input: { expectedRevisionId: number | null; patch: ProductDrawerPatch }): Record<string, unknown> | ScriptedError {
+  const key = productKey(storeConnectionId, product.productId);
+  const current = productLayerOf(state, storeConnectionId, product.productId);
+  if (input.expectedRevisionId !== (current?.revisionId ?? null)) {
+    return { status: 409, code: "DROPSHIP_PRODUCT_LISTING_SETTINGS_VERSION_CONFLICT",
+      message: "Listing settings changed after you opened them. Reload them before saving again.",
+      context: { storeConnectionId, conflicts: [{ productId: product.productId, expectedRevisionId: input.expectedRevisionId,
+        actualRevisionId: current?.revisionId ?? null }], conflictCount: 1, retryable: false, classification: "permanent" } };
   }
-  return null;
+  const values: ProductListingSettingValues = { ...(current?.values ?? NO_PRODUCT_VALUES) };
+  const setup = setupOf(state, storeConnectionId);
+  const { patch } = input;
+  const fields = PRODUCT_POLICY_FIELDS.filter((field) => patch[field] !== undefined);
+  const saved = PRODUCT_DRAWER_FIELDS.filter((field) => patch[field] !== undefined);
+  // An id the product's own row doesn't hold already asks eBay, which a sign-in stops (D4, P13).
+  const asksEbay: string[] = [];
+  if (patch.ebayCategory && patch.ebayCategory.categoryId !== values.ebayCategory?.categoryId) asksEbay.push("ebayCategory");
+  if (patch.storeShelf?.mode === "own" && !sameShelfIds(patch.storeShelf.shelfIds, values.storeShelf)) asksEbay.push("storeShelf");
+  for (const field of fields) {
+    const sent = patch[field];
+    if (sent !== null && sent !== undefined && values[field]?.id !== sent.id) asksEbay.push(field);
+  }
+  if (asksEbay.length > 0 && state.setupReadError !== null) {
+    return { status: 403, code: "DROPSHIP_LISTING_SETTINGS_EBAY_SIGN_IN_REQUIRED",
+      message: "Sign in to eBay again to choose new eBay values. Settings that keep their saved eBay values can still be saved.",
+      context: { storeConnectionId, fields: asksEbay } };
+  }
+  const permanent = { storeConnectionId, retryable: false, classification: "permanent" } as const;
+  if (patch.ebayCategory !== undefined) {
+    const sent = patch.ebayCategory;
+    if (sent === null) values.ebayCategory = null;
+    else if (asksEbay.includes("ebayCategory")) {
+      const option = EBAY_CATEGORIES.find((entry) => entry.categoryId === sent.categoryId) ?? null;
+      if (option === null || !option.leaf) {
+        return { status: 422, code: "DROPSHIP_EBAY_CATEGORY_RULE_INVALID",
+          message: option === null ? "That eBay category is not in eBay's current category list. Search again and pick a current category."
+            : "Pick a more specific eBay category. eBay accepts listings only in the last level of a category path.",
+          context: { ...permanent, invalidFields: ["ebayCategory"], reason: option === null ? "not_found" : "not_leaf" } };
+      }
+      values.ebayCategory = ebayCategory(option);
+    }
+  }
+  if (patch.storeShelf !== undefined) {
+    const sent = patch.storeShelf;
+    if (sent === null || sent.mode === "none") values.storeShelf = sent;
+    else if (asksEbay.includes("storeShelf")) {
+      const shelves = state.storeShelves[storeConnectionId] ?? [];
+      const found = sent.shelfIds.map((id) => shelves.find((shelf) => shelf.categoryId === id) ?? null);
+      if (found.some((shelf) => shelf === null)) {
+        return { status: 422, code: "DROPSHIP_EBAY_STORE_CATEGORY_INVALID",
+          message: "That store shelf is not in your eBay store now. Reload the shelves and pick again.",
+          context: { ...permanent, invalidFields: ["storeShelf"], reason: "not_found" } };
+      }
+      values.storeShelf = { mode: "own", shelves: found.map((shelf) => ({ id: shelf!.categoryId, name: shelf!.path })) };
+    }
+  }
+  if (patch.textAbove !== undefined) values.textAbove = patch.textAbove;
+  if (patch.textBelow !== undefined) values.textBelow = patch.textBelow;
+  if (patch.mainText !== undefined) {
+    values.mainText = patch.mainText === null ? null : { text: patch.mainText.text, catalogHash: STUB_PRODUCT_CATALOG_HASH };
+  }
+  for (const field of fields) {
+    const sent = patch[field];
+    if (sent === null || sent === undefined) {
+      values[field] = null;
+      continue;
+    }
+    const listed = (setup.options[POLICY_OPTIONS[field]] as Array<{ id: string; name: string }>).find((option) => option.id === sent.id);
+    if (!listed) {
+      if (values[field]?.id === sent.id) continue;
+      return { status: 422, code: "DROPSHIP_EBAY_LISTING_SETUP_SELECTION_INVALID", message: "That policy is not one of the store's eBay policies.",
+        context: { storeConnectionId, retryable: false, classification: "permanent", invalidFields: [field] } };
+    }
+    values[field] = { id: listed.id, name: listed.name };
+  }
+  // Saving a field clears what today's per-size panels left on this product's sizes for it.
+  let clearedSizeCount = 0;
+  for (const size of product.sizes) {
+    const sizeId = sizeKey(storeConnectionId, size.productVariantId);
+    const leftover = state.sizeLeftovers[sizeId];
+    if (!leftover) continue;
+    const kept = { ...leftover };
+    for (const field of saved) if (field in LEFTOVER_KEYS) delete kept[LEFTOVER_KEYS[field as keyof typeof LEFTOVER_KEYS]];
+    if (Object.keys(kept).length !== Object.keys(leftover).length) {
+      clearedSizeCount += 1;
+      state.sizeLeftovers[sizeId] = kept;
+    }
+  }
+  const changed = JSON.stringify(values) !== JSON.stringify(current?.values ?? NO_PRODUCT_VALUES);
+  let revisionId = current?.revisionId ?? null;
+  if (changed) {
+    revisionId = state.nextRevision++;
+    state.productSettings[key] = productSettingsLayerSchema.parse({ revisionId, values });
+  }
+  return saveProductSettingsResponseSchema.parse({
+    outcome: changed || clearedSizeCount > 0 ? "changed" : "unchanged", productId: product.productId, revisionId, sizes: [], clearedSizeCount,
+  });
+}
+
+/** A W5 replay says so in its `outcome`, with no clean-up count (saveProductSettingsResponseSchema). */
+const PRODUCT_SETTINGS_ANSWER: KeyedAnswerShape = (json, replayed) =>
+  saveProductSettingsResponseSchema.parse(replayed ? { ...json, outcome: "replayed", clearedSizeCount: null } : json);
+
+function findSize(state: StubState, productVariantId: number): SizeFixture | null {
+  return findProductOf(state, productVariantId)?.sizes.find((entry) => entry.productVariantId === productVariantId) ?? null;
+}
+
+function findProductOf(state: StubState, productVariantId: number): ProductFixture | null {
+  return state.catalog.find((product) => product.sizes.some((entry) => entry.productVariantId === productVariantId)) ?? null;
 }
 
 function shelfName(state: StubState, storeConnectionId: number, id: string): string {
@@ -735,10 +1250,12 @@ export const defaultStubState = (): StubState => ({
   stores: [MARZ], selected: true, previewCalls: 0, setupReads: [], summaryReads: [], productsReads: [], reads: [],
   vendor: { status: "active", entitlementStatus: "active" }, summaries: {}, liveSummary: false, storeStatuses: {}, tooLarge: false,
   summaryFailures: 0, listingSetups: {}, setupReadFailures: 0, setupReadError: null, pricingRules: {}, setupWrites: [],
-  setupWriteAnswers: [], catalog: [ENVELOPE], sizePrices: {}, storeShelves: {}, storeShelvesError: null, categoryRules: {},
+  setupWriteAnswers: [], catalog: [ENVELOPE], sizePrices: {}, productSettings: {}, categorySettings: {}, sizeLeftovers: {},
+  storeShelves: {}, storeShelvesError: null, categoryRules: {},
   contentProfiles: {}, pricingReviews: [], pricingReviewAnswers: [], pricingApplies: [], pricingApplyAnswers: [],
   categoryWrites: [], categoryWriteAnswers: [], categorySearches: [], contentWrites: [], contentWriteAnswers: [],
-  priceWrites: [], priceWriteAnswers: [], reviews: {}, keyedAnswers: {}, nextRevision: 40, unexpected: [], errors: [],
+  priceWrites: [], priceWriteAnswers: [], productSettingsWrites: [], productSettingsWriteAnswers: [],
+  reviews: {}, keyedAnswers: {}, nextRevision: 40, unexpected: [], errors: [],
 });
 
 /**
@@ -852,7 +1369,7 @@ function answerSetupWrite(state: StubState, route: Route, storeId: number, metho
   return route.fulfill({ json: { ...answered, outcome: answer && "outcome" in answer ? answer.outcome : "changed" } });
 }
 
-/** W1 (price check and save), W3, W4 and W9: NOT_MINE when the request is none of them. */
+/** W1 (price check and save), W3, W4, W5 and W9: NOT_MINE when the request is none of them. */
 async function answerListingWrite(state: StubState, route: Route, storeId: number, listings: string, method: string, path: string, url: URL) {
   const json = () => route.request().postDataJSON() as Record<string, unknown>;
   if (method === "POST" && path === `${listings}/pricing-rules/reviews`) {
@@ -937,6 +1454,26 @@ async function answerListingWrite(state: StubState, route: Route, storeId: numbe
       return { state: saved };
     });
   }
+  const productSettingsPath = new RegExp(`^${listings}/listing-settings/products/(\\d+)$`).exec(path);
+  if (method === "PUT" && productSettingsPath) {
+    const body = json();
+    state.productSettingsWrites.push({ method, path, body });
+    const parsed = saveProductSettingsInputSchema.safeParse(body);
+    if (!parsed.success) return refuseBody(state, route, method, path, parsed.error.message);
+    // D1: the drawer never sends a price, a size's price or shown prices: ids and text only.
+    const extra = Object.keys(body).filter((name) => !["idempotencyKey", "expectedRevisionId", "patch"].includes(name));
+    const fields = Object.keys(parsed.data.patch).filter((name) => !(PRODUCT_DRAWER_FIELDS as readonly string[]).includes(name));
+    if (extra.length > 0 || fields.length > 0) {
+      return refuseBody(state, route, method, path, `the drawer sends ids and text only, not ${[...extra, ...fields].join(", ")}`);
+    }
+    const product = state.catalog.find((entry) => entry.productId === Number(productSettingsPath[1])) ?? null;
+    if (product === null) {
+      return fulfillError(route, { status: 404, code: "DROPSHIP_LISTING_SETTINGS_PRODUCT_NOT_FOUND", message: "This product has no chosen size in this store. Reload the page." });
+    }
+    const patch: ProductDrawerPatch = parsed.data.patch;
+    return keyedWrite(state, route, parsed.data.idempotencyKey, body, state.productSettingsWriteAnswers,
+      () => saveProductSettings(state, storeId, product, { expectedRevisionId: parsed.data.expectedRevisionId, patch }), PRODUCT_SETTINGS_ANSWER);
+  }
   const pricePath = new RegExp(`^${listings}/variants/(\\d+)/price$`).exec(path);
   if (method === "PUT" && pricePath) {
     const body = json();
@@ -954,7 +1491,8 @@ async function answerListingWrite(state: StubState, route: Route, storeId: numbe
         return { status: 409, code: "DROPSHIP_LISTING_PRICE_VERSION_CONFLICT", message: "This price changed since it was loaded." };
       }
       const mode: ListingPricingMode = parsed.data.priceCents !== null ? "fixed" : parsed.data.pricingMode ?? "catalog_default";
-      const rule = rulePriceFor(storeRecipe(state, storeId), size);
+      const product = findProductOf(state, size.productVariantId) as ProductFixture;
+      const rule = rulePriceFor(priceOf(state, storeId, product)?.recipe ?? null, size);
       // W9 never lets a size lose a usable price (listing-price-save-guard.ts).
       if (mode === "inherit" && rule?.priceCents == null && size.retailCents === null) {
         return { status: 422, code: "DROPSHIP_LISTING_PRICE_WOULD_BE_LOST", message: "This size would have no price." };
@@ -999,6 +1537,16 @@ async function answerStoreRead(state: StubState, route: Route, storeId: number, 
   if (path === `${listings}/listing-settings/prices`) {
     if (state.tooLarge) return fulfillTooLarge(route);
     return route.fulfill({ json: listingSettingsPrices(state, storeId, url.searchParams) });
+  }
+  // One product's own settings row (plan PR 10, 4.2): refused while too large, as the server refuses every list read.
+  const ownPath = new RegExp(`^${listings}/listing-settings/products/(\\d+)/own$`).exec(path);
+  if (ownPath) {
+    if (state.tooLarge) return fulfillTooLarge(route);
+    const own = listingSettingsProductOwn(state, storeId, Number(ownPath[1]));
+    if (own === null) {
+      return fulfillError(route, { status: 404, code: "DROPSHIP_LISTING_SETTINGS_PRODUCT_NOT_FOUND", message: "That product isn't chosen for this store." });
+    }
+    return route.fulfill({ json: own });
   }
   const productPath = new RegExp(`^${listings}/listing-settings/products/(\\d+)$`).exec(path);
   if (productPath) {
@@ -1046,7 +1594,7 @@ async function answerStoreRead(state: StubState, route: Route, storeId: number, 
   return NOT_MINE;
 }
 
-/** More than 10,000 sizes chosen: the lists and the product read are refused (dropship-listing-settings.routes.ts). */
+/** More than 10,000 sizes chosen: the lists, the product read and its own settings are refused (dropship-listing-settings.routes.ts). */
 function fulfillTooLarge(route: Route) {
   return fulfillError(route, { status: 422, code: "DROPSHIP_LISTING_SETTINGS_TOO_LARGE",
     message: "More than 10,000 sizes are chosen.", context: { limit: 10_000 } });
@@ -1085,6 +1633,65 @@ export function oldSetupPanel(page: Page) {
   listingSettingsProducts(loaded, MARZ.storeConnectionId, new URLSearchParams());
   listingSettingsPrices(loaded, MARZ.storeConnectionId, new URLSearchParams());
   listingSettingsProductDetail(loaded, MARZ.storeConnectionId, ENVELOPE.productId);
+  listingSettingsProductOwn(loaded, MARZ.storeConnectionId, ENVELOPE.productId);
   listingPriceResponseSchema.parse({ price: sizePriceSetting(loaded, MARZ.storeConnectionId, ENVELOPE.sizes[0]) });
   pricingProfileStateSchema.parse(SAVED_PRICING_RULES);
+
+  // Every layer at once (plan PR 10, 3.2): a product row, its category's row and two sizes' leftovers.
+  // Each read's answer is parsed with its contract, whose checks tie the rows' flags to the values.
+  const store = MARZ.storeConnectionId;
+  const layered: StubState = { ...defaultStubState(), liveSummary: true, catalog: [ENVELOPE, LAYERED_SAMPLE],
+    productSettings: { [productKey(store, LAYERED_SAMPLE.productId)]: { revisionId: 7, values: {
+      price: { basis: "catalog_retail", markupBps: 1_000, flatCents: 0, rounding: "cent" },
+      ebayCategory: null, storeShelf: { mode: "own", shelves: [{ id: "11", name: "Supplies:Sleeves" }] },
+      shippingPolicy: { id: "priority", name: "USPS Priority Mail" }, returnPolicy: null, paymentPolicy: null,
+      textAbove: { mode: "own", text: "Ships in a rigid mailer." }, textBelow: null,
+      mainText: { text: "Our own words.", catalogHash: "b".repeat(64) } } } },
+    categorySettings: { [categoryKey(store, LAYERED_SAMPLE.categoryId as number)]: { revisionId: 8, values: {
+      price: null, ebayCategory: { categoryId: SLEEVES.categoryId, categoryName: SLEEVES.categoryName, path: [...SLEEVES.path] },
+      storeShelf: { mode: "none" }, shippingPolicy: null, returnPolicy: { id: "no-returns", name: "No returns" }, paymentPolicy: null,
+      textAbove: null, textBelow: { mode: "none" } } } },
+    sizeLeftovers: { [sizeKey(store, 302)]: { shippingPolicyId: "ground", shelfNames: ["Sale"], mainText: "This size's words." } } };
+  for (const product of layered.catalog) {
+    listingSettingsProductDetail(layered, store, product.productId);
+    listingSettingsProductOwn(layered, store, product.productId);
+  }
+  liveListingSettingsSummary(layered, store);
+  listingSettingsProducts(layered, store, new URLSearchParams());
+  listingSettingsPrices(layered, store, new URLSearchParams());
+  // W5 (plan PR 10, 4.9): a save of two policy fields on the sample's stored revision answers through the
+  // shared contract, clears the size leftover it covers, and its replay answer is on contract too.
+  const saving: StubState = { ...layered, productSettings: { ...layered.productSettings }, sizeLeftovers: { ...layered.sizeLeftovers } };
+  const saved = saveProductSettings(saving, store, LAYERED_SAMPLE, { expectedRevisionId: 7, patch: { shippingPolicy: { id: "ground" }, returnPolicy: null } });
+  if ("status" in saved || saved.clearedSizeCount !== 1 || PRODUCT_SETTINGS_ANSWER(saved, true).outcome !== "replayed") {
+    throw new Error(`The stub's W5 save changed: ${JSON.stringify(saved)}`);
+  }
+  listingSettingsProductOwn(saving, store, LAYERED_SAMPLE.productId);
+  // 10b's fields (plan 5.2, 5.4): an eBay category and two shelves by id, text above as none, and the same main text
+  // saved again, which the new catalog hash makes a change, so its check clears; the size's shelf and text leftovers go.
+  const tenB: StubState = { ...layered, productSettings: { ...layered.productSettings }, sizeLeftovers: { ...layered.sizeLeftovers },
+    storeShelves: { [store]: [{ categoryId: "11", categoryName: "Sleeves", path: "Supplies:Sleeves", level: 2 },
+      { categoryId: "12", categoryName: "Sale", path: "Sale", level: 1 }] } };
+  const tenBSaved = saveProductSettings(tenB, store, LAYERED_SAMPLE, { expectedRevisionId: 7, patch: {
+    ebayCategory: { categoryId: TOPLOADERS.categoryId }, storeShelf: { mode: "own", shelfIds: ["11", "12"] },
+    textAbove: { mode: "none" }, mainText: { text: "Our own words." } } });
+  const tenBOwn = listingSettingsProductOwn(tenB, store, LAYERED_SAMPLE.productId);
+  if ("status" in tenBSaved || tenBSaved.outcome !== "changed" || tenBSaved.clearedSizeCount !== 1 || tenBOwn?.own.mainText?.needsCheck !== false
+    || JSON.stringify(tenBOwn.own.storeShelf) !== JSON.stringify({ mode: "own", shelves: [{ id: "11", name: "Supplies:Sleeves" }, { id: "12", name: "Sale" }] })
+    || tenBOwn.own.ebayCategory?.categoryName !== TOPLOADERS.categoryName || JSON.stringify(tenB.sizeLeftovers[sizeKey(store, 302)]) !== JSON.stringify({ shippingPolicyId: "ground" })) {
+    throw new Error(`The stub's W5 save of 10b's fields changed: ${JSON.stringify({ tenBSaved, tenBOwn })}`);
+  }
+  const notLeaf = saveProductSettings(tenB, store, LAYERED_SAMPLE, { expectedRevisionId: tenBSaved.revisionId as number,
+    patch: { ebayCategory: { categoryId: CARD_SUPPLIES.categoryId } } });
+  if (!("status" in notLeaf) || notLeaf.code !== "DROPSHIP_EBAY_CATEGORY_RULE_INVALID" || (notLeaf as ScriptedError).context?.reason !== "not_leaf") {
+    throw new Error(`The stub's W5 eBay category check changed: ${JSON.stringify(notLeaf)}`);
+  }
+  // The resolver's order, pinned once here: size, then product, then category (named), then the store default.
+  const sample = layeredSettings(layered, store, LAYERED_SAMPLE.productId) as LayeredProduct;
+  const got = sample.sizes.map(({ values }) => [values.shippingPolicy.source, values.returnPolicy.source,
+    values.returnPolicy.ruleName, values.paymentPolicy.source, values.storeShelf.source, values.mainText.source].join(","));
+  const want = ["product,category,Sleeves,store_default,product,product", "size,category,Sleeves,store_default,size,size"];
+  if (JSON.stringify(got) !== JSON.stringify(want) || sample.price?.kind !== "product" || !sample.sizes[0].ownTextNeedsCheck) {
+    throw new Error(`The stub's layered resolver changed: ${JSON.stringify(got)}`);
+  }
 }

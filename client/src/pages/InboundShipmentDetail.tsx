@@ -149,13 +149,13 @@ function parsePositiveInt(value: string | null): number | null {
 }
 
 type LandedCostPushResult = {
+  status: "applied" | "review_required";
   updated: number;
   total: number;
   skipped?: Array<{
-    lotId: number;
-    productVariantId: number | null;
+    applicationId: number | null;
     reason: string;
-    lineIds?: number[];
+    message: string;
   }>;
 };
 
@@ -351,6 +351,7 @@ export default function InboundShipmentDetail() {
   const [showEditCostDialog, setShowEditCostDialog] = useState(false);
   const [cancelReason, setCancelReason] = useState("");
   const [lastLandedCostPush, setLastLandedCostPush] = useState<LandedCostPushResult | null>(null);
+  const [costPushRetryRequired, setCostPushRetryRequired] = useState(false);
   const [shipmentReceiptPackResolution, setShipmentReceiptPackResolution] = useState<ShipmentReceiptPackResolution | null>(null);
   const [pendingShipmentReceipt, setPendingShipmentReceipt] = useState<{ shipmentId: number; purchaseOrderId: number } | null>(null);
   const [checkingShipmentReceiptPacks, setCheckingShipmentReceiptPacks] = useState(false);
@@ -709,10 +710,24 @@ export default function InboundShipmentDetail() {
         const res = await apiRequest("POST", `/api/inbound-shipments/${shipmentId}/${endpoint}`, body || undefined);
         return res.json();
       },
-      onSuccess: () => {
+      onSuccess: (result: { costApplication?: LandedCostPushResult | { status: "retry_required"; code: string } }) => {
         queryClient.invalidateQueries({ queryKey: [`/api/inbound-shipments/${shipmentId}`] });
         queryClient.invalidateQueries({ queryKey: ["/api/inbound-shipments"] });
         invalidatePoViews();
+        const costResult = result.costApplication;
+        if (costResult) {
+          setCostPushRetryRequired(costResult.status === "retry_required");
+          if (costResult.status !== "retry_required") setLastLandedCostPush(costResult);
+          if (costResult.status !== "applied") {
+            setActiveTab("allocation");
+            toast({ title: "Shipment closed; inventory costs need attention",
+              description: costResult.status === "retry_required"
+                ? "The inventory cost update failed. Retry Push Costs to Lots."
+                : "Some inventory costs need review. See the allocation results.",
+              variant: "destructive" });
+            return;
+          }
+        }
         toast({ title: "Success", description: `Shipment ${endpoint.replace(/-/g, " ")} completed` });
       },
       onError: (err: Error) => {
@@ -950,16 +965,18 @@ export default function InboundShipmentDetail() {
       return res.json();
     },
     onSuccess: async (result) => {
+      setCostPushRetryRequired(false);
       setLastLandedCostPush(result);
       await refreshShipmentCostingViews();
       const skippedCount = result.skipped?.length ?? 0;
+      const needsReview = result.status === "review_required";
       toast({
-        title: skippedCount > 0 ? "Landed cost push needs review" : "Landed costs pushed",
+        title: needsReview ? "Landed cost push needs review" : "Landed costs pushed",
         description:
           skippedCount > 0
             ? `${result.updated} lot${result.updated === 1 ? "" : "s"} updated, ${skippedCount} skipped`
             : `${result.updated} lot${result.updated === 1 ? "" : "s"} updated`,
-        variant: skippedCount > 0 ? "destructive" : "default",
+        variant: needsReview ? "destructive" : "default",
       });
     },
     onError: (err: Error) => {
@@ -1901,28 +1918,32 @@ export default function InboundShipmentDetail() {
             </Card>
           )}
 
+          {costPushRetryRequired && (
+            <div role="alert" className="rounded-md border border-destructive p-4 text-sm text-destructive">
+              The shipment is closed, but its inventory cost update failed. Use Push Costs to Lots to retry.
+            </div>
+          )}
           {lastLandedCostPush && (
-            <Card className={lastLandedCostPush.skipped?.length ? "border-amber-300 bg-amber-50/60 dark:bg-amber-950/10" : "border-green-300 bg-green-50/60 dark:bg-green-950/10"}>
+            <Card className={lastLandedCostPush.status === "review_required" ? "border-amber-300 bg-amber-50/60 dark:bg-amber-950/10" : "border-green-300 bg-green-50/60 dark:bg-green-950/10"}>
               <CardContent className="p-4 space-y-3">
                 <div className="flex flex-wrap items-center gap-2 text-sm">
+                  <Badge variant={lastLandedCostPush.status === "review_required" ? "destructive" : "secondary"}>
+                    {lastLandedCostPush.status === "review_required" ? "Needs review" : "Applied"}
+                  </Badge>
                   <Badge variant={lastLandedCostPush.skipped?.length ? "outline" : "secondary"}>
                     {lastLandedCostPush.updated} updated
                   </Badge>
                   <Badge variant={lastLandedCostPush.skipped?.length ? "destructive" : "outline"}>
                     {lastLandedCostPush.skipped?.length ?? 0} skipped
                   </Badge>
-                  <span className="text-muted-foreground">{lastLandedCostPush.total} provisional lots checked</span>
+                  <span className="text-muted-foreground">{lastLandedCostPush.total} lots in applied cost results</span>
                 </div>
                 {lastLandedCostPush.skipped && lastLandedCostPush.skipped.length > 0 && (
                   <div className="space-y-2">
                     {lastLandedCostPush.skipped.map((item) => (
-                      <div key={`${item.lotId}-${item.reason}`} className="flex flex-wrap items-center gap-2 text-sm">
+                      <div key={`${item.applicationId}-${item.reason}-${item.message}`} className="flex flex-wrap items-center gap-2 text-sm">
                         <AlertTriangle className="h-4 w-4 text-amber-600" />
-                        <span className="font-medium">Lot {item.lotId}</span>
-                        <span>{formatLandedCostSkipReason(item.reason)}</span>
-                        {item.lineIds && item.lineIds.length > 0 && (
-                          <span className="text-muted-foreground">Lines {item.lineIds.join(", ")}</span>
-                        )}
+                        <span>{item.message || formatLandedCostSkipReason(item.reason)}</span>
                       </div>
                     ))}
                   </div>

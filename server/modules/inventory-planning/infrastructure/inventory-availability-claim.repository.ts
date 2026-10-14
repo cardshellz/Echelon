@@ -5963,6 +5963,10 @@ export class PostgresInventoryAvailabilityClaimRepository implements InventoryAv
                   cost.inventory_lot_id AS cost_inventory_lot_id,
                   cost.product_variant_id AS cost_product_variant_id,
                   cost.qty AS cost_qty, cost.unit_cost_mills, cost.total_cost_mills,
+                  CASE WHEN to_jsonb(cost)->>'cost_quantity_allocation_id' IS NULL THEN NULL
+                    ELSE jsonb_build_object('quantityAllocationId',to_jsonb(cost)->>'cost_quantity_allocation_id',
+                    'productMills',to_jsonb(cost)->>'product_total_cost_mills','packagingMills',to_jsonb(cost)->>'packaging_total_cost_mills',
+                    'landedMills',to_jsonb(cost)->>'landed_total_cost_mills') END AS exact_cost_totals,
                   COALESCE((SELECT sum(dispatch.quantity)
                     FROM inventory.availability_claim_dispatch_movements AS dispatch
                     WHERE dispatch.pick_movement_id = movement.id), 0)::text AS dispatched_quantity
@@ -6023,7 +6027,8 @@ export class PostgresInventoryAvailabilityClaimRepository implements InventoryAv
             || positiveInteger(row.cost_product_variant_id, "orderItemCost.productVariantId")
               !== positiveInteger(row.source_variant_id, "claimResource.sourceVariantId")
             || costQty !== movementQty
-            || totalCostMills !== unitCostMills * costQty) {
+            || !recordedCostTotalIsValid({quantity:costQty.toString(),unitCostMills:unitCostMills.toString(),totalCostMills:totalCostMills.toString(),
+              exactTotals:row.exact_cost_totals==null?undefined:exactRecordedCostTotalsSchema.parse(row.exact_cost_totals)})) {
             throw new InventoryAvailabilityClaimRepositoryError(
               "CLAIM_PICK_COGS_EVIDENCE_INVALID",
               "The original canonical pick COGS row does not match its immutable movement identity or cost.",
@@ -6045,6 +6050,7 @@ export class PostgresInventoryAvailabilityClaimRepository implements InventoryAv
             inventoryLotId: positiveInteger(row.inventory_lot_id, "inventoryLot.id"),
             unpickQty: selected.quantity,
             reversesPickMovementId: positiveBigInt(row.id, "pickMovement.id"),
+            orderItemCostId: positiveInteger(row.order_item_cost_id, "orderItemCost.id"),
             unitCostMills,
           };
           byResource.set(key, {
@@ -6826,3 +6832,4 @@ export class PostgresInventoryAvailabilityClaimRepository implements InventoryAv
     );
   }
 }
+import { recordedCostTotalIsValid, exactRecordedCostTotalsSchema } from "@shared/utils/recorded-cost-total";

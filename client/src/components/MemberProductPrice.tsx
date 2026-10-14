@@ -10,6 +10,8 @@ export function MemberProductPrice(props: {
   priceCents: number;
   retailPriceCents?: number;
   plan: MemberPlanPresentation | null;
+  showSavings?: boolean;
+  layout?: "stacked" | "compact";
 }) {
   const [failedIcon, setFailedIcon] = useState<string | null>(null);
   const { priceCents, retailPriceCents, plan } = props;
@@ -17,6 +19,9 @@ export function MemberProductPrice(props: {
     return (
       <span className="text-sm tabular-nums">
         {formatOrderEditMoney(priceCents, "USD")}
+        {props.layout === "compact" && (
+          <span className="cardshellz-price-unit"> each</span>
+        )}
       </span>
     );
   const style = {
@@ -27,7 +32,7 @@ export function MemberProductPrice(props: {
   } as CSSProperties;
   return (
     <div
-      className="cardshellz-catalog-price cardshellz-collection-price"
+      className={`cardshellz-catalog-price cardshellz-collection-price${props.layout === "compact" ? " cardshellz-catalog-price--compact" : ""}`}
       style={style}
       aria-label={`${plan.name} member price ${formatOrderEditMoney(priceCents, "USD")}; retail ${formatOrderEditMoney(retailPriceCents, "USD")}`}
     >
@@ -39,6 +44,9 @@ export function MemberProductPrice(props: {
       <div className="cardshellz-collection-price__bottom">
         <span className="cardshellz-member-price-value">
           {formatOrderEditMoney(priceCents, "USD")}
+          {props.layout === "compact" && (
+            <span className="cardshellz-price-unit"> each</span>
+          )}
         </span>
         <span className="cardshellz-member-tag cardshellz-member-tag--only">
           {plan.iconUrl && failedIcon !== plan.iconUrl ? (
@@ -53,6 +61,11 @@ export function MemberProductPrice(props: {
           )}
         </span>
       </div>
+      {props.showSavings && (
+        <span className="cardshellz-unit-savings">
+          Save {formatOrderEditMoney(retailPriceCents - priceCents, "USD")} each
+        </span>
+      )}
     </div>
   );
 }

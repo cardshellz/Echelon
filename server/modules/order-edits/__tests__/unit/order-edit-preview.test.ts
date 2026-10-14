@@ -19,6 +19,8 @@ import {
 import type { OrderEditPreviewContext } from "../../application/order-edit-preview-provider";
 import type { OrderEditPlan } from "../../application/order-edit-provider";
 import { buildOrderEditFinancials } from "../../domain/order-edit-financials";
+import type { OrderEditStore } from "../../application/order-edit-store";
+import { serviceHarness, OP } from "../fixtures/order-edit-service.fixture";
 
 function priceOrderEditPreviewItems(
   context: OrderEditPreviewContext,
@@ -203,6 +205,7 @@ function harness() {
     orderReference: vi.fn(async () => structuredClone(reference)),
     create: vi.fn(),
     save: vi.fn(),
+    get: vi.fn<OrderEditStore["get"]>(),
   };
   const provider = {
     readOrder: vi.fn(async () => structuredClone(context.snapshot)),
@@ -222,6 +225,7 @@ function harness() {
       wmsOrderIds: [1],
     })),
     acquire: vi.fn(),
+    assertHeld: vi.fn(async () => {}),
     releaseUnchanged: vi.fn(),
   };
   const service = new OrderEditPreviewService(
@@ -247,6 +251,38 @@ const scope = () => {
   return s;
 };
 describe("preview scope and read-only cache", () => {
+  it("validates code changes against the same actor's unsubmitted held review, including cache hits", async () => {
+    const h = harness();
+    const fixture = serviceHarness();
+    await fixture.service.quote(fixture.input, "staff-a");
+    const record = {
+      ...fixture.record(),
+      baseline: h.context.snapshot,
+      quoteDeadline: new Date(PREVIEW_NOW + 600000).toISOString(),
+    };
+    h.reference.activeOperationId = OP;
+    h.store.get.mockImplementation(async () => structuredClone(record));
+    const input = { ...previewInput(), operationId: OP };
+    await h.service.preview(input, "staff-a");
+    await h.service.preview(input, "staff-a");
+    expect(h.warehouse.assertHeld).toHaveBeenCalledTimes(2);
+    expect(h.warehouse.inspect).not.toHaveBeenCalled();
+    expect(h.provider.preview).toHaveBeenCalledTimes(1);
+    await expect(h.service.preview(input, "other-actor")).rejects.toMatchObject(
+      { code: "ORDER_EDIT_PREVIEW_OPERATION_UNAVAILABLE" },
+    );
+    record.commitStartedAt = new Date(PREVIEW_NOW).toISOString();
+    await expect(h.service.preview(input, "staff-a")).rejects.toMatchObject({
+      code: "ORDER_EDIT_PREVIEW_OPERATION_UNAVAILABLE",
+    });
+    record.commitStartedAt = null;
+    h.warehouse.assertHeld.mockRejectedValue(new Error("Hold changed"));
+    await expect(h.service.preview(input, "staff-a")).rejects.toThrow(
+      "Hold changed",
+    );
+    expect(h.provider.preview).toHaveBeenCalledTimes(1);
+    expect(h.provider.commit).not.toHaveBeenCalled();
+  });
   it("reuses the warmed verified customer context for catalog pricing and isolates customer mappings, actors and expiry", async () => {
     const h = harness();
     await h.service.warm(scope(), "staff-a");

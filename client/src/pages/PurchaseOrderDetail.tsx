@@ -1,4 +1,5 @@
 import { PoVarianceApproval, hasPendingPoVarianceApproval } from "@/features/purchasing/PoVarianceApproval";
+import { PoShipmentCostSummary } from "@/features/purchasing/PoShipmentCostSummary";
 import { parseShipmentReceiptResolution, requiresReceiptUnitReview } from "@/lib/shipment-receipt-units";
 import React from "react";
 import { poEmailDeliveryPresentation } from "@/lib/po-email-delivery";
@@ -169,7 +170,12 @@ type PoLifecycleActionId =
   | "close_short";
 
 type PoLifecycleSummary = {
-  nextActions?: Array<{ id: PoLifecycleActionId }>;
+  nextActions?: Array<{
+    id: PoLifecycleActionId;
+    label?: string;
+    endpoint?: string;
+    requiredPermission?: { resource: string; action: string };
+  }>;
 };
 
 type AutoDraftActionPlanActionId =
@@ -979,7 +985,7 @@ function parsePositiveInt(value: string | null): number | null {
 }
 
 export default function PurchaseOrderDetail() {
-  const { user: shipmentCommandUser } = useAuth();
+  const { user: shipmentCommandUser, hasPermission } = useAuth();
   const shipmentLineCommands = React.useMemo(() => shipmentCommandUser?.id ? createShipmentLineCommandClient(
     () => "shipment-line-" + crypto.randomUUID(),
     createShipmentLineRecoveryStore(() => window.sessionStorage, shipmentCommandUser.id),
@@ -1368,10 +1374,10 @@ export default function PurchaseOrderDetail() {
     "create_receipt",
     ["sent", "acknowledged", "partially_received"].includes(po?.status),
   );
-  const canCancelPo = canLifecycleAction(
-    "cancel",
-    po ? !["closed", "cancelled"].includes(po.status) : false,
-  );
+  const cancellationAction = lifecycle?.nextActions?.find((action) => action.id === "cancel");
+  const canCancelPo = Boolean(cancellationAction?.endpoint && cancellationAction.requiredPermission
+    && hasPermission(cancellationAction.requiredPermission.resource, cancellationAction.requiredPermission.action));
+  const cancellationLabel = cancellationAction?.label ?? "Cancel";
   const canClosePo = canLifecycleAction("close", po?.status === "received");
   const scheduleStatus = po?.physicalStatus ?? po?.status;
   const canEditSchedule = Boolean(
@@ -2050,8 +2056,10 @@ export default function PurchaseOrderDetail() {
 
   const cancelMutation = useMutation({
     mutationFn: async (reason: string) => {
-      const endpoint = ["sent", "acknowledged"].includes(po?.status) ? "void" : "cancel";
-      const res = await fetch(`/api/purchase-orders/${poId}/${endpoint}`, {
+      if (!canCancelPo || !cancellationAction?.endpoint) {
+        throw new Error("Cancellation is unavailable. Refresh the purchase order and review your current permissions.");
+      }
+      const res = await fetch(cancellationAction.endpoint, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ reason }),
@@ -2066,8 +2074,14 @@ export default function PurchaseOrderDetail() {
       setCancelReason("");
       toast({ title: "Cancelled", description: "Purchase order cancelled" });
     },
-    onError: (err: Error) => {
+    onError: async (err: Error) => {
       toast({ title: "Error", description: err.message, variant: "destructive" });
+      // A lost response does not prove that cancellation rolled back. Refresh
+      // committed state before allowing another attempt with the open dialog.
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: [`/api/purchase-orders/${poId}`] }),
+        queryClient.invalidateQueries({ queryKey: ["/api/purchase-orders"] }),
+      ]);
     },
   });
 
@@ -2813,7 +2827,7 @@ export default function PurchaseOrderDetail() {
           {canCancelPo && (
             <Button variant="outline" onClick={() => setShowCancelDialog(true)} className="flex-1 sm:flex-none min-h-[44px] text-red-600 hover:text-red-700">
               <Ban className="h-4 w-4 mr-2" />
-              {["sent", "acknowledged"].includes(po.status) ? "Void" : "Cancel"}
+              {cancellationLabel}
             </Button>
           )}
           {["approved", "sent", "acknowledged", "partially_received", "received", "closed"].includes(po.status) && (
@@ -3033,7 +3047,7 @@ export default function PurchaseOrderDetail() {
         <Card className={!taxApplicable ? "opacity-40" : ""}>
           <CardContent className="p-3">
             <div className="flex items-center justify-between">
-              <div className="text-xs text-muted-foreground">Tax / Duties</div>
+              <div className="text-xs text-muted-foreground">Supplier tax / duties</div>
               {taxApplicable && canEditHeader && !editingTax && (
                 <Button variant="ghost" size="icon" className="h-5 w-5"
                   onClick={() => { setTaxDollars(((Number(po.taxCents) || 0) / 100).toFixed(2)); setEditingTax(true); }}
@@ -3071,7 +3085,7 @@ export default function PurchaseOrderDetail() {
         <Card className={!shippingApplicable ? "opacity-40" : ""}>
           <CardContent className="p-3">
             <div className="flex items-center justify-between">
-              <div className="text-xs text-muted-foreground">Freight</div>
+              <div className="text-xs text-muted-foreground">Supplier freight</div>
               {shippingApplicable && canEditHeader && !editingShipping && (
                 <Button variant="ghost" size="icon" className="h-5 w-5"
                   onClick={() => { setShippingDollars(((Number(po.shippingCostCents) || 0) / 100).toFixed(2)); setEditingShipping(true); }}
@@ -3116,12 +3130,14 @@ export default function PurchaseOrderDetail() {
         {/* Total — always read-only */}
         <Card>
           <CardContent className="p-3">
-            <div className="text-xs text-muted-foreground">Total</div>
+            <div className="text-xs text-muted-foreground">Supplier PO total</div>
             <div className="font-mono font-bold text-lg">{formatCents(po.totalCents)}</div>
           </CardContent>
         </Card>
 
       </div>
+
+      {poId && <PoShipmentCostSummary purchaseOrderId={poId} onViewShipments={() => setActiveTab("shipments")} />}
 
       {/* Auto-Draft Banner */}
       {immutableRecommendationPo && (
@@ -4000,7 +4016,7 @@ export default function PurchaseOrderDetail() {
                 onClick={() => setShowCancelDialog(true)}
               >
                 <Ban className="h-3.5 w-3.5 mr-2" />
-                Cancel PO
+                {cancellationLabel} PO
               </Button>
             )}
 
@@ -4735,9 +4751,13 @@ export default function PurchaseOrderDetail() {
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
               <AlertTriangle className="h-5 w-5 text-red-500" />
-              {["sent", "acknowledged"].includes(po.status) ? "Void" : "Cancel"} Purchase Order
+              {cancellationLabel} Purchase Order
             </DialogTitle>
-            <DialogDescription>This action cannot be undone. Please provide a reason.</DialogDescription>
+            <DialogDescription>{canCancelPo
+              ? "This action cannot be undone. Please provide a reason."
+              : po.status === "cancelled"
+                ? "The saved purchase order is already cancelled. Close this dialog to review its current state."
+                : "Cancellation is unavailable for the current purchase order or your current permissions."}</DialogDescription>
           </DialogHeader>
           <div className="space-y-4">
             <div className="space-y-2">
@@ -4754,9 +4774,9 @@ export default function PurchaseOrderDetail() {
               <Button
                 variant="destructive"
                 onClick={() => cancelMutation.mutate(cancelReason)}
-                disabled={!cancelReason.trim() || cancelMutation.isPending}
+                disabled={!canCancelPo || !cancelReason.trim() || cancelMutation.isPending}
               >
-                {cancelMutation.isPending ? "Cancelling..." : "Confirm Cancel"}
+                {cancelMutation.isPending ? "Saving..." : `Confirm ${cancellationLabel}`}
               </Button>
             </div>
           </div>

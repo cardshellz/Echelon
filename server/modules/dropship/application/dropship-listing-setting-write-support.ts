@@ -285,22 +285,49 @@ export interface ChosenSize {
 const CHOSEN_SIZE_BATCH_SIZE = 250;
 
 /**
+ * What a chosen check keeps (plan 6.2 #5): `true` keeps each chosen size's
+ * whole candidate (W5 needs the product's catalog hash); `"pricing"` keeps
+ * it without the description, item specifics and image URLs (W7, whose
+ * price check holds up to 10,000 candidates and prices none from those
+ * fields; v2, C-money-12), and stops as soon as more than `stopAbove` sizes
+ * are chosen (W7 refuses such a scope, P35, so no candidate past the first
+ * one over the bound is kept and no later batch is read: the heap held
+ * before that refusal stays bounded, however many sizes the products have);
+ * `false` keeps only the ids, dropping each batch's candidates once checked
+ * (W12, which needs only whether a product is chosen, and which ones), and
+ * with `firstOnly` stops after the first batch that holds a chosen size
+ * (W12 when it clears nothing: one chosen product is all it asks).
+ */
+export type ChosenSizeOptions = { keepCandidates: true } | { keepCandidates: "pricing"; stopAbove: number }
+  | { keepCandidates: false; firstOnly?: boolean };
+
+/** A chosen size's candidate as a price check keeps it: everything a price, a limit or a review row reads, without the listing's content. */
+export type PricingCatalogCandidate = Omit<DropshipListingCatalogCandidate, "description" | "itemSpecifics" | "imageUrls">;
+
+/**
  * Which of `sizeIds` are chosen and shown, in ascending id, by the content
  * service's rule: Card Shellz exposes the size and the vendor's selection
  * includes it (stock is not part of "chosen", rawAtpUnits 0). Exposure and
  * selection rules are read once; candidates and overrides per batch of 250,
  * so a write checks only its own sizes, never the whole catalog (plan P12).
- * Each chosen size keeps its whole candidate: W5 needs the product's catalog
- * hash.
+ * By default each chosen size keeps its whole candidate (ChosenSizeOptions).
  */
-export async function loadChosenSizes(tx: ChosenSizeReader, sizeIds: readonly number[],
-  now: Date): Promise<Array<ChosenSize & { candidate: DropshipListingCatalogCandidate }>> {
+export async function loadChosenSizes(tx: ChosenSizeReader, sizeIds: readonly number[], now: Date,
+  options?: { keepCandidates: true }): Promise<Array<ChosenSize & { candidate: DropshipListingCatalogCandidate }>>;
+export async function loadChosenSizes(tx: ChosenSizeReader, sizeIds: readonly number[], now: Date,
+  options: { keepCandidates: "pricing"; stopAbove: number }): Promise<Array<ChosenSize & { candidate: PricingCatalogCandidate }>>;
+export async function loadChosenSizes(tx: ChosenSizeReader, sizeIds: readonly number[], now: Date,
+  options: { keepCandidates: false; firstOnly?: boolean }): Promise<ChosenSize[]>;
+export async function loadChosenSizes(tx: ChosenSizeReader, sizeIds: readonly number[], now: Date,
+  options: ChosenSizeOptions = { keepCandidates: true }): Promise<Array<ChosenSize & { candidate?: PricingCatalogCandidate }>> {
   const ids = [...new Set(sizeIds)].sort((left, right) => left - right);
   if (ids.length === 0) return [];
+  const firstOnly = options.keepCandidates === false && options.firstOnly === true;
+  const stopAbove = options.keepCandidates === "pricing" ? options.stopAbove : null;
   // One read at a time: these share the transaction's one connection, which runs one statement at a time anyway.
   const exposureRules = await tx.catalog.listCatalogExposureRules();
   const selectionRules = await tx.catalog.listSelectionRules(tx.vendorId);
-  const chosen: Array<ChosenSize & { candidate: DropshipListingCatalogCandidate }> = [];
+  const chosen: Array<ChosenSize & { candidate?: PricingCatalogCandidate }> = [];
   for (let start = 0; start < ids.length; start += CHOSEN_SIZE_BATCH_SIZE) {
     const batch = ids.slice(start, start + CHOSEN_SIZE_BATCH_SIZE);
     const candidates = await tx.catalog.listCatalogCandidates(batch);
@@ -313,10 +340,36 @@ export async function loadChosenSizes(tx: ChosenSizeReader, sizeIds: readonly nu
       const selection = evaluateDropshipVendorCatalogSelection({ candidate, adminExposureDecision: exposure,
         rules: selectionRules, rawAtpUnits: 0, override: overrideById.get(candidate.productVariantId) ?? null });
       if (!exposure.exposed || !selection.selected) continue;
-      chosen.push({ productVariantId: candidate.productVariantId, productId: candidate.productId, candidate });
+      const size = { productVariantId: candidate.productVariantId, productId: candidate.productId };
+      if (options.keepCandidates === true) chosen.push({ ...size, candidate });
+      else if (options.keepCandidates === "pricing") chosen.push({ ...size, candidate: pricingCandidate(candidate) });
+      else chosen.push(size);
+      // Over the bound: the caller refuses the scope, so nothing past this size is read or kept.
+      if (stopAbove !== null && chosen.length > stopAbove) return chosen;
     }
+    if (firstOnly && chosen.length > 0) break;
   }
   return chosen;
+}
+
+/** A new object without the listing's content; the candidate itself is not changed (CLAUDE.md §4). */
+function pricingCandidate(candidate: DropshipListingCatalogCandidate): PricingCatalogCandidate {
+  const { description: _description, itemSpecifics: _itemSpecifics, imageUrls: _imageUrls, ...pricing } = candidate;
+  return pricing;
+}
+
+/**
+ * The store still holds older group rules (plan P21, D16): a group rule beats
+ * a category's setting, so category settings and older rules never mix (R:§5.1).
+ * Permanent: the same change is refused until the rules are converted (PR 11).
+ * Raised after the replay probe, so a committed save still replays.
+ */
+export function listingSettingOlderRulesPresent(storeConnectionId: number,
+  counts: { pricingGroups: number; contentGroups: number; ebayCategoryRules: number }): DropshipError {
+  return permanent("DROPSHIP_LISTING_SETTINGS_OLDER_RULES_PRESENT",
+    "This store still uses older group rules for prices, descriptions or eBay categories, and they would win over category settings. Category settings can be saved once those rules are replaced.", {
+      storeConnectionId, pricingGroups: counts.pricingGroups, contentGroups: counts.contentGroups, ebayCategoryRules: counts.ebayCategoryRules,
+    });
 }
 
 function permanent(code: string, message: string, context: Record<string, unknown>): DropshipError {

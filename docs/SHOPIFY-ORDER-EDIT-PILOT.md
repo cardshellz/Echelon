@@ -122,9 +122,10 @@ publication/category coverage must also be checked on the deployed connection.
 ## Discount calculation and evidence
 
 `priceOrderEditDiscounts` is a pure domain engine. All money is validated integer
-cents; percentage arithmetic and penny allocation use `BigInt`. Only the original
-order's accepted discounts enter the engine. There is no new coupon entry or
-second rewards redemption in the editor.
+cents; percentage arithmetic and penny allocation use `BigInt`. The original-code
+path preserves accepted native discounts. New entry uses `ShopifyOrderEditCodes`
+for admission and native calculation, then `priceOrderEditCodes` reuses the same
+allocation engine. Rewards state remains owned by the Club app.
 
 1. Verified product and member discounts establish each eligible item subtotal.
 2. Existing order percentages use that same subtotal, without compounding.
@@ -153,11 +154,70 @@ leave unused credit, or require choosing priority between multiple capped fixed
 credits. Automatic settlement of unused Shellz rewards points is not implemented:
 that requires a command owned by the rewards ledger, proven original redemption
 identity, a capped settlement budget and retry-safe audit. A code name is not proof
-of a rewards redemption. The editor does not mint a replacement discount or add a
-manual compensating credit, which could bypass the original combination rules.
+of a rewards redemption. The original-code path does not mint a replacement
+discount or invent compensating credit. The separate new-code path below requires
+explicit combination and redemption evidence before staging a manual adjustment.
 
 These boundaries follow [Shopify's order-edit rules](https://help.shopify.com/en/manual/fulfillment/managing-orders/editing-orders/considerations)
 and [discount combination rules](https://help.shopify.com/en/manual/discounts/discount-combinations).
+
+### New coupon and rewards entry
+
+The customer draft and review share `OrderEditCodeEntry`. A code-only edit is
+valid. Entering a code validates a read-only calculation; it neither commits the
+order nor consumes points. A rejected code on an existing review leaves that
+review intact. An accepted change rebuilds its quote with the persisted item plan.
+The `codeEntryVersion=v1` read protocol also exposes entry on older held reviews
+without changing legacy command hashes or strict response contracts.
+
+`ShopifyOrderEditCodes` reads the issued code's actual identity, customer scope,
+dates, minimum requirements, discount class, value and `combinesWith` flags.
+`assertOrderEditCodeCombinations` requires both discounts to permit every relevant
+class. Current member-pricing and shipping functions are resolved by their
+canonical handles. Missing or ambiguous metadata rejects the code. A calculation
+through `draftOrderCalculate` must approve the exact code savings; no draft order
+is created. Quoting and pre-commit checks repeat admission against current terms,
+stock, shipping and combination rules.
+
+Shopify order editing has no input to redeem a newly entered native code.
+Consequently the supported path stages the complete verified member/code line
+discount as a manual order adjustment with an audited description. Native line
+prices, tax, shipping, total, payments and refunds must match the saved quote.
+Shopify's native code-usage counter does **not** increment for this adjustment.
+Do not describe this receipt as a native Shopify coupon redemption.
+
+Supported new codes are `DiscountCodeBasic` order discounts applying to all items:
+unlimited percentage/fixed campaigns without a once-per-customer limit, and
+canonical customer-locked, one-code/one-use fixed Shellz rewards. Generic finite
+campaign limits, public once-per-customer limits, product/shipping/BXGY codes,
+legacy combined reward/promo/shipping credits, and adding a code to an existing
+native item-code order reject with an explanation. Existing accepted native
+discounts retain their previous supported flow. Rewards that cannot spend their
+full fixed credit reject; unused points are not silently forfeited.
+
+The Club app owns the redemption saga and append-only receipts. A reward is
+claimed transactionally, its native code disabled, and direct customer order
+history checked before the edit can be submitted. The original points deduction
+is not repeated. Only verified payment/refund settlement marks the existing reward
+used and its ledger entry completed on the original order. A code remains reserved
+while additional payment is outstanding. Cancellation or expiry releases it only
+after proving no submission or verified restoration of original economic contents.
+Unknown outcomes keep fulfillment held and retry the same operation. Expiry cannot
+refund a reward already reserved by an edit.
+
+Activation requires the Club migration/API first, then Echelon with
+`SHELLZ_CLUB_API_URL` set to the canonical Club HTTPS origin and the existing shared
+`INTERNAL_API_KEY`. The staging theme uses live-shop orders; the separate Club
+staging database is not the rewards authority for them. Before configuring the URL,
+code entry is visibly unavailable and commands reject. Rollback must retain the
+redemption API and reconciliation while receipts remain active.
+
+Local unit, mocked-provider, browser and disposable-PostgreSQL tests cover these
+boundaries. They do not prove Shopify checkout/deactivation concurrency or actual
+payment/refund acceptance. Before customer launch, record a supervised reward
+redemption on the same order, exactly one refund/payment, duplicate submission,
+expired unpaid restoration, and a checkout racing the reservation. Do not enable
+the live theme or retire Orderify on local tests alone.
 
 ## Recovery and diagnostics
 

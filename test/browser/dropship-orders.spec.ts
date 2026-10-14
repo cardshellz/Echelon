@@ -1,4 +1,4 @@
-import { expect, test, type Page } from "playwright/test";
+import { expect, test, type Page } from "@playwright/test";
 import { resolve } from "node:path";
 import { dropshipVendorOrderDetailResponseSchema } from "../../shared/dropship/vendor-order-detail";
 import { makeDropshipOrderOpsDetail } from "../../server/modules/dropship/__tests__/fixtures/order-ops-detail.fixture";

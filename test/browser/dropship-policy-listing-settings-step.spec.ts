@@ -1,4 +1,4 @@
-import { expect, test, type Locator, type Page, type TestInfo } from "playwright/test";
+import { expect, test, type Page } from "@playwright/test";
 import type { EbayCategoryRulesState } from "../../shared/dropship/ebay-category-rules";
 import type { ContentProfileState } from "../../shared/dropship/listing-content";
 import type { ListingSettingsSummary } from "../../shared/dropship/listing-settings";
@@ -16,7 +16,6 @@ import {
   liveListingSettingsSummary,
   listingSetupWithAnotherShippingPolicy,
   listingSetupWithNothingSaved,
-  openCatalog,
   openOlderSettings,
   shot,
   sizeKey,
@@ -24,6 +23,27 @@ import {
   type ProductFixture,
   type StubState,
 } from "./dropship-policy-catalog-stubs";
+import {
+  KEY,
+  LISTINGS,
+  SETUP_PATH,
+  STORE,
+  banner,
+  drawer,
+  drawerSave,
+  exactBox,
+  expectGatedReads,
+  expectInView,
+  expectNoHorizontalScroll,
+  expectNothingUnexpected,
+  expectSheetLayout,
+  openProductRow,
+  openStep,
+  phone,
+  readsOf,
+  row,
+  rowValue,
+} from "./dropship-policy-listing-settings-helpers";
 
 // Playwright's serviceWorkers:block init script reads navigator.serviceWorker in
 // every frame, which throws in an opaque sandbox. This local-only harness
@@ -40,11 +60,7 @@ test.use({ serviceWorkers: "allow" });
  * journey ends with nothing unexpected asked and no page error.
  */
 
-const SETUP_PATH = `${CATALOG_PATH}/setup`;
-const STORE = MARZ.storeConnectionId;
-const LISTINGS = `/api/dropship/listings/stores/${STORE}`;
 const SETUP_WRITE_PATH = `/api/dropship/ebay/listing-setup/${STORE}`;
-const KEY = (prefix: string) => expect.stringMatching(new RegExp(`^${prefix}:[A-Za-z0-9-]+$`));
 
 /** Product 11 with a second size, so one size's change can hold the other back (D4). */
 const TWO_SIZE_ENVELOPE: ProductFixture = { ...ENVELOPE, sizes: [...ENVELOPE.sizes,
@@ -59,24 +75,6 @@ const TOPLOADER_GROUP = { id: "toploaders", name: "Toploaders", priority: 1, sco
 const RULES_WITH_GROUP: PricingProfileState = { revisionId: 3, updatedAt: STAMP, profile: {
   defaultRecipe: { basis: "catalog_retail", markupBps: 1_500, flatCents: 0, rounding: "cent" }, groups: [TOPLOADER_GROUP] } };
 
-/** Opens step 2 with the summary worked out from what the stub holds, so a save shows in it. */
-function openStep(page: Page, initial: Partial<StubState> = {}, path = SETUP_PATH) {
-  return openCatalog(page, path, { liveSummary: true, ...initial });
-}
-
-function phone(testInfo: TestInfo) {
-  return testInfo.project.name === "mobile";
-}
-
-/** A row's value: the record's words from 640 px, the shorter phone words below (R:433-442, C24). */
-function rowValue(testInfo: TestInfo, wide: string, narrow: string) {
-  return phone(testInfo) ? narrow : wide;
-}
-
-function row(page: Page, field: string) {
-  return page.getByTestId(`store-default-row-${field}`);
-}
-
 /** The open Store defaults editor: an inline panel from 640 px, a bottom sheet below. */
 function editor(page: Page) {
   return page.getByTestId("editor-surface");
@@ -86,91 +84,9 @@ function bar(page: Page) {
   return page.getByTestId("catalog-action-summary");
 }
 
-function banner(page: Page) {
-  return page.getByTestId("listing-settings-banner");
-}
-
-function drawer(page: Page) {
-  return page.getByTestId("product-drawer");
-}
-
-/** The drawer's main button: "Save product", or "Save" on a phone. */
-function drawerSave(page: Page) {
-  return page.getByTestId("product-drawer-footer").getByRole("button", { name: /^Save( product)?$/ });
-}
-
-function exactBox(page: Page, title: string) {
-  return drawer(page).getByLabel(`Exact price for ${title}`, { exact: true });
-}
-
 /** A policy in the open editor, by its exact eBay name (the label also carries its Card Shellz fit line). */
 function policyChoice(page: Page, name: string) {
   return editor(page).locator("label").filter({ has: page.getByText(name, { exact: true }) }).getByRole("radio");
-}
-
-function readsOf(state: StubState, method: string, path: string) {
-  return state.reads.filter((read) => read.method === method && read.path === path);
-}
-
-async function expectNoHorizontalScroll(page: Page) {
-  const width = page.viewportSize()?.width ?? 1280;
-  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(width);
-}
-
-/** Waits for a sheet's enter animation, then returns its box. */
-async function settledBox(locator: Locator) {
-  await locator.evaluate((element) => Promise.all(element.getAnimations({ subtree: true }).map((animation) => animation.finished)));
-  const box = await locator.boundingBox();
-  expect(box).not.toBeNull();
-  return box!;
-}
-
-/** Full screen on a phone (R:412); a sheet on the right edge from 640 px. */
-async function expectSheetLayout(page: Page, testInfo: TestInfo, sheet: Locator) {
-  const viewport = page.viewportSize()!;
-  const box = await settledBox(sheet);
-  if (phone(testInfo)) {
-    expect(box.x).toBe(0);
-    expect(Math.round(box.width)).toBe(viewport.width);
-  } else {
-    expect(box.x).toBeGreaterThan(0);
-    expect(Math.round(box.x + box.width)).toBe(viewport.width);
-  }
-}
-
-/** The element sits inside the viewport, so it can be pressed without scrolling. */
-async function expectInView(page: Page, locator: Locator) {
-  const viewport = page.viewportSize()!;
-  const box = await locator.boundingBox();
-  expect(box).not.toBeNull();
-  expect(box!.y).toBeGreaterThanOrEqual(0);
-  expect(box!.y + box!.height).toBeLessThanOrEqual(viewport.height);
-}
-
-/**
- * C3: the step reads no description templates unless their editor is open, and adds no
- * pricing-rules or category-rules read of its own. The one of each comes from the hidden
- * older panels, which read on mount under the same query keys.
- */
-function expectGatedReads(state: StubState) {
-  expect(readsOf(state, "GET", `${LISTINGS}/content-profile`)).toEqual([]);
-  expect(readsOf(state, "GET", `${LISTINGS}/pricing-rules`)).toHaveLength(1);
-  expect(readsOf(state, "GET", `${LISTINGS}/ebay-category-rules`)).toHaveLength(1);
-}
-
-function expectNothingUnexpected(state: StubState) {
-  expect(state.unexpected).toEqual([]);
-  expect(state.errors).toEqual([]);
-}
-
-function escapeRegExp(text: string): string {
-  return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-/** Opens the product's drawer from the Products tab: the name on a wide screen, the card on a phone. */
-async function openProductRow(page: Page, productId: number, name: string) {
-  await page.getByTestId(`listing-settings-product-${productId}`).getByRole("button", { name: new RegExp(`^${escapeRegExp(name)}`) }).click();
-  await expect(drawer(page)).toBeVisible();
 }
 
 test("the step shows its title, timing line and seven store defaults in order, Products first, with Older settings closed", async ({ page }, testInfo) => {
@@ -679,7 +595,7 @@ test("eBay asking for a sign-in shows one banner with Reconnect eBay, locks the 
     message: "eBay needs the store to be connected again.", context: { storeConnectionId: STORE, retryable: false } } });
   await expect(banner(page)).toHaveCount(1);
   await expect(banner(page)).toHaveAttribute("data-kind", "sign_in");
-  await expect(banner(page)).toContainText(`eBay needs you to sign in again for ${MARZ.name}. Your settings are safe.`);
+  await expect(banner(page)).toContainText(`eBay needs you to sign in again for ${MARZ.name}. You can still change prices, text and defaults.`);
   await expect(banner(page).getByRole("link", { name: "Reconnect eBay" })).toHaveAttribute("href", /\/onboarding$/);
   for (const field of ["shipping", "return", "payment", "shelf"]) {
     await expect(row(page, field)).toContainText("Reconnect eBay to change this.");
@@ -710,7 +626,7 @@ test("a paused account shows the selling-paused banner: policies stay editable a
   const state = await openStep(page, { vendor: { status: "paused", entitlementStatus: "active" }, pricingRules: { [STORE]: SAVED_PRICING_RULES } });
   await expect(banner(page)).toHaveCount(1);
   await expect(banner(page)).toHaveAttribute("data-kind", "selling_paused");
-  await expect(banner(page)).toHaveText(/^Selling is paused on your account\. Prices, eBay categories and descriptions can't be changed until it resumes\./);
+  await expect(banner(page)).toHaveText(/^Selling is paused on your account\. Prices, products and categories can't be changed until it resumes\./);
   await expect(banner(page).getByRole("link", { name: "Go to Wallet" })).toBeVisible();
   await expect(row(page, "shipping").getByRole("button", { name: "Change Shipping policy" })).toBeVisible();
   await expect(row(page, "price")).toContainText(rowValue(testInfo, "Retail price + 15%, to the cent", "Retail + 15%, to the cent"));

@@ -1,4 +1,5 @@
 import type { CanonicalClaimDispatchPlan } from "../../../../shared/types/inventory-availability-dispatch";
+import type { ExactRecordedCostTotals } from "../../../../shared/utils/recorded-cost-total";
 
 export type CanonicalClaimTransactionClient = {
   query: (text: string, values?: unknown[]) => Promise<{ rows: any[]; rowCount?: number | null }>;
@@ -13,6 +14,7 @@ export type CanonicalClaimInventoryDispatchCost = {
   quantity: string;
   unitCostMills: string;
   totalCostMills: string;
+  exactTotals?: ExactRecordedCostTotals | null;
 };
 
 export type CanonicalClaimInventoryDispatchResult = {
@@ -135,6 +137,7 @@ export type CanonicalClaimInventoryUnpickResource = {
     inventoryLotId: number;
     unpickQty: bigint;
     reversesPickMovementId: bigint;
+    orderItemCostId?: number;
     unitCostMills: bigint;
   }[];
 };

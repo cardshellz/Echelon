@@ -1,5 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+// Keep the COGS dependency without importing unrelated inventory repository owners.
+vi.mock("../../../inventory", async () => ({
+  COGSService: (await import("../../../inventory/cogs.service")).COGSService,
+}));
+
 // These owner fixtures isolate financial state changes. The real PostgreSQL
 // cost suites verify the shared graph lock and its transaction ordering.
 vi.mock("../../../inventory/infrastructure/cost-evidence.repository", async (importOriginal) => ({
@@ -98,6 +103,8 @@ const invoice = {
   vendorId: 4,
   status: "received",
   paidAmountCents: 0,
+  approvedAt: null,
+  approvedBy: null,
 };
 
 describe("AP financial work after physical PO terminal states", () => {
@@ -111,6 +118,7 @@ describe("AP financial work after physical PO terminal states", () => {
       const writeReached = new Error("link write reached");
       const tx = buildTx([
         [invoice],
+      [],
         [{ id: 55, vendorId: 4, status }],
       ], writeReached);
       mocks.db.transaction.mockImplementationOnce(async (callback: any) => callback(tx));
@@ -125,6 +133,7 @@ describe("AP financial work after physical PO terminal states", () => {
     const writeReached = new Error("line write reached");
     const tx = buildTx([
       [invoice],
+      [],
       [{ purchaseOrderId: 55 }],
       [{ id: 55, status: "closed" }],
       [{ purchaseOrderId: 55 }],
@@ -146,6 +155,7 @@ describe("AP financial work after physical PO terminal states", () => {
     const writeReached = new Error("link write reached");
     const tx = buildTx([
       [{ ...invoice, currency: "EUR" }],
+      [],
       [{ id: 55, vendorId: 4, status: "received", currency: "USD" }],
     ], writeReached);
     mocks.db.transaction.mockImplementationOnce(async (callback: any) => callback(tx));

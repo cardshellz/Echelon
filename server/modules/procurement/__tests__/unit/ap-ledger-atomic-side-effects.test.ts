@@ -401,10 +401,9 @@ describe("AP ledger atomic side effects", () => {
       invoicedAmountCents: 2500,
     }, "ops-user")).rejects.toMatchObject({
       name: "ApLedgerError",
-      statusCode: 500,
+      statusCode: 409,
       details: {
-        code: "AP_DATABASE_MONEY_INVALID",
-        field: "invoice[12].paidAmountCents",
+        code: "AP_INVOICE_SOURCE_REVIEW_REQUIRED",
       },
     });
 

@@ -1,10 +1,17 @@
 # Browser CI coverage
 
-Procurement runs on four independent runner shards; dropship and shared shipping
-configuration run on two. Playwright's existing file-level sharding partitions
-the unchanged test configurations, including both desktop and mobile projects.
-One worker per runner preserves fixture isolation. No retries or shorter timeouts
-are introduced, and every shard uploads its own failure artifacts.
+Procurement runs on four independent runner shards, with two page-isolated
+workers per runner. Its fully parallel configuration distributes individual tests
+across shards. Dropship and shared shipping configuration run on two shards,
+partitioned by file, with one worker per runner. Both desktop and mobile projects
+remain included. No retries or shorter timeouts are introduced, and every shard
+uploads its own failure artifacts.
+
+Procurement's financial retry scenarios use Playwright's controlled browser clock
+to advance the existing 2, 4, and 8 second backoff delays. They verify that no
+attempt occurs before each delay boundary and that the next attempt occurs at
+the boundary, while retaining request-body and idempotency-key assertions.
+Production retry behavior is unchanged.
 
 The stable aggregate checks retain the original journey names. They pass only
 when dependency selection succeeds and either every shard succeeds or the
@@ -31,6 +38,13 @@ roots. Specs are discovered from the same existing filename patterns; adding or
 changing a spec always runs its suite. App imports automatically bring newly
 added routes into procurement's dependency graph.
 
+Browser tests import the declared `@playwright/test` package. Importing its
+undeclared transitive dependency `playwright/test` makes dependency traversal
+uncertain and forces otherwise unnecessary suite runs. The selector regression
+checks the actual Playwright-discovered Dropship spec set and its injected HTML
+harness roots, including catalog conversions, so restoring safe skips does not
+leave those entrypoints uncovered.
+
 Changes to App/main, shared code, shared UI/layout, hooks/libraries, styles, public
 assets, package manifests, and build/test tooling run both suites. Local imports
 crossing feature directories are included transitively. Known feature files
@@ -48,8 +62,9 @@ the TypeScript parser; this has a small fixed startup cost even for a safe skip.
 ## Validation
 
 `server/__tests__/unit/browser-ci-selection.test.ts` exercises selection and
-failure cases, including a real-repository check that a box-suite-only edit still
-runs procurement because App imports it eagerly. Verify each
+failure cases against the real repository, including unrelated-path skips,
+unresolved-import fallback, and a box-suite-only edit that still runs procurement
+because App imports it eagerly. Verify each
 configuration's unsharded `playwright test --list --reporter=json` IDs equal the
 union of its shard listing IDs, with no duplicates, when changing shard layout.
 Do not enable shared-database test concurrency as part of browser optimization.
