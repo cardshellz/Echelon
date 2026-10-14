@@ -40,22 +40,40 @@ import {
 } from "./dropship-listing-settings-drafts";
 import { builtFromWords, formatCents, recipeWords, retailFallbackFixWords, w9OriginWords } from "./dropship-listing-settings-price-words";
 import {
+  DESCRIPTION_EDIT_FIELDS,
   drawerChangeKind,
+  isPolicyEditField,
+  ownTextCheckChoices,
+  PRODUCT_EDIT_FIELDS,
   productFieldRights,
   readProductSettingsDraft,
+  sizeLeftoverFields,
+  sizesDifferPick,
+  type DescriptionEditField,
   type FieldChoice,
-  type PolicyChoiceValue,
+  type OwnTextCheck,
+  type PolicyEditField,
   type ProductEditField,
+  type ProductFieldChoice,
+  type ProductFieldRights,
   type ProductOwnSettings,
+  type ProductSettingsChoices,
+  type ProductSettingsPicks,
   type ProductSettingsRights,
+  type SizesDifferField,
+  type SizesDifferSetting,
 } from "./dropship-listing-settings-product-edit";
+// The live setup read with Card Shellz shipping's facts: the rows name policies from it, and a quick pick checks a policy as its editor does (5.3).
+import { shelfPathWords, type PolicySetupFacts } from "./dropship-listing-settings-store-requests";
 import {
+  descriptionPendingWords,
   drawerDescriptionTemplateValue,
   drawerEbayCategoryValue,
   drawerMainTextValue,
   drawerPolicyValue,
   drawerSourceWords,
   drawerStoreShelfValue,
+  fromCategorySettingsWords,
   GROUP_RULE_ORDER_NOTE,
   LISTING_SETTINGS_EDIT_WORDS,
   ownSettingsSentence,
@@ -64,9 +82,11 @@ import {
   productStatusWords,
   rightReasonLine,
   SIZES_DIFFER_WORDS,
+  UNNAMED_SHELF,
   usedByWords,
-  type PolicySetupFacts,
+  type DescriptionPendingPart,
 } from "./dropship-listing-settings-words";
+import type { DropshipEbayStoreCategoryOption } from "./dropship-ops-surface";
 
 /**
  * The product drawer of the Listing settings step (Listing settings PR 7,
@@ -237,17 +257,35 @@ function sizesWord(count: number): string {
   return count === 1 ? "size" : "sizes";
 }
 
+/** The category whose settings give one of the product's values (a `category` source names it), or null. */
+function categorySettingsName(settings: ListingSettingsProductDetail["settings"]): string | null {
+  for (const key of LISTING_SETTINGS_SETTING_KEYS) {
+    for (const entry of settings[key]) {
+      const source = entry.sources.find((candidate) => candidate.source === "category" && candidate.ruleName?.trim());
+      if (source?.ruleName) return source.ruleName.trim();
+    }
+  }
+  return null;
+}
+
 /**
  * "Card Shellz category: Sleeves · 4 of 4 sizes selected · No fixes needed",
- * or "No Card Shellz category · …". Category settings come in PR 8-10, so the
- * header never says "From your <c> settings".
+ * or "No Card Shellz category · …". With the product's settings in full, a
+ * value its Card Shellz category sets adds "From your Sleeves settings"
+ * (R:591; plan 5.2), only when the server says the source is the category,
+ * named as the server names it. The part's place in the line is a PROPOSAL.
  */
-export function drawerCategoryLine(product: ListingSettingsProductDetail["product"]): string {
+export function drawerCategoryLine(
+  product: ListingSettingsProductDetail["product"],
+  settings: ListingSettingsProductDetail["settings"] | null = null,
+): string {
   const category = product.category?.trim();
   // A chosen size Card Shellz no longer offers is still counted, so the line never reads "5 of 4".
   const total = Math.max(product.sizesTotal, product.sizesChosen);
+  const fromCategory = settings === null ? null : categorySettingsName(settings);
   return [
     category ? `Card Shellz category: ${category}` : "No Card Shellz category",
+    ...(fromCategory === null ? [] : [fromCategorySettingsWords(fromCategory)]),
     `${countText(product.sizesChosen)} of ${countText(total)} ${sizesWord(total)} selected`,
     productStatusWords(product).text,
   ].join(" · ");
@@ -1143,7 +1181,7 @@ export function drawerFooter(input: DrawerFooterInput): DrawerFooter {
 }
 
 // ---------------------------------------------------------------------------
-// The setting rows (R:259-266, R:285-294; C16, C17; PR 10 plan 4.3)
+// The setting rows (R:259-266, R:285-294; C16, C17; PR 10 plan 4.3, 5.2, 5.3)
 // ---------------------------------------------------------------------------
 
 /** The rows, in the record's order (R:259-266). The description row also shows the main text. */
@@ -1158,6 +1196,19 @@ export const DRAWER_SETTING_ROWS = [
 
 export type DrawerSettingRowKey = (typeof DRAWER_SETTING_ROWS)[number]["key"];
 
+/** A "Sizes differ" quick pick beside one value (plan 5.3): its button, and what it puts in the draft. */
+export interface DrawerEntryPick {
+  /** `use_default`: every size gets the default back; `use_this`: this value for the product. */
+  action: "use_default" | "use_this";
+  /** "Use for all sizes" or "Use default for all sizes". */
+  label: string;
+  field: SizesDifferField;
+  /** For `productSettingsEditAction({ picks })`; nothing is sent until Save. */
+  picks: ProductSettingsPicks;
+  /** Off as the row's [Change] is (the own read loads, a save is out, a size's price waits, D2), and while any row's editor is open. */
+  disabled: boolean;
+}
+
 /** One value of a setting and where it comes from. */
 export interface DrawerSettingEntry {
   value: string;
@@ -1165,36 +1216,96 @@ export interface DrawerSettingEntry {
   tags: string[];
   /** "used by Pack of 100 and Box of 5" when the sizes differ; null otherwise. */
   usedBy: string | null;
+  /** The quick pick beside it while the sizes differ and the row can be changed (PR 10, 5.3); absent otherwise. */
+  pick?: DrawerEntryPick;
 }
 
 /** One setting's values: one, or several when the sizes differ (C16). */
 export interface DrawerSettingGroup {
   entries: DrawerSettingEntry[];
-  /** "Sizes have different values. Each size keeps its own for now."; null when every size agrees. */
+  /**
+   * The line over values that differ, null when every size agrees. Without
+   * a way to change the row: "Sizes have different values. Each size keeps
+   * its own for now." With one: "Sizes differ. Pick one for all sizes." over
+   * quick picks, or "Sizes differ. Use Change to pick one for all sizes." for
+   * the shelf and the description (5.3).
+   */
   differ: string | null;
 }
 
-/** How a row can be changed (PR 10): only the rows 10a edits have it. */
-export interface DrawerRowEdit {
-  field: ProductEditField;
-  /** A new value can be picked. */
+/** What a row's [Change] opens: one field's editor, or the description's (text above, text below, main text). */
+export type DrawerFieldTarget = PolicyEditField | "ebayCategory" | "storeShelf";
+export type DrawerEditTarget = DrawerFieldTarget | "description";
+
+const ROW_TARGETS: Readonly<Record<DrawerSettingRowKey, DrawerEditTarget>> = {
+  shippingPolicy: "shippingPolicy",
+  returnPolicy: "returnPolicy",
+  paymentPolicy: "paymentPolicy",
+  ebayCategory: "ebayCategory",
+  storeShelf: "storeShelf",
+  descriptionTemplate: "description",
+};
+
+/** The fields a row's editor changes, in the drawer's order. */
+export function drawerEditFields(target: DrawerEditTarget): readonly ProductEditField[] {
+  return target === "description" ? DESCRIPTION_EDIT_FIELDS : [target];
+}
+
+/** How a row can be changed, whatever its editor. */
+interface DrawerRowEditState {
+  /** A new value can be picked (own text written, for the description). */
   canSet: boolean;
   /** "Use default" can be chosen. */
   canDefault: boolean;
+  /** "None" can be chosen (shelf, text above and below). */
+  canNone: boolean;
   /** [Change]: shown when anything can be chosen; off while the own read loads, a save is out or a size's price waits (D2). */
   change: { shown: boolean; disabled: boolean };
+  /**
+   * The row's "Sizes differ" quick picks and the check's answers under the
+   * closed Description row: off as [Change] is, and while any row's editor is
+   * open, since that editor's [Done] would then override them unseen.
+   */
+  picksDisabled: boolean;
   /** The line under the row: "Checking…", the D2 or sign-in line, or why it can't be changed; null when nothing needs saying. */
   line: string | null;
   /** This row's editor is the one open. */
   open: boolean;
-  /** The draft's choice for this field: "leave" while it holds none. */
-  choice: FieldChoice<PolicyChoiceValue>;
-  /** "→ Free Standard US · Not saved" or "→ Use default · Not saved" while the draft changes it. */
+  /** "→ Free Standard US · Not saved", "→ Use default · Not saved", "→ Text above: your own · Not saved" while the draft changes it. */
   pending: string | null;
-  /** Another window changed it too (R:542, after "Load latest"). */
+  /** Another window changed one of its fields too (R:542, after "Load latest"). */
   marked: boolean;
-  /** The refused save that names this field. */
+  /** The refused save that names one of its fields. */
   fieldError: string | null;
+}
+
+/** A one-field row (a policy, the eBay category, the store shelf): its field and the draft's choice for it. */
+export type DrawerFieldRowEdit = {
+  [F in DrawerFieldTarget]: DrawerRowEditState & {
+    kind: "field";
+    target: F;
+    field: F;
+    /** The draft's choice for this field: "leave" while it holds none. */
+    choice: ProductFieldChoice<F>;
+  };
+}[DrawerFieldTarget];
+
+/** The Description row: its three parts, the draft's choice for each, and the main text's check. */
+export interface DrawerDescriptionRowEdit extends DrawerRowEditState {
+  kind: "description";
+  target: "description";
+  fields: readonly DescriptionEditField[];
+  choices: Pick<ProductSettingsChoices, DescriptionEditField>;
+  /** "Card Shellz changed this product. Check your text still fits." [Keep my text] [Use Card Shellz text]; null when nothing needs a check, it can't be answered now, or the draft answers it. */
+  check: OwnTextCheck | null;
+}
+
+export type DrawerRowEdit = DrawerFieldRowEdit | DrawerDescriptionRowEdit;
+export type DrawerPolicyRowEdit = Extract<DrawerFieldRowEdit, { field: PolicyEditField }>;
+
+/** Whether a row's edit is a policy row's (PR 10a's editor). */
+export function isPolicyRowEdit(edit: DrawerRowEdit | null | undefined): edit is DrawerPolicyRowEdit {
+  return edit != null && edit.kind === "field" && isPolicyEditField(edit.field);
 }
 
 export interface DrawerSettingRowModel {
@@ -1204,7 +1315,7 @@ export interface DrawerSettingRowModel {
   groups: DrawerSettingGroup[];
   /** The older group rules' place in the order, once, when one is used. */
   notes: string[];
-  /** How it can be changed; null for a row that can't be changed here (or with no edit facts). */
+  /** How it can be changed; null without edit facts (PR 7). */
   edit: DrawerRowEdit | null;
 }
 
@@ -1216,22 +1327,18 @@ export interface DrawerSettingsEditInput {
   /** The step's one draft, whoever holds it. */
   draft: ListingSettingsDraft | null;
   editor: EditorId;
-  /** The field whose editor is open; one at a time. */
-  openField: ProductEditField | null;
+  /** The row whose editor is open; one at a time. */
+  openField: DrawerEditTarget | null;
   /** The last refused settings save, with the fields it named (`WriteFailure.fields`). */
   failure: Pick<WriteFailure, "message" | "fields"> | null;
+  /** The step's shelves read (`categories`), to name a picked shelf in its pending line; null or absent while it can't be read. */
+  shelves?: readonly DropshipEbayStoreCategoryOption[] | null;
 }
 
 type SettingValue<K extends ListingSettingsSettingKey> = ListingSettingsProductDetail["settings"][K][number]["value"];
 
-const POLICY_ROWS: ReadonlySet<ListingSettingsSettingKey> = new Set(["shippingPolicy", "returnPolicy", "paymentPolicy"]);
-
-function isPolicyKey(key: ListingSettingsSettingKey): key is ProductEditField {
-  return POLICY_ROWS.has(key);
-}
-
 /** The name the product's own row stored for this policy, when its own policy is this one (G2). */
-function ownPolicyName(own: ProductOwnSettings | null, key: ProductEditField, policyId: string | null): string | null {
+function ownPolicyName(own: ProductOwnSettings | null, key: PolicyEditField, policyId: string | null): string | null {
   const saved = own?.own[key] ?? null;
   return saved !== null && saved.id === policyId ? saved.name : null;
 }
@@ -1252,7 +1359,9 @@ function settingValueWords(
     case "ebayCategory":
       return drawerEbayCategoryValue(value as SettingValue<"ebayCategory">);
     case "storeShelf":
-      return drawerStoreShelfValue(value as SettingValue<"storeShelf">);
+      // A stored shelf name is eBay's path ("Supplies:Sleeves"); the drawer says it in the record's words
+      // ("Supplies › Sleeves", R:581), as the shelf editor and a pending pick do.
+      return drawerStoreShelfValue({ names: (value as SettingValue<"storeShelf">).names.map(shelfPathWords) });
     case "descriptionTemplate":
       return drawerDescriptionTemplateValue(value as SettingValue<"descriptionTemplate">);
     case "mainText":
@@ -1260,17 +1369,24 @@ function settingValueWords(
   }
 }
 
+/** The row's rights and whether its quick picks wait, for "Sizes differ" (5.3); null without edit facts. */
+type DifferFacts = { rights: Pick<ProductFieldRights, "canSet" | "canDefault">; disabled: boolean } | null;
+
 function settingGroup(
   key: ListingSettingsSettingKey,
   detail: ListingSettingsProductDetail,
   setup: ListingSettingsReadState<PolicySetupFacts>,
   sizeNames: ReadonlyMap<number, string>,
   own: ProductOwnSettings | null,
+  differFacts: DifferFacts,
 ): { group: DrawerSettingGroup; groupRule: boolean } {
   const values = detail.settings[key];
   const differ = values.length > 1;
+  const setting = { key, values } as SizesDifferSetting;
   let groupRule = false;
-  const entries = values.map((entry) => {
+  let anyButton = false;
+  let differLine: string | null = null;
+  const entries = values.map((entry): DrawerSettingEntry => {
     const tags: string[] = [];
     for (const source of entry.sources) {
       if (source.source === "group_rule") groupRule = true;
@@ -1278,20 +1394,85 @@ function settingGroup(
       if (tag !== null && !tags.includes(tag)) tags.push(tag);
     }
     const sizes = entry.sources.flatMap((source) => source.productVariantIds).map((id) => sizeNames.get(id) ?? "");
-    return { value: settingValueWords(key, entry.value, setup, own), tags, usedBy: differ ? usedByWords(sizes) : null };
+    const shown: DrawerSettingEntry = { value: settingValueWords(key, entry.value, setup, own), tags, usedBy: differ ? usedByWords(sizes) : null };
+    if (!differ || differFacts === null) return shown;
+    const pick = sizesDifferPick(setting, entry, differFacts.rights, setup);
+    if (pick.kind === "line") differLine = pick.line;
+    if (pick.kind !== "button") return shown;
+    anyButton = true;
+    return { ...shown, pick: { action: pick.action, label: pick.label, field: pick.field, picks: pick.picks, disabled: differFacts.disabled } };
   });
-  return { group: { entries, differ: differ ? SIZES_DIFFER_WORDS : null }, groupRule };
+  const differWords = !differ ? null
+    : anyButton ? LISTING_SETTINGS_EDIT_WORDS.sizesDifferPick
+      : differLine ?? SIZES_DIFFER_WORDS;
+  return { group: { entries, differ: differWords }, groupRule };
 }
 
-const LEAVE_CHOICE: FieldChoice<PolicyChoiceValue> = Object.freeze({ mode: "leave" });
+const LEAVE_CHOICE: FieldChoice<never> = Object.freeze({ mode: "leave" });
 
-/** How one policy row can be changed, from the rights, the own read and the draft. */
+/** A picked shelf's name: the product's own row's, else the shelves read's path, else "A shelf". */
+function shelfName(id: string, own: ProductOwnSettings | null, shelves: readonly DropshipEbayStoreCategoryOption[] | null): string {
+  const saved = own?.own.storeShelf;
+  const stored = saved?.mode === "own" ? saved.shelves.find((shelf) => shelf.id === id)?.name ?? null : null;
+  if (stored !== null) return shelfPathWords(stored) || UNNAMED_SHELF;
+  const live = shelves?.find((shelf) => shelf.categoryId === id) ?? null;
+  return live === null ? UNNAMED_SHELF : shelfPathWords(live.path) || live.categoryName.trim() || UNNAMED_SHELF;
+}
+
+/** A one-field row's change before Save, by name only (never an id). */
+function fieldPendingWords(
+  field: DrawerFieldTarget,
+  choice: ProductFieldChoice<DrawerFieldTarget>,
+  setup: ListingSettingsReadState<PolicySetupFacts>,
+  own: ProductOwnSettings | null,
+  shelves: readonly DropshipEbayStoreCategoryOption[] | null,
+): string | null {
+  if (choice.mode === "leave") return null;
+  if (choice.mode === "default") return pendingSettingWords(LISTING_SETTINGS_EDIT_WORDS.useDefault);
+  const value = choice.value as unknown as Record<string, unknown>;
+  switch (field) {
+    case "shippingPolicy":
+    case "returnPolicy":
+    case "paymentPolicy": {
+      const id = String(value.id);
+      return pendingSettingWords(drawerPolicyValue(field, { policyId: id }, setup, ownPolicyName(own, field, id)));
+    }
+    case "ebayCategory": {
+      const id = String(value.categoryId);
+      const saved = own?.own.ebayCategory;
+      const name = typeof value.categoryName === "string" ? value.categoryName : saved?.categoryId === id ? saved.categoryName : null;
+      return pendingSettingWords(drawerEbayCategoryValue({ categoryId: id, categoryName: name }));
+    }
+    case "storeShelf": {
+      if (value.mode !== "own") return pendingSettingWords(LISTING_SETTINGS_EDIT_WORDS.none);
+      const names = (value.shelfIds as readonly string[]).map((id) => shelfName(id, own, shelves));
+      return pendingSettingWords(drawerStoreShelfValue({ names }));
+    }
+  }
+}
+
+/** The Description row's change before Save: each part it changes, never the text itself. */
+function descriptionPending(choices: Pick<ProductSettingsChoices, DescriptionEditField>): string | null {
+  const parts: DescriptionPendingPart[] = [];
+  for (const part of DESCRIPTION_EDIT_FIELDS) {
+    const choice = choices[part];
+    if (choice.mode === "leave") continue;
+    if (choice.mode === "default") parts.push({ part, to: "default" });
+    else parts.push({ part, to: part === "mainText" ? "own" : (choice.value as { mode: "none" | "own" }).mode });
+  }
+  return descriptionPendingWords(parts);
+}
+
+/** How one row can be changed, from the rights, the own read and the draft. */
 function rowEdit(
-  field: ProductEditField,
+  target: DrawerEditTarget,
   input: DrawerSettingsEditInput,
   setup: ListingSettingsReadState<PolicySetupFacts>,
+  detail: ListingSettingsProductDetail,
 ): DrawerRowEdit {
-  const rights = productFieldRights(input.rights, field);
+  const fields = drawerEditFields(target);
+  // The description's three parts share one right: W5's (text names no eBay value).
+  const rights = productFieldRights(input.rights, fields[0]);
   const own = input.own.error != null ? null : input.own.data ?? null;
   const ownFailed = input.own.error != null;
   const ownDraft = input.draft !== null && input.draft.editor === input.editor ? input.draft : null;
@@ -1300,7 +1481,7 @@ function rowEdit(
   const holding = ownDraft !== null && (isDraftDirty(ownDraft) || locked);
   const settings = holding ? readProductSettingsDraft(ownDraft.value) : null;
   const sizeWaits = drawerChangeKind(input.draft, input.editor) === "size_price";
-  const shown = rights.canSet || rights.canDefault;
+  const shown = rights.canSet || rights.canDefault || rights.canNone;
 
   let line: string | null = null;
   if (!shown) line = rights.reason === null ? null : rightReasonLine(rights.reason);
@@ -1308,30 +1489,34 @@ function rowEdit(
   else if (own === null) line = ownFailed ? null : DRAWER_WORDS.checking;
   else if (sizeWaits) line = LISTING_SETTINGS_EDIT_WORDS.otherChangeFirst;
   else if (!rights.canSet && rights.reason !== null) {
-    // The editor then lists "Use default" alone; a banner that says why gives no line of its own (D4).
+    // The editor then lists "Use default" (and "None") alone; a banner that says why gives no line of its own (D4).
     line = rights.reason === "sign_in"
       ? LISTING_SETTINGS_EDIT_WORDS.signInFieldLine
       : rightReasonLine(rights.reason) ?? LISTING_SETTINGS_EDIT_WORDS.defaultOnlyLine;
   }
 
-  const choice = settings?.[field] ?? LEAVE_CHOICE;
-  const pending = choice.mode === "default"
-    ? pendingSettingWords(LISTING_SETTINGS_EDIT_WORDS.useDefault)
-    : choice.mode === "set"
-      ? pendingSettingWords(drawerPolicyValue(field, { policyId: choice.value.id }, setup, ownPolicyName(own, field, choice.value.id)))
-      : null;
-  return {
-    field,
+  const choiceOf = <F extends ProductEditField>(field: F): ProductFieldChoice<F> =>
+    (settings?.[field] ?? LEAVE_CHOICE) as ProductFieldChoice<F>;
+  const state: Omit<DrawerRowEditState, "pending"> = {
     canSet: rights.canSet,
     canDefault: rights.canDefault,
+    canNone: rights.canNone,
     change: { shown, disabled: own === null || locked || sizeWaits },
+    picksDisabled: own === null || locked || sizeWaits || input.openField !== null,
     line,
-    open: input.openField === field,
-    choice,
-    pending,
-    marked: settings !== null && ownDraft !== null && ownDraft.marked.includes(field),
-    fieldError: input.failure?.fields?.includes(field) ? input.failure.message : null,
+    open: input.openField === target,
+    marked: settings !== null && ownDraft !== null && fields.some((field) => ownDraft.marked.includes(field)),
+    fieldError: fields.some((field) => input.failure?.fields?.includes(field) === true) ? input.failure?.message ?? null : null,
   };
+  const shelves = input.shelves ?? null;
+  if (target === "description") {
+    const choices = { textAbove: choiceOf("textAbove"), textBelow: choiceOf("textBelow"), mainText: choiceOf("mainText") };
+    // The check's answers put a choice in the draft, so they wait as [Change] does; once the draft answers it, the pending line says so.
+    const check = shown && own !== null && choices.mainText.mode === "leave" ? ownTextCheckChoices(own, detail, sizeLeftoverFields(detail.settings)) : null;
+    return { ...state, kind: "description", target, fields: DESCRIPTION_EDIT_FIELDS, choices, pending: descriptionPending(choices), check };
+  }
+  const choice = choiceOf(target);
+  return { ...state, kind: "field", target, field: target, choice, pending: fieldPendingWords(target, choice, setup, own, shelves) } as DrawerFieldRowEdit;
 }
 
 /** How the drawer's one draft drives its footer, its Save and its Esc (PR 10: D2, plan 3.4, 4.6). */
@@ -1350,7 +1535,7 @@ export interface DrawerDraftState {
   escapeKeepsOpen: boolean;
 }
 
-const EDIT_FIELD_NAMES: ReadonlySet<string> = new Set<string>(POLICY_ROWS);
+const EDIT_FIELD_NAMES: ReadonlySet<string> = new Set<string>(PRODUCT_EDIT_FIELDS);
 
 /** The drawer's draft state, from the step's one draft, the rights and the last refused settings save. */
 export function drawerDraftState(input: {
@@ -1373,28 +1558,45 @@ export function drawerDraftState(input: {
 }
 
 /**
- * The field whose editor shows (plan 4.5): the one the vendor opened, while
+ * The row whose editor shows (plan 4.5): the one the vendor opened, while
  * its row still offers a choice and the product's own settings are read. A
  * banner can take the right away and a refetch of the own read can fail while
  * it is open; then it closes (its pick was never in the draft). A size's price
  * typed meanwhile keeps it open, so [Done] can say why it waits (D2).
  */
-export function shownFieldEditor(
+export function shownFieldEditor<T extends DrawerEditTarget>(
   rows: readonly Pick<DrawerSettingRowModel, "edit">[],
-  field: ProductEditField | null,
+  target: T | null,
   ownRead: boolean,
-): ProductEditField | null {
-  if (field === null || !ownRead) return null;
-  const edit = rows.find((row) => row.edit?.field === field)?.edit ?? null;
-  return edit !== null && edit.change.shown ? field : null;
+): T | null {
+  if (target === null || !ownRead) return null;
+  const edit = rows.find((row) => row.edit?.target === target)?.edit ?? null;
+  return edit !== null && edit.change.shown ? target : null;
+}
+
+/**
+ * Where the drawer lands when it opens on a row (an attention [Fix], plan
+ * 5.2): the row's edit target, and whether its editor opens there. It opens
+ * only when the row's [Change] would (the own read answered, nothing locked,
+ * no size price waiting); otherwise the drawer only takes the vendor to the
+ * row. Null for a row with no edit facts.
+ */
+export function drawerLanding(
+  rows: readonly Pick<DrawerSettingRowModel, "key" | "edit">[],
+  key: DrawerSettingRowKey,
+): { target: DrawerEditTarget; open: boolean } | null {
+  const edit = rows.find((row) => row.key === key)?.edit ?? null;
+  if (edit === null) return null;
+  return { target: edit.target, open: edit.change.shown && !edit.change.disabled };
 }
 
 /**
  * The drawer's rows (R:968): each setting's value with where it comes from.
  * Sizes that differ list each value with the sizes using it (C16). With
- * `edit` (PR 10), the policy rows say how they can be changed and a product's
- * own policy is named from its own read when eBay wasn't read; without it,
- * nothing can be changed, as in PR 7.
+ * `edit` (PR 10), every row says how it can be changed, a product's own
+ * policy is named from its own read when eBay wasn't read, and values whose
+ * sizes differ get their quick pick (5.3); without it, nothing can be
+ * changed, as in PR 7.
  */
 export function drawerSettingRows(
   detail: ListingSettingsProductDetail,
@@ -1404,14 +1606,17 @@ export function drawerSettingRows(
   const sizeNames = new Map(detail.sizes.map((size) => [size.price.productVariantId, size.price.sizeName]));
   const own = edit === null || edit.own.error != null ? null : edit.own.data ?? null;
   return DRAWER_SETTING_ROWS.map(({ key, label }) => {
+    const model = edit === null ? null : rowEdit(ROW_TARGETS[key], edit, setup, detail);
+    // A quick pick shows only where the row's [Change] does, and waits as it does and while an editor is open.
+    const differFacts: DifferFacts = model === null || !model.change.shown ? null : { rights: model, disabled: model.picksDisabled };
     const keys: ListingSettingsSettingKey[] = key === "descriptionTemplate" ? ["descriptionTemplate", "mainText"] : [key];
-    const parts = keys.map((settingKey) => settingGroup(settingKey, detail, setup, sizeNames, own));
+    const parts = keys.map((settingKey) => settingGroup(settingKey, detail, setup, sizeNames, own, differFacts));
     return {
       key,
       label,
       groups: parts.map((part) => part.group),
       notes: parts.some((part) => part.groupRule) ? [GROUP_RULE_ORDER_NOTE] : [],
-      edit: edit !== null && isPolicyKey(key) ? rowEdit(key, edit, setup) : null,
+      edit: model,
     };
   });
 }

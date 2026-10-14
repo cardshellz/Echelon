@@ -35,11 +35,13 @@ import {
   drawerPhoneSummary,
   drawerReadProblem,
   drawerSettingRows,
+  drawerLanding,
   drawerSizeEditState,
   shownFieldEditor,
   drawerSizeLine,
   drawerSizeList,
   drawerStartsWithAllSizes,
+  isPolicyRowEdit,
   ownSizePriceDraft,
   priceHeadWords,
   rebaseSizePriceDraft,
@@ -50,20 +52,27 @@ import {
   sizePriceQueryOptions,
   sizePriceSave,
   sizesNotChosenWords,
+  type DrawerEditTarget,
+  type DrawerEntryPick,
   type DrawerFooter,
+  type DrawerSettingRowKey,
   type DrawerSettingRowModel,
   type DrawerTarget,
   type SizePriceSaveCallbacks,
 } from "@/lib/dropship-listing-settings-drawer";
 import {
+  descriptionFieldEditor,
+  ebayCategoryFieldEditor,
   policyFieldEditor,
   productSettingsEditAction,
   readProductSettingsDraft,
   sizeLeftoverFields,
+  storeShelfFieldEditor,
   type FieldChoice,
-  type PolicyChoiceValue,
-  type ProductEditField,
+  type MainTextChoiceValue,
   type ProductOwnSettings,
+  type ProductSettingsEditAction,
+  type ProductSettingsPicks,
 } from "@/lib/dropship-listing-settings-product-edit";
 import {
   loadLatestProductSettings,
@@ -73,9 +82,10 @@ import {
 } from "@/lib/dropship-listing-settings-product-requests";
 import type { PolicySetupFacts } from "@/lib/dropship-listing-settings-store-requests";
 import { LISTING_SETTINGS_EDIT_WORDS, rightReasonLine } from "@/lib/dropship-listing-settings-words";
-import { putJson } from "@/lib/dropship-ops-surface";
+import { putJson, type DropshipEbayStoreCategoryOption } from "@/lib/dropship-ops-surface";
 import { useLeaveGuard } from "../catalog/UnsavedChangesGuard";
-import { DrawerFieldEditor } from "./DrawerFieldEditor";
+import { DrawerDescriptionEditor } from "./DrawerDescriptionEditor";
+import { DrawerEbayCategoryEditor, DrawerFieldEditor, DrawerShelfEditor } from "./DrawerFieldEditor";
 import { DrawerPriceSection } from "./DrawerPriceSection";
 import { DrawerSettingRow } from "./DrawerSettingRow";
 import type { FocusReturnTarget } from "./EditorSurface";
@@ -83,6 +93,17 @@ import { useListingSettingsDrafts } from "./ListingSettingsDraftsProvider";
 
 /** How the vendor closed the drawer: × / Esc / ← with nothing to lose, or "Discard and leave". */
 export type ProductDrawerCloseReason = "dismissed" | "discarded";
+
+/**
+ * A row the drawer lands on when it opens (an attention [Fix], plan 5.2): the
+ * description conflict opens the Description row's editor. One request per
+ * [Fix] press (`requestId`); the drawer handles it once, then calls `onLanded`.
+ */
+export interface DrawerLandingRequest {
+  productId: number;
+  row: DrawerSettingRowKey;
+  requestId: number;
+}
 
 export interface ProductDrawerProps {
   storeConnectionId: number;
@@ -92,11 +113,22 @@ export interface ProductDrawerProps {
   /**
    * The step's edit rights (plan 4.3): `exactPrice` for a size's exact price
    * (W9); `productSettings` for the product's own settings (W5, PR 10), with
-   * `shipping` and `policies` to pick a new eBay policy (D3, D4).
+   * `shipping` and `policies` to pick a new eBay policy, `ebayCategory` and
+   * `shelfPick` to pick a new eBay category or shelf (D3, D4; 10b).
    */
-  rights: Pick<ListingSettingsEditRights, "exactPrice" | "productSettings" | "shipping" | "policies">;
+  rights: Pick<ListingSettingsEditRights, "exactPrice" | "productSettings" | "shipping" | "policies" | "ebayCategory" | "shelfPick">;
   /** The live eBay setup read: policy names (A4) and, from PR 10, the policies a row's editor lists with their Card Shellz fit. */
   setup: ListingSettingsReadState<PolicySetupFacts>;
+  /**
+   * The step's store shelves read (`categories`) while it answers, else null:
+   * the shelf editor's choices and a picked shelf's name (10b). Left out, no
+   * new shelf can be picked (`rights.shelfPick` says the same).
+   */
+  shelves?: readonly DropshipEbayStoreCategoryOption[] | null;
+  /** The row to land on when the drawer opens on this product; null or left out for none. */
+  landing?: DrawerLandingRequest | null;
+  /** The landing request was handled (or can't be): the step forgets it. */
+  onLanded?: () => void;
   /** `summary.storeDefaults.price.recipe`; undefined until the summary answers. */
   summaryRecipe: PricingRecipe | null | undefined;
   /** The step takes `?product=` off the address. Browser Back closes the drawer without this. */
@@ -121,10 +153,13 @@ export const PRODUCT_DRAWER_CLASS =
 /**
  * The product drawer (M4, R:237-296; plan 2E). Opened by the address
  * (`?product=<id>&size=<variantId>`); the PRICE section saves one size's
- * exact price per Save through W9. From PR 10 the shipping, return and
- * payment policy rows can be changed too (or set back to the default), and
- * Save sends them through W5, from the product's own settings read. Every
- * other row is read-only with where its value comes from (R:968).
+ * exact price per Save through W9. From PR 10 every setting row can be
+ * changed too (the shipping, return and payment policy, the eBay category,
+ * the store shelf, and the description's text above, text below and main
+ * text), or set back to the default, and Save sends them through W5, from
+ * the product's own settings read. Each row says where its value comes from
+ * (R:968); values whose sizes differ get a one-button fix (5.3), and own main
+ * text Card Shellz changed under asks to be checked (5.4).
  *
  * One kind of change per Save (D2): a size's price or the product's
  * settings; starting the other kind says "Save or discard your other change
@@ -224,8 +259,11 @@ interface ProductDrawerBodyProps extends ProductDrawerProps {
 
 type FieldError = { productVariantId: number; message: string } | null;
 
-/** The open field editor and why its last [Done] didn't take ("Save or discard your other change first."). */
-type OpenField = { field: ProductEditField; message: string | null } | null;
+/** The open row editor and why its last [Done] didn't take ("Save or discard your other change first."). */
+type OpenField = { target: DrawerEditTarget; message: string | null } | null;
+
+/** What putting a choice in the draft came to: in it, nothing to change, or why not. */
+type PutResult = Exclude<ProductSettingsEditAction["kind"], "start"> | "asked";
 
 /** The product's draft whatever it holds, or null when the step's draft is another editor's. */
 function productDraftOf(draft: ListingSettingsDraft | null, editor: EditorId): ListingSettingsDraft | null {
@@ -268,8 +306,8 @@ function ProductDrawerBody(props: ProductDrawerBodyProps) {
   const [openField, setOpenField] = useState<OpenField>(null);
   // The last refused settings save, with the fields it named (the draft keeps its words only).
   const [settingsFailure, setSettingsFailure] = useState<WriteFailure | null>(null);
-  const changeButtons = useRef(new Map<ProductEditField, HTMLButtonElement>());
-  const settingRowElements = useRef(new Map<ProductEditField, HTMLElement>());
+  const changeButtons = useRef(new Map<DrawerEditTarget, HTMLButtonElement>());
+  const settingRowElements = useRef(new Map<DrawerEditTarget, HTMLElement>());
   const saving = useRef(false);
   const mounted = useRef(true);
   useEffect(() => {
@@ -398,62 +436,89 @@ function ProductDrawerBody(props: ProductDrawerBodyProps) {
    * size's price waits, D2, or a banner took the right away), the row takes
    * it, so focus is never lost to the page.
    */
-  function focusChange(field: ProductEditField) {
-    const button = changeButtons.current.get(field);
+  function focusChange(target: DrawerEditTarget) {
+    const button = changeButtons.current.get(target);
     if (button && button.isConnected && !button.disabled) {
       button.focus();
       return;
     }
-    const row = settingRowElements.current.get(field);
+    const row = settingRowElements.current.get(target);
     if (row && row.isConnected) row.focus();
   }
 
   /** [Change] opens its row's editor (one at a time); pressed again, it closes it, as its aria-expanded says. */
-  function toggleFieldEditor(field: ProductEditField) {
-    if (shownField === field) {
+  function toggleFieldEditor(target: DrawerEditTarget) {
+    if (shownField === target) {
       closeFieldEditor();
       return;
     }
-    setOpenField({ field, message: null });
+    setOpenField({ target, message: null });
   }
 
   /** [Cancel] or Esc: the pick is dropped, and focus goes back to the row's [Change]. */
   function closeFieldEditor() {
-    const field = openField?.field ?? null;
+    const target = openField?.target ?? null;
     setOpenField(null);
-    if (field !== null) focusChange(field);
+    if (target !== null) focusChange(target);
   }
 
-  /** [Done] (plan 4.5): the choice goes into the drawer's one draft; nothing is sent until Save. */
-  function finishField(field: ProductEditField, choice: FieldChoice<PolicyChoiceValue>) {
-    if (ownSettings === null || !props.rights.productSettings.editable) return;
-    const action = productSettingsEditAction({ draft: drafts.draft, editor, own: ownSettings, leftovers, field, choice });
+  /**
+   * Puts choices in the drawer's one draft (nothing is sent until Save): an
+   * editor's [Done], a "Sizes differ" quick pick or a check's answer. One kind
+   * of change per Save (D2), and a save that is out or unconfirmed changes
+   * nothing (`productSettingsEditAction` decides).
+   */
+  function putInDraft(picks: ProductSettingsPicks): PutResult {
+    if (ownSettings === null || !props.rights.productSettings.editable) return "locked";
+    const action = productSettingsEditAction({ draft: drafts.draft, editor, own: ownSettings, leftovers, picks });
     switch (action.kind) {
       case "locked":
-        return;
       case "no_change":
-        // What the product has already: no draft opens, nothing is asked; the editor just closes.
-        setOpenField(null);
-        focusChange(field);
-        return;
       case "finish_first":
-        // D2: a size's price holds a change; the editor stays open with the words.
-        setOpenField({ field, message: LISTING_SETTINGS_EDIT_WORDS.otherChangeFirst });
-        return;
+        return action.kind;
       case "edit":
         if (action.reopen && drafts.draft) drafts.open(editor, place, drafts.draft.base);
         drafts.edit(action.value);
         break;
       case "start":
-        // False when another editor holds changes: the vendor is asked first, and the editor stays open.
-        if (!drafts.open(editor, place, action.base)) return;
+        // False when another editor holds changes: the vendor is asked first, and nothing changes yet.
+        if (!drafts.open(editor, place, action.base)) return "asked";
         drafts.edit(action.value);
         break;
     }
     setSettingsFailure(null);
     setFooterMessage(null);
+    return "edit";
+  }
+
+  /** [Done] (plan 4.5): the editor's choice goes into the draft, and focus goes back to its [Change]. */
+  function finishEditor(target: DrawerEditTarget, picks: ProductSettingsPicks) {
+    const result = putInDraft(picks);
+    if (result === "locked" || result === "asked") return;
+    if (result === "finish_first") {
+      // D2: a size's price holds a change; the editor stays open with the words.
+      setOpenField({ target, message: LISTING_SETTINGS_EDIT_WORDS.otherChangeFirst });
+      return;
+    }
+    // In the draft, or what the product has already (no draft opens, nothing is asked): the editor closes.
     setOpenField(null);
-    focusChange(field);
+    focusChange(target);
+  }
+
+  /** A quick pick from a closed row: the choice goes into the draft; focus stays on the button, which reads the pending line. */
+  function pickFromRow(picks: ProductSettingsPicks): PutResult {
+    const result = putInDraft(picks);
+    if (result === "finish_first") setFooterMessage(LISTING_SETTINGS_EDIT_WORDS.otherChangeFirst);
+    return result;
+  }
+
+  /**
+   * The check answered under the closed Description row: once the draft takes
+   * it, the notice and the pressed button go, so focus goes to the row's
+   * [Change], which reads the pending line (plan 3.4).
+   */
+  function answerCheckFromRow(answer: FieldChoice<MainTextChoiceValue>) {
+    if (pickFromRow({ mainText: answer }) === "edit") focusChange("description");
   }
 
   /** Save (or Check again) of the product's settings through W5 (plan 4.6). */
@@ -536,24 +601,44 @@ function ProductDrawerBody(props: ProductDrawerBodyProps) {
 
   // The rows, and the one field editor that shows: it closes when its row can no longer be changed (D3) or
   // the own read is gone, and that pick was never in the draft.
-  const rowsFor = (field: ProductEditField | null) => detail === null ? [] : drawerSettingRows(detail, props.setup, {
+  const shelves = props.shelves ?? null;
+  const rowsFor = (target: DrawerEditTarget | null) => detail === null ? [] : drawerSettingRows(detail, props.setup, {
     own: { data: ownQuery.data, error: ownQuery.error },
     rights: props.rights,
     draft: drafts.draft,
     editor,
-    openField: field,
+    openField: target,
     failure: productDraft?.phase === "refused" ? settingsFailure : null,
+    shelves,
   });
   const closedRows = rowsFor(null);
-  const shownField = shownFieldEditor(closedRows, openField?.field ?? null, ownSettings !== null);
+  const shownField = shownFieldEditor(closedRows, openField?.target ?? null, ownSettings !== null);
   const settingRows = shownField === null ? closedRows : rowsFor(shownField);
   useEffect(() => {
     if (openField === null || shownField !== null) return;
     setOpenField(null);
     // The editor closed itself: focus that was in it fell to the page or the sheet, so it goes to the row (plan 3.4).
     const active = document.activeElement;
-    if (active === null || active === document.body || active.getAttribute("tabindex") === "-1") focusChange(openField.field);
+    if (active === null || active === document.body || active.getAttribute("tabindex") === "-1") focusChange(openField.target);
   }, [openField, shownField]);
+
+  // An attention [Fix] that names a row (plan 5.2): once the product and its own settings are read, the drawer
+  // goes to that row and opens its editor when the row can be changed now; else it only takes focus there.
+  const landing = props.landing !== undefined && props.landing !== null && props.landing.productId === productId ? props.landing : null;
+  const landed = useRef<number | null>(null);
+  const ownSettled = ownQuery.data !== undefined || ownQuery.isError;
+  useEffect(() => {
+    if (landing === null || landed.current === landing.requestId || detail === null || !ownSettled) return;
+    landed.current = landing.requestId;
+    const spot = drawerLanding(closedRows, landing.row);
+    props.onLanded?.();
+    if (spot === null) return;
+    const row = settingRowElements.current.get(spot.target);
+    row?.scrollIntoView?.({ block: "center" });
+    // The editor takes focus itself when it opens (plan 3.4); a row that can't be changed now takes it instead.
+    if (spot.open) setOpenField({ target: spot.target, message: null });
+    else row?.focus();
+  });
 
   // Which writer the draft is for, the right the footer saves with, and what Esc does (D2, plan 3.4).
   const draftState = drawerDraftState({ draft: drafts.draft, editor, rights: props.rights, failure: settingsFailure });
@@ -595,7 +680,7 @@ function ProductDrawerBody(props: ProductDrawerBodyProps) {
           <SheetTitle className="break-words text-base font-semibold text-zinc-900">{title}</SheetTitle>
           {detail && (
             <>
-              <p className="text-sm text-zinc-700">{compact ? drawerPhoneSummary(detail.product) : drawerCategoryLine(detail.product)}</p>
+              <p className="text-sm text-zinc-700">{compact ? drawerPhoneSummary(detail.product) : drawerCategoryLine(detail.product, detail.settings)}</p>
               <p className="text-sm text-zinc-600">{drawerOwnSettingsLine(detail)}</p>
             </>
           )}
@@ -658,21 +743,55 @@ function ProductDrawerBody(props: ProductDrawerBodyProps) {
             renderEditor={(row) => {
               const rowEdit = row.edit;
               if (rowEdit === null || !rowEdit.open || ownSettings === null || openField === null) return null;
+              const common = { title: row.label, productName: place, message: openField.message, onCancel: closeFieldEditor };
+              if (rowEdit.kind === "description") {
+                return (
+                  <DrawerDescriptionEditor
+                    key="description"
+                    {...common}
+                    model={descriptionFieldEditor({ rights: rowEdit, draftChoices: rowEdit.choices, own: ownSettings, leftovers, detail })}
+                    onDone={(picks) => finishEditor("description", picks)}
+                  />
+                );
+              }
+              if (rowEdit.target === "ebayCategory") {
+                return (
+                  <DrawerEbayCategoryEditor
+                    key="ebayCategory"
+                    {...common}
+                    storeConnectionId={storeConnectionId}
+                    model={ebayCategoryFieldEditor({ rights: rowEdit, draftChoice: rowEdit.choice, own: ownSettings })}
+                    onDone={(choice) => finishEditor("ebayCategory", { ebayCategory: choice })}
+                  />
+                );
+              }
+              if (rowEdit.target === "storeShelf") {
+                return (
+                  <DrawerShelfEditor
+                    key="storeShelf"
+                    {...common}
+                    model={storeShelfFieldEditor({
+                      rights: rowEdit, draftChoice: rowEdit.choice, own: ownSettings, leftover: leftovers.includes("storeShelf"), shelves,
+                    })}
+                    onDone={(choice) => finishEditor("storeShelf", { storeShelf: choice })}
+                  />
+                );
+              }
+              if (!isPolicyRowEdit(rowEdit)) return null;
+              const field = rowEdit.field;
               return (
                 <DrawerFieldEditor
-                  key={rowEdit.field}
+                  key={field}
+                  {...common}
                   model={policyFieldEditor({
-                    field: rowEdit.field, rights: rowEdit, draftChoice: rowEdit.choice, own: ownSettings,
-                    leftover: leftovers.includes(rowEdit.field), setup: props.setup,
+                    field, rights: rowEdit, draftChoice: rowEdit.choice, own: ownSettings, leftover: leftovers.includes(field), setup: props.setup,
                   })}
-                  title={row.label}
-                  productName={place}
-                  message={openField.message}
-                  onDone={(choice) => finishField(rowEdit.field, choice)}
-                  onCancel={closeFieldEditor}
+                  onDone={(choice) => finishEditor(field, { [field]: choice })}
                 />
               );
             }}
+            onPick={(pick) => { pickFromRow(pick.picks); }}
+            onAnswerCheck={answerCheckFromRow}
             onChangeField={toggleFieldEditor}
             changeRef={(field, element) => {
               if (element) changeButtons.current.set(field, element);
@@ -716,7 +835,7 @@ function CloseButton({ phone = false, onClick }: { phone?: boolean; onClick: () 
 
 function DrawerContent({
   detail, props, editor, own, inEditId, w9, showAll, onShowAll, sizeSearch, onSizeSearch, fieldError, onEdit, onFocusSize, inputRef,
-  settingRows, renderEditor, onChangeField, changeRef, rowRef, settingsHoldChange,
+  settingRows, renderEditor, onPick, onAnswerCheck, onChangeField, changeRef, rowRef, settingsHoldChange,
 }: {
   detail: ListingSettingsProductDetail;
   props: ProductDrawerBodyProps;
@@ -733,14 +852,18 @@ function DrawerContent({
   onEdit: (price: ListingSettingsSizePrice, text: string) => void;
   onFocusSize: (productVariantId: number) => void;
   inputRef: (productVariantId: number, element: HTMLInputElement | null) => void;
-  /** The rows, with how the policy rows can be changed (`drawerSettingRows` with edit facts). */
+  /** The rows, with how each can be changed (`drawerSettingRows` with edit facts). */
   settingRows: DrawerSettingRowModel[];
   /** The open row's inline editor, or null. */
   renderEditor: (row: DrawerSettingRowModel) => ReactNode;
-  onChangeField: (field: ProductEditField) => void;
-  changeRef: (field: ProductEditField, element: HTMLButtonElement | null) => void;
+  /** A "Sizes differ" quick pick pressed (5.3). */
+  onPick: (pick: DrawerEntryPick) => void;
+  /** The main text's check answered from the closed Description row (5.4). */
+  onAnswerCheck: (answer: FieldChoice<MainTextChoiceValue>) => void;
+  onChangeField: (target: DrawerEditTarget) => void;
+  changeRef: (target: DrawerEditTarget, element: HTMLButtonElement | null) => void;
   /** A changeable row, so focus can go back to it when its [Change] can't take it. */
-  rowRef: (field: ProductEditField, element: HTMLElement | null) => void;
+  rowRef: (target: DrawerEditTarget, element: HTMLElement | null) => void;
   /** The product's settings hold a change (or a save of them is out): every size's price waits (D2). */
   settingsHoldChange: boolean;
 }) {
@@ -791,16 +914,18 @@ function DrawerContent({
       />
       <section aria-label="Other settings" className="rounded-md border border-zinc-200 px-4" data-testid="drawer-settings">
         {settingRows.map((row) => {
-          const field = row.edit?.field ?? null;
+          const target = row.edit?.target ?? null;
           return (
             <DrawerSettingRow
               key={row.key}
               row={row}
               productName={detail.product.productName}
-              onChange={field === null ? undefined : () => onChangeField(field)}
-              changeRef={field === null ? undefined : (element) => changeRef(field, element)}
-              rowRef={field === null ? undefined : (element) => rowRef(field, element)}
+              onChange={target === null ? undefined : () => onChangeField(target)}
+              changeRef={target === null ? undefined : (element) => changeRef(target, element)}
+              rowRef={target === null ? undefined : (element) => rowRef(target, element)}
               editor={renderEditor(row)}
+              onPick={onPick}
+              onAnswerCheck={onAnswerCheck}
             />
           );
         })}

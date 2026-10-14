@@ -245,7 +245,7 @@ export function storeDefaultPolicyValue(input: {
 // Interim: an eBay category whose name was not resolved; the number is never shown.
 const UNNAMED_EBAY_CATEGORY = "An eBay category";
 // Interim: a saved shelf with no name stored and none on eBay.
-const UNNAMED_SHELF = "A shelf";
+export const UNNAMED_SHELF = "A shelf";
 
 /** The eBay category store default (R:580). Names and paths only, never the number. */
 export function storeDefaultEbayCategoryValue(category: { categoryName: string; path?: readonly string[] } | null): string {
@@ -578,7 +578,86 @@ export const LISTING_SETTINGS_EDIT_WORDS = Object.freeze({
   shelfTooLong: "eBay names this shelf in a way we can't use. Pick another shelf.",
   // Interim (PR 10 PROPOSAL): the store's saved text is at its cap (3.3 row 21).
   storeTextLimit: "Your store has too much saved text. Shorten text on other products, or set it once on a category or as your store default.",
+  // Interim (PR 10 PROPOSAL): a setting whose sizes differ, with a quick pick beside its values (plan 5.3, 12.2).
+  sizesDifferPick: "Sizes differ. Pick one for all sizes.",
+  // Interim (PR 10 PROPOSAL): the quick pick that sets this value for the product, so every size uses it (5.3).
+  useForAllSizes: "Use for all sizes",
+  // Interim (PR 10 PROPOSAL): the quick pick that gives every size the default back (5.3; CC-C17).
+  useDefaultForAllSizes: "Use default for all sizes",
+  // Interim (PR 10 PROPOSAL): the store shelf or the description differ by size; its [Change] picks one (5.3).
+  sizesDifferChange: "Sizes differ. Use Change to pick one for all sizes.",
+  // The store default shelf editor's word for explicitly no shelf (R:581), and for no text above or below.
+  none: "None",
+  // Interim (PR 10 PROPOSAL): the description editor's choice to write the product's own text (5.2).
+  ownText: "Own text",
+  // Interim (PR 10 PROPOSAL): the shelf editor's choice to pick one or two shelves for the product (5.2).
+  ownShelves: "Own shelves",
+  // Interim (PR 10 PROPOSAL): an empty shelf box in the drawer's shelf editor.
+  pickShelf: "Pick a shelf",
+  // Interim (PR 10 PROPOSAL): the shelf box's choice that empties it again.
+  clearShelf: "Clear this shelf",
+  // Interim (PR 10 PROPOSAL): the description editor's parts (5.2), as the store default editor names the first and last.
+  textAbove: "Text above",
+  textBelow: "Text below",
+  mainText: "Main text",
+  // Interim (PR 10 PROPOSAL): the main text's default, and the check's second answer (5.4, 12.2).
+  useCardShellzText: "Use Card Shellz text",
+  // Interim (PR 10 PROPOSAL): the check's first answer: the same text, saved again (5.4, 12.2).
+  keepMyText: "Keep my text",
+  // Interim (PR 10 PROPOSAL): the main text's check (5.4, 12.2).
+  ownTextCheck: "Card Shellz changed this product. Check your text still fits.",
+  // Interim (PR 10 PROPOSAL): the description editor while two older description rules tie for the product; only the
+  // product's own text above and below (each own text or None) takes the tie away.
+  descriptionConflictBoth: "Set both text above and text below, your own or None, to fix this.",
+  // The shared schema's own words for empty own text above or below (`SH/listing-setting-values.ts` ownTemplateText; 5.5).
+  textEmpty: "Enter the text, or choose None.",
+  // Interim (PR 10 PROPOSAL): empty own main text (5.5, 12.2).
+  mainTextEmpty: "Enter your text, or use the Card Shellz text.",
+  // Interim (PR 10 PROPOSAL): own text with a control character the shared schema refuses (a paste can bring one).
+  textBadCharacters: "This text has characters that can't be saved. Paste it as plain text.",
 } as const);
+
+const TEXT_NUMBER = new Intl.NumberFormat("en-US");
+
+/** "Shorten it to 4,000 characters or fewer.": own text over its limit (5.4). Interim (PR 10 PROPOSAL). */
+export function textTooLongWords(max: number): string {
+  return `Shorten it to ${TEXT_NUMBER.format(max)} characters or fewer.`;
+}
+
+/**
+ * A text box's counter, "12 / 4,000": the raw text's length (UTF-16 units,
+ * as the server counts it, 5.4), in the store default description's form
+ * (R:582, `descriptionLengthWords`).
+ */
+export function textLengthWords(count: number, max: number): string {
+  return `${TEXT_NUMBER.format(count)} / ${TEXT_NUMBER.format(max)}`;
+}
+
+/** "From your Sleeves settings": the drawer header's part for a value its Card Shellz category sets (R:591, via `drawerCategoryLine`). */
+export function fromCategorySettingsWords(category: string): string {
+  return `From your ${category.trim()} settings`;
+}
+
+/** One part of a pending description change, for `descriptionPendingWords`. */
+export type DescriptionPendingPart = { part: "textAbove" | "textBelow" | "mainText"; to: "default" | "none" | "own" };
+
+/**
+ * The Description row's change before Save, every part it changes in one
+ * line: "→ Text above: your own, main text: Card Shellz text · Not saved".
+ * The text itself is never repeated there. Interim (PR 10 PROPOSAL).
+ */
+export function descriptionPendingWords(parts: readonly DescriptionPendingPart[]): string | null {
+  if (parts.length === 0) return null;
+  const words = parts.map(({ part, to }, index) => {
+    const label = LISTING_SETTINGS_EDIT_WORDS[part];
+    const name = index === 0 ? label : label.charAt(0).toLowerCase() + label.slice(1);
+    const value = to === "own" ? "your own"
+      : to === "none" ? LISTING_SETTINGS_EDIT_WORDS.none
+        : part === "mainText" ? "Card Shellz text" : LISTING_SETTINGS_EDIT_WORDS.useDefault;
+    return `${name}: ${value}`;
+  });
+  return pendingSettingWords(words.join(", "));
+}
 
 /** The product read's and a product save's 404: the product isn't chosen for this store (any more). The words name the store (C27). */
 export function productNotFoundWords(store: string): string {
@@ -597,6 +676,18 @@ export function changeSettingLabel(label: string, productName: string): string {
 }
 
 /**
+ * A "Sizes differ" quick pick's name, read out with the value and the product
+ * (plan 3.4, 5.3): "Use USPS Priority Mail for all sizes of Penny Sleeves",
+ * or "Use default for all sizes of Penny Sleeves". The button shows only
+ * "Use for all sizes" / "Use default for all sizes". Interim (PR 10 PROPOSAL).
+ */
+export function sizesDifferPickLabel(action: "use_default" | "use_this", value: string, productName: string): string {
+  const product = productName.trim();
+  const what = action === "use_default" ? "default" : value.trim() || "this";
+  return product ? `Use ${what} for all sizes of ${product}` : `Use ${what} for all sizes`;
+}
+
+/**
  * The open field editor's name ("Shipping policy for Penny Sleeves"), read
  * out for its group (plan 3.4). Interim (PR 10 PROPOSAL).
  */
@@ -611,9 +702,9 @@ export function pendingSettingWords(value: string): string {
   return `→ ${value} · Not saved`;
 }
 
-/** The main text in the drawer (interim). */
+/** The main text in the drawer (interim): the drawer edits it now, so it no longer points at step 3 (plan 5.2). */
 export function drawerMainTextValue(value: ListingSettingsMainTextValue): string {
-  return value.own ? "Main text: your own (set in step 3)" : "Main text: Card Shellz text";
+  return value.own ? "Main text: your own" : "Main text: Card Shellz text";
 }
 
 // ---------------------------------------------------------------------------
