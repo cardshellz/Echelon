@@ -1066,6 +1066,40 @@ describeDatabase.sequential("listing-settings writes on PostgreSQL (plan PR 9)",
       expect(JSON.stringify(audit.rows)).not.toContain("Own words");
     });
 
+    it("re-saves the same own main text against Card Shellz's product as it is now: changed with a new revision, then unchanged (PR 10b A2)", async () => {
+      const text = "Own words for the toploader.";
+      const OLD_HASH = "e".repeat(64);
+      // Product 7's own main text, written against an older Card Shellz product; no size keeps text of its own.
+      await execute(`INSERT INTO dropship.dropship_product_listing_setting_revisions
+        (vendor_id, store_connection_id, product_id, previous_revision_id, request_id, body_text, body_catalog_hash,
+         idempotency_key, request_hash, actor_type, actor_id, created_at)
+        VALUES ($1, $2, $3, NULL, NULL, $4, $5, 'seed-body:7', $6, 'vendor', 'seed', $7)`, [VENDOR, STORE, PRODUCT_7, text, OLD_HASH, "d".repeat(64), NOW]);
+      await execute(`INSERT INTO dropship.dropship_product_listing_settings (vendor_id, store_connection_id, product_id, revision_id)
+        SELECT vendor_id, store_connection_id, product_id, id FROM dropship.dropship_product_listing_setting_revisions WHERE idempotency_key = 'seed-body:7'`);
+      const seeded = (await execute(`SELECT revision_id FROM dropship.dropship_product_listing_settings WHERE store_connection_id = $1 AND product_id = $2`,
+        [STORE, PRODUCT_7])).rows[0].revision_id as number;
+      const current = async () => (await execute(`SELECT r.id, r.previous_revision_id, r.body_text, r.body_catalog_hash
+        FROM dropship.dropship_product_listing_settings s JOIN dropship.dropship_product_listing_setting_revisions r ON r.id = s.revision_id
+        WHERE s.store_connection_id = $1 AND s.product_id = $2`, [STORE, PRODUCT_7])).rows[0];
+
+      // [Keep my text]: the same text, sent alone; W5 stamps the product as it is now, and the repository's
+      // comparison (hash included) calls it a change, so a new revision is written (plan 5.4, A2).
+      const kept = await products().saveForMember(MEMBER, STORE, PRODUCT_7, { idempotencyKey: productKey("keep-text"),
+        expectedRevisionId: seeded, patch: { mainText: { text } } });
+      expect(kept).toMatchObject({ outcome: "changed", clearedSizeCount: 0 });
+      expect(kept.revisionId).not.toBe(seeded);
+      const stamped = await current();
+      expect(stamped).toMatchObject({ id: kept.revisionId, previous_revision_id: seeded, body_text: text });
+      expect(stamped.body_catalog_hash).toMatch(/^[a-f0-9]{64}$/);
+      expect(stamped.body_catalog_hash).not.toBe(OLD_HASH);
+
+      // The stamp is the product's hash now: the same text again is no change, and no revision is written.
+      const again = await products().saveForMember(MEMBER, STORE, PRODUCT_7, { idempotencyKey: productKey("keep-text-again"),
+        expectedRevisionId: kept.revisionId, patch: { mainText: { text } } });
+      expect(again).toMatchObject({ outcome: "unchanged", revisionId: kept.revisionId });
+      expect(await current()).toEqual(stamped);
+    });
+
     it("pins PostgreSQL's name for the content revision key, and maps a real 23505 on it to the key conflict (PG 5)", async () => {
       const names = await pool.query<{ conname: string }>(`SELECT c.conname FROM pg_constraint c JOIN pg_class t ON t.oid = c.conrelid
         JOIN pg_namespace n ON n.oid = t.relnamespace WHERE n.nspname = $1 AND c.contype = 'u'

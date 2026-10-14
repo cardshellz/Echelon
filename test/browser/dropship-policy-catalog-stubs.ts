@@ -10,7 +10,11 @@ import {
 } from "../../shared/dropship/ebay-category-rules";
 import { decideDropshipListingAccess } from "../../shared/dropship/listing-access";
 import { contentProfileStateSchema, saveContentProfileInputSchema, type ContentProfileState } from "../../shared/dropship/listing-content";
-import { saveProductSettingsInputSchema, saveProductSettingsResponseSchema } from "../../shared/dropship/listing-setting-writes";
+import {
+  saveProductSettingsInputSchema,
+  saveProductSettingsResponseSchema,
+  type ProductSettingsPatchInput,
+} from "../../shared/dropship/listing-setting-writes";
 import {
   listingPriceResponseSchema,
   saveListingPriceInputSchema,
@@ -1092,9 +1096,12 @@ async function keyedWrite(state: StubState, route: Route, key: string, body: Rec
 // W5: one product's own settings (plan PR 10, 4.6, 4.9)
 // ---------------------------------------------------------------------------
 
-/** The policy fields 10a's drawer saves; the W5 stub refuses any other (10b adds the rest). */
+/** The policy fields the drawer saves (10a). */
 const PRODUCT_POLICY_FIELDS = ["shippingPolicy", "returnPolicy", "paymentPolicy"] as const;
-type ProductPolicyField = (typeof PRODUCT_POLICY_FIELDS)[number];
+/** Every field the drawer saves (10a's policies, 10b's eBay category, shelf and text); the W5 stub refuses any other, a price above all (D1). */
+const PRODUCT_DRAWER_FIELDS = [...PRODUCT_POLICY_FIELDS, "ebayCategory", "storeShelf", "textAbove", "textBelow", "mainText"] as const;
+/** The patch the drawer sends: ids and text only, never a price (D1). */
+type ProductDrawerPatch = Pick<ProductSettingsPatchInput, (typeof PRODUCT_DRAWER_FIELDS)[number]>;
 const POLICY_OPTIONS = { shippingPolicy: "fulfillmentPolicies", returnPolicy: "returnPolicies", paymentPolicy: "paymentPolicies" } as const;
 /** No value of its own on any field: a product with no row reads this way. */
 const NO_PRODUCT_VALUES: ProductListingSettingValues = {
@@ -1102,15 +1109,28 @@ const NO_PRODUCT_VALUES: ProductListingSettingValues = {
   textAbove: null, textBelow: null, mainText: null,
 };
 
+/** Each leftover field's key in a size's leftovers (LISTING_SETTING_LEFTOVER_FIELDS on the server). */
+const LEFTOVER_KEYS = { ...POLICY_LEFTOVER, storeShelf: "shelfNames", mainText: "mainText" } as const;
+
+/** The same shelves in the same order (newListingSettingEbayFields compares the id lists in order). */
+function sameShelfIds(ids: readonly string[], stored: ProductListingSettingValues["storeShelf"]): boolean {
+  return stored !== null && stored.mode === "own" && JSON.stringify(stored.shelves.map((shelf) => shelf.id)) === JSON.stringify(ids);
+}
+
 /**
- * W5 as dropship-listing-product-settings-service.ts saves it, for the policy fields 10a sends:
- * compare-and-set on the product's settings revision (8a's 409), a new eBay policy named from
- * eBay's list (the setup answer), refused while eBay needs a sign-in (D4) or when eBay doesn't
- * list it; null sets the field back to the default. Any field saved clears that field's
- * leftovers on the product's sizes (`clearedSizeCount`). Nothing changed is `unchanged`.
+ * W5 as dropship-listing-product-settings-service.ts saves it, for every field the drawer sends:
+ * compare-and-set on the product's settings revision (8a's 409). An id the product's own row
+ * doesn't hold already asks eBay, which a sign-in stops (D4): a policy is named from eBay's list
+ * (the setup answer) or refused (422 SELECTION_INVALID); an eBay category must be a last-level one
+ * of the stub's tree (422 CATEGORY_RULE_INVALID, `not_found` / `not_leaf`); a shelf must be in the
+ * store's shelves, named by its path (422 STORE_CATEGORY_INVALID, `not_found`). Text is kept as the
+ * shared schema gave it, and a main text is stamped with the product's catalog hash now
+ * (STUB_PRODUCT_CATALOG_HASH), so a re-save of the same text clears its check (plan 5.4, A2).
+ * null sets the field back to the default. Any field saved clears that field's leftovers on the
+ * product's sizes (`clearedSizeCount`). Nothing changed is `unchanged`.
  */
 function saveProductSettings(state: StubState, storeConnectionId: number, product: ProductFixture,
-  input: { expectedRevisionId: number | null; patch: Partial<Record<ProductPolicyField, { id: string } | null>> }): Record<string, unknown> | ScriptedError {
+  input: { expectedRevisionId: number | null; patch: ProductDrawerPatch }): Record<string, unknown> | ScriptedError {
   const key = productKey(storeConnectionId, product.productId);
   const current = productLayerOf(state, storeConnectionId, product.productId);
   if (input.expectedRevisionId !== (current?.revisionId ?? null)) {
@@ -1121,19 +1141,58 @@ function saveProductSettings(state: StubState, storeConnectionId: number, produc
   }
   const values: ProductListingSettingValues = { ...(current?.values ?? NO_PRODUCT_VALUES) };
   const setup = setupOf(state, storeConnectionId);
-  const fields = PRODUCT_POLICY_FIELDS.filter((field) => input.patch[field] !== undefined);
+  const { patch } = input;
+  const fields = PRODUCT_POLICY_FIELDS.filter((field) => patch[field] !== undefined);
+  const saved = PRODUCT_DRAWER_FIELDS.filter((field) => patch[field] !== undefined);
   // An id the product's own row doesn't hold already asks eBay, which a sign-in stops (D4, P13).
-  const asksEbay = fields.filter((field) => {
-    const sent = input.patch[field];
-    return sent !== null && sent !== undefined && values[field]?.id !== sent.id;
-  });
+  const asksEbay: string[] = [];
+  if (patch.ebayCategory && patch.ebayCategory.categoryId !== values.ebayCategory?.categoryId) asksEbay.push("ebayCategory");
+  if (patch.storeShelf?.mode === "own" && !sameShelfIds(patch.storeShelf.shelfIds, values.storeShelf)) asksEbay.push("storeShelf");
+  for (const field of fields) {
+    const sent = patch[field];
+    if (sent !== null && sent !== undefined && values[field]?.id !== sent.id) asksEbay.push(field);
+  }
   if (asksEbay.length > 0 && state.setupReadError !== null) {
     return { status: 403, code: "DROPSHIP_LISTING_SETTINGS_EBAY_SIGN_IN_REQUIRED",
       message: "Sign in to eBay again to choose new eBay values. Settings that keep their saved eBay values can still be saved.",
       context: { storeConnectionId, fields: asksEbay } };
   }
+  const permanent = { storeConnectionId, retryable: false, classification: "permanent" } as const;
+  if (patch.ebayCategory !== undefined) {
+    const sent = patch.ebayCategory;
+    if (sent === null) values.ebayCategory = null;
+    else if (asksEbay.includes("ebayCategory")) {
+      const option = EBAY_CATEGORIES.find((entry) => entry.categoryId === sent.categoryId) ?? null;
+      if (option === null || !option.leaf) {
+        return { status: 422, code: "DROPSHIP_EBAY_CATEGORY_RULE_INVALID",
+          message: option === null ? "That eBay category is not in eBay's current category list. Search again and pick a current category."
+            : "Pick a more specific eBay category. eBay accepts listings only in the last level of a category path.",
+          context: { ...permanent, invalidFields: ["ebayCategory"], reason: option === null ? "not_found" : "not_leaf" } };
+      }
+      values.ebayCategory = ebayCategory(option);
+    }
+  }
+  if (patch.storeShelf !== undefined) {
+    const sent = patch.storeShelf;
+    if (sent === null || sent.mode === "none") values.storeShelf = sent;
+    else if (asksEbay.includes("storeShelf")) {
+      const shelves = state.storeShelves[storeConnectionId] ?? [];
+      const found = sent.shelfIds.map((id) => shelves.find((shelf) => shelf.categoryId === id) ?? null);
+      if (found.some((shelf) => shelf === null)) {
+        return { status: 422, code: "DROPSHIP_EBAY_STORE_CATEGORY_INVALID",
+          message: "That store shelf is not in your eBay store now. Reload the shelves and pick again.",
+          context: { ...permanent, invalidFields: ["storeShelf"], reason: "not_found" } };
+      }
+      values.storeShelf = { mode: "own", shelves: found.map((shelf) => ({ id: shelf!.categoryId, name: shelf!.path })) };
+    }
+  }
+  if (patch.textAbove !== undefined) values.textAbove = patch.textAbove;
+  if (patch.textBelow !== undefined) values.textBelow = patch.textBelow;
+  if (patch.mainText !== undefined) {
+    values.mainText = patch.mainText === null ? null : { text: patch.mainText.text, catalogHash: STUB_PRODUCT_CATALOG_HASH };
+  }
   for (const field of fields) {
-    const sent = input.patch[field];
+    const sent = patch[field];
     if (sent === null || sent === undefined) {
       values[field] = null;
       continue;
@@ -1153,7 +1212,7 @@ function saveProductSettings(state: StubState, storeConnectionId: number, produc
     const leftover = state.sizeLeftovers[sizeId];
     if (!leftover) continue;
     const kept = { ...leftover };
-    for (const field of fields) delete kept[POLICY_LEFTOVER[field]];
+    for (const field of saved) if (field in LEFTOVER_KEYS) delete kept[LEFTOVER_KEYS[field as keyof typeof LEFTOVER_KEYS]];
     if (Object.keys(kept).length !== Object.keys(leftover).length) {
       clearedSizeCount += 1;
       state.sizeLeftovers[sizeId] = kept;
@@ -1401,17 +1460,17 @@ async function answerListingWrite(state: StubState, route: Route, storeId: numbe
     state.productSettingsWrites.push({ method, path, body });
     const parsed = saveProductSettingsInputSchema.safeParse(body);
     if (!parsed.success) return refuseBody(state, route, method, path, parsed.error.message);
-    // D1: the drawer never sends a price, a size's price or shown prices; 10a sends the three policies only.
+    // D1: the drawer never sends a price, a size's price or shown prices: ids and text only.
     const extra = Object.keys(body).filter((name) => !["idempotencyKey", "expectedRevisionId", "patch"].includes(name));
-    const fields = Object.keys(parsed.data.patch).filter((name) => !(PRODUCT_POLICY_FIELDS as readonly string[]).includes(name));
+    const fields = Object.keys(parsed.data.patch).filter((name) => !(PRODUCT_DRAWER_FIELDS as readonly string[]).includes(name));
     if (extra.length > 0 || fields.length > 0) {
-      return refuseBody(state, route, method, path, `10a sends policies only, not ${[...extra, ...fields].join(", ")}`);
+      return refuseBody(state, route, method, path, `the drawer sends ids and text only, not ${[...extra, ...fields].join(", ")}`);
     }
     const product = state.catalog.find((entry) => entry.productId === Number(productSettingsPath[1])) ?? null;
     if (product === null) {
       return fulfillError(route, { status: 404, code: "DROPSHIP_LISTING_SETTINGS_PRODUCT_NOT_FOUND", message: "This product has no chosen size in this store. Reload the page." });
     }
-    const patch = parsed.data.patch as Partial<Record<ProductPolicyField, { id: string } | null>>;
+    const patch: ProductDrawerPatch = parsed.data.patch;
     return keyedWrite(state, route, parsed.data.idempotencyKey, body, state.productSettingsWriteAnswers,
       () => saveProductSettings(state, storeId, product, { expectedRevisionId: parsed.data.expectedRevisionId, patch }), PRODUCT_SETTINGS_ANSWER);
   }
@@ -1608,6 +1667,25 @@ export function oldSetupPanel(page: Page) {
     throw new Error(`The stub's W5 save changed: ${JSON.stringify(saved)}`);
   }
   listingSettingsProductOwn(saving, store, LAYERED_SAMPLE.productId);
+  // 10b's fields (plan 5.2, 5.4): an eBay category and two shelves by id, text above as none, and the same main text
+  // saved again, which the new catalog hash makes a change, so its check clears; the size's shelf and text leftovers go.
+  const tenB: StubState = { ...layered, productSettings: { ...layered.productSettings }, sizeLeftovers: { ...layered.sizeLeftovers },
+    storeShelves: { [store]: [{ categoryId: "11", categoryName: "Sleeves", path: "Supplies:Sleeves", level: 2 },
+      { categoryId: "12", categoryName: "Sale", path: "Sale", level: 1 }] } };
+  const tenBSaved = saveProductSettings(tenB, store, LAYERED_SAMPLE, { expectedRevisionId: 7, patch: {
+    ebayCategory: { categoryId: TOPLOADERS.categoryId }, storeShelf: { mode: "own", shelfIds: ["11", "12"] },
+    textAbove: { mode: "none" }, mainText: { text: "Our own words." } } });
+  const tenBOwn = listingSettingsProductOwn(tenB, store, LAYERED_SAMPLE.productId);
+  if ("status" in tenBSaved || tenBSaved.outcome !== "changed" || tenBSaved.clearedSizeCount !== 1 || tenBOwn?.own.mainText?.needsCheck !== false
+    || JSON.stringify(tenBOwn.own.storeShelf) !== JSON.stringify({ mode: "own", shelves: [{ id: "11", name: "Supplies:Sleeves" }, { id: "12", name: "Sale" }] })
+    || tenBOwn.own.ebayCategory?.categoryName !== TOPLOADERS.categoryName || JSON.stringify(tenB.sizeLeftovers[sizeKey(store, 302)]) !== JSON.stringify({ shippingPolicyId: "ground" })) {
+    throw new Error(`The stub's W5 save of 10b's fields changed: ${JSON.stringify({ tenBSaved, tenBOwn })}`);
+  }
+  const notLeaf = saveProductSettings(tenB, store, LAYERED_SAMPLE, { expectedRevisionId: tenBSaved.revisionId as number,
+    patch: { ebayCategory: { categoryId: CARD_SUPPLIES.categoryId } } });
+  if (!("status" in notLeaf) || notLeaf.code !== "DROPSHIP_EBAY_CATEGORY_RULE_INVALID" || (notLeaf as ScriptedError).context?.reason !== "not_leaf") {
+    throw new Error(`The stub's W5 eBay category check changed: ${JSON.stringify(notLeaf)}`);
+  }
   // The resolver's order, pinned once here: size, then product, then category (named), then the store default.
   const sample = layeredSettings(layered, store, LAYERED_SAMPLE.productId) as LayeredProduct;
   const got = sample.sizes.map(({ values }) => [values.shippingPolicy.source, values.returnPolicy.source,

@@ -58,7 +58,9 @@ const GENERATED_AT = "2026-10-09T12:00:00.000Z";
 const RETAIL_20_UP: PricingRecipe = { basis: "catalog_retail", markupBps: 2000, flatCents: 0, rounding: "up_99" };
 const EDITABLE: ListingSettingsRight = { editable: true, reason: null };
 /** Every right the drawer reads (PR 10): a size's exact price, the product's own settings, and the eBay policy picks. */
-const RIGHTS: ProductDrawerProps["rights"] = { exactPrice: EDITABLE, productSettings: EDITABLE, shipping: EDITABLE, policies: EDITABLE };
+const RIGHTS: ProductDrawerProps["rights"] = {
+  exactPrice: EDITABLE, productSettings: EDITABLE, shipping: EDITABLE, policies: EDITABLE, ebayCategory: EDITABLE, shelfPick: EDITABLE,
+};
 const noop = () => undefined;
 
 afterEach(() => {
@@ -279,7 +281,7 @@ describe("ProductDrawer", () => {
     expect(words).not.toContain("Everything else uses your store defaults.");
   });
 
-  it("shows every other setting with where it comes from; only the policy rows have Change (C17, PR 10)", () => {
+  it("shows every other setting with where it comes from, each with its Change (C17, PR 10)", () => {
     const markup = renderDrawer();
     const words = text(markup);
     for (const label of ["Shipping policy", "Return policy", "Payment policy", "eBay category", "Store shelf", "Description"]) {
@@ -291,12 +293,10 @@ describe("ProductDrawer", () => {
     expect(words).toContain("Card Sleeves Card Shellz picks");
     expect(words).toContain("Card Shellz text, with your text above Store default");
     expect(words).toContain("Main text: Card Shellz text");
-    // The three policy rows can be changed (W5); each [Change] names the product. The rest stay read-only (10b).
-    for (const setting of ["shipping policy", "return policy", "payment policy"]) {
-      expect(markup).toMatch(new RegExp(`<button[^>]*aria-label="Change ${setting} for Easy Glide Soft Sleeves"[^>]*>Change</button>`));
-    }
-    expect(markup.match(/>Change<\/button>/g)).toHaveLength(3);
-    for (const key of ["ebayCategory", "storeShelf", "descriptionTemplate"]) {
+    // Every row can be changed (W5; the policies from 10a, the rest from 10b); each [Change] names the product.
+    const settings = { shippingPolicy: "shipping policy", returnPolicy: "return policy", paymentPolicy: "payment policy",
+      ebayCategory: "eBay category", storeShelf: "store shelf", descriptionTemplate: "description" };
+    for (const [key, setting] of Object.entries(settings)) {
       // The whole row, up to the next row (or the end of the rows).
       const start = markup.indexOf(`data-testid="drawer-setting-${key}"`);
       expect(start).toBeGreaterThan(-1);
@@ -304,16 +304,18 @@ describe("ProductDrawer", () => {
       const next = /data-testid="drawer-setting-[A-Za-z]+"/.exec(rest);
       const row = markup.slice(start, next === null ? markup.indexOf("</section>", start) : start + 1 + next.index);
       expect(row).toContain("</h4>");
-      expect(row).not.toContain(">Change</button>");
+      expect(row).toMatch(new RegExp(`<button[^>]*aria-label="Change ${setting} for Easy Glide Soft Sleeves"[^>]*>Change</button>`));
     }
+    expect(markup.match(/>Change<\/button>/g)).toHaveLength(6);
     // No ids or codes.
     expect(words).not.toMatch(/Set for this product|261328|ship-1|pay-1|DROPSHIP_/);
   });
 
   it("keeps Change off with Checking… until the product's own settings are read (4.8)", () => {
     const markup = renderDrawer({ own: null });
-    expect(markup.match(/<button[^>]*disabled=""[^>]*>Change<\/button>/g)).toHaveLength(3);
-    expect(markup.match(/data-testid="drawer-setting-[a-zA-Z]+-line">Checking…/g)).toHaveLength(3);
+    expect(markup.match(/<button[^>]*disabled=""[^>]*>Change<\/button>/g)).toHaveLength(6);
+    // Every row can be changed from 10b, so each says it is checking.
+    expect(markup.match(/data-testid="drawer-setting-[a-zA-Z]+-line">Checking…/g)).toHaveLength(6);
   });
 
   it("says once when the product's own settings couldn't be read, with Try again, and keeps Change off (4.8)", () => {
@@ -321,7 +323,7 @@ describe("ProductDrawer", () => {
     const problem = markup.slice(markup.indexOf('data-testid="drawer-own-read-problem"'));
     expect(text(problem.slice(0, problem.indexOf("</div>")))).toContain("Couldn't load this product's settings. Try again.");
     expect(problem.slice(0, problem.indexOf("</div>"))).toContain(">Try again</button>");
-    expect(markup.match(/<button[^>]*disabled=""[^>]*>Change<\/button>/g)).toHaveLength(3);
+    expect(markup.match(/<button[^>]*disabled=""[^>]*>Change<\/button>/g)).toHaveLength(6);
     expect(markup.match(/Couldn&#x27;t load this product&#x27;s settings/g)).toHaveLength(1);
   });
 

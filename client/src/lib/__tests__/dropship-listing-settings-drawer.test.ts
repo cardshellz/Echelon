@@ -34,6 +34,7 @@ import {
   drawerOwnSettingsLine,
   drawerPhoneSummary,
   drawerReadProblem,
+  drawerLanding,
   drawerSearch,
   drawerSettingRows,
   shownFieldEditor,
@@ -76,13 +77,15 @@ import {
   type ListingSettingsRightsInput,
   type ListingSetupFacts,
 } from "../dropship-listing-settings-access";
-import { LISTING_SETTINGS_EDIT_WORDS, type PolicySetupFacts } from "../dropship-listing-settings-words";
+import type { PolicySetupFacts } from "../dropship-listing-settings-store-requests";
+import { LISTING_SETTINGS_EDIT_WORDS } from "../dropship-listing-settings-words";
 import {
   emptyChoices,
   productSettingsDraftValue,
   type ProductOwnSettings,
   type ProductSettingsChoices,
 } from "../dropship-listing-settings-product-edit";
+import { isPolicyRowEdit } from "../dropship-listing-settings-drawer";
 
 const STORE = 22;
 const PRODUCT = 11;
@@ -193,6 +196,7 @@ const SETUP: ListingSettingsReadState<PolicySetupFacts> = {
       paymentPolicies: [{ id: "pay-1", name: "eBay payments" }],
     },
     checks: { ebay: "checked", fulfillment: { status: "checked" } },
+    fulfillmentCapability: null,
   },
   error: null,
 };
@@ -285,6 +289,19 @@ describe("header words", () => {
 
   it("never reads more chosen than there are", () => {
     expect(drawerCategoryLine({ ...DETAIL.product, sizesChosen: 5, sizesTotal: 4 })).toContain("5 of 5 sizes selected");
+  });
+
+  it("says \"From your <c> settings\" only when the server says a value comes from the category (R:591; plan 5.2)", () => {
+    // DETAIL has no category source: the line is as before, with or without the settings.
+    expect(drawerCategoryLine(DETAIL.product, DETAIL.settings)).toBe("Card Shellz category: Sleeves · 2 of 4 sizes selected · Sizes differ");
+    const settings = {
+      ...DETAIL.settings,
+      returnPolicy: [{ value: { policyId: "ret-4" }, sources: [{ source: "category" as const, ruleName: " Sleeves ", productVariantIds: [SIZE_A, SIZE_B] }] }],
+    };
+    expect(drawerCategoryLine(DETAIL.product, settings))
+      .toBe("Card Shellz category: Sleeves · From your Sleeves settings · 2 of 4 sizes selected · Sizes differ");
+    // Named as the server names the category now, even when the product row's name lags behind.
+    expect(drawerCategoryLine({ ...DETAIL.product, category: "Old name" }, settings)).toContain("From your Sleeves settings");
   });
 
   it("has a short phone line and the own settings sentence", () => {
@@ -1185,13 +1202,23 @@ describe("the drawer with a product's own settings (PR 10)", () => {
   });
   const edit = (rows: ReturnType<typeof drawerSettingRows>, key: string) => rows.find((row) => row.key === key)!.edit!;
 
-  it("gives the three policy rows their edit state, and no other row; none without edit facts", () => {
+  it("gives every row its edit state (10b: the eBay category, the shelf and the description too); none without edit facts", () => {
     const rows = rowsWith();
-    expect(rows.map((row) => row.edit?.field ?? null)).toEqual(["shippingPolicy", "returnPolicy", "paymentPolicy", null, null, null]);
+    expect(rows.map((row) => row.edit?.target ?? null)).toEqual(["shippingPolicy", "returnPolicy", "paymentPolicy", "ebayCategory", "storeShelf", "description"]);
     expect(edit(rows, "shippingPolicy")).toEqual({
-      field: "shippingPolicy", canSet: true, canDefault: true, change: { shown: true, disabled: false }, line: null, open: false,
-      choice: { mode: "leave" }, pending: null, marked: false, fieldError: null,
+      kind: "field", target: "shippingPolicy", field: "shippingPolicy", canSet: true, canDefault: true, canNone: false,
+      change: { shown: true, disabled: false }, picksDisabled: false, line: null, open: false, choice: { mode: "leave" }, pending: null, marked: false,
+      fieldError: null,
     });
+    expect(edit(rows, "ebayCategory")).toMatchObject({ kind: "field", field: "ebayCategory", canSet: true, canNone: false, choice: { mode: "leave" } });
+    expect(edit(rows, "storeShelf")).toMatchObject({ kind: "field", field: "storeShelf", canSet: true, canNone: true, choice: { mode: "leave" } });
+    expect(edit(rows, "descriptionTemplate")).toEqual({
+      kind: "description", target: "description", fields: ["textAbove", "textBelow", "mainText"],
+      canSet: true, canDefault: true, canNone: true, change: { shown: true, disabled: false }, picksDisabled: false, line: null, open: false,
+      choices: { textAbove: { mode: "leave" }, textBelow: { mode: "leave" }, mainText: { mode: "leave" } },
+      pending: null, marked: false, fieldError: null, check: null,
+    });
+    expect(rows.map((row) => isPolicyRowEdit(row.edit))).toEqual([true, true, true, false, false, false]);
     expect(drawerSettingRows(EDITED, SETUP).every((row) => row.edit === null)).toBe(true);
   });
 
@@ -1278,6 +1305,19 @@ describe("the drawer with a product's own settings (PR 10)", () => {
     expect(drawerSizeEditState(unchanged, EDITOR, EXACT_A).waiting).toBe(false);
   });
 
+  it("lands on a row and opens its editor only when its Change would (plan 5.2)", () => {
+    expect(drawerLanding(rowsWith(), "descriptionTemplate")).toEqual({ target: "description", open: true });
+    expect(drawerLanding(rowsWith(), "storeShelf")).toEqual({ target: "storeShelf", open: true });
+    // The own read loads, or a size's price waits: the drawer only goes to the row.
+    expect(drawerLanding(rowsWith({ own: { data: undefined, error: null } }), "descriptionTemplate")).toEqual({ target: "description", open: false });
+    expect(drawerLanding(rowsWith({ draft: draftFor(BASE_A, "12.00") }), "descriptionTemplate")).toEqual({ target: "description", open: false });
+    // W5 taken away: nothing can be chosen, so it doesn't open.
+    expect(drawerLanding(rowsWith({ rights: rights({ account: { status: "paused", entitlementStatus: "active" } }) }), "descriptionTemplate"))
+      .toEqual({ target: "description", open: false });
+    // Rows without edit facts (PR 7): nowhere to land.
+    expect(drawerLanding(drawerSettingRows(DETAIL, SETUP), "descriptionTemplate")).toBeNull();
+  });
+
   it("shows the opened field's editor only while its row offers a choice and the own read is there", () => {
     expect(shownFieldEditor(rowsWith(), "returnPolicy", true)).toBe("returnPolicy");
     expect(shownFieldEditor(rowsWith(), null, true)).toBeNull();
@@ -1342,5 +1382,231 @@ describe("the drawer with a product's own settings (PR 10)", () => {
     expect(drawerFooter({ ...base, draft: refused }).message).toBeNull();
     expect(drawerFooter({ ...base, draft: refused, showRefusal: true }).message).toEqual({ text: LISTING_SETTINGS_EDIT_WORDS.fatal, tone: "alert" });
     expect(drawerFooter({ ...base, draft: refused, showRefusal: true }).primary).toMatchObject({ action: "save", label: "Save product", disabled: false });
+  });
+
+  // -------------------------------------------------------------------------
+  // 10b: the eBay category, the shelf and the description (plan 5.2-5.6)
+  // -------------------------------------------------------------------------
+
+  /** Own values for every 10b row; its main text needs a check since Card Shellz changed the product. */
+  const OWN_10B: ProductOwnSettings = listingSettingsProductOwnSettingsSchema.parse({
+    ...OWN,
+    revisionId: 6,
+    own: {
+      ...OWN.own,
+      ebayCategory: { categoryId: "183454", categoryName: "Card Sleeves" },
+      storeShelf: { mode: "own", shelves: [{ id: "S1", name: "Sleeves" }] },
+      textAbove: { mode: "own", text: "Ships in 1 day." },
+      mainText: { text: "Our own words.", needsCheck: true },
+    },
+  });
+  const draftOn = (base: ProductOwnSettings, choices: Partial<ProductSettingsChoices>): ListingSettingsDraft => {
+    const opened = reduceListingSettingsDraft(null, { type: "open", editor: EDITOR, place: "Easy Glide Soft Sleeves", base: productSettingsDraftValue(base) });
+    return reduceListingSettingsDraft(opened, { type: "edit", value: productSettingsDraftValue(base, { ...emptyChoices(), ...choices }) })!;
+  };
+  const SHELVES = [{ categoryId: "S3", categoryName: "Toploaders", path: "Supplies:Toploaders", level: 2 }];
+  const descriptionOf = (rows: ReturnType<typeof drawerSettingRows>) => {
+    const model = edit(rows, "descriptionTemplate");
+    if (model.kind !== "description") throw new Error("The description row has the description's edit.");
+    return model;
+  };
+
+  it("offers the default (and None) but no new eBay category or shelf under a sign-in, and keeps text whole (D4)", () => {
+    const rows = rowsWith({ own: { data: OWN_10B, error: null }, rights: rights({ blocked: { kind: "sign_in", diagnosticReference: null } }) });
+    expect(edit(rows, "ebayCategory")).toMatchObject({ canSet: false, canDefault: true, canNone: false, change: { shown: true }, line: LISTING_SETTINGS_EDIT_WORDS.signInFieldLine });
+    expect(edit(rows, "storeShelf")).toMatchObject({ canSet: false, canDefault: true, canNone: true, change: { shown: true }, line: LISTING_SETTINGS_EDIT_WORDS.signInFieldLine });
+    expect(edit(rows, "descriptionTemplate")).toMatchObject({ canSet: true, canDefault: true, canNone: true, line: null });
+    // The shelves can't be read: the shelf row says so; the category picker reads eBay itself.
+    const shelvesDown = rowsWith({ rights: rights({ shelves: { error: new DropshipApiError({ message: "x", status: 502, code: "DROPSHIP_EBAY_STORE_CATEGORIES_UNAVAILABLE" }) } }) });
+    expect(edit(shelvesDown, "storeShelf")).toMatchObject({ canSet: false, canDefault: true, line: "Can't check eBay right now." });
+    // A paused vendor (or inactive .ops) takes W5 away: no row can be changed, the shelf included (C16).
+    const paused = rowsWith({ rights: rights({ account: { status: "paused", entitlementStatus: "active" } }) });
+    for (const key of ["ebayCategory", "storeShelf", "descriptionTemplate"]) {
+      expect(edit(paused, key)).toMatchObject({ canSet: false, canDefault: false, canNone: false, change: { shown: false }, line: null });
+    }
+  });
+
+  it("names the draft's eBay category, shelves and text parts in their pending lines, never an id or the text", () => {
+    const draft = draftOn(OWN_10B, {
+      ebayCategory: { mode: "set", value: { categoryId: "261328", categoryName: "Toploaders" } },
+      storeShelf: { mode: "set", value: { mode: "own", shelfIds: ["S3", "S1"] } },
+      textAbove: { mode: "set", value: { mode: "none" } },
+      textBelow: { mode: "set", value: { mode: "own", text: "Thanks for buying!" } },
+      mainText: { mode: "default" },
+    });
+    const rows = rowsWith({ own: { data: OWN_10B, error: null }, draft, shelves: SHELVES, openField: "description" });
+    expect(edit(rows, "ebayCategory")).toMatchObject({ choice: { mode: "set", value: { categoryId: "261328" } }, pending: "→ Toploaders · Not saved" });
+    // The new shelf by its path from the shelves read, the product's own by the name it stored.
+    expect(edit(rows, "storeShelf").pending).toBe("→ Supplies › Toploaders · second: Sleeves · Not saved");
+    expect(edit(rows, "descriptionTemplate")).toMatchObject({
+      open: true,
+      choices: { textAbove: { mode: "set", value: { mode: "none" } }, mainText: { mode: "default" } },
+      pending: "→ Text above: None, text below: your own, main text: Card Shellz text · Not saved",
+      // The draft answers the main text's check, so the check steps back.
+      check: null,
+    });
+    expect(JSON.stringify(rows.map((row) => row.edit?.pending))).not.toMatch(/261328|S3|Thanks for buying/);
+    // A shelf the read doesn't know, the default and None.
+    const other = rowsWith({ own: { data: OWN_10B, error: null }, draft: draftOn(OWN_10B, {
+      storeShelf: { mode: "set", value: { mode: "own", shelfIds: ["S9"] } }, ebayCategory: { mode: "default" },
+    }) });
+    expect(edit(other, "storeShelf").pending).toBe("→ A shelf · Not saved");
+    expect(edit(other, "ebayCategory").pending).toBe("→ Use default · Not saved");
+    const none = rowsWith({ own: { data: OWN_10B, error: null }, draft: draftOn(OWN_10B, { storeShelf: { mode: "set", value: { mode: "none" } } }) });
+    expect(edit(none, "storeShelf").pending).toBe("→ None · Not saved");
+    // The product's own category picked again by its number alone is named from the own read.
+    const again = rowsWith({ own: { data: OWN_10B, error: null }, draft: draftOn(OWN_10B, {
+      ebayCategory: { mode: "set", value: { categoryId: "183454" } }, textAbove: { mode: "default" },
+    }) });
+    expect(edit(again, "ebayCategory").pending).toBeNull();
+    expect(edit(again, "descriptionTemplate").pending).toBe("→ Text above: Use default · Not saved");
+  });
+
+  it("asks the main text's check on the Description row while it needs one and can be answered (5.4)", () => {
+    expect(descriptionOf(rowsWith({ own: { data: OWN_10B, error: null } })).check)
+      .toEqual({ keep: { mode: "set", value: { text: "Our own words." } }, useCardShellz: { mode: "default" } });
+    expect(descriptionOf(rowsWith()).check).toBeNull();
+    expect(descriptionOf(rowsWith({ own: { data: OWN_10B, error: null }, rights: rights({ account: { status: "active", entitlementStatus: "lapsed" } }) })).check)
+      .toBeNull();
+    const kept = draftOn(OWN_10B, { mainText: { mode: "set", value: { text: "Our own words." } } });
+    expect(edit(rowsWith({ own: { data: OWN_10B, error: null }, draft: kept }), "descriptionTemplate"))
+      .toMatchObject({ check: null, pending: "→ Main text: your own · Not saved" });
+  });
+
+  it("offers only [Use Card Shellz text] on the row while a size keeps its own main text, which a keep would delete (review CE1)", () => {
+    const detail = listingSettingsProductDetailSchema.parse({
+      ...EDITED,
+      product: { ...EDITED.product, ownSettings: [...EDITED.product.ownSettings, "description"], sizesDiffer: ["description"] },
+      settings: { ...EDITED.settings, mainText: [
+        { value: { own: true }, sources: [{ source: "product", ruleName: null, productVariantIds: [SIZE_A] }] },
+        { value: { own: true }, sources: [{ source: "size", ruleName: null, productVariantIds: [SIZE_B] }] },
+      ] },
+    });
+    const rows = drawerSettingRows(detail, SETUP, { own: { data: OWN_10B, error: null }, rights: rights(), draft: null, editor: EDITOR, openField: null, failure: null });
+    expect(edit(rows, "descriptionTemplate")).toMatchObject({ kind: "description", check: { keep: null, useCardShellz: { mode: "default" } } });
+    // The row's [Change] picks one text for all sizes instead (5.3's line).
+    expect(rows.find((row) => row.key === "descriptionTemplate")!.groups[1].differ).toBe("Sizes differ. Use Change to pick one for all sizes.");
+  });
+
+  it("puts eBay's category and shelf refusals on their rows, and the store text cap in the footer (rows 19-21)", () => {
+    const category = rowsWith({ failure: { message: "Pick a final eBay category.", fields: ["ebayCategory"] } });
+    expect(edit(category, "ebayCategory").fieldError).toBe("Pick a final eBay category.");
+    expect(edit(category, "storeShelf").fieldError).toBeNull();
+    const shelf = rowsWith({ failure: { message: "That shelf is gone from your eBay store.", fields: ["storeShelf"] } });
+    expect(edit(shelf, "storeShelf").fieldError).toBe("That shelf is gone from your eBay store.");
+    const text = rowsWith({ failure: { message: LISTING_SETTINGS_EDIT_WORDS.textEmpty, fields: ["textBelow"] } });
+    expect(edit(text, "descriptionTemplate").fieldError).toBe(LISTING_SETTINGS_EDIT_WORDS.textEmpty);
+    const draft = draftOn(OWN_10B, { ebayCategory: { mode: "set", value: { categoryId: "99" } } });
+    const state = (fields: string[]) => drawerDraftState({ draft, editor: EDITOR, rights: rights(), failure: { fields } }).showRefusal;
+    expect(state(["ebayCategory"])).toBe(false);
+    expect(state(["storeShelf"])).toBe(false);
+    expect(state(["mainText"])).toBe(false);
+    // The store text cap names no field: the footer says it (D8, never the banner).
+    expect(state([])).toBe(true);
+    // A row's marked line after Load latest names its fields.
+    const marked = reduceListingSettingsDraft(draftOn(OWN_10B, { textAbove: { mode: "default" } }), {
+      type: "rebase", latest: productSettingsDraftValue(OWN_10B), marked: ["textAbove"],
+    })!;
+    expect(edit(rowsWith({ own: { data: OWN_10B, error: null }, draft: marked }), "descriptionTemplate").marked).toBe(true);
+    expect(edit(rowsWith({ own: { data: OWN_10B, error: null }, draft: marked }), "storeShelf").marked).toBe(false);
+  });
+
+  it("shows the Description editor while its row offers a choice, as the field editors", () => {
+    expect(shownFieldEditor(rowsWith(), "description", true)).toBe("description");
+    expect(shownFieldEditor(rowsWith(), "ebayCategory", true)).toBe("ebayCategory");
+    expect(shownFieldEditor(rowsWith({ rights: rights({ account: { status: "paused", entitlementStatus: "active" } }) }), "description", true)).toBeNull();
+  });
+
+  // "Sizes differ" in the rows (plan 5.3): DETAIL's shipping policy differs, store default on one size, a leftover on the other.
+  // SETUP doesn't list the leftover's ship-2; SETUP_SHIP_2 lists it, working with Card Shellz shipping.
+  const SETUP_SHIP_2: ListingSettingsReadState<PolicySetupFacts> = { error: null, data: { ...SETUP.data!, options: { ...SETUP.data!.options,
+    fulfillmentPolicies: [...SETUP.data!.options.fulfillmentPolicies, { id: "ship-2", name: "Economy", compatible: true, compatibilityIssues: [] }] } } };
+  const differRows = (edit: Partial<Parameters<typeof drawerSettingRows>[2] & object> = {}, setup = SETUP_SHIP_2) => drawerSettingRows(DETAIL, setup, {
+    own: { data: OWN, error: null }, rights: rights(), draft: null, editor: EDITOR, openField: null, failure: null, ...edit,
+  });
+
+  it("puts a quick pick beside each value whose sizes differ, with the line over them (5.3)", () => {
+    const shipping = differRows()[0].groups[0];
+    expect(shipping.differ).toBe("Sizes differ. Pick one for all sizes.");
+    expect(shipping.entries.map((entry) => entry.pick)).toEqual([
+      { action: "use_default", label: "Use default for all sizes", field: "shippingPolicy", picks: { shippingPolicy: { mode: "default" } }, disabled: false },
+      { action: "use_this", label: "Use for all sizes", field: "shippingPolicy", picks: { shippingPolicy: { mode: "set", value: { id: "ship-2" } } }, disabled: false },
+    ]);
+    // A policy no longer on eBay gets no "Use for all sizes": its editor wouldn't take it, and the Save would be refused (review CE3).
+    expect(differRows({}, SETUP)[0].groups[0].entries.map((entry) => entry.pick?.action ?? null)).toEqual(["use_default", null]);
+    // Rows whose sizes agree have none.
+    expect(differRows()[1].groups[0]).toEqual({ differ: null, entries: [{ value: "Not set", tags: [], usedBy: null }] });
+    // Without edit facts, PR 7's words and no pick.
+    expect(drawerSettingRows(DETAIL, SETUP)[0].groups[0].differ).toBe("Sizes have different values. Each size keeps its own for now.");
+    expect(drawerSettingRows(DETAIL, SETUP)[0].groups[0].entries.every((entry) => entry.pick === undefined)).toBe(true);
+  });
+
+  it("hides Use for all sizes under a sign-in, waits as [Change] does, and drops every pick when nothing can change (D4, D2)", () => {
+    const signIn = differRows({ rights: rights({ blocked: { kind: "sign_in", diagnosticReference: null } }) })[0].groups[0];
+    expect(signIn.entries.map((entry) => entry.pick?.label ?? null)).toEqual(["Use default for all sizes", null]);
+    expect(signIn.differ).toBe("Sizes differ. Pick one for all sizes.");
+    const loading = differRows({ own: { data: undefined, error: null } })[0].groups[0];
+    expect(loading.entries.map((entry) => entry.pick?.disabled)).toEqual([true, true]);
+    const waiting = differRows({ draft: draftFor(BASE_A, "12.00") })[0].groups[0];
+    expect(waiting.entries.map((entry) => entry.pick?.disabled)).toEqual([true, true]);
+    const paused = differRows({ rights: rights({ account: { status: "paused", entitlementStatus: "active" } }) })[0].groups[0];
+    expect(paused.entries.every((entry) => entry.pick === undefined)).toBe(true);
+    expect(paused.differ).toBe("Sizes have different values. Each size keeps its own for now.");
+  });
+
+  it("turns the quick picks off while any row's editor is open, so its Done can't override them unseen (review UX4)", () => {
+    for (const openField of ["shippingPolicy", "returnPolicy", "description"] as const) {
+      const rows = differRows({ openField });
+      expect(rows[0].groups[0].entries.map((entry) => entry.pick?.disabled)).toEqual([true, true]);
+      expect(rows.every((row) => row.edit?.picksDisabled === true)).toBe(true);
+      // [Change] keeps its 10a behaviour: another row's opens that row's editor.
+      expect(rows[0].edit?.change.disabled).toBe(false);
+    }
+    expect(differRows()[0].edit?.picksDisabled).toBe(false);
+  });
+
+  it("names a stored shelf in the record's words, in the row and in a pending pick (R:581)", () => {
+    const detail = listingSettingsProductDetailSchema.parse({
+      ...DETAIL,
+      product: { ...DETAIL.product, ownSettings: ["shipping_policy", "store_shelf"] },
+      settings: { ...DETAIL.settings,
+        storeShelf: [{ value: { names: ["Supplies:Sleeves", "Sale"] }, sources: [{ source: "product", ruleName: null, productVariantIds: [SIZE_A, SIZE_B] }] }] },
+    });
+    const shelfRow = (edit: Parameters<typeof drawerSettingRows>[2] = null) => drawerSettingRows(detail, SETUP, edit).find((row) => row.key === "storeShelf")!;
+    expect(shelfRow().groups[0].entries[0].value).toBe("Supplies › Sleeves · second: Sale");
+    const own = listingSettingsProductOwnSettingsSchema.parse({ ...OWN, revisionId: 3,
+      own: { ...OWN.own, storeShelf: { mode: "own", shelves: [{ id: "S1", name: "Supplies:Sleeves" }, { id: "S2", name: "Sale" }] } } });
+    const opened = reduceListingSettingsDraft(null, { type: "open", editor: EDITOR, place: "x", base: productSettingsDraftValue(own) });
+    const draft = reduceListingSettingsDraft(opened, { type: "edit",
+      value: productSettingsDraftValue(own, { ...emptyChoices(), storeShelf: { mode: "set", value: { mode: "own", shelfIds: ["S2", "S1"] } } }) })!;
+    const edit = shelfRow({ own: { data: own, error: null }, rights: rights(), draft, editor: EDITOR, openField: null, failure: null }).edit!;
+    expect(edit.pending).toBe("→ Sale · second: Supplies › Sleeves · Not saved");
+  });
+
+  it("gives the shelf and the description only the line (5.3)", () => {
+    const detail = listingSettingsProductDetailSchema.parse({
+      ...DETAIL,
+      product: { ...DETAIL.product, ownSettings: ["shipping_policy", "store_shelf", "description"], sizesDiffer: ["shipping_policy", "store_shelf", "description"] },
+      settings: {
+        ...DETAIL.settings,
+        storeShelf: [
+          { value: { names: ["Sleeves"] }, sources: [{ source: "size", ruleName: null, productVariantIds: [SIZE_A] }] },
+          { value: { names: [] }, sources: [{ source: "none", ruleName: null, productVariantIds: [SIZE_B] }] },
+        ],
+        mainText: [
+          { value: { own: true }, sources: [{ source: "size", ruleName: null, productVariantIds: [SIZE_A] }] },
+          { value: { own: false }, sources: [{ source: "catalog", ruleName: null, productVariantIds: [SIZE_B] }] },
+        ],
+      },
+    });
+    const rows = drawerSettingRows(detail, SETUP, { own: { data: OWN, error: null }, rights: rights(), draft: null, editor: EDITOR, openField: null, failure: null });
+    const shelf = rows.find((row) => row.key === "storeShelf")!.groups[0];
+    expect(shelf.differ).toBe("Sizes differ. Use Change to pick one for all sizes.");
+    expect(shelf.entries.every((entry) => entry.pick === undefined)).toBe(true);
+    const description = rows.find((row) => row.key === "descriptionTemplate")!;
+    expect(description.groups.map((group) => group.differ)).toEqual([null, "Sizes differ. Use Change to pick one for all sizes."]);
+    // "Main text: your own", never "set in step 3" (5.7).
+    expect(description.groups[1].entries[0].value).toBe("Main text: your own");
+    expect(JSON.stringify(rows)).not.toContain("set in step 3");
   });
 });
