@@ -50,6 +50,7 @@ CREATE TABLE catalog.product_variants(id integer PRIMARY KEY, product_id integer
       );
       repository = new PostgresListingPublicationRepository(database.pool);
       await database.pool.query(readFileSync(resolve("migrations/260_channel_listing_recreation.sql"), "utf8"));
+      await database.pool.query(readFileSync(resolve("migrations/900000002000017820001_walmart_match_recreation.sql"), "utf8"));
     });
     afterAll(async () => {
       await database?.close();
@@ -636,6 +637,24 @@ CREATE TABLE catalog.product_variants(id integer PRIMARY KEY, product_id integer
       await expect(repository.createOperation(input(stale, 105, 106))).rejects.toMatchObject({ code: "LISTING_RECREATION_STALE" });
       expect((await repository.operation(104, prior.id)).progress.items[0].state).toBe("accepted");
       expect((await repository.draft(104)).items).toEqual(next.draft.items);
+      expect((await counts()).operations).toBe(1);
+    });
+    it.each(["changed identifier", "changed inherited identifier", "mismatched feed"])("rejects a matched recreation with %s and rolls back its claim transfer", async failure => {
+      const { prior, next } = await acceptedRecreation("old-wpid", "match");
+      const invalid = structuredClone(next);
+      invalid.review.id = testId(104);
+      if (failure === "changed identifier") invalid.draft.items[0].identifier = { type: "GTIN", value: "00850025354769" };
+      if (failure === "changed inherited identifier") {
+        invalid.draft.items[0].identifier = null;
+        invalid.catalog[0].identifier = { type: "GTIN", value: "00850025354769" };
+      }
+      if (failure === "mismatched feed") invalid.prepared[0].feedType = "MP_ITEM";
+      const reviewed = await saveReview(invalid);
+      await expect(repository.createOperation(input(reviewed, 105, 106)))
+        .rejects.toThrow("Only a rejected claim or an explicitly reviewed missing listing may transfer");
+      expect((await repository.operation(104, prior.id)).progress).toEqual(prior.progress);
+      expect((await repository.draft(104)).items).toEqual(reviewed.draft.items);
+      expect((await database.pool.query("SELECT operation_id FROM marketplace.channel_listing_item_claims")).rows[0].operation_id).toBe(prior.id);
       expect((await counts()).operations).toBe(1);
     });
     it("retains the reviewed mapping identity when an accepted original feed omitted its product ID", async () => {

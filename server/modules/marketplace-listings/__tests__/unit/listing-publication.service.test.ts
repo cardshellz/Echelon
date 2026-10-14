@@ -1284,6 +1284,26 @@ describe("deleted Walmart listing recreation", () => {
     expect(h.provider.submit).toHaveBeenCalledOnce();
     expect(h.linkRecreated).toHaveBeenCalledOnce();
   });
+  it("resumes stock for a matched recreation when Walmart returns the original product ID", async () => {
+    const snapshot = publicationSnapshot();
+    snapshot.draft.items[0].method = "match";
+    snapshot.prepared[0].feedType = "MP_ITEM_MATCH";
+    const h = replacement(snapshot);
+    h.provider.status.mockResolvedValue({ state: "processed", items: [{ ...result("SKU-10", "accepted"), externalProductId: "original-wpid" }] });
+    h.provider.observe.mockReset().mockRejectedValueOnce(new ChannelProviderError("ITEM_NOT_FOUND", "Missing", false, 404))
+      .mockResolvedValue({ item: { sku: "SKU-10", title: "Existing catalog product", externalProductId: "original-wpid",
+        externalVariantId: "SKU-10", externalInventoryItemId: "SKU-10", lifecycleStatus: "ACTIVE", publishedStatus: "PUBLISHED" }, priceCents: 1299 });
+    await h.run();
+    expect(h.linkRecreated).toHaveBeenCalledWith(snapshot.account, expect.objectContaining({
+      previousExternalProductId: "original-wpid", expectedExternalProductId: "original-wpid",
+    }), "listing-publication-worker");
+    expect(h.inventory.resumeRecreationStock).toHaveBeenCalledWith(expect.objectContaining({
+      variantId: 10, sku: "SKU-10", externalProductId: "original-wpid",
+    }));
+    expect(h.store.saveProgress.mock.calls.at(-1)?.[1].items[0]).toMatchObject({
+      state: "verified", externalProductId: "original-wpid", stockState: "ready",
+    });
+  });
   it("submits other reviewed feed families before a recreation handoff can advance the stock target revision", async () => {
     const snapshot = publicationSnapshot([10, 11]);
     snapshot.prepared[1].feedType = "MP_ITEM_MATCH";

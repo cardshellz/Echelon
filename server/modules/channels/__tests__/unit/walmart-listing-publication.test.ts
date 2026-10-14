@@ -378,6 +378,30 @@ describe("Walmart listing provider", () => {
     expect(channels.withListingWrites).not.toHaveBeenCalled();
   });
 
+  it("retains offer-specific photos when the matched condition requires them", async () => {
+    const { provider } = setup();
+    const prepared = await provider.prepare(account, {
+      catalog,
+      draft: { ...draft(), method: "match", attributes: { Orderable: { ShippingWeight: 1, condition: "Pre-Owned: Good" } } },
+      priceCents: 1299,
+    });
+    expect(prepared.issues).toEqual([]);
+    expect(prepared.payload.Item).toMatchObject({ condition: "Pre-Owned: Good", mainImageUrl: catalog.images[0] });
+  });
+
+  it.each(["missing photo", "failed inherited photo"])("blocks a non-new catalog offer with a %s", async failure => {
+    const { provider, api } = setup();
+    const photoIssue = { code: "CATALOG_IMAGE_UNAVAILABLE", message: "Missing local photo", field: "images" };
+    const prepared = await provider.prepare(account, {
+      catalog: { ...catalog, images: [], imageIssues: failure === "failed inherited photo" ? [photoIssue] : [] },
+      draft: { ...draft(), method: "match", attributes: { Orderable: { ShippingWeight: 1, condition: "Pre-Owned: Good" } } },
+      priceCents: 1299,
+    });
+    expect(prepared.issues.length).toBeGreaterThan(0);
+    if (failure === "failed inherited photo") expect(prepared.issues).toContainEqual(photoIssue);
+    expect(api.submitFeed).not.toHaveBeenCalled();
+  });
+
   it("shows writable nested requirements without exposing quantity, identity or price controls", async () => {
     const { provider } = setup();
     const requirements = await provider.requirements(account, type, "create");

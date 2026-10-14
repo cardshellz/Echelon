@@ -63,6 +63,7 @@ export function ListingItemEditor({
     JSON.stringify(item.attributes, null, 2),
   );
   const [error, setError] = useState("");
+  const identifier = draft.identifier ?? (draft.recreateFromOperationId ? catalog?.identifier : null);
   const taxonomy = useQuery({
     queryKey: [base, "taxonomy"],
     queryFn: () =>
@@ -268,7 +269,7 @@ export function ListingItemEditor({
                   <select
                     id={`${prefix}-identifier-type`}
                     className={selectClass}
-                    value={draft.identifier?.type ?? "GTIN"}
+                    value={identifier?.type ?? "GTIN"}
                     disabled={Boolean(draft.recreateFromOperationId)}
                     onChange={(event) =>
                       setDraft((previous) => ({
@@ -293,7 +294,7 @@ export function ListingItemEditor({
                   </Label>
                   <Input
                     id={`${prefix}-identifier`}
-                    value={draft.identifier?.value ?? ""}
+                    value={identifier?.value ?? ""}
                     disabled={Boolean(draft.recreateFromOperationId)}
                     maxLength={32}
                     onChange={(event) =>
@@ -320,7 +321,7 @@ export function ListingItemEditor({
                     ? "Product type selected"
                     : "Product type still needed"}{" "}
                 ·{" "}
-                {draft.identifier?.value.trim()
+                {identifier?.value.trim()
                   ? "Identifier entered"
                   : "Identifier still needed"}
                 . Review validates these details before publication.
