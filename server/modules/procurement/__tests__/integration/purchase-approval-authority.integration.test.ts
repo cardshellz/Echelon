@@ -26,6 +26,7 @@ import { isPurchaseOrderHistoryConstraintViolation } from "../../purchase-order-
 import { createPurchasingService } from "../../purchasing.service";
 import { registerPurchaseOrderRoutes } from "../../purchase-order.routes";
 import { readPurchaseApprovalActor } from "../../../identity/infrastructure/purchase-approval-access.repository";
+import { readCommandAuthorityActor } from "../../../identity/infrastructure/command-authority.repository";
 
 config({ path: resolve(process.cwd(), ".env.test") });
 const testUrl = process.env.ECHELON_TEST_DATABASE_URL;
@@ -140,14 +141,15 @@ databaseTests.sequential("purchase approval authority PostgreSQL owner and HTTP 
       INSERT INTO identity.users(id,username,password,role,active) VALUES
         ('admin-user','admin','unused','admin',1), ('lead-user','lead','unused','picker',1),
         ('wrong-user','wrong','unused','admin',1), ('inactive-user','inactive','unused','admin',0),
-        ('scoped-user','scoped','unused','admin',1), ('no-grant-user','no-grant','unused','admin',1);
+        ('scoped-user','scoped','unused','admin',1), ('no-grant-user','no-grant','unused','admin',1),
+        ('cancel-user','cancel-only','unused','admin',1);
       INSERT INTO identity.auth_roles(id,name,is_system) VALUES
-        (1,'Administrator',1),(2,'Team Lead',1),(3,'Other Buyer',0),(4,'Scoped Approver',0),(5,'No Grant',0);
-      INSERT INTO identity.auth_permissions(id,resource,action,category) VALUES (1,'purchasing','approve','purchasing'),(2,'purchasing','edit','purchasing');
+        (1,'Administrator',1),(2,'Team Lead',1),(3,'Other Buyer',0),(4,'Scoped Approver',0),(5,'No Grant',0),(6,'Cancel Only',0);
+      INSERT INTO identity.auth_permissions(id,resource,action,category) VALUES (1,'purchasing','approve','purchasing'),(2,'purchasing','edit','purchasing'),(3,'purchasing','cancel','purchasing');
       INSERT INTO identity.auth_role_permissions(id,role_id,permission_id,constraints) VALUES
-        (1,1,1,NULL),(2,2,1,NULL),(3,3,1,NULL),(4,4,1,'{"warehouseId":1}'),(5,1,2,NULL);
+        (1,1,1,NULL),(2,2,1,NULL),(3,3,1,NULL),(4,4,1,'{"warehouseId":1}'),(5,1,2,NULL),(6,1,3,NULL),(7,6,3,NULL);
       INSERT INTO identity.auth_user_roles(id,user_id,role_id) VALUES
-        (1,'admin-user',1),(2,'lead-user',2),(3,'wrong-user',3),(4,'inactive-user',1),(5,'scoped-user',4),(6,'no-grant-user',5);
+        (1,'admin-user',1),(2,'lead-user',2),(3,'wrong-user',3),(4,'inactive-user',1),(5,'scoped-user',4),(6,'no-grant-user',5),(7,'cancel-user',6);
       INSERT INTO procurement.purchase_orders(id,po_number,vendor_id,status,physical_status,financial_status,currency,
         approval_tier_id,subtotal_cents,total_cents,discount_cents,tax_cents,shipping_cost_cents,updated_at)
       VALUES (1,'APPROVAL-001',1,'pending_approval','draft','unbilled','USD',1,10000,10000,0,0,0,'2026-09-01T12:00:00');
@@ -158,8 +160,8 @@ databaseTests.sequential("purchase approval authority PostgreSQL owner and HTTP 
       VALUES (11,1,1,'product',1,'A','Product A','open',202,1,1,10000,1000000,1000000,10000,0,0,0,10000,'per_piece','manual',0,'2026-09-01T12:00:00');
       INSERT INTO procurement.po_approval_tiers(id,tier_name,threshold_cents,approver_role,active) VALUES (1,'Admin approval',1000,'admin',1);
       INSERT INTO inventory.warehouse_settings(id,warehouse_code,require_approval,auto_send_on_approve,require_acknowledge_before_receive,
-        hide_incoterms_domestic,enable_shipment_tracking,auto_putaway_location,auto_close_on_reconcile,one_click_receive_start,use_new_po_editor,use_new_reorder_cockpit)
-      VALUES (1,'DEFAULT',true,false,false,false,false,false,false,false,false,false);
+        hide_incoterms_domestic,enable_shipment_tracking,auto_putaway_location,auto_close_on_reconcile,one_click_receive_start,use_new_po_editor,use_new_reorder_cockpit,procurement_policy_revision)
+      VALUES (1,'DEFAULT',true,false,false,false,false,false,false,false,false,false,0);
     `);
     await pool.query(retentionMigration);
   });
@@ -169,6 +171,198 @@ databaseTests.sequential("purchase approval authority PostgreSQL owner and HTTP 
     if (pool) {
       for (const name of [...ownedSchemas].reverse()) await pool.query(`DROP SCHEMA ${name} CASCADE`);
       await pool.end();
+    }
+  });
+
+  const postCancellation = async (endpoint: "cancel" | "void") => {
+    const response = await fetch(`${url}/api/purchase-orders/1/${endpoint}`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ reason: "Supplier order withdrawn" }),
+    });
+    return { status: response.status, body: await response.json() as any };
+  };
+
+  it.each(["cancel", "void"] as const)("allows a cancel-only actor to cancel an unissued PO through /%s", async (endpoint) => {
+    requestActor = "cancel-user";
+    await pool.query("UPDATE procurement.purchase_orders SET status='approved',physical_status='draft' WHERE id=1");
+    expect((await postCancellation(endpoint)).status).toBe(200);
+    const after = await evidence();
+    expect(after.header[0]).toMatchObject({ status: "cancelled", physical_status: "cancelled", cancelled_by: "cancel-user" });
+    expect(after.lines[0]).toMatchObject({ status: "cancelled", cancelled_qty: 1 });
+    expect(after.events).toHaveLength(1);
+    expect(after.events[0]).toMatchObject({ event_type: "cancelled", actor_id: "cancel-user" });
+  });
+
+  it.each([
+    { endpoint: "cancel", status: "sent" }, { endpoint: "void", status: "sent" },
+    { endpoint: "cancel", status: "acknowledged" }, { endpoint: "void", status: "acknowledged" },
+  ] as const)("denies a cancel-only actor on /$endpoint for $status without any mutation", async ({ endpoint, status }) => {
+    requestActor = "cancel-user";
+    await pool.query("UPDATE procurement.purchase_orders SET status=$1,physical_status=$1 WHERE id=1", [status]);
+    const before = await evidence();
+    expect(await postCancellation(endpoint)).toMatchObject({ status: 403, body: { details: { code: "PO_CANCEL_PERMISSION_REQUIRED", requiredPermission: "purchasing:approve" } } });
+    expect(await evidence()).toEqual(before);
+  });
+
+  it.each(["cancel", "void"] as const)("accepts current approval-only authority for an issued PO through /%s", async (endpoint) => {
+    requestActor = "lead-user";
+    await pool.query("UPDATE procurement.purchase_orders SET status='sent',physical_status='sent' WHERE id=1");
+    expect((await postCancellation(endpoint)).status).toBe(200);
+    expect((await evidence()).header[0]).toMatchObject({ status: "cancelled", cancelled_by: "lead-user" });
+  });
+
+  it("persists one injected cancellation time and the checked authority plus actual before/after evidence", async () => {
+    await pool.query("UPDATE procurement.purchase_orders SET status='sent',physical_status='sent' WHERE id=1; UPDATE procurement.purchase_order_lines SET cancelled_qty=0 WHERE id=11");
+    const at = new Date("2026-10-13T12:34:56.789Z");
+    const clock = vi.fn(() => at);
+    const controlled = makeService({ now: clock });
+    await controlled.cancel(1, "Supplier withdrew order", "lead-user");
+    expect(clock).toHaveBeenCalledTimes(1);
+    const after = await evidence();
+    expect(after.events[0]).toMatchObject({
+      actor_type: "user", actor_id: "lead-user", event_type: "cancelled",
+      payload_json: {
+        required_permission: "purchasing:approve",
+        before: { status: "sent", physical_status: "sent" },
+        after: { status: "cancelled", physical_status: "cancelled" },
+        line_changes: [{ line_id: 11, before: { status: "open", cancelled_qty: 0 }, after: { status: "cancelled", cancelled_qty: 1 } }],
+      },
+    });
+    // These production columns are timestamp without time zone. Inspect their
+    // stored text so the assertion does not depend on the test host's zone.
+    const timestamps = await pool.query(`
+      SELECT to_char(po.cancelled_at,'YYYY-MM-DD"T"HH24:MI:SS.MS') AS cancelled_at,
+        to_char(po.updated_at,'YYYY-MM-DD"T"HH24:MI:SS.MS') AS header_updated_at,
+        to_char(line.updated_at,'YYYY-MM-DD"T"HH24:MI:SS.MS') AS line_updated_at,
+        to_char(history.changed_at,'YYYY-MM-DD"T"HH24:MI:SS.MS') AS history_changed_at,
+        to_char(event.created_at,'YYYY-MM-DD"T"HH24:MI:SS.MS') AS event_created_at
+      FROM procurement.purchase_orders po
+      JOIN procurement.purchase_order_lines line ON line.purchase_order_id=po.id
+      JOIN procurement.po_status_history history ON history.purchase_order_id=po.id
+      JOIN procurement.po_events event ON event.po_id=po.id WHERE po.id=1
+    `);
+    expect(Object.values(timestamps.rows[0])).toEqual(Array(5).fill("2026-10-13T12:34:56.789"));
+  });
+
+  it("rejects an invalid injected cancellation clock before any mutation", async () => {
+    const before = await evidence();
+    await expect(makeService({ now: () => new Date("invalid") }).cancel(1, "withdrawn", "cancel-user"))
+      .rejects.toMatchObject({ statusCode: 500, details: { code: "PO_CANCEL_CLOCK_INVALID" } });
+    expect(await evidence()).toEqual(before);
+  });
+
+  it("rolls back cancellation lines, header and history if its immutable audit insert fails", async () => {
+    const before = await evidence();
+    await pool.query(`CREATE FUNCTION procurement.fail_cancellation_audit() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected cancellation audit failure'; END $$;
+      CREATE TRIGGER fail_cancellation_audit BEFORE INSERT ON procurement.po_events FOR EACH ROW EXECUTE FUNCTION procurement.fail_cancellation_audit()`);
+    try {
+      await expect(service.cancel(1, "withdrawn", "cancel-user")).rejects.toThrow();
+      expect(await evidence()).toEqual(before);
+    } finally {
+      await pool.query("DROP TRIGGER fail_cancellation_audit ON procurement.po_events; DROP FUNCTION procurement.fail_cancellation_audit()");
+    }
+  });
+
+  it.each([
+    { status: "draft", physicalStatus: "sent", sentAt: null },
+    { status: "sent", physicalStatus: "draft", sentAt: null },
+    { status: "approved", physicalStatus: "draft", sentAt: "2026-10-13T12:00:00Z" },
+  ])("direct cancellation cannot weaken issued evidence $status/$physicalStatus/$sentAt", async ({ status, physicalStatus, sentAt }) => {
+    await pool.query("UPDATE procurement.purchase_orders SET status=$1,physical_status=$2,sent_to_vendor_at=$3 WHERE id=1", [status, physicalStatus, sentAt]);
+    const before = await evidence();
+    await expect(service.cancel(1, "withdrawn", "cancel-user")).rejects.toMatchObject({ statusCode: 403, details: { code: "PO_CANCEL_PERMISSION_REQUIRED", requiredPermission: "purchasing:approve" } });
+    expect(await evidence()).toEqual(before);
+  });
+
+  it.each([
+    { userId: "inactive-user", code: "PO_CANCEL_ACTOR_INACTIVE" },
+    { userId: "scoped-user", code: "PO_CANCEL_SCOPE_UNSUPPORTED" },
+    { userId: "no-grant-user", code: "PO_CANCEL_PERMISSION_REQUIRED" },
+  ])("direct cancellation rejects $userId even when session middleware is bypassed", async ({ userId, code }) => {
+    await pool.query("UPDATE procurement.purchase_orders SET status='sent',physical_status='sent' WHERE id=1");
+    const before = await evidence();
+    await expect(service.cancel(1, "withdrawn", userId)).rejects.toMatchObject({ statusCode: 403, details: { code } });
+    expect(await evidence()).toEqual(before);
+  });
+
+  it("still rejects receiving-state cancellation even for a fully authorized actor", async () => {
+    await pool.query("UPDATE procurement.purchase_orders SET status='partially_received',physical_status='receiving' WHERE id=1");
+    const before = await evidence();
+    await expect(service.cancel(1, "withdrawn", "admin-user")).rejects.toMatchObject({ statusCode: 400 });
+    expect(await evidence()).toEqual(before);
+  });
+
+  it("physical transition entry point cannot bypass cancellation authority or its line/audit owner", async () => {
+    await pool.query("UPDATE procurement.purchase_orders SET status='sent',physical_status='sent' WHERE id=1");
+    const before = await evidence();
+    await expect(service.transitionPhysical(1, "cancelled", "cancel-user", "withdrawn"))
+      .rejects.toMatchObject({ statusCode: 403, details: { code: "PO_CANCEL_PERMISSION_REQUIRED" } });
+    expect(await evidence()).toEqual(before);
+    expect((await service.transitionPhysical(1, "cancelled", "lead-user", "withdrawn")).status).toBe("cancelled");
+    const after = await evidence();
+    expect(after.lines[0]).toMatchObject({ status: "cancelled", cancelled_qty: 1 });
+    expect(after.events).toHaveLength(1);
+    expect(after.events[0]).toMatchObject({ event_type: "cancelled", actor_id: "lead-user" });
+  });
+
+  it("does not permit another physical transition to override its final state into a cancellation", async () => {
+    await pool.query("UPDATE procurement.purchase_orders SET status='acknowledged',physical_status='acknowledged' WHERE id=1");
+    const before = await evidence();
+    await expect(service.transitionPhysical(1, "shipped", "cancel-user", "withdrawn", { status: "cancelled", physicalStatus: "cancelled" }))
+      .rejects.toMatchObject({ statusCode: 400, details: { code: "PO_LIFECYCLE_PATCH_UNSUPPORTED" } });
+    expect(await evidence()).toEqual(before);
+  });
+
+  it("does not permit a financial transition to overwrite the cancellation owner's state", async () => {
+    await pool.query("UPDATE procurement.purchase_orders SET status='sent',physical_status='sent',financial_status='unbilled' WHERE id=1");
+    const before = await evidence();
+    await expect(service.transitionFinancial(1, "invoiced", "cancel-user", "withdrawn", { status: "cancelled", physicalStatus: "cancelled" }))
+      .rejects.toMatchObject({ statusCode: 400, details: { code: "PO_LIFECYCLE_PATCH_UNSUPPORTED" } });
+    expect(await evidence()).toEqual(before);
+  });
+
+  it.each([
+    ["grant", "DELETE FROM identity.auth_role_permissions WHERE id=7", "PO_CANCEL_PERMISSION_REQUIRED"],
+    ["membership", "DELETE FROM identity.auth_user_roles WHERE id=7", "PO_CANCEL_PERMISSION_REQUIRED"],
+    ["active account", "UPDATE identity.users SET active=0 WHERE id='cancel-user'", "PO_CANCEL_ACTOR_INACTIVE"],
+    ["permission", "UPDATE identity.auth_permissions SET action='view' WHERE id=3", "PO_CANCEL_PERMISSION_REQUIRED"],
+  ])("holds %s authority through cancellation commit and denies after revocation", async (_label, revokeSql, denialCode) => {
+    const captured = deferred();
+    const continueCancellation = deferred();
+    const controlled = makeService({ readCommandActor: async (tx, userId) => {
+      const actor = await readCommandAuthorityActor(tx, userId);
+      captured.resolve();
+      await continueCancellation.promise;
+      return actor;
+    } });
+    const cancellation = controlled.cancel(1, "withdrawn", "cancel-user");
+    await captured.promise;
+    const revoker = await pool.connect();
+    let deletion: Promise<pg.QueryResult> | undefined;
+    try {
+      await revoker.query("BEGIN");
+      const pid = (await revoker.query("SELECT pg_backend_pid() AS pid")).rows[0].pid;
+      deletion = revoker.query(revokeSql);
+      let blocked = false;
+      for (let attempt = 0; attempt < 100; attempt++) {
+        const result = await pool.query("SELECT wait_event_type FROM pg_stat_activity WHERE pid=$1", [pid]);
+        if (result.rows[0]?.wait_event_type === "Lock") { blocked = true; break; }
+        await new Promise((resolveValue) => setTimeout(resolveValue, 10));
+      }
+      expect(blocked).toBe(true);
+      continueCancellation.resolve();
+      expect((await cancellation).status).toBe("cancelled");
+      await deletion;
+      await revoker.query("COMMIT");
+      await pool.query("UPDATE procurement.purchase_orders SET status='pending_approval',physical_status='draft' WHERE id=1");
+      const before = await evidence();
+      await expect(service.cancel(1, "withdrawn", "cancel-user")).rejects.toMatchObject({ details: { code: denialCode } });
+      expect(await evidence()).toEqual(before);
+    } finally {
+      continueCancellation.resolve();
+      await cancellation.catch(() => undefined);
+      await deletion?.catch(() => undefined);
+      await revoker.query("ROLLBACK");
+      revoker.release();
     }
   });
 

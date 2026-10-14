@@ -1,5 +1,6 @@
 import { expect, test, type Page } from "@playwright/test";
 import { installFixtures, po } from "./procurement-fixtures";
+import { expectFinancialRetryBoundaries, installFinancialRetryClock } from "./procurement-retry-clock";
 import type { PoVarianceContext } from "../../shared/procurement/po-variance-approval";
 async function setup(page: Page, options: { admin?: boolean; lost?: boolean; stale?: boolean } = {}) {
   const failures = await installFixtures(page), commands: { key: string; body: unknown }[] = [];
@@ -50,8 +51,9 @@ test("keeps review available but blocks users without admin authority", async ({
   await expect(page.getByRole("button", { name: "Approve variance", exact: true })).toBeDisabled(); expect(state.commands).toEqual([]); expect(state.failures).toEqual([]);
 });
 test("retains the exact saved approval after reload when acceptance already committed", async ({ page }) => {
-  const state = await setup(page, { lost: true }); await approve(page);
-  await expect.poll(() => state.commands.length, { timeout: 20000 }).toBe(4);
+  await installFinancialRetryClock(page);
+  const state = await setup(page, { lost: true });
+  await expectFinancialRetryBoundaries(page, () => approve(page), () => state.commands.length);
   state.recover(); await page.reload();
   await page.getByRole("button", { name: "Verify saved variance approval", exact: true }).click();
   await page.getByRole("dialog").getByRole("button", { name: "Retry saved confirmation", exact: true }).click();

@@ -17,6 +17,14 @@ import {
   warehouseSettings,
   eq, and, inArray, isNull, desc, asc, sql,
 } from "../../../storage/base";
+import {
+  assertWarehouseSettingsCreation,
+  assertWarehouseSettingsDeletable,
+  assertWarehouseSettingsIdentityChange,
+  parseWarehouseSettingsCreation,
+  parseWarehouseSettingsId,
+  parseWarehouseSettingsWrite,
+} from "../../warehouse/domain/warehouse-settings-write";
 import { getSettingsForWarehouse } from "../../warehouse/settings.resolver";
 
 type ReplenTaskWithDemand = ReplenTask & {
@@ -349,21 +357,41 @@ export const replenishmentMethods: IReplenishmentStorage = {
   },
 
   async createWarehouseSettings(data: InsertWarehouseSettings, executor: any = db): Promise<WarehouseSettings> {
-    const result = await executor.insert(warehouseSettings).values(data).returning();
+    const parsed = parseWarehouseSettingsCreation(data);
+    assertWarehouseSettingsCreation(parsed);
+    const result = await executor.insert(warehouseSettings).values(parsed).returning();
     return result[0];
   },
 
-  async updateWarehouseSettings(id: number, updates: Partial<InsertWarehouseSettings>, executor: any = db): Promise<WarehouseSettings | null> {
-    const result = await executor.update(warehouseSettings)
-      .set({ ...updates, updatedAt: new Date() })
-      .where(eq(warehouseSettings.id, id))
-      .returning();
-    return result[0] || null;
+  async updateWarehouseSettings(id: number, updates: Partial<InsertWarehouseSettings>, executor?: Pick<typeof db, "select" | "update">): Promise<WarehouseSettings | null> {
+    const settingsId = parseWarehouseSettingsId(id);
+    const parsed = parseWarehouseSettingsWrite(updates);
+    // A supplied executor belongs to the caller's transaction. In particular,
+    // the legacy-authority adapter wraps a raw PoolClient transaction in Drizzle;
+    // calling .transaction() on that wrapper would COMMIT the caller's work.
+    const write = async (tx: Pick<typeof db, "select" | "update">) => {
+      const [current] = await tx.select().from(warehouseSettings)
+        .where(eq(warehouseSettings.id, settingsId)).for("update");
+      if (!current) return null;
+      assertWarehouseSettingsIdentityChange(current, parsed);
+      const [updated] = await tx.update(warehouseSettings)
+        .set({ ...parsed, updatedAt: sql`transaction_timestamp()` })
+        .where(eq(warehouseSettings.id, settingsId)).returning();
+      return updated ?? null;
+    };
+    return executor ? write(executor) : db.transaction(write);
   },
 
   async deleteWarehouseSettings(id: number): Promise<boolean> {
-    const result = await db.delete(warehouseSettings).where(eq(warehouseSettings.id, id)).returning();
-    return result.length > 0;
+    const settingsId = parseWarehouseSettingsId(id);
+    return db.transaction(async (tx) => {
+      const [current] = await tx.select().from(warehouseSettings)
+        .where(eq(warehouseSettings.id, settingsId)).for("update");
+      if (!current) return false;
+      assertWarehouseSettingsDeletable(current);
+      const result = await tx.delete(warehouseSettings).where(eq(warehouseSettings.id, settingsId)).returning();
+      return result.length > 0;
+    });
   },
 
   async getVelocityLookbackDays(warehouseId?: number | null): Promise<number> {

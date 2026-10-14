@@ -1,4 +1,7 @@
 import { costGraphLockExecute } from "./cost-graph.fixture";
+import { costGraphAndProcurementSettingsExecute } from "./procurement-settings.fixture";
+import type { SQL } from "drizzle-orm";
+import { PgDialect } from "drizzle-orm/pg-core";
 import { describe, expect, it, vi } from "vitest";
 import {
   poApprovalTiers,
@@ -8,7 +11,6 @@ import {
   purchaseOrders,
   vendorProducts,
   vendors,
-  warehouseSettings,
 } from "@shared/schema";
 import { createPurchasingService } from "../../purchasing.service";
 
@@ -90,12 +92,12 @@ function lifecycleDb(input: {
   const rowsFor = (table: unknown): any[] => {
     if (table === purchaseOrders) return [input.lockedPo];
     if (table === purchaseOrderLines) return input.lines;
-    if (table === warehouseSettings) return input.settings ?? [];
     if (table === poApprovalTiers) return input.tiers ?? [];
     if (table === vendorProducts) return input.vendorProducts ?? [];
     return [];
   };
 
+  const commandExecute = costGraphAndProcurementSettingsExecute(input.settings?.[0] ?? {});
   const tx: any = {
     select: vi.fn(() => {
       let table: unknown;
@@ -134,13 +136,16 @@ function lifecycleDb(input: {
         return Promise.resolve([]);
       }),
     })),
-    execute: vi.fn(async () => ({
-      rows: [{
-        quote_evaluated_at:
-          input.quoteClock?.evaluatedAt ?? new Date("2026-07-13T12:00:00.000Z"),
-        quote_current_date: input.quoteClock?.currentDate ?? "2026-07-13",
-      }],
-    })),
+    execute: vi.fn(async (query: SQL) => {
+      const statement = new PgDialect().sqlToQuery(query).sql.replace(/\s+/g, " ").trim();
+      if (statement === "SELECT transaction_timestamp() AS quote_evaluated_at, current_date::text AS quote_current_date") {
+        return { rows: [{
+          quote_evaluated_at: input.quoteClock?.evaluatedAt ?? new Date("2026-07-13T12:00:00.000Z"),
+          quote_current_date: input.quoteClock?.currentDate ?? "2026-07-13",
+        }] };
+      }
+      return commandExecute(query);
+    }),
   };
   const db: any = {
     ...tx,
@@ -619,7 +624,9 @@ describe("purchase-order lifecycle concurrency", () => {
     const db = lifecycleDb({ lockedPo: locked, lines: [exactLine()] });
     const service = createPurchasingService(db, baseStorage({
       getPurchaseOrderById: vi.fn().mockResolvedValue(observed),
-    }));
+    }), {
+      readCommandActor: async (_tx, userId) => ({ userId, active: true, permissions: ["purchasing:cancel"], scopedPermissions: [] }),
+    });
 
     await expect(service.cancel(1, "stale cancellation", "buyer-8")).rejects.toMatchObject({
       statusCode: 409,

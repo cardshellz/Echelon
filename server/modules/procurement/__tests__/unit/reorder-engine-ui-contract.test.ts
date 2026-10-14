@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
+import { procurementSettingsCommandSchema, procurementSettingsSnapshotSchema } from "@shared/procurement/procurement-settings";
 
 // UI contract for the Reorder Engine cockpit (PR 2 read-only + PR 3 Order
 // Builder). Pattern follows demand-planner-ui-contract.test.ts: pin the
@@ -207,10 +208,14 @@ describe("reorder engine UI contract", () => {
   });
 
   it("is gated by the useNewReorderCockpit procurement setting end-to-end", () => {
-    // Server: whitelisted key with a safe default.
-    expect(service).toContain('"useNewReorderCockpit"');
-    expect(service).toContain("useNewReorderCockpit: false");
-    // Settings page: admin-toggleable with a real label.
+    // The service delegates to the canonical reader; schema validation owns
+    // the allowed boolean flag instead of inventing values in a read fallback.
+    expect(service.includes("return getProcurementSettingsTx(db, false);")).toBe(true);
+    expect(service.includes('readProcurementSettings(tx, lock ? "share" : undefined)')).toBe(true);
+    expect(procurementSettingsCommandSchema.parse({ key: "useNewReorderCockpit", value: true, expectedRevision: 0 }).updates)
+      .toEqual([{ key: "useNewReorderCockpit", value: true }]);
+    expect(procurementSettingsSnapshotSchema.shape.useNewReorderCockpit.safeParse("false").success).toBe(false);
+    // Settings page: policy-editor toggle with a real label.
     expect(settingsPage).toContain('key: "useNewReorderCockpit"');
     // Router: flag switch on /reorder-analysis…
     expect(app).toContain("useNewReorderCockpit");

@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { resolve } from "node:path";
 import Papa from "papaparse";
-import { expect, test, type Page } from "playwright/test";
+import { expect, test, type Page } from "@playwright/test";
 import type { OpeningSaveRequest, OpeningVerification } from "../../shared/types/inventory-cutover-opening";
 import { openingAssessment, openingSaved, openingSource } from
   "../../server/modules/inventory-planning/__tests__/fixtures/inventory-cutover-opening-interface.fixture";

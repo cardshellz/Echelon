@@ -1,0 +1,837 @@
+{
+  "version": 1,
+  "metric": "vitest-duration-ms",
+  "source": {
+    "repository": "cardshellz/Echelon",
+    "runId": 38490362642,
+    "headSha": "ca148634e8c4abf105e6dec37b42111da61de871",
+    "conclusion": "success",
+    "jobIds": [
+      115614022318,
+      115614022457,
+      115614022477,
+      115614022490,
+      115614022492,
+      115614022517,
+      115614022590,
+      115614022668
+    ]
+  },
+  "measurements": [
+    {
+      "file": "server/modules/catalog/__tests__/integration/catalog-variant-publication-photos.integration.test.ts",
+      "durationMs": 471,
+      "jobId": 115614022492
+    },
+    {
+      "file": "server/modules/catalog/__tests__/integration/inventory-tracking-policy.integration.test.ts",
+      "durationMs": 11120,
+      "jobId": 115614022517
+    },
+    {
+      "file": "server/modules/catalog/__tests__/integration/piece-variant-backfill.integration.test.ts",
+      "durationMs": 1630,
+      "jobId": 115614022590
+    },
+    {
+      "file": "server/modules/catalog/__tests__/integration/product-102-cleanup.integration.test.ts",
+      "durationMs": 9970,
+      "jobId": 115614022490
+    },
+    {
+      "file": "server/modules/catalog/__tests__/integration/product-asset-order.integration.test.ts",
+      "durationMs": 1490,
+      "jobId": 115614022457
+    },
+    {
+      "file": "server/modules/catalog/__tests__/integration/product-asset-scope.integration.test.ts",
+      "durationMs": 4320,
+      "jobId": 115614022492
+    },
+    {
+      "file": "server/modules/catalog/__tests__/integration/shared-product-photos.integration.test.ts",
+      "durationMs": 1520,
+      "jobId": 115614022477
+    },
+    {
+      "file": "server/modules/channels/__tests__/integration/allocation-engine.integration.test.ts",
+      "durationMs": 2380,
+      "jobId": 115614022457
+    },
+    {
+      "file": "server/modules/channels/__tests__/integration/channel-quantity-publication-catchup.integration.test.ts",
+      "durationMs": 633,
+      "jobId": 115614022668
+    },
+    {
+      "file": "server/modules/channels/__tests__/integration/channel-stock-selection.integration.test.ts",
+      "durationMs": 734,
+      "jobId": 115614022517
+    },
+    {
+      "file": "server/modules/channels/__tests__/integration/ebay-listing-mapping-repair.integration.test.ts",
+      "durationMs": 4000,
+      "jobId": 115614022457
+    },
+    {
+      "file": "server/modules/channels/__tests__/integration/ebay-listing-photos.integration.test.ts",
+      "durationMs": 486,
+      "jobId": 115614022490
+    },
+    {
+      "file": "server/modules/channels/__tests__/integration/ebay-listing-sync-recovery.integration.test.ts",
+      "durationMs": 5180,
+      "jobId": 115614022517
+    },
+    {
+      "file": "server/modules/channels/__tests__/integration/ebay-publication-stock.integration.test.ts",
+      "durationMs": 7750,
+      "jobId": 115614022492
+    },
+    {
+      "file": "server/modules/channels/__tests__/integration/source-lock.integration.test.ts",
+      "durationMs": 5330,
+      "jobId": 115614022492
+    },
+    {
+      "file": "server/modules/channels/__tests__/integration/walmart-connection.integration.test.ts",
+      "durationMs": 1870,
+      "jobId": 115614022668
+    },
+    {
+      "file": "server/modules/dropship/__tests__/integration/dropship-canonical-acceptance-stage.integration.test.ts",
+      "durationMs": 653,
+      "jobId": 115614022492
+    },
+    {
+      "file": "server/modules/dropship/__tests__/integration/dropship-catalog-retail-price.integration.test.ts",
+      "durationMs": 821,
+      "jobId": 115614022318
+    },
+    {
+      "file": "server/modules/dropship/__tests__/integration/dropship-cost-schedule.integration.test.ts",
+      "durationMs": 896,
+      "jobId": 115614022490
+    },
+    {
+      "file": "server/modules/dropship/__tests__/integration/dropship-ebay-category-rules.integration.test.ts",
+      "durationMs": 990,
+      "jobId": 115614022668
+    },
+    {
+      "file": "server/modules/dropship/__tests__/integration/dropship-ebay-listing-policy-bulk.integration.test.ts",
+      "durationMs": 707,
+      "jobId": 115614022590
+    },
+    {
+      "file": "server/modules/dropship/__tests__/integration/dropship-finance.integration.test.ts",
+      "durationMs": 4320,
+      "jobId": 115614022517
+    },
+    {
+      "file": "server/modules/dropship/__tests__/integration/dropship-listing-config-revision.integration.test.ts",
+      "durationMs": 1140,
+      "jobId": 115614022668
+    },
+    {
+      "file": "server/modules/dropship/__tests__/integration/dropship-listing-content.integration.test.ts",
+      "durationMs": 1280,
+      "jobId": 115614022492
+    },
+    {
+      "file": "server/modules/dropship/__tests__/integration/dropship-listing-price.integration.test.ts",
+      "durationMs": 2880,
+      "jobId": 115614022457
+    },
+    {
+      "file": "server/modules/dropship/__tests__/integration/dropship-listing-setting-writes.integration.test.ts",
+      "durationMs": 107440,
+      "jobId": 115614022457
+    },
+    {
+      "file": "server/modules/dropship/__tests__/integration/dropship-listing-settings.integration.test.ts",
+      "durationMs": 11630,
+      "jobId": 115614022477
+    },
+    {
+      "file": "server/modules/dropship/__tests__/integration/dropship-marketplace-credentials.integration.test.ts",
+      "durationMs": 1790,
+      "jobId": 115614022318
+    },
+    {
+      "file": "server/modules/dropship/__tests__/integration/dropship-product-category-listing-settings.integration.test.ts",
+      "durationMs": 22600,
+      "jobId": 115614022318
+    },
+    {
+      "file": "server/modules/dropship/__tests__/integration/dropship-product-cost.integration.test.ts",
+      "durationMs": 1350,
+      "jobId": 115614022477
+    },
+    {
+      "file": "server/modules/dropship/__tests__/integration/dropship-stock-publication-selection.integration.test.ts",
+      "durationMs": 1140,
+      "jobId": 115614022590
+    },
+    {
+      "file": "server/modules/inventory-planning/__tests__/integration/canonical-pick-case-break.integration.test.ts",
+      "durationMs": 36510,
+      "jobId": 115614022668
+    },
+    {
+      "file": "server/modules/inventory-planning/__tests__/integration/channel-quantity-read-only.integration.test.ts",
+      "durationMs": 15930,
+      "jobId": 115614022668
+    },
+    {
+      "file": "server/modules/inventory-planning/__tests__/integration/ebay-publication-readiness.integration.test.ts",
+      "durationMs": 23480,
+      "jobId": 115614022477
+    },
+    {
+      "file": "server/modules/inventory-planning/__tests__/integration/inventory-availability-dispatch-migration.integration.test.ts",
+      "durationMs": 1590,
+      "jobId": 115614022490
+    },
+    {
+      "file": "server/modules/inventory-planning/__tests__/integration/inventory-availability-dispatch-runtime.integration.test.ts",
+      "durationMs": 2720,
+      "jobId": 115614022517
+    },
+    {
+      "file": "server/modules/inventory-planning/__tests__/integration/inventory-availability-dispatch-source-command.integration.test.ts",
+      "durationMs": 2250,
+      "jobId": 115614022590
+    },
+    {
+      "file": "server/modules/inventory-planning/__tests__/integration/inventory-availability-foundation.integration.test.ts",
+      "durationMs": 13650,
+      "jobId": 115614022590
+    },
+    {
+      "file": "server/modules/inventory-planning/__tests__/integration/inventory-availability-runtime-shipment.integration.test.ts",
+      "durationMs": 2860,
+      "jobId": 115614022457
+    },
+    {
+      "file": "server/modules/inventory-planning/__tests__/integration/inventory-channel-publication-status.integration.test.ts",
+      "durationMs": 5930,
+      "jobId": 115614022318
+    },
+    {
+      "file": "server/modules/inventory-planning/__tests__/integration/inventory-cutover-admission-fence.integration.test.ts",
+      "durationMs": 2760,
+      "jobId": 115614022457
+    },
+    {
+      "file": "server/modules/inventory-planning/__tests__/integration/inventory-cutover-capture-stage.integration.test.ts",
+      "durationMs": 2630,
+      "jobId": 115614022318
+    },
+    {
+      "file": "server/modules/inventory-planning/__tests__/integration/inventory-cutover-composition.integration.test.ts",
+      "durationMs": 24650,
+      "jobId": 115614022492
+    },
+    {
+      "file": "server/modules/inventory-planning/__tests__/integration/inventory-cutover-history-reader.integration.test.ts",
+      "durationMs": 589,
+      "jobId": 115614022490
+    },
+    {
+      "file": "server/modules/inventory-planning/__tests__/integration/inventory-cutover-history.integration.test.ts",
+      "durationMs": 26640,
+      "jobId": 115614022517
+    },
+    {
+      "file": "server/modules/inventory-planning/__tests__/integration/inventory-cutover-opening.integration.test.ts",
+      "durationMs": 49970,
+      "jobId": 115614022668
+    },
+    {
+      "file": "server/modules/inventory-planning/__tests__/integration/inventory-cutover-preflight.integration.test.ts",
+      "durationMs": 1210,
+      "jobId": 115614022492
+    },
+    {
+      "file": "server/modules/inventory-planning/__tests__/integration/inventory-cutover-reconstruction.integration.test.ts",
+      "durationMs": 3760,
+      "jobId": 115614022477
+    },
+    {
+      "file": "server/modules/inventory-planning/__tests__/integration/inventory-demand-dispatch.integration.test.ts",
+      "durationMs": 2150,
+      "jobId": 115614022457
+    },
+    {
+      "file": "server/modules/inventory-planning/__tests__/integration/inventory-opening-capture.integration.test.ts",
+      "durationMs": 1210,
+      "jobId": 115614022590
+    },
+    {
+      "file": "server/modules/inventory-planning/__tests__/integration/inventory-publication-failure-cleanup.integration.test.ts",
+      "durationMs": 10340,
+      "jobId": 115614022517
+    },
+    {
+      "file": "server/modules/inventory-planning/__tests__/integration/inventory-publication-global-control.integration.test.ts",
+      "durationMs": 2000,
+      "jobId": 115614022477
+    },
+    {
+      "file": "server/modules/inventory-planning/__tests__/integration/inventory-publication-initial-scope.integration.test.ts",
+      "durationMs": 67690,
+      "jobId": 115614022318
+    },
+    {
+      "file": "server/modules/inventory-planning/__tests__/integration/inventory-publication-readback-selection.integration.test.ts",
+      "durationMs": 900,
+      "jobId": 115614022477
+    },
+    {
+      "file": "server/modules/inventory-planning/__tests__/integration/inventory-publication-scope.integration.test.ts",
+      "durationMs": 11230,
+      "jobId": 115614022477
+    },
+    {
+      "file": "server/modules/inventory-planning/__tests__/integration/inventory-publication-target-enable.integration.test.ts",
+      "durationMs": 19950,
+      "jobId": 115614022668
+    },
+    {
+      "file": "server/modules/inventory-planning/__tests__/integration/inventory-publication-target-resume.integration.test.ts",
+      "durationMs": 2950,
+      "jobId": 115614022318
+    },
+    {
+      "file": "server/modules/inventory-planning/__tests__/integration/publication-selection-work.integration.test.ts",
+      "durationMs": 969,
+      "jobId": 115614022457
+    },
+    {
+      "file": "server/modules/inventory-planning/__tests__/integration/quantity-publication-admission.integration.test.ts",
+      "durationMs": 3000,
+      "jobId": 115614022477
+    },
+    {
+      "file": "server/modules/inventory-planning/__tests__/integration/quantity-publication-catchup-canonical.integration.test.ts",
+      "durationMs": 2600,
+      "jobId": 115614022318
+    },
+    {
+      "file": "server/modules/inventory-planning/__tests__/integration/shipment-publication-transaction.integration.test.ts",
+      "durationMs": 2750,
+      "jobId": 115614022492
+    },
+    {
+      "file": "server/modules/inventory-planning/__tests__/integration/stock-selection-publication-flow.integration.test.ts",
+      "durationMs": 18420,
+      "jobId": 115614022492
+    },
+    {
+      "file": "server/modules/inventory-planning/__tests__/integration/transformation-execution-authority.integration.test.ts",
+      "durationMs": 1320,
+      "jobId": 115614022490
+    },
+    {
+      "file": "server/modules/inventory-planning/__tests__/integration/verified-listing-stock.integration.test.ts",
+      "durationMs": 35030,
+      "jobId": 115614022492
+    },
+    {
+      "file": "server/modules/inventory-planning/__tests__/integration/walmart-publication-membership.integration.test.ts",
+      "durationMs": 4430,
+      "jobId": 115614022457
+    },
+    {
+      "file": "server/modules/inventory/__tests__/integration/allocation-concurrency.integration.test.ts",
+      "durationMs": 2330,
+      "jobId": 115614022477
+    },
+    {
+      "file": "server/modules/inventory/__tests__/integration/build-order-transformation-authority.integration.test.ts",
+      "durationMs": 436,
+      "jobId": 115614022517
+    },
+    {
+      "file": "server/modules/inventory/__tests__/integration/canonical-claim-dispatch-inventory.integration.test.ts",
+      "durationMs": 1280,
+      "jobId": 115614022477
+    },
+    {
+      "file": "server/modules/inventory/__tests__/integration/canonical-claim-picker-observation.integration.test.ts",
+      "durationMs": 805,
+      "jobId": 115614022517
+    },
+    {
+      "file": "server/modules/inventory/__tests__/integration/cost-lineage-owners.integration.test.ts",
+      "durationMs": 2730,
+      "jobId": 115614022668
+    },
+    {
+      "file": "server/modules/inventory/__tests__/integration/cost-report-reads.integration.test.ts",
+      "durationMs": 2100,
+      "jobId": 115614022590
+    },
+    {
+      "file": "server/modules/inventory/__tests__/integration/inline-replenishment.integration.test.ts",
+      "durationMs": 17000,
+      "jobId": 115614022668
+    },
+    {
+      "file": "server/modules/inventory/__tests__/integration/inventory-cutover-encumbrance.integration.test.ts",
+      "durationMs": 549,
+      "jobId": 115614022457
+    },
+    {
+      "file": "server/modules/inventory/__tests__/integration/legacy-shipment-authority-fence.integration.test.ts",
+      "durationMs": 2250,
+      "jobId": 115614022318
+    },
+    {
+      "file": "server/modules/inventory/__tests__/integration/lot-cost-column-types.integration.test.ts",
+      "durationMs": 1610,
+      "jobId": 115614022517
+    },
+    {
+      "file": "server/modules/inventory/__tests__/integration/lot-cost-ownership.integration.test.ts",
+      "durationMs": 3730,
+      "jobId": 115614022490
+    },
+    {
+      "file": "server/modules/inventory/__tests__/integration/manual-transfer-command.integration.test.ts",
+      "durationMs": 9440,
+      "jobId": 115614022318
+    },
+    {
+      "file": "server/modules/inventory/__tests__/integration/quantity-ledger-hardening.integration.test.ts",
+      "durationMs": 16600,
+      "jobId": 115614022492
+    },
+    {
+      "file": "server/modules/inventory/__tests__/integration/quantity-ledger.integration.test.ts",
+      "durationMs": 61100,
+      "jobId": 115614022457
+    },
+    {
+      "file": "server/modules/inventory/__tests__/integration/replenishment-claim-safety.integration.test.ts",
+      "durationMs": 9060,
+      "jobId": 115614022477
+    },
+    {
+      "file": "server/modules/inventory/__tests__/integration/shipment-lot-parity.integration.test.ts",
+      "durationMs": 2450,
+      "jobId": 115614022668
+    },
+    {
+      "file": "server/modules/inventory/__tests__/integration/shipment-operational-dispatch.integration.test.ts",
+      "durationMs": 4170,
+      "jobId": 115614022477
+    },
+    {
+      "file": "server/modules/inventory/__tests__/integration/shipment-quantity-evidence.integration.test.ts",
+      "durationMs": 2740,
+      "jobId": 115614022492
+    },
+    {
+      "file": "server/modules/marketplace-listings/__tests__/integration/channel-listing-catalog.integration.test.ts",
+      "durationMs": 2270,
+      "jobId": 115614022590
+    },
+    {
+      "file": "server/modules/marketplace-listings/__tests__/integration/listing-lifecycle.integration.test.ts",
+      "durationMs": 1580,
+      "jobId": 115614022517
+    },
+    {
+      "file": "server/modules/marketplace-listings/__tests__/integration/listing-presence.integration.test.ts",
+      "durationMs": 1340,
+      "jobId": 115614022590
+    },
+    {
+      "file": "server/modules/marketplace-listings/__tests__/integration/listing-replacement-recovery.integration.test.ts",
+      "durationMs": 3810,
+      "jobId": 115614022490
+    },
+    {
+      "file": "server/modules/marketplace-listings/__tests__/integration/pg-listing-publication.integration.test.ts",
+      "durationMs": 1720,
+      "jobId": 115614022668
+    },
+    {
+      "file": "server/modules/marketplace-listings/__tests__/integration/pg-listing-update.integration.test.ts",
+      "durationMs": 1040,
+      "jobId": 115614022517
+    },
+    {
+      "file": "server/modules/marketplace-listings/__tests__/integration/walmart-recreation-stock.integration.test.ts",
+      "durationMs": 28620,
+      "jobId": 115614022490
+    },
+    {
+      "file": "server/modules/membership/__tests__/integration/member-directory.integration.test.ts",
+      "durationMs": 630,
+      "jobId": 115614022490
+    },
+    {
+      "file": "server/modules/oms/__tests__/integration/archon-order-delivery.test.ts",
+      "durationMs": 602,
+      "jobId": 115614022668
+    },
+    {
+      "file": "server/modules/oms/__tests__/integration/channel-receipt-immutable-replay.integration.test.ts",
+      "durationMs": 2890,
+      "jobId": 115614022477
+    },
+    {
+      "file": "server/modules/oms/__tests__/integration/channel-shipment-runtime-preparation.integration.test.ts",
+      "durationMs": 2250,
+      "jobId": 115614022490
+    },
+    {
+      "file": "server/modules/oms/__tests__/integration/inventory-cutover-receipt-evidence.integration.test.ts",
+      "durationMs": 2890,
+      "jobId": 115614022590
+    },
+    {
+      "file": "server/modules/oms/__tests__/integration/oms-disposition-cutover-replay.integration.test.ts",
+      "durationMs": 521,
+      "jobId": 115614022318
+    },
+    {
+      "file": "server/modules/oms/__tests__/integration/oms-line-authority-grant.integration.test.ts",
+      "durationMs": 1500,
+      "jobId": 115614022590
+    },
+    {
+      "file": "server/modules/oms/__tests__/integration/order-edit-paid-projection.integration.test.ts",
+      "durationMs": 1900,
+      "jobId": 115614022457
+    },
+    {
+      "file": "server/modules/oms/__tests__/integration/order-line-catalog-identity.integration.test.ts",
+      "durationMs": 3700,
+      "jobId": 115614022457
+    },
+    {
+      "file": "server/modules/oms/__tests__/integration/shipment-canonical-echo-preparation.integration.test.ts",
+      "durationMs": 2840,
+      "jobId": 115614022517
+    },
+    {
+      "file": "server/modules/oms/__tests__/integration/shipment-omission-compatibility.integration.test.ts",
+      "durationMs": 2730,
+      "jobId": 115614022318
+    },
+    {
+      "file": "server/modules/order-edits/__tests__/integration/order-edit-warehouse.integration.test.ts",
+      "durationMs": 4870,
+      "jobId": 115614022590
+    },
+    {
+      "file": "server/modules/orders/__tests__/integration/combining-country.integration.test.ts",
+      "durationMs": 1830,
+      "jobId": 115614022477
+    },
+    {
+      "file": "server/modules/orders/__tests__/integration/confirmed-pick-inventory.integration.test.ts",
+      "durationMs": 19640,
+      "jobId": 115614022492
+    },
+    {
+      "file": "server/modules/orders/__tests__/integration/order-country-integrity.integration.test.ts",
+      "durationMs": 2080,
+      "jobId": 115614022457
+    },
+    {
+      "file": "server/modules/orders/__tests__/integration/order-country-writers.integration.test.ts",
+      "durationMs": 1810,
+      "jobId": 115614022492
+    },
+    {
+      "file": "server/modules/orders/__tests__/integration/order-list.integration.test.ts",
+      "durationMs": 14240,
+      "jobId": 115614022590
+    },
+    {
+      "file": "server/modules/orders/__tests__/integration/pick-correction.integration.test.ts",
+      "durationMs": 1440,
+      "jobId": 115614022457
+    },
+    {
+      "file": "server/modules/orders/__tests__/integration/picking-assignment-release.integration.test.ts",
+      "durationMs": 1820,
+      "jobId": 115614022457
+    },
+    {
+      "file": "server/modules/orders/__tests__/integration/picking-progress-owner.integration.test.ts",
+      "durationMs": 1980,
+      "jobId": 115614022492
+    },
+    {
+      "file": "server/modules/orders/__tests__/integration/shipping-progress.integration.test.ts",
+      "durationMs": 1860,
+      "jobId": 115614022318
+    },
+    {
+      "file": "server/modules/orders/__tests__/integration/warehouse-operation-commands.integration.test.ts",
+      "durationMs": 3840,
+      "jobId": 115614022477
+    },
+    {
+      "file": "server/modules/procurement/__tests__/integration/ap-financial-safeguards.integration.test.ts",
+      "durationMs": 4200,
+      "jobId": 115614022490
+    },
+    {
+      "file": "server/modules/procurement/__tests__/integration/ap-invoice-line-metadata.integration.test.ts",
+      "durationMs": 3040,
+      "jobId": 115614022668
+    },
+    {
+      "file": "server/modules/procurement/__tests__/integration/cost-reporting.integration.test.ts",
+      "durationMs": 2830,
+      "jobId": 115614022517
+    },
+    {
+      "file": "server/modules/procurement/__tests__/integration/historical-po-supplier-evidence-backfill.integration.test.ts",
+      "durationMs": 494,
+      "jobId": 115614022477
+    },
+    {
+      "file": "server/modules/procurement/__tests__/integration/inbound-tracking.integration.test.ts",
+      "durationMs": 644,
+      "jobId": 115614022490
+    },
+    {
+      "file": "server/modules/procurement/__tests__/integration/invoice-cost-review.integration.test.ts",
+      "durationMs": 5030,
+      "jobId": 115614022590
+    },
+    {
+      "file": "server/modules/procurement/__tests__/integration/invoice-po-quantities.integration.test.ts",
+      "durationMs": 3000,
+      "jobId": 115614022590
+    },
+    {
+      "file": "server/modules/procurement/__tests__/integration/legacy-po-receive-config-remediation.integration.test.ts",
+      "durationMs": 471,
+      "jobId": 115614022318
+    },
+    {
+      "file": "server/modules/procurement/__tests__/integration/po-email-outbox.integration.test.ts",
+      "durationMs": 1890,
+      "jobId": 115614022668
+    },
+    {
+      "file": "server/modules/procurement/__tests__/integration/po-lifecycle-timestamp.integration.test.ts",
+      "durationMs": 1310,
+      "jobId": 115614022492
+    },
+    {
+      "file": "server/modules/procurement/__tests__/integration/po-quantity-amendment.integration.test.ts",
+      "durationMs": 20910,
+      "jobId": 115614022318
+    },
+    {
+      "file": "server/modules/procurement/__tests__/integration/procurement-cost-evidence.integration.test.ts",
+      "durationMs": 1530,
+      "jobId": 115614022517
+    },
+    {
+      "file": "server/modules/procurement/__tests__/integration/procurement-flow-cost-controlled-acceptance.integration.test.ts",
+      "durationMs": 4690,
+      "jobId": 115614022490
+    },
+    {
+      "file": "server/modules/procurement/__tests__/integration/procurement-payment-controlled-acceptance.integration.test.ts",
+      "durationMs": 6610,
+      "jobId": 115614022517
+    },
+    {
+      "file": "server/modules/procurement/__tests__/integration/procurement-rfq-controlled-acceptance.integration.test.ts",
+      "durationMs": 3770,
+      "jobId": 115614022668
+    },
+    {
+      "file": "server/modules/procurement/__tests__/integration/procurement-settings-authority.integration.test.ts",
+      "durationMs": 2340,
+      "jobId": 115614022590
+    },
+    {
+      "file": "server/modules/procurement/__tests__/integration/purchase-approval-authority.integration.test.ts",
+      "durationMs": 5770,
+      "jobId": 115614022492
+    },
+    {
+      "file": "server/modules/procurement/__tests__/integration/purchase-pipeline.integration.test.ts",
+      "durationMs": 798,
+      "jobId": 115614022477
+    },
+    {
+      "file": "server/modules/procurement/__tests__/integration/purchase-planning-policy.integration.test.ts",
+      "durationMs": 1440,
+      "jobId": 115614022457
+    },
+    {
+      "file": "server/modules/procurement/__tests__/integration/purchase-planning-receipt-supply.integration.test.ts",
+      "durationMs": 789,
+      "jobId": 115614022318
+    },
+    {
+      "file": "server/modules/procurement/__tests__/integration/purchase-workspace.integration.test.ts",
+      "durationMs": 1270,
+      "jobId": 115614022490
+    },
+    {
+      "file": "server/modules/procurement/__tests__/integration/receiving-audit-immutability.integration.test.ts",
+      "durationMs": 1280,
+      "jobId": 115614022318
+    },
+    {
+      "file": "server/modules/procurement/__tests__/integration/receiving-close-integrity.integration.test.ts",
+      "durationMs": 21060,
+      "jobId": 115614022477
+    },
+    {
+      "file": "server/modules/procurement/__tests__/integration/receiving-cost-application.integration.test.ts",
+      "durationMs": 13740,
+      "jobId": 115614022492
+    },
+    {
+      "file": "server/modules/procurement/__tests__/integration/receiving-unit-integrity.integration.test.ts",
+      "durationMs": 4340,
+      "jobId": 115614022457
+    },
+    {
+      "file": "server/modules/procurement/__tests__/integration/rfq-workflow.integration.test.ts",
+      "durationMs": 7230,
+      "jobId": 115614022318
+    },
+    {
+      "file": "server/modules/procurement/__tests__/integration/shipment-cost-commands.integration.test.ts",
+      "durationMs": 5040,
+      "jobId": 115614022517
+    },
+    {
+      "file": "server/modules/procurement/__tests__/integration/shipment-line-commands.integration.test.ts",
+      "durationMs": 7920,
+      "jobId": 115614022590
+    },
+    {
+      "file": "server/modules/procurement/__tests__/integration/shipment-purchase-orders.integration.test.ts",
+      "durationMs": 1310,
+      "jobId": 115614022457
+    },
+    {
+      "file": "server/modules/procurement/__tests__/integration/supplier-po-document.integration.test.ts",
+      "durationMs": 2570,
+      "jobId": 115614022490
+    },
+    {
+      "file": "server/modules/procurement/__tests__/integration/supplier-sourcing.integration.test.ts",
+      "durationMs": 1800,
+      "jobId": 115614022668
+    },
+    {
+      "file": "server/modules/returns/__tests__/integration/customer-return-authorization.repository.test.ts",
+      "durationMs": 3240,
+      "jobId": 115614022492
+    },
+    {
+      "file": "server/modules/returns/__tests__/integration/customer-return-customer-auth.repository.test.ts",
+      "durationMs": 409,
+      "jobId": 115614022590
+    },
+    {
+      "file": "server/modules/returns/__tests__/integration/customer-return-customer-ownership.repository.test.ts",
+      "durationMs": 5040,
+      "jobId": 115614022457
+    },
+    {
+      "file": "server/modules/returns/__tests__/integration/customer-return-intake.repository.test.ts",
+      "durationMs": 20420,
+      "jobId": 115614022318
+    },
+    {
+      "file": "server/modules/returns/__tests__/integration/customer-return-labels.repository.test.ts",
+      "durationMs": 26280,
+      "jobId": 115614022668
+    },
+    {
+      "file": "server/modules/returns/__tests__/integration/customer-return-local-inspection.reader.test.ts",
+      "durationMs": 13810,
+      "jobId": 115614022477
+    },
+    {
+      "file": "server/modules/returns/__tests__/integration/customer-return-order-access.repository.test.ts",
+      "durationMs": 467,
+      "jobId": 115614022517
+    },
+    {
+      "file": "server/modules/returns/__tests__/integration/return-policy-archive.repository.test.ts",
+      "durationMs": 2530,
+      "jobId": 115614022490
+    },
+    {
+      "file": "server/modules/returns/__tests__/integration/return-policy-shipping-migration.test.ts",
+      "durationMs": 5450,
+      "jobId": 115614022590
+    },
+    {
+      "file": "server/modules/returns/__tests__/integration/return-policy-shipping.repository.test.ts",
+      "durationMs": 4170,
+      "jobId": 115614022517
+    },
+    {
+      "file": "server/modules/shipping-engine/__tests__/integration/fulfillment-provider-connections.integration.test.ts",
+      "durationMs": 413,
+      "jobId": 115614022517
+    },
+    {
+      "file": "server/modules/shipping/__tests__/integration/carrier-tracking-recovery.integration.test.ts",
+      "durationMs": 2000,
+      "jobId": 115614022490
+    },
+    {
+      "file": "server/modules/shipping/__tests__/integration/historical-shipstation-contents-correction.repository.integration.test.ts",
+      "durationMs": 545,
+      "jobId": 115614022490
+    },
+    {
+      "file": "server/modules/shipping/__tests__/integration/ordinary-split-parcels.integration.test.ts",
+      "durationMs": 6540,
+      "jobId": 115614022668
+    },
+    {
+      "file": "server/modules/shipping/__tests__/integration/package-allocation-ledger.repository.integration.test.ts",
+      "durationMs": 58650,
+      "jobId": 115614022318
+    },
+    {
+      "file": "server/modules/warehouse/__tests__/integration/assembly-work.integration.test.ts",
+      "durationMs": 2430,
+      "jobId": 115614022590
+    },
+    {
+      "file": "server/modules/warehouse/__tests__/integration/work-configuration.integration.test.ts",
+      "durationMs": 1560,
+      "jobId": 115614022517
+    },
+    {
+      "file": "server/modules/wms/__tests__/integration/canonical-claim-dispatch-source.integration.test.ts",
+      "durationMs": 912,
+      "jobId": 115614022590
+    },
+    {
+      "file": "server/modules/wms/__tests__/integration/shipment-unpick-source-bin.integration.test.ts",
+      "durationMs": 2640,
+      "jobId": 115614022668
+    },
+    {
+      "file": "server/platform/__tests__/integration/financial-command-results.integration.test.ts",
+      "durationMs": 999,
+      "jobId": 115614022490
+    }
+  ]
+}

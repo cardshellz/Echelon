@@ -1,4 +1,4 @@
-import { expect, test, type Page } from "playwright/test";
+import { expect, test, type Page } from "@playwright/test";
 import type { EbayCategoryRulesState } from "../../shared/dropship/ebay-category-rules";
 import type { ContentProfileState } from "../../shared/dropship/listing-content";
 import type { ListingSettingsSummary } from "../../shared/dropship/listing-settings";

@@ -1,4 +1,4 @@
-import { costGraphLockExecute } from "./cost-graph.fixture";
+import { costGraphAndProcurementSettingsExecute } from "./procurement-settings.fixture";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mockDetectQtyVariance = vi.fn().mockResolvedValue(undefined);
@@ -31,7 +31,7 @@ function buildMockDb(txSelectResults: any[][] = []) {
     return chain;
   });
   const db: any = {
-      execute: costGraphLockExecute(),
+      execute: costGraphAndProcurementSettingsExecute(),
     insertedRows,
     updateCalls,
     insert: vi.fn(() => ({
@@ -441,7 +441,7 @@ describe("PO lifecycle actions", () => {
       physicalStatus: "draft",
     };
     const lines = [
-      { id: 50, status: "open", orderQty: 12 },
+      { id: 50, status: "open", orderQty: 12, cancelledQty: 0 },
       { id: 51, status: "received", orderQty: 2 },
     ];
     const db = buildMockDb([[po], lines]);
@@ -449,23 +449,31 @@ describe("PO lifecycle actions", () => {
       getPurchaseOrderById: vi.fn().mockResolvedValue(po),
       getPurchaseOrderLines: vi.fn().mockResolvedValue(lines),
     });
-    const svc = createPurchasingService(db, storage);
+    const commandAt = new Date("2026-10-13T12:34:56.789Z");
+    const clock = vi.fn(() => commandAt);
+    const svc = createPurchasingService(db, storage, {
+      now: clock,
+      readCommandActor: async (_tx, userId) => ({ userId, active: true, permissions: ["purchasing:cancel"], scopedPermissions: [] }),
+    });
 
     await svc.cancel(5, "vendor cancelled", "user-5");
 
+    expect(clock).toHaveBeenCalledTimes(1);
     expect(db.transaction).toHaveBeenCalledTimes(1);
     expect(storage.updatePurchaseOrderLine).not.toHaveBeenCalled();
     expect(storage.updatePurchaseOrderStatusWithHistory).not.toHaveBeenCalled();
     expect(db.updateCalls).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
-          patch: expect.objectContaining({ status: "cancelled", cancelledQty: 12 }),
+          patch: expect.objectContaining({ status: "cancelled", cancelledQty: 12, updatedAt: commandAt }),
         }),
         expect.objectContaining({
           patch: expect.objectContaining({
             status: "cancelled",
             physicalStatus: "cancelled",
             cancelReason: "vendor cancelled",
+            cancelledAt: commandAt,
+            updatedAt: commandAt,
           }),
         }),
       ]),
@@ -475,6 +483,7 @@ describe("PO lifecycle actions", () => {
         purchaseOrderId: 5,
         fromStatus: "approved",
         toStatus: "cancelled",
+        changedAt: commandAt,
       }),
     );
     expect(db.insertedRows).toContainEqual(
@@ -482,9 +491,14 @@ describe("PO lifecycle actions", () => {
         poId: 5,
         eventType: "cancelled",
         actorId: "user-5",
+        createdAt: commandAt,
         payloadJson: expect.objectContaining({
           reason: "vendor cancelled",
           physical_status: "cancelled",
+          required_permission: "purchasing:cancel",
+          before: { status: "approved", physical_status: "draft" },
+          after: { status: "cancelled", physical_status: "cancelled" },
+          line_changes: [{ line_id: 50, before: { status: "open", cancelled_qty: 0 }, after: { status: "cancelled", cancelled_qty: 12 } }],
         }),
       }),
     );

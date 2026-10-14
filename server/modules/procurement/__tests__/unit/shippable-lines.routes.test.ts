@@ -21,6 +21,7 @@ vi.mock("../../../../routes/middleware", () => {
   };
   return {
     requirePermission: () => pass,
+    requireAnyPermission: () => pass,
     requireAuth: pass,
     requireInternalApiKey: pass,
     upload: { single: () => pass },
