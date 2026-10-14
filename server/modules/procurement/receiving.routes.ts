@@ -140,7 +140,7 @@ export function registerReceivingRoutes(app: Express) {
     try {
       const id = parseInt(req.params.id);
       const { receiving: rcvService } = req.app.locals.services;
-      const order = await rcvService.updateOrderDetails(id, req.body ?? {});
+      const order = await rcvService.updateOrderDetails(id, req.body ?? {}, req.session.user?.id || null);
       if (!order) {
         return res.status(404).json({ error: "Receiving order not found" });
       }

@@ -211,7 +211,7 @@ describe("receiving routes", () => {
       expectedDate: undefined,
       notes: "dock 1",
     }, "test-user");
-    expect(receiving.updateOrderDetails).toHaveBeenCalledWith(20, { notes: "dock 2" });
+    expect(receiving.updateOrderDetails).toHaveBeenCalledWith(20, { notes: "dock 2" }, "test-user");
     expect(receiving.addLine).toHaveBeenCalledWith(20, expect.objectContaining({
       sku: "SKU-1",
       expectedQty: 5,

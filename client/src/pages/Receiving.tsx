@@ -4,6 +4,7 @@ import { Link, useLocation, useSearch } from "wouter";
 import { useProcurementNavigation } from "@/hooks/use-procurement-navigation";
 import { parseProcurementRecord } from "@/lib/procurement-navigation";
 import { createReceivingNavigationSession } from "@/lib/receiving-navigation-session";
+import { parseReceivingHeaderResult, parseReceivingCloseResult, receivingIssueMessages, receivingCostOutcomeMessage } from "@/lib/receiving-outcomes";
 import { ReceivingUnitControl } from "@/components/purchasing/ReceivingUnitControl";
 import { ReceivingCountControl } from "@/components/purchasing/ReceivingCountControl";
 import { hasReceivingUnitVersion, ReceivingUnitVersionError, parseReceivingUnitRefresh, parseReceivingLineMutation, receivingSelectedFactor, receivingVariantChange, receivingCompleteAllCommand, receivingCountChange, receivingAddQuantity, recordedReceivingFactor, type ReceivingUnitLine } from "@/lib/receiving-units";
@@ -184,23 +185,21 @@ function LocationTypeahead({
   value,
   onChange,
   disabled = false,
+  ariaLabel = "Inventory location",
 }: {
   locations: WarehouseLocation[];
   value: number | null;
   onChange: (locationId: number | null) => void;
   disabled?: boolean;
+  ariaLabel?: string;
 }) {
-  const selectedLocation = locations.find((location) => location.id === value);
-  if (disabled) {
-    return <span className="text-sm">{selectedLocation?.code || "-"}</span>;
-  }
-
   return (
     <InventoryLocationCombobox
       locations={filterActionableWarehouseLocations(locations)}
       value={value}
       onValueChange={onChange}
-      ariaLabel="Inventory location"
+      ariaLabel={ariaLabel}
+      disabled={disabled}
       placeholder="Select..."
       searchPlaceholder="Search locations..."
       emptyMessage="No matching locations found."
@@ -244,6 +243,8 @@ export default function Receiving() {
   const [showNewReceiptDialog, setShowNewReceiptDialog] = useState(false);
   const [showNewVendorDialog, setShowNewVendorDialog] = useState(false);
   const [selectedReceipt, setSelectedReceipt] = useState<ReceivingOrder | null>(null);
+  const [receiptSettingsError, setReceiptSettingsError] = useState<string | null>(null);
+  const [closeIssues, setCloseIssues] = useState<string[]>([]);
   const [showReceiptDetail, setShowReceiptDetail] = useState(false);
   const [receiptLoading, setReceiptLoading] = useState(false);
   const [receiptLoadError, setReceiptLoadError] = useState<string | null>(null);
@@ -607,16 +608,18 @@ DEF-456,25,,,5.00,,Location TBD`;
         }
         throw new Error(body?.error || "Failed to close receipt");
       }
-      return res.json();
+      return parseReceivingCloseResult(await res.json(), id);
     },
     onSuccess: (result, _variables, context) => {
       queryClient.invalidateQueries({ queryKey: ["/api/receiving"] });
       queryClient.invalidateQueries({ queryKey: ["/api/inventory"] });
       queryClient.invalidateQueries({ queryKey: ["/api/purchase-orders"] });
       if (!isCurrentReceiptNavigation(context)) return;
+      setCloseIssues([]);
+      const costMessage = receivingCostOutcomeMessage(result.costReconciliation);
       toast({
-        title: "Receipt closed — inventory updated",
-        description: `${result.unitsReceived} units received across ${result.linesProcessed} lines`
+        title: costMessage ? "Inventory received — costs unfinished" : "Receipt closed — inventory updated",
+        description: costMessage ?? `${result.unitsReceived} units received across ${result.linesProcessed} lines`
       });
       setShowReceiptDetail(false);
       const closedPoId = selectedReceipt?.purchaseOrderId;
@@ -656,17 +659,15 @@ DEF-456,25,,,5.00,,Location TBD`;
         return;
       }
       if (error.issues) {
-        const missingSku = error.issues.filter((i: any) => i.missingVariant).length;
-        const missingLoc = error.issues.filter((i: any) => i.missingLocation).length;
-        const parts: string[] = [];
-        if (missingSku) parts.push(`${missingSku} missing product link`);
-        if (missingLoc) parts.push(`${missingLoc} missing location`);
+        const messages = receivingIssueMessages(error.issues);
+        setCloseIssues(messages.length ? messages : [error.message]);
         toast({
           title: "Cannot close receipt",
-          description: `Resolve issues first: ${parts.join(", ")}`,
+          description: messages[0] || error.message,
           variant: "destructive",
         });
       } else {
+        setCloseIssues([error.message || "The close outcome could not be verified. Load the latest receipt before retrying."]);
         toast({ title: "Failed to close receipt", description: error.message, variant: "destructive" });
       }
     },
@@ -705,6 +706,7 @@ DEF-456,25,,,5.00,,Location TBD`;
   const bulkImportMutation = useMutation({
     onMutate: captureReceiptNavigation,
     mutationFn: async ({ orderId, lines }: { orderId: number; lines: any[] }) => {
+      assertReceiptSettingsConfirmed();
       const res = await fetch(`/api/receiving/${orderId}/lines/bulk`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -745,11 +747,16 @@ DEF-456,25,,,5.00,,Location TBD`;
         });
       }
     },
+    onError: (error: Error, _variables, context) => {
+      if (!isCurrentReceiptNavigation(context)) return;
+      toast({ title: "Import was not confirmed", description: error.message, variant: "destructive" });
+    },
   });
 
   const addLineMutation = useMutation({
     onMutate: captureReceiptNavigation,
     mutationFn: async ({ orderId, line }: { orderId: number; line: any }) => {
+      assertReceiptSettingsConfirmed();
       const res = await fetch(`/api/receiving/${orderId}/lines`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -798,6 +805,7 @@ DEF-456,25,,,5.00,,Location TBD`;
     onMutate: captureReceiptNavigation,
     retry: false,
     mutationFn: async ({ lineId, updates }: { lineId: number; updates: Record<string, unknown> }) => {
+      assertReceiptSettingsConfirmed();
       const expectedReceiptId = selectedReceipt?.id;
       if (!expectedReceiptId || !selectedReceipt?.lines?.some((line) => line.id === lineId)) throw new Error("The receipt line is no longer selected. Load the latest receipt.");
       const res = await fetch("/api/receiving/lines/" + lineId, {
@@ -847,8 +855,14 @@ DEF-456,25,,,5.00,,Location TBD`;
     toast({ title: "Line change needs review", description: message, variant: "destructive" });
   }
 
+  function assertReceiptSettingsConfirmed() {
+    if (updateReceiptMutation.isPending || receiptSettingsError) {
+      throw new Error("Receipt settings are not confirmed. Wait for the save or load the latest receipt before changing a line.");
+    }
+  }
+
   function applyVariant(line: ReceivingLine, variantId: number, confirmLegacyUnit = false, expectedUnitsPerVariant?: number) {
-    if (updateLineMutation.isPending || completeAllMutation.isPending || reloadingUnits || unitErrors[line.id]?.needsRefresh) return;
+    if (updateReceiptMutation.isPending || receiptSettingsError || updateLineMutation.isPending || completeAllMutation.isPending || reloadingUnits || unitErrors[line.id]?.needsRefresh) return;
     try {
       if (countDrafts[line.id]) throw new Error("Save or discard the received-count draft before changing its unit.");
       const updates = receivingVariantChange(line, variantId, confirmLegacyUnit, expectedUnitsPerVariant);
@@ -866,7 +880,7 @@ DEF-456,25,,,5.00,,Location TBD`;
   }
 
   function saveReceivedCount(line: ReceivingLine) {
-    if (updateLineMutation.isPending || completeAllMutation.isPending || reloadingUnits || unitErrors[line.id]?.needsRefresh) return;
+    if (updateReceiptMutation.isPending || receiptSettingsError || updateLineMutation.isPending || completeAllMutation.isPending || reloadingUnits || unitErrors[line.id]?.needsRefresh) return;
     try {
       const draft = countDrafts[line.id];
       updateLineMutation.mutate({ lineId: line.id, updates: receivingCountChange(draft?.line ?? line, draft?.value) });
@@ -911,7 +925,7 @@ DEF-456,25,,,5.00,,Location TBD`;
       // A stale or ambiguous response must not leave a green confirmation on
       // the previous count after its draft is discarded; verify the source first.
       confirmed={line.status === "complete" && !draft && hasReceivingUnitVersion(line) && recordedReceivingFactor(line) !== null && !unitErrors[line.id]}
-      disabled={updateLineMutation.isPending || completeAllMutation.isPending || reloadingUnits || recordedReceivingFactor(line) === null || !!unitErrors[line.id]?.needsRefresh}
+      disabled={updateReceiptMutation.isPending || !!receiptSettingsError || updateLineMutation.isPending || completeAllMutation.isPending || reloadingUnits || recordedReceivingFactor(line) === null || !!unitErrors[line.id]?.needsRefresh}
       discardDisabled={updateLineMutation.isPending}
       compact={layout === "desktop"}
       saveTestId={layout === "desktop" ? `btn-complete-line-${line.id}` : `btn-complete-line-mobile-${line.id}`}
@@ -934,7 +948,7 @@ DEF-456,25,,,5.00,,Location TBD`;
         line={line}
         variants={variants}
         mutable={mutable}
-        pending={updateLineMutation.isPending || completeAllMutation.isPending || reloadingUnits || !!countDrafts[line.id] || !!unitErrors[line.id]?.needsRefresh}
+        pending={updateReceiptMutation.isPending || !!receiptSettingsError || updateLineMutation.isPending || completeAllMutation.isPending || reloadingUnits || !!countDrafts[line.id] || !!unitErrors[line.id]?.needsRefresh}
         onChange={(variantId, confirm, factor) => applyVariant(line, variantId, confirm, factor)}
       />
       {error && <div role="alert" className="rounded border border-destructive/40 p-2 text-xs text-destructive">
@@ -951,15 +965,29 @@ DEF-456,25,,,5.00,,Location TBD`;
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(updates),
       });
-      if (!res.ok) throw new Error("Failed to update receipt");
-      return res.json();
+      const body: unknown = await res.json().catch(() => null);
+      if (!res.ok) {
+        const error = body && typeof body === "object" && "error" in body && typeof body.error === "string"
+          ? body.error : "Failed to update receipt. Load the latest receipt before continuing.";
+        const issues = body && typeof body === "object" && "issues" in body ? receivingIssueMessages(body.issues) : [];
+        throw new Error(issues.length ? `${error} ${issues.join(" ")}` : error);
+      }
+      return parseReceivingHeaderResult(body, id);
     },
-    onSuccess: (_result, _variables, context) => {
+    onSuccess: (result, variables, context) => {
       queryClient.invalidateQueries({ queryKey: ["/api/receiving"] });
       if (!isCurrentReceiptNavigation(context)) return;
-      if (selectedReceipt) {
-        queryClient.invalidateQueries({ queryKey: [`/api/receiving/${selectedReceipt.id}`] });
-      }
+      setReceiptSettingsError(null);
+      setCloseIssues([]);
+      setSelectedReceipt((current) => current?.id === result.id ? { ...current, ...result } : current);
+      // A default can fill unassigned lines atomically. Reload the returned
+      // source evidence instead of fabricating new line versions in the UI.
+      if (variables.updates.applyDefaultToUnassigned === true) setReceiptLoadAttempt((attempt) => attempt + 1);
+    },
+    onError: (error: Error, _variables, context) => {
+      if (!isCurrentReceiptNavigation(context)) return;
+      setReceiptSettingsError(error.message);
+      toast({ title: "Receipt settings were not confirmed", description: error.message, variant: "destructive" });
     },
   });
 
@@ -1229,6 +1257,8 @@ DEF-456,25,,,5.00,,Location TBD`;
     setReverseTarget(null);
     setOverReceiptPrompt(null);
     setNextPoPrompt(null);
+    setReceiptSettingsError(null);
+    setCloseIssues([]);
   }, [requestedReceiptId, invalidReceiptId, location, searchStr]);
 
   // The address identifies the open receipt, including after reload or browser
@@ -2026,7 +2056,7 @@ DEF-456,25,,,5.00,,Location TBD`;
                         variant="outline"
                         className="min-h-[44px] text-xs md:text-sm flex-1 sm:flex-none"
                         onClick={() => completeAllMutation.mutate({ orderId: selectedReceipt.id, lines: selectedReceipt.lines ?? [] })}
-                        disabled={completeAllMutation.isPending || updateLineMutation.isPending || reloadingUnits || Object.keys(countDrafts).length > 0 || Object.keys(unitErrors).length > 0 || !selectedReceipt.lines?.length || selectedReceipt.lines.some((line) => recordedReceivingFactor(line) === null || !hasReceivingUnitVersion(line))}
+                        disabled={updateReceiptMutation.isPending || !!receiptSettingsError || completeAllMutation.isPending || updateLineMutation.isPending || reloadingUnits || Object.keys(countDrafts).length > 0 || Object.keys(unitErrors).length > 0 || !selectedReceipt.lines?.length || selectedReceipt.lines.some((line) => recordedReceivingFactor(line) === null || !hasReceivingUnitVersion(line))}
                         data-testid="btn-complete-all"
                       >
                         <CheckCircle className="h-4 w-4 mr-1 md:mr-2" />
@@ -2035,7 +2065,7 @@ DEF-456,25,,,5.00,,Location TBD`;
                       <Button
                         className="min-h-[44px] text-xs md:text-sm flex-1 sm:flex-none"
                         onClick={handlePreCloseValidation}
-                        disabled={closeReceiptMutation.isPending || updateLineMutation.isPending || completeAllMutation.isPending || reloadingUnits || Object.keys(countDrafts).length > 0 || Object.keys(unitErrors).length > 0 || receiveUnitsNeedReview}
+                        disabled={updateReceiptMutation.isPending || !!receiptSettingsError || closeReceiptMutation.isPending || updateLineMutation.isPending || completeAllMutation.isPending || reloadingUnits || Object.keys(countDrafts).length > 0 || Object.keys(unitErrors).length > 0 || receiveUnitsNeedReview}
                         data-testid="btn-close-receipt"
                       >
                         <CheckCircle className="h-4 w-4 mr-1 md:mr-2" />
@@ -2102,6 +2132,20 @@ DEF-456,25,,,5.00,,Location TBD`;
                   </div>
                 )}
 
+                {(receiptSettingsError || closeIssues.length > 0) && (
+                  <div role="alert" className="space-y-2 rounded border border-destructive/40 p-3 text-sm text-destructive">
+                    {receiptSettingsError && <p>{receiptSettingsError}</p>}
+                    {closeIssues.length > 0 && <><p className="font-medium">The last close attempt needs review.</p><ul className="list-disc pl-5">{closeIssues.map((message, index) => <li key={`${index}-${message}`}>{message}</li>)}</ul></>}
+                    <Button variant="outline" size="sm" disabled={updateReceiptMutation.isPending || updateLineMutation.isPending || closeReceiptMutation.isPending} onClick={() => {
+                      setCountDrafts({});
+                      setUnitErrors({});
+                      setReceiptSettingsError(null);
+                      setCloseIssues([]);
+                      setReceiptLoadAttempt((attempt) => attempt + 1);
+                    }}>Load latest receipt and discard unsaved counts</Button>
+                  </div>
+                )}
+
                 {/* Warehouse & Default Location */}
                 {selectedReceipt.status !== "closed" && (
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 p-3 bg-muted/30 border rounded-lg">
@@ -2109,16 +2153,16 @@ DEF-456,25,,,5.00,,Location TBD`;
                       <label className="text-[11px] font-semibold text-muted-foreground block mb-1">Receiving Warehouse</label>
                       <Select
                         value={selectedReceipt.warehouseId?.toString() || ""}
+                        disabled={updateReceiptMutation.isPending || addLineMutation.isPending || bulkImportMutation.isPending || updateLineMutation.isPending || closeReceiptMutation.isPending || !!receiptSettingsError}
                         onValueChange={(v) => {
                           const warehouseId = parseInt(v);
                           updateReceiptMutation.mutate({
                             id: selectedReceipt.id,
                             updates: { warehouseId, receivingLocationId: null },
                           });
-                          setSelectedReceipt(prev => prev ? { ...prev, warehouseId, receivingLocationId: null } : null);
                         }}
                       >
-                        <SelectTrigger className="h-9 text-xs">
+                        <SelectTrigger className="h-9 text-xs" aria-label="Receiving warehouse">
                           <SelectValue placeholder="Select warehouse..." />
                         </SelectTrigger>
                         <SelectContent>
@@ -2133,23 +2177,16 @@ DEF-456,25,,,5.00,,Location TBD`;
                       <LocationTypeahead
                         locations={selectedReceipt.warehouseId ? locations.filter(l => l.warehouseId === selectedReceipt.warehouseId) : locations}
                         value={selectedReceipt.receivingLocationId ?? null}
+                        ariaLabel="Default receiving location"
+                        disabled={updateReceiptMutation.isPending || addLineMutation.isPending || bulkImportMutation.isPending || updateLineMutation.isPending || closeReceiptMutation.isPending || !!receiptSettingsError || Object.keys(countDrafts).length > 0}
                         onChange={(locationId) => {
                           updateReceiptMutation.mutate({
                             id: selectedReceipt.id,
-                            updates: { receivingLocationId: locationId },
+                            updates: { receivingLocationId: locationId, ...(locationId === null ? {} : { applyDefaultToUnassigned: true }) },
                           });
-                          setSelectedReceipt(prev => prev ? { ...prev, receivingLocationId: locationId } : null);
-                          // Apply default to ALL lines
-                          if (locationId && selectedReceipt.lines) {
-                            for (const line of selectedReceipt.lines) {
-                              updateLineMutation.mutate({
-                                lineId: line.id,
-                                updates: { putawayLocationId: locationId },
-                              });
-                            }
-                          }
                         }}
                       />
+                      <p className="mt-1 text-xs text-muted-foreground">Fills lines without a location. Existing line locations are preserved. Save any count drafts first.</p>
                     </div>
                   </div>
                 )}
@@ -2164,6 +2201,7 @@ DEF-456,25,,,5.00,,Location TBD`;
                         size="sm"
                         className="min-h-[44px]"
                         onClick={() => setShowAddLineDialog(true)}
+                        disabled={updateReceiptMutation.isPending || !!receiptSettingsError || closeReceiptMutation.isPending}
                         data-testid="btn-add-line"
                       >
                         <Plus className="h-4 w-4 mr-1" />
@@ -2264,11 +2302,12 @@ DEF-456,25,,,5.00,,Location TBD`;
                                           lineId: line.id,
                                           updates: { putawayLocationId: locationId }
                                         })}
-                                        disabled={false}
+                                        disabled={updateReceiptMutation.isPending || updateLineMutation.isPending || closeReceiptMutation.isPending || !!receiptSettingsError}
                                       />
                                       {selectedReceipt.receivingLocationId && !line.putawayLocationId && (
                                         <button
                                           className="text-[10px] text-primary mt-1 hover:underline"
+                                          disabled={updateReceiptMutation.isPending || updateLineMutation.isPending || closeReceiptMutation.isPending || !!receiptSettingsError}
                                           onClick={() => updateLineMutation.mutate({
                                             lineId: line.id,
                                             updates: { putawayLocationId: selectedReceipt.receivingLocationId }
@@ -2359,13 +2398,13 @@ DEF-456,25,,,5.00,,Location TBD`;
                               <TableCell>
                                 {(selectedReceipt.status === "open" || selectedReceipt.status === "receiving") ? (
                                   <LocationTypeahead
-                                    locations={locations}
+                                    locations={selectedReceipt.warehouseId ? locations.filter(l => l.warehouseId === selectedReceipt.warehouseId) : locations}
                                     value={line.putawayLocationId}
                                     onChange={(locationId) => updateLineMutation.mutate({
                                       lineId: line.id,
                                       updates: { putawayLocationId: locationId }
                                     })}
-                                    disabled={false}
+                                    disabled={updateReceiptMutation.isPending || updateLineMutation.isPending || closeReceiptMutation.isPending || !!receiptSettingsError}
                                   />
                                 ) : (
                                   <span className="text-sm text-muted-foreground">
@@ -2667,7 +2706,7 @@ DEF-456,25,,,5.00,,Location TBD`;
               <Button 
                 className="min-h-[44px]"
                 onClick={handleCSVImport}
-                disabled={bulkImportMutation.isPending || !csvText.trim()}
+                disabled={updateReceiptMutation.isPending || !!receiptSettingsError || closeReceiptMutation.isPending || bulkImportMutation.isPending || !csvText.trim()}
                 data-testid="btn-import"
               >
                 <Upload className="h-4 w-4 mr-2" />
@@ -2820,7 +2859,7 @@ DEF-456,25,,,5.00,,Location TBD`;
                     },
                   });
                 }}
-                disabled={!newLine.sku || !newLine.putawayLocationId || newLine.productVariantId !== null && !newLine.expectedUnitsPerVariant || addLineMutation.isPending}
+                disabled={updateReceiptMutation.isPending || !!receiptSettingsError || closeReceiptMutation.isPending || !newLine.sku || !newLine.putawayLocationId || newLine.productVariantId !== null && !newLine.expectedUnitsPerVariant || addLineMutation.isPending}
                 data-testid="btn-confirm-add-line"
               >
                 <Plus className="h-4 w-4 mr-2" />

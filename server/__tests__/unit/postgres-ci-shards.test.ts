@@ -77,6 +77,8 @@ describe("PostgreSQL CI coverage and isolation", () => {
       "server/modules/inventory-planning/__tests__/integration/inventory-opening-capture.integration.test.ts",
       "server/modules/inventory/__tests__/integration/cost-report-reads.integration.test.ts",
       "server/modules/procurement/__tests__/integration/shipment-purchase-orders.integration.test.ts",
+      "server/modules/procurement/__tests__/integration/receiving-close-integrity.integration.test.ts",
+      "server/modules/procurement/__tests__/integration/receiving-audit-immutability.integration.test.ts",
       "server/modules/procurement/__tests__/integration/procurement-rfq-controlled-acceptance.integration.test.ts",
       "server/modules/procurement/__tests__/integration/procurement-flow-cost-controlled-acceptance.integration.test.ts",
       "server/modules/procurement/__tests__/integration/procurement-payment-controlled-acceptance.integration.test.ts",

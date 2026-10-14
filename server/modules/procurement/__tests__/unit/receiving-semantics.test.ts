@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 import { ReceivingService } from "../../../../modules/procurement/receiving.service";
 import { receivingUnitVersion } from "../../receiving-unit-contract";
+import { PgDialect } from "drizzle-orm/pg-core";
 
 function sqlToStr(query: any): string {
   if (Array.isArray(query?.queryChunks)) {
@@ -512,7 +513,7 @@ describe("ReceivingService - close reconciliation semantics", () => {
     });
   });
 
-  it("surfaces PO reconciliation failures after inventory posting", async () => {
+  it("propagates PO reconciliation failure through the posting transaction without after-commit effects", async () => {
     const updatedAt = new Date("2026-07-20T12:00:00.000Z");
     const order = {
       id: 10,
@@ -520,11 +521,13 @@ describe("ReceivingService - close reconciliation semantics", () => {
       sourceType: "po",
       poNumber: "PO-10",
       purchaseOrderId: 1,
+      warehouseId: 1,
       updatedAt,
     };
     const lines = [
       {
         id: 601,
+        productId: 1,
         expectedQty: 2,
         unitsPerVariantSnapshot: 1,
         productVariantId: 5,
@@ -545,6 +548,11 @@ describe("ReceivingService - close reconciliation semantics", () => {
         if (text.includes("units_per_variant")) {
           return { rows: [{ id: 5, product_id: 1, units_per_variant: 1, is_active: true }] };
         }
+        if (text.includes("from warehouse.warehouses")) return { rows: [{ isActive: 1 }] };
+        if (text.includes("from warehouse.warehouse_locations")) return { rows: [{ id: 12, warehouseId: 1, isActive: 1 }] };
+        if (text.includes("from procurement.purchase_order_lines")) return { rows: [{ id: 100, purchaseOrderId: 1,
+          productId: 1, lineType: "product", status: "open", orderQty: 10, receivedQty: 0, cancelledQty: 0 }] };
+        if (text.includes("from procurement.purchase_orders")) return { rows: [{ status: "sent" }] };
         return { rows: [] };
       }),
     };
@@ -568,7 +576,9 @@ describe("ReceivingService - close reconciliation semantics", () => {
     const inventoryCore = { receiveInventory: vi.fn().mockResolvedValue(undefined) };
     const channelSync = { queueSyncAfterInventoryChange: vi.fn().mockResolvedValue(undefined) };
     const purchasing = {
-      onReceivingOrderClosed: vi.fn().mockRejectedValue(new Error("PO reconcile failed")),
+      onReceivingOrderClosed: vi.fn(),
+      onReceivingOrderClosedInTransaction: vi.fn().mockRejectedValue(new Error("PO reconcile failed")),
+      afterReceivingOrderClosed: vi.fn(),
     };
     const reconciliationFailureReporter = vi.fn().mockResolvedValue(undefined);
     const service = new ReceivingService(
@@ -583,13 +593,11 @@ describe("ReceivingService - close reconciliation semantics", () => {
 
     await expect(service.close(10, "user-1")).rejects.toThrow("PO reconcile failed");
     expect(inventoryCore.receiveInventory).toHaveBeenCalledOnce();
-    expect(purchasing.onReceivingOrderClosed).toHaveBeenCalledOnce();
-    expect(reconciliationFailureReporter).toHaveBeenCalledWith(expect.objectContaining({
-      purchaseOrderId: 1,
-      receivingOrderId: 10,
-      userId: "user-1",
-      message: "PO reconcile failed",
-    }));
+    expect(purchasing.onReceivingOrderClosedInTransaction).toHaveBeenCalledWith(10, expect.any(Array), "user-1", tx, expect.any(Date));
+    expect(purchasing.onReceivingOrderClosed).not.toHaveBeenCalled();
+    expect(purchasing.afterReceivingOrderClosed).not.toHaveBeenCalled();
+    expect(channelSync.queueSyncAfterInventoryChange).not.toHaveBeenCalled();
+    expect(reconciliationFailureReporter).not.toHaveBeenCalled();
   });
 
   it("finalizes shipment receipt line statuses from received quantity on close", async () => {
@@ -601,29 +609,44 @@ describe("ReceivingService - close reconciliation semantics", () => {
       sourceType: "shipment",
       receiptNumber: "RCV-11",
       inboundShipmentId: 84,
+      purchaseOrderId: 1,
+      warehouseId: 1,
       updatedAt,
     };
     const lines = [
       { id: 701, damagedQty: 0, unitsPerVariantSnapshot: 1, expectedQty: 10, receivedQty: 4, productVariantId: 5, putawayLocationId: 12, status: "partial", updatedAt },
       { id: 702, damagedQty: 0, unitsPerVariantSnapshot: 1, expectedQty: 5, receivedQty: 0, productVariantId: 6, putawayLocationId: 13, status: "pending", updatedAt },
       { id: 703, damagedQty: 0, unitsPerVariantSnapshot: 1, expectedQty: 3, receivedQty: 3, productVariantId: 7, putawayLocationId: 14, status: "complete", updatedAt },
-    ];
+    ].map((line) => ({ ...line, productId: 1, purchaseOrderLineId: line.id, inboundShipmentLineId: line.id }));
     const tx = {
       execute: vi.fn(async (query: any) => {
         const text = sqlToStr(query);
         if (text.includes("from procurement.receiving_orders") && text.includes("for update")) {
           return { rows: [{ id: order.id }] };
         }
+        if (text.includes("from warehouse.warehouses")) return { rows: [{ isActive: 1 }] };
+        if (text.includes("from warehouse.warehouse_locations")) return { rows: [12, 13, 14].map((id) => ({ id, warehouseId: 1, isActive: 1 })) };
+        if (text.includes("from procurement.purchase_order_lines")) return { rows: lines.map((line) => ({ id: line.id, purchaseOrderId: 1,
+          productId: 1, lineType: "product", status: "open", orderQty: line.expectedQty, receivedQty: 0, cancelledQty: 0 })) };
+        if (text.includes("from procurement.purchase_orders")) return { rows: [{ status: "sent" }] };
+        if (text.includes("from procurement.inbound_shipments")) return { rows: [{ status: "delivered" }] };
+        if (text.includes("from procurement.inbound_shipment_lines")) {
+          if (text.includes('as "inboundshipmentid"')) return { rows: lines.map((line) => ({ id: line.id, inboundShipmentId: 84,
+            purchaseOrderId: 1, purchaseOrderLineId: line.id })) };
+          const sourceId = new PgDialect().sqlToQuery(query).params[0];
+          return { rows: [{ inbound_shipment_id: 84, purchase_order_id: 1, purchase_order_line_id: sourceId, qty_shipped: 10 }] };
+        }
         return { rows: [{ id: 5, product_id: 1, units_per_variant: 1, is_active: true }] };
       }),
     };
     const mockStorage = {
       getReceivingOrderById: vi.fn().mockResolvedValue(order),
+      getPurchaseOrderLineById: vi.fn(async (id: number) => ({ id, productId: 1, purchaseOrderId: 1 })),
       getReceivingLines: vi.fn()
         .mockResolvedValueOnce(lines)
         .mockResolvedValueOnce(lines)
         .mockResolvedValueOnce(lines)
-        .mockResolvedValueOnce([
+        .mockResolvedValue([
           { ...lines[0], status: "short" },
           { ...lines[1], status: "short" },
           { ...lines[2], status: "complete" },
@@ -646,11 +669,17 @@ describe("ReceivingService - close reconciliation semantics", () => {
         events.push("channel-sync-enqueued");
       }),
     };
+    const purchasing = {
+      onReceivingOrderClosed: vi.fn(),
+      onReceivingOrderClosedInTransaction: vi.fn().mockResolvedValue({ purchaseOrderId: 1, appliedLines: 2,
+        existingReceiptLines: 0, skippedLines: 0, autoMatchedLines: 0, issues: [] }),
+    };
     const service = new ReceivingService(
       db as any,
       inventoryCore as any,
       channelSync as any,
       mockStorage as any,
+      purchasing as any,
     );
 
     const result = await service.close(11, "user-1");

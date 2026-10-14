@@ -136,11 +136,18 @@ controlled.sequential("FLOW persisted RFQ, partial receipts, sale and late freig
   async function receive(shipmentId: number, poId: number, shipmentLineId: number, cartons: number,
     expectedCartons: number, locationId: number) {
     const receipt = await harness.purchasing.createReceiptFromShipment(shipmentId, FLOW_ACTOR, { purchaseOrderId: poId });
+    // RFQ-created POs have no destination warehouse. Shipment receipts inherit
+    // the PO destination, so select it explicitly through the receiving owner.
+    expect(receipt.warehouseId).toBeNull();
     const lines = await harness.storage.getReceivingLines(receipt.id);
     expect(lines).toHaveLength(1);
     const [line] = lines;
     expect(line).toMatchObject({ expectedQty: expectedCartons, unitsPerVariantSnapshot: 100, inboundShipmentLineId: shipmentLineId });
     await harness.receiving.open(receipt.id, FLOW_ACTOR);
+    const selectedDestination = await harness.receiving.updateOrderDetails(
+      receipt.id, { warehouseId: FLOW_IDS.warehouse }, FLOW_ACTOR,
+    );
+    expect(selectedDestination).toMatchObject({ id: receipt.id, warehouseId: FLOW_IDS.warehouse });
     await harness.receiving.updateLine(line.id, { receivedQty: cartons, putawayLocationId: locationId,
       expectedUnitVersion: receivingUnitVersion(line) }, FLOW_ACTOR);
     await harness.receiving.close(receipt.id, FLOW_ACTOR);

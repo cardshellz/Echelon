@@ -1,5 +1,6 @@
 import { readPostedReceiptUnitEvidence, resolveReceivingUnitSnapshot, ReceivingUnitSnapshotError } from "./receiving-unit-snapshot";
 import { centsToMills, millsToCents } from "@shared/utils/money";
+import { isOpenReceiptProductSource } from "./receiving-close-integrity.domain";
 
 export type ReceivingReconciliationLine = {
   receivingLineId: number;
@@ -16,7 +17,6 @@ export type PoReceiptReconciliationStorage = {
   getPurchaseOrderLineById(id: number, executor?: any): Promise<any>;
   getReceivingOrderById(id: number, executor?: any): Promise<any>;
   getReceivingLineById(id: number, executor?: any): Promise<any>;
-  getProductVariantById(id: number, executor?: any): Promise<any>;
   reconcilePoReceiptLine(input: {
     purchaseOrderLineId: number;
     receivingLineId: number;
@@ -73,15 +73,8 @@ export async function findOpenPoLineByProduct(
   executor?: any,
 ): Promise<any | null> {
   const lines = await storage.getPurchaseOrderLines(poId, executor);
-  const candidates = lines.filter((line: any) => {
-    if ((line.lineType ?? "product") !== "product") return false;
-    if (line.productId !== productId) return false;
-    if (line.status === "cancelled" || line.status === "received" || line.status === "closed") return false;
-    const remaining = (Number(line.orderQty) || 0)
-      - (Number(line.receivedQty) || 0)
-      - (Number(line.cancelledQty) || 0);
-    return remaining > 0;
-  });
+  const candidates = lines.filter((line: any) => isOpenReceiptProductSource({ ...line,
+    receivedQty: Number(line.receivedQty ?? 0), cancelledQty: Number(line.cancelledQty ?? 0) }, productId));
 
   if (candidates.length === 1) return candidates[0];
   return null;
@@ -95,7 +88,6 @@ export async function reconcilePurchaseOrderReceipt(params: {
   executor?: any;
   changedBy?: string;
   now?: () => Date;
-  logger?: Pick<Console, "info" | "warn">;
 }): Promise<ReceiptReconciliationResult> {
   const {
     storage,
@@ -105,7 +97,6 @@ export async function reconcilePurchaseOrderReceipt(params: {
     executor,
     changedBy,
     now = () => new Date(),
-    logger = console,
   } = params;
   const resolvedReceivingLines = receivingLines.map((line) => ({ ...line }));
   const reconciledAt = now();
@@ -137,51 +128,10 @@ export async function reconcilePurchaseOrderReceipt(params: {
     };
   }
 
-  let autoMatchedLines = 0;
+  // Physical close must persist exact source links before inventory posting.
+  // Reconciliation cannot invent provenance for an already posted legacy row.
+  const autoMatchedLines = 0;
   const issues: ReceiptReconciliationIssue[] = [];
-  for (const receivingLine of resolvedReceivingLines) {
-    if (receivingLine.purchaseOrderLineId) continue;
-
-    const receivingLineRecord = await storage.getReceivingLineById(receivingLine.receivingLineId, executor);
-    if (!receivingLineRecord) continue;
-
-    let productId: number | null = receivingLineRecord.productId ?? null;
-    if (!productId && receivingLineRecord.productVariantId) {
-      const variant = await storage.getProductVariantById(receivingLineRecord.productVariantId, executor);
-      productId = variant?.productId ?? null;
-    }
-
-    if (!productId) {
-      issues.push({
-        receivingLineId: receivingLine.receivingLineId,
-        reason: "missing_receiving_product",
-        detail: `Receiving line ${receivingLine.receivingLineId} has no product_id resolvable for PO auto-match`,
-      });
-      logger.warn(
-        `[Receiving] Auto-match skipped for receiving line ${receivingLine.receivingLineId}: no product_id resolvable`,
-      );
-      continue;
-    }
-
-    const matchedLine = await findOpenPoLineByProduct(storage, poId, productId, executor);
-    if (matchedLine) {
-      receivingLine.purchaseOrderLineId = matchedLine.id;
-      autoMatchedLines++;
-      logger.info(
-        `[Receiving] Auto-matched receiving line ${receivingLine.receivingLineId} to PO line ${matchedLine.id} (product_id=${productId})`,
-      );
-    } else {
-      issues.push({
-        receivingLineId: receivingLine.receivingLineId,
-        reason: "auto_match_unresolved",
-        detail: `Receiving line ${receivingLine.receivingLineId} could not be auto-matched to exactly one open PO line for product_id=${productId}`,
-      });
-      logger.warn(
-        `[Receiving] Auto-match failed for receiving line ${receivingLine.receivingLineId}: ` +
-        `zero or multiple open PO lines for product_id=${productId} on PO ${poId}. Leaving unlinked.`,
-      );
-    }
-  }
 
   let appliedLines = 0;
   let existingReceiptLines = 0;
@@ -349,7 +299,10 @@ export async function reconcilePurchaseOrderReceipt(params: {
     }
   }
 
-  await recalculateTotals(poId, executor);
+  // Receipt identity makes replay a read of the existing original posting.
+  // Do not rewrite PO totals/timestamps when no new receipt was applied. The
+  // status repair below still handles a genuinely stale legacy header.
+  if (appliedLines > 0) await recalculateTotals(poId, executor);
   const poStatusUpdate = await updatePurchaseOrderReceiptStatus(
     storage,
     poId,
