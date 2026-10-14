@@ -44,7 +44,6 @@ interface PreparedLineItem {
   retailPriceCents: number;
   grossTotalCents: number;
   rawDiscount: LineDiscountSplit;
-  discountIneligible: boolean;
 }
 
 function readShopifyQuantity(raw: unknown): number | null {
@@ -67,24 +66,6 @@ export function readShopifyLineCurrentQuantity(
 function dollarsToCents(value: string | number | undefined | null): number {
   if (value === null || value === undefined) return 0;
   return Math.round(parseFloat(String(value)) * 100);
-}
-
-function isDonationLine(item: any): boolean {
-  const sku = String(item.sku || "").toUpperCase();
-  const text = `${item.title || ""} ${item.name || ""} ${item.vendor || ""}`.toLowerCase();
-
-  // Shopify creates synthetic SHOPIFY-* SKUs for some custom-sale lines. Only treat
-  // them as donation lines when the human-visible text also says donation.
-  return sku.startsWith("SHOPIFY-") && text.includes("donation");
-}
-
-function isDiscountIneligibleLine(item: any): boolean {
-  // Club/rewards discounts are a Shopify workaround until we can return to real
-  // line-item pricing. They can be commercial truth for products and memberships,
-  // but they should never reduce donations or gift cards. If Shopify allocates a
-  // discount there anyway, keep these lines at gross price and move that discount
-  // onto eligible lines so OMS/WMS/ShipStation totals still reconcile.
-  return item.gift_card === true || isDonationLine(item);
 }
 
 function splitDiscountAllocations(item: any, discountApplications: any[]): LineDiscountSplit {
@@ -119,31 +100,6 @@ function splitDiscountAllocations(item: any, discountApplications: any[]): LineD
   }
 
   return { planDiscountCents, couponDiscountCents };
-}
-
-function allocateCentsByGross(totalCents: number, lines: PreparedLineItem[]): Map<PreparedLineItem, number> {
-  const allocations = new Map<PreparedLineItem, number>();
-  if (totalCents <= 0 || lines.length === 0) return allocations;
-
-  const grossTotal = lines.reduce((sum, line) => sum + Math.max(0, line.grossTotalCents), 0);
-  if (grossTotal <= 0) return allocations;
-
-  let assigned = 0;
-  const ranked = lines.map((line) => {
-    const exact = (totalCents * line.grossTotalCents) / grossTotal;
-    const whole = Math.floor(exact);
-    assigned += whole;
-    allocations.set(line, whole);
-    return { line, remainder: exact - whole };
-  });
-
-  ranked.sort((a, b) => b.remainder - a.remainder);
-  for (let i = 0; i < totalCents - assigned; i += 1) {
-    const line = ranked[i % ranked.length].line;
-    allocations.set(line, (allocations.get(line) || 0) + 1);
-  }
-
-  return allocations;
 }
 
 function buildNormalizedLineItem(
@@ -214,38 +170,19 @@ export function normalizeShopifyLineItems(
   discountApplications: any[],
   orderNumber?: string
 ): NormalizedLineItem[] {
-  const prepared = lineItems.map((item) => {
+  // Each line keeps exactly the discount Shopify allocated to it. Echelon only
+  // converts units and labels discounts (plan vs coupon); it never moves them.
+  // Moving donation/gift-card discounts onto other lines (6b336d74) priced a
+  // fully discounted binder at -$1.00 and blocked OMS order 1071127's WMS sync.
+  return lineItems.map((item) => {
     const quantity = item.quantity || 1;
     const retailPriceCents = dollarsToCents(item.price);
     const grossTotalCents = retailPriceCents * quantity;
     const rawDiscount = splitDiscountAllocations(item, discountApplications);
-    const discountIneligible = isDiscountIneligibleLine(item);
-    return { item, quantity, retailPriceCents, grossTotalCents, rawDiscount, discountIneligible };
-  });
-
-  const eligible = prepared.filter((line) => !line.discountIneligible);
-  const ineligibleDiscount = prepared
-    .filter((line) => line.discountIneligible)
-    .reduce(
-      (sum, line) => ({
-        planDiscountCents: sum.planDiscountCents + line.rawDiscount.planDiscountCents,
-        couponDiscountCents: sum.couponDiscountCents + line.rawDiscount.couponDiscountCents,
-      }),
-      { planDiscountCents: 0, couponDiscountCents: 0 },
-    );
-
-  const extraPlanByLine = allocateCentsByGross(ineligibleDiscount.planDiscountCents, eligible);
-  const extraCouponByLine = allocateCentsByGross(ineligibleDiscount.couponDiscountCents, eligible);
-
-  return prepared.map((line) => {
-    if (line.discountIneligible) {
-      return buildNormalizedLineItem(line, 0, 0);
-    }
-
     return buildNormalizedLineItem(
-      line,
-      line.rawDiscount.planDiscountCents + (extraPlanByLine.get(line) || 0),
-      line.rawDiscount.couponDiscountCents + (extraCouponByLine.get(line) || 0),
+      { item, quantity, retailPriceCents, grossTotalCents, rawDiscount },
+      rawDiscount.planDiscountCents,
+      rawDiscount.couponDiscountCents,
     );
   });
 }
