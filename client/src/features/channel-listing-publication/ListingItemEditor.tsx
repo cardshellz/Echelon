@@ -26,6 +26,7 @@ import { dollarsToCents, errorMessage, money } from "./model";
 import { SchemaFields } from "./SchemaFields";
 import { ListingProductTypePicker } from "./ListingProductTypePicker";
 import { selectListingProductType } from "./product-type-model";
+import { selectListingMethod } from "./listing-method-model";
 import { InheritedContentField } from "./InheritedContentField";
 import { normalizeListingContent } from "./content-inheritance";
 import { assertListingDraftItemUnchanged } from "./draft-item-snapshot";
@@ -62,6 +63,7 @@ export function ListingItemEditor({
     JSON.stringify(item.attributes, null, 2),
   );
   const [error, setError] = useState("");
+  const identifier = draft.identifier ?? (draft.recreateFromOperationId ? catalog?.identifier : null);
   const taxonomy = useQuery({
     queryKey: [base, "taxonomy"],
     queryFn: () =>
@@ -214,15 +216,10 @@ export function ListingItemEditor({
                     id={`${prefix}-method`}
                     className={selectClass}
                     value={draft.method}
-                    disabled={Boolean(draft.recreateFromOperationId)}
                     onChange={(event) => {
-                      setDraft((previous) => ({
-                        ...previous,
-                        method: event.target
-                          .value as ListingDraftItem["method"],
-                        attributes: {},
-                      }));
-                      setAdvanced("{}");
+                      const next = selectListingMethod(draft, event.target.value as ListingDraftItem["method"]);
+                      setDraft(next);
+                      setAdvanced(JSON.stringify(next.attributes, null, 2));
                     }}
                   >
                     <option value="create">Create product on Walmart</option>
@@ -232,7 +229,7 @@ export function ListingItemEditor({
                   </select>
                 </div>
               </div>
-              <ListingProductTypePicker
+              {draft.method === "create" && <ListingProductTypePicker
                 label="Walmart product type"
                 value={draft.productType}
                 taxonomy={taxonomy.data}
@@ -258,11 +255,11 @@ export function ListingItemEditor({
                     setError(errorMessage(failure));
                   }
                 }}
-              />
+              />}
               <p className="text-xs text-muted-foreground">
-                Changing the listing method or product type resets its provider
-                attributes. Walmart validates catalog matches using the exact
-                product identifier.
+                {draft.method === "match"
+                  ? "Use the existing Walmart product for this identifier. Review verifies the match. The product's category and content come from Walmart."
+                  : "Changing the product type resets its attributes. Switching listing methods keeps shipping weight and condition; review checks the remaining required details."}
               </p>
               <div className="grid gap-4 sm:grid-cols-[140px_1fr]">
                 <div className="space-y-1.5">
@@ -272,7 +269,8 @@ export function ListingItemEditor({
                   <select
                     id={`${prefix}-identifier-type`}
                     className={selectClass}
-                    value={draft.identifier?.type ?? "GTIN"}
+                    value={identifier?.type ?? "GTIN"}
+                    disabled={Boolean(draft.recreateFromOperationId)}
                     onChange={(event) =>
                       setDraft((previous) => ({
                         ...previous,
@@ -296,7 +294,8 @@ export function ListingItemEditor({
                   </Label>
                   <Input
                     id={`${prefix}-identifier`}
-                    value={draft.identifier?.value ?? ""}
+                    value={identifier?.value ?? ""}
+                    disabled={Boolean(draft.recreateFromOperationId)}
                     maxLength={32}
                     onChange={(event) =>
                       setDraft((previous) => ({
@@ -312,6 +311,9 @@ export function ListingItemEditor({
                   />
                 </div>
               </div>
+              {draft.recreateFromOperationId && <p className="text-xs text-muted-foreground">
+                Recreating this listing keeps its original selling-unit identifier.
+              </p>}
               <p className="text-xs text-muted-foreground">
                 {draft.method === "match"
                   ? "Catalog matching selected"
@@ -319,7 +321,7 @@ export function ListingItemEditor({
                     ? "Product type selected"
                     : "Product type still needed"}{" "}
                 ·{" "}
-                {draft.identifier?.value.trim()
+                {identifier?.value.trim()
                   ? "Identifier entered"
                   : "Identifier still needed"}
                 . Review validates these details before publication.
@@ -440,7 +442,7 @@ export function ListingItemEditor({
                 />
               </section>
             )}
-            {images === null && catalog?.imageIssues?.length ? (
+            {draft.method === "create" && images === null && catalog?.imageIssues?.length ? (
               <ul
                 className="space-y-1 text-sm text-destructive"
                 aria-label="Catalog photo issues"
