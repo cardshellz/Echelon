@@ -66,6 +66,21 @@ describe("Shopify coupon / points-accounting boundary", () => {
   it("preserves unlimited-campaign adjustments without a rewards record", () => {
     expect(() => assertCouponAdjustmentSupported([coupon])).not.toThrow();
   });
+  it.each([
+    { ...coupon, code: "ten" },
+    { ...coupon, code: "HOLIDAY-ALIAS" },
+    { ...coupon, discountId: "gid://shopify/DiscountCodeNode/2" },
+  ])("rejects an already applied coupon by code or campaign identity: $code", (candidate) => {
+    expect(() => assertCouponAdjustmentSupported([candidate], [coupon])).toThrow(
+      expect.objectContaining({ code: "ORDER_EDIT_CODE_ALREADY_APPLIED" }),
+    );
+  });
+  it("retains an existing adjustment without treating it as a fresh redemption", () => {
+    const retained = { ...coupon, appliesOncePerCustomer: true };
+    const before = structuredClone(retained);
+    expect(() => assertCouponAdjustmentSupported([], [retained])).not.toThrow();
+    expect(retained).toEqual(before);
+  });
   it("does not impose a points-credit consumption rule on a fixed Shopify coupon", () => {
     const fixedCoupon: OrderEditCodeRule = {
       ...coupon,
@@ -87,6 +102,7 @@ describe("Shopify coupon / points-accounting boundary", () => {
     { usageLimit: 1, appliesOncePerCustomer: false },
     { usageLimit: 10, appliesOncePerCustomer: false },
     { usageLimit: null, appliesOncePerCustomer: true },
+    { usageLimit: 100, appliesOncePerCustomer: true },
   ])(
     "does not mistake calculation for native coupon redemption: %j",
     (limits) => {

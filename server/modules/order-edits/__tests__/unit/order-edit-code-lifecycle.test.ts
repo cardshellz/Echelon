@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { serviceHarness } from "../fixtures/order-edit-service.fixture";
 import { priceOrderEditCodes } from "../../domain/order-edit-code-pricing";
-import { OrderEditCommitNotSentError } from "../../application/order-edit-provider";
+import { OrderEditCommitNotSentError, OrderEditProviderError } from "../../application/order-edit-provider";
 import type { OrderEditCodeRedemptions } from "../../application/order-edit-code-redemptions";
 
 const key = "44444444-4444-4444-8444-444444444444";
@@ -98,6 +98,29 @@ describe("code settlement boundaries in order editing", () => {
     expect(review.codeEntryAvailable).toBe(true);
     const result = await h.service.commit(h.record().id, key, "staff");
     expect(result.status).toBe("completed");
+    expect(h.provider.refund).toHaveBeenCalledWith(
+      4, expect.objectContaining({ amountCents: 200 }), expect.any(String),
+    );
+    await h.service.commit(h.record().id, key, "staff");
+    expect(h.provider.commit).toHaveBeenCalledTimes(1);
+    expect(h.provider.refund).toHaveBeenCalledTimes(1);
+    expect(h.codes.reserve).not.toHaveBeenCalled();
+    expect(h.codes.finalize).not.toHaveBeenCalled();
+    expect(h.codes.release).not.toHaveBeenCalled();
+  });
+  it("reconciles an uncertain unrestricted-coupon refund with the same intent", async () => {
+    const h = harness(2, "shopify_coupon");
+    h.provider.refund.mockRejectedValueOnce(
+      new OrderEditProviderError("SHOPIFY_UNAVAILABLE", "Response lost", "unknown"),
+    );
+    await h.service.quote(h.input, "staff");
+    expect((await h.service.commit(h.record().id, key, "staff")).status).toBe("refunding");
+    const intent = structuredClone(h.record().refundIntent);
+    expect(intent?.amountCents).toBe(200);
+    expect((await h.service.reconcile(h.record().id, "staff")).status).toBe("completed");
+    expect(h.provider.commit).toHaveBeenCalledTimes(1);
+    expect(h.provider.refund).toHaveBeenCalledTimes(2);
+    expect(h.provider.refund.mock.calls[1]).toEqual(h.provider.refund.mock.calls[0]);
     expect(h.codes.reserve).not.toHaveBeenCalled();
     expect(h.codes.finalize).not.toHaveBeenCalled();
     expect(h.codes.release).not.toHaveBeenCalled();
