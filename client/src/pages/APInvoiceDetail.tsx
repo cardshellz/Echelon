@@ -1,4 +1,6 @@
 import { InvoiceLineCostReview } from "@/features/purchasing/InvoiceLineCostReview";
+import { apInvoiceEditCapabilitySchema } from "@shared/procurement/ap-invoice-capabilities";
+import { useAuth } from "@/lib/auth";
 import { InvoiceQuantityCorrection } from "@/features/purchasing/InvoiceQuantityCorrection";
 import { InvoicePoQuantity } from "@/features/purchasing/InvoicePoQuantity";
 import { centsToMills, dollarsToCents, dollarsToMills, formatMills } from "@shared/utils/money";
@@ -124,7 +126,15 @@ const PAYMENT_METHOD_LABELS: Record<string, string> = {
 };
 
 // ── Link PO Dialog Content ──
-function LinkPoDialogContent({ invoice, linkPoId, setLinkPoId, linkPoMutation, onClose }: any) {
+function LinkPoDialogContent({ invoice, linkPoId, setLinkPoId, linkPoMutation, onClose, canEdit, editUnavailableReason }: {
+  invoice: { vendorId: number; poLinks?: Array<{ purchaseOrderId: number }> };
+  linkPoId: string;
+  setLinkPoId: (id: string) => void;
+  linkPoMutation: { mutate: () => void; isPending: boolean };
+  onClose: () => void;
+  canEdit: boolean;
+  editUnavailableReason: string;
+}) {
   const [poSearch, setPoSearch] = useState("");
   const { data: posData } = useQuery<any>({
     queryKey: [`/api/purchase-orders?vendorId=${invoice.vendorId}&limit=100`],
@@ -166,9 +176,10 @@ function LinkPoDialogContent({ invoice, linkPoId, setLinkPoId, linkPoMutation, o
         </div>
       </div>
       <p className="text-xs text-muted-foreground">PO line items will be automatically imported.</p>
+      {!canEdit && <p role="alert" className="text-sm text-destructive">{editUnavailableReason}</p>}
       <div className="flex gap-2 justify-end">
         <Button variant="outline" onClick={onClose}>Cancel</Button>
-        <Button onClick={() => linkPoMutation.mutate()} disabled={!linkPoId || linkPoMutation.isPending}>
+        <Button onClick={() => linkPoMutation.mutate()} disabled={!canEdit || !linkPoId || linkPoMutation.isPending}>
           {linkPoMutation.isPending ? "Linking..." : "Link & Import Lines"}
         </Button>
       </div>
@@ -178,6 +189,7 @@ function LinkPoDialogContent({ invoice, linkPoId, setLinkPoId, linkPoMutation, o
 
 // ── Main Component ──
 export default function APInvoiceDetail() {
+  const { hasPermission } = useAuth();
   const { toast } = useToast();
   const queryClient = useQueryClient();
   const [paymentIntent] = useState(() =>
@@ -230,9 +242,17 @@ export default function APInvoiceDetail() {
     enabled: !!invoiceId,
   });
 
+  const editCapability = apInvoiceEditCapabilitySchema.safeParse(invoice?.capabilities?.edit);
+  const canEdit = hasPermission("purchasing", "edit") && editCapability.success && editCapability.data.allowed;
+  const editUnavailableReason = !hasPermission("purchasing", "edit") ? "You have read-only access to invoice edits."
+    : editCapability.success ? editCapability.data.reason : "Invoice editing availability could not be verified. Reload the invoice before editing.";
+  function requireEditableInvoice(): void {
+    if (!canEdit) throw new Error(editUnavailableReason);
+  }
+
   const invalidate = () => {
     queryClient.invalidateQueries({ queryKey: [`/api/vendor-invoices/${invoiceId}`] });
-    queryClient.invalidateQueries({ queryKey: ["/api/vendor-invoices"] });
+    queryClient.invalidateQueries({ predicate: (query) => typeof query.queryKey[0] === "string" && /^\/api\/vendor-invoices(?:\?|$)/.test(query.queryKey[0]) });
     queryClient.invalidateQueries({ queryKey: ["/api/ap/summary"] });
     queryClient.invalidateQueries({ queryKey: ["/api/ap/command-events?limit=8"] });
   };
@@ -272,7 +292,7 @@ export default function APInvoiceDetail() {
       invalidate();
       toast({ title: "Invoice approved", description: apLedgerOutcomeDescription(result) });
     },
-    onError: (e: Error) => toast({ title: "Error", description: e.message, variant: "destructive" }),
+    onError: (e: Error) => { invalidate(); toast({ title: "Error", description: e.message, variant: "destructive" }); },
   });
 
   const disputeMutation = useMutation({
@@ -286,7 +306,7 @@ export default function APInvoiceDetail() {
       setReason("");
       toast({ title: "Invoice disputed", description: apLedgerOutcomeDescription(result) });
     },
-    onError: (e: Error) => toast({ title: "Error", description: e.message, variant: "destructive" }),
+    onError: (e: Error) => { invalidate(); toast({ title: "Error", description: e.message, variant: "destructive" }); },
   });
 
   const voidMutation = useMutation({
@@ -300,11 +320,12 @@ export default function APInvoiceDetail() {
       setReason("");
       toast({ title: "Invoice voided", description: apLedgerOutcomeDescription(result) });
     },
-    onError: (e: Error) => toast({ title: "Error", description: e.message, variant: "destructive" }),
+    onError: (e: Error) => { invalidate(); toast({ title: "Error", description: e.message, variant: "destructive" }); },
   });
 
   const linkPoMutation = useMutation({
     mutationFn: () => {
+      requireEditableInvoice();
       const idempotencyKey = createApCommandIdempotencyKey("ap-invoice-link-po");
       return fetch(`/api/vendor-invoices/${invoiceId}/po-links`, {
         method: "POST",
@@ -316,18 +337,22 @@ export default function APInvoiceDetail() {
       }).then(async (r) => { if (!r.ok) throw new Error((await r.json()).error); return r.json(); });
     },
     onSuccess: () => { invalidate(); setShowLinkPoDialog(false); setLinkPoId(""); toast({ title: "PO linked & lines imported" }); },
-    onError: (e: Error) => toast({ title: "Error", description: e.message, variant: "destructive" }),
+    onError: (e: Error) => { invalidate(); toast({ title: "Error", description: e.message, variant: "destructive" }); },
   });
 
   const unlinkPoMutation = useMutation({
-    mutationFn: (poId: number) => fetch(`/api/vendor-invoices/${invoiceId}/po-links/${poId}`, { method: "DELETE" })
-      .then(async (r) => { if (!r.ok) throw new Error((await r.json()).error); return r.json(); }),
+    mutationFn: (poId: number) => {
+      requireEditableInvoice();
+      return fetch(`/api/vendor-invoices/${invoiceId}/po-links/${poId}`, { method: "DELETE" })
+        .then(async (r) => { if (!r.ok) throw new Error((await r.json()).error); return r.json(); });
+    },
     onSuccess: () => { invalidate(); toast({ title: "PO unlinked" }); },
-    onError: (e: Error) => toast({ title: "Error", description: e.message, variant: "destructive" }),
+    onError: (e: Error) => { invalidate(); toast({ title: "Error", description: e.message, variant: "destructive" }); },
   });
 
   const updateInvoiceMutation = useMutation({
     mutationFn: async () => {
+      requireEditableInvoice();
       const res = await fetch(`/api/vendor-invoices/${invoiceId}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
@@ -344,7 +369,7 @@ export default function APInvoiceDetail() {
       return res.json();
     },
     onSuccess: () => { invalidate(); setEditing(false); toast({ title: "Invoice updated" }); },
-    onError: (e: Error) => toast({ title: "Error", description: e.message, variant: "destructive" }),
+    onError: (e: Error) => { invalidate(); toast({ title: "Error", description: e.message, variant: "destructive" }); },
   });
 
   const paymentMutation = useMutation({
@@ -389,13 +414,14 @@ export default function APInvoiceDetail() {
       setPayment({ paymentDate: format(new Date(), "yyyy-MM-dd"), paymentMethod: "ach", referenceNumber: "", checkNumber: "", bankAccountLabel: "", amountDollars: "", notes: "" });
       toast({ title: "Payment recorded", description: apLedgerOutcomeDescription(result) });
     },
-    onError: (e: Error) => toast({ title: "Error", description: e.message, variant: "destructive" }),
+    onError: (e: Error) => { invalidate(); toast({ title: "Error", description: e.message, variant: "destructive" }); },
   });
 
   // ── Line Mutations ──
 
   const addLineMutation = useMutation({
     mutationFn: () => {
+      requireEditableInvoice();
       const idempotencyKey = createApCommandIdempotencyKey("ap-invoice-add-line");
       return fetch(`/api/vendor-invoices/${invoiceId}/lines`, {
         method: "POST",
@@ -418,20 +444,23 @@ export default function APInvoiceDetail() {
       setNewLine({ sku: "", productName: "", description: "", qtyInvoiced: "", unitCostDollars: "" });
       toast({ title: "Line added" });
     },
-    onError: (e: Error) => toast({ title: "Error", description: e.message, variant: "destructive" }),
+    onError: (e: Error) => { invalidate(); toast({ title: "Error", description: e.message, variant: "destructive" }); },
   });
 
   const deleteLineMutation = useMutation({
-    mutationFn: (lineId: number) => fetch(`/api/vendor-invoice-lines/${lineId}`, { method: "DELETE" })
-      .then(async (r) => { if (!r.ok) throw new Error((await r.json()).error); return r.json(); }),
+    mutationFn: (lineId: number) => {
+      requireEditableInvoice();
+      return fetch(`/api/vendor-invoice-lines/${lineId}`, { method: "DELETE" })
+        .then(async (r) => { if (!r.ok) throw new Error((await r.json()).error); return r.json(); });
+    },
     onSuccess: () => { invalidate(); toast({ title: "Line removed" }); },
-    onError: (e: Error) => toast({ title: "Error", description: e.message, variant: "destructive" }),
+    onError: (e: Error) => { invalidate(); toast({ title: "Error", description: e.message, variant: "destructive" }); },
   });
 
   const matchMutation = useMutation({
     mutationFn: () => action("match"),
     onSuccess: () => { invalidate(); toast({ title: "Match completed" }); },
-    onError: (e: Error) => toast({ title: "Error", description: e.message, variant: "destructive" }),
+    onError: (e: Error) => { invalidate(); toast({ title: "Error", description: e.message, variant: "destructive" }); },
   });
 
   // ── Attachment Mutations ──
@@ -452,7 +481,7 @@ export default function APInvoiceDetail() {
     mutationFn: (id: number) => fetch(`/api/vendor-invoice-attachments/${id}`, { method: "DELETE" })
       .then(async (r) => { if (!r.ok) throw new Error((await r.json()).error); return r.json(); }),
     onSuccess: () => { invalidate(); toast({ title: "Attachment removed" }); },
-    onError: (e: Error) => toast({ title: "Error", description: e.message, variant: "destructive" }),
+    onError: (e: Error) => { invalidate(); toast({ title: "Error", description: e.message, variant: "destructive" }); },
   });
 
   function startEditing() {
@@ -518,11 +547,13 @@ export default function APInvoiceDetail() {
   }
 
   const status = invoice.status;
-  const canApprove = ["received", "disputed"].includes(status);
-  const canDispute = ["received", "approved", "partially_paid"].includes(status);
-  const canVoid = status !== "voided";
-  const canPay = ["approved", "partially_paid"].includes(status);
-  const canEdit = status !== "voided" && status !== "paid";
+  const canApprove = hasPermission("purchasing", "approve") && ["received", "disputed"].includes(status);
+  const canDispute = hasPermission("purchasing", "edit") && ["received", "approved", "partially_paid"].includes(status);
+  const canVoid = hasPermission("purchasing", "approve") && status !== "voided" && invoice.paidAmountCents === 0;
+  const canPay = hasPermission("purchasing", "approve") && !invoice.paymentReviewRequired && ["approved", "partially_paid"].includes(status);
+  // Evidence attachments and reviewed quantity corrections retain their own owners.
+  const canManageAttachments = hasPermission("purchasing", "edit") && status !== "voided";
+  const canRunMatch = hasPermission("purchasing", "edit") && status !== "voided";
   const lines: any[] = invoice.lines ?? [];
   const attachments: any[] = invoice.attachments ?? [];
 
@@ -532,6 +563,16 @@ export default function APInvoiceDetail() {
     <div className={`p-2 md:p-6 max-w-5xl mx-auto space-y-4 md:space-y-6 ${isVoided ? "opacity-50 pointer-events-auto" : ""}`}>
       <ProcurementContext navigation={procurementNavigation} />
       {/* ── Voided Banner ── */}
+      {!isVoided && !canEdit && (
+        <p role="status" className="rounded-lg border px-4 py-3 text-sm text-muted-foreground">
+          {editUnavailableReason}
+        </p>
+      )}
+      {invoice.paymentReviewRequired && (
+        <p role="alert" className="rounded-lg border border-amber-300 bg-amber-50 px-4 py-3 text-sm">
+          A payment has an unsupported historical status. Review its recorded evidence before changing the invoice balance; existing balances have been preserved.
+        </p>
+      )}
       {isVoided && (
         <div className="bg-slate-100 border border-slate-300 rounded-lg px-4 py-3 text-center pointer-events-auto">
           <p className="text-sm font-medium text-slate-500">This invoice has been voided and is read-only.</p>
@@ -641,8 +682,9 @@ export default function APInvoiceDetail() {
         <Card>
           <CardHeader className="flex flex-row items-center justify-between py-3">
             <CardTitle className="text-sm">Invoice Line Items</CardTitle>
-            {canEdit && (
+            {(canEdit || (canRunMatch && lines.length > 0)) && (
               <div className="flex gap-2">
+                {canEdit && <>
                 <Button size="sm" variant="outline" onClick={() => setShowLinkPoDialog(true)}>
                   <Link2 className="h-4 w-4 mr-1" />
                   Link PO
@@ -651,7 +693,8 @@ export default function APInvoiceDetail() {
                   <Plus className="h-4 w-4 mr-1" />
                   Add Line
                 </Button>
-                {lines.length > 0 && (
+                </>}
+                {canRunMatch && lines.length > 0 && (
                   <Button size="sm" variant="outline" onClick={() => matchMutation.mutate()} disabled={matchMutation.isPending}>
                     <RefreshCw className={`h-4 w-4 mr-1 ${matchMutation.isPending ? "animate-spin" : ""}`} />
                     Run Match
@@ -814,7 +857,7 @@ export default function APInvoiceDetail() {
                 </div>
                 <div className="flex gap-2 justify-end">
                   <Button size="sm" variant="outline" onClick={() => setEditing(false)}>Cancel</Button>
-                  <Button size="sm" onClick={() => updateInvoiceMutation.mutate()} disabled={updateInvoiceMutation.isPending}>
+                  <Button size="sm" onClick={() => updateInvoiceMutation.mutate()} disabled={!canEdit || updateInvoiceMutation.isPending}>
                     {updateInvoiceMutation.isPending ? "Saving..." : "Save Changes"}
                   </Button>
                 </div>
@@ -840,7 +883,7 @@ export default function APInvoiceDetail() {
         <Card>
           <CardHeader className="flex flex-row items-center justify-between py-3">
             <CardTitle className="text-sm">Attachments</CardTitle>
-            {canEdit && (
+            {canManageAttachments && (
               <>
                 <input
                   ref={fileInputRef}
@@ -891,7 +934,7 @@ export default function APInvoiceDetail() {
                               <Download className="h-3.5 w-3.5" />
                             </a>
                           </Button>
-                          {canEdit && (
+                          {canManageAttachments && (
                             <Button size="sm" variant="ghost" className="h-7 text-muted-foreground"
                               onClick={() => deleteAttachmentMutation.mutate(att.id)}
                               disabled={deleteAttachmentMutation.isPending}
@@ -1010,6 +1053,8 @@ export default function APInvoiceDetail() {
             linkPoId={linkPoId}
             setLinkPoId={setLinkPoId}
             linkPoMutation={linkPoMutation}
+            canEdit={canEdit}
+            editUnavailableReason={editUnavailableReason}
             onClose={() => setShowLinkPoDialog(false)}
           />
         </DialogContent>
@@ -1023,6 +1068,7 @@ export default function APInvoiceDetail() {
             <DialogDescription>Manually add a line item.</DialogDescription>
           </DialogHeader>
           <div className="space-y-4">
+            {!canEdit && <p role="alert" className="text-sm text-destructive">{editUnavailableReason}</p>}
             <div className="grid grid-cols-2 gap-4">
               <div className="space-y-2">
                 <Label>SKU</Label>
@@ -1049,7 +1095,7 @@ export default function APInvoiceDetail() {
             </div>
             <div className="flex gap-2 justify-end">
               <Button variant="outline" onClick={() => setShowAddLineDialog(false)}>Cancel</Button>
-              <Button onClick={() => addLineMutation.mutate()} disabled={!newLine.qtyInvoiced || !newLine.unitCostDollars || addLineMutation.isPending}>
+              <Button onClick={() => addLineMutation.mutate()} disabled={!canEdit || !newLine.qtyInvoiced || !newLine.unitCostDollars || addLineMutation.isPending}>
                 {addLineMutation.isPending ? "Adding..." : "Add Line"}
               </Button>
             </div>

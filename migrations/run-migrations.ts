@@ -3,10 +3,11 @@
  * Auto-run SQL migrations in order during Heroku release phase
  */
 import { Pool } from 'pg';
-import { readFileSync, readdirSync } from 'fs';
+import { readFileSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import * as crypto from 'crypto';
+import { validateMigrationDirectory } from '../scripts/migrations/migration-policy.mjs';
 import {
   acquireMigrationAdvisoryLock,
   executeMigrationWithRetry,
@@ -50,25 +51,11 @@ async function runMigrations() {
     await acquireMigrationAdvisoryLock(client);
     advisoryLockHeld = true;
 
-    // Check for duplicate prefixes
+    // Use the same dependency-free validation as CI. It preserves legacy names
+    // and lexical order while checking ownership and declared dependency order
+    // for the collision-resistant namespace before any migration is executed.
     const migrationsDir = join(__dirname);
-    const files = readdirSync(migrationsDir)
-      .filter(f => f.endsWith('.sql'))
-      .sort(); // Alphabetical order (0063, 0064, etc.)
-
-    const prefixMap = new Map<string, string>();
-    for (const file of files) {
-      const match = file.match(/^(\d+)_/);
-      if (match) {
-        const prefix = match[1];
-        if (prefixMap.has(prefix)) {
-          throw new Error(
-            `Migration prefix collision: ${prefixMap.get(prefix)} and ${file}`,
-          );
-        }
-        prefixMap.set(prefix, file);
-      }
-    }
+    const files = validateMigrationDirectory(migrationsDir);
 
     // Create migrations tracking table
     await client.query(`

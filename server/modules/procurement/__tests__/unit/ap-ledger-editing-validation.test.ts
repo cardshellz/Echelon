@@ -38,6 +38,13 @@ describe("AP invoice editing boundary validation", () => {
     vi.clearAllMocks();
   });
 
+  it.each(["scheduled", "returned", "voided", "unknown", null])("rejects record-payment status %s before opening a transaction", async (status) => {
+    const { recordPayment } = await import("../../ap-ledger.service");
+    await expect(recordPayment({ vendorId: 4, paymentDate: new Date("2026-10-13T12:00:00Z"), paymentMethod: "ach", totalAmountCents: 1000, allocations: [], status } as any))
+      .rejects.toMatchObject({ statusCode: 400, details: { code: "AP_PAYMENT_STATUS_INVALID" } });
+    expect(mocks.db.transaction).not.toHaveBeenCalled();
+  });
+
   it("rejects unsupported invoice-create fields before opening a transaction", async () => {
     const { createInvoice } = await import("../../ap-ledger.service");
 

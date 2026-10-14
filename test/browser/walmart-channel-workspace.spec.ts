@@ -93,8 +93,9 @@ async function deletedListing(page: Page) {
   state.publication.catalogItems[0].alreadyLinked = true;
   state.publication.draft.items = [listingDraftItemSchema.parse({ variantId: 26, productType: "Trading Card Storage", title: "Keep my other edits" })];
   const item = listingDraftItemSchema.parse({ variantId: 1, method: "create", recreateFromOperationId: operationId,
+    identifier: { type: "GTIN", value: "00850025354769" },
     productType: "Trading Card Accessories", priceOverrideCents: 2499, title: "Clear sleeves - 100 count",
-    attributes: { Orderable: { ShippingWeight: 2 } } });
+    attributes: { Orderable: { ShippingWeight: 2 }, Visible: { condition: "New" } } });
   const response = { account: { channelId: 77, connectionId: 9, provider: "walmart", market: "US", environment: "production",
     accountId: status.partnerId, scopeId: status.shipNodeId, revision: 1 }, item,
     catalog: state.publication.catalogItems[0], checkedAt: "2026-10-12T12:00:00.000Z" };
@@ -102,7 +103,32 @@ async function deletedListing(page: Page) {
   return { state, operationId, response };
 }
 
-test("recreates a deleted listing through a fresh full draft and review while preserving other draft edits", async ({ page }, info) => {
+test("refresh detects a deleted completed listing, preserves its title and offers recreation without stale stock or editing", async ({ page }, info) => {
+  const { state, operationId, response } = await deletedListing(page);
+  state.publication.operations[0].state = "completed";
+  Object.assign(state.publication.operations[0].items[0], { state: "verified", missingOnProvider: false, error: null, stockState: "ready" });
+  state.remoteRows = [{ ...listing("CARD-1"), title: "Clear card sleeves", priceCents: 2499 }];
+  state.lifecycle.missingOnRefresh.add("CARD-1");
+  await page.route(`**${PUBLICATION_BASE}/operations/${operationId}/recreation?sku=CARD-1`, route => route.fulfill({ json: response }));
+  await page.reload();
+  const row = page.getByRole("row").filter({ hasText: "CARD-1" });
+  await expect(row.getByText("Active", { exact: true })).toBeVisible();
+  await expect(row.getByLabel("Walmart stock for CARD-1", { exact: true })).toHaveText("100");
+  await page.getByRole("button", { name: "Refresh listings", exact: true }).click();
+  await expect(row.getByText("Missing on Walmart", { exact: true })).toBeVisible();
+  await expect(row.getByText("Clear card sleeves", { exact: true })).toBeVisible();
+  await expect(row.getByLabel("Walmart stock for CARD-1", { exact: true })).toHaveText("—");
+  await expect(row.getByRole("button", { name: /Edit listing/ })).toHaveCount(0);
+  expect(state.lifecycle.presenceReads.flat()).toContain("CARD-1");
+  await row.screenshot({ path: info.outputPath("missing-walmart-listing.png") });
+  await row.getByRole("button", { name: "More actions for CARD-1", exact: true }).click();
+  await page.getByRole("menuitem", { name: "Recreate on Walmart", exact: true }).click();
+  await expect(page.getByRole("dialog").getByLabel("Walmart title", { exact: true })).toHaveValue(response.item.title!);
+  expect(state.publication.writes).toEqual([]);
+});
+
+for (const method of ["create", "match"] as const) {
+test(`recreates a deleted listing through a ${method} draft and review while preserving its GTIN and other draft edits`, async ({ page }, info) => {
   const { state, operationId, response } = await deletedListing(page);
   let lookups = 0;
   await page.route(`**${PUBLICATION_BASE}/operations/${operationId}/recreation?sku=CARD-1`, async route => {
@@ -116,19 +142,32 @@ test("recreates a deleted listing through a fresh full draft and review while pr
   await page.getByRole("menuitem", { name: "Recreate on Walmart", exact: true }).click();
   const editor = page.getByRole("dialog");
   await expect(editor.getByLabel("Listing method", { exact: true })).toHaveValue("create");
-  await expect(editor.getByLabel("Listing method", { exact: true })).toBeDisabled();
+  await expect(editor.getByLabel("Listing method", { exact: true })).toBeEnabled();
+  await expect(editor.getByLabel("Identifier for this selling unit", { exact: true })).toHaveValue("00850025354769");
+  await expect(editor.getByLabel("Identifier for this selling unit", { exact: true })).toBeDisabled();
+  await expect(editor.getByLabel("Identifier type", { exact: true })).toBeDisabled();
   await expect(editor.getByLabel("Walmart title", { exact: true })).toHaveValue(response.item.title!);
   await expect(editor.getByRole("status")).toContainText("Recreate on Walmart. The exact SKU was not found.");
   expect(lookups).toBe(1);
   expect(state.publication.writes).toEqual([]);
+  if (method === "match") {
+    const schema = JSON.parse(readFileSync(resolve("server/modules/channels/__tests__/fixtures/walmart-listing-match.schema.json"), "utf8"));
+    state.publication.requirementsSchema = editorSchema(schema, "MP_ITEM_MATCH", "");
+    await editor.getByLabel("Listing method", { exact: true }).selectOption("match");
+    await expect(editor.getByText(/The product's category and content come from Walmart/)).toBeVisible();
+    await expect(editor.getByLabel("Walmart title", { exact: true })).toHaveCount(0);
+    await editor.screenshot({ path: info.outputPath("recreate-catalog-match-editor.png") });
+  }
   await editor.getByRole("button", { name: "Update draft item", exact: true }).click();
   await expect(row.getByText("Recreate draft", { exact: true })).toBeVisible();
   await page.getByRole("button", { name: "Save draft", exact: true }).click();
   await expect(page.getByRole("button", { name: "Save draft", exact: true })).toBeDisabled();
   expect(state.publication.draft.items.find(item => item.variantId === 26)?.title).toBe("Keep my other edits");
-  expect(state.publication.draft.items.find(item => item.variantId === 1)).toMatchObject(response.item);
+  expect(state.publication.draft.items.find(item => item.variantId === 1)).toEqual({ ...response.item, method,
+    attributes: method === "match" ? { Orderable: { ShippingWeight: 2, condition: "New" } } : response.item.attributes });
   await page.getByRole("button", { name: "Review selected (1)", exact: true }).click();
   await expect(editor.getByText(/This review includes recreating/)).toBeVisible();
+  if (method === "match") await expect(editor.getByText(/Match existing catalog product/)).toBeVisible();
   await expect(editor.getByText(/including when a recreated item's quantity is unchanged/)).toBeVisible();
   await expect(editor.getByRole("button", { name: "Publish 1 items", exact: true })).toBeEnabled();
   await editor.screenshot({ path: info.outputPath("recreate-listing-review.png") });
@@ -136,12 +175,14 @@ test("recreates a deleted listing through a fresh full draft and review while pr
   expect(state.publication.submittedItems).toEqual([]);
   await editor.getByRole("button", { name: "Publish 1 items", exact: true }).click();
   await expect(editor).toHaveCount(0);
-  expect(state.publication.submittedItems).toEqual([expect.objectContaining({ variantId: 1, method: "create", recreateFromOperationId: operationId })]);
+  expect(state.publication.submittedItems).toEqual([expect.objectContaining({ variantId: 1, method, recreateFromOperationId: operationId,
+    identifier: { type: "GTIN", value: "00850025354769" } })]);
   expect(state.publication.draft.items.map(item => item.variantId)).toEqual([26]);
   expect(state.publication.operations.some(operation => operation.id === operationId)).toBe(true);
   expect(state.updates.writes).toEqual([]);
   expect(state.unexpected).toEqual([]); expect(state.errors).toEqual([]);
 });
+}
 
 test("recreated listing distinguishes stock confirmation, a recoverable blocker, and completion", async ({ page }, info) => {
   const state = await setup(page, { remoteRows: [{ ...listing("CARD-P5"), mappingStatus: "linked" }] });

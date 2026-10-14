@@ -100,7 +100,7 @@ describe("shipment close transaction", () => {
     expect(h.db.transaction).toHaveBeenCalledTimes(2);
     const closingTx = h.transactions[0];
     expect(recordShipmentCostRevisions).toHaveBeenCalledWith(closingTx, 1, "operator-1", commandTime, { allocationJustFinalized: true });
-    expect(applyShipmentCostRevisions).toHaveBeenCalledWith(h.transactions[1], 1, expect.any(Object), "system:shipment-costs", commandTime);
+    expect(applyShipmentCostRevisions).toHaveBeenCalledWith(h.transactions[1], 1, expect.any(Object), "operator-1", commandTime);
     expect(h.storage.bulkCreateLandedCostSnapshots).toHaveBeenCalledWith(expect.any(Array), closingTx);
     expect(h.storage.updateInboundShipment).toHaveBeenCalledWith(1, expect.objectContaining({ status: "closed" }), closingTx);
     expect(h.storage.createInboundShipmentStatusHistory).toHaveBeenCalledWith(expect.any(Object), closingTx);

@@ -1,4 +1,6 @@
 import type { ListingAccount } from "@shared/types/channel-listing-publication";
+import type { ListingPresence } from "@shared/types/channel-listing-presence";
+import type { ListingSetupIntent } from "../../inventory-planning/application/listing-setup-intent";
 import type {
   ListingLifecycleView,
   ListingLifecycleCommand,
@@ -7,11 +9,16 @@ import type {
 /** Outgoing listing/content/positive-stock writes share a per-account/SKU lock;
  * retirement takes it exclusively. Zero stock can still drain the listing. */
 export interface ListingWriteGuard {
+  assertNotStopped?(account: ListingAccount, sku: string): Promise<void>;
+  withStockAllowed?<T>(account: ListingAccount, sku: string, quantity: number, work: () => Promise<T>): Promise<T>;
   withAllowed<T>(
     account: ListingAccount,
     skus: readonly string[],
     work: () => Promise<T>,
+    initialStock?: Readonly<ListingSetupIntent>,
   ): Promise<T>;
+  observePresence?(account: ListingAccount, sku: string,
+    observe: () => Promise<ListingPresence>, completingOperationId?: string): Promise<ListingPresence | null>;
 }
 export interface StoredListingLifecycle {
   account: ListingAccount;
@@ -36,6 +43,7 @@ export interface ListingLifecycleSession {
   hasPendingFeed(sku: string): Promise<boolean>;
 }
 export interface ListingLifecycleStore extends ListingWriteGuard {
+  presence?(account: ListingAccount, skus: readonly string[]): Promise<ListingPresence[]>;
   withListing<T>(
     account: ListingAccount,
     sku: string,

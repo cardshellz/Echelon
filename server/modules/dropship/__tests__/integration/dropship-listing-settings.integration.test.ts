@@ -7,11 +7,22 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vites
 import type {
   CategoryListingSettingPatch, ProductListingSettingPatch,
 } from "../../../../../shared/dropship/listing-setting-values";
-import { listingSettingsProductDetailSchema } from "../../../../../shared/dropship/listing-settings";
-import { listingCatalogHash } from "../../application/dropship-listing-content-resolver";
+import {
+  listingSettingsCategoriesResponseSchema,
+  listingSettingsCategoryDetailSchema,
+  listingSettingsProductDetailSchema,
+  listingSettingsProductOwnSettingsSchema,
+  listingSettingsUpdatedProductsResponseSchema,
+} from "../../../../../shared/dropship/listing-settings";
+import { listingCatalogHash, productCatalogHash } from "../../application/dropship-listing-content-resolver";
+import { DropshipListingCategoryMovesService } from "../../application/dropship-listing-category-moves-service";
+import { DropshipListingCategorySettingsService } from "../../application/dropship-listing-category-settings-service";
 import { DropshipListingPriceService } from "../../application/dropship-listing-price-service";
+import type { ListingSettingEbayPort } from "../../application/dropship-listing-setting-ebay-values";
+import { ListingSettingHeavyWriteGate } from "../../application/dropship-listing-setting-write-support";
 import { buildListingSettingsFacts, selectListingSettingsProduct } from "../../application/dropship-listing-settings-facts";
 import { DropshipListingSettingsService, type ListingSettingsLoad } from "../../application/dropship-listing-settings-service";
+import { categoryMarksJobKey } from "../../domain/category-marks-job";
 import { listingSettingRequestHash } from "../../domain/listing-setting-values";
 import { PgDropshipListingContentRepository } from "../../infrastructure/dropship-listing-content.repository";
 import { PgDropshipListingPreviewRepository } from "../../infrastructure/dropship-listing-preview.repository";
@@ -91,6 +102,7 @@ const STORE_NO_RULES = 24; // vendor 10, eBay, no pricing rules
 const STORE_SHOPIFY = 25; // vendor 10, not eBay
 const STORE_OTHER_VENDOR = 23; // vendor 11
 const TOPLOADERS = 3; // Card Shellz category of product 7 (sizes 101-103); product 8 has none
+const SLEEVES = 5; // a Card Shellz category no product is in at first
 
 interface Statement { connection: number; sql: string }
 
@@ -234,6 +246,18 @@ describeDatabase.sequential("listing settings PostgreSQL read guarantees", () =>
         return tx.saveCategory({ categoryId, expectedRevisionId: current?.revisionId ?? null, patch,
           requestHash: listingSettingRequestHash({ key, patch }), now: NOW });
       });
+  }
+  /** First category marks through the wrapper the job uses (executeForSystem + insertFirstCategoryMarks, plan 10.5). */
+  async function markFirst(storeConnectionId: number, productIds: number[], now = NOW) {
+    const jobKey = categoryMarksJobKey(now);
+    return new PgDropshipListingSettingWritesRepository(scopedPool()).executeForSystem({ storeConnectionId, jobKey },
+      (tx) => tx.insertFirstCategoryMarks({ productIds, jobKey, now }));
+  }
+  /** "Got it" (W13) through its real service and wrapper, as the page sends it. */
+  async function gotIt(items: Array<{ productId: number; shownCategoryId: number | null }>, key: string, now: Date) {
+    return new DropshipListingCategoryMovesService({ repository: new PgDropshipListingSettingWritesRepository(scopedPool()),
+      clock: { now: () => now }, timer: () => 0, log: { info: vi.fn() } })
+      .acknowledgeForMember("member-1", STORE_RULES, { idempotencyKey: `category-moves:${key}`, items });
   }
   /** Row contents of every table in the isolated schema, to prove a read changed nothing. */
   async function databaseState(): Promise<Record<string, string | null>> {
@@ -552,6 +576,8 @@ describeDatabase.sequential("listing settings PostgreSQL read guarantees", () =>
     ["the store's tokens", () => execute("UPDATE dropship.dropship_store_connections SET refresh_token_ref = NULL WHERE id = 22")],
     ["a product setting", () => saveProductSetting(8, { returnPolicy: { id: "return-p", name: null } }, "change-product-8")],
     ["a category setting", () => saveCategorySetting(TOPLOADERS, { storeShelf: { mode: "none" } }, "change-category-3")],
+    // The store's category marks (plan P29): the first-mark job's insert.
+    ["a first category mark", () => markFirst(STORE_RULES, [7])],
   ];
   it.each(changes)("changes the fingerprint when %s changes", async (_change, change) => {
     const before = await fingerprint();
@@ -584,6 +610,8 @@ describeDatabase.sequential("listing settings PostgreSQL read guarantees", () =>
     ["an inactive Card Shellz rule", () => execute("INSERT INTO dropship.dropship_catalog_rules (id, scope_type, action, is_active) VALUES (2, 'catalog', 'exclude', false)")],
     ["another store's product setting", () => saveProductSetting(7, { storeShelf: { mode: "none" } }, "other-store-product-7", STORE_NO_RULES)],
     ["another store's category setting", () => saveCategorySetting(TOPLOADERS, { storeShelf: { mode: "none" } }, "other-store-category-3", STORE_NO_RULES)],
+    ["another store's category mark", () => markFirst(STORE_NO_RULES, [7, 8])],
+    ["another vendor's category mark", () => markFirst(STORE_OTHER_VENDOR, [7, 8])],
   ];
   it.each(unrelated)("keeps the fingerprint when only %s changes", async (_change, change) => {
     const before = await fingerprint();
@@ -683,6 +711,102 @@ describeDatabase.sequential("listing settings PostgreSQL read guarantees", () =>
     }
   });
 
+  it("gives one product's own settings from its own row, read now in one read-only snapshot with no lock and no write (PR 10, plan 4.2)", async () => {
+    const [sleevesSize] = await new PgDropshipListingPreviewRepository(scopedPool()).listCatalogCandidates([201]);
+    const saved = await saveProductSetting(8, {
+      price: { basis: "catalog_retail", markupBps: 1_000, flatCents: 0, rounding: "cent" },
+      ebayCategory: { categoryId: "261328", categoryName: "Card Sleeves", path: ["Collectibles", "Card Sleeves"] },
+      storeShelf: { mode: "own", shelves: [{ id: "12", name: "Supplies:Sleeves" }] },
+      shippingPolicy: { id: "ship-p", name: "Free shipping" },
+      returnPolicy: { id: "return-p", name: null },
+      textAbove: { mode: "own", text: "Ships in a rigid mailer." },
+      textBelow: { mode: "none" },
+      mainText: { text: "Our product words.", catalogHash: productCatalogHash(sleevesSize) },
+    }, "own-read-product-8");
+    // Product 7 has none of its own: its category's value and its sizes' leftovers (beforeEach) are not its own.
+    await saveCategorySetting(TOPLOADERS, { returnPolicy: { id: "return-c", name: "Category returns" } }, "own-read-category-3");
+    const statements: Statement[] = [];
+    const modes: Array<{ connection: number; isolation: string; readOnly: string }> = [];
+    let connection = 0;
+    const service = new DropshipListingSettingsService({
+      repository: settings({ statements, afterStatement: async (sql, client) => {
+        if (!sql.startsWith("BEGIN")) return;
+        connection = statements.at(-1)!.connection;
+        // Asked on the read's own connection inside its transaction; not recorded.
+        modes.push({ connection, isolation: (await client.query("SHOW transaction_isolation")).rows[0].transaction_isolation,
+          readOnly: (await client.query("SHOW transaction_read_only")).rows[0].transaction_read_only });
+      } }),
+      stock: { atp: { getVariantAtp: async () => { throw new Error("The own read reads no stock."); } },
+        overrides: { listVariantOverrides: async () => { throw new Error("The own read reads no stock."); } } },
+      clock: { now: () => NOW },
+      logger,
+    });
+    const before = await databaseState();
+
+    const own = await service.getProductOwnSettings("member-1", { storeConnectionId: STORE_RULES, productId: 8 });
+
+    expect(listingSettingsProductOwnSettingsSchema.parse(own)).toEqual({ storeConnectionId: STORE_RULES, productId: 8,
+      revisionId: saved.row!.revisionId, generatedAt: NOW.toISOString(), own: {
+        price: { basis: "catalog_retail", markupBps: 1_000, flatCents: 0, rounding: "cent" },
+        ebayCategory: { categoryId: "261328", categoryName: "Card Sleeves" },
+        storeShelf: { mode: "own", shelves: [{ id: "12", name: "Supplies:Sleeves" }] },
+        shippingPolicy: { id: "ship-p", name: "Free shipping" },
+        returnPolicy: { id: "return-p", name: null },
+        paymentPolicy: null,
+        textAbove: { mode: "own", text: "Ships in a rigid mailer." },
+        textBelow: { mode: "none" },
+        // The product's own text, not its size's (beforeEach), checked against the catalog read with it.
+        mainText: { text: "Our product words.", needsCheck: false },
+      } });
+    // The revision a product save sends back is the one the id list gives.
+    expect((await service.listProductIdsForMember("member-1", { storeConnectionId: STORE_RULES, productId: 8 })).rows)
+      .toEqual([{ productId: 8, revisionId: own.revisionId }]);
+    expect(await databaseState()).toEqual(before);
+    for (const { sql } of statements) {
+      expect(sql).not.toMatch(/\b(INSERT|UPDATE|DELETE|TRUNCATE|LOCK TABLE|FOR UPDATE|FOR SHARE|pg_advisory\w*)\b/i);
+    }
+    // The views' snapshot (connection 1), then the own read's: the row, then its catalog facts, on one connection.
+    const ownRead = statements.filter((statement) => statement.connection === 2).map((statement) => statement.sql);
+    expect(ownRead[0]).toBe("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
+    expect(ownRead.at(-1)).toBe("COMMIT");
+    expect(ownRead).toHaveLength(4);
+    expect(ownRead[1]).toMatch(/FROM dropship\.dropship_product_listing_settings s\b/);
+    expect(ownRead[2]).toMatch(/FROM catalog\.product_variants pv\b/);
+    expect(modes.filter((mode) => mode.connection === 2)).toEqual([{ connection: 2, isolation: "repeatable read", readOnly: "on" }]);
+    // Every Dropship table it reads is in the fingerprint (or named by a revision id the fingerprint holds).
+    const fingerprintStatements: Statement[] = [];
+    await settings({ statements: fingerprintStatements }).readFingerprint({ memberId: "member-1", storeConnectionId: STORE_RULES });
+    const tablesIn = (rows: string[]) => new Set(rows.flatMap((sql) => [...sql.matchAll(/\bdropship\.([a-z_]+)/g)].map((match) => match[1])));
+    const covered = tablesIn(fingerprintStatements.map((statement) => statement.sql));
+    expect([...tablesIn(ownRead)].filter((table) => !covered.has(table) && !NAMED_BY_REVISION_ID.has(table))).toEqual([]);
+
+    // Card Shellz changes the product's description: the main text needs a check at once, inside the views' time limit.
+    await execute("UPDATE catalog.products SET description = 'New sleeves text.' WHERE id = 8");
+    const changed = await databaseState();
+    const loads = statements.filter((statement) => statement.sql.startsWith("BEGIN")).length;
+    expect((await service.getProductOwnSettings("member-1", { storeConnectionId: STORE_RULES, productId: 8 })).own.mainText)
+      .toEqual({ text: "Our product words.", needsCheck: true });
+    expect(statements.filter((statement) => statement.sql.startsWith("BEGIN"))).toHaveLength(loads + 1);
+
+    // No row of its own: every value null, no revision, and no catalog read.
+    const firstBlank = statements.length;
+    expect(await service.getProductOwnSettings("member-1", { storeConnectionId: STORE_RULES, productId: 7 })).toEqual({
+      storeConnectionId: STORE_RULES, productId: 7, revisionId: null, generatedAt: NOW.toISOString(), own: { price: null, ebayCategory: null,
+        storeShelf: null, shippingPolicy: null, returnPolicy: null, paymentPolicy: null, textAbove: null, textBelow: null, mainText: null } });
+    expect(statements.slice(firstBlank).some((statement) => /\bcatalog\./.test(statement.sql))).toBe(false);
+
+    // A product with no chosen size (product 9 does not exist): the product detail's 404.
+    await expect(service.getProductOwnSettings("member-1", { storeConnectionId: STORE_RULES, productId: 9 }))
+      .rejects.toMatchObject({ code: "DROPSHIP_LISTING_SETTINGS_PRODUCT_NOT_FOUND" });
+    // Another vendor's store: the ownership check alone (one statement on the pool), no read of its rows.
+    const firstForeign = statements.length;
+    await expect(service.getProductOwnSettings("member-1", { storeConnectionId: STORE_OTHER_VENDOR, productId: 8 }))
+      .rejects.toMatchObject({ code: "DROPSHIP_STORE_CONNECTION_REQUIRED" });
+    expect(statements.slice(firstForeign).map((statement) => [statement.connection, statement.sql.trimStart().slice(0, 10)]))
+      .toEqual([[0, "WITH owner"]]);
+    expect(await databaseState()).toEqual(changed);
+  });
+
   it("gives a size priced by its category's own price the price the per-size price read gives, in a store without rules", async () => {
     await saveCategorySetting(TOPLOADERS, { price: { basis: "catalog_retail", markupBps: 0, flatCents: 100, rounding: "cent" } },
       "category-price-3", STORE_NO_RULES);
@@ -712,6 +836,118 @@ describeDatabase.sequential("listing settings PostgreSQL read guarantees", () =>
     expect(uncovered).toEqual([]);
   });
 
+  it("reads the category views from the same snapshot with no lock and no write, naming every chosen category live (PR 9e, PG 6)", async () => {
+    await saveCategorySetting(TOPLOADERS, { storeShelf: { mode: "none" }, returnPolicy: { id: "return-c", name: "Category returns" } },
+      "category-view-3");
+    await saveProductSetting(7, { textAbove: { mode: "own", text: "Product above." } }, "category-view-product-7");
+    // A category with no settings row is named too: product 8 moves into Sleeves, which has none (plan 8.11).
+    await execute("UPDATE catalog.products SET category_id = 5 WHERE id = 8");
+    await execute("UPDATE catalog.product_categories SET name = 'Top loaders' WHERE id = 3");
+    const before = await databaseState();
+    const statements: Statement[] = [];
+    const service = new DropshipListingSettingsService({
+      repository: settings({ statements }),
+      stock: { atp: { getVariantAtp: async () => { throw new Error("The category views read no stock."); } },
+        overrides: new PgDropshipListingPreviewRepository(scopedPool()) },
+      clock: { now: () => NOW },
+      logger,
+    });
+
+    const list = await service.listCategoriesForMember("member-1", { storeConnectionId: STORE_RULES });
+    const detail = await service.getCategoryForMember("member-1", { storeConnectionId: STORE_RULES, categoryId: TOPLOADERS });
+
+    expect(listingSettingsCategoriesResponseSchema.parse(list)).toEqual({ storeConnectionId: STORE_RULES, categories: [
+      { categoryId: 5, name: "Sleeves", productCount: 1, revisionId: null, setFields: [] },
+      { categoryId: TOPLOADERS, name: "Top loaders", productCount: 1, revisionId: expect.any(Number), setFields: ["storeShelf", "returnPolicy"] },
+    ], uncategorizedProductCount: 0, generatedAt: NOW.toISOString() });
+    expect(listingSettingsCategoryDetailSchema.parse(detail)).toMatchObject({ categoryId: TOPLOADERS, name: "Top loaders", productCount: 1,
+      settings: {
+        storeShelf: { source: "category", value: { mode: "none" } },
+        returnPolicy: { source: "category", value: { id: "return-c", name: "Category returns" } },
+        shippingPolicy: { source: "store_default", value: { id: "ship-a", name: null } },
+        price: { source: "store_default", value: { basis: "product_cost", markupBps: 3000, flatCents: 100, rounding: "cent" } },
+      },
+      // Product 7 has its own text above, size 101 a shelf and size 102 a shipping policy left by today's panels.
+      ownValues: [{ productId: 7, revisionId: expect.any(Number), fields: ["storeShelf", "shippingPolicy", "textAbove"] }],
+    });
+    expect(detail.examples.map((size) => size.productVariantId)).toEqual([101, 102, 103]);
+    await expect(service.getCategoryForMember("member-1", { storeConnectionId: STORE_RULES, categoryId: 99 }))
+      .rejects.toMatchObject({ code: "DROPSHIP_LISTING_SETTINGS_CATEGORY_NOT_FOUND" });
+
+    // One fingerprint read per request and one load; nothing writes or locks, and nothing changed.
+    expect(statements.filter((statement) => statement.sql.startsWith("BEGIN"))).toHaveLength(1);
+    for (const { sql } of statements) {
+      expect(sql).not.toMatch(/\b(INSERT|UPDATE|DELETE|TRUNCATE|LOCK TABLE|FOR UPDATE|FOR SHARE|pg_advisory\w*)\b/i);
+    }
+    expect(await databaseState()).toEqual(before);
+    // The names come from the load's one category name read, for every chosen category.
+    const nameReads = statements.filter((statement) => /FROM catalog\.product_categories\b/.test(statement.sql));
+    expect(nameReads).toHaveLength(1);
+  });
+
+  it("derives in W12 exactly the clear set the category view shows, so a clear built from the view saves (PR 9e, plan 8.12 #1)", async () => {
+    // The category holds the shelf, a shipping policy and text above, so a clear of all three re-sends stored values (no eBay call).
+    await saveCategorySetting(TOPLOADERS, { storeShelf: { mode: "none" }, shippingPolicy: { id: "ship-c", name: "Category ship" },
+      textAbove: { mode: "none" } }, "round-trip-category");
+    // Product 7: its own text above on its row; the fixture left a shelf on size 101 and a shipping policy on size 102.
+    await saveProductSetting(7, { textAbove: { mode: "own", text: "Product above." } }, "round-trip-product-7");
+    // Product 8 joins the category with no settings row: its only own value is a shipping policy left on size 201.
+    await execute("UPDATE catalog.products SET category_id = $1 WHERE id = 8", [TOPLOADERS]);
+    await setPolicyOverride(201, "ship-p");
+    // Product 10 holds only a return policy of its own, and a shelf on size 1002, which the vendor does not choose:
+    // a leftover on an unchosen size is no own value on either side, so 10 is shown and stays out of the clear.
+    await execute(`INSERT INTO catalog.products (id, sku, name, category, category_id, product_type)
+      VALUES (10, 'TL2', 'Toploader 2', 'Toploaders', $1, 'toploader')`, [TOPLOADERS]);
+    await execute(`INSERT INTO catalog.product_variants (id, product_id, sku, name, sales_eligibility)
+      VALUES (1001, 10, 'TL2-25', 'Pack of 25', 'sellable'), (1002, 10, 'TL2-100', 'Pack of 100', 'sellable')`);
+    await execute(`INSERT INTO dropship.dropship_vendor_selection_rules (id, vendor_id, scope_type, action, product_variant_id, priority)
+      VALUES (4, 10, 'variant', 'exclude', 1002, 10)`);
+    await setShelf(1002, "Unchosen");
+    await saveProductSetting(10, { returnPolicy: { id: "return-p", name: "Product returns" } }, "round-trip-product-10");
+    const reads = new DropshipListingSettingsService({
+      repository: settings(),
+      stock: { atp: { getVariantAtp: async () => { throw new Error("The category views read no stock."); } },
+        overrides: new PgDropshipListingPreviewRepository(scopedPool()) },
+      clock: { now: () => NOW },
+      logger,
+    });
+    const cleared = ["storeShelf", "shippingPolicy", "textAbove"] as const;
+    const meetsClear = (fields: readonly string[]) => fields.some((field) => (cleared as readonly string[]).includes(field));
+
+    const detail = listingSettingsCategoryDetailSchema.parse(
+      await reads.getCategoryForMember("member-1", { storeConnectionId: STORE_RULES, categoryId: TOPLOADERS }));
+    expect([...detail.ownValues].sort((a, b) => a.productId - b.productId)).toEqual([
+      { productId: 7, revisionId: expect.any(Number), fields: ["storeShelf", "shippingPolicy", "textAbove"] },
+      { productId: 8, revisionId: null, fields: ["shippingPolicy"] },
+      { productId: 10, revisionId: expect.any(Number), fields: ["returnPolicy"] },
+    ]);
+    const shown = detail.ownValues.filter((entry) => meetsClear(entry.fields));
+
+    const ebayAsked: ListingSettingEbayPort = {
+      describeCategories: async () => { throw new Error("W12 asked eBay."); },
+      discoverPolicies: async () => { throw new Error("W12 asked eBay."); },
+      loadFulfillmentCapability: async () => { throw new Error("W12 asked eBay."); },
+      listStoreShelves: async () => { throw new Error("W12 asked eBay."); },
+    };
+    const w12 = new DropshipListingCategorySettingsService({ repository: new PgDropshipListingSettingWritesRepository(scopedPool()),
+      ebay: ebayAsked, heavyWrites: new ListingSettingHeavyWriteGate(), clock: { now: () => NOW }, timer: () => 0, log: { info: vi.fn() } });
+    const result = await w12.saveForMember("member-1", STORE_RULES, TOPLOADERS, {
+      idempotencyKey: "category-settings:round-trip", expectedRevisionId: detail.revisionId,
+      patch: { storeShelf: { mode: "none" }, shippingPolicy: { id: "ship-c" }, textAbove: { mode: "none" } },
+      clear: { fields: [...cleared], products: shown.map((entry) => ({ productId: entry.productId, expectedRevisionId: entry.revisionId })) },
+    });
+
+    expect(result).toEqual({ outcome: "changed", categoryId: TOPLOADERS, revisionId: detail.revisionId, clearedProductCount: 2 });
+    // The same service: the write changed the fingerprint, so the next read is rebuilt and shows only product 10.
+    const after = await reads.getCategoryForMember("member-1", { storeConnectionId: STORE_RULES, categoryId: TOPLOADERS });
+    expect(after.ownValues).toEqual([{ productId: 10, revisionId: expect.any(Number), fields: ["returnPolicy"] }]);
+    // The unchosen size's shelf is product 10's, which was not cleared; every cleared product's leftovers are gone.
+    const shelves = await execute("SELECT product_variant_id FROM dropship.dropship_ebay_store_category_assignments ORDER BY 1");
+    expect(shelves.rows).toEqual([{ product_variant_id: 1002 }]);
+    expect((await execute("SELECT count(*)::int AS n FROM dropship.dropship_ebay_listing_policy_overrides WHERE fulfillment_policy_id IS NOT NULL"))
+      .rows[0].n).toBe(0);
+  });
+
   it("builds the views without costs when the cost source fails, inside the same snapshot", async () => {
     const report = vi.fn();
     await execute("ALTER TABLE membership.plan_variant_overrides RENAME TO plan_variant_overrides_unavailable");
@@ -735,5 +971,157 @@ describeDatabase.sequential("listing settings PostgreSQL read guarantees", () =>
     const result = await load();
     expect(result).toMatchObject({ state: "too_large", store: { storeConnectionId: STORE_RULES },
       storeLevel: { pricing: { revisionId: 1 }, listingConfig: { storeConnectionId: STORE_RULES } } });
+  });
+  describe("Card Shellz updated products: marks in the fingerprint and the read (plan PR 9, 10.6, 10.9)", () => {
+    const LATER = new Date(NOW.getTime() + 2 * 60 * 60 * 1000);
+    const LATEST = new Date(NOW.getTime() + 3 * 60 * 60 * 1000);
+    const readsService = (clock: { now: () => Date }, options: Parameters<typeof scopedPool>[0] = {}) => new DropshipListingSettingsService({
+      repository: settings(options),
+      stock: { atp: { getVariantAtp: async () => { throw new Error("The updated products read no stock."); } },
+        overrides: new PgDropshipListingPreviewRepository(scopedPool()) },
+      clock,
+      logger,
+    });
+
+    it("changes the fingerprint on a Got it, and not on the move itself, which Card Shellz owns (P29)", async () => {
+      await markFirst(STORE_RULES, [7, 8]);
+      const marked = await fingerprint();
+      await execute("UPDATE catalog.products SET category_id = $1 WHERE id = 7", [SLEEVES]);
+      // A move is Card Shellz's, with no revision: the cache's time limit covers it (Listing settings design 8.4).
+      expect(await fingerprint()).toBe(marked);
+
+      await expect(gotIt([{ productId: 7, shownCategoryId: SLEEVES }], "fingerprint", LATER))
+        .resolves.toEqual({ outcome: "acknowledged", acknowledgedProductIds: [7], movedAgainProductIds: [] });
+
+      const acknowledged = await fingerprint();
+      expect(acknowledged).not.toBe(marked);
+      // The job's next run inserts nothing, so it changes nothing.
+      await markFirst(STORE_RULES, [7, 8], LATEST);
+      expect(await fingerprint()).toBe(acknowledged);
+    });
+
+    it("reads the marks and the moved products' old categories in the snapshot, with no lock and no write, apart from the other views' inputs", async () => {
+      await saveCategorySetting(TOPLOADERS, { storeShelf: { mode: "none" }, returnPolicy: { id: "return-top", name: "Top returns" } }, "moves-read-3");
+      await markFirst(STORE_RULES, [7, 8]);
+      await execute("UPDATE catalog.products SET category_id = $1 WHERE id = 7", [SLEEVES]);
+      const before = await databaseState();
+      const statements: Statement[] = [];
+
+      const result = okLoad(await load(STORE_RULES, { statements }));
+
+      for (const { sql } of statements) {
+        expect(sql).not.toMatch(/\b(INSERT|UPDATE|DELETE|TRUNCATE|LOCK TABLE|FOR UPDATE|FOR SHARE|pg_advisory\w*)\b/i);
+      }
+      expect(await databaseState()).toEqual(before);
+      expect(new Set(statements.map((statement) => statement.connection))).toEqual(new Set([1]));
+      // Besides the fingerprint, which digests the same tables first: one marks read, and two of each below.
+      const reads = statements.filter((statement) => !statement.sql.trimStart().startsWith("WITH owner"));
+      expect(reads.filter((statement) => /FROM dropship\.dropship_product_category_seen\b/.test(statement.sql))).toHaveLength(1);
+      // The layers' category read (Sleeves has no row), then the moved product's old category; the same for the names.
+      expect(reads.filter((statement) => /FROM dropship\.dropship_category_listing_settings\b/.test(statement.sql))).toHaveLength(2);
+      expect(reads.filter((statement) => /FROM catalog\.product_categories\b/.test(statement.sql))).toHaveLength(2);
+      expect(result.inputs.categoryMoves.marks).toEqual(new Map([
+        [7, { storeConnectionId: STORE_RULES, productId: 7, categoryId: TOPLOADERS, seenAt: NOW.toISOString() }],
+        [8, { storeConnectionId: STORE_RULES, productId: 8, categoryId: null, seenAt: NOW.toISOString() }],
+      ]));
+      expect([...result.inputs.categoryMoves.fromCategories.keys()]).toEqual([TOPLOADERS]);
+      expect(result.inputs.categoryMoves.fromCategoryNames).toEqual(new Map([[TOPLOADERS, "Toploaders"]]));
+      // The other views read what they read before: the current categories only (plan 10.6).
+      expect([...result.inputs.layers.categories.keys()]).toEqual([]);
+      expect(result.inputs.categoryNames).toEqual(new Map([[SLEEVES, "Sleeves"]]));
+    });
+
+    it("has every Dropship table a load with a moved product reads in the fingerprint", async () => {
+      await saveCategorySetting(TOPLOADERS, { storeShelf: { mode: "none" } }, "moves-guard-3");
+      await markFirst(STORE_RULES, [7, 8]);
+      await execute("UPDATE catalog.products SET category_id = $1 WHERE id = 7", [SLEEVES]);
+      const fingerprintStatements: Statement[] = [];
+      await settings({ statements: fingerprintStatements }).readFingerprint({ memberId: "member-1", storeConnectionId: STORE_RULES });
+      const loadStatements: Statement[] = [];
+      okLoad(await load(STORE_RULES, { statements: loadStatements }));
+      const tablesIn = (rows: Statement[]) => new Set(rows.flatMap((row) => [...row.sql.matchAll(/\bdropship\.([a-z_]+)/g)].map((match) => match[1])));
+      const covered = tablesIn(fingerprintStatements);
+      expect(covered.has("dropship_product_category_seen")).toBe(true);
+      expect(tablesIn(loadStatements).has("dropship_product_category_seen")).toBe(true);
+      expect([...tablesIn(loadStatements)].filter((table) => !covered.has(table) && !NAMED_BY_REVISION_ID.has(table))).toEqual([]);
+    });
+
+    it("lists a product moved after its first mark with from and to, drops it after Got it, and keeps one that moved again (shown again within the time limit)", async () => {
+      await saveCategorySetting(TOPLOADERS, { storeShelf: { mode: "none" }, returnPolicy: { id: "return-top", name: "Top returns" } }, "moves-top");
+      await saveCategorySetting(SLEEVES, { returnPolicy: { id: "return-sleeves", name: null } }, "moves-sleeves");
+      await markFirst(STORE_RULES, [7, 8]);
+      let nowMs = NOW.getTime();
+      const statements: Statement[] = [];
+      const reads = readsService({ now: () => new Date(nowMs) }, { statements });
+      const updated = async () => listingSettingsUpdatedProductsResponseSchema.parse(
+        await reads.listUpdatedProductsForMember("member-1", { storeConnectionId: STORE_RULES }));
+      const nothing = { total: 0, rows: [], moves: { total: 0, items: [] } };
+
+      expect(await updated()).toMatchObject(nothing);
+      // Card Shellz moves product 7 to Sleeves and product 8 into Toploaders. The cached view shows it within the time limit.
+      await execute("UPDATE catalog.products SET category_id = $1 WHERE id = 7", [SLEEVES]);
+      await execute("UPDATE catalog.products SET category_id = $1 WHERE id = 8", [TOPLOADERS]);
+      expect(await updated()).toMatchObject(nothing);
+      nowMs += 60_000;
+
+      const moved = await updated();
+      expect(moved).toEqual({ storeConnectionId: STORE_RULES, page: 0, pageSize: 50, total: 2, rows: [
+        // By name: Penny sleeves, then Toploader 3x4. Size 101's own shelf does not cover sizes 102 and 103, so the shelf stays.
+        { productId: 8, productName: "Penny sleeves", ownTextNeedsCheck: false, move: { from: { categoryId: null, name: null },
+          to: { categoryId: TOPLOADERS, name: "Toploaders" }, changedFields: ["storeShelf", "returnPolicy"] } },
+        { productId: 7, productName: "Toploader 3x4", ownTextNeedsCheck: false, move: { from: { categoryId: TOPLOADERS, name: "Toploaders" },
+          to: { categoryId: SLEEVES, name: "Sleeves" }, changedFields: ["storeShelf", "returnPolicy"] } },
+      ], moves: { total: 2, items: [{ productId: 8, shownCategoryId: TOPLOADERS }, { productId: 7, shownCategoryId: SLEEVES }] },
+      generatedAt: new Date(nowMs).toISOString() });
+
+      // Product 8 moves again, to Sleeves, before the vendor's Got it for all 2 arrives with what the page showed.
+      await execute("UPDATE catalog.products SET category_id = $1 WHERE id = 8", [SLEEVES]);
+      await expect(gotIt(moved.moves.items, "all-2", LATER))
+        .resolves.toEqual({ outcome: "acknowledged", acknowledgedProductIds: [7], movedAgainProductIds: [8] });
+
+      // The marks are in the fingerprint, so the next read is built again at once, with no time passing.
+      const afterGotIt = await updated();
+      expect(afterGotIt).toMatchObject({ total: 1, rows: [{ productId: 8, ownTextNeedsCheck: false, move: {
+        from: { categoryId: null, name: null }, to: { categoryId: SLEEVES, name: "Sleeves" }, changedFields: ["returnPolicy"] } }],
+      moves: { total: 1, items: [{ productId: 8, shownCategoryId: SLEEVES }] }, generatedAt: new Date(nowMs).toISOString() });
+
+      // Product 8 moves again, into Toploaders, and a Got it arrives with the page's Sleeves. Every product of it moved
+      // again, so it writes no mark (only its ledger and audit rows, which are not fingerprint parts): the fingerprint
+      // stays, and the cached view, still showing Sleeves, is served until the time limit, like any move.
+      const beforeStaleGotIt = await fingerprint();
+      await execute("UPDATE catalog.products SET category_id = $1 WHERE id = 8", [TOPLOADERS]);
+      await expect(gotIt(afterGotIt.moves.items, "stale-1", LATEST))
+        .resolves.toEqual({ outcome: "acknowledged", acknowledgedProductIds: [], movedAgainProductIds: [8] });
+      expect(await fingerprint()).toBe(beforeStaleGotIt);
+      expect(await updated()).toEqual(afterGotIt);
+      nowMs += 60_000;
+
+      const movedAgain = await updated();
+      expect(movedAgain).toMatchObject({ total: 1, rows: [{ productId: 8, move: { from: { categoryId: null, name: null },
+        to: { categoryId: TOPLOADERS, name: "Toploaders" }, changedFields: ["storeShelf", "returnPolicy"] } }],
+      moves: { total: 1, items: [{ productId: 8, shownCategoryId: TOPLOADERS }] }, generatedAt: new Date(nowMs).toISOString() });
+
+      await expect(gotIt(movedAgain.moves.items, "all-1", LATEST))
+        .resolves.toEqual({ outcome: "acknowledged", acknowledgedProductIds: [8], movedAgainProductIds: [] });
+      expect(await updated()).toMatchObject(nothing);
+      // Five loads (the first, after each time limit, after each Got it that marked), and none of the reads wrote or locked.
+      expect(statements.filter((statement) => statement.sql.startsWith("BEGIN"))).toHaveLength(5);
+      for (const { sql } of statements) {
+        expect(sql).not.toMatch(/\b(INSERT|UPDATE|DELETE|TRUNCATE|LOCK TABLE|FOR UPDATE|FOR SHARE|pg_advisory\w*)\b/i);
+      }
+      expect((await execute(`SELECT product_id, category_id, seen_at FROM dropship.dropship_product_category_seen
+        WHERE store_connection_id = $1 ORDER BY product_id`, [STORE_RULES])).rows).toEqual([
+        { product_id: 7, category_id: SLEEVES, seen_at: LATER }, { product_id: 8, category_id: TOPLOADERS, seen_at: LATEST }]);
+    });
+
+    it("lists a product whose own text needs a check with no move, and no Got it item", async () => {
+      await markFirst(STORE_RULES, [7, 8]);
+      // Card Shellz changes size 201's catalog facts after the vendor wrote its own text against them.
+      await execute("UPDATE catalog.product_variants SET name = 'Pack of 100 (new)' WHERE id = 201");
+      const reads = readsService({ now: () => NOW });
+      expect(listingSettingsUpdatedProductsResponseSchema.parse(await reads.listUpdatedProductsForMember("member-1",
+        { storeConnectionId: STORE_RULES }))).toMatchObject({ total: 1,
+        rows: [{ productId: 8, productName: "Penny sleeves", ownTextNeedsCheck: true, move: null }], moves: { total: 0, items: [] } });
+    });
   });
 });

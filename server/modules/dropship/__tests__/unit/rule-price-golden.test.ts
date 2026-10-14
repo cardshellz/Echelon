@@ -10,8 +10,9 @@ import {
   CATEGORY_PRICE_RULE_NAME, PRODUCT_PRICE_RULE_NAME, pricingProfileStateSchema, type PricingProfileState, type PricingRecipe,
 } from "../../../../../shared/dropship/pricing-rules";
 import {
-  createRulePriceResolver, NO_PRICING_PROFILE_STATE, pricingHash, rulePriceContextOf, type ListingRulePrice, type RulePriceCandidate,
+  createRulePriceResolver, NO_PRICING_PROFILE_STATE, pricingHash, rulePriceContextOf, withRecipes, type ListingRulePrice, type RulePriceCandidate,
 } from "../../application/dropship-rule-price";
+import { buildListingPriceChanges } from "../../application/dropship-listing-price-change-builder";
 import { classifyListing, type CostActionVendorFacts } from "../../application/dropship-cost-change-listing-action-service";
 import { prepareEbayCategoryRules, resolveEbayListingCategory } from "../../application/dropship-ebay-category-resolver";
 import { buildListingSettingsFacts, type ListingSettingsInputs } from "../../application/dropship-listing-settings-facts";
@@ -424,6 +425,51 @@ describe("every price path gives the golden rule prices", () => {
   });
 });
 
+describe("the price-change builder gives the golden rule prices (plan PR 9, 6.4, C-money-6)", () => {
+  /** The facts' inputs for the golden sizes with the golden profile and costs, nothing saved and no settings. */
+  function goldenFactsInputs(candidates: DropshipListingCatalogCandidate[]): ListingSettingsInputs {
+    const ebayCategories = prepareEbayCategoryRules(null, null, EMPTY_LISTING_SETTING_LAYERS);
+    return {
+      store: { vendorId: VENDOR_ID, vendorStatus: "active", entitlementStatus: "active", storeConnectionId: STORE_ID,
+        storeStatus: "connected", setupStatus: "ready", platform: "ebay", storeLaunchReady: true },
+      candidates, sizesTotalByProductId: candidates.reduce((counts, row) => counts.set(row.productId, (counts.get(row.productId) ?? 0) + 1),
+        new Map<number, number>()),
+      savedPrices: new Map(), existingListings: new Map(), pricing: GOLDEN_RULE_PROFILE_STATE,
+      costs: costsFor(GOLDEN_RULE_PRICE_CASES), pricingPolicies: [], listingConfig: null, policyOverrides: new Map(), shelfAssignments: new Map(),
+      ebayCategoryRules: { revisionId: null, profile: null, updatedAt: null },
+      ebayCategories: new Map(candidates.map((row) => [row.productVariantId, resolveEbayListingCategory(row, ebayCategories)])),
+      content: { revisionId: null, profile: null, updatedAt: null }, contentSettings: new Map(), pausedSince: new Map(),
+      layers: EMPTY_LISTING_SETTING_LAYERS, categoryNames: GOLDEN_CATEGORY_NAMES,
+      // No category marks: no product is moved (plan PR 9, 10.1).
+      categoryMoves: { marks: new Map(), fromCategories: new Map(), fromCategoryNames: new Map() },
+    };
+  }
+
+  it("for unchanged inputs, before and after equal the facts' price, the golden price and W9's answer, for every golden size", async () => {
+    mockGoldenCosts();
+    const candidates = catalogCandidates();
+    const facts = new Map(buildListingSettingsFacts(goldenFactsInputs(candidates)).sizes.map((size) => [size.price.productVariantId, size.price]));
+    const context = rulePriceContextOf(GOLDEN_RULE_PROFILE_STATE, EMPTY_LISTING_SETTING_LAYERS);
+    const costs = costsFor(GOLDEN_RULE_PRICE_CASES);
+
+    const changes = buildListingPriceChanges({ before: context, after: context, policies: [], typedInRequest: new Map(),
+      sizes: candidates.map((candidate) => ({ candidate, saved: null, existingListingPriceCents: null,
+        cost: costs.get(candidate.productVariantId) ?? null })) });
+
+    for (const [index, [, row, golden]] of cases.entries()) {
+      const change = changes[index];
+      expect(change.productVariantId).toBe(row.candidate.productVariantId);
+      const w9 = await perSizePrice(candidates[index], fakeClient(profileRow).client);
+      // A size the rules give no price falls to what W9 and the facts give it (no saved setting: the rules own it).
+      expect(change.before.priceCents).toBe(facts.get(row.candidate.productVariantId)!.priceCents);
+      expect(change.before.priceCents).toBe(w9.effectivePriceCents);
+      expect(change.before.priceCents).toBe(golden.priceCents);
+      expect(change.after).toEqual({ ...change.before, typed: false });
+      expect(change.refusal).toBeNull();
+    }
+  });
+});
+
 describe("product and category prices (recipe version 2)", () => {
   const caseFor = (productVariantId: number) => GOLDEN_RULE_PRICE_CASES.find((row) => row.candidate.productVariantId === productVariantId)!;
   const pinFor = (productVariantId: number) => GOLDEN_RULE_PRICES.find((row) => row.productVariantId === productVariantId)!;
@@ -575,6 +621,8 @@ function v2SettingsInputs(input: GoldenRulePriceV2Case): ListingSettingsInputs {
     ebayCategories: new Map([[catalog.productVariantId, resolveEbayListingCategory(catalog, ebayCategories)]]),
     content: { revisionId: null, profile: null, updatedAt: null }, contentSettings: new Map(), pausedSince: new Map(),
     layers, categoryNames: GOLDEN_CATEGORY_NAMES,
+    // No category marks: no product is moved (plan PR 9, 10.1).
+    categoryMoves: { marks: new Map(), fromCategories: new Map(), fromCategoryNames: new Map() },
   };
 }
 /** A rule price's pinned fields, `ruleLevel` null when it is absent (the resolver test also pins that the key is absent). */
@@ -778,6 +826,32 @@ describe("every price path gives the pinned product and category prices", () => 
     expect(size.price).toMatchObject({ priceCents: pin.priceCents, source: "rules", issue: null,
       rule: { kind, name, recipe: winningRecipe(row, pin) }, basis: pin.basis });
   });
+
+  it.each(pricedV2Cases)(
+    "price-change builder: setting the case's recipes on a store without them gives the facts' and W9's price after the save: %s",
+    async (_name, row, pin) => {
+      mockGoldenCosts();
+      const { catalog, cost } = v2Size(row);
+      const saved = v2Saved(row);
+      const before = rulePriceContextOf(v2State(row), EMPTY_LISTING_SETTING_LAYERS);
+      const after = withRecipes(before, { products: new Map(row.products), categories: new Map(row.categories) });
+
+      const [change] = buildListingPriceChanges({ before, after, policies: [], typedInRequest: new Map(),
+        sizes: [{ candidate: catalog, saved, existingListingPriceCents: null, cost }] });
+
+      const [factsAfter] = buildListingSettingsFacts(v2SettingsInputs(row)).sizes;
+      const w9After = await perSizePrice(catalog, v2Client(row).client, saved);
+      expect(change.after.priceCents).toBe(pin.priceCents);
+      expect(change.after.priceCents).toBe(factsAfter.price.priceCents);
+      expect(change.after.priceCents).toBe(w9After.effectivePriceCents);
+      expect(change.afterRule).toMatchObject({ priceCents: pin.priceCents, ruleId: pin.ruleId });
+      // Before is the store without the case's recipes, as the facts read it.
+      const [factsBefore] = buildListingSettingsFacts({ ...v2SettingsInputs(row), layers: EMPTY_LISTING_SETTING_LAYERS,
+        ebayCategories: new Map([[catalog.productVariantId, resolveEbayListingCategory(catalog,
+          prepareEbayCategoryRules(null, null, EMPTY_LISTING_SETTING_LAYERS))]]) }).sizes;
+      expect(change.before.priceCents).toBe(factsBefore.price.priceCents);
+    },
+  );
 
   it.each(unpricedV2Cases)("no path prices a tie, and none falls through to the category's price: %s", async (_name, row, pin) => {
     mockGoldenCosts();

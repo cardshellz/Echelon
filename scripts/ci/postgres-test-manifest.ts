@@ -29,6 +29,8 @@ export const POSTGRES_TEST_FILES: readonly string[] = Object.freeze([
   "server/modules/inventory/__tests__/integration/cost-report-reads.integration.test.ts",
   "server/modules/procurement/__tests__/integration/shipment-purchase-orders.integration.test.ts",
   "server/modules/procurement/__tests__/integration/receiving-cost-application.integration.test.ts",
+  "server/modules/procurement/__tests__/integration/receiving-close-integrity.integration.test.ts",
+  "server/modules/procurement/__tests__/integration/receiving-audit-immutability.integration.test.ts",
   "server/modules/inventory/__tests__/integration/cost-lineage-owners.integration.test.ts",
   "server/modules/inventory/__tests__/integration/lot-cost-ownership.integration.test.ts",
   "server/modules/inventory/__tests__/integration/canonical-claim-picker-observation.integration.test.ts",
@@ -54,6 +56,7 @@ export const POSTGRES_TEST_FILES: readonly string[] = Object.freeze([
   "server/modules/procurement/__tests__/integration/historical-po-supplier-evidence-backfill.integration.test.ts",
   "server/modules/procurement/__tests__/integration/legacy-po-receive-config-remediation.integration.test.ts",
   "server/modules/procurement/__tests__/integration/ap-invoice-line-metadata.integration.test.ts",
+  "server/modules/procurement/__tests__/integration/ap-financial-safeguards.integration.test.ts",
   "server/modules/inventory/__tests__/integration/lot-cost-column-types.integration.test.ts",
   "server/modules/inventory-planning/__tests__/integration/inventory-availability-foundation.integration.test.ts",
   "server/modules/inventory/__tests__/integration/inventory-cutover-encumbrance.integration.test.ts",
@@ -167,5 +170,6 @@ export const POSTGRES_TEST_FILES: readonly string[] = Object.freeze([
   "server/modules/dropship/__tests__/integration/dropship-ebay-category-rules.integration.test.ts",
   "server/modules/procurement/__tests__/integration/supplier-po-document.integration.test.ts",
   "server/modules/marketplace-listings/__tests__/integration/listing-lifecycle.integration.test.ts",
+  "server/modules/marketplace-listings/__tests__/integration/listing-presence.integration.test.ts",
   "server/modules/dropship/__tests__/integration/dropship-listing-setting-writes.integration.test.ts",
 ]);

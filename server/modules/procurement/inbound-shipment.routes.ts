@@ -425,7 +425,7 @@ export function registerInboundShipmentRoutes(app: Express) {
 
   app.post("/api/inbound-shipments/:id/push-costs-to-lots", requirePermission("purchasing", "approve"), async (req, res) => {
     try {
-      const result = await shipmentTracking.pushLandedCostsToLots(Number(req.params.id));
+      const result = await shipmentTracking.pushLandedCostsToLots(Number(req.params.id), req.session.user?.id);
       res.json(result);
     } catch (error: any) {
       if (error instanceof ShipmentTrackingError) return res.status(error.statusCode).json({ error: error.message });

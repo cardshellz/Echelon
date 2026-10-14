@@ -2,11 +2,15 @@ import type { Express, Request, Response } from "express";
 import rateLimit from "express-rate-limit";
 import { ZodError, type z } from "zod";
 import {
+  listingSettingsCategoriesResponseSchema,
+  listingSettingsCategoryDetailSchema,
   listingSettingsPricesResponseSchema,
   listingSettingsProductDetailSchema,
   listingSettingsProductIdsResponseSchema,
+  listingSettingsProductOwnSettingsSchema,
   listingSettingsProductsResponseSchema,
   listingSettingsSummarySchema,
+  listingSettingsUpdatedProductsResponseSchema,
 } from "../../../../../shared/dropship/listing-settings";
 import { logger } from "../../../../platform/observability/logger";
 import type { DropshipListingSettingsService } from "../../application/dropship-listing-settings-service";
@@ -15,7 +19,8 @@ import { createDropshipListingSettingsService } from "../../infrastructure/drops
 import { requireDropshipAuth } from "./dropship-auth.routes";
 
 type ListingSettingsRouteService = Pick<DropshipListingSettingsService,
-  "getSummaryForMember" | "listPricesForMember" | "listProductsForMember" | "listProductIdsForMember" | "getProductForMember">;
+  "getSummaryForMember" | "listPricesForMember" | "listProductsForMember" | "listProductIdsForMember" | "getProductForMember"
+  | "getProductOwnSettings" | "listCategoriesForMember" | "getCategoryForMember" | "listUpdatedProductsForMember">;
 
 /** Reads only, so the read budget from the Listing settings design (8.8). */
 export const LISTING_SETTINGS_READS_PER_MINUTE = 120;
@@ -24,7 +29,8 @@ export const LISTING_SETTINGS_READS_PER_MINUTE = 120;
  * Read-only listing settings views (Listing settings design 8.4). No route
  * here writes or calls eBay. Inputs are checked by the service's schemas and
  * every answer by its response schema. One product's view also reads its
- * sizes' stock, through the same budget.
+ * sizes' stock, and one product's own settings its own row, through the same
+ * budget.
  */
 export function registerDropshipListingSettingsRoutes(
   app: Express,
@@ -53,6 +59,27 @@ export function registerDropshipListingSettingsRoutes(
     () => service.getProductForMember(memberId(req), {
       storeConnectionId: parseId(req.params.storeConnectionId),
       productId: parseId(req.params.productId),
+    })));
+  // One product's own settings row, for its editor (PR 10). One segment longer than the product route, so neither
+  // route can answer the other's path; "ids" here is not a product id and is refused (400).
+  app.get(`${base}/products/:productId/own`, requireDropshipAuth, limiter, (req, res) => respond(req, res,
+    listingSettingsProductOwnSettingsSchema, () => service.getProductOwnSettings(memberId(req), {
+      storeConnectionId: parseId(req.params.storeConnectionId),
+      productId: parseId(req.params.productId),
+    })));
+  // The Card Shellz categories of the chosen products, and one category's settings (PR 9e); the category save is a write route.
+  app.get(`${base}/categories`, requireDropshipAuth, limiter, (req, res) => respond(req, res, listingSettingsCategoriesResponseSchema,
+    () => service.listCategoriesForMember(memberId(req), { storeConnectionId: parseId(req.params.storeConnectionId) })));
+  app.get(`${base}/categories/:categoryId`, requireDropshipAuth, limiter, (req, res) => respond(req, res, listingSettingsCategoryDetailSchema,
+    () => service.getCategoryForMember(memberId(req), {
+      storeConnectionId: parseId(req.params.storeConnectionId),
+      categoryId: parseId(req.params.categoryId),
+    })));
+  // Card Shellz updated products (PR 9g): moves and own text to check. Its "Got it" is a write route.
+  app.get(`${base}/updated-products`, requireDropshipAuth, limiter, (req, res) => respond(req, res,
+    listingSettingsUpdatedProductsResponseSchema, () => service.listUpdatedProductsForMember(memberId(req), {
+      storeConnectionId: parseId(req.params.storeConnectionId),
+      page: queryId(req.query.page),
     })));
 }
 
@@ -106,6 +133,7 @@ async function respond<T>(req: Request, res: Response, schema: z.ZodType<T>, ope
     const errorClass = status >= 500 ? "fatal" : "permanent";
     const storeConnectionId = parseId(req.params.storeConnectionId ?? "");
     const productId = parseId(req.params.productId ?? "");
+    const categoryId = parseId(req.params.categoryId ?? "");
     const entry = {
       outcome: "failed",
       error_code: code,
@@ -114,6 +142,7 @@ async function respond<T>(req: Request, res: Response, schema: z.ZodType<T>, ope
       path: req.route?.path ?? req.path,
       store_connection_id: Number.isSafeInteger(storeConnectionId) ? storeConnectionId : null,
       product_id: Number.isSafeInteger(productId) ? productId : null,
+      ...(Number.isSafeInteger(categoryId) ? { category_id: categoryId } : {}),
       actor_id: req.session?.dropship?.memberId ?? null,
       error_class: errorClass,
       error_message: errorClass === "fatal" && error instanceof Error ? error.message : undefined,
@@ -140,6 +169,7 @@ function statusFor(error: unknown): number {
       return 401;
     case "DROPSHIP_STORE_CONNECTION_REQUIRED":
     case "DROPSHIP_LISTING_SETTINGS_PRODUCT_NOT_FOUND":
+    case "DROPSHIP_LISTING_SETTINGS_CATEGORY_NOT_FOUND":
       return 404;
     case "DROPSHIP_LISTING_SETTINGS_EBAY_ONLY":
     case "DROPSHIP_LISTING_SETTINGS_TOO_LARGE":

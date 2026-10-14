@@ -1,0 +1,296 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { drizzle } from "drizzle-orm/node-postgres";
+import * as schema from "@shared/schema";
+import { createQuantityLedgerTestContext, prepareQuantityLotCreationMetadata, type QuantityLedgerTestContext } from "../../../inventory/__tests__/fixtures/quantity-ledger-database";
+import { fixtureTable, fixtureForeignKeys } from "./shipment-line-fixture";
+import { ReceivingService } from "../../receiving.service";
+import { createPurchasingService } from "../../purchasing.service";
+import { procurementMethods } from "../../procurement.storage";
+import { InventoryUseCases } from "../../../inventory/application/inventory.use-cases";
+import { createInventoryMethods } from "../../../inventory/infrastructure/inventory.repository";
+import { InventoryLotService } from "../../../inventory/lots.service";
+
+// Same module-global exclusion as the existing active-ledger integration suite.
+// Every storage operation used below is bound to the dedicated real SQL executor.
+vi.mock("../../../../db", () => ({ pool: {}, db: {} }));
+const enabled = !!process.env.ECHELON_TEST_DATABASE_URL && process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true";
+const run = enabled ? describe : describe.skip;
+const ACTOR = "receiving-integrity-operator";
+const NOW = new Date("2026-10-13T12:00:00Z");
+const tables = [schema.vendors, schema.purchaseOrders, schema.purchaseOrderLines, schema.inboundShipments,
+  schema.inboundShipmentLines, schema.receivingOrders, schema.receivingLines, schema.poReceipts,
+  schema.poStatusHistory, schema.vendorInvoices, schema.vendorInvoiceLines, schema.receiptReversals] as const;
+
+run.sequential("Receipt integrity with the activated quantity ledger", () => {
+  let context: QuantityLedgerTestContext;
+  let service: ReceivingService;
+  beforeEach(async () => {
+    context = await createQuantityLedgerTestContext(process.env.ECHELON_TEST_DATABASE_URL, true);
+    const pool = context.pool;
+    await prepareQuantityLotCreationMetadata(pool);
+    await pool.query(`ALTER TABLE inventory.inventory_lots ALTER COLUMN received_at TYPE timestamp USING received_at AT TIME ZONE 'UTC';
+      CREATE SCHEMA procurement`);
+    for (const table of tables) await pool.query(fixtureTable(table));
+    for (const statement of fixtureForeignKeys(tables)) await pool.query(statement);
+    await pool.query(`CREATE UNIQUE INDEX review_po_receipt_identity ON procurement.po_receipts(purchase_order_line_id,receiving_line_id);
+      INSERT INTO warehouse.warehouses(id,code,name,is_active) VALUES(2,'OTHER','Other warehouse',1);
+      INSERT INTO warehouse.warehouse_locations(id,warehouse_id,code) VALUES(105,1,'DEFAULT-DOCK');
+      INSERT INTO catalog.products(id,sku) VALUES(21,'ORDERED-PRODUCT');
+      INSERT INTO catalog.product_variants(id,product_id,sku,units_per_variant,is_active) VALUES(102,21,'ORDERED-EACH',1,true);
+      INSERT INTO procurement.vendors(id,code,name) VALUES(5,'REVIEW-VENDOR','Review vendor');
+      INSERT INTO procurement.purchase_orders(id,po_number,vendor_id,status) VALUES(10,'REVIEW-PO',5,'sent');
+      INSERT INTO procurement.purchase_order_lines(id,purchase_order_id,line_number,product_id,product_variant_id,sku,order_qty,status)
+        VALUES(21,10,1,21,102,'ORDERED-EACH',100,'open');
+      INSERT INTO procurement.receiving_orders(id,receipt_number,source_type,status,warehouse_id)
+        VALUES(50,'REVIEW-RECEIPT','blind','open',1);
+      INSERT INTO procurement.receiving_lines(id,receiving_order_id,product_id,product_variant_id,sku,expected_qty,received_qty,damaged_qty,
+        units_per_variant_snapshot,putaway_location_id,unit_cost,unit_cost_mills,status)
+        VALUES(51,50,20,101,'P5',2,2,0,5,100,2,200,'complete')`);
+    // Install the actual receipt queue and immutable origin tables. Financial
+    // revision/AP application remains covered by its dedicated owner suite.
+    const evidence = readFileSync(resolve(process.cwd(), "migrations/222_procurement_cost_evidence.sql"), "utf8");
+    const start = evidence.indexOf("CREATE TABLE IF NOT EXISTS procurement.receipt_cost_requests (");
+    const end = evidence.indexOf("CREATE OR REPLACE FUNCTION inventory.reject_cost_evidence_mutation", start);
+    if (start < 0 || end < start) throw new Error("Receipt queue migration boundary changed");
+    await pool.query(evidence.slice(start, end));
+    const originStart = evidence.indexOf("CREATE TABLE IF NOT EXISTS inventory.lot_cost_origins (");
+    const originEnd = evidence.indexOf("CREATE TABLE IF NOT EXISTS inventory.lot_cost_contributions (", originStart);
+    if (originStart < 0 || originEnd < originStart) throw new Error("Receipt cost origin migration boundary changed");
+    // The cutover admission fixture creates a marker-only origin relation.
+    // Replace that owned empty prerequisite with migration222's actual schema.
+    expect((await pool.query("SELECT count(*)::int AS count FROM inventory.lot_cost_origins")).rows[0].count).toBe(0);
+    await pool.query("DROP TABLE inventory.lot_cost_origins");
+    await pool.query(evidence.slice(originStart, originEnd));
+    await pool.query(`CREATE TRIGGER aa_cutover_writer_admission BEFORE INSERT OR UPDATE OR DELETE OR TRUNCATE ON inventory.lot_cost_origins
+      FOR EACH STATEMENT EXECUTE FUNCTION inventory.pin_cutover_writer_admission();
+      CREATE TRIGGER cost_evidence_immutable BEFORE UPDATE OR DELETE ON inventory.lot_cost_origins
+      FOR EACH ROW EXECUTE FUNCTION inventory.reject_cost_evidence_mutation()`);
+
+    // Real reviewed opening + authority switch and quantity journal guards.
+    // Existing fixture keeps unrelated initial stock at20 and reservations3.
+    await context.open();
+    expect((await pool.query(`SELECT (SELECT count(*)::int FROM inventory.quantity_ledger_opening) AS openings,
+      (SELECT authority FROM inventory.availability_runtime_authority WHERE singleton_key=true) AS authority`)).rows)
+      .toEqual([{ openings: 1, authority: "canonical" }]);
+    const database = drizzle(pool, { schema });
+    const storage = {
+      getReceivingOrderById: (id: number, tx = database) => procurementMethods.getReceivingOrderById(id, tx),
+      getReceivingLineById: (id: number, tx = database) => procurementMethods.getReceivingLineById(id, tx),
+      getReceivingLines: (id: number, tx = database) => procurementMethods.getReceivingLines(id, tx),
+      updateReceivingLine: (id: number, patch: Parameters<typeof procurementMethods.updateReceivingLine>[1], tx = database) => procurementMethods.updateReceivingLine(id, patch, tx),
+      updateReceivingOrder: (id: number, patch: Parameters<typeof procurementMethods.updateReceivingOrder>[1], tx = database) => procurementMethods.updateReceivingOrder(id, patch, tx),
+      getPurchaseOrderById: (id: number, tx = database) => procurementMethods.getPurchaseOrderById(id, tx),
+      getPurchaseOrderLines: (id: number, tx = database) => procurementMethods.getPurchaseOrderLines(id, tx),
+      getPurchaseOrderLineById: (id: number, tx = database) => procurementMethods.getPurchaseOrderLineById(id, tx),
+      updatePurchaseOrder: (id: number, patch: Parameters<typeof procurementMethods.updatePurchaseOrder>[1], tx = database) => procurementMethods.updatePurchaseOrder(id, patch, tx),
+      updatePurchaseOrderLine: (id: number, patch: Parameters<typeof procurementMethods.updatePurchaseOrderLine>[1], tx = database) => procurementMethods.updatePurchaseOrderLine(id, patch, tx),
+      reconcilePoReceiptLine: (input: Parameters<typeof procurementMethods.reconcilePoReceiptLine>[0], tx = database) => procurementMethods.reconcilePoReceiptLine(input, tx),
+      updatePurchaseOrderStatusWithHistory: (id: number, patch: Parameters<typeof procurementMethods.updatePurchaseOrderStatusWithHistory>[1], history: Parameters<typeof procurementMethods.updatePurchaseOrderStatusWithHistory>[2], tx = database) => procurementMethods.updatePurchaseOrderStatusWithHistory(id, patch, history, tx),
+    };
+    // Existing legacy ports disagree on execute generics; adapt actual executor
+    // and storage signatures only. No query results or owner methods are mocked.
+    const inventory = new InventoryUseCases(database as unknown as ConstructorParameters<typeof InventoryUseCases>[0],
+      createInventoryMethods(database), new InventoryLotService(database));
+    const purchasing = createPurchasingService(database, storage as unknown as Parameters<typeof createPurchasingService>[1]);
+    service = new ReceivingService(database, inventory, { queueSyncAfterInventoryChange: async () => undefined },
+      storage as unknown as ConstructorParameters<typeof ReceivingService>[3], purchasing, null, null, null, null, null, () => NOW);
+  }, 60_000);
+  afterEach(async () => { await context?.close(); });
+
+  async function physicalState() {
+    return (await context.pool.query(`SELECT ro.status AS receipt_status,ro.warehouse_id AS header_warehouse,
+      wl.warehouse_id AS stock_warehouse,rl.received_qty,rl.damaged_qty,l.qty_on_hand,l.status AS lot_status,
+      q.kind,e.on_hand_delta,e.warehouse_id AS journal_warehouse
+      FROM procurement.receiving_orders ro JOIN procurement.receiving_lines rl ON rl.receiving_order_id=ro.id
+      JOIN inventory.inventory_transactions t ON t.receiving_line_id=rl.id AND t.transaction_type='receipt'
+      JOIN inventory.inventory_lots l ON l.id=t.inventory_lot_id
+      JOIN warehouse.warehouse_locations wl ON wl.id=l.warehouse_location_id
+      JOIN inventory.quantity_entries e ON e.inventory_lot_id=l.id
+      JOIN inventory.quantity_commands q ON q.id=e.command_id WHERE ro.id=50`)).rows;
+  }
+
+  async function state() {
+    const inventory = await context.state();
+    const receipt = (await context.pool.query(`SELECT
+      (SELECT jsonb_agg(to_jsonb(r) ORDER BY id) FROM procurement.receiving_orders r) AS receipts,
+      (SELECT jsonb_agg(to_jsonb(l) ORDER BY id) FROM procurement.receiving_lines l) AS lines,
+      (SELECT jsonb_agg(to_jsonb(p) ORDER BY id) FROM procurement.purchase_orders p) AS purchase_orders,
+      (SELECT jsonb_agg(to_jsonb(p) ORDER BY id) FROM procurement.purchase_order_lines p) AS purchase_lines,
+      (SELECT count(*)::int FROM procurement.po_receipts) AS po_receipts,
+      (SELECT count(*)::int FROM procurement.po_status_history) AS po_history,
+      (SELECT count(*)::int FROM inventory.inventory_transactions) AS inventory_transactions,
+      (SELECT count(*)::int FROM inventory.lot_cost_origins) AS cost_origins,
+      (SELECT count(*)::int FROM procurement.receipt_cost_requests) AS cost_requests,
+      (SELECT count(*)::int FROM public.audit_events WHERE actor=$1) AS audits`, [ACTOR])).rows[0];
+    return { inventory, receipt };
+  }
+
+  async function linkReceiptToMatchingPO() {
+    await context.pool.query(`UPDATE procurement.receiving_orders SET source_type='po',purchase_order_id=10 WHERE id=50;
+      UPDATE procurement.purchase_order_lines SET product_id=20,product_variant_id=101 WHERE id=21`);
+  }
+
+  async function addUnassignedLine() {
+    await context.pool.query(`INSERT INTO procurement.receiving_lines(id,receiving_order_id,sku,expected_qty,received_qty,damaged_qty,status)
+      VALUES(52,50,'UNASSIGNED',0,0,0,'pending')`);
+  }
+
+  it("applies a default only to unassigned lines in one audited command and replays without changes", async () => {
+    await addUnassignedLine();
+    await service.updateOrderDetails(50, { receivingLocationId: 105, applyDefaultToUnassigned: true }, ACTOR);
+    expect((await context.pool.query("SELECT id,putaway_location_id FROM procurement.receiving_lines ORDER BY id")).rows)
+      .toEqual([{ id: 51, putaway_location_id: 100 }, { id: 52, putaway_location_id: 105 }]);
+    expect((await context.pool.query("SELECT changes FROM public.audit_events WHERE actor=$1", [ACTOR])).rows)
+      .toEqual([{ changes: { before: { receivingLocationId: null }, after: { receivingLocationId: 105 },
+        lines: [{ receivingLineId: 52, before: null, after: 105 }] } }]);
+    const after = await state();
+    await service.updateOrderDetails(50, { receivingLocationId: 105, applyDefaultToUnassigned: true }, ACTOR);
+    expect(await state()).toEqual(after);
+  });
+
+  it("rolls back default header and all assignments when the audit insert fails", async () => {
+    await addUnassignedLine();
+    await context.pool.query(`CREATE FUNCTION procurement.reject_receipt_test_audit() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN RAISE EXCEPTION 'receipt integrity injected audit failure'; END $$;
+      CREATE TRIGGER reject_receipt_test_audit BEFORE INSERT ON public.audit_events
+      FOR EACH ROW EXECUTE FUNCTION procurement.reject_receipt_test_audit()`);
+    const before = await state();
+    await expect(service.updateOrderDetails(50, { receivingLocationId: 105, applyDefaultToUnassigned: true }, ACTOR))
+      .rejects.toThrow(/receipt integrity injected audit failure/);
+    expect(await state()).toEqual(before);
+  });
+
+  async function waitForBlockedBy(pid: number, count: number) {
+    const deadline = Date.now() + 5_000;
+    while (Date.now() < deadline) {
+      // PostgreSQL queues tuple locks: a later waiter may be blocked by the
+      // first waiter rather than directly by our holder. Observe the complete
+      // blocker chain, not an assumed flat lock queue.
+      const blocked = (await context.pool.query(`WITH RECURSIVE blocked(pid) AS (
+        SELECT pid FROM pg_stat_activity WHERE datname=current_database() AND $1=ANY(pg_blocking_pids(pid))
+        UNION
+        SELECT activity.pid FROM pg_stat_activity activity JOIN blocked prior ON prior.pid=ANY(pg_blocking_pids(activity.pid))
+          WHERE activity.datname=current_database()
+      ) SELECT count(*)::int AS count FROM blocked`, [pid])).rows[0].count;
+      if (blocked >= count) return;
+      await new Promise((done) => setTimeout(done, 20));
+    }
+    throw new Error(`Expected ${count} receipt commands blocked by backend ${pid}`);
+  }
+  const observed = (promise: Promise<unknown>) => promise.then((value) => ({ ok: true, value }), (error: unknown) => ({ ok: false, error }));
+
+  it("serializes two closes prepared before either posts, creating one canonical receipt", async () => {
+    const holder = await context.pool.connect();
+    const pending: Array<ReturnType<typeof observed>> = [];
+    let open = false;
+    try {
+      await holder.query("BEGIN"); open = true;
+      const pid = (await holder.query("SELECT pg_backend_pid() AS pid")).rows[0].pid;
+      await holder.query("SELECT pg_advisory_xact_lock(hashtext('inventory.cost_graph'),hashtext('version_1'))");
+      pending.push(observed(service.close(50, ACTOR)), observed(service.close(50, ACTOR)));
+      await waitForBlockedBy(pid, 2);
+      await holder.query("COMMIT"); open = false;
+      expect((await Promise.all(pending)).map((result) => result.ok)).toEqual([true, true]);
+      expect(await physicalState()).toHaveLength(1);
+      expect((await context.pool.query("SELECT count(*)::int AS count FROM inventory.quantity_commands WHERE kind='receive'")).rows[0].count).toBe(1);
+    } finally {
+      if (open) await holder.query("ROLLBACK");
+      holder.release();
+      await Promise.all(pending);
+    }
+  });
+
+  it("preserves a concurrent explicit line location before applying the default to still-unassigned lines", async () => {
+    await addUnassignedLine();
+    const holder = await context.pool.connect();
+    const pending: Array<ReturnType<typeof observed>> = [];
+    let open = false;
+    try {
+      await holder.query("BEGIN"); open = true;
+      const pid = (await holder.query("SELECT pg_backend_pid() AS pid")).rows[0].pid;
+      await holder.query("SELECT id FROM procurement.receiving_orders WHERE id=50 FOR UPDATE");
+      pending.push(observed(service.updateLine(52, { putawayLocationId: 100 }, ACTOR)));
+      await waitForBlockedBy(pid, 1);
+      pending.push(observed(service.updateOrderDetails(50, { receivingLocationId: 105, applyDefaultToUnassigned: true }, ACTOR)));
+      await waitForBlockedBy(pid, 2);
+      await holder.query("COMMIT"); open = false;
+      expect((await Promise.all(pending)).map((result) => result.ok)).toEqual([true, true]);
+      expect((await context.pool.query("SELECT id,putaway_location_id FROM procurement.receiving_lines ORDER BY id")).rows)
+        .toEqual([{ id: 51, putaway_location_id: 100 }, { id: 52, putaway_location_id: 100 }]);
+    } finally {
+      if (open) await holder.query("ROLLBACK");
+      holder.release();
+      await Promise.all(pending);
+    }
+  });
+
+  it("posts a standalone receipt exactly once through actual ledger on close retry", async () => {
+    await service.close(50, ACTOR);
+    const after = await state();
+    await service.close(50, ACTOR);
+    expect(await state()).toEqual(after);
+    expect(await physicalState()).toEqual([{ receipt_status: "closed", header_warehouse: 1, stock_warehouse: 1,
+      received_qty: 2, damaged_qty: 0, qty_on_hand: 2, lot_status: "active", kind: "receive", on_hand_delta: 2, journal_warehouse: 1 }]);
+  });
+
+  it("rejects a header warehouse change that strands assigned lines without writing", async () => {
+    const before = await state();
+    await expect(service.updateOrderDetails(50, { warehouseId: 2, receivingLocationId: null }, ACTOR))
+      .rejects.toMatchObject({ statusCode: 409, details: { issues: [expect.objectContaining({ code: "RECEIVING_LOCATION_WAREHOUSE_MISMATCH", receivingLineId: 51 })] } });
+    expect(await state()).toEqual(before);
+  });
+
+  it("rejects an already inconsistent line warehouse before canonical inventory writes", async () => {
+    await context.pool.query("UPDATE procurement.receiving_orders SET warehouse_id=2 WHERE id=50");
+    const before = await state();
+    await expect(service.close(50, ACTOR)).rejects.toMatchObject({ statusCode: 409 });
+    expect(await state()).toEqual(before);
+  });
+
+  it("rejects unmatched goods before physical receipt and preserves retry without writes", async () => {
+    await context.pool.query("UPDATE procurement.receiving_orders SET source_type='po',purchase_order_id=10 WHERE id=50");
+    const before = await state();
+    for (let attempt = 0; attempt < 2; attempt++) {
+      await expect(service.close(50, ACTOR)).rejects.toMatchObject({ statusCode: 409,
+        details: { issues: [expect.objectContaining({ code: "RECEIVING_SOURCE_UNMATCHED", receivingLineId: 51 })] } });
+      expect(await state()).toEqual(before);
+    }
+  });
+
+  it("rejects ambiguous product sources before any inventory or provenance writes", async () => {
+    await linkReceiptToMatchingPO();
+    await context.pool.query(`INSERT INTO procurement.purchase_order_lines(id,purchase_order_id,line_number,product_id,product_variant_id,sku,order_qty,status)
+      VALUES(22,10,2,20,101,'P5',100,'open')`);
+    const before = await state();
+    await expect(service.close(50, ACTOR)).rejects.toMatchObject({ statusCode: 409,
+      details: { issues: [expect.objectContaining({ code: "RECEIVING_SOURCE_AMBIGUOUS", receivingLineId: 51 })] } });
+    expect(await state()).toEqual(before);
+  });
+
+  it("persists unique PO provenance before lot origin and canonical stock, and replays once", async () => {
+    await linkReceiptToMatchingPO();
+    await service.close(50, ACTOR);
+    expect((await context.pool.query(`SELECT rl.purchase_order_line_id,l.po_line_id,o.purchase_order_line_id AS origin_line_id,o.receiving_line_id
+      FROM procurement.receiving_lines rl JOIN inventory.lot_cost_origins o ON o.receiving_line_id=rl.id
+      JOIN inventory.inventory_lots l ON l.id=o.inventory_lot_id WHERE rl.id=51`)).rows)
+      .toEqual([{ purchase_order_line_id: 21, po_line_id: 21, origin_line_id: 21, receiving_line_id: 51 }]);
+    expect((await context.pool.query("SELECT received_qty FROM procurement.purchase_order_lines WHERE id=21")).rows).toEqual([{ received_qty: 10 }]);
+    expect((await context.pool.query("SELECT count(*)::int AS count FROM procurement.po_receipts")).rows[0].count).toBe(1);
+    const after = await state();
+    await service.close(50, ACTOR);
+    expect(await state()).toEqual(after);
+  });
+
+  it("rolls back source resolution, canonical stock, cost requests and header when PO history fails", async () => {
+    await linkReceiptToMatchingPO();
+    await context.pool.query(`CREATE FUNCTION procurement.reject_receipt_test_history() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN RAISE EXCEPTION 'receipt integrity injected PO history failure'; END $$;
+      CREATE TRIGGER reject_receipt_test_history BEFORE INSERT ON procurement.po_status_history
+      FOR EACH ROW EXECUTE FUNCTION procurement.reject_receipt_test_history()`);
+    const before = await state();
+    await expect(service.close(50, ACTOR)).rejects.toThrow(/receipt integrity injected PO history failure/);
+    expect(await state()).toEqual(before);
+  });
+});

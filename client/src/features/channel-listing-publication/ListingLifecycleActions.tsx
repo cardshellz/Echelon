@@ -78,6 +78,7 @@ export function useListingLifecycle(
       return {
         account: first.account,
         items: results.flatMap((result) => result.items),
+        presence: results.flatMap((result) => result.presence),
       };
     },
     refetchInterval: 15_000,
@@ -135,7 +136,17 @@ export function useListingLifecycle(
       }),
     onSuccess: refreshViews,
   });
+  const presenceCheck = useMutation({
+    mutationFn: async () => {
+      for (let offset = 0; offset < exactSkus.length; offset += 250)
+        await publicationRequest("POST", `${base}/presence`, listingLifecycleListSchema, { skus: exactSkus.slice(offset, offset + 250) });
+    },
+    onSettled: refreshViews,
+  });
   return {
+    missingSkus: new Set(accountChanged ? [] : (query.data?.presence ?? []).filter(item => item.state === "missing").map(item => item.sku)),
+    refreshPresence: () => { if (enabled) presenceCheck.mutate(); },
+    refreshingPresence: presenceCheck.isPending,
     bySku: new Map(
       [...retained, ...(query.data?.items ?? [])].map((item) => [
         item.sku,
@@ -180,6 +191,8 @@ export function useListingLifecycle(
         ? errorMessage(query.error)
         : history.error
           ? errorMessage(history.error)
+          : presenceCheck.error
+            ? errorMessage(presenceCheck.error)
           : check.error
             ? errorMessage(check.error)
             : null,

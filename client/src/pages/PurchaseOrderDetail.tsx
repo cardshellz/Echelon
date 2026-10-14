@@ -1,4 +1,5 @@
 import { PoVarianceApproval, hasPendingPoVarianceApproval } from "@/features/purchasing/PoVarianceApproval";
+import { PoShipmentCostSummary } from "@/features/purchasing/PoShipmentCostSummary";
 import { parseShipmentReceiptResolution, requiresReceiptUnitReview } from "@/lib/shipment-receipt-units";
 import React from "react";
 import { poEmailDeliveryPresentation } from "@/lib/po-email-delivery";
@@ -3046,7 +3047,7 @@ export default function PurchaseOrderDetail() {
         <Card className={!taxApplicable ? "opacity-40" : ""}>
           <CardContent className="p-3">
             <div className="flex items-center justify-between">
-              <div className="text-xs text-muted-foreground">Tax / Duties</div>
+              <div className="text-xs text-muted-foreground">Supplier tax / duties</div>
               {taxApplicable && canEditHeader && !editingTax && (
                 <Button variant="ghost" size="icon" className="h-5 w-5"
                   onClick={() => { setTaxDollars(((Number(po.taxCents) || 0) / 100).toFixed(2)); setEditingTax(true); }}
@@ -3084,7 +3085,7 @@ export default function PurchaseOrderDetail() {
         <Card className={!shippingApplicable ? "opacity-40" : ""}>
           <CardContent className="p-3">
             <div className="flex items-center justify-between">
-              <div className="text-xs text-muted-foreground">Freight</div>
+              <div className="text-xs text-muted-foreground">Supplier freight</div>
               {shippingApplicable && canEditHeader && !editingShipping && (
                 <Button variant="ghost" size="icon" className="h-5 w-5"
                   onClick={() => { setShippingDollars(((Number(po.shippingCostCents) || 0) / 100).toFixed(2)); setEditingShipping(true); }}
@@ -3129,12 +3130,14 @@ export default function PurchaseOrderDetail() {
         {/* Total — always read-only */}
         <Card>
           <CardContent className="p-3">
-            <div className="text-xs text-muted-foreground">Total</div>
+            <div className="text-xs text-muted-foreground">Supplier PO total</div>
             <div className="font-mono font-bold text-lg">{formatCents(po.totalCents)}</div>
           </CardContent>
         </Card>
 
       </div>
+
+      {poId && <PoShipmentCostSummary purchaseOrderId={poId} onViewShipments={() => setActiveTab("shipments")} />}
 
       {/* Auto-Draft Banner */}
       {immutableRecommendationPo && (

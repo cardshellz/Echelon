@@ -311,20 +311,20 @@ databaseTests.sequential("receiving frozen units PostgreSQL guarantees", () => {
     },
   );
 
-  it("posts exactly 501 pieces once while unavailable PO reconciliation remains explicitly retryable", async () => {
-    await pool.query(`UPDATE procurement.receiving_orders SET source_type='shipment',inbound_shipment_id=1,purchase_order_id=10 WHERE id=50;
+  it("rolls back all physical receipt changes while the PO reconciliation owner is unavailable", async () => {
+    await pool.query(`UPDATE procurement.inbound_shipments SET status='delivered' WHERE id=1;
+      UPDATE procurement.receiving_orders SET source_type='shipment',inbound_shipment_id=1,purchase_order_id=10 WHERE id=50;
       UPDATE procurement.receiving_lines SET product_variant_id=201,units_per_variant_snapshot=1,expected_qty=501,received_qty=501,damaged_qty=0,purchase_order_line_id=21,inbound_shipment_line_id=11 WHERE id=51`);
-    // This fixture deliberately omits the post-commit purchasing owner. Physical
-    // posting commits once, while both initial close and replay report that gap.
+    // The purchasing owner participates in the physical receipt transaction.
+    // Its absence must leave the entire command retryable with no committed
+    // inventory, lot, header, audit, or cost-request changes.
+    const before = await state();
     for (let attempt = 0; attempt < 2; attempt++) {
       await expect(service.close(50, actorId)).rejects.toMatchObject({
         statusCode: 409, details: { reason: "purchasing_unavailable" },
       });
+      expect(await state()).toEqual(before);
     }
-    expect((await pool.query("SELECT status FROM procurement.receiving_orders WHERE id=50")).rows).toEqual([{ status: "closed" }]);
-    expect((await pool.query("SELECT variant_qty FROM inventory.inventory_levels")).rows).toEqual([{ variant_qty: 501 }]);
-    expect((await pool.query("SELECT qty_received,qty_on_hand,unit_cost_mills FROM inventory.inventory_lots")).rows).toEqual([{ qty_received: 501, qty_on_hand: 501, unit_cost_mills: "375" }]);
-    expect((await pool.query("SELECT receiving_line_id,variant_qty_delta FROM inventory.inventory_transactions")).rows).toEqual([{ receiving_line_id: 51, variant_qty_delta: 501 }]);
   });
 
   it.each(["purchase_order_line_id", "purchase_order_id", "inbound_shipment_id"] as const)(

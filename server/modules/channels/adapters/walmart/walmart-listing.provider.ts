@@ -21,6 +21,7 @@ import {
   listingJsonHash,
   walmartListingFeedTypeSchema,
   type WalmartListingFeedType,
+  type WalmartListingIdentifier,
   type WalmartListingSchema,
 } from "./walmart-listing-api";
 import {
@@ -37,9 +38,9 @@ import {
   validProductIdentifier,
 } from "./walmart-listing-schema";
 import {
-  assertListingSetupZeroAdmission,
-  type ListingSetupZeroIntent,
-} from "../../../inventory-planning/application/listing-setup-zero-intent";
+  assertListingSetupAdmission,
+  type ListingSetupIntent,
+} from "../../../inventory-planning/application/listing-setup-intent";
 
 type SchemaCacheEntry = WalmartListingSchema & {
   validate: ReturnType<typeof compileListingSchema>;
@@ -258,47 +259,9 @@ export class WalmartListingProvider implements ListingPublicationProvider {
         throw error;
     }
     if (feedType === "MP_ITEM_MATCH") {
-      const matched = await api.match(identifier);
-      if (!matched || matched.feedType !== "MP_ITEM_MATCH") {
-        issues.push(
-          issue(
-            "WALMART_CATALOG_MATCH_REQUIRED",
-            "No existing Walmart product was confirmed for this identifier; use new item setup",
-            "identifier",
-          ),
-        );
-        return result;
-      }
-      const parsed = z
-        .object({
-          MPItem: z
-            .array(
-              z.object({
-                Item: z.object({
-                  productIdentifiers: z.object({
-                    productIdType: z.enum(["GTIN", "UPC", "EAN", "ISBN"]),
-                    productId: z.string(),
-                  }),
-                }),
-              }),
-            )
-            .length(1),
-        })
-        .safeParse(matched.payload);
-      if (
-        !parsed.success ||
-        !sameProductIdentifier(identifier, {
-          type: parsed.data.MPItem[0].Item.productIdentifiers.productIdType,
-          value: parsed.data.MPItem[0].Item.productIdentifiers.productId,
-        })
-      ) {
-        issues.push(
-          issue(
-            "WALMART_CATALOG_IDENTIFIER_MISMATCH",
-            "The Walmart catalog match has a different selling-unit identifier",
-            "identifier",
-          ),
-        );
+      const matchIssue = await this.catalogMatchIssue(api, identifier);
+      if (matchIssue) {
+        issues.push(matchIssue);
         return result;
       }
     }
@@ -307,7 +270,12 @@ export class WalmartListingProvider implements ListingPublicationProvider {
     const title = draft.title ?? input.catalog.title;
     const description = draft.description ?? input.catalog.description;
     const brand = draft.brand ?? input.catalog.brand;
-    const images = draft.images ?? input.catalog.images;
+    // A new-condition catalog offer reuses Walmart's existing product content.
+    // Other conditions can require offer-specific images under the match schema.
+    const reusesCatalogContent = feedType === "MP_ITEM_MATCH" && orderable.condition === "New";
+    const images = reusesCatalogContent ? [] : draft.images ?? input.catalog.images;
+    if (feedType === "MP_ITEM_MATCH" && !reusesCatalogContent && draft.images === null)
+      issues.push(...(input.catalog.imageIssues ?? []));
     const imageUrls = z
       .array(
         z
@@ -341,7 +309,6 @@ export class WalmartListingProvider implements ListingPublicationProvider {
         ? {
             Item: {
               ...offer,
-              productName: title,
               ...(images.length ? { mainImageUrl: images[0] } : {}),
             },
           }
@@ -378,17 +345,20 @@ export class WalmartListingProvider implements ListingPublicationProvider {
       operationId: string;
       correlationId: string;
       items: PreparedListingItem[];
-      zeroStockAdmission: Readonly<ListingSetupZeroIntent>;
+      stockAdmission: Readonly<ListingSetupIntent>;
       beforeSubmit(): Promise<void>;
     },
   ): Promise<{ submissionId: string }> {
     let writeEntered = false;
     try {
+      // Prepared/reviewed content is immutable. Inventory supplies the current
+      // quantity at admission, including for persisted drafts from older code.
+      const items = structuredClone(input.items);
       z.string().uuid().parse(input.operationId);
       z.string().uuid().parse(input.correlationId);
       z.array(z.unknown()).min(1).max(100).parse(input.items);
-      assertListingSetupZeroAdmission(input.zeroStockAdmission);
-      const admission = input.zeroStockAdmission;
+      assertListingSetupAdmission(input.stockAdmission);
+      const admission = input.stockAdmission;
       if (
         admission.operationId !== input.operationId ||
         admission.channelId !== account.channelId ||
@@ -402,8 +372,7 @@ export class WalmartListingProvider implements ListingPublicationProvider {
             !admission.items.some(
               (member) =>
                 member.productVariantId === item.variantId &&
-                member.sku === item.sku &&
-                member.quantity === 0,
+                member.sku === item.sku,
             ),
         )
       ) {
@@ -418,7 +387,7 @@ export class WalmartListingProvider implements ListingPublicationProvider {
         input.items[0].feedType,
       );
       const seen = new Set<string>();
-      for (const item of input.items) {
+      for (const item of items) {
         await input.beforeSubmit();
         if (
           item.feedType !== feedType ||
@@ -436,11 +405,12 @@ export class WalmartListingProvider implements ListingPublicationProvider {
         const offer = jsonObject(
           item.payload[feedType === "MP_ITEM" ? "Orderable" : "Item"],
         );
+        const quantity = admission.items.find(member => member.productVariantId === item.variantId && member.sku === item.sku)!.quantity;
         const inventory = z
           .array(
             z
               .object({
-                quantity: z.literal(0),
+                quantity: z.number().int().min(0).max(2_147_483_647),
                 fulfillmentCenterID: z.literal(account.scopeId),
               })
               .strict(),
@@ -450,9 +420,11 @@ export class WalmartListingProvider implements ListingPublicationProvider {
         if (offer.sku !== item.sku || !inventory.success)
           throw new WalmartApiError(
             "WALMART_LISTING_STOCK_INVALID",
-            "Listing setup must use zero stock at the approved fulfillment center",
+            "Listing setup must use the approved fulfillment center",
             false,
           );
+        offer.inventory = [{ quantity, fulfillmentCenterID: account.scopeId }];
+        item.payload[feedType === "MP_ITEM" ? "Orderable" : "Item"] = offer;
         const productType =
           feedType === "MP_ITEM"
             ? Object.keys(jsonObject(item.payload.Visible))[0]
@@ -482,19 +454,31 @@ export class WalmartListingProvider implements ListingPublicationProvider {
           if (!(error instanceof WalmartApiError) || error.status !== 404)
             throw error;
         }
+        if (feedType === "MP_ITEM_MATCH") {
+          const identifier = z.object({
+            productIdType: z.enum(["GTIN", "UPC", "EAN", "ISBN"]),
+            productId: z.string(),
+          }).parse(offer.productIdentifiers);
+          const matchIssue = await this.catalogMatchIssue(api, {
+            type: identifier.productIdType,
+            value: identifier.productId,
+          });
+          if (matchIssue)
+            throw new WalmartApiError(matchIssue.code, matchIssue.message, false);
+        }
       }
-      this.validateVariantGroups(input.items, feedType);
+      this.validateVariantGroups(items, feedType);
       return await this.channels.withListingWrites(account, input.items.map(item => item.sku), async () => {
         await input.beforeSubmit();
         writeEntered = true;
         const receipt = await api.submitFeed(
           feedType,
-          { MPItemFeedHeader: feedHeader(feedType), MPItem: input.items.map(item => item.payload) },
+          { MPItemFeedHeader: feedHeader(feedType), MPItem: items.map(item => item.payload) },
           input.correlationId,
           admission,
         );
         return { submissionId: receipt.feedId };
-      });
+      }, admission);
     } catch (error) {
       const effect = !writeEntered
         ? "not_sent"
@@ -516,6 +500,41 @@ export class WalmartListingProvider implements ListingPublicationProvider {
           : "The listing submission could not complete. Review its recorded outcome before trying again.";
       throw new ListingSubmissionError(code, message, effect);
     }
+  }
+
+  /** Recheck the exact identifier at review and before sending. A catalog lookup
+   * template never supplies our SKU, price, inventory, or outgoing schema. */
+  private async catalogMatchIssue(
+    api: WalmartListingApi,
+    identifier: WalmartListingIdentifier,
+  ): Promise<ListingIssue | null> {
+    const matched = await api.match(identifier);
+    if (!matched || matched.feedType !== "MP_ITEM_MATCH")
+      return issue(
+        "WALMART_CATALOG_MATCH_REQUIRED",
+        "No existing Walmart product was confirmed for this identifier; use new item setup",
+        "identifier",
+      );
+    const parsed = z.object({
+      MPItem: z.array(z.object({
+        Item: z.object({
+          productIdentifiers: z.object({
+            productIdType: z.enum(["GTIN", "UPC", "EAN", "ISBN"]),
+            productId: z.string(),
+          }),
+        }),
+      })).length(1),
+    }).safeParse(matched.payload);
+    if (!parsed.success || !sameProductIdentifier(identifier, {
+      type: parsed.data.MPItem[0].Item.productIdentifiers.productIdType,
+      value: parsed.data.MPItem[0].Item.productIdentifiers.productId,
+    }))
+      return issue(
+        "WALMART_CATALOG_IDENTIFIER_MISMATCH",
+        "The Walmart catalog match has a different selling-unit identifier",
+        "identifier",
+      );
+    return null;
   }
 
   async status(
@@ -608,7 +627,7 @@ export class WalmartListingProvider implements ListingPublicationProvider {
   async assertCanRecreate(account: ListingAccount, sku: string): Promise<void> {
     await this.api(account);
     // An explicit Echelon stop must not be bypassed by deleting an item elsewhere.
-    await this.channels.withListingWrites(account, [sku], async () => {});
+    await this.channels.assertListingNotStopped(account, sku);
   }
 
   private async api(

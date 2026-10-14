@@ -3,12 +3,13 @@ import { assertRecreatedListingStockReady } from "./listing-recreation-stock.rep
 import { createHash, randomUUID } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
 import { canonicalJson } from "@shared/utils/canonical-json";
-import { listingSetupZeroInspectionInputSchema, type ListingSetupZeroInspectionInput, type ListingSetupZeroInspection, validateListingSetupZeroIntent, runWithListingSetupZeroAdmission, type ListingSetupZeroIntent } from "../application/listing-setup-zero-intent";
-import { admitListingSetupZeroInsideTransaction, validateListingSetupZeroReadinessInsideTransaction, type ListingSetupReadinessCache } from "./listing-setup-zero-admission";
+import { listingSetupInspectionInputSchema, listingSetupRequestSchema, type ListingSetupInspectionInput, type ListingSetupInspection, validateListingSetupIntent, runWithListingSetupAdmission, type ListingSetupIntent } from "../application/listing-setup-intent";
+import { admitListingSetupInsideTransaction, validateListingSetupReadinessInsideTransaction, resolveListingSetupQuantitiesInsideTransaction, type ListingSetupReadinessCache, type ListingSetupQuantityCache } from "./listing-setup-admission";
 import type { InventoryAvailabilityTransactionQueryClient as Client } from "../application/inventory-availability-transaction-query.port";
 import type { QuantityPublicationAdmission, QuantityPublicationCatchup, QuantityPublicationCatchupStore, QuantityPublicationOutboxClaim } from "../application/quantity-publication-admission.port";
 import { readPublicationStockSelection, selectionRequiresPublication } from "./inventory-publication-selection.reader";
 import { QuantityProviderEvidenceCollector } from "../application/quantity-provider-request-evidence";
+import { InventoryPublicationNotSentError } from "../application/inventory-publication-transport";
 import { PostgresQuantityProviderRequestEvidenceStore } from "./quantity-provider-request-evidence.repository";
 import { QuantityPublicationAdmissionError, quantityPublicationScopeSchema, quantityPublicationRecoverySchema,
   type QuantityPublicationScope, type QuantityPublicationDrainProof, type QuantityPublicationRecovery } from "../domain/quantity-publication-admission";
@@ -218,31 +219,34 @@ export class PostgresQuantityPublicationAdmission implements QuantityPublication
     return this.execute(scope, claim, work);
   }
 
-  async inspectListingSetupZero(raw: ListingSetupZeroInspectionInput): Promise<ListingSetupZeroInspection> {
-    const input = listingSetupZeroInspectionInputSchema.parse(raw);
+  async inspectListingSetup(raw: ListingSetupInspectionInput): Promise<ListingSetupInspection> {
+    const input = listingSetupInspectionInputSchema.parse(raw);
     const client = await this.pool.connect();
     let discard = false;
     try {
-      await client.query("BEGIN ISOLATION LEVEL REPEATABLE READ");
+      await client.query("BEGIN ISOLATION LEVEL SERIALIZABLE");
       const targets = (await client.query<{ id:number; revision:string }>(
         `SELECT id,revision::text FROM inventory.inventory_publication_targets WHERE channel_id=$1 AND channel_connection_id=$2
           AND destination_kind='channel_connection' AND provider_scope_type='location' AND external_scope_id=$3 ORDER BY id`,
         [input.channelId,input.channelConnectionId,input.shipNodeId])).rows;
-      const blockers: ListingSetupZeroInspection["blockers"] = [];
+      const blockers: ListingSetupInspection["blockers"] = [];
       if (targets.length!==1) blockers.push({ code:"PUBLICATION_SETUP_TARGET_REQUIRED",message:"Configure exactly one inventory publication destination for this Walmart connection and fulfillment center.",productVariantId:null });
       if (!await readGlobalPublicationEnabled(client)) blockers.push({ code:"PUBLICATION_GLOBAL_DISABLED",message:"Enable the shared inventory publication control before submitting new listings.",productVariantId:null });
       const gate = (await client.query<{ activation_run_id:string|null }>("SELECT activation_run_id::text FROM inventory.quantity_publication_gate WHERE singleton")).rows[0];
       if (!gate || gate.activation_run_id!==null) blockers.push({ code:"PUBLICATION_SETUP_GATE_SUPPRESSED",message:"Inventory publication is suppressed; complete or abort its existing activation workflow first.",productVariantId:null });
-      const variants: ListingSetupZeroInspection["variants"] = [];
+      const variants: ListingSetupInspection["variants"] = [];
       // One sealed product graph per inspection transaction, even when the
       // operator selected many package variants of the same product.
       const productEvidence:ListingSetupReadinessCache=new Map();
+      const quantities: ListingSetupQuantityCache = new Map();
       for (const item of input.items) {
         const itemBlockers: Array<{code:string;message:string}> = [];
         if (targets.length===1) {
           try {
-            await validateListingSetupZeroReadinessInsideTransaction(client,{ ...input,items:[item],operationId:"readiness-only",
+            await validateListingSetupReadinessInsideTransaction(client,{ ...input,items:[item],operationId:"readiness-only",
               publicationTargetId:targets[0].id,expectedTargetRevision:targets[0].revision },productEvidence);
+            await resolveListingSetupQuantitiesInsideTransaction(client, { ...input, items: [item], operationId: "readiness-only",
+              publicationTargetId: targets[0].id, expectedTargetRevision: targets[0].revision }, quantities);
           } catch(error) {
             if (!(error instanceof QuantityPublicationAdmissionError)) throw error;
             itemBlockers.push({code:error.code,message:error.message});
@@ -259,15 +263,20 @@ export class PostgresQuantityPublicationAdmission implements QuantityPublication
     } finally { client.release(discard); }
   }
 
-  runListingSetupZero<T>(input: ListingSetupZeroIntent, work: (validated: Readonly<ListingSetupZeroIntent>) => Promise<T>): Promise<T> {
+  runListingSetup<T>(input: ListingSetupIntent, work: (validated: Readonly<ListingSetupIntent>) => Promise<T>): Promise<T> {
     if (session.getStore()) fail("PUBLICATION_SETUP_NESTING_INVALID", "Initial listing setup cannot inherit another provider capability.");
-    const intent = validateListingSetupZeroIntent(input);
+    const intent = validateListingSetupIntent(listingSetupRequestSchema.parse(input));
+    let resolved: Readonly<ListingSetupIntent> | undefined;
     const scopes = intent.items.map(item => quantityPublicationScopeSchema.parse({
       destinationKind:"channel_connection",connectionId:intent.channelConnectionId,providerKey:"walmart",
       providerScopeType:"location",externalScopeId:intent.shipNodeId,externalInventoryItemId:item.sku,
       productId:null,productVariantId:item.productVariantId,
     }));
-    return this.execute(scopes[0],null,()=>runWithListingSetupZeroAdmission(intent,()=>work(intent)),undefined,scopes,intent);
+    return this.execute(scopes[0], null, () => {
+      if (!resolved) return fail("PUBLICATION_SETUP_PLAN_MISSING", "Inventory did not authorize initial stock.");
+      const admitted = resolved;
+      return runWithListingSetupAdmission(admitted, () => work(admitted));
+    }, undefined, scopes, intent, value => { resolved = value; });
   }
 
   runListing<T>(raw: QuantityPublicationScope,
@@ -320,7 +329,9 @@ export class PostgresQuantityPublicationAdmission implements QuantityPublication
 
   private async execute<T>(scope: QuantityPublicationScope, claim: QuantityPublicationOutboxClaim | null,
     work: () => Promise<T>, resolveCurrentPlan?: () => Promise<Array<{ outboxId: string; quantity: number; scope: QuantityPublicationScope }>>,
-    memberScopes: readonly QuantityPublicationScope[] = [], setupZero?: Readonly<ListingSetupZeroIntent>): Promise<T> {
+    memberScopes: readonly QuantityPublicationScope[] = [], setupRequest?: Readonly<ListingSetupIntent>,
+    receiveSetup?: (intent: Readonly<ListingSetupIntent>) => void): Promise<T> {
+    let initialStock: Readonly<ListingSetupIntent> | null = null;
     const expectedCatchup = legacyCatchupScope.getStore();
     if (expectedCatchup && (claim !== null || memberScopes.length > 0 || key(expectedCatchup.scope) !== key(scope))) {
       fail("PUBLICATION_CATCHUP_SCOPE_MISMATCH", "A legacy catch-up retry can admit only its exact destination and item, without outbox or group expansion.");
@@ -330,7 +341,7 @@ export class PostgresQuantityPublicationAdmission implements QuantityPublication
     const retainWork = async (connection: Client, runId: string | null, reason: string): Promise<void> => {
       // Initial item creation is retried/reconciled by its durable listing
       // operation. It has no inventory mapping yet and cannot be an ATP catch-up.
-      if (setupZero) return;
+      if (setupRequest) return;
       if (expectedCatchup?.claim) {
         // A retry already owns a retained revision. Rewriting that revision here
         // would make its later failure/backoff update miss and hot-loop forever.
@@ -374,7 +385,7 @@ export class PostgresQuantityPublicationAdmission implements QuantityPublication
         }
         lockedScopeKeys.push(scopeKey);
       }
-      await client.query(setupZero ? "BEGIN ISOLATION LEVEL SERIALIZABLE" : "BEGIN"); inTransaction = true;
+      await client.query(setupRequest ? "BEGIN ISOLATION LEVEL SERIALIZABLE" : "BEGIN"); inTransaction = true;
       const gate = (await client.query<{ epoch: string; activation_run_id: string | null }>(
         "SELECT epoch::text,activation_run_id::text FROM inventory.quantity_publication_gate WHERE singleton FOR SHARE",
       )).rows[0];
@@ -401,7 +412,7 @@ export class PostgresQuantityPublicationAdmission implements QuantityPublication
           "SELECT authority FROM inventory.availability_runtime_authority WHERE singleton_key=true",
         )).rows[0];
         if (!authority) fail("PUBLICATION_AUTHORITY_MISSING", "Runtime publication authority is missing.");
-        if (setupZero && authority.authority !== "canonical") {
+        if (setupRequest && authority.authority !== "canonical") {
           fail("PUBLICATION_SETUP_CANONICAL_REQUIRED", "Initial listing stock requires separately activated canonical inventory; no provider request was sent.");
         }
         if (expectedCatchup && authority.authority !== "legacy") {
@@ -441,8 +452,10 @@ export class PostgresQuantityPublicationAdmission implements QuantityPublication
             );
           }
         }
-        if (setupZero) {
-          await admitListingSetupZeroInsideTransaction(client,setupZero,this.clock());
+        if (setupRequest) {
+          initialStock = await resolveListingSetupQuantitiesInsideTransaction(client, setupRequest);
+          await admitListingSetupInsideTransaction(client,setupRequest,this.clock());
+          receiveSetup?.(initialStock);
         } else if (authority.authority === "canonical") {
           if (!resolveCurrentPlan) {
             await retainWork(client, null, "canonical_outbox_required");
@@ -484,7 +497,7 @@ export class PostgresQuantityPublicationAdmission implements QuantityPublication
         await client.query("COMMIT"); inTransaction = false;
         fail("PUBLICATION_PRIOR_OUTCOME_UNRESOLVED", "A prior provider quantity outcome requires reconciliation.", { attemptId: unresolved.id });
       }
-      if (!setupZero) await assertRecreatedListingStockReady(client, [scope, ...memberScopes]);
+      if (!setupRequest) await assertRecreatedListingStockReady(client, [scope, ...memberScopes]);
       const cooldown = (await client.query<{ retry_not_before: Date }>(`SELECT MAX(retry_not_before) AS retry_not_before
         FROM inventory.quantity_publication_cooldowns c
         JOIN jsonb_to_recordset($1::jsonb) AS incoming("providerKey" text,"providerScopeType" text,"externalScopeId" text,"externalInventoryItemId" text)
@@ -500,12 +513,12 @@ export class PostgresQuantityPublicationAdmission implements QuantityPublication
       }
       // Per-scope session lock serializes providers without holding a DB transaction during HTTP.
       attemptId = (await client.query<{ id: string }>(`INSERT INTO inventory.quantity_publication_attempts
-        (owner_token,owner_kind,gate_epoch,scope_key,scope,outbox_id,state,started_at,planned_outbox_id,affected_scope_keys,planned_outbox_ids,affected_scopes${setupZero ? ",listing_setup_operation_id" : ""})
-        VALUES ($1,$2,$3,$4,$5,$6,'running',$7,$8,$9,$10,$11${setupZero ? ",$12" : ""}) RETURNING id::text`,
-      [ownerToken, claim ? "outbox" : setupZero ? "listing_setup_zero" : "legacy", gate.epoch, key(scope), scope, claim?.outboxId ?? null, now(this.clock()),
+        (owner_token,owner_kind,gate_epoch,scope_key,scope,outbox_id,state,started_at,planned_outbox_id,affected_scope_keys,planned_outbox_ids,affected_scopes${setupRequest ? ",listing_setup_operation_id,listing_setup_intent" : ""})
+        VALUES ($1,$2,$3,$4,$5,$6,'running',$7,$8,$9,$10,$11${setupRequest ? ",$12,$13::jsonb" : ""}) RETURNING id::text`,
+      [ownerToken, claim ? "outbox" : setupRequest ? "listing_setup_zero" : "legacy", gate.epoch, key(scope), scope, claim?.outboxId ?? null, now(this.clock()),
         planned[0]?.outboxId ?? null,lockedScopeKeys,planned.map(row => row.outboxId),
         JSON.stringify(lockedScopeKeys.map(scopeKey => [scope, ...memberScopes].find(member => key(member) === scopeKey))),
-        ...(setupZero ? [setupZero.operationId] : [])])).rows[0].id;
+        ...(setupRequest ? [setupRequest.operationId, JSON.stringify(initialStock)] : [])])).rows[0].id;
       await client.query("COMMIT"); inTransaction = false;
       const requestEvidence = new QuantityProviderEvidenceCollector(
         new PostgresQuantityProviderRequestEvidenceStore(client, attemptId!, ownerToken, [scope,...memberScopes]), this.clock);
@@ -514,23 +527,24 @@ export class PostgresQuantityPublicationAdmission implements QuantityPublication
         result = await requestEvidence.run(() => session.run({ scope, externalSku: claim?.externalSku ?? null,
           memberKeys: new Set(memberScopes.map(key)) }, work));
         requestEvidence.assertNoAmbiguousRequests();
-        if (setupZero) requestEvidence.assertSingleCompletedRequest("POST",["/v3/feeds?feedType=MP_ITEM","/v3/feeds?feedType=MP_ITEM_MATCH"]);
+        if (setupRequest) requestEvidence.assertSingleCompletedRequest("POST",["/v3/feeds?feedType=MP_ITEM","/v3/feeds?feedType=MP_ITEM_MATCH"]);
       } catch (error) {
         await client.query("BEGIN"); inTransaction = true;
         const rejected = requestEvidence.provesTerminalRejection();
         // Only a caught, explicitly classified preflight failure can prove no
         // request. A crashed worker never reaches this branch and stays running.
-        const notSent = setupZero!==undefined && error instanceof Error && "effect" in error && error.effect==="not_sent"
-          && requestEvidence.provesNoRequestsStarted();
+        const setupNotSent = setupRequest !== undefined && error instanceof Error && "effect" in error && error.effect === "not_sent";
+        const outboxNotSent = claim !== undefined && error instanceof InventoryPublicationNotSentError;
+        const notSent = (setupNotSent || outboxNotSent) && requestEvidence.provesNoRequestsStarted();
         const terminal = rejected || notSent;
         await client.query(`UPDATE inventory.quantity_publication_attempts
           SET state=$4,error_code=$3,completed_at=$5,outcome_hash=$6,resolution_basis=$7
           WHERE id=$1 AND owner_token=$2 AND state='running'`,
         [attemptId, ownerToken, error instanceof Error && "code" in error ? String(error.code) : notSent ? "PROVIDER_PREFLIGHT_NOT_SENT" : "PROVIDER_OUTCOME_UNCERTAIN",
           rejected ? "rejected" : notSent ? "not_sent" : "uncertain", terminal ? now(this.clock()) : null,
-          rejected ? requestEvidence.evidenceHash() : notSent ? hash({intent:setupZero,outcome:"owner_preflight_no_request",errorCode:error instanceof Error && "code" in error ? error.code : "PROVIDER_PREFLIGHT_NOT_SENT"}) : null,
+          rejected ? requestEvidence.evidenceHash() : notSent ? hash({intent:setupRequest ?? { scope, claim },outcome:"owner_preflight_no_request",errorCode:error instanceof Error && "code" in error ? error.code : "PROVIDER_PREFLIGHT_NOT_SENT"}) : null,
           rejected ? "provider_rejection" : notSent ? "owner_preflight_no_request" : null]);
-        await retainWork(client, gate.activation_run_id, rejected ? "provider_rejected_quantity_write" : "uncertain_provider_outcome");
+        await retainWork(client, gate.activation_run_id, rejected ? "provider_rejected_quantity_write" : notSent ? "provider_preflight_not_sent" : "uncertain_provider_outcome");
         await client.query("COMMIT"); inTransaction = false;
         throw error;
       }

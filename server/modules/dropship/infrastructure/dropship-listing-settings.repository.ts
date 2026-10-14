@@ -5,13 +5,18 @@ import { evaluateDropshipCatalogExposure } from "../domain/catalog-exposure";
 import { DropshipError } from "../domain/errors";
 import { prepareEbayCategoryRules, resolveEbayListingCategory } from "../application/dropship-ebay-category-resolver";
 import type { ListingSettingsInputs } from "../application/dropship-listing-settings-facts";
-import type { ListingSettingsLoad, ListingSettingsRepository } from "../application/dropship-listing-settings-service";
+import type {
+  ListingSettingsLoad, ListingSettingsProductOwnRead, ListingSettingsRepository,
+} from "../application/dropship-listing-settings-service";
 import { loadSelectedCandidates } from "../application/dropship-selected-catalog";
+import { readCategoryListingSettings } from "./dropship-category-listing-settings.repository";
 import { readEbayCategoryRules } from "./dropship-ebay-category-rules.reader";
 import { readContentProfile, readListingContentSettings } from "./dropship-listing-content.reader";
 import { PgDropshipListingPreviewRepository } from "./dropship-listing-preview.repository";
 import { readCatalogCategoryNames, readListingSettingLayers } from "./dropship-listing-setting-layers.reader";
 import { readPricingProfile } from "./dropship-pricing-profile.reader";
+import { readProductCategoryMarks } from "./dropship-product-category-marks.repository";
+import { readProductListingSettings } from "./dropship-product-listing-settings.repository";
 import { selectedCatalogReaderForTransaction } from "./dropship-selected-catalog.reader";
 import { PgShellzClubProductCostAdapter } from "./shellz-club-product-cost.adapter";
 
@@ -38,13 +43,22 @@ function rowsDigest(columns: string, from: string, orderBy: string): string {
  * settings, whose triggers keep each row equal to its revision (migrations
  * 0657, 0659, 0660, 0717, 0738, 0739; the last two refuse a delete, so a reset
  * is a new revision too). So every committed save, reset or delete changes the
- * fingerprint. What Card Shellz owns with no revision (catalog facts, a
- * product's category and that category's name, .ops costs, the eBay category
- * mappings, exposure time windows) is covered by the cache's time limit
- * instead (Listing settings design 8.4). The category marks (0739) are not
- * read by these views yet. The reads in this file and these parts change
- * together: the PostgreSQL suite fails when a load reads a Dropship table that
- * is not here.
+ * fingerprint. The store's category marks (0739) are a part too, as their own
+ * values (product, category, seen_at; plan P29): a first mark, or a "Got it"
+ * that acknowledges at least one product, changes it, so "Card Shellz updated
+ * products" shows either at once instead of after the cache's time limit. A
+ * "Got it" whose products all moved again writes no mark (only its request
+ * ledger row and audit row, which are not parts), so it changes nothing here:
+ * their new category shows within the time limit, like any move. Marks are
+ * never deleted (the 0739 guard).
+ * The rows of the categories moved products came from are in the category
+ * settings part, which covers every category row of the store. What Card
+ * Shellz owns with no revision (catalog facts, a product's category and that
+ * category's name, .ops costs, the eBay category mappings, exposure time
+ * windows) is covered by the cache's time limit instead (Listing settings
+ * design 8.4): a move itself shows within that limit. The reads in this file
+ * and these parts change together: the PostgreSQL suite fails when a load
+ * reads a Dropship table that is not here.
  */
 const FINGERPRINT_SQL = `
 WITH owner AS (
@@ -92,7 +106,9 @@ SELECT o.vendor_id, json_build_array(
   ${rowsDigest("h.id, h.product_variant_id, h.held_at", `dropship.dropship_cost_change_listing_holds h
      WHERE h.vendor_id = o.vendor_id AND h.store_connection_id = o.store_connection_id AND h.released_at IS NULL`, "h.id")},
   ${rowsDigest("l.id, l.product_variant_id, l.status, l.vendor_retail_price_cents, l.quantity_cap, l.external_listing_id",
-    "dropship.dropship_vendor_listings l WHERE l.store_connection_id = o.store_connection_id", "l.id")}
+    "dropship.dropship_vendor_listings l WHERE l.store_connection_id = o.store_connection_id", "l.id")},
+  ${rowsDigest("m.product_id, m.category_id, m.seen_at", `dropship.dropship_product_category_seen m
+     WHERE m.vendor_id = o.vendor_id AND m.store_connection_id = o.store_connection_id`, "m.product_id")}
 ) AS parts
 FROM owner o`;
 
@@ -132,6 +148,29 @@ export class PgDropshipListingSettingsRepository implements ListingSettingsRepos
     }
   }
 
+  async readProductOwnSettings(input: {
+    vendorId: number; storeConnectionId: number; productId: number; productVariantIds: readonly number[];
+  }): Promise<ListingSettingsProductOwnRead> {
+    const client = await this.dbPool.connect();
+    try {
+      // One snapshot, no locks, as the load: the row and the catalog facts its main text is checked against agree.
+      await client.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
+      const rows = await readProductListingSettings(client, {
+        vendorId: input.vendorId, storeConnectionId: input.storeConnectionId, productIds: [input.productId],
+      });
+      const row = rows.get(input.productId) ?? null;
+      // Only a main text is checked against the catalog, so a product without one reads no catalog.
+      const catalog = row?.values.mainText != null ? await readProductCatalog(client, input.productId, input.productVariantIds) : null;
+      await client.query("COMMIT");
+      return { row, catalog };
+    } catch (error) {
+      await rollbackQuietly(client);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
   private async loadInSnapshot(client: Reader, input: { memberId: string; storeConnectionId: number; now: Date }): Promise<ListingSettingsLoad | null> {
     // The fingerprint is read first, so it describes exactly the snapshot everything else is read from.
     const owner = await readOwnerFingerprint(client, input);
@@ -161,9 +200,13 @@ export class PgDropshipListingSettingsRepository implements ListingSettingsRepos
 
     const ids = candidates.map((row) => row.productVariantId);
     // The product and category settings, once, for every resolver below (plan D26), and the live names of
-    // the categories that have settings (plan D19). Plain reads in this snapshot, like everything else here.
+    // every chosen size's category (plan D19), which the category views show (PR 9e, plan 8.11): one read
+    // either way, and a superset of the categories with settings. Plain reads in this snapshot, like
+    // everything else here.
     const layers = await readListingSettingLayers(client, { vendorId, storeConnectionId, candidates });
-    const categoryNames = await readCatalogCategoryNames(client, [...layers.categories.keys()]);
+    const categoryNames = await readCatalogCategoryNames(client,
+      [...new Set(candidates.flatMap((row) => row.categoryId === null ? [] : [row.categoryId]))]);
+    const categoryMoves = await readCategoryMoveInputs(client, { vendorId, storeConnectionId, candidates });
     let costReadFailed = false;
     const costs = await PgShellzClubProductCostAdapter.forTransaction(client, (failure) => {
       costReadFailed = true;
@@ -193,9 +236,57 @@ export class PgDropshipListingSettingsRepository implements ListingSettingsRepos
       pausedSince: await readLiveHolds(client, { vendorId, storeConnectionId, productVariantIds: ids }),
       layers,
       categoryNames,
+      categoryMoves,
     };
     return { state: "ok", fingerprint, inputs, costReadFailed };
   }
+}
+
+/**
+ * What "Card Shellz updated products" needs (plan PR 9, 10.6), in the load's
+ * snapshot and with no lock (the marks reader without `forUpdate`): the marks
+ * of the chosen products, then, only for products whose mark's category
+ * differs from their current one, the settings rows and live names of the
+ * categories they came from. Both reads are skipped when no product moved, so
+ * a store without moves pays one indexed read. Kept out of `layers` and
+ * `categoryNames`, which the other views read (the PostgreSQL suite pins
+ * them).
+ */
+async function readCategoryMoveInputs(client: Reader, input: {
+  vendorId: number;
+  storeConnectionId: number;
+  candidates: ListingSettingsInputs["candidates"];
+}): Promise<ListingSettingsInputs["categoryMoves"]> {
+  const { vendorId, storeConnectionId } = input;
+  const currentCategory = new Map(input.candidates.map((row) => [row.productId, row.categoryId]));
+  const marks = await readProductCategoryMarks(client, { vendorId, storeConnectionId, productIds: [...currentCategory.keys()] });
+  const fromCategoryIds = [...new Set([...marks.values()].flatMap((mark) =>
+    mark.categoryId !== null && mark.categoryId !== currentCategory.get(mark.productId) ? [mark.categoryId] : []))];
+  return {
+    marks,
+    fromCategories: fromCategoryIds.length === 0 ? new Map()
+      : await readCategoryListingSettings(client, { vendorId, storeConnectionId, categoryIds: fromCategoryIds }),
+    fromCategoryNames: await readCatalogCategoryNames(client, fromCategoryIds),
+  };
+}
+
+/**
+ * The product's catalog facts its own main text is checked against
+ * (productCatalogHash), from the same catalog read the views and W5 use
+ * (listCatalogCandidates), so the check here is the one they make. Every fact
+ * is a product column, so the size with the lowest id the catalog still lists
+ * gives them; null when it lists none of `productVariantIds` for the product.
+ * Only those facts are kept: a description can be long.
+ */
+async function readProductCatalog(client: Reader, productId: number, productVariantIds: readonly number[]):
+  Promise<ListingSettingsProductOwnRead["catalog"]> {
+  const candidates = await PgDropshipListingPreviewRepository.readerForTransaction(client).listCatalogCandidates(productVariantIds);
+  const first = candidates.filter((candidate) => candidate.productId === productId)
+    .sort((left, right) => left.productVariantId - right.productVariantId)[0];
+  return first === undefined ? null : {
+    productId: first.productId, description: first.description, brand: first.brand, condition: first.condition,
+    itemSpecifics: first.itemSpecifics,
+  };
 }
 
 /**

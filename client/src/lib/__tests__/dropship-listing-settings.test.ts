@@ -3,6 +3,7 @@ import { keepPreviousData } from "@tanstack/react-query";
 import {
   listingSettingsPricesResponseSchema,
   listingSettingsProductDetailSchema,
+  listingSettingsProductOwnSettingsSchema,
   listingSettingsProductsResponseSchema,
   type ListingSettingsPricesResponse,
   type ListingSettingsProductDetail,
@@ -16,6 +17,7 @@ import {
   LISTING_SETTINGS_OFF_CONTRACT,
   ListingSettingsReadError,
   listingSettingsPricesQueryOptions,
+  listingSettingsProductOwnQueryOptions,
   listingSettingsProductQueryOptions,
   listingSettingsProductsQueryOptions,
   listingSettingsQueryKey,
@@ -253,5 +255,60 @@ describe("listing settings product query (the drawer)", () => {
     await expect(listingSettingsProductQueryOptions(22, 11).queryFn({ signal })).rejects.toMatchObject({
       status: 404, code: "DROPSHIP_LISTING_SETTINGS_PRODUCT_NOT_FOUND",
     });
+  });
+});
+
+describe("listing settings own settings query (the drawer's editors, PR 10)", () => {
+  const ownSettings = listingSettingsProductOwnSettingsSchema.parse({
+    storeConnectionId: 22, productId: 11, revisionId: 5,
+    own: {
+      price: null, ebayCategory: null, storeShelf: null, shippingPolicy: { id: "F2", name: "Fast Free" }, returnPolicy: null,
+      paymentPolicy: null, textAbove: { mode: "own", text: "Ships fast." }, textBelow: null, mainText: null,
+    },
+    generatedAt: GENERATED_AT,
+  });
+
+  it("reads one product's own settings under the store's prefix, fresh each time the drawer opens", async () => {
+    const fetchMock = stubFetch(ownSettings);
+    const options = listingSettingsProductOwnQueryOptions(22, 11);
+    expect(options.queryKey).toEqual(["/api/dropship/listings/stores", 22, "listing-settings", "product-own", 11]);
+    expect(options.queryKey.slice(0, 3)).toEqual(listingSettingsQueryKey(22));
+    await expect(options.queryFn({ signal })).resolves.toEqual(ownSettings);
+    expect(fetchMock.mock.calls[0][0]).toBe("/api/dropship/listings/stores/22/listing-settings/products/11/own");
+    expect(options).toMatchObject({ enabled: true, retry: false, staleTime: 0 });
+    expect(options.queryKey).not.toEqual(listingSettingsProductQueryOptions(22, 11).queryKey);
+  });
+
+  it("runs only for a real product while the drawer is open", async () => {
+    expect(listingSettingsProductOwnQueryOptions(22, 11, { enabled: false }).enabled).toBe(false);
+    for (const productId of [0, -3, 1.5, Number.NaN, 2_147_483_648]) expect(listingSettingsProductOwnQueryOptions(22, productId).enabled).toBe(false);
+    const fetchMock = stubFetch(ownSettings);
+    await expect(listingSettingsProductOwnQueryOptions(22, 0).queryFn({ signal })).rejects.toMatchObject({
+      code: LISTING_SETTINGS_INVALID_REQUEST, context: { read: "product-own" },
+    });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("refuses an answer outside the strict contract, or for another store or product", async () => {
+    for (const answer of [
+      { ...ownSettings, categoryId: 40 },
+      { ...ownSettings, own: { ...ownSettings.own, shippingPolicy: { id: "F2" } } },
+      { ...ownSettings, revisionId: null },
+      { ...ownSettings, productId: 12 },
+      { ...ownSettings, storeConnectionId: 23 },
+    ]) {
+      stubFetch(answer);
+      await expect(listingSettingsProductOwnQueryOptions(22, 11).queryFn({ signal })).rejects.toMatchObject({
+        code: LISTING_SETTINGS_OFF_CONTRACT, context: { read: "product-own" },
+      });
+    }
+  });
+
+  it("passes the server's refusals on, for the drawer's read words", async () => {
+    for (const [status, code] of [[404, "DROPSHIP_LISTING_SETTINGS_PRODUCT_NOT_FOUND"], [422, "DROPSHIP_LISTING_SETTINGS_TOO_LARGE"], [429, "DROPSHIP_LISTING_SETTINGS_RATE_LIMITED"]] as const) {
+      stubFetch({ error: { code, message: "Refused." } }, status);
+      await expect(listingSettingsProductOwnQueryOptions(22, 11).queryFn({ signal })).rejects.toBeInstanceOf(DropshipApiError);
+      await expect(listingSettingsProductOwnQueryOptions(22, 11).queryFn({ signal })).rejects.toMatchObject({ status, code });
+    }
   });
 });

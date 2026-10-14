@@ -31,22 +31,22 @@ export class WalmartStockConnectionService {
         const after = this.cursors.get(channelId) ?? 0;
         const ordered = [...mappings.filter(row => row.product_variant_id > after),
           ...mappings.filter(row => row.product_variant_id <= after)];
-        const pending: typeof mappings = [];
-        for (let offset = 0; offset < ordered.length && pending.length < limit; offset += 500) {
-          const batch = ordered.slice(offset, offset + 500);
-          const ids = new Set(await this.inventory.pending(channelId, connection.connection_id, batch.map(row => row.product_variant_id)));
-          pending.push(...batch.filter(row => ids.has(row.product_variant_id)).slice(0, limit - pending.length));
-        }
-        if (!pending.length) continue;
+        // Check every retained mapping, including SKUs already connected to ATP.
+        // The cursor bounds provider reads without starving later listings.
+        const batch = ordered.slice(0, limit);
+        if (!batch.length) continue;
+        const pending = new Set(await this.inventory.pending(channelId, connection.connection_id, batch.map(row => row.product_variant_id)));
         const api = this.channels.api(connection);
         const account = await api.account();
         if (account.partnerId !== connection.partner_id
           || !account.nodes.some(node => node.shipNode === connection.ship_node_id && isActiveSellerShipNode(node))) {
           throw new WalmartApiError("WALMART_ACCOUNT_CHANGED", "Verify the changed Walmart account or fulfillment center before connecting stock.", false);
         }
-        for (const mapping of pending) {
+        for (const mapping of batch) {
           this.cursors.set(channelId, mapping.product_variant_id);
           try {
+            const presence = await this.channels.observeListingPresence(walmartListingAccount(connection), mapping.channel_sku);
+            if (presence?.state === "missing" || !pending.has(mapping.product_variant_id)) continue;
             const item = channelCatalogItemSchema.parse(await api.catalogItem(mapping.channel_sku));
             if (item.sku !== mapping.channel_sku || item.externalInventoryItemId !== mapping.channel_sku) {
               throw new WalmartApiError("WALMART_STOCK_IDENTITY_CHANGED", "Walmart returned a different inventory identity.", false);

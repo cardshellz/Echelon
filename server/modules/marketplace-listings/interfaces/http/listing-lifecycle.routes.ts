@@ -53,6 +53,9 @@ export function registerListingLifecycleRoutes(app: Express): void {
   route("/history", false, (service, id, request) =>
     service.history(id, request.body),
   );
+  route("/presence", false, (service, id, request) =>
+    service.refreshPresence(id, lookupSchema.parse(request.body).skus),
+  );
   route("", true, (service, id, request) =>
     service.request(
       id,
