@@ -248,6 +248,17 @@
   color: #a32f22;
   font-size: 12px;
 }
+.oe-code-entry > .oe-code-clear {
+  min-height: 32px;
+  margin-top: 4px;
+  padding: 4px 0;
+  border: 0;
+  background: transparent;
+  color: #8b420e;
+  font-size: 12px;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
 .oe-items-heading {
   display: flex;
   align-items: center;
