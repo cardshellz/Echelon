@@ -13,12 +13,15 @@ import {
   listingSettingsProductsInputSchema,
   listingSettingsProductsResponseSchema,
   listingSettingsSummarySchema,
+  listingSettingsUpdatedProductsInputSchema,
+  listingSettingsUpdatedProductsResponseSchema,
   type ListingSettingsPricesResponse,
   type ListingSettingsProductDetail,
   type ListingSettingsProductIdsResponse,
   type ListingSettingsProductOwnSettings,
   type ListingSettingsProductsResponse,
   type ListingSettingsSummary,
+  type ListingSettingsUpdatedProductsResponse,
 } from "@shared/dropship/listing-settings";
 import { fetchJson } from "./dropship-ops-surface";
 
@@ -60,7 +63,7 @@ export class ListingSettingsReadError extends Error {
   }
 }
 
-type ListingSettingsRead = "summary" | "products" | "prices" | "product" | "product-own" | "product-ids";
+type ListingSettingsRead = "summary" | "products" | "prices" | "product" | "product-own" | "product-ids" | "updated-products";
 
 /** At most this many contract issues are kept on the error: enough to find the field, never the values. */
 const MAX_REPORTED_ISSUES = 5;
@@ -310,6 +313,49 @@ export function listingSettingsProductIdsQueryOptions(
     // otherwise raise to 5 minutes), so the next opening reads again; the sheet also waits for a read made
     // after it opened before it sets up its draft.
     gcTime: 0,
+    retry: false,
+  } as const;
+}
+
+export interface ListingSettingsUpdatedProductsReadOptions extends ListingSettingsReadOptions {
+  /**
+   * True reads fresh each time it mounts (staleTime 0): the open sheet, whose
+   * "Got it" items come from this answer (plan PR 10, D6, D10). False (the
+   * default) is a list read, at most 60 seconds old: the line under the
+   * attention strip.
+   */
+  fresh?: boolean;
+}
+
+/**
+ * The products Card Shellz updated (`GET …/updated-products?page=N`, PR 10
+ * plan 10.2, 10.4): moved to another category since the vendor last
+ * confirmed it, or whose own text needs a check, 50 a page, with every moved
+ * product's "Got it" item. The key is built from the checked page, under the
+ * store's prefix (D10). The caller keeps it off while the selection is too
+ * large (D18): the server refuses it with the lists' 422 then.
+ */
+export function listingSettingsUpdatedProductsQueryOptions(
+  storeConnectionId: number,
+  page: number,
+  options: ListingSettingsUpdatedProductsReadOptions = {},
+) {
+  const parsed = listingSettingsUpdatedProductsInputSchema.safeParse({ storeConnectionId, page });
+  const asked = parsed.success ? parsed.data.page : page;
+  return {
+    queryKey: [...listingSettingsQueryKey(storeConnectionId), "updated-products", asked] as const,
+    queryFn: async ({ signal }: { signal: AbortSignal }): Promise<ListingSettingsUpdatedProductsResponse> => {
+      if (!parsed.success) throw invalidRequest("updated-products", parsed.error);
+      const { storeConnectionId: store, page: wanted } = parsed.data;
+      const params = new URLSearchParams({ page: String(wanted) });
+      return readListingSettings("updated-products", `${listingSettingsPath(store)}/updated-products?${params.toString()}`,
+        listingSettingsUpdatedProductsResponseSchema.refine(
+          (answer) => answer.storeConnectionId === store && answer.page === wanted,
+          { message: "The answer is for another store or page.", path: ["page"] },
+        ), signal);
+    },
+    enabled: (options.enabled ?? true) && parsed.success,
+    staleTime: options.fresh === true ? 0 : LISTING_SETTINGS_STALE_MS,
     retry: false,
   } as const;
 }

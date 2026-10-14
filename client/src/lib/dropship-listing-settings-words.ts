@@ -13,6 +13,7 @@ import {
   type ListingSettingsValueSource,
 } from "@shared/dropship/listing-settings";
 import { MAX_NAMED_CATALOG_GROUP_ITEMS } from "@shared/dropship/catalog-scope";
+import type { CategoryListingSettingField } from "@shared/dropship/listing-setting-values";
 import type { ConnectionBanner, ListingSettingsReadState, ListingSettingsRightReason } from "./dropship-listing-settings-access";
 import { LISTING_SETUP_RELOAD_MESSAGE } from "./dropship-ebay-listing-setup";
 import { listingAccessLink, type ListingAccessLink } from "./dropship-listing-access";
@@ -1021,4 +1022,109 @@ export function wouldBeLeftWithoutPriceWords(count: number): string {
  */
 export function releaseLimitWords(maxReleases: number, releaseCount: number): string {
   return `You can clear up to ${TEXT_NUMBER.format(maxReleases)} exact prices at once. This would clear ${TEXT_NUMBER.format(releaseCount)}. Choose fewer products.`;
+}
+
+// ---------------------------------------------------------------------------
+// "Card Shellz updated products" (PR 10g, plan 10.3, 12.2)
+// ---------------------------------------------------------------------------
+
+/**
+ * Words of "Card Shellz updated products" (W13, plan 10.3). The title and
+ * "Got it" / "Got it for all N" are the record's (REC:875, REC:993); every
+ * other one is a proposal (plan 12.2, or "beyond 12.2" where marked), kept
+ * here so a later PR changes it in one place. None names a code or an id.
+ */
+/**
+ * A product the answer gives no name for, in the attention strip's lines and
+ * in "Card Shellz updated products"' rows and read-out labels. Interim (PR 10 PROPOSAL).
+ */
+export const UNNAMED_PRODUCT_WORDS = "A product";
+
+export const LISTING_SETTINGS_UPDATED_WORDS = Object.freeze({
+  // The record's name for the sheet (REC:875, REC:993), and the place the step's bar names.
+  title: "Card Shellz updated products",
+  // The record's button for one moved product (REC:875).
+  gotIt: "Got it",
+  // Interim (PR 10 PROPOSAL): the strip line's button, and the own-text row's; both open the sheet or the drawer (10.3).
+  check: "Check",
+  // Interim (PR 10 PROPOSAL): the line under the attention strip opens the sheet (10.2).
+  review: "Review",
+  // Interim (PR 10 PROPOSAL): after a confirmed "Got it" (10.3).
+  done: "Done.",
+  // Interim (PR 10 PROPOSAL): a move whose category settings don't differ for this product (10.3, UX-M6; never "Nothing changes").
+  noChanges: "No category setting changes for it.",
+  // Interim (PR 10 PROPOSAL): a product moved out of, or into, no category (CC-C21).
+  noCategory: "no category",
+  // Interim (PR 10 PROPOSAL): a category Card Shellz has since deleted; the mark keeps its id, the name is gone (CC-C21).
+  removedCategory: "a category Card Shellz removed",
+  // Interim (PR 10 PROPOSAL, beyond 12.2): while the sheet's page reads (3.7).
+  loading: "Checking what Card Shellz updated…",
+  // Interim (PR 10 PROPOSAL, beyond 12.2): the sheet's page read failed (3.7); [Try again] reads it again.
+  readFailed: "Couldn't check what Card Shellz updated. Try again.",
+  // Interim (PR 10 PROPOSAL, beyond 12.2): nothing to show (3.7).
+  empty: "Nothing here. Card Shellz hasn't updated any of your products.",
+  // Interim (PR 10 PROPOSAL, beyond 12.2): the phone's paging (10.3 "phone Load more").
+  loadMore: "Load more",
+} as const);
+
+/** Each category setting's name inside a sentence (`changedFields`, the stored shape's order). Interim (PR 10 PROPOSAL). */
+export const CATEGORY_SETTING_WORDS: Readonly<Record<CategoryListingSettingField, string>> = Object.freeze({
+  price: "price",
+  ebayCategory: "eBay category",
+  storeShelf: "store shelf",
+  shippingPolicy: "shipping policy",
+  returnPolicy: "return policy",
+  paymentPolicy: "payment policy",
+  textAbove: "text above",
+  textBelow: "text below",
+});
+
+/** "Moved from Sleeves to Toploaders.": a product's move, with the category names as given (10.3). Interim (PR 10 PROPOSAL). */
+export function movedFromToWords(from: string, to: string): string {
+  return `Moved from ${from} to ${to}.`;
+}
+
+/**
+ * "Category settings that differ: price, shipping policy." in the order
+ * given (the stored shape's, never re-sorted), or "No category setting
+ * changes for it." when none differ (10.3, UX-M6). Interim (PR 10 PROPOSAL).
+ */
+export function changedCategorySettingsWords(fields: readonly CategoryListingSettingField[]): string {
+  if (fields.length === 0) return LISTING_SETTINGS_UPDATED_WORDS.noChanges;
+  return `Category settings that differ: ${fields.map((field) => CATEGORY_SETTING_WORDS[field]).join(", ")}.`;
+}
+
+/** "Got it for all 4" (REC:875). */
+export function gotItForAllWords(count: number): string {
+  return `Got it for all ${TEXT_NUMBER.format(count)}`;
+}
+
+/** A row's [Got it], read out with its product (plan 3.4): "Got it for Penny Sleeves". Interim (PR 10 PROPOSAL). */
+export function gotItLabel(productName: string): string {
+  const product = productName.trim();
+  return product ? `${LISTING_SETTINGS_UPDATED_WORDS.gotIt} for ${product}` : LISTING_SETTINGS_UPDATED_WORDS.gotIt;
+}
+
+/** An own-text row's [Check], read out with its product (plan 3.4): "Check the text of Penny Sleeves". Interim (PR 10 PROPOSAL). */
+export function checkOwnTextLabel(productName: string): string {
+  const product = productName.trim();
+  return product ? `${LISTING_SETTINGS_UPDATED_WORDS.check} the text of ${product}` : LISTING_SETTINGS_UPDATED_WORDS.check;
+}
+
+/**
+ * "2 products moved again. Check them below. It can take a minute to update."
+ * (10.3): W13's `movedAgainProductIds`, counted from the answer, never from
+ * the re-read (which can show the same list for up to a minute). Interim (PR 10 PROPOSAL).
+ */
+export function movedAgainWords(count: number): string {
+  return count === 1
+    ? "1 product moved again. Check it below. It can take a minute to update."
+    : `${TEXT_NUMBER.format(count)} products moved again. Check them below. It can take a minute to update.`;
+}
+
+/** "Card Shellz moved 4 products to another category.": the line under the attention strip (10.2). Interim (PR 10 PROPOSAL). */
+export function updatedProductsLineWords(count: number): string {
+  return count === 1
+    ? "Card Shellz moved 1 product to another category."
+    : `Card Shellz moved ${TEXT_NUMBER.format(count)} products to another category.`;
 }

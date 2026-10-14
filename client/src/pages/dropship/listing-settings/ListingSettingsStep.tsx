@@ -50,6 +50,8 @@ import { ProductDrawer, type DrawerLandingRequest } from "./ProductDrawer";
 import { ShelfDefaultRow } from "./ShelfDefaultRow";
 import { ShipFromRepairNote } from "./ShipFromRepairNote";
 import { StoreDefaultsCard } from "./StoreDefaultsCard";
+import { UpdatedProductsLine } from "./UpdatedProductsLine";
+import { UpdatedProductsSheet, type OwnTextCheckAction } from "./UpdatedProductsSheet";
 
 /**
  * The Listing settings step (Listing settings PR 7, plan 3A and 4.1): the
@@ -63,8 +65,8 @@ import { StoreDefaultsCard } from "./StoreDefaultsCard";
  * the facts every row shares (the live eBay setup, the summary, the store
  * shelves), turns them into edit rights and the one banner, and routes the
  * strip's buttons and the address (`?product=&size=`, and from PR 10
- * `?sheet=bulk` for "Set for selected") to the right place, one surface at a
- * time (D20).
+ * `?sheet=bulk` for "Set for selected" and `?sheet=updated` for "Card Shellz
+ * updated products") to the right place, one surface at a time (D20).
  */
 
 /** The onboarding read the page and portal shell share; its vendor status and entitlement gate every writer. */
@@ -158,6 +160,7 @@ export function ListingSettingsStep(props: ListingSettingsStepProps) {
   const tabsRef = useRef<HTMLDivElement | null>(null);
   const drawerOpener = useRef<HTMLElement | null>(null);
   const bulkOpener = useRef<HTMLElement | null>(null);
+  const updatedOpener = useRef<HTMLElement | null>(null);
   const mounted = useRef(false);
   useEffect(() => {
     mounted.current = true;
@@ -178,6 +181,9 @@ export function ListingSettingsStep(props: ListingSettingsStepProps) {
     blocked,
   };
   const banner = chooseConnectionBanner(accessInput);
+  // More than 10,000 sizes chosen: the lists can't be used, and "Card Shellz updated products" stays shut; the
+  // banner explains (plan 3.7, D18).
+  const tooLarge = banner?.kind === "too_large" || blocked?.kind === "too_large";
   const rights = listingSettingsEditRights({
     ...accessInput,
     // C19: the ship-from repair reloads the setup an open policy editor works on, so it waits.
@@ -259,6 +265,36 @@ export function ListingSettingsStep(props: ListingSettingsStepProps) {
     navigate(`${path}${sheetSearch(query, null)}`, { replace: true });
   }, [navigate]);
 
+  /**
+   * [Review] under the strip, or the strip's [Check], puts "Card Shellz updated products" in the address (D21), so
+   * Back closes it; the drawer's address goes with it (D20). No editor's change is asked about: the sheet holds
+   * none until a "Got it" is pressed, and that asks then (D16).
+   */
+  const openUpdatedSheet = useCallback(() => {
+    const active = typeof document === "undefined" ? null : document.activeElement;
+    updatedOpener.current = active instanceof HTMLElement ? active : null;
+    const { location: path, search: query } = latest.current;
+    navigate(`${path}${sheetSearch(drawerSearch(query, null), "updated")}`);
+  }, [navigate]);
+
+  const closeUpdatedSheet = useCallback(() => {
+    const { location: path, search: query } = latest.current;
+    navigate(`${path}${sheetSearch(query, null)}`, { replace: true });
+  }, [navigate]);
+
+  /**
+   * An own-text row's [Check] in that sheet: one push that takes the sheet off the address and opens the drawer on
+   * the product's Description row (D20, through 10b's landing request), so Back returns to the sheet (D21).
+   */
+  const checkOwnText = useCallback((action: OwnTextCheckAction) => {
+    const { productId, row } = action;
+    // The row's [Check] goes with the sheet, so the drawer gives focus back to what opened the sheet (plan 3.4).
+    drawerOpener.current = updatedOpener.current;
+    if (row !== undefined) setLanding((previous) => ({ productId, row, requestId: (previous?.requestId ?? 0) + 1 }));
+    const { location: path, search: query } = latest.current;
+    navigate(`${path}${drawerSearch(sheetSearch(query, null), { productId })}`);
+  }, [navigate]);
+
   const openProduct = useCallback((target: ListingSettingsProductTarget) => {
     openDrawer(target.productVariantId === undefined
       ? { productId: target.productId }
@@ -313,8 +349,11 @@ export function ListingSettingsStep(props: ListingSettingsStepProps) {
       case "open_product":
         void openProductFix(action);
         return;
+      case "open_updated_products":
+        openUpdatedSheet();
+        return;
     }
-  }, [openPolicyEditor, openProductFix]);
+  }, [openPolicyEditor, openProductFix, openUpdatedSheet]);
 
   const saved = summary.data?.storeDefaults ?? null;
   const goToStep1 = () => goToStep("choose");
@@ -339,6 +378,13 @@ export function ListingSettingsStep(props: ListingSettingsStepProps) {
         storeName={storeName}
         onAction={onAttention}
         onRetry={() => void summary.refetch()}
+      />
+      {/* Under the strip, never in a Category card (UX-M10); its read is off while the selection is too large (D18). */}
+      <UpdatedProductsLine
+        storeConnectionId={storeConnectionId}
+        summary={{ data: summary.data, error: summary.error }}
+        onOpen={openUpdatedSheet}
+        onTooLarge={onWriteBlocked}
       />
       <div ref={defaultsRef} className="mt-4">
         {/* The record's order (R:90): Price; Shipping, with the ship-from note under it; Return; Payment; eBay category; Store shelf; Description. */}
@@ -417,7 +463,7 @@ export function ListingSettingsStep(props: ListingSettingsStepProps) {
           storeConnectionId={storeConnectionId}
           summary={summary.data}
           // Off while too large, also under a wider banner that outranks the too-large one.
-          readOnly={banner?.kind === "too_large" || blocked?.kind === "too_large"}
+          readOnly={tooLarge}
           onOpenProduct={openProduct}
           onGoToStep1={goToStep1}
           request={tabsRequest}
@@ -455,6 +501,19 @@ export function ListingSettingsStep(props: ListingSettingsStepProps) {
         onGoToStep3={() => goToStep("publish")}
         onBlocked={onWriteBlocked}
         returnFocusTo={drawerOpener}
+      />
+      <UpdatedProductsSheet
+        storeConnectionId={storeConnectionId}
+        // One surface at a time (D20): the drawer, when the address opens both. Shut while the selection is too large (D18).
+        open={sheet === "updated" && drawerTarget === null && !tooLarge}
+        summary={{ data: summary.data, error: summary.error }}
+        right={rights.categoryMoves}
+        saveCallbacks={saveCallbacks}
+        onSaved={onSettingsSaved}
+        onClose={closeUpdatedSheet}
+        onCheckOwnText={checkOwnText}
+        onBlocked={onWriteBlocked}
+        returnFocusTo={updatedOpener}
       />
     </div>
   );
