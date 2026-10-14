@@ -1,4 +1,5 @@
 import type { PoFinancialStatus, PoPhysicalStatus } from "@shared/schema/procurement.schema";
+import { getPurchaseOrderCancellationPermission } from "./domain/purchase-order-cancellation-authority";
 
 export class PoLifecycleError extends Error {
   constructor(
@@ -324,15 +325,18 @@ export function buildPoLifecycleSummary(po: Record<string, any>): PoLifecycleSum
   }
 
   if (CANCELLABLE_LEGACY_STATUSES.has(legacyStatus) && allowedPhysicalTransitions.includes("cancelled")) {
+    const requiredPermission = getPurchaseOrderCancellationPermission({
+      status: legacyStatus, physicalStatus, sentToVendorAt: po.sentToVendorAt,
+    });
     nextActions.push(action(po, {
       id: "cancel",
-      label: ["sent", "acknowledged"].includes(legacyStatus) ? "Void" : "Cancel",
+      label: requiredPermission.action === "approve" ? "Void" : "Cancel",
       track: "physical",
       endpointSuffix: "cancel",
       targetStatus: "cancelled",
       requiresDialog: true,
       destructive: true,
-      requiredPermission: { resource: "purchasing", action: "cancel" },
+      requiredPermission,
     }));
   }
 

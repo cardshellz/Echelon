@@ -4,7 +4,11 @@ import type { SupplierPriceList } from "@shared/procurement/supplier-sourcing";
 import { loadSupplierSourcingRecords } from "./supplier-sourcing.repository";
 import { isPurchaseOrderHistoryConstraintViolation, readPurchaseOrderHistoryPresence } from "./purchase-order-history.repository";
 import { PURCHASE_ORDER_HISTORY_DELETE_MESSAGE, retainedPurchaseOrderHistoryKinds } from "./purchase-order-history.policy";
-import { readPurchaseApprovalActor, type PurchaseApprovalActor } from "../identity";
+import { readPurchaseApprovalActor, readCommandAuthorityActor, type CommandAuthorityActor, type PurchaseApprovalActor } from "../identity";
+import { readProcurementSettings } from "./procurement-settings.repository";
+import { ProcurementSettingsError } from "./procurement-settings.policy";
+import type { ProcurementSettingsSnapshot } from "@shared/procurement/procurement-settings";
+import { assertPurchaseOrderCancellationAuthority, getPurchaseOrderCancellationPermission, PurchaseOrderCancellationAuthorityError } from "./domain/purchase-order-cancellation-authority";
 import {
   assertPurchaseApprovalPermission,
   assertUniqueHighestApprovalTier,
@@ -59,7 +63,6 @@ import {
   purchaseRecommendationLines as purchaseRecommendationLinesTable,
   requestForQuotes as requestForQuotesTable,
   requestForQuoteLines as requestForQuoteLinesTable,
-  warehouseSettings as warehouseSettingsTable,
 } from "@shared/schema";
 import type { PoLineType, PoPhysicalStatus, PoFinancialStatus } from "@shared/schema/procurement.schema";
 import {
@@ -409,6 +412,7 @@ export function createPurchasingService(
   options: {
     now?: () => Date;
     readApprovalActor?: (tx: any, userId: string) => Promise<PurchaseApprovalActor>;
+    readCommandActor?: (tx: any, userId: string) => Promise<CommandAuthorityActor>;
     reconcileApprovedInvoiceCost?: (
       purchaseOrderLineId: number,
       tx: any,
@@ -418,6 +422,7 @@ export function createPurchasingService(
 ) {
   const now = options.now ?? (() => new Date());
   const readApprovalActor = options.readApprovalActor ?? readPurchaseApprovalActor;
+  const readCommandActor = options.readCommandActor ?? readCommandAuthorityActor;
   const reconcileApprovedInvoiceCost = options.reconcileApprovedInvoiceCost;
   const lineCommands = createPurchaseOrderLineCommands(db, {
     persistCatalogWrites: async (tx, vendorId, lines, userId) => {
@@ -1408,13 +1413,14 @@ export function createPurchasingService(
       changedBy?: string;
       notes?: string;
     },
+    at?: Date,
   ): Promise<any | null> {
     if (!historyData?.toStatus) {
       throw new Error("updatePurchaseOrderStatusWithHistoryTx requires historyData.toStatus");
     }
 
     const result = await tx.update(purchaseOrdersTable)
-      .set({ ...updates, updatedAt: new Date() })
+      .set({ ...updates, updatedAt: at ?? new Date() })
       .where(eq(purchaseOrdersTable.id, id))
       .returning();
 
@@ -1423,6 +1429,7 @@ export function createPurchasingService(
       await tx.insert(poStatusHistoryTable).values({
         ...historyData,
         purchaseOrderId: id,
+        ...(at ? { changedAt: at } : {}),
       });
     }
     return updatedPo;
@@ -1432,9 +1439,10 @@ export function createPurchasingService(
     tx: any,
     id: number,
     updates: Record<string, unknown>,
+    at?: Date,
   ): Promise<any | null> {
     const result = await tx.update(purchaseOrderLinesTable)
-      .set({ ...updates, updatedAt: new Date() })
+      .set({ ...updates, updatedAt: at ?? new Date() })
       .where(eq(purchaseOrderLinesTable.id, id))
       .returning();
     return result[0] || null;
@@ -1486,6 +1494,14 @@ export function createPurchasingService(
     extraPatch?: Record<string, any>,
     historyFromStatus?: string,
   ): Promise<any> {
+    // Every cancellation entry point uses the same authority and line/audit owner.
+    const acknowledgementFields = new Set(["vendorAckDate", "vendorRefNumber", "confirmedDeliveryDate"]);
+    if (extraPatch && Object.keys(extraPatch).some(key => target !== "acknowledged" || !acknowledgementFields.has(key))) {
+      throw new PurchasingError("Physical transitions do not accept lifecycle or unrelated field overrides", 400, { code: "PO_LIFECYCLE_PATCH_UNSUPPORTED" });
+    }
+    if (target === "cancelled") {
+      return cancel(poId, notes ?? "", userId);
+    }
     const expectation = await observeLifecycleVersion(poId);
     const eventType = PHYSICAL_LIFECYCLE_EVENTS[target];
     const result = await db.transaction(async (tx: any) => {
@@ -1566,6 +1582,9 @@ export function createPurchasingService(
     notes?: string,
     extraPatch?: Record<string, any>,
   ): Promise<any> {
+    if (extraPatch && Object.keys(extraPatch).length > 0) {
+      throw new PurchasingError("Financial transitions do not accept additional purchase order changes", 400, { code: "PO_LIFECYCLE_PATCH_UNSUPPORTED" });
+    }
     const expectation = await observeLifecycleVersion(poId);
     return db.transaction(async (tx: any) => {
       await lockInventoryCostGraph(tx);
@@ -2879,12 +2898,27 @@ export function createPurchasingService(
   }
 
   async function cancel(id: number, reason: string, userId?: string) {
-    if (!reason) throw new PurchasingError("Cancel reason is required", 400);
+    if (typeof reason !== "string" || !reason.trim()) throw new PurchasingError("Cancel reason is required", 400);
+    if (!userId?.trim()) {
+      console.warn(JSON.stringify({ event: "procurement.cancellation.denied", purchaseOrderId: id, code: "PO_CANCEL_ACTOR_REQUIRED" }));
+      throw new PurchasingError("An authenticated user is required to cancel this purchase order.", 403, { code: "PO_CANCEL_ACTOR_REQUIRED" });
+    }
+    reason = reason.trim();
     const expectation = await observeLifecycleVersion(id);
 
     const result = await db.transaction(async (tx: any) => {
       await lockInventoryCostGraph(tx);
+      const actor = await readCommandActor(tx, userId);
       const po = await lockLifecycleHeader(tx, id, expectation);
+      try {
+        assertPurchaseOrderCancellationAuthority(po, actor);
+      } catch (error) {
+        if (error instanceof PurchaseOrderCancellationAuthorityError) {
+          console.warn(JSON.stringify({ event: "procurement.cancellation.denied", purchaseOrderId: id, ...error.details }));
+          throw new PurchasingError(error.message, error.statusCode, error.details);
+        }
+        throw error;
+      }
       if (!CANCELLABLE_FROM.has(po.status) && !VOIDABLE_FROM.has(po.status)) {
         throw new PurchasingError(`Cannot cancel/void PO in '${po.status}' status`, 400);
       }
@@ -2894,11 +2928,20 @@ export function createPurchasingService(
         .where(eq(purchaseOrderLinesTable.purchaseOrderId, id))
         .orderBy(purchaseOrderLinesTable.id)
         .for("update");
+      const clockValue = now();
+      if (!(clockValue instanceof Date) || !Number.isFinite(clockValue.getTime())) {
+        throw new PurchasingError("Cancellation could not obtain a valid command timestamp", 500, { code: "PO_CANCEL_CLOCK_INVALID" });
+      }
+      // One immutable command time ties the header, changed lines and both audit
+      // records together; do not sample wall time separately at each write.
+      const cancelledAt = new Date(clockValue.getTime());
+      const permission = getPurchaseOrderCancellationPermission(po);
       const change = (() => {
         try {
           return buildPhysicalTransitionChange({
             po,
             target: "cancelled",
+            now: cancelledAt,
             userId,
             notes: reason,
             extraPatch: { cancelReason: reason },
@@ -2907,11 +2950,22 @@ export function createPurchasingService(
           return toPurchasingError(error);
         }
       })();
+      const lineChanges: Array<{
+        line_id: number;
+        before: { status: string; cancelled_qty: number | null };
+        after: { status: string; cancelled_qty: number };
+      }> = [];
       for (const line of lines) {
         if (line.status === "open") {
-          await updatePurchaseOrderLineTx(tx, line.id, {
+          const updatedLine = await updatePurchaseOrderLineTx(tx, line.id, {
             status: "cancelled",
             cancelledQty: line.orderQty,
+          }, cancelledAt);
+          if (!updatedLine) throw new PurchasingError("Purchase order line changed during cancellation", 409, { code: "PO_CANCEL_LINE_CONFLICT", lineId: line.id });
+          lineChanges.push({
+            line_id: line.id,
+            before: { status: line.status, cancelled_qty: line.cancelledQty ?? null },
+            after: { status: updatedLine.status, cancelled_qty: updatedLine.cancelledQty },
           });
         }
       }
@@ -2921,13 +2975,19 @@ export function createPurchasingService(
         id,
         change.patch,
         change.history,
+        cancelledAt,
       );
+      if (!updated) throw new PurchasingError("Purchase order changed during cancellation", 409, { code: "PO_CANCEL_HEADER_CONFLICT" });
       await emitPoEventTx(tx, id, "cancelled", userId, {
         from_status: change.history.fromStatus,
         to_status: change.history.toStatus,
         physical_status: "cancelled",
         reason,
-      });
+        required_permission: `${permission.resource}:${permission.action}`,
+        before: { status: po.status, physical_status: po.physicalStatus ?? null },
+        after: { status: updated.status, physical_status: updated.physicalStatus },
+        line_changes: lineChanges,
+      }, cancelledAt);
       return updated;
     });
 
@@ -4521,143 +4581,21 @@ export function createPurchasingService(
     }
   }
 
-  // ── PROCUREMENT SETTINGS (Spec A) ───────────────────────────────────────
-  //
-  // These live on inventory.warehouse_settings (DEFAULT row) per spec §12.
-  // Whitelisted here to prevent arbitrary key writes from the PATCH endpoint.
-  // Only `requireApproval` and `autoSendOnApprove` affect Spec A directly;
-  // the remaining keys are scaffolded for Specs B and C.
-
-  const PROCUREMENT_SETTING_KEYS = [
-    "requireApproval",
-    "autoSendOnApprove",
-    "requireAcknowledgeBeforeReceive",
-    "hideIncotermsDomestic",
-    "enableShipmentTracking",
-    "autoPutawayLocation",
-    "autoCloseOnReconcile",
-    "oneClickReceiveStart",
-    "useNewPoEditor",
-    "useNewReorderCockpit",
-  ] as const;
-  type ProcurementSettingKey = typeof PROCUREMENT_SETTING_KEYS[number];
-  const PROCUREMENT_SETTING_KEY_SET = new Set<string>(PROCUREMENT_SETTING_KEYS);
-
-  // Defaults mirror the NOT NULL DEFAULT clauses in migration 0557. Returned
-  // when no DEFAULT row exists yet (new install, test DB).
-  const PROCUREMENT_SETTING_DEFAULTS: Record<ProcurementSettingKey, boolean> = {
-    requireApproval: false,
-    autoSendOnApprove: true,
-    requireAcknowledgeBeforeReceive: false,
-    hideIncotermsDomestic: true,
-    enableShipmentTracking: true,
-    autoPutawayLocation: true,
-    autoCloseOnReconcile: true,
-    oneClickReceiveStart: true,
-    useNewPoEditor: false,
-    useNewReorderCockpit: false,
-  };
-
-  async function getProcurementSettings(): Promise<Record<ProcurementSettingKey, boolean>> {
-    const rows = await db
-      .select({
-        requireApproval: warehouseSettingsTable.requireApproval,
-        autoSendOnApprove: warehouseSettingsTable.autoSendOnApprove,
-        requireAcknowledgeBeforeReceive: warehouseSettingsTable.requireAcknowledgeBeforeReceive,
-        hideIncotermsDomestic: warehouseSettingsTable.hideIncotermsDomestic,
-        enableShipmentTracking: warehouseSettingsTable.enableShipmentTracking,
-        autoPutawayLocation: warehouseSettingsTable.autoPutawayLocation,
-        autoCloseOnReconcile: warehouseSettingsTable.autoCloseOnReconcile,
-        oneClickReceiveStart: warehouseSettingsTable.oneClickReceiveStart,
-        useNewPoEditor: warehouseSettingsTable.useNewPoEditor,
-        useNewReorderCockpit: warehouseSettingsTable.useNewReorderCockpit,
-      })
-      .from(warehouseSettingsTable)
-      .where(eq(warehouseSettingsTable.warehouseCode, "DEFAULT"))
-      .limit(1);
-
-    if (rows.length === 0) {
-      // Fallback: first row. Covers edge cases where no DEFAULT code exists.
-      const fallback = await db
-        .select({
-          requireApproval: warehouseSettingsTable.requireApproval,
-          autoSendOnApprove: warehouseSettingsTable.autoSendOnApprove,
-          requireAcknowledgeBeforeReceive: warehouseSettingsTable.requireAcknowledgeBeforeReceive,
-          hideIncotermsDomestic: warehouseSettingsTable.hideIncotermsDomestic,
-          enableShipmentTracking: warehouseSettingsTable.enableShipmentTracking,
-          autoPutawayLocation: warehouseSettingsTable.autoPutawayLocation,
-          autoCloseOnReconcile: warehouseSettingsTable.autoCloseOnReconcile,
-          oneClickReceiveStart: warehouseSettingsTable.oneClickReceiveStart,
-          useNewPoEditor: warehouseSettingsTable.useNewPoEditor,
-          useNewReorderCockpit: warehouseSettingsTable.useNewReorderCockpit,
-        })
-        .from(warehouseSettingsTable)
-        .limit(1);
-      if (fallback.length === 0) return { ...PROCUREMENT_SETTING_DEFAULTS };
-      return fallback[0] as Record<ProcurementSettingKey, boolean>;
-    }
-    return rows[0] as Record<ProcurementSettingKey, boolean>;
+  // Purchasing decisions read only the canonical global policy. Missing or invalid
+  // configuration fails closed; all writes belong to the settings command owner.
+  async function getProcurementSettings(): Promise<ProcurementSettingsSnapshot> {
+    return getProcurementSettingsTx(db, false);
   }
 
-  async function getProcurementSettingsTx(
-    tx: any,
-  ): Promise<Record<ProcurementSettingKey, boolean>> {
-    const projection = {
-      requireApproval: warehouseSettingsTable.requireApproval,
-      autoSendOnApprove: warehouseSettingsTable.autoSendOnApprove,
-      requireAcknowledgeBeforeReceive: warehouseSettingsTable.requireAcknowledgeBeforeReceive,
-      hideIncotermsDomestic: warehouseSettingsTable.hideIncotermsDomestic,
-      enableShipmentTracking: warehouseSettingsTable.enableShipmentTracking,
-      autoPutawayLocation: warehouseSettingsTable.autoPutawayLocation,
-      autoCloseOnReconcile: warehouseSettingsTable.autoCloseOnReconcile,
-      oneClickReceiveStart: warehouseSettingsTable.oneClickReceiveStart,
-      useNewPoEditor: warehouseSettingsTable.useNewPoEditor,
-      useNewReorderCockpit: warehouseSettingsTable.useNewReorderCockpit,
-    };
-    const rows = await tx
-      .select(projection)
-      .from(warehouseSettingsTable)
-      .where(eq(warehouseSettingsTable.warehouseCode, "DEFAULT"))
-      .limit(1)
-      .for("share");
-    if (rows[0]) return rows[0] as Record<ProcurementSettingKey, boolean>;
-
-    const fallback = await tx
-      .select(projection)
-      .from(warehouseSettingsTable)
-      .limit(1)
-      .for("share");
-    return fallback[0]
-      ? fallback[0] as Record<ProcurementSettingKey, boolean>
-      : { ...PROCUREMENT_SETTING_DEFAULTS };
-  }
-
-  async function updateProcurementSetting(
-    key: string,
-    value: boolean,
-    userId?: string,
-  ): Promise<Record<ProcurementSettingKey, boolean>> {
-    if (!PROCUREMENT_SETTING_KEY_SET.has(key)) {
-      throw new PurchasingError(`Unknown procurement setting: ${key}`, 400);
+  async function getProcurementSettingsTx(tx: any, lock = true): Promise<ProcurementSettingsSnapshot> {
+    try {
+      return (await readProcurementSettings(tx, lock ? "share" : undefined)).settings;
+    } catch (error) {
+      if (error instanceof ProcurementSettingsError) {
+        throw new PurchasingError(error.message, error.statusCode, { code: error.code });
+      }
+      throw error;
     }
-    if (typeof value !== "boolean") {
-      throw new PurchasingError(`Procurement setting '${key}' must be a boolean`, 400);
-    }
-    // Drizzle column names match the schema keys. Use a dynamic set object.
-    const patch: Record<string, any> = { [key]: value, updatedAt: new Date() };
-    const result = await db
-      .update(warehouseSettingsTable)
-      .set(patch)
-      .where(eq(warehouseSettingsTable.warehouseCode, "DEFAULT"))
-      .returning();
-    // If no DEFAULT row yet, apply to first row.
-    if (result.length === 0) {
-      await db
-        .update(warehouseSettingsTable)
-        .set(patch);
-    }
-    console.log(`[Purchasing] procurement setting "${key}" set to ${value} by ${userId ?? "system"}`);
-    return getProcurementSettings();
   }
 
   // ── PO EVENT STREAM (Spec A) ─────────────────────────────────────────────
@@ -4697,6 +4635,7 @@ export function createPurchasingService(
     eventType: string,
     userId: string | null | undefined,
     payload?: Record<string, unknown>,
+    at?: Date,
   ): Promise<void> {
     const { actorType, actorId } = resolveActor(userId);
     await tx.insert(poEventsTable).values({
@@ -4705,6 +4644,7 @@ export function createPurchasingService(
       actorType,
       actorId,
       payloadJson: payload ?? null,
+      ...(at ? { createdAt: at } : {}),
     });
   }
 
@@ -8679,7 +8619,6 @@ export function createPurchasingService(
     duplicatePurchaseOrder,
     getNewPoPreload,
     getProcurementSettings,
-    updateProcurementSetting,
     emitPoEvent,
   };
 }

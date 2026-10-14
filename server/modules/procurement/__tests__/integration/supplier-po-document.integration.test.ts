@@ -25,6 +25,7 @@ import { loadSupplierPoDocumentSource } from "../../supplier-po-document.reposit
 const TEST_URL = process.env.ECHELON_TEST_DATABASE_URL;
 const integration = TEST_URL && process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true" ? describe : describe.skip;
 const TABLES = [schema.products, schema.productVariants, schema.vendors, schema.vendorProducts, schema.warehouses, schema.echelonSettings,
+  schema.users, schema.authRoles, schema.authPermissions, schema.authUserRoles, schema.authRolePermissions,
   schema.purchaseOrders, schema.purchaseOrderLines, schema.poStatusHistory, schema.poEvents, schema.purchasingRecommendationPoHandoffs,
   schema.inboundShipments, schema.inboundShipmentLines, schema.receivingOrders, schema.receivingLines, schema.poReceipts,
   schema.vendorInvoices, schema.vendorInvoiceLines, schema.landedCostSnapshots, schema.landedCostAdjustments, schema.inventoryLots];
@@ -52,7 +53,7 @@ integration.sequential("supplier document from real saved purchase orders", () =
     validatePostgresTestEnvironment(process.env);
     pool = new pg.Pool({ connectionString: TEST_URL, ssl: false, max: 4, statement_timeout: 15_000 });
     // CREATE refuses any preexisting fixture schema; cleanup owns only successes.
-    for (const name of ["catalog", "procurement", "warehouse", "inventory"]) {
+    for (const name of ["catalog", "procurement", "warehouse", "inventory", "identity"]) {
       await pool.query(`CREATE SCHEMA ${name}`); ownedSchemas.push(name);
     }
     for (const table of TABLES) await pool.query(fixtureTable(table));
@@ -74,9 +75,15 @@ integration.sequential("supplier document from real saved purchase orders", () =
     service = createPurchasingService(database, storage as never, { now: () => new Date("2026-10-12T12:00:00Z") });
   });
   beforeEach(async () => {
-    if (ownedSchemas.length !== 4) throw new Error("Missing fixture ownership");
+    if (ownedSchemas.length !== 5) throw new Error("Missing fixture ownership");
     await pool.query(`TRUNCATE ${TABLES.map(qualifiedTable).join(",")} RESTART IDENTITY CASCADE`);
     await pool.query(`
+      INSERT INTO identity.users(id,username,password,role,active) VALUES ('document-test','document-test','unused','purchaser',1);
+      INSERT INTO identity.users(id,username,password,role,active) VALUES ('concurrent-document-editor','concurrent-document-editor','unused','purchaser',1);
+      INSERT INTO identity.auth_roles(id,name,is_system) VALUES (1,'Document cancellation fixture',0);
+      INSERT INTO identity.auth_permissions(id,resource,action,category) VALUES (1,'purchasing','cancel','purchasing');
+      INSERT INTO identity.auth_user_roles(user_id,role_id) VALUES ('document-test',1);
+      INSERT INTO identity.auth_role_permissions(role_id,permission_id,constraints) VALUES (1,1,NULL);
       INSERT INTO catalog.products(id,sku,name) VALUES (10,'PRODUCT-SNAPSHOT','Supplier document product');
       INSERT INTO catalog.product_variants(id,product_id,sku,name,units_per_variant,uom_type,is_base_unit)
         VALUES (100,10,'PIECE-SKU','Each',1,'each',true);

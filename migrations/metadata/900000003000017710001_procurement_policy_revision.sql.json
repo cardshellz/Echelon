@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "migration": "900000003000017710001_procurement_policy_revision.sql",
+  "generation": 3,
+  "pr": 1771,
+  "ordinal": 1,
+  "after": [
+    "900000002000017820001_walmart_match_recreation.sql"
+  ]
+}

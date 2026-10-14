@@ -130,14 +130,14 @@ describe("conversion surface relocation", () => {
     expect(state.mutate).not.toHaveBeenCalled();
   });
 
-  it("registers planning-permission routes without changing admin procurement settings access", () => {
+  it("registers planning-permission routes and independent procurement settings access", () => {
     const app = readFileSync(resolve(process.cwd(), "client/src/App.tsx"), "utf8");
     const nav = readFileSync(resolve(process.cwd(), "client/src/components/layout/AppShell.tsx"), "utf8");
     for (const path of ["/inventory/cutover", "/settings/procurement/promise-safety"]) {
       const route = app.slice(app.indexOf(`<Route path="${path}">`));
       expect(route.slice(0, route.indexOf("</Route>"))).toContain('requiredPermission={{ resource: "inventory_planning", action: "view" }}');
     }
-    expect(app).toContain('<ProtectedRoute component={ProcurementSettings} allowedRoles={["admin"]} />');
+    expect(app).toContain('<ProtectedRoute component={ProcurementSettings} anyOfPermissions={[{ resource: "purchasing", action: "view" }, { resource: "settings", action: "edit" }]} />');
     expect(nav).toContain('href: "/inventory/cutover"');
   });
 });

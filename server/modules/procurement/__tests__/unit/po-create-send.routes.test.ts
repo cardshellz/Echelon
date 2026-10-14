@@ -22,6 +22,7 @@ vi.mock("../../../../routes/middleware", () => {
   };
   return {
     requirePermission: () => pass,
+    requireAnyPermission: () => pass,
     requireAuth: pass,
     requireInternalApiKey: pass,
     upload: { single: () => pass },
@@ -44,6 +45,12 @@ vi.mock("../../ap-ledger.service", () => ({}));
 vi.mock("../../po-document", () => ({ renderPoHtml: vi.fn() }));
 vi.mock("../../../notifications/email.service", () => ({}));
 vi.mock("../../../notifications/notifications.service", () => ({}));
+
+const settingsCommandMocks = vi.hoisted(() => ({ update: vi.fn() }));
+vi.mock("../../procurement-settings.commands", async importOriginal => ({
+  ...await importOriginal<typeof import("../../procurement-settings.commands")>(),
+  procurementSettingsCommands: settingsCommandMocks,
+}));
 
 const poEmailOutboxMocks = vi.hoisted(() => ({
   enqueue: vi.fn(),
@@ -82,7 +89,6 @@ function buildPurchasingMock(overrides: Record<string, any> = {}) {
     duplicatePurchaseOrder: vi.fn(),
     getNewPoPreload: vi.fn(),
     getProcurementSettings: vi.fn(),
-    updateProcurementSetting: vi.fn(),
     addLineCommand: vi.fn(),
     addBulkLinesCommand: vi.fn(),
     updateLineCommand: vi.fn(),
@@ -574,6 +580,7 @@ describe("Settings endpoints", () => {
   let purchasing: ReturnType<typeof buildPurchasingMock>;
 
   beforeEach(async () => {
+    settingsCommandMocks.update.mockReset();
     purchasing = buildPurchasingMock();
     server = await startServer(buildApp(purchasing));
   });
@@ -593,35 +600,43 @@ describe("Settings endpoints", () => {
     expect(body.requireApproval).toBe(false);
   });
 
-  it("PATCH accepts { key, value }", async () => {
-    purchasing.updateProcurementSetting.mockResolvedValue({ requireApproval: true });
-    const { status } = await jsonRequest(server.url, "PATCH", "/api/settings/procurement", {
-      key: "requireApproval",
-      value: true,
-    });
+  it("PATCH sends a single toggle and reviewed revision through the transactional command owner", async () => {
+    settingsCommandMocks.update.mockResolvedValue({ httpStatus: 200, replayed: false, body: { requireApproval: true, revision: 1 } });
+    const input = { key: "requireApproval", value: true, expectedRevision: 0 };
+    const { status, body, headers } = await jsonRequest(server.url, "PATCH", "/api/settings/procurement", input, "settings-intent-001");
     expect(status).toBe(200);
-    expect(purchasing.updateProcurementSetting).toHaveBeenCalledWith(
-      "requireApproval",
-      true,
-      "test-user",
-    );
+    expect(body).toEqual({ requireApproval: true, revision: 1 });
+    expect(headers.get("Idempotency-Replayed")).toBe("false");
+    expect(settingsCommandMocks.update).toHaveBeenCalledWith(input, "test-user", expect.objectContaining({
+      actorId: "test-user", actorType: "user", method: "PATCH", idempotencyKey: "settings-intent-001",
+      routeTemplate: "/api/settings/procurement", resourceKey: "procurement_settings:DEFAULT", commandName: "procurement.settings.update",
+    }));
   });
 
   it("PATCH accepts { updates: [...] } batch form", async () => {
-    purchasing.updateProcurementSetting.mockResolvedValue({});
+    settingsCommandMocks.update.mockResolvedValue({ httpStatus: 200, replayed: true, body: { revision: 1 } });
     await jsonRequest(server.url, "PATCH", "/api/settings/procurement", {
       updates: [
         { key: "requireApproval", value: true },
         { key: "useNewPoEditor", value: true },
       ],
+      expectedRevision: 0,
     });
-    expect(purchasing.updateProcurementSetting).toHaveBeenCalledTimes(2);
+    expect(settingsCommandMocks.update).toHaveBeenCalledTimes(1);
   });
 
-  it("PATCH rejects empty body", async () => {
+  it("PATCH preserves the owner's classified full-batch rejection", async () => {
+    settingsCommandMocks.update.mockResolvedValue({ httpStatus: 400, replayed: false, body: { error: "Invalid procurement policy command", code: "PROCUREMENT_SETTINGS_INPUT_INVALID" } });
     const { status, body } = await jsonRequest(server.url, "PATCH", "/api/settings/procurement", {});
     expect(status).toBe(400);
-    expect(body.error).toMatch(/key, value.*updates/);
+    expect(body.code).toBe("PROCUREMENT_SETTINGS_INPUT_INVALID");
+  });
+
+  it("requires a command key before dispatching the policy owner", async () => {
+    const { status, body } = await jsonRequest(server.url, "PATCH", "/api/settings/procurement", { key: "requireApproval", value: true, expectedRevision: 0 }, null);
+    expect(status).toBe(400);
+    expect(body.details.code).toBe("FINANCIAL_COMMAND_IDEMPOTENCY_KEY_REQUIRED");
+    expect(settingsCommandMocks.update).not.toHaveBeenCalled();
   });
 });
 
