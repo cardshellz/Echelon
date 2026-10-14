@@ -1,5 +1,7 @@
 import { PoVarianceApproval, hasPendingPoVarianceApproval } from "@/features/purchasing/PoVarianceApproval";
 import { PoShipmentCostSummary } from "@/features/purchasing/PoShipmentCostSummary";
+import { usePoShipmentCosts } from "@/features/purchasing/use-po-shipment-costs";
+import { formatIntegerCents } from "@shared/utils/format-integer-cents";
 import { parseShipmentReceiptResolution, requiresReceiptUnitReview } from "@/lib/shipment-receipt-units";
 import React from "react";
 import { poEmailDeliveryPresentation } from "@/lib/po-email-delivery";
@@ -1205,6 +1207,13 @@ export default function PurchaseOrderDetail() {
     queryKey: [`/api/purchase-orders/${poId}`],
     enabled: !!poId,
   });
+  const shipmentCosts = usePoShipmentCosts(poId);
+  const costCardAmount = (amount: number | null | undefined) => {
+    if (shipmentCosts.isError) return "Unavailable";
+    if (!shipmentCosts.data) return "Loading…";
+    if (amount == null) return "Incomplete";
+    return formatIntegerCents(amount, shipmentCosts.data.summary.currency);
+  };
   const immutableRecommendationPo = isImmutableRecommendationPurchaseOrder(po);
   const lifecycle = (po as any)?.lifecycle as PoLifecycleSummary | undefined;
   const autoDraftActionPlan = (po as any)?.autoDraftActionPlan as AutoDraftActionPlan | null | undefined;
@@ -3043,13 +3052,13 @@ export default function PurchaseOrderDetail() {
           </CardContent>
         </Card>
 
-        {/* Tax — editable when DDP (or no incoterms); grayed out otherwise */}
-        <Card className={!taxApplicable ? "opacity-40" : ""}>
+        {/* Combined duties; the edit action changes only the supplier charge. */}
+        <Card data-testid="po-duty-summary-card">
           <CardContent className="p-3">
             <div className="flex items-center justify-between">
-              <div className="text-xs text-muted-foreground">Supplier tax / duties</div>
+              <div className="text-xs text-muted-foreground">{editingTax ? "Edit supplier tax / duties" : "Tax / Duties"}</div>
               {taxApplicable && canEditHeader && !editingTax && (
-                <Button variant="ghost" size="icon" className="h-5 w-5"
+                <Button variant="ghost" size="icon" className="h-5 w-5" aria-label="Edit supplier tax / duties"
                   onClick={() => { setTaxDollars(((Number(po.taxCents) || 0) / 100).toFixed(2)); setEditingTax(true); }}
                 >
                   <Pencil className="h-3 w-3" />
@@ -3058,7 +3067,7 @@ export default function PurchaseOrderDetail() {
             </div>
             {editingTax ? (
               <div className="flex gap-1 mt-1">
-                <Input type="number" min="0" step="0.01" value={taxDollars}
+                <Input aria-label="Supplier tax / duties" type="number" min="0" step="0.01" value={taxDollars}
                   onChange={e => setTaxDollars(e.target.value)}
                   className="h-7 text-sm font-mono" autoFocus
                   onKeyDown={e => { if (e.key === "Enter") updateChargesMutation.mutate({ taxCents: dollarsToCents(taxDollars || "0") }); if (e.key === "Escape") setEditingTax(false); }}
@@ -3073,21 +3082,25 @@ export default function PurchaseOrderDetail() {
                 </Button>
               </div>
             ) : (
-              <div className="font-mono font-medium">{formatCents(po.taxCents)}</div>
+              <div className="font-mono font-medium">{costCardAmount(shipmentCosts.data?.totals.dutyCents)}</div>
             )}
+            {shipmentCosts.isSuccess && <div className="text-xs text-muted-foreground mt-1">
+              Supplier: {formatIntegerCents(shipmentCosts.data.supplier.dutyCents, shipmentCosts.data.summary.currency)}<br />
+              Shipment: {formatIntegerCents(shipmentCosts.data.summary.dutyCents, shipmentCosts.data.summary.currency)}
+            </div>}
             {!taxApplicable && poIncoterms && (
-              <div className="text-xs text-muted-foreground mt-0.5">N/A — {poIncoterms}</div>
+              <div className="text-xs text-muted-foreground mt-0.5">Supplier charge N/A — {poIncoterms}</div>
             )}
           </CardContent>
         </Card>
 
-        {/* Shipping — editable when CFR/CIF/CPT/CIP/DAP/DPU/DDP (or no incoterms); grayed otherwise */}
-        <Card className={!shippingApplicable ? "opacity-40" : ""}>
+        {/* Combined freight; supplier edits retain their incoterm restrictions. */}
+        <Card data-testid="po-freight-summary-card">
           <CardContent className="p-3">
             <div className="flex items-center justify-between">
-              <div className="text-xs text-muted-foreground">Supplier freight</div>
+              <div className="text-xs text-muted-foreground">{editingShipping ? "Edit supplier freight" : "Freight"}</div>
               {shippingApplicable && canEditHeader && !editingShipping && (
-                <Button variant="ghost" size="icon" className="h-5 w-5"
+                <Button variant="ghost" size="icon" className="h-5 w-5" aria-label="Edit supplier freight"
                   onClick={() => { setShippingDollars(((Number(po.shippingCostCents) || 0) / 100).toFixed(2)); setEditingShipping(true); }}
                 >
                   <Pencil className="h-3 w-3" />
@@ -3096,7 +3109,7 @@ export default function PurchaseOrderDetail() {
             </div>
             {editingShipping ? (
               <div className="flex gap-1 mt-1">
-                <Input type="number" min="0" step="0.01" value={shippingDollars}
+                <Input aria-label="Supplier freight" type="number" min="0" step="0.01" value={shippingDollars}
                   onChange={e => setShippingDollars(e.target.value)}
                   className="h-7 text-sm font-mono" autoFocus
                   onKeyDown={e => { if (e.key === "Enter") updateChargesMutation.mutate({ shippingCostCents: dollarsToCents(shippingDollars || "0") }); if (e.key === "Escape") setEditingShipping(false); }}
@@ -3111,11 +3124,15 @@ export default function PurchaseOrderDetail() {
                 </Button>
               </div>
             ) : (
-              <div className="font-mono font-medium">{formatCents(po.shippingCostCents)}</div>
+              <div className="font-mono font-medium">{costCardAmount(shipmentCosts.data?.totals.freightCents)}</div>
             )}
+            {shipmentCosts.isSuccess && <div className="text-xs text-muted-foreground mt-1">
+              Supplier: {formatIntegerCents(shipmentCosts.data.supplier.freightCents, shipmentCosts.data.summary.currency)}<br />
+              Shipment: {formatIntegerCents(shipmentCosts.data.summary.freightCents, shipmentCosts.data.summary.currency)}
+            </div>}
             {!shippingApplicable && poIncoterms && (
               <div className="text-xs text-muted-foreground mt-0.5">
-                N/A — {poIncoterms}
+                Supplier charge N/A — {poIncoterms}
                 <button
                   className="ml-1 text-primary underline"
                   onClick={() => setActiveTab("shipments")}
@@ -3128,16 +3145,20 @@ export default function PurchaseOrderDetail() {
         </Card>
 
         {/* Total — always read-only */}
-        <Card>
+        <Card data-testid="po-total-cost-summary-card">
           <CardContent className="p-3">
-            <div className="text-xs text-muted-foreground">Supplier PO total</div>
-            <div className="font-mono font-bold text-lg">{formatCents(po.totalCents)}</div>
+            <div className="text-xs text-muted-foreground">Total cost</div>
+            <div className="font-mono font-bold text-lg">{costCardAmount(shipmentCosts.data?.totals.combinedCostCents)}</div>
+            {shipmentCosts.isSuccess && <div className="text-xs text-muted-foreground mt-1">
+              Supplier PO: {formatIntegerCents(shipmentCosts.data.summary.poAmountCents, shipmentCosts.data.summary.currency)}<br />
+              Shipment charges: {formatIntegerCents(shipmentCosts.data.summary.totalCents, shipmentCosts.data.summary.currency)}
+            </div>}
           </CardContent>
         </Card>
 
       </div>
 
-      {poId && <PoShipmentCostSummary purchaseOrderId={poId} onViewShipments={() => setActiveTab("shipments")} />}
+      {poId && <PoShipmentCostSummary purchaseOrderId={poId} query={shipmentCosts} onViewShipments={() => setActiveTab("shipments")} />}
 
       {/* Auto-Draft Banner */}
       {immutableRecommendationPo && (
