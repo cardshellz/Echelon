@@ -588,7 +588,7 @@ export default function Layout({ children }: { children: React.ReactNode }) {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const isMobile = useIsMobile();
   const [mobileOpen, setMobileOpen] = useState(false);
-  const { user } = useAuth();
+  const { user, hasPermission } = useAuth();
   const isAdmin = user?.role === "admin";
 
   return (
@@ -627,7 +627,7 @@ export default function Layout({ children }: { children: React.ReactNode }) {
 
           <div className="flex items-center gap-2">
             <NotificationBell />
-            {isAdmin && (
+            {(isAdmin || hasPermission("purchasing", "view") || hasPermission("settings", "edit")) && (
               <DropdownMenu>
                 <DropdownMenuTrigger asChild>
                   <Button variant="ghost" size="icon" className="text-muted-foreground min-h-[44px] min-w-[44px]" data-testid="button-settings-menu">
@@ -637,18 +637,19 @@ export default function Layout({ children }: { children: React.ReactNode }) {
                 <DropdownMenuContent align="end" className="w-48">
                   <DropdownMenuLabel>Settings</DropdownMenuLabel>
                   <DropdownMenuSeparator />
-                  <DropdownMenuItem asChild data-testid="link-general-settings">
+                  {isAdmin && <DropdownMenuItem asChild data-testid="link-general-settings">
                     <Link href="/settings" className="w-full cursor-pointer">
                       <Cog className="mr-2 h-4 w-4" />
                       General Settings
                     </Link>
-                  </DropdownMenuItem>
-                  <DropdownMenuItem asChild data-testid="link-procurement-settings">
+                  </DropdownMenuItem>}
+                  {(hasPermission("purchasing", "view") || hasPermission("settings", "edit")) && <DropdownMenuItem asChild data-testid="link-procurement-settings">
                     <Link href="/settings/procurement" className="w-full cursor-pointer">
                       <ShoppingBag className="mr-2 h-4 w-4" />
                       Procurement
                     </Link>
-                  </DropdownMenuItem>
+                  </DropdownMenuItem>}
+                  {isAdmin && <>
                   <DropdownMenuItem asChild data-testid="link-shipping-settings">
                     <Link href="/shipping-settings" className="w-full cursor-pointer">
                       <Package className="mr-2 h-4 w-4" />
@@ -681,6 +682,7 @@ export default function Layout({ children }: { children: React.ReactNode }) {
                       Roles & Permissions
                     </Link>
                   </DropdownMenuItem>
+                  </>}
                 </DropdownMenuContent>
               </DropdownMenu>
             )}

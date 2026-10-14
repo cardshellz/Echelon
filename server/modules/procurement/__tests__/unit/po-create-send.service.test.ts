@@ -1,4 +1,5 @@
 import { costGraphLockExecute } from "./cost-graph.fixture";
+import { costGraphAndProcurementSettingsExecute } from "./procurement-settings.fixture";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { createPurchasingService, PurchasingError } from "../../purchasing.service";
 
@@ -12,7 +13,7 @@ import { createPurchasingService, PurchasingError } from "../../purchasing.servi
 //   1. createPurchaseOrderWithLines rejects invalid input before touching db.
 //   2. sendPurchaseOrder rejects POs not in draft/approved state.
 //   3. duplicatePurchaseOrder handles missing / line-less source POs.
-//   4. updateProcurementSetting whitelists keys and enforces boolean type.
+//   4. procurement policy reads reject missing canonical configuration.
 //   5. emitPoEvent resolves the actor correctly (user vs system:auto).
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -29,6 +30,7 @@ function buildMockDb() {
     limit: vi.fn().mockResolvedValue([]),
   };
   return {
+    execute: vi.fn().mockResolvedValue({ rows: [] }),
     insert: vi.fn().mockReturnValue(insertBuilder),
     select: vi.fn().mockReturnValue(selectBuilder),
     update: vi.fn().mockReturnValue({
@@ -47,7 +49,7 @@ function buildLifecycleDb(selectResults: any[][]) {
   const insertedRows: any[] = [];
   let selectIndex = 0;
   const tx: any = {
-    execute: costGraphLockExecute(),
+    execute: costGraphAndProcurementSettingsExecute(),
     select: vi.fn(() => {
       const rows = selectResults[selectIndex++] ?? [];
       const chain: any = {
@@ -329,31 +331,12 @@ describe("Spec A — duplicatePurchaseOrder", () => {
   });
 });
 
-describe("Spec A — updateProcurementSetting", () => {
-  let svc: ReturnType<typeof createPurchasingService>;
-
-  beforeEach(() => {
-    svc = createPurchasingService(buildMockDb(), buildMockStorage());
-  });
-
-  it("rejects unknown keys", async () => {
-    await expect(
-      svc.updateProcurementSetting("not_a_real_key", true as any, "u1"),
-    ).rejects.toThrow(/Unknown procurement setting/);
-  });
-
-  it("rejects non-boolean values", async () => {
-    await expect(
-      svc.updateProcurementSetting("requireApproval", "yes" as any, "u1"),
-    ).rejects.toThrow(/must be a boolean/);
-  });
-
-  it("accepts whitelisted key + boolean value", async () => {
-    // Will hit the mock db.update chain and return empty array; the follow-up
-    // getProcurementSettings() falls through to defaults. No throw = pass.
-    await expect(
-      svc.updateProcurementSetting("requireApproval", true, "u1"),
-    ).resolves.toBeDefined();
+describe("canonical procurement policy access", () => {
+  it("does not fabricate defaults when global settings are missing", async () => {
+    const database = buildMockDb();
+    const svc = createPurchasingService(database, buildMockStorage());
+    await expect(svc.getProcurementSettings()).rejects.toMatchObject({ statusCode: 409, details: { code: "PROCUREMENT_SETTINGS_CONFIGURATION_INVALID" } });
+    expect(database.update).not.toHaveBeenCalled();
   });
 });
 

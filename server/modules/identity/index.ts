@@ -34,3 +34,5 @@ export async function hasPermission(userId: string, resource: string, action: st
 
 export { readPurchaseApprovalActor } from "./infrastructure/purchase-approval-access.repository";
 export type { PurchaseApprovalActor } from "./domain/purchase-approval-authority";
+export { readCommandAuthorityActor } from "./infrastructure/command-authority.repository";
+export type { CommandAuthorityActor } from "./domain/command-authority";
