@@ -44,6 +44,7 @@ import {
   drawerStartsWithAllSizes,
   firstSizeNeedingFix,
   drawerTargetFromSearch,
+  LISTING_SETTINGS_SHEETS,
   limitNotices,
   marginNotice,
   ownSizePriceDraft,
@@ -56,6 +57,8 @@ import {
   rereadSizePrice,
   runSizePriceSave,
   savedExactText,
+  sheetFromSearch,
+  sheetSearch,
   sizeFactsLine,
   sizePriceDraftBase,
   sizePriceDraftValue,
@@ -271,6 +274,40 @@ describe("drawerSearch", () => {
     expect(() => drawerSearch("", { productId: 0 })).toThrow();
     expect(() => drawerSearch("", { productId: 1.5 })).toThrow();
     expect(() => drawerSearch("", { productId: 11, productVariantId: -1 })).toThrow();
+  });
+
+  it("keeps a sheet's parameter as it is (K15)", () => {
+    expect(drawerSearch("?sheet=bulk&store=22", { productId: 11 })).toBe("?sheet=bulk&store=22&product=11");
+    expect(drawerSearch("?sheet=bulk&product=11", null)).toBe("?sheet=bulk");
+  });
+});
+
+describe("the sheets in the page address (?sheet=, PR 10c, D21)", () => {
+  it("opens Set for selected from ?sheet=bulk, and nothing from a sheet this page doesn't have", () => {
+    expect(LISTING_SETTINGS_SHEETS).toEqual(["bulk"]);
+    expect(sheetFromSearch("?sheet=bulk")).toBe("bulk");
+    expect(sheetFromSearch("sheet=bulk&store=22")).toBe("bulk");
+    expect(sheetFromSearch("?store=22&product=11&sheet=bulk")).toBe("bulk");
+    for (const search of ["", "?store=22", "?sheet=", "?sheet=Bulk", "?sheet=bulk%20", "?sheet=give-prices", "?sheet=updated", "?sheet=bulk&sheet=bulk", "?sheets=bulk"]) {
+      expect({ search, sheet: sheetFromSearch(search) }).toEqual({ search, sheet: null });
+    }
+  });
+
+  it("opens and closes a sheet, keeping every other parameter, the drawer's too (K15)", () => {
+    expect(sheetSearch("", "bulk")).toBe("?sheet=bulk");
+    expect(sheetSearch("?store=22", "bulk")).toBe("?store=22&sheet=bulk");
+    expect(sheetSearch("?sheet=bulk&store=22", null)).toBe("?store=22");
+    expect(sheetSearch("?sheet=bulk", null)).toBe("");
+    expect(sheetSearch("?product=11&size=101&sheet=bulk&sheet=bulk", null)).toBe("?product=11&size=101");
+    expect(sheetSearch("?product=11", "bulk")).toBe("?product=11&sheet=bulk");
+    // Each helper leaves the other's parameter alone, so a closed sheet never closes the drawer and the other way round.
+    expect(drawerTargetFromSearch(sheetSearch("?product=11&size=101", "bulk"))).toEqual({ productId: 11, productVariantId: 101 });
+    expect(sheetFromSearch(drawerSearch("?sheet=bulk", { productId: 11 }))).toBe("bulk");
+    expect(sheetFromSearch(sheetSearch("?store=22", "bulk"))).toBe("bulk");
+  });
+
+  it("refuses a sheet this page doesn't have", () => {
+    expect(() => sheetSearch("", "give-prices" as "bulk")).toThrow(/only a sheet this page has/);
   });
 });
 
@@ -1053,6 +1090,12 @@ describe("drawerFooter", () => {
     expect(drawerFooter({ ...base, draft: dirty, compact: true })).toMatchObject({ notSaved: "● Not saved · 1", primary: { label: "Save" } });
     expect(drawerFooter({ ...base, draft: dirty, editable: false }).primary.disabled).toBe(true);
     expect(drawerFooter({ ...base, draft: dirty, busy: true }).primary.disabled).toBe(true);
+  });
+
+  it("takes another wide Save's words, and keeps the phone's \"Save\" (Set for selected, PR 10c plan 6.3)", () => {
+    expect(drawerFooter({ ...base, draft: dirty, saveLabel: "Save for 312 products" }).primary).toEqual({ action: "save", label: "Save for 312 products", disabled: false });
+    expect(drawerFooter({ ...base, draft: dirty, saveLabel: "Save for 312 products", compact: true }).primary.label).toBe("Save");
+    expect(drawerFooter({ ...base, draft: null, saveLabel: "Save for 1 product" }).primary).toEqual({ action: "save", label: "Save for 1 product", disabled: true });
   });
 
   it("holds Save for a clear until it is known to price the size", () => {

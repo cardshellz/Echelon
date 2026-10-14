@@ -683,12 +683,18 @@ test("more than 10,000 sizes chosen shows the too-large banner, and the lists ca
   await expect(banner(page)).toContainText("You've chosen more than 10,000 sizes. Settings can't be checked until you choose 10,000 or fewer.");
   await expect(page.getByRole("searchbox", { name: "Search product, size or SKU" })).toBeDisabled();
   await expect(page.getByTestId("listing-settings-attention")).toHaveCount(0);
+  // Set for selected (PR 10c): on step 2, with the tabs shown, no product can be ticked and there is no selection bar.
+  await expect(page.getByTestId("listing-settings-tabs")).toBeVisible();
+  await expect(page.getByTestId("listing-settings-tabs").getByRole("checkbox")).toHaveCount(0);
+  await expect(page.getByTestId("listing-settings-selection-bar")).toHaveCount(0);
   await banner(page).getByRole("button", { name: "Go to step 1" }).click();
   await expect(page).toHaveURL(`${CATALOG_PATH}/choose`);
   // The Products tab may ask once before the summary answers; that read is refused as too large too,
   // and nothing is asked after (the lists are off).
   expect(readsOf(state, "GET", `${LISTINGS}/listing-settings/products`).length).toBeLessThanOrEqual(1);
   expect(readsOf(state, "GET", `${LISTINGS}/listing-settings/prices`)).toEqual([]);
+  // Nothing could be ticked, so the sheet's ids read was never made (its own refusal: the bulk spec's too-large journey).
+  expect(readsOf(state, "GET", `${LISTINGS}/listing-settings/products/ids`)).toEqual([]);
   expectGatedReads(state);
   expectNothingUnexpected(state);
 });

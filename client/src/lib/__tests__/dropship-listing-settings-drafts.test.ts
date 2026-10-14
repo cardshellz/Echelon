@@ -1,8 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { DropshipApiError } from "../dropship-ops-surface";
 import { LISTING_SETUP_RELOAD_MESSAGE } from "../dropship-ebay-listing-setup";
-import { LISTING_SETTINGS_EDIT_WORDS } from "../dropship-listing-settings-words";
+import { LISTING_SETTINGS_BULK_WORDS, LISTING_SETTINGS_EDIT_WORDS } from "../dropship-listing-settings-words";
 import {
+  BULK_EDITOR_ID,
   LISTING_SETTINGS_GUARD_ID_PREFIX,
   LISTING_SETTINGS_KEY_PREFIXES,
   LISTING_SETTINGS_SAVE_WORDS,
@@ -86,7 +87,23 @@ describe("store default rows", () => {
     expect(LISTING_SETTINGS_KEY_PREFIXES).toEqual({
       policy: "ls-policy", shelf: "ls-shelf", shipFrom: "ls-ship-from", pricingApply: "ls-apply",
       category: "ls-category", description: "ls-text", sizePrice: "ls-price", productSettings: "ls-product",
+      bulkSettings: "ls-bulk",
     });
+  });
+
+  it("names Set for selected's editor \"bulk\", one draft beside the others (PR 10c, D16)", () => {
+    expect(BULK_EDITOR_ID).toBe("bulk");
+    const product = run([{ type: "open", editor: productEditorId(11), place: "Easy Glide Soft Sleeves", base: { a: 1 } }, { type: "edit", value: { a: 2 } }]);
+    // Opening the sheet while a product's drawer holds a change asks first; an unchanged one gives way.
+    expect(decideOpen(product, BULK_EDITOR_ID)).toBe("ask");
+    expect(decideOpen(run([{ type: "open", editor: productEditorId(11), place: "Easy Glide Soft Sleeves", base: { a: 1 } }]), BULK_EDITOR_ID)).toBe("open");
+    const bulk = run([{ type: "open", editor: BULK_EDITOR_ID, place: "Set for selected", base: { a: 1 } }, { type: "edit", value: { a: 2 } }]);
+    expect(bulk).toMatchObject({ editor: "bulk", place: "Set for selected", changes: 1 });
+    // And the other way round: a held sheet change is asked about before the drawer or a Store defaults row opens.
+    expect(decideOpen(bulk, productEditorId(11))).toBe("ask");
+    expect(decideOpen(bulk, "shipping")).toBe("ask");
+    expect(decideOpen(bulk, BULK_EDITOR_ID)).toBe("open");
+    expect(describeListingSettingsBar({ draft: bulk, olderDraftCount: 0, saving: false })).toBe("Not saved · 1 change in Set for selected");
   });
 });
 
@@ -354,8 +371,8 @@ describe("reduceListingSettingsDraft", () => {
   });
 });
 
-/** The PR 7 writers; W5 (PR 10) has its own table below. */
-type Pr7Writer = Exclude<ListingSettingsWriter, "W5">;
+/** The PR 7 writers; W5 and W6 (PR 10) have their own tables below. */
+type Pr7Writer = Exclude<ListingSettingsWriter, "W5" | "W6">;
 
 describe("classifyWriteFailure", () => {
   const writers: readonly Pr7Writer[] = ["W1", "W2", "W3", "W4", "W9", "W10"];
@@ -576,6 +593,53 @@ describe("classifyWriteFailure for W5 (PR 10, plan 3.3, D7)", () => {
     expect(W5(404, "DROPSHIP_LISTING_SETTINGS_PRODUCT_NOT_FOUND", undefined, { storeName: "Marz Cards" }).message)
       .toBe("This product isn't chosen for Marz Cards. Choose it in step 1.");
     expect(W5(404, "DROPSHIP_LISTING_SETTINGS_PRODUCT_NOT_FOUND").message).toBe("This product isn't chosen for your eBay store. Choose it in step 1.");
+  });
+});
+
+describe("classifyWriteFailure for W6 (PR 10c, plan 3.3, 6.5)", () => {
+  const W6 = (status: number, code: string | null, context?: Record<string, unknown>) =>
+    classifyWriteFailure("W6", apiError(status, code, "Server words.", context));
+
+  it("counts a version conflict's products as the server does, never the list's length (plan 6.5)", () => {
+    const conflicts = [{ productId: 11, expectedRevisionId: 5, actualRevisionId: 6 }];
+    expect(W6(409, "DROPSHIP_PRODUCT_LISTING_SETTINGS_VERSION_CONFLICT", { conflicts, conflictCount: 3 })).toEqual({
+      phase: "conflict", message: "3 of the selected products changed in another window.",
+      code: "DROPSHIP_PRODUCT_LISTING_SETTINGS_VERSION_CONFLICT", status: 409, fields: [],
+    });
+    expect(W6(409, "DROPSHIP_PRODUCT_LISTING_SETTINGS_VERSION_CONFLICT", { conflictCount: 1_204 }).message)
+      .toBe("1,204 of the selected products changed in another window.");
+    // No usable count: the save words', never a count from `conflicts`.
+    for (const context of [undefined, { conflicts }, { conflictCount: 0 }, { conflictCount: "3" }, { conflictCount: 2.5 }]) {
+      expect(W6(409, "DROPSHIP_PRODUCT_LISTING_SETTINGS_VERSION_CONFLICT", context).message).toBe("This changed in another window.");
+    }
+    // W5's conflict keeps its words.
+    expect(classifyWriteFailure("W5", apiError(409, "DROPSHIP_PRODUCT_LISTING_SETTINGS_VERSION_CONFLICT", "x", { conflictCount: 3 })).message)
+      .toBe("This changed in another window.");
+  });
+
+  it("words the text budget as a refusal, and a product Card Shellz deleted as a conflict Load latest gets past (plan 6.5)", () => {
+    expect(W6(422, "DROPSHIP_LISTING_SETTINGS_BULK_TOO_LARGE", { textBytes: 30_000_001, maxTextBytes: 30_000_000, productCount: 3_751 })).toEqual({
+      phase: "refused", message: LISTING_SETTINGS_BULK_WORDS.tooMuchText, code: "DROPSHIP_LISTING_SETTINGS_BULK_TOO_LARGE", status: 422, fields: [],
+    });
+    // Saving the same products again would be refused again under every new key (CLAUDE.md §6): Load latest reads them again.
+    expect(W6(404, "DROPSHIP_LISTING_SETTINGS_PRODUCT_NOT_FOUND", { productId: 11 })).toMatchObject({
+      phase: "conflict", message: "A selected product is no longer in the Card Shellz catalog. Load the list again.",
+    });
+    // The store's own text cap keeps its words (3.3 row 21), and never the banner (D8).
+    expect(W6(422, "DROPSHIP_LISTING_SETTINGS_TOO_LARGE", { reason: "store_text_limit" })).toMatchObject({ phase: "refused", message: LISTING_SETTINGS_EDIT_WORDS.storeTextLimit });
+    // W5 can't get W6's budget: refused with the invalid words (3.3 row 22).
+    expect(classifyWriteFailure("W5", apiError(422, "DROPSHIP_LISTING_SETTINGS_BULK_TOO_LARGE", "x")).message).toBe(LISTING_SETTINGS_EDIT_WORDS.invalid);
+  });
+
+  it("refuses what W6 can't be answered, and keeps the shared rows (busy, fatal, eBay values)", () => {
+    for (const code of ["DROPSHIP_LISTING_SETTINGS_OLDER_RULES_PRESENT", "DROPSHIP_LISTING_PRICES_MOVED", "DROPSHIP_CATEGORY_LISTING_SETTINGS_VERSION_CONFLICT"]) {
+      expect(W6(409, code)).toMatchObject({ phase: "refused", message: LISTING_SETTINGS_EDIT_WORDS.invalid });
+    }
+    expect(W6(503, "DROPSHIP_LISTING_SETTINGS_BUSY", { reason: "heavy_write_in_progress" })).toMatchObject({ phase: "unreachable", message: LISTING_SETTINGS_EDIT_WORDS.busyHeavy });
+    expect(W6(503, "DROPSHIP_LISTING_SETTINGS_BUSY")).toMatchObject({ phase: "uncertain" });
+    expect(W6(500, "DROPSHIP_LISTING_SETTINGS_REPLAY_INCOMPLETE")).toMatchObject({ phase: "refused", message: LISTING_SETTINGS_EDIT_WORDS.fatal });
+    expect(W6(422, "DROPSHIP_EBAY_STORE_CATEGORY_INVALID", { reason: "not_found", invalidFields: ["storeShelf"] })).toMatchObject({ phase: "refused", fields: ["storeShelf"] });
+    expect(W6(403, "DROPSHIP_LISTING_SETTINGS_EBAY_SIGN_IN_REQUIRED", { fields: ["ebayCategory"] })).toMatchObject({ phase: "blocked", fields: ["ebayCategory"] });
   });
 });
 

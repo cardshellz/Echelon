@@ -1,5 +1,5 @@
-import { useEffect, useId, type ReactNode } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useEffect, useId, type MouseEvent, type ReactNode } from "react";
+import { useQueries, useQuery, type UseQueryResult } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -8,6 +8,7 @@ import {
   MAX_LISTING_SETTINGS_PAGE,
   MAX_LISTING_SETTINGS_SEARCH_LENGTH,
   type ListingSettingsProductRow,
+  type ListingSettingsProductsResponse,
   type ListingSettingsSummary,
 } from "@shared/dropship/listing-settings";
 import {
@@ -15,9 +16,26 @@ import {
   listingSettingsProductsQueryOptions,
   type ListingSettingsProductFilter,
 } from "@/lib/dropship-listing-settings";
+import type { ListingSettingsRight } from "@/lib/dropship-listing-settings-access";
+import { bulkSelectionBar, type BulkSavedStatus, type BulkSelectionBar } from "@/lib/dropship-listing-settings-bulk";
 import { formatCents } from "@/lib/dropship-listing-settings-price-words";
-import { ownSettingsWords, productStatusWords, type ProductStatusTone } from "@/lib/dropship-listing-settings-words";
+import {
+  isSelected,
+  pageTickState,
+  shownForSelection,
+  type ListingSettingsSelection,
+  type ListingSettingsSelectionAction,
+} from "@/lib/dropship-listing-settings-selection";
+import {
+  LISTING_SETTINGS_BULK_WORDS,
+  ownSettingsWords,
+  productStatusWords,
+  selectProductLabel,
+  type ProductStatusTone,
+} from "@/lib/dropship-listing-settings-words";
 import { DropshipApiError } from "@/lib/dropship-ops-surface";
+import { cn } from "@/lib/utils";
+import { CATALOG_STEP_RAIL_HEIGHT_VAR } from "../catalog/CatalogStepRail";
 
 /**
  * The Products tab of the Listing settings step (Listing settings PR 7,
@@ -25,10 +43,17 @@ import { DropshipApiError } from "@/lib/dropship-ops-surface";
  * parts the Prices tab shares with it: the search box, the read states, the
  * paging and the words for them.
  *
- * Read-only. A row opens the product drawer; nothing here saves. Search,
- * filters, counts and paging run on the server (`GET …/listing-settings/products`,
- * 50 rows a page). Words come from the design record unless marked interim;
+ * A row opens the product drawer; nothing here saves. Search, filters,
+ * counts and paging run on the server (`GET …/listing-settings/products`, 50
+ * rows a page). Words come from the design record unless marked interim;
  * the tab's interim words live in this file and PricesTab.tsx only.
+ *
+ * From PR 10 (plan 6.3) each product has a checkbox, and the bar over the
+ * list ("3 selected · [Set for selected] · [Clear]", "Select all N") opens
+ * "Set for selected". Ticking never opens the drawer: on a wide screen the
+ * checkbox's cell keeps the click from the row, and on a phone the checkbox
+ * sits beside the card's button, never inside it. The ticks are the tabs'
+ * (`reduceListingSettingsSelection`); every decision is the lib's.
  */
 
 // ---------------------------------------------------------------------------
@@ -468,11 +493,39 @@ export interface ProductsTabProps extends ListingSettingsListHandlers<ProductSho
   compact: boolean;
   /** The list can't be read now (more than 10,000 sizes): no reads, controls off, the banner says why. */
   listsOff: boolean;
+  /** The products ticked for "Set for selected" (PR 10, D22), kept by the tabs beside this view. */
+  selection: ListingSettingsSelection;
+  onSelect: (action: ListingSettingsSelectionAction) => void;
+  /** [Set for selected]: the step opens the sheet in the page address (D21). */
+  onSetForSelected: () => void;
+  /** W6's right (D3): [Set for selected] is off while it can't be used. */
+  bulkRight: ListingSettingsRight;
+  /** The last confirmed "Set for selected" save (`bulkAfterSave`); null for none, or once the ticks changed. */
+  saved: BulkSavedStatus | null;
+  /** A "Set for selected" save is out or unconfirmed: [Set for selected] opens on it with nothing ticked (D21). */
+  heldSave: boolean;
 }
 
-/** The Products tab: search, Show, one row per chosen product, paging. */
+/** The ticks a page's rows read and change. */
+export interface ProductTicks {
+  selection: ListingSettingsSelection;
+  onSelect: (action: ListingSettingsSelectionAction) => void;
+}
+
+/** The Products tab: search, Show, the selection bar, one row per chosen product with its checkbox, paging. */
 export function ProductsTab(props: ProductsTabProps) {
   const { view, compact, listsOff } = props;
+  const pages = listsOff ? [] : listPagesShown(view, compact);
+  // The same reads the pages make (one request each, shared by key): which products the ticks act on now. Typed by
+  // hand: useQueries can't infer each answer through a mapped list, and every one is the pages' parsed answer.
+  const reads = useQueries({
+    queries: pages.map((page) => listingSettingsProductsQueryOptions(props.storeConnectionId, { search: view.search, show: view.show, page })),
+  }) as ReadonlyArray<UseQueryResult<ListingSettingsProductsResponse>>;
+  const shown = shownForSelection(reads);
+  const bar = bulkSelectionBar({
+    selection: props.selection, shown, compact, right: props.bulkRight, saved: props.saved, heldSave: props.heldSave,
+  });
+  const ticks: ProductTicks = { selection: props.selection, onSelect: props.onSelect };
   return (
     <div data-testid="listing-settings-products-tab" className="space-y-3">
       <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
@@ -487,12 +540,116 @@ export function ProductsTab(props: ProductsTabProps) {
         )}
       </div>
       {!compact && <ProductShowChips summary={props.summary} value={view.show} disabled={listsOff} onShow={props.onShow} />}
-      {!listsOff && listPagesShown(view, compact).map((page, index, pages) => (
+      {!listsOff && (
+        // Always in the page, so a screen reader hears each change to the bar (the bar itself comes and goes; plan 3.4).
+        <p role="status" className="sr-only" data-testid="listing-settings-selection-live">{bar.announcement}</p>
+      )}
+      {!listsOff && (
+        <SelectionBar
+          bar={bar}
+          compact={compact}
+          onSetForSelected={props.onSetForSelected}
+          onClear={() => props.onSelect({ type: "clear" })}
+          onSelectAll={(total) => props.onSelect({ type: "selectAllMatching", filter: { search: view.search, show: view.show }, total })}
+        />
+      )}
+      {!listsOff && compact && shown !== null && shown.productIds.length > 0 && (
+        // A phone has no table header: this box ticks (or unticks) every card shown.
+        <label className="flex min-h-11 cursor-pointer items-center gap-3 text-sm text-zinc-800" data-testid="listing-settings-select-shown">
+          <TickBox
+            checked={bar.shownTick === "all"}
+            indeterminate={bar.shownTick === "some"}
+            onChange={() => props.onSelect({ type: "togglePage", productIds: shown.productIds })}
+          />
+          {LISTING_SETTINGS_BULK_WORDS.selectShown}
+        </label>
+      )}
+      {pages.map((page, index) => (
         // One page on a wide screen keeps its place while the next loads; a phone keeps every page it loaded.
-        <ProductsPage key={compact ? page : "page"} {...props} page={page} last={index === pages.length - 1} />
+        <ProductsPage key={compact ? page : "page"} {...props} ticks={ticks} page={page} last={index === pages.length - 1} />
       ))}
     </div>
   );
+}
+
+/**
+ * "3 selected · [Set for selected] · [Clear]" over the list (plan 6.3), the
+ * "Select all N" offer once every product shown is ticked, and the status
+ * after a save. Sticky on a phone just below the step rail, which sticks at
+ * the top above it (`CATALOG_STEP_RAIL_HEIGHT_VAR`), so it stays in reach
+ * while the cards scroll (the page's own bar holds the bottom). Its words
+ * are read out by the tab's status region, not here. Stateless.
+ */
+export function SelectionBar({ bar, compact, onSetForSelected, onClear, onSelectAll }: {
+  bar: BulkSelectionBar;
+  compact: boolean;
+  onSetForSelected: () => void;
+  onClear: () => void;
+  onSelectAll: (total: number) => void;
+}) {
+  const reasonId = useId();
+  if (!bar.visible) return null;
+  const { offer } = bar;
+  return (
+    <div
+      data-testid="listing-settings-selection-bar"
+      className={cn("space-y-2 rounded-md border border-zinc-200 bg-white px-3 py-2", compact && "sticky z-10 shadow-sm")}
+      style={compact ? { top: `var(${CATALOG_STEP_RAIL_HEIGHT_VAR}, 0px)` } : undefined}
+    >
+      <div className="flex flex-wrap items-center gap-x-2 gap-y-2 text-sm">
+        <span className="font-medium text-zinc-900" data-testid="listing-settings-selection-count">{bar.count}</span>
+        <span aria-hidden="true" className="text-zinc-400">·</span>
+        <Button type="button" size="sm" className="min-h-11 sm:min-h-9" disabled={bar.setForSelected.disabled} onClick={onSetForSelected}
+          aria-describedby={bar.reason ? reasonId : undefined}>
+          {bar.setForSelected.label}
+        </Button>
+        <span aria-hidden="true" className="text-zinc-400">·</span>
+        <Button type="button" variant="outline" size="sm" className="min-h-11 sm:min-h-9" onClick={onClear}>{bar.clear}</Button>
+        {bar.reason && <span id={reasonId} className="text-xs text-zinc-600">{bar.reason}</span>}
+      </div>
+      {offer && (
+        <p className="flex flex-wrap items-center gap-x-2 text-sm text-zinc-700" data-testid="listing-settings-select-all">
+          <span>{offer.line}</span>
+          <Button type="button" variant="link" className="h-auto min-h-11 p-0 sm:min-h-0" onClick={() => onSelectAll(offer.total)}>
+            {offer.label}
+          </Button>
+        </p>
+      )}
+      {bar.status && <p className="text-sm text-emerald-800" data-testid="listing-settings-selection-saved">{bar.status}</p>}
+    </div>
+  );
+}
+
+/**
+ * A native checkbox (Space ticks it, a screen reader reads it as one),
+ * "mixed" when some of what it stands for is ticked.
+ */
+function TickBox({ label, checked, indeterminate = false, disabled = false, onChange }: {
+  /** Read out; left out when a visible label names it. */
+  label?: string;
+  checked: boolean;
+  indeterminate?: boolean;
+  /** The rows are an older list's, kept on screen while the new one loads: ticking them would tick products it may not hold. */
+  disabled?: boolean;
+  onChange: () => void;
+}) {
+  return (
+    <input
+      type="checkbox"
+      aria-label={label}
+      checked={checked}
+      disabled={disabled}
+      // `indeterminate` is a property only, never an attribute.
+      ref={(element) => { if (element) element.indeterminate = indeterminate; }}
+      onChange={onChange}
+      className="h-4 w-4 shrink-0 cursor-pointer accent-[#C060E0]"
+    />
+  );
+}
+
+/** The row's click opens the drawer; a click on the checkbox's cell stays there, so ticking never opens it (plan 6.3, CI-M3). */
+export function keepClickInCell(event: Pick<MouseEvent, "stopPropagation">): void {
+  event.stopPropagation();
 }
 
 function ProductShowChips({ summary, value, disabled, onShow }: {
@@ -523,7 +680,7 @@ function ProductShowChips({ summary, value, disabled, onShow }: {
   );
 }
 
-function ProductsPage(props: ProductsTabProps & { page: number; last: boolean }) {
+function ProductsPage(props: ProductsTabProps & { ticks: ProductTicks; page: number; last: boolean }) {
   const { storeConnectionId, view, page } = props;
   const read = useQuery(listingSettingsProductsQueryOptions(storeConnectionId, { search: view.search, show: view.show, page }));
   useReportListTooLarge(read.error, props.onTooLarge);
@@ -543,6 +700,7 @@ function ProductsPage(props: ProductsTabProps & { page: number; last: boolean })
       onPage={props.onPage}
       onLoadMore={props.onLoadMore}
       onOpenProduct={props.onOpenProduct}
+      ticks={props.ticks}
     />
   );
 }
@@ -556,17 +714,19 @@ export interface ProductsPageViewProps {
   onPage: (page: number) => void;
   onLoadMore: () => void;
   onOpenProduct: (target: ListingSettingsProductTarget) => void;
+  /** Each row's checkbox reads and changes these. */
+  ticks: ProductTicks;
 }
 
 /** One page of products in any state: a table on a wide screen, cards on a phone. */
-export function ProductsPageView({ state, compact, last, actions, onPage, onLoadMore, onOpenProduct }: ProductsPageViewProps) {
+export function ProductsPageView({ state, compact, last, actions, onPage, onLoadMore, onOpenProduct, ticks }: ProductsPageViewProps) {
   return (
     <ListPageStates state={state} words={PRODUCTS_TAB_WORDS} actions={actions}>
       {(page) => (
         <>
           {compact
-            ? <ProductCards rows={page.rows} onOpenProduct={onOpenProduct} />
-            : <ProductsTable rows={page.rows} onOpenProduct={onOpenProduct} />}
+            ? <ProductCards rows={page.rows} onOpenProduct={onOpenProduct} ticks={ticks} ticksOff={page.refreshing} />
+            : <ProductsTable rows={page.rows} onOpenProduct={onOpenProduct} ticks={ticks} ticksOff={page.refreshing} />}
           <ListFooter page={page.page} rowsOnPage={page.rows.length} total={page.total} compact={compact} last={last} onPage={onPage} onLoadMore={onLoadMore} />
         </>
       )}
@@ -574,13 +734,36 @@ export function ProductsPageView({ state, compact, last, actions, onPage, onLoad
   );
 }
 
-function ProductsTable({ rows, onOpenProduct }: { rows: readonly ListingSettingsProductRow[]; onOpenProduct: (target: ListingSettingsProductTarget) => void }) {
+/**
+ * The wide table (hook-free, so a test can walk what it draws): the header's
+ * checkbox ticks the page; each row's checkbox sits in a first cell that
+ * keeps its click, since the whole row opens the drawer. While the rows are
+ * an older page's, kept on screen as a new search loads (`ticksOff`), the
+ * boxes are off.
+ */
+export function ProductsTable({ rows, onOpenProduct, ticks, ticksOff = false }: {
+  rows: readonly ListingSettingsProductRow[];
+  onOpenProduct: (target: ListingSettingsProductTarget) => void;
+  ticks: ProductTicks;
+  ticksOff?: boolean;
+}) {
   const words = PRODUCTS_TAB_WORDS.columns;
+  const pageIds = rows.map((row) => row.productId);
+  const pageTick = pageTickState(ticks.selection, pageIds);
   return (
     <div className="overflow-x-auto rounded-md border border-zinc-200 bg-white">
       <table className="w-full text-sm" data-testid="listing-settings-products-table">
         <thead>
           <tr className="border-b border-zinc-200 bg-zinc-50 text-left text-xs font-medium text-zinc-600">
+            <th scope="col" className="w-10 px-3 py-2" data-testid="listing-settings-select-page">
+              <TickBox
+                label={LISTING_SETTINGS_BULK_WORDS.selectPage}
+                checked={pageTick === "all"}
+                indeterminate={pageTick === "some"}
+                disabled={ticksOff}
+                onChange={() => ticks.onSelect({ type: "togglePage", productIds: pageIds })}
+              />
+            </th>
             <th scope="col" className="px-3 py-2">{words.product}</th>
             <th scope="col" className="px-3 py-2">{words.sizes}</th>
             <th scope="col" className="px-3 py-2">{words.price}</th>
@@ -597,6 +780,16 @@ function ProductsTable({ rows, onOpenProduct }: { rows: readonly ListingSettings
               // The whole row opens the drawer for a mouse; the product name is the button for a keyboard.
               <tr key={row.productId} data-testid={`listing-settings-product-${row.productId}`} onClick={open}
                 className="cursor-pointer border-b border-zinc-100 align-top last:border-0 hover:bg-zinc-50">
+                <td className="w-10 p-0" onClick={keepClickInCell}>
+                  <label className="flex min-h-9 cursor-pointer items-start justify-center px-3 py-2.5">
+                    <TickBox
+                      label={selectProductLabel(row.productName)}
+                      checked={isSelected(ticks.selection, row.productId)}
+                      disabled={ticksOff}
+                      onChange={() => ticks.onSelect({ type: "toggle", productId: row.productId })}
+                    />
+                  </label>
+                </td>
                 <td className="px-3 py-2">
                   <button type="button" className="text-left font-medium text-zinc-900 hover:underline"
                     onClick={(event) => { event.stopPropagation(); open(); }}>
@@ -622,8 +815,17 @@ function ProductsTable({ rows, onOpenProduct }: { rows: readonly ListingSettings
   );
 }
 
-/** Phone cards (R:458-466): name, "3 sizes · $6.99–$39.99", the status with ● when it needs a look, and own settings. */
-function ProductCards({ rows, onOpenProduct }: { rows: readonly ListingSettingsProductRow[]; onOpenProduct: (target: ListingSettingsProductTarget) => void }) {
+/**
+ * Phone cards (R:458-466): name, "3 sizes · $6.99–$39.99", the status with ● when it needs a look, and own settings.
+ * The 44 px checkbox sits beside the card's button, never inside it, so the button's name still starts with the product.
+ */
+export function ProductCards({ rows, onOpenProduct, ticks, ticksOff = false }: {
+  rows: readonly ListingSettingsProductRow[];
+  onOpenProduct: (target: ListingSettingsProductTarget) => void;
+  ticks: ProductTicks;
+  /** The cards are an older page's, kept on screen while a new search loads: the boxes are off. */
+  ticksOff?: boolean;
+}) {
   return (
     <ul className="space-y-2" data-testid="listing-settings-product-cards">
       {rows.map((row) => {
@@ -632,9 +834,17 @@ function ProductCards({ rows, onOpenProduct }: { rows: readonly ListingSettingsP
         const own = ownSettingsWords(row);
         const price = row.priceRange === null ? null : priceRangeWords(row.priceRange);
         return (
-          <li key={row.productId} data-testid={`listing-settings-product-${row.productId}`}>
+          <li key={row.productId} data-testid={`listing-settings-product-${row.productId}`} className="flex items-stretch gap-2">
+            <label className="flex min-h-11 w-11 shrink-0 cursor-pointer items-center justify-center rounded-md border border-zinc-200 bg-white">
+              <TickBox
+                label={selectProductLabel(row.productName)}
+                checked={isSelected(ticks.selection, row.productId)}
+                disabled={ticksOff}
+                onChange={() => ticks.onSelect({ type: "toggle", productId: row.productId })}
+              />
+            </label>
             <button type="button" onClick={() => onOpenProduct(productTarget(row))}
-              className="flex min-h-11 w-full items-start justify-between gap-3 rounded-md border border-zinc-200 bg-white p-3 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#C060E0]">
+              className="flex min-h-11 min-w-0 flex-1 items-start justify-between gap-3 rounded-md border border-zinc-200 bg-white p-3 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#C060E0]">
               <span className="min-w-0">
                 <span className="block break-words font-medium text-zinc-900">{row.productName}</span>
                 {match && <span className="block break-words text-xs text-zinc-500">{match}</span>}
