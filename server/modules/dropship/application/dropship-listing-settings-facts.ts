@@ -13,7 +13,7 @@ import {
   type ListingSettingsCategorySettings, type ListingSettingsFixCode,
   type ListingSettingsPolicyKind, type ListingSettingsPriceIssue, type ListingSettingsPriceLimit,
   type ListingSettingsPriceRule, type ListingSettingsPriceSource, type ListingSettingsPricesInput,
-  type ListingSettingsProductIdsInput, type ListingSettingsProductIdsResponse,
+  type ListingSettingsProductIdsInput, type ListingSettingsProductIdsResponse, type ListingSettingsProductOwnSettings,
   type ListingSettingsProductRow, type ListingSettingsProductSettings, type ListingSettingsProductsInput,
   type ListingSettingsRailState, type ListingSettingsSettingKey, type ListingSettingsSizePrice, type ListingSettingsSummary,
   type ListingSettingsUpdatedProductsInput, type ListingSettingsUpdatedProductsResponse, type ListingSettingsValueSource,
@@ -21,7 +21,7 @@ import {
 import {
   CATEGORY_LISTING_SETTING_FIELDS, PRODUCT_LISTING_SETTING_FIELDS,
   type CategoryListingSettingField, type CategoryListingSettingRow, type ListingSettingMainText,
-  type ProductCategoryMark, type ProductListingSettingField, type ProductListingSettingValues,
+  type ProductCategoryMark, type ProductListingSettingField, type ProductListingSettingRow, type ProductListingSettingValues,
 } from "../../../../shared/dropship/listing-setting-values";
 import {
   PRODUCT_PRICE_RULE_NAME, pricingBasisCents, type PricingProfileState, type RulePriceResult,
@@ -984,6 +984,74 @@ export function selectListingSettingsProduct(facts: ListingSettingsFacts, produc
       mainText: settingValues(sizes, (values) => values.mainText),
     },
     sizes: sizes.map((size) => ({ price: size.price, fixes: [...size.fixes] })),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// One product's own settings (PR 10, plan 4.2)
+// ---------------------------------------------------------------------------
+
+/**
+ * The Card Shellz catalog facts a product's own main text is written against:
+ * productCatalogHash's input. Every one is a product column, so any chosen
+ * size's candidate gives the same facts.
+ */
+export type ListingSettingsProductCatalog = Pick<DropshipListingCatalogCandidate, "productId" | "description" | "brand" | "condition" | "itemSpecifics">;
+
+export type ListingSettingsProductOwnSelection = Omit<ListingSettingsProductOwnSettings, "storeConnectionId" | "generatedAt">;
+
+/**
+ * One product's own settings row as its editor shows it (plan PR 10, 4.2): each
+ * stored value with its stored names and texts, null for a setting the product
+ * follows from its category or the store default, and the row's revision (null
+ * with every value null when it has no row). Only the product's own row: no
+ * size's leftover, category or store default is read here. The main text's
+ * catalog hash stays on the server; `needsCheck` is the facts' own check
+ * (needsProductCatalogReview against productCatalogHash, as a size's
+ * `own_text_needs_check` is worked out), so `catalog` is required exactly when
+ * the row holds a main text. New objects: the stored row is never handed out.
+ * A row or catalog for another product is a programming fault (fatal). Pure.
+ */
+export function productOwnSettingsView(input: {
+  productId: number;
+  row: ProductListingSettingRow | null;
+  catalog: ListingSettingsProductCatalog | null;
+}): ListingSettingsProductOwnSelection {
+  const { productId, row, catalog } = input;
+  if (row !== null && row.productId !== productId) {
+    throw listingSettingsInvariantFailed("A product's own settings were built from another product's row.", { productId, rowProductId: row.productId });
+  }
+  if (catalog !== null && catalog.productId !== productId) {
+    throw listingSettingsInvariantFailed("A product's own settings were checked against another product's catalog facts.", {
+      productId, catalogProductId: catalog.productId,
+    });
+  }
+  const values = row?.values ?? null;
+  const storedText = values?.mainText ?? null;
+  let mainText: ListingSettingsProductOwnSelection["own"]["mainText"] = null;
+  if (storedText !== null) {
+    if (catalog === null) {
+      throw listingSettingsInvariantFailed("A product's own main text was shown without the catalog facts it is checked against.", { productId });
+    }
+    mainText = { text: storedText.text, needsCheck: needsProductCatalogReview(storedText, productCatalogHash(catalog)) };
+  }
+  const policy = (stored: { id: string; name: string | null } | null) => stored && { id: stored.id, name: stored.name };
+  const shelf = values?.storeShelf ?? null;
+  return {
+    productId,
+    revisionId: row?.revisionId ?? null,
+    own: {
+      price: values?.price ? { ...values.price } : null,
+      ebayCategory: values?.ebayCategory ? { categoryId: values.ebayCategory.categoryId, categoryName: values.ebayCategory.categoryName } : null,
+      storeShelf: shelf === null ? null : shelf.mode === "none" ? { mode: "none" }
+        : { mode: "own", shelves: shelf.shelves.map((entry) => ({ id: entry.id, name: entry.name })) },
+      shippingPolicy: policy(values?.shippingPolicy ?? null),
+      returnPolicy: policy(values?.returnPolicy ?? null),
+      paymentPolicy: policy(values?.paymentPolicy ?? null),
+      textAbove: templateText(values?.textAbove ?? null),
+      textBelow: templateText(values?.textBelow ?? null),
+      mainText,
+    },
   };
 }
 

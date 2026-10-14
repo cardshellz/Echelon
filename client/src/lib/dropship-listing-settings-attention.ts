@@ -87,10 +87,18 @@ export type AttentionAction =
   | { kind: "open_store_default"; label: string; field: ListingSettingsPolicyKind }
   /** Shows the Products tab filtered to "Needs a fix". */
   | { kind: "show_products"; label: string; show: "needs_fix" }
-  /** Opens the product drawer; `fix` says which problem to open it on (a size that can't be priced opens on that size). */
-  | { kind: "open_product"; label: string; productId: number; fix: ListingSettingsAttentionCode }
+  /**
+   * Opens the product drawer; `fix` says which problem to open it on (a size
+   * that can't be priced opens on that size). `row`: the drawer row to land
+   * on and open (the description conflict opens Description, plan 5.2);
+   * absent for every other fix.
+   */
+  | { kind: "open_product"; label: string; productId: number; fix: ListingSettingsAttentionCode; row?: AttentionDrawerRow }
   /** Leaves for another portal page. */
   | { kind: "link"; link: ListingAccessLink };
+
+/** The drawer row a [Fix] lands on and opens (a `DrawerSettingRowKey`, `L/dropship-listing-settings-drawer.ts`). */
+export type AttentionDrawerRow = "descriptionTemplate";
 
 export interface AttentionLine {
   /** Stable among the lines shown: the code, and the product for a product line. */
@@ -177,9 +185,9 @@ function attentionLine(
   const key = item.productId === null ? item.code : `${item.code}:${item.productId}`;
   const product = productName(item.productName);
   // A product line without its product can't open the drawer, so it shows the products that need a fix.
-  const fix = (code: ListingSettingsAttentionCode): AttentionAction => item.productId === null
+  const fix = (code: ListingSettingsAttentionCode, row?: AttentionDrawerRow): AttentionAction => item.productId === null
     ? SHOW_NEEDS_FIX("Fix")
-    : { kind: "open_product", label: "Fix", productId: item.productId, fix: code };
+    : { kind: "open_product", label: "Fix", productId: item.productId, fix: code, ...(row === undefined ? {} : { row }) };
   switch (item.code) {
     case "reconnect_store":
       // The banner says the same while it shows (the summary adds this line for every store status but connected).
@@ -211,8 +219,13 @@ function attentionLine(
       // Interim button.
       return { key, code: item.code, text: `${product} can't be listed: a size can't be priced.`, action: fix(item.code) };
     case "description_group_conflict":
-      // Interim words and button.
-      return { key, code: item.code, text: `${product}: two older description rules tie, so neither's text is used.`, action: fix(item.code) };
+      // Interim (PR 10 PROPOSAL, plan 12.2): [Fix] lands on the drawer's Description row and opens it (plan 5.2).
+      return {
+        key,
+        code: item.code,
+        text: `${product}: two of your older description rules apply, so neither is used. Set its description.`,
+        action: fix(item.code, "descriptionTemplate"),
+      };
   }
 }
 

@@ -131,7 +131,9 @@ describe("attentionLines", () => {
     const more = attentionLines(summary({ items: [CANT_PRICE, TIE] }), NO_BANNER).lines;
     expect(more.map((line) => [line.text, line.action])).toEqual([
       ["Easy Glide Soft Sleeves can't be listed: a size can't be priced.", { kind: "open_product", label: "Fix", productId: 12, fix: "size_cannot_be_priced" }],
-      ["Team Bags: two older description rules tie, so neither's text is used.", { kind: "open_product", label: "Fix", productId: 13, fix: "description_group_conflict" }],
+      // Plan 5.2, 12.2: [Fix] lands on the drawer's Description row and opens it.
+      ["Team Bags: two of your older description rules apply, so neither is used. Set its description.",
+        { kind: "open_product", label: "Fix", productId: 13, fix: "description_group_conflict", row: "descriptionTemplate" }],
     ]);
   });
 
@@ -181,6 +183,12 @@ describe("attentionLines", () => {
   it("shows the products that need a fix when a product line has no product, and names an unnamed product plainly", () => {
     const orphan = attentionLines(summary({ items: [item("no_ebay_category", { productId: null, productName: "Lost" })] }), NO_BANNER).lines[0];
     expect(orphan.action).toEqual({ kind: "show_products", label: "Fix", show: "needs_fix" });
+    // A description conflict with no product can't land on a drawer row either.
+    const tie = attentionLines(summary({ items: [item("description_group_conflict", { productId: null, productName: "Lost" })] }), NO_BANNER).lines[0];
+    expect(tie.action).toEqual({ kind: "show_products", label: "Fix", show: "needs_fix" });
+    // Only the description conflict names a row to open.
+    const lines = attentionLines(summary({ items: [NO_CATEGORY, CANT_PRICE] }), NO_BANNER).lines;
+    expect(lines.map((line) => "row" in line.action)).toEqual([false, false]);
     const unnamed = attentionLines(summary({ items: [item("no_ebay_category", { productId: 9, productName: "   " })] }), NO_BANNER).lines[0];
     expect(unnamed.text).toBe("A product can't be listed: it has no eBay category.");
     expect(unnamed.key).toBe("no_ebay_category:9");
