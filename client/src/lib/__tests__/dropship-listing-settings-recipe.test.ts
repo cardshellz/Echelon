@@ -692,6 +692,27 @@ describe("the check's words (M3)", () => {
       .toBe("From your older group rule “Envelopes”: retail $6.25 + 30%");
   });
 
+  it("names the product's own price and its category's by the row's level alone, never its name (PR 10d, CC-C22)", () => {
+    expect(reviewRowBuiltFrom(row({ ruleLevel: "product", ruleName: "Easy Glide Soft Sleeves" }), PROFILE)).toBe("This product's price: retail $12.50");
+    expect(reviewRowBuiltFrom(row({ ruleLevel: "category", ruleName: "Sleeves", basis: "product_cost", basisCents: 980 }), PROFILE)).toBe("Category price: your cost $9.80");
+    expect(reviewRowBuiltFrom(row({ ruleLevel: "product", ruleName: "Store default rule" }), PROFILE)).toBe("This product's price: retail $12.50");
+    expect(reviewRowBuiltFrom(row({ ruleLevel: "category", ruleName: "Envelopes" }), PROFILE)).toBe("Category price: retail $12.50");
+    expect(reviewRowBuiltFrom(row({ ruleLevel: "product", ruleName: "x", basisCents: null }), PROFILE)).toBe("This product's price: retail");
+    expect(reviewRowBuiltFrom(row({ ruleLevel: "category", ruleName: "Sleeves", basis: null, basisCents: null }), PROFILE)).toBe("Category price");
+    // A group rule that happens to be named like a level, with no level, is still an older group rule.
+    expect(reviewRowBuiltFrom(row({ ruleName: "Product price", basisCents: 625 }), PROFILE)).toBe("From your older group rule “Product price”: retail $6.25");
+    expect(reviewRowBuiltFrom(row({ ruleName: "Category price" }), PROFILE)).toBe("From your older group rule “Category price”: retail $12.50");
+    // The level never changes a kept exact price, a size on its retail price or one that can't be priced.
+    expect(reviewRowBuiltFrom(row({ ruleLevel: "product", preserved: true, ruleName: "Fixed override preserved" }), PROFILE)).toBe("Exact price");
+    expect(reviewRowBuiltFrom(row({ ruleLevel: "product", priceCents: null, issues: ["pricing_basis_unavailable"] }), PROFILE)).toMatch(/^Can't price/);
+    const fallback = row({ ruleName: RETAIL_FALLBACK_RULE_NAME, followsStorePricing: true, retailFallbackIssue: "pricing_rule_outside_limit", priceCents: 899 });
+    expect(reviewRowBuiltFrom({ ...fallback, ruleLevel: "category" }, PROFILE)).toBe(reviewRowBuiltFrom(fallback, PROFILE));
+    // The page words take any check's summary (the price check for many products has its own counts).
+    const priceCheckSummary = { total: 1240, changed: 10, released: 2, refused: 0 };
+    expect(reviewPageWords({ page: 1, summary: priceCheckSummary }, 50)).toBe("51–100 of 1,240");
+    expect(hasNextReviewPage({ page: 24, summary: { total: 1240 } }, 50)).toBe(false);
+  });
+
   it("shows only the starting amount when two group rules share a name", () => {
     const twins = { ...PROFILE, groups: [ENVELOPES, { ...ENVELOPES, id: "envelopes-2", priority: 20 }] };
     expect(reviewRowBuiltFrom(row({ ruleName: "Envelopes", basisCents: 625 }), twins)).toBe("From your older group rule “Envelopes”: retail $6.25");

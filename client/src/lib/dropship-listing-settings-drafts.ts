@@ -4,7 +4,10 @@ import {
   bulkConflictWords,
   LISTING_SETTINGS_BULK_WORDS,
   LISTING_SETTINGS_EDIT_WORDS,
+  LISTING_SETTINGS_PRICE_CHECK_WORDS,
   productNotFoundWords,
+  releaseLimitWords,
+  wouldBeLeftWithoutPriceWords,
 } from "./dropship-listing-settings-words";
 import { describeLeavePrompt } from "./dropship-unsaved-changes";
 
@@ -161,6 +164,8 @@ export const LISTING_SETTINGS_KEY_PREFIXES = Object.freeze({
   productSettings: "ls-product",
   // W6, "Set for selected": many products' settings, never a price (plan PR 10, D5).
   bulkSettings: "ls-bulk",
+  // W7's apply, the price check for one or many products; the check itself is unkeyed (plan PR 10, D5).
+  priceCheck: "ls-price-check",
 } as const);
 
 /** The words every editor shares (R:535-545). */
@@ -467,9 +472,11 @@ function answersAttempt(draft: ListingSettingsDraft | null, key: string): draft 
  * rules, W4 the description profile, W9 one size's price, W10 the ship-from
  * repair; and the PR 9 writers as PR 10 adds them: W5 one product's own
  * settings (plan PR 10, 4.6), W6 many products' settings ("Set for
- * selected", plan PR 10, 6.4).
+ * selected", plan PR 10, 6.4), W7 the price check for one or many products
+ * and its apply (plan PR 10, 7.3; the check's failures take its words, the
+ * apply is keyed).
  */
-export type ListingSettingsWriter = "W1" | "W2" | "W3" | "W4" | "W5" | "W6" | "W9" | "W10";
+export type ListingSettingsWriter = "W1" | "W2" | "W3" | "W4" | "W5" | "W6" | "W7" | "W9" | "W10";
 
 export interface WriteFailure {
   phase: WriteFailurePhase;
@@ -705,8 +712,8 @@ function refusesAnOlderRule(error: DropshipApiError, pickedCategoryId: string | 
 // Failed saves of the PR 9 writers (plan PR 10, 3.3, 4.7, D7, D8)
 // ---------------------------------------------------------------------------
 
-type Pr9Writer = "W5" | "W6";
-const PR9_WRITERS: ReadonlySet<ListingSettingsWriter> = new Set<Pr9Writer>(["W5", "W6"]);
+type Pr9Writer = "W5" | "W6" | "W7";
+const PR9_WRITERS: ReadonlySet<ListingSettingsWriter> = new Set<Pr9Writer>(["W5", "W6", "W7"]);
 
 function isPr9Writer(writer: ListingSettingsWriter): writer is Pr9Writer {
   return PR9_WRITERS.has(writer);
@@ -749,6 +756,20 @@ const PR9_WRITER_CODES: Readonly<Record<Pr9Writer, Pr9WriterCodes>> = {
       // (`S/application/dropship-listing-products-bulk-service.ts`).
       "DROPSHIP_CATEGORY_LISTING_SETTINGS_VERSION_CONFLICT", "DROPSHIP_LISTING_SETTINGS_OLDER_RULES_PRESENT",
       "DROPSHIP_LISTING_SETTINGS_CATEGORY_NOT_FOUND", "DROPSHIP_PRICING_REVIEW_NOT_FOUND",
+    ]),
+  },
+  W7: {
+    // A `product_prices` check carries no revision (D6): nothing of its own conflicts. A moved price is a refused
+    // apply the owner checks again (`decideAfterApplyRefusal`, dropship-listing-settings-price-check.ts), never a
+    // "Load latest"; the drawer's own guard runs before each check (D6a).
+    conflict: NONE,
+    cannotHappen: new Set([
+      // The category kind's refusals (PR 10f): a `product_prices` check names no category and no older-rules check
+      // refuses it (`S/application/dropship-listing-price-changes-service.ts` review, apply).
+      "DROPSHIP_CATEGORY_LISTING_SETTINGS_VERSION_CONFLICT", "DROPSHIP_PRODUCT_LISTING_SETTINGS_VERSION_CONFLICT",
+      "DROPSHIP_LISTING_SETTINGS_OLDER_RULES_PRESENT", "DROPSHIP_LISTING_SETTINGS_CATEGORY_NOT_FOUND",
+      // W7 types no price, so the store's rules can't be "not configured" for it (plan P14).
+      "DROPSHIP_PRICING_RULES_NOT_CONFIGURED",
     ]),
   },
 };
@@ -801,6 +822,16 @@ const PRODUCT_NOT_FOUND_CODE = "DROPSHIP_LISTING_SETTINGS_PRODUCT_NOT_FOUND";
 const TOO_LARGE_CODE = "DROPSHIP_LISTING_SETTINGS_TOO_LARGE";
 const BULK_TOO_LARGE_CODE = "DROPSHIP_LISTING_SETTINGS_BULK_TOO_LARGE";
 const STORE_TEXT_LIMIT = "store_text_limit";
+/** W7's own refusals (plan 7.5; `S/application/dropship-listing-price-changes-service.ts` errors). */
+const PRICE_RELEASE_LIMIT_CODE = "DROPSHIP_LISTING_PRICE_RELEASE_LIMIT";
+const WOULD_BE_LOST_CODE = "DROPSHIP_LISTING_PRICE_WOULD_BE_LOST";
+const PRICING_REVIEW_NOT_FOUND_CODE = "DROPSHIP_PRICING_REVIEW_NOT_FOUND";
+
+/** A whole number the answer's context carries under `key`, else null. */
+function contextCount(error: DropshipApiError, key: string): number | null {
+  const value = error.context?.[key];
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : null;
+}
 
 /** The fields a refusal names, once each (`fields` from the sign-in refusal, `invalidFields` from eBay's value checks). */
 function namedFields(error: DropshipApiError, also: readonly string[] = []): string[] {
@@ -886,10 +917,33 @@ function classifyPr9WriteFailure(writer: Pr9Writer, error: unknown, options: Cla
       return failure("refused", contextReason(error) === "too_long" ? words.shelfTooLong : LISTING_SETTINGS_SAVE_WORDS.shelfGone,
         ["storeShelf"]);
     case TOO_LARGE_CODE:
+      // W7 with no reason: more than 10,000 sizes (P35, plan 7.5); the store text cap keeps its reason and words.
+      if (writer === "W7" && contextReason(error) !== STORE_TEXT_LIMIT) return failure("refused", LISTING_SETTINGS_PRICE_CHECK_WORDS.tooManySizes);
       return failure("refused", contextReason(error) === STORE_TEXT_LIMIT ? words.storeTextLimit : error.message);
     case BULK_TOO_LARGE_CODE:
       // W6's text budget (plan 6.5; `S/application/dropship-listing-setting-write-support.ts` listingSettingBulkTooLarge).
       if (writer === "W6") return failure("refused", LISTING_SETTINGS_BULK_WORDS.tooMuchText);
+      // W7 (plan 7.5, CC-C10): the stored text, or the text and the rows together (`reason: price_check_rows`); a
+      // check sends no text, so never "shorten your text". The reason is read, never `textBytes` alone.
+      if (writer === "W7") return failure("refused", LISTING_SETTINGS_PRICE_CHECK_WORDS.tooHeavy);
+      break;
+    case PRICE_RELEASE_LIMIT_CODE: {
+      // W7 (plan 7.5, CC-C9): the counts come from the answer; without them the server's own words stand.
+      if (writer !== "W7") break;
+      const maxReleases = contextCount(error, "maxReleases");
+      const releaseCount = contextCount(error, "releaseCount");
+      return failure("refused", maxReleases !== null && releaseCount !== null ? releaseLimitWords(maxReleases, releaseCount) : error.message);
+    }
+    case WOULD_BE_LOST_CODE: {
+      // W7's apply refusing the sizes the check already named (plan 7.5): counted from `sizeCount`, never the list,
+      // which the server caps. Without a count (a release's W9 refusal naming one size) the server's words stand.
+      if (writer !== "W7") break;
+      const sizeCount = contextCount(error, "sizeCount");
+      return failure("refused", sizeCount !== null && sizeCount > 0 ? wouldBeLeftWithoutPriceWords(sizeCount) : error.message);
+    }
+    case PRICING_REVIEW_NOT_FOUND_CODE:
+      // W7's apply of a check the server no longer holds (plan 7.5): the owner checks again; W1's words meanwhile.
+      if (writer === "W7") return failure("refused", LISTING_SETTINGS_SAVE_WORDS.pricingReviewGone);
       break;
     case PRODUCT_NOT_FOUND_CODE:
       if (writer === "W5") return failure("refused", productNotFoundWords(options.storeName ?? ""));

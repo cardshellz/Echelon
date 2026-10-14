@@ -51,6 +51,7 @@ import {
   parseExactPrice,
   priceHeadWords,
   productNotFoundWords,
+  productPriceHeadRule,
   readSizePriceDraft,
   rebaseSizePriceDraft,
   refreshAfterSizePriceSave,
@@ -77,6 +78,7 @@ import { DropshipApiError } from "../dropship-ops-surface";
 import {
   listingSettingsEditRights,
   type ListingSettingsReadState,
+  type ListingSettingsRight,
   type ListingSettingsRightsInput,
   type ListingSetupFacts,
 } from "../dropship-listing-settings-access";
@@ -84,6 +86,7 @@ import type { PolicySetupFacts } from "../dropship-listing-settings-store-reques
 import { LISTING_SETTINGS_EDIT_WORDS } from "../dropship-listing-settings-words";
 import {
   emptyChoices,
+  productPriceDraftValue,
   productSettingsDraftValue,
   type ProductOwnSettings,
   type ProductSettingsChoices,
@@ -1095,6 +1098,9 @@ describe("drawerFooter", () => {
   it("takes another wide Save's words, and keeps the phone's \"Save\" (Set for selected, PR 10c plan 6.3)", () => {
     expect(drawerFooter({ ...base, draft: dirty, saveLabel: "Save for 312 products" }).primary).toEqual({ action: "save", label: "Save for 312 products", disabled: false });
     expect(drawerFooter({ ...base, draft: dirty, saveLabel: "Save for 312 products", compact: true }).primary.label).toBe("Save");
+    // The price's Save runs the check (PR 10d): a phone says so too when asked, never "Save".
+    expect(drawerFooter({ ...base, draft: dirty, saveLabel: "Check new prices", compactSaveLabel: "Check new prices", compact: true }).primary.label).toBe("Check new prices");
+    expect(drawerFooter({ ...base, draft: dirty, saveLabel: "Check new prices", compactSaveLabel: "Check new prices" }).primary.label).toBe("Check new prices");
     expect(drawerFooter({ ...base, draft: null, saveLabel: "Save for 1 product" }).primary).toEqual({ action: "save", label: "Save for 1 product", disabled: true });
   });
 
@@ -1396,11 +1402,11 @@ describe("the drawer with a product's own settings (PR 10)", () => {
     const off = { editable: false as const, reason: "banner" as const };
     const state = (draft: ListingSettingsDraft | null, overrides: Partial<Parameters<typeof drawerDraftState>[0]> = {}) =>
       drawerDraftState({ draft, editor: EDITOR, rights: { exactPrice: allowed, productSettings: off }, failure: null, ...overrides });
-    expect(state(null)).toEqual({ writer: "W9", footerDraft: null, editable: true, settingsHoldChange: false, showRefusal: false, escapeKeepsOpen: false });
+    expect(state(null)).toEqual({ writer: "W9", footerDraft: null, editable: true, settingsHoldChange: false, priceHoldsChange: false, showRefusal: false, escapeKeepsOpen: false });
     const size = draftFor(BASE_A, "12.00");
-    expect(state(size)).toEqual({ writer: "W9", footerDraft: size, editable: true, settingsHoldChange: false, showRefusal: false, escapeKeepsOpen: false });
+    expect(state(size)).toEqual({ writer: "W9", footerDraft: size, editable: true, settingsHoldChange: false, priceHoldsChange: false, showRefusal: false, escapeKeepsOpen: false });
     const settings = settingsDraft({ paymentPolicy: { mode: "default" } });
-    expect(state(settings)).toEqual({ writer: "W5", footerDraft: settings, editable: false, settingsHoldChange: true, showRefusal: true, escapeKeepsOpen: false });
+    expect(state(settings)).toEqual({ writer: "W5", footerDraft: settings, editable: false, settingsHoldChange: true, priceHoldsChange: false, showRefusal: true, escapeKeepsOpen: false });
     // An unchanged settings draft is still W5's, but holds no size back.
     expect(state(settingsDraft({}))).toMatchObject({ writer: "W5", settingsHoldChange: false });
     // A refusal that names a row is told there, not in the footer.
@@ -1651,5 +1657,110 @@ describe("the drawer with a product's own settings (PR 10)", () => {
     // "Main text: your own", never "set in step 3" (5.7).
     expect(description.groups[1].entries[0].value).toBe("Main text: your own");
     expect(JSON.stringify(rows)).not.toContain("set in step 3");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The product's price (PR 10d, plan 7.2, D2, UX-M7)
+// ---------------------------------------------------------------------------
+
+describe("the product's price in the drawer (PR 10d, plan 7.2, D2, UX-M7)", () => {
+  const COST_35: PricingRecipe = { basis: "product_cost", markupBps: 3500, flatCents: 0, rounding: "cent" };
+  const PRODUCT_RULE = { kind: "product" as const, name: "Easy Glide Soft Sleeves", recipe: COST_35 };
+  const CATEGORY_RULE = { kind: "category" as const, name: "Sleeves", recipe: RETAIL_20_UP };
+  const GROUP_RULE = { kind: "group" as const, name: "Envelopes", recipe: COST_35 };
+  const STORE_RULE = { kind: "store_default" as const, name: "Store default rule", recipe: COST_35 };
+  const OWN_PRICE: ProductOwnSettings = listingSettingsProductOwnSettingsSchema.parse({
+    storeConnectionId: STORE, productId: PRODUCT, revisionId: 5,
+    own: { price: null, ebayCategory: null, storeShelf: null, shippingPolicy: null, returnPolicy: null, paymentPolicy: null, textAbove: null, textBelow: null, mainText: null },
+    generatedAt: GENERATED_AT,
+  });
+  const allowed = { editable: true as const, reason: null };
+  const setupFacts: ListingSetupFacts = {
+    access: { canEdit: true, reason: null }, revision: 4, checks: { ebay: "checked", fulfillment: { status: "checked" } }, missingFields: [],
+  };
+  const rights = () => listingSettingsEditRights({
+    account: { status: "active", entitlementStatus: "active" },
+    summary: { storeStatus: "connected", catalog: { state: "ok", products: 3, sizes: 9 } },
+    setup: { data: setupFacts, error: null }, shelves: { data: { categories: [] }, error: null }, blocked: null,
+  });
+  const priceDraft = (change: { price: { mode: "leave" } | { mode: "default" } | { mode: "set"; value: PricingRecipe }; releaseExactPrices: boolean }) => {
+    const opened = reduceListingSettingsDraft(null, { type: "open", editor: EDITOR, place: "Easy Glide Soft Sleeves", base: productPriceDraftValue(OWN_PRICE) });
+    return reduceListingSettingsDraft(opened, { type: "edit", value: productPriceDraftValue(OWN_PRICE, { ...change, check: null }) })!;
+  };
+
+  it("names the level that prices the product in the PRICE head, one case per level (UX-M7)", () => {
+    expect(priceHeadWords(RETAIL_20_UP, PRODUCT_RULE)).toBe("This product: Your cost + 35%, to the cent");
+    expect(priceHeadWords(RETAIL_20_UP, CATEGORY_RULE)).toBe("Sleeves: Retail price + 20%, round up to .99");
+    // The level the sizes show wins over the summary's state: no "Checking…" or "No store price" while a level prices them.
+    expect(priceHeadWords(undefined, CATEGORY_RULE)).toBe("Sleeves: Retail price + 20%, round up to .99");
+    expect(priceHeadWords(null, PRODUCT_RULE)).toBe("This product: Your cost + 35%, to the cent");
+    // A group rule or the store default is not a level of the product's: the store default recipe, as before.
+    expect(priceHeadWords(RETAIL_20_UP, GROUP_RULE)).toBe("Store default: Retail price + 20%, round up to .99");
+    expect(priceHeadWords(RETAIL_20_UP, STORE_RULE)).toBe("Store default: Retail price + 20%, round up to .99");
+    expect(priceHeadWords(RETAIL_20_UP, null)).toBe(priceHeadWords(RETAIL_20_UP));
+    expect(priceHeadWords(RETAIL_20_UP, { ...CATEGORY_RULE, name: "  " })).toBe("Category: Retail price + 20%, round up to .99");
+  });
+
+  it("finds the level from the sizes: the product's own price first, then its category's, else none", () => {
+    const categorySize = size(sizePrice({ ...RULES_B, rule: CATEGORY_RULE }));
+    const productSize = size(sizePrice({ ...RULES_B, productVariantId: 103, rule: PRODUCT_RULE }));
+    expect(productPriceHeadRule([size(EXACT_A), categorySize])).toEqual(CATEGORY_RULE);
+    expect(productPriceHeadRule([size(EXACT_A), categorySize, productSize])).toEqual(PRODUCT_RULE);
+    expect(productPriceHeadRule([productSize, categorySize])).toEqual(PRODUCT_RULE);
+    expect(productPriceHeadRule([size(EXACT_A)])).toBeNull();
+    expect(productPriceHeadRule([size(sizePrice({ ...RULES_B, rule: GROUP_RULE }))])).toBeNull();
+    expect(productPriceHeadRule([size(sizePrice({ ...RULES_B, rule: STORE_RULE }))])).toBeNull();
+    expect(productPriceHeadRule([])).toBeNull();
+  });
+
+  it("says what a size would cost by the level that prices it, one case per level (UX-M7)", () => {
+    expect(wouldBeWords(w9())).toBe("store default would be $15.99");
+    expect(wouldBeWords(w9({ ruleName: "Envelopes" }))).toBe("your older group rule “Envelopes” would give $15.99");
+    expect(wouldBeWords(w9({ ruleName: "Easy Glide Soft Sleeves", ruleLevel: "product" }))).toBe("this product's price would be $15.99");
+    expect(wouldBeWords(w9({ ruleName: "Sleeves", ruleLevel: "category" }))).toBe("the Sleeves price would be $15.99");
+    expect(wouldBeWords(w9({ rulePriceCents: null, rulesConfigured: false, ruleName: null }))).toBe("retail price would be $12.50");
+    // The level decides, never the name; the category is named from the product detail when given, else as W9 names it.
+    expect(wouldBeWords(w9({ ruleName: "Store default rule", ruleLevel: "product" }))).toBe("this product's price would be $15.99");
+    expect(wouldBeWords(w9({ ruleName: "Old name", ruleLevel: "category" }), DETAIL.product)).toBe("the Sleeves price would be $15.99");
+    expect(wouldBeWords(w9({ ruleName: "Old name", ruleLevel: "category" }), { category: null })).toBe("the Old name price would be $15.99");
+    expect(wouldBeWords(w9({ ruleName: null, ruleLevel: "category" }), { category: null })).toBe("the Category price would be $15.99");
+    // A rule price a blocking limit refuses falls back to retail, whatever its level.
+    expect(wouldBeWords(w9({ ruleLevel: "product", pricingIssue: "pricing_rule_outside_limit" }))).toBe("retail price would be $12.50");
+    expect(typedPriceLine(1499, w9({ ruleName: "Sleeves", ruleLevel: "category" }), DETAIL.product)).toBe("→ $14.99 · Not saved · the Sleeves price would be $15.99");
+    expect(typedPriceLine(1499, w9({ ruleLevel: "product" }))).toBe("→ $14.99 · Not saved · this product's price would be $15.99");
+  });
+
+  it("holds the product's price as its own kind of change: the rows and the sizes wait, the footer is W7's (D2, 7.6)", () => {
+    const draft = priceDraft({ price: { mode: "set", value: COST_35 }, releaseExactPrices: false });
+    expect(draft.changes).toBe(1);
+    const rows = drawerSettingRows(DETAIL, SETUP, { own: { data: OWN_PRICE, error: null }, rights: rights(), draft, editor: EDITOR, openField: null, failure: null });
+    expect(rows).toHaveLength(6);
+    for (const row of rows) {
+      expect(row.edit).toMatchObject({ change: { shown: true, disabled: true }, picksDisabled: true, line: LISTING_SETTINGS_EDIT_WORDS.otherChangeFirst });
+    }
+    expect(drawerSizeEditState(draft, EDITOR, EXACT_A)).toEqual({ text: "14.99", changed: false, waiting: true, marked: false });
+    expect(decideSizeEdit(draft, EDITOR, EXACT_A, null, "12")).toEqual({ kind: "wait" });
+    const state = (held: ListingSettingsDraft, priceCheck: ListingSettingsRight = allowed) =>
+      drawerDraftState({ draft: held, editor: EDITOR, rights: { exactPrice: allowed, productSettings: allowed, priceCheck }, failure: null });
+    expect(state(draft)).toEqual({ writer: "W7", footerDraft: draft, editable: true, settingsHoldChange: false, priceHoldsChange: true, showRefusal: true, escapeKeepsOpen: false });
+    // W7's right decides the footer; a caller without it can't save a price.
+    expect(state(draft, { editable: false, reason: "banner" })).toMatchObject({ writer: "W7", editable: false });
+    expect(drawerDraftState({ draft, editor: EDITOR, rights: { exactPrice: allowed, productSettings: allowed }, failure: null })).toMatchObject({ writer: "W7", editable: false });
+    // A clean price draft holds nothing back.
+    const clean = priceDraft({ price: { mode: "leave" }, releaseExactPrices: false });
+    expect(state(clean)).toMatchObject({ writer: "W7", priceHoldsChange: false, settingsHoldChange: false });
+    expect(drawerSizeEditState(clean, EDITOR, EXACT_A).waiting).toBe(false);
+    expect(drawerSettingRows(DETAIL, SETUP, { own: { data: OWN_PRICE, error: null }, rights: rights(), draft: clean, editor: EDITOR, openField: null, failure: null })
+      .every((row) => row.edit?.change.disabled === false)).toBe(true);
+    // Out or unconfirmed: Esc keeps the drawer (3.4), and everything still waits.
+    const saving = reduceListingSettingsDraft(draft, { type: "startSave", attempt: { signature: "s", key: "k" } })!;
+    expect(state(saving)).toMatchObject({ writer: "W7", priceHoldsChange: true, escapeKeepsOpen: true });
+    expect(drawerSizeEditState(saving, EDITOR, EXACT_A).waiting).toBe(true);
+    const uncertain = reduceListingSettingsDraft(saving, { type: "failure", key: "k",
+      failure: { phase: "uncertain", message: "We couldn't confirm your save.", code: null, status: null, fields: [] } })!;
+    expect(state(uncertain)).toMatchObject({ writer: "W7", priceHoldsChange: true, escapeKeepsOpen: true });
+    // Another product's price draft is not this drawer's.
+    expect(state({ ...draft, editor: productEditorId(12) })).toMatchObject({ writer: "W9", footerDraft: null, priceHoldsChange: false });
   });
 });

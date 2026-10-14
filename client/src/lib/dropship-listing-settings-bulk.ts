@@ -6,7 +6,7 @@ import {
   type ProductsBulkPatchInput,
 } from "@shared/dropship/listing-setting-writes";
 import type { ListingSettingsProductIdsResponse } from "@shared/dropship/listing-settings";
-import type { ListingSettingsEditRights, ListingSettingsReadState, ListingSettingsRight } from "./dropship-listing-settings-access";
+import type { ListingSettingsEditRights, ListingSettingsReadState, ListingSettingsRight, ListingSettingsRightReason } from "./dropship-listing-settings-access";
 import {
   BULK_EDITOR_ID,
   decideOpen,
@@ -30,18 +30,23 @@ import {
   type DrawerRowEdit,
   type DrawerSettingRowModel,
 } from "./dropship-listing-settings-drawer";
+import { pendingPriceWords } from "./dropship-listing-settings-price-check";
 import {
   DESCRIPTION_EDIT_FIELDS,
   descriptionEditorResult,
   ebayCategoryChoiceReady,
+  emptyProductPriceChange,
   fieldChoiceReady,
   isProductEditField,
   isProductFieldChoice,
+  isProductPriceChange,
+  isProductPriceChanged,
   normalizedVendorText,
   patchSignatureEntries,
   policyFieldEditor,
   PRODUCT_EDIT_FIELDS,
   productFieldRights,
+  productPriceRights,
   productSettingsPatch,
   storeShelfEditorChoice,
   storeShelfFieldEditor,
@@ -54,10 +59,12 @@ import {
   type PolicyChoiceValue,
   type PolicyEditField,
   type PolicyFieldEditorModel,
+  type PriceCheckRef,
   type ProductEditField,
   type ProductFieldChoice,
   type ProductFieldRights,
   type ProductOwnSettings,
+  type ProductPriceChange,
   type StoreShelfChoiceValue,
   type StoreShelfEditorState,
   type StoreShelfFieldEditorModel,
@@ -75,6 +82,7 @@ import {
   type PickedProducts,
   type ShownProducts,
 } from "./dropship-listing-settings-selection";
+import { PRICE_DEFAULT_WORDS } from "./dropship-listing-settings-recipe";
 import type { PolicySetupFacts } from "./dropship-listing-settings-store-requests";
 import {
   bulkSheetTitleWords,
@@ -104,8 +112,9 @@ import { DropshipApiError, type DropshipEbayStoreCategoryOption } from "./dropsh
  * and editors' models, and the sheet's state.
  *
  * Rules this module keeps:
- * - Never a price (D1): the patch has no `price` key at all; a price for many
- *   products goes through the price check (10d).
+ * - Never a price in W6 (D1): the patch has no `price` key at all; a price for
+ *   many products is its own kind of change (the Price row, PR 10d) that goes
+ *   through the price check (W7) and is never saved with the setting rows (D2).
  * - The main text only as a reset (`SW` productsBulkPatchInputSchema): one
  *   patch can't carry each product's catalog hash, so "Use Card Shellz text"
  *   or leave it.
@@ -215,17 +224,58 @@ export function readBulkDraft(value: DraftValue): BulkDraftValue | null {
   return value as unknown as BulkDraftValue;
 }
 
-/** The sheet's draft and its value, when the step's one draft is the sheet's. */
+/** The sheet's draft and its value, when the step's one draft is the sheet's and holds the settings (not the price, PR 10d). */
 function ownBulkDraft(draft: ListingSettingsDraft | null): { draft: ListingSettingsDraft; value: BulkDraftValue } | null {
   if (draft === null || draft.editor !== BULK_EDITOR_ID) return null;
   const value = readBulkDraft(draft.value);
   return value === null ? null : { draft, value };
 }
 
+/** Which kind of change the sheet's draft holds (D2): the settings (W6), the price (W7, PR 10d), or none. */
+export type BulkChangeKind = "none" | "settings" | "price";
+
+/** The sheet's draft of either kind, with the products it is for. */
+interface HeldBulkDraft {
+  draft: ListingSettingsDraft;
+  kind: Exclude<BulkChangeKind, "none">;
+  products: readonly PickedProduct[];
+  settings: BulkDraftValue | null;
+  price: BulkPriceDraftValue | null;
+}
+
+/** The sheet's draft of either kind, when the step's one draft is the sheet's; null otherwise. */
+function heldBulkDraft(draft: ListingSettingsDraft | null): HeldBulkDraft | null {
+  if (draft === null || draft.editor !== BULK_EDITOR_ID) return null;
+  const settings = readBulkDraft(draft.value);
+  if (settings !== null) return { draft, kind: "settings", products: settings.products, settings, price: null };
+  const price = readBulkPriceDraft(draft.value);
+  if (price !== null) return { draft, kind: "price", products: price.products, settings: null, price };
+  return null;
+}
+
+/**
+ * The kind of change the sheet's draft holds while it holds one (a change,
+ * or a save out or unconfirmed); "none" for a clean draft of either shape
+ * (D2: the other kind may then start).
+ */
+export function bulkChangeKind(draft: ListingSettingsDraft | null): BulkChangeKind {
+  const held = heldBulkDraft(draft);
+  if (held === null || (!isDraftDirty(held.draft) && !isDraftLocked(held.draft))) return "none";
+  return held.kind;
+}
+
 /** What putting a row editor's choice in the sheet's draft does ([Done]; nothing is sent until Save). */
 export type BulkEditAction =
   /** The draft takes the choices: send `value` to `drafts.edit`. */
   | { kind: "edit"; value: BulkDraftValue }
+  /**
+   * The sheet's draft is a clean price draft (PR 10d: a price change discarded
+   * or saved): open the settings on the same products (`drafts.open(BULK_EDITOR_ID,
+   * …, base)`, which a clean draft takes), then `drafts.edit(value)`.
+   */
+  | { kind: "start"; base: BulkDraftValue; value: BulkDraftValue }
+  /** The price holds a change (PR 10d, D2): "Save or discard your other change first." */
+  | { kind: "finish_first" }
   /** A save is in flight or unconfirmed: nothing changes until it ends (R:539, R:541). */
   | { kind: "locked" }
   /** The sheet's draft isn't open yet (its ids read hasn't answered). */
@@ -243,12 +293,15 @@ export function bulkEditAction(input: { draft: ListingSettingsDraft | null; pick
       throw new Error(`A "Set for selected" edit names a field or a choice the sheet doesn't set: ${field}.`);
     }
   }
-  const own = ownBulkDraft(input.draft);
-  if (own === null) return { kind: "not_open" };
-  if (isDraftLocked(own.draft)) return { kind: "locked" };
-  const value: Record<string, unknown> = { ...own.value };
+  const held = heldBulkDraft(input.draft);
+  if (held === null) return { kind: "not_open" };
+  if (isDraftLocked(held.draft)) return { kind: "locked" };
+  const value: Record<string, unknown> = { ...(held.settings ?? bulkDraftValue(held.products)) };
   for (const [field, choice] of picks) value[field] = (choice as { mode: string }).mode === "leave" ? LEAVE : copyChoice(choice);
-  return { kind: "edit", value: value as unknown as BulkDraftValue };
+  if (held.settings !== null) return { kind: "edit", value: value as unknown as BulkDraftValue };
+  // The draft holds the price: a change of it waits (D2); a clean one gives way to the settings on the same products.
+  if (isDraftDirty(held.draft)) return { kind: "finish_first" };
+  return { kind: "start", base: bulkDraftValue(held.products), value: value as unknown as BulkDraftValue };
 }
 
 // ---------------------------------------------------------------------------
@@ -358,8 +411,13 @@ export function bulkSignature(storeConnectionId: number, products: readonly Pick
 // Who may change which row (D3, D4)
 // ---------------------------------------------------------------------------
 
-/** The rights "Set for selected" reads: W6's, and the rights its rows pick eBay values with. */
-export type BulkSettingsRights = Pick<ListingSettingsEditRights, "bulkSettings" | "shipping" | "policies" | "ebayCategory" | "shelfPick">;
+/**
+ * The rights "Set for selected" reads: W6's, and the rights its rows pick
+ * eBay values with; W7's for the Price row (PR 10d, `bulkPriceRow`; a caller
+ * that doesn't pass it offers no price change).
+ */
+export type BulkSettingsRights = Pick<ListingSettingsEditRights, "bulkSettings" | "shipping" | "policies" | "ebayCategory" | "shelfPick">
+  & { priceCheck?: ListingSettingsRight };
 
 /**
  * A row's rights: W6's right AND the field's own pick right, as the drawer's
@@ -401,12 +459,14 @@ export interface BulkRowsInput {
  * while a save is out or unconfirmed. No "Sizes differ" picks, no check.
  */
 export function bulkSettingRows(input: BulkRowsInput): DrawerSettingRowModel[] {
-  const own = ownBulkDraft(input.draft);
+  const own = heldBulkDraft(input.draft);
   const locked = own !== null && isDraftLocked(own.draft);
   const holding = own !== null && (isDraftDirty(own.draft) || locked);
-  const choices = holding ? own.value : emptyBulkChoices();
+  const choices = holding && own.settings !== null ? own.settings : emptyBulkChoices();
+  // The price holds a change, or its apply is out or unconfirmed (PR 10d, D2): every setting row waits.
+  const priceWaits = holding && own.kind === "price";
   // A refusal's words sit by the rows it named until the vendor changes something (the draft is then editing again).
-  const failure = own?.draft.phase === "refused" ? input.failure : null;
+  const failure = own?.draft.phase === "refused" && own.kind === "settings" ? input.failure : null;
   return DRAWER_SETTING_ROWS.map(({ key, label }) => {
     const target = DRAWER_ROW_TARGETS[key];
     const fields = drawerEditFields(target);
@@ -415,6 +475,7 @@ export function bulkSettingRows(input: BulkRowsInput): DrawerSettingRowModel[] {
     const shown = rights.canSet || rights.canDefault || rights.canNone;
     let line: string | null = null;
     if (!shown) line = rights.reason === null ? null : rightReasonLine(rights.reason);
+    else if (priceWaits) line = LISTING_SETTINGS_EDIT_WORDS.otherChangeFirst;
     else if (!rights.canSet && rights.reason !== null) {
       line = rights.reason === "sign_in" ? LISTING_SETTINGS_EDIT_WORDS.signInFieldLine
         : rightReasonLine(rights.reason) ?? LISTING_SETTINGS_EDIT_WORDS.defaultOnlyLine;
@@ -423,7 +484,7 @@ export function bulkSettingRows(input: BulkRowsInput): DrawerSettingRowModel[] {
       canSet: rights.canSet,
       canDefault: rights.canDefault,
       canNone: rights.canNone,
-      change: { shown, disabled: own === null || locked },
+      change: { shown, disabled: own === null || locked || priceWaits },
       picksDisabled: true,
       line,
       open: input.openTarget === target,
@@ -635,7 +696,7 @@ export type BulkSheetOpen =
    * says so. A product the change was already for keeps the revision it was
    * made against (a save elsewhere since is the 409); the others take the read's.
    */
-  | { kind: "restart"; base: BulkDraftValue; value: BulkDraftValue }
+  | { kind: "restart"; base: BulkDraftValue | BulkPriceDraftValue; value: BulkDraftValue | BulkPriceDraftValue }
   /** None of the products is chosen any more: no draft opens, Save stays off. */
   | { kind: "none_left" };
 
@@ -646,37 +707,42 @@ export type BulkSheetOpen =
  */
 export function bulkSheetOpen(draft: ListingSettingsDraft | null, picked: PickedProducts | null): BulkSheetOpen {
   if (decideOpen(draft, BULK_EDITOR_ID) !== "open") return { kind: "elsewhere" };
-  const own = ownBulkDraft(draft);
+  const own = heldBulkDraft(draft);
   if (own !== null && isDraftLocked(own.draft)) return { kind: "keep" };
   if (picked === null) return { kind: "wait" };
   if (picked.total === 0) return { kind: "none_left" };
   if (own === null || !isDraftDirty(own.draft)) return { kind: "open", base: bulkDraftValue(picked.products) };
-  if (sameProductIds(own.value.products, picked.products)) return { kind: "keep" };
-  const held = new Map(own.value.products.map((product) => [product.productId, product.expectedRevisionId]));
+  if (sameProductIds(own.products, picked.products)) return { kind: "keep" };
+  const held = new Map(own.products.map((product) => [product.productId, product.expectedRevisionId]));
   const products = picked.products.map((product) => (held.has(product.productId)
     ? { productId: product.productId, expectedRevisionId: held.get(product.productId) ?? null }
     : product));
-  return { kind: "restart", base: bulkDraftValue(products), value: bulkDraftValue(products, own.value) };
+  if (own.price !== null) {
+    // The price change goes to the products read now; its check, made for other products, is dropped (PR 10d).
+    return { kind: "restart", base: bulkPriceDraftValue(products), value: bulkPriceDraftValue(products, { ...own.price.priceChange, check: null }) };
+  }
+  return { kind: "restart", base: bulkDraftValue(products), value: bulkDraftValue(products, own.settings ?? undefined) };
 }
 
 /**
  * [Discard] in the sheet: every row back to "Leave as is" on the same
- * products (`reset`, send `value` to `drafts.edit`); after a 409 the draft's
- * revisions are known to be old, so the ids read is made again instead
- * (`reread`, then `bulkReload` with no choices); `none` without a sheet draft.
+ * products (`reset`, send `value` to `drafts.edit`; the price's draft keeps
+ * its shape, with no change, PR 10d); after a 409 the draft's revisions are
+ * known to be old, so the ids read is made again instead (`reread`, then
+ * `bulkReload` with no choices); `none` without a sheet draft.
  */
-export type BulkDiscard = { kind: "reset"; value: BulkDraftValue } | { kind: "reread" } | { kind: "none" };
+export type BulkDiscard = { kind: "reset"; value: BulkDraftValue | BulkPriceDraftValue } | { kind: "reread" } | { kind: "none" };
 
 export function bulkDiscard(draft: ListingSettingsDraft | null): BulkDiscard {
-  const own = ownBulkDraft(draft);
+  const own = heldBulkDraft(draft);
   if (own === null || isDraftLocked(own.draft)) return { kind: "none" };
   if (own.draft.phase === "conflict") return { kind: "reread" };
-  return { kind: "reset", value: bulkDraftValue(own.value.products) };
+  return { kind: "reset", value: own.price !== null ? bulkPriceDraftValue(own.products) : bulkDraftValue(own.products) };
 }
 
-/** Whether the step's one draft is a "Set for selected" save that is out or unconfirmed: the sheet opens on it, ticks or none (D21). */
+/** Whether the step's one draft is a "Set for selected" save (its settings or its price) that is out or unconfirmed: the sheet opens on it, ticks or none (D21). */
 export function bulkHoldsSave(draft: ListingSettingsDraft | null): boolean {
-  const own = ownBulkDraft(draft);
+  const own = heldBulkDraft(draft);
   return own !== null && isDraftLocked(own.draft);
 }
 
@@ -692,7 +758,8 @@ export interface BulkSheetInput {
   draft: ListingSettingsDraft | null;
   /** What this opening did to the draft (`bulkSheetOpen`'s kind once it decided); null before. */
   opening: BulkSheetOpen["kind"] | null;
-  rights: Pick<ListingSettingsEditRights, "bulkSettings">;
+  /** W6's right, and W7's for a price change (PR 10d; absent = no price change can be checked or saved). */
+  rights: Pick<ListingSettingsEditRights, "bulkSettings"> & { priceCheck?: ListingSettingsRight };
   /** Another listing action is running, or a read for the footer is in flight. */
   busy: boolean;
   /** "Saved" shows now (3 seconds after a confirmed save, R:538). */
@@ -727,6 +794,19 @@ export interface BulkSheetState {
   noneLeft: string | null;
   /** Esc keeps the sheet open: a save is out or unconfirmed (3.4). */
   escapeKeepsOpen: boolean;
+  /**
+   * What the footer's Save does (PR 10d, D2): the settings save (W6), or, while
+   * the draft holds the price, the price check (W7: "Check new prices"; the
+   * check body's own footer applies it); "none" with no change of either kind.
+   */
+  kind: BulkChangeKind;
+  /**
+   * The shape of the sheet's draft, change or none: the settings' or the
+   * price's, null with no sheet draft. A clean price-shaped draft (a price
+   * apply saved with a stale view, or a price change discarded) is still the
+   * price's, so its [Reload] is the price's re-read, not W6's.
+   */
+  shape: Exclude<BulkChangeKind, "none"> | null;
   footer: DrawerFooter;
 }
 
@@ -738,10 +818,11 @@ export function bulkSheetState(input: BulkSheetInput): BulkSheetState {
   const failed = ids.error !== undefined && ids.error !== null;
   const picked = !failed && ids.data !== undefined ? pickSelected(ids.data, input.selection) : null;
   const read: BulkSheetState["read"] = failed ? "failed" : picked === null ? "loading" : "answered";
-  const own = ownBulkDraft(input.draft);
+  const own = heldBulkDraft(input.draft);
+  const kind = bulkChangeKind(input.draft);
   // A save out or unconfirmed is for its own products, whatever is ticked or read now (D21); it needs no ids read.
-  const held = own !== null && isDraftLocked(own.draft) ? own.value.products : null;
-  const count = own?.value.products.length ?? picked?.total ?? selectionCount(input.selection);
+  const held = own !== null && isDraftLocked(own.draft) ? own.products : null;
+  const count = own?.products.length ?? picked?.total ?? selectionCount(input.selection);
 
   const lines: string[] = [];
   if (held !== null && (picked === null || !sameProductIds(held, picked.products))) {
@@ -753,19 +834,23 @@ export function bulkSheetState(input: BulkSheetInput): BulkSheetState {
   }
   const noneLeft = held === null && picked !== null && picked.total === 0 ? LISTING_SETTINGS_BULK_WORDS.noneChosen : null;
 
-  const patch = own === null ? null : bulkPatch(own.value);
-  const textTooLarge = own !== null && patch !== null && bulkTextTooLarge(own.value.products.length, patch);
+  const patch = own?.settings == null ? null : bulkPatch(own.settings);
+  const textTooLarge = own !== null && patch !== null && bulkTextTooLarge(own.products.length, patch);
   const namesRow = (input.failure?.fields ?? []).some((field) => BULK_FIELD_SET.has(field));
+  // The price (W7, PR 10d): Save runs the check (the check body applies it), with W7's right; a price refusal names no row.
+  const price = kind === "price";
   let footer = drawerFooter({
     draft: own?.draft ?? null,
-    editable: input.rights.bulkSettings.editable && count > 0,
+    editable: (price ? input.rights.priceCheck?.editable === true : input.rights.bulkSettings.editable) && count > 0,
     busy: input.busy,
     clear: null,
     savedFlashVisible: input.savedFlashVisible,
     compact: input.compact,
-    showRefusal: !namesRow,
+    showRefusal: price || !namesRow,
     fieldEditorOpen: input.fieldEditorOpen,
-    saveLabel: saveForWords(count),
+    saveLabel: price ? PRICE_DEFAULT_WORDS.checkNewPrices : saveForWords(count),
+    // A phone says "Check new prices" too: "Save" would not say what the button does.
+    ...(price ? { compactSaveLabel: PRICE_DEFAULT_WORDS.checkNewPrices } : {}),
   });
   if (footer.primary.action === "save" && noneLeft !== null) {
     // The ticked products aren't chosen any more: nothing to save for them here (a save out or unconfirmed keeps Check again).
@@ -782,6 +867,8 @@ export function bulkSheetState(input: BulkSheetInput): BulkSheetState {
     lines,
     noneLeft,
     escapeKeepsOpen: held !== null,
+    kind,
+    shape: own?.kind ?? null,
     footer,
   };
 }
@@ -912,5 +999,139 @@ export function bulkSelectionBar(input: BulkSelectionBarInput): BulkSelectionBar
     status,
     shownTick,
     announcement: visible ? selectionAnnouncementWords({ count: countWords, offer, status }) : "",
+  };
+}
+
+// ---------------------------------------------------------------------------
+// The Price row (W7 `product_prices`; PR 10d, plan 7.2, 7.6, D1, D2, D16)
+// ---------------------------------------------------------------------------
+
+/**
+ * The sheet's draft value while it holds the price (W7): the change (a recipe
+ * or "Use default", "Clear exact prices too", and the check made for it) and
+ * the products the ids read gave. Its own shape, never with the setting rows
+ * (D2): one kind of change per Save. The products' revisions are kept only to
+ * tell the products apart on reopen (`bulkSheetOpen`); a `product_prices`
+ * check carries no revision (D6).
+ */
+export type BulkPriceDraftValue = {
+  readonly priceChange: ProductPriceChange;
+  readonly products: readonly PickedProduct[];
+};
+
+/** The price draft value on the ids read's products (ascending); with no change it is the draft's base. */
+export function bulkPriceDraftValue(products: readonly PickedProduct[], change: ProductPriceChange = emptyProductPriceChange()): BulkPriceDraftValue {
+  const copied = Object.freeze([...products]
+    .map((product) => Object.freeze({ productId: product.productId, expectedRevisionId: product.expectedRevisionId }))
+    .sort((left, right) => left.productId - right.productId));
+  const check = change.check === null ? null : { ...change.check };
+  const priceChange: ProductPriceChange = !isProductPriceChanged(change)
+    ? emptyProductPriceChange()
+    : { price: copyChoice(change.price), releaseExactPrices: change.releaseExactPrices, check };
+  return { priceChange, products: copied };
+}
+
+/** The sheet's price draft value, or null when `value` is not one (the settings, a product's draft, a Store defaults row's). */
+export function readBulkPriceDraft(value: DraftValue): BulkPriceDraftValue | null {
+  if (!isPickedProducts(value.products) || !isProductPriceChange(value.priceChange)) return null;
+  if (Object.keys(value).some((key) => key !== "products" && key !== "priceChange")) return null;
+  return value as unknown as BulkPriceDraftValue;
+}
+
+/** The product ids a "Set for selected" price check names: the draft's products, ascending (the ids read's, D6). */
+export function bulkPriceProductIds(value: Pick<BulkPriceDraftValue, "products">): number[] {
+  return value.products.map((product) => product.productId);
+}
+
+/** The check the runner made, put in the price draft (`null` drops a check: "Back to editing", a check for other products). */
+export function bulkPriceDraftWithCheck(value: BulkPriceDraftValue, check: PriceCheckRef | null): BulkPriceDraftValue {
+  return { ...value, priceChange: { ...value.priceChange, check: check === null ? null : { ...check } } };
+}
+
+/** What [Check new prices] in the Price row's editor does to the sheet's draft (nothing is sent until the check and its Save). */
+export type BulkPriceEditAction =
+  /** The sheet's draft holds the price: the choice replaces it (its check with it; the runner makes a new one). */
+  | { kind: "edit"; value: BulkPriceDraftValue }
+  /** A clean draft of either shape: open the price on the same products (`drafts.open`, which a clean draft takes), then `drafts.edit(value)`. */
+  | { kind: "start"; base: BulkPriceDraftValue; value: BulkPriceDraftValue }
+  /** The setting rows hold a change (D2): "Save or discard your other change first." */
+  | { kind: "finish_first" }
+  /** A save is in flight or unconfirmed: nothing changes until it ends (R:539, R:541). */
+  | { kind: "locked" }
+  /** The sheet's draft isn't open yet (its ids read hasn't answered). */
+  | { kind: "not_open" }
+  /** Nothing to check: the price left as it is and nothing to clear. */
+  | { kind: "no_change" };
+
+export function bulkPriceEditAction(input: {
+  draft: ListingSettingsDraft | null;
+  change: Pick<ProductPriceChange, "price" | "releaseExactPrices">;
+}): BulkPriceEditAction {
+  const held = heldBulkDraft(input.draft);
+  if (held === null) return { kind: "not_open" };
+  if (isDraftLocked(held.draft)) return { kind: "locked" };
+  const dirty = isDraftDirty(held.draft);
+  if (held.kind === "settings" && dirty) return { kind: "finish_first" };
+  const value = bulkPriceDraftValue(held.products, { price: input.change.price, releaseExactPrices: input.change.releaseExactPrices, check: null });
+  if (held.kind === "price" && dirty) return { kind: "edit", value };
+  if (!isProductPriceChanged(value.priceChange)) return { kind: "no_change" };
+  return { kind: "start", base: bulkPriceDraftValue(held.products), value };
+}
+
+/** The Price row of the sheet (plan 7.2): "Leave as is" with [Change], its pending change below it. */
+export interface BulkPriceRowModel {
+  key: "price";
+  label: string;
+  value: string;
+  /** "→ Retail price + 20%, round up to .99 · Clear exact prices too · Not saved"; null with no change. */
+  pending: string | null;
+  canSet: boolean;
+  canDefault: boolean;
+  /** Why neither can be chosen (W7's right, D3); null when they can. The editor says it in its own words. */
+  reason: ListingSettingsRightReason | null;
+  change: { shown: boolean; disabled: boolean };
+  /** Why [Change] is off or waits, in words; null otherwise. */
+  line: string | null;
+  open: boolean;
+  /** The change the editor opens on (the draft's, else none). */
+  draftChange: Pick<ProductPriceChange, "price" | "releaseExactPrices">;
+}
+
+/**
+ * The Price row (PR 10d): one row beside the six setting rows, reading "Leave
+ * as is" with [Change]; its editor is the product price editor
+ * (`productPriceEditorModel`, dropship-listing-settings-price-check.ts). [Change]
+ * waits for the draft (the ids read), while a save is out or unconfirmed, and
+ * while the setting rows hold a change (D2). W7's right decides what it offers
+ * (D3). A refused apply's words are the check body's, which shows while the
+ * draft holds the check; the row itself never names one.
+ */
+export function bulkPriceRow(input: {
+  draft: ListingSettingsDraft | null;
+  rights: Pick<BulkSettingsRights, "priceCheck">;
+  open: boolean;
+}): BulkPriceRowModel {
+  const own = heldBulkDraft(input.draft);
+  const locked = own !== null && isDraftLocked(own.draft);
+  const holding = own !== null && (isDraftDirty(own.draft) || locked);
+  const change = holding && own.price !== null ? own.price.priceChange : emptyProductPriceChange();
+  const settingsWait = holding && own.kind === "settings";
+  const rights = productPriceRights({ priceCheck: input.rights.priceCheck ?? { editable: false, reason: "loading" } });
+  const shown = rights.canSet || rights.canDefault;
+  let line: string | null = null;
+  if (!shown) line = rights.reason === null ? null : rightReasonLine(rights.reason);
+  else if (settingsWait) line = LISTING_SETTINGS_EDIT_WORDS.otherChangeFirst;
+  return {
+    key: "price",
+    label: DRAWER_WORDS.priceHead,
+    value: LISTING_SETTINGS_BULK_WORDS.leaveAsIs,
+    pending: pendingPriceWords(change),
+    canSet: rights.canSet,
+    canDefault: rights.canDefault,
+    reason: rights.reason,
+    change: { shown, disabled: own === null || locked || settingsWait },
+    line,
+    open: input.open,
+    draftChange: { price: change.price, releaseExactPrices: change.releaseExactPrices },
   };
 }

@@ -310,11 +310,14 @@ function firstOf(kinds: Map<ConnectionBannerKind, string | null>, order: readonl
  *   (`productFieldRights`, dropship-listing-settings-product-edit.ts);
  * - `bulkSettings` (W6, "Set for selected": many products' settings, never a
  *   price; plan PR 10, D3), with the same rule for each field (`bulkFieldRights`,
- *   dropship-listing-settings-bulk.ts).
+ *   dropship-listing-settings-bulk.ts);
+ * - `priceCheck` (W7, the price check for one or many products: a product's
+ *   price in its drawer, the price in "Set for selected"; plan PR 10, D3, 7.6).
+ *   It names no eBay value, so a sign-in never takes it away.
  */
 export const LISTING_SETTINGS_RIGHTS = [
   "price", "exactPrice", "policies", "shipping", "shelfPick", "shelfNone", "shipFrom", "ebayCategory", "description",
-  "productSettings", "bulkSettings",
+  "productSettings", "bulkSettings", "priceCheck",
 ] as const;
 export type ListingSettingsRightName = (typeof LISTING_SETTINGS_RIGHTS)[number];
 
@@ -357,11 +360,11 @@ const ALL_RIGHTS: readonly ListingSettingsRightName[] = LISTING_SETTINGS_RIGHTS;
 /**
  * W1, W9, W3 and W4 need an active or onboarding vendor and an active .ops
  * entitlement, and so does every PR 9 writer (`authorizeListingSettingWrite`):
- * W5 and W6 here. A sign-in or eBay not answering doesn't lock them: resets
- * need no eBay call (plan D3, D4).
+ * W5, W6 and W7 here. A sign-in or eBay not answering doesn't lock them: resets
+ * and prices need no eBay call (plan D3, D4).
  */
 const LISTING_WRITER_RIGHTS: readonly ListingSettingsRightName[] = [
-  "price", "exactPrice", "ebayCategory", "description", "productSettings", "bulkSettings",
+  "price", "exactPrice", "ebayCategory", "description", "productSettings", "bulkSettings", "priceCheck",
 ];
 /** Choices that read eBay: the W2 policies and shelves, W10, and W3's category check. */
 const EBAY_RIGHTS: readonly ListingSettingsRightName[] = ["policies", "shipping", "shelfPick", "shelfNone", "shipFrom", "ebayCategory"];

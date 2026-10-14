@@ -60,6 +60,7 @@ const EDITABLE: ListingSettingsRight = { editable: true, reason: null };
 /** Every right the drawer reads (PR 10): a size's exact price, the product's own settings, and the eBay policy picks. */
 const RIGHTS: ProductDrawerProps["rights"] = {
   exactPrice: EDITABLE, productSettings: EDITABLE, shipping: EDITABLE, policies: EDITABLE, ebayCategory: EDITABLE, shelfPick: EDITABLE,
+  priceCheck: EDITABLE,
 };
 const noop = () => undefined;
 
