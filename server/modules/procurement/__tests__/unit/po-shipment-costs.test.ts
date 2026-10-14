@@ -51,6 +51,15 @@ const detail = (): PoShipmentCostLineDetail => ({
 const supplier = { freightCents: 300, dutyCents: 200 };
 
 describe("PO card totals and recorded shipment cost review", () => {
+  it("keeps a retained quantity review visible and does not suggest retrying away missing history", () => {
+    const issue = { code:"COST_UNRESOLVED_QUANTITY_RETAINED",message:"Lot CASE-1: four units remain unresolved.",
+      unresolvedQuantity:{inventoryLotId:3364,allocationId:1,lotNumber:"CASE-1",originalQuantity:220,
+        onHandQuantityAtReview:157,recordedOutflowQuantityAtReview:59,quantity:4,component:"landed" as const,amountMills:609104} };
+    const input = source(); input.lines[0].applicationStatus="review_required";
+    const costs = buildPoShipmentCosts(input,supplier,[{...detail(),applicationIssues:[issue]}]);
+    expect(costs.lines[0]).toMatchObject({status:"review_required",issues:[issue]});
+    expect(shipmentCostReviewGuidance([issue]).nextStep).toContain("retrying will not resolve");
+  });
   it("shows supplier plus allocated shipment charges without adding supplier charges twice", () => {
     expect(buildPoShipmentCosts(source(), supplier, [detail()])).toMatchObject({
       supplier,

@@ -64,6 +64,12 @@ export function shipmentCostReviewGuidance(issues: readonly CostIssue[]): {
   nextStep: string;
 } {
   const codes = new Set(issues.map((issue) => issue.code));
+  if (codes.has("COST_UNRESOLVED_QUANTITY_RETAINED")) {
+    return {
+      explanation: null,
+      nextStep: "Review the named lot's stock movements and order cost records. The unexplained amount is retained separately; retrying will not resolve it or change stock counts.",
+    };
+  }
   const previousRoundingCodes = new Set([
     "COST_UNIFORM_LOT_RESIDUAL_REVIEW",
     "COST_TRANSFORM_RESIDUAL_REVIEW",

@@ -1931,17 +1931,17 @@ export default function InboundShipmentDetail() {
                     {lastLandedCostPush.status === "review_required" ? "Needs review" : "Applied"}
                   </Badge>
                   <Badge variant={lastLandedCostPush.skipped?.length ? "outline" : "secondary"}>
-                    {lastLandedCostPush.updated} updated
+                    {lastLandedCostPush.updated} lots updated
                   </Badge>
                   <Badge variant={lastLandedCostPush.skipped?.length ? "destructive" : "outline"}>
-                    {lastLandedCostPush.skipped?.length ?? 0} skipped
+                    {lastLandedCostPush.skipped?.length ?? 0} issues to review
                   </Badge>
                   <span className="text-muted-foreground">{lastLandedCostPush.total} lots in applied cost results</span>
                 </div>
                 {lastLandedCostPush.skipped && lastLandedCostPush.skipped.length > 0 && (
                   <div className="space-y-2">
-                    {lastLandedCostPush.skipped.map((item) => (
-                      <div key={`${item.applicationId}-${item.reason}-${item.message}`} className="flex flex-wrap items-center gap-2 text-sm">
+                    {lastLandedCostPush.skipped.map((item, index) => (
+                      <div key={`${item.applicationId}-${item.reason}-${index}`} className="flex flex-wrap items-center gap-2 text-sm">
                         <AlertTriangle className="h-4 w-4 text-amber-600" />
                         <span>{item.message || formatLandedCostSkipReason(item.reason)}</span>
                       </div>

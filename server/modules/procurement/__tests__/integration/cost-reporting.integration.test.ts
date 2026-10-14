@@ -76,6 +76,33 @@ const tables=[schema.purchaseOrders,schema.purchaseOrderLines,schema.inboundShip
     const work=(await Promise.all(Array.from({length:4},() => repository.claim(destination,NOW,randomUUID)))).flat();expect(work).toHaveLength(1);
     expect((await pool.query("SELECT COUNT(*)::int AS count FROM procurement.cost_report_deliveries")).rows[0].count).toBe(1);
   });
+  async function retainedQuantityReport(issueCode = "COST_UNRESOLVED_QUANTITY_RETAINED") {
+    const original = (await pool.query("SELECT a.source_revision_id,a.recorded_by,a.recorded_at,e.payload FROM inventory.cost_applications a JOIN inventory.cost_reporting_events e ON e.application_id=a.id")).rows[0];
+    const unresolved = { inventoryLotId:5,allocationId:99,lotNumber:"REPORT-LOT",originalQuantity:3,
+      onHandQuantityAtReview:1,recordedOutflowQuantityAtReview:1,quantity:1,component:"product",amountMills:100 };
+    const payload = {...original.payload,unresolvedQuantities:[unresolved]};
+    const outcome = {status:"review_required",lotsUpdated:1,totalCogsDeltaCents:payload.cogsDeltaCents,
+      issues:[{code:issueCode,message:"One historical unit remains unresolved.",unresolvedQuantity:unresolved}]};
+    const added = (await pool.query(`INSERT INTO inventory.cost_applications(application_key,source_revision_id,status,evidence,recorded_by,recorded_at)
+      VALUES($1,$2,'review_required',$3::jsonb,$4,$5) RETURNING id`,["d".repeat(64),original.source_revision_id,JSON.stringify({result:outcome}),original.recorded_by,original.recorded_at])).rows[0];
+    for (const change of payload.changes) await pool.query("INSERT INTO inventory.cost_application_lots(application_id,inventory_lot_id,before_state,after_state) VALUES($1,$2,$3,$4)",
+      [added.id,change.lotId,change.before,change.after]);
+    await pool.query("INSERT INTO inventory.cost_reporting_events(application_id,contract_version,payload,recorded_at) VALUES($1,1,$2,$3)",[added.id,payload,original.recorded_at]);
+    return {applicationId:added.id,payload};
+  }
+  it("queues known cost updates with their unresolved quantity evidence intact",async () => {
+    const retained = await retainedQuantityReport();
+    expect(await repository.enqueue(destination,NOW,randomUUID)).toBe(2);
+    const saved = (await pool.query("SELECT state,envelope,last_error_code FROM procurement.cost_report_deliveries WHERE application_id=$1",[retained.applicationId])).rows[0];
+    expect(saved).toMatchObject({state:"queued",last_error_code:null});
+    expect(saved.envelope.payload).toEqual(retained.payload);
+  });
+  it("does not export blocked cost applications as successful updates",async () => {
+    const retained = await retainedQuantityReport("COST_GRAPH_INCOMPLETE");
+    await repository.enqueue(destination,NOW,randomUUID);
+    expect((await pool.query("SELECT state,last_error_code FROM procurement.cost_report_deliveries WHERE application_id=$1",[retained.applicationId])).rows[0])
+      .toEqual({state:"dead_letter",last_error_code:"COST_REPORT_SOURCE_CONFLICT"});
+  });
   it("reclaims an expired lease and fences the old worker's late acknowledgement",async () => {
     await queued();const old=await claim();const later=new Date(NOW.getTime()+61_000);const current=await claim(later);
     expect(current.attemptCount).toBe(2);expect(current.id).toBe(old.id);expect(current.envelope).toEqual(old.envelope);

@@ -625,6 +625,149 @@ audit.sequential("receipt/AP/freight cost revisions with real owners", () => {
     expect((await pool.query("SELECT total_cost_mills::text AS cost FROM oms.order_item_costs")).rows).toEqual([{cost:"3"}]);
   });
 
+  async function legacyQuantityGaps() {
+    // A compact reproduction of the 220-case / four-case gap and the depleted
+    // 20-box / one-box gap. All historical input/output quantities are retained.
+    await pool.query(`UPDATE procurement.purchase_order_lines SET order_qty=2200000 WHERE id=21;
+      UPDATE procurement.inbound_shipment_lines SET qty_shipped=2200000 WHERE id=11;
+      UPDATE procurement.inbound_freight_costs SET actual_cents=335007 WHERE id=31;
+      INSERT INTO procurement.receiving_orders(id,receipt_number,source_type,status) VALUES(40,'LEGACY-RECEIPT','shipment','closed');
+      INSERT INTO procurement.receiving_lines(id,receiving_order_id,purchase_order_line_id,inbound_shipment_line_id,sku,product_variant_id,
+        expected_qty,received_qty,units_per_variant_snapshot,cost_source_kind)
+        VALUES(51,40,21,11,'AUDIT-PRODUCT',200,220,220,10000,'purchase_order_line');
+      INSERT INTO inventory.inventory_lots(id,lot_number,product_variant_id,warehouse_location_id,qty_received,qty_on_hand,
+        po_line_id,inbound_shipment_id,receiving_order_id,unit_cost_mills,po_unit_cost_mills,packaging_cost_mills,landed_cost_mills,total_unit_cost_mills,cost_precision_version,cost_source,received_at)
+        VALUES(3364,'LEGACY-CASE',200,99,220,157,21,1,40,1000000,1000000,0,0,1000000,1,'po','2026-09-01'),
+          (4016,'LEGACY-BOX',201,99,20,0,21,1,NULL,50000,50000,0,0,50000,1,'transformation','2026-09-02'),
+          (4017,'OTHER-BOXES',201,99,380,380,21,1,NULL,50000,50000,0,0,50000,1,'transformation','2026-09-02');
+      INSERT INTO oms.order_item_costs(order_id,order_item_id,inventory_lot_id,product_variant_id,qty,unit_cost_cents,total_cost_cents,
+        unit_cost_mills,total_cost_mills,cost_precision_version,created_at)
+        VALUES(1,1,3364,200,39,10000,390000,1000000,39000000,1,'2026-09-03'),
+          (1,1,4016,201,19,500,9500,50000,950000,1,'2026-09-03');`);
+    const { recordReceiptCostOrigin, recordLotCostContribution } = await import("../../../inventory/infrastructure/cost-evidence.repository");
+    await database.transaction(async tx => {
+      await recordReceiptCostOrigin(tx, { inventoryLotId:3364,receivingLineId:51,purchaseOrderLineId:21,inboundShipmentLineId:11,
+        unitsPerVariantSnapshot:10000,receivedVariantQty:220 }, actorId,NOW);
+      for (const [outputLotId, outputStartQty] of [[4016,0],[4017,20]]) await recordLotCostContribution(tx, {
+        sourceLotId:3364,outputLotId,sourceQty:20,outputQty:400,outputStartQty,
+        operationKind:"conversion",operationKey:"legacy-boxes" },actorId,NOW);
+    });
+    await shipment.finalizeAllocations(1,actorId);
+  }
+
+  async function costQuantityPhysicalSnapshot() {
+    return {
+      lots: (await pool.query("SELECT id,qty_received,qty_on_hand,qty_reserved,qty_picked,qty_consumed FROM inventory.inventory_lots ORDER BY id")).rows,
+      cogs: (await pool.query("SELECT id,order_id,order_item_id,inventory_lot_id,qty FROM oms.order_item_costs ORDER BY id")).rows,
+      transactions: (await pool.query("SELECT * FROM inventory.inventory_transactions ORDER BY id")).rows,
+    };
+  }
+
+  it("updates late freight through historical gaps into stock and sold costs while retaining every mill", async () => {
+    await legacyQuantityGaps();
+    const before = await costQuantityPhysicalSnapshot();
+    const result = await shipment.pushLandedCostsToLots(1,actorId);
+    expect(result).toMatchObject({status:"review_required",updated:3,total:3});
+    expect(result.costApplications[0]).toMatchObject({lotsUpdated:3,cogsRowsUpdated:2,issues:[
+      {code:"COST_UNRESOLVED_QUANTITY_RETAINED",unresolvedQuantity:{inventoryLotId:3364,quantity:4}},
+      {code:"COST_UNRESOLVED_QUANTITY_RETAINED",unresolvedQuantity:{inventoryLotId:4016,quantity:1}},
+    ]});
+    expect(await costQuantityPhysicalSnapshot()).toEqual(before);
+    const { readUnallocatedLotCosts } = await import("../../../inventory/infrastructure/cost-quantity.repository");
+    const remaining = await database.transaction(async tx => readUnallocatedLotCosts(tx,
+      (await tx.execute(sql`SELECT * FROM inventory.inventory_lots ORDER BY id`)).rows.map(row => ({...row,id:row.id}))));
+    const stock = [...remaining.values()].reduce((sum,row) => sum+row.costs.landedMills,BigInt(0));
+    const sold = BigInt((await pool.query("SELECT sum(landed_total_cost_mills)::text AS amount FROM oms.order_item_costs")).rows[0].amount);
+    const held = result.costApplications[0].issues.reduce((sum,issue) => sum+BigInt(issue.unresolvedQuantity!.amountMills),BigInt(0));
+    expect(stock).toBeGreaterThan(BigInt(0)); expect(sold).toBeGreaterThan(BigInt(0)); expect(held).toBeGreaterThan(BigInt(0));
+    expect(stock+sold+held).toBe(BigInt(33_500_700));
+    expect(remaining.get(3364)?.quantity).toBe(157);
+    expect(remaining.get(4016)?.quantity).toBe(0);
+    const event = (await pool.query("SELECT payload FROM inventory.cost_reporting_events ORDER BY id DESC LIMIT 1")).rows[0].payload;
+    const { inventoryCostReportEventSchema } = await import("@shared/procurement/cost-report-delivery");
+    expect(inventoryCostReportEventSchema.parse(event).unresolvedQuantities).toHaveLength(2);
+    expect(event.cogsDeltaCents).toBe(result.costApplications[0].totalCogsDeltaCents);
+    const retry = await shipment.pushLandedCostsToLots(1,actorId);
+    expect(retry).toMatchObject({status:"review_required",updated:0,total:3});
+    expect(retry.costApplications[0]).toMatchObject({applicationId:result.costApplications[0].applicationId,replayed:true});
+    expect((await pool.query("SELECT count(*)::int AS count FROM inventory.lot_cost_quantity_allocations WHERE source_evidence->>'sourceKind'='unresolved_historical_quantity'")).rows[0].count).toBe(2);
+    expect(await costQuantityPhysicalSnapshot()).toEqual(before);
+  });
+
+  it("serializes simultaneous late-cost retries without duplicate unresolved allocations or COGS changes", async () => {
+    await legacyQuantityGaps();
+    const results = await Promise.all([shipment.pushLandedCostsToLots(1,actorId),shipment.pushLandedCostsToLots(1,actorId)]);
+    expect(results.map(result=>result.updated).sort()).toEqual([0,3]);
+    expect(new Set(results.map(result=>result.costApplications[0].applicationId)).size).toBe(1);
+    expect((await pool.query("SELECT count(*)::int AS count FROM inventory.cost_reporting_events")).rows[0].count).toBe(1);
+  });
+
+  it("retains zero unresolved cost without losing the quantity review", async () => {
+    await legacyQuantityGaps();
+    await pool.query("UPDATE procurement.inbound_freight_costs SET actual_cents=0 WHERE id=31");
+    await shipment.finalizeAllocations(1,actorId);
+    const result = await shipment.pushLandedCostsToLots(1,actorId);
+    expect(result).toMatchObject({status:"review_required",updated:3});
+    expect(result.costApplications[0].issues.map(issue=>issue.unresolvedQuantity?.amountMills)).toEqual([0,0]);
+  });
+
+  it("revalues the same unresolved intervals when the supplier's freight changes", async () => {
+    await legacyQuantityGaps();
+    const first = await shipment.pushLandedCostsToLots(1,actorId);
+    const custody = (await pool.query("SELECT * FROM inventory.lot_cost_quantity_allocations ORDER BY id")).rows;
+    await pool.query("UPDATE procurement.inbound_freight_costs SET actual_cents=670014 WHERE id=31");
+    await shipment.finalizeAllocations(1,actorId);
+    const revised = await shipment.pushLandedCostsToLots(1,actorId);
+    expect(revised).toMatchObject({status:"review_required",updated:3});
+    expect((await pool.query("SELECT * FROM inventory.lot_cost_quantity_allocations ORDER BY id")).rows).toEqual(custody);
+    expect(revised.costApplications[0].issues.map(issue=>issue.unresolvedQuantity?.allocationId))
+      .toEqual(first.costApplications[0].issues.map(issue=>issue.unresolvedQuantity?.allocationId));
+    expect(revised.costApplications[0].issues[0].unresolvedQuantity!.amountMills)
+      .toBeGreaterThan(first.costApplications[0].issues[0].unresolvedQuantity!.amountMills);
+  });
+
+  it("does not let a stock command silently import an unexplained quantity", async () => {
+    await legacyQuantityGaps();
+    const { ensureLotCostQuantityBasis } = await import("../../../inventory/infrastructure/cost-quantity.repository");
+    await expect(database.transaction(async tx => {
+      const source = (await tx.execute(sql`SELECT * FROM inventory.inventory_lots WHERE id=3364`)).rows[0];
+      await ensureLotCostQuantityBasis(tx,{...source,id:3364},actorId,NOW);
+    })).rejects.toMatchObject({code:"COST_HISTORICAL_QUANTITY_INCOMPLETE"});
+    expect((await pool.query("SELECT count(*)::int AS count FROM inventory.lot_cost_quantity_allocations")).rows[0].count).toBe(0);
+  });
+
+  it("refuses excess recorded consumption instead of fabricating negative custody", async () => {
+    await legacyQuantityGaps();
+    await pool.query("UPDATE inventory.inventory_lots SET qty_on_hand=180 WHERE id=3364");
+    const result = await shipment.pushLandedCostsToLots(1,actorId);
+    expect(result).toMatchObject({status:"review_required",updated:0,total:0});
+    expect(result.skipped.some(issue=>issue.reason==="COST_HISTORICAL_QUANTITY_INCOMPLETE")).toBe(true);
+    expect((await pool.query("SELECT count(*)::int AS count FROM inventory.lot_cost_quantity_allocations")).rows[0].count).toBe(0);
+    expect((await pool.query("SELECT count(*)::int AS count FROM inventory.cost_reporting_events")).rows[0].count).toBe(0);
+  });
+
+  it("does not absorb a new stock discrepancy after exact custody was established", async () => {
+    await legacyQuantityGaps(); await shipment.pushLandedCostsToLots(1,actorId);
+    await pool.query("UPDATE inventory.inventory_lots SET qty_on_hand=156 WHERE id=3364");
+    const result = await shipment.pushLandedCostsToLots(1,actorId);
+    expect(result).toMatchObject({status:"review_required",updated:0});
+    expect(result.skipped.some(issue=>issue.reason==="COST_QUANTITY_CUSTODY_CONFLICT")).toBe(true);
+  });
+
+  it("rolls back cost custody and all revaluation when the reporting audit fails", async () => {
+    await legacyQuantityGaps();
+    await pool.query(`CREATE FUNCTION inventory.fail_cost_report() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected cost report failure'; END $$;
+      CREATE TRIGGER fail_cost_report BEFORE INSERT ON inventory.cost_reporting_events FOR EACH ROW EXECUTE FUNCTION inventory.fail_cost_report()`);
+    try {
+      await expect(shipment.pushLandedCostsToLots(1,actorId)).rejects.toThrow("injected cost report failure");
+      expect((await pool.query("SELECT count(*)::int AS count FROM inventory.lot_cost_quantity_allocations")).rows[0].count).toBe(0);
+      expect((await pool.query("SELECT sum(landed_cost_mills)::text AS amount FROM inventory.inventory_lots")).rows[0].amount).toBe("0");
+      expect((await pool.query("SELECT count(*)::int AS count FROM inventory.cost_applications")).rows[0].count).toBe(0);
+    } finally {
+      await pool.query("DROP TRIGGER fail_cost_report ON inventory.cost_reporting_events; DROP FUNCTION inventory.fail_cost_report()");
+    }
+  });
+
   it("applies a later invoice through real transfer lineage into sold destination COGS", async () => {
     await receive();
     await pool.query("INSERT INTO warehouse.warehouse_locations(id,warehouse_id,code) VALUES(100,1,'AUDIT-PICK')");

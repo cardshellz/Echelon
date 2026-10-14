@@ -400,6 +400,30 @@ test("shows the new remaining reason when a retry only fixes some lines", async 
   ).toHaveCount(0);
 });
 
+test("keeps the exact unresolved portions visible after reloading the PO", async ({ page }) => {
+  const { state } = await installCostFixtures(page);
+  const messages = [
+    "Lot TEST-CASE: 4 case units remain unexplained. 60.9104 USD is retained separately. Known inventory and order costs were updated; stock counts were not changed.",
+    "Lot TEST-BOX: 1 box unit remains unexplained. 0.7614 USD is retained separately. Known inventory and order costs were updated; stock counts were not changed.",
+  ];
+  state.value.lines = state.value.lines.map(line => line.lineId === 101 ? { ...line, issues: messages.map((message,index) => ({
+    code:"COST_UNRESOLVED_QUANTITY_RETAINED",message,
+    unresolvedQuantity:{inventoryLotId:index === 0 ? 3364 : 4016,allocationId:index+1,lotNumber:index === 0 ? "TEST-CASE" : "TEST-BOX",
+      originalQuantity:index === 0 ? 220 : 20,onHandQuantityAtReview:index === 0 ? 157 : 0,
+      recordedOutflowQuantityAtReview:index === 0 ? 59 : 19,quantity:index === 0 ? 4 : 1,
+      component:"landed" as const,amountMills:index === 0 ? 609104 : 7614},
+  })) } : line.shipmentId === 42 ? {...line,status:"applied",issues:[]} : line);
+  state.value.summary = {...state.value.summary,reviewLines:1,appliedLines:5};
+  await page.goto("/purchase-orders/17?tab=lines");
+  for (let visit=0;visit<2;visit++) {
+    if (visit>0) await page.reload();
+    await page.getByRole("button",{name:"Review 1 line",exact:true}).click();
+    for (const message of messages) await expect(page.getByText(message,{exact:true})).toBeVisible();
+    await expect(page.getByText(/retrying will not resolve it or change stock counts/)).toBeVisible();
+    await expect(page.getByText("All confirmed shipment costs have been applied to inventory.",{exact:true})).toHaveCount(0);
+  }
+});
+
 test("retains the recorded failures when a retry is denied", async ({
   page,
 }) => {

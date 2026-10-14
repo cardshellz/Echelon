@@ -61,6 +61,29 @@ linked reversal/return quantities, ordered deterministically. Missing quantity
 history, conflicting operation intervals, manual component protections and
 unsupported source evidence remain review results.
 
+A positive unexplained quantity on a lot with no established financial basis
+is now retained as a separate immutable financial allocation during a cost
+revision. Known transformations, orders and remaining stock can then receive
+their exact costs. The unresolved allocation does not add stock, create a sale,
+write off inventory or assign cost to an order. Its quantity and amount remain
+visible on the PO review and shipment result. A zero cost still retains the
+quantity review. Repeated retries reuse the allocation and application; later
+source revisions revalue its amount alongside the other destinations.
+
+The result remains `review_required` even when `lotsUpdated` is positive.
+Those posted changes and the unresolved amounts are captured together in the
+reporting event. The reporting contract accepts optional exact prior balances
+and `unresolvedQuantities`, and validates them against the application audit.
+An external report consumer must support these fields before accepting these
+events; a rejection remains a delivery failure, never an acknowledgement.
+
+Negative discrepancies, unknown original quantities, conflicting lineage,
+unidentified reversals, and new discrepancies after custody was established
+continue to block revaluation. Operational stock commands cannot create an
+unresolved historical allocation. Resolving the original stock or order-cost
+history requires a separate evidence-backed correction; retrying costs cannot
+assert what happened to the unexplained units.
+
 After deployment, an authorized purchasing approver can retry **Push Costs to
 Lots** on the affected shipment. The changed application fingerprint creates
 the exact-total application and a repeated successful request replays it.

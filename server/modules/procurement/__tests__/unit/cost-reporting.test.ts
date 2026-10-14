@@ -17,6 +17,28 @@ const envelope = () => buildCostReportEnvelope({destination:configuration,delive
 const acknowledgement = () => ({contractVersion:1,disposition:"accepted_evidence_only",sourceSystemId:configuration.sourceSystemId,destinationId:configuration.id,deliveryId:envelope().deliveryId,sourceEventId:envelope().sourceEventId,payloadHash:envelope().payloadHash,reportHash:envelope().reportHash,receiptId:"cccccccc-cccc-4ccc-8ccc-cccccccccccc",acceptedAt:now.toISOString()});
 
 describe("exact cost reporting contract",() => {
+  const unresolved = { inventoryLotId: 5, allocationId: 9, lotNumber: "TEST-LOT", originalQuantity: 3,
+    onHandQuantityAtReview: 1, recordedOutflowQuantityAtReview: 1, quantity: 1, component: "product", amountMills: 101 };
+  it("retains exact prior balances and unresolved quantities in the hashed report", () => {
+    const source = { ...payload, unresolvedQuantities: [unresolved], changes: [{ ...payload.changes[0],
+      before: { ...payload.changes[0].before, basisQuantity: 3,
+        extendedTotals: { poMills: "600", packagingMills: "6", landedMills: "9", totalMills: "615" } } }] };
+    expect(inventoryCostReportEventSchema.parse(source)).toEqual(source);
+  });
+  it.each([{ inventoryLotId: 6 }, { component: "landed" }, { amountMills: 303 }, { quantity: 2 },
+    { quantity: 1.5 }, { onHandQuantityAtReview: 0.5 }, { amountMills: -1 }, { originalQuantity: 4, onHandQuantityAtReview: 2 }])("rejects a conflicting unresolved portion %j", patch => {
+    expect(inventoryCostReportEventSchema.safeParse({ ...payload, unresolvedQuantities: [{ ...unresolved, ...patch }] }).success).toBe(false);
+  });
+  it("rejects duplicated unresolved custody and incomplete exact before balances", () => {
+    expect(inventoryCostReportEventSchema.safeParse({ ...payload, unresolvedQuantities: [unresolved, unresolved] }).success).toBe(false);
+    expect(inventoryCostReportEventSchema.safeParse({ ...payload, changes: [{ ...payload.changes[0], before: {
+      ...payload.changes[0].before, basisQuantity: 3,
+    } }] }).success).toBe(false);
+  });
+  it.each(["NaN", "1.5", "-1", "01", "1".repeat(100)])("rejects invalid exact prior balance %s without throwing from safeParse", amount => {
+    expect(inventoryCostReportEventSchema.safeParse({...payload,changes:[{...payload.changes[0],before:{...payload.changes[0].before,
+      basisQuantity:3,extendedTotals:{poMills:amount,packagingMills:"6",landedMills:"9",totalMills:"615"}}}]}).success).toBe(false);
+  });
   it("preserves signed COGS and component residuals without bigint ID rounding",() => {
     const value = envelope(); expect(value).toEqual(JSON.parse(readFileSync("test/fixtures/procurement-cost-report-v1.json","utf8"))); expect(value.payload).toEqual(payload);expect(value.sourceEventId).toBe("9223372036854775807");
     expect(value.payloadHash).toBe(reportHash(payload));const {reportHash:hash,...core}=value;expect(hash).toBe(reportHash(core));

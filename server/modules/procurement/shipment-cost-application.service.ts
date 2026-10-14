@@ -166,7 +166,7 @@ export async function applyShipmentCostRevisions(tx: CostEvidenceTransaction, sh
   const applications = [];
   for (const revision of revisions) applications.push(await applyCostRevision(tx, revision, writer, actorId, now));
   return {
-    updated: applications.filter((application) => application.status === "applied" && !application.replayed).reduce((sum, application) => sum + application.lotsUpdated, 0),
+    updated: applications.filter((application) => !application.replayed).reduce((sum, application) => sum + application.lotsUpdated, 0),
     total: applications.reduce((sum, application) => sum + application.lotsUpdated, 0),
     status: issues.length > 0 || applications.some((application) => application.status === "review_required") ? "review_required" as const : "applied" as const,
     skipped: [...issues.map((issue) => ({ applicationId: null, reason: issue.code, message: issue.message })),
