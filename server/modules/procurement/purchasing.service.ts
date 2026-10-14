@@ -34,6 +34,7 @@ import { readPoShipmentCostSummary } from "./po-shipment-cost-summary.repository
 import { randomUUID } from "node:crypto";
 import { canonicalJson } from "@shared/utils/canonical-json";
 import { readClosedShipmentReceivedBaseQtyByLine, ShipmentReceiptCoverageError } from "./receiving-shipment-coverage";
+import { readReceiptCustodyPresence } from "./receiving-quarantine.repository";
 import { ReceivingUnitSnapshotError } from "./receiving-unit-snapshot";
 import { shipmentReceiptSourceVersion } from "./shipment-receipt-source-version";
 import { planReceiptUnits, ReceivingUnitError, type ReceiptUnitPlan, type ReceiptVariant } from "./receiving-unit-contract";
@@ -3786,14 +3787,16 @@ export function createPurchasingService(
     if (activeReceipt) {
       if (typeof storage.getReceivingLines === "function") {
         const lines = await storage.getReceivingLines(activeReceipt.id, executor);
-        if (lines.length === 0) return { kind: "empty_active", receipt: activeReceipt, lineCount: 0 };
+        if (lines.length === 0 && !await readReceiptCustodyPresence(executor ?? db, activeReceipt.id)) {
+          return { kind: "empty_active", receipt: activeReceipt, lineCount: 0 };
+        }
       }
       return { kind: "active", receipt: activeReceipt };
     }
 
     for (const receipt of matchingReceipts) {
       const summary = await getShipmentReceiptPostingSummary(receipt.id, executor);
-      if (isZeroPostClosedShipmentReceipt(summary)) {
+      if (isZeroPostClosedShipmentReceipt(summary) && !await readReceiptCustodyPresence(executor ?? db, receipt.id)) {
         return { kind: "zero_post_closed", receipt, summary };
       }
     }

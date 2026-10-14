@@ -11,6 +11,9 @@ import { procurementMethods } from "../../procurement.storage";
 import { InventoryUseCases } from "../../../inventory/application/inventory.use-cases";
 import { createInventoryMethods } from "../../../inventory/infrastructure/inventory.repository";
 import { InventoryLotService } from "../../../inventory/lots.service";
+import { receivingUnitVersion } from "../../receiving-unit-contract";
+import { lockReceivingCustodyFence } from "../../receiving-custody-public";
+import { insertCustodyObservation } from "../../receiving-quarantine.repository";
 
 // Same module-global exclusion as the existing active-ledger integration suite.
 // Every storage operation used below is bound to the dedicated real SQL executor.
@@ -30,10 +33,14 @@ run.sequential("Receipt integrity with the activated quantity ledger", () => {
     context = await createQuantityLedgerTestContext(process.env.ECHELON_TEST_DATABASE_URL, true);
     const pool = context.pool;
     await prepareQuantityLotCreationMetadata(pool);
-    await pool.query(`ALTER TABLE inventory.inventory_lots ALTER COLUMN received_at TYPE timestamp USING received_at AT TIME ZONE 'UTC';
-      CREATE SCHEMA procurement`);
+    await pool.query(`ALTER TABLE inventory.inventory_lots ALTER COLUMN received_at TYPE timestamp USING received_at AT TIME ZONE 'UTC'`);
+    // The quantity fixture installs an empty custody reader prerequisite. This
+    // suite replaces only those proven-empty tables with the actual migration.
+    expect((await pool.query("SELECT count(*)::int AS count FROM procurement.receiving_quarantine_observations")).rows[0].count).toBe(0);
+    await pool.query("DROP TABLE procurement.receiving_quarantine_observations, procurement.receiving_custody_fence");
     for (const table of tables) await pool.query(fixtureTable(table));
     for (const statement of fixtureForeignKeys(tables)) await pool.query(statement);
+    await pool.query(readFileSync(resolve(process.cwd(), "migrations/pending/receiving_quarantine.sql"), "utf8"));
     await pool.query(`CREATE UNIQUE INDEX review_po_receipt_identity ON procurement.po_receipts(purchase_order_line_id,receiving_line_id);
       INSERT INTO warehouse.warehouses(id,code,name,is_active) VALUES(2,'OTHER','Other warehouse',1);
       INSERT INTO warehouse.warehouse_locations(id,warehouse_id,code) VALUES(105,1,'DEFAULT-DOCK');
@@ -136,6 +143,40 @@ run.sequential("Receipt integrity with the activated quantity ledger", () => {
     await context.pool.query(`INSERT INTO procurement.receiving_lines(id,receiving_order_id,sku,expected_qty,received_qty,damaged_qty,status)
       VALUES(52,50,'UNASSIGNED',0,0,0,'pending')`);
   }
+
+  it("posts only explicitly accepted packs while keeping held custody outside the activated quantity ledger", async () => {
+    const database = drizzle(context.pool, { schema });
+    const before = await context.state();
+    const observationId = await database.transaction(async tx => {
+      await lockReceivingCustodyFence(tx, "write");
+      const line = (await procurementMethods.getReceivingLineById(51, tx))!;
+      const reviewed = await service.reviewQuarantineIntakeInTransaction(tx, {
+        receivingOrderId: 50, receivingLineId: 51, expectedUnitVersion: receivingUnitVersion(line),
+        acceptedQty: 1, heldQty: 1, holdingLocationId: 105,
+      }, ACTOR, NOW);
+      return insertCustodyObservation(tx, {
+        receivingOrderId: 50, receivingLineId: 51, warehouseId: 1, holdingLocationId: 105,
+        productId: reviewed.productId, productVariantId: reviewed.productVariantId, unitsPerVariant: reviewed.unitsPerVariantSnapshot,
+        purchaseOrderLineId: reviewed.lineAfter.purchaseOrderLineId, inboundShipmentLineId: reviewed.lineAfter.inboundShipmentLineId,
+        description: "One damaged pack physically held", observedSku: "P5", unitLabel: "Pack of five", condition: "damaged",
+        observedQty: 1, reason: "Independent physical recount", evidenceReference: "activated-ledger-photo",
+        actorId: ACTOR, recordedAt: NOW.toISOString(),
+      }, "activated-custody-intake", { before: reviewed.lineBefore, after: reviewed.lineAfter, countsReviewed: true });
+    });
+    expect(await context.state()).toEqual(before);
+    await service.close(50, ACTOR);
+    expect((await context.pool.query(`SELECT t.variant_qty_delta,l.qty_received,l.qty_on_hand,e.on_hand_delta
+      FROM inventory.inventory_transactions t JOIN inventory.inventory_lots l ON l.id=t.inventory_lot_id
+      JOIN inventory.quantity_entries e ON e.inventory_lot_id=l.id
+      WHERE t.receiving_line_id=51 AND t.transaction_type='receipt'`)).rows)
+      .toEqual([{ variant_qty_delta: 1, qty_received: 1, qty_on_hand: 1, on_hand_delta: 1 }]);
+    expect((await context.pool.query(`SELECT observed_qty,awaiting_receipt_qty,received_qty,returned_qty,version
+      FROM procurement.receiving_quarantine_observations WHERE id=$1`, [observationId])).rows)
+      .toEqual([{ observed_qty: 1, awaiting_receipt_qty: 0, received_qty: 0, returned_qty: 0, version: 0 }]);
+    const posted = await context.state();
+    await service.close(50, ACTOR);
+    expect(await context.state()).toEqual(posted);
+  });
 
   it("applies a default only to unassigned lines in one audited command and replays without changes", async () => {
     await addUnassignedLine();

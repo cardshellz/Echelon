@@ -7,6 +7,7 @@ import { createReceivingNavigationSession } from "@/lib/receiving-navigation-ses
 import { parseReceivingHeaderResult, parseReceivingCloseResult, receivingIssueMessages, receivingCostOutcomeMessage } from "@/lib/receiving-outcomes";
 import { ReceivingUnitControl } from "@/components/purchasing/ReceivingUnitControl";
 import { ReceivingCountControl } from "@/components/purchasing/ReceivingCountControl";
+import { ReceivingQuarantinePanel } from "@/components/purchasing/ReceivingQuarantinePanel";
 import { hasReceivingUnitVersion, ReceivingUnitVersionError, parseReceivingUnitRefresh, parseReceivingLineMutation, receivingSelectedFactor, receivingVariantChange, receivingCompleteAllCommand, receivingCountChange, receivingAddQuantity, recordedReceivingFactor, type ReceivingUnitLine } from "@/lib/receiving-units";
 import { ProcurementContext } from "@/components/procurement-context";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
@@ -245,10 +246,29 @@ export default function Receiving() {
   const [selectedReceipt, setSelectedReceipt] = useState<ReceivingOrder | null>(null);
   const [receiptSettingsError, setReceiptSettingsError] = useState<string | null>(null);
   const [closeIssues, setCloseIssues] = useState<string[]>([]);
+  const [quarantineCommandPending, setQuarantineCommandPending] = useState(false);
+  const [quarantineAcceptAll, setQuarantineAcceptAll] = useState<{ allowed: boolean; reason: string | null }>({ allowed: false, reason: "Loading quarantine custody." });
   const [showReceiptDetail, setShowReceiptDetail] = useState(false);
   const [receiptLoading, setReceiptLoading] = useState(false);
   const [receiptLoadError, setReceiptLoadError] = useState<string | null>(null);
   const [receiptLoadAttempt, setReceiptLoadAttempt] = useState(0);
+  const refreshReceiptAfterQuarantine = useCallback(async () => {
+    if (requestedReceiptId === null) throw new Error("The receipt is no longer open.");
+    const context = captureReceiptNavigation();
+    const response = await fetch(`/api/receiving/${requestedReceiptId}`);
+    if (!response.ok) throw new Error("The quarantine command needs receipt readback. Retry the saved command to verify its result.");
+    const current: unknown = await response.json();
+    parseReceivingHeaderResult(current, requestedReceiptId);
+    if (!current || typeof current !== "object" || !("lines" in current) || !Array.isArray(current.lines) ||
+        !("status" in current) || typeof current.status !== "string" || !("receiptNumber" in current) || typeof current.receiptNumber !== "string" ||
+        current.lines.some((line: ReceivingLine) => line.receivingOrderId !== requestedReceiptId || !hasReceivingUnitVersion(line))) {
+      throw new Error("The receipt readback was incomplete. Retry the saved quarantine command before further changes.");
+    }
+    if (!isCurrentReceiptNavigation(context)) return;
+    setSelectedReceipt(current as ReceivingOrder);
+    setCountDrafts({}); setUnitErrors({}); setReceiptSettingsError(null);
+    void queryClient.invalidateQueries({ queryKey: ["/api/receiving"] });
+  }, [requestedReceiptId, captureReceiptNavigation, isCurrentReceiptNavigation, queryClient]);
   const [showCSVImport, setShowCSVImport] = useState(false);
   const [csvText, setCsvText] = useState("");
   const [importResults, setImportResults] = useState<{ errors: string[]; warnings: string[]; created: number; updated: number } | null>(null);
@@ -406,6 +426,7 @@ DEF-456,25,,,5.00,,Location TBD`;
 
   const deleteReceiptMutation = useMutation({
     mutationFn: async (id: number) => {
+      if (quarantineCommandPending) throw new Error("Confirm the saved quarantine command before deleting a receipt.");
       const res = await fetch(`/api/receiving/${id}`, { method: "DELETE" });
       if (!res.ok) {
         const data = await res.json();
@@ -425,6 +446,7 @@ DEF-456,25,,,5.00,,Location TBD`;
   const discardReceiptMutation = useMutation({
     onMutate: captureReceiptNavigation,
     mutationFn: async (id: number) => {
+      if (quarantineCommandPending) throw new Error("Confirm the saved quarantine command before discarding this receipt.");
       const res = await fetch(`/api/receiving-orders/${id}/discard`, { method: "DELETE" });
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
@@ -492,6 +514,7 @@ DEF-456,25,,,5.00,,Location TBD`;
       reason: string;
       allowNegative: boolean;
     }) => {
+      if (quarantineCommandPending) throw new Error("Confirm the saved quarantine command before reversing this receipt.");
       const url = input.scope === "line"
         ? `/api/procurement/receiving-lines/${input.lineId}/reverse`
         : `/api/procurement/receiving-orders/${selectedReceipt!.id}/reverse`;
@@ -557,6 +580,7 @@ DEF-456,25,,,5.00,,Location TBD`;
   const openReceiptMutation = useMutation({
     onMutate: captureReceiptNavigation,
     mutationFn: async (id: number) => {
+      if (quarantineCommandPending) throw new Error("Confirm the saved quarantine command before starting this receipt.");
       const res = await fetch(`/api/receiving/${id}/open`, { method: "POST" });
       if (!res.ok) throw new Error("Failed to open receipt");
       return res.json();
@@ -584,6 +608,7 @@ DEF-456,25,,,5.00,,Location TBD`;
   const closeReceiptMutation = useMutation({
     onMutate: captureReceiptNavigation,
     mutationFn: async ({ id, allowOverReceipt = false }: { id: number; allowOverReceipt?: boolean }) => {
+      assertReceiptSettingsConfirmed();
       const res = await fetch(`/api/receiving/${id}/close`, {
         method: "POST",
         headers: {
@@ -856,13 +881,14 @@ DEF-456,25,,,5.00,,Location TBD`;
   }
 
   function assertReceiptSettingsConfirmed() {
+    if (quarantineCommandPending) throw new Error("Confirm the saved quarantine command before changing this receipt.");
     if (updateReceiptMutation.isPending || receiptSettingsError) {
       throw new Error("Receipt settings are not confirmed. Wait for the save or load the latest receipt before changing a line.");
     }
   }
 
   function applyVariant(line: ReceivingLine, variantId: number, confirmLegacyUnit = false, expectedUnitsPerVariant?: number) {
-    if (updateReceiptMutation.isPending || receiptSettingsError || updateLineMutation.isPending || completeAllMutation.isPending || reloadingUnits || unitErrors[line.id]?.needsRefresh) return;
+    if (quarantineCommandPending || updateReceiptMutation.isPending || receiptSettingsError || updateLineMutation.isPending || completeAllMutation.isPending || reloadingUnits || unitErrors[line.id]?.needsRefresh) return;
     try {
       if (countDrafts[line.id]) throw new Error("Save or discard the received-count draft before changing its unit.");
       const updates = receivingVariantChange(line, variantId, confirmLegacyUnit, expectedUnitsPerVariant);
@@ -871,6 +897,7 @@ DEF-456,25,,,5.00,,Location TBD`;
   }
 
   function setReceivedDraft(line: ReceivingLine, value: string) {
+    if (quarantineCommandPending) return;
     setCountDrafts((current) => {
       const next = { ...current };
       // An explicit zero is a draft too; saving never fills expectedQty.
@@ -880,7 +907,7 @@ DEF-456,25,,,5.00,,Location TBD`;
   }
 
   function saveReceivedCount(line: ReceivingLine) {
-    if (updateReceiptMutation.isPending || receiptSettingsError || updateLineMutation.isPending || completeAllMutation.isPending || reloadingUnits || unitErrors[line.id]?.needsRefresh) return;
+    if (quarantineCommandPending || updateReceiptMutation.isPending || receiptSettingsError || updateLineMutation.isPending || completeAllMutation.isPending || reloadingUnits || unitErrors[line.id]?.needsRefresh) return;
     try {
       const draft = countDrafts[line.id];
       updateLineMutation.mutate({ lineId: line.id, updates: receivingCountChange(draft?.line ?? line, draft?.value) });
@@ -888,7 +915,7 @@ DEF-456,25,,,5.00,,Location TBD`;
   }
 
   async function reloadReceiptUnits(lineId: number) {
-    if (!selectedReceipt || updateLineMutation.isPending || reloadingUnits) return;
+    if (!selectedReceipt || quarantineCommandPending || updateLineMutation.isPending || reloadingUnits) return;
     const id = selectedReceipt.id;
     const context = captureReceiptNavigation();
     setReloadingUnits(true);
@@ -925,7 +952,7 @@ DEF-456,25,,,5.00,,Location TBD`;
       // A stale or ambiguous response must not leave a green confirmation on
       // the previous count after its draft is discarded; verify the source first.
       confirmed={line.status === "complete" && !draft && hasReceivingUnitVersion(line) && recordedReceivingFactor(line) !== null && !unitErrors[line.id]}
-      disabled={updateReceiptMutation.isPending || !!receiptSettingsError || updateLineMutation.isPending || completeAllMutation.isPending || reloadingUnits || recordedReceivingFactor(line) === null || !!unitErrors[line.id]?.needsRefresh}
+      disabled={quarantineCommandPending || updateReceiptMutation.isPending || !!receiptSettingsError || updateLineMutation.isPending || completeAllMutation.isPending || reloadingUnits || recordedReceivingFactor(line) === null || !!unitErrors[line.id]?.needsRefresh}
       discardDisabled={updateLineMutation.isPending}
       compact={layout === "desktop"}
       saveTestId={layout === "desktop" ? `btn-complete-line-${line.id}` : `btn-complete-line-mobile-${line.id}`}
@@ -948,18 +975,19 @@ DEF-456,25,,,5.00,,Location TBD`;
         line={line}
         variants={variants}
         mutable={mutable}
-        pending={updateReceiptMutation.isPending || !!receiptSettingsError || updateLineMutation.isPending || completeAllMutation.isPending || reloadingUnits || !!countDrafts[line.id] || !!unitErrors[line.id]?.needsRefresh}
+        pending={quarantineCommandPending || updateReceiptMutation.isPending || !!receiptSettingsError || updateLineMutation.isPending || completeAllMutation.isPending || reloadingUnits || !!countDrafts[line.id] || !!unitErrors[line.id]?.needsRefresh}
         onChange={(variantId, confirm, factor) => applyVariant(line, variantId, confirm, factor)}
       />
       {error && <div role="alert" className="rounded border border-destructive/40 p-2 text-xs text-destructive">
         <p>{error.message}</p>
-        {error.needsRefresh && <Button size="sm" variant="outline" className="mt-2 h-auto min-h-10 whitespace-normal" disabled={reloadingUnits || updateLineMutation.isPending} onClick={() => void reloadReceiptUnits(line.id)}>Load latest line and discard count draft</Button>}
+        {error.needsRefresh && <Button size="sm" variant="outline" className="mt-2 h-auto min-h-10 whitespace-normal" disabled={quarantineCommandPending || reloadingUnits || updateLineMutation.isPending} onClick={() => void reloadReceiptUnits(line.id)}>Load latest line and discard count draft</Button>}
       </div>}
     </div>;
   }
   const updateReceiptMutation = useMutation({
     onMutate: captureReceiptNavigation,
     mutationFn: async ({ id, updates }: { id: number; updates: Record<string, any> }) => {
+      assertReceiptSettingsConfirmed();
       const res = await fetch(`/api/receiving/${id}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
@@ -995,6 +1023,8 @@ DEF-456,25,,,5.00,,Location TBD`;
     onMutate: captureReceiptNavigation,
     retry: false,
     mutationFn: async ({ orderId, lines }: { orderId: number; lines: ReceivingLine[] }) => {
+      assertReceiptSettingsConfirmed();
+      if (!quarantineAcceptAll.allowed) throw new Error(quarantineAcceptAll.reason || "Review quarantine custody before accepting all quantities.");
       const body = receivingCompleteAllCommand(lines);
       const res = await fetch("/api/receiving/" + orderId + "/complete-all", {
         method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
@@ -1021,6 +1051,7 @@ DEF-456,25,,,5.00,,Location TBD`;
   const createVariantMutation = useMutation({
     onMutate: captureReceiptNavigation,
     mutationFn: async (lineId: number) => {
+      assertReceiptSettingsConfirmed();
       const res = await fetch("/api/receiving/lines/" + lineId + "/create-variant", { method: "POST" });
       const data = await res.json().catch(() => null);
       if (!res.ok) throw new Error(data?.error || "Failed to create variant");
@@ -1259,6 +1290,8 @@ DEF-456,25,,,5.00,,Location TBD`;
     setNextPoPrompt(null);
     setReceiptSettingsError(null);
     setCloseIssues([]);
+    setQuarantineCommandPending(false);
+    setQuarantineAcceptAll({ allowed: false, reason: "Loading quarantine custody." });
   }, [requestedReceiptId, invalidReceiptId, location, searchStr]);
 
   // The address identifies the open receipt, including after reload or browser
@@ -1454,7 +1487,7 @@ DEF-456,25,,,5.00,,Location TBD`;
                                 deleteReceiptMutation.mutate(receipt.id);
                               }
                             }}
-                            disabled={deleteReceiptMutation.isPending}
+                            disabled={quarantineCommandPending || deleteReceiptMutation.isPending}
                             data-testid={`btn-delete-receipt-mobile-${receipt.id}`}
                           >
                             <Trash2 className="h-4 w-4 text-red-500" />
@@ -1542,7 +1575,7 @@ DEF-456,25,,,5.00,,Location TBD`;
                                   deleteReceiptMutation.mutate(receipt.id);
                                 }
                               }}
-                              disabled={deleteReceiptMutation.isPending}
+                              disabled={quarantineCommandPending || deleteReceiptMutation.isPending}
                               data-testid={`btn-delete-receipt-${receipt.id}`}
                             >
                               <Trash2 className="h-4 w-4 text-red-500" />
@@ -1999,6 +2032,7 @@ DEF-456,25,,,5.00,,Location TBD`;
                             className="min-h-[44px] text-xs md:text-sm flex-1 sm:flex-none"
                             onClick={() => { setShowCSVImport(true); }}
                             data-testid="btn-import-csv"
+                            disabled={quarantineCommandPending}
                           >
                             <Upload className="h-4 w-4 mr-1 md:mr-2" />
                             <span className="hidden sm:inline">Import</span> CSV
@@ -2008,7 +2042,7 @@ DEF-456,25,,,5.00,,Location TBD`;
                       <Button 
                         className="min-h-[44px] text-xs md:text-sm flex-1 sm:flex-none"
                         onClick={() => openReceiptMutation.mutate(selectedReceipt.id)}
-                        disabled={openReceiptMutation.isPending}
+                        disabled={quarantineCommandPending || openReceiptMutation.isPending}
                         data-testid="btn-open-receipt"
                       >
                         <Play className="h-4 w-4 mr-1 md:mr-2" />
@@ -2021,7 +2055,7 @@ DEF-456,25,,,5.00,,Location TBD`;
                             <Button
                               variant="ghost"
                               className="min-h-[44px] text-xs md:text-sm text-destructive hover:text-destructive hover:bg-destructive/10"
-                              disabled={discardReceiptMutation.isPending}
+                              disabled={quarantineCommandPending || discardReceiptMutation.isPending}
                               data-testid="btn-discard-receipt"
                             >
                               <X className="h-4 w-4 mr-1 md:mr-2" />
@@ -2056,7 +2090,7 @@ DEF-456,25,,,5.00,,Location TBD`;
                         variant="outline"
                         className="min-h-[44px] text-xs md:text-sm flex-1 sm:flex-none"
                         onClick={() => completeAllMutation.mutate({ orderId: selectedReceipt.id, lines: selectedReceipt.lines ?? [] })}
-                        disabled={updateReceiptMutation.isPending || !!receiptSettingsError || completeAllMutation.isPending || updateLineMutation.isPending || reloadingUnits || Object.keys(countDrafts).length > 0 || Object.keys(unitErrors).length > 0 || !selectedReceipt.lines?.length || selectedReceipt.lines.some((line) => recordedReceivingFactor(line) === null || !hasReceivingUnitVersion(line))}
+                        disabled={quarantineCommandPending || !quarantineAcceptAll.allowed || updateReceiptMutation.isPending || !!receiptSettingsError || completeAllMutation.isPending || updateLineMutation.isPending || reloadingUnits || Object.keys(countDrafts).length > 0 || Object.keys(unitErrors).length > 0 || !selectedReceipt.lines?.length || selectedReceipt.lines.some((line) => recordedReceivingFactor(line) === null || !hasReceivingUnitVersion(line))}
                         data-testid="btn-complete-all"
                       >
                         <CheckCircle className="h-4 w-4 mr-1 md:mr-2" />
@@ -2065,7 +2099,7 @@ DEF-456,25,,,5.00,,Location TBD`;
                       <Button
                         className="min-h-[44px] text-xs md:text-sm flex-1 sm:flex-none"
                         onClick={handlePreCloseValidation}
-                        disabled={updateReceiptMutation.isPending || !!receiptSettingsError || closeReceiptMutation.isPending || updateLineMutation.isPending || completeAllMutation.isPending || reloadingUnits || Object.keys(countDrafts).length > 0 || Object.keys(unitErrors).length > 0 || receiveUnitsNeedReview}
+                        disabled={quarantineCommandPending || updateReceiptMutation.isPending || !!receiptSettingsError || closeReceiptMutation.isPending || updateLineMutation.isPending || completeAllMutation.isPending || reloadingUnits || Object.keys(countDrafts).length > 0 || Object.keys(unitErrors).length > 0 || receiveUnitsNeedReview}
                         data-testid="btn-close-receipt"
                       >
                         <CheckCircle className="h-4 w-4 mr-1 md:mr-2" />
@@ -2084,12 +2118,15 @@ DEF-456,25,,,5.00,,Location TBD`;
                         setReverseAllowNegative(false);
                       }}
                       data-testid="btn-reverse-order"
+                      disabled={quarantineCommandPending}
                     >
                       <X className="h-4 w-4 mr-1 md:mr-2" />
                       Reverse Entire Receipt
                     </Button>
                   )}
                 </div>
+
+                {!quarantineAcceptAll.allowed && quarantineAcceptAll.reason && (selectedReceipt.status === "open" || selectedReceipt.status === "receiving") && <p className="text-sm text-muted-foreground">Accept all: {quarantineAcceptAll.reason}</p>}
 
                 {selectedReceipt.status !== "closed" && (receiveUnitsNeedReview || Object.keys(countDrafts).length > 0 || Object.keys(unitErrors).length > 0) && (
                   <div className="space-y-2 rounded border border-amber-400/50 p-3 text-sm text-amber-800 dark:text-amber-200">
@@ -2136,7 +2173,7 @@ DEF-456,25,,,5.00,,Location TBD`;
                   <div role="alert" className="space-y-2 rounded border border-destructive/40 p-3 text-sm text-destructive">
                     {receiptSettingsError && <p>{receiptSettingsError}</p>}
                     {closeIssues.length > 0 && <><p className="font-medium">The last close attempt needs review.</p><ul className="list-disc pl-5">{closeIssues.map((message, index) => <li key={`${index}-${message}`}>{message}</li>)}</ul></>}
-                    <Button variant="outline" size="sm" disabled={updateReceiptMutation.isPending || updateLineMutation.isPending || closeReceiptMutation.isPending} onClick={() => {
+                    <Button variant="outline" size="sm" disabled={quarantineCommandPending || updateReceiptMutation.isPending || updateLineMutation.isPending || closeReceiptMutation.isPending} onClick={() => {
                       setCountDrafts({});
                       setUnitErrors({});
                       setReceiptSettingsError(null);
@@ -2153,7 +2190,7 @@ DEF-456,25,,,5.00,,Location TBD`;
                       <label className="text-[11px] font-semibold text-muted-foreground block mb-1">Receiving Warehouse</label>
                       <Select
                         value={selectedReceipt.warehouseId?.toString() || ""}
-                        disabled={updateReceiptMutation.isPending || addLineMutation.isPending || bulkImportMutation.isPending || updateLineMutation.isPending || closeReceiptMutation.isPending || !!receiptSettingsError}
+                        disabled={quarantineCommandPending || updateReceiptMutation.isPending || addLineMutation.isPending || bulkImportMutation.isPending || updateLineMutation.isPending || closeReceiptMutation.isPending || !!receiptSettingsError}
                         onValueChange={(v) => {
                           const warehouseId = parseInt(v);
                           updateReceiptMutation.mutate({
@@ -2178,7 +2215,7 @@ DEF-456,25,,,5.00,,Location TBD`;
                         locations={selectedReceipt.warehouseId ? locations.filter(l => l.warehouseId === selectedReceipt.warehouseId) : locations}
                         value={selectedReceipt.receivingLocationId ?? null}
                         ariaLabel="Default receiving location"
-                        disabled={updateReceiptMutation.isPending || addLineMutation.isPending || bulkImportMutation.isPending || updateLineMutation.isPending || closeReceiptMutation.isPending || !!receiptSettingsError || Object.keys(countDrafts).length > 0}
+                        disabled={quarantineCommandPending || updateReceiptMutation.isPending || addLineMutation.isPending || bulkImportMutation.isPending || updateLineMutation.isPending || closeReceiptMutation.isPending || !!receiptSettingsError || Object.keys(countDrafts).length > 0}
                         onChange={(locationId) => {
                           updateReceiptMutation.mutate({
                             id: selectedReceipt.id,
@@ -2201,7 +2238,7 @@ DEF-456,25,,,5.00,,Location TBD`;
                         size="sm"
                         className="min-h-[44px]"
                         onClick={() => setShowAddLineDialog(true)}
-                        disabled={updateReceiptMutation.isPending || !!receiptSettingsError || closeReceiptMutation.isPending}
+                        disabled={quarantineCommandPending || updateReceiptMutation.isPending || !!receiptSettingsError || closeReceiptMutation.isPending}
                         data-testid="btn-add-line"
                       >
                         <Plus className="h-4 w-4 mr-1" />
@@ -2302,12 +2339,12 @@ DEF-456,25,,,5.00,,Location TBD`;
                                           lineId: line.id,
                                           updates: { putawayLocationId: locationId }
                                         })}
-                                        disabled={updateReceiptMutation.isPending || updateLineMutation.isPending || closeReceiptMutation.isPending || !!receiptSettingsError}
+                                        disabled={quarantineCommandPending || updateReceiptMutation.isPending || updateLineMutation.isPending || closeReceiptMutation.isPending || !!receiptSettingsError}
                                       />
                                       {selectedReceipt.receivingLocationId && !line.putawayLocationId && (
                                         <button
                                           className="text-[10px] text-primary mt-1 hover:underline"
-                                          disabled={updateReceiptMutation.isPending || updateLineMutation.isPending || closeReceiptMutation.isPending || !!receiptSettingsError}
+                                          disabled={quarantineCommandPending || updateReceiptMutation.isPending || updateLineMutation.isPending || closeReceiptMutation.isPending || !!receiptSettingsError}
                                           onClick={() => updateLineMutation.mutate({
                                             lineId: line.id,
                                             updates: { putawayLocationId: selectedReceipt.receivingLocationId }
@@ -2347,6 +2384,7 @@ DEF-456,25,,,5.00,,Location TBD`;
                                       setReverseAllowNegative(false);
                                     }}
                                     data-testid={`btn-reverse-line-mobile-${line.id}`}
+                                    disabled={quarantineCommandPending}
                                   >
                                     <X className="h-4 w-4 mr-1" />
                                     Reverse
@@ -2404,7 +2442,7 @@ DEF-456,25,,,5.00,,Location TBD`;
                                       lineId: line.id,
                                       updates: { putawayLocationId: locationId }
                                     })}
-                                    disabled={updateReceiptMutation.isPending || updateLineMutation.isPending || closeReceiptMutation.isPending || !!receiptSettingsError}
+                                    disabled={quarantineCommandPending || updateReceiptMutation.isPending || updateLineMutation.isPending || closeReceiptMutation.isPending || !!receiptSettingsError}
                                   />
                                 ) : (
                                   <span className="text-sm text-muted-foreground">
@@ -2456,6 +2494,7 @@ DEF-456,25,,,5.00,,Location TBD`;
                                         setReverseAllowNegative(false);
                                       }}
                                       data-testid={`btn-reverse-line-${line.id}`}
+                                      disabled={quarantineCommandPending}
                                     >
                                       <X className="h-4 w-4 mr-1" />
                                       Reverse
@@ -2496,6 +2535,16 @@ DEF-456,25,,,5.00,,Location TBD`;
                     </Table>
                   </CardContent>
                 </Card>
+
+                <ReceivingQuarantinePanel
+                  key={`${selectedReceipt.id}:${location}?${searchStr}`}
+                  receipt={selectedReceipt}
+                  locations={locations}
+                  disabled={updateReceiptMutation.isPending || updateLineMutation.isPending || closeReceiptMutation.isPending || completeAllMutation.isPending || addLineMutation.isPending || bulkImportMutation.isPending || reverseMutation.isPending || openReceiptMutation.isPending || discardReceiptMutation.isPending || reloadingUnits || !!receiptSettingsError || Object.keys(countDrafts).length > 0 || Object.keys(unitErrors).length > 0}
+                  onCommandPendingChange={setQuarantineCommandPending}
+                  onAcceptAllCapabilityChange={setQuarantineAcceptAll}
+                  onReceiptChanged={refreshReceiptAfterQuarantine}
+                />
 
                 {/* Reversal history (Spec D) — closed receipts only. */}
                 {selectedReceipt.status === "closed" && (reversalsQuery.data?.length ?? 0) > 0 && (
@@ -2615,6 +2664,7 @@ DEF-456,25,,,5.00,,Location TBD`;
               <Button
                 variant="destructive"
                 disabled={
+                  quarantineCommandPending ||
                   reverseMutation.isPending ||
                   reverseReason.trim().length === 0 ||
                   (reverseTarget?.scope === "line" &&
@@ -2706,7 +2756,7 @@ DEF-456,25,,,5.00,,Location TBD`;
               <Button 
                 className="min-h-[44px]"
                 onClick={handleCSVImport}
-                disabled={updateReceiptMutation.isPending || !!receiptSettingsError || closeReceiptMutation.isPending || bulkImportMutation.isPending || !csvText.trim()}
+                disabled={quarantineCommandPending || updateReceiptMutation.isPending || !!receiptSettingsError || closeReceiptMutation.isPending || bulkImportMutation.isPending || !csvText.trim()}
                 data-testid="btn-import"
               >
                 <Upload className="h-4 w-4 mr-2" />
@@ -2859,7 +2909,7 @@ DEF-456,25,,,5.00,,Location TBD`;
                     },
                   });
                 }}
-                disabled={updateReceiptMutation.isPending || !!receiptSettingsError || closeReceiptMutation.isPending || !newLine.sku || !newLine.putawayLocationId || newLine.productVariantId !== null && !newLine.expectedUnitsPerVariant || addLineMutation.isPending}
+                disabled={quarantineCommandPending || updateReceiptMutation.isPending || !!receiptSettingsError || closeReceiptMutation.isPending || !newLine.sku || !newLine.putawayLocationId || newLine.productVariantId !== null && !newLine.expectedUnitsPerVariant || addLineMutation.isPending}
                 data-testid="btn-confirm-add-line"
               >
                 <Plus className="h-4 w-4 mr-2" />
@@ -3001,7 +3051,7 @@ DEF-456,25,,,5.00,,Location TBD`;
                 return <div className="rounded border border-amber-400/50 p-3 text-sm space-y-2">
                   <p>{legacy ? "The count basis was not recorded. Confirm these existing counts only if the source document proves their unit. Counts will stay unchanged." : "The server will preserve expected, received and damaged piece totals, or reject a conversion that is not exact."}</p>
                   <p>Expected {resolvingLine.expectedQty}; received {resolvingLine.receivedQty}; damaged {resolvingLine.damagedQty}.</p>
-                  <Button className="h-auto min-h-10 whitespace-normal" disabled={updateLineMutation.isPending || completeAllMutation.isPending || reloadingUnits || !!unitErrors[resolvingLine.id]?.needsRefresh} onClick={() => applyVariant(resolvingLine, legacyResolveVariant, legacy, candidate?.unitsPerVariant ?? result?.unitsPerVariant)}>
+                  <Button className="h-auto min-h-10 whitespace-normal" disabled={quarantineCommandPending || updateLineMutation.isPending || completeAllMutation.isPending || reloadingUnits || !!unitErrors[resolvingLine.id]?.needsRefresh} onClick={() => applyVariant(resolvingLine, legacyResolveVariant, legacy, candidate?.unitsPerVariant ?? result?.unitsPerVariant)}>
                     {legacy ? "Confirm these counts are in " : "Apply receive variant: "}{label}
                   </Button>
                 </div>;
@@ -3033,7 +3083,7 @@ DEF-456,25,,,5.00,,Location TBD`;
                       <Button
                         className="w-full min-h-[44px]"
                         onClick={() => createVariantMutation.mutate(resolvingLine.id)}
-                        disabled={createVariantMutation.isPending}
+                        disabled={quarantineCommandPending || createVariantMutation.isPending}
                       >
                         {createVariantMutation.isPending ? (
                           <><span className="animate-spin mr-2">⏳</span> Creating...</>
@@ -3128,6 +3178,7 @@ DEF-456,25,,,5.00,,Location TBD`;
           <AlertDialogFooter>
             <AlertDialogCancel>Go back and fix quantities</AlertDialogCancel>
             <AlertDialogAction
+              disabled={quarantineCommandPending}
               onClick={() => {
                 const id = overReceiptPrompt?.id;
                 setOverReceiptPrompt(null);

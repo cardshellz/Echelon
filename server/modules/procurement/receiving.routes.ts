@@ -1,4 +1,5 @@
 import { ReceivingError } from "./receiving.service";
+import { registerReceivingQuarantineRoutes } from "./receiving-quarantine.routes";
 import { withReceivingUnitVersion } from "./receiving-unit-contract";
 import type { Express } from "express";
 import { procurementStorage } from "../procurement";
@@ -62,6 +63,7 @@ function resolveUnitCostPair(
 }
 
 export function registerReceivingRoutes(app: Express) {
+  registerReceivingQuarantineRoutes(app);
   // ===== RECEIVING ORDERS API =====
   
   app.get("/api/receiving", requireAuth, async (req, res) => {

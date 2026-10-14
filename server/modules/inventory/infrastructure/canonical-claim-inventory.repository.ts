@@ -21,6 +21,7 @@ import { recordLotCostFollowUp } from "./lot-cost-follow-up.repository";
 import { dispatchCanonicalPickedResources, loadCanonicalDispatchCosts } from "./canonical-claim-dispatch-inventory";
 import { CanonicalClaimQuantityPosting } from "./canonical-claim-quantity-posting";
 import { InventoryQuantityError } from "../domain/quantity-ledger";
+import { assertReceivingCustodyCountable } from "../application/receiving-custody-count-guard";
 
 type CanonicalTransformationExecutionInput =
   | Parameters<CanonicalClaimInventoryMutationPort["executePackageOperation"]>[0]
@@ -147,6 +148,12 @@ async function lockLevel(
 }
 
 export class PostgresCanonicalClaimInventoryRepository implements CanonicalClaimInventoryMutationPort, CanonicalClaimInventoryDispatchPort {
+  async assertCountableCustody(input: Parameters<CanonicalClaimInventoryMutationPort["assertCountableCustody"]>[0]): Promise<void> {
+    await assertReceivingCustodyCountable(input.client, {
+      productVariantId: input.productVariantId, warehouseLocationId: input.warehouseLocationId,
+    });
+  }
+
   loadDispatchCosts(input: Parameters<CanonicalClaimInventoryDispatchPort["loadDispatchCosts"]>[0]) {
     return loadCanonicalDispatchCosts(input);
   }
@@ -224,6 +231,7 @@ export class PostgresCanonicalClaimInventoryRepository implements CanonicalClaim
     }
 
     const costTransaction=costEvidenceTransactionFromPg(input.client);
+    await this.assertCountableCustody({ client: input.client, productVariantId, warehouseLocationId });
     await lockInventoryCostGraph(costTransaction);
     const level = await lockLevel(input.client, inventoryLevelId);
     if (!level
@@ -504,6 +512,7 @@ export class PostgresCanonicalClaimInventoryRepository implements CanonicalClaim
         "Cycle-count inventory reconciliation time must be a valid Date.",
       );
     }
+    await this.assertCountableCustody({ client: input.client, productVariantId, warehouseLocationId });
     const transaction = rows(await input.client.query(
       `INSERT INTO inventory.inventory_transactions (
          product_variant_id, from_location_id, to_location_id, transaction_type,

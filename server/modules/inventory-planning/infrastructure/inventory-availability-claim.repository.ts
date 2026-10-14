@@ -5087,6 +5087,9 @@ export class PostgresInventoryAvailabilityClaimRepository implements InventoryAv
           );
         }
 
+        await this.inventoryWriter.assertCountableCustody({
+          client, productVariantId: command.productVariantId, warehouseLocationId: command.warehouseLocationId,
+        });
         let levelRow = rows(await client.query(
           `SELECT id, variant_qty, reserved_qty
            FROM inventory.inventory_levels

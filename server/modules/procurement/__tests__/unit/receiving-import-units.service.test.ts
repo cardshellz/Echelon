@@ -56,6 +56,9 @@ function harness(options: {
   const tx = {
     execute: vi.fn(async (query: Parameters<PgDialect["sqlToQuery"]>[0]) => {
       const rendered = dialect.sqlToQuery(query);
+      if (rendered.sql.startsWith("SAVEPOINT") || rendered.sql.startsWith("RELEASE SAVEPOINT")) return { rows: [] };
+      if (rendered.sql.includes("procurement.receiving_custody_fence")) return { rows: [{ singleton: true }] };
+      if (rendered.sql.includes("procurement.receiving_quarantine_")) return { rows: [] };
       if (rendered.sql.includes("inventory.cost_graph")) return { rows: [] };
       queries.push(rendered);
       if (rendered.sql.includes("FROM warehouse.warehouses")) return { rows: [{ isActive: 1 }] };
@@ -353,7 +356,7 @@ describe("ReceivingService import source preservation", () => {
 describe("ReceivingService source checks before posting", () => {
   it.each(["purchaseOrderLineId", "headerPurchaseOrderId", "headerShipmentId"] as const)("rejects an explicit shipment line with missing %s before posting", async (missing) => {
     const test = harness({
-      lines: [{ ...receiptLine(), inboundShipmentLineId: 55,
+      lines: [{ ...receiptLine(), damagedQty: 0, inboundShipmentLineId: 55,
         purchaseOrderLineId: missing === "purchaseOrderLineId" ? null : 31 }],
       order: {
         sourceType: "shipment",
@@ -367,7 +370,7 @@ describe("ReceivingService source checks before posting", () => {
   });
 
   it.each([null, { productId: 2 }, { purchaseOrderId: 4 }, { lineType: "fee" }])("blocks bad purchase source %j before inventory is posted", async (purchaseSource) => {
-    const test = harness({ lines: [{ ...receiptLine(), purchaseOrderLineId: 31 }],
+    const test = harness({ lines: [{ ...receiptLine(), damagedQty: 0, purchaseOrderLineId: 31 }],
       order: { purchaseOrderId: 3 }, purchaseSource });
     await expect(test.service.close(10, ACTOR))
       .rejects.toMatchObject({ statusCode: 409, details: { code: "RECEIVING_SOURCE_PRODUCT_MISMATCH" } });
@@ -375,7 +378,7 @@ describe("ReceivingService source checks before posting", () => {
   });
 
   it.each([null, { inbound_shipment_id: 8 }, { purchase_order_line_id: 32 }, { purchase_order_id: 4 }])("blocks inconsistent shipment source %j before inventory is posted", async (shipmentSource) => {
-    const test = harness({ lines: [{ ...receiptLine(), purchaseOrderLineId: 31, inboundShipmentLineId: 55 }],
+    const test = harness({ lines: [{ ...receiptLine(), damagedQty: 0, purchaseOrderLineId: 31, inboundShipmentLineId: 55 }],
       order: { purchaseOrderId: 3, inboundShipmentId: 7, sourceType: "shipment" }, shipmentSource });
     await expect(test.service.close(10, ACTOR))
       .rejects.toMatchObject({ statusCode: 409, details: { code: "RECEIVING_SHIPMENT_SOURCE_MISMATCH" } });
@@ -383,7 +386,7 @@ describe("ReceivingService source checks before posting", () => {
   });
 
   it.each([0, -1, 1.5, MAX_PG_INTEGER + 1])("blocks malformed shipment source piece quantity %s before inventory is posted", async (qty_shipped) => {
-    const test = harness({ lines: [{ ...receiptLine(), purchaseOrderLineId: 31, inboundShipmentLineId: 55 }],
+    const test = harness({ lines: [{ ...receiptLine(), damagedQty: 0, purchaseOrderLineId: 31, inboundShipmentLineId: 55 }],
       order: { purchaseOrderId: 3, inboundShipmentId: 7, sourceType: "shipment" }, shipmentSource: { qty_shipped } });
     await expect(test.service.close(10, ACTOR))
       .rejects.toMatchObject({ statusCode: 400, details: { field: "Shipment source pieces" } });
@@ -391,10 +394,10 @@ describe("ReceivingService source checks before posting", () => {
   });
 
   it("blocks a catalog pack change after explicit legacy unit confirmation", async () => {
-    const test = harness({ lines: [{ ...receiptLine(), unitsPerVariantSnapshot: null }] });
+    const test = harness({ lines: [{ ...receiptLine(), unitsPerVariantSnapshot: null, damagedQty: 0 }] });
     const confirmed = await test.service.updateLine(11, { productVariantId: 100, confirmLegacyUnit: true, expectedUnitsPerVariant: 250,
       expectedUnitVersion: receivingUnitVersion(test.state.lines[0]) }, ACTOR);
-    expect(confirmed).toMatchObject({ unitsPerVariantSnapshot: 250, expectedQty: 4, receivedQty: 2, damagedQty: 1 });
+    expect(confirmed).toMatchObject({ unitsPerVariantSnapshot: 250, expectedQty: 4, receivedQty: 2, damagedQty: 0 });
     test.storage.updateReceivingLine.mockClear();
     test.storage.updateReceivingOrder.mockClear();
     test.variants[0].unitsPerVariant = 500;

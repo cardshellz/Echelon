@@ -36,6 +36,9 @@ function harness(options: {
   const tx = {
     execute: vi.fn(async (query: Parameters<PgDialect["sqlToQuery"]>[0]) => {
       const rendered = dialect.sqlToQuery(query);
+      if (rendered.sql.startsWith("SAVEPOINT") || rendered.sql.startsWith("RELEASE SAVEPOINT")) return { rows: [] };
+      if (rendered.sql.includes("procurement.receiving_custody_fence")) return { rows: [{ singleton: true }] };
+      if (rendered.sql.includes("procurement.receiving_quarantine_")) return { rows: [] };
       if (rendered.sql.includes("inventory.cost_graph")) return { rows: [] };
       queries.push(rendered);
       if (rendered.sql.includes("FROM catalog.product_variants")) {
@@ -194,7 +197,7 @@ describe("ReceivingService frozen count commands", () => {
     [null, 250, "RECEIVING_UNIT_CONFIRMATION_REQUIRED"],
     [250, 500, "RECEIVING_UNIT_SOURCE_CHANGED"],
   ] as const)("blocks close for frozen factor %s and catalog factor %s before inventory writes", async (snapshot, catalogFactor, code) => {
-    const test = harness({ line: { unitsPerVariantSnapshot: snapshot }, catalogFactor });
+    const test = harness({ line: { unitsPerVariantSnapshot: snapshot, damagedQty: 0 }, catalogFactor });
     await expect(test.service.close(10, ACTOR)).rejects.toMatchObject({ statusCode: 409, details: { code } });
     expectNoWrites(test);
   });

@@ -128,4 +128,9 @@ describe("Freeze enforcement (H2)", () => {
   });
 });
 // Explicit pre-opening compatibility fixture. Active posting is covered against PostgreSQL.
-vi.mock("../../infrastructure/operational-quantity-posting", () => ({ openOperationalQuantityPosting: vi.fn(async () => null) }));
+vi.mock("../../infrastructure/operational-quantity-posting", async importOriginal => ({
+  ...await importOriginal<typeof import("../../infrastructure/operational-quantity-posting")>(),
+  openOperationalQuantityPosting: vi.fn(async () => null),
+}));
+// The freeze fixture has no held receipt custody; custody conflicts are tested separately.
+vi.mock("../../../procurement/receiving-custody-public", () => ({ readUnresolvedReceivingCustody: vi.fn(async () => []) }));
