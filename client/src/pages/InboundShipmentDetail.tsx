@@ -178,8 +178,8 @@ type AllocationStatus = {
     allocationCount: number;
     method: string;
     methodSource: string;
-    rawBasisTotal: number;
-    basisTotal: number;
+    rawBasisTotal: number | null;
+    basisTotal: number | null;
     usedFallback: boolean;
     status: string;
   }>;
@@ -205,6 +205,8 @@ const ALLOCATION_COST_STATUS_LABELS: Record<string, string> = {
   needs_allocation: "Needs Allocation",
   stale_allocation: "Stale Allocation",
   stale_allocation_basis: "Stale Basis",
+  invalid_value_basis: "Data needs review",
+  invalid_allocation_basis: "Data needs review",
   allocation_mismatch: "Mismatch",
   allocated_with_fallback: "Even Split",
   allocated: "Allocated",
@@ -1827,7 +1829,7 @@ export default function InboundShipmentDetail() {
           </details>
 
           {allocationStatus && (
-            <Card>
+            <Card role="region" aria-label="Allocation status">
               <CardHeader className="pb-3">
                 <div className="flex flex-wrap items-center justify-between gap-3">
                   <CardTitle className="text-base">Allocation Status</CardTitle>
@@ -1840,6 +1842,9 @@ export default function InboundShipmentDetail() {
                 </div>
               </CardHeader>
               <CardContent className="space-y-4">
+                {allocationStatus.costs.some((cost) => cost.method === "by_value") && (
+                  <p className="text-sm text-muted-foreground">By value uses each PO line's product total, prorated to the pieces in this shipment. Allocation preserves subcent product values.</p>
+                )}
                 <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
                   <div>
                     <div className="text-xs text-muted-foreground">Lines</div>
@@ -1872,6 +1877,11 @@ export default function InboundShipmentDetail() {
                     ))}
                   </div>
                 )}
+                {allocationStatus.issues.some((issue) => issue.code === "stale_allocation_basis") && (
+                  <Button variant="outline" className="min-h-[44px]" disabled={runAllocationMutation.isPending || lines.length === 0} onClick={() => runAllocationMutation.mutate()}>
+                    {runAllocationMutation.isPending ? "Re-running allocation..." : "Re-run allocation"}
+                  </Button>
+                )}
 
                 {allocationStatus.costs.length > 0 && (
                   <Table>
@@ -1899,11 +1909,12 @@ export default function InboundShipmentDetail() {
                           <TableCell className="text-right font-mono">{formatCents(cost.effectiveCents)}</TableCell>
                           <TableCell className="text-right font-mono">{formatCents(cost.allocatedCents)}</TableCell>
                           <TableCell className="text-right font-mono">
-                            {Number(cost.basisTotal || 0).toLocaleString(undefined, { maximumFractionDigits: 3 })}
+                            {cost.basisTotal === null || ["invalid_value_basis", "invalid_allocation_basis"].includes(cost.status) ? "—" : Number(cost.basisTotal || 0).toLocaleString(undefined, { maximumFractionDigits: cost.method === "by_value" ? 6 : 3 })}
+                            {cost.method === "by_value" && <div className="text-xs font-sans text-muted-foreground">PO product value (cents)</div>}
                           </TableCell>
                           <TableCell>
                             <Badge
-                              variant={["needs_allocation", "stale_allocation", "stale_allocation_basis", "allocation_mismatch"].includes(cost.status) ? "destructive" : cost.status === "allocated_with_fallback" ? "outline" : "secondary"}
+                              variant={["needs_allocation", "stale_allocation", "stale_allocation_basis", "invalid_value_basis", "invalid_allocation_basis", "allocation_mismatch"].includes(cost.status) ? "destructive" : cost.status === "allocated_with_fallback" ? "outline" : "secondary"}
                               className={cost.status === "allocated_with_fallback" ? "border-amber-500 text-amber-700" : undefined}
                             >
                               {ALLOCATION_COST_STATUS_LABELS[cost.status] || cost.status.replace(/_/g, " ")}
@@ -1931,17 +1942,17 @@ export default function InboundShipmentDetail() {
                     {lastLandedCostPush.status === "review_required" ? "Needs review" : "Applied"}
                   </Badge>
                   <Badge variant={lastLandedCostPush.skipped?.length ? "outline" : "secondary"}>
-                    {lastLandedCostPush.updated} updated
+                    {lastLandedCostPush.updated} lots updated
                   </Badge>
                   <Badge variant={lastLandedCostPush.skipped?.length ? "destructive" : "outline"}>
-                    {lastLandedCostPush.skipped?.length ?? 0} skipped
+                    {lastLandedCostPush.skipped?.length ?? 0} issues to review
                   </Badge>
                   <span className="text-muted-foreground">{lastLandedCostPush.total} lots in applied cost results</span>
                 </div>
                 {lastLandedCostPush.skipped && lastLandedCostPush.skipped.length > 0 && (
                   <div className="space-y-2">
-                    {lastLandedCostPush.skipped.map((item) => (
-                      <div key={`${item.applicationId}-${item.reason}-${item.message}`} className="flex flex-wrap items-center gap-2 text-sm">
+                    {lastLandedCostPush.skipped.map((item, index) => (
+                      <div key={`${item.applicationId}-${item.reason}-${index}`} className="flex flex-wrap items-center gap-2 text-sm">
                         <AlertTriangle className="h-4 w-4 text-amber-600" />
                         <span>{item.message || formatLandedCostSkipReason(item.reason)}</span>
                       </div>

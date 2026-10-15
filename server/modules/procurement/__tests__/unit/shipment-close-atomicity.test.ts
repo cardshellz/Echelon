@@ -8,7 +8,7 @@ const commandTime = new Date("2026-09-06T12:00:00.000Z");
 function harness() {
   const state = {
     shipment: { id: 1, status: "costing", closedAt: null, closedBy: null } as any,
-    lines: [{ id: 11, inboundShipmentId: 1, purchaseOrderLineId: 21, productVariantId: 10, qtyShipped: 5 }] as any[],
+    lines: [{ id: 11, inboundShipmentId: 1, purchaseOrderId: 1, purchaseOrderLineId: 21, productVariantId: 10, qtyShipped: 5 }] as any[],
     snapshots: [] as any[],
     history: [] as any[],
   };
@@ -37,7 +37,11 @@ function harness() {
     getInboundShipmentById: vi.fn(async (_id: number, tx: any) => ({ ...inTransaction(tx).shipment })),
     getInboundShipmentLines: vi.fn(async (_id: number, tx: any) => inTransaction(tx).lines),
     getInboundFreightCosts: vi.fn(async (_id: number, tx: any) => { inTransaction(tx); return []; }),
-    getPurchaseOrderLineById: vi.fn(async (_id: number, tx: any) => { inTransaction(tx); return { id: 21, unitCostCents: 100 }; }),
+    getPurchaseOrderById: vi.fn(async (_id: number, tx: any) => { inTransaction(tx); return { id: 1, currency: "USD" }; }),
+    getPurchaseOrderLineById: vi.fn(async (_id: number, tx: any) => {
+      inTransaction(tx);
+      return { id: 21, purchaseOrderId: 1, lineType: "product", orderQty: 5, totalProductCostCents: 500, unitCostCents: 100 };
+    }),
     deleteAllocationsForShipment: vi.fn(async (_id: number, tx: any) => { inTransaction(tx); }),
     bulkCreateInboundFreightCostAllocations: vi.fn(async (_data: unknown, tx: any) => { inTransaction(tx); return []; }),
     updateInboundShipmentLine: vi.fn(async (id: number, patch: any, tx: any) => {
@@ -116,6 +120,20 @@ describe("shipment close transaction", () => {
     expect(h.state.lines[0]).not.toHaveProperty("allocatedCostCents");
     expect(h.events).toEqual(["snapshots", "source-revisions", "closed", "rollback"]);
     expect(h.storage.getProvisionalLotsByShipment).not.toHaveBeenCalled();
+    expect(applyShipmentCostRevisions).not.toHaveBeenCalled();
+  });
+
+  it("rejects an incomplete PO value before allocation, snapshot or close writes", async () => {
+    const h = harness();
+    h.storage.getPurchaseOrderLineById.mockResolvedValue({ id: 21, purchaseOrderId: 1, lineType: "product",
+      orderQty: 5, totalProductCostCents: undefined as unknown as number, unitCostCents: 100 });
+    await expect(h.service.close(1, "operator-1")).rejects.toMatchObject({ statusCode: 409,
+      details: { code: "INVALID_ALLOCATION_BASIS" } });
+    expect(h.state.shipment.status).toBe("costing");
+    expect(h.state.snapshots).toEqual([]);
+    expect(h.state.history).toEqual([]);
+    expect(h.storage.deleteAllocationsForShipment).not.toHaveBeenCalled();
+    expect(h.storage.bulkCreateLandedCostSnapshots).not.toHaveBeenCalled();
     expect(applyShipmentCostRevisions).not.toHaveBeenCalled();
   });
 

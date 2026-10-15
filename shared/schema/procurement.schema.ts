@@ -5,6 +5,7 @@ import { z } from "zod";
 import { products, productVariants, forecastProductIdentities } from "./catalog.schema";
 import { warehouses, warehouseLocations } from "./warehouse.schema";
 import { users } from "./identity.schema";
+import type { ShipmentAllocationEvidence } from "../procurement/shipment-allocation";
 
 // ============================================================================
 // PROCUREMENT + FINANCE/AP TABLES
@@ -1692,6 +1693,8 @@ export const inboundFreightAllocations = procurementSchema.table("inbound_freigh
   inboundShipmentLineId: integer("inbound_shipment_line_id").notNull().references(() => inboundShipmentLines.id, { onDelete: "cascade" }),
   allocationBasisValue: numeric("allocation_basis_value", { precision: 14, scale: 6 }),
   allocationBasisTotal: numeric("allocation_basis_total", { precision: 14, scale: 6 }),
+  // Exact, versioned inputs are authority; legacy numeric columns are display mirrors.
+  basisEvidence: jsonb("basis_evidence").$type<ShipmentAllocationEvidence>(),
   sharePercent: numeric("share_percent", { precision: 8, scale: 4 }),
   allocatedCents: bigint("allocated_cents", { mode: "number" }),
   createdAt: timestamp("created_at").defaultNow().notNull(),
@@ -1718,6 +1721,8 @@ export const landedCostSnapshots = procurementSchema.table("landed_cost_snapshot
   purchaseOrderLineId: integer("purchase_order_line_id").references(() => purchaseOrderLines.id, { onDelete: "set null" }),
   productVariantId: integer("product_variant_id").references(() => productVariants.id, { onDelete: "set null" }),
   poUnitCostCents: bigint("po_unit_cost_cents", { mode: "number" }),
+  // Freeze the PO product value behind this snapshot without rounding its shipment ratio.
+  productValueEvidence: jsonb("product_value_evidence").$type<ShipmentAllocationEvidence>(),
   freightAllocatedCents: bigint("freight_allocated_cents", { mode: "number" }),
   dutyAllocatedCents: bigint("duty_allocated_cents", { mode: "number" }),
   insuranceAllocatedCents: bigint("insurance_allocated_cents", { mode: "number" }),

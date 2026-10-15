@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } fro
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowLeft, X } from "lucide-react";
 import type { ListingPriceSetting } from "@shared/dropship/listing-price";
+import type { PriceChangeReviewResponse } from "@shared/dropship/listing-setting-writes";
 import type { ListingSettingsProductDetail, ListingSettingsSizePrice } from "@shared/dropship/listing-settings";
 import type { PricingRecipe } from "@shared/dropship/pricing-rules";
 import { Button } from "@/components/ui/button";
@@ -18,6 +19,7 @@ import {
   isDraftDirty,
   isDraftLocked,
   LISTING_SETTINGS_GUARD_ID_PREFIX,
+  LISTING_SETTINGS_SAVE_WORDS,
   productEditorId,
   type EditorId,
   type ListingSettingsDraft,
@@ -44,6 +46,7 @@ import {
   isPolicyRowEdit,
   ownSizePriceDraft,
   priceHeadWords,
+  productPriceHeadRule,
   rebaseSizePriceDraft,
   refreshAfterSizePriceSave,
   rereadSizePrice,
@@ -61,16 +64,44 @@ import {
   type SizePriceSaveCallbacks,
 } from "@/lib/dropship-listing-settings-drawer";
 import {
+  changePriceButton,
+  priceCheckBack,
+  priceCheckShown,
+  productPriceEditorModel,
+  type PriceCheckShown,
+} from "@/lib/dropship-listing-settings-price-check";
+import {
+  fetchPriceChangeReviewPage,
+  loadLatestProductPrice,
+  readPriceCheckPage,
+  refreshAfterPriceChangeApply,
+  rereadProductPriceBase,
+  runPriceChangeApply,
+  runPriceChangeCheck,
+  sendPriceChangeApply,
+  sendPriceChangeReview,
+  type PriceChangeCheckOutcome,
+} from "@/lib/dropship-listing-settings-price-check-requests";
+import {
   descriptionFieldEditor,
   ebayCategoryFieldEditor,
+  emptyProductPriceChange,
+  ownProductPriceDraft,
   policyFieldEditor,
+  productPriceDraftWithCheck,
+  productPriceEditAction,
+  productPriceRights,
   productSettingsEditAction,
   readProductSettingsDraft,
   sizeLeftoverFields,
   storeShelfFieldEditor,
   type FieldChoice,
   type MainTextChoiceValue,
+  type PriceCheckAfter,
+  type PriceCheckRef,
   type ProductOwnSettings,
+  type ProductPriceChange,
+  type ProductPriceDraftValue,
   type ProductSettingsEditAction,
   type ProductSettingsPicks,
 } from "@/lib/dropship-listing-settings-product-edit";
@@ -80,16 +111,19 @@ import {
   rereadProductSettings,
   runProductSettingsSave,
 } from "@/lib/dropship-listing-settings-product-requests";
+import { PRICE_DEFAULT_WORDS } from "@/lib/dropship-listing-settings-recipe";
 import type { PolicySetupFacts } from "@/lib/dropship-listing-settings-store-requests";
 import { LISTING_SETTINGS_EDIT_WORDS, rightReasonLine } from "@/lib/dropship-listing-settings-words";
 import { putJson, type DropshipEbayStoreCategoryOption } from "@/lib/dropship-ops-surface";
 import { useLeaveGuard } from "../catalog/UnsavedChangesGuard";
 import { DrawerDescriptionEditor } from "./DrawerDescriptionEditor";
 import { DrawerEbayCategoryEditor, DrawerFieldEditor, DrawerShelfEditor } from "./DrawerFieldEditor";
-import { DrawerPriceSection } from "./DrawerPriceSection";
+import { DrawerPriceSection, type DrawerChangePrice } from "./DrawerPriceSection";
 import { DrawerSettingRow } from "./DrawerSettingRow";
 import type { FocusReturnTarget } from "./EditorSurface";
 import { useListingSettingsDrafts } from "./ListingSettingsDraftsProvider";
+import { PriceChangeCheckBody, type PriceCheckRead } from "./PriceChangeCheckBody";
+import { ProductPriceEditor } from "./ProductPriceEditor";
 
 /** How the vendor closed the drawer: × / Esc / ← with nothing to lose, or "Discard and leave". */
 export type ProductDrawerCloseReason = "dismissed" | "discarded";
@@ -114,9 +148,10 @@ export interface ProductDrawerProps {
    * The step's edit rights (plan 4.3): `exactPrice` for a size's exact price
    * (W9); `productSettings` for the product's own settings (W5, PR 10), with
    * `shipping` and `policies` to pick a new eBay policy, `ebayCategory` and
-   * `shelfPick` to pick a new eBay category or shelf (D3, D4; 10b).
+   * `shelfPick` to pick a new eBay category or shelf (D3, D4; 10b);
+   * `priceCheck` for the product's price through the price check (W7, 10d).
    */
-  rights: Pick<ListingSettingsEditRights, "exactPrice" | "productSettings" | "shipping" | "policies" | "ebayCategory" | "shelfPick">;
+  rights: Pick<ListingSettingsEditRights, "exactPrice" | "productSettings" | "shipping" | "policies" | "ebayCategory" | "shelfPick" | "priceCheck">;
   /** The live eBay setup read: policy names (A4) and, from PR 10, the policies a row's editor lists with their Card Shellz fit. */
   setup: ListingSettingsReadState<PolicySetupFacts>;
   /**
@@ -161,9 +196,19 @@ export const PRODUCT_DRAWER_CLASS =
  * (R:968); values whose sizes differ get a one-button fix (5.3), and own main
  * text Card Shellz changed under asks to be checked (5.4).
  *
- * One kind of change per Save (D2): a size's price or the product's
- * settings; starting the other kind says "Save or discard your other change
- * first." One field editor is open at a time, in place under its row.
+ * From PR 10d the PRICE head's [Change price] opens the product's price
+ * editor: a recipe or "Use default", and "Clear exact prices too"; [Check
+ * new prices] runs the W7 check, whose rows replace the drawer's body until
+ * [Back to editing] or [Save new prices] (D20). Before every check the
+ * product's own read is read again, and a price or revision that moved
+ * since the draft started is the conflict, nothing sent (D6a). Browser Back
+ * on an unconfirmed apply keeps the locked draft; reopening shows the check
+ * again with Check again (D21).
+ *
+ * One kind of change per Save (D2): a size's price, the product's settings
+ * or the product's price; starting another kind says "Save or discard your
+ * other change first." One field editor is open at a time, in place under
+ * its row.
  *
  * × or Esc with a change asks first (plan 4.6). Esc closes an open field
  * editor first, and keeps the drawer open while a settings save is out or
@@ -265,6 +310,11 @@ type OpenField = { target: DrawerEditTarget; message: string | null } | null;
 /** What putting a choice in the draft came to: in it, nothing to change, or why not. */
 type PutResult = Exclude<ProductSettingsEditAction["kind"], "start"> | "asked";
 
+/** The open price editor and why its last [Check new prices] didn't take, or the check's own words; null while closed. */
+type OpenPriceEditor = { message: string | null } | null;
+
+const NO_SIZES: ReadonlySet<number> = new Set();
+
 /** The product's draft whatever it holds, or null when the step's draft is another editor's. */
 function productDraftOf(draft: ListingSettingsDraft | null, editor: EditorId): ListingSettingsDraft | null {
   return draft !== null && draft.editor === editor ? draft : null;
@@ -314,6 +364,31 @@ function ProductDrawerBody(props: ProductDrawerBodyProps) {
     mounted.current = true;
     return () => { mounted.current = false; };
   }, []);
+
+  // The product's price (W7, PR 10d): its editor, the check's rows (page 0 from the review, later pages from the
+  // page read; never the apply's answer, D9), and what a refused apply named. The draft holds the check itself.
+  const [priceEditor, setPriceEditor] = useState<OpenPriceEditor>(null);
+  const [checking, setChecking] = useState(false);
+  const [paging, setPaging] = useState(false);
+  const [checkReview, setCheckReview] = useState<PriceChangeReviewResponse | null>(null);
+  const [checkNotice, setCheckNotice] = useState<string | null>(null);
+  const [checkRead, setCheckRead] = useState<PriceCheckRead | null>(null);
+  const [refusedSizes, setRefusedSizes] = useState<ReadonlySet<number>>(NO_SIZES);
+  const changePriceButtonElement = useRef<HTMLButtonElement | null>(null);
+  // A second click before React re-renders must not send a second check; a check that comes back after Cancel,
+  // Discard or Back is dropped, never shown.
+  const checkInFlight = useRef(false);
+  const checkGeneration = useRef(0);
+  const latestDraft = useRef(drafts.draft);
+  latestDraft.current = drafts.draft;
+  const priceDraft = ownProductPriceDraft(drafts.draft, editor);
+  const priceChange = priceDraft?.value.priceChange ?? null;
+  const shownCheck = priceCheckShown(priceDraft?.draft ?? null, priceChange);
+  // While a refused apply's new check is being made, the stale check has left the draft; the body stays the
+  // check's, waiting, rather than flashing the drawer's own body in between.
+  const lastCheck = useRef<PriceCheckRef | null>(null);
+  if (shownCheck !== null) lastCheck.current = shownCheck.check;
+  const [rechecking, setRechecking] = useState(false);
 
   // The drawer opens with the target size's Exact price box focused (R:360, R:552).
   const inputs = useRef(new Map<number, HTMLInputElement>());
@@ -596,8 +671,352 @@ function ProductDrawerBody(props: ProductDrawerBodyProps) {
     setFooterMessage(null);
     setSettingsFailure(null);
     setOpenField(null);
+    dropCheckViews();
+    setPriceEditor(null);
     drafts.discard();
   }
+
+  // ---------------------------------------------------------------------------
+  // The product's price (W7, PR 10d; plan 7.2, 7.6, D1, D2, D6a, D20, D21)
+  // ---------------------------------------------------------------------------
+
+  /** The product's price draft value as it is at call time: a check's answer lands after renders. */
+  function currentPriceValue(): ProductPriceDraftValue | null {
+    return ownProductPriceDraft(latestDraft.current, editor)?.value ?? null;
+  }
+
+  /** Forgets the check's rows and what an apply named; a check still on its way is dropped when it lands. */
+  function dropCheckViews() {
+    checkGeneration.current += 1;
+    setCheckReview(null);
+    setCheckNotice(null);
+    setCheckRead(null);
+    setRefusedSizes(NO_SIZES);
+  }
+
+  /** One check of `change` from the price draft `value` started on (the guard compares that start, D6a). */
+  function checkRun(change: Pick<ProductPriceChange, "price" | "releaseExactPrices">, value: ProductPriceDraftValue, after: PriceCheckAfter | null) {
+    return runPriceChangeCheck({
+      productIds: [productId],
+      change,
+      after,
+      send: (body) => sendPriceChangeReview(storeConnectionId, body),
+      guard: {
+        base: { ownPrice: value.ownPrice, revisionId: value.revisionId },
+        reread: () => rereadProductPriceBase(queryClient, storeConnectionId, productId),
+        drafts,
+      },
+    });
+  }
+
+  /**
+   * Runs the check and shows it (plan 7.2): the check goes in the draft and
+   * its rows replace the body; a moved price is the conflict (nothing sent);
+   * a block goes to the banner; anything else is said in the editor.
+   */
+  async function checkPrices(change: Pick<ProductPriceChange, "price" | "releaseExactPrices">, value: ProductPriceDraftValue, after: PriceCheckAfter | null = null) {
+    if (checkInFlight.current) return;
+    checkInFlight.current = true;
+    const generation = checkGeneration.current;
+    setChecking(true);
+    setCheckNotice(null);
+    try {
+      const outcome = await checkRun(change, value, after);
+      if (!mounted.current || generation !== checkGeneration.current) return;
+      takeCheckOutcome(outcome);
+    } finally {
+      checkInFlight.current = false;
+      if (mounted.current) setChecking(false);
+    }
+  }
+
+  function takeCheckOutcome(outcome: PriceChangeCheckOutcome) {
+    switch (outcome.kind) {
+      case "checked": {
+        const live = currentPriceValue();
+        // Discarded meanwhile: the answer is dropped (the draft is gone, nothing to show it under).
+        if (live === null) return;
+        drafts.edit(productPriceDraftWithCheck(live, outcome.check));
+        setCheckReview(outcome.review);
+        setCheckRead(null);
+        setRefusedSizes(NO_SIZES);
+        setPriceEditor(null);
+        return;
+      }
+      case "conflict":
+        // The draft shows "This changed in another window." with [Load latest and keep my changes].
+        setPriceEditor(null);
+        setCheckReview(null);
+        return;
+      case "blocked":
+        props.onBlocked?.(outcome.error);
+        setPriceEditor({ message: LISTING_SETTINGS_SAVE_WORDS.blocked });
+        return;
+      case "failed":
+        setPriceEditor({ message: outcome.message });
+        return;
+    }
+  }
+
+  /** [Change price] opens the price editor under the head (one editor at a time); pressed again, it closes it. */
+  function togglePriceEditor() {
+    if (priceEditor !== null) {
+      closePriceEditor();
+      return;
+    }
+    setOpenField(null);
+    setPriceEditor({ message: null });
+  }
+
+  /** [Cancel] or Esc: what was typed is dropped (the draft keeps a change it already holds), and focus goes back to [Change price]. */
+  function closePriceEditor() {
+    setPriceEditor(null);
+    const button = changePriceButtonElement.current;
+    if (button && button.isConnected && !button.disabled) button.focus();
+  }
+
+  /**
+   * [Check new prices] in the editor (plan 7.2): the choice goes in the drawer's
+   * one draft as the product's price change (D2, `productPriceEditAction`), then
+   * the check runs on it. A choice the product already has, with nothing to
+   * clear, is nothing to check: the editor just closes, and a draft that held a
+   * price change the choice undoes takes the clean value ("All saved").
+   */
+  function checkFromEditor(change: Pick<ProductPriceChange, "price" | "releaseExactPrices">) {
+    if (ownSettings === null) return;
+    const action = productPriceEditAction({ draft: drafts.draft, editor, own: ownSettings, change });
+    let value: ProductPriceDraftValue;
+    switch (action.kind) {
+      case "locked":
+        return;
+      case "finish_first":
+        setPriceEditor({ message: LISTING_SETTINGS_EDIT_WORDS.otherChangeFirst });
+        return;
+      case "no_change":
+        if (action.value !== null) drafts.edit(action.value);
+        closePriceEditor();
+        return;
+      case "edit":
+        if (action.reopen && drafts.draft) drafts.open(editor, place, drafts.draft.base);
+        drafts.edit(action.value);
+        value = action.value;
+        break;
+      case "start":
+        // False when another editor holds changes: the vendor is asked first, and nothing is checked yet.
+        if (!drafts.open(editor, place, action.base)) return;
+        drafts.edit(action.value);
+        value = action.value;
+        break;
+    }
+    setSettingsFailure(null);
+    setFooterMessage(null);
+    setPriceEditor({ message: null });
+    void checkPrices({ price: value.priceChange.price, releaseExactPrices: value.priceChange.releaseExactPrices }, value);
+  }
+
+  /** The footer's [Check new prices] while the draft holds a price change with no check (after Back to editing, Load latest). */
+  function checkFromFooter() {
+    const live = ownProductPriceDraft(drafts.draft, editor);
+    if (live === null) return;
+    setFooterMessage(null);
+    void checkPrices({ price: live.value.priceChange.price, releaseExactPrices: live.value.priceChange.releaseExactPrices }, live.value);
+  }
+
+  /**
+   * The check the server dropped (404 on a page read): it leaves the draft and a new one is made for the same
+   * change, with its line, once the draft can take it (`page_expired`: no apply was tried for it, so its apply
+   * still gets the one automatic re-check). While the draft is locked, Check again (the apply) answers it from the
+   * draft's reference alone: a 404 there makes the new check through the apply runner.
+   */
+  function checkAgainAfterExpiry(check: PriceCheckShown) {
+    const live = ownProductPriceDraft(latestDraft.current, editor);
+    if (live === null || check.locked) {
+      setCheckRead({ kind: "failed", message: LISTING_SETTINGS_SAVE_WORDS.pricingReviewGone });
+      return;
+    }
+    const value = productPriceDraftWithCheck(live.value, null);
+    drafts.edit(value);
+    dropCheckViews();
+    setPriceEditor({ message: null });
+    void checkPrices({ price: value.priceChange.price, releaseExactPrices: value.priceChange.releaseExactPrices }, value, "page_expired");
+  }
+
+  /**
+   * [Save new prices], or [Check again] after an unconfirmed apply (plan 7.3,
+   * 7.5): one W7 apply of the check the draft holds. A refusal a new check
+   * answers (prices moved, already applied, expired) gets one, once, after the
+   * guard (D6a); the new check shows with its line. The views are read again
+   * after a confirmed save (D9); the answer is never shown.
+   */
+  async function applyPrices() {
+    const live = ownProductPriceDraft(drafts.draft, editor);
+    const check = live?.value.priceChange.check ?? null;
+    if (live === null || check === null || saving.current) return;
+    saving.current = true;
+    setCheckNotice(null);
+    const change = { price: live.value.priceChange.price, releaseExactPrices: live.value.priceChange.releaseExactPrices };
+    try {
+      const outcome = await runPriceChangeApply({
+        draft: live.draft,
+        check,
+        drafts,
+        callbacks: props.saveCallbacks,
+        send: (body) => sendPriceChangeApply(storeConnectionId, body),
+        reread: () => refreshAfterPriceChangeApply(queryClient, storeConnectionId),
+        onSettingsSaved: props.onSaved,
+        onBlocked: props.onBlocked,
+        recheck: {
+          check: async (after) => {
+            setRechecking(true);
+            try {
+              return await checkRun(change, live.value, after);
+            } finally {
+              if (mounted.current) setRechecking(false);
+            }
+          },
+          withCheck: (next) => productPriceDraftWithCheck(currentPriceValue() ?? live.value, next),
+        },
+      });
+      if (!mounted.current) return;
+      switch (outcome.kind) {
+        case "not_started":
+          if (outcome.message) setCheckNotice(outcome.message);
+          return;
+        case "saved":
+          // The body shows again from the views read again; "Saved" shows in the footer for 3 seconds.
+          dropCheckViews();
+          return;
+        case "failed":
+          setRefusedSizes(outcome.refusedSizes);
+          return;
+        case "rechecked":
+          setCheckReview(outcome.review);
+          setCheckRead(null);
+          setRefusedSizes(NO_SIZES);
+          return;
+        case "recheck_failed":
+          dropCheckViews();
+          setPriceEditor({ message: outcome.message });
+          return;
+        case "conflict":
+          dropCheckViews();
+          return;
+      }
+    } finally {
+      saving.current = false;
+    }
+  }
+
+  /** Another page of the check (plan 7.5): the same review by id; a dropped review means a new check. */
+  async function showCheckPage(page: number) {
+    if (shownCheck === null || paging) return;
+    const { check } = shownCheck;
+    setPaging(true);
+    setCheckNotice(null);
+    try {
+      const outcome = await readPriceCheckPage(check, () => fetchPriceChangeReviewPage(storeConnectionId, check.reviewId, page));
+      if (!mounted.current) return;
+      if (outcome.kind === "ok") setCheckReview(outcome.review);
+      else if (outcome.kind === "expired") checkAgainAfterExpiry(shownCheck);
+      else setCheckNotice(outcome.message);
+    } finally {
+      if (mounted.current) setPaging(false);
+    }
+  }
+
+  /**
+   * [Back to editing] (D20, D21): the check leaves the draft and the price
+   * editor opens on the change; while the draft is locked (a save out or
+   * unconfirmed) the drawer closes and keeps it, so reopening shows Check again.
+   */
+  function backToEditing() {
+    const decision = priceCheckBack(priceDraft?.draft ?? null, priceChange);
+    switch (decision.kind) {
+      case "edit": {
+        const live = currentPriceValue();
+        if (live !== null) drafts.edit(productPriceDraftWithCheck(live, null));
+        dropCheckViews();
+        setPriceEditor({ message: null });
+        return;
+      }
+      case "close":
+        drafts.close();
+        props.onClose("dismissed");
+        return;
+      case "none":
+        return;
+    }
+  }
+
+  /** "Load latest and keep my changes" after the price conflict (D6a, R:542): the change on what is saved now; its check is gone. */
+  async function loadLatestPrice() {
+    const live = ownProductPriceDraft(drafts.draft, editor);
+    if (live === null || reading) return;
+    setReading(true);
+    setFooterMessage(null);
+    try {
+      const next = await loadLatestProductPrice(queryClient, storeConnectionId, productId, live.value);
+      if (!mounted.current) return;
+      dropCheckViews();
+      if (!next.keeps) {
+        // Another window saved the same price: nothing of the vendor's is left to put on top.
+        drafts.discard();
+        return;
+      }
+      drafts.edit(next.edited);
+      drafts.rebase(next.latest, next.marked);
+      // Deliberate: the product's lines catch up in the background; its own error shows if that read fails.
+      void queryClient.invalidateQueries({ queryKey: listingSettingsQueryKey(storeConnectionId) });
+    } catch {
+      // Deliberate: the draft keeps the conflict and its Load latest; the words say the read failed.
+      if (mounted.current) setFooterMessage(DRAWER_WORDS.latestFailed);
+    } finally {
+      if (mounted.current) setReading(false);
+    }
+  }
+
+  /** [Reload] after "Saved. We couldn't load the latest view." for a price apply (reads only, D9). */
+  async function reloadAfterPrices() {
+    if (reading) return;
+    setReading(true);
+    setFooterMessage(null);
+    try {
+      await refreshAfterPriceChangeApply(queryClient, storeConnectionId);
+      if (mounted.current) drafts.discard();
+    } catch {
+      // Deliberate: the save stands; the draft keeps "Saved. We couldn't load the latest view." with Reload.
+      if (mounted.current) setFooterMessage(DRAWER_WORDS.latestFailed);
+    } finally {
+      if (mounted.current) setReading(false);
+    }
+  }
+
+  // The drawer reopened on a draft that holds a check (browser Back, D21): its rows are read again, page 0, by the
+  // review's id; a check the server dropped means a new check once the draft can take it. Only once per check.
+  const shownReviewId = shownCheck?.check.reviewId ?? null;
+  const reviewShown = checkReview !== null && checkReview.reviewId === shownReviewId ? checkReview : null;
+  const readFor = useRef<string | null>(null);
+  useEffect(() => {
+    if (shownCheck === null || reviewShown !== null || checking || rechecking || checkRead !== null || readFor.current === shownCheck.check.reviewId) return;
+    readFor.current = shownCheck.check.reviewId;
+    const { check } = shownCheck;
+    const generation = checkGeneration.current;
+    setCheckRead({ kind: "loading" });
+    void (async () => {
+      const outcome = await readPriceCheckPage(check, () => fetchPriceChangeReviewPage(storeConnectionId, check.reviewId, 0));
+      if (!mounted.current || generation !== checkGeneration.current) return;
+      if (outcome.kind === "ok") {
+        setCheckReview(outcome.review);
+        setCheckRead(null);
+      } else if (outcome.kind === "expired") {
+        checkAgainAfterExpiry(shownCheck);
+      } else {
+        setCheckRead({ kind: "failed", message: outcome.message });
+      }
+      // A failed read can be tried again; a read that answered is this check's.
+      if (outcome.kind !== "ok") readFor.current = null;
+    })();
+  });
 
   // The rows, and the one field editor that shows: it closes when its row can no longer be changed (D3) or
   // the own read is gone, and that pick was never in the draft.
@@ -643,11 +1062,20 @@ function ProductDrawerBody(props: ProductDrawerBodyProps) {
   // Which writer the draft is for, the right the footer saves with, and what Esc does (D2, plan 3.4).
   const draftState = drawerDraftState({ draft: drafts.draft, editor, rights: props.rights, failure: settingsFailure });
 
-  // Esc (plan 3.4): closes the open field editor first; a settings save that is out or unconfirmed keeps the drawer open.
+  // Esc (plan 3.4): closes the open field or price editor first, then takes a shown check back to editing (D20);
+  // a settings or price save that is out or unconfirmed keeps the drawer open.
   useEffect(() => {
     props.escapeRef.current = () => {
       if (shownField !== null) {
         closeFieldEditor();
+        return true;
+      }
+      if (priceEditor !== null) {
+        closePriceEditor();
+        return true;
+      }
+      if (shownCheck !== null && !shownCheck.locked) {
+        backToEditing();
         return true;
       }
       return draftState.escapeKeepsOpen;
@@ -659,34 +1087,95 @@ function ProductDrawerBody(props: ProductDrawerBodyProps) {
   const footer = drawerFooter({
     draft: draftState.footerDraft,
     editable: draftState.editable,
-    busy: props.saveCallbacks.disabled === true || reading,
-    // An open field editor holds a pick that isn't in the draft yet: [Done] or [Cancel] first, so Save never drops it.
-    fieldEditorOpen: shownField !== null,
+    busy: props.saveCallbacks.disabled === true || reading || checking,
+    // An open field or price editor holds a pick that isn't in the draft yet: [Done] or [Cancel] first, so Save never drops it.
+    fieldEditorOpen: shownField !== null || priceEditor !== null,
     clear: draftState.writer === "W5" ? null : pendingClear,
     savedFlashVisible: drafts.savedFlashVisible,
     compact,
     showRefusal: draftState.showRefusal,
+    // The price's Save is the check (W7), on a phone too: the check body's own footer applies it.
+    saveLabel: draftState.writer === "W7" ? PRICE_DEFAULT_WORDS.checkNewPrices : undefined,
+    compactSaveLabel: draftState.writer === "W7" ? PRICE_DEFAULT_WORDS.checkNewPrices : undefined,
   });
+
+  // [Change price] (plan 7.2): with W7's right and the own read, while no other kind of change waits (D2); the lib says why not.
+  const sizeHoldsChange = own !== null && (isDraftDirty(own.draft) || isDraftLocked(own.draft));
+  const priceRight = props.rights.priceCheck;
+  const priceLocked = priceDraft !== null && isDraftLocked(priceDraft.draft);
+  const changePrice: DrawerChangePrice | null = detail === null ? null : {
+    productName: detail.product.productName,
+    ...changePriceButton({
+      own: ownSettings !== null ? "ready" : ownQuery.isError ? "failed" : "loading",
+      right: priceRight,
+      otherHoldsChange: draftState.settingsHoldChange || sizeHoldsChange,
+      waiting: priceLocked || checking,
+    }),
+    expanded: priceEditor !== null,
+    onClick: togglePriceEditor,
+    buttonRef: (element) => { changePriceButtonElement.current = element; },
+  };
+  const priceEditorNode = priceEditor !== null && ownSettings !== null && detail !== null ? (
+    <ProductPriceEditor
+      model={productPriceEditorModel({
+        rights: productPriceRights({ priceCheck: priceRight }),
+        change: priceChange ?? emptyProductPriceChange(),
+        ownPrice: ownSettings.own.price,
+        storeRecipe: props.summaryRecipe ?? null,
+      })}
+      title={DRAWER_WORDS.priceHead}
+      productName={detail.product.productName}
+      message={priceEditor.message}
+      checking={checking}
+      locked={priceLocked}
+      onCheck={checkFromEditor}
+      onCancel={closePriceEditor}
+    />
+  ) : null;
+  // The price editor closes itself when its row can no longer be changed (the own read gone, a banner).
+  useEffect(() => {
+    if (priceEditor !== null && (ownSettings === null || !priceRight.editable)) setPriceEditor(null);
+  }, [priceEditor, ownSettings, priceRight.editable]);
+
+  // The check replaces the body (D20): the draft's check, or the stale one while a refused apply's new check is made.
+  const bodyCheck: PriceCheckShown | null = shownCheck
+    ?? (rechecking && lastCheck.current !== null ? { check: lastCheck.current, phase: "saving", message: null, code: null, locked: true } : null);
+  const checkShown = detail !== null && priceChange !== null && bodyCheck !== null;
 
   const problem = detail === null && detailQuery.isError ? drawerReadProblem(detailQuery.error, props.storeName) : null;
   const ownProblem = detail !== null && ownQuery.isError ? drawerOwnReadProblem(ownQuery.error, props.storeName) : null;
-  const title = detail?.product.productName ?? (own?.draft.place || DRAWER_WORDS.untitled);
+  const title = detail?.product.productName ?? (own?.draft.place || priceDraft?.draft.place || DRAWER_WORDS.untitled);
+
+  if (checkShown && bodyCheck !== null && priceChange !== null) {
+    return (
+      <>
+        <DrawerHeader compact={compact} title={title} detail={detail} onDismiss={props.onDismiss} />
+        <PriceChangeCheckBody
+          check={bodyCheck.check}
+          review={rechecking ? null : reviewShown}
+          change={priceChange}
+          phase={bodyCheck.phase}
+          message={bodyCheck.message}
+          code={bodyCheck.code}
+          notice={checkNotice}
+          refusedSizes={refusedSizes}
+          busy={props.saveCallbacks.disabled === true || checking || rechecking}
+          paging={paging}
+          read={rechecking ? { kind: "loading" } : checkRead}
+          compact={compact}
+          onBack={backToEditing}
+          onSave={() => void applyPrices()}
+          onResend={() => void applyPrices()}
+          onPage={(page) => void showCheckPage(page)}
+          onRetryRead={() => { readFor.current = null; setCheckRead(null); }}
+        />
+      </>
+    );
+  }
 
   return (
     <>
-      <div className="flex items-start gap-2 border-b border-zinc-200 px-4 py-3 sm:px-6">
-        {compact && <CloseButton phone onClick={props.onDismiss} />}
-        <div className="min-w-0 flex-1 space-y-1">
-          <SheetTitle className="break-words text-base font-semibold text-zinc-900">{title}</SheetTitle>
-          {detail && (
-            <>
-              <p className="text-sm text-zinc-700">{compact ? drawerPhoneSummary(detail.product) : drawerCategoryLine(detail.product, detail.settings)}</p>
-              <p className="text-sm text-zinc-600">{drawerOwnSettingsLine(detail)}</p>
-            </>
-          )}
-        </div>
-        {!compact && <CloseButton onClick={props.onDismiss} />}
-      </div>
+      <DrawerHeader compact={compact} title={title} detail={detail} onDismiss={props.onDismiss} />
 
       <div className="min-h-0 flex-1 space-y-5 overflow-y-auto overscroll-contain px-4 py-4 sm:px-6">
         {detail === null && !problem && <p role="status" className="text-sm text-zinc-600">{DRAWER_WORDS.loading}</p>}
@@ -792,7 +1281,7 @@ function ProductDrawerBody(props: ProductDrawerBodyProps) {
             }}
             onPick={(pick) => { pickFromRow(pick.picks); }}
             onAnswerCheck={answerCheckFromRow}
-            onChangeField={toggleFieldEditor}
+            onChangeField={(target) => { setPriceEditor(null); toggleFieldEditor(target); }}
             changeRef={(field, element) => {
               if (element) changeButtons.current.set(field, element);
               else changeButtons.current.delete(field);
@@ -801,7 +1290,10 @@ function ProductDrawerBody(props: ProductDrawerBodyProps) {
               if (element) settingRowElements.current.set(field, element);
               else settingRowElements.current.delete(field);
             }}
-            settingsHoldChange={draftState.settingsHoldChange}
+            settingsHoldChange={draftState.settingsHoldChange || draftState.priceHoldsChange}
+            priceHead={priceHeadWords(props.summaryRecipe, productPriceHeadRule(detail.sizes))}
+            changePrice={changePrice}
+            priceEditor={priceEditorNode}
           />
         )}
       </div>
@@ -812,16 +1304,55 @@ function ProductDrawerBody(props: ProductDrawerBodyProps) {
           message={footerMessage}
           onDiscard={discard}
           onPrimary={() => {
-            // The draft's kind decides the writer (D2): the product's settings (W5) or one size's price (W9).
+            // The draft's kind decides the writer (D2): the product's settings (W5), its price (W7: Save runs the
+            // check, Check again the apply) or one size's price (W9).
             const action = footer.primary.action;
-            const settingsSave = draftState.writer === "W5";
-            if (action === "save" || action === "resend") void (settingsSave ? saveSettings() : saveSize());
-            else if (action === "load_latest") void (settingsSave ? loadLatestSettings() : loadLatest());
-            else if (action === "reload") void (settingsSave ? reloadSettings() : reload());
+            switch (draftState.writer) {
+              case "W5":
+                if (action === "save" || action === "resend") void saveSettings();
+                else if (action === "load_latest") void loadLatestSettings();
+                else if (action === "reload") void reloadSettings();
+                return;
+              case "W7":
+                if (action === "save") checkFromFooter();
+                else if (action === "resend") void applyPrices();
+                else if (action === "load_latest") void loadLatestPrice();
+                else if (action === "reload") void reloadAfterPrices();
+                return;
+              case "W9":
+                if (action === "save" || action === "resend") void saveSize();
+                else if (action === "load_latest") void loadLatest();
+                else if (action === "reload") void reload();
+                return;
+            }
           }}
         />
       )}
     </>
+  );
+}
+
+/** The drawer's header (R:591): the product's name, its category line and what it sets for itself; × or ←. */
+function DrawerHeader({ compact, title, detail, onDismiss }: {
+  compact: boolean;
+  title: string;
+  detail: ListingSettingsProductDetail | null;
+  onDismiss: () => void;
+}) {
+  return (
+    <div className="flex items-start gap-2 border-b border-zinc-200 px-4 py-3 sm:px-6">
+      {compact && <CloseButton phone onClick={onDismiss} />}
+      <div className="min-w-0 flex-1 space-y-1">
+        <SheetTitle className="break-words text-base font-semibold text-zinc-900">{title}</SheetTitle>
+        {detail && (
+          <>
+            <p className="text-sm text-zinc-700">{compact ? drawerPhoneSummary(detail.product) : drawerCategoryLine(detail.product, detail.settings)}</p>
+            <p className="text-sm text-zinc-600">{drawerOwnSettingsLine(detail)}</p>
+          </>
+        )}
+      </div>
+      {!compact && <CloseButton onClick={onDismiss} />}
+    </div>
   );
 }
 
@@ -836,7 +1367,7 @@ export function CloseButton({ phone = false, onClick }: { phone?: boolean; onCli
 
 function DrawerContent({
   detail, props, editor, own, inEditId, w9, showAll, onShowAll, sizeSearch, onSizeSearch, fieldError, onEdit, onFocusSize, inputRef,
-  settingRows, renderEditor, onPick, onAnswerCheck, onChangeField, changeRef, rowRef, settingsHoldChange,
+  settingRows, renderEditor, onPick, onAnswerCheck, onChangeField, changeRef, rowRef, settingsHoldChange, priceHead, changePrice, priceEditor,
 }: {
   detail: ListingSettingsProductDetail;
   props: ProductDrawerBodyProps;
@@ -865,8 +1396,14 @@ function DrawerContent({
   changeRef: (target: DrawerEditTarget, element: HTMLButtonElement | null) => void;
   /** A changeable row, so focus can go back to it when its [Change] can't take it. */
   rowRef: (target: DrawerEditTarget, element: HTMLElement | null) => void;
-  /** The product's settings hold a change (or a save of them is out): every size's price waits (D2). */
+  /** The product's settings or its price hold a change (or a save of them is out): every size's price waits (D2). */
   settingsHoldChange: boolean;
+  /** The PRICE head: the level that prices the product (`priceHeadWords`, UX-M7). */
+  priceHead: string;
+  /** [Change price] beside the head (PR 10d); null while the product isn't read. */
+  changePrice: DrawerChangePrice | null;
+  /** The product's price editor while it is open, under the head. */
+  priceEditor: ReactNode;
 }) {
   const drafts = useListingSettingsDrafts();
   const changedId = own !== null && isDraftDirty(own.draft) ? own.value.productVariantId : null;
@@ -899,7 +1436,9 @@ function DrawerContent({
   return (
     <>
       <DrawerPriceSection
-        head={priceHeadWords(props.summaryRecipe)}
+        head={priceHead}
+        changePrice={changePrice}
+        editor={priceEditor}
         reason={reason}
         waitingHint={waitingHint}
         sizes={lines}

@@ -1,7 +1,13 @@
 import { describe, expect, it } from "vitest";
 import { DropshipApiError } from "../dropship-ops-surface";
 import { LISTING_SETUP_RELOAD_MESSAGE } from "../dropship-ebay-listing-setup";
-import { LISTING_SETTINGS_BULK_WORDS, LISTING_SETTINGS_EDIT_WORDS } from "../dropship-listing-settings-words";
+import {
+  LISTING_SETTINGS_BULK_WORDS,
+  LISTING_SETTINGS_EDIT_WORDS,
+  LISTING_SETTINGS_PRICE_CHECK_WORDS,
+  releaseLimitWords,
+  wouldBeLeftWithoutPriceWords,
+} from "../dropship-listing-settings-words";
 import {
   BULK_EDITOR_ID,
   LISTING_SETTINGS_GUARD_ID_PREFIX,
@@ -87,7 +93,7 @@ describe("store default rows", () => {
     expect(LISTING_SETTINGS_KEY_PREFIXES).toEqual({
       policy: "ls-policy", shelf: "ls-shelf", shipFrom: "ls-ship-from", pricingApply: "ls-apply",
       category: "ls-category", description: "ls-text", sizePrice: "ls-price", productSettings: "ls-product",
-      bulkSettings: "ls-bulk",
+      bulkSettings: "ls-bulk", priceCheck: "ls-price-check",
     });
   });
 
@@ -371,8 +377,8 @@ describe("reduceListingSettingsDraft", () => {
   });
 });
 
-/** The PR 7 writers; W5 and W6 (PR 10) have their own tables below. */
-type Pr7Writer = Exclude<ListingSettingsWriter, "W5" | "W6">;
+/** The PR 7 writers; W5, W6 and W7 (PR 10) have their own tables below. */
+type Pr7Writer = Exclude<ListingSettingsWriter, "W5" | "W6" | "W7">;
 
 describe("classifyWriteFailure", () => {
   const writers: readonly Pr7Writer[] = ["W1", "W2", "W3", "W4", "W9", "W10"];
@@ -640,6 +646,79 @@ describe("classifyWriteFailure for W6 (PR 10c, plan 3.3, 6.5)", () => {
     expect(W6(500, "DROPSHIP_LISTING_SETTINGS_REPLAY_INCOMPLETE")).toMatchObject({ phase: "refused", message: LISTING_SETTINGS_EDIT_WORDS.fatal });
     expect(W6(422, "DROPSHIP_EBAY_STORE_CATEGORY_INVALID", { reason: "not_found", invalidFields: ["storeShelf"] })).toMatchObject({ phase: "refused", fields: ["storeShelf"] });
     expect(W6(403, "DROPSHIP_LISTING_SETTINGS_EBAY_SIGN_IN_REQUIRED", { fields: ["ebayCategory"] })).toMatchObject({ phase: "blocked", fields: ["ebayCategory"] });
+  });
+});
+
+describe("classifyWriteFailure for W7 (PR 10d, plan 3.3, 7.5)", () => {
+  const W7 = (status: number, code: string | null, context?: Record<string, unknown>) =>
+    classifyWriteFailure("W7", apiError(status, code, "Server words.", context));
+
+  it("words too many sizes, too heavy a check and too many releases by code and reason, never by `textBytes` (7.5, D8)", () => {
+    expect(W7(422, "DROPSHIP_LISTING_SETTINGS_TOO_LARGE", { storeConnectionId: 22 })).toEqual({
+      phase: "refused", message: LISTING_SETTINGS_PRICE_CHECK_WORDS.tooManySizes, code: "DROPSHIP_LISTING_SETTINGS_TOO_LARGE", status: 422, fields: [],
+    });
+    // The store text cap keeps its reason and its words (row 21), though W7 sends no text.
+    expect(W7(422, "DROPSHIP_LISTING_SETTINGS_TOO_LARGE", { reason: "store_text_limit" }).message).toBe(LISTING_SETTINGS_EDIT_WORDS.storeTextLimit);
+    // The rows and the text together (`reason: price_check_rows`), or the text alone: the same words, never "shorten your text" (CC-C10).
+    expect(W7(422, "DROPSHIP_LISTING_SETTINGS_BULK_TOO_LARGE", { reason: "price_check_rows", textBytes: 30_000_100, maxTextBytes: 30_000_000, productCount: 2 }))
+      .toMatchObject({ phase: "refused", message: LISTING_SETTINGS_PRICE_CHECK_WORDS.tooHeavy });
+    expect(W7(422, "DROPSHIP_LISTING_SETTINGS_BULK_TOO_LARGE", { textBytes: 30_000_100, maxTextBytes: 30_000_000, productCount: 2 }))
+      .toMatchObject({ phase: "refused", message: LISTING_SETTINGS_PRICE_CHECK_WORDS.tooHeavy });
+    expect(W7(422, "DROPSHIP_LISTING_SETTINGS_BULK_TOO_LARGE", { textBytes: 1 }).message).toBe(LISTING_SETTINGS_PRICE_CHECK_WORDS.tooHeavy);
+    // The release limit is built from the answer's counts (CC-C9); without both, the server's words stand.
+    expect(W7(422, "DROPSHIP_LISTING_PRICE_RELEASE_LIMIT", { releaseCount: 236, maxReleases: 200 })).toMatchObject({
+      phase: "refused", message: releaseLimitWords(200, 236),
+    });
+    expect(releaseLimitWords(200, 236)).toBe("You can clear up to 200 exact prices at once. This would clear 236. Choose fewer products.");
+    expect(releaseLimitWords(1_000, 1_236)).toBe("You can clear up to 1,000 exact prices at once. This would clear 1,236. Choose fewer products.");
+    for (const context of [undefined, { releaseCount: 236 }, { maxReleases: 200 }, { releaseCount: "236", maxReleases: 200 }, { releaseCount: -1, maxReleases: 200 }]) {
+      expect(W7(422, "DROPSHIP_LISTING_PRICE_RELEASE_LIMIT", context).message).toBe("Server words.");
+    }
+  });
+
+  it("counts the sizes an apply would leave without a price from `sizeCount`, never the capped list (7.5)", () => {
+    const sizes = [{ productVariantId: 101, beforePriceCents: 1499, afterPriceCents: null, refusal: "DROPSHIP_LISTING_PRICE_WOULD_BE_LOST", blockers: [] }];
+    expect(W7(422, "DROPSHIP_LISTING_PRICE_WOULD_BE_LOST", { sizes, sizeCount: 3 })).toEqual({
+      phase: "refused", message: wouldBeLeftWithoutPriceWords(3), code: "DROPSHIP_LISTING_PRICE_WOULD_BE_LOST", status: 422, fields: [],
+    });
+    expect(wouldBeLeftWithoutPriceWords(3)).toBe("● 3 sizes would be left without a price. Give them an exact price in Products first.");
+    expect(wouldBeLeftWithoutPriceWords(1)).toBe("● 1 size would be left without a price. Give it an exact price in Products first.");
+    expect(wouldBeLeftWithoutPriceWords(1_200)).toBe("● 1,200 sizes would be left without a price. Give them an exact price in Products first.");
+    // A release's W9 refusal names one size and no count: the server's words stand (the owner checks again).
+    for (const context of [undefined, { sizes }, { sizeCount: 0 }, { sizeCount: "3" }]) {
+      expect(W7(422, "DROPSHIP_LISTING_PRICE_WOULD_BE_LOST", context).message).toBe("Server words.");
+    }
+  });
+
+  it("refuses a moved, expired or already applied check with words the owner's re-check reads; a conflict is never a Load latest (D6)", () => {
+    // PRICES_MOVED: refused with the server's words (the apply runner then checks again once).
+    expect(W7(409, "DROPSHIP_LISTING_PRICES_MOVED", { sizes: [] })).toMatchObject({ phase: "refused", message: "Server words." });
+    expect(W7(404, "DROPSHIP_PRICING_REVIEW_NOT_FOUND", { reviewId: "x" })).toMatchObject({ phase: "refused", message: LISTING_SETTINGS_SAVE_WORDS.pricingReviewGone });
+    expect(W7(409, "DROPSHIP_IDEMPOTENCY_CONFLICT", { reviewId: "x" })).toMatchObject({ phase: "refused", message: LISTING_SETTINGS_SAVE_WORDS.keyReused });
+    // A release's W9 refusals, rolled back with the rest (CC-C11): refused, with the server's words.
+    for (const code of ["DROPSHIP_LISTING_PRICE_VERSION_CONFLICT", "DROPSHIP_LISTING_PRICE_OUTSIDE_LIMIT", "DROPSHIP_LISTING_PRICE_NOT_AVAILABLE"]) {
+      expect(W7(code === "DROPSHIP_LISTING_PRICE_NOT_AVAILABLE" ? 404 : code === "DROPSHIP_LISTING_PRICE_OUTSIDE_LIMIT" ? 422 : 409, code))
+        .toMatchObject({ phase: "refused", message: "Server words." });
+    }
+    // Nothing of W7's own is a conflict: no revision travels with a products check.
+    expect(W7(409, "DROPSHIP_PRODUCT_LISTING_SETTINGS_VERSION_CONFLICT", { conflictCount: 3 })).toMatchObject({ phase: "refused", message: LISTING_SETTINGS_EDIT_WORDS.invalid });
+  });
+
+  it("refuses what W7 can't be answered, and keeps the shared rows (busy, fatal, blocks)", () => {
+    for (const code of ["DROPSHIP_LISTING_SETTINGS_OLDER_RULES_PRESENT", "DROPSHIP_CATEGORY_LISTING_SETTINGS_VERSION_CONFLICT", "DROPSHIP_LISTING_SETTINGS_CATEGORY_NOT_FOUND", "DROPSHIP_PRICING_RULES_NOT_CONFIGURED"]) {
+      expect(W7(code === "DROPSHIP_PRICING_RULES_NOT_CONFIGURED" ? 422 : code.endsWith("NOT_FOUND") ? 404 : 409, code))
+        .toMatchObject({ phase: "refused", message: LISTING_SETTINGS_EDIT_WORDS.invalid });
+    }
+    expect(W7(503, "DROPSHIP_LISTING_SETTINGS_BUSY", { reason: "heavy_write_in_progress" })).toMatchObject({ phase: "unreachable", message: LISTING_SETTINGS_EDIT_WORDS.busyHeavy });
+    expect(W7(503, "DROPSHIP_LISTING_SETTINGS_BUSY", { reason: "request_key_changed" })).toMatchObject({ phase: "unreachable", message: LISTING_SETTINGS_EDIT_WORDS.busyKeyChanged });
+    expect(W7(503, "DROPSHIP_LISTING_SETTINGS_BUSY")).toMatchObject({ phase: "uncertain" });
+    expect(W7(500, "DROPSHIP_LISTING_PRICE_INVARIANT_FAILED")).toMatchObject({ phase: "refused", message: LISTING_SETTINGS_EDIT_WORDS.fatal });
+    expect(W7(502, null)).toMatchObject({ phase: "uncertain" });
+    expect(W7(403, "DROPSHIP_LISTING_STORE_BLOCKED", { reason: "paused" })).toMatchObject({ phase: "blocked", message: "Nothing was saved." });
+    expect(classifyWriteFailure("W7", new TypeError("Failed to fetch"))).toEqual({ phase: "uncertain", message: "We couldn't confirm your save.", code: null, status: null, fields: [] });
+    // W5 and W6 don't take W7's words.
+    expect(classifyWriteFailure("W5", apiError(422, "DROPSHIP_LISTING_SETTINGS_TOO_LARGE", "x")).message).toBe("x");
+    expect(classifyWriteFailure("W6", apiError(422, "DROPSHIP_LISTING_PRICE_RELEASE_LIMIT", "x", { releaseCount: 1, maxReleases: 1 })).message).toBe(LISTING_SETTINGS_EDIT_WORDS.invalid);
   });
 });
 

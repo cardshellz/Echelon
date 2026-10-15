@@ -1,12 +1,32 @@
-import { useId } from "react";
+import { useId, type ReactNode } from "react";
 import { X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { DRAWER_WORDS, type DrawerNotice, type DrawerSizeLine } from "@/lib/dropship-listing-settings-drawer";
+import { PRODUCT_PRICE_EDITOR_WORDS } from "@/lib/dropship-listing-settings-price-check";
+import { changeSettingLabel } from "@/lib/dropship-listing-settings-words";
+
+/** [Change price] beside the PRICE head (PR 10d, plan 7.2): opens the product's price editor under it. */
+export interface DrawerChangePrice {
+  /** The product, so a screen reader names whose price this is (plan 3.4). */
+  productName: string;
+  disabled: boolean;
+  /** The editor is open under the head (aria-expanded). */
+  expanded: boolean;
+  /** Why the button is off or waits, in words ("Checking…", a right's reason); null for nothing. */
+  line: string | null;
+  onClick: () => void;
+  /** The button, so the drawer can give it focus back when the editor closes. */
+  buttonRef?: (element: HTMLButtonElement | null) => void;
+}
 
 export interface DrawerPriceSectionProps {
-  /** "Store default: Retail price + 20%, round up to .99", or why there is none yet. */
+  /** "Store default: Retail price + 20%, round up to .99", "This product: …", or why there is none yet. */
   head: string;
+  /** [Change price] (PR 10d); left out, the head has no button (PR 7's section). */
+  changePrice?: DrawerChangePrice | null;
+  /** The product's price editor while it is open, under the head (`ProductPriceEditor`); the drawer stays the one surface (D20). */
+  editor?: ReactNode;
   /** Why exact prices can't be changed now (plan 4.3); null when they can, or when the banner says why. */
   reason: string | null;
   /** "Save or discard the price you changed first." while one size holds a change (D4). */
@@ -42,13 +62,32 @@ const NOTICE_CLASS: Readonly<Record<DrawerNotice["tone"], string>> = {
  * from `drawerSizeLine`, so every state renders in tests.
  */
 export function DrawerPriceSection(props: DrawerPriceSectionProps) {
-  const ids = { waiting: useId(), head: useId() };
+  const ids = { waiting: useId(), head: useId(), line: useId() };
+  const change = props.changePrice ?? null;
   return (
     <section aria-labelledby={ids.head} className="space-y-3" data-testid="drawer-price-section">
       <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
         <h3 id={ids.head} className="text-xs font-semibold uppercase tracking-wide text-zinc-500">{DRAWER_WORDS.priceHead}</h3>
-        <p className="text-sm text-zinc-900">{props.head}</p>
+        <p className="text-sm text-zinc-900" data-testid="drawer-price-head">{props.head}</p>
+        {change && (
+          <Button
+            ref={change.buttonRef}
+            type="button"
+            variant="outline"
+            size="sm"
+            className="min-h-11 sm:min-h-9"
+            aria-label={changeSettingLabel(DRAWER_WORDS.priceHead, change.productName)}
+            aria-describedby={change.line ? ids.line : undefined}
+            aria-expanded={change.expanded}
+            disabled={change.disabled}
+            onClick={change.onClick}
+          >
+            {PRODUCT_PRICE_EDITOR_WORDS.change}
+          </Button>
+        )}
       </div>
+      {change?.line && <p id={ids.line} className="text-xs text-zinc-600" data-testid="drawer-price-line">{change.line}</p>}
+      {props.editor}
       {props.reason && <p className="text-sm text-zinc-600">{props.reason}</p>}
       {props.waitingHint && <p id={ids.waiting} className="text-sm text-amber-900">{props.waitingHint}</p>}
       {props.search && (

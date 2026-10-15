@@ -3,6 +3,7 @@ import { descriptionTextSchema } from "@shared/dropship/listing-content";
 import { listingSettingTemplateTextSchema } from "@shared/dropship/listing-setting-values";
 import { saveProductSettingsInputSchema } from "@shared/dropship/listing-setting-writes";
 import { listingSettingsProductOwnSettingsSchema, type ListingSettingsProductDetail } from "@shared/dropship/listing-settings";
+import type { PricingRecipe } from "@shared/dropship/pricing-rules";
 import { DropshipApiError } from "../dropship-ops-surface";
 import {
   listingSettingsEditRights,
@@ -36,19 +37,30 @@ import {
   ebayCategoryFieldEditor,
   ebayCategoryPick,
   emptyChoices,
+  emptyProductPriceChange,
   fieldChoiceReady,
+  isPriceCheckRef,
+  isProductPriceChanged,
   mainTextProblem,
   markedAfterReload,
   normalizedVendorText,
   ownTextCheckChoices,
   policyFieldEditor,
   productFieldRights,
+  productPriceBaseMoved,
+  productPriceBaseOf,
+  productPriceDraftValue,
+  productPriceDraftWithCheck,
+  productPriceEditAction,
+  productPriceRights,
   productSettingsDraftValue,
   productSettingsEditAction,
   productSettingsPatch,
   productSettingsSaveBody,
   productSettingsSignature,
+  readProductPriceDraft,
   readProductSettingsDraft,
+  rebaseProductPriceDraft,
   rebaseProductSettingsDraft,
   sizeLeftoverFields,
   sizesDifferPick,
@@ -57,6 +69,7 @@ import {
   templateTextProblem,
   textCounter,
   type DrawerChangeKind,
+  type FieldChoice,
   type SizesDifferSetting,
   type PolicyEditField,
   type ProductOwnSettings,
@@ -223,6 +236,8 @@ describe("the drawer's draft and its kinds of change (D2)", () => {
     expect(drawerChangeKind(draftOf(base), EDITOR)).toBe("none");
     expect(drawerChangeKind(draftOf(base, twoChanges), EDITOR)).toBe("settings");
     expect(drawerChangeKind(draftOf(size, { ...size, exact: "12.00" }), EDITOR)).toBe("size_price");
+    const price = productPriceDraftValue(OWN, { price: { mode: "default" }, releaseExactPrices: true, check: null });
+    expect(drawerChangeKind(draftOf(productPriceDraftValue(OWN), price), EDITOR)).toBe("product_price");
     expect(drawerChangeKind(draftOf(base, twoChanges), productEditorId(12))).toBe("none");
     // A save that is out or unconfirmed still holds its change.
     const saving = reduceListingSettingsDraft(draftOf(base, twoChanges), { type: "startSave", attempt: { signature: "s", key: "k" } })!;
@@ -1120,5 +1135,161 @@ describe("sizesDifferPick (plan 5.3; UX-M5, CC-C17)", () => {
     if (keepOwn.kind !== "button") throw new Error("expected a button");
     const again = productSettingsEditAction({ draft: null, editor: EDITOR, own: OWN, leftovers: ["shippingPolicy"], picks: keepOwn.picks });
     expect(again.kind === "start" && productSettingsPatch(again.value)).toEqual({ shippingPolicy: { id: "F2" } });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The product's price (PR 10d, plan 7.2, 7.6, D1, D2, D6a)
+// ---------------------------------------------------------------------------
+
+describe("the product's price (PR 10d, plan 7.2, D1, D2, D6a)", () => {
+  const RETAIL_20_UP: PricingRecipe = { basis: "catalog_retail", markupBps: 2000, flatCents: 0, rounding: "up_99" };
+  const COST_35: PricingRecipe = { basis: "product_cost", markupBps: 3500, flatCents: 0, rounding: "cent" };
+  const CHECK = { reviewId: "11111111-1111-4111-8111-111111111111", reviewHash: "a".repeat(64), after: null };
+  const PRICED = own({ price: RETAIL_20_UP });
+  const SET = { price: { mode: "set" as const, value: COST_35 }, releaseExactPrices: false };
+  const priceDraft = (base: ProductOwnSettings, change: { price: FieldChoice<PricingRecipe>; releaseExactPrices: boolean; check: typeof CHECK | null }) =>
+    draftOf(productPriceDraftValue(base), productPriceDraftValue(base, change));
+
+  it("keeps the price as one field of the draft: leave, Use default or a recipe, the release and the check", () => {
+    expect(productPriceDraftValue(OWN)).toEqual({ priceChange: { price: { mode: "leave" }, releaseExactPrices: false, check: null }, ownPrice: null, revisionId: 5 });
+    expect(emptyProductPriceChange()).toEqual({ price: { mode: "leave" }, releaseExactPrices: false, check: null });
+    expect(productPriceDraftValue(OWN)).toEqual(productPriceDraftValue(OWN, emptyProductPriceChange()));
+    const set = productPriceDraftValue(OWN, { ...SET, releaseExactPrices: true, check: CHECK });
+    expect(set).toEqual({ priceChange: { price: { mode: "set", value: COST_35 }, releaseExactPrices: true, check: CHECK }, ownPrice: null, revisionId: 5 });
+    expect(draftOf(productPriceDraftValue(OWN), set).changes).toBe(1);
+    // What the product has is no change: "Use default" while it follows the default, its own recipe again; then no check either.
+    expect(productPriceDraftValue(OWN, { price: { mode: "default" }, releaseExactPrices: false, check: CHECK }).priceChange)
+      .toEqual({ price: { mode: "leave" }, releaseExactPrices: false, check: null });
+    expect(productPriceDraftValue(PRICED, { price: { mode: "set", value: { ...RETAIL_20_UP } }, releaseExactPrices: false, check: CHECK }).priceChange)
+      .toEqual({ price: { mode: "leave" }, releaseExactPrices: false, check: null });
+    expect(productPriceDraftValue(PRICED, { price: { mode: "default" }, releaseExactPrices: false, check: null }).priceChange.price).toEqual({ mode: "default" });
+    expect(productPriceDraftValue(PRICED, { ...SET, check: null }).ownPrice).toEqual(RETAIL_20_UP);
+    // A release alone is a change, and keeps its check.
+    expect(productPriceDraftValue(PRICED, { price: { mode: "leave" }, releaseExactPrices: true, check: CHECK }).priceChange)
+      .toEqual({ price: { mode: "leave" }, releaseExactPrices: true, check: CHECK });
+    // The recipe is copied through the contract, never shared with the editor; an off-contract one throws.
+    const value = { ...COST_35 };
+    const made = productPriceDraftValue(OWN, { price: { mode: "set", value }, releaseExactPrices: false, check: null }).priceChange.price;
+    expect(made.mode === "set" && made.value).toEqual(COST_35);
+    expect(made.mode === "set" && made.value).not.toBe(value);
+    expect(() => productPriceDraftValue(OWN, { price: { mode: "set", value: { ...COST_35, markupBps: -1 } }, releaseExactPrices: false, check: null })).toThrow();
+    expect(isProductPriceChanged({ price: { mode: "leave" }, releaseExactPrices: false })).toBe(false);
+    expect(isProductPriceChanged({ price: { mode: "leave" }, releaseExactPrices: true })).toBe(true);
+    expect(isProductPriceChanged({ price: { mode: "default" }, releaseExactPrices: false })).toBe(true);
+  });
+
+  it("reads only its own shape", () => {
+    const set = productPriceDraftValue(OWN, { ...SET, check: CHECK });
+    expect(readProductPriceDraft(set)).toEqual(set);
+    expect(readProductPriceDraft(productPriceDraftValue(PRICED))).toEqual(productPriceDraftValue(PRICED));
+    expect(readProductPriceDraft(productSettingsDraftValue(OWN))).toBeNull();
+    expect(readProductPriceDraft(sizePriceDraftValue({ productVariantId: 101, expectedRevisionId: 7, exact: "12.00" }))).toBeNull();
+    expect(readProductPriceDraft({ ...set, revisionId: 0 })).toBeNull();
+    expect(readProductPriceDraft({ ...set, ownPrice: { basis: "catalog_retail" } })).toBeNull();
+    expect(readProductPriceDraft({ ...set, priceChange: { ...set.priceChange, releaseExactPrices: "yes" } })).toBeNull();
+    expect(readProductPriceDraft({ ...set, priceChange: { ...set.priceChange, check: { reviewId: "x", reviewHash: "y", after: null } } })).toBeNull();
+    expect(readProductPriceDraft({ ...set, priceChange: { ...set.priceChange, price: { mode: "set", value: { basis: "catalog_retail" } } } })).toBeNull();
+    for (const after of [null, "prices_moved", "already_applied", "expired"]) expect(isPriceCheckRef({ ...CHECK, after })).toBe(true);
+    expect(isPriceCheckRef({ ...CHECK, after: "x" })).toBe(false);
+    expect(isPriceCheckRef({ ...CHECK, reviewId: "1A111111-1111-4111-8111-111111111111" })).toBe(false);
+    expect(isPriceCheckRef({ ...CHECK, reviewId: "1a111111-1111-4111-8111-111111111111" })).toBe(true);
+    expect(isPriceCheckRef({ ...CHECK, reviewHash: "A".repeat(64) })).toBe(false);
+    expect(isPriceCheckRef(null)).toBe(false);
+  });
+
+  it("says which kind of change the draft holds, and lets the kinds wait for each other (D2)", () => {
+    const draft = priceDraft(OWN, { ...SET, check: null });
+    expect(drawerChangeKind(draft, EDITOR)).toBe("product_price");
+    expect(drawerChangeKind(draftOf(productPriceDraftValue(OWN)), EDITOR)).toBe("none");
+    expect(drawerChangeKind(draft, productEditorId(12))).toBe("none");
+    expect(drawerChangeKind(reduceListingSettingsDraft(draft, { type: "startSave", attempt: { signature: "s", key: "k" } }), EDITOR)).toBe("product_price");
+    const cases: Array<[DrawerChangeKind, DrawerChangeKind, "edit" | "finish_first"]> = [
+      ["none", "product_price", "edit"], ["product_price", "product_price", "edit"],
+      ["settings", "product_price", "finish_first"], ["size_price", "product_price", "finish_first"],
+      ["product_price", "settings", "finish_first"], ["product_price", "size_price", "finish_first"],
+    ];
+    for (const [current, wanted, decision] of cases) expect({ current, wanted, decision: decideDrawerEdit(current, wanted) }).toEqual({ current, wanted, decision });
+    // A settings edit over a price change waits (the sizes do too, dropship-listing-settings-drawer.ts).
+    expect(productSettingsEditAction({ draft, editor: EDITOR, own: OWN, field: "returnPolicy", choice: { mode: "set", value: { id: "R4" } } })).toEqual({ kind: "finish_first" });
+  });
+
+  it("[Check new prices] puts the choice in the draft: start, edit, finish first, locked, no change", () => {
+    expect(productPriceEditAction({ draft: null, editor: EDITOR, own: OWN, change: SET }))
+      .toEqual({ kind: "start", base: productPriceDraftValue(OWN), value: productPriceDraftValue(OWN, { ...SET, check: null }) });
+    expect(productPriceEditAction({ draft: null, editor: EDITOR, own: OWN, change: { price: { mode: "default" }, releaseExactPrices: false } })).toEqual({ kind: "no_change", value: null });
+    expect(productPriceEditAction({ draft: null, editor: EDITOR, own: PRICED, change: { price: { mode: "default" }, releaseExactPrices: false } })).toMatchObject({ kind: "start" });
+    expect(productPriceEditAction({ draft: null, editor: EDITOR, own: PRICED, change: { price: { mode: "set", value: { ...RETAIL_20_UP } }, releaseExactPrices: false } })).toEqual({ kind: "no_change", value: null });
+    expect(productPriceEditAction({ draft: null, editor: EDITOR, own: OWN, change: { price: { mode: "leave" }, releaseExactPrices: true } })).toMatchObject({ kind: "start" });
+    // Over the settings or a size's price: finish first (D2).
+    const settings = draftOf(productSettingsDraftValue(OWN), productSettingsDraftValue(OWN, choices({ shippingPolicy: { mode: "set", value: { id: "F9" } } })));
+    expect(settings.changes).toBe(1);
+    expect(productPriceEditAction({ draft: settings, editor: EDITOR, own: OWN, change: SET })).toEqual({ kind: "finish_first" });
+    const sizeValue = sizePriceDraftValue({ productVariantId: 101, expectedRevisionId: 7, exact: "14.99" });
+    expect(productPriceEditAction({ draft: draftOf(sizeValue, { ...sizeValue, exact: "12.00" }), editor: EDITOR, own: OWN, change: SET })).toEqual({ kind: "finish_first" });
+    // Nothing to check over a clean settings draft, or over an unchanged other product's draft, opens nothing either.
+    expect(productPriceEditAction({ draft: draftOf(productSettingsDraftValue(OWN)), editor: EDITOR, own: OWN, change: { price: { mode: "default" }, releaseExactPrices: false } })).toEqual({ kind: "no_change", value: null });
+    // A price draft with changes keeps its start (the price and revision the vendor saw, D6a) and drops its check; reopen when hidden.
+    const held = priceDraft(OWN, { ...SET, check: CHECK });
+    expect(productPriceEditAction({ draft: held, editor: EDITOR, own: own({}, 9), change: { price: { mode: "default" }, releaseExactPrices: true } })).toEqual({
+      kind: "edit", reopen: false, value: { priceChange: { price: { mode: "leave" }, releaseExactPrices: true, check: null }, ownPrice: null, revisionId: 5 },
+    });
+    // The choice undoes the change the draft holds (Use default while the product follows it, its own recipe again, the only
+    // release unticked): nothing to check, and the draft takes the clean value, so the bar reads "All saved".
+    expect(productPriceEditAction({ draft: held, editor: EDITOR, own: own({}, 9), change: { price: { mode: "default" }, releaseExactPrices: false } }))
+      .toEqual({ kind: "no_change", value: productPriceDraftValue(OWN) });
+    const heldPriced = priceDraft(PRICED, { ...SET, check: CHECK });
+    expect(productPriceEditAction({ draft: heldPriced, editor: EDITOR, own: PRICED, change: { price: { mode: "set", value: { ...RETAIL_20_UP } }, releaseExactPrices: false } }))
+      .toEqual({ kind: "no_change", value: productPriceDraftValue(PRICED) });
+    const release = priceDraft(OWN, { price: { mode: "leave" }, releaseExactPrices: true, check: CHECK });
+    expect(productPriceEditAction({ draft: release, editor: EDITOR, own: OWN, change: { price: { mode: "leave" }, releaseExactPrices: false } }))
+      .toEqual({ kind: "no_change", value: productPriceDraftValue(OWN) });
+    expect(productPriceEditAction({ draft: reduceListingSettingsDraft(held, { type: "close" }), editor: EDITOR, own: OWN, change: SET })).toMatchObject({ kind: "edit", reopen: true });
+    const saving = reduceListingSettingsDraft(held, { type: "startSave", attempt: { signature: "s", key: "k" } })!;
+    expect(productPriceEditAction({ draft: saving, editor: EDITOR, own: OWN, change: SET })).toEqual({ kind: "locked" });
+    // Saved: the next change starts from the own read as it is now.
+    const saved = reduceListingSettingsDraft(saving, { type: "saved", key: "k", nowMs: 1 })!;
+    expect(productPriceEditAction({ draft: saved, editor: EDITOR, own: own({ price: COST_35 }, 9), change: { price: { mode: "default" }, releaseExactPrices: false } }))
+      .toEqual({ kind: "start", base: productPriceDraftValue(own({ price: COST_35 }, 9)), value: productPriceDraftValue(own({ price: COST_35 }, 9), { price: { mode: "default" }, releaseExactPrices: false, check: null }) });
+  });
+
+  it("puts the check in and takes it out, and compares the start with the own read (D6a)", () => {
+    const value = productPriceDraftValue(OWN, { ...SET, check: null });
+    expect(productPriceDraftWithCheck(value, CHECK)).toEqual({ ...value, priceChange: { ...value.priceChange, check: CHECK } });
+    expect(productPriceDraftWithCheck(productPriceDraftWithCheck(value, CHECK), null)).toEqual(value);
+    expect(productPriceDraftWithCheck(value, CHECK).priceChange.check).not.toBe(CHECK);
+    expect(productPriceBaseOf(OWN)).toEqual({ ownPrice: null, revisionId: 5 });
+    expect(productPriceBaseOf(PRICED)).toEqual({ ownPrice: RETAIL_20_UP, revisionId: 5 });
+    expect(productPriceBaseMoved(productPriceBaseOf(OWN), { ownPrice: null, revisionId: 5 })).toBe(false);
+    expect(productPriceBaseMoved(productPriceBaseOf(PRICED), { ownPrice: { ...RETAIL_20_UP }, revisionId: 5 })).toBe(false);
+    expect(productPriceBaseMoved(productPriceBaseOf(OWN), { ownPrice: null, revisionId: 6 })).toBe(true);
+    expect(productPriceBaseMoved(productPriceBaseOf(OWN), { ownPrice: RETAIL_20_UP, revisionId: 5 })).toBe(true);
+    expect(productPriceBaseMoved(productPriceBaseOf(PRICED), { ownPrice: COST_35, revisionId: 5 })).toBe(true);
+    expect(productPriceBaseMoved({ ownPrice: null, revisionId: null }, { ownPrice: null, revisionId: null })).toBe(false);
+  });
+
+  it("Load latest keeps the vendor's price on what is saved now, marks a price both changed, and says when nothing is left", () => {
+    const mine = productPriceDraftValue(OWN, { ...SET, check: CHECK });
+    const latest = own({ price: RETAIL_20_UP }, 6);
+    expect(rebaseProductPriceDraft(mine, latest)).toEqual({
+      edited: productPriceDraftValue(latest, { ...SET, check: null }),
+      latest: productPriceDraftValue(latest),
+      marked: ["priceChange"],
+      keeps: true,
+    });
+    // The other window saved the very same price: nothing of the vendor's is left to keep.
+    expect(rebaseProductPriceDraft(mine, own({ price: COST_35 }, 6))).toMatchObject({ keeps: false, marked: [] });
+    // Only the revision moved (a settings save elsewhere): the price stays a change, not marked.
+    expect(rebaseProductPriceDraft(mine, own({}, 6))).toEqual({ edited: productPriceDraftValue(own({}, 6), { ...SET, check: null }), latest: productPriceDraftValue(own({}, 6)), marked: [], keeps: true });
+    // A release alone stays a change; "Use default" on a product that now follows the default is nothing.
+    expect(rebaseProductPriceDraft(productPriceDraftValue(PRICED, { price: { mode: "leave" }, releaseExactPrices: true, check: CHECK }), own({}, 6))).toMatchObject({ keeps: true, marked: [] });
+    expect(rebaseProductPriceDraft(productPriceDraftValue(PRICED, { price: { mode: "default" }, releaseExactPrices: false, check: null }), own({}, 6))).toMatchObject({ keeps: false, marked: [] });
+  });
+
+  it("takes W7's right alone: a recipe and Use default with it, nothing without (D3)", () => {
+    expect(productPriceRights({ priceCheck: { editable: true, reason: null } })).toEqual({ canSet: true, canDefault: true, canNone: false, reason: null });
+    expect(productPriceRights({ priceCheck: { editable: false, reason: "banner" } })).toEqual({ canSet: false, canDefault: false, canNone: false, reason: "banner" });
+    expect(productPriceRights(rights({ blocked: { kind: "selling_paused", diagnosticReference: null } }))).toMatchObject({ canSet: false, reason: "banner" });
+    expect(productPriceRights(rights({ blocked: { kind: "sign_in", diagnosticReference: null } }))).toMatchObject({ canSet: true, canDefault: true });
   });
 });

@@ -1,4 +1,5 @@
-import { buildShipmentAllocationBasis, resolveShipmentAllocationMethod, shipmentAllocationBasisMatches } from "./domain/shipment-allocation-basis";
+import { buildShipmentAllocationBasis, resolveShipmentAllocationMethod, shipmentAllocationBasisMatches,
+  allocateShipmentCents, shipmentAllocationEvidenceMatches, type ShipmentAllocationBasis } from "./domain/shipment-allocation-basis";
 import { recordCostRevision } from "./cost-source-revision.repository";
 import { sql } from "drizzle-orm";
 import type { CostIssue } from "@shared/procurement/cost-source-contracts";
@@ -11,12 +12,17 @@ export async function recordShipmentCostRevisions(tx: CostEvidenceTransaction, s
   await lockInventoryCostGraph(tx);
   const lines = await tx.execute(sql`
     SELECT line.id,line.purchase_order_id,line.purchase_order_line_id,line.qty_shipped,snapshot.qty,
-      line.total_volume_cbm,line.total_weight_kg,line.chargeable_weight_kg,po_line.unit_cost_cents AS allocation_po_unit_cost_cents,
+      line.total_volume_cbm,line.total_weight_kg,line.chargeable_weight_kg,
+      po_line.id AS allocation_po_line_id,po_line.purchase_order_id AS allocation_po_id,po_line.line_type AS allocation_po_line_type,
+      po_line.order_qty AS allocation_po_order_qty,po_line.total_product_cost_cents AS allocation_po_product_total_cents,
+      po.currency AS allocation_po_currency,
       shipment.allocation_method_default,
-      snapshot.id AS snapshot_id,snapshot.freight_allocated_cents,snapshot.duty_allocated_cents,snapshot.insurance_allocated_cents,snapshot.other_allocated_cents
+      snapshot.id AS snapshot_id,snapshot.product_value_evidence AS snapshot_product_value_evidence,
+      snapshot.freight_allocated_cents,snapshot.duty_allocated_cents,snapshot.insurance_allocated_cents,snapshot.other_allocated_cents
     FROM procurement.inbound_shipment_lines line
     JOIN procurement.inbound_shipments shipment ON shipment.id=line.inbound_shipment_id
     LEFT JOIN procurement.purchase_order_lines po_line ON po_line.id=line.purchase_order_line_id
+    LEFT JOIN procurement.purchase_orders po ON po.id=po_line.purchase_order_id
     LEFT JOIN procurement.landed_cost_snapshots snapshot ON snapshot.inbound_shipment_line_id=line.id
     WHERE line.inbound_shipment_id=${shipmentId} ORDER BY line.id
   `);
@@ -77,24 +83,36 @@ export async function recordShipmentCostRevisions(tx: CostEvidenceTransaction, s
       && allocations.reduce((sum, allocation) => sum + BigInt(costInteger(allocation.allocated_cents, "allocationCents", -Number.MAX_SAFE_INTEGER)), BigInt(0))
         === BigInt(costInteger(amount, "chargeCents", -Number.MAX_SAFE_INTEGER));
   });
-  const currentBasis: Array<{ costId: number; method: string; source: string; values: Array<{ lineId: number; basis: number }>; basisTotal: number; usedFallback: boolean }> = [];
+  const currentBasis: Array<{ costId: number; source: string } & ShipmentAllocationBasis> = [];
   let basisStale = false;
   for (const charge of charges.rows) {
     if (costInteger(charge.actual_cents ?? charge.estimated_cents ?? 0, "chargeCents", -Number.MAX_SAFE_INTEGER) === 0) continue;
     try {
       const method = resolveShipmentAllocationMethod(charge.cost_type, charge.allocation_method, lines.rows[0]?.allocation_method_default ?? null);
+      if (method.method === "by_value" && lines.rows.some((line) => line.allocation_po_line_type !== "product"
+        || Number(line.allocation_po_id) !== Number(line.purchase_order_id))) {
+        throw new Error("Shipment product value requires the original product PO source");
+      }
       const basis = buildShipmentAllocationBasis(lines.rows.map((line) => ({ lineId: costInteger(line.id, "lineId", 1),
         qtyShipped: costInteger(line.qty_shipped, "qtyShipped", 1), totalVolumeCbm: line.total_volume_cbm,
-        totalWeightKg: line.total_weight_kg, chargeableWeightKg: line.chargeable_weight_kg, poUnitCostCents: line.allocation_po_unit_cost_cents })), method.method);
+        totalWeightKg: line.total_weight_kg, chargeableWeightKg: line.chargeable_weight_kg,
+        poLineId: line.allocation_po_line_id, poOrderQty: line.allocation_po_order_qty,
+        poTotalProductCostCents: line.allocation_po_product_total_cents, poCurrency: line.allocation_po_currency })), method.method);
       const allocated = allocationRows.rows.filter((allocation) => Number(allocation.shipment_cost_id) === Number(charge.id));
+      const expectedCents = new Map(allocateShipmentCents(costInteger(charge.actual_cents ?? charge.estimated_cents, "chargeCents"), basis)
+        .map((allocation) => [allocation.lineId, allocation.allocatedCents]));
       const seen = new Set(allocated.map((allocation) => Number(allocation.inbound_shipment_line_id)));
       basisStale ||= basis.missingDimensionLineIds.length > 0 || allocated.length !== basis.values.length || seen.size !== allocated.length
         || basis.values.some((value) => {
           const saved = allocated.find((allocation) => Number(allocation.inbound_shipment_line_id) === value.lineId);
+          if (method.method === "by_value" || saved?.basis_evidence != null) {
+            return !saved || !shipmentAllocationEvidenceMatches(saved.basis_evidence, basis, value.lineId)
+              || costInteger(saved.allocated_cents, "allocationCents") !== expectedCents.get(value.lineId);
+          }
           return !saved || !shipmentAllocationBasisMatches(saved.allocation_basis_value, value.basis)
             || !shipmentAllocationBasisMatches(saved.allocation_basis_total, basis.basisTotal);
         });
-      currentBasis.push({ costId: Number(charge.id), ...method, values: basis.values, basisTotal: basis.basisTotal, usedFallback: basis.usedFallback });
+      currentBasis.push({ costId: Number(charge.id), source: method.source, ...basis });
     } catch {
       // Invalid or unrepresentable stored basis inputs require an allocation
       // review. They must not promote the old snapshot to current authority.
@@ -166,7 +184,7 @@ export async function applyShipmentCostRevisions(tx: CostEvidenceTransaction, sh
   const applications = [];
   for (const revision of revisions) applications.push(await applyCostRevision(tx, revision, writer, actorId, now));
   return {
-    updated: applications.filter((application) => application.status === "applied" && !application.replayed).reduce((sum, application) => sum + application.lotsUpdated, 0),
+    updated: applications.filter((application) => !application.replayed).reduce((sum, application) => sum + application.lotsUpdated, 0),
     total: applications.reduce((sum, application) => sum + application.lotsUpdated, 0),
     status: issues.length > 0 || applications.some((application) => application.status === "review_required") ? "review_required" as const : "applied" as const,
     skipped: [...issues.map((issue) => ({ applicationId: null, reason: issue.code, message: issue.message })),

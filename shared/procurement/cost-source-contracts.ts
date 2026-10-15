@@ -20,9 +20,30 @@ export const costMillsSchema = z.number().int().safe();
 export const costComponentSchema = z.enum(COST_COMPONENTS);
 export const costFingerprintSchema = z.string().regex(/^[0-9a-f]{64}$/);
 export const costCurrencySchema = z.string().regex(/^[A-Z]{3}$/);
+/** Financial amount retained for an unexplained historical quantity. It is not
+ * an inventory addition, write-off or a second charge to a customer order. */
+export const unresolvedCostQuantitySchema = z.object({
+  inventoryLotId: resourceId,
+  allocationId: positiveInteger,
+  lotNumber: z.string().min(1).max(200),
+  originalQuantity: positiveInteger,
+  onHandQuantityAtReview: nonnegativeInteger,
+  recordedOutflowQuantityAtReview: nonnegativeInteger,
+  quantity: positiveInteger,
+  component: costComponentSchema,
+  amountMills: nonnegativeInteger,
+}).strict().superRefine((value, context) => {
+  if (![value.originalQuantity, value.onHandQuantityAtReview, value.recordedOutflowQuantityAtReview, value.quantity].every(Number.isSafeInteger)) return;
+  if (BigInt(value.originalQuantity) !== BigInt(value.onHandQuantityAtReview)
+    + BigInt(value.recordedOutflowQuantityAtReview) + BigInt(value.quantity)) {
+    context.addIssue({ code: "custom", message: "Unresolved quantity must reconcile to its recorded snapshot" });
+  }
+});
+export type UnresolvedCostQuantity = z.infer<typeof unresolvedCostQuantitySchema>;
 export const costIssueSchema = z.object({
   code: z.string().regex(/^[A-Z][A-Z0-9_]{0,99}$/),
   message: z.string().trim().min(1).max(2_000),
+  unresolvedQuantity: unresolvedCostQuantitySchema.optional(),
 }).strict();
 
 export const costSourceScopeSchema = z.discriminatedUnion("kind", [

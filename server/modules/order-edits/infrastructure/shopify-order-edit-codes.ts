@@ -30,9 +30,8 @@ const page = z.object({ hasNextPage: z.boolean() });
 const combines = `combinesWith { productDiscounts orderDiscounts shippingDiscounts }`;
 export const ORDER_EDIT_CODE_LOOKUP = `query EchelonEditCode($code: String!, $search: String!) {
   codeDiscountNodeByCode(code: $code) { id codeDiscount { __typename ... on DiscountCodeBasic {
-    title status startsAt endsAt usageLimit appliesOncePerCustomer asyncUsageCount discountClasses
+    title status startsAt endsAt usageLimit appliesOncePerCustomer discountClasses
     codes(first: 2, query: $search) { nodes { code } pageInfo { hasNextPage } }
-    codesCount { count precision }
     ${combines} context { __typename ... on DiscountCustomers { customers { id } } }
     customerGets { items { __typename ... on AllDiscountItems { allItems } }
       value { __typename ... on DiscountPercentage { percentage } ... on DiscountAmount { amount { amount currencyCode } appliesOnEachItem } } }
@@ -52,15 +51,10 @@ const lookupSchema = z.object({
         endsAt: z.string().datetime().nullable(),
         usageLimit: integer.positive().nullable(),
         appliesOncePerCustomer: z.boolean(),
-        asyncUsageCount: integer,
         discountClasses: z.array(orderEditDiscountClassSchema),
         codes: z.object({
           nodes: z.array(z.object({ code: z.string() })),
           pageInfo: page,
-        }),
-        codesCount: z.object({
-          count: integer,
-          precision: z.enum(["EXACT", "AT_LEAST"]),
         }),
         combinesWith: orderEditCombinesWithSchema,
         // Eligibility belongs to Shopify's calculation with the actual buyer.

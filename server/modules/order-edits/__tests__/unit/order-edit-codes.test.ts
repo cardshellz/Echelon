@@ -272,6 +272,23 @@ describe("new-code admission and exact pricing", () => {
         .fingerprint,
     ).not.toBe(first.fingerprint);
   });
+  it("does not depend on usage counters or coupon-batch size for unrestricted adjustments", () => {
+    const input = native();
+    const discount = input.codeDiscountNodeByCode.codeDiscount as Record<string, unknown>;
+    delete discount.asyncUsageCount;
+    delete discount.codesCount;
+    expect(readOrderEditCodeRule(input, "TEN")).toMatchObject({
+      usageLimit: null,
+      appliesOncePerCustomer: false,
+    });
+  });
+  it.each(["usageLimit", "appliesOncePerCustomer"])("blocks missing %s instead of assuming unrestricted usage", (field) => {
+    const input = native();
+    delete (input.codeDiscountNodeByCode.codeDiscount as Record<string, unknown>)[field];
+    expect(() => readOrderEditCodeRule(input, "TEN")).toThrow(
+      expect.objectContaining({ code: "ORDER_EDIT_CODE_RULES_UNAVAILABLE" }),
+    );
+  });
   it.each([1, 10, 100])(
     "preserves shared finite usage limit %s as a Shopify coupon, never a points reward",
     (usageLimit) => {

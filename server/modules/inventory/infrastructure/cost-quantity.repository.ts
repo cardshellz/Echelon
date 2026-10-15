@@ -2,6 +2,11 @@ import { sql } from "drizzle-orm";
 import { canonicalJson } from "@shared/utils/canonical-json";
 import { z } from "zod";
 import {
+  historicalCostQuantityGap,
+  historicalCostQuantitySnapshotSchema,
+  type HistoricalCostQuantitySnapshot,
+} from "../domain/historical-cost-quantity";
+import {
   CostEvidenceError,
   costInteger,
   lockInventoryCostGraph,
@@ -218,14 +223,17 @@ async function insertAllocation(
 /** Establish historical financial allocation positions only from the complete
  * recorded operation/COGS quantities. Stable evidence order is a documented
  * allocation policy, not an assertion about unidentified physical pieces.
- * Missing disposals, conflicting operation quantities or unidentified reversals
- * prevent importing that lot; nothing is guessed from current on-hand stock.
+ * Ordinary stock commands reject incomplete history. A cost revision may retain
+ * a positive unexplained portion in immutable financial custody. This portion
+ * is neither stock nor COGS and remains an explicit review on every application.
+ * Conflicting quantities and unidentified reversals always prevent import.
  */
 export async function ensureLotCostQuantityBasis(
   tx: CostEvidenceTransaction,
-  lot: LotCostRecord & { id: unknown; qty_on_hand?: unknown },
+  lot: LotCostRecord & { id: unknown; qty_on_hand?: unknown; lot_number?: unknown },
   actor: string,
   now: Date,
+  options: { retainUnresolvedQuantity?: boolean; verifyOnHand?: boolean } = {},
 ): Promise<number> {
   const lotId = costInteger(lot.id, "lot.id", 1);
   const basis = costInteger(lot.qty_received, "lot.qtyReceived", 1);
@@ -372,6 +380,16 @@ export async function ensureLotCostQuantityBasis(
   // Existing immutable custody remains the authority; only a newly observed
   // legacy operation requires a complete historical reconciliation.
   if (prior.rows.length > 0 && candidates.length === 0) {
+    if (options.verifyOnHand) {
+      const used = occupiedCostQuantityIntervals(await readAllocations(tx, lotId), basis)
+        .reduce((sum, interval) => sum + BigInt(interval.quantity), BigInt(0));
+      const onHand = costInteger(lot.qty_on_hand, "lot.qtyOnHand");
+      if (used + BigInt(onHand) !== BigInt(basis)) throw new CostEvidenceError(
+        "COST_QUANTITY_CUSTODY_CONFLICT",
+        `Lot ${String(lot.lot_number ?? lotId)}: recorded cost quantities leave ${BigInt(basis) - used} units, but on-hand stock is ${onHand}. Review the stock movements before updating costs.`,
+        { lotId },
+      );
+    }
     await mapHistoricalReturnIntervals(tx, lotId, actor, now);
     return basis;
   }
@@ -390,16 +408,19 @@ export async function ensureLotCostQuantityBasis(
         (candidate.kind === "reversal" ? BigInt(-1) : BigInt(1)),
     BigInt(occupiedQuantity),
   );
-  if (
-    total + BigInt(costInteger(lot.qty_on_hand, "lot.qtyOnHand")) !==
-    BigInt(basis)
-  ) {
+  const onHandQuantity = costInteger(lot.qty_on_hand, "lot.qtyOnHand");
+  const gap = BigInt(basis) - BigInt(onHandQuantity) - total;
+  // A newly observed discrepancy on an established basis is not legacy import.
+  // Do not absorb it into an existing hold or conceal an active posting error.
+  if (gap !== BigInt(0) && (!options.retainUnresolvedQuantity || prior.rows.length > 0 || gap < BigInt(0) || total < BigInt(0))) {
     throw new CostEvidenceError(
       "COST_HISTORICAL_QUANTITY_INCOMPLETE",
-      "Recorded consumption and transformations do not reconcile to the original and remaining lot quantities.",
-      { lotId },
+      `Lot ${String(lot.lot_number ?? lotId)}: original quantity ${basis}, on hand ${onHandQuantity}, recorded outflow ${total}. These quantities do not reconcile.`,
+      { lotId, originalQuantity: basis, onHandQuantity, recordedOutflowQuantity: total.toString() },
     );
   }
+  const unresolved = historicalCostQuantityGap({ originalQuantity: basis, onHandQuantity,
+    recordedOutflowQuantity: costInteger(total.toString(), "recordedOutflowQuantity") });
   let assigned = occupied;
   for (const candidate of candidates) {
     if (candidate.kind === "reversal") {
@@ -458,15 +479,42 @@ export async function ensureLotCostQuantityBasis(
     }
     assigned = [...assigned, ...intervals];
   }
+  if (unresolved !== null) {
+    // Known operations retain their deterministic intervals. Reserve the gap
+    // before the remaining stock; later cost revisions can revalue every known
+    // destination without assigning this amount to an unrelated order.
+    await insertAllocation(tx, {
+      lotId, key: `historical_unresolved_quantity:${lotId}`, direction: 1,
+      quantity: unresolved.unresolvedQuantity,
+      intervals: takeCostQuantityIntervals(basis, assigned, unresolved.unresolvedQuantity),
+      evidence: { sourceKind: "unresolved_historical_quantity", policy: "retain_unresolved_quantity_v1", snapshot: unresolved },
+      actor, now,
+    });
+  }
   if (prior.rows.length === 0)
     await tx.execute(sql`INSERT INTO inventory.lot_cost_quantity_bases(inventory_lot_id,quantity,source_evidence,recorded_by,recorded_at)
     VALUES (${lotId},${basis},${canonicalJson({
       policy: "stable_recorded_evidence_order_v1",
       sources: candidates,
-      unallocatedQuantity: basis - Number(total),
+      unallocatedQuantity: onHandQuantity,
+      ...(unresolved === null ? {} : { unresolvedQuantity: unresolved.unresolvedQuantity }),
     })}::jsonb,${actor},${now})`);
   await mapHistoricalReturnIntervals(tx, lotId, actor, now);
   return basis;
+}
+
+export async function readUnresolvedCostQuantities(
+  tx: CostEvidenceTransaction, lotId: number,
+): Promise<Array<{ allocationId: number; intervals: CostQuantityInterval[]; snapshot: HistoricalCostQuantitySnapshot }>> {
+  const rows = await readAllocations(tx, lotId);
+  return rows.filter(row => row.source_evidence.sourceKind === "unresolved_historical_quantity").map(row => {
+    const snapshot = historicalCostQuantitySnapshotSchema.safeParse(row.source_evidence.snapshot);
+    if (!snapshot.success || row.source_evidence.policy !== "retain_unresolved_quantity_v1"
+      || row.direction !== 1 || snapshot.data.unresolvedQuantity !== row.quantity) {
+      throw new CostEvidenceError("COST_UNRESOLVED_QUANTITY_INVALID", "Unresolved cost quantity has invalid retained evidence.", { lotId });
+    }
+    return { allocationId: row.id, intervals: row.intervals, snapshot: snapshot.data };
+  });
 }
 
 /** Historical returns retain their recorded sold-row identity and quantity.

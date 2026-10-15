@@ -11,6 +11,7 @@ import { shipmentLineVersion, versionShipmentLine } from "./shipment-line-versio
 import { ShipmentTrackingError } from "./shipment-tracking.service";
 import { computeShipmentLinePhysicalTotals, validateShipmentPhysicalTotals } from "./shipment-line-physical-values";
 import { lockShipmentSourceCapacity } from "./shipment-source-capacity";
+import { lockInventoryCostGraph } from "../inventory/infrastructure/cost-evidence.repository";
 
 type Dimensions = Pick<InboundShipmentLine, "weightKg" | "lengthCm" | "widthCm" | "heightCm">;
 interface LineStorage {
@@ -196,6 +197,9 @@ export function createShipmentLineMutationOwner(dependencies: Dependencies) {
     shipmentLineResourceIdSchema.parse(command.resourceId);
     if (typeof actorId !== "string" || !actorId.trim()) reject("An authenticated actor is required.", "SHIPMENT_LINE_ACTOR_REQUIRED", 401);
     if (!(now instanceof Date) || !Number.isFinite(now.getTime())) reject("A valid command clock is required.", "SHIPMENT_LINE_CLOCK_INVALID", 500);
+    // Direct HTTP commands also recalculate allocations. Use graph -> shipment
+    // -> PO source order so quantity/value amendments cannot mix source reads.
+    await lockInventoryCostGraph(tx);
     const isLine = command.operation === "update" || command.operation === "delete";
     const initial = isLine ? await storage.getInboundShipmentLineById(command.resourceId, tx) : null;
     if (isLine && !initial) reject("Shipment line not found.", "SHIPMENT_LINE_NOT_FOUND", 404);
