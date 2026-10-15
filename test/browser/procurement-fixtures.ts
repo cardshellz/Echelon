@@ -20,6 +20,11 @@ export async function installFixtures(page: Page) {
     let json: unknown = [];
     if (path === "/api/auth/me") json = { user: { id: "test-user", username: "test", role: "admin" }, permissions: [], roles: ["admin"] };
     else if (path === "/api/settings/procurement") json = { useNewPoEditor: true };
+    else if (/^\/api\/purchase-orders\/\d+\/financial-evidence$/.test(path)) json = {
+      purchaseOrderId: Number(path.split("/")[3]), currency: "USD", state: "complete",
+      invoicedAmountCents: 0, paidAmountCents: 0, outstandingAmountCents: 0,
+      invoiceCount: 0, reviewReasons: [],
+    };
     else if (/^\/api\/purchase-orders\/\d+\/cost-reporting$/.test(path)) json = {
       purchaseOrderId: Number(path.split("/")[3]), configuration: "not_configured", deliveries: [], unqueuedEventCount: 0, truncated: false,
     };
