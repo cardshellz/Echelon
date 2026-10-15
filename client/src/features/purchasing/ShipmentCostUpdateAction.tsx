@@ -32,7 +32,7 @@ export function ShipmentCostUpdateAction({ shipmentId, disabled = false }: { shi
     {current && update.isError && <p role="alert" className="text-sm text-destructive">{shipmentCostWorkflowError(update.error)}</p>}
     {current && update.isSuccess && <p role="status" className="text-sm">
       {update.data.status === "review_required"
-        ? "Cost update saved. Some items still need attention; review their saved reasons below."
+        ? "Shipment charges are saved. Inventory application results, including historical exceptions, are shown below."
         : "Cost update saved. Review the refreshed charge split and results below."}
     </p>}
   </div>;

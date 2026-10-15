@@ -22,6 +22,7 @@ const resultSchema = z.object({
   cogsRowsUpdated: z.number().int().nonnegative().safe(),
   issues: z.array(costIssueSchema).min(1),
 });
+const compareText = (left: string, right: string): number => left < right ? -1 : left > right ? 1 : 0;
 
 /** Only documented historical gaps can be accepted. Currency, source, graph
  * corruption, and ordinary update failures keep their owning repair workflow. */
@@ -35,8 +36,8 @@ export function buildShipmentCostException(facts: ShipmentExceptionFacts): Shipm
     || contract.scope.inboundShipmentLineId !== facts.lineId || contract.scope.inboundShipmentId !== facts.shipmentId
     || contract.issue !== null || contract.currency !== "USD" || contract.totalMills === null || contract.totalMills < 0
     || !["estimated", "confirmed"].includes(contract.evidence)) return null;
-  const issues = [...result.data.issues].sort((a, b) => a.code.localeCompare(b.code)
-    || (a.unresolvedQuantity?.allocationId ?? 0) - (b.unresolvedQuantity?.allocationId ?? 0) || a.message.localeCompare(b.message));
+  const issues = [...result.data.issues].sort((a, b) => compareText(a.code, b.code)
+    || (a.unresolvedQuantity?.allocationId ?? 0) - (b.unresolvedQuantity?.allocationId ?? 0) || compareText(a.message, b.message));
   const missingReceipt = issues.every(issue => issue.code === "COST_HISTORICAL_LINEAGE_MISSING" && !issue.unresolvedQuantity);
   const retainedQuantity = issues.every(issue => issue.code === "COST_UNRESOLVED_QUANTITY_RETAINED"
     && issue.unresolvedQuantity?.component === "landed");

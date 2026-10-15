@@ -10,6 +10,7 @@ export const shipmentExceptionDecisionSchema = z.object({
   fingerprint: costFingerprintSchema,
   reason: z.string().trim().min(10).max(2_000),
   actorId: z.string().trim().min(1).max(200),
+  actorName: z.string().trim().min(1).max(200).optional(),
   recordedAt: z.string().datetime({ offset: true }),
 }).strict();
 
@@ -29,6 +30,7 @@ export const shipmentCostExceptionSchema = z.object({
 }).strict();
 export type ShipmentCostException = z.infer<typeof shipmentCostExceptionSchema>;
 export type ShipmentExceptionDecision = z.infer<typeof shipmentExceptionDecisionSchema>;
+export const shipmentExceptionHistorySchema = z.array(shipmentExceptionDecisionSchema.extend({ amountMills: amount, currency: costCurrencySchema })).max(20);
 
 export const shipmentExceptionContextSchema = z.object({
   shipmentId: shipmentExceptionIdSchema,
@@ -38,6 +40,7 @@ export const shipmentExceptionContextSchema = z.object({
   canApprove: z.boolean(),
   blockedReason: z.string().nullable(),
   review: shipmentCostExceptionSchema.nullable(),
+  history: shipmentExceptionHistorySchema.default([]),
 }).strict();
 export type ShipmentExceptionContext = z.infer<typeof shipmentExceptionContextSchema>;
 export const shipmentExceptionRequestSchema = z.object({
@@ -57,9 +60,10 @@ export function formatShipmentExceptionAmount(mills: number, currency: string): 
   amount.parse(mills);
   costCurrencySchema.parse(currency);
   const value = BigInt(mills);
-  const fraction = (value % BigInt(10_000)).toString().padStart(4, "0");
+  const exactFraction = (value % BigInt(10_000)).toString().padStart(4, "0");
+  const fraction = exactFraction.endsWith("00") ? exactFraction.slice(0, 2) : exactFraction;
   const formatter = new Intl.NumberFormat("en-US", { style: "currency", currency,
-    minimumFractionDigits: 4, maximumFractionDigits: 4 });
+    minimumFractionDigits: fraction.length, maximumFractionDigits: fraction.length });
   return formatter.formatToParts(value / BigInt(10_000))
     .map(part => part.type === "fraction" ? fraction : part.value).join("");
 }

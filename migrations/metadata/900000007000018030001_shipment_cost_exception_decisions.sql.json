@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "migration": "900000007000018030001_shipment_cost_exception_decisions.sql",
+  "generation": 7,
+  "pr": 1803,
+  "ordinal": 1,
+  "after": [
+    "900000006000017980001_invoice_replacement_lineage.sql"
+  ]
+}

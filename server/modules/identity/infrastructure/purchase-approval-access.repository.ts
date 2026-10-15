@@ -7,6 +7,14 @@ export interface PurchaseApprovalIdentityTransaction {
 }
 const resourceId = z.number().int().positive().safe();
 
+/** A frozen display label for a financial audit; authority still comes from
+ * readPurchaseApprovalActor and its transaction-held identity locks. */
+export async function readPurchaseApproverName(tx: PurchaseApprovalIdentityTransaction, userId: string): Promise<string> {
+  const result = await tx.execute(sql`SELECT COALESCE(NULLIF(btrim(display_name),''),username,id) AS name
+    FROM identity.users WHERE id=${purchaseApprovalActorSchema.shape.userId.parse(userId)}`);
+  return z.object({ name: z.string().trim().min(1) }).parse(result.rows[0]).name.slice(0, 200);
+}
+
 /** Identity owns these reads. Share locks hold current account, membership and
  * grant evidence through the purchase transaction; session role strings never
  * authorize a financial command. No password leaves this reader. */

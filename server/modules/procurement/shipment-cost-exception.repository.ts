@@ -1,8 +1,9 @@
 import { sql, type SQL } from "drizzle-orm";
 import { canonicalJson } from "@shared/utils/canonical-json";
-import { shipmentExceptionDecisionSchema, type ShipmentCostException, type ShipmentExceptionContext,
+import { shipmentExceptionDecisionSchema, shipmentExceptionHistorySchema, type ShipmentCostException, type ShipmentExceptionContext,
   type ShipmentExceptionRequest } from "@shared/procurement/shipment-cost-exception";
 import type { PurchaseApprovalActor } from "../identity/domain/purchase-approval-authority";
+import { readPurchaseApproverName } from "../identity/infrastructure/purchase-approval-access.repository";
 import { costFingerprint, costInteger } from "../inventory/infrastructure/cost-evidence-values";
 import { dateValues } from "./purchase-workspace-read";
 import { prepareShipmentCostRevisions } from "./shipment-cost-application.service";
@@ -22,7 +23,7 @@ export async function readShipmentExceptionFacts(tx: ShipmentExceptionReader, li
     LEFT JOIN LATERAL (SELECT id,status,evidence FROM inventory.cost_applications
       WHERE source_revision_id=revision.id ORDER BY id DESC LIMIT 1) application ON true
     LEFT JOIN LATERAL (SELECT jsonb_build_object('id',id,'action',action,'fingerprint',exception_fingerprint,
-      'reason',reason,'actorId',actor_id,'recordedAt',recorded_at) AS decision
+      'reason',reason,'actorId',actor_id,'actorName',actor_name,'recordedAt',recorded_at) AS decision
       FROM procurement.shipment_cost_exception_decisions WHERE inbound_shipment_line_id=line.id ORDER BY id DESC LIMIT 1) decision ON true
     WHERE line.id IN (SELECT value::integer FROM jsonb_array_elements_text(${JSON.stringify(lineIds)}::jsonb)) ORDER BY line.id`);
   return rows.rows.map(row => shipmentExceptionFactsSchema.parse({
@@ -40,6 +41,17 @@ export async function readCurrentShipmentSourceFingerprints(tx: ShipmentExceptio
     ? [[proposal.input.scope.inboundShipmentLineId, costFingerprint(proposal)] as const] : []));
 }
 
+export async function readShipmentExceptionHistory(tx: ShipmentExceptionReader, lineId: number) {
+  const rows = await tx.execute(sql`SELECT id,action,exception_fingerprint,reason,actor_id,actor_name,recorded_at,amount_mills,currency
+    FROM procurement.shipment_cost_exception_decisions WHERE inbound_shipment_line_id=${lineId} ORDER BY id DESC LIMIT 20`);
+  return shipmentExceptionHistorySchema.parse(rows.rows.map(row => ({
+    id: costInteger(row.id, "decisionId", 1), action: row.action, fingerprint: row.exception_fingerprint,
+    reason: row.reason, actorId: row.actor_id, actorName: row.actor_name,
+    recordedAt: dateValues({ at: row.recorded_at }, ["at"]).at,
+    amountMills: costInteger(row.amount_mills, "amountMills"), currency: row.currency,
+  })));
+}
+
 /** A saved acceptance is valid only while its source and issue evidence still
  * match. Check current sources once per shipment, not once per line. */
 export async function readShipmentCostExceptions(tx: ShipmentExceptionReader, lineIds: number[]): Promise<Map<number, ShipmentCostException>> {
@@ -52,7 +64,10 @@ export async function readShipmentCostExceptions(tx: ShipmentExceptionReader, li
     if (review.state === "accepted") {
       if (!current.has(fact.shipmentId)) current.set(fact.shipmentId, await readCurrentShipmentSourceFingerprints(tx, fact.shipmentId));
       const contract = fact.contract as { fingerprint: string };
-      if (current.get(fact.shipmentId)!.get(fact.lineId) !== contract.fingerprint) review.state = "open";
+      if (current.get(fact.shipmentId)!.get(fact.lineId) !== contract.fingerprint) {
+        reviews.set(fact.lineId, { ...review, state: "open" });
+        continue;
+      }
     }
     reviews.set(fact.lineId, review);
   }
@@ -62,18 +77,21 @@ export async function readShipmentCostExceptions(tx: ShipmentExceptionReader, li
 export async function persistShipmentExceptionDecision(tx: ShipmentExceptionReader, facts: ShipmentExceptionFacts,
   context: ShipmentExceptionContext, request: ShipmentExceptionRequest, actor: PurchaseApprovalActor, at: Date) {
   const review = context.review!;
-  const after = { ...review, state: request.action === "accept" ? "accepted" : "open" };
+  const actorName = await readPurchaseApproverName(tx, actor.userId);
+  const { decision: _priorDecision, ...reviewedEvidence } = review;
+  const after = { ...reviewedEvidence, state: request.action === "accept" ? "accepted" : "open",
+    decision: { action: request.action, actorId: actor.userId, actorName, reason: request.reason, recordedAt: at.toISOString() } };
   // This audit changes the disposition of a review only. It never writes to
   // quantities, cost sources, applications, order costs, payments or journals.
   const evidence = { version: 1, reviewedSourceVersion: context.sourceVersion, approval: actor,
     before: review, after, inventoryQuantityDelta: 0, inventoryCostDeltaMills: 0, orderCostDeltaMills: 0 };
   const rows = await tx.execute(sql`INSERT INTO procurement.shipment_cost_exception_decisions
       (inbound_shipment_id,inbound_shipment_line_id,source_revision_id,application_id,previous_decision_id,
-       exception_fingerprint,action,amount_mills,currency,reason,actor_id,recorded_at,evidence)
+       exception_fingerprint,action,amount_mills,currency,reason,actor_id,actor_name,recorded_at,evidence)
     VALUES (${facts.shipmentId},${facts.lineId},${facts.revisionId},${facts.applicationId},${facts.decision?.id ?? null},
-      ${review.fingerprint},${request.action},${review.amountMills},${review.currency},${request.reason},${actor.userId},${at},${canonicalJson(evidence)}::jsonb)
+      ${review.fingerprint},${request.action},${review.amountMills},${review.currency},${request.reason},${actor.userId},${actorName},${at},${canonicalJson(evidence)}::jsonb)
     RETURNING id,recorded_at`);
   return shipmentExceptionDecisionSchema.parse({ id: costInteger(rows.rows[0]?.id, "decisionId", 1),
-    action: request.action, fingerprint: review.fingerprint, reason: request.reason, actorId: actor.userId,
+    action: request.action, fingerprint: review.fingerprint, reason: request.reason, actorId: actor.userId, actorName,
     recordedAt: dateValues({ at: rows.rows[0]?.recorded_at }, ["at"]).at });
 }

@@ -43,7 +43,7 @@ export function registerShipmentCostExceptionRoutes(app: Express, service = crea
       const descriptor = financialCommandFromRequest(req, { actorId, ...shipmentExceptionScope(lineId) });
       const result = await service.decide(lineId, input.data, actorId, descriptor);
       logger.info("procurement.shipment_cost_exception", { line_id: lineId, actor_id: actorId,
-        action: input.data.action, http_status: result.httpStatus, replayed: result.replayed, command_key: descriptor.idempotencyKey });
+        decision_action: input.data.action, http_status: result.httpStatus, replayed: result.replayed, command_key: descriptor.idempotencyKey });
       res.setHeader("Idempotency-Replayed", result.replayed ? "true" : "false");
       res.status(result.httpStatus).json(result.body);
     } catch (error) { failure(error, req, res); }

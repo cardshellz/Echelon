@@ -9,7 +9,7 @@ import { lockInventoryCostGraph } from "../inventory/infrastructure/cost-evidenc
 import { hasQuantityAmendmentAuthority } from "./po-quantity-amendment.policy";
 import type { AmendmentDatabase, AmendmentTransaction } from "./po-quantity-amendment.repository";
 import { buildShipmentCostException, shipmentExceptionVersion, ShipmentCostExceptionError } from "./shipment-cost-exception.policy";
-import { persistShipmentExceptionDecision, readCurrentShipmentSourceFingerprints, readShipmentExceptionFacts } from "./shipment-cost-exception.repository";
+import { persistShipmentExceptionDecision, readCurrentShipmentSourceFingerprints, readShipmentExceptionFacts, readShipmentExceptionHistory } from "./shipment-cost-exception.repository";
 
 export function shipmentExceptionScope(lineId: number) {
   shipmentExceptionIdSchema.parse(lineId);
@@ -38,6 +38,7 @@ async function loadReview(tx: AmendmentTransaction, lineId: number, actorId: str
       : !review ? "This issue needs its source records corrected. Only documented historical quantity or receipt gaps can be accepted."
         : stale ? "Shipment charges or their allocation changed. Update shipment costs, then review the latest inventory result." : null,
     review: stale && review ? { ...review, state: "open" } : review,
+    history: await readShipmentExceptionHistory(tx, lineId),
   });
   return { facts, context, actor };
 }

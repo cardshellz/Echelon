@@ -3,6 +3,7 @@ import { shipmentCostWorkflowIdSchema, shipmentCostReviewSchema, type ShipmentCo
 import type { PoShipmentCostSummaryDatabase } from "./po-shipment-cost-summary.repository";
 import { costInteger } from "../inventory/infrastructure/cost-evidence-values";
 import { dateValues } from "./purchase-workspace-read";
+import { readShipmentCostExceptions } from "./shipment-cost-exception.repository";
 
 /** One read-only snapshot of the current source revision and its last application.
  * Both applied and review outcomes survive navigation, reload and lost responses. */
@@ -20,11 +21,13 @@ export async function readShipmentCostReview(db: PoShipmentCostSummaryDatabase, 
       LEFT JOIN LATERAL (SELECT id,status,recorded_at,evidence FROM inventory.cost_applications application
         WHERE application.source_revision_id=revision.id ORDER BY application.id DESC LIMIT 1) application ON true
       WHERE line.inbound_shipment_id=${shipmentId} ORDER BY line.id`);
+    const exceptions = await readShipmentCostExceptions(tx, result.rows.map(row => costInteger(row.id, "line.id", 1)));
     return shipmentCostReviewSchema.parse({ shipmentId, lines: result.rows.map(row => {
       const outcome = row.result as Record<string, unknown> | null;
       return {
         lineId: costInteger(row.id, "line.id", 1), sku: row.sku == null ? null : String(row.sku),
         sourceIssue: row.source_issue ?? null,
+        exceptionReview: exceptions.get(costInteger(row.id, "line.id", 1)) ?? null,
         application: row.application_id == null ? null : {
           id: costInteger(row.application_id, "application.id", 1),
           recordedAt: dateValues({ recordedAt: row.recorded_at }, ["recordedAt"]).recordedAt,
