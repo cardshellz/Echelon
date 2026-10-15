@@ -35,6 +35,10 @@ import { useAuth } from "@/lib/auth";
 import type { MemberPlanPresentation } from "@shared/membership/member-plan-presentation";
 import { useOrderEditPreview } from "@/hooks/use-order-edit-preview";
 import { canonicalJson } from "@shared/utils/canonical-json";
+import {
+  canConfirmOrderEditPreview,
+  orderEditMatchesInput,
+} from "@/lib/order-edit-confirmation";
 import { OrderEditCodeEntry } from "@/components/order-edits/OrderEditCodeEntry";
 import { useDebounce } from "@/hooks/use-debounce";
 import {
@@ -254,12 +258,16 @@ export function OrderDraft({
   discountCodes: controlledCodes,
   onDiscountCodesChange,
   initialOperation,
+  inline,
 }: {
   order: OrderEditOrder;
   api: OrderEditTransport;
   enabled: boolean;
   staffId: string;
-  onQuote(operation: OrderEditOperation): void;
+  onQuote(
+    operation: OrderEditOperation,
+    confirmDisplayedAmount?: boolean,
+  ): void | Promise<void>;
   onLock(locked: boolean): void;
   onConfigure?: () => void;
   /** Keep item entry responsive while closing a prior quote; submission waits for confirmation. */
@@ -272,6 +280,17 @@ export function OrderDraft({
   onDiscountCodesChange?: (codes: string[]) => void;
   /** Hydrate an existing review from its persisted plan, never from baseline quantities. */
   initialOperation?: OrderEditOperation | null;
+  /** Customer confirmation stays in the editable form; staff retain their existing review. */
+  inline?: {
+    operation: OrderEditOperation | null;
+    now: number;
+    busy: boolean;
+    uncertain: boolean;
+    onCommit(): Promise<void>;
+    onChange(): void;
+    onAbandon(): void;
+    beforeBrowse(): Promise<boolean>;
+  };
 }) {
   const queryClient = useQueryClient();
   const [localCodes, setLocalCodes] = useState<string[]>([]);
@@ -336,9 +355,15 @@ export function OrderDraft({
     setLocked(false);
     setError(null);
   }, [closedOperationId]);
-  const canEdit = order.eligibility.editable && enabled;
-  const mutable = canEdit && !pending && !locked;
+  const ownsUnsubmittedEdit =
+    inline?.operation?.canAbandon === true &&
+    order.activeOperationId === inline.operation.operationId;
+  const canEdit =
+    (order.eligibility.editable || ownsUnsubmittedEdit) && enabled;
+  const mutable =
+    canEdit && !pending && !locked && !inline?.busy && !inline?.uncertain;
   function updateQuantity(id: string, value: string) {
+    inline?.onChange();
     setQuantityTarget({ kind: "line", id });
     command.current = null;
     setError(null);
@@ -365,13 +390,24 @@ export function OrderDraft({
   };
   const validation = orderEditPreviewInputSchema.safeParse(input);
   const valid = validation.success;
+  const prepared =
+    inline?.operation && orderEditMatchesInput(inline.operation, input)
+      ? inline.operation
+      : null;
+  const verified =
+    prepared &&
+    orderEditCanCommit(prepared, inline!.now) &&
+    prepared.quoteAvailable &&
+    prepared.financials?.quoted
+      ? prepared
+      : null;
   const validationMessage =
     !validation.success && changes.length + additions.length > 0
       ? `Check the item quantities: ${validation.error.issues[0]?.message ?? "Enter valid whole numbers."}`
       : null;
   const {
     currentPreview,
-    displayPreview,
+    displayPreview: backgroundDisplay,
     query: preview,
   } = useOrderEditPreview({
     api,
@@ -386,8 +422,16 @@ export function OrderDraft({
       audience === "customer"
         ? nextOrderEditPreviewInput(order, input, quantityTarget)
         : null,
-    active: active && mutable && !reviewBlocked,
+    active: active && mutable && !reviewBlocked && !inline?.operation,
   });
+  const displayPreview = verified?.financials?.quoted
+    ? { financials: verified.financials.quoted, lines: verified.lines }
+    : backgroundDisplay;
+  const displayedDifference = verified
+    ? verified.balanceDueCents - verified.refundDueCents
+    : currentPreview && order.settlement
+      ? currentPreview.financials.totalCents - order.settlement.netPaidCents
+      : null;
   const originalPricing = useQuery({
     queryKey: [
       ORDER_EDITS_API,
@@ -493,19 +537,42 @@ export function OrderDraft({
   async function quote() {
     if (!canEdit || !valid || reviewBlocked || codeEditing || inflight.current)
       return;
+    if (
+      inline &&
+      (inline.busy ||
+        inline.uncertain ||
+        (inline.operation ? !verified : !currentPreview && !locked))
+    )
+      return;
     inflight.current = true;
     setReviewPreview(currentPreview);
     setPending(true);
     setError(null);
     onLock(true);
     try {
+      if (inline && verified) {
+        await inline.onCommit();
+        onLock(false);
+        return;
+      }
       if (!command.current)
         command.current = orderEditQuoteInputSchema.parse({
           ...input,
           requestKey: crypto.randomUUID(),
         });
       savePendingOrderEditQuote(staffId, command.current, sessionStorage);
-      onQuote(await api.quote(command.current));
+      // The initial click approves exactly the visible preview. A changed quote
+      // stays in this form and requires another explicit confirmation.
+      const approved = locked ? null : currentPreview;
+      const result = await api.quote(command.current);
+      await onQuote(
+        result,
+        Boolean(
+          inline &&
+            approved &&
+            canConfirmOrderEditPreview(order, approved, result, Date.now()),
+        ),
+      );
     } catch (failure) {
       const unknown = uncertain(failure);
       setError(message(failure));
@@ -531,6 +598,9 @@ export function OrderDraft({
     const next = orderEditPreviewInputSchema.parse({
       ...input,
       discountCodes: [...discountCodes, code],
+      ...(inline?.operation
+        ? { operationId: inline.operation.operationId }
+        : {}),
     });
     const verified = await api.preview(next);
     queryClient.setQueryData(
@@ -538,9 +608,10 @@ export function OrderDraft({
       verified,
     );
     command.current = null;
+    inline?.onChange();
     changeCodes(next.discountCodes!);
   }
-  if (pending)
+  if (pending && !inline)
     return (
       <OrderEditPreviewReview
         order={order}
@@ -613,8 +684,9 @@ export function OrderDraft({
                   Update quantities or add a product.
                 </p>
               </div>
-              {canEdit && (
+              {(canEdit || inline) && (
                 <OrderEditProductPicker
+                  beforeOpen={inline?.beforeBrowse}
                   api={api}
                   connectionId={order.connectionId}
                   staffId={staffId}
@@ -643,6 +715,7 @@ export function OrderDraft({
                     )
                       return;
                     command.current = null;
+                    inline?.onChange();
                     setError(null);
                     setAdditions((current) =>
                       current.some(
@@ -796,6 +869,7 @@ export function OrderDraft({
                         className="oe-item-remove"
                         disabled={!mutable}
                         onClick={() => {
+                          inline?.onChange();
                           command.current = null;
                           setAdditions((current) =>
                             current.filter(
@@ -829,6 +903,7 @@ export function OrderDraft({
                           value={item.quantity}
                           disabled={!mutable}
                           onChange={(event) => {
+                            inline?.onChange();
                             setQuantityTarget({
                               kind: "addition",
                               id: item.variant.variantId,
@@ -870,6 +945,7 @@ export function OrderDraft({
               onEditing={setCodeEditing}
               onApply={applyCode}
               onRemove={(code) => {
+                inline?.onChange();
                 command.current = null;
                 changeCodes(
                   discountCodes.filter((existing) => existing !== code),
@@ -887,11 +963,19 @@ export function OrderDraft({
           <aside className="oe-edit-sidebar">
             {valid && active && (
               <p role="status" className="text-xs text-muted-foreground">
-                {currentPreview
-                  ? "Updated totals are ready."
-                  : preview.isError
-                    ? "Background totals are unavailable. Review will verify your changes."
-                    : "Calculating updated shipping and tax…"}
+                {pending
+                  ? "Verifying your changes…"
+                  : verified
+                    ? "Verified total. Apply to confirm these changes."
+                    : inline?.operation
+                      ? "Your selections are saved."
+                      : currentPreview
+                        ? "Updated totals are ready."
+                        : preview.isError
+                          ? inline
+                            ? "We couldn't calculate updated totals. Please retry."
+                            : "Background totals are unavailable. Review will verify your changes."
+                          : "Calculating updated shipping and tax…"}
               </p>
             )}
             <OrderEditSummary
@@ -903,20 +987,20 @@ export function OrderDraft({
               }
               difference={
                 audience === "customer" &&
-                currentPreview &&
+                (currentPreview || verified) &&
                 order.settlement &&
-                currentPreview.financials.totalCents !==
-                  order.settlement.netPaidCents
+                displayedDifference !== null &&
+                displayedDifference !== 0
                   ? {
                       label:
-                        currentPreview.financials.totalCents <
-                        order.settlement.netPaidCents
-                          ? "Estimated refund:"
-                          : "Estimated payment due:",
-                      amountCents: Math.abs(
-                        currentPreview.financials.totalCents -
-                          order.settlement.netPaidCents,
-                      ),
+                        displayedDifference < 0
+                          ? verified
+                            ? "Refund:"
+                            : "Estimated refund:"
+                          : verified
+                            ? "Payment due:"
+                            : "Estimated payment due:",
+                      amountCents: Math.abs(displayedDifference),
                     }
                   : undefined
               }
@@ -932,9 +1016,10 @@ export function OrderDraft({
                 ...(displayPreview
                   ? [
                       {
-                        label: currentPreview
-                          ? "Updated order total"
-                          : "Last calculated total",
+                        label:
+                          currentPreview || verified
+                            ? "Updated order total"
+                            : "Last calculated total",
                         totalCents: displayPreview.financials.totalCents,
                       },
                     ]
@@ -948,11 +1033,11 @@ export function OrderDraft({
             ...(order.financials
               ? [{ label: "Current order", financials: order.financials }]
               : []),
-            ...(currentPreview
+            ...(displayPreview && (currentPreview || verified)
               ? [
                   {
                     label: "With your changes",
-                    financials: currentPreview.financials,
+                    financials: displayPreview.financials,
                   },
                 ]
               : []),
@@ -963,22 +1048,87 @@ export function OrderDraft({
         )}
         <div className="oe-editor-footer">
           <p className="text-xs text-muted-foreground">
-            Review the updated total before applying changes.
+            {inline
+              ? pending
+                ? "Verifying and applying your changes…"
+                : "Apply changes to confirm the total shown."
+              : "Review the updated total before applying changes."}
           </p>
+          {inline?.operation?.canAbandon && (
+            <Button
+              type="button"
+              variant="outline"
+              disabled={pending || inline.busy || inline.uncertain}
+              onClick={inline.onAbandon}
+            >
+              {inline.busy && reviewBlocked ? "Canceling edit…" : "Cancel edit"}
+            </Button>
+          )}
+          {inline && !inline.operation && preview.isError && (
+            <Button
+              type="button"
+              variant="outline"
+              disabled={pending || preview.isFetching}
+              onClick={() => void preview.refetch()}
+            >
+              Retry calculation
+            </Button>
+          )}
           <Button
             type="button"
             disabled={
-              !canEdit || !valid || pending || reviewBlocked || codeEditing
+              !canEdit ||
+              !valid ||
+              pending ||
+              reviewBlocked ||
+              codeEditing ||
+              Boolean(
+                inline &&
+                  (inline.busy ||
+                    inline.uncertain ||
+                    (inline.operation
+                      ? !verified
+                      : !currentPreview && !locked)),
+              )
             }
             onClick={quote}
           >
             {pending
-              ? "Verifying changes…"
+              ? inline && verified
+                ? "Applying changes…"
+                : "Verifying changes…"
               : locked
                 ? "Retry same quote request"
-                : "Review changes"}
+                : inline
+                  ? displayedDifference === null
+                    ? "Apply changes"
+                    : displayedDifference > 0
+                      ? `Apply changes · ${formatOrderEditMoney(displayedDifference, order.currency)} due`
+                      : displayedDifference < 0
+                        ? `Apply changes · ${formatOrderEditMoney(-displayedDifference, order.currency)} refund`
+                        : "Apply changes"
+                  : "Review changes"}
           </Button>
         </div>
+        {inline?.operation?.error && (
+          <ErrorMessage
+            text={
+              inline.operation.error.code === "ORDER_EDIT_UNAVAILABLE"
+                ? "We couldn't verify your changes. Your selections are saved. Cancel this attempt and try again."
+                : inline.operation.error.message
+            }
+          />
+        )}
+        {inline?.operation && (
+          <p className="break-all text-xs text-muted-foreground">
+            Edit reference {inline.operation.operationId}
+          </p>
+        )}
+        {prepared?.status === "ready" &&
+          prepared.expiresAt !== null &&
+          Date.parse(prepared.expiresAt) <= inline!.now && (
+            <ErrorMessage text="The verified total has expired. Cancel this attempt to calculate it again. Your selections are saved." />
+          )}
       </CardContent>
     </Card>
   );
@@ -1334,7 +1484,11 @@ export function OrderEditOperationView({
               disabled={busy || isUncertain}
               onClick={onAbandon}
             >
-              {busy && busyAction === "abandon" ? "Canceling edit…" : operation.status === "ready" ? "Change items" : "Cancel edit"}
+              {busy && busyAction === "abandon"
+                ? "Canceling edit…"
+                : operation.status === "ready"
+                  ? "Change items"
+                  : "Cancel edit"}
             </Button>
           )}
           {paymentUrl && (
@@ -1353,7 +1507,9 @@ export function OrderEditOperationView({
               disabled={busy}
               onClick={onRefresh}
             >
-              {busy && (!busyAction || busyAction === "reconcile") ? "Checking…" : "Check status"}
+              {busy && (!busyAction || busyAction === "reconcile")
+                ? "Checking…"
+                : "Check status"}
             </Button>
           )}
         </div>

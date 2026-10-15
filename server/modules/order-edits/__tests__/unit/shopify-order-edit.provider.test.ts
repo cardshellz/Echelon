@@ -1683,6 +1683,17 @@ describe("shipping repricing, commit and payment recovery", () => {
 });
 
 describe("ShopifyOrderEditProvider", () => {
+  it("records the failing read phase and original transport cause without starting an edit", async () => {
+    const cause = Object.assign(new Error("Connection interrupted"), {code:"ECONNRESET"});
+    const h = harness([rawOrder(), cause]);
+    const snapshot = await h.provider.readOrder(4, "100");
+    await expect(h.provider.quote(4,snapshot,{changes:[{lineItemId:"1",quantity:3}],additions:[]},"edit-1")).rejects.toMatchObject({code:"SHOPIFY_UNAVAILABLE"});
+    expect(h.reports).toHaveBeenCalledWith(expect.objectContaining({
+      operationId:"edit-1",phase:"read_current_order",connectionId:4,
+      error:expect.objectContaining({cause:expect.objectContaining({code:"ECONNRESET",message:"Connection interrupted"})}),
+    }));
+    expect(h.requests.some(request => request.query.includes("mutation"))).toBe(false);
+  });
   it.each(["missing code", "duplicate index", "unknown index"])(
     "rejects %s in original allocation evidence before starting an edit",
     async (problem) => {
@@ -4221,10 +4232,14 @@ describe("member function pricing on protected quantity increases", () => {
         "edit-1",
       ),
     ).rejects.toMatchObject({ code: "SHOPIFY_UNAVAILABLE" });
-    expect(h.reports).toHaveBeenCalledExactlyOnceWith({
-      operationId: "edit-1",
-      code: "SHOPIFY_UNAVAILABLE",
-    });
+    expect(h.reports).toHaveBeenCalledWith(expect.objectContaining({
+      operationId: "edit-1", code: "SHOPIFY_UNAVAILABLE", phase: "variant_pricing",
+      error: expect.objectContaining({ cause: expect.objectContaining({ message: "Product read unavailable" }) }),
+    }));
+    expect(h.reports).toHaveBeenCalledWith(expect.objectContaining({
+      operationId: "edit-1", phase: "verify_promotions",
+      error: expect.objectContaining({ cause: expect.objectContaining({ message: "Promotion read unavailable" }) }),
+    }));
     expect(
       h.requests.some((request) => request.query.includes("mutation")),
     ).toBe(false);
