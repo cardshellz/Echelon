@@ -177,8 +177,8 @@ export class EbayListingRecoveryService {
   }
 
   private publicJob(job: StoredEbayListingSyncJob) {
-    const { id, kind, operation, productId, state, code, message, nextAttemptAt, updatedAt } = job;
-    return { id, kind, operation, productId, state, code, message, nextAttemptAt, updatedAt,
+    const { id, kind, operation, productId, state, code, message, nextAttemptAt, updatedAt, progress } = job;
+    return { id, kind, operation, productId, state, code, message, nextAttemptAt, updatedAt, ...(progress ? { progress } : {}),
       ...(code ? { issue: resolveEbayListingIssue({ code, message, productId, jobId: id, state }) } : {}) };
   }
 }

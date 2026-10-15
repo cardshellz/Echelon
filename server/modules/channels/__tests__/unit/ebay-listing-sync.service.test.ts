@@ -88,6 +88,10 @@ describe("existing eBay listing sync execution", () => {
     expect(result.synced).toBe(1);
     expect(result.errors).toBe(0);
     expect(stages).toEqual([
+      "start:prepare_listing",
+      "done:prepare_listing",
+      "start:recover_prior_requests",
+      "done:recover_prior_requests",
       "start:inspection",
       "start:offer:offer-101",
       "done:offer:offer-101",

@@ -31,7 +31,10 @@ export class EbayPublicationCompletionExecution implements EbayListingSyncExecut
       throw new EbayListingSyncError("EBAY_PUBLICATION_OWNER_REQUIRED", "Publication must run through its saved job and identity checkpoints.");
     const inventoryContext = context.jobId && context.requestedBy
       ? { commandKey: context.jobId, actor: context.requestedBy } : undefined;
-    const prepared = await this.prepare(source, context.publicationTarget);
+    let prepared!: PreparedEbayPublication;
+    await stage("prepare_listing", syncStageHash(source), async () => {
+      prepared = await this.prepare(source, context.publicationTarget);
+    });
     assertEbayListingSourceIdentityUnchanged(source, prepared.sourceIdentity);
     const observed = resolveEbayPublicationTarget(source, prepared.inspection);
     const target = context.publicationTarget ?? { ...observed, variants: observed.variants.map(member => ({ ...member, listingId: null })) };
@@ -56,16 +59,18 @@ export class EbayPublicationCompletionExecution implements EbayListingSyncExecut
     ].map(member => ({ destinationKind: "channel_connection", connectionId: target.connectionId, providerKey: "ebay",
       providerScopeType: "account", externalScopeId: target.accountId, externalInventoryItemId: member.sku,
       productId: target.productId, productVariantId: member.variantId }));
-    const recovered = await this.recovery.reconcile(scopes);
-    if (recovered.busy) throw new EbayListingSyncError("PUBLICATION_SCOPE_BUSY", "Waiting for an active inventory publisher before finishing this saved publication.");
-    if (recovered.unresolved.length) throw new EbayListingSyncError("EBAY_SYNC_RESPONSE_EVIDENCE_REQUIRED",
-      `A prior publication request has no provable final response (attempts ${recovered.unresolved.join(", ")}). Review recovery and resume this saved publication before another write.`);
+    await stage("recover_prior_requests", syncStageHash(target), async () => {
+      const recovered = await this.recovery.reconcile(scopes);
+      if (recovered.busy) throw new EbayListingSyncError("PUBLICATION_SCOPE_BUSY", "Waiting for an active inventory publisher before finishing this saved publication.");
+      if (recovered.unresolved.length) throw new EbayListingSyncError("EBAY_SYNC_RESPONSE_EVIDENCE_REQUIRED",
+        `A prior publication request has no provable final response (attempts ${recovered.unresolved.join(", ")}). Review recovery and resume this saved publication before another write.`);
+    });
     let accepted = context.publicationAccepted;
     if (!accepted && !context.publicationWriteCompleted && !context.publicationWriteStarted) {
       // Validate the complete stock scope before even zero-quantity preparation
       // writes. Per-request inventory admission still owns quantity decisions.
       // Accepted publications can finish read-only verification without this gate.
-      await prepared.assertInventoryReady(inventoryContext);
+      await stage("prepare_inventory", syncContentIntentHash(prepared.draft), () => prepared.assertInventoryReady(inventoryContext));
       const result = await this.connector.pushListing({ client: prepared.client, draft: prepared.draft,
         resolvePublishedIdentity: prepared.resolvePublishedIdentity, stage });
       if (!result.published || !result.externalProductId)

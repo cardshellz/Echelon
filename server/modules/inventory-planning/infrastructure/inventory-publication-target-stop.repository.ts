@@ -232,11 +232,17 @@ implements InventoryPublicationTargetStopStore {
  * active SKU mappings plus any outbox rows still in flight. Commands that
  * change what the target publishes lock these first, so they never race a
  * provider request that is mid-flight for the same SKU.
+ * Exact mapping preparation may restrict this to the one product it replans;
+ * destination lifecycle changes omit the restriction and fence every scope.
  */
 export async function loadPublicationTargetScopes(
   client: PoolClient,
   target: PublicationTargetScopeSource,
+  productId?: number,
 ): Promise<QuantityPublicationScope[]> {
+  if (productId !== undefined && (!Number.isSafeInteger(productId) || productId <= 0)) {
+    throw targetError(400, "INVENTORY_PUBLICATION_SCOPE_PRODUCT_INVALID", "A publication scope requires a valid catalog product.");
+  }
   const connectionId = target.destination_kind === "channel_connection"
     ? target.channel_connection_id
     : target.dropship_store_connection_id;
@@ -250,20 +256,28 @@ export async function loadPublicationTargetScopes(
      JOIN inventory.publication_variant_mapping_versions AS mapping
        ON mapping.id=head.active_mapping_id
      WHERE head.publication_target_id=$1
+       AND ($2::integer IS NULL OR EXISTS (SELECT 1 FROM catalog.product_variants variant
+         WHERE variant.id=head.product_variant_id AND variant.product_id=$2))
      UNION
      SELECT outbox.external_inventory_item_id_snapshot
      FROM inventory.inventory_publication_outbox AS outbox
      WHERE outbox.publication_target_id=$1
+       AND ($2::integer IS NULL OR EXISTS (SELECT 1 FROM catalog.product_variants variant
+         WHERE variant.id=outbox.product_variant_id AND variant.product_id=$2))
        AND outbox.state IN ('desired','queued','leased','retryable','drifted','acknowledged')
      ORDER BY 1`,
-    [target.id],
+    [target.id, productId ?? null],
   )).rows;
   if (target.provider_key === "walmart") {
     // Initial zero feeds hold exact SKU admission before channel mappings exist.
     // Lifecycle changes must fence those durable scopes too.
     inventoryItems.push(...(await client.query<{ external_inventory_item_id: string }>(
-      "SELECT external_inventory_item_id FROM inventory.publication_listing_setup_scopes WHERE publication_target_id=$1 ORDER BY external_inventory_item_id",
-      [target.id])).rows);
+      `SELECT scope.external_inventory_item_id FROM inventory.publication_listing_setup_scopes scope
+       WHERE scope.publication_target_id=$1
+         AND ($2::integer IS NULL OR EXISTS (SELECT 1 FROM catalog.product_variants variant
+           WHERE variant.id=scope.product_variant_id AND variant.product_id=$2))
+       ORDER BY scope.external_inventory_item_id`,
+      [target.id, productId ?? null])).rows);
   }
   const scopes = inventoryItems.map((item) => quantityPublicationScopeSchema.parse({
     destinationKind: target.destination_kind,
