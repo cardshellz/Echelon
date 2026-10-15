@@ -1,5 +1,8 @@
 import { defineConfig } from "@playwright/test";
-export default defineConfig({
+import { dropshipFeatureTestMatch } from "./scripts/ci/dropship-browser-features.mjs";
+
+const feature = process.env.BROWSER_FEATURE;
+const config = defineConfig({
   testDir: "./test/browser", testMatch: ["dropship-pricing-*.spec.ts", "dropship-content-*.spec.ts", "dropship-policy-*.spec.ts", "dropship-shipping-estimate.spec.ts", "dropship-wallet.spec.ts", "dropship-orders.spec.ts", "dropship-finance.spec.ts", "dropship-onboarding.spec.ts", "shared-shipping-configuration.spec.ts", "bounded-page-loading.spec.ts", "catalog-conversions.spec.ts"], fullyParallel: false, workers: 1,
   timeout: 45_000, expect: { timeout: 15_000 },
   use: { baseURL: "http://127.0.0.1:5187", serviceWorkers: "block", trace: "retain-on-failure",
@@ -9,3 +12,7 @@ export default defineConfig({
   webServer: { command: "npx vite --host 127.0.0.1 --port 5187 --strictPort", url: "http://127.0.0.1:5187",
     reuseExistingServer: false, timeout: 60_000 },
 });
+// No feature (local full run), or explicit recovery, retains the original suite.
+// An invalid feature is an error, never a successful empty test selection.
+if (feature !== undefined && feature !== "all") config.testMatch = dropshipFeatureTestMatch(feature);
+export default config;

@@ -6,6 +6,7 @@ import { describe, expect, it } from "vitest";
 import {
   BROWSER_SUITES, dependencyClosure, parseChangedFiles, runSelection, selectBrowserSuite,
 } from "../../../scripts/ci/browser-suite-impact.mjs";
+import { DROPSHIP_BROWSER_FEATURES } from "../../../scripts/ci/dropship-browser-features.mjs";
 
 function fixture(extra: Record<string, string> = {}) {
   const sources: Record<string, string> = {
@@ -233,6 +234,11 @@ describe("browser CI impact selection", () => {
     expect(discovered.length).toBeGreaterThan(0);
     const selected = [...repositorySources().files].filter((file) => file.endsWith(".spec.ts") && BROWSER_SUITES.dropship.tests.test(file));
     expect([...new Set(discovered)].sort()).toEqual(selected.sort());
+    // Compare feature ownership against Playwright's own discovery, so additions
+    // to testMatch cannot silently disappear from the selected CI groups.
+    const assigned = Object.values(DROPSHIP_BROWSER_FEATURES).flatMap(group => group.tests);
+    expect(new Set(assigned).size).toBe(assigned.length);
+    expect(assigned.sort()).toEqual([...new Set(discovered)].sort());
   });
 
   it("registers every current HTML-injected dropship harness as a dependency root", () => {

@@ -4,6 +4,7 @@ export interface BrowserSuiteDefinition {
   tests: RegExp;
   roots: string[];
   ownedPrefixes: string[];
+  isolated?: boolean;
 }
 
 export interface BrowserFileChange {
@@ -39,3 +40,9 @@ export function runSelection(
   environment?: Record<string, string | undefined>,
   root?: string,
 ): BrowserSelection;
+
+export function readBrowserChangeEvidence(environment: Record<string, string | undefined>, root: string): {
+  changes: BrowserFileChange[];
+  files: Set<string>;
+  readSource: (file: string) => string;
+};
