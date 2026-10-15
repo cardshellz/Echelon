@@ -6,6 +6,10 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Link, useLocation, useSearch } from "wouter";
 import { useProcurementNavigation } from "@/hooks/use-procurement-navigation";
 import { ShipmentPurchaseOrderLinks } from "@/features/purchasing/ShipmentPurchaseOrderLinks";
+import { ShipmentCostUpdateAction } from "@/features/purchasing/ShipmentCostUpdateAction";
+import { ShipmentCostApplicationReview } from "@/features/purchasing/ShipmentCostApplicationReview";
+import { shipmentCostWorkflowError } from "@/lib/shipment-cost-workflow";
+import { Decimal } from "decimal.js";
 import { parseProcurementJourney, procurementRecordHref } from "@/lib/procurement-navigation";
 import { ProcurementContext } from "@/components/procurement-context";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -67,7 +71,6 @@ import {
   Calendar,
   FileText,
   CheckCircle,
-  BarChart3,
 } from "lucide-react";
 
 // ── Status badges ──
@@ -193,23 +196,23 @@ type AllocationStatus = {
 };
 
 const ALLOCATION_STATUS_LABELS: Record<AllocationStatus["status"], string> = {
-  blocked: "Blocked",
-  no_costs: "No Costs",
-  needs_allocation: "Needs Allocation",
-  allocated_with_warnings: "Allocated With Warnings",
-  allocated: "Allocated",
+  blocked: "Check shipment details",
+  no_costs: "No shipment charges",
+  needs_allocation: "Cost update needed",
+  allocated_with_warnings: "Charge split needs review",
+  allocated: "Charge split current",
 };
 
 const ALLOCATION_COST_STATUS_LABELS: Record<string, string> = {
   zero_amount: "Zero Amount",
-  needs_allocation: "Needs Allocation",
-  stale_allocation: "Stale Allocation",
-  stale_allocation_basis: "Stale Basis",
+  needs_allocation: "Not split yet",
+  stale_allocation: "Update needed",
+  stale_allocation_basis: "Update needed",
   invalid_value_basis: "Data needs review",
   invalid_allocation_basis: "Data needs review",
-  allocation_mismatch: "Mismatch",
+  allocation_mismatch: "Totals differ",
   allocated_with_fallback: "Even Split",
-  allocated: "Allocated",
+  allocated: "Split recorded",
 };
 
 function compareShipmentLinesByEntryOrder(a: any, b: any): number {
@@ -228,15 +231,23 @@ function compareShipmentLinesByEntryOrder(a: any, b: any): number {
   return Number(a?.id ?? 0) - Number(b?.id ?? 0);
 }
 
-const LANDED_COST_SKIP_LABELS: Record<string, string> = {
-  ambiguous_variant_landed_cost: "Ambiguous same-SKU landed cost",
-  invalid_lot_variant: "Invalid lot variant",
-  landed_cost_not_finalized: "Landed cost not finalized",
-  no_matching_finalized_landed_cost: "No finalized landed cost match",
-};
+function allocationBasisLabel(cost: AllocationStatus["costs"][number]): string {
+  if (typeof cost.basisTotal !== "number" || !Number.isFinite(cost.basisTotal)
+    || ["invalid_value_basis", "invalid_allocation_basis"].includes(cost.status)) return "—";
+  // This presentation value may contain subcent precision. Decimal prevents
+  // the display conversion from adding binary rounding to the server basis.
+  if (cost.method === "by_value") return `$${new Decimal(cost.basisTotal).div(100).toFixed(2)}`;
+  return cost.basisTotal.toLocaleString(undefined, { maximumFractionDigits: 3 });
+}
 
-function formatLandedCostSkipReason(reason: string) {
-  return LANDED_COST_SKIP_LABELS[reason] || reason.replace(/_/g, " ");
+function allocationIssueLabel(issue: AllocationStatus["issues"][number], costs: AllocationStatus["costs"], canUpdateCosts: boolean): string {
+  const cost = costs.find(item => item.costId === issue.costId);
+  const name = cost?.costType.replace(/_/g, " ") ?? "shipment charge";
+  if (issue.code === "stale_allocation_basis") return `The ${name} charge is saved, but its split across products uses older shipment or PO values. ${canUpdateCosts ? "Update shipment costs" : "Recalculate the charge split"} to use the current values.`;
+  if (issue.code === "cost_not_allocated") return `The ${name} charge is saved and still needs to be split across the shipment's products.`;
+  if (issue.code === "allocation_total_mismatch") return `The saved product shares do not add up to the ${name} charge. Recalculate them with the cost update.`;
+  if (issue.code === "stale_allocation_line") return `The ${name} charge includes a product line that has changed. Recalculate its split with the cost update.`;
+  return issue.message;
 }
 
 const PAYMENT_STATUS_BADGES: Record<string, { label: string; variant: "default" | "secondary" | "outline" | "destructive"; className?: string }> = {
@@ -352,8 +363,6 @@ export default function InboundShipmentDetail() {
   const [showAddCostDialog, setShowAddCostDialog] = useState(false);
   const [showEditCostDialog, setShowEditCostDialog] = useState(false);
   const [cancelReason, setCancelReason] = useState("");
-  const [lastLandedCostPush, setLastLandedCostPush] = useState<LandedCostPushResult | null>(null);
-  const [costPushRetryRequired, setCostPushRetryRequired] = useState(false);
   const [shipmentReceiptPackResolution, setShipmentReceiptPackResolution] = useState<ShipmentReceiptPackResolution | null>(null);
   const [pendingShipmentReceipt, setPendingShipmentReceipt] = useState<{ shipmentId: number; purchaseOrderId: number } | null>(null);
   const [checkingShipmentReceiptPacks, setCheckingShipmentReceiptPacks] = useState(false);
@@ -459,7 +468,7 @@ export default function InboundShipmentDetail() {
     enabled: !!shipmentId,
   });
 
-  const { data: allocationStatus } = useQuery<AllocationStatus>({
+  const { data: allocationStatus, isError: allocationStatusError, refetch: refetchAllocationStatus } = useQuery<AllocationStatus>({
     queryKey: shipmentAllocationStatusQueryKey,
     // Loaded whenever the shipment is open so the missing-dimensions banner + fix modal
     // (and the close-blocked auto-open) always have allocation data, regardless of tab.
@@ -732,14 +741,13 @@ export default function InboundShipmentDetail() {
         invalidatePoViews();
         const costResult = result.costApplication;
         if (costResult) {
-          setCostPushRetryRequired(costResult.status === "retry_required");
-          if (costResult.status !== "retry_required") setLastLandedCostPush(costResult);
+          void queryClient.invalidateQueries({ queryKey: [`/api/inbound-shipments/${shipmentId}/cost-review`] });
           if (costResult.status !== "applied") {
             setActiveTab("allocation");
             toast({ title: "Shipment closed; inventory costs need attention",
               description: costResult.status === "retry_required"
-                ? "The inventory cost update failed. Retry Push Costs to Lots."
-                : "Some inventory costs need review. See the allocation results.",
+                ? "Use Update shipment costs in Cost review to retry the update."
+                : "See the saved reasons in Cost review.",
               variant: "destructive" });
             return;
           }
@@ -954,49 +962,11 @@ export default function InboundShipmentDetail() {
     },
     onSuccess: async () => {
       await refreshShipmentCostingViews();
-      toast({ title: "Allocation complete", description: "Costs allocated to shipment lines" });
+      await invalidatePoViews();
+      toast({ title: "Charge split recalculated", description: "The shipment charges have been split across its products." });
     },
     onError: (err: Error) => {
-      toast({ title: "Error", description: err.message, variant: "destructive" });
-    },
-  });
-
-  const finalizeMutation = useMutation({
-    mutationFn: async () => {
-      const res = await apiRequest("POST", `/api/inbound-shipments/${shipmentId}/finalize`);
-      return res.json();
-    },
-    onSuccess: async () => {
-      await refreshShipmentCostingViews();
-      toast({ title: "Finalized", description: "Landed costs finalized and snapshotted" });
-    },
-    onError: (err: Error) => {
-      toast({ title: "Error", description: err.message, variant: "destructive" });
-    },
-  });
-
-  const pushCostsToLotsMutation = useMutation({
-    mutationFn: async (): Promise<LandedCostPushResult> => {
-      const res = await apiRequest("POST", `/api/inbound-shipments/${shipmentId}/push-costs-to-lots`);
-      return res.json();
-    },
-    onSuccess: async (result) => {
-      setCostPushRetryRequired(false);
-      setLastLandedCostPush(result);
-      await refreshShipmentCostingViews();
-      const skippedCount = result.skipped?.length ?? 0;
-      const needsReview = result.status === "review_required";
-      toast({
-        title: needsReview ? "Landed cost push needs review" : "Landed costs pushed",
-        description:
-          skippedCount > 0
-            ? `${result.updated} lot${result.updated === 1 ? "" : "s"} updated, ${skippedCount} skipped`
-            : `${result.updated} lot${result.updated === 1 ? "" : "s"} updated`,
-        variant: needsReview ? "destructive" : "default",
-      });
-    },
-    onError: (err: Error) => {
-      toast({ title: "Error", description: err.message, variant: "destructive" });
+      toast({ title: "Could not recalculate the charge split", description: shipmentCostWorkflowError(err), variant: "destructive" });
     },
   });
 
@@ -1358,7 +1328,7 @@ export default function InboundShipmentDetail() {
         <TabsList className="h-auto flex-wrap justify-start gap-1">
           <TabsTrigger value="lines">Lines ({lines.length})</TabsTrigger>
           <TabsTrigger value="costs">Costs ({costs.length})</TabsTrigger>
-          <TabsTrigger value="allocation">Allocation</TabsTrigger>
+          <TabsTrigger value="allocation">Cost review</TabsTrigger>
           <TabsTrigger value="invoices">Invoices ({invoicesData?.summary?.invoiceCount ?? 0})</TabsTrigger>
           <TabsTrigger value="timeline">Timeline</TabsTrigger>
           <TabsTrigger value="tracking">Tracking</TabsTrigger>
@@ -1787,52 +1757,20 @@ export default function InboundShipmentDetail() {
         {/* ══ Tab 3: Allocation ══ */}
         <TabsContent value="allocation" className="space-y-4">
           <p className="text-sm text-muted-foreground">
-            Costs allocate automatically when you add or edit a cost, and finalize + push to inventory
-            automatically when the shipment is closed. This tab is the read-only result.
+            Review how shipment charges are split across products and applied to stock and sold orders.
+            Any items that still need attention are listed here.
           </p>
-          <details className="text-sm">
-            <summary className="cursor-pointer select-none text-muted-foreground hover:text-foreground">
-              Advanced — manually re-run (rarely needed)
-            </summary>
-            <div className="flex gap-2 flex-wrap mt-2">
-              <Button
-                variant="outline"
-                onClick={() => runAllocationMutation.mutate()}
-                disabled={runAllocationMutation.isPending || lines.length === 0}
-                className="min-h-[44px]"
-              >
-                <BarChart3 className={`h-4 w-4 mr-2 ${runAllocationMutation.isPending ? "animate-spin" : ""}`} />
-                {runAllocationMutation.isPending ? "Allocating..." : "Run Allocation"}
-              </Button>
-              {shipment.status === "costing" && (
-                <Button
-                  onClick={() => finalizeMutation.mutate()}
-                  disabled={finalizeMutation.isPending}
-                  className="min-h-[44px]"
-                >
-                  <CheckCircle className="h-4 w-4 mr-2" />
-                  {finalizeMutation.isPending ? "Finalizing..." : "Finalize"}
-                </Button>
-              )}
-              {["costing", "closed"].includes(shipment.status) && (
-                <Button
-                  variant="outline"
-                  onClick={() => pushCostsToLotsMutation.mutate()}
-                  disabled={pushCostsToLotsMutation.isPending}
-                  className="min-h-[44px]"
-                >
-                  <RefreshCw className={`h-4 w-4 mr-2 ${pushCostsToLotsMutation.isPending ? "animate-spin" : ""}`} />
-                  {pushCostsToLotsMutation.isPending ? "Pushing..." : "Push Costs to Lots"}
-                </Button>
-              )}
-            </div>
-          </details>
+
+          {allocationStatusError && <div role="alert" className="rounded-md border p-4 space-y-2 text-sm">
+            <p>The current charge split could not be loaded. Reload it before updating costs.</p>
+            <Button variant="outline" onClick={() => void refetchAllocationStatus()}>Reload charge split</Button>
+          </div>}
 
           {allocationStatus && (
             <Card role="region" aria-label="Allocation status">
               <CardHeader className="pb-3">
                 <div className="flex flex-wrap items-center justify-between gap-3">
-                  <CardTitle className="text-base">Allocation Status</CardTitle>
+                  <CardTitle className="text-base">Shipment cost review</CardTitle>
                   <Badge
                     variant={allocationStatus.blockerCount > 0 ? "destructive" : allocationStatus.warningCount > 0 ? "outline" : "secondary"}
                     className={allocationStatus.warningCount > 0 && allocationStatus.blockerCount === 0 ? "border-amber-500 text-amber-700" : undefined}
@@ -1843,7 +1781,7 @@ export default function InboundShipmentDetail() {
               </CardHeader>
               <CardContent className="space-y-4">
                 {allocationStatus.costs.some((cost) => cost.method === "by_value") && (
-                  <p className="text-sm text-muted-foreground">By value uses each PO line's product total, prorated to the pieces in this shipment. Allocation preserves subcent product values.</p>
+                  <p className="text-sm text-muted-foreground">Charges split by product value use the PO value of the pieces in this shipment.</p>
                 )}
                 <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
                   <div>
@@ -1851,15 +1789,15 @@ export default function InboundShipmentDetail() {
                     <div className="font-mono text-sm">{allocationStatus.lineCount}</div>
                   </div>
                   <div>
-                    <div className="text-xs text-muted-foreground">Allocatable Costs</div>
+                    <div className="text-xs text-muted-foreground">Shipment charges</div>
                     <div className="font-mono text-sm">{allocationStatus.allocatableCostCount}</div>
                   </div>
                   <div>
-                    <div className="text-xs text-muted-foreground">Effective Cost</div>
+                    <div className="text-xs text-muted-foreground">Total charges</div>
                     <div className="font-mono text-sm">{formatCents(allocationStatus.effectiveCostCents)}</div>
                   </div>
                   <div>
-                    <div className="text-xs text-muted-foreground">Unallocated Delta</div>
+                    <div className="text-xs text-muted-foreground">Amount not yet split</div>
                     <div className={`font-mono text-sm ${allocationStatus.unallocatedCents === 0 ? "" : "text-amber-700"}`}>
                       {formatCents(allocationStatus.unallocatedCents)}
                     </div>
@@ -1871,27 +1809,30 @@ export default function InboundShipmentDetail() {
                     {allocationStatus.issues.map((issue) => (
                       <div key={`${issue.code}-${issue.costId ?? issue.lineId ?? "shipment"}`} className="flex flex-wrap items-center gap-2 text-sm">
                         <AlertTriangle className={`h-4 w-4 ${issue.severity === "blocker" ? "text-destructive" : "text-amber-600"}`} />
-                        <Badge variant={issue.severity === "blocker" ? "destructive" : "outline"}>{issue.severity}</Badge>
-                        <span>{issue.message}</span>
+                        <span>{allocationIssueLabel(issue, allocationStatus.costs, ["costing", "closed"].includes(shipment.status))}</span>
                       </div>
                     ))}
                   </div>
                 )}
-                {allocationStatus.issues.some((issue) => issue.code === "stale_allocation_basis") && (
-                  <Button variant="outline" className="min-h-[44px]" disabled={runAllocationMutation.isPending || lines.length === 0} onClick={() => runAllocationMutation.mutate()}>
-                    {runAllocationMutation.isPending ? "Re-running allocation..." : "Re-run allocation"}
-                  </Button>
-                )}
+                {["costing", "closed"].includes(shipment.status) ? <div className="space-y-2 rounded-md bg-muted/40 p-3">
+                  <p className="text-sm">Update shipment costs recalculates this split and updates stock and sold-order costs. {shipment.status === "closed" && "This shipment stays closed; cost adjustments are recorded automatically."}</p>
+                  <ShipmentCostUpdateAction key={shipment.id} shipmentId={shipment.id} disabled={allocationStatusError || lines.length === 0} />
+                </div> : shipment.status !== "cancelled" && <div className="space-y-2">
+                  <p className="text-sm text-muted-foreground">The charge split updates when charges change. Stock and sold-order costs are updated when the shipment closes.</p>
+                  {hasPermission("purchasing", "edit") && <Button variant="outline" className="min-h-[44px]" disabled={runAllocationMutation.isPending || lines.length === 0 || allocationStatusError} onClick={() => runAllocationMutation.mutate()}>
+                    {runAllocationMutation.isPending ? "Recalculating…" : "Recalculate charge split"}
+                  </Button>}
+                </div>}
 
                 {allocationStatus.costs.length > 0 && (
                   <Table>
                     <TableHeader>
                       <TableRow>
                         <TableHead>Cost</TableHead>
-                        <TableHead>Method</TableHead>
-                        <TableHead className="text-right">Effective</TableHead>
-                        <TableHead className="text-right">Allocated</TableHead>
-                        <TableHead className="text-right">Basis</TableHead>
+                        <TableHead>Split by</TableHead>
+                        <TableHead className="text-right">Charge amount</TableHead>
+                        <TableHead className="text-right">Assigned to products</TableHead>
+                        <TableHead className="text-right">Value used for split</TableHead>
                         <TableHead>Status</TableHead>
                       </TableRow>
                     </TableHeader>
@@ -1904,13 +1845,12 @@ export default function InboundShipmentDetail() {
                           </TableCell>
                           <TableCell className="text-sm">
                             {ALLOCATION_METHOD_LABELS[cost.method] || cost.method.replace(/_/g, " ")}
-                            <div className="text-xs text-muted-foreground">{cost.methodSource.replace(/_/g, " ")}</div>
                           </TableCell>
                           <TableCell className="text-right font-mono">{formatCents(cost.effectiveCents)}</TableCell>
                           <TableCell className="text-right font-mono">{formatCents(cost.allocatedCents)}</TableCell>
                           <TableCell className="text-right font-mono">
-                            {cost.basisTotal === null || ["invalid_value_basis", "invalid_allocation_basis"].includes(cost.status) ? "—" : Number(cost.basisTotal || 0).toLocaleString(undefined, { maximumFractionDigits: cost.method === "by_value" ? 6 : 3 })}
-                            {cost.method === "by_value" && <div className="text-xs font-sans text-muted-foreground">PO product value (cents)</div>}
+                            {allocationBasisLabel(cost)}
+                            {cost.method === "by_value" && <div className="text-xs font-sans text-muted-foreground">PO product value</div>}
                           </TableCell>
                           <TableCell>
                             <Badge
@@ -1929,39 +1869,7 @@ export default function InboundShipmentDetail() {
             </Card>
           )}
 
-          {costPushRetryRequired && (
-            <div role="alert" className="rounded-md border border-destructive p-4 text-sm text-destructive">
-              The shipment is closed, but its inventory cost update failed. Use Push Costs to Lots to retry.
-            </div>
-          )}
-          {lastLandedCostPush && (
-            <Card className={lastLandedCostPush.status === "review_required" ? "border-amber-300 bg-amber-50/60 dark:bg-amber-950/10" : "border-green-300 bg-green-50/60 dark:bg-green-950/10"}>
-              <CardContent className="p-4 space-y-3">
-                <div className="flex flex-wrap items-center gap-2 text-sm">
-                  <Badge variant={lastLandedCostPush.status === "review_required" ? "destructive" : "secondary"}>
-                    {lastLandedCostPush.status === "review_required" ? "Needs review" : "Applied"}
-                  </Badge>
-                  <Badge variant={lastLandedCostPush.skipped?.length ? "outline" : "secondary"}>
-                    {lastLandedCostPush.updated} lots updated
-                  </Badge>
-                  <Badge variant={lastLandedCostPush.skipped?.length ? "destructive" : "outline"}>
-                    {lastLandedCostPush.skipped?.length ?? 0} issues to review
-                  </Badge>
-                  <span className="text-muted-foreground">{lastLandedCostPush.total} lots in applied cost results</span>
-                </div>
-                {lastLandedCostPush.skipped && lastLandedCostPush.skipped.length > 0 && (
-                  <div className="space-y-2">
-                    {lastLandedCostPush.skipped.map((item, index) => (
-                      <div key={`${item.applicationId}-${item.reason}-${index}`} className="flex flex-wrap items-center gap-2 text-sm">
-                        <AlertTriangle className="h-4 w-4 text-amber-600" />
-                        <span>{item.message || formatLandedCostSkipReason(item.reason)}</span>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </CardContent>
-            </Card>
-          )}
+          {["costing", "closed"].includes(shipment.status) && <ShipmentCostApplicationReview key={shipment.id} shipmentId={shipment.id} />}
 
           <Card>
             <Table>

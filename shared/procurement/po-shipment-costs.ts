@@ -83,14 +83,16 @@ export function shipmentCostReviewGuidance(issues: readonly CostIssue[]): {
       explanation:
         "The earlier cost update could not distribute the charge exactly across the received units.",
       nextStep:
-        "Retry the inventory cost update. The current calculation will check the exact amounts and lot history again.",
+        "Select Update shipment costs. It recalculates the charge split and updates stock and sold-order costs.",
     };
   }
   if ([...codes].some((code) => code.startsWith("LANDED_ALLOCATION"))) {
     return {
-      explanation: null,
+      explanation: codes.has("LANDED_ALLOCATION_MISSING")
+        ? "These shipment lines do not have a saved charge split yet."
+        : "The saved charge split needs updating before it can be used for inventory costs.",
       nextStep:
-        "Open the shipment's Allocation tab, correct the allocation and finalize it before retrying.",
+        "Select Update shipment costs to recalculate the charge split and apply it. If a source value is missing, correct the named shipment line or charge first.",
     };
   }
   if (
@@ -102,7 +104,7 @@ export function shipmentCostReviewGuidance(issues: readonly CostIssue[]): {
     return {
       explanation: null,
       nextStep:
-        "Check the shipment charges and their supplier invoice, then retry the inventory cost update.",
+        "Check the shipment charges and their supplier invoice, then select Update shipment costs.",
     };
   }
   if (
@@ -131,7 +133,7 @@ export function shipmentCostReviewGuidance(issues: readonly CostIssue[]): {
     return {
       explanation: null,
       nextStep:
-        "Confirm the shipment charges and finalize their allocation, then update inventory costs.",
+        "Check that the shipment charges are correct, then select Update shipment costs.",
     };
   }
   if (codes.has("LANDED_CHARGES_UNCONFIRMED")) {
@@ -145,12 +147,12 @@ export function shipmentCostReviewGuidance(issues: readonly CostIssue[]): {
     return {
       explanation: null,
       nextStep:
-        "Retry the inventory cost update to check the current confirmed charges and allocation.",
+        "Select Update shipment costs to apply the current confirmed charges and charge split.",
     };
   }
   return {
     explanation: null,
     nextStep:
-      "Open the shipment to review the recorded reason. Retry the cost update after correcting its source.",
+      "Check the reason shown above. Select Update shipment costs after correcting the affected record.",
   };
 }
