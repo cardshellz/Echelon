@@ -3,6 +3,14 @@ import { resolveEbayListingIssue, safeListingDiagnostic } from "@shared/ebay-lis
 import { ebayListingIssueSchema } from "@shared/types/ebay-listing-issue";
 
 describe("shared eBay issue actions", () => {
+  it("offers the normal checked sync for an invalid prepared draft, without telling the operator to repair a mapping", () => {
+    const result = resolveEbayListingIssue({ code: "EBAY_SYNC_DRAFT_SCOPE_INVALID", state: "needs_attention", productId: 1,
+      message: "The prepared update contains a different listing, group or SKU identity." });
+    expect(result).toMatchObject({ retryable: true, action: { kind: "retry_sync", label: "Sync existing listing" } });
+    expect(result.message).toContain("prepared update");
+    expect(result.message).not.toContain("different listing");
+    expect(result.nextStep).toContain("automatically");
+  });
   it.each([
     ["EBAY_LISTING_FEED_UNAVAILABLE","contact_support",false],
     ["EBAY_FEED_QUANTITY_UNAVAILABLE","contact_support",false],

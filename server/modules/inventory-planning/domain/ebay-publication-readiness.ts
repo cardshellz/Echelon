@@ -16,14 +16,17 @@ export type EbayPublicationMappingRow = z.infer<typeof ebayPublicationMappingRow
 
 /** Existing holds/differing drafts are decisions to preserve. A new
  * mapping is a proposed exact SKU identity, never a fabricated provider item. */
-export function reviewEbayPublicationMember(source: Pick<InventoryEbayPublicationReadinessInput, "productId">,
+export function reviewEbayPublicationMember(source: Pick<InventoryEbayPublicationReadinessInput, "productId" | "purpose">,
   input: InventoryEbayPublicationReadinessInput["variants"][number], targetId: number | null,
   matches: readonly EbayPublicationMappingRow[]) {
   const row = matches.length === 1 ? matches[0] : undefined;
   const blockers: PublicationMembershipBlocker[] = [];
   const block = (code: string, message: string, action: PublicationMembershipBlocker["action"] = "review_mapping") =>
     blockers.push({ code, message, action, productVariantId: input.productVariantId });
-  if (!row || row.product_id !== source.productId || (row.external_sku ?? row.sku) !== input.sku || !row.eligible)
+  // Maintenance still needs the exact retained identity. The channel selection
+  // owner decides whether that member may publish stock or must remain at zero.
+  if (!row || row.product_id !== source.productId || (row.external_sku ?? row.sku) !== input.sku
+    || (!row.eligible && source.purpose !== "sync"))
     block("STOCK_LISTING_SOURCE_CHANGED", "The catalog variant or its exact eBay SKU changed. Review the product mapping again.", "review_variant");
   if (row?.held_at) block("STOCK_LISTING_HELD", "This SKU's stock is on hold. Review the hold before publishing.", "configure_inventory");
   if (row?.conflicts.length) block("STOCK_LISTING_MAPPING_CONFLICT", `This eBay SKU is already mapped to catalog variant ${row.conflicts.join(", ")}. Review both mappings.`);
