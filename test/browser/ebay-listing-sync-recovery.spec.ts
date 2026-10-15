@@ -71,6 +71,28 @@ test("an old invalid draft and a new catalog variant do not force mapping review
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
 });
 
+for (const action of ["primary", "issue"] as const) {
+test(`a ${action} sync retry with conflicting feed IDs checks the existing listing and never starts publishing`, async ({ page }) => {
+  const state = await setupEbayChannelPage(page);
+  state.externalListingId = null;
+  state.externalListingIdentityConflict = true;
+  state.jobs = [{ ...job, operation: "sync", state: "needs_attention", code: "EBAY_SYNC_DRAFT_SCOPE_INVALID",
+    message: "The prepared update contains a different listing, group or SKU identity." }];
+  const conflict = resolveEbayListingIssue({ code: "EBAY_SYNC_PROVIDER_IDENTITY_CHANGED", productId: 1 });
+  state.response = { ...pending, pending: 0, errors: 1, jobs: [{ ...job, operation: "sync", state: "needs_attention",
+    code: conflict.code, message: conflict.message, issue: conflict }] };
+  await page.reload();
+  if (action === "primary") await page.getByTitle("Sync this listing", { exact: true }).filter({ visible: true }).click();
+  else await page.getByRole("button", { name: "Sync existing listing", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Review listing mapping", exact: true })).toBeVisible();
+  await expect(page.getByTitle("Sync this listing", { exact: true }).filter({ visible: true })).toBeDisabled();
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  expect(state.requests).toEqual(["/api/ebay/listings/sync-product/1"]);
+  expect(state.errors).toEqual([]);
+  expect(state.unexpected).toEqual([]);
+});
+}
+
 test("a real provider identity conflict still requires its mapping correction", async ({ page }) => {
   const state = await setupEbayChannelPage(page);
   state.jobs = [{ ...job, operation: "sync", state: "needs_attention", code: "EBAY_SYNC_PROVIDER_IDENTITY_CHANGED",
@@ -918,18 +940,28 @@ test("a lost sync response clears only after its exact command appears in saved 
   expect(state.errors).toEqual([]); expect(state.unexpected).toEqual([]);
 });
 
-test("an older completed job cannot hide a newer unsaved sync failure", async ({ page }) => {
+test("an older completed job cannot hide a lost response and normal Sync retries the same command", async ({ page }) => {
   const state = await setupEbayChannelPage(page);
   state.jobs = [{ ...job, state: "completed" }];
   await page.reload(); await page.clock.install();
-  await page.route("**/api/ebay/listings/sync-product/1", (route) => route.abort("failed"));
+  const commandKeys: string[] = [];
+  await page.route("**/api/ebay/listings/sync-product/1", async (route) => {
+    commandKeys.push(route.request().postDataJSON().commandKey);
+    if (commandKeys.length === 1) return route.abort("failed");
+    state.jobs = [{ ...job, id: commandKeys[0], state: "queued" }];
+    return route.fulfill({ json: { ...pending, jobs: state.jobs } });
+  });
   await page.getByTitle("Sync this listing", { exact: true }).filter({ visible: true }).click();
   await expect(page.getByText("Listed · update paused", { exact: true }).filter({ visible: true })).toBeVisible();
   // The older job can be observed again with a later read. It still does not
   // prove acceptance of the newer command whose response was lost.
   await page.clock.fastForward(10_100);
   await expect(page.getByRole("button", { name: "Retry this request", exact: true })).toBeVisible();
-  await expect(page.getByTitle("Sync this listing", { exact: true }).filter({ visible: true })).toBeDisabled();
+  await expect(page.getByTitle("Sync this listing", { exact: true }).filter({ visible: true })).toBeEnabled();
+  await page.getByTitle("Sync this listing", { exact: true }).filter({ visible: true }).click();
+  await expect.poll(() => commandKeys.length).toBe(2);
+  expect(commandKeys[1]).toBe(commandKeys[0]);
+  await expect(page.getByRole("button", { name: "Retry this request", exact: true })).toHaveCount(0);
   expect(state.errors).toEqual([]); expect(state.unexpected).toEqual([]);
 });
 

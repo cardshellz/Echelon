@@ -47,6 +47,27 @@ describe("existing eBay listing sync execution", () => {
       unresolved: [],
     })),
   });
+  it.each([true, false])("finishes accepted photo readback after a stock hold with checkpoint=%s", async hasCheckpoint => {
+    const fixture = syncProviderFixture(), prepared = await fixture.prepare();
+    const inventoryReady = vi.fn(async () => {});
+    prepared.assertInventoryReady = inventoryReady;
+    const executor = new EbayExistingListingSyncExecution(async () => prepared, recovered(), new EbayMarketplaceListingConnector());
+    await executor.execute(syncIdentity, async (_key, _hash, work) => work());
+    inventoryReady.mockRejectedValue(new EbayListingSyncError("STOCK_LISTING_GLOBAL_STOP", "Stock is paused."));
+    const writes = vi.mocked(fixture.client.createOrReplaceInventoryItem).mock.calls.length;
+    expect(await executor.execute(syncIdentity, async (_key, _hash, work) => work(),
+      hasCheckpoint ? syncContentIntentHash(prepared.draft) : null)).toMatchObject({ synced: 1, errors: 0 });
+    expect(inventoryReady).toHaveBeenCalledTimes(1);
+    expect(fixture.client.createOrReplaceInventoryItem).toHaveBeenCalledTimes(writes);
+  });
+  it("stops a new photo mutation when automatic stock preparation is blocked", async () => {
+    const fixture = syncProviderFixture(), prepared = await fixture.prepare();
+    prepared.assertInventoryReady = async () => { throw new EbayListingSyncError("STOCK_LISTING_HELD", "Stock is held."); };
+    const executor = new EbayExistingListingSyncExecution(async () => prepared, recovered(), new EbayMarketplaceListingConnector());
+    await expect(executor.execute(syncIdentity, async (_key, _hash, work) => work())).rejects.toMatchObject({ code: "STOCK_LISTING_HELD" });
+    expect(fixture.client.createOrReplaceInventoryItem).not.toHaveBeenCalled();
+    expect(fixture.client.updateOffer).not.toHaveBeenCalled();
+  });
   it("checks the exact identity, recovers, journals each primitive and verifies published content before completion", async () => {
     const fixture = syncProviderFixture(),
       recovery = recovered(),

@@ -110,6 +110,7 @@ dbDescribe.sequential("reviewed eBay publication stock enrollment, real PostgreS
         if (quantity === undefined) throw new Error("Expected the admitted canonical inventory quantity");
         items.set(row.sku, { ...current, availability: { shipToLocationAvailability: { quantity } } });
         return { sku: row.sku, statusCode: 200, offers: (row.offers ?? []).map(update => {
+          if (update.availableQuantity === undefined) throw new Error("Expected the admitted canonical offer quantity");
           offers.set(row.sku, { ...offers.get(row.sku)!, availableQuantity: update.availableQuantity });
           return { offerId: update.offerId, statusCode: 200 };
         }) };
@@ -155,6 +156,7 @@ dbDescribe.sequential("reviewed eBay publication stock enrollment, real PostgreS
     const writes = runtime.api.mock.calls.filter(call => call[0] !== "GET").length;
     // After committed mapping work and a lost local completion, retry verifies
     // current pictures. Neither mapping receipts nor provider writes duplicate.
+    await database.pool.query("UPDATE channels.sync_settings SET global_enabled=false");
     expect(await run()).toMatchObject({ synced: 1, errors: 0 });
     expect(runtime.api.mock.calls.filter(call => call[0] !== "GET")).toHaveLength(writes);
     expect((await database.pool.query("SELECT count(*)::int AS n FROM inventory.ebay_publication_readiness_applications WHERE command_key=$1", [jobId])).rows[0].n).toBe(1);

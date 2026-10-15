@@ -874,7 +874,10 @@ export default function EbayChannelPage() {
       const commandKey = local?.issue.code === issue.code ? local.commandKey ?? undefined : undefined;
       if (latestSyncJobs.get(productId)?.operation === "withdraw") retryWithdrawal(productId);
       else if (latestSyncJobs.get(productId)?.operation === "publish" && latestSyncJobs.get(productId)?.state !== "completed") handlePushSingle(productId);
-      else if (item?.externalListingId) handleSyncProduct(productId, commandKey);
+      // A missing aggregate listing ID can mean conflicting saved identities,
+      // not a new listing. Keep a sync retry in the existing-listing owner so
+      // its fresh identity check reports the conflict without publishing.
+      else if (latestSyncJobs.get(productId)?.operation === "sync" || item?.isListed || item?.externalListingId || commandKey) handleSyncProduct(productId, commandKey);
       else handlePushSingle(productId);
       return;
     }
@@ -2075,8 +2078,7 @@ export default function EbayChannelPage() {
                           ? resolveEbayListingIssue({ message: item.syncError, productId: item.id }) : null);
                       const canSyncExistingListing = !syncIssue || (syncIssue.retryable && syncIssue.action.kind === "retry_sync"
                         && (!syncJob?.operation || syncJob.operation === "sync"));
-                      const syncExistingListing = () => syncIssue
-                        ? handleIssueAction(syncIssue, item.id, syncJob?.id) : handleSyncProduct(item.id);
+                      const syncExistingListing = () => handleSyncProduct(item.id, localSyncIssues.get(item.id)?.commandKey ?? undefined);
                       const isExcluded = item.isExcluded;
                       const isExpanded = expandedProducts.has(item.id);
                       const hasVariants = item.variants && item.variants.length > 0;
