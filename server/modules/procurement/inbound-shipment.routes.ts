@@ -11,6 +11,8 @@ import { requireIdempotency } from "../../middleware/idempotency";
 import { ShipmentTrackingError } from "./shipment-tracking.service";
 import * as apLedger from "./ap-ledger.service";
 import * as notificationService from "../notifications/notifications.service";
+import { shipmentCostWorkflowIdSchema } from "@shared/procurement/shipment-cost-workflow";
+import { createShipmentCostUpdateCommands, shipmentCostUpdateScope, SHIPMENT_COST_UPDATE_PRINCIPAL } from "./shipment-cost-update.commands";
 
 function getActorId(req: any): string | undefined {
   return req.user?.id ?? req.session?.user?.id;
@@ -20,6 +22,7 @@ export function registerInboundShipmentRoutes(app: Express) {
   const { shipmentTracking } = app.locals.services;
   const shipmentCostCommands = createShipmentCostCommands(shipmentTracking);
   const shipmentLineCommands = createShipmentLineCommands(shipmentTracking);
+  const shipmentCostUpdates = createShipmentCostUpdateCommands(shipmentTracking);
 
   async function handleCostCommand(req: Request, res: Response, operation: ShipmentCostCommand["operation"]) {
     try {
@@ -129,7 +132,7 @@ export function registerInboundShipmentRoutes(app: Express) {
       const shipment = await shipmentTracking.getShipment(Number(req.params.id));
       const [lines, costs, history, paymentStatus, purchaseOrders] = await Promise.all([
         shipmentTracking.getEnrichedLines(shipment.id),
-        shipmentTracking.getCosts(shipment.id),
+        apLedger.enrichCostsWithInvoiceInfo(shipment.id).then((costs) => shipmentTracking.versionCosts(costs)),
         shipmentTracking.getStatusHistory(shipment.id),
         apLedger.getShipmentCostPaymentStatus(shipment.id),
         shipmentTracking.getShipmentPurchaseOrders(shipment.id),
@@ -381,6 +384,52 @@ export function registerInboundShipmentRoutes(app: Express) {
   });
 
   // Allocation
+
+  const costWorkflowId = z.string().regex(/^[1-9]\d*$/).transform(Number).pipe(shipmentCostWorkflowIdSchema);
+
+  app.get("/api/inbound-shipments/:id/cost-review", requirePermission("purchasing", "view"), async (req, res) => {
+    const id = costWorkflowId.safeParse(req.params.id);
+    if (!id.success) return res.status(400).json({ code: "SHIPMENT_COST_UPDATE_ID_INVALID", error: "Choose a valid shipment." });
+    try {
+      const result = await shipmentTracking.getCostReview(id.data);
+      if (!result) return res.status(404).json({ code: "SHIPMENT_NOT_FOUND", error: "This shipment is no longer available." });
+      return res.json(result);
+    } catch (error) {
+      console.error(JSON.stringify({ event: "procurement.shipment_cost.review_failed", shipmentId: id.data,
+        actorId: getActorId(req) ?? null, code: "SHIPMENT_COST_REVIEW_UNAVAILABLE",
+        errorType: error instanceof Error ? error.name : typeof error }));
+      return res.status(500).json({ code: "SHIPMENT_COST_REVIEW_UNAVAILABLE", error: "Saved cost results could not be loaded. Reload the cost review." });
+    }
+  });
+
+  app.post("/api/inbound-shipments/:id/update-costs", requirePermission("purchasing", "approve"), async (req, res) => {
+    const id = costWorkflowId.safeParse(req.params.id);
+    if (!id.success) return res.status(400).json({ code: "SHIPMENT_COST_UPDATE_ID_INVALID", error: "Choose a valid shipment." });
+    try {
+      const shipmentId = id.data;
+      const actorId = getActorId(req);
+      if (!actorId) throw new FinancialCommandError("Sign in before updating costs.", 401, "SHIPMENT_COST_UPDATE_ACTOR_REQUIRED");
+      const descriptor = financialCommandFromRequest(req, {
+        actorType: "service", actorId: SHIPMENT_COST_UPDATE_PRINCIPAL, ...shipmentCostUpdateScope(shipmentId),
+      });
+      const result = await shipmentCostUpdates.execute(shipmentId, req.body, actorId, descriptor);
+      res.setHeader("Idempotency-Replayed", result.replayed ? "true" : "false");
+      return res.status(result.httpStatus).json(result.body);
+    } catch (error) {
+      if (error instanceof FinancialCommandError) {
+        for (const [name, value] of Object.entries(error.responseHeaders ?? {})) res.setHeader(name, value);
+        return res.status(error.statusCode).json({ code: error.code, error: error.message, details: error.details });
+      }
+      const cause = error instanceof Error ? error.cause ?? error : error;
+      const databaseCode = cause && typeof cause === "object" && "code" in cause
+        && typeof cause.code === "string" && /^[A-Z0-9]{5}$/.test(cause.code) ? cause.code : null;
+      console.error(JSON.stringify({ event: "procurement.shipment_cost.update_failed", shipmentId: req.params.id,
+        actorId: getActorId(req) ?? null, code: "SHIPMENT_COST_UPDATE_FAILED", databaseCode,
+        errorType: error instanceof Error ? error.name : typeof error }));
+      return res.status(500).json({ code: "SHIPMENT_COST_UPDATE_FAILED",
+        error: "The cost update could not be completed. Reload the saved results and retry." });
+    }
+  });
 
   app.get("/api/inbound-shipments/:id/allocation-status", requirePermission("purchasing", "view"), async (req, res) => {
     try {

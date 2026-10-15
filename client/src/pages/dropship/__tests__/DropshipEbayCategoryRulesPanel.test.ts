@@ -151,7 +151,7 @@ describe("eBay category review", () => {
     expect(markup).toContain("After saving: 300 from your rules · 500 from your store default.");
     expect(markup).toContain("500 → Card Sleeves");
     expect(markup).toContain("Toploader 35pt");
-    expect(markup).toContain("From the Card Shellz category");
+    expect(markup).toContain("Card Shellz picks");
     expect(markup).toContain("From one of your rules");
     expect(markup).toContain("Showing 1 of 142 changed listings.");
     const withoutExamples = render(React.createElement(ReviewSummary, { review: review({ changes: [] }), ruleNames: [], saving: false, disabled: false,

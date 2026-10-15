@@ -44,6 +44,7 @@ export async function recordShipmentCostRevisions(tx: CostEvidenceTransaction, s
     SELECT invoice_line.id,invoice.id AS vendor_invoice_id,invoice_line.freight_cost_id,
       invoice_line.qty_invoiced,invoice_line.unit_cost_mills,invoice_line.unit_cost_cents,invoice_line.line_total_cents,
       invoice.vendor_id,invoice.inbound_shipment_id,invoice.currency,invoice.status,invoice.invoiced_amount_cents,
+      invoice.invoice_number,invoice.replaces_invoice_id,
       SUM(invoice_line.line_total_cents) OVER (PARTITION BY invoice.id)::text AS document_lines_total_cents
     FROM linked_invoices selected JOIN procurement.vendor_invoices invoice ON invoice.id=selected.id
     LEFT JOIN procurement.vendor_invoice_lines invoice_line ON invoice_line.vendor_invoice_id=invoice.id
@@ -52,6 +53,7 @@ export async function recordShipmentCostRevisions(tx: CostEvidenceTransaction, s
   const invoiceEvidence = invoiceRows.rows.map((line) => ({
     id: line.id, invoiceId: line.vendor_invoice_id, freightCostId: line.freight_cost_id,
     vendorId: line.vendor_id, shipmentId: line.inbound_shipment_id, currency: line.currency, status: line.status,
+    invoiceNumber: line.invoice_number ?? null, replacesInvoiceId: line.replaces_invoice_id ?? null,
     invoiceTotalCents: line.invoiced_amount_cents, documentLinesTotalCents: line.document_lines_total_cents,
     quantity: line.qty_invoiced, unitCostMills: line.unit_cost_mills, unitCostCents: line.unit_cost_cents,
     lineTotalCents: line.line_total_cents,

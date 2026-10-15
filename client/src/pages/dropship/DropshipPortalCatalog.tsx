@@ -961,7 +961,6 @@ function DropshipPortalCatalogPage() {
               listingPreview={listingPreview}
               listingPreviewStale={listingPreviewStale}
               priceSavePending={pendingPriceSaves > 0}
-              priceSaveCallbacks={priceSaveCallbacks}
               listingPushResult={listingPushResult}
               selectedStoreName={selectedStoreName}
               pendingListingAction={pendingListingAction}
@@ -1370,7 +1369,6 @@ function ListingPreviewPanel({
   listingPreview,
   listingPreviewStale,
   priceSavePending,
-  priceSaveCallbacks,
   listingPushResult,
   selectedStoreName,
   onPreview,
@@ -1390,7 +1388,6 @@ function ListingPreviewPanel({
   listingPreview: DropshipListingPreviewResult | null;
   listingPreviewStale: boolean;
   priceSavePending: boolean;
-  priceSaveCallbacks: ListingPriceSaveCallbacks;
   listingPushResult: DropshipListingPushResponse | null;
   /** The store's name as the vendor knows it, for the push outcome. */
   selectedStoreName: string;
@@ -1542,8 +1539,7 @@ function ListingPreviewPanel({
       {listingPreview && listingPreviewStale && <div role="status" className="mt-4 rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900">
         {priceSavePending ? "Saving your listing price and refreshing the preview…" : "This preview is out of date. Preview again to see current details."}
       </div>}
-      {listingPreview && <DropshipListingPreview key={listingPreview.storeConnectionId} preview={listingPreview}
-        stale={listingPreviewStale} priceSaveCallbacks={priceSaveCallbacks} />}
+      {listingPreview && <DropshipListingPreview key={listingPreview.storeConnectionId} preview={listingPreview} stale={listingPreviewStale} />}
 
       {listingPushResult && <ListingQueueResultNotice key={listingPushResult.job.jobId} response={listingPushResult} storeName={selectedStoreName} />}
     </section>

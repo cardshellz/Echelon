@@ -6,6 +6,10 @@ const missingMessage = "PO line 101 has no valid product total and piece quantit
 
 async function setup(page: Page, mode: "current" | "legacy" | "missing" | "invalid_basis") {
   const failures = await installFixtures(page);
+  await page.route("**/api/auth/me", route => route.fulfill({ json: {
+    user: { id: "test-user", username: "test", role: "admin" }, roles: ["admin"],
+    permissions: ["purchasing:view", "purchasing:approve"],
+  } }));
   const state = { legacy: mode === "legacy", missing: mode === "missing" || mode === "invalid_basis", allocations: 0, closes: 0, writes: [] as Array<{ path: string; body: string | null }> };
   const invalidStatus = mode === "invalid_basis" ? "invalid_allocation_basis" : "invalid_value_basis";
   const invalidMessage = mode === "invalid_basis" ? "Shipment line 1 has invalid weight evidence. Review the shipment source before allocating or closing." : missingMessage;
@@ -43,11 +47,15 @@ async function setup(page: Page, mode: "current" | "legacy" | "missing" | "inval
       issues: state.missing ? [{ severity: "blocker", code: invalidStatus, costId: 71, lineId: 1, message: invalidMessage }]
         : state.legacy ? [{ severity: "blocker", code: "stale_allocation_basis", costId: 71, message: staleMessage }] : [],
     } });
-    if (request.method() === "POST" && ["/api/inbound-shipments/42/allocate", "/api/inbound-shipments/42/close"].includes(path)) {
+    if (request.method() === "POST" && ["/api/inbound-shipments/42/update-costs", "/api/inbound-shipments/42/close"].includes(path)) {
       state.writes.push({ path, body: request.postData() });
       if (path.endsWith("/close")) state.closes++; else state.allocations++;
       if (state.missing) return route.fulfill({ status: 400, json: { error: invalidMessage, code: invalidStatus } });
-      if (path.endsWith("/allocate")) { state.legacy = false; return route.fulfill({ json: { allocated: 1 } }); }
+      if (path.endsWith("/update-costs")) {
+        expect(request.headers()["idempotency-key"]).toBeTruthy();
+        state.legacy = false;
+        return route.fulfill({ json: { shipmentId: 42, finalizedLines: 2, adjustments: 0, status: "applied", updated: 2, total: 2, skipped: [] } });
+      }
       throw new Error("This fixture does not authorize shipment finalization");
     }
     return route.fallback();
@@ -73,10 +81,9 @@ async function expectExactAllocation(page: Page) {
 test("by-value allocation explains the source and preserves server subcent product and duty values", async ({ page }, info) => {
   const { state, failures } = await setup(page, "current");
   const status = page.getByRole("region", { name: "Allocation status", exact: true });
-  await expect(status).toContainText("By value uses each PO line's product total, prorated to the pieces in this shipment.");
-  await expect(status).toContainText("Allocation preserves subcent product values.");
-  const basis = status.getByRole("cell").filter({ hasText: "PO product value (cents)" });
-  await expect(basis).toContainText("990");
+  await expect(status).toContainText("Charges split by product value use the PO value of the pieces in this shipment.");
+  const basis = status.getByRole("cell").filter({ hasText: "PO product value" });
+  await expect(basis).toContainText("$9.90");
   await expectExactAllocation(page);
   await expect(page.getByRole("button", { name: "Re-run allocation", exact: true })).toHaveCount(0);
   expect(state.writes).toEqual([]); expect(failures).toEqual([]);
@@ -84,19 +91,19 @@ test("by-value allocation explains the source and preserves server subcent produ
   await page.screenshot({ path: info.outputPath("exact-value-allocation.png"), fullPage: true });
 });
 
-test("historical by-value evidence stays under review until the operator reruns server allocation", async ({ page }) => {
+test("historical by-value evidence stays under review until the operator updates shipment costs", async ({ page }) => {
   const { state, failures } = await setup(page, "legacy");
   const status = page.getByRole("region", { name: "Allocation status", exact: true });
-  await expect(status.getByText("Stale Basis", { exact: true })).toBeVisible();
-  await expect(status.getByText(staleMessage, { exact: true })).toBeVisible();
+  await expect(status.getByText("Update needed", { exact: true })).toBeVisible();
+  await expect(status.getByText(/The duty charge is saved, but its split across products uses older shipment or PO values/)).toBeVisible();
   const first = page.getByRole("row").filter({ hasText: "PRODUCT-0049" });
   await expect(first.getByRole("cell").nth(3)).toContainText("$0.00");
   expect(state.writes).toEqual([]);
-  await status.getByRole("button", { name: "Re-run allocation", exact: true }).click();
+  await status.getByRole("button", { name: "Update shipment costs", exact: true }).click();
   await expectExactAllocation(page);
-  await expect(status.getByText("Stale Basis", { exact: true })).toHaveCount(0);
+  await expect(status.getByText("Update needed", { exact: true })).toHaveCount(0);
   await expect(status.getByText(staleMessage, { exact: true })).toHaveCount(0);
-  expect(state.writes).toEqual([{ path: "/api/inbound-shipments/42/allocate", body: null }]);
+  expect(state.writes).toEqual([{ path: "/api/inbound-shipments/42/update-costs", body: "{}" }]);
   expect(state.allocations).toBe(1); expect(state.closes).toBe(0); expect(failures).toEqual([]);
 });
 
@@ -105,9 +112,9 @@ for (const mode of ["missing", "invalid_basis"] as const) test(`${mode} allocati
   const status = page.getByRole("region", { name: "Allocation status", exact: true });
   await expect(status.getByText("Data needs review", { exact: true })).toBeVisible();
   await expect(status.getByText(invalidMessage, { exact: true })).toBeVisible();
-  await expect(status.getByRole("row").nth(1).getByRole("cell").nth(4)).toHaveText(mode === "missing" ? "—PO product value (cents)" : "—");
+  await expect(status.getByRole("row").nth(1).getByRole("cell").nth(4)).toHaveText(mode === "missing" ? "—PO product value" : "—");
   if (mode === "missing") await expect(page.getByRole("row").filter({ hasText: "PRODUCT-0049" }).getByRole("cell").nth(1)).toHaveText("—");
-  else await expect(status.getByText(/By value uses/)).toHaveCount(0);
+  else await expect(status.getByText(/Charges split by product value/)).toHaveCount(0);
   await page.getByRole("button", { name: "Close Shipment", exact: true }).click();
   await expect.poll(() => state.closes).toBe(1);
   await expect(page.getByRole("button", { name: "Close Shipment", exact: true })).toBeEnabled();

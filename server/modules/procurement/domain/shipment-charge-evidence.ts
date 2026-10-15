@@ -11,6 +11,8 @@ const chargeSchema = z.object({
 });
 const invoiceLineSchema = z.object({
   id: id.nullable(), invoiceId: id, freightCostId: id.nullable(), vendorId: id,
+  invoiceNumber: z.string().min(1).nullable().optional().default(null),
+  replacesInvoiceId: id.nullable().optional().default(null),
   shipmentId: id.nullable(), currency: z.string(), status: z.string(),
   invoiceTotalCents: money, documentLinesTotalCents: money.nullable(),
   quantity: integer.positive().nullable(), unitCostMills: money.nullable(), unitCostCents: money.nullable(),
@@ -18,6 +20,7 @@ const invoiceLineSchema = z.object({
 });
 const inputSchema = z.object({ charge: chargeSchema, invoices: z.array(invoiceLineSchema), priorConfirmedCharge: z.unknown() });
 type Charge = z.infer<typeof chargeSchema>;
+type InvoiceLine = z.infer<typeof invoiceLineSchema>;
 export interface ShipmentChargeEvidence {
   evidence: "confirmed" | "estimated" | "review_required";
   issue: CostIssue | null;
@@ -37,6 +40,42 @@ function sameConfirmedCharge(current: Charge, previous: Charge): boolean {
     && current.actualCents === previous.actualCents;
 }
 
+/** Historical lines remain evidence. Only a complete, matching replacement chain
+ * makes a voided document historical rather than a competing cost authority. */
+function replacedAncestorIds(charge: Charge, invoices: readonly InvoiceLine[]): Set<number> | null {
+  const ancestors = new Set<number>();
+  if (charge.invoiceId === null) return ancestors;
+  const headers = new Map<number, InvoiceLine>();
+  for (const line of invoices) {
+    const previous = headers.get(line.invoiceId);
+    if (previous && (previous.replacesInvoiceId !== line.replacesInvoiceId
+      || previous.invoiceNumber !== line.invoiceNumber || previous.status !== line.status
+      || previous.vendorId !== line.vendorId || previous.shipmentId !== line.shipmentId
+      || previous.currency !== line.currency)) return null;
+    headers.set(line.invoiceId, line);
+  }
+  const current = headers.get(charge.invoiceId);
+  if (!current || current.replacesInvoiceId === null) return ancestors;
+  if (current.invoiceNumber === null || current.vendorId !== charge.vendorId
+    || current.shipmentId !== charge.shipmentId || current.currency !== charge.currency) return null;
+  let child = current;
+  const visited = new Set([current.invoiceId]);
+  while (child.replacesInvoiceId !== null) {
+    const parentId = child.replacesInvoiceId;
+    if (visited.has(parentId)) return null;
+    visited.add(parentId);
+    const parent = headers.get(parentId);
+    if (!parent || parent.status !== "voided" || parent.vendorId !== current.vendorId
+      || parent.invoiceNumber !== current.invoiceNumber || parent.shipmentId !== current.shipmentId
+      || parent.currency !== current.currency
+      || !invoices.some((line) => line.invoiceId === parentId && line.freightCostId === charge.id)
+      || [...headers.values()].some((header) => header.replacesInvoiceId === parentId && header.invoiceId !== child.invoiceId)) return null;
+    ancestors.add(parentId);
+    child = parent;
+  }
+  return ancestors;
+}
+
 /**
  * AP linkage and payment state are not cost confirmation. A matching immutable
  * finalized charge retains its authority while AP progresses, or complete,
@@ -54,7 +93,12 @@ export function resolveShipmentChargeEvidence(value: unknown): ShipmentChargeEvi
     && ["invoiced", "paid", "partially_paid"].includes(charge.status ?? "");
   const confirmedCharge = currentIsConfirmed ? charge : priorStillApplies ? previous.data : null;
   const effectiveCents = charge.actualCents ?? charge.estimatedCents;
-  const relevant = invoices.filter((line) => line.freightCostId === charge.id || line.invoiceId === charge.invoiceId);
+  const ancestors = replacedAncestorIds(charge, invoices);
+  if (ancestors === null) {
+    return review("LANDED_INVOICE_REPLACEMENT_REVIEW", `Shipment charge ${charge.id} has incomplete or conflicting invoice replacement history. Review its original and replacement documents.`);
+  }
+  const relevant = invoices.filter((line) => !ancestors.has(line.invoiceId)
+    && (line.freightCostId === charge.id || line.invoiceId === charge.invoiceId));
   const sourcedLines = relevant.filter((line) => line.freightCostId === charge.id);
   if (charge.invoiceId !== null && sourcedLines.length === 0) {
     return review("LANDED_INVOICE_LINES_MISSING", `Shipment charge ${charge.id} is linked to an invoice without a recorded charge allocation. Review its invoice lines.`);

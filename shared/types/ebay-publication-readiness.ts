@@ -8,6 +8,8 @@ const identity = z.string().trim().min(1).max(100);
 export const inventoryEbayPublicationReadinessInputSchema = z.object({
   channelId: id, connectionId: id, accountId: z.string().trim().min(1).max(255),
   environment: z.enum(["production", "sandbox"]), productId: id,
+  /** Existing-listing maintenance may retain inactive members at canonical zero. */
+  purpose: z.enum(["publish", "sync"]).optional(),
   variants: z.array(z.object({ productVariantId: id, sku: identity }).strict()).min(1).max(500)
     .refine(rows => new Set(rows.map(row => row.productVariantId)).size === rows.length
       && new Set(rows.map(row => row.sku)).size === rows.length, "Each variant and provider SKU must be unique"),

@@ -47,9 +47,8 @@ export class EbayPublicationCompletionExecution implements EbayListingSyncExecut
     const changedContent = context.publicationIntentHash !== null && context.publicationIntentHash !== syncContentIntentHash(prepared.draft);
     if (prepared.inspection.publication && (refreshRequested || changedContent
       || (!context.publicationAccepted && !context.publicationWriteCompleted && !context.publicationWriteStarted))) {
-      await prepared.assertInventoryReady(inventoryContext);
       return this.maintain(prepared, observed).execute(source, stage, checkpoint,
-        identity => bindProviderIdentity(identity, prepared.inspection.publication!));
+        identity => bindProviderIdentity(identity, prepared.inspection.publication!), context);
     }
     const scopes: QuantityPublicationScope[] = [
       ...(target.groupKey ? [{ sku: `group:${target.groupKey}`, variantId: null }] : []),

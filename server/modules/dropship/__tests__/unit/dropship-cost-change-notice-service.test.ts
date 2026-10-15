@@ -260,7 +260,7 @@ describe("DropshipCostChangeNoticeService", () => {
       fromCents: 809, unitCostCents: 999, effectiveAt: IN_TWO_WEEKS, announcedAt: READING,
     }];
     repository.listingActions = [{
-      actionId: 71, entryId: 11, listingId: 1, storeConnectionId: 9, platform: "shopify", productVariantId: 66, variantSku: "ARM-ENV-SGL-P50",
+      actionId: 71, entryId: 11, listingId: 1, storeConnectionId: 9, platform: "shopify", productVariantId: 66, productId: 1, variantSku: "ARM-ENV-SGL-P50",
       variantName: "Single pack", productName: "Armor Envelope", action: "reprice_queued", detail: null, listingPriceCents: 1399, unitCostCents: 999,
       pushJobId: 100, decidedAt: NOW, holdReleasedAt: null, holdReleaseReason: null,
     }];

@@ -1,4 +1,5 @@
 import { InvoiceLineCostReview } from "@/features/purchasing/InvoiceLineCostReview";
+import { InvoiceShipmentReplacement } from "@/features/purchasing/InvoiceShipmentReplacement";
 import { apInvoiceEditCapabilitySchema } from "@shared/procurement/ap-invoice-capabilities";
 import { useAuth } from "@/lib/auth";
 import { InvoiceQuantityCorrection } from "@/features/purchasing/InvoiceQuantityCorrection";
@@ -560,7 +561,7 @@ export default function APInvoiceDetail() {
   const isVoided = status === "voided";
 
   return (
-    <div className={`p-2 md:p-6 max-w-5xl mx-auto space-y-4 md:space-y-6 ${isVoided ? "opacity-50 pointer-events-auto" : ""}`}>
+    <div className="p-2 md:p-6 max-w-5xl mx-auto space-y-4 md:space-y-6">
       <ProcurementContext navigation={procurementNavigation} />
       {/* ── Voided Banner ── */}
       {!isVoided && !canEdit && (
@@ -581,6 +582,12 @@ export default function APInvoiceDetail() {
           )}
         </div>
       )}
+
+      <InvoiceShipmentReplacement invoiceId={invoice.id} invoiceStatus={invoice.status} shipmentId={invoice.inboundShipmentId ?? null}
+        capability={invoice.replacementCapability} history={invoice.replacementHistory} childHref={procurementNavigation.childHref} onReload={async () => {
+          const refreshed = await refetchInvoice();
+          if (refreshed.error) throw refreshed.error;
+        }} />
 
       {/* ── Header ── */}
       <div className="flex flex-col sm:flex-row items-start justify-between gap-3">
@@ -830,7 +837,8 @@ export default function APInvoiceDetail() {
                 <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
                   <div className="space-y-1">
                     <Label className="text-xs">Invoice Number</Label>
-                    <Input value={editForm.invoiceNumber} onChange={e => setEditForm(f => ({ ...f, invoiceNumber: e.target.value }))} />
+                    <Input aria-label="Invoice Number" value={editForm.invoiceNumber} disabled={invoice.replacesInvoiceId != null} onChange={e => setEditForm(f => ({ ...f, invoiceNumber: e.target.value }))} />
+                    {invoice.replacesInvoiceId != null && <p className="text-xs text-muted-foreground">The supplier invoice number is preserved across replacements.</p>}
                   </div>
                   <div className="space-y-1">
                     <Label className="text-xs">Our Reference</Label>

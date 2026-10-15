@@ -7,6 +7,8 @@
 
 import { z } from "zod";
 import { costChangeEventTypeValues, costDecreaseTimingValues, type CostChangeEventType } from "@shared/dropship/cost-change-policy";
+import { catalogStepPath } from "./dropship-catalog-steps";
+import { drawerSearch } from "./dropship-listing-settings-drawer";
 
 export const DROPSHIP_COST_CHANGES_URL = "/api/dropship/cost-changes";
 
@@ -54,6 +56,8 @@ const listingActionSchema = z.object({
   storeConnectionId: z.number().int().positive(),
   platform: z.string(),
   productVariantId: z.number().int().positive(),
+  /** The size's product, from servers with PR 10h (D13b); the price link needs it, so an older answer shows none. */
+  productId: z.number().int().positive().optional(),
   variantSku: z.string().nullable(),
   variantName: z.string(),
   productName: z.string(),
@@ -189,6 +193,9 @@ export function describeVendorListingAction(action: DropshipVendorListingAction[
 
 /** The line under the action: what to do, or what has happened since. */
 export function describeVendorListingActionDetail(action: DropshipVendorListingAction, formatDate: (iso: string) => string): string | null {
+  // Interim (PR 10 PROPOSAL): a row with a price link names the link's place, so the two lines don't
+  // read as two instructions; a row without one (another platform, an older answer) still names the page.
+  const place = vendorListingActionPriceLink(action) === null ? "on the Catalog page" : "in Listing settings";
   switch (action.action) {
     case "reprice_queued":
       return action.pushJobId !== null ? `Queued as push job ${action.pushJobId}; the result shows on the Catalog page.` : null;
@@ -198,16 +205,54 @@ export function describeVendorListingActionDetail(action: DropshipVendorListingA
       return "Your listing price is unchanged. Queue the listing from the Catalog page to publish the price your rules now give.";
     case "below_cost_recorded":
     case "below_cost_warned":
-      return "Each sale loses money until you raise the price on the Catalog page.";
+      return `Each sale loses money until you raise the price ${place}.`;
     case "below_cost_paused":
       return action.holdReleasedAt !== null
         ? `Selling again since ${formatDate(action.holdReleasedAt)}.`
-        : "It publishes zero quantity until the price covers the cost. Raise the price on the Catalog page to resume.";
+        : `It publishes zero quantity until the price covers the cost. Raise the price ${place} to resume.`;
     case "price_covers_cost":
     case "skipped_inactive_listing":
     case "skipped_price_unavailable":
       return null;
   }
+}
+
+// Interim (PR 10 PROPOSAL): the link under a below-cost action (REC:922 "links to that size"; plan 12.2 "Cost changes").
+const COST_CHANGE_PRICE_LINK_WORDS = "Change its price in Listing settings";
+export const COST_CHANGE_PRICE_LINK_LABEL = `${COST_CHANGE_PRICE_LINK_WORDS} ›`;
+
+/** The actions whose way out is raising the size's price. */
+const PRICE_LINK_ACTIONS: ReadonlySet<DropshipVendorListingAction["action"]> = new Set(["below_cost_recorded", "below_cost_warned", "below_cost_paused"]);
+
+export interface VendorListingActionPriceLink {
+  /** Portal-relative (`/catalog/setup?product=&size=`, D21); the page adds `dropshipPortalPath`. */
+  href: string;
+  label: string;
+  /** The link's name for a screen reader: the label, then the size, so the rows' links tell apart (plan 3.4). */
+  name: string;
+  /** The store the Catalog page must open on before following the link (`rememberCatalogStore`, plan A4). */
+  storeConnectionId: number;
+}
+
+/**
+ * Where the vendor raises the price a below-cost action names: the size's
+ * Exact price box in the product's drawer, Listing settings. Listing settings
+ * is eBay-only, so only an eBay row gets a link, and only when the server
+ * named the product (older answers don't); a pause already released needs none.
+ */
+export function vendorListingActionPriceLink(
+  action: Pick<DropshipVendorListingAction, "action" | "platform" | "productId" | "productVariantId" | "storeConnectionId" | "holdReleasedAt"
+    | "variantSku" | "variantName" | "productName">,
+): VendorListingActionPriceLink | null {
+  if (action.platform !== "ebay" || action.productId === undefined) return null;
+  if (!PRICE_LINK_ACTIONS.has(action.action)) return null;
+  if (action.action === "below_cost_paused" && action.holdReleasedAt !== null) return null;
+  return {
+    href: `${catalogStepPath("setup")}${drawerSearch("", { productId: action.productId, productVariantId: action.productVariantId })}`,
+    label: COST_CHANGE_PRICE_LINK_LABEL,
+    name: `${COST_CHANGE_PRICE_LINK_WORDS}: ${formatVendorCostChangeVariant(action)}`,
+    storeConnectionId: action.storeConnectionId,
+  };
 }
 
 /** "listed at $8.99, cost now $9.99", or just the cost when the price is unknown. */

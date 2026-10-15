@@ -1595,6 +1595,8 @@ export type InboundShipmentLine = typeof inboundShipmentLines.$inferSelect;
 
 export const vendorInvoices = procurementSchema.table("vendor_invoices", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  // Explicit successor identity: retained voided documents are never renumbered.
+  replacesInvoiceId: integer("replaces_invoice_id").references((): AnyPgColumn => vendorInvoices.id, { onDelete: "restrict" }),
   invoiceNumber: varchar("invoice_number", { length: 100 }).notNull(), // Vendor's invoice number
   ourReference: varchar("our_reference", { length: 100 }), // Internal reference
 
@@ -1630,7 +1632,10 @@ export const vendorInvoices = procurementSchema.table("vendor_invoices", {
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 }, (table) => [
-  uniqueIndex("vendor_invoices_vendor_invoice_idx").on(table.vendorId, table.invoiceNumber),
+  uniqueIndex("vendor_invoices_vendor_invoice_idx").on(table.vendorId, table.invoiceNumber).where(sql`${table.status} <> 'voided'`),
+  uniqueIndex("vendor_invoices_root_number_idx").on(table.vendorId, table.invoiceNumber).where(sql`${table.replacesInvoiceId} IS NULL`),
+  uniqueIndex("vendor_invoices_one_successor_idx").on(table.replacesInvoiceId).where(sql`${table.replacesInvoiceId} IS NOT NULL`),
+  check("vendor_invoices_replacement_not_self_chk", sql`${table.replacesInvoiceId} IS NULL OR ${table.replacesInvoiceId} <> ${table.id}`),
   check("vendor_invoices_currency_usd_chk", sql`${table.currency} = 'USD'`),
 ]);
 

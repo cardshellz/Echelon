@@ -6,8 +6,14 @@ async function ready(page: Page) {
   await expect(page.getByRole("button", { name: "Record quarantine", exact: true })).toBeEnabled();
 }
 async function location(page: Page, label: string, code: string) {
-  await page.getByRole("combobox", { name: label, exact: true }).click();
-  await page.getByRole("option", { name: new RegExp(code) }).click();
+  const trigger = page.getByRole("combobox", { name: label, exact: true });
+  const option = page.getByRole("option", { name: new RegExp(code) });
+  await trigger.click();
+  await option.click();
+  await expect(trigger).toContainText(code);
+  // The closing popover remains mounted during its exit animation. Wait for it
+  // to leave before interacting with the checkbox immediately below the trigger.
+  await expect(option).toHaveCount(0);
 }
 async function unknownIntake(page: Page) {
   await ready(page);

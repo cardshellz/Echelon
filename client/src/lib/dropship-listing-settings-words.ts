@@ -221,6 +221,15 @@ function policyName(setup: PolicySetupFacts, field: PolicyField, policyId: strin
 }
 
 /**
+ * A policy's name for a page outside this step (step 3, plan PR 10 D14):
+ * eBay's live name when the setup read ran this visit, else the name stored
+ * for the store default, else null, so the caller shows a link and never an id.
+ */
+export function setupPolicyName(setup: PolicySetupFacts, kind: ListingSettingsPolicyKind, policyId: string): string | null {
+  return policyName(setup, POLICY_FIELD[kind], policyId).name;
+}
+
+/**
  * A store policy row's value (R:579): the policy's name, "Not set · Needed to
  * list", "Checking eBay…" while the live read loads, or "Set" when it can't be
  * named. A4: names come only from the live setup read; the summary says only

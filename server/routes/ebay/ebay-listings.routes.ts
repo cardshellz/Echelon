@@ -359,6 +359,8 @@ interface ListingFeedVariant {
             externalListingIdentityConflict: row.external_product_id_count > 1,
             variantCount: parseInt(row.variant_count) || 0,
             includedVariantCount,
+            unlinkedVariants: includedVariants.filter((variant: { id: number }) => listingState.unlinkedVariantIds.includes(variant.id))
+              .map((variant: { id: number; sku: string }) => ({ id: variant.id, sku: variant.sku })),
             imageCount: parseInt(row.image_count) || 0,
             variants,
             fulfillmentPolicyOverride: row.product_fulfillment_override || null,

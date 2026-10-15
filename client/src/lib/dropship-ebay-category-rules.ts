@@ -155,12 +155,14 @@ export function categoryPathLabel(category: Pick<EbayCategory, "categoryName" | 
 export function ebayCategorySourceLabel(source: EbayCategorySource, ruleName: string | null | undefined): string {
   switch (source) {
     case "rule": return ruleName ? `From your rule "${ruleName}"` : "From one of your rules";
-    // Interim words (R:§3.7) until the full drawer (PR 10); sent only once product
-    // or category settings are saved (PR 9).
-    case "product": return "This product";
-    case "category": return "From your Card Shellz category's settings";
+    // Interim (PR 10 PROPOSAL), in the drawer's words (`drawerSourceWords`): a product's own category is
+    // set in Listing settings; a Card Shellz category's is named by the category when a name is given
+    // (the preview row carries none, dropship-ebay-category-resolver `fromSetting`), never by an id; the
+    // catalog's own pick says so, so it can't be mistaken for the category's setting (mS3 b.1).
+    case "product": return "Set in Listing settings";
+    case "category": return ruleName ? `From category: ${ruleName}` : "From its Card Shellz category";
     case "store_default": return "From your store default";
-    case "catalog": return "From the Card Shellz category";
+    case "catalog": return "Card Shellz picks";
     case "none": return "No eBay category yet";
   }
 }
