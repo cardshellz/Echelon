@@ -33,9 +33,10 @@ type DrizzleDb = {
 
 import { InventoryUseCases } from "./inventory.use-cases";
 import { validateWarehouseLocationIntegrity } from "../../warehouse/location-integrity";
+import { logger } from "../../../platform/observability/logger";
 
 type ChannelSync = {
-  queueSyncAfterInventoryChange(variantId: number): Promise<void>;
+  queueSyncAfterInventoryChange(variantId: number, triggeredBy?: string): Promise<void>;
 };
 
 type Replenishment = {
@@ -1701,13 +1702,46 @@ export class CycleCountUseCases {
       throw new CycleCountError(`${unapprovedVariances.length} variances not approved/resolved`);
     }
 
-    await this.storage.updateCycleCount(id, {
-      status: "completed",
-      completedAt: new Date(),
-    });
+    // Completion may be retried after a publication failure. Keep the original
+    // completion time rather than rewriting the count's audit history.
+    if (cycleCount.status !== "completed") {
+      await this.storage.updateCycleCount(id, {
+        status: "completed",
+        completedAt: new Date(),
+      });
+    }
 
     // Unfreeze all locations that were frozen by this cycle count
     await this.unfreezeLocations(id);
+
+    // Approval publishes while the bin is still frozen, so its stock is not
+    // promise eligible yet. Refresh after release, including unchanged counts:
+    // releasing the freeze changes availability even without a quantity delta.
+    // Await every request before acknowledging completion. A retry of complete
+    // can repeat this safely without replaying any inventory adjustments.
+    const failedVariants: number[] = [];
+    const variantIds = [...new Set(items.flatMap(item =>
+      item.productVariantId == null ? [] : [item.productVariantId]))];
+    for (const variantId of variantIds) {
+      try {
+        await this.channelSync.queueSyncAfterInventoryChange(variantId, "cycle_count_completed");
+      } catch (error) {
+        failedVariants.push(variantId);
+        logger.error("cycle_count_completion_publication", {
+          outcome: "failed",
+          error_code: "CYCLE_COUNT_COMPLETION_PUBLICATION_FAILED",
+          cycle_count_id: id,
+          product_variant_id: variantId,
+          message: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+    if (failedVariants.length > 0) {
+      throw new CycleCountError(
+        `Count completed and bins released, but inventory publication failed for variants ${failedVariants.join(", ")}. Resolve the publication error, then retry completion; do not recount or adjust stock again.`,
+        502,
+      );
+    }
 
     const linkedReplenBlockersClosed = await this.closeLinkedReplenExceptionTasks(id);
 
