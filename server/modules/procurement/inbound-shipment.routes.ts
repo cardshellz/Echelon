@@ -13,12 +13,14 @@ import * as apLedger from "./ap-ledger.service";
 import * as notificationService from "../notifications/notifications.service";
 import { shipmentCostWorkflowIdSchema } from "@shared/procurement/shipment-cost-workflow";
 import { createShipmentCostUpdateCommands, shipmentCostUpdateScope, SHIPMENT_COST_UPDATE_PRINCIPAL } from "./shipment-cost-update.commands";
+import { registerShipmentCostExceptionRoutes } from "./shipment-cost-exception.routes";
 
 function getActorId(req: any): string | undefined {
   return req.user?.id ?? req.session?.user?.id;
 }
 
 export function registerInboundShipmentRoutes(app: Express) {
+  registerShipmentCostExceptionRoutes(app);
   const { shipmentTracking } = app.locals.services;
   const shipmentCostCommands = createShipmentCostCommands(shipmentTracking);
   const shipmentLineCommands = createShipmentLineCommands(shipmentTracking);
@@ -393,7 +395,9 @@ export function registerInboundShipmentRoutes(app: Express) {
     try {
       const result = await shipmentTracking.getCostReview(id.data);
       if (!result) return res.status(404).json({ code: "SHIPMENT_NOT_FOUND", error: "This shipment is no longer available." });
-      return res.json(result);
+      res.vary("X-Shipment-Cost-Review-Version");
+      return res.json(req.get("X-Shipment-Cost-Review-Version") === "2" ? result
+        : { ...result, lines: result.lines.map(({ exceptionReview: _review, ...line }) => line) });
     } catch (error) {
       console.error(JSON.stringify({ event: "procurement.shipment_cost.review_failed", shipmentId: id.data,
         actorId: getActorId(req) ?? null, code: "SHIPMENT_COST_REVIEW_UNAVAILABLE",

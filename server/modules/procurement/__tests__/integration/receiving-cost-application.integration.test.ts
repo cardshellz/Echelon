@@ -17,6 +17,9 @@ import { installPreOpeningQuantityAuthorityFixture } from "../../../inventory/__
 import { receivingUnitVersion } from "../../receiving-unit-contract";
 import { fixtureForeignKeys, fixtureTable, qualifiedTable } from "./shipment-line-fixture";
 import { resetFixtureWithEmptyReceivingCustody } from "./receiving-custody-fixture";
+import { createShipmentCostExceptionService, shipmentExceptionScope } from "../../shipment-cost-exception.service";
+import { costFingerprint } from "../../../inventory/infrastructure/cost-evidence-values";
+import type { ShipmentExceptionRequest } from "@shared/procurement/shipment-cost-exception";
 
 // Real PostgreSQL regression coverage for the coordinated receipt/AP/freight owners.
 config({ path: resolve(process.cwd(), ".env.test") });
@@ -25,6 +28,7 @@ const enabled = process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true" && !!url
 const audit = enabled ? describe : describe.skip;
 const NOW = new Date("2026-09-06T12:00:00.000Z");
 const TABLES = [
+  schema.users, schema.authRoles, schema.authPermissions, schema.authUserRoles, schema.authRolePermissions,
   schema.products, schema.productVariants, schema.vendors, schema.purchaseOrders,
   schema.purchaseOrderLines, schema.inboundShipments, schema.inboundShipmentLines,
   schema.receivingOrders, schema.receivingLines, schema.poReceipts, schema.receiptReversals,
@@ -65,7 +69,7 @@ audit.sequential("receipt/AP/freight cost revisions with real owners", () => {
     const lock = await lease.query("SELECT pg_try_advisory_lock(hashtext('echelon.procurement.cost-application-fixture')) AS acquired");
     if (!lock.rows[0].acquired) throw new Error("Another cost audit owns the fixture lease");
     // CREATE fails on an existing schema. Never drop an unowned schema to begin a test.
-    for (const name of ["catalog", "procurement", "warehouse", "inventory", "wms", "oms"]) {
+    for (const name of ["identity", "catalog", "procurement", "warehouse", "inventory", "wms", "oms"]) {
       await pool.query(`CREATE SCHEMA ${name}`);
       ownedSchemas.push(name);
     }
@@ -84,6 +88,7 @@ audit.sequential("receipt/AP/freight cost revisions with real owners", () => {
         reason VARCHAR(100), created_at TIMESTAMP NOT NULL DEFAULT NOW()
       )`);
     await pool.query(readFileSync(resolve(process.cwd(), "migrations/222_procurement_cost_evidence.sql"), "utf8"));
+    await pool.query(readFileSync(resolve(process.cwd(), "migrations/900000007000018030001_shipment_cost_exception_decisions.sql"), "utf8"));
     await pool.query(readFileSync(resolve(process.cwd(), "migrations/0751_exact_inventory_cost_totals.sql"), "utf8"));
     await pool.query(readFileSync(resolve(process.cwd(), "migrations/0725_inventory_cost_admission_evidence.sql"), "utf8"));
     await pool.query(readFileSync(resolve(process.cwd(), "migrations/231_receipt_cost_recovery.sql"), "utf8"));
@@ -166,11 +171,19 @@ audit.sequential("receipt/AP/freight cost revisions with real owners", () => {
   });
 
   beforeEach(async () => {
-    if (ownedSchemas.length !== 6) throw new Error("Fixture schema ownership missing");
+    if (ownedSchemas.length !== 7) throw new Error("Fixture schema ownership missing");
     await resetFixtureWithEmptyReceivingCustody(pool, `TRUNCATE ${TABLES.map(qualifiedTable).join(",")},inventory.cost_adjustment_log RESTART IDENTITY CASCADE`);
     await pool.query("DELETE FROM public.audit_events WHERE actor=$1", [actorId]);
     await pool.query("TRUNCATE public.financial_command_results RESTART IDENTITY CASCADE");
+    await pool.query("INSERT INTO identity.users(id,username,password,role,active) VALUES($1,'cost-audit-owner','unused','admin',1)", [actorId]);
     await pool.query(`
+      INSERT INTO identity.users(id,username,password,role,active) VALUES
+        ('admin-user','admin','unused','picker',1),('lead-user','lead','unused','admin',1),
+        ('custom-user','custom','unused','admin',1),('scoped-user','scoped','unused','admin',1);
+      INSERT INTO identity.auth_roles(id,name,is_system) VALUES(1,'Administrator',1),(2,'Team Lead',1),(3,'Administrator',0),(4,'Administrator',1);
+      INSERT INTO identity.auth_permissions(id,resource,action,category) VALUES(1,'purchasing','approve','purchasing');
+      INSERT INTO identity.auth_user_roles(user_id,role_id) VALUES('admin-user',1),('lead-user',2),('custom-user',3),('scoped-user',4);
+      INSERT INTO identity.auth_role_permissions(role_id,permission_id,constraints) VALUES(1,1,NULL),(2,1,NULL),(3,1,NULL),(4,1,'{"warehouseId":1}');
       INSERT INTO catalog.products(id,sku,name) VALUES(100,'AUDIT-PRODUCT','Synthetic cost audit product');
       INSERT INTO catalog.product_variants(id,product_id,sku,name,units_per_variant,uom_type,is_base_unit)
         VALUES(200,100,'AUDIT-CASE','Case of 50',50,'case',false),(201,100,'AUDIT-EACH','Each',1,'piece',true);
@@ -202,7 +215,7 @@ audit.sequential("receipt/AP/freight cost revisions with real owners", () => {
       if (pool) {
         if (ownsCommands) await pool.query("DROP TABLE public.financial_command_recoveries, public.financial_command_results; DROP FUNCTION public.guard_financial_command_result_update()");
         if (ownsAudit) await pool.query("DROP TABLE public.audit_events");
-        else if (ownedSchemas.length === 6) await pool.query("DELETE FROM public.audit_events WHERE actor=$1", [actorId]);
+        else if (ownedSchemas.length === 7) await pool.query("DELETE FROM public.audit_events WHERE actor=$1", [actorId]);
         for (const name of [...ownedSchemas].reverse()) await pool.query(`DROP SCHEMA ${name} CASCADE`);
       }
     } finally {
@@ -791,6 +804,136 @@ audit.sequential("receipt/AP/freight cost revisions with real owners", () => {
         expect.objectContaining({ code: "COST_UNRESOLVED_QUANTITY_RETAINED", unresolvedQuantity: expect.objectContaining({ inventoryLotId: 4016, quantity: 1 }) })] });
     expect(await costQuantityPhysicalSnapshot()).toEqual(physical);
     expect(await shipment.getCostReview(1)).toEqual(review);
+  });
+
+  function exceptionService() { return createShipmentCostExceptionService(database, () => NOW); }
+  async function prepareException() {
+    await legacyQuantityGaps();
+    await pool.query("UPDATE procurement.inbound_shipments SET status='closed' WHERE id=1");
+    await updateShipmentCosts();
+    const context = await exceptionService().context(11, "admin-user");
+    expect(context).toMatchObject({ canApprove: true, blockedReason: null, review: { state: "open", kind: "unexplained_quantity" } });
+    return { sourceVersion: context.sourceVersion, action: "accept" as const, reason: "Reviewed the historical movement records and retained amount." };
+  }
+  async function decideException(request: ShipmentExceptionRequest, key = randomUUID(), actor = "admin-user") {
+    return exceptionService().decide(11, request, actor, { ...shipmentExceptionScope(11), actorType: "user", actorId: actor,
+      contractVersion: 1, idempotencyKey: key, requestHash: costFingerprint(request) });
+  }
+  async function completeCostSnapshot() {
+    return {
+      physical: await costQuantityPhysicalSnapshot(),
+      lots: (await pool.query("SELECT * FROM inventory.inventory_lots ORDER BY id")).rows,
+      cogs: (await pool.query("SELECT * FROM oms.order_item_costs ORDER BY id")).rows,
+      applications: (await pool.query("SELECT * FROM inventory.cost_applications ORDER BY id")).rows,
+      reporting: (await pool.query("SELECT * FROM inventory.cost_reporting_events ORDER BY id")).rows,
+      allocations: (await pool.query("SELECT * FROM inventory.lot_cost_quantity_allocations ORDER BY id")).rows,
+      charges: (await pool.query("SELECT * FROM procurement.inbound_freight_costs ORDER BY id")).rows,
+    };
+  }
+  it("accepts a historical exception with immutable before/after and no inventory or accounting mutation; lost-response retries replay", async () => {
+    const request = await prepareException(), before = await completeCostSnapshot(), key = randomUUID();
+    const result = await decideException(request, key);
+    expect(result).toMatchObject({ httpStatus: 200, replayed: false, body: { lineId: 11, decision: { action: "accept", actorId: "admin-user" } } });
+    expect(await completeCostSnapshot()).toEqual(before);
+    expect(await decideException(request, key)).toMatchObject({ httpStatus: 200, replayed: true, body: result.body });
+    const saved = (await pool.query("SELECT * FROM procurement.shipment_cost_exception_decisions")).rows;
+    expect(saved).toHaveLength(1);
+    expect(saved[0].evidence).toMatchObject({ before: { state: "open" }, after: { state: "accepted" },
+      inventoryQuantityDelta: 0, inventoryCostDeltaMills: 0, orderCostDeltaMills: 0, approval: { userId: "admin-user", active: true } });
+    expect((await shipment.getCostReview(1))?.lines[0]).toMatchObject({ application: { status: "review_required" }, exceptionReview: { state: "accepted" } });
+    expect((await readPoShipmentCosts(database, 10))?.lines[0]).toMatchObject({ status: "review_required", exceptionReview: { state: "accepted" } });
+    await expect(pool.query("UPDATE procurement.shipment_cost_exception_decisions SET reason='Changed old decision' ")).rejects.toThrow(/immutable/);
+    await expect(pool.query("DELETE FROM procurement.shipment_cost_exception_decisions")).rejects.toThrow(/immutable/);
+    await updateShipmentCosts();
+    expect((await exceptionService().context(11, "admin-user")).review?.state).toBe("accepted");
+  });
+  it("reopens an accepted decision with a new reason and preserves its previous evidence", async () => {
+    const request = await prepareException(); await decideException(request);
+    const context = await exceptionService().context(11, "admin-user"), before = await completeCostSnapshot();
+    const reopened = await decideException({ ...request, sourceVersion: context.sourceVersion, action: "reopen", reason: "New receipt evidence needs another review." });
+    expect(reopened).toMatchObject({ httpStatus: 200, body: { decision: { action: "reopen" } } });
+    const reviewed = await exceptionService().context(11, "admin-user");
+    expect(reviewed.review?.state).toBe("open");
+    expect(reviewed.history.map(decision => decision.action)).toEqual(["reopen", "accept"]);
+    const events = (await pool.query("SELECT id,previous_decision_id,action FROM procurement.shipment_cost_exception_decisions ORDER BY id")).rows;
+    expect(events).toHaveLength(2); expect(events[1].previous_decision_id).toBe(events[0].id);
+    expect(await completeCostSnapshot()).toEqual(before);
+  });
+  it.each(["lead-user", "custom-user", "scoped-user", "missing-user"])("rejects %s using current identity authority", async actor => {
+    const request = await prepareException(), before = await completeCostSnapshot();
+    expect((await exceptionService().context(11, actor)).canApprove).toBe(false);
+    expect(await decideException(request, randomUUID(), actor)).toMatchObject({ httpStatus: 403, body: { code: "SHIPMENT_EXCEPTION_ADMIN_REQUIRED" } });
+    expect(await completeCostSnapshot()).toEqual(before);
+    expect((await pool.query("SELECT * FROM procurement.shipment_cost_exception_decisions")).rows).toEqual([]);
+  });
+  it.each(["membership", "permission", "active"])("rechecks revoked %s between preview and approval", async field => {
+    const request = await prepareException();
+    if (field === "membership") await pool.query("DELETE FROM identity.auth_user_roles WHERE user_id='admin-user'");
+    if (field === "permission") await pool.query("DELETE FROM identity.auth_role_permissions WHERE role_id=1");
+    if (field === "active") await pool.query("UPDATE identity.users SET active=0 WHERE id='admin-user'");
+    expect(await decideException(request)).toMatchObject({ httpStatus: 403 });
+  });
+  it("rejects stale previews and reopens the displayed review when the underlying charge changes", async () => {
+    const request = await prepareException(); await decideException(request);
+    await pool.query("UPDATE procurement.inbound_freight_costs SET actual_cents=400000 WHERE id=31");
+    expect((await shipment.getCostReview(1))?.lines[0].exceptionReview?.state).toBe("open");
+    expect((await exceptionService().context(11, "admin-user")).blockedReason).toContain("changed");
+    expect(await decideException(request)).toMatchObject({ httpStatus: 409, body: { code: "SHIPMENT_EXCEPTION_STALE" } });
+    await updateShipmentCosts();
+    const current = await exceptionService().context(11, "admin-user");
+    expect(current).toMatchObject({ blockedReason: null, review: { state: "open", allocatedMills: 40000000 } });
+  });
+  it("serializes two independent administrators' confirmations without duplicate decisions", async () => {
+    const request = await prepareException();
+    const results = await Promise.all([decideException(request), decideException(request)]);
+    expect(results.map(result => result.httpStatus).sort()).toEqual([200, 409]);
+    expect((await pool.query("SELECT * FROM procurement.shipment_cost_exception_decisions")).rows).toHaveLength(1);
+  });
+  it("rolls back a failed audit insert and retries the same approval key safely", async () => {
+    const request = await prepareException(), key = randomUUID(), before = await completeCostSnapshot();
+    await pool.query(`CREATE FUNCTION procurement.fail_exception_audit() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected exception audit failure'; END $$;
+      CREATE TRIGGER fail_exception_audit BEFORE INSERT ON procurement.shipment_cost_exception_decisions FOR EACH ROW EXECUTE FUNCTION procurement.fail_exception_audit()`);
+    try { await expect(decideException(request, key)).rejects.toThrow(); }
+    finally { await pool.query("DROP TRIGGER fail_exception_audit ON procurement.shipment_cost_exception_decisions; DROP FUNCTION procurement.fail_exception_audit()"); }
+    expect(await completeCostSnapshot()).toEqual(before);
+    expect((await pool.query("SELECT * FROM procurement.shipment_cost_exception_decisions")).rows).toEqual([]);
+    // Honor the real command owner's first retry deadline (two seconds). Do not
+    // disable its immutable-ledger trigger to make the retry run early.
+    await pool.query("SELECT pg_sleep(GREATEST(0, EXTRACT(EPOCH FROM next_attempt_at-clock_timestamp())) + 0.01) FROM public.financial_command_results WHERE idempotency_key=$1 AND status='retryable'", [key]);
+    expect(await decideException(request, key)).toMatchObject({ httpStatus: 200 });
+  });
+
+  it("accepts missing receipt history as a separate review without inventing an origin or applying its charge", async () => {
+    await legacyQuantityGaps();
+    await pool.query(`INSERT INTO inventory.inventory_lots(id,lot_number,product_variant_id,warehouse_location_id,qty_received,qty_on_hand,
+      po_line_id,inbound_shipment_id,unit_cost_cents,cost_source,received_at) VALUES(1453,'MISSING-RECEIPT',200,99,10,0,21,1,1,'po','2026-09-01');
+      UPDATE procurement.inbound_shipments SET status='closed' WHERE id=1`);
+    await updateShipmentCosts();
+    const context = await exceptionService().context(11, "admin-user"), before = await completeCostSnapshot();
+    expect(context).toMatchObject({ blockedReason: null, review: { kind: "missing_receipt_history", amountMills: 33500700, lotsUpdated: 0, cogsRowsUpdated: 0 } });
+    expect(await decideException({ sourceVersion: context.sourceVersion, action: "accept", reason: "Legacy receipt reviewed; source documentation unavailable." })).toMatchObject({ httpStatus: 200 });
+    expect(await completeCostSnapshot()).toEqual(before);
+    expect((await pool.query("SELECT * FROM inventory.lot_cost_origins WHERE inventory_lot_id=1453")).rows).toEqual([]);
+  });
+
+  it("rechecks authority after waiting behind an in-flight cost update", async () => {
+    const request = await prepareException();
+    const blocker = await pool.connect();
+    let release!: () => void;
+    let observed!: () => void;
+    const locked = new Promise<void>(resolve => { observed = resolve; });
+    const wait = new Promise<void>(resolve => { release = resolve; });
+    const gate = database.transaction(async tx => { await lockInventoryCostGraph(tx); observed(); await wait; });
+    await locked;
+    const attempt = decideException(request);
+    try {
+      await blocker.query("BEGIN");
+      await blocker.query("DELETE FROM identity.auth_user_roles WHERE user_id='admin-user'");
+      await blocker.query("COMMIT");
+    } finally { release(); blocker.release(); }
+    await gate;
+    expect(await attempt).toMatchObject({ httpStatus: 403 });
+    expect((await pool.query("SELECT * FROM procurement.shipment_cost_exception_decisions")).rows).toEqual([]);
   });
 
   it("updates late freight through historical gaps into stock and sold costs while retaining every mill", async () => {

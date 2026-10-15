@@ -149,6 +149,24 @@ describe("PO shipment costs read endpoint", () => {
     expect(getCosts).toHaveBeenCalledExactlyOnceWith(17);
     expect(await response.json()).toEqual(payload);
   });
+  it("keeps older tabs compatible and exposes exception decisions to opted-in clients", async () => {
+    const line: PoShipmentCosts["lines"][number] = {
+      lineId: 141, shipmentId: 92, shipmentNumber: "S260622005194", shipmentStatus: "closed",
+      sku: "EG-SLV-STD-5PCK", allocatedCents: 282799, status: "review_required",
+      applicationId: 17, recordedAt: "2026-10-15T12:00:00.000Z", issues: [], exceptionReview: null,
+    };
+    const payload = { ...emptyCosts(), lines: [line] };
+    getCosts.mockResolvedValue(payload);
+    const { exceptionReview: _review, ...legacyLine } = line;
+    const legacy = await read();
+    expect(legacy.headers.get("vary")).toContain("X-Shipment-Cost-Review-Version");
+    expect(await legacy.json()).toEqual({ ...payload, lines: [legacyLine] });
+    const current = await fetch(`${url}/api/purchase-orders/17/shipment-costs`, { headers: {
+      "x-test-permission": "purchasing:view", "X-Shipment-Cost-Review-Version": "2",
+    } });
+    expect(current.headers.get("vary")).toContain("X-Shipment-Cost-Review-Version");
+    expect(await current.json()).toEqual(payload);
+  });
   it.each(["0", "-1", "17.5", "17x", "2147483648", "00017"])(
     "rejects invalid identifier %s",
     async (id) => {

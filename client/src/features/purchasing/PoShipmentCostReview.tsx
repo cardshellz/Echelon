@@ -8,6 +8,7 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { ShipmentCostUpdateAction } from "./ShipmentCostUpdateAction";
 import { useProcurementNavigation } from "@/hooks/use-procurement-navigation";
+import { ShipmentCostExceptionReview } from "./ShipmentCostExceptionReview";
 
 export function PoShipmentCostReview({
   costs,
@@ -35,10 +36,10 @@ export function PoShipmentCostReview({
       className="space-y-4 border-t pt-3"
     >
       <div>
-        <h3 className="font-semibold text-sm">Inventory cost review</h3>
+        <h3 className="font-semibold text-sm">Inventory cost updates and exceptions</h3>
         <p className="text-xs text-muted-foreground">
-          Update shipment costs here to refresh the charge split and the costs of stock and sold items.
-          Any remaining issues stay below for review.
+          Shipment charges are saved separately. Cost updates refresh their allocation to stock and sold items.
+          Historical inventory differences have their own administrator review below.
         </p>
       </div>
       {pending.length === 0 && (
@@ -91,7 +92,7 @@ export function PoShipmentCostReview({
                         )}
                       </strong>
                     </div>
-                    <Badge
+                    {!line.exceptionReview && <Badge
                       variant={
                         line.status === "review_required"
                           ? "destructive"
@@ -101,7 +102,7 @@ export function PoShipmentCostReview({
                       {line.status === "review_required"
                         ? "Needs review"
                         : "Awaiting cost update"}
-                    </Badge>
+                    </Badge>}
                     {line.recordedAt && (
                       <div className="text-xs text-muted-foreground">
                         Last attempt:{" "}
@@ -110,6 +111,7 @@ export function PoShipmentCostReview({
                     )}
                   </div>
                   <div className="space-y-2 text-sm">
+                    {line.exceptionReview ? <ShipmentCostExceptionReview lineId={line.lineId} review={line.exceptionReview} /> : <>
                     {guidance.explanation ? (
                       <p>{guidance.explanation}</p>
                     ) : (
@@ -122,6 +124,7 @@ export function PoShipmentCostReview({
                     <p>
                       <strong>Next step:</strong> {guidance.nextStep}
                     </p>
+                    </>}
                     <details className="text-xs text-muted-foreground">
                       <summary className="cursor-pointer">
                         Cost review details · line #{line.lineId}
