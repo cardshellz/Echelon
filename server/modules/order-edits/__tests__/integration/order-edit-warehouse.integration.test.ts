@@ -300,6 +300,34 @@ function inventoryProjection(): CanonicalAvailabilityReservationStatusProjection
       INSERT INTO inventory.availability_claim_lines VALUES(1,1,40,100,1,1,0,0,0,0);`);
     });
 
+    it("inspects committed availability without waiting for an order writer or observing its uncommitted hold", async () => {
+      const writer = await database.pool.connect();
+      let inspection: ReturnType<OrderEditWarehouseGateway["inspect"]> | undefined;
+      let deadline: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await writer.query("BEGIN");
+        await writer.query("UPDATE oms.oms_orders SET updated_at='2026-10-05T00:01:00Z' WHERE id=20");
+        await writer.query("UPDATE wms.orders SET order_edit_operation_id=$1 WHERE id=10", [OP]);
+        inspection = gateway.inspect(20);
+        // The writer remains open until the read finishes. A SELECT FOR UPDATE
+        // implementation cannot pass by simply completing after the release.
+        const result = await Promise.race([
+          inspection,
+          new Promise<never>((_resolve, reject) => {
+            deadline = setTimeout(() => reject(new Error("Availability read waited for the writer")), 2000);
+          }),
+        ]);
+        expect(result).toMatchObject({ editable: true, reasons: [], wmsOrderIds: [10] });
+        await writer.query("COMMIT");
+        expect((await gateway.inspect(20)).editable).toBe(false);
+      } finally {
+        if (deadline) clearTimeout(deadline);
+        await writer.query("ROLLBACK");
+        writer.release();
+        await inspection?.catch(() => undefined);
+      }
+    });
+
     function customerRecord(): OrderEditRecord {
       const original = record();
       return { ...original, id: "88888888-8888-4888-8888-888888888888", omsOrderId: 21,

@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { costIssueSchema, type CostIssue } from "./cost-source-contracts";
 import { poShipmentCostSummarySchema } from "./po-shipment-cost-summary";
+import { shipmentCostExceptionSchema } from "./shipment-cost-exception";
 
 const id = z.number().int().positive().max(2_147_483_647);
 const applicationId = z.number().int().positive().safe();
@@ -35,6 +36,7 @@ export const poShipmentCostsSchema = z
           applicationId: applicationId.nullable(),
           recordedAt: z.string().datetime({ offset: true }).nullable(),
           issues: z.array(costIssueSchema),
+          exceptionReview: shipmentCostExceptionSchema.nullable().optional(),
         })
         .strict(),
     ),

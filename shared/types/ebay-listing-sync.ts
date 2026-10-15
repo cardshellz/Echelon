@@ -2,6 +2,23 @@ import { z } from "zod";
 import { ebayListingIssueSchema } from "./ebay-listing-issue";
 
 const syncCount = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
+export const ebayListingSyncPhaseSchema = z.enum([
+  "prepare_listing", "recover_prior_requests", "inspect_content", "prepare_inventory",
+  "update_offer", "update_item", "update_group", "publish", "publication_readback", "verify", "withdraw",
+]);
+export const ebayListingSyncProgressSchema = z.object({
+  phase: ebayListingSyncPhaseSchema.nullable(),
+  phaseState: z.enum(["started", "completed"]).nullable(),
+  requestedAt: z.string().datetime(),
+  lastActivityAt: z.string().datetime(),
+  lastWorkerActivityAt: z.string().datetime().nullable(),
+  // Earlier eligible candidates in the durable queue, not a completion estimate.
+  queuedAhead: syncCount.nullable(),
+}).strict().refine(progress => (progress.phase === null) === (progress.phaseState === null), {
+  message: "A recorded phase must include its recorded state.",
+});
+export type EbayListingSyncPhase = z.infer<typeof ebayListingSyncPhaseSchema>;
+export type EbayListingSyncProgress = z.infer<typeof ebayListingSyncProgressSchema>;
 export const ebayListingSyncJobSchema = z.object({
   id: z.string().uuid(), productId: z.number().int().positive(),
   kind: z.enum(["sync", "admission"]).default("sync"),
@@ -10,6 +27,8 @@ export const ebayListingSyncJobSchema = z.object({
   code: z.string().max(100).nullable(), message: z.string().max(1000).nullable(),
   nextAttemptAt: z.string().datetime(), updatedAt: z.string().datetime(),
   issue: ebayListingIssueSchema.optional(),
+  // Older saved responses remain readable while the server adds event evidence.
+  progress: ebayListingSyncProgressSchema.optional(),
 });
 export type EbayListingSyncJob = z.infer<typeof ebayListingSyncJobSchema>;
 /** A 200 response may contain per-product failures; clients must not translate it into success. */

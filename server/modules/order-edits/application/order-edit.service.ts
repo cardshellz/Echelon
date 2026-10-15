@@ -1143,9 +1143,9 @@ export class OrderEditService {
             })),
       warnings: [
         "Private staff testing. Customer access is disabled.",
-        quote?.shippingRepricing
+        ...(quote ? [quote.shippingRepricing
           ? "Shipping is recalculated for the revised items using current checkout rates and eligible shipping benefits."
-          : "This saved edit predates shipping recalculation. Start a new edit to recheck shipping.",
+          : "This saved edit predates shipping recalculation. Start a new edit to recheck shipping."] : []),
       ],
       canAbandon:
         !record.commitStartedAt &&

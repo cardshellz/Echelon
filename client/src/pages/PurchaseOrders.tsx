@@ -133,20 +133,16 @@ function physicalSegments(physicalStatus: string): SegmentState[] {
   });
 }
 
-function financialSegments(financialStatus: string, outstandingCents: number, firstInvoicedAt: string | null): SegmentState[] {
+function financialSegments(financialStatus: string): SegmentState[] {
   // Same convention as physicalSegments: completed stages green, next stage
   // blue. 'disputed' paints the IN-stage as warn so the row flags at a glance.
-  // Past-due also surfaces as warn on the IN-stage.
+  // This is recorded whole-invoice status, not PO payment attribution.
   const effectiveStatus = financialStatus === "disputed" ? "partially_paid" : financialStatus;
-  const isPastDue =
-    outstandingCents > 0 &&
-    firstInvoicedAt != null &&
-    Date.now() - new Date(firstInvoicedAt).getTime() > 30 * 24 * 60 * 60 * 1000; // rough 30d heuristic
   const idx = FINANCIAL_TRACK_STAGES.indexOf(effectiveStatus as typeof FINANCIAL_TRACK_STAGES[number]);
   return FINANCIAL_TRACK_STAGES.map((stage, i) => {
     if (idx < 0) return "future";
     if (i <= idx) {
-      if ((financialStatus === "disputed" || isPastDue) && stage === "partially_paid" && i === idx) {
+      if (financialStatus === "disputed" && stage === "partially_paid" && i === idx) {
         return "warn";
       }
       return "done";
@@ -190,9 +186,9 @@ function DualTrackCell({ po }: { po: PurchaseOrder }) {
         <span className="text-[10px] uppercase tracking-wide text-muted-foreground">Phys</span>
         <MiniTrack segments={physicalSegments(po.physicalStatus)} />
       </div>
-      <div className="grid grid-cols-[50px_1fr] items-center gap-1.5">
-        <span className="text-[10px] uppercase tracking-wide text-muted-foreground">Fin</span>
-        <MiniTrack segments={financialSegments(po.financialStatus, po.outstandingCents, po.firstInvoicedAt)} />
+      <div className="flex flex-wrap items-center gap-1.5" title="Recorded status covers whole linked invoices. Open the purchase order to review its financial evidence.">
+        <span className="text-[10px] uppercase tracking-wide text-muted-foreground">Linked invoices</span>
+        <MiniTrack segments={financialSegments(po.financialStatus)} />
       </div>
       {/* Exception pill — shown below the tracks when open exceptions exist (migration 0566) */}
       {(po.openExceptionCount ?? 0) > 0 && (
@@ -738,7 +734,7 @@ export default function PurchaseOrders() {
           </button>
         ))}
         <span className="w-px h-4 bg-border mx-1" />
-        <span className="text-xs text-muted-foreground">Financial:</span>
+        <span className="text-xs text-muted-foreground">Linked invoice status:</span>
         {([null, "unbilled", "invoiced", "partially_paid", "paid"] as (string | null)[]).map((val) => (
           <button
             key={val ?? "all-fin"}
@@ -866,7 +862,7 @@ export default function PurchaseOrders() {
                         ? "cancelled"
                         : po.status === "closed"
                         ? "closed"
-                        : `${po.physicalStatus ?? "draft"} · ${po.financialStatus ?? "unbilled"}`}
+                        : `${po.physicalStatus ?? "draft"} · Linked invoices: ${po.financialStatus ?? "unbilled"}`}
                     </div>
                   </TableCell>
                   <TableCell className="text-right">{po.lineCount || 0}</TableCell>

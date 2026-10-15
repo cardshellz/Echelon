@@ -4,7 +4,6 @@ import { z } from "zod";
 import { canonicalJson } from "@shared/utils/canonical-json";
 import { publicationMappingPreparationReceiptSchema, type PublicationMappingPreparationReceipt } from "@shared/types/inventory-publication-mapping-preparation";
 import type { PublicationMembershipBlocker } from "@shared/types/inventory-publication-membership";
-import { readCatalogStockVariantOwners } from "../../catalog/catalog-stock-selection.reader";
 import { InventoryPublicationMembershipError } from "../application/inventory-publication-membership.service";
 import { reviewInventoryPublicationQuantities } from "../application/inventory-publication-quantity-review";
 import type { ActivePublicationVariantMappingSnapshot } from "../application/inventory-channel-exposure-runtime.service";
@@ -202,44 +201,25 @@ export async function applyMappingPreparation(client: PoolClient, scopeKeys: str
     if (!evidence.review.ready)
         fail("STOCK_MAPPING_NOT_READY", evidence.review.blockers.map(row => row.message).join(" "));
     const { target } = evidence;
-    for (const key of [...new Set((await loadPublicationTargetScopes(client, target)).map(quantityPublicationScopeLockKey))].sort()) {
+    for (const key of [...new Set((await loadPublicationTargetScopes(client, target, input.productId)).map(quantityPublicationScopeLockKey))].sort()) {
         if (!(await client.query<{
             acquired: boolean;
         }>("SELECT pg_try_advisory_lock(hashtextextended($1,$2)) AS acquired", [key, PUBLICATION_TARGET_SCOPE_LOCK_SEED])).rows[0]?.acquired)
             fail("STOCK_MAPPING_PROVIDER_BUSY", "A provider request is in flight. The saved listing will retry after it finishes.");
         scopeKeys.push(key);
     }
-    let revision = target.revision;
-    if (changedVariantIds.length) {
-        const row = (await client.query<{
-            revision: string;
-        }>("UPDATE inventory.inventory_publication_targets SET revision=revision+1,updated_at=$3 WHERE id=$1 AND revision=$2::bigint RETURNING revision::text", [target.id, target.revision, now])).rows[0];
-        if (!row)
-            fail("STOCK_MAPPING_TARGET_CHANGED", "The exact stock destination changed during preparation.");
-        revision = row.revision;
-        await client.query(`UPDATE inventory.inventory_publication_outbox SET state='superseded',lease_token=NULL,lease_expires_at=NULL,
-      last_error_class='PUBLICATION_MAPPING_PREPARED',last_error_message='Replanned after exact listing mapping preparation',updated_at=$2
-      WHERE publication_target_id=$1 AND state IN('desired','queued','leased','retryable','drifted')`, [target.id, now]);
-    }
-    // A revision change fences every existing target row. Replan all retained
-    // mapped products through the canonical owner, never only this one product.
-    const mappingIds = (await client.query<{
-        product_variant_id: number;
-    }>("SELECT product_variant_id FROM inventory.publication_variant_mapping_heads WHERE publication_target_id=$1 AND active_mapping_id IS NOT NULL ORDER BY product_variant_id", [target.id])).rows.map(row => row.product_variant_id);
-    const productIds = changedVariantIds.length ? [...new Set([input.productId, ...(await readCatalogStockVariantOwners(client, mappingIds)).map(row => row.productId)])].sort((a, b) => a - b) : [input.productId];
-    if (productIds.length > 1000)
-        fail("STOCK_MAPPING_SCOPE_TOO_LARGE", "The complete stock destination exceeds the preparation limit. No partial mapping was applied.");
+    // Both callers only add exact missing mappings or seal an unchanged SKU
+    // identity. Promotion fences the mapping head's revision; no destination,
+    // source, policy or existing provider identity changes. Bumping the target
+    // revision would invalidate unrelated products and make their mapping gaps
+    // roll back this preparation. The canonical owner below locks each affected
+    // target/variant pair and supersedes only a changed desired revision.
     const publisher = createTransactionScopedInventoryPublicationService(client, { channelId: target.channel_id,
         replacementListings: replacementListingVariantIds.map(productVariantId => ({ publicationTargetId: target.id, productVariantId })) });
-    let publicationRows = 0;
-    for (const productId of productIds) {
-        const result = await publisher.publishProduct({ productId, publicationTargetId: target.id, dryRun: false, triggeredBy: "listing_mapping_preparation" }, async () => null);
-        if (result.authority === "canonical")
-            publicationRows += result.publication.enqueuedRows;
-        else
-            fail("STOCK_MAPPING_AUTHORITY_CHANGED", "Canonical stock authority changed during preparation.");
-    }
-    const receipt = publicationMappingPreparationReceiptSchema.parse({ publicationTargetId: target.id, revision, reviewHash: evidence.review.reviewHash, changedProductVariantIds: [...changedVariantIds], publicationRows, appliedAt: now.toISOString(), appliedBy: actor, alreadyApplied: false });
+    const result = await publisher.publishProduct({ productId: input.productId, publicationTargetId: target.id, dryRun: false, triggeredBy: "listing_mapping_preparation" }, async () => null);
+    if (result.authority !== "canonical")
+        return fail("STOCK_MAPPING_AUTHORITY_CHANGED", "Canonical stock authority changed during preparation.");
+    const receipt = publicationMappingPreparationReceiptSchema.parse({ publicationTargetId: target.id, revision: target.revision, reviewHash: evidence.review.reviewHash, changedProductVariantIds: [...changedVariantIds], publicationRows: result.publication.enqueuedRows, appliedAt: now.toISOString(), appliedBy: actor, alreadyApplied: false });
     await client.query(`INSERT INTO inventory.publication_mapping_preparations(idempotency_key,publication_target_id,request_hash,actor,occurred_at,review,receipt)
     VALUES($1,$2,$3,$4,$5,$6::jsonb,$7::jsonb)`, [input.idempotencyKey, target.id, requestHash, actor, now, JSON.stringify(evidence.review), JSON.stringify(receipt)]);
     await client.query(`INSERT INTO public.audit_events(timestamp,level,actor,action,target,changes,context) VALUES($1,'AUDIT',$2,'inventory_availability.listing_mapping.prepared',$3,$4::jsonb,$5::jsonb)`, [now, actor, `inventory.inventory_publication_target:${target.id}`, JSON.stringify(receipt), JSON.stringify({ idempotencyKey: input.idempotencyKey, requestHash, selectionFingerprint: evidence.review.selectionFingerprint })]);

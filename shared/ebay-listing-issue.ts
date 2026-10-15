@@ -22,7 +22,7 @@ export function resolveEbayListingIssue(input: EbayListingIssueInput): EbayListi
     || input.code?.startsWith("CANONICAL_CHANNEL_QUANTITY_");
   // Older jobs saved generic contention prose and described invalid prepared
   // drafts as mapping faults. Present the classified cause and current action.
-  const message = isFeedReadIssue || ["INVENTORY_PUBLICATION_TARGET_BUSY", "EBAY_SYNC_DRAFT_SCOPE_INVALID"].includes(code)
+  const message = isFeedReadIssue || ["INVENTORY_PUBLICATION_TARGET_BUSY", "EBAY_SYNC_DRAFT_SCOPE_INVALID", "CANONICAL_PUBLICATION_MAPPING_MISSING"].includes(code)
     ? undefined : safeListingDiagnostic(input.message);
   const issue = (title: string, fallback: string, nextStep: string, retryable: boolean,
     kind: EbayListingIssue["action"]["kind"], label: string, href?: string): EbayListingIssue =>
@@ -255,12 +255,16 @@ export function resolveEbayListingIssue(input: EbayListingIssueInput): EbayListi
     return issue("The listing update was prepared incorrectly", "Echelon rejected its prepared update because it did not match the saved listing's identity or variants. This does not establish a problem with your eBay mapping.",
       "Use Sync existing listing. Echelon automatically verifies the existing listing and prepares a fresh update with current pictures. If this error returns, give its reference to an administrator to inspect the prepared update.",
       true, "retry_sync", "Sync existing listing");
+  if (code === "CANONICAL_PUBLICATION_MAPPING_MISSING")
+    return issue("Inventory setup stopped this update", "Echelon could not prepare the inventory connection needed for this listing. Its pictures have not been confirmed updated.",
+      "Retry Sync to recheck this listing and prepare missing inventory connections for its verified variants.",
+      true, "retry_sync", "Retry Sync");
   if (["EBAY_QUANTITY_DAILY_LIMIT", "PUBLICATION_PROVIDER_COOLDOWN", "EBAY_PROVIDER_RATE_LIMITED"].includes(code))
     return issue("eBay is temporarily limiting updates", "eBay has asked Echelon to wait before another update.",
       reference && input.state !== "needs_attention"
         ? "Your saved update will retry after the displayed retry time. Repeated Sync clicks do not shorten eBay's waiting period."
         : "Wait for eBay's stated retry period, then retry this product. Repeated clicks do not shorten eBay's waiting period.",
-      false, "check_recovery", "View update status");
+      false, "check_status", "View update status");
   if (["PUBLICATION_GLOBAL_STOP_ACTIVE", "PUBLICATION_GLOBAL_DISABLED", "QUANTITY_PUBLICATION_SUPPRESSED", "PUBLICATION_LEGACY_CHANNEL_NOT_LIVE"].includes(code))
     return issue("Inventory publishing is paused", "The inventory publication owner currently prevents this listing update.",
       "An inventory administrator must review the channel's publication status. Once publishing is allowed, saved sync work continues automatically; retry Publish if this product has no saved sync job.",
@@ -282,7 +286,7 @@ export function resolveEbayListingIssue(input: EbayListingIssueInput): EbayListi
       "A temporary provider or local persistence failure interrupted the update.",
       input.state === "recovering" ? "The saved update will retry automatically. Open its status to see the latest result."
         : "Retry this product. Echelon checks the saved request and existing listing before sending another update.",
-      input.state !== "recovering", input.state === "recovering" ? "check_recovery" : "retry_sync",
+      input.state !== "recovering", input.state === "recovering" ? "check_status" : "retry_sync",
       input.state === "recovering" ? "View update status" : "Retry this product");
   if (["EBAY_SYNC_PRODUCT_NOT_ELIGIBLE", "EBAY_SYNC_CONTENT_SCOPE_EMPTY"].includes(code))
     return issue("Review which variants are included", "This product has no eligible existing listing update.",
@@ -292,11 +296,12 @@ export function resolveEbayListingIssue(input: EbayListingIssueInput): EbayListi
     return issue("Listing details need attention", "The listing does not meet a required eBay or inventory condition.",
       "Review the specific requirement above. Open this product's listing settings to correct its category, item specifics, policies or availability, then retry.",
       false, "edit_listing", "Open listing settings", `${productPath}?tab=channels`);
-  return issue("This listing needs investigation", "The listing operation failed without a recognized recovery classification.",
+  return issue("The automated update stopped", "Echelon could not identify a recovery step for this error. The update is not confirmed complete.",
     reference
-      ? "Copy the diagnostic details, including the product and reference, for an administrator. The saved update remains available for inspection."
-      : "Copy the diagnostic details and product ID for an administrator. Check the listing feed for its current state before retrying.",
-    false, "contact_support", "Copy diagnostic details");
+      ? "Open the saved update details to see its last recorded step and failure code. Checking status does not send another update."
+      : "Open the listing feed to check the latest saved request and its failure code. Checking the feed does not send another update.",
+    false, reference ? "check_status" : "edit_listing", reference ? "View saved update details" : "Open listing feed",
+    reference ? undefined : "/channels/ebay");
 }
 
 /** Public descriptions of the planner's checks; unknown diagnostics stay private. */

@@ -20,6 +20,8 @@ The account gateway accepts the configured storefront origin and the exact HTTPS
 
 The existing connection's order edit setting and payment window still apply. Customer quotes, commits, payments, refunds, recovery, picking holds, discounts, club pricing and shipping calculations are delegated to the existing services. No browser financial calculation authorizes an edit. The existing administration endpoints retain staff permissions.
 
+Availability inspections use a repeatable-read, read-only database snapshot; hold, release and apply commands retain their locked verification. A failed per-order action lookup offers **Retry order actions** without bypassing eligibility. Storefront requests have a 25-second deadline including the response body. A timed-out mutation remains uncertain and is checked using its existing operation reference rather than automatically replayed. Once cancellation is confirmed, a failed fresh-order read keeps the cancelled review closed, blocks reviewing stale order data, and offers **Retry order** while allowing the dialog to close. A failed quote with no calculated quote does not display a legacy-shipping warning. Unclassified account failures log a bounded underlying error code when supplied, without SQL, credentials or customer data.
+
 Migration `0745_customer_account_order_edit_actor.sql` preserves staff user foreign keys while adding channel/external-customer audit columns for Shopify shoppers. A customer operation must match its certified baseline's channel and customer. Audit rows remain append-only and are written in the same transaction as the operation. Customers are never inserted into the staff user table.
 
 ## Verification and cutover boundaries

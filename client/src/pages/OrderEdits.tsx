@@ -1068,6 +1068,7 @@ export function OrderEditOperationView({
   operation,
   now,
   busy,
+  busyAction,
   isUncertain,
   error,
   onCommit,
@@ -1079,6 +1080,7 @@ export function OrderEditOperationView({
   operation: OrderEditOperation;
   now: number;
   busy: boolean;
+  busyAction?: "commit" | "reconcile" | "abandon";
   isUncertain: boolean;
   error: string | null;
   onCommit(): void;
@@ -1332,7 +1334,7 @@ export function OrderEditOperationView({
               disabled={busy || isUncertain}
               onClick={onAbandon}
             >
-              {operation.status === "ready" ? "Change items" : "Cancel edit"}
+              {busy && busyAction === "abandon" ? "Canceling edit…" : operation.status === "ready" ? "Change items" : "Cancel edit"}
             </Button>
           )}
           {paymentUrl && (
@@ -1351,7 +1353,7 @@ export function OrderEditOperationView({
               disabled={busy}
               onClick={onRefresh}
             >
-              {busy ? "Checking…" : "Check status"}
+              {busy && (!busyAction || busyAction === "reconcile") ? "Checking…" : "Check status"}
             </Button>
           )}
         </div>

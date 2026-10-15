@@ -1266,6 +1266,9 @@
   "procurement.rfq_quote_revisions": [
     "modules/procurement"
   ],
+  "procurement.shipment_cost_exception_decisions": [
+    "modules/procurement"
+  ],
   "procurement.supplier_sourcing_revisions": [
     "modules/procurement"
   ],

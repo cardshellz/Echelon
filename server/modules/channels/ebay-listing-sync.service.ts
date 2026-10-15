@@ -24,6 +24,7 @@ import { syncContentIntentHash } from "./ebay-listing-sync-content";
 import type { QuantityPublicationScope } from "../inventory-planning/domain/quantity-publication-admission";
 import { assertEbayListingSourceIdentityUnchanged } from "./ebay-existing-listing-identity";
 import { resolveEbayListingIssue } from "@shared/ebay-listing-issue";
+import { ebayListingFailureDiagnostic, type EbayListingFailureDiagnostic } from "./ebay-listing-failure-diagnostic";
 
 export interface PreparedEbayListingSync {
   sourceIdentity?: EbayListingSyncIdentity;
@@ -63,7 +64,10 @@ export class EbayExistingListingSyncExecution
     bindProviderIdentity?: (identity: EbayListingSyncIdentity) => Promise<void>,
     context?: EbayListingExecutionContext,
   ): Promise<EbayProductSyncResult> {
-    const prepared = await this.prepare(identity);
+    let prepared!: PreparedEbayListingSync;
+    await stage("prepare_listing", syncIdentityHash(identity), async () => {
+      prepared = await this.prepare(identity);
+    });
     if (prepared.sourceIdentity) {
       assertEbayListingSourceIdentityUnchanged(identity, prepared.sourceIdentity);
     } else if (syncIdentityHash(identity) !== syncIdentityHash(prepared.identity)) {
@@ -85,20 +89,22 @@ export class EbayExistingListingSyncExecution
       productId: null,
       productVariantId: null,
     });
-    const recovery = await this.recovery.reconcile([
-      ...(resolvedIdentity.groupKey === null ? [] : [scope(`group:${resolvedIdentity.groupKey}`)]),
-      ...resolvedIdentity.variants.map((member) => scope(member.sku)),
-    ]);
-    if (recovery.busy)
-      throw new EbayListingSyncError(
-        "PUBLICATION_SCOPE_BUSY",
-        "Waiting for an active quantity publisher before checking prior response evidence.",
-      );
-    if (recovery.unresolved.length)
-      throw new EbayListingSyncError(
-        "EBAY_SYNC_RESPONSE_EVIDENCE_REQUIRED",
-        `A prior request has no provable final response (attempts ${recovery.unresolved.join(", ")}). Reconcile that request before another write.`,
-      );
+    await stage("recover_prior_requests", syncIdentityHash(resolvedIdentity), async () => {
+      const recovery = await this.recovery.reconcile([
+        ...(resolvedIdentity.groupKey === null ? [] : [scope(`group:${resolvedIdentity.groupKey}`)]),
+        ...resolvedIdentity.variants.map((member) => scope(member.sku)),
+      ]);
+      if (recovery.busy)
+        throw new EbayListingSyncError(
+          "PUBLICATION_SCOPE_BUSY",
+          "Waiting for an active quantity publisher before checking prior response evidence.",
+        );
+      if (recovery.unresolved.length)
+        throw new EbayListingSyncError(
+          "EBAY_SYNC_RESPONSE_EVIDENCE_REQUIRED",
+          `A prior request has no provable final response (attempts ${recovery.unresolved.join(", ")}). Reconcile that request before another write.`,
+        );
+    });
     const contentHash = syncContentIntentHash(prepared.draft);
     const offerIds: Record<number, string> = {};
     for (const member of resolvedIdentity.variants) {
@@ -130,8 +136,10 @@ export class EbayExistingListingSyncExecution
     // Prepare only before a new provider mutation. Accepted content can finish
     // read-only verification even if stock was paused after the original write.
     // Inventory owns mappings and retained zero stock; retries reuse this job.
-    await prepared.assertInventoryReady?.(context?.jobId && context.requestedBy
-      ? { commandKey: context.jobId, actor: context.requestedBy } : undefined);
+    if (prepared.assertInventoryReady) {
+      await stage("prepare_inventory", contentHash, () => prepared.assertInventoryReady!(context?.jobId && context.requestedBy
+        ? { commandKey: context.jobId, actor: context.requestedBy } : undefined));
+    }
     const updated = await this.connector.syncExistingListing({
       client: prepared.client,
       draft: prepared.draft,
@@ -224,6 +232,7 @@ export interface EbayListingSyncStore {
       message: string | null;
       nextAttemptAt: Date;
       resetAttempts?: boolean;
+      diagnostic?: EbayListingFailureDiagnostic;
     },
     now: Date,
   ): Promise<void>;
@@ -388,23 +397,17 @@ export class EbayListingSyncService {
             failure.state = withdrawalCompleted ? "recovering" : "awaiting_evidence";
             failure.resetAttempts = true;
           }
+          const diagnostic = ebayListingFailureDiagnostic(error);
+          // Log before the final transaction: a failed database commit must not
+          // erase the original failure and its exact inventory scope.
+          console.error(JSON.stringify({ event: "ebay_listing_sync_followup", jobId: job.id,
+            productId: job.productId, ...diagnostic }));
           // A failed final commit is retained as running. Never overwrite a newer
           // owner's progress after losing this connection or its fencing token.
           await this.store.finish(
             job,
-            { ...failure, result: null },
+            { ...failure, result: null, diagnostic },
             this.now(),
-          );
-          console.error(
-            JSON.stringify({
-              event: "ebay_listing_sync_followup",
-              jobId: job.id,
-              productId: job.productId,
-              code:
-                error instanceof Error && "code" in error
-                  ? error.code
-                  : "EBAY_LISTING_SYNC_FAILED",
-            }),
           );
         } finally {
           await claim.release();

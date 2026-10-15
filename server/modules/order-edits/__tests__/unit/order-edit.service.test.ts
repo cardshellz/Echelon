@@ -515,8 +515,9 @@ describe("private order edit orchestration", () => {
     h.provider.quote.mockRejectedValueOnce(
       new OrderEditProviderError("QUOTE_REJECTED", "Invalid quote"),
     );
-    await h.service.quote(h.input, "staff");
+    const failedQuote = await h.service.quote(h.input, "staff");
     expect(h.record().error?.code).toBe("HOLD_FAILED");
+    expect(failedQuote.warnings.some(warning => /predates shipping recalculation/.test(warning))).toBe(false);
     expect(h.record().quote).toBeNull();
     expect(h.report).toHaveBeenCalledWith({
       operationId: OP,

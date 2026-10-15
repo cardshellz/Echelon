@@ -62,6 +62,13 @@ describe("writer-ratchet (P2.1)", () => {
     expect(baseline["oms.archon_order_outbox"]).toEqual(["modules/oms"]);
   });
 
+  it("historical shipment cost decisions have only the Procurement writer, including scripts", () => {
+    const table = "procurement.shipment_cost_exception_decisions";
+    expect(current[table]).toEqual(["modules/procurement"]);
+    expect(currentIncludingScripts[table]).toEqual(["modules/procurement"]);
+    expect(baseline[table]).toEqual(["modules/procurement"]);
+  });
+
   it("keeps country-repair approval and audit writes in the Orders maintenance owner", () => {
     for (const table of ["oms.order_country_repair_operations", "oms.order_country_repairs"]) {
       expect(current[table]).toEqual(["modules/orders"]);

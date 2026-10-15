@@ -1,6 +1,13 @@
 import { shipmentCostWorkflowIdSchema, shipmentCostUpdateResultSchema, type ShipmentCostUpdateResult } from "@shared/procurement/shipment-cost-workflow";
 import { createFinancialCommandIntentStore, financialCommandFetchJson, FinancialCommandRequestError, type FinancialCommandIntentStore } from "./financial-command";
 
+/** Opt in to the additive exception fields. Older open browser tabs still use
+ * the original strict response shape during a rolling application deployment. */
+export function readShipmentCostWorkflow(url: string): Promise<unknown> {
+  return financialCommandFetchJson<unknown>(url, { method: "GET", credentials: "include",
+    headers: { "X-Shipment-Cost-Review-Version": "2" } });
+}
+
 /** Each shipment keeps its own uncertain command so a retry cannot post twice. */
 export function createShipmentCostUpdateClient(generateKey: () => string) {
   const intents = new Map<number, FinancialCommandIntentStore>();

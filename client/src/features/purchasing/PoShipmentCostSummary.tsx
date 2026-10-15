@@ -40,6 +40,8 @@ export function PoShipmentCostSummary({
   const costs = query.data.summary;
   if (costs.shipmentCount === 0) return null;
   const money = (cents: number) => formatIntegerCents(cents, costs.currency);
+  const accepted = query.data.lines.filter(line => line.exceptionReview?.state === "accepted").length;
+  const needsReview = Math.max(0, costs.reviewLines - accepted);
   return (
     <Card>
       <CardContent className="p-3 space-y-3">
@@ -57,7 +59,7 @@ export function PoShipmentCostSummary({
         </div>
         <div className="space-y-1 text-sm" role="status">
           <p>
-            Allocated shipment charges:{" "}
+            Saved and allocated shipment charges:{" "}
             <strong>{money(costs.totalCents)}</strong>
           </p>
           {costs.otherCents !== 0 && (
@@ -85,13 +87,16 @@ export function PoShipmentCostSummary({
               conversion before calculating the combined cost.
             </p>
           )}
-          {costs.inventoryCosting === "review_required" && (
+          {costs.inventoryCosting === "review_required" && (needsReview > 0 || costs.reviewLines === 0) && (
             <p className="text-destructive">
-              {costs.reviewLines > 0
-                ? `${costs.reviewLines} shipment line${costs.reviewLines === 1 ? " has" : "s have"} a recorded cost update that needs review.`
+              {needsReview > 0
+                ? `${needsReview} shipment line${needsReview === 1 ? " has" : "s have"} an inventory cost exception awaiting review. Saved shipment charges are included above.`
                 : "Shipment charge evidence needs review before inventory costs can be updated."}
             </p>
           )}
+          {accepted > 0 && <p className="text-muted-foreground">
+            {accepted} historical inventory difference{accepted === 1 ? " is" : "s are"} accepted by an administrator. The retained costs and decisions remain visible in the review.
+          </p>}
           {costs.inventoryCosting === "pending" && (
             <p className="text-amber-700 dark:text-amber-400">
               Inventory costing is awaiting receipt, confirmed charges or a cost
@@ -113,8 +118,9 @@ export function PoShipmentCostSummary({
           >
             {showReview
               ? "Hide cost review"
-              : costs.reviewLines > 0
-                ? `Review ${costs.reviewLines} line${costs.reviewLines === 1 ? "" : "s"}`
+              : needsReview > 0
+                ? `Review ${needsReview} line${needsReview === 1 ? "" : "s"}`
+                : accepted > 0 ? "View accepted differences"
                 : "Review inventory costs"}
           </Button>
         )}

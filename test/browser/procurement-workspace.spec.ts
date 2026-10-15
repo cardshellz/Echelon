@@ -97,7 +97,8 @@ test("inline inspector supports keyboard, connected records, history, refresh, c
   await inspector(page).getByRole("link", { name: "Invoice TEST-INV-71", exact: true }).click();
   const invoiceTitle = inspector(page).getByRole("heading", { name: "Invoice TEST-INV-71", exact: true });
   await expect(invoiceTitle).toBeFocused();
-  await expect(inspector(page)).toContainText("Allocated to this PO");
+  await expect(inspector(page)).toContainText("Recorded link amount");
+  await expect(inspector(page)).toContainText("not a validated invoice or payment allocation");
   await expect(inspector(page)).toContainText("75.00");
   await expect(inspector(page)).toContainText("200.00");
   const selectedUrl = page.url();
