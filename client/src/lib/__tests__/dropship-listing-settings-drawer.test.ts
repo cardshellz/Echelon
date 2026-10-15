@@ -285,13 +285,15 @@ describe("drawerSearch", () => {
   });
 });
 
-describe("the sheets in the page address (?sheet=, PR 10c, D21)", () => {
-  it("opens Set for selected from ?sheet=bulk, and nothing from a sheet this page doesn't have", () => {
-    expect(LISTING_SETTINGS_SHEETS).toEqual(["bulk"]);
+describe("the sheets in the page address (?sheet=, PR 10c, 10g, D21)", () => {
+  it("opens Set for selected from ?sheet=bulk, Card Shellz updated products from ?sheet=updated, and nothing from a sheet this page doesn't have", () => {
+    expect(LISTING_SETTINGS_SHEETS).toEqual(["bulk", "updated"]);
     expect(sheetFromSearch("?sheet=bulk")).toBe("bulk");
+    expect(sheetFromSearch("?sheet=updated")).toBe("updated");
+    expect(sheetFromSearch("?store=22&sheet=updated&product=11")).toBe("updated");
     expect(sheetFromSearch("sheet=bulk&store=22")).toBe("bulk");
     expect(sheetFromSearch("?store=22&product=11&sheet=bulk")).toBe("bulk");
-    for (const search of ["", "?store=22", "?sheet=", "?sheet=Bulk", "?sheet=bulk%20", "?sheet=give-prices", "?sheet=updated", "?sheet=bulk&sheet=bulk", "?sheets=bulk"]) {
+    for (const search of ["", "?store=22", "?sheet=", "?sheet=Bulk", "?sheet=bulk%20", "?sheet=give-prices", "?sheet=Updated", "?sheet=bulk&sheet=bulk", "?sheet=bulk&sheet=updated", "?sheets=bulk"]) {
       expect({ search, sheet: sheetFromSearch(search) }).toEqual({ search, sheet: null });
     }
   });
@@ -303,6 +305,10 @@ describe("the sheets in the page address (?sheet=, PR 10c, D21)", () => {
     expect(sheetSearch("?sheet=bulk", null)).toBe("");
     expect(sheetSearch("?product=11&size=101&sheet=bulk&sheet=bulk", null)).toBe("?product=11&size=101");
     expect(sheetSearch("?product=11", "bulk")).toBe("?product=11&sheet=bulk");
+    // One sheet at a time in the address: opening the other replaces it (10g).
+    expect(sheetSearch("?sheet=bulk&store=22", "updated")).toBe("?store=22&sheet=updated");
+    expect(sheetSearch("?sheet=updated", null)).toBe("");
+    expect(sheetFromSearch(sheetSearch("", "updated"))).toBe("updated");
     // Each helper leaves the other's parameter alone, so a closed sheet never closes the drawer and the other way round.
     expect(drawerTargetFromSearch(sheetSearch("?product=11&size=101", "bulk"))).toEqual({ productId: 11, productVariantId: 101 });
     expect(sheetFromSearch(drawerSearch("?sheet=bulk", { productId: 11 }))).toBe("bulk");

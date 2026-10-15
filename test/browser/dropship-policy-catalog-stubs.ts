@@ -14,6 +14,8 @@ import { contentProfileStateSchema, saveContentProfileInputSchema, type ContentP
 import {
   MAX_BULK_TEXT_BYTES,
   MAX_PRICE_RELEASES_PER_APPLY,
+  acknowledgeCategoryMovesInputSchema,
+  acknowledgeCategoryMovesResponseSchema,
   applyPriceChangesInputSchema,
   applyPriceChangesResponseSchema,
   patchTextBytes,
@@ -24,6 +26,7 @@ import {
   saveProductsBulkInputSchema,
   saveProductsBulkResponseSchema,
   storedProductPricesInputSchema,
+  type AcknowledgeCategoryMovesInput,
   type ApplyPriceChangesInput,
   type PriceChangeReviewResponse,
   type PriceChangeRow,
@@ -50,6 +53,8 @@ import {
   listingSettingsProductOwnSettingsSchema,
   listingSettingsProductsResponseSchema,
   listingSettingsSummarySchema,
+  listingSettingsUpdatedProductsInputSchema,
+  listingSettingsUpdatedProductsResponseSchema,
   type ListingSettingsFixCode,
   type ListingSettingsProductDetail,
   type ListingSettingsProductIdsInput,
@@ -60,11 +65,14 @@ import {
   type ListingSettingsSettingKey,
   type ListingSettingsSizePrice,
   type ListingSettingsSummary,
+  type ListingSettingsUpdatedProductsResponse,
   type ListingSettingsValueSource,
 } from "../../shared/dropship/listing-settings";
 import {
+  CATEGORY_LISTING_SETTING_FIELDS,
   categoryListingSettingValuesSchema,
   productListingSettingValuesSchema,
+  type CategoryListingSettingField,
   type CategoryListingSettingValues,
   type ListingSettingTemplateText,
   type ProductListingSettingValues,
@@ -338,8 +346,15 @@ export interface SizeLeftoverLayer {
   shelfNames?: string[];
   mainText?: string;
 }
+/**
+ * A product's category mark (PR 9g, W13; plan PR 10, 10.4): the Card Shellz category the vendor last confirmed
+ * the product in (null = none). A product without a mark is never listed as moved; one whose mark differs
+ * from its current category is, until "Got it" moves the mark.
+ */
+export type CategoryMark = number | null;
 
 const revisionIdSchema = z.number().int().positive().max(2_147_483_647);
+const categoryMarkSchema = z.number().int().positive().max(2_147_483_647).nullable();
 const productSettingsLayerSchema = z.object({ revisionId: revisionIdSchema, values: productListingSettingValuesSchema }).strict();
 const categorySettingsLayerSchema = z.object({ revisionId: revisionIdSchema, values: categoryListingSettingValuesSchema }).strict();
 const sizeLeftoverLayerSchema = z.object({
@@ -441,6 +456,8 @@ export interface StubState {
   categorySettings: Record<string, CategorySettingsLayer>;
   /** What today's per-size panels left on single sizes, by sizeKey(store, size); a size left out has none. */
   sizeLeftovers: Record<string, SizeLeftoverLayer>;
+  /** Each product's category mark by productKey(store, product) (plan PR 10, 10.4); a product left out has none. */
+  categoryMarks: Record<string, CategoryMark>;
   /** The store's eBay shelves by store; a store left out has none. */
   storeShelves: Record<number, StoreShelfFixture[]>;
   /** The shelves read is refused with this while it is set. */
@@ -480,6 +497,9 @@ export interface StubState {
   /** W7 applies (POST …/listing-settings/price-changes/apply), and how the next ones answer. */
   priceChangeApplies: StubWrite[];
   priceChangeApplyAnswers: WriteAnswer[];
+  /** W13 "Got it"s (POST …/listing-settings/category-moves/acknowledge; plan PR 10, 10.4), and how the next ones answer. */
+  categoryMovesAcknowledges: StubWrite[];
+  categoryMovesAcknowledgeAnswers: WriteAnswer[];
   /** The W7 checks made, by review id: the stored input and every row, for paging and the apply's hash. */
   priceChangeChecks: Record<string, PriceChangeCheck>;
   /** W7 checks already applied, by review id, with the request key that applied them (another key is 409 IDEMPOTENCY_CONFLICT). */
@@ -585,6 +605,21 @@ function categoryLayerOf(state: StubState, storeConnectionId: number, categoryId
 function sizeLeftoverOf(state: StubState, storeConnectionId: number, productVariantId: number): SizeLeftoverLayer {
   const layer = state.sizeLeftovers[sizeKey(storeConnectionId, productVariantId)];
   return layer === undefined ? {} : sizeLeftoverLayerSchema.parse(layer);
+}
+
+/** The product's category mark, when it has one (parsed each read, as the layers are). */
+function categoryMarkOf(state: StubState, storeConnectionId: number, productId: number): { marked: true; categoryId: CategoryMark } | { marked: false } {
+  const key = productKey(storeConnectionId, productId);
+  if (!(key in state.categoryMarks)) return { marked: false };
+  return { marked: true, categoryId: categoryMarkSchema.parse(state.categoryMarks[key]) };
+}
+
+/**
+ * A Card Shellz category's current name: the one the catalog's products in it carry. A category no chosen
+ * product is in any more has none, as the server reads a category Card Shellz deleted (CC-C21).
+ */
+function categoryNameOf(state: StubState, categoryId: number): string | null {
+  return state.catalog.find((product) => (product.categoryId ?? null) === categoryId)?.category ?? null;
 }
 
 /** The recipe that prices a size by rule, closest first: the product's own price, its category's, the store's. */
@@ -946,6 +981,112 @@ export function listingSettingsProductIds(state: StubState, storeConnectionId: n
     .map(({ product }) => ({ productId: product.productId, revisionId: productLayerOf(state, storeConnectionId, product.productId)?.revisionId ?? null }));
   return listingSettingsProductIdsResponseSchema.parse({ total: rows.length, rows });
 }
+
+type UpdatedProductMove = NonNullable<ListingSettingsUpdatedProductsResponse["rows"][number]["move"]>;
+
+/** A category setting's listing-deciding value, as the server compares them (category-move-changes.ts listingDecidingValues). */
+function decidingValue(values: CategoryListingSettingValues | null, field: CategoryListingSettingField): string {
+  if (values === null) return "null";
+  switch (field) {
+    case "price": return values.price === null ? "null" : JSON.stringify(values.price);
+    case "ebayCategory": return values.ebayCategory === null ? "null" : `ebay:${values.ebayCategory.categoryId}`;
+    case "storeShelf": {
+      const shelf = values.storeShelf;
+      return shelf === null ? "null" : shelf.mode === "none" ? "shelf:none" : `shelf:${shelf.shelves.map((entry) => entry.name).join("|")}`;
+    }
+    case "shippingPolicy": case "returnPolicy": case "paymentPolicy": {
+      const policy = values[field];
+      return policy === null ? "null" : `policy:${policy.id}`;
+    }
+    case "textAbove": case "textBelow": {
+      const text = values[field];
+      return text === null ? "null" : text.mode === "none" ? "text:none" : `text:${text.text}`;
+    }
+  }
+}
+
+const LEFTOVER_OWNS: Record<"shippingPolicy" | "returnPolicy" | "paymentPolicy" | "storeShelf", (leftover: SizeLeftoverLayer) => boolean> = {
+  shippingPolicy: (leftover) => leftover.shippingPolicyId !== undefined,
+  returnPolicy: (leftover) => leftover.returnPolicyId !== undefined,
+  paymentPolicy: (leftover) => leftover.paymentPolicyId !== undefined,
+  storeShelf: (leftover) => leftover.shelfNames !== undefined,
+};
+
+/**
+ * The product's move (plan PR 10, 10.3; the server's categoryMoveOf): its mark's category against its current
+ * one, with the category settings whose deciding value differs between the two rows, minus what the product's
+ * own row sets and what every chosen size's leftovers or exact price cover (category-move-changes.ts
+ * categoryMoveMaskedFields), in the stored shape's order. Null for a product with no mark, or still in it.
+ */
+function categoryMoveOf(state: StubState, storeConnectionId: number, product: ProductFixture): UpdatedProductMove | null {
+  const mark = categoryMarkOf(state, storeConnectionId, product.productId);
+  const current = product.categoryId ?? null;
+  if (!mark.marked || mark.categoryId === current) return null;
+  const from = mark.categoryId === null ? null : categoryLayerOf(state, storeConnectionId, mark.categoryId)?.values ?? null;
+  const to = current === null ? null : categoryLayerOf(state, storeConnectionId, current)?.values ?? null;
+  const own = productLayerOf(state, storeConnectionId, product.productId)?.values ?? null;
+  const masked = new Set<CategoryListingSettingField>(CATEGORY_LISTING_SETTING_FIELDS.filter((field) => own !== null && own[field] !== null));
+  if (product.sizes.length > 0) {
+    const leftovers = product.sizes.map((size) => sizeLeftoverOf(state, storeConnectionId, size.productVariantId));
+    for (const field of Object.keys(LEFTOVER_OWNS) as Array<keyof typeof LEFTOVER_OWNS>) {
+      if (leftovers.every((leftover) => LEFTOVER_OWNS[field](leftover))) masked.add(field);
+    }
+    const ownsPrice = (size: SizeFixture) => {
+      const saved = state.sizePrices[sizeKey(storeConnectionId, size.productVariantId)];
+      return saved !== undefined && saved.pricingMode !== "rules" && saved.pricingMode !== "inherit";
+    };
+    if (product.sizes.every(ownsPrice)) masked.add("price");
+  }
+  return {
+    from: { categoryId: mark.categoryId, name: mark.categoryId === null ? null : categoryNameOf(state, mark.categoryId) },
+    to: { categoryId: current, name: current === null ? null : product.category },
+    changedFields: CATEGORY_LISTING_SETTING_FIELDS.filter((field) => !masked.has(field) && decidingValue(from, field) !== decidingValue(to, field)),
+  };
+}
+
+/**
+ * "Card Shellz updated products" (`GET …/updated-products?page=N`, plan PR 10, 10.4): every chosen product
+ * Card Shellz moved to another category since its mark, or whose own text needs a check, in catalog order, 50 a
+ * page; and every moved product on every page as W13's items ("Got it for all N" sends them as they are).
+ */
+export function listingSettingsUpdatedProducts(state: StubState, storeConnectionId: number, page: number): ListingSettingsUpdatedProductsResponse {
+  const updated = state.catalog.map((product) => ({
+    productId: product.productId,
+    productName: product.productName,
+    ownTextNeedsCheck: productFacts(state, storeConnectionId, product).row.fixes.includes("own_text_needs_check"),
+    move: categoryMoveOf(state, storeConnectionId, product),
+  })).filter((row) => row.move !== null || row.ownTextNeedsCheck);
+  const moved = updated.flatMap((row) => (row.move === null ? [] : [{ productId: row.productId, shownCategoryId: row.move.to.categoryId }]));
+  return listingSettingsUpdatedProductsResponseSchema.parse({
+    storeConnectionId, page, pageSize: LISTING_SETTINGS_PAGE_SIZE, total: updated.length, rows: pageOf(updated, page),
+    moves: { total: moved.length, items: moved }, generatedAt: STAMP,
+  });
+}
+
+/**
+ * W13 (plan PR 10, 10.4; dropship-listing-category-moves-service.ts): each product still in the category shown
+ * now takes that mark (acknowledged); one Card Shellz moved again since keeps its mark (moved again); one no
+ * longer in the catalog is in neither list. Ascending product ids, as the server answers.
+ */
+function acknowledgeCategoryMoves(state: StubState, storeConnectionId: number, items: AcknowledgeCategoryMovesInput["items"]): Record<string, unknown> {
+  const acknowledgedProductIds: number[] = [];
+  const movedAgainProductIds: number[] = [];
+  for (const item of [...items].sort((left, right) => left.productId - right.productId)) {
+    const product = state.catalog.find((entry) => entry.productId === item.productId);
+    if (product === undefined) continue;
+    if ((product.categoryId ?? null) === item.shownCategoryId) {
+      state.categoryMarks[productKey(storeConnectionId, item.productId)] = item.shownCategoryId;
+      acknowledgedProductIds.push(item.productId);
+    } else {
+      movedAgainProductIds.push(item.productId);
+    }
+  }
+  return acknowledgeCategoryMovesResponseSchema.parse({ outcome: "acknowledged", acknowledgedProductIds, movedAgainProductIds });
+}
+
+/** A W13 replay says so in its `outcome` and names no product (acknowledgeCategoryMovesResponseSchema). */
+const CATEGORY_MOVES_ANSWER: KeyedAnswerShape = (json, replayed) =>
+  acknowledgeCategoryMovesResponseSchema.parse(replayed ? { outcome: "replayed", acknowledgedProductIds: [], movedAgainProductIds: [] } : json);
 
 /** The Prices tab's answer: every chosen size, searched, filtered and paged as the route does. */
 export function listingSettingsPrices(state: StubState, storeConnectionId: number, query: URLSearchParams) {
@@ -1635,14 +1776,14 @@ export const defaultStubState = (): StubState => ({
   stores: [MARZ], selected: true, previewCalls: 0, setupReads: [], summaryReads: [], productsReads: [], reads: [],
   vendor: { status: "active", entitlementStatus: "active" }, summaries: {}, liveSummary: false, storeStatuses: {}, tooLarge: false,
   summaryFailures: 0, listingSetups: {}, setupReadFailures: 0, setupReadError: null, pricingRules: {}, setupWrites: [],
-  setupWriteAnswers: [], catalog: [ENVELOPE], sizePrices: {}, productSettings: {}, categorySettings: {}, sizeLeftovers: {},
+  setupWriteAnswers: [], catalog: [ENVELOPE], sizePrices: {}, productSettings: {}, categorySettings: {}, sizeLeftovers: {}, categoryMarks: {},
   storeShelves: {}, storeShelvesError: null, categoryRules: {},
   contentProfiles: {}, pricingReviews: [], pricingReviewAnswers: [], pricingApplies: [], pricingApplyAnswers: [],
   categoryWrites: [], categoryWriteAnswers: [], categorySearches: [], contentWrites: [], contentWriteAnswers: [],
   priceWrites: [], priceWriteAnswers: [], productSettingsWrites: [], productSettingsWriteAnswers: [],
   productsBulkWrites: [], productsBulkWriteAnswers: [],
   priceChangeReviews: [], priceChangeReviewAnswers: [], priceChangePageAnswers: [], priceChangeApplies: [], priceChangeApplyAnswers: [],
-  priceChangeChecks: {}, priceChangeApplied: {},
+  priceChangeChecks: {}, priceChangeApplied: {}, categoryMovesAcknowledges: [], categoryMovesAcknowledgeAnswers: [],
   reviews: {}, keyedAnswers: {}, nextRevision: 40, unexpected: [], errors: [],
 });
 
@@ -1881,6 +2022,15 @@ async function answerListingWrite(state: StubState, route: Route, storeId: numbe
     return keyedWrite(state, route, parsed.data.idempotencyKey, body, state.productsBulkWriteAnswers,
       () => saveProductsBulk(state, storeId, { products, patch }), PRODUCTS_BULK_ANSWER);
   }
+  // W13 (plan PR 10, 10.4): "Got it" for products Card Shellz moved; keyed, no size check of its own, asks eBay nothing.
+  if (method === "POST" && path === `${listings}/listing-settings/category-moves/acknowledge`) {
+    const body = json();
+    state.categoryMovesAcknowledges.push({ method, path, body });
+    const parsed = acknowledgeCategoryMovesInputSchema.safeParse(body);
+    if (!parsed.success) return refuseBody(state, route, method, path, parsed.error.message);
+    return keyedWrite(state, route, parsed.data.idempotencyKey, body, state.categoryMovesAcknowledgeAnswers,
+      () => acknowledgeCategoryMoves(state, storeId, parsed.data.items), CATEGORY_MOVES_ANSWER);
+  }
   // W7 (plan PR 10, 7.3): the check, its pages and the apply, for one or many products.
   if (method === "POST" && path === `${listings}/listing-settings/price-changes/review`) {
     const body = json();
@@ -2000,6 +2150,18 @@ async function answerStoreRead(state: StubState, route: Route, storeId: number, 
     }
     return route.fulfill({ json: listingSettingsProductIds(state, storeId, parsed.data) });
   }
+  // "Card Shellz updated products" (plan PR 10, 10.4; read on mount for the line under the strip): refused while too large (D18).
+  if (path === `${listings}/listing-settings/updated-products`) {
+    if (state.tooLarge) return fulfillTooLarge(route);
+    const query = url.searchParams;
+    const parsed = listingSettingsUpdatedProductsInputSchema.safeParse({ storeConnectionId: storeId, ...(query.has("page") ? { page: Number(query.get("page")) } : {}) });
+    const unknown = [...query.keys()].filter((key) => key !== "page");
+    if (!parsed.success || unknown.length > 0) {
+      state.unexpected.push(`GET ${path}${url.search} (query off contract)`);
+      return route.fulfill({ status: 400, json: { error: { code: "STUB_INVALID_INPUT", message: "The query is not what the route takes." } } });
+    }
+    return route.fulfill({ json: listingSettingsUpdatedProducts(state, storeId, parsed.data.page) });
+  }
   // One product's own settings row (plan PR 10, 4.2): refused while too large, as the server refuses every list read.
   const ownPath = new RegExp(`^${listings}/listing-settings/products/(\\d+)/own$`).exec(path);
   if (ownPath) {
@@ -2056,7 +2218,7 @@ async function answerStoreRead(state: StubState, route: Route, storeId: number, 
   return NOT_MINE;
 }
 
-/** More than 10,000 sizes chosen: the lists, the ids read, the product read and its own settings are refused (dropship-listing-settings.routes.ts). */
+/** More than 10,000 sizes chosen: the lists, the ids read, the updated products, the product read and its own settings are refused (dropship-listing-settings.routes.ts). */
 function fulfillTooLarge(route: Route) {
   return fulfillError(route, { status: 422, code: "DROPSHIP_LISTING_SETTINGS_TOO_LARGE",
     message: "More than 10,000 sizes are chosen.", context: { limit: 10_000 } });
@@ -2168,6 +2330,35 @@ export function oldSetupPanel(page: Page) {
   }
   saveProductsBulkInputSchema.parse({ idempotencyKey: "ls-bulk:load-time-check", products: bulkProducts, patch: { mainText: null } });
   listingSettingsProductIds({ ...defaultStubState(), catalog: bulkCatalog(312) }, store, { search: "team", show: "all" });
+
+  // W13 (plan PR 10, 10.4, 10.5): with no mark nothing is moved and the sample's own text alone is listed; a mark on another
+  // category lists the move with the category settings that differ (the sample's own shipping policy masks that one), "Got
+  // it" with the shown category moves the mark, a product moved again since keeps its mark and is named as such, and the
+  // replay answer is on contract.
+  const unmarked = listingSettingsUpdatedProducts(layered, store, 0);
+  if (unmarked.moves.total !== 0 || unmarked.rows.length !== 1 || unmarked.rows[0].productId !== LAYERED_SAMPLE.productId || !unmarked.rows[0].ownTextNeedsCheck) {
+    throw new Error(`The stub's updated products read changed: ${JSON.stringify(unmarked)}`);
+  }
+  const marked: StubState = { ...layered, categoryMarks: { [productKey(store, LAYERED_SAMPLE.productId)]: 41 },
+    categorySettings: { ...layered.categorySettings, [categoryKey(store, 41)]: { revisionId: 9, values: {
+      price: null, ebayCategory: null, storeShelf: { mode: "none" }, shippingPolicy: { id: "priority", name: "USPS Priority Mail" },
+      returnPolicy: { id: "no-returns", name: "No returns" }, paymentPolicy: null, textAbove: null, textBelow: { mode: "none" } } } } };
+  const movedRead = listingSettingsUpdatedProducts(marked, store, 0);
+  const sampleMove = movedRead.rows[0]?.move;
+  if (movedRead.moves.total !== 1 || JSON.stringify(movedRead.moves.items) !== JSON.stringify([{ productId: LAYERED_SAMPLE.productId, shownCategoryId: 40 }])
+    || JSON.stringify(sampleMove) !== JSON.stringify({ from: { categoryId: 41, name: null }, to: { categoryId: 40, name: "Sleeves" }, changedFields: ["ebayCategory"] })) {
+    throw new Error(`The stub's category move changed: ${JSON.stringify(movedRead)}`);
+  }
+  const gotIt = acknowledgeCategoryMoves(marked, store, [{ productId: LAYERED_SAMPLE.productId, shownCategoryId: 40 }, { productId: 999, shownCategoryId: null }]);
+  if (JSON.stringify(gotIt) !== JSON.stringify({ outcome: "acknowledged", acknowledgedProductIds: [LAYERED_SAMPLE.productId], movedAgainProductIds: [] })
+    || marked.categoryMarks[productKey(store, LAYERED_SAMPLE.productId)] !== 40 || listingSettingsUpdatedProducts(marked, store, 0).moves.total !== 0) {
+    throw new Error(`The stub's W13 Got it changed: ${JSON.stringify(gotIt)}`);
+  }
+  const movedAgain = acknowledgeCategoryMoves(marked, store, [{ productId: LAYERED_SAMPLE.productId, shownCategoryId: 41 }]);
+  if (JSON.stringify(movedAgain) !== JSON.stringify({ outcome: "acknowledged", acknowledgedProductIds: [], movedAgainProductIds: [LAYERED_SAMPLE.productId] })
+    || marked.categoryMarks[productKey(store, LAYERED_SAMPLE.productId)] !== 40 || CATEGORY_MOVES_ANSWER(movedAgain, true).outcome !== "replayed") {
+    throw new Error(`The stub's W13 moved-again answer changed: ${JSON.stringify(movedAgain)}`);
+  }
 
   // W7 (plan PR 10, 7.3, 7.7): a check of the envelope's price prices its size with the shared resolver, the apply writes the
   // product's own price with a new revision and answers through the shared contract (its replay too), the same review under

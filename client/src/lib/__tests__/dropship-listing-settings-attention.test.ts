@@ -119,7 +119,8 @@ describe("attentionLines", () => {
         key: "own_text_needs_check",
         code: "own_text_needs_check",
         text: "Card Shellz updated 4 products that have your own text. Check that it still fits.",
-        action: { kind: "show_products", label: "Show products", show: "needs_fix" },
+        // PR 10g (plan 10.2): the line keeps its record words; [Check] opens "Card Shellz updated products".
+        action: { kind: "open_updated_products", label: "Check" },
       },
       {
         key: "no_ebay_category:11",

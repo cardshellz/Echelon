@@ -6,6 +6,7 @@ import {
   listingSettingsProductIdsResponseSchema,
   listingSettingsProductOwnSettingsSchema,
   listingSettingsProductsResponseSchema,
+  listingSettingsUpdatedProductsResponseSchema,
   type ListingSettingsPricesResponse,
   type ListingSettingsProductDetail,
   type ListingSettingsProductsResponse,
@@ -24,6 +25,7 @@ import {
   listingSettingsProductsQueryOptions,
   listingSettingsQueryKey,
   listingSettingsSummaryQueryOptions,
+  listingSettingsUpdatedProductsQueryOptions,
 } from "../dropship-listing-settings";
 
 const GENERATED_AT = "2026-10-07T12:00:00.000Z";
@@ -378,6 +380,62 @@ describe("listing settings product ids query (Set for selected, PR 10c, plan 6.4
     for (const [status, code] of [[422, "DROPSHIP_LISTING_SETTINGS_TOO_LARGE"], [429, "DROPSHIP_LISTING_SETTINGS_RATE_LIMITED"], [404, "DROPSHIP_STORE_CONNECTION_REQUIRED"]] as const) {
       stubFetch({ error: { code, message: "Refused." } }, status);
       await expect(listingSettingsProductIdsQueryOptions(22, {}).queryFn({ signal })).rejects.toMatchObject({ status, code });
+    }
+  });
+});
+
+describe("listing settings updated-products query (Card Shellz updated products, PR 10g, plan 10.2, D10, D18)", () => {
+  const updated = listingSettingsUpdatedProductsResponseSchema.parse({
+    storeConnectionId: 22, page: 1, pageSize: 50, total: 51, generatedAt: GENERATED_AT,
+    rows: [{ productId: 11, productName: "Easy Glide Soft Sleeves", ownTextNeedsCheck: false, move: { from: { categoryId: 40, name: "Sleeves" }, to: { categoryId: 41, name: "Toploaders" }, changedFields: ["price"] } }],
+    moves: { total: 1, items: [{ productId: 11, shownCategoryId: 41 }] },
+  });
+
+  it("reads one page under the store's prefix, keyed by the page, a list read by default and fresh for the open sheet", async () => {
+    const fetchMock = stubFetch(updated);
+    const options = listingSettingsUpdatedProductsQueryOptions(22, 1);
+    expect(options.queryKey).toEqual(["/api/dropship/listings/stores", 22, "listing-settings", "updated-products", 1]);
+    expect(options.queryKey.slice(0, 3)).toEqual(listingSettingsQueryKey(22));
+    await expect(options.queryFn({ signal })).resolves.toEqual(updated);
+    expect(fetchMock.mock.calls[0][0]).toBe("/api/dropship/listings/stores/22/listing-settings/updated-products?page=1");
+    expect(options).toMatchObject({ enabled: true, retry: false, staleTime: 60_000 });
+    expect(listingSettingsUpdatedProductsQueryOptions(22, 1, { fresh: true })).toMatchObject({ staleTime: 0, retry: false });
+    expect(listingSettingsUpdatedProductsQueryOptions(22, 1, { fresh: true }).queryKey).toEqual(options.queryKey);
+    expect(listingSettingsUpdatedProductsQueryOptions(22, 0).queryKey).not.toEqual(options.queryKey);
+  });
+
+  it("runs only for a real store and a page inside the contract, and only while enabled (too large, a closed sheet)", async () => {
+    expect(listingSettingsUpdatedProductsQueryOptions(22, 0, { enabled: false }).enabled).toBe(false);
+    for (const page of [-1, 1.5, 200, Number.NaN]) expect(listingSettingsUpdatedProductsQueryOptions(22, page).enabled).toBe(false);
+    for (const store of [0, -3, 1.5]) expect(listingSettingsUpdatedProductsQueryOptions(store, 0).enabled).toBe(false);
+    const fetchMock = stubFetch(updated);
+    await expect(listingSettingsUpdatedProductsQueryOptions(22, 200).queryFn({ signal })).rejects.toMatchObject({
+      code: LISTING_SETTINGS_INVALID_REQUEST, context: { read: "updated-products" },
+    });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("refuses an answer outside the strict contract, or for another store or page", async () => {
+    for (const answer of [
+      { ...updated, extra: 1 },
+      { ...updated, page: 0 },
+      { ...updated, storeConnectionId: 23 },
+      { ...updated, moves: { total: 2, items: updated.moves.items } },
+      { ...updated, rows: [{ ...updated.rows[0], move: null }] },
+      { ...updated, rows: [{ ...updated.rows[0], move: { ...updated.rows[0].move, to: { categoryId: 41, name: null } } }] },
+      null,
+    ]) {
+      stubFetch(answer);
+      await expect(listingSettingsUpdatedProductsQueryOptions(22, 1).queryFn({ signal })).rejects.toMatchObject({
+        code: LISTING_SETTINGS_OFF_CONTRACT, context: { read: "updated-products" },
+      });
+    }
+  });
+
+  it("passes the server's refusals on, for the sheet's read words and the too-large banner (D18)", async () => {
+    for (const [status, code] of [[422, "DROPSHIP_LISTING_SETTINGS_TOO_LARGE"], [429, "DROPSHIP_LISTING_SETTINGS_RATE_LIMITED"], [422, "DROPSHIP_LISTING_SETTINGS_EBAY_ONLY"]] as const) {
+      stubFetch({ error: { code, message: "Refused." } }, status);
+      await expect(listingSettingsUpdatedProductsQueryOptions(22, 0).queryFn({ signal })).rejects.toMatchObject({ status, code });
     }
   });
 });

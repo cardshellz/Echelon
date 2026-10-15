@@ -695,6 +695,10 @@ test("more than 10,000 sizes chosen shows the too-large banner, and the lists ca
   expect(readsOf(state, "GET", `${LISTINGS}/listing-settings/prices`)).toEqual([]);
   // Nothing could be ticked, so the sheet's ids read was never made (its own refusal: the bulk spec's too-large journey).
   expect(readsOf(state, "GET", `${LISTINGS}/listing-settings/products/ids`)).toEqual([]);
+  // "Card Shellz updated products" (PR 10g, D18): at most the one read made before the summary answered, refused too; the
+  // line under the strip stays hidden and adds no banner of its own.
+  expect(readsOf(state, "GET", `${LISTINGS}/listing-settings/updated-products`).length).toBeLessThanOrEqual(1);
+  await expect(page.getByTestId("updated-products-line")).toHaveCount(0);
   expectGatedReads(state);
   expectNothingUnexpected(state);
 });

@@ -110,9 +110,11 @@ function oracle(vendor: string, entitlement: string, store: string, outcome: Set
   const bulkSettings = price;
   // W7 (PR 10d, D3): the price check for one or many products, the same PR 9 gate; it names no eBay value.
   const priceCheck = price;
+  // W13 (PR 10g, D3): "Got it" in "Card Shellz updated products", the same PR 9 gate; it asks eBay nothing.
+  const categoryMoves = price;
   return {
     price, exactPrice: price, description: price, ebayCategory,
-    policies, shelfNone: policies, shelfPick: policies, shipping, shipFrom: shipping, productSettings, bulkSettings, priceCheck,
+    policies, shelfNone: policies, shelfPick: policies, shipping, shipFrom: shipping, productSettings, bulkSettings, priceCheck, categoryMoves,
   };
 }
 
@@ -158,7 +160,7 @@ describe("edit rights: reasons", () => {
     const setupLoading = listingSettingsEditRights(input({ setup: { data: undefined, error: null } }));
     expect(setupLoading.policies).toEqual({ editable: false, reason: "checking_ebay" });
     // Prices, the eBay category and the description never wait for eBay's setup read.
-    expect(editableRights(setupLoading)).toEqual(["price", "exactPrice", "ebayCategory", "description", "productSettings", "bulkSettings", "priceCheck"]);
+    expect(editableRights(setupLoading)).toEqual(["price", "exactPrice", "ebayCategory", "description", "productSettings", "bulkSettings", "priceCheck", "categoryMoves"]);
     const shelvesLoading = listingSettingsEditRights(input({ shelves: { data: undefined, error: null } }));
     expect(shelvesLoading.shelfPick).toEqual({ editable: false, reason: "checking_ebay" });
     expect(shelvesLoading.shelfNone.editable).toBe(true);
@@ -177,7 +179,7 @@ describe("edit rights: reasons", () => {
       input({ shelves: { error: apiError(403, "DROPSHIP_EBAY_STORE_CATEGORIES_PERMISSION_REQUIRED") } }),
     ]) {
       const rights = listingSettingsEditRights(cell);
-      expect(editableRights(rights)).toEqual(["price", "exactPrice", "description", "productSettings", "bulkSettings", "priceCheck"]);
+      expect(editableRights(rights)).toEqual(["price", "exactPrice", "description", "productSettings", "bulkSettings", "priceCheck", "categoryMoves"]);
       for (const right of ["policies", "shipping", "shelfPick", "shelfNone", "shipFrom", "ebayCategory"] as const) {
         expect(rights[right]).toEqual({ editable: false, reason: "sign_in" });
       }
@@ -188,7 +190,7 @@ describe("edit rights: reasons", () => {
   it("eBay unreachable keeps every choice that needs no setup read (R:502)", () => {
     const cell = input({ setup: { error: apiError(503, "DROPSHIP_EBAY_TOKEN_REFRESH_FAILED") } });
     const rights = listingSettingsEditRights(cell);
-    expect(editableRights(rights)).toEqual(["price", "exactPrice", "ebayCategory", "description", "productSettings", "bulkSettings", "priceCheck"]);
+    expect(editableRights(rights)).toEqual(["price", "exactPrice", "ebayCategory", "description", "productSettings", "bulkSettings", "priceCheck", "categoryMoves"]);
     expect(rights.policies).toEqual({ editable: false, reason: "unreachable" });
     expect(chooseConnectionBanner(cell)).toEqual({ kind: "unreachable", diagnosticReference: null });
   });
@@ -219,7 +221,7 @@ describe("edit rights: reasons", () => {
     expect(unfinished.shipping).toEqual({ editable: false, reason: "shipping_setup" });
     expect(unfinished.shipFrom).toEqual({ editable: false, reason: "shipping_setup" });
     expect(editableRights(unfinished)).toEqual([
-      "price", "exactPrice", "policies", "shelfPick", "shelfNone", "ebayCategory", "description", "productSettings", "bulkSettings", "priceCheck",
+      "price", "exactPrice", "policies", "shelfPick", "shelfNone", "ebayCategory", "description", "productSettings", "bulkSettings", "priceCheck", "categoryMoves",
     ]);
     const outage = listingSettingsEditRights(input({ setup: { data: setupChecked({ checks: { ebay: "checked", fulfillment: { status: "unavailable", reference: "R-2", kind: "temporary" } } }) } }));
     expect(outage.shipping).toEqual({ editable: false, reason: "shipping_unavailable" });
@@ -277,11 +279,11 @@ describe("edit rights: reasons", () => {
     expect(chooseConnectionBanner(entitlement)?.kind).toBe("ops_inactive");
   });
 
-  it("a product's own settings (W5), Set for selected (W6) and the price check (W7) are taken away by exactly the plan's banners (PR 10, D3)", () => {
+  it("a product's own settings (W5), Set for selected (W6), the price check (W7) and Got it (W13) are taken away by exactly the plan's banners (PR 10, D3)", () => {
     const takesPr9WritersAway: ReadonlySet<ConnectionBannerKind> = new Set([
       "account_inactive", "store_paused", "store_disconnecting", "store_disconnected", "too_large", "other_site", "selling_paused", "ops_inactive",
     ]);
-    for (const name of ["productSettings", "bulkSettings", "priceCheck"] as const) {
+    for (const name of ["productSettings", "bulkSettings", "priceCheck", "categoryMoves"] as const) {
       for (const kind of CONNECTION_BANNER_KINDS) {
         const right = listingSettingsEditRights(input({ blocked: { kind, diagnosticReference: null } }))[name];
         expect({ name, kind, editable: right.editable }).toEqual({ name, kind, editable: !takesPr9WritersAway.has(kind) });
