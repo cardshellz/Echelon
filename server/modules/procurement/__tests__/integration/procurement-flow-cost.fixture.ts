@@ -105,7 +105,7 @@ export async function createFlowCostHarness(url: string) {
       CREATE UNIQUE INDEX flow_snapshot_unique ON procurement.landed_cost_snapshots(inbound_shipment_line_id)
         WHERE inbound_shipment_line_id IS NOT NULL;
       CREATE UNIQUE INDEX flow_invoice_po_unique ON procurement.vendor_invoice_po_links(vendor_invoice_id,purchase_order_id);
-      CREATE UNIQUE INDEX flow_invoice_number_unique ON procurement.vendor_invoices(vendor_id,invoice_number);
+      CREATE UNIQUE INDEX vendor_invoices_vendor_invoice_idx ON procurement.vendor_invoices(vendor_id,invoice_number);
       CREATE TABLE inventory.cost_adjustment_log (
         id SERIAL PRIMARY KEY, lot_id INTEGER NOT NULL, lot_number VARCHAR(50), product_variant_id INTEGER,
         sku VARCHAR(100), old_cost_cents BIGINT, new_cost_cents BIGINT, delta_cents BIGINT,

@@ -1,0 +1,39 @@
+# Shipment invoice replacement validation
+
+Reproduction base: `079d4274b2c8ed42ae3f1e8a6b6eb7dc9acf01af`. Final implementation base: `9e09d41dad4dbee0575d0bc7db10d692ebb9e61c`, refreshed on 2026-10-15. Incoming PR1795 changes Dropship/CI paths; procurement implementation is unchanged by that refresh.
+
+## Reproduced behavior and correction
+
+Three disposable PostgreSQL characterization cases reproduced the original void/replacement dead end through actual application owners. The original foreign key and freight lines remain after void, both available-cost selectors exclude them, generic same-number recreation is rejected, and unlink rejects the terminal invoice. Clearing the foreign key alone does not establish new cost authority.
+
+The correction is an explicit received successor, with immutable lineage and the same supplier number, complete locked charge reassignment, durable command replay and an audit record in the same transaction. The original is preserved. The shipment detail read now uses enriched/versioned cost rows, and the invoice detail plus replacement version share one read-only repeatable-read transaction.
+
+## Executed checks
+
+- Procurement unit suite: **2,831 passed**, **14 existing skips**, across 205 files. Includes the new eligibility/contract and invoice-lineage tests. This is a complete clean rerun after updating two assertions that described the original misleading voided status.
+- PostgreSQL: **214 passed**, no failures or skips, across nine suites. The eight existing regression suites were rerun completely after adding the new read dependency to the invoice-PO comparison fixture. The new replacement suite passed all **19 cases**.
+- Browser: **38 passed**, no failures or skips, across desktop/mobile. Includes 18 replacement cases and 20 existing AP safeguards. A first run exposed a test navigation mistake; the corrected complete run passed. Screenshots were inspected at both sizes. The final saved-request wording change does not alter behavior.
+- Focused UI/recovery/route units: **48 passed**, including storage failures, lost responses, strict HTTP input, permissions, replay headers, composed shipment reads, existing navigation and detail-load recovery. Some route cases also belong to the procurement count; counts are not additive.
+- CI/migration guards: **226 passed** across six suites. Includes all five preflight suites plus migration-allocation tests. The three affected browser/typing/workflow guards passed again after refreshing main.
+
+- All three TypeScript projects passed on the refreshed base: application, server tests and client tests. The new browser spec also passed a direct typing check.
+- The production build passed on the refreshed base. Vite retains its existing large-chunk warning.
+- The migration catalog validates 515 existing allocated migrations; the candidate SQL is not allocated or released yet.
+
+The exact commands, raw logs and final readiness receipt are retained in the local review output `outputs/procurement-invoice-recovery-2026-10-15`.
+
+## Database coverage
+
+The new suite exercises exact retained original data, same-number creation, fresh approval/payment state, cloned legitimate PO links, atomic charge reassignment, durable replay, rollback after injected audit failure, concurrent distinct commands, stale previews, generic duplicate protection, immutable identity/deletion/attachments, zero values, closed shipments, payment history including voided payments, invalid source ownership and amounts, strict inputs, repeated replacement generations and current cost authority.
+
+A deterministic race commits a separate header edit immediately after the actual detail header SELECT. The returned display and replacement token both retain the original snapshot; the next GET sees the new state. Real cost revisions retain all historical invoice rows while selecting only the approved successor as invoice authority. The PO shipment-cost reader agrees. No inventory cost application is created by replacement.
+
+Existing regression suites cover AP financial safeguards (13), invoice PO comparisons (8), invoice cost review (10), exact value allocation (15), receiving cost application (54), controlled procurement flow (3), shipment cost commands (40), and shipment line commands (52). All writes use fresh databases on the verified owned local PostgreSQL17 cluster. Generated databases were dropped, and the server was stopped after verifying that no other clients remained.
+
+## Review, assumptions and limits
+
+An independent reviewer traced the command, migration, database mutation bypasses, both cost readers and UI boundary, and independently ran the 52 eligibility/lineage tests. Identified gaps in identity editing, tail deletion, original attachments, strict input and detail snapshot consistency were fixed before completion.
+
+No payment allocation policy or historical inventory correction is assumed. This recovery supports complete unpaid shipment-charge invoices without any payment history. Mixed/product/unmapped sources, signed or inconsistent amounts, broken ownership, cancelled shipments and unsupported PO links remain explicit review cases. They are not silently cloned, cleared or renumbered.
+
+SQL allocation remains pending until a draft PR supplies its migration identity; allocation must preserve the reviewed SQL bytes. Local tests do not prove hosted CI, migration application, deployment, live acceptance or production prevalence. The shared graph-lock throughput has not been benchmarked. F19 and the remaining F23 shipment-detail recovery work remain separate.

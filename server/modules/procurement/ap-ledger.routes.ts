@@ -11,6 +11,8 @@ import {
 } from "../../platform/commands/transactional-command.service";
 import { apPaymentCommands } from "./ap-payment-commands";
 import { apInvoiceCommands } from "./ap-invoice-commands";
+import { apInvoiceReplacementCommands } from "./ap-invoice-replacement.commands";
+import { invoiceReplacementInputSchema } from "@shared/procurement/invoice-replacement";
 
 function handleApLedgerError(res: any, err: any, fallbackStatus = 400) {
   if (err?.name === "ApLedgerError") {
@@ -164,6 +166,28 @@ export function registerApLedgerRoutes(app: Express) {
       });
       const result = await apInvoiceCommands.voidInvoice(invoiceId, {
         reason,
+        userId: getUserId(req),
+      }, descriptor);
+      return sendFinancialCommandResult(res, result);
+    } catch (err: any) {
+      if (err instanceof FinancialCommandError) return sendFinancialCommandError(res, err);
+      handleApLedgerError(res, err);
+    }
+  });
+
+  app.post("/api/vendor-invoices/:id/replacement", requirePermission("purchasing", "create"), requirePermission("purchasing", "edit"), async (req, res) => {
+    try {
+      const invoiceId = Number(req.params.id);
+      const descriptor = financialCommandFromRequest(req, {
+        actorId: getUserId(req),
+        routeTemplate: "/api/vendor-invoices/:id/replacement",
+        resourceKey: `vendor_invoice:${invoiceId}`,
+        commandName: "ap.invoice.replacement",
+      });
+      const input = invoiceReplacementInputSchema.safeParse(req.body);
+      if (!input.success) return res.status(400).json({ error: "Invalid invoice replacement request", details: { code: "AP_INVOICE_REPLACEMENT_INPUT_INVALID", issues: input.error.issues } });
+      const result = await apInvoiceReplacementCommands.createReplacement(invoiceId, {
+        ...input.data,
         userId: getUserId(req),
       }, descriptor);
       return sendFinancialCommandResult(res, result);
