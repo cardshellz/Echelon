@@ -27,6 +27,8 @@ import {
   decideSizeEdit,
   DRAWER_SIZES_SHOWN_FIRST,
   DRAWER_WORDS,
+  categorySearch,
+  categoryTargetFromSearch,
   drawerCategoryLine,
   drawerDraftState,
   drawerFooter,
@@ -46,6 +48,7 @@ import {
   drawerTargetFromSearch,
   LISTING_SETTINGS_SHEETS,
   limitNotices,
+  listingSettingsSurfaceFromSearch,
   marginNotice,
   ownSizePriceDraft,
   parseExactPrice,
@@ -317,6 +320,42 @@ describe("the sheets in the page address (?sheet=, PR 10c, 10g, D21)", () => {
 
   it("refuses a sheet this page doesn't have", () => {
     expect(() => sheetSearch("", "give-prices" as "bulk")).toThrow(/only a sheet this page has/);
+  });
+});
+
+describe("the category editor in the page address (?category=, PR 10e, D21)", () => {
+  it("opens the editor from one positive whole category id, and nothing from anything else", () => {
+    expect(categoryTargetFromSearch("?category=40")).toBe(40);
+    expect(categoryTargetFromSearch("category=40&store=22")).toBe(40);
+    expect(categoryTargetFromSearch("?store=22&product=11&category=2147483647")).toBe(2_147_483_647);
+    for (const search of ["", "?store=22", "?category=", "?category=0", "?category=-1", "?category=1.5", "?category=040", "?category=x", "?category=2147483648", "?category=40&category=41", "?categories=40"]) {
+      expect({ search, categoryId: categoryTargetFromSearch(search) }).toEqual({ search, categoryId: null });
+    }
+  });
+
+  it("opens and closes the editor, keeping every other parameter, the drawer's and the sheets' too (K15)", () => {
+    expect(categorySearch("", 40)).toBe("?category=40");
+    expect(categorySearch("?store=22", 40)).toBe("?store=22&category=40");
+    expect(categorySearch("?category=40&store=22", null)).toBe("?store=22");
+    expect(categorySearch("?category=40", null)).toBe("");
+    expect(categorySearch("?product=11&size=101&category=40&category=41", null)).toBe("?product=11&size=101");
+    expect(categorySearch("?category=40&store=22", 41)).toBe("?store=22&category=41");
+    expect(categoryTargetFromSearch(categorySearch("?store=22", 40))).toBe(40);
+    // Each helper leaves the others' parameters alone; the page takes them off first (D20, one surface at a time).
+    expect(sheetFromSearch(categorySearch("?sheet=bulk", 40))).toBe("bulk");
+    expect(categoryTargetFromSearch(sheetSearch(drawerSearch("?category=40", { productId: 11 }), "updated"))).toBe(40);
+    expect(categorySearch(sheetSearch(drawerSearch("?store=22&product=11&size=101&sheet=bulk", null), null), 40)).toBe("?store=22&category=40");
+    expect(() => categorySearch("", 0)).toThrow(/positive whole-number category id/);
+    expect(() => categorySearch("", 1.5)).toThrow();
+  });
+
+  it("names the one surface an address opens: the drawer over a sheet over the category editor (D20)", () => {
+    expect(listingSettingsSurfaceFromSearch("?store=22")).toBeNull();
+    expect(listingSettingsSurfaceFromSearch("?category=40")).toEqual({ kind: "category", categoryId: 40 });
+    expect(listingSettingsSurfaceFromSearch("?sheet=updated&category=40")).toEqual({ kind: "sheet", sheet: "updated" });
+    expect(listingSettingsSurfaceFromSearch("?product=11&size=101&sheet=bulk&category=40")).toEqual({ kind: "drawer", target: { productId: 11, productVariantId: 101 } });
+    expect(listingSettingsSurfaceFromSearch("?product=0&sheet=bulk")).toEqual({ kind: "sheet", sheet: "bulk" });
+    expect(listingSettingsSurfaceFromSearch("?sheet=nope&category=40")).toEqual({ kind: "category", categoryId: 40 });
   });
 });
 

@@ -699,6 +699,9 @@ test("more than 10,000 sizes chosen shows the too-large banner, and the lists ca
   // line under the strip stays hidden and adds no banner of its own.
   expect(readsOf(state, "GET", `${LISTINGS}/listing-settings/updated-products`).length).toBeLessThanOrEqual(1);
   await expect(page.getByTestId("updated-products-line")).toHaveCount(0);
+  // The Category settings card (PR 10e, D18): at most the one read made before the summary answered, refused too; the card hides.
+  expect(readsOf(state, "GET", `${LISTINGS}/listing-settings/categories`).length).toBeLessThanOrEqual(1);
+  await expect(page.getByTestId("category-settings-card")).toHaveCount(0);
   expectGatedReads(state);
   expectNothingUnexpected(state);
 });

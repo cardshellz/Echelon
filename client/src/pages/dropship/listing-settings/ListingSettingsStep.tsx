@@ -20,24 +20,30 @@ import {
   BULK_EDITOR_ID,
   LISTING_SETTINGS_GUARD_ID_PREFIX,
   STORE_DEFAULT_LABELS,
+  categoryEditorId,
   countOlderSettingsDrafts,
   decideOpen,
   describeListingSettingsBar,
   isDraftDirty,
 } from "@/lib/dropship-listing-settings-drafts";
 import {
+  categorySearch,
   drawerSearch,
   drawerTargetFromSearch,
   firstSizeNeedingFix,
+  listingSettingsSurfaceFromSearch,
   sheetFromSearch,
   sheetSearch,
   type DrawerTarget,
 } from "@/lib/dropship-listing-settings-drawer";
 import { isStoreDefaultPolicyEditor, policyEditorBase } from "@/lib/dropship-listing-settings-store-requests";
+import { LISTING_SETTINGS_CATEGORY_WORDS } from "@/lib/dropship-listing-settings-words";
 import type { DropshipEbayStoreCategoryResponse, DropshipStoreConnectionSummary } from "@/lib/dropship-ops-surface";
 import { CatalogActionBar, type CatalogNextStepAction } from "../catalog/CatalogActionBar";
 import { useLeaveGuard, useUnsavedDrafts } from "../catalog/UnsavedChangesGuard";
 import { AttentionStrip } from "./AttentionStrip";
+import { CategoryEditor, type CategoryEditorCloseReason } from "./CategoryEditor";
+import { CategorySettingsCard, type CategoryCardOpen } from "./CategorySettingsCard";
 import { ConnectionBannerView } from "./ConnectionBanner";
 import { DescriptionDefaultRow } from "./DescriptionDefaultRow";
 import { EbayCategoryDefaultRow } from "./EbayCategoryDefaultRow";
@@ -65,8 +71,10 @@ import { UpdatedProductsSheet, type OwnTextCheckAction } from "./UpdatedProducts
  * the facts every row shares (the live eBay setup, the summary, the store
  * shelves), turns them into edit rights and the one banner, and routes the
  * strip's buttons and the address (`?product=&size=`, and from PR 10
- * `?sheet=bulk` for "Set for selected" and `?sheet=updated` for "Card Shellz
- * updated products") to the right place, one surface at a time (D20).
+ * `?sheet=bulk` for "Set for selected", `?sheet=updated` for "Card Shellz
+ * updated products" and `?category=<id>` for a category's editor) to the
+ * right place, one surface at a time (D20). The Category settings card sits
+ * between the Store defaults card and the tabs (PR 10e, A5).
  */
 
 /** The onboarding read the page and portal shell share; its vendor status and entitlement gate every writer. */
@@ -145,6 +153,11 @@ export function ListingSettingsStep(props: ListingSettingsStepProps) {
   const search = useSearch();
   const drawerTarget = useMemo(() => drawerTargetFromSearch(search), [search]);
   const sheet = useMemo(() => sheetFromSearch(search), [search]);
+  // The category editor only when it is the one surface the address opens (D20: the drawer, then a sheet, win).
+  const categoryTarget = useMemo(() => {
+    const surface = listingSettingsSurfaceFromSearch(search);
+    return surface?.kind === "category" ? surface.categoryId : null;
+  }, [search]);
   const guard = useLeaveGuard();
 
   // A block a save reported during this visit (plan 4.3). It stays until the vendor checks again
@@ -156,11 +169,21 @@ export function ListingSettingsStep(props: ListingSettingsStepProps) {
   useEffect(() => {
     if (drawerTarget === null) setLanding(null);
   }, [drawerTarget]);
+  // The card row a [Change] opened the category editor from (its name titles the editor while the detail loads);
+  // null when the address alone opened it.
+  const [openedCategory, setOpenedCategory] = useState<CategoryCardOpen | null>(null);
+  // Why the category editor closed itself (no chosen product is in its category any more, 8.6), said under the
+  // card until a category editor opens again.
+  const [categoryNotice, setCategoryNotice] = useState<string | null>(null);
+  useEffect(() => {
+    if (categoryTarget !== null) setCategoryNotice(null);
+  }, [categoryTarget]);
   const defaultsRef = useRef<HTMLDivElement | null>(null);
   const tabsRef = useRef<HTMLDivElement | null>(null);
   const drawerOpener = useRef<HTMLElement | null>(null);
   const bulkOpener = useRef<HTMLElement | null>(null);
   const updatedOpener = useRef<HTMLElement | null>(null);
+  const categoryOpener = useRef<HTMLElement | null>(null);
   const mounted = useRef(false);
   useEffect(() => {
     mounted.current = true;
@@ -219,12 +242,12 @@ export function ListingSettingsStep(props: ListingSettingsStepProps) {
     void latest.current.shelves.refetch();
   }, []);
 
-  /** Opens the drawer by putting it in the address, so Back closes it and a link opens it (R:690-692). */
+  /** Opens the drawer by putting it in the address, so Back closes it and a link opens it (R:690-692); a category editor's address goes (D20). */
   const openDrawer = useCallback((target: DrawerTarget) => {
     const active = typeof document === "undefined" ? null : document.activeElement;
     drawerOpener.current = active instanceof HTMLElement ? active : null;
     const { location: path, search: query } = latest.current;
-    navigate(`${path}${drawerSearch(query, target)}`);
+    navigate(`${path}${drawerSearch(categorySearch(query, null), target)}`);
   }, [navigate]);
 
   /** Closing takes the drawer off the address in place, so Back doesn't open it again. */
@@ -244,7 +267,7 @@ export function ListingSettingsStep(props: ListingSettingsStepProps) {
     const show = () => {
       bulkOpener.current = opener;
       const { location: path, search: query } = latest.current;
-      navigate(`${path}${sheetSearch(drawerSearch(query, null), "bulk")}`);
+      navigate(`${path}${sheetSearch(drawerSearch(categorySearch(query, null), null), "bulk")}`);
     };
     const decision = decideOpen(drafts.draft, BULK_EDITOR_ID);
     // Another editor's save is in flight: nothing opens until it settles.
@@ -274,7 +297,7 @@ export function ListingSettingsStep(props: ListingSettingsStepProps) {
     const active = typeof document === "undefined" ? null : document.activeElement;
     updatedOpener.current = active instanceof HTMLElement ? active : null;
     const { location: path, search: query } = latest.current;
-    navigate(`${path}${sheetSearch(drawerSearch(query, null), "updated")}`);
+    navigate(`${path}${sheetSearch(drawerSearch(categorySearch(query, null), null), "updated")}`);
   }, [navigate]);
 
   const closeUpdatedSheet = useCallback(() => {
@@ -292,7 +315,42 @@ export function ListingSettingsStep(props: ListingSettingsStepProps) {
     drawerOpener.current = updatedOpener.current;
     if (row !== undefined) setLanding((previous) => ({ productId, row, requestId: (previous?.requestId ?? 0) + 1 }));
     const { location: path, search: query } = latest.current;
-    navigate(`${path}${drawerSearch(sheetSearch(query, null), { productId })}`);
+    navigate(`${path}${drawerSearch(sheetSearch(categorySearch(query, null), null), { productId })}`);
+  }, [navigate]);
+
+  /**
+   * A category row's [Change] (PR 10e, plan 8.2) puts that category's editor in the address (D21), so Back closes
+   * it and keeps its draft. Another editor's unsaved change is asked about first (D16, through the step's one
+   * draft); the drawer's and the sheets' addresses go with it: one surface at a time (D20). The opener is taken
+   * now, so focus comes back to the row's [Change] when the editor closes (plan 3.4).
+   */
+  const openCategoryEditor = useCallback((row: CategoryCardOpen) => {
+    const active = typeof document === "undefined" ? null : document.activeElement;
+    const opener = active instanceof HTMLElement ? active : null;
+    const show = () => {
+      categoryOpener.current = opener;
+      setOpenedCategory(row);
+      const { location: path, search: query } = latest.current;
+      navigate(`${path}${categorySearch(sheetSearch(drawerSearch(query, null), null), row.categoryId)}`);
+    };
+    const decision = decideOpen(drafts.draft, categoryEditorId(row.categoryId));
+    // Another editor's save is in flight: nothing opens until it settles.
+    if (decision === "refuse") return;
+    if (decision === "ask") {
+      guard(() => {
+        drafts.discard();
+        show();
+      }, [`${LISTING_SETTINGS_GUARD_ID_PREFIX}${storeConnectionId}`]);
+      return;
+    }
+    show();
+  }, [drafts, guard, navigate, storeConnectionId]);
+
+  /** Closing takes the category off the address in place, so Back doesn't open it again; an editor that closed itself says why under the card. */
+  const closeCategoryEditor = useCallback((reason?: CategoryEditorCloseReason) => {
+    const { location: path, search: query } = latest.current;
+    navigate(`${path}${categorySearch(query, null)}`, { replace: true });
+    if (reason === "not_found") setCategoryNotice(LISTING_SETTINGS_CATEGORY_WORDS.categoryNotFound);
   }, [navigate]);
 
   const openProduct = useCallback((target: ListingSettingsProductTarget) => {
@@ -458,6 +516,17 @@ export function ListingSettingsStep(props: ListingSettingsStepProps) {
           />
         </StoreDefaultsCard>
       </div>
+      {/* Between the Store defaults card and the tabs (PR 10e, A5); its read is off and it hides while the selection is too large (D18). */}
+      <div className="mt-4">
+        <CategorySettingsCard
+          storeConnectionId={storeConnectionId}
+          summary={{ data: summary.data, error: summary.error }}
+          right={rights.categorySettings}
+          onChange={openCategoryEditor}
+          onTooLarge={onWriteBlocked}
+          notice={categoryNotice}
+        />
+      </div>
       <div ref={tabsRef} className="mt-6">
         <ListingSettingsTabs
           storeConnectionId={storeConnectionId}
@@ -514,6 +583,21 @@ export function ListingSettingsStep(props: ListingSettingsStepProps) {
         onCheckOwnText={checkOwnText}
         onBlocked={onWriteBlocked}
         returnFocusTo={updatedOpener}
+      />
+      <CategoryEditor
+        storeConnectionId={storeConnectionId}
+        // The one surface the address opens (D20); shut while the selection is too large (D18).
+        categoryId={tooLarge ? null : categoryTarget}
+        category={openedCategory !== null && openedCategory.categoryId === categoryTarget ? openedCategory : null}
+        summary={{ data: summary.data, error: summary.error }}
+        rights={rights}
+        setup={{ data: setupQuery.data, error: setupQuery.error }}
+        shelves={shelfOptions}
+        saveCallbacks={saveCallbacks}
+        onSaved={onSettingsSaved}
+        onClose={closeCategoryEditor}
+        onBlocked={onWriteBlocked}
+        returnFocusTo={categoryOpener}
       />
     </div>
   );
