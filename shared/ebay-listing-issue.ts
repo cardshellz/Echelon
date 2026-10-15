@@ -20,7 +20,10 @@ export function resolveEbayListingIssue(input: EbayListingIssueInput): EbayListi
   // copy is public; details and references are supplied by the read boundary.
   const isFeedReadIssue = input.code === "EBAY_LISTING_FEED_UNAVAILABLE" || input.code?.startsWith("EBAY_FEED_QUANTITY_")
     || input.code?.startsWith("CANONICAL_CHANNEL_QUANTITY_");
-  const message = isFeedReadIssue ? undefined : safeListingDiagnostic(input.message);
+  // Older jobs saved a generic failure for target contention. Explain the known
+  // cause instead of repeating that obsolete diagnostic or internal lock prose.
+  const message = isFeedReadIssue || code === "INVENTORY_PUBLICATION_TARGET_BUSY"
+    ? undefined : safeListingDiagnostic(input.message);
   const issue = (title: string, fallback: string, nextStep: string, retryable: boolean,
     kind: EbayListingIssue["action"]["kind"], label: string, href?: string): EbayListingIssue =>
     ebayListingIssueSchema.parse({ code, title, message: message || fallback, nextStep, retryable,
@@ -258,6 +261,15 @@ export function resolveEbayListingIssue(input: EbayListingIssueInput): EbayListi
     return issue("Inventory publishing is paused", "The inventory publication owner currently prevents this listing update.",
       "An inventory administrator must review the channel's publication status. Once publishing is allowed, saved sync work continues automatically; retry Publish if this product has no saved sync job.",
       false, "edit_listing", "Open inventory settings", "/channels/inventory");
+  if (code === "INVENTORY_PUBLICATION_TARGET_BUSY") {
+    const automatic = !!reference && ["queued", "running", "recovering", "awaiting_evidence"].includes(input.state ?? "");
+    return issue(automatic ? "Waiting for an inventory update" : "An inventory update interrupted this sync",
+      "Another inventory update was using this listing. Its pictures and listing details have not all been verified.",
+      automatic
+        ? "Your saved update will retry automatically, then check the listing and pictures on eBay. View its status for the next check."
+        : "Use Retry this product to finish updating the existing listing and pictures. Echelon checks the saved requests and current inventory before continuing.",
+      !automatic, automatic ? "check_status" : "retry_sync", automatic ? "View update status" : "Retry this product");
+  }
   if (["EBAY_SYNC_READBACK_PENDING", "EBAY_PHOTO_READ_FAILED", "EBAY_SYNC_PERSISTENCE_FAILED", "PUBLICATION_RESPONSE_RECOVERY_FAILED",
     "PUBLICATION_SCOPE_BUSY", "PUBLICATION_ADMISSION_CAPACITY_BUSY", "QUANTITY_PUBLICATION_DRAIN_BUSY", "EBAY_SYNC_ADMISSION_UNSAVED",
     "EBAY_SYNC_ADMISSION_FAILED", "EBAY_REGISTRATION_READ_TIMEOUT", "EBAY_REGISTRATION_READ_FAILED", "EBAY_AUTH_UNAVAILABLE", "EBAY_AUTH_REFRESH_SUPERSEDED",

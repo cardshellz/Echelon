@@ -13,6 +13,26 @@ import {
 import { safeEbayErrorMessage } from "../../adapters/ebay/ebay-quantity-http";
 import { syncContentIntentHash } from "../../ebay-listing-sync-content";
 describe("existing eBay listing sync execution", () => {
+  it.each([1, 5, 50])("waits for canonical inventory target contention at attempt %i without exhausting the sync", attempts => {
+    const now = new Date("2026-10-14T12:00:00Z");
+    const failure = Object.assign(new Error("Publication target is busy; retry the complete owning transaction."), {
+      code: "INVENTORY_PUBLICATION_TARGET_BUSY", context: { retryable: true },
+    });
+    const outcome = syncFailure(failure, attempts, now);
+    expect(outcome).toMatchObject({ code: failure.code, state: "recovering", resetAttempts: true });
+    expect(outcome.message).toBe("An inventory update is using this listing. The saved listing update will retry automatically.");
+    expect(outcome.nextAttemptAt.getTime()).toBeGreaterThan(now.getTime());
+    expect(outcome.nextAttemptAt.getTime()).toBeLessThanOrEqual(now.getTime() + 15 * 60_000);
+  });
+  it("does not classify unrelated inventory errors as contention or expose their diagnostics", () => {
+    const error = Object.assign(new Error("internal database diagnostic"), {
+      code: "INVENTORY_PUBLICATION_TARGET_INVALID", context: { retryable: true },
+    });
+    expect(syncFailure(error, 1, new Date("2026-10-14T12:00:00Z"))).toMatchObject({
+      state: "needs_attention", resetAttempts: false, code: error.code,
+      message: "The listing update could not finish. Inspect the saved sync job before retrying.",
+    });
+  });
   it.each(["STOCK_MAPPING_PROVIDER_BUSY", "STOCK_MAPPING_CONCURRENT_CHANGE", "STOCK_MAPPING_CLEANUP_UNCERTAIN",
     "STOCK_MAPPING_REVIEW_STALE", "STOCK_MAPPING_TARGET_CHANGED"])("retries transient stock preparation %s with a finite budget", code => {
     const failure = new EbayListingSyncError(code, "Recheck the saved listing's current stock preparation.");

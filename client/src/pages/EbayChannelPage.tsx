@@ -2167,6 +2167,10 @@ export default function EbayChannelPage() {
                                 {syncJob.state === "recovering" && <span className="block text-muted-foreground">Next check: {new Date(syncJob.nextAttemptAt).toLocaleString()}</span>}
                               </p>
                             )}
+                            {syncPending && syncJob.operation === "sync" && <Button variant="outline" size="sm" className="min-h-[44px] mt-1 text-xs" onClick={event => {
+                              event.stopPropagation();
+                              setPublicationStatusTarget({ jobId: syncJob.id, productId: item.id, name: item.name });
+                            }}>View update status</Button>}
                             <div className="flex flex-wrap gap-1.5 mt-0.5">
                               {/* Variant count with inclusion info */}
                               {allIncluded ? (

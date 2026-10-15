@@ -1,5 +1,9 @@
-import { buildShipmentAllocationBasis, resolveShipmentAllocationMethod, shipmentAllocationBasisMatches, DIMENSIONAL_ALLOCATION_METHODS } from "./domain/shipment-allocation-basis";
+import { buildShipmentAllocationBasis, resolveShipmentAllocationMethod, shipmentAllocationBasisMatches, DIMENSIONAL_ALLOCATION_METHODS,
+  allocateShipmentCents, buildShipmentAllocationEvidence, shipmentAllocationEvidenceMatches, storedBasisMirror,
+  allocateCentsFromNumericBasis, projectShipmentProductValue,
+  type ShipmentAllocationBasis, type ShipmentAllocationBasisLine } from "./domain/shipment-allocation-basis";
 import { lockInventoryCostGraph } from "../inventory/infrastructure/cost-evidence.repository";
+import { deriveShipmentCostAdjustment } from "./domain/shipment-cost-adjustment";
 import { recordShipmentCostRevisions, applyShipmentCostRevisions } from "./shipment-cost-application.service";
 import { COGSService } from "../inventory/cogs.service";
 /**
@@ -38,6 +42,8 @@ import { shipmentHeaderCreateSchema, shipmentHeaderPatchSchema } from "@shared/p
 import { shipmentCostVersion, versionShipmentCost } from "./shipment-cost-version";
 import type { ShipmentCostCommand } from "./shipment-cost-commands";
 import { eq, sql as sqlTag } from "drizzle-orm";
+import { canonicalJson } from "@shared/utils/canonical-json";
+import { shipmentAllocationEvidenceSchema } from "@shared/procurement/shipment-allocation";
 
 /**
  * Allocate a shipment line's NON-PRODUCT landed cost (freight+duty+insurance+other,
@@ -65,47 +71,8 @@ export function allocateCentsByBasis(
   amountCents: number,
   basisValues: Array<{ lineId: number; basis: number }>,
 ): Array<{ lineId: number; basis: number; allocatedCents: number; sharePercent: string }> {
-  if (!Number.isSafeInteger(amountCents) || amountCents < 0) {
-    throw new ShipmentTrackingError("Allocation amount must be a non-negative safe integer cents value");
-  }
-  if (basisValues.length === 0) return [];
-
-  const normalized = basisValues.map((value) => {
-    if (!Number.isInteger(value.lineId) || value.lineId <= 0) {
-      throw new ShipmentTrackingError("Allocation line identity must be a positive integer");
-    }
-    const basis = new Decimal(String(value.basis));
-    if (!basis.isFinite() || basis.isNegative()) {
-      throw new ShipmentTrackingError("Allocation basis must be a non-negative finite number");
-    }
-    return { lineId: value.lineId, basis };
-  });
-  const basisTotal = normalized.reduce((sum, value) => sum.plus(value.basis), new Decimal(0));
-  if (!basisTotal.isPositive()) {
-    throw new ShipmentTrackingError("Allocation basis total must be positive");
-  }
-
-  const rows = normalized.map((value) => {
-    const exactCents = new Decimal(amountCents).mul(value.basis).div(basisTotal);
-    return {
-      lineId: value.lineId,
-      basis: value.basis.toNumber(),
-      allocatedCents: exactCents.toDecimalPlaces(0, Decimal.ROUND_FLOOR).toNumber(),
-      remainder: exactCents.mod(1),
-      sharePercent: value.basis.div(basisTotal).mul(100).toDecimalPlaces(4).toFixed(4),
-    };
-  });
-
-  const centsRemaining = amountCents - rows.reduce((sum, row) => sum + row.allocatedCents, 0);
-  const remainderOrder = [...rows].sort((left, right) => {
-    const remainderComparison = right.remainder.comparedTo(left.remainder);
-    return remainderComparison !== 0 ? remainderComparison : left.lineId - right.lineId;
-  });
-  for (let index = 0; index < centsRemaining; index++) {
-    remainderOrder[index % remainderOrder.length].allocatedCents += 1;
-  }
-
-  return rows.map(({ remainder: _remainder, ...row }) => row);
+  try { return allocateCentsFromNumericBasis(amountCents, basisValues); }
+  catch (error) { throw new ShipmentTrackingError(error instanceof Error ? error.message : "Invalid allocation basis"); }
 }
 
 // ── Minimal dependency interfaces ───────────────────────────────────
@@ -314,15 +281,40 @@ export function createShipmentTrackingService(
   }
 
   async function buildAllocationBasis(lines: InboundShipmentLine[], method: string, executor?: any) {
-    const inputs = [];
+    const inputs: ShipmentAllocationBasisLine[] = [];
+    const purchaseOrdersById = new Map<number, { currency: string | null } | null>();
     for (const line of lines) {
       const poLine = method === "by_value" && line.purchaseOrderLineId
         ? await storage.getPurchaseOrderLineById(line.purchaseOrderLineId, executor) : null;
+      if (method === "by_value" && poLine && (poLine.lineType !== "product"
+        || poLine.purchaseOrderId !== line.purchaseOrderId || poLine.id !== line.purchaseOrderLineId)) {
+        throw new ShipmentTrackingError(`Shipment line ${line.id} needs its original product PO source reviewed`, 409,
+          { code: "INVALID_ALLOCATION_BASIS", lineId: line.id });
+      }
+      if (method === "by_value" && line.purchaseOrderId && !purchaseOrdersById.has(line.purchaseOrderId)) {
+        purchaseOrdersById.set(line.purchaseOrderId, await storage.getPurchaseOrderById(line.purchaseOrderId, executor) ?? null);
+      }
       inputs.push({ lineId: line.id, qtyShipped: line.qtyShipped, totalVolumeCbm: line.totalVolumeCbm,
-        totalWeightKg: line.totalWeightKg, chargeableWeightKg: line.chargeableWeightKg, poUnitCostCents: poLine?.unitCostCents ?? null });
+        totalWeightKg: line.totalWeightKg, chargeableWeightKg: line.chargeableWeightKg,
+        poLineId: poLine?.id ?? null, poOrderQty: poLine?.orderQty ?? null,
+        poTotalProductCostCents: poLine?.totalProductCostCents ?? null,
+        poCurrency: line.purchaseOrderId ? purchaseOrdersById.get(line.purchaseOrderId)?.currency ?? null : null });
     }
     try { return buildShipmentAllocationBasis(inputs, method); }
     catch (error) { throw new ShipmentTrackingError(error instanceof Error ? error.message : "Invalid allocation basis", 409, { code: "INVALID_ALLOCATION_BASIS" }); }
+  }
+
+  async function projectLineProductValue(line: InboundShipmentLine, allocatedCents: number, executor?: any) {
+    // Legacy shipments can have no purchase source. Keep their product value
+    // unknown; the cost-revision owner already records the required review.
+    if (line.purchaseOrderLineId == null || line.purchaseOrderId == null) return null;
+    const basis = await buildAllocationBasis([line], "by_value", executor);
+    const evidence = buildShipmentAllocationEvidence(basis, line.id);
+    try { return { evidence, amounts: projectShipmentProductValue(evidence, allocatedCents) }; }
+    catch (error) {
+      throw new ShipmentTrackingError(error instanceof Error ? error.message : "Invalid shipment product value", 409,
+        { code: "INVALID_SHIPMENT_PRODUCT_VALUE", lineId: line.id });
+    }
   }
   function assertTransition(currentStatus: string, targetStatus: string) {
     const allowed = VALID_TRANSITIONS[currentStatus];
@@ -466,6 +458,7 @@ export function createShipmentTrackingService(
     const variantMap = new Map<number, any>();
     const productMap = new Map<number, any>();
     const poLineMap = new Map<number, any>();
+    const purchaseOrderMap = new Map<number, { currency: string | null }>();
 
     // Fetch variants
     await Promise.all(variantIds.map(async (id) => {
@@ -487,6 +480,11 @@ export function createShipmentTrackingService(
       const pol = await storage.getPurchaseOrderLineById(id);
       if (pol) poLineMap.set(id, pol);
     }));
+    const purchaseOrderIds = [...new Set(lines.flatMap((line) => line.purchaseOrderId == null ? [] : [line.purchaseOrderId]))];
+    await Promise.all(purchaseOrderIds.map(async (id) => {
+      const purchaseOrder = await storage.getPurchaseOrderById(id);
+      if (purchaseOrder) purchaseOrderMap.set(id, purchaseOrder);
+    }));
 
     return lines.map(line => {
       const pv = line.productVariantId ? variantMap.get(line.productVariantId) : null;
@@ -504,12 +502,26 @@ export function createShipmentTrackingService(
           + allocationBreakdown.otherAllocatedCents
         : null;
       const allocatedCostCents = line.allocatedCostCents ?? breakdownTotalCents;
-      const poUnitCostMills = poUnitCostMillsFromLine(pol);
+      let productValue: ReturnType<typeof projectShipmentProductValue> | null = null;
+      let productValueIssue: { code: string; message: string } | null = null;
+      try {
+        if (!pol || pol.id !== line.purchaseOrderLineId || pol.purchaseOrderId !== line.purchaseOrderId || pol.lineType !== "product") {
+          throw new Error("The shipment line needs its original product PO source reviewed");
+        }
+        const valueBasis = buildShipmentAllocationBasis([{ lineId: line.id, qtyShipped: line.qtyShipped,
+          totalVolumeCbm: null, totalWeightKg: null, chargeableWeightKg: null,
+          poLineId: pol.id, poOrderQty: pol.orderQty, poTotalProductCostCents: pol.totalProductCostCents,
+          poCurrency: line.purchaseOrderId == null ? null : purchaseOrderMap.get(line.purchaseOrderId)?.currency ?? null }], "by_value");
+        productValue = projectShipmentProductValue(buildShipmentAllocationEvidence(valueBasis, line.id), allocatedCostCents ?? 0);
+      } catch (error) {
+        // An invalid source remains visible as unknown in this read projection;
+        // allocation/finalization revalidates it and rejects the command.
+        productValueIssue = { code: "INVALID_SHIPMENT_PRODUCT_VALUE", message: error instanceof Error ? error.message : "Review shipment product value" };
+      }
+      const poUnitCostMills = productValue?.poUnitCostMills ?? null;
       const totalAllocatedMillsPerUnit = allocatedCentsPerUnitMills(allocatedCostCents, line.qtyShipped);
       const landedUnitCostMills =
-        poUnitCostMills !== null && totalAllocatedMillsPerUnit !== null
-          ? poUnitCostMills + totalAllocatedMillsPerUnit
-          : null;
+        productValue !== null && totalAllocatedMillsPerUnit !== null ? productValue.landedUnitCostMills : null;
       return {
         ...versionShipmentLine(line),
         allocatedCostCents,
@@ -517,8 +529,9 @@ export function createShipmentTrackingService(
         unitsPerVariant: pv?.unitsPerVariant ?? 1,
         productName: product?.title || product?.name || pol?.productName || pv?.name || line.sku || null,
         poQtyOrdered: pol?.orderQty ?? null,
-        poUnitCostCents: pol?.unitCostCents ?? null,
+        poUnitCostCents: productValue?.poUnitCostCents ?? null,
         poUnitCostMills,
+        productValueIssue,
         freightAllocatedCents,
         dutyAllocatedCents,
         insuranceAllocatedCents,
@@ -841,6 +854,9 @@ export function createShipmentTrackingService(
       : command.operation === "update" ? shipmentCostPatchSchema.parse(command.body)
       : command.operation === "delete" ? shipmentCostDeleteSchema.parse(command.body)
       : costError("Unsupported charge command", 400, "SHIPMENT_COST_OPERATION_INVALID");
+    // HTTP commands enter directly, outside runInTransaction. Freeze PO value
+    // sources before shipment/charge locks, matching PO amendments and close.
+    await lockInventoryCostGraph(tx);
     const initial = command.operation === "create" ? null : await storage.getInboundFreightCostById(command.resourceId, tx);
     if (command.operation !== "create" && !initial) costError("Shipment charge not found", 404, "SHIPMENT_COST_NOT_FOUND");
     const shipmentId = initial?.inboundShipmentId ?? command.resourceId;
@@ -920,13 +936,13 @@ export function createShipmentTrackingService(
     allocations: Array<{
       lineId: number;
       sku: string | null;
-      poUnitCostCents: number;
+      poUnitCostCents: number | null;
       freightCents: number;
       dutyCents: number;
       insuranceCents: number;
       otherCents: number;
       totalAllocatedCents: number;
-      landedUnitCostCents: number;
+      landedUnitCostCents: number | null;
     }>;
     totalAllocated: number;
   }> {
@@ -967,13 +983,14 @@ export function createShipmentTrackingService(
       const basisValues = basisSummary.values;
       const basisTotal = basisSummary.basisTotal;
 
-      const distributed = allocateCentsByBasis(effectiveAmount, basisValues);
+      const distributed = allocateShipmentCents(effectiveAmount, basisSummary);
       for (const allocation of distributed) {
         allNewAllocations.push({
           shipmentCostId: cost.id,
           inboundShipmentLineId: allocation.lineId,
-          allocationBasisValue: String(allocation.basis),
-          allocationBasisTotal: String(basisTotal),
+          allocationBasisValue: storedBasisMirror(basisValues.find((value) => value.lineId === allocation.lineId)!.basis),
+          allocationBasisTotal: storedBasisMirror(basisTotal),
+          basisEvidence: buildShipmentAllocationEvidence(basisSummary, allocation.lineId),
           sharePercent: allocation.sharePercent,
           allocatedCents: allocation.allocatedCents,
         } as any);
@@ -991,8 +1008,8 @@ export function createShipmentTrackingService(
 
     // Bulk insert all allocations
     let totalAllocated = 0;
-    const resultLines: any[] = [];
-    const lineUpdates: Array<{ lineId: number; allocatedCostCents: number; landedUnitCostCents: number }> = [];
+    const resultLines: Awaited<ReturnType<typeof runAllocationInTransaction>>["allocations"] = [];
+    const lineUpdates: Array<{ lineId: number; allocatedCostCents: number; landedUnitCostCents: number | null }> = [];
 
     for (const line of lines) {
       const qtyShipped = Number(line.qtyShipped);
@@ -1007,32 +1024,9 @@ export function createShipmentTrackingService(
       const totalForLine = acc.freightCents + acc.dutyCents + acc.insuranceCents + acc.otherCents;
       totalAllocated += totalForLine;
 
-      // Look up PO unit cost
-      let poUnitCostCents = 0;
-      if (line.purchaseOrderLineId) {
-        const poLine = await storage.getPurchaseOrderLineById(line.purchaseOrderLineId, tx);
-        poUnitCostCents = Number(poLine?.unitCostCents || 0);
-      }
-      if (!Number.isSafeInteger(poUnitCostCents) || poUnitCostCents < 0) {
-        throw new ShipmentTrackingError(
-          `Shipment line ${line.id} has an invalid PO unit cost`,
-          409,
-          { code: "INVALID_PO_UNIT_COST", shipmentId, lineId: line.id, poUnitCostCents },
-        );
-      }
-
-      const totalCostCents = (poUnitCostCents * qtyShipped) + totalForLine;
-      if (!Number.isSafeInteger(totalCostCents)) {
-        throw new ShipmentTrackingError(
-          `Shipment line ${line.id} landed cost exceeds safe integer range`,
-          409,
-          { code: "LANDED_COST_OVERFLOW", shipmentId, lineId: line.id },
-        );
-      }
-      const landedUnitCostCents = new Decimal(totalCostCents)
-        .div(qtyShipped)
-        .toDecimalPlaces(0, Decimal.ROUND_HALF_UP)
-        .toNumber();
+      const productValue = await projectLineProductValue(line, totalForLine, tx);
+      const poUnitCostCents = productValue?.amounts.poUnitCostCents ?? null;
+      const landedUnitCostCents = productValue?.amounts.landedUnitCostCents ?? null;
       lineUpdates.push({ lineId: line.id, allocatedCostCents: totalForLine, landedUnitCostCents });
 
       resultLines.push({
@@ -1113,15 +1107,31 @@ export function createShipmentTrackingService(
       const allocations = await storage.getInboundFreightCostAllocations(cost.id, executor);
       const allocatedCents = allocations.reduce((sum: number, allocation: any) => sum + Number(allocation.allocatedCents || 0), 0);
       const staleAllocationCount = allocations.filter((allocation: any) => !currentLineIds.has(allocation.inboundShipmentLineId)).length;
-      const basisSummary = lines.length > 0
-        ? await buildAllocationBasis(lines, method, executor)
-        : { rawBasisTotal: 0, basisTotal: 0, usedFallback: false };
-      const basisValues = "values" in basisSummary ? basisSummary.values : [];
+      let basisSummary: ShipmentAllocationBasis | null = null;
+      let basisIssue: string | null = null;
+      if (lines.length > 0 && effectiveCents !== 0) {
+        try { basisSummary = await buildAllocationBasis(lines, method, executor); }
+        catch (error) {
+          if (!(error instanceof ShipmentTrackingError) || error.details?.code !== "INVALID_ALLOCATION_BASIS") throw error;
+          basisIssue = error.message;
+        }
+      }
+      const basisValues = basisSummary?.values ?? [];
       const expectedBasisByLine = new Map(
         basisValues.map((value: any) => [value.lineId, value.basis]),
       );
+      const expectedCentsByLine = basisSummary && Number.isSafeInteger(effectiveCents) && effectiveCents >= 0
+        ? new Map(allocateShipmentCents(effectiveCents, basisSummary).map((value) => [value.lineId, value.allocatedCents]))
+        : new Map<number, number>();
       const staleBasisCount = allocations.filter((allocation: any) => {
         if (!currentLineIds.has(allocation.inboundShipmentLineId)) return false;
+        if (!basisSummary) return false;
+        // A decimal mirror cannot prove a PO product source or an exact ratio.
+        // Existing dimensional allocations retain their established comparison.
+        if (method === "by_value" || allocation.basisEvidence != null) {
+          return !shipmentAllocationEvidenceMatches(allocation.basisEvidence, basisSummary, allocation.inboundShipmentLineId)
+            || allocation.allocatedCents !== expectedCentsByLine.get(allocation.inboundShipmentLineId);
+        }
         const expectedBasis = expectedBasisByLine.get(allocation.inboundShipmentLineId);
         if (expectedBasis == null) return true;
         return !shipmentAllocationBasisMatches(allocation.allocationBasisValue, expectedBasis)
@@ -1141,6 +1151,10 @@ export function createShipmentTrackingService(
       let status = "allocated";
       if (effectiveCents === 0) {
         status = "zero_amount";
+      } else if (basisIssue !== null) {
+        status = method === "by_value" ? "invalid_value_basis" : "invalid_allocation_basis";
+        issues.push({ severity: "blocker", code: status, costId: cost.id,
+          message: `${cost.costType}: ${basisIssue}. Review the source before allocating or closing.` });
       } else if (missingDimLines.length > 0) {
         status = "missing_dimensions";
         issues.push({
@@ -1181,7 +1195,7 @@ export function createShipmentTrackingService(
           costId: cost.id,
           message: `${cost.costType} cost allocation total does not match the effective cost`,
         });
-      } else if (basisSummary.usedFallback && method !== "by_line_count") {
+      } else if (basisSummary?.usedFallback && method !== "by_line_count") {
         status = "allocated_with_fallback";
         issues.push({
           severity: "warning",
@@ -1200,11 +1214,27 @@ export function createShipmentTrackingService(
         allocationCount: allocations.length,
         method,
         methodSource: source,
-        rawBasisTotal: basisSummary.rawBasisTotal,
-        basisTotal: basisSummary.basisTotal,
-        usedFallback: basisSummary.usedFallback,
+        rawBasisTotal: basisSummary?.rawBasisTotal ?? null,
+        basisTotal: basisSummary?.basisTotal ?? null,
+        usedFallback: basisSummary?.usedFallback ?? false,
         status,
       });
+    }
+
+    // Every finalized sourced line gets a product-value snapshot, even with
+    // dimensional/line-count allocation or no charge. Surface the same source
+    // failures before a command; orphan legacy lines still return null here.
+    // A failed by-value basis already reports this review at the cost level.
+    if (!costStatuses.some((cost) => cost.status === "invalid_value_basis")) {
+      for (const line of lines) {
+        try { await projectLineProductValue(line, 0, executor); }
+        catch (error) {
+          if (!(error instanceof ShipmentTrackingError)
+            || !["INVALID_ALLOCATION_BASIS", "INVALID_SHIPMENT_PRODUCT_VALUE"].includes(error.details?.code)) throw error;
+          issues.push({ severity: "blocker", code: "invalid_product_value", lineId: line.id,
+            message: `${line.sku || `Shipment line ${line.id}`}: ${error.message}. Review the PO product source before allocating or closing.` });
+        }
+      }
     }
 
     const blockerCount = issues.filter((issue) => issue.severity === "blocker").length;
@@ -1212,10 +1242,10 @@ export function createShipmentTrackingService(
     const allocationStatus =
       lines.length === 0
         ? "blocked"
-        : allocatableCostCount === 0
-          ? "no_costs"
-          : blockerCount > 0
-            ? "needs_allocation"
+        : blockerCount > 0
+          ? "needs_allocation"
+          : allocatableCostCount === 0
+            ? "no_costs"
             : warningCount > 0
               ? "allocated_with_warnings"
               : "allocated";
@@ -1386,11 +1416,32 @@ export function createShipmentTrackingService(
     return nullableNumber(left) === nullableNumber(right);
   }
 
+  function frozenSnapshotAmounts(snapshot: any) {
+    if (snapshot.productValueEvidence == null) return null;
+    const parsed = shipmentAllocationEvidenceSchema.safeParse(snapshot.productValueEvidence);
+    const allocatedCents = snapshotAllocatedCostCents(snapshot);
+    if (!parsed.success || parsed.data.source.kind !== "po_product_total" || allocatedCents === null || !Number.isSafeInteger(allocatedCents)
+      || [snapshot.freightAllocatedCents, snapshot.dutyAllocatedCents, snapshot.insuranceAllocatedCents, snapshot.otherAllocatedCents]
+        .some((value) => !Number.isSafeInteger(value) || value < 0)
+      || parsed.data.lineId !== snapshot.inboundShipmentLineId
+      || parsed.data.source.poLineId !== snapshot.purchaseOrderLineId
+      || parsed.data.source.qtyShipped !== snapshot.qty) {
+      throw new ShipmentTrackingError("The saved shipment product value needs review before use", 409,
+        { code: "LANDED_SNAPSHOT_VALUE_EVIDENCE_INVALID", snapshotId: snapshot.id });
+    }
+    try { return projectShipmentProductValue(parsed.data, allocatedCents); }
+    catch (error) {
+      throw new ShipmentTrackingError(error instanceof Error ? error.message : "Invalid saved product value", 409,
+        { code: "LANDED_SNAPSHOT_VALUE_EVIDENCE_INVALID", snapshotId: snapshot.id });
+    }
+  }
+
   function landedSnapshotMatches(existing: any, next: InsertLandedCostSnapshot): boolean {
     return (
       sameNullableNumber(existing.inboundShipmentLineId, (next as any).inboundShipmentLineId) &&
       sameNullableNumber(existing.purchaseOrderLineId, (next as any).purchaseOrderLineId) &&
       sameNullableNumber(existing.productVariantId, (next as any).productVariantId) &&
+      canonicalJson(existing.productValueEvidence ?? null) === canonicalJson(next.productValueEvidence ?? null) &&
       sameNullableNumber(existing.poUnitCostCents, (next as any).poUnitCostCents) &&
       sameNullableNumber(existing.freightAllocatedCents, (next as any).freightAllocatedCents) &&
       sameNullableNumber(existing.dutyAllocatedCents, (next as any).dutyAllocatedCents) &&
@@ -1483,40 +1534,51 @@ export function createShipmentTrackingService(
         else otherCents += cents;
       }
 
-      let poUnitCostCents = 0;
-      if (line.purchaseOrderLineId) {
-        const poLine = await storage.getPurchaseOrderLineById(line.purchaseOrderLineId, tx);
-        poUnitCostCents = Number(poLine?.unitCostCents || 0);
-      }
+      const productValue = await projectLineProductValue(line, freightCents + dutyCents + insuranceCents + otherCents, tx);
+      const poUnitCostCents = productValue?.amounts.poUnitCostCents ?? null;
+      const totalLandedCostCents = productValue?.amounts.totalLandedCostCents ?? null;
+      const landedUnitCostCents = productValue?.amounts.landedUnitCostCents ?? null;
 
-      const qtyShipped = Number(line.qtyShipped);
-      const totalLandedCostCents = (poUnitCostCents * qtyShipped) + freightCents + dutyCents + insuranceCents + otherCents;
-      const landedUnitCostCents = new Decimal(totalLandedCostCents)
-        .div(qtyShipped)
-        .toDecimalPlaces(0, Decimal.ROUND_HALF_UP)
-        .toNumber();
-
-      // H6: Landed-cost re-allocation must not retroactively mutate closed lines
+      // Closed shipment audit retains the full total delta and distinguishes a
+      // product projection correction from changes to actual landed charges.
       if (shipment.status === "closed") {
         const oldSnap = oldSnapshotsByLine.get(line.id);
-        if (oldSnap && oldSnap.totalLandedCostCents !== totalLandedCostCents) {
-          const adjustmentPoLineId = Number(line.purchaseOrderLineId);
-          if (!Number.isInteger(adjustmentPoLineId) || adjustmentPoLineId <= 0) {
-            throw new ShipmentTrackingError(
-              `Closed shipment line ${line.id} cannot record a landed-cost adjustment without a PO line`,
-              409,
-              { code: "LANDED_COST_ADJUSTMENT_MISSING_PO_LINE", shipmentId, lineId: line.id },
-            );
+        // Validate existing frozen authority even when compatibility amounts
+        // match; replacing malformed evidence must not silently repair it.
+        const priorProjection = oldSnap?.productValueEvidence != null ? frozenSnapshotAmounts(oldSnap) : null;
+        if (priorProjection && priorProjection.totalLandedCostCents !== oldSnap.totalLandedCostCents) {
+          throw new ShipmentTrackingError("Prior snapshot total does not reconcile to its frozen product evidence", 409,
+            { code: "LANDED_COST_ADJUSTMENT_INVALID_VALUES", shipmentId, lineId: line.id });
+        }
+        const changedSnapshotAmounts = oldSnap && (oldSnap.totalLandedCostCents !== totalLandedCostCents
+          || oldSnap.freightAllocatedCents !== freightCents || oldSnap.dutyAllocatedCents !== dutyCents
+          || oldSnap.insuranceAllocatedCents !== insuranceCents || oldSnap.otherAllocatedCents !== otherCents);
+        if (changedSnapshotAmounts) {
+          let adjustment;
+          try {
+            adjustment = deriveShipmentCostAdjustment(oldSnap, { totalLandedCostCents,
+              freightAllocatedCents: freightCents, dutyAllocatedCents: dutyCents,
+              insuranceAllocatedCents: insuranceCents, otherAllocatedCents: otherCents }, priorProjection ? "exact" : "legacy");
+          } catch (error) {
+            throw new ShipmentTrackingError(error instanceof Error ? error.message : "Invalid prior shipment cost values", 409,
+              { code: "LANDED_COST_ADJUSTMENT_INVALID_VALUES", shipmentId, lineId: line.id });
           }
-          const adjustmentCents = totalLandedCostCents - oldSnap.totalLandedCostCents;
-          
-          adjustments.push({
-            inboundShipmentLineId: line.id,
-            purchaseOrderLineId: adjustmentPoLineId,
-            adjustmentAmountCents: adjustmentCents,
-            reason: "Post-close landed cost reallocation",
-            createdBy: userId || "system",
-          });
+          if (adjustment) {
+            const adjustmentPoLineId = Number(line.purchaseOrderLineId);
+            if (!Number.isSafeInteger(adjustmentPoLineId) || adjustmentPoLineId <= 0) {
+              throw new ShipmentTrackingError(
+                `Closed shipment line ${line.id} cannot record a landed-cost adjustment without a PO line`,
+                409,
+                { code: "LANDED_COST_ADJUSTMENT_MISSING_PO_LINE", shipmentId, lineId: line.id },
+              );
+            }
+            adjustments.push({
+              inboundShipmentLineId: line.id,
+              purchaseOrderLineId: adjustmentPoLineId,
+              ...adjustment,
+              createdBy: userId || "system",
+            });
+          }
         }
       }
 
@@ -1525,6 +1587,7 @@ export function createShipmentTrackingService(
         purchaseOrderLineId: line.purchaseOrderLineId,
         productVariantId: line.productVariantId,
         poUnitCostCents,
+        productValueEvidence: productValue?.evidence ?? null,
         freightAllocatedCents: freightCents,
         dutyAllocatedCents: dutyCents,
         insuranceAllocatedCents: insuranceCents,
@@ -1577,17 +1640,21 @@ export function createShipmentTrackingService(
    */
   async function getLandedCostForPoLine(purchaseOrderLineId: number): Promise<number | null> {
     const snapshot = await storage.getLandedCostSnapshotByPoLine(purchaseOrderLineId);
+    if (snapshot?.productValueEvidence != null) return frozenSnapshotAmounts(snapshot)!.landedUnitCostCents;
     return snapshot?.landedUnitCostCents ?? null;
   }
 
   /**
    * Get the landed unit cost in mills for a PO line (used by receiving.close).
-   * Reconstructs mills from finalized snapshot allocation buckets because the
-   * persisted snapshot stores the legacy cents mirror only.
+   * Uses frozen exact product evidence when present. Legacy snapshots retain
+   * their existing allocation-bucket and PO-unit compatibility reconstruction.
    */
   async function getLandedCostMillsForPoLine(purchaseOrderLineId: number): Promise<number | null> {
     const snapshot = await storage.getLandedCostSnapshotByPoLine(purchaseOrderLineId);
     if (!snapshot) return null;
+    // New snapshots retain their product source. A later PO edit must not
+    // silently change this already-finalized compatibility projection.
+    if (snapshot.productValueEvidence != null) return frozenSnapshotAmounts(snapshot)!.landedUnitCostMills;
 
     const fallbackMills = snapshotLandedUnitCostMills(snapshot);
     const poLine = await storage.getPurchaseOrderLineById(purchaseOrderLineId);
