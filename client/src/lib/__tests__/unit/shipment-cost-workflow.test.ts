@@ -1,11 +1,21 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createShipmentCostUpdateClient, shipmentCostWorkflowError } from "../../shipment-cost-workflow";
+import { createShipmentCostUpdateClient, readShipmentCostWorkflow, shipmentCostWorkflowError } from "../../shipment-cost-workflow";
 import { FinancialCommandRequestError } from "../../financial-command";
 
 afterEach(() => vi.unstubAllGlobals());
 const result = (shipmentId = 42) => ({ shipmentId, finalizedLines: 2, adjustments: 1,
   status: "applied", updated: 2, total: 2, skipped: [] });
 const response = (body = result(), status = 200) => new Response(JSON.stringify(body), { status });
+
+it("requests the exception-aware read contract with the current session", async () => {
+  const saved = { shipmentId: 42, lines: [] };
+  const fetch = vi.fn().mockResolvedValue(new Response(JSON.stringify(saved)));
+  vi.stubGlobal("fetch", fetch);
+  expect(await readShipmentCostWorkflow("/api/inbound-shipments/42/cost-review")).toEqual(saved);
+  expect(fetch).toHaveBeenCalledExactlyOnceWith("/api/inbound-shipments/42/cost-review", {
+    method: "GET", credentials: "include", headers: { "X-Shipment-Cost-Review-Version": "2" },
+  });
+});
 
 describe("shipment cost update intent", () => {
   it("keeps the same key after a lost response and rotates only after verified completion", async () => {

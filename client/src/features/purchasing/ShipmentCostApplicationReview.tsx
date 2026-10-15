@@ -1,15 +1,16 @@
 import { useQuery } from "@tanstack/react-query";
 import { shipmentCostReviewSchema } from "@shared/procurement/shipment-cost-workflow";
 import { shipmentCostReviewGuidance } from "@shared/procurement/po-shipment-costs";
-import { apiRequest } from "@/lib/queryClient";
+import { readShipmentCostWorkflow } from "@/lib/shipment-cost-workflow";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { ShipmentCostExceptionReview } from "./ShipmentCostExceptionReview";
 
 export function ShipmentCostApplicationReview({ shipmentId }: { shipmentId: number }) {
   const review = useQuery({ queryKey: [`/api/inbound-shipments/${shipmentId}/cost-review`], queryFn: async () => {
-    const response = await apiRequest("GET", `/api/inbound-shipments/${shipmentId}/cost-review`);
-    const parsed = shipmentCostReviewSchema.parse(await response.json());
+    const response = await readShipmentCostWorkflow(`/api/inbound-shipments/${shipmentId}/cost-review`);
+    const parsed = shipmentCostReviewSchema.parse(response);
     if (parsed.shipmentId !== shipmentId) throw new Error("Cost results belong to another shipment.");
     return parsed;
   } });
@@ -36,10 +37,12 @@ export function ShipmentCostApplicationReview({ shipmentId }: { shipmentId: numb
           }]);
           return <div key={line.lineId} className="border-t pt-3 space-y-2">
             <div className="flex flex-wrap items-center gap-2"><strong className="font-mono break-all">{line.sku ?? `Line ${line.lineId}`}</strong>
-              <Badge variant="outline">{unique.length ? "Needs attention" : "Not updated yet"}</Badge></div>
+              {!line.exceptionReview && <Badge variant="outline">{unique.length ? "Needs attention" : "Not updated yet"}</Badge>}</div>
+            {line.exceptionReview ? <ShipmentCostExceptionReview lineId={line.lineId} review={line.exceptionReview} /> : <>
             {guidance.explanation ? <p>{guidance.explanation}</p> : unique.map(issue => <p key={`${issue.code}:${issue.message}`}>{issue.message}</p>)}
             {!line.application && unique.length === 0 && <p>No inventory cost update has been recorded for this line.</p>}
             <p><strong>Next step:</strong> {guidance.nextStep}</p>
+            </>}
             {line.application && <p className="text-xs text-muted-foreground">Last saved update: {new Date(line.application.recordedAt).toLocaleString()}. {line.application.lotsUpdated} stock lots and {line.application.cogsRowsUpdated} sold-order cost records updated.</p>}
           </div>;
         })}

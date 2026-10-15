@@ -399,7 +399,7 @@ test("shows the new remaining reason when a retry only fixes some lines", async 
     .click();
   await expect(page.getByText(newIssue.message, { exact: true })).toBeVisible();
   await expect(
-    page.getByText(/1 shipment line has a recorded cost update/),
+    page.getByText(/1 shipment line has an inventory cost exception awaiting review/),
   ).toBeVisible();
   await expect(
     page.getByText(
