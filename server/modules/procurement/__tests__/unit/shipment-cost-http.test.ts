@@ -16,7 +16,11 @@ vi.mock("../../../../routes/middleware", () => ({
   },
 }));
 vi.mock("../../../../middleware/idempotency", () => ({ requireIdempotency: () => (_req: Request, _res: Response, next: NextFunction) => next() }));
-vi.mock("../../../../platform/commands/command-results.repository", () => ({ financialCommandRepository: mocks.repository }));
+vi.mock("../../../../db", () => ({ db: {} }));
+vi.mock("../../../../platform/commands/command-results.repository", () => ({
+  financialCommandRepository: mocks.repository,
+  createDrizzleFinancialCommandRepository: () => mocks.repository,
+}));
 vi.mock("../../ap-ledger.service", () => ({}));
 vi.mock("../../../notifications/notifications.service", () => ({}));
 
@@ -48,8 +52,10 @@ beforeEach(async () => {
   url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
 });
 afterEach(async () => {
-  await new Promise<void>((resolve, reject) => server?.close((error) => error ? reject(error) : resolve()));
+  if (!server?.listening) { server = undefined; return; }
+  const activeServer = server;
   server = undefined;
+  await new Promise<void>((resolve, reject) => activeServer.close((error) => error ? reject(error) : resolve()));
 });
 
 describe("shipment cost HTTP command contract", () => {
