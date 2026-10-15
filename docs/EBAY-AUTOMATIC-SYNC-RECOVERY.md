@@ -1,7 +1,7 @@
 # Automatic recovery for existing eBay listing updates
 
 Initial baseline: `ec1b87c53f021e9ce021f8598bcde4a6baa8e2fe`.
-Fresh-main compatibility reference: `37a41a80ed2dfc570730ac49928e11cb72f3294b`.
+Fresh-main compatibility reference: `fa97165bd68954d2a3497e4253581f9861485400`.
 PR: https://github.com/cardshellz/Echelon/pull/1812.
 
 An interrupted quantity request can retain an unknown outcome indefinitely. Existing
@@ -155,6 +155,13 @@ coverage totals. Initial Windows runs found fixture line-ending differences and
 one local HTTP `bad port` failure; the complete passing reruns used exact Git
 fixture bytes without changing committed SQL or golden content. Remote CI and
 release state remain separate from these local results.
+
+After these runs, main through `fa97165bd68954d2a3497e4253581f9861485400` was
+merged into this branch. Every tested feature file is unchanged by that merge;
+incoming changes are the separate dropship listing-rule conversion work. The
+post-merge quantity/transport selection passed **149 tests** across six files,
+and the migration policy check still validates **519 migrations**. Both new SQL
+files retain their previously tested SHA256 values.
 
 ## Migration and operational limits
 
