@@ -125,6 +125,12 @@ function ShipmentReconciliation({ lineId, onClose }: { lineId: number; onClose: 
         {data && (
           <>
             <strong className="block break-all">{data.sku ?? `Shipment line ${lineId}`}</strong>
+            {data.sourceEvidence === "estimated" && (
+              <p className="text-amber-700 dark:text-amber-400">
+                This shipment charge is still estimated. Approval uses the saved estimate; confirming the final charge
+                will update its cost posting.
+              </p>
+            )}
             {data.blockedReason && (
               <p role="alert" className="text-amber-700 dark:text-amber-400">
                 {data.blockedReason}

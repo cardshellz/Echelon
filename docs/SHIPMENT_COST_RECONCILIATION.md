@@ -61,6 +61,8 @@ An approved destination follows later cost changes for the same historical
 quantity. Increases, reductions and zero amounts produce signed differences;
 they do not repeat the original expense. An administrator can change the
 destination with another reviewed approval that reverses the first balance.
+An estimated charge is explicitly identified in the approval review. Its saved
+estimate can be reconciled; the later confirmed charge updates the posting.
 
 Changed historical attribution invalidates the prior approval and reverses its
 expense. When complete receipt and sold-order history is restored, the existing

@@ -84,6 +84,7 @@ async function loadContext(tx: AmendmentTransaction, lineId: number, actorId: st
     currency: source.currency,
     sourceVersion: costFingerprint({ facts, current, ledger, records }),
     sourceAmountMills: source.totalMills,
+    sourceEvidence: source.evidence,
     historicalAmountMills: eligible?.amountMills ?? 0,
     balances: ledger.balances,
     state: reconciliationState(eligible, ledger),
@@ -191,6 +192,7 @@ export function createShipmentCostReconciliationService(database: AmendmentDatab
               preview: reconciliationPreview(context, request.destination),
               inventoryQuantityDelta: 0,
               sourceAmountMills: context.sourceAmountMills,
+              sourceEvidence: context.sourceEvidence,
             },
           });
           const application = await applyCostRevision(

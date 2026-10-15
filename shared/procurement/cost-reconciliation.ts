@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { costFingerprintSchema, costIssueSchema } from "./cost-source-contracts";
+import { COST_SOURCE_EVIDENCE_STATES, costFingerprintSchema, costIssueSchema } from "./cost-source-contracts";
 
 const integer = z.number().int().safe();
 const amount = integer.nonnegative();
@@ -73,6 +73,7 @@ export const reconciliationContextSchema = z
     currency: z.literal("USD"),
     sourceVersion: costFingerprintSchema,
     sourceAmountMills: amount,
+    sourceEvidence: z.enum(COST_SOURCE_EVIDENCE_STATES),
     historicalAmountMills: amount,
     balances: reconciliationBalanceSchema,
     state: reconciliationStateSchema,

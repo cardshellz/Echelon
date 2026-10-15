@@ -51,6 +51,7 @@ async function installReconciliation(
     currency: "USD",
     sourceVersion: "a".repeat(64),
     sourceAmountMills: review.allocatedMills,
+    sourceEvidence: options.missing ? "estimated" : "confirmed",
     historicalAmountMills: review.amountMills,
     balances: { historical_cogs: 0, inventory_variance: 0 },
     state: review.reconciliation!,
@@ -280,6 +281,7 @@ test("missing receipt links show the full unassigned charge and affected receipt
   await chooseInventory(dialog);
   await expect(dialog.getByRole("row", { name: /Unassigned cost/ })).toContainText("$100.00");
   await expect(dialog).toContainText("subsequent cost links are missing");
+  await expect(dialog).toContainText("This shipment charge is still estimated.");
   expect(failures).toEqual([]);
 });
 test("server authority gates posting even when the session UI says admin", async ({ page }) => {
