@@ -1,4 +1,5 @@
 import type { PoFinancialStatus, PoPhysicalStatus } from "@shared/schema/procurement.schema";
+import { poFinancialWorkflowSchema, type PoFinancialWorkflow } from "@shared/procurement/po-financial-workflow";
 import { getPurchaseOrderCancellationPermission } from "./domain/purchase-order-cancellation-authority";
 
 export class PoLifecycleError extends Error {
@@ -150,6 +151,8 @@ export type PoAutoDraftActionPlanActionId =
   | "open_exceptions"
   | "create_invoice"
   | "record_payment"
+  | "review_financial_evidence"
+  | "review_invoice_approval"
   | "done"
   | "cancelled";
 
@@ -177,6 +180,7 @@ export type PoAutoDraftActionPlan = {
     legacyStatus: string;
     physicalStatus: PoPhysicalStatus;
     financialStatus: PoFinancialStatus;
+    financialWorkflowState: PoFinancialWorkflow["state"];
     availableLifecycleActionIds: PoLifecycleCommand[];
   };
 };
@@ -384,6 +388,7 @@ export function buildPoAutoDraftActionPlan(
   context: {
     lineCount?: number | null;
     openExceptionCount?: number | null;
+    financialWorkflow?: PoFinancialWorkflow | null;
   } = {},
 ): PoAutoDraftActionPlan | null {
   if (po.source !== "auto_draft") return null;
@@ -397,6 +402,10 @@ export function buildPoAutoDraftActionPlan(
   const legacyStatus = lifecycle.legacyStatus;
   const physicalStatus = lifecycle.physicalStatus;
   const financialStatus = lifecycle.financialStatus;
+  // Recorded linked-invoice status is history, not proof of this PO's AP completion.
+  const parsedWorkflow = poFinancialWorkflowSchema.safeParse(context.financialWorkflow);
+  const financialWorkflowState = parsedWorkflow.success && parsedWorkflow.data.purchaseOrderId === po.id
+    ? parsedWorkflow.data.state : "review_required";
   const sentToSupplier = ["sent", "acknowledged", "shipped", "in_transit", "arrived", "receiving", "received", "short_closed"].includes(physicalStatus);
   const receivedInventory = ["received", "short_closed"].includes(physicalStatus) || ["received", "closed"].includes(legacyStatus);
   const isCancelled = legacyStatus === "cancelled" || physicalStatus === "cancelled";
@@ -409,13 +418,20 @@ export function buildPoAutoDraftActionPlan(
   const receivingStatus: PoAutoDraftActionPlanStepStatus =
     isCancelled ? "blocked" : receivedInventory ? "done" : sentToSupplier || hasAction("create_receipt") ? "current" : "pending";
   const apStatus: PoAutoDraftActionPlanStepStatus =
-    isCancelled
-      ? "blocked"
-      : financialStatus === "paid"
-        ? "done"
-        : receivedInventory || ["invoiced", "partially_paid", "disputed"].includes(financialStatus)
+    financialWorkflowState === "settled"
+      ? "done"
+      : isCancelled && financialWorkflowState === "unbilled"
+        ? "blocked"
+        : receivedInventory || isCancelled || ["awaiting_approval", "payment_due"].includes(financialWorkflowState)
           ? "current"
           : "pending";
+  const apDetail: Record<PoFinancialWorkflow["state"], string> = {
+    settled: "Linked invoices are paid and this PO's financial amounts are verified.",
+    unbilled: "No active linked invoices are recorded. Create the vendor invoice when receiving is complete.",
+    review_required: "Review linked invoices; this PO's financial completion has not been verified.",
+    awaiting_approval: "Review and approve the linked invoice before recording payment.",
+    payment_due: "Review the outstanding linked invoice and record its payment when paid.",
+  };
 
   const checklist: PoAutoDraftActionPlan["checklist"] = [];
   if (openExceptionCount > 0) {
@@ -451,7 +467,7 @@ export function buildPoAutoDraftActionPlan(
       id: "ap_closeout",
       label: "AP closeout",
       status: apStatus,
-      detail: financialStatus === "paid" ? "Invoice and payment are complete." : "Create the vendor invoice and record payment for landed-cost and financial reporting.",
+      detail: apDetail[financialWorkflowState],
     },
   );
 
@@ -467,9 +483,38 @@ export function buildPoAutoDraftActionPlan(
       legacyStatus,
       physicalStatus,
       financialStatus,
+      financialWorkflowState,
       availableLifecycleActionIds: actionIds,
     },
   });
+
+  const financialFollowupAction = (): PoAutoDraftActionPlan["primaryAction"] | null => {
+    switch (financialWorkflowState) {
+      case "review_required":
+        return {
+          id: "review_financial_evidence", label: "Review linked invoices",
+          detail: apDetail.review_required, severity: "warning", tab: "invoices",
+        };
+      case "awaiting_approval":
+        return {
+          id: "review_invoice_approval", label: "Review invoice approval",
+          detail: apDetail.awaiting_approval, severity: "info", tab: "invoices",
+        };
+      case "unbilled":
+        return {
+          id: "create_invoice", label: "Create vendor invoice",
+          detail: "Receiving is complete; create the invoice so AP and landed cost can reconcile.",
+          severity: "info", tab: "invoices",
+        };
+      case "payment_due":
+        return {
+          id: "record_payment", label: "Review invoice payment",
+          detail: apDetail.payment_due, severity: "info", tab: "invoices",
+        };
+      case "settled":
+        return null;
+    }
+  };
 
   if (openExceptionCount > 0) {
     return makePrimary({
@@ -482,6 +527,9 @@ export function buildPoAutoDraftActionPlan(
   }
 
   if (isCancelled) {
+    // Cancellation stops physical work; it does not settle linked invoices.
+    const financialAction = financialWorkflowState === "unbilled" ? null : financialFollowupAction();
+    if (financialAction) return makePrimary(financialAction);
     return makePrimary({
       id: "cancelled",
       label: "PO cancelled",
@@ -577,25 +625,8 @@ export function buildPoAutoDraftActionPlan(
     });
   }
 
-  if (receivedInventory && financialStatus === "unbilled") {
-    return makePrimary({
-      id: "create_invoice",
-      label: "Create vendor invoice",
-      detail: "Receiving is complete; create the invoice so AP and landed cost can reconcile.",
-      severity: "info",
-      tab: "invoices",
-    });
-  }
-
-  if (["invoiced", "partially_paid", "disputed"].includes(financialStatus)) {
-    return makePrimary({
-      id: "record_payment",
-      label: "Record payment",
-      detail: "Record payment against the linked invoice when it is paid.",
-      severity: financialStatus === "disputed" ? "warning" : "info",
-      tab: "payments",
-    });
-  }
+  const financialAction = financialFollowupAction();
+  if (financialAction) return makePrimary(financialAction);
 
   if (hasAction("close")) {
     return makePrimary({
@@ -611,7 +642,7 @@ export function buildPoAutoDraftActionPlan(
     id: "done",
     label: "No next action",
     detail: "This auto-drafted PO has no open lifecycle, receiving, or AP action from the current state.",
-    severity: financialStatus === "paid" ? "success" : "info",
+    severity: "success",
   });
 }
 

@@ -4,6 +4,7 @@ import { formatIntegerCents } from "@shared/utils/format-integer-cents";
 import { apiRequest } from "@/lib/queryClient";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Link } from "wouter";
 
 export function usePoFinancialEvidence(purchaseOrderId: number | null) {
   return useQuery({
@@ -19,9 +20,10 @@ export function usePoFinancialEvidence(purchaseOrderId: number | null) {
   });
 }
 
-export function PoFinancialEvidence({ query, onViewInvoices }: {
+export function PoFinancialEvidence({ query, onViewInvoices, invoiceHref }: {
   query: ReturnType<typeof usePoFinancialEvidence>;
   onViewInvoices: () => void;
+  invoiceHref: (invoiceId: number) => string;
 }) {
   const evidence = query.data;
   const amount = (cents: number | null, currency: string) => cents === null ? "Unknown" : formatIntegerCents(cents, currency);
@@ -43,7 +45,10 @@ export function PoFinancialEvidence({ query, onViewInvoices }: {
         {evidence.state === "review_required" && <div className="space-y-2 rounded-md border border-amber-400/60 p-3">
           <p className="font-medium">Financial attribution needs review</p>
           <p>Unknown means the recorded evidence cannot establish this PO's share. Review the linked invoices before relying on its payment or balance totals.</p>
-          <ul className="list-disc space-y-1 pl-5">{evidence.reviewReasons.map((reason, index) => <li key={`${reason.invoiceId}:${reason.code}:${index}`}>{reason.message}</li>)}</ul>
+          <ul className="list-disc space-y-1 pl-5">{evidence.reviewReasons.map((reason, index) => <li key={`${reason.invoiceId}:${reason.code}:${index}`}>
+            {reason.message}
+            {reason.invoiceId !== null && <Link href={invoiceHref(reason.invoiceId)} className="ml-2 text-primary underline">Open invoice {reason.invoiceId}</Link>}
+          </li>)}</ul>
           <Button variant="outline" onClick={onViewInvoices}>Review linked invoices</Button>
         </div>}
         {evidence.state === "complete" && evidence.invoiceCount > 0 && <p className="text-muted-foreground">Amounts supported by the recorded invoice lines and settlement evidence. Individual payments remain recorded against entire invoices.</p>}

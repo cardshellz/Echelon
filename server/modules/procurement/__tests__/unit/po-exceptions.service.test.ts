@@ -12,8 +12,8 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 //   - listExceptions: filters by includeResolved
 //   - countOpenExceptions: returns count + maxSeverity correctly
 //   - detectQtyVariance: flags short and over, ignores cancelled lines
-//   - detectOverpaid: triggers when paid > invoiced
-//   - detectPastDue: respects vendor terms, no trigger when within terms
+// Financial detector coverage lives in po-financial-exceptions.domain.test.ts
+// and the real PostgreSQL po-financial-exceptions.integration.test.ts.
 //
 // All tests mock the db module to keep this purely in-memory.
 // ─────────────────────────────────────────────────────────────────────────────
@@ -73,8 +73,6 @@ import {
   listExceptions,
   countOpenExceptions,
   detectQtyVariance,
-  detectOverpaid,
-  detectPastDue,
   PoExceptionError,
 } from "../../po-exceptions.service";
 
@@ -425,129 +423,6 @@ describe("detectQtyVariance", () => {
     ]);
 
     await detectQtyVariance(123);
-    expect(dbState.selectChain.length).toBe(0);
-  });
-});
-
-// ─── detectOverpaid ──────────────────────────────────────────────────────────
-
-describe.skip("detectOverpaid", () => {
-  it("triggers when paid > invoiced", async () => {
-    dbState.selectChain.push([
-      {
-        id: 123,
-        invoicedTotalCents: 10000,
-        paidTotalCents: 10500, // overpaid by $5
-      },
-    ]);
-    dbState.selectChain.push([]); // upsert lookup
-    dbState.insertReturn = [{ id: 200, kind: "overpaid" }];
-
-    await detectOverpaid(123);
-    expect(dbState.selectChain.length).toBe(0);
-  });
-
-  it("does not trigger when paid == invoiced", async () => {
-    dbState.selectChain.push([
-      {
-        id: 123,
-        invoicedTotalCents: 10000,
-        paidTotalCents: 10000,
-      },
-    ]);
-
-    await detectOverpaid(123);
-    expect(dbState.selectChain.length).toBe(0);
-  });
-
-  it("does not trigger when paid < invoiced", async () => {
-    dbState.selectChain.push([
-      {
-        id: 123,
-        invoicedTotalCents: 10000,
-        paidTotalCents: 9000,
-      },
-    ]);
-
-    await detectOverpaid(123);
-    expect(dbState.selectChain.length).toBe(0);
-  });
-});
-
-// ─── detectPastDue ───────────────────────────────────────────────────────────
-
-describe.skip("detectPastDue", () => {
-  it("triggers when outstanding and age > vendor terms", async () => {
-    const past = new Date(Date.now() - 45 * 24 * 60 * 60 * 1000); // 45 days ago
-    // PO + vendor join
-    dbState.selectChain.push([
-      {
-        po: {
-          id: 123,
-          vendorId: 1,
-          firstInvoicedAt: past,
-          outstandingCents: 5000,
-        },
-        vendor: { paymentTermsDays: 30 },
-      },
-    ]);
-    dbState.selectChain.push([]); // upsert lookup
-    dbState.insertReturn = [{ id: 300, kind: "past_due" }];
-
-    await detectPastDue(123);
-    expect(dbState.selectChain.length).toBe(0);
-  });
-
-  it("does not trigger when within vendor terms", async () => {
-    const recent = new Date(Date.now() - 10 * 24 * 60 * 60 * 1000); // 10 days ago
-    dbState.selectChain.push([
-      {
-        po: {
-          id: 123,
-          vendorId: 1,
-          firstInvoicedAt: recent,
-          outstandingCents: 5000,
-        },
-        vendor: { paymentTermsDays: 30 },
-      },
-    ]);
-
-    await detectPastDue(123);
-    expect(dbState.selectChain.length).toBe(0);
-  });
-
-  it("does not trigger when outstanding == 0", async () => {
-    const past = new Date(Date.now() - 60 * 24 * 60 * 60 * 1000);
-    dbState.selectChain.push([
-      {
-        po: {
-          id: 123,
-          vendorId: 1,
-          firstInvoicedAt: past,
-          outstandingCents: 0,
-        },
-        vendor: { paymentTermsDays: 30 },
-      },
-    ]);
-
-    await detectPastDue(123);
-    expect(dbState.selectChain.length).toBe(0);
-  });
-
-  it("does not trigger when no firstInvoicedAt", async () => {
-    dbState.selectChain.push([
-      {
-        po: {
-          id: 123,
-          vendorId: 1,
-          firstInvoicedAt: null,
-          outstandingCents: 5000,
-        },
-        vendor: { paymentTermsDays: 30 },
-      },
-    ]);
-
-    await detectPastDue(123);
     expect(dbState.selectChain.length).toBe(0);
   });
 });

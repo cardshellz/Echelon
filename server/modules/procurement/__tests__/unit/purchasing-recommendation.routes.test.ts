@@ -39,6 +39,7 @@ const mocks = vi.hoisted(() => ({
     updateVelocityLookbackDays: vi.fn(),
   },
   db: {
+    transaction: vi.fn(),
     execute: vi.fn(),
     select: vi.fn(),
   },
@@ -144,6 +145,7 @@ describe("purchasing recommendation routes", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    mocks.db.transaction.mockImplementation(async work => work(mocks.db));
     mocks.db.execute.mockResolvedValue({ rows: [] });
     mocks.db.select.mockImplementation(() => {
       const chain: any = {
@@ -3339,6 +3341,7 @@ describe("purchasing recommendation routes", () => {
   });
 
   it("returns stale auto-draft PO diagnostics from the shared action plan", async () => {
+    mocks.db.select.mockReturnValueOnce(selectChain([{ id: 77, vendorId: 9, currency: "USD" }]));
     mocks.procurement.getAutoDraftSettings.mockResolvedValueOnce({
       stalePoThresholds: {
         reviewPendingWarningDays: 4,
@@ -3382,6 +3385,7 @@ describe("purchasing recommendation routes", () => {
 
     expect(status).toBe(200);
     expect(mocks.db.execute).toHaveBeenCalledTimes(1);
+    expect(mocks.db.transaction).toHaveBeenCalledWith(expect.any(Function), { isolationLevel: "repeatable read", accessMode: "read only" });
     expect(body).toMatchObject({
       thresholds: {
         reviewPendingWarningDays: 4,
@@ -3407,6 +3411,15 @@ describe("purchasing recommendation routes", () => {
         },
       ],
     });
+  });
+
+  it("returns a failed diagnostic read without invented counts or source details", async () => {
+    mocks.db.transaction.mockRejectedValueOnce(new Error("private financial source details"));
+    server = await startServer(buildApp());
+    const response = await requestJson(server.url, "GET", "/api/purchasing/auto-draft/stale-pos");
+    expect(response.status).toBe(500);
+    expect(response.body).toEqual({ error: "Failed to fetch stale auto-draft PO diagnostics" });
+    expect(mocks.procurement.getAutoDraftSettings).not.toHaveBeenCalled();
   });
 
   it("delegates the direct endpoint to the canonical auto-draft job", async () => {

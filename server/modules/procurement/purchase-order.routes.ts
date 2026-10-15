@@ -24,6 +24,9 @@ import { loadSupplierPoDocumentSource } from "./supplier-po-document.repository"
 import { inArray } from "drizzle-orm";
 import { db } from "../../db";
 import { createPurchaseWorkspaceRepository } from "./purchase-workspace.repository";
+import { createPoFinancialEvidenceService } from "./po-financial-evidence.service";
+import { poFinancialWorkflowSchema } from "@shared/procurement/po-financial-workflow";
+import { logger } from "../../platform/observability/logger";
 import { getShippablePurchaseOrderLines, ShipmentSourceCapacityError } from "./shipment-source-capacity";
 import { shipmentLineResourceIdSchema } from "@shared/procurement/shipment-line-command";
 import { createPurchaseWorkspaceService, PurchaseWorkspaceError } from "./purchase-workspace.service";
@@ -295,7 +298,7 @@ function mapPurchaseOrderWithLinesInput(
   };
 }
 
-export function registerPurchaseOrderRoutes(app: Express) {
+export function registerPurchaseOrderRoutes(app: Express, financialEvidence: Pick<ReturnType<typeof createPoFinancialEvidenceService>, "readWorkflow"> = createPoFinancialEvidenceService(db)) {
   registerPoQuantityAmendmentRoutes(app);
   registerPoVarianceApprovalRoutes(app);
   const { purchasing, shipmentTracking } = app.locals.services;
@@ -484,13 +487,18 @@ export function registerPurchaseOrderRoutes(app: Express) {
       const po = await purchasing.getPurchaseOrderById(Number(req.params.id));
       if (!po) return res.status(404).json({ error: "Purchase order not found" });
 
-      const [lines, vendor, exceptionCount, history, exceptions] = await Promise.all([
+      const [lines, vendor, exceptionCount, history, exceptions, workflowResult] = await Promise.all([
         purchasing.getPurchaseOrderLines(po.id),
         storage.getVendorById(po.vendorId),
         poExceptionsService.countOpenExceptions(po.id),
         purchasing.getPoStatusHistory(po.id),
         poExceptionsService.listExceptions(po.id, { includeResolved: true }),
+        financialEvidence.readWorkflow(po.id),
       ]);
+
+      if (!workflowResult) return res.status(404).json({ error: "Purchase order not found", code: "PO_NOT_FOUND" });
+      const financialWorkflow = poFinancialWorkflowSchema.parse(workflowResult);
+      if (financialWorkflow.purchaseOrderId !== po.id) throw new Error("Purchase order financial workflow identity mismatch");
 
       // Collect all distinct user IDs referenced on this PO for client-side
       // display. Prefixed actor strings (system, cron:*, agent:*) are passed
@@ -538,14 +546,18 @@ export function registerPurchaseOrderRoutes(app: Express) {
         vendor,
         openExceptionCount: exceptionCount.count,
         maxOpenSeverity: exceptionCount.maxSeverity,
+        financialWorkflow,
         autoDraftActionPlan: buildPoAutoDraftActionPlan(po, {
+          financialWorkflow,
           lineCount: lines.length,
           openExceptionCount: exceptionCount.count,
         }),
         relatedUsers,
       });
-    } catch (error: any) {
-      res.status(500).json({ error: error.message });
+    } catch (error: unknown) {
+      logger.error("procurement.purchase_order_detail", { outcome: "failed", purchase_order_id: req.params.id,
+        error_code: "PURCHASE_ORDER_DETAIL_UNAVAILABLE", error_class: error instanceof Error ? error.name : "UnknownError" });
+      res.status(503).json({ code: "PURCHASE_ORDER_DETAIL_UNAVAILABLE", error: "Purchase order details and financial review could not be loaded. Retry to load the current records." });
     }
   });
 
