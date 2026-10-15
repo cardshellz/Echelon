@@ -84,14 +84,14 @@ export function resolveEbayListingIssue(input: EbayListingIssueInput): EbayListi
     return issue("Stock selection needs an administrator check", "The saved operation could not obtain a valid transaction time for stock selection.",
       "Copy this code and request reference for an administrator to inspect the failed operation. Its saved request remains available; do not change listing mappings to work around this failure.",
       false, "contact_support", "Copy diagnostic details");
-  if (["EBAY_PUBLICATION_STOCK_REVIEW_REQUIRED", "EBAY_PUBLICATION_STOCK_REVIEW_STALE", "EBAY_PUBLICATION_STOCK_APPLY_RETIRED", "STOCK_LISTING_EXCLUDED"].includes(code))
+  if (["EBAY_PUBLICATION_STOCK_REVIEW_REQUIRED", "EBAY_PUBLICATION_STOCK_APPLY_RETIRED", "STOCK_LISTING_EXCLUDED"].includes(code))
     return issue("Continue publishing this selected product", "The previous publication stopped before its inventory connections were ready.",
       "Retry this product. The saved publishing workflow checks the existing offers and prepares matching inventory connections from your channel selection before publishing with current stock and pictures.",
       true, "retry_sync", "Retry publishing");
-  if (["STOCK_MAPPING_CONCURRENT_CHANGE", "STOCK_MAPPING_PROVIDER_BUSY", "STOCK_MAPPING_CLEANUP_UNCERTAIN",
+  if (["EBAY_PUBLICATION_STOCK_REVIEW_STALE", "STOCK_MAPPING_CONCURRENT_CHANGE", "STOCK_MAPPING_PROVIDER_BUSY", "STOCK_MAPPING_CLEANUP_UNCERTAIN",
     "STOCK_MAPPING_REVIEW_STALE", "STOCK_MAPPING_TARGET_CHANGED"].includes(code))
     return issue("Inventory preparation needs another check", "The inventory connection changed or has earlier work to finish.",
-      "Retry this saved listing request. Echelon checks current inventory connections and any unfinished stock updates before it can publish.",
+      "Echelon retries this saved request using current inventory connections. If automatic retries stop, use Sync to continue with the current stock and pictures.",
       true, "retry_sync", "Retry saved listing");
   if (code === "STOCK_MAPPING_COMMAND_CONFLICT")
     return issue("Check the saved inventory preparation request", "This request reference belongs to different inventory preparation inputs.",

@@ -6,11 +6,15 @@ import { cutoverCompositionBaseSql } from "../fixtures/inventory-cutover-composi
 import { WALMART_INVENTORY_NOW } from "../fixtures/walmart-publication-inventory.fixture";
 import { installEbayPublicationInventoryFixture } from "../fixtures/ebay-publication-inventory.fixture";
 import { calculatePublicationVariantMappingDefinitionHash } from "../../domain/inventory-channel-exposure";
-import { reviewEbayPublicationReadiness, assertEbayPublicationReady, withEbayPublicationReadinessApplied, findEbayPublicationReadinessReceipt, rejectEbayPublicationReadinessCommand } from "../../infrastructure/ebay-publication-readiness.repository";
+import { reviewEbayPublicationReadiness, assertEbayPublicationReady, ensureEbayPublicationReady, withEbayPublicationReadinessApplied, findEbayPublicationReadinessReceipt, rejectEbayPublicationReadinessCommand } from "../../infrastructure/ebay-publication-readiness.repository";
 import { createEbayRouteListingLifecycleClient } from "../../../channels/infrastructure/ebay-listing-client";
 import { recordQuantityProviderResponse } from "../../application/quantity-provider-request-evidence";
 import { quantityPublicationScopeLockKey } from "../../infrastructure/quantity-publication-admission.repository";
 import { PUBLICATION_TARGET_SCOPE_LOCK_SEED } from "../../infrastructure/inventory-publication-target-stop.repository";
+import { EbayExistingListingSyncExecution, type EbayListingExecutionContext, type PreparedEbayListingSync } from "../../../channels/ebay-listing-sync.service";
+import { EbayMarketplaceListingConnector, type EbayObservedOffer } from "../../../channels/listing-connectors/ebay-listing.connector";
+import { ensureEbayListingInventoryReady } from "../../../channels/infrastructure/ebay-listing-inventory-readiness";
+import type { EbayInventoryItem, EbayInventoryItemGroup, EbayBulkPriceQuantityRequest, EbayOffer } from "../../../channels/adapters/ebay/ebay-types";
 
 const runtime = vi.hoisted(() => ({ pool: null as Pool | null, api: vi.fn() }));
 vi.mock("../../../../db", () => ({ pool: new Proxy({} as Pool, { get(_target, key) {
@@ -61,6 +65,129 @@ dbDescribe.sequential("reviewed eBay publication stock enrollment, real PostgreS
     await database.pool.query('CREATE TABLE saved_publication_work(command_key uuid PRIMARY KEY)');
   }, 30_000);
   afterEach(async () => { await database?.close(); });
+
+  const retainedSource = async () => {
+    await database.pool.query(`UPDATE catalog.product_variants SET is_active=false WHERE id=102;
+      UPDATE channels.channel_listings SET external_product_id='listing-20' WHERE id=1;
+      INSERT INTO channels.channel_listings(id,channel_id,product_variant_id,external_sku,external_variant_id,external_product_id,sync_status)
+        VALUES(2,67,102,'NEW','offer-NEW','listing-20','synced')`);
+    return { ...source(), purpose: "sync" as const, variants: [...source().variants, { productVariantId: 102, sku: "NEW" }] };
+  };
+
+  it("updates and verifies existing group pictures after automatically preparing an inactive member's missing stock mapping", async () => {
+    // Match the incident: the active pack already has a sealed connection; only
+    // the inactive case retained in the existing group is missing its mapping.
+    await ensureEbayPublicationReady(database.pool, source(),
+      { commandKey: randomUUID(), actor: "operator", now: WALMART_INVENTORY_NOW });
+    const selected = await retainedSource();
+    const photos = ["https://example.test/current-front.jpg", "https://example.test/current-back.jpg"];
+    const item = (sku: string): EbayInventoryItem => ({ sku, condition: "NEW", product: {
+      title: "Pack", description: "Description", imageUrls: [], aspects: { Style: [sku] },
+    }, availability: { shipToLocationAvailability: { quantity: 999 } } });
+    const items = new Map(selected.variants.map(member => [member.sku, item(member.sku)]));
+    const offers = new Map<string, EbayObservedOffer>(selected.variants.map(member => [member.sku, {
+      sku: member.sku, offerId: `offer-${member.sku}`, listingId: "listing-20", status: "PUBLISHED",
+      marketplaceId: "EBAY_US", format: "FIXED_PRICE", availableQuantity: 999, categoryId: "183454",
+      merchantLocationKey: "main", listingPolicies: { fulfillmentPolicyId: "f", paymentPolicyId: "p", returnPolicyId: "r" },
+      pricingSummary: { price: { value: "10.00", currency: "USD" } },
+    }]));
+    let group: EbayInventoryItemGroup = { title: "Pack", description: "Description", aspects: {},
+      imageUrls: ["https://example.test/deleted.png"], variantSKUs: ["NEW", "P5"],
+      variesBy: { specifications: [{ name: "Style", values: ["P5", "NEW"] }] } };
+    runtime.api.mockImplementation(async (method: string, path: string, _token: string, body: unknown) => {
+      const url = new URL(path, "https://example.test");
+      if (method === "GET") {
+        if (path.includes("/inventory_item/")) return structuredClone(items.get(decodeURIComponent(url.pathname.split("/").at(-1)!)));
+        if (path.includes("/inventory_item_group/")) return structuredClone(group);
+        if (path.includes("/offer?")) return { total: 1, offers: [structuredClone(offers.get(url.searchParams.get("sku")!)!)] };
+        throw new Error(`Unexpected provider read ${path}`);
+      }
+      recordQuantityProviderResponse({ outcome: "completed", httpStatus: method === "POST" ? 200 : 204,
+        requestTerminated: true, providerRequestId: null, responseHash: "a".repeat(64), errorCodes: [], retryNotBefore: null, cooldownScope: null });
+      if (path.includes("bulk_update_price_quantity")) return { responses: (body as EbayBulkPriceQuantityRequest).requests.map(row => {
+        const current = items.get(row.sku)!;
+        const quantity = row.shipToLocationAvailability?.quantity;
+        if (quantity === undefined) throw new Error("Expected the admitted canonical inventory quantity");
+        items.set(row.sku, { ...current, availability: { shipToLocationAvailability: { quantity } } });
+        return { sku: row.sku, statusCode: 200, offers: (row.offers ?? []).map(update => {
+          offers.set(row.sku, { ...offers.get(row.sku)!, availableQuantity: update.availableQuantity });
+          return { offerId: update.offerId, statusCode: 200 };
+        }) };
+      }) };
+      if (method === "PUT" && path.includes("/inventory_item/")) { items.set(decodeURIComponent(url.pathname.split("/").at(-1)!), structuredClone(body as EbayInventoryItem)); return {}; }
+      if (method === "PUT" && path.includes("/inventory_item_group/")) { group = structuredClone(body as EbayInventoryItemGroup); return {}; }
+      if (method === "PUT" && path.includes("/offer/")) {
+        const update = body as EbayOffer; offers.set(update.sku, { ...offers.get(update.sku)!, ...structuredClone(update) }); return {};
+      }
+      throw new Error(`Unexpected provider mutation ${method} ${path}`);
+    });
+    const client = createEbayRouteListingLifecycleClient({ accessToken: "synthetic-test-token", expectedAccountId: "seller-36", expectedConnectionId: 9 });
+    // Reproduce the next failure hidden by the old mapping-review UI.
+    await expect(client.createOrReplaceInventoryItemGroup("PACK", group)).rejects.toMatchObject({ code: "PUBLICATION_LISTING_TARGET_UNMAPPED" });
+    expect(runtime.api).not.toHaveBeenCalled();
+    const prepared: PreparedEbayListingSync = {
+      identity: { channelId: 67, connectionId: 9, accountId: "seller-36", productId: 20, marketplaceId: "EBAY_US", groupKey: "PACK",
+        variants: selected.variants.map(member => ({ variantId: member.productVariantId, sku: member.sku,
+          externalSku: member.sku, offerId: `offer-${member.sku}`, listingId: "listing-20", contentSyncEnabled: member.productVariantId === 101 })) },
+      client, assertInventoryReady: context => ensureEbayListingInventoryReady(selected, context, WALMART_INVENTORY_NOW),
+      draft: { productId: 20, marketplaceId: "EBAY_US",
+        inventoryItems: [{ sku: "P5", payload: { ...item("P5"), product: { ...item("P5").product, imageUrls: photos } } }],
+        offers: [{ variantId: 101, sku: "P5", payload: offers.get("P5")! }],
+        itemGroup: { groupKey: "PACK", payload: { ...group, imageUrls: photos } } },
+      variants: [{ variantId: 101, sku: "P5", productName: "Pack", priceCents: 1000, priceChanged: false }],
+    };
+    const execution = new EbayExistingListingSyncExecution(async () => prepared,
+      { reconcile: async () => ({ busy: false, unresolved: [], resolved: [] }) },
+      new EbayMarketplaceListingConnector({ delay: async () => {}, inventoryDelayMs: 0, offerDelayMs: 0 }));
+    const jobId = randomUUID();
+    const context: EbayListingExecutionContext = { jobId, requestedBy: "operator", operation: "sync",
+      publicationTarget: null, bindPublicationTarget: async () => {}, publicationAccepted: null,
+      publicationWriteCompleted: false, publicationWriteStarted: false, publicationAcceptedRevision: null,
+      publicationIntentHash: null, claimedRevision: "1", bindPublicationAccepted: async () => {} };
+    const stages: string[] = [];
+    const run = () => execution.execute(prepared.identity, async (key, _hash, work) => { stages.push(key); await work(); }, null, async () => {}, context);
+    expect(await run()).toMatchObject({ synced: 1, errors: 0 });
+    expect(stages).toContain("verification");
+    expect(group).toMatchObject({ variantSKUs: ["NEW", "P5"], imageUrls: photos });
+    expect(items.get("P5")).toMatchObject({ product: { imageUrls: photos }, availability: { shipToLocationAvailability: { quantity: 17 } } });
+    expect(items.get("NEW")).toMatchObject({ product: { imageUrls: [], aspects: { Style: ["NEW"] } }, availability: { shipToLocationAvailability: { quantity: 0 } } });
+    expect(offers.get("NEW")).toMatchObject({ offerId: "offer-NEW", listingId: "listing-20", availableQuantity: 0 });
+    const writes = runtime.api.mock.calls.filter(call => call[0] !== "GET").length;
+    // After committed mapping work and a lost local completion, retry verifies
+    // current pictures. Neither mapping receipts nor provider writes duplicate.
+    expect(await run()).toMatchObject({ synced: 1, errors: 0 });
+    expect(runtime.api.mock.calls.filter(call => call[0] !== "GET")).toHaveLength(writes);
+    expect((await database.pool.query("SELECT count(*)::int AS n FROM inventory.ebay_publication_readiness_applications WHERE command_key=$1", [jobId])).rows[0].n).toBe(1);
+    expect((await database.pool.query("SELECT is_active FROM catalog.product_variants WHERE id=102")).rows[0].is_active).toBe(false);
+    expect((await database.pool.query("SELECT state FROM inventory.quantity_publication_attempts WHERE state IN ('running','uncertain')")).rows).toEqual([]);
+  });
+
+  it("rolls back retained-zero preparation and then resumes the same saved command concurrently", async () => {
+    const selected = await retainedSource(), commandKey = randomUUID();
+    const review = await reviewEbayPublicationReadiness(database.pool, selected);
+    expect(review).toMatchObject({ ready: true, variants: [
+      { productVariantId: 101, desiredQuantity: "17" }, { productVariantId: 102, desiredQuantity: "0" },
+    ] });
+    await expect(withEbayPublicationReadinessApplied(database.pool, { source: selected, commandKey,
+      contextHash: "a".repeat(64), expectedReviewHash: review.reviewHash }, "operator", WALMART_INVENTORY_NOW,
+      async () => { throw new Error("follow-up failed"); })).rejects.toThrow("follow-up failed");
+    expect(await counts()).toEqual({ mappings: 0, members: 0, updates: 0, receipts: 0, jobs: 0 });
+    await Promise.all([1, 2].map(() => ensureEbayPublicationReady(database.pool, selected,
+      { commandKey, actor: "operator", now: WALMART_INVENTORY_NOW })));
+    expect(await counts()).toEqual({ mappings: 2, members: 0, updates: 2, receipts: 1, jobs: 0 });
+    expect((await database.pool.query("SELECT product_variant_id,desired_quantity::text FROM inventory.inventory_publication_outbox WHERE publication_target_id=3 ORDER BY product_variant_id")).rows)
+      .toEqual([{ product_variant_id: 101, desired_quantity: "17" }, { product_variant_id: 102, desired_quantity: "0" }]);
+    expect(runtime.api).not.toHaveBeenCalled();
+  });
+
+  it("does not use maintenance to enroll an inactive variant without a retained listing", async () => {
+    await database.pool.query("UPDATE catalog.product_variants SET is_active=false WHERE id=102");
+    const review = await reviewEbayPublicationReadiness(database.pool, { ...source(), purpose: "sync",
+      variants: [...source().variants, { productVariantId: 102, sku: "NEW" }] });
+    expect(review.ready).toBe(false);
+    expect(review.blockers).toContainEqual(expect.objectContaining({ code: "STOCK_LISTING_NOT_SELECTED", productVariantId: 102 }));
+    expect(await counts()).toEqual({ mappings: 0, members: 0, updates: 0, receipts: 0, jobs: 0 });
+  });
 
   it("reviews the missing exact mapping without inventing IDs, then atomically creates, seals, enrolls and saves follow-up work", async () => {
     const original = source();

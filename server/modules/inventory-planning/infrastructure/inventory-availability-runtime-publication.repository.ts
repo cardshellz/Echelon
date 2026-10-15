@@ -362,7 +362,7 @@ async function listActivePublicationProductIds(
   return rows.map((row) => positiveInteger(row.product_id, "productId"));
 }
 
-async function loadZeroPublicationTargets(
+export async function loadZeroPublicationTargets(
   client: InventoryAvailabilityTransactionQueryClient,
   input: {
     productId: number;

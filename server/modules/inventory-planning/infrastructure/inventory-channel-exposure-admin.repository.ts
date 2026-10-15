@@ -653,7 +653,8 @@ implements InventoryChannelExposureAdminStore {
   /** The inventory enrollment owner supplies its existing transaction. The
    * ordinary configuration path and enrollment share this one draft writer. */
   async saveVariantMappingDraftInsideTransaction(tx: Transaction,
-    command: SavePublicationVariantMappingDraftCommand): Promise<ChannelExposureDraftSaveResult> {
+    command: SavePublicationVariantMappingDraftCommand,
+    options: { allowRetainedZero?: boolean } = {}): Promise<ChannelExposureDraftSaveResult> {
       const receiptKey = `${VARIANT_MAPPING_RECEIPT_PREFIX}${command.idempotencyKey}`;
       await lockIdempotency(tx, command.idempotencyKey);
       const replay = await loadReplay(tx, receiptKey, command.requestHash);
@@ -662,7 +663,7 @@ implements InventoryChannelExposureAdminStore {
       await tx.execute(sql`
         SELECT pg_advisory_xact_lock(${VARIANT_MAPPING_LOCK_NAMESPACE}, ${command.publicationTargetId})
       `);
-      await validateVariantMapping(tx, command.publicationTargetId, command.productVariantId);
+      await validateVariantMapping(tx, command.publicationTargetId, command.productVariantId, options.allowRetainedZero === true);
       const identityConflict = rows(await tx.execute(sql`
         SELECT head.product_variant_id
         FROM inventory.publication_variant_mapping_heads AS head
@@ -1601,28 +1602,40 @@ async function validateVariantMapping(
   tx: Transaction,
   publicationTargetId: number,
   productVariantId: number,
+  allowRetainedZero = false,
 ): Promise<void> {
   const found = rows(await tx.execute(sql`
-    SELECT target.id AS target_id, variant.id AS variant_id
+    SELECT target.id AS target_id, variant.id AS variant_id, variant.product_id,
+           target.destination_kind, target.channel_id, target.channel_connection_id,
+           target.dropship_store_connection_id, target.state, target.publication_authority,
+           (variant.is_active AND variant.requires_shipping AND COALESCE(variant.track_inventory,true)
+            AND variant.sales_eligibility='sellable' AND product.is_active) IS TRUE AS eligible
     FROM inventory.inventory_publication_targets AS target
     JOIN catalog.product_variants AS variant
       ON variant.id = ${productVariantId}
-     AND variant.is_active = true
-     AND variant.requires_shipping = true
-     AND COALESCE(variant.track_inventory, true) = true
-     AND variant.sales_eligibility = 'sellable'
     JOIN catalog.products AS product
       ON product.id = variant.product_id
-     AND product.is_active = true
     WHERE target.id = ${publicationTargetId}
   `));
-  if (found.length === 0) {
-    throw new InventoryAvailabilityMasterDataError(
-      409,
-      "INVENTORY_PUBLICATION_VARIANT_MAPPING_SCOPE_INVALID",
-      "The target must exist and the mapped SKU must be active, physical, tracked, and customer-sellable.",
-    );
+  const row = found.length === 1 ? found[0] : undefined;
+  if (row?.eligible === true) return;
+  // The internal maintenance owner can connect a retained identity only when
+  // the listing owner still requires its removal/zero duty. This never makes
+  // an inactive SKU eligible for positive stock or a new publication.
+  if (allowRetainedZero && row?.state === "live" && row.publication_authority === "echelon") {
+    const selection = await readPublicationStockSelection(selectionQueryClient(tx), {
+      destinationKind: publicationDestinationKind(row.destination_kind),
+      channelId: positiveInteger(row.channel_id, "target.channelId"),
+      channelConnectionId: nullablePositiveInteger(row.channel_connection_id, "target.channelConnectionId"),
+      dropshipStoreConnectionId: nullablePositiveInteger(row.dropship_store_connection_id, "target.dropshipStoreConnectionId"),
+    }, { productId: positiveInteger(row.product_id, "variant.productId"), productVariantIds: [productVariantId] });
+    if (selection.variants[0]?.action === "zero" && selection.variants[0].blockers.length === 0) return;
   }
+  throw new InventoryAvailabilityMasterDataError(
+    409,
+    "INVENTORY_PUBLICATION_VARIANT_MAPPING_SCOPE_INVALID",
+    "The mapped SKU must be active, physical, tracked and sellable, or have a verified retained listing that must remain at zero.",
+  );
 }
 
 async function validatePolicyScope(tx: Transaction, scope: ChannelExposurePolicyScope): Promise<void> {

@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { EbayListingSyncExecution } from "../../ebay-listing-sync.service";
+import type { EbayListingSyncExecution, EbayListingExecutionContext } from "../../ebay-listing-sync.service";
 import type { EbayListingLifecycleClient, EbayObservedOffer } from "../../listing-connectors/ebay-listing.connector";
 import type { EbayInventoryItem, EbayInventoryItemGroup } from "../../adapters/ebay/ebay-types";
 import type { EbayRegistrationReadTransport } from "../../../marketplace-listings/infrastructure/providers/ebay/ebay-registration-contracts";
@@ -13,10 +13,11 @@ const fixture = vi.hoisted(() => ({
   transport: null as EbayRegistrationReadTransport | null,
   photoRequests: [] as Array<{ variants: Array<{ variantId: number; sku: string }> }>,
   photoUrls: null as string[] | null,
-  recovery: vi.fn(async () => ({ busy: false, resolved: [], unresolved: [] })),
+  recovery: vi.fn(async () => ({ busy: false, resolved: [] as string[], unresolved: [] as string[] })),
   readCount: 0,
   changeSource: false,
   atp: vi.fn(),
+  inventoryReady: vi.fn(async () => {}),
 }));
 vi.mock("../../../../db", () => ({ pool: {}, db: { select: () => {
   const query = { from: () => query, innerJoin: () => query, leftJoin: () => query, where: () => query,
@@ -50,7 +51,9 @@ vi.mock("../../adapters/ebay/ebay-marketplace-registration.factory", async () =>
   ) }) };
 });
 vi.mock("../../infrastructure/ebay-listing-sync.repository", () => ({ PostgresEbayListingSyncRepository: class {} }));
-vi.mock("../../../inventory-planning/quantity-publication", () => ({ quantityProviderResponseRecovery: { reconcile: fixture.recovery } }));
+vi.mock("../../../inventory-planning/quantity-publication", () => ({ quantityProviderResponseRecovery: { reconcile: fixture.recovery },
+  ensureEbayPublicationReady: fixture.inventoryReady,
+}));
 vi.mock("../../ebay-listing-sync.service", async importOriginal => ({
   ...await importOriginal<typeof import("../../ebay-listing-sync.service")>(),
   EbayListingSyncService: class { constructor(_repository: unknown, execution: EbayListingSyncExecution) { fixture.execution = execution; } },
@@ -102,7 +105,14 @@ function provider(example: typeof cases[number]) {
 beforeEach(() => {
   fixture.readCount = 0; fixture.changeSource = false; fixture.photoRequests = []; fixture.photoUrls = null; fixture.recovery.mockClear();
   fixture.atp.mockReset().mockImplementation(async () => fixture.rows.map(row => ({ productVariantId: row.variant_id, atpUnits: 17 })));
+  fixture.inventoryReady.mockClear();
 });
+function executionContext(): EbayListingExecutionContext {
+  return { jobId: "a949682e-6690-4749-a6f7-c0bba463cd20", requestedBy: "operator", operation: "sync",
+    publicationTarget: null, bindPublicationTarget: async () => {}, publicationAccepted: null,
+    publicationWriteCompleted: false, publicationWriteStarted: false, publicationAcceptedRevision: null,
+    publicationIntentHash: null, claimedRevision: "1", bindPublicationAccepted: async () => {} };
+}
 
 describe("production existing-listing prepare through verified completion", () => {
   it("syncs the Tobacco listing's missing photos from its old saved identity while retaining the inactive case", async () => {
@@ -126,12 +136,18 @@ describe("production existing-listing prepare through verified completion", () =
     const retainedBefore = structuredClone(f.items.get("SHLZ-TOP-TOB-C1000"));
     const stages: string[] = [];
     const binding = vi.fn(async () => {});
-    const result = await fixture.execution!.execute(legacyIdentity, async (stage, _hash, work) => { stages.push(stage); return work(); }, null, binding);
+    const result = await fixture.execution!.execute(legacyIdentity, async (stage, _hash, work) => { stages.push(stage); return work(); }, null, binding, executionContext());
     expect(result).toMatchObject({ synced: 1, errors: 0 });
     expect(binding).toHaveBeenCalledWith(expect.objectContaining({ variants: [
       expect.objectContaining({ sku: "SHLZ-TOP-TOB-P25", contentSyncEnabled: true }),
       expect.objectContaining({ sku: "SHLZ-TOP-TOB-C1000", contentSyncEnabled: false }),
     ] }));
+    expect(fixture.inventoryReady).toHaveBeenCalledExactlyOnceWith({}, {
+      channelId: 67, connectionId: 12, accountId: "seller", environment: "production", productId: 1, purpose: "sync",
+      variants: [{ productVariantId: 1, sku: "SHLZ-TOP-TOB-P25" }, { productVariantId: 2, sku: "SHLZ-TOP-TOB-C1000" }],
+    }, { commandKey: executionContext().jobId, actor: "operator", now: expect.any(Date) });
+    expect(binding.mock.invocationCallOrder[0]).toBeLessThan(fixture.inventoryReady.mock.invocationCallOrder[0]);
+    expect(fixture.inventoryReady.mock.invocationCallOrder[0]).toBeLessThan(vi.mocked(f.client.createOrReplaceInventoryItem).mock.invocationCallOrder[0]);
     expect(f.client.createOrReplaceInventoryItem).toHaveBeenCalledExactlyOnceWith("SHLZ-TOP-TOB-P25", expect.objectContaining({
       product: expect.objectContaining({ imageUrls: photos, aspects: expect.objectContaining({ Style: [styles[0]] }) }),
     }));
@@ -144,7 +160,7 @@ describe("production existing-listing prepare through verified completion", () =
     expect(f.client.createOffer).not.toHaveBeenCalled();
     expect(f.client.publishOffer).not.toHaveBeenCalled();
     // A lost local completion re-reads the accepted photos and never repeats the writes.
-    await fixture.execution!.execute(legacyIdentity, async (_stage, _hash, work) => work(), null, binding);
+    await fixture.execution!.execute(legacyIdentity, async (_stage, _hash, work) => work(), null, binding, executionContext());
     expect(f.client.createOrReplaceInventoryItem).toHaveBeenCalledTimes(1);
     expect(f.client.createOrReplaceInventoryItemGroup).toHaveBeenCalledTimes(1);
   });
@@ -183,7 +199,7 @@ describe("production existing-listing prepare through verified completion", () =
   it.each(cases)("completes product $productId using provider aliases in writes, recovery and final projection details", async example => {
     const { source, client } = provider(example);
     const binding = vi.fn(async () => {});
-    const result = await fixture.execution!.execute(source, async (_key, _hash, work) => work(), null, binding);
+    const result = await fixture.execution!.execute(source, async (_key, _hash, work) => work(), null, binding, executionContext());
     expect(result).toMatchObject({ synced: 2, errors: 0 });
     expect(result.details.map(detail => [detail.variantId, detail.variantSku])).toEqual(source.variants.map(member => [member.variantId, member.sku]));
     expect(binding).toHaveBeenCalledWith(expect.objectContaining({ groupKey: example.group }));
@@ -203,7 +219,23 @@ describe("production existing-listing prepare through verified completion", () =
     await expect(fixture.execution!.execute(source, async (_key, _hash, work) => work(), null, binding)).rejects.toMatchObject({ code: "EBAY_SYNC_IDENTITY_CHANGED" });
     expect(binding).not.toHaveBeenCalled();
     expect(fixture.recovery).not.toHaveBeenCalled();
+    expect(fixture.inventoryReady).not.toHaveBeenCalled();
     expect(client.createOrReplaceInventoryItem).not.toHaveBeenCalled();
     expect(client.updateOffer).not.toHaveBeenCalled();
+  });
+  it("cannot prepare stock or write without the durable job's actor and key", async () => {
+    const { source, client } = provider(cases[0]);
+    await expect(fixture.execution!.execute(source, async (_key, _hash, work) => work(), null, async () => {}))
+      .rejects.toMatchObject({ code: "EBAY_PUBLICATION_OWNER_REQUIRED" });
+    expect(fixture.inventoryReady).not.toHaveBeenCalled();
+    expect(client.createOrReplaceInventoryItem).not.toHaveBeenCalled();
+  });
+  it("preserves uncertain prior-response evidence before any automatic stock preparation", async () => {
+    const { source, client } = provider(cases[0]);
+    fixture.recovery.mockResolvedValueOnce({ busy: false, resolved: [], unresolved: ["16323"] });
+    await expect(fixture.execution!.execute(source, async (_key, _hash, work) => work(), null, async () => {}, executionContext()))
+      .rejects.toMatchObject({ code: "EBAY_SYNC_RESPONSE_EVIDENCE_REQUIRED" });
+    expect(fixture.inventoryReady).not.toHaveBeenCalled();
+    expect(client.createOrReplaceInventoryItem).not.toHaveBeenCalled();
   });
 });

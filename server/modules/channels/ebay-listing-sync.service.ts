@@ -28,6 +28,7 @@ import { resolveEbayListingIssue } from "@shared/ebay-listing-issue";
 export interface PreparedEbayListingSync {
   sourceIdentity?: EbayListingSyncIdentity;
   identity: EbayListingSyncIdentity;
+  assertInventoryReady?(context?: { commandKey: string; actor: string }): Promise<void>;
   client: EbayListingLifecycleClient;
   draft: Pick<
     EbayListingConnectorDraft,
@@ -60,6 +61,7 @@ export class EbayExistingListingSyncExecution
     stage: Parameters<EbayListingSyncExecution["execute"]>[1],
     verificationIntentHash: string | null = null,
     bindProviderIdentity?: (identity: EbayListingSyncIdentity) => Promise<void>,
+    context?: EbayListingExecutionContext,
   ): Promise<EbayProductSyncResult> {
     const prepared = await this.prepare(identity);
     if (prepared.sourceIdentity) {
@@ -97,6 +99,11 @@ export class EbayExistingListingSyncExecution
         "EBAY_SYNC_RESPONSE_EVIDENCE_REQUIRED",
         `A prior request has no provable final response (attempts ${recovery.unresolved.join(", ")}). Reconcile that request before another write.`,
       );
+    // Verification and prior-response recovery precede preparation. Inventory
+    // owns exact mappings, selection, zeroing retained members and durable stock
+    // work; retries reuse this saved job's preparation receipt.
+    await prepared.assertInventoryReady?.(context?.jobId && context.requestedBy
+      ? { commandKey: context.jobId, actor: context.requestedBy } : undefined);
     const contentHash = syncContentIntentHash(prepared.draft);
     const offerIds: Record<number, string> = {};
     for (const member of resolvedIdentity.variants) {

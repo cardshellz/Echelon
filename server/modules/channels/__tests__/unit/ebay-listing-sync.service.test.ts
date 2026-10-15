@@ -33,7 +33,7 @@ describe("existing eBay listing sync execution", () => {
       message: "The listing update could not finish. Inspect the saved sync job before retrying.",
     });
   });
-  it.each(["STOCK_MAPPING_PROVIDER_BUSY", "STOCK_MAPPING_CONCURRENT_CHANGE", "STOCK_MAPPING_CLEANUP_UNCERTAIN",
+  it.each(["EBAY_PUBLICATION_STOCK_REVIEW_STALE", "STOCK_MAPPING_PROVIDER_BUSY", "STOCK_MAPPING_CONCURRENT_CHANGE", "STOCK_MAPPING_CLEANUP_UNCERTAIN",
     "STOCK_MAPPING_REVIEW_STALE", "STOCK_MAPPING_TARGET_CHANGED"])("retries transient stock preparation %s with a finite budget", code => {
     const failure = new EbayListingSyncError(code, "Recheck the saved listing's current stock preparation.");
     const now = new Date("2026-10-12T12:00:00Z");
