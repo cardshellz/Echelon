@@ -46,11 +46,17 @@ export function reconciliationEligibility(
         scope: source.scope,
         basePieces: source.basePieces,
         missing: records
-          .map(({ record }) => ({
+          .map(({ record, hasCogs, hasLegacyCogs, hasContribution, hasPhysicalCommitments, existingLandedMills }) => ({
             lotId: record.lotId,
             originalQuantity: record.originalQuantity,
             receiptId: record.receiptId,
             receiptLineId: record.receiptLineId,
+            hasOnHand: record.onHandQuantity !== 0,
+            hasCogs,
+            hasLegacyCogs,
+            hasContribution,
+            hasPhysicalCommitments,
+            hasLandedCost: existingLandedMills !== 0,
           }))
           .sort((a, b) => a.lotId - b.lotId),
       }),
@@ -73,6 +79,10 @@ export function reconciliationEligibility(
     identity: costFingerprint({
       scope: source.scope,
       basePieces: source.basePieces,
+      legacyCostLots: records
+        .filter((record) => record.hasLegacyCogs)
+        .map((record) => record.record.lotId)
+        .sort((a, b) => a - b),
       gaps: gaps.map((gap) => ({
         allocationId: gap.allocationId,
         lotId: gap.inventoryLotId,

@@ -280,6 +280,20 @@ export function registerShipmentReconciliationCases(fixture: {
     expect(await post(request)).toMatchObject({ httpStatus: 409 });
     expect(await postings()).toEqual([]);
   });
+  it("reopens the financial review immediately when previously absent cost evidence appears", async () => {
+    const { request } = await prepare(true);
+    await post(request);
+    await query(`INSERT INTO inventory.order_line_costs(order_id,order_item_id,product_variant_id,lot_id,qty_consumed,unit_cost_cents,total_cost_cents)
+      VALUES(1,1,200,501,2,10,20)`);
+    expect((await context()).state.status).toBe("review_required");
+    expect((await readPoShipmentCosts(fixture.database(), 10))?.lines[0].exceptionReview?.reconciliation?.status).toBe(
+      "review_required",
+    );
+    await fixture.updateCosts();
+    const rows = await postings();
+    expect(rows).toHaveLength(2);
+    expect(rows[1].after_mills).toBe("0");
+  });
   it("reopens changed historical attribution with an explicit reversal rather than reusing the old approval", async () => {
     const { request, before } = await prepare(true);
     await post(request);

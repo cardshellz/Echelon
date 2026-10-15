@@ -169,11 +169,21 @@ describe("shipment cost reconciliation policy", () => {
     expect(reconciliationBlocker(source, [missing], [{ ...record, ...patch }], false)).toContain(
       "stock or existing costs",
     );
+    const approved = reconciliationEligibility(source, [missing], [record])!;
+    expect(
+      reconciliationState(reconciliationEligibility(source, [missing], [{ ...record, ...patch }]), {
+        approval: { fingerprint: approved.identity, destination: "inventory_variance" },
+        balances: { historical_cogs: 0, inventory_variance: approved.amountMills },
+      }).status,
+    ).toBe("review_required");
   });
   it("blocks mixed known/missing receipts and unknown issue codes", () => {
     expect(reconciliationBlocker(source, [missing], [record], true)).toContain("twice");
     expect(reconciliationBlocker(source, [gap], [{ ...record, hasLegacyCogs: true }], true)).toContain(
       "Older order cost records",
+    );
+    expect(reconciliationEligibility(source, [gap], [{ ...record, hasLegacyCogs: true }])?.identity).not.toBe(
+      reconciliationEligibility(source, [gap], [record])?.identity,
     );
     expect(reconciliationBlocker(source, [{ code: "OTHER", message: "Unhandled" }], [record], false)).toContain(
       "source evidence",
