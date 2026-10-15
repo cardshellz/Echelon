@@ -127,6 +127,7 @@ function importSelectResults(poLines: any[], existingLines: any[], totalCents: n
     [{ maxLine: 3 }],
     [{ total: totalCents }],
     [{ id: 55, paidAmountCents: 0 }],
+    [{ purchaseOrderId: 7 }],
     [{
       status: "sent",
       financialStatus: "unbilled",

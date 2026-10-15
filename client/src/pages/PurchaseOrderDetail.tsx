@@ -1,5 +1,6 @@
 import { PoVarianceApproval, hasPendingPoVarianceApproval } from "@/features/purchasing/PoVarianceApproval";
 import { PoShipmentCostSummary } from "@/features/purchasing/PoShipmentCostSummary";
+import { PoFinancialEvidence, usePoFinancialEvidence } from "@/features/purchasing/PoFinancialEvidence";
 import { usePoShipmentCosts } from "@/features/purchasing/use-po-shipment-costs";
 import { formatIntegerCents } from "@shared/utils/format-integer-cents";
 import { parseShipmentReceiptResolution, requiresReceiptUnitReview } from "@/lib/shipment-receipt-units";
@@ -421,37 +422,9 @@ function DualTrackHeader({
     );
   }
 
-  // financial summary text (integer math only — Rule #3)
-  const paidCents = Number(po.paidTotalCents ?? 0);
-  const invoicedCents = Number(po.invoicedTotalCents ?? 0);
-  const outstandingCents = Number(po.outstandingCents ?? 0);
-  let financialSummary: React.ReactNode;
-  if (po.financialStatus === "unbilled") {
-    financialSummary = <span className="text-muted-foreground">Unbilled</span>;
-  } else if (po.financialStatus === "paid") {
-    financialSummary = <span className="text-green-600 font-medium">Paid in full</span>;
-  } else if (outstandingCents > 0 && po.firstInvoicedAt) {
-    const daysSinceInvoice = Math.floor(
-      (Date.now() - new Date(po.firstInvoicedAt).getTime()) / (1000 * 60 * 60 * 24),
-    );
-    const isPastDue = daysSinceInvoice > 30;
-    financialSummary = (
-      <>
-        <strong>{formatCents(paidCents)}</strong> paid of{" "}
-        <strong>{formatCents(invoicedCents)}</strong>
-        {isPastDue && (
-          <span className="ml-1 text-red-600 font-medium">· {formatCents(outstandingCents)} past due</span>
-        )}
-      </>
-    );
-  } else {
-    financialSummary = (
-      <>
-        <strong>{formatCents(paidCents)}</strong> paid of{" "}
-        <strong>{formatCents(invoicedCents)}</strong>
-      </>
-    );
-  }
+  // This legacy track records linked invoice status. Its cached whole-invoice
+  // totals cannot establish this PO's share; the evidence card owns amounts.
+  const financialSummary = FINANCIAL_LABELS[po.financialStatus] ?? "Not recorded";
 
   // ── Per-stage tooltip data ─────────────────────────────────────────────
   //
@@ -469,11 +442,9 @@ function DualTrackHeader({
   //   receiving     history fallback (toStatus IN ('receiving', 'partially_received'))
   //   received      history fallback (toStatus = 'received')
   //
-  // Financial track stage → source mapping:
-  //   unbilled      createdAt + 'no invoice yet' note when current
-  //   invoiced      firstInvoicedAt + 'invoiced \$X' line
-  //   partially_paid firstPaidAt + 'paid \$Y of \$Z' line
-  //   paid          fullyPaidAt + 'paid in full' line
+  // Linked invoice track timestamps retain their recorded history:
+  // firstInvoicedAt, firstPaidAt and fullyPaidAt. These are not evidence of
+  // this PO's allocated amounts; the separate financial read supplies those.
 
   const inTransitAt = firstHistoryAt(history, ["in_transit"]);
   const receivingAt = firstHistoryAt(history, ["receiving", "partially_received"]);
@@ -565,42 +536,32 @@ function DualTrackHeader({
   const finTimestamps: Record<string, StageTooltipInfo | undefined> = {
     unbilled: {
       // No timestamp — 'unbilled' is the starting state, not an event.
-      extra: ["No invoice received yet"],
+      extra: ["No linked invoice recorded"],
     },
     invoiced: {
       ts: po.firstInvoicedAt,
       extra: [
-        invoicedCents > 0 ? `Invoiced: ${formatCents(invoicedCents)}` : null,
+        "Linked invoices recorded",
         ...cancelExtras(po.firstInvoicedAt),
       ],
     },
     partially_paid: {
       ts: po.firstPaidAt,
       extra: [
-        invoicedCents > 0
-          ? `${formatCents(paidCents)} paid of ${formatCents(invoicedCents)}`
-          : null,
-        outstandingCents > 0
-          ? `${formatCents(outstandingCents)} outstanding`
-          : null,
+        "Payment recorded against linked invoices",
         ...cancelExtras(po.firstPaidAt),
       ],
     },
     paid: {
       ts: po.fullyPaidAt,
       extra: [
-        invoicedCents > 0
-          ? `${formatCents(paidCents)} paid in full`
-          : null,
+        "Linked invoices recorded as paid",
         ...cancelExtras(po.fullyPaidAt),
       ],
     },
   };
 
-  const finWarn = po.financialStatus === "disputed" ||
-    (outstandingCents > 0 &&
-      po.firstInvoicedAt != null &&
-      Date.now() - new Date(po.firstInvoicedAt).getTime() > 30 * 24 * 60 * 60 * 1000);
+  const finWarn = po.financialStatus === "disputed";
 
   return (
     // TooltipProvider needs to wrap the tooltip triggers below. delayDuration
@@ -625,7 +586,7 @@ function DualTrackHeader({
         {/* Financial track */}
         <div className="flex items-start gap-4">
           <span className="w-20 shrink-0 text-xs font-semibold text-muted-foreground uppercase tracking-wide mt-1">
-            Financial
+            Linked invoices
           </span>
           <div className="flex-1 overflow-x-auto">
             <TrackTimeline
@@ -637,6 +598,7 @@ function DualTrackHeader({
           </div>
           <div className="text-xs text-right shrink-0 ml-4 mt-0.5">{financialSummary}</div>
         </div>
+        <p className="text-xs text-muted-foreground">Linked invoice status describes whole invoices, which may include other purchase orders.</p>
       </div>
     </TooltipProvider>
   );
@@ -1208,6 +1170,7 @@ export default function PurchaseOrderDetail() {
     enabled: !!poId,
   });
   const shipmentCosts = usePoShipmentCosts(poId);
+  const financialEvidence = usePoFinancialEvidence(poId);
   const costCardAmount = (amount: number | null | undefined) => {
     if (shipmentCosts.isError) return "Unavailable";
     if (!shipmentCosts.data) return "Loading…";
@@ -1217,6 +1180,21 @@ export default function PurchaseOrderDetail() {
   const immutableRecommendationPo = isImmutableRecommendationPurchaseOrder(po);
   const lifecycle = (po as any)?.lifecycle as PoLifecycleSummary | undefined;
   const autoDraftActionPlan = (po as any)?.autoDraftActionPlan as AutoDraftActionPlan | null | undefined;
+  const financialEvidenceLoading = financialEvidence.isPending || financialEvidence.isFetching;
+  const financialEvidenceAvailable = financialEvidence.isSuccess && !financialEvidenceLoading;
+  const financialReviewRequired = financialEvidenceAvailable && financialEvidence.data?.state === "review_required";
+  const financialCompletionSupported = financialEvidenceAvailable && financialEvidence.data?.state === "complete" &&
+    financialEvidence.data.invoiceCount > 0 && financialEvidence.data.outstandingAmountCents === 0;
+  const financialGuidanceLabel = financialEvidenceLoading ? "Loading financial evidence…"
+    : financialEvidence.isError ? "Reload financial evidence" : "Review linked invoices";
+  const financialGuidanceDetail = financialEvidenceLoading ? "Wait for the current invoice and payment evidence before deciding the next financial action."
+    : financialEvidence.isError ? "Purchase order financial amounts could not be verified. Reload the evidence before relying on payment or balance totals."
+      : "Review linked invoices before relying on this PO's payment or balance totals.";
+  // This affects displayed financial guidance only. Server lifecycle authority
+  // and every physical action remain unchanged.
+  const reviewAutoDraftFinances = !!autoDraftActionPlan &&
+    ["done", "record_payment", "create_invoice"].includes(autoDraftActionPlan.primaryAction.id) &&
+    (!financialEvidenceAvailable || financialReviewRequired || (autoDraftActionPlan.primaryAction.id === "done" && !financialCompletionSupported));
   const lifecycleActionIds = new Set(
     (lifecycle?.nextActions ?? []).map((action) => action.id),
   );
@@ -2060,7 +2038,14 @@ export default function PurchaseOrderDetail() {
       }));
       toast({ title: "Payment recorded", description: apLedgerOutcomeDescription(result) });
     },
-    onError: (err: Error) => toast({ title: "Error", description: err.message, variant: "destructive" }),
+    onError: (err: Error) => {
+      // A response can be lost after commit. Reload the recorded evidence and
+      // entire-invoice balances before the operator decides whether to retry.
+      void queryClient.invalidateQueries({ queryKey: [`/api/purchase-orders/${poId}`] });
+      void queryClient.invalidateQueries({ queryKey: [`/api/purchase-orders/${poId}/payments`] });
+      void queryClient.invalidateQueries({ queryKey: [`/api/purchase-orders/${poId}/invoices`] });
+      toast({ title: "Error", description: err.message, variant: "destructive" });
+    },
   });
 
   const cancelMutation = useMutation({
@@ -2509,6 +2494,15 @@ export default function PurchaseOrderDetail() {
   };
 
   const runAutoDraftPrimaryAction = async () => {
+    if (reviewAutoDraftFinances) {
+      if (financialEvidenceLoading) return;
+      if (financialEvidence.isError) {
+        await financialEvidence.refetch();
+        return;
+      }
+      setActiveTab("invoices");
+      return;
+    }
     const action = autoDraftActionPlan?.primaryAction;
     if (!action) return;
     if (action.tab) setActiveTab(action.tab);
@@ -2602,6 +2596,7 @@ export default function PurchaseOrderDetail() {
   })();
 
   const autoDraftPrimaryButtonLabel = (() => {
+    if (reviewAutoDraftFinances) return financialGuidanceLabel;
     switch (autoDraftActionPlan?.primaryAction.id) {
       case "open_lines":
         return "Open lines";
@@ -2610,7 +2605,7 @@ export default function PurchaseOrderDetail() {
       case "create_invoice":
         return "Create invoice";
       case "record_payment":
-        return "Record payment";
+        return "Record invoice payment";
       case "done":
         return "No action";
       case "cancelled":
@@ -2623,7 +2618,8 @@ export default function PurchaseOrderDetail() {
   const autoDraftPrimaryButtonDisabled =
     !autoDraftActionPlan ||
     autoDraftPrimaryActionPending ||
-    ["done", "cancelled"].includes(autoDraftActionPlan.primaryAction.id);
+    (reviewAutoDraftFinances && financialEvidenceLoading) ||
+    (!reviewAutoDraftFinances && ["done", "cancelled"].includes(autoDraftActionPlan.primaryAction.id));
 
   if (isLoading) {
     return (
@@ -2965,6 +2961,8 @@ export default function PurchaseOrderDetail() {
         </div>
       )}
 
+      <PoFinancialEvidence query={financialEvidence} onViewInvoices={() => setActiveTab("invoices")} />
+
       {/* Phase 2: Dual-track header. We pass the history rows so the
           tooltip can derive timestamps for stages that don't have
           dedicated columns (in_transit, receiving, received). */}
@@ -3183,7 +3181,7 @@ export default function PurchaseOrderDetail() {
                 <div className="flex items-center gap-2 flex-wrap">
                   <Badge
                     variant="outline"
-                    className={`text-xs ${AUTO_DRAFT_SEVERITY_STYLES[autoDraftActionPlan.primaryAction.severity]}`}
+                    className={`text-xs ${AUTO_DRAFT_SEVERITY_STYLES[reviewAutoDraftFinances ? "warning" : autoDraftActionPlan.primaryAction.severity]}`}
                   >
                     Auto-draft next action
                   </Badge>
@@ -3195,9 +3193,9 @@ export default function PurchaseOrderDetail() {
                   </span>
                 </div>
                 <div>
-                  <h3 className="font-semibold text-base">{autoDraftActionPlan.primaryAction.label}</h3>
+                  <h3 className="font-semibold text-base">{reviewAutoDraftFinances ? financialGuidanceLabel : autoDraftActionPlan.primaryAction.label}</h3>
                   <p className="text-sm text-muted-foreground mt-1">
-                    {autoDraftActionPlan.primaryAction.detail}
+                    {reviewAutoDraftFinances ? financialGuidanceDetail : autoDraftActionPlan.primaryAction.detail}
                   </p>
                 </div>
               </div>
@@ -3212,7 +3210,13 @@ export default function PurchaseOrderDetail() {
             </div>
 
             <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-2">
-              {autoDraftActionPlan.checklist.map((step) => (
+              {autoDraftActionPlan.checklist.map((recordedStep) => {
+                const step = recordedStep.id === "ap_closeout" &&
+                  (!financialEvidenceAvailable || financialReviewRequired || (recordedStep.status === "done" && !financialCompletionSupported))
+                  ? { ...recordedStep, status: financialEvidenceLoading ? "pending" as const : financialEvidence.isError ? "blocked" as const : "current" as const,
+                    detail: financialGuidanceDetail }
+                  : recordedStep;
+                return (
                 <div
                   key={step.id}
                   className={`rounded-md border px-3 py-2 text-sm ${AUTO_DRAFT_STEP_STYLES[step.status]}`}
@@ -3233,7 +3237,8 @@ export default function PurchaseOrderDetail() {
                     </p>
                   )}
                 </div>
-              ))}
+                );
+              })}
             </div>
           </CardContent>
         </Card>
@@ -3664,7 +3669,7 @@ export default function PurchaseOrderDetail() {
         <TabsContent value="invoices" className="space-y-4">
           <div className="flex items-center justify-between">
             <p className="text-sm text-muted-foreground">
-              Vendor invoices linked to this purchase order.
+              Linked vendor invoices. Amounts and balances cover each entire invoice, which may include other purchase orders.
             </p>
             <a href="/ap-invoices" className="text-sm text-blue-600 hover:underline">
               Manage all invoices →
@@ -3686,8 +3691,8 @@ export default function PurchaseOrderDetail() {
                       <TableHead>Invoice #</TableHead>
                       <TableHead>Invoice Date</TableHead>
                       <TableHead>Due Date</TableHead>
-                      <TableHead className="text-right">Amount</TableHead>
-                      <TableHead className="text-right">Balance</TableHead>
+                      <TableHead className="text-right">Entire invoice amount</TableHead>
+                      <TableHead className="text-right">Entire invoice balance</TableHead>
                       <TableHead>Status</TableHead>
                       <TableHead></TableHead>
                     </TableRow>
@@ -3702,7 +3707,7 @@ export default function PurchaseOrderDetail() {
                         </TableCell>
                         <TableCell className="text-right font-mono">{formatCents(inv.invoicedAmountCents)}</TableCell>
                         <TableCell className="text-right font-mono font-medium">
-                          {inv.balanceCents > 0 ? formatCents(inv.balanceCents) : <span className="text-green-600 text-sm">Paid</span>}
+                          {formatCents(inv.balanceCents)}
                         </TableCell>
                         <TableCell>
                           <Badge variant="outline" className="text-xs">{inv.status?.replace("_", " ")}</Badge>
@@ -3722,13 +3727,13 @@ export default function PurchaseOrderDetail() {
         {/* ── Payments Tab (Phase 2) ── */}
         <TabsContent value="payments" className="space-y-4">
           <p className="text-sm text-muted-foreground">
-            AP payments applied to invoices linked to this purchase order.
+            Payments applied to entire linked invoices. These amounts are not payment allocations to this purchase order.
           </p>
           {!paymentsData?.payments?.length ? (
             <Card>
               <CardContent className="p-8 text-center text-muted-foreground">
                 <DollarSign className="h-8 w-8 mx-auto mb-2 opacity-30" />
-                <p className="text-sm">No payments recorded against this PO yet.</p>
+                <p className="text-sm">No completed payments recorded against linked invoices.</p>
                 <p className="text-xs mt-1">
                   Payments appear here once invoices are linked and payment is applied in the AP ledger.
                 </p>
@@ -3742,7 +3747,7 @@ export default function PurchaseOrderDetail() {
                     <TableRow>
                       <TableHead>Payment Date</TableHead>
                       <TableHead>Method</TableHead>
-                      <TableHead className="text-right">Amount Applied</TableHead>
+                      <TableHead className="text-right">Applied to entire invoice</TableHead>
                       <TableHead>Invoice #</TableHead>
                       <TableHead>Reference</TableHead>
                     </TableRow>
@@ -4095,7 +4100,7 @@ export default function PurchaseOrderDetail() {
                   }}
                 >
                   <DollarSign className="h-3.5 w-3.5 mr-2" />
-                  Record payment
+                  Record invoice payment
                 </Button>
                 {/* Fallback link for users who want the full AP payments list */}
                 <button
@@ -4109,7 +4114,7 @@ export default function PurchaseOrderDetail() {
 
             {/* Fallback: no actions available */}
             {po.physicalStatus === "received" &&
-              po.financialStatus === "paid" && (
+              po.financialStatus === "paid" && financialCompletionSupported && (
               <p className="text-xs text-muted-foreground text-center py-2">
                 All done — PO fully received and paid.
               </p>
@@ -5587,9 +5592,9 @@ export default function PurchaseOrderDetail() {
       <Dialog open={showPaymentDialog} onOpenChange={setShowPaymentDialog}>
         <DialogContent className="max-w-md">
           <DialogHeader>
-            <DialogTitle>Record Payment</DialogTitle>
+            <DialogTitle>Record invoice payment</DialogTitle>
             <DialogDescription>
-              {po?.poNumber} — choose an invoice and enter payment details
+              Choose an invoice linked to {po?.poNumber}. This records payment against the entire invoice, which may cover other purchase orders.
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-4">
@@ -5601,7 +5606,7 @@ export default function PurchaseOrderDetail() {
                 if (unpaidInvoices.length === 0) {
                   return (
                     <div className="rounded-md border border-amber-300 bg-amber-50 dark:bg-amber-950/30 p-3 text-sm">
-                      No unpaid invoices on this PO. Add an invoice first.
+                      No linked invoices with an outstanding balance are available.
                     </div>
                   );
                 }
@@ -5621,7 +5626,7 @@ export default function PurchaseOrderDetail() {
                     <option value="" disabled>Select invoice…</option>
                     {unpaidInvoices.map((inv: any) => (
                       <option key={inv.id} value={inv.id}>
-                        {inv.invoiceNumber} — {formatCents(inv.balanceCents)} due
+                        {inv.invoiceNumber} — {formatCents(inv.balanceCents)} due on entire invoice
                       </option>
                     ))}
                   </select>
@@ -5673,7 +5678,7 @@ export default function PurchaseOrderDetail() {
                 onClick={() => paymentMutation.mutate()}
                 disabled={!payment.amountDollars || !payment.invoiceId || paymentMutation.isPending}
               >
-                {paymentMutation.isPending ? "Recording..." : "Record Payment"}
+                {paymentMutation.isPending ? "Recording..." : "Record invoice payment"}
               </Button>
             </div>
           </div>

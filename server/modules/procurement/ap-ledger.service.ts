@@ -1649,29 +1649,39 @@ export async function linkPoToInvoice(
     : requireNonnegativeInteger(allocatedAmountCents, "allocatedAmountCents");
   const normalizedNotes = normalizeOptionalText(notes, "notes", 10_000);
 
-  const link = await runApCostTransaction(async (tx: ApLedgerDbClient) => {
+  const result = await runApCostTransaction(async (tx: ApLedgerDbClient) => {
     const invoice = await lockEditableInvoice(tx, normalizedInvoiceId);
     await lockMatchingPurchaseOrder(tx, normalizedPoId, invoice.vendorId, invoice.currency);
 
-    const [upserted] = await tx
-      .insert(vendorInvoicePoLinks)
-      .values({
+    // The invoice lock serializes this relationship owner. An existing link
+    // with no supplied metadata is a valid retry, not an empty UPDATE command.
+    const [existingLink] = await tx.select().from(vendorInvoicePoLinks).where(and(
+      eq(vendorInvoicePoLinks.vendorInvoiceId, normalizedInvoiceId),
+      eq(vendorInvoicePoLinks.purchaseOrderId, normalizedPoId),
+    )).for("update");
+    let upserted = existingLink;
+    if (!existingLink) {
+      [upserted] = await tx.insert(vendorInvoicePoLinks).values({
         vendorInvoiceId: normalizedInvoiceId,
         purchaseOrderId: normalizedPoId,
         allocatedAmountCents: normalizedAllocation,
         notes: normalizedNotes,
-      })
-      .onConflictDoUpdate({
-        target: [vendorInvoicePoLinks.vendorInvoiceId, vendorInvoicePoLinks.purchaseOrderId],
-        set: { allocatedAmountCents: normalizedAllocation, notes: normalizedNotes },
-      })
-      .returning();
+      }).returning();
+    } else if (normalizedAllocation !== undefined || normalizedNotes !== undefined) {
+      [upserted] = await tx.update(vendorInvoicePoLinks).set({
+        ...(normalizedAllocation === undefined ? {} : { allocatedAmountCents: normalizedAllocation }),
+        ...(normalizedNotes === undefined ? {} : { notes: normalizedNotes }),
+      }).where(eq(vendorInvoicePoLinks.id, existingLink.id)).returning();
+    }
+    if (!upserted) {
+      throw new ApLedgerError("Invoice purchase-order link could not be saved", 500, {
+        code: "AP_INVOICE_PO_LINK_SAVE_FAILED", invoiceId: normalizedInvoiceId, purchaseOrderId: normalizedPoId,
+      });
+    }
 
     const imported = await importLinesFromPOWithClient(normalizedInvoiceId, normalizedPoId, tx);
     await recalculateInvoiceFromLines(normalizedInvoiceId, tx);
-    await recomputePoFinancialAggregates(normalizedPoId, {
-      client: tx,
-      runDetection: false,
+    const affectedPoIds = await recomputeLinkedPurchaseOrders(normalizedInvoiceId, tx, {
       actorId,
       reason: `Vendor invoice ${normalizedInvoiceId} linked to PO ${normalizedPoId}.`,
     });
@@ -1683,15 +1693,16 @@ export async function linkPoToInvoice(
         invoiceId: normalizedInvoiceId,
         purchaseOrderId: normalizedPoId,
         linkId: upserted.id,
+        affectedPurchaseOrderIds: affectedPoIds,
         importedLineIds: imported.map((line) => line.id),
       },
       tx,
     );
-    return upserted;
+    return { link: upserted, affectedPoIds };
   });
 
-  await runPoFinancialDetectionHooks(normalizedPoId);
-  return link;
+  await runPoFinancialDetectionHooksForMany(result.affectedPoIds);
+  return result.link;
 }
 
 export async function unlinkPoFromInvoice(
@@ -1701,7 +1712,7 @@ export async function unlinkPoFromInvoice(
 ) {
   const normalizedInvoiceId = requireCommandId(invoiceId, "invoiceId");
   const normalizedPoId = requireCommandId(purchaseOrderId, "purchaseOrderId");
-  const changed = await runApCostTransaction(async (tx: ApLedgerDbClient) => {
+  const result = await runApCostTransaction(async (tx: ApLedgerDbClient) => {
     const invoice = await lockEditableInvoice(tx, normalizedInvoiceId);
     await lockMatchingPurchaseOrder(tx, normalizedPoId, invoice.vendorId, invoice.currency);
     const [existingLink] = await tx
@@ -1712,7 +1723,7 @@ export async function unlinkPoFromInvoice(
         eq(vendorInvoicePoLinks.purchaseOrderId, normalizedPoId),
       ))
       .for("update");
-    if (!existingLink) return false;
+    if (!existingLink) return { changed: false, affectedPoIds: [] };
 
     await tx
       .delete(vendorInvoicePoLinks)
@@ -1732,9 +1743,12 @@ export async function unlinkPoFromInvoice(
     }
 
     await recalculateInvoiceFromLines(normalizedInvoiceId, tx);
-    await recomputePoFinancialAggregates(normalizedPoId, {
-      client: tx,
-      runDetection: false,
+    // Recalculate both sides: remaining relationships observe the new invoice
+    // total, while the removed PO must lose this invoice from its context.
+    const affectedPoIds = [...new Set([
+      normalizedPoId, ...await getPoIdsForInvoice(normalizedInvoiceId, tx),
+    ])].sort((left, right) => left - right);
+    await recomputePoFinancialAggregatesForMany(affectedPoIds, tx, {
       actorId,
       reason: `Vendor invoice ${normalizedInvoiceId} unlinked from PO ${normalizedPoId}.`,
     });
@@ -1746,16 +1760,15 @@ export async function unlinkPoFromInvoice(
         invoiceId: normalizedInvoiceId,
         purchaseOrderId: normalizedPoId,
         removedLinkId: existingLink.id,
+        affectedPurchaseOrderIds: affectedPoIds,
       },
       tx,
     );
-    return true;
+    return { changed: true, affectedPoIds };
   });
 
-  if (changed) {
-    await runPoFinancialDetectionHooks(normalizedPoId);
-  }
-  return { ok: true, changed };
+  await runPoFinancialDetectionHooksForMany(result.affectedPoIds);
+  return { ok: true, changed: result.changed };
 }
 
 export async function getInvoicesForPo(purchaseOrderId: number) {
@@ -2569,7 +2582,7 @@ export async function importLinesFromPO(
 ) {
   const normalizedInvoiceId = requireCommandId(invoiceId, "invoiceId");
   const normalizedPoId = requireCommandId(purchaseOrderId, "purchaseOrderId");
-  const lines = await runApCostTransaction(async (tx: ApLedgerDbClient) => {
+  const result = await runApCostTransaction(async (tx: ApLedgerDbClient) => {
     const invoice = await lockEditableInvoice(tx, normalizedInvoiceId);
     await lockMatchingPurchaseOrder(tx, normalizedPoId, invoice.vendorId, invoice.currency);
 
@@ -2591,9 +2604,7 @@ export async function importLinesFromPO(
 
     const imported = await importLinesFromPOWithClient(normalizedInvoiceId, normalizedPoId, tx);
     await recalculateInvoiceFromLines(normalizedInvoiceId, tx);
-    await recomputePoFinancialAggregates(normalizedPoId, {
-      client: tx,
-      runDetection: false,
+    const affectedPoIds = await recomputeLinkedPurchaseOrders(normalizedInvoiceId, tx, {
       actorId,
       reason: `Invoice ${normalizedInvoiceId} lines imported from PO ${normalizedPoId}.`,
     });
@@ -2604,15 +2615,16 @@ export async function importLinesFromPO(
       {
         invoiceId: normalizedInvoiceId,
         purchaseOrderId: normalizedPoId,
+        affectedPurchaseOrderIds: affectedPoIds,
         importedLineIds: imported.map((line) => line.id),
       },
       tx,
     );
-    return imported;
+    return { lines: imported, affectedPoIds };
   });
 
-  await runPoFinancialDetectionHooks(normalizedPoId);
-  return lines;
+  await runPoFinancialDetectionHooksForMany(result.affectedPoIds);
+  return result.lines;
 }
 
 export async function addInvoiceLine(invoiceId: number, data: {
