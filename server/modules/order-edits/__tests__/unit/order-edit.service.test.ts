@@ -519,10 +519,11 @@ describe("private order edit orchestration", () => {
     expect(h.record().error?.code).toBe("HOLD_FAILED");
     expect(failedQuote.warnings.some(warning => /predates shipping recalculation/.test(warning))).toBe(false);
     expect(h.record().quote).toBeNull();
-    expect(h.report).toHaveBeenCalledWith({
+    expect(h.report).toHaveBeenCalledWith(expect.objectContaining({
       operationId: OP,
       code: "QUOTE_REJECTED",
-    });
+      phase: "shopify_quote",
+    }));
     expect(h.events.at(-1)?.action).toBe("quote_failed_held");
     expect(h.provider.commit).not.toHaveBeenCalled();
   });
