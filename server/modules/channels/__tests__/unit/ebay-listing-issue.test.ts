@@ -34,6 +34,7 @@ describe("shared eBay issue actions", () => {
     ["PUBLICATION_GLOBAL_DISABLED","edit_listing",false],
     ["EBAY_REGISTRATION_READ_TIMEOUT","retry_sync",true],
     ["EBAY_SYNC_ADMISSION_UNSAVED","retry_sync",true],
+    ["INVENTORY_PUBLICATION_TARGET_BUSY","retry_sync",true],
     ["EBAY_SYNC_COMMAND_UNCONFIRMED","retry_sync",true],
     ["EBAY_RECOVERY_PREVIEW_CHANGED","check_recovery",false],
     ["EBAY_RECOVERY_FOLLOWUP_PENDING","check_recovery",false],
@@ -105,6 +106,25 @@ describe("shared eBay issue actions", () => {
     const attention = resolveEbayListingIssue({ code: "EBAY_SYNC_READBACK_PENDING",state: "needs_attention" });
     expect(recovering).toMatchObject({ retryable: false,action: { kind: "check_recovery" } });
     expect(attention).toMatchObject({ retryable: true,action: { kind: "retry_sync" } });
+  });
+  it.each(["queued", "running", "recovering", "awaiting_evidence"])("explains inventory contention in %s without requesting another sync", state => {
+    const issue = resolveEbayListingIssue({ code: "INVENTORY_PUBLICATION_TARGET_BUSY", state,
+      jobId: "655ca747-20b9-4940-9c61-019baf1c11c1", message: "internal lock diagnostic" });
+    expect(issue).toMatchObject({ title: "Waiting for an inventory update", retryable: false,
+      action: { kind: "check_status", label: "View update status" } });
+    expect(issue.message).toContain("pictures and listing details have not all been verified");
+    expect(issue.nextStep).toContain("retry automatically");
+    expect(issue.message).not.toContain("internal lock");
+  });
+  it("offers the existing retry flow for a job stranded by the old contention classification", () => {
+    const issue = resolveEbayListingIssue({ code: "INVENTORY_PUBLICATION_TARGET_BUSY", state: "needs_attention",
+      jobId: "655ca747-20b9-4940-9c61-019baf1c11c1",
+      message: "The listing update could not finish. Inspect the saved sync job before retrying." });
+    expect(issue).toMatchObject({ title: "An inventory update interrupted this sync", retryable: true,
+      action: { kind: "retry_sync", label: "Retry this product" } });
+    expect(issue.message).toContain("Another inventory update was using this listing");
+    expect(issue.nextStep).toContain("finish updating the existing listing and pictures");
+    expect(issue.nextStep).not.toContain("automatically");
   });
   it("uses normal publishing for missing stock preparation but keeps genuine inventory failures out of retry loops", () => {
     const preparation = resolveEbayListingIssue({ code: "EBAY_PUBLICATION_STOCK_REVIEW_REQUIRED", productId: 20 });

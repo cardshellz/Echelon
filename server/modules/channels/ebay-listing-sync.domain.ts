@@ -113,6 +113,10 @@ const WAIT_CODES = new Set([
   "PUBLICATION_PROVIDER_COOLDOWN",
   "PUBLICATION_SCOPE_BUSY",
   "PUBLICATION_ADMISSION_CAPACITY_BUSY",
+  // The canonical planner deliberately releases its transaction when another
+  // publisher holds the target lock. Wait and rebuild the entire sync; this
+  // contention must not exhaust retries or strand partially updated pictures.
+  "INVENTORY_PUBLICATION_TARGET_BUSY",
   "QUANTITY_PUBLICATION_DRAIN_BUSY",
   "PUBLICATION_GLOBAL_STOP_ACTIVE",
   "PUBLICATION_GLOBAL_DISABLED",
@@ -171,8 +175,9 @@ export function syncFailure(
       : NaN;
   const minimum =
     now.getTime() + Math.min(15 * 60_000, 30_000 * 2 ** Math.min(attempts, 5));
-  const message =
-    error instanceof Error &&
+  const message = code === "INVENTORY_PUBLICATION_TARGET_BUSY"
+    ? "An inventory update is using this listing. The saved listing update will retry automatically."
+    : error instanceof Error &&
     (error instanceof EbayListingSyncError ||
       /^(EBAY_|PUBLICATION_|QUANTITY_)/.test(code))
       ? error.message.slice(0, 1000)
