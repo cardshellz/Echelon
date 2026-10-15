@@ -3,13 +3,17 @@ import { buildShipmentAllocationBasis, resolveShipmentAllocationMethod, shipment
 import { recordCostRevision } from "./cost-source-revision.repository";
 import { sql } from "drizzle-orm";
 import type { CostIssue } from "@shared/procurement/cost-source-contracts";
-import { costFingerprint, costInteger, lockInventoryCostGraph, type CostEvidenceTransaction, type RecordedCostRevision } from "../inventory/infrastructure/cost-evidence.repository";
+import { costFingerprint, costInteger, lockInventoryCostGraph, type CostEvidenceTransaction, type RecordedCostRevision, type CostRevisionInput } from "../inventory/infrastructure/cost-evidence.repository";
 import { applyCostRevision, type CostComponentWriter } from "../inventory/application/apply-cost-revision";
 import { resolveShipmentChargeEvidence } from "./domain/shipment-charge-evidence";
 
-export async function recordShipmentCostRevisions(tx: CostEvidenceTransaction, shipmentId: number, actorId: string, now: Date, options: { allocationJustFinalized?: boolean; inboundShipmentLineId?: number } = {}): Promise<{ revisions: RecordedCostRevision[]; issues: CostIssue[] }> {
+type ShipmentRevisionOptions = { allocationJustFinalized?: boolean; inboundShipmentLineId?: number };
+type ShipmentRevisionProposal = { input: CostRevisionInput; sourceEvidence: unknown };
+
+/** Shared read-only preparation for posting and admin review. A preview must
+ * compare the current economic inputs using the same source authority. */
+export async function prepareShipmentCostRevisions(tx: CostEvidenceTransaction, shipmentId: number, options: ShipmentRevisionOptions = {}): Promise<{ proposals: ShipmentRevisionProposal[]; issues: CostIssue[] }> {
   costInteger(shipmentId, "shipmentId", 1);
-  await lockInventoryCostGraph(tx);
   const lines = await tx.execute(sql`
     SELECT line.id,line.purchase_order_id,line.purchase_order_line_id,line.qty_shipped,snapshot.qty,
       line.total_volume_cbm,line.total_weight_kg,line.chargeable_weight_kg,
@@ -121,7 +125,7 @@ export async function recordShipmentCostRevisions(tx: CostEvidenceTransaction, s
       basisStale = true;
     }
   }
-  const revisions: RecordedCostRevision[] = [];
+  const proposals: ShipmentRevisionProposal[] = [];
   const issues: CostIssue[] = [];
   for (const line of lines.rows) {
     if (options.inboundShipmentLineId !== undefined && Number(line.id) !== options.inboundShipmentLineId) continue;
@@ -168,16 +172,24 @@ export async function recordShipmentCostRevisions(tx: CostEvidenceTransaction, s
       : sources.length === 0 ? { code: "LANDED_SOURCE_MISSING", message: "A zero allocation without charge evidence does not establish a confirmed zero freight cost." }
       : allocationStale ? { code: "LANDED_ALLOCATION_STALE", message: "The saved allocation no longer reconciles to the current charge, allocation basis, method or shipment quantity. Finalize allocation again before applying it." }
       : chargeAuthorities.find((authority) => authority.issue !== null)?.issue ?? null;
-    revisions.push(await recordCostRevision(tx, {
+    proposals.push({ input: {
       contractVersion: 1, component: "landed",
       scope: { kind: "shipment_line", purchaseOrderId: costInteger(line.purchase_order_id, "purchaseOrderId", 1), purchaseOrderLineId: costInteger(line.purchase_order_line_id, "purchaseOrderLineId", 1), inboundShipmentId: shipmentId, inboundShipmentLineId: costInteger(line.id, "shipmentLineId", 1) },
       sources: sources.length > 0 ? sources : [{ kind: "purchase_order_line", documentId: Number(line.purchase_order_id), lineId: Number(line.purchase_order_line_id), version: costFingerprint(line) }],
       currency: charges.rows.length > 0 && charges.rows.every((charge) => charge.currency === "USD") ? "USD" : null,
       totalMills: amount === null ? null : costInteger(amount, "totalMills", -Number.MAX_SAFE_INTEGER), basePieces: line.qty == null ? null : costInteger(line.qty, "snapshot.qty", 1),
       evidence: issue ? "review_required" : actual ? "confirmed" : "estimated", packagingTreatment: "not_applicable", issue, manualOverride: null,
-    }, actorId, now, { shipmentLineSnapshot: line, allocationBasis: currentBasis, charges: charges.rows, chargeAuthorities,
-      invoices: invoiceRows.rows, allocations: allocationRows.rows.filter((allocation) => Number(allocation.inbound_shipment_line_id) === Number(line.id)) }));
+    }, sourceEvidence: { shipmentLineSnapshot: line, allocationBasis: currentBasis, charges: charges.rows, chargeAuthorities,
+      invoices: invoiceRows.rows, allocations: allocationRows.rows.filter((allocation) => Number(allocation.inbound_shipment_line_id) === Number(line.id)) } });
   }
+  return { proposals, issues };
+}
+
+export async function recordShipmentCostRevisions(tx: CostEvidenceTransaction, shipmentId: number, actorId: string, now: Date, options: ShipmentRevisionOptions = {}): Promise<{ revisions: RecordedCostRevision[]; issues: CostIssue[] }> {
+  await lockInventoryCostGraph(tx);
+  const { proposals, issues } = await prepareShipmentCostRevisions(tx, shipmentId, options);
+  const revisions: RecordedCostRevision[] = [];
+  for (const proposal of proposals) revisions.push(await recordCostRevision(tx, proposal.input, actorId, now, proposal.sourceEvidence));
   return { revisions, issues };
 }
 
