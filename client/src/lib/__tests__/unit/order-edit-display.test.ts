@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   exactOrderEditUnitPrice,
   groupOrderEditDisplayLines,
+  orderEditTaxDisplay,
 } from "../../order-edit-display";
 import {
   orderEditOperationSchema,
@@ -9,6 +10,25 @@ import {
 } from "@shared/order-edits/order-edit.contract";
 
 type Line = OrderEditOperation["lines"][number];
+
+describe("verified tax rate presentation", () => {
+  it.each([6, 8.875, 0])("shows Shopify's %s percent rate without inferring a taxable basis", ratePercentage => {
+    expect(orderEditTaxDisplay({ taxesIncluded: false, taxLines: [{title: "State tax", ratePercentage, amountCents: 877}] })).toEqual({label: `Tax (${ratePercentage}%)`, details: []});
+  });
+  it("keeps included taxes and missing legacy rates explicit", () => {
+    expect(orderEditTaxDisplay({ taxesIncluded: false })).toEqual({label: "Tax", details: []});
+    expect(orderEditTaxDisplay({ taxesIncluded: true, taxLines: [] })).toEqual({label: "Tax (included)", details: []});
+    expect(orderEditTaxDisplay({ taxesIncluded: false, taxLines: [{title: "Tax", ratePercentage: null, amountCents: 877}] })).toEqual({label: "Tax", details: []});
+    expect(orderEditTaxDisplay({ taxesIncluded: true, taxLines: [{title: "Tax", ratePercentage: 6, amountCents: 877}] })).toEqual({label: "Tax (6%, included)", details: []});
+  });
+  it("names multiple tax rates rather than claiming they have the same taxable basis", () => {
+    expect(orderEditTaxDisplay({ taxesIncluded: false, taxLines: [
+      {title: "State", ratePercentage: 6, amountCents: 600},
+      {title: "County", ratePercentage: 1, amountCents: 48},
+      {title: "Other tax", ratePercentage: null, amountCents: 5},
+    ] })).toEqual({label: "Tax", details: ["State 6%", "County 1%", "Other tax"]});
+  });
+});
 
 describe("exact net unit price presentation", () => {
   it.each([

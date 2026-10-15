@@ -65,25 +65,28 @@ function evidence(
 describe("order coupon display evidence", () => {
   it("negotiates financial display metadata without mutating amounts, saved evidence, or old tabs", () => {
     const { pricing, financials } = evidence();
-    const display = presentOrderEditCodeBreakdown(financials, pricing)!;
+    const couponDisplay = presentOrderEditCodeBreakdown(financials, pricing)!;
+    const display = { ...couponDisplay, taxLines: [{ title: "State tax", ratePercentage: 6, amountCents: 46 }] };
     const flat = { phase: "preview", financials: display };
     const operation = {
       operationId: "operation",
       financials: { before: null, quoted: display, current: display },
     };
     const before = structuredClone({ flat, operation });
-    expect(orderEditResponsePresentation(flat, true)).toBe(flat);
-    expect(orderEditResponsePresentation(operation, true)).toBe(operation);
-    expect(orderEditResponsePresentation(flat, false)).toEqual({
+    expect(orderEditResponsePresentation(flat, "v2")).toBe(flat);
+    expect(orderEditResponsePresentation(operation, "v2")).toBe(operation);
+    expect(orderEditResponsePresentation(flat, "v1").financials).toEqual(couponDisplay);
+    expect(orderEditResponsePresentation(operation, "v1").financials).toEqual({ before: null, quoted: couponDisplay, current: couponDisplay });
+    expect(orderEditResponsePresentation(flat, undefined)).toEqual({
       ...flat,
       financials,
     });
-    expect(orderEditResponsePresentation(operation, false)).toEqual({
+    expect(orderEditResponsePresentation(operation, undefined)).toEqual({
       ...operation,
       financials: { before: null, quoted: financials, current: financials },
     });
     expect({ flat, operation }).toEqual(before);
-    expect(orderEditResponsePresentation({}, false)).toEqual({});
+    expect(orderEditResponsePresentation({}, undefined)).toEqual({});
   });
 
   it("exposes the 233-cent club subtotal and 23-cent coupon without changing native net money or persisted proof", () => {

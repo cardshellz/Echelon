@@ -54,6 +54,7 @@ export function buildOrderEditFinancials(input: {
   shippingCents: number;
   shippingDiscountLabels: string[];
   taxCents: number;
+  taxLines?: OrderEditFinancials["taxLines"];
   taxesIncluded: boolean;
   totalCents: number;
 }): OrderEditFinancials {
@@ -113,10 +114,12 @@ export function equivalentOrderEditFinancialEvidence(
 ): boolean {
   if (!expected) return true;
   if (!actual) return false;
-  if (expected.itemDiscounts)
-    return canonicalJson(actual) === canonicalJson(expected);
-  const { itemDiscounts: ignored, ...legacyActual } = actual;
-  return canonicalJson(legacyActual) === canonicalJson(expected);
+  // Tax rates are display metadata. Exact tax cents remain part of the proof,
+  // including when cancelling an edit saved before rates were requested.
+  const { taxLines: _actualRates, ...actualEvidence } = actual;
+  const { taxLines: _expectedRates, ...expectedEvidence } = expected;
+  if (!expected.itemDiscounts) delete actualEvidence.itemDiscounts;
+  return canonicalJson(actualEvidence) === canonicalJson(expectedEvidence);
 }
 
 /** Older persisted snapshots can still report settlement without fabricating discount allocations. */

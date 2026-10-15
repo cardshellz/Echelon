@@ -862,10 +862,6 @@ export function OrderDraft({
                 );
               })}
             </div>
-            <p className="text-xs text-muted-foreground">
-              Set quantity to 0 to remove an item. Discounts, shipping and tax
-              are recalculated for your changes.
-            </p>
             <OrderEditCodeEntry
               codes={discountCodes}
               applications={currentPreview?.appliedCodes ?? []}
