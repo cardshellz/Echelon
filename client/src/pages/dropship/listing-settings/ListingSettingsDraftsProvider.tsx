@@ -35,9 +35,10 @@ export interface ListingSettingsDraftsValue {
    * Opens an editor with the saved value it starts from. Returns false when
    * it did not open now: another editor is saving, or another editor holds
    * changes, in which case the vendor is asked first and the editor opens
-   * after "Discard and leave".
+   * after "Discard and leave", when `onOpened` is called (a press that
+   * should go on then, as a "Got it" does, runs from it).
    */
-  open: (editor: EditorId, place: string, base: DraftValue) => boolean;
+  open: (editor: EditorId, place: string, base: DraftValue, onOpened?: () => void) => boolean;
   /** The vendor's new value (ignored while the draft is locked). */
   edit: (value: DraftValue) => void;
   /**
@@ -186,13 +187,14 @@ export function ListingSettingsDraftsProvider({
     return () => clearTimeout(timer);
   }, [savedAtMs, apply]);
 
-  const open = useCallback((editor: EditorId, place: string, base: DraftValue) => {
+  const open = useCallback((editor: EditorId, place: string, base: DraftValue, onOpened?: () => void) => {
     const decision = decideOpen(stateRef.current.draft, editor);
     if (decision === "refuse") return false;
     if (decision === "ask") {
       guard(() => {
         apply({ type: "discard" });
         apply({ type: "open", editor, place, base });
+        onOpened?.();
       }, [guardIdRef.current]);
       return false;
     }

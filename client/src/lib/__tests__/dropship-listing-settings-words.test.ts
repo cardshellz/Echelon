@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { CATEGORY_LISTING_SETTING_FIELDS } from "@shared/dropship/listing-setting-values";
 import {
   LISTING_SETTINGS_FIELDS,
   LISTING_SETTINGS_FIX_CODES,
@@ -20,6 +21,16 @@ import {
   LISTING_SETTINGS_BULK_WORDS,
   LISTING_SETTINGS_EDIT_WORDS,
   LISTING_SETTINGS_PRICE_CHECK_WORDS,
+  LISTING_SETTINGS_UPDATED_WORDS,
+  UNNAMED_PRODUCT_WORDS,
+  CATEGORY_SETTING_WORDS,
+  changedCategorySettingsWords,
+  checkOwnTextLabel,
+  gotItForAllWords,
+  gotItLabel,
+  movedAgainWords,
+  movedFromToWords,
+  updatedProductsLineWords,
   NOT_SET_NEEDED_TO_LIST,
   builtFromStartWords,
   loseExactPriceWords,
@@ -667,6 +678,57 @@ describe("the price check for one or many products (PR 10d proposals, plan 7.4, 
     for (const words of [
       olderGroupRuleWords("Envelopes"), builtFromStartWords("catalog_retail", 1250), loseExactPriceWords(36), wouldLosePriceCountWords(3),
       wouldBeLeftWithoutPriceWords(3), releaseLimitWords(200, 236),
+    ]) expectPlain(words);
+  });
+});
+
+describe("Card Shellz updated products (PR 10g proposals, plan 10.3, 12.2)", () => {
+  it("uses the record's title and buttons and the plan's words, every one plain", () => {
+    expect(LISTING_SETTINGS_UPDATED_WORDS).toEqual({
+      title: "Card Shellz updated products",
+      gotIt: "Got it",
+      check: "Check",
+      review: "Review",
+      done: "Done.",
+      noChanges: "No category setting changes for it.",
+      noCategory: "no category",
+      removedCategory: "a category Card Shellz removed",
+      loading: "Checking what Card Shellz updated…",
+      readFailed: "Couldn't check what Card Shellz updated. Try again.",
+      empty: "Nothing here. Card Shellz hasn't updated any of your products.",
+      loadMore: "Load more",
+    });
+    for (const words of Object.values(LISTING_SETTINGS_UPDATED_WORDS)) expectPlain(words);
+    // One place for a product the answer gives no name for: the strip's lines and the sheet's rows say the same.
+    expect(UNNAMED_PRODUCT_WORDS).toBe("A product");
+    expectPlain(UNNAMED_PRODUCT_WORDS);
+    // Every category setting has a name in a sentence, in the stored shape's order.
+    expect(CATEGORY_LISTING_SETTING_FIELDS.map((field) => CATEGORY_SETTING_WORDS[field]))
+      .toEqual(["price", "eBay category", "store shelf", "shipping policy", "return policy", "payment policy", "text above", "text below"]);
+  });
+
+  it("builds the move, the changed settings in the order given, Got it for all N, the moved-again line and the strip line", () => {
+    expect(movedFromToWords("Sleeves", "Toploaders")).toBe("Moved from Sleeves to Toploaders.");
+    expect(movedFromToWords("no category", "a category Card Shellz removed")).toBe("Moved from no category to a category Card Shellz removed.");
+    expect(changedCategorySettingsWords(["price", "shippingPolicy"])).toBe("Category settings that differ: price, shipping policy.");
+    expect(changedCategorySettingsWords(["textBelow", "price"])).toBe("Category settings that differ: text below, price.");
+    expect(changedCategorySettingsWords([])).toBe("No category setting changes for it.");
+    expect(changedCategorySettingsWords([])).not.toMatch(/Nothing changes/);
+    expect(gotItForAllWords(4)).toBe("Got it for all 4");
+    expect(gotItForAllWords(1_240)).toBe("Got it for all 1,240");
+    expect(gotItLabel("Penny Sleeves")).toBe("Got it for Penny Sleeves");
+    expect(gotItLabel("  ")).toBe("Got it");
+    expect(checkOwnTextLabel("Penny Sleeves")).toBe("Check the text of Penny Sleeves");
+    expect(checkOwnTextLabel("")).toBe("Check");
+    expect(movedAgainWords(2)).toBe("2 products moved again. Check them below. It can take a minute to update.");
+    expect(movedAgainWords(1)).toBe("1 product moved again. Check it below. It can take a minute to update.");
+    expect(movedAgainWords(1_000)).toBe("1,000 products moved again. Check them below. It can take a minute to update.");
+    expect(updatedProductsLineWords(4)).toBe("Card Shellz moved 4 products to another category.");
+    expect(updatedProductsLineWords(1)).toBe("Card Shellz moved 1 product to another category.");
+    expect(updatedProductsLineWords(1_240)).toBe("Card Shellz moved 1,240 products to another category.");
+    for (const words of [
+      movedFromToWords("Sleeves", "Toploaders"), changedCategorySettingsWords([...CATEGORY_LISTING_SETTING_FIELDS]), gotItForAllWords(4), gotItLabel("Penny Sleeves"),
+      checkOwnTextLabel("Penny Sleeves"), movedAgainWords(2), updatedProductsLineWords(4),
     ]) expectPlain(words);
   });
 });

@@ -68,13 +68,24 @@ export const STORE_DEFAULTS_CARD_WORDS = Object.freeze({
 
 /**
  * Who holds the step's one draft: a Store defaults row, the ship-from repair
- * under Shipping, the product drawer of one product, or "Set for selected"
- * (`bulk`, many products at once; plan PR 10, D16).
+ * under Shipping, the product drawer of one product, "Set for selected"
+ * (`bulk`, many products at once; plan PR 10, D16), or "Card Shellz updated
+ * products" (`updatedProducts`, a "Got it" in flight; it holds no change,
+ * like `shipFrom`; plan PR 10, 10.2, D16).
  */
-export type EditorId = StoreDefaultField | "shipFrom" | `product:${number}` | "bulk";
+export type EditorId = StoreDefaultField | "shipFrom" | `product:${number}` | "bulk" | "updatedProducts";
 
 /** "Set for selected"'s editor id: one sheet for the ticked products (plan PR 10, 6.2, D16). */
 export const BULK_EDITOR_ID = "bulk" satisfies EditorId;
+
+/**
+ * "Card Shellz updated products"' editor id (plan PR 10, 10.2, D16): the
+ * draft holds the "Got it" being sent (its items, as base and value alike),
+ * never a change, so another editor opens over it as it does over the
+ * ship-from repair. Its key goes with it; that is safe, because a second
+ * "Got it" for the same shown category writes the same mark.
+ */
+export const UPDATED_PRODUCTS_EDITOR_ID = "updatedProducts" satisfies EditorId;
 
 /** The drawer's editor id for one product. Refuses an id that is not a positive whole number. */
 export function productEditorId(productId: number): EditorId {
@@ -166,6 +177,8 @@ export const LISTING_SETTINGS_KEY_PREFIXES = Object.freeze({
   bulkSettings: "ls-bulk",
   // W7's apply, the price check for one or many products; the check itself is unkeyed (plan PR 10, D5).
   priceCheck: "ls-price-check",
+  // W13, "Got it" for products Card Shellz moved; one key per set of products, reused on Check again (plan PR 10, D5).
+  categoryMoves: "ls-moves",
 } as const);
 
 /** The words every editor shares (R:535-545). */
@@ -474,9 +487,10 @@ function answersAttempt(draft: ListingSettingsDraft | null, key: string): draft 
  * settings (plan PR 10, 4.6), W6 many products' settings ("Set for
  * selected", plan PR 10, 6.4), W7 the price check for one or many products
  * and its apply (plan PR 10, 7.3; the check's failures take its words, the
- * apply is keyed).
+ * apply is keyed), W13 "Got it" for products Card Shellz moved ("Card Shellz
+ * updated products", plan PR 10, 10.4).
  */
-export type ListingSettingsWriter = "W1" | "W2" | "W3" | "W4" | "W5" | "W6" | "W7" | "W9" | "W10";
+export type ListingSettingsWriter = "W1" | "W2" | "W3" | "W4" | "W5" | "W6" | "W7" | "W9" | "W10" | "W13";
 
 export interface WriteFailure {
   phase: WriteFailurePhase;
@@ -712,8 +726,8 @@ function refusesAnOlderRule(error: DropshipApiError, pickedCategoryId: string | 
 // Failed saves of the PR 9 writers (plan PR 10, 3.3, 4.7, D7, D8)
 // ---------------------------------------------------------------------------
 
-type Pr9Writer = "W5" | "W6" | "W7";
-const PR9_WRITERS: ReadonlySet<ListingSettingsWriter> = new Set<Pr9Writer>(["W5", "W6", "W7"]);
+type Pr9Writer = "W5" | "W6" | "W7" | "W13";
+const PR9_WRITERS: ReadonlySet<ListingSettingsWriter> = new Set<Pr9Writer>(["W5", "W6", "W7", "W13"]);
 
 function isPr9Writer(writer: ListingSettingsWriter): writer is Pr9Writer {
   return PR9_WRITERS.has(writer);
@@ -770,6 +784,23 @@ const PR9_WRITER_CODES: Readonly<Record<Pr9Writer, Pr9WriterCodes>> = {
       "DROPSHIP_LISTING_SETTINGS_OLDER_RULES_PRESENT", "DROPSHIP_LISTING_SETTINGS_CATEGORY_NOT_FOUND",
       // W7 types no price, so the store's rules can't be "not configured" for it (plan P14).
       "DROPSHIP_PRICING_RULES_NOT_CONFIGURED",
+    ]),
+  },
+  W13: {
+    // A mark has no revision: its category is its state. A product that moved again, or left the catalog, is answered
+    // in the lists (or in neither), never refused (`S/application/dropship-listing-category-moves-service.ts`).
+    conflict: NONE,
+    cannotHappen: new Set([
+      // W13 writes no price and no setting (plan 10.4).
+      "DROPSHIP_LISTING_PRICE_WOULD_BE_LOST", "DROPSHIP_LISTING_PRICE_OUTSIDE_LIMIT", "DROPSHIP_PRICING_RULES_NOT_CONFIGURED",
+      "DROPSHIP_LISTING_PRICE_RELEASE_LIMIT", "DROPSHIP_LISTING_PRICES_MOVED", "DROPSHIP_LISTING_PRICE_VERSION_CONFLICT",
+      "DROPSHIP_LISTING_PRICE_NOT_AVAILABLE", "DROPSHIP_PRODUCT_LISTING_SETTINGS_VERSION_CONFLICT",
+      "DROPSHIP_CATEGORY_LISTING_SETTINGS_VERSION_CONFLICT", "DROPSHIP_LISTING_SETTINGS_OLDER_RULES_PRESENT",
+      "DROPSHIP_LISTING_SETTINGS_BULK_TOO_LARGE", "DROPSHIP_LISTING_SETTINGS_CATEGORY_NOT_FOUND",
+      "DROPSHIP_LISTING_SETTINGS_PRODUCT_NOT_FOUND", "DROPSHIP_PRICING_REVIEW_NOT_FOUND",
+      // W13 asks eBay nothing (`I/dropship-listing-setting-writes.factory.ts`): no eBay value can be refused, no sign-in asked.
+      "DROPSHIP_LISTING_SETTINGS_EBAY_SIGN_IN_REQUIRED", "DROPSHIP_EBAY_LISTING_SETUP_SELECTION_INVALID",
+      "DROPSHIP_EBAY_FULFILLMENT_POLICY_INCOMPATIBLE", "DROPSHIP_EBAY_CATEGORY_RULE_INVALID", "DROPSHIP_EBAY_STORE_CATEGORY_INVALID",
     ]),
   },
 };
@@ -890,6 +921,9 @@ function classifyPr9WriteFailure(writer: Pr9Writer, error: unknown, options: Cla
   if (status >= 500) return failure("uncertain", LISTING_SETTINGS_SAVE_WORDS.uncertain);
   if (status < 400) return failure("uncertain", LISTING_SETTINGS_SAVE_WORDS.uncertain);
 
+  // A 4xx this writer can't answer to a request this page builds (3.3 row 22): refused, never unconfirmed, and never
+  // worded as another writer's refusal (W13 asks eBay nothing, so "pick another policy" would send the vendor nowhere).
+  if (code !== null && codes.cannotHappen.has(code)) return failure("refused", words.invalid);
   if (code !== null && codes.conflict.has(code)) {
     // W6: "3 of the selected products changed in another window." (plan 6.5), as the server counts them.
     const count = writer === "W6" ? conflictCountOf(error) : null;
@@ -954,7 +988,6 @@ function classifyPr9WriteFailure(writer: Pr9Writer, error: unknown, options: Cla
     default:
       break;
   }
-  if (code !== null && codes.cannotHappen.has(code)) return failure("refused", words.invalid);
   return failure("refused", error.message);
 }
 

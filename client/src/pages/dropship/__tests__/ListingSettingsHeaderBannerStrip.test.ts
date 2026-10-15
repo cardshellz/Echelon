@@ -358,17 +358,23 @@ describe("AttentionStrip", () => {
   });
 
   it("leaves out the reconnect line while a banner shows, and keeps it as a link when none does", () => {
+    const onAction = vi.fn();
     const items = [item("reconnect_store"), item("own_text_needs_check", { count: 2 })];
-    const withBanner = strip({ summary: { data: summary(items) }, bannerShown: true });
+    const withBanner = strip({ summary: { data: summary(items) }, bannerShown: true, onAction });
+    // The own-text line keeps its record words; only its button changed (PR 10g, plan 10.6): [Check] opens
+    // "Card Shellz updated products", never the Products filter.
     expect(visibleText(withBanner)).toBe(
-      "Needs your attention ● Card Shellz updated 2 products that have your own text. Check that it still fits. Show products",
+      "Needs your attention ● Card Shellz updated 2 products that have your own text. Check that it still fits. Check",
     );
+    expect(withBanner).not.toContain("Show products");
+    button("Check").onClick?.();
+    expect(onAction).toHaveBeenCalledWith({ kind: "open_updated_products", label: "Check" });
 
     buttons.length = 0;
     const withoutBanner = strip({ summary: { data: summary(items) }, bannerShown: false });
     expect(visibleText(withoutBanner)).toContain("● Reconnect eBay for Marz Cards. Reconnect eBay");
     expect(openingTag(withoutBanner, "<a ")).toContain('href="/dropship-portal/onboarding"');
-    expect(buttons.map((entry) => entry.text)).toEqual(["Reconnect eBay", "Show products"]);
+    expect(buttons.map((entry) => entry.text)).toEqual(["Reconnect eBay", "Check"]);
   });
 
   it("says nothing needs the vendor when the list is empty", () => {

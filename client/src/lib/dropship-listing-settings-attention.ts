@@ -7,6 +7,7 @@ import {
 import { LISTING_SETTINGS_SEND_TIMING } from "./dropship-catalog-steps";
 import { listingAccessLink, type ListingAccessLink } from "./dropship-listing-access";
 import type { ListingSettingsReadState } from "./dropship-listing-settings-access";
+import { LISTING_SETTINGS_UPDATED_WORDS, UNNAMED_PRODUCT_WORDS } from "./dropship-listing-settings-words";
 
 /**
  * The words at the top of the Listing settings step (Listing settings PR 7,
@@ -94,6 +95,8 @@ export type AttentionAction =
    * absent for every other fix.
    */
   | { kind: "open_product"; label: string; productId: number; fix: ListingSettingsAttentionCode; row?: AttentionDrawerRow }
+  /** Opens the "Card Shellz updated products" sheet (`?sheet=updated`, plan PR 10, 10.2, D21). */
+  | { kind: "open_updated_products"; label: string }
   /** Leaves for another portal page. */
   | { kind: "link"; link: ListingAccessLink };
 
@@ -132,9 +135,6 @@ export interface AttentionOptions {
 const POLICY_WORDS: Readonly<Record<ListingSettingsPolicyKind, string>> = { shipping: "shipping", return: "return", payment: "payment" };
 /** R:508: [Choose] opens Shipping policy when the summary doesn't name the first missing one. */
 const FIRST_POLICY: ListingSettingsPolicyKind = "shipping";
-// Interim: a product line whose product has no name in the answer.
-const UNNAMED_PRODUCT = "A product";
-
 const SHOW_NEEDS_FIX = (label: string): AttentionAction => ({ kind: "show_products", label, show: "needs_fix" });
 
 function reconnectLink(): ListingAccessLink {
@@ -146,7 +146,7 @@ function reconnectLink(): ListingAccessLink {
 
 function productName(name: string | null): string {
   const trimmed = name?.trim();
-  return trimmed ? trimmed : UNNAMED_PRODUCT;
+  return trimmed ? trimmed : UNNAMED_PRODUCT_WORDS;
 }
 
 type AttentionItem = ListingSettingsSummary["attention"]["items"][number];
@@ -210,8 +210,9 @@ function attentionLine(
       const text = item.count === 1
         ? "Card Shellz updated 1 product that has your own text. Check that it still fits."
         : `Card Shellz updated ${item.count} products that have your own text. Check that it still fits.`;
-      // Interim button: the review sheet comes with PR 10.
-      return { key, code: item.code, text, action: SHOW_NEEDS_FIX("Show products") };
+      // The line keeps its record words; its button opens "Card Shellz updated products" (PR 10g, plan 10.2; the
+      // label is a PROPOSAL, LISTING_SETTINGS_UPDATED_WORDS.check).
+      return { key, code: item.code, text, action: { kind: "open_updated_products", label: LISTING_SETTINGS_UPDATED_WORDS.check } };
     }
     case "no_ebay_category":
       return { key, code: item.code, text: `${product} can't be listed: it has no eBay category.`, action: fix(item.code) };

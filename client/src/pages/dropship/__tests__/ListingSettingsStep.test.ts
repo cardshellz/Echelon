@@ -254,7 +254,9 @@ describe("Catalog page wiring of the Listing settings step", () => {
     expect(start).toBeGreaterThan(-1);
     const tabs = step.slice(start, step.indexOf("/>", start));
     expect(tabs).toContain("onTooLarge={onWriteBlocked}");
-    expect(tabs).toContain('readOnly={banner?.kind === "too_large" || blocked?.kind === "too_large"}');
+    // The same fact keeps "Card Shellz updated products" shut (PR 10g, plan 3.7, D18).
+    expect(step).toContain('const tooLarge = banner?.kind === "too_large" || blocked?.kind === "too_large";');
+    expect(tabs).toContain("readOnly={tooLarge}");
     // The refusal names the banner on its own, so nothing else is read again for it.
     expect(bannerFromWriteError(new DropshipApiError({ status: 422, code: "DROPSHIP_LISTING_SETTINGS_TOO_LARGE", message: "x" })))
       .toEqual({ kind: "too_large", diagnosticReference: null });

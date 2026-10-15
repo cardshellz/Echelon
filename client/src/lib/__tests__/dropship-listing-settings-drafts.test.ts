@@ -17,6 +17,7 @@ import {
   STORE_DEFAULT_COMPACT_LABELS,
   STORE_DEFAULT_FIELDS,
   STORE_DEFAULT_LABELS,
+  UPDATED_PRODUCTS_EDITOR_ID,
   bothChangedFields,
   changedFields,
   classifyWriteFailure,
@@ -93,7 +94,7 @@ describe("store default rows", () => {
     expect(LISTING_SETTINGS_KEY_PREFIXES).toEqual({
       policy: "ls-policy", shelf: "ls-shelf", shipFrom: "ls-ship-from", pricingApply: "ls-apply",
       category: "ls-category", description: "ls-text", sizePrice: "ls-price", productSettings: "ls-product",
-      bulkSettings: "ls-bulk", priceCheck: "ls-price-check",
+      bulkSettings: "ls-bulk", priceCheck: "ls-price-check", categoryMoves: "ls-moves",
     });
   });
 
@@ -110,6 +111,43 @@ describe("store default rows", () => {
     expect(decideOpen(bulk, "shipping")).toBe("ask");
     expect(decideOpen(bulk, BULK_EDITOR_ID)).toBe("open");
     expect(describeListingSettingsBar({ draft: bulk, olderDraftCount: 0, saving: false })).toBe("Not saved · 1 change in Set for selected");
+  });
+
+  it("names Card Shellz updated products' editor \"updatedProducts\", which holds no change, like the ship-from repair (PR 10g, D16)", () => {
+    expect(UPDATED_PRODUCTS_EDITOR_ID).toBe("updatedProducts");
+    const items = Object.freeze([{ productId: 11, shownCategoryId: 41 }]);
+    const gotIt = Object.freeze({ signature: '{"v":1,"writer":"W13","storeConnectionId":22,"items":[{"productId":11,"shownCategoryId":41}]}', key: "ls-moves:first" });
+    const opened = run([
+      { type: "open", editor: UPDATED_PRODUCTS_EDITOR_ID, place: "Card Shellz updated products", base: { items } },
+      { type: "startSave", attempt: gotIt },
+    ]);
+    expect(opened).toMatchObject({ editor: "updatedProducts", phase: "saving", changes: 0, attempt: gotIt });
+    expect(isDraftDirty(opened)).toBe(false);
+    // While it is sent, nothing else opens.
+    expect(decideOpen(opened, "return")).toBe("refuse");
+    expect(decideOpen(opened, productEditorId(11))).toBe("refuse");
+    const uncertain = run([{ type: "failure", key: gotIt.key, failure: failure("uncertain") }], opened);
+    expect(uncertain).toMatchObject({ editor: "updatedProducts", phase: "uncertain", changes: 0, attempt: gotIt });
+    // Check again resends the same request with the same key; another set of products can't start meanwhile.
+    expect(nextSaveAttempt(uncertain, gotIt.signature, () => "ls-moves:new")).toBe(gotIt);
+    expect(nextSaveAttempt(uncertain, "another", () => "ls-moves:new")).toBeNull();
+    // It holds no change: another editor opens over it without a word, and its key goes (a second Got it for the
+    // same shown category writes the same mark).
+    expect(decideOpen(uncertain, UPDATED_PRODUCTS_EDITOR_ID)).toBe("open");
+    expect(decideOpen(uncertain, "return")).toBe("open");
+    expect(decideOpen(uncertain, productEditorId(5))).toBe("open");
+    expect(decideOpen(uncertain, BULK_EDITOR_ID)).toBe("open");
+    expect(run([{ type: "open", editor: productEditorId(5), place: "Team Bags", base: { a: 1 } }], uncertain))
+      .toMatchObject({ editor: "product:5", phase: "editing", attempt: null });
+    // A saved Got it reopens fresh for the next one, and the bar never names it as a change.
+    const saved = run([{ type: "saved", key: gotIt.key, nowMs: T0 }], opened);
+    expect(saved).toMatchObject({ phase: "saved", changes: 0, attempt: null });
+    expect(describeListingSettingsBar({ draft: saved, olderDraftCount: 0, saving: false })).toBe("All saved");
+    expect(run([{ type: "open", editor: UPDATED_PRODUCTS_EDITOR_ID, place: "Card Shellz updated products", base: { items: [] } }], saved))
+      .toMatchObject({ editor: "updatedProducts", phase: "editing", base: { items: [] }, attempt: null });
+    // The other way round: a held change elsewhere is asked about before a Got it starts.
+    const product = run([{ type: "open", editor: productEditorId(11), place: "Penny Sleeves", base: { a: 1 } }, { type: "edit", value: { a: 2 } }]);
+    expect(decideOpen(product, UPDATED_PRODUCTS_EDITOR_ID)).toBe("ask");
   });
 });
 
@@ -378,7 +416,7 @@ describe("reduceListingSettingsDraft", () => {
 });
 
 /** The PR 7 writers; W5, W6 and W7 (PR 10) have their own tables below. */
-type Pr7Writer = Exclude<ListingSettingsWriter, "W5" | "W6" | "W7">;
+type Pr7Writer = Exclude<ListingSettingsWriter, "W5" | "W6" | "W7" | "W13">;
 
 describe("classifyWriteFailure", () => {
   const writers: readonly Pr7Writer[] = ["W1", "W2", "W3", "W4", "W9", "W10"];
@@ -806,5 +844,40 @@ describe("describeLeavePrompt (from the drafts module)", () => {
   it("counts one and two changes", () => {
     expect(describeLeavePrompt([{ id: "listing-settings:22", label: "Price", changes: 1, discard }])).toBe("You have 1 change that isn't saved.");
     expect(describeLeavePrompt([{ id: "listing-settings:22", label: "Price", changes: 2, discard }])).toBe("You have 2 changes that aren't saved.");
+  });
+});
+
+describe("classifyWriteFailure for W13 (PR 10g, plan 3.3, 10.5)", () => {
+  const W13 = (status: number, code: string | null, context?: Record<string, unknown>) =>
+    classifyWriteFailure("W13", apiError(status, code, "Server words.", context));
+
+  it("has no conflict: a mark has no revision, so every other writer's version conflict is a plain refusal (row 22), never a Load latest", () => {
+    for (const code of ["DROPSHIP_PRODUCT_LISTING_SETTINGS_VERSION_CONFLICT", "DROPSHIP_CATEGORY_LISTING_SETTINGS_VERSION_CONFLICT", "DROPSHIP_LISTING_PRICES_MOVED"]) {
+      expect(W13(409, code, { conflictCount: 3 })).toEqual({ phase: "refused", message: LISTING_SETTINGS_EDIT_WORDS.invalid, code, status: 409, fields: [] });
+    }
+    // A product Card Shellz removed is in neither of the answer's lists, never a 404 (W6's conflict is not W13's).
+    expect(W13(404, "DROPSHIP_LISTING_SETTINGS_PRODUCT_NOT_FOUND", { productId: 11 })).toMatchObject({ phase: "refused", message: LISTING_SETTINGS_EDIT_WORDS.invalid });
+  });
+
+  it("never gives another writer's advice: eBay value refusals and a sign-in can't happen, so they read as a request the server couldn't take", () => {
+    expect(W13(422, "DROPSHIP_EBAY_LISTING_SETUP_SELECTION_INVALID", { invalidFields: ["shippingPolicy"] }))
+      .toEqual({ phase: "refused", message: LISTING_SETTINGS_EDIT_WORDS.invalid, code: "DROPSHIP_EBAY_LISTING_SETUP_SELECTION_INVALID", status: 422, fields: ["shippingPolicy"] });
+    expect(W13(422, "DROPSHIP_EBAY_CATEGORY_RULE_INVALID", { reason: "not_leaf" }).message).toBe(LISTING_SETTINGS_EDIT_WORDS.invalid);
+    expect(W13(422, "DROPSHIP_EBAY_STORE_CATEGORY_INVALID", { reason: "too_long" }).message).toBe(LISTING_SETTINGS_EDIT_WORDS.invalid);
+    expect(W13(422, "DROPSHIP_EBAY_FULFILLMENT_POLICY_INCOMPATIBLE").message).toBe(LISTING_SETTINGS_EDIT_WORDS.invalid);
+    // Not blocked, so no sign-in banner is raised for a write that asked eBay nothing.
+    expect(W13(403, "DROPSHIP_LISTING_SETTINGS_EBAY_SIGN_IN_REQUIRED", { fields: ["ebayCategory"] })).toMatchObject({ phase: "refused", message: LISTING_SETTINGS_EDIT_WORDS.invalid });
+    expect(W13(422, "DROPSHIP_LISTING_SETTINGS_BULK_TOO_LARGE", { textBytes: 1 }).message).toBe(LISTING_SETTINGS_EDIT_WORDS.invalid);
+    expect(W13(422, "DROPSHIP_LISTING_PRICE_RELEASE_LIMIT", { releaseCount: 236, maxReleases: 200 }).message).toBe(LISTING_SETTINGS_EDIT_WORDS.invalid);
+  });
+
+  it("keeps the shared rows: the gate blocks, busy by reason, the fatal codes, a reused key, and the server's words otherwise", () => {
+    expect(W13(403, "DROPSHIP_LISTING_STORE_BLOCKED", { reason: "paused" })).toMatchObject({ phase: "blocked", message: LISTING_SETTINGS_SAVE_WORDS.blocked });
+    expect(W13(503, "DROPSHIP_LISTING_SETTINGS_BUSY", { reason: "heavy_write_in_progress" })).toMatchObject({ phase: "unreachable", message: LISTING_SETTINGS_EDIT_WORDS.busyHeavy });
+    expect(W13(503, "DROPSHIP_LISTING_SETTINGS_BUSY")).toMatchObject({ phase: "uncertain" });
+    expect(W13(500, "DROPSHIP_LISTING_SETTINGS_REPLAY_INCOMPLETE")).toMatchObject({ phase: "refused", message: LISTING_SETTINGS_EDIT_WORDS.fatal });
+    expect(W13(409, "DROPSHIP_IDEMPOTENCY_CONFLICT")).toMatchObject({ phase: "refused", message: LISTING_SETTINGS_SAVE_WORDS.keyReused });
+    expect(W13(422, "DROPSHIP_LISTING_SETTINGS_TOO_LARGE")).toMatchObject({ phase: "refused", message: "Server words." });
+    expect(classifyWriteFailure("W13", new TypeError("Failed to fetch"))).toEqual({ phase: "uncertain", message: LISTING_SETTINGS_SAVE_WORDS.uncertain, code: null, status: null, fields: [] });
   });
 });
