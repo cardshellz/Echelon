@@ -7,6 +7,10 @@ import {
 } from "../application/order-edit-evidence";
 export { isUnpaidRecoveryRestored } from "../application/order-edit-evidence";
 import { createHash } from "node:crypto";
+import {
+  orderEditDiagnosticError,
+  type OrderEditDiagnosticEvent,
+} from "../application/order-edit-diagnostics";
 import { canonicalJson } from "@shared/utils/canonical-json";
 import { z } from "zod";
 import Decimal from "decimal.js";
@@ -306,7 +310,7 @@ export class ShopifyOrderEditProvider
       fetch?: typeof fetch;
       timeoutMs?: number;
       shippingCalculator?: OrderEditShippingCalculator;
-      report?: (event: { operationId: string; code: string }) => void;
+      report?: (event: OrderEditDiagnosticEvent) => void;
       memberPresentation?: MemberPlanPresentationReader;
       codeHistory?: OrderEditCodeHistory;
     },
@@ -662,8 +666,8 @@ export class ShopifyOrderEditProvider
 
   private async codes(connectionId: number): Promise<ShopifyOrderEditCodes> {
     const credentials = await this.credentials(connectionId);
-    return new ShopifyOrderEditCodes(
-      (query, variables) => this.request(credentials, query, variables),
+    return new ShopifyOrderEditCodes((query, variables) =>
+      this.request(credentials, query, variables),
     );
   }
   private async codePricing(
@@ -751,83 +755,124 @@ export class ShopifyOrderEditProvider
     plan: OrderEditPlan,
     operationId: string,
   ): Promise<OrderEditQuote> {
-    parse(orderEditSnapshotSchema, snapshot);
-    validateOperation(operationId);
-    validatePlan(plan);
-    this.bind(connectionId, snapshot);
-    const fresh = await this.readOrder(connectionId, snapshot.orderId);
-    if (!unchangedOrderEditSnapshot(fresh, snapshot))
-      fail(
-        "ORDER_CHANGED",
-        "The order changed. Refresh it before preparing an edit.",
-      );
-    assertEditable(fresh);
-    if (
-      !fresh.fullyPaid ||
-      fresh.outstandingCents !== 0 ||
-      fresh.netPaidCents !== fresh.totalCents ||
-      fresh.capturableCents !== 0 ||
-      unresolved(fresh.transactions)
-    ) {
-      fail(
-        "UNSUPPORTED_PAYMENT_STATE",
-        "The pilot requires a fully paid order with no payment in progress.",
-      );
-    }
-    if (fresh.refunds.length > 0)
-      fail(
-        "EXISTING_REFUND_UNSUPPORTED",
-        "Orders with previous refunds require staff review before editing.",
-      );
-    // These existing read-only checks are independent. Wait for both even on
-    // failure; no edit session is opened until both have been validated.
-    const [promotionCheck, variantCheck] = await Promise.allSettled([
-      fresh.discountsPresent
-        ? this.verifyExistingPromotions(connectionId, fresh)
-        : Promise.resolve(null),
-      this.variantPricing(connectionId, fresh, plan),
-    ]);
-    if (promotionCheck.status === "rejected") {
-      if (variantCheck.status === "rejected")
-        this.options.report?.({
-          operationId,
-          code:
-            variantCheck.reason instanceof OrderEditProviderError
-              ? variantCheck.reason.code
-              : "VARIANT_PRICING_READ_FAILED",
-        });
-      throw promotionCheck.reason;
-    }
-    if (variantCheck.status === "rejected") throw variantCheck.reason;
-    const pricingProvenance = promotionCheck.value;
-    const quote =
-      plan.discountCodes?.length || fresh.codePricing
-        ? await this.stageCodes(connectionId, fresh, plan, operationId)
-        : await this.stage(
-            connectionId,
-            fresh,
-            plan,
+    let phase = "validate_request";
+    const setPhase = (value: string) => {
+      phase = value;
+    };
+    try {
+      parse(orderEditSnapshotSchema, snapshot);
+      validateOperation(operationId);
+      validatePlan(plan);
+      this.bind(connectionId, snapshot);
+      phase = "read_current_order";
+      const fresh = await this.readOrder(connectionId, snapshot.orderId);
+      if (!unchangedOrderEditSnapshot(fresh, snapshot))
+        fail(
+          "ORDER_CHANGED",
+          "The order changed. Refresh it before preparing an edit.",
+        );
+      phase = "verify_eligibility";
+      assertEditable(fresh);
+      if (
+        !fresh.fullyPaid ||
+        fresh.outstandingCents !== 0 ||
+        fresh.netPaidCents !== fresh.totalCents ||
+        fresh.capturableCents !== 0 ||
+        unresolved(fresh.transactions)
+      ) {
+        fail(
+          "UNSUPPORTED_PAYMENT_STATE",
+          "The pilot requires a fully paid order with no payment in progress.",
+        );
+      }
+      if (fresh.refunds.length > 0)
+        fail(
+          "EXISTING_REFUND_UNSUPPORTED",
+          "Orders with previous refunds require staff review before editing.",
+        );
+      // These existing read-only checks are independent. Wait for both even on
+      // failure; no edit session is opened until both have been validated.
+      phase = "verify_pricing";
+      const [promotionCheck, variantCheck] = await Promise.allSettled([
+        fresh.discountsPresent
+          ? this.verifyExistingPromotions(connectionId, fresh)
+          : Promise.resolve(null),
+        this.variantPricing(connectionId, fresh, plan),
+      ]);
+      if (promotionCheck.status === "rejected") {
+        phase = "verify_promotions";
+        if (variantCheck.status === "rejected")
+          this.options.report?.({
             operationId,
-            variantCheck.value,
-          );
-    assertRecoveryLineage(quote);
-    // Establish financial eligibility while the order is still unchanged. A
-    // successful edit must not discover only afterwards that its refund is unsupported.
-    const refundPreflight =
-      quote.deltaCents < 0
-        ? {
-            amountCents: -quote.deltaCents,
-            ...(await this.refundMethod(
+            code:
+              variantCheck.reason instanceof OrderEditProviderError
+                ? variantCheck.reason.code
+                : "VARIANT_PRICING_READ_FAILED",
+            phase: "variant_pricing",
+            connectionId,
+            occurredAt: this.options.clock().toISOString(),
+            error: orderEditDiagnosticError(variantCheck.reason),
+          });
+        throw promotionCheck.reason;
+      }
+      if (variantCheck.status === "rejected") {
+        phase = "variant_pricing";
+        throw variantCheck.reason;
+      }
+      const pricingProvenance = promotionCheck.value;
+      const quote =
+        plan.discountCodes?.length || fresh.codePricing
+          ? await this.stageCodes(
               connectionId,
               fresh,
-              -quote.deltaCents,
-            )),
-          }
-        : null;
-    return parse(orderEditQuoteSchema, {
-      ...quote,
-      evidence: { ...quote.evidence, pricingProvenance, refundPreflight },
-    });
+              plan,
+              operationId,
+              setPhase,
+            )
+          : await this.stage(
+              connectionId,
+              fresh,
+              plan,
+              operationId,
+              variantCheck.value,
+              setPhase,
+            );
+      phase = "verify_recovery_lineage";
+      assertRecoveryLineage(quote);
+      // Establish financial eligibility while the order is still unchanged. A
+      // successful edit must not discover only afterwards that its refund is unsupported.
+      phase = "refund_preflight";
+      const refundPreflight =
+        quote.deltaCents < 0
+          ? {
+              amountCents: -quote.deltaCents,
+              ...(await this.refundMethod(
+                connectionId,
+                fresh,
+                -quote.deltaCents,
+              )),
+            }
+          : null;
+      phase = "validate_quote_response";
+      return parse(orderEditQuoteSchema, {
+        ...quote,
+        evidence: { ...quote.evidence, pricingProvenance, refundPreflight },
+      });
+    } catch (error) {
+      this.options.report?.({
+        operationId,
+        connectionId,
+        phase,
+        occurredAt: this.options.clock().toISOString(),
+        code:
+          error instanceof OrderEditProviderError ||
+          error instanceof OrderEditError
+            ? error.code
+            : "QUOTE_PREPARATION_FAILED",
+        error: orderEditDiagnosticError(error),
+      });
+      throw error;
+    }
   }
 
   /** Native manual discounts replace the line's previous discount. Reproduce the full
@@ -838,7 +883,9 @@ export class ShopifyOrderEditProvider
     baseline: OrderEditSnapshot,
     plan: OrderEditPlan,
     operationId: string,
+    setPhase: (phase: string) => void,
   ): Promise<OrderEditQuote> {
+    setPhase("coupon_pricing");
     if (
       (baseline.discountRules ?? []).some(
         (rule) =>
@@ -864,12 +911,14 @@ export class ShopifyOrderEditProvider
       plan,
     );
     const pricing = (await this.codePricing(baseline, plan, basis.lines))!;
+    setPhase("shopify_begin");
     const begin = await this.mutate(
       credentials,
       gql.BEGIN_MUTATION,
       { id: baseline.orderId },
       "orderEditBegin",
     );
+    setPhase("coupon_item_changes");
     let calculated = readCalculated(begin.calculatedOrder, baseline.orderId);
     const initial = verifyCalculatedFinancials(calculated, baseline);
     if (
@@ -1077,10 +1126,12 @@ export class ShopifyOrderEditProvider
         "ORDER_EDIT_CODE_NATIVE_MISMATCH",
         "Shopify's item prices do not match the approved code saving.",
       );
+    setPhase("shipping_calculation");
     const shippingRepricing = await this.shippingCalculator.calculate(
       baseline,
       shippingItems(calculated, nativeItems),
     );
+    setPhase("shipping_and_coupon_verification");
     await (
       await this.codes(connectionId)
     ).assertCombinations(
@@ -1167,7 +1218,9 @@ export class ShopifyOrderEditProvider
     plan: OrderEditPlan,
     operationId: string,
     pricing: VariantPricing,
+    setPhase: (phase: string) => void,
   ): Promise<OrderEditQuote> {
+    setPhase("verify_line_identity");
     const credentials = await this.credentials(connectionId);
     if (credentials.channelId !== baseline.channelId)
       fail("CONNECTION_MISMATCH", "The connection's channel changed.");
@@ -1195,12 +1248,14 @@ export class ShopifyOrderEditProvider
         );
     }
     const { variants, prices } = pricing;
+    setPhase("shopify_begin");
     const begin = await this.mutate(
       credentials,
       gql.BEGIN_MUTATION,
       { id: baseline.orderId },
       "orderEditBegin",
     );
+    setPhase("shopify_item_changes");
     let calculated = readCalculated(begin.calculatedOrder, baseline.orderId);
     const originalShippingLines = structuredClone(calculated.shippingLines);
     const nativeDiscounts = verifyNativeOrderDiscounts(calculated, baseline);
@@ -1445,10 +1500,12 @@ export class ShopifyOrderEditProvider
         "SHIPPING_FINANCIALS_REQUIRED",
         "A complete item breakdown is required before shipping can be recalculated.",
       );
+    setPhase("shipping_calculation");
     const shippingRepricing = await this.shippingCalculator.calculate(
       baseline,
       shippingItems(calculated, itemFinancials),
     );
+    setPhase("shipping_and_tax_verification");
     let shippingFinancials = {
       grossCents: baseline.financials!.shippingGrossCents,
       netCents: baseline.shippingCents,
@@ -1803,7 +1860,8 @@ export class ShopifyOrderEditProvider
         // as a points reward in order to make an old enum shape match.
         const comparable = rules.map((rule) => {
           const previous = expected.find((entry) => entry.code === rule.code);
-          if (!previous || previous.redemption === "shopify_coupon") return rule;
+          if (!previous || previous.redemption === "shopify_coupon")
+            return rule;
           const {
             usageLimit: _limit,
             appliesOncePerCustomer: _once,
@@ -2647,11 +2705,13 @@ export class ShopifyOrderEditProvider
     } catch (error) {
       if (error instanceof OrderEditProviderError) throw error;
       // Never retry a mutation here: the remote operation may have completed after a timeout or body-read failure.
-      fail(
+      const unavailable = new OrderEditProviderError(
         "SHOPIFY_UNAVAILABLE",
         "Shopify did not return a usable response.",
         mutation ? "unknown" : "rejected",
       );
+      unavailable.cause = error;
+      throw unavailable;
     } finally {
       clearTimeout(timer);
     }
@@ -2735,13 +2795,16 @@ function fail(
 }
 function parse<T>(schema: z.ZodType<T>, value: unknown, ambiguous = false): T {
   const result = schema.safeParse(value);
-  if (!result.success)
-    fail(
+  if (!result.success) {
+    const invalid = new OrderEditProviderError(
       "SHOPIFY_RESPONSE_INVALID",
       "Shopify returned incomplete or unsupported data.",
       ambiguous ? "unknown" : "rejected",
       { paths: result.error.issues.map((issue) => issue.path.join(".")) },
     );
+    invalid.cause = result.error;
+    throw invalid;
+  }
   return result.data;
 }
 function hash(value: unknown): string {
@@ -3116,8 +3179,16 @@ function sameFinancialEvidence(
   if (!expected) return false;
   // Calculated and original line IDs differ; compare allocations separately through their proven lineage.
   // Tax metadata does not change the legacy monetary recovery proof.
-  const { lines: actualLines, taxLines: _actualRates, ...actualTotals } = actual;
-  const { lines: expectedLines, taxLines: _expectedRates, ...expectedTotals } = expected;
+  const {
+    lines: actualLines,
+    taxLines: _actualRates,
+    ...actualTotals
+  } = actual;
+  const {
+    lines: expectedLines,
+    taxLines: _expectedRates,
+    ...expectedTotals
+  } = expected;
   if (!expected.itemDiscounts) delete actualTotals.itemDiscounts;
   return canonicalJson(actualTotals) === canonicalJson(expectedTotals);
 }
