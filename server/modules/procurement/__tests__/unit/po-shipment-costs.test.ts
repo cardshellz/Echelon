@@ -249,7 +249,7 @@ describe("actionable cost review wording", () => {
       ]),
     ).toMatchObject({
       explanation: expect.stringContaining("earlier cost update"),
-      nextStep: expect.stringContaining("Retry the inventory cost update"),
+      nextStep: expect.stringContaining("Select Update shipment costs"),
     });
   });
   it("does not dismiss an independent history error as rounding", () => {
@@ -261,12 +261,12 @@ describe("actionable cost review wording", () => {
     ).toContain("recorded receipt");
   });
   it.each([
-    ["LANDED_ALLOCATION_STALE", "Allocation tab"],
+    ["LANDED_ALLOCATION_STALE", "Select Update shipment costs"],
     ["LANDED_INVOICE_SOURCE_MISMATCH", "supplier invoice"],
     ["COST_MANUAL_OVERRIDE_REVIEW", "manual cost correction"],
     ["COST_GRAPH_INCOMPLETE", "recorded receipt"],
-    ["COST_UPDATE_NOT_RECORDED", "Confirm the shipment charges"],
-    ["COST_UNKNOWN_REASON", "recorded reason"],
+    ["COST_UPDATE_NOT_RECORDED", "Check that the shipment charges"],
+    ["COST_UNKNOWN_REASON", "reason shown above"],
   ])("gives a next step for %s", (code, wording) => {
     expect(shipmentCostReviewGuidance([issue(code)]).nextStep).toContain(
       wording,

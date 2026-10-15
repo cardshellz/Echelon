@@ -231,13 +231,13 @@ test("identifies all five affected SKUs, recorded reasons and the next step", as
   ).toBeVisible();
   await expect(
     group.getByRole("button", {
-      name: "Retry inventory cost update",
+      name: "Update shipment costs",
       exact: true,
     }),
   ).toBeVisible();
   await expect(
-    group.getByRole("link", { name: "Open shipment allocation", exact: true }),
-  ).toHaveAttribute("href", "/shipments/42?tab=allocation");
+    group.getByRole("link", { name: "View shipment cost details", exact: true }),
+  ).toHaveAttribute("href", "/shipments/42?tab=allocation&purchase=purchase%3A17%3Alines&via=purchase%3A17%3Alines");
   await group
     .getByText("Cost review details · line #101", { exact: true })
     .click();
@@ -265,6 +265,19 @@ test("identifies all five affected SKUs, recorded reasons and the next step", as
   expect(failures).toEqual([]);
 });
 
+test("cost review links retain the PO and return to its selected tab", async ({ page }) => {
+  const { failures } = await installCostFixtures(page);
+  await page.goto("/purchase-orders/17?tab=lines");
+  await page.getByRole("button", { name: "Review 5 lines", exact: true }).click();
+  await page.getByRole("group", { name: "Cost review for shipment TEST-SEA-42" })
+    .getByRole("link", { name: "View shipment cost details", exact: true }).click();
+  await expect(page.getByRole("tab", { name: "Cost review", exact: true })).toHaveAttribute("data-state", "active");
+  await page.getByRole("link", { name: "Back to purchase #17", exact: true }).first().click();
+  await expect(page).toHaveURL(/\/purchase-orders\/17\?tab=lines/);
+  await expect(page.getByRole("tab", { name: "Lines", exact: false })).toHaveAttribute("data-state", "active");
+  expect(failures).toEqual([]);
+});
+
 test("allows viewers to inspect reasons but reserves retry for purchasing approvers", async ({
   page,
 }) => {
@@ -276,14 +289,14 @@ test("allows viewers to inspect reasons but reserves retry for purchasing approv
   await expect(page.getByText("TEST-SKU-1", { exact: true })).toBeVisible();
   await expect(
     page.getByRole("button", {
-      name: "Retry inventory cost update",
+      name: "Update shipment costs",
       exact: true,
     }),
   ).toHaveCount(0);
   await expect(
     page
       .getByText(
-        "A user with purchasing approval permission can retry this cost update.",
+        "A purchasing approver can update these costs. You can review the saved details below.",
       )
       .first(),
   ).toBeVisible();
@@ -296,7 +309,7 @@ test("retries through the existing owner and replaces old warnings from persiste
   const { failures, state } = await installCostFixtures(page);
   let attempts = 0;
   await page.route(
-    "**/api/inbound-shipments/42/push-costs-to-lots",
+    "**/api/inbound-shipments/42/update-costs",
     (route) => {
       attempts++;
       state.value.lines = state.value.lines.map((line) =>
@@ -316,7 +329,7 @@ test("retries through the existing owner and replaces old warnings from persiste
         inventoryCosting: "pending",
       };
       return route.fulfill({
-        json: { status: "applied", updated: 5, total: 6, skipped: [] },
+        json: { shipmentId: 42, finalizedLines: 6, adjustments: 0, status: "applied", updated: 5, total: 6, skipped: [] },
       });
     },
   );
@@ -327,15 +340,10 @@ test("retries through the existing owner and replaces old warnings from persiste
   expect(attempts).toBe(0);
   await page
     .getByRole("group", { name: "Cost review for shipment TEST-SEA-42" })
-    .getByRole("button", { name: "Retry inventory cost update", exact: true })
+    .getByRole("button", { name: "Update shipment costs", exact: true })
     .click();
   await expect(page.getByText("TEST-SKU-1", { exact: true })).toHaveCount(0);
-  await expect(
-    page.getByText(
-      "Inventory cost update completed. Check the latest recorded line results below.",
-      { exact: true },
-    ),
-  ).toBeVisible();
+  await expect(page.getByRole("group", { name: "Cost review for shipment TEST-SEA-42" })).toHaveCount(0);
   await expect(page.getByText("TEST-AIR-107", { exact: true })).toBeVisible();
   expect(attempts).toBe(1);
   expect(failures).toEqual([]);
@@ -350,7 +358,7 @@ test("shows the new remaining reason when a retry only fixes some lines", async 
     message: "The recorded receipt quantity still needs review.",
   };
   await page.route(
-    "**/api/inbound-shipments/42/push-costs-to-lots",
+    "**/api/inbound-shipments/42/update-costs",
     (route) => {
       state.value.lines = state.value.lines.map((line) =>
         line.lineId === 101
@@ -366,6 +374,7 @@ test("shows the new remaining reason when a retry only fixes some lines", async 
       };
       return route.fulfill({
         json: {
+          shipmentId: 42, finalizedLines: 6, adjustments: 0,
           status: "review_required",
           updated: 4,
           total: 5,
@@ -386,7 +395,7 @@ test("shows the new remaining reason when a retry only fixes some lines", async 
     .click();
   await page
     .getByRole("group", { name: "Cost review for shipment TEST-SEA-42" })
-    .getByRole("button", { name: "Retry inventory cost update", exact: true })
+    .getByRole("button", { name: "Update shipment costs", exact: true })
     .click();
   await expect(page.getByText(newIssue.message, { exact: true })).toBeVisible();
   await expect(
@@ -428,7 +437,7 @@ test("retains the recorded failures when a retry is denied", async ({
   page,
 }) => {
   await installCostFixtures(page);
-  await page.route("**/api/inbound-shipments/42/push-costs-to-lots", (route) =>
+  await page.route("**/api/inbound-shipments/42/update-costs", (route) =>
     route.fulfill({
       status: 403,
       json: { error: "Purchasing approval permission is required." },
@@ -440,12 +449,12 @@ test("retains the recorded failures when a retry is denied", async ({
     .click();
   await page
     .getByRole("group", { name: "Cost review for shipment TEST-SEA-42" })
-    .getByRole("button", { name: "Retry inventory cost update", exact: true })
+    .getByRole("button", { name: "Update shipment costs", exact: true })
     .click();
   await expect(
     page
       .getByRole("alert")
-      .filter({ hasText: "Purchasing approval permission is required." }),
+      .filter({ hasText: "A user with purchasing approval permission must update these costs." }),
   ).toBeVisible();
   await expect(page.getByText("TEST-SKU-1", { exact: true })).toBeVisible();
 });
@@ -456,7 +465,7 @@ test("re-reads a committed result when the retry response is lost", async ({
   const { failures, state } = await installCostFixtures(page);
   let attempts = 0;
   await page.route(
-    "**/api/inbound-shipments/42/push-costs-to-lots",
+    "**/api/inbound-shipments/42/update-costs",
     (route) => {
       attempts++;
       state.value.lines = state.value.lines.map((line) =>
@@ -479,7 +488,7 @@ test("re-reads a committed result when the retry response is lost", async ({
     .click();
   await page
     .getByRole("group", { name: "Cost review for shipment TEST-SEA-42" })
-    .getByRole("button", { name: "Retry inventory cost update", exact: true })
+    .getByRole("button", { name: "Update shipment costs", exact: true })
     .click();
   await expect(page.getByText("TEST-SKU-1", { exact: true })).toHaveCount(0);
   await expect(page.getByText("TEST-AIR-107", { exact: true })).toBeVisible();
@@ -492,6 +501,11 @@ for (const status of ["review_required", "retry_required"] as const) {
     page,
   }) => {
     await installFixtures(page);
+    await page.route("**/api/inbound-shipments/42/cost-review", route => route.fulfill({ json: {
+      shipmentId: 42, lines: [{ lineId: 1, sku: "TEST-SKU", sourceIssue: null,
+        application: status === "review_required" ? { id: 1, recordedAt: "2026-10-15T12:00:00Z", status: "review_required",
+          lotsUpdated: 0, cogsRowsUpdated: 0, issues: [{ code: "COST_HISTORICAL_QUANTITY_INCOMPLETE", message: "Recorded quantity history needs review." }] } : null }],
+    } }));
     await page.route("**/api/inbound-shipments/42", (route) =>
       route.fulfill({
         json: {
@@ -534,15 +548,19 @@ for (const status of ["review_required", "retry_required"] as const) {
       .getByRole("button", { name: "Close Shipment", exact: true })
       .click();
     await expect(
-      page.getByRole("tab", { name: "Allocation", exact: false }),
+      page.getByRole("tab", { name: "Cost review", exact: true }),
     ).toHaveAttribute("data-state", "active");
     await expect(
       page.getByText(
         status === "retry_required"
-          ? "The shipment is closed, but its inventory cost update failed. Use Push Costs to Lots to retry."
+          ? "Use Update shipment costs in Cost review to retry the update."
           : "Recorded quantity history needs review.",
         { exact: true },
       ),
     ).toBeVisible();
+    await page.reload();
+    await expect(page.getByRole("region", { name: "Inventory cost results" })).toContainText(
+      status === "review_required" ? "Recorded quantity history needs review." : "Not updated yet",
+    );
   });
 }

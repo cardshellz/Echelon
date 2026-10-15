@@ -39,6 +39,7 @@ audit.sequential("receipt/AP/freight cost revisions with real owners", () => {
   const actorId = `cost-audit-${randomUUID()}`;
   const ownedSchemas: string[] = [];
   let ownsAudit = false;
+  let ownsCommands = false;
   let pool: pg.Pool;
   let lease: pg.PoolClient | undefined;
   let defaultModulePool: pg.Pool | undefined;
@@ -48,6 +49,7 @@ audit.sequential("receipt/AP/freight cost revisions with real owners", () => {
   let purchasing: ReturnType<typeof import("../../purchasing.service").createPurchasingService>;
   let shipment: ReturnType<typeof import("../../shipment-tracking.service").createShipmentTrackingService>;
   let createShipment: typeof import("../../shipment-tracking.service").createShipmentTrackingService;
+  let costUpdateCommands: ReturnType<typeof import("../../shipment-cost-update.commands").createShipmentCostUpdateCommands>;
   let inventory: import("../../../inventory/application/inventory.use-cases").InventoryUseCases;
   let cogs: import("../../../inventory/cogs.service").COGSService;
   let reconcile: typeof import("../../ap-ledger.service").reconcileApprovedInvoiceVarianceForPurchaseOrderLineInTransaction;
@@ -90,6 +92,12 @@ audit.sequential("receipt/AP/freight cost revisions with real owners", () => {
     if (!(await pool.query("SELECT to_regclass('public.audit_events') AS relation")).rows[0].relation) {
       await pool.query(fixtureTable(schema.auditEvents)); ownsAudit = true;
     }
+    if ((await pool.query("SELECT to_regclass('public.financial_command_results') AS relation")).rows[0].relation) {
+      throw new Error("Cost workflow fixture requires its own financial command table");
+    }
+    await pool.query(readFileSync(resolve(process.cwd(), "migrations/136_financial_command_results.sql"), "utf8"));
+    await pool.query(readFileSync(resolve(process.cwd(), "migrations/140_financial_command_operations.sql"), "utf8"));
+    ownsCommands = true;
     database = drizzle(pool, { schema });
     const priorDatabase = process.env.DATABASE_URL;
     const priorExternal = process.env.EXTERNAL_DATABASE_URL;
@@ -144,6 +152,10 @@ audit.sequential("receipt/AP/freight cost revisions with real owners", () => {
       });
       createShipment = shipmentModule.createShipmentTrackingService;
       shipment = createShipment(database, storage, cogs, () => NOW);
+      const [{ createShipmentCostUpdateCommands }, { createDrizzleFinancialCommandRepository }] = await Promise.all([
+        import("../../shipment-cost-update.commands"), import("../../../../platform/commands/command-results.repository"),
+      ]);
+      costUpdateCommands = createShipmentCostUpdateCommands(shipment, createDrizzleFinancialCommandRepository(database), () => NOW);
       receiving = new receivingModule.ReceivingService(database, inventory,
         { queueSyncAfterInventoryChange: async () => undefined }, storage, purchasing, shipment, null,
         { reconcilePurchaseOrderLine: (id, tx, actor) => reconcile(id, tx, actor) }, null, null, () => NOW);
@@ -157,6 +169,7 @@ audit.sequential("receipt/AP/freight cost revisions with real owners", () => {
     if (ownedSchemas.length !== 6) throw new Error("Fixture schema ownership missing");
     await resetFixtureWithEmptyReceivingCustody(pool, `TRUNCATE ${TABLES.map(qualifiedTable).join(",")},inventory.cost_adjustment_log RESTART IDENTITY CASCADE`);
     await pool.query("DELETE FROM public.audit_events WHERE actor=$1", [actorId]);
+    await pool.query("TRUNCATE public.financial_command_results RESTART IDENTITY CASCADE");
     await pool.query(`
       INSERT INTO catalog.products(id,sku,name) VALUES(100,'AUDIT-PRODUCT','Synthetic cost audit product');
       INSERT INTO catalog.product_variants(id,product_id,sku,name,units_per_variant,uom_type,is_base_unit)
@@ -187,6 +200,7 @@ audit.sequential("receipt/AP/freight cost revisions with real owners", () => {
   afterAll(async () => {
     try {
       if (pool) {
+        if (ownsCommands) await pool.query("DROP TABLE public.financial_command_recoveries, public.financial_command_results; DROP FUNCTION public.guard_financial_command_result_update()");
         if (ownsAudit) await pool.query("DROP TABLE public.audit_events");
         else if (ownedSchemas.length === 6) await pool.query("DELETE FROM public.audit_events WHERE actor=$1", [actorId]);
         for (const name of [...ownedSchemas].reverse()) await pool.query(`DROP SCHEMA ${name} CASCADE`);
@@ -664,6 +678,120 @@ audit.sequential("receipt/AP/freight cost revisions with real owners", () => {
       transactions: (await pool.query("SELECT * FROM inventory.inventory_transactions ORDER BY id")).rows,
     };
   }
+
+  async function updateShipmentCosts(key = randomUUID()) {
+    const { shipmentCostUpdateScope, SHIPMENT_COST_UPDATE_PRINCIPAL } = await import("../../shipment-cost-update.commands");
+    return costUpdateCommands.execute(1, {}, actorId, {
+      ...shipmentCostUpdateScope(1), actorType: "service", actorId: SHIPMENT_COST_UPDATE_PRINCIPAL,
+      contractVersion: 1, idempotencyKey: key, requestHash: "b".repeat(64),
+    });
+  }
+
+  it("updates a closed shipment in one audited command, preserves quantities, and replays a lost response", async () => {
+    await receive(); await seedConsumedCost();
+    await shipment.finalizeAllocations(1, actorId); await shipment.pushLandedCostsToLots(1, actorId);
+    await pool.query("UPDATE procurement.inbound_shipments SET status='closed' WHERE id=1; UPDATE procurement.inbound_freight_costs SET actual_cents=6000 WHERE id=31");
+    const physical = await costQuantityPhysicalSnapshot();
+    const key = randomUUID();
+    const updated = await updateShipmentCosts(key);
+    expect(updated).toMatchObject({ httpStatus: 200, replayed: false, body: { shipmentId: 1, status: "applied", finalizedLines: 1, adjustments: 1, updated: 1 } });
+    expect(await lot()).toMatchObject({ freight: "300000", total: "850000" });
+    expect((await pool.query("SELECT total_cost_mills::text AS cost FROM oms.order_item_costs")).rows).toEqual([{ cost: "850000" }]);
+    expect((await storage.getInboundShipmentById(1)).status).toBe("closed");
+    expect((await pool.query("SELECT created_by FROM procurement.landed_cost_adjustments")).rows).toEqual([{ created_by: actorId }]);
+    expect(await costQuantityPhysicalSnapshot()).toEqual(physical);
+    expect(await updateShipmentCosts(key)).toMatchObject({ replayed: true, body: updated.body });
+    expect((await pool.query("SELECT count(*)::int AS count FROM procurement.landed_cost_adjustments")).rows[0].count).toBe(1);
+    const review = await shipment.getCostReview(1);
+    expect(review).toMatchObject({ shipmentId: 1, lines: [{ lineId: 11, sourceIssue: null,
+      application: { status: "applied", lotsUpdated: 1, cogsRowsUpdated: 1, issues: [] } }] });
+    expect(await shipment.getCostReview(999)).toBeNull();
+  });
+
+  it("refreshes a stale by-value basis on a closed shipment without using the forbidden allocate endpoint", async () => {
+    await pool.query("UPDATE procurement.inbound_freight_costs SET allocation_method='by_value' WHERE id=31");
+    await receive(); await shipment.finalizeAllocations(1, actorId); await shipment.pushLandedCostsToLots(1, actorId);
+    await pool.query("UPDATE procurement.inbound_shipments SET status='closed' WHERE id=1");
+    await storage.updatePurchaseOrderLine(21, { unitCostCents: 150, unitCostMills: 15000, totalProductCostCents: 30000, lineTotalCents: 32000 });
+    expect((await shipment.getAllocationStatus(1)).issues).toEqual(expect.arrayContaining([expect.objectContaining({ code: "stale_allocation_basis" })]));
+    await expect(shipment.runAllocation(1)).rejects.toMatchObject({ statusCode: 409 });
+    expect(await updateShipmentCosts()).toMatchObject({ body: { status: "applied", adjustments: 1 } });
+    expect((await shipment.getAllocationStatus(1)).issues).not.toEqual(expect.arrayContaining([expect.objectContaining({ code: "stale_allocation_basis" })]));
+    expect((await pool.query("SELECT allocation_basis_value FROM procurement.inbound_freight_allocations")).rows).toEqual([{ allocation_basis_value: "15000.000000" }]);
+  });
+
+  it("serializes two cost update commands without duplicate adjustments or downstream revaluation", async () => {
+    await receive(); await seedConsumedCost(); await shipment.finalizeAllocations(1, actorId); await shipment.pushLandedCostsToLots(1, actorId);
+    await pool.query("UPDATE procurement.inbound_shipments SET status='closed' WHERE id=1; UPDATE procurement.inbound_freight_costs SET actual_cents=6000 WHERE id=31");
+    const applicationsBefore = (await pool.query("SELECT count(*)::int AS count FROM inventory.cost_applications")).rows[0].count;
+    const results = await Promise.all([updateShipmentCosts(), updateShipmentCosts()]);
+    expect(results.map(result => (result.body as { adjustments: number }).adjustments).sort()).toEqual([0, 1]);
+    expect((await pool.query("SELECT count(*)::int AS count FROM inventory.cost_applications")).rows[0].count).toBe(applicationsBefore + 1);
+    expect((await pool.query("SELECT count(*)::int AS count FROM procurement.landed_cost_adjustments")).rows[0].count).toBe(1);
+    expect(await lot()).toMatchObject({ freight: "300000", total: "850000" });
+  });
+
+  it("takes the shared cost lock before the shipment lock, matching receiving and PO amendments", async () => {
+    await receive();
+    let signalPid!: (pid: number) => void;
+    const waitingPid = new Promise<number>(resolve => { signalPid = resolve; });
+    let pending: Promise<{ ok: boolean; error?: unknown }> | undefined;
+    try {
+      await database.transaction(async owner => {
+        await lockInventoryCostGraph(owner);
+        pending = database.transaction(async competitor => {
+          signalPid(Number((await competitor.execute(sql`SELECT pg_backend_pid() AS pid`)).rows[0].pid));
+          return shipment.updateCostsInTransaction(competitor, 1, {}, actorId, NOW);
+        }).then(() => ({ ok: true }), error => ({ ok: false, error }));
+        const pid = await waitingPid;
+        let waitingForGraph = false;
+        const deadline = Date.now() + 5000;
+        while (Date.now() < deadline) {
+          waitingForGraph = (await pool.query("SELECT EXISTS(SELECT 1 FROM pg_locks WHERE pid=$1 AND locktype='advisory' AND NOT granted) AS waiting", [pid])).rows[0].waiting;
+          if (waitingForGraph) break;
+          await new Promise(resolve => setTimeout(resolve, 20));
+        }
+        expect(waitingForGraph).toBe(true);
+        // The waiting update must not own the shipment row while another cost
+        // owner holds the graph. NOWAIT makes the reversed lock order fail fast.
+        expect((await owner.execute(sql`SELECT id FROM procurement.inbound_shipments WHERE id=1 FOR UPDATE NOWAIT`)).rows).toEqual([{ id: 1 }]);
+      });
+      expect(await pending).toEqual({ ok: true });
+    } finally { await pending; }
+  });
+
+  it("rolls back the new split, closed-shipment adjustments, and sold costs if the reporting audit fails", async () => {
+    await receive(); await seedConsumedCost(); await shipment.finalizeAllocations(1, actorId); await shipment.pushLandedCostsToLots(1, actorId);
+    await pool.query("UPDATE procurement.inbound_shipments SET status='closed' WHERE id=1; UPDATE procurement.inbound_freight_costs SET actual_cents=6000 WHERE id=31");
+    const before = await lot();
+    const snapshot = (await pool.query("SELECT * FROM procurement.landed_cost_snapshots")).rows;
+    const allocations = (await pool.query("SELECT * FROM procurement.inbound_freight_allocations")).rows;
+    const sold = (await pool.query("SELECT * FROM oms.order_item_costs")).rows;
+    await pool.query(`CREATE FUNCTION inventory.fail_workflow_report() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected workflow audit failure'; END $$;
+      CREATE TRIGGER fail_workflow_report BEFORE INSERT ON inventory.cost_reporting_events FOR EACH ROW EXECUTE FUNCTION inventory.fail_workflow_report()`);
+    try { await expect(updateShipmentCosts()).rejects.toThrow(/injected workflow audit failure/); }
+    finally { await pool.query("DROP TRIGGER fail_workflow_report ON inventory.cost_reporting_events; DROP FUNCTION inventory.fail_workflow_report()"); }
+    expect(await lot()).toEqual(before);
+    expect((await pool.query("SELECT * FROM procurement.landed_cost_snapshots")).rows).toEqual(snapshot);
+    expect((await pool.query("SELECT * FROM procurement.inbound_freight_allocations")).rows).toEqual(allocations);
+    expect((await pool.query("SELECT * FROM oms.order_item_costs")).rows).toEqual(sold);
+    expect((await pool.query("SELECT count(*)::int AS count FROM procurement.landed_cost_adjustments")).rows[0].count).toBe(0);
+    expect((await pool.query("SELECT status FROM public.financial_command_results")).rows).toEqual([{ status: "retryable" }]);
+  });
+
+  it("persists actionable review results when historical quantities remain unresolved", async () => {
+    await legacyQuantityGaps();
+    await pool.query("UPDATE procurement.inbound_shipments SET status='closed' WHERE id=1");
+    const physical = await costQuantityPhysicalSnapshot();
+    const result = await updateShipmentCosts();
+    expect(result).toMatchObject({ body: { status: "review_required", updated: 3 } });
+    const review = await shipment.getCostReview(1);
+    expect(review?.lines[0].application).toMatchObject({ status: "review_required", lotsUpdated: 3, cogsRowsUpdated: 2,
+      issues: [expect.objectContaining({ code: "COST_UNRESOLVED_QUANTITY_RETAINED", unresolvedQuantity: expect.objectContaining({ inventoryLotId: 3364, quantity: 4 }) }),
+        expect.objectContaining({ code: "COST_UNRESOLVED_QUANTITY_RETAINED", unresolvedQuantity: expect.objectContaining({ inventoryLotId: 4016, quantity: 1 }) })] });
+    expect(await costQuantityPhysicalSnapshot()).toEqual(physical);
+    expect(await shipment.getCostReview(1)).toEqual(review);
+  });
 
   it("updates late freight through historical gaps into stock and sold costs while retaining every mill", async () => {
     await legacyQuantityGaps();
