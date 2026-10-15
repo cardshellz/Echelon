@@ -37,6 +37,8 @@ import { guardOrderEditShopifyIngress } from "../../infrastructure/order-edit-in
 import { OrderEditOmsSynchronizer } from "../../infrastructure/order-edit-oms-synchronizer";
 import type { CanonicalAvailabilityReservationStatusProjection } from "@shared/types/inventory-availability-claims";
 import { buildOrderEditFinancials } from "../../domain/order-edit-financials";
+import { orderEditQuoteSchema } from "../../application/order-edit-provider.schema";
+import { serviceHarness } from "../fixtures/order-edit-service.fixture";
 
 const url = process.env.ECHELON_TEST_DATABASE_URL;
 const disposable = process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true";
@@ -356,6 +358,117 @@ function inventoryProjection(): CanonicalAvailabilityReservationStatusProjection
       await expect(new PostgresOrderEditStore(database.pool).create({ ...customer, baseline: { ...customer.baseline, customerId: "gid://shopify/Customer/101" } })).rejects.toThrow();
       expect((await database.pool.query("SELECT count(*)::int AS count FROM oms.order_edit_operations WHERE oms_order_id=21")).rows[0].count).toBe(0);
     });
+    it.each([
+      { label: "legacy omitted codes", discountCodes: undefined },
+      { label: "explicit empty codes", discountCodes: [] },
+    ])(
+      "persists a provider-parsed customer quote with $label and reloads its exact plan",
+      async ({ discountCodes }) => {
+        await customerParent();
+        const store = new PostgresOrderEditStore(database.pool);
+        const original = customerRecord();
+        if (discountCodes !== undefined)
+          original.input.discountCodes = discountCodes;
+        await database.pool.query(
+          "UPDATE oms.oms_orders SET external_customer_id='100' WHERE id=21",
+        );
+        await store.saveSettings(
+          4,
+          { enabled: true, paymentWindowMinutes: 30 },
+          "staff",
+          new Date(original.createdAt),
+        );
+        const baseline = original.baseline;
+        const line = baseline.lines[0];
+        // Exercise the provider's real parser before the real PostgreSQL save.
+        // Parsing puts discountCodes before changes/additions when it is present.
+        const quote = orderEditQuoteSchema.parse({
+          connectionId: original.connectionId,
+          channelId: baseline.channelId,
+          orderId: baseline.orderId,
+          operationId: original.id,
+          calculatedOrderId: "gid://shopify/CalculatedOrder/2",
+          sessionId: "gid://shopify/OrderEditSession/2",
+          baseline,
+          baselineFingerprint: baseline.fingerprint,
+          plan: {
+            changes: original.input.changes,
+            additions: original.input.additions,
+            ...(discountCodes === undefined ? {} : { discountCodes }),
+          },
+          lines: [
+            {
+              title: line.title,
+              variantTitle: line.variantTitle,
+              originalLineId: line.id,
+              calculatedLineId: "gid://shopify/CalculatedLineItem/101",
+              variantId: line.variantId,
+              quantity: 2,
+              originalUnitPriceCents: 1000,
+              discountedUnitPriceCents: 1000,
+              totalCents: 2000,
+            },
+          ],
+          totalCents: 2000,
+          outstandingCents: 1000,
+          deltaCents: 1000,
+          shippingCents: 0,
+          createdAt: original.createdAt,
+          evidence: {},
+        });
+        const external = serviceHarness();
+        external.provider.readOrder.mockResolvedValue(baseline);
+        external.provider.quote.mockResolvedValue(quote);
+        const service = new OrderEditService(
+          store,
+          external.provider,
+          external.warehouse,
+          () => new Date(original.createdAt),
+          () => original.id,
+          external.report,
+        );
+        const response = await service.quote(original.input, original.actorId);
+        expect(response).toMatchObject({
+          status: "ready",
+          quoteAvailable: true,
+          updatedTotalCents: 2000,
+          error: null,
+        });
+        const next = await store.get(original.id);
+        expect(next).toMatchObject({ status: "ready", version: 1, quote });
+        expect(await store.findByRequestKey(original.requestKey)).toEqual(next);
+        expect(await service.quote(original.input, original.actorId)).toEqual(
+          response,
+        );
+        expect(external.provider.quote).toHaveBeenCalledTimes(1);
+        expect(external.provider.commit).not.toHaveBeenCalled();
+        expect(external.provider.refund).not.toHaveBeenCalled();
+        expect(external.report).not.toHaveBeenCalled();
+        const changedPlan = {
+          ...next,
+          version: 2,
+          input: { ...next.input, discountCodes: ["DIFFERENT"] },
+        };
+        await expect(
+          store.save(changedPlan, 1, original.actorId, "quoted"),
+        ).rejects.toMatchObject({
+          issues: expect.arrayContaining([
+            expect.objectContaining({ path: ["quote", "plan"] }),
+          ]),
+        });
+        expect(await store.get(original.id)).toEqual(next);
+        expect(
+          (
+            await database.pool.query(
+              "SELECT action FROM oms.order_edit_events WHERE operation_id=$1 ORDER BY id",
+              [original.id],
+            )
+          ).rows.map((row) => row.action),
+        ).toEqual(["created", "quoted"]);
+        expect(next.commitStartedAt).toBeNull();
+        expect(next.refundStartedAt).toBeNull();
+      },
+    );
     it("enforces customer identities and the original staff foreign key in PostgreSQL", async () => {
       await customerParent();
       const customer = customerRecord();
