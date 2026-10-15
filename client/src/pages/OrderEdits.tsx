@@ -29,6 +29,7 @@ import {
 import {
   exactOrderEditUnitPrice,
   groupOrderEditDisplayLines,
+  orderEditItemSubtotal,
 } from "@/lib/order-edit-display";
 import { useAuth } from "@/lib/auth";
 import type { MemberPlanPresentation } from "@shared/membership/member-plan-presentation";
@@ -462,10 +463,16 @@ export function OrderDraft({
   const previewLineGroups = useMemo(
     () =>
       new Map(
-        groupOrderEditDisplayLines(displayPreview?.lines ?? []).map((line) => [
-          line.key,
-          line,
-        ]),
+        groupOrderEditDisplayLines(
+          (displayPreview?.lines ?? []).map((line) => ({
+            ...line,
+            totalCents: orderEditItemSubtotal(
+              displayPreview?.financials,
+              line.id,
+              line.totalCents,
+            ),
+          })),
+        ).map((line) => [line.key, line]),
       ),
     [displayPreview],
   );
@@ -662,7 +669,12 @@ export function OrderDraft({
                     ? previewGroup
                     : null;
                 const displayedTotal =
-                  previewLine?.totalCents ?? line.totalCents;
+                  previewLine?.totalCents ??
+                  orderEditItemSubtotal(
+                    order.financials,
+                    line.lineItemId,
+                    line.totalCents,
+                  );
                 const displayedQuantity =
                   previewLine?.quantity ?? line.quantity;
                 const unitNetCents = exactOrderEditUnitPrice(
@@ -729,10 +741,7 @@ export function OrderDraft({
                         {previewLine ||
                         Number(quantities[line.lineItemId]) ===
                           line.quantity ? (
-                          formatOrderEditMoney(
-                            previewLine?.totalCents ?? line.totalCents,
-                            order.currency,
-                          )
+                          formatOrderEditMoney(displayedTotal, order.currency)
                         ) : (
                           <span aria-label="Line total updating">—</span>
                         )}
@@ -891,8 +900,39 @@ export function OrderDraft({
             )}
             <OrderEditSummary
               financials={displayPreview?.financials ?? order.financials}
+              paidCents={
+                audience === "customer"
+                  ? order.settlement?.netPaidCents
+                  : undefined
+              }
+              difference={
+                audience === "customer" &&
+                currentPreview &&
+                order.settlement &&
+                currentPreview.financials.totalCents !==
+                  order.settlement.netPaidCents
+                  ? {
+                      label:
+                        currentPreview.financials.totalCents <
+                        order.settlement.netPaidCents
+                          ? "Estimated refund:"
+                          : "Estimated payment due:",
+                      amountCents: Math.abs(
+                        currentPreview.financials.totalCents -
+                          order.settlement.netPaidCents,
+                      ),
+                    }
+                  : undefined
+              }
               totals={[
-                { label: "Current order total", totalCents: order.totalCents },
+                ...(audience === "staff" || !displayPreview
+                  ? [
+                      {
+                        label: "Current order total",
+                        totalCents: order.totalCents,
+                      },
+                    ]
+                  : []),
                 ...(displayPreview
                   ? [
                       {
@@ -922,7 +962,7 @@ export function OrderDraft({
               : []),
           ]}
         />
-        {order.settlement && (
+        {audience === "staff" && order.settlement && (
           <OrderEditPaymentDetails settlement={order.settlement} />
         )}
         <div className="oe-editor-footer">
@@ -977,11 +1017,27 @@ export function OrderEditPreviewReview({
         </p>
         {preview && (
           <>
-            <OrderEditItems lines={preview.lines} showAdded />
+            <OrderEditItems
+              lines={preview.lines}
+              financials={preview.financials}
+              showAdded
+            />
             <OrderEditSummary
               financials={preview.financials}
+              paidCents={
+                audience === "customer"
+                  ? order.settlement?.netPaidCents
+                  : undefined
+              }
               totals={[
-                { label: "Current order total", totalCents: order.totalCents },
+                ...(audience === "staff"
+                  ? [
+                      {
+                        label: "Current order total",
+                        totalCents: order.totalCents,
+                      },
+                    ]
+                  : []),
                 {
                   label: "Preview total · verifying",
                   totalCents: preview.financials.totalCents,
@@ -1155,7 +1211,15 @@ export function OrderEditOperationView({
             show their recorded status.
           </p>
         )}
-        <OrderEditItems lines={operation.lines} showAdded={!showCurrent} />
+        <OrderEditItems
+          lines={operation.lines}
+          financials={
+            showCurrent
+              ? financials?.current
+              : (financials?.quoted ?? financials?.current)
+          }
+          showAdded={!showCurrent}
+        />
         {operation.status === "ready" &&
           onCodesChange &&
           operation.requestedPlan?.discountCodes !== undefined && (
@@ -1181,8 +1245,15 @@ export function OrderEditOperationView({
             />
           )}
         <OrderEditSummary
-          totals={summaryTotals}
+          totals={
+            audience === "customer" ? summaryTotals.slice(-1) : summaryTotals
+          }
           difference={difference}
+          paidCents={
+            audience === "customer"
+              ? operation.settlement?.netPaidCents
+              : undefined
+          }
           financials={
             showCurrent
               ? financials?.current
@@ -1197,7 +1268,7 @@ export function OrderEditOperationView({
               : null
           }
         />
-        {operation.settlement && (
+        {audience === "staff" && operation.settlement && (
           <OrderEditPaymentDetails
             settlement={operation.settlement}
             pendingChanges={operation.status === "ready"}

@@ -59,6 +59,7 @@
 .oe-summary-items { padding-bottom: 12px; margin-bottom: 12px; border-bottom: 1px solid #eeded1; }
 .oe-money-list .oe-total-label, .oe-money-list .oe-total-value { padding-top: 10px; font-weight: 700; color: var(--oe-ink); }
 .oe-summary-totals .oe-total-value { color: #a6470d; font-size: 21px; }
+.oe-money-list.oe-summary-paid { margin-top: 12px; }
 .oe-payment-difference { display: grid; grid-template-columns: minmax(0, 1fr) max-content; gap: 12px; margin-top: 14px; padding-top: 12px; border-top: 1px solid #eeded1; color: #a6470d; font-size: 14px; }
 .oe-details { min-width: 0; border: 1px solid var(--oe-border); border-radius: 9px; background: #fff; }
 .oe-details > summary { display: flex; align-items: center; gap: 10px; margin: 0; padding: 12px 14px; min-height: 48px; cursor: pointer; list-style: none; font-size: 13px; color: var(--oe-ink); }

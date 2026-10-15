@@ -1,4 +1,8 @@
 import { z } from "zod";
+import {
+  ORDER_EDIT_PRICING_DISPLAY_HEADER,
+  ORDER_EDIT_PRICING_DISPLAY_VERSION,
+} from "@shared/order-edits/order-edit-financials";
 import { canonicalJson } from "@shared/utils/canonical-json";
 import {
   ORDER_EDIT_CATALOG_HEADER,
@@ -100,6 +104,10 @@ export async function orderEditRequest<T>(
   const mutation = method !== "GET" && !options.calculationOnly;
   const headers = new Headers({ Accept: "application/json" });
   headers.set(ORDER_EDIT_LINE_DISPLAY_HEADER, ORDER_EDIT_LINE_DISPLAY_VERSION);
+  headers.set(
+    ORDER_EDIT_PRICING_DISPLAY_HEADER,
+    ORDER_EDIT_PRICING_DISPLAY_VERSION,
+  );
   headers.set(ORDER_EDIT_CATALOG_HEADER, ORDER_EDIT_CATALOG_VERSION);
   if (options.body !== undefined)
     headers.set("Content-Type", "application/json");

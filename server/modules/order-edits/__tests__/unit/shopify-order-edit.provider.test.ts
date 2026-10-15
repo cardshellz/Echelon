@@ -4529,6 +4529,22 @@ describe("member function pricing on protected quantity increases", () => {
 });
 
 describe("calculation-only background order previews", () => {
+  it("separates the order coupon from item display prices while shipping receives discounted net amounts", async () => {
+    const calculatePreview = vi.fn(async () => ({
+      shippingRepricing: { title: "Standard Shipping", code: "standard", source: "Echelon Shipping", grossCents: 500, netCents: 500, discountCents: 0, discountLabels: [] },
+      taxCents: 135, totalCents: 2435,
+    }));
+    const h = harness([shippingOrder(), { nodes: [variant(10, "10.00")] }, newCodeLookup(), nativeCodeCalculation(), emptyCombinationMetadata()], {}, { calculate: vi.fn(), calculatePreview });
+    const snapshot = await h.provider.readOrder(4, "100");
+    const context = await h.provider.preparePreview(snapshot);
+    const before = structuredClone(context);
+    const result = await h.provider.preview(context, { changes: [], additions: [], discountCodes: ["TEN"] });
+    expect(result.financials).toMatchObject({ itemsNetCents: 1800, totalCents: 2435, orderDiscounts: [{ label: "TEN", amountCents: 200 }], lines: [{ netCents: 1800, productNetCents: 2000 }] });
+    expect(result.lines[0].totalCents).toBe(1800);
+    expect(calculatePreview).toHaveBeenCalledWith(snapshot, [{ variantId: id("ProductVariant", 10), quantity: 2, netCents: 1800 }]);
+    expect(context).toEqual(before);
+    expect(h.requests.some(request => /orderEditBegin|orderEditCommit|refundCreate/.test(request.query))).toBe(false);
+  });
   it("warms product metadata and calculates revised totals without opening an edit session", async () => {
     const calculatePreview = vi.fn(async () => ({
       shippingRepricing: {
