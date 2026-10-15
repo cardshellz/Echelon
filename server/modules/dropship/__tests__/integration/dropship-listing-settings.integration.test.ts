@@ -4,9 +4,12 @@ import { resolve } from "node:path";
 import { config } from "dotenv";
 import pg, { type Pool } from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import type { ContentProfile } from "../../../../../shared/dropship/listing-content";
+import { listingRulesConversionCheckSchema, type ListingRulesConversionCheck } from "../../../../../shared/dropship/listing-rules-conversion";
 import type {
   CategoryListingSettingPatch, ProductListingSettingPatch,
 } from "../../../../../shared/dropship/listing-setting-values";
+import type { PricingProfile } from "../../../../../shared/dropship/pricing-rules";
 import {
   listingSettingsCategoriesResponseSchema,
   listingSettingsCategoryDetailSchema,
@@ -15,6 +18,7 @@ import {
   listingSettingsUpdatedProductsResponseSchema,
 } from "../../../../../shared/dropship/listing-settings";
 import { listingCatalogHash, productCatalogHash } from "../../application/dropship-listing-content-resolver";
+import { checkRulesConversion, conversionCheckView } from "../../application/dropship-listing-rules-conversion";
 import { DropshipListingCategoryMovesService } from "../../application/dropship-listing-category-moves-service";
 import { DropshipListingCategorySettingsService } from "../../application/dropship-listing-category-settings-service";
 import { DropshipListingPriceService } from "../../application/dropship-listing-price-service";
@@ -105,6 +109,8 @@ const TOPLOADERS = 3; // Card Shellz category of product 7 (sizes 101-103); prod
 const SLEEVES = 5; // a Card Shellz category no product is in at first
 
 interface Statement { connection: number; sql: string }
+/** The rules conversion check's owner read (the repository's OWNER_SQL): the owner by member, without the views' fingerprint. */
+const OWNER_READ = /^SELECT v\.id AS vendor_id\s+FROM dropship\.dropship_vendors v/;
 
 describeDatabase.sequential("listing settings PostgreSQL read guarantees", () => {
   const schema = `dropship_listing_settings_${process.pid}`;
@@ -176,30 +182,30 @@ describeDatabase.sequential("listing settings PostgreSQL read guarantees", () =>
       createHash("sha256").update(key).digest("hex"), NOW);
     });
   }
-  async function saveTemplates(introduction: string, key: string) {
+  async function saveTemplates(introduction: string, key: string, groups: ContentProfile["groups"] = []) {
     const repository = new PgDropshipListingContentRepository(scopedPool());
     await repository.execute({ memberId: "member-1", storeConnectionId: STORE_RULES, idempotencyKey: key }, async (tx) => {
       const current = await tx.loadProfile();
       await tx.saveProfile({ expectedRevisionId: current.revisionId, idempotencyKey: key,
-        profile: { defaultTemplate: { introduction, footer: "" }, groups: [] } }, createHash("sha256").update(key).digest("hex"), NOW);
+        profile: { defaultTemplate: { introduction, footer: "" }, groups } }, createHash("sha256").update(key).digest("hex"), NOW);
     });
   }
   /** A new head revision, as the pricing rules writer appends one; the trigger checks the predecessor. */
-  async function savePricingProfile(markupBps: number) {
+  async function savePricingProfile(markupBps: number, groups: PricingProfile["groups"] = []) {
     const current = await execute("SELECT revision_id FROM dropship.dropship_pricing_profiles WHERE store_connection_id = $1", [STORE_RULES]);
     const revision = await execute(`INSERT INTO dropship.dropship_pricing_profile_revisions
       (vendor_id, store_connection_id, previous_revision_id, profile, actor_id, created_at) VALUES (10, $1, $2, $3::jsonb, 'member-1', $4) RETURNING id`,
     [STORE_RULES, current.rows[0]?.revision_id ?? null, JSON.stringify({
-      defaultRecipe: { basis: "product_cost", markupBps, flatCents: 100, rounding: "cent" }, groups: [] }), NOW]);
+      defaultRecipe: { basis: "product_cost", markupBps, flatCents: 100, rounding: "cent" }, groups }), NOW]);
     await execute(`INSERT INTO dropship.dropship_pricing_profiles (vendor_id, store_connection_id, revision_id) VALUES (10, $1, $2)
       ON CONFLICT (store_connection_id) DO UPDATE SET revision_id = EXCLUDED.revision_id`, [STORE_RULES, revision.rows[0].id]);
   }
-  async function saveCategoryRules(categoryId: string) {
+  async function saveCategoryRules(categoryId: string, rules: readonly unknown[] = []) {
     const current = await execute("SELECT revision_id FROM dropship.dropship_ebay_category_rule_profiles WHERE store_connection_id = $1", [STORE_RULES]);
     const revision = await execute(`INSERT INTO dropship.dropship_ebay_category_rule_revisions
       (vendor_id, store_connection_id, previous_revision_id, profile, idempotency_key, request_hash, actor_id, created_at)
       VALUES (10, $1, $2, $3::jsonb, $4, $5, 'member-1', $6) RETURNING id`,
-    [STORE_RULES, current.rows[0]?.revision_id ?? null, JSON.stringify({ version: 1, rules: [],
+    [STORE_RULES, current.rows[0]?.revision_id ?? null, JSON.stringify({ version: 1, rules,
       defaultCategory: { categoryId, categoryName: "Card Sleeves", path: ["Collectibles", "Card Sleeves"] } }),
     `category-${categoryId}`, "c".repeat(64), NOW]);
     await execute(`INSERT INTO dropship.dropship_ebay_category_rule_profiles (vendor_id, store_connection_id, revision_id) VALUES (10, $1, $2)
@@ -472,6 +478,21 @@ describeDatabase.sequential("listing settings PostgreSQL read guarantees", () =>
     const statements: Statement[] = [];
     expect(await settings({ statements }).load({ memberId: "member-2", storeConnectionId: STORE_RULES, now: NOW })).toBeNull();
     expect(statements.map((statement) => statement.sql.trim().split(/\s+/)[0])).toEqual(["BEGIN", "WITH", "COMMIT"]);
+  });
+
+  // The rules conversion's dry run checks the owner with its own statement (OWNER_SQL, not the fingerprint), so the same
+  // three pairs are refused through it too: another member's store, the member's own vendor asking for another vendor's
+  // store, and a member with no vendor. Each answers null after the snapshot's BEGIN, the owner read alone and COMMIT.
+  it.each([
+    ["member-2", STORE_RULES],
+    ["member-1", STORE_OTHER_VENDOR],
+    ["member-9", STORE_RULES],
+  ] as const)("refuses %s for store %i in the rules conversion's dry run, inside its snapshot, before reading anything else", async (memberId, storeConnectionId) => {
+    const statements: Statement[] = [];
+    expect(await settings({ statements }).loadConversionInputs({ memberId, storeConnectionId, now: NOW })).toBeNull();
+    expect(statements.map(({ sql }) => sql)).toEqual([
+      "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY", expect.stringMatching(OWNER_READ), "COMMIT"]);
+    expect(statements.map(({ connection }) => connection)).toEqual([1, 1, 1]);
   });
 
   it("names a store that is not on eBay without reading the catalog", async () => {
@@ -1123,5 +1144,257 @@ describeDatabase.sequential("listing settings PostgreSQL read guarantees", () =>
         { storeConnectionId: STORE_RULES }))).toMatchObject({ total: 1,
         rows: [{ productId: 8, productName: "Penny sleeves", ownTextNeedsCheck: true, move: null }], moves: { total: 0, items: [] } });
     });
+  });
+
+  describe("the rules conversion's dry run: one snapshot, names to ids and the text bytes (PR 11a2, plan 4.B.4, D8, D14, D23)", () => {
+    /** Today's rules match a product's copy of its category's name (catalog-scope.ts); these name Card Shellz categories 5 and 3. */
+    const SLEEVE_PRICES: PricingProfile["groups"][number] = { id: "sleeve-prices", name: "Sleeve prices", priority: 10,
+      scope: { type: "category", category: "Sleeves" }, recipe: { basis: "product_cost", markupBps: 5_000, flatCents: 0, rounding: "cent" } };
+    const SLEEVE_TEXT: ContentProfile["groups"][number] = { id: "sleeve-text", name: "Sleeve text", priority: 10,
+      scope: { type: "category", category: "Sleeves" }, template: { introduction: "Every sleeve is acid free.", footer: "" } };
+    const TOPLOADER_CATEGORY = { id: "toploader-category", name: "Toploader category", scope: { type: "category", category: "Toploaders" },
+      category: { categoryId: "183439", categoryName: "Card Toploaders", path: ["Collectibles", "Card Toploaders"] } };
+    /** Writes, row or table locks and advisory locks: a check sends none of them. */
+    const WRITE_OR_LOCK = /\b(INSERT|UPDATE|DELETE|TRUNCATE|LOCK TABLE|FOR UPDATE|FOR SHARE|pg_advisory\w*)\b/i;
+    /** Statements that open, end, nest or change a transaction. */
+    const TRANSACTION_STATEMENT = /^\s*(BEGIN|START|COMMIT|END|ROLLBACK|SAVEPOINT|RELEASE|SET\s+TRANSACTION|SET\s+LOCAL)\b/i;
+    /** The measured 10,000-size check seeds 10,000 rows into four tables first; as the writes suite's bulk runs allow. */
+    const CONVERSION_MEASURE_TIMEOUT_MS = 240_000;
+
+    /** The read service over the real repository, as the route calls it; the check reads no stock. */
+    const conversionService = (options: Parameters<typeof scopedPool>[0] = {}, report = vi.fn()) => new DropshipListingSettingsService({
+      repository: settings(options, report),
+      stock: { atp: { getVariantAtp: async () => { throw new Error("The rules check reads no stock."); } },
+        overrides: new PgDropshipListingPreviewRepository(scopedPool()) },
+      clock: { now: () => NOW },
+      logger,
+    });
+    /** The answer as the route sends it: the service's answer through the strict schema. */
+    async function check(options: Parameters<typeof scopedPool>[0] = {}, report = vi.fn()): Promise<ListingRulesConversionCheck> {
+      return listingRulesConversionCheckSchema.parse(await conversionService(options, report)
+        .getConversionForMember("member-1", { storeConnectionId: STORE_RULES, page: 0 }));
+    }
+
+    it("checks a store's older rules in one read-only snapshot on one connection, with no lock, and changes nothing", async () => {
+      await savePricingProfile(3000, [SLEEVE_PRICES]);
+      await saveCategoryRules("261328", [TOPLOADER_CATEGORY]);
+      const before = await databaseState();
+      const statements: Statement[] = [];
+      const modes: Array<{ isolation: string; readOnly: string }> = [];
+
+      const answer = await check({ statements, afterStatement: async (sql, connection) => {
+        if (!sql.startsWith("BEGIN")) return;
+        // Asked on the check's own connection inside its transaction; not recorded.
+        modes.push({ isolation: (await connection.query("SHOW transaction_isolation")).rows[0].transaction_isolation,
+          readOnly: (await connection.query("SHOW transaction_read_only")).rows[0].transaction_read_only });
+      } });
+
+      expect(modes).toEqual([{ isolation: "repeatable read", readOnly: "on" }]);
+      expect(new Set(statements.map((statement) => statement.connection))).toEqual(new Set([1]));
+      expect(statements[0].sql).toBe("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
+      expect(statements.at(-1)?.sql).toBe("COMMIT");
+      // Exactly these transaction statements: the snapshot, the .ops cost read's own savepoint inside it (the store has
+      // chosen sizes, so the cost read runs), and COMMIT. A nested BEGIN, a COMMIT mid-load or a SET TRANSACTION would
+      // end or change the snapshot.
+      expect(statements.filter(({ sql }) => TRANSACTION_STATEMENT.test(sql)).map(({ sql }) => sql)).toEqual([
+        "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY", "SAVEPOINT dropship_product_cost_read",
+        "RELEASE SAVEPOINT dropship_product_cost_read", "COMMIT"]);
+      // The owner alone: a check is never cached, so it reads no fingerprint.
+      expect(statements[1].sql).toMatch(OWNER_READ);
+      expect(statements.some(({ sql }) => /^\s*WITH owner AS/.test(sql))).toBe(false);
+      for (const { sql } of statements) expect(sql).not.toMatch(WRITE_OR_LOCK);
+      // The conversion's own reads are in the snapshot too: the categories by name, then the store's text bytes.
+      expect(statements.filter(({ sql }) => sql.includes("FROM catalog.product_categories WHERE name = ANY"))).toHaveLength(1);
+      expect(statements.filter(({ sql }) => sql.includes("current_setting('server_encoding')"))).toHaveLength(1);
+      expect(await databaseState()).toEqual(before);
+      expect(answer).toMatchObject({ storeConnectionId: STORE_RULES, generatedAt: NOW.toISOString(), state: "clean",
+        olderRules: { pricingGroups: 1, contentGroups: 0, ebayCategoryRules: 1 } });
+      // Nothing was kept: the store checked again gives the same plan, from a new read.
+      expect((await check()).planHash).toBe(answer.planHash);
+    });
+
+    it("reads the names in the check's own snapshot: a category named after the check began is no target of it", async () => {
+      await savePricingProfile(3000, [SLEEVE_PRICES]);
+      let interleaved = false;
+
+      const answer = await check({ afterStatement: async (sql) => {
+        // Right after the owner read (the snapshot's first), another connection adds a second "Sleeves" and commits.
+        if (interleaved || !OWNER_READ.test(sql)) return;
+        interleaved = true;
+        await execute("INSERT INTO catalog.product_categories (id, name) VALUES (6, 'Sleeves')");
+      } });
+
+      expect(interleaved).toBe(true);
+      expect(answer.report.shared).toEqual({ total: 0, items: [] });
+      expect(answer.becomes.categories.items.map((item) => item.categoryId)).toEqual([SLEEVES]);
+      expect((await check()).report.shared.items).toEqual([{ ruleName: "Sleeve prices", categoryName: "Sleeves", categoryCount: 2, kind: "price" }]);
+    });
+
+    it("lists product 8 'Penny sleeves' (copy 'Sleeves', no Card Shellz category id) as a name mismatch and gives it no value", async () => {
+      await savePricingProfile(3000, [SLEEVE_PRICES]);
+
+      const answer = await check();
+
+      expect(answer.report.nameMismatches).toEqual({ total: 1,
+        items: [{ productId: 8, productName: "Penny sleeves", listedAs: "Sleeves", categoryName: null }] });
+      // The rule still becomes category 5's price, though no chosen product is in it; product 8 gets nothing of its own.
+      expect(answer.becomes).toEqual({ categories: { total: 1, items: [{ categoryId: SLEEVES, categoryName: "Sleeves", settings: ["price"] }] },
+        products: { total: 0, items: [] } });
+      expect(answer.report.unmatched).toEqual({ total: 0, items: [] });
+    });
+
+    it("makes both categories named 'Sleeves' targets, and no category whose name differs in case or spaces (plan D8)", async () => {
+      await savePricingProfile(3000, [SLEEVE_PRICES]);
+      await execute("INSERT INTO catalog.product_categories (id, name) VALUES (6, 'Sleeves'), (7, 'sleeves'), (9, 'Sleeves ')");
+
+      const answer = await check();
+
+      expect(answer.report.shared).toEqual({ total: 1,
+        items: [{ ruleName: "Sleeve prices", categoryName: "Sleeves", categoryCount: 2, kind: "price" }] });
+      expect(answer.becomes.categories.items).toEqual([
+        { categoryId: SLEEVES, categoryName: "Sleeves", settings: ["price"] }, { categoryId: 6, categoryName: "Sleeves", settings: ["price"] }]);
+      expect(answer.report.unmatched).toEqual({ total: 0, items: [] });
+    });
+
+    it("reports a rule whose category was renamed after the rule was saved as matching no category, and writes nothing for it", async () => {
+      await saveCategoryRules("261328", [TOPLOADER_CATEGORY]);
+      const before = await check();
+      expect(before.becomes.categories.items).toEqual([{ categoryId: TOPLOADERS, categoryName: "Toploaders", settings: ["ebayCategory"] }]);
+      expect(before.report.unmatched).toEqual({ total: 0, items: [] });
+
+      // A Card Shellz rename rewrites the products' copies with it (the category PUT, catalog.routes.ts).
+      await execute("UPDATE catalog.product_categories SET name = 'Toploaders 35pt' WHERE id = $1", [TOPLOADERS]);
+      await execute("UPDATE catalog.products SET category = 'Toploaders 35pt' WHERE category_id = $1", [TOPLOADERS]);
+      const after = await check();
+
+      expect(after.report.unmatched).toEqual({ total: 1,
+        items: [{ ruleName: "Toploader category", categoryName: "Toploaders", kind: "ebayCategory" }] });
+      // Listed once: an unmatched rule is never also "never applies" (plan D5).
+      expect(after.report.neverApplies).toEqual({ total: 0, items: [] });
+      expect(after.becomes.categories).toEqual({ total: 0, items: [] });
+      // The renamed rule decides no size today, so no size changes and the store is clean.
+      expect(after).toMatchObject({ state: "clean", changes: { total: 0, rows: [] } });
+    });
+
+    it("counts the store's saved product text in bytes exactly as the write path's store text cap counts it", async () => {
+      const texts = { above7: "Rigid “35pt” toploaders.", below7: "Über-dick: ✓", below8: "Penny sleeves, 100 a pack.",
+        main8: "Ærmer til kort — 100 stk. ✓" };
+      const [sleevesSize] = await new PgDropshipListingPreviewRepository(scopedPool()).listCatalogCandidates([201]);
+      await saveProductSetting(7, { textAbove: { mode: "own", text: texts.above7 }, textBelow: { mode: "own", text: texts.below7 } }, "text-bytes-7");
+      // Product 8's main text too: the store text cap sums text above, below and main (LISTING_TEXT_BYTES_SQL, plan D9c).
+      await saveProductSetting(8, { textBelow: { mode: "own", text: texts.below8 },
+        mainText: { text: texts.main8, catalogHash: productCatalogHash(sleevesSize) } }, "text-bytes-8");
+      // Another store's text is that store's, and a category's text never counts (plan D9c).
+      await saveProductSetting(7, { textAbove: { mode: "own", text: "Another store’s words." } }, "text-bytes-other", STORE_NO_RULES);
+      await saveCategorySetting(TOPLOADERS, { textBelow: { mode: "own", text: "Category words." } }, "text-bytes-category");
+      const expected = Object.values(texts).reduce((sum, text) => sum + Buffer.byteLength(text, "utf8"), 0);
+      expect(expected).toBeGreaterThan(Object.values(texts).join("").length);
+
+      const load = await settings().loadConversionInputs({ memberId: "member-1", storeConnectionId: STORE_RULES, now: NOW });
+      if (load?.state !== "ok") throw new Error(`Expected an ok conversion load, got ${load?.state ?? "null"}.`);
+      // The write transaction's own read (W5's and W12's store text cap), with no product replaced.
+      const writePath = await new PgDropshipListingSettingWritesRepository(scopedPool()).execute(
+        { memberId: "member-1", storeConnectionId: STORE_RULES, idempotencyKey: "listing-settings:text-bytes-read" },
+        (tx) => tx.readListingTextBytes({ productIds: [], replacedFields: { textAbove: false, textBelow: false, mainText: false } }));
+
+      expect(load.inputs.storeTextBytes).toBe(writePath.storeBytes);
+      expect(load.inputs.storeTextBytes).toBe(expected);
+      // The main text is in the sum: without it the count would be short by exactly its bytes.
+      expect(expected - Buffer.byteLength(texts.main8, "utf8")).toBeLessThan(load.inputs.storeTextBytes);
+    });
+
+    it("refuses as transient, inside the snapshot, when the .ops cost read times out on a lock, and changes nothing", async () => {
+      await savePricingProfile(3000, [SLEEVE_PRICES]);
+      const report = vi.fn();
+      const before = await databaseState();
+      // Another transaction holds a table the cost read needs; the check's cost read gives up after 200 ms (55P03).
+      const holder = await pool.connect();
+      try {
+        await holder.query("BEGIN");
+        await holder.query(qualify("LOCK TABLE membership.plan_variant_overrides IN ACCESS EXCLUSIVE MODE"));
+        const refusal = await conversionService({ afterStatement: async (sql, connection) => {
+          // Inside the cost read's own savepoint, so its rollback ends the setting with it.
+          if (sql === "SAVEPOINT dropship_product_cost_read") await connection.query("SET LOCAL lock_timeout = '200ms'");
+        } }, report).getConversionForMember("member-1", { storeConnectionId: STORE_RULES, page: 0 })
+          .then(() => null, (error: unknown) => error);
+        expect(refusal).toMatchObject({ code: "DROPSHIP_LISTING_CONVERSION_CHECK_UNAVAILABLE", context: { storeConnectionId: STORE_RULES,
+          stage: "variant_overrides", sqlState: "55P03", classification: "transient", retryable: true, retryAfterSeconds: 60 } });
+        expect(report).toHaveBeenCalledWith(expect.objectContaining({ vendorId: 10, storeConnectionId: STORE_RULES, variantCount: 4,
+          stage: "variant_overrides", sqlState: "55P03" }));
+      } finally {
+        await holder.query("ROLLBACK");
+        holder.release();
+      }
+      expect(await databaseState()).toEqual(before);
+    });
+
+    it("fails as fatal, never as a retry, inside the snapshot, when the .ops cost source is missing a table, and changes nothing", async () => {
+      await savePricingProfile(3000, [SLEEVE_PRICES]);
+      const report = vi.fn();
+      const before = await databaseState();
+      await execute("ALTER TABLE membership.plan_variant_overrides RENAME TO plan_variant_overrides_unavailable");
+      try {
+        const failure = await conversionService({}, report).getConversionForMember("member-1", { storeConnectionId: STORE_RULES, page: 0 })
+          .then(() => null, (error: unknown) => error);
+        // A missing table stays missing until a person fixes it (42P01): a retry every minute would never clear it.
+        expect(failure).toMatchObject({ code: "DROPSHIP_LISTING_SETTINGS_INVARIANT_FAILED", context: { storeConnectionId: STORE_RULES,
+          causeCode: "DROPSHIP_PRODUCT_COST_SOURCE_UNAVAILABLE", stage: "variant_overrides", sqlState: "42P01", classification: "fatal",
+          retryable: false } });
+        expect(report).toHaveBeenCalledWith(expect.objectContaining({ vendorId: 10, storeConnectionId: STORE_RULES, variantCount: 4,
+          stage: "variant_overrides", sqlState: "42P01" }));
+      } finally {
+        await pool.query(`ALTER TABLE "${schema}".plan_variant_overrides_unavailable RENAME TO plan_variant_overrides`);
+      }
+      expect(await databaseState()).toEqual(before);
+    });
+
+    it("times one check over 10,000 chosen sizes (logged, not asserted; plan 4.B.4, CFC#11)", async () => {
+      // Sizes 101, 102, 103 and 201 are chosen already, so this is the read model's cap exactly (more is 422 too large).
+      const BULK_SIZES = 10_000 - 4;
+      const SIZES_PER_PRODUCT = 10;
+      const FIRST_PRODUCT = 1_001;
+      const FIRST_SIZE = 300_001;
+      await execute(`INSERT INTO catalog.products (id, sku, name, category, category_id, product_type, shopify_product_id)
+        SELECT g, 'CONVERT-' || g, 'Bulk sleeves ' || g, 'Sleeves', $3, 'sleeve', (9300000000 + g)::text
+        FROM generate_series($1::int, $2::int) g`,
+      [FIRST_PRODUCT, FIRST_PRODUCT + Math.ceil(BULK_SIZES / SIZES_PER_PRODUCT) - 1, SLEEVES]);
+      await execute(`INSERT INTO catalog.product_variants (id, product_id, sku, name, shopify_variant_id, weight_grams, sales_eligibility)
+        SELECT $1::int + i, $3::int + i / $4::int, 'CONVERT-SIZE-' || i, 'Size ' || i, (7400000000 + i)::text, 100, 'sellable'
+        FROM generate_series(0, $2::int - 1) i`, [FIRST_SIZE, BULK_SIZES, FIRST_PRODUCT, SIZES_PER_PRODUCT]);
+      await execute(`INSERT INTO public.shopify_variants (id, product_id, sku, price)
+        SELECT (7400000000 + i)::text, (9300000000 + $2::int + i / $3::int)::text, 'CONVERT-SIZE-' || i, 9.99 FROM generate_series(0, $1::int - 1) i`,
+      [BULK_SIZES, FIRST_PRODUCT, SIZES_PER_PRODUCT]);
+      await execute(`INSERT INTO membership.plan_variant_overrides
+        SELECT 'ops-convert-' || i, 'ops', (7400000000 + i)::text, (9300000000 + $2::int + i / $3::int)::text, 'fixed_price', 6.00, NULL, true
+        FROM generate_series(0, $1::int - 1) i`, [BULK_SIZES, FIRST_PRODUCT, SIZES_PER_PRODUCT]);
+      // One rule of each kind, all of them on the bulk products' categories.
+      await savePricingProfile(3000, [SLEEVE_PRICES]);
+      await saveTemplates("Shipped in a rigid mailer.", "convert-templates", [SLEEVE_TEXT]);
+      await saveCategoryRules("261328", [TOPLOADER_CATEGORY]);
+      const statements: Statement[] = [];
+      const heapBefore = process.memoryUsage().heapUsed;
+      // The load (which holds a pooled connection) and the planning (CPU, after the connection is released) apart,
+      // as the service runs them: one check's connection time and its event-loop time (review CT-4).
+      const started = process.hrtime.bigint();
+      const load = await settings({ statements }).loadConversionInputs({ memberId: "member-1", storeConnectionId: STORE_RULES, now: NOW });
+      const loaded = process.hrtime.bigint();
+      if (load?.state !== "ok" || load.costReadFailure !== null) throw new Error(`Expected an ok conversion load, got ${load?.state ?? "null"}.`);
+      const { plan, diff } = checkRulesConversion(load.inputs);
+      const planned = process.hrtime.bigint();
+      const answer = listingRulesConversionCheckSchema.parse(conversionCheckView(plan, diff, 0, NOW));
+
+      const ms = (from: bigint, to: bigint) => Math.round(Number(to - from) / 1e6);
+      process.stdout.write(`${JSON.stringify({ measurement: "rules conversion check, 10,000 chosen sizes", loadMs: ms(started, loaded),
+        planMs: ms(loaded, planned), elapsedMs: ms(started, process.hrtime.bigint()),
+        statements: statements.length, heapUsedDeltaMiB: Number(((process.memoryUsage().heapUsed - heapBefore) / 1_048_576).toFixed(1)),
+        state: answer.state, changedSizes: answer.changes.total, categories: answer.becomes.categories.total })}\n`);
+      expect(load.inputs.listing.candidates).toHaveLength(10_000);
+      // That it answers for the whole store (the time is logged, never asserted).
+      expect(answer.olderRules).toEqual({ pricingGroups: 1, contentGroups: 1, ebayCategoryRules: 1 });
+      // By name: "Sleeves" (its price and both texts), then "Toploaders" (its eBay category).
+      expect(answer.becomes.categories.items).toEqual([
+        { categoryId: SLEEVES, categoryName: "Sleeves", settings: ["price", "textAbove", "textBelow"] },
+        { categoryId: TOPLOADERS, categoryName: "Toploaders", settings: ["ebayCategory"] }]);
+    }, CONVERSION_MEASURE_TIMEOUT_MS);
   });
 });
