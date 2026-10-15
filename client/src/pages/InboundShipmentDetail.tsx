@@ -500,6 +500,20 @@ export default function InboundShipmentDetail() {
     [shipment?.purchaseOrderId, lines],
   );
   const costs = shipment?.costs ?? [];
+  const canReplaceShipmentInvoice = hasPermission("purchasing", "create") && hasPermission("purchasing", "edit");
+  function costInvoiceStatus(cost: { derivedStatus?: string; vendorInvoiceId?: number | null; linkedInvoice?: { status?: string } | null }) {
+    if (cost.linkedInvoice?.status === "voided" || cost.derivedStatus === "voided") return "Voided invoice — replacement required";
+    if (cost.derivedStatus === "paid") return "Paid";
+    if (cost.derivedStatus === "invoiced") return "Invoiced";
+    if (cost.derivedStatus === "unbilled" && cost.vendorInvoiceId == null) return "Unbilled";
+    return "Invoice status unavailable";
+  }
+  function invoiceRecoveryLink(cost: { linkedInvoice?: { id: number; status?: string } | null }) {
+    if (cost.linkedInvoice?.status !== "voided") return null;
+    return <p className="text-xs mt-1">{canReplaceShipmentInvoice
+      ? <Link href={procurementNavigation.childHref(`/ap-invoices/${cost.linkedInvoice.id}`)} className="text-primary underline">Review invoice replacement</Link>
+      : "A user with purchasing create and edit permissions can review replacement of this voided invoice."}</p>;
+  }
   const paymentStatus = shipment?.paymentStatus ?? null;
   const statusHistory = shipment?.statusHistory ?? [];
 
@@ -1584,22 +1598,14 @@ export default function InboundShipmentDetail() {
                             <span className="text-sm font-mono">{formatCents(effectiveShipmentCostCents(cost))}</span>
                             {cost.vendorName && <span className="text-xs text-muted-foreground">Pay to: {cost.vendorName}</span>}
                             {cost.performedByName && <span className="text-xs text-muted-foreground">By: {cost.performedByName}</span>}
-                            {(() => {
-                              const status = cost.derivedStatus as "unbilled" | "invoiced" | "paid";
-                              const badgeMap: Record<string, { label: string; variant: "default" | "secondary" | "outline"; className?: string }> = {
-                                unbilled: { label: "Unbilled", variant: "outline", className: "text-muted-foreground" },
-                                invoiced: { label: "Invoiced", variant: "outline", className: "border-blue-500 text-blue-600" },
-                                paid: { label: "Paid", variant: "outline", className: "border-green-500 text-green-600" },
-                              };
-                              const badge = badgeMap[status] || badgeMap.unbilled;
-                              return <Badge variant={badge.variant} className={`text-xs ${badge.className || ""}`}>{badge.label}</Badge>;
-                            })()}
+                            <Badge variant="outline" className="text-xs whitespace-normal">{costInvoiceStatus(cost)}</Badge>
                           </div>
                           {cost.linkedInvoice && (
                             <Link href={procurementNavigation.childHref(`/ap-invoices/${cost.linkedInvoice.id}`)} className="text-xs text-blue-600 hover:underline mt-1 block">
                               {cost.linkedInvoice.invoiceNumber}
                             </Link>
                           )}
+                          {invoiceRecoveryLink(cost)}
                         </div>
                         {isEditable && (
                           <div className="flex gap-1">
@@ -1691,11 +1697,14 @@ export default function InboundShipmentDetail() {
                             >
                               {cost.linkedInvoice.invoiceNumber}
                             </Link>
+                          ) : cost.vendorInvoiceId ? (
+                            <span className="text-xs text-muted-foreground">Invoice link unavailable</span>
                           ) : cost.vendorId ? (
                             <span className="text-xs text-muted-foreground">Unbilled</span>
                           ) : (
                             <span className="text-xs text-muted-foreground">Set vendor first</span>
                           )}
+                          {invoiceRecoveryLink(cost)}
                         </TableCell>
                         <TableCell className="text-xs">
                           {cost.allocationMethod
@@ -1703,16 +1712,7 @@ export default function InboundShipmentDetail() {
                             : `Default (${ALLOCATION_METHOD_LABELS[MODE_DEFAULT_ALLOCATION[shipment?.mode] || "by_volume"] || "By Volume"})`}
                         </TableCell>
                         <TableCell>
-                          {(() => {
-                            const status = cost.derivedStatus as "unbilled" | "invoiced" | "paid";
-                            const badgeMap: Record<string, { label: string; variant: "default" | "secondary" | "outline"; className?: string }> = {
-                              unbilled: { label: "Unbilled", variant: "outline", className: "text-muted-foreground" },
-                              invoiced: { label: "Invoiced", variant: "outline", className: "border-blue-500 text-blue-600" },
-                              paid: { label: "Paid", variant: "outline", className: "border-green-500 text-green-600" },
-                            };
-                            const badge = badgeMap[status] || badgeMap.unbilled;
-                            return <Badge variant={badge.variant} className={`text-xs ${badge.className || ""}`}>{badge.label}</Badge>;
-                          })()}
+                          <Badge variant="outline" className="text-xs whitespace-normal">{costInvoiceStatus(cost)}</Badge>
                         </TableCell>
                         {isEditable && (
                           <TableCell>

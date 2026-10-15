@@ -135,7 +135,7 @@ async function mount(page: Page, options: {
     if (request.method() === "GET" && path === LISTING_ACTIONS_URL) {
       return route.fulfill({ json: {
         items: [{
-          actionId: 71, entryId: 11, listingId: 2, storeConnectionId: 9, platform: "shopify", productVariantId: 66, variantSku: "ARM-ENV-SGL-P50",
+          actionId: 71, entryId: 11, listingId: 2, storeConnectionId: 9, platform: "shopify", productId: 5, productVariantId: 66, variantSku: "ARM-ENV-SGL-P50",
           variantName: "Single pack", productName: "Armor Envelope", action: "below_cost_paused", detail: null, listingPriceCents: 899, unitCostCents: 999,
           pushJobId: null, decidedAt: "2026-10-13T00:05:00.000Z", holdReleasedAt: null, holdReleaseReason: null,
           vendorId: 5, vendorBusinessName: "Shellz Vendor", listingStatus: "active", priceSource: "saved_listing", policyId: 2,

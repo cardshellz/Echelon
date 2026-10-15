@@ -199,6 +199,9 @@ jobs:
           client/src/pages/dropship/__tests__/ListingSettingsStep.test.ts
           client/src/lib/__tests__/dropship-ebay-listing-setup.test.ts
           client/src/lib/__tests__/dropship-ebay-listing-query-sync.test.ts
+          client/src/lib/__tests__/dropship-listing-push-status.test.ts
+          client/src/lib/__tests__/dropship-cost-changes.test.ts
+          client/src/pages/__tests__/dropship-portal-cost-changes-page.test.ts
       # These paths have no "unit" in them, so test:unit never selects them.
       - name: Dropship program finance contracts
         run: >-

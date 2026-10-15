@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  COST_CHANGE_PRICE_LINK_LABEL,
   describeVendorListingAction,
   describeVendorListingActionAmounts,
   describeVendorListingActionDetail,
@@ -11,6 +12,7 @@ import {
   formatVendorCostChangeVariant,
   isVendorCostIncrease,
   parseDropshipVendorCostChanges,
+  vendorListingActionPriceLink,
   type DropshipVendorListingAction,
   type DropshipVendorRecentChange,
 } from "../dropship-cost-changes";
@@ -105,11 +107,49 @@ describe("vendor listing action words", () => {
     expect(describeVendorListingActionAmounts(action())).toBe("listed at $8.99, cost now $9.99");
     expect(describeVendorListingActionAmounts(action({ listingPriceCents: null }))).toBe("cost now $9.99");
     expect(describeVendorListingActionDetail(action(), formatDate)).toContain("publishes zero quantity");
+    // A row with a price link names the link's place (PR 10h); a row without one still names the Catalog page.
+    expect(describeVendorListingActionDetail(action({ platform: "ebay", productId: 7 }), formatDate))
+      .toBe("It publishes zero quantity until the price covers the cost. Raise the price in Listing settings to resume.");
+    expect(describeVendorListingActionDetail(action(), formatDate))
+      .toBe("It publishes zero quantity until the price covers the cost. Raise the price on the Catalog page to resume.");
+    expect(describeVendorListingActionDetail(action({ platform: "ebay", productId: 7, action: "below_cost_warned" }), formatDate))
+      .toBe("Each sale loses money until you raise the price in Listing settings.");
+    expect(describeVendorListingActionDetail(action({ platform: "shopify", productId: 7, action: "below_cost_warned" }), formatDate))
+      .toBe("Each sale loses money until you raise the price on the Catalog page.");
+    expect(describeVendorListingActionDetail(action({ platform: "ebay", action: "below_cost_recorded" }), formatDate))
+      .toBe("Each sale loses money until you raise the price on the Catalog page.");
     expect(describeVendorListingActionDetail(action({ holdReleasedAt: "2026-10-14T00:05:00.000Z", holdReleaseReason: "price_covers_cost" }), formatDate))
       .toBe("Selling again since on 2026-10-14.");
     expect(describeVendorListingActionDetail(action({ action: "reprice_queued", pushJobId: 100 }), formatDate)).toContain("push job 100");
     expect(describeVendorListingActionDetail(action({ action: "price_covers_cost" }), formatDate)).toBeNull();
     expect(isVendorListingActionAttention("awaiting_review")).toBe(true);
     expect(isVendorListingActionAttention("price_covers_cost")).toBe(false);
+  });
+
+  it("takes the size's product id when the server names it, and still accepts an older answer without it (D13b)", () => {
+    const base = { announced: [], recent: [], policy, generatedAt: "2026-09-28T16:05:00.000Z" };
+    expect(parseDropshipVendorCostChanges({ ...base, listingActions: [{ ...action(), productId: 7 }] }).listingActions[0]?.productId).toBe(7);
+    expect(parseDropshipVendorCostChanges({ ...base, listingActions: [action()] }).listingActions[0]?.productId).toBeUndefined();
+    for (const productId of [0, -1, 1.5, "7", null]) {
+      expect(() => parseDropshipVendorCostChanges({ ...base, listingActions: [{ ...action(), productId }] }), String(productId)).toThrow(/contract/);
+    }
+  });
+
+  it("links a below-cost action on an eBay row to the size's price in Listing settings, with the store to open on", () => {
+    const link = { href: "/catalog/setup?product=7&size=66", label: "Change its price in Listing settings ›",
+      name: "Change its price in Listing settings: ARM-ENV-SGL-P50 · Armor Envelope", storeConnectionId: 9 };
+    expect(COST_CHANGE_PRICE_LINK_LABEL).toBe("Change its price in Listing settings ›");
+    expect(vendorListingActionPriceLink(action({ platform: "ebay", productId: 7 }))).toEqual(link);
+    expect(vendorListingActionPriceLink(action({ platform: "ebay", productId: 7, action: "below_cost_recorded" }))).toEqual(link);
+    expect(vendorListingActionPriceLink(action({ platform: "ebay", productId: 7, action: "below_cost_warned" }))).toEqual(link);
+  });
+
+  it("gives no link for another platform, an answer without the product, a released pause, or an action a price can't fix", () => {
+    expect(vendorListingActionPriceLink(action({ platform: "shopify", productId: 7 }))).toBeNull();
+    expect(vendorListingActionPriceLink(action({ platform: "ebay" }))).toBeNull();
+    expect(vendorListingActionPriceLink(action({ platform: "ebay", productId: 7, holdReleasedAt: "2026-10-14T00:05:00.000Z", holdReleaseReason: "price_covers_cost" }))).toBeNull();
+    for (const kind of ["reprice_queued", "reprice_refused", "awaiting_review", "price_covers_cost", "skipped_inactive_listing", "skipped_price_unavailable"] as const) {
+      expect(vendorListingActionPriceLink(action({ platform: "ebay", productId: 7, action: kind })), kind).toBeNull();
+    }
   });
 });

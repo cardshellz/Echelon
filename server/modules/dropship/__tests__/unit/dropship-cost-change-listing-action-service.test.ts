@@ -403,7 +403,7 @@ describe("DropshipCostChangeListingActionService", () => {
 
   it("pages listing actions newest first before a cursor, one more than the page telling whether more exist", async () => {
     const view = (actionId: number): DropshipCostChangeListingActionView => ({
-      actionId, entryId: 11, listingId: 1, storeConnectionId: 9, platform: "shopify", productVariantId: 61, variantSku: "SKU-61", variantName: "Variant 61",
+      actionId, entryId: 11, listingId: 1, storeConnectionId: 9, platform: "shopify", productVariantId: 61, productId: 1, variantSku: "SKU-61", variantName: "Variant 61",
       productName: "Armor Envelope", action: "reprice_queued", detail: null, listingPriceCents: 1399, unitCostCents: 999, pushJobId: 100, decidedAt: NOW,
       holdReleasedAt: null, holdReleaseReason: null, vendorId: 5, vendorBusinessName: "Shellz Vendor", listingStatus: "active", priceSource: "rules_cost", policyId: 3,
     });

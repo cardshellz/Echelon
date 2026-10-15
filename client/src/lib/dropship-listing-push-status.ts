@@ -1,9 +1,24 @@
 import { z } from "zod";
+import { formatListingPreviewIssue } from "./dropship-listing-preview";
 
 /**
  * What became of a push the vendor queued, read from
  * GET /api/dropship/listing-push-jobs/:jobId and put into the vendor's words.
  */
+
+/**
+ * A row queued while its preview was blocked: the server stores its blocker
+ * codes as one comma-separated list in `error_message`
+ * (dropship-listing-preview.repository, insertJobItemForPreview), so the
+ * vendor would read raw codes. Each code gets step 3's words instead.
+ */
+const PREVIEW_BLOCKED_CODE = "DROPSHIP_LISTING_PREVIEW_BLOCKED";
+
+/** The blocker codes of a blocked item, each in the vendor's words, once; empty when the list is blank. */
+export function listingPushBlockedReasons(errorMessage: string | null): string[] {
+  const codes = (errorMessage ?? "").split(",").map((code) => code.trim()).filter((code) => code.length > 0);
+  return [...new Set(codes.map(formatListingPreviewIssue))];
+}
 
 const positiveInteger = z.number().int().positive();
 
@@ -123,7 +138,8 @@ export function describeListingPushOutcome(job: DropshipListingPushJob, storeNam
     }
     if (FAILED_ITEM_STATUSES.has(item.status)) {
       const gate = item.errorCode ? STOCK_GATE_REFUSALS[item.errorCode] : undefined;
-      const reason = gate?.reason ?? (item.errorMessage?.trim() || "the store did not say why");
+      const blocked = item.errorCode === PREVIEW_BLOCKED_CODE ? listingPushBlockedReasons(item.errorMessage) : [];
+      const reason = gate?.reason ?? (blocked.length > 0 ? blocked.join(" ") : (item.errorMessage?.trim() || "the store did not say why"));
       return { ...base, state: "failed", line: `Could not list: ${reason}`, nextStep: gate?.nextStep ?? listingPushNextStep(item.errorCode, item.retryable) };
     }
     return { ...base, state: "pending", line: `Sending to ${store}…`, nextStep: null };
@@ -189,6 +205,9 @@ export function listingPushNextStep(errorCode: string | null, retryable: boolean
       return "Its price moved after it was queued. Check the price on this page, then queue the listing again.";
     case "DROPSHIP_LISTING_PREVIEW_DRIFT":
       return "The listing changed while it was queued. Queue it again.";
+    case PREVIEW_BLOCKED_CODE:
+      // Interim (PR 10 PROPOSAL): the reasons above name where each fix is (Listing settings, step 1, or support).
+      return "Fix what's named above, then preview the listing again and queue it.";
     case "DROPSHIP_EBAY_MANAGED_LOCATION_CONFIG_MISMATCH":
       return "Card Shellz changed the warehouse your listings ship from. In Listing settings, choose Update ship-from location, then queue the listing again.";
     case "DROPSHIP_LISTING_ENTITLEMENT_BLOCKED":

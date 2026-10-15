@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   describeListingPushOutcome,
+  listingPushBlockedReasons,
   listingPushJobUrl,
   listingPushNextStep,
   listingPushPollingContinues,
@@ -140,6 +141,44 @@ describe("stock gate refusals", () => {
       line: "Could not list: eBay asked for a pause after the last attempt.",
       nextStep: "Queue the listing again in a few minutes.",
     });
+  });
+});
+
+describe("a row queued while its preview was blocked", () => {
+  // The server stores the blocker codes as one comma-separated list (dropship-listing-preview.repository, insertJobItemForPreview).
+  const blocked = item({ status: "blocked", errorCode: "DROPSHIP_LISTING_PREVIEW_BLOCKED", retryable: null, listingUrl: null,
+    errorMessage: "missing_config:merchantLocationKey, ebay_browse_category_required, pricing:below_floor:policy_12" });
+
+  it("words each blocker code through step 3's table, never the codes", () => {
+    const outcome = describeListingPushOutcome(job({ status: "failed", items: [blocked] }), "marz_cards");
+    expect(outcome.tone).toBe("failed");
+    expect(outcome.items[0]).toMatchObject({
+      state: "failed",
+      line: "Could not list: Your ship-from location isn't set. Update it in Listing settings. No eBay category. Pick one in Listing settings. Outside a Card Shellz price limit.",
+      nextStep: "Fix what's named above, then preview the listing again and queue it.",
+    });
+    expect(outcome.items[0]!.line).not.toMatch(/missing_config|ebay_browse|policy_12|Could not list: [a-z_]+:/);
+  });
+
+  it("lists each reason once, in the server's order, and nothing for a blank list", () => {
+    expect(listingPushBlockedReasons("ebay_browse_category_required,ebay_browse_category_required , listing_tier:autopay_off"))
+      .toEqual(["No eBay category. Pick one in Listing settings.", "This listing's tier is not active: autopay is off, so your wallet has no reserve. Turn on autopay in Wallet."]);
+    expect(listingPushBlockedReasons("")).toEqual([]);
+    expect(listingPushBlockedReasons(null)).toEqual([]);
+    expect(listingPushBlockedReasons(" , ")).toEqual([]);
+  });
+
+  it("never shows a code the table doesn't know, and says nothing invented for an empty list", () => {
+    const unknown = describeListingPushOutcome(job({ status: "failed", items: [item({ ...blocked, errorMessage: "brand_new_code" })] }), null);
+    expect(unknown.items[0]!.line).toBe("Could not list: Card Shellz can't list this yet. Contact support.");
+    const empty = describeListingPushOutcome(job({ status: "failed", items: [item({ ...blocked, errorMessage: null })] }), null);
+    expect(empty.items[0]!.line).toBe("Could not list: the store did not say why");
+  });
+
+  it("leaves every other failure's store reason as it was", () => {
+    const outcome = describeListingPushOutcome(job({ status: "failed", items: [item({ status: "failed", errorCode: "DROPSHIP_EBAY_LISTING_PUSH_HTTP_ERROR",
+      retryable: false, errorMessage: "missing_config:merchantLocationKey, as eBay put it", listingUrl: null })] }), null);
+    expect(outcome.items[0]!.line).toBe("Could not list: missing_config:merchantLocationKey, as eBay put it");
   });
 });
 

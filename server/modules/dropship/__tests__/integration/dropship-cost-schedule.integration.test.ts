@@ -82,9 +82,11 @@ describeDatabase.sequential("cost schedule PostgreSQL guarantees (migration 0711
         status varchar(40) NOT NULL DEFAULT 'not_listed', vendor_retail_price_cents bigint, platform varchar(30) NOT NULL DEFAULT 'shopify');
       INSERT INTO dropship.dropship_vendors (business_name, status)
         VALUES ('Shellz Vendor', 'active'), ('Paused Vendor', 'paused'), ('Closed Vendor', 'closed');
-      INSERT INTO catalog.products (name) VALUES ('Armor Envelope');
+      -- A first product nobody lists, so the listed product's id (2) differs from every size's id (1-3): a read that
+      -- confused the product id with a variant id would show (PR 10h, D13b).
+      INSERT INTO catalog.products (name) VALUES ('Retired product'), ('Armor Envelope');
       INSERT INTO catalog.product_variants (product_id, sku, name)
-        VALUES (1, 'ARM-ENV-SGL-P50', 'Single pack'), (1, NULL, 'Case of 10'), (1, 'ARM-ENV-XL', 'XL pack');
+        VALUES (2, 'ARM-ENV-SGL-P50', 'Single pack'), (2, NULL, 'Case of 10'), (2, 'ARM-ENV-XL', 'XL pack');
       INSERT INTO dropship.dropship_vendor_listings (vendor_id, store_connection_id, product_variant_id, status, vendor_retail_price_cents) VALUES
         (1, 1, 1, 'active', 899), (1, 1, 2, 'preview_ready', NULL), (1, 2, 1, 'queued', NULL), (1, 1, 3, 'ended', NULL), (1, 1, 3, 'not_listed', NULL),
         (2, 3, 1, 'paused', NULL), (3, 4, 1, 'active', 1_299);
@@ -393,9 +395,11 @@ describeDatabase.sequential("cost schedule PostgreSQL guarantees (migration 0711
 
     const vendorRows = await actions.listVendorListingActions({ vendorId: 1, since: READ_AT, limit: 10 });
     expect(vendorRows.map((row) => [row.listingId, row.action, row.holdReleasedAt])).toEqual([[3, "skipped_inactive_listing", null], [1, "below_cost_paused", null]]);
+    // Each action names the size's product (id 2, not the size's id 1), read from the variant row the query joins (PR 10h, D13b).
+    expect(vendorRows.map((row) => [row.productVariantId, row.productId])).toEqual([[1, 2], [1, 2]]);
     const staffRows = await actions.listListingActions({ limit: 1, beforeId: null });
     expect(staffRows).toHaveLength(1);
-    expect(staffRows[0]).toMatchObject({ listingId: 3, vendorBusinessName: "Shellz Vendor", priceSource: "rules_cost", listingStatus: "queued", policyId: 1 });
+    expect(staffRows[0]).toMatchObject({ listingId: 3, productId: 2, vendorBusinessName: "Shellz Vendor", priceSource: "rules_cost", listingStatus: "queued", policyId: 1 });
 
     // Release once; a second release is a no-op, and the engine refuses any other edit or a delete.
     expect(await actions.releaseHolds({ holdIds: [holds[0]!.holdId], reason: "price_covers_cost", detail: "released", releasedAt: AFTER, releaseIdempotencyKey: "dropship-cost-change-release:1:x" })).toBe(1);
