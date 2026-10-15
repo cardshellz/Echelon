@@ -12,6 +12,7 @@ import {
   orderEditVariantsSchema,
   orderEditQuoteInputSchema,
   orderEditSettingsInputSchema,
+  type OrderEditOperation,
 } from "@shared/order-edits/order-edit.contract";
 import type { OrderEditService } from "../application/order-edit.service";
 import {
@@ -27,6 +28,12 @@ import {
 } from "@shared/order-edits/order-edit-catalog";
 import { OrderEditError } from "../domain/order-edit-error";
 import { OrderEditProviderError } from "../application/order-edit-provider";
+import {
+  ORDER_EDIT_PRICING_DISPLAY_HEADER,
+  ORDER_EDIT_PRICING_DISPLAY_VERSION,
+  type OrderEditFinancials,
+} from "@shared/order-edits/order-edit-financials";
+import { orderEditResponsePresentation } from "../application/order-edit-response-presentation";
 import {
   orderEditPreviewInputSchema,
   orderEditPreviewScopeSchema,
@@ -53,16 +60,24 @@ function catalogMode(req: Request): OrderEditCatalogMode {
 }
 
 function sendLineDisplayResponse<
-  T extends { lines: Array<{ variantId?: string | null; added?: boolean }> },
+  T extends {
+    lines: Array<{ variantId?: string | null; added?: boolean }>;
+    financials?: OrderEditOperation["financials"] | OrderEditFinancials;
+  },
 >(req: Request, res: Response, response: T): void {
   // Older open tabs use strict line schemas. Only clients opting in receive
   // display metadata; financial amounts and command handling are identical.
+  const presented = orderEditResponsePresentation(
+    response,
+    req.get(ORDER_EDIT_PRICING_DISPLAY_HEADER) ===
+      ORDER_EDIT_PRICING_DISPLAY_VERSION,
+  );
   res.json(
     req.get(ORDER_EDIT_LINE_DISPLAY_HEADER) === ORDER_EDIT_LINE_DISPLAY_VERSION
-      ? response
+      ? presented
       : {
-          ...response,
-          lines: response.lines.map(
+          ...presented,
+          lines: presented.lines.map(
             ({ variantId: _variant, added: _added, ...line }) => line,
           ),
         },
@@ -213,12 +228,16 @@ export function registerOrderEditRoutes(
         .strict()
         .parse(req.query);
       res.json(
-        orderEditOrderSchema.parse(
-          await service.order(
-            query.connectionId,
-            positiveId.parse(req.params.omsOrderId),
-            query.codeEntryVersion,
+        orderEditResponsePresentation(
+          orderEditOrderSchema.parse(
+            await service.order(
+              query.connectionId,
+              positiveId.parse(req.params.omsOrderId),
+              query.codeEntryVersion,
+            ),
           ),
+          req.get(ORDER_EDIT_PRICING_DISPLAY_HEADER) ===
+            ORDER_EDIT_PRICING_DISPLAY_VERSION,
         ),
       );
     }),

@@ -44,6 +44,9 @@ import type { ShipmentCostCommand } from "./shipment-cost-commands";
 import { eq, sql as sqlTag } from "drizzle-orm";
 import { canonicalJson } from "@shared/utils/canonical-json";
 import { shipmentAllocationEvidenceSchema } from "@shared/procurement/shipment-allocation";
+import { shipmentCostWorkflowIdSchema, shipmentCostUpdateInputSchema, shipmentCostUpdateResultSchema } from "@shared/procurement/shipment-cost-workflow";
+import { readShipmentCostReview } from "./shipment-cost-review.repository";
+import { shipmentAllocationsEqual } from "./domain/shipment-allocation-equality";
 
 /**
  * Allocate a shipment line's NON-PRODUCT landed cost (freight+duty+insurance+other,
@@ -1046,9 +1049,15 @@ export function createShipmentTrackingService(
       });
     }
 
-    await storage.deleteAllocationsForShipment(shipmentId, tx);
-    await storage.bulkCreateInboundFreightCostAllocations(allNewAllocations, tx);
+    const savedAllocations = [];
+    for (const cost of costs) savedAllocations.push(...await storage.getInboundFreightCostAllocations(cost.id, tx));
+    if (!shipmentAllocationsEqual(savedAllocations, allNewAllocations)) {
+      await storage.deleteAllocationsForShipment(shipmentId, tx);
+      await storage.bulkCreateInboundFreightCostAllocations(allNewAllocations, tx);
+    }
     for (const update of lineUpdates) {
+      const line = lines.find(line => line.id === update.lineId)!;
+      if (line.allocatedCostCents === update.allocatedCostCents && line.landedUnitCostCents === update.landedUnitCostCents) continue;
       await storage.updateInboundShipmentLine(update.lineId, {
         allocatedCostCents: update.allocatedCostCents,
         landedUnitCostCents: update.landedUnitCostCents,
@@ -1470,6 +1479,29 @@ export function createShipmentTrackingService(
     });
   }
 
+  /** The operator's single cost update: fresh allocation, audited snapshots and
+   * downstream revaluation share the financial command's transaction and clock. */
+  async function updateCostsInTransaction(tx: any, shipmentId: number, body: unknown, actorId: string, now: Date) {
+    shipmentCostWorkflowIdSchema.parse(shipmentId);
+    shipmentCostUpdateInputSchema.parse(body);
+    if (!tx || typeof tx.execute !== "function" || typeof tx.insert !== "function") {
+      throw new ShipmentTrackingError("A database transaction is required to update shipment costs.", 500,
+        { code: "SHIPMENT_COST_UPDATE_TRANSACTION_REQUIRED" });
+    }
+    if (typeof actorId !== "string" || !actorId.trim() || !(now instanceof Date) || !Number.isFinite(now.getTime())) {
+      throw new ShipmentTrackingError("Valid audit context is required to update shipment costs.", 500,
+        { code: "SHIPMENT_COST_UPDATE_AUDIT_REQUIRED" });
+    }
+    // Durable commands enter outside runInTransaction. Match its graph-before-
+    // shipment lock order so receiving, PO edits and revaluation cannot deadlock.
+    await lockInventoryCostGraph(tx);
+    const shipment = await lockShipment(tx, shipmentId);
+    const finalization = await finalizeAllocationsInTransaction(tx, shipment, actorId, now);
+    const application = await applyShipmentCostRevisions(tx, shipmentId, new COGSService(tx), actorId, now);
+    return shipmentCostUpdateResultSchema.parse({ ...application, shipmentId,
+      finalizedLines: finalization.finalized, adjustments: finalization.adjustments });
+  }
+
   async function finalizeAllocationsInTransaction(
     tx: any, shipment: InboundShipment, userId: string | undefined, finalizedAt: Date,
   ) {
@@ -1501,7 +1533,7 @@ export function createShipmentTrackingService(
     }
 
     // Run allocation first to ensure fresh numbers
-    await runAllocationInTransaction(tx, shipmentId, shipment);
+    await runAllocationInTransaction(tx, shipmentId, shipment, finalizedAt);
 
     // Re-fetch lines after allocation
     const updatedLines = await storage.getInboundShipmentLines(shipmentId, tx);
@@ -1755,6 +1787,8 @@ export function createShipmentTrackingService(
     getAllocationStatus,
     getLandedCostHealth,
     finalizeAllocations,
+    updateCostsInTransaction,
+    getCostReview: (shipmentId: number) => readShipmentCostReview(db, shipmentId),
 
     // Receiving integration
     pushLandedCostsToLots,

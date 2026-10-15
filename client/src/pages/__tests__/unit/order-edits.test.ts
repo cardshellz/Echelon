@@ -191,6 +191,44 @@ beforeEach(() => {
 });
 
 describe("order financial presentation", () => {
+  it.each([1, 3])("keeps the club unit price for %i items and shows the coupon only in the customer summary", (quantity) => {
+    const subtotal = quantity * 233;
+    const coupon = quantity === 1 ? 23 : 70;
+    const discount = { key: "code:TEN", label: "TEN", amountCents: coupon, value: { type: "percentage" as const, percentage: "10" } };
+    const financials: OrderEditFinancials = {
+      itemsGrossCents: 279 * quantity, itemsDiscountCents: 46 * quantity + coupon, itemsNetCents: subtotal - coupon,
+      itemDiscountLabels: ["Club", "TEN"], itemDiscounts: [discount, { key: "product", label: "Club", amountCents: 46 * quantity, value: { type: "allocated" } }],
+      orderDiscounts: [discount], shippingGrossCents: 549, shippingDiscountCents: 0, shippingCents: 549, shippingDiscountLabels: [],
+      taxCents: 46, taxesIncluded: false, totalCents: subtotal - coupon + 595,
+      lines: [{ id: "line-1", grossCents: 279 * quantity, discountCents: 46 * quantity + coupon, netCents: subtotal - coupon, productNetCents: subtotal }],
+    };
+    const html = renderOperation({
+      ...operation, previousTotalCents: 829, updatedTotalCents: financials.totalCents,
+      balanceDueCents: Math.max(0, financials.totalCents - 829), refundDueCents: Math.max(0, 829 - financials.totalCents),
+      financials: { before: null, quoted: financials, current: null },
+      lines: [{ ...operation.lines[0], quantity, totalCents: subtotal - coupon }],
+      settlement: { receivedCents: 829, refundedCents: 0, netPaidCents: 829, outstandingCents: 0, activity: [] },
+    }, { audience: "customer" });
+    const items = html.match(/<section aria-label="Items in your order">(.*?)<\/section>/)![1];
+    expect(items.replace(/<[^>]*>/g, "")).toContain("$2.33 each");
+    expect(items).not.toContain("Unit price unavailable");
+    const summary = html.match(/<section aria-label="Order summary".*?<\/section>/)![0];
+    expect(summary).toContain("Items subtotal");
+    expect(summary).toContain("TEN");
+    expect(summary).toContain("10% off");
+    expect(summary.indexOf("TEN")).toBeLessThan(summary.indexOf("Shipping"));
+    expect(summary.indexOf("Shipping")).toBeLessThan(summary.indexOf("Tax"));
+    expect(summary).toContain("Already paid");
+    expect(summary).toContain("$8.29");
+    expect(html).not.toContain("Payment history");
+    expect(html).not.toContain("Payment activity");
+    if (quantity === 1) {
+      expect(items).not.toContain("$2.10");
+      expect(summary).toContain("−$0.23");
+      expect(summary).toContain("$8.05");
+      expect(summary).toContain("$0.24");
+    }
+  });
   it("consolidates protected SKU lines without losing their differently allocated discounts", () => {
     const html = renderOperation({
       ...operation,
