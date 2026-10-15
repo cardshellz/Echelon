@@ -326,7 +326,7 @@ describe("nextTabsRequest", () => {
 const ROW_ORDER = ["price", "shipping", "return", "payment", "ebayCategory", "shelf", "description"] as const;
 
 describe("ListingSettingsStep", () => {
-  it("renders the header, the strip, the seven rows in the record's order, then the tabs", () => {
+  it("renders the header, the strip, the seven rows in the record's order, the Category settings card, then the tabs", () => {
     const markup = renderStep();
     expect(markup).toContain('data-testid="listing-settings-step"');
     expectInOrder(markup, [
@@ -334,6 +334,8 @@ describe("ListingSettingsStep", () => {
       "listing-settings-attention",
       "store-defaults-card",
       ...ROW_ORDER.map((field) => `store-default-row-${field}`),
+      // Between the Store defaults card and the tabs (PR 10e, A5); its list is not read yet here, so it shows its skeleton.
+      "category-settings-card",
       "listing-settings-tabs",
     ]);
     expect(markup).toContain(`Listing settings for ${STORE}`);
@@ -408,6 +410,8 @@ describe("ListingSettingsStep", () => {
     // The lists are not read and their search is off; the banner says why.
     expect(markup).not.toContain('data-testid="listing-settings-list-loading"');
     expect(markup).toMatch(/<input[^>]*disabled=""[^>]*placeholder="Search product, size or SKU"/);
+    // The Category settings card is hidden too (PR 10e, D18).
+    expect(markup).not.toContain('data-testid="category-settings-card"');
   });
 
   it("waits for the account before offering any change", () => {

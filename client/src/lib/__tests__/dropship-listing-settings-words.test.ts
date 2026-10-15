@@ -19,11 +19,21 @@ import {
   CHECKING_EBAY,
   GROUP_RULE_ORDER_NOTE,
   LISTING_SETTINGS_BULK_WORDS,
+  LISTING_SETTINGS_CATEGORY_WORDS,
   LISTING_SETTINGS_EDIT_WORDS,
   LISTING_SETTINGS_PRICE_CHECK_WORDS,
   LISTING_SETTINGS_UPDATED_WORDS,
   UNNAMED_PRODUCT_WORDS,
   CATEGORY_SETTING_WORDS,
+  alsoClearLabelWords,
+  categoryEditorTitleWords,
+  categoryProductsChangedWords,
+  categoryRowWords,
+  changeCategoryLabel,
+  loadingCategoryWords,
+  ownValuesLineWords,
+  setForCategoryWords,
+  uncategorizedWords,
   changedCategorySettingsWords,
   checkOwnTextLabel,
   gotItForAllWords,
@@ -729,6 +739,63 @@ describe("Card Shellz updated products (PR 10g proposals, plan 10.3, 12.2)", () 
     for (const words of [
       movedFromToWords("Sleeves", "Toploaders"), changedCategorySettingsWords([...CATEGORY_LISTING_SETTING_FIELDS]), gotItForAllWords(4), gotItLabel("Penny Sleeves"),
       checkOwnTextLabel("Penny Sleeves"), movedAgainWords(2), updatedProductsLineWords(4),
+    ]) expectPlain(words);
+  });
+});
+
+describe("Category settings (PR 10e proposals, plan 8.3, 8.6, 12.2)", () => {
+  it("uses the record's title, Use store default and Also clear theirs, and the plan's words, every one plain", () => {
+    expect(LISTING_SETTINGS_CATEGORY_WORDS).toEqual({
+      title: "Category settings",
+      intro: "Products in a Card Shellz category use its settings before your store defaults.",
+      usesStoreDefaults: "Uses your store defaults",
+      sets: "Sets",
+      empty: "None of your chosen products is in a Card Shellz category.",
+      readFailed: "Couldn't load category settings.",
+      olderRules: "Category settings can't be saved while your store has older group rules. They'll be moved over in a later update.",
+      useStoreDefault: "Use store default",
+      storeDefault: "Store default",
+      alsoClear: "Also clear theirs",
+      categoryNotFound: "No chosen product is in this category any more.",
+      priceReadOnly: "A category's price can't be changed here yet.",
+      readTooLarge: "This category can't be checked until you choose 10,000 or fewer sizes.",
+      loading: "Loading…",
+    });
+    for (const words of Object.values(LISTING_SETTINGS_CATEGORY_WORDS)) expectPlain(words);
+    // No advice to delete the rules: removing description groups changes listing text with no check (plan 8.3).
+    expect(LISTING_SETTINGS_CATEGORY_WORDS.olderRules).not.toMatch(/delete|remove/i);
+  });
+
+  it("builds the card's rows in the order given, the uncategorized line, the editor's title and tags, the box and the conflict, one or many", () => {
+    expect(categoryRowWords({ name: "Sleeves", productCount: 15, setFields: ["shippingPolicy", "storeShelf"] })).toEqual({
+      name: "Sleeves", products: "15 products", sets: "Sets: shipping policy, store shelf", text: "Sleeves · 15 products · Sets: shipping policy, store shelf",
+    });
+    expect(categoryRowWords({ name: "Toploaders", productCount: 1, setFields: [] }).text).toBe("Toploaders · 1 product · Uses your store defaults");
+    expect(categoryRowWords({ name: " ", productCount: 1_240, setFields: ["textBelow", "price"] }).text).toBe("Category · 1,240 products · Sets: text below, price");
+    expect(uncategorizedWords(4)).toBe("4 products have no Card Shellz category. They use your store defaults.");
+    expect(uncategorizedWords(1)).toBe("1 product has no Card Shellz category. It uses your store defaults.");
+    expect(uncategorizedWords(1_000)).toBe("1,000 products have no Card Shellz category. They use your store defaults.");
+    expect(uncategorizedWords(0)).toBeNull();
+    expect(categoryEditorTitleWords("Sleeves", 15)).toBe("Sleeves · 15 products");
+    expect(categoryEditorTitleWords(" ", 1)).toBe("Category · 1 product");
+    expect(loadingCategoryWords("Sleeves")).toBe("Loading Sleeves…");
+    expect(loadingCategoryWords(" ")).toBe("Loading…");
+    expect(setForCategoryWords("Sleeves")).toBe("Set for Sleeves");
+    expect(setForCategoryWords("")).toBe("Set for this category");
+    expect(changeCategoryLabel("Sleeves")).toBe("Change settings for Sleeves");
+    expect(changeCategoryLabel("")).toBe("Change settings");
+    expect(ownValuesLineWords(3, "Sleeves", "shippingPolicy")).toBe("3 products in Sleeves have their own shipping policy.");
+    expect(ownValuesLineWords(1, "Sleeves", "textAbove")).toBe("1 product in Sleeves has its own text above.");
+    expect(ownValuesLineWords(1_200, "", "ebayCategory")).toBe("1,200 products in this category have their own eBay category.");
+    expect(alsoClearLabelWords(15)).toBe("Also clear theirs, so all 15 use this one.");
+    expect(alsoClearLabelWords(1_240)).toBe("Also clear theirs, so all 1,240 use this one.");
+    expect(alsoClearLabelWords(1)).toBe("Also clear theirs, so it uses this one.");
+    expect(categoryProductsChangedWords("Sleeves")).toBe("The products in Sleeves changed. Load the latest and save again. A Card Shellz change can take a minute to show.");
+    expect(categoryProductsChangedWords(" ")).toBe("The products in this category changed. Load the latest and save again. A Card Shellz change can take a minute to show.");
+    for (const words of [
+      categoryRowWords({ name: "Sleeves", productCount: 15, setFields: [...CATEGORY_LISTING_SETTING_FIELDS] }).text, uncategorizedWords(4), categoryEditorTitleWords("Sleeves", 15),
+      loadingCategoryWords("Sleeves"), setForCategoryWords("Sleeves"), changeCategoryLabel("Sleeves"), ownValuesLineWords(3, "Sleeves", "shippingPolicy"),
+      alsoClearLabelWords(15), categoryProductsChangedWords("Sleeves"),
     ]) expectPlain(words);
   });
 });

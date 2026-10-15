@@ -66,7 +66,7 @@ function PurchaseReadView({ purchase }: { purchase: PurchaseWorkspace["purchase"
         <Field label="Supplier">{purchase.vendorName ?? "Not recorded"}</Field>
         <Field label="PO total">{formatWorkspaceMoney(purchase.totalCents, purchase.currency)}</Field>
         <Field label="Goods status">{formatWorkspaceStatus(purchase.physicalStatus)}</Field>
-        <Field label="Recorded financial status">{formatWorkspaceStatus(purchase.financialStatus)}</Field>
+        <Field label="Recorded linked invoice status">{formatWorkspaceStatus(purchase.financialStatus)}</Field>
         <Field label="Expected delivery">{formatProcurementScheduleDate(purchase.expectedDeliveryDate)}</Field>
         <Field label="Confirmed delivery">{formatProcurementScheduleDate(purchase.confirmedDeliveryDate)}</Field>
         <Field label="Actual delivery">{formatWorkspaceDate(purchase.actualDeliveryDate)}</Field>
@@ -159,12 +159,12 @@ function InvoiceReadView({ invoice, purchaseOrderId, navigation }: {
 }) {
   return (
     <div className="space-y-4">
-      <p className="rounded-md border bg-muted/40 p-3 text-xs">Invoice totals and payment status cover the entire invoice. The recorded allocation to this purchase order is shown separately.</p>
+      <p className="rounded-md border bg-muted/40 p-3 text-xs">Invoice totals and payment status cover the entire invoice. The recorded link amount is metadata; it is not a validated invoice or payment allocation to this purchase order.</p>
       <dl className="grid grid-cols-2 gap-4">
         <Field label="Entire invoice amount">{formatWorkspaceMoney(invoice.invoicedAmountCents, invoice.currency)}</Field>
         <Field label="Paid against entire invoice">{formatWorkspaceMoney(invoice.paidAmountCents, invoice.currency)}</Field>
         <Field label="Entire invoice balance">{formatWorkspaceMoney(invoice.balanceCents, invoice.currency)}</Field>
-        <Field label="Allocated to this PO">{formatWorkspaceMoney(invoice.allocatedToPurchaseCents, invoice.currency)}</Field>
+        <Field label="Recorded link amount">{formatWorkspaceMoney(invoice.allocatedToPurchaseCents, invoice.currency)}</Field>
         <Field label="Invoice date">{formatWorkspaceDate(invoice.invoiceDate)}</Field>
         <Field label="Due date">{formatWorkspaceDate(invoice.dueDate)}</Field>
       </dl>

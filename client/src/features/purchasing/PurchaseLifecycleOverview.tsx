@@ -103,7 +103,7 @@ export function PurchaseLifecycleOverview({ data, navigation }: OverviewProps) {
             <div><dt className="text-xs text-muted-foreground">PO total</dt><dd className="mt-1 break-words font-mono font-semibold">{formatWorkspaceMoney(purchase.totalCents, purchase.currency)}</dd></div>
             <div><dt className="text-xs text-muted-foreground">Confirmed delivery</dt><dd className="mt-1">{formatProcurementScheduleDate(purchase.confirmedDeliveryDate)}</dd></div>
             <div><dt className="text-xs text-muted-foreground">Goods status</dt><dd className="mt-1">{formatWorkspaceStatus(purchase.physicalStatus)}</dd></div>
-            <div><dt className="text-xs text-muted-foreground">Recorded financial status</dt><dd className="mt-1">{formatWorkspaceStatus(purchase.financialStatus)}</dd></div>
+            <div><dt className="text-xs text-muted-foreground">Recorded linked invoice status</dt><dd className="mt-1">{formatWorkspaceStatus(purchase.financialStatus)}</dd></div>
           </dl>
           <p className="border-t pt-3 text-xs text-muted-foreground">
             Connected records: {shipments.length} shipment{shipments.length === 1 ? "" : "s"} · {receipts.length} receipt{receipts.length === 1 ? "" : "s"} · {invoices.length} invoice{invoices.length === 1 ? "" : "s"}
