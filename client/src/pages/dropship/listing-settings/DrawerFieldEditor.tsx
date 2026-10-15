@@ -41,6 +41,12 @@ interface FieldEditorBaseProps {
    * no change, and opens on it while the row holds none. Left out, the drawer's.
    */
   bulk?: boolean;
+  /**
+   * The words of the default choice: the drawer's "Use default" (it follows the
+   * category, else the store default), or the category editor's "Use store
+   * default" (PR 10e, D17). Left out, "Use default".
+   */
+  defaultLabel?: string;
 }
 
 export interface DrawerFieldEditorProps extends FieldEditorBaseProps {
@@ -134,7 +140,9 @@ export function ChoiceRadio({ name, label, checked, disabled = false, onPick, ch
  * setting, else the store default; REC:854, REC:857). [Done] puts the
  * choice in the drawer's one draft; nothing is sent until the drawer's Save.
  */
-export function DrawerFieldEditor({ model, title, productName, message, onDone, onCancel, bulk = false }: DrawerFieldEditorProps) {
+export function DrawerFieldEditor({
+  model, title, productName, message, onDone, onCancel, bulk = false, defaultLabel = LISTING_SETTINGS_EDIT_WORDS.useDefault,
+}: DrawerFieldEditorProps) {
   const group = useId();
   const [choice, setChoice] = useState<FieldChoice<PolicyChoiceValue>>(model.initial);
   const picked = choice.mode === "set" ? choice.value.id : null;
@@ -162,7 +170,7 @@ export function DrawerFieldEditor({ model, title, productName, message, onDone, 
           ? { label: LISTING_SETTINGS_BULK_WORDS.leaveAsIs, checked: choice.mode === "leave", onPick: () => setChoice({ mode: "leave" }) }
           : undefined}
         extra={model.canDefault
-          ? { label: LISTING_SETTINGS_EDIT_WORDS.useDefault, checked: choice.mode === "default", onPick: () => setChoice({ mode: "default" }) }
+          ? { label: defaultLabel, checked: choice.mode === "default", onPick: () => setChoice({ mode: "default" }) }
           : undefined}
       />
     </FieldEditorFrame>
@@ -186,7 +194,7 @@ export interface DrawerEbayCategoryEditorProps extends FieldEditorBaseProps {
  * the picker's search when it opens, and to the picked category after a pick.
  */
 export function DrawerEbayCategoryEditor({
-  model, storeConnectionId, title, productName, message, onDone, onCancel, bulk = false,
+  model, storeConnectionId, title, productName, message, onDone, onCancel, bulk = false, defaultLabel = LISTING_SETTINGS_EDIT_WORDS.useDefault,
 }: DrawerEbayCategoryEditorProps) {
   const group = useId();
   const [choice, setChoice] = useState<FieldChoice<EbayCategoryChoiceValue>>(model.initial);
@@ -230,7 +238,7 @@ export function DrawerEbayCategoryEditor({
             />
           )}
           {model.canDefault && (
-            <ChoiceRadio name={group} label={LISTING_SETTINGS_EDIT_WORDS.useDefault} checked={choice.mode === "default"} onPick={() => setChoice({ mode: "default" })} />
+            <ChoiceRadio name={group} label={defaultLabel} checked={choice.mode === "default"} onPick={() => setChoice({ mode: "default" })} />
           )}
         </fieldset>
         {model.canSet && !picking && (
@@ -286,7 +294,9 @@ export interface DrawerShelfEditorProps extends FieldEditorBaseProps {
  * "Use default". Picking a shelf chooses "Own shelves". "None" and "Use
  * default" name no eBay value, so they stay while eBay needs a sign-in (D4).
  */
-export function DrawerShelfEditor({ model, title, productName, message, onDone, onCancel, bulk = false }: DrawerShelfEditorProps) {
+export function DrawerShelfEditor({
+  model, title, productName, message, onDone, onCancel, bulk = false, defaultLabel = LISTING_SETTINGS_EDIT_WORDS.useDefault,
+}: DrawerShelfEditorProps) {
   const group = useId();
   const [state, setState] = useState<StoreShelfEditorState>(model.initial);
   const result = bulk ? bulkStoreShelfEditorChoice(model, state) : storeShelfEditorChoice(model, state);
@@ -350,7 +360,7 @@ export function DrawerShelfEditor({ model, title, productName, message, onDone, 
           <ChoiceRadio name={group} label={LISTING_SETTINGS_EDIT_WORDS.none} checked={state.mode === "none"} onPick={() => setState({ ...state, mode: "none" })} />
         )}
         {model.canDefault && (
-          <ChoiceRadio name={group} label={LISTING_SETTINGS_EDIT_WORDS.useDefault} checked={state.mode === "default"} onPick={() => setState({ ...state, mode: "default" })} />
+          <ChoiceRadio name={group} label={defaultLabel} checked={state.mode === "default"} onPick={() => setState({ ...state, mode: "default" })} />
         )}
       </fieldset>
       {model.canSet && options !== null && options.length === 0 && <p className="text-sm text-zinc-700">{STORE_DEFAULT_EDITOR_WORDS.noShelves}</p>}

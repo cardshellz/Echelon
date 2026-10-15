@@ -3,6 +3,9 @@ import type { z } from "zod";
 import {
   LISTING_SETTINGS_PRICE_FILTERS,
   LISTING_SETTINGS_PRODUCT_FILTERS,
+  listingSettingsCategoriesResponseSchema,
+  listingSettingsCategoryDetailSchema,
+  listingSettingsCategoryInputSchema,
   listingSettingsPricesInputSchema,
   listingSettingsPricesResponseSchema,
   listingSettingsProductDetailSchema,
@@ -12,9 +15,12 @@ import {
   listingSettingsProductOwnSettingsSchema,
   listingSettingsProductsInputSchema,
   listingSettingsProductsResponseSchema,
+  listingSettingsStoreInputSchema,
   listingSettingsSummarySchema,
   listingSettingsUpdatedProductsInputSchema,
   listingSettingsUpdatedProductsResponseSchema,
+  type ListingSettingsCategoriesResponse,
+  type ListingSettingsCategoryDetail,
   type ListingSettingsPricesResponse,
   type ListingSettingsProductDetail,
   type ListingSettingsProductIdsResponse,
@@ -63,7 +69,7 @@ export class ListingSettingsReadError extends Error {
   }
 }
 
-type ListingSettingsRead = "summary" | "products" | "prices" | "product" | "product-own" | "product-ids" | "updated-products";
+type ListingSettingsRead = "summary" | "products" | "prices" | "product" | "product-own" | "product-ids" | "updated-products" | "categories" | "category";
 
 /** At most this many contract issues are kept on the error: enough to find the field, never the values. */
 const MAX_REPORTED_ISSUES = 5;
@@ -356,6 +362,67 @@ export function listingSettingsUpdatedProductsQueryOptions(
     },
     enabled: (options.enabled ?? true) && parsed.success,
     staleTime: options.fresh === true ? 0 : LISTING_SETTINGS_STALE_MS,
+    retry: false,
+  } as const;
+}
+
+/**
+ * The Card Shellz categories of the store's chosen products (`GET
+ * …/categories`, PR 10 plan 8.2, 8.5): each with what it sets, in the stored
+ * shape's order, and its settings revision; the Category settings card's read,
+ * made at mount with the lists (D18). A list read, at most 60 seconds old,
+ * under the store's prefix (D10). The caller keeps it off while the selection
+ * is too large (D18): the server refuses it with the lists' 422 then.
+ */
+export function listingSettingsCategoriesQueryOptions(storeConnectionId: number, options: ListingSettingsReadOptions = {}) {
+  const parsed = listingSettingsStoreInputSchema.safeParse({ storeConnectionId });
+  return {
+    queryKey: [...listingSettingsQueryKey(storeConnectionId), "categories"] as const,
+    queryFn: async ({ signal }: { signal: AbortSignal }): Promise<ListingSettingsCategoriesResponse> => {
+      if (!parsed.success) throw invalidRequest("categories", parsed.error);
+      const { storeConnectionId: store } = parsed.data;
+      return readListingSettings("categories", `${listingSettingsPath(store)}/categories`,
+        listingSettingsCategoriesResponseSchema.refine(
+          (answer) => answer.storeConnectionId === store,
+          { message: "The answer is for another store.", path: ["storeConnectionId"] },
+        ), signal);
+    },
+    enabled: (options.enabled ?? true) && parsed.success,
+    staleTime: LISTING_SETTINGS_STALE_MS,
+    retry: false,
+  } as const;
+}
+
+/**
+ * One Card Shellz category's settings in full (`GET …/categories/:categoryId`,
+ * PR 10 plan 8.2, 8.5): each setting with where it comes from, the chosen
+ * products that hold their own value in one ("Also clear theirs", with the
+ * revisions it sends back) and the category's revision (W12's
+ * `expectedRevisionId`), for its editor. Read fresh whenever the editor is
+ * open (staleTime 0): the editor's start, its revision and its clear set come
+ * from this one answer (D6). An answer for another store or category is off
+ * the contract.
+ */
+export function listingSettingsCategoryQueryOptions(
+  storeConnectionId: number,
+  categoryId: number,
+  options: ListingSettingsReadOptions = {},
+) {
+  const parsed = listingSettingsCategoryInputSchema.safeParse({ storeConnectionId, categoryId });
+  return {
+    queryKey: [...listingSettingsQueryKey(storeConnectionId), "category", categoryId] as const,
+    queryFn: async ({ signal }: { signal: AbortSignal }): Promise<ListingSettingsCategoryDetail> => {
+      if (!parsed.success) throw invalidRequest("category", parsed.error);
+      const { storeConnectionId: store, categoryId: category } = parsed.data;
+      return readListingSettings("category", `${listingSettingsPath(store)}/categories/${category}`,
+        listingSettingsCategoryDetailSchema.refine(
+          (answer) => answer.storeConnectionId === store && answer.categoryId === category,
+          { message: "The answer is for another store or category.", path: ["categoryId"] },
+        ), signal);
+    },
+    enabled: (options.enabled ?? true) && parsed.success,
+    // The editor starts from what is saved now.
+    staleTime: 0,
     retry: false,
   } as const;
 }

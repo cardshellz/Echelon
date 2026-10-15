@@ -3,6 +3,7 @@ import { DropshipApiError } from "../dropship-ops-surface";
 import { LISTING_SETUP_RELOAD_MESSAGE } from "../dropship-ebay-listing-setup";
 import {
   LISTING_SETTINGS_BULK_WORDS,
+  LISTING_SETTINGS_CATEGORY_WORDS,
   LISTING_SETTINGS_EDIT_WORDS,
   LISTING_SETTINGS_PRICE_CHECK_WORDS,
   releaseLimitWords,
@@ -19,6 +20,8 @@ import {
   STORE_DEFAULT_LABELS,
   UPDATED_PRODUCTS_EDITOR_ID,
   bothChangedFields,
+  categoryEditorId,
+  categoryIdOfEditor,
   changedFields,
   classifyWriteFailure,
   countOlderSettingsDrafts,
@@ -94,8 +97,34 @@ describe("store default rows", () => {
     expect(LISTING_SETTINGS_KEY_PREFIXES).toEqual({
       policy: "ls-policy", shelf: "ls-shelf", shipFrom: "ls-ship-from", pricingApply: "ls-apply",
       category: "ls-category", description: "ls-text", sizePrice: "ls-price", productSettings: "ls-product",
-      bulkSettings: "ls-bulk", priceCheck: "ls-price-check", categoryMoves: "ls-moves",
+      bulkSettings: "ls-bulk", priceCheck: "ls-price-check", categoryMoves: "ls-moves", categorySettings: "ls-cat",
     });
+  });
+
+  it("names the category editor by category, one draft beside the others (PR 10e, D16)", () => {
+    expect(categoryEditorId(40)).toBe("category:40");
+    for (const bad of [0, -1, 1.5, Number.NaN, Number.MAX_SAFE_INTEGER + 1]) {
+      expect(() => categoryEditorId(bad)).toThrow(/positive whole-number category id/);
+    }
+    expect(categoryIdOfEditor("category:40")).toBe(40);
+    for (const other of ["product:40", "bulk", "updatedProducts", "shipping", "category:0", "category:x", "category:", null, undefined]) {
+      expect(categoryIdOfEditor(other as never)).toBeNull();
+    }
+    // W3's "ls-category" (the eBay category rules) and W12's "ls-cat" are two prefixes, never one key shape.
+    expect(LISTING_SETTINGS_KEY_PREFIXES.categorySettings).not.toBe(LISTING_SETTINGS_KEY_PREFIXES.category);
+    // Opening the editor while another holds a change asks first; an unchanged one gives way (decideOpen).
+    const product = run([{ type: "open", editor: productEditorId(11), place: "Penny Sleeves", base: { a: 1 } }, { type: "edit", value: { a: 2 } }]);
+    expect(decideOpen(product, categoryEditorId(40))).toBe("ask");
+    expect(decideOpen(run([{ type: "open", editor: productEditorId(11), place: "Penny Sleeves", base: { a: 1 } }]), categoryEditorId(40))).toBe("open");
+    const category = run([{ type: "open", editor: categoryEditorId(40), place: "Sleeves", base: { a: 1 } }, { type: "edit", value: { a: 2 } }]);
+    expect(category).toMatchObject({ editor: "category:40", place: "Sleeves", changes: 1 });
+    // And the other way round: a held category change is asked about before the drawer, the sheet or a Store defaults row opens.
+    expect(decideOpen(category, productEditorId(11))).toBe("ask");
+    expect(decideOpen(category, BULK_EDITOR_ID)).toBe("ask");
+    expect(decideOpen(category, "shipping")).toBe("ask");
+    expect(decideOpen(category, categoryEditorId(41))).toBe("ask");
+    expect(decideOpen(category, categoryEditorId(40))).toBe("open");
+    expect(describeListingSettingsBar({ draft: category, olderDraftCount: 0, saving: false })).toBe("Not saved · 1 change in Sleeves");
   });
 
   it("names Set for selected's editor \"bulk\", one draft beside the others (PR 10c, D16)", () => {
@@ -415,8 +444,8 @@ describe("reduceListingSettingsDraft", () => {
   });
 });
 
-/** The PR 7 writers; W5, W6 and W7 (PR 10) have their own tables below. */
-type Pr7Writer = Exclude<ListingSettingsWriter, "W5" | "W6" | "W7" | "W13">;
+/** The PR 7 writers; W5, W6, W7, W12 and W13 (PR 10) have their own tables below. */
+type Pr7Writer = Exclude<ListingSettingsWriter, "W5" | "W6" | "W7" | "W12" | "W13">;
 
 describe("classifyWriteFailure", () => {
   const writers: readonly Pr7Writer[] = ["W1", "W2", "W3", "W4", "W9", "W10"];
@@ -879,5 +908,58 @@ describe("classifyWriteFailure for W13 (PR 10g, plan 3.3, 10.5)", () => {
     expect(W13(409, "DROPSHIP_IDEMPOTENCY_CONFLICT")).toMatchObject({ phase: "refused", message: LISTING_SETTINGS_SAVE_WORDS.keyReused });
     expect(W13(422, "DROPSHIP_LISTING_SETTINGS_TOO_LARGE")).toMatchObject({ phase: "refused", message: "Server words." });
     expect(classifyWriteFailure("W13", new TypeError("Failed to fetch"))).toEqual({ phase: "uncertain", message: LISTING_SETTINGS_SAVE_WORDS.uncertain, code: null, status: null, fields: [] });
+  });
+});
+
+describe("classifyWriteFailure for W12 (PR 10e, plan 3.3, 8.6)", () => {
+  const W12 = (status: number, code: string | null, context?: Record<string, unknown>, options?: ClassifyWriteFailureOptions) =>
+    classifyWriteFailure("W12", apiError(status, code, "Server words.", context), options);
+
+  it("calls the category's conflict and the clear set's conflict a conflict, the second naming the category (plan 8.6)", () => {
+    expect(W12(409, "DROPSHIP_CATEGORY_LISTING_SETTINGS_VERSION_CONFLICT", { categoryId: 40, expectedRevisionId: 7, actualRevisionId: 8 })).toEqual({
+      phase: "conflict", message: "This changed in another window.", code: "DROPSHIP_CATEGORY_LISTING_SETTINGS_VERSION_CONFLICT", status: 409, fields: [],
+    });
+    expect(W12(409, "DROPSHIP_PRODUCT_LISTING_SETTINGS_VERSION_CONFLICT", { conflicts: [{ productId: 12 }], conflictCount: 1 }, { categoryName: "Sleeves" })).toEqual({
+      phase: "conflict", message: "The products in Sleeves changed. Load the latest and save again. A Card Shellz change can take a minute to show.",
+      code: "DROPSHIP_PRODUCT_LISTING_SETTINGS_VERSION_CONFLICT", status: 409, fields: [],
+    });
+    expect(W12(409, "DROPSHIP_PRODUCT_LISTING_SETTINGS_VERSION_CONFLICT", { conflictCount: 3 }).message)
+      .toBe("The products in this category changed. Load the latest and save again. A Card Shellz change can take a minute to show.");
+    // W6's count words stay W6's.
+    expect(classifyWriteFailure("W6", apiError(409, "DROPSHIP_PRODUCT_LISTING_SETTINGS_VERSION_CONFLICT", "x", { conflictCount: 3 })).message)
+      .toBe("3 of the selected products changed in another window.");
+  });
+
+  it("refuses older group rules in the D11 line, a category no product is in any more, and too much text in the 6.5 words (plan 8.6)", () => {
+    expect(W12(409, "DROPSHIP_LISTING_SETTINGS_OLDER_RULES_PRESENT", { pricingGroups: 1, contentGroups: 0, ebayCategoryRules: 0 })).toEqual({
+      phase: "refused", message: LISTING_SETTINGS_CATEGORY_WORDS.olderRules, code: "DROPSHIP_LISTING_SETTINGS_OLDER_RULES_PRESENT", status: 409, fields: [],
+    });
+    expect(W12(404, "DROPSHIP_LISTING_SETTINGS_CATEGORY_NOT_FOUND", { categoryId: 40 })).toMatchObject({ phase: "refused", message: "No chosen product is in this category any more." });
+    expect(W12(422, "DROPSHIP_LISTING_SETTINGS_BULK_TOO_LARGE", { textBytes: 30_000_001, maxTextBytes: 30_000_000, productCount: 3 })).toMatchObject({
+      phase: "refused", message: LISTING_SETTINGS_BULK_WORDS.tooMuchText,
+    });
+    // The other writers can't get W12's codes: refused with the invalid words (3.3 row 22).
+    for (const writer of ["W5", "W6", "W7", "W13"] as const) {
+      expect(classifyWriteFailure(writer, apiError(409, "DROPSHIP_LISTING_SETTINGS_OLDER_RULES_PRESENT", "x")).message).toBe(LISTING_SETTINGS_EDIT_WORDS.invalid);
+      expect(classifyWriteFailure(writer, apiError(404, "DROPSHIP_LISTING_SETTINGS_CATEGORY_NOT_FOUND", "x")).message).toBe(LISTING_SETTINGS_EDIT_WORDS.invalid);
+    }
+  });
+
+  it("refuses what W12 can't be answered (a price, a product by path, a review), and keeps the shared rows", () => {
+    for (const [status, code] of [
+      [422, "DROPSHIP_LISTING_PRICE_WOULD_BE_LOST"], [409, "DROPSHIP_LISTING_PRICES_MOVED"], [422, "DROPSHIP_LISTING_PRICE_RELEASE_LIMIT"],
+      [404, "DROPSHIP_LISTING_SETTINGS_PRODUCT_NOT_FOUND"], [404, "DROPSHIP_PRICING_REVIEW_NOT_FOUND"],
+    ] as const) {
+      expect(W12(status, code, { productId: 11, releaseCount: 1, maxReleases: 1 })).toMatchObject({ phase: "refused", message: LISTING_SETTINGS_EDIT_WORDS.invalid });
+    }
+    expect(W12(503, "DROPSHIP_LISTING_SETTINGS_BUSY", { reason: "heavy_write_in_progress" })).toMatchObject({ phase: "unreachable", message: LISTING_SETTINGS_EDIT_WORDS.busyHeavy });
+    expect(W12(503, "DROPSHIP_LISTING_SETTINGS_BUSY")).toMatchObject({ phase: "uncertain" });
+    expect(W12(500, "DROPSHIP_LISTING_SETTINGS_REPLAY_INCOMPLETE")).toMatchObject({ phase: "refused", message: LISTING_SETTINGS_EDIT_WORDS.fatal });
+    expect(W12(409, "DROPSHIP_IDEMPOTENCY_CONFLICT")).toMatchObject({ phase: "refused", message: LISTING_SETTINGS_SAVE_WORDS.keyReused });
+    // W12 asks eBay about a new id: eBay's refusals and a sign-in keep their rows.
+    expect(W12(422, "DROPSHIP_EBAY_STORE_CATEGORY_INVALID", { reason: "not_found", invalidFields: ["storeShelf"] })).toMatchObject({ phase: "refused", fields: ["storeShelf"] });
+    expect(W12(403, "DROPSHIP_LISTING_SETTINGS_EBAY_SIGN_IN_REQUIRED", { fields: ["ebayCategory"] })).toMatchObject({ phase: "blocked", fields: ["ebayCategory"] });
+    expect(W12(422, "DROPSHIP_LISTING_SETTINGS_TOO_LARGE", { reason: "store_text_limit" })).toMatchObject({ phase: "refused", message: LISTING_SETTINGS_EDIT_WORDS.storeTextLimit });
+    expect(classifyWriteFailure("W12", new TypeError("Failed to fetch"))).toEqual({ phase: "uncertain", message: LISTING_SETTINGS_SAVE_WORDS.uncertain, code: null, status: null, fields: [] });
   });
 });

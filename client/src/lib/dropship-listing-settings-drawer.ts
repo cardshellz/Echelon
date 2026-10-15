@@ -294,6 +294,61 @@ export function sheetSearch(search: string, sheet: ListingSettingsSheet | null):
 }
 
 // ---------------------------------------------------------------------------
+// The category editor in the page address (?category=<id>; plan PR 10, 8.2, D21)
+// ---------------------------------------------------------------------------
+
+export const LISTING_SETTINGS_CATEGORY_PARAM = "category";
+
+/**
+ * The Card Shellz category whose editor a page address opens (D21), or null:
+ * one `category` parameter holding a positive whole id; a repeated or
+ * malformed one opens nothing. Browser Back to an address without it closes
+ * the editor, and its draft is kept.
+ */
+export function categoryTargetFromSearch(search: string): number | null {
+  return idParam(new URLSearchParams(search), LISTING_SETTINGS_CATEGORY_PARAM);
+}
+
+/**
+ * The page address with the category editor open on `categoryId`, or closed
+ * with null (D21: pushed on open, replaced on close). Every other parameter
+ * is kept as it was, the drawer's and the sheets' included (K15); one surface
+ * at a time (D20) is the page's to keep, as `listingSettingsSurfaceFromSearch`
+ * reads it. Returns "" or "?…".
+ */
+export function categorySearch(search: string, categoryId: number | null): string {
+  const params = new URLSearchParams(search);
+  params.delete(LISTING_SETTINGS_CATEGORY_PARAM);
+  if (categoryId !== null) {
+    if (!isId(categoryId)) throw new Error("The category editor opens on a positive whole-number category id only.");
+    params.set(LISTING_SETTINGS_CATEGORY_PARAM, String(categoryId));
+  }
+  const text = params.toString();
+  return text ? `?${text}` : "";
+}
+
+/** The one surface a page address opens (D20, D21): the drawer, a sheet, or the category editor. */
+export type ListingSettingsSurface =
+  | { kind: "drawer"; target: DrawerTarget }
+  | { kind: "sheet"; sheet: ListingSettingsSheet }
+  | { kind: "category"; categoryId: number };
+
+/**
+ * Which surface a page address opens, one at a time (D20): the drawer wins
+ * over a sheet, which wins over the category editor (the order the parts
+ * arrived in; an address naming two comes only from Forward or by hand,
+ * since each opener takes the others off the address first). Null for none.
+ */
+export function listingSettingsSurfaceFromSearch(search: string): ListingSettingsSurface | null {
+  const target = drawerTargetFromSearch(search);
+  if (target !== null) return { kind: "drawer", target };
+  const sheet = sheetFromSearch(search);
+  if (sheet !== null) return { kind: "sheet", sheet };
+  const categoryId = categoryTargetFromSearch(search);
+  return categoryId === null ? null : { kind: "category", categoryId };
+}
+
+// ---------------------------------------------------------------------------
 // The header (R:591)
 // ---------------------------------------------------------------------------
 
@@ -1421,8 +1476,8 @@ export interface DrawerSettingsEditInput {
 
 type SettingValue<K extends ListingSettingsSettingKey> = ListingSettingsProductDetail["settings"][K][number]["value"];
 
-/** The name the product's own row stored for this policy, when its own policy is this one (G2). */
-function ownPolicyName(own: ProductOwnSettings | null, key: PolicyEditField, policyId: string | null): string | null {
+/** The name the product's own row stored for this policy, when its own policy is this one (G2). Also a category's row (PR 10e). */
+function ownPolicyName(own: Pick<ProductOwnSettings, "own"> | null, key: PolicyEditField, policyId: string | null): string | null {
   const saved = own?.own[key] ?? null;
   return saved !== null && saved.id === policyId ? saved.name : null;
 }
@@ -1494,8 +1549,8 @@ function settingGroup(
 
 const LEAVE_CHOICE: FieldChoice<never> = Object.freeze({ mode: "leave" });
 
-/** A picked shelf's name: the product's own row's, else the shelves read's path, else "A shelf". */
-function shelfName(id: string, own: ProductOwnSettings | null, shelves: readonly DropshipEbayStoreCategoryOption[] | null): string {
+/** A picked shelf's name: the product's (or category's, PR 10e) own row's, else the shelves read's path, else "A shelf". */
+function shelfName(id: string, own: Pick<ProductOwnSettings, "own"> | null, shelves: readonly DropshipEbayStoreCategoryOption[] | null): string {
   const saved = own?.own.storeShelf;
   const stored = saved?.mode === "own" ? saved.shelves.find((shelf) => shelf.id === id)?.name ?? null : null;
   if (stored !== null) return shelfPathWords(stored) || UNNAMED_SHELF;
@@ -1505,13 +1560,15 @@ function shelfName(id: string, own: ProductOwnSettings | null, shelves: readonly
 
 /**
  * A one-field row's change before Save, by name only (never an id). Also the
- * "Set for selected" rows' (PR 10 plan 6.3), with no product's own row (`own` null).
+ * "Set for selected" rows' (PR 10 plan 6.3), with no product's own row (`own`
+ * null), and the category editor's (PR 10e), with the category's own row in
+ * the product row's shape (the two store the same value shapes, `SR`).
  */
 export function fieldPendingWords(
   field: DrawerFieldTarget,
   choice: ProductFieldChoice<DrawerFieldTarget>,
   setup: ListingSettingsReadState<PolicySetupFacts>,
-  own: ProductOwnSettings | null,
+  own: Pick<ProductOwnSettings, "own"> | null,
   shelves: readonly DropshipEbayStoreCategoryOption[] | null,
 ): string | null {
   if (choice.mode === "leave") return null;

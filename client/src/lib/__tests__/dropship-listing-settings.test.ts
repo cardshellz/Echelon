@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { keepPreviousData } from "@tanstack/react-query";
 import {
+  listingSettingsCategoriesResponseSchema,
+  listingSettingsCategoryDetailSchema,
   listingSettingsPricesResponseSchema,
   listingSettingsProductDetailSchema,
   listingSettingsProductIdsResponseSchema,
@@ -18,6 +20,8 @@ import {
   LISTING_SETTINGS_INVALID_REQUEST,
   LISTING_SETTINGS_OFF_CONTRACT,
   ListingSettingsReadError,
+  listingSettingsCategoriesQueryOptions,
+  listingSettingsCategoryQueryOptions,
   listingSettingsPricesQueryOptions,
   listingSettingsProductIdsQueryOptions,
   listingSettingsProductOwnQueryOptions,
@@ -436,6 +440,85 @@ describe("listing settings updated-products query (Card Shellz updated products,
     for (const [status, code] of [[422, "DROPSHIP_LISTING_SETTINGS_TOO_LARGE"], [429, "DROPSHIP_LISTING_SETTINGS_RATE_LIMITED"], [422, "DROPSHIP_LISTING_SETTINGS_EBAY_ONLY"]] as const) {
       stubFetch({ error: { code, message: "Refused." } }, status);
       await expect(listingSettingsUpdatedProductsQueryOptions(22, 0).queryFn({ signal })).rejects.toMatchObject({ status, code });
+    }
+  });
+});
+
+describe("listing settings categories queries (the Category settings card and editor, PR 10e, plan 8.2, D6, D10, D18)", () => {
+  const categories = listingSettingsCategoriesResponseSchema.parse({
+    storeConnectionId: 22, generatedAt: GENERATED_AT, uncategorizedProductCount: 4,
+    categories: [{ categoryId: 40, name: "Sleeves", productCount: 15, revisionId: 7, setFields: ["shippingPolicy"] }, { categoryId: 41, name: "Toploaders", productCount: 1, revisionId: null, setFields: [] }],
+  });
+  const detail = listingSettingsCategoryDetailSchema.parse({
+    storeConnectionId: 22, categoryId: 40, name: "Sleeves", productCount: 15, revisionId: 7, generatedAt: GENERATED_AT, examples: [sizePrice],
+    settings: {
+      price: { source: "none", value: null }, ebayCategory: { source: "none", value: null }, storeShelf: { source: "store_default", value: { mode: "none" } },
+      shippingPolicy: { source: "category", value: { id: "F2", name: "Fast Free" } }, returnPolicy: { source: "store_default", value: { id: "R1", name: null } },
+      paymentPolicy: { source: "none", value: null }, textAbove: { source: "none", value: null }, textBelow: { source: "none", value: null },
+    },
+    ownValues: [{ productId: 11, revisionId: 5, fields: ["shippingPolicy"] }],
+  });
+
+  it("reads every category of the chosen products under the store's prefix, a list read at most a minute old", async () => {
+    const fetchMock = stubFetch(categories);
+    const options = listingSettingsCategoriesQueryOptions(22);
+    expect(options.queryKey).toEqual(["/api/dropship/listings/stores", 22, "listing-settings", "categories"]);
+    expect(options.queryKey.slice(0, 3)).toEqual(listingSettingsQueryKey(22));
+    await expect(options.queryFn({ signal })).resolves.toEqual(categories);
+    expect(fetchMock.mock.calls[0][0]).toBe("/api/dropship/listings/stores/22/listing-settings/categories");
+    expect(options).toMatchObject({ enabled: true, retry: false, staleTime: 60_000 });
+    expect(listingSettingsCategoriesQueryOptions(22, { enabled: false }).enabled).toBe(false);
+    for (const store of [0, -3, 1.5]) expect(listingSettingsCategoriesQueryOptions(store).enabled).toBe(false);
+    await expect(listingSettingsCategoriesQueryOptions(0).queryFn({ signal })).rejects.toMatchObject({ code: LISTING_SETTINGS_INVALID_REQUEST, context: { read: "categories" } });
+  });
+
+  it("reads one category fresh each time the editor opens, under its own key beside the product detail's", async () => {
+    const fetchMock = stubFetch(detail);
+    const options = listingSettingsCategoryQueryOptions(22, 40);
+    expect(options.queryKey).toEqual(["/api/dropship/listings/stores", 22, "listing-settings", "category", 40]);
+    expect(options.queryKey).not.toEqual(listingSettingsProductQueryOptions(22, 40).queryKey);
+    await expect(options.queryFn({ signal })).resolves.toEqual(detail);
+    expect(fetchMock.mock.calls[0][0]).toBe("/api/dropship/listings/stores/22/listing-settings/categories/40");
+    expect(options).toMatchObject({ enabled: true, retry: false, staleTime: 0 });
+    expect(listingSettingsCategoryQueryOptions(22, 40, { enabled: false }).enabled).toBe(false);
+    for (const categoryId of [0, -3, 1.5, Number.NaN, 2_147_483_648]) expect(listingSettingsCategoryQueryOptions(22, categoryId).enabled).toBe(false);
+    fetchMock.mockClear();
+    await expect(listingSettingsCategoryQueryOptions(22, 0).queryFn({ signal })).rejects.toMatchObject({ code: LISTING_SETTINGS_INVALID_REQUEST, context: { read: "category" } });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("refuses answers outside the strict contracts, or for another store or category", async () => {
+    for (const answer of [
+      { ...categories, extra: 1 }, { ...categories, storeConnectionId: 23 },
+      { ...categories, categories: [{ ...categories.categories[0], revisionId: null }] },
+      { ...categories, categories: [categories.categories[0], categories.categories[0]] },
+      null,
+    ]) {
+      stubFetch(answer);
+      await expect(listingSettingsCategoriesQueryOptions(22).queryFn({ signal })).rejects.toMatchObject({ code: LISTING_SETTINGS_OFF_CONTRACT, context: { read: "categories" } });
+    }
+    for (const answer of [
+      { ...detail, extra: 1 }, { ...detail, storeConnectionId: 23 }, { ...detail, categoryId: 41 },
+      { ...detail, revisionId: null },
+      { ...detail, ownValues: [{ productId: 11, revisionId: 5, fields: [] }] },
+      { ...detail, ownValues: [detail.ownValues[0], detail.ownValues[0]] },
+      { ...detail, settings: { ...detail.settings, paymentPolicy: { source: "none", value: { id: "P1", name: null } } } },
+      "ok",
+    ]) {
+      stubFetch(answer);
+      await expect(listingSettingsCategoryQueryOptions(22, 40).queryFn({ signal })).rejects.toMatchObject({ code: LISTING_SETTINGS_OFF_CONTRACT, context: { read: "category" } });
+    }
+  });
+
+  it("passes the server's refusals on, for the card's and the editor's words and the too-large banner (D18)", async () => {
+    for (const [status, code] of [[422, "DROPSHIP_LISTING_SETTINGS_TOO_LARGE"], [429, "DROPSHIP_LISTING_SETTINGS_RATE_LIMITED"], [422, "DROPSHIP_LISTING_SETTINGS_EBAY_ONLY"]] as const) {
+      stubFetch({ error: { code, message: "Refused." } }, status);
+      await expect(listingSettingsCategoriesQueryOptions(22).queryFn({ signal })).rejects.toMatchObject({ status, code });
+    }
+    for (const [status, code] of [[404, "DROPSHIP_LISTING_SETTINGS_CATEGORY_NOT_FOUND"], [422, "DROPSHIP_LISTING_SETTINGS_TOO_LARGE"], [429, "DROPSHIP_LISTING_SETTINGS_RATE_LIMITED"]] as const) {
+      stubFetch({ error: { code, message: "Refused." } }, status);
+      await expect(listingSettingsCategoryQueryOptions(22, 40).queryFn({ signal })).rejects.toBeInstanceOf(DropshipApiError);
+      await expect(listingSettingsCategoryQueryOptions(22, 40).queryFn({ signal })).rejects.toMatchObject({ status, code });
     }
   });
 });
