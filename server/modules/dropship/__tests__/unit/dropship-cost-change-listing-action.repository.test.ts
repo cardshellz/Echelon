@@ -239,7 +239,7 @@ describe("PgDropshipCostChangeListingActionRepository", () => {
 
   it("serves the vendor's recent listing actions and staff pages, with labels and the hold's release", async () => {
     const row = {
-      id: "71", entry_id: "11", listing_id: 2, store_connection_id: 9, platform: "shopify", product_variant_id: 62, variant_sku: "SKU-62", variant_name: "Single",
+      id: "71", entry_id: "11", listing_id: 2, store_connection_id: 9, platform: "shopify", product_variant_id: 62, product_id: 7, variant_sku: "SKU-62", variant_name: "Single",
       product_name: "Armor Envelope", action: "below_cost_paused", detail: null, listing_price_cents: "899", unit_cost_cents: "999", push_job_id: null, decided_at: NOW,
       hold_released_at: EFFECTIVE, hold_release_reason: "price_covers_cost", vendor_id: 5, business_name: "Shellz Vendor", listing_status: "active",
       price_source: "saved_listing", policy_id: 3,
@@ -248,20 +248,41 @@ describe("PgDropshipCostChangeListingActionRepository", () => {
     const repo = repository(pool);
     const since = new Date("2026-09-13T00:05:00.000Z");
     const vendorRows = await repo.listVendorListingActions({ vendorId: 5, since, limit: 200 });
+    // The size's product id rides along for the portal's link to its price (PR 10h, D13b), from the variant row the query already joins.
+    expect(calls[0]?.sql).toContain("a.product_variant_id, pv.product_id, pv.sku AS variant_sku");
     expect(calls[0]?.sql).toContain("LEFT JOIN dropship.dropship_cost_change_listing_holds h ON h.id = a.hold_id WHERE a.vendor_id = $1 AND a.decided_at >= $2 ORDER BY a.id DESC LIMIT $3");
     expect(calls[0]?.values).toEqual([5, since, 200]);
     expect(vendorRows).toEqual([{
-      actionId: 71, entryId: 11, listingId: 2, storeConnectionId: 9, platform: "shopify", productVariantId: 62, variantSku: "SKU-62", variantName: "Single",
+      actionId: 71, entryId: 11, listingId: 2, storeConnectionId: 9, platform: "shopify", productVariantId: 62, productId: 7, variantSku: "SKU-62", variantName: "Single",
       productName: "Armor Envelope", action: "below_cost_paused", detail: null, listingPriceCents: 899, unitCostCents: 999, pushJobId: null, decidedAt: NOW,
       holdReleasedAt: EFFECTIVE, holdReleaseReason: "price_covers_cost",
     }]);
     const staffRows = await repo.listListingActions({ limit: 51, beforeId: 80 });
+    expect(calls[1]?.sql).toContain("a.product_variant_id, pv.product_id, pv.sku AS variant_sku");
     expect(calls[1]?.sql).toContain("WHERE ($1::bigint IS NULL OR a.id < $1) ORDER BY a.id DESC LIMIT $2");
     expect(calls[1]?.values).toEqual([80, 51]);
-    expect(staffRows[0]).toMatchObject({ actionId: 71, vendorId: 5, vendorBusinessName: "Shellz Vendor", listingStatus: "active", priceSource: "saved_listing", policyId: 3 });
+    expect(staffRows[0]).toMatchObject({ actionId: 71, productId: 7, vendorId: 5, vendorBusinessName: "Shellz Vendor", listingStatus: "active", priceSource: "saved_listing", policyId: 3 });
     const bad = fakePool([result([{ ...row, action: "ignored" }])]);
     await expect(repository(bad.pool).listListingActions({ limit: 1, beforeId: null }))
       .rejects.toMatchObject({ code: "DROPSHIP_COST_SCHEDULE_INVALID_STORED_VALUE", context: { column: "action" } });
+  });
+
+  it("refuses a listing action whose product id is not a positive whole number, never coercing it", async () => {
+    const row = {
+      id: "71", entry_id: "11", listing_id: 2, store_connection_id: 9, platform: "ebay", product_variant_id: 62, product_id: 7, variant_sku: "SKU-62", variant_name: "Single",
+      product_name: "Armor Envelope", action: "below_cost_paused", detail: null, listing_price_cents: "899", unit_cost_cents: "999", push_job_id: null, decided_at: NOW,
+      hold_released_at: null, hold_release_reason: null, vendor_id: 5, business_name: "Shellz Vendor", listing_status: "active", price_source: "saved_listing", policy_id: 3,
+    };
+    for (const productId of [0, -1, 1.5, "7" as unknown as number]) {
+      const { pool } = fakePool([result([{ ...row, product_id: productId }])]);
+      const attempt = repository(pool).listVendorListingActions({ vendorId: 5, since: NOW, limit: 10 });
+      if (productId === "7" as unknown as number) {
+        // bigint-style text is accepted as the other id columns accept it.
+        await expect(attempt).resolves.toMatchObject([{ productId: 7 }]);
+      } else {
+        await expect(attempt).rejects.toMatchObject({ code: "DROPSHIP_COST_SCHEDULE_INVALID_STORED_VALUE", context: { column: "product_id" } });
+      }
+    }
   });
 
   it("maps a missing table to the transient code the pass retries on", async () => {

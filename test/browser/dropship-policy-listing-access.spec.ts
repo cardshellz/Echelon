@@ -206,6 +206,9 @@ test("an onboarding vendor is told to activate, can still preview, and is never 
 
   await card.getByRole("button", { name: "Preview selected" }).click();
   await expect(card.getByText("Envelope Single Pocket, Pack of 50").first()).toBeVisible();
+  // The row's price links to the product's drawer in Listing settings (PR 10h): the address is checked, not followed.
+  await expect(card.getByRole("link", { name: "Change in Listing settings: ENV-SGL-P50" }))
+    .toHaveAttribute("href", "/dropship-portal/catalog/setup?product=11&size=101");
   await expect(card.getByRole("button", { name: "Queue ready listings" })).toBeDisabled();
   await shot(page, testInfo, card, "catalog-access-onboarding");
   expect(state.previewCalls).toBe(1);
@@ -346,8 +349,8 @@ test("says plainly when nothing selected was ready to queue", async ({ page }) =
 
   await expect(card.getByTestId("listing-queue-result"))
     .toHaveText("Nothing was queued: the selected listing is not ready. The table below shows why.");
-  // The row itself says why, under its status badge.
-  await expect(card.getByTestId("listing-row-issues-101")).toHaveText("Catalog Package Data Required");
+  // The row itself says why, under its status badge, in words (PR 10h): never the code.
+  await expect(card.getByTestId("listing-row-issues-101")).toHaveText("Card Shellz hasn't added this size's package size yet. Contact support.");
   expect(state.pushCalls).toBe(1);
   expect(state.unexpected).toEqual([]); expect(state.errors).toEqual([]);
 });

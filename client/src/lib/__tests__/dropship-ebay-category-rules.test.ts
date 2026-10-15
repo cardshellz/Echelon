@@ -147,15 +147,19 @@ describe("eBay category words", () => {
     expect(ebayCategorySourceLabel("rule", "Envelopes")).toBe('From your rule "Envelopes"');
     expect(ebayCategorySourceLabel("rule", null)).toBe("From one of your rules");
     expect(ebayCategorySourceLabel("store_default", null)).toBe("From your store default");
-    expect(ebayCategorySourceLabel("catalog", null)).toBe("From the Card Shellz category");
+    // The catalog's own pick, in the drawer's words, so it can't be read as the category's setting (mS3 b.1).
+    expect(ebayCategorySourceLabel("catalog", null)).toBe("Card Shellz picks");
     expect(ebayCategorySourceLabel("none", null)).toBe("No eBay category yet");
-    // Product and category settings (interim words, R:§3.7).
-    expect(ebayCategorySourceLabel("product", null)).toBe("This product");
-    expect(ebayCategorySourceLabel("category", null)).toBe("From your Card Shellz category's settings");
+    // A product's own category and a Card Shellz category's (PR 10h): a place or a name, never an id.
+    expect(ebayCategorySourceLabel("product", null)).toBe("Set in Listing settings");
+    expect(ebayCategorySourceLabel("product", "Envelopes")).toBe("Set in Listing settings");
+    expect(ebayCategorySourceLabel("category", "Sleeves")).toBe("From category: Sleeves");
+    expect(ebayCategorySourceLabel("category", null)).toBe("From its Card Shellz category");
     for (const source of ebayCategorySourceValues) {
-      const label = ebayCategorySourceLabel(source, "Envelopes");
-      expect(label).not.toMatch(/[a-z]+_[a-z_]+/);
-      expect(label).not.toBe(source);
+      for (const label of [ebayCategorySourceLabel(source, "Envelopes"), ebayCategorySourceLabel(source, null)]) {
+        expect(label).not.toMatch(/[a-z]+_[a-z_]+|#\d|\d{4,}/);
+        expect(label).not.toBe(source);
+      }
     }
   });
 
