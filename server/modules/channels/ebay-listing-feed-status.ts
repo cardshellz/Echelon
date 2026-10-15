@@ -16,7 +16,7 @@ export type EbayFeedVariantListingState = z.infer<typeof stateSchema>;
 export function resolveEbayFeedListingState(
   states: readonly EbayFeedVariantListingState[],
   includedVariantIds: readonly number[],
-): { syncStatus: string | null; syncError: string | null; isListed: boolean; isEnded: boolean; needsPublicationCheck: boolean } {
+): { syncStatus: string | null; syncError: string | null; isListed: boolean; isEnded: boolean; needsPublicationCheck: boolean; unlinkedVariantIds: number[] } {
   const included = new Set(z.array(id).parse(includedVariantIds));
   const candidates = z.array(stateSchema).parse(states)
     .filter(state => included.has(state.variantId) && state.listingRecordId !== null);
@@ -24,16 +24,23 @@ export function resolveEbayFeedListingState(
   candidates.sort((left, right) => Number(hasError(right)) - Number(hasError(left)) || right.listingRecordId! - left.listingRecordId!);
   const current = candidates[0];
   // A quantity acknowledgement can mark a local row synced before publication.
-  // Only complete, consistent saved listing identities support a Listed badge;
-  // a fresh provider review decides how incomplete publication can continue.
-  const hasCompletePublication = included.size > 0 && candidates.length === included.size &&
+  // A newly selected catalog variant with no channel row is separate from an
+  // incomplete publication attempt. It must not block updates to a saved listing.
+  // Existing offer-only, pending, conflicting or duplicate rows still need review.
+  const mappedIds = new Set(candidates.map(state => state.variantId));
+  const hasCompletePublication = candidates.length > 0 && mappedIds.size === candidates.length &&
     candidates.every(state => state.externalListingId !== null) &&
     new Set(candidates.map(state => state.externalListingId)).size === 1;
+  const coversSelection = mappedIds.size === included.size;
+  const hasCurrentListing = candidates.every(state => ["synced", "error"].includes(state.syncStatus ?? ""));
+  const isEnded = included.size > 0 && coversSelection && mappedIds.size === candidates.length
+    && candidates.every(state => ["ended", "deleted"].includes(state.syncStatus ?? ""));
   return {
     syncStatus: current?.syncStatus ?? null,
     syncError: current?.syncError ?? null,
     isListed: hasCompletePublication && candidates.every(state => state.syncStatus === "synced" && !hasError(state)),
-    isEnded: included.size > 0 && candidates.length === included.size && candidates.every(state => ["ended", "deleted"].includes(state.syncStatus ?? "")),
-    needsPublicationCheck: candidates.length > 0 && (!hasCompletePublication || candidates.some(state => !["synced", "error", "ended", "deleted"].includes(state.syncStatus ?? ""))),
+    isEnded,
+    needsPublicationCheck: candidates.length > 0 && (!hasCompletePublication || (!hasCurrentListing && !isEnded)),
+    unlinkedVariantIds: [...included].filter(variantId => !mappedIds.has(variantId)),
   };
 }

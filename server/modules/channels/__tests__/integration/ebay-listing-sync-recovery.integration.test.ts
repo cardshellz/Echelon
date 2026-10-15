@@ -48,7 +48,7 @@ import {
   syncIdentity,
   syncProviderFixture,
 } from "../fixtures/ebay-listing-sync.fixture";
-import type { EbayListingSyncIdentity } from "../../ebay-listing-sync.domain";
+import { EbayListingSyncError, type EbayListingSyncIdentity } from "../../ebay-listing-sync.domain";
 vi.mock("../../../../db", () => ({ pool: {} }));
 const configured =
   process.env.ECHELON_TEST_DATABASE_URL &&
@@ -354,6 +354,42 @@ const configured =
       expect(f.provider.currentGroup().imageUrls).toEqual(galleryPhotos);
       expect(await f.store.get(original.id)).toEqual(oldJob);
       expect((await database.pool.query("SELECT * FROM channels.ebay_listing_sync_events WHERE job_id=$1 ORDER BY id", [original.id])).rows).toEqual(oldEvents);
+      expect(f.provider.client.createOffer).not.toHaveBeenCalled();
+      expect(f.provider.client.publishOfferByInventoryItemGroup).not.toHaveBeenCalled();
+    });
+
+    it("continues an old invalid draft through normal sync, preserving its failure and coalescing repeated commands", async () => {
+      const f = fixture({ photoUrls: galleryPhotos });
+      f.prepare.mockRejectedValueOnce(new EbayListingSyncError("EBAY_SYNC_DRAFT_SCOPE_INVALID",
+        "The prepared update contains a different listing, group or SKU identity."));
+      const original = await f.service.enqueue(identity, "operator");
+      await f.service.processDue(1, original.id);
+      const oldJob = await f.store.get(original.id);
+      const oldEvents = (await database.pool.query("SELECT * FROM channels.ebay_listing_sync_events WHERE job_id=$1 ORDER BY id", [original.id])).rows;
+      expect(oldJob).toMatchObject({ state: "needs_attention", code: "EBAY_SYNC_DRAFT_SCOPE_INVALID" });
+      expect(f.mutations).toEqual([]);
+      expect((await f.service.list(identity.channelId)).find(job => job.id === original.id)?.issue)
+        .toMatchObject({ retryable: true, action: { kind: "retry_sync", label: "Sync existing listing" } });
+      advance();
+      const commandKey = randomUUID();
+      const [retry, replay] = await Promise.all([
+        f.service.enqueue(identity, "operator", commandKey), f.service.enqueue(identity, "operator", commandKey),
+      ]);
+      expect(retry.id).not.toBe(original.id);
+      expect(replay.id).toBe(retry.id);
+      const restarted = new EbayListingSyncService(new PostgresEbayListingSyncRepository(database.pool), f.executor, clock, randomUUID);
+      await Promise.all([f.service.processDue(1, retry.id), restarted.processDue(1, retry.id)]);
+      expect(await f.store.get(retry.id)).toMatchObject({ state: "completed", result: { synced: 1, errors: 0 } });
+      expect(f.provider.currentItem().product.imageUrls).toEqual(galleryPhotos);
+      expect(f.provider.currentGroup().imageUrls).toEqual(galleryPhotos);
+      expect(await f.store.get(original.id)).toEqual(oldJob);
+      expect((await database.pool.query("SELECT * FROM channels.ebay_listing_sync_events WHERE job_id=$1 ORDER BY id", [original.id])).rows).toEqual(oldEvents);
+      expect((await database.pool.query("SELECT sync_status,sync_error FROM channels.channel_listings")).rows)
+        .toEqual([{ sync_status: "synced", sync_error: null }]);
+      const writes = structuredClone(f.mutations);
+      expect((await f.service.enqueue(identity, "operator", commandKey)).id).toBe(retry.id);
+      await restarted.processDue(1, retry.id);
+      expect(f.mutations).toEqual(writes);
       expect(f.provider.client.createOffer).not.toHaveBeenCalled();
       expect(f.provider.client.publishOfferByInventoryItemGroup).not.toHaveBeenCalled();
     });

@@ -384,7 +384,10 @@ export class AuthorityAwareInventoryPublicationService {
   }
 }
 
-async function zeroPublicationIntents(context: InventoryAvailabilityRuntimePublicationContext,
+/** Shared retained-listing projection for publication and exact mapping review.
+ * The loader must return only destinations selected by the listing owner. */
+export async function zeroPublicationIntents(context: Pick<InventoryAvailabilityRuntimePublicationContext,
+  "authority" | "authorityRevision" | "activationRunId" | "loadActivePublicationTargets">,
   productId: number, productVariantId: number, channelId?: number, publicationTargetId?: number,
 ): Promise<CanonicalInventoryPublicationIntent[]> {
   const targets = await context.loadActivePublicationTargets({ productId, productVariantIds: [productVariantId], channelId });
@@ -585,7 +588,7 @@ function canonicalActivationRunId(context: InventoryAvailabilityRuntimePublicati
 function publicationError(
   code: string,
   message: string,
-  context: InventoryAvailabilityRuntimePublicationContext,
+  context: Pick<InventoryAvailabilityRuntimePublicationContext, "authority" | "authorityRevision" | "activationRunId">,
   details: Readonly<Record<string, unknown>>,
 ): InventoryAvailabilityRuntimePublicationError {
   return new InventoryAvailabilityRuntimePublicationError(code, message, {

@@ -54,7 +54,9 @@ export async function captureEbayPublicationReadiness(client: PoolClient, source
     LEFT JOIN inventory.publication_variant_mapping_versions active ON active.id=h.active_mapping_id
     LEFT JOIN inventory.inventory_publication_target_variant_holds holds ON holds.publication_target_id=$1 AND holds.product_variant_id=v.id
     WHERE v.id=ANY($3::integer[]) ORDER BY v.id`, [target?.id ?? null, source.channelId, source.variants.map(row => row.productVariantId)])).rows.map(row => ebayPublicationMappingRowSchema.parse(row));
-  const proposal: PublicationMappingProposal = { mappings: [], newMappingVariantIds: [] };
+  const proposal: PublicationMappingProposal = { mappings: [], newMappingVariantIds: [],
+    identities: source.variants.map(member => ({ productVariantId: member.productVariantId,
+      externalInventoryItemId: member.sku, externalSku: member.sku })) };
   const mappings: ActivePublicationVariantMappingSnapshot[] = [], missing: number[] = [];
   const variants = source.variants.map(input => {
     const matches = rows.filter(row => row.id === input.productVariantId);
@@ -71,7 +73,8 @@ export async function captureEbayPublicationReadiness(client: PoolClient, source
   let mappingReview = null;
   if (target && blockers.length === 0) {
     mappingReview = (await reviewMappingPreparation(client, { publicationTargetId: target.id, expectedTargetRevision: target.revision,
-      productId: source.productId, productVariantIds: source.variants.map(row => row.productVariantId) }, lock, proposal)).review;
+      productId: source.productId, productVariantIds: source.variants.map(row => row.productVariantId),
+      allowRetainedZero: source.purpose === "sync" }, lock, proposal)).review;
     blockers.push(...mappingReview.blockers);
     for (const variant of variants) {
       const quantity = mappingReview.quantities.find(row => row.productVariantId === variant.productVariantId);

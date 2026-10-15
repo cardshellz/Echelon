@@ -11,7 +11,9 @@ import type { ActivePublicationVariantMappingSnapshot } from "../application/inv
 import { loadAndLockRuntimeAuthority } from "./inventory-availability-runtime-atp.repository";
 import { captureActiveSupplySnapshotInsideTransaction } from "./inventory-availability-shadow.repository";
 import { loadActivePublicationTargets, loadManagedSellableVariantIds } from "./inventory-channel-exposure-runtime.repository";
-import { createTransactionScopedInventoryPublicationService } from "./inventory-availability-runtime-publication.repository";
+import { createTransactionScopedInventoryPublicationService, loadZeroPublicationTargets } from "./inventory-availability-runtime-publication.repository";
+import { zeroPublicationIntents, type ActivePublicationVariantMapping } from "../application/inventory-availability-runtime-publication.service";
+import { readPublicationStockSelection } from "./inventory-publication-selection.reader";
 import { loadPublicationTargetScopes, PUBLICATION_TARGET_SCOPE_LOCK_SEED } from "./inventory-publication-target-stop.repository";
 import { quantityPublicationScopeLockKey } from "./quantity-publication-admission.repository";
 const id = z.number().int().positive();
@@ -23,6 +25,8 @@ export type MappingPreparationTarget = z.infer<typeof targetSchema>;
 export interface PublicationMappingProposal {
     mappings: readonly ActivePublicationVariantMappingSnapshot[];
     newMappingVariantIds: readonly number[];
+    /** Exact proposed identities, including members without a saved mapping yet. */
+    identities: readonly ActivePublicationVariantMapping[];
 }
 export const mappingPreparationDigest = (value: unknown) => createHash("sha256").update(canonicalJson(value)).digest("hex");
 const fail = (code: string, message: string): never => { throw new InventoryPublicationMembershipError(code, message); };
@@ -59,6 +63,7 @@ export async function reviewMappingPreparation(client: PoolClient, input: {
     expectedTargetRevision: string;
     productId: number;
     productVariantIds: readonly number[];
+    allowRetainedZero?: boolean;
 }, lock: boolean, proposal?: PublicationMappingProposal) {
     const authority = await loadAndLockRuntimeAuthority(client);
     const target = (await readTargets(client, undefined, undefined, input.publicationTargetId, lock))[0];
@@ -73,11 +78,15 @@ export async function reviewMappingPreparation(client: PoolClient, input: {
     const managedSellableVariantIds = await loadManagedSellableVariantIds(client, input.productId);
     const targets = await loadActivePublicationTargets(client, input.productId, managedSellableVariantIds);
     const selected = targets.find(candidate => candidate.publicationTargetId === target.id);
+    const selection = await readPublicationStockSelection(client, {
+        destinationKind: target.destination_kind, channelId: target.channel_id,
+        channelConnectionId: target.channel_connection_id, dropshipStoreConnectionId: target.dropship_store_connection_id,
+    }, { productId: input.productId, productVariantIds: input.productVariantIds });
     if (!selected)
         blockers.push(blocker("STOCK_LISTING_TARGET_UNAVAILABLE", "This destination has no active stock plan."));
     for (const variantId of input.productVariantIds) {
-        const decision = selected?.selection?.variants.find(row => row.productVariantId === variantId);
-        if (decision?.action !== "publish")
+        const decision = selection.variants.find(row => row.productVariantId === variantId);
+        if (decision?.action !== "publish" && !(input.allowRetainedZero && decision?.action === "zero"))
             blockers.push(blocker("STOCK_LISTING_NOT_SELECTED", decision?.reason ?? "Select this exact variant in its channel listing before publishing stock.", variantId));
         for (const issue of decision?.blockers ?? [])
             blockers.push(blocker(issue.code, issue.message, variantId));
@@ -88,10 +97,30 @@ export async function reviewMappingPreparation(client: PoolClient, input: {
     const targetPlan = plan.targets.find(candidate => candidate.publicationTargetId === target.id);
     for (const issue of targetPlan?.blockers ?? [])
         blockers.push(blocker(issue.code, issue.message));
+    // Inactive retained members are intentionally absent from positive ATP.
+    // Use the publication owner's existing removal projection, not a fabricated
+    // ATP row or a second quantity rule in the eBay integration.
+    const retainedQuantities = [];
+    if (input.allowRetainedZero && blockers.length === 0) {
+        for (const variantId of input.productVariantIds.filter(id => !managedSellableVariantIds.includes(id))) {
+            if (selection.variants.find(row => row.productVariantId === variantId)?.action !== "zero") continue;
+            const rows = await zeroPublicationIntents({ ...authority, loadActivePublicationTargets: async request =>
+                (await loadZeroPublicationTargets(client, request)).map(candidate => candidate.publicationTargetId !== target.id || !proposal
+                    ? candidate : { ...candidate, mappings: [...candidate.mappings.filter(mapping =>
+                        !proposal.identities.some(identity => identity.productVariantId === mapping.productVariantId)), ...proposal.identities] }),
+            }, input.productId, variantId, target.channel_id, target.id);
+            retainedQuantities.push(...rows);
+        }
+    }
     const quantities = [];
     for (const variantId of input.productVariantIds) {
         const row = targetPlan?.rows.find(candidate => candidate.productVariantId === variantId);
         if (!row) {
+            const retained = retainedQuantities.find(candidate => candidate.productVariantId === variantId);
+            if (retained) {
+                quantities.push({ productVariantId: variantId, desiredQuantity: retained.desiredQuantity });
+                continue;
+            }
             blockers.push(blocker("STOCK_LISTING_QUANTITY_UNAVAILABLE", "The canonical stock planner did not return this exact selected SKU.", variantId));
             continue;
         }
@@ -101,7 +130,7 @@ export async function reviewMappingPreparation(client: PoolClient, input: {
         quantities.push({ productVariantId: variantId, desiredQuantity: row.desiredQuantity });
     }
     const review = { publicationTargetId: target.id, targetRevision: target.revision, productId: input.productId, productVariantIds: [...input.productVariantIds].sort((a, b) => a - b),
-        ready: blockers.length === 0, blockers, quantities, selectionFingerprint: selected?.selection?.fingerprint ?? null };
+        ready: blockers.length === 0, blockers, quantities, selectionFingerprint: selection.fingerprint };
     return { target, review: { ...review, reviewHash: mappingPreparationDigest({ review, plan: plan.evidenceHash, proposal }) } };
 }
 /** Shares rollback and provider session locks with mapping promotion. No remote
@@ -153,6 +182,7 @@ export async function applyMappingPreparation(client: PoolClient, scopeKeys: str
     expectedTargetRevision: string;
     productId: number;
     productVariantIds: readonly number[];
+    allowRetainedZero?: boolean;
     expectedReviewHash: string;
     idempotencyKey: string;
 }, actor: string, requestHash: string, now: Date, changedVariantIds: readonly number[], replacementListingVariantIds: readonly number[] = []): Promise<PublicationMappingPreparationReceipt> {

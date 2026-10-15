@@ -33,7 +33,7 @@ describe("existing eBay listing sync execution", () => {
       message: "The listing update could not finish. Inspect the saved sync job before retrying.",
     });
   });
-  it.each(["STOCK_MAPPING_PROVIDER_BUSY", "STOCK_MAPPING_CONCURRENT_CHANGE", "STOCK_MAPPING_CLEANUP_UNCERTAIN",
+  it.each(["EBAY_PUBLICATION_STOCK_REVIEW_STALE", "STOCK_MAPPING_PROVIDER_BUSY", "STOCK_MAPPING_CONCURRENT_CHANGE", "STOCK_MAPPING_CLEANUP_UNCERTAIN",
     "STOCK_MAPPING_REVIEW_STALE", "STOCK_MAPPING_TARGET_CHANGED"])("retries transient stock preparation %s with a finite budget", code => {
     const failure = new EbayListingSyncError(code, "Recheck the saved listing's current stock preparation.");
     const now = new Date("2026-10-12T12:00:00Z");
@@ -46,6 +46,27 @@ describe("existing eBay listing sync execution", () => {
       resolved: [],
       unresolved: [],
     })),
+  });
+  it.each([true, false])("finishes accepted photo readback after a stock hold with checkpoint=%s", async hasCheckpoint => {
+    const fixture = syncProviderFixture(), prepared = await fixture.prepare();
+    const inventoryReady = vi.fn(async () => {});
+    prepared.assertInventoryReady = inventoryReady;
+    const executor = new EbayExistingListingSyncExecution(async () => prepared, recovered(), new EbayMarketplaceListingConnector());
+    await executor.execute(syncIdentity, async (_key, _hash, work) => work());
+    inventoryReady.mockRejectedValue(new EbayListingSyncError("STOCK_LISTING_GLOBAL_STOP", "Stock is paused."));
+    const writes = vi.mocked(fixture.client.createOrReplaceInventoryItem).mock.calls.length;
+    expect(await executor.execute(syncIdentity, async (_key, _hash, work) => work(),
+      hasCheckpoint ? syncContentIntentHash(prepared.draft) : null)).toMatchObject({ synced: 1, errors: 0 });
+    expect(inventoryReady).toHaveBeenCalledTimes(1);
+    expect(fixture.client.createOrReplaceInventoryItem).toHaveBeenCalledTimes(writes);
+  });
+  it("stops a new photo mutation when automatic stock preparation is blocked", async () => {
+    const fixture = syncProviderFixture(), prepared = await fixture.prepare();
+    prepared.assertInventoryReady = async () => { throw new EbayListingSyncError("STOCK_LISTING_HELD", "Stock is held."); };
+    const executor = new EbayExistingListingSyncExecution(async () => prepared, recovered(), new EbayMarketplaceListingConnector());
+    await expect(executor.execute(syncIdentity, async (_key, _hash, work) => work())).rejects.toMatchObject({ code: "STOCK_LISTING_HELD" });
+    expect(fixture.client.createOrReplaceInventoryItem).not.toHaveBeenCalled();
+    expect(fixture.client.updateOffer).not.toHaveBeenCalled();
   });
   it("checks the exact identity, recovers, journals each primitive and verifies published content before completion", async () => {
     const fixture = syncProviderFixture(),

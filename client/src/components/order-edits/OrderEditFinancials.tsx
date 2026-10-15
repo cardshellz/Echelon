@@ -6,9 +6,20 @@ import type {
 } from "@shared/order-edits/order-edit-financials";
 import type { OrderEditShippingRepricing } from "@shared/order-edits/order-edit-shipping";
 import { formatOrderEditMoney } from "@/lib/order-edits";
+import { orderEditTaxDisplay } from "@/lib/order-edit-display";
 
 type FinancialColumn = { label: string; financials: OrderEditFinancials };
 const money = (amount: number) => formatOrderEditMoney(amount, "USD");
+
+function TaxLabel({ financials }: { financials: OrderEditFinancials }) {
+  const tax = orderEditTaxDisplay(financials);
+  return (
+    <dt>
+      {tax.label}
+      {tax.details.map((detail, index) => <small key={index}>{detail}</small>)}
+    </dt>
+  );
+}
 
 export function OrderEditSummary({
   totals,
@@ -52,9 +63,15 @@ export function OrderEditSummary({
               <dd className="oe-saving">−{money(discount.amountCents)}</dd>
             </React.Fragment>
           ))}
+          {orderDiscounts.length > 0 && (
+            <>
+              <dt className="oe-net">Items after discounts</dt>
+              <dd className="oe-net">{money(financials.itemsNetCents)}</dd>
+            </>
+          )}
           <dt>Shipping</dt>
           <dd>{money(financials.shippingCents)}</dd>
-          <dt>{financials.taxesIncluded ? "Tax (included)" : "Tax"}</dt>
+          <TaxLabel financials={financials} />
           <dd>{money(financials.taxCents)}</dd>
         </dl>
       )}
@@ -252,7 +269,7 @@ export function OrderEditTotals({
               )}
               <dt>Shipping</dt>
               <dd>{money(values.shippingCents)}</dd>
-              <dt>{values.taxesIncluded ? "Tax (included)" : "Tax"}</dt>
+              <TaxLabel financials={values} />
               <dd>{money(values.taxCents)}</dd>
               <dt className="oe-total-label">Order total</dt>
               <dd className="oe-total-value">{money(values.totalCents)}</dd>

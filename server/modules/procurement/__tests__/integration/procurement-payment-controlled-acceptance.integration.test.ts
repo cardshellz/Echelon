@@ -47,6 +47,19 @@ acceptance.sequential("procurement payment controlled acceptance", () => {
       paid_amount_cents: String(paid), balance_cents: String(balance), status: invoiceStatus });
   }
 
+  it("reads an ordinary product invoice with explicit replacement ineligibility without changing the financial graph", async () => {
+    const before = await fixture.graph();
+    const invoice = await fixture.request(`/api/vendor-invoices/${PAYMENT_FLOW.invoiceA}`);
+    expect(invoice.status, JSON.stringify(invoice.body)).toBe(200);
+    expect(invoice.body).toMatchObject({
+      id: PAYMENT_FLOW.invoiceA, status: "approved", inboundShipmentId: null,
+      invoicedAmountCents: PAYMENT_FLOW.invoiceCents, paidAmountCents: 0, balanceCents: PAYMENT_FLOW.invoiceCents,
+      replacementCapability: { allowed: false, code: "AP_INVOICE_REPLACEMENT_NOT_VOIDED", successorInvoiceId: null },
+      replacementHistory: [{ id: PAYMENT_FLOW.invoiceA, status: "approved", replacesInvoiceId: null }],
+    });
+    expect(await fixture.graph()).toEqual(before);
+  });
+
   it("records partial and final FLOW payments with matching invoice, ledger and PO balances while preserving costs and physical receipt state", async () => {
     const before = await fixture.graph();
     const first = await pay(100_000);

@@ -264,6 +264,7 @@ describe("enrichCostsWithInvoiceInfo", () => {
           invoiceVendorId: 5,
           invoiceStatus: "paid",
           invoiceVendorName: "Freightos Inc",
+          vendorName: "Freightos",
           invoicedAmountCents: 50000,
           paidAmountCents: 50000,
           balanceCents: 0,
@@ -280,7 +281,9 @@ describe("enrichCostsWithInvoiceInfo", () => {
       invoiceNumber: "INV-010",
       vendorId: 5,
       vendorName: "Freightos Inc",
+      status: "paid",
     });
+    expect(result[0].vendorName).toBe("Freightos");
   });
 
   it("derives 'invoiced' status when invoice has outstanding balance", async () => {
@@ -337,7 +340,7 @@ describe("enrichCostsWithInvoiceInfo", () => {
     expect(result[0].linkedInvoice).toBeNull();
   });
 
-  it("derives 'unbilled' when linked invoice is voided", async () => {
+  it("keeps a voided invoice visible as requiring replacement", async () => {
     const { db } = await import("../../../../db");
     const { enrichCostsWithInvoiceInfo } = await import("../../ap-ledger.service");
 
@@ -351,6 +354,7 @@ describe("enrichCostsWithInvoiceInfo", () => {
           invoiceVendorId: 5,
           invoiceStatus: "voided",
           invoiceVendorName: "Freightos Inc",
+          vendorName: "Freightos",
           invoicedAmountCents: 50000,
           paidAmountCents: 0,
           balanceCents: 50000,
@@ -360,8 +364,9 @@ describe("enrichCostsWithInvoiceInfo", () => {
 
     const result = await enrichCostsWithInvoiceInfo(1);
 
-    expect(result[0].derivedStatus).toBe("unbilled");
-    expect(result[0].linkedInvoice).not.toBeNull(); // linkedInvoice still present, but status is unbilled
+    expect(result[0].derivedStatus).toBe("voided");
+    expect(result[0].linkedInvoice).toMatchObject({ id: 12, invoiceNumber: "INV-012", status: "voided" });
+    expect(result[0].vendorName).toBe("Freightos");
   });
 });
 

@@ -84,13 +84,15 @@ export async function readPoShipmentCosts(
       JOIN procurement.inbound_freight_costs cost ON cost.id=invoice_line.freight_cost_id
       WHERE cost.inbound_shipment_id IN (SELECT value::integer FROM jsonb_array_elements_text(${JSON.stringify(shipmentIds)}::jsonb))
     ) SELECT line.id,invoice.id AS invoice_id,line.freight_cost_id,invoice.vendor_id,invoice.inbound_shipment_id,
-      invoice.currency,invoice.status,invoice.invoiced_amount_cents,line.qty_invoiced,line.unit_cost_mills,line.unit_cost_cents,line.line_total_cents,
+      invoice.currency,invoice.status,invoice.invoiced_amount_cents,invoice.invoice_number,invoice.replaces_invoice_id,line.qty_invoiced,line.unit_cost_mills,line.unit_cost_cents,line.line_total_cents,
       SUM(line.line_total_cents) OVER (PARTITION BY invoice.id)::text AS document_total
       FROM selected JOIN procurement.vendor_invoices invoice ON invoice.id=selected.id
       LEFT JOIN procurement.vendor_invoice_lines line ON line.vendor_invoice_id=invoice.id ORDER BY invoice.id,line.id`);
       const invoiceEvidence = invoices.rows.map((row) => ({
         id: row.id,
         invoiceId: row.invoice_id,
+        invoiceNumber: row.invoice_number ?? null,
+        replacesInvoiceId: row.replaces_invoice_id ?? null,
         freightCostId: row.freight_cost_id,
         vendorId: row.vendor_id,
         shipmentId: row.inbound_shipment_id,

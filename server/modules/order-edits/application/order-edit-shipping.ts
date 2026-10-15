@@ -1,5 +1,6 @@
 import type { OrderEditSnapshot } from "./order-edit-provider";
 import type { OrderEditShippingRepricing } from "@shared/order-edits/order-edit-shipping";
+import type { OrderEditTaxLine } from "@shared/order-edits/order-edit-taxes";
 
 export interface OrderEditShippingContext {
   address: {
@@ -35,6 +36,7 @@ export interface OrderEditShippingCalculator {
   ): Promise<{
     shippingRepricing: OrderEditShippingRepricing;
     taxCents: number;
+    taxLines?: OrderEditTaxLine[];
     totalCents: number;
   }>;
   calculate(

@@ -132,7 +132,7 @@ export function registerInboundShipmentRoutes(app: Express) {
       const shipment = await shipmentTracking.getShipment(Number(req.params.id));
       const [lines, costs, history, paymentStatus, purchaseOrders] = await Promise.all([
         shipmentTracking.getEnrichedLines(shipment.id),
-        shipmentTracking.getCosts(shipment.id),
+        apLedger.enrichCostsWithInvoiceInfo(shipment.id).then((costs) => shipmentTracking.versionCosts(costs)),
         shipmentTracking.getStatusHistory(shipment.id),
         apLedger.getShipmentCostPaymentStatus(shipment.id),
         shipmentTracking.getShipmentPurchaseOrders(shipment.id),

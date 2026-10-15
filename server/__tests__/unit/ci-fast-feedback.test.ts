@@ -203,12 +203,30 @@ describe("fast CI preserves coverage and required checks", () => {
     const preflight = job(workflow, "preflight");
     for (const file of [
       "postgres-ci-shards.test.ts", "migration-prefix-collision.test.ts",
-      "browser-ci-selection.test.ts", "test-typecheck-ratchet.test.ts", "ci-fast-feedback.test.ts",
+      "browser-ci-selection.test.ts", "dropship-browser-features.test.ts", "test-typecheck-ratchet.test.ts", "ci-fast-feedback.test.ts",
     ]) expect(preflight).toContain(file);
     expect(preflight).toContain("--allowOnly=false --passWithNoTests=false");
     for (const name of ["typecheck", "unit-tests", "contracts", "postgres-hardening-shard"]) {
       expect(job(workflow, name)).toContain("needs: preflight");
     }
+  });
+
+  it("runs only the selected feature matrix, with bounded concurrency and an unfiltered failure fallback", () => {
+    const workflow = source(".github/workflows/dropship-pricing.yml");
+    const select = job(workflow, "select");
+    expect(select).toContain("run: node scripts/ci/dropship-browser-impact.mjs");
+    expect(select).toContain("matrix: ${{ steps.impact.outputs.matrix }}");
+    const browser = job(workflow, "browser");
+    expect(browser).toContain("max-parallel: 4");
+    expect(browser).toContain("fail-fast: false");
+    expect(browser).toContain("fromJSON(needs.select.outputs.matrix ||");
+    expect(browser).toContain('"feature":"all","label":"Full coverage fallback","shard":1,"shards":2');
+    expect(browser).toContain('"feature":"all","label":"Full coverage fallback","shard":2,"shards":2');
+    expect(browser).toContain("BROWSER_FEATURE: ${{ matrix.feature }}");
+    expect(browser).toContain("--shard=${{ matrix.shard }}/${{ matrix.shards }} --forbid-only");
+    expect(browser).toContain("feature-browser-traces-${{ matrix.feature }}-${{ matrix.shard }}");
+    expect(job(workflow, "result")).toContain("name: Dropship pricing browser journeys\n");
+    expect(workflow).not.toMatch(/continue-on-error:|paths(?:-ignore)?:|pass-with-no-tests/);
   });
 
   it("runs all three existing typecheck programs on independent runners", () => {

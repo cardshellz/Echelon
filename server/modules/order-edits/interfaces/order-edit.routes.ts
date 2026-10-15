@@ -30,7 +30,7 @@ import { OrderEditError } from "../domain/order-edit-error";
 import { OrderEditProviderError } from "../application/order-edit-provider";
 import {
   ORDER_EDIT_PRICING_DISPLAY_HEADER,
-  ORDER_EDIT_PRICING_DISPLAY_VERSION,
+  orderEditPricingDisplayVersionSchema,
   type OrderEditFinancials,
 } from "@shared/order-edits/order-edit-financials";
 import { orderEditResponsePresentation } from "../application/order-edit-response-presentation";
@@ -69,8 +69,9 @@ function sendLineDisplayResponse<
   // display metadata; financial amounts and command handling are identical.
   const presented = orderEditResponsePresentation(
     response,
-    req.get(ORDER_EDIT_PRICING_DISPLAY_HEADER) ===
-      ORDER_EDIT_PRICING_DISPLAY_VERSION,
+    orderEditPricingDisplayVersionSchema.safeParse(
+      req.get(ORDER_EDIT_PRICING_DISPLAY_HEADER),
+    ).data,
   );
   res.json(
     req.get(ORDER_EDIT_LINE_DISPLAY_HEADER) === ORDER_EDIT_LINE_DISPLAY_VERSION
@@ -236,8 +237,9 @@ export function registerOrderEditRoutes(
               query.codeEntryVersion,
             ),
           ),
-          req.get(ORDER_EDIT_PRICING_DISPLAY_HEADER) ===
-            ORDER_EDIT_PRICING_DISPLAY_VERSION,
+          orderEditPricingDisplayVersionSchema.safeParse(
+            req.get(ORDER_EDIT_PRICING_DISPLAY_HEADER),
+          ).data,
         ),
       );
     }),

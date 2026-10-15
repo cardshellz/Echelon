@@ -135,6 +135,7 @@ describe("inbound shipment routes", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.notifications.notify.mockResolvedValue(undefined);
+    mocks.apLedger.enrichCostsWithInvoiceInfo.mockResolvedValue([]);
   });
 
   afterEach(async () => {
@@ -206,6 +207,34 @@ describe("inbound shipment routes", () => {
     server = await startServer(buildApp(shipmentTracking));
     expect(await requestJson(server.url, "GET", "/api/inbound-shipments/42")).toEqual({
       status: 500, body: { error: "Purchase references unavailable" },
+    });
+  });
+
+  it("composes invoice status and command versions on the main shipment read", async () => {
+    const costs = [{ id: 9, vendorName: "Carrier", vendorInvoiceId: 71, derivedStatus: "voided", linkedInvoice: { id: 71, invoiceNumber: "F-71", status: "voided" } }];
+    const versioned = costs.map((cost) => ({ ...cost, version: "a".repeat(64), hasInvoiceSourceReference: true }));
+    mocks.apLedger.enrichCostsWithInvoiceInfo.mockResolvedValue(costs);
+    const shipmentTracking = buildShipmentTrackingMock({
+      getShipment: vi.fn().mockResolvedValue({ id: 42 }),
+      getEnrichedLines: vi.fn().mockResolvedValue([]),
+      versionCosts: vi.fn().mockResolvedValue(versioned),
+      getStatusHistory: vi.fn().mockResolvedValue([]),
+    });
+    mocks.apLedger.getShipmentCostPaymentStatus.mockResolvedValue(null);
+    server = await startServer(buildApp(shipmentTracking));
+    const response = await requestJson(server.url, "GET", "/api/inbound-shipments/42");
+    expect(response).toMatchObject({ status: 200, body: { costs: versioned } });
+    expect(mocks.apLedger.enrichCostsWithInvoiceInfo).toHaveBeenCalledExactlyOnceWith(42);
+    expect(shipmentTracking.versionCosts).toHaveBeenCalledExactlyOnceWith(costs);
+    expect(shipmentTracking.getCosts).not.toHaveBeenCalled();
+  });
+
+  it("does not report unbilled costs when invoice enrichment fails", async () => {
+    mocks.apLedger.enrichCostsWithInvoiceInfo.mockRejectedValue(new Error("Invoice evidence unavailable"));
+    const shipmentTracking = buildShipmentTrackingMock({ getShipment: vi.fn().mockResolvedValue({ id: 42 }) });
+    server = await startServer(buildApp(shipmentTracking));
+    expect(await requestJson(server.url, "GET", "/api/inbound-shipments/42")).toMatchObject({
+      status: 500, body: { error: "Invoice evidence unavailable" },
     });
   });
 
