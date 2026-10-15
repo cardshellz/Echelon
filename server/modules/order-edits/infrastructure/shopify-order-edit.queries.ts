@@ -12,6 +12,7 @@ export const ORDER_QUERY = `query EchelonEditOrder($id: ID!) {
     currencyCode presentmentCurrencyCode capturable taxesIncluded
     currentTotalPriceSet { ${MONEY} } totalOutstandingSet { ${MONEY} }
     currentSubtotalPriceSet { ${MONEY} } currentTotalTaxSet { ${MONEY} }
+    currentTaxLines { title ratePercentage priceSet { ${MONEY} } }
     netPaymentSet { ${MONEY} } totalCapturableSet { ${MONEY} } currentShippingPriceSet { ${MONEY} }
     paymentCollectionDetails { additionalPaymentCollectionUrl }
     paymentTerms { id } purchasingEntity { __typename } disputes { id }
@@ -108,7 +109,7 @@ export const PRICING_PROVENANCE_QUERY = `query EchelonEditPricingProvenance {
   } } pageInfo { hasNextPage } }
 }`;
 export const CALCULATED_FIELDS = `id originalOrder { id } totalPriceSet { ${MONEY} } totalOutstandingSet { ${MONEY} }
-  subtotalPriceSet { ${MONEY} } taxLines { priceSet { ${MONEY} } }
+  subtotalPriceSet { ${MONEY} } taxLines { title ratePercentage priceSet { ${MONEY} } }
   shippingLines { id title price { ${MONEY} } stagedStatus }
   lineItems(first: 250) { nodes { id title variantTitle quantity editableQuantityBeforeChanges editableSubtotalSet { ${MONEY} } variant { id }
     originalUnitPriceSet { ${MONEY} } discountedUnitPriceSet { ${MONEY} }

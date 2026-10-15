@@ -1,5 +1,9 @@
 import { z } from "zod";
 import Decimal from "decimal.js";
+import {
+  shopifyOrderEditTaxLineSchema,
+  readShopifyOrderEditTaxLines,
+} from "./shopify-order-edit-taxes";
 import { canonicalJson } from "@shared/utils/canonical-json";
 import {
   orderEditShippingRepricingSchema,
@@ -47,6 +51,7 @@ const calculationSchema = z.object({
         acceptAutomaticDiscounts: z.literal(true),
         taxesIncluded: z.boolean(),
         totalTaxSet: bag.optional(),
+        taxLines: z.array(shopifyOrderEditTaxLineSchema).optional(),
         totalPriceSet: bag.optional(),
         shippingLine: z
           .object({
@@ -82,6 +87,7 @@ const SHIPPING_CALCULATION = `mutation EchelonEditShippingCalculate($input: Draf
   draftOrderCalculate(input: $input) { userErrors { field message } calculatedDraftOrder {
     currencyCode presentmentCurrencyCode acceptAutomaticDiscounts taxesIncluded
     totalTaxSet { presentmentMoney { amount currencyCode } shopMoney { amount currencyCode } }
+    taxLines { title ratePercentage priceSet { presentmentMoney { amount currencyCode } shopMoney { amount currencyCode } } }
     totalPriceSet { presentmentMoney { amount currencyCode } shopMoney { amount currencyCode } }
     lineItems { quantity variant { id } discountedTotalSet { presentmentMoney { amount currencyCode } shopMoney { amount currencyCode } } }
     platformDiscounts { title code discountClasses totalAmountPriceSet { presentmentMoney { amount currencyCode } shopMoney { amount currencyCode } } }
@@ -178,6 +184,7 @@ export class ShopifyOrderEditShippingCalculator
     return {
       shippingRepricing: result.shippingRepricing,
       taxCents: result.taxCents,
+      ...(result.taxLines === undefined ? {} : { taxLines: result.taxLines }),
       totalCents: result.totalCents,
     };
   }
@@ -355,6 +362,7 @@ export class ShopifyOrderEditShippingCalculator
     return {
       shippingRepricing,
       taxCents: calculated.totalTaxSet ? amount(calculated.totalTaxSet) : null,
+      taxLines: readShopifyOrderEditTaxLines(calculated.taxLines),
       totalCents: calculated.totalPriceSet
         ? amount(calculated.totalPriceSet)
         : null,

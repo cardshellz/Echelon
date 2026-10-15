@@ -377,6 +377,7 @@ describe("preview checkout tax and total proof", () => {
     const draft = {
       ...value.draftOrderCalculate.calculatedDraftOrder,
       totalTaxSet: bag("5.59"),
+      taxLines: [{ title: "State tax", ratePercentage: 6, priceSet: bag("5.59") }],
       totalPriceSet: bag("98.79"),
     };
     const h = harness([
@@ -390,9 +391,11 @@ describe("preview checkout tax and total proof", () => {
     ]);
     const result = await h.calculator.calculatePreview(snapshot(), items);
     expect(result.taxCents).toBe(559);
+    expect(result.taxLines).toEqual([{ title: "State tax", ratePercentage: 6, amountCents: 559 }]);
     expect(result.totalCents).toBe(9879);
     expect(result.shippingRepricing.netCents).toBe(0);
     expect(h.request.mock.calls[1][1]).toContain("draftOrderCalculate");
+    expect(h.request.mock.calls[1][1]).toContain("taxLines { title ratePercentage priceSet");
     expect(
       h.request.mock.calls.some((r) =>
         /draftOrderCreate|orderEdit|refundCreate/.test(r[1]),

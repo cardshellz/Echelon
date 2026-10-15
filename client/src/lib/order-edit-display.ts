@@ -1,6 +1,29 @@
 import type { OrderEditOperation } from "@shared/order-edits/order-edit.contract";
 import type { OrderEditFinancials } from "@shared/order-edits/order-edit-financials";
 
+export function orderEditTaxDisplay(
+  financials: Pick<OrderEditFinancials, "taxLines" | "taxesIncluded">,
+): {
+  label: string;
+  details: string[];
+} {
+  const lines = financials.taxLines ?? [];
+  const singleRate = lines.length === 1 ? lines[0].ratePercentage : null;
+  const qualifiers = [
+    ...(singleRate === null ? [] : [`${singleRate}%`]),
+    ...(financials.taxesIncluded ? ["included"] : []),
+  ];
+  return {
+    label: qualifiers.length ? `Tax (${qualifiers.join(", ")})` : "Tax",
+    // Jurisdictions may tax different bases. Never add their rates or derive a rate from dollars.
+    details: lines.length > 1
+      ? lines.map(line => line.ratePercentage === null
+        ? line.title
+        : `${line.title} ${line.ratePercentage}%`)
+      : [],
+  };
+}
+
 /** Use the verified price after product/member savings, before order coupons.
  * Older responses retain their exact net total; never infer allocations from a code label. */
 export function orderEditItemSubtotal(

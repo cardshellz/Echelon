@@ -1,8 +1,13 @@
 import { z } from "zod";
 import { orderEditDiscountSchema } from "./order-edit-discounts";
+import { orderEditTaxLineSchema } from "./order-edit-taxes";
 
 export const ORDER_EDIT_PRICING_DISPLAY_HEADER = "X-Order-Edit-Pricing-Display";
-export const ORDER_EDIT_PRICING_DISPLAY_VERSION = "v1";
+export const ORDER_EDIT_PRICING_DISPLAY_VERSION = "v2";
+export const orderEditPricingDisplayVersionSchema = z.enum(["v1", "v2"]);
+export type OrderEditPricingDisplayVersion = z.infer<
+  typeof orderEditPricingDisplayVersionSchema
+>;
 
 const cents = z.number().int().safe().nonnegative();
 const label = z.string().trim().min(1).max(500);
@@ -23,6 +28,8 @@ export const orderEditFinancialsSchema = z
     shippingCents: cents,
     shippingDiscountLabels: z.array(label).max(250),
     taxCents: cents,
+    // Optional display evidence; older saved edits do not contain tax rates.
+    taxLines: z.array(orderEditTaxLineSchema).max(250).optional(),
     taxesIncluded: z.boolean(),
     totalCents: cents,
     lines: z
@@ -51,6 +58,7 @@ export const orderEditFinancialsSchema = z
       value.shippingCents,
       value.taxCents,
       value.totalCents,
+      ...(value.taxLines?.map((line) => line.amountCents) ?? []),
       ...value.lines.flatMap((line) => [
         line.grossCents,
         line.discountCents,
@@ -62,6 +70,15 @@ export const orderEditFinancialsSchema = z
       return;
     const sum = (values: number[]) =>
       values.reduce((total, amount) => total + BigInt(amount), BigInt(0));
+    if (
+      value.taxLines !== undefined &&
+      sum(value.taxLines.map((line) => line.amountCents)) !== BigInt(value.taxCents)
+    ) {
+      context.addIssue({
+        code: "custom",
+        message: "The tax lines do not reconcile to the tax total.",
+      });
+    }
     if (value.orderDiscounts !== undefined) {
       if (
         value.orderDiscounts.some(
