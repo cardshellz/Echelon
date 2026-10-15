@@ -17,6 +17,7 @@ import type { ListingSettingsInputs } from "../../application/dropship-listing-s
 import { EMPTY_LISTING_SETTING_LAYERS } from "../../application/dropship-listing-setting-layers";
 import {
   DropshipListingSettingsService,
+  type ListingSettingsConversionLoad,
   type ListingSettingsLoad,
   type ListingSettingsProductOwnRead,
   type ListingSettingsRepository,
@@ -75,6 +76,10 @@ class FakeRepository implements ListingSettingsRepository {
     if (this.gate) await this.gate;
     if (this.loadError) throw this.loadError;
     return this.next;
+  }
+  /** The views never read the conversion's inputs (PR 11): its dry run has its own test file. */
+  async loadConversionInputs(): Promise<ListingSettingsConversionLoad | null> {
+    throw new Error("A listing settings view read the rules conversion's inputs.");
   }
   ownRead: ListingSettingsProductOwnRead | Error = { row: null, catalog: null };
   ownReads: Array<{ vendorId: number; storeConnectionId: number; productId: number; productVariantIds: readonly number[] }> = [];
@@ -553,9 +558,10 @@ describe("listing settings service: one product's own settings (plan PR 10, 4.2)
   it("fails the request when the row read fails, and reads nothing else: no stock, no eBay, no write", async () => {
     repository.ownRead = new Error("connection reset");
     await expect(service.getProductOwnSettings("member-1", { storeConnectionId: 5, productId: 501 })).rejects.toThrow("connection reset");
-    // The read service has no eBay port and its repository no write; the only calls are the three reads.
+    // The read service has no eBay port and its repository no write: its port is four reads (PR 11 added the
+    // conversion's, which this fake refuses), and the only calls are the three this read makes.
     expect(Object.getOwnPropertyNames(Object.getPrototypeOf(repository)).filter((name) => name !== "constructor").sort())
-      .toEqual(["load", "readFingerprint", "readProductOwnSettings"]);
+      .toEqual(["load", "loadConversionInputs", "readFingerprint", "readProductOwnSettings"]);
     expect([repository.fingerprintReads.length, repository.loads.length, repository.ownReads.length]).toEqual([1, 1, 1]);
     expect(stock.atpReads).toHaveLength(0);
     expect(stock.capReads).toHaveLength(0);

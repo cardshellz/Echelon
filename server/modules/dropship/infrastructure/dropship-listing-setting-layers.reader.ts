@@ -4,6 +4,7 @@ import {
   EMPTY_LISTING_SETTING_LAYERS,
   type ListingSettingLayers,
 } from "../application/dropship-listing-setting-layers";
+import type { ConversionCategory } from "../domain/listing-rules-conversion-names";
 import { listingSettingsInvariantFailed } from "../domain/listing-setting-values";
 import { readCategoryListingSettings } from "./dropship-category-listing-settings.repository";
 import { readProductListingSettings } from "./dropship-product-listing-settings.repository";
@@ -88,6 +89,48 @@ export async function readCatalogCategoryNames(client: Reader, categoryIds: read
     names.set(categoryId, row.name);
   }
   return names;
+}
+
+/**
+ * Every Card Shellz category whose current name is exactly one of `names`,
+ * by name (PR 11, plan D8, 4.B.1): the conversion's names-to-ids read. A key
+ * for every name asked, holding its categories by id, or none (an empty
+ * list: looked up, no category has it), so the planner can tell "no category
+ * has this name" from "never looked up". Raw and exact: no trimming, no case
+ * folding, and no `is_active` filter (an inactive category is a target, as
+ * category settings read live names, plan D8). One parameterized `ANY` read;
+ * no names, no query. A row whose name is not exactly one asked for (a
+ * database collation that compares text loosely), or that is blank, not
+ * text or without a valid id, is fatal, never a guess.
+ */
+export async function readCatalogCategoriesByName(client: Reader, names: readonly string[]):
+  Promise<Map<string, ConversionCategory[]>> {
+  if (!names.every((name) => typeof name === "string" && name.trim() !== "")) {
+    throw listingSettingsInvariantFailed("Card Shellz categories were read for a blank or non-text name.", {
+      invalidCount: names.filter((name) => typeof name !== "string" || name.trim() === "").length,
+    });
+  }
+  // By UTF-16 code units, so the statement's parameter is the same whatever order the names come in.
+  const asked = [...new Set(names)].sort((left, right) => (left < right ? -1 : left > right ? 1 : 0));
+  const byName = new Map<string, ConversionCategory[]>(asked.map((name) => [name, []]));
+  if (asked.length === 0) return byName;
+  const result = await client.query<{ id: unknown; name: unknown }>(
+    "SELECT id, name FROM catalog.product_categories WHERE name = ANY($1::text[]) ORDER BY id",
+    [asked],
+  );
+  for (const row of result.rows) {
+    // As readCatalogCategoryNames reads it.
+    const categoryId = Number(row.id);
+    if (!isCategoryId(categoryId)) {
+      throw listingSettingsInvariantFailed("A Card Shellz category was read without a valid id.", { categoryId: row.id });
+    }
+    const entries = typeof row.name === "string" ? byName.get(row.name) : undefined;
+    if (entries === undefined) {
+      throw listingSettingsInvariantFailed("A Card Shellz category was read under a name that was not asked for.", { categoryId });
+    }
+    entries.push({ id: categoryId, name: row.name as string });
+  }
+  return byName;
 }
 
 function isCategoryId(value: number): boolean {

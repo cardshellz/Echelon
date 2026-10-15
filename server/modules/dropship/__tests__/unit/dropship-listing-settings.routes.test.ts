@@ -138,11 +138,13 @@ describe("listing settings HTTP boundary", () => {
   });
   const listUpdatedProductsForMember = vi.fn(async (_member: string, input: unknown) =>
     updatedProducts(listingSettingsUpdatedProductsInputSchema.parse(input).page));
+  // The rules conversion's dry run (PR 11) has its own routes test; no route here reaches it.
+  const getConversionForMember = vi.fn(async (): Promise<never> => { throw new Error("A view route reached the conversion check."); });
 
   beforeEach(async () => {
     for (const fn of [getSummaryForMember, listPricesForMember, listProductsForMember, getProductForMember, getProductOwnSettings,
-      listProductIdsForMember, listCategoriesForMember, getCategoryForMember, listUpdatedProductsForMember, logged.info, logged.warn,
-      logged.error]) fn.mockClear();
+      listProductIdsForMember, listCategoriesForMember, getCategoryForMember, listUpdatedProductsForMember, getConversionForMember,
+      logged.info, logged.warn, logged.error]) fn.mockClear();
     const app = express();
     app.use((req, _res, next) => {
       const memberId = req.header("X-Test-Member");
@@ -150,7 +152,8 @@ describe("listing settings HTTP boundary", () => {
       next();
     });
     registerDropshipListingSettingsRoutes(app, { getSummaryForMember, listPricesForMember, listProductsForMember, getProductForMember,
-      getProductOwnSettings, listProductIdsForMember, listCategoriesForMember, getCategoryForMember, listUpdatedProductsForMember });
+      getProductOwnSettings, listProductIdsForMember, listCategoriesForMember, getCategoryForMember, listUpdatedProductsForMember,
+      getConversionForMember });
     server = http.createServer(app);
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
     base = `http://127.0.0.1:${(server.address() as AddressInfo).port}/api/dropship/listings/stores`;
