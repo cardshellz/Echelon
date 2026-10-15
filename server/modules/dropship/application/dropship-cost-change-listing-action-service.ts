@@ -193,6 +193,8 @@ export interface VendorCostChangeListingActionView {
   storeConnectionId: number;
   platform: string;
   productVariantId: number;
+  /** The size's product: the portal's link to its price in Listing settings opens on `?product=&size=` (PR 10h, D13b). */
+  productId: number;
   variantSku: string | null;
   variantName: string;
   productName: string;

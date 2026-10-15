@@ -105,7 +105,9 @@ describe("DropshipPortalCatalog workflow", () => {
     const previewSource = readFileSync(join(process.cwd(), "client/src/pages/dropship/DropshipListingPreview.tsx"), "utf8");
     expect(source).toContain("<DropshipListingPreview");
     expect(previewSource).toContain("Marketplace category");
-    expect(previewSource).toContain("Your Store categories");
+    // The shelf row carries step 2's name ("Store shelf", R:90) through the words module (PR 10h).
+    expect(previewSource).toContain("LISTING_PREVIEW_WORDS.storeShelf");
+    expect(previewSource).not.toContain("Your Store categories");
     expect(comboboxSource).toContain("Search your eBay Store categories...");
     expect(comboboxSource).toContain('className="max-h-64 overflow-y-auto overscroll-contain"');
   });
@@ -212,12 +214,10 @@ describe("DropshipPortalCatalog workflow", () => {
     expect(catalogSource).not.toContain('setLocation(dropshipPortalPath("/settings"))');
   });
 
-  it("turns raw eBay preview config keys into actionable setup labels", () => {
-    expect(formatIssue("missing_config:merchantLocationKey")).toBe("eBay setup: Inventory location");
-    expect(formatIssue("missing_config:businessPolicies.returnPolicyId")).toBe("eBay setup: Return policy");
-    expect(formatIssue("ebay_browse_category_required")).toBe(
-      "No eBay category. Add a rule or set a store default under eBay categories in step 2, Listing settings.",
-    );
+  it("turns raw eBay preview config keys into plain words that name Listing settings (PR 10h)", () => {
+    expect(formatIssue("missing_config:merchantLocationKey")).toBe("Your ship-from location isn't set. Update it in Listing settings.");
+    expect(formatIssue("missing_config:businessPolicies.returnPolicyId")).toBe("No return policy. Choose one in Listing settings.");
+    expect(formatIssue("ebay_browse_category_required")).toBe("No eBay category. Pick one in Listing settings.");
   });
 
   it("places an explicit authorization confirmation beside the emailed code", () => {
