@@ -1,6 +1,6 @@
 # Shipment invoice replacement validation
 
-Reproduction base: `079d4274b2c8ed42ae3f1e8a6b6eb7dc9acf01af`. Final implementation base: `9e09d41dad4dbee0575d0bc7db10d692ebb9e61c`, refreshed on 2026-10-15. Incoming PR1795 changes Dropship/CI paths; procurement implementation is unchanged by that refresh.
+Reproduction base: `079d4274b2c8ed42ae3f1e8a6b6eb7dc9acf01af`. Final implementation base: `9e09d41dad4dbee0575d0bc7db10d692ebb9e61c`, refreshed on 2026-10-15. Incoming PR1795 changes Dropship/CI paths; procurement implementation is unchanged by that refresh. Publication additionally merges main `7c1a9c266712690be721c408a3536a1cb9c3b8d2` (PR1796 order-edit changes); all 31 approved file blobs remain identical across that merge.
 
 ## Reproduced behavior and correction
 
@@ -18,7 +18,9 @@ The correction is an explicit received successor, with immutable lineage and the
 
 - All three TypeScript projects passed on the refreshed base: application, server tests and client tests. The new browser spec also passed a direct typing check.
 - The production build passed on the refreshed base. Vite retains its existing large-chunk warning.
-- The migration catalog validates 515 existing allocated migrations; the candidate SQL is not allocated or released yet.
+- PR1798 adds `900000006000017980001_invoice_replacement_lineage.sql` and its generated metadata, bringing the validated catalog to 516 migrations. The SQL remains byte-identical to the reviewed candidate.
+
+After merging publication base `7c1a9c266712690be721c408a3536a1cb9c3b8d2` and allocating PR1798, the allocated migration passed all **19 replacement PostgreSQL cases**, the **226 guard tests** passed, and all **three TypeScript projects** passed again. The 214-case PostgreSQL regression suite and production build above were run before this allocation; procurement production files are unchanged by the merge and allocation.
 
 The exact commands, raw logs and final readiness receipt are retained in the local review output `outputs/procurement-invoice-recovery-2026-10-15`.
 
@@ -36,4 +38,4 @@ An independent reviewer traced the command, migration, database mutation bypasse
 
 No payment allocation policy or historical inventory correction is assumed. This recovery supports complete unpaid shipment-charge invoices without any payment history. Mixed/product/unmapped sources, signed or inconsistent amounts, broken ownership, cancelled shipments and unsupported PO links remain explicit review cases. They are not silently cloned, cleared or renumbered.
 
-SQL allocation remains pending until a draft PR supplies its migration identity; allocation must preserve the reviewed SQL bytes. Local tests do not prove hosted CI, migration application, deployment, live acceptance or production prevalence. The shared graph-lock throughput has not been benchmarked. F19 and the remaining F23 shipment-detail recovery work remain separate.
+PR1798 supplies the generated migration identity. Allocation preserves the reviewed SQL SHA256 `7d30a023e38e79016a771696ef810f4c647a3848c64d05742f6c8e582f586331` and Git blob `607a18b66cc883b9394757afee4ea0d4c39bb7dd`. Local tests do not prove hosted CI, migration application, deployment, live acceptance or production prevalence. The shared graph-lock throughput has not been benchmarked. F19 and the remaining F23 shipment-detail recovery work remain separate.

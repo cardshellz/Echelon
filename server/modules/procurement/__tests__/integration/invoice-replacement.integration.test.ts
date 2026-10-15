@@ -23,7 +23,7 @@ integration.sequential("voided shipment invoice replacement through real Postgre
   beforeEach(async () => {
     harness = await createFlowCostHarness(url!);
     await harness.pool.query(fixtureTable(vendorInvoiceAttachments));
-    await harness.pool.query(readFileSync(resolve(process.cwd(), "migrations/pending/invoice_replacement_lineage.sql"), "utf8"));
+    await harness.pool.query(readFileSync(resolve(process.cwd(), "migrations/900000006000017980001_invoice_replacement_lineage.sql"), "utf8"));
     await seedFlowMasterData(harness);
     await harness.pool.query(`
       INSERT INTO procurement.purchase_orders(id,po_number,vendor_id,status,physical_status,warehouse_id,currency,total_cents)

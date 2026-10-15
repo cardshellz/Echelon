@@ -1,6 +1,6 @@
 # Shipment invoice replacement
 
-Reproduction base: `079d4274b2c8ed42ae3f1e8a6b6eb7dc9acf01af` on 2026-10-15. Refreshed implementation base: `9e09d41dad4dbee0575d0bc7db10d692ebb9e61c` (the incoming PR1795 has no procurement changes). This is the bounded correction for procurement finding F21. PR1792 (exact shipment value allocation) is merged; deployment is not established by that fact.
+Reproduction base: `079d4274b2c8ed42ae3f1e8a6b6eb7dc9acf01af` on 2026-10-15. Refreshed implementation base: `9e09d41dad4dbee0575d0bc7db10d692ebb9e61c` (the incoming PR1795 has no procurement changes). Publication also includes main `7c1a9c266712690be721c408a3536a1cb9c3b8d2` (PR1796 order-edit changes), which preserves all approved procurement files. This is the bounded correction for procurement finding F21. PR1792 (exact shipment value allocation) is merged; deployment is not established by that fact.
 
 ## Reproduced defect
 
@@ -28,7 +28,7 @@ Received replacement lines do not establish approved cost authority. Existing in
 
 ## Deployment and operator checks
 
-The forward migration is staged as `migrations/pending/invoice_replacement_lineage.sql` until PR-based allocation. It adds lineage and guards, replaces the old unconditional supplier-number index with active/root indexes, and does not rewrite existing invoice or charge rows. Drain old AP writers, apply the allocated migration, then use the compatible application version. A database migration alone does not establish successful deployment or live acceptance.
+PR1798 allocates `migrations/900000006000017980001_invoice_replacement_lineage.sql` with generated ownership/dependency metadata. Its SQL bytes match the reviewed candidate exactly. It adds lineage and guards, replaces the old unconditional supplier-number index with active/root indexes, and does not rewrite existing invoice or charge rows. Drain old AP writers, apply the allocated migration, then use the compatible application version. A database migration alone does not establish successful deployment or live acceptance.
 
 For an eligible affected invoice, open its AP detail, review the recorded original, enter the recovery reason, and create the replacement. Follow the returned replacement link, correct the received document through its existing editor and review/approve normally. Inspect shipment cost status and cost-review results separately. If the request outcome is unknown, retry the saved request; do not create a new supplier number or manually unlink/delete evidence.
 
