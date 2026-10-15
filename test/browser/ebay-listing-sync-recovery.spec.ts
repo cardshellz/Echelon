@@ -940,9 +940,11 @@ test("a lost sync response clears only after its exact command appears in saved 
   expect(state.errors).toEqual([]); expect(state.unexpected).toEqual([]);
 });
 
-test("an older completed job cannot hide a lost response and normal Sync retries the same command", async ({ page }) => {
+for (const previousOperation of ["sync", "publish", "withdraw"] as const) {
+for (const retryAction of ["primary", "issue"] as const) {
+test(`an older completed ${previousOperation} cannot hide a lost response and ${retryAction} Sync retries the same command`, async ({ page }) => {
   const state = await setupEbayChannelPage(page);
-  state.jobs = [{ ...job, state: "completed" }];
+  state.jobs = [{ ...job, operation: previousOperation, state: "completed" }];
   await page.reload(); await page.clock.install();
   const commandKeys: string[] = [];
   await page.route("**/api/ebay/listings/sync-product/1", async (route) => {
@@ -958,12 +960,15 @@ test("an older completed job cannot hide a lost response and normal Sync retries
   await page.clock.fastForward(10_100);
   await expect(page.getByRole("button", { name: "Retry this request", exact: true })).toBeVisible();
   await expect(page.getByTitle("Sync this listing", { exact: true }).filter({ visible: true })).toBeEnabled();
-  await page.getByTitle("Sync this listing", { exact: true }).filter({ visible: true }).click();
+  if (retryAction === "primary") await page.getByTitle("Sync this listing", { exact: true }).filter({ visible: true }).click();
+  else await page.getByRole("button", { name: "Retry this request", exact: true }).click();
   await expect.poll(() => commandKeys.length).toBe(2);
   expect(commandKeys[1]).toBe(commandKeys[0]);
   await expect(page.getByRole("button", { name: "Retry this request", exact: true })).toHaveCount(0);
   expect(state.errors).toEqual([]); expect(state.unexpected).toEqual([]);
 });
+}
+}
 
 test("an exact command receipt resolves a lost response coalesced into another job ID", async ({ page }) => {
   const state = await setupEbayChannelPage(page);

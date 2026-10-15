@@ -872,12 +872,15 @@ export default function EbayChannelPage() {
     if (issue.action.kind === "retry_sync" && issue.retryable) {
       const local = localSyncIssues.get(productId);
       const commandKey = local?.issue.code === issue.code ? local.commandKey ?? undefined : undefined;
-      if (latestSyncJobs.get(productId)?.operation === "withdraw") retryWithdrawal(productId);
+      // This key belongs to the exact local sync whose response was lost. An
+      // older job's operation must not redirect that retry to publish/withdraw.
+      if (commandKey) handleSyncProduct(productId, commandKey);
+      else if (latestSyncJobs.get(productId)?.operation === "withdraw") retryWithdrawal(productId);
       else if (latestSyncJobs.get(productId)?.operation === "publish" && latestSyncJobs.get(productId)?.state !== "completed") handlePushSingle(productId);
       // A missing aggregate listing ID can mean conflicting saved identities,
       // not a new listing. Keep a sync retry in the existing-listing owner so
       // its fresh identity check reports the conflict without publishing.
-      else if (latestSyncJobs.get(productId)?.operation === "sync" || item?.isListed || item?.externalListingId || commandKey) handleSyncProduct(productId, commandKey);
+      else if (latestSyncJobs.get(productId)?.operation === "sync" || item?.isListed || item?.externalListingId) handleSyncProduct(productId);
       else handlePushSingle(productId);
       return;
     }
@@ -2077,7 +2080,7 @@ export default function EbayChannelPage() {
                         : item.status === "error" && item.syncError && !syncPending
                           ? resolveEbayListingIssue({ message: item.syncError, productId: item.id }) : null);
                       const canSyncExistingListing = !syncIssue || (syncIssue.retryable && syncIssue.action.kind === "retry_sync"
-                        && (!syncJob?.operation || syncJob.operation === "sync"));
+                        && (localSyncIssues.get(item.id)?.commandKey != null || !syncJob?.operation || syncJob.operation === "sync"));
                       const syncExistingListing = () => handleSyncProduct(item.id, localSyncIssues.get(item.id)?.commandKey ?? undefined);
                       const isExcluded = item.isExcluded;
                       const isExpanded = expandedProducts.has(item.id);
