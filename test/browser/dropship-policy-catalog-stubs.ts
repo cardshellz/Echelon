@@ -21,6 +21,8 @@ import {
   patchTextBytes,
   priceChangeReviewResponseSchema,
   reviewPriceChangesInputSchema,
+  saveCategorySettingsInputSchema,
+  saveCategorySettingsResponseSchema,
   saveProductSettingsInputSchema,
   saveProductSettingsResponseSchema,
   saveProductsBulkInputSchema,
@@ -31,6 +33,7 @@ import {
   type PriceChangeReviewResponse,
   type PriceChangeRow,
   type ProductSettingsPatchInput,
+  type SaveCategorySettingsInput,
   type SaveProductsBulkInput,
   type StoredProductPricesInput,
 } from "../../shared/dropship/listing-setting-writes";
@@ -46,6 +49,8 @@ import {
   LISTING_SETTINGS_FIX_CODES,
   LISTING_SETTINGS_PAGE_SIZE,
   LISTING_SETTINGS_VALUE_SOURCES,
+  listingSettingsCategoriesResponseSchema,
+  listingSettingsCategoryDetailSchema,
   listingSettingsPricesResponseSchema,
   listingSettingsProductDetailSchema,
   listingSettingsProductIdsInputSchema,
@@ -55,6 +60,8 @@ import {
   listingSettingsSummarySchema,
   listingSettingsUpdatedProductsInputSchema,
   listingSettingsUpdatedProductsResponseSchema,
+  type ListingSettingsCategoriesResponse,
+  type ListingSettingsCategoryDetail,
   type ListingSettingsFixCode,
   type ListingSettingsProductDetail,
   type ListingSettingsProductIdsInput,
@@ -298,9 +305,12 @@ export const LAYERED_SAMPLE: ProductFixture = {
   ],
 };
 
-/** Product 11 and its one chosen size, as ROW: $6.99 retail, $4.10 cost (the price stub's numbers). */
+/** The Card Shellz category id of ROW's "Mailers" (PR 10e, D18): the default state's one category, with no settings of its own. */
+export const MAILERS_CATEGORY_ID = 30;
+
+/** Product 11 and its one chosen size, as ROW: $6.99 retail, $4.10 cost (the price stub's numbers); in Mailers, which sets nothing. */
 export const ENVELOPE: ProductFixture = {
-  productId: ROW.productId, productName: ROW.productName, productSku: ROW.productSku, category: ROW.category,
+  productId: ROW.productId, productName: ROW.productName, productSku: ROW.productSku, category: ROW.category, categoryId: MAILERS_CATEGORY_ID,
   sizes: [{ productVariantId: ROW.productVariantId, sizeName: ROW.variantName, sku: ROW.variantSku, retailCents: 699, costCents: 410, stockUnits: 25 }],
 };
 
@@ -489,6 +499,9 @@ export interface StubState {
   /** W6 saves of many products' settings ("Set for selected", POST …/listing-settings/products/bulk; plan PR 10, 6.4), and how the next ones answer. */
   productsBulkWrites: StubWrite[];
   productsBulkWriteAnswers: WriteAnswer[];
+  /** W12 saves of one Card Shellz category's settings (PUT …/listing-settings/categories/:id; plan PR 10, 8.5), and how the next ones answer. */
+  categorySettingsWrites: StubWrite[];
+  categorySettingsWriteAnswers: WriteAnswer[];
   /** W7 price checks for one or many products (POST …/listing-settings/price-changes/review; plan PR 10, 7.3), and how the next ones answer. */
   priceChangeReviews: StubWrite[];
   priceChangeReviewAnswers: WriteAnswer[];
@@ -1554,6 +1567,217 @@ const PRODUCTS_BULK_ANSWER: KeyedAnswerShape = (json, replayed) =>
 // ---------------------------------------------------------------------------
 
 /** The server's name for a kept exact price in a W7 row (dropship-listing-price-changes-service.ts PRESERVED_RULE_NAME). */
+// ---------------------------------------------------------------------------
+// W12: one Card Shellz category's settings, and the Category settings card's reads (plan PR 10, 8.5, 8.6)
+// ---------------------------------------------------------------------------
+
+/** No value of its own on any field: a category with no row reads this way. */
+const NO_CATEGORY_VALUES: CategoryListingSettingValues = {
+  price: null, ebayCategory: null, storeShelf: null, shippingPolicy: null, returnPolicy: null, paymentPolicy: null, textAbove: null, textBelow: null,
+};
+
+/**
+ * The category settings a product holds its own value for (the server's `ownCategoryFields`): every one
+ * its own row sets, the price included, and a policy or the shelf a leftover on any of its chosen sizes
+ * sets; never the main text (a category has none). In the stored shape's order. One rule for the detail's
+ * `ownValues` and for the W12 clear set, as on the server, so the set a vendor is shown is the set the
+ * save derives.
+ */
+function ownCategoryFieldsOf(state: StubState, storeConnectionId: number, product: ProductFixture): CategoryListingSettingField[] {
+  const own = productLayerOf(state, storeConnectionId, product.productId);
+  const fields = new Set<CategoryListingSettingField>();
+  if (own !== null) {
+    for (const field of CATEGORY_LISTING_SETTING_FIELDS) if (own.values[field] !== null) fields.add(field);
+  }
+  for (const size of product.sizes) {
+    const leftover = sizeLeftoverOf(state, storeConnectionId, size.productVariantId);
+    for (const field of PRODUCT_POLICY_FIELDS) if (leftover[POLICY_LEFTOVER[field]] != null) fields.add(field);
+    if (leftover.shelfNames !== undefined) fields.add("storeShelf");
+  }
+  return CATEGORY_LISTING_SETTING_FIELDS.filter((field) => fields.has(field));
+}
+
+/** The chosen products in a Card Shellz category, in catalog order. */
+function categoryProducts(state: StubState, categoryId: number): ProductFixture[] {
+  return state.catalog.filter((product) => (product.categoryId ?? null) === categoryId);
+}
+
+/**
+ * Every Card Shellz category that holds a chosen product (`GET …/listing-settings/categories`, the card's
+ * read on mount), by its current name then id, with its row's revision and what the row sets in the stored
+ * shape's order, and how many chosen products have no category. Through the strict schema.
+ */
+export function listingSettingsCategories(state: StubState, storeConnectionId: number): ListingSettingsCategoriesResponse {
+  const byId = new Map<number, { name: string; count: number }>();
+  for (const product of state.catalog) {
+    const category = categoryOf(state, storeConnectionId, product);
+    if (category === null) continue;
+    const entry = byId.get(category.categoryId) ?? { name: category.name, count: 0 };
+    entry.count += 1;
+    byId.set(category.categoryId, entry);
+  }
+  const categories = [...byId.entries()].map(([categoryId, entry]) => {
+    const layer = categoryLayerOf(state, storeConnectionId, categoryId);
+    return {
+      categoryId, name: entry.name, productCount: entry.count, revisionId: layer?.revisionId ?? null,
+      setFields: layer === null ? [] : CATEGORY_LISTING_SETTING_FIELDS.filter((field) => layer.values[field] !== null),
+    };
+  }).sort((left, right) => (left.name < right.name ? -1 : left.name > right.name ? 1 : left.categoryId - right.categoryId));
+  return listingSettingsCategoriesResponseSchema.parse({
+    storeConnectionId, categories,
+    uncategorizedProductCount: state.catalog.filter((product) => (product.categoryId ?? null) === null).length,
+    generatedAt: STAMP,
+  });
+}
+
+/**
+ * One category's settings in full (`GET …/listing-settings/categories/:categoryId`, the editor's read): each
+ * setting from its row (`category`), else the store default (`store_default`, a policy by id alone, as the
+ * server names store defaults with no name), else `none`; the chosen products in it that hold their own value
+ * for a category setting, each with its row's revision (null when its own value is a size's leftover alone);
+ * no price examples. Null when no chosen product is in the category. Today's stub reads no store shelf default
+ * (PR 7's fixture), so a category with no shelf of its own reads none.
+ */
+export function listingSettingsCategoryDetail(state: StubState, storeConnectionId: number, categoryId: number): ListingSettingsCategoryDetail | null {
+  const products = categoryProducts(state, categoryId);
+  if (products.length === 0) return null;
+  const name = categoryOf(state, storeConnectionId, products[0])!.name;
+  const layer = categoryLayerOf(state, storeConnectionId, categoryId);
+  const values = layer?.values ?? null;
+  const selection = setupOf(state, storeConnectionId).selection as Record<string, string | null | undefined>;
+  const template = state.contentProfiles[storeConnectionId]?.profile?.defaultTemplate ?? null;
+  const storeCategory = state.categoryRules[storeConnectionId]?.profile?.defaultCategory ?? null;
+  const sourced = <V>(own: V | null, store: V | null) =>
+    own !== null ? { source: "category", value: own } : store !== null ? { source: "store_default", value: store } : { source: "none", value: null };
+  const policy = (field: keyof typeof POLICY_DEFAULT) => {
+    const own = values?.[field] ?? null;
+    const store = selection[POLICY_DEFAULT[field]] ?? null;
+    return sourced(own === null ? null : { id: own.id, name: own.name }, store === null ? null : { id: store, name: null });
+  };
+  const text = (field: "textAbove" | "textBelow", storeText: string) =>
+    sourced(values?.[field] ?? null, storeText === "" ? null : { mode: "own" as const, text: storeText });
+  return listingSettingsCategoryDetailSchema.parse({
+    storeConnectionId, categoryId, name, productCount: products.length, revisionId: layer?.revisionId ?? null,
+    settings: {
+      price: sourced(values?.price ?? null, storeRecipe(state, storeConnectionId)),
+      ebayCategory: sourced(
+        values?.ebayCategory ? { categoryId: values.ebayCategory.categoryId, categoryName: values.ebayCategory.categoryName } : null,
+        storeCategory ? { categoryId: storeCategory.categoryId, categoryName: storeCategory.categoryName } : null,
+      ),
+      storeShelf: sourced(values?.storeShelf ?? null, null),
+      shippingPolicy: policy("shippingPolicy"), returnPolicy: policy("returnPolicy"), paymentPolicy: policy("paymentPolicy"),
+      textAbove: text("textAbove", template?.introduction ?? ""), textBelow: text("textBelow", template?.footer ?? ""),
+    },
+    ownValues: products.flatMap((product) => {
+      const fields = ownCategoryFieldsOf(state, storeConnectionId, product);
+      if (fields.length === 0) return [];
+      return [{ productId: product.productId, revisionId: productLayerOf(state, storeConnectionId, product.productId)?.revisionId ?? null, fields }];
+    }),
+    examples: [],
+    generatedAt: STAMP,
+  });
+}
+
+/** The older group rules the store still holds (plan P21, D11), counted as the live summary counts them. */
+function olderGroupRuleCounts(state: StubState, storeConnectionId: number) {
+  return {
+    pricingGroups: state.pricingRules[storeConnectionId]?.profile?.groups.length ?? 0,
+    contentGroups: state.contentProfiles[storeConnectionId]?.profile?.groups.length ?? 0,
+    ebayCategoryRules: state.categoryRules[storeConnectionId]?.profile?.rules.length ?? 0,
+  };
+}
+
+/** W12's 409 when the clear set is not the one the server derives (the service's productSetConflict), with the server's delay note. */
+function categoryProductSetConflict(storeConnectionId: number, categoryId: number, productIds: readonly number[]): ScriptedError {
+  return { status: 409, code: "DROPSHIP_PRODUCT_LISTING_SETTINGS_VERSION_CONFLICT",
+    message: "Which products have their own values in this category changed after you opened it. Reload it before saving again. A change Card Shellz made can take up to 60 seconds to show.",
+    context: { storeConnectionId, categoryId, conflicts: productIds.slice(0, 100).map((productId) => ({ productId })), conflictCount: productIds.length,
+      retryable: false, classification: "permanent" } };
+}
+
+/**
+ * W12 as dropship-listing-category-settings-service.ts saves it, in its order: older group rules refuse
+ * first (after the replay probe, which keyedWrite runs before this); no chosen product in the category is
+ * the 404; the "Also clear theirs" set is derived again and must be the set sent (409 PRODUCT_…
+ * VERSION_CONFLICT with `conflictCount`); the category's revision compares-and-sets (409 CATEGORY_…
+ * VERSION_CONFLICT); each cleared product's revision too; an id the category's row doesn't hold already
+ * asks eBay, which a sign-in stops (D4); the values as `patchedValues` makes them (never a main text);
+ * then each product of the set loses its own values in the cleared settings (its row, with a new
+ * revision, and its sizes' leftovers). Nothing changed and nothing cleared is `unchanged`.
+ */
+function saveCategorySettings(state: StubState, storeConnectionId: number, categoryId: number,
+  input: Pick<SaveCategorySettingsInput, "expectedRevisionId" | "patch" | "clear">): Record<string, unknown> | ScriptedError {
+  const rules = olderGroupRuleCounts(state, storeConnectionId);
+  if (rules.pricingGroups + rules.contentGroups + rules.ebayCategoryRules > 0) {
+    return { status: 409, code: "DROPSHIP_LISTING_SETTINGS_OLDER_RULES_PRESENT",
+      message: "This store still uses older group rules for prices, descriptions or eBay categories, and they would win over category settings. Category settings can be saved once those rules are replaced.",
+      context: { storeConnectionId, ...rules, retryable: false, classification: "permanent" } };
+  }
+  const products = categoryProducts(state, categoryId);
+  if (products.length === 0) {
+    return { status: 404, code: "DROPSHIP_LISTING_SETTINGS_CATEGORY_NOT_FOUND", message: "This category has no chosen product in this store. Reload the page.",
+      context: { storeConnectionId, categoryId, retryable: false, classification: "permanent" } };
+  }
+  const { clear, patch } = input;
+  let cleared: ProductFixture[] = [];
+  if (clear !== undefined) {
+    const fields = new Set<string>(clear.fields);
+    cleared = products.filter((product) => ownCategoryFieldsOf(state, storeConnectionId, product).some((field) => fields.has(field)));
+    const derived = cleared.map((product) => product.productId);
+    const sent = clear.products.map((product) => product.productId);
+    const differ = [...derived.filter((id) => !sent.includes(id)), ...sent.filter((id) => !derived.includes(id))].sort((left, right) => left - right);
+    if (differ.length > 0) return categoryProductSetConflict(storeConnectionId, categoryId, differ);
+  }
+  const current = categoryLayerOf(state, storeConnectionId, categoryId);
+  if (input.expectedRevisionId !== (current?.revisionId ?? null)) {
+    return { status: 409, code: "DROPSHIP_CATEGORY_LISTING_SETTINGS_VERSION_CONFLICT", message: "This category's settings changed after you opened them. Reload them before saving again.",
+      context: { storeConnectionId, categoryId, expectedRevisionId: input.expectedRevisionId, actualRevisionId: current?.revisionId ?? null, retryable: false, classification: "permanent" } };
+  }
+  if (clear !== undefined) {
+    const stale = clear.products.map((product) => ({ productId: product.productId, expectedRevisionId: product.expectedRevisionId,
+      actualRevisionId: productLayerOf(state, storeConnectionId, product.productId)?.revisionId ?? null }))
+      .filter((product) => product.expectedRevisionId !== product.actualRevisionId);
+    if (stale.length > 0) return versionConflict(storeConnectionId, stale);
+  }
+  const before = current?.values ?? NO_CATEGORY_VALUES;
+  const asksEbay: string[] = [];
+  if (patch.ebayCategory && patch.ebayCategory.categoryId !== before.ebayCategory?.categoryId) asksEbay.push("ebayCategory");
+  if (patch.storeShelf?.mode === "own" && !sameShelfIds(patch.storeShelf.shelfIds, before.storeShelf)) asksEbay.push("storeShelf");
+  for (const field of PRODUCT_POLICY_FIELDS) {
+    const sent = patch[field];
+    if (sent !== null && sent !== undefined && before[field]?.id !== sent.id) asksEbay.push(field);
+  }
+  const signIn = signInRequired(state, storeConnectionId, asksEbay);
+  if (signIn) return signIn;
+  const patched = patchedValues(state, storeConnectionId, { ...before, mainText: null }, patch, asksEbay);
+  if ("status" in patched) return patched as ScriptedError;
+  const { mainText: _mainText, ...values } = patched;
+  const changed = JSON.stringify(values) !== JSON.stringify(before);
+  let revisionId = current?.revisionId ?? null;
+  if (changed) {
+    revisionId = state.nextRevision++;
+    state.categorySettings[categoryKey(storeConnectionId, categoryId)] = categorySettingsLayerSchema.parse({ revisionId, values });
+  }
+  for (const product of cleared) {
+    const own = productLayerOf(state, storeConnectionId, product.productId);
+    if (own !== null) {
+      const next: ProductListingSettingValues = { ...own.values };
+      for (const field of clear!.fields) next[field] = null;
+      if (JSON.stringify(next) !== JSON.stringify(own.values)) {
+        state.productSettings[productKey(storeConnectionId, product.productId)] = productSettingsLayerSchema.parse({ revisionId: state.nextRevision++, values: next });
+      }
+    }
+    clearSizeLeftovers(state, storeConnectionId, product, clear!.fields);
+  }
+  return saveCategorySettingsResponseSchema.parse({
+    outcome: changed || cleared.length > 0 ? "changed" : "unchanged", categoryId, revisionId, clearedProductCount: cleared.length,
+  });
+}
+
+/** A W12 replay says so in its `outcome`, with no clear count (saveCategorySettingsResponseSchema). */
+const CATEGORY_SETTINGS_ANSWER: KeyedAnswerShape = (json, replayed) =>
+  saveCategorySettingsResponseSchema.parse(replayed ? { ...json, outcome: "replayed", clearedProductCount: null } : json);
+
 const PRESERVED_RULE_NAME = "Fixed override preserved";
 const WOULD_BE_LOST = "DROPSHIP_LISTING_PRICE_WOULD_BE_LOST";
 /** The 409's and 422's name at most this many sizes (write-support MAX_LISTED_SIZES). */
@@ -1781,7 +2005,7 @@ export const defaultStubState = (): StubState => ({
   contentProfiles: {}, pricingReviews: [], pricingReviewAnswers: [], pricingApplies: [], pricingApplyAnswers: [],
   categoryWrites: [], categoryWriteAnswers: [], categorySearches: [], contentWrites: [], contentWriteAnswers: [],
   priceWrites: [], priceWriteAnswers: [], productSettingsWrites: [], productSettingsWriteAnswers: [],
-  productsBulkWrites: [], productsBulkWriteAnswers: [],
+  productsBulkWrites: [], productsBulkWriteAnswers: [], categorySettingsWrites: [], categorySettingsWriteAnswers: [],
   priceChangeReviews: [], priceChangeReviewAnswers: [], priceChangePageAnswers: [], priceChangeApplies: [], priceChangeApplyAnswers: [],
   priceChangeChecks: {}, priceChangeApplied: {}, categoryMovesAcknowledges: [], categoryMovesAcknowledgeAnswers: [],
   reviews: {}, keyedAnswers: {}, nextRevision: 40, unexpected: [], errors: [],
@@ -2071,6 +2295,16 @@ async function answerListingWrite(state: StubState, route: Route, storeId: numbe
     return keyedWrite(state, route, parsed.data.idempotencyKey, body, state.priceChangeApplyAnswers,
       () => applyPriceChanges(state, storeId, parsed.data), PRICE_CHANGE_ANSWER);
   }
+  // W12 (plan PR 10, 8.5): one category's settings, keyed, checked with the shared input schema.
+  const categorySettingsPath = new RegExp(`^${listings}/listing-settings/categories/(\\d+)$`).exec(path);
+  if (method === "PUT" && categorySettingsPath) {
+    const body = json();
+    state.categorySettingsWrites.push({ method, path, body });
+    const parsed = saveCategorySettingsInputSchema.safeParse(body);
+    if (!parsed.success) return refuseBody(state, route, method, path, parsed.error.message);
+    return keyedWrite(state, route, parsed.data.idempotencyKey, body, state.categorySettingsWriteAnswers,
+      () => saveCategorySettings(state, storeId, Number(categorySettingsPath[1]), parsed.data), CATEGORY_SETTINGS_ANSWER);
+  }
   const pricePath = new RegExp(`^${listings}/variants/(\\d+)/price$`).exec(path);
   if (method === "PUT" && pricePath) {
     const body = json();
@@ -2162,6 +2396,20 @@ async function answerStoreRead(state: StubState, route: Route, storeId: number, 
     }
     return route.fulfill({ json: listingSettingsUpdatedProducts(state, storeId, parsed.data.page) });
   }
+  // The Category settings card (read on mount) and the category editor (plan PR 10, 8.5): refused while too large (D18).
+  if (path === `${listings}/listing-settings/categories`) {
+    if (state.tooLarge) return fulfillTooLarge(route);
+    return route.fulfill({ json: listingSettingsCategories(state, storeId) });
+  }
+  const categoryPath = new RegExp(`^${listings}/listing-settings/categories/(\\d+)$`).exec(path);
+  if (categoryPath) {
+    if (state.tooLarge) return fulfillTooLarge(route);
+    const detail = listingSettingsCategoryDetail(state, storeId, Number(categoryPath[1]));
+    if (detail === null) {
+      return fulfillError(route, { status: 404, code: "DROPSHIP_LISTING_SETTINGS_CATEGORY_NOT_FOUND", message: "This category has no chosen product in this store. Reload the page." });
+    }
+    return route.fulfill({ json: detail });
+  }
   // One product's own settings row (plan PR 10, 4.2): refused while too large, as the server refuses every list read.
   const ownPath = new RegExp(`^${listings}/listing-settings/products/(\\d+)/own$`).exec(path);
   if (ownPath) {
@@ -2218,7 +2466,7 @@ async function answerStoreRead(state: StubState, route: Route, storeId: number, 
   return NOT_MINE;
 }
 
-/** More than 10,000 sizes chosen: the lists, the ids read, the updated products, the product read and its own settings are refused (dropship-listing-settings.routes.ts). */
+/** More than 10,000 sizes chosen: the lists, the ids read, the updated products, the categories, the product read and its own settings are refused (dropship-listing-settings.routes.ts). */
 function fulfillTooLarge(route: Route) {
   return fulfillError(route, { status: 422, code: "DROPSHIP_LISTING_SETTINGS_TOO_LARGE",
     message: "More than 10,000 sizes are chosen.", context: { limit: 10_000 } });
@@ -2358,6 +2606,52 @@ export function oldSetupPanel(page: Page) {
   if (JSON.stringify(movedAgain) !== JSON.stringify({ outcome: "acknowledged", acknowledgedProductIds: [], movedAgainProductIds: [LAYERED_SAMPLE.productId] })
     || marked.categoryMarks[productKey(store, LAYERED_SAMPLE.productId)] !== 40 || CATEGORY_MOVES_ANSWER(movedAgain, true).outcome !== "replayed") {
     throw new Error(`The stub's W13 moved-again answer changed: ${JSON.stringify(movedAgain)}`);
+  }
+
+  // W12 (plan PR 10, 8.5, 8.6): the card lists the sample's category with what its row sets, in the stored order; the detail
+  // names the sample's own values (its row's, the price included, and its size's leftovers; never the main text) with its row's
+  // revision; a save with "Also clear theirs" on the shipping policy clears the sample's row and its size's leftover and answers
+  // through the shared contract (its replay too); another clear set is the set conflict; the category's revision compares-and-sets;
+  // older group rules refuse before anything else.
+  // The default state answers one category with no settings (D18), so every earlier journey's reads are unchanged.
+  const defaultCard = listingSettingsCategories(loaded, store);
+  if (JSON.stringify(defaultCard.categories) !== JSON.stringify([{ categoryId: MAILERS_CATEGORY_ID, name: "Mailers", productCount: 1, revisionId: null, setFields: [] }])
+    || defaultCard.uncategorizedProductCount !== 0) {
+    throw new Error(`The stub's default categories read changed: ${JSON.stringify(defaultCard)}`);
+  }
+  const cardRead = listingSettingsCategories(layered, store);
+  if (JSON.stringify(cardRead.categories) !== JSON.stringify([
+    { categoryId: MAILERS_CATEGORY_ID, name: "Mailers", productCount: 1, revisionId: null, setFields: [] },
+    { categoryId: 40, name: "Sleeves", productCount: 1, revisionId: 8, setFields: ["ebayCategory", "storeShelf", "returnPolicy", "textBelow"] },
+  ]) || cardRead.uncategorizedProductCount !== 0) {
+    throw new Error(`The stub's categories read changed: ${JSON.stringify(cardRead)}`);
+  }
+  const detailRead = listingSettingsCategoryDetail(layered, store, 40);
+  if (detailRead === null || JSON.stringify(detailRead.ownValues) !== JSON.stringify([{ productId: LAYERED_SAMPLE.productId, revisionId: 7, fields: ["price", "storeShelf", "shippingPolicy", "textAbove"] }])
+    || detailRead.settings.returnPolicy.source !== "category" || detailRead.settings.shippingPolicy.source !== "store_default"
+    || detailRead.settings.shippingPolicy.value?.name !== null || detailRead.settings.storeShelf.value?.mode !== "none" || detailRead.settings.textAbove.source !== "none"
+    || listingSettingsCategoryDetail(layered, store, 99) !== null) {
+    throw new Error(`The stub's category detail changed: ${JSON.stringify(detailRead)}`);
+  }
+  const twelve: StubState = { ...layered, productSettings: { ...layered.productSettings }, categorySettings: { ...layered.categorySettings }, sizeLeftovers: { ...layered.sizeLeftovers } };
+  const twelveSaved = saveCategorySettings(twelve, store, 40, { expectedRevisionId: 8, patch: { shippingPolicy: { id: "ground" } },
+    clear: { fields: ["shippingPolicy"], products: [{ productId: LAYERED_SAMPLE.productId, expectedRevisionId: 7 }] } });
+  if ("status" in twelveSaved || twelveSaved.outcome !== "changed" || twelveSaved.clearedProductCount !== 1 || CATEGORY_SETTINGS_ANSWER(twelveSaved, true).outcome !== "replayed"
+    || productLayerOf(twelve, store, LAYERED_SAMPLE.productId)?.values.shippingPolicy !== null || productLayerOf(twelve, store, LAYERED_SAMPLE.productId)?.revisionId === 7
+    || twelve.sizeLeftovers[sizeKey(store, 302)]?.shippingPolicyId !== undefined || categoryLayerOf(twelve, store, 40)?.values.shippingPolicy?.name !== "USPS Ground Advantage"
+    || listingSettingsCategoryDetail(twelve, store, 40)?.ownValues[0]?.fields.includes("shippingPolicy")) {
+    throw new Error(`The stub's W12 save changed: ${JSON.stringify(twelveSaved)}`);
+  }
+  const wrongSet = saveCategorySettings({ ...layered, categorySettings: { ...layered.categorySettings } }, store, 40,
+    { expectedRevisionId: 8, patch: { shippingPolicy: { id: "ground" } }, clear: { fields: ["shippingPolicy"], products: [{ productId: ENVELOPE.productId, expectedRevisionId: null }] } });
+  const staleCategory = saveCategorySettings({ ...layered, categorySettings: { ...layered.categorySettings } }, store, 40, { expectedRevisionId: 1, patch: { returnPolicy: null } });
+  const ruled = saveCategorySettings({ ...layered, pricingRules: { [store]: { ...SAVED_PRICING_RULES, profile: { ...SAVED_PRICING_RULES.profile!,
+    groups: [{ id: "g1", name: "Sleeves", priority: 1, scope: { type: "category", category: "Sleeves" }, recipe: SAVED_PRICING_RULES.profile!.defaultRecipe }] } } } },
+  store, 40, { expectedRevisionId: 8, patch: { returnPolicy: null } });
+  if (!("status" in wrongSet) || wrongSet.code !== "DROPSHIP_PRODUCT_LISTING_SETTINGS_VERSION_CONFLICT" || (wrongSet as ScriptedError).context?.conflictCount !== 2
+    || !("status" in staleCategory) || staleCategory.code !== "DROPSHIP_CATEGORY_LISTING_SETTINGS_VERSION_CONFLICT"
+    || !("status" in ruled) || ruled.code !== "DROPSHIP_LISTING_SETTINGS_OLDER_RULES_PRESENT" || (ruled as ScriptedError).context?.pricingGroups !== 1) {
+    throw new Error(`The stub's W12 refusals changed: ${JSON.stringify({ wrongSet, staleCategory, ruled })}`);
   }
 
   // W7 (plan PR 10, 7.3, 7.7): a check of the envelope's price prices its size with the shared resolver, the apply writes the
