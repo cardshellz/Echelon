@@ -52,11 +52,22 @@ describe("shared eBay publication batch", () => {
     } } }).success).toBe(false);
   });
 
-  it("does not expose database query details as a provider diagnostic", () => {
-    const failure = ebayListingPushFailure(20, Object.assign(new Error("duplicate key: confidential database value"), { code: "23505" }));
-    expect(failure.code).toBe("EBAY_LISTING_OPERATION_FAILED");
-    expect(failure.issue?.action.kind).toBe("contact_support");
+  it.each([
+    { name: "no saved request", jobId: undefined, reference: undefined,
+      action: { kind: "edit_listing", label: "Open listing feed", href: "/channels/ebay" } },
+    { name: "a saved request", jobId: "18000000-0000-4000-8000-000000000002", reference: "18000000-0000-4000-8000-000000000002",
+      action: { kind: "check_status", label: "View saved update details" } },
+    { name: "an invalid request reference", jobId: "invalid-reference", reference: undefined,
+      action: { kind: "edit_listing", label: "Open listing feed", href: "/channels/ebay" } },
+  ])("keeps database diagnostics private and offers read-only navigation with $name", ({ jobId, reference, action }) => {
+    const failure = ebayListingPushFailure(20, Object.assign(new Error("duplicate key: confidential database value"), { code: "23505", jobId }));
+    expect(failure).toMatchObject({ code: "EBAY_LISTING_OPERATION_FAILED", success: false, status: "error",
+      issue: { code: "EBAY_LISTING_OPERATION_FAILED", retryable: false } });
+    expect(failure.issue?.action).toEqual(action);
+    expect(failure.issue?.reference).toBe(reference);
     expect(JSON.stringify(failure)).not.toContain("confidential");
+    expect(JSON.stringify(failure)).not.toContain("23505");
+    expect(JSON.stringify(failure)).not.toContain("invalid-reference");
   });
   it("counts a saved publication as queued and retains its exact request and actor", async () => {
     const commandKey="18000000-0000-4000-8000-000000000001";
