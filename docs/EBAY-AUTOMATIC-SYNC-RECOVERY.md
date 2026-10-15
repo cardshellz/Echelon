@@ -121,6 +121,41 @@ Both new PostgreSQL suites are included in `scripts/ci/postgres-test-manifest.ts
 and its coverage guard. The writer baseline adds only the four new tables owned
 by inventory planning.
 
+### CI follow-up on 2026-10-15
+
+CI exposed two missed consumers of the readback change and an outdated browser
+assertion. The corrections preserve the production consistency check:
+
+- `EbayDropshipInventoryPublicationTransportAdapter.readAbsolute` in
+  `server/modules/dropship/infrastructure/dropship-ebay-inventory-publication.adapter.ts:116`
+  now forwards `quantityConsistent` alongside the observed quantity. Previously it
+  retained the flag only inside diagnostic evidence, so the outbox's optional
+  top-level contract could treat disagreeing item/offer quantities as a match.
+  Seven exact-response cases first failed before the adapter correction and now
+  cover both disagreement directions, zero quantities, agreement and the maximum
+  safe integer. The shared eBay reader still owns the provider calculation.
+- `shipmentPublicationFixtureSql` in
+  `server/modules/inventory-planning/__tests__/fixtures/shipment-publication.fixture.ts:16`
+  now installs the actual quantity-consistency migration. This reduced PostgreSQL
+  fixture previously bypassed the central migration installer. Both consuming
+  suites pass (**11 cases**), including the existing lock-cycle test; their
+  assertions are unchanged.
+- The replayed-publication browser case in
+  `test/browser/ebay-listing-mapping-repair.spec.ts:133` now expects the current
+  `Listed` badge and separately verifies the newer photo failure, correction link,
+  Errors count and newer job's status dialog. The historical successful receipt
+  must not erase or replace that newer failure.
+
+Follow-up local validation: full unit shard 4 (**403 files, 6,653 tests**), all
+dropship unit tests plus shared quantity/outbox boundaries (**312 files, 6,492
+tests**), full PostgreSQL shard 3 (**20 files, 280 tests**), the full desktop/mobile
+mapping-repair browser suite (**50 tests**) and server/client-test TypeScript
+passed. Unit selections overlap; these are separate runs, not additive
+coverage totals. Initial Windows runs found fixture line-ending differences and
+one local HTTP `bad port` failure; the complete passing reruns used exact Git
+fixture bytes without changing committed SQL or golden content. Remote CI and
+release state remain separate from these local results.
+
 ## Migration and operational limits
 
 - Migration `900000008000018120001_ebay_automatic_sync_recovery.sql` adds the durable

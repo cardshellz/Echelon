@@ -121,7 +121,11 @@ export class EbayDropshipInventoryPublicationTransportAdapter
       const observation = await readEbayInventoryQuantity(
         this.quantityClient(context), exactEbayInventoryItemKey(request), ebayInventoryMarketplace(context.credential.config.marketplaceId),
       );
-      return { observedQuantity: observation.observedQuantity, providerResponse: observation };
+      return {
+        observedQuantity: observation.observedQuantity,
+        quantityConsistent: observation.quantityConsistent,
+        providerResponse: observation,
+      };
     } catch (error) { throw translateQuantityError(error); }
   }
 

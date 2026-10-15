@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import type { CanonicalInventoryPublicationIntent } from "../../application/inventory-availability-runtime-publication.service";
 
 export function shipmentPublicationIntent(quantity = "6"): CanonicalInventoryPublicationIntent {
@@ -10,7 +12,8 @@ export function shipmentPublicationIntent(quantity = "6"): CanonicalInventoryPub
   };
 }
 
-/** Real-query prerequisites, not a substitute for publication migration proof. */
+/** Real-query prerequisites, not a substitute for publication migration proof.
+ * Apply the actual readback migration for every reduced-fixture consumer. */
 export const shipmentPublicationFixtureSql = `
   CREATE SCHEMA channels;
   CREATE TABLE channels.sync_settings (
@@ -69,4 +72,4 @@ export const shipmentPublicationFixtureSql = `
     provider_scope_type_snapshot text NOT NULL, external_scope_id_snapshot text NOT NULL,
     publication_target_revision_snapshot bigint NOT NULL, observed_at timestamptz NOT NULL
   );
-`;
+` + readFileSync(resolve(process.cwd(), "migrations/900000009000018120002_inventory_publication_quantity_consistency.sql"), "utf8");

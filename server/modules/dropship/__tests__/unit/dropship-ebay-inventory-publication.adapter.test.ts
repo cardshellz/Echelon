@@ -72,15 +72,32 @@ describe("EbayDropshipInventoryPublicationTransportAdapter", () => {
     });
   });
 
-  it("reads the provider quantity without applying another ATP formula", async () => {
-    const fetchFn = vi.fn().mockResolvedValueOnce(jsonResponse(offerPage(9))).mockResolvedValueOnce(jsonResponse(inventoryItem(12)));
+  it.each([
+    { itemQuantity: 12, offerQuantity: 9, observedQuantity: 9, quantityConsistent: false },
+    { itemQuantity: 9, offerQuantity: 12, observedQuantity: 9, quantityConsistent: false },
+    { itemQuantity: 0, offerQuantity: 9, observedQuantity: 0, quantityConsistent: false },
+    { itemQuantity: 9, offerQuantity: 0, observedQuantity: 0, quantityConsistent: false },
+    { itemQuantity: 9, offerQuantity: 9, observedQuantity: 9, quantityConsistent: true },
+    { itemQuantity: 0, offerQuantity: 0, observedQuantity: 0, quantityConsistent: true },
+    { itemQuantity: Number.MAX_SAFE_INTEGER, offerQuantity: Number.MAX_SAFE_INTEGER,
+      observedQuantity: Number.MAX_SAFE_INTEGER, quantityConsistent: true },
+  ])("forwards provider quantity and consistency without another ATP formula (item=$itemQuantity, offer=$offerQuantity)", async ({
+    itemQuantity, offerQuantity, observedQuantity, quantityConsistent,
+  }) => {
+    const fetchFn = vi.fn().mockResolvedValueOnce(jsonResponse(offerPage(offerQuantity)))
+      .mockResolvedValueOnce(jsonResponse(inventoryItem(itemQuantity)));
     const { adapter } = fixture(fetchFn);
 
     await expect(adapter.readAbsolute(request())).resolves.toEqual({
-      observedQuantity: 9,
-      providerResponse: { sku: "SKU-101", marketplaceId: "EBAY_US", offerId: "offer-1", inventoryItemQuantity: 12, offerQuantity: 9, observedQuantity: 9 },
+      observedQuantity,
+      quantityConsistent,
+      providerResponse: {
+        sku: "SKU-101", marketplaceId: "EBAY_US", offerId: "offer-1",
+        inventoryItemQuantity: itemQuantity, offerQuantity, observedQuantity, quantityConsistent,
+      },
     });
     expect(fetchFn).toHaveBeenCalledTimes(2);
+    expect(fetchFn.mock.calls.every(([, init]) => init.method === "GET")).toBe(true);
   });
   it("returns exact read-only convergence without creating a listing or sending a quantity mutation", async () => {
     const fetchFn = vi.fn().mockResolvedValueOnce(jsonResponse(offerPage(9))).mockResolvedValueOnce(jsonResponse(inventoryItem(9)));
