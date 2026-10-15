@@ -33,7 +33,7 @@ function AccountModal({ api, session, choice, onClose }: {
     <div className="csz-account-ui" ref={setPortalRoot}>
       <header className="csz-dialog-heading">
         <div><h2 id="csz-account-dialog-title">{choice.kind === "edit" ? "Edit your order" : "Return items"}</h2>
-          <p>{choice.kind === "edit" ? "Update quantities or add a product, then review the new total." : "Choose the items and quantities you want to send back."}</p></div>
+          <p>{choice.kind === "edit" ? "Update your items, then apply your changes." : "Choose the items and quantities you want to send back."}</p></div>
         <button type="button" className="csz-modal-close" aria-label="Close order tools" disabled={busy} onClick={onClose}>×</button>
       </header>
       <div className="csz-dialog-body">

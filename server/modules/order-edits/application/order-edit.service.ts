@@ -51,6 +51,11 @@ import { OrderEditError } from "../domain/order-edit-error";
 import type { OrderEditCodeRedemptions } from "./order-edit-code-redemptions";
 import { requiresLegacyCodeReceipt } from "../domain/order-edit-coupon-boundary";
 import { presentOrderEditCodeBreakdown } from "./order-edit-code-presentation";
+import {
+  orderEditActorFingerprint,
+  orderEditDiagnosticError,
+  type OrderEditDiagnosticEvent,
+} from "./order-edit-diagnostics";
 
 const terminal = new Set(["completed", "recovered", "failed", "expired"]);
 // Bound each scheduler pass so one store cannot monopolize the worker.
@@ -69,10 +74,7 @@ export class OrderEditService {
     private readonly warehouse: OrderEditWarehouse,
     private readonly clock: () => Date,
     private readonly uuid: () => string,
-    private readonly report: (event: {
-      operationId: string;
-      code: string;
-    }) => void,
+    private readonly report: (event: OrderEditDiagnosticEvent) => void,
     private readonly previews?: OrderEditPreviewService,
     private readonly catalog?: OrderEditCatalog,
     private readonly codeRedemptions?: OrderEditCodeRedemptions,
@@ -367,6 +369,18 @@ export class OrderEditService {
         error: null,
       };
       await this.store.create(record);
+      let phase = "preparation";
+      const reportFailure = (failedPhase: string, error: unknown) =>
+        this.report({
+          operationId: record.id,
+          code: this.failure(error).code,
+          phase: failedPhase,
+          omsOrderId: record.omsOrderId,
+          connectionId: record.connectionId,
+          actorFingerprint: orderEditActorFingerprint(actorId),
+          occurredAt: this.clock().toISOString(),
+          error: orderEditDiagnosticError(error),
+        });
       try {
         // Staging only calculates an uncommitted Shopify edit. It does not
         // change the order or move money, so it can overlap hold acquisition.
@@ -387,18 +401,17 @@ export class OrderEditService {
             record.id,
           ),
         ]);
+        if (hold.status === "rejected")
+          reportFailure("warehouse_hold", hold.reason);
+        if (preparation.status === "rejected")
+          reportFailure("shopify_quote", preparation.reason);
         if (hold.status === "rejected") {
-          // Hold failure determines the persisted outcome. Keep the independent
-          // preview failure observable as well when both branches fail.
-          if (preparation.status === "rejected")
-            this.report({
-              operationId: record.id,
-              code: this.failure(preparation.reason).code,
-            });
+          // Both failures were recorded; hold failure still determines the saved outcome.
           throw hold.reason;
         }
         if (preparation.status === "rejected") throw preparation.reason;
         const quote = preparation.value;
+        phase = "quote_identity";
         if (
           quote.operationId !== record.id ||
           quote.orderId !== baseline.orderId ||
@@ -424,6 +437,7 @@ export class OrderEditService {
             "ORDER_EDIT_QUOTE_IDENTITY_INVALID",
             "The order edit quote did not match the requested order.",
           );
+        phase = "quote_persist";
         record = await this.update(
           record,
           { status: "ready", quote },
@@ -431,9 +445,21 @@ export class OrderEditService {
           "quoted",
         );
       } catch (error) {
+        if (phase !== "preparation") reportFailure(phase, error);
+        const failure = this.failure(error);
         record = await this.update(
           record,
-          { status: "review_required", error: this.failure(error) },
+          {
+            status: "review_required",
+            error:
+              failure.code === "ORDER_EDIT_UNAVAILABLE"
+                ? {
+                    ...failure,
+                    message:
+                      "We couldn't verify your changes. No order changes were applied. Cancel this attempt and try again.",
+                  }
+                : failure,
+          },
           actorId,
           "quote_failed_held",
         );
@@ -1143,9 +1169,13 @@ export class OrderEditService {
             })),
       warnings: [
         "Private staff testing. Customer access is disabled.",
-        ...(quote ? [quote.shippingRepricing
-          ? "Shipping is recalculated for the revised items using current checkout rates and eligible shipping benefits."
-          : "This saved edit predates shipping recalculation. Start a new edit to recheck shipping."] : []),
+        ...(quote
+          ? [
+              quote.shippingRepricing
+                ? "Shipping is recalculated for the revised items using current checkout rates and eligible shipping benefits."
+                : "This saved edit predates shipping recalculation. Start a new edit to recheck shipping.",
+            ]
+          : []),
       ],
       canAbandon:
         !record.commitStartedAt &&
