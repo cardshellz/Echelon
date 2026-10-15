@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { CATEGORY_LISTING_SETTING_FIELDS } from "@shared/dropship/listing-setting-values";
-import { CATEGORY_CLEAR_FIELDS, saveCategorySettingsInputSchema } from "@shared/dropship/listing-setting-writes";
+import { CATEGORY_CLEAR_FIELDS, reviewPriceChangesInputSchema, saveCategorySettingsInputSchema, type PriceChangeClearField } from "@shared/dropship/listing-setting-writes";
 import {
   listingSettingsCategoriesResponseSchema,
   listingSettingsCategoryDetailSchema,
@@ -8,6 +8,7 @@ import {
   type ListingSettingsCategoryDetail,
   type ListingSettingsSummary,
 } from "@shared/dropship/listing-settings";
+import type { PricingRecipe } from "@shared/dropship/pricing-rules";
 import { DropshipApiError } from "../dropship-ops-surface";
 import {
   listingSettingsEditRights,
@@ -21,15 +22,17 @@ import {
   classifyWriteFailure,
   productEditorId,
   reduceListingSettingsDraft,
+  SAVED_FLASH_MS,
   type DraftValue,
   type ListingSettingsDraft,
   type ListingSettingsDraftAction,
   type WriteFailurePhase,
 } from "../dropship-listing-settings-drafts";
 import { DRAWER_WORDS } from "../dropship-listing-settings-drawer";
-import type { DescriptionEditorState } from "../dropship-listing-settings-product-edit";
+import type { DescriptionEditorState, PriceCheckRef } from "../dropship-listing-settings-product-edit";
 import {
   CATEGORY_EDIT_FIELDS,
+  CATEGORY_PRICE_TARGET,
   CategoryRequestError,
   categoriesCardQueryOptions,
   categoriesReadEnabled,
@@ -49,29 +52,56 @@ import {
   categoryGoneDiscards,
   categoryHasChange,
   categoryHoldsSave,
+  categoryOwnPrice,
   categoryOwnValues,
   categoryPatch,
   categoryPickAction,
   categoryPolicyFieldEditor,
+  categoryPriceAction,
+  categoryPriceBaseMoved,
+  categoryPriceChanged,
+  categoryPriceCheckAlso,
+  categoryPriceCheckAlsoLines,
+  categoryPriceCheckAnswers,
+  categoryPriceCheckBack,
+  categoryPriceCheckBody,
+  categoryPriceCheckBaseOf,
+  categoryPriceCheckChange,
+  categoryPriceCheckShown,
+  categoryPriceClearBody,
+  categoryPriceDraftWithCheck,
+  categoryPriceEditorModel,
+  categoryPriceEditorResult,
+  categoryPricePatch,
+  categoryPricePending,
+  categoryPriceReviewBody,
+  categoryPriceReviewRequest,
+  categoryPriceRights,
+  categorySavedThroughCheck,
   categorySaveBody,
   categorySettingsCardState,
   categorySignature,
+  categoryStoreRecipe,
   categoryStoreShelfFieldEditor,
   choicesFromCategory,
   clearAllowed,
   clearCandidates,
   emptyCategoryChoices,
+  emptyCategoryPriceChange,
+  isCategoryPriceChange,
   olderGroupRulesPresent,
   olderRulesState,
   readCategoryDraft,
   rebaseCategoryDraft,
   type CategoryChoices,
   type CategoryEditorInput,
+  type CategoryPriceChange,
 } from "../dropship-listing-settings-categories";
+import { PRICE_DEFAULT_WORDS } from "../dropship-listing-settings-recipe";
 import type { PolicySetupFacts } from "../dropship-listing-settings-store-requests";
-import { LISTING_SETTINGS_BULK_WORDS, LISTING_SETTINGS_CATEGORY_WORDS, LISTING_SETTINGS_EDIT_WORDS } from "../dropship-listing-settings-words";
+import { LISTING_SETTINGS_BULK_WORDS, LISTING_SETTINGS_CATEGORY_PRICE_WORDS, LISTING_SETTINGS_CATEGORY_WORDS, LISTING_SETTINGS_EDIT_WORDS, LISTING_SETTINGS_PRICE_CHECK_WORDS, rightReasonLine } from "../dropship-listing-settings-words";
 
-/** The Category settings card and the category editor (plan PR 10, 8.1-8.7; W12). */
+/** The Category settings card and the category editor (plan PR 10, 8.1-8.7; W12), and the category price (PR 10f, plan 9.2, 9.4, 9.6; W7 `category_price`). */
 
 const STORE = 22;
 const CATEGORY = 40;
@@ -403,7 +433,10 @@ describe("the draft (plan 8.2, 8.4, D6, D16)", () => {
     expect(readCategoryDraft({ items: [] })).toBeNull();
     const base = categoryDraftValue(DETAIL) as unknown as Record<string, unknown>;
     for (const bad of [
-      { ...base, categoryId: 0 }, { ...base, expectedRevisionId: 1.5 }, { ...base, own: null }, { ...base, clear: ["price"] }, { ...base, clear: ["storeShelf", "storeShelf"] },
+      { ...base, categoryId: 0 }, { ...base, expectedRevisionId: 1.5 }, { ...base, own: null }, { ...base, clear: ["mainText"] }, { ...base, clear: ["storeShelf", "storeShelf"] },
+      // The price (PR 10f): its own recipe and its change must be the contract's shapes.
+      { ...base, ownPrice: { basis: "x" } }, { ...base, price: null }, { ...base, price: { choice: { mode: "set", value: { basis: "x" } }, check: null } },
+      { ...base, price: { choice: { mode: "leave" }, check: { reviewId: "x" } } },
       { ...base, ownValues: [{ productId: 11, revisionId: 5, fields: [] }] }, { ...base, ownValues: [{ productId: 11, revisionId: 5, fields: ["mainText"] }] },
       { ...base, ownValues: [{ productId: 11, revisionId: 5, fields: ["price"] }, { productId: 11, revisionId: 6, fields: ["price"] }] },
       { ...base, shippingPolicy: { mode: "set", value: { id: "" } } }, { ...base, storeShelf: { mode: "set", value: { mode: "own", shelfIds: [] } } },
@@ -411,6 +444,8 @@ describe("the draft (plan 8.2, 8.4, D6, D16)", () => {
       expect(readCategoryDraft(bad)).toBeNull();
     }
     expect(readCategoryDraft({ ...base, ownValues: [{ productId: 13, revisionId: 9, fields: ["price", "storeShelf"] }] })).not.toBeNull();
+    // A price tick is a draft shape (its clear rides on the check, PR 10f).
+    expect(readCategoryDraft({ ...base, clear: ["price"] })).not.toBeNull();
   });
 
   it("puts an editor's choices in the open draft, keeps the ticks that still apply, and refuses a pick it doesn't set", () => {
@@ -491,7 +526,9 @@ describe("the draft (plan 8.2, 8.4, D6, D16)", () => {
     // In the stored shape's order, whatever order they were ticked in.
     expect(categoryDraftValue(DETAIL, choices({ storeShelf: SET_SHELF }), ["shippingPolicy", "storeShelf", "textAbove"]).clear).toEqual(["storeShelf", "shippingPolicy", "textAbove"]);
     expect(categoryClearAction({ draft: null, categoryId: CATEGORY, field: "shippingPolicy", ticked: true })).toEqual({ kind: "not_open" });
-    expect(() => categoryClearAction({ draft: opened, categoryId: CATEGORY, field: "price" as never, ticked: true })).toThrow(/can't clear: price/);
+    expect(() => categoryClearAction({ draft: opened, categoryId: CATEGORY, field: "mainText" as never, ticked: true })).toThrow(/can't clear: mainText/);
+    // The price (PR 10f): a tick with no recipe set is dropped; its clear rides on the price check, which needs a price change.
+    expect(categoryClearAction({ draft: both, categoryId: CATEGORY, field: "price", ticked: true })).toMatchObject({ kind: "edit", value: { clear: ["storeShelf", "shippingPolicy"] } });
   });
 
   it("drops its draft when the read says the category is gone, unless a save is out or unconfirmed (8.6, 3.4)", () => {
@@ -751,7 +788,7 @@ describe("the editor (plan 8.3, 8.4, 3.7)", () => {
   const SAVING = categoryDraft({ shippingPolicy: SET_F1 }, ["shippingPolicy"], { type: "startSave", attempt: { signature: "s", key: "ls-cat:1" } });
   const UNCERTAIN = run([{ type: "failure", key: "ls-cat:1", failure: { phase: "uncertain", message: "We couldn't confirm your save.", code: null, status: null } }], SAVING);
 
-  it("titles the editor, shows each value with where it comes from, the Price row read-only, and Change on every row once the draft is open", () => {
+  it("titles the editor, shows each value with where it comes from, the Price row with its Change (PR 10f), and Change on every row once the draft is open", () => {
     const state = editor({ draft: OPENED });
     expect(state).toMatchObject({ title: "Sleeves · 15 products", name: "Sleeves", read: "answered", loadingLine: null, problem: null, latestFailed: null, detail: DETAIL, escapeKeepsOpen: false, held: false });
     // A value nothing gives has no tag: the value says so itself, as the drawer's `none` (10a).
@@ -773,7 +810,14 @@ describe("the editor (plan 8.3, 8.4, 3.7)", () => {
     }
     expect(state.rows[5].row.edit).toMatchObject({ kind: "description", fields: ["textAbove", "textBelow"], check: null });
     expect(state.rows.map((row) => row.fields)).toEqual([["shippingPolicy"], ["returnPolicy"], ["paymentPolicy"], ["ebayCategory"], ["storeShelf"], ["textAbove", "textBelow"]]);
-    expect(state.price).toEqual({ label: "Price", value: "Retail price + 20%, round up to .99", tag: "Store default", line: LISTING_SETTINGS_CATEGORY_WORDS.priceReadOnly });
+    expect(state.price).toEqual({
+      label: "Price", value: "Retail price + 20%, round up to .99", tag: "Store default", line: null, examples: null, pending: null,
+      change: { label: LISTING_SETTINGS_PRICE_CHECK_WORDS.changePrice, ariaLabel: "Change price for Sleeves", shown: true, disabled: false },
+      editor: expect.objectContaining({ canSet: true, canDefault: true, reason: null, initial: expect.objectContaining({ mode: "default", releaseExactPrices: false }), suggestion: true }),
+      open: false, marked: false, fieldError: null, clears: [],
+    });
+    // Without W7's right at hand (a caller from before 10f) the row reads as it did: no Change, the old line.
+    expect(editor({ draft: OPENED, rights: { ...rights(), priceCheck: undefined } }).price).toMatchObject({ line: LISTING_SETTINGS_CATEGORY_WORDS.priceReadOnly, change: { shown: false } });
     // The rows' editors open on the category's own values: the read's while the draft holds nothing.
     expect(state.own).toEqual(categoryOwnValues(DETAIL.settings));
     expect(editor({ detail: { data: undefined, error: null } }).own).toBeNull();
@@ -942,6 +986,498 @@ describe("W12's own refusals, code by code (plan 8.6)", () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// The category price (PR 10f, plan 9.2, 9.4, 9.6; D1, D2, D6, D16, D20, D21)
+// ---------------------------------------------------------------------------
+
+describe("the category price (PR 10f, plan 9.2, 9.6; D1, D2, D16)", () => {
+  const RETAIL_20_UP: PricingRecipe = { basis: "catalog_retail", markupBps: 2000, flatCents: 0, rounding: "up_99" };
+  const COST_35: PricingRecipe = { basis: "product_cost", markupBps: 3500, flatCents: 0, rounding: "cent" };
+  const SET_COST = { mode: "set", value: COST_35 } as const;
+  const SET_RETAIL = { mode: "set", value: RETAIL_20_UP } as const;
+  const LEAVE = { mode: "leave" } as const;
+  const CHECK: PriceCheckRef = deepFreeze({ reviewId: "11111111-1111-4111-8111-111111111111", reviewHash: "a".repeat(64), after: null });
+  const parse = (detail: unknown) => deepFreeze(listingSettingsCategoryDetailSchema.parse(detail));
+  /** Sleeves with a recipe of its own (the store price then isn't shown). */
+  const OWN_PRICED = parse({ ...DETAIL, settings: { ...DETAIL.settings, price: { source: "category", value: COST_35 } } });
+  const example = (productVariantId: number, sizeName: string, priceCents: number | null) => ({
+    productVariantId, productId: 11, productName: "Penny Sleeves", sizeName, sku: null, priceCents, source: "retail_fallback", rule: null, basis: null,
+    basisAmountCents: null, issue: null, costCents: 210, belowCostByCents: null, limits: [], pausedSince: null, settingRevisionId: null,
+  });
+  /** Sleeves with two example prices (current prices, CC-C23). */
+  const WITH_EXAMPLES = parse({ ...DETAIL, examples: [example(101, "Pack of 100", 499), example(102, "Box of 5", 2199)] });
+  const priceOnly = (price: CategoryPriceChange, detail: ListingSettingsCategoryDetail = DETAIL) => categoryDraftValue(detail, undefined, [], price);
+
+  /** The editor's draft opened on `detail`, then edited to `price` with `edit` and `clear`. */
+  function pricedDraft(price: CategoryPriceChange, edit: Partial<CategoryChoices> = {}, clear: readonly PriceChangeClearField[] = [], detail: ListingSettingsCategoryDetail = DETAIL, ...after: ListingSettingsDraftAction[]): ListingSettingsDraft {
+    const draft = run([
+      { type: "open", editor: categoryEditorId(CATEGORY), place: "Sleeves", base: categoryDraftValue(detail) },
+      { type: "edit", value: categoryDraftValue(detail, choices(edit), clear, price) },
+      ...after,
+    ]);
+    if (draft === null) throw new Error("expected a draft");
+    return draft;
+  }
+
+  it("reads the category's own recipe and the store's, and keeps a price choice that asks for what the category has as no change", () => {
+    expect(categoryOwnPrice(DETAIL.settings)).toBeNull();
+    expect(categoryStoreRecipe(DETAIL.settings)).toEqual(RETAIL_20_UP);
+    expect(categoryOwnPrice(OWN_PRICED.settings)).toEqual(COST_35);
+    expect(categoryStoreRecipe(OWN_PRICED.settings)).toBeNull();
+    const none = { ...DETAIL.settings, price: { source: "none" as const, value: null } };
+    expect([categoryOwnPrice(none), categoryStoreRecipe(none)]).toEqual([null, null]);
+    expect(emptyCategoryPriceChange()).toEqual({ choice: LEAVE, check: null });
+    const base = categoryDraftValue(DETAIL);
+    expect(base.price).toEqual({ choice: LEAVE, check: null });
+    expect(base.ownPrice).toBeNull();
+    expect(categoryPriceChanged(base)).toBe(false);
+    // "Use store default" where the category has no price of its own asks for what it has: no change, and no check kept.
+    expect(priceOnly({ choice: { mode: "default" }, check: CHECK }).price).toEqual({ choice: LEAVE, check: null });
+    // A recipe, the store's very one included, is a change for a category without one of its own; the price is no edit field.
+    const setStore = priceOnly({ choice: SET_RETAIL, check: null });
+    expect(setStore.price).toEqual({ choice: SET_RETAIL, check: null });
+    expect(categoryPriceChanged(setStore)).toBe(true);
+    expect(categoryHasChange(setStore)).toBe(true);
+    expect(categoryChangedFields(setStore)).toEqual([]);
+    // On a category with its own recipe: the same recipe again is no change; "Use store default" is, and its check rides along, copied.
+    expect(priceOnly({ choice: SET_COST, check: CHECK }, OWN_PRICED).price).toEqual({ choice: LEAVE, check: null });
+    const toDefault = priceOnly({ choice: { mode: "default" }, check: CHECK }, OWN_PRICED);
+    expect(toDefault.price).toEqual({ choice: { mode: "default" }, check: CHECK });
+    expect(toDefault.price.check).not.toBe(CHECK);
+    expect(toDefault.ownPrice).toEqual(COST_35);
+    const copied = priceOnly({ choice: SET_COST, check: CHECK }).price.choice;
+    expect(copied).toEqual(SET_COST);
+    expect(copied.mode === "set" ? copied.value : null).not.toBe(COST_35);
+    // The price is one change of the draft, with or without its check (D16); the other changes count beside it.
+    const draft = pricedDraft({ choice: SET_COST, check: null });
+    expect(draft.changes).toBe(1);
+    expect(run([{ type: "edit", value: categoryPriceDraftWithCheck(readCategoryDraft(draft.value)!, CHECK) }], draft)?.changes).toBe(1);
+    expect(pricedDraft({ choice: SET_COST, check: null }, { shippingPolicy: SET_F1 }, ["shippingPolicy"]).changes).toBe(3);
+    expect(isCategoryPriceChange({ choice: SET_COST, check: CHECK })).toBe(true);
+    expect(isCategoryPriceChange({ choice: { mode: "default" }, check: null })).toBe(true);
+    for (const bad of [null, "set", { choice: { mode: "none" }, check: null }, { choice: { mode: "set", value: { basis: "x" } }, check: null }, { choice: LEAVE, check: {} }, { choice: LEAVE }]) {
+      expect(isCategoryPriceChange(bad)).toBe(false);
+    }
+  });
+
+  it("Check new prices in the price editor puts the choice in the draft with no check, and keeps the other changes and ticks (D2)", () => {
+    const opened = categoryDraft({ shippingPolicy: SET_F1 }, ["shippingPolicy"]);
+    expect(categoryPriceAction({ draft: opened, categoryId: CATEGORY, choice: SET_COST }))
+      .toMatchObject({ kind: "edit", value: { price: { choice: SET_COST, check: null }, shippingPolicy: SET_F1, clear: ["shippingPolicy"] } });
+    // A new choice over a held check drops it: the check was of the old change.
+    const checked = pricedDraft({ choice: SET_COST, check: CHECK });
+    expect(categoryPriceAction({ draft: checked, categoryId: CATEGORY, choice: SET_RETAIL })).toMatchObject({ kind: "edit", value: { price: { choice: SET_RETAIL, check: null } } });
+    // Leave: the change goes, and a price tick with it (the clear needs a recipe set).
+    const ticked = pricedDraft({ choice: SET_COST, check: null }, {}, ["price"]);
+    expect(readCategoryDraft(ticked.value)?.clear).toEqual(["price"]);
+    expect(categoryPriceAction({ draft: ticked, categoryId: CATEGORY, choice: LEAVE })).toMatchObject({ kind: "edit", value: { price: { choice: LEAVE, check: null }, clear: [] } });
+    // What the category has is no change.
+    expect(categoryPriceAction({ draft: opened, categoryId: CATEGORY, choice: { mode: "default" } })).toMatchObject({ kind: "edit", value: { price: { choice: LEAVE, check: null } } });
+    // Locked, not open, or started again on the read now (D6).
+    const saving = pricedDraft({ choice: SET_COST, check: CHECK }, {}, [], DETAIL, { type: "startSave", attempt: { signature: "s", key: "ls-price-check:1" } });
+    expect(categoryPriceAction({ draft: saving, categoryId: CATEGORY, choice: SET_RETAIL })).toEqual({ kind: "locked" });
+    expect(categoryPriceAction({ draft: null, categoryId: CATEGORY, choice: SET_COST })).toEqual({ kind: "not_open" });
+    expect(categoryPriceAction({ draft: null, categoryId: CATEGORY, detail: DETAIL, choice: SET_COST }))
+      .toMatchObject({ kind: "start", editor: categoryEditorId(CATEGORY), place: "Sleeves", base: categoryDraftValue(DETAIL), value: { price: { choice: SET_COST, check: null } } });
+    expect(() => categoryPriceAction({ draft: opened, categoryId: CATEGORY, choice: { mode: "set", value: { basis: "x" } } as never })).toThrow(/doesn't set/);
+    // The check in and out of the draft, copied.
+    const value = readCategoryDraft(checked.value)!;
+    const other = { ...CHECK, after: "prices_moved" as const };
+    expect(categoryPriceDraftWithCheck(value, other).price).toEqual({ choice: SET_COST, check: other });
+    expect(categoryPriceDraftWithCheck(value, other).price.check).not.toBe(other);
+    expect(categoryPriceDraftWithCheck(value, null).price).toEqual({ choice: SET_COST, check: null });
+    expect(categoryPricePending(SET_RETAIL)).toBe("→ Retail price + 20%, round up to .99 · Not saved");
+    expect(categoryPricePending({ mode: "default" })).toBe("→ Use store default · Not saved");
+    expect(categoryPricePending(LEAVE)).toBeNull();
+  });
+
+  it("ticks Also clear theirs on the price only with a recipe set, since the clear rides on the check (9.6, P34)", () => {
+    const facts = categoryDraftValue(DETAIL);
+    expect(clearCandidates(facts, "price").map((entry) => entry.productId)).toEqual([13]);
+    expect(clearAllowed(facts, "price", SET_COST)).toBe(true);
+    expect(clearAllowed(facts, "price", { mode: "default" })).toBe(false);
+    expect(clearAllowed(facts, "price", LEAVE)).toBe(false);
+    expect(clearAllowed(categoryDraftValue(OWN_PRICED), "price", { mode: "default" })).toBe(false);
+    expect(categoryDraftValue(DETAIL, undefined, ["price"], { choice: SET_COST, check: null }).clear).toEqual(["price"]);
+    expect(categoryDraftValue(DETAIL, undefined, ["price"]).clear).toEqual([]);
+    expect(categoryDraftValue(OWN_PRICED, undefined, ["price"], { choice: { mode: "default" }, check: null }).clear).toEqual([]);
+    // In the stored shape's order, the price first.
+    expect(categoryDraftValue(DETAIL, choices({ shippingPolicy: SET_F1 }), ["shippingPolicy", "price"], { choice: SET_COST, check: null }).clear).toEqual(["price", "shippingPolicy"]);
+    const priced = pricedDraft({ choice: SET_COST, check: null });
+    expect(categoryClearAction({ draft: priced, categoryId: CATEGORY, field: "price", ticked: true })).toMatchObject({ kind: "edit", value: { clear: ["price"], price: { choice: SET_COST, check: null } } });
+    expect(categoryClearAction({ draft: pricedDraft({ choice: SET_COST, check: null }, {}, ["price"]), categoryId: CATEGORY, field: "price", ticked: false })).toMatchObject({ kind: "edit", value: { clear: [] } });
+    // A pick on another field keeps the price and its tick.
+    expect(categoryPickAction({ draft: pricedDraft({ choice: SET_COST, check: null }, {}, ["price"]), categoryId: CATEGORY, picks: { shippingPolicy: SET_F1 } }))
+      .toMatchObject({ kind: "edit", value: { shippingPolicy: SET_F1, price: { choice: SET_COST, check: null }, clear: ["price"] } });
+  });
+
+  it("a pick or a tick after the check drops it: the check was of the request before the change (9.4, D2)", () => {
+    const checked = pricedDraft({ choice: SET_COST, check: CHECK }, { shippingPolicy: SET_F1 }, ["shippingPolicy"]);
+    expect(readCategoryDraft(checked.value)?.price.check).toEqual(CHECK);
+    const picked = categoryPickAction({ draft: checked, categoryId: CATEGORY, picks: { returnPolicy: { mode: "set", value: { id: "R2" } } } });
+    expect(picked).toMatchObject({ kind: "edit", value: { price: { choice: SET_COST, check: null }, shippingPolicy: SET_F1, returnPolicy: { mode: "set", value: { id: "R2" } }, clear: ["shippingPolicy"] } });
+    const ticked = categoryClearAction({ draft: checked, categoryId: CATEGORY, field: "price", ticked: true });
+    expect(ticked).toMatchObject({ kind: "edit", value: { price: { choice: SET_COST, check: null }, clear: ["price", "shippingPolicy"] } });
+    const unticked = categoryClearAction({ draft: checked, categoryId: CATEGORY, field: "shippingPolicy", ticked: false });
+    expect(unticked).toMatchObject({ kind: "edit", value: { price: { choice: SET_COST, check: null }, clear: [] } });
+    // In the conflict phase too (its rows can be changed): the stale check never comes back with the editing phase.
+    const conflict = pricedDraft({ choice: SET_COST, check: CHECK }, {}, [], DETAIL,
+      { type: "startSave", attempt: { signature: "s", key: "ls-price-check:1" } },
+      { type: "failure", key: "ls-price-check:1", failure: { phase: "conflict", message: "This changed in another window.", code: "DROPSHIP_CATEGORY_LISTING_SETTINGS_VERSION_CONFLICT", status: 409, fields: [] } });
+    const afterConflict = categoryPickAction({ draft: conflict, categoryId: CATEGORY, picks: { shippingPolicy: SET_F1 } });
+    expect(afterConflict).toMatchObject({ kind: "edit", value: { price: { choice: SET_COST, check: null } } });
+    if (afterConflict.kind !== "edit") throw new Error("expected an edit");
+    expect(categoryPriceCheckShown(run([{ type: "edit", value: afterConflict.value }], conflict), CATEGORY)).toBeNull();
+    // A check's answer is for the draft as it is now: the request the draft builds is the one sent; a changed draft, or
+    // one with nothing to check, is not answered by it.
+    const value = readCategoryDraft(checked.value)!;
+    const request = categoryPriceReviewRequest(value);
+    const valueOf = (action: ReturnType<typeof categoryPickAction>) => {
+      if (action.kind !== "edit") throw new Error("expected an edit");
+      return readCategoryDraft(action.value)!;
+    };
+    expect(categoryPriceCheckAnswers(value, request)).toBe(true);
+    expect(categoryPriceCheckAnswers(value, JSON.parse(JSON.stringify(request)))).toBe(true);
+    expect(categoryPriceCheckAnswers(valueOf(picked), request)).toBe(false);
+    expect(categoryPriceCheckAnswers(valueOf(ticked), request)).toBe(false);
+    expect(categoryPriceCheckAnswers(categoryDraftValue(DETAIL, choices({ shippingPolicy: SET_F1 }), ["shippingPolicy"], { choice: SET_RETAIL, check: null }), request)).toBe(false);
+    expect(categoryPriceCheckAnswers(categoryDraftValue(DETAIL), request)).toBe(false);
+    expect(categoryPriceCheckAnswers(value, { ...request, expectedRevisionId: 99 })).toBe(false);
+  });
+
+  it("never sends a price through W12: the patch leaves it out, the clear refuses it, and a price-only draft has no W12 body (P34)", () => {
+    const value = categoryDraftValue(DETAIL, choices({ shippingPolicy: SET_F1 }), ["shippingPolicy", "price"], { choice: SET_COST, check: null });
+    expect(categoryPatch(value)).toEqual({ shippingPolicy: { id: "F1" } });
+    expect(categoryClearBody(value)).toEqual({ fields: ["shippingPolicy"], products: [{ productId: 11, expectedRevisionId: 5 }, { productId: 12, expectedRevisionId: null }] });
+    expect(JSON.stringify(categorySaveBody({ key: "ls-cat:1", expectedRevisionId: 7, patch: categoryPatch(value), clear: categoryClearBody(value) }))).not.toMatch(/price/);
+    expect(() => categorySaveBody({ key: "ls-cat:1", expectedRevisionId: 7, patch: categoryPatch(value), clear: { fields: ["price", "shippingPolicy"] as never, products: [{ productId: 13, expectedRevisionId: 9 }] } }))
+      .toThrow(expect.objectContaining({ message: "This change clears a setting the category editor doesn't save.", context: { fields: ["price"] } }));
+    // A price-only draft is a change (Save shows Check new prices), with nothing for W12.
+    const priceOnlyValue = priceOnly({ choice: SET_COST, check: null });
+    expect(categoryHasChange(priceOnlyValue)).toBe(true);
+    expect(categoryPatch(priceOnlyValue)).toEqual({});
+    expect(() => categorySaveBody({ key: "ls-cat:1", expectedRevisionId: 7, patch: categoryPatch(priceOnlyValue) })).toThrow("There is no change to save.");
+  });
+
+  it("builds the check's request from the draft: the price with the other changes as W12 sends them, and Also clear theirs with the price, parsed by the shared schema (9.2)", () => {
+    const value = categoryDraftValue(DETAIL, choices({ shippingPolicy: SET_F1, returnPolicy: { mode: "default" } }), ["shippingPolicy", "price"], { choice: SET_COST, check: null });
+    expect(categoryPricePatch(value)).toEqual({ price: COST_35, shippingPolicy: { id: "F1" } });
+    expect(categoryPricePatch(priceOnly({ choice: { mode: "default" }, check: null }, OWN_PRICED))).toEqual({ price: null });
+    expect(() => categoryPricePatch(categoryDraftValue(DETAIL, choices({ shippingPolicy: SET_F1 })))).toThrow(expect.objectContaining({ message: "There is no price change to check.", context: { fields: ["price"] } }));
+    const products = [{ productId: 11, expectedRevisionId: 5 }, { productId: 12, expectedRevisionId: null }, { productId: 13, expectedRevisionId: 9 }];
+    expect(categoryPriceClearBody(value)).toEqual({ fields: ["price", "shippingPolicy"], products });
+    expect(categoryPriceClearBody(categoryDraftValue(DETAIL))).toBeUndefined();
+    const request = categoryPriceReviewRequest(value);
+    expect(request).toEqual({ kind: "category_price", categoryId: CATEGORY, expectedRevisionId: 7, patch: { price: COST_35, shippingPolicy: { id: "F1" } }, clear: { fields: ["price", "shippingPolicy"], products } });
+    expect(reviewPriceChangesInputSchema.parse(request)).toEqual(request);
+    expect(JSON.stringify(request)).not.toMatch(/mainText|releaseExactPrices|idempotencyKey|priceCents|productIds/);
+    // A clear-only tick on a field left alone resends the category's own value, as W12 does (P20).
+    const resend = categoryPriceReviewRequest(categoryDraftValue(DETAIL, undefined, ["shippingPolicy"], { choice: SET_COST, check: null }));
+    expect(resend.patch).toEqual({ price: COST_35, shippingPolicy: { id: "F2" } });
+    expect(resend.clear).toEqual({ fields: ["shippingPolicy"], products: [{ productId: 11, expectedRevisionId: 5 }, { productId: 12, expectedRevisionId: null }] });
+    // Nothing ticked: no clear at all; a category with no settings row sends its null revision.
+    const plain = categoryPriceReviewRequest(priceOnly({ choice: SET_COST, check: null }));
+    expect(plain).toEqual({ kind: "category_price", categoryId: CATEGORY, expectedRevisionId: 7, patch: { price: COST_35 } });
+    expect("clear" in plain).toBe(false);
+    const fresh = parse({ ...DETAIL, revisionId: null, settings: { ...DETAIL.settings, ebayCategory: { source: "none", value: null }, shippingPolicy: { source: "none", value: null }, textAbove: { source: "none", value: null } } });
+    expect(categoryPriceReviewRequest(priceOnly({ choice: SET_COST, check: null }, fresh)).expectedRevisionId).toBeNull();
+    // Refusals, never sent: no price, a field outside the editor's, a cleared field the patch doesn't set, a body the schema refuses.
+    const body = (input: Parameters<typeof categoryPriceReviewBody>[0]) => () => categoryPriceReviewBody(input);
+    expect(body({ categoryId: CATEGORY, expectedRevisionId: 7, patch: { shippingPolicy: { id: "F1" } } as never })).toThrow("A price check needs a price.");
+    expect(body({ categoryId: CATEGORY, expectedRevisionId: 7, patch: { price: COST_35, mainText: { mode: "own", text: "x" } } as never })).toThrow(expect.objectContaining({ context: { fields: ["mainText"] } }));
+    expect(body({ categoryId: CATEGORY, expectedRevisionId: 7, patch: { price: COST_35 }, clear: { fields: ["shippingPolicy"], products: [{ productId: 11, expectedRevisionId: 5 }] } }))
+      .toThrow("A cleared setting must be set on the category by this change.");
+    expect(body({ categoryId: CATEGORY, expectedRevisionId: 7, patch: { price: null }, clear: { fields: ["price"], products: [{ productId: 13, expectedRevisionId: 9 }] } }))
+      .toThrow("A cleared setting must be set on the category by this change.");
+    expect(body({ categoryId: 0, expectedRevisionId: 7, patch: { price: COST_35 } })).toThrow("This check can't be sent as it is.");
+    expect(body({ categoryId: CATEGORY, expectedRevisionId: 7, patch: { price: { basis: "x" } as never } })).toThrow(CategoryRequestError);
+    for (const thrown of [
+      body({ categoryId: CATEGORY, expectedRevisionId: 7, patch: { shippingPolicy: { id: "F1" } } as never }),
+      body({ categoryId: 0, expectedRevisionId: 7, patch: { price: COST_35 } }),
+    ]) {
+      expect(thrown).toThrow(CategoryRequestError);
+    }
+  });
+
+  it("knows when the check's base moved: the category's revision, or the ticked products and their revisions (9.4, D6)", () => {
+    const value = categoryDraftValue(DETAIL, choices({ shippingPolicy: SET_F1 }), ["shippingPolicy"], { choice: SET_COST, check: null });
+    const base = categoryPriceCheckBaseOf(value);
+    expect(base).toEqual({ expectedRevisionId: 7, clear: { fields: ["shippingPolicy"], products: [{ productId: 11, expectedRevisionId: 5 }, { productId: 12, expectedRevisionId: null }] } });
+    expect(categoryPriceBaseMoved(base, DETAIL)).toBe(false);
+    expect(categoryPriceBaseMoved(base, { ...DETAIL, revisionId: 8 })).toBe(true);
+    expect(categoryPriceBaseMoved(base, { ...DETAIL, revisionId: null })).toBe(true);
+    const withEntries = (ownValues: ListingSettingsCategoryDetail["ownValues"]) => ({ ...DETAIL, ownValues });
+    // A ticked product's revision moved, one left, one joined.
+    expect(categoryPriceBaseMoved(base, withEntries(DETAIL.ownValues.map((entry) => (entry.productId === 11 ? { ...entry, revisionId: 6 } : entry))))).toBe(true);
+    expect(categoryPriceBaseMoved(base, withEntries(DETAIL.ownValues.filter((entry) => entry.productId !== 12)))).toBe(true);
+    expect(categoryPriceBaseMoved(base, withEntries([...DETAIL.ownValues, { productId: 15, revisionId: 1, fields: ["shippingPolicy"] }]))).toBe(true);
+    // A product holding no ticked field doesn't count, whatever it did.
+    expect(categoryPriceBaseMoved(base, withEntries(DETAIL.ownValues.map((entry) => (entry.productId === 13 ? { ...entry, revisionId: 10 } : entry))))).toBe(false);
+    expect(categoryPriceBaseMoved(base, withEntries([...DETAIL.ownValues].reverse()))).toBe(false);
+    // Nothing ticked: the revision alone.
+    const plain = categoryPriceCheckBaseOf(priceOnly({ choice: SET_COST, check: null }));
+    expect(plain.clear).toBeUndefined();
+    expect(categoryPriceBaseMoved(plain, withEntries([]))).toBe(false);
+    expect(categoryPriceBaseMoved(plain, { ...DETAIL, revisionId: 8 })).toBe(true);
+  });
+
+  it("says what else the check saves, in the stored shape's order, with each clear's count (UX-m9), and that it releases nothing", () => {
+    const value = categoryDraftValue(
+      DETAIL,
+      choices({ shippingPolicy: SET_F1, ebayCategory: { mode: "default" }, textBelow: { mode: "set", value: { mode: "own", text: "Thanks!" } } }),
+      ["shippingPolicy", "price", "textAbove"],
+      { choice: SET_COST, check: null },
+    );
+    expect(categoryPriceCheckAlso(value)).toEqual({
+      fields: ["ebayCategory", "shippingPolicy", "textBelow"],
+      clears: [{ field: "price", count: 1 }, { field: "shippingPolicy", count: 2 }, { field: "textAbove", count: 1 }],
+    });
+    expect(categoryPriceCheckAlsoLines(value)).toEqual([
+      "Also saves: eBay category, shipping policy, text below.",
+      "Clears 1 product's own price.",
+      "Clears 2 products' own shipping policy.",
+      "Clears 1 product's own text above.",
+    ]);
+    for (const line of categoryPriceCheckAlsoLines(value)) expectPlain(line);
+    expect(categoryPriceCheckAlsoLines(priceOnly({ choice: SET_COST, check: null }))).toEqual([]);
+    expect(categoryPriceCheckChange(value)).toEqual({ price: SET_COST, releaseExactPrices: false });
+    expect(categoryPriceCheckChange(priceOnly({ choice: { mode: "default" }, check: null }, OWN_PRICED))).toEqual({ price: { mode: "default" }, releaseExactPrices: false });
+  });
+
+  it("shows the check in place of the editor's body while the draft holds one, and says what Back does (D20, D21)", () => {
+    expect(categoryPriceCheckShown(null, CATEGORY)).toBeNull();
+    expect(categoryPriceCheckShown(pricedDraft({ choice: SET_COST, check: null }), CATEGORY)).toBeNull();
+    const checked = pricedDraft({ choice: SET_COST, check: CHECK }, { shippingPolicy: SET_F1 }, ["shippingPolicy"]);
+    expect(categoryPriceCheckShown(checked, CATEGORY)).toEqual({
+      check: CHECK, phase: "editing", message: null, code: null, locked: false,
+      also: ["Also saves: shipping policy.", "Clears 2 products' own shipping policy."], change: { price: SET_COST, releaseExactPrices: false },
+    });
+    expect(categoryPriceCheckShown(checked, 41)).toBeNull();
+    expect(categoryPriceCheckShown(run([{ type: "open", editor: productEditorId(11), place: "Penny Sleeves", base: { a: 1 } }]), CATEGORY)).toBeNull();
+    const saving = run([{ type: "startSave", attempt: { signature: "s", key: "ls-price-check:1" } }], checked)!;
+    expect(categoryPriceCheckShown(saving, CATEGORY)).toMatchObject({ phase: "saving", locked: true });
+    const failure = (phase: WriteFailurePhase, message: string, code: string | null) => run([{ type: "failure", key: "ls-price-check:1", failure: { phase, message, code, status: code === null ? null : 409, fields: [] } }], saving)!;
+    expect(categoryPriceCheckShown(failure("refused", "Server words.", "DROPSHIP_LISTING_PRICES_MOVED"), CATEGORY))
+      .toMatchObject({ phase: "refused", message: "Server words.", code: "DROPSHIP_LISTING_PRICES_MOVED", locked: false });
+    expect(categoryPriceCheckShown(failure("uncertain", "We couldn't confirm your save.", null), CATEGORY)).toMatchObject({ phase: "uncertain", locked: true });
+    expect(categoryPriceCheckShown(failure("rate_limited", "Too many saves in a minute. Wait a moment and try again.", "DROPSHIP_LISTING_SETTINGS_RATE_LIMITED"), CATEGORY)).toMatchObject({ phase: "rate_limited", locked: false });
+    // A conflict shows the editor's body with Load latest (the check goes with the rebase); a save shows the read-again rows.
+    expect(categoryPriceCheckShown(failure("conflict", "This changed in another window.", "DROPSHIP_CATEGORY_LISTING_SETTINGS_VERSION_CONFLICT"), CATEGORY)).toBeNull();
+    const saved = run([{ type: "saved", key: "ls-price-check:1", nowMs: 1_000, viewStale: false }], saving)!;
+    expect(categoryPriceCheckShown(saved, CATEGORY)).toBeNull();
+    expect(categoryPriceCheckShown(run([{ type: "saved", key: "ls-price-check:1", nowMs: 1_000, viewStale: true }], saving), CATEGORY)).toBeNull();
+    // Saved, then "Saved" goes (the open draft turns to editing with its value kept): the body stays the editor's, since
+    // a clean draft holding a check is an applied one; the next price change starts a new draft and a new check.
+    const flashOver = run([{ type: "tick", nowMs: 1_000 + SAVED_FLASH_MS }], saved)!;
+    expect(flashOver).toMatchObject({ phase: "editing", changes: 0, value: { price: { choice: SET_COST, check: CHECK } } });
+    expect(categoryPriceCheckShown(flashOver, CATEGORY)).toBeNull();
+    expect(categoryPriceCheckBack(flashOver, CATEGORY)).toMatchObject({ kind: "edit" });
+    // The body shown: the draft's check; while a refused apply's new check is made, the last one as "Saving…" (locked,
+    // no words), unless the draft is in conflict (Load latest is the editor's); else the editor's own body.
+    const shown = categoryPriceCheckShown(checked, CATEGORY)!;
+    expect(categoryPriceCheckBody({ shown, lastShown: null, rechecking: true, draft: checked, categoryId: CATEGORY })).toBe(shown);
+    expect(categoryPriceCheckBody({ shown: null, lastShown: shown, rechecking: false, draft: checked, categoryId: CATEGORY })).toBeNull();
+    expect(categoryPriceCheckBody({ shown: null, lastShown: null, rechecking: true, draft: checked, categoryId: CATEGORY })).toBeNull();
+    const refused = failure("refused", "Server words.", "DROPSHIP_LISTING_PRICES_MOVED");
+    expect(categoryPriceCheckBody({ shown: null, lastShown: shown, rechecking: true, draft: run([{ type: "edit", value: categoryPriceDraftWithCheck(readCategoryDraft(refused.value)!, null) }], refused), categoryId: CATEGORY }))
+      .toEqual({ ...shown, phase: "saving", message: null, code: null, locked: true });
+    expect(categoryPriceCheckBody({ shown: null, lastShown: shown, rechecking: true, draft: failure("conflict", "This changed in another window.", null), categoryId: CATEGORY })).toBeNull();
+    // Back to editing: the check leaves the draft and the changes stay; over a locked draft the editor closes and keeps it.
+    expect(categoryPriceCheckBack(null, CATEGORY)).toEqual({ kind: "none" });
+    expect(categoryPriceCheckBack(pricedDraft({ choice: SET_COST, check: null }), CATEGORY)).toEqual({ kind: "none" });
+    expect(categoryPriceCheckBack(checked, CATEGORY)).toMatchObject({ kind: "edit", value: { price: { choice: SET_COST, check: null }, shippingPolicy: SET_F1, clear: ["shippingPolicy"] } });
+    expect(categoryPriceCheckBack(saving, CATEGORY)).toEqual({ kind: "close" });
+    expect(categoryPriceCheckBack(failure("uncertain", "We couldn't confirm your save.", null), CATEGORY)).toEqual({ kind: "close" });
+    expect(categoryPriceCheckBack(failure("refused", "Server words.", "DROPSHIP_LISTING_PRICES_MOVED"), CATEGORY)).toMatchObject({ kind: "edit" });
+  });
+
+  it("gives the price W7's right alone (D3), and its editor opens on the draft's choice, else the category's recipe, else the store's", () => {
+    expect(categoryPriceRights({})).toEqual({ canSet: false, canDefault: false, canNone: false, reason: null });
+    expect(categoryPriceRights({ priceCheck: EDITABLE })).toEqual({ canSet: true, canDefault: true, canNone: false, reason: null });
+    expect(categoryPriceRights({ priceCheck: { editable: false, reason: "sign_in" } })).toEqual({ canSet: false, canDefault: false, canNone: false, reason: "sign_in" });
+    const rights = categoryPriceRights({ priceCheck: EDITABLE });
+    const model = categoryPriceEditorModel({ rights, draftChoice: LEAVE, ownPrice: null, storeRecipe: RETAIL_20_UP });
+    expect(model).toMatchObject({ canSet: true, canDefault: true, reason: null, initial: { mode: "default", releaseExactPrices: false }, suggestion: true });
+    expect(categoryPriceEditorModel({ rights, draftChoice: LEAVE, ownPrice: COST_35, storeRecipe: null })).toMatchObject({ initial: { mode: "set" }, suggestion: false });
+    expect(categoryPriceEditorModel({ rights, draftChoice: SET_COST, ownPrice: null, storeRecipe: RETAIL_20_UP })).toMatchObject({ initial: { mode: "set" }, suggestion: false });
+    expect(categoryPriceEditorModel({ rights, draftChoice: { mode: "default" }, ownPrice: COST_35, storeRecipe: RETAIL_20_UP })).toMatchObject({ initial: { mode: "default" }, suggestion: true });
+    // [Check new prices]: the recipe parsed with the integer parsers (D1), or "Use store default"; nothing is computed from it.
+    expect(categoryPriceEditorResult(model, { ...model.initial, mode: "default" })).toEqual({ ok: true, choice: { mode: "default" } });
+    expect(categoryPriceEditorResult(model, { ...model.initial, mode: "set" })).toEqual({ ok: true, choice: SET_RETAIL });
+    expect(categoryPriceEditorResult(model, { ...model.initial, mode: "set", releaseExactPrices: true })).toEqual({ ok: true, choice: SET_RETAIL });
+    expect(categoryPriceEditorResult({ canSet: false, canDefault: false }, { ...model.initial, mode: "set" })).toEqual({ ok: false, errors: {} });
+    expect(categoryPriceEditorResult({ canSet: false, canDefault: false }, { ...model.initial, mode: "default" })).toEqual({ ok: false, errors: {} });
+    expect(categoryPriceEditorResult(model, { ...model.initial, mode: "set", fields: { ...model.initial.fields, percent: "x" } })).toMatchObject({ ok: false, errors: { percent: expect.any(String) } });
+  });
+
+  it("Load latest keeps the price choice on the read now, drops its check, and marks the price when the other window changed it too (9.4, R:542)", () => {
+    const mine = categoryDraftValue(DETAIL, choices({ shippingPolicy: SET_F1 }), ["shippingPolicy"], { choice: SET_COST, check: CHECK });
+    const same = parse({ ...DETAIL, revisionId: 8 });
+    const reload = rebaseCategoryDraft(mine, same);
+    expect(reload.edited).toMatchObject({ expectedRevisionId: 8, price: { choice: SET_COST, check: null }, shippingPolicy: SET_F1, clear: ["shippingPolicy"] });
+    expect(reload).toMatchObject({ marked: [], keeps: true, latest: { expectedRevisionId: 8, price: { choice: LEAVE, check: null } } });
+    // The other window set a price of its own: the vendor's stays on top, marked.
+    const moved = parse({ ...DETAIL, revisionId: 8, settings: { ...DETAIL.settings, price: { source: "category", value: RETAIL_20_UP } } });
+    expect(rebaseCategoryDraft(mine, moved)).toMatchObject({ marked: ["price"], keeps: true, edited: { price: { choice: SET_COST, check: null }, ownPrice: RETAIL_20_UP } });
+    // It saved the very same recipe: no longer a change, not marked; with nothing else kept the draft goes.
+    const agreed = parse({ ...DETAIL, revisionId: 8, settings: { ...DETAIL.settings, price: { source: "category", value: COST_35 } } });
+    expect(rebaseCategoryDraft(priceOnly({ choice: SET_COST, check: CHECK }), agreed)).toMatchObject({ marked: [], keeps: false, edited: { price: { choice: LEAVE, check: null } } });
+    // "Use store default" over a price the other window removed is no change any more either.
+    const removed = parse({ ...OWN_PRICED, revisionId: 8, settings: { ...DETAIL.settings } });
+    expect(rebaseCategoryDraft(priceOnly({ choice: { mode: "default" }, check: CHECK }, OWN_PRICED), removed)).toMatchObject({ marked: [], keeps: false, edited: { price: { choice: LEAVE, check: null } } });
+    // A price tick stays while product 13 still holds its own price, and goes once it doesn't.
+    const ticked = categoryDraftValue(DETAIL, undefined, ["price"], { choice: SET_COST, check: CHECK });
+    expect(rebaseCategoryDraft(ticked, same).edited.clear).toEqual(["price"]);
+    expect(rebaseCategoryDraft(ticked, parse({ ...DETAIL, revisionId: 8, ownValues: DETAIL.ownValues.filter((entry) => entry.productId !== 13) }))).toMatchObject({ keeps: true, edited: { clear: [] } });
+  });
+});
+
+describe("the editor's Price row and its check (PR 10f, plan 9.2, 9.3; CC-C23, D20)", () => {
+  const RETAIL_20_UP: PricingRecipe = { basis: "catalog_retail", markupBps: 2000, flatCents: 0, rounding: "up_99" };
+  const COST_35: PricingRecipe = { basis: "product_cost", markupBps: 3500, flatCents: 0, rounding: "cent" };
+  const SET_COST = { mode: "set", value: COST_35 } as const;
+  const CHECK: PriceCheckRef = deepFreeze({ reviewId: "11111111-1111-4111-8111-111111111111", reviewHash: "a".repeat(64), after: null });
+  const parse = (detail: unknown) => deepFreeze(listingSettingsCategoryDetailSchema.parse(detail));
+  const example = (productVariantId: number, sizeName: string, priceCents: number | null) => ({
+    productVariantId, productId: 11, productName: "Penny Sleeves", sizeName, sku: null, priceCents, source: "retail_fallback", rule: null, basis: null,
+    basisAmountCents: null, issue: null, costCents: 210, belowCostByCents: null, limits: [], pausedSince: null, settingRevisionId: null,
+  });
+  const WITH_EXAMPLES = parse({ ...DETAIL, examples: [example(101, "Pack of 100", 499), example(102, "Box of 5", 2199), example(103, "", null)] });
+  const OWN_PRICED = parse({ ...DETAIL, settings: { ...DETAIL.settings, price: { source: "category", value: COST_35 } } });
+  const editor = (overrides: Partial<CategoryEditorInput> = {}) => categoryEditorState({
+    category: { categoryId: CATEGORY, name: "Sleeves", productCount: 15 }, categoryId: CATEGORY, detail: { data: WITH_EXAMPLES, error: null }, summary: summary(), draft: null,
+    rights: rights(), setup: LIVE, shelves: SHELVES, openTarget: null, failure: null, busy: false, savedFlashVisible: false, compact: false, fieldEditorOpen: false,
+    ...overrides,
+  });
+  function pricedDraft(price: CategoryPriceChange, edit: Partial<CategoryChoices> = {}, clear: readonly PriceChangeClearField[] = [], detail: ListingSettingsCategoryDetail = WITH_EXAMPLES, ...after: ListingSettingsDraftAction[]): ListingSettingsDraft {
+    const draft = run([
+      { type: "open", editor: categoryEditorId(CATEGORY), place: "Sleeves", base: categoryDraftValue(detail) },
+      { type: "edit", value: categoryDraftValue(detail, choices(edit), clear, price) },
+      ...after,
+    ]);
+    if (draft === null) throw new Error("expected a draft");
+    return draft;
+  }
+  const OPENED = run([{ type: "open", editor: categoryEditorId(CATEGORY), place: "Sleeves", base: categoryDraftValue(WITH_EXAMPLES) }]);
+
+  it("waits while a check is out: every Change and every box is off, so the check answers the draft it was made for (9.4)", () => {
+    const priced = pricedDraft({ choice: SET_COST, check: null }, { shippingPolicy: SET_F1 });
+    const open = editor({ draft: priced });
+    expect(open.price).toMatchObject({ change: { label: "Change price", ariaLabel: "Change price for Sleeves", shown: true, disabled: false } });
+    expect(open.rows.map((row) => row.row.edit?.change.disabled)).toEqual([false, false, false, false, false, false]);
+    expect(open.rows[0].clears[0]).toMatchObject({ field: "shippingPolicy", disabled: false });
+    expect(open.price?.clears[0]).toMatchObject({ field: "price", disabled: false });
+    const checking = editor({ draft: priced, checking: true });
+    expect(checking.price).toMatchObject({ change: { shown: true, disabled: true } });
+    expect(checking.rows.map((row) => row.row.edit?.change.disabled)).toEqual([true, true, true, true, true, true]);
+    expect(checking.rows[0].clears[0]).toMatchObject({ disabled: true });
+    expect(checking.price?.clears[0]).toMatchObject({ disabled: true });
+    // The footer's Save waits as it does for any busy action; nothing else changes.
+    expect(checking.footer).toMatchObject({ primary: { label: PRICE_DEFAULT_WORDS.checkNewPrices, disabled: false } });
+    expect(editor({ draft: priced, checking: false }).price?.change.disabled).toBe(false);
+  });
+
+  it("shows the current prices as Now, hides them while the price is changed, and turns Save into Check new prices for one change (9.2, CC-C23)", () => {
+    const plain = editor({ draft: OPENED });
+    expect(plain.price).toMatchObject({ examples: "Now: Pack of 100 $4.99 · Box of 5 $21.99 · A size no price", pending: null, change: { shown: true, disabled: false } });
+    expect(plain).toMatchObject({ priceHoldsChange: false, priceCheck: null, footer: { primary: { action: "save", label: "Save", disabled: true } } });
+    expect(plain.price?.examples).toMatch(new RegExp(`^${LISTING_SETTINGS_CATEGORY_PRICE_WORDS.now} `));
+    const priced = pricedDraft({ choice: { mode: "set", value: RETAIL_20_UP }, check: null });
+    const state = editor({ draft: priced });
+    expect(state.price).toMatchObject({ examples: null, pending: "→ Retail price + 20%, round up to .99 · Not saved", change: { shown: true, disabled: false }, editor: { initial: { mode: "set" } } });
+    expect(state).toMatchObject({
+      priceHoldsChange: true, priceCheck: null,
+      footer: { notSaved: "● Not saved · 1 change", primary: { action: "save", label: PRICE_DEFAULT_WORDS.checkNewPrices, disabled: false }, discardDisabled: false, message: null },
+    });
+    expect(editor({ draft: priced, compact: true }).footer).toMatchObject({ notSaved: "● Not saved · 1", primary: { label: PRICE_DEFAULT_WORDS.checkNewPrices } });
+    // "Use store default" over the category's own recipe, worded the category editor's way (D17).
+    const toDefault = pricedDraft({ choice: { mode: "default" }, check: null }, {}, [], OWN_PRICED);
+    expect(editor({ detail: { data: OWN_PRICED, error: null }, draft: toDefault }).price).toMatchObject({ value: "Your cost + 35%, to the cent", tag: "Set for Sleeves", pending: "→ Use store default · Not saved", examples: null });
+    // The other changes ride along in the one check (D2): three changes, still Check new prices.
+    const riding = pricedDraft({ choice: SET_COST, check: null }, { shippingPolicy: SET_F1 }, ["shippingPolicy"]);
+    expect(editor({ draft: riding }).footer).toMatchObject({ notSaved: "● Not saved · 3 changes", primary: { label: PRICE_DEFAULT_WORDS.checkNewPrices, disabled: false } });
+    expect(editor({ draft: riding }).rows[0].clears[0]).toMatchObject({ ticked: true, disabled: false });
+    // Without a price change, Save is W12's.
+    expect(editor({ draft: pricedDraft({ choice: { mode: "leave" }, check: null }, { shippingPolicy: SET_F1 }) }).footer.primary).toMatchObject({ label: "Save", disabled: false });
+  });
+
+  it("shows the check in place of its body, the price editor open, the price marked after Load latest, and named by a refusal", () => {
+    const checked = pricedDraft({ choice: SET_COST, check: CHECK }, { shippingPolicy: SET_F1 }, ["shippingPolicy"]);
+    const shown = editor({ draft: checked });
+    expect(shown.priceCheck).toEqual(categoryPriceCheckShown(checked, CATEGORY));
+    expect(shown.priceCheck).toMatchObject({ check: CHECK, phase: "editing", also: ["Also saves: shipping policy.", "Clears 2 products' own shipping policy."] });
+    expect(shown.price).toMatchObject({ examples: null, pending: "→ Your cost + 35%, to the cent · Not saved" });
+    const priced = pricedDraft({ choice: SET_COST, check: null });
+    expect(editor({ draft: priced, openTarget: CATEGORY_PRICE_TARGET }).price?.open).toBe(true);
+    expect(editor({ draft: priced, openTarget: "storeShelf" }).price?.open).toBe(false);
+    expect(editor({ draft: priced, openTarget: CATEGORY_PRICE_TARGET }).rows.every((row) => row.row.edit?.open === false)).toBe(true);
+    const saving = run([{ type: "startSave", attempt: { signature: "s", key: "ls-price-check:1" } }], priced)!;
+    expect(editor({ draft: saving })).toMatchObject({ held: true, escapeKeepsOpen: true, price: { change: { shown: true, disabled: true } }, footer: { primary: { action: "none", label: "Saving…" } } });
+    const conflict = run([{ type: "failure", key: "ls-price-check:1", failure: { phase: "conflict", message: "This changed in another window.", code: "C", status: 409, fields: [] } }], saving)!;
+    expect(editor({ draft: conflict })).toMatchObject({ priceCheck: null, footer: { primary: { action: "load_latest" } } });
+    const rebased = run([{ type: "rebase", latest: categoryDraftValue({ ...WITH_EXAMPLES, revisionId: 8 }), marked: ["price"] }], conflict)!;
+    expect(editor({ draft: rebased }).price?.marked).toBe(true);
+    expect(editor({ draft: rebased }).rows[0].row.edit?.marked).toBe(false);
+    const refused = run([{ type: "failure", key: "ls-price-check:1", failure: { phase: "refused", message: "Server words.", code: "X", status: 422, fields: ["price"] } }], saving)!;
+    const named = editor({ draft: refused, failure: { message: "Server words.", fields: ["price"] } });
+    expect(named.price?.fieldError).toBe("Server words.");
+    expect(named.footer.message).toBeNull();
+    expect(editor({ draft: refused, failure: { message: "Server words.", fields: [] } })).toMatchObject({ price: { fieldError: null }, footer: { message: { text: "Server words.", tone: "alert" } } });
+  });
+
+  it("offers Also clear theirs under the Price row only with a recipe set and products holding their own price, and never while Change is hidden (9.1, 9.6)", () => {
+    const ownPriced = parse({ ...DETAIL, ownValues: [...DETAIL.ownValues, { productId: 15, revisionId: 3, fields: ["price"] }] });
+    const read = { data: ownPriced, error: null };
+    // Nothing set: no box (a price clear can't ride on W12, P34).
+    const opened = run([{ type: "open", editor: categoryEditorId(CATEGORY), place: "Sleeves", base: categoryDraftValue(ownPriced) }]);
+    expect(editor({ detail: read, draft: opened }).price?.clears).toEqual([]);
+    // A recipe set: the box with the count, the category's words and the tick as the draft holds it.
+    const priced = pricedDraft({ choice: SET_COST, check: null }, {}, [], ownPriced);
+    expect(editor({ detail: read, draft: priced }).price?.clears).toEqual([{
+      field: "price", count: 2, line: "2 products in Sleeves have their own price.", label: "Also clear theirs, so all 15 use this one.", ticked: false, disabled: false,
+    }]);
+    const ticked = pricedDraft({ choice: SET_COST, check: null }, {}, ["price"], ownPriced);
+    expect(editor({ detail: read, draft: ticked }).price?.clears[0]).toMatchObject({ ticked: true, disabled: false });
+    expect(editor({ detail: read, draft: ticked }).footer.notSaved).toBe("● Not saved · 2 changes");
+    // "Use store default" over the category's own recipe: no box (the patch carries null, which the schema refuses to clear on).
+    const toDefault = pricedDraft({ choice: { mode: "default" }, check: null }, {}, [], parse({ ...ownPriced, settings: { ...ownPriced.settings, price: { source: "category", value: COST_35 } } }));
+    expect(editor({ detail: read, draft: toDefault }).price?.clears).toEqual([]);
+    // Off while a save is out; gone with Change while W7 can't be used or under older rules.
+    const saving = run([{ type: "startSave", attempt: { signature: "s", key: "ls-price-check:1" } }], ticked)!;
+    expect(editor({ detail: read, draft: saving }).price?.clears[0]).toMatchObject({ ticked: true, disabled: true });
+    expect(editor({ detail: read, draft: ticked, rights: { ...rights(), priceCheck: { editable: false, reason: "banner" } } }).price?.clears).toEqual([]);
+    expect(editor({ detail: read, draft: ticked, summary: summary({ price: 1 }) }).price?.clears).toEqual([]);
+    // The price never makes a product a candidate for another field's box (8.4): the shipping policy's box counts its own two.
+    expect(editor({ detail: read, draft: ticked }).rows[0].clears[0]).toMatchObject({ field: "shippingPolicy", count: 2 });
+  });
+
+  it("knows a draft that went through the price check (its check is held, a saved one too), so Reload re-reads the apply's views", () => {
+    expect(categorySavedThroughCheck(null, CATEGORY)).toBe(false);
+    expect(categorySavedThroughCheck(OPENED, CATEGORY)).toBe(false);
+    expect(categorySavedThroughCheck(pricedDraft({ choice: SET_COST, check: null }), CATEGORY)).toBe(false);
+    const checked = pricedDraft({ choice: SET_COST, check: CHECK });
+    expect(categorySavedThroughCheck(checked, CATEGORY)).toBe(true);
+    expect(categorySavedThroughCheck(checked, 999)).toBe(false);
+    const saving = run([{ type: "startSave", attempt: { signature: "s", key: "ls-price-check:1" } }], checked)!;
+    const stale = run([{ type: "saved", key: "ls-price-check:1", nowMs: 1_000, viewStale: true }], saving)!;
+    expect(stale.phase).toBe("saved_view_stale");
+    expect(categorySavedThroughCheck(stale, CATEGORY)).toBe(true);
+  });
+
+  it("offers no price change without W7's right, saying why, nor under older rules (D3, D11); a held change then can't be checked", () => {
+    const signIn = editor({ draft: OPENED, rights: { ...rights(), priceCheck: { editable: false, reason: "sign_in" } } });
+    expect(signIn.price).toMatchObject({ change: { shown: false }, line: rightReasonLine("sign_in"), examples: "Now: Pack of 100 $4.99 · Box of 5 $21.99 · A size no price", editor: { canSet: false, canDefault: false, reason: "sign_in" } });
+    expect(editor({ draft: OPENED, rights: { ...rights(), priceCheck: { editable: false, reason: "banner" } } }).price).toMatchObject({ change: { shown: false }, line: null });
+    expect(editor({ draft: OPENED, summary: summary({ price: 1 }) }).price).toMatchObject({ change: { shown: false }, line: null });
+    expect(editor({ draft: OPENED, summary: summary({ price: 1 }) }).footer.message).toEqual({ text: LISTING_SETTINGS_CATEGORY_WORDS.olderRules, tone: "status" });
+    // The draft holds a price change but W7 can't be used: Check new prices is off; W12's right alone doesn't open it.
+    const priced = pricedDraft({ choice: SET_COST, check: null });
+    expect(editor({ draft: priced, rights: { ...rights(), priceCheck: { editable: false, reason: "sign_in" } } }).footer.primary).toMatchObject({ label: PRICE_DEFAULT_WORDS.checkNewPrices, disabled: true });
+    expect(editor({ draft: priced, rights: { ...rights(), categorySettings: { editable: false, reason: "banner" } } }).footer.primary).toMatchObject({ label: PRICE_DEFAULT_WORDS.checkNewPrices, disabled: false });
+    expect(editor({ draft: pricedDraft({ choice: { mode: "leave" }, check: null }, { shippingPolicy: SET_F1 }), rights: { ...rights(), categorySettings: { editable: false, reason: "banner" } } }).footer.primary).toMatchObject({ label: "Save", disabled: true });
+  });
+});
+
 describe("never mutates its inputs", () => {
   it("builds every value from frozen inputs without throwing, and returns fresh objects", () => {
     const picks = deepFreeze({ shippingPolicy: SET_F1, storeShelf: SET_SHELF });
@@ -953,6 +1489,23 @@ describe("never mutates its inputs", () => {
     categoryClearBody(value);
     categorySignature(STORE, CATEGORY, 7, categoryPatch(value), categoryClearBody(value));
     rebaseCategoryDraft(value, DETAIL);
+    // The price (PR 10f): the check's request, its base and its lines, from frozen inputs.
+    const priceChange = deepFreeze({ choice: { mode: "set" as const, value: { basis: "product_cost" as const, markupBps: 3500, flatCents: 0, rounding: "cent" as const } }, check: null });
+    const priced = categoryDraftValue(DETAIL, choices(picks), deepFreeze(["storeShelf", "shippingPolicy", "price"]), priceChange);
+    expect(priced.price.choice).not.toBe(priceChange.choice);
+    expect(priced.price.choice).toEqual(priceChange.choice);
+    categoryPricePatch(priced);
+    categoryPriceClearBody(priced);
+    categoryPriceReviewRequest(priced);
+    categoryPriceBaseMoved(categoryPriceCheckBaseOf(priced), DETAIL);
+    categoryPriceCheckAlsoLines(priced);
+    categoryPriceDraftWithCheck(priced, deepFreeze({ reviewId: "11111111-1111-4111-8111-111111111111", reviewHash: "a".repeat(64), after: null }));
+    rebaseCategoryDraft(priced, DETAIL);
+    categoryPriceAction({ draft: categoryDraft(picks), categoryId: CATEGORY, choice: priceChange.choice });
+    categoryEditorState({
+      category: null, categoryId: CATEGORY, detail: { data: DETAIL, error: null }, summary: summary(), draft: run([{ type: "open", editor: categoryEditorId(CATEGORY), place: "Sleeves", base: categoryDraftValue(DETAIL) }, { type: "edit", value: priced }]),
+      rights: rights(), setup: LIVE, shelves: SHELVES, openTarget: CATEGORY_PRICE_TARGET, failure: null, busy: false, savedFlashVisible: false, compact: false, fieldEditorOpen: false,
+    });
     categorySettingsCardState({ read: { data: LIST, error: null }, summary: summary({ price: 1 }), draft: categoryDraft(picks), right: EDITABLE });
     categoryEditorState({
       category: null, categoryId: CATEGORY, detail: { data: DETAIL, error: null }, summary: summary({ price: 1 }), draft: categoryDraft(picks, ["shippingPolicy"]),

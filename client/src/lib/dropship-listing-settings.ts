@@ -141,6 +141,13 @@ export interface ListingSettingsListQuery<Show extends string> {
 export interface ListingSettingsReadOptions {
   /** False keeps the read from running (the tab or the drawer is closed). */
   enabled?: boolean;
+  /**
+   * True reads fresh each time it mounts (staleTime 0): an open editor's read
+   * (plan PR 10, D6, D10), such as "Give these sizes a price" over the Prices
+   * pages (PR 10f). False (the default) is a list read, at most 60 seconds
+   * old. Read by the prices and updated-products options.
+   */
+  fresh?: boolean;
 }
 
 /**
@@ -189,7 +196,7 @@ export function listingSettingsProductsQueryOptions(
   } as const;
 }
 
-/** The Prices tab: one row per chosen size, 50 a page. */
+/** The Prices tab: one row per chosen size, 50 a page; fresh for the open "Give these sizes a price" sheet (PR 10f, D10). */
 export function listingSettingsPricesQueryOptions(
   storeConnectionId: number,
   query: ListingSettingsListQuery<ListingSettingsPriceFilter>,
@@ -204,7 +211,7 @@ export function listingSettingsPricesQueryOptions(
         listingSettingsPricesResponseSchema, signal);
     },
     enabled: (options.enabled ?? true) && request.ok,
-    staleTime: LISTING_SETTINGS_STALE_MS,
+    staleTime: options.fresh === true ? 0 : LISTING_SETTINGS_STALE_MS,
     placeholderData: keepPreviousData,
     retry: false,
   } as const;
@@ -323,15 +330,8 @@ export function listingSettingsProductIdsQueryOptions(
   } as const;
 }
 
-export interface ListingSettingsUpdatedProductsReadOptions extends ListingSettingsReadOptions {
-  /**
-   * True reads fresh each time it mounts (staleTime 0): the open sheet, whose
-   * "Got it" items come from this answer (plan PR 10, D6, D10). False (the
-   * default) is a list read, at most 60 seconds old: the line under the
-   * attention strip.
-   */
-  fresh?: boolean;
-}
+/** The updated-products read's options: `fresh` for the open sheet, whose "Got it" items come from this answer; the line under the attention strip keeps the list's 60 seconds. */
+export type ListingSettingsUpdatedProductsReadOptions = ListingSettingsReadOptions;
 
 /**
  * The products Card Shellz updated (`GET …/updated-products?page=N`, PR 10

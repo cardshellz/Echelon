@@ -189,6 +189,8 @@ export interface ListingSettingsTabsProps {
   onTooLarge?: (error: unknown) => void;
   /** "Set for selected" (PR 10, plan 6.3): what its sheet needs from the step, and the address it opens at. */
   bulk: ListingSettingsTabsBulk;
+  /** The Prices tab's [Give these sizes a price] (PR 10f, plan 9.3): the step puts the sheet in the address (D21). */
+  onGivePrices?: () => void;
 }
 
 /** "Set for selected" as the step hands it to the tabs: the sheet's facts, and its place in the address (D20, D21). */
@@ -311,6 +313,7 @@ export function ListingSettingsTabs(props: ListingSettingsTabsProps) {
             compact={compact}
             listsOff={listsOff}
             onShow={(show) => dispatch({ type: "show_prices", show })}
+            onGivePrices={props.onGivePrices}
           />
         </TabsContent>
       </Tabs>

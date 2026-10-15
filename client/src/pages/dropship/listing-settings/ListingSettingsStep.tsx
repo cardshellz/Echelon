@@ -47,6 +47,7 @@ import { CategorySettingsCard, type CategoryCardOpen } from "./CategorySettingsC
 import { ConnectionBannerView } from "./ConnectionBanner";
 import { DescriptionDefaultRow } from "./DescriptionDefaultRow";
 import { EbayCategoryDefaultRow } from "./EbayCategoryDefaultRow";
+import { GiveSizesPriceSheet } from "./GiveSizesPriceSheet";
 import { useListingSettingsDrafts } from "./ListingSettingsDraftsProvider";
 import { ListingSettingsHeader } from "./ListingSettingsHeader";
 import { ListingSettingsTabs, type ListingSettingsProductTarget, type ListingSettingsTabsRequest } from "./ListingSettingsTabs";
@@ -72,9 +73,10 @@ import { UpdatedProductsSheet, type OwnTextCheckAction } from "./UpdatedProducts
  * shelves), turns them into edit rights and the one banner, and routes the
  * strip's buttons and the address (`?product=&size=`, and from PR 10
  * `?sheet=bulk` for "Set for selected", `?sheet=updated` for "Card Shellz
- * updated products" and `?category=<id>` for a category's editor) to the
- * right place, one surface at a time (D20). The Category settings card sits
- * between the Store defaults card and the tabs (PR 10e, A5).
+ * updated products", `?sheet=give-prices` for "Give these sizes a price" and
+ * `?category=<id>` for a category's editor) to the right place, one surface
+ * at a time (D20). The Category settings card sits between the Store defaults
+ * card and the tabs (PR 10e, A5).
  */
 
 /** The onboarding read the page and portal shell share; its vendor status and entitlement gate every writer. */
@@ -183,6 +185,7 @@ export function ListingSettingsStep(props: ListingSettingsStepProps) {
   const drawerOpener = useRef<HTMLElement | null>(null);
   const bulkOpener = useRef<HTMLElement | null>(null);
   const updatedOpener = useRef<HTMLElement | null>(null);
+  const givePricesOpener = useRef<HTMLElement | null>(null);
   const categoryOpener = useRef<HTMLElement | null>(null);
   const mounted = useRef(false);
   useEffect(() => {
@@ -306,6 +309,24 @@ export function ListingSettingsStep(props: ListingSettingsStepProps) {
   }, [navigate]);
 
   /**
+   * The Prices tab's [Give these sizes a price], or the strip's [Fix] on a can't-be-priced line with no product
+   * (UX-M2), puts the sheet in the address (D21), so Back closes it; the drawer's and the category's addresses go
+   * with it (D20). No editor's change is asked about here: the sheet takes the step's one draft on the first typed
+   * price, and asks then (D16).
+   */
+  const openGivePricesSheet = useCallback(() => {
+    const active = typeof document === "undefined" ? null : document.activeElement;
+    givePricesOpener.current = active instanceof HTMLElement ? active : null;
+    const { location: path, search: query } = latest.current;
+    navigate(`${path}${sheetSearch(drawerSearch(categorySearch(query, null), null), "give-prices")}`);
+  }, [navigate]);
+
+  const closeGivePricesSheet = useCallback(() => {
+    const { location: path, search: query } = latest.current;
+    navigate(`${path}${sheetSearch(query, null)}`, { replace: true });
+  }, [navigate]);
+
+  /**
    * An own-text row's [Check] in that sheet: one push that takes the sheet off the address and opens the drawer on
    * the product's Description row (D20, through 10b's landing request), so Back returns to the sheet (D21).
    */
@@ -410,8 +431,11 @@ export function ListingSettingsStep(props: ListingSettingsStepProps) {
       case "open_updated_products":
         openUpdatedSheet();
         return;
+      case "open_size_prices":
+        openGivePricesSheet();
+        return;
     }
-  }, [openPolicyEditor, openProductFix, openUpdatedSheet]);
+  }, [openPolicyEditor, openProductFix, openUpdatedSheet, openGivePricesSheet]);
 
   const saved = summary.data?.storeDefaults ?? null;
   const goToStep1 = () => goToStep("choose");
@@ -551,6 +575,7 @@ export function ListingSettingsStep(props: ListingSettingsStepProps) {
             onBlocked: onWriteBlocked,
             returnFocusTo: bulkOpener,
           }}
+          onGivePrices={openGivePricesSheet}
         />
       </div>
       <ProductDrawer
@@ -583,6 +608,18 @@ export function ListingSettingsStep(props: ListingSettingsStepProps) {
         onCheckOwnText={checkOwnText}
         onBlocked={onWriteBlocked}
         returnFocusTo={updatedOpener}
+      />
+      <GiveSizesPriceSheet
+        storeConnectionId={storeConnectionId}
+        // One surface at a time (D20): the drawer, when the address opens both. Shut while the selection is too large (D18).
+        open={sheet === "give-prices" && drawerTarget === null && !tooLarge}
+        summary={{ data: summary.data, error: summary.error }}
+        right={rights.sizePrices}
+        saveCallbacks={saveCallbacks}
+        onSaved={onSettingsSaved}
+        onClose={closeGivePricesSheet}
+        onBlocked={onWriteBlocked}
+        returnFocusTo={givePricesOpener}
       />
       <CategoryEditor
         storeConnectionId={storeConnectionId}

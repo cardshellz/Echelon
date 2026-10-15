@@ -1,5 +1,6 @@
 import { expect, test, type Page } from "@playwright/test";
 import type { CategoryListingSettingValues, ProductListingSettingValues } from "../../shared/dropship/listing-setting-values";
+import { calculateRulePrice, type PricingRecipe } from "../../shared/dropship/pricing-rules";
 import {
   SAVED_PRICING_RULES,
   categoryKey,
@@ -39,11 +40,34 @@ test.use({ serviceWorkers: "allow" });
  * (ids and text only, never a price; compare-and-set on the category's revision and on the clear set's
  * products; the clear set must be the one the server derives; keyed), older group rules refuse every
  * save (D11), and every journey ends with nothing unexpected asked and no page error. Desktop and phone.
+ *
+ * From 10f (plan 9.1-9.4, 9.6) the Price row: the category's price through the W7 `category_price`
+ * check, with the editor's other changes and "Also clear theirs" riding along in the one check (D2),
+ * applied with the category's revision; older rules take the row's Change away and refuse a race (D11);
+ * a revision that moved under the apply brings the editor back with Load latest (9.4); a dropped apply
+ * is checked again with the same key. A category price never goes through W12 (9.7).
  */
 
 const CATEGORIES_PATH = `${LISTINGS}/listing-settings/categories`;
 const PRODUCTS_PATH = `${LISTINGS}/listing-settings/products`;
+const PRICES_PATH = `${LISTINGS}/listing-settings/prices`;
 const SUMMARY_PATH = `${LISTINGS}/listing-settings/summary`;
+const REVIEW_PATH = `${LISTINGS}/listing-settings/price-changes/review`;
+const APPLY_PATH = `${LISTINGS}/listing-settings/price-changes/apply`;
+const RETAIL_20: PricingRecipe = { basis: "catalog_retail", markupBps: 2_000, flatCents: 0, rounding: "cent" };
+/** Every Sleeves size's retail price (the fixture's). */
+const RETAIL_CENTS = 399;
+
+/** "$3.60" from integer cents (never floating point). */
+function dollars(cents: number | null): string {
+  if (cents === null) throw new Error("The resolver gave no price.");
+  return `$${Math.floor(cents / 100)}.${String(cents % 100).padStart(2, "0")}`;
+}
+
+/** The price the shared resolver gives a size from its retail price, as the check's rows show it (D1). */
+function rulePrice(recipe: PricingRecipe, retailCents = RETAIL_CENTS): string {
+  return dollars(calculateRulePrice(recipe, retailCents).priceCents);
+}
 
 const SLEEVES = 40;
 const TOPLOADERS = 41;
@@ -163,6 +187,44 @@ function saveButton(page: Page) {
   return footer(page).getByRole("button", { name: "Save", exact: true });
 }
 
+function priceRow(page: Page) {
+  return editor(page).getByTestId("category-price-row");
+}
+
+function changePrice(page: Page, name: string) {
+  return priceRow(page).getByRole("button", { name: `Change price for ${name}`, exact: true });
+}
+
+function priceEditor(page: Page) {
+  return editor(page).getByTestId("drawer-field-editor-price");
+}
+
+function check(page: Page) {
+  return editor(page).getByTestId("price-check");
+}
+
+function checkFooter(page: Page) {
+  return editor(page).getByTestId("price-check-footer");
+}
+
+/** The editor's Save while the draft holds a price change (plan 9.2): the same words on every width (10d's rule). */
+function checkNewPrices(page: Page) {
+  return footer(page).getByRole("button", { name: "Check new prices", exact: true });
+}
+
+/** Opens the Price row's editor, picks Set price and types `percent` into Add. */
+async function setPricePercent(page: Page, name: string, percent: string) {
+  await changePrice(page, name).click();
+  await expect(priceEditor(page)).toBeVisible();
+  await priceEditor(page).getByRole("radio", { name: "Set price" }).check();
+  await priceEditor(page).getByRole("textbox", { name: "Add" }).fill(percent);
+}
+
+/** The categories state with the store price saved (retail + 15%), so a check has a Now price to show. */
+function pricedCategoriesState(): Partial<StubState> {
+  return { ...categoriesState(), pricingRules: { [STORE]: SAVED_PRICING_RULES } };
+}
+
 function bar(page: Page) {
   return page.getByTestId("catalog-action-summary");
 }
@@ -211,14 +273,14 @@ test("the card lists each category in name order with what it sets and the uncat
   await openEditor(page, "Sleeves", SLEEVES);
   await expect(editor(page)).toContainText("Sleeves · 3 products");
   expect(readsOf(state, "GET", categoryPath(SLEEVES))).toHaveLength(1);
-  // Every value with where it comes from; the Price row read-only until the category price check (UX-m9).
+  // Every value with where it comes from; the Price row with its [Change] (PR 10f) and the sizes' prices as they are now (CC-C23).
   await expect(settingRow(page, "shippingPolicy")).toContainText("USPS Ground Advantage");
   await expect(settingRow(page, "shippingPolicy")).toContainText("Store default");
-  const price = editor(page).getByTestId("category-price-row");
-  // No store price in this store yet: the row says so, as the drawer's head does, and offers no [Change].
-  await expect(price).toContainText("No store price yet. Set one in Store defaults.");
-  await expect(price).toContainText("A category's price can't be changed here yet.");
-  await expect(price.locator("button")).toHaveCount(0);
+  // No store price in this store yet: the row says so, as the drawer's head does; each size sells at its retail price now.
+  await expect(priceRow(page)).toContainText("No store price yet. Set one in Store defaults.");
+  await expect(priceRow(page).getByTestId("category-price-examples")).toHaveText("Now: Pack of 100 $3.99 · Pack of 100 $3.99 · Pack of 100 $3.99");
+  await expect(changePrice(page, "Sleeves")).toBeEnabled();
+  await expect(priceRow(page)).not.toContainText("can't be changed here yet");
   for (const key of ["shippingPolicy", "returnPolicy", "paymentPolicy", "ebayCategory", "storeShelf", "descriptionTemplate"] as const) {
     await expect(changeButton(page, key, "Sleeves")).toBeEnabled();
   }
@@ -665,6 +727,218 @@ test("the description editor offers text above and below with Use store default 
   await expect(settingRow(page, "descriptionTemplate")).toContainText("Card Shellz text, with your text above");
   await expect(settingRow(page, "descriptionTemplate")).toContainText("Set for Sleeves");
   await expect(cardRow(page, SLEEVES)).toContainText("Sets: text above");
+  expectNothingUnexpected(state);
+});
+
+test("a category price is checked with a shelf, a shipping change and Also clear theirs riding along, then saved in one apply; the rows and the card read again; never W12 (9.1, 9.2, D2, D9)", async ({ page }, testInfo) => {
+  const state = await openStep(page, pricedCategoriesState());
+  await openEditor(page, "Sleeves", SLEEVES);
+  // The store price, with the sizes' prices as they are now.
+  await expect(priceRow(page)).toContainText("Retail price + 15%, to the cent");
+  await expect(priceRow(page)).toContainText("Store default");
+  const now = rulePrice(SAVED_PRICING_RULES.profile!.defaultRecipe);
+  await expect(priceRow(page).getByTestId("category-price-examples")).toHaveText(`Now: Pack of 100 ${now} · Pack of 100 ${now} · Pack of 100 ${now}`);
+  // A shipping policy with its clear box ticked rides along in the one check (D2), and so does a store shelf, which the
+  // review resolves with eBay as W12 does (its id is new to the category).
+  await pickPolicy(page, "shippingPolicy", "Sleeves", "USPS Priority Mail");
+  await clearBox(page, "shippingPolicy").getByRole("checkbox").check();
+  await changeButton(page, "storeShelf", "Sleeves").click();
+  await fieldEditor(page, "storeShelf").getByRole("combobox", { name: "Shelf for Sleeves" }).click();
+  await page.getByRole("option", { name: "Sale", exact: true }).click();
+  await expect(page.getByRole("option")).toHaveCount(0);
+  await fieldEditor(page, "storeShelf").getByRole("button", { name: "Done" }).click();
+  await expect(settingRow(page, "storeShelf")).toContainText("→ Sale · Not saved");
+  // The price editor offers "Use store default" (D17) and no "Clear exact prices too" (a category check releases nothing).
+  await setPricePercent(page, "Sleeves", "20");
+  await expect(priceEditor(page).getByRole("radio", { name: "Use store default" })).toBeVisible();
+  await expect(priceEditor(page).getByRole("checkbox")).toHaveCount(0);
+  await priceEditor(page).getByRole("button", { name: "Check new prices" }).click();
+
+  // The check replaces the editor's body (D20): one review for the category, with the editor's other changes and the clear set.
+  await expect(check(page)).toBeVisible();
+  await expect(editor(page).getByTestId("category-editor-rows")).toHaveCount(0);
+  await expect(editor(page)).toContainText("Sleeves · 3 products");
+  expect(state.priceChangeReviews).toEqual([{ method: "POST", path: REVIEW_PATH, body: {
+    kind: "category_price", categoryId: SLEEVES, expectedRevisionId: null,
+    patch: { price: RETAIL_20, shippingPolicy: { id: "priority" }, storeShelf: { mode: "own", shelfIds: ["12"] } },
+    clear: { fields: ["shippingPolicy"], products: [{ productId: PENNY.productId, expectedRevisionId: 7 }, { productId: TEAM.productId, expectedRevisionId: null }] },
+  } }]);
+  await expect(check(page).getByTestId("price-check-head")).toHaveText("Checking: Retail price + 20%, to the cent · Not saved yet");
+  // The other settings in the stored shape's order (the shelf before the shipping policy).
+  await expect(check(page).getByTestId("price-check-also")).toHaveText(["Also saves: store shelf, shipping policy.", "Clears 2 products' own shipping policy."]);
+  await expect(check(page).getByTestId("price-check-counts")).toHaveText("3 sizes · 3 change");
+  for (const product of [PENNY, TEAM, SOFT]) {
+    const row = check(page).getByTestId(`price-check-size-${product.sizes[0].productVariantId}`);
+    await expect(row).toContainText(product.productName);
+    await expect(row).toContainText(`Category price, from retail ${dollars(RETAIL_CENTS)}`);
+    await expect(row).toContainText(now);
+    await expect(row).toContainText(rulePrice(RETAIL_20));
+  }
+  await expect(bar(page)).toHaveText("Not saved · 4 changes in Sleeves");
+  expect(state.priceChangeApplies).toEqual([]);
+  await shot(page, testInfo, "listing-settings-category-price-check");
+
+  await checkFooter(page).getByRole("button", { name: "Save new prices" }).click();
+  await expect(footer(page)).toContainText("Saved");
+  const [held] = Object.values(state.priceChangeChecks);
+  expect(state.priceChangeApplies).toEqual([{ method: "POST", path: APPLY_PATH,
+    body: { reviewId: held.reviewId, reviewHash: held.reviewHash, idempotencyKey: KEY("ls-price-check") } }]);
+  // The editor's body shows again from the views read again (D9): the category, the categories, the products and the
+  // summary now; the prices view is invalidated too and reads when its tab shows (nothing watches it under Products).
+  const postAt = state.reads.findIndex((read) => read.method === "POST" && read.path === APPLY_PATH);
+  for (const path of [categoryPath(SLEEVES), CATEGORIES_PATH, PRODUCTS_PATH, SUMMARY_PATH]) {
+    await expect.poll(() => readsAfter(state, postAt, "GET", path), path).toBeGreaterThanOrEqual(1);
+  }
+  await expect(check(page)).toHaveCount(0);
+  await expect(priceRow(page)).toContainText("Retail price + 20%, to the cent");
+  await expect(priceRow(page)).toContainText("Set for Sleeves");
+  await expect(priceRow(page)).not.toContainText("Not saved");
+  await expect(settingRow(page, "shippingPolicy")).toContainText("USPS Priority Mail");
+  await expect(settingRow(page, "shippingPolicy")).toContainText("Set for Sleeves");
+  await expect(settingRow(page, "storeShelf")).toContainText("Sale");
+  await expect(settingRow(page, "storeShelf")).toContainText("Set for Sleeves");
+  await expect(clearBox(page, "shippingPolicy")).toHaveCount(0);
+  await expect(bar(page)).toHaveText("All saved");
+  await expect(cardRow(page, SLEEVES)).toContainText("Sleeves · 3 products · Sets: price, store shelf, shipping policy");
+  expect(state.categorySettings[categoryKey(STORE, SLEEVES)].values.price).toEqual(RETAIL_20);
+  expect(state.categorySettings[categoryKey(STORE, SLEEVES)].values.shippingPolicy).toEqual(PRIORITY);
+  // The shelf as eBay named it, resolved by the review and written by the apply.
+  expect(state.categorySettings[categoryKey(STORE, SLEEVES)].values.storeShelf).toMatchObject({ mode: "own", shelves: [{ id: "12" }] });
+  expect(state.productSettings[productKey(STORE, PENNY.productId)].values.shippingPolicy).toBeNull();
+  expect(state.sizeLeftovers[sizeKey(STORE, TEAM.sizes[0].productVariantId)]).toEqual({});
+  // A category price never goes through W12 (9.7).
+  expect(state.categorySettingsWrites).toEqual([]);
+  expectNothingUnexpected(state);
+});
+
+test("Use store default over the category's own price is checked and applied as null, and the row then reads the store price", async ({ page }) => {
+  const initial = pricedCategoriesState();
+  initial.categorySettings![categoryKey(STORE, SLEEVES)] = { revisionId: 5, values: { ...NO_CATEGORY_VALUES, price: RETAIL_20 } };
+  const state = await openStep(page, initial);
+  await openEditor(page, "Sleeves", SLEEVES);
+  await expect(priceRow(page)).toContainText("Retail price + 20%, to the cent");
+  await expect(priceRow(page)).toContainText("Set for Sleeves");
+  await changePrice(page, "Sleeves").click();
+  await expect(priceEditor(page).getByRole("radio", { name: "Set price" })).toBeChecked();
+  await priceEditor(page).getByRole("radio", { name: "Use store default" }).check();
+  await priceEditor(page).getByRole("button", { name: "Check new prices" }).click();
+  await expect(check(page)).toBeVisible();
+  expect(state.priceChangeReviews).toEqual([{ method: "POST", path: REVIEW_PATH,
+    body: { kind: "category_price", categoryId: SLEEVES, expectedRevisionId: 5, patch: { price: null } } }]);
+  await expect(check(page).getByTestId("price-check-head")).toHaveText("Checking: Use store default · Not saved yet");
+  await expect(check(page).getByTestId("price-check-also")).toHaveCount(0);
+  await checkFooter(page).getByRole("button", { name: "Save new prices" }).click();
+  await expect(footer(page)).toContainText("Saved");
+  expect(state.priceChangeApplies).toHaveLength(1);
+  expect(state.categorySettings[categoryKey(STORE, SLEEVES)].values.price).toBeNull();
+  await expect(priceRow(page)).toContainText("Retail price + 15%, to the cent");
+  await expect(priceRow(page)).toContainText("Store default");
+  expect(state.categorySettingsWrites).toEqual([]);
+  expectNothingUnexpected(state);
+});
+
+test("while the store holds older group rules the Price row has no Change (D11); rules added after the check opened refuse the apply with the one line, and Back to editing is the way out (9.4)", async ({ page }) => {
+  const ruled = await openStep(page, { ...pricedCategoriesState(), pricingRules: { [STORE]: pricingRulesWithGroup() } }, `${SETUP_PATH}?category=${SLEEVES}`);
+  await expect(editor(page).getByTestId("category-editor-rows")).toBeVisible();
+  await expect(changePrice(page, "Sleeves")).toHaveCount(0);
+  await expect(priceRow(page).getByTestId("category-price-examples")).toBeVisible();
+  await expect(footer(page)).toContainText("Category settings can't be saved while your store has older group rules.");
+  expect(ruled.priceChangeReviews).toEqual([]);
+  expectNothingUnexpected(ruled);
+  await page.goto("about:blank");
+
+  // The race: a pricing group arrives between the check and its apply (the server's 2.5; the 409 is the backstop).
+  const state = await openStep(page, pricedCategoriesState());
+  await openEditor(page, "Sleeves", SLEEVES);
+  await setPricePercent(page, "Sleeves", "20");
+  await priceEditor(page).getByRole("button", { name: "Check new prices" }).click();
+  await expect(check(page)).toBeVisible();
+  state.pricingRules[STORE] = pricingRulesWithGroup();
+  await checkFooter(page).getByRole("button", { name: "Save new prices" }).click();
+  const line = "Category settings can't be saved while your store has older group rules. They'll be moved over in a later update.";
+  await expect(checkFooter(page)).toContainText(line);
+  await expect(checkFooter(page).getByRole("button", { name: "Save new prices" })).toBeDisabled();
+  expect(state.priceChangeApplies).toHaveLength(1);
+  expect(state.categorySettings[categoryKey(STORE, SLEEVES)]).toBeUndefined();
+  // The card read the summary again and took every Change away (D11), as after W12's refusal (by element: the open
+  // sheet hides the page behind it from the accessibility tree).
+  await expect(card(page).locator("button")).toHaveCount(0);
+  await expect(card(page)).toContainText(line);
+  // Back to editing: the editor's body with the change kept, no Change on the Price row either, Check new prices off
+  // with the one line, and no second apply.
+  await checkFooter(page).getByRole("button", { name: /^Back( to editing)?$/ }).click();
+  await expect(check(page)).toHaveCount(0);
+  await expect(editor(page).getByTestId("category-editor-rows")).toBeVisible();
+  await expect(priceRow(page)).toContainText("→ Retail price + 20%, to the cent · Not saved");
+  await expect(changePrice(page, "Sleeves")).toHaveCount(0);
+  await expect(editor(page).getByRole("button", { name: /^Change / })).toHaveCount(0);
+  await expect(checkNewPrices(page)).toBeDisabled();
+  await expect(footer(page)).toContainText(line);
+  await expect(bar(page)).toHaveText("Not saved · 1 change in Sleeves");
+  expect(state.priceChangeApplies).toHaveLength(1);
+  expect(state.priceChangeReviews).toHaveLength(1);
+  expect(state.categorySettingsWrites).toEqual([]);
+  expectNothingUnexpected(state);
+});
+
+test("a category whose revision moved under the apply is a conflict: the editor's body comes back with Load latest, which keeps the price; the new check carries the new revision (9.4, D6)", async ({ page }) => {
+  const initial = pricedCategoriesState();
+  initial.categorySettings![categoryKey(STORE, SLEEVES)] = { revisionId: 5, values: { ...NO_CATEGORY_VALUES, returnPolicy: { ...NO_RETURNS } } };
+  const state = await openStep(page, initial);
+  await openEditor(page, "Sleeves", SLEEVES);
+  await setPricePercent(page, "Sleeves", "20");
+  await priceEditor(page).getByRole("button", { name: "Check new prices" }).click();
+  await expect(check(page)).toBeVisible();
+  expect(state.priceChangeReviews[0].body.expectedRevisionId).toBe(5);
+  // Another window saved the category meanwhile (the same values at a new revision: the rows still hash the same).
+  state.categorySettings[categoryKey(STORE, SLEEVES)] = { revisionId: 6, values: { ...NO_CATEGORY_VALUES, returnPolicy: { ...NO_RETURNS } } };
+  await checkFooter(page).getByRole("button", { name: "Save new prices" }).click();
+  // The editor's body is back, with Load latest (never a re-check over a moved category).
+  await expect(check(page)).toHaveCount(0);
+  await expect(editor(page).getByTestId("category-editor-rows")).toBeVisible();
+  await expect(footer(page).getByRole("button", { name: "Load latest and keep my changes" })).toBeVisible();
+  expect(state.priceChangeApplies).toHaveLength(1);
+  expect(state.priceChangeReviews).toHaveLength(1);
+  expect(state.categorySettings[categoryKey(STORE, SLEEVES)].values.price).toBeNull();
+
+  await footer(page).getByRole("button", { name: "Load latest and keep my changes" }).click();
+  await expect(footer(page)).toContainText("Here's what's saved now. Your changes are on top; fields you both changed are marked.");
+  await expect(priceRow(page)).toContainText("→ Retail price + 20%, to the cent · Not saved");
+  await expect(priceRow(page).getByTestId("category-price-examples")).toHaveCount(0);
+  // Save is the check again, from the revision read now (D6); then the apply saves.
+  await checkNewPrices(page).click();
+  await expect(check(page)).toBeVisible();
+  expect(state.priceChangeReviews).toHaveLength(2);
+  expect(state.priceChangeReviews[1].body).toEqual({ kind: "category_price", categoryId: SLEEVES, expectedRevisionId: 6, patch: { price: RETAIL_20 } });
+  await checkFooter(page).getByRole("button", { name: "Save new prices" }).click();
+  await expect(footer(page)).toContainText("Saved");
+  expect(state.priceChangeApplies).toHaveLength(2);
+  expect(state.priceChangeApplies[1].body.idempotencyKey).not.toBe(state.priceChangeApplies[0].body.idempotencyKey);
+  expect(state.categorySettings[categoryKey(STORE, SLEEVES)].values.price).toEqual(RETAIL_20);
+  expect(state.categorySettings[categoryKey(STORE, SLEEVES)].revisionId).not.toBe(6);
+  await expect(priceRow(page)).toContainText("Set for Sleeves");
+  expectNothingUnexpected(state);
+});
+
+test("an apply whose answer was lost is checked again with the same key and body; Esc keeps the editor and the check meanwhile (D5, D7)", async ({ page }) => {
+  const state = await openStep(page, { ...pricedCategoriesState(), priceChangeApplyAnswers: ["drop"] });
+  await openEditor(page, "Sleeves", SLEEVES);
+  await setPricePercent(page, "Sleeves", "20");
+  await priceEditor(page).getByRole("button", { name: "Check new prices" }).click();
+  await expect(check(page)).toBeVisible();
+  await checkFooter(page).getByRole("button", { name: "Save new prices" }).click();
+  await expect(checkFooter(page)).toContainText("We couldn't confirm your save.");
+  await expect(checkFooter(page)).not.toContainText("Nothing was saved");
+  await page.keyboard.press("Escape");
+  await expect(editor(page)).toBeVisible();
+  await expect(check(page)).toBeVisible();
+  await checkFooter(page).getByRole("button", { name: "Check again" }).click();
+  await expect(footer(page)).toContainText("Saved");
+  expect(state.priceChangeApplies).toHaveLength(2);
+  expect(state.priceChangeApplies[1].body).toEqual(state.priceChangeApplies[0].body);
+  expect(state.priceChangeApplies[0].body.idempotencyKey).toEqual(KEY("ls-price-check"));
+  expect(state.categorySettings[categoryKey(STORE, SLEEVES)].values.price).toEqual(RETAIL_20);
+  await expect(priceRow(page)).toContainText("Set for Sleeves");
   expectNothingUnexpected(state);
 });
 

@@ -30,6 +30,10 @@ export interface ProductPriceEditorProps {
   onCheck: (change: Pick<ProductPriceChange, "price" | "releaseExactPrices">) => void;
   /** [Cancel] or Esc: the editor closes and drops what was typed. */
   onCancel: () => void;
+  /** The default's words: the drawer's "Use default", or the category editor's "Use store default" (D17; PR 10f). */
+  defaultLabel?: string;
+  /** Whether "Clear exact prices too" is offered; a category check releases nothing (PR 10f), so its editor leaves it out. */
+  release?: boolean;
 }
 
 /**
@@ -43,7 +47,10 @@ export interface ProductPriceEditorProps {
  * opens in place, so the owner stays the only surface (D20). Nothing here
  * computes a price.
  */
-export function ProductPriceEditor({ model, title, productName, message, checking, locked, onCheck, onCancel }: ProductPriceEditorProps) {
+export function ProductPriceEditor({
+  model, title, productName, message, checking, locked, onCheck, onCancel,
+  defaultLabel = PRODUCT_PRICE_EDITOR_WORDS.useDefault, release = true,
+}: ProductPriceEditorProps) {
   const group = useId();
   const [state, setState] = useState<ProductPriceEditorState>(model.initial);
   const [errors, setErrors] = useState<FieldErrors>({});
@@ -83,7 +90,7 @@ export function ProductPriceEditor({ model, title, productName, message, checkin
       {canChoose && (
         <fieldset disabled={waiting} className="space-y-2">
           <legend className="sr-only">{title}</legend>
-          <ChoiceRadio name={group} label={PRODUCT_PRICE_EDITOR_WORDS.useDefault} checked={state.mode === "default"} disabled={!model.canDefault}
+          <ChoiceRadio name={group} label={defaultLabel} checked={state.mode === "default"} disabled={!model.canDefault}
             onPick={() => setState((current) => ({ ...current, mode: "default" }))} />
           <ChoiceRadio name={group} label={PRODUCT_PRICE_EDITOR_WORDS.setPrice} checked={state.mode === "set"} disabled={!model.canSet}
             onPick={() => setState((current) => ({ ...current, mode: "set" }))} />
@@ -108,11 +115,13 @@ export function ProductPriceEditor({ model, title, productName, message, checkin
               />
             </div>
           )}
-          <label className="flex min-h-11 items-start gap-3 rounded-md border border-zinc-200 bg-white p-3 text-sm">
-            <input type="checkbox" className="mt-0.5 h-4 w-4 shrink-0 accent-[#C060E0]" checked={state.releaseExactPrices}
-              onChange={(event) => setState((current) => ({ ...current, releaseExactPrices: event.target.checked }))} />
-            <span className="min-w-0 break-words text-zinc-900">{PRODUCT_PRICE_EDITOR_WORDS.clearExactPrices}</span>
-          </label>
+          {release && (
+            <label className="flex min-h-11 items-start gap-3 rounded-md border border-zinc-200 bg-white p-3 text-sm">
+              <input type="checkbox" className="mt-0.5 h-4 w-4 shrink-0 accent-[#C060E0]" checked={state.releaseExactPrices}
+                onChange={(event) => setState((current) => ({ ...current, releaseExactPrices: event.target.checked }))} />
+              <span className="min-w-0 break-words text-zinc-900">{PRODUCT_PRICE_EDITOR_WORDS.clearExactPrices}</span>
+            </label>
+          )}
         </fieldset>
       )}
     </FieldEditorFrame>

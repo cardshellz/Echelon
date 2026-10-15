@@ -19,14 +19,24 @@ import {
   CHECKING_EBAY,
   GROUP_RULE_ORDER_NOTE,
   LISTING_SETTINGS_BULK_WORDS,
+  LISTING_SETTINGS_CATEGORY_PRICE_WORDS,
   LISTING_SETTINGS_CATEGORY_WORDS,
   LISTING_SETTINGS_EDIT_WORDS,
   LISTING_SETTINGS_PRICE_CHECK_WORDS,
+  LISTING_SETTINGS_SIZE_PRICES_WORDS,
   LISTING_SETTINGS_UPDATED_WORDS,
   UNNAMED_PRODUCT_WORDS,
   CATEGORY_SETTING_WORDS,
   alsoClearLabelWords,
+  categoryCheckAlsoWords,
   categoryEditorTitleWords,
+  categoryExamplesWords,
+  sizeCostWords,
+  sizePriceBoxLabel,
+  sizePricesConflictWords,
+  sizePricesLeftListWords,
+  sizePricesNotSavedWords,
+  sizePricesOutsideLimitWords,
   categoryProductsChangedWords,
   categoryRowWords,
   changeCategoryLabel,
@@ -796,6 +806,72 @@ describe("Category settings (PR 10e proposals, plan 8.3, 8.6, 12.2)", () => {
       categoryRowWords({ name: "Sleeves", productCount: 15, setFields: [...CATEGORY_LISTING_SETTING_FIELDS] }).text, uncategorizedWords(4), categoryEditorTitleWords("Sleeves", 15),
       loadingCategoryWords("Sleeves"), setForCategoryWords("Sleeves"), changeCategoryLabel("Sleeves"), ownValuesLineWords(3, "Sleeves", "shippingPolicy"),
       alsoClearLabelWords(15), categoryProductsChangedWords("Sleeves"),
+    ]) expectPlain(words);
+  });
+});
+
+describe("the category price and Give these sizes a price (PR 10f proposals, plan 9.3, 9.5, 12.2)", () => {
+  it("uses the record's title and the plan's words, every one plain", () => {
+    expect(LISTING_SETTINGS_CATEGORY_PRICE_WORDS).toEqual({
+      now: "Now:",
+      alsoSaves: "Also saves",
+      tooHeavy: "This category's price check is too big to save at once. Shorten text on its products, or choose fewer of them in step 1.",
+      tooManySizes: "This category's price check covers more than 10,000 sizes. Choose fewer of its products in step 1.",
+    });
+    expect(LISTING_SETTINGS_SIZE_PRICES_WORDS).toEqual({
+      title: "Give these sizes a price",
+      intro: "These sizes can't be listed until they have a price.",
+      product: "Product",
+      size: "Size",
+      yourCost: "Your cost",
+      exactPrice: "Exact price",
+      save: "Save prices",
+      tooMany: "Save up to 200 prices at a time.",
+      empty: "Every size has a price.",
+      loading: "Checking which sizes need a price…",
+      readFailed: "Couldn't check which sizes need a price. Try again.",
+      loadMore: "Load more",
+      outsideLimit: "Outside a Card Shellz price limit",
+      enterAllowed: "Enter prices Card Shellz allows.",
+      notAvailable: "This size isn't chosen any more. Load the list again.",
+      fix: "Fix",
+    });
+    for (const words of [...Object.values(LISTING_SETTINGS_CATEGORY_PRICE_WORDS), ...Object.values(LISTING_SETTINGS_SIZE_PRICES_WORDS)]) expectPlain(words);
+    // W1's note for a limit, word for word, so a row the save refused reads as the check's rows do.
+    expect(LISTING_SETTINGS_SIZE_PRICES_WORDS.outsideLimit).toBe("Outside a Card Shellz price limit");
+  });
+
+  it("builds the category's examples as current prices, and the lines for what else a check saves", () => {
+    expect(categoryExamplesWords([{ sizeName: "Pack of 100", priceCents: 499 }, { sizeName: "Box of 5", priceCents: 2199 }])).toBe("Now: Pack of 100 $4.99 · Box of 5 $21.99");
+    expect(categoryExamplesWords([{ sizeName: "Pack of 100", priceCents: 1733 }, { sizeName: " ", priceCents: null }])).toBe("Now: Pack of 100 $17.33 · A size no price");
+    expect(categoryExamplesWords([{ sizeName: "Case", priceCents: 2_147_483_647 }])).toMatch(/^Now: Case \$21,?474,?836\.47$/);
+    expect(categoryExamplesWords([])).toBeNull();
+    expect(categoryCheckAlsoWords({ fields: ["shippingPolicy", "textAbove"], clears: [{ field: "shippingPolicy", count: 3 }] }))
+      .toEqual(["Also saves: shipping policy, text above.", "Clears 3 products' own shipping policy."]);
+    expect(categoryCheckAlsoWords({ fields: [], clears: [{ field: "price", count: 1 }, { field: "storeShelf", count: 0 }] })).toEqual(["Clears 1 product's own price."]);
+    expect(categoryCheckAlsoWords({ fields: [], clears: [] })).toEqual([]);
+    for (const words of [categoryExamplesWords([{ sizeName: "Pack of 100", priceCents: 499 }]), ...categoryCheckAlsoWords({ fields: ["price"], clears: [{ field: "price", count: 2 }] })]) expectPlain(words);
+  });
+
+  it("builds the sheet's counts and lines, one or many, with thousands marked, from the server's integer cents", () => {
+    expect(sizePricesNotSavedWords(12, false)).toBe("● Not saved · 12 prices");
+    expect(sizePricesNotSavedWords(1, false)).toBe("● Not saved · 1 price");
+    expect(sizePricesNotSavedWords(1_240, true)).toBe("● Not saved · 1,240");
+    expect(sizePricesLeftListWords(2)).toBe("2 sizes left this list and weren't saved.");
+    expect(sizePricesLeftListWords(1)).toBe("1 size left this list and wasn't saved.");
+    expect(sizePricesConflictWords(3)).toBe("3 sizes' prices changed in another window.");
+    expect(sizePricesConflictWords(1)).toBe("1 size's price changed in another window.");
+    expect(sizePricesConflictWords(1_000)).toBe("1,000 sizes' prices changed in another window.");
+    expect(sizePricesOutsideLimitWords(3)).toBe("3 sizes' prices would be outside what Card Shellz allows. Enter prices Card Shellz allows.");
+    expect(sizePricesOutsideLimitWords(1)).toBe("1 size's price would be outside what Card Shellz allows. Enter prices Card Shellz allows.");
+    expect(sizeCostWords(210)).toBe("Your cost $2.10");
+    expect(sizeCostWords(1)).toBe("Your cost $0.01");
+    expect(sizeCostWords(null)).toBeNull();
+    expect(sizePriceBoxLabel("Penny Sleeves", "Pack of 100")).toBe("Exact price for Penny Sleeves, Pack of 100");
+    expect(sizePriceBoxLabel("  ", "Pack of 100")).toBe("Exact price for A product, Pack of 100");
+    expect(sizePriceBoxLabel("Penny Sleeves", " ")).toBe("Exact price for Penny Sleeves");
+    for (const words of [
+      sizePricesNotSavedWords(12, false), sizePricesLeftListWords(2), sizePricesConflictWords(3), sizePricesOutsideLimitWords(3), sizeCostWords(210), sizePriceBoxLabel("Penny Sleeves", "Pack of 100"),
     ]) expectPlain(words);
   });
 });

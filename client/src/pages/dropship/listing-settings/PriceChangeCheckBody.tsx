@@ -30,6 +30,10 @@ export interface PriceChangeCheckBodyProps {
   review: PriceChangeReviewResponse | null;
   /** What was checked: the recipe or "Use default", and "Clear exact prices too". */
   change: Pick<ProductPriceChange, "price" | "releaseExactPrices">;
+  /** The head's words for `change` when they aren't the products kind's (a category check says "Use store default", D17; PR 10f). */
+  changeWords?: readonly string[];
+  /** Lines under the head for what else the check saves (a category check: "Also saves: …", "Clears …"; plan 9.2, UX-m9). */
+  also?: readonly string[];
   /** The owner's draft phase: a save in flight, unconfirmed, refused…; null before any apply. */
   phase: SavePhase | null;
   /** The draft's words for its phase (a failed apply's), shown under the buttons. */
@@ -82,8 +86,9 @@ export function PriceChangeCheckBody(props: PriceChangeCheckBodyProps) {
   }, [check.reviewId]);
   const after = priceCheckAfterWords(check.after);
   const pageWords = review === null ? null : priceCheckPageWords(review);
-  const checked = priceCheckChangeWords(change);
+  const checked = props.changeWords ?? priceCheckChangeWords(change);
   const head = checked.length === 0 ? LISTING_SETTINGS_PRICE_CHECK_WORDS.checking : `${LISTING_SETTINGS_PRICE_CHECK_WORDS.checking}: ${checked.join(" · ")}`;
+  const also = props.also ?? [];
   return (
     <>
       <div
@@ -98,6 +103,7 @@ export function PriceChangeCheckBody(props: PriceChangeCheckBodyProps) {
             {head}
             <span className="font-normal text-amber-800"> · {CHECK_NEW_PRICES_WORDS.notSavedYet}</span>
           </h3>
+          {also.map((line) => <p key={line} className="text-sm text-zinc-700" data-testid="price-check-also">{line}</p>)}
         </div>
         {after && <p role="status" className="text-sm text-zinc-700" data-testid="price-check-after">{after}</p>}
         {props.notice && <p role="alert" className="text-sm text-amber-900">{props.notice}</p>}

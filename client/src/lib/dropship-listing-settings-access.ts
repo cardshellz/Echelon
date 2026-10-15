@@ -319,11 +319,14 @@ function firstOf(kinds: Map<ConnectionBannerKind, string | null>, order: readonl
  * - `categorySettings` (W12, one Card Shellz category's settings, never its
  *   price; plan PR 10, D3, 8.2), with the same rule for each field as a
  *   product's (`categoryFieldRights`, dropship-listing-settings-categories.ts).
- *   Older group rules are not a right: the card checks them itself (D11).
+ *   Older group rules are not a right: the card checks them itself (D11);
+ * - `sizePrices` (W8, "Give these sizes a price": typed exact prices for up to
+ *   200 sizes in one save; plan PR 10, D3, 9.2). It names no eBay value, so a
+ *   sign-in never takes it away.
  */
 export const LISTING_SETTINGS_RIGHTS = [
   "price", "exactPrice", "policies", "shipping", "shelfPick", "shelfNone", "shipFrom", "ebayCategory", "description",
-  "productSettings", "bulkSettings", "priceCheck", "categoryMoves", "categorySettings",
+  "productSettings", "bulkSettings", "priceCheck", "categoryMoves", "categorySettings", "sizePrices",
 ] as const;
 export type ListingSettingsRightName = (typeof LISTING_SETTINGS_RIGHTS)[number];
 
@@ -366,11 +369,11 @@ const ALL_RIGHTS: readonly ListingSettingsRightName[] = LISTING_SETTINGS_RIGHTS;
 /**
  * W1, W9, W3 and W4 need an active or onboarding vendor and an active .ops
  * entitlement, and so does every PR 9 writer (`authorizeListingSettingWrite`):
- * W5, W6, W7, W13 and W12 here. A sign-in or eBay not answering doesn't lock them:
+ * W5, W6, W7, W13, W12 and W8 here. A sign-in or eBay not answering doesn't lock them:
  * resets, prices and "Got it" need no eBay call (plan D3, D4).
  */
 const LISTING_WRITER_RIGHTS: readonly ListingSettingsRightName[] = [
-  "price", "exactPrice", "ebayCategory", "description", "productSettings", "bulkSettings", "priceCheck", "categoryMoves", "categorySettings",
+  "price", "exactPrice", "ebayCategory", "description", "productSettings", "bulkSettings", "priceCheck", "categoryMoves", "categorySettings", "sizePrices",
 ];
 /** Choices that read eBay: the W2 policies and shelves, W10, and W3's category check. */
 const EBAY_RIGHTS: readonly ListingSettingsRightName[] = ["policies", "shipping", "shelfPick", "shelfNone", "shipFrom", "ebayCategory"];
