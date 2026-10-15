@@ -1,4 +1,7 @@
-import type { OrderEditFinancials } from "@shared/order-edits/order-edit-financials";
+import type {
+  OrderEditFinancials,
+  OrderEditPricingDisplayVersion,
+} from "@shared/order-edits/order-edit-financials";
 
 type FinancialResponse = {
   financials?:
@@ -10,10 +13,13 @@ type FinancialResponse = {
       };
 };
 
-function legacyFinancials(
+function presentedFinancials(
   financials: OrderEditFinancials,
+  version: OrderEditPricingDisplayVersion | undefined,
 ): OrderEditFinancials {
-  const { orderDiscounts: _discounts, ...legacy } = financials;
+  const { taxLines: _taxLines, ...v1 } = financials;
+  if (version === "v1") return v1;
+  const { orderDiscounts: _discounts, ...legacy } = v1;
   return {
     ...legacy,
     lines: legacy.lines.map(({ productNetCents: _subtotal, ...line }) => line),
@@ -23,19 +29,19 @@ function legacyFinancials(
 /** Old tabs use strict schemas. Project only the API response, never financial evidence. */
 export function orderEditResponsePresentation<T extends FinancialResponse>(
   response: T,
-  enabled: boolean,
+  version: OrderEditPricingDisplayVersion | undefined,
 ): T {
-  if (enabled || !response.financials) return response;
+  if (version === "v2" || !response.financials) return response;
   const financials = response.financials;
   return {
     ...response,
     financials:
       "itemsNetCents" in financials
-        ? legacyFinancials(financials)
+        ? presentedFinancials(financials, version)
         : {
-            before: financials.before && legacyFinancials(financials.before),
-            quoted: financials.quoted && legacyFinancials(financials.quoted),
-            current: financials.current && legacyFinancials(financials.current),
+            before: financials.before && presentedFinancials(financials.before, version),
+            quoted: financials.quoted && presentedFinancials(financials.quoted, version),
+            current: financials.current && presentedFinancials(financials.current, version),
           },
   };
 }

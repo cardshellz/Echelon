@@ -35,6 +35,10 @@ import { supportedVariant, stockAvailable } from "../domain/order-edit-variant";
 import { shopifyOrderEditVariantSchema as VARIANT } from "./shopify-order-edit-variant";
 import { cents } from "./shopify-order-edit-money";
 import {
+  shopifyOrderEditTaxLineSchema,
+  readShopifyOrderEditTaxLines,
+} from "./shopify-order-edit-taxes";
+import {
   MAX_ORDER_EDIT_CODES,
   orderEditRequestedCodesSchema,
   type OrderEditCodePricing,
@@ -172,6 +176,7 @@ const ORDER = z.object({
   currentShippingPriceSet: BAG,
   currentSubtotalPriceSet: BAG,
   currentTotalTaxSet: BAG,
+  currentTaxLines: z.array(shopifyOrderEditTaxLineSchema).optional(),
   paymentCollectionDetails: z.object({
     additionalPaymentCollectionUrl: z.string().url().nullable(),
   }),
@@ -269,7 +274,7 @@ const CALCULATED = z.object({
   totalPriceSet: BAG,
   totalOutstandingSet: BAG,
   subtotalPriceSet: BAG.nullable(),
-  taxLines: z.array(z.object({ priceSet: BAG })),
+  taxLines: z.array(shopifyOrderEditTaxLineSchema),
   shippingLines: z.array(
     z.object({
       id: z.string().nullable(),
@@ -594,7 +599,7 @@ export class ShopifyOrderEditProvider
         "ORDER_EDIT_PREVIEW_UNAVAILABLE",
         "The shipping calculator does not support background totals.",
       );
-    const { shippingRepricing, taxCents, totalCents } =
+    const { shippingRepricing, taxCents, taxLines, totalCents } =
       await this.shippingCalculator.calculatePreview(
         context.snapshot,
         previewLines.map((line) => ({
@@ -616,6 +621,7 @@ export class ShopifyOrderEditProvider
       shippingCents: shippingRepricing.netCents,
       shippingDiscountLabels: shippingRepricing.discountLabels,
       taxCents,
+      ...(taxLines === undefined ? {} : { taxLines }),
       taxesIncluded: context.snapshot.financials!.taxesIncluded,
       totalCents,
     });
@@ -3095,6 +3101,9 @@ function readOrderFinancials(
       .filter((entry) => entry.targetType === "SHIPPING_LINE")
       .map((entry) => entry.code ?? entry.title ?? "Shipping discount"),
     taxCents: money(order.currentTotalTaxSet),
+    ...(order.currentTaxLines === undefined
+      ? {}
+      : { taxLines: readShopifyOrderEditTaxLines(order.currentTaxLines) }),
     taxesIncluded: order.taxesIncluded,
     totalCents: money(order.currentTotalPriceSet),
   });
@@ -3106,8 +3115,9 @@ function sameFinancialEvidence(
 ): boolean {
   if (!expected) return false;
   // Calculated and original line IDs differ; compare allocations separately through their proven lineage.
-  const { lines: actualLines, ...actualTotals } = actual;
-  const { lines: expectedLines, ...expectedTotals } = expected;
+  // Tax metadata does not change the legacy monetary recovery proof.
+  const { lines: actualLines, taxLines: _actualRates, ...actualTotals } = actual;
+  const { lines: expectedLines, taxLines: _expectedRates, ...expectedTotals } = expected;
   if (!expected.itemDiscounts) delete actualTotals.itemDiscounts;
   return canonicalJson(actualTotals) === canonicalJson(expectedTotals);
 }
@@ -3597,6 +3607,7 @@ function verifyCalculatedFinancials(
     shippingCents: shipping.netCents,
     shippingDiscountLabels: [...shipping.discountLabels],
     taxCents: sum(calculated.taxLines.map((line) => money(line.priceSet))),
+    taxLines: readShopifyOrderEditTaxLines(calculated.taxLines),
     taxesIncluded: baseline.financials.taxesIncluded,
     totalCents: money(calculated.totalPriceSet),
   });
