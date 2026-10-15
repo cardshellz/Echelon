@@ -16,6 +16,7 @@ import { MAX_NAMED_CATALOG_GROUP_ITEMS } from "@shared/dropship/catalog-scope";
 import type { ConnectionBanner, ListingSettingsReadState, ListingSettingsRightReason } from "./dropship-listing-settings-access";
 import { LISTING_SETUP_RELOAD_MESSAGE } from "./dropship-ebay-listing-setup";
 import { listingAccessLink, type ListingAccessLink } from "./dropship-listing-access";
+import { displayListingPrice } from "./dropship-listing-price";
 import type {
   DropshipEbayFulfillmentCapability,
   DropshipEbayFulfillmentPolicyOption,
@@ -921,4 +922,103 @@ export function leftOutWords(count: number): string {
  */
 export function bulkConflictWords(conflictCount: number): string {
   return `${TEXT_NUMBER.format(conflictCount)} of the selected products changed in another window.`;
+}
+
+// ---------------------------------------------------------------------------
+// The price check for one or many products (W7 `product_prices`; plan PR 10, 7.4, 7.5, 12.2)
+// ---------------------------------------------------------------------------
+
+/**
+ * Words of the price check for one or many products (PR 10d). Every one is a
+ * proposal (plan 12.2, or "beyond 12.2" where marked), kept here so a later
+ * PR changes it in one place. The check's shared words (title, columns,
+ * "Back to editing", "Save new prices", the stale line R:683) are W1's
+ * `CHECK_NEW_PRICES_WORDS` (dropship-listing-settings-recipe.ts). None names
+ * a code or an id.
+ */
+export const LISTING_SETTINGS_PRICE_CHECK_WORDS = Object.freeze({
+  // Interim (PR 10 PROPOSAL): the price editor's tick box (7.1, 12.2); the apply then releases every chosen size's exact price.
+  clearExactPrices: "Clear exact prices too, so every size uses this price",
+  // Interim (PR 10 PROPOSAL, beyond 12.2): the same choice in a pending line, short.
+  clearExactPricesShort: "Clear exact prices too",
+  // Interim (PR 10 PROPOSAL): the Note of a size whose exact price the apply clears (7.4).
+  exactPriceCleared: "Exact price cleared",
+  // Interim (PR 10 PROPOSAL): a check with no rows (P35; 7.4). Save stays on when a price is sent.
+  noSizes: "No chosen sizes to check.",
+  // Interim (PR 10 PROPOSAL): rows but no price moves, while a price is sent (7.4). Save on.
+  noPriceChanges: "No prices change now. Saving still sets the price.",
+  // Interim (PR 10 PROPOSAL): a release with nothing to release (7.4). Save off.
+  nothingToClear: "No exact prices to clear.",
+  // Interim (PR 10 PROPOSAL): under the refused footer: an exact price for a size is W9's, another draft (D16; 7.4).
+  oneDraft: "To give them an exact price, discard this change first.",
+  // Interim (PR 10 PROPOSAL): the apply found its check already applied under another key (409 IDEMPOTENCY_CONFLICT; 7.5, CC-C8).
+  alreadySaved: "This check was already saved. Here's a new check.",
+  // Interim (PR 10 PROPOSAL, beyond 12.2): the apply found no such check (404; 7.5): the new check says so once.
+  expired: "This check expired. Here's a new check.",
+  // Interim (PR 10 PROPOSAL): 422 TOO_LARGE with no reason on the check (P35; 7.5, D8).
+  tooManySizes: "This check covers more than 10,000 sizes. Choose fewer products.",
+  // Interim (PR 10 PROPOSAL): 422 BULK_TOO_LARGE on the check or the apply (plan 9.7's memory rule; 7.5, CC-C10).
+  tooHeavy: "This check is too big to save at once. Choose fewer products.",
+  // Interim (PR 10 PROPOSAL, beyond 12.2): the drawer's PRICE head button that opens the price editor (7.2).
+  changePrice: "Change price",
+  // Interim (PR 10 PROPOSAL, beyond 12.2): the check body's head: what is being checked.
+  checking: "Checking",
+  // Built from (7.4, 12.2): the level that prices a size, by the row's `ruleLevel`, then its `ruleName`.
+  thisProductPrice: "This product's price",
+  categoryPrice: "Category price",
+  storeDefault: "Store default",
+  retailNoPrice: "Retail price (no price set)",
+  exactKept: "Exact price kept",
+} as const);
+
+/** "Older group rule “Envelopes”": a W7 row priced by an older group rule (7.4). Interim (PR 10 PROPOSAL). */
+export function olderGroupRuleWords(name: string): string {
+  return `Older group rule “${name.trim()}”`;
+}
+
+/**
+ * "from retail $12.50" / "from your cost $2.10": what a W7 row's new price
+ * starts from (its `basis` and `basisCents`, 7.4); without the amount "from
+ * retail"; null without a basis. Interim (PR 10 PROPOSAL).
+ */
+export function builtFromStartWords(basis: "catalog_retail" | "product_cost" | null | undefined, basisCents: number | null | undefined): string | null {
+  if (basis !== "catalog_retail" && basis !== "product_cost") return null;
+  const start = basis === "catalog_retail" ? "retail" : "your cost";
+  return basisCents == null ? `from ${start}` : `from ${start} ${displayListingPrice(basisCents)}`;
+}
+
+function sizesWord(count: number): string {
+  return count === 1 ? "size" : "sizes";
+}
+
+/** "36 lose their exact price" / "1 loses its exact price": the counts line (7.4). Interim (PR 10 PROPOSAL). */
+export function loseExactPriceWords(count: number): string {
+  return count === 1 ? "1 loses its exact price" : `${TEXT_NUMBER.format(count)} lose their exact price`;
+}
+
+/** "3 would lose their price" / "1 would lose its price": the counts line (7.4). Interim (PR 10 PROPOSAL). */
+export function wouldLosePriceCountWords(count: number): string {
+  return count === 1 ? "1 would lose its price" : `${TEXT_NUMBER.format(count)} would lose their price`;
+}
+
+/**
+ * The refused footer when the check sends no recipe (Use default, or a
+ * release alone), and the apply's own 422 WOULD_BE_LOST (7.4, 7.5): "● 3
+ * sizes would be left without a price. Give them an exact price in Products
+ * first." Interim (PR 10 PROPOSAL).
+ */
+export function wouldBeLeftWithoutPriceWords(count: number): string {
+  const sizes = `${TEXT_NUMBER.format(count)} ${sizesWord(count)}`;
+  return count === 1
+    ? `● ${sizes} would be left without a price. Give it an exact price in Products first.`
+    : `● ${sizes} would be left without a price. Give them an exact price in Products first.`;
+}
+
+/**
+ * 422 PRICE_RELEASE_LIMIT (7.5, CC-C9), from the answer's `maxReleases` and
+ * `releaseCount`: "You can clear up to 200 exact prices at once. This would
+ * clear 236. Choose fewer products." Interim (PR 10 PROPOSAL).
+ */
+export function releaseLimitWords(maxReleases: number, releaseCount: number): string {
+  return `You can clear up to ${TEXT_NUMBER.format(maxReleases)} exact prices at once. This would clear ${TEXT_NUMBER.format(releaseCount)}. Choose fewer products.`;
 }

@@ -108,6 +108,23 @@ export function escapeRegExp(text: string): string {
   return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
+/**
+ * Answers the next GET of `pathname` (the full path, no query) with a 500 once `armed()` says so, once; every other
+ * request goes to the stub. The failed read never reaches the stub, so `state.reads` doesn't list it. Moved from the
+ * drawer spec (10a) so the bulk spec can fail a list read the same way (10d).
+ */
+export async function failNextRead(page: Page, pathname: string, armed: () => boolean) {
+  let failed = false;
+  await page.route((url) => url.pathname === pathname, async (route) => {
+    if (!failed && route.request().method() === "GET" && armed()) {
+      failed = true;
+      await route.fulfill({ status: 500, json: { error: { code: "DROPSHIP_LISTING_SETTINGS_INTERNAL_ERROR", message: "Read failed." } } });
+      return;
+    }
+    await route.fallback();
+  });
+}
+
 /** Opens the product's drawer from the Products tab: the name on a wide screen, the card on a phone. */
 export async function openProductRow(page: Page, productId: number, name: string) {
   await page.getByTestId(`listing-settings-product-${productId}`).getByRole("button", { name: new RegExp(`^${escapeRegExp(name)}`) }).click();

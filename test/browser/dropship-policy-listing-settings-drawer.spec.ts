@@ -1,9 +1,11 @@
 import { expect, test, type Page } from "@playwright/test";
 import type { CategoryListingSettingValues, ProductListingSettingValues } from "../../shared/dropship/listing-setting-values";
 import type { ListingSettingsSummary } from "../../shared/dropship/listing-settings";
+import { calculateRulePrice, type PricingRecipe } from "../../shared/dropship/pricing-rules";
 import {
   ENVELOPE,
   LAYERED_SAMPLE,
+  SAVED_PRICING_RULES,
   STUB_PRODUCT_CATALOG_HASH,
   TOPLOADERS,
   categoryKey,
@@ -14,6 +16,7 @@ import {
   productKey,
   shot,
   sizeKey,
+  type ProductFixture,
   type StoreShelfFixture,
   type StubState,
   type WriteAnswer,
@@ -31,6 +34,7 @@ import {
   expectNoHorizontalScroll,
   expectNothingUnexpected,
   expectSheetLayout,
+  failNextRead,
   openProductRow,
   openStep,
   phone,
@@ -49,6 +53,12 @@ test.use({ serviceWorkers: "allow" });
  * button, and own text Card Shellz changed under is checked. Every save is checked against the
  * shared contract by the stub (ids and text only, compare-and-set on the product's revision,
  * keyed), and every journey ends with nothing unexpected asked and no page error. Desktop and phone.
+ *
+ * From 10d (plan 7.7) the product's price: [Change price] in the PRICE head, the check whose rows
+ * replace the drawer's body (W7, every price the server's), and Save new prices; Use default; a
+ * price another window saved before the check (D6a); Clear exact prices too and a size that would
+ * lose its price; prices moved under the apply; page 2; a dropped apply; Back while unconfirmed; a check the server
+ * dropped while its apply was unconfirmed; an apply refused for sizes that would lose their price.
  */
 
 const PRODUCT_PATH = `${LISTINGS}/listing-settings/products/${ENVELOPE.productId}`;
@@ -124,22 +134,6 @@ async function pick(page: Page, key: PolicyRow, name: string) {
   await policyRadio(page, key, name).check();
   await fieldEditor(page, key).getByRole("button", { name: "Done" }).click();
   await expect(fieldEditor(page, key)).toHaveCount(0);
-}
-
-/**
- * Answers the next GET of `path` with a 500 once `armed()` says so, once; every other request goes
- * to the stub. The failed read never reaches the stub, so `state.reads` doesn't list it.
- */
-async function failNextRead(page: Page, path: string, armed: () => boolean) {
-  let failed = false;
-  await page.route(`**${path}`, async (route) => {
-    if (!failed && route.request().method() === "GET" && armed()) {
-      failed = true;
-      await route.fulfill({ status: 500, json: { error: { code: "DROPSHIP_LISTING_SETTINGS_INTERNAL_ERROR", message: "Read failed." } } });
-      return;
-    }
-    await route.fallback();
-  });
 }
 
 /** The reads after the n-th request, by method and path. */
@@ -818,5 +812,476 @@ test("text over its limit is caught before anything is sent, and the store's tex
   await expect(settingRow(page, "descriptionTemplate")).toContainText("→ Text above: your own · Not saved");
   expect(state.productSettingsWrites).toEqual([{ method: "PUT", path: PRODUCT_PATH,
     body: { idempotencyKey: KEY("ls-product"), expectedRevisionId: null, patch: { textAbove: { mode: "own", text: "Ships in a rigid mailer." } } } }]);
+  expectNothingUnexpected(state);
+});
+
+// ---------------------------------------------------------------------------
+// 10d: the product's price through the price check (W7; plan 7.2-7.7, D1, D2, D6a, D20, D21)
+// ---------------------------------------------------------------------------
+
+const REVIEW_PATH = `${LISTINGS}/listing-settings/price-changes/review`;
+const APPLY_PATH = `${LISTINGS}/listing-settings/price-changes/apply`;
+const RETAIL_20: PricingRecipe = { basis: "catalog_retail", markupBps: 2_000, flatCents: 0, rounding: "cent" };
+const COST_35: PricingRecipe = { basis: "product_cost", markupBps: 3_500, flatCents: 0, rounding: "cent" };
+
+/** "$8.39" from integer cents (never floating point). */
+function dollars(cents: number | null): string {
+  if (cents === null) throw new Error("The resolver gave no price.");
+  return `$${Math.floor(cents / 100)}.${String(cents % 100).padStart(2, "0")}`;
+}
+
+/** The price the shared resolver gives a size for `recipe` (the stub prices with the same call, D1). */
+function rulePrice(recipe: PricingRecipe, retailCents: number): string {
+  return dollars(calculateRulePrice(recipe, retailCents).priceCents);
+}
+
+function pagePath(reviewId: string): string {
+  return `${LISTINGS}/listing-settings/price-changes/reviews/${reviewId}`;
+}
+
+function changePrice(page: Page, productName = ENVELOPE.productName) {
+  return drawer(page).getByRole("button", { name: `Change price for ${productName}`, exact: true });
+}
+
+function priceEditor(page: Page) {
+  return drawer(page).getByTestId("drawer-field-editor-price");
+}
+
+function check(page: Page) {
+  return page.getByTestId("price-check");
+}
+
+function checkFooter(page: Page) {
+  return page.getByTestId("price-check-footer");
+}
+
+function checkSize(page: Page, productVariantId: number) {
+  return check(page).getByTestId(`price-check-size-${productVariantId}`);
+}
+
+function priceHead(page: Page) {
+  return drawer(page).getByTestId("drawer-price-head");
+}
+
+/** Opens the price editor, picks Set price and types `percent` into Add (the fields are W1's). */
+async function setPricePercent(page: Page, percent: string, productName = ENVELOPE.productName) {
+  await changePrice(page, productName).click();
+  await expect(priceEditor(page)).toBeVisible();
+  await priceEditor(page).getByRole("radio", { name: "Set price" }).check();
+  await priceEditor(page).getByRole("textbox", { name: "Add" }).fill(percent);
+}
+
+/** Product 11 with its own price at revision 7 (a new object for each journey). */
+function ownPrice(recipe: PricingRecipe): StubState["productSettings"] {
+  return { [productKey(STORE, ENVELOPE.productId)]: { revisionId: 7, values: { ...NO_VALUES, price: recipe } } };
+}
+
+/** A product of `count` sizes, ids 501 on, each with a retail price, for a check of more than one page. */
+function manySizes(count: number): ProductFixture {
+  return { productId: 41, productName: "Team Bags", productSku: "TB", category: "Bags",
+    sizes: Array.from({ length: count }, (_, index) => ({ productVariantId: 501 + index, sizeName: `Pack of ${index + 1}`, sku: `TB-${index + 1}`,
+      retailCents: 1_000 + index, costCents: 500, stockUnits: 3 })) };
+}
+
+/** A product whose second size has no retail price and an exact one: a retail-based price can't price it without the exact price. */
+const GRADED_CASE: ProductFixture = { productId: 31, productName: "Graded Card Case", productSku: "GCC", category: "Cases",
+  sizes: [
+    { productVariantId: 401, sizeName: "Single", sku: "GCC-1", retailCents: 399, costCents: 210, stockUnits: 8 },
+    { productVariantId: 402, sizeName: "Bundle", sku: "GCC-B", retailCents: null, costCents: 300, stockUnits: 2 },
+  ] };
+
+test("the product's price is set in the drawer, checked against the server's rows, and saved only after the check (D1, D6a)", async ({ page }, testInfo) => {
+  const state = await openStep(page, { pricingRules: { [STORE]: SAVED_PRICING_RULES } }, `${SETUP_PATH}?product=11`);
+  await expect(priceHead(page)).toHaveText("Store default: Retail price + 15%, to the cent");
+  const now = rulePrice(SAVED_PRICING_RULES.profile!.defaultRecipe, 699);
+  await expect(drawer(page).getByTestId("drawer-size-101")).toContainText(now);
+  await expect(changePrice(page)).toBeEnabled();
+
+  // The editor opens on Use default (the product has no price of its own), with Clear exact prices too unticked.
+  await changePrice(page).click();
+  await expect(changePrice(page)).toHaveAttribute("aria-expanded", "true");
+  await expect(priceEditor(page).getByRole("radio", { name: "Use default" })).toBeChecked();
+  await expect(priceEditor(page).getByRole("checkbox", { name: /^Clear exact prices too/ })).not.toBeChecked();
+  // Esc closes the editor, not the drawer, and focus goes back to Change price (plan 3.4).
+  await page.keyboard.press("Escape");
+  await expect(priceEditor(page)).toHaveCount(0);
+  await expect(drawer(page)).toBeVisible();
+  await expect(changePrice(page)).toBeFocused();
+  await expect(bar(page)).toHaveText("All saved");
+
+  await setPricePercent(page, "20");
+  // Set price shows the store price's fields to start from: the rounding is the store's.
+  await expect(priceEditor(page).getByRole("combobox", { name: "Round" })).toHaveValue("cent");
+  const pressedAt = state.reads.length;
+  await priceEditor(page).getByRole("button", { name: "Check new prices" }).click();
+
+  // The check replaces the drawer's body (D20) and takes focus (plan 3.4): one review, sent only after the own read
+  // was read again, between the press and the POST (D6a).
+  await expect(check(page)).toBeVisible();
+  await expect(check(page)).toBeFocused();
+  await expect(priceEditor(page)).toHaveCount(0);
+  await expect(drawer(page).getByTestId("drawer-settings")).toHaveCount(0);
+  expect(state.priceChangeReviews).toEqual([{ method: "POST", path: REVIEW_PATH,
+    body: { kind: "product_prices", productIds: [ENVELOPE.productId], price: RETAIL_20 } }]);
+  const reviewAt = state.reads.findIndex((read) => read.method === "POST" && read.path === REVIEW_PATH);
+  expect(reviewAt).toBeGreaterThanOrEqual(pressedAt);
+  expect(state.reads.slice(pressedAt, reviewAt).some((read) => read.method === "GET" && read.path === OWN_PATH)).toBe(true);
+  await expect(check(page).getByTestId("price-check-head")).toHaveText("Checking: Retail price + 20%, to the cent · Not saved yet");
+  await expect(check(page).getByTestId("price-check-counts")).toHaveText("1 size · 1 change");
+  const next = rulePrice(RETAIL_20, 699);
+  await expect(checkSize(page, 101)).toContainText("This product's price, from retail $6.99");
+  await expect(checkSize(page, 101)).toContainText(now);
+  await expect(checkSize(page, 101)).toContainText(next);
+  await expect(checkFooter(page)).toContainText(phone(testInfo) ? "Nothing is saved yet." : "Nothing is saved until you press Save new prices.");
+  await expect(bar(page)).toHaveText(`Not saved · 1 change in ${ENVELOPE.productName}`);
+  expect(state.priceChangeApplies).toEqual([]);
+  await shot(page, testInfo, "listing-settings-drawer-price-check");
+
+  await checkFooter(page).getByRole("button", { name: "Save new prices" }).click();
+  await expect(check(page)).toHaveCount(0);
+  await expect(footer(page)).toContainText("Saved");
+  const [held] = Object.values(state.priceChangeChecks);
+  expect(state.priceChangeApplies).toEqual([{ method: "POST", path: APPLY_PATH,
+    body: { reviewId: held.reviewId, reviewHash: held.reviewHash, idempotencyKey: KEY("ls-price-check") } }]);
+  // D9: the product, its own read, the lists and the summary are read again after the POST; its answer is not shown.
+  const postAt = state.reads.findIndex((read) => read.method === "POST" && read.path === APPLY_PATH);
+  await expect.poll(() => readsAfter(state, postAt, "GET", PRODUCT_PATH)).toBeGreaterThanOrEqual(1);
+  await expect.poll(() => readsAfter(state, postAt, "GET", OWN_PATH)).toBeGreaterThanOrEqual(1);
+  await expect.poll(() => readsAfter(state, postAt, "GET", `${LISTINGS}/listing-settings/products`)).toBeGreaterThanOrEqual(1);
+  await expect(priceHead(page)).toHaveText("This product: Retail price + 20%, to the cent");
+  await expect(drawer(page).getByTestId("drawer-size-101")).toContainText(next);
+  await expect(bar(page)).toHaveText("All saved");
+  expect(state.productSettings[productKey(STORE, ENVELOPE.productId)].values.price).toEqual(RETAIL_20);
+  // Nothing the client worked out was sent: no price of a size, no revision, in either request (the recipe's own fields only).
+  for (const write of [...state.priceChangeReviews, ...state.priceChangeApplies]) expect(JSON.stringify(write.body)).not.toMatch(/priceCents|expectedPrice|revision/i);
+  expectNothingUnexpected(state);
+});
+
+test("Use default sets a product's own price back, sent as null, and the head then reads Store default; the product's own recipe again is nothing to check", async ({ page }) => {
+  const state = await openStep(page, { pricingRules: { [STORE]: SAVED_PRICING_RULES }, productSettings: ownPrice(RETAIL_20) }, `${SETUP_PATH}?product=11`);
+  await expect(priceHead(page)).toHaveText("This product: Retail price + 20%, to the cent");
+  await changePrice(page).click();
+  // The editor opens on the product's own price; checking that again is nothing to check: the editor closes, nothing is sent.
+  await expect(priceEditor(page).getByRole("radio", { name: "Set price" })).toBeChecked();
+  await expect(priceEditor(page).getByRole("textbox", { name: "Add" })).toHaveValue("20");
+  await priceEditor(page).getByRole("button", { name: "Check new prices" }).click();
+  await expect(priceEditor(page)).toHaveCount(0);
+  await expect(changePrice(page)).toBeFocused();
+  await expect(bar(page)).toHaveText("All saved");
+  expect(state.priceChangeReviews).toEqual([]);
+
+  await changePrice(page).click();
+  await priceEditor(page).getByRole("radio", { name: "Use default" }).check();
+  await priceEditor(page).getByRole("button", { name: "Check new prices" }).click();
+  await expect(check(page)).toBeVisible();
+  expect(state.priceChangeReviews).toEqual([{ method: "POST", path: REVIEW_PATH, body: { kind: "product_prices", productIds: [ENVELOPE.productId], price: null } }]);
+  await expect(check(page).getByTestId("price-check-head")).toHaveText("Checking: Use default · Not saved yet");
+  await expect(checkSize(page, 101)).toContainText("Store default, from retail $6.99");
+  await expect(checkSize(page, 101)).toContainText(rulePrice(SAVED_PRICING_RULES.profile!.defaultRecipe, 699));
+
+  // Back to editing, then the product's own recipe typed back: the change is undone (All saved), the editor closes, no second check.
+  await checkFooter(page).getByRole("button", { name: /^Back( to editing)?$/ }).click();
+  await expect(priceEditor(page)).toBeVisible();
+  await priceEditor(page).getByRole("radio", { name: "Set price" }).check();
+  await priceEditor(page).getByRole("textbox", { name: "Add" }).fill("20");
+  await priceEditor(page).getByRole("button", { name: "Check new prices" }).click();
+  await expect(priceEditor(page)).toHaveCount(0);
+  await expect(check(page)).toHaveCount(0);
+  await expect(bar(page)).toHaveText("All saved");
+  await expect(footer(page)).not.toContainText("couldn't be built");
+  expect(state.priceChangeReviews).toHaveLength(1);
+
+  // Use default once more, checked and saved.
+  await changePrice(page).click();
+  await priceEditor(page).getByRole("radio", { name: "Use default" }).check();
+  await priceEditor(page).getByRole("button", { name: "Check new prices" }).click();
+  await expect(check(page)).toBeVisible();
+  expect(state.priceChangeReviews).toHaveLength(2);
+  await checkFooter(page).getByRole("button", { name: "Save new prices" }).click();
+  await expect(footer(page)).toContainText("Saved");
+  expect(state.priceChangeApplies).toHaveLength(1);
+  expect(state.productSettings[productKey(STORE, ENVELOPE.productId)].values.price).toBeNull();
+  await expect(priceHead(page)).toHaveText("Store default: Retail price + 15%, to the cent");
+  expectNothingUnexpected(state);
+});
+
+test("a price another window saved before the check is a conflict, nothing sent; Load latest keeps the change and checks it (D6a)", async ({ page }) => {
+  const state = await openStep(page, { pricingRules: { [STORE]: SAVED_PRICING_RULES } }, `${SETUP_PATH}?product=11`);
+  await setPricePercent(page, "20");
+  // Another window saves this product's price after the drawer read it.
+  state.productSettings[productKey(STORE, ENVELOPE.productId)] = { revisionId: 60, values: { ...NO_VALUES, price: COST_35 } };
+  await priceEditor(page).getByRole("button", { name: "Check new prices" }).click();
+  await expect(footer(page)).toContainText("This changed in another window.");
+  await expect(check(page)).toHaveCount(0);
+  expect(state.priceChangeReviews).toEqual([]);
+  expect(state.priceChangeApplies).toEqual([]);
+
+  await footer(page).getByRole("button", { name: "Load latest and keep my changes" }).click();
+  await expect(footer(page)).toContainText("Here's what's saved now. Your changes are on top; fields you both changed are marked.");
+  await expect(priceHead(page)).toHaveText("This product: Your cost + 35%, to the cent");
+  await expect(bar(page)).toHaveText(`Not saved · 1 change in ${ENVELOPE.productName}`);
+  // The change is kept with no check: the footer's button checks it against what is saved now.
+  await footer(page).getByRole("button", { name: "Check new prices" }).click();
+  await expect(check(page)).toBeVisible();
+  expect(state.priceChangeReviews).toHaveLength(1);
+  await expect(checkSize(page, 101)).toContainText("This product's price, from retail $6.99");
+  await checkFooter(page).getByRole("button", { name: "Save new prices" }).click();
+  await expect(footer(page)).toContainText("Saved");
+  expect(state.priceChangeApplies).toHaveLength(1);
+  expect(state.productSettings[productKey(STORE, ENVELOPE.productId)].values.price).toEqual(RETAIL_20);
+  expectNothingUnexpected(state);
+});
+
+test("a size that would lose its price keeps Save off and says why; without clearing its exact price the check saves", async ({ page }) => {
+  const state = await openStep(page, { catalog: [ENVELOPE, GRADED_CASE], pricingRules: { [STORE]: SAVED_PRICING_RULES },
+    sizePrices: { [sizeKey(STORE, 402)]: { revisionId: 32, pricingMode: "fixed", overridePriceCents: 899 } } }, `${SETUP_PATH}?product=31`);
+  await setPricePercent(page, "20", GRADED_CASE.productName);
+  await priceEditor(page).getByRole("checkbox", { name: /^Clear exact prices too/ }).check();
+  await priceEditor(page).getByRole("button", { name: "Check new prices" }).click();
+  await expect(check(page)).toBeVisible();
+  expect(state.priceChangeReviews).toEqual([{ method: "POST", path: REVIEW_PATH,
+    body: { kind: "product_prices", productIds: [GRADED_CASE.productId], price: RETAIL_20, releaseExactPrices: true } }]);
+  await expect(check(page).getByTestId("price-check-counts")).toHaveText("2 sizes · 2 change · 1 loses its exact price · 1 would lose its price");
+  await expect(checkSize(page, 401)).toContainText(rulePrice(RETAIL_20, 399));
+  await expect(checkSize(page, 402)).toContainText("$8.99");
+  await expect(checkSize(page, 402)).toContainText("● Loses its price");
+  await expect(checkFooter(page)).toContainText("● 1 size can't be priced this way. Give it an exact price in Products, or start from Your cost.");
+  await expect(checkFooter(page)).toContainText("To give them an exact price, discard this change first.");
+  await expect(checkFooter(page).getByRole("button", { name: "Save new prices" })).toBeDisabled();
+  expect(state.priceChangeApplies).toEqual([]);
+
+  // Back to editing: the editor opens on the change; the exact price is kept this time.
+  await checkFooter(page).getByRole("button", { name: /^Back( to editing)?$/ }).click();
+  await expect(check(page)).toHaveCount(0);
+  await expect(priceEditor(page)).toBeVisible();
+  await expect(priceEditor(page).getByRole("textbox", { name: "Add" })).toHaveValue("20");
+  await expect(priceEditor(page).getByRole("checkbox", { name: /^Clear exact prices too/ })).toBeChecked();
+  await priceEditor(page).getByRole("checkbox", { name: /^Clear exact prices too/ }).uncheck();
+  await priceEditor(page).getByRole("button", { name: "Check new prices" }).click();
+  await expect(check(page)).toBeVisible();
+  expect(state.priceChangeReviews).toHaveLength(2);
+  expect(state.priceChangeReviews[1].body).toEqual({ kind: "product_prices", productIds: [GRADED_CASE.productId], price: RETAIL_20 });
+  await expect(check(page).getByTestId("price-check-counts")).toHaveText("2 sizes · 1 change");
+  await expect(checkSize(page, 402)).toContainText("Exact price kept");
+  await expect(checkSize(page, 402)).not.toContainText("Loses its price");
+  await checkFooter(page).getByRole("button", { name: "Save new prices" }).click();
+  await expect(footer(page)).toContainText("Saved");
+  expect(state.priceChangeApplies).toHaveLength(1);
+  expect(state.productSettings[productKey(STORE, GRADED_CASE.productId)].values.price).toEqual(RETAIL_20);
+  expect(state.sizePrices[sizeKey(STORE, 402)]).toMatchObject({ pricingMode: "fixed", overridePriceCents: 899 });
+  expectNothingUnexpected(state);
+});
+
+test("prices that moved under the apply give a new check with the stale line, never a re-apply; the new check saves with its own key", async ({ page }) => {
+  const state = await openStep(page, { pricingRules: { [STORE]: SAVED_PRICING_RULES } }, `${SETUP_PATH}?product=11`);
+  await setPricePercent(page, "20");
+  await priceEditor(page).getByRole("button", { name: "Check new prices" }).click();
+  await expect(check(page)).toBeVisible();
+  // Another window gives the size an exact price while the check is on screen: the apply's recompute differs.
+  state.sizePrices[sizeKey(STORE, 101)] = { revisionId: 50, pricingMode: "fixed", overridePriceCents: 777 };
+  await checkFooter(page).getByRole("button", { name: "Save new prices" }).click();
+  await expect(check(page)).toContainText("Prices changed while you were checking. Here's the new check.");
+  expect(state.priceChangeApplies).toHaveLength(1);
+  expect(state.priceChangeReviews).toHaveLength(2);
+  expect(state.priceChangeReviews[1].body).toEqual(state.priceChangeReviews[0].body);
+  // D6a again: the own read is read between the refused apply and the new review, before the re-check is sent.
+  const applyAt = state.reads.findIndex((read) => read.method === "POST" && read.path === APPLY_PATH);
+  const recheckAt = state.reads.findIndex((read, index) => index > applyAt && read.method === "POST" && read.path === REVIEW_PATH);
+  expect(recheckAt).toBeGreaterThan(applyAt);
+  expect(state.reads.slice(applyAt + 1, recheckAt).some((read) => read.method === "GET" && read.path === OWN_PATH)).toBe(true);
+  await expect(checkSize(page, 101)).toContainText("Exact price kept");
+  await expect(checkSize(page, 101)).toContainText("$7.77");
+  await expect(check(page).getByTestId("price-check-counts")).toHaveText("1 size · no price changes");
+  await expect(checkFooter(page)).toContainText("No prices change now. Saving still sets the price.");
+  await expect(checkFooter(page).getByRole("button", { name: "Save new prices" })).toBeEnabled();
+
+  await checkFooter(page).getByRole("button", { name: "Save new prices" }).click();
+  await expect(footer(page)).toContainText("Saved");
+  expect(state.priceChangeApplies).toHaveLength(2);
+  expect(state.priceChangeApplies[1].body.reviewId).not.toBe(state.priceChangeApplies[0].body.reviewId);
+  expect(state.priceChangeApplies[1].body.idempotencyKey).not.toBe(state.priceChangeApplies[0].body.idempotencyKey);
+  expect(state.productSettings[productKey(STORE, ENVELOPE.productId)].values.price).toEqual(RETAIL_20);
+  expect(state.sizePrices[sizeKey(STORE, 101)]).toMatchObject({ pricingMode: "fixed", overridePriceCents: 777 });
+  expectNothingUnexpected(state);
+});
+
+test("a check of more than 50 sizes pages through the same review, and saves", async ({ page }) => {
+  const product = manySizes(60);
+  const state = await openStep(page, { catalog: [ENVELOPE, product], pricingRules: { [STORE]: SAVED_PRICING_RULES } }, `${SETUP_PATH}?product=${product.productId}`);
+  await setPricePercent(page, "20", product.productName);
+  await priceEditor(page).getByRole("button", { name: "Check new prices" }).click();
+  await expect(check(page)).toBeVisible();
+  await expect(check(page).getByTestId("price-check-counts")).toHaveText("60 sizes · 60 change");
+  await expect(check(page).getByTestId("price-check-pages")).toHaveText("1–50 of 60");
+  await expect(checkSize(page, 501)).toBeVisible();
+  await expect(checkSize(page, 560)).toHaveCount(0);
+  const [held] = Object.values(state.priceChangeChecks);
+  await check(page).getByRole("button", { name: "Next" }).click();
+  await expect(check(page).getByTestId("price-check-pages")).toHaveText("51–60 of 60");
+  await expect(checkSize(page, 560)).toContainText(rulePrice(RETAIL_20, 1_059));
+  await expect(checkSize(page, 501)).toHaveCount(0);
+  expect(state.reads.filter((read) => read.method === "GET" && read.path === pagePath(held.reviewId)).map((read) => read.search)).toEqual(["?page=1"]);
+  await check(page).getByRole("button", { name: "Previous" }).click();
+  await expect(check(page).getByTestId("price-check-pages")).toHaveText("1–50 of 60");
+  await checkFooter(page).getByRole("button", { name: "Save new prices" }).click();
+  await expect(footer(page)).toContainText("Saved");
+  expect(state.priceChangeApplies).toEqual([{ method: "POST", path: APPLY_PATH,
+    body: { reviewId: held.reviewId, reviewHash: held.reviewHash, idempotencyKey: KEY("ls-price-check") } }]);
+  expectNothingUnexpected(state);
+});
+
+test("an apply whose answer was lost is checked again with the same key and body, with Esc keeping the drawer open meanwhile", async ({ page }) => {
+  const state = await openStep(page, { pricingRules: { [STORE]: SAVED_PRICING_RULES }, priceChangeApplyAnswers: ["drop"] }, `${SETUP_PATH}?product=11`);
+  await setPricePercent(page, "20");
+  await priceEditor(page).getByRole("button", { name: "Check new prices" }).click();
+  await checkFooter(page).getByRole("button", { name: "Save new prices" }).click();
+  await expect(checkFooter(page)).toContainText("We couldn't confirm your save.");
+  await expect(checkFooter(page)).not.toContainText("Nothing was saved");
+  // Esc keeps the drawer, and the check, open while nobody could confirm the save (plan 3.4).
+  await page.keyboard.press("Escape");
+  await expect(drawer(page)).toBeVisible();
+  await expect(check(page)).toBeVisible();
+  await checkFooter(page).getByRole("button", { name: "Check again" }).click();
+  await expect(check(page)).toHaveCount(0);
+  await expect(footer(page)).toContainText("Saved");
+  expect(state.priceChangeApplies).toHaveLength(2);
+  expect(state.priceChangeApplies[1].body).toEqual(state.priceChangeApplies[0].body);
+  expect(state.priceChangeApplies[0].body.idempotencyKey).toEqual(KEY("ls-price-check"));
+  expect(state.productSettings[productKey(STORE, ENVELOPE.productId)].values.price).toEqual(RETAIL_20);
+  expectNothingUnexpected(state);
+});
+
+test("Back while the apply is unconfirmed closes the drawer and keeps it; opening the product again shows the check with Check again (D21)", async ({ page }, testInfo) => {
+  const state = await openStep(page, { pricingRules: { [STORE]: SAVED_PRICING_RULES }, priceChangeApplyAnswers: ["drop"] }, `${SETUP_PATH}?product=11`);
+  await setPricePercent(page, "20");
+  await priceEditor(page).getByRole("button", { name: "Check new prices" }).click();
+  await checkFooter(page).getByRole("button", { name: "Save new prices" }).click();
+  await expect(checkFooter(page)).toContainText("We couldn't confirm your save.");
+  const [held] = Object.values(state.priceChangeChecks);
+  const pageReadsBefore = readsAfter(state, -1, "GET", pagePath(held.reviewId));
+
+  await checkFooter(page).getByRole("button", { name: phone(testInfo) ? "Back" : "Back to editing", exact: true }).click();
+  await expect(drawer(page)).toHaveCount(0);
+  await expect(page).toHaveURL(SETUP_PATH);
+  await expect(bar(page)).toHaveText(`Not saved · 1 change in ${ENVELOPE.productName}`);
+  expect(state.priceChangeApplies).toHaveLength(1);
+
+  // Reopened: the check is rebuilt from the draft's review id and hash, its rows read again, with Check again.
+  await openProductRow(page, ENVELOPE.productId, ENVELOPE.productName);
+  await expect(check(page)).toBeVisible();
+  await expect(check(page)).toHaveAttribute("data-review", held.reviewId);
+  await expect(checkFooter(page)).toContainText("We couldn't confirm your save.");
+  await expect(checkSize(page, 101)).toContainText(rulePrice(RETAIL_20, 699));
+  expect(readsAfter(state, -1, "GET", pagePath(held.reviewId))).toBe(pageReadsBefore + 1);
+  await checkFooter(page).getByRole("button", { name: "Check again" }).click();
+  await expect(footer(page)).toContainText("Saved");
+  expect(state.priceChangeApplies).toHaveLength(2);
+  expect(state.priceChangeApplies[1].body).toEqual(state.priceChangeApplies[0].body);
+  await expect(bar(page)).toHaveText("All saved");
+  expectNothingUnexpected(state);
+});
+
+test("a check the server dropped while its apply was unconfirmed is still checked again from the draft after reopening; the apply's 404 makes the new check (D21)", async ({ page }, testInfo) => {
+  // The first apply is refused as busy with no reason: unconfirmed, same key, nothing recorded by the server.
+  const state = await openStep(page, { pricingRules: { [STORE]: SAVED_PRICING_RULES },
+    priceChangeApplyAnswers: [{ status: 503, code: BUSY, message: "Busy.", context: { retryable: true } }] }, `${SETUP_PATH}?product=11`);
+  await setPricePercent(page, "20");
+  await priceEditor(page).getByRole("button", { name: "Check new prices" }).click();
+  await checkFooter(page).getByRole("button", { name: "Save new prices" }).click();
+  await expect(checkFooter(page)).toContainText("We couldn't confirm your save.");
+  const [held] = Object.values(state.priceChangeChecks);
+  // The server drops the check meanwhile (it expired).
+  delete state.priceChangeChecks[held.reviewId];
+
+  await checkFooter(page).getByRole("button", { name: phone(testInfo) ? "Back" : "Back to editing", exact: true }).click();
+  await expect(drawer(page)).toHaveCount(0);
+  await openProductRow(page, ENVELOPE.productId, ENVELOPE.productName);
+  await expect(check(page)).toBeVisible();
+  // The page read answers 404: the words say so, and Check again is on, rebuilt from the draft's review id and hash alone.
+  await expect(check(page)).toContainText("This price check has expired. Check new prices again.");
+  await expect(check(page)).toHaveAttribute("data-review", held.reviewId);
+  const checkAgain = checkFooter(page).getByRole("button", { name: "Check again" });
+  await expect(checkAgain).toBeEnabled();
+  await checkAgain.click();
+  // The apply's own 404 makes the new check, once, with its line (the own read read again first, D6a); nothing was applied.
+  await expect(check(page)).toContainText("This check expired. Here's a new check.");
+  expect(state.priceChangeApplies).toHaveLength(2);
+  expect(state.priceChangeApplies[1].body).toEqual(state.priceChangeApplies[0].body);
+  expect(state.priceChangeReviews).toHaveLength(2);
+  expect(state.priceChangeReviews[1].body).toEqual(state.priceChangeReviews[0].body);
+  await expect(checkSize(page, 101)).toContainText(rulePrice(RETAIL_20, 699));
+  expect(state.productSettings[productKey(STORE, ENVELOPE.productId)]?.values.price ?? null).toBeNull();
+
+  await checkFooter(page).getByRole("button", { name: "Save new prices" }).click();
+  await expect(footer(page)).toContainText("Saved");
+  expect(state.priceChangeApplies).toHaveLength(3);
+  expect(state.priceChangeApplies[2].body.reviewId).not.toBe(held.reviewId);
+  expect(state.priceChangeApplies[2].body.idempotencyKey).not.toBe(state.priceChangeApplies[0].body.idempotencyKey);
+  expect(state.productSettings[productKey(STORE, ENVELOPE.productId)].values.price).toEqual(RETAIL_20);
+  await expect(bar(page)).toHaveText("All saved");
+  expectNothingUnexpected(state);
+});
+
+test("an apply refused for sizes that would lose their price marks them and keeps Save off, also after Back and reopening; a new check is the way on", async ({ page }) => {
+  const lost: WriteAnswer = { status: 422, code: "DROPSHIP_LISTING_PRICE_WOULD_BE_LOST", message: "Some sizes would lose their price.",
+    context: { storeConnectionId: STORE, sizes: [{ productVariantId: 101 }], sizeCount: 1 } };
+  const state = await openStep(page, { pricingRules: { [STORE]: SAVED_PRICING_RULES }, priceChangeApplyAnswers: [lost] });
+  await openProductRow(page, ENVELOPE.productId, ENVELOPE.productName);
+  await setPricePercent(page, "20");
+  await priceEditor(page).getByRole("button", { name: "Check new prices" }).click();
+  await checkFooter(page).getByRole("button", { name: "Save new prices" }).click();
+  await expect(checkFooter(page)).toContainText("● 1 size would be left without a price. Give it an exact price in Products first.");
+  await expect(checkSize(page, 101)).toContainText("● Loses its price");
+  await expect(checkFooter(page).getByRole("button", { name: "Save new prices" })).toBeDisabled();
+  expect(state.priceChangeApplies).toHaveLength(1);
+  expect(state.priceChangeReviews).toHaveLength(1);
+
+  // Browser Back closes the drawer and keeps the refused check; reopened, it still says why and Save stays off.
+  await page.goBack();
+  await expect(drawer(page)).toHaveCount(0);
+  await expect(page).toHaveURL(SETUP_PATH);
+  await expect(bar(page)).toHaveText(`Not saved · 1 change in ${ENVELOPE.productName}`);
+  await openProductRow(page, ENVELOPE.productId, ENVELOPE.productName);
+  await expect(check(page)).toBeVisible();
+  await expect(checkFooter(page)).toContainText("● 1 size would be left without a price. Give it an exact price in Products first.");
+  await expect(checkFooter(page).getByRole("button", { name: "Save new prices" })).toBeDisabled();
+  expect(state.priceChangeApplies).toHaveLength(1);
+
+  // Back to editing, then a new check: the server's rows decide again, and the new check saves under its own key.
+  await checkFooter(page).getByRole("button", { name: /^Back( to editing)?$/ }).click();
+  await expect(priceEditor(page)).toBeVisible();
+  await priceEditor(page).getByRole("button", { name: "Check new prices" }).click();
+  await expect(check(page)).toBeVisible();
+  expect(state.priceChangeReviews).toHaveLength(2);
+  await expect(checkSize(page, 101)).not.toContainText("Loses its price");
+  await expect(checkFooter(page).getByRole("button", { name: "Save new prices" })).toBeEnabled();
+  await checkFooter(page).getByRole("button", { name: "Save new prices" }).click();
+  await expect(footer(page)).toContainText("Saved");
+  expect(state.priceChangeApplies).toHaveLength(2);
+  expect(state.priceChangeApplies[1].body.idempotencyKey).not.toBe(state.priceChangeApplies[0].body.idempotencyKey);
+  expect(state.productSettings[productKey(STORE, ENVELOPE.productId)].values.price).toEqual(RETAIL_20);
+  expectNothingUnexpected(state);
+});
+
+test("on a phone the price editor opens inside the drawer and the check shows as cards, with Save new prices in view and no sideways scroll", async ({ page }, testInfo) => {
+  test.skip(!phone(testInfo), "The phone layout (below 640 px) only.");
+  const state = await openStep(page, { pricingRules: { [STORE]: SAVED_PRICING_RULES } }, `${SETUP_PATH}?product=11`);
+  await expectSheetLayout(page, testInfo, drawer(page));
+  await setPricePercent(page, "20");
+  // Inline in the drawer: no second sheet opens over it (D20).
+  await expect(page.getByTestId("editor-surface")).toHaveCount(0);
+  await expectNoHorizontalScroll(page);
+  await priceEditor(page).getByRole("button", { name: "Check new prices" }).click();
+  await expect(check(page)).toBeVisible();
+  await expect(check(page).locator("table")).toHaveCount(0);
+  await expect(check(page).locator("li[data-testid^='price-check-size-']")).toHaveCount(1);
+  await expect(checkSize(page, 101)).toContainText(`${rulePrice(SAVED_PRICING_RULES.profile!.defaultRecipe, 699)} → ${rulePrice(RETAIL_20, 699)}`);
+  await expect(checkFooter(page)).toContainText("Nothing is saved yet.");
+  await expectInView(page, checkFooter(page).getByRole("button", { name: "Save new prices" }));
+  await expectNoHorizontalScroll(page);
+  await shot(page, testInfo, "listing-settings-drawer-price-check-phone");
+  await checkFooter(page).getByRole("button", { name: "Save new prices" }).click();
+  await expect(footer(page)).toContainText("Saved");
+  expect(state.priceChangeApplies).toHaveLength(1);
   expectNothingUnexpected(state);
 });

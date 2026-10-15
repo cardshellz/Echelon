@@ -29,6 +29,7 @@ import {
   type WriteFailure,
 } from "./dropship-listing-settings-drafts";
 import { formatCents, percentText, reviewRetailFallbackWords } from "./dropship-listing-settings-price-words";
+import { LISTING_SETTINGS_PRICE_CHECK_WORDS } from "./dropship-listing-settings-words";
 import { listingPriceInput } from "./dropship-listing-price";
 import { fetchJson, postJson, queryErrorMessage, DropshipApiError } from "./dropship-ops-surface";
 import { parseNonnegativeHundredths, SUGGESTED_PRICING_RECIPE } from "./dropship-pricing-rules";
@@ -834,8 +835,12 @@ function ruleStartWords(recipe: PricingRecipe, basis: PricingRecipe["basis"], ba
   return `${start}${amount} + ${percentText(recipe.markupBps)}%${flat}${rounding}`;
 }
 
-/** "Can't price: …" for a size the checked recipe gives no price. The same words as 1A's Built from lines. */
-function cannotPriceWords(row: Pick<PricingImpactRow, "issues" | "basis">): string {
+/**
+ * "Can't price: …" for a size the checked recipe gives no price. The same
+ * words as 1A's Built from lines; the price check for one or many products
+ * (W7, dropship-listing-settings-price-check.ts) reads its rows with them too.
+ */
+export function reviewCannotPriceWords(row: Pick<PricingImpactRow, "issues" | "basis">): string {
   const issues = new Set(row.issues);
   if (issues.has("pricing_basis_unavailable")) {
     if (row.basis === "catalog_retail") return "Can't price: Card Shellz has no retail price for this size";
@@ -855,17 +860,24 @@ function cannotPriceWords(row: Pick<PricingImpactRow, "issues" | "basis">): stri
  * - a size that follows the store's pricing on its retail price because the
  *   checked rules give it no usable price, with why (L1): "Your pricing rules
  *   can't price this size (your cost isn't on file), so it uses the retail price ($8.99).";
+ * - the product's own price or its Card Shellz category's (`ruleLevel`, PR
+ *   10d, CC-C22): "This product's price: retail $12.50", "Category price:
+ *   your cost $9.80"; the row's level decides, never its name, so a group
+ *   rule that happens to be named "Product price" still reads as a group rule;
  * - no price: "Can't price: …".
  * `profile` is the profile the check was made with. A group rule's recipe is
  * found by its name; when two groups share the name, only the starting amount is shown.
  */
 export function reviewRowBuiltFrom(row: PricingImpactRow, profile: PricingProfile): string {
   if (row.preserved) return CHECK_NEW_PRICES_WORDS.exactPrice;
-  if (row.priceCents === null) return cannotPriceWords(row);
+  if (row.priceCents === null) return reviewCannotPriceWords(row);
   // The server's name for this row is not a rule of the store's (dropship-pricing-rules-service.ts).
   if (row.followsStorePricing === true && row.ruleName === RETAIL_FALLBACK_RULE_NAME) {
     return reviewRetailFallbackWords(row.retailFallbackIssue, row.priceCents);
   }
+  // A product's or category's own recipe is not in the store's profile: the row's start is all that is known.
+  if (row.ruleLevel === "product") return labelWithStart(LISTING_SETTINGS_PRICE_CHECK_WORDS.thisProductPrice, row);
+  if (row.ruleLevel === "category") return labelWithStart(LISTING_SETTINGS_PRICE_CHECK_WORDS.categoryPrice, row);
   const name = row.ruleName;
   if (name === null) return "Your pricing rules"; // interim; a rule price always names its rule
   if (name === STORE_DEFAULT_RULE_NAME) {
@@ -878,6 +890,11 @@ export function reviewRowBuiltFrom(row: PricingImpactRow, profile: PricingProfil
     const recipe = matches[0].recipe;
     return `${label}: ${ruleStartWords(recipe, row.basis ?? recipe.basis, row.basisCents)}`;
   }
+  return labelWithStart(label, row);
+}
+
+/** "<label>: retail $6.25" from the row's start alone (no recipe known); the label alone without a basis. */
+function labelWithStart(label: string, row: Pick<PricingImpactRow, "basis" | "basisCents">): string {
   if (!row.basis) return label;
   const start = row.basis === "catalog_retail" ? "retail" : "your cost";
   return row.basisCents == null ? `${label}: ${start}` : `${label}: ${start} ${formatCents(row.basisCents)}`;
@@ -941,18 +958,24 @@ export function reviewBlockedWords(blocked: number, basis: PricingRecipe["basis"
     : `● ${count(blocked)} sizes can't be priced this way. Give them an exact price in Products, or start from ${other}.`;
 }
 
+/** Any paged check: W1's review and the price check for one or many products (W7, PR 10d) share the page words. */
+export interface PagedReview {
+  page: number;
+  summary: { total: number };
+}
+
 /** "1–50 of 1,240"; null for a check with no sizes. */
-export function reviewPageWords(review: Pick<PricingReviewResponse, "page" | "summary">, pageSize: number): string | null {
+export function reviewPageWords(review: PagedReview, pageSize: number): string | null {
   if (review.summary.total === 0) return null;
   const first = review.page * pageSize + 1;
   const last = Math.min(review.summary.total, (review.page + 1) * pageSize);
   return `${count(first)}–${count(last)} of ${count(review.summary.total)}`;
 }
 
-export function hasPreviousReviewPage(review: Pick<PricingReviewResponse, "page">): boolean {
+export function hasPreviousReviewPage(review: Pick<PagedReview, "page">): boolean {
   return review.page > 0;
 }
 
-export function hasNextReviewPage(review: Pick<PricingReviewResponse, "page" | "summary">, pageSize: number): boolean {
+export function hasNextReviewPage(review: PagedReview, pageSize: number): boolean {
   return (review.page + 1) * pageSize < review.summary.total;
 }

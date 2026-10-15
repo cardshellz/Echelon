@@ -319,6 +319,7 @@ export function ListingSettingsTabs(props: ListingSettingsTabsProps) {
         open={sheetOpen}
         selection={selection}
         rights={bulk.rights}
+        summaryRecipe={props.summary?.storeDefaults.price.recipe}
         setup={bulk.setup}
         shelves={bulk.shelves}
         saveCallbacks={bulk.saveCallbacks}

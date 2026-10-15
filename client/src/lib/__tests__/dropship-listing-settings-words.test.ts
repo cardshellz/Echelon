@@ -19,7 +19,14 @@ import {
   GROUP_RULE_ORDER_NOTE,
   LISTING_SETTINGS_BULK_WORDS,
   LISTING_SETTINGS_EDIT_WORDS,
+  LISTING_SETTINGS_PRICE_CHECK_WORDS,
   NOT_SET_NEEDED_TO_LIST,
+  builtFromStartWords,
+  loseExactPriceWords,
+  olderGroupRuleWords,
+  releaseLimitWords,
+  wouldBeLeftWithoutPriceWords,
+  wouldLosePriceCountWords,
   SIZES_DIFFER_WORDS,
   WORKS_WITH_CARD_SHELLZ_SHIPPING,
   changeSettingLabel,
@@ -611,5 +618,55 @@ describe("Products list words (C15)", () => {
     expect(ownSettingsSentence({ ownSettings: ["store_shelf"], exactPriceCount: 1 }, true))
       .toBe("Own settings: 1 exact price, store shelf. Everything else uses your store defaults or older group rules.");
     expectPlain(ownSettingsSentence({ ownSettings: [...LISTING_SETTINGS_FIELDS], exactPriceCount: 2 }, true));
+  });
+});
+
+describe("the price check for one or many products (PR 10d proposals, plan 7.4, 7.5, 12.2)", () => {
+  it("uses the plan's words, every one plain", () => {
+    expect(LISTING_SETTINGS_PRICE_CHECK_WORDS).toEqual({
+      clearExactPrices: "Clear exact prices too, so every size uses this price",
+      clearExactPricesShort: "Clear exact prices too",
+      exactPriceCleared: "Exact price cleared",
+      noSizes: "No chosen sizes to check.",
+      noPriceChanges: "No prices change now. Saving still sets the price.",
+      nothingToClear: "No exact prices to clear.",
+      oneDraft: "To give them an exact price, discard this change first.",
+      alreadySaved: "This check was already saved. Here's a new check.",
+      expired: "This check expired. Here's a new check.",
+      tooManySizes: "This check covers more than 10,000 sizes. Choose fewer products.",
+      tooHeavy: "This check is too big to save at once. Choose fewer products.",
+      changePrice: "Change price",
+      checking: "Checking",
+      thisProductPrice: "This product's price",
+      categoryPrice: "Category price",
+      storeDefault: "Store default",
+      retailNoPrice: "Retail price (no price set)",
+      exactKept: "Exact price kept",
+    });
+    for (const words of Object.values(LISTING_SETTINGS_PRICE_CHECK_WORDS)) expectPlain(words);
+  });
+
+  it("builds the check's lines and counts, one or many, with thousands marked, from the server's integer cents", () => {
+    expect(olderGroupRuleWords("Envelopes")).toBe("Older group rule “Envelopes”");
+    expect(olderGroupRuleWords("  Envelopes ")).toBe("Older group rule “Envelopes”");
+    expect(builtFromStartWords("catalog_retail", 1250)).toBe("from retail $12.50");
+    expect(builtFromStartWords("product_cost", 210)).toBe("from your cost $2.10");
+    expect(builtFromStartWords("product_cost", 1)).toBe("from your cost $0.01");
+    expect(builtFromStartWords("catalog_retail", null)).toBe("from retail");
+    expect(builtFromStartWords("catalog_retail", undefined)).toBe("from retail");
+    expect(builtFromStartWords(null, 1250)).toBeNull();
+    expect(builtFromStartWords(undefined, undefined)).toBeNull();
+    expect(loseExactPriceWords(36)).toBe("36 lose their exact price");
+    expect(loseExactPriceWords(1)).toBe("1 loses its exact price");
+    expect(loseExactPriceWords(1_240)).toBe("1,240 lose their exact price");
+    expect(wouldLosePriceCountWords(3)).toBe("3 would lose their price");
+    expect(wouldLosePriceCountWords(1)).toBe("1 would lose its price");
+    expect(wouldBeLeftWithoutPriceWords(3)).toBe("● 3 sizes would be left without a price. Give them an exact price in Products first.");
+    expect(wouldBeLeftWithoutPriceWords(1)).toBe("● 1 size would be left without a price. Give it an exact price in Products first.");
+    expect(releaseLimitWords(200, 236)).toBe("You can clear up to 200 exact prices at once. This would clear 236. Choose fewer products.");
+    for (const words of [
+      olderGroupRuleWords("Envelopes"), builtFromStartWords("catalog_retail", 1250), loseExactPriceWords(36), wouldLosePriceCountWords(3),
+      wouldBeLeftWithoutPriceWords(3), releaseLimitWords(200, 236),
+    ]) expectPlain(words);
   });
 });
