@@ -38,7 +38,7 @@ describe("shared eBay issue actions", () => {
     ["EBAY_SYNC_AUTH_REQUIRED","reconnect",false],
     ["EBAY_SYNC_ACCOUNT_CHANGED","reconnect",false],
     ["EBAY_AUTH_RESPONSE_INVALID","reconnect",false],
-    ["EBAY_QUANTITY_DAILY_LIMIT","check_recovery",false],
+    ["EBAY_QUANTITY_DAILY_LIMIT","check_status",false],
     ["PUBLICATION_GLOBAL_DISABLED","edit_listing",false],
     ["EBAY_REGISTRATION_READ_TIMEOUT","retry_sync",true],
     ["EBAY_SYNC_ADMISSION_UNSAVED","retry_sync",true],
@@ -57,7 +57,7 @@ describe("shared eBay issue actions", () => {
     ["EBAY_MAPPING_PRODUCT_NOT_ELIGIBLE","edit_listing",false],
     ["EBAY_SYNC_PRODUCT_NOT_ELIGIBLE","edit_listing",false],
     ["EBAY_SYNC_PRODUCT_NOT_FOUND","edit_listing",false],
-    ["UNRECOGNIZED_CODE","contact_support",false],
+    ["UNRECOGNIZED_CODE","check_status",false],
     ["STOCK_LISTING_ATP_NOT_READY","edit_listing",false],
     ["EBAY_PUBLICATION_STOCK_REVIEW_STALE","retry_sync",true],
     ["EBAY_PUBLICATION_STOCK_REVIEW_BLOCKED","edit_listing",false],
@@ -112,7 +112,7 @@ describe("shared eBay issue actions", () => {
   it("distinguishes automatically recovering work from an exhausted retry", () => {
     const recovering = resolveEbayListingIssue({ code: "EBAY_SYNC_READBACK_PENDING",state: "recovering" });
     const attention = resolveEbayListingIssue({ code: "EBAY_SYNC_READBACK_PENDING",state: "needs_attention" });
-    expect(recovering).toMatchObject({ retryable: false,action: { kind: "check_recovery" } });
+    expect(recovering).toMatchObject({ retryable: false,action: { kind: "check_status" } });
     expect(attention).toMatchObject({ retryable: true,action: { kind: "retry_sync" } });
   });
   it.each(["queued", "running", "recovering", "awaiting_evidence"])("explains inventory contention in %s without requesting another sync", state => {

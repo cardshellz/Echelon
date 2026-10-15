@@ -29,6 +29,8 @@ import { PgMarketplaceListingRegistrationRepository, type MarketplaceObservedLis
 import { assertEbayPublicationObservation } from "../ebay-publication-observation";
 import { assertEbayPublicationTargetUnchanged } from "../ebay-publication-completion.domain";
 import { assertEbayMappingOwnership } from "./ebay-listing-mapping-ownership";
+import { withEbayListingJobProgress } from "./ebay-listing-job-progress.reader";
+import { ebayListingFailureDiagnosticSchema } from "../ebay-listing-failure-diagnostic";
 
 const LOCK_NAMESPACE = 918427;
 const PUBLICATION_EVIDENCE_RECHECK_MS = 30_000;
@@ -340,7 +342,7 @@ export class PostgresEbayListingSyncRepository implements EbayListingSyncStore {
     }); } finally {client.release();}
   }
   async list(channelId: number): Promise<EbayListingSyncJob[]> {
-    return (
+    const jobs = (
       await this.pool.query(
         `SELECT * FROM (SELECT DISTINCT ON ("productId") * FROM (
           SELECT id::text,product_id AS "productId",'sync' AS kind,operation,state,error_code AS code,error_message AS message,
@@ -358,6 +360,7 @@ export class PostgresEbayListingSyncRepository implements EbayListingSyncStore {
         updatedAt: row.updatedAt.toISOString(),
       }),
     );
+    return withEbayListingJobProgress(this.pool, jobs);
   }
   async recordAdmissionFailure(input: EbaySyncAdmissionFailure, now: Date): Promise<EbayListingSyncJob> {
     input=ebaySyncAdmissionFailureSchema.parse(input);
@@ -462,14 +465,14 @@ export class PostgresEbayListingSyncRepository implements EbayListingSyncStore {
         "EBAY_SYNC_JOB_NOT_FOUND",
         "The listing sync job was not found.",
       );
-    return decode(row);
+    return (await withEbayListingJobProgress(this.pool, [decode(row)]))[0];
   }
   async getByCommand(commandKey: string, channelId: number, transactionClient?: PoolClient): Promise<StoredEbayListingSyncJob | null> {
     // A second command can join an existing job. Recover a lost HTTP response
     // through that durable membership, never by assuming command ID equals job ID.
     const row = (await (transactionClient ?? this.pool).query(rowSql + ` WHERE channel_id=$2 AND id=(
       SELECT job_id FROM channels.ebay_listing_sync_commands WHERE command_key=$1)`, [commandKey, channelId])).rows[0];
-    return row ? decode(row) : null;
+    return row ? (await withEbayListingJobProgress(transactionClient ?? this.pool, [decode(row)]))[0] : null;
   }
   async getAdmission(id: string, channelId: number): Promise<EbayListingSyncJob | null> {
     const row = (await this.pool.query(`SELECT command_key::text AS id,product_id AS "productId",operation,error_code AS code,error_message AS message,created_at
@@ -675,7 +678,8 @@ export class PostgresEbayListingSyncRepository implements EbayListingSyncStore {
         client,
         job,
         outcome.state,
-        { code: outcome.code, message: outcome.message },
+        { code: outcome.code, message: outcome.message,
+          ...(outcome.diagnostic ? { diagnostic: ebayListingFailureDiagnosticSchema.parse(outcome.diagnostic) } : {}) },
         now,
       );
     });
