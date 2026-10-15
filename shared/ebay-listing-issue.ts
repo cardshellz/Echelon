@@ -20,9 +20,9 @@ export function resolveEbayListingIssue(input: EbayListingIssueInput): EbayListi
   // copy is public; details and references are supplied by the read boundary.
   const isFeedReadIssue = input.code === "EBAY_LISTING_FEED_UNAVAILABLE" || input.code?.startsWith("EBAY_FEED_QUANTITY_")
     || input.code?.startsWith("CANONICAL_CHANNEL_QUANTITY_");
-  // Older jobs saved a generic failure for target contention. Explain the known
-  // cause instead of repeating that obsolete diagnostic or internal lock prose.
-  const message = isFeedReadIssue || code === "INVENTORY_PUBLICATION_TARGET_BUSY"
+  // Older jobs saved generic contention prose and described invalid prepared
+  // drafts as mapping faults. Present the classified cause and current action.
+  const message = isFeedReadIssue || ["INVENTORY_PUBLICATION_TARGET_BUSY", "EBAY_SYNC_DRAFT_SCOPE_INVALID"].includes(code)
     ? undefined : safeListingDiagnostic(input.message);
   const issue = (title: string, fallback: string, nextStep: string, retryable: boolean,
     kind: EbayListingIssue["action"]["kind"], label: string, href?: string): EbayListingIssue =>
@@ -245,12 +245,16 @@ export function resolveEbayListingIssue(input: EbayListingIssueInput): EbayListi
       false, "review_mapping", "Review publication");
   if (["EBAY_SYNC_IDENTITY_CHANGED", "EBAY_SYNC_OFFER_IDENTITY_CHANGED", "EBAY_SYNC_PROJECTION_IDENTITY_CHANGED", "EBAY_SYNC_PROVIDER_IDENTITY_CHANGED",
     "EBAY_SYNC_OFFER_MISSING", "EBAY_SYNC_SOURCE_INVALID", "EBAY_SYNC_SCOPE_UNAVAILABLE", "PUBLICATION_LISTING_MEMBERSHIP_UNPROVEN",
-    "EBAY_SYNC_DRAFT_SCOPE_INVALID", "EBAY_SYNC_PROVIDER_MEMBERSHIP_UNPROVEN", "EBAY_SYNC_MAPPING_INVALID",
+    "EBAY_SYNC_PROVIDER_MEMBERSHIP_UNPROVEN", "EBAY_SYNC_MAPPING_INVALID",
     "EBAY_SYNC_LISTING_IDENTITY_REQUIRED", "EBAY_SYNC_MEMBERSHIP_CHANGED", "EBAY_SYNC_GROUP_IDENTITY_REQUIRED", "EBAY_SYNC_PROVIDER_IDENTITY_INVALID",
     "EBAY_SYNC_RETAINED_IDENTITY_CHANGED"].includes(code))
     return issue("Review the existing listing mapping", "The saved product-to-eBay mapping could not be verified.",
       "Open the mapping review to compare the saved mapping with eBay, see the exact issue and review the recommended correction. Apply the verified fix there when available.",
       false, "review_mapping", "Review listing mapping");
+  if (code === "EBAY_SYNC_DRAFT_SCOPE_INVALID")
+    return issue("The listing update was prepared incorrectly", "Echelon rejected its prepared update because it did not match the saved listing's identity or variants. This does not establish a problem with your eBay mapping.",
+      "Use Sync existing listing. Echelon automatically verifies the existing listing and prepares a fresh update with current pictures. If this error returns, give its reference to an administrator to inspect the prepared update.",
+      true, "retry_sync", "Sync existing listing");
   if (["EBAY_QUANTITY_DAILY_LIMIT", "PUBLICATION_PROVIDER_COOLDOWN", "EBAY_PROVIDER_RATE_LIMITED"].includes(code))
     return issue("eBay is temporarily limiting updates", "eBay has asked Echelon to wait before another update.",
       reference && input.state !== "needs_attention"

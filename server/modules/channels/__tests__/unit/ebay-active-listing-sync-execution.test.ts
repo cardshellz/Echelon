@@ -12,6 +12,7 @@ const fixture = vi.hoisted(() => ({
   client: null as EbayListingLifecycleClient | null,
   transport: null as EbayRegistrationReadTransport | null,
   photoRequests: [] as Array<{ variants: Array<{ variantId: number; sku: string }> }>,
+  photoUrls: null as string[] | null,
   recovery: vi.fn(async () => ({ busy: false, resolved: [], unresolved: [] })),
   readCount: 0,
   changeSource: false,
@@ -33,7 +34,7 @@ vi.mock("../../infrastructure/ebay-api-runtime", () => ({ EBAY_CHANNEL_ID: 67,
   atpService: { getAtpPerVariant: fixture.atp },
   ebayListingPhotoResolver: { resolve: async (input: { variants: Array<{ variantId: number; sku: string }> }) => {
     fixture.photoRequests.push(input);
-    return { byVariantId: new Map(input.variants.map(member => [member.variantId, [`https://example.com/${member.variantId}.jpg`]])), groupImageUrls: ["https://example.com/shared.jpg"] };
+    return { byVariantId: new Map(input.variants.map(member => [member.variantId, fixture.photoUrls ?? [`https://example.com/${member.variantId}.jpg`]])), groupImageUrls: fixture.photoUrls ?? ["https://example.com/shared.jpg"] };
   } },
 }));
 vi.mock("../../infrastructure/ebay-listing-client", () => ({ createEbayRouteListingLifecycleClient: () => fixture.client, getExistingEbayListingPhotos: vi.fn() }));
@@ -96,14 +97,57 @@ function provider(example: typeof cases[number]) {
     }
     throw new Error(`Unexpected provider read ${request.path}`);
   }) };
-  return { source, client };
+  return { source, client, items, setGroup: (value: EbayInventoryItemGroup) => { group = value; } };
 }
 beforeEach(() => {
-  fixture.readCount = 0; fixture.changeSource = false; fixture.photoRequests = []; fixture.recovery.mockClear();
+  fixture.readCount = 0; fixture.changeSource = false; fixture.photoRequests = []; fixture.photoUrls = null; fixture.recovery.mockClear();
   fixture.atp.mockReset().mockImplementation(async () => fixture.rows.map(row => ({ productVariantId: row.variant_id, atpUnits: 17 })));
 });
 
 describe("production existing-listing prepare through verified completion", () => {
+  it("syncs the Tobacco listing's missing photos from its old saved identity while retaining the inactive case", async () => {
+    const example = { productId: 1, catalog: "SHLZ-TOP-TOB", group: "SHLZ-TOP-TOB", suffixes: ["P25", "C1000"],
+      ids: [1, 2], listing: "298148233614", offers: ["136406476011", "136406478011"] };
+    const f = provider(example);
+    const photos = ["https://example.com/front.jpg", "https://example.com/back.jpg"];
+    fixture.photoUrls = photos;
+    fixture.rows[1].variant_is_active = false;
+    const styles = ["1 Pack of 25", "Case of 1000 (40 packs of 25)"];
+    fixture.rows[0].option1_value = styles[0];
+    // The October 9 command predates these optional snapshot fields. A new
+    // command captures current eligibility; recovery also supports that old shape.
+    const legacyIdentity = { ...f.source, variants: f.source.variants.map(({ catalogSku: _catalog, contentSyncEnabled: _enabled, mappingExists: _exists, ...member }) => member) };
+    f.source.variants.forEach((member, index) => {
+      const item = f.items.get(member.sku)!;
+      f.items.set(member.sku, { ...item, product: { ...item.product, imageUrls: [], aspects: { Style: [styles[index]] } } });
+    });
+    f.setGroup({ ...(await f.client.getInventoryItemGroup(example.group))!,
+      imageUrls: ["https://example.com/deleted-old-photo.png"], variesBy: { specifications: [{ name: "Style", values: styles }] } });
+    const retainedBefore = structuredClone(f.items.get("SHLZ-TOP-TOB-C1000"));
+    const stages: string[] = [];
+    const binding = vi.fn(async () => {});
+    const result = await fixture.execution!.execute(legacyIdentity, async (stage, _hash, work) => { stages.push(stage); return work(); }, null, binding);
+    expect(result).toMatchObject({ synced: 1, errors: 0 });
+    expect(binding).toHaveBeenCalledWith(expect.objectContaining({ variants: [
+      expect.objectContaining({ sku: "SHLZ-TOP-TOB-P25", contentSyncEnabled: true }),
+      expect.objectContaining({ sku: "SHLZ-TOP-TOB-C1000", contentSyncEnabled: false }),
+    ] }));
+    expect(f.client.createOrReplaceInventoryItem).toHaveBeenCalledExactlyOnceWith("SHLZ-TOP-TOB-P25", expect.objectContaining({
+      product: expect.objectContaining({ imageUrls: photos, aspects: expect.objectContaining({ Style: [styles[0]] }) }),
+    }));
+    expect(f.client.createOrReplaceInventoryItemGroup).toHaveBeenCalledExactlyOnceWith(example.group, expect.objectContaining({
+      variantSKUs: ["SHLZ-TOP-TOB-C1000", "SHLZ-TOP-TOB-P25"], imageUrls: photos,
+      variesBy: expect.objectContaining({ specifications: [{ name: "Style", values: styles }] }),
+    }));
+    expect(f.items.get("SHLZ-TOP-TOB-C1000")).toEqual(retainedBefore);
+    expect(stages).toContain("verification");
+    expect(f.client.createOffer).not.toHaveBeenCalled();
+    expect(f.client.publishOffer).not.toHaveBeenCalled();
+    // A lost local completion re-reads the accepted photos and never repeats the writes.
+    await fixture.execution!.execute(legacyIdentity, async (_stage, _hash, work) => work(), null, binding);
+    expect(f.client.createOrReplaceInventoryItem).toHaveBeenCalledTimes(1);
+    expect(f.client.createOrReplaceInventoryItemGroup).toHaveBeenCalledTimes(1);
+  });
   it("reads the transaction mapping identity without ATP or provider calls, retaining disabled members", async () => {
     const { source, client } = provider(cases[0]);
     fixture.rows[1].variant_is_active = false;

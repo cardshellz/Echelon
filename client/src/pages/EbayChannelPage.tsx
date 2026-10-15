@@ -202,6 +202,7 @@ interface FeedItem {
   externalListingIdentityConflict: boolean;
   variantCount: number;
   includedVariantCount: number;
+  unlinkedVariants?: Array<{ id: number; sku: string }>;
   imageCount: number;
   variants: FeedVariant[];
   fulfillmentPolicyOverride: string | null;
@@ -2072,6 +2073,10 @@ export default function EbayChannelPage() {
                         ? syncJob.issue ?? resolveEbayListingIssue({ code: syncJob.code, message: syncJob.message, productId: item.id, jobId: syncJob.id, state: syncJob.state })
                         : item.status === "error" && item.syncError && !syncPending
                           ? resolveEbayListingIssue({ message: item.syncError, productId: item.id }) : null);
+                      const canSyncExistingListing = !syncIssue || (syncIssue.retryable && syncIssue.action.kind === "retry_sync"
+                        && (!syncJob?.operation || syncJob.operation === "sync"));
+                      const syncExistingListing = () => syncIssue
+                        ? handleIssueAction(syncIssue, item.id, syncJob?.id) : handleSyncProduct(item.id);
                       const isExcluded = item.isExcluded;
                       const isExpanded = expandedProducts.has(item.id);
                       const hasVariants = item.variants && item.variants.length > 0;
@@ -2264,8 +2269,8 @@ export default function EbayChannelPage() {
                                     variant="outline"
                                     size="sm"
                                     className="min-h-[44px] min-w-[44px] px-3 text-xs"
-                                    disabled={syncingProductIds.has(item.id) || !!syncPending || !!syncIssue || syncJobsQuery.isError}
-                                    onClick={(e) => { e.stopPropagation(); handleSyncProduct(item.id); }}
+                                    disabled={syncingProductIds.has(item.id) || !!syncPending || !canSyncExistingListing || syncJobsQuery.isError || syncJobsQuery.isPending}
+                                    onClick={(e) => { e.stopPropagation(); syncExistingListing(); }}
                                     title="Sync this listing"
                                   >
                                     {syncingProductIds.has(item.id) ? (
@@ -2273,6 +2278,7 @@ export default function EbayChannelPage() {
                                     ) : (
                                       <RefreshCw className="h-4 w-4" />
                                     )}
+                                    <span className="ml-1">Sync</span>
                                   </Button>
                                 </>
                               )}
@@ -2404,9 +2410,9 @@ export default function EbayChannelPage() {
                                     <Button
                                       variant="ghost"
                                       size="sm"
-                                      className="h-6 w-6 p-0"
-                                      disabled={syncingProductIds.has(item.id) || !!syncPending || !!syncIssue || syncJobsQuery.isError}
-                                      onClick={(e) => { e.stopPropagation(); handleSyncProduct(item.id); }}
+                                      className="h-8 px-2"
+                                      disabled={syncingProductIds.has(item.id) || !!syncPending || !canSyncExistingListing || syncJobsQuery.isError || syncJobsQuery.isPending}
+                                      onClick={(e) => { e.stopPropagation(); syncExistingListing(); }}
                                       title="Sync this listing"
                                     >
                                       {syncingProductIds.has(item.id) ? (
@@ -2414,6 +2420,7 @@ export default function EbayChannelPage() {
                                       ) : (
                                         <RefreshCw className="h-3.5 w-3.5" />
                                       )}
+                                      <span className="ml-1">Sync</span>
                                     </Button>
                                     {item.externalListingId && (
                                       <a
@@ -2467,6 +2474,16 @@ export default function EbayChannelPage() {
                             </div>
                           </TableCell>
                         </TableRow>
+                        {item.externalListingId && !isExcluded && !!item.unlinkedVariants?.length && <TableRow className="block sm:table-row">
+                          <TableCell colSpan={6} className="block sm:table-cell p-3">
+                            <section aria-label={`Variants without a saved listing for ${item.name}`} className="rounded-md border p-3 text-sm space-y-2">
+                              <p className="font-medium">Selected variants without a saved eBay listing: {item.unlinkedVariants.map(variant => variant.sku).join(", ")}</p>
+                              <p>Sync updates the existing listing and its pictures. Review these variants to check whether they need to be added.</p>
+                              <Button variant="outline" size="sm" disabled={!!syncPending || registrationStatusUnavailable || registrationStatusChecking}
+                                onClick={() => setListingChangesTarget(item)}>Review variants</Button>
+                            </section>
+                          </TableCell>
+                        </TableRow>}
                         {syncIssue && <TableRow className="block sm:table-row">
                           <TableCell colSpan={6} className="block sm:table-cell p-3">
                             {withdrawalJob && syncIssue.action.kind === "review_mapping" ? <EbayWithdrawalIssueCard issue={syncIssue}

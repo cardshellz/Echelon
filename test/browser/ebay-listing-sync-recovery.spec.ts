@@ -23,6 +23,66 @@ const pending = {
 };
 const statusName = "Sync status for 55PT Toploader Combo Pack";
 
+test("an old invalid draft and a new catalog variant do not force mapping review before syncing pictures", async ({ page }, info) => {
+  const state = await setupEbayChannelPage(page);
+  state.jobs = [{ ...job, operation: "sync", state: "needs_attention", code: "EBAY_SYNC_DRAFT_SCOPE_INVALID",
+    message: "The prepared update contains a different listing, group or SKU identity." }];
+  state.unlinkedVariants = [{ id: 472, sku: "SHLZ-TOP-TOB-C500" }];
+  state.response = pending;
+  await page.reload();
+  await expect(page.getByText("Listed · update paused", { exact: true }).filter({ visible: true })).toBeVisible();
+  await expect(page.getByText("The listing update was prepared incorrectly", { exact: true })).toBeVisible();
+  await expect(page.getByRole("region", { name: "Variants without a saved listing for 55PT Toploader Combo Pack" })).toContainText("SHLZ-TOP-TOB-C500");
+  await expect(page.getByRole("button", { name: "Check publication", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Review listing mapping", exact: true })).toHaveCount(0);
+  const sync = page.getByTitle("Sync this listing", { exact: true }).filter({ visible: true });
+  await expect(sync).toBeEnabled();
+  await sync.click();
+  await expect(page.getByRole("status", { name: statusName })).toContainText("waiting to run");
+  await expect(sync).toBeDisabled();
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  expect(state.requests).toEqual(["/api/ebay/listings/sync-product/1"]);
+  state.jobs = [{ ...job, operation: "sync", state: "completed" }];
+  await page.reload();
+  await expect(page.getByText("Listed", { exact: true }).filter({ visible: true })).toBeVisible();
+  await expect(page.getByRole("region", { name: "Variants without a saved listing for 55PT Toploader Combo Pack" })).toContainText("SHLZ-TOP-TOB-C500");
+  await expect(page.getByText("The listing update was prepared incorrectly", { exact: true })).toHaveCount(0);
+  await expect(sync).toBeEnabled();
+  await page.screenshot({ path: info.outputPath("ebay-sync-current-listing-and-new-variant.png"), fullPage: true });
+
+  // Adding a SKU uses the existing membership-change preview, independently of
+  // the completed photo sync. Opening it cannot publish or recreate the listing.
+  const previews: unknown[] = [];
+  await page.route("**/api/ebay/listings/push", async route => {
+    previews.push(route.request().postDataJSON());
+    return route.fulfill({ json: { results: [{ productId: 1, success: true, rebuildPreview: {
+      productId: 1, groupKey: "SHLZ-TOP-TOB", currentExternalListingId: "listing-1", sourceState: "active",
+      currentSkus: ["SHLZ-TOP-TOB-P25", "SHLZ-TOP-TOB-C1000"], activeSkus: ["SHLZ-TOP-TOB-P25"], inactiveSkus: ["SHLZ-TOP-TOB-C1000"],
+      desiredSkus: ["SHLZ-TOP-TOB-P25", "SHLZ-TOP-TOB-C500"], addedSkus: ["SHLZ-TOP-TOB-C500"], removedSkus: ["SHLZ-TOP-TOB-C1000"],
+      rebuildRequired: false, confirmationToken: "a".repeat(64),
+    } }] } });
+  });
+  await page.getByRole("button", { name: "Review variants", exact: true }).click();
+  await expect(page.getByRole("dialog")).toContainText("SHLZ-TOP-TOB-C500");
+  expect(previews).toEqual([{ productIds: [1], rebuild: { mode: "preview" } }]);
+  expect(state.requests).toHaveLength(1);
+  expect(state.errors).toEqual([]);
+  expect(state.unexpected).toEqual([]);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+});
+
+test("a real provider identity conflict still requires its mapping correction", async ({ page }) => {
+  const state = await setupEbayChannelPage(page);
+  state.jobs = [{ ...job, operation: "sync", state: "needs_attention", code: "EBAY_SYNC_PROVIDER_IDENTITY_CHANGED",
+    message: "The published offer no longer matches the saved SKU and listing identity." }];
+  await page.reload();
+  await expect(page.getByTitle("Sync this listing", { exact: true }).filter({ visible: true })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "Review listing mapping", exact: true })).toBeVisible();
+  expect(state.requests).toEqual([]);
+  expect(state.errors).toEqual([]);
+  expect(state.unexpected).toEqual([]);
+});
+
 test("inventory contention explains the photo interruption, retries the existing listing, and exposes read-only automatic progress", async ({ page }, info) => {
   const state = await setupEbayChannelPage(page);
   const busyJob = { ...job, operation: "sync", state: "needs_attention", code: "INVENTORY_PUBLICATION_TARGET_BUSY",
