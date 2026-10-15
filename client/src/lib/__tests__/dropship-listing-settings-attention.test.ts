@@ -187,6 +187,14 @@ describe("attentionLines", () => {
     // A description conflict with no product can't land on a drawer row either.
     const tie = attentionLines(summary({ items: [item("description_group_conflict", { productId: null, productName: "Lost" })] }), NO_BANNER).lines[0];
     expect(tie.action).toEqual({ kind: "show_products", label: "Fix", show: "needs_fix" });
+    // A can't-be-priced line with no product opens "Give these sizes a price", which lists every such size (PR 10f, UX-M2);
+    // a one-product line keeps the drawer, which opens on that size.
+    const sizes = attentionLines(summary({ items: [item("size_cannot_be_priced", { count: 3, productId: null, productName: null })] }), NO_BANNER).lines[0];
+    expect(sizes).toEqual({
+      key: "size_cannot_be_priced", code: "size_cannot_be_priced", text: "A product can't be listed: a size can't be priced.",
+      action: { kind: "open_size_prices", label: "Fix" },
+    });
+    expect(attentionLines(summary({ items: [CANT_PRICE] }), NO_BANNER).lines[0].action).toEqual({ kind: "open_product", label: "Fix", productId: 12, fix: "size_cannot_be_priced" });
     // Only the description conflict names a row to open.
     const lines = attentionLines(summary({ items: [NO_CATEGORY, CANT_PRICE] }), NO_BANNER).lines;
     expect(lines.map((line) => "row" in line.action)).toEqual([false, false]);

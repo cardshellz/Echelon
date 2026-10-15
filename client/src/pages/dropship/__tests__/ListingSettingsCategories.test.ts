@@ -15,18 +15,23 @@ import {
 } from "@shared/dropship/listing-settings";
 import { listingSettingsCategoriesQueryOptions, listingSettingsCategoryQueryOptions } from "@/lib/dropship-listing-settings";
 import type { ListingSettingsReadState, ListingSettingsRight } from "@/lib/dropship-listing-settings-access";
+import type { PricingRecipe } from "@shared/dropship/pricing-rules";
 import {
   categoryDraftValue,
   categorySettingsCardState,
   emptyCategoryChoices,
   type CategoryCardInput,
   type CategoryChoices,
+  type CategoryPriceChange,
   type CategorySettingsRights,
 } from "@/lib/dropship-listing-settings-categories";
 import { categoryEditorId, reduceListingSettingsDraft, type ListingSettingsDraft, type ListingSettingsDraftAction } from "@/lib/dropship-listing-settings-drafts";
+import { productPriceEditorModel } from "@/lib/dropship-listing-settings-price-check";
+import type { PriceCheckRef } from "@/lib/dropship-listing-settings-product-edit";
 import { DropshipApiError } from "@/lib/dropship-ops-surface";
 import type { PolicySetupFacts } from "@/lib/dropship-listing-settings-store-requests";
-import { CategoryEditor, ClearTheirsBox, type CategoryEditorProps } from "../listing-settings/CategoryEditor";
+import { CategoryEditor, CategoryPriceRowItem, ClearTheirsBox, type CategoryEditorProps } from "../listing-settings/CategoryEditor";
+import { ProductPriceEditor } from "../listing-settings/ProductPriceEditor";
 import { CategoryCardRowItem, CategorySettingsCard, CategorySettingsCardView } from "../listing-settings/CategorySettingsCard";
 import type { ListingSettingsDraftsValue } from "../listing-settings/ListingSettingsDraftsProvider";
 import { ListingSettingsDraftsProvider } from "../listing-settings/ListingSettingsDraftsProvider";
@@ -36,8 +41,10 @@ import { ListingSettingsStep, type ListingSettingsStepProps } from "../listing-s
  * The Category settings card and the category editor (Listing settings PR 10e, plan 8.2, 8.3, 8.4, 8.7, 3.7):
  * the card's states, the editor's states and the "Also clear theirs" box rules, and the step's wiring (the card
  * between the Store defaults card and the tabs, `?category=<id>` opening the editor, hidden while too large).
- * Static renders, as the other step tests: the step's one draft is set per test, the reads are put in the query
- * cache, and what a button does is checked on the hook-free row and box views.
+ * From PR 10f (plan 9.2, 9.3, 9.6): the Price row with its Change, the examples as "Now:" hidden while the price
+ * is changed, the price's clear box, Save as [Check new prices], and the check body in place of the editor's
+ * (D20) with its "Also saves" lines. Static renders, as the other step tests: the step's one draft is set per
+ * test, the reads are put in the query cache, and what a button does is checked on the hook-free row and box views.
  */
 
 const state = vi.hoisted(() => ({ drafts: null as unknown }));
@@ -146,7 +153,22 @@ function summaryFacts(groupRules = 0, catalogState: "ok" | "too_large" = "ok"): 
   };
 }
 
-const RIGHTS: CategorySettingsRights = { categorySettings: EDITABLE, shipping: EDITABLE, policies: EDITABLE, ebayCategory: EDITABLE, shelfPick: EDITABLE };
+const RIGHTS: CategorySettingsRights = { categorySettings: EDITABLE, shipping: EDITABLE, policies: EDITABLE, ebayCategory: EDITABLE, shelfPick: EDITABLE, priceCheck: EDITABLE };
+const RETAIL_20_UP: PricingRecipe = { basis: "catalog_retail", markupBps: 2000, flatCents: 0, rounding: "up_99" };
+const COST_35: PricingRecipe = { basis: "product_cost", markupBps: 3500, flatCents: 0, rounding: "cent" };
+const CHECK: PriceCheckRef = { reviewId: "11111111-1111-4111-8111-111111111111", reviewHash: "a".repeat(64), after: null };
+/** One example price of the category's sizes, as the detail lists them (current prices, CC-C23). */
+function example(productVariantId: number, sizeName: string, priceCents: number | null) {
+  return {
+    productVariantId, productId: 11, productName: "Penny Sleeves", sizeName, sku: null, priceCents, source: "retail_fallback", rule: null, basis: null,
+    basisAmountCents: null, issue: null, costCents: 210, belowCostByCents: null, limits: [], pausedSince: null, settingRevisionId: null,
+  };
+}
+/** Sleeves with two example prices, and a third product holding its own price. */
+const WITH_EXAMPLES: ListingSettingsCategoryDetail = listingSettingsCategoryDetailSchema.parse({
+  ...DETAIL, examples: [example(101, "Pack of 100", 499), example(102, "Box of 5", 2199)],
+  ownValues: [...DETAIL.ownValues, { productId: 14, revisionId: 3, fields: ["price"] }],
+});
 
 type Phase = "editing" | "saving" | "uncertain" | "refused" | "conflict" | "saved_view_stale";
 
@@ -156,19 +178,25 @@ function run(actions: readonly ListingSettingsDraftAction[]): ListingSettingsDra
   return draft;
 }
 
-/** Sleeves' draft opened on DETAIL, edited to `edit` with `clear` ticked, then settled as `phase` with its words. */
-function categoryDraft(edit: Partial<CategoryChoices> = {}, clear: readonly ("shippingPolicy" | "storeShelf" | "textAbove")[] = [],
-  phase: Phase = "editing", message: string | null = null): ListingSettingsDraft {
-  const base = categoryDraftValue(DETAIL);
+/** Sleeves' draft opened on `detail`, edited to `edit` with `clear` ticked (and `price`, PR 10f), then settled as `phase` with its words. */
+function categoryDraft(edit: Partial<CategoryChoices> = {}, clear: readonly ("shippingPolicy" | "storeShelf" | "textAbove" | "price")[] = [],
+  phase: Phase = "editing", message: string | null = null, price?: CategoryPriceChange, detail: ListingSettingsCategoryDetail = DETAIL): ListingSettingsDraft {
+  const base = categoryDraftValue(detail);
   const opened: ListingSettingsDraftAction[] = [
     { type: "open", editor: categoryEditorId(CATEGORY), place: "Sleeves", base },
-    { type: "edit", value: categoryDraftValue(DETAIL, { ...emptyCategoryChoices(), ...edit }, clear) },
+    { type: "edit", value: categoryDraftValue(detail, { ...emptyCategoryChoices(), ...edit }, clear, price) },
   ];
   if (phase === "editing") return run(opened);
   const saving: ListingSettingsDraftAction[] = [...opened, { type: "startSave", attempt: { signature: "s", key: "ls-cat:k1" } }];
   if (phase === "saving") return run(saving);
   if (phase === "saved_view_stale") return run([...saving, { type: "saved", key: "ls-cat:k1", nowMs: 1_000, viewStale: true }]);
   return run([...saving, { type: "failure", key: "ls-cat:k1", failure: { phase, message: message ?? "", code: null, status: null } }]);
+}
+
+/** Sleeves' draft on WITH_EXAMPLES holding `price` (a check too when given), with `edit` and `clear` riding along (D2), settled as `phase`. */
+function pricedDraft(price: CategoryPriceChange, edit: Partial<CategoryChoices> = {}, clear: readonly ("shippingPolicy" | "storeShelf" | "price")[] = [],
+  phase: Phase = "editing", message: string | null = null): ListingSettingsDraft {
+  return categoryDraft(edit, clear, phase, message, price, WITH_EXAMPLES);
 }
 
 function draftsValue(draft: ListingSettingsDraft | null): ListingSettingsDraftsValue {
@@ -398,18 +426,23 @@ function renderEditor(draft: ListingSettingsDraft | null, answer: Seeded<Listing
 const OPENED = run([{ type: "open", editor: categoryEditorId(CATEGORY), place: "Sleeves", base: categoryDraftValue(DETAIL) }]);
 
 describe("the category editor", () => {
-  it("titles itself, shows each value with where it comes from, the Price row read-only, and Change on every row named with the category", () => {
+  it("titles itself, shows each value with where it comes from, the Price row with its Change (PR 10f), and Change on every row named with the category", () => {
     const markup = renderEditor(OPENED, DETAIL);
     expect(count(markup, 'data-testid="category-editor"')).toBe(1);
     expect(markup).toContain("<h2>Sleeves · 15 products</h2>");
     // × is the first button (plan 3.4).
     expect(markup.indexOf('aria-label="Close"')).toBeLessThan(markup.indexOf('data-testid="category-editor-rows"'));
-    const price = sliceOf(markup, "category-price-row", "div");
+    const price = markup.slice(markup.indexOf('data-testid="category-price-row"'), markup.indexOf('data-testid="drawer-setting-shippingPolicy"'));
     expect(price).toContain(">Price</h4>");
     expect(price).toContain("Retail price + 20%, round up to .99");
     expect(price).toContain(">Store default</span>");
-    expect(price).toContain("A category's price can't be changed here yet.");
-    expect(price).not.toContain("<button");
+    expect(price).not.toContain("A category's price can't be changed here yet.");
+    // Its name starts with its label (WCAG 2.5.3), as the rows' Change does; the words are 10d's PRICE head.
+    expect(markup).toMatch(/<button class="[^"]*min-h-11[^"]*" type="button" aria-label="Change price for Sleeves" aria-expanded="false">Change price<\/button>/);
+    // Without W7's right at hand (a caller from before 10f) the row reads as it did: no Change, the old line.
+    const before = renderEditor(OPENED, DETAIL, { rights: { ...RIGHTS, priceCheck: undefined } });
+    expect(before).toContain("A category's price can't be changed here yet.");
+    expect(before).not.toContain('aria-label="Change price for Sleeves"');
     // The rows in the drawer's order, each with its tag and [Change].
     const rows = sliceOf(markup, "category-editor-rows", "section");
     const order = ["category-price-row", "drawer-setting-shippingPolicy", "drawer-setting-returnPolicy", "drawer-setting-paymentPolicy",
@@ -420,7 +453,7 @@ describe("the category editor", () => {
     expect(markup).toContain("USPS Priority Mail");
     expect(markup).toContain(">Set for Sleeves</span>");
     expect(markup).toContain("30-day returns");
-    for (const setting of ["shipping policy", "return policy", "payment policy", "eBay category", "store shelf", "description"]) {
+    for (const setting of ["price", "shipping policy", "return policy", "payment policy", "eBay category", "store shelf", "description"]) {
       expect(markup).toContain(`aria-label="Change ${setting} for Sleeves"`);
     }
     expect(rows).not.toContain('disabled=""');
@@ -463,7 +496,7 @@ describe("the category editor", () => {
 
   it("keeps every Change off until the draft is open, and while a save is out or unconfirmed; renders its rows over another editor's clean draft, with Change waiting for its own", () => {
     const noDraft = renderEditor(null, DETAIL);
-    expect(count(noDraft, 'aria-label="Change ')).toBe(6);
+    expect(count(noDraft, 'aria-label="Change ')).toBe(7);
     expect(noDraft).toMatch(/aria-label="Change shipping policy for Sleeves" aria-expanded="false" disabled=""/);
     const saving = renderEditor(categoryDraft({ shippingPolicy: { mode: "default" } }, [], "saving"), DETAIL);
     // Back on [Change], the change not saved yet is read with it (aria-describedby names the pending line).
@@ -475,8 +508,8 @@ describe("the category editor", () => {
     const other = run([{ type: "open", editor: "price", place: "Price", base: {} }]);
     const over = renderEditor(other, DETAIL);
     expect(over).toContain('data-testid="category-editor-rows"');
-    expect(count(over, 'aria-label="Change ')).toBe(6);
-    expect(count(over, 'aria-expanded="false" disabled=""')).toBe(6);
+    expect(count(over, 'aria-label="Change ')).toBe(7);
+    expect(count(over, 'aria-expanded="false" disabled=""')).toBe(7);
     expect(over).toContain('data-testid="category-editor-footer"');
   });
 
@@ -516,7 +549,133 @@ describe("the category editor", () => {
     expect(held).not.toContain('aria-label="Change ');
     const uncertain = renderEditor(categoryDraft({ shippingPolicy: { mode: "default" } }, [], "uncertain", "We couldn't confirm your save."), DETAIL, { summary: summaryFacts(2) });
     expect(uncertain).toMatch(/<button class="[^"]*" type="button">Check again<\/button>/);
-    expect(count(uncertain, 'aria-label="Change ')).toBe(6);
+    expect(count(uncertain, 'aria-label="Change ')).toBe(7);
+  });
+
+  it("the Price row (PR 10f, plan 9.2, 9.3): the examples as Now, hidden while the price is changed; the pending line; Save as Check new prices; the price's clear box; no Change without W7's right (CC-C23, D3)", () => {
+    const opened = run([{ type: "open", editor: categoryEditorId(CATEGORY), place: "Sleeves", base: categoryDraftValue(WITH_EXAMPLES) }]);
+    const plain = renderEditor(opened, WITH_EXAMPLES);
+    expect(plain).toContain('data-testid="category-price-examples">Now: Pack of 100 $4.99 · Box of 5 $21.99</p>');
+    expect(plain).not.toContain('data-testid="category-price-pending"');
+    expect(plain).not.toContain('data-testid="category-clear-price"');
+    expect(plain).toMatch(/<button class="[^"]*" type="button" disabled="">Save<\/button>/);
+
+    const priced = renderEditor(pricedDraft({ choice: { mode: "set", value: RETAIL_20_UP }, check: null }), WITH_EXAMPLES);
+    expect(priced).not.toContain('data-testid="category-price-examples"');
+    expect(priced).toMatch(/<p id="[^"]+" class="[^"]*" data-testid="category-price-pending">→ Retail price \+ 20%, round up to \.99 · Not saved<\/p>/);
+    // Back on [Change], the change not saved yet is read with it.
+    expect(priced).toMatch(/aria-label="Change price for Sleeves" aria-describedby="[^"]+" aria-expanded="false">Change price<\/button>/);
+    expect(priced).toContain('data-testid="category-editor-not-saved">● Not saved · 1 change</span>');
+    expect(priced).toMatch(/<button class="[^"]*" type="button">Check new prices<\/button>/);
+    expect(priced).not.toMatch(/<button class="[^"]*" type="button">Save<\/button>/);
+    // The price's "Also clear theirs" box, with a recipe set and a product holding its own price (9.1), read out with its line.
+    const box = sliceOf(priced, "category-clear-price", "div");
+    expect(box).toContain('<p id="category-clear-price-line" class="text-zinc-700">1 product in Sleeves has its own price.</p>');
+    expect(box).toMatch(/<input type="checkbox" class="[^"]*" aria-describedby="category-clear-price-line"\/><span>Also clear theirs, so all 15 use this one\.<\/span>/);
+    expect(priced.indexOf('data-testid="category-clear-price"')).toBeGreaterThan(priced.indexOf('data-testid="category-price-row"'));
+    expect(priced.indexOf('data-testid="category-clear-price"')).toBeLessThan(priced.indexOf('data-testid="drawer-setting-shippingPolicy"'));
+    // Ticked: two changes, still Check new prices; the other rows' changes ride along (D2).
+    const riding = renderEditor(pricedDraft({ choice: { mode: "set", value: COST_35 }, check: null }, { shippingPolicy: { mode: "set", value: { id: "ground" } } }, ["price", "shippingPolicy"]), WITH_EXAMPLES);
+    expect(riding).toContain('data-testid="category-editor-not-saved">● Not saved · 3 changes</span>');
+    expect(sliceOf(riding, "category-clear-price", "div")).toContain('checked=""');
+    expect(riding).toContain("→ Your cost + 35%, to the cent · Not saved");
+    expect(riding).toContain("→ USPS Ground Advantage · Not saved");
+    expect(riding).toMatch(/<button class="[^"]*" type="button">Check new prices<\/button>/);
+    // "Use store default" over the category's own recipe, worded the editor's way (D17).
+    const ownPriced = listingSettingsCategoryDetailSchema.parse({ ...WITH_EXAMPLES, settings: { ...WITH_EXAMPLES.settings, price: { source: "category", value: COST_35 } } });
+    const toDefault = renderEditor(categoryDraft({}, [], "editing", null, { choice: { mode: "default" }, check: null }, ownPriced), ownPriced);
+    expect(toDefault).toContain("Your cost + 35%, to the cent");
+    expect(toDefault).toContain('data-testid="category-price-pending">→ Use store default · Not saved</p>');
+    expect(toDefault).not.toContain('data-testid="category-clear-price"');
+    // Without W7's right: no Change, the right's reason where it has words; the examples still show.
+    const signIn = renderEditor(opened, WITH_EXAMPLES, { rights: { ...RIGHTS, priceCheck: { editable: false, reason: "reload" } } });
+    expect(signIn).not.toContain('aria-label="Change price for Sleeves"');
+    expect(signIn).toContain('data-testid="category-price-line"');
+    expect(signIn).toContain('data-testid="category-price-examples"');
+    const banner = renderEditor(opened, WITH_EXAMPLES, { rights: { ...RIGHTS, priceCheck: { editable: false, reason: "banner" } } });
+    expect(banner).not.toContain('aria-label="Change price for Sleeves"');
+    expect(banner).not.toContain('data-testid="category-price-line"');
+    // Under older rules (D11) the Price row has no Change either, and Save stays off with the one line.
+    const gated = renderEditor(pricedDraft({ choice: { mode: "set", value: RETAIL_20_UP }, check: null }), WITH_EXAMPLES, { summary: summaryFacts(1) });
+    expect(gated).not.toContain('aria-label="Change price for Sleeves"');
+    expect(gated).toMatch(/<button class="[^"]*" type="button" disabled="">Check new prices<\/button>/);
+    expect(sliceOf(gated, "category-editor-footer", "div")).toContain("Category settings can't be saved while your store has older group rules.");
+  });
+
+  it("shows the price check in place of its body while the draft holds one (D20), with the category's head and Also saves lines; the editor's body is back for a conflict and a stale view", () => {
+    const checked = pricedDraft({ choice: { mode: "set", value: RETAIL_20_UP }, check: CHECK }, { shippingPolicy: { mode: "set", value: { id: "ground" } } }, ["shippingPolicy"]);
+    const markup = renderEditor(checked, WITH_EXAMPLES);
+    expect(count(markup, 'data-testid="price-check"')).toBe(1);
+    expect(markup).toContain("data-review=\"11111111-1111-4111-8111-111111111111\"");
+    // The header stays; the rows and the editor's footer do not.
+    expect(markup).toContain("<h2>Sleeves · 15 products</h2>");
+    expect(markup).not.toContain('data-testid="category-editor-rows"');
+    expect(markup).not.toContain('data-testid="category-editor-footer"');
+    const headOf = (shown: string) => { const head = sliceOf(shown, "price-check-head", "h3"); return head.slice(head.indexOf(">") + 1).replace(/<[^>]+>/g, ""); };
+    expect(headOf(markup)).toBe("Checking: Retail price + 20%, round up to .99 · Not saved yet");
+    expect(count(markup, 'data-testid="price-check-also"')).toBe(2);
+    expect(markup).toContain('data-testid="price-check-also">Also saves: shipping policy.</p>');
+    expect(markup).toContain('data-testid="price-check-also">Clears 2 products\' own shipping policy.</p>');
+    // A static render reads the rows again (no page yet): Save waits, Back to editing is on.
+    expect(markup).toContain('data-testid="price-check-footer"');
+    expect(markup).toMatch(/<button[^>]*>Back to editing<\/button>/);
+    expect(markup).toMatch(/<button[^>]*disabled=""[^>]*>Save new prices<\/button>/);
+    // "Use store default" reads the category's way in the head (D17).
+    const ownPriced = listingSettingsCategoryDetailSchema.parse({ ...WITH_EXAMPLES, settings: { ...WITH_EXAMPLES.settings, price: { source: "category", value: COST_35 } } });
+    const toDefault = renderEditor(categoryDraft({}, [], "editing", null, { choice: { mode: "default" }, check: CHECK }, ownPriced), ownPriced);
+    expect(headOf(toDefault)).toBe("Checking: Use store default · Not saved yet");
+    expect(toDefault).not.toContain('data-testid="price-check-also"');
+    // An apply nobody could confirm keeps the check with Check again (D21).
+    const uncertain = renderEditor(pricedDraft({ choice: { mode: "set", value: RETAIL_20_UP }, check: CHECK }, {}, [], "uncertain", "We couldn't confirm your save."), WITH_EXAMPLES);
+    expect(uncertain).toContain('data-testid="price-check"');
+    expect(uncertain).toContain("We couldn't confirm your save.");
+    expect(uncertain).toMatch(/<button[^>]*>Check again<\/button>/);
+    // The category's version conflict (plan 9.4): the editor's body with Load latest; no check body.
+    const conflict = renderEditor(pricedDraft({ choice: { mode: "set", value: RETAIL_20_UP }, check: CHECK }, {}, [], "conflict", "This changed in another window."), WITH_EXAMPLES);
+    expect(conflict).not.toContain('data-testid="price-check"');
+    expect(conflict).toContain('data-testid="category-editor-rows"');
+    expect(conflict).toContain("This changed in another window.");
+    expect(conflict).toMatch(/<button class="[^"]*" type="button">Load latest and keep my changes<\/button>/);
+    // Saved, but the views couldn't be read again: the body with Reload (D9).
+    const stale = renderEditor(pricedDraft({ choice: { mode: "set", value: RETAIL_20_UP }, check: CHECK }, {}, [], "saved_view_stale"), WITH_EXAMPLES);
+    expect(stale).not.toContain('data-testid="price-check"');
+    expect(stale).toContain("Saved. We couldn't load the latest view.");
+    expect(stale).toMatch(/<button class="[^"]*" type="button">Reload<\/button>/);
+  });
+
+  it("the price editor offers Use store default and Set price, never Clear exact prices too (D17; a category check releases nothing)", () => {
+    const model = productPriceEditorModel({ rights: { canSet: true, canDefault: true, reason: null }, change: { price: { mode: "leave" }, releaseExactPrices: false }, ownPrice: null, storeRecipe: RETAIL_20_UP });
+    const markup = render(React.createElement(ProductPriceEditor, {
+      model, title: "Price", productName: "Sleeves", message: null, checking: false, locked: false, onCheck: noop, onCancel: noop,
+      defaultLabel: "Use store default", release: false,
+    }));
+    expect(markup).toContain('role="group" aria-label="Price for Sleeves" data-testid="drawer-field-editor-price"');
+    expect(markup).toContain(">Use store default</span>");
+    expect(markup).not.toContain(">Use default</span>");
+    expect(markup).toContain(">Set price</span>");
+    expect(markup).not.toContain("Clear exact prices too");
+    expect(markup).toMatch(/<button[^>]*>Check new prices<\/button>/);
+    // The drawer's editor keeps its words and its box.
+    const drawers = render(React.createElement(ProductPriceEditor, { model, title: "Price", productName: "Penny Sleeves", message: null, checking: false, locked: false, onCheck: noop, onCancel: noop }));
+    expect(drawers).toContain(">Use default</span>");
+    expect(drawers).toContain("Clear exact prices too");
+  });
+
+  it("the Price row hands its Change to the editor and reads its button from the lib's words", () => {
+    vi.stubGlobal("React", React);
+    const onChange = vi.fn();
+    const price = {
+      label: "Price", value: "Retail price + 20%, round up to .99", tag: "Store default", line: null, examples: "Now: Pack of 100 $4.99", pending: null,
+      change: { label: "Change price", ariaLabel: "Change price for Sleeves", shown: true, disabled: false },
+      editor: productPriceEditorModel({ rights: { canSet: true, canDefault: true, reason: null }, change: { price: { mode: "leave" }, releaseExactPrices: false }, ownPrice: null, storeRecipe: RETAIL_20_UP }),
+      open: false, marked: false, fieldError: null, clears: [],
+    };
+    const buttons = pressable(CategoryPriceRowItem({ price, onChange }));
+    expect(buttons.map((button) => button.props["aria-label"])).toEqual(["Change price for Sleeves"]);
+    buttons[0].props.onClick?.();
+    expect(onChange).toHaveBeenCalledTimes(1);
+    // Hidden Change: nothing to press.
+    expect(pressable(CategoryPriceRowItem({ price: { ...price, change: { ...price.change, shown: false } }, onChange }))).toEqual([]);
   });
 
   it("shows Also clear theirs under a field the save sets on the category whose products hold their own value, never with Use store default (8.4)", () => {
@@ -545,7 +704,8 @@ describe("the category editor", () => {
     // Off while a save is out; gone with [Change] while W12 can't be used (a row that can't be changed clears nothing).
     const held = renderEditor(categoryDraft({}, ["shippingPolicy"], "uncertain", "We couldn't confirm your save."), DETAIL);
     expect(sliceOf(held, "category-clear-shippingPolicy", "div")).toContain('disabled="" checked=""');
-    const paused = renderEditor(OPENED, DETAIL, { rights: { ...RIGHTS, categorySettings: { editable: false, reason: "banner" } } });
+    // A banner takes every writer's right away (D3): W12's and W7's.
+    const paused = renderEditor(OPENED, DETAIL, { rights: { ...RIGHTS, categorySettings: { editable: false, reason: "banner" }, priceCheck: { editable: false, reason: "banner" } } });
     expect(paused).not.toContain('aria-label="Change ');
     expect(paused).not.toContain('data-testid="category-clear-');
   });
@@ -596,7 +756,7 @@ describe("the category editor", () => {
     const signIn = renderEditor(OPENED, DETAIL, { rights: { ...RIGHTS, shipping: { editable: false, reason: "sign_in" }, policies: { editable: false, reason: "sign_in" }, ebayCategory: { editable: false, reason: "sign_in" }, shelfPick: { editable: false, reason: "sign_in" } } });
     expect(signIn).toContain("Sign in to eBay again to pick a new one. You can still use the default.");
     expect(signIn).toContain('aria-label="Change shipping policy for Sleeves"');
-    const paused = renderEditor(OPENED, DETAIL, { rights: { ...RIGHTS, categorySettings: { editable: false, reason: "banner" } } });
+    const paused = renderEditor(OPENED, DETAIL, { rights: { ...RIGHTS, categorySettings: { editable: false, reason: "banner" }, priceCheck: { editable: false, reason: "banner" } } });
     expect(paused).not.toContain('aria-label="Change ');
     expect(paused).toMatch(/<button class="[^"]*" type="button" disabled="">Save<\/button>/);
   });

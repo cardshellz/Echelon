@@ -8,11 +8,12 @@ import {
   type PriceChangeRow,
   type ReviewPriceChangesInput,
 } from "@shared/dropship/listing-setting-writes";
-import { listingSettingsProductOwnSettingsSchema } from "@shared/dropship/listing-settings";
+import { listingSettingsCategoryDetailSchema, listingSettingsProductOwnSettingsSchema, type ListingSettingsCategoryDetail } from "@shared/dropship/listing-settings";
 import type { PricingRecipe } from "@shared/dropship/pricing-rules";
 import { DropshipApiError } from "../dropship-ops-surface";
 import { listingSettingsQueryKey } from "../dropship-listing-settings";
 import {
+  categoryEditorId,
   LISTING_SETTINGS_SAVE_WORDS,
   nextSaveAttempt,
   productEditorId,
@@ -21,6 +22,15 @@ import {
   type ListingSettingsDraft,
   type WriteFailurePhase,
 } from "../dropship-listing-settings-drafts";
+import {
+  categoryDraftValue,
+  categoryPriceCheckBaseOf,
+  categoryPriceDraftWithCheck,
+  categoryPriceReviewRequest,
+  emptyCategoryChoices,
+  readCategoryDraft,
+  type CategoryPriceReviewInput,
+} from "../dropship-listing-settings-categories";
 import { DRAWER_WORDS } from "../dropship-listing-settings-drawer";
 import { PRICE_CHECK_REQUEST_INVALID, PriceCheckRequestError, priceCheckRefOf, productPricesReviewBody } from "../dropship-listing-settings-price-check";
 import {
@@ -29,6 +39,7 @@ import {
   priceChangesEndpoint,
   readAppliedPriceChange,
   readPriceCheckPage,
+  refreshAfterCategoryPriceApply,
   refreshAfterPriceChangeApply,
   requestPriceChangeReview,
   rereadProductPriceBase,
@@ -37,6 +48,7 @@ import {
   sendPriceChangeApply,
   sendPriceChangeReview,
   settlePriceCheckConflict,
+  type CategoryPriceCheckRun,
   type PriceCheckDrafts,
   type PriceCheckQueryClient,
   type PriceChangeApplyRun,
@@ -52,10 +64,16 @@ import {
   type ProductOwnSettings,
   type ProductPriceChange,
 } from "../dropship-listing-settings-product-edit";
+import type { ProductSettingsSaveDrafts } from "../dropship-listing-settings-product-requests";
 import { CHECK_NEW_PRICES_WORDS, MAX_PRICE_CHECK_ATTEMPTS, PRICE_DEFAULT_WORDS } from "../dropship-listing-settings-recipe";
-import { LISTING_SETTINGS_EDIT_WORDS, LISTING_SETTINGS_PRICE_CHECK_WORDS } from "../dropship-listing-settings-words";
+import {
+  LISTING_SETTINGS_CATEGORY_PRICE_WORDS,
+  LISTING_SETTINGS_CATEGORY_WORDS,
+  LISTING_SETTINGS_EDIT_WORDS,
+  LISTING_SETTINGS_PRICE_CHECK_WORDS,
+} from "../dropship-listing-settings-words";
 
-/** W7 from the drawer and from "Set for selected" (plan PR 10d, 7.3, 7.5, 7.6, 3.3, 3.6, D5, D6a, D7, D9). */
+/** W7 from the drawer and from "Set for selected" (plan PR 10d, 7.3, 7.5, 7.6, 3.3, 3.6, D5, D6a, D7, D9), and from the category editor (PR 10f, plan 9.2, 9.4). */
 
 const STORE = 22;
 const PRODUCT = 11;
@@ -660,6 +678,306 @@ describe("a refused apply that asks for a new check (plan 7.5, CC-C8, CC-C11; W1
     await expect(runPriceChangeApply(run)).resolves.toMatchObject({ kind: "rechecked", check: { reviewId: OTHER_REVIEW_ID, after: "prices_moved" } });
     expect(reviewSend).toHaveBeenCalledWith({ kind: "product_prices", productIds: [11, 12, 13], price: COST_35, releaseExactPrices: true });
     expect(reviewSend.mock.calls[0][0]).toEqual(productPricesReviewBody({ productIds: [11, 12, 13], price: SET.price, releaseExactPrices: true }));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The category kind (PR 10f, plan 9.2, 9.4; W7 `category_price`)
+// ---------------------------------------------------------------------------
+
+const CATEGORY = 40;
+const CATEGORY_DETAIL: ListingSettingsCategoryDetail = listingSettingsCategoryDetailSchema.parse({
+  storeConnectionId: STORE, categoryId: CATEGORY, name: "Sleeves", productCount: 15, revisionId: 7,
+  settings: {
+    price: { source: "store_default", value: RETAIL_20_UP },
+    ebayCategory: { source: "none", value: null },
+    storeShelf: { source: "store_default", value: { mode: "none" } },
+    shippingPolicy: { source: "category", value: { id: "F2", name: "Fast Free" } },
+    returnPolicy: { source: "store_default", value: { id: "R1", name: null } },
+    paymentPolicy: { source: "none", value: null },
+    textAbove: { source: "none", value: null },
+    textBelow: { source: "none", value: null },
+  },
+  ownValues: [{ productId: 12, revisionId: null, fields: ["shippingPolicy"] }, { productId: 11, revisionId: 5, fields: ["shippingPolicy", "price"] }],
+  examples: [],
+  generatedAt: "2026-10-14T12:00:00.000Z",
+});
+/** The editor's draft value: the price set, the shipping policy changed with "Also clear theirs" ticked (riding along, D2). */
+const CATEGORY_VALUE = categoryDraftValue(CATEGORY_DETAIL, { ...emptyCategoryChoices(), shippingPolicy: { mode: "set", value: { id: "F1" } } }, ["shippingPolicy"], { choice: { mode: "set", value: COST_35 }, check: null });
+const CATEGORY_REQUEST: CategoryPriceReviewInput = categoryPriceReviewRequest(CATEGORY_VALUE);
+const CATEGORY_BASE = categoryPriceCheckBaseOf(CATEGORY_VALUE);
+const CATEGORY_REVIEW = review({ kind: "category_price" });
+const CATEGORY_NEW_REVIEW = review({ kind: "category_price", reviewId: OTHER_REVIEW_ID, reviewHash: HASH_B });
+const CATEGORY_CHECK: PriceCheckRef = priceCheckRefOf(CATEGORY_REVIEW);
+const CATEGORY_APPLIED = { ...APPLIED, categoryRevisionId: 8 };
+const PRODUCTS_CHANGED = "The products in Sleeves changed. Load the latest and save again. A Card Shellz change can take a minute to show.";
+const CATEGORY_CONFLICTS: ReadonlyArray<readonly [DropshipApiError, string]> = [
+  [apiError(409, "DROPSHIP_CATEGORY_LISTING_SETTINGS_VERSION_CONFLICT", { categoryId: CATEGORY, expectedRevisionId: 7, actualRevisionId: 8 }), LISTING_SETTINGS_SAVE_WORDS.conflict],
+  [apiError(409, "DROPSHIP_PRODUCT_LISTING_SETTINGS_VERSION_CONFLICT", { conflicts: [{ productId: 11, expectedRevisionId: 5, actualRevisionId: 6 }], conflictCount: 1 }), PRODUCTS_CHANGED],
+];
+/** The category kind's own refusals, their words, and what the editor does beside showing them (plan 9.4, as W12's 8.6). */
+const CATEGORY_REFUSALS: ReadonlyArray<readonly [DropshipApiError, string, "reread_card" | "close" | null]> = [
+  [apiError(409, "DROPSHIP_LISTING_SETTINGS_OLDER_RULES_PRESENT", { pricingGroups: 1, contentGroups: 0, ebayCategoryRules: 0 }), LISTING_SETTINGS_CATEGORY_WORDS.olderRules, "reread_card"],
+  [apiError(404, "DROPSHIP_LISTING_SETTINGS_CATEGORY_NOT_FOUND", { categoryId: CATEGORY }), "No chosen product is in this category any more.", "close"],
+  [apiError(422, "DROPSHIP_LISTING_SETTINGS_BULK_TOO_LARGE", { reason: "price_check_rows", textBytes: 30_000_100, maxTextBytes: 30_000_000, productCount: 15 }), LISTING_SETTINGS_CATEGORY_PRICE_WORDS.tooHeavy, null],
+  [apiError(422, "DROPSHIP_LISTING_SETTINGS_BULK_TOO_LARGE", { textBytes: 30_000_100 }), LISTING_SETTINGS_CATEGORY_PRICE_WORDS.tooHeavy, null],
+  [apiError(422, "DROPSHIP_LISTING_SETTINGS_TOO_LARGE"), LISTING_SETTINGS_CATEGORY_PRICE_WORDS.tooManySizes, null],
+];
+
+/** The category editor's draft on CATEGORY_DETAIL, holding CATEGORY_VALUE with `check` (null: before any check). */
+function categoryDraft(check: PriceCheckRef | null = CATEGORY_CHECK): ListingSettingsDraft {
+  const opened = reduceListingSettingsDraft(null, { type: "open", editor: categoryEditorId(CATEGORY), place: "Sleeves", base: categoryDraftValue(CATEGORY_DETAIL) });
+  return reduceListingSettingsDraft(opened, { type: "edit", value: categoryPriceDraftWithCheck(CATEGORY_VALUE, check) })!;
+}
+
+const currentCategoryCheck = (drafts: ReturnType<typeof reducerDrafts>) => readCategoryDraft(drafts.current().value)?.price.check ?? null;
+
+type LatestDetail = Pick<ListingSettingsCategoryDetail, "revisionId" | "ownValues">;
+
+/** A category check run on `drafts`, with the editor's guard reading `latest` (plan 9.4). */
+function categoryCheckRun(drafts: ProductSettingsSaveDrafts, send: (body: ReviewPriceChangesInput) => Promise<unknown>, latest: () => Promise<LatestDetail> = async () => CATEGORY_DETAIL, after: PriceCheckAfter | null = null): CategoryPriceCheckRun {
+  return { kind: "category_price", request: CATEGORY_REQUEST, categoryName: "Sleeves", after, send, drafts, guard: { base: CATEGORY_BASE, reread: latest } };
+}
+
+/** An apply run on the category editor's draft, as `setup` is for the drawer's: the re-check runs through the editor's guard. */
+function categorySetup(overrides: Partial<PriceChangeApplyRun> = {}, start: ListingSettingsDraft = categoryDraft(), latestDetail: () => LatestDetail = () => CATEGORY_DETAIL) {
+  const drafts = reducerDrafts(start);
+  const sent: ApplyPriceChangesInput[] = [];
+  const reviewsSent: ReviewPriceChangesInput[] = [];
+  const callbacks = { onSaveStarted: vi.fn(), onSaveSettled: vi.fn() };
+  const answers: Array<unknown | Error> = [];
+  const reviews: Array<unknown | Error> = [];
+  const send = vi.fn(async (body: ApplyPriceChangesInput) => {
+    sent.push(body);
+    const next = answers.length > 0 ? answers.shift() : CATEGORY_APPLIED;
+    if (next instanceof Error) throw next;
+    return next;
+  });
+  const reviewSend = vi.fn(async (body: ReviewPriceChangesInput) => {
+    reviewsSent.push(body);
+    const next = reviews.length > 0 ? reviews.shift() : CATEGORY_NEW_REVIEW;
+    if (next instanceof Error) throw next;
+    return next;
+  });
+  const guardReread = vi.fn(async () => latestDetail());
+  const check = vi.fn((after: PriceCheckAfter): Promise<PriceChangeCheckOutcome> => runPriceChangeCheck(categoryCheckRun(drafts, reviewSend, guardReread, after)));
+  const input: PriceChangeApplyRun = {
+    kind: "category_price", categoryName: "Sleeves",
+    draft: drafts.current(), check: currentCategoryCheck(drafts) ?? CATEGORY_CHECK, drafts, callbacks, send,
+    reread: vi.fn(async () => undefined), onSettingsSaved: vi.fn(), onBlocked: vi.fn(),
+    recheck: { check, withCheck: (next) => categoryPriceDraftWithCheck(readCategoryDraft(drafts.current().value)!, next) },
+    ...overrides,
+  };
+  const apply = () => runPriceChangeApply({ ...input, draft: drafts.current(), check: currentCategoryCheck(drafts) ?? input.check });
+  return { input, drafts, sent, reviewsSent, callbacks, answers, reviews, send, reviewSend, guardReread, check, apply };
+}
+
+describe("the category check (PR 10f, plan 9.2, 9.4)", () => {
+  it("sends the editor's request as built, after the detail is read again; a moved revision or clear set is the conflict, and nothing is sent", async () => {
+    const drafts = reducerDrafts(categoryDraft(null));
+    const send = vi.fn().mockResolvedValue(CATEGORY_REVIEW);
+    await expect(runPriceChangeCheck(categoryCheckRun(drafts, send))).resolves.toEqual({ kind: "checked", review: CATEGORY_REVIEW, check: CATEGORY_CHECK, request: CATEGORY_REQUEST });
+    expect(send).toHaveBeenCalledWith(CATEGORY_REQUEST);
+    expect(reviewPriceChangesInputSchema.safeParse(send.mock.calls[0][0]).success).toBe(true);
+    expect(send.mock.calls[0][0]).toMatchObject({ kind: "category_price", categoryId: CATEGORY, expectedRevisionId: 7, patch: { price: COST_35, shippingPolicy: { id: "F1" } }, clear: { fields: ["shippingPolicy"] } });
+    expect(drafts.current()).toMatchObject({ phase: "editing", changes: 3 });
+    // A re-check carries why, for the stale line.
+    await expect(runPriceChangeCheck(categoryCheckRun(drafts, send, undefined, "prices_moved"))).resolves.toMatchObject({ kind: "checked", check: { ...CATEGORY_CHECK, after: "prices_moved" } });
+    // The category's revision moved, a ticked product's revision moved, or one left the clear set: the conflict, nothing sent (D6).
+    const moved: LatestDetail[] = [
+      { ...CATEGORY_DETAIL, revisionId: 8 },
+      { ...CATEGORY_DETAIL, revisionId: null },
+      { ...CATEGORY_DETAIL, ownValues: [CATEGORY_DETAIL.ownValues[0], { productId: 11, revisionId: 6, fields: ["shippingPolicy", "price"] }] },
+      { ...CATEGORY_DETAIL, ownValues: [CATEGORY_DETAIL.ownValues[1]] },
+      { ...CATEGORY_DETAIL, ownValues: [...CATEGORY_DETAIL.ownValues, { productId: 13, revisionId: 2, fields: ["shippingPolicy"] }] },
+    ];
+    for (const latest of moved) {
+      const stale = reducerDrafts(categoryDraft(null));
+      const never = vi.fn();
+      await expect(runPriceChangeCheck(categoryCheckRun(stale, never, async () => latest))).resolves.toEqual({ kind: "conflict" });
+      expect(never).not.toHaveBeenCalled();
+      expect(stale.current()).toMatchObject({ phase: "conflict", message: LISTING_SETTINGS_SAVE_WORDS.conflict, attempt: null, changes: 3 });
+    }
+    // A product holding its own value in a setting that isn't ticked may change: not this check's business.
+    const unticked: LatestDetail = { ...CATEGORY_DETAIL, ownValues: [...CATEGORY_DETAIL.ownValues, { productId: 13, revisionId: 2, fields: ["storeShelf"] }] };
+    await expect(runPriceChangeCheck(categoryCheckRun(reducerDrafts(categoryDraft(null)), send, async () => unticked))).resolves.toMatchObject({ kind: "checked" });
+    // A guard read that fails, or an answer of the products kind, is "couldn't check"; nothing is sent for the first.
+    const dropped = vi.fn();
+    await expect(runPriceChangeCheck(categoryCheckRun(reducerDrafts(categoryDraft(null)), dropped, async () => { throw networkDrop(); }))).resolves.toEqual({ kind: "failed", message: PRICE_DEFAULT_WORDS.reviewFailed });
+    expect(dropped).not.toHaveBeenCalled();
+    await expect(runPriceChangeCheck(categoryCheckRun(reducerDrafts(categoryDraft(null)), async () => review()))).resolves.toEqual({ kind: "failed", message: PRICE_DEFAULT_WORDS.reviewFailed });
+    // Without a guard (the review alone) the request still goes as built.
+    await expect(runPriceChangeCheck({ kind: "category_price", request: CATEGORY_REQUEST, categoryName: "Sleeves", send, drafts })).resolves.toMatchObject({ kind: "checked", request: CATEGORY_REQUEST });
+  });
+
+  it("settles the review's own version conflicts as the draft's conflict in their words, and refuses older rules, a gone category and too much text with the editor's (9.4)", async () => {
+    for (const [thrown, message] of CATEGORY_CONFLICTS) {
+      const drafts = reducerDrafts(categoryDraft(null));
+      await expect(runPriceChangeCheck(categoryCheckRun(drafts, async () => { throw thrown; }))).resolves.toEqual({ kind: "conflict" });
+      expect(drafts.current()).toMatchObject({ phase: "conflict", message, attempt: null, changes: 3 });
+      // Its Load latest re-reads the category (`loadLatestCategory`); the check it held is none yet.
+      expect(currentCategoryCheck(drafts)).toBeNull();
+    }
+    for (const [thrown, message, followUp] of CATEGORY_REFUSALS) {
+      const drafts = reducerDrafts(categoryDraft(null));
+      // Older rules and a gone category carry what the editor does next (the card re-read, the close); the rest only words.
+      await expect(runPriceChangeCheck(categoryCheckRun(drafts, async () => { throw thrown; }))).resolves.toEqual(followUp === null ? { kind: "failed", message } : { kind: "failed", message, followUp });
+      expect(drafts.current()).toMatchObject({ phase: "editing", attempt: null, changes: 3 });
+      expect(message).not.toMatch(/DROPSHIP_|[a-z]+_[a-z_]+/);
+    }
+    // The products kind never carries a follow-up: its refusals name no category.
+    await expect(requestPriceChangeReview(async () => { throw CATEGORY_REFUSALS[0][0]; })).resolves.toEqual({ kind: "failed", message: WORDS.invalid });
+    // The review's outcome by kind: the products kind has no conflict (the same code is just "can't happen" there).
+    const productsConflict = CATEGORY_CONFLICTS[1][0];
+    await expect(requestPriceChangeReview(async () => { throw productsConflict; }, "category_price", { categoryName: "Sleeves" })).resolves.toEqual({ kind: "conflict", message: PRODUCTS_CHANGED });
+    await expect(requestPriceChangeReview(async () => { throw productsConflict; }, "category_price")).resolves.toEqual({ kind: "conflict", message: "The products in this category changed. Load the latest and save again. A Card Shellz change can take a minute to show." });
+    await expect(requestPriceChangeReview(async () => { throw productsConflict; })).resolves.toEqual({ kind: "failed", message: WORDS.invalid });
+    await expect(requestPriceChangeReview(async () => CATEGORY_REVIEW, "category_price")).resolves.toEqual({ kind: "ok", review: CATEGORY_REVIEW });
+    await expect(requestPriceChangeReview(async () => CATEGORY_REVIEW)).resolves.toEqual({ kind: "failed", message: PRICE_DEFAULT_WORDS.reviewFailed });
+    // A block goes to the banner through the check run too.
+    const blocked = apiError(403, "DROPSHIP_LISTING_STORE_BLOCKED", { reason: "paused" });
+    await expect(runPriceChangeCheck(categoryCheckRun(reducerDrafts(categoryDraft(null)), async () => { throw blocked; }))).resolves.toEqual({ kind: "blocked", error: blocked });
+  });
+});
+
+describe("the category apply (PR 10f, plan 9.4; CC-C3)", () => {
+  it("sends the check with the draft's ls-price-check key, re-reads, then tells the step; its version conflicts are the editor's conflict with Load latest, never a re-check", async () => {
+    const run = categorySetup();
+    await expect(run.apply()).resolves.toEqual({ kind: "saved", viewStale: false });
+    expect(run.sent).toEqual([{ reviewId: REVIEW_ID, reviewHash: HASH_A, idempotencyKey: "ls-price-check:1" }]);
+    expect(run.input.reread).toHaveBeenCalledTimes(1);
+    expect(run.input.onSettingsSaved).toHaveBeenCalledTimes(1);
+    expect(run.check).not.toHaveBeenCalled();
+    expect(run.drafts.current()).toMatchObject({ phase: "saved", changes: 0, attempt: null });
+    // A replay, and an answer whose category revision is null, both count as saved.
+    for (const answer of [{ ...REPLAYED, categoryRevisionId: 8 }, { ...CATEGORY_APPLIED, categoryRevisionId: null }]) {
+      const again = categorySetup();
+      again.answers.push(answer);
+      await expect(again.apply()).resolves.toEqual({ kind: "saved", viewStale: false });
+    }
+    for (const [thrown, message] of CATEGORY_CONFLICTS) {
+      const conflict = categorySetup();
+      conflict.answers.push(thrown);
+      await expect(conflict.apply()).resolves.toEqual({ kind: "conflict" });
+      expect(conflict.check).not.toHaveBeenCalled();
+      expect(conflict.guardReread).not.toHaveBeenCalled();
+      expect(conflict.drafts.current()).toMatchObject({ phase: "conflict", message, attempt: null, changes: 3 });
+      // The check stays in the draft until Load latest re-reads the category and drops it (`rebaseCategoryDraft`); the editor's body shows meanwhile.
+      expect(currentCategoryCheck(conflict.drafts)).toEqual(CATEGORY_CHECK);
+      expect(conflict.input.onSettingsSaved).not.toHaveBeenCalled();
+      expect(conflict.input.onBlocked).not.toHaveBeenCalled();
+    }
+  });
+
+  it("prices moved, already applied or expired under the apply: the detail is read again; the same revision and clear set get the one re-check with the same request, a moved one the conflict", async () => {
+    const codes = [
+      [409, "DROPSHIP_LISTING_PRICES_MOVED", { sizes: [{ productVariantId: 101, beforePriceCents: 1499, afterPriceCents: 1599 }] }, "prices_moved"],
+      [409, "DROPSHIP_IDEMPOTENCY_CONFLICT", { reviewId: REVIEW_ID }, "already_applied"],
+      [404, "DROPSHIP_PRICING_REVIEW_NOT_FOUND", { reviewId: REVIEW_ID }, "expired"],
+      // A size's compare-and-set refusal rolled back with the rest (CC-C11): the sizes moved under the apply.
+      [409, "DROPSHIP_LISTING_PRICE_VERSION_CONFLICT", { productVariantId: 101 }, "prices_moved"],
+    ] as const;
+    for (const [status, code, context, after] of codes) {
+      const run = categorySetup();
+      run.answers.push(apiError(status, code, { ...context }));
+      await expect(run.apply()).resolves.toEqual({ kind: "rechecked", review: CATEGORY_NEW_REVIEW, check: { reviewId: OTHER_REVIEW_ID, reviewHash: HASH_B, after }, after });
+      expect(run.guardReread).toHaveBeenCalledTimes(1);
+      expect(run.reviewsSent).toEqual([CATEGORY_REQUEST]);
+      expect(run.sent).toHaveLength(1);
+      expect(run.input.onSettingsSaved).not.toHaveBeenCalled();
+      // The new check is in the draft with the vendor's changes untouched, editing again, with no key.
+      expect(currentCategoryCheck(run.drafts)).toEqual({ reviewId: OTHER_REVIEW_ID, reviewHash: HASH_B, after });
+      expect(readCategoryDraft(run.drafts.current().value)).toMatchObject({ shippingPolicy: { mode: "set", value: { id: "F1" } }, clear: ["shippingPolicy"], price: { choice: { mode: "set", value: COST_35 } } });
+      expect(run.drafts.current()).toMatchObject({ phase: "editing", attempt: null, changes: 3 });
+      // Save on the new check: a new signature, a new key; the re-check's own refusal is shown, never looped.
+      await expect(run.apply()).resolves.toMatchObject({ kind: "saved" });
+      expect(run.sent.map((body) => [body.reviewId, body.idempotencyKey])).toEqual([[REVIEW_ID, "ls-price-check:1"], [OTHER_REVIEW_ID, "ls-price-check:2"]]);
+    }
+    const looped = categorySetup();
+    looped.answers.push(apiError(409, "DROPSHIP_LISTING_PRICES_MOVED"), apiError(409, "DROPSHIP_LISTING_PRICES_MOVED"));
+    await expect(looped.apply()).resolves.toMatchObject({ kind: "rechecked" });
+    await expect(looped.apply()).resolves.toMatchObject({ kind: "failed", failure: { phase: "refused", code: "DROPSHIP_LISTING_PRICES_MOVED" } });
+    expect(looped.check).toHaveBeenCalledTimes(1);
+    // The category's revision, or its clear set, moved under the apply: the conflict, nothing re-checked, the stale check gone.
+    for (const latest of [{ ...CATEGORY_DETAIL, revisionId: 8 }, { ...CATEGORY_DETAIL, ownValues: [CATEGORY_DETAIL.ownValues[1]] }]) {
+      const moved = categorySetup({}, categoryDraft(), () => latest);
+      moved.answers.push(apiError(409, "DROPSHIP_LISTING_PRICES_MOVED"));
+      await expect(moved.apply()).resolves.toEqual({ kind: "conflict" });
+      expect(moved.guardReread).toHaveBeenCalledTimes(1);
+      expect(moved.reviewSend).not.toHaveBeenCalled();
+      expect(moved.drafts.current()).toMatchObject({ phase: "conflict", message: LISTING_SETTINGS_SAVE_WORDS.conflict, attempt: null, changes: 3 });
+      expect(currentCategoryCheck(moved.drafts)).toBeNull();
+    }
+    // The re-check's review answers a version conflict: the same conflict.
+    const answered = categorySetup();
+    answered.answers.push(apiError(409, "DROPSHIP_LISTING_PRICES_MOVED"));
+    answered.reviews.push(CATEGORY_CONFLICTS[1][0]);
+    await expect(answered.apply()).resolves.toEqual({ kind: "conflict" });
+    expect(answered.drafts.current()).toMatchObject({ phase: "conflict", message: PRODUCTS_CHANGED });
+    // When the new check can't be made the stale one is dropped and the editor shows the words.
+    const failed = categorySetup();
+    failed.answers.push(apiError(409, "DROPSHIP_LISTING_PRICES_MOVED"));
+    failed.reviews.push(CATEGORY_REFUSALS[0][0]);
+    await expect(failed.apply()).resolves.toEqual({ kind: "recheck_failed", message: LISTING_SETTINGS_CATEGORY_WORDS.olderRules, after: "prices_moved", followUp: "reread_card" });
+    expect(currentCategoryCheck(failed.drafts)).toBeNull();
+    expect(failed.drafts.current()).toMatchObject({ phase: "editing", changes: 3, attempt: null });
+  });
+
+  it("refuses older rules, a gone category and too much text with the editor's words, a new key next time and no re-check (9.4)", async () => {
+    for (const [thrown, message] of CATEGORY_REFUSALS) {
+      const run = categorySetup();
+      run.answers.push(thrown);
+      await expect(run.apply()).resolves.toEqual({ kind: "failed", failure: { phase: "refused", message, code: thrown.code, status: thrown.status, fields: [] }, refusedSizes: new Set() });
+      expect(run.check).not.toHaveBeenCalled();
+      expect(run.guardReread).not.toHaveBeenCalled();
+      expect(run.input.onBlocked).not.toHaveBeenCalled();
+      expect(run.drafts.current()).toMatchObject({ phase: "refused", message, attempt: null, changes: 3 });
+      expect(currentCategoryCheck(run.drafts)).toEqual(CATEGORY_CHECK);
+      await run.apply();
+      expect(run.sent.map((body) => body.idempotencyKey)).toEqual(["ls-price-check:1", "ls-price-check:2"]);
+    }
+    // The shared rows read the same for the category kind: a drop is unconfirmed with its key kept, a block goes to the banner.
+    const dropped = categorySetup();
+    dropped.answers.push(networkDrop(), { ...REPLAYED, categoryRevisionId: 8 });
+    await expect(dropped.apply()).resolves.toMatchObject({ kind: "failed", failure: { phase: "uncertain", message: UNCONFIRMED } });
+    await expect(dropped.apply()).resolves.toEqual({ kind: "saved", viewStale: false });
+    expect(dropped.sent.map((body) => body.idempotencyKey)).toEqual(["ls-price-check:1", "ls-price-check:1"]);
+    const blocked = apiError(403, "DROPSHIP_LISTING_STORE_BLOCKED", { reason: "paused" });
+    const gate = categorySetup();
+    gate.answers.push(blocked);
+    await expect(gate.apply()).resolves.toMatchObject({ kind: "failed", failure: { phase: "blocked" } });
+    expect(gate.input.onBlocked).toHaveBeenCalledWith(blocked);
+  });
+
+  it("after a category apply the categories, the lists, the summary, every product read and the size prices are read again, and the category's detail fresh (D9, 9.2)", async () => {
+    const calls: string[] = [];
+    const client = {
+      cancelQueries: vi.fn(async (filter: { queryKey: readonly unknown[]; exact?: boolean }) => {
+        calls.push(`cancel ${String(filter.queryKey[3])}${filter.exact ? `:${String(filter.queryKey[4])}` : ""}`);
+      }),
+      invalidateQueries: vi.fn(async (filter: { queryKey?: readonly unknown[]; predicate?: (query: { queryKey: readonly unknown[] }) => boolean }) => {
+        calls.push(filter.queryKey ? `invalidate ${String(filter.queryKey[3])}` : "invalidate sizes");
+        if (filter.predicate) {
+          expect(filter.predicate({ queryKey: [`/api/dropship/listings/stores/${STORE}/variants/101/price`] })).toBe(true);
+          expect(filter.predicate({ queryKey: [`/api/dropship/listings/stores/${STORE + 1}/variants/101/price`] })).toBe(false);
+        }
+      }),
+      fetchQuery: vi.fn(async ({ queryKey }: { queryKey: readonly unknown[] }) => { calls.push(`fetch ${String(queryKey[3])}:${String(queryKey[4])}`); return CATEGORY_DETAIL; }),
+    };
+    await refreshAfterCategoryPriceApply(client as unknown as PriceCheckQueryClient, STORE, CATEGORY);
+    expect(calls).toEqual([
+      "cancel categories", "cancel products", "cancel prices", "cancel summary", "cancel product", "cancel product-own", "cancel category:40",
+      "invalidate categories", "invalidate products", "invalidate prices", "invalidate summary", "invalidate product", "invalidate product-own", "invalidate sizes",
+      "fetch category:40",
+    ]);
+    for (const read of ["categories", "products", "prices", "summary", "product", "product-own"]) {
+      expect(client.invalidateQueries).toHaveBeenCalledWith({ queryKey: [...listingSettingsQueryKey(STORE), read] }, { throwOnError: true });
+    }
+    expect(client.fetchQuery).toHaveBeenCalledWith(expect.objectContaining({ queryKey: [...listingSettingsQueryKey(STORE), "category", CATEGORY], staleTime: 0, retry: false }));
+    client.fetchQuery.mockRejectedValueOnce(networkDrop());
+    await expect(refreshAfterCategoryPriceApply(client as unknown as PriceCheckQueryClient, STORE, CATEGORY)).rejects.toThrow("Failed to fetch");
+    client.invalidateQueries.mockRejectedValueOnce(networkDrop());
+    await expect(refreshAfterCategoryPriceApply(client as unknown as PriceCheckQueryClient, STORE, CATEGORY)).rejects.toThrow("Failed to fetch");
   });
 });
 

@@ -382,6 +382,24 @@ describe("runCategorySettingsSave (plan 3.6)", () => {
     expect(saving.callbacks.onSaveSettled).toHaveBeenCalledTimes(1);
   });
 
+  it("(9) never sends a price change through W12: a draft holding one is the price check's, whatever else it holds (PR 10f, plan 9.2, 9.7)", async () => {
+    const recipe = { basis: "catalog_retail" as const, markupBps: 2000, flatCents: 0, rounding: "up_99" as const };
+    for (const price of [{ mode: "set" as const, value: recipe }]) {
+      const opened = reduceListingSettingsDraft(null, { type: "open", editor: categoryEditorId(CATEGORY), place: "Sleeves", base: categoryDraftValue(DETAIL) });
+      const priceOnly = reduceListingSettingsDraft(opened, { type: "edit", value: categoryDraftValue(DETAIL, emptyCategoryChoices(), [], { choice: price, check: null }) })!;
+      const riding = reduceListingSettingsDraft(opened, { type: "edit", value: categoryDraftValue(DETAIL, { ...emptyCategoryChoices(), ...PICK }, ["shippingPolicy"], { choice: price, check: null }) })!;
+      expect(priceOnly.changes).toBe(1);
+      expect(riding.changes).toBe(4);
+      for (const draft of [priceOnly, riding]) {
+        const run = setup({}, draft);
+        await expect(run.save()).resolves.toEqual({ kind: "not_started", message: null });
+        expect(run.send).not.toHaveBeenCalled();
+        expect(run.callbacks.onSaveStarted).not.toHaveBeenCalled();
+        expect(run.drafts.current()).toMatchObject({ phase: "editing", attempt: null, changes: draft.changes });
+      }
+    }
+  });
+
   it("(9) settles a body it can't build as refused, sends nothing, and the next try gets a new key", async () => {
     const run = setup();
     let tries = 0;

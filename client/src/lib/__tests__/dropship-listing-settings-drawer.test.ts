@@ -288,15 +288,17 @@ describe("drawerSearch", () => {
   });
 });
 
-describe("the sheets in the page address (?sheet=, PR 10c, 10g, D21)", () => {
-  it("opens Set for selected from ?sheet=bulk, Card Shellz updated products from ?sheet=updated, and nothing from a sheet this page doesn't have", () => {
-    expect(LISTING_SETTINGS_SHEETS).toEqual(["bulk", "updated"]);
+describe("the sheets in the page address (?sheet=, PR 10c, 10g, 10f, D21)", () => {
+  it("opens Set for selected from ?sheet=bulk, Card Shellz updated products from ?sheet=updated, Give these sizes a price from ?sheet=give-prices, and nothing from a sheet this page doesn't have", () => {
+    expect(LISTING_SETTINGS_SHEETS).toEqual(["bulk", "updated", "give-prices"]);
     expect(sheetFromSearch("?sheet=bulk")).toBe("bulk");
     expect(sheetFromSearch("?sheet=updated")).toBe("updated");
+    expect(sheetFromSearch("?sheet=give-prices")).toBe("give-prices");
     expect(sheetFromSearch("?store=22&sheet=updated&product=11")).toBe("updated");
     expect(sheetFromSearch("sheet=bulk&store=22")).toBe("bulk");
     expect(sheetFromSearch("?store=22&product=11&sheet=bulk")).toBe("bulk");
-    for (const search of ["", "?store=22", "?sheet=", "?sheet=Bulk", "?sheet=bulk%20", "?sheet=give-prices", "?sheet=Updated", "?sheet=bulk&sheet=bulk", "?sheet=bulk&sheet=updated", "?sheets=bulk"]) {
+    expect(sheetFromSearch("?store=22&sheet=give-prices")).toBe("give-prices");
+    for (const search of ["", "?store=22", "?sheet=", "?sheet=Bulk", "?sheet=bulk%20", "?sheet=give-price", "?sheet=Give-Prices", "?sheet=prices", "?sheet=Updated", "?sheet=bulk&sheet=bulk", "?sheet=bulk&sheet=updated", "?sheet=give-prices&sheet=bulk", "?sheets=bulk"]) {
       expect({ search, sheet: sheetFromSearch(search) }).toEqual({ search, sheet: null });
     }
   });
@@ -312,6 +314,12 @@ describe("the sheets in the page address (?sheet=, PR 10c, 10g, D21)", () => {
     expect(sheetSearch("?sheet=bulk&store=22", "updated")).toBe("?store=22&sheet=updated");
     expect(sheetSearch("?sheet=updated", null)).toBe("");
     expect(sheetFromSearch(sheetSearch("", "updated"))).toBe("updated");
+    // "Give these sizes a price" (10f) the same way: pushed on open, replaced on close, one sheet at a time.
+    expect(sheetSearch("?store=22", "give-prices")).toBe("?store=22&sheet=give-prices");
+    expect(sheetSearch("?sheet=bulk&store=22", "give-prices")).toBe("?store=22&sheet=give-prices");
+    expect(sheetSearch("?sheet=give-prices&store=22", null)).toBe("?store=22");
+    expect(sheetFromSearch(sheetSearch("", "give-prices"))).toBe("give-prices");
+    expect(listingSettingsSurfaceFromSearch("?sheet=give-prices&category=40")).toEqual({ kind: "sheet", sheet: "give-prices" });
     // Each helper leaves the other's parameter alone, so a closed sheet never closes the drawer and the other way round.
     expect(drawerTargetFromSearch(sheetSearch("?product=11&size=101", "bulk"))).toEqual({ productId: 11, productVariantId: 101 });
     expect(sheetFromSearch(drawerSearch("?sheet=bulk", { productId: 11 }))).toBe("bulk");
@@ -319,7 +327,8 @@ describe("the sheets in the page address (?sheet=, PR 10c, 10g, D21)", () => {
   });
 
   it("refuses a sheet this page doesn't have", () => {
-    expect(() => sheetSearch("", "give-prices" as "bulk")).toThrow(/only a sheet this page has/);
+    expect(() => sheetSearch("", "give-price" as "bulk")).toThrow(/only a sheet this page has/);
+    expect(() => sheetSearch("", "prices" as "bulk")).toThrow(/only a sheet this page has/);
   });
 });
 

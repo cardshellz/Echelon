@@ -3,6 +3,7 @@ import { Button } from "@/components/ui/button";
 import type { ListingSettingsSizePrice } from "@shared/dropship/listing-settings";
 import { listingSettingsPricesQueryOptions, type ListingSettingsPriceFilter } from "@/lib/dropship-listing-settings";
 import { builtFromWords, formatCents, retailFallbackFixWords } from "@/lib/dropship-listing-settings-price-words";
+import { SIZE_PRICES_SHOW, sizePricesEntry } from "@/lib/dropship-listing-settings-size-prices";
 import {
   ListFooter,
   ListPageStates,
@@ -28,6 +29,12 @@ import {
  *
  * Price words come from dropship-listing-settings-price-words.ts (1A), so a
  * size reads the same here, in the drawer and in the price check.
+ *
+ * From PR 10f (plan 9.2, 9.3) the tab offers "Give these sizes a price" while
+ * Show = "Can't be priced" lists a size: one sheet (`?sheet=give-prices`) that
+ * types an exact price for every such size at once. The button reads the
+ * sheet's own first page (no search), which with no search typed is the
+ * tab's own query (D18), so it adds no read then.
  */
 
 /** The Prices tab's own words. */
@@ -102,20 +109,44 @@ export interface PricesTabProps extends ListingSettingsListHandlers<PriceShowOpt
   compact: boolean;
   /** The list can't be read now (more than 10,000 sizes): no reads, controls off, the banner says why. */
   listsOff: boolean;
+  /** [Give these sizes a price] (PR 10f): the step puts the sheet in the address. Left out, the tab offers no button. */
+  onGivePrices?: () => void;
 }
 
 /** The Prices tab: search, Show, one row per chosen size, paging. */
 export function PricesTab(props: PricesTabProps) {
-  const { view, compact, listsOff } = props;
+  const { view, compact, listsOff, storeConnectionId, onGivePrices } = props;
   return (
     <div data-testid="listing-settings-prices-tab" className="space-y-3">
       <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
         <ListSearch value={view.searchInput} disabled={listsOff} onChange={props.onSearchInput} />
         <ListShowSelect value={view.show} options={PRICE_SHOW_OPTIONS} disabled={listsOff} onChange={props.onShow} />
       </div>
+      {onGivePrices !== undefined && !listsOff && view.show === SIZE_PRICES_SHOW && (
+        <GivePricesEntry storeConnectionId={storeConnectionId} onOpen={onGivePrices} />
+      )}
       {!listsOff && listPagesShown(view, compact).map((page, index, pages) => (
         <PricesPage key={compact ? page : "page"} {...props} page={page} last={index === pages.length - 1} />
       ))}
+    </div>
+  );
+}
+
+/**
+ * [Give these sizes a price] under Show = "Can't be priced" (PR 10f, plan 9.3): mounted only then, it reads the
+ * sheet's own first page (no search: the button follows the Show filter, not the tab's search, since the sheet lists
+ * every size that can't be priced; with no search typed it is the page below's key, so one read, D18) and shows while
+ * a size is listed.
+ */
+function GivePricesEntry({ storeConnectionId, onOpen }: { storeConnectionId: number; onOpen: () => void }) {
+  const read = useQuery(listingSettingsPricesQueryOptions(storeConnectionId, { search: "", show: SIZE_PRICES_SHOW, page: 0 }));
+  const entry = sizePricesEntry({ show: SIZE_PRICES_SHOW, listsOff: false, page: { data: read.data, error: read.error } });
+  if (!entry.shown) return null;
+  return (
+    <div data-testid="listing-settings-give-prices">
+      <Button type="button" variant="outline" size="sm" className="min-h-11 sm:min-h-9" onClick={onOpen}>
+        {entry.label}
+      </Button>
     </div>
   );
 }

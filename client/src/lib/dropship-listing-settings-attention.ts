@@ -7,7 +7,7 @@ import {
 import { LISTING_SETTINGS_SEND_TIMING } from "./dropship-catalog-steps";
 import { listingAccessLink, type ListingAccessLink } from "./dropship-listing-access";
 import type { ListingSettingsReadState } from "./dropship-listing-settings-access";
-import { LISTING_SETTINGS_UPDATED_WORDS, UNNAMED_PRODUCT_WORDS } from "./dropship-listing-settings-words";
+import { LISTING_SETTINGS_SIZE_PRICES_WORDS, LISTING_SETTINGS_UPDATED_WORDS, UNNAMED_PRODUCT_WORDS } from "./dropship-listing-settings-words";
 
 /**
  * The words at the top of the Listing settings step (Listing settings PR 7,
@@ -97,6 +97,8 @@ export type AttentionAction =
   | { kind: "open_product"; label: string; productId: number; fix: ListingSettingsAttentionCode; row?: AttentionDrawerRow }
   /** Opens the "Card Shellz updated products" sheet (`?sheet=updated`, plan PR 10, 10.2, D21). */
   | { kind: "open_updated_products"; label: string }
+  /** Opens "Give these sizes a price" (`?sheet=give-prices`, plan PR 10, 9.2, D21; UX-M2): a can't-be-priced line with no product. */
+  | { kind: "open_size_prices"; label: string }
   /** Leaves for another portal page. */
   | { kind: "link"; link: ListingAccessLink };
 
@@ -217,7 +219,11 @@ function attentionLine(
     case "no_ebay_category":
       return { key, code: item.code, text: `${product} can't be listed: it has no eBay category.`, action: fix(item.code) };
     case "size_cannot_be_priced":
-      // Interim button.
+      // Interim button. A line with no product opens "Give these sizes a price", which lists every such size (PR 10f,
+      // UX-M2); a one-product line keeps the drawer, which opens on that size.
+      if (item.productId === null) {
+        return { key, code: item.code, text: `${product} can't be listed: a size can't be priced.`, action: { kind: "open_size_prices", label: LISTING_SETTINGS_SIZE_PRICES_WORDS.fix } };
+      }
       return { key, code: item.code, text: `${product} can't be listed: a size can't be priced.`, action: fix(item.code) };
     case "description_group_conflict":
       // Interim (PR 10 PROPOSAL, plan 12.2): [Fix] lands on the drawer's Description row and opens it (plan 5.2).

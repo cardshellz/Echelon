@@ -7,7 +7,7 @@ import {
   type PriceChangeRow,
 } from "@shared/dropship/listing-setting-writes";
 import { RETAIL_FALLBACK_RULE_NAME, type PricingRecipe } from "@shared/dropship/pricing-rules";
-import { reduceListingSettingsDraft, productEditorId, type ListingSettingsDraft } from "../dropship-listing-settings-drafts";
+import { reduceListingSettingsDraft, productEditorId, SAVED_FLASH_MS, type ListingSettingsDraft } from "../dropship-listing-settings-drafts";
 import { formatCents, reviewRetailFallbackWords } from "../dropship-listing-settings-price-words";
 import {
   productPriceDraftValue,
@@ -20,6 +20,8 @@ import { CHECK_NEW_PRICES_WORDS, PRICE_DEFAULT_WORDS, reviewBlockedWords, review
 import { LISTING_SETTINGS_EDIT_WORDS, LISTING_SETTINGS_PRICE_CHECK_WORDS, wouldBeLeftWithoutPriceWords } from "../dropship-listing-settings-words";
 import { SUGGESTED_PRICING_RECIPE } from "../dropship-pricing-rules";
 import {
+  categoryPriceCheckChangeWords,
+  categoryPriceCheckCountsWords,
   changePriceButton,
   checkPriceCheckPage,
   decideAfterApplyRefusal,
@@ -33,6 +35,7 @@ import {
   PriceCheckRequestError,
   priceCheckAfterOf,
   priceCheckAfterWords,
+  priceCheckAlsoWords,
   priceCheckApplyBody,
   priceCheckApplySignature,
   priceCheckBack,
@@ -331,6 +334,21 @@ describe("counts and lines (plan 7.4, 7.5)", () => {
     expect(pendingPriceWords({ price: { mode: "leave" }, releaseExactPrices: false })).toBeNull();
   });
 
+  it("counts a category check the same way, says Use store default for its default, and lines what else it saves (PR 10f, plan 9.2, 9.3)", () => {
+    expect(categoryPriceCheckCountsWords({ total: 1240, changed: 1180, released: 36, refused: 3 })).toBe(priceCheckCountsWords({ total: 1240, changed: 1180, released: 36, refused: 3 }));
+    expect(categoryPriceCheckChangeWords(SET)).toEqual(["Retail price + 20%, round up to .99"]);
+    expect(categoryPriceCheckChangeWords(DEFAULT)).toEqual(["Use store default"]);
+    expect(categoryPriceCheckChangeWords({ price: { mode: "leave" } })).toEqual([]);
+    expect(priceCheckAlsoWords({ fields: ["shippingPolicy"], clears: [{ field: "shippingPolicy", count: 3 }] })).toEqual([
+      "Also saves: shipping policy.", "Clears 3 products' own shipping policy.",
+    ]);
+    expect(priceCheckAlsoWords({ fields: ["ebayCategory", "storeShelf", "textBelow"], clears: [{ field: "price", count: 1 }, { field: "storeShelf", count: 1_240 }, { field: "textAbove", count: 0 }] })).toEqual([
+      "Also saves: eBay category, store shelf, text below.", "Clears 1 product's own price.", "Clears 1,240 products' own store shelf.",
+    ]);
+    expect(priceCheckAlsoWords({ fields: [], clears: [] })).toEqual([]);
+    for (const line of priceCheckAlsoWords({ fields: ["shippingPolicy"], clears: [{ field: "price", count: 2 }] })) expect(line).not.toMatch(/DROPSHIP_|[a-z]+_[a-z_]+/);
+  });
+
   it("says once why a new check replaced the one before it", () => {
     expect(priceCheckAfterWords(null)).toBeNull();
     expect(priceCheckAfterWords("prices_moved")).toBe("Prices changed while you were checking. Here's the new check.");
@@ -463,8 +481,19 @@ describe("decideAfterApplyRefusal (plan 7.5, CC-C3)", () => {
     ["product_prices", "DROPSHIP_PRODUCT_LISTING_SETTINGS_VERSION_CONFLICT", { conflictCount: 2 }, "refused"],
     ["category_price", "DROPSHIP_CATEGORY_LISTING_SETTINGS_VERSION_CONFLICT", null, "conflict"],
     ["category_price", "DROPSHIP_PRODUCT_LISTING_SETTINGS_VERSION_CONFLICT", { conflictCount: 2 }, "conflict"],
+    // The category kind's table (plan 9.4, PR 10f): a new check (after the guard re-reads the category), a conflict, or words.
     ["category_price", "DROPSHIP_LISTING_PRICES_MOVED", null, "recheck"],
+    ["category_price", "DROPSHIP_IDEMPOTENCY_CONFLICT", { reviewId: REVIEW_ID }, "recheck"],
+    ["category_price", "DROPSHIP_PRICING_REVIEW_NOT_FOUND", { reviewId: REVIEW_ID }, "recheck"],
+    ["category_price", "DROPSHIP_LISTING_PRICE_VERSION_CONFLICT", { productVariantId: 101 }, "recheck"],
+    ["category_price", "DROPSHIP_LISTING_SETTINGS_OLDER_RULES_PRESENT", { pricingGroups: 1 }, "refused"],
+    ["category_price", "DROPSHIP_LISTING_SETTINGS_CATEGORY_NOT_FOUND", { categoryId: 40 }, "refused"],
+    ["category_price", "DROPSHIP_LISTING_SETTINGS_BULK_TOO_LARGE", { reason: "price_check_rows" }, "refused"],
+    ["category_price", "DROPSHIP_LISTING_SETTINGS_TOO_LARGE", null, "refused"],
     ["category_price", "DROPSHIP_LISTING_PRICE_WOULD_BE_LOST", { sizeCount: 2 }, "refused"],
+    ["category_price", "DROPSHIP_LISTING_PRICE_WOULD_BE_LOST", { productVariantId: 101 }, "recheck"],
+    ["category_price", "DROPSHIP_LISTING_SETTINGS_REPLAY_INCOMPLETE", null, "refused"],
+    ["category_price", null, null, "refused"],
     ["product_prices", null, null, "refused"],
     ["product_prices", "DROPSHIP_SOMETHING_NEW", null, "refused"],
   ];
@@ -573,6 +602,20 @@ describe("the check inside its owner (D16, D20, D21)", () => {
     }
     // Hidden by Back, the draft keeps the check: reopening shows it again (D21).
     expect(priceCheckShown(reduceListingSettingsDraft(uncertain, { type: "close" }), change)).toMatchObject({ phase: "uncertain", locked: true });
+  });
+
+  it("never shows an applied check again once the Saved flash ends (the draft is clean; found by PR 10f's review)", () => {
+    const saving = reduceListingSettingsDraft(priceDraft(change), { type: "startSave", attempt: { signature: "s", key: "k" } })!;
+    const saved = reduceListingSettingsDraft(saving, { type: "saved", key: "k", nowMs: 1_000, viewStale: false })!;
+    expect(priceCheckShown(saved, change)).toBeNull();
+    // The flash ends: the provider ticks the open draft back to editing with the applied check still in its value.
+    const afterFlash = reduceListingSettingsDraft(saved, { type: "tick", nowMs: 1_000 + SAVED_FLASH_MS })!;
+    expect(afterFlash).toMatchObject({ phase: "editing", changes: 0 });
+    expect(priceCheckShown(afterFlash, change)).toBeNull();
+    // A new change on top of it is a new request, not the applied check: the owner's edit drops the check first
+    // (`priceCheckBack` / the editor's edit), so a dirty draft with a check is one that was checked, not applied.
+    const dirty = { ...afterFlash, changes: 1 };
+    expect(priceCheckShown(dirty, change)).toMatchObject({ phase: "editing", locked: false });
   });
 
   it("Back to editing drops the check and keeps the change, or closes the owner while a save is out or unconfirmed", () => {

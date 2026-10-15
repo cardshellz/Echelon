@@ -46,6 +46,8 @@ import {
 } from "./dropship-listing-settings-recipe";
 import {
   builtFromStartWords,
+  categoryCheckAlsoWords,
+  LISTING_SETTINGS_CATEGORY_WORDS,
   LISTING_SETTINGS_EDIT_WORDS,
   LISTING_SETTINGS_PRICE_CHECK_WORDS,
   loseExactPriceWords,
@@ -59,10 +61,13 @@ import { SUGGESTED_PRICING_RECIPE } from "./dropship-pricing-rules";
 
 /**
  * The price check for one or many products (W7 `product_prices`; Listing
- * settings PR 10d, plan 7.2-7.6): the review request a product's drawer or
- * "Set for selected" sends, the check's rows, counts, pages and footer as
- * the vendor reads them, the price editor's model, and what an apply's
- * refusal means (check again, or show it).
+ * settings PR 10d, plan 7.2-7.6), and for one category's price (W7
+ * `category_price`; PR 10f, plan 9.2, 9.4): the review request a product's
+ * drawer or "Set for selected" sends (the category editor's is built in
+ * dropship-listing-settings-categories.ts), the check's rows, counts, pages
+ * and footer as the vendor reads them (both kinds share them), the price
+ * editor's model, and what an apply's refusal means (check again, a conflict
+ * for the category kind, or show it).
  *
  * Rules this module keeps:
  * - The client never computes a price (D1): every Now and New price is the
@@ -342,6 +347,34 @@ export function pendingPriceWords(change: Pick<ProductPriceChange, "price" | "re
   return words.length === 0 ? null : pendingSettingWords(words.join(" · "));
 }
 
+/**
+ * What a category check is of (PR 10f, plan 9.3; D17): "Retail price + 20%,
+ * round up to .99" or "Use store default". A category check releases
+ * nothing. Empty for no change.
+ */
+export function categoryPriceCheckChangeWords(change: Pick<ProductPriceChange, "price">): string[] {
+  if (change.price.mode === "set") return [recipeWords(change.price.value)];
+  if (change.price.mode === "default") return [LISTING_SETTINGS_CATEGORY_WORDS.useStoreDefault];
+  return [];
+}
+
+/**
+ * The lines over a category check for what else it saves (plan 9.2, UX-m9):
+ * "Also saves: shipping policy, store shelf." and "Clears 3 products' own
+ * shipping policy." (one per ticked clear, counted from the set shown).
+ * Empty for a check of the price alone.
+ */
+export function priceCheckAlsoWords(also: Parameters<typeof categoryCheckAlsoWords>[0]): string[] {
+  return categoryCheckAlsoWords(also);
+}
+
+/**
+ * The counts line of either kind (plan 7.4, 9.2): a category check's rows are
+ * the sizes of the category's chosen products, counted the same way; a
+ * product whose own price a clear takes away counts among the changes.
+ */
+export const categoryPriceCheckCountsWords = priceCheckCountsWords;
+
 /** The line shown once over a check that replaced an earlier one (7.5): R:683's for moved prices, else why. */
 export function priceCheckAfterWords(after: PriceCheckAfter | null): string | null {
   switch (after) {
@@ -613,9 +646,14 @@ export interface PriceCheckShown {
  * check (made, or kept from before Back, D21). A saved check has no body any
  * more (the owner's views are read again). Null shows the owner's own body.
  */
-export function priceCheckShown(draft: Pick<ListingSettingsDraft, "phase" | "message" | "code"> | null, change: ProductPriceChange | null): PriceCheckShown | null {
+export function priceCheckShown(draft: Pick<ListingSettingsDraft, "phase" | "message" | "code" | "changes"> | null, change: ProductPriceChange | null): PriceCheckShown | null {
   if (draft === null || change === null || change.check === null) return null;
   if (draft.phase === "saved" || draft.phase === "saved_view_stale") return null;
+  // A check is held only with a change to save. Once the apply took it, the base took the value and the draft is
+  // clean; when the "Saved" flash ends the draft turns back to editing with that check still in its value, and
+  // showing it again would offer a save the server has already made (found by PR 10f's review; the category
+  // editor's rule, `categoryPriceCheckShown`).
+  if (draft.phase === "editing" && !isDraftDirty(draft)) return null;
   return { check: change.check, phase: draft.phase, message: draft.message, code: draft.code, locked: isDraftLocked(draft) };
 }
 

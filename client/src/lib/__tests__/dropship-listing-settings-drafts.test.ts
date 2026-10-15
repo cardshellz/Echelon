@@ -3,9 +3,11 @@ import { DropshipApiError } from "../dropship-ops-surface";
 import { LISTING_SETUP_RELOAD_MESSAGE } from "../dropship-ebay-listing-setup";
 import {
   LISTING_SETTINGS_BULK_WORDS,
+  LISTING_SETTINGS_CATEGORY_PRICE_WORDS,
   LISTING_SETTINGS_CATEGORY_WORDS,
   LISTING_SETTINGS_EDIT_WORDS,
   LISTING_SETTINGS_PRICE_CHECK_WORDS,
+  LISTING_SETTINGS_SIZE_PRICES_WORDS,
   releaseLimitWords,
   wouldBeLeftWithoutPriceWords,
 } from "../dropship-listing-settings-words";
@@ -15,6 +17,7 @@ import {
   LISTING_SETTINGS_KEY_PREFIXES,
   LISTING_SETTINGS_SAVE_WORDS,
   SAVED_FLASH_MS,
+  SIZE_PRICES_EDITOR_ID,
   STORE_DEFAULT_COMPACT_LABELS,
   STORE_DEFAULT_FIELDS,
   STORE_DEFAULT_LABELS,
@@ -98,7 +101,26 @@ describe("store default rows", () => {
       policy: "ls-policy", shelf: "ls-shelf", shipFrom: "ls-ship-from", pricingApply: "ls-apply",
       category: "ls-category", description: "ls-text", sizePrice: "ls-price", productSettings: "ls-product",
       bulkSettings: "ls-bulk", priceCheck: "ls-price-check", categoryMoves: "ls-moves", categorySettings: "ls-cat",
+      sizePrices: "ls-size-prices",
     });
+    // W9's "ls-price" (one size) and W8's "ls-size-prices" (many sizes) are two prefixes, never one key shape.
+    expect(LISTING_SETTINGS_KEY_PREFIXES.sizePrices).not.toBe(LISTING_SETTINGS_KEY_PREFIXES.sizePrice);
+  });
+
+  it("names Give these sizes a price's editor \"sizePrices\", one draft beside the others (PR 10f, D16)", () => {
+    expect(SIZE_PRICES_EDITOR_ID).toBe("sizePrices");
+    const product = run([{ type: "open", editor: productEditorId(11), place: "Penny Sleeves", base: { a: 1 } }, { type: "edit", value: { a: 2 } }]);
+    expect(decideOpen(product, SIZE_PRICES_EDITOR_ID)).toBe("ask");
+    expect(decideOpen(run([{ type: "open", editor: productEditorId(11), place: "Penny Sleeves", base: { a: 1 } }]), SIZE_PRICES_EDITOR_ID)).toBe("open");
+    const sizes = run([{ type: "open", editor: SIZE_PRICES_EDITOR_ID, place: "Give these sizes a price", base: {} }, { type: "edit", value: { "size:101": { text: "14.99", expectedRevisionId: null } } }]);
+    expect(sizes).toMatchObject({ editor: "sizePrices", changes: 1 });
+    // And the other way round: a held typed price is asked about before the drawer, a sheet, a category or a Store defaults row opens.
+    expect(decideOpen(sizes, productEditorId(11))).toBe("ask");
+    expect(decideOpen(sizes, BULK_EDITOR_ID)).toBe("ask");
+    expect(decideOpen(sizes, categoryEditorId(40))).toBe("ask");
+    expect(decideOpen(sizes, "price")).toBe("ask");
+    expect(decideOpen(sizes, SIZE_PRICES_EDITOR_ID)).toBe("open");
+    expect(describeListingSettingsBar({ draft: sizes, olderDraftCount: 0, saving: false })).toBe("Not saved · 1 change in Give these sizes a price");
   });
 
   it("names the category editor by category, one draft beside the others (PR 10e, D16)", () => {
@@ -444,8 +466,8 @@ describe("reduceListingSettingsDraft", () => {
   });
 });
 
-/** The PR 7 writers; W5, W6, W7, W12 and W13 (PR 10) have their own tables below. */
-type Pr7Writer = Exclude<ListingSettingsWriter, "W5" | "W6" | "W7" | "W12" | "W13">;
+/** The PR 7 writers; W5, W6, W7, W8, W12 and W13 (PR 10) have their own tables below. */
+type Pr7Writer = Exclude<ListingSettingsWriter, "W5" | "W6" | "W7" | "W8" | "W12" | "W13">;
 
 describe("classifyWriteFailure", () => {
   const writers: readonly Pr7Writer[] = ["W1", "W2", "W3", "W4", "W9", "W10"];
@@ -961,5 +983,100 @@ describe("classifyWriteFailure for W12 (PR 10e, plan 3.3, 8.6)", () => {
     expect(W12(403, "DROPSHIP_LISTING_SETTINGS_EBAY_SIGN_IN_REQUIRED", { fields: ["ebayCategory"] })).toMatchObject({ phase: "blocked", fields: ["ebayCategory"] });
     expect(W12(422, "DROPSHIP_LISTING_SETTINGS_TOO_LARGE", { reason: "store_text_limit" })).toMatchObject({ phase: "refused", message: LISTING_SETTINGS_EDIT_WORDS.storeTextLimit });
     expect(classifyWriteFailure("W12", new TypeError("Failed to fetch"))).toEqual({ phase: "uncertain", message: LISTING_SETTINGS_SAVE_WORDS.uncertain, code: null, status: null, fields: [] });
+  });
+});
+
+describe("classifyWriteFailure for W8 (PR 10f, plan 3.3, 9.5)", () => {
+  const W8 = (status: number, code: string | null, context?: Record<string, unknown>) =>
+    classifyWriteFailure("W8", apiError(status, code, "Server words.", context));
+
+  it("calls a version conflict a conflict, counted by the server (conflictCount), never by its capped list (plan 9.5, CC-C5)", () => {
+    expect(W8(409, "DROPSHIP_LISTING_PRICE_VERSION_CONFLICT", { conflicts: [{ productVariantId: 101, expectedRevisionId: 5, actualRevisionId: 6 }], conflictCount: 3 })).toEqual({
+      phase: "conflict", message: "3 sizes' prices changed in another window.", code: "DROPSHIP_LISTING_PRICE_VERSION_CONFLICT", status: 409, fields: [],
+    });
+    expect(W8(409, "DROPSHIP_LISTING_PRICE_VERSION_CONFLICT", { conflicts: [{ productVariantId: 101 }], conflictCount: 1 }).message).toBe("1 size's price changed in another window.");
+    expect(W8(409, "DROPSHIP_LISTING_PRICE_VERSION_CONFLICT", { conflicts: [{ productVariantId: 101 }, { productVariantId: 102 }] }).message).toBe(LISTING_SETTINGS_SAVE_WORDS.conflict);
+    // W9's own conflict keeps its shared words.
+    expect(classifyWriteFailure("W9", apiError(409, "DROPSHIP_LISTING_PRICE_VERSION_CONFLICT", "x", { conflictCount: 3 })).message).toBe(LISTING_SETTINGS_SAVE_WORDS.conflict);
+  });
+
+  it("refuses a price outside a limit in the server's form from sizeCount, a size no longer chosen, and the fatal replay (plan 9.5)", () => {
+    expect(W8(422, "DROPSHIP_LISTING_PRICE_OUTSIDE_LIMIT", { sizes: [{ productVariantId: 101, priceCents: 1, blockers: ["pricing:below_floor:policy_3"] }], sizeCount: 3 })).toEqual({
+      phase: "refused", message: "3 sizes' prices would be outside what Card Shellz allows. Enter prices Card Shellz allows.", code: "DROPSHIP_LISTING_PRICE_OUTSIDE_LIMIT", status: 422, fields: [],
+    });
+    expect(W8(422, "DROPSHIP_LISTING_PRICE_OUTSIDE_LIMIT", { sizes: [{ productVariantId: 101 }], sizeCount: 1 }).message).toBe("1 size's price would be outside what Card Shellz allows. Enter prices Card Shellz allows.");
+    expect(W8(422, "DROPSHIP_LISTING_PRICE_OUTSIDE_LIMIT", { sizes: [{ productVariantId: 101 }] }).message).toBe("Server words.");
+    // A size no longer chosen is a conflict (Load latest drops it), never a refusal resent under a new key (W6's product-gone rule).
+    expect(W8(404, "DROPSHIP_LISTING_PRICE_NOT_AVAILABLE", { productVariantId: 101 })).toMatchObject({ phase: "conflict", message: LISTING_SETTINGS_SIZE_PRICES_WORDS.notAvailable });
+    expect(W8(500, "DROPSHIP_LISTING_SETTINGS_REPLAY_INCOMPLETE")).toMatchObject({ phase: "refused", message: LISTING_SETTINGS_EDIT_WORDS.fatal });
+    expect(W8(500, "DROPSHIP_LISTING_PRICE_INVARIANT_FAILED")).toMatchObject({ phase: "refused", message: LISTING_SETTINGS_EDIT_WORDS.fatal });
+    // W9 keeps the server's words for the same codes.
+    expect(classifyWriteFailure("W9", apiError(422, "DROPSHIP_LISTING_PRICE_OUTSIDE_LIMIT", "Server words.", { sizeCount: 3 })).message).toBe("Server words.");
+  });
+
+  it("refuses what W8 can't be answered (a lost price, the rules, a release, a review, a product, a category, text, eBay), and keeps the shared rows", () => {
+    for (const [status, code] of [
+      [422, "DROPSHIP_LISTING_PRICE_WOULD_BE_LOST"], [422, "DROPSHIP_PRICING_RULES_NOT_CONFIGURED"], [422, "DROPSHIP_LISTING_PRICE_RELEASE_LIMIT"],
+      [409, "DROPSHIP_LISTING_PRICES_MOVED"], [404, "DROPSHIP_PRICING_REVIEW_NOT_FOUND"], [409, "DROPSHIP_PRODUCT_LISTING_SETTINGS_VERSION_CONFLICT"],
+      [409, "DROPSHIP_CATEGORY_LISTING_SETTINGS_VERSION_CONFLICT"], [409, "DROPSHIP_LISTING_SETTINGS_OLDER_RULES_PRESENT"],
+      [404, "DROPSHIP_LISTING_SETTINGS_CATEGORY_NOT_FOUND"], [404, "DROPSHIP_LISTING_SETTINGS_PRODUCT_NOT_FOUND"], [422, "DROPSHIP_LISTING_SETTINGS_BULK_TOO_LARGE"],
+      [403, "DROPSHIP_LISTING_SETTINGS_EBAY_SIGN_IN_REQUIRED"], [422, "DROPSHIP_EBAY_LISTING_SETUP_SELECTION_INVALID"], [422, "DROPSHIP_EBAY_FULFILLMENT_POLICY_INCOMPATIBLE"],
+      [422, "DROPSHIP_EBAY_CATEGORY_RULE_INVALID"], [422, "DROPSHIP_EBAY_STORE_CATEGORY_INVALID"],
+    ] as const) {
+      expect({ input: code, ...W8(status, code, { productVariantId: 101, sizeCount: 1, conflictCount: 1 }) }).toEqual({ input: code, code, phase: "refused", message: LISTING_SETTINGS_EDIT_WORDS.invalid, status, fields: [] });
+    }
+    expect(W8(503, "DROPSHIP_LISTING_SETTINGS_BUSY", { reason: "heavy_write_in_progress" })).toMatchObject({ phase: "unreachable", message: LISTING_SETTINGS_EDIT_WORDS.busyHeavy });
+    expect(W8(503, "DROPSHIP_LISTING_SETTINGS_BUSY", { reason: "request_key_changed" })).toMatchObject({ phase: "unreachable", message: LISTING_SETTINGS_EDIT_WORDS.busyKeyChanged });
+    expect(W8(503, "DROPSHIP_LISTING_SETTINGS_BUSY")).toMatchObject({ phase: "uncertain" });
+    expect(W8(429, "DROPSHIP_LISTING_SETTINGS_RATE_LIMITED")).toMatchObject({ phase: "rate_limited" });
+    expect(W8(409, "DROPSHIP_IDEMPOTENCY_CONFLICT")).toMatchObject({ phase: "refused", message: LISTING_SETTINGS_SAVE_WORDS.keyReused });
+    expect(W8(413, "DROPSHIP_REQUEST_TOO_LARGE")).toMatchObject({ phase: "refused", message: LISTING_SETTINGS_EDIT_WORDS.tooBig });
+    expect(W8(422, "DROPSHIP_LISTING_SETTINGS_TOO_LARGE")).toMatchObject({ phase: "refused", message: "Server words." });
+    expect(W8(403, "DROPSHIP_LISTING_STORE_BLOCKED", { reason: "paused" })).toMatchObject({ phase: "blocked" });
+    expect(classifyWriteFailure("W8", new TypeError("Failed to fetch"))).toEqual({ phase: "uncertain", message: LISTING_SETTINGS_SAVE_WORDS.uncertain, code: null, status: null, fields: [] });
+  });
+});
+
+describe("classifyWriteFailure for W7's category kind (PR 10f, plan 9.4)", () => {
+  const CAT = (status: number, code: string | null, context?: Record<string, unknown>) =>
+    classifyWriteFailure("W7", apiError(status, code, "Server words.", context), { priceCheckKind: "category_price", categoryName: "Sleeves" });
+
+  it("calls the category's and the clear set's version conflicts a conflict (the products kind can't get them)", () => {
+    expect(CAT(409, "DROPSHIP_CATEGORY_LISTING_SETTINGS_VERSION_CONFLICT", { conflicts: [{ categoryId: 40, expectedRevisionId: 7, actualRevisionId: 8 }], conflictCount: 1 })).toEqual({
+      phase: "conflict", message: LISTING_SETTINGS_SAVE_WORDS.conflict, code: "DROPSHIP_CATEGORY_LISTING_SETTINGS_VERSION_CONFLICT", status: 409, fields: [],
+    });
+    expect(CAT(409, "DROPSHIP_PRODUCT_LISTING_SETTINGS_VERSION_CONFLICT", { conflicts: [{ productId: 12 }], conflictCount: 1 })).toEqual({
+      phase: "conflict", message: "The products in Sleeves changed. Load the latest and save again. A Card Shellz change can take a minute to show.",
+      code: "DROPSHIP_PRODUCT_LISTING_SETTINGS_VERSION_CONFLICT", status: 409, fields: [],
+    });
+    for (const kind of ["product_prices", undefined] as const) {
+      expect(classifyWriteFailure("W7", apiError(409, "DROPSHIP_CATEGORY_LISTING_SETTINGS_VERSION_CONFLICT", "x"), { priceCheckKind: kind })).toMatchObject({ phase: "refused", message: LISTING_SETTINGS_EDIT_WORDS.invalid });
+      expect(classifyWriteFailure("W7", apiError(409, "DROPSHIP_PRODUCT_LISTING_SETTINGS_VERSION_CONFLICT", "x", { conflictCount: 2 }), { priceCheckKind: kind })).toMatchObject({ phase: "refused", message: LISTING_SETTINGS_EDIT_WORDS.invalid });
+    }
+  });
+
+  it("refuses older rules in the D11 line, a gone category in the card's words, and too much text in the category's words; the rest as the products kind", () => {
+    expect(CAT(409, "DROPSHIP_LISTING_SETTINGS_OLDER_RULES_PRESENT", { pricingGroups: 1, contentGroups: 0, ebayCategoryRules: 0 })).toMatchObject({ phase: "refused", message: LISTING_SETTINGS_CATEGORY_WORDS.olderRules });
+    expect(CAT(404, "DROPSHIP_LISTING_SETTINGS_CATEGORY_NOT_FOUND", { categoryId: 40 })).toMatchObject({ phase: "refused", message: LISTING_SETTINGS_CATEGORY_WORDS.categoryNotFound });
+    expect(CAT(422, "DROPSHIP_LISTING_SETTINGS_BULK_TOO_LARGE", { reason: "price_check_rows", textBytes: 30_000_100 })).toMatchObject({ phase: "refused", message: LISTING_SETTINGS_CATEGORY_PRICE_WORDS.tooHeavy });
+    expect(CAT(422, "DROPSHIP_LISTING_SETTINGS_BULK_TOO_LARGE", { textBytes: 30_000_100 })).toMatchObject({ phase: "refused", message: LISTING_SETTINGS_CATEGORY_PRICE_WORDS.tooHeavy });
+    // More than 10,000 sizes names step 1 for a category, as its text budget does; the store text cap keeps its words.
+    expect(CAT(422, "DROPSHIP_LISTING_SETTINGS_TOO_LARGE")).toMatchObject({ phase: "refused", message: LISTING_SETTINGS_CATEGORY_PRICE_WORDS.tooManySizes });
+    expect(CAT(422, "DROPSHIP_LISTING_SETTINGS_TOO_LARGE", { reason: "store_text_limit" })).toMatchObject({ phase: "refused", message: LISTING_SETTINGS_EDIT_WORDS.storeTextLimit });
+    expect(CAT(409, "DROPSHIP_LISTING_PRICES_MOVED", { sizes: [] })).toMatchObject({ phase: "refused", message: "Server words." });
+    expect(CAT(409, "DROPSHIP_IDEMPOTENCY_CONFLICT", { reviewId: "x" })).toMatchObject({ phase: "refused", message: LISTING_SETTINGS_SAVE_WORDS.keyReused });
+    expect(CAT(404, "DROPSHIP_PRICING_REVIEW_NOT_FOUND")).toMatchObject({ phase: "refused", message: LISTING_SETTINGS_SAVE_WORDS.pricingReviewGone });
+    expect(CAT(422, "DROPSHIP_LISTING_PRICE_WOULD_BE_LOST", { sizes: [{ productVariantId: 101 }], sizeCount: 2 })).toMatchObject({ phase: "refused", message: wouldBeLeftWithoutPriceWords(2) });
+    expect(CAT(422, "DROPSHIP_LISTING_PRICE_RELEASE_LIMIT", { releaseCount: 236, maxReleases: 200 })).toMatchObject({ phase: "refused", message: releaseLimitWords(200, 236) });
+    expect(CAT(422, "DROPSHIP_PRICING_RULES_NOT_CONFIGURED")).toMatchObject({ phase: "refused", message: LISTING_SETTINGS_EDIT_WORDS.invalid });
+    expect(CAT(404, "DROPSHIP_LISTING_SETTINGS_PRODUCT_NOT_FOUND", { productId: 11 })).toMatchObject({ phase: "refused", message: LISTING_SETTINGS_EDIT_WORDS.invalid });
+    expect(CAT(503, "DROPSHIP_LISTING_SETTINGS_BUSY", { reason: "heavy_write_in_progress" })).toMatchObject({ phase: "unreachable", message: LISTING_SETTINGS_EDIT_WORDS.busyHeavy });
+    expect(CAT(500, "DROPSHIP_LISTING_SETTINGS_INVARIANT_FAILED")).toMatchObject({ phase: "refused", message: LISTING_SETTINGS_EDIT_WORDS.fatal });
+    // The category check asks eBay about a new id (plan P13): eBay's refusals and a sign-in keep their rows.
+    expect(CAT(403, "DROPSHIP_LISTING_SETTINGS_EBAY_SIGN_IN_REQUIRED", { fields: ["ebayCategory"] })).toMatchObject({ phase: "blocked", fields: ["ebayCategory"] });
+    expect(CAT(422, "DROPSHIP_EBAY_STORE_CATEGORY_INVALID", { reason: "not_found", invalidFields: ["storeShelf"] })).toMatchObject({ phase: "refused", fields: ["storeShelf"] });
+    // The products kind keeps its words for the same codes.
+    expect(classifyWriteFailure("W7", apiError(409, "DROPSHIP_LISTING_SETTINGS_OLDER_RULES_PRESENT", "x")).message).toBe(LISTING_SETTINGS_EDIT_WORDS.invalid);
+    expect(classifyWriteFailure("W7", apiError(422, "DROPSHIP_LISTING_SETTINGS_BULK_TOO_LARGE", "x", { textBytes: 1 })).message).toBe(LISTING_SETTINGS_PRICE_CHECK_WORDS.tooHeavy);
   });
 });
