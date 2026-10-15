@@ -40,7 +40,7 @@ import {
   type CustomerAccountStagingConfig,
 } from "../domain/customer-account-staging";
 import type { customerAccountServices } from "../infrastructure/customer-account.composition";
-import { ORDER_EDIT_PRICING_DISPLAY_VERSION } from "@shared/order-edits/order-edit-financials";
+import { orderEditPricingDisplayVersionSchema } from "@shared/order-edits/order-edit-financials";
 import { orderEditResponsePresentation } from "../../order-edits/application/order-edit-response-presentation";
 
 type Services = ReturnType<ReturnType<typeof customerAccountServices>>;
@@ -205,11 +205,9 @@ async function dispatch(
   const { pricingDisplayVersion, ...orderQuery } = input.query;
   const query = path.startsWith("/order-edits/") ? orderQuery : input.query;
   const pricingDisplay =
-    path.startsWith("/order-edits/") &&
-    z
-      .literal(ORDER_EDIT_PRICING_DISPLAY_VERSION)
-      .optional()
-      .parse(pricingDisplayVersion) === ORDER_EDIT_PRICING_DISPLAY_VERSION;
+    path.startsWith("/order-edits/")
+      ? orderEditPricingDisplayVersionSchema.optional().parse(pricingDisplayVersion)
+      : undefined;
   const read = method === "GET";
   if (read && body !== undefined) empty.parse(body);
   if (path === "/account/bootstrap" && read) {

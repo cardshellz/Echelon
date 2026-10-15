@@ -60,6 +60,7 @@ import { prepareEbayPublicationCompletion } from "./ebay-listing-push";
 import { assertEbayPublicationCompatibility } from "./ebay-publication-compatibility";
 import { EbayListingWithdrawalExecution,EbayWithdrawalOperationExecution } from "../ebay-listing-withdrawal.service";
 import { prepareEbayWithdrawal } from "./ebay-listing-withdrawal";
+import { ensureEbayListingInventoryReady } from "./ebay-listing-inventory-readiness";
 export interface SyncFilter {
   productIds?: number[];
   productTypeSlugs?: string[];
@@ -482,6 +483,12 @@ async function prepareActiveEbayListingSync(
     sourceIdentity,
     client: ebayClient,
     draft: preparedDraft,
+    assertInventoryReady: execution => ensureEbayListingInventoryReady({
+      channelId: boundIdentity.channelId, connectionId: boundIdentity.connectionId,
+      accountId: boundIdentity.accountId, environment: ctx.authService.getEnvironment(),
+      productId, purpose: "sync",
+      variants: boundIdentity.variants.map(member => ({ productVariantId: member.variantId, sku: member.sku })),
+    }, execution, new Date()),
     variants: variants
       .filter((variant) =>
         routeDraft.offers.some(

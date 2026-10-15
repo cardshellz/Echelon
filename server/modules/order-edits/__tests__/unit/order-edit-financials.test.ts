@@ -30,6 +30,41 @@ const payment = (
 ) => ({ id, kind, status, amountCents });
 
 describe("exact order edit financials", () => {
+  it("reconciles Shopify tax display amounts without changing saved edit comparisons", () => {
+    const legacy = buildOrderEditFinancials({ ...input(), taxCents: 648, totalCents: 11444 });
+    const taxLines = [{ title: "PA State Tax", ratePercentage: 6, amountCents: 648 }];
+    const enriched = buildOrderEditFinancials({ ...input(), taxCents: 648, totalCents: 11444, taxLines });
+    expect(enriched.taxLines).toEqual(taxLines);
+    expect(equivalentOrderEditFinancialEvidence(enriched, legacy)).toBe(true);
+    expect(equivalentOrderEditFinancialEvidence(legacy, enriched)).toBe(true);
+    expect(matchesOrderEditFinancials(enriched, legacy)).toBe(true);
+    expect(equivalentOrderEditFinancialEvidence({ ...enriched, taxCents: 649 }, legacy)).toBe(false);
+    expect(matchesOrderEditFinancials({ ...enriched, taxCents: 649 }, legacy)).toBe(false);
+    enriched.taxLines![0].amountCents = 0;
+    expect(taxLines[0].amountCents).toBe(648);
+    expect(orderEditFinancialsSchema.safeParse(enriched).success).toBe(false);
+  });
+  it.each([null, 0, 6, 8.875, 100])("retains the stated tax rate %s including unknown and zero rates", ratePercentage => {
+    expect(buildOrderEditFinancials({ ...input(), taxLines: [{ title: "Tax", ratePercentage, amountCents: 0 }] }).taxLines?.[0].ratePercentage).toBe(ratePercentage);
+  });
+  it.each([
+    [{ title: "Tax", ratePercentage: 6, amountCents: 1 }],
+    [{ title: "Tax", ratePercentage: 6, amountCents: 0.5 }],
+    [{ title: "Tax", ratePercentage: -1, amountCents: 0 }],
+    [{ title: "Tax", ratePercentage: 101, amountCents: 0 }],
+    [{ title: "Tax", ratePercentage: NaN, amountCents: 0 }],
+    [{ title: "Tax", ratePercentage: Infinity, amountCents: 0 }],
+    [{ title: "", ratePercentage: 6, amountCents: 0 }],
+    [{ title: "Tax", amountCents: 0 }],
+  ])("rejects invalid or unreconciled tax display evidence", line => {
+    expect(orderEditFinancialsSchema.safeParse({ ...buildOrderEditFinancials(input()), taxLines: [line] }).success).toBe(false);
+  });
+  it("reconciles multiple and included taxes without calculating or adding rates", () => {
+    const taxLines = [{ title: "State", ratePercentage: 6, amountCents: 600 }, { title: "County", ratePercentage: 1, amountCents: 48 }];
+    const result = buildOrderEditFinancials({ ...input(), taxesIncluded: true, taxCents: 648, taxLines });
+    expect(result.totalCents).toBe(10796);
+    expect(result.taxLines).toEqual(taxLines);
+  });
   const details = () => [
     {
       key: "code:AMAZZIN'",

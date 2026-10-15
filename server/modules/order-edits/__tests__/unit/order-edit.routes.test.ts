@@ -156,13 +156,13 @@ describe("order edit staff HTTP boundary", () => {
     },
     body: JSON.stringify({ paymentWindowMinutes: 30, enabled: true }),
   });
-  it.each([false, true])("negotiates coupon display metadata on operation reads and previews, opt-in=%s", async (optIn) => {
+  it.each([undefined, "v1", "v2"])("negotiates coupon display metadata on operation reads and previews, opt-in=%s", async (optIn) => {
     const calculation = previewCalculation();
-    const financials = { ...calculation.financials, orderDiscounts: [], lines: calculation.financials.lines.map(line => ({ ...line, productNetCents: line.netCents })) };
+    const financials = { ...calculation.financials, taxLines: [{ title: "State tax", ratePercentage: 6, amountCents: calculation.financials.taxCents }], orderDiscounts: [], lines: calculation.financials.lines.map(line => ({ ...line, productNetCents: line.netCents })) };
     getOperation.mockResolvedValue({ ...displayOperation, financials: { before: null, quoted: financials, current: financials } });
     preview.mockImplementationOnce(async input => ({ phase: "preview", input, calculatedAt: new Date(PREVIEW_NOW).toISOString(), expiresAt: new Date(PREVIEW_NOW + 60000).toISOString(), ...calculation, financials }));
     const headers: Record<string, string> = { "Content-Type": "application/json", Origin: url };
-    if (optIn) headers[ORDER_EDIT_PRICING_DISPLAY_HEADER] = ORDER_EDIT_PRICING_DISPLAY_VERSION;
+    if (optIn) headers[ORDER_EDIT_PRICING_DISPLAY_HEADER] = optIn;
     const operationResponse = await fetch(`${url}/api/order-edits/admin/operations/${KEY}`, { headers });
     const previewResponse = await fetch(`${url}/api/order-edits/admin/previews`, { method: "POST", headers, body: JSON.stringify(previewInput()) });
     expect(operationResponse.status).toBe(200);
@@ -170,6 +170,7 @@ describe("order edit staff HTTP boundary", () => {
     for (const result of [(await operationResponse.json()).financials.quoted, (await previewResponse.json()).financials]) {
       expect(result.totalCents).toBe(financials.totalCents);
       expect(result.orderDiscounts).toEqual(optIn ? [] : undefined);
+    expect(result.taxLines).toEqual(optIn === "v2" ? financials.taxLines : undefined);
       expect(result.lines[0].productNetCents).toBe(optIn ? financials.lines[0].netCents : undefined);
       expect(result.lines[0].netCents).toBe(financials.lines[0].netCents);
     }
@@ -212,7 +213,7 @@ describe("order edit staff HTTP boundary", () => {
     },
   );
 
-  it.each([false, true])("negotiates quote and preview line metadata without changing amounts, opt-in=%s", async (optIn) => {
+  it.each([undefined, "v1", "v2"])("negotiates quote and preview line metadata without changing amounts, opt-in=%s", async (optIn) => {
     quote.mockResolvedValue(displayOperation);
     const calculation = previewCalculation();
     preview.mockImplementationOnce(async (input) => ({

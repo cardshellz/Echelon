@@ -21,7 +21,7 @@ describe("storefront transport reuses canonical clients", () => {
     request.mockImplementation(async () => Response.json({ connectionId: 4, input: { after: null }, categories: ["Toploaders"], pageInfo: { hasNextPage: false, endCursor: null } }));
     expect((await api.edits.catalogCategories(4, { after: null })).categories).toEqual(["Toploaders"]);
     const body = JSON.parse(String((request.mock.calls[1] as unknown as [string, RequestInit])[1].body));
-    expect(body.path).toBe("/order-edits/catalog/categories"); expect(body.query).toEqual({ connectionId: "4", pricingDisplayVersion: "v1" });
+    expect(body.path).toBe("/order-edits/catalog/categories"); expect(body.query).toEqual({ connectionId: "4", pricingDisplayVersion: "v2" });
     expect(body.sessionKey).toBe(key);
   });
   it("rejects external requests and unsupported methods before network calls", async () => {

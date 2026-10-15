@@ -22,6 +22,7 @@ vi.mock("../../ebay-listing-mapping.routes", () => ({ registerEbayListingMapping
 import { router } from "../../ebay-listings.routes";
 import { InventoryChannelQuantityRuntimeError } from "../../../../modules/inventory-planning/application/inventory-channel-quantity-runtime.service";
 import { ebayListingIssueSchema } from "@shared/types/ebay-listing-issue";
+import { resolveEbayFeedListingState } from "../../../../modules/channels/ebay-listing-feed-status";
 
 describe("eBay listing feed current content intent", () => {
   let server: ReturnType<ReturnType<typeof express>["listen"]>;
@@ -101,6 +102,38 @@ describe("eBay listing feed current content intent", () => {
     fixture.variants[0].external_listing_id = null;
     const { feed } = await (await fetch(url)).json();
     expect(feed[0]).toMatchObject({ status: "publication_incomplete", isListed: false });
+  });
+
+  it("keeps an existing listing syncable when a newly selected variant has never been listed", async () => {
+    Object.assign(fixture.variants[1], { listing_id: null, external_listing_id: null, listing_status: null, listing_sync_error: null });
+    const before = structuredClone(fixture.variants);
+    const { feed } = await (await fetch(url)).json();
+    expect(feed[0]).toMatchObject({ status: "listed", isListed: true, externalListingId: "listing-20",
+      unlinkedVariants: [{ id: 2, sku: "SKU-2" }] });
+    expect(fixture.variants).toEqual(before);
+    expect(fixture.query.mock.calls.every(([sql]) => !/^\s*(UPDATE|INSERT|DELETE)/i.test(sql))).toBe(true);
+  });
+
+  it("does not make an ended listing syncable just because a new variant is selected", async () => {
+    fixture.variants[0].listing_status = "ended";
+    Object.assign(fixture.variants[1], { listing_id: null, external_listing_id: null, listing_status: null, listing_sync_error: null });
+    const { feed } = await (await fetch(url)).json();
+    expect(feed[0]).toMatchObject({ status: "publication_incomplete", isListed: false });
+  });
+
+  it("requires a provider check for mixed active and ended members even when their saved listing ID agrees", async () => {
+    fixture.variants[0].listing_status = "ended";
+    const { feed } = await (await fetch(url)).json();
+    expect(feed[0]).toMatchObject({ status: "publication_incomplete", isListed: false });
+  });
+
+  it("does not treat duplicate ended rows as a fully ended selected listing", () => {
+    const state = resolveEbayFeedListingState([
+      { variantId: 1, listingRecordId: 1, externalListingId: "listing-20", syncStatus: "ended", syncError: null },
+      { variantId: 1, listingRecordId: 4, externalListingId: "listing-20", syncStatus: "ended", syncError: null },
+      { variantId: 2, listingRecordId: null, externalListingId: null, syncStatus: null, syncError: null },
+    ], [1, 2]);
+    expect(state).toMatchObject({ isEnded: false, isListed: false, needsPublicationCheck: true });
   });
 
   it("routes conflicting saved listing identities to a fresh publication review", async () => {

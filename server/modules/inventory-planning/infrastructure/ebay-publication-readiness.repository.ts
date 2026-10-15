@@ -161,7 +161,7 @@ export async function withEbayPublicationReadinessApplied<T>(pool: ConnectionPoo
           changeReason: "Reviewed exact eBay SKU stock enrollment before publication.",
           idempotencyKey: `ebay-stock:${input.commandKey}:${variant.productVariantId}`,
           requestHash, actorId: actor, occurredAt: now,
-        });
+        }, { allowRetainedZero: input.source.purpose === "sync" });
         selectors.push({ kind: "variant_mapping" as const, key: `${target.id}:${variant.productVariantId}`,
           definitionId: saved.definitionId, definitionHash: saved.definitionHash });
       } else if (variant.mappingAction === "promote_draft") selectors.push({ kind: "variant_mapping" as const,
@@ -173,7 +173,7 @@ export async function withEbayPublicationReadinessApplied<T>(pool: ConnectionPoo
     const promoted = await captureEbayPublicationReadiness(client, input.source, true);
     if (!promoted.review.ready) fail("EBAY_PUBLICATION_STOCK_REVIEW_BLOCKED", promoted.review.blockers.map(row => row.message).join(" "));
     const command = { publicationTargetId: target.id, expectedTargetRevision: target.revision, productId: input.source.productId,
-      productVariantIds: input.source.variants.map(row => row.productVariantId) };
+      productVariantIds: input.source.variants.map(row => row.productVariantId), allowRetainedZero: input.source.purpose === "sync" };
     const reviewed = (await reviewMappingPreparation(client, command, true)).review;
     const applied = await applyMappingPreparation(client, scopeKeys, { ...command, expectedReviewHash: reviewed.reviewHash,
       idempotencyKey: `ebay-stock:${input.commandKey}` }, actor, requestHash, now,

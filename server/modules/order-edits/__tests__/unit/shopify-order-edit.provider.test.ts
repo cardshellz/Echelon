@@ -285,7 +285,7 @@ function shippingCalculated(
   return {
     ...calculated(total, outstanding, lines, added),
     subtotalPriceSet: bag(subtotal),
-    taxLines: [{ priceSet: bag(tax) }],
+    taxLines: [{ title: "State tax", ratePercentage: 6, priceSet: bag(tax) }],
     shippingLines: [
       {
         id: id("CalculatedShippingLine", 1),
@@ -716,6 +716,25 @@ async function reduction() {
   return { snapshot, quote };
 }
 
+describe("native tax rate display evidence", () => {
+  it("reads current tax rates without changing the existing order identity or amounts", async () => {
+    const original = rawOrder({ currentTotalPriceSet: bag("21.20"), currentTotalTaxSet: bag("1.20"), netPaymentSet: bag("21.20"), transactions: [tx(1, "21.20")] });
+    const enriched = { ...original, order: { ...original.order, currentTaxLines: [{ title: "State tax", ratePercentage: 6, priceSet: bag("1.20") }] } };
+    const h = harness([original, enriched]);
+    const legacy = await h.provider.readOrder(4, "100");
+    const current = await h.provider.readOrder(4, "100");
+    expect(current.fingerprint).toBe(legacy.fingerprint);
+    expect(current.contentFingerprint).toBe(legacy.contentFingerprint);
+    expect(current.financials?.taxLines).toEqual([{ title: "State tax", ratePercentage: 6, amountCents: 120 }]);
+    expect(current.financials?.totalCents).toBe(legacy.financials?.totalCents);
+    expect(h.requests[0].query).toContain("currentTaxLines { title ratePercentage priceSet");
+  });
+  it("rejects tax lines that do not reconcile to the current tax total", async () => {
+    const h = harness([rawOrder({ currentTaxLines: [{ title: "State tax", ratePercentage: 6, priceSet: bag("1.20") }] })]);
+    await expect(h.provider.readOrder(4, "100")).rejects.toMatchObject({ code: "ORDER_EDIT_FINANCIAL_MISMATCH" });
+  });
+});
+
 // The observed #63909 pricing combination, with synthetic identities and no live mutations.
 function codeOrder(
   itemQuantity = 4,
@@ -1061,7 +1080,7 @@ function shippingOnlyCalculated(
       calcLine(2, 20, 1, "139.99"),
     ]),
     cartDiscountAmountSet: cartDiscount === null ? null : bag(cartDiscount),
-    taxLines: [] as Array<{ priceSet: ReturnType<typeof bag> }>,
+    taxLines: [] as Array<{ title: string; ratePercentage: number | null; priceSet: ReturnType<typeof bag> }>,
     shippingLines: [
       {
         id: id("CalculatedShippingLine", 1),
@@ -2364,7 +2383,7 @@ describe("ShopifyOrderEditProvider", () => {
           decimal(cents("245.96") - cents("187.98")),
         );
       }
-      if (field === "tax") result.taxLines = [{ priceSet: bag("0.01") }];
+      if (field === "tax") result.taxLines = [{ title: "State tax", ratePercentage: 6, priceSet: bag("0.01") }];
       const h = harness([
         shippingOnlyOrder(),
         shippingOnlyOrder(),
@@ -2526,19 +2545,20 @@ describe("ShopifyOrderEditProvider", () => {
     Object.assign(raw.order, {
       currentTotalPriceSet: bag("114.44"),
       currentTotalTaxSet: bag("6.48"),
+      currentTaxLines: [{ title: "State tax", ratePercentage: 6, priceSet: bag("6.48") }],
       netPaymentSet: bag("114.44"),
       transactions: [tx(1, "114.44")],
     });
     const initial = {
       ...codeCalculated(),
       totalPriceSet: bag("114.44"),
-      taxLines: [{ priceSet: bag("6.48") }],
+      taxLines: [{ title: "State tax", ratePercentage: 6, priceSet: bag("6.48") }],
     };
     const changed = {
       ...codeCalculated(5, "2.50", "112.45"),
       totalPriceSet: bag("119.20"),
       totalOutstandingSet: bag("4.76"),
-      taxLines: [{ priceSet: bag("6.75") }],
+      taxLines: [{ title: "State tax", ratePercentage: 6, priceSet: bag("6.75") }],
     };
     const h = harness([
       raw,
@@ -2557,7 +2577,7 @@ describe("ShopifyOrderEditProvider", () => {
     expect(quote).toMatchObject({
       totalCents: 11920,
       deltaCents: 476,
-      financials: { itemsNetCents: 11245, taxCents: 675, totalCents: 11920 },
+      financials: { itemsNetCents: 11245, taxCents: 675, totalCents: 11920, taxLines: [{ title: "State tax", ratePercentage: 6, amountCents: 675 }] },
     });
   });
 
@@ -4557,6 +4577,7 @@ describe("calculation-only background order previews", () => {
         discountLabels: [],
       },
       taxCents: 180,
+      taxLines: [{ title: "State tax", ratePercentage: 6, amountCents: 180 }],
       totalCents: 3680,
     }));
     const h = harness(
@@ -4575,6 +4596,7 @@ describe("calculation-only background order previews", () => {
       changes: [{ lineItemId: id("LineItem", 1), quantity: 3 }],
       additions: [],
     });
+    expect(result.financials.taxLines).toEqual([{ title: "State tax", ratePercentage: 6, amountCents: 180 }]);
     expect(result.financials.totalCents).toBe(3680);
     expect(result.financials.itemsNetCents).toBe(3000);
     expect(result.lines).toMatchObject([

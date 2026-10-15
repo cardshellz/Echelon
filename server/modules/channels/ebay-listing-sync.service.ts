@@ -28,6 +28,7 @@ import { resolveEbayListingIssue } from "@shared/ebay-listing-issue";
 export interface PreparedEbayListingSync {
   sourceIdentity?: EbayListingSyncIdentity;
   identity: EbayListingSyncIdentity;
+  assertInventoryReady?(context?: { commandKey: string; actor: string }): Promise<void>;
   client: EbayListingLifecycleClient;
   draft: Pick<
     EbayListingConnectorDraft,
@@ -60,6 +61,7 @@ export class EbayExistingListingSyncExecution
     stage: Parameters<EbayListingSyncExecution["execute"]>[1],
     verificationIntentHash: string | null = null,
     bindProviderIdentity?: (identity: EbayListingSyncIdentity) => Promise<void>,
+    context?: EbayListingExecutionContext,
   ): Promise<EbayProductSyncResult> {
     const prepared = await this.prepare(identity);
     if (prepared.sourceIdentity) {
@@ -125,6 +127,11 @@ export class EbayExistingListingSyncExecution
         error.code !== "EBAY_SYNC_READBACK_PENDING"
       ) throw error;
     }
+    // Prepare only before a new provider mutation. Accepted content can finish
+    // read-only verification even if stock was paused after the original write.
+    // Inventory owns mappings and retained zero stock; retries reuse this job.
+    await prepared.assertInventoryReady?.(context?.jobId && context.requestedBy
+      ? { commandKey: context.jobId, actor: context.requestedBy } : undefined);
     const updated = await this.connector.syncExistingListing({
       client: prepared.client,
       draft: prepared.draft,

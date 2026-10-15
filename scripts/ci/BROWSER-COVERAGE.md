@@ -2,10 +2,11 @@
 
 Procurement runs on four independent runner shards, with two page-isolated
 workers per runner. Its fully parallel configuration distributes individual tests
-across shards. Dropship and shared shipping configuration run on two shards,
-partitioned by file, with one worker per runner. Both desktop and mobile projects
-remain included. No retries or shorter timeouts are introduced, and every shard
-uploads its own failure artifacts.
+across shards. The former Dropship pricing suite runs only its affected feature
+groups, with at most four runners at once and one worker per runner. Catalog and
+listing settings use three file-based shards; the other groups use one runner
+each. Both desktop and mobile projects remain included. No retries or shorter
+timeouts are introduced, and every shard uploads its own failure artifacts.
 
 Procurement's financial retry scenarios use Playwright's controlled browser clock
 to advance the existing 2, 4, and 8 second backoff delays. They verify that no
@@ -23,20 +24,46 @@ selector errors, cancelled shards, and failed shards cannot produce a green gate
 `browser-suite-impact.mjs` inspects the complete NUL-delimited pull-request diff.
 It follows static imports, exports, literal dynamic imports, CommonJS requires,
 and type imports from the suite's runtime entrypoints, browser specs, and
-HTML-injected harness entrypoints. It also follows non-page application-shell
-imports. It parses source; it never executes imported application code.
+HTML-injected harness entrypoints. Full-application suites also follow non-page
+application-shell imports. It parses source; it never executes imported
+application code.
 
 Procurement uses the real `main.tsx` / `App.tsx`, which currently imports every
 page eagerly. Its graph must include those pages: a packaging module can break
 application startup even without visiting a packaging route. Therefore most
 frontend changes still run procurement. Its speedup comes primarily from
-sharding, not unsafe route-only filtering. The dropship suite uses isolated
-harnesses and can safely exclude more unrelated feature changes.
+sharding, not unsafe route-only filtering. Order editing retains its existing
+selection behavior as well.
 
-When adding another injected HTML harness, add its module to the owning suite's
-roots. Specs are discovered from the same existing filename patterns; adding or
-changing a spec always runs its suite. App imports automatically bring newly
-added routes into procurement's dependency graph.
+## Selecting affected feature groups
+
+`dropship-browser-impact.mjs` selects groups declared in
+`dropship-browser-features.mjs`: prices, content, catalog/listing settings,
+policies/categories, cost changes, wallet, orders, finance, onboarding, shipping
+estimates, shipping configuration, catalog conversions, page loading, and
+inventory opening. Each group starts from its own specs and HTML-injected
+harnesses. These harnesses do not load App, so unrelated application pages and
+unimported shared modules do not trigger them.
+
+Imports are followed transitively, including spec helpers and shared components.
+For example, a wallet page edit runs wallet coverage, a finance money helper edit
+runs finance coverage, and a pricing rules panel edit runs both prices and the
+catalog/listing settings that embed that panel. A spec edit runs its owning group.
+The selector logs the decision and reason for every group.
+
+These browser journeys mock their API responses. Unimported backend changes do
+not trigger them; existing unit, contract and PostgreSQL checks remain unchanged.
+Backend source imported by a spec is still part of that group's dependency graph.
+Build/test tooling, package manifests, styles and public assets trigger all
+groups. Shared source changes trigger every group that imports that source.
+
+When adding another injected HTML harness, add its module to the owning group's
+roots. Assign every new spec to exactly one group. The fast CI guard compares
+that assignment with Playwright's actual unfiltered discovery and checks injected
+harnesses, including those injected through spec helpers. Missing or duplicate
+assignments fail the guard; selection falls back to the unfiltered suite rather
+than omitting tests. App imports automatically bring newly added routes into
+procurement's dependency graph.
 
 Browser tests import the declared `@playwright/test` package. Importing its
 undeclared transitive dependency `playwright/test` makes dependency traversal
@@ -45,16 +72,17 @@ checks the actual Playwright-discovered Dropship spec set and its injected HTML
 harness roots, including catalog conversions, so restoring safe skips does not
 leave those entrypoints uncovered.
 
-Changes to App/main, shared code, shared UI/layout, hooks/libraries, styles, public
-assets, package manifests, and build/test tooling run both suites. Local imports
-crossing feature directories are included transitively. Known feature files
-outside the resulting graph can skip an unrelated suite. Known backend,
-migration, and documentation paths can skip browser coverage; dropship backend
-changes retain the previous dropship trigger. Other unknown paths run coverage.
+Full-application suites retain their broad triggers for App/main, shared code,
+shared UI/layout, hooks/libraries, styles, assets and tooling. Known files outside
+the relevant dependency graph can skip unrelated coverage. Unknown paths run
+coverage conservatively.
 
 Deleted/renamed/copied files, missing files, unresolved dependencies, dynamic
 imports that cannot be resolved, missing diff evidence, and parse failures all
-run coverage conservatively. Manual dispatch always runs the complete suite.
+run coverage conservatively. An uncertain group graph runs that group. Missing
+diff evidence, invalid feature registration, and manual dispatch run the original
+unfiltered suite on two shards. Invalid feature names fail instead of producing
+an empty successful run.
 The workflow listens on every PR so GitHub's path-filter limits cannot silently
 omit a needed check. The selection job installs the lockfile's dependencies for
 the TypeScript parser; this has a small fixed startup cost even for a safe skip.
@@ -64,7 +92,20 @@ the TypeScript parser; this has a small fixed startup cost even for a safe skip.
 `server/__tests__/unit/browser-ci-selection.test.ts` exercises selection and
 failure cases against the real repository, including unrelated-path skips,
 unresolved-import fallback, and a box-suite-only edit that still runs procurement
-because App imports it eagerly. Verify each
-configuration's unsharded `playwright test --list --reporter=json` IDs equal the
-union of its shard listing IDs, with no duplicates, when changing shard layout.
+because App imports it eagerly. `dropship-browser-features.test.ts` exercises
+feature dependencies, coverage registration and conservative fallbacks.
+`ci-fast-feedback.test.ts` verifies the workflow matrix and aggregate checks,
+including failures, cancellations, and explicit safe skips.
+
+The full local command remains:
+
+```sh
+npx playwright test --config playwright.dropship-pricing.config.ts
+```
+
+Set `BROWSER_FEATURE` to a manifest key such as `wallet` to run one group, or
+`all` to force unfiltered discovery. Omit the variable for ordinary full runs.
+Verify that unfiltered `playwright test --list --reporter=json` IDs equal the
+union of every feature/shard listing's IDs, with no duplicates, when changing
+the partition. All 536 desktop/mobile cases were preserved by the initial split.
 Do not enable shared-database test concurrency as part of browser optimization.

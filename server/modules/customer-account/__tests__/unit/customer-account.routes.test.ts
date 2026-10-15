@@ -92,17 +92,18 @@ describe("customer account signed storefront HTTP boundary", () => {
     expect((await request({ path: "/order-edits/settings/4", method: "POST", body: {}, sessionKey: bootstrap.session.sessionKey })).status).toBe(404);
     expect((await request({ path: "/order-edits/orders", sessionKey: bootstrap.session.sessionKey })).status).toBe(404);
   });
-  it.each([false, true])("negotiates pricing display through the signed customer bridge, opt-in=%s", async (optIn) => {
+  it.each([undefined, "v1", "v2"])("negotiates pricing display through the signed customer bridge, opt-in=%s", async (optIn) => {
     const bootstrap = await (await request()).json();
     const calculation = previewCalculation();
-    const financials = { ...calculation.financials, orderDiscounts: [], lines: calculation.financials.lines.map(line => ({ ...line, productNetCents: line.netCents })) };
+    const financials = { ...calculation.financials, taxLines: [{ title: "State tax", ratePercentage: 6, amountCents: calculation.financials.taxCents }], orderDiscounts: [], lines: calculation.financials.lines.map(line => ({ ...line, productNetCents: line.netCents })) };
     const preview = vi.fn(async (input) => ({ phase: "preview", input, calculatedAt: new Date(PREVIEW_NOW).toISOString(), expiresAt: new Date(PREVIEW_NOW + 60000).toISOString(), ...calculation, financials }));
     services.mockImplementation(() => ({ edits: { connection, preview }, returns: vi.fn() }));
-    const response = await request({ path: "/order-edits/previews", method: "POST", sessionKey: bootstrap.session.sessionKey, query: optIn ? { pricingDisplayVersion: "v1" } : {}, body: previewInput() });
+    const response = await request({ path: "/order-edits/previews", method: "POST", sessionKey: bootstrap.session.sessionKey, query: optIn ? { pricingDisplayVersion: optIn } : {}, body: previewInput() });
     expect(response.status).toBe(200);
     const result = (await response.json()).financials;
     expect(result.totalCents).toBe(financials.totalCents);
     expect(result.orderDiscounts).toEqual(optIn ? [] : undefined);
+    expect(result.taxLines).toEqual(optIn === "v2" ? financials.taxLines : undefined);
     expect(result.lines[0].productNetCents).toBe(optIn ? financials.lines[0].netCents : undefined);
     expect(preview).toHaveBeenCalledWith(previewInput());
     const unsupported = await request({ path: "/order-edits/previews", method: "POST", sessionKey: bootstrap.session.sessionKey, query: { pricingDisplayVersion: "unrecognized" }, body: previewInput() });

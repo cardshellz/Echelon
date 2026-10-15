@@ -145,7 +145,7 @@
   .oe-items-heading { gap: 8px; }
   .oe-items-heading > button { font-size: 12px; padding: 0 10px; }
   .oe-editor-footer > p { flex-basis: 100%; }
-  .oe-editor-footer > button { flex: 1; }
+  .oe-editor-footer > button { flex: 1 1 100%; min-width: 0; height: auto; white-space: normal; }
   .oe-picker { width: calc(100vw - 16px); height: min(680px, calc(100dvh - 16px)); max-height: calc(100dvh - 16px); padding: 14px; gap: 12px; }
   .oe-picker-filters { grid-template-columns: minmax(0, 1fr); gap: 8px; }
   .oe-picker-filters input, .oe-picker-filters select { font-size: 16px; }
@@ -936,7 +936,10 @@
     flex-basis: 100%;
   }
   .oe-editor-footer > button {
-    flex: 1;
+    flex: 1 1 100%;
+    min-width: 0;
+    height: auto;
+    white-space: normal;
   }
   .oe-picker {
     width: calc(100vw - 16px);

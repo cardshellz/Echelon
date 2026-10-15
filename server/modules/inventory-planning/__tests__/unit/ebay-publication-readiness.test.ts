@@ -19,6 +19,14 @@ describe("exact eBay stock mapping proposal", () => {
   it("supports a saved provider SKU alias without renaming the local SKU", () => {
     expect(reviewEbayPublicationMember({ productId: 232 }, member, 3, [{ ...row(), sku: "RENAMED", external_sku: "BLUE-P10" }]).blockers).toEqual([]);
   });
+  it("keeps an inactive member's exact identity available to maintenance selection without authorizing new publication", () => {
+    const retained = { ...row(), eligible: false };
+    expect(reviewEbayPublicationMember({ productId: 232, purpose: "sync" }, member, 3, [retained]).blockers).toEqual([]);
+    expect(reviewEbayPublicationMember({ productId: 232 }, member, 3, [retained]).blockers)
+      .toContainEqual(expect.objectContaining({ code: "STOCK_LISTING_SOURCE_CHANGED" }));
+    expect(reviewEbayPublicationMember({ productId: 232, purpose: "sync" }, member, 3, [{ ...retained, mapping_sku: "OTHER" }]).blockers)
+      .toContainEqual(expect.objectContaining({ code: "STOCK_LISTING_MAPPING_REVIEW_REQUIRED" }));
+  });
   it.each([
     [{ product_id: 3 }, "STOCK_LISTING_SOURCE_CHANGED"], [{ eligible: false }, "STOCK_LISTING_SOURCE_CHANGED"],
     [{ held_at: new Date("2026-10-12T12:00:00Z") }, "STOCK_LISTING_HELD"],
