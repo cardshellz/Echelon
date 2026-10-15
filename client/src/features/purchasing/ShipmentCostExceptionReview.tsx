@@ -1,10 +1,16 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { shipmentExceptionContextSchema, formatShipmentExceptionAmount,
-  type ShipmentCostException, type ShipmentExceptionRequest } from "@shared/procurement/shipment-cost-exception";
+import { formatShipmentExceptionAmount, type ShipmentCostException } from "@shared/procurement/shipment-cost-exception";
+import {
+  reconciliationContextSchema,
+  reconciliationDestinations,
+  reconciliationPreview,
+  type ReconciliationDestination,
+  type ReconciliationRequest,
+} from "@shared/procurement/cost-reconciliation";
 import { apiRequest } from "@/lib/queryClient";
 import { FinancialCommandRequestError } from "@/lib/financial-command";
-import { createShipmentExceptionClient } from "@/lib/shipment-cost-exception";
+import { createShipmentReconciliationClient } from "@/lib/shipment-cost-reconciliation";
 import { shipmentCostWorkflowError } from "@/lib/shipment-cost-workflow";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -14,120 +20,267 @@ import { Textarea } from "@/components/ui/textarea";
 
 export function ShipmentCostExceptionReview({ lineId, review }: { lineId: number; review: ShipmentCostException }) {
   const [open, setOpen] = useState(false);
-  const accepted = review.state === "accepted";
-  const amount = formatShipmentExceptionAmount(review.amountMills, review.currency);
-  return <div className="space-y-2 text-sm">
-    <Badge variant="outline">{accepted ? "Historical difference accepted" : "Inventory history exception"}</Badge>
-    <p>{review.kind === "missing_receipt_history"
-      ? `The shipment charge is saved. Missing receipt history prevents applying ${amount} to inventory and sold orders.`
-      : `Known stock and sold-order costs were updated. ${amount} remains separate because some historical stock movements are missing.`}</p>
-    {review.kind === "unexplained_quantity" && <ul className="space-y-1 text-xs">
-      {review.issues.map(issue => issue.unresolvedQuantity && <li key={issue.unresolvedQuantity.allocationId}>
-        {issue.unresolvedQuantity.lotNumber}: {issue.unresolvedQuantity.quantity.toLocaleString()} lot units without a recorded movement · {formatShipmentExceptionAmount(issue.unresolvedQuantity.amountMills, review.currency)}
-      </li>)}
-    </ul>}
-    {accepted && review.decision && <p className="text-xs text-muted-foreground">
-      Accepted by {review.decision.actorName ?? review.decision.actorId} · {new Date(review.decision.recordedAt).toLocaleString()}. {review.decision.reason}
-    </p>}
-    {!accepted && <p className="text-xs text-muted-foreground">An administrator can accept this documented difference after review. Updating costs again will not repair the missing history.</p>}
-    <Button size="sm" variant="outline" onClick={() => setOpen(true)}>{accepted ? "Review decision" : "Review exception"}</Button>
-    <Dialog open={open} onOpenChange={setOpen}>
-      <DialogContent className="w-[calc(100vw-2rem)] sm:max-w-2xl max-h-[90dvh] flex flex-col overflow-hidden">
-        <DialogHeader><DialogTitle>Review inventory exception</DialogTitle>
-          <DialogDescription>Shipment charges are saved. Review the historical difference and its impact before approving.</DialogDescription></DialogHeader>
-        {open && <ShipmentExceptionDecision lineId={lineId} onClose={() => setOpen(false)} />}
-      </DialogContent>
-    </Dialog>
-  </div>;
+  const posted = review.reconciliation?.status === "posted";
+  const amount = formatShipmentExceptionAmount(
+    review.reconciliation?.postedMills ?? review.amountMills,
+    review.currency,
+  );
+  return (
+    <div className="space-y-2 text-sm">
+      <Badge variant={posted ? "outline" : "destructive"}>
+        {posted ? "Costs reconciled" : "Cost reconciliation needed"}
+      </Badge>
+      <p>
+        {posted
+          ? `${amount} is posted to ${reconciliationDestinations[review.reconciliation!.destination!].toLowerCase()}.`
+          : review.kind === "missing_receipt_history"
+            ? "This shipment charge is saved, but its inventory cost has not been assigned. Review the missing history and choose where the cost belongs."
+            : `${formatShipmentExceptionAmount(review.amountMills, review.currency)} needs a destination for stock with incomplete history. Known stock and sold-order costs were updated.`}
+      </p>
+      {posted && (
+        <p className="text-xs text-muted-foreground">
+          The original stock history remains in the audit. Later cost changes follow the approved destination.
+        </p>
+      )}
+      <Button size="sm" variant="outline" onClick={() => setOpen(true)}>
+        {posted ? "View reconciliation" : "Reconcile costs"}
+      </Button>
+      <Dialog open={open} onOpenChange={setOpen}>
+        <DialogContent className="w-[calc(100vw-2rem)] sm:max-w-2xl max-h-[90dvh] flex flex-col overflow-hidden">
+          <DialogHeader>
+            <DialogTitle>Reconcile shipment costs</DialogTitle>
+            <DialogDescription>
+              Review the recorded history and approve where the unresolved cost belongs.
+            </DialogDescription>
+          </DialogHeader>
+          {open && <ShipmentReconciliation lineId={lineId} onClose={() => setOpen(false)} />}
+        </DialogContent>
+      </Dialog>
+    </div>
+  );
 }
 
-function ShipmentExceptionDecision({ lineId, onClose }: { lineId: number; onClose: () => void }) {
-  const path = `/api/shipment-lines/${lineId}/cost-exception`;
+function ShipmentReconciliation({ lineId, onClose }: { lineId: number; onClose: () => void }) {
+  const path = `/api/shipment-lines/${lineId}/cost-reconciliation`;
   const queryClient = useQueryClient();
-  const context = useQuery({ queryKey: [path], staleTime: 0, refetchOnWindowFocus: false, queryFn: async () => {
-    const response = await apiRequest("GET", path);
-    const parsed = shipmentExceptionContextSchema.parse(await response.json());
-    if (parsed.lineId !== lineId) throw new Error("This review belongs to a different shipment line.");
-    return parsed;
-  } });
+  const context = useQuery({
+    queryKey: [path],
+    staleTime: 0,
+    refetchOnWindowFocus: false,
+    queryFn: async () => {
+      const response = await apiRequest("GET", path);
+      const parsed = reconciliationContextSchema.parse(await response.json());
+      if (parsed.lineId !== lineId) throw new Error("This review belongs to a different shipment line.");
+      return parsed;
+    },
+  });
   const [reason, setReason] = useState("");
-  const [client] = useState(() => createShipmentExceptionClient(() => crypto.randomUUID()));
-  const [attempt, setAttempt] = useState<ShipmentExceptionRequest | null>(null);
-  const save = useMutation({ mutationFn: (request: ShipmentExceptionRequest) => client.decide(lineId, request),
+  const [destination, setDestination] = useState<ReconciliationDestination | null>(null);
+  const [client] = useState(() => createShipmentReconciliationClient(() => crypto.randomUUID()));
+  const [attempt, setAttempt] = useState<ReconciliationRequest | null>(null);
+  const save = useMutation({
+    mutationFn: (request: ReconciliationRequest) => client.reconcile(lineId, request),
     onSuccess: async () => {
-      await queryClient.invalidateQueries({ predicate: query => {
-        const key = query.queryKey[0];
-        return typeof key === "string" && (key === path || key.startsWith("/api/purchase-orders/") || key.startsWith("/api/inbound-shipments/"));
-      } });
+      await queryClient.invalidateQueries({
+        predicate: (query) => {
+          const key = query.queryKey[0];
+          return (
+            typeof key === "string" &&
+            (key === path ||
+              key === "/api/cogs/historical-adjustments" ||
+              key.startsWith("/api/purchase-orders/") ||
+              key.startsWith("/api/inbound-shipments/"))
+          );
+        },
+      });
       onClose();
     },
   });
-  const data = context.data, review = data?.review;
+  const data = context.data;
   const ambiguous = save.isError && save.error instanceof FinancialCommandRequestError && save.error.ambiguous;
   const locked = save.isPending || ambiguous;
-  const accepted = review?.state === "accepted";
-  const action = accepted ? "reopen" : "accept";
+  const preview = data && destination ? reconciliationPreview(data, destination) : null;
+  const money = (mills: number) => formatShipmentExceptionAmount(mills, "USD");
+  const sameDestination = data?.state.status === "posted" && data.state.destination === destination;
   const submit = () => {
-    if (ambiguous && attempt) { save.mutate(attempt); return; }
-    if (!data || !review) return;
-    const request = { sourceVersion: data.sourceVersion, action, reason: reason.trim() } as const;
-    setAttempt(request); save.mutate(request);
+    if (ambiguous && attempt) {
+      save.mutate(attempt);
+      return;
+    }
+    if (!data || !destination) return;
+    const request = { sourceVersion: data.sourceVersion, destination, reason: reason.trim() };
+    setAttempt(request);
+    save.mutate(request);
   };
-  const reload = () => { save.reset(); setAttempt(null); void context.refetch(); };
-  return <>
-    <div className="min-h-0 overflow-y-auto space-y-4 pr-1 text-sm">
-      {context.isPending && <p role="status">Loading the current cost evidence…</p>}
-      {context.isError && <p role="alert">The review could not be loaded. Reload before approving.</p>}
-      {data && <>
-        <strong className="block break-all">{data.sku ?? `Shipment line ${lineId}`}</strong>
-        {data.blockedReason && <p role="alert" className="text-amber-700 dark:text-amber-400">{data.blockedReason}</p>}
-        {review && <>
-          <p>{accepted ? "Reopen this exception for another review. The earlier approval stays in the audit history."
-            : "Accept the documented historical difference. Its amount stays visible and separate until supporting records can be corrected."}</p>
-          <div className="rounded-md bg-muted/50 p-3 text-xs space-y-1">
-            {review.kind === "missing_receipt_history" ? <p>Receipt history is missing. This line's charge could not be applied to inventory or sold orders.</p>
-              : review.issues.map(issue => issue.unresolvedQuantity && <p key={issue.unresolvedQuantity.allocationId}>
-                <strong>{issue.unresolvedQuantity.lotNumber}</strong>: {issue.unresolvedQuantity.quantity.toLocaleString()} lot units have no recorded stock movement; {formatShipmentExceptionAmount(issue.unresolvedQuantity.amountMills, review.currency)} is kept separate.
-              </p>)}
-          </div>
-          <table className="w-full text-xs sm:text-sm" aria-label="Exception before and after">
-            <thead><tr className="border-b"><th className="py-2 text-left">What changes</th><th className="p-2 text-right">Before</th><th className="py-2 text-right">After approval</th></tr></thead>
-            <tbody>
-              <tr className="border-b"><th className="py-2 text-left font-normal">Review status</th><td className="p-2 text-right">{accepted ? "Accepted" : "Needs review"}</td><td className="py-2 text-right font-semibold">{accepted ? "Needs review" : "Historical difference accepted"}</td></tr>
-              <tr className="border-b"><th className="py-2 text-left font-normal">Shipment charge for this line</th><td className="p-2 text-right">{formatShipmentExceptionAmount(review.allocatedMills, review.currency)}</td><td className="py-2 text-right">{formatShipmentExceptionAmount(review.allocatedMills, review.currency)}</td></tr>
-              <tr className="border-b"><th className="py-2 text-left font-normal">Unassigned inventory cost</th><td className="p-2 text-right">{formatShipmentExceptionAmount(review.amountMills, review.currency)}</td><td className="py-2 text-right">{formatShipmentExceptionAmount(review.amountMills, review.currency)}</td></tr>
-              <tr><th className="py-2 text-left font-normal">Stock counts and order costs</th><td className="p-2 text-right">Current records</td><td className="py-2 text-right">Unchanged</td></tr>
-            </tbody>
-          </table>
-          <details className="text-xs"><summary className="cursor-pointer">Affected records</summary>
-            <ul className="mt-2 space-y-1">{review.issues.map(issue => <li key={`${issue.code}:${issue.message}`}>{issue.message}</li>)}</ul>
-            <p className="mt-2">Last cost application updated {review.lotsUpdated} stock lots and {review.cogsRowsUpdated} sold-order cost records.</p>
-          </details>
-          <div className="space-y-2"><Label htmlFor={`exception-reason-${lineId}`}>Reason / supporting reference</Label>
-            <Textarea id={`exception-reason-${lineId}`} value={reason} onChange={event => setReason(event.target.value)} disabled={locked || !data.canApprove}
-              maxLength={2000} rows={2} placeholder="Explain the historical difference and what you checked." />
-            <p className="text-xs text-muted-foreground">Your identity, reason and reviewed values are saved. Changed cost evidence requires a new review.</p>
-          </div>
-        </>}
-        {data.history.length > 0 && <details className="text-xs">
-          <summary className="cursor-pointer">Decision history ({data.history.length}{data.history.length === 20 ? " most recent" : ""})</summary>
-          <ol className="mt-2 space-y-2">{data.history.map(decision => <li key={decision.id} className="border-t pt-2">
-            <strong>{decision.action === "accept" ? "Accepted" : "Reopened"}</strong> · {formatShipmentExceptionAmount(decision.amountMills, decision.currency)} · {decision.actorName ?? decision.actorId} · {new Date(decision.recordedAt).toLocaleString()}
-            <p>{decision.reason}</p>
-          </li>)}</ol>
-        </details>}
-      </>}
-      {save.isError && <p role="alert" className="text-destructive">{ambiguous
-        ? "The approval response was lost. Retry this same approval, or close and reopen to check the saved decision."
-        : save.error instanceof FinancialCommandRequestError ? save.error.message : shipmentCostWorkflowError(save.error)}</p>}
-    </div>
-    <div className="shrink-0 border-t pt-3 flex flex-wrap justify-end gap-2">
-      <Button variant="outline" onClick={onClose} disabled={save.isPending}>Cancel</Button>
-      {(context.isError || save.isError && !ambiguous || data?.blockedReason) && <Button variant="outline" disabled={locked} onClick={reload}>Reload review</Button>}
-      {review && data?.canApprove && <Button className="min-h-[44px] bg-green-700 hover:bg-green-800 text-white" onClick={submit}
-        disabled={save.isPending || context.isFetching || (!ambiguous && (!!data.blockedReason || reason.trim().length < 10))}>
-        {save.isPending ? "Saving decision…" : ambiguous ? "Retry approval" : accepted ? "Reopen exception" : "Accept historical difference"}
-      </Button>}
-    </div>
-  </>;
+  const reload = () => {
+    save.reset();
+    setAttempt(null);
+    void context.refetch();
+  };
+  return (
+    <>
+      <div className="min-h-0 overflow-y-auto space-y-4 pr-1 text-sm">
+        {context.isPending && <p role="status">Loading receipt, stock history and saved postings…</p>}
+        {context.isError && <p role="alert">The history could not be loaded. Reload before approving.</p>}
+        {data && (
+          <>
+            <strong className="block break-all">{data.sku ?? `Shipment line ${lineId}`}</strong>
+            {data.blockedReason && (
+              <p role="alert" className="text-amber-700 dark:text-amber-400">
+                {data.blockedReason}
+              </p>
+            )}
+            <div className="rounded-md bg-muted/50 p-3 space-y-2 text-xs">
+              {data.records.map((record) => (
+                <p key={record.lotId}>
+                  <strong>{record.lotNumber}</strong> · {record.originalQuantity.toLocaleString()} recorded received;{" "}
+                  {record.onHandQuantity.toLocaleString()} on hand.
+                  {record.quantityWithoutHistory !== null && (
+                    <> {record.quantityWithoutHistory.toLocaleString()} lot units have no recorded movement.</>
+                  )}
+                  {record.receiptId !== null && (
+                    <>
+                      {" "}
+                      Receipt #{record.receiptId}
+                      {record.receiptLineId !== null && <> / line #{record.receiptLineId}</>}.
+                    </>
+                  )}
+                  <span className="block mt-1">{record.explanation}</span>
+                </p>
+              ))}
+            </div>
+            <fieldset disabled={locked || !data.canApprove || !!data.blockedReason} className="space-y-2">
+              <legend className="font-semibold mb-2">Where does this historical cost belong?</legend>
+              {(["historical_cogs", "inventory_variance"] as const).map((value) => (
+                <label key={value} className="flex gap-3 rounded-md border p-3 cursor-pointer">
+                  <input
+                    type="radio"
+                    name={`destination-${lineId}`}
+                    value={value}
+                    checked={destination === value}
+                    onChange={() => setDestination(value)}
+                  />
+                  <span>
+                    <strong>{reconciliationDestinations[value]}</strong>
+                    <span className="block text-xs text-muted-foreground">
+                      {value === "historical_cogs"
+                        ? "You have evidence the goods were sold. Records do not identify the individual orders."
+                        : "Record an inventory expense adjustment when the missing movements cannot be attributed to sales."}
+                    </span>
+                  </span>
+                </label>
+              ))}
+            </fieldset>
+            {preview ? (
+              <table className="w-full text-xs sm:text-sm" aria-label="Cost reconciliation before and after">
+                <thead>
+                  <tr className="border-b">
+                    <th className="py-2 text-left">Cost destination</th>
+                    <th className="p-2 text-right">Before</th>
+                    <th className="py-2 text-right">After approval</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr className="border-b">
+                    <th className="py-2 text-left font-normal">Shipment charge</th>
+                    <td className="p-2 text-right">{money(data.sourceAmountMills)}</td>
+                    <td className="py-2 text-right">{money(data.sourceAmountMills)}</td>
+                  </tr>
+                  <tr className="border-b">
+                    <th className="py-2 text-left font-normal">Assigned to tracked stock / sold orders</th>
+                    <td className="p-2 text-right">{money(preview.assignedMills)}</td>
+                    <td className="py-2 text-right">{money(preview.assignedMills)}</td>
+                  </tr>
+                  {(["historical_cogs", "inventory_variance", "unassignedMills"] as const).map((key) => (
+                    <tr key={key} className="border-b">
+                      <th className="py-2 text-left font-normal">
+                        {key === "unassignedMills" ? "Unassigned cost" : reconciliationDestinations[key]}
+                      </th>
+                      <td className="p-2 text-right">{money(preview.before[key])}</td>
+                      <td className="py-2 text-right font-semibold">{money(preview.after[key])}</td>
+                    </tr>
+                  ))}
+                  <tr>
+                    <th className="py-2 text-left font-normal">Stock quantity change</th>
+                    <td className="p-2 text-right">—</td>
+                    <td className="py-2 text-right">0</td>
+                  </tr>
+                </tbody>
+              </table>
+            ) : (
+              <p>Choose a destination to see the exact before and after.</p>
+            )}
+            <p className="text-xs text-muted-foreground">
+              Approval posts the cost adjustment with your identity and reason. It preserves the shipment charge,
+              receipts and stock counts. Future cost revisions adjust this posting; restored history reverses it before
+              assigning those costs again.
+            </p>
+            <div className="space-y-2">
+              <Label htmlFor={`reconciliation-reason-${lineId}`}>Reason / supporting reference</Label>
+              <Textarea
+                id={`reconciliation-reason-${lineId}`}
+                value={reason}
+                onChange={(event) => setReason(event.target.value)}
+                disabled={locked || !data.canApprove}
+                maxLength={2000}
+                rows={2}
+                placeholder="What did you check, and why does the cost belong here?"
+              />
+            </div>
+            {sameDestination && <p role="status">These costs are already reconciled to this destination.</p>}
+            {data.history.length > 0 && (
+              <details className="text-xs">
+                <summary className="cursor-pointer">
+                  Posted adjustments ({data.history.length}
+                  {data.history.length === 50 ? " most recent" : ""})
+                </summary>
+                <ol className="mt-2 space-y-2">
+                  {data.history.map((posting) => (
+                    <li key={posting.id} className="border-t pt-2">
+                      <strong>{reconciliationDestinations[posting.destination]}</strong> · {money(posting.beforeMills)}{" "}
+                      → {money(posting.afterMills)} · approved by {posting.actorName} ·{" "}
+                      {new Date(posting.recordedAt).toLocaleString()}
+                      <p>{posting.reason}</p>
+                    </li>
+                  ))}
+                </ol>
+              </details>
+            )}
+          </>
+        )}
+        {save.isError && (
+          <p role="alert" className="text-destructive">
+            {ambiguous
+              ? "The approval response was lost. Retry this same approval, or close and reopen to check the saved posting."
+              : save.error instanceof FinancialCommandRequestError
+                ? save.error.message
+                : shipmentCostWorkflowError(save.error)}
+          </p>
+        )}
+      </div>
+      <div className="shrink-0 border-t pt-3 flex flex-wrap justify-end gap-2">
+        <Button variant="outline" onClick={onClose} disabled={save.isPending}>
+          Close review
+        </Button>
+        {(context.isError || (save.isError && !ambiguous) || data?.blockedReason) && (
+          <Button variant="outline" disabled={locked} onClick={reload}>
+            Reload review
+          </Button>
+        )}
+        {data?.canApprove && (
+          <Button
+            className="min-h-[44px] bg-green-700 hover:bg-green-800 text-white"
+            onClick={submit}
+            disabled={
+              save.isPending ||
+              context.isFetching ||
+              (!ambiguous && (!!data.blockedReason || !destination || sameDestination || reason.trim().length < 10))
+            }
+          >
+            {save.isPending ? "Posting adjustment…" : ambiguous ? "Retry approval" : "Approve & post costs"}
+          </Button>
+        )}
+      </div>
+    </>
+  );
 }

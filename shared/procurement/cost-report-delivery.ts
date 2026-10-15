@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { unresolvedCostQuantitySchema } from "./cost-source-contracts";
+import { reconciliationPostingSchema } from "./cost-reconciliation";
 
 export const COST_REPORT_MAX_BYTES = 4 * 1024 * 1024;
 export const COST_REPORT_ACK_MAX_BYTES = 16 * 1024;
@@ -34,7 +35,12 @@ export const inventoryCostReportEventSchema = z.object({
   }).strict()).max(10_000),
   cogsDeltaCents: integer, actorId: z.string().min(1).max(500), recordedAt: z.string().datetime({ offset: true }),
   unresolvedQuantities: z.array(unresolvedCostQuantitySchema).min(1).max(10_000).optional(),
+  historicalCostAdjustments: z.array(reconciliationPostingSchema).min(1).max(2).optional(),
 }).strict().superRefine((event, context) => {
+  if (event.historicalCostAdjustments && (event.component !== "landed" || event.currency !== "USD"
+    || new Set(event.historicalCostAdjustments.map(posting=>posting.destination)).size !== event.historicalCostAdjustments.length)) {
+    context.addIssue({code:"custom",path:["historicalCostAdjustments"],message:"Historical cost postings must have unique USD landed-cost destinations"});
+  }
   const ids = new Set<number>();
   for (const [index, change] of event.changes.entries()) {
     const after = change.after;

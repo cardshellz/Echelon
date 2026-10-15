@@ -2,6 +2,8 @@ import { normalizeLotCosts, lotCostNeedsReview, lotCostTotals, hasExactLotCostTo
 import { costForQuantityIntervals, validateCostQuantityIntervals, type CostQuantityInterval } from "../domain/cost-quantity-intervals";
 import { ensureLotCostQuantityBasis } from "../infrastructure/cost-quantity.repository";
 import { readCostQuantityReview } from "./cost-quantity-review";
+import { postCostReconciliation } from "../infrastructure/cost-reconciliation.repository";
+import { planCostReconciliation } from "./plan-cost-reconciliation";
 import { sql } from "drizzle-orm";
 import { canonicalJson } from "@shared/utils/canonical-json";
 import { type CostComponent, type CostIssue } from "@shared/procurement/cost-source-contracts";
@@ -218,7 +220,11 @@ export async function applyCostRevision(
     }));
   }
   const allIssues = [...issues, ...quantityReviews];
+  const receivedBasePieces = roots.reduce((sum,root) => sum + BigInt(String(root.received_variant_qty))*BigInt(String(root.units_per_variant_snapshot)),BigInt(0));
+  const reconciliation = await planCostReconciliation(tx,revision,allIssues,
+    issues.length===0 && source.basePieces!==null && receivedBasePieces===BigInt(source.basePieces));
   const identity = { costAllocationVersion: writer.revalueExactComponent ? 3 : 1, sourceRevisionId: revision.id, lotIds, graph: edgeResult.rows, issues: allIssues,
+    ...(reconciliation ? { reconciliation:reconciliation.identity } : {}),
     targets: targets.map((target) => ({ id: target.lot.id, unitMills: target.unitMills, remainderMills: target.remainderMills,
       allocatedMills: target.allocatedMills, quantity: target.quantity })) };
   const planFingerprint = costFingerprint(identity);
@@ -229,7 +235,8 @@ export async function applyCostRevision(
     const totals = lotCostTotals(target.lot.source).totals;
     return (source.component==="product" ? totals.poMills : source.component==="packaging" ? totals.packagingMills : totals.landedMills) === BigInt(target.allocatedMills);
   });
-  if (replay.rows[0]?.evidence.planFingerprint === planFingerprint && (issues.length > 0 || currentComponentsMatch)) {
+  if (replay.rows[0]?.evidence.planFingerprint === planFingerprint && (issues.length > 0 || currentComponentsMatch)
+    && (!reconciliation || reconciliation.matches)) {
     return { ...replay.rows[0].evidence.result, applicationId: costInteger(replay.rows[0].id, "applicationId", 1), replayed: true };
   }
   const applicationKey = costFingerprint({ planFingerprint, priorApplicationId: replay.rows[0]?.id ?? null });
@@ -262,14 +269,17 @@ export async function applyCostRevision(
     VALUES (${applicationKey},${revision.id},${result.status},${canonicalJson({ ...identity, planFingerprint, result })}::jsonb,${actorId},${now}) RETURNING id
   `);
   result.applicationId = costInteger(application.rows[0]?.id, "applicationId", 1);
+  const historicalCostAdjustments = reconciliation
+    ? await postCostReconciliation(tx,reconciliation,revision,result.applicationId,actorId,now) : [];
   for (const change of changes) await tx.execute(sql`
     INSERT INTO inventory.cost_application_lots(application_id,inventory_lot_id,before_state,after_state)
     VALUES (${result.applicationId},${change.lotId},${canonicalJson(change.before)}::jsonb,${canonicalJson(change.after)}::jsonb)
   `);
-  if (issues.length === 0) await tx.execute(sql`
+  if (issues.length === 0 || historicalCostAdjustments.length > 0) await tx.execute(sql`
     INSERT INTO inventory.cost_reporting_events(application_id,contract_version,payload,recorded_at)
     VALUES (${result.applicationId},1,${canonicalJson({ contractVersion: 1, currency: source.currency, sourceRevisionId: revision.id, sourceFingerprint: source.fingerprint, component: source.component, changes, cogsDeltaCents: result.totalCogsDeltaCents, actorId, recordedAt: now.toISOString(),
       ...(quantityReviews.length === 0 ? {} : { unresolvedQuantities: quantityReviews.map(issue => issue.unresolvedQuantity!) }),
+      ...(historicalCostAdjustments.length === 0 ? {} : { historicalCostAdjustments }),
     })}::jsonb,${now})
   `);
   if (allLotIds.length > 0) {

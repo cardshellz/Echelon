@@ -5,7 +5,7 @@ import { createFinancialCommandIntentStore, financialCommandFetchJson, Financial
  * the original strict response shape during a rolling application deployment. */
 export function readShipmentCostWorkflow(url: string): Promise<unknown> {
   return financialCommandFetchJson<unknown>(url, { method: "GET", credentials: "include",
-    headers: { "X-Shipment-Cost-Review-Version": "2" } });
+    headers: { "X-Shipment-Cost-Review-Version": "3" } });
 }
 
 /** Each shipment keeps its own uncertain command so a retry cannot post twice. */

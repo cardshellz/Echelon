@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { shipmentCostUpdateInputSchema } from "@shared/procurement/shipment-cost-workflow";
 import { ShipmentTrackingError } from "../../shipment-tracking.service";
+import { CostEvidenceError } from "../../../inventory/infrastructure/cost-evidence.repository";
 import { createShipmentCostUpdateCommands, classifyShipmentCostUpdateFailure, shipmentCostUpdateScope, SHIPMENT_COST_UPDATE_PRINCIPAL } from "../../shipment-cost-update.commands";
 import type { FinancialCommandDescriptor, FinancialCommandRepository, FinancialCommandResult } from "../../../../platform/commands/transactional-command.service";
 
@@ -55,5 +56,13 @@ describe("audited shipment cost update command", () => {
   it("never misclassifies malformed stored evidence as a user input rejection", () => {
     const invalidEvidence = shipmentCostUpdateInputSchema.safeParse({ invalid: true });
     expect(classifyShipmentCostUpdateFailure(invalidEvidence.error)).toMatchObject({ kind: "retryable" });
+  });
+  it("returns an actionable review when restored history would count a historical expense twice", async () => {
+    const h = harness();
+    h.updateCostsInTransaction.mockRejectedValueOnce(new CostEvidenceError("COST_RECONCILIATION_PARTIAL_HISTORY", "Complete receipt attribution."));
+    expect(await h.commands.execute(42, {}, "approver", descriptor)).toMatchObject({
+      httpStatus: 409, terminalState: "rejected", body: { code: "COST_RECONCILIATION_PARTIAL_HISTORY", error: "Complete receipt attribution." },
+    });
+    expect(h.repository.markRetryable).not.toHaveBeenCalled();
   });
 });

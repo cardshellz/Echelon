@@ -396,8 +396,7 @@ export function registerInboundShipmentRoutes(app: Express) {
       const result = await shipmentTracking.getCostReview(id.data);
       if (!result) return res.status(404).json({ code: "SHIPMENT_NOT_FOUND", error: "This shipment is no longer available." });
       res.vary("X-Shipment-Cost-Review-Version");
-      return res.json(req.get("X-Shipment-Cost-Review-Version") === "2" ? result
-        : { ...result, lines: result.lines.map(({ exceptionReview: _review, ...line }) => line) });
+      return res.json(shipmentCostReviewResponse(result,req.get("X-Shipment-Cost-Review-Version")));
     } catch (error) {
       console.error(JSON.stringify({ event: "procurement.shipment_cost.review_failed", shipmentId: id.data,
         actorId: getActorId(req) ?? null, code: "SHIPMENT_COST_REVIEW_UNAVAILABLE",
@@ -488,3 +487,4 @@ export function registerInboundShipmentRoutes(app: Express) {
 
 
 }
+import { shipmentCostReviewResponse } from "@shared/procurement/shipment-cost-review-version";

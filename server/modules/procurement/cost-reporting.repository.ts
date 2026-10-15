@@ -35,7 +35,7 @@ export class CostReportingRepository {
     return this.transaction(async (tx) => {
       await this.bind(tx,destination,now);
       const candidates = await tx.query(`SELECT event.id::text AS "eventId",event.application_id::text AS "applicationId",event.payload,event.contract_version,event.recorded_at,
-        a.recorded_by AS "applicationActor",a.recorded_at AS "applicationRecordedAt",a.status,a.evidence->'result' AS outcome,r.id::text AS "sourceRevisionId",r.contract AS "sourceContract",r.inbound_shipment_line_id AS "shipmentLineId",r.fingerprint,r.component,r.contract->>'currency' AS currency,
+        a.recorded_by AS "applicationActor",a.recorded_at AS "applicationRecordedAt",a.status,a.evidence->'result' AS outcome,a.evidence->'reconciliation' AS reconciliation,r.id::text AS "sourceRevisionId",r.contract AS "sourceContract",r.inbound_shipment_line_id AS "shipmentLineId",r.fingerprint,r.component,r.contract->>'currency' AS currency,
         r.purchase_order_line_id AS "purchaseOrderLineId",pol.purchase_order_id AS "purchaseOrderId",
         COALESCE((SELECT jsonb_agg(jsonb_build_object('lotId',c.inventory_lot_id,'before',c.before_state,'after',c.after_state) ORDER BY c.inventory_lot_id)
           FROM inventory.cost_application_lots c WHERE c.application_id=a.id),'[]'::jsonb) AS changes
@@ -52,6 +52,14 @@ export class CostReportingRepository {
           const payload = envelope.payload;
           const source = costSourceRevisionSchema.safeParse(row.sourceContract);
           const reviewIssues = costIssueSchema.array().safeParse(row.outcome?.issues);
+          // Financial postings are separate from retained quantity evidence.
+          // Verify every exported amount against the immutable owner ledger.
+          const postings = row.reconciliation || payload.historicalCostAdjustments
+            ? await tx.query(`SELECT id,approval_id,destination,before_mills,after_mills,delta_mills
+              FROM inventory.cost_reconciliation_postings WHERE application_id=$1 ORDER BY id`,[row.applicationId]) : {rows:[]};
+          const historical = postings.rows.map(posting=>({id:Number(posting.id),approvalId:Number(posting.approval_id),
+            destination:posting.destination,beforeMills:Number(posting.before_mills),afterMills:Number(posting.after_mills),deltaMills:Number(posting.delta_mills)}));
+          const historicalMatches=reportHash(historical)===reportHash(payload.historicalCostAdjustments ?? []);
           // A retained historical gap is explicit evidence, not an applied
           // write-off. Only this classified review may accompany posted costs.
           const appliedWithReview = row.status === "review_required" && row.outcome?.status === "review_required"
@@ -59,11 +67,15 @@ export class CostReportingRepository {
             && reviewIssues.data.every(issue => issue.code === "COST_UNRESOLVED_QUANTITY_RETAINED" && issue.unresolvedQuantity !== undefined)
             && reportHash(reviewIssues.data.map(issue => issue.unresolvedQuantity)) === reportHash(payload.unresolvedQuantities);
           const appliedWithoutReview = row.status === "applied" && row.outcome?.status === "applied" && payload.unresolvedQuantities === undefined;
+          const historicalOnly=row.status === "review_required" && row.outcome?.status === "review_required"
+            && historical.length>0 && historicalMatches && payload.changes.length===0 && payload.cogsDeltaCents===0
+            && payload.unresolvedQuantities===undefined && reviewIssues.success && reviewIssues.data.length>0
+            && reviewIssues.data.every(issue=>issue.code==="COST_HISTORICAL_LINEAGE_MISSING");
           if (!source.success || source.data.fingerprint !== row.fingerprint || source.data.component !== row.component
             || source.data.scope.purchaseOrderId !== row.purchaseOrderId || source.data.scope.purchaseOrderLineId !== row.purchaseOrderLineId
             || (source.data.scope.kind === "shipment_line" ? source.data.scope.inboundShipmentLineId : null) !== row.shipmentLineId
             || row.applicationActor !== payload.actorId || instant(row.applicationRecordedAt) !== instant(payload.recordedAt)
-            || row.contract_version !== 1 || (!appliedWithReview && !appliedWithoutReview)
+            || row.contract_version !== 1 || (!appliedWithReview && !appliedWithoutReview && !historicalOnly) || !historicalMatches
             || row.outcome.lotsUpdated !== payload.changes.length || row.outcome.totalCogsDeltaCents !== payload.cogsDeltaCents
             || String(payload.sourceRevisionId) !== row.sourceRevisionId || payload.sourceFingerprint !== row.fingerprint
             || payload.component !== row.component || payload.currency !== row.currency || instant(row.recorded_at) !== instant(payload.recordedAt)

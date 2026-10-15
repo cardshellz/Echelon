@@ -17,7 +17,7 @@ import { fixtureTable,fixtureForeignKeys } from "./shipment-line-fixture";
 const url=process.env.ECHELON_TEST_DATABASE_URL;
 const enabled=!!url && process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true";
 const NOW=new Date("2026-09-07T12:00:00.000Z");
-const tables=[schema.purchaseOrders,schema.purchaseOrderLines,schema.inboundShipmentLines,schema.receivingOrders,schema.receivingLines,schema.receiptReversals,schema.vendorInvoiceLines,schema.inventoryLots];
+const tables=[schema.purchaseOrders,schema.purchaseOrderLines,schema.inboundShipments,schema.inboundShipmentLines,schema.receivingOrders,schema.receivingLines,schema.receiptReversals,schema.vendorInvoiceLines,schema.inventoryLots,schema.orderItemCosts];
 (enabled ? describe : describe.skip).sequential("durable reporting owner in PostgreSQL",() => {
   let pool:pg.Pool,repository:CostReportingRepository,destination:ReportDestination;
   const owned:string[]=[];
@@ -26,10 +26,12 @@ const tables=[schema.purchaseOrders,schema.purchaseOrderLines,schema.inboundShip
     pool=new pg.Pool({connectionString:url,ssl:false,max:10,statement_timeout:15_000});repository=new CostReportingRepository(pool);
   });
   beforeEach(async () => {
-    for (const name of ["procurement","inventory"]) {await pool.query(`CREATE SCHEMA ${name}`);owned.push(name);}
+    for (const name of ["procurement","inventory","oms"]) {await pool.query(`CREATE SCHEMA ${name}`);owned.push(name);}
     for (const table of tables) await pool.query(fixtureTable(table));
     for (const statement of fixtureForeignKeys(tables)) await pool.query(statement);
-    for (const name of ["222_procurement_cost_evidence.sql","0725_inventory_cost_admission_evidence.sql","230_procurement_cost_reporting_delivery.sql"]) await pool.query(readFileSync(resolve(process.cwd(),"migrations",name),"utf8"));
+    for (const name of ["222_procurement_cost_evidence.sql","0725_inventory_cost_admission_evidence.sql","230_procurement_cost_reporting_delivery.sql",
+      "900000007000018030001_shipment_cost_exception_decisions.sql","0751_exact_inventory_cost_totals.sql",
+      "900000008000018110001_shipment_cost_reconciliation.sql"]) await pool.query(readFileSync(resolve(process.cwd(),"migrations",name),"utf8"));
     await pool.query(`INSERT INTO procurement.purchase_orders(id,po_number,vendor_id) VALUES(10,'REPORT-FIXTURE',5);
       INSERT INTO procurement.purchase_order_lines(id,purchase_order_id,line_number,sku,order_qty,unit_cost_cents,line_total_cents) VALUES(21,10,1,'REPORT',3,2,6);
       INSERT INTO procurement.receiving_orders(id,receipt_number,source_type,status) VALUES(40,'REPORT-RECEIPT','purchase_order','closed');
@@ -70,6 +72,37 @@ const tables=[schema.purchaseOrders,schema.purchaseOrderLines,schema.inboundShip
     expect(await repository.finish(work,{acknowledgement:receipt},new Date(NOW.getTime()+2000))).toBe(false);
     const status=costReportDeliveryListSchema.parse({purchaseOrderId:10,configuration:"enabled",...await repository.list(10,destination.id)});
     expect(status.deliveries[0]).toMatchObject({state:"acknowledged",attemptCount:1,acknowledgement:receipt});expect(status.unqueuedEventCount).toBe(0);
+  });
+  it.each([false,true])("verifies historical posting amounts against the owner ledger (tampered payload: %s)",async tampered=>{
+    await pool.query(`INSERT INTO procurement.inbound_shipments(id,shipment_number,status) VALUES(42,'SYNTHETIC-SHIPMENT','closed');
+      INSERT INTO procurement.inbound_shipment_lines(id,inbound_shipment_id,purchase_order_id,purchase_order_line_id,sku,qty_shipped)
+        VALUES(23,42,10,21,'REPORT',3)`);
+    const database=drizzle(pool);
+    const application=await database.transaction(async tx=>{
+      const revision=await recordCostRevision(tx,{contractVersion:1,component:"landed",
+        scope:{kind:"shipment_line",purchaseOrderId:10,purchaseOrderLineId:21,inboundShipmentId:42,inboundShipmentLineId:23},
+        sources:[{kind:"shipment_cost",documentId:42,lineId:1,version:"e".repeat(64)}],currency:"USD",totalMills:100001,basePieces:3,
+        evidence:"confirmed",packagingTreatment:"not_applicable",issue:null,manualOverride:null},"synthetic-admin",NOW);
+      const result={status:"review_required",lotsUpdated:0,cogsRowsUpdated:0,totalCogsDeltaCents:0,
+        issues:[{code:"COST_HISTORICAL_LINEAGE_MISSING",message:"Synthetic receipt links absent."}]};
+      const app=(await tx.execute(sql`INSERT INTO inventory.cost_applications(application_key,source_revision_id,status,evidence,recorded_by,recorded_at)
+        VALUES(${'f'.repeat(64)},${revision.id},'review_required',${JSON.stringify({result,reconciliation:{historicalAmountMills:100001}})}::jsonb,'synthetic-admin',${NOW}) RETURNING id`)).rows[0];
+      const approval=(await tx.execute(sql`INSERT INTO inventory.cost_reconciliation_approvals(inbound_shipment_line_id,source_revision_id,application_id,evidence_fingerprint,
+        destination,actor_id,actor_name,reason,recorded_at,evidence) VALUES(23,${revision.id},${app.id},${'a'.repeat(64)},'historical_cogs','synthetic-admin','Synthetic administrator',
+        'Verified synthetic history',${NOW},'{}'::jsonb) RETURNING id`)).rows[0];
+      const posting=(await tx.execute(sql`INSERT INTO inventory.cost_reconciliation_postings(inbound_shipment_line_id,approval_id,source_revision_id,application_id,destination,currency,
+        before_mills,after_mills,delta_mills,unassigned_delta_mills,actor_id,recorded_at) VALUES(23,${approval.id},${revision.id},${app.id},'historical_cogs','USD',0,100001,100001,-100001,'synthetic-admin',${NOW}) RETURNING id`)).rows[0];
+      const payload={contractVersion:1,currency:"USD",sourceRevisionId:revision.id,sourceFingerprint:revision.contract.fingerprint,component:"landed",changes:[],
+        cogsDeltaCents:0,actorId:"synthetic-admin",recordedAt:NOW.toISOString(),historicalCostAdjustments:[{id:Number(posting.id),approvalId:Number(approval.id),destination:"historical_cogs",
+          beforeMills:0,afterMills:tampered?100000:100001,deltaMills:tampered?100000:100001}]};
+      await tx.execute(sql`INSERT INTO inventory.cost_reporting_events(application_id,contract_version,payload,recorded_at) VALUES(${app.id},1,${JSON.stringify(payload)}::jsonb,${NOW})`);
+      return String(app.id);
+    });
+    await repository.enqueue(destination,NOW,randomUUID);
+    const row=(await pool.query("SELECT state,envelope,last_error_code FROM procurement.cost_report_deliveries WHERE application_id=$1",[application])).rows[0];
+    expect(row.state).toBe(tampered?"dead_letter":"queued");
+    if(tampered) expect(row.last_error_code).toBe("COST_REPORT_SOURCE_CONFLICT");
+    else expect(row.envelope.payload.historicalCostAdjustments[0].deltaMills).toBe(100001);
   });
   it("serializes simultaneous enqueues and claims without duplicate delivery",async () => {
     expect((await Promise.all([repository.enqueue(destination,NOW,randomUUID),repository.enqueue(destination,NOW,randomUUID)])).reduce((sum,n) => sum+n,0)).toBe(1);
