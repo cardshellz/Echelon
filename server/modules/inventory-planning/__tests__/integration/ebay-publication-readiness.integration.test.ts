@@ -9,7 +9,8 @@ import { calculatePublicationVariantMappingDefinitionHash } from "../../domain/i
 import { reviewEbayPublicationReadiness, assertEbayPublicationReady, ensureEbayPublicationReady, withEbayPublicationReadinessApplied, findEbayPublicationReadinessReceipt, rejectEbayPublicationReadinessCommand } from "../../infrastructure/ebay-publication-readiness.repository";
 import { createEbayRouteListingLifecycleClient } from "../../../channels/infrastructure/ebay-listing-client";
 import { recordQuantityProviderResponse } from "../../application/quantity-provider-request-evidence";
-import { quantityPublicationScopeLockKey } from "../../infrastructure/quantity-publication-admission.repository";
+import { PostgresQuantityPublicationAdmission, quantityPublicationScopeLockKey } from "../../infrastructure/quantity-publication-admission.repository";
+import { PostgresInventoryPublicationOutboxRepository } from "../../infrastructure/inventory-publication-outbox.repository";
 import { PUBLICATION_TARGET_SCOPE_LOCK_SEED } from "../../infrastructure/inventory-publication-target-stop.repository";
 import { EbayExistingListingSyncExecution, type EbayListingExecutionContext, type PreparedEbayListingSync } from "../../../channels/ebay-listing-sync.service";
 import { EbayMarketplaceListingConnector, type EbayObservedOffer } from "../../../channels/listing-connectors/ebay-listing.connector";
@@ -73,6 +74,121 @@ dbDescribe.sequential("reviewed eBay publication stock enrollment, real PostgreS
         VALUES(2,67,102,'NEW','offer-NEW','listing-20','synced')`);
     return { ...source(), purpose: "sync" as const, variants: [...source().variants, { productVariantId: 102, sku: "NEW" }] };
   };
+
+  const unrelatedRetainedMappingGap = async () => {
+    await database.pool.query(`BEGIN;
+      INSERT INTO catalog.products(id,sku) VALUES(21,'OTHER');
+      INSERT INTO catalog.product_variants(id,product_id,sku,is_active) VALUES(201,21,'OTHER-PACK',true),(202,21,'OTHER-CASE',false);
+      INSERT INTO inventory.inventory_levels(id,warehouse_location_id,product_variant_id,variant_qty,reserved_qty,picked_qty,packed_qty)
+        VALUES(11,100,201,7,0,0,0);
+      INSERT INTO inventory.transformation_model_versions(product_id,version,build_to_promise_enabled,definition_hash,validation_state,validation_errors,change_reason,idempotency_key,request_hash,created_by)
+        VALUES(21,1,false,repeat('c',64),'valid','[]','Other product model','other-product-model',repeat('c',64),'operator');
+      INSERT INTO inventory.transformation_model_heads(product_id,draft_model_id,revision,updated_by,update_reason)
+        SELECT 21,id,0,'operator','Other product model' FROM inventory.transformation_model_versions WHERE product_id=21;
+      UPDATE inventory.transformation_model_versions SET lifecycle_status='sealed',sealed_by='operator',sealed_at=transaction_timestamp() WHERE product_id=21;
+      UPDATE inventory.transformation_model_heads SET active_model_id=draft_model_id,draft_model_id=NULL,revision=revision+1 WHERE product_id=21;
+      INSERT INTO channels.channel_listings(id,channel_id,product_variant_id,external_sku,external_variant_id,external_product_id,sync_status)
+        VALUES(3,67,201,'OTHER-PACK','offer-OTHER-PACK','listing-21','synced');
+      COMMIT;`);
+    await ensureEbayPublicationReady(database.pool, { ...source(), productId: 21,
+      variants: [{ productVariantId: 201, sku: "OTHER-PACK" }] },
+      { commandKey: randomUUID(), actor: "operator", now: WALMART_INVENTORY_NOW });
+    // The unrelated product has a valid active mapping and a retained inactive
+    // offer without a listing ID, exactly the production blocker shape.
+    await database.pool.query(`INSERT INTO channels.channel_listings(id,channel_id,product_variant_id,external_sku,external_variant_id,external_product_id,sync_status)
+      VALUES(4,67,202,'OTHER-CASE','offer-OTHER-CASE',NULL,'synced')`);
+  };
+
+  it("prepares one product without invalidating another product's stock work or requiring its missing retained mapping", async () => {
+    await ensureEbayPublicationReady(database.pool, source(),
+      { commandKey: randomUUID(), actor: "operator", now: WALMART_INVENTORY_NOW });
+    await unrelatedRetainedMappingGap();
+    const selected = await retainedSource(), commandKey = randomUUID();
+    const targetBefore = (await database.pool.query("SELECT revision::text FROM inventory.inventory_publication_targets WHERE id=3")).rows[0];
+    const unrelatedBefore = (await database.pool.query("SELECT * FROM inventory.inventory_publication_outbox WHERE publication_target_id=3 AND product_variant_id=201 ORDER BY id")).rows;
+    expect(unrelatedBefore).toHaveLength(1);
+    await Promise.all([1, 2].map(() => ensureEbayPublicationReady(database.pool, selected,
+      { commandKey, actor: "operator", now: WALMART_INVENTORY_NOW })));
+    expect((await database.pool.query("SELECT revision::text FROM inventory.inventory_publication_targets WHERE id=3")).rows[0]).toEqual(targetBefore);
+    expect((await database.pool.query("SELECT * FROM inventory.inventory_publication_outbox WHERE publication_target_id=3 AND product_variant_id=201 ORDER BY id")).rows).toEqual(unrelatedBefore);
+    expect((await database.pool.query("SELECT product_variant_id FROM inventory.publication_variant_mapping_heads WHERE publication_target_id=3 ORDER BY product_variant_id")).rows)
+      .toEqual([{ product_variant_id: 101 }, { product_variant_id: 102 }, { product_variant_id: 201 }]);
+    expect((await database.pool.query("SELECT desired_quantity::text FROM inventory.inventory_publication_outbox WHERE publication_target_id=3 AND product_variant_id=102")).rows)
+      .toEqual([{ desired_quantity: "0" }]);
+    expect((await database.pool.query("SELECT count(*)::int AS n FROM inventory.ebay_publication_readiness_applications WHERE command_key=$1", [commandKey])).rows[0].n).toBe(1);
+    const preparations = (await database.pool.query("SELECT receipt FROM inventory.publication_mapping_preparations WHERE idempotency_key=$1", [`ebay-stock:${commandKey}`])).rows;
+    expect(preparations).toEqual([{ receipt: expect.objectContaining({ publicationTargetId: 3, revision: targetBefore.revision,
+      changedProductVariantIds: [102], publicationRows: 1, appliedBy: "operator" }) }]);
+    await expect(database.pool.query("UPDATE inventory.publication_mapping_preparations SET receipt='{}' WHERE idempotency_key=$1", [`ebay-stock:${commandKey}`]))
+      .rejects.toMatchObject({ code: "23514" });
+    expect((await database.pool.query("SELECT receipt FROM inventory.publication_mapping_preparations WHERE idempotency_key=$1", [`ebay-stock:${commandKey}`])).rows).toEqual(preparations);
+    expect(runtime.api).not.toHaveBeenCalled();
+  });
+
+  it("does not wait on another product's provider scope while preparing exact mappings", async () => {
+    await unrelatedRetainedMappingGap();
+    const selected = await retainedSource(), other = await database.pool.connect();
+    const key = quantityPublicationScopeLockKey({ destinationKind: "channel_connection", connectionId: 9, providerKey: "ebay",
+      providerScopeType: "account", externalScopeId: "seller-36", externalInventoryItemId: "OTHER-PACK", productId: null, productVariantId: null });
+    try {
+      await other.query("SELECT pg_advisory_lock(hashtextextended($1,$2))", [key, PUBLICATION_TARGET_SCOPE_LOCK_SEED]);
+      await ensureEbayPublicationReady(database.pool, selected,
+        { commandKey: randomUUID(), actor: "operator", now: WALMART_INVENTORY_NOW });
+      expect((await database.pool.query("SELECT product_variant_id FROM inventory.inventory_publication_outbox WHERE publication_target_id=3 AND state='queued' ORDER BY product_variant_id")).rows)
+        .toEqual([{ product_variant_id: 101 }, { product_variant_id: 102 }, { product_variant_id: 201 }]);
+    } finally { await other.query("SELECT pg_advisory_unlock(hashtextextended($1,$2))", [key, PUBLICATION_TARGET_SCOPE_LOCK_SEED]); other.release(); }
+  });
+
+  it("still rolls back the complete requested product when another retained member of that product is unmapped", async () => {
+    const selected = await retainedSource();
+    await database.pool.query(`UPDATE catalog.product_variants SET is_active=false WHERE id=103;
+      INSERT INTO channels.channel_listings(id,channel_id,product_variant_id,external_sku,external_variant_id,external_product_id,sync_status)
+        VALUES(3,67,103,'UNCERTAIN','offer-UNCERTAIN',NULL,'synced')`);
+    await expect(ensureEbayPublicationReady(database.pool, selected,
+      { commandKey: randomUUID(), actor: "operator", now: WALMART_INVENTORY_NOW }))
+      .rejects.toMatchObject({ code: "CANONICAL_PUBLICATION_MAPPING_MISSING",
+        context: { productId: 20, productVariantId: 103, publicationTargetId: 3 } });
+    expect(await counts()).toEqual({ mappings: 0, members: 0, updates: 0, receipts: 0, jobs: 0 });
+    expect(runtime.api).not.toHaveBeenCalled();
+  });
+
+  it("rolls back mapping preparation while the canonical target and variant pair is owned by a worker", async () => {
+    const selected = await retainedSource(), commandKey = randomUUID(), other = await database.pool.connect();
+    try {
+      await other.query("SELECT pg_advisory_lock($1,$2)", [3, 102]);
+      await expect(ensureEbayPublicationReady(database.pool, selected,
+        { commandKey, actor: "operator", now: WALMART_INVENTORY_NOW }))
+        .rejects.toMatchObject({ code: "INVENTORY_PUBLICATION_TARGET_BUSY" });
+      expect(await counts()).toEqual({ mappings: 0, members: 0, updates: 0, receipts: 0, jobs: 0 });
+    } finally { await other.query("SELECT pg_advisory_unlock($1,$2)", [3, 102]); other.release(); }
+    await ensureEbayPublicationReady(database.pool, selected,
+      { commandKey, actor: "operator", now: WALMART_INVENTORY_NOW });
+    expect(await counts()).toEqual({ mappings: 2, members: 0, updates: 2, receipts: 1, jobs: 0 });
+  });
+
+  it("rejects a stale leased quantity for the same variant without changing the destination revision", async () => {
+    await ensureEbayPublicationReady(database.pool, source(),
+      { commandKey: randomUUID(), actor: "operator", now: WALMART_INVENTORY_NOW });
+    const now = (await database.pool.query<{ now: Date }>("SELECT transaction_timestamp() AS now")).rows[0].now;
+    const outbox = new PostgresInventoryPublicationOutboxRepository(database.pool);
+    const [claim] = await outbox.claimDue({ batchSize: 1, leaseSeconds: 120, leaseToken: "before-mapping-preparation", now });
+    expect(claim).toMatchObject({ productVariantId: 101, desiredQuantity: "17" });
+    await database.pool.query(`UPDATE inventory.inventory_levels SET variant_qty=variant_qty+2 WHERE product_variant_id=101;
+      UPDATE inventory.inventory_lots SET qty_on_hand=qty_on_hand+2 WHERE product_variant_id=101`);
+    await ensureEbayPublicationReady(database.pool, await retainedSource(),
+      { commandKey: randomUUID(), actor: "operator", now: WALMART_INVENTORY_NOW });
+    const rows = (await database.pool.query(`SELECT state,desired_quantity::text,desired_revision::text,publication_target_revision_snapshot::text
+      FROM inventory.inventory_publication_outbox WHERE publication_target_id=3 AND product_variant_id=101 ORDER BY desired_revision`)).rows;
+    expect(rows).toEqual([
+      { state: "superseded", desired_quantity: "17", desired_revision: "1", publication_target_revision_snapshot: claim.publicationTargetRevision },
+      { state: "queued", desired_quantity: "19", desired_revision: "2", publication_target_revision_snapshot: claim.publicationTargetRevision },
+    ]);
+    const send = vi.fn();
+    expect(await outbox.runIfCurrent(claim, send)).toEqual({ status: "superseded" });
+    await expect(new PostgresQuantityPublicationAdmission(database.pool, () => now).runOutbox(claim, send))
+      .rejects.toMatchObject({ code: "PUBLICATION_OUTBOX_AUTHORIZATION_INVALID" });
+    expect(send).not.toHaveBeenCalled();
+  });
 
   it("updates and verifies existing group pictures after automatically preparing an inactive member's missing stock mapping", async () => {
     // Match the incident: the active pack already has a sealed connection; only
@@ -153,6 +269,11 @@ dbDescribe.sequential("reviewed eBay publication stock enrollment, real PostgreS
     expect(items.get("P5")).toMatchObject({ product: { imageUrls: photos }, availability: { shipToLocationAvailability: { quantity: 17 } } });
     expect(items.get("NEW")).toMatchObject({ product: { imageUrls: [], aspects: { Style: ["NEW"] } }, availability: { shipToLocationAvailability: { quantity: 0 } } });
     expect(offers.get("NEW")).toMatchObject({ offerId: "offer-NEW", listingId: "listing-20", availableQuantity: 0 });
+    const groupAttempts = (await database.pool.query<{ affected_scopes: Array<{ externalInventoryItemId: string }> }>(
+      "SELECT affected_scopes FROM inventory.quantity_publication_attempts WHERE scope->>'externalInventoryItemId'='group:PACK'")).rows;
+    expect(groupAttempts.length).toBeGreaterThan(0);
+    for (const attempt of groupAttempts) expect(attempt.affected_scopes.map(scope => scope.externalInventoryItemId).sort())
+      .toEqual(["NEW", "P5", "group:PACK"]);
     const writes = runtime.api.mock.calls.filter(call => call[0] !== "GET").length;
     // After committed mapping work and a lost local completion, retry verifies
     // current pictures. Neither mapping receipts nor provider writes duplicate.
@@ -354,10 +475,13 @@ dbDescribe.sequential("reviewed eBay publication stock enrollment, real PostgreS
     expect(await rejecting).toMatchObject({ commandKey: command.commandKey, alreadyApplied: true });
     expect(await counts()).toEqual({ mappings: 1, members: 0, updates: 1, receipts: 1, jobs: 1 });
   });
-  it("rolls back enrollment while an exact provider scope is busy", async () => {
-    const command = await input(), other = await database.pool.connect();
+  it.each(["P5", "NEW"])("rolls back enrollment while exact group member %s has a busy provider scope", async sku => {
+    const selected = await retainedSource();
+    const command = { source: selected, commandKey: randomUUID(), contextHash: "a".repeat(64),
+      expectedReviewHash: (await reviewEbayPublicationReadiness(database.pool, selected)).reviewHash };
+    const other = await database.pool.connect();
     const key = quantityPublicationScopeLockKey({ destinationKind: "channel_connection", connectionId: 9, providerKey: "ebay",
-      providerScopeType: "account", externalScopeId: "seller-36", externalInventoryItemId: "P5", productId: null, productVariantId: null });
+      providerScopeType: "account", externalScopeId: "seller-36", externalInventoryItemId: sku, productId: null, productVariantId: null });
     try {
       await other.query("SELECT pg_advisory_lock(hashtextextended($1,$2))", [key, PUBLICATION_TARGET_SCOPE_LOCK_SEED]);
       await expect(withEbayPublicationReadinessApplied(database.pool, command, "operator", WALMART_INVENTORY_NOW, followUp))

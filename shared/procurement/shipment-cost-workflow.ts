@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { costIssueSchema } from "./cost-source-contracts";
 import { shipmentCostPushResultSchema } from "./po-shipment-costs";
+import { shipmentCostExceptionSchema } from "./shipment-cost-exception";
 
 export const shipmentCostWorkflowIdSchema = z.number().int().positive().max(2_147_483_647);
 export const shipmentCostUpdateInputSchema = z.object({}).strict();
@@ -19,6 +20,7 @@ export const shipmentCostReviewSchema = z.object({
     lineId: shipmentCostWorkflowIdSchema,
     sku: z.string().nullable(),
     sourceIssue: costIssueSchema.nullable(),
+    exceptionReview: shipmentCostExceptionSchema.nullable().optional(),
     application: z.object({
       id: z.number().int().positive().safe(),
       recordedAt: z.string().datetime({ offset: true }),

@@ -68,6 +68,15 @@ describe("shipment cost workflow HTTP boundaries", () => {
     expect((await read()).status).toBe(404);
     expect(mocks.getCostReview).toHaveBeenCalledWith(42);
   });
+  it("preserves the original strict response for older tabs and opts new clients into exceptions", async () => {
+    mocks.getCostReview.mockResolvedValue({ shipmentId: 42, lines: [{ lineId: 1, exceptionReview: null }] });
+    expect(await (await read()).json()).toEqual({ shipmentId: 42, lines: [{ lineId: 1 }] });
+    const response = await fetch(`${base}/api/inbound-shipments/42/cost-review`, { headers: {
+      "x-test-permission": "purchasing:view", "X-Shipment-Cost-Review-Version": "2",
+    } });
+    expect(response.headers.get("vary")).toContain("X-Shipment-Cost-Review-Version");
+    expect(await response.json()).toEqual({ shipmentId: 42, lines: [{ lineId: 1, exceptionReview: null }] });
+  });
   it("requires an authenticated actor and idempotency key before work", async () => {
     expect((await update({ actor: "" })).status).toBe(401);
     expect((await update({ key: "" })).status).toBe(400);

@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { canonicalJson } from "@shared/utils/canonical-json";
 import { createHash } from "node:crypto";
+import { ebayListingFailureDiagnostic } from "./ebay-listing-failure-diagnostic";
 import {
   ebayProductSyncResultSchema,
   ebayListingSyncJobSchema,
@@ -157,10 +158,7 @@ export function syncFailure(
   nextAttemptAt: Date;
   resetAttempts: boolean;
 } {
-  const code =
-    error instanceof Error && "code" in error && typeof error.code === "string"
-      ? error.code
-      : "EBAY_LISTING_SYNC_FAILED";
+  const { code } = ebayListingFailureDiagnostic(error);
   const waiting = WAIT_CODES.has(code);
   const retrying =
     waiting ||
@@ -178,6 +176,8 @@ export function syncFailure(
     now.getTime() + Math.min(15 * 60_000, 30_000 * 2 ** Math.min(attempts, 5));
   const message = code === "INVENTORY_PUBLICATION_TARGET_BUSY"
     ? "An inventory update is using this listing. The saved listing update will retry automatically."
+    : code === "CANONICAL_PUBLICATION_MAPPING_MISSING"
+      ? "Inventory setup stopped this listing update before its pictures could be confirmed. Retry Sync to prepare this listing's inventory connection."
     : error instanceof Error &&
     (error instanceof EbayListingSyncError ||
       /^(EBAY_|PUBLICATION_|QUANTITY_)/.test(code))

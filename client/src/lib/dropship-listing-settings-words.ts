@@ -1137,3 +1137,134 @@ export function updatedProductsLineWords(count: number): string {
     ? "Card Shellz moved 1 product to another category."
     : `Card Shellz moved ${TEXT_NUMBER.format(count)} products to another category.`;
 }
+
+// ---------------------------------------------------------------------------
+// The Category settings card and the category editor (PR 10e, plan 8.3, 8.4, 8.6, 12.2)
+// ---------------------------------------------------------------------------
+
+/**
+ * Words of the Category settings card and the category editor (W12, plan
+ * 8.3). "Category settings" is the record's (REC:971, REC:819), "Use store
+ * default" REC:871's and "Also clear theirs" REC:869's; every other one is a
+ * proposal (plan 12.2, or "beyond 12.2" where marked), kept here so a later
+ * PR changes it in one place. None names a code or an id.
+ */
+export const LISTING_SETTINGS_CATEGORY_WORDS = Object.freeze({
+  // The record's name for the card (REC:971, REC:819), and the place the step's bar names.
+  title: "Category settings",
+  // Interim (PR 10 PROPOSAL): the card's intro (8.3).
+  intro: "Products in a Card Shellz category use its settings before your store defaults.",
+  // Interim (PR 10 PROPOSAL): a category row with no setting of its own (8.3).
+  usesStoreDefaults: "Uses your store defaults",
+  // Interim (PR 10 PROPOSAL): the lead-in to a category row's own settings, "Sets: shipping policy, store shelf" (8.3).
+  sets: "Sets",
+  // Interim (PR 10 PROPOSAL): no chosen product is in a Card Shellz category (8.3).
+  empty: "None of your chosen products is in a Card Shellz category.",
+  // Interim (PR 10 PROPOSAL): the card's read failed (8.3); [Try again] reads it again.
+  readFailed: "Couldn't load category settings.",
+  // Interim (PR 10 PROPOSAL): the store holds older group rules, so no category save can be made (D11, 8.3); also the 409's words (8.6).
+  olderRules: "Category settings can't be saved while your store has older group rules. They'll be moved over in a later update.",
+  // The record's word for a category that follows the store (REC:871, D17).
+  useStoreDefault: "Use store default",
+  // Interim (PR 10 PROPOSAL): the tag beside a value the store default gives (8.3).
+  storeDefault: "Store default",
+  // The record's box (REC:869): the category's products with their own value follow the category (8.4).
+  alsoClear: "Also clear theirs",
+  // Interim (PR 10 PROPOSAL): the 404 of a category save or the editor's read (8.6): the editor closes, the card reads again.
+  categoryNotFound: "No chosen product is in this category any more.",
+  // Interim (PR 10 PROPOSAL, beyond 12.2): the editor's Price row is read-only until the category price check (10f, UX-m9).
+  priceReadOnly: "A category's price can't be changed here yet.",
+  // Interim (PR 10 PROPOSAL, beyond 12.2): the editor's read refused for more than 10,000 sizes (the banner says why).
+  readTooLarge: "This category can't be checked until you choose 10,000 or fewer sizes.",
+  // Interim (PR 10 PROPOSAL, beyond 12.2): the editor's read loading with no name to say yet.
+  loading: "Loading…",
+} as const);
+
+function categoryName(name: string): string {
+  const trimmed = name.trim();
+  return trimmed || "this category";
+}
+
+/** One category row of the card (8.3): "Sleeves · 15 products · Sets: shipping policy, store shelf" or "… · Uses your store defaults". Interim (PR 10 PROPOSAL). */
+export interface CategoryRowWords {
+  name: string;
+  /** "15 products". */
+  products: string;
+  /** "Sets: shipping policy, store shelf" (the fields in the order given, the stored shape's) or "Uses your store defaults". */
+  sets: string;
+  /** The three joined with " · ". */
+  text: string;
+}
+
+export function categoryRowWords(category: { name: string; productCount: number; setFields: readonly CategoryListingSettingField[] }): CategoryRowWords {
+  const name = category.name.trim() || DRAWER_UNNAMED_CATEGORY;
+  const products = `${TEXT_NUMBER.format(category.productCount)} ${productsWord(category.productCount)}`;
+  // In the order given: the server lists a category's own settings in the stored shape's order (`SR` setFields).
+  const sets = category.setFields.length === 0
+    ? LISTING_SETTINGS_CATEGORY_WORDS.usesStoreDefaults
+    : `${LISTING_SETTINGS_CATEGORY_WORDS.sets}: ${category.setFields.map((field) => CATEGORY_SETTING_WORDS[field]).join(", ")}`;
+  return { name, products, sets, text: `${name} · ${products} · ${sets}` };
+}
+
+/** Interim (PR 10 PROPOSAL, beyond 12.2): a category the answer gives no name for (the contract requires one; never expected). */
+const DRAWER_UNNAMED_CATEGORY = "Category";
+
+/** "4 products have no Card Shellz category. They use your store defaults." (8.3, `uncategorizedProductCount`); null for none. Interim (PR 10 PROPOSAL). */
+export function uncategorizedWords(count: number): string | null {
+  if (count <= 0) return null;
+  return count === 1
+    ? "1 product has no Card Shellz category. It uses your store defaults."
+    : `${TEXT_NUMBER.format(count)} products have no Card Shellz category. They use your store defaults.`;
+}
+
+/** The editor's title, "Sleeves · 15 products" (8.3). Interim (PR 10 PROPOSAL). */
+export function categoryEditorTitleWords(name: string, productCount: number): string {
+  return `${name.trim() || DRAWER_UNNAMED_CATEGORY} · ${TEXT_NUMBER.format(productCount)} ${productsWord(productCount)}`;
+}
+
+/** "Loading Sleeves…" while the editor's read answers (8.3). Interim (PR 10 PROPOSAL). */
+export function loadingCategoryWords(name: string): string {
+  const trimmed = name.trim();
+  return trimmed ? `Loading ${trimmed}…` : LISTING_SETTINGS_CATEGORY_WORDS.loading;
+}
+
+/** The tag beside a value the category sets itself: "Set for Sleeves" (8.3). Interim (PR 10 PROPOSAL). */
+export function setForCategoryWords(name: string): string {
+  return `Set for ${categoryName(name)}`;
+}
+
+/** A card row's [Change], read out with its category (plan 3.4): "Change settings for Sleeves". Interim (PR 10 PROPOSAL). */
+export function changeCategoryLabel(name: string): string {
+  const trimmed = name.trim();
+  return trimmed ? `Change settings for ${trimmed}` : "Change settings";
+}
+
+/**
+ * "3 products in Sleeves have their own shipping policy." (8.3, 8.4): the
+ * line over the "Also clear theirs" box, counted from the detail's
+ * `ownValues` entries that hold the field. Interim (PR 10 PROPOSAL).
+ */
+export function ownValuesLineWords(count: number, name: string, field: CategoryListingSettingField): string {
+  const setting = CATEGORY_SETTING_WORDS[field];
+  return count === 1
+    ? `1 product in ${categoryName(name)} has its own ${setting}.`
+    : `${TEXT_NUMBER.format(count)} products in ${categoryName(name)} have their own ${setting}.`;
+}
+
+/** "Also clear theirs, so all 15 use this one." (REC:869; R:§3.3 M8 "so all N use this one"). */
+export function alsoClearLabelWords(productCount: number): string {
+  return productCount === 1
+    ? `${LISTING_SETTINGS_CATEGORY_WORDS.alsoClear}, so it uses this one.`
+    : `${LISTING_SETTINGS_CATEGORY_WORDS.alsoClear}, so all ${TEXT_NUMBER.format(productCount)} use this one.`;
+}
+
+/**
+ * W12's product version conflict (8.6): the category's products, or which of
+ * them hold their own values, changed since the editor opened. The second
+ * sentence is the server's note (`S/application/dropship-listing-category-settings-service.ts`
+ * CATALOG_DELAY_NOTE): the category view is cached for up to a minute.
+ * Interim (PR 10 PROPOSAL).
+ */
+export function categoryProductsChangedWords(name: string): string {
+  return `The products in ${categoryName(name)} changed. Load the latest and save again. A Card Shellz change can take a minute to show.`;
+}

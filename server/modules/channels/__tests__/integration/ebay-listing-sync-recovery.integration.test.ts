@@ -274,6 +274,103 @@ const configured =
     });
     const galleryPhotos = ["https://example.com/current-front.jpg", "https://example.com/current-back.jpg"];
 
+    it("shows only the current claim's phase across a crash, joined command and requeue", async () => {
+      await database.pool.query("INSERT INTO catalog.products(id,sku) VALUES(900,'PROGRESS')");
+      await database.pool.query("INSERT INTO catalog.product_variants(id,product_id,sku) VALUES(900,900,'PROGRESS-P5')");
+      const source = { ...identity, productId: 900, variants: identity.variants.map(member => ({ ...member, variantId: 900, sku: 'PROGRESS-P5' })) };
+      const store = new PostgresEbayListingSyncRepository(database.pool);
+      const command = randomUUID();
+      const saved = await store.enqueue(source, command, "operator", clock());
+      expect((await store.get(saved.id)).progress).toMatchObject({ phase: null, phaseState: null,
+        requestedAt: timestamp.toISOString() });
+      const claim = (await store.claim(clock(), randomUUID(), saved.id))!;
+      advance();
+      const hash = "a".repeat(64);
+      await store.stage(claim.job, "item:P5", hash, "started", clock());
+      const running = await store.get(saved.id);
+      expect(running.progress).toMatchObject({ phase: "update_item", phaseState: "started", lastActivityAt: timestamp.toISOString() });
+      expect(running.updatedAt).not.toBe(running.progress!.lastActivityAt);
+      // Simulate a process dying after its stage was saved. Its session lock is
+      // released, but the durable running row remains claimable by another owner.
+      await claim.release();
+      const reclaimed = (await store.claim(clock(), randomUUID(), saved.id))!;
+      expect((await store.get(saved.id)).progress).toMatchObject({ phase: null, phaseState: null });
+      await store.stage(reclaimed.job, "prepare_inventory", hash, "started", clock());
+      // A concurrent command increments requested revision while this pass owns
+      // the earlier revision. Its current phase stays visible until it requeues.
+      const joined = await store.enqueue(source, randomUUID(), "operator", clock());
+      expect(joined.revision).toBe("2");
+      expect((await store.get(saved.id)).progress).toMatchObject({ phase: "prepare_inventory", phaseState: "started" });
+      await store.finish(reclaimed.job, { state: "recovering", result: null, code: "PUBLICATION_SCOPE_BUSY",
+        message: "Waiting", nextAttemptAt: clock() }, clock());
+      await reclaimed.release();
+      const queued = await store.get(saved.id);
+      expect(queued).toMatchObject({ state: "queued", progress: { phase: null, phaseState: null } });
+      expect((await store.getByCommand(command, identity.channelId))?.progress).toEqual(queued.progress);
+      expect((await store.list(identity.channelId)).find(job => job.id === saved.id)?.progress).toEqual(queued.progress);
+      const final = (await store.claim(clock(), randomUUID(), saved.id))!;
+      await store.finish(final.job, { state: "needs_attention", result: null, code: "EBAY_SYNC_MAPPING_INVALID",
+        message: "Test complete", nextAttemptAt: clock() }, clock());
+      await final.release();
+    });
+
+    it("counts earlier eligible work across channels, excludes future retries and records actual queue activity", async () => {
+      await database.pool.query("INSERT INTO catalog.products(id,sku) VALUES(901,'QUEUE-A'),(902,'QUEUE-B'),(903,'QUEUE-C')");
+      await database.pool.query("INSERT INTO catalog.product_variants(id,product_id,sku) VALUES(901,901,'QUEUE-A'),(902,902,'QUEUE-B'),(903,903,'QUEUE-C')");
+      await database.pool.query("INSERT INTO channels.channels(id,name,provider) VALUES(902,'Second eBay account','ebay')");
+      await database.pool.query("INSERT INTO channels.channel_connections(id,channel_id) VALUES(902,902)");
+      // Match the database's due-candidate clock while keeping every timestamp
+      // in this test an explicit input. Future retries must stay out of the count.
+      timestamp = new Date((await database.pool.query("SELECT CURRENT_TIMESTAMP AS now")).rows[0].now.getTime() - 2 * 60 * 60_000);
+      const queuedIdentity = (productId: number, sku: string) => ({ ...identity, productId,
+        variants: identity.variants.map(member => ({ ...member, variantId: productId, sku })) });
+      const store = new PostgresEbayListingSyncRepository(database.pool);
+      const future = await store.enqueue(queuedIdentity(901, "QUEUE-A"), randomUUID(), "operator", clock());
+      const held = (await store.claim(clock(), randomUUID(), future.id))!;
+      await store.finish(held.job, { state: "recovering", result: null, code: "PUBLICATION_PROVIDER_COOLDOWN",
+        message: "Wait", nextAttemptAt: new Date("2099-01-01T00:00:00Z") }, clock());
+      await held.release();
+      advance();
+      const first = await store.enqueue({ ...queuedIdentity(902, "QUEUE-B"), channelId: 902, connectionId: 902 }, randomUUID(), "operator", clock());
+      const running = (await store.claim(clock(), randomUUID(), first.id))!;
+      advance();
+      await store.stage(running.job, "group:PACK", "b".repeat(64), "started", clock());
+      const lastActivityAt = timestamp.toISOString();
+      advance();
+      const queued = await store.enqueue(queuedIdentity(903, "QUEUE-C"), randomUUID(), "operator", clock());
+      expect((await store.get(queued.id)).progress).toMatchObject({ queuedAhead: 1, lastWorkerActivityAt: lastActivityAt });
+      await store.finish(running.job, { state: "needs_attention", result: null, code: "EBAY_SYNC_MAPPING_INVALID", message: "Done", nextAttemptAt: clock() }, clock());
+      await running.release();
+      expect((await store.get(queued.id)).progress?.queuedAhead).toBe(0);
+      for (const job of [future, queued]) {
+        const claim = (await store.claim(new Date("2099-01-02T00:00:00Z"), randomUUID(), job.id))!;
+        await store.finish(claim.job, { state: "needs_attention", result: null, code: "EBAY_SYNC_MAPPING_INVALID", message: "Done", nextAttemptAt: clock() }, clock());
+        await claim.release();
+      }
+    });
+
+    it("retains the exact failing preparation phase and safe scope diagnostics before any provider write", async () => {
+      const f = fixture();
+      const prepare = f.prepare.getMockImplementation()!;
+      f.prepare.mockImplementationOnce(async () => ({ ...await prepare(), assertInventoryReady: async () => {
+        throw Object.assign(new Error("private SQL diagnostic"), { code: "CANONICAL_PUBLICATION_MAPPING_MISSING",
+          context: { productId: 4, productVariantId: 208, publicationTargetId: 3, password: "private" } });
+      } }));
+      const saved = await f.service.enqueue(identity, "operator");
+      await f.service.processDue(1, saved.id);
+      expect(f.mutations).toEqual([]);
+      const job = await f.store.get(saved.id);
+      expect(job).toMatchObject({ state: "needs_attention", code: "CANONICAL_PUBLICATION_MAPPING_MISSING",
+        progress: { phase: "prepare_inventory", phaseState: "started" } });
+      expect(job.message).not.toContain("private");
+      const event = (await database.pool.query(`SELECT evidence FROM channels.ebay_listing_sync_events
+        WHERE job_id=$1 AND event='needs_attention' ORDER BY id DESC LIMIT 1`, [saved.id])).rows[0];
+      expect(event.evidence.diagnostic).toEqual({ code: "CANONICAL_PUBLICATION_MAPPING_MISSING",
+        context: { productId: 4, productVariantId: 208, publicationTargetId: 3 } });
+      expect((await f.service.list(identity.channelId)).find(item => item.id === saved.id)?.issue)
+        .toMatchObject({ action: { kind: "retry_sync" }, retryable: true });
+    });
+
     it("retains partial photo sync through repeated target contention, restart and competing workers, then verifies the same listing", async () => {
       let busy = true;
       let release!: () => void, entered!: () => void;

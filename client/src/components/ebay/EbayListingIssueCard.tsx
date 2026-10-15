@@ -6,10 +6,11 @@ interface EbayListingIssueCardProps {
   issue: EbayListingIssue;
   onAction?: (issue: EbayListingIssue) => void;
   busy?: boolean;
+  showTitle?: boolean;
 }
 
 /** Present the server's recovery decision without inventing client-side retry policy. */
-export function EbayListingIssueCard({ issue, onAction, busy = false }: EbayListingIssueCardProps) {
+export function EbayListingIssueCard({ issue, onAction, busy = false, showTitle = true }: EbayListingIssueCardProps) {
   const [copyResult, setCopyResult] = useState<string | null>(null);
   const safeHref = issue.action.href?.startsWith("/") && !issue.action.href.startsWith("//")
     ? issue.action.href : null;
@@ -28,7 +29,7 @@ export function EbayListingIssueCard({ issue, onAction, busy = false }: EbayList
 
   return (
     <div className="min-w-0 space-y-2 rounded-md border border-amber-300 bg-amber-50/50 p-3 text-left text-sm dark:border-amber-800 dark:bg-amber-950/20" onClick={(event) => event.stopPropagation()}>
-      <p className="font-medium break-words">{issue.title}</p>
+      {showTitle && <p className="font-medium break-words">{issue.title}</p>}
       <p className="break-words">{issue.message}</p>
       <p className="break-words"><strong>Next step:</strong> {issue.nextStep}</p>
       <div className="flex flex-wrap items-center gap-2">

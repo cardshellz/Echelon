@@ -9,6 +9,8 @@
 
 import { ebayProductSyncResultSchema, ebayListingSyncJobSchema } from "@shared/types/ebay-listing-sync";
 import { EbayListingJobStatusDialog } from "@/components/ebay/EbayListingJobStatusDialog";
+import { EbayListingJobProgress } from "@/components/ebay/EbayListingJobProgress";
+import { presentEbayListingJob } from "@shared/ebay-listing-progress";
 import { EbayProductListingIntentControl } from "@/components/ebay/EbayProductListingIntentControl";
 import { EbayWithdrawalIssueCard } from "@/components/ebay/EbayWithdrawalIssueCard";
 import { ebayListingIssueSchema, type EbayListingIssue } from "@shared/types/ebay-listing-issue";
@@ -2075,6 +2077,8 @@ export default function EbayChannelPage() {
                       const syncPending = syncJob && ["queued","running","recovering"].includes(syncJob.state);
                       const publicationPending = syncPending && syncJob?.operation === "publish";
                       const withdrawalJob = syncJob?.operation === "withdraw" ? syncJob : null;
+                      const savedSyncIssue = syncJob?.code ? syncJob.issue ?? resolveEbayListingIssue({ code: syncJob.code,
+                        message: syncJob.message, productId: item.id, jobId: syncJob.id, state: syncJob.state }) : null;
                       const syncIssue = localSyncIssues.get(item.id)?.issue ?? (syncJob && ["awaiting_evidence", "needs_attention"].includes(syncJob.state)
                         ? syncJob.issue ?? resolveEbayListingIssue({ code: syncJob.code, message: syncJob.message, productId: item.id, jobId: syncJob.id, state: syncJob.state })
                         : item.status === "error" && item.syncError && !syncPending
@@ -2169,15 +2173,10 @@ export default function EbayChannelPage() {
                               {item.name}
                             </span>
                             {syncJob && syncJob.state !== "completed" && (
-                              <p role="status" aria-label={`Sync status for ${item.name}`} className="text-xs mt-1" title={syncJob.message ?? undefined}>
-                                {syncJob.operation === "withdraw" ? syncPending ? "Exclusion saved — removal from eBay is in progress" : "Exclusion saved — removal needs attention below" : syncJob.code === "EBAY_PUBLICATION_READBACK_PENDING" ? "Checking published listing and pictures" : syncJob.operation === "publish"
-                                  ? syncJob.state === "queued" ? "Publishing saved — waiting to run" : syncJob.state === "running" ? "Publishing in progress" : syncJob.state === "recovering" ? "Publishing saved — recovering automatically" : "Publishing paused — see the next step below"
-                                  : syncJob.state === "queued" ? "Sync saved — waiting to run" : syncJob.state === "running" ? "Sync in progress" : syncJob.state === "recovering" ? "Sync saved — recovering automatically" : "Update paused — see the next step below"}
-                                {syncPending && syncJob.message && <span className="block text-muted-foreground">{syncJob.message}</span>}
-                                {syncJob.state === "recovering" && <span className="block text-muted-foreground">Next check: {new Date(syncJob.nextAttemptAt).toLocaleString()}</span>}
-                              </p>
+                              <div className="mt-1"><EbayListingJobProgress job={syncJob} label={`Sync status for ${item.name}`}
+                                detail={syncPending ? savedSyncIssue?.message ?? syncJob.message : null} /></div>
                             )}
-                            {syncPending && syncJob.operation === "sync" && <Button variant="outline" size="sm" className="min-h-[44px] mt-1 text-xs" onClick={event => {
+                            {syncJob && syncJob.state !== "completed" && syncJob.operation === "sync" && syncIssue?.action.kind !== "check_status" && <Button variant="outline" size="sm" className="min-h-[44px] mt-1 text-xs" onClick={event => {
                               event.stopPropagation();
                               setPublicationStatusTarget({ jobId: syncJob.id, productId: item.id, name: item.name });
                             }}>View update status</Button>}
@@ -2494,7 +2493,9 @@ export default function EbayChannelPage() {
                             {withdrawalJob && syncIssue.action.kind === "review_mapping" ? <EbayWithdrawalIssueCard issue={syncIssue}
                               onCheck={() => setPublicationStatusTarget({ jobId: withdrawalJob.id, productId: item.id, name: item.name })}
                               onRetry={withdrawalJob.state === "needs_attention" ? () => retryWithdrawal(item.id) : undefined} />
-                              : <EbayListingIssueCard issue={syncIssue} busy={syncingProductIds.has(item.id)} onAction={(issue) => handleIssueAction(issue, item.id, syncJob?.id)} />}
+                              : <EbayListingIssueCard issue={syncIssue}
+                                showTitle={!syncJob || syncJob.state === "completed" || presentEbayListingJob(syncJob).summary !== syncIssue.title}
+                                busy={syncingProductIds.has(item.id)} onAction={(issue) => handleIssueAction(issue, item.id, syncJob?.id)} />}
                           </TableCell>
                         </TableRow>}
                         {item.inventoryIssue && <TableRow className="block sm:table-row">

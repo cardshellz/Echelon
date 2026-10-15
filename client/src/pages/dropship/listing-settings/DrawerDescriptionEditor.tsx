@@ -2,6 +2,7 @@ import { useId, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { bulkDescriptionEditorResult, type BulkPicks } from "@/lib/dropship-listing-settings-bulk";
+import { categoryDescriptionEditorResult, type CategoryDescriptionField, type CategoryPicks } from "@/lib/dropship-listing-settings-categories";
 import {
   descriptionEditorAnswer,
   descriptionEditorCheck,
@@ -32,12 +33,15 @@ interface DescriptionEditorBaseProps {
   message: string | null;
   /** Closes the editor and drops what was typed; Esc does the same (the drawer routes it here). */
   onCancel: () => void;
+  /** The words of each part's default choice: "Use default", or the category editor's "Use store default" (PR 10e, D17). */
+  defaultLabel?: string;
 }
 
 export type DrawerDescriptionEditorProps = DescriptionEditorBaseProps & (
   | {
     /** The drawer's (one product). */
     bulk?: false;
+    category?: false;
     /** Puts the parts the vendor changed in the drawer's draft; nothing is sent until Save. */
     onDone: (picks: Pick<ProductSettingsPicks, DescriptionEditField>) => void;
   }
@@ -48,8 +52,20 @@ export type DrawerDescriptionEditorProps = DescriptionEditorBaseProps & (
      * Card Shellz text" (the model's `mainTextOwn: false`).
      */
     bulk: true;
+    category?: false;
     /** Puts the parts the vendor changed in the sheet's draft; nothing is sent until Save. */
     onDone: (picks: Pick<BulkPicks, DescriptionEditField>) => void;
+  }
+  | {
+    /**
+     * The category editor's mode (PR 10e, plan 8.2): text above and below only,
+     * since a category has no main text (that part is not shown), with "Use
+     * store default" for the default (D17).
+     */
+    category: true;
+    bulk?: false;
+    /** Puts the parts the vendor changed in the category's draft; nothing is sent until Save. */
+    onDone: (picks: Pick<CategoryPicks, CategoryDescriptionField>) => void;
   });
 
 type Problems = Partial<Record<DescriptionEditField, string>>;
@@ -68,8 +84,9 @@ type Problems = Partial<Record<DescriptionEditField, string>>;
  * `descriptionEditorCheck`).
  */
 export function DrawerDescriptionEditor(props: DrawerDescriptionEditorProps) {
-  const { model, title, productName, message, onCancel } = props;
+  const { model, title, productName, message, onCancel, defaultLabel = LISTING_SETTINGS_EDIT_WORDS.useDefault } = props;
   const bulk = props.bulk === true;
+  const category = props.category === true;
   const [state, setState] = useState<DescriptionEditorState>(model.initial);
   const [problems, setProblems] = useState<Problems>({});
   const groupId = useId();
@@ -85,11 +102,18 @@ export function DrawerDescriptionEditor(props: DrawerDescriptionEditorProps) {
     });
   };
   const finish = (result: ReturnType<typeof descriptionEditorResult>) => {
-    if (props.bulk === true) return;
+    if (props.bulk === true || props.category === true) return;
     if (result.ok) props.onDone(result.picks);
     else setProblems(result.problems);
   };
   const done = () => {
+    if (props.category === true) {
+      // Never a main text: the part is not shown, and the result drops it.
+      const result = categoryDescriptionEditorResult(model, state);
+      if (result.ok) props.onDone(result.picks);
+      else setProblems(result.problems);
+      return;
+    }
     if (props.bulk !== true) {
       finish(descriptionEditorResult(model, state));
       return;
@@ -120,20 +144,24 @@ export function DrawerDescriptionEditor(props: DrawerDescriptionEditorProps) {
         model={model}
         state={state.textAbove}
         bulk={bulk}
+        defaultLabel={defaultLabel}
         problem={problems.textAbove ?? null}
         onChange={(next) => change("textAbove", next)}
       />
-      <MainTextPart
-        name={`${groupId}-main`}
-        productName={productName}
-        model={model}
-        state={state.mainText}
-        bulk={bulk}
-        check={descriptionEditorCheck(model, state)}
-        problem={problems.mainText ?? null}
-        onChange={(next) => change("mainText", next)}
-        onAnswer={(answer) => finish(descriptionEditorAnswer(model, state, answer))}
-      />
+      {/* A category has no main text (PR 10e): its part stays at the model's initial, which the result drops. */}
+      {!category && (
+        <MainTextPart
+          name={`${groupId}-main`}
+          productName={productName}
+          model={model}
+          state={state.mainText}
+          bulk={bulk}
+          check={descriptionEditorCheck(model, state)}
+          problem={problems.mainText ?? null}
+          onChange={(next) => change("mainText", next)}
+          onAnswer={(answer) => finish(descriptionEditorAnswer(model, state, answer))}
+        />
+      )}
       <TemplatePart
         name={`${groupId}-below`}
         field="textBelow"
@@ -142,6 +170,7 @@ export function DrawerDescriptionEditor(props: DrawerDescriptionEditorProps) {
         model={model}
         state={state.textBelow}
         bulk={bulk}
+        defaultLabel={defaultLabel}
         problem={problems.textBelow ?? null}
         onChange={(next) => change("textBelow", next)}
       />
@@ -150,7 +179,7 @@ export function DrawerDescriptionEditor(props: DrawerDescriptionEditorProps) {
 }
 
 /** Text above or below: Use default / None / Own text, and the box for own text. */
-function TemplatePart({ name, field, label, productName, model, state, bulk, problem, onChange }: {
+function TemplatePart({ name, field, label, productName, model, state, bulk, defaultLabel, problem, onChange }: {
   name: string;
   field: "textAbove" | "textBelow";
   label: string;
@@ -159,6 +188,8 @@ function TemplatePart({ name, field, label, productName, model, state, bulk, pro
   state: TemplateTextEditorState;
   /** "Set for selected": "Leave as is" comes first. */
   bulk: boolean;
+  /** "Use default", or the category editor's "Use store default" (D17). */
+  defaultLabel: string;
   problem: string | null;
   onChange: (next: TemplateTextEditorState) => void;
 }) {
@@ -169,7 +200,7 @@ function TemplatePart({ name, field, label, productName, model, state, bulk, pro
         <ChoiceRadio name={name} label={LISTING_SETTINGS_BULK_WORDS.leaveAsIs} checked={state.mode === "leave"} onPick={() => onChange({ ...state, mode: "leave" })} />
       )}
       {model.canDefault && (
-        <ChoiceRadio name={name} label={LISTING_SETTINGS_EDIT_WORDS.useDefault} checked={state.mode === "default"} onPick={() => onChange({ ...state, mode: "default" })} />
+        <ChoiceRadio name={name} label={defaultLabel} checked={state.mode === "default"} onPick={() => onChange({ ...state, mode: "default" })} />
       )}
       {model.canNone && (
         <ChoiceRadio name={name} label={LISTING_SETTINGS_EDIT_WORDS.none} checked={state.mode === "none"} onPick={() => onChange({ ...state, mode: "none" })} />

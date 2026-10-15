@@ -5,6 +5,7 @@ import type { PoShipmentCostSummary } from "@shared/procurement/po-shipment-cost
 import type { PoShipmentCosts } from "@shared/procurement/po-shipment-costs";
 import { resolveShipmentChargeEvidence } from "./domain/shipment-charge-evidence";
 import { dateValues } from "./purchase-workspace-read";
+import { readShipmentCostExceptions } from "./shipment-cost-exception.repository";
 
 type SummaryReader = {
   execute(query: SQL): Promise<{ rows: Record<string, unknown>[] }>;
@@ -125,7 +126,8 @@ export async function readPoShipmentCosts(
       const linkedById = new Map(
         linked.rows.map((row) => [costInteger(row.id, "lineId", 1), row]),
       );
-      return buildPoShipmentCosts(
+      const exceptions = await readShipmentCostExceptions(tx, linked.rows.map(row => costInteger(row.id, "lineId", 1)));
+      const costs = buildPoShipmentCosts(
         {
           poId,
           currency,
@@ -230,6 +232,7 @@ export async function readPoShipmentCosts(
           };
         }),
       );
+      return { ...costs, lines: costs.lines.map(line => ({ ...line, exceptionReview: exceptions.get(line.lineId) ?? null })) };
     },
     { isolationLevel: "repeatable read", accessMode: "read only" },
   );

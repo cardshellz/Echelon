@@ -16,8 +16,9 @@ export const DROPSHIP_BROWSER_FEATURES = Object.freeze({
   content: feature("Listing content", ["dropship-content-editor"], ["dropship-content"]),
   listings: feature("Catalog and listing settings", [
     "dropship-policy-catalog-steps", "dropship-policy-listing-access",
-    "dropship-policy-listing-settings-bulk", "dropship-policy-listing-settings-drawer",
-    "dropship-policy-listing-settings-step", "dropship-policy-listing-settings-updated",
+    "dropship-policy-listing-settings-bulk", "dropship-policy-listing-settings-categories",
+    "dropship-policy-listing-settings-drawer", "dropship-policy-listing-settings-step",
+    "dropship-policy-listing-settings-updated",
   ], ["dropship-catalog"], 3),
   policies: feature("eBay policies and categories", [
     "dropship-policy-recovery", "dropship-policy-ebay-categories",

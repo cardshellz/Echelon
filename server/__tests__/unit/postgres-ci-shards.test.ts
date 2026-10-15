@@ -156,6 +156,8 @@ describe("PostgreSQL CI coverage and isolation", () => {
       "server/modules/dropship/__tests__/integration/dropship-listing-setting-writes.integration.test.ts",
     ];
     addedSuites.push(
+      "server/modules/procurement/__tests__/integration/po-financial-evidence.integration.test.ts",
+      "server/modules/procurement/__tests__/integration/po-financial-refresh.integration.test.ts",
       "server/modules/procurement/__tests__/integration/invoice-replacement.integration.test.ts",
       "server/modules/procurement/__tests__/integration/shipment-value-allocation.integration.test.ts",
       "server/modules/procurement/__tests__/integration/receiving-quarantine.integration.test.ts",
