@@ -24,6 +24,18 @@ After merging publication base `7c1a9c266712690be721c408a3536a1cb9c3b8d2` and al
 
 The exact commands, raw logs and final readiness receipt are retained in the local review output `outputs/procurement-invoice-recovery-2026-10-15`.
 
+## Hosted CI fixture correction
+
+The first hosted run on `af97ab28f` exposed a gap in the local regression selection: `procurement-payment-controlled-acceptance.integration.test.ts` was registered in CI but absent from the nine local PostgreSQL suites above. All six failing cases called the actual invoice detail route; `getInvoiceById()` called `readInvoiceReplacementDetail()`, whose freight-footprint query required `procurement.inbound_freight_costs`. `PaymentAcceptanceFixture.TABLES` omitted that table. The six failures were reproduced locally before changing the fixture.
+
+The fixture now creates the canonical `schema.inboundFreightCosts` through its existing schema/FK/reset owner. An additional HTTP test checks ordinary product-invoice detail, explicit replacement ineligibility, unchanged balances/history, and an unchanged financial graph. Existing payment assertions and production error handling are preserved.
+
+The same hosted run also failed a quarantine browser checkbox action. Its trace shows the location popup still mounted in its closed/exit-animation state when the next action began. The location helper now asserts the selected value and waits for the option to unmount; native clicks/checks and payload assertions remain unchanged. Ten baseline local repetitions passed, so exclusive causality for the hosted failure is not established. No arbitrary delay or forced click is added.
+
+The correction includes a clean merge of main `b6fb3883061662c17733740f466448331b8062fb` (shipment cost workflow). Independent review verified that the merged routes retain invoice-enriched shipment reads and that the UI retains replacement links alongside the new cost-review workflow.
+
+Validation on the merged correction: **92 PostgreSQL cases** passed (13 payment, 19 replacement, 60 receiving/cost-application), **315 unit tests** across 19 affected server/client suites, and **78 desktop/mobile cases** across quarantine, replacement, shipment cost workflow and summary. No failures or skips occurred in these runs. All **three TypeScript projects** and the **516-migration ownership check** passed. The owned PostgreSQL cluster and frontend server were stopped after testing. These counts overlap prior runs and are not additive. Logs are retained under `outputs/procurement-invoice-recovery-2026-10-15/ci-correction`. Hosted rerun and deployment remain unverified.
+
 ## Database coverage
 
 The new suite exercises exact retained original data, same-number creation, fresh approval/payment state, cloned legitimate PO links, atomic charge reassignment, durable replay, rollback after injected audit failure, concurrent distinct commands, stale previews, generic duplicate protection, immutable identity/deletion/attachments, zero values, closed shipments, payment history including voided payments, invalid source ownership and amounts, strict inputs, repeated replacement generations and current cost authority.
