@@ -4,16 +4,22 @@ import { pool as defaultPool } from "../../../db";
 import { evaluateDropshipCatalogExposure } from "../domain/catalog-exposure";
 import { DropshipError } from "../domain/errors";
 import { prepareEbayCategoryRules, resolveEbayListingCategory } from "../application/dropship-ebay-category-resolver";
+import type { DropshipListingStoreContext } from "../application/dropship-listing-preview-service";
+import { conversionCategoryNamesToRead } from "../application/dropship-listing-rules-conversion";
 import type { ListingSettingsInputs } from "../application/dropship-listing-settings-facts";
 import type {
-  ListingSettingsLoad, ListingSettingsProductOwnRead, ListingSettingsRepository,
+  ListingSettingsConversionLoad, ListingSettingsCostReadFailure, ListingSettingsLoad, ListingSettingsProductOwnRead,
+  ListingSettingsRepository, ListingSettingsStoreLevelInputs,
 } from "../application/dropship-listing-settings-service";
 import { loadSelectedCandidates } from "../application/dropship-selected-catalog";
 import { readCategoryListingSettings } from "./dropship-category-listing-settings.repository";
 import { readEbayCategoryRules } from "./dropship-ebay-category-rules.reader";
 import { readContentProfile, readListingContentSettings } from "./dropship-listing-content.reader";
 import { PgDropshipListingPreviewRepository } from "./dropship-listing-preview.repository";
-import { readCatalogCategoryNames, readListingSettingLayers } from "./dropship-listing-setting-layers.reader";
+import {
+  readCatalogCategoriesByName, readCatalogCategoryNames, readListingSettingLayers,
+} from "./dropship-listing-setting-layers.reader";
+import { readStoreListingTextBytesWithClient } from "./dropship-listing-setting-writes.repository";
 import { readPricingProfile } from "./dropship-pricing-profile.reader";
 import { readProductCategoryMarks } from "./dropship-product-category-marks.repository";
 import { readProductListingSettings } from "./dropship-product-listing-settings.repository";
@@ -21,6 +27,24 @@ import { selectedCatalogReaderForTransaction } from "./dropship-selected-catalog
 import { PgShellzClubProductCostAdapter } from "./shellz-club-product-cost.adapter";
 
 type Reader = Pick<PoolClient, "query">;
+
+/**
+ * Told when the .ops cost read fails inside a load: the load goes on, unpriced by cost, and says so
+ * (`costReadFailure`). The stage and SQLSTATE tell a timeout from a schema fault; never a message.
+ */
+export type ListingSettingsCostReadFailureReport = (input: {
+  vendorId: number; storeConnectionId: number; variantCount: number; stage: string; sqlState: string | null;
+}) => void;
+
+/**
+ * What the read model's inputs load to for a store whose owner the caller
+ * has already resolved (loadListingSettingsInputsWithClient): the inputs, or
+ * why there are none to build views from.
+ */
+export type ListingSettingsInputsLoad =
+  | { state: "ok"; inputs: ListingSettingsInputs; costReadFailure: ListingSettingsCostReadFailure | null }
+  | { state: "too_large"; store: DropshipListingStoreContext; storeLevel: ListingSettingsStoreLevelInputs }
+  | { state: "not_ebay"; store: DropshipListingStoreContext };
 
 /**
  * A digest of exactly the rows one view reads, in a stable order; null when
@@ -34,6 +58,23 @@ function rowsDigest(columns: string, from: string, orderBy: string): string {
   return `(SELECT encode(sha256(convert_to(string_agg(json_build_array(${columns})::text, ',' ORDER BY ${orderBy}), 'UTF8')), 'hex')
      FROM ${from})`;
 }
+
+/**
+ * The store's owner by member, as every read here resolves it: the store is
+ * one of the member's vendor's connections. One predicate for the views'
+ * fingerprint and the dry run's owner read, so both answer the same 404.
+ */
+const OWNER_BY_MEMBER = `FROM dropship.dropship_vendors v
+  JOIN dropship.dropship_store_connections sc ON sc.vendor_id = v.id
+  WHERE v.member_id::text = $1 AND sc.id = $2`;
+
+/**
+ * The owner alone, for a read that is never cached (the rules conversion's
+ * dry run): the fingerprint's owner part without its digests, which would
+ * hash every listing row of the store only to be thrown away.
+ */
+const OWNER_SQL = `SELECT v.id AS vendor_id
+  ${OWNER_BY_MEMBER}`;
 
 /**
  * The store's owner and a fingerprint of every Dropship-owned value the views
@@ -66,9 +107,7 @@ WITH owner AS (
          -- What the store context reads (loadStoreContext); tokens only as present or not.
          json_build_array(v.status, v.entitlement_status, sc.status, sc.setup_status, sc.platform,
            sc.access_token_ref IS NOT NULL, sc.refresh_token_ref IS NOT NULL) AS access
-  FROM dropship.dropship_vendors v
-  JOIN dropship.dropship_store_connections sc ON sc.vendor_id = v.id
-  WHERE v.member_id::text = $1 AND sc.id = $2
+  ${OWNER_BY_MEMBER}
 )
 SELECT o.vendor_id, json_build_array(
   o.access,
@@ -114,6 +153,12 @@ FROM owner o`;
 
 interface FingerprintRow { vendor_id: number; parts: unknown }
 
+/** The vendor that owns the store, when it is the member's; null otherwise. */
+async function readOwner(client: Reader, input: { memberId: string; storeConnectionId: number }): Promise<number | null> {
+  const row = (await client.query<{ vendor_id: number }>(OWNER_SQL, [input.memberId, input.storeConnectionId])).rows[0];
+  return row ? row.vendor_id : null;
+}
+
 async function readOwnerFingerprint(client: Reader, input: { memberId: string; storeConnectionId: number }):
   Promise<{ vendorId: number; fingerprint: string } | null> {
   const row = (await client.query<FingerprintRow>(FINGERPRINT_SQL, [input.memberId, input.storeConnectionId])).rows[0];
@@ -125,7 +170,7 @@ async function readOwnerFingerprint(client: Reader, input: { memberId: string; s
 export class PgDropshipListingSettingsRepository implements ListingSettingsRepository {
   constructor(
     private readonly dbPool: Pick<Pool, "query" | "connect"> = defaultPool,
-    private readonly reportCostReadFailure: (input: { vendorId: number; storeConnectionId: number; variantCount: number; stage: string }) => void = () => undefined,
+    private readonly reportCostReadFailure: ListingSettingsCostReadFailureReport = () => undefined,
   ) {}
 
   async readFingerprint(input: { memberId: string; storeConnectionId: number }): Promise<string | null> {
@@ -133,11 +178,64 @@ export class PgDropshipListingSettingsRepository implements ListingSettingsRepos
   }
 
   async load(input: { memberId: string; storeConnectionId: number; now: Date }): Promise<ListingSettingsLoad | null> {
+    return this.inReadSnapshot<ListingSettingsLoad | null>(async (client) => {
+      // The fingerprint is read first, so it describes exactly the snapshot everything else is read from.
+      const owner = await readOwnerFingerprint(client, input);
+      if (!owner) return null;
+      const load = await loadListingSettingsInputsWithClient(client,
+        { vendorId: owner.vendorId, storeConnectionId: input.storeConnectionId, now: input.now }, this.reportCostReadFailure);
+      // The views only need to know that the costs are missing: they show those sizes unpriced and cache nothing.
+      return load.state === "ok"
+        ? { state: "ok", inputs: load.inputs, costReadFailed: load.costReadFailure !== null, fingerprint: owner.fingerprint }
+        : { ...load, fingerprint: owner.fingerprint };
+    });
+  }
+
+  /**
+   * The rules conversion's dry run inputs (PR 11, plan 4.B.1, D14, D23), in
+   * one read snapshot (inReadSnapshot) with no lock and no write: the owner by
+   * member, by the predicate every read here uses (OWNER_SQL: the dry run is
+   * never cached, so it reads no fingerprint), then the conversion's inputs
+   * on the snapshot's one client (loadConversionInputsWithClient).
+   */
+  async loadConversionInputs(input: { memberId: string; storeConnectionId: number; now: Date }): Promise<ListingSettingsConversionLoad | null> {
+    return this.inReadSnapshot(async (client) => {
+      const vendorId = await readOwner(client, input);
+      if (vendorId === null) return null;
+      return loadConversionInputsWithClient(client, { vendorId, storeConnectionId: input.storeConnectionId, now: input.now },
+        this.reportCostReadFailure);
+    });
+  }
+
+  async readProductOwnSettings(input: {
+    vendorId: number; storeConnectionId: number; productId: number; productVariantIds: readonly number[];
+  }): Promise<ListingSettingsProductOwnRead> {
+    // One snapshot, as the load: the row and the catalog facts its main text is checked against agree.
+    return this.inReadSnapshot(async (client) => {
+      const rows = await readProductListingSettings(client, {
+        vendorId: input.vendorId, storeConnectionId: input.storeConnectionId, productIds: [input.productId],
+      });
+      const row = rows.get(input.productId) ?? null;
+      // Only a main text is checked against the catalog, so a product without one reads no catalog.
+      const catalog = row?.values.mainText != null ? await readProductCatalog(client, input.productId, input.productVariantIds) : null;
+      return { row, catalog };
+    });
+  }
+
+  /**
+   * load, loadConversionInputs and readProductOwnSettings each run in one
+   * REPEATABLE READ READ ONLY snapshot on one pooled client, with no lock:
+   * the views and the dry run never write, and a long scan must not block
+   * listing queues. readFingerprint is the one small pool query outside it
+   * (the views' cache key, read before load opens its snapshot). COMMIT, or
+   * ROLLBACK on any failure (the read's own failure is the one thrown, a
+   * failed COMMIT's included), and the client is released once on every path.
+   */
+  private async inReadSnapshot<T>(work: (client: Reader) => Promise<T>): Promise<T> {
     const client = await this.dbPool.connect();
     try {
-      // One snapshot, no locks: the views never write, and a long scan must not block listing queues.
       await client.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
-      const result = await this.loadInSnapshot(client, input);
+      const result = await work(client);
       await client.query("COMMIT");
       return result;
     } catch (error) {
@@ -147,99 +245,119 @@ export class PgDropshipListingSettingsRepository implements ListingSettingsRepos
       client.release();
     }
   }
+}
 
-  async readProductOwnSettings(input: {
-    vendorId: number; storeConnectionId: number; productId: number; productVariantIds: readonly number[];
-  }): Promise<ListingSettingsProductOwnRead> {
-    const client = await this.dbPool.connect();
-    try {
-      // One snapshot, no locks, as the load: the row and the catalog facts its main text is checked against agree.
-      await client.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
-      const rows = await readProductListingSettings(client, {
-        vendorId: input.vendorId, storeConnectionId: input.storeConnectionId, productIds: [input.productId],
-      });
-      const row = rows.get(input.productId) ?? null;
-      // Only a main text is checked against the catalog, so a product without one reads no catalog.
-      const catalog = row?.values.mainText != null ? await readProductCatalog(client, input.productId, input.productVariantIds) : null;
-      await client.query("COMMIT");
-      return { row, catalog };
-    } catch (error) {
-      await rollbackQuietly(client);
-      throw error;
-    } finally {
-      client.release();
+/**
+ * The rules conversion's planner inputs for one store (PR 11, plan 4.B.1),
+ * every read on `client` and so in the caller's transaction: the dry run's
+ * read snapshot here, and the apply's own transaction (11c2, plan 7.B.3
+ * step 9), so the apply plans over inputs composed exactly as the dry run's.
+ * It opens, commits and rolls back nothing and takes no lock; the caller has
+ * already resolved the store's owner (`vendorId`). In order: the read
+ * model's own inputs (loadListingSettingsInputsWithClient); the categories
+ * the store's category rules name, by exact name, active or not (plan D8;
+ * the names come from the inputs just read, conversionCategoryNamesToRead,
+ * so the planner and this read agree on them); every such category's
+ * settings row, or null for one with none (the planner refuses a target
+ * whose row was never read); and the store's saved product text in bytes,
+ * by the store text cap's own statement (plan D9c). A store not on eBay or
+ * over 10,000 sizes is passed through, unplanned.
+ */
+export async function loadConversionInputsWithClient(client: Reader,
+  input: { vendorId: number; storeConnectionId: number; now: Date },
+  reportCostReadFailure: ListingSettingsCostReadFailureReport): Promise<ListingSettingsConversionLoad> {
+  const { vendorId, storeConnectionId } = input;
+  const load = await loadListingSettingsInputsWithClient(client, input, reportCostReadFailure);
+  if (load.state !== "ok") return { state: load.state, store: load.store };
+  const listing = load.inputs;
+  const categoriesByName = await readCatalogCategoriesByName(client, conversionCategoryNamesToRead(listing));
+  const categoryIds = [...categoriesByName.values()].flatMap((categories) => categories.map((category) => category.id));
+  // A key for every category named, chosen products or not: the planner refuses a target whose row was never read.
+  const rows = await readCategoryListingSettings(client, { vendorId, storeConnectionId, categoryIds });
+  const categoryRows = new Map(categoryIds.map((categoryId) => [categoryId, rows.get(categoryId) ?? null] as const));
+  const storeTextBytes = await readStoreListingTextBytesWithClient(client, { vendorId, storeConnectionId });
+  return { state: "ok", inputs: { listing, categoriesByName, categoryRows, storeTextBytes }, costReadFailure: load.costReadFailure };
+}
+
+/**
+ * The read model's inputs for one store (Listing settings design 8.4), every
+ * read on `client` and so in the caller's transaction: the views' snapshot,
+ * and, through loadConversionInputsWithClient, the dry run's snapshot and
+ * the apply's transaction (plan PR 11, 4.B.1, 7.B). It opens, commits and
+ * rolls back nothing, and takes no lock; the caller has already resolved
+ * the store's owner (`vendorId`). Only the .ops cost read sets its own
+ * savepoint on the client (PgShellzClubProductCostAdapter.forTransaction). A
+ * failed cost read leaves the costs unavailable, is told to
+ * `reportCostReadFailure` and comes back as `costReadFailure` (its stage and
+ * SQLSTATE), for the caller to decide on.
+ */
+export async function loadListingSettingsInputsWithClient(client: Reader,
+  input: { vendorId: number; storeConnectionId: number; now: Date },
+  reportCostReadFailure: ListingSettingsCostReadFailureReport): Promise<ListingSettingsInputsLoad> {
+  const { vendorId, storeConnectionId } = input;
+  const reader = PgDropshipListingPreviewRepository.readerForTransaction(client);
+  const store = await reader.loadStoreContext({ vendorId, storeConnectionId });
+  if (!store) throw new Error(`Listing settings found the owner of store ${storeConnectionId} but not its context.`);
+  if (store.platform !== "ebay") return { state: "not_ebay", store };
+
+  const pricing = await readPricingProfile(client, storeConnectionId, vendorId);
+  const listingConfig = await reader.getStoreListingConfig(storeConnectionId);
+  const ebayCategoryRules = await readEbayCategoryRules(client, vendorId, storeConnectionId);
+  const content = await readContentProfile(client, vendorId, storeConnectionId);
+  const storeLevel = { pricing, listingConfig, ebayCategoryRules, content };
+
+  let candidates: ListingSettingsInputs["candidates"];
+  try {
+    candidates = await loadSelectedCandidates({ vendorId, ...selectedCatalogReaderForTransaction(client) }, input.now, "listing_settings");
+  } catch (error) {
+    if (error instanceof DropshipError && error.code === "DROPSHIP_LISTING_SETTINGS_TOO_LARGE") {
+      return { state: "too_large", store, storeLevel };
     }
+    throw error;
   }
 
-  private async loadInSnapshot(client: Reader, input: { memberId: string; storeConnectionId: number; now: Date }): Promise<ListingSettingsLoad | null> {
-    // The fingerprint is read first, so it describes exactly the snapshot everything else is read from.
-    const owner = await readOwnerFingerprint(client, input);
-    if (!owner) return null;
-    const { vendorId, fingerprint } = owner;
-    const storeConnectionId = input.storeConnectionId;
-    const reader = PgDropshipListingPreviewRepository.readerForTransaction(client);
-    const store = await reader.loadStoreContext({ vendorId, storeConnectionId });
-    if (!store) throw new Error(`Listing settings found the owner of store ${storeConnectionId} but not its context.`);
-    if (store.platform !== "ebay") return { state: "not_ebay", fingerprint, store };
-
-    const pricing = await readPricingProfile(client, storeConnectionId, vendorId);
-    const listingConfig = await reader.getStoreListingConfig(storeConnectionId);
-    const ebayCategoryRules = await readEbayCategoryRules(client, vendorId, storeConnectionId);
-    const content = await readContentProfile(client, vendorId, storeConnectionId);
-    const storeLevel = { pricing, listingConfig, ebayCategoryRules, content };
-
-    let candidates: ListingSettingsInputs["candidates"];
-    try {
-      candidates = await loadSelectedCandidates({ vendorId, ...selectedCatalogReaderForTransaction(client) }, input.now, "listing_settings");
-    } catch (error) {
-      if (error instanceof DropshipError && error.code === "DROPSHIP_LISTING_SETTINGS_TOO_LARGE") {
-        return { state: "too_large", fingerprint, store, storeLevel };
-      }
-      throw error;
-    }
-
-    const ids = candidates.map((row) => row.productVariantId);
-    // The product and category settings, once, for every resolver below (plan D26), and the live names of
-    // every chosen size's category (plan D19), which the category views show (PR 9e, plan 8.11): one read
-    // either way, and a superset of the categories with settings. Plain reads in this snapshot, like
-    // everything else here.
-    const layers = await readListingSettingLayers(client, { vendorId, storeConnectionId, candidates });
-    const categoryNames = await readCatalogCategoryNames(client,
-      [...new Set(candidates.flatMap((row) => row.categoryId === null ? [] : [row.categoryId]))]);
-    const categoryMoves = await readCategoryMoveInputs(client, { vendorId, storeConnectionId, candidates });
-    let costReadFailed = false;
-    const costs = await PgShellzClubProductCostAdapter.forTransaction(client, (failure) => {
-      costReadFailed = true;
-      this.reportCostReadFailure({ vendorId, storeConnectionId, variantCount: failure.variantCount, stage: failure.stage });
-    }).loadProductCosts({ vendorId, productVariantIds: ids });
-    const preparedCategories = prepareEbayCategoryRules(ebayCategoryRules.revisionId, ebayCategoryRules.profile, layers);
-    const inputs: ListingSettingsInputs = {
-      store,
-      candidates,
-      sizesTotalByProductId: await countOfferedSizes(client, reader, candidates, input.now),
-      savedPrices: new Map((await reader.listSavedListingPrices({ vendorId, storeConnectionId, productVariantIds: ids }))
-        .map((row) => [row.productVariantId, row])),
-      existingListings: new Map((await reader.listExistingListings({ storeConnectionId, productVariantIds: ids }))
-        .map((row) => [row.productVariantId, row])),
-      pricing,
-      costs,
-      pricingPolicies: await reader.listPricingPolicies(),
-      listingConfig,
-      policyOverrides: new Map((await reader.listEbayListingPolicyOverrides({ vendorId, storeConnectionId, productVariantIds: ids }))
-        .map((row) => [row.productVariantId, row])),
-      shelfAssignments: new Map((await reader.listEbayStoreCategoryAssignments({ vendorId, storeConnectionId, productVariantIds: ids }))
-        .map((row) => [row.productVariantId, row.storeCategoryNames])),
-      ebayCategoryRules,
-      ebayCategories: new Map(candidates.map((row) => [row.productVariantId, resolveEbayListingCategory(row, preparedCategories)])),
-      content,
-      contentSettings: await readListingContentSettings(client, vendorId, storeConnectionId, ids),
-      pausedSince: await readLiveHolds(client, { vendorId, storeConnectionId, productVariantIds: ids }),
-      layers,
-      categoryNames,
-      categoryMoves,
-    };
-    return { state: "ok", fingerprint, inputs, costReadFailed };
-  }
+  const ids = candidates.map((row) => row.productVariantId);
+  // The product and category settings, once, for every resolver below (plan D26), and the live names of
+  // every chosen size's category (plan D19), which the category views show (PR 9e, plan 8.11): one read
+  // either way, and a superset of the categories with settings. Plain reads in this snapshot, like
+  // everything else here.
+  const layers = await readListingSettingLayers(client, { vendorId, storeConnectionId, candidates });
+  const categoryNames = await readCatalogCategoryNames(client,
+    [...new Set(candidates.flatMap((row) => row.categoryId === null ? [] : [row.categoryId]))]);
+  const categoryMoves = await readCategoryMoveInputs(client, { vendorId, storeConnectionId, candidates });
+  let costReadFailure: ListingSettingsCostReadFailure | null = null;
+  const costs = await PgShellzClubProductCostAdapter.forTransaction(client, (failure) => {
+    // Recorded before the report runs, so a report that throws (the adapter swallows it) cannot hide the failure.
+    costReadFailure = { stage: failure.stage, sqlState: failure.sqlState };
+    reportCostReadFailure({ vendorId, storeConnectionId, variantCount: failure.variantCount, stage: failure.stage, sqlState: failure.sqlState });
+  }).loadProductCosts({ vendorId, productVariantIds: ids });
+  const preparedCategories = prepareEbayCategoryRules(ebayCategoryRules.revisionId, ebayCategoryRules.profile, layers);
+  const inputs: ListingSettingsInputs = {
+    store,
+    candidates,
+    sizesTotalByProductId: await countOfferedSizes(client, reader, candidates, input.now),
+    savedPrices: new Map((await reader.listSavedListingPrices({ vendorId, storeConnectionId, productVariantIds: ids }))
+      .map((row) => [row.productVariantId, row])),
+    existingListings: new Map((await reader.listExistingListings({ storeConnectionId, productVariantIds: ids }))
+      .map((row) => [row.productVariantId, row])),
+    pricing,
+    costs,
+    pricingPolicies: await reader.listPricingPolicies(),
+    listingConfig,
+    policyOverrides: new Map((await reader.listEbayListingPolicyOverrides({ vendorId, storeConnectionId, productVariantIds: ids }))
+      .map((row) => [row.productVariantId, row])),
+    shelfAssignments: new Map((await reader.listEbayStoreCategoryAssignments({ vendorId, storeConnectionId, productVariantIds: ids }))
+      .map((row) => [row.productVariantId, row.storeCategoryNames])),
+    ebayCategoryRules,
+    ebayCategories: new Map(candidates.map((row) => [row.productVariantId, resolveEbayListingCategory(row, preparedCategories)])),
+    content,
+    contentSettings: await readListingContentSettings(client, vendorId, storeConnectionId, ids),
+    pausedSince: await readLiveHolds(client, { vendorId, storeConnectionId, productVariantIds: ids }),
+    layers,
+    categoryNames,
+    categoryMoves,
+  };
+  return { state: "ok", inputs, costReadFailure };
 }
 
 /**

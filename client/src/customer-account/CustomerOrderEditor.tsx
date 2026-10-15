@@ -2,12 +2,9 @@ import { useEffect, useRef, useState } from "react";
 import { OrderDraft, OrderEditOperationView } from "@/pages/OrderEdits";
 import {
   loadPendingOrderEditQuote,
-  savePendingOrderEditQuote,
   clearPendingOrderEditQuote,
   OrderEditRequestError,
 } from "@/lib/order-edits";
-import { orderEditPreviewInputSchema } from "@shared/order-edits/order-edit-preview";
-import { orderEditQuoteInputSchema } from "@shared/order-edits/order-edit.contract";
 import type {
   OrderEditOrder,
   OrderEditOperation,
@@ -49,8 +46,11 @@ export function CustomerOrderEditor({
     null,
   );
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const [busyAction, setBusyAction] = useState<"commit" | "reconcile" | "abandon">();
+  const [busyAction, setBusyAction] = useState<
+    "commit" | "reconcile" | "abandon"
+  >();
   const [reloadRequired, setReloadRequired] = useState(false);
   const [reloadBusy, setReloadBusy] = useState(false);
   const reloadInFlight = useRef(false);
@@ -95,7 +95,7 @@ export function CustomerOrderEditor({
           setInitialOperation(active);
           setOperation(active);
           setDiscountCodes(active.requestedPlan?.discountCodes ?? []);
-          setDraftVisible(false);
+          setDraftVisible(active.canAbandon && Boolean(active.requestedPlan));
         }
         setOrder(current);
       } catch (cause) {
@@ -105,14 +105,25 @@ export function CustomerOrderEditor({
     return () => controller.abort();
   }, [api, connectionId, omsOrderId, actorKey]);
 
-  function received(result: OrderEditOperation) {
+  async function received(
+    result: OrderEditOperation,
+    confirmDisplayedAmount = false,
+  ) {
+    if (result.canAbandon && !result.requestedPlan) {
+      setOperation(result);
+      // Old quote responses can omit the saved plan. Hydrate it before exposing
+      // editable controls; never guess quantities from the order baseline.
+      result = await api.edits.operation(result.operationId);
+      confirmDisplayedAmount = false;
+    }
     if (result.requestedPlan?.discountCodes !== undefined)
       setDiscountCodes(result.requestedPlan.discountCodes);
     setOperation(result);
-    setDraftVisible(false);
+    setDraftVisible(result.canAbandon);
     setLocked(false);
     setUncertain(false);
     setError(null);
+    setNotice(null);
     try {
       clearPendingOrderEditQuote(actorKey, sessionStorage);
       setPendingQuote(null);
@@ -120,90 +131,13 @@ export function CustomerOrderEditor({
       setError(
         "Your edit is saved, but this browser could not clear its request reference. Keep this page open and contact us if you need help.",
       );
-    }
-  }
-  async function reviseCodes(codes: string[]) {
-    if (
-      !operation ||
-      operation.status !== "ready" ||
-      !operation.canAbandon ||
-      !operation.requestedPlan ||
-      inFlight.current
-    )
       return;
-    const previous = operation;
-    const plan = operation.requestedPlan;
-    let phase: "validating" | "closing" | "quoting" = "validating";
-    let reviewClosed = false;
-    inFlight.current = true;
-    setBusy(true);
-    setError(null);
-    try {
-      const candidate = {
-        connectionId,
-        omsOrderId,
-        expectedRevision: previous.expectedRevision ?? order?.revision,
-        changes: plan.changes,
-        additions: plan.additions,
-        discountCodes: codes,
-      };
-      const hasChanges =
-        candidate.changes.length + candidate.additions.length + codes.length >
-        0;
-      // Validate while retaining the current review. An invalid code must not discard an accepted cart.
-      if (hasChanges)
-        await api.edits.preview(
-          orderEditPreviewInputSchema.parse({
-            ...candidate,
-            operationId: previous.operationId,
-          }),
-        );
-      phase = "closing";
-      const released = await api.edits.abandon(previous.operationId);
-      if (!closed.has(released.status)) {
-        setOperation(released);
-        throw new Error(
-          "The previous review is still closing. Check its status before changing the code.",
-        );
-      }
-      reviewClosed = true;
-      setClosedOperationId(released.operationId);
-      const current = await api.edits.order(connectionId, omsOrderId);
-      setOrder(current);
-      if (!hasChanges) {
-        setDiscountCodes([]);
-        setOperation(null);
-        setDraftVisible(true);
-        return;
-      }
-      setDiscountCodes(codes);
-      const command = orderEditQuoteInputSchema.parse({
-        ...candidate,
-        expectedRevision: current.revision,
-        requestKey: crypto.randomUUID(),
-      });
-      savePendingOrderEditQuote(actorKey, command, sessionStorage);
-      setPendingQuote(command);
-      phase = "quoting";
-      received(await api.edits.quote(command));
-    } catch (cause) {
-      if (phase !== "validating") {
-        setError(message(cause));
-        setUncertain(cause instanceof OrderEditRequestError && cause.uncertain);
-        if (reviewClosed) {
-          setOperation(null);
-          setDraftVisible(true);
-        }
-      }
-      if (!(cause instanceof OrderEditRequestError && cause.uncertain)) {
-        clearPendingOrderEditQuote(actorKey, sessionStorage);
-        setPendingQuote(null);
-      }
-      throw cause;
-    } finally {
-      inFlight.current = false;
-      setBusy(false);
     }
+    if (confirmDisplayedAmount) await progress("commit", result);
+    else if (result.status === "ready")
+      setNotice(
+        "Your changes are verified. Confirm the total shown to apply them.",
+      );
   }
   async function recoverQuote() {
     if (!pendingQuote || inFlight.current) return;
@@ -219,8 +153,8 @@ export function CustomerOrderEditor({
         const current = await api.edits.order(connectionId, omsOrderId);
         setInitialOperation(hydrated);
         setOrder(current);
-        received(hydrated);
-      } else received(result);
+        await received(hydrated);
+      } else await received(result);
     } catch (cause) {
       setError(message(cause));
     } finally {
@@ -238,26 +172,34 @@ export function CustomerOrderEditor({
       const current = await api.edits.order(connectionId, omsOrderId);
       setOrder(current);
       setReloadRequired(false);
+      return current;
     } catch {
-      setError("Your edit was cancelled, but we couldn't reload your order. Please try again.");
+      setError(
+        "Your edit was cancelled, but we couldn't reload your order. Please try again.",
+      );
+      return null;
     } finally {
       reloadInFlight.current = false;
       setReloadBusy(false);
     }
   }
-  async function progress(action: "commit" | "reconcile" | "abandon") {
-    if (!operation || inFlight.current) return;
+  async function progress(
+    action: "commit" | "reconcile" | "abandon",
+    target = operation,
+  ): Promise<boolean> {
+    if (!target || inFlight.current) return false;
     inFlight.current = true;
     setBusy(true);
     setBusyAction(action);
     setError(null);
+    setNotice(null);
     if (action === "abandon") {
       setClosingQuote(true);
       // Show the retained draft immediately; another review waits for release.
-      if (operation.status === "ready" && order) setDraftVisible(true);
+      if (order) setDraftVisible(true);
     }
     try {
-      const result = await api.edits[action](operation.operationId);
+      const result = await api.edits[action](target.operationId);
       setOperation(result);
       setUncertain(false);
       if ((action === "abandon" || closingQuote) && closed.has(result.status)) {
@@ -268,19 +210,31 @@ export function CustomerOrderEditor({
         // Cancellation is confirmed. A failed read must not restore this edit
         // or permit a new review against stale eligibility/revision evidence.
         setBusy(false);
-        await reloadCancelledOrder();
+        return Boolean(await reloadCancelledOrder());
       } else if (action === "abandon" || closingQuote) {
         setDraftVisible(false);
         setClosingQuote(false);
-      }
+      } else
+        setDraftVisible(result.canAbandon && Boolean(result.requestedPlan));
     } catch (cause) {
       setError(message(cause));
       setUncertain(cause instanceof OrderEditRequestError && cause.uncertain);
+      // Only a genuinely uncertain command needs status reconciliation. A known
+      // failed preparation remains inline with its original selections.
+      if (cause instanceof OrderEditRequestError && cause.uncertain)
+        setDraftVisible(false);
     } finally {
       inFlight.current = false;
       setBusy(false);
       setBusyAction(undefined);
+      setLocked(false);
     }
+    return false;
+  }
+  async function releaseForEditing(): Promise<boolean> {
+    if (!operation) return !inFlight.current && !reloadRequired;
+    if (!operation.canAbandon || uncertain) return false;
+    return progress("abandon");
   }
   if (pendingQuote && !operation)
     return (
@@ -304,6 +258,11 @@ export function CustomerOrderEditor({
     );
   return (
     <div className="space-y-4">
+      {notice && draftVisible && (
+        <p role="status" className="text-sm text-muted-foreground">
+          {notice}
+        </p>
+      )}
       {error && (!operation || draftVisible) && (
         <p
           role="alert"
@@ -317,8 +276,16 @@ export function CustomerOrderEditor({
       )}
       {reloadRequired && (
         <div className="space-y-3">
-          {reloadBusy ? <p role="status">Your edit was cancelled. Reloading your order…</p> : (
-            <button type="button" className="csz-action" onClick={() => void reloadCancelledOrder()}>Retry order</button>
+          {reloadBusy ? (
+            <p role="status">Your edit was cancelled. Reloading your order…</p>
+          ) : (
+            <button
+              type="button"
+              className="csz-action"
+              onClick={() => void reloadCancelledOrder()}
+            >
+              Retry order
+            </button>
           )}
         </div>
       )}
@@ -338,14 +305,27 @@ export function CustomerOrderEditor({
             initialOperation={initialOperation}
             onLock={setLocked}
             onQuote={received}
+            inline={{
+              operation,
+              now,
+              busy,
+              uncertain,
+              onCommit: async () => {
+                await progress("commit");
+              },
+              onChange: () => {
+                if (operation) void releaseForEditing();
+              },
+              onAbandon: () => {
+                void progress("abandon");
+              },
+              beforeBrowse: releaseForEditing,
+            }}
           />
         </div>
       )}
       {closingQuote && draftVisible && !reloadRequired && (
-        <p role="status">
-          Closing the previous review. You can change items now; another review
-          will be available when this finishes.
-        </p>
+        <p role="status">Updating your edit. Your selections are saved.</p>
       )}
       {closingQuote && draftVisible && error && (
         <button
@@ -366,7 +346,6 @@ export function CustomerOrderEditor({
           isUncertain={uncertain}
           error={error}
           onCommit={() => void progress("commit")}
-          onCodesChange={reviseCodes}
           onRefresh={() => void progress("reconcile")}
           onAbandon={() => void progress("abandon")}
         />

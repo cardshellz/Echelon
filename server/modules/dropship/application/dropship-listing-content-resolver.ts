@@ -70,8 +70,12 @@ export interface ResolvedContentTemplate {
   template: DescriptionTemplate | null; templateName: string | null; groupName: string | null; conflict: boolean;
   parts: { textAbove: TemplatePart; textBelow: TemplatePart };
 }
-/** The product and category setting behind each template part; each part is its own setting (plan D8). */
-const TEMPLATE_PART_SETTING = { introduction: "textAbove", footer: "textBelow" } as const;
+/**
+ * The product and category setting behind each template part; each part is
+ * its own setting (plan D8). Exported so the PR 11 conversion planner maps a
+ * group's parts to settings with this mapping, not a copy of it.
+ */
+export const TEMPLATE_PART_SETTING = { introduction: "textAbove", footer: "textBelow" } as const;
 const NO_LAYER_VALUES: ListingSettingLayerValues = Object.freeze({ product: null, category: null });
 
 /**
@@ -93,11 +97,30 @@ export function resolveContentTemplate(prepared: PreparedContentProfile, candida
   layers: ListingSettingLayers = EMPTY_LISTING_SETTING_LAYERS): ResolvedContentTemplate {
   return templateFor(prepared, candidate, layersFor(layers, candidate));
 }
-function templateFor(prepared: PreparedContentProfile, candidate: DropshipListingCatalogCandidate, layer: ListingSettingLayerValues): ResolvedContentTemplate {
+/** One older description group of a prepared content profile. */
+export type PreparedContentGroup = PreparedContentProfile["groups"][number]["group"];
+/** The older groups that match one size, best first, and the one that wins: none when the best two tie. */
+export interface MatchingContentGroups {
+  groups: readonly PreparedContentGroup[];
+  tie: boolean;
+  winner: PreparedContentGroup | null;
+}
+/**
+ * The older description groups that match a size, in the prepared order
+ * (priority, then id), whether the best two tie, and the winner (none on a
+ * tie): the one walk `templateFor` reads. Exported so the PR 11 conversion
+ * planner reads today's winner from the same walk instead of a copy of it
+ * (plan D2). Whether a part reaches the groups (the product's own part comes
+ * first) is the caller's: `templateFor` below, or the planner. Pure.
+ */
+export function matchingContentGroups(prepared: PreparedContentProfile, candidate: DropshipListingCatalogCandidate): MatchingContentGroups {
   const groups = prepared.groups.filter(({ group, variantIds }) => variantIds
     ? variantIds.has(candidate.productVariantId) : matchesCatalogScope(group.scope, candidate)).map(({ group }) => group);
   const tie = groups.length > 1 && groups[0].priority === groups[1].priority;
-  const winner = tie ? null : groups[0] ?? null;
+  return { groups, tie, winner: tie ? null : groups[0] ?? null };
+}
+function templateFor(prepared: PreparedContentProfile, candidate: DropshipListingCatalogCandidate, layer: ListingSettingLayerValues): ResolvedContentTemplate {
+  const { tie, winner } = matchingContentGroups(prepared, candidate);
   const store = prepared.state.profile?.defaultTemplate ?? null;
   // null = the part reached the tied groups.
   const part = (key: keyof typeof TEMPLATE_PART_SETTING): TemplatePart | null => {

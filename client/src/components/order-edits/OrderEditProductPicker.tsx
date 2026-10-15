@@ -34,24 +34,47 @@ type PickerProps = {
   omsOrderId: number;
   expectedRevision: string;
   enabled: boolean;
+  beforeOpen?: () => Promise<boolean>;
   includedVariantIds: ReadonlySet<string>;
   onAdd(
     variant: OrderEditCatalogVariant,
     plan: MemberPlanPresentation | null,
   ): void;
 };
-type CatalogBrowserProps = PickerProps & { onSelectionNotice(message: string): void };
+type CatalogBrowserProps = PickerProps & {
+  onSelectionNotice(message: string): void;
+};
 
 export function OrderEditProductPicker(props: PickerProps) {
   const [open, setOpen] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
+  const [opening, setOpening] = useState(false);
+  async function changeOpen(value: boolean) {
+    if (opening) return;
+    setNotice(null);
+    if (!value || !props.beforeOpen) {
+      setOpen(value);
+      return;
+    }
+    setOpening(true);
+    try {
+      if (await props.beforeOpen()) setOpen(true);
+    } finally {
+      setOpening(false);
+    }
+  }
   return (
-    <Dialog open={open && props.enabled} onOpenChange={value => { setOpen(value); setNotice(null); }}>
+    <Dialog
+      open={open && props.enabled}
+      onOpenChange={(value) => {
+        void changeOpen(value);
+      }}
+    >
       <DialogTrigger asChild>
         <Button
           type="button"
           variant="outline"
-          disabled={!props.enabled}
+          disabled={!props.enabled || opening}
           className="gap-2"
         >
           <Plus className="h-4 w-4" aria-hidden="true" />
@@ -66,11 +89,19 @@ export function OrderEditProductPicker(props: PickerProps) {
               Find a product, then choose a pack size.
             </DialogDescription>
           </DialogHeader>
-          {notice && <p role="alert" className="shrink-0 rounded-md border border-orange-200 bg-orange-50 p-3 text-sm text-orange-900">{notice}</p>}
+          {notice && (
+            <p
+              role="alert"
+              className="shrink-0 rounded-md border border-orange-200 bg-orange-50 p-3 text-sm text-orange-900"
+            >
+              {notice}
+            </p>
+          )}
           <CatalogBrowser {...props} onSelectionNotice={setNotice} />
           <div className="oe-picker-footer">
             <p className="text-xs text-muted-foreground">
-              Prices shown for your account. Review verifies the final total.
+              Prices shown for your account. Final totals are verified when you
+              apply changes.
             </p>
             <DialogClose asChild>
               <Button type="button">Done</Button>
@@ -390,10 +421,7 @@ function VariantOptions(
     if (noAvailableOptions) props.onUnavailable(props.product.productId);
   }, [noAvailableOptions, props.onUnavailable, props.product.productId]);
   return (
-    <div
-      className="oe-variant-options"
-      aria-busy={variants.isFetching}
-    >
+    <div className="oe-variant-options" aria-busy={variants.isFetching}>
       {variants.isPending && (
         <p role="status" className="text-sm text-muted-foreground">
           Loading pack sizes…
@@ -421,10 +449,7 @@ function VariantOptions(
           .filter(Boolean)
           .join(" · ");
         return (
-          <div
-            key={variant.variantId}
-            className="oe-variant-row"
-          >
+          <div key={variant.variantId} className="oe-variant-row">
             <div className="oe-variant-label">
               <p className="break-words text-sm font-medium">
                 {variant.variantTitle ?? "Standard option"}
