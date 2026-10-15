@@ -68,7 +68,7 @@ describe("purchase lifecycle workspace rendering", () => {
     const markup = renderWorkspace("tab=lifecycle");
     expect(markup).toContain("Following PO-0017");
     expect(markup).toContain("Connected records: 2 shipments · 3 receipts · 2 invoices");
-    expect(markup).toContain("Recorded financial status");
+    expect(markup).toContain("Recorded linked invoice status");
     expect(markup).toContain('aria-label="Receipts for shipment SHIP-0042"');
     expect(markup).toContain("RCPT-DRAFT");
     expect(markup).toContain("RCPT-OTHER-PO");
@@ -80,11 +80,12 @@ describe("purchase lifecycle workspace rendering", () => {
     expect(markup).not.toContain('role="dialog"');
   });
 
-  it("shows an entire shared invoice separately from its unknown PO allocation", () => {
+  it("shows an entire shared invoice separately from unvalidated link metadata", () => {
     const markup = renderWorkspace("tab=lifecycle&inspect=invoice:71");
     expect(markup).toContain("Entire invoice amount");
     expect(markup).toContain("$23,000.00");
-    expect(markup).toContain("Allocated to this PO");
+    expect(markup).toContain("Recorded link amount");
+    expect(markup).toContain("not a validated invoice or payment allocation");
     expect(markup).toContain("Not recorded");
     expect(markup).toContain("Paid against entire invoice");
     expect(markup).toContain("Open full record");

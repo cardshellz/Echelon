@@ -1,3 +1,4 @@
+import { registerPoFinancialEvidenceRoutes } from "./po-financial-evidence.routes";
 import { invoiceCostReviewCommands } from "./invoice-cost-review.service";
 import { registerInvoiceQuantityCorrectionRoutes } from "./invoice-quantity-correction.routes";
 ﻿import type { Express } from "express";
@@ -42,6 +43,7 @@ function sendFinancialCommandError(res: any, error: FinancialCommandError): any 
 
 export function registerApLedgerRoutes(app: Express) {
   registerInvoiceQuantityCorrectionRoutes(app);
+  registerPoFinancialEvidenceRoutes(app);
   // ============================================================
   // AP LEDGER - Vendor invoices
   // ============================================================
