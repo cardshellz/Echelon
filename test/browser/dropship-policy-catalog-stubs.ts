@@ -27,14 +27,20 @@ import {
   saveProductSettingsResponseSchema,
   saveProductsBulkInputSchema,
   saveProductsBulkResponseSchema,
+  saveSizePricesInputSchema,
+  saveSizePricesResponseSchema,
+  storedCategoryPriceInputSchema,
   storedProductPricesInputSchema,
   type AcknowledgeCategoryMovesInput,
   type ApplyPriceChangesInput,
   type PriceChangeReviewResponse,
   type PriceChangeRow,
   type ProductSettingsPatchInput,
+  type ReviewPriceChangesInput,
   type SaveCategorySettingsInput,
   type SaveProductsBulkInput,
+  type SaveSizePricesInput,
+  type StoredCategoryPriceInput,
   type StoredProductPricesInput,
 } from "../../shared/dropship/listing-setting-writes";
 import {
@@ -49,6 +55,7 @@ import {
   LISTING_SETTINGS_FIX_CODES,
   LISTING_SETTINGS_PAGE_SIZE,
   LISTING_SETTINGS_VALUE_SOURCES,
+  MAX_LISTING_SETTINGS_CATEGORY_EXAMPLES,
   listingSettingsCategoriesResponseSchema,
   listingSettingsCategoryDetailSchema,
   listingSettingsPricesResponseSchema,
@@ -458,8 +465,10 @@ export interface StubState {
   setupWriteAnswers: SetupWriteAnswer[];
   /** The chosen products and sizes the listing settings reads list (every store chooses the same). */
   catalog: ProductFixture[];
-  /** Saved size prices (W9) by sizeKey(store, size). */
+  /** Saved size prices (W9, W8) by sizeKey(store, size). */
   sizePrices: Record<string, SavedSizePrice>;
+  /** Card Shellz's listing limits by sizeKey(store, size) (plan PR 10, 9.5): a size left out has none. */
+  sizePriceLimits: Record<string, SizePriceLimit>;
   /** Each product's own settings row by productKey(store, product); a product left out has none (plan PR 10, 3.2). */
   productSettings: Record<string, ProductSettingsLayer>;
   /** Each Card Shellz category's settings row by categoryKey(store, category); a category left out has none. */
@@ -502,7 +511,10 @@ export interface StubState {
   /** W12 saves of one Card Shellz category's settings (PUT …/listing-settings/categories/:id; plan PR 10, 8.5), and how the next ones answer. */
   categorySettingsWrites: StubWrite[];
   categorySettingsWriteAnswers: WriteAnswer[];
-  /** W7 price checks for one or many products (POST …/listing-settings/price-changes/review; plan PR 10, 7.3), and how the next ones answer. */
+  /** W8 saves of typed exact prices ("Give these sizes a price", PUT …/listing-settings/size-prices; plan PR 10, 9.4), and how the next ones answer. */
+  sizePricesWrites: StubWrite[];
+  sizePricesWriteAnswers: WriteAnswer[];
+  /** W7 price checks for one or many products, or a category's price (POST …/listing-settings/price-changes/review; plan PR 10, 7.3, 9.4), and how the next ones answer. */
   priceChangeReviews: StubWrite[];
   priceChangeReviewAnswers: WriteAnswer[];
   /** How the next W7 page reads (GET …/price-changes/reviews/:id?page=N) answer (a 429, say); once used up, the page is served. */
@@ -527,15 +539,20 @@ export interface StubState {
   errors: string[];
 }
 
-/** A W7 check as the stub keeps it: its stored input, every row (ascending by size), and what the page answers carry. */
-export interface PriceChangeCheck {
+/** A W7 check as the stub keeps it: its kind and stored input, every row (ascending by size), and what the page answers carry. */
+interface PriceChangeCheckBase {
   storeConnectionId: number;
-  input: StoredProductPricesInput;
   rows: PriceChangeRow[];
   reviewId: string;
   reviewHash: string;
   createdAt: string;
 }
+export type PriceChangeCheck =
+  | (PriceChangeCheckBase & { kind: "product_prices"; input: StoredProductPricesInput })
+  | (PriceChangeCheckBase & { kind: "category_price"; input: StoredCategoryPriceInput });
+
+/** A Card Shellz block_listing limit for one size (plan PR 10, 9.5): W8 refuses a typed price outside it; the Prices rows list it. */
+export interface SizePriceLimit { floorCents?: number; ceilingCents?: number }
 
 /** Saved pricing rules: catalog reference retail + 15%. */
 export const SAVED_PRICING_RULES: PricingProfileState = { revisionId: 3, updatedAt: STAMP, profile: {
@@ -869,9 +886,29 @@ export function sizePriceFact(state: StubState, storeConnectionId: number, produ
     ? size.costCents - facts.priceCents : null;
   return {
     productVariantId: size.productVariantId, productId: product.productId, productName: product.productName, sizeName: size.sizeName,
-    sku: size.sku, ...facts, costCents: size.costCents, belowCostByCents: belowCost, limits: [], pausedSince: null,
+    sku: size.sku, ...facts, costCents: size.costCents, belowCostByCents: belowCost, limits: sizePriceLimits(state, storeConnectionId, size, facts.priceCents), pausedSince: null,
     settingRevisionId: saved?.revisionId ?? null,
   };
+}
+
+/** The size's Card Shellz limit as the Prices rows list it (listingSettingsPriceLimitSchema): one block_listing policy, breached by the price now. */
+function sizePriceLimits(state: StubState, storeConnectionId: number, size: SizeFixture, priceCents: number | null): ListingSettingsSizePrice["limits"] {
+  const limit = state.sizePriceLimits[sizeKey(storeConnectionId, size.productVariantId)];
+  if (limit === undefined) return [];
+  const floorCents = limit.floorCents ?? null;
+  const ceilingCents = limit.ceilingCents ?? null;
+  const breached = priceCents === null ? null : floorCents !== null && priceCents < floorCents ? "below_floor" as const
+    : ceilingCents !== null && priceCents > ceilingCents ? "above_ceiling" as const : null;
+  return [{ policyId: 1, floorCents, ceilingCents, mode: "block_listing", breached }];
+}
+
+/** Why W8 refuses a typed price against the size's limit (W9's blocker codes), or null when it fits. */
+function sizePriceBlocker(state: StubState, storeConnectionId: number, productVariantId: number, priceCents: number): string | null {
+  const limit = state.sizePriceLimits[sizeKey(storeConnectionId, productVariantId)];
+  if (limit === undefined) return null;
+  if (limit.floorCents !== undefined && priceCents < limit.floorCents) return "pricing:below_floor:policy_1";
+  if (limit.ceilingCents !== undefined && priceCents > limit.ceilingCents) return "pricing:above_ceiling:policy_1";
+  return null;
 }
 
 /** One size's own price read (W9 `GET …/variants/:id/price`), as the route projects it. */
@@ -1673,7 +1710,9 @@ export function listingSettingsCategoryDetail(state: StubState, storeConnectionI
       if (fields.length === 0) return [];
       return [{ productId: product.productId, revisionId: productLayerOf(state, storeConnectionId, product.productId)?.revisionId ?? null, fields }];
     }),
-    examples: [],
+    // The first sizes' prices as they are now, in the sizes' order (selectListingSettingsCategory; CC-C23).
+    examples: products.flatMap((product) => product.sizes.map((size) => sizePriceFact(state, storeConnectionId, product, size)))
+      .slice(0, MAX_LISTING_SETTINGS_CATEGORY_EXAMPLES),
     generatedAt: STAMP,
   });
 }
@@ -1778,6 +1817,55 @@ function saveCategorySettings(state: StubState, storeConnectionId: number, categ
 const CATEGORY_SETTINGS_ANSWER: KeyedAnswerShape = (json, replayed) =>
   saveCategorySettingsResponseSchema.parse(replayed ? { ...json, outcome: "replayed", clearedProductCount: null } : json);
 
+/**
+ * W8 as dropship-listing-size-prices-service.ts saves it (plan PR 10, 9.4, 9.5): each size in ascending order through
+ * W9's checks; a size not chosen stops at once (404 PRICE_NOT_AVAILABLE naming it); version conflicts and prices
+ * outside a Card Shellz limit are gathered (409 PRICE_VERSION_CONFLICT with `conflicts` ≤ 100 and `conflictCount`,
+ * then 422 PRICE_OUTSIDE_LIMIT with `sizes` ≤ 100 and `sizeCount`), so the vendor sees every size to fix at once;
+ * all or none: nothing is written unless every size passes. Each saved size gets a new revision as an exact price.
+ */
+function saveSizePrices(state: StubState, storeConnectionId: number, rows: SaveSizePricesInput["rows"]): Record<string, unknown> | ScriptedError {
+  const permanent = { storeConnectionId, retryable: false, classification: "permanent" } as const;
+  const sorted = [...rows].sort((left, right) => left.productVariantId - right.productVariantId);
+  const conflicts: Array<{ productVariantId: number; expectedRevisionId: number | null; actualRevisionId: number | null }> = [];
+  const limits: Array<{ productVariantId: number; priceCents: number; blockers: string[] }> = [];
+  for (const row of sorted) {
+    if (findSize(state, row.productVariantId) === null) {
+      return { status: 404, code: "DROPSHIP_LISTING_PRICE_NOT_AVAILABLE", message: "This size isn't chosen for the store.",
+        context: { ...permanent, productVariantId: row.productVariantId } };
+    }
+    const actualRevisionId = state.sizePrices[sizeKey(storeConnectionId, row.productVariantId)]?.revisionId ?? null;
+    if (row.expectedRevisionId !== actualRevisionId) {
+      conflicts.push({ productVariantId: row.productVariantId, expectedRevisionId: row.expectedRevisionId, actualRevisionId });
+      continue;
+    }
+    const blocker = sizePriceBlocker(state, storeConnectionId, row.productVariantId, row.priceCents);
+    if (blocker !== null) limits.push({ productVariantId: row.productVariantId, priceCents: row.priceCents, blockers: [blocker] });
+  }
+  const sizeCount = (count: number) => (count === 1 ? "1 size's price" : `${count} sizes' prices`);
+  if (conflicts.length > 0) {
+    return { status: 409, code: "DROPSHIP_LISTING_PRICE_VERSION_CONFLICT",
+      message: `${sizeCount(conflicts.length)} changed after you opened ${conflicts.length === 1 ? "it" : "them"}. Reload before saving again.`,
+      context: { ...permanent, conflicts: conflicts.slice(0, MAX_LISTED_SIZES), conflictCount: conflicts.length } };
+  }
+  if (limits.length > 0) {
+    return { status: 422, code: "DROPSHIP_LISTING_PRICE_OUTSIDE_LIMIT",
+      message: `${sizeCount(limits.length)} would be outside what Card Shellz allows. Enter prices Card Shellz allows.`,
+      context: { ...permanent, sizes: limits.slice(0, MAX_LISTED_SIZES), sizeCount: limits.length } };
+  }
+  const sizes = sorted.map((row) => {
+    const revisionId = state.nextRevision++;
+    state.sizePrices[sizeKey(storeConnectionId, row.productVariantId)] = { revisionId, pricingMode: "fixed", overridePriceCents: row.priceCents };
+    return { productVariantId: row.productVariantId, revisionId, idempotentReplay: false };
+  });
+  return saveSizePricesResponseSchema.parse({ outcome: "changed", sizes });
+}
+
+/** A W8 replay says so in its `outcome` and on every size (saveSizePricesResponseSchema). */
+const SIZE_PRICES_ANSWER: KeyedAnswerShape = (json, replayed) => saveSizePricesResponseSchema.parse(replayed
+  ? { outcome: "replayed", sizes: (json.sizes as Array<Record<string, unknown>>).map((size) => ({ ...size, idempotentReplay: true })) }
+  : json);
+
 const PRESERVED_RULE_NAME = "Fixed override preserved";
 const WOULD_BE_LOST = "DROPSHIP_LISTING_PRICE_WOULD_BE_LOST";
 /** The 409's and 422's name at most this many sizes (write-support MAX_LISTED_SIZES). */
@@ -1816,9 +1904,41 @@ function priceChangeRows(state: StubState, storeConnectionId: number, input: Sto
     if (!product) continue;
     const after = priceAfterChange(state, storeConnectionId, product, input.price);
     for (const size of product.sizes) {
+      const saved = state.sizePrices[sizeKey(storeConnectionId, size.productVariantId)] ?? null;
+      rows.push(priceChangeRow(state, storeConnectionId, product, size, after, input.releaseExactPrices === true && saved?.pricingMode === "fixed"));
+    }
+  }
+  return rows.sort((left, right) => left.productVariantId - right.productVariantId);
+}
+
+/**
+ * The category kind's rows (plan PR 10, 9.4): every chosen size of the category's products. The after side prices a
+ * product by its own price unless "Also clear theirs" names the price and the product (then, and for every other
+ * product, by the category's price sent, or with "Use store default" by the store's), as the resolver's levels go;
+ * a category check releases nothing, so an exact price is kept.
+ */
+function categoryPriceChangeRows(state: StubState, storeConnectionId: number, input: StoredCategoryPriceInput): PriceChangeRow[] {
+  const rows: PriceChangeRow[] = [];
+  const categoryName = categoryNameOf(state, input.categoryId) ?? CATEGORY_PRICE_RULE_NAME;
+  const clearsPrice = input.clear?.fields.includes("price") === true ? new Set(input.clear.products.map((product) => product.productId)) : new Set<number>();
+  const storeDefault = storeRecipe(state, storeConnectionId);
+  for (const product of categoryProducts(state, input.categoryId)) {
+    const own = productLayerOf(state, storeConnectionId, product.productId);
+    const after: LayeredPrice | null = own?.values.price && !clearsPrice.has(product.productId)
+      ? { recipe: own.values.price, kind: "product", name: product.productName.trim() ? product.productName : PRODUCT_PRICE_RULE_NAME }
+      : input.patch.price !== null ? { recipe: input.patch.price, kind: "category", name: categoryName }
+        : storeDefault === null ? null : { recipe: storeDefault, kind: "store_default", name: STORE_DEFAULT_RULE_NAME };
+    for (const size of product.sizes) rows.push(priceChangeRow(state, storeConnectionId, product, size, after, false));
+  }
+  return rows.sort((left, right) => left.productVariantId - right.productVariantId);
+}
+
+/** One size's W7 row for the after side `after` (the service's priceChangeRow), with its exact price released or kept. */
+function priceChangeRow(state: StubState, storeConnectionId: number, product: ProductFixture, size: SizeFixture, after: LayeredPrice | null, released: boolean): PriceChangeRow {
+  {
+    {
       const now = sizePriceFact(state, storeConnectionId, product, size);
       const saved = state.sizePrices[sizeKey(storeConnectionId, size.productVariantId)] ?? null;
-      const released = input.releaseExactPrices === true && saved?.pricingMode === "fixed";
       const mode: ListingPricingMode | null = released ? "inherit" : saved?.pricingMode ?? null;
       const recipe = after?.recipe ?? null;
       const basisCents = recipe === null ? null : basisCentsFor(recipe, size);
@@ -1854,15 +1974,14 @@ function priceChangeRows(state: StubState, storeConnectionId: number, input: Sto
       const warnings = priced.priceCents !== null && size.costCents !== null && priced.priceCents < size.costCents ? ["price_below_product_cost"] : [];
       // R:§8.6 rule 1: a size with a usable price keeps one; one that had a price and would have none is refused at apply.
       const refusal = base.previousPriceCents !== null && priced.priceCents === null ? WOULD_BE_LOST : null;
-      rows.push({ ...base, ...priced, warnings, refusal });
+      return { ...base, ...priced, warnings, refusal };
     }
   }
-  return rows.sort((left, right) => left.productVariantId - right.productVariantId);
 }
 
 /** The review hash as the service makes it (plan P22): the kind, the stored input and the rows, so the apply's recompute finds a moved price. */
-function priceChangeHash(input: StoredProductPricesInput, rows: readonly PriceChangeRow[]): string {
-  return createHash("sha256").update(JSON.stringify({ kind: "product_prices", input, rows })).digest("hex");
+function priceChangeHash(kind: PriceChangeCheck["kind"], input: StoredProductPricesInput | StoredCategoryPriceInput, rows: readonly PriceChangeRow[]): string {
+  return createHash("sha256").update(JSON.stringify({ kind, input, rows })).digest("hex");
 }
 
 function priceChangeReviewIdFor(count: number): string {
@@ -1879,16 +1998,109 @@ function storedPriceChangeInput(input: { productIds: readonly number[]; price?: 
 }
 
 /** A check made now, held by its review id (the count numbers the id). */
-function buildPriceChangeCheck(state: StubState, storeConnectionId: number, input: StoredProductPricesInput, count: number): PriceChangeCheck {
+function buildPriceChangeCheck(state: StubState, storeConnectionId: number, input: StoredProductPricesInput, count: number): Extract<PriceChangeCheck, { kind: "product_prices" }> {
   const rows = priceChangeRows(state, storeConnectionId, input);
-  return { storeConnectionId, input, rows, reviewId: priceChangeReviewIdFor(count), reviewHash: priceChangeHash(input, rows), createdAt: STAMP };
+  return { kind: "product_prices", storeConnectionId, input, rows, reviewId: priceChangeReviewIdFor(count), reviewHash: priceChangeHash("product_prices", input, rows), createdAt: STAMP };
+}
+
+/** The category kind's 409 for a category revision that moved (the service's categoryVersionConflict). */
+function categoryPriceVersionConflict(storeConnectionId: number, categoryId: number, expectedRevisionId: number | null, actualRevisionId: number | null): ScriptedError {
+  return { status: 409, code: "DROPSHIP_CATEGORY_LISTING_SETTINGS_VERSION_CONFLICT",
+    message: "This category's listing settings changed after you opened them. Reload them before checking prices again.",
+    context: { storeConnectionId, categoryId, conflicts: [{ categoryId, expectedRevisionId, actualRevisionId }], conflictCount: 1, retryable: false, classification: "permanent" } };
+}
+
+/** The category kind's clear set, derived as W12 derives it (ownCategoryFieldsOf), against the set sent: the differing products, ascending. */
+function categoryClearSetDiffers(state: StubState, storeConnectionId: number, categoryId: number, clear: NonNullable<StoredCategoryPriceInput["clear"]>): number[] {
+  const fields = new Set<string>(clear.fields);
+  const derived = categoryProducts(state, categoryId).filter((product) => ownCategoryFieldsOf(state, storeConnectionId, product).some((field) => fields.has(field))).map((product) => product.productId);
+  const sent = clear.products.map((product) => product.productId);
+  return [...derived.filter((id) => !sent.includes(id)), ...sent.filter((id) => !derived.includes(id))].sort((left, right) => left - right);
+}
+
+/** The cleared products whose revision moved since the vendor was shown it (the service's assertClearedRevisions). */
+function categoryClearedStale(state: StubState, storeConnectionId: number, clear: NonNullable<StoredCategoryPriceInput["clear"]>) {
+  return clear.products.map((product) => ({ productId: product.productId, expectedRevisionId: product.expectedRevisionId,
+    actualRevisionId: productLayerOf(state, storeConnectionId, product.productId)?.revisionId ?? null }))
+    .filter((product) => product.expectedRevisionId !== product.actualRevisionId);
+}
+
+const CATEGORY_PRICE_SET_CONFLICT = "DROPSHIP_PRODUCT_LISTING_SETTINGS_VERSION_CONFLICT";
+const CATALOG_DELAY_NOTE = "A change Card Shellz made can take up to 60 seconds to show.";
+
+/**
+ * The category kind's review as dropship-listing-price-changes-service.ts makes it (plan PR 10, 9.4): older group
+ * rules refuse first (D11), then a category no chosen product is in (404), the category's revision (409), the
+ * "Also clear theirs" set derived again against the one sent and each cleared product's revision (409 with
+ * `conflictCount`), then the other fields resolved as W12 resolves them (eBay asked for a new id; a sign-in stops
+ * it); the stored input keeps the resolved values (storedCategoryPriceInputSchema), and the rows price every size
+ * of the category's products with the change. Examples in the detail are current prices, never the check's.
+ */
+function reviewCategoryPrice(state: StubState, storeConnectionId: number, input: Extract<ReviewPriceChangesInput, { kind: "category_price" }>, count: number): PriceChangeCheck | ScriptedError {
+  const permanent = { storeConnectionId, retryable: false, classification: "permanent" } as const;
+  const { categoryId } = input;
+  const rules = olderGroupRuleCounts(state, storeConnectionId);
+  if (rules.pricingGroups + rules.contentGroups + rules.ebayCategoryRules > 0) {
+    return { status: 409, code: "DROPSHIP_LISTING_SETTINGS_OLDER_RULES_PRESENT",
+      message: "This store still uses older group rules for prices, descriptions or eBay categories, and they would win over category settings. Category settings can be saved once those rules are replaced.",
+      context: { ...permanent, ...rules } };
+  }
+  if (categoryProducts(state, categoryId).length === 0) {
+    return { status: 404, code: "DROPSHIP_LISTING_SETTINGS_CATEGORY_NOT_FOUND", message: "This Card Shellz category was not found. Reload the page.", context: { ...permanent, categoryId } };
+  }
+  const current = categoryLayerOf(state, storeConnectionId, categoryId);
+  if (input.expectedRevisionId !== (current?.revisionId ?? null)) {
+    return categoryPriceVersionConflict(storeConnectionId, categoryId, input.expectedRevisionId, current?.revisionId ?? null);
+  }
+  if (input.clear !== undefined) {
+    const differ = categoryClearSetDiffers(state, storeConnectionId, categoryId, input.clear);
+    if (differ.length > 0) {
+      return { status: 409, code: CATEGORY_PRICE_SET_CONFLICT,
+        message: `Which products have their own values in this category changed after you opened it. Reload it before checking prices again. ${CATALOG_DELAY_NOTE}`,
+        context: { ...permanent, categoryId, conflicts: differ.slice(0, MAX_LISTED_SIZES).map((productId) => ({ productId })), conflictCount: differ.length } };
+    }
+    const stale = categoryClearedStale(state, storeConnectionId, input.clear);
+    if (stale.length > 0) {
+      return { status: 409, code: CATEGORY_PRICE_SET_CONFLICT,
+        message: "Listing settings of products in this category changed after you opened them. Reload them before checking prices again.",
+        context: { ...permanent, categoryId, conflicts: stale.slice(0, MAX_LISTED_SIZES), conflictCount: stale.length } };
+    }
+  }
+  // The other fields as W12 resolves them: eBay asked about an id the category's row doesn't hold (a sign-in stops it).
+  const before = current?.values ?? NO_CATEGORY_VALUES;
+  const { price, ...rest } = input.patch;
+  const patch = rest as ProductDrawerPatch;
+  const asksEbay: string[] = [];
+  if (patch.ebayCategory && patch.ebayCategory.categoryId !== before.ebayCategory?.categoryId) asksEbay.push("ebayCategory");
+  if (patch.storeShelf?.mode === "own" && !sameShelfIds(patch.storeShelf.shelfIds, before.storeShelf)) asksEbay.push("storeShelf");
+  for (const field of PRODUCT_POLICY_FIELDS) {
+    const sent = patch[field];
+    if (sent !== null && sent !== undefined && before[field]?.id !== sent.id) asksEbay.push(field);
+  }
+  const signIn = signInRequired(state, storeConnectionId, asksEbay);
+  if (signIn) return signIn;
+  const patched = patchedValues(state, storeConnectionId, { ...before, mainText: null }, patch, asksEbay);
+  if ("status" in patched) return patched as ScriptedError;
+  const storedPatch: Record<string, unknown> = { price };
+  for (const field of CATEGORY_LISTING_SETTING_FIELDS) {
+    if (field !== "price" && (patch as Record<string, unknown>)[field] !== undefined) storedPatch[field] = patched[field];
+  }
+  const stored = storedCategoryPriceInputSchema.parse({
+    categoryId, expectedRevisionId: input.expectedRevisionId, patch: storedPatch,
+    ...(input.clear === undefined ? {} : { clear: {
+      fields: CATEGORY_LISTING_SETTING_FIELDS.filter((field) => input.clear!.fields.includes(field)),
+      products: [...input.clear.products].sort((left, right) => left.productId - right.productId),
+    } }),
+  });
+  const rows = categoryPriceChangeRows(state, storeConnectionId, stored);
+  return { kind: "category_price", storeConnectionId, input: stored, rows, reviewId: priceChangeReviewIdFor(count), reviewHash: priceChangeHash("category_price", stored, rows), createdAt: STAMP };
 }
 
 /** One page of a held check, through the shared contract (the summary as reviewSummary counts it). */
 function priceChangePage(check: PriceChangeCheck, page: number): PriceChangeReviewResponse {
   const { rows } = check;
   return priceChangeReviewResponseSchema.parse({
-    reviewId: check.reviewId, reviewHash: check.reviewHash, createdAt: check.createdAt, kind: "product_prices", page,
+    reviewId: check.reviewId, reviewHash: check.reviewHash, createdAt: check.createdAt, kind: check.kind, page,
     summary: {
       total: rows.length,
       changed: rows.filter((row) => row.previousPriceCents !== row.priceCents).length,
@@ -1944,8 +2156,9 @@ function applyPriceChanges(state: StubState, storeConnectionId: number, input: A
     context: { ...permanent, sizes: sizes.slice(0, MAX_LISTED_SIZES), sizeCount: sizes.length },
   });
   if (held.reviewHash !== input.reviewHash) return pricesMoved([]);
+  if (held.kind === "category_price") return applyCategoryPriceChange(state, storeConnectionId, held, input, pricesMoved);
   const rows = priceChangeRows(state, storeConnectionId, held.input);
-  if (priceChangeHash(held.input, rows) !== held.reviewHash) return pricesMoved(movedPriceSizes(held.rows, rows));
+  if (priceChangeHash("product_prices", held.input, rows) !== held.reviewHash) return pricesMoved(movedPriceSizes(held.rows, rows));
   const refused = rows.filter((row) => row.refusal !== null);
   if (refused.length > 0) {
     const sizes = refused.map((row) => ({ productVariantId: row.productVariantId, beforePriceCents: row.previousPriceCents,
@@ -1979,6 +2192,78 @@ function applyPriceChanges(state: StubState, storeConnectionId: number, input: A
   });
 }
 
+/**
+ * The category kind's apply (plan PR 10, 9.4; the service's steps 2.5-2.10): older group rules refuse (D11); the rows
+ * computed again must hash the same (409 PRICES_MOVED with the sizes that moved, which a product moved in or out
+ * changes too); the clear set derived again under the lock must be the one sent, and each cleared product at its
+ * revision (409 with `conflictCount`); the category's revision compares-and-sets (409); then the category's row takes
+ * the price and the other fields with a new revision (`unchanged` when nothing moved), every cleared product loses
+ * the cleared settings (the price among them) with a new revision and its sizes' leftovers go. Nothing is released.
+ */
+function applyCategoryPriceChange(state: StubState, storeConnectionId: number, held: Extract<PriceChangeCheck, { kind: "category_price" }>,
+  input: ApplyPriceChangesInput, pricesMoved: (sizes: Array<Record<string, number | null>>) => ScriptedError): Record<string, unknown> | ScriptedError {
+  const permanent = { storeConnectionId, retryable: false, classification: "permanent" } as const;
+  const stored = held.input;
+  const { categoryId } = stored;
+  const rules = olderGroupRuleCounts(state, storeConnectionId);
+  if (rules.pricingGroups + rules.contentGroups + rules.ebayCategoryRules > 0) {
+    return { status: 409, code: "DROPSHIP_LISTING_SETTINGS_OLDER_RULES_PRESENT",
+      message: "This store still uses older group rules for prices, descriptions or eBay categories, and they would win over category settings. Category settings can be saved once those rules are replaced.",
+      context: { ...permanent, ...rules } };
+  }
+  const rows = categoryPriceChangeRows(state, storeConnectionId, stored);
+  if (priceChangeHash("category_price", stored, rows) !== held.reviewHash) return pricesMoved(movedPriceSizes(held.rows, rows));
+  const products = categoryProducts(state, categoryId);
+  if (products.length === 0) {
+    return { status: 404, code: "DROPSHIP_LISTING_SETTINGS_CATEGORY_NOT_FOUND", message: "This Card Shellz category was not found. Reload the page.", context: { ...permanent, categoryId } };
+  }
+  let cleared: ProductFixture[] = [];
+  if (stored.clear !== undefined) {
+    const differ = categoryClearSetDiffers(state, storeConnectionId, categoryId, stored.clear);
+    if (differ.length > 0) {
+      return { status: 409, code: CATEGORY_PRICE_SET_CONFLICT,
+        message: `The products in this category changed after you checked prices. Check prices again before applying. ${CATALOG_DELAY_NOTE}`,
+        context: { ...permanent, categoryId, conflicts: differ.slice(0, MAX_LISTED_SIZES).map((productId) => ({ productId })), conflictCount: differ.length } };
+    }
+    const stale = categoryClearedStale(state, storeConnectionId, stored.clear);
+    if (stale.length > 0) {
+      return { status: 409, code: CATEGORY_PRICE_SET_CONFLICT,
+        message: "Listing settings of products in this category changed after you opened them. Reload them before checking prices again.",
+        context: { ...permanent, categoryId, conflicts: stale.slice(0, MAX_LISTED_SIZES), conflictCount: stale.length } };
+    }
+    const sent = new Set(stored.clear.products.map((product) => product.productId));
+    cleared = products.filter((product) => sent.has(product.productId));
+  }
+  const current = categoryLayerOf(state, storeConnectionId, categoryId);
+  if (stored.expectedRevisionId !== (current?.revisionId ?? null)) {
+    return categoryPriceVersionConflict(storeConnectionId, categoryId, stored.expectedRevisionId, current?.revisionId ?? null);
+  }
+  const before = current?.values ?? NO_CATEGORY_VALUES;
+  const values: CategoryListingSettingValues = { ...before, ...stored.patch };
+  const changed = JSON.stringify(values) !== JSON.stringify(before);
+  let revisionId = current?.revisionId ?? null;
+  if (changed) {
+    revisionId = state.nextRevision++;
+    state.categorySettings[categoryKey(storeConnectionId, categoryId)] = categorySettingsLayerSchema.parse({ revisionId, values });
+  }
+  for (const product of cleared) {
+    const own = productLayerOf(state, storeConnectionId, product.productId);
+    if (own !== null) {
+      const next: ProductListingSettingValues = { ...own.values };
+      for (const field of stored.clear!.fields) next[field] = null;
+      if (JSON.stringify(next) !== JSON.stringify(own.values)) {
+        state.productSettings[productKey(storeConnectionId, product.productId)] = productSettingsLayerSchema.parse({ revisionId: state.nextRevision++, values: next });
+      }
+    }
+    clearSizeLeftovers(state, storeConnectionId, product, stored.clear!.fields);
+  }
+  state.priceChangeApplied[input.reviewId] = input.idempotencyKey;
+  return applyPriceChangesResponseSchema.parse({
+    outcome: changed || cleared.length > 0 ? "changed" : "unchanged", reviewId: input.reviewId, requestId: state.nextRevision++,
+    changedProductCount: cleared.length, releasedSizeCount: 0, categoryRevisionId: revisionId,
+  });
+}
+
 /** A W7 replay says so in its `outcome`, with the product count unknown (applyPriceChangesResponseSchema). */
 const PRICE_CHANGE_ANSWER: KeyedAnswerShape = (json, replayed) =>
   applyPriceChangesResponseSchema.parse(replayed ? { ...json, outcome: "replayed", changedProductCount: null } : json);
@@ -2000,12 +2285,13 @@ export const defaultStubState = (): StubState => ({
   stores: [MARZ], selected: true, previewCalls: 0, setupReads: [], summaryReads: [], productsReads: [], reads: [],
   vendor: { status: "active", entitlementStatus: "active" }, summaries: {}, liveSummary: false, storeStatuses: {}, tooLarge: false,
   summaryFailures: 0, listingSetups: {}, setupReadFailures: 0, setupReadError: null, pricingRules: {}, setupWrites: [],
-  setupWriteAnswers: [], catalog: [ENVELOPE], sizePrices: {}, productSettings: {}, categorySettings: {}, sizeLeftovers: {}, categoryMarks: {},
+  setupWriteAnswers: [], catalog: [ENVELOPE], sizePrices: {}, sizePriceLimits: {}, productSettings: {}, categorySettings: {}, sizeLeftovers: {}, categoryMarks: {},
   storeShelves: {}, storeShelvesError: null, categoryRules: {},
   contentProfiles: {}, pricingReviews: [], pricingReviewAnswers: [], pricingApplies: [], pricingApplyAnswers: [],
   categoryWrites: [], categoryWriteAnswers: [], categorySearches: [], contentWrites: [], contentWriteAnswers: [],
   priceWrites: [], priceWriteAnswers: [], productSettingsWrites: [], productSettingsWriteAnswers: [],
   productsBulkWrites: [], productsBulkWriteAnswers: [], categorySettingsWrites: [], categorySettingsWriteAnswers: [],
+  sizePricesWrites: [], sizePricesWriteAnswers: [],
   priceChangeReviews: [], priceChangeReviewAnswers: [], priceChangePageAnswers: [], priceChangeApplies: [], priceChangeApplyAnswers: [],
   priceChangeChecks: {}, priceChangeApplied: {}, categoryMovesAcknowledges: [], categoryMovesAcknowledgeAnswers: [],
   reviews: {}, keyedAnswers: {}, nextRevision: 40, unexpected: [], errors: [],
@@ -2255,13 +2541,12 @@ async function answerListingWrite(state: StubState, route: Route, storeId: numbe
     return keyedWrite(state, route, parsed.data.idempotencyKey, body, state.categoryMovesAcknowledgeAnswers,
       () => acknowledgeCategoryMoves(state, storeId, parsed.data.items), CATEGORY_MOVES_ANSWER);
   }
-  // W7 (plan PR 10, 7.3): the check, its pages and the apply, for one or many products.
+  // W7 (plan PR 10, 7.3, 9.4): the check, its pages and the apply, for one or many products, or a category's price.
   if (method === "POST" && path === `${listings}/listing-settings/price-changes/review`) {
     const body = json();
     state.priceChangeReviews.push({ method, path, body });
     const parsed = reviewPriceChangesInputSchema.safeParse(body);
     if (!parsed.success) return refuseBody(state, route, method, path, parsed.error.message);
-    if (parsed.data.kind !== "product_prices") return refuseBody(state, route, method, path, "the category kind is PR 10f's; 10d checks products only");
     const answer = state.priceChangeReviewAnswers.shift();
     if (answer === "drop") return route.abort("connectionreset");
     if (answer) return fulfillError(route, answer);
@@ -2269,6 +2554,12 @@ async function answerListingWrite(state: StubState, route: Route, storeId: numbe
     if (state.tooLarge) {
       return fulfillError(route, { status: 422, code: "DROPSHIP_LISTING_SETTINGS_TOO_LARGE",
         message: "This price check covers more than 10,000 sizes. Choose fewer products.", context: { storeConnectionId: storeId } });
+    }
+    if (parsed.data.kind === "category_price") {
+      const reviewed = reviewCategoryPrice(state, storeId, parsed.data, state.priceChangeReviews.length);
+      if ("status" in reviewed) return fulfillError(route, reviewed);
+      state.priceChangeChecks[reviewed.reviewId] = reviewed;
+      return route.fulfill({ json: priceChangePage(reviewed, 0) });
     }
     const check = buildPriceChangeCheck(state, storeId, storedPriceChangeInput(parsed.data), state.priceChangeReviews.length);
     const limit = priceReleaseLimit(storeId, check.rows.filter((row) => row.released).length);
@@ -2294,6 +2585,15 @@ async function answerListingWrite(state: StubState, route: Route, storeId: numbe
     if (!parsed.success) return refuseBody(state, route, method, path, parsed.error.message);
     return keyedWrite(state, route, parsed.data.idempotencyKey, body, state.priceChangeApplyAnswers,
       () => applyPriceChanges(state, storeId, parsed.data), PRICE_CHANGE_ANSWER);
+  }
+  // W8 (plan PR 10, 9.4): typed exact prices for up to 200 sizes in one keyed request, checked with the shared input schema.
+  if (method === "PUT" && path === `${listings}/listing-settings/size-prices`) {
+    const body = json();
+    state.sizePricesWrites.push({ method, path, body });
+    const parsed = saveSizePricesInputSchema.safeParse(body);
+    if (!parsed.success) return refuseBody(state, route, method, path, parsed.error.message);
+    return keyedWrite(state, route, parsed.data.idempotencyKey, body, state.sizePricesWriteAnswers,
+      () => saveSizePrices(state, storeId, parsed.data.rows), SIZE_PRICES_ANSWER);
   }
   // W12 (plan PR 10, 8.5): one category's settings, keyed, checked with the shared input schema.
   const categorySettingsPath = new RegExp(`^${listings}/listing-settings/categories/(\\d+)$`).exec(path);
@@ -2699,6 +2999,68 @@ export function oldSetupPanel(page: Page) {
   const refused = applyPriceChanges(losing, store, { reviewId: lost.reviewId, reviewHash: lost.reviewHash, idempotencyKey: "ls-price-check:lost" });
   if (priceChangePage(lost, 0).summary.refused !== 1 || !("status" in refused) || refused.code !== WOULD_BE_LOST || (refused as ScriptedError).context?.sizeCount !== 1) {
     throw new Error(`The stub's W7 would-be-lost answer changed: ${JSON.stringify({ rows: lost.rows, refused })}`);
+  }
+
+  // W8 (plan PR 10, 9.4, 9.5): two typed prices save as exact prices with new revisions and answer through the shared
+  // contract (the replay too); a stale revision refuses it all with `conflictCount`; a price outside a limit with
+  // `sizeCount`, nothing written; a size not chosen is 404 naming it.
+  const eight: StubState = { ...defaultStubState(), catalog: [ENVELOPE, LAYERED_SAMPLE], sizePrices: {}, sizePriceLimits: { [sizeKey(store, 302)]: { floorCents: 500 } } };
+  const eightSaved = saveSizePrices(eight, store, [{ productVariantId: 301, priceCents: 1_234, expectedRevisionId: null }, { productVariantId: 101, priceCents: 999, expectedRevisionId: null }]);
+  if ("status" in eightSaved || (eightSaved.sizes as unknown[]).length !== 2 || SIZE_PRICES_ANSWER(eightSaved, true).outcome !== "replayed"
+    || eight.sizePrices[sizeKey(store, 301)]?.overridePriceCents !== 1_234 || sizePriceFact(eight, store, LAYERED_SAMPLE, LAYERED_SAMPLE.sizes[0]).source !== "exact") {
+    throw new Error(`The stub's W8 save changed: ${JSON.stringify(eightSaved)}`);
+  }
+  const eightStale = saveSizePrices(eight, store, [{ productVariantId: 301, priceCents: 1_500, expectedRevisionId: null }, { productVariantId: 302, priceCents: 700, expectedRevisionId: null }]);
+  const eightLimit = saveSizePrices(eight, store, [{ productVariantId: 302, priceCents: 400, expectedRevisionId: null }]);
+  const eightGone = saveSizePrices(eight, store, [{ productVariantId: 9_999, priceCents: 400, expectedRevisionId: null }]);
+  if (!("status" in eightStale) || eightStale.code !== "DROPSHIP_LISTING_PRICE_VERSION_CONFLICT" || (eightStale as ScriptedError).context?.conflictCount !== 1
+    || !("status" in eightLimit) || eightLimit.code !== "DROPSHIP_LISTING_PRICE_OUTSIDE_LIMIT" || (eightLimit as ScriptedError).context?.sizeCount !== 1
+    || eight.sizePrices[sizeKey(store, 302)] !== undefined || sizePriceFact(eight, store, LAYERED_SAMPLE, LAYERED_SAMPLE.sizes[1]).limits[0]?.floorCents !== 500
+    || !("status" in eightGone) || eightGone.code !== "DROPSHIP_LISTING_PRICE_NOT_AVAILABLE") {
+    throw new Error(`The stub's W8 refusals changed: ${JSON.stringify({ eightStale, eightLimit, eightGone })}`);
+  }
+  // W7's category kind (plan PR 10, 9.4): the detail's examples are current prices; a check of Sleeves' price prices the
+  // sample's sizes by its own price (the product's level) unless the clear names the price, then by the category's; the
+  // apply writes the category's row (the price and the shelf sent) with a new revision, clears the sample's own price and
+  // shelf, answers `categoryRevisionId` through the shared contract (its replay too); a stale revision, a wrong clear set
+  // and older group rules are refused.
+  const examples = listingSettingsCategoryDetail(layered, store, 40)?.examples ?? [];
+  if (examples.length !== 2 || examples[0].productVariantId !== 301 || examples[0].priceCents === null) {
+    throw new Error(`The stub's category examples changed: ${JSON.stringify(examples)}`);
+  }
+  const nine: StubState = { ...layered, pricingRules: { [store]: SAVED_PRICING_RULES }, productSettings: { ...layered.productSettings }, categorySettings: { ...layered.categorySettings }, sizeLeftovers: { ...layered.sizeLeftovers },
+    storeShelves: { [store]: [{ categoryId: "12", categoryName: "Sale", path: "Sale", level: 1 }] } };
+  const keptOwn = reviewCategoryPrice(nine, store, { kind: "category_price", categoryId: 40, expectedRevisionId: 8, patch: { price: retail20 } }, 1);
+  if ("status" in keptOwn || keptOwn.kind !== "category_price" || keptOwn.rows.length !== 2 || keptOwn.rows[0].ruleLevel !== "product"
+    || keptOwn.rows[0].priceCents !== calculateRulePrice({ basis: "catalog_retail", markupBps: 1_000, flatCents: 0, rounding: "cent" }, LAYERED_SAMPLE.sizes[0].retailCents).priceCents) {
+    throw new Error(`The stub's category check changed: ${JSON.stringify(keptOwn)}`);
+  }
+  const clearing = reviewCategoryPrice(nine, store, { kind: "category_price", categoryId: 40, expectedRevisionId: 8,
+    patch: { price: retail20, storeShelf: { mode: "own", shelfIds: ["12"] } }, clear: { fields: ["price", "storeShelf"], products: [{ productId: LAYERED_SAMPLE.productId, expectedRevisionId: 7 }] } }, 2);
+  if ("status" in clearing || clearing.kind !== "category_price" || clearing.rows[0].ruleLevel !== "category" || clearing.rows[0].ruleName !== CATEGORY_PRICE_RULE_NAME
+    || clearing.rows[0].priceCents !== calculateRulePrice(retail20, LAYERED_SAMPLE.sizes[0].retailCents).priceCents || clearing.input.patch.storeShelf?.mode !== "own"
+    || priceChangePage(clearing, 0).kind !== "category_price") {
+    throw new Error(`The stub's category check with a clear changed: ${JSON.stringify(clearing)}`);
+  }
+  nine.priceChangeChecks[clearing.reviewId] = clearing;
+  const nineApplied = applyPriceChanges(nine, store, { reviewId: clearing.reviewId, reviewHash: clearing.reviewHash, idempotencyKey: "ls-price-check:category" });
+  const nineLayer = categoryLayerOf(nine, store, 40);
+  if ("status" in nineApplied || nineApplied.changedProductCount !== 1 || nineApplied.releasedSizeCount !== 0 || nineApplied.categoryRevisionId !== nineLayer?.revisionId
+    || JSON.stringify(nineLayer?.values.price) !== JSON.stringify(retail20) || nineLayer?.values.storeShelf?.mode !== "own"
+    || productLayerOf(nine, store, LAYERED_SAMPLE.productId)?.values.price !== null || productLayerOf(nine, store, LAYERED_SAMPLE.productId)?.values.storeShelf !== null
+    || nine.sizeLeftovers[sizeKey(store, 302)]?.shelfNames !== undefined || PRICE_CHANGE_ANSWER(nineApplied, true).outcome !== "replayed") {
+    throw new Error(`The stub's category apply changed: ${JSON.stringify({ nineApplied, nineLayer })}`);
+  }
+  const staleNine = reviewCategoryPrice(nine, store, { kind: "category_price", categoryId: 40, expectedRevisionId: 8, patch: { price: null } }, 3);
+  const wrongNine = reviewCategoryPrice(nine, store, { kind: "category_price", categoryId: 40, expectedRevisionId: nineLayer?.revisionId ?? null,
+    patch: { price: null }, clear: { fields: ["price"], products: [{ productId: ENVELOPE.productId, expectedRevisionId: null }] } }, 4);
+  const ruledNine = reviewCategoryPrice({ ...nine, pricingRules: { [store]: { ...SAVED_PRICING_RULES, profile: { ...SAVED_PRICING_RULES.profile!,
+    groups: [{ id: "g1", name: "Sleeves", priority: 1, scope: { type: "category", category: "Sleeves" }, recipe: SAVED_PRICING_RULES.profile!.defaultRecipe }] } } } },
+  store, { kind: "category_price", categoryId: 40, expectedRevisionId: nineLayer?.revisionId ?? null, patch: { price: null } }, 5);
+  if (!("status" in staleNine) || staleNine.code !== "DROPSHIP_CATEGORY_LISTING_SETTINGS_VERSION_CONFLICT" || (staleNine as ScriptedError).context?.conflictCount !== 1
+    || !("status" in wrongNine) || wrongNine.code !== CATEGORY_PRICE_SET_CONFLICT || (wrongNine as ScriptedError).context?.conflictCount !== 1
+    || !("status" in ruledNine) || ruledNine.code !== "DROPSHIP_LISTING_SETTINGS_OLDER_RULES_PRESENT") {
+    throw new Error(`The stub's category check refusals changed: ${JSON.stringify({ staleNine, wrongNine, ruledNine })}`);
   }
 
   // The resolver's order, pinned once here: size, then product, then category (named), then the store default.

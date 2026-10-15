@@ -1,11 +1,16 @@
 import { CATEGORY_LISTING_SETTING_FIELDS, type CategoryListingSettingField } from "@shared/dropship/listing-setting-values";
 import {
   CATEGORY_CLEAR_FIELDS,
+  PRICE_CHANGE_CLEAR_FIELDS,
+  reviewPriceChangesInputSchema,
   saveCategorySettingsInputSchema,
   type CategoryClearField,
   type CategorySettingsPatchInput,
+  type PriceChangeClearField,
+  type ReviewPriceChangesInput,
   type SaveCategorySettingsInput,
 } from "@shared/dropship/listing-setting-writes";
+import { pricingRecipeSchema, type PricingRecipe } from "@shared/dropship/pricing-rules";
 import type {
   ListingSettingsCategoriesResponse,
   ListingSettingsCategoryDetail,
@@ -21,9 +26,11 @@ import {
   isDraftDirty,
   isDraftLocked,
   LISTING_SETTINGS_SAVE_WORDS,
+  sameDraftValue,
   type DraftValue,
   type EditorId,
   type ListingSettingsDraft,
+  type SavePhase,
   type WriteFailure,
 } from "./dropship-listing-settings-drafts";
 import {
@@ -41,12 +48,19 @@ import {
   type DrawerSettingRowKey,
   type DrawerSettingRowModel,
 } from "./dropship-listing-settings-drawer";
+import {
+  productPriceEditorModel,
+  productPriceEditorResult,
+  type ProductPriceEditorModel,
+  type ProductPriceEditorState,
+} from "./dropship-listing-settings-price-check";
 import { recipeWords } from "./dropship-listing-settings-price-words";
 import {
   choicesFromOwn,
   descriptionEditorResult,
   descriptionFieldEditor,
   ebayCategoryFieldEditor,
+  isPriceCheckRef,
   isProductFieldChoice,
   normalizedVendorText,
   patchSignatureEntries,
@@ -60,25 +74,32 @@ import {
   type FieldChoice,
   type PolicyEditField,
   type PolicyFieldEditorModel,
+  type PriceCheckRef,
   type ProductEditField,
   type ProductFieldChoice,
   type ProductFieldRights,
   type ProductOwnSettings,
+  type ProductPriceChange,
   type ProductSettingsChoices,
   type StoreShelfFieldEditorModel,
 } from "./dropship-listing-settings-product-edit";
+import { PRICE_DEFAULT_WORDS } from "./dropship-listing-settings-recipe";
 import { shelfPathWords, type PolicySetupFacts } from "./dropship-listing-settings-store-requests";
 import {
   alsoClearLabelWords,
+  categoryCheckAlsoWords,
   categoryEditorTitleWords,
+  categoryExamplesWords,
   categoryRowWords,
   changeCategoryLabel,
+  changeSettingLabel,
   drawerDescriptionTemplateValue,
   drawerEbayCategoryValue,
   drawerPolicyValue,
   drawerStoreShelfValue,
   LISTING_SETTINGS_CATEGORY_WORDS,
   LISTING_SETTINGS_EDIT_WORDS,
+  LISTING_SETTINGS_PRICE_CHECK_WORDS,
   loadingCategoryWords,
   ownValuesLineWords,
   pendingSettingWords,
@@ -92,16 +113,24 @@ import { DropshipApiError, type DropshipEbayStoreCategoryOption } from "./dropsh
 
 /**
  * The Category settings card and the category editor (Listing settings PR 10e,
- * plan 8.1-8.4): the reads the card and the editor make, the older-rules check
- * (D11), the card's rows and state, the choices a category's seven fields can
- * take (never the price, read-only until 10f, UX-m9), the draft that holds them
- * with "Also clear theirs", the W12 patch and request they make, who may change
- * which field, the field editors' models, "Load latest", and the editor's state.
+ * plan 8.1-8.4; the category price, PR 10f, plan 9.1-9.4): the reads the card
+ * and the editor make, the older-rules check (D11), the card's rows and state,
+ * the choices a category's seven fields can take, its price (a recipe or "Use
+ * store default", saved through the price check, W7 `category_price`), the
+ * draft that holds them with "Also clear theirs", the W12 patch and request
+ * they make, the W7 review request a price change makes, who may change which
+ * field, the field editors' models, "Load latest", and the editor's state.
  *
  * Rules this module keeps:
  * - Never a price and never a main text in W12 (plan P34; `SW`
  *   saveCategorySettingsInputSchema has neither): a category price goes through
- *   the price check (W7, PR 10f); a category has no main text.
+ *   the price check (W7, `categoryPriceReviewBody`, PR 10f, plan 9.7), which
+ *   carries the editor's other changes and "Also clear theirs" with it in one
+ *   check (D2); a category has no main text.
+ * - The client never computes a price (D1): the recipe is parsed with PR 7's
+ *   integer parsers (`productPriceEditorResult`); the examples shown are the
+ *   server's current prices, labelled "Now:" and hidden while the price is
+ *   changed (CC-C23).
  * - Ids and text only, as W5's patch (`productSettingsPatch`): "Use store
  *   default" is null, "Set" the value, a field left alone is absent, unless
  *   "Also clear theirs" is ticked on it: then the category's current value is
@@ -409,6 +438,78 @@ export function choicesFromCategory(settings: ListingSettingsCategorySettings): 
   return Object.freeze(choices) as unknown as CategoryChoices;
 }
 
+// ---------------------------------------------------------------------------
+// The price (PR 10f, plan 9.1, 9.2; D1, D2, D16)
+// ---------------------------------------------------------------------------
+
+/**
+ * The category's price as the editor changes it (plan 9.2): the recipe
+ * (`set`), "Use store default" (`default`, W7 `price: null`) or leave it, and
+ * the check made for it (the W7 review the vendor saw, D16). One field of the
+ * draft, so the bar counts the price as one change, and the check never
+ * counts as a change. Saved only through the price check (W7, plan 9.7).
+ */
+export interface CategoryPriceChange {
+  readonly choice: FieldChoice<PricingRecipe>;
+  readonly check: PriceCheckRef | null;
+}
+
+const NO_PRICE_CHANGE: CategoryPriceChange = Object.freeze({ choice: LEAVE, check: null });
+
+/** The price left as it is, with no check. */
+export function emptyCategoryPriceChange(): CategoryPriceChange {
+  return NO_PRICE_CHANGE;
+}
+
+function isRecipeChoice(value: unknown): value is FieldChoice<PricingRecipe> {
+  if (typeof value !== "object" || value === null) return false;
+  const choice = value as { mode?: unknown; value?: unknown };
+  if (choice.mode === "leave" || choice.mode === "default") return true;
+  return choice.mode === "set" && pricingRecipeSchema.safeParse(choice.value).success;
+}
+
+/** Whether `value` is a price change of the shape above (a leave, the default or a recipe the contract takes, and a check or none). */
+export function isCategoryPriceChange(value: unknown): value is CategoryPriceChange {
+  if (typeof value !== "object" || value === null) return false;
+  const { choice, check } = value as Record<string, unknown>;
+  return isRecipeChoice(choice) && (check === null || isPriceCheckRef(check));
+}
+
+/** The category's own recipe (the setting's value when its source is `category`); null when the store default, or nothing, gives it. */
+export function categoryOwnPrice(settings: Pick<ListingSettingsCategorySettings, "price">): PricingRecipe | null {
+  return settings.price.source === "category" ? settings.price.value : null;
+}
+
+/** The store price the category would follow with "Use store default" (the setting's value when its source is `store_default`); null when none is set. */
+export function categoryStoreRecipe(settings: Pick<ListingSettingsCategorySettings, "price">): PricingRecipe | null {
+  return settings.price.source === "store_default" ? settings.price.value : null;
+}
+
+/**
+ * The price choice as the draft keeps it: one that asks for what the category
+ * has now (the same recipe, or "Use store default" while it has none of its
+ * own) is "leave", so it counts as no change; a recipe is copied through the
+ * contract, so the draft never shares an object with an editor.
+ */
+function priceChoiceFor(choice: FieldChoice<PricingRecipe>, ownPrice: PricingRecipe | null): FieldChoice<PricingRecipe> {
+  if (choice.mode === "leave") return LEAVE;
+  if (choice.mode === "default") return ownPrice === null ? LEAVE : DEFAULT;
+  if (ownPrice !== null && sameDraftValue(choice.value, ownPrice)) return LEAVE;
+  return { mode: "set", value: pricingRecipeSchema.parse(choice.value) };
+}
+
+/** The price change as the draft keeps it: the choice normalised, and its check only while there is a change to check. */
+function priceChangeFor(price: CategoryPriceChange, ownPrice: PricingRecipe | null): CategoryPriceChange {
+  const choice = priceChoiceFor(price.choice, ownPrice);
+  if (choice.mode === "leave") return NO_PRICE_CHANGE;
+  return { choice, check: price.check === null ? null : { ...price.check } };
+}
+
+/** Whether the draft's price asks for anything: a recipe other than the category's, or "Use store default" over its own. */
+export function categoryPriceChanged(value: Pick<CategoryDraftValue, "price">): boolean {
+  return value.price.choice.mode !== "leave";
+}
+
 /**
  * A choice's meaning for comparing, by field: ids for eBay values (a renamed
  * policy, category or shelf is the same one), and text as it is stored.
@@ -467,27 +568,34 @@ export interface CategoryOwnValueEntry {
 }
 
 /**
- * What the draft starts from: the category, its revision, its own values and
- * its products' own values, all from one read (D6). A type, not an interface,
- * so the draft value built on it is a `DraftValue` the provider takes as it is.
+ * What the draft starts from: the category, its revision, its own values
+ * (its price among them, PR 10f) and its products' own values, all from one
+ * read (D6). A type, not an interface, so the draft value built on it is a
+ * `DraftValue` the provider takes as it is.
  */
 export type CategoryDraftFacts = {
   readonly categoryId: number;
-  /** W12's `expectedRevisionId`: the detail's `revisionId`. */
+  /** W12's `expectedRevisionId`, and the W7 category check's: the detail's `revisionId`. */
   readonly expectedRevisionId: number | null;
   readonly own: CategoryOwnValues;
+  /** The category's own recipe (`categoryOwnPrice`); null when the store default, or nothing, gives its price. */
+  readonly ownPrice: PricingRecipe | null;
   readonly ownValues: readonly CategoryOwnValueEntry[];
 };
 
 /**
  * The editor's draft value: one field per choice (so the bar counts each
- * changed setting as one change), "Also clear theirs" as one field (`clear`,
- * the ticked settings in the stored shape's order: one change however many
- * are ticked), and the facts the draft started from, the same in the draft's
- * base and value. The base has every choice "leave" and nothing ticked.
+ * changed setting as one change), the price as one field (`price`, PR 10f:
+ * its choice and the check made for it), "Also clear theirs" as one field
+ * (`clear`, the ticked settings in the stored shape's order: one change
+ * however many are ticked; the price among them only with a price change,
+ * which goes through the check), and the facts the draft started from, the
+ * same in the draft's base and value. The base has every choice "leave", the
+ * price left, and nothing ticked.
  */
 export type CategoryDraftValue = CategoryChoices & CategoryDraftFacts & {
-  readonly clear: readonly CategoryClearField[];
+  readonly price: CategoryPriceChange;
+  readonly clear: readonly PriceChangeClearField[];
 };
 
 export function categoryDraftFacts(detail: Pick<ListingSettingsCategoryDetail, "categoryId" | "revisionId" | "settings" | "ownValues">): CategoryDraftFacts {
@@ -495,6 +603,7 @@ export function categoryDraftFacts(detail: Pick<ListingSettingsCategoryDetail, "
     categoryId: detail.categoryId,
     expectedRevisionId: detail.revisionId,
     own: categoryOwnValues(detail.settings),
+    ownPrice: categoryOwnPrice(detail.settings),
     ownValues: Object.freeze(detail.ownValues.map((entry) => Object.freeze({
       productId: entry.productId, revisionId: entry.revisionId, fields: Object.freeze([...entry.fields]),
     }))),
@@ -502,7 +611,7 @@ export function categoryDraftFacts(detail: Pick<ListingSettingsCategoryDetail, "
 }
 
 /** The `ownValues` entries that hold their own value in `field` (plan 8.4): the products "Also clear theirs" would clear for it. */
-export function clearCandidates(facts: Pick<CategoryDraftFacts, "ownValues">, field: CategoryClearField): CategoryOwnValueEntry[] {
+export function clearCandidates(facts: Pick<CategoryDraftFacts, "ownValues">, field: PriceChangeClearField): CategoryOwnValueEntry[] {
   return facts.ownValues.filter((entry) => (entry.fields as readonly string[]).includes(field));
 }
 
@@ -512,45 +621,58 @@ export function clearCandidates(facts: Pick<CategoryDraftFacts, "ownValues">, fi
  * category: the vendor sets it, or the category already sets it (the current
  * value is sent again). Never with "Use store default", and never on a field
  * the store default gives: every cleared field is non-null in the patch
- * (`SW:438-445`), so the store default is never pinned on the category.
+ * (`SW:438-445`), so the store default is never pinned on the category. The
+ * price (PR 10f) can be cleared only with a recipe set: a price clear rides
+ * on the price check (W7), which needs a price change (plan 9.6; W12 never
+ * carries it, P34).
  */
-export function clearAllowed(facts: Pick<CategoryDraftFacts, "own" | "ownValues">, field: CategoryClearField, choice: AnyChoice): boolean {
+export function clearAllowed(facts: Pick<CategoryDraftFacts, "own" | "ownValues">, field: PriceChangeClearField, choice: AnyChoice): boolean {
   if (clearCandidates(facts, field).length === 0) return false;
   if (choice.mode === "set") return true;
+  if (field === "price") return false;
   return choice.mode === "leave" && facts.own[field] !== null;
 }
 
-/** The draft value on `facts`; with no choices and nothing ticked, it is the draft's base. */
+/** The draft value on `facts`; with no choices, the price left and nothing ticked, it is the draft's base. */
 export function categoryDraftValueOn(
   facts: CategoryDraftFacts,
   choices: CategoryChoices = emptyCategoryChoices(),
-  clear: readonly CategoryClearField[] = [],
+  clear: readonly PriceChangeClearField[] = [],
+  price: CategoryPriceChange = NO_PRICE_CHANGE,
 ): CategoryDraftValue {
   const value: Record<string, unknown> = {};
   for (const field of CATEGORY_EDIT_FIELDS) value[field] = draftChoice(field, choices[field], facts.own);
+  const priceChange = priceChangeFor(price, facts.ownPrice);
   const wanted = new Set(clear);
-  const kept = CATEGORY_CLEAR_FIELDS.filter((field) => wanted.has(field) && clearAllowed(facts, field, value[field] as AnyChoice));
+  const choiceOf = (field: PriceChangeClearField): AnyChoice => (field === "price" ? priceChange.choice : value[field] as AnyChoice);
+  const kept = PRICE_CHANGE_CLEAR_FIELDS.filter((field) => wanted.has(field) && clearAllowed(facts, field, choiceOf(field)));
   return {
     ...value,
+    price: priceChange,
     clear: Object.freeze(kept),
     categoryId: facts.categoryId,
     expectedRevisionId: facts.expectedRevisionId,
     own: facts.own,
+    ownPrice: facts.ownPrice,
     ownValues: facts.ownValues,
   } as unknown as CategoryDraftValue;
 }
 
-/** The draft value on the detail read; with no choices and nothing ticked, it is the draft's base. */
+/** The draft value on the detail read; with no choices, the price left and nothing ticked, it is the draft's base. */
 export function categoryDraftValue(
   detail: Pick<ListingSettingsCategoryDetail, "categoryId" | "revisionId" | "settings" | "ownValues">,
   choices: CategoryChoices = emptyCategoryChoices(),
-  clear: readonly CategoryClearField[] = [],
+  clear: readonly PriceChangeClearField[] = [],
+  price: CategoryPriceChange = NO_PRICE_CHANGE,
 ): CategoryDraftValue {
-  return categoryDraftValueOn(categoryDraftFacts(detail), choices, clear);
+  return categoryDraftValueOn(categoryDraftFacts(detail), choices, clear, price);
 }
 
 const MAX_ID = 2_147_483_647;
+/** The settings a W12 clear can name (never the price). */
 const CLEAR_FIELD_SET: ReadonlySet<string> = new Set(CATEGORY_CLEAR_FIELDS);
+/** The settings a tick can name in the draft: W12's, and the price for the check (PR 10f). */
+const DRAFT_CLEAR_FIELD_SET: ReadonlySet<string> = new Set(PRICE_CHANGE_CLEAR_FIELDS);
 const SETTING_FIELD_SET: ReadonlySet<string> = new Set(CATEGORY_LISTING_SETTING_FIELDS);
 
 function isId(value: unknown): value is number {
@@ -565,8 +687,8 @@ function isFieldList(value: unknown, known: ReadonlySet<string>): value is reado
   return Array.isArray(value) && value.every((field) => typeof field === "string" && known.has(field)) && new Set(value).size === value.length;
 }
 
-function isClearFields(value: unknown): value is readonly CategoryClearField[] {
-  return isFieldList(value, CLEAR_FIELD_SET);
+function isClearFields(value: unknown): value is readonly PriceChangeClearField[] {
+  return isFieldList(value, DRAFT_CLEAR_FIELD_SET);
 }
 
 function isOwnValueEntries(value: unknown): value is readonly CategoryOwnValueEntry[] {
@@ -583,16 +705,18 @@ function isOwnValueEntries(value: unknown): value is readonly CategoryOwnValueEn
 
 /** The editor's draft value, or null when `value` is not one (a product's draft, a Store defaults row's, the sheet's). */
 export function readCategoryDraft(value: DraftValue): CategoryDraftValue | null {
-  const { categoryId, expectedRevisionId, own, ownValues, clear } = value;
+  const { categoryId, expectedRevisionId, own, ownPrice, ownValues, clear, price } = value;
   if (!isId(categoryId) || !isRevision(expectedRevisionId)) return null;
   if (typeof own !== "object" || own === null || !isOwnValueEntries(ownValues) || !isClearFields(clear)) return null;
+  if (ownPrice !== null && !pricingRecipeSchema.safeParse(ownPrice).success) return null;
+  if (!isCategoryPriceChange(price)) return null;
   if (!CATEGORY_EDIT_FIELDS.every((field) => isProductFieldChoice(field, value[field]))) return null;
   return value as unknown as CategoryDraftValue;
 }
 
-/** Whether the draft asks for anything: a changed field, or "Also clear theirs" ticked (a clear-only save). */
-export function categoryHasChange(value: Pick<CategoryDraftValue, CategoryEditField | "clear">): boolean {
-  return categoryChangedFields(value).length > 0 || value.clear.length > 0;
+/** Whether the draft asks for anything: a changed field, a changed price (PR 10f), or "Also clear theirs" ticked (a clear-only save). */
+export function categoryHasChange(value: Pick<CategoryDraftValue, CategoryEditField | "clear" | "price">): boolean {
+  return categoryChangedFields(value).length > 0 || value.clear.length > 0 || categoryPriceChanged(value);
 }
 
 /** This category's draft and its value, when the step's one draft is it; null otherwise. */
@@ -679,9 +803,22 @@ function checkedPicks(picks: Readonly<Record<string, unknown>>): Array<[Category
 }
 
 /**
+ * The price change a pick or a tick keeps (PR 10f, plan 9.4): the choice,
+ * with no check. A check is of the whole request (the price with the other
+ * changes and the clear set, D2), so any change after it needs a new one;
+ * keeping the old check would show it over a draft it no longer answers, and
+ * [Save new prices] would apply the stored review while the editor reports
+ * the newer change as saved.
+ */
+function priceChangeWithoutCheck(value: Pick<CategoryDraftValue, "price">): CategoryPriceChange {
+  return { choice: value.price.choice, check: null };
+}
+
+/**
  * [Done] in a field editor: its choices go in the editor's draft. A choice
  * that asks for what the category has is no change; "Use store default" on a
- * field drops its "Also clear theirs" tick (the clear needs a set value).
+ * field drops its "Also clear theirs" tick (the clear needs a set value). A
+ * held price check goes: the request changed (PR 10f).
  */
 export function categoryPickAction(input: CategoryEditFacts & { picks: CategoryPicks }): CategoryEditAction {
   const picks = checkedPicks(input.picks);
@@ -690,18 +827,44 @@ export function categoryPickAction(input: CategoryEditFacts & { picks: CategoryP
   const choices: Record<string, AnyChoice> = {};
   for (const field of CATEGORY_EDIT_FIELDS) choices[field] = from.current[field];
   for (const [field, choice] of picks) choices[field] = choice;
-  const value = categoryDraftValueOn(from.current, choices as unknown as CategoryChoices, from.current.clear);
+  const value = categoryDraftValueOn(from.current, choices as unknown as CategoryChoices, from.current.clear, priceChangeWithoutCheck(from.current));
   return from.start === null ? { kind: "edit", value } : { kind: "start", ...from.start, value };
 }
 
-/** "Also clear theirs" ticked or unticked on `field`: the draft takes it when the box can show (`clearAllowed`); otherwise the tick is dropped. */
-export function categoryClearAction(input: CategoryEditFacts & { field: CategoryClearField; ticked: boolean }): CategoryEditAction {
-  if (!CLEAR_FIELD_SET.has(input.field)) throw new Error(`A category clear names a setting it can't clear: ${input.field}.`);
+/**
+ * "Also clear theirs" ticked or unticked on `field`: the draft takes it when
+ * the box can show (`clearAllowed`); otherwise the tick is dropped. The price
+ * (PR 10f) can be ticked only while a recipe is set: its clear rides on the
+ * price check. A held price check goes: the request changed.
+ */
+export function categoryClearAction(input: CategoryEditFacts & { field: PriceChangeClearField; ticked: boolean }): CategoryEditAction {
+  if (!DRAFT_CLEAR_FIELD_SET.has(input.field)) throw new Error(`A category clear names a setting it can't clear: ${input.field}.`);
   const from = categoryEditFrom(input);
   if ("kind" in from) return from;
   const clear = input.ticked ? [...from.current.clear, input.field] : from.current.clear.filter((field) => field !== input.field);
-  const value = categoryDraftValueOn(from.current, from.current, clear);
+  const value = categoryDraftValueOn(from.current, from.current, clear, priceChangeWithoutCheck(from.current));
   return from.start === null ? { kind: "edit", value } : { kind: "start", ...from.start, value };
+}
+
+/**
+ * [Check new prices] in the price editor (PR 10f, plan 9.2): the editor's
+ * choice goes in the draft as the category's price change, with no check yet
+ * (the check runner adds it); a choice that asks for what the category has is
+ * no change, and a price tick stays only while a recipe is set. The other
+ * fields' choices and ticks stay as they are: they ride along in the one
+ * check (D2).
+ */
+export function categoryPriceAction(input: CategoryEditFacts & { choice: FieldChoice<PricingRecipe> }): CategoryEditAction {
+  if (!isRecipeChoice(input.choice)) throw new Error("A category price edit names a choice the editor doesn't set.");
+  const from = categoryEditFrom(input);
+  if ("kind" in from) return from;
+  const value = categoryDraftValueOn(from.current, from.current, from.current.clear, { choice: input.choice, check: null });
+  return from.start === null ? { kind: "edit", value } : { kind: "start", ...from.start, value };
+}
+
+/** The check the runner made, put in the draft (the choices stay; `null` drops a check, e.g. "Back to editing"). */
+export function categoryPriceDraftWithCheck(value: CategoryDraftValue, check: PriceCheckRef | null): CategoryDraftValue {
+  return { ...value, price: { choice: value.price.choice, check: check === null ? null : { ...check } } };
 }
 
 // ---------------------------------------------------------------------------
@@ -740,7 +903,9 @@ export function categoryPatch(value: Pick<CategoryDraftValue, CategoryEditField 
   const choices: Record<string, AnyChoice> = { mainText: LEAVE };
   for (const field of CATEGORY_EDIT_FIELDS) choices[field] = value[field];
   const patch: Record<string, unknown> = productSettingsPatch(choices as unknown as ProductSettingsChoices);
-  for (const field of value.clear) {
+  // A price tick (PR 10f) is the check's: W12 never carries the price (P34).
+  for (const field of CATEGORY_CLEAR_FIELDS) {
+    if (!value.clear.includes(field)) continue;
     const own = value.own[field];
     if (value[field].mode === "leave" && own !== null) patch[field] = ownValueAsInput(field, own);
   }
@@ -756,12 +921,16 @@ export function categoryPatch(value: Pick<CategoryDraftValue, CategoryEditField 
 export function categoryClearBody(value: Pick<CategoryDraftValue, "clear" | "ownValues">): SaveCategorySettingsInput["clear"] | undefined {
   const fields = CATEGORY_CLEAR_FIELDS.filter((field) => value.clear.includes(field));
   if (fields.length === 0) return undefined;
+  return { fields, products: clearProductsFor(value.ownValues, fields) };
+}
+
+/** The union of the `ownValues` entries holding any of `fields`, each once, ascending, with the revision it was read with (plan 8.4). */
+function clearProductsFor(ownValues: readonly CategoryOwnValueEntry[], fields: readonly PriceChangeClearField[]): Array<{ productId: number; expectedRevisionId: number | null }> {
   const ticked = new Set<string>(fields);
-  const products = value.ownValues
+  return ownValues
     .filter((entry) => entry.fields.some((field) => ticked.has(field)))
     .map((entry) => ({ productId: entry.productId, expectedRevisionId: entry.revisionId }))
     .sort((left, right) => left.productId - right.productId);
-  return { fields, products };
 }
 
 /** "Also clear theirs" as given to the body and the signature: the ticked fields and the products, read-only (never mutated). */
@@ -805,7 +974,10 @@ export function categorySaveBody(input: {
   const outside = sent.filter((field) => !FIELD_SET.has(field));
   if (outside.length > 0) throw new CategoryRequestError("This change names a setting the category editor doesn't save.", { fields: outside });
   if (sent.length === 0) throw new CategoryRequestError("There is no change to save.", { fields: [] });
-  const unset = (input.clear?.fields ?? []).filter((field) => input.patch[field] == null);
+  // A price clear is the price check's (PR 10f, P34): never W12's.
+  const uncleared = (input.clear?.fields ?? []).filter((field) => !CLEAR_FIELD_SET.has(field));
+  if (uncleared.length > 0) throw new CategoryRequestError("This change clears a setting the category editor doesn't save.", { fields: uncleared });
+  const unset = (input.clear?.fields ?? []).filter((field) => input.patch[field as CategoryClearField] == null);
   if (unset.length > 0) throw new CategoryRequestError("A cleared setting must be set on the category by this change.", { fields: unset });
   const parsed = saveCategorySettingsInputSchema.safeParse({
     idempotencyKey: input.key,
@@ -843,11 +1015,250 @@ export function categorySignature(
 }
 
 // ---------------------------------------------------------------------------
+// The W7 request: the category price check (PR 10f, plan 9.2, 9.4; D1, D2, D5, D6)
+// ---------------------------------------------------------------------------
+
+/** The `category_price` review as the contract takes it (`SW` reviewPriceChangesInputSchema). */
+export type CategoryPriceReviewInput = Extract<ReviewPriceChangesInput, { kind: "category_price" }>;
+
+/**
+ * The check's patch (plan 9.2): the price as the vendor chose it (a recipe,
+ * or null for "Use store default"; the contract requires one), and the
+ * editor's other changes as the W12 patch carries them (ids and text only,
+ * clear-only resends included). Throws when the price isn't changed: there is
+ * nothing to check, and a W12 save is the way (plan 9.7).
+ */
+export function categoryPricePatch(value: Pick<CategoryDraftValue, CategoryEditField | "own" | "clear" | "price">): CategoryPriceReviewInput["patch"] {
+  const choice = value.price.choice;
+  if (choice.mode === "leave") throw new CategoryRequestError("There is no price change to check.", { fields: ["price"] });
+  return { price: choice.mode === "default" ? null : pricingRecipeSchema.parse(choice.value), ...categoryPatch(value) };
+}
+
+/**
+ * "Also clear theirs" as the check takes it (plan 9.2, 9.6): the ticked
+ * settings in the stored shape's order, the price among them, and the union
+ * of the `ownValues` entries holding any of them, each once, ascending, with
+ * the revision it was read with. Undefined when nothing is ticked.
+ */
+export function categoryPriceClearBody(value: Pick<CategoryDraftValue, "clear" | "ownValues">): CategoryPriceReviewInput["clear"] | undefined {
+  const fields = PRICE_CHANGE_CLEAR_FIELDS.filter((field) => value.clear.includes(field));
+  if (fields.length === 0) return undefined;
+  return { fields: [...fields], products: clearProductsFor(value.ownValues, fields) };
+}
+
+/** "Also clear theirs" as given to the check: the ticked fields (the price among them) and the products, read-only (never mutated). */
+export type CategoryPriceClearInput = {
+  readonly fields: readonly PriceChangeClearField[];
+  readonly products: ReadonlyArray<{ readonly productId: number; readonly expectedRevisionId: number | null }>;
+};
+
+/**
+ * The W7 `category_price` review body (plan 9.2, 9.4), checked by the shared
+ * input schema before it is sent: the category, the revision the editor
+ * opened on (D6), the patch with its price, and "Also clear theirs" when
+ * ticked. Throws a CategoryRequestError for a patch without a price, a
+ * cleared field the patch doesn't set, or anything else the schema refuses
+ * (never sent). What is sent is the schema's output. Never a main text.
+ */
+export function categoryPriceReviewBody(input: {
+  categoryId: number;
+  expectedRevisionId: number | null;
+  patch: CategoryPriceReviewInput["patch"];
+  clear?: CategoryPriceClearInput | undefined;
+}): CategoryPriceReviewInput {
+  if (input.patch.price === undefined) throw new CategoryRequestError("A price check needs a price.", { fields: ["price"] });
+  const outside = Object.keys(input.patch).filter((field) => input.patch[field as keyof CategoryPriceReviewInput["patch"]] !== undefined && field !== "price" && !FIELD_SET.has(field));
+  if (outside.length > 0) throw new CategoryRequestError("This check names a setting the category editor doesn't save.", { fields: outside });
+  const unset = (input.clear?.fields ?? []).filter((field) => input.patch[field] == null);
+  if (unset.length > 0) throw new CategoryRequestError("A cleared setting must be set on the category by this change.", { fields: unset });
+  const parsed = reviewPriceChangesInputSchema.safeParse({
+    kind: "category_price",
+    categoryId: input.categoryId,
+    expectedRevisionId: input.expectedRevisionId,
+    patch: input.patch,
+    ...(input.clear === undefined ? {} : { clear: { fields: [...input.clear.fields], products: input.clear.products.map((product) => ({ ...product })) } }),
+  });
+  if (!parsed.success || parsed.data.kind !== "category_price") {
+    throw new CategoryRequestError("This check can't be sent as it is.", {
+      issues: parsed.success ? [{ path: "kind", code: "other_kind" }] : parsed.error.issues.slice(0, 5).map((issue) => ({ path: issue.path.join("."), code: issue.code })),
+    });
+  }
+  return parsed.data;
+}
+
+/** The check's request from the draft (plan 9.2): the body `categoryPriceReviewBody` checks, on the draft's revision and clear set (D6). */
+export function categoryPriceReviewRequest(value: CategoryDraftValue): CategoryPriceReviewInput {
+  return categoryPriceReviewBody({
+    categoryId: value.categoryId,
+    expectedRevisionId: value.expectedRevisionId,
+    patch: categoryPricePatch(value),
+    clear: categoryPriceClearBody(value),
+  });
+}
+
+/**
+ * Whether a check's answer is for the draft as it is now (plan 9.4): the
+ * request the draft builds now is the one that was sent. A draft changed
+ * while the check was out (a pick, a tick, a price the editor can't build a
+ * request for any more) needs a new check, so the answer is dropped.
+ */
+export function categoryPriceCheckAnswers(value: CategoryDraftValue, request: ReviewPriceChangesInput): boolean {
+  try {
+    return sameDraftValue(categoryPriceReviewRequest(value), request);
+  } catch {
+    // Deliberate: a draft with no price change to check builds no request, so no check answers it.
+    return false;
+  }
+}
+
+/**
+ * What the check was made against (plan 9.4, D6): the category's revision
+ * and the clear set it sends. Before each check, and again before the
+ * automatic re-check after a refused apply, the detail is read again and
+ * compared (`categoryPriceBaseMoved`): a moved revision or set is the
+ * editor's conflict (Load latest), and nothing is sent.
+ */
+export interface CategoryPriceCheckBase {
+  readonly expectedRevisionId: number | null;
+  readonly clear: CategoryPriceClearInput | undefined;
+}
+
+export function categoryPriceCheckBaseOf(value: Pick<CategoryDraftValue, "expectedRevisionId" | "clear" | "ownValues">): CategoryPriceCheckBase {
+  return { expectedRevisionId: value.expectedRevisionId, clear: categoryPriceClearBody(value) };
+}
+
+/** Whether the category's revision, or the clear set the check sends, moved away from the base on the detail read now (plan 9.4). */
+export function categoryPriceBaseMoved(base: CategoryPriceCheckBase, latest: Pick<ListingSettingsCategoryDetail, "revisionId" | "ownValues">): boolean {
+  if (base.expectedRevisionId !== latest.revisionId) return true;
+  if (base.clear === undefined) return false;
+  const now = clearProductsFor(latest.ownValues, base.clear.fields);
+  const sent = [...base.clear.products].sort((left, right) => left.productId - right.productId);
+  return JSON.stringify(now.map((product) => [product.productId, product.expectedRevisionId]))
+    !== JSON.stringify(sent.map((product) => [product.productId, product.expectedRevisionId]));
+}
+
+/** What else the check saves (plan 9.2, UX-m9): the other changed settings in the stored shape's order, and each ticked clear with its count. */
+export interface CategoryPriceCheckAlso {
+  fields: CategoryListingSettingField[];
+  clears: Array<{ field: CategoryListingSettingField; count: number }>;
+}
+
+export function categoryPriceCheckAlso(value: Pick<CategoryDraftValue, CategoryEditField | "clear" | "ownValues">): CategoryPriceCheckAlso {
+  const changed = new Set<string>(categoryChangedFields(value));
+  return {
+    fields: CATEGORY_LISTING_SETTING_FIELDS.filter((field) => changed.has(field)),
+    clears: PRICE_CHANGE_CLEAR_FIELDS.filter((field) => value.clear.includes(field)).map((field) => ({ field, count: clearCandidates(value, field).length })),
+  };
+}
+
+/** "Also saves: shipping policy." and "Clears 3 products' own shipping policy.": the lines over the check (`categoryCheckAlsoWords`). */
+export function categoryPriceCheckAlsoLines(value: Pick<CategoryDraftValue, CategoryEditField | "clear" | "ownValues">): string[] {
+  return categoryCheckAlsoWords(categoryPriceCheckAlso(value));
+}
+
+/** The price change as the check's footer and head read it (10d's `priceCheckFooter`, `priceCheckChangeWords`): a category check releases nothing. */
+export function categoryPriceCheckChange(value: Pick<CategoryDraftValue, "price">): Pick<ProductPriceChange, "price" | "releaseExactPrices"> {
+  return { price: value.price.choice, releaseExactPrices: false };
+}
+
+/** The check body the editor shows in place of its own (D20), and the draft phase it is in. */
+export interface CategoryPriceCheckShown {
+  check: PriceCheckRef;
+  phase: SavePhase;
+  message: string | null;
+  code: string | null;
+  /** The draft is locked (a save out or unconfirmed): Back closes the editor and keeps it (D21). */
+  locked: boolean;
+  /** "Also saves: …" and "Clears …" (plan 9.2). */
+  also: string[];
+  change: Pick<ProductPriceChange, "price" | "releaseExactPrices">;
+}
+
+/**
+ * Whether the editor shows the check: its draft holds a price change with a
+ * check (made, or kept from before Back, D21). Null shows the editor's own
+ * body: before any check, after a save (the views are read again; a clean
+ * draft holding a check is a saved one, whatever its phase once "Saved" has
+ * gone), and while the draft shows a conflict (plan 9.4: the editor's Load
+ * latest re-reads the category; the check it holds goes with the rebase).
+ */
+export function categoryPriceCheckShown(draft: ListingSettingsDraft | null, categoryId: number): CategoryPriceCheckShown | null {
+  const own = ownCategoryDraft(draft, categoryId);
+  if (own === null || own.value.price.check === null || !categoryPriceChanged(own.value)) return null;
+  const { phase } = own.draft;
+  if (phase === "saved" || phase === "saved_view_stale" || phase === "conflict") return null;
+  // A check is held only with a change to save; without one the check was applied (the base took the value).
+  if (!isDraftDirty(own.draft)) return null;
+  return {
+    check: own.value.price.check,
+    phase,
+    message: own.draft.message,
+    code: own.draft.code,
+    locked: isDraftLocked(own.draft),
+    also: categoryPriceCheckAlsoLines(own.value),
+    change: categoryPriceCheckChange(own.value),
+  };
+}
+
+/**
+ * The check the editor's body shows in place of its own (D20): the draft's
+ * (`categoryPriceCheckShown`), or, while a refused apply's new check is being
+ * made (`rechecking`), the one shown last as "Saving…" (locked, no words), so
+ * the body doesn't flash back to the rows between the refusal and the new
+ * check. Null for the editor's own body: nothing held, or the draft is in
+ * conflict (the re-check's guard found the category moved: Load latest is the
+ * editor's, plan 9.4).
+ */
+export function categoryPriceCheckBody(input: {
+  shown: CategoryPriceCheckShown | null;
+  lastShown: CategoryPriceCheckShown | null;
+  rechecking: boolean;
+  draft: ListingSettingsDraft | null;
+  categoryId: number;
+}): CategoryPriceCheckShown | null {
+  if (input.shown !== null) return input.shown;
+  if (!input.rechecking || input.lastShown === null) return null;
+  if (ownCategoryDraft(input.draft, input.categoryId)?.draft.phase === "conflict") return null;
+  return { ...input.lastShown, phase: "saving", message: null, code: null, locked: true };
+}
+
+/**
+ * Whether this category's draft went through the price check (W7): it holds a
+ * check (a saved draft keeps its value, so after a confirmed apply too). The
+ * editor's [Reload] after "Saved. We couldn't load the latest view." then
+ * reads the apply's views again (`refreshAfterCategoryPriceApply`), not W12's.
+ */
+export function categorySavedThroughCheck(draft: ListingSettingsDraft | null, categoryId: number): boolean {
+  const own = ownCategoryDraft(draft, categoryId);
+  return own !== null && own.value.price.check !== null;
+}
+
+/** What "Back to editing" does over a category check (D20, D21). */
+export type CategoryPriceCheckBack =
+  /** Back to the editor's body: the check leaves the draft (send `value` to `drafts.edit`), the changes stay. */
+  | { kind: "edit"; value: CategoryDraftValue }
+  /** The draft is locked (a save out or unconfirmed): the editor closes and keeps it; reopening shows Check again. */
+  | { kind: "close" }
+  | { kind: "none" };
+
+export function categoryPriceCheckBack(draft: ListingSettingsDraft | null, categoryId: number): CategoryPriceCheckBack {
+  const own = ownCategoryDraft(draft, categoryId);
+  if (own === null || own.value.price.check === null) return { kind: "none" };
+  if (isDraftLocked(own.draft)) return { kind: "close" };
+  return { kind: "edit", value: categoryPriceDraftWithCheck(own.value, null) };
+}
+
+// ---------------------------------------------------------------------------
 // Who may change which field (D3, D4)
 // ---------------------------------------------------------------------------
 
-/** The rights the editor reads: W12's, and the rights its fields pick eBay values with. */
-export type CategorySettingsRights = Pick<ListingSettingsEditRights, "categorySettings" | "shipping" | "policies" | "ebayCategory" | "shelfPick">;
+/**
+ * The rights the editor reads: W12's, the rights its fields pick eBay values
+ * with, and W7's for the price (PR 10f; left out, the Price row stays
+ * read-only, as before 10f).
+ */
+export type CategorySettingsRights = Pick<ListingSettingsEditRights, "categorySettings" | "shipping" | "policies" | "ebayCategory" | "shelfPick">
+  & { priceCheck?: ListingSettingsRight };
 
 /**
  * A field's rights: W12's right AND the field's own pick right, as the
@@ -862,6 +1273,21 @@ export function categoryFieldRights(rights: CategorySettingsRights, field: Categ
     productSettings: rights.categorySettings, shipping: rights.shipping, policies: rights.policies,
     ebayCategory: rights.ebayCategory, shelfPick: rights.shelfPick,
   }, field);
+}
+
+/**
+ * The price's rights (PR 10f, D3): W7's right alone, as the drawer's price
+ * editor (`productPriceRights`): a recipe and "Use store default" both need
+ * it, and nothing else (a price names no eBay value). Without W7's right at
+ * hand (`rights.priceCheck` left out) nothing can be chosen, with no reason
+ * of its own: the row then reads as before 10f.
+ */
+export function categoryPriceRights(rights: Pick<CategorySettingsRights, "priceCheck">): ProductFieldRights {
+  const right = rights.priceCheck;
+  if (right === undefined) return { canSet: false, canDefault: false, canNone: false, reason: null };
+  return right.editable
+    ? { canSet: true, canDefault: true, canNone: false, reason: null }
+    : { canSet: false, canDefault: false, canNone: false, reason: right.reason };
 }
 
 // ---------------------------------------------------------------------------
@@ -899,12 +1325,12 @@ export function categoryEditorOpen(
 
 /** "Load latest": the vendor's choices and ticks on what is saved now, and whether any of them is still a change. */
 export interface CategoryReload {
-  /** The vendor's choices on what is saved now, the clear set rebuilt from the new `ownValues`: send it to the draft first. */
+  /** The vendor's choices on what is saved now, the clear set rebuilt from the new `ownValues`, the price's check dropped: send it to the draft first. */
   edited: CategoryDraftValue;
   /** What is saved now, the draft's new base: rebase on it with `marked`. */
   latest: CategoryDraftValue;
-  /** The fields the vendor changed whose category value another window moved too (R:542, C20). */
-  marked: CategoryEditField[];
+  /** The fields the vendor changed whose category value another window moved too (R:542, C20); `price` among them (PR 10f). */
+  marked: Array<CategoryEditField | "price">;
   /** False when nothing of the vendor's is left to keep: the draft is discarded instead. */
   keeps: boolean;
 }
@@ -927,12 +1353,16 @@ export function rebaseCategoryDraft(
   mine: CategoryDraftValue,
   latest: Pick<ListingSettingsCategoryDetail, "categoryId" | "revisionId" | "settings" | "ownValues">,
 ): CategoryReload {
-  const edited = categoryDraftValue(latest, mine, mine.clear);
+  // The check was of the old revision and set: it goes; the price choice stays (PR 10f).
+  const edited = categoryDraftValue(latest, mine, mine.clear, { choice: mine.price.choice, check: null });
   const changed = categoryChangedFields(edited);
+  const priceMoved = !sameDraftValue(mine.ownPrice, edited.ownPrice);
+  const marked: Array<CategoryEditField | "price"> = changed.filter((field) => ownValueMoved(field, mine.own, edited.own));
+  if (priceMoved && categoryPriceChanged(mine) && categoryPriceChanged(edited)) marked.push("price");
   return {
     edited,
     latest: categoryDraftValue(latest),
-    marked: changed.filter((field) => ownValueMoved(field, mine.own, edited.own)),
+    marked,
     keeps: categoryHasChange(edited),
   };
 }
@@ -1026,6 +1456,44 @@ export function categoryDescriptionEditorResult(model: DescriptionEditorModel, s
   return { ok: true, picks };
 }
 
+/** The price editor's model (PR 10f): 10d's editor without "Clear exact prices too" (a category check releases nothing). */
+export type CategoryPriceEditorModel = ProductPriceEditorModel;
+export type CategoryPriceEditorState = ProductPriceEditorState;
+
+/**
+ * The Price row's editor (plan 9.2; 10d's `productPriceEditorModel`): where it
+ * opens (the draft's choice first, else the category's own recipe, else "Use
+ * store default" over the store price, or the suggestion while the store has
+ * none), and what can be chosen (W7's right, `categoryPriceRights`). The
+ * component words the default "Use store default" (D17).
+ */
+export function categoryPriceEditorModel(input: {
+  rights: Pick<ProductFieldRights, "canSet" | "canDefault" | "reason">;
+  draftChoice: FieldChoice<PricingRecipe>;
+  /** The category's own recipe, and the store's (`categoryOwnPrice`, `categoryStoreRecipe`). */
+  ownPrice: PricingRecipe | null;
+  storeRecipe: PricingRecipe | null;
+}): CategoryPriceEditorModel {
+  return productPriceEditorModel({
+    rights: input.rights,
+    change: { price: input.draftChoice, releaseExactPrices: false },
+    ownPrice: input.ownPrice,
+    storeRecipe: input.storeRecipe,
+  });
+}
+
+export type CategoryPriceEditorResult =
+  /** The choice to put in the draft (`categoryPriceAction`), then check. */
+  | { ok: true; choice: FieldChoice<PricingRecipe> }
+  /** A field the parsers refuse (W1's words), or a choice the rights don't allow (`errors` empty: the button is just off). */
+  | { ok: false; errors: Partial<Record<"percent" | "flat", string>> };
+
+/** [Check new prices] in the price editor: the recipe parsed with the integer parsers (D1), or "Use store default". Nothing is computed from it here. */
+export function categoryPriceEditorResult(model: Pick<CategoryPriceEditorModel, "canSet" | "canDefault">, state: CategoryPriceEditorState): CategoryPriceEditorResult {
+  const result = productPriceEditorResult(model, { ...state, releaseExactPrices: false });
+  return result.ok ? { ok: true, choice: result.change.price } : result;
+}
+
 // ---------------------------------------------------------------------------
 // The editor (plan 8.3, 8.4, 3.7)
 // ---------------------------------------------------------------------------
@@ -1045,12 +1513,17 @@ export interface CategoryEditorInput {
   setup: ListingSettingsReadState<PolicySetupFacts>;
   /** The step's shelves read, to name a picked shelf; null or absent while it can't be read. */
   shelves?: readonly DropshipEbayStoreCategoryOption[] | null;
-  /** The row whose editor is open; one at a time. */
-  openTarget: DrawerEditTarget | null;
+  /** The row whose editor is open; one at a time (the Price row's is `"price"`, PR 10f). */
+  openTarget: CategoryEditorTarget | null;
   /** The last refused save, with the fields it named (`WriteFailure.fields`); shown by its rows only while the draft is refused. */
   failure: Pick<WriteFailure, "message" | "fields"> | null;
   /** Another listing action is running, or a read for the footer is in flight. */
   busy: boolean;
+  /**
+   * A price check is out (PR 10f, plan 9.4): every [Change] and every "Also clear theirs" box waits for its answer,
+   * so the check lands on the draft it was made for (a pick or a tick meanwhile would need a new one). Absent: false.
+   */
+  checking?: boolean;
   /** "Saved" shows now (3 seconds after a confirmed save, R:538). */
   savedFlashVisible: boolean;
   compact: boolean;
@@ -1060,7 +1533,8 @@ export interface CategoryEditorInput {
 
 /** "Also clear theirs" under one field (plan 8.4). */
 export interface CategoryClearBox {
-  field: CategoryClearField;
+  /** A category setting; the price's box (PR 10f) shows under the Price row and rides on the price check. */
+  field: PriceChangeClearField;
   /** How many of the category's products hold their own value in the field. */
   count: number;
   /** "3 products in Sleeves have their own shipping policy." */
@@ -1082,16 +1556,47 @@ export interface CategoryEditorRow {
   clears: CategoryClearBox[];
 }
 
-/** The Price row, read-only until the category price check (10f, UX-m9). */
+/** The Price row (plan 9.2, 9.3; UX-m9 lifted in PR 10f): the category's price now, its change, its examples and its [Change]. */
 export interface CategoryPriceRow {
   label: string;
   /** "Retail price + 20%, round up to .99", or the no-store-price words. */
   value: string;
   /** "Set for Sleeves" or "Store default"; null when nothing gives a price (the value says so itself). */
   tag: string | null;
-  /** Why there is no [Change]. */
-  line: string;
+  /**
+   * Why there is no [Change]: the right's line, or, with no W7 right handed
+   * in (`rights.priceCheck` left out), the words from before 10f; null when
+   * [Change] shows or a banner says why.
+   */
+  line: string | null;
+  /** "Now: Pack of 100 $4.99 · Box of 5 $21.99": current prices (CC-C23), hidden while the price is changed; null with none. */
+  examples: string | null;
+  /** "→ Retail price + 20%, round up to .99 · Not saved" or "→ Use store default · Not saved"; null with no change. */
+  pending: string | null;
+  /**
+   * [Change price], named with its category ("Change price for Sleeves", plan 3.4; the name starts with the label, WCAG
+   * 2.5.3): hidden under D11 and without the right, off while the draft waits, a save is out or unconfirmed, or a check is out.
+   */
+  change: { label: string; ariaLabel: string; shown: boolean; disabled: boolean };
+  /** The editor's model when it opens (`categoryPriceEditorModel`). */
+  editor: CategoryPriceEditorModel;
+  /** The price editor is open (`openTarget === "price"`). */
+  open: boolean;
+  /** Another window changed the price too (R:542, after Load latest). */
+  marked: boolean;
+  /** The last refused save named the price. */
+  fieldError: string | null;
+  /**
+   * "Also clear theirs" for the price (plan 9.1, 9.6): shown only with a recipe set and products holding their own
+   * price (`clearAllowed`), since the clear rides on the price check (W7 carries the price among its clear fields,
+   * P25); never while [Change] is hidden.
+   */
+  clears: CategoryClearBox[];
 }
+
+/** The price editor's target in `openTarget` (PR 10f), beside the drawer's rows'. */
+export const CATEGORY_PRICE_TARGET = "price" as const;
+export type CategoryEditorTarget = DrawerEditTarget | typeof CATEGORY_PRICE_TARGET;
 
 export type CategoryEditorReadProblem = { kind: "not_found" | "too_large" | "rate_limited" | "failed"; text: string; retryLabel: string | null };
 
@@ -1115,6 +1620,10 @@ export interface CategoryEditorState {
    */
   own: CategoryOwnValues | null;
   price: CategoryPriceRow | null;
+  /** The price check the editor shows in place of its body (D20, PR 10f); null for the body. */
+  priceCheck: CategoryPriceCheckShown | null;
+  /** The draft holds a price change: the footer's Save runs the check (plan 9.2); the other changes ride along (D2). */
+  priceHoldsChange: boolean;
   footer: DrawerFooter;
   /** Esc keeps the editor open: a save is out or unconfirmed (3.4). */
   escapeKeepsOpen: boolean;
@@ -1231,14 +1740,57 @@ function editorReadProblem(error: unknown): CategoryEditorReadProblem {
   return { kind: "failed", text: LISTING_SETTINGS_CATEGORY_WORDS.readFailed, retryLabel: LISTING_SETTINGS_SAVE_WORDS.tryAgain };
 }
 
-/** The Price row (UX-m9): the category's own price, else the store default, read-only. */
-function priceRow(settings: ListingSettingsCategorySettings, name: string): CategoryPriceRow {
-  const price = settings.price;
+/** "→ Retail price + 20%, round up to .99 · Not saved" / "→ Use store default · Not saved" (D17); null with no change. */
+export function categoryPricePending(choice: FieldChoice<PricingRecipe>): string | null {
+  if (choice.mode === "leave") return null;
+  return pendingSettingWords(choice.mode === "default" ? LISTING_SETTINGS_CATEGORY_WORDS.useStoreDefault : recipeWords(choice.value));
+}
+
+/**
+ * The Price row (plan 9.2, 9.3): the category's own price, else the store
+ * default; its examples as current prices, hidden while the price is changed
+ * (CC-C23); its pending change; [Change price] under the same rules as the
+ * rows' [Change] (D11, W7's right, the draft waiting or locked); and the
+ * editor's model.
+ */
+function priceRow(input: {
+  view: Pick<ListingSettingsCategoryDetail, "settings" | "examples">;
+  name: string;
+  value: CategoryDraftValue | null;
+  ownPrice: PricingRecipe | null;
+  rights: ProductFieldRights;
+  gated: boolean;
+  waiting: boolean;
+  open: boolean;
+  marked: boolean;
+  fieldError: string | null;
+  /** W7's right was handed in at all (`rights.priceCheck`); without it the row reads as before 10f. */
+  rightKnown: boolean;
+  /** The price's "Also clear theirs" box, when it can show; built by the editor's state with the rows' rule. */
+  clears: CategoryClearBox[];
+}): CategoryPriceRow {
+  const price = input.view.settings.price;
+  const choice = input.value?.price.choice ?? LEAVE;
+  const shown = !input.gated && (input.rights.canSet || input.rights.canDefault);
+  let line: string | null = null;
+  if (!shown) {
+    if (!input.rightKnown) line = LISTING_SETTINGS_CATEGORY_WORDS.priceReadOnly;
+    else if (!input.gated && input.rights.reason !== null) line = rightReasonLine(input.rights.reason);
+  }
   return {
     label: DRAWER_WORDS.priceHead,
     value: price.value === null ? DRAWER_WORDS.noStorePrice : recipeWords(price.value),
-    tag: sourceTag(price.source, name),
-    line: LISTING_SETTINGS_CATEGORY_WORDS.priceReadOnly,
+    tag: sourceTag(price.source, input.name),
+    line,
+    examples: choice.mode === "leave" ? categoryExamplesWords(input.view.examples) : null,
+    pending: categoryPricePending(choice),
+    // The drawer's PRICE head words (10d), named as the rows' [Change] is: "Change price for Sleeves".
+    change: { label: LISTING_SETTINGS_PRICE_CHECK_WORDS.changePrice, ariaLabel: changeSettingLabel(DRAWER_WORDS.priceHead, input.name), shown, disabled: input.waiting },
+    editor: categoryPriceEditorModel({ rights: input.rights, draftChoice: choice, ownPrice: input.ownPrice, storeRecipe: categoryStoreRecipe(input.view.settings) }),
+    open: input.open,
+    marked: input.marked,
+    fieldError: input.fieldError,
+    clears: shown ? input.clears : [],
   };
 }
 
@@ -1271,11 +1823,16 @@ export function categoryEditorState(input: CategoryEditorInput): CategoryEditorS
   const locked = own !== null && isDraftLocked(own.draft);
   const holding = own !== null && (isDraftDirty(own.draft) || locked);
   const value = holding ? own.value : null;
+  // A check out (PR 10f): the rows, the boxes and the Price row wait, as they do for a save (the check answers this draft).
+  const waiting = own === null || locked || input.checking === true;
   // The facts the rows and the boxes read: the draft's while it holds a change or a save (D6), else the read's.
   const facts: CategoryDraftFacts | null = value ?? (view === null ? null : categoryDraftFacts(view));
   const failure = own?.draft.phase === "refused" ? input.failure : null;
   const shelves = input.shelves ?? null;
-  const editable = input.rights.categorySettings.editable;
+  // The draft holds a price change (PR 10f): Save is the price check, which needs W7's right and carries the rest (D2).
+  const priceHoldsChange = value !== null && categoryPriceChanged(value);
+  const priceRights = categoryPriceRights(input.rights);
+  const editable = priceHoldsChange ? priceRights.canSet : input.rights.categorySettings.editable;
   // D11, checked up front from the summary as the card does: the 409 stays the backstop for the race.
   const gated = olderRulesState(input.summary) === "present" && !locked;
 
@@ -1295,7 +1852,7 @@ export function categoryEditorState(input: CategoryEditorInput): CategoryEditorS
       canSet: rights.canSet,
       canDefault: rights.canDefault,
       canNone: rights.canNone,
-      change: { shown, disabled: own === null || locked },
+      change: { shown, disabled: waiting },
       picksDisabled: true,
       line,
       open: input.openTarget === target,
@@ -1323,7 +1880,7 @@ export function categoryEditorState(input: CategoryEditorInput): CategoryEditorS
         line: ownValuesLineWords(clearCandidates(facts, field).length, name, field),
         label: alsoClearLabelWords(productCount),
         ticked: value?.clear.includes(field) === true,
-        disabled: own === null || locked || !editable,
+        disabled: waiting || !editable,
       }));
     return {
       key,
@@ -1333,7 +1890,7 @@ export function categoryEditorState(input: CategoryEditorInput): CategoryEditorS
     };
   });
 
-  const namesRow = (failure?.fields ?? []).some((field) => FIELD_SET.has(field));
+  const namesRow = (failure?.fields ?? []).some((field) => FIELD_SET.has(field) || field === CATEGORY_PRICE_TARGET);
   const drawn = drawerFooter({
     draft: own?.draft ?? null,
     editable: editable && view !== null && !gated,
@@ -1343,7 +1900,9 @@ export function categoryEditorState(input: CategoryEditorInput): CategoryEditorS
     compact: input.compact,
     showRefusal: !namesRow,
     fieldEditorOpen: input.fieldEditorOpen,
-    saveLabel: DRAWER_WORDS.save,
+    // A price change is saved through the check (plan 9.2): Save becomes [Check new prices], on a phone too (10d's rule).
+    saveLabel: priceHoldsChange ? PRICE_DEFAULT_WORDS.checkNewPrices : DRAWER_WORDS.save,
+    ...(priceHoldsChange ? { compactSaveLabel: PRICE_DEFAULT_WORDS.checkNewPrices } : {}),
   });
   // Under D11 the footer says why Save is off, unless it has words of its own (a refusal, "Saved", a conflict's Load latest).
   const footer: DrawerFooter = gated && view !== null && drawn.primary.action === "save" && drawn.message === null
@@ -1360,7 +1919,30 @@ export function categoryEditorState(input: CategoryEditorInput): CategoryEditorS
     detail: view,
     rows,
     own: view === null ? null : facts?.own ?? null,
-    price: view === null ? null : priceRow(view.settings, name),
+    price: view === null || facts === null ? null : priceRow({
+      view,
+      name,
+      value,
+      ownPrice: facts.ownPrice,
+      rights: priceRights,
+      gated,
+      waiting,
+      open: input.openTarget === CATEGORY_PRICE_TARGET,
+      marked: own !== null && own.draft.marked.includes(CATEGORY_PRICE_TARGET),
+      fieldError: failure?.fields?.includes(CATEGORY_PRICE_TARGET) === true ? failure.message : null,
+      rightKnown: input.rights.priceCheck !== undefined,
+      // The price's box under the same rule as the rows' (8.4), which for the price needs a recipe set (`clearAllowed`, 9.6).
+      clears: !clearAllowed(facts, CATEGORY_PRICE_TARGET, value?.price.choice ?? LEAVE) ? [] : [{
+        field: CATEGORY_PRICE_TARGET,
+        count: clearCandidates(facts, CATEGORY_PRICE_TARGET).length,
+        line: ownValuesLineWords(clearCandidates(facts, CATEGORY_PRICE_TARGET).length, name, CATEGORY_PRICE_TARGET),
+        label: alsoClearLabelWords(productCount),
+        ticked: value?.clear.includes(CATEGORY_PRICE_TARGET) === true,
+        disabled: waiting || !editable,
+      }],
+    }),
+    priceCheck: categoryPriceCheckShown(input.draft, categoryId),
+    priceHoldsChange,
     footer,
     escapeKeepsOpen: locked,
     held: locked,

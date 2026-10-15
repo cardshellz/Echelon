@@ -4,11 +4,15 @@ import {
   bulkConflictWords,
   categoryProductsChangedWords,
   LISTING_SETTINGS_BULK_WORDS,
+  LISTING_SETTINGS_CATEGORY_PRICE_WORDS,
   LISTING_SETTINGS_CATEGORY_WORDS,
   LISTING_SETTINGS_EDIT_WORDS,
   LISTING_SETTINGS_PRICE_CHECK_WORDS,
+  LISTING_SETTINGS_SIZE_PRICES_WORDS,
   productNotFoundWords,
   releaseLimitWords,
+  sizePricesConflictWords,
+  sizePricesOutsideLimitWords,
   wouldBeLeftWithoutPriceWords,
 } from "./dropship-listing-settings-words";
 import { describeLeavePrompt } from "./dropship-unsaved-changes";
@@ -73,10 +77,12 @@ export const STORE_DEFAULTS_CARD_WORDS = Object.freeze({
  * under Shipping, the product drawer of one product, "Set for selected"
  * (`bulk`, many products at once; plan PR 10, D16), "Card Shellz updated
  * products" (`updatedProducts`, a "Got it" in flight; it holds no change,
- * like `shipFrom`; plan PR 10, 10.2, D16), or the category editor of one
- * Card Shellz category (`category:<id>`; plan PR 10, 8.2, D16).
+ * like `shipFrom`; plan PR 10, 10.2, D16), the category editor of one Card
+ * Shellz category (`category:<id>`; plan PR 10, 8.2, D16; its price check
+ * lives inside it too, 9.2), or "Give these sizes a price" (`sizePrices`,
+ * typed prices for many sizes; plan PR 10, 9.2, D16).
  */
-export type EditorId = StoreDefaultField | "shipFrom" | `product:${number}` | "bulk" | "updatedProducts" | `category:${number}`;
+export type EditorId = StoreDefaultField | "shipFrom" | `product:${number}` | "bulk" | "updatedProducts" | `category:${number}` | "sizePrices";
 
 /** "Set for selected"'s editor id: one sheet for the ticked products (plan PR 10, 6.2, D16). */
 export const BULK_EDITOR_ID = "bulk" satisfies EditorId;
@@ -89,6 +95,9 @@ export const BULK_EDITOR_ID = "bulk" satisfies EditorId;
  * "Got it" for the same shown category writes the same mark.
  */
 export const UPDATED_PRODUCTS_EDITOR_ID = "updatedProducts" satisfies EditorId;
+
+/** "Give these sizes a price"'s editor id (plan PR 10, 9.2, D16): one sheet, the typed prices of up to 200 sizes in one draft. */
+export const SIZE_PRICES_EDITOR_ID = "sizePrices" satisfies EditorId;
 
 /** The drawer's editor id for one product. Refuses an id that is not a positive whole number. */
 export function productEditorId(productId: number): EditorId {
@@ -202,6 +211,8 @@ export const LISTING_SETTINGS_KEY_PREFIXES = Object.freeze({
   categoryMoves: "ls-moves",
   // W12, one Card Shellz category's settings (never its price), with "Also clear theirs"; reused on Check again (plan PR 10, D5).
   categorySettings: "ls-cat",
+  // W8, "Give these sizes a price": up to 200 typed prices in one request; one key per intent, reused on Check again (plan PR 10, D5).
+  sizePrices: "ls-size-prices",
 } as const);
 
 /** The words every editor shares (R:535-545). */
@@ -512,9 +523,12 @@ function answersAttempt(draft: ListingSettingsDraft | null, key: string): draft 
  * and its apply (plan PR 10, 7.3; the check's failures take its words, the
  * apply is keyed), W13 "Got it" for products Card Shellz moved ("Card Shellz
  * updated products", plan PR 10, 10.4), W12 one Card Shellz category's
- * settings with "Also clear theirs" (the category editor, plan PR 10, 8.5).
+ * settings with "Also clear theirs" (the category editor, plan PR 10, 8.5),
+ * W8 typed prices for many sizes ("Give these sizes a price", plan PR 10, 9.5).
+ * W7's `category_price` kind takes the category's rows too (plan 9.4), told
+ * apart by `ClassifyWriteFailureOptions.priceCheckKind`.
  */
-export type ListingSettingsWriter = "W1" | "W2" | "W3" | "W4" | "W5" | "W6" | "W7" | "W9" | "W10" | "W12" | "W13";
+export type ListingSettingsWriter = "W1" | "W2" | "W3" | "W4" | "W5" | "W6" | "W7" | "W8" | "W9" | "W10" | "W12" | "W13";
 
 export interface WriteFailure {
   phase: WriteFailurePhase;
@@ -536,8 +550,15 @@ export interface ClassifyWriteFailureOptions {
   pickedEbayCategoryId?: string | null;
   /** W5: the store's name, for "This product isn't chosen for <store>." */
   storeName?: string;
-  /** W12: the category's name, for "The products in <category> changed." (plan 8.6). */
+  /** W12, and W7's category kind: the category's name, for "The products in <category> changed." (plan 8.6, 9.4). */
   categoryName?: string;
+  /**
+   * W7: which check the apply or review was for (plan 9.4). The category kind
+   * calls the category's and the clear set's version conflicts a conflict and
+   * words the category's own refusals; the products kind can't be answered
+   * with them (default).
+   */
+  priceCheckKind?: "product_prices" | "category_price";
 }
 
 interface WriterCodes {
@@ -752,8 +773,8 @@ function refusesAnOlderRule(error: DropshipApiError, pickedCategoryId: string | 
 // Failed saves of the PR 9 writers (plan PR 10, 3.3, 4.7, D7, D8)
 // ---------------------------------------------------------------------------
 
-type Pr9Writer = "W5" | "W6" | "W7" | "W12" | "W13";
-const PR9_WRITERS: ReadonlySet<ListingSettingsWriter> = new Set<Pr9Writer>(["W5", "W6", "W7", "W12", "W13"]);
+type Pr9Writer = "W5" | "W6" | "W7" | "W8" | "W12" | "W13";
+const PR9_WRITERS: ReadonlySet<ListingSettingsWriter> = new Set<Pr9Writer>(["W5", "W6", "W7", "W8", "W12", "W13"]);
 
 function isPr9Writer(writer: ListingSettingsWriter): writer is Pr9Writer {
   return PR9_WRITERS.has(writer);
@@ -801,7 +822,8 @@ const PR9_WRITER_CODES: Readonly<Record<Pr9Writer, Pr9WriterCodes>> = {
   W7: {
     // A `product_prices` check carries no revision (D6): nothing of its own conflicts. A moved price is a refused
     // apply the owner checks again (`decideAfterApplyRefusal`, dropship-listing-settings-price-check.ts), never a
-    // "Load latest"; the drawer's own guard runs before each check (D6a).
+    // "Load latest"; the drawer's own guard runs before each check (D6a). The `category_price` kind's rows are
+    // `W7_CATEGORY_CODES` (plan 9.4), chosen by `ClassifyWriteFailureOptions.priceCheckKind`.
     conflict: NONE,
     cannotHappen: new Set([
       // The category kind's refusals (PR 10f): a `product_prices` check names no category and no older-rules check
@@ -810,6 +832,28 @@ const PR9_WRITER_CODES: Readonly<Record<Pr9Writer, Pr9WriterCodes>> = {
       "DROPSHIP_LISTING_SETTINGS_OLDER_RULES_PRESENT", "DROPSHIP_LISTING_SETTINGS_CATEGORY_NOT_FOUND",
       // W7 types no price, so the store's rules can't be "not configured" for it (plan P14).
       "DROPSHIP_PRICING_RULES_NOT_CONFIGURED",
+    ]),
+  },
+  W8: {
+    // W9's compare-and-set per size, gathered: one stale size refuses all, with `conflicts` (at most 100) and
+    // `conflictCount` (`S/application/dropship-listing-size-prices-service.ts` versionConflicts; plan 9.5). A size no
+    // longer chosen (404, naming it) is a conflict too, not a refusal: the same row would be refused under every key,
+    // so the sheet offers Load latest, whose pages read again no longer list the size and drop it (W6's product-gone
+    // rule; CLAUDE.md §6: never retry a permanent error).
+    conflict: new Set(["DROPSHIP_LISTING_PRICE_VERSION_CONFLICT", "DROPSHIP_LISTING_PRICE_NOT_AVAILABLE"]),
+    cannotHappen: new Set([
+      // Every W8 row is a typed price (`pricingMode: "fixed"`): nothing is released, so no size can lose its price, the
+      // store's rules are never asked for (`S/application/dropship-listing-price-service.ts` saveListingPriceInTransaction:
+      // RULES_NOT_CONFIGURED is thrown for `pricingMode: "rules"` only), and no check is reviewed or applied.
+      "DROPSHIP_LISTING_PRICE_WOULD_BE_LOST", "DROPSHIP_PRICING_RULES_NOT_CONFIGURED", "DROPSHIP_LISTING_PRICE_RELEASE_LIMIT",
+      "DROPSHIP_LISTING_PRICES_MOVED", "DROPSHIP_PRICING_REVIEW_NOT_FOUND",
+      // W8 names no product, no category and no older-rules check refuses it; it carries no text.
+      "DROPSHIP_PRODUCT_LISTING_SETTINGS_VERSION_CONFLICT", "DROPSHIP_CATEGORY_LISTING_SETTINGS_VERSION_CONFLICT",
+      "DROPSHIP_LISTING_SETTINGS_OLDER_RULES_PRESENT", "DROPSHIP_LISTING_SETTINGS_CATEGORY_NOT_FOUND",
+      "DROPSHIP_LISTING_SETTINGS_PRODUCT_NOT_FOUND", "DROPSHIP_LISTING_SETTINGS_BULK_TOO_LARGE",
+      // W8 asks eBay nothing (`I/dropship-listing-setting-writes.factory.ts`): no eBay value can be refused, no sign-in asked.
+      "DROPSHIP_LISTING_SETTINGS_EBAY_SIGN_IN_REQUIRED", "DROPSHIP_EBAY_LISTING_SETUP_SELECTION_INVALID",
+      "DROPSHIP_EBAY_FULFILLMENT_POLICY_INCOMPATIBLE", "DROPSHIP_EBAY_CATEGORY_RULE_INVALID", "DROPSHIP_EBAY_STORE_CATEGORY_INVALID",
     ]),
   },
   W12: {
@@ -844,6 +888,20 @@ const PR9_WRITER_CODES: Readonly<Record<Pr9Writer, Pr9WriterCodes>> = {
       "DROPSHIP_EBAY_FULFILLMENT_POLICY_INCOMPATIBLE", "DROPSHIP_EBAY_CATEGORY_RULE_INVALID", "DROPSHIP_EBAY_STORE_CATEGORY_INVALID",
     ]),
   },
+};
+
+/**
+ * W7's rows for the `category_price` kind (plan 9.4; `S/application/dropship-listing-price-changes-service.ts`
+ * review and apply): the category's compare-and-set and the "Also clear theirs" set, both answered before anything is
+ * written, are a conflict (the editor's Load latest re-reads the category); the older-rules check (D16 again at
+ * apply, P21), a category no chosen product is in, and the text budget are refusals in the category's words.
+ */
+const W7_CATEGORY_CODES: Pr9WriterCodes = {
+  conflict: new Set(["DROPSHIP_CATEGORY_LISTING_SETTINGS_VERSION_CONFLICT", "DROPSHIP_PRODUCT_LISTING_SETTINGS_VERSION_CONFLICT"]),
+  cannotHappen: new Set([
+    // A category check sends no product by path and types no price (P14).
+    "DROPSHIP_LISTING_SETTINGS_PRODUCT_NOT_FOUND", "DROPSHIP_PRICING_RULES_NOT_CONFIGURED",
+  ]),
 };
 
 const HTTP_UNAUTHORIZED = 401;
@@ -902,6 +960,9 @@ const STORE_TEXT_LIMIT = "store_text_limit";
 const PRICE_RELEASE_LIMIT_CODE = "DROPSHIP_LISTING_PRICE_RELEASE_LIMIT";
 const WOULD_BE_LOST_CODE = "DROPSHIP_LISTING_PRICE_WOULD_BE_LOST";
 const PRICING_REVIEW_NOT_FOUND_CODE = "DROPSHIP_PRICING_REVIEW_NOT_FOUND";
+/** W8's own refusals (plan 9.5; `S/application/dropship-listing-size-prices-service.ts`). */
+const PRICE_OUTSIDE_LIMIT_CODE = "DROPSHIP_LISTING_PRICE_OUTSIDE_LIMIT";
+const PRICE_NOT_AVAILABLE_CODE = "DROPSHIP_LISTING_PRICE_NOT_AVAILABLE";
 
 /** A whole number the answer's context carries under `key`, else null. */
 function contextCount(error: DropshipApiError, key: string): number | null {
@@ -941,7 +1002,9 @@ function classifyPr9WriteFailure(writer: Pr9Writer, error: unknown, options: Cla
     return { phase: "uncertain", message: LISTING_SETTINGS_SAVE_WORDS.uncertain, code: null, status: null, fields: [] };
   }
   const { status, code } = error;
-  const codes = PR9_WRITER_CODES[writer];
+  // W7's category kind takes the category's rows (plan 9.4); every other call is its writer's own.
+  const categoryCheck = writer === "W7" && options.priceCheckKind === "category_price";
+  const codes = categoryCheck ? W7_CATEGORY_CODES : PR9_WRITER_CODES[writer];
   const failure = (phase: WriteFailurePhase, message: string, also: readonly string[] = []): WriteFailure =>
     ({ phase, message, code, status, fields: namedFields(error, also) });
 
@@ -972,8 +1035,15 @@ function classifyPr9WriteFailure(writer: Pr9Writer, error: unknown, options: Cla
   if (code !== null && codes.conflict.has(code)) {
     // W6: "3 of the selected products changed in another window." (plan 6.5), as the server counts them.
     const count = writer === "W6" ? conflictCountOf(error) : null;
-    // W12: the "Also clear theirs" set moved (plan 8.6); the category's own conflict keeps the shared words.
-    if (writer === "W12" && code === PRODUCT_VERSION_CONFLICT_CODE) return failure("conflict", categoryProductsChangedWords(options.categoryName ?? ""));
+    // W12, and W7's category kind: the "Also clear theirs" set moved (plan 8.6, 9.4); the category's own conflict keeps the shared words.
+    if ((writer === "W12" || categoryCheck) && code === PRODUCT_VERSION_CONFLICT_CODE) return failure("conflict", categoryProductsChangedWords(options.categoryName ?? ""));
+    // W8: "3 sizes' prices changed in another window." (plan 9.5), counted by the server (`conflictCount`), never by its capped list;
+    // a size no longer chosen (404, the wrapper's refusal naming it) in its own words, with the same Load latest.
+    if (writer === "W8") {
+      if (code === PRICE_NOT_AVAILABLE_CODE) return failure("conflict", LISTING_SETTINGS_SIZE_PRICES_WORDS.notAvailable);
+      const sizes = conflictCountOf(error);
+      return failure("conflict", sizes === null ? LISTING_SETTINGS_SAVE_WORDS.conflict : sizePricesConflictWords(sizes));
+    }
     return failure("conflict", count === null ? LISTING_SETTINGS_SAVE_WORDS.conflict : bulkConflictWords(count));
   }
   if (code === IDEMPOTENCY_CONFLICT_CODE) return failure("refused", LISTING_SETTINGS_SAVE_WORDS.keyReused);
@@ -998,17 +1068,28 @@ function classifyPr9WriteFailure(writer: Pr9Writer, error: unknown, options: Cla
       return failure("refused", contextReason(error) === "too_long" ? words.shelfTooLong : LISTING_SETTINGS_SAVE_WORDS.shelfGone,
         ["storeShelf"]);
     case TOO_LARGE_CODE:
-      // W7 with no reason: more than 10,000 sizes (P35, plan 7.5); the store text cap keeps its reason and words.
-      if (writer === "W7" && contextReason(error) !== STORE_TEXT_LIMIT) return failure("refused", LISTING_SETTINGS_PRICE_CHECK_WORDS.tooManySizes);
+      // W7 with no reason: more than 10,000 sizes (P35, plan 7.5); the store text cap keeps its reason and words. The
+      // category kind names step 1 (plan 9.4), as its `tooHeavy` does: the category's products are fixed there.
+      if (writer === "W7" && contextReason(error) !== STORE_TEXT_LIMIT) {
+        return failure("refused", categoryCheck ? LISTING_SETTINGS_CATEGORY_PRICE_WORDS.tooManySizes : LISTING_SETTINGS_PRICE_CHECK_WORDS.tooManySizes);
+      }
       return failure("refused", contextReason(error) === STORE_TEXT_LIMIT ? words.storeTextLimit : error.message);
     case BULK_TOO_LARGE_CODE:
       // W6's text budget (plan 6.5; `S/application/dropship-listing-setting-write-support.ts` listingSettingBulkTooLarge), and
       // W12's over the cleared products' stored text (plan 8.6: the 6.5 words).
       if (writer === "W6" || writer === "W12") return failure("refused", LISTING_SETTINGS_BULK_WORDS.tooMuchText);
+      // W7's category kind (plan 9.4): the category's products' text and the rows together; "fewer products" names step 1.
+      if (categoryCheck) return failure("refused", LISTING_SETTINGS_CATEGORY_PRICE_WORDS.tooHeavy);
       // W7 (plan 7.5, CC-C10): the stored text, or the text and the rows together (`reason: price_check_rows`); a
       // check sends no text, so never "shorten your text". The reason is read, never `textBytes` alone.
       if (writer === "W7") return failure("refused", LISTING_SETTINGS_PRICE_CHECK_WORDS.tooHeavy);
       break;
+    case PRICE_OUTSIDE_LIMIT_CODE: {
+      // W8 (plan 9.5): counted from `sizeCount`, never the capped `sizes` list; without a count the server's words stand.
+      if (writer !== "W8") break;
+      const sizeCount = contextCount(error, "sizeCount");
+      return failure("refused", sizeCount !== null && sizeCount > 0 ? sizePricesOutsideLimitWords(sizeCount) : error.message);
+    }
     case PRICE_RELEASE_LIMIT_CODE: {
       // W7 (plan 7.5, CC-C9): the counts come from the answer; without them the server's own words stand.
       if (writer !== "W7") break;
@@ -1034,13 +1115,15 @@ function classifyPr9WriteFailure(writer: Pr9Writer, error: unknown, options: Cla
       // Load latest, whose new ids read no longer lists the product (CLAUDE.md §6: never retry a permanent error).
       return failure("conflict", LISTING_SETTINGS_BULK_WORDS.productGone);
     case OLDER_RULES_PRESENT_CODE:
-      // W12 (plan 8.6, D11): the store still holds older group rules, so no category save goes through until PR 11. A
-      // final refusal (the same change is refused under every key); the card reads the summary again and takes [Change] away.
-      if (writer === "W12") return failure("refused", LISTING_SETTINGS_CATEGORY_WORDS.olderRules);
+      // W12 (plan 8.6, D11), and W7's category kind (plan 9.4, P21): the store still holds older group rules, so no
+      // category save goes through until PR 11. A final refusal (the same change is refused under every key); the
+      // card reads the summary again and takes [Change] away.
+      if (writer === "W12" || categoryCheck) return failure("refused", LISTING_SETTINGS_CATEGORY_WORDS.olderRules);
       break;
     case CATEGORY_NOT_FOUND_CODE:
-      // W12 (plan 8.6): no chosen product is in the category any more. Refused for good: the editor closes and the card reads again.
-      if (writer === "W12") return failure("refused", LISTING_SETTINGS_CATEGORY_WORDS.categoryNotFound);
+      // W12 (plan 8.6), and W7's category kind (plan 9.4): no chosen product is in the category any more. Refused for
+      // good: the editor closes and the card reads again.
+      if (writer === "W12" || categoryCheck) return failure("refused", LISTING_SETTINGS_CATEGORY_WORDS.categoryNotFound);
       break;
     default:
       break;

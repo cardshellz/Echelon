@@ -1268,3 +1268,146 @@ export function alsoClearLabelWords(productCount: number): string {
 export function categoryProductsChangedWords(name: string): string {
   return `The products in ${categoryName(name)} changed. Load the latest and save again. A Card Shellz change can take a minute to show.`;
 }
+
+// ---------------------------------------------------------------------------
+// The category price check (W7 `category_price`) and "Give these sizes a price" (W8) (PR 10f, plan 9.3, 9.5, 12.2)
+// ---------------------------------------------------------------------------
+
+/**
+ * Words of the category price in the category editor and its check (PR 10f,
+ * plan 9.3). Every one is a proposal (plan 12.2, or "beyond 12.2" where
+ * marked), kept here so a later PR changes it in one place. The check's own
+ * words are W1's and 10d's (`CHECK_NEW_PRICES_WORDS`, `LISTING_SETTINGS_PRICE_CHECK_WORDS`).
+ * None names a code or an id.
+ */
+export const LISTING_SETTINGS_CATEGORY_PRICE_WORDS = Object.freeze({
+  // Interim (PR 10 PROPOSAL): the lead-in to the category's example prices, which are current prices (CC-C23).
+  now: "Now:",
+  // Interim (PR 10 PROPOSAL, beyond 12.2): the lead-in to the other settings a category price check saves with it (UX-m9).
+  alsoSaves: "Also saves",
+  // Interim (PR 10 PROPOSAL, beyond 12.2): 422 BULK_TOO_LARGE on a category's price check or its apply (9.4): the category's
+  // products' stored text and the check's rows together pass the budget; "choose fewer products" names step 1, not a price.
+  tooHeavy: "This category's price check is too big to save at once. Shorten text on its products, or choose fewer of them in step 1.",
+  // Interim (PR 10 PROPOSAL, beyond 12.2): 422 TOO_LARGE with no reason on a category's price check (P35; 9.4): the category's
+  // products are fixed by step 1, so "choose fewer products" names step 1, as `tooHeavy` does.
+  tooManySizes: "This category's price check covers more than 10,000 sizes. Choose fewer of its products in step 1.",
+} as const);
+
+/**
+ * "Now: Pack of 100 $4.99 · Box of 5 $21.99": the category's example prices as
+ * they are now (the detail's `examples`, CC-C23), each size with its price or
+ * "No price"; null with no example. Interim (PR 10 PROPOSAL).
+ */
+export function categoryExamplesWords(examples: ReadonlyArray<{ sizeName: string; priceCents: number | null }>): string | null {
+  if (examples.length === 0) return null;
+  const parts = examples.map((example) => `${example.sizeName.trim() || "A size"} ${example.priceCents === null ? "no price" : displayListingPrice(example.priceCents)}`);
+  return `${LISTING_SETTINGS_CATEGORY_PRICE_WORDS.now} ${parts.join(" · ")}`;
+}
+
+/**
+ * The line over a category price check for what else the check saves (plan
+ * 9.2, UX-m9): "Also saves: shipping policy, store shelf." for the editor's
+ * other changed settings (in the stored shape's order given), and "Clears 3
+ * products' own shipping policy." per ticked "Also clear theirs" (the count
+ * from the clear set shown). Empty with neither. Interim (PR 10 PROPOSAL).
+ */
+export function categoryCheckAlsoWords(input: {
+  fields: readonly CategoryListingSettingField[];
+  clears: ReadonlyArray<{ field: CategoryListingSettingField; count: number }>;
+}): string[] {
+  const lines: string[] = [];
+  if (input.fields.length > 0) {
+    lines.push(`${LISTING_SETTINGS_CATEGORY_PRICE_WORDS.alsoSaves}: ${input.fields.map((field) => CATEGORY_SETTING_WORDS[field]).join(", ")}.`);
+  }
+  for (const clear of input.clears) {
+    if (clear.count <= 0) continue;
+    const setting = CATEGORY_SETTING_WORDS[clear.field];
+    lines.push(clear.count === 1 ? `Clears 1 product's own ${setting}.` : `Clears ${TEXT_NUMBER.format(clear.count)} products' own ${setting}.`);
+  }
+  return lines;
+}
+
+/**
+ * Words of "Give these sizes a price" (W8, plan 9.3, 9.5). The title is the
+ * record's (REC:862, REC:971); "Enter a price like 14.99." and the limit words
+ * are the drawer's (`DRAWER_WORDS`); every other one is a proposal (plan 12.2,
+ * or "beyond 12.2" where marked), kept here so a later PR changes it in one
+ * place. None names a code or an id.
+ */
+export const LISTING_SETTINGS_SIZE_PRICES_WORDS = Object.freeze({
+  // The record's name for the sheet (REC:862, REC:971), the Prices tab's entry button, and the place the step's bar names.
+  title: "Give these sizes a price",
+  // Interim (PR 10 PROPOSAL): the sheet's intro (9.3).
+  intro: "These sizes can't be listed until they have a price.",
+  // Interim (PR 10 PROPOSAL, beyond 12.2): the rows' column names (9.3), read out with each box.
+  product: "Product",
+  size: "Size",
+  yourCost: "Your cost",
+  exactPrice: "Exact price",
+  // Interim (PR 10 PROPOSAL): the footer's Save (9.3).
+  save: "Save prices",
+  // Interim (PR 10 PROPOSAL): more than 200 typed prices; one Save is one request of at most 200 (D12).
+  tooMany: "Save up to 200 prices at a time.",
+  // Interim (PR 10 PROPOSAL): no size needs a price (9.3); the entry button hides.
+  empty: "Every size has a price.",
+  // Interim (PR 10 PROPOSAL, beyond 12.2): while the sheet's pages read (3.7).
+  loading: "Checking which sizes need a price…",
+  // Interim (PR 10 PROPOSAL, beyond 12.2): the sheet's read failed (3.7); [Try again] reads it again.
+  readFailed: "Couldn't check which sizes need a price. Try again.",
+  // Interim (PR 10 PROPOSAL): the one list's next page, on every width (9.3).
+  loadMore: "Load more",
+  // W1's note for a Card Shellz price limit (`CHECK_NEW_PRICES_WORDS.outsideLimit`; 9.5): a row 422 PRICE_OUTSIDE_LIMIT named.
+  outsideLimit: "Outside a Card Shellz price limit",
+  // The server's own closing words for 422 PRICE_OUTSIDE_LIMIT (`S/application/dropship-listing-size-prices-service.ts` outsideLimits; 9.5).
+  enterAllowed: "Enter prices Card Shellz allows.",
+  // Interim (PR 10 PROPOSAL): 404 PRICE_NOT_AVAILABLE, a size no longer chosen (9.5).
+  notAvailable: "This size isn't chosen any more. Load the list again.",
+  // Interim (PR 10 PROPOSAL, beyond 12.2): the attention strip's button for a can't-be-priced line with no product (UX-M2).
+  fix: "Fix",
+} as const);
+
+/** "● Not saved · 12 prices" (a phone: "● Not saved · 12"): the sheet's footer count (9.3). Interim (PR 10 PROPOSAL). */
+export function sizePricesNotSavedWords(count: number, compact: boolean): string {
+  const number = TEXT_NUMBER.format(count);
+  if (compact) return `● Not saved · ${number}`;
+  return `● Not saved · ${number} ${count === 1 ? "price" : "prices"}`;
+}
+
+/** "2 sizes left this list and weren't saved.": typed sizes the pages read again no longer list (9.5). Interim (PR 10 PROPOSAL). */
+export function sizePricesLeftListWords(count: number): string {
+  return count === 1
+    ? "1 size left this list and wasn't saved."
+    : `${TEXT_NUMBER.format(count)} sizes left this list and weren't saved.`;
+}
+
+/**
+ * W8's version conflict (9.5): "3 sizes' prices changed in another window.",
+ * counted by the server (`conflictCount`), never by its capped list. Interim (PR 10 PROPOSAL).
+ */
+export function sizePricesConflictWords(conflictCount: number): string {
+  return conflictCount === 1
+    ? "1 size's price changed in another window."
+    : `${TEXT_NUMBER.format(conflictCount)} sizes' prices changed in another window.`;
+}
+
+/**
+ * 422 PRICE_OUTSIDE_LIMIT (9.5), counted from `sizeCount`, in the server's own
+ * form (`S/application/dropship-listing-size-prices-service.ts` outsideLimits):
+ * "3 sizes' prices would be outside what Card Shellz allows. Enter prices Card Shellz allows."
+ */
+export function sizePricesOutsideLimitWords(sizeCount: number): string {
+  const sizes = sizeCount === 1 ? "1 size's price" : `${TEXT_NUMBER.format(sizeCount)} sizes' prices`;
+  return `${sizes} would be outside what Card Shellz allows. ${LISTING_SETTINGS_SIZE_PRICES_WORDS.enterAllowed}`;
+}
+
+/** "Your cost $2.10" under a size in the sheet (9.3); null when the cost isn't known. Interim (PR 10 PROPOSAL). */
+export function sizeCostWords(costCents: number | null): string | null {
+  return costCents === null ? null : `${LISTING_SETTINGS_SIZE_PRICES_WORDS.yourCost} ${displayListingPrice(costCents)}`;
+}
+
+/** A size's Exact price box, read out with its product and size (plan 3.4): "Exact price for Penny Sleeves, Pack of 100". Interim (PR 10 PROPOSAL). */
+export function sizePriceBoxLabel(productName: string, sizeName: string): string {
+  const product = productName.trim() || UNNAMED_PRODUCT_WORDS;
+  const size = sizeName.trim();
+  return size ? `${LISTING_SETTINGS_SIZE_PRICES_WORDS.exactPrice} for ${product}, ${size}` : `${LISTING_SETTINGS_SIZE_PRICES_WORDS.exactPrice} for ${product}`;
+}

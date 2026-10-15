@@ -8,8 +8,11 @@ import {
   type PriceChangeReviewResponse,
   type ReviewPriceChangesInput,
 } from "@shared/dropship/listing-setting-writes";
+import type { ListingSettingsCategoryDetail } from "@shared/dropship/listing-settings";
 import { DropshipApiError, fetchJson, postJson, queryErrorMessage } from "./dropship-ops-surface";
-import { listingSettingsProductOwnQueryOptions, listingSettingsQueryKey } from "./dropship-listing-settings";
+import { listingSettingsCategoryQueryOptions, listingSettingsProductOwnQueryOptions, listingSettingsQueryKey } from "./dropship-listing-settings";
+import { categoryPriceBaseMoved, type CategoryPriceCheckBase, type CategoryPriceReviewInput } from "./dropship-listing-settings-categories";
+import { categoryFailureFollowUp, type CategoryFailureFollowUp } from "./dropship-listing-settings-category-requests";
 import {
   classifyWriteFailure,
   failureAfterUnconfirmed,
@@ -50,12 +53,14 @@ import { priceChangeReviewIdSchema } from "@shared/dropship/listing-setting-writ
 
 /**
  * The price check for one or many products and its apply (W7
- * `product_prices`; Listing settings PR 10d, plan 7.3, 7.5, 7.6): the three
+ * `product_prices`; Listing settings PR 10d, plan 7.3, 7.5, 7.6), and for one
+ * category's price (W7 `category_price`; PR 10f, plan 9.2, 9.4): the three
  * requests, the check run (the review), a page of it, the apply run from
  * Save to settled (as `runPricingApply` runs W1's and `runProductSettingsSave`
- * W5's), the re-reads after it, and the drawer's guard (D6a).
+ * W5's), the re-reads after it, the drawer's guard (D6a) and the category
+ * editor's (plan 9.4: the category's revision and clear set read again).
  *
- * Rules this module keeps (plan D1, D5, D6a, D7, D9, 7.5):
+ * Rules this module keeps (plan D1, D5, D6a, D7, D9, 7.5, 9.4):
  * - The client never computes a price (D1): a check is the server's rows; the
  *   recipe sent is the one the editor parsed with the integer parsers.
  * - The check is unkeyed; one review has one apply key (`ls-price-check:…`),
@@ -71,6 +76,12 @@ import { priceChangeReviewIdSchema } from "@shared/dropship/listing-setting-writ
  *   refusal is shown, never looped (7.5, CC-C11).
  * - An apply's answer is checked, never shown or cached: the views are read
  *   again instead (D9). A Check again answered "not now" keeps its doubt (D7b).
+ * - A category check is sent only while the category's revision and the
+ *   "Also clear theirs" set are the ones the editor opened on (plan 9.4): the
+ *   detail is read again before every check, and again after a refused
+ *   apply before the automatic re-check; a moved one is the editor's
+ *   conflict (Load latest), and nothing is sent. The review's and the
+ *   apply's own version conflicts settle the same way.
  *
  * The network calls and the query client are passed in, so every step can be
  * run in a test.
@@ -165,6 +176,36 @@ export async function refreshAfterPriceChangeApply(queryClient: PriceCheckQueryC
   ]);
 }
 
+/**
+ * The listing settings reads a category's price apply changes (plan 9.2, D9):
+ * the categories list, the Products and Prices lists, the summary, and every
+ * product's detail and own row (the category's products' prices moved, and
+ * "Also clear theirs" may have cleared their own values).
+ */
+const READS_AFTER_CATEGORY_APPLY = ["categories", "products", "prices", "summary", "product", "product-own"] as const;
+
+/**
+ * After a confirmed category price apply (D9, plan 9.2): the reads above are
+ * marked stale and the shown ones read now (prefixes), the category's detail
+ * is read fresh (its revision and clear set moved; the editor's next change
+ * starts from it, D6), and so is every size price read of the store (W1's
+ * rule). Reads in flight are cancelled first. Never taken from the apply's
+ * answer. Throws when a read fails.
+ */
+export async function refreshAfterCategoryPriceApply(queryClient: PriceCheckQueryClient, storeConnectionId: number, categoryId: number): Promise<void> {
+  const keys = READS_AFTER_CATEGORY_APPLY.map((read) => [...listingSettingsQueryKey(storeConnectionId), read] as const);
+  const detail = listingSettingsCategoryQueryOptions(storeConnectionId, categoryId);
+  await Promise.all([
+    ...keys.map((queryKey) => queryClient.cancelQueries({ queryKey })),
+    queryClient.cancelQueries({ queryKey: detail.queryKey, exact: true }),
+  ]);
+  await Promise.all([
+    ...keys.map((queryKey) => queryClient.invalidateQueries({ queryKey }, { throwOnError: true })),
+    queryClient.invalidateQueries({ predicate: isStoreSizePriceQuery(storeConnectionId) }, { throwOnError: true }),
+    queryClient.fetchQuery({ queryKey: detail.queryKey, queryFn: detail.queryFn, staleTime: 0, retry: false }),
+  ]);
+}
+
 // ---------------------------------------------------------------------------
 // The check (POST …/review; plan 7.5)
 // ---------------------------------------------------------------------------
@@ -174,26 +215,39 @@ export async function refreshAfterPriceChangeApply(queryClient: PriceCheckQueryC
  * "couldn't check" (never "we couldn't confirm your save"):
  * - `blocked`: a block a banner explains;
  * - `failed`: anything else, with its words (W7's refusals read by code and
- *   reason: more than 10,000 sizes, too many releases, too heavy, busy…).
+ *   reason: more than 10,000 sizes, too many releases, too heavy, busy…). For
+ *   the category kind, `followUp` names what the editor does beside showing
+ *   the words (plan 9.4, as W12's refusals do, 8.6): `reread_card` for older
+ *   rules (the card takes [Change] away, D11), `close` for a category no
+ *   chosen product is in any more. Absent otherwise.
  */
 export type PriceChangeReviewOutcome =
   | { kind: "ok"; review: PriceChangeReviewResponse }
   | { kind: "blocked"; error: unknown }
-  | { kind: "failed"; message: string };
+  | { kind: "failed"; message: string; followUp?: CategoryFailureFollowUp }
+  /** The category kind only (plan 9.4): the category or its clear set moved since the editor opened; the editor's Load latest, with these words. */
+  | { kind: "conflict"; message: string };
 
 export async function requestPriceChangeReview(
   send: () => Promise<unknown>,
   kind: PriceChangeReviewKind = "product_prices",
+  options: { categoryName?: string } = {},
 ): Promise<PriceChangeReviewOutcome> {
   let answer: unknown;
   try {
     answer = await send();
   } catch (error) {
-    const failure = classifyWriteFailure("W7", error);
+    const failure = classifyWriteFailure("W7", error, { priceCheckKind: kind, categoryName: options.categoryName });
     switch (failure.phase) {
       case "blocked":
         return { kind: "blocked", error };
-      case "refused":
+      case "conflict":
+        return { kind: "conflict", message: failure.message };
+      case "refused": {
+        // The category kind's refusals the editor must act on (plan 9.4): older rules, the category gone.
+        const followUp = kind === "category_price" ? categoryFailureFollowUp(failure) : null;
+        return followUp === null ? { kind: "failed", message: failure.message } : { kind: "failed", message: failure.message, followUp };
+      }
       case "rate_limited":
       case "unreachable":
       case "reload_required":
@@ -217,7 +271,9 @@ export interface PriceCheckGuard {
   drafts: ProductSettingsSaveDrafts;
 }
 
-export interface PriceChangeCheckRun {
+/** The `product_prices` check: the drawer's one product, or "Set for selected"'s products (plan 7.3). */
+export interface ProductPricesCheckRun {
+  kind?: "product_prices";
   /** The drawer's one product, or the sheet's products from its ids read (D6). */
   productIds: readonly number[];
   /** What to check: the recipe or "Use default", and "Clear exact prices too". */
@@ -229,22 +285,55 @@ export interface PriceChangeCheckRun {
   guard?: PriceCheckGuard;
 }
 
+/** The category editor's guard (plan 9.4): the revision and clear set the check was made against, and the detail read again. */
+export interface CategoryPriceCheckGuard {
+  base: CategoryPriceCheckBase;
+  /** Reads the category's detail again (`rereadCategoryDetail`). */
+  reread: () => Promise<Pick<ListingSettingsCategoryDetail, "revisionId" | "ownValues">>;
+}
+
+/** The `category_price` check: one category's price with the editor's other changes and its clear set (plan 9.2, 9.4). */
+export interface CategoryPriceCheckRun {
+  kind: "category_price";
+  /** The body the editor built (`categoryPriceReviewRequest`, checked by the shared schema). */
+  request: CategoryPriceReviewInput;
+  /** For the clear set's conflict words: "The products in <category> changed." */
+  categoryName: string;
+  /** Why this check replaces an earlier one (the stale line); null or absent for a first check. */
+  after?: PriceCheckAfter | null;
+  send: (body: ReviewPriceChangesInput) => Promise<unknown>;
+  /** The draft to settle a conflict in (the guard's, or the review's own 409). */
+  drafts: ProductSettingsSaveDrafts;
+  /** The category's guard (plan 9.4); absent only in tests of the review alone. */
+  guard?: CategoryPriceCheckGuard;
+}
+
+export type PriceChangeCheckRun = ProductPricesCheckRun | CategoryPriceCheckRun;
+
 export type PriceChangeCheckOutcome =
-  /** The check to show; `check` goes in the owner's draft (`productPriceDraftWithCheck` / `bulkPriceDraftWithCheck`). */
+  /** The check to show; `check` goes in the owner's draft (`productPriceDraftWithCheck` / `bulkPriceDraftWithCheck` / `categoryPriceDraftWithCheck`). */
   | { kind: "checked"; review: PriceChangeReviewResponse; check: PriceCheckRef; request: ReviewPriceChangesInput }
-  /** The product's price or revision moved from the draft's start (D6a); the draft shows the conflict. Nothing was sent. */
+  /**
+   * The product's price or revision moved from the draft's start (D6a), or the category's revision or clear set did
+   * (plan 9.4: found by the guard, or answered by the review); the draft shows the conflict. Nothing was saved.
+   */
   | { kind: "conflict" }
   | { kind: "blocked"; error: unknown }
-  | { kind: "failed"; message: string };
+  /** With its words; `followUp` for the category kind's refusals the editor acts on (`PriceChangeReviewOutcome`). */
+  | { kind: "failed"; message: string; followUp?: CategoryFailureFollowUp };
 
 /**
- * One check (plan 7.3): for the drawer, the own read is read again first and
- * a moved price or revision is the conflict, nothing sent (D6a); then the
- * review body is checked by the shared schema and sent. Never throws; every
- * failure has vendor words. A failed guard read sends nothing either ("couldn't check").
+ * One check (plan 7.3, 9.4): for the drawer, the own read is read again first
+ * and a moved price or revision is the conflict, nothing sent (D6a); for the
+ * category editor, the detail is read again first and a moved revision or
+ * clear set is the conflict, nothing sent, and so is a 409 the review itself
+ * answers; then the review body (built here for products, the editor's for
+ * a category) is sent. Never throws; every failure has vendor words. A failed
+ * guard read sends nothing either ("couldn't check").
  */
 export async function runPriceChangeCheck(run: PriceChangeCheckRun): Promise<PriceChangeCheckOutcome> {
   try {
+    if (run.kind === "category_price") return await runCategoryPriceCheck(run);
     if (run.guard !== undefined) {
       const latest = await run.guard.reread();
       if (productPriceBaseMoved(run.guard.base, latest)) {
@@ -253,18 +342,41 @@ export async function runPriceChangeCheck(run: PriceChangeCheckRun): Promise<Pri
       }
     }
     const request = productPricesReviewBody({ productIds: run.productIds, price: run.change.price, releaseExactPrices: run.change.releaseExactPrices });
-    const outcome = await requestPriceChangeReview(() => run.send(request));
-    switch (outcome.kind) {
-      case "ok":
-        return { kind: "checked", review: outcome.review, check: priceCheckRefOf(outcome.review, run.after ?? null), request };
-      case "blocked":
-        return { kind: "blocked", error: outcome.error };
-      case "failed":
-        return { kind: "failed", message: outcome.message };
-    }
+    return checkOutcome(await requestPriceChangeReview(() => run.send(request)), request, run.after ?? null);
   } catch (error) {
     // A request this page couldn't build has its own words; a failed guard read is just "couldn't check".
     return { kind: "failed", message: error instanceof PriceCheckRequestError ? error.message : PRICE_DEFAULT_WORDS.reviewFailed };
+  }
+}
+
+/** The category kind's check (plan 9.4): the guard, then the editor's request; a 409 the review answers settles the draft's conflict. */
+async function runCategoryPriceCheck(run: CategoryPriceCheckRun): Promise<PriceChangeCheckOutcome> {
+  if (run.guard !== undefined) {
+    const latest = await run.guard.reread();
+    if (categoryPriceBaseMoved(run.guard.base, latest)) {
+      settlePriceCheckConflict(run.drafts);
+      return { kind: "conflict" };
+    }
+  }
+  const outcome = await requestPriceChangeReview(() => run.send(run.request), "category_price", { categoryName: run.categoryName });
+  if (outcome.kind === "conflict") {
+    settlePriceCheckConflict(run.drafts, outcome.message);
+    return { kind: "conflict" };
+  }
+  return checkOutcome(outcome, run.request, run.after ?? null);
+}
+
+function checkOutcome(outcome: PriceChangeReviewOutcome, request: ReviewPriceChangesInput, after: PriceCheckAfter | null): PriceChangeCheckOutcome {
+  switch (outcome.kind) {
+    case "ok":
+      return { kind: "checked", review: outcome.review, check: priceCheckRefOf(outcome.review, after), request };
+    case "blocked":
+      return { kind: "blocked", error: outcome.error };
+    case "failed":
+      return outcome.followUp === undefined ? { kind: "failed", message: outcome.message } : { kind: "failed", message: outcome.message, followUp: outcome.followUp };
+    case "conflict":
+      // The products kind has no conflict code (`classifyWriteFailure`, W7); the category kind settles it above.
+      return { kind: "failed", message: outcome.message };
   }
 }
 
@@ -272,18 +384,20 @@ export async function runPriceChangeCheck(run: PriceChangeCheckRun): Promise<Pri
 const BASE_MOVED_SIGNATURE = "price-check-base-moved";
 
 /**
- * Shows "This changed in another window." when the product's price or
- * revision moved away from the draft's start before anything was sent (D6a).
- * The draft goes through the same conflict state as a 409, so [Load latest and
- * keep my changes] works the same way (`loadLatestProductPrice`). Returns
- * false when the draft can't take it now (a save in flight).
+ * Shows "This changed in another window." (or the words given: the clear
+ * set's, plan 9.4) when the product's price or revision, or the category's
+ * revision or clear set, moved away from the draft's start before anything
+ * was sent (D6a, 9.4). The draft goes through the same conflict state as a
+ * 409, so [Load latest and keep my changes] works the same way
+ * (`loadLatestProductPrice`, `loadLatestCategory`). Returns false when the
+ * draft can't take it now (a save in flight).
  */
-export function settlePriceCheckConflict(drafts: ProductSettingsSaveDrafts): boolean {
+export function settlePriceCheckConflict(drafts: ProductSettingsSaveDrafts, message: string = LISTING_SETTINGS_SAVE_WORDS.conflict): boolean {
   const key = drafts.startSave(BASE_MOVED_SIGNATURE, LISTING_SETTINGS_KEY_PREFIXES.priceCheck);
   if (key === null) return false;
   drafts.settle(key, {
     kind: "failure",
-    failure: { phase: "conflict", message: LISTING_SETTINGS_SAVE_WORDS.conflict, code: null, status: null, fields: [] },
+    failure: { phase: "conflict", message, code: null, status: null, fields: [] },
   });
   return true;
 }
@@ -349,8 +463,10 @@ export interface PriceCheckRecheck {
 }
 
 export interface PriceChangeApplyRun {
-  /** The check's kind; `product_prices` for this part. */
+  /** The check's kind: `product_prices` (the default), or `category_price` for the category editor (PR 10f). */
   kind?: PriceChangeReviewKind;
+  /** The category kind: its name, for the clear set's conflict words (plan 9.4). */
+  categoryName?: string;
   /** The owner's draft as Save (or Check again) was pressed: its phase decides a Check again's doubt (D7b). */
   draft: Pick<ListingSettingsDraft, "phase">;
   /**
@@ -383,9 +499,17 @@ export type PriceChangeApplyOutcome =
   | { kind: "failed"; failure: WriteFailure; refusedSizes: ReadonlySet<number> }
   /** The apply was refused for a reason a new check answers (7.5): the new check is in the draft, with why. */
   | { kind: "rechecked"; review: PriceChangeReviewResponse; check: PriceCheckRef; after: PriceCheckAfter }
-  /** The apply was refused, and the new check couldn't be made: the check is dropped, the editor shows these words. */
-  | { kind: "recheck_failed"; message: string; after: PriceCheckAfter }
-  /** The product's price moved under the apply (D6a): the check is dropped, the draft shows the conflict. */
+  /**
+   * The apply was refused, and the new check couldn't be made: the check is dropped, the editor shows these words;
+   * `followUp` for the category kind's refusals the editor acts on (`PriceChangeReviewOutcome`).
+   */
+  | { kind: "recheck_failed"; message: string; after: PriceCheckAfter; followUp?: CategoryFailureFollowUp }
+  /**
+   * The product's price moved under the apply (D6a): the check is dropped, the draft shows the conflict. For the
+   * category kind (plan 9.4): the category's revision or clear set moved (the guard before the re-check, or the
+   * apply's own 409): the draft shows the conflict with [Load latest and keep my changes], which re-reads the
+   * category and drops the check; the editor's body shows meanwhile (`categoryPriceCheckShown` is null then).
+   */
   | { kind: "conflict" };
 
 /**
@@ -448,11 +572,13 @@ export async function runPriceChangeApply(run: PriceChangeApplyRun): Promise<Pri
     try {
       answer = await run.send(body);
     } catch (error) {
-      const classified = classifyWriteFailure("W7", error);
+      const classified = classifyWriteFailure("W7", error, { priceCheckKind: kind, categoryName: run.categoryName });
       const failure = failureAfterUnconfirmed(wasUncertain, classified);
       run.drafts.settle(key, { kind: "failure", failure });
       // The banner learns of every block, a Check again's too, which stays unconfirmed (D7b).
       if (classified.phase === "blocked") run.onBlocked?.(error);
+      // The category kind's version conflicts (plan 9.4): the draft shows the conflict; Load latest re-reads the category.
+      if (failure.phase === "conflict") return { kind: "conflict" };
       const context = error instanceof DropshipApiError ? error.context : null;
       // A refusal a new check answers gets one, once: a check that already came from an apply's re-check is shown as refused (CC-C11).
       const firstCheck = run.check.after == null || run.check.after === "page_expired";
@@ -520,7 +646,9 @@ async function recheckAfterRefusal(run: PriceChangeApplyRun, code: string | null
         run.onBlocked?.(outcome.error);
         return { kind: "recheck_failed", message: LISTING_SETTINGS_SAVE_WORDS.blocked, after };
       case "failed":
-        return { kind: "recheck_failed", message: outcome.message, after };
+        return outcome.followUp === undefined
+          ? { kind: "recheck_failed", message: outcome.message, after }
+          : { kind: "recheck_failed", message: outcome.message, after, followUp: outcome.followUp };
     }
   }
   return { kind: "recheck_failed", message: PRICE_DEFAULT_WORDS.reviewFailed, after };

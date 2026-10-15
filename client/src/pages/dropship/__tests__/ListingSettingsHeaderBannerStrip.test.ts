@@ -344,6 +344,26 @@ describe("AttentionStrip", () => {
     ]);
   });
 
+  it("a can't-be-priced line with no product opens Give these sizes a price; a one-product line keeps the drawer (PR 10f, UX-M2)", () => {
+    const onAction = vi.fn();
+    const items = [
+      item("size_cannot_be_priced", { count: 3, productId: null, productName: null }),
+      item("size_cannot_be_priced", { productId: 12, productName: "Easy Glide Soft Sleeves" }),
+    ];
+    const markup = strip({ summary: { data: summary(items) }, onAction });
+    expect(visibleText(markup)).toBe([
+      "Needs your attention",
+      "● A product can't be listed: a size can't be priced. Fix",
+      "● Easy Glide Soft Sleeves can't be listed: a size can't be priced. Fix",
+    ].join(" "));
+    expect(buttons.map((entry) => entry.text)).toEqual(["Fix", "Fix"]);
+    for (const entry of buttons) entry.onClick?.();
+    expect(onAction.mock.calls.map(([action]) => action)).toEqual([
+      { kind: "open_size_prices", label: "Fix" },
+      { kind: "open_product", label: "Fix", productId: 12, fix: "size_cannot_be_priced" },
+    ]);
+  });
+
   it("names only the two policies that aren't set", () => {
     const onAction = vi.fn();
     const base = summary([item("choose_store_policies", { count: 2 })], 1, "return");

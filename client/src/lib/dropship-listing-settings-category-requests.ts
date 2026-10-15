@@ -22,6 +22,7 @@ import {
   categoryClearBody,
   categoryHasChange,
   categoryPatch,
+  categoryPriceChanged,
   categorySaveBody,
   categorySignature,
   readCategoryDraft,
@@ -52,6 +53,9 @@ import { LISTING_SETTINGS_EDIT_WORDS } from "./dropship-listing-settings-words";
  * - The older-rules 409 is the backstop (D11): refused for good, and the
  *   card reads the summary again so [Change] goes away; a 404 closes the
  *   editor and reads the card again (8.6).
+ * - A price change never goes through W12 (PR 10f, plan 9.7, P34): a draft
+ *   holding one is not sent here; its Save is the price check
+ *   (`runPriceChangeCheck` with the category kind, then `runPriceChangeApply`).
  *
  * The network calls and the query client are passed in, so every step can be
  * run in a test.
@@ -251,6 +255,8 @@ export type CategorySettingsSaveOutcome =
 export async function runCategorySettingsSave(run: CategorySettingsSaveRun): Promise<CategorySettingsSaveOutcome> {
   const value = run.draft.editor === categoryEditorId(run.categoryId) ? readCategoryDraft(run.draft.value) : null;
   if (value === null || value.categoryId !== run.categoryId || !categoryHasChange(value)) return { kind: "not_started", message: null };
+  // A price change is the check's, with the other changes riding along (plan 9.2, 9.7): never W12's.
+  if (categoryPriceChanged(value)) return { kind: "not_started", message: null };
   const patch = categoryPatch(value);
   const clear = categoryClearBody(value);
   const signature = categorySignature(run.storeConnectionId, run.categoryId, value.expectedRevisionId, patch, clear);
