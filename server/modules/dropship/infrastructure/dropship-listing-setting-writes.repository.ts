@@ -1002,6 +1002,20 @@ async function readListingTextBytes(client: QueryClient, target: { vendorId: num
   };
 }
 
+/**
+ * The store's saved product text in UTF-8 bytes (`store_bytes`), on the
+ * caller's client and in its snapshot: the same statement, UTF8 check and
+ * contract as the write transaction's readListingTextBytes, with no product
+ * replaced, so a read (the PR 11 conversion's dry run, plan 4.B.1) and the
+ * store text cap read one number. No lock: the caller's snapshot fixes it.
+ */
+export async function readStoreListingTextBytesWithClient(client: QueryClient,
+  target: { vendorId: number; storeConnectionId: number }): Promise<number> {
+  const bytes = await readListingTextBytes(client, target,
+    { productIds: [], replacedFields: { textAbove: false, textBelow: false, mainText: false } });
+  return bytes.storeBytes;
+}
+
 /** A numeric sum sent as text; anything but a safe non-negative whole number is refused, never coerced. */
 function textByteSum(value: unknown, column: string): number {
   const bytes = typeof value === "string" && /^\d{1,16}$/.test(value) ? Number(value) : Number.NaN;

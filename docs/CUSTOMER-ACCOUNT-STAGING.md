@@ -26,6 +26,18 @@ Migration `0745_customer_account_order_edit_actor.sql` preserves staff user fore
 
 ## Verification and cutover boundaries
 
+Customer order edits use one editable form. **Apply changes** prepares the native edit and compares its verified items, quantities, product/coupon breakdown, shipping service, shipping/tax totals and payment/refund amount with the preview the customer approved. Only an exact match proceeds to the existing commit command. Different or incomplete evidence keeps the verified total in the same form and requires another explicit Apply. Changing quantities, products or codes invalidates the saved verification and releases its hold through the existing cancellation command. Invalid codes preserve the accepted selection. Staff retain their existing review screen.
+
+Known preparation failures keep the customer's selections visible and offer cancellation/retry without a status loop. A lost quote reply still reuses its original request key. An uncertain commit or cancellation still uses operation reconciliation; it is never automatically repeated. Expired verifications cannot be applied. These UI changes neither skip backend eligibility checks nor change payment/refund idempotency.
+
+### Preparation diagnostics
+
+Find the customer's **Edit reference** in structured application logs. `order_edit_requires_attention` includes the operation ID, connection/OMS order IDs, actor fingerprint, injected-clock timestamp and failing service phase (`warehouse_hold`, `shopify_quote`, `quote_identity`, or `quote_persist`). `order_edit_quote_preflight_failure` adds the provider phase: current-order read, eligibility, promotion/variant pricing, native edit begin/item changes, shipping/coupon/tax verification, recovery-lineage validation, refund preflight or response validation. If independent hold and quote checks both fail, both causes are recorded before preserving the existing failure precedence.
+
+Error output is bounded to name/code, redacted message, eight stack frames, validation paths/codes and a limited cause chain. Full errors, SQL statements/parameters, snapshots, headers and credentials are not serialized. Database errors retain SQLSTATE and frames while suppressing row-bearing messages. Browser responses retain customer-facing messages and the operation reference. Correlate both log events with the saved operation/audit history before deciding on recovery; a generic error alone does not identify its root cause.
+
+Local fixtures establish failure handling, not the cause of a past production failure. Deploy the backend diagnostics and staging bundle, then capture the next authorized attempt's reference and matching phase/cause. Do not replay a production quote or apply/refund command solely to generate logs without authorization.
+
 - Unit/HTTP tests exercise valid and invalid signatures, anonymous requests, wrong stores/paths, stale proofs, shop enablement, account switching, foreign orders/operations, command keys and transport confinement.
 - Real PostgreSQL tests apply the migration verbatim and exercise audit identity, database constraints, immutable history and concurrent edits alongside existing financial hold tests.
 - Theme browser fixtures exercise desktop/mobile account actions, grouped quantities, collapsed calculations, membership blocking notices and lost-response recovery. These use deterministic mocked backend responses and do not prove deployed Shopify payments or postage.
