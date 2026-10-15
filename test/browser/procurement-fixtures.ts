@@ -51,6 +51,9 @@ export async function installFixtures(page: Page) {
     else if (/\/purchase-orders\/\d+\/history$/.test(path)) json = { history: [] };
     else if (path === "/api/purchase-orders") json = { purchaseOrders: [] };
     else if (path === "/api/inbound-shipments/42") json = shipment;
+    else if (/^\/api\/inbound-shipments\/\d+\/cost-review$/.test(path)) json = {
+      shipmentId: Number(path.split("/")[3]), lines: [],
+    };
     else if (path === "/api/inbound-shipments/42/allocation-status") json = { issues: [], costs: [], status: "allocated", blockerCount: 0, warningCount: 0, lineCount: 1, allocatableCostCount: 1, effectiveCostCents: 10000, unallocatedCents: 0 };
     else if (path === "/api/inbound-shipments/42/invoices") json = { invoices: [invoice], summary: { invoiceCount: 1 } };
     else if (path === "/api/vendor-invoices/71") json = invoice;

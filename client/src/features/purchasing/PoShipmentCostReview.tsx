@@ -1,64 +1,21 @@
-import { useState } from "react";
-import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { Link } from "wouter";
 import {
-  shipmentCostPushResultSchema,
   shipmentCostReviewGuidance,
   type PoShipmentCosts,
 } from "@shared/procurement/po-shipment-costs";
 import { formatIntegerCents } from "@shared/utils/format-integer-cents";
-import { apiRequest } from "@/lib/queryClient";
-import { useAuth } from "@/lib/auth";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { ShipmentCostUpdateAction } from "./ShipmentCostUpdateAction";
+import { useProcurementNavigation } from "@/hooks/use-procurement-navigation";
 
 export function PoShipmentCostReview({
-  purchaseOrderId,
   costs,
 }: {
   purchaseOrderId: number;
   costs: PoShipmentCosts;
 }) {
-  const { hasPermission } = useAuth();
-  const canApprove = hasPermission("purchasing", "approve");
-  const queryClient = useQueryClient();
-  const [outcome, setOutcome] = useState<string | null>(null);
-  const retry = useMutation({
-    mutationFn: async (shipmentId: number) => {
-      const response = await apiRequest(
-        "POST",
-        `/api/inbound-shipments/${shipmentId}/push-costs-to-lots`,
-      );
-      const result = shipmentCostPushResultSchema.safeParse(
-        await response.json(),
-      );
-      if (!result.success)
-        throw new Error(
-          "The cost update response could not be verified. Check the latest recorded results before retrying.",
-        );
-      return result.data;
-    },
-    onMutate: () => setOutcome(null),
-    onSuccess: (result) => {
-      setOutcome(
-        result.status === "review_required"
-          ? "The cost update finished, but some lines still need review. Check the latest recorded reasons below."
-          : "Inventory cost update completed. Check the latest recorded line results below.",
-      );
-    },
-    // A lost response may follow a committed update. Re-read its recorded
-    // outcome on both success and failure; never guess from the POST alone.
-    onSettled: async (_result, _error, shipmentId) => {
-      await Promise.all([
-        queryClient.invalidateQueries({
-          queryKey: [`/api/purchase-orders/${purchaseOrderId}`],
-        }),
-        queryClient.invalidateQueries({
-          queryKey: [`/api/inbound-shipments/${shipmentId}`],
-        }),
-      ]);
-    },
-  });
+  const navigation = useProcurementNavigation();
   const pending = costs.lines.filter((line) => line.status !== "applied");
   const groups = [
     ...new Map(
@@ -80,20 +37,10 @@ export function PoShipmentCostReview({
       <div>
         <h3 className="font-semibold text-sm">Inventory cost review</h3>
         <p className="text-xs text-muted-foreground">
-          These are the last recorded results and current charge checks.
-          Retrying checks the charges and lot history again.
+          Update shipment costs here to refresh the charge split and the costs of stock and sold items.
+          Any remaining issues stay below for review.
         </p>
       </div>
-      {retry.isError && (
-        <p role="alert" className="text-sm text-destructive">
-          {retry.error.message}
-        </p>
-      )}
-      {outcome && (
-        <p role="status" className="text-sm">
-          {outcome}
-        </p>
-      )}
       {pending.length === 0 && (
         <p className="text-sm text-green-700 dark:text-green-400">
           All confirmed shipment costs have been applied to inventory.
@@ -112,33 +59,15 @@ export function PoShipmentCostReview({
             </span>
             <div className="flex flex-wrap gap-2">
               <Button size="sm" variant="outline" asChild>
-                <Link href={`/shipments/${shipment.id}?tab=allocation`}>
-                  Open shipment allocation
+                <Link href={navigation.childHref(`/shipments/${shipment.id}?tab=allocation`)}>
+                  View shipment cost details
                 </Link>
               </Button>
-              {canApprove &&
-                ["costing", "closed"].includes(shipment.status) && (
-                  <Button
-                    size="sm"
-                    onClick={() => retry.mutate(shipment.id)}
-                    disabled={retry.isPending}
-                  >
-                    {retry.isPending && retry.variables === shipment.id
-                      ? "Updating inventory costs…"
-                      : "Retry inventory cost update"}
-                  </Button>
-                )}
             </div>
           </div>
-          {!canApprove && (
-            <p className="text-xs text-muted-foreground">
-              A user with purchasing approval permission can retry this cost
-              update.
-            </p>
-          )}
+          {["costing", "closed"].includes(shipment.status) && <ShipmentCostUpdateAction key={shipment.id} shipmentId={shipment.id} />}
           <p className="text-xs text-muted-foreground">
-            A retry applies this shipment's recorded charges to inventory and
-            cost of sold stock, including any other linked POs.
+            This updates the entire shipment, including its other linked POs. Closed-shipment adjustments are recorded automatically.
           </p>
           {pending
             .filter((line) => line.shipmentId === shipment.id)
