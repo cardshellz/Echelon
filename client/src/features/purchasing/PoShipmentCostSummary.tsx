@@ -40,7 +40,7 @@ export function PoShipmentCostSummary({
   const costs = query.data.summary;
   if (costs.shipmentCount === 0) return null;
   const money = (cents: number) => formatIntegerCents(cents, costs.currency);
-  const accepted = query.data.lines.filter(line => line.exceptionReview?.state === "accepted").length;
+  const accepted = query.data.lines.filter(line => line.exceptionReview?.reconciliation?.status === "posted").length;
   const needsReview = Math.max(0, costs.reviewLines - accepted);
   return (
     <Card>
@@ -95,7 +95,7 @@ export function PoShipmentCostSummary({
             </p>
           )}
           {accepted > 0 && <p className="text-muted-foreground">
-            {accepted} historical inventory difference{accepted === 1 ? " is" : "s are"} accepted by an administrator. The retained costs and decisions remain visible in the review.
+            Costs reconciled on {accepted} shipment line{accepted === 1 ? "" : "s"}. Approved postings and the original stock history are available below.
           </p>}
           {costs.inventoryCosting === "pending" && (
             <p className="text-amber-700 dark:text-amber-400">
@@ -120,7 +120,7 @@ export function PoShipmentCostSummary({
               ? "Hide cost review"
               : needsReview > 0
                 ? `Review ${needsReview} line${needsReview === 1 ? "" : "s"}`
-                : accepted > 0 ? "View accepted differences"
+                : accepted > 0 ? "View reconciled costs"
                 : "Review inventory costs"}
           </Button>
         )}

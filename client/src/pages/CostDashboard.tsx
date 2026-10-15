@@ -1,4 +1,5 @@
 import React, { useState, useMemo } from "react";
+import { HistoricalCostAdjustments } from "@/features/purchasing/HistoricalCostAdjustments";
 import { useInventoryQuantityCapabilities } from "@/hooks/use-inventory-quantity-capabilities";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
@@ -153,6 +154,7 @@ export default function CostDashboard() {
         </TabsContent>
 
         <TabsContent value="adjustments" className="mt-4">
+          <HistoricalCostAdjustments />
           <AdjustmentsSection />
         </TabsContent>
 

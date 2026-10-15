@@ -68,6 +68,11 @@ describe("writer-ratchet (P2.1)", () => {
     expect(currentIncludingScripts[table]).toEqual(["modules/procurement"]);
     expect(baseline[table]).toEqual(["modules/procurement"]);
   });
+  it.each(["inventory.cost_reconciliation_approvals","inventory.cost_reconciliation_postings"])("%s has only the Inventory financial owner",table=>{
+    expect(current[table]).toEqual(["modules/inventory"]);
+    expect(currentIncludingScripts[table]).toEqual(["modules/inventory"]);
+    expect(baseline[table]).toEqual(["modules/inventory"]);
+  });
 
   it("keeps country-repair approval and audit writes in the Orders maintenance owner", () => {
     for (const table of ["oms.order_country_repair_operations", "oms.order_country_repairs"]) {

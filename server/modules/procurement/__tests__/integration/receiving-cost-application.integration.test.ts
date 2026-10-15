@@ -20,6 +20,7 @@ import { resetFixtureWithEmptyReceivingCustody } from "./receiving-custody-fixtu
 import { createShipmentCostExceptionService, shipmentExceptionScope } from "../../shipment-cost-exception.service";
 import { costFingerprint } from "../../../inventory/infrastructure/cost-evidence-values";
 import type { ShipmentExceptionRequest } from "@shared/procurement/shipment-cost-exception";
+import { registerShipmentReconciliationCases } from "./shipment-cost-reconciliation.cases";
 
 // Real PostgreSQL regression coverage for the coordinated receipt/AP/freight owners.
 config({ path: resolve(process.cwd(), ".env.test") });
@@ -36,7 +37,7 @@ const TABLES = [
   schema.inboundFreightCosts, schema.inboundFreightAllocations,
   schema.landedCostSnapshots, schema.landedCostAdjustments, schema.inboundShipmentStatusHistory,
   schema.warehouses, schema.warehouseLocations, schema.productLocations, schema.inventoryLevels,
-  schema.inventoryLots, schema.inventoryTransactions, schema.orders, schema.orderItems, schema.orderItemCosts,
+  schema.inventoryLots, schema.inventoryTransactions, schema.orders, schema.orderItems, schema.orderItemCosts, schema.orderLineCosts,
 ];
 
 audit.sequential("receipt/AP/freight cost revisions with real owners", () => {
@@ -90,6 +91,7 @@ audit.sequential("receipt/AP/freight cost revisions with real owners", () => {
     await pool.query(readFileSync(resolve(process.cwd(), "migrations/222_procurement_cost_evidence.sql"), "utf8"));
     await pool.query(readFileSync(resolve(process.cwd(), "migrations/900000007000018030001_shipment_cost_exception_decisions.sql"), "utf8"));
     await pool.query(readFileSync(resolve(process.cwd(), "migrations/0751_exact_inventory_cost_totals.sql"), "utf8"));
+    await pool.query(readFileSync(resolve(process.cwd(), "migrations/900000008000018110001_shipment_cost_reconciliation.sql"), "utf8"));
     await pool.query(readFileSync(resolve(process.cwd(), "migrations/0725_inventory_cost_admission_evidence.sql"), "utf8"));
     await pool.query(readFileSync(resolve(process.cwd(), "migrations/231_receipt_cost_recovery.sql"), "utf8"));
     await pool.query(readFileSync(resolve(process.cwd(), "migrations/900000004000017890001_receiving_quarantine.sql"), "utf8"));
@@ -172,7 +174,13 @@ audit.sequential("receipt/AP/freight cost revisions with real owners", () => {
 
   beforeEach(async () => {
     if (ownedSchemas.length !== 7) throw new Error("Fixture schema ownership missing");
-    await resetFixtureWithEmptyReceivingCustody(pool, `TRUNCATE ${TABLES.map(qualifiedTable).join(",")},inventory.cost_adjustment_log RESTART IDENTITY CASCADE`);
+    // These schemas are exclusively owned by this disposable local fixture.
+    // Restore production immutability guards before any owner code executes.
+    await pool.query(`ALTER TABLE inventory.cost_reconciliation_approvals DISABLE TRIGGER cost_reconciliation_approval_no_truncate;
+      ALTER TABLE inventory.cost_reconciliation_postings DISABLE TRIGGER cost_reconciliation_posting_no_truncate`);
+    try { await resetFixtureWithEmptyReceivingCustody(pool, `TRUNCATE ${TABLES.map(qualifiedTable).join(",")},inventory.cost_adjustment_log RESTART IDENTITY CASCADE`); }
+    finally { await pool.query(`ALTER TABLE inventory.cost_reconciliation_approvals ENABLE TRIGGER cost_reconciliation_approval_no_truncate;
+      ALTER TABLE inventory.cost_reconciliation_postings ENABLE TRIGGER cost_reconciliation_posting_no_truncate`); }
     await pool.query("DELETE FROM public.audit_events WHERE actor=$1", [actorId]);
     await pool.query("TRUNCATE public.financial_command_results RESTART IDENTITY CASCADE");
     await pool.query("INSERT INTO identity.users(id,username,password,role,active) VALUES($1,'cost-audit-owner','unused','admin',1)", [actorId]);
@@ -807,6 +815,8 @@ audit.sequential("receipt/AP/freight cost revisions with real owners", () => {
   });
 
   function exceptionService() { return createShipmentCostExceptionService(database, () => NOW); }
+  registerShipmentReconciliationCases({ pool:()=>pool, database:()=>database, at:NOW,
+    prepareGaps:legacyQuantityGaps, updateCosts:updateShipmentCosts, physicalSnapshot:costQuantityPhysicalSnapshot });
   async function prepareException() {
     await legacyQuantityGaps();
     await pool.query("UPDATE procurement.inbound_shipments SET status='closed' WHERE id=1");
