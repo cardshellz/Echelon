@@ -67,6 +67,7 @@ const EDITOR = productEditorId(PRODUCT);
 const EDITABLE: ListingSettingsRight = { editable: true, reason: null };
 const RIGHTS: ProductDrawerProps["rights"] = {
   exactPrice: EDITABLE, productSettings: EDITABLE, shipping: EDITABLE, policies: EDITABLE, ebayCategory: EDITABLE, shelfPick: EDITABLE,
+  priceCheck: EDITABLE,
 };
 const noop = () => undefined;
 

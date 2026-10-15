@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { MAX_LISTING_SETTING_BULK_PRODUCTS } from "@shared/dropship/listing-setting-values";
 import { MAX_BULK_TEXT_BYTES, patchTextBytes, saveProductsBulkInputSchema } from "@shared/dropship/listing-setting-writes";
 import { listingSettingsProductIdsResponseSchema } from "@shared/dropship/listing-settings";
+import type { PricingRecipe } from "@shared/dropship/pricing-rules";
 import { DropshipApiError } from "../dropship-ops-surface";
 import {
   listingSettingsEditRights,
@@ -17,12 +18,19 @@ import {
   type DraftValue,
   type ListingSettingsDraft,
 } from "../dropship-listing-settings-drafts";
-import { descriptionEditorResult, readProductSettingsDraft, type DescriptionEditorState } from "../dropship-listing-settings-product-edit";
+import {
+  descriptionEditorResult,
+  readProductSettingsDraft,
+  type DescriptionEditorState,
+  type PriceCheckRef,
+  type ProductPriceChange,
+} from "../dropship-listing-settings-product-edit";
 import {
   BULK_EDIT_FIELDS,
   BulkRequestError,
   bulkChangedFields,
   bulkAfterSave,
+  bulkChangeKind,
   bulkDescriptionEditorResult,
   bulkDescriptionFieldEditor,
   bulkDiscard,
@@ -34,6 +42,11 @@ import {
   bulkHoldsSave,
   bulkPatch,
   bulkPolicyFieldEditor,
+  bulkPriceDraftValue,
+  bulkPriceDraftWithCheck,
+  bulkPriceEditAction,
+  bulkPriceProductIds,
+  bulkPriceRow,
   bulkReload,
   bulkSaveBody,
   bulkSavedFor,
@@ -48,6 +61,7 @@ import {
   bulkTextTooLarge,
   emptyBulkChoices,
   readBulkDraft,
+  readBulkPriceDraft,
   type BulkChoices,
   type BulkSheetInput,
 } from "../dropship-listing-settings-bulk";
@@ -710,5 +724,161 @@ describe("after a confirmed save (D22)", () => {
       .toMatchObject({ count: "3 selected", status: "Saved for 3 products. Still selected." });
     expect(bulkAfterSave({ productCount: 2, selection: ticks, matchedNow: null })).toEqual({ action: null, status: { productCount: 2, selection: ticks } });
     expect(bulkAfterSave({ productCount: 2, selection: null, matchedNow: null })).toEqual({ action: null, status: { productCount: 2, selection: null } });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The Price row (PR 10d, plan 7.2, 7.6, D2, D21)
+// ---------------------------------------------------------------------------
+
+describe("the Price row (PR 10d, plan 7.2, D2)", () => {
+  const COST_35: PricingRecipe = { basis: "product_cost", markupBps: 3500, flatCents: 0, rounding: "cent" };
+  const CHECK = { reviewId: "11111111-1111-4111-8111-111111111111", reviewHash: "a".repeat(64), after: null };
+  const SET = { price: { mode: "set" as const, value: COST_35 }, releaseExactPrices: true };
+  const priceDraft = (change: Pick<ProductPriceChange, "price" | "releaseExactPrices"> = SET, products: PickedProducts["products"] = PRODUCTS, check: PriceCheckRef | null = null) => {
+    const opened = reduceListingSettingsDraft(null, { type: "open", editor: BULK_EDITOR_ID, place: "Set for selected", base: Object.freeze(bulkPriceDraftValue(products)) });
+    return Object.freeze(reduceListingSettingsDraft(Object.freeze(opened!), { type: "edit", value: Object.freeze(bulkPriceDraftValue(products, { ...change, check })) })!);
+  };
+  const cleanPrice = () => reduceListingSettingsDraft(null, { type: "open", editor: BULK_EDITOR_ID, place: "Set for selected", base: bulkPriceDraftValue(PRODUCTS) })!;
+  const saving = (draft: ListingSettingsDraft) => reduceListingSettingsDraft(draft, { type: "startSave", attempt: { signature: "s", key: "k" } })!;
+  const refusedWords = "Refused words.";
+  const refused = (draft: ListingSettingsDraft) => reduceListingSettingsDraft(saving(draft), {
+    type: "failure", key: "k", failure: { phase: "refused", message: refusedWords, code: "C", status: 422, fields: [] },
+  })!;
+
+  it("holds the price in its own shape, one change, never with the setting rows (D1, D2)", () => {
+    const base = bulkPriceDraftValue(PRODUCTS);
+    expect(base).toEqual({ priceChange: { price: { mode: "leave" }, releaseExactPrices: false, check: null }, products: [{ productId: 11, expectedRevisionId: 5 }, { productId: 12, expectedRevisionId: null }] });
+    expect(priceDraft().changes).toBe(1);
+    expect(readBulkPriceDraft(priceDraft().value)).toEqual(bulkPriceDraftValue(PRODUCTS, { ...SET, check: null }));
+    expect(readBulkPriceDraft(priceDraft(SET, PRODUCTS, CHECK).value)?.priceChange.check).toEqual(CHECK);
+    // Nothing of the setting rows reads a price draft, and the other way round.
+    expect(readBulkDraft(priceDraft().value)).toBeNull();
+    expect(readBulkPriceDraft(bulkDraftValue(PRODUCTS))).toBeNull();
+    expect(readBulkPriceDraft({ ...base, shippingPolicy: { mode: "leave" } })).toBeNull();
+    expect(readBulkPriceDraft({ ...base, products: [{ productId: 0, expectedRevisionId: null }] })).toBeNull();
+    expect(JSON.stringify(bulkPriceDraftValue(PRODUCTS, { ...SET, check: null }))).not.toMatch(/shippingPolicy|mainText/);
+    // What is sent names the products, ascending; a no-change is the empty change; the recipe is copied.
+    expect(bulkPriceProductIds(base)).toEqual([11, 12]);
+    expect(bulkPriceDraftValue(PRODUCTS, { price: { mode: "leave" }, releaseExactPrices: false, check: CHECK }).priceChange).toEqual({ price: { mode: "leave" }, releaseExactPrices: false, check: null });
+    const value = { ...COST_35 };
+    const made = bulkPriceDraftValue(PRODUCTS, { price: { mode: "set", value }, releaseExactPrices: false, check: null }).priceChange.price;
+    expect(made).toEqual({ mode: "set", value: COST_35 });
+    expect(made.mode === "set" && made.value).not.toBe(value);
+    expect(bulkPriceDraftWithCheck(bulkPriceDraftValue(PRODUCTS, { ...SET, check: null }), CHECK).priceChange.check).toEqual(CHECK);
+    expect(bulkPriceDraftWithCheck(bulkPriceDraftValue(PRODUCTS, { ...SET, check: CHECK }), null).priceChange.check).toBeNull();
+    expect(bulkChangeKind(priceDraft())).toBe("price");
+    expect(bulkChangeKind(saving(priceDraft()))).toBe("price");
+    expect(bulkChangeKind(bulkDraft({ mainText: { mode: "default" } }))).toBe("settings");
+    expect(bulkChangeKind(bulkDraft())).toBe("none");
+    expect(bulkChangeKind(cleanPrice())).toBe("none");
+    expect(bulkChangeKind(null)).toBe("none");
+  });
+
+  it("[Check new prices] starts the price over a clean draft, replaces it, and the two kinds wait for each other (D2)", () => {
+    expect(bulkPriceEditAction({ draft: null, change: SET })).toEqual({ kind: "not_open" });
+    expect(bulkPriceEditAction({ draft: bulkDraft(), change: SET })).toEqual({ kind: "start", base: bulkPriceDraftValue(PRODUCTS), value: bulkPriceDraftValue(PRODUCTS, { ...SET, check: null }) });
+    expect(bulkPriceEditAction({ draft: cleanPrice(), change: SET })).toEqual({ kind: "start", base: bulkPriceDraftValue(PRODUCTS), value: bulkPriceDraftValue(PRODUCTS, { ...SET, check: null }) });
+    expect(bulkPriceEditAction({ draft: bulkDraft(), change: { price: { mode: "leave" }, releaseExactPrices: false } })).toEqual({ kind: "no_change" });
+    expect(bulkPriceEditAction({ draft: bulkDraft({ mainText: { mode: "default" } }), change: SET })).toEqual({ kind: "finish_first" });
+    const held = priceDraft(SET, PRODUCTS, CHECK);
+    expect(bulkPriceEditAction({ draft: held, change: { price: { mode: "default" }, releaseExactPrices: false } }))
+      .toEqual({ kind: "edit", value: bulkPriceDraftValue(PRODUCTS, { price: { mode: "default" }, releaseExactPrices: false, check: null }) });
+    expect(bulkPriceEditAction({ draft: saving(held), change: SET })).toEqual({ kind: "locked" });
+    // The other way round: a setting row waits for the price, and a clean price draft gives way to the settings.
+    expect(bulkEditAction({ draft: priceDraft(), picks: { shippingPolicy: { mode: "default" } } })).toEqual({ kind: "finish_first" });
+    expect(bulkEditAction({ draft: saving(priceDraft()), picks: { shippingPolicy: { mode: "default" } } })).toEqual({ kind: "locked" });
+    expect(bulkEditAction({ draft: cleanPrice(), picks: { shippingPolicy: { mode: "default" } } }))
+      .toEqual({ kind: "start", base: bulkDraftValue(PRODUCTS), value: bulkDraftValue(PRODUCTS, choices({ shippingPolicy: { mode: "default" } })) });
+  });
+
+  it("draws the Price row: Leave as is with Change, its pending line, and waits while the setting rows hold a change", () => {
+    const row = (draft: ListingSettingsDraft | null, overrides: Partial<Parameters<typeof bulkPriceRow>[0]> = {}) =>
+      bulkPriceRow({ draft, rights: rights(), open: false, ...overrides });
+    expect(row(bulkDraft())).toEqual({
+      key: "price", label: "Price", value: "Leave as is", pending: null, canSet: true, canDefault: true, reason: null, change: { shown: true, disabled: false },
+      line: null, open: false, draftChange: { price: { mode: "leave" }, releaseExactPrices: false },
+    });
+    expect(row(priceDraft())).toMatchObject({ pending: "→ Your cost + 35%, to the cent · Clear exact prices too · Not saved", draftChange: SET, change: { disabled: false } });
+    expect(row(priceDraft({ price: { mode: "default" }, releaseExactPrices: false })).pending).toBe("→ Use default · Not saved");
+    expect(row(priceDraft({ price: { mode: "leave" }, releaseExactPrices: true })).pending).toBe("→ Clear exact prices too · Not saved");
+    expect(row(null).change.disabled).toBe(true);
+    expect(row(cleanPrice()).change.disabled).toBe(false);
+    expect(row(saving(priceDraft()))).toMatchObject({ change: { disabled: true }, pending: "→ Your cost + 35%, to the cent · Clear exact prices too · Not saved" });
+    expect(row(bulkDraft({ mainText: { mode: "default" } }))).toMatchObject({ change: { shown: true, disabled: true }, line: LISTING_SETTINGS_EDIT_WORDS.otherChangeFirst });
+    // W7's right (D3): a banner takes the row away with no line of its own; without the right nothing is offered. The
+    // editor reads the reason from the row.
+    expect(row(bulkDraft(), { rights: { priceCheck: { editable: false, reason: "banner" } } })).toMatchObject({ change: { shown: false }, canSet: false, canDefault: false, reason: "banner", line: null });
+    expect(row(bulkDraft(), { rights: {} })).toMatchObject({ change: { shown: false }, canSet: false, reason: "loading" });
+    expect(row(bulkDraft(), { open: true }).open).toBe(true);
+    // A refused apply's words are the check body's (the draft keeps the check); the row names none.
+    expect(row(refused(priceDraft()))).not.toHaveProperty("fieldError");
+    // Every setting row waits while the price holds a change (D2); a clean price draft counts as the sheet's draft.
+    const rows = (draft: ListingSettingsDraft | null) => bulkSettingRows({ draft, rights: rights(), openTarget: null, failure: null, setup: LIVE, shelves: SHELVES });
+    for (const settingRow of rows(priceDraft())) {
+      expect(settingRow.edit).toMatchObject({ change: { shown: true, disabled: true }, line: LISTING_SETTINGS_EDIT_WORDS.otherChangeFirst, pending: null });
+    }
+    expect(rows(saving(priceDraft())).every((settingRow) => settingRow.edit?.change.disabled === true)).toBe(true);
+    expect(rows(cleanPrice()).every((settingRow) => settingRow.edit?.change.disabled === false && settingRow.edit.line === null)).toBe(true);
+    expect(rows(refused(priceDraft())).every((settingRow) => settingRow.edit?.fieldError === null)).toBe(true);
+  });
+
+  it("opens the sheet on a held price change, carries it onto other products without its check, discards it and holds its save (D21)", () => {
+    const held = priceDraft(SET, PRODUCTS, CHECK);
+    expect(bulkSheetOpen(held, picked([...PRODUCTS].reverse()))).toEqual({ kind: "keep" });
+    const more = [...PRODUCTS, { productId: 13, expectedRevisionId: 2 }];
+    expect(bulkSheetOpen(held, picked(more))).toEqual({ kind: "restart", base: bulkPriceDraftValue(more), value: bulkPriceDraftValue(more, { ...SET, check: null }) });
+    expect(bulkSheetOpen(held, picked([]))).toEqual({ kind: "none_left" });
+    expect(bulkSheetOpen(cleanPrice(), picked(more))).toEqual({ kind: "open", base: bulkDraftValue(more) });
+    expect(bulkDiscard(held)).toEqual({ kind: "reset", value: bulkPriceDraftValue(PRODUCTS) });
+    expect(bulkDiscard(cleanPrice())).toEqual({ kind: "reset", value: bulkPriceDraftValue(PRODUCTS) });
+    const out = saving(held);
+    expect(bulkHoldsSave(out)).toBe(true);
+    expect(bulkHoldsSave(held)).toBe(false);
+    expect(bulkSheetOpen(out, null)).toEqual({ kind: "keep" });
+    expect(bulkSheetOpen(out, picked([]))).toEqual({ kind: "keep" });
+    expect(bulkDiscard(out)).toEqual({ kind: "none" });
+  });
+
+  it("tells the sheet the footer's Save is the price check, with W7's right (D2, D3, 7.6)", () => {
+    const ticks = reduceListingSettingsSelection(emptySelection(STORE), { type: "togglePage", productIds: [11, 12] });
+    const read = listingSettingsProductIdsResponseSchema.parse({ total: 2, rows: [{ productId: 11, revisionId: 5 }, { productId: 12, revisionId: null }] });
+    const state = (overrides: Partial<BulkSheetInput>) => bulkSheetState({
+      selection: ticks, ids: { data: read, error: null }, draft: null, opening: "open", rights: rights(), busy: false,
+      savedFlashVisible: false, compact: false, fieldEditorOpen: false, failure: null, ...overrides,
+    });
+    expect(state({ draft: priceDraft() })).toMatchObject({
+      kind: "price", shape: "price", title: "Set for 2 products", lines: [], noneLeft: null, escapeKeepsOpen: false,
+      footer: { notSaved: "● Not saved · 1 change", primary: { action: "save", label: "Check new prices", disabled: false }, message: null },
+    });
+    // A phone says what the button does too: "Save" would mislead for a check.
+    expect(state({ draft: priceDraft(), compact: true }).footer.primary.label).toBe("Check new prices");
+    expect(state({ draft: bulkDraft({ mainText: { mode: "default" } }), compact: true }).footer.primary.label).toBe("Save");
+    expect(state({ draft: priceDraft(), rights: { ...rights(), priceCheck: { editable: false, reason: "banner" } } }).footer.primary.disabled).toBe(true);
+    expect(state({ draft: priceDraft(), rights: { bulkSettings: rights().bulkSettings } }).footer.primary.disabled).toBe(true);
+    expect(state({ draft: bulkDraft({ mainText: { mode: "default" } }) })).toMatchObject({ kind: "settings", shape: "settings", footer: { primary: { label: "Save for 2 products" } } });
+    expect(state({ draft: bulkDraft() })).toMatchObject({ kind: "none", shape: "settings" });
+    expect(state({ draft: cleanPrice() })).toMatchObject({ kind: "none", shape: "price", footer: { primary: { action: "save", label: "Save for 2 products", disabled: true } } });
+    expect(state({ draft: null })).toMatchObject({ kind: "none", shape: null });
+    // A price apply saved with a stale view, or a price change discarded, leaves a clean price-shaped draft: its Reload
+    // is the price's re-read, and a row's Done then starts the settings on the same products (`bulkEditAction`).
+    const staleView = reduceListingSettingsDraft(saving(priceDraft()), { type: "saved", key: "k", nowMs: 1, viewStale: true })!;
+    expect(state({ draft: staleView })).toMatchObject({ kind: "none", shape: "price", footer: { primary: { action: "reload", label: "Reload", disabled: false } } });
+    const discarded = reduceListingSettingsDraft(priceDraft(), { type: "edit", value: bulkPriceDraftValue(PRODUCTS) })!;
+    expect(state({ draft: discarded })).toMatchObject({ kind: "none", shape: "price" });
+    expect(bulkEditAction({ draft: discarded, picks: { shippingPolicy: { mode: "default" } } })).toMatchObject({ kind: "start" });
+    expect(bulkEditAction({ draft: staleView, picks: { shippingPolicy: { mode: "default" } } })).toMatchObject({ kind: "start" });
+    // The price's draft is never held to the text budget, and a change carried onto new products says so.
+    expect(state({ draft: priceDraft(SET, Array.from({ length: 3_751 }, (_, index) => ({ productId: index + 1, expectedRevisionId: null }))) }).footer.message).toBeNull();
+    expect(state({ draft: priceDraft(), opening: "restart" }).lines).toEqual([LISTING_SETTINGS_BULK_WORDS.carried]);
+    // An apply out or unconfirmed: Check again, Esc keeps the sheet, its own products named (D21).
+    const uncertain = reduceListingSettingsDraft(saving(priceDraft()), {
+      type: "failure", key: "k", failure: { phase: "uncertain", message: "We couldn't confirm your save.", code: null, status: null, fields: [] },
+    })!;
+    expect(state({ draft: uncertain })).toMatchObject({ kind: "price", escapeKeepsOpen: true, footer: { primary: { action: "resend", label: "Check again", disabled: false } } });
+    expect(state({ draft: uncertain, selection: emptySelection(STORE), ids: { data: undefined, error: null }, opening: "keep" }))
+      .toMatchObject({ title: "Set for 2 products", lines: ["This save is for the 2 products it was sent for."] });
+    // A refused apply names no row: the footer tells it.
+    expect(state({ draft: refused(priceDraft()), failure: { fields: [] } }).footer.message).toEqual({ text: refusedWords, tone: "alert" });
   });
 });

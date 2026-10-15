@@ -9,6 +9,7 @@ import {
   LISTING_SETTINGS_SETTING_KEYS,
   type ListingSettingsFixCode,
   type ListingSettingsPriceLimit,
+  type ListingSettingsPriceRule,
   type ListingSettingsProductDetail,
   type ListingSettingsProductSize,
   type ListingSettingsSettingKey,
@@ -46,6 +47,7 @@ import {
   ownTextCheckChoices,
   PRODUCT_EDIT_FIELDS,
   productFieldRights,
+  readProductPriceDraft,
   readProductSettingsDraft,
   sizeLeftoverFields,
   sizesDifferPick,
@@ -131,6 +133,8 @@ export const DRAWER_WORDS = Object.freeze({
   priceHead: "Price",
   // Interim: the record's head always has a store price to name.
   noStorePrice: "No store price yet. Set one in Store defaults.",
+  // Interim (PR 10d): a category price whose category the server named with nothing (never expected; the contract requires a name).
+  unnamedCategory: "Category",
   checking: "Checking…",
   exact: "Exact",
   clear: "Use the price above",
@@ -351,8 +355,28 @@ function usesOlderGroupRule(detail: ListingSettingsProductDetail): boolean {
   return setting || detail.sizes.some((size) => size.price.rule?.kind === "group");
 }
 
-/** The PRICE head (R:245): the store default recipe; "Checking…" until the summary answers. */
-export function priceHeadWords(recipe: PricingRecipe | null | undefined): string {
+/**
+ * The level that prices the product's sizes, when it is the product's own
+ * price or its Card Shellz category's (PR 10d, UX-M7): the first size whose
+ * rule is one of those (a product price prices every size without an exact
+ * price, so one size says it for all; the product's own price wins over the
+ * category's, as the server's resolution does). Null when the store default,
+ * an older group rule or nothing prices them.
+ */
+export function productPriceHeadRule(sizes: ReadonlyArray<Pick<ListingSettingsProductSize, "price">>): ListingSettingsPriceRule | null {
+  const rules = sizes.map((size) => size.price.rule).filter((rule): rule is ListingSettingsPriceRule => rule !== null);
+  return rules.find((rule) => rule.kind === "product") ?? rules.find((rule) => rule.kind === "category") ?? null;
+}
+
+/**
+ * The PRICE head (R:245): the level that prices the product (PR 10d, plan
+ * 7.2, UX-M7): "This product: Retail price + 20%…" for its own price, "Sleeves:
+ * …" for its category's (`productPriceHeadRule`), else the store default
+ * recipe; "Checking…" until the summary answers.
+ */
+export function priceHeadWords(recipe: PricingRecipe | null | undefined, rule: ListingSettingsPriceRule | null = null): string {
+  if (rule !== null && rule.kind === "product") return `This product: ${recipeWords(rule.recipe)}`;
+  if (rule !== null && rule.kind === "category") return `${rule.name.trim() || DRAWER_WORDS.unnamedCategory}: ${recipeWords(rule.recipe)}`;
   if (recipe === undefined) return DRAWER_WORDS.checking;
   if (recipe === null) return DRAWER_WORDS.noStorePrice;
   return `Store default: ${recipeWords(recipe)}`;
@@ -571,7 +595,13 @@ export function parseExactPrice(text: string): ExactPriceParse {
   }
 }
 
-type W9PriceFacts = Pick<ListingPriceSetting, "rulePriceCents" | "defaultPriceCents" | "ruleName" | "pricingIssue">;
+/**
+ * What W9's GET says of a size's price without its exact price: the rule
+ * price and the level that gives it (`ruleLevel` for the product's own price
+ * or its category's, PR 10d; absent for the store default or an older group
+ * rule, which `ruleName` then names), else the retail price.
+ */
+export type W9PriceFacts = Pick<ListingPriceSetting, "rulePriceCents" | "defaultPriceCents" | "ruleName" | "pricingIssue" | "ruleLevel">;
 
 /** "the store default" or "your older group rule “Envelopes”": who gives a rule price. */
 function ruleOwner(ruleName: string | null | undefined): { storeDefault: boolean; name: string | null } {
@@ -582,22 +612,30 @@ function ruleOwner(ruleName: string | null | undefined): { storeDefault: boolean
 /**
  * What the size would cost without its exact price (R:250, from W9's GET):
  * "store default would be $15.99", "your older group rule “Envelopes” would
- * give $6.99" (interim), or, with no rule price, "retail price would be
- * $12.50" (interim). Null when nothing would price it.
+ * give $6.99" (interim), "this product's price would be $14.99" or "the
+ * Sleeves price would be $14.99" (PR 10d, UX-M7; `ruleLevel`, the category
+ * named from the product detail when given, else as W9 names it), or, with no
+ * rule price, "retail price would be $12.50" (interim). Null when nothing
+ * would price it.
  */
-export function wouldBeWords(setting: W9PriceFacts | null): string | null {
+export function wouldBeWords(setting: W9PriceFacts | null, product: Pick<ListingSettingsProductDetail["product"], "category"> | null = null): string | null {
   if (setting === null) return null;
   const inherited = inheritedListingPrice(setting);
   if (inherited.priceCents === null) return null;
   const amount = formatCents(inherited.priceCents);
   if (inherited.from === "retail") return `retail price would be ${amount}`;
+  if (setting.ruleLevel === "product") return `this product's price would be ${amount}`;
+  if (setting.ruleLevel === "category") {
+    const name = product?.category?.trim() || setting.ruleName?.trim() || DRAWER_WORDS.unnamedCategory;
+    return `the ${name} price would be ${amount}`;
+  }
   const owner = ruleOwner(setting.ruleName);
   return owner.storeDefault ? `store default would be ${amount}` : `your older group rule “${owner.name}” would give ${amount}`;
 }
 
 /** "→ $14.99 · Not saved · store default would be $15.99" (R:250). */
-export function typedPriceLine(priceCents: number, setting: W9PriceFacts | null): string {
-  const wouldBe = wouldBeWords(setting);
+export function typedPriceLine(priceCents: number, setting: W9PriceFacts | null, product: Pick<ListingSettingsProductDetail["product"], "category"> | null = null): string {
+  const wouldBe = wouldBeWords(setting, product);
   return `→ ${formatCents(priceCents)} · ${LISTING_SETTINGS_SAVE_WORDS.notSaved}${wouldBe ? ` · ${wouldBe}` : ""}`;
 }
 
@@ -736,8 +774,8 @@ export function decideSizeEdit(
   w9: ListingPriceSetting | null,
   text: string,
 ): SizeEditAction {
-  // The product's settings hold a change: a price waits until they are saved or discarded (PR 10, D2).
-  if (settingsHoldChange(draft, editor)) return { kind: "wait" };
+  // The product's settings or its price hold a change: a size's price waits until they are saved or discarded (PR 10, D2).
+  if (otherKindHoldsChange(draft, editor)) return { kind: "wait" };
   const own = ownSizePriceDraft(draft, editor);
   const holding = own !== null && (isDraftDirty(own.draft) || isDraftLocked(own.draft));
   if (holding && own.value.productVariantId === price.productVariantId) {
@@ -767,13 +805,14 @@ export function ownSizePriceDraft(draft: ListingSettingsDraft | null, editor: Ed
   return value === null ? null : { draft, value };
 }
 
-/** This product's draft holds a change to its settings (W5), not to a size's price. */
-function settingsHoldChange(draft: ListingSettingsDraft | null, editor: EditorId): boolean {
-  return drawerChangeKind(draft, editor) === "settings";
+/** This product's draft holds a change of another kind than a size's price: its settings (W5) or its price (W7, PR 10d); the sizes wait (D2). */
+function otherKindHoldsChange(draft: ListingSettingsDraft | null, editor: EditorId): boolean {
+  const kind = drawerChangeKind(draft, editor);
+  return kind === "settings" || kind === "product_price";
 }
 
 export function drawerSizeEditState(draft: ListingSettingsDraft | null, editor: EditorId, price: ListingSettingsSizePrice): DrawerSizeEditState {
-  if (settingsHoldChange(draft, editor)) return { text: savedExactText(price), changed: false, waiting: true, marked: false };
+  if (otherKindHoldsChange(draft, editor)) return { text: savedExactText(price), changed: false, waiting: true, marked: false };
   const own = ownSizePriceDraft(draft, editor);
   if (own !== null && own.value.productVariantId === price.productVariantId) {
     const dirty = isDraftDirty(own.draft);
@@ -1166,6 +1205,8 @@ export interface DrawerFooterInput {
   fieldEditorOpen?: boolean;
   /** The wide Save's words when they aren't "Save product" ("Save for 312 products", PR 10 plan 6.3); a phone says "Save". */
   saveLabel?: string;
+  /** The phone's words when "Save" would mislead: the price's Save runs the check ("Check new prices", PR 10d); left out, "Save". */
+  compactSaveLabel?: string;
 }
 
 /** The drawer's footer from its draft (R:535-545). */
@@ -1173,7 +1214,7 @@ export function drawerFooter(input: DrawerFooterInput): DrawerFooter {
   const { draft } = input;
   const dirty = isDraftDirty(draft);
   const busy = input.busy || input.fieldEditorOpen === true;
-  const saveLabel = input.compact ? DRAWER_WORDS.save : input.saveLabel ?? DRAWER_WORDS.saveProduct;
+  const saveLabel = input.compact ? input.compactSaveLabel ?? DRAWER_WORDS.save : input.saveLabel ?? DRAWER_WORDS.saveProduct;
   const notSaved = dirty && draft
     ? input.compact
       ? `● ${LISTING_SETTINGS_SAVE_WORDS.notSaved} · ${draft.changes}`
@@ -1526,7 +1567,9 @@ function rowEdit(
   // Choices count only while the draft holds them: once saved, the rows show what the server says.
   const holding = ownDraft !== null && (isDraftDirty(ownDraft) || locked);
   const settings = holding ? readProductSettingsDraft(ownDraft.value) : null;
-  const sizeWaits = drawerChangeKind(input.draft, input.editor) === "size_price";
+  // A size's exact price (W9) or the product's price (W7, PR 10d) holds a change: the settings wait (D2).
+  const changeKind = drawerChangeKind(input.draft, input.editor);
+  const sizeWaits = changeKind === "size_price" || changeKind === "product_price";
   const shown = rights.canSet || rights.canDefault || rights.canNone;
 
   let line: string | null = null;
@@ -1565,41 +1608,58 @@ function rowEdit(
   return { ...state, kind: "field", target, field: target, choice, pending: fieldPendingWords(target, choice, setup, own, shelves) } as DrawerFieldRowEdit;
 }
 
-/** How the drawer's one draft drives its footer, its Save and its Esc (PR 10: D2, plan 3.4, 4.6). */
+/** How the drawer's one draft drives its footer, its Save and its Esc (PR 10: D2, plan 3.4, 4.6; PR 10d: 7.6). */
 export interface DrawerDraftState {
-  /** The writer Save, Check again, Load latest and Reload use: the product's settings (W5), else one size's price (W9). */
-  writer: "W5" | "W9";
-  /** The draft the footer reads: the product's draft of either kind; null with none. */
+  /**
+   * The writer Save, Check again, Load latest and Reload use: the product's
+   * settings (W5), the product's price (W7: Save runs the price check, the
+   * check body's own footer applies it), else one size's price (W9).
+   */
+  writer: "W5" | "W7" | "W9";
+  /** The draft the footer reads: the product's draft of any kind; null with none. */
   footerDraft: ListingSettingsDraft | null;
-  /** The right the footer saves with: `productSettings` for W5, `exactPrice` for W9. */
+  /** The right the footer saves with: `productSettings` for W5, `priceCheck` for W7, `exactPrice` for W9. */
   editable: boolean;
   /** The product's settings hold a change, or a save of them is out or unconfirmed: every size's price waits (D2). */
   settingsHoldChange: boolean;
-  /** A refused settings save that names none of the rows is told in the footer; one that names a row is told there. */
+  /** The product's price holds a change, or its apply is out or unconfirmed: every size's price and every row waits (D2). */
+  priceHoldsChange: boolean;
+  /** A refused save that names none of the rows is told in the footer; one that names a row is told there. */
   showRefusal: boolean;
-  /** Esc keeps the drawer open: a settings save is out or unconfirmed (3.4). A size's price keeps PR 7's Esc. */
+  /** Esc keeps the drawer open: a settings or price save is out or unconfirmed (3.4). A size's price keeps PR 7's Esc. */
   escapeKeepsOpen: boolean;
 }
 
 const EDIT_FIELD_NAMES: ReadonlySet<string> = new Set<string>(PRODUCT_EDIT_FIELDS);
 
-/** The drawer's draft state, from the step's one draft, the rights and the last refused settings save. */
+/**
+ * The drawer's draft state, from the step's one draft, the rights and the
+ * last refused save. `rights.priceCheck` is W7's (PR 10d); a caller that
+ * doesn't pass it can't save a price change (the footer's Save stays off).
+ */
 export function drawerDraftState(input: {
   draft: ListingSettingsDraft | null;
   editor: EditorId;
-  rights: { exactPrice: ListingSettingsRight; productSettings: ListingSettingsRight };
+  rights: { exactPrice: ListingSettingsRight; productSettings: ListingSettingsRight; priceCheck?: ListingSettingsRight };
   failure: Pick<WriteFailure, "fields"> | null;
 }): DrawerDraftState {
   const mine = input.draft !== null && input.draft.editor === input.editor ? input.draft : null;
   const settings = mine !== null && readProductSettingsDraft(mine.value) !== null;
+  const price = mine !== null && !settings && readProductPriceDraft(mine.value) !== null;
   const namesRow = (input.failure?.fields ?? []).some((field) => EDIT_FIELD_NAMES.has(field));
+  const kind = drawerChangeKind(input.draft, input.editor);
+  const writer: DrawerDraftState["writer"] = settings ? "W5" : price ? "W7" : "W9";
   return {
-    writer: settings ? "W5" : "W9",
-    footerDraft: settings ? mine : ownSizePriceDraft(input.draft, input.editor)?.draft ?? null,
-    editable: settings ? input.rights.productSettings.editable : input.rights.exactPrice.editable,
-    settingsHoldChange: drawerChangeKind(input.draft, input.editor) === "settings",
-    showRefusal: settings && !namesRow,
-    escapeKeepsOpen: settings && isDraftLocked(mine),
+    writer,
+    footerDraft: settings || price ? mine : ownSizePriceDraft(input.draft, input.editor)?.draft ?? null,
+    editable: settings ? input.rights.productSettings.editable
+      : price ? input.rights.priceCheck?.editable === true
+        : input.rights.exactPrice.editable,
+    settingsHoldChange: kind === "settings",
+    priceHoldsChange: kind === "product_price",
+    // A price refusal names no row: it is told in the footer (or in the check body, which shows while the draft holds a check).
+    showRefusal: (settings && !namesRow) || price,
+    escapeKeepsOpen: (settings || price) && isDraftLocked(mine),
   };
 }
 

@@ -1,4 +1,5 @@
 import { expect, type Page, type Route, type TestInfo } from "@playwright/test";
+import { createHash } from "node:crypto";
 import { join, resolve } from "node:path";
 import { z } from "zod";
 import {
@@ -12,13 +13,23 @@ import { decideDropshipListingAccess } from "../../shared/dropship/listing-acces
 import { contentProfileStateSchema, saveContentProfileInputSchema, type ContentProfileState } from "../../shared/dropship/listing-content";
 import {
   MAX_BULK_TEXT_BYTES,
+  MAX_PRICE_RELEASES_PER_APPLY,
+  applyPriceChangesInputSchema,
+  applyPriceChangesResponseSchema,
   patchTextBytes,
+  priceChangeReviewResponseSchema,
+  reviewPriceChangesInputSchema,
   saveProductSettingsInputSchema,
   saveProductSettingsResponseSchema,
   saveProductsBulkInputSchema,
   saveProductsBulkResponseSchema,
+  storedProductPricesInputSchema,
+  type ApplyPriceChangesInput,
+  type PriceChangeReviewResponse,
+  type PriceChangeRow,
   type ProductSettingsPatchInput,
   type SaveProductsBulkInput,
+  type StoredProductPricesInput,
 } from "../../shared/dropship/listing-setting-writes";
 import {
   listingPriceResponseSchema,
@@ -62,6 +73,7 @@ import {
   CATEGORY_PRICE_RULE_NAME,
   PRICING_REVIEW_PAGE_SIZE,
   PRODUCT_PRICE_RULE_NAME,
+  RETAIL_FALLBACK_RULE_NAME,
   applyPricingRulesInputSchema,
   calculateRulePrice,
   pricingBasisCents,
@@ -460,6 +472,18 @@ export interface StubState {
   /** W6 saves of many products' settings ("Set for selected", POST …/listing-settings/products/bulk; plan PR 10, 6.4), and how the next ones answer. */
   productsBulkWrites: StubWrite[];
   productsBulkWriteAnswers: WriteAnswer[];
+  /** W7 price checks for one or many products (POST …/listing-settings/price-changes/review; plan PR 10, 7.3), and how the next ones answer. */
+  priceChangeReviews: StubWrite[];
+  priceChangeReviewAnswers: WriteAnswer[];
+  /** How the next W7 page reads (GET …/price-changes/reviews/:id?page=N) answer (a 429, say); once used up, the page is served. */
+  priceChangePageAnswers: WriteAnswer[];
+  /** W7 applies (POST …/listing-settings/price-changes/apply), and how the next ones answer. */
+  priceChangeApplies: StubWrite[];
+  priceChangeApplyAnswers: WriteAnswer[];
+  /** The W7 checks made, by review id: the stored input and every row, for paging and the apply's hash. */
+  priceChangeChecks: Record<string, PriceChangeCheck>;
+  /** W7 checks already applied, by review id, with the request key that applied them (another key is 409 IDEMPOTENCY_CONFLICT). */
+  priceChangeApplied: Record<string, string>;
   /** The checks W1 made, by review id, for paging and saving. */
   reviews: Record<string, { storeConnectionId: number; input: ReviewPricingRulesInput; review: PricingReviewResponse }>;
   /** Request keys the keyed writers saw, with the body and the answer, so a retry is answered from the first save. */
@@ -468,6 +492,16 @@ export interface StubState {
   nextRevision: number;
   unexpected: string[];
   errors: string[];
+}
+
+/** A W7 check as the stub keeps it: its stored input, every row (ascending by size), and what the page answers carry. */
+export interface PriceChangeCheck {
+  storeConnectionId: number;
+  input: StoredProductPricesInput;
+  rows: PriceChangeRow[];
+  reviewId: string;
+  reviewHash: string;
+  createdAt: string;
 }
 
 /** Saved pricing rules: catalog reference retail + 15%. */
@@ -1374,6 +1408,216 @@ function saveProductsBulk(state: StubState, storeConnectionId: number,
 const PRODUCTS_BULK_ANSWER: KeyedAnswerShape = (json, replayed) =>
   saveProductsBulkResponseSchema.parse(replayed ? { ...json, outcome: "replayed", changedProductCount: null, clearedSizeCount: null } : json);
 
+// ---------------------------------------------------------------------------
+// W7: the price check for one or many products (plan PR 10, 7.3-7.5; D1, D6)
+// ---------------------------------------------------------------------------
+
+/** The server's name for a kept exact price in a W7 row (dropship-listing-price-changes-service.ts PRESERVED_RULE_NAME). */
+const PRESERVED_RULE_NAME = "Fixed override preserved";
+const WOULD_BE_LOST = "DROPSHIP_LISTING_PRICE_WOULD_BE_LOST";
+/** The 409's and 422's name at most this many sizes (write-support MAX_LISTED_SIZES). */
+const MAX_LISTED_SIZES = 100;
+
+/**
+ * The after side's recipe for a product (the service's afterContext): the price the change sets (a recipe, or
+ * null for "Use default": its category's price, else the store's), else what the layers price it by today.
+ */
+function priceAfterChange(state: StubState, storeConnectionId: number, product: ProductFixture, price: PricingRecipe | null | undefined): LayeredPrice | null {
+  if (price === undefined) return priceOf(state, storeConnectionId, product);
+  if (price !== null) return { recipe: price, kind: "product", name: product.productName.trim() ? product.productName : PRODUCT_PRICE_RULE_NAME };
+  const category = categoryOf(state, storeConnectionId, product);
+  if (category?.layer?.values.price) return { recipe: category.layer.values.price, kind: "category", name: category.name };
+  const recipe = storeRecipe(state, storeConnectionId);
+  return recipe === null ? null : { recipe, kind: "store_default", name: STORE_DEFAULT_RULE_NAME };
+}
+
+/** The rule name a W7 row carries for the level that priced it (resolvePricingRule's names). */
+function ruleNameOf(level: LayeredPrice): string {
+  return level.kind === "product" ? PRODUCT_PRICE_RULE_NAME : level.kind === "category" ? CATEGORY_PRICE_RULE_NAME : STORE_DEFAULT_RULE_NAME;
+}
+
+/**
+ * Every chosen size of the products a W7 check names, as the service's priceChangeRow builds them (plan 9.5):
+ * Now is the size's price today (sizePriceFact); New is the price with the change's recipe (the shared
+ * calculateRulePrice, so a price here is the price the server would give, D1): a kept exact price is
+ * `preserved`; a released one, or one saved as "follow the store's pricing", is `inherit`: the rule price,
+ * else its retail price (RETAIL_FALLBACK_RULE_NAME), else no price, which the apply refuses (WOULD_BE_LOST).
+ * Rows ascend by size, as the contract requires. Integer cents throughout.
+ */
+function priceChangeRows(state: StubState, storeConnectionId: number, input: StoredProductPricesInput): PriceChangeRow[] {
+  const rows: PriceChangeRow[] = [];
+  for (const productId of input.productIds) {
+    const product = state.catalog.find((entry) => entry.productId === productId);
+    if (!product) continue;
+    const after = priceAfterChange(state, storeConnectionId, product, input.price);
+    for (const size of product.sizes) {
+      const now = sizePriceFact(state, storeConnectionId, product, size);
+      const saved = state.sizePrices[sizeKey(storeConnectionId, size.productVariantId)] ?? null;
+      const released = input.releaseExactPrices === true && saved?.pricingMode === "fixed";
+      const mode: ListingPricingMode | null = released ? "inherit" : saved?.pricingMode ?? null;
+      const recipe = after?.recipe ?? null;
+      const basisCents = recipe === null ? null : basisCentsFor(recipe, size);
+      const rule = recipe === null ? null : calculateRulePrice(recipe, basisCents);
+      const base = {
+        productVariantId: size.productVariantId, productId: product.productId, title: product.productName, sku: size.sku, sizeName: size.sizeName,
+        previousPriceCents: now.priceCents, productCostCents: size.costCents, settingRevisionId: saved?.revisionId ?? null, evidenceHash: EVIDENCE_HASH,
+        released,
+      };
+      let priced: Pick<PriceChangeRow, "priceCents" | "ruleName" | "preserved" | "issues" | "basis" | "basisCents" | "followsStorePricing" | "retailFallbackIssue" | "ruleLevel">;
+      if (mode === "fixed") {
+        priced = { priceCents: saved?.overridePriceCents ?? null, ruleName: PRESERVED_RULE_NAME, preserved: true, issues: [], basis: null, basisCents: null };
+      } else if (rule?.priceCents != null && after !== null && recipe !== null) {
+        priced = {
+          priceCents: rule.priceCents, ruleName: ruleNameOf(after), preserved: false, issues: [], basis: recipe.basis, basisCents,
+          ...(mode === "inherit" ? { followsStorePricing: true as const } : {}),
+          ...(after.kind !== "store_default" ? { ruleLevel: after.kind } : {}),
+        };
+      } else if (mode === "inherit" && size.retailCents !== null) {
+        // A3, L1: the rules give no usable price, so the size uses its retail price, with why.
+        priced = {
+          priceCents: size.retailCents, ruleName: RETAIL_FALLBACK_RULE_NAME, preserved: false, issues: [], basis: "catalog_retail", basisCents: size.retailCents,
+          followsStorePricing: true as const, ...(rule?.issue ? { retailFallbackIssue: rule.issue } : {}),
+        };
+      } else if (recipe !== null) {
+        priced = { priceCents: null, ruleName: null, preserved: false, issues: rule?.issue ? [rule.issue] : [], basis: null, basisCents: null,
+          ...(mode === "inherit" ? { followsStorePricing: true as const } : {}) };
+      } else {
+        // No rule prices the size: its retail price, as the catalog lists it.
+        priced = { priceCents: size.retailCents, ruleName: null, preserved: false, issues: [], basis: null, basisCents: null,
+          ...(mode === "inherit" ? { followsStorePricing: true as const } : {}) };
+      }
+      const warnings = priced.priceCents !== null && size.costCents !== null && priced.priceCents < size.costCents ? ["price_below_product_cost"] : [];
+      // R:§8.6 rule 1: a size with a usable price keeps one; one that had a price and would have none is refused at apply.
+      const refusal = base.previousPriceCents !== null && priced.priceCents === null ? WOULD_BE_LOST : null;
+      rows.push({ ...base, ...priced, warnings, refusal });
+    }
+  }
+  return rows.sort((left, right) => left.productVariantId - right.productVariantId);
+}
+
+/** The review hash as the service makes it (plan P22): the kind, the stored input and the rows, so the apply's recompute finds a moved price. */
+function priceChangeHash(input: StoredProductPricesInput, rows: readonly PriceChangeRow[]): string {
+  return createHash("sha256").update(JSON.stringify({ kind: "product_prices", input, rows })).digest("hex");
+}
+
+function priceChangeReviewIdFor(count: number): string {
+  return `0000000d-0000-4000-8000-${String(count).padStart(12, "0")}`;
+}
+
+/** W7's stored input: ids ascending, each once; the price only when sent; the release only as true (storedProductPricesInputSchema). */
+function storedPriceChangeInput(input: { productIds: readonly number[]; price?: PricingRecipe | null; releaseExactPrices?: true }): StoredProductPricesInput {
+  return storedProductPricesInputSchema.parse({
+    productIds: [...new Set(input.productIds)].sort((left, right) => left - right),
+    ...(input.price !== undefined ? { price: input.price } : {}),
+    ...(input.releaseExactPrices ? { releaseExactPrices: true } : {}),
+  });
+}
+
+/** A check made now, held by its review id (the count numbers the id). */
+function buildPriceChangeCheck(state: StubState, storeConnectionId: number, input: StoredProductPricesInput, count: number): PriceChangeCheck {
+  const rows = priceChangeRows(state, storeConnectionId, input);
+  return { storeConnectionId, input, rows, reviewId: priceChangeReviewIdFor(count), reviewHash: priceChangeHash(input, rows), createdAt: STAMP };
+}
+
+/** One page of a held check, through the shared contract (the summary as reviewSummary counts it). */
+function priceChangePage(check: PriceChangeCheck, page: number): PriceChangeReviewResponse {
+  const { rows } = check;
+  return priceChangeReviewResponseSchema.parse({
+    reviewId: check.reviewId, reviewHash: check.reviewHash, createdAt: check.createdAt, kind: "product_prices", page,
+    summary: {
+      total: rows.length,
+      changed: rows.filter((row) => row.previousPriceCents !== row.priceCents).length,
+      released: rows.filter((row) => row.released).length,
+      refused: rows.filter((row) => row.refusal !== null).length,
+    },
+    rows: rows.slice(page * PRICING_REVIEW_PAGE_SIZE, (page + 1) * PRICING_REVIEW_PAGE_SIZE),
+  });
+}
+
+/** The sizes whose row moved between the check and now (the service's movedSizes): the price then and the price now. */
+function movedPriceSizes(stored: readonly PriceChangeRow[], current: readonly PriceChangeRow[]): Array<Record<string, number | null>> {
+  const then = new Map(stored.map((row) => [row.productVariantId, row]));
+  const now = new Map(current.map((row) => [row.productVariantId, row]));
+  const ids = [...new Set([...then.keys(), ...now.keys()])].sort((left, right) => left - right);
+  const moved: Array<Record<string, number | null>> = [];
+  for (const id of ids) {
+    const before = then.get(id);
+    const after = now.get(id);
+    if (before !== undefined && after !== undefined && JSON.stringify(before) === JSON.stringify(after)) continue;
+    moved.push({ productVariantId: id, ...(before ? { expectedPriceCents: before.priceCents } : {}), ...(after ? { priceCents: after.priceCents } : {}) });
+  }
+  return moved;
+}
+
+/** 422 PRICE_RELEASE_LIMIT, on the check and the apply alike (plan P24; service releaseLimit). */
+function priceReleaseLimit(storeConnectionId: number, releaseCount: number): ScriptedError | null {
+  if (releaseCount <= MAX_PRICE_RELEASES_PER_APPLY) return null;
+  return { status: 422, code: "DROPSHIP_LISTING_PRICE_RELEASE_LIMIT",
+    message: `This price check would release ${releaseCount} exact prices; at most ${MAX_PRICE_RELEASES_PER_APPLY} can be released at once. Choose fewer products.`,
+    context: { storeConnectionId, releaseCount, maxReleases: MAX_PRICE_RELEASES_PER_APPLY, retryable: false, classification: "permanent" } };
+}
+
+/**
+ * W7's apply as dropship-listing-price-changes-service.ts applies it (plan 9.5 step 2): the review must be this
+ * store's and not applied under another key (409 IDEMPOTENCY_CONFLICT naming it); the hash sent must be the one
+ * shown, and the rows computed again now must hash the same, else 409 PRICES_MOVED with the sizes that moved; a
+ * size that would lose its price refuses it all (422 WOULD_BE_LOST, the sizes named); then every product's own
+ * price is set (or cleared) with a new revision, and every released size follows the rules again. All or none.
+ */
+function applyPriceChanges(state: StubState, storeConnectionId: number, input: ApplyPriceChangesInput): Record<string, unknown> | ScriptedError {
+  const permanent = { storeConnectionId, retryable: false, classification: "permanent" } as const;
+  const held = state.priceChangeChecks[input.reviewId];
+  if (!held || held.storeConnectionId !== storeConnectionId) {
+    return { status: 404, code: "DROPSHIP_PRICING_REVIEW_NOT_FOUND", message: "That price check is gone. Check prices again.", context: { ...permanent } };
+  }
+  const appliedUnder = state.priceChangeApplied[input.reviewId];
+  if (appliedUnder !== undefined && appliedUnder !== input.idempotencyKey) {
+    return { status: 409, code: "DROPSHIP_IDEMPOTENCY_CONFLICT", message: "This price check was already applied.", context: { ...permanent, reviewId: input.reviewId } };
+  }
+  const pricesMoved = (sizes: Array<Record<string, number | null>>): ScriptedError => ({
+    status: 409, code: "DROPSHIP_LISTING_PRICES_MOVED", message: "Prices changed while you were editing. Reload to see the new prices, then save again.",
+    context: { ...permanent, sizes: sizes.slice(0, MAX_LISTED_SIZES), sizeCount: sizes.length },
+  });
+  if (held.reviewHash !== input.reviewHash) return pricesMoved([]);
+  const rows = priceChangeRows(state, storeConnectionId, held.input);
+  if (priceChangeHash(held.input, rows) !== held.reviewHash) return pricesMoved(movedPriceSizes(held.rows, rows));
+  const refused = rows.filter((row) => row.refusal !== null);
+  if (refused.length > 0) {
+    const sizes = refused.map((row) => ({ productVariantId: row.productVariantId, beforePriceCents: row.previousPriceCents,
+      afterPriceCents: row.priceCents, refusal: row.refusal, blockers: row.issues }));
+    const one = sizes.length === 1;
+    return { status: 422, code: WOULD_BE_LOST,
+      message: `${one ? "1 size" : `${sizes.length} sizes`} would be left without a price it can be listed at. Change the price check, or type an exact price for ${one ? "it" : "them"} first.`,
+      context: { ...permanent, sizes: sizes.slice(0, MAX_LISTED_SIZES), sizeCount: sizes.length } };
+  }
+  const releases = rows.filter((row) => row.released);
+  const limit = priceReleaseLimit(storeConnectionId, releases.length);
+  if (limit) return limit;
+  let changedProductCount = 0;
+  if (held.input.price !== undefined) {
+    for (const productId of held.input.productIds) {
+      if (!state.catalog.some((entry) => entry.productId === productId)) continue;
+      const current = productLayerOf(state, storeConnectionId, productId);
+      const values: ProductListingSettingValues = { ...(current?.values ?? NO_PRODUCT_VALUES), price: held.input.price };
+      if (JSON.stringify(values) === JSON.stringify(current?.values ?? NO_PRODUCT_VALUES)) continue;
+      changedProductCount += 1;
+      state.productSettings[productKey(storeConnectionId, productId)] = productSettingsLayerSchema.parse({ revisionId: state.nextRevision++, values });
+    }
+  }
+  for (const row of releases) {
+    state.sizePrices[sizeKey(storeConnectionId, row.productVariantId)] = { revisionId: state.nextRevision++, pricingMode: "inherit", overridePriceCents: null };
+  }
+  state.priceChangeApplied[input.reviewId] = input.idempotencyKey;
+  return applyPriceChangesResponseSchema.parse({
+    outcome: changedProductCount > 0 || releases.length > 0 ? "changed" : "unchanged", reviewId: input.reviewId, requestId: state.nextRevision++,
+    changedProductCount, releasedSizeCount: releases.length, categoryRevisionId: null,
+  });
+}
+
+/** A W7 replay says so in its `outcome`, with the product count unknown (applyPriceChangesResponseSchema). */
+const PRICE_CHANGE_ANSWER: KeyedAnswerShape = (json, replayed) =>
+  applyPriceChangesResponseSchema.parse(replayed ? { ...json, outcome: "replayed", changedProductCount: null } : json);
+
 function findSize(state: StubState, productVariantId: number): SizeFixture | null {
   return findProductOf(state, productVariantId)?.sizes.find((entry) => entry.productVariantId === productVariantId) ?? null;
 }
@@ -1397,6 +1641,8 @@ export const defaultStubState = (): StubState => ({
   categoryWrites: [], categoryWriteAnswers: [], categorySearches: [], contentWrites: [], contentWriteAnswers: [],
   priceWrites: [], priceWriteAnswers: [], productSettingsWrites: [], productSettingsWriteAnswers: [],
   productsBulkWrites: [], productsBulkWriteAnswers: [],
+  priceChangeReviews: [], priceChangeReviewAnswers: [], priceChangePageAnswers: [], priceChangeApplies: [], priceChangeApplyAnswers: [],
+  priceChangeChecks: {}, priceChangeApplied: {},
   reviews: {}, keyedAnswers: {}, nextRevision: 40, unexpected: [], errors: [],
 });
 
@@ -1634,6 +1880,46 @@ async function answerListingWrite(state: StubState, route: Route, storeId: numbe
     }
     return keyedWrite(state, route, parsed.data.idempotencyKey, body, state.productsBulkWriteAnswers,
       () => saveProductsBulk(state, storeId, { products, patch }), PRODUCTS_BULK_ANSWER);
+  }
+  // W7 (plan PR 10, 7.3): the check, its pages and the apply, for one or many products.
+  if (method === "POST" && path === `${listings}/listing-settings/price-changes/review`) {
+    const body = json();
+    state.priceChangeReviews.push({ method, path, body });
+    const parsed = reviewPriceChangesInputSchema.safeParse(body);
+    if (!parsed.success) return refuseBody(state, route, method, path, parsed.error.message);
+    if (parsed.data.kind !== "product_prices") return refuseBody(state, route, method, path, "the category kind is PR 10f's; 10d checks products only");
+    const answer = state.priceChangeReviewAnswers.shift();
+    if (answer === "drop") return route.abort("connectionreset");
+    if (answer) return fulfillError(route, answer);
+    // More than 10,000 sizes chosen: refused with no reason, as the server's priceCheckTooLarge (D8, D18).
+    if (state.tooLarge) {
+      return fulfillError(route, { status: 422, code: "DROPSHIP_LISTING_SETTINGS_TOO_LARGE",
+        message: "This price check covers more than 10,000 sizes. Choose fewer products.", context: { storeConnectionId: storeId } });
+    }
+    const check = buildPriceChangeCheck(state, storeId, storedPriceChangeInput(parsed.data), state.priceChangeReviews.length);
+    const limit = priceReleaseLimit(storeId, check.rows.filter((row) => row.released).length);
+    if (limit) return fulfillError(route, limit);
+    state.priceChangeChecks[check.reviewId] = check;
+    return route.fulfill({ json: priceChangePage(check, 0) });
+  }
+  const priceChangePageRead = new RegExp(`^${listings}/listing-settings/price-changes/reviews/([^/]+)$`).exec(path);
+  if (method === "GET" && priceChangePageRead) {
+    const answer = state.priceChangePageAnswers.shift();
+    if (answer === "drop") return route.abort("connectionreset");
+    if (answer) return fulfillError(route, answer);
+    const held = state.priceChangeChecks[decodeURIComponent(priceChangePageRead[1])];
+    if (!held || held.storeConnectionId !== storeId) {
+      return fulfillError(route, { status: 404, code: "DROPSHIP_PRICING_REVIEW_NOT_FOUND", message: "That price check is gone. Check prices again." });
+    }
+    return route.fulfill({ json: priceChangePage(held, Number(url.searchParams.get("page") ?? 0)) });
+  }
+  if (method === "POST" && path === `${listings}/listing-settings/price-changes/apply`) {
+    const body = json();
+    state.priceChangeApplies.push({ method, path, body });
+    const parsed = applyPriceChangesInputSchema.safeParse(body);
+    if (!parsed.success) return refuseBody(state, route, method, path, parsed.error.message);
+    return keyedWrite(state, route, parsed.data.idempotencyKey, body, state.priceChangeApplyAnswers,
+      () => applyPriceChanges(state, storeId, parsed.data), PRICE_CHANGE_ANSWER);
   }
   const pricePath = new RegExp(`^${listings}/variants/(\\d+)/price$`).exec(path);
   if (method === "PUT" && pricePath) {
@@ -1882,6 +2168,53 @@ export function oldSetupPanel(page: Page) {
   }
   saveProductsBulkInputSchema.parse({ idempotencyKey: "ls-bulk:load-time-check", products: bulkProducts, patch: { mainText: null } });
   listingSettingsProductIds({ ...defaultStubState(), catalog: bulkCatalog(312) }, store, { search: "team", show: "all" });
+
+  // W7 (plan PR 10, 7.3, 7.7): a check of the envelope's price prices its size with the shared resolver, the apply writes the
+  // product's own price with a new revision and answers through the shared contract (its replay too), the same review under
+  // another key is refused, and a size price saved since moves the hash, so the apply refuses it as PRICES_MOVED.
+  const sevens: StubState = { ...defaultStubState(), pricingRules: { [store]: SAVED_PRICING_RULES } };
+  const retail20: PricingRecipe = { basis: "catalog_retail", markupBps: 2_000, flatCents: 0, rounding: "cent" };
+  const check = buildPriceChangeCheck(sevens, store, storedPriceChangeInput({ productIds: [ENVELOPE.productId], price: retail20 }), 1);
+  const page0 = priceChangePage(check, 0);
+  const envelopeSize = ENVELOPE.sizes[0];
+  const expectedNew = calculateRulePrice(retail20, envelopeSize.retailCents).priceCents;
+  if (page0.rows.length !== 1 || page0.rows[0].priceCents !== expectedNew || page0.rows[0].previousPriceCents !== calculateRulePrice(SAVED_PRICING_RULES.profile!.defaultRecipe, envelopeSize.retailCents).priceCents
+    || page0.rows[0].ruleLevel !== "product" || page0.summary.changed !== 1 || !Number.isInteger(expectedNew)) {
+    throw new Error(`The stub's W7 check changed: ${JSON.stringify(page0)}`);
+  }
+  sevens.priceChangeChecks[check.reviewId] = check;
+  const applied = applyPriceChanges(sevens, store, { reviewId: check.reviewId, reviewHash: check.reviewHash, idempotencyKey: "ls-price-check:load-time" });
+  if ("status" in applied || applied.changedProductCount !== 1 || PRICE_CHANGE_ANSWER(applied, true).outcome !== "replayed"
+    || JSON.stringify(productLayerOf(sevens, store, ENVELOPE.productId)?.values.price) !== JSON.stringify(retail20)) {
+    throw new Error(`The stub's W7 apply changed: ${JSON.stringify(applied)}`);
+  }
+  const otherKey = applyPriceChanges(sevens, store, { reviewId: check.reviewId, reviewHash: check.reviewHash, idempotencyKey: "ls-price-check:another" });
+  if (!("status" in otherKey) || otherKey.code !== "DROPSHIP_IDEMPOTENCY_CONFLICT" || (otherKey as ScriptedError).context?.reviewId !== check.reviewId) {
+    throw new Error(`The stub's W7 already-applied answer changed: ${JSON.stringify(otherKey)}`);
+  }
+  const moving: StubState = { ...defaultStubState(), pricingRules: { [store]: SAVED_PRICING_RULES } };
+  const second = buildPriceChangeCheck(moving, store, check.input, 2);
+  moving.priceChangeChecks[second.reviewId] = second;
+  moving.sizePrices[sizeKey(store, envelopeSize.productVariantId)] = { revisionId: 50, pricingMode: "fixed", overridePriceCents: 777 };
+  const moved = applyPriceChanges(moving, store, { reviewId: second.reviewId, reviewHash: second.reviewHash, idempotencyKey: "ls-price-check:moved" });
+  if (!("status" in moved) || moved.code !== "DROPSHIP_LISTING_PRICES_MOVED" || (moved as ScriptedError).context?.sizeCount !== 1) {
+    throw new Error(`The stub's W7 prices-moved answer changed: ${JSON.stringify(moved)}`);
+  }
+  // A release of that exact price is counted and cleared; a size with no retail price and an exact price would lose it, so the apply refuses.
+  const releasing = buildPriceChangeCheck(moving, store, storedPriceChangeInput({ productIds: [ENVELOPE.productId], releaseExactPrices: true }), 3);
+  if (priceChangePage(releasing, 0).summary.released !== 1 || releasing.rows[0].priceCents !== calculateRulePrice(SAVED_PRICING_RULES.profile!.defaultRecipe, envelopeSize.retailCents).priceCents) {
+    throw new Error(`The stub's W7 release changed: ${JSON.stringify(releasing.rows)}`);
+  }
+  const noRetail: ProductFixture = { productId: 31, productName: "Graded Card Case", productSku: "GCC", category: "Cases",
+    sizes: [{ productVariantId: 401, sizeName: "Single", sku: "GCC-1", retailCents: null, costCents: 300, stockUnits: 8 }] };
+  const losing: StubState = { ...defaultStubState(), catalog: [noRetail], pricingRules: { [store]: SAVED_PRICING_RULES },
+    sizePrices: { [sizeKey(store, 401)]: { revisionId: 32, pricingMode: "fixed", overridePriceCents: 899 } } };
+  const lost = buildPriceChangeCheck(losing, store, storedPriceChangeInput({ productIds: [31], price: retail20, releaseExactPrices: true }), 4);
+  losing.priceChangeChecks[lost.reviewId] = lost;
+  const refused = applyPriceChanges(losing, store, { reviewId: lost.reviewId, reviewHash: lost.reviewHash, idempotencyKey: "ls-price-check:lost" });
+  if (priceChangePage(lost, 0).summary.refused !== 1 || !("status" in refused) || refused.code !== WOULD_BE_LOST || (refused as ScriptedError).context?.sizeCount !== 1) {
+    throw new Error(`The stub's W7 would-be-lost answer changed: ${JSON.stringify({ rows: lost.rows, refused })}`);
+  }
 
   // The resolver's order, pinned once here: size, then product, then category (named), then the store default.
   const sample = layeredSettings(layered, store, LAYERED_SAMPLE.productId) as LayeredProduct;

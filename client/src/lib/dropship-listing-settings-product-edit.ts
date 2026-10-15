@@ -12,6 +12,8 @@ import type {
   ListingSettingsProductOwnSettings,
   ListingSettingsSettingKey,
 } from "@shared/dropship/listing-settings";
+import { priceChangeReviewIdSchema } from "@shared/dropship/listing-setting-writes";
+import { pricingRecipeSchema, type PricingRecipe } from "@shared/dropship/pricing-rules";
 import type {
   ListingSettingsEditRights,
   ListingSettingsReadState,
@@ -20,6 +22,7 @@ import type {
 import {
   isDraftDirty,
   isDraftLocked,
+  sameDraftValue,
   type DraftValue,
   type EditorId,
   type ListingSettingsDraft,
@@ -46,11 +49,11 @@ import type { DropshipEbayStoreCategoryOption } from "./dropship-ops-surface";
  * Rules this module keeps:
  * - Ids and text only (plan D1, P13): a choice names a policy, an eBay
  *   category or a shelf by its id, and text as typed; the server builds every
- *   stored name and stamps the main text's catalog hash. Never a price: a
- *   product's price goes through the price check (10d), a size's exact price
- *   through W9.
+ *   stored name and stamps the main text's catalog hash. Never a price in W5:
+ *   a product's price is its own kind of change that goes through the price
+ *   check (W7, 10d; `ProductPriceChange` below), a size's exact price through W9.
  * - One kind of change per Save (D2): the drawer's draft holds one size's
- *   exact price or the product's settings, never both.
+ *   exact price, the product's settings, or the product's price, never two.
  * - The draft's start (the product's own values) and its revision come from
  *   one own-read answer, so the revision W5 sends is the one the vendor saw.
  * - Text is checked as typed (5.4): the shared schemas bound the raw text
@@ -149,8 +152,12 @@ type AnyChoice = FieldChoice<ProductEditValues[ProductEditField]>;
 export type ProductOwnSettings = ListingSettingsProductOwnSettings;
 export type ProductOwnValues = ProductOwnSettings["own"];
 
-/** `size_price`: one size's exact price (W9). `settings`: the product's own settings (W5). 10d adds "product_price". */
-export type DrawerChangeKind = "none" | "size_price" | "settings";
+/**
+ * `size_price`: one size's exact price (W9). `settings`: the product's own
+ * settings (W5). `product_price`: the product's price through the price
+ * check (W7, PR 10d; plan D2).
+ */
+export type DrawerChangeKind = "none" | "size_price" | "settings" | "product_price";
 
 /**
  * The drawer's draft value while it holds the product's settings: one field
@@ -164,8 +171,8 @@ export type ProductSettingsDraftValue = ProductSettingsChoices & {
   readonly expectedRevisionId: number | null;
 };
 
-/** What the drawer's one draft holds: a size's exact price (PR 7's W9 value) or the product's settings. */
-export type DrawerDraftValue = SizePriceDraft | ProductSettingsDraftValue;
+/** What the drawer's one draft holds: a size's exact price (PR 7's W9 value), the product's settings, or its price (W7). */
+export type DrawerDraftValue = SizePriceDraft | ProductSettingsDraftValue | ProductPriceDraftValue;
 
 const LEAVE: FieldChoice<never> = Object.freeze({ mode: "leave" });
 const DEFAULT: FieldChoice<never> = Object.freeze({ mode: "default" });
@@ -413,8 +420,9 @@ export function readProductSettingsDraft(value: DraftValue): ProductSettingsDraf
 export function drawerChangeKind(draft: ListingSettingsDraft | null, editor: EditorId): DrawerChangeKind {
   if (draft === null || draft.editor !== editor) return "none";
   if (!isDraftDirty(draft) && !isDraftLocked(draft)) return "none";
-  // The drawer's draft holds one of two values; anything that isn't settings is PR 7's size price.
-  return readProductSettingsDraft(draft.value) !== null ? "settings" : "size_price";
+  // The drawer's draft holds one of three values; anything that isn't settings or the price is PR 7's size price.
+  if (readProductSettingsDraft(draft.value) !== null) return "settings";
+  return readProductPriceDraft(draft.value) !== null ? "product_price" : "size_price";
 }
 
 /** Starting a change of kind `wanted` while the draft holds `current` (D2): one kind per Save. */
@@ -1326,4 +1334,252 @@ export function sizesDifferPick(
       return differButton(setting.key, setting, entry, rights, policy, fieldChoiceReady(editor, { mode: "set", value: policy }));
     }
   }
+}
+
+// ---------------------------------------------------------------------------
+// The product's price (W7 `product_prices`; PR 10d, plan 7.2, 7.6, D1, D2, D6a)
+// ---------------------------------------------------------------------------
+
+/**
+ * Why a check replaced an earlier one (plan 7.5): the apply found the prices
+ * moved (R:683 words), the check already applied under another key, or no
+ * such check any more (`expired`); or a page read found no such check before
+ * any apply was tried (`page_expired`, the owner's own re-check). Null for a
+ * first check. A check made after an apply's refusal is the last: a second
+ * refusal is shown, never looped (CC-C11); one made after a page read's 404
+ * still counts as a first check, since no apply has been tried for it.
+ */
+export type PriceCheckAfter = "prices_moved" | "already_applied" | "expired" | "page_expired";
+
+/**
+ * The check the draft holds (plan 7.2, D5): the review the server stored and
+ * the hash it was shown with. The apply's signature is exactly these two, so
+ * a Check again resends the same apply with the same key (D21).
+ */
+export interface PriceCheckRef {
+  readonly reviewId: string;
+  readonly reviewHash: string;
+  readonly after: PriceCheckAfter | null;
+}
+
+/**
+ * The product's price as the drawer, or "Set for selected", changes it (plan
+ * 7.2): the recipe (`set`), "Use default" (`default`: the category's price,
+ * else the store price; W7 `price: null`) or leave it, with "Clear exact
+ * prices too" (W7 `releaseExactPrices`), and the check made for it. It is
+ * one field of the draft, so the bar counts the price as one change however
+ * many of its parts moved, and the check never counts as a change.
+ */
+export interface ProductPriceChange {
+  readonly price: FieldChoice<PricingRecipe>;
+  readonly releaseExactPrices: boolean;
+  readonly check: PriceCheckRef | null;
+}
+
+/**
+ * The product's draft value while it holds its price: the change, and the
+ * price and revision read when it started (D6a). A type, not an interface, so
+ * it is a `DraftValue` the provider takes as it is.
+ */
+export type ProductPriceDraftValue = {
+  readonly priceChange: ProductPriceChange;
+  /** The product's own price as the own read gave it (`own.price`); null when it follows the default. */
+  readonly ownPrice: PricingRecipe | null;
+  /** The own read's `revisionId`, from the same answer as `ownPrice`. */
+  readonly revisionId: number | null;
+};
+
+const NO_PRICE_CHANGE: ProductPriceChange = Object.freeze({ price: LEAVE, releaseExactPrices: false, check: null });
+
+/** Nothing changed: the price left as it is, no release, no check. */
+export function emptyProductPriceChange(): ProductPriceChange {
+  return NO_PRICE_CHANGE;
+}
+
+const REVIEW_HASH = /^[a-f0-9]{64}$/;
+
+/** Whether `value` is a check reference the draft can hold. */
+export function isPriceCheckRef(value: unknown): value is PriceCheckRef {
+  if (typeof value !== "object" || value === null) return false;
+  const { reviewId, reviewHash, after } = value as Record<string, unknown>;
+  return typeof reviewId === "string" && priceChangeReviewIdSchema.safeParse(reviewId).success
+    && typeof reviewHash === "string" && REVIEW_HASH.test(reviewHash)
+    && (after === null || after === "prices_moved" || after === "already_applied" || after === "expired" || after === "page_expired");
+}
+
+function isRecipeChoice(value: unknown): value is FieldChoice<PricingRecipe> {
+  if (typeof value !== "object" || value === null) return false;
+  const choice = value as { mode?: unknown; value?: unknown };
+  if (choice.mode === "leave" || choice.mode === "default") return true;
+  return choice.mode === "set" && pricingRecipeSchema.safeParse(choice.value).success;
+}
+
+/** Whether `value` is a price change of the shape above (a leave, the default or a recipe the contract takes). */
+export function isProductPriceChange(value: unknown): value is ProductPriceChange {
+  if (typeof value !== "object" || value === null) return false;
+  const { price, releaseExactPrices, check } = value as Record<string, unknown>;
+  return isRecipeChoice(price) && typeof releaseExactPrices === "boolean" && (check === null || isPriceCheckRef(check));
+}
+
+/** Whether the change asks for anything: a price other than what is saved, or a release. */
+export function isProductPriceChanged(change: Pick<ProductPriceChange, "price" | "releaseExactPrices">): boolean {
+  return change.price.mode !== "leave" || change.releaseExactPrices;
+}
+
+/**
+ * The price choice as the draft keeps it: a choice that asks for what the
+ * product already has (the same recipe, or "Use default" while it has none)
+ * is "leave", so it counts as no change; a recipe is copied through the
+ * contract, so the draft never shares an object with an editor.
+ */
+function priceChoiceFor(choice: FieldChoice<PricingRecipe>, ownPrice: PricingRecipe | null): FieldChoice<PricingRecipe> {
+  if (choice.mode === "leave") return LEAVE;
+  if (choice.mode === "default") return ownPrice === null ? LEAVE : DEFAULT;
+  if (ownPrice !== null && sameDraftValue(choice.value, ownPrice)) return LEAVE;
+  return { mode: "set", value: pricingRecipeSchema.parse(choice.value) };
+}
+
+/** The price draft value on the own read's answer; with no change, it is the draft's base (every part at rest). */
+export function productPriceDraftValue(
+  own: Pick<ProductOwnSettings, "own" | "revisionId">,
+  change: ProductPriceChange = NO_PRICE_CHANGE,
+): ProductPriceDraftValue {
+  return productPriceDraftValueOn(productPriceBaseOf(own), change);
+}
+
+/** The same on a base a draft already holds (the price and revision it started from). */
+export function productPriceDraftValueOn(base: ProductPriceBase, change: ProductPriceChange = NO_PRICE_CHANGE): ProductPriceDraftValue {
+  const price = priceChoiceFor(change.price, base.ownPrice);
+  const releaseExactPrices = change.releaseExactPrices === true;
+  // A check belongs to a change; with nothing to check there is none.
+  const check = price.mode === "leave" && !releaseExactPrices ? null : change.check === null ? null : { ...change.check };
+  return {
+    priceChange: price === LEAVE && !releaseExactPrices && check === null ? NO_PRICE_CHANGE : { price, releaseExactPrices, check },
+    ownPrice: base.ownPrice,
+    revisionId: base.revisionId,
+  };
+}
+
+/** The price draft value, or null when `value` is not one (a size's price, the settings, another editor's draft). */
+export function readProductPriceDraft(value: DraftValue): ProductPriceDraftValue | null {
+  const { priceChange, ownPrice, revisionId } = value;
+  if (!isProductPriceChange(priceChange) || !isRevision(revisionId)) return null;
+  if (ownPrice !== null && !pricingRecipeSchema.safeParse(ownPrice).success) return null;
+  return value as unknown as ProductPriceDraftValue;
+}
+
+/** This product's price draft and its value, when the step's one draft is it; null otherwise. */
+export function ownProductPriceDraft(draft: ListingSettingsDraft | null, editor: EditorId): { draft: ListingSettingsDraft; value: ProductPriceDraftValue } | null {
+  if (draft === null || draft.editor !== editor) return null;
+  const value = readProductPriceDraft(draft.value);
+  return value === null ? null : { draft, value };
+}
+
+/** What putting the price editor's choice in the draft does ([Check new prices]; nothing is sent until the check and its Save). */
+export type ProductPriceEditAction =
+  /** The product's price draft holds a change: the choice replaces it (`reopen` when the drawer was hidden by Back). */
+  | { kind: "edit"; reopen: boolean; value: ProductPriceDraftValue }
+  /** A new price draft on the own read: opened on `base` (asking first if another editor holds changes), then `value`. */
+  | { kind: "start"; base: ProductPriceDraftValue; value: ProductPriceDraftValue }
+  /** A size's price or the settings hold a change: "Save or discard your other change first." (D2). */
+  | { kind: "finish_first" }
+  /** A save is in flight or unconfirmed: nothing changes until it ends (R:539, R:541). */
+  | { kind: "locked" }
+  /**
+   * The choice is what the product has and nothing is released: nothing to
+   * check, so the editor closes. `value` is the clean draft value when the
+   * draft held a price change the choice undoes (send it to `drafts.edit`:
+   * the bar then reads "All saved"); null when no draft opens.
+   */
+  | { kind: "no_change"; value: ProductPriceDraftValue | null };
+
+/**
+ * [Check new prices] in the price editor: the editor's choice goes in the
+ * draft as the product's price change, with no check yet (the check runner
+ * adds it). A price draft with changes keeps its start (the price and
+ * revision the vendor saw, D6a); any other edit starts from the own read as
+ * it is now.
+ */
+export function productPriceEditAction(input: {
+  draft: ListingSettingsDraft | null;
+  editor: EditorId;
+  own: Pick<ProductOwnSettings, "own" | "revisionId">;
+  change: Pick<ProductPriceChange, "price" | "releaseExactPrices">;
+}): ProductPriceEditAction {
+  const { draft, editor } = input;
+  const ownDraft = draft !== null && draft.editor === editor ? draft : null;
+  if (ownDraft !== null && isDraftLocked(ownDraft)) return { kind: "locked" };
+  const kind = drawerChangeKind(draft, editor);
+  const change: ProductPriceChange = { price: input.change.price, releaseExactPrices: input.change.releaseExactPrices, check: null };
+  if (kind === "product_price" && ownDraft !== null) {
+    const current = readProductPriceDraft(ownDraft.value)!;
+    const value = productPriceDraftValueOn(current, change);
+    // The choice brings the price back to what the product has: the draft takes it (clean), and there is nothing to check.
+    if (!isProductPriceChanged(value.priceChange)) return { kind: "no_change", value };
+    return { kind: "edit", reopen: !ownDraft.open, value };
+  }
+  const value = productPriceDraftValue(input.own, change);
+  if (!isProductPriceChanged(value.priceChange)) return { kind: "no_change", value: null };
+  if (decideDrawerEdit(kind, "product_price") === "finish_first") return { kind: "finish_first" };
+  return { kind: "start", base: productPriceDraftValue(input.own), value };
+}
+
+/** The check the runner made, put in the price draft (the change stays; `null` drops a check, e.g. "Back to editing"). */
+export function productPriceDraftWithCheck(value: ProductPriceDraftValue, check: PriceCheckRef | null): ProductPriceDraftValue {
+  return { ...value, priceChange: { ...value.priceChange, check: check === null ? null : { ...check } } };
+}
+
+/** The price and revision a price draft started from, and the same of an own read: what D6a compares. */
+export interface ProductPriceBase {
+  readonly ownPrice: PricingRecipe | null;
+  readonly revisionId: number | null;
+}
+
+export function productPriceBaseOf(own: Pick<ProductOwnSettings, "own" | "revisionId">): ProductPriceBase {
+  return { ownPrice: own.own.price, revisionId: own.revisionId };
+}
+
+/**
+ * Whether the product's price or its settings revision moved away from what
+ * the draft started from (D6a): another window saved, so the check would
+ * price over something the vendor never saw. Then nothing is sent and the
+ * draft shows the conflict.
+ */
+export function productPriceBaseMoved(base: ProductPriceBase, latest: ProductPriceBase): boolean {
+  return base.revisionId !== latest.revisionId || !sameDraftValue(base.ownPrice, latest.ownPrice);
+}
+
+/** "Load latest": the vendor's price change on what is saved now, and whether it is still a change. */
+export interface ProductPriceReload {
+  /** The vendor's change on the price and revision read now, its check dropped: send it to the draft first. */
+  edited: ProductPriceDraftValue;
+  /** What is saved now, the draft's new base: rebase on it with `marked`. */
+  latest: ProductPriceDraftValue;
+  /** `["priceChange"]` when the vendor changed the price and another window moved it too (R:542). */
+  marked: readonly string[];
+  /** False when nothing of the vendor's is left to keep (the other window saved the same price): discard instead. */
+  keeps: boolean;
+}
+
+/** After a conflict (D6a): the vendor's change on the own read as it is now. The check is dropped: it was of the old price. */
+export function rebaseProductPriceDraft(mine: ProductPriceDraftValue, latest: Pick<ProductOwnSettings, "own" | "revisionId">): ProductPriceReload {
+  const edited = productPriceDraftValue(latest, { ...mine.priceChange, check: null });
+  const priceMoved = !sameDraftValue(mine.ownPrice, latest.own.price);
+  return {
+    edited,
+    latest: productPriceDraftValue(latest),
+    marked: priceMoved && mine.priceChange.price.mode !== "leave" && edited.priceChange.price.mode !== "leave" ? ["priceChange"] : [],
+    keeps: isProductPriceChanged(edited.priceChange),
+  };
+}
+
+/** The rights the price editor reads: W7's (plan D3). A price names no eBay value, so nothing else is asked. */
+export type ProductPriceRights = Pick<ListingSettingsEditRights, "priceCheck">;
+
+/** W7's right as the editor's: a recipe, "Use default" and the release all need it, and nothing else. */
+export function productPriceRights(rights: ProductPriceRights): ProductFieldRights {
+  const right = rights.priceCheck;
+  return right.editable
+    ? { canSet: true, canDefault: true, canNone: false, reason: null }
+    : { canSet: false, canDefault: false, canNone: false, reason: right.reason };
 }

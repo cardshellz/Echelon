@@ -34,6 +34,7 @@ import { supportedVariant, stockAvailable } from "../domain/order-edit-variant";
 import { shopifyOrderEditVariantSchema as VARIANT } from "./shopify-order-edit-variant";
 import { cents } from "./shopify-order-edit-money";
 import {
+  MAX_ORDER_EDIT_CODES,
   orderEditRequestedCodesSchema,
   type OrderEditCodePricing,
 } from "@shared/order-edits/order-edit-codes";
@@ -666,20 +667,21 @@ export class ShopifyOrderEditProvider
     const newCodes = plan.discountCodes ?? [];
     const retained = snapshot.codePricing?.rules ?? [];
     if (!newCodes.length && !retained.length) return undefined;
-    if (newCodes.length + retained.length > 5)
+    if (newCodes.length + retained.length > MAX_ORDER_EDIT_CODES)
       fail(
         "ORDER_EDIT_CODES_LIMIT",
-        "An order can have up to five discount codes.",
+        `An order can have up to ${MAX_ORDER_EDIT_CODES} discount codes.`,
       );
     const gateway = await this.codes(snapshot.connectionId);
     const rules = newCodes.length
       ? await gateway.rules(snapshot, newCodes)
       : [];
+    // Reject unsupported usage restrictions before calculating or opening an
+    // edit. A manual adjustment cannot consume a native Shopify redemption.
+    assertCouponAdjustmentSupported(rules, retained);
     const approved = rules.length
       ? await gateway.verifyNativeCalculation(snapshot, lines, rules)
       : undefined;
-    // A native quote proves the calculation, not consumption of a Shopify code.
-    assertCouponAdjustmentSupported(rules);
     return priceOrderEditCodes(
       lines,
       [...retained, ...rules],

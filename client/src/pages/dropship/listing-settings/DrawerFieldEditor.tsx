@@ -60,9 +60,11 @@ const FOCUSABLE = "input:not([disabled]), textarea:not([disabled]), button:not([
  * into it when it opens, to the picked choice, else the first one that can
  * be used; the drawer gives focus back to the row's [Change] when it closes.
  */
-export function FieldEditorFrame({ testId, title, productName, message, doneDisabled, onDone, onCancel, children }: FieldEditorBaseProps & {
+export function FieldEditorFrame({ testId, title, productName, message, doneDisabled, doneLabel = LISTING_SETTINGS_EDIT_WORDS.done, onDone, onCancel, children }: FieldEditorBaseProps & {
   testId: string;
   doneDisabled: boolean;
+  /** The main button's words when they aren't [Done]: the price editor's [Check new prices] (PR 10d). */
+  doneLabel?: string;
   onDone: () => void;
   children: ReactNode;
 }) {
@@ -91,7 +93,7 @@ export function FieldEditorFrame({ testId, title, productName, message, doneDisa
           {LISTING_SETTINGS_SAVE_WORDS.cancel}
         </Button>
         <Button type="button" size="sm" className="min-h-11 sm:min-h-9" disabled={doneDisabled} onClick={onDone}>
-          {LISTING_SETTINGS_EDIT_WORDS.done}
+          {doneLabel}
         </Button>
       </div>
     </div>

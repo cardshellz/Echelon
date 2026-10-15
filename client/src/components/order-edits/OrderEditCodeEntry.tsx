@@ -78,7 +78,7 @@ export function OrderEditCodeEntry({
           autoCapitalize="characters"
           spellCheck={false}
           placeholder="Enter code"
-          aria-describedby={error ? `${id}-error` : `${id}-help`}
+          aria-describedby={`${id}-help${error ? ` ${id}-error` : ""}`}
           aria-invalid={error !== null}
           disabled={disabled || pending || !available}
           onChange={(event) => {
@@ -101,11 +101,24 @@ export function OrderEditCodeEntry({
           {pending ? "Checking…" : "Apply code"}
         </Button>
       </div>
+      {error && value.trim() && (
+        <button
+          type="button"
+          className="oe-code-clear"
+          disabled={disabled || pending}
+          onClick={() => {
+            setValue("");
+            setError(null);
+          }}
+        >
+          Clear code
+        </button>
+      )}
       <p id={`${id}-help`} className="oe-code-help">
         {available
           ? value.trim()
             ? "Apply this code or clear it before continuing."
-            : "Eligible codes follow the same combination rules as checkout."
+            : "Codes with usage limits must be used at checkout. Other eligible codes follow your existing discount combination rules."
           : "Codes are temporarily unavailable. Your order has not changed."}
       </p>
       {codes.length > 0 && (

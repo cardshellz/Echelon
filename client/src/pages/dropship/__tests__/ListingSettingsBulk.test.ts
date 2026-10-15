@@ -70,7 +70,7 @@ vi.mock("@/components/ui/sheet", async () => {
 const STORE = 22;
 const GENERATED_AT = "2026-10-09T12:00:00.000Z";
 const EDITABLE: ListingSettingsRight = { editable: true, reason: null };
-const RIGHTS: BulkSettingsRights = { bulkSettings: EDITABLE, shipping: EDITABLE, policies: EDITABLE, ebayCategory: EDITABLE, shelfPick: EDITABLE };
+const RIGHTS: BulkSettingsRights = { bulkSettings: EDITABLE, shipping: EDITABLE, policies: EDITABLE, ebayCategory: EDITABLE, shelfPick: EDITABLE, priceCheck: EDITABLE };
 const noop = () => undefined;
 
 afterEach(() => {
@@ -442,9 +442,11 @@ describe("BulkSettingsSheet (plan 6.3)", () => {
       expect(row, key).toMatch(new RegExp(`<button[^>]*aria-label="Change ${ROW_SETTINGS[index]} for the selected products"[^>]*aria-expanded="false"[^>]*>Change</button>`));
       expect(row, key).not.toMatch(/<button[^>]*disabled=""[^>]*>Change<\/button>/);
     });
-    // Exactly the six rows: never a price row, an id or a size's own words.
-    expect(markup.match(/data-testid="drawer-setting-[A-Za-z]+"/g)).toEqual(ROW_KEYS.map((key) => `data-testid="drawer-setting-${key}"`));
-    expect(markup).not.toMatch(/drawer-setting-price|>Price<|\b(?:F1|F2|R1|P1)\b|ls-bulk|Sizes differ/);
+    // Exactly the seven rows, the Price row first (PR 10d, plan 7.2): never an id or a size's own words.
+    expect(markup.match(/data-testid="drawer-setting-[A-Za-z]+"/g)).toEqual(["price", ...ROW_KEYS].map((key) => `data-testid="drawer-setting-${key}"`));
+    expect(rowOf(markup, "price")).toContain(">Leave as is</p>");
+    expect(rowOf(markup, "price")).toMatch(/<button[^>]*aria-label="Change price for the selected products"[^>]*aria-expanded="false"[^>]*>Change<\/button>/);
+    expect(markup).not.toMatch(/\b(?:F1|F2|R1|P1)\b|ls-bulk|Sizes differ/);
     // Nothing chosen yet: Save waits for a change.
     expect(footerOf(markup)).toMatch(/<button[^>]*disabled=""[^>]*>Save for 3 products<\/button>/);
     expect(footerOf(markup)).not.toContain("Not saved");
@@ -467,8 +469,8 @@ describe("BulkSettingsSheet (plan 6.3)", () => {
     const loading = renderSheet(tick(11, 12, 13), null);
     expect(loading).toContain('<p role="status" class="text-sm text-zinc-600">Checking 3 products…</p>');
     expect(loading).toContain("<h2>Set for 3 products</h2>");
-    // No draft yet: every Change waits.
-    expect(loading.match(/<button[^>]*disabled=""[^>]*>Change<\/button>/g)).toHaveLength(6);
+    // No draft yet: every Change waits, the Price row's too.
+    expect(loading.match(/<button[^>]*disabled=""[^>]*>Change<\/button>/g)).toHaveLength(7);
     const failed = renderSheet(tick(11, 12, 13), null, { error: new DropshipApiError({ status: 500, code: "X", message: "x" }) });
     expect(failed).toContain("Couldn't check the selected products. Try again.");
     expect(failed).toMatch(/data-testid="bulk-settings-read-problem"><span>[^<]+<\/span><button[^>]*>Try again<\/button>/);
@@ -519,7 +521,7 @@ describe("BulkSettingsSheet (plan 6.3)", () => {
     const locked = renderSheet(tick(11, 12, 13), uncertain, ids([[11, 5], [12, null], [13, 9]]));
     expect(footerOf(locked)).toMatch(/<button[^>]*>Check again<\/button>/);
     expect(footerOf(locked)).toMatch(/<button[^>]*disabled=""[^>]*>Discard<\/button>/);
-    expect(locked.match(/<button[^>]*disabled=""[^>]*>Change<\/button>/g)).toHaveLength(6);
+    expect(locked.match(/<button[^>]*disabled=""[^>]*>Change<\/button>/g)).toHaveLength(7);
   });
 
   it("reopened on an unconfirmed save, names that save's products and needs no ids read, whatever is ticked (D21)", () => {
@@ -538,7 +540,8 @@ describe("BulkSettingsSheet (plan 6.3)", () => {
   });
 
   it("takes every Change away while W6 can't be used, and leaves only Use default (and None) under a sign-in (D3, D4)", () => {
-    const off: BulkSettingsRights = { ...RIGHTS, bulkSettings: { editable: false, reason: "banner" } };
+    // The D3 kinds take W6's and W7's rights away together (`listingSettingsEditRights`); the Price row's Change goes too.
+    const off: BulkSettingsRights = { ...RIGHTS, bulkSettings: { editable: false, reason: "banner" }, priceCheck: { editable: false, reason: "banner" } };
     const markup = renderSheet(tick(11), bulkDraft({}, PICKED.slice(0, 1)), ids([[11, 5]]), { rights: off });
     expect(markup).not.toContain(">Change</button>");
     expect(footerOf(markup)).toMatch(/<button[^>]*disabled=""[^>]*>Save for 1 product<\/button>/);

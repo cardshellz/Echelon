@@ -505,12 +505,14 @@ describe("new coupon native edit path", () => {
       acceptAutomaticDiscounts: source !== "legacy",
     });
   });
-  it("reports the native redemption limitation after calculation without consulting points or opening an edit", async () => {
+  it.each([
+    { usageLimit: 1, appliesOncePerCustomer: false },
+    { usageLimit: 100, appliesOncePerCustomer: false },
+    { usageLimit: null, appliesOncePerCustomer: true },
+  ])("rejects restricted coupon %j before calculating or opening an edit", async (restrictions) => {
     const h = codeHarness();
     const lookup = newCodeLookup();
-    (
-      lookup.codeDiscountNodeByCode.codeDiscount as Record<string, unknown>
-    ).usageLimit = 1;
+    Object.assign(lookup.codeDiscountNodeByCode.codeDiscount, restrictions);
     h.responses[3] = lookup;
     const baseline = await h.provider.readOrder(4, "100");
     await expect(h.provider.quote(
@@ -523,11 +525,43 @@ describe("new coupon native edit path", () => {
     });
     expect(
       h.requests.some((request) => request.query.includes("draftOrderCalculate")),
-    ).toBe(true);
+    ).toBe(false);
     expect(
       h.requests.some((request) => request.query.includes("orderEditBegin")),
     ).toBe(false);
   });
+  it.each(["usage_limit", "once_per_customer", "stacking", "expired", "saving_changed"])(
+    "does not submit an unrestricted-code adjustment when %s changes after review",
+    async (change) => {
+      const h = codeHarness();
+      const baseline = await h.provider.readOrder(4, "100");
+      const quote = await h.provider.quote(4, baseline,
+        { changes: [], additions: [], discountCodes: ["TEN"] }, "changed-code");
+      const lookup = newCodeLookup();
+      const terms = lookup.codeDiscountNodeByCode.codeDiscount;
+      const calculation = nativeCodeCalculation();
+      let expectedCode = "ORDER_EDIT_CODE_TERMS_CHANGED";
+      if (change === "usage_limit")
+        (terms as Record<string, unknown>).usageLimit = 10;
+      if (change === "once_per_customer") terms.appliesOncePerCustomer = true;
+      if (change === "stacking") terms.combinesWith.productDiscounts = false;
+      if (change === "expired") {
+        terms.status = "EXPIRED";
+        calculation.draftOrderCalculate.calculatedDraftOrder.platformDiscounts = [];
+        expectedCode = "ORDER_EDIT_CODE_INELIGIBLE";
+      }
+      if (change === "saving_changed") {
+        calculation.draftOrderCalculate.calculatedDraftOrder.platformDiscounts[0].totalAmountPriceSet = bag("1.99");
+        expectedCode = "ORDER_EDIT_CODE_NATIVE_MISMATCH";
+      }
+      h.responses.push(shippingOrder(), lookup, calculation);
+      const before = vi.fn(async () => {});
+      await expect(h.provider.commit(4, quote, "changed-code", before))
+        .rejects.toMatchObject({ code: expectedCode, outcome: "rejected" });
+      expect(before).not.toHaveBeenCalled();
+      expect(h.requests.some((request) => request.query.includes("orderEditCommit"))).toBe(false);
+    },
+  );
   it("retains the reservation boundary for an already-persisted legacy receipt quote", async () => {
     const h = codeHarness();
     const baseline = await h.provider.readOrder(4, "100");

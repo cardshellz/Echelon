@@ -159,6 +159,7 @@ async function installFixtures(
     includeSpecialProducts?: boolean;
     codeEntryAvailable?: boolean;
     codeRejection?: { code: string; message: string };
+    approvedCode?: { code: string; amountCents: number };
   } = {},
 ) {
   const failures: string[] = [];
@@ -469,6 +470,9 @@ async function installFixtures(
           },
         });
       const quantity = input.changes[0]?.quantity ?? 2;
+      const coupon = input.discountCodes?.includes(options.approvedCode?.code ?? "")
+        ? options.approvedCode : undefined;
+      const saving = coupon?.amountCents ?? 0;
       const lines = [
         ...(quantity
           ? [
@@ -479,7 +483,7 @@ async function installFixtures(
                 title: "Toploader Binder Pages",
                 variantTitle: "Black · 1 Binder",
                 quantity,
-                totalCents: quantity * 1000,
+                totalCents: quantity * 1000 - saving,
               },
             ]
           : []),
@@ -501,11 +505,12 @@ async function installFixtures(
           calculatedAt: "2026-10-05T12:00:00.000Z",
           expiresAt: "2026-10-05T12:01:00.000Z",
           lines,
+          appliedCodes: coupon ? [coupon] : [],
           financials: {
-            itemsGrossCents: total,
+            itemsGrossCents: total + saving,
             itemsNetCents: total,
-            itemsDiscountCents: 0,
-            itemDiscountLabels: [],
+            itemsDiscountCents: saving,
+            itemDiscountLabels: coupon ? [coupon.code] : [],
             shippingGrossCents: 0,
             shippingDiscountCents: 0,
             shippingCents: 0,
@@ -515,9 +520,9 @@ async function installFixtures(
             totalCents: total,
             lines: lines.map((line) => ({
               id: line.id,
-              grossCents: line.totalCents,
+              grossCents: line.totalCents + (line.id === lineId ? saving : 0),
               netCents: line.totalCents,
-              discountCents: 0,
+              discountCents: line.id === lineId ? saving : 0,
             })),
           },
           shippingRepricing: {
@@ -542,8 +547,11 @@ async function installFixtures(
         ["expired", "recovered", "completed", "failed"].includes(current.status)
       ) {
         const quantity = input.changes[0]?.quantity ?? 2;
+        const coupon = input.discountCodes?.includes(options.approvedCode?.code ?? "")
+          ? options.approvedCode : undefined;
+        const saving = coupon?.amountCents ?? 0;
         const total =
-          quantity * 1000 +
+          quantity * 1000 - saving +
           input.additions.reduce((sum, item) => sum + item.quantity * 1500, 0);
         current = {
           operationId: current
@@ -555,6 +563,12 @@ async function installFixtures(
           updatedTotalCents: total,
           balanceDueCents: Math.max(0, total - 2000),
           refundDueCents: Math.max(0, 2000 - total),
+          ...(options.codeEntryAvailable ? {
+            codeEntryAvailable: true,
+            requestedPlan: { changes: input.changes, additions: input.additions, discountCodes: input.discountCodes ?? [] },
+            expectedRevision: input.expectedRevision,
+            appliedCodes: coupon ? [coupon] : [],
+          } : {}),
           lines: [
             {
               id: "calculated-1",
@@ -563,7 +577,7 @@ async function installFixtures(
               title: "Toploader Binder Pages",
               variantTitle: "Black · 1 Binder",
               quantity,
-              totalCents: quantity * 1000,
+              totalCents: quantity * 1000 - saving,
             },
             ...input.additions.map((item) => ({
               id: item.variantId,
@@ -680,7 +694,7 @@ for (const rejection of [
   {
     code: "ORDER_EDIT_NATIVE_COUPON_REDEMPTION_UNAVAILABLE",
     message:
-      "Shopify can calculate this discount, but this code cannot currently be redeemed on an existing order. Your order has not changed and the code has not been used.",
+      "This code has a usage limit and can only be applied at checkout. It can't be added to an existing order. Clear the code to continue editing; your order has not changed.",
   },
 ]) {
   test(`discount entry preserves the draft after ${rejection.code} without a points request`, async ({ page }) => {
@@ -703,7 +717,9 @@ for (const rejection of [
     await expect(
       page.getByRole("textbox", { name: "Coupon or rewards code", exact: true }),
     ).toHaveCount(0);
-    await field.fill("");
+    await page.getByRole("button", { name: "Clear code", exact: true }).click();
+    await expect(field).toHaveValue("");
+    await expect(page.getByRole("alert")).toHaveCount(0);
     await page.getByRole("spinbutton", {
       name: "Quantity for Toploader Binder Pages Black · 1 Binder",
     }).fill("3");
@@ -717,6 +733,46 @@ for (const rejection of [
     await assertFitsScreen(page);
   });
 }
+
+test("unrestricted coupon can be removed, re-added and applied once as a refund without changing quantities", async ({ page }, testInfo) => {
+  const fixture = await installFixtures(page, {
+    codeEntryAvailable: true,
+    approvedCode: { code: "HOLIDAY10", amountCents: 200 },
+  });
+  await chooseOrder(page);
+  const field = page.getByRole("textbox", { name: "Discount code", exact: true });
+  const apply = page.getByRole("button", { name: "Apply code", exact: true });
+  const codes = page.getByRole("list", { name: "Codes added to your changes" });
+  await field.fill("holiday10");
+  await apply.click();
+  await expect(field).toHaveValue("");
+  await expect(codes).toContainText("HOLIDAY10");
+  await expect(codes).toContainText("$2.00");
+  await field.fill("HOLIDAY10");
+  await apply.click();
+  await expect(page.getByRole("alert")).toContainText("This code has already been added.");
+  await page.getByRole("button", { name: "Clear code", exact: true }).click();
+  await page.getByRole("button", { name: "Remove HOLIDAY10", exact: true }).click();
+  await expect(codes).toHaveCount(0);
+  await field.fill("HOLIDAY10");
+  await apply.click();
+  await expect(codes).toContainText("$2.00");
+  await expect(page.getByRole("spinbutton", { name: "Quantity for Toploader Binder Pages Black · 1 Binder" })).toHaveValue("2");
+  await assertFitsScreen(page);
+  await page.screenshot({ path: testInfo.outputPath("unrestricted-coupon.png"), fullPage: true });
+  await page.getByRole("button", { name: "Review changes", exact: true }).click();
+  const submit = page.getByRole("button", { name: "Apply changes and refund $2.00", exact: true });
+  await expect(submit).toBeVisible();
+  expect(fixture.requests.find((request) => request.path.endsWith("/quotes"))?.body)
+    .toMatchObject({ changes: [], additions: [], discountCodes: ["HOLIDAY10"] });
+  await submit.click();
+  await expect(page.getByText("Refund processing", { exact: true })).toBeVisible();
+  fixture.setStatus("completed");
+  await page.getByRole("button", { name: "Check status", exact: true }).click();
+  await expect(page.getByText("Changes completed", { exact: true })).toBeVisible();
+  expect(fixture.requests.filter((request) => request.path.endsWith("/commit"))).toHaveLength(1);
+  expect(fixture.failures).toEqual([]);
+});
 
 for (const product of specialProducts) {
   test(`discovers available ${product.selectionFlow} products and handles requirements after selection`, async ({ page }) => {
