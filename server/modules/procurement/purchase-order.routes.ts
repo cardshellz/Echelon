@@ -473,8 +473,7 @@ export function registerPurchaseOrderRoutes(app: Express, financialEvidence: Pic
       const costs = await purchasing.getPoShipmentCosts(parsed.data);
       if (!costs) return res.status(404).json({ code: "PURCHASE_ORDER_NOT_FOUND", error: "Purchase order not found" });
       res.vary("X-Shipment-Cost-Review-Version");
-      res.json(req.get("X-Shipment-Cost-Review-Version") === "2" ? costs
-        : { ...costs, lines: costs.lines.map(({ exceptionReview: _review, ...line }) => line) });
+      res.json(shipmentCostReviewResponse(costs,req.get("X-Shipment-Cost-Review-Version")));
     } catch (error: unknown) {
       console.error(JSON.stringify({ event: "procurement.po_shipment_costs_failed", poId: parsed.data,
         errorType: error instanceof Error ? error.name : "unknown" }));
@@ -1370,3 +1369,4 @@ export function registerPurchaseOrderRoutes(app: Express, financialEvidence: Pic
     },
   );
 }
+import { shipmentCostReviewResponse } from "@shared/procurement/shipment-cost-review-version";

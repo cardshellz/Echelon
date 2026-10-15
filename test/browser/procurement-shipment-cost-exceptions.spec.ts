@@ -1,131 +1,330 @@
 import { expect, test, type Page } from "@playwright/test";
 import { installFixtures, po } from "./procurement-fixtures";
-import type { ShipmentCostException, ShipmentExceptionDecision, ShipmentExceptionRequest } from "../../shared/procurement/shipment-cost-exception";
+import type { ShipmentCostException } from "../../shared/procurement/shipment-cost-exception";
+import type { ReconciliationContext, ReconciliationRequest } from "../../shared/procurement/cost-reconciliation";
 
-async function installException(page: Page, options: { viewer?: boolean; lostResponse?: boolean; stale?: boolean } = {}) {
+async function installReconciliation(
+  page: Page,
+  options: { viewer?: boolean; lostResponse?: boolean; stale?: boolean; missing?: boolean } = {},
+) {
   const failures = await installFixtures(page);
-  const review: ShipmentCostException = { state: "open", fingerprint: "b".repeat(64), kind: "unexplained_quantity", currency: "USD",
-    allocatedMills: 28279900, amountMills: 520608, lotsUpdated: 34, cogsRowsUpdated: 326, decision: null,
-    issues: [{ code: "COST_UNRESOLVED_QUANTITY_RETAINED", message: "LEGACY-CASE has four units with no recorded movement.",
-      unresolvedQuantity: { inventoryLotId: 3364, allocationId: 11, lotNumber: "LEGACY-CASE", originalQuantity: 220,
-        onHandQuantityAtReview: 157, recordedOutflowQuantityAtReview: 59, quantity: 4, component: "landed", amountMills: 520608 } }] };
-  const state = { review, keys: [] as string[], bodies: [] as ShipmentExceptionRequest[], saved: null as ShipmentExceptionDecision | null, version: "a".repeat(64),
-    history: [] as (ShipmentExceptionDecision & { amountMills: number; currency: string })[] };
-  await page.route("**/api/**", async route => {
-    const req = route.request(), path = new URL(req.url()).pathname;
-    if (path === "/api/auth/me") return route.fulfill({ json: { user: { id: "test-user", username: "test", role: "admin" },
-      roles: ["admin"], permissions: ["purchasing:view", "purchasing:approve"] } });
+  const review: ShipmentCostException = {
+    state: "open",
+    fingerprint: "b".repeat(64),
+    kind: options.missing ? "missing_receipt_history" : "unexplained_quantity",
+    currency: "USD",
+    allocatedMills: 1000000,
+    amountMills: options.missing ? 1000000 : 100001,
+    lotsUpdated: options.missing ? 0 : 2,
+    cogsRowsUpdated: options.missing ? 0 : 1,
+    decision: null,
+    issues: options.missing
+      ? [{ code: "COST_HISTORICAL_LINEAGE_MISSING", message: "Synthetic receipt links missing." }]
+      : [
+          {
+            code: "COST_UNRESOLVED_QUANTITY_RETAINED",
+            message: "TEST-LOT has one unit without a recorded movement.",
+            unresolvedQuantity: {
+              inventoryLotId: 6,
+              allocationId: 7,
+              lotNumber: "TEST-LOT",
+              originalQuantity: 10,
+              onHandQuantityAtReview: 4,
+              recordedOutflowQuantityAtReview: 5,
+              quantity: 1,
+              component: "landed",
+              amountMills: 100001,
+            },
+          },
+        ],
+    reconciliation: {
+      status: "unresolved",
+      postedMills: 0,
+      unassignedMills: options.missing ? 1000000 : 100001,
+      destination: null,
+    },
+  };
+  const context: ReconciliationContext = {
+    lineId: 23,
+    shipmentId: 42,
+    sku: "TEST-PRODUCT",
+    currency: "USD",
+    sourceVersion: "a".repeat(64),
+    sourceAmountMills: review.allocatedMills,
+    sourceEvidence: options.missing ? "estimated" : "confirmed",
+    historicalAmountMills: review.amountMills,
+    balances: { historical_cogs: 0, inventory_variance: 0 },
+    state: review.reconciliation!,
+    canApprove: !options.viewer,
+    blockedReason: options.viewer
+      ? "A current Administrator with purchasing approval permission must approve this correction."
+      : null,
+    records: [
+      {
+        lotId: 6,
+        lotNumber: "TEST-LOT",
+        originalQuantity: 10,
+        onHandQuantity: options.missing ? 0 : 4,
+        receiptId: 8,
+        receiptLineId: 9,
+        quantityWithoutHistory: options.missing ? null : 1,
+        explanation: options.missing
+          ? "The receipt exists but its subsequent cost links are missing."
+          : "One unit has no recorded movement.",
+      },
+    ],
+    issues: review.issues,
+    history: [],
+  };
+  const state = { review, context, keys: [] as string[], bodies: [] as ReconciliationRequest[] };
+  await page.route("**/api/**", async (route) => {
+    const req = route.request(),
+      path = new URL(req.url()).pathname;
+    if (path === "/api/auth/me")
+      return route.fulfill({
+        json: {
+          user: { id: "test-user", username: "test", role: "admin" },
+          roles: ["admin"],
+          permissions: ["purchasing:view", "purchasing:approve"],
+        },
+      });
     if (path === "/api/purchase-orders/17") return route.fulfill({ json: po(17) });
-    if (path === "/api/inbound-shipments/42") return route.fulfill({ json: {
-      id: 42, shipmentNumber: "TEST-SEA-42", status: "closed", mode: "sea_fcl", purchaseOrderId: 17, statusHistory: [],
-      lines: [{ id: 141, purchaseOrderId: 17, purchaseOrderLineId: 101, sku: "TEST-PRODUCT", productName: "Test product", qtyShipped: 2200000, cartonCount: 220 }],
-      costs: [{ id: 71, costType: "freight", actualCents: 282799, estimatedCents: 282799, currency: "USD", costStatus: "finalized" }],
-    } });
-    if (path === "/api/purchase-orders/17/shipment-costs") return route.fulfill({ json: {
-      summary: { currency: "USD", shipmentCount: 1, chargeCount: 1, freightCents: 282799, dutyCents: 0, otherCents: 0,
-        totalCents: 282799, poAmountCents: 6465550, combinedCostCents: 6748349, estimatedCents: 0,
-        unallocatedChargeCount: 0, unsupportedCurrencyCount: 0, appliedLines: 0, reviewLines: 1, pendingLines: 0, inventoryCosting: "review_required" },
-      supplier: { freightCents: 0, dutyCents: 0 }, totals: { freightCents: 282799, dutyCents: 0, combinedCostCents: 6748349 },
-      lines: [{ lineId: 141, shipmentId: 42, shipmentNumber: "TEST-SEA-42", shipmentStatus: "closed", sku: "TEST-PRODUCT",
-        allocatedCents: 282799, status: "review_required", applicationId: 9, recordedAt: "2026-10-15T12:00:00Z", issues: review.issues, exceptionReview: state.review }],
-    } });
-    if (path === "/api/inbound-shipments/42/cost-review") return route.fulfill({ json: { shipmentId: 42,
-      lines: [{ lineId: 141, sku: "TEST-PRODUCT", sourceIssue: null, exceptionReview: state.review,
-        application: { id: 9, status: "review_required", recordedAt: "2026-10-15T12:00:00Z", lotsUpdated: 34, cogsRowsUpdated: 326, issues: review.issues } }] } });
-    if (path === "/api/shipment-lines/141/cost-exception") {
-      if (req.method() === "GET") return route.fulfill({ json: { shipmentId: 42, lineId: 141, sku: "TEST-PRODUCT", sourceVersion: state.version,
-        canApprove: !options.viewer, blockedReason: options.viewer ? "A current Administrator with purchasing approval permission must approve this decision." : null, review: state.review, history: state.history } });
-      const body = req.postDataJSON() as ShipmentExceptionRequest;
-      state.keys.push(req.headers()["idempotency-key"]); state.bodies.push(body);
+    if (path === "/api/inbound-shipments/42")
+      return route.fulfill({
+        json: {
+          id: 42,
+          shipmentNumber: "TEST-SHIP",
+          status: "closed",
+          mode: "sea_fcl",
+          purchaseOrderId: 17,
+          statusHistory: [],
+          lines: [
+            {
+              id: 23,
+              purchaseOrderId: 17,
+              purchaseOrderLineId: 101,
+              sku: "TEST-PRODUCT",
+              productName: "Synthetic product",
+              qtyShipped: 100,
+              cartonCount: 10,
+            },
+          ],
+          costs: [
+            {
+              id: 71,
+              costType: "freight",
+              actualCents: 10000,
+              estimatedCents: 10000,
+              currency: "USD",
+              costStatus: "finalized",
+            },
+          ],
+        },
+      });
+    if (path === "/api/purchase-orders/17/shipment-costs")
+      return route.fulfill({
+        json: {
+          summary: {
+            currency: "USD",
+            shipmentCount: 1,
+            chargeCount: 1,
+            freightCents: 10000,
+            dutyCents: 0,
+            otherCents: 0,
+            totalCents: 10000,
+            poAmountCents: 100000,
+            combinedCostCents: 110000,
+            estimatedCents: 0,
+            unallocatedChargeCount: 0,
+            unsupportedCurrencyCount: 0,
+            appliedLines: 0,
+            reviewLines: 1,
+            pendingLines: 0,
+            inventoryCosting: "review_required",
+          },
+          supplier: { freightCents: 0, dutyCents: 0 },
+          totals: { freightCents: 10000, dutyCents: 0, combinedCostCents: 110000 },
+          lines: [
+            {
+              lineId: 23,
+              shipmentId: 42,
+              shipmentNumber: "TEST-SHIP",
+              shipmentStatus: "closed",
+              sku: "TEST-PRODUCT",
+              allocatedCents: 10000,
+              status: "review_required",
+              applicationId: 9,
+              recordedAt: "2026-01-01T12:00:00Z",
+              issues: review.issues,
+              exceptionReview: state.review,
+            },
+          ],
+        },
+      });
+    if (path === "/api/inbound-shipments/42/cost-review")
+      return route.fulfill({
+        json: {
+          shipmentId: 42,
+          lines: [
+            {
+              lineId: 23,
+              sku: "TEST-PRODUCT",
+              sourceIssue: null,
+              exceptionReview: state.review,
+              application: {
+                id: 9,
+                status: "review_required",
+                recordedAt: "2026-01-01T12:00:00Z",
+                lotsUpdated: 2,
+                cogsRowsUpdated: 1,
+                issues: review.issues,
+              },
+            },
+          ],
+        },
+      });
+    if (path === "/api/shipment-lines/23/cost-reconciliation") {
+      if (req.method() === "GET") return route.fulfill({ json: state.context });
+      const body = req.postDataJSON() as ReconciliationRequest;
+      state.keys.push(req.headers()["idempotency-key"]);
+      state.bodies.push(body);
       if (options.stale && state.keys.length === 1) {
-        state.version = "c".repeat(64);
-        return route.fulfill({ status: 409, json: { code: "SHIPMENT_EXCEPTION_STALE", error: "The cost evidence changed. Reload and review the new before and after values." } });
+        state.context = { ...state.context, sourceVersion: "c".repeat(64) };
+        return route.fulfill({
+          status: 409,
+          json: {
+            code: "SHIPMENT_RECONCILIATION_STALE",
+            error: "The cost evidence changed. Reload the before and after.",
+          },
+        });
       }
       if (state.keys.length === 1 || state.keys.at(-2) !== state.keys.at(-1)) {
-        state.saved = { id: state.keys.length, action: body.action,
-          fingerprint: review.fingerprint, actorId: "test-admin", actorName: "Test administrator", reason: body.reason, recordedAt: "2026-10-15T12:00:00Z" };
-        state.history.unshift({ ...state.saved, amountMills: review.amountMills, currency: review.currency });
+        const balances = {
+          historical_cogs: 0,
+          inventory_variance: 0,
+          [body.destination]: context.historicalAmountMills,
+        };
+        const financial = {
+          status: "posted" as const,
+          postedMills: context.historicalAmountMills,
+          unassignedMills: 0,
+          destination: body.destination,
+        };
+        state.context = {
+          ...state.context,
+          sourceVersion: "d".repeat(64),
+          balances,
+          state: financial,
+          history: [
+            {
+              id: state.keys.length,
+              destination: body.destination,
+              beforeMills: state.context.balances[body.destination],
+              afterMills: balances[body.destination],
+              deltaMills: balances[body.destination] - state.context.balances[body.destination],
+              actorName: "Test administrator",
+              reason: body.reason,
+              recordedAt: "2026-01-01T12:00:00Z",
+            },
+            ...state.context.history,
+          ],
+        };
+        state.review = { ...review, reconciliation: financial };
       }
-      state.review = { ...review, state: body.action === "accept" ? "accepted" : "open", decision: state.saved };
       if (options.lostResponse && state.keys.length === 1) return route.abort("connectionreset");
-      return route.fulfill({ json: { lineId: 141, shipmentId: 42, decision: state.saved } });
+      return route.fulfill({ json: { lineId: 23, shipmentId: 42, applicationId: 10, state: state.context.state } });
     }
     return route.fallback();
   });
   await page.goto("/purchase-orders/17?tab=lines");
   await page.getByRole("button", { name: "Review 1 line", exact: true }).click();
-  await page.getByRole("button", { name: "Review exception", exact: true }).click();
+  await page.getByRole("button", { name: "Reconcile costs", exact: true }).click();
   return { state, failures, dialog: page.getByRole("dialog") };
 }
+async function chooseInventory(dialog: ReturnType<Page["getByRole"]>) {
+  await dialog.getByRole("radio", { name: /Historical inventory cost adjustment/ }).check();
+  await dialog
+    .getByLabel("Reason / supporting reference")
+    .fill("Historical records reviewed; the missing movements cannot be attributed to sales.");
+}
 
-test("an admin reviews exact before/after, accepts, reloads and reopens without editing charges", async ({ page }, info) => {
-  const { state, failures, dialog } = await installException(page);
-  await expect(dialog.getByRole("table", { name: "Exception before and after" })).toBeVisible();
-  await expect(dialog.getByText("$52.0608", { exact: true })).toHaveCount(2);
-  await expect(dialog.getByText("$2,827.99", { exact: true })).toHaveCount(2);
-  const approve = dialog.getByRole("button", { name: "Accept historical difference", exact: true });
+test("admin sees exact before/after, posts costs and reloads the saved financial result", async ({ page }, info) => {
+  const { dialog, state, failures } = await installReconciliation(page);
+  const approve = dialog.getByRole("button", { name: "Approve & post costs", exact: true });
   await expect(approve).toBeDisabled();
-  await dialog.getByLabel("Reason / supporting reference").fill("Reviewed historic movements; original evidence is unavailable.");
+  await expect(dialog.getByText("Receipt #8 / line #9.", { exact: false })).toBeVisible();
+  await chooseInventory(dialog);
+  const table = dialog.getByRole("table", { name: "Cost reconciliation before and after" });
+  await expect(table.getByRole("row", { name: /Unassigned cost/ })).toContainText("$10.0001");
+  await expect(table.getByRole("row", { name: /Unassigned cost/ })).toContainText("$0.00");
+  await expect(table.getByRole("row", { name: /Assigned to tracked/ })).toContainText("$89.9999");
   await expect(approve).toBeEnabled();
-  const bounds = await approve.boundingBox(); expect(bounds!.y + bounds!.height).toBeLessThanOrEqual(page.viewportSize()!.height);
-  await dialog.screenshot({ path: info.outputPath("historical-difference-before-after.png") });
+  const bounds = await approve.boundingBox();
+  expect(bounds!.y + bounds!.height).toBeLessThanOrEqual(page.viewportSize()!.height);
+  await dialog.screenshot({ path: info.outputPath("cost-reconciliation-before-after.png") });
   await approve.click();
   await expect(dialog).toHaveCount(0);
-  await expect(page.getByText("Historical difference accepted", { exact: true })).toBeVisible();
-  await expect(page.getByTestId("po-freight-summary-card")).toContainText("$2,827.99");
-  await expect(page.getByText(/1 historical inventory difference is accepted/)).toBeVisible();
+  await expect(page.getByText("Costs reconciled", { exact: true })).toBeVisible();
+  await expect(page.getByText(/Costs reconciled on 1 shipment line/)).toBeVisible();
   await page.reload();
-  await page.getByRole("button", { name: "View accepted differences", exact: true }).click();
-  await page.getByRole("button", { name: "Review decision", exact: true }).click();
-  await dialog.getByText("Decision history (1)", { exact: true }).click();
-  await expect(dialog).toContainText("Reviewed historic movements; original evidence is unavailable.");
-  await dialog.getByLabel("Reason / supporting reference").fill("New supplier documentation needs review.");
-  await dialog.getByRole("button", { name: "Reopen exception", exact: true }).click();
-  await expect(page.getByText("Inventory history exception", { exact: true })).toBeVisible();
-  expect(state.bodies.map(body => body.action)).toEqual(["accept", "reopen"]);
-  expect(state.bodies.every(body => Object.keys(body).sort().join(",") === "action,reason,sourceVersion")).toBe(true);
+  await page.getByRole("button", { name: "View reconciled costs", exact: true }).click();
+  await page.getByRole("button", { name: "View reconciliation", exact: true }).click();
+  await dialog.getByText("Posted adjustments (1)", { exact: true }).click();
+  await expect(dialog).toContainText("Test administrator");
+  await expect(dialog).toContainText("Historical records reviewed");
+  expect(state.bodies).toHaveLength(1);
+  expect(Object.keys(state.bodies[0]).sort()).toEqual(["destination", "reason", "sourceVersion"]);
   expect(failures).toEqual([]);
 });
-
-test("server approval authority controls the dialog even when session UI says admin", async ({ page }) => {
-  const { dialog, state, failures } = await installException(page, { viewer: true });
-  await expect(dialog).toContainText("A current Administrator with purchasing approval permission must approve this decision.");
-  await expect(dialog.getByRole("button", { name: "Accept historical difference", exact: true })).toHaveCount(0);
-  await expect(dialog.getByLabel("Reason / supporting reference")).toBeDisabled();
-  expect(state.keys).toEqual([]); expect(failures).toEqual([]);
+test("missing receipt links show the full unassigned charge and affected receipt", async ({ page }) => {
+  const { dialog, failures } = await installReconciliation(page, { missing: true });
+  await chooseInventory(dialog);
+  await expect(dialog.getByRole("row", { name: /Unassigned cost/ })).toContainText("$100.00");
+  await expect(dialog).toContainText("subsequent cost links are missing");
+  await expect(dialog).toContainText("This shipment charge is still estimated.");
+  expect(failures).toEqual([]);
 });
-
-test("a lost approval response locks the request and retries the same reviewed values", async ({ page }) => {
-  const { dialog, state, failures } = await installException(page, { lostResponse: true });
-  await dialog.getByLabel("Reason / supporting reference").fill("Missing records investigated with operations.");
-  await dialog.getByRole("button", { name: "Accept historical difference", exact: true }).click();
+test("server authority gates posting even when the session UI says admin", async ({ page }) => {
+  const { dialog, state, failures } = await installReconciliation(page, { viewer: true });
+  await expect(dialog).toContainText("A current Administrator");
+  await expect(dialog.getByRole("button", { name: "Approve & post costs", exact: true })).toHaveCount(0);
+  await expect(dialog.getByLabel("Reason / supporting reference")).toBeDisabled();
+  expect(state.keys).toEqual([]);
+  expect(failures).toEqual([]);
+});
+test("lost response locks the reviewed values and reuses the approval key", async ({ page }) => {
+  const { dialog, state, failures } = await installReconciliation(page, { lostResponse: true });
+  await chooseInventory(dialog);
+  await dialog.getByRole("button", { name: "Approve & post costs", exact: true }).click();
   await expect(dialog.getByRole("alert")).toContainText("approval response was lost");
   await expect(dialog.getByLabel("Reason / supporting reference")).toBeDisabled();
   await dialog.getByRole("button", { name: "Retry approval", exact: true }).click();
   await expect(dialog).toHaveCount(0);
-  expect(state.keys).toHaveLength(2); expect(state.keys[1]).toBe(state.keys[0]); expect(state.bodies[1]).toEqual(state.bodies[0]);
+  expect(state.keys).toHaveLength(2);
+  expect(state.keys[1]).toBe(state.keys[0]);
+  expect(state.bodies[1]).toEqual(state.bodies[0]);
   expect(failures).toEqual([]);
 });
-
-test("stale approval requires a refreshed preview before another confirmation", async ({ page }) => {
-  const { dialog, state, failures } = await installException(page, { stale: true });
-  await dialog.getByLabel("Reason / supporting reference").fill("Historical evidence reviewed with the warehouse.");
-  await dialog.getByRole("button", { name: "Accept historical difference", exact: true }).click();
+test("changed evidence requires a refreshed preview", async ({ page }) => {
+  const { dialog, state, failures } = await installReconciliation(page, { stale: true });
+  await chooseInventory(dialog);
+  await dialog.getByRole("button", { name: "Approve & post costs", exact: true }).click();
   await expect(dialog.getByRole("alert")).toContainText("cost evidence changed");
   await dialog.getByRole("button", { name: "Reload review", exact: true }).click();
   await expect(dialog.getByRole("alert")).toHaveCount(0);
-  await dialog.getByRole("button", { name: "Accept historical difference", exact: true }).click();
-  await expect(dialog).toHaveCount(0); expect(state.bodies[1].sourceVersion).toBe("c".repeat(64));
-  expect(state.keys[1]).not.toBe(state.keys[0]); expect(failures).toEqual([]);
+  await dialog.getByRole("button", { name: "Approve & post costs", exact: true }).click();
+  await expect(dialog).toHaveCount(0);
+  expect(state.bodies[1].sourceVersion).toBe("c".repeat(64));
+  expect(state.keys[1]).not.toBe(state.keys[0]);
+  expect(failures).toEqual([]);
 });
-
-test("the same exception and admin action are available directly on the shipment", async ({ page }) => {
-  const { dialog, failures } = await installException(page);
-  await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
+test("shipment allocation exposes the same reconciliation without another workflow", async ({ page }) => {
+  const { dialog, failures } = await installReconciliation(page);
+  await dialog.getByRole("button", { name: "Close review", exact: true }).click();
   await page.goto("/shipments/42?tab=allocation");
   const results = page.getByRole("region", { name: "Inventory cost results", exact: true });
-  await expect(results).toContainText("$52.0608 remains separate");
-  await results.getByRole("button", { name: "Review exception", exact: true }).click();
-  await expect(page.getByRole("dialog").getByRole("table", { name: "Exception before and after" })).toBeVisible();
+  await results.getByRole("button", { name: "Reconcile costs", exact: true }).click();
+  await chooseInventory(page.getByRole("dialog"));
+  await expect(page.getByRole("table", { name: "Cost reconciliation before and after" })).toBeVisible();
   expect(failures).toEqual([]);
 });

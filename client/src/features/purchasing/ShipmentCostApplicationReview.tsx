@@ -15,8 +15,8 @@ export function ShipmentCostApplicationReview({ shipmentId }: { shipmentId: numb
     return parsed;
   } });
   const lines = review.data?.lines ?? [];
-  const completed = lines.filter(line => line.application?.status === "applied" && !line.sourceIssue);
-  const pending = lines.filter(line => !completed.includes(line));
+  const completed = lines.filter(line => !line.sourceIssue && (line.application?.status === "applied" || line.exceptionReview?.reconciliation?.status === "posted"));
+  const pending = lines.filter(line => !completed.includes(line) || line.exceptionReview);
   return <Card role="region" aria-label="Inventory cost results">
     <CardHeader className="pb-3"><CardTitle className="text-base">Inventory and sold-order costs</CardTitle></CardHeader>
     <CardContent className="space-y-3 text-sm">

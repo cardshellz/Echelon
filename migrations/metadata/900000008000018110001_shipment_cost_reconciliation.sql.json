@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "migration": "900000008000018110001_shipment_cost_reconciliation.sql",
+  "generation": 8,
+  "pr": 1811,
+  "ordinal": 1,
+  "after": [
+    "0751_exact_inventory_cost_totals.sql",
+    "900000007000018030001_shipment_cost_exception_decisions.sql"
+  ]
+}
