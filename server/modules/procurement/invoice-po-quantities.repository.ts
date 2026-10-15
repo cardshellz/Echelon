@@ -9,9 +9,9 @@ import { logger } from "../../platform/observability/logger";
 type InvoiceLineWithPoQuantities = VendorInvoiceLine & { poQuantities: InvoicePoQuantities };
 
 /** One SQL snapshot supplies both comparison counts; reading never repairs invoice records. */
-export async function getInvoiceLinesWithPoQuantities(invoiceId: number): Promise<InvoiceLineWithPoQuantities[]> {
+export async function getInvoiceLinesWithPoQuantities(invoiceId: number, client: Pick<typeof db, "select"> = db): Promise<InvoiceLineWithPoQuantities[]> {
   try {
-    const rows = await db.select({
+    const rows = await client.select({
       invoiceLine: getTableColumns(vendorInvoiceLines),
       purchaseOrderLine: {
         id: purchaseOrderLines.id,
@@ -23,7 +23,7 @@ export async function getInvoiceLinesWithPoQuantities(invoiceId: number): Promis
       .from(vendorInvoiceLines)
       .leftJoin(purchaseOrderLines, and(
         eq(purchaseOrderLines.id, vendorInvoiceLines.purchaseOrderLineId),
-        exists(db.select({ id: vendorInvoicePoLinks.id }).from(vendorInvoicePoLinks).where(and(
+        exists(client.select({ id: vendorInvoicePoLinks.id }).from(vendorInvoicePoLinks).where(and(
           eq(vendorInvoicePoLinks.vendorInvoiceId, vendorInvoiceLines.vendorInvoiceId),
           eq(vendorInvoicePoLinks.purchaseOrderId, purchaseOrderLines.purchaseOrderId),
         ))),

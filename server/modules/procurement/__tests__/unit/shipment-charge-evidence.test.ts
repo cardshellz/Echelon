@@ -96,3 +96,67 @@ describe("shipment charge confirmation across the AP lifecycle", () => {
     }
   });
 });
+
+
+describe("shipment charge authority after explicit invoice replacement", () => {
+  const original = { ...line, invoiceNumber: "FRT-71", replacesInvoiceId: null, status: "voided" };
+  const successor = { ...line, id: 82, invoiceId: 81, invoiceNumber: "FRT-71", replacesInvoiceId: 71 };
+  const charge = { ...invoiced, invoiceId: 81 };
+  const resolve = (invoices: unknown[], chargeOverride: unknown = charge) =>
+    resolveShipmentChargeEvidence({ charge: chargeOverride, invoices, priorConfirmedCharge: null });
+
+  it("accepts only the approved successor while preserving immutable caller evidence", () => {
+    const input = [original, successor];
+    const before = structuredClone(input);
+    expect(resolve(input)).toMatchObject({ evidence: "confirmed", issue: null, approvedInvoiceLineIds: [82] });
+    expect(input).toEqual(before);
+  });
+
+  it("does not promote a received replacement or its voided ancestor to confirmed cost", () => {
+    expect(resolve([original, { ...successor, status: "received" }]))
+      .toMatchObject({ evidence: "estimated", issue: null, approvedInvoiceLineIds: [] });
+  });
+
+  it("supports repeated void and replacement without counting any prior invoice amount", () => {
+    expect(resolve([original, { ...successor, status: "voided" },
+      { ...successor, id: 92, invoiceId: 91, replacesInvoiceId: 81 }], { ...charge, invoiceId: 91 }))
+      .toMatchObject({ evidence: "confirmed", approvedInvoiceLineIds: [92] });
+  });
+
+  it.each<[string, unknown[]]>([
+    ["missing ancestor", [successor]],
+    ["nonvoided ancestor", [{ ...original, status: "approved" }, successor]],
+    ["different supplier", [{ ...original, vendorId: 7 }, successor]],
+    ["different shipment", [{ ...original, shipmentId: 2 }, successor]],
+    ["different currency", [{ ...original, currency: "EUR" }, successor]],
+    ["different document number", [{ ...original, invoiceNumber: "OTHER" }, successor]],
+    ["missing document number", [{ ...original, invoiceNumber: null }, successor]],
+    ["lost charge membership", [{ ...original, freightCostId: null }, successor]],
+    ["self cycle", [original, { ...successor, replacesInvoiceId: 81 }]],
+    ["ancestor cycle", [{ ...original, replacesInvoiceId: 81 }, successor]],
+    ["competing successors", [original, successor, { ...successor, id: 93, invoiceId: 91 }]],
+    ["inconsistent document headers", [original, successor, { ...successor, id: 83, invoiceNumber: "OTHER" }]],
+  ])("requires review for %s", (_label, invoices) => {
+    expect(resolve(invoices)).toMatchObject({ evidence: "review_required", issue: { code: "LANDED_INVOICE_REPLACEMENT_REVIEW" } });
+  });
+
+  it("keeps disconnected voided charge lines as conflicts instead of discarding all voids", () => {
+    expect(resolve([original, successor, { ...original, id: 99, invoiceId: 98 }]))
+      .toMatchObject({ evidence: "review_required", issue: { code: "LANDED_INVOICE_SOURCE_MISMATCH" } });
+  });
+
+  it("keeps the currently attached voided successor blocked until explicitly replaced", () => {
+    expect(resolve([original, { ...successor, status: "voided" }]))
+      .toMatchObject({ evidence: "review_required", issue: { code: "LANDED_INVOICE_STATUS_REVIEW" } });
+  });
+
+  it("still verifies the successor amount, independently of a valid replacement chain", () => {
+    expect(resolve([original, { ...successor, lineTotalCents: "32999" }]))
+      .toMatchObject({ evidence: "review_required", issue: { code: "LANDED_INVOICE_TOTAL_REVIEW" } });
+  });
+
+  it("does not discard voided history when the charge FK is simply cleared", () => {
+    expect(resolve([original], { ...charge, invoiceId: null }))
+      .toMatchObject({ evidence: "review_required", issue: { code: "LANDED_INVOICE_STATUS_REVIEW" } });
+  });
+});

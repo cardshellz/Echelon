@@ -27,6 +27,7 @@ import {
   poStatusHistory,
 } from "@shared/schema";
 import { eq, and, inArray, sql, desc, lt, lte, gte, ne, asc, like } from "drizzle-orm";
+import { alias } from "drizzle-orm/pg-core";
 import { format } from "date-fns";
 import {
   centsToMills,
@@ -440,7 +441,7 @@ async function getPoIdsForInvoice(invoiceId: number, client: ApLedgerDbClient = 
   return rows.map((r: { purchaseOrderId: number }) => r.purchaseOrderId);
 }
 
-async function recomputeLinkedPurchaseOrders(
+export async function recomputeLinkedPurchaseOrders(
   invoiceId: number,
   client: ApLedgerDbClient,
   options: Pick<
@@ -538,6 +539,8 @@ type EditableInvoice = {
   currency: string | null;
   status: string;
   paidAmountCents: number;
+  replacesInvoiceId?: number | null;
+  invoiceNumber?: string;
 };
 
 async function lockEditableInvoice(
@@ -553,6 +556,8 @@ async function lockEditableInvoice(
       paidAmountCents: vendorInvoices.paidAmountCents,
       approvedAt: vendorInvoices.approvedAt,
       approvedBy: vendorInvoices.approvedBy,
+      replacesInvoiceId: vendorInvoices.replacesInvoiceId,
+      invoiceNumber: vendorInvoices.invoiceNumber,
     })
     .from(vendorInvoices)
     .where(eq(vendorInvoices.id, invoiceId))
@@ -1139,54 +1144,58 @@ export async function createInvoice(data: {
 }
 
 export async function getInvoiceById(id: number) {
-  const [invoice] = await db
-    .select()
-    .from(vendorInvoices)
-    .where(eq(vendorInvoices.id, id));
+  return db.transaction(async tx => {
+    const [invoice] = await tx
+      .select()
+      .from(vendorInvoices)
+      .where(eq(vendorInvoices.id, id));
 
-  if (!invoice) return null;
+    if (!invoice) return null;
 
-  const poLinks = await db
-    .select({
-      id: vendorInvoicePoLinks.id,
-      purchaseOrderId: vendorInvoicePoLinks.purchaseOrderId,
-      allocatedAmountCents: vendorInvoicePoLinks.allocatedAmountCents,
-      notes: vendorInvoicePoLinks.notes,
-      poNumber: purchaseOrders.poNumber,
-      poStatus: purchaseOrders.status,
-      poTotalCents: purchaseOrders.totalCents,
-    })
-    .from(vendorInvoicePoLinks)
-    .leftJoin(purchaseOrders, eq(vendorInvoicePoLinks.purchaseOrderId, purchaseOrders.id))
-    .where(eq(vendorInvoicePoLinks.vendorInvoiceId, id));
+    const poLinks = await tx
+      .select({
+        id: vendorInvoicePoLinks.id,
+        purchaseOrderId: vendorInvoicePoLinks.purchaseOrderId,
+        allocatedAmountCents: vendorInvoicePoLinks.allocatedAmountCents,
+        notes: vendorInvoicePoLinks.notes,
+        poNumber: purchaseOrders.poNumber,
+        poStatus: purchaseOrders.status,
+        poTotalCents: purchaseOrders.totalCents,
+      })
+      .from(vendorInvoicePoLinks)
+      .leftJoin(purchaseOrders, eq(vendorInvoicePoLinks.purchaseOrderId, purchaseOrders.id))
+      .where(eq(vendorInvoicePoLinks.vendorInvoiceId, id));
 
-  const payments = await db
-    .select({
-      id: apPaymentAllocations.id,
-      apPaymentId: apPaymentAllocations.apPaymentId,
-      appliedAmountCents: apPaymentAllocations.appliedAmountCents,
-      paymentNumber: apPayments.paymentNumber,
-      paymentDate: apPayments.paymentDate,
-      paymentMethod: apPayments.paymentMethod,
-      paymentStatus: apPayments.status,
-      referenceNumber: apPayments.referenceNumber,
-    })
-    .from(apPaymentAllocations)
-    .innerJoin(apPayments, eq(apPaymentAllocations.apPaymentId, apPayments.id))
-    .where(eq(apPaymentAllocations.vendorInvoiceId, id))
-    .orderBy(desc(apPayments.paymentDate));
+    const payments = await tx
+      .select({
+        id: apPaymentAllocations.id,
+        apPaymentId: apPaymentAllocations.apPaymentId,
+        appliedAmountCents: apPaymentAllocations.appliedAmountCents,
+        paymentNumber: apPayments.paymentNumber,
+        paymentDate: apPayments.paymentDate,
+        paymentMethod: apPayments.paymentMethod,
+        paymentStatus: apPayments.status,
+        referenceNumber: apPayments.referenceNumber,
+      })
+      .from(apPaymentAllocations)
+      .innerJoin(apPayments, eq(apPaymentAllocations.apPaymentId, apPayments.id))
+      .where(eq(apPaymentAllocations.vendorInvoiceId, id))
+      .orderBy(desc(apPayments.paymentDate));
 
-  const lines = await getInvoiceLinesWithPoQuantities(invoice.id);
+    const lines = await getInvoiceLinesWithPoQuantities(invoice.id, tx);
 
-  const attachments = await db
-    .select()
-    .from(vendorInvoiceAttachments)
-    .where(eq(vendorInvoiceAttachments.vendorInvoiceId, id))
-    .orderBy(desc(vendorInvoiceAttachments.uploadedAt));
+    const attachments = await tx
+      .select()
+      .from(vendorInvoiceAttachments)
+      .where(eq(vendorInvoiceAttachments.vendorInvoiceId, id))
+      .orderBy(desc(vendorInvoiceAttachments.uploadedAt));
 
-  return { ...invoice, capabilities: { edit: invoiceEditCapability({ ...invoice, hasPaymentHistory: payments.length > 0 }) },
-    paymentReviewRequired: payments.some((payment) => classifyApPaymentState(payment.paymentStatus) === "review_required"),
-    poLinks, payments, lines: lines.map((line) => ({ ...line, costReviewVersion: invoiceCostReviewVersion(line) })), attachments };
+    const { readInvoiceReplacementDetail } = await import("./ap-invoice-replacement.service");
+    const replacementDetail = await readInvoiceReplacementDetail(tx, id);
+    return { ...invoice, ...replacementDetail, capabilities: { edit: invoiceEditCapability({ ...invoice, hasPaymentHistory: payments.length > 0 }) },
+      paymentReviewRequired: payments.some((payment) => classifyApPaymentState(payment.paymentStatus) === "review_required"),
+      poLinks, payments, lines: lines.map((line) => ({ ...line, costReviewVersion: invoiceCostReviewVersion(line) })), attachments };
+  }, { isolationLevel: "repeatable read", accessMode: "read only" });
 }
 
 export async function listInvoices(filters: {
@@ -1297,6 +1306,10 @@ export async function updateInvoice(
     const patch: Record<string, unknown> = { updatedBy: actorId, updatedAt: new Date() };
     if (data.invoiceNumber !== undefined) {
       patch.invoiceNumber = normalizeRequiredText(data.invoiceNumber, "invoiceNumber", 100);
+      if (invoice.replacesInvoiceId != null && patch.invoiceNumber !== invoice.invoiceNumber) {
+        throw new ApLedgerError("A replacement retains its original supplier invoice number.", 409,
+          { code: "AP_INVOICE_REPLACEMENT_IDENTITY_IMMUTABLE", invoiceId });
+      }
     }
     if (data.ourReference !== undefined) {
       patch.ourReference = normalizeOptionalText(data.ourReference, "ourReference", 100) ?? null;
@@ -3239,6 +3252,13 @@ export async function runInvoiceMatch(invoiceId: number, actorId?: string) {
 
 // ─── Attachments ──────────────────────────────────────────────────────────────
 
+async function assertInvoiceEvidenceNotReplaced(client: ApLedgerDbClient, invoiceId: number): Promise<void> {
+  const [successor] = await client.select({ id: vendorInvoices.id }).from(vendorInvoices)
+    .where(eq(vendorInvoices.replacesInvoiceId, invoiceId)).limit(1);
+  if (successor) throw new ApLedgerError("The replaced invoice is retained as historical evidence. Open its successor to make changes.", 409,
+    { code: "AP_INVOICE_REPLACEMENT_HISTORY_IMMUTABLE", invoiceId, successorInvoiceId: successor.id });
+}
+
 export async function addAttachment(invoiceId: number, data: {
   fileName: string;
   fileType?: string;
@@ -3266,7 +3286,7 @@ export async function addAttachment(invoiceId: number, data: {
     if (!invoice) {
       throw new ApLedgerError("Invoice not found", 404, { code: "AP_INVOICE_NOT_FOUND" });
     }
-
+    await assertInvoiceEvidenceNotReplaced(tx, normalizedInvoiceId);
     const [attachment] = await tx
       .insert(vendorInvoiceAttachments)
       .values({
@@ -3321,7 +3341,7 @@ export async function removeAttachment(id: number, actorId?: string) {
       .where(eq(vendorInvoiceAttachments.id, normalizedAttachmentId))
       .for("update");
     if (!attachment) return null;
-
+    await assertInvoiceEvidenceNotReplaced(tx, attachment.vendorInvoiceId);
     await tx
       .delete(vendorInvoiceAttachments)
       .where(eq(vendorInvoiceAttachments.id, normalizedAttachmentId));
@@ -3935,9 +3955,11 @@ export async function getShipmentInvoicesSummary(shipmentId: number) {
  * Returns enriched cost array with linkedInvoice and derivedStatus fields.
  */
 export async function enrichCostsWithInvoiceInfo(shipmentId: number) {
+  const costVendor = alias(vendors, "shipment_cost_vendor");
   const costs = await db
     .select({
       cost: inboundFreightCosts,
+      vendorName: costVendor.name,
       invoiceId: vendorInvoices.id,
       invoiceNumber: vendorInvoices.invoiceNumber,
       invoiceVendorId: vendorInvoices.vendorId,
@@ -3950,6 +3972,7 @@ export async function enrichCostsWithInvoiceInfo(shipmentId: number) {
     .from(inboundFreightCosts)
     .leftJoin(vendorInvoices, eq(inboundFreightCosts.vendorInvoiceId, vendorInvoices.id))
     .leftJoin(vendors, eq(vendorInvoices.vendorId, vendors.id))
+    .leftJoin(costVendor, eq(inboundFreightCosts.vendorId, costVendor.id))
     .where(eq(inboundFreightCosts.inboundShipmentId, shipmentId));
 
   return costs.map((c) => {
@@ -3959,13 +3982,14 @@ export async function enrichCostsWithInvoiceInfo(shipmentId: number) {
           invoiceNumber: c.invoiceNumber,
           vendorId: c.invoiceVendorId,
           vendorName: c.invoiceVendorName,
+          status: c.invoiceStatus,
         }
       : null;
 
-    let derivedStatus: "unbilled" | "invoiced" | "paid" = "unbilled";
+    let derivedStatus: "unbilled" | "invoiced" | "paid" | "voided" = "unbilled";
     if (c.invoiceId && c.invoiceStatus) {
       if (c.invoiceStatus === "voided") {
-        derivedStatus = "unbilled";
+        derivedStatus = "voided";
       } else {
         const balance = Number(c.balanceCents) || 0;
         derivedStatus = balance <= 0 ? "paid" : "invoiced";
@@ -3974,6 +3998,7 @@ export async function enrichCostsWithInvoiceInfo(shipmentId: number) {
 
     return {
       ...c.cost,
+      vendorName: c.vendorName,
       linkedInvoice,
       derivedStatus,
     };

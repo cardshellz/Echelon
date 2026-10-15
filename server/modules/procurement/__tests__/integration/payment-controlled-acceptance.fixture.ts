@@ -31,6 +31,9 @@ const TABLES = [
   schema.users, schema.authRoles, schema.authPermissions, schema.authUserRoles, schema.authRolePermissions,
   schema.products, schema.productVariants, schema.vendors, schema.purchaseOrders, schema.purchaseOrderLines,
   schema.vendorInvoices, schema.vendorInvoiceLines, schema.vendorInvoicePoLinks, schema.vendorInvoiceAttachments,
+  // Invoice detail reads the freight footprint for replacement eligibility even
+  // when this payment fixture's product invoice has no shipment or freight rows.
+  schema.inboundFreightCosts,
   schema.apPayments, schema.apPaymentAllocations, schema.poStatusHistory, schema.poExceptions,
   schema.warehouses, schema.warehouseLocations, schema.inventoryLevels, schema.inventoryLots,
   schema.orders, schema.orderItems, schema.orderItemCosts,

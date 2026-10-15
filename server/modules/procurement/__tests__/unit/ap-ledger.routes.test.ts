@@ -7,6 +7,7 @@ import { AddressInfo } from "net";
 const mocks = vi.hoisted(() => {
   const idempotencyMiddleware = vi.fn((_req: any, _res: any, next: any) => next());
   return {
+    deniedPermission: null as string | null,
     idempotencyMiddleware,
     requireIdempotency: vi.fn(() => idempotencyMiddleware),
     apLedger: {
@@ -46,6 +47,7 @@ const mocks = vi.hoisted(() => {
       disputeInvoice: vi.fn(),
       voidInvoice: vi.fn(),
     },
+    apInvoiceReplacementCommands: { createReplacement: vi.fn() },
   };
 });
 
@@ -56,7 +58,10 @@ vi.mock("../../../../routes/middleware", () => {
     next();
   };
   return {
-    requirePermission: () => pass,
+    requirePermission: (resource: string, action: string) => (req: Request, res: Response, next: NextFunction) => {
+      if (mocks.deniedPermission === `${resource}:${action}`) return res.status(403).json({ error: "Permission denied" });
+      return pass(req, res, next);
+    },
     requireAnyPermission: () => pass,
     upload: {
       single: () => pass,
@@ -78,6 +83,10 @@ vi.mock("../../ap-payment-commands", () => ({
 
 vi.mock("../../ap-invoice-commands", () => ({
   apInvoiceCommands: mocks.apInvoiceCommands,
+}));
+
+vi.mock("../../ap-invoice-replacement.commands", () => ({
+  apInvoiceReplacementCommands: mocks.apInvoiceReplacementCommands,
 }));
 
 import { registerApLedgerRoutes } from "../../ap-ledger.routes";
@@ -120,6 +129,7 @@ describe("AP ledger routes", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    mocks.deniedPermission = null;
   });
 
   afterEach(async () => {
@@ -140,6 +150,51 @@ describe("AP ledger routes", () => {
     server = await startServer(buildApp());
     const response = await requestJson(server.url, "PATCH", "/api/vendor-invoices/71", { invoicedAmountCents: 5000 });
     expect(response).toMatchObject({ status: 409, body: { details: { code: "AP_INVOICE_FINANCIAL_HISTORY", invoiceId: 71 } } });
+  });
+
+  it("dispatches replacement through the durable owner and preserves its replay result", async () => {
+    const result = { invoiceId: 72, replacesInvoiceId: 71, invoiceNumber: "F-71", status: "received", freightCostIds: [4] };
+    mocks.apInvoiceReplacementCommands.createReplacement.mockResolvedValue({ httpStatus: 201, replayed: true, body: result });
+    server = await startServer(buildApp());
+    const response = await requestJson(server.url, "POST", "/api/vendor-invoices/71/replacement", { expectedVersion: "a".repeat(64), reason: "Correct freight document" });
+    expect(response).toEqual({ status: 201, idempotencyReplayed: "true", body: result });
+    expect(mocks.apInvoiceReplacementCommands.createReplacement).toHaveBeenCalledExactlyOnceWith(71, {
+      expectedVersion: "a".repeat(64), reason: "Correct freight document", userId: "test-user",
+    }, expect.objectContaining({ commandName: "ap.invoice.replacement", resourceKey: "vendor_invoice:71", routeTemplate: "/api/vendor-invoices/:id/replacement", contractVersion: 1, idempotencyKey: "test-key" }));
+  });
+
+  it("requires a retained replacement idempotency key before dispatch", async () => {
+    server = await startServer(buildApp());
+    const response = await fetch(`${server.url}/api/vendor-invoices/71/replacement`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ expectedVersion: "a".repeat(64), reason: "Correction" }),
+    });
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({ details: { code: "FINANCIAL_COMMAND_IDEMPOTENCY_KEY_REQUIRED" } });
+    expect(mocks.apInvoiceReplacementCommands.createReplacement).not.toHaveBeenCalled();
+  });
+
+  it("preserves a replacement source conflict for explicit reload", async () => {
+    mocks.apInvoiceReplacementCommands.createReplacement.mockResolvedValue({ httpStatus: 409, replayed: false, body: {
+      error: "Invoice source changed. Reload before replacing it.", details: { code: "AP_INVOICE_REPLACEMENT_STALE" },
+    } });
+    server = await startServer(buildApp());
+    expect(await requestJson(server.url, "POST", "/api/vendor-invoices/71/replacement", { expectedVersion: "a".repeat(64), reason: "Correction" })).toMatchObject({
+      status: 409, body: { details: { code: "AP_INVOICE_REPLACEMENT_STALE" } },
+    });
+  });
+
+  it.each(["invoiceNumber", "vendorId", "replacesInvoiceId", "lineOverrides"])("rejects injected replacement field %s at the boundary", async (field) => {
+    server = await startServer(buildApp());
+    expect(await requestJson(server.url, "POST", "/api/vendor-invoices/71/replacement", {
+      expectedVersion: "a".repeat(64), reason: "Correction", [field]: "unexpected",
+    })).toMatchObject({ status: 400, body: { details: { code: "AP_INVOICE_REPLACEMENT_INPUT_INVALID" } } });
+    expect(mocks.apInvoiceReplacementCommands.createReplacement).not.toHaveBeenCalled();
+  });
+  it.each(["purchasing:create", "purchasing:edit"])("requires %s for replacement", async (permission) => {
+    mocks.deniedPermission = permission;
+    server = await startServer(buildApp());
+    expect(await requestJson(server.url, "POST", "/api/vendor-invoices/71/replacement", { expectedVersion: "a".repeat(64), reason: "Correction" })).toMatchObject({ status: 403 });
+    expect(mocks.apInvoiceReplacementCommands.createReplacement).not.toHaveBeenCalled();
   });
 
   it("returns a durable command rejection for an unsupported record-payment status", async () => {
