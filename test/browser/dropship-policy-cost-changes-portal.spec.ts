@@ -19,7 +19,9 @@ const policy = { increaseNoticeDays: 14, decreaseTiming: "immediate", priceProte
 
 /** The vendor's session and onboarding, stubbed the way the wallet journey does; the cost changes view is the subject. */
 interface ListingAction {
-  actionId: number; entryId: number; listingId: number; storeConnectionId: number; platform: string; productVariantId: number;
+  actionId: number; entryId: number; listingId: number; storeConnectionId: number; platform: string;
+  /** The size's product (D13b); an older answer has none. */
+  productId?: number; productVariantId: number;
   variantSku: string | null; variantName: string; productName: string;
   action: "reprice_queued" | "reprice_refused" | "awaiting_review" | "price_covers_cost" | "below_cost_recorded" | "below_cost_warned" | "below_cost_paused" | "skipped_inactive_listing" | "skipped_price_unavailable";
   detail: string | null; listingPriceCents: number | null; unitCostCents: number; pushJobId: number | null; decidedAt: string;
@@ -70,8 +72,18 @@ const subject = { productVariantId: 66, variantSku: "ARM-ENV-SGL-P50", variantNa
 test("shows the notice terms, the coming changes and the recent changes with their notice status", async ({ page }, testInfo) => {
   const state = await mount(page, {
     listingActions: [{
-      actionId: 71, entryId: 11, listingId: 2, storeConnectionId: 9, platform: "shopify", productVariantId: 66, variantSku: "ARM-ENV-SGL-P50",
+      actionId: 71, entryId: 11, listingId: 2, storeConnectionId: 9, platform: "shopify", productId: 5, productVariantId: 66, variantSku: "ARM-ENV-SGL-P50",
       variantName: "Single pack", productName: "Armor Envelope", action: "awaiting_review", detail: null, listingPriceCents: 1152, unitCostCents: 999,
+      pushJobId: null, decidedAt: "2026-10-13T00:05:00.000Z", holdReleasedAt: null, holdReleaseReason: null,
+    }, {
+      // A below-cost eBay listing whose product the server named (D13b): the one kind of row that links (PR 10h).
+      actionId: 72, entryId: 11, listingId: 3, storeConnectionId: 12, platform: "ebay", productId: 5, productVariantId: 66, variantSku: "ARM-ENV-SGL-P50",
+      variantName: "Single pack", productName: "Armor Envelope", action: "below_cost_warned", detail: null, listingPriceCents: 899, unitCostCents: 999,
+      pushJobId: null, decidedAt: "2026-10-13T00:05:00.000Z", holdReleasedAt: null, holdReleaseReason: null,
+    }, {
+      // A below-cost Shopify listing with its product named: Listing settings is eBay-only, so nothing links.
+      actionId: 73, entryId: 11, listingId: 4, storeConnectionId: 9, platform: "shopify", productId: 5, productVariantId: 66, variantSku: "ARM-ENV-SGL-P50",
+      variantName: "Single pack", productName: "Armor Envelope", action: "below_cost_paused", detail: null, listingPriceCents: 899, unitCostCents: 999,
       pushJobId: null, decidedAt: "2026-10-13T00:05:00.000Z", holdReleasedAt: null, holdReleaseReason: null,
     }],
     announced: [{ ...subject, entryId: 11, kind: "increase", fromCents: 809, unitCostCents: 999, effectiveAt: "2026-10-13T00:00:00.000Z", announcedAt: STAMP }],
@@ -84,6 +96,16 @@ test("shows the notice terms, the coming changes and the recent changes with the
   await expect(page.getByTestId("cost-changes-terms")).toContainText("You get 14 days' notice before a higher .ops cost is charged.");
   await expect(page.getByTestId("cost-changes-action-71")).toContainText("Waiting for your price review");
   await expect(page.getByTestId("cost-changes-action-71")).toContainText("listed at $11.52, cost now $9.99");
+  // The eBay row below cost links to the size's price in Listing settings (the drawer address, under the portal's
+  // path), and its sentence names the same place. The address is checked, not followed: the harness mounts this page alone.
+  const priceLink = page.getByTestId("cost-changes-action-72").getByRole("link", { name: "Change its price in Listing settings: ARM-ENV-SGL-P50 · Armor Envelope" });
+  await expect(priceLink).toHaveText("Change its price in Listing settings ›");
+  await expect(priceLink).toHaveAttribute("href", "/dropship-portal/catalog/setup?product=5&size=66");
+  await expect(page.getByTestId("cost-changes-action-72")).toContainText("Each sale loses money until you raise the price in Listing settings.");
+  // No link on a Shopify row: the one waiting for a review (no price to raise) and the one below cost (not an eBay row).
+  await expect(page.getByTestId("cost-changes-action-71").getByRole("link")).toHaveCount(0);
+  await expect(page.getByTestId("cost-changes-action-73")).toContainText("Raise the price on the Catalog page to resume.");
+  await expect(page.getByTestId("cost-changes-action-73").getByRole("link")).toHaveCount(0);
   await expect(page.getByTestId("cost-changes-terms")).toContainText("Orders accepted before a change takes effect are charged the cost in force at the time.");
   const announced = page.getByTestId("cost-changes-announced-11");
   await expect(announced).toContainText("ARM-ENV-SGL-P50 · Armor Envelope");

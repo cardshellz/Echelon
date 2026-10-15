@@ -2,16 +2,21 @@
  * Vendor portal, Cost changes: the .ops cost changes announced on the
  * vendor's listings and not yet in effect, what changed recently, and the
  * policy's notice terms (docs/DROPSHIP-COST-CHANGE-CONTROLS.md, C4). Read
- * only; every word and decision lives in `@/lib/dropship-cost-changes`.
+ * only; every word and decision lives in `@/lib/dropship-cost-changes`. A
+ * below-cost eBay listing links to its size's price in Listing settings
+ * (PR 10h, plan §11); the page itself changes nothing.
  */
 
 import React from "react";
 import { useQuery } from "@tanstack/react-query";
+import { Link } from "wouter";
 import { AlertCircle, TrendingUp } from "lucide-react";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { dropshipPortalPath, useDropshipAuth } from "@/lib/dropship-auth";
+import { catalogBrowserStorage, rememberCatalogStore } from "@/lib/dropship-catalog-steps";
 import { fetchJson, formatDateTime, queryErrorMessage } from "@/lib/dropship-ops-surface";
 import {
   DROPSHIP_COST_CHANGES_URL,
@@ -26,16 +31,30 @@ import {
   isVendorCostIncrease,
   isVendorListingActionAttention,
   parseDropshipVendorCostChanges,
+  vendorListingActionPriceLink,
   type DropshipVendorCostChanges,
 } from "@/lib/dropship-cost-changes";
 import { DropshipPortalShell } from "./DropshipPortalShell";
 
 export default function DropshipPortalCostChanges() {
+  const { principal } = useDropshipAuth();
+  const memberId = principal?.memberId ?? null;
   const query = useQuery<DropshipVendorCostChanges>({
     queryKey: [DROPSHIP_COST_CHANGES_URL],
     queryFn: async ({ signal }) => parseDropshipVendorCostChanges(await fetchJson<unknown>(DROPSHIP_COST_CHANGES_URL, { signal })),
   });
   const data = query.data;
+
+  function rememberListingStore(storeConnectionId: number): void {
+    // Plan A4: the Catalog page opens on the store it remembers for this member, so the link lands in
+    // this listing's store. Best effort on purpose: a browser that refuses the write only means the
+    // next visit opens on the first eBay store, and the link itself still works. Not financial state.
+    try {
+      rememberCatalogStore(catalogBrowserStorage(), memberId, storeConnectionId);
+    } catch {
+      // Deliberately swallowed (see above): nothing to retry, nothing lost.
+    }
+  }
 
   return (
     <DropshipPortalShell>
@@ -121,6 +140,7 @@ export default function DropshipPortalCostChanges() {
                 <ol className="mt-3 divide-y rounded-md border">
                   {data.listingActions.map((action) => {
                     const detail = describeVendorListingActionDetail(action, formatDateTime);
+                    const link = vendorListingActionPriceLink(action);
                     return (
                       <li key={action.actionId} className="space-y-1 p-3 text-sm" data-testid={`cost-changes-action-${action.actionId}`}>
                         <div className="flex flex-wrap items-center gap-2">
@@ -131,6 +151,15 @@ export default function DropshipPortalCostChanges() {
                         </div>
                         <p>{describeVendorListingActionAmounts(action)} · Decided {formatDateTime(action.decidedAt)}</p>
                         {detail && <p className="text-xs text-zinc-500">{detail}</p>}
+                        {link && (
+                          <p>
+                            <Link href={dropshipPortalPath(link.href)} aria-label={link.name} data-testid={`cost-changes-action-${action.actionId}-price-link`}
+                              className="text-xs font-medium text-violet-700 underline-offset-2 hover:underline"
+                              onClick={() => rememberListingStore(link.storeConnectionId)}>
+                              {link.label}
+                            </Link>
+                          </p>
+                        )}
                       </li>
                     );
                   })}

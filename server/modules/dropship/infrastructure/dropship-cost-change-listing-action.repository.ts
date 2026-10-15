@@ -109,6 +109,7 @@ interface ActionViewRow {
   store_connection_id: number;
   platform: string;
   product_variant_id: number;
+  product_id: number;
   variant_sku: string | null;
   variant_name: string;
   product_name: string;
@@ -127,7 +128,7 @@ interface ActionViewRow {
   policy_id: number | null;
 }
 
-const ACTION_VIEW_SELECT = `SELECT a.id, a.entry_id, a.listing_id, a.store_connection_id, l.platform, a.product_variant_id,
+const ACTION_VIEW_SELECT = `SELECT a.id, a.entry_id, a.listing_id, a.store_connection_id, l.platform, a.product_variant_id, pv.product_id,
                 pv.sku AS variant_sku, pv.name AS variant_name, p.name AS product_name, a.action, a.detail, a.listing_price_cents,
                 a.unit_cost_cents, a.push_job_id, a.decided_at, h.released_at AS hold_released_at, h.release_reason AS hold_release_reason,
                 a.vendor_id, v.business_name, a.listing_status, a.price_source, a.policy_id
@@ -508,6 +509,8 @@ function mapVendorActionView(row: ActionViewRow): VendorCostChangeListingActionV
     storeConnectionId: row.store_connection_id,
     platform: row.platform,
     productVariantId: row.product_variant_id,
+    // The portal links a below-cost action to the size's price in Listing settings, whose address needs the product (PR 10h, D13b).
+    productId: toId(row.product_id, "product_id"),
     variantSku: row.variant_sku,
     variantName: row.variant_name,
     productName: row.product_name,

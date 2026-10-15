@@ -2,6 +2,7 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { useQuery } from "@tanstack/react-query";
+import { Router } from "wouter";
 import DropshipPortalCostChanges from "../dropship/DropshipPortalCostChanges";
 import type { DropshipVendorCostChanges } from "@/lib/dropship-cost-changes";
 
@@ -18,6 +19,13 @@ vi.mock("@tanstack/react-query", () => ({
 // The shell needs the vendor session; the page under test is what matters here.
 vi.mock("../dropship/DropshipPortalShell", () => ({
   DropshipPortalShell: ({ children }: { children: unknown }) => createElement("div", { "data-testid": "shell" }, children as never),
+}));
+
+// The link to Listing settings reads the member (to remember the listing's store, plan A4) and the
+// portal path, which reads the browser's host; neither exists under node.
+vi.mock("@/lib/dropship-auth", () => ({
+  useDropshipAuth: () => ({ principal: { memberId: "m-1" } }),
+  dropshipPortalPath: (path: string) => `/dropship-portal${path}`,
 }));
 
 // The shadcn Skeleton has no React import of its own and vitest compiles JSX with
@@ -45,8 +53,18 @@ function view(patch: Partial<DropshipVendorCostChanges> = {}): DropshipVendorCos
       observedAt: "2026-09-28T16:00:00.000Z", noticeDecision: "sent",
     }],
     listingActions: [{
-      actionId: 71, entryId: 11, listingId: 2, storeConnectionId: 9, platform: "shopify", productVariantId: 66, variantSku: "ARM-ENV-SGL-P50",
+      actionId: 71, entryId: 11, listingId: 2, storeConnectionId: 9, platform: "shopify", productId: 5, productVariantId: 66, variantSku: "ARM-ENV-SGL-P50",
       variantName: "Single pack", productName: "Armor Envelope", action: "below_cost_paused", detail: null, listingPriceCents: 899, unitCostCents: 999,
+      pushJobId: null, decidedAt: "2026-10-13T00:05:00.000Z", holdReleasedAt: null, holdReleaseReason: null,
+    }, {
+      // An eBay listing whose product the server named (D13b): the one kind of row that links.
+      actionId: 72, entryId: 11, listingId: 3, storeConnectionId: 12, platform: "ebay", productId: 5, productVariantId: 66, variantSku: "ARM-ENV-SGL-P50",
+      variantName: "Single pack", productName: "Armor Envelope", action: "below_cost_warned", detail: null, listingPriceCents: 899, unitCostCents: 999,
+      pushJobId: null, decidedAt: "2026-10-13T00:05:00.000Z", holdReleasedAt: null, holdReleaseReason: null,
+    }, {
+      // An older answer without the product: nothing to open.
+      actionId: 73, entryId: 11, listingId: 4, storeConnectionId: 12, platform: "ebay", productVariantId: 66, variantSku: "ARM-ENV-SGL-P50",
+      variantName: "Single pack", productName: "Armor Envelope", action: "below_cost_recorded", detail: null, listingPriceCents: 899, unitCostCents: 999,
       pushJobId: null, decidedAt: "2026-10-13T00:05:00.000Z", holdReleasedAt: null, holdReleaseReason: null,
     }],
     policy: { increaseNoticeDays: 14, decreaseTiming: "immediate", priceProtection: true, notifyByEmail: true, notifyInPortal: true, notifyOnDecrease: true },
@@ -58,7 +76,8 @@ function view(patch: Partial<DropshipVendorCostChanges> = {}): DropshipVendorCos
 function render(state: Record<string, unknown>): string {
   queries.states = [state];
   queries.index = 0;
-  return renderToStaticMarkup(createElement(DropshipPortalCostChanges));
+  // Node has no browser location, so the router renders from a fixed path.
+  return renderToStaticMarkup(createElement(Router, { ssrPath: "/dropship-portal/cost-changes", children: createElement(DropshipPortalCostChanges) }));
 }
 
 describe("vendor portal cost changes page", () => {
@@ -80,6 +99,23 @@ describe("vendor portal cost changes page", () => {
     expect(html).toContain("Paused: priced under the cost");
     expect(html).toContain("listed at $8.99, cost now $9.99");
     expect(html).toContain("publishes zero quantity");
+  });
+
+  it("links an eBay row whose product the server named to the size's price in Listing settings, and no other row (PR 10h)", () => {
+    const html = render({ data: view() });
+    expect(html.match(/-price-link"/g)).toHaveLength(1);
+    expect(html).toContain('href="/dropship-portal/catalog/setup?product=5&amp;size=66"');
+    expect(html).toContain('data-testid="cost-changes-action-72-price-link"');
+    expect(html).toContain('aria-label="Change its price in Listing settings: ARM-ENV-SGL-P50 · Armor Envelope"');
+    expect(html).toContain("Change its price in Listing settings ›");
+    // The Shopify row, even with a product, and the eBay row without one get no link.
+    expect(html).not.toContain('data-testid="cost-changes-action-71-price-link"');
+    expect(html).not.toContain('data-testid="cost-changes-action-73-price-link"');
+    expect(html).toContain('data-testid="cost-changes-action-73"');
+    // The sentence above the link names the link's place; the rows without a link still name the Catalog page.
+    expect(html).toContain("Each sale loses money until you raise the price in Listing settings.");
+    expect(html).toContain("Raise the price on the Catalog page to resume.");
+    expect(html).toContain("Each sale loses money until you raise the price on the Catalog page.");
   });
 
   it("says when nothing is coming and nothing changed", () => {
