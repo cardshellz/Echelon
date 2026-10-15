@@ -1,4 +1,4 @@
-name: Dropship pricing
+name: Feature browser coverage
 on:
   pull_request:
   workflow_dispatch:
@@ -12,11 +12,12 @@ concurrency:
 
 jobs:
   select:
-    name: Select dropship browser coverage
+    name: Select affected browser features
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
       run: ${{ steps.impact.outputs.run }}
+      matrix: ${{ steps.impact.outputs.matrix }}
       migrations: ${{ steps.migrations.outcome }}
     steps:
       - uses: actions/checkout@v4
@@ -34,14 +35,13 @@ jobs:
       - id: impact
         name: Check suite dependencies (uncertainty runs coverage)
         env:
-          BROWSER_SUITE: dropship
           BROWSER_EVENT_NAME: ${{ github.event_name }}
           BROWSER_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           BROWSER_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-        run: node scripts/ci/browser-suite-impact.mjs
+        run: node scripts/ci/dropship-browser-impact.mjs
 
   browser:
-    name: Dropship pricing browser journeys (${{ matrix.shard }}/2)
+    name: ${{ matrix.label }} (${{ matrix.shard }}/${{ matrix.shards }})
     needs: select
     # Invalid migrations stop setup; later selector uncertainty still runs coverage.
     if: ${{ !cancelled() && needs.select.outputs.migrations == 'success' && (needs.select.result != 'success' || needs.select.outputs.run != 'false') }}
@@ -49,8 +49,12 @@ jobs:
     timeout-minutes: 15
     strategy:
       fail-fast: false
-      matrix:
-        shard: [1, 2]
+      max-parallel: 4
+      # Job-level if runs before matrix expansion: an explicit safe skip starts
+      # no browsers. If selection crashes without output, run the full suite.
+      matrix: ${{ fromJSON(needs.select.outputs.matrix || '{"include":[{"feature":"all","label":"Full coverage fallback","shard":1,"shards":2},{"feature":"all","label":"Full coverage fallback","shard":2,"shards":2}]}') }}
+    env:
+      BROWSER_FEATURE: ${{ matrix.feature }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -61,15 +65,16 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npx playwright install --with-deps chromium
-      - run: npx playwright test --config playwright.dropship-pricing.config.ts --shard=${{ matrix.shard }}/2
+      - run: npx playwright test --config playwright.dropship-pricing.config.ts --shard=${{ matrix.shard }}/${{ matrix.shards }} --forbid-only
       - uses: actions/upload-artifact@v4
         if: failure()
         with:
-          name: dropship-pricing-browser-traces-${{ matrix.shard }}
+          name: feature-browser-traces-${{ matrix.feature }}-${{ matrix.shard }}
           path: test-results/
           retention-days: 7
 
   result:
+    # Preserve the aggregate check identity for existing branch rules and links.
     name: Dropship pricing browser journeys
     needs: [select, browser]
     if: ${{ always() }}

@@ -49,6 +49,12 @@ const GLOBAL_FILES = new Set([
   "client/src/App.tsx", "client/src/main.tsx", "client/index.html", "client/src/index.css",
   "package.json", "package-lock.json", ".npmrc", ".nvmrc", "tsconfig.json", "vitest.config.ts",
 ]);
+// Isolated harnesses do not execute App or every shared module. Keep build,
+// dependency, style and asset changes broad, then follow actual source imports.
+const ISOLATED_GLOBAL_FILES = new Set([
+  "package.json", "package-lock.json", ".npmrc", ".nvmrc", "tsconfig.json", "vitest.config.ts",
+]);
+const ISOLATED_GLOBAL_PREFIXES = ["client/public/", "attached_assets/", "scripts/ci/"];
 const KNOWN_NON_BROWSER_PREFIXES = ["server/", "migrations/", "docs/", "scripts/", ".github/"];
 const KNOWN_FEATURE_PREFIXES = ["client/src/pages/", "client/src/features/", "client/src/components/"];
 const SOURCE_EXTENSION = /\.[cm]?[jt]sx?$/;
@@ -168,7 +174,9 @@ export function selectBrowserSuite({ suite, changes, files, readSource, force = 
     const changed = changes.flatMap((change) => change.paths);
     for (const file of changed) {
       if (!files.has(file)) return run(`Changed path is missing: ${file}`);
-      if (GLOBAL_FILES.has(file) || GLOBAL_PREFIXES.some((prefix) => file.startsWith(prefix))
+      const globalFiles = config.isolated ? ISOLATED_GLOBAL_FILES : GLOBAL_FILES;
+      const globalPrefixes = config.isolated ? ISOLATED_GLOBAL_PREFIXES : GLOBAL_PREFIXES;
+      if (globalFiles.has(file) || globalPrefixes.some((prefix) => file.startsWith(prefix))
         || /^(?:vite|tailwind|postcss|playwright)[^/]*\.[cm]?[jt]s$/.test(file)
         || /\.(?:css|scss|sass|less)$/.test(file)) return run(`Shared UI or toolchain: ${file}`);
       if (file === config.config || file === config.workflow || config.tests.test(file)
@@ -176,11 +184,13 @@ export function selectBrowserSuite({ suite, changes, files, readSource, force = 
     }
     const testRoots = [...files].filter((file) => config.tests.test(file));
     if (!testRoots.length) return run("No suite tests discovered");
-    const graph = dependencyClosure([...config.roots, ...testRoots, ...sharedShellRoots(files, readSource)], files, readSource);
+    const shellRoots = config.isolated ? [] : sharedShellRoots(files, readSource);
+    const graph = dependencyClosure([...config.roots, ...testRoots, ...shellRoots], files, readSource);
     for (const file of changed) {
       if (graph.has(file)) return run(`Transitive suite dependency: ${file}`);
       if (KNOWN_FEATURE_PREFIXES.some((prefix) => file.startsWith(prefix))
         || KNOWN_NON_BROWSER_PREFIXES.some((prefix) => file.startsWith(prefix))
+        || (config.isolated && ["shared/", "client/src/", "test/browser/"].some(prefix => file.startsWith(prefix)))
         || /^test\/browser\/(?:procurement-|dropship-)/.test(file)
         || /^(?:README|AGENTS|LICENSE)(?:\.[^/]*)?$/.test(file)) continue;
       return run(`Unclassified path: ${file}`);
@@ -195,6 +205,15 @@ function git(root, args) {
   return execFileSync("git", args, { cwd: root, encoding: "utf8", maxBuffer: 16 * 1024 * 1024 });
 }
 
+export function readBrowserChangeEvidence(environment, root) {
+  const base = environment.BROWSER_BASE_SHA;
+  const head = environment.BROWSER_HEAD_SHA;
+  if (![base, head].every((sha) => /^[a-f0-9]{40}$/.test(sha ?? ""))) throw new Error("Missing or invalid commit SHA");
+  const changes = parseChangedFiles(git(root, ["diff", "--name-status", "-z", "--find-renames", `${base}...${head}`, "--"]));
+  const files = new Set(git(root, ["ls-files", "-z"]).split("\0").filter(Boolean));
+  return { changes, files, readSource: (file) => readFileSync(path.join(root, file), "utf8") };
+}
+
 export function runSelection(environment = process.env, root = process.cwd()) {
   const suite = environment.BROWSER_SUITE;
   if (!Object.hasOwn(BROWSER_SUITES, suite ?? "")) throw new Error("BROWSER_SUITE must name a configured suite");
@@ -203,13 +222,7 @@ export function runSelection(environment = process.env, root = process.cwd()) {
     if (environment.BROWSER_EVENT_NAME === "workflow_dispatch") {
       selection = { run: true, reason: "Manual dispatch requests complete coverage" };
     } else {
-      const base = environment.BROWSER_BASE_SHA;
-      const head = environment.BROWSER_HEAD_SHA;
-      if (![base, head].every((sha) => /^[a-f0-9]{40}$/.test(sha ?? ""))) throw new Error("Missing or invalid commit SHA");
-      const changes = parseChangedFiles(git(root, ["diff", "--name-status", "-z", "--find-renames", `${base}...${head}`, "--"]));
-      const files = new Set(git(root, ["ls-files", "-z"]).split("\0").filter(Boolean));
-      selection = selectBrowserSuite({ suite, changes, files,
-        readSource: (file) => readFileSync(path.join(root, file), "utf8") });
+      selection = selectBrowserSuite({ suite, ...readBrowserChangeEvidence(environment, root) });
     }
   } catch (error) {
     selection = { run: true, reason: `Selection evidence unavailable: ${error instanceof Error ? error.message : String(error)}` };
