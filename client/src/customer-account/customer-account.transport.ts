@@ -13,13 +13,32 @@ export const customerAccountPageConfigSchema = z.object({
   proxyPath: z.string().regex(/^\/(apps|a|community|tools)\/[a-z0-9][a-z0-9-]*$/).refine(path => !path.endsWith("/member-portal")),
 }).strict();
 export type CustomerAccountPageConfig = z.infer<typeof customerAccountPageConfigSchema>;
+// Bound storefront waits; a timed-out mutation must still be reconciled.
+export const CUSTOMER_ACCOUNT_REQUEST_TIMEOUT_MS = 25_000;
 export function createCustomerAccountTransport(raw: CustomerAccountPageConfig, request: typeof fetch = fetch) {
   const config = customerAccountPageConfigSchema.parse(raw);
   let sessionKey: string | undefined;
   async function call(input: { method: "GET" | "POST"; path: string; query?: Record<string, string>; body?: unknown; commandKey?: string }, signal?: AbortSignal | null): Promise<Response> {
     const body = customerAccountRequestSchema.parse({ ...input, themeId: config.themeId, expectedCustomerId: config.customerId, ...(sessionKey ? { sessionKey } : {}) });
-    return request(`${config.proxyPath}/account`, { method: "POST", credentials: "same-origin", cache: "no-store", redirect: "error", signal,
-      headers: { "Content-Type": "application/json", Accept: "application/json", [CUSTOMER_ACCOUNT_COMMAND_HEADER]: "1" }, body: JSON.stringify(body) });
+    const controller = new AbortController();
+    const cancel = () => controller.abort(signal?.reason);
+    if (signal?.aborted) cancel();
+    else signal?.addEventListener("abort", cancel, { once: true });
+    const timer = setTimeout(() => controller.abort(new DOMException("The request took too long. Please try again.", "TimeoutError")), CUSTOMER_ACCOUNT_REQUEST_TIMEOUT_MS);
+    try {
+      if (controller.signal.aborted) throw controller.signal.reason;
+      const response = await request(`${config.proxyPath}/account`, { method: "POST", credentials: "same-origin", cache: "no-store", redirect: "error", signal: controller.signal,
+        headers: { "Content-Type": "application/json", Accept: "application/json", [CUSTOMER_ACCOUNT_COMMAND_HEADER]: "1" }, body: JSON.stringify(body) });
+      // Include body download in the deadline. Canonical clients still own
+      // validation and uncertain mutation results; no command is retried here.
+      const bytes = await response.arrayBuffer();
+      return new Response([204, 205, 304].includes(response.status) ? null : bytes, {
+        status: response.status, statusText: response.statusText, headers: response.headers,
+      });
+    } finally {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", cancel);
+    }
   }
   async function json<T>(response: Response, schema: z.ZodType<T, z.ZodTypeDef, unknown>): Promise<T> {
     const value: unknown = await response.json().catch(() => null);

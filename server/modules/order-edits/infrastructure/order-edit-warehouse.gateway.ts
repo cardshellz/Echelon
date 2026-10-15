@@ -549,11 +549,12 @@ export class OrderEditWarehouseGateway {
 
   private async transaction<T>(
     work: (client: PoolClient) => Promise<T>,
+    mode: "write" | "read" = "write",
   ): Promise<T> {
     const client = await this.pool.connect();
     let destroyClient = false;
     try {
-      await client.query("BEGIN");
+      await client.query(mode === "read" ? "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY" : "BEGIN");
       await client.query("SET LOCAL lock_timeout='5000ms'");
       const result = await work(client);
       await client.query("COMMIT");
@@ -573,10 +574,12 @@ export class OrderEditWarehouseGateway {
   private async evidence(
     client: PoolClient,
     omsOrderId: number,
+    lockMode: "update" | "none" = "update",
   ): Promise<{ orders: WarehouseOrder[]; shipments: Shipment[] }> {
     positiveId.parse(omsOrderId);
+    const lock = lockMode === "update" ? " FOR UPDATE" : "";
     const source = await client.query(
-      "SELECT id,channel_id FROM oms.oms_orders WHERE id=$1 FOR UPDATE",
+      `SELECT id,channel_id FROM oms.oms_orders WHERE id=$1${lock}`,
       [omsOrderId],
     );
     if (source.rows.length !== 1)
@@ -592,7 +595,7 @@ export class OrderEditWarehouseGateway {
         AND (oi.picked_quantity<>0 OR oi.fulfilled_quantity<>0 OR oi.status NOT IN ('pending','cancelled'))) AS has_pick_work,
       EXISTS(SELECT 1 FROM wms.outbound_shipments os WHERE os.order_id=wo.id
         AND (os.status NOT IN ('planned','queued','on_hold','cancelled','voided') OR os.tracking_number IS NOT NULL OR os.shipped_at IS NOT NULL)) AS has_label
-      FROM wms.orders wo WHERE ${binding}=$1 ORDER BY wo.id FOR UPDATE OF wo`,
+      FROM wms.orders wo WHERE ${binding}=$1 ORDER BY wo.id${lock ? " FOR UPDATE OF wo" : ""}`,
       [omsOrderId],
     );
     const orders = z.array(orderSchema).parse(result.rows);
@@ -608,7 +611,7 @@ export class OrderEditWarehouseGateway {
       COALESCE(shipstation_order_id, CASE WHEN shipping_engine='shipstation' AND engine_order_ref ~ '^[0-9]+$'
         AND length(engine_order_ref)<10 THEN engine_order_ref::integer END) AS provider_order_id,
       shipping_engine, status, held, requires_review FROM wms.outbound_shipments
-      WHERE order_id=ANY($1::int[]) AND status NOT IN ('cancelled','voided') ORDER BY id FOR UPDATE`,
+      WHERE order_id=ANY($1::int[]) AND status NOT IN ('cancelled','voided') ORDER BY id${lock}`,
           [orders.map((order) => order.id)],
         )
       ).rows,
@@ -640,8 +643,10 @@ export class OrderEditWarehouseGateway {
   }
 
   async inspect(omsOrderId: number): Promise<OrderEditWarehouseInspection> {
+    // Availability is advisory. Use one consistent committed snapshot without
+    // competing with cancellation/picking; commands recheck under update locks.
     return this.transaction(async (client) => {
-      const { orders } = await this.evidence(client, omsOrderId);
+      const { orders } = await this.evidence(client, omsOrderId, "none");
       const reasons = orderEditWarehouseBlockers(orders);
       return {
         editable: reasons.length === 0,
@@ -649,7 +654,7 @@ export class OrderEditWarehouseGateway {
         status: orders.map((order) => order.warehouse_status).join(", "),
         wmsOrderIds: orders.map((order) => order.id),
       };
-    });
+    }, "read");
   }
 
   private async heldEvidence(

@@ -50,6 +50,10 @@ export function CustomerOrderEditor({
   );
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [busyAction, setBusyAction] = useState<"commit" | "reconcile" | "abandon">();
+  const [reloadRequired, setReloadRequired] = useState(false);
+  const [reloadBusy, setReloadBusy] = useState(false);
+  const reloadInFlight = useRef(false);
   const [locked, setLocked] = useState(false);
   const [uncertain, setUncertain] = useState(false);
   const [draftVisible, setDraftVisible] = useState(true);
@@ -224,32 +228,48 @@ export function CustomerOrderEditor({
       setBusy(false);
     }
   }
+  async function reloadCancelledOrder() {
+    if (reloadInFlight.current) return;
+    reloadInFlight.current = true;
+    setReloadRequired(true);
+    setReloadBusy(true);
+    setError(null);
+    try {
+      const current = await api.edits.order(connectionId, omsOrderId);
+      setOrder(current);
+      setReloadRequired(false);
+    } catch {
+      setError("Your edit was cancelled, but we couldn't reload your order. Please try again.");
+    } finally {
+      reloadInFlight.current = false;
+      setReloadBusy(false);
+    }
+  }
   async function progress(action: "commit" | "reconcile" | "abandon") {
     if (!operation || inFlight.current) return;
     inFlight.current = true;
     setBusy(true);
+    setBusyAction(action);
     setError(null);
-    if (action === "abandon" && operation.status === "ready" && order) {
-      // Show the retained draft immediately; another review waits for release.
-      setDraftVisible(true);
+    if (action === "abandon") {
       setClosingQuote(true);
+      // Show the retained draft immediately; another review waits for release.
+      if (operation.status === "ready" && order) setDraftVisible(true);
     }
     try {
       const result = await api.edits[action](operation.operationId);
       setOperation(result);
       setUncertain(false);
-      if (action === "abandon" && closed.has(result.status)) {
+      if ((action === "abandon" || closingQuote) && closed.has(result.status)) {
         setClosedOperationId(result.operationId);
         setOperation(null);
         setClosingQuote(false);
         setDraftVisible(true);
-        const current = await api.edits.order(connectionId, omsOrderId);
-        setOrder(current);
-      } else if (closingQuote && closed.has(result.status)) {
-        setClosedOperationId(result.operationId);
-        setOperation(null);
-        setClosingQuote(false);
-      } else if (closingQuote && !closed.has(result.status)) {
+        // Cancellation is confirmed. A failed read must not restore this edit
+        // or permit a new review against stale eligibility/revision evidence.
+        setBusy(false);
+        await reloadCancelledOrder();
+      } else if (action === "abandon" || closingQuote) {
         setDraftVisible(false);
         setClosingQuote(false);
       }
@@ -259,6 +279,7 @@ export function CustomerOrderEditor({
     } finally {
       inFlight.current = false;
       setBusy(false);
+      setBusyAction(undefined);
     }
   }
   if (pendingQuote && !operation)
@@ -294,16 +315,23 @@ export function CustomerOrderEditor({
       {!order && !operation && !error && (
         <p role="status">Loading your order…</p>
       )}
+      {reloadRequired && (
+        <div className="space-y-3">
+          {reloadBusy ? <p role="status">Your edit was cancelled. Reloading your order…</p> : (
+            <button type="button" className="csz-action" onClick={() => void reloadCancelledOrder()}>Retry order</button>
+          )}
+        </div>
+      )}
       {order && (
-        <div hidden={!draftVisible}>
+        <div hidden={!draftVisible || reloadRequired}>
           <OrderDraft
             audience="customer"
             order={order}
             api={api.edits}
             enabled={enabled}
             staffId={actorKey}
-            active={draftVisible}
-            reviewBlocked={closingQuote}
+            active={draftVisible && !reloadRequired}
+            reviewBlocked={closingQuote || reloadRequired}
             closedOperationId={closedOperationId}
             discountCodes={discountCodes}
             onDiscountCodesChange={setDiscountCodes}
@@ -313,13 +341,13 @@ export function CustomerOrderEditor({
           />
         </div>
       )}
-      {closingQuote && (
+      {closingQuote && draftVisible && !reloadRequired && (
         <p role="status">
           Closing the previous review. You can change items now; another review
           will be available when this finishes.
         </p>
       )}
-      {closingQuote && error && (
+      {closingQuote && draftVisible && error && (
         <button
           className="csz-action"
           disabled={busy}
@@ -334,6 +362,7 @@ export function CustomerOrderEditor({
           operation={operation}
           now={now}
           busy={busy}
+          busyAction={busyAction}
           isUncertain={uncertain}
           error={error}
           onCommit={() => void progress("commit")}

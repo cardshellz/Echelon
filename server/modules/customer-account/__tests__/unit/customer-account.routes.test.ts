@@ -49,6 +49,13 @@ describe("customer account signed storefront HTTP boundary", () => {
     expect(anonymous.status).toBe(401);
     expect(services).toHaveBeenCalledTimes(1);
   });
+  it("records a database failure code without exposing SQL or connection details", async () => {
+    connection.mockRejectedValueOnce(Object.assign(new Error("private database query and credentials"), { code: "55P03" }));
+    const response = await request();
+    expect(response.status).toBe(503);
+    expect(report).toHaveBeenLastCalledWith({ code: "CUSTOMER_ACCOUNT_REQUEST_FAILED", path: "/account/bootstrap", causeCode: "55P03" });
+    expect(JSON.stringify(await response.json())).not.toContain("private database");
+  });
   it.each([
     { signed: () => `${proof()}&signature=duplicate` },
     { signed: () => proof({ timestamp: String(Math.floor(now.getTime() / 1000) - 301) }) },
