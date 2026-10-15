@@ -1,6 +1,9 @@
 import { z } from "zod";
 import { orderEditDiscountSchema } from "./order-edit-discounts";
 
+export const ORDER_EDIT_PRICING_DISPLAY_HEADER = "X-Order-Edit-Pricing-Display";
+export const ORDER_EDIT_PRICING_DISPLAY_VERSION = "v1";
+
 const cents = z.number().int().safe().nonnegative();
 const label = z.string().trim().min(1).max(500);
 
@@ -12,6 +15,9 @@ export const orderEditFinancialsSchema = z
     itemDiscountLabels: z.array(label).max(250),
     // Optional so saved operations retain their original financial proof shape.
     itemDiscounts: z.array(orderEditDiscountSchema).max(250).optional(),
+    // Response-only presentation: order coupons are separate from product/member prices.
+    // Omitted for older evidence that cannot prove this distinction.
+    orderDiscounts: z.array(orderEditDiscountSchema).max(250).optional(),
     shippingGrossCents: cents,
     shippingDiscountCents: cents,
     shippingCents: cents,
@@ -27,6 +33,7 @@ export const orderEditFinancialsSchema = z
             grossCents: cents,
             discountCents: cents,
             netCents: cents,
+            productNetCents: cents.optional(),
           })
           .strict(),
       )
@@ -48,12 +55,58 @@ export const orderEditFinancialsSchema = z
         line.grossCents,
         line.discountCents,
         line.netCents,
+        ...(line.productNetCents === undefined ? [] : [line.productNetCents]),
       ]),
     ];
     if (amounts.some((amount) => !Number.isSafeInteger(amount) || amount < 0))
       return;
     const sum = (values: number[]) =>
       values.reduce((total, amount) => total + BigInt(amount), BigInt(0));
+    if (value.orderDiscounts !== undefined) {
+      if (
+        value.orderDiscounts.some(
+          (discount) => !Number.isSafeInteger(discount.amountCents),
+        ) ||
+        new Set(value.orderDiscounts.map((discount) => discount.key)).size !==
+          value.orderDiscounts.length ||
+        value.lines.some(
+          (line) =>
+            line.productNetCents === undefined ||
+            line.productNetCents < line.netCents ||
+            line.productNetCents > line.grossCents,
+        ) ||
+        value.orderDiscounts.some(
+          (discount) =>
+            !value.itemDiscounts?.some(
+              (item) =>
+                item.key === discount.key &&
+                item.label === discount.label &&
+                item.amountCents === discount.amountCents &&
+                JSON.stringify(item.value) === JSON.stringify(discount.value),
+            ),
+        )
+      ) {
+        context.addIssue({
+          code: "custom",
+          message:
+            "The order discount presentation is incomplete or inconsistent.",
+        });
+      } else if (
+        sum(value.lines.map((line) => line.productNetCents!)) -
+          BigInt(value.itemsNetCents) !==
+        sum(value.orderDiscounts.map((discount) => discount.amountCents))
+      ) {
+        context.addIssue({
+          code: "custom",
+          message: "The item subtotals and order discounts do not reconcile.",
+        });
+      }
+    } else if (value.lines.some((line) => line.productNetCents !== undefined)) {
+      context.addIssue({
+        code: "custom",
+        message: "Item subtotals require their order discount breakdown.",
+      });
+    }
     if (
       new Set(value.lines.map((line) => line.id)).size !== value.lines.length ||
       (value.itemDiscounts !== undefined &&

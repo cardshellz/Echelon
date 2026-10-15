@@ -5,6 +5,7 @@ import { CUSTOMER_RETURNS_API, RETURN_CUSTOMER_SESSION_HEADER } from "@shared/re
 import { PreviewAccessError } from "@/lib/customer-return-preview";
 import { createOrderEditTransport } from "@/lib/order-edits";
 import { createCustomerReturnTransport } from "@/lib/customer-return-customer";
+import { ORDER_EDIT_PRICING_DISPLAY_HEADER, ORDER_EDIT_PRICING_DISPLAY_VERSION } from "@shared/order-edits/order-edit-financials";
 
 export const customerAccountPageConfigSchema = z.object({
   themeId: z.string().max(30).regex(/^[1-9][0-9]*$/),
@@ -45,6 +46,8 @@ export function createCustomerAccountTransport(raw: CustomerAccountPageConfig, r
       fields[key] = value;
     }
     const headers = new Headers(options?.headers);
+    if (prefix === ORDER_EDIT_API && headers.get(ORDER_EDIT_PRICING_DISPLAY_HEADER) === ORDER_EDIT_PRICING_DISPLAY_VERSION)
+      fields.pricingDisplayVersion = ORDER_EDIT_PRICING_DISPLAY_VERSION;
     if (prefix === CUSTOMER_RETURNS_API && headers.get(RETURN_CUSTOMER_SESSION_HEADER) !== sessionKey) {
       throw new PreviewAccessError("Your signed-in account changed. Refresh this page before continuing.");
     }

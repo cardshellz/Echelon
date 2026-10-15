@@ -1,4 +1,18 @@
 import type { OrderEditOperation } from "@shared/order-edits/order-edit.contract";
+import type { OrderEditFinancials } from "@shared/order-edits/order-edit-financials";
+
+/** Use the verified price after product/member savings, before order coupons.
+ * Older responses retain their exact net total; never infer allocations from a code label. */
+export function orderEditItemSubtotal(
+  financials: OrderEditFinancials | null | undefined,
+  id: string,
+  fallbackCents: number,
+): number {
+  return (
+    financials?.lines.find((line) => line.id === id)?.productNetCents ??
+    fallbackCents
+  );
+}
 
 type DisplayLine = OrderEditOperation["lines"][number];
 

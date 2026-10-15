@@ -68,6 +68,33 @@ The old `unlimited` and `single_use_reward` serialized values exist only to fini
 or recover already persisted operations. Do not use them to admit newly entered
 coupons or infer reward issuance from a coupon's shape.
 
+## Customer price presentation
+
+`presentOrderEditCodeBreakdown` adds response-only display fields from the existing
+verified code-pricing proof. Each item's `productNetCents` is its price after
+product/member discounts and before order coupons. Its existing `netCents` remains
+the amount after all allocated discounts. `orderDiscounts` identifies the exact
+coupon amounts already included in `itemDiscounts`; it is not another discount.
+The response schema checks that item subtotals minus these coupons equal the
+original item net, and rejects missing, mismatched or non-reconciling evidence.
+Saved pricing proofs, fingerprints, shipping inputs, taxes and financial commands
+are unchanged.
+
+The customer draft and review display the club unit/line price, then item subtotal,
+each order coupon, shipping, tax and updated total. For the #64043 screenshot case:
+233 - 23 + 549 + 46 = 805 cents, against 829 cents already paid, yielding a 24-cent
+refund difference. The customer modal replaces payment history with **Already
+paid** (net of recorded refunds) and the payment/refund difference. Staff retain
+their payment history. Older evidence without a verified product/coupon split
+keeps its original exact net amounts; the UI never reverse-engineers a club price.
+
+Deploy this backend before the rebuilt staging theme. New clients opt into display
+version `v1` using `X-Order-Edit-Pricing-Display`, carried in the customer proxy's
+JSON query as `pricingDisplayVersion`. Old tabs receive the previous strict
+response shape. This capability changes presentation only and grants no access.
+No migration is needed. The complete browser walkthrough remains mocked; it
+cannot prove a deployed Shopify refund or payment.
+
 ## Evidence and release limits
 
 - Read-only Shopify calculations on order #64043 returned $0.23 for each 10%

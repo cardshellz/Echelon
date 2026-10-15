@@ -14,18 +14,44 @@ export function OrderEditSummary({
   totals,
   difference,
   financials,
+  paidCents,
 }: {
   totals: Array<{ label: string; totalCents: number }>;
   difference?: { label: string; amountCents: number };
   financials?: OrderEditFinancials | null;
+  paidCents?: number;
 }) {
+  const orderDiscounts = financials?.orderDiscounts ?? [];
+  // The API proves that these exact amounts reconcile; no percentage is calculated in the UI.
+  const itemSubtotal =
+    financials &&
+    Number(
+      BigInt(financials.itemsNetCents) +
+        orderDiscounts.reduce(
+          (sum, discount) => sum + BigInt(discount.amountCents),
+          BigInt(0),
+        ),
+    );
   return (
     <section aria-label="Order summary" className="oe-summary">
       <h3>Your order total</h3>
       {financials && (
         <dl className="oe-money-list oe-summary-items">
-          <dt>Items after discounts</dt>
-          <dd>{money(financials.itemsNetCents)}</dd>
+          <dt>
+            {orderDiscounts.length ? "Items subtotal" : "Items after discounts"}
+          </dt>
+          <dd>{money(itemSubtotal!)}</dd>
+          {orderDiscounts.map((discount) => (
+            <React.Fragment key={discount.key}>
+              <dt className="oe-saving">
+                {discount.label}
+                {discount.value.type === "percentage" && (
+                  <small>{discount.value.percentage}% off</small>
+                )}
+              </dt>
+              <dd className="oe-saving">−{money(discount.amountCents)}</dd>
+            </React.Fragment>
+          ))}
           <dt>Shipping</dt>
           <dd>{money(financials.shippingCents)}</dd>
           <dt>{financials.taxesIncluded ? "Tax (included)" : "Tax"}</dt>
@@ -44,6 +70,12 @@ export function OrderEditSummary({
           </React.Fragment>
         ))}
       </dl>
+      {paidCents !== undefined && (
+        <dl className="oe-money-list oe-summary-paid">
+          <dt>Already paid</dt>
+          <dd>{money(paidCents)}</dd>
+        </dl>
+      )}
       {difference && (
         <div className="oe-payment-difference">
           <span>{difference.label}</span>{" "}
@@ -87,17 +119,28 @@ export function OrderEditCalculationDetails({
     <FinancialDetails label="How your total is calculated">
       {columns.length > 0 && <OrderEditTotals columns={columns} embedded />}
       {shipping && (
-        <section className="oe-shipping-rate" aria-label="Recalculated shipping">
+        <section
+          className="oe-shipping-rate"
+          aria-label="Recalculated shipping"
+        >
           <h3>{shipping.title}</h3>
           <dl className="oe-money-list">
-            <dt>Current checkout rate</dt><dd>{money(shipping.grossCents)}</dd>
-            {shipping.discountCents > 0 && <>
-              <dt className="oe-saving">{shipping.discountLabels.join(", ") || "Shipping savings"}</dt>
-              <dd className="oe-saving">−{money(shipping.discountCents)}</dd>
-            </>}
-            <dt className="oe-net">Shipping charged</dt><dd className="oe-net">{money(shipping.netCents)}</dd>
+            <dt>Current checkout rate</dt>
+            <dd>{money(shipping.grossCents)}</dd>
+            {shipping.discountCents > 0 && (
+              <>
+                <dt className="oe-saving">
+                  {shipping.discountLabels.join(", ") || "Shipping savings"}
+                </dt>
+                <dd className="oe-saving">−{money(shipping.discountCents)}</dd>
+              </>
+            )}
+            <dt className="oe-net">Shipping charged</dt>
+            <dd className="oe-net">{money(shipping.netCents)}</dd>
           </dl>
-          <p className="oe-shipping-note">Included in the shipping amount above.</p>
+          <p className="oe-shipping-note">
+            Included in the shipping amount above.
+          </p>
         </section>
       )}
     </FinancialDetails>

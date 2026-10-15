@@ -27,6 +27,7 @@ import {
   type OrderEditVariant,
 } from "../application/order-edit-provider";
 import { buildOrderEditFinancials } from "../domain/order-edit-financials";
+import { presentOrderEditCodeBreakdown } from "../application/order-edit-code-presentation";
 import { priceOrderEditDiscounts } from "../domain/order-edit-discount-engine";
 import { resolveOrderEditLinePlan } from "../domain/order-edit-line-plan";
 import { priceOrderEditPreviewItems } from "../domain/order-edit-preview-pricing";
@@ -636,7 +637,7 @@ export class ShopifyOrderEditProvider
       ...(plan.discountCodes !== undefined
         ? { appliedCodes: codePricing?.applications ?? [] }
         : {}),
-      financials,
+      financials: presentOrderEditCodeBreakdown(financials, codePricing)!,
       shippingRepricing,
       lines: previewLines.map((line) => ({
         id: line.id,
