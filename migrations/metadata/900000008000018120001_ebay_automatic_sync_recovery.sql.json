@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "migration": "900000008000018120001_ebay_automatic_sync_recovery.sql",
+  "generation": 8,
+  "pr": 1812,
+  "ordinal": 1,
+  "after": [
+    "900000007000018030001_shipment_cost_exception_decisions.sql"
+  ]
+}

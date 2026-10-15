@@ -45,7 +45,8 @@ import {
 } from "../ebay-existing-listing-identity";
 import { admitEbayListingSyncProducts } from "../ebay-listing-sync-admission";
 import { createEbayMarketplaceRegistrationAdapters } from "../adapters/ebay/ebay-marketplace-registration.factory";
-import { quantityProviderResponseRecovery } from "../../inventory-planning/quantity-publication";
+import { quantityProviderResponseRecovery, automaticEbayPublicationRecovery, ebayPublicationReconciliationRepository,
+  EbayPublicationContentRefreshRejectedError } from "../../inventory-planning/quantity-publication";
 import {
   type EbayProductSyncResult,
 } from "@shared/types/ebay-listing-sync";
@@ -518,20 +519,29 @@ export const ebayListingSyncService = new EbayListingSyncService(
     prepareActiveEbayListingSync,
     quantityProviderResponseRecovery,
     existingListingConnector,
+    automaticEbayPublicationRecovery,
   ), new EbayPublicationCompletionExecution(prepareEbayPublicationCompletion, quantityProviderResponseRecovery,
     existingListingConnector, assertEbayPublicationCompatibility)),new EbayListingWithdrawalExecution(prepareEbayWithdrawal,quantityProviderResponseRecovery)),
   () => new Date(),
   randomUUID,
+  ebayPublicationReconciliationRepository,
 );
 export async function syncActiveListings(
   filter: SyncFilter | null,
   actor = "ebay-listing-sync",
   commandKey?: string,
+  expectedDestination?: { connectionId: number; accountId: string },
 ): Promise<EbayProductSyncResult> {
   filter = filterSchema.parse(filter);
   const validatedActor = z.string().trim().min(1).max(200).parse(actor);
   if (commandKey !== undefined) z.string().uuid().parse(commandKey);
   const ctx = await context();
+  if (expectedDestination) {
+    const expected = z.object({ connectionId: z.number().int().positive().max(2147483647),
+      accountId: z.string().trim().min(1).max(240) }).strict().parse(expectedDestination);
+    if (ctx.conn.id !== expected.connectionId || ctx.account.externalAccountId !== expected.accountId)
+      throw new EbayListingSyncError("EBAY_SYNC_IDENTITY_CHANGED", "The eBay connection changed. The earlier recovery cannot update a different account.");
+  }
   const selected = await readActiveEbaySyncRows(filter);
   const selectedProductIds = [...new Set(selected.map(row => row.product_id))];
   const requestedProductIds = [...new Set(filter?.productIds ?? [])];
@@ -572,6 +582,45 @@ export async function syncActiveListings(
     summary.details.push({ productId, success: false, code: "EBAY_SYNC_PRODUCT_NOT_FOUND", error: "This product no longer exists. Refresh the listing feed before retrying." });
   }
   return summary;
+}
+
+/** Inventory's recurring drift check asks the existing channel owner to refresh
+ * content. It cannot create offers, switch seller accounts, or select quantities.
+ * A lost acknowledgement reuses the same admission key; a durable rejection is
+ * explicit so the watch can try a new command after the underlying issue changes. */
+export async function refreshRecoveredEbayListing(input: {
+  productId: number; connectionId: number; accountId: string; commandKey: string;
+}): Promise<{ jobId: string }> {
+  const request = z.object({ productId: z.number().int().positive().max(2147483647),
+    connectionId: z.number().int().positive().max(2147483647), accountId: z.string().trim().min(1).max(240),
+    commandKey: z.string().uuid() }).strict().parse(input);
+  const actor = "system:ebay-recovery-reconciliation";
+  // Resolve a consumed command before capturing today's catalog. Otherwise a
+  // lost enqueue acknowledgement followed by a rename/inclusion change traps
+  // the old key in a permanent replay conflict. This is a receipt read only;
+  // the next durable watch cycle requests fresh content with its own key.
+  const prior = await ebayListingSyncService.getByCommand(request.commandKey, EBAY_CHANNEL_ID, actor);
+  if (prior) {
+    if (prior.operation !== "sync" || prior.productId !== request.productId
+      || prior.identity.connectionId !== request.connectionId || prior.identity.accountId !== request.accountId)
+      throw new EbayListingSyncError("EBAY_SYNC_REPLAY_CONFLICT", "The saved recovery command belongs to another listing or destination.");
+    return { jobId: prior.id };
+  }
+  const rejection = await ebayListingSyncService.getAdmission(request.commandKey, EBAY_CHANNEL_ID);
+  if (rejection) {
+    if (rejection.productId !== request.productId || rejection.operation !== "sync")
+      throw new EbayListingSyncError("EBAY_SYNC_REPLAY_CONFLICT", "The saved rejection belongs to another listing operation.");
+    throw new EbayPublicationContentRefreshRejectedError(rejection.code ?? "EBAY_SYNC_PRODUCT_NOT_ELIGIBLE",
+      rejection.message ?? "This listing needs its saved selection or catalog issue corrected.");
+  }
+  const result = await syncActiveListings({ productIds: [request.productId] },
+    actor, request.commandKey,
+    { connectionId: request.connectionId, accountId: request.accountId });
+  const job = result.jobs.find(member => member.productId === request.productId);
+  if (job?.kind === "admission") throw new EbayPublicationContentRefreshRejectedError(
+    job.code ?? "EBAY_SYNC_PRODUCT_NOT_ELIGIBLE", job.message ?? "This listing needs its saved selection or catalog issue corrected.");
+  if (!job) throw new EbayListingSyncError("EBAY_SYNC_PERSISTENCE_FAILED", "The current listing refresh has not been durably queued.");
+  return { jobId: job.id };
 }
 
 export async function triggerPricingRuleSync(

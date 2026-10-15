@@ -60,11 +60,123 @@ test("recorded picture and verification phases do not claim success before saved
   state.jobs = [{ ...running, progress: { ...running.progress, phase: "verify", phaseState: "completed" } }];
   await dialog.getByRole("button", { name: "Refresh update status", exact: true }).click();
   await expect(dialog.getByRole("status")).toContainText("Verification recorded; saving the result");
-  await expect(dialog).not.toContainText("Listing update and pictures verified.");
+  await expect(dialog).not.toContainText("Listing and pictures verified.");
   state.jobs = [{ ...running, state: "completed" }];
   await dialog.getByRole("button", { name: "Refresh update status", exact: true }).click();
-  await expect(dialog.getByRole("status")).toHaveText("Listing update and pictures verified.");
+  await expect(dialog.getByRole("status")).toHaveText("Listing and pictures verified.");
   expect(state.requests).toEqual([]);
+  expect(state.errors).toEqual([]); expect(state.unexpected).toEqual([]);
+});
+
+for (const code of ["PUBLICATION_AUTOMATIC_RECOVERY_FAILED", "EBAY_QUANTITY_RESPONSE_UNCERTAIN", "QUANTITY_PROVIDER_REQUEST_TIMEOUT"]) {
+test(`an automatic missing-response retry (${code}) stays on live status without administrator recovery`, async ({ page }, info) => {
+  const state = await setupEbayChannelPage(page);
+  const priorIssue = resolveEbayListingIssue({ code, jobId: job.id, productId: job.productId, state: "awaiting_evidence" });
+  state.jobs = [{ ...job, state: "recovering", code, message: priorIssue.message, issue: priorIssue,
+    nextAttemptAt: "2026-10-15T13:35:50.000Z",
+    progress: { ...recordedProgress, phase: "recover_prior_requests", phaseState: "started", queuedAhead: null } }];
+  await page.reload(); await page.clock.install();
+  await expect(page.getByRole("status", { name: statusName })).toContainText("Recovering an interrupted update");
+  await expect(page.getByRole("button", { name: "Review blocked update", exact: true })).toHaveCount(0);
+  await page.getByRole("button", { name: "View update status", exact: true }).click();
+  const dialog = page.getByRole("dialog");
+  await expect(dialog).toContainText("will retry automatically using current listing content and inventory");
+  await expect(dialog).toContainText("Checking earlier eBay request outcomes");
+  await expect(dialog).toContainText("Next automatic check eligible at");
+  await expect(dialog.getByRole("button", { name: "Review blocked update", exact: true })).toHaveCount(0);
+  await expect(dialog.getByRole("button", { name: /Resume|Retry this product/ })).toHaveCount(0);
+  await expect(dialog).not.toContainText("administrator");
+  await page.screenshot({ path: info.outputPath("ebay-automatic-response-recovery.png"), fullPage: true });
+  state.jobs = [{ ...job, state: "running", progress: { ...recordedProgress, phase: "update_item", phaseState: "started", queuedAhead: null } }];
+  await page.clock.fastForward(10_100);
+  await expect(dialog.getByRole("status")).toContainText("Updating variant content and pictures");
+  expect(state.requests).toEqual([]); expect(state.commands).toEqual([]);
+  expect(state.errors).toEqual([]); expect(state.unexpected).toEqual([]);
+});
+}
+
+for (const activeState of ["queued", "running"]) {
+  test(`a ${activeState} request does not display an old recoverable blocker`, async ({ page }) => {
+    const state = await setupEbayChannelPage(page);
+    const issue = resolveEbayListingIssue({ code: "EBAY_SYNC_RESPONSE_EVIDENCE_REQUIRED", jobId: job.id, productId: 1 });
+    state.jobs = [{ ...job, state: activeState, code: issue.code, message: issue.message, issue,
+      progress: { ...recordedProgress, phase: "update_item", phaseState: "started" } }];
+    await page.reload();
+    await expect(page.getByRole("status", { name: statusName })).not.toContainText("earlier eBay quantity request");
+    await expect(page.getByRole("button", { name: "Review blocked update", exact: true })).toHaveCount(0);
+    await page.getByRole("button", { name: "View update status", exact: true }).click();
+    const dialog = page.getByRole("dialog");
+    await expect(dialog.getByRole("status")).toContainText(activeState === "queued" ? "Waiting for 28 earlier updates" : "Updating variant content and pictures");
+    await expect(dialog).not.toContainText("needs review");
+    await expect(dialog).not.toContainText("Next automatic check eligible at");
+    await expect(dialog.getByRole("button", { name: /Review blocked|Resume/ })).toHaveCount(0);
+    expect(state.requests).toEqual([]); expect(state.errors).toEqual([]); expect(state.unexpected).toEqual([]);
+  });
+}
+
+test("completed content keeps observing stock through a checked match, delayed drift, and unavailable status", async ({ page }, info) => {
+  const state = await setupEbayChannelPage(page);
+  const completed = { ...job, state: "completed" };
+  const inventoryReconciliation = { state: "pending", checkedAt: null, nextCheckAt: "2026-10-15T14:00:30.000Z", code: null, message: null };
+  state.jobs = [{ ...completed, inventoryReconciliation }];
+  await page.reload(); await page.clock.install();
+  await expect(page.getByRole("status", { name: statusName })).toContainText("Listing and pictures verified.");
+  await expect(page.getByRole("region", { name: "Stock reconciliation", exact: true })).toContainText("does not confirm current stock");
+  await page.getByRole("button", { name: "View update status", exact: true }).click();
+  const dialog = page.getByRole("dialog");
+  const stock = dialog.getByRole("region", { name: "Stock reconciliation", exact: true });
+  await expect(stock).toContainText("Checking current stock");
+  await page.screenshot({ path: info.outputPath("ebay-content-complete-stock-pending.png"), fullPage: true });
+  const checkedAt = "2026-10-15T14:00:01.000Z";
+  state.jobs = [{ ...completed, inventoryReconciliation: { ...inventoryReconciliation, state: "verified", checkedAt } }];
+  await page.clock.fastForward(10_100);
+  await expect(stock).toContainText("Stock matched current inventory at the last check.");
+  await expect(stock.locator("time").first()).toHaveAttribute("datetime", checkedAt);
+  await expect(stock).toContainText("Monitoring continues");
+  state.jobs = [{ ...completed, inventoryReconciliation: { ...inventoryReconciliation, checkedAt,
+    code: "PUBLICATION_RECONCILIATION_DRIFT" } }];
+  await page.clock.fastForward(10_100);
+  await expect(stock).toContainText("Restoring current stock");
+  await expect(stock).toContainText("The last stock check found a difference. A correction was requested. The next check will confirm the current quantity.");
+  await expect(stock.locator("time").last()).toHaveAttribute("datetime", inventoryReconciliation.nextCheckAt);
+  await expect(dialog.getByRole("status")).toContainText("Listing and pictures verified.");
+  await page.screenshot({ path: info.outputPath("ebay-delayed-stock-drift.png"), fullPage: true });
+  state.jobs = [{ ...completed, inventoryReconciliation: { ...inventoryReconciliation, state: "unavailable", nextCheckAt: null,
+    code: "PUBLICATION_RECONCILIATION_STATUS_UNAVAILABLE" } }];
+  await page.clock.fastForward(10_100);
+  await expect(stock).toContainText("Stock verification status is unavailable.");
+  await expect(stock.locator("time")).toHaveCount(0);
+  await expect(dialog.getByRole("status")).toContainText("Listing and pictures verified.");
+  await dialog.getByRole("button", { name: "Refresh update status", exact: true }).click();
+  expect(state.requests).toEqual([]); expect(state.commands).toEqual([]);
+  expect(state.errors).toEqual([]); expect(state.unexpected).toEqual([]);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+});
+
+test("stock monitoring failure appears in Errors while automatic correction remains progress", async ({ page }, info) => {
+  const state = await setupEbayChannelPage(page);
+  const completed = { ...job, state: "completed", inventoryReconciliation: {
+    state: "needs_attention", checkedAt: "2026-10-15T14:00:00.000Z", nextCheckAt: "2026-10-15T14:01:00.000Z",
+    code: "PUBLICATION_RECONCILIATION_FAILED", message: "eBay could not be checked for the current stock quantity.",
+  } };
+  state.jobs = [completed];
+  await page.reload(); await page.clock.install();
+  await page.getByRole("button", { name: "Errors (1)", exact: true }).click();
+  await expect(page.getByRole("status", { name: statusName })).toContainText("Listing and pictures verified.");
+  await expect(page.getByRole("region", { name: "Stock reconciliation", exact: true })).toContainText("Stock check could not finish");
+  await page.getByRole("button", { name: "View update status", exact: true }).click();
+  const dialog = page.getByRole("dialog");
+  await expect(dialog).toContainText("Stock monitoring will retry automatically.");
+  await expect(dialog.getByRole("button", { name: /Resume|Retry Sync/ })).toHaveCount(0);
+  await page.screenshot({ path: info.outputPath("ebay-stock-monitoring-error.png"), fullPage: true });
+  await dialog.getByRole("button", { name: "Close", exact: true }).first().click();
+  await page.getByRole("button", { name: "All (1)", exact: true }).click();
+  state.jobs = [{ ...completed, inventoryReconciliation: { ...completed.inventoryReconciliation,
+    state: "pending", code: "PUBLICATION_RECONCILIATION_DRIFT", message: null } }];
+  await page.clock.fastForward(10_100);
+  await expect(page.getByRole("button", { name: "Errors (0)", exact: true })).toBeVisible();
+  await expect(page.getByRole("region", { name: "Stock reconciliation", exact: true })).toContainText("Restoring current stock");
+  expect(state.requests).toEqual([]); expect(state.commands).toEqual([]);
   expect(state.errors).toEqual([]); expect(state.unexpected).toEqual([]);
 });
 
@@ -132,7 +244,7 @@ test("an old invalid draft and a new catalog variant do not force mapping review
   state.unlinkedVariants = [{ id: 472, sku: "SHLZ-TOP-TOB-C500" }];
   state.response = pending;
   await page.reload();
-  await expect(page.getByText("Listed · update paused", { exact: true }).filter({ visible: true })).toBeVisible();
+  await expect(page.getByText("Listed", { exact: true }).filter({ visible: true })).toBeVisible();
   await expect(page.getByText("The listing update was prepared incorrectly", { exact: true })).toBeVisible();
   await expect(page.getByRole("region", { name: "Variants without a saved listing for 55PT Toploader Combo Pack" })).toContainText("SHLZ-TOP-TOB-C500");
   await expect(page.getByRole("button", { name: "Check publication", exact: true })).toHaveCount(0);
@@ -237,7 +349,7 @@ test("inventory contention explains the photo interruption, retries the existing
   state.jobs = [{ ...recovering, state: "completed", code: null, message: null }];
   state.feedStatus = "listed";
   await dialog.getByRole("button", { name: "Refresh update status", exact: true }).click();
-  await expect(dialog).toContainText("Listing update and pictures verified");
+  await expect(dialog).toContainText("Listing and pictures verified");
   expect(state.requests).toHaveLength(1);
   expect(state.errors).toEqual([]);
   expect(state.unexpected).toEqual([]);
@@ -279,7 +391,7 @@ test("saved sync survives reload, shows recovery, and clears only after verified
   ];
   await page.reload();
   await expect(page.getByRole("status", { name: statusName })).toContainText(
-    "An earlier quantity update needs review",
+    "Recovering an interrupted update",
   );
   await expect(page.getByText(state.syncError, { exact: true })).toHaveCount(0);
   await page.screenshot({
@@ -384,20 +496,33 @@ const preview = {
   }],
 };
 
-test("blocked quantity update has a preview and explicit audited resume action", async ({ page }, info) => {
+test("reviewed recovery hands a stale response to live status and follows the saved request to completion", async ({ page }, info) => {
   const state = await setupEbayChannelPage(page);
   state.jobs = [blockedJob];
   const commands: unknown[] = [];
+  let recovered = false;
+  let allowStatusRead: () => void = () => {};
+  const freshStatus = new Promise<void>(resolve => { allowStatusRead = resolve; });
+  await page.route(`**/api/ebay/listings/sync-jobs/${job.id}`, async route => {
+    if (!recovered) return route.fallback();
+    await freshStatus;
+    return route.fulfill({ json: { job: state.jobs[0] } });
+  });
   await page.route(`**/api/ebay/listings/sync-jobs/${job.id}/recovery`, async (route) => {
     if (route.request().method() === "GET") return route.fulfill({ json: preview });
     commands.push(route.request().postDataJSON());
     state.jobs = [job];
-    return route.fulfill({ json: { attemptIds: ["16323"], replayed: false, providerWriteAttempted: false, job } });
+    recovered = true;
+    return route.fulfill({ json: { attemptIds: ["16323"], replayed: false, providerWriteAttempted: false, job: blockedJob } });
   });
   await page.reload();
+  await page.clock.install();
   await expect(page.getByRole("button", { name: "Errors (1)", exact: true })).toBeVisible();
-  await expect(page.getByText("Listed · update paused", { exact: true }).filter({ visible: true })).toBeVisible();
-  await page.getByRole("button", { name: "Review blocked update", exact: true }).click();
+  await expect(page.getByText("Listed", { exact: true }).filter({ visible: true })).toBeVisible();
+  // Opening status first leaves a cached blocked snapshot. Recovery must not
+  // show that snapshot while its first fresh GET is still in flight.
+  await page.getByRole("button", { name: "View update status", exact: true }).click();
+  await page.getByRole("dialog").getByRole("button", { name: "Review blocked update", exact: true }).click();
   const dialog = page.getByRole("dialog");
   await expect(dialog).toContainText("SHLZ-TOP-260PT-P10 · Attempt 16323");
   await dialog.getByText("Recorded response details", { exact: true }).click();
@@ -411,7 +536,18 @@ test("blocked quantity update has a preview and explicit audited resume action",
   await expect(resume).toBeEnabled();
   await page.screenshot({ path: info.outputPath("ebay-recovery-confirmation.png"), fullPage: true });
   await resume.click();
-  await expect(dialog).toContainText("Recovery saved. The listing update will continue using current inventory.");
+  await expect(dialog.getByRole("status")).toContainText("Loading saved request status");
+  await expect(dialog.getByRole("button", { name: "Review blocked update", exact: true })).toHaveCount(0);
+  allowStatusRead();
+  await expect(dialog.getByRole("heading", { name: "Listing update status", exact: true })).toBeVisible();
+  await expect(dialog.getByRole("status")).toContainText("Queued for eBay");
+  await expect(dialog.getByRole("button", { name: "Review blocked update", exact: true })).toHaveCount(0);
+  state.jobs = [{ ...job, state: "running", progress: { ...recordedProgress, phase: "update_item", phaseState: "started", queuedAhead: null } }];
+  await page.clock.fastForward(10_100);
+  await expect(dialog.getByRole("status")).toContainText("Updating variant content and pictures");
+  state.jobs = [{ ...job, state: "completed" }];
+  await page.clock.fastForward(10_100);
+  await expect(dialog.getByRole("status")).toContainText("Listing and pictures verified.");
   expect(commands).toEqual([{ previewHash: preview.previewHash, acknowledgeUnknownOutcome: true, idempotencyKey: expect.stringMatching(/^[a-f0-9-]{36}$/) }]);
   expect(state.requests).toEqual([]);
   expect(state.errors).toEqual([]); expect(state.unexpected).toEqual([]);
@@ -436,6 +572,7 @@ test("a lost recovery response retains its idempotency key for the retry", async
     if (route.request().method() === "GET") return route.fulfill({ json: preview });
     commands.push(route.request().postDataJSON());
     if (commands.length === 1) return route.fulfill({ status: 503, json: { error: "Recovery response was interrupted." } });
+    state.jobs = [job];
     return route.fulfill({ json: { attemptIds: ["16323"], replayed: true, providerWriteAttempted: false, job } });
   });
   await page.reload(); await page.getByRole("button", { name: "Review blocked update", exact: true }).click();
@@ -444,7 +581,8 @@ test("a lost recovery response retains its idempotency key for the retry", async
   await dialog.getByRole("button", { name: "Resume with current inventory", exact: true }).click();
   await expect(dialog.getByRole("alert")).toContainText("Recovery response was interrupted.");
   await dialog.getByRole("button", { name: "Resume with current inventory", exact: true }).click();
-  await expect(dialog).toContainText("Recovery saved.");
+  await expect(dialog.getByRole("heading", { name: "Listing update status", exact: true })).toBeVisible();
+  await expect(dialog.getByRole("status")).toContainText("Queued for eBay");
   expect(commands).toHaveLength(2); expect(commands[1]).toEqual(commands[0]);
   expect(state.errors).toEqual([]); expect(state.unexpected).toEqual([]);
 });
@@ -459,6 +597,7 @@ test("interrupted publication without quantity attempts requires explicit confir
     if (route.request().method() === "GET") return route.fulfill({ json: publicationRecovery });
     commands.push(route.request().postDataJSON());
     if (commands.length === 1) return route.abort("failed");
+    state.jobs = [{ ...job, operation: "publish" }];
     return route.fulfill({ json: { attemptIds: [], publicationRetryAuthorized: true, replayed: true, providerWriteAttempted: false, job: { ...job, operation: "publish" } } });
   });
   await page.reload(); await page.getByRole("button", { name: "Review interrupted publication", exact: true }).click();
@@ -474,7 +613,8 @@ test("interrupted publication without quantity attempts requires explicit confir
   await dialog.getByRole("checkbox").check(); await resume.click();
   await expect(dialog.getByRole("alert")).toBeVisible();
   await resume.click();
-  await expect(dialog).toContainText("The saved publication will continue. Listing and pictures are not yet verified.");
+  await expect(dialog.getByRole("heading", { name: "Publishing status", exact: true })).toBeVisible();
+  await expect(dialog.getByRole("status")).toContainText("This request has not yet confirmed publication and current pictures.");
   expect(commands).toHaveLength(2); expect(commands[1]).toEqual(commands[0]);
   expect(commands[0]).toEqual({ previewHash: preview.previewHash, publicationRetryHash: publicationRecovery.publicationRetry.reviewHash, acknowledgeUnknownOutcome: true, idempotencyKey: expect.stringMatching(/^[a-f0-9-]{36}$/) });
   expect(state.commands).toEqual([]); expect(state.errors).toEqual([]); expect(state.unexpected).toEqual([]);
@@ -491,6 +631,7 @@ test("a changed publication recovery review resets acknowledgement and binds a n
       current = { ...publicationRecovery, publicationRetry: { ...publicationRecovery.publicationRetry, reviewHash: "d".repeat(64), revision: "2" } };
       return route.fulfill({ status: 409, json: { code: "EBAY_RECOVERY_PREVIEW_CHANGED", error: "The saved publication changed. Refresh the current review." } });
     }
+    state.jobs = [{ ...job, operation: "publish" }];
     return route.fulfill({ json: { attemptIds: [], publicationRetryAuthorized: true, replayed: false, providerWriteAttempted: false, job: { ...job, operation: "publish" } } });
   });
   await page.reload(); await page.getByRole("button", { name: "Review interrupted publication", exact: true }).click();
@@ -500,7 +641,7 @@ test("a changed publication recovery review resets acknowledgement and binds a n
   await dialog.getByRole("button", { name: "Refresh request details" }).click();
   await expect(dialog.getByRole("checkbox")).not.toBeChecked(); await expect(resume).toBeDisabled();
   await dialog.getByRole("checkbox").check(); await resume.click();
-  await expect(dialog).toContainText("Recovery saved.");
+  await expect(dialog.getByRole("heading", { name: "Publishing status", exact: true })).toBeVisible();
   expect(commands).toHaveLength(2);
   expect(commands[1].previewHash).toBe(commands[0].previewHash);
   expect(commands[1].publicationRetryHash).toBe("d".repeat(64));
@@ -890,7 +1031,7 @@ test("refreshing an older publishing request cannot hide a newer listing failure
   await expect.poll(() => reads).toBeGreaterThan(previousReads);
   await dialog.getByRole("button", { name: "Close", exact: true }).first().click();
   await expect(page.getByText("The newer update requires a photo.", { exact: true })).toBeVisible();
-  await expect(page.getByText("Listed · update paused", { exact: true }).filter({ visible: true })).toBeVisible();
+  await expect(page.getByText("Listed", { exact: true }).filter({ visible: true })).toBeVisible();
   expect(state.errors).toEqual([]); expect(state.unexpected).toEqual([]);
 });
 
@@ -975,15 +1116,18 @@ test("unreadable publication retry storage blocks new writes and offers recovery
 test("recovery success with a new admission error presents that correction instead of claiming progress", async ({ page }) => {
   const state = await setupEbayChannelPage(page); state.jobs = [blockedJob];
   const issue = resolveEbayListingIssue({ code: "EBAY_CATALOG_PHOTO_REQUIRED", productId: 1, message: "The included case variant needs a photo." });
-  await page.route(`**/api/ebay/listings/sync-jobs/${job.id}/recovery`, (route) => route.fulfill({ json: route.request().method() === "GET" ? preview : {
-    attemptIds: ["16323"], replayed: false, providerWriteAttempted: false,
-    job: { ...job, kind: "admission", state: "needs_attention", code: issue.code, message: issue.message, issue },
-  } }));
+  const admission = { ...job, kind: "admission", state: "needs_attention", code: issue.code, message: issue.message, issue };
+  await page.route(`**/api/ebay/listings/sync-jobs/${job.id}/recovery`, (route) => {
+    if (route.request().method() === "GET") return route.fulfill({ json: preview });
+    state.jobs = [admission];
+    return route.fulfill({ json: { attemptIds: ["16323"], replayed: false, providerWriteAttempted: false, job: admission } });
+  });
   await page.reload(); await page.getByRole("button", { name: "Review blocked update", exact: true }).click();
   const dialog = page.getByRole("dialog");
   await dialog.getByRole("checkbox").check();
   await dialog.getByRole("button", { name: "Resume with current inventory", exact: true }).click();
-  await expect(dialog).toContainText("Recovery saved. The listing still needs the correction below.");
+  await expect(dialog.getByRole("heading", { name: "Listing update status", exact: true })).toBeVisible();
+  await expect(dialog).toContainText("The included case variant needs a photo.");
   await expect(dialog.getByRole("link", { name: "Open product images" })).toHaveAttribute("href", "/products/1?tab=images");
   await expect(dialog.getByText("The listing update will continue", { exact: false })).toHaveCount(0);
   expect(state.errors).toEqual([]); expect(state.unexpected).toEqual([]);
@@ -1031,7 +1175,7 @@ test("a lost sync response clears only after its exact command appears in saved 
     await route.abort("failed");
   });
   await page.getByTitle("Sync this listing", { exact: true }).filter({ visible: true }).click();
-  await expect(page.getByText("Listed · update paused", { exact: true }).filter({ visible: true })).toBeVisible();
+  await expect(page.getByText("Listed", { exact: true }).filter({ visible: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "Retry this request", exact: true })).toBeVisible();
   expect(commandKey).toMatch(/^[a-f0-9-]{36}$/);
   state.jobs = [{ ...job, id: commandKey!, state: "completed" }];
@@ -1056,7 +1200,7 @@ test(`an older completed ${previousOperation} cannot hide a lost response and ${
     return route.fulfill({ json: { ...pending, jobs: state.jobs } });
   });
   await page.getByTitle("Sync this listing", { exact: true }).filter({ visible: true }).click();
-  await expect(page.getByText("Listed · update paused", { exact: true }).filter({ visible: true })).toBeVisible();
+  await expect(page.getByText("Listed", { exact: true }).filter({ visible: true })).toBeVisible();
   // The older job can be observed again with a later read. It still does not
   // prove acceptance of the newer command whose response was lost.
   await page.clock.fastForward(10_100);
@@ -1087,7 +1231,7 @@ test("an exact command receipt resolves a lost response coalesced into another j
     return route.fulfill({ status: 404, json: { code: "EBAY_SYNC_JOB_NOT_FOUND", error: "The receipt is not available yet." } });
   });
   await page.getByTitle("Sync this listing", { exact: true }).filter({ visible: true }).click();
-  await expect(page.getByText("Listed · update paused", { exact: true }).filter({ visible: true })).toBeVisible();
+  await expect(page.getByText("Listed", { exact: true }).filter({ visible: true })).toBeVisible();
   expect(commandKey).not.toBe(job.id);
   accepted = true; state.jobs = [{ ...job, state: "completed" }];
   await page.clock.fastForward(10_100);
@@ -1110,7 +1254,7 @@ test("a recovered exact sync receipt cannot replace a newer server failure", asy
   accepted = true; await page.clock.fastForward(10_100);
   await expect(page.getByRole("button", { name: "Retry this request", exact: true })).toHaveCount(0);
   await expect(page.getByText("The current server request requires another photo.", { exact: true })).toBeVisible();
-  await expect(page.getByText("Listed · update paused", { exact: true }).filter({ visible: true })).toBeVisible();
+  await expect(page.getByText("Listed", { exact: true }).filter({ visible: true })).toBeVisible();
   expect(state.errors).toEqual([]); expect(state.unexpected).toEqual([]);
 });
 
@@ -1122,7 +1266,7 @@ test("a late saved sync response reloads the latest job instead of overwriting i
   });
   await page.getByTitle("Sync this listing", { exact: true }).filter({ visible: true }).click();
   await expect(page.getByText("A newer saved update is missing a photo.", { exact: true })).toBeVisible();
-  await expect(page.getByText("Listed · update paused", { exact: true }).filter({ visible: true })).toBeVisible();
+  await expect(page.getByText("Listed", { exact: true }).filter({ visible: true })).toBeVisible();
   expect(state.errors).toEqual([]); expect(state.unexpected).toEqual([]);
 });
 

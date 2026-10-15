@@ -130,7 +130,7 @@ export class PostgresEbayListingExclusionRepository {
   }
 
   private async result(row: ExclusionReceipt, replayed: boolean, client?: PoolClient): Promise<EbayProductExclusionResult> {
-    const job = row.job_id ? await this.jobs.getByCommand(row.command_key, row.channel_id, client) : null;
+    const job = row.job_id ? await this.jobs.getByCommand(row.command_key, row.channel_id, { transactionClient: client }) : null;
     if (row.job_id && (!job || job.id !== row.job_id || job.operation !== "withdraw" || job.productId !== row.product_id))
       throw new EbayListingSyncError("EBAY_EXCLUSION_PERSISTENCE_FAILED", "The saved exclusion receipt is missing its exact withdrawal job. Keep this command reference and inspect its saved status.");
     return ebayProductExclusionResultSchema.parse({ success: true, productId: row.product_id, excluded: row.excluded,

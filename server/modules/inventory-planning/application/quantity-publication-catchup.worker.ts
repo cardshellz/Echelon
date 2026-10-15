@@ -12,6 +12,7 @@ type Log = (entry: Readonly<Record<string, unknown>>) => void;
 export function startQuantityPublicationCatchupWorker(processor: Processor, options: {
   intervalMs?: number;
   log?: Log;
+  reconcile?: () => Promise<{ checked: number; repaired: number; blocked: number }>;
 } = {}): { stop(): Promise<void> } {
   const intervalMs = options.intervalMs ?? DEFAULT_INTERVAL_MS;
   if (!Number.isSafeInteger(intervalMs) || intervalMs < 1 || intervalMs > MAX_INTERVAL_MS) {
@@ -30,6 +31,15 @@ export function startQuantityPublicationCatchupWorker(processor: Processor, opti
         // Per-scope failures are retained by the owner; infrastructure failure is
         // actionable without exposing provider payloads or credentials in logs.
         log({ event: "quantity_publication_catchup_failed", code: "PUBLICATION_CATCHUP_WORKER_FAILED" });
+      }
+      if (options.reconcile) {
+        try {
+          const result = await observeRuntimeWork("inventory.publication_reconciliation", options.reconcile);
+          if (result.checked > 0 || result.repaired > 0 || result.blocked > 0)
+            log({ event: "ebay_publication_reconciliation_batch", ...result });
+        } catch {
+          log({ event: "ebay_publication_reconciliation_failed", code: "PUBLICATION_RECONCILIATION_WORKER_FAILED" });
+        }
       }
     })().finally(() => { running = null; });
   };

@@ -1,0 +1,143 @@
+import type {
+  EbayBulkPriceQuantityRequest,
+  EbayInventoryItem,
+  EbayInventoryItemGroup,
+  EbayOffer,
+} from "../../adapters/ebay/ebay-types";
+import { executeEbayQuantityHttp } from "../../adapters/ebay/ebay-quantity-http";
+import type { EbayObservedOffer } from "../../listing-connectors/ebay-listing.connector";
+import type { EbayQuantityHttpRequest } from "../../quantity-publication-request";
+
+export const automaticSyncPhotos = [
+  "https://example.test/current-front.jpg",
+  "https://example.test/current-back.jpg",
+] as const;
+export const automaticSyncOldPhotos = ["https://example.test/old.jpg"];
+
+/** Stateful provider double. A lost response does not cancel the remote write:
+ * tests explicitly deliver it later, after a newer request has completed. Every
+ * ordinary request still crosses production HTTP classification/evidence code. */
+export class AutomaticSyncEbayProvider {
+  readonly writes: EbayQuantityHttpRequest[] = [];
+  readonly lateWrites: EbayQuantityHttpRequest[] = [];
+  private fault: { path: string; applyBeforeFailure: boolean } | null = null;
+  private held: { path: string; entered: () => void; gate: Promise<void> } | null = null;
+  private item: EbayInventoryItem = {
+    sku: "P5",
+    condition: "NEW",
+    product: { title: "Old title", description: "Description", imageUrls: [...automaticSyncOldPhotos] },
+    availability: { shipToLocationAvailability: { quantity: 999 } },
+  };
+  private offer: EbayObservedOffer = {
+    sku: "P5", offerId: "offer-P5", listingId: "listing-20", status: "PUBLISHED",
+    marketplaceId: "EBAY_US", format: "FIXED_PRICE", availableQuantity: 999,
+    categoryId: "183454", merchantLocationKey: "main",
+    listingPolicies: { fulfillmentPolicyId: "f", paymentPolicyId: "p", returnPolicyId: "r" },
+    pricingSummary: { price: { value: "9.99", currency: "USD" } },
+  };
+  private group: EbayInventoryItemGroup = {
+    title: "Old title", description: "Description", aspects: { Brand: ["Shellz"] },
+    imageUrls: [...automaticSyncOldPhotos], variantSKUs: ["P5"],
+    variesBy: { specifications: [{ name: "Pack Size", values: ["5"] }] },
+  };
+
+  constructor(private readonly clock: () => Date) {}
+
+  snapshot() {
+    return structuredClone({ item: this.item, offer: this.offer, group: this.group });
+  }
+
+  loseNextResponse(path: string, applyBeforeFailure = false): void {
+    if (this.fault) throw new Error("Only one provider failure may be armed at a time.");
+    this.fault = { path, applyBeforeFailure };
+  }
+
+  holdNextWrite(path: string): { entered: Promise<void>; release(): void } {
+    if (this.held) throw new Error("Only one provider write may be held at a time.");
+    let entered!: () => void;
+    let release!: () => void;
+    const observed = new Promise<void>(resolve => { entered = resolve; });
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    this.held = { path, entered, gate };
+    return { entered: observed, release };
+  }
+
+  deliverLateWrites(): void {
+    for (const request of this.lateWrites.splice(0)) this.apply(request);
+  }
+
+  async request<T>(input: EbayQuantityHttpRequest): Promise<T> {
+    const request = structuredClone(input);
+    return executeEbayQuantityHttp<T>({
+      url: `https://example.test${request.path}`, path: request.path,
+      method: request.method, body: request.body, headers: {}, now: this.clock,
+      request: async () => {
+        if (request.method === "GET") return this.response(this.read(request.path));
+        this.writes.push(request);
+        if (this.held?.path === request.path) {
+          const held = this.held;
+          this.held = null;
+          held.entered();
+          await held.gate;
+        }
+        if (this.fault?.path === request.path) {
+          const fault = this.fault;
+          this.fault = null;
+          if (fault.applyBeforeFailure) this.apply(request);
+          else this.lateWrites.push(request);
+          throw Object.assign(new Error("Injected response loss; provider may still apply this write."), { code: "ECONNRESET" });
+        }
+        const body = this.apply(request);
+        return body === undefined ? new Response(null, { status: 204 }) : this.response(body);
+      },
+    });
+  }
+
+  private response(body: unknown): Response {
+    return new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
+  }
+
+  private read(path: string): unknown {
+    const url = new URL(path, "https://example.test");
+    if (url.pathname === "/sell/inventory/v1/inventory_item/P5") return structuredClone(this.item);
+    if (url.pathname === "/sell/inventory/v1/inventory_item_group/PACK") return structuredClone(this.group);
+    if (url.pathname === "/sell/inventory/v1/offer/offer-P5") return structuredClone(this.offer);
+    if (url.pathname === "/sell/inventory/v1/offer" && url.searchParams.get("sku") === "P5") {
+      return { offers: [structuredClone(this.offer)], total: 1 };
+    }
+    throw new Error(`Unexpected fake eBay GET ${path}`);
+  }
+
+  private apply(request: EbayQuantityHttpRequest): unknown {
+    if (request.method === "PUT" && request.path === "/sell/inventory/v1/inventory_item/P5") {
+      this.item = { ...structuredClone(request.body as EbayInventoryItem), sku: "P5" };
+      return;
+    }
+    if (request.method === "PUT" && request.path === "/sell/inventory/v1/offer/offer-P5") {
+      this.offer = { ...structuredClone(request.body as EbayOffer), offerId: "offer-P5", listingId: "listing-20", status: "PUBLISHED" };
+      return;
+    }
+    if (request.method === "PUT" && request.path === "/sell/inventory/v1/inventory_item_group/PACK") {
+      const { inventoryItemGroupKey: _requestIdentity, ...body } = structuredClone(request.body as EbayInventoryItemGroup);
+      this.group = body;
+      return;
+    }
+    if (request.method === "POST" && request.path === "/sell/inventory/v1/bulk_update_price_quantity") {
+      const body = request.body as EbayBulkPriceQuantityRequest;
+      return { responses: body.requests.map(row => {
+        if (row.sku !== "P5") throw new Error("Unexpected fake eBay SKU.");
+        if (row.shipToLocationAvailability?.quantity !== undefined) {
+          this.item.availability.shipToLocationAvailability.quantity = row.shipToLocationAvailability.quantity;
+        }
+        return { sku: row.sku, statusCode: 200, offers: (row.offers ?? []).map(offer => {
+          if (offer.offerId !== this.offer.offerId) throw new Error("Unexpected fake eBay offer.");
+          if (offer.availableQuantity !== undefined) this.offer.availableQuantity = offer.availableQuantity;
+          return { offerId: offer.offerId, statusCode: 200 };
+        }) };
+      }) };
+    }
+    // Any accidental create/publish/delete in existing-listing recovery fails
+    // the test instead of quietly manufacturing another listing.
+    throw new Error(`Unexpected fake eBay mutation ${request.method} ${request.path}`);
+  }
+}

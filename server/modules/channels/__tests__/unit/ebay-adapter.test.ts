@@ -252,8 +252,8 @@ describe("eBay Adapter", () => {
 
       expect(getApiClient).toHaveBeenCalledWith(2, 22, "seller-account-1");
       expect(getInventoryItem).toHaveBeenCalledWith("CS-TL35-P25");
-      expect(result).toEqual([{ variantId: 101, observedQty: 9, status: "success", providerResponse: {
-        sku: "CS-TL35-P25", marketplaceId: "EBAY_US", offerId: "offer-1", inventoryItemQuantity: 9, offerQuantity: 9, observedQuantity: 9,
+      expect(result).toEqual([{ variantId: 101, observedQty: 9, quantityConsistent: true, status: "success", providerResponse: {
+        sku: "CS-TL35-P25", marketplaceId: "EBAY_US", offerId: "offer-1", inventoryItemQuantity: 9, offerQuantity: 9, observedQuantity: 9, quantityConsistent: true,
       } }]);
     });
 

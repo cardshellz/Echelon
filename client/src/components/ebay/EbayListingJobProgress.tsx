@@ -16,5 +16,16 @@ export function EbayListingJobProgress({ job, label, detail }: {
     {presentation.times.map(({ label: timeLabel, at }) => <p key={timeLabel} className="text-xs text-muted-foreground">
       {timeLabel}: <time dateTime={at}>{new Date(at).toLocaleString()}</time>
     </p>)}
+    {presentation.inventory && <section aria-label="Stock reconciliation" className="space-y-1 border-t pt-2">
+      <p className="font-medium break-words">{presentation.inventory.summary}</p>
+      <p className="text-muted-foreground break-words">{presentation.inventory.detail}</p>
+      {presentation.inventory.times.map(({ label: timeLabel, at }) => <p key={timeLabel} className="text-xs text-muted-foreground">
+        {timeLabel}: <time dateTime={at}>{new Date(at).toLocaleString()}</time>
+      </p>)}
+      {presentation.inventory.code && <details className="text-xs text-muted-foreground break-words" onClick={event => event.stopPropagation()}>
+        <summary className="cursor-pointer py-1">Stock check details</summary>
+        <p>Code: {presentation.inventory.code}</p><p>Request reference: {job.id}</p>
+      </details>}
+    </section>}
   </div>;
 }

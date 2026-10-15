@@ -1,4 +1,23 @@
 import { ebayListingIssueSchema, type EbayListingIssue } from "./types/ebay-listing-issue";
+import type { EbayListingSyncJob } from "./types/ebay-listing-sync";
+
+function isAutomaticResponseRecovery(code: string | null | undefined, state: string | undefined): boolean {
+  return state === "recovering" && (code === "EBAY_QUANTITY_RESPONSE_UNCERTAIN" || code === "QUANTITY_PROVIDER_REQUEST_TIMEOUT");
+}
+
+/** A previous attempt's error can remain on a queued/running snapshot. Only
+ * the saved stopped or recovering state makes that diagnostic actionable. */
+export function resolveEbayListingJobIssue(job: EbayListingSyncJob): EbayListingIssue | null {
+  if (["queued", "running", "completed"].includes(job.state)) return null;
+  if (job.state === "recovering" && !job.code && !job.issue) return null;
+  // Older responses classified these transport failures as manual recovery.
+  // The saved job's automatic retry state takes precedence over that old card.
+  const code = job.code ?? job.issue?.code;
+  if (isAutomaticResponseRecovery(code, job.state)) return resolveEbayListingIssue({ code,
+    productId: job.productId, jobId: job.id, state: job.state });
+  return job.issue ?? resolveEbayListingIssue({ code: job.code, message: job.message,
+    productId: job.productId, jobId: job.id, state: job.state });
+}
 
 export interface EbayListingIssueInput {
   code?: string | null;
@@ -13,6 +32,7 @@ export interface EbayListingIssueInput {
  * Codes determine available actions. Provider prose never decides permissions or retry policy. */
 export function resolveEbayListingIssue(input: EbayListingIssueInput): EbayListingIssue {
   const code = input.code && /^[A-Z0-9_]{1,100}$/.test(input.code) ? input.code : "EBAY_LISTING_OPERATION_FAILED";
+  const automaticResponseRecovery = isAutomaticResponseRecovery(code, input.state);
   const productPath = Number.isSafeInteger(input.productId) && input.productId! > 0 ? `/products/${input.productId}` : "/channels/ebay";
   const inventoryPath = Number.isSafeInteger(input.productId) && input.productId! > 0 ? `/channels/inventory?product=${input.productId}` : "/channels/inventory";
   const reference = input.jobId && /^[a-f0-9-]{36}$/i.test(input.jobId) ? input.jobId : undefined;
@@ -22,7 +42,7 @@ export function resolveEbayListingIssue(input: EbayListingIssueInput): EbayListi
     || input.code?.startsWith("CANONICAL_CHANNEL_QUANTITY_");
   // Older jobs saved generic contention prose and described invalid prepared
   // drafts as mapping faults. Present the classified cause and current action.
-  const message = isFeedReadIssue || ["INVENTORY_PUBLICATION_TARGET_BUSY", "EBAY_SYNC_DRAFT_SCOPE_INVALID", "CANONICAL_PUBLICATION_MAPPING_MISSING"].includes(code)
+  const message = isFeedReadIssue || automaticResponseRecovery || ["INVENTORY_PUBLICATION_TARGET_BUSY", "EBAY_SYNC_DRAFT_SCOPE_INVALID", "CANONICAL_PUBLICATION_MAPPING_MISSING", "PUBLICATION_AUTOMATIC_RECOVERY_FAILED"].includes(code)
     ? undefined : safeListingDiagnostic(input.message);
   const issue = (title: string, fallback: string, nextStep: string, retryable: boolean,
     kind: EbayListingIssue["action"]["kind"], label: string, href?: string): EbayListingIssue =>
@@ -144,6 +164,12 @@ export function resolveEbayListingIssue(input: EbayListingIssueInput): EbayListi
     return issue("Publication was interrupted", "Echelon cannot confirm whether an earlier publish request reached eBay.",
       "Review the saved publication. An inventory administrator can authorize it to check the existing offers and resume using current inventory and catalog pictures.",
       false, "check_recovery", "Review interrupted publication");
+  if (automaticResponseRecovery || code === "PUBLICATION_AUTOMATIC_RECOVERY_FAILED")
+    return issue("Recovering an interrupted update", automaticResponseRecovery
+      ? "Echelon did not receive a final response to an earlier eBay update. That request's outcome remains unknown."
+      : "Echelon could not finish preparing a fresh update after an earlier eBay response was lost.",
+      "The saved update will retry automatically using current listing content and inventory. View its status for the recorded step and retry eligibility.",
+      false, "check_status", "View update status");
   if (["EBAY_SYNC_RESPONSE_EVIDENCE_REQUIRED", "PUBLICATION_PRIOR_OUTCOME_UNRESOLVED", "PUBLICATION_REQUEST_EVIDENCE_INCOMPLETE",
     "EBAY_QUANTITY_RESPONSE_UNCERTAIN", "QUANTITY_PROVIDER_REQUEST_TIMEOUT"].includes(code))
     return issue("An earlier quantity update needs review", "Echelon cannot confirm the outcome of an earlier eBay quantity request.",

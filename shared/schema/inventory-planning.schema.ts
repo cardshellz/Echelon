@@ -2702,6 +2702,8 @@ export const inventoryPublicationReadbacks = inventoryPlanningSchema.table(
     publicationTargetRevisionSnapshot: bigint("publication_target_revision_snapshot", { mode: "bigint" }),
     externalInventoryItemIdSnapshot: varchar("external_inventory_item_id_snapshot", { length: 240 }),
     observedQuantity: bigint("observed_quantity", { mode: "bigint" }).notNull(),
+    // Older observations did not record agreement between provider quantity surfaces.
+    quantityConsistent: boolean("quantity_consistent"),
     matchesDesired: boolean("matches_desired"),
     evidenceHash: varchar("evidence_hash", { length: 64 }).notNull(),
     observedAt: timestamp("observed_at", { withTimezone: true }).notNull(),

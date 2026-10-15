@@ -5,10 +5,15 @@ import { createAuthorityAwareInventoryPublicationService } from "./inventory-ava
 import { QuantityPublicationCatchupService } from "../application/quantity-publication-admission.port";
 import type { EbayQuantityRequestAdmission } from "../../channels/quantity-publication-request";
 import { PostgresQuantityProviderResponseRecovery } from "./quantity-provider-response-recovery.repository";
+import { EbayAutomaticPublicationRecoveryService } from "../application/ebay-automatic-publication-recovery.service";
+import { PostgresEbayAutomaticPublicationRecoveryRepository } from "./ebay-automatic-publication-recovery.repository";
+import { PostgresEbayPublicationReconciliationRepository } from "./ebay-publication-reconciliation.repository";
 
 /** Shared production instance bounds nested provider connections across the known quantity owners. */
 export const quantityPublicationAdmission = new PostgresQuantityPublicationAdmission(pool);
 export const quantityProviderResponseRecovery = new PostgresQuantityProviderResponseRecovery(pool, () => new Date());
+export const automaticEbayPublicationRecovery = new EbayAutomaticPublicationRecoveryService(new PostgresEbayAutomaticPublicationRecoveryRepository(pool));
+export const ebayPublicationReconciliationRepository = new PostgresEbayPublicationReconciliationRepository(pool);
 
 function ebayRequestAdmission(base: Omit<QuantityPublicationScope, "externalInventoryItemId">): EbayQuantityRequestAdmission {
   const scope = (identity: string): QuantityPublicationScope => ({ ...base, externalInventoryItemId: identity });
