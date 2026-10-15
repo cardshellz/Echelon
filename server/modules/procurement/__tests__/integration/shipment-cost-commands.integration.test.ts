@@ -574,7 +574,8 @@ databaseTests.sequential("shipment cost command PostgreSQL guarantees", () => {
       expect(await cancelling).toMatchObject({ ok: false, error: { statusCode: 400, message: "Cannot transition from 'closed' to 'cancelled'" } });
       expect((await readCost()).actualCents).toBe(500);
       expect(await database.select().from(schema.landedCostSnapshots)).toMatchObject([
-        { inboundShipmentLineId: 11, totalLandedCostCents: 500, finalizedAt: NOW },
+        // A charge-only historical line has known freight but no proven product value.
+        { inboundShipmentLineId: 11, freightAllocatedCents: 500, totalLandedCostCents: null, productValueEvidence: null, finalizedAt: NOW },
       ]);
       expect(await database.select().from(schema.inboundShipmentStatusHistory)).toMatchObject([
         { inboundShipmentId: 1, fromStatus: "costing", toStatus: "closed", changedBy: actorId, changedAt: NOW },
