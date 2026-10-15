@@ -7,6 +7,7 @@ import { CUSTOMER_ACCOUNT_PROXY_API, CUSTOMER_ACCOUNT_COMMAND_HEADER } from "@sh
 import { CustomerReturnCustomerAuthService } from "../../../returns/application/customer-return-customer-auth.service";
 import type { CustomerReturnCustomerSession } from "../../../returns/application/customer-return-customer-auth.service";
 import { registerCustomerAccountRoutes, type CustomerAccountRouteDependencies } from "../../interfaces/customer-account.routes";
+import { previewCalculation, previewInput, PREVIEW_NOW } from "../../../order-edits/__tests__/fixtures/order-edit-preview.fixture";
 
 const now = new Date("2026-10-12T12:00:00Z");
 const config = { storageSecret: "fixture-storage-only-secret-32-characters", publicOrigin: "https://backend.test",
@@ -27,6 +28,7 @@ describe("customer account signed storefront HTTP boundary", () => {
   let enabled = true;
   beforeEach(async () => {
     vi.clearAllMocks(); enabled = true;
+    services.mockImplementation(() => ({ edits: { connection }, returns: vi.fn() }));
     const auth = new CustomerReturnCustomerAuthService({ config, challenges: { create: vi.fn(), consume: vi.fn() },
       shops: async () => [{ channelId: 2, connectionId: 4, shopDomain: "fixture.myshopify.com", displayName: "Shopify" }], now: () => now, randomState: () => "a".repeat(43) });
     const app = express(); app.use(express.json());
@@ -89,5 +91,22 @@ describe("customer account signed storefront HTTP boundary", () => {
     const bootstrap = await (await request()).json();
     expect((await request({ path: "/order-edits/settings/4", method: "POST", body: {}, sessionKey: bootstrap.session.sessionKey })).status).toBe(404);
     expect((await request({ path: "/order-edits/orders", sessionKey: bootstrap.session.sessionKey })).status).toBe(404);
+  });
+  it.each([false, true])("negotiates pricing display through the signed customer bridge, opt-in=%s", async (optIn) => {
+    const bootstrap = await (await request()).json();
+    const calculation = previewCalculation();
+    const financials = { ...calculation.financials, orderDiscounts: [], lines: calculation.financials.lines.map(line => ({ ...line, productNetCents: line.netCents })) };
+    const preview = vi.fn(async (input) => ({ phase: "preview", input, calculatedAt: new Date(PREVIEW_NOW).toISOString(), expiresAt: new Date(PREVIEW_NOW + 60000).toISOString(), ...calculation, financials }));
+    services.mockImplementation(() => ({ edits: { connection, preview }, returns: vi.fn() }));
+    const response = await request({ path: "/order-edits/previews", method: "POST", sessionKey: bootstrap.session.sessionKey, query: optIn ? { pricingDisplayVersion: "v1" } : {}, body: previewInput() });
+    expect(response.status).toBe(200);
+    const result = (await response.json()).financials;
+    expect(result.totalCents).toBe(financials.totalCents);
+    expect(result.orderDiscounts).toEqual(optIn ? [] : undefined);
+    expect(result.lines[0].productNetCents).toBe(optIn ? financials.lines[0].netCents : undefined);
+    expect(preview).toHaveBeenCalledWith(previewInput());
+    const unsupported = await request({ path: "/order-edits/previews", method: "POST", sessionKey: bootstrap.session.sessionKey, query: { pricingDisplayVersion: "unrecognized" }, body: previewInput() });
+    expect(unsupported.status).toBe(400);
+    expect(preview).toHaveBeenCalledTimes(1);
   });
 });

@@ -50,6 +50,7 @@ import type {
 import { OrderEditError } from "../domain/order-edit-error";
 import type { OrderEditCodeRedemptions } from "./order-edit-code-redemptions";
 import { requiresLegacyCodeReceipt } from "../domain/order-edit-coupon-boundary";
+import { presentOrderEditCodeBreakdown } from "./order-edit-code-presentation";
 
 const terminal = new Set(["completed", "recovered", "failed", "expired"]);
 // Bound each scheduler pass so one store cannot monopolize the worker.
@@ -284,7 +285,10 @@ export class OrderEditService {
             ?.netCents ?? line.totalCents,
       })),
       totalCents: snapshot.totalCents,
-      financials: snapshot.financials,
+      financials: presentOrderEditCodeBreakdown(
+        snapshot.financials,
+        snapshot.codePricing,
+      ),
       settlement: presentOrderEditSettlement(snapshot),
       financialStatus: snapshot.fullyPaid ? "Paid" : "Payment outstanding",
       warehouseStatus: warehouse.editable
@@ -1091,9 +1095,21 @@ export class OrderEditService {
       balanceDueCents: Math.max(0, presentedTotal - presentedPaid),
       refundDueCents: Math.max(0, presentedPaid - presentedTotal),
       financials: {
-        before: record.baseline.financials ?? null,
-        quoted: quote?.financials ?? null,
-        current: snapshot.financials ?? null,
+        before:
+          presentOrderEditCodeBreakdown(
+            record.baseline.financials,
+            record.baseline.codePricing,
+          ) ?? null,
+        quoted:
+          presentOrderEditCodeBreakdown(
+            quote?.financials,
+            quote?.codePricing,
+          ) ?? null,
+        current:
+          presentOrderEditCodeBreakdown(
+            snapshot.financials,
+            snapshot.codePricing,
+          ) ?? null,
       },
       settlement: presentOrderEditSettlement(snapshot),
       lines:

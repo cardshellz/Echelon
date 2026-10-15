@@ -1,5 +1,6 @@
 import React from "react";
 import type { OrderEditOperation } from "@shared/order-edits/order-edit.contract";
+import type { OrderEditFinancials } from "@shared/order-edits/order-edit-financials";
 import { Badge } from "@/components/ui/badge";
 import { MemberProductPrice } from "@/components/MemberProductPrice";
 import type { MemberPlanPresentation } from "@shared/membership/member-plan-presentation";
@@ -7,6 +8,7 @@ import { formatOrderEditMoney } from "@/lib/order-edits";
 import {
   exactOrderEditUnitPrice,
   groupOrderEditDisplayLines,
+  orderEditItemSubtotal,
 } from "@/lib/order-edit-display";
 
 export function OrderEditUnitPrice({
@@ -46,15 +48,26 @@ export function OrderEditUnitPrice({
 export function OrderEditItems({
   lines,
   showAdded = false,
+  financials,
 }: {
   lines: OrderEditOperation["lines"];
   showAdded?: boolean;
+  financials?: OrderEditFinancials | null;
 }) {
   return (
     <section aria-label="Items in your order">
       <h3 className="mb-3 text-sm font-medium">Items in your order</h3>
       <ul className="oe-review-items">
-        {groupOrderEditDisplayLines(lines).map((line) => (
+        {groupOrderEditDisplayLines(
+          lines.map((line) => ({
+            ...line,
+            totalCents: orderEditItemSubtotal(
+              financials,
+              line.id,
+              line.totalCents,
+            ),
+          })),
+        ).map((line) => (
           <li key={line.key} className="oe-review-item">
             <div className="min-w-0 flex-1">
               <p className="text-sm font-medium">

@@ -11,6 +11,7 @@ import {
 import { registerOrderEditRoutes } from "../../interfaces/order-edit.routes";
 import type { OrderEditService } from "../../application/order-edit.service";
 import { ORDER_EDIT_CATALOG_HEADER, ORDER_EDIT_CATALOG_VERSION } from "@shared/order-edits/order-edit-catalog";
+import { ORDER_EDIT_PRICING_DISPLAY_HEADER, ORDER_EDIT_PRICING_DISPLAY_VERSION } from "@shared/order-edits/order-edit-financials";
 import {
   previewInput,
   previewCalculation,
@@ -155,6 +156,26 @@ describe("order edit staff HTTP boundary", () => {
     },
     body: JSON.stringify({ paymentWindowMinutes: 30, enabled: true }),
   });
+  it.each([false, true])("negotiates coupon display metadata on operation reads and previews, opt-in=%s", async (optIn) => {
+    const calculation = previewCalculation();
+    const financials = { ...calculation.financials, orderDiscounts: [], lines: calculation.financials.lines.map(line => ({ ...line, productNetCents: line.netCents })) };
+    getOperation.mockResolvedValue({ ...displayOperation, financials: { before: null, quoted: financials, current: financials } });
+    preview.mockImplementationOnce(async input => ({ phase: "preview", input, calculatedAt: new Date(PREVIEW_NOW).toISOString(), expiresAt: new Date(PREVIEW_NOW + 60000).toISOString(), ...calculation, financials }));
+    const headers: Record<string, string> = { "Content-Type": "application/json", Origin: url };
+    if (optIn) headers[ORDER_EDIT_PRICING_DISPLAY_HEADER] = ORDER_EDIT_PRICING_DISPLAY_VERSION;
+    const operationResponse = await fetch(`${url}/api/order-edits/admin/operations/${KEY}`, { headers });
+    const previewResponse = await fetch(`${url}/api/order-edits/admin/previews`, { method: "POST", headers, body: JSON.stringify(previewInput()) });
+    expect(operationResponse.status).toBe(200);
+    expect(previewResponse.status).toBe(200);
+    for (const result of [(await operationResponse.json()).financials.quoted, (await previewResponse.json()).financials]) {
+      expect(result.totalCents).toBe(financials.totalCents);
+      expect(result.orderDiscounts).toEqual(optIn ? [] : undefined);
+      expect(result.lines[0].productNetCents).toBe(optIn ? financials.lines[0].netCents : undefined);
+      expect(result.lines[0].netCents).toBe(financials.lines[0].netCents);
+    }
+    expect(financials.lines[0].productNetCents).toBe(financials.lines[0].netCents);
+  });
+
   it.each(["", "/commit", "/reconcile", "/abandon"])(
     "preserves strict legacy operation responses and opts new clients into SKU display metadata for %s",
     async (action) => {

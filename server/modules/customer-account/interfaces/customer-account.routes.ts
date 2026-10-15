@@ -40,6 +40,8 @@ import {
   type CustomerAccountStagingConfig,
 } from "../domain/customer-account-staging";
 import type { customerAccountServices } from "../infrastructure/customer-account.composition";
+import { ORDER_EDIT_PRICING_DISPLAY_VERSION } from "@shared/order-edits/order-edit-financials";
+import { orderEditResponsePresentation } from "../../order-edits/application/order-edit-response-presentation";
 
 type Services = ReturnType<ReturnType<typeof customerAccountServices>>;
 export interface CustomerAccountRouteDependencies {
@@ -199,7 +201,15 @@ async function dispatch(
   principal: CustomerReturnCustomerSession,
   services: Services,
 ): Promise<unknown> {
-  const { path, method, query, body } = input;
+  const { path, method, body } = input;
+  const { pricingDisplayVersion, ...orderQuery } = input.query;
+  const query = path.startsWith("/order-edits/") ? orderQuery : input.query;
+  const pricingDisplay =
+    path.startsWith("/order-edits/") &&
+    z
+      .literal(ORDER_EDIT_PRICING_DISPLAY_VERSION)
+      .optional()
+      .parse(pricingDisplayVersion) === ORDER_EDIT_PRICING_DISPLAY_VERSION;
   const read = method === "GET";
   if (read && body !== undefined) empty.parse(body);
   if (path === "/account/bootstrap" && read) {
@@ -222,12 +232,15 @@ async function dispatch(
     const params = connectionQuery
       .extend({ codeEntryVersion: z.literal("v1").optional() })
       .parse(query);
-    return orderEditOrderSchema.parse(
-      await services.edits.order(
-        params.connectionId,
-        id.parse(order[1]),
-        params.codeEntryVersion,
+    return orderEditResponsePresentation(
+      orderEditOrderSchema.parse(
+        await services.edits.order(
+          params.connectionId,
+          id.parse(order[1]),
+          params.codeEntryVersion,
+        ),
       ),
+      pricingDisplay,
     );
   }
   const catalog =
@@ -255,12 +268,18 @@ async function dispatch(
   }
   if (path === "/order-edits/previews" && !read) {
     empty.parse(query);
-    return orderEditPreviewSchema.parse(await services.edits.preview(body));
+    return orderEditResponsePresentation(
+      orderEditPreviewSchema.parse(await services.edits.preview(body)),
+      pricingDisplay,
+    );
   }
   if (path === "/order-edits/quotes" && !read) {
     empty.parse(query);
-    return orderEditOperationSchema.parse(
-      await services.edits.quote(body, commandKey(input)),
+    return orderEditResponsePresentation(
+      orderEditOperationSchema.parse(
+        await services.edits.quote(body, commandKey(input)),
+      ),
+      pricingDisplay,
     );
   }
   const operation =
@@ -274,19 +293,25 @@ async function dispatch(
         .object({ codeEntryVersion: z.literal("v1").optional() })
         .strict()
         .parse(query);
-      return orderEditOperationSchema.parse(
-        await services.edits.operation(operationId, params.codeEntryVersion),
+      return orderEditResponsePresentation(
+        orderEditOperationSchema.parse(
+          await services.edits.operation(operationId, params.codeEntryVersion),
+        ),
+        pricingDisplay,
       );
     }
     empty.parse(query);
     if (operation[2] && !read) {
       empty.parse(body);
-      return orderEditOperationSchema.parse(
-        await services.edits.progress(
-          operationId,
-          z.enum(["commit", "reconcile", "abandon"]).parse(operation[2]),
-          commandKey(input),
+      return orderEditResponsePresentation(
+        orderEditOperationSchema.parse(
+          await services.edits.progress(
+            operationId,
+            z.enum(["commit", "reconcile", "abandon"]).parse(operation[2]),
+            commandKey(input),
+          ),
         ),
+        pricingDisplay,
       );
     }
   }
@@ -355,12 +380,10 @@ function notFound() {
   );
 }
 function unavailable(res: Response) {
-  res
-    .status(404)
-    .json({
-      error: {
-        code: "CUSTOMER_ACCOUNT_NOT_FOUND",
-        message: "This account action is unavailable.",
-      },
-    });
+  res.status(404).json({
+    error: {
+      code: "CUSTOMER_ACCOUNT_NOT_FOUND",
+      message: "This account action is unavailable.",
+    },
+  });
 }
