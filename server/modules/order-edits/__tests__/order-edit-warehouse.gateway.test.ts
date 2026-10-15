@@ -26,7 +26,7 @@ function ready() {
   };
 }
 function fixture() {
-  const orders = [{ ...ready(), order_edit_operation_id: OPERATION }];
+  const orders: ReturnType<typeof ready>[] = [{ ...ready(), order_edit_operation_id: OPERATION }];
   const items: OrderEditWarehouseItem[] = [
     {
       id: 1,
@@ -109,6 +109,18 @@ function fixture() {
 }
 
 describe("order edit warehouse cutoff", () => {
+  it("reads consistent availability without acquiring command locks or changing holds", async () => {
+    const f = fixture();
+    f.orders[0].order_edit_operation_id = null;
+    expect(await f.gateway.inspect(20)).toMatchObject({ editable: true, reasons: [], wmsOrderIds: [10] });
+    expect(f.commands[0]).toBe("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
+    expect(f.commands.at(-1)).toBe("COMMIT");
+    expect(f.commands.some(command => /FOR UPDATE|^UPDATE|^INSERT|^DELETE/.test(command))).toBe(false);
+    expect(f.provider.synchronizeOrderEditShipment).not.toHaveBeenCalled();
+    f.orders[0].order_edit_operation_id = OPERATION;
+    expect((await f.gateway.inspect(20)).editable).toBe(false);
+    expect(f.orders[0].order_edit_operation_id).toBe(OPERATION);
+  });
   it("allows an untouched ready order without removing a manual hold", () => {
     expect(orderEditWarehouseBlockers([{ ...ready(), on_hold: 1 }])).toEqual(
       [],
@@ -151,6 +163,8 @@ describe("atomic warehouse edit release proof", () => {
     const f = fixture();
     f.orders[0].on_hold = 1;
     const proof = await f.gateway.releaseUnchanged(20, OPERATION);
+    expect(f.commands).toContain("BEGIN");
+    expect(f.commands.some(command => command.includes("FOR UPDATE"))).toBe(true);
     expect(f.orders[0].order_edit_operation_id).toBe(OPERATION);
     expect(
       f.commands.some((text) =>

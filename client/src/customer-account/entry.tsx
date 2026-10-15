@@ -60,7 +60,7 @@ function CustomerAccount({ root, api, statusTarget }: { root: HTMLElement; api: 
   useEffect(() => {
     const controller = new AbortController();
     const rows = Array.from(root.querySelectorAll<HTMLElement>("[data-csz-account-order]"));
-    const listeners: Array<() => void> = [];
+    const rowListeners = new Map<HTMLElement, Array<() => void>>();
     let observer: IntersectionObserver | null = null;
     let active = 0;
     const queued: HTMLElement[] = [];
@@ -78,8 +78,27 @@ function CustomerAccount({ root, api, statusTarget }: { root: HTMLElement; api: 
       }
     }
     async function inspect(row: HTMLElement) {
+      rowListeners.get(row)?.forEach(remove => remove());
+      const cleanup: Array<() => void> = [];
+      rowListeners.set(row, cleanup);
+      row.querySelectorAll<HTMLElement>("[data-csz-account-action]").forEach(button => { button.hidden = true; });
       const status = row.querySelector<HTMLElement>("[data-csz-order-tools-status]");
       if (status) status.textContent = "Checking available actions…";
+      const offerRetry = () => {
+        if (!status || controller.signal.aborted) return;
+        const retry = document.createElement("button");
+        retry.type = "button";
+        retry.className = "csz-action";
+        retry.textContent = "Retry order actions";
+        const click = () => {
+          retry.disabled = true;
+          queued.push(row);
+          schedule();
+        };
+        retry.addEventListener("click", click);
+        status.after(retry);
+        cleanup.push(() => { retry.removeEventListener("click", click); retry.remove(); });
+      };
       try {
         const identity = await api.resolve({ orderReference: row.dataset.orderReference, externalOrderId: row.dataset.externalOrderId }, controller.signal);
         const currentSession = activeSession;
@@ -100,7 +119,7 @@ function CustomerAccount({ root, api, statusTarget }: { root: HTMLElement; api: 
           button.hidden = false;
           const click = () => setChoice({ kind, omsOrderId: identity.omsOrderId, returnOrder });
           button.addEventListener("click", click);
-          listeners.push(() => button.removeEventListener("click", click));
+          cleanup.push(() => button.removeEventListener("click", click));
         };
         if (editResult.status === "fulfilled" && editResult.value && (editResult.value.activeOperationId || (currentSession.connection.enabled && editResult.value.eligibility.editable))) {
           bind("edit");
@@ -108,10 +127,14 @@ function CustomerAccount({ root, api, statusTarget }: { root: HTMLElement; api: 
           if (address && editResult.value.eligibility.editable) address.hidden = false;
         }
         if (returnResult.status === "fulfilled" && returnResult.value?.order.lines.some(line => line.eligibleQuantity > 0)) bind("return", returnResult.value);
-        if (status) status.textContent = results.some(result => result.status === "rejected") ? "Some order actions could not be checked. Refresh this page to try again."
+        const failed = results.some(result => result.status === "rejected");
+        if (status) status.textContent = failed ? "We couldn't check the available actions for this order. Please try again."
           : editResult.status === "fulfilled" && editResult.value && !editResult.value.eligibility.editable
             ? editResult.value.eligibility.reasons[0] ?? "This order can no longer be edited." : "";
-      } catch (cause) { if (!controller.signal.aborted && status) status.textContent = message(cause); }
+        if (failed) offerRetry();
+      } catch (cause) {
+        if (!controller.signal.aborted && status) { status.textContent = message(cause); offerRetry(); }
+      }
     }
     void api.bootstrap(controller.signal).then(result => {
       if (controller.signal.aborted) return;
@@ -129,7 +152,7 @@ function CustomerAccount({ root, api, statusTarget }: { root: HTMLElement; api: 
       }, { rootMargin: "200px" });
       rows.forEach(row => observer!.observe(row));
     }).catch(cause => { if (!controller.signal.aborted) setError(message(cause)); });
-    return () => { controller.abort(); observer?.disconnect(); listeners.forEach(remove => remove()); client.clear(); };
+    return () => { controller.abort(); observer?.disconnect(); rowListeners.forEach(cleanup => cleanup.forEach(remove => remove())); client.clear(); };
   }, [api, root, attempt, client]);
   async function showReturn(authorizationId: number, omsOrderId: number) {
     if (!session?.session.sessionKey) return;

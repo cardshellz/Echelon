@@ -1,11 +1,52 @@
-import { describe, it, expect, vi } from "vitest";
-import { createCustomerAccountTransport } from "../customer-account.transport";
+import { afterEach, describe, it, expect, vi } from "vitest";
+import { createCustomerAccountTransport, CUSTOMER_ACCOUNT_REQUEST_TIMEOUT_MS } from "../customer-account.transport";
 
 const config = { themeId: "174740308127", customerId: "100", proxyPath: "/apps/echelon-returns" };
 const connection = { connectionId: 4, channelId: 2, name: "Shopify", shopDomain: "fixture.myshopify.com", enabled: true, paymentWindowMinutes: 30 };
 const key = "a".repeat(43);
 const bootstrap = { session: { authenticated: true, privateTesting: true, sessionKey: key }, connection };
 describe("storefront transport reuses canonical clients", () => {
+  afterEach(() => vi.useRealTimers());
+  it("bounds a stalled account read without retrying it", async () => {
+    vi.useFakeTimers();
+    const request = vi.fn<typeof fetch>((_target, options) => new Promise((_resolve, reject) => {
+      options!.signal!.addEventListener("abort", () => reject(options!.signal!.reason), { once: true });
+    }));
+    const api = createCustomerAccountTransport(config, request);
+    const result = expect(api.bootstrap()).rejects.toMatchObject({ name: "TimeoutError" });
+    await vi.advanceTimersByTimeAsync(CUSTOMER_ACCOUNT_REQUEST_TIMEOUT_MS);
+    await result;
+    expect(request).toHaveBeenCalledTimes(1);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+  it("treats a stalled cancellation body as uncertain and preserves its operation without replaying the command", async () => {
+    vi.useFakeTimers();
+    const request = vi.fn<typeof fetch>(async (_target, options) => new Response(new ReadableStream({ start(controller) {
+      options!.signal!.addEventListener("abort", () => controller.error(options!.signal!.reason), { once: true });
+    } }), { headers: { "Content-Type": "application/json" } }));
+    const api = createCustomerAccountTransport(config, request);
+    const operationId = "22222222-2222-4222-8222-222222222222";
+    const result = expect(api.edits.abandon(operationId)).rejects.toMatchObject({ code: "ORDER_EDIT_CONNECTION_FAILED", uncertain: true });
+    await vi.advanceTimersByTimeAsync(CUSTOMER_ACCOUNT_REQUEST_TIMEOUT_MS);
+    await result;
+    expect(request).toHaveBeenCalledTimes(1);
+    const input = JSON.parse(String(request.mock.calls[0][1]!.body));
+    expect(input.path).toBe(`/order-edits/operations/${operationId}/abandon`);
+    expect(input.commandKey).toBe(operationId);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+  it("honors caller cancellation and clears its deadline", async () => {
+    vi.useFakeTimers();
+    const request = vi.fn<typeof fetch>((_target, options) => new Promise((_resolve, reject) => {
+      options!.signal!.addEventListener("abort", () => reject(options!.signal!.reason), { once: true });
+    }));
+    const controller = new AbortController();
+    const api = createCustomerAccountTransport(config, request);
+    const result = expect(api.bootstrap(controller.signal)).rejects.toMatchObject({ name: "AbortError" });
+    controller.abort();
+    await result;
+    expect(vi.getTimerCount()).toBe(0);
+  });
   it("sends every call through the dedicated same-origin proxy with JSON inputs and account binding", async () => {
     const request = vi.fn(async () => Response.json(bootstrap));
     const api = createCustomerAccountTransport(config, request);

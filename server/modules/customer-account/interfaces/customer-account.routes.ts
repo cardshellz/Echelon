@@ -52,6 +52,7 @@ export interface CustomerAccountRouteDependencies {
     code: string;
     path: string;
     context?: CustomerAccountOriginContext;
+    causeCode?: string;
   }) => void;
 }
 const id = z.coerce.number().int().positive().safe();
@@ -95,6 +96,8 @@ export function registerCustomerAccountRoutes(
     },
   });
   const failed = (res: Response, error: unknown, path: string) => {
+    // Record a bounded driver/provider code, never SQL, credentials or customer data.
+    const cause = z.object({ code: z.string().regex(/^[A-Z0-9_]{1,80}$/) }).safeParse(error);
     const known =
       error instanceof OrderEditError ||
       error instanceof OrderEditProviderError;
@@ -107,6 +110,7 @@ export function registerCustomerAccountRoutes(
     dependencies.report({
       code,
       path,
+      ...(code === "CUSTOMER_ACCOUNT_REQUEST_FAILED" && cause.success ? { causeCode: cause.data.code } : {}),
       ...(error instanceof CustomerAccountOriginAccessError
         ? { context: error.context }
         : {}),
