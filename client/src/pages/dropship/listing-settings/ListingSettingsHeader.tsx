@@ -28,7 +28,8 @@ export function ListingSettingsHeader({ storeName, ebayStoreCount }: ListingSett
   const lines = sendTimingLines(storeName, ebayStoreCount);
   return (
     <header data-testid="listing-settings-header" className="mt-5">
-      <h2 className="text-xl font-semibold text-zinc-900">{listingSettingsTitle(storeName, !wide)}</h2>
+      {/* Focusable from code only: the last place focus goes when a sheet closes and nothing nearer is left (PR 11b, 11.2). */}
+      <h2 tabIndex={-1} className="text-xl font-semibold text-zinc-900 focus:outline-none">{listingSettingsTitle(storeName, !wide)}</h2>
       <p className="mt-1 text-sm text-zinc-600">{LISTING_SETTINGS_HEADER_WORDS.intro}</p>
       <p className="mt-1 text-sm text-zinc-600" data-testid="listing-settings-timing">
         {wide ? LISTING_SETTINGS_HEADER_WORDS.timing : LISTING_SETTINGS_HEADER_WORDS.timingPhone}
