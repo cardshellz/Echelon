@@ -357,7 +357,7 @@ describe("private order edit orchestration", () => {
     await h.service.commit(OP, OP, "staff");
     expect(h.provider.commit).toHaveBeenCalledTimes(1);
     expect((await h.service.abandon(OP, "staff")).status).toBe("expired");
-    expect(h.warehouse.releaseUnchanged).toHaveBeenCalledOnce();
+    expect(h.warehouse.releaseUnsubmitted).toHaveBeenCalledTimes(2);
   });
   it("does not treat a generic rejected provider error as proof nothing was sent", async () => {
     const h = serviceHarness();
@@ -397,7 +397,7 @@ describe("private order edit orchestration", () => {
     await h.service.quote(h.input, "staff");
     await h.service.quote(h.input, "staff");
     expect(h.provider.quote).toHaveBeenCalledTimes(1);
-    expect(h.warehouse.acquire).toHaveBeenCalledTimes(1);
+    expect(h.warehouse.acquire).not.toHaveBeenCalled();
     await expect(
       h.service.quote(
         { ...h.input, changes: [{ ...h.input.changes[0], quantity: 4 }] },
@@ -420,112 +420,6 @@ describe("private order edit orchestration", () => {
     });
     expect(h.warehouse.acquire).not.toHaveBeenCalled();
     expect(h.record()).toBeNull();
-  });
-  it("never exposes or commits a staged preview when picking wins acquisition", async () => {
-    const h = serviceHarness();
-    h.warehouse.acquire.mockRejectedValue(
-      new OrderEditError("ORDER_EDIT_PICKING_CUTOFF", "Picking started"),
-    );
-    expect((await h.service.quote(h.input, "staff")).status).toBe(
-      "review_required",
-    );
-    expect(h.provider.quote).toHaveBeenCalledOnce();
-    expect(h.record().quote).toBeNull();
-    expect(h.record().error?.code).toBe("ORDER_EDIT_PICKING_CUTOFF");
-    await h.service.commit(OP, OP, "staff");
-    expect(h.provider.commit).not.toHaveBeenCalled();
-    expect(h.provider.refund).not.toHaveBeenCalled();
-  });
-  it("overlaps preview and hold acquisition but exposes neither before both finish", async () => {
-    const h = serviceHarness();
-    let releaseHold!: () => void;
-    const hold = new Promise<void>((resolve) => {
-      releaseHold = resolve;
-    });
-    h.warehouse.acquire.mockReturnValueOnce(hold);
-    const pending = h.service.quote(h.input, "staff");
-    await vi.waitFor(() => expect(h.provider.quote).toHaveBeenCalledOnce());
-    expect(h.record().status).toBe("preparing");
-    expect(h.record().quote).toBeNull();
-    releaseHold();
-    expect((await pending).status).toBe("ready");
-    expect(h.record().quote).not.toBeNull();
-  });
-  it("waits for a late hold after preview failure before unlocking cancellation", async () => {
-    const h = serviceHarness();
-    let releaseHold!: () => void;
-    h.warehouse.acquire.mockReturnValueOnce(
-      new Promise<void>((resolve) => {
-        releaseHold = resolve;
-      }),
-    );
-    h.provider.quote.mockRejectedValueOnce(
-      new OrderEditProviderError("QUOTE_REJECTED", "Invalid quote"),
-    );
-    const pending = h.service.quote(h.input, "staff");
-    await vi.waitFor(() => expect(h.provider.quote).toHaveBeenCalledOnce());
-    expect(h.record().status).toBe("preparing");
-    await expect(h.service.abandon(OP, "staff")).rejects.toMatchObject({
-      code: "ORDER_EDIT_BUSY",
-    });
-    releaseHold();
-    expect((await pending).status).toBe("review_required");
-    expect(h.record().error?.code).toBe("QUOTE_REJECTED");
-    expect((await h.service.abandon(OP, "staff")).status).toBe("expired");
-    expect(h.warehouse.releaseUnchanged).toHaveBeenCalledOnce();
-  });
-  it("waits for a late preview after hold failure and retains the hold error", async () => {
-    const h = serviceHarness();
-    const staged = await h.provider.quote();
-    h.provider.quote.mockClear();
-    let releasePreview!: (quote: OrderEditQuote) => void;
-    h.provider.quote.mockReturnValueOnce(
-      new Promise<OrderEditQuote>((resolve) => {
-        releasePreview = resolve;
-      }),
-    );
-    h.warehouse.acquire.mockRejectedValueOnce(
-      new OrderEditError("HOLD_FAILED", "Hold unavailable"),
-    );
-    const pending = h.service.quote(h.input, "staff");
-    await vi.waitFor(() => expect(h.provider.quote).toHaveBeenCalledOnce());
-    expect(h.record().status).toBe("preparing");
-    releasePreview(staged);
-    expect((await pending).status).toBe("review_required");
-    expect(h.record().quote).toBeNull();
-    expect(h.record().error?.code).toBe("HOLD_FAILED");
-    expect(h.provider.commit).not.toHaveBeenCalled();
-  });
-  it("rechecks warehouse cutoff and quote revision at commit", async () => {
-    const h = serviceHarness();
-    await h.service.quote(h.input, "staff");
-    h.warehouse.assertHeld.mockRejectedValue(
-      new OrderEditError("ORDER_EDIT_PICKING_CUTOFF", "Picking started"),
-    );
-    await expect(h.service.commit(OP, OP, "staff")).rejects.toMatchObject({
-      code: "ORDER_EDIT_PICKING_CUTOFF",
-    });
-    expect(h.provider.commit).not.toHaveBeenCalled();
-  });
-  it("audits the hold error and also reports the preview error when both fail", async () => {
-    const h = serviceHarness();
-    h.warehouse.acquire.mockRejectedValueOnce(
-      new OrderEditError("HOLD_FAILED", "Hold unavailable"),
-    );
-    h.provider.quote.mockRejectedValueOnce(
-      new OrderEditProviderError("QUOTE_REJECTED", "Invalid quote"),
-    );
-    const failedQuote = await h.service.quote(h.input, "staff");
-    expect(h.record().error?.code).toBe("HOLD_FAILED");
-    expect(failedQuote.warnings.some(warning => /predates shipping recalculation/.test(warning))).toBe(false);
-    expect(h.record().quote).toBeNull();
-    expect(h.report).toHaveBeenCalledWith(expect.objectContaining({
-      operationId: OP,
-      code: "QUOTE_REJECTED",
-      phase: "shopify_quote",
-    }));
-    expect(h.events.at(-1)?.action).toBe("quote_failed_held");
-    expect(h.provider.commit).not.toHaveBeenCalled();
   });
   it("persists a commit intent before the provider write and never commits again on retries", async () => {
     const h = serviceHarness();
@@ -695,7 +589,7 @@ describe("private order edit orchestration", () => {
     expect((await h.service.abandon(OP, "staff")).status).toBe("expired");
     expect(h.provider.commit).not.toHaveBeenCalled();
     expect(h.provider.refund).not.toHaveBeenCalled();
-    expect(h.events.at(-1)?.releaseProof).toEqual(proof);
+    expect(h.events.at(-1)?.releaseProof).toMatchObject({ unsubmitted: true, ownership: "none", wmsOrderIds: [] });
   });
   it("read-only status never causes a financial side effect", async () => {
     const h = serviceHarness();
@@ -741,17 +635,17 @@ describe("private order edit orchestration", () => {
       updatedTotalCents: 2000,
       lines: [{ quantity: 2, totalCents: 2000 }],
     });
-    expect(h.warehouse.releaseFulfilledUnsubmitted).toHaveBeenCalledOnce();
-    expect(h.warehouse.releaseUnchanged).not.toHaveBeenCalled();
-    expect(h.record().lastSnapshot).toEqual(h.snapshot());
+    expect(h.warehouse.releaseUnsubmitted).toHaveBeenCalledOnce();
+    expect(h.warehouse.releaseFulfilledUnsubmitted).not.toHaveBeenCalled();
+    expect(h.record().lastSnapshot).toBeNull();
     expect(h.events.at(-1)?.action).toBe(
-      "uncommitted_edit_abandoned_after_fulfillment",
+      "uncommitted_edit_abandoned",
     );
     expect(h.provider.commit).not.toHaveBeenCalled();
     expect(h.provider.refund).not.toHaveBeenCalled();
     expect(h.provider.recoverUnpaid).not.toHaveBeenCalled();
     await h.service.abandon(OP, "staff");
-    expect(h.warehouse.releaseFulfilledUnsubmitted).toHaveBeenCalledOnce();
+    expect(h.warehouse.releaseUnsubmitted).toHaveBeenCalledOnce();
   });
   it.each([
     "quantity",
@@ -761,7 +655,7 @@ describe("private order edit orchestration", () => {
     "discount",
     "partial fulfillment",
   ])(
-    "does not bypass cancellation verification after %s changes",
+    "discards an unsubmitted draft without undoing external %s changes",
     async (change) => {
       const h = serviceHarness();
       await h.service.quote(h.input, "staff");
@@ -795,13 +689,13 @@ describe("private order edit orchestration", () => {
         current.lines[0].unfulfilledQuantity = 1;
       h.setCurrent(current);
       expect((await h.service.abandon(OP, "staff")).status).toBe(
-        "review_required",
+        "expired",
       );
-      expect(h.warehouse.releaseUnchanged).not.toHaveBeenCalled();
+      expect(h.warehouse.releaseUnsubmitted).toHaveBeenCalledOnce();
       expect(h.warehouse.releaseFulfilledUnsubmitted).not.toHaveBeenCalled();
     },
   );
-  it("retains the operation when terminal shipping verification fails", async () => {
+  it("retains the operation when unsubmitted hold cleanup fails", async () => {
     const h = serviceHarness();
     await h.service.quote(h.input, "staff");
     h.setCurrent({
@@ -813,7 +707,7 @@ describe("private order edit orchestration", () => {
         totalCents: 0,
       })),
     });
-    h.warehouse.releaseFulfilledUnsubmitted.mockRejectedValueOnce(
+    h.warehouse.releaseUnsubmitted.mockRejectedValueOnce(
       new OrderEditError(
         "ORDER_EDIT_PROVIDER_FULFILLMENT_PENDING",
         "Provider work is active",
@@ -831,7 +725,7 @@ describe("private order edit orchestration", () => {
     "different rules",
     "missing rules",
   ])(
-    "compares exact financial and discount evidence for new operations: %s",
+    "does not rewrite external financial changes when cancelling an unsubmitted draft: %s",
     async (change) => {
       const h = serviceHarness();
       const financials = buildOrderEditFinancials({
@@ -888,12 +782,10 @@ describe("private order edit orchestration", () => {
       h.setCurrent(current);
       const before = structuredClone(h.snapshot());
       expect((await h.service.abandon(OP, "staff")).status).toBe(
-        change === "unchanged" ? "expired" : "review_required",
+        "expired",
       );
       expect(h.snapshot()).toEqual(before);
-      expect(h.warehouse.releaseFulfilledUnsubmitted).toHaveBeenCalledTimes(
-        change === "unchanged" ? 1 : 0,
-      );
+      expect(h.warehouse.releaseUnsubmitted).toHaveBeenCalledOnce();
     },
   );
   it("continues polling an in-flight payment while hiding the hosted payment link", async () => {

@@ -46,8 +46,7 @@ export class OrderEditPreviewService {
       Partial<Pick<OrderEditStore, "get">>,
     private readonly provider: Pick<OrderEditProvider, "readOrder"> &
       OrderEditPreviewProvider,
-    private readonly warehouse: Pick<OrderEditWarehouse, "inspect"> &
-      Partial<Pick<OrderEditWarehouse, "assertHeld">>,
+    private readonly warehouse: Pick<OrderEditWarehouse, "inspect">,
     private readonly clock: () => Date,
   ) {
     this.contexts = new OrderEditPreviewCache(
@@ -149,14 +148,19 @@ export class OrderEditPreviewService {
         record.status !== "ready" ||
         record.commitStartedAt ||
         record.commitKey ||
-        Date.parse(record.quoteDeadline) <= this.clock().getTime() ||
-        !this.warehouse.assertHeld
+        Date.parse(record.quoteDeadline) <= this.clock().getTime()
       )
         throw new OrderEditError(
           "ORDER_EDIT_PREVIEW_OPERATION_UNAVAILABLE",
           "This review can no longer be changed. Check the order before trying again.",
         );
-      await this.warehouse.assertHeld(scope.omsOrderId, operationId);
+      // Recheck on cache hits too: a saved draft never reserves fulfillment.
+      const warehouse = await this.warehouse.inspect(scope.omsOrderId);
+      if (!warehouse.editable)
+        throw new OrderEditError(
+          "ORDER_EDIT_PICKING_CUTOFF",
+          warehouse.reasons.join(" "),
+        );
     } else if (reference.activeOperationId)
       throw new OrderEditError(
         "ORDER_EDIT_ALREADY_ACTIVE",

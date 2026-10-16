@@ -12,7 +12,7 @@ async function failedDraft() {
 }
 
 describe("resuming an owned unsubmitted order edit", () => {
-  it("prepares the saved plan under the same operation and hold, preserving its request identity", async () => {
+  it("prepares the saved plan under the same operation without holding fulfillment, preserving its request identity", async () => {
     const h = await failedDraft();
     const original = structuredClone(h.record());
     h.advance(60 * 60_000);
@@ -41,9 +41,9 @@ describe("resuming an owned unsubmitted order edit", () => {
       { changes: h.input.changes, additions: [] },
       OP,
     );
-    expect(h.warehouse.acquire).toHaveBeenLastCalledWith(1, OP);
+    expect(h.warehouse.acquire).not.toHaveBeenCalled();
     expect(h.events.map((event) => event.action)).toEqual([
-      "quote_failed_held",
+      "quote_failed",
       "quote_preparation_resumed",
       "quoted",
     ]);
@@ -54,7 +54,7 @@ describe("resuming an owned unsubmitted order edit", () => {
     expect(h.warehouse.releaseUnchanged).not.toHaveBeenCalled();
   });
 
-  it("refreshes an expired ready quote without releasing its hold or applying it", async () => {
+  it("refreshes an expired ready quote without holding or applying it", async () => {
     const h = serviceHarness();
     await h.service.quote(h.input, "customer:36:8");
     h.advance(60 * 60_000);
@@ -66,7 +66,7 @@ describe("resuming an owned unsubmitted order edit", () => {
     expect(h.provider.commit).not.toHaveBeenCalled();
   });
 
-  it("retains the hold and saved plan when recalculation fails again", async () => {
+  it("retains the saved plan without a hold when recalculation fails again", async () => {
     const h = await failedDraft();
     h.provider.quote.mockRejectedValueOnce(
       new OrderEditProviderError("QUOTE_FAILED_AGAIN", "Try again"),

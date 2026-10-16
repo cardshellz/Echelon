@@ -19,10 +19,6 @@ import type {
 import { createHash } from "node:crypto";
 import { presentOrderEditSettlement } from "../domain/order-edit-financials";
 import {
-  unchangedFulfilledOrderEdit,
-  unchangedOrderEditSnapshot,
-} from "./order-edit-evidence";
-import {
   orderEditOperationSchema,
   orderEditOrderSchema,
   orderEditQuoteInputSchema,
@@ -49,6 +45,7 @@ import type {
 } from "./order-edit-store";
 import { OrderEditError } from "../domain/order-edit-error";
 import { sameOrderEditPlan } from "../domain/order-edit-plan-identity";
+import { orderEditHasSubmissionEvidence } from "./order-edit-submission";
 import type { OrderEditCodeRedemptions } from "./order-edit-code-redemptions";
 import { requiresLegacyCodeReceipt } from "../domain/order-edit-coupon-boundary";
 import { presentOrderEditCodeBreakdown } from "./order-edit-code-presentation";
@@ -410,13 +407,12 @@ export class OrderEditService {
           409,
         );
       // Unknown/submitted outcomes must use reconciliation, never preparation.
-      if (
-        record.commitStartedAt ||
-        record.commitKey ||
-        record.refundIntent ||
-        record.refundStartedAt ||
-        record.recoveryStartedAt
-      )
+      if (orderEditHasSubmissionEvidence(record))
+        return this.present(record, "v1");
+      // Also clears legacy quote-time holds and a submission interrupted before
+      // its durable Shopify command intent. Reopening never acquires a hold.
+      record = await this.releaseUnsubmitted(record, actorId);
+      if (record.error?.code === "ORDER_EDIT_HOLD_RELEASE_PENDING")
         return this.present(record, "v1");
       if (!["preparing", "ready", "review_required"].includes(record.status))
         return this.present(record, "v1");
@@ -509,35 +505,28 @@ export class OrderEditService {
         error: orderEditDiagnosticError(error),
       });
     try {
-      // Staging only calculates an uncommitted Shopify edit. It does not
-      // change the order or move money, so it can overlap hold acquisition.
-      // Await BOTH outcomes before releasing the order lock or exposing a
-      // quote: a late hold must never outlive a failed preparation request.
-      const [hold, preparation] = await Promise.allSettled([
-        this.warehouse.acquire(record.omsOrderId, record.id),
-        this.provider.quote(
-          record.connectionId,
-          baseline,
-          {
-            changes: input.changes,
-            additions: input.additions,
-            ...(input.discountCodes !== undefined
-              ? { discountCodes: input.discountCodes }
-              : {}),
-          },
-          record.id,
-        ),
-      ]);
-      if (hold.status === "rejected")
-        reportFailure("warehouse_hold", hold.reason);
-      if (preparation.status === "rejected")
-        reportFailure("shopify_quote", preparation.reason);
-      if (hold.status === "rejected") {
-        // Both failures were recorded; hold failure still determines the saved outcome.
-        throw hold.reason;
-      }
-      if (preparation.status === "rejected") throw preparation.reason;
-      const quote = preparation.value;
+      phase = "warehouse_inspection";
+      const warehouse = await this.warehouse.inspect(record.omsOrderId);
+      if (!warehouse.editable)
+        throw new OrderEditError(
+          "ORDER_EDIT_PICKING_CUTOFF",
+          warehouse.reasons.join(" "),
+        );
+      phase = "shopify_quote";
+      // A quote is only a draft. Fulfillment remains free to proceed; submission
+      // must acquire ownership and revalidate the quote before any order write.
+      const quote = await this.provider.quote(
+        record.connectionId,
+        baseline,
+        {
+          changes: input.changes,
+          additions: input.additions,
+          ...(input.discountCodes !== undefined
+            ? { discountCodes: input.discountCodes }
+            : {}),
+        },
+        record.id,
+      );
       phase = "quote_identity";
       if (
         quote.operationId !== record.id ||
@@ -575,7 +564,7 @@ export class OrderEditService {
               : failure,
         },
         actorId,
-        "quote_failed_held",
+        "quote_failed",
       );
     }
     return this.present(record, codeEntryVersion);
@@ -605,16 +594,32 @@ export class OrderEditService {
           "ORDER_EDIT_DISABLED",
           "The private order editor is disabled.",
         );
-      await this.warehouse.assertHeld(record.omsOrderId, record.id);
-      const fresh = await this.provider.readOrder(
-        record.connectionId,
-        record.baseline.orderId,
+      // Persist approval before acquisition. If this process stops before the
+      // financial intent below, the worker can prove that no command was sent.
+      record = await this.update(
+        record,
+        { status: "committing", error: null },
+        actorId,
+        "submission_started",
       );
-      if (fresh.fingerprint !== record.baseline.fingerprint)
-        throw new OrderEditError(
-          "ORDER_EDIT_STALE_QUOTE",
-          "The order changed after review. Do not apply this quote.",
+      let submissionPhase = "warehouse_acquisition";
+      try {
+        await this.warehouse.acquire(record.omsOrderId, record.id);
+        submissionPhase = "shopify_revalidation";
+        const fresh = await this.provider.readOrder(
+          record.connectionId,
+          record.baseline.orderId,
         );
+        if (fresh.fingerprint !== record.baseline.fingerprint)
+          throw new OrderEditError(
+            "ORDER_EDIT_STALE_QUOTE",
+            "The order changed after review. Do not apply this quote.",
+          );
+      } catch (error) {
+        this.reportSubmissionFailure(record, actorId, submissionPhase, error);
+        record = await this.review(record, actorId, error);
+        return this.present(await this.releaseUnsubmitted(record, actorId));
+      }
       const now = this.clock();
       record = await this.update(
         record,
@@ -644,10 +649,10 @@ export class OrderEditService {
           "commit_observed",
         );
       } catch (error) {
+        this.reportSubmissionFailure(record, actorId, "shopify_commit", error);
         if (error instanceof OrderEditCommitNotSentError) {
           // Only the provider's explicit pre-send boundary permits removing
-          // commit intent. The immutable commit_intent event remains evidence
-          // of the attempt; cancellation must still verify the original order.
+          // commit intent. Audit both the attempt and proof of no submission.
           record = await this.update(
             record,
             {
@@ -660,7 +665,7 @@ export class OrderEditService {
             actorId,
             "commit_not_submitted",
           );
-          return this.present(record);
+          return this.present(await this.releaseUnsubmitted(record, actorId));
         }
         record = await this.update(
           record,
@@ -700,7 +705,10 @@ export class OrderEditService {
   ): Promise<OrderEditRecord> {
     let record = initial;
     if (terminal.has(record.status)) return record;
-    if (!record.commitStartedAt) {
+    if (!orderEditHasSubmissionEvidence(record)) {
+      record = await this.releaseUnsubmitted(record, actorId);
+      if (record.error?.code === "ORDER_EDIT_HOLD_RELEASE_PENDING")
+        return record;
       if (this.clock().getTime() >= Date.parse(record.quoteDeadline)) {
         await this.abandonLocked(record, actorId);
         return this.store.get(record.id);
@@ -1084,52 +1092,90 @@ export class OrderEditService {
     record: OrderEditRecord,
     actorId: string | null,
   ): Promise<OrderEditOperation> {
-    if (
-      record.commitStartedAt ||
-      record.commitKey ||
-      record.refundIntent ||
-      record.refundStartedAt ||
-      record.recoveryStartedAt
-    )
+    if (orderEditHasSubmissionEvidence(record))
       throw new OrderEditError(
         "ORDER_EDIT_ALREADY_SUBMITTED",
         "This edit has already been submitted. Check its status.",
       );
     if (terminal.has(record.status)) return this.present(record);
-    const current = await this.provider.readOrder(
-      record.connectionId,
-      record.baseline.orderId,
-    );
-    const fulfilled = unchangedFulfilledOrderEdit(current, record.baseline);
-    if (!fulfilled && !unchangedOrderEditSnapshot(current, record.baseline))
-      return this.present(
-        await this.review(
-          record,
-          actorId,
-          new OrderEditError(
-            "ORDER_EDIT_ABANDON_CONFLICT",
-            "The order's items, payment, or fulfillment changed. Cancellation needs verification before its edit hold can be cleared.",
-          ),
-        ),
-      );
+    // Drafts have no authority over order contents. Picking, fulfillment, or an
+    // unrelated order update must not prevent discarding an unsubmitted draft.
     await this.codes(record, "release");
-    const proof = fulfilled
-      ? await this.warehouse.releaseFulfilledUnsubmitted(
-          record.omsOrderId,
-          record.id,
-        )
-      : await this.warehouse.releaseUnchanged(record.omsOrderId, record.id);
+    const proof = await this.warehouse.releaseUnsubmitted(
+      record.omsOrderId,
+      record.id,
+    );
     return this.present(
       await this.update(
         record,
-        { status: "expired", error: null, lastSnapshot: current },
+        { status: "expired", error: null },
         actorId,
-        fulfilled
-          ? "uncommitted_edit_abandoned_after_fulfillment"
-          : "uncommitted_edit_abandoned",
+        "uncommitted_edit_abandoned",
         proof,
       ),
     );
+  }
+  private async releaseUnsubmitted(
+    record: OrderEditRecord,
+    actorId: string | null,
+  ): Promise<OrderEditRecord> {
+    if (orderEditHasSubmissionEvidence(record))
+      throw new OrderEditError(
+        "ORDER_EDIT_ALREADY_SUBMITTED",
+        "This edit has already been submitted. Check its status.",
+      );
+    try {
+      await this.codes(record, "release");
+      const proof = await this.warehouse.releaseUnsubmitted(
+        record.omsOrderId,
+        record.id,
+      );
+      if (
+        !proof.wmsOrderIds.length &&
+        !proof.shipmentIds.length &&
+        record.status !== "committing" &&
+        record.error?.code !== "ORDER_EDIT_HOLD_RELEASE_PENDING"
+      )
+        return record;
+      return await this.update(
+        record,
+        {
+          ...(record.error?.code === "ORDER_EDIT_HOLD_RELEASE_PENDING"
+            ? { error: null }
+            : {}),
+          // A crash before sending must not resume the approved submission automatically.
+          ...(record.status === "committing"
+            ? {
+                status: "review_required" as const,
+                error: {
+                  code: "ORDER_EDIT_SUBMISSION_INTERRUPTED",
+                  message: "Your changes were not submitted. Please try again.",
+                },
+              }
+            : {}),
+        },
+        actorId,
+        "unsubmitted_hold_released",
+        proof,
+      );
+    } catch (error) {
+      // Keep a durable retryable state. The worker selects unsubmitted ownership
+      // even in review_required, unlike the previous quote-time hold lifecycle.
+      this.reportSubmissionFailure(
+        record,
+        actorId,
+        "unsubmitted_hold_release",
+        error,
+      );
+      return this.review(
+        record,
+        actorId,
+        new OrderEditError(
+          "ORDER_EDIT_HOLD_RELEASE_PENDING",
+          "Your changes were not submitted. We are finishing cleanup; please try again shortly.",
+        ),
+      );
+    }
   }
   private async locked<T>(
     id: string,
@@ -1139,6 +1185,25 @@ export class OrderEditService {
     return this.store.withOrderLock(record.omsOrderId, async () =>
       work(await this.store.get(id)),
     );
+  }
+  private reportSubmissionFailure(
+    record: OrderEditRecord,
+    actorId: string | null,
+    phase: string,
+    error: unknown,
+  ): void {
+    this.report({
+      operationId: record.id,
+      code: this.failure(error).code,
+      phase,
+      omsOrderId: record.omsOrderId,
+      connectionId: record.connectionId,
+      ...(actorId
+        ? { actorFingerprint: orderEditActorFingerprint(actorId) }
+        : {}),
+      occurredAt: this.clock().toISOString(),
+      error: orderEditDiagnosticError(error),
+    });
   }
   private async codes(
     record: OrderEditRecord,

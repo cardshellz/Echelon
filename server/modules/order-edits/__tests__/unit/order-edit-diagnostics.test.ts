@@ -4,14 +4,14 @@ import { orderEditDiagnosticError } from "../../application/order-edit-diagnosti
 import { serviceHarness } from "../fixtures/order-edit-service.fixture";
 
 describe("order edit preparation diagnostics", () => {
-  it.each(["hold", "quote", "persist"])(
+  it.each(["inspection", "quote", "persist"])(
     "records the original %s failure with phase and operation identity",
     async (phase) => {
       const h = serviceHarness();
       const original = Object.assign(new Error("connection timed out"), {
         code: "ETIMEDOUT",
       });
-      if (phase === "hold") h.warehouse.acquire.mockRejectedValueOnce(original);
+      if (phase === "inspection") h.warehouse.inspect.mockRejectedValueOnce(original);
       if (phase === "quote") h.provider.quote.mockRejectedValueOnce(original);
       if (phase === "persist") {
         const save = h.store.save;
@@ -30,7 +30,7 @@ describe("order edit preparation diagnostics", () => {
           omsOrderId: 1,
           connectionId: 4,
           phase: {
-            hold: "warehouse_hold",
+            inspection: "warehouse_inspection",
             quote: "shopify_quote",
             persist: "quote_persist",
           }[phase],

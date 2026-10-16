@@ -27,6 +27,7 @@ import {
 import {
   finalizeOrderEditWarehouseRelease,
   OrderEditWarehouseGateway,
+  type OrderEditWarehouseProvider,
 } from "../../infrastructure/order-edit-warehouse.gateway";
 import { PostgresOrderEditStore } from "../../infrastructure/postgres-order-edit.store";
 import type { OrderEditRecord } from "../../application/order-edit-store";
@@ -39,6 +40,7 @@ import type { CanonicalAvailabilityReservationStatusProjection } from "@shared/t
 import { buildOrderEditFinancials } from "../../domain/order-edit-financials";
 import { orderEditQuoteSchema } from "../../application/order-edit-provider.schema";
 import { serviceHarness } from "../fixtures/order-edit-service.fixture";
+import { createShipStationService } from "../../../oms/shipstation.service";
 
 const url = process.env.ECHELON_TEST_DATABASE_URL;
 const disposable = process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true";
@@ -137,7 +139,7 @@ function record(): OrderEditRecord {
     requestKey: "00000000-0000-4000-8000-000000000002",
     requestHash: "a".repeat(64),
     actorId: "staff",
-    status: "preparing",
+    status: "committing",
     version: 0,
     createdAt: "2026-10-05T00:00:00.000Z",
     updatedAt: "2026-10-05T00:00:00.000Z",
@@ -281,6 +283,7 @@ function inventoryProjection(): CanonicalAvailabilityReservationStatusProjection
         vi.fn(),
       );
       await database.pool.query(await readFile(new URL("../../../../../migrations/0745_customer_account_order_edit_actor.sql", import.meta.url), "utf8"));
+      await database.pool.query(await readFile(new URL("../../../../../migrations/900000010000018180001_order_edit_submission_holds.sql", import.meta.url), "utf8"));
     }, 30000);
     afterAll(async () => {
       await database?.close();
@@ -439,9 +442,11 @@ function inventoryProjection(): CanonicalAvailabilityReservationStatusProjection
         if (resume) {
           external.provider.quote.mockRejectedValueOnce(new Error("Fixture preparation failure"));
           expect(await service.quote(original.input, original.actorId)).toMatchObject({ status: "review_required" });
-          expect((await gateway.inspect(21)).reasons).toContain("Another order edit holds this order.");
+          expect((await gateway.inspect(21)).reasons).toEqual([]);
           expect(await service.order(4, 21, "v1", original.actorId)).toMatchObject({ activeOperationId: original.id, eligibility: { editable: true, reasons: [] } });
-          expect(await service.order(4, 21, "v1", "customer:36:101")).toMatchObject({ eligibility: { editable: false } });
+          // Warehouse availability is not an authorization grant. Customer facade
+          // tests separately prove that another customer cannot open this order.
+          expect(await service.order(4, 21, "v1", "customer:36:101")).toMatchObject({ eligibility: { editable: true } });
         }
         let response;
         if (resume) {
@@ -493,8 +498,8 @@ function inventoryProjection(): CanonicalAvailabilityReservationStatusProjection
               [original.id],
             )
           ).rows.map((row) => row.action),
-        ).toEqual(resume ? ["created", "quote_failed_held", "quote_preparation_resumed", "quoted"] : ["created", "quoted"]);
-        expect((await database.pool.query("SELECT order_edit_operation_id FROM wms.orders WHERE id=11")).rows[0].order_edit_operation_id).toBe(original.id);
+        ).toEqual(resume ? ["created", "quote_failed", "quote_preparation_resumed", "quoted"] : ["created", "quoted"]);
+        expect((await database.pool.query("SELECT order_edit_operation_id FROM wms.orders WHERE id=11")).rows[0].order_edit_operation_id).toBeNull();
         expect(next.commitStartedAt).toBeNull();
         expect(next.refundStartedAt).toBeNull();
       },
@@ -782,7 +787,7 @@ function inventoryProjection(): CanonicalAvailabilityReservationStatusProjection
         {
           action: "uncommitted_edit_abandoned_after_fulfillment",
           before_state: record(),
-          after_state: after,
+          after_state: { ...after, warehouseRelease: proof },
         },
       ]);
       await expect(
@@ -811,7 +816,7 @@ function inventoryProjection(): CanonicalAvailabilityReservationStatusProjection
         expect(await physicalState()).toEqual(before);
         expect(
           (await new PostgresOrderEditStore(database.pool).get(OP)).status,
-        ).toBe("preparing");
+        ).toBe("committing");
       },
     );
     it.each([
@@ -875,7 +880,7 @@ function inventoryProjection(): CanonicalAvailabilityReservationStatusProjection
         { order_edit_operation_id: OP },
         { order_edit_operation_id: OP },
       ]);
-      expect((await store.get(OP)).status).toBe("preparing");
+      expect((await store.get(OP)).status).toBe("committing");
     });
     it("rolls back fulfilled cancellation on audit failure and prevents using cleanup proof for an applied edit", async () => {
       const fulfilled = await fulfillHeldOrder();
@@ -1252,7 +1257,88 @@ function inventoryProjection(): CanonicalAvailabilityReservationStatusProjection
         ).rows[0].order_edit_operation_id,
       ).toBe(OP);
     });
-    it("inherits an active edit on a new fulfillment partition and protects source identity", async () => {
+    it.each(["preparing", "ready", "review_required"])("does not inherit or acquire a hold for a %s draft", async status => {
+      await database.pool.query("UPDATE oms.order_edit_operations SET status=$2::varchar,document=jsonb_set(document,'{status}',to_jsonb($2::text)) WHERE id=$1", [OP, status]);
+      await database.pool.query("INSERT INTO wms.orders(id,source,oms_fulfillment_order_id,channel_id,external_order_id) VALUES(11,'oms','20',36,'1')");
+      expect((await database.pool.query("SELECT order_edit_operation_id FROM wms.orders ORDER BY id")).rows).toEqual([
+        { order_edit_operation_id: null }, { order_edit_operation_id: null },
+      ]);
+      await expect(gateway.acquire(20, OP)).rejects.toMatchObject({ code: "ORDER_EDIT_HOLD_OWNER_INVALID" });
+      const claimed = await database.pool.query("UPDATE wms.orders SET assigned_picker_id='picker',started_at='2026-10-05T00:01:00Z' WHERE id=10 AND order_edit_operation_id IS NULL");
+      expect(claimed.rowCount).toBe(1);
+    });
+    it("atomically releases an interrupted submission, preserves manual holds, and stops new partitions inheriting", async () => {
+      const store = new PostgresOrderEditStore(database.pool);
+      await gateway.acquire(20, OP);
+      await database.pool.query("UPDATE wms.orders SET on_hold=1 WHERE id=10");
+      const proof = await gateway.releaseUnsubmitted(20, OP);
+      expect((await database.pool.query("SELECT order_edit_operation_id FROM wms.orders WHERE id=10")).rows[0].order_edit_operation_id).toBe(OP);
+      await store.save({ ...record(), status: "review_required", version: 1 }, 0, "staff", "unsubmitted_hold_released", proof);
+      expect((await database.pool.query("SELECT order_edit_operation_id,on_hold FROM wms.orders WHERE id=10")).rows[0]).toEqual({ order_edit_operation_id: null, on_hold: 1 });
+      await database.pool.query("INSERT INTO wms.orders(id,source,oms_fulfillment_order_id,channel_id,external_order_id) VALUES(11,'oms','20',36,'1')");
+      expect((await database.pool.query("SELECT order_edit_operation_id FROM wms.orders WHERE id=11")).rows[0].order_edit_operation_id).toBeNull();
+      expect((await database.pool.query("SELECT after_state->'warehouseRelease'->>'unsubmitted' AS proof FROM oms.order_edit_events WHERE action='unsubmitted_hold_released'")).rows[0].proof).toBe("true");
+    });
+    it("rejects stale cleanup proof if financial intent appeared after verification", async () => {
+      await gateway.acquire(20, OP);
+      const proof = await gateway.releaseUnsubmitted(20, OP);
+      await database.pool.query(`UPDATE oms.order_edit_operations SET document=jsonb_set(document,'{commitStartedAt}','"2026-10-05T00:01:00.000Z"') WHERE id=$1`, [OP]);
+      const client = await database.pool.connect();
+      try {
+        await client.query("BEGIN");
+        await expect(finalizeOrderEditWarehouseRelease(client, 20, OP, proof, record().updatedAt)).rejects.toMatchObject({ code: "ORDER_EDIT_ALREADY_SUBMITTED" });
+      } finally { await client.query("ROLLBACK"); client.release(); }
+      expect((await database.pool.query("SELECT order_edit_operation_id FROM wms.orders WHERE id=10")).rows[0].order_edit_operation_id).toBe(OP);
+    });
+    it("does not treat missing financial intent as permission to release an already certified paid edit", async () => {
+      await gateway.acquire(20, OP);
+      await saveProjection();
+      await expect(gateway.releaseUnsubmitted(20, OP)).rejects.toMatchObject({ code: "ORDER_EDIT_ALREADY_SUBMITTED" });
+    });
+    it("rolls back an unsubmitted release if audit persistence fails", async () => {
+      await gateway.acquire(20, OP);
+      const store = new PostgresOrderEditStore(database.pool);
+      const proof = await gateway.releaseUnsubmitted(20, OP);
+      await expect(store.save({ ...record(), status: "review_required", version: 1 }, 0, "missing-staff", "unsubmitted_hold_released", proof)).rejects.toMatchObject({ code: "23503" });
+      expect((await store.get(OP)).version).toBe(0);
+      expect((await database.pool.query("SELECT order_edit_operation_id FROM wms.orders WHERE id=10")).rows[0].order_edit_operation_id).toBe(OP);
+      expect((await database.pool.query("SELECT count(*)::int AS count FROM oms.order_edit_events WHERE action='unsubmitted_hold_released'")).rows[0].count).toBe(0);
+    });
+    it("cleans legacy failed drafts and interrupted submissions through the real worker and store", async () => {
+      const store = new PostgresOrderEditStore(database.pool);
+      await gateway.acquire(20, OP);
+      const h = serviceHarness();
+      const service = new OrderEditService(store, h.provider, gateway, () => new Date("2026-10-05T00:01:00Z"), () => OP, h.report);
+      expect(await store.pending(25, new Date("2026-10-05T00:01:00Z"))).toEqual([OP]);
+      await service.sweep();
+      expect((await store.get(OP)).status).toBe("review_required");
+      expect((await database.pool.query("SELECT order_edit_operation_id FROM wms.orders WHERE id=10")).rows[0].order_edit_operation_id).toBeNull();
+      expect(h.provider.commit).not.toHaveBeenCalled();
+      expect(h.provider.readOrder).not.toHaveBeenCalled();
+      // Simulate the previously deployed failed-quote hold, which had no financial intent.
+      await database.pool.query("UPDATE wms.orders SET order_edit_operation_id=$1 WHERE id=10", [OP]);
+      expect(await store.pending(25, new Date("2026-10-05T00:01:00Z"))).toEqual([OP]);
+      await service.sweep();
+      expect((await database.pool.query("SELECT order_edit_operation_id FROM wms.orders WHERE id=10")).rows[0].order_edit_operation_id).toBeNull();
+      expect(await store.pending(25, new Date("2026-10-05T00:01:00Z"))).toEqual([]);
+    });
+    it("retries a partial provider cleanup and retires its receipts only in the final atomic transaction", async () => {
+      await gateway.acquire(20, OP);
+      await database.pool.query("INSERT INTO wms.outbound_shipments(id,order_id,shipstation_order_id) VALUES(51,10,551),(52,10,552)");
+      await database.pool.query("INSERT INTO oms.order_edit_provider_holds(operation_id,shipment_id,provider_order_id,was_held) VALUES($1,51,551,false),($1,52,552,true)", [OP]);
+      const synchronize = vi.fn<OrderEditWarehouseProvider["synchronizeOrderEditShipment"]>()
+        .mockResolvedValueOnce(undefined).mockRejectedValueOnce(new Error("response lost")).mockResolvedValue(undefined);
+      const cleanup = new OrderEditWarehouseGateway(database.pool, { isConfigured: () => true, synchronizeOrderEditShipment: synchronize }, async () => {});
+      await expect(cleanup.releaseUnsubmitted(20, OP)).rejects.toThrow("response lost");
+      expect((await database.pool.query("SELECT count(*)::int AS count FROM oms.order_edit_provider_holds WHERE released_at IS NULL")).rows[0].count).toBe(2);
+      const proof = await cleanup.releaseUnsubmitted(20, OP);
+      expect(synchronize.mock.calls.every(([input]) => input.mode === "release_unsubmitted")).toBe(true);
+      const store = new PostgresOrderEditStore(database.pool);
+      await store.save({ ...record(), status: "review_required", version: 1 }, 0, "staff", "unsubmitted_hold_released", proof);
+      expect((await database.pool.query("SELECT count(*)::int AS count FROM oms.order_edit_provider_holds WHERE released_at IS NULL")).rows[0].count).toBe(0);
+      expect((await cleanup.releaseUnsubmitted(20, OP)).shipmentIds).toEqual([]);
+    });
+    it("inherits an approved submission on a new fulfillment partition and protects source identity", async () => {
       await gateway.acquire(20, OP);
       await database.pool.query(
         "INSERT INTO wms.orders(id,source,oms_fulfillment_order_id,channel_id,external_order_id) VALUES(11,'oms','20',36,'1')",
@@ -1275,6 +1361,50 @@ function inventoryProjection(): CanonicalAvailabilityReservationStatusProjection
           "INSERT INTO wms.orders(id,source,oms_fulfillment_order_id,channel_id,external_order_id) VALUES(12,'oms','20',37,'1')",
         ),
       ).rejects.toMatchObject({ code: "23514" });
+    });
+    it("recaptures the provider's current hold on a later submission instead of reusing a retired receipt", async () => {
+      const originalFetch = globalThis.fetch;
+      let providerStatus = "awaiting_shipment";
+      let restored = 0;
+      vi.stubEnv("SHIPSTATION_API_KEY", "fixture-key");
+      vi.stubEnv("SHIPSTATION_API_SECRET", "fixture-secret");
+      globalThis.fetch = vi.fn(async (url: string | URL | Request) => {
+        const path = new URL(String(url)).pathname;
+        const live = { orderId: 551, orderNumber: "#1", orderStatus: providerStatus, items: [] };
+        let result: unknown;
+        if (path === "/orders/551") result = live;
+        else if (path === "/orders") result = { orders: [live], pages: 1 };
+        else if (path === "/shipments") result = { shipments: [], pages: 1 };
+        else if (path === "/orders/holduntil") { providerStatus = "on_hold"; result = { success: true }; }
+        else if (path === "/orders/restorefromhold") { providerStatus = "awaiting_shipment"; restored++; result = { success: true }; }
+        else throw new Error(`Unexpected test request: ${path}`);
+        return new Response(JSON.stringify(result), { status: 200, headers: { "Content-Type": "application/json" } });
+      }) as typeof fetch;
+      try {
+        await database.pool.query("INSERT INTO wms.outbound_shipments(id,order_id,shipstation_order_id,status) VALUES(51,10,551,'queued')");
+        const provider = createShipStationService(drizzle(database.pool), undefined, { sessionLock: async (_key, work) => work() });
+        const realGateway = new OrderEditWarehouseGateway(database.pool, provider, async () => {});
+        const store = new PostgresOrderEditStore(database.pool);
+        await realGateway.acquire(20, OP);
+        const proof = await realGateway.releaseUnsubmitted(20, OP);
+        const released = { ...record(), status: "review_required" as const, version: 1 };
+        await store.save(released, 0, "staff", "unsubmitted_hold_released", proof);
+        expect(providerStatus).toBe("awaiting_shipment");
+        expect(restored).toBe(1);
+        // An independent hold is applied between attempts. Its new provenance
+        // must replace the retired receipt and survive the second cleanup.
+        providerStatus = "on_hold";
+        await store.save({ ...released, status: "committing", version: 2 }, 1, "staff", "submission_started");
+        await realGateway.acquire(20, OP);
+        expect((await database.pool.query("SELECT was_held,released_at FROM oms.order_edit_provider_holds WHERE operation_id=$1", [OP])).rows).toEqual([{ was_held: true, released_at: null }]);
+        const nextProof = await realGateway.releaseUnsubmitted(20, OP);
+        await store.save({ ...released, version: 3 }, 2, "staff", "unsubmitted_hold_released", nextProof);
+        expect(providerStatus).toBe("on_hold");
+        expect(restored).toBe(1);
+      } finally {
+        globalThis.fetch = originalFetch;
+        vi.unstubAllEnvs();
+      }
     });
     it("blocks a picking claim after acquisition even if a manual hold is released", async () => {
       await gateway.acquire(20, OP);
@@ -1478,7 +1608,7 @@ function inventoryProjection(): CanonicalAvailabilityReservationStatusProjection
           proof,
         ),
       ).rejects.toMatchObject({ code: "ORDER_EDIT_RELEASE_OWNER_CHANGED" });
-      expect((await store.get(OP)).status).toBe("preparing");
+      expect((await store.get(OP)).status).toBe("committing");
     });
     it("atomically saves the terminal state, hold release and audit, including rollback on audit failure", async () => {
       await gateway.acquire(20, OP);
@@ -1494,7 +1624,7 @@ function inventoryProjection(): CanonicalAvailabilityReservationStatusProjection
           proof,
         ),
       ).rejects.toMatchObject({ code: "23503" });
-      expect((await store.get(OP)).status).toBe("preparing");
+      expect((await store.get(OP)).status).toBe("committing");
       expect(
         (
           await database.pool.query(
@@ -1556,7 +1686,7 @@ function inventoryProjection(): CanonicalAvailabilityReservationStatusProjection
           proof,
         ),
       ).rejects.toMatchObject({ code: "ORDER_EDIT_ALLOCATION_PROOF_REQUIRED" });
-      expect((await store.get(OP)).status).toBe("preparing");
+      expect((await store.get(OP)).status).toBe("committing");
       expect(
         (
           await database.pool.query(
@@ -1586,6 +1716,7 @@ function inventoryProjection(): CanonicalAvailabilityReservationStatusProjection
       ).toBe(OP);
     });
     it("does not let unexpired quote work starve committed reconciliation", async () => {
+      await database.pool.query(`UPDATE oms.order_edit_operations SET status='preparing',document=jsonb_set(document,'{status}','"preparing"') WHERE id=$1`, [OP]);
       const store = new PostgresOrderEditStore(database.pool);
       expect(await store.pending(1, new Date("2026-10-05T00:01:00Z"))).toEqual(
         [],
@@ -1790,6 +1921,26 @@ function inventoryProjection(): CanonicalAvailabilityReservationStatusProjection
         ).rows[0].count,
       ).toBe(1);
     });
+    it.each([false, true])("keeps a prior submitted conflict with its original owner, not a new draft (pre-send hold=%s)", async approved => {
+      const next = "00000000-0000-4000-8000-000000000099";
+      await saveProjection();
+      await database.pool.query(`UPDATE oms.order_edit_operations SET status='completed',
+        document=jsonb_set(jsonb_set(document,'{status}','"completed"'),'{commitStartedAt}','"2026-10-05T00:00:00.000Z"') WHERE id=$1`, [OP]);
+      await new PostgresOrderEditStore(database.pool).create({ ...record(), id: next, status: approved ? "committing" : "preparing",
+        requestKey: next, input: { ...record().input, requestKey: next } });
+      if (approved) {
+        await gateway.acquire(20, next);
+        await database.pool.query("INSERT INTO wms.outbound_shipments(id,order_id,shipstation_order_id) VALUES(51,10,551)");
+        await database.pool.query("INSERT INTO oms.order_edit_provider_holds(operation_id,shipment_id,provider_order_id,was_held) VALUES($1,51,551,true)", [next]);
+      }
+      await ingress(rawOrder({ current_total_price: "30.00" }));
+      expect((await database.pool.query("SELECT id,status FROM oms.order_edit_operations ORDER BY id")).rows).toEqual([
+        { id: OP, status: "review_required" }, { id: next, status: "expired" },
+      ]);
+      expect((await database.pool.query("SELECT order_edit_operation_id FROM wms.orders WHERE id=10")).rows[0].order_edit_operation_id).toBe(OP);
+      if (approved) expect((await database.pool.query("SELECT operation_id,was_held FROM oms.order_edit_provider_holds WHERE released_at IS NULL")).rows).toEqual([{ operation_id: OP, was_held: true }]);
+      expect(await new PostgresOrderEditStore(database.pool).pending(25, new Date("2026-10-05T00:01:00Z"))).toEqual([]);
+    });
     it.each(["2026-10-05T00:00:00Z", "2026-10-05T00:01:00Z"])(
       "allows a second owned edit at %s to observe added lines without lifting its hold",
       async (updatedAt) => {
@@ -1806,6 +1957,7 @@ function inventoryProjection(): CanonicalAvailabilityReservationStatusProjection
           input: { ...record().input, requestKey: next },
         });
         await gateway.acquire(20, next);
+        await database.pool.query(`UPDATE oms.order_edit_operations SET document=jsonb_set(document,'{commitStartedAt}','"2026-10-05T00:00:00.000Z"') WHERE id=$1`, [next]);
         const { sql } = await import("drizzle-orm");
         expect(
           await ingress(

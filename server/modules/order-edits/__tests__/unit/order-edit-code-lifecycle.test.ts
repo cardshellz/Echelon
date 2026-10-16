@@ -205,7 +205,7 @@ describe("code settlement boundaries in order editing", () => {
       h.codes.finalize.mock.invocationCallOrder[0],
     );
   });
-  it("releases an uncertain code reservation only after a proven unsubmitted cancellation", async () => {
+  it("automatically releases a code reservation after a proven unsubmitted attempt", async () => {
     const h = harness();
     await h.service.quote(h.input, "staff");
     h.provider.commit.mockRejectedValueOnce(
@@ -216,19 +216,19 @@ describe("code settlement boundaries in order editing", () => {
     );
     const rejected = await h.service.commit(h.record().id, key, "staff");
     expect(rejected.canAbandon).toBe(true);
-    expect(h.codes.release).not.toHaveBeenCalled();
+    expect(h.codes.release).toHaveBeenCalledOnce();
     await h.service.abandon(h.record().id, "staff");
-    expect(h.codes.release).toHaveBeenCalledTimes(1);
+    expect(h.codes.release).toHaveBeenCalledTimes(2);
     expect(h.codes.release.mock.invocationCallOrder[0]).toBeLessThan(
-      h.warehouse.releaseUnchanged.mock.invocationCallOrder[0],
+      h.warehouse.releaseUnsubmitted.mock.invocationCallOrder[0],
     );
   });
-  it("does not release a code when the order changed before cancellation", async () => {
+  it("releases its unsubmitted reservation even when an external order change prevents applying the draft", async () => {
     const h = harness();
     await h.service.quote(h.input, "staff");
     h.setCurrent({ fingerprint: "changed" });
     const result = await h.service.abandon(h.record().id, "staff");
-    expect(result.status).toBe("review_required");
-    expect(h.codes.release).not.toHaveBeenCalled();
+    expect(result.status).toBe("expired");
+    expect(h.codes.release).toHaveBeenCalledOnce();
   });
 });

@@ -4695,10 +4695,10 @@ export function createShipStationService(
    * the original provider hold before mutation, and never creates a new label.
    */
   async function synchronizeOrderEditShipment(input: {
-    shipmentId: number; operationId: string; mode: "hold" | "verify" | "synchronize" | "release" | "verify_shipped";
+    shipmentId: number; operationId: string; mode: "hold" | "verify" | "synchronize" | "release" | "verify_shipped" | "release_unsubmitted";
   }): Promise<void> {
     z.object({ shipmentId: z.number().int().positive(), operationId: z.string().uuid(),
-      mode: z.enum(["hold", "verify", "synchronize", "release", "verify_shipped"]) }).strict().parse(input);
+      mode: z.enum(["hold", "verify", "synchronize", "release", "verify_shipped", "release_unsubmitted"]) }).strict().parse(input);
     const providerSchema = z.object({ orderId: z.number().int().positive(), orderNumber: z.string().min(1), orderStatus: z.string(),
       items: z.array(z.object({ lineItemKey: z.string(), quantity: z.number().int().nonnegative() }).passthrough()) }).passthrough();
     const itemSchema = z.object({ id: z.number().int().positive(), qty: z.number().int().positive(),
@@ -4711,6 +4711,19 @@ export function createShipStationService(
         ON operation.oms_order_id=oo.id WHERE operation.id=${input.operationId}::uuid
         AND operation.status NOT IN ('completed','recovered','expired','failed') FOR UPDATE OF oo`);
       if (source.rows?.length !== 1) throw new OrderEditError("ORDER_EDIT_HOLD_OWNER_INVALID", "The active edit no longer owns this order.");
+      if (input.mode === "release_unsubmitted") {
+        const unsent =
+          await tx.execute(sql`SELECT id FROM oms.order_edit_operations WHERE id=${input.operationId}::uuid
+          AND document ?& ARRAY['commitStartedAt','commitKey','refundIntent','refundStartedAt','recoveryStartedAt']
+          AND document->>'commitStartedAt' IS NULL AND document->>'commitKey' IS NULL AND document->>'refundIntent' IS NULL
+          AND document->>'refundStartedAt' IS NULL AND document->>'recoveryStartedAt' IS NULL
+          AND NOT EXISTS (SELECT 1 FROM oms.order_edit_paid_projections WHERE operation_id=${input.operationId}::uuid) FOR UPDATE`);
+        if (unsent.rows?.length !== 1)
+          throw new OrderEditError(
+            "ORDER_EDIT_ALREADY_SUBMITTED",
+            "A submitted or uncertain edit cannot release an unsubmitted hold.",
+          );
+      }
       const order = await tx.execute(sql`SELECT wo.id FROM wms.orders wo
         WHERE wo.id=(SELECT order_id FROM wms.outbound_shipments WHERE id=${input.shipmentId}) FOR UPDATE OF wo`);
       if (order.rows?.length !== 1) throw new OrderEditError("ORDER_EDIT_SHIPMENT_MISSING", "The warehouse shipment is unavailable.");
@@ -4720,8 +4733,8 @@ export function createShipStationService(
         wo.order_edit_operation_id,wo.warehouse_status,wo.on_hold FROM wms.outbound_shipments os JOIN wms.orders wo ON wo.id=os.order_id
         WHERE os.id=${input.shipmentId} FOR UPDATE OF os`);
       const row = headerSchema.parse(result.rows?.[0]);
-      if (row.order_edit_operation_id !== input.operationId || row.requires_review ||
-        (input.mode === "verify_shipped" ? row.warehouse_status !== "shipped" : !["planned", "queued", "on_hold"].includes(row.status))) {
+      if (row.order_edit_operation_id !== input.operationId || (input.mode !== "release_unsubmitted" && (row.requires_review ||
+        (input.mode === "verify_shipped" ? row.warehouse_status !== "shipped" : !["planned", "queued", "on_hold"].includes(row.status))))) {
         throw new OrderEditError("ORDER_EDIT_SHIPMENT_CHANGED", "The shipment is no longer held by this editable operation.");
       }
       // A timed-out push may have created a remote order before its identity
@@ -4777,15 +4790,67 @@ export function createShipStationService(
         const live = await readProvider(row.provider_order_id);
         await tx.execute(sql`INSERT INTO oms.order_edit_provider_holds(operation_id,shipment_id,provider_order_id,was_held)
           VALUES(${input.operationId}::uuid,${input.shipmentId},${row.provider_order_id},${live.orderStatus === "on_hold"})
-          ON CONFLICT(operation_id,shipment_id) DO NOTHING`);
+          ON CONFLICT(operation_id,shipment_id) DO UPDATE SET provider_order_id=EXCLUDED.provider_order_id,
+            was_held=EXCLUDED.was_held,released_at=NULL WHERE oms.order_edit_provider_holds.released_at IS NOT NULL`);
       });
       await db.transaction(async (tx: any) => {
         const row = await lock(tx);
         if (!isConfigured()) throw new OrderEditError("ORDER_EDIT_SHIPPING_UNAVAILABLE", "ShipStation is unavailable.");
         const proof = await tx.execute(sql`SELECT provider_order_id,was_held FROM oms.order_edit_provider_holds
-          WHERE operation_id=${input.operationId}::uuid AND shipment_id=${input.shipmentId} FOR UPDATE`);
+          WHERE operation_id=${input.operationId}::uuid AND shipment_id=${input.shipmentId} AND released_at IS NULL FOR UPDATE`);
         const baseline = z.object({ provider_order_id: z.coerce.number().int().positive().safe(), was_held: z.boolean() }).parse(proof.rows?.[0]);
         if (baseline.provider_order_id !== row.provider_order_id) throw new OrderEditError("ORDER_EDIT_PROVIDER_IDENTITY_CHANGED", "The provider shipment identity changed.");
+        if (input.mode === "release_unsubmitted") {
+          // No order write was sent. Undo only our hold; quantities, labels,
+          // other splits and fulfillment have no dependency on this draft.
+          const live = providerSchema.parse(
+            await apiRequest<unknown>(
+              "GET",
+              `/orders/${row.provider_order_id}`,
+            ),
+          );
+          if (
+            live.orderId !== row.provider_order_id ||
+            !["awaiting_shipment", "on_hold", "shipped", "cancelled"].includes(
+              live.orderStatus,
+            )
+          )
+            throw new OrderEditError(
+              "ORDER_EDIT_PROVIDER_NOT_EDITABLE",
+              "Provider hold cleanup could not be verified.",
+            );
+          if (
+            baseline.was_held ||
+            row.on_hold !== 0 ||
+            row.held ||
+            row.requires_review ||
+            live.orderStatus !== "on_hold"
+          )
+            return;
+          await apiRequest(
+            "POST",
+            "/orders/restorefromhold",
+            { orderId: row.provider_order_id },
+            { replaySafe: true },
+          );
+          const verified = providerSchema.parse(
+            await apiRequest<unknown>(
+              "GET",
+              `/orders/${row.provider_order_id}`,
+            ),
+          );
+          if (
+            verified.orderId !== row.provider_order_id ||
+            !["awaiting_shipment", "shipped", "cancelled"].includes(
+              verified.orderStatus,
+            )
+          )
+            throw new OrderEditError(
+              "ORDER_EDIT_PROVIDER_HOLD_NOT_VERIFIED",
+              "Provider hold cleanup could not be verified.",
+            );
+          return;
+        }
         if (input.mode === "verify_shipped") {
           await readProvider(row.provider_order_id, true);
           return;

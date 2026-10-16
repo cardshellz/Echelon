@@ -54,6 +54,8 @@ export interface OrderEditReleaseProof {
   ownership?: "owned" | "none";
   allocationRequired?: boolean;
   fulfilledCancellation?: boolean;
+  /** No Shopify financial command was sent; only this operation's hold is removed. */
+  unsubmitted?: boolean;
 }
 export interface OrderEditStore {
   connections(): Promise<OrderEditConnection[]>;
@@ -92,6 +94,10 @@ export interface OrderEditWarehouse {
   ): Promise<{ editable: boolean; reasons: string[]; wmsOrderIds: number[] }>;
   acquire(omsOrderId: number, operationId: string): Promise<void>;
   assertHeld(omsOrderId: number, operationId: string): Promise<void>;
+  releaseUnsubmitted(
+    omsOrderId: number,
+    operationId: string,
+  ): Promise<OrderEditReleaseProof>;
   reconcileAndRelease(
     omsOrderId: number,
     operationId: string,
