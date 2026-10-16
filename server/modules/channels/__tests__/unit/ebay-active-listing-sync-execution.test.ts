@@ -14,6 +14,7 @@ const fixture = vi.hoisted(() => ({
   photoRequests: [] as Array<{ variants: Array<{ variantId: number; sku: string }> }>,
   photoUrls: null as string[] | null,
   recovery: vi.fn(async () => ({ busy: false, resolved: [] as string[], unresolved: [] as string[] })),
+  automaticRecovery: vi.fn(async () => ({ busy: false, superseded: [] as string[], unresolved: [] as string[], watchId: null as string | null })),
   readCount: 0,
   changeSource: false,
   atp: vi.fn(),
@@ -52,6 +53,10 @@ vi.mock("../../adapters/ebay/ebay-marketplace-registration.factory", async () =>
 });
 vi.mock("../../infrastructure/ebay-listing-sync.repository", () => ({ PostgresEbayListingSyncRepository: class {} }));
 vi.mock("../../../inventory-planning/quantity-publication", () => ({ quantityProviderResponseRecovery: { reconcile: fixture.recovery },
+  automaticEbayPublicationRecovery: { recover: fixture.automaticRecovery }, ebayPublicationReconciliationRepository: {},
+  EbayPublicationContentRefreshRejectedError: class extends Error {
+    constructor(readonly code: string, message: string) { super(message); }
+  },
   ensureEbayPublicationReady: fixture.inventoryReady,
 }));
 vi.mock("../../ebay-listing-sync.service", async importOriginal => ({
@@ -103,7 +108,7 @@ function provider(example: typeof cases[number]) {
   return { source, client, items, setGroup: (value: EbayInventoryItemGroup) => { group = value; } };
 }
 beforeEach(() => {
-  fixture.readCount = 0; fixture.changeSource = false; fixture.photoRequests = []; fixture.photoUrls = null; fixture.recovery.mockClear();
+  fixture.readCount = 0; fixture.changeSource = false; fixture.photoRequests = []; fixture.photoUrls = null; fixture.recovery.mockClear(); fixture.automaticRecovery.mockClear();
   fixture.atp.mockReset().mockImplementation(async () => fixture.rows.map(row => ({ productVariantId: row.variant_id, atpUnits: 17 })));
   fixture.inventoryReady.mockClear();
 });
@@ -230,12 +235,16 @@ describe("production existing-listing prepare through verified completion", () =
     expect(fixture.inventoryReady).not.toHaveBeenCalled();
     expect(client.createOrReplaceInventoryItem).not.toHaveBeenCalled();
   });
-  it("preserves uncertain prior-response evidence before any automatic stock preparation", async () => {
+  it("keeps an unsupported prior operation fenced before stock preparation", async () => {
     const { source, client } = provider(cases[0]);
     fixture.recovery.mockResolvedValueOnce({ busy: false, resolved: [], unresolved: ["16323"] });
+    // Automatic recovery owns operation classification. An unsupported prior
+    // create/publish/delete keeps its evidence guard; ordinary replacements do not.
+    fixture.automaticRecovery.mockResolvedValueOnce({ busy: false, superseded: [], unresolved: ["16323"], watchId: null });
     await expect(fixture.execution!.execute(source, async (_key, _hash, work) => work(), null, async () => {}, executionContext()))
       .rejects.toMatchObject({ code: "EBAY_SYNC_RESPONSE_EVIDENCE_REQUIRED" });
     expect(fixture.inventoryReady).not.toHaveBeenCalled();
+    expect(fixture.automaticRecovery).toHaveBeenCalledOnce();
     expect(client.createOrReplaceInventoryItem).not.toHaveBeenCalled();
   });
 });

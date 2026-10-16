@@ -169,6 +169,8 @@ import { InventoryPublicationOutboxService } from "../modules/inventory-planning
 import { PostgresInventoryPublicationOutboxRepository } from "../modules/inventory-planning/infrastructure/inventory-publication-outbox.repository";
 import { PostgresPublicationSelectionWork } from "../modules/inventory-planning/infrastructure/publication-selection-work.repository";
 import { quantityPublicationAdmission, createQuantityPublicationCatchupService } from "../modules/inventory-planning/infrastructure/quantity-publication-runtime";
+import { EbayPublicationReconciliationService, ebayPublicationReconciliationRepository } from "../modules/inventory-planning/quantity-publication";
+import { refreshRecoveredEbayListing } from "../modules/channels/ebay-listing-sync";
 import { InventoryPublicationReadbackService } from "../modules/inventory-planning/application/inventory-publication-readback.service";
 import { PostgresInventoryPublicationReadbackRepository } from "../modules/inventory-planning/infrastructure/inventory-publication-readback.repository";
 import { InventoryPublicationTransportRegistry } from "../modules/inventory-planning/application/inventory-publication-transport";
@@ -482,6 +484,9 @@ export function createServices(
       await echelonOrchestrator.syncInventoryForPublicationTarget(target);
     },
   });
+  const ebayPublicationReconciliation = new EbayPublicationReconciliationService(
+    ebayPublicationReconciliationRepository, inventoryPublicationTransports, refreshRecoveredEbayListing, () => new Date(),
+  );
   const inventoryPublicationReadback = new InventoryPublicationReadbackService(
     new PostgresInventoryPublicationReadbackRepository(),
     inventoryPublicationTransports,
@@ -728,6 +733,7 @@ export function createServices(
     inventoryPublicationOutbox,
     inventoryPublicationSelectionWork,
     quantityPublicationCatchup,
+    ebayPublicationReconciliation,
     inventoryPublicationReadback,
     inventoryAvailabilityClaims,
     assemblyWork,

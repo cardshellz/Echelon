@@ -81,6 +81,7 @@ export interface EbayInventoryQuantityObservation {
   inventoryItemQuantity: number;
   offerQuantity: number;
   observedQuantity: number;
+  quantityConsistent: boolean;
 }
 
 /** Provider availability, not an ATP formula: eBay caps a listing by BOTH quantities. */
@@ -105,6 +106,7 @@ async function observeQuantity(client: EbayInventoryQuantityClient, sku: string,
   return {
     sku, marketplaceId, offerId: offer.offerId, inventoryItemQuantity, offerQuantity: offerQuantity.data,
     observedQuantity: Math.min(inventoryItemQuantity, offerQuantity.data),
+    quantityConsistent: inventoryItemQuantity === offerQuantity.data,
   };
 }
 

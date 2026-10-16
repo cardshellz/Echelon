@@ -176,8 +176,9 @@ export class PostgresEbayListingSyncRepository implements EbayListingSyncStore {
     const priorTerminal = (await client.query(rowSql + " WHERE channel_id=$1 AND product_id=$2 AND operation='publish' AND state='needs_attention'", [identity.channelId,identity.productId])).rows.map(decode).find(hasPublicationBarrier);
     if (priorTerminal) throw this.priorPublicationRequired(priorTerminal.id);
     const active = (
-      await client.query<{ id: string; identity: EbayListingSyncIdentity; providerIdentity: EbayListingSyncIdentity | null; operation: "sync" | "publish" | "withdraw" }>(
-        `SELECT id::text,identity,provider_identity AS "providerIdentity",operation FROM channels.ebay_listing_sync_jobs
+      await client.query<{ id: string; identity: EbayListingSyncIdentity; providerIdentity: EbayListingSyncIdentity | null;
+        operation: "sync" | "publish" | "withdraw"; state: StoredEbayListingSyncJob["state"]; ownerToken: string | null }>(
+        `SELECT id::text,identity,provider_identity AS "providerIdentity",operation,state,owner_token::text AS "ownerToken" FROM channels.ebay_listing_sync_jobs
       WHERE channel_id=$1 AND product_id=$2 AND state IN ('queued','running','recovering','awaiting_evidence') FOR UPDATE`,
         [identity.channelId, identity.productId],
       )
@@ -239,9 +240,19 @@ export class PostgresEbayListingSyncRepository implements EbayListingSyncStore {
     }
     if (active && reusable) {
       id = active.id;
+      const requeueIdle = active.operation === "sync" && active.state !== "running" && active.ownerToken === null
+        && (await client.query<{ acquired: boolean }>("SELECT pg_try_advisory_xact_lock($1,hashtext($2)) AS acquired", [LOCK_NAMESPACE, id])).rows[0]?.acquired === true;
       await client.query(
-        `UPDATE channels.ebay_listing_sync_jobs SET revision=revision+1,updated_at=$2,next_attempt_at=$2 WHERE id=$1`,
-        [id, now.toISOString()],
+        // A new maintenance revision is queued work, not a repetition of the
+        // previous error. Preserve live ownership and publication/withdrawal
+        // barriers. The worker still revalidates every inventory fence; history
+        // stays in the immutable events even when the current error is cleared.
+        `UPDATE channels.ebay_listing_sync_jobs SET revision=revision+1,updated_at=$2,next_attempt_at=$2,
+          state=CASE WHEN $3::boolean THEN 'queued' ELSE state END,
+          error_code=CASE WHEN $3::boolean THEN NULL ELSE error_code END,
+          error_message=CASE WHEN $3::boolean THEN NULL ELSE error_message END
+          WHERE id=$1`,
+        [id, now.toISOString(), requeueIdle],
       );
     } else {
       id = commandKey;
@@ -467,12 +478,21 @@ export class PostgresEbayListingSyncRepository implements EbayListingSyncStore {
       );
     return (await withEbayListingJobProgress(this.pool, [decode(row)]))[0];
   }
-  async getByCommand(commandKey: string, channelId: number, transactionClient?: PoolClient): Promise<StoredEbayListingSyncJob | null> {
+  async getByCommand(commandKey: string, channelId: number, options: { transactionClient?: PoolClient; expectedActor?: string } = {}): Promise<StoredEbayListingSyncJob | null> {
     // A second command can join an existing job. Recover a lost HTTP response
     // through that durable membership, never by assuming command ID equals job ID.
-    const row = (await (transactionClient ?? this.pool).query(rowSql + ` WHERE channel_id=$2 AND id=(
+    const client = options.transactionClient ?? this.pool;
+    const row = (await client.query(rowSql + ` WHERE channel_id=$2 AND id=(
       SELECT job_id FROM channels.ebay_listing_sync_commands WHERE command_key=$1)`, [commandKey, channelId])).rows[0];
-    return row ? (await withEbayListingJobProgress(transactionClient ?? this.pool, [decode(row)]))[0] : null;
+    if (row && options.expectedActor !== undefined) {
+      // Commands are immutable. Validate the command actor, not the job's first
+      // requester: a recovery command may have joined an operator's active job.
+      const command = (await client.query<{ actor: string }>(
+        "SELECT actor FROM channels.ebay_listing_sync_commands WHERE command_key=$1", [commandKey])).rows[0];
+      if (command?.actor !== options.expectedActor) throw new EbayListingSyncError(
+        "EBAY_SYNC_REPLAY_CONFLICT", "This saved command belongs to a different requester.");
+    }
+    return row ? (await withEbayListingJobProgress(client, [decode(row)]))[0] : null;
   }
   async getAdmission(id: string, channelId: number): Promise<EbayListingSyncJob | null> {
     const row = (await this.pool.query(`SELECT command_key::text AS id,product_id AS "productId",operation,error_code AS code,error_message AS message,created_at
@@ -654,7 +674,9 @@ export class PostgresEbayListingSyncRepository implements EbayListingSyncStore {
       const changed = await client.query(
         `UPDATE channels.ebay_listing_sync_jobs SET
         state=CASE WHEN revision>claimed_revision THEN 'queued' ELSE $3 END,owner_token=NULL,claimed_revision=NULL,
-        error_code=$4,error_message=$5,result=$6::jsonb,next_attempt_at=CASE WHEN revision>claimed_revision THEN $7::timestamptz ELSE $8::timestamptz END,
+        error_code=CASE WHEN revision>claimed_revision THEN NULL ELSE $4 END,
+        error_message=CASE WHEN revision>claimed_revision THEN NULL ELSE $5 END,
+        result=$6::jsonb,next_attempt_at=CASE WHEN revision>claimed_revision THEN $7::timestamptz ELSE $8::timestamptz END,
         attempts=CASE WHEN $9::boolean THEN 0 ELSE attempts END,
         updated_at=$7 WHERE id=$1 AND owner_token=$2 RETURNING id`,
         [

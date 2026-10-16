@@ -864,6 +864,11 @@ const configured =
       expect(newer.id).toBe(first.id);
       expect(newer.revision).toBe("2");
       expect((await f.service.getByCommand(joinedCommandKey, identity.channelId))?.id).toBe(first.id);
+      // Recovery commands may join a job originally requested by another actor.
+      // Authorize replay using the immutable command, not requested_by on the job.
+      expect((await f.service.getByCommand(joinedCommandKey, identity.channelId, "other-operator"))?.id).toBe(first.id);
+      await expect(f.service.getByCommand(joinedCommandKey, identity.channelId, "operator"))
+        .rejects.toMatchObject({ code: "EBAY_SYNC_REPLAY_CONFLICT" });
       expect(await f.service.getByCommand(joinedCommandKey, identity.channelId + 1)).toBeNull();
       expect(await f.service.getByCommand(randomUUID(), identity.channelId)).toBeNull();
       await f.store.finish(
@@ -1180,6 +1185,37 @@ const configured =
           { ...scope("P5"), externalScopeId: "different-account" },
         ]),
       ).toMatchObject({ busy: false, resolved: [], unresolved: [] });
+    });
+    it.each(["recovering", "awaiting_evidence"] as const)("queues a new maintenance revision without its old %s error, preserving audit history", async state => {
+      const f = fixture();
+      const original = await f.service.enqueue(identity, "operator");
+      const claim = (await f.store.claim(clock(), randomUUID(), original.id))!;
+      try {
+        await f.store.finish(claim.job, { state, result: null, code: "EBAY_SYNC_RESPONSE_EVIDENCE_REQUIRED",
+          message: "Earlier unknown response", nextAttemptAt: clock() }, clock());
+      } finally { await claim.release(); }
+      const command = randomUUID();
+      const resumed = await f.service.enqueue(identity, "operator", command);
+      expect(resumed).toMatchObject({ id: original.id, state: "queued", revision: "2", code: null, message: null });
+      expect(await f.service.enqueue(identity, "operator", command)).toMatchObject({ id: original.id, revision: "2" });
+      const history = await database.pool.query("SELECT evidence FROM channels.ebay_listing_sync_events WHERE job_id=$1 AND event=$2", [original.id, state]);
+      expect(JSON.stringify(history.rows)).toContain("EBAY_SYNC_RESPONSE_EVIDENCE_REQUIRED");
+      await f.service.processDue(1, original.id);
+      expect(await f.store.get(original.id)).toMatchObject({ state: "completed" });
+    });
+    it("keeps a live owner's claim while coalescing a click, then queues the newer revision without stale errors", async () => {
+      const f = fixture();
+      const job = await f.service.enqueue(identity, "operator");
+      const claim = (await f.store.claim(clock(), randomUUID(), job.id))!;
+      try {
+        const joined = await f.service.enqueue(identity, "operator", randomUUID());
+        expect(joined).toMatchObject({ state: "running", ownerToken: claim.job.ownerToken, claimedRevision: "1", revision: "2" });
+        await f.store.finish(claim.job, { state: "recovering", result: null, code: "PUBLICATION_SCOPE_BUSY",
+          message: "Old revision waited", nextAttemptAt: clock() }, clock());
+      } finally { await claim.release(); }
+      expect(await f.store.get(job.id)).toMatchObject({ state: "queued", revision: "2", ownerToken: null, code: null, message: null });
+      await f.service.processDue(1, job.id);
+      expect(await f.store.get(job.id)).toMatchObject({ state: "completed" });
     });
     it("completes the exact provider alias after a catalog rename without overwriting its saved mapping", async () => {
       identity = { ...identity, variants: identity.variants.map(member => ({ ...member, catalogSku: "PACK-CURRENT" })) };

@@ -41,6 +41,37 @@ describe("quantity publication catch-up worker", () => {
     await vi.advanceTimersByTimeAsync(60_000);
     expect(processDue).not.toHaveBeenCalled();
   });
+  it("runs recurring reconciliation after catch-up fails and redacts both infrastructure failures", async () => {
+    vi.useFakeTimers();
+    const processDue = vi.fn().mockRejectedValue(new Error("private catchup detail"));
+    const reconcile = vi.fn().mockRejectedValue(new Error("private reconciliation detail"));
+    const log = vi.fn();
+    const worker = startQuantityPublicationCatchupWorker({ processDue }, { intervalMs: 100, reconcile, log });
+    await vi.advanceTimersByTimeAsync(300);
+    await worker.stop();
+    expect(reconcile.mock.calls.length).toBeGreaterThan(1);
+    expect(processDue).toHaveBeenCalledTimes(reconcile.mock.calls.length);
+    expect(log).toHaveBeenCalledWith({ event: "ebay_publication_reconciliation_failed", code: "PUBLICATION_RECONCILIATION_WORKER_FAILED" });
+    expect(JSON.stringify(log.mock.calls)).not.toContain("private");
+  });
+  it("owns reconciliation through shutdown and prevents overlapping subsequent catch-up batches", async () => {
+    vi.useFakeTimers();
+    const processDue = vi.fn().mockResolvedValue({ completed: 0, failed: 0 });
+    let complete!: (result: { checked: number; repaired: number; blocked: number }) => void;
+    const reconcile = vi.fn(() => new Promise<{ checked: number; repaired: number; blocked: number }>(resolve => { complete = resolve; }));
+    const log = vi.fn();
+    const worker = startQuantityPublicationCatchupWorker({ processDue }, { intervalMs: 100, reconcile, log });
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(processDue).toHaveBeenCalledOnce();
+    expect(reconcile).toHaveBeenCalledOnce();
+    let stopped = false;
+    const stopping = worker.stop().then(() => { stopped = true; });
+    await Promise.resolve();
+    expect(stopped).toBe(false);
+    complete({ checked: 1, repaired: 1, blocked: 0 });
+    await stopping;
+    expect(log).toHaveBeenCalledWith({ event: "ebay_publication_reconciliation_batch", checked: 1, repaired: 1, blocked: 0 });
+  });
   it.each([0, -1, NaN, Infinity, 1.2, 3_600_001])("rejects unsafe interval %s before scheduling", intervalMs => {
     expect(() => startQuantityPublicationCatchupWorker({ processDue: vi.fn() }, { intervalMs })).toThrow("supported range");
   });

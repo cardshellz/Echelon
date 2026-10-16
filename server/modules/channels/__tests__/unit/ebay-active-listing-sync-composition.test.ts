@@ -7,6 +7,8 @@ const fixture = vi.hoisted(() => ({
   queued: [] as unknown[],
   failures: [] as Array<Record<string, unknown>>,
   products: [] as Array<{ id: number; name: string }>,
+  saved: new Map<string, { actor: string; job: unknown }>(),
+  rejections: new Map<string, unknown>(),
 }));
 vi.mock("../../../../db", () => ({
   pool: {},
@@ -25,15 +27,32 @@ vi.mock("../../infrastructure/ebay-api-runtime", () => ({ EBAY_CHANNEL_ID: 67,
   atpService: {}, ebayListingPhotoResolver: {},
 }));
 vi.mock("../../infrastructure/ebay-listing-sync.repository", () => ({ PostgresEbayListingSyncRepository: class {} }));
-vi.mock("../../../inventory-planning/quantity-publication", () => ({ quantityProviderResponseRecovery: {} }));
+vi.mock("../../../inventory-planning/quantity-publication", () => ({ quantityProviderResponseRecovery: {},
+  automaticEbayPublicationRecovery: {}, ebayPublicationReconciliationRepository: {},
+  EbayPublicationContentRefreshRejectedError: class extends Error {
+    constructor(readonly code: string, message: string) { super(message); }
+  },
+}));
 vi.mock("../../ebay-listing-sync.service", async importOriginal => {
   const actual = await importOriginal<typeof import("../../ebay-listing-sync.service")>();
   return { ...actual, EbayListingSyncService: class {
     async enqueue(identity: { productId: number }, actor: string, key: string) {
       fixture.queued.push({ identity, actor, key });
-      return storedEbayListingSyncJobSchema.parse({ id: key, productId: identity.productId, state: "queued", kind: "sync", code: null, message: null,
+      const job = storedEbayListingSyncJobSchema.parse({ id: key, productId: identity.productId, state: "queued", kind: "sync", code: null, message: null,
         nextAttemptAt: "2026-10-09T20:00:00.000Z", updatedAt: "2026-10-09T20:00:00.000Z", identity,
         revision: "1", claimedRevision: null, ownerToken: null, attempts: 0, result: null, verificationIntentHash: null, verificationRevision: null });
+      fixture.saved.set(key, { actor, job });
+      return job;
+    }
+    async getByCommand(key: string, _channelId: number, expectedActor?: string) {
+      const saved = fixture.saved.get(key);
+      if (saved && expectedActor !== undefined && saved.actor !== expectedActor)
+        throw Object.assign(new Error("Different requester"), { code: "EBAY_SYNC_REPLAY_CONFLICT" });
+      return saved ? storedEbayListingSyncJobSchema.parse(saved.job) : null;
+    }
+    async getAdmission(key: string) {
+      const saved = fixture.rejections.get(key);
+      return saved ? ebayListingSyncJobSchema.parse(saved) : null;
     }
     async recordAdmissionFailure(failure: Record<string, unknown>) {
       fixture.failures.push(failure);
@@ -42,7 +61,7 @@ vi.mock("../../ebay-listing-sync.service", async importOriginal => {
     }
   } };
 });
-import { syncActiveListings } from "../../infrastructure/ebay-active-listing-sync";
+import { syncActiveListings, refreshRecoveredEbayListing } from "../../infrastructure/ebay-active-listing-sync";
 
 function rows(productId: number, catalog: string, external: string, invalid = false) {
   return ["PACK", "CASE"].map((unit, index) => ({ product_id: productId, product_name: `Toploader ${productId}`, product_sku: catalog,
@@ -55,9 +74,77 @@ beforeEach(() => {
   fixture.queued = [];
   fixture.failures = [];
   fixture.products = [];
+  fixture.saved.clear();
+  fixture.rejections.clear();
 });
 
 describe("active existing-listing selection to admission composition", () => {
+  it("queues recovery content through normal Sync with the exact account and stable command", async () => {
+    fixture.rows = rows(3, "CAT-3", "EBAY-3");
+    const commandKey = "00000000-0000-4000-8000-000000000003";
+    expect(await refreshRecoveredEbayListing({ productId: 3, connectionId: 12, accountId: "seller", commandKey }))
+      .toEqual({ jobId: commandKey });
+    expect(fixture.queued).toEqual([expect.objectContaining({ actor: "system:ebay-recovery-reconciliation", key: commandKey,
+      identity: expect.objectContaining({ productId: 3, connectionId: 12, accountId: "seller" }) })]);
+  });
+  it("recovers a consumed command before recapturing changed catalog selection after a lost acknowledgement", async () => {
+    fixture.rows = rows(3, "CAT-3", "EBAY-3");
+    const request = { productId: 3, connectionId: 12, accountId: "seller", commandKey: "00000000-0000-4000-8000-000000000003" };
+    const first = await refreshRecoveredEbayListing(request);
+    fixture.rows = rows(3, "RENAMED", "EBAY-3").map(row => ({ ...row, variant_is_active: false }));
+    expect(await refreshRecoveredEbayListing(request)).toEqual(first);
+    expect(fixture.queued).toHaveLength(1);
+    expect(fixture.failures).toEqual([]);
+  });
+  it.each([
+    { productId: 4 }, { connectionId: 13 }, { accountId: "another-seller" }, { operation: "publish" },
+  ])("does not reuse a recovery command for another saved destination or operation: %j", async changes => {
+    fixture.rows = rows(3, "CAT-3", "EBAY-3");
+    const request = { productId: 3, connectionId: 12, accountId: "seller", commandKey: "00000000-0000-4000-8000-000000000003" };
+    await refreshRecoveredEbayListing(request);
+    const saved = fixture.saved.get(request.commandKey)!;
+    const job = storedEbayListingSyncJobSchema.parse(saved.job);
+    saved.job = { ...job, ...changes, identity: { ...job.identity, ...changes } };
+    if ("operation" in changes) saved.job = { ...job, operation: changes.operation };
+    await expect(refreshRecoveredEbayListing(request)).rejects.toMatchObject({ code: "EBAY_SYNC_REPLAY_CONFLICT" });
+    expect(fixture.queued).toHaveLength(1);
+  });
+  it("consumes a saved admission rejection without trying to reuse its key after catalog changes", async () => {
+    const request = { productId: 3, connectionId: 12, accountId: "seller", commandKey: "00000000-0000-4000-8000-000000000003" };
+    fixture.rejections.set(request.commandKey, { id: request.commandKey, productId: 3, operation: "sync", kind: "admission", state: "needs_attention",
+      code: "EBAY_SYNC_PRODUCT_NOT_ELIGIBLE", message: "The saved selection was excluded.",
+      nextAttemptAt: "2026-10-09T20:00:00.000Z", updatedAt: "2026-10-09T20:00:00.000Z" });
+    fixture.rows = rows(3, "NOW-INCLUDED", "EBAY-3");
+    await expect(refreshRecoveredEbayListing(request)).rejects.toMatchObject({ code: "EBAY_SYNC_PRODUCT_NOT_ELIGIBLE" });
+    expect(fixture.queued).toEqual([]);
+    expect(fixture.failures).toEqual([]);
+  });
+  it("rejects a command owned by another requester before fresh admission", async () => {
+    fixture.rows = rows(3, "CAT-3", "EBAY-3");
+    const request = { productId: 3, connectionId: 12, accountId: "seller", commandKey: "00000000-0000-4000-8000-000000000003" };
+    await refreshRecoveredEbayListing(request);
+    fixture.saved.get(request.commandKey)!.actor = "another-requester";
+    await expect(refreshRecoveredEbayListing(request)).rejects.toMatchObject({ code: "EBAY_SYNC_REPLAY_CONFLICT" });
+    expect(fixture.queued).toHaveLength(1);
+  });
+  it.each([{ connectionId: 13, accountId: "seller" }, { connectionId: 12, accountId: "other-seller" }])(
+    "refuses recurring content refresh after the destination changes: %j", async destination => {
+      fixture.rows = rows(3, "CAT-3", "EBAY-3");
+      await expect(refreshRecoveredEbayListing({ productId: 3, ...destination,
+        commandKey: "00000000-0000-4000-8000-000000000003" })).rejects.toMatchObject({ code: "EBAY_SYNC_IDENTITY_CHANGED" });
+      expect(fixture.queued).toEqual([]);
+      expect(fixture.failures).toEqual([]);
+    });
+  it("distinguishes a consumed durable rejection from a lost queue acknowledgement", async () => {
+    fixture.products = [{ id: 3, name: "Excluded" }];
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await expect(refreshRecoveredEbayListing({ productId: 3, connectionId: 12, accountId: "seller",
+        commandKey: "00000000-0000-4000-8000-000000000003" })).rejects.toMatchObject({ code: "EBAY_SYNC_PRODUCT_NOT_ELIGIBLE" });
+      expect(fixture.failures).toHaveLength(1);
+      expect(fixture.queued).toEqual([]);
+    } finally { log.mockRestore(); }
+  });
   it("admits both renamed SKU/group examples without any provider discovery during the HTTP request", async () => {
     fixture.rows = [...rows(3, "SHLZ-TOP-180PT-CLR", "SHLZ-TOP-180PT"), ...rows(86, "SHLZ-TOP-TCG-SLIM-CLR", "SHLZ-TOP-40PT-SLIM")];
     const result = await syncActiveListings(null, "operator");

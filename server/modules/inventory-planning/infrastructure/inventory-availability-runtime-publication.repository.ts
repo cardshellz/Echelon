@@ -78,6 +78,7 @@ interface MappingRow extends Record<string, unknown> {
 }
 
 interface LatestPublicationRow extends Record<string, unknown> {
+  id: string;
   publication_phase: string;
   state: string;
   desired_quantity: string;
@@ -198,6 +199,7 @@ implements InventoryAvailabilityRuntimePublicationExecutor {
     private readonly client: InventoryAvailabilityTransactionQueryClient,
     private readonly logger?: InventoryAvailabilityRuntimePublicationLogger,
     private readonly replacementListings: readonly ReplacementListing[] = [],
+    private readonly reconciliationObservationIds: readonly string[] = [],
   ) {}
 
   async execute<T>(
@@ -215,7 +217,7 @@ implements InventoryAvailabilityRuntimePublicationExecutor {
       throw runtimeError("INVENTORY_PUBLICATION_TRANSACTION_REQUIRED",
         "Caller-owned publication requires a SERIALIZABLE read-write transaction.", {});
     }
-    return work(await createPublicationContext(this.client, this.logger, true, this.replacementListings));
+    return work(await createPublicationContext(this.client, this.logger, true, this.replacementListings, this.reconciliationObservationIds));
   }
 }
 
@@ -228,6 +230,9 @@ export function createTransactionScopedInventoryPublicationService(
      * belong to the deleted listing. The caller records its replay receipt in
      * the same transaction; quantities still come from the canonical planner. */
     replacementListings?: readonly ReplacementListing[];
+    /** Immutable current-revision drift observations permit a fresh desired
+     * revision even when the newly calculated quantity equals a prior receipt. */
+    reconciliationObservationIds?: readonly string[];
   } = {},
 ): AuthorityAwareInventoryPublicationService {
   // The enclosing command may still fail after this callback. Never present
@@ -241,7 +246,7 @@ export function createTransactionScopedInventoryPublicationService(
       : console.warn(JSON.stringify({ ...event, transactionState: "pending_commit" })),
   };
   return new AuthorityAwareInventoryPublicationService(
-    new PostgresTransactionScopedInventoryPublicationExecutor(client, logger, options.replacementListings),
+    new PostgresTransactionScopedInventoryPublicationExecutor(client, logger, options.replacementListings, options.reconciliationObservationIds),
     options.channelId,
     logger,
   );
@@ -277,6 +282,7 @@ async function createPublicationContext(
   logger: InventoryAvailabilityRuntimePublicationLogger | undefined,
   requireCanonical: boolean,
   replacementListings: readonly ReplacementListing[] = [],
+  reconciliationObservationIds: readonly string[] = [],
 ): Promise<InventoryAvailabilityRuntimePublicationContext> {
   const authority = await loadAndLockRuntimeAuthority(client);
   if (requireCanonical && authority.authority !== "canonical") {
@@ -316,7 +322,7 @@ async function createPublicationContext(
           { activationRunId, pinnedActivationRunId: authority.activationRunId },
         );
       }
-      return enqueueFullPublications(client, activationRunId, intents, replacementListings);
+      return enqueueFullPublications(client, activationRunId, intents, replacementListings, reconciliationObservationIds);
     },
   };
 }
@@ -647,6 +653,7 @@ async function enqueueFullPublications(
   activationRunId: string,
   intents: readonly CanonicalInventoryPublicationIntent[],
   replacementListings: readonly ReplacementListing[] = [],
+  reconciliationObservationIds: readonly string[] = [],
 ): Promise<CanonicalInventoryPublicationEnqueueResult> {
   positiveBigintString(activationRunId, "activationRunId");
   let enqueuedRows = 0;
@@ -678,7 +685,16 @@ async function enqueueFullPublications(
     )).rows[0];
     const replacingListing = replacementListings.some(listing => listing.publicationTargetId === intent.publicationTargetId
       && listing.productVariantId === intent.productVariantId);
-    if (!replacingListing && latest && reusablePublicationState(latest.state)
+    // A periodic observation is only authority to refresh the exact current
+    // desired row it observed. A concurrent newer plan cannot be overwritten.
+    const repairingDrift = latest && ["verified", "acknowledged"].includes(latest.state)
+      && reconciliationObservationIds.length > 0 && (await client.query<{ permitted: boolean }>(
+      `SELECT EXISTS(SELECT 1 FROM inventory.ebay_publication_reconciliation_observations observation
+        JOIN inventory.ebay_publication_reconciliation_watches watch ON watch.id=observation.watch_id
+        WHERE observation.id=ANY($1::bigint[]) AND observation.outbox_id=$2 AND observation.current_revision
+          AND NOT observation.matches_desired AND observation.revision=watch.revision AND observation.cycle=watch.cycle
+          AND watch.lease_token IS NOT NULL) AS permitted`, [reconciliationObservationIds, latest.id])).rows[0]?.permitted === true;
+    if (!replacingListing && !repairingDrift && latest && reusablePublicationState(latest.state)
       && sameDesiredPublication(latest, activationRunId, intent)) {
       coalescedRows += 1;
       coalescedPublicationKeys.push(publicationKey(intent));
@@ -782,7 +798,7 @@ async function enqueueFullPublications(
  * follow-ups, replen and carrier dispatch failed with "publication revision must
  * be greater than existing revision 10").
  */
-export const LATEST_PUBLICATION_ROW_SQL = `SELECT activation_run_id::text AS activation_run_id, state, publication_phase,
+export const LATEST_PUBLICATION_ROW_SQL = `SELECT id::text AS id, activation_run_id::text AS activation_run_id, state, publication_phase,
        desired_revision::text AS desired_revision,
        desired_quantity::text AS desired_quantity,
        publication_target_revision_snapshot::text AS publication_target_revision_snapshot,

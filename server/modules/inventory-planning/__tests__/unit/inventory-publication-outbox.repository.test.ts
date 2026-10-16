@@ -306,6 +306,21 @@ describe("PostgresInventoryPublicationOutboxRepository full publication phase", 
       77,
     ]);
   });
+
+  it("queues another canonical write when provider surfaces disagree despite scalar equality", async () => {
+    const client = fakeClient(sql => {
+      if (sql.includes("SELECT * FROM inventory.inventory_publication_outbox")) return { rows: [{ id: "41" }] };
+      if (sql.includes("SELECT TRUE AS valid")) return { rows: [{ valid: true }] };
+      if (sql.includes("SELECT state")) return { rows: [{ state: "active", reason: "Activated" }] };
+      return { rows: [], rowCount: 1 };
+    });
+    const repository = new PostgresInventoryPublicationOutboxRepository(fakePool(client));
+    await expect(repository.recordVerified(claim(), { observedQuantity: 7, quantityConsistent: false,
+      providerResponse: { item: 8, offer: 7 }, completedAt: NOW })).resolves.toBe("drifted");
+    const readback = client.queries.find(({ sql }) => sql.includes("INSERT INTO inventory.inventory_publication_readbacks"));
+    expect(readback?.values?.[4]).toBe(false);
+    expect(client.queries.some(({ sql }) => sql.includes("state = 'queued'") && sql.includes("PROVIDER_READBACK_MISMATCH"))).toBe(true);
+  });
 });
 
 type QueryResponse = { rows: Record<string, unknown>[]; rowCount?: number };

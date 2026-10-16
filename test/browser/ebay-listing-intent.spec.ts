@@ -165,6 +165,7 @@ test("an interrupted withdrawal needs explicit acknowledgement and retries the s
     } });
     commands.push(route.request().postDataJSON());
     if (commands.length === 1) return route.abort("failed");
+    state.jobs = [withdrawal];
     return route.fulfill({ json: { attemptIds: [], publicationRetryAuthorized: true, replayed: true, providerWriteAttempted: false, job: withdrawal } });
   });
   await page.reload(); await page.getByRole("button", { name: "Review interrupted removal", exact: true }).click();
@@ -174,7 +175,8 @@ test("an interrupted withdrawal needs explicit acknowledgement and retries the s
   await expect(resume).toBeDisabled(); await expect(dialog.getByRole("button", { name: "Resume saved publication" })).toHaveCount(0);
   await dialog.getByRole("checkbox").check(); await resume.click();
   await expect(dialog.getByRole("alert")).toBeVisible(); await resume.click();
-  await expect(dialog).toContainText("The saved removal will continue. Removal from eBay is not yet verified.");
+  await expect(dialog.getByRole("heading", { name: "Removal status", exact: true })).toBeVisible();
+  await expect(dialog).toContainText("Removal from eBay has not yet been verified.");
   expect(commands).toHaveLength(2); expect(commands[1]).toEqual(commands[0]);
   expect(commands[0].publicationRetryHash).toBe("b".repeat(64));
   expect(state.commands).toEqual([]); expect(state.errors).toEqual([]); expect(state.unexpected).toEqual([]);

@@ -42,6 +42,9 @@ export interface AbsoluteInventoryPublicationResult {
 
 export interface AbsoluteInventoryReadResult {
   observedQuantity: number;
+  /** False when the provider's exact item/offer quantity surfaces disagree.
+   * A conservative scalar alone cannot establish that every surface is current. */
+  quantityConsistent?: boolean;
   providerResponse: unknown;
 }
 

@@ -3,7 +3,14 @@
 export {
   createChannelEbayQuantityRequestAdmission,
   quantityProviderResponseRecovery,
+  automaticEbayPublicationRecovery,
+  ebayPublicationReconciliationRepository,
 } from "./infrastructure/quantity-publication-runtime";
+export { EbayAutomaticPublicationRecoveryService } from "./application/ebay-automatic-publication-recovery.service";
+export { PostgresEbayAutomaticPublicationRecoveryRepository } from "./infrastructure/ebay-automatic-publication-recovery.repository";
+export { EbayPublicationReconciliationService, EbayPublicationContentRefreshRejectedError } from "./application/ebay-publication-reconciliation.service";
+export type { EbayPublicationReconciliationStatus, RefreshRecoveredEbayContent } from "./application/ebay-publication-reconciliation.service";
+export { PostgresEbayPublicationReconciliationRepository } from "./infrastructure/ebay-publication-reconciliation.repository";
 export { EbayPublicationRecoveryService } from "./application/ebay-publication-recovery.service";
 export { InventoryPublicationMembershipError } from "./application/inventory-publication-membership.service";
 export { InventoryPublicationSelectionError } from "./infrastructure/inventory-publication-selection.reader";

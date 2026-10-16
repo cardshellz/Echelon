@@ -131,22 +131,20 @@ const RETRY_CODES = new Set([
   "STOCK_MAPPING_CLEANUP_UNCERTAIN",
   "STOCK_MAPPING_REVIEW_STALE",
   "STOCK_MAPPING_TARGET_CHANGED",
-  "EBAY_QUANTITY_RESPONSE_UNCERTAIN",
-  "QUANTITY_PROVIDER_REQUEST_TIMEOUT",
   "EBAY_QUANTITY_REJECTED",
   "EBAY_QUANTITY_DAILY_LIMIT",
-  "EBAY_SYNC_READBACK_PENDING",
-  "EBAY_SYNC_PERSISTENCE_FAILED",
-  "PUBLICATION_RESPONSE_RECOVERY_FAILED",
-  "ECONNRESET",
-  "ETIMEDOUT",
-  "ECONNREFUSED",
-  "EBAY_REGISTRATION_READ_TIMEOUT",
-  "EBAY_REGISTRATION_READ_FAILED",
-  "EBAY_AUTH_UNAVAILABLE",
-  "EBAY_AUTH_REFRESH_SUPERSEDED",
 ]);
 export const SYNC_RETRY_LIMIT = 5;
+// Known temporary failures retain their saved job with capped backoff. Exhausting
+// a counter cannot repair a lost response or an outage; recovery owns those cases.
+// Unclassified failures and business rejections still require a finite budget.
+const AUTOMATIC_RECOVERY_CODES = new Set([
+  "EBAY_QUANTITY_RESPONSE_UNCERTAIN", "QUANTITY_PROVIDER_REQUEST_TIMEOUT",
+  "EBAY_SYNC_READBACK_PENDING", "EBAY_SYNC_PERSISTENCE_FAILED",
+  "PUBLICATION_RESPONSE_RECOVERY_FAILED", "PUBLICATION_AUTOMATIC_RECOVERY_FAILED",
+  "ECONNRESET", "ETIMEDOUT", "ECONNREFUSED", "EBAY_AUTH_UNAVAILABLE",
+  "EBAY_AUTH_REFRESH_SUPERSEDED", "EBAY_REGISTRATION_READ_TIMEOUT", "EBAY_REGISTRATION_READ_FAILED",
+]);
 export function syncFailure(
   error: unknown,
   attempts: number,
@@ -161,7 +159,7 @@ export function syncFailure(
   const { code } = ebayListingFailureDiagnostic(error);
   const waiting = WAIT_CODES.has(code);
   const retrying =
-    waiting ||
+    waiting || AUTOMATIC_RECOVERY_CODES.has(code) ||
     ((RETRY_CODES.has(code) || code === "EBAY_LISTING_SYNC_FAILED") &&
       attempts < SYNC_RETRY_LIMIT);
   const retryAfter =

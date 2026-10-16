@@ -123,6 +123,9 @@ export interface InventoryReadItem {
 export interface InventoryReadResult {
   variantId: number;
   observedQty: number;
+  /** False when the provider's separate stock fields disagree, even if its
+   * effective available quantity happens to match the canonical target. */
+  quantityConsistent?: boolean;
   status: "success" | "error";
   error?: string;
   errorCode?: string;

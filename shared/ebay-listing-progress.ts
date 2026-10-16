@@ -1,5 +1,5 @@
-import type { EbayListingSyncJob, EbayListingSyncPhase } from "./types/ebay-listing-sync";
-import { resolveEbayListingIssue } from "./ebay-listing-issue";
+import type { EbayInventoryReconciliation, EbayListingSyncJob, EbayListingSyncPhase } from "./types/ebay-listing-sync";
+import { resolveEbayListingJobIssue, safeListingDiagnostic } from "./ebay-listing-issue";
 
 const phaseDescriptions: Record<EbayListingSyncPhase, { started: string; completed: string }> = {
   prepare_listing: { started: "Checking the existing listing and preparing current content", completed: "Listing identity and current content prepared" },
@@ -21,15 +21,47 @@ export interface EbayListingJobPresentation {
   verification: string | null;
   activity: string | null;
   times: Array<{ label: string; at: string }>;
+  inventory: {
+    summary: string;
+    detail: string;
+    code: string | null;
+    times: Array<{ label: string; at: string }>;
+  } | null;
+}
+
+function presentInventoryReconciliation(status: EbayInventoryReconciliation): NonNullable<EbayListingJobPresentation["inventory"]> {
+  const times: Array<{ label: string; at: string }> = [];
+  if (status.checkedAt) times.push({ label: "Stock checked", at: status.checkedAt });
+  if (status.nextCheckAt) times.push({ label: "Next stock check eligible at", at: status.nextCheckAt });
+  if (status.state === "verified") return {
+    summary: "Stock matched current inventory at the last check.",
+    detail: "Monitoring continues for delayed changes from earlier eBay requests.", code: null, times,
+  };
+  if (status.state === "unavailable") return {
+    summary: "Stock verification status is unavailable.",
+    detail: "The listing update status is still available. Refresh this saved status to check stock monitoring again.", code: status.code, times,
+  };
+  if (status.state === "needs_attention") return {
+    summary: "Stock check could not finish",
+    detail: `${safeListingDiagnostic(status.message) ?? "Echelon could not check current eBay stock."} Stock monitoring will retry automatically.`,
+    code: status.code, times,
+  };
+  return status.code === "PUBLICATION_RECONCILIATION_DRIFT" ? {
+    summary: "Restoring current stock",
+    detail: "The last stock check found a difference. A correction was requested. The next check will confirm the current quantity.", code: status.code, times,
+  } : {
+    summary: "Checking current stock",
+    detail: "The listing result does not confirm current stock. Echelon is checking eBay against current inventory.", code: status.code, times,
+  };
 }
 
 /** Presentation only: the saved job owns state, retry eligibility and completion.
  * Event completion is an intermediate checkpoint, never overall success. */
 export function presentEbayListingJob(job: EbayListingSyncJob): EbayListingJobPresentation {
   const progress = job.progress;
+  const inventory = job.inventoryReconciliation ? presentInventoryReconciliation(job.inventoryReconciliation) : null;
   const operation = job.operation === "withdraw" ? "Removal" : job.operation === "publish" ? "Publishing" : "Listing update";
-  const issue = job.issue ?? (job.code ? resolveEbayListingIssue({ code: job.code, message: job.message,
-    productId: job.productId, jobId: job.id, state: job.state }) : null);
+  const issue = resolveEbayListingJobIssue(job);
   const phase = progress?.phase && progress.phaseState
     ? progress.phase === "verify" && job.operation === "withdraw"
       ? progress.phaseState === "started" ? "Verifying removal on eBay" : "Removal verification recorded; saving the result"
@@ -44,9 +76,9 @@ export function presentEbayListingJob(job: EbayListingSyncJob): EbayListingJobPr
     case "needs_attention": summary = issue?.title ?? "Update stopped"; break;
     case "completed": summary = job.operation === "withdraw"
       ? "Removed from eBay. The provider's listing state is verified."
-      : job.operation === "publish" ? "Published. Listing and pictures verified." : "Listing update and pictures verified.";
+      : job.operation === "publish" ? "Published. Listing and pictures verified." : "Listing and pictures verified.";
   }
-  if (job.state === "completed") return { summary, phase: null, verification: null, activity: null, times: [] };
+  if (job.state === "completed") return { summary, phase: null, verification: null, activity: null, times: [], inventory };
 
   const times: EbayListingJobPresentation["times"] = [];
   if (progress) {
@@ -56,7 +88,9 @@ export function presentEbayListingJob(job: EbayListingSyncJob): EbayListingJobPr
       times.push({ label: "Latest queue activity", at: progress.lastWorkerActivityAt });
     }
   }
-  if (job.state === "recovering" || job.state === "awaiting_evidence") {
+  // A review-required missing response is not a promise that passing this
+  // timestamp will unblock it. Only automatic retry states expose eligibility.
+  if (job.state === "recovering") {
     times.push({ label: "Next automatic check eligible at", at: job.nextAttemptAt });
   }
   return {
@@ -70,5 +104,6 @@ export function presentEbayListingJob(job: EbayListingSyncJob): EbayListingJobPr
     activity: job.state === "queued" && progress && progress.lastWorkerActivityAt === null
       ? "No recent queue activity is available." : null,
     times,
+    inventory,
   };
 }

@@ -415,13 +415,15 @@ describe("existing eBay listing sync execution", () => {
     expect(fixture.client.getInventoryItem).not.toHaveBeenCalled();
     expect(fixture.client.updateOffer).not.toHaveBeenCalled();
   });
-  it("enforces a finite retry budget and provider cooldown, and never retries missing proof", () => {
+  it("keeps interrupted stock recovery automatic, honors cooldown, and retains unsupported evidence barriers", () => {
     const now = new Date("2026-10-09T12:00:00Z"),
       uncertain = Object.assign(new Error("uncertain"), {
         code: "EBAY_QUANTITY_RESPONSE_UNCERTAIN",
       });
     expect(syncFailure(uncertain, 1, now).state).toBe("recovering");
-    expect(syncFailure(uncertain, 5, now).state).toBe("needs_attention");
+    expect(syncFailure(uncertain, 50, now)).toMatchObject({ state: "recovering", resetAttempts: false,
+      nextAttemptAt: new Date(now.getTime() + 15 * 60_000) });
+    expect(syncFailure(new Error("unknown failure"), 5, now).state).toBe("needs_attention");
     const deadline = "2026-10-10T12:00:00.000Z";
     expect(
       syncFailure(

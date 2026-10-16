@@ -19,6 +19,16 @@ export const ebayListingSyncProgressSchema = z.object({
 });
 export type EbayListingSyncPhase = z.infer<typeof ebayListingSyncPhaseSchema>;
 export type EbayListingSyncProgress = z.infer<typeof ebayListingSyncProgressSchema>;
+export const ebayInventoryReconciliationSchema = z.object({
+  state: z.enum(["pending", "verified", "needs_attention", "unavailable"]),
+  checkedAt: z.string().datetime().nullable(),
+  nextCheckAt: z.string().datetime().nullable(),
+  code: z.string().max(100).nullable(),
+  message: z.string().max(1000).nullable(),
+}).strict().refine(status => status.state !== "verified" || status.checkedAt !== null, {
+  message: "Verified stock must identify its actual provider observation time.",
+});
+export type EbayInventoryReconciliation = z.infer<typeof ebayInventoryReconciliationSchema>;
 export const ebayListingSyncJobSchema = z.object({
   id: z.string().uuid(), productId: z.number().int().positive(),
   kind: z.enum(["sync", "admission"]).default("sync"),
@@ -29,6 +39,9 @@ export const ebayListingSyncJobSchema = z.object({
   issue: ebayListingIssueSchema.optional(),
   // Older saved responses remain readable while the server adds event evidence.
   progress: ebayListingSyncProgressSchema.optional(),
+  // Inventory's owner supplies current readback evidence independently of
+  // listing-content completion. Older saved responses have no stock evidence.
+  inventoryReconciliation: ebayInventoryReconciliationSchema.optional(),
 });
 export type EbayListingSyncJob = z.infer<typeof ebayListingSyncJobSchema>;
 /** A 200 response may contain per-product failures; clients must not translate it into success. */

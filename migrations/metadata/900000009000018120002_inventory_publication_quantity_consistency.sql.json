@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "migration": "900000009000018120002_inventory_publication_quantity_consistency.sql",
+  "generation": 9,
+  "pr": 1812,
+  "ordinal": 2,
+  "after": [
+    "900000008000018120001_ebay_automatic_sync_recovery.sql"
+  ]
+}

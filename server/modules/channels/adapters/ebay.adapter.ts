@@ -463,7 +463,8 @@ export class EbayAdapter implements IChannelAdapter {
           throw new EbayInventoryQuantityError("EBAY_INVENTORY_SCOPE_MISMATCH", "The item does not belong to the selected eBay account scope.");
         }
         const observation = await readEbayInventoryQuantity(client, item.sku, ebayInventoryMarketplace(metadata.siteId));
-        results.push({ variantId: item.variantId, observedQty: observation.observedQuantity, status: "success", providerResponse: observation });
+        results.push({ variantId: item.variantId, observedQty: observation.observedQuantity,
+          quantityConsistent: observation.quantityConsistent, status: "success", providerResponse: observation });
       } catch (error) {
         results.push({
           variantId: item.variantId,

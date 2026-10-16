@@ -88,14 +88,16 @@ export class ChannelInventoryPublicationTransportAdapter
           result.retryable !== false,
         );
       }
-      if (!Number.isSafeInteger(result.observedQty) || result.observedQty < 0) {
+      if (!Number.isSafeInteger(result.observedQty) || result.observedQty < 0
+        || (result.quantityConsistent !== undefined && typeof result.quantityConsistent !== "boolean")) {
         throw new InventoryPublicationTransportError(
           "PROVIDER_READBACK_INVALID",
           "Provider returned an invalid inventory quantity.",
           true,
         );
       }
-      return { observedQuantity: result.observedQty, providerResponse: result };
+      return { observedQuantity: result.observedQty, providerResponse: result,
+        ...(result.quantityConsistent === undefined ? {} : { quantityConsistent: result.quantityConsistent }) };
     } catch (error) {
       throw translateConfigurationError(error);
     }

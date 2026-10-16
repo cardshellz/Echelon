@@ -254,7 +254,7 @@ export class PostgresInventoryPublicationOutboxRepository {
 
   async recordVerified(
     claim: ClaimedInventoryPublication,
-    input: { observedQuantity: number; providerResponse: unknown; completedAt: Date },
+    input: { observedQuantity: number; quantityConsistent?: boolean; providerResponse: unknown; completedAt: Date },
   ): Promise<"verified" | "drifted" | null> {
     return inTransaction(this.connectionPool, async (client) => {
       await lockActivationRun(client, claim.activationRunId);
@@ -277,7 +277,8 @@ export class PostgresInventoryPublicationOutboxRepository {
          WHERE id = $1 AND lease_token = $2 AND state = 'leased'`,
         [claim.outboxId, claim.leaseToken, input.completedAt.toISOString()],
       );
-      const matches = BigInt(input.observedQuantity) === BigInt(claim.desiredQuantity);
+      const matches = input.quantityConsistent !== false
+        && BigInt(input.observedQuantity) === BigInt(claim.desiredQuantity);
       const readbackEvidence = {
         publicationTargetId: claim.publicationTargetId,
         publicationTargetRevision: claim.publicationTargetRevision,
@@ -290,6 +291,7 @@ export class PostgresInventoryPublicationOutboxRepository {
         externalInventoryItemId: claim.externalInventoryItemId,
         desiredQuantity: claim.desiredQuantity,
         observedQuantity: input.observedQuantity,
+        quantityConsistent: input.quantityConsistent ?? null,
         observedAt: input.completedAt.toISOString(),
       };
       await client.query(
@@ -299,14 +301,14 @@ export class PostgresInventoryPublicationOutboxRepository {
            destination_kind_snapshot, channel_connection_id_snapshot,
            dropship_store_connection_id_snapshot, provider_scope_type_snapshot,
            external_scope_id_snapshot, publication_target_revision_snapshot,
-           observed_at
+           observed_at, quantity_consistent
          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9,
-           $10, $11, $12, $13, $14)`,
+           $10, $11, $12, $13, $14, $15)`,
         [claim.publicationTargetId, claim.productVariantId, claim.outboxId,
           input.observedQuantity, matches, hash(readbackEvidence), claim.externalInventoryItemId,
           claim.destinationKind, claim.channelConnectionId, claim.dropshipStoreConnectionId,
           claim.providerScopeType, claim.externalScopeId, claim.publicationTargetRevision,
-          input.completedAt.toISOString()],
+          input.completedAt.toISOString(), input.quantityConsistent ?? null],
       );
       await client.query(
         `UPDATE inventory.inventory_publication_outbox
@@ -341,7 +343,9 @@ export class PostgresInventoryPublicationOutboxRepository {
                last_error_message = $3
            WHERE id = $1 AND state = 'drifted'`,
           [claim.outboxId, input.completedAt.toISOString(),
-            `Observed ${input.observedQuantity}; desired ${claim.desiredQuantity}`],
+            input.quantityConsistent === false
+              ? "The provider inventory surfaces disagree; a canonical correction must be read back consistently."
+              : `Observed ${input.observedQuantity}; desired ${claim.desiredQuantity}`],
         );
         return "drifted";
       }

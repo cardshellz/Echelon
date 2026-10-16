@@ -29,11 +29,30 @@ describe("actual provider adapters through the canonical transport", () => {
   it("does not confirm eBay item 50 as listing 50 when its offer remains 38", async () => {
     const { client, getApiClient, transport } = ebayFixture();
     await expect(transport.readAbsolute(ebayRequest)).resolves.toMatchObject({
-      observedQuantity: 38, providerResponse: { providerResponse: { inventoryItemQuantity: 50, offerQuantity: 38, offerId: "offer-1" } },
+      observedQuantity: 38, quantityConsistent: false,
+      providerResponse: { providerResponse: { inventoryItemQuantity: 50, offerQuantity: 38, offerId: "offer-1" } },
     });
     expect(getApiClient).toHaveBeenCalledWith(2, 22, "seller-1");
     expect(client.getInventoryItem).toHaveBeenCalledExactlyOnceWith("SKU-101");
     expect(client.bulkUpdatePriceQuantity).not.toHaveBeenCalled();
+  });
+  it.each([[38, 50, false], [50, 38, false], [38, 38, true], [0, 0, true]])(
+    "preserves separate-field consistency for item %i / offer %i", async (itemQuantity, offerQuantity, consistent) => {
+      const { client, transport } = ebayFixture();
+      client.getInventoryItem.mockResolvedValue({ sku: "SKU-101", availability: { shipToLocationAvailability: { quantity: itemQuantity } } });
+      client.getInventoryOffersPage.mockResolvedValue({ total: 1, offers: [{ ...offer, availableQuantity: offerQuantity }] });
+      await expect(transport.readAbsolute(ebayRequest)).resolves.toMatchObject({
+        observedQuantity: Math.min(itemQuantity, offerQuantity), quantityConsistent: consistent,
+      });
+      expect(client.bulkUpdatePriceQuantity).not.toHaveBeenCalled();
+    },
+  );
+  it("rejects a malformed consistency flag instead of silently accepting it", async () => {
+    const { adapter, transport } = ebayFixture();
+    vi.spyOn(adapter, "readInventory").mockResolvedValue([{
+      variantId: 101, status: "success", observedQty: 38, quantityConsistent: "false" as never,
+    }]);
+    await expect(transport.readAbsolute(ebayRequest)).rejects.toMatchObject({ code: "PROVIDER_READBACK_INVALID" });
   });
   it("resolves the offer omitted by canonical transport and updates both limits, with no item replacement", async () => {
     const { client, transport } = ebayFixture();
