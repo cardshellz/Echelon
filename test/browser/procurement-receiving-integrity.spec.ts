@@ -169,3 +169,35 @@ test("an unsaved count must be resolved before changing the default", async ({ p
   expect(state.writes).toEqual([]);
   expect(failures).toEqual([]);
 });
+
+
+test("the receipt list offers discard only for drafts and preserves a concurrent-start rejection", async ({ page }) => {
+  const failures = await installFixtures(page);
+  const orders = [
+    { ...receipt(31), status: "draft", receivedTotalUnits: 0 },
+    { ...receipt(32), status: "open" },
+    { ...receipt(33), status: "closed" },
+  ];
+  const writes: string[] = [];
+  await page.route("**/api/**", async route => {
+    const request = route.request(), path = new URL(request.url()).pathname;
+    if (request.method() === "GET" && path === "/api/receiving") return route.fulfill({ json: orders });
+    if (request.method() === "DELETE") {
+      writes.push(path);
+      return route.fulfill({ status: 409, json: { error: "Cannot discard a started receipt", code: "RECEIVING_DISCARD_STARTED" } });
+    }
+    return route.fallback();
+  });
+  await page.goto("/receiving");
+  const discard = page.getByRole("button", { name: "Discard draft TEST-RECEIPT-31" }).filter({ visible: true });
+  await expect(discard).toHaveCount(1);
+  await expect(page.getByRole("button", { name: "Discard draft TEST-RECEIPT-32" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Discard draft TEST-RECEIPT-33" })).toHaveCount(0);
+  page.once("dialog", dialog => dialog.accept());
+  await discard.click();
+  await expect(page.getByText("Cannot discard a started receipt", { exact: true })).toBeVisible();
+  await expect(discard).toBeVisible();
+  await expect(page.getByText("Receipt discarded", { exact: true })).toHaveCount(0);
+  expect(writes).toEqual(["/api/receiving-orders/31/discard"]);
+  expect(failures).toEqual([]);
+});

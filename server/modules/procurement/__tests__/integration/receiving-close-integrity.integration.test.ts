@@ -267,6 +267,77 @@ run.sequential("Receipt integrity with the activated quantity ledger", () => {
     }
   });
 
+  it("rejects compatibility deletion of a counted open receipt without changing any evidence", async () => {
+    const before = await state();
+    await expect(service.deleteOrder(50, ACTOR)).rejects.toMatchObject({ statusCode: 409,
+      details: { code: "RECEIVING_DISCARD_STARTED" } });
+    expect(await state()).toEqual(before);
+  });
+
+  it("preserves damaged-only draft counts through both discard entry points", async () => {
+    await context.pool.query("UPDATE procurement.receiving_orders SET status='draft' WHERE id=50; UPDATE procurement.receiving_lines SET received_qty=0,damaged_qty=2 WHERE id=51");
+    const before = await state();
+    await expect(service.deleteOrder(50, ACTOR)).rejects.toMatchObject({ statusCode: 409,
+      details: { code: "RECEIVING_DISCARD_ACTIVITY_EXISTS" } });
+    await expect(service.discardDraftReceivingOrder(50, ACTOR)).rejects.toMatchObject({ statusCode: 409 });
+    expect(await state()).toEqual(before);
+  });
+
+  it("deletes an unused draft atomically and keeps the actor, time and before state", async () => {
+    await context.pool.query("UPDATE procurement.receiving_orders SET status='draft' WHERE id=50; UPDATE procurement.receiving_lines SET received_qty=0,damaged_qty=0 WHERE id=51");
+    await expect(service.deleteOrder(50, ACTOR)).resolves.toBe(true);
+    expect((await context.pool.query("SELECT id FROM procurement.receiving_orders WHERE id=50")).rows).toEqual([]);
+    expect((await context.pool.query("SELECT id FROM procurement.receiving_lines WHERE id=51")).rows).toEqual([]);
+    const audits = (await context.pool.query("SELECT timestamp,actor,target,changes FROM public.audit_events WHERE action='procurement.receiving.discard'")).rows;
+    expect(audits).toEqual([expect.objectContaining({ timestamp: NOW, actor: ACTOR, target: "receiving-order:50",
+      changes: { before: { order: expect.objectContaining({ id: 50, status: "draft" }), lines: [expect.objectContaining({ id: 51 })] }, after: null } })]);
+    await expect(service.deleteOrder(50, ACTOR)).rejects.toMatchObject({ statusCode: 404 });
+    expect((await context.pool.query("SELECT count(*)::int AS count FROM public.audit_events WHERE action='procurement.receiving.discard'")).rows[0].count).toBe(1);
+  });
+
+  it("keeps linked PO history at the same injected command time as the discard audit", async () => {
+    await context.pool.query("UPDATE procurement.receiving_orders SET status='draft',purchase_order_id=10 WHERE id=50; UPDATE procurement.receiving_lines SET received_qty=0,damaged_qty=0 WHERE id=51");
+    await service.discardDraftReceivingOrder(50, ACTOR);
+    const history = await drizzle(context.pool).select().from(schema.poStatusHistory);
+    expect(history).toEqual([expect.objectContaining({ purchaseOrderId: 10, changedBy: ACTOR, changedAt: NOW,
+      notes: "Unused draft receipt REVIEW-RECEIPT discarded" })]);
+  });
+
+  it("rolls back discard and its audit if linked PO history cannot be written", async () => {
+    await context.pool.query(`UPDATE procurement.receiving_orders SET status='draft',purchase_order_id=10 WHERE id=50;
+      UPDATE procurement.receiving_lines SET received_qty=0,damaged_qty=0 WHERE id=51;
+      CREATE FUNCTION procurement.reject_discard_history() RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN RAISE EXCEPTION 'discard history injected failure'; END $$;
+      CREATE TRIGGER reject_discard_history BEFORE INSERT ON procurement.po_status_history
+        FOR EACH ROW EXECUTE FUNCTION procurement.reject_discard_history()`);
+    const before = await state();
+    await expect(service.deleteOrder(50, ACTOR)).rejects.toThrow("discard history injected failure");
+    expect(await state()).toEqual(before);
+  });
+
+  it("rechecks activity committed by a writer while deletion waits for the receipt lock", async () => {
+    await context.pool.query("UPDATE procurement.receiving_orders SET status='draft' WHERE id=50; UPDATE procurement.receiving_lines SET received_qty=0,damaged_qty=0 WHERE id=51");
+    const holder = await context.pool.connect();
+    let pending: ReturnType<typeof observed> | undefined;
+    let open = false;
+    try {
+      await holder.query("BEGIN"); open = true;
+      const pid = (await holder.query("SELECT pg_backend_pid() AS pid")).rows[0].pid;
+      await holder.query("SELECT id FROM procurement.receiving_orders WHERE id=50 FOR UPDATE");
+      pending = observed(service.deleteOrder(50, ACTOR));
+      await waitForBlockedBy(pid, 1);
+      await holder.query("UPDATE procurement.receiving_orders SET status='open' WHERE id=50; UPDATE procurement.receiving_lines SET received_qty=2 WHERE id=51");
+      await holder.query("COMMIT"); open = false;
+      expect(await pending).toMatchObject({ ok: false, error: { statusCode: 409 } });
+      expect((await context.pool.query("SELECT received_qty FROM procurement.receiving_lines WHERE id=51")).rows).toEqual([{ received_qty: 2 }]);
+      expect((await context.pool.query("SELECT count(*)::int AS count FROM public.audit_events WHERE action='procurement.receiving.discard'")).rows[0].count).toBe(0);
+    } finally {
+      if (open) await holder.query("ROLLBACK");
+      holder.release();
+      await pending;
+    }
+  });
+
   it("posts a standalone receipt exactly once through actual ledger on close retry", async () => {
     await service.close(50, ACTOR);
     const after = await state();

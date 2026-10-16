@@ -199,7 +199,7 @@ databaseTests.sequential("shipment cost command PostgreSQL guarantees", () => {
 
   beforeEach(async () => {
     if (!ownsProcurement) throw new Error("Fixture schema ownership was not established");
-    await pool.query(`TRUNCATE procurement.receiving_orders, procurement.landed_cost_adjustments,
+    await pool.query(`TRUNCATE procurement.receiving_lines, procurement.receiving_orders, procurement.landed_cost_adjustments,
       procurement.landed_cost_snapshots, procurement.inbound_shipment_status_history,
       procurement.vendor_invoice_lines, procurement.inbound_freight_allocations,
       procurement.inbound_freight_costs, procurement.inbound_shipment_lines, procurement.vendor_invoices,
@@ -235,6 +235,137 @@ databaseTests.sequential("shipment cost command PostgreSQL guarantees", () => {
     } finally {
       await pool?.end();
       await defaultModulePool?.end();
+    }
+  });
+
+  async function prepareCancellableShipment() {
+    await pool.query("DELETE FROM procurement.vendor_invoices WHERE id=71");
+    await pool.query("UPDATE procurement.inbound_freight_costs SET actual_cents=NULL,cost_status='estimated' WHERE id=31");
+    await pool.query("UPDATE procurement.inbound_shipments SET status='delivered' WHERE id=1");
+  }
+
+  it("cancels an unreceived shipment with only estimated charges and records one transition", async () => {
+    await prepareCancellableShipment();
+    const before = await state();
+    const cancelling = createService(database, storage as Parameters<typeof createService>[1], undefined, () => NOW);
+    await expect(cancelling.cancel(1, actorId, "Supplier withdrew shipment")).resolves.toMatchObject({ status: "cancelled" });
+    const after = await state();
+    expect(after[0]).toEqual(before[0]);
+    expect(after[2]).toEqual(before[2]);
+    // Drizzle applies the application's UTC mapping for timestamp-without-zone
+    // columns; raw pg otherwise interprets them in the host's local timezone.
+    expect(await database.select().from(schema.inboundShipmentStatusHistory)).toMatchObject([
+      { fromStatus: "delivered", toStatus: "cancelled", changedBy: actorId,
+        changedAt: NOW, notes: "Cancelled: Supplier withdrew shipment" },
+    ]);
+  });
+
+  it.each(["draft", "receiving", "closed", "cancelled"])("protects retained %s receipt evidence before cancelling", async receiptStatus => {
+    await prepareCancellableShipment();
+    await pool.query("INSERT INTO procurement.receiving_orders(id,receipt_number,source_type,status,inbound_shipment_id) VALUES(60,'TEST-CANCEL-RECEIPT','shipment',$1,1)", [receiptStatus]);
+    const before = await state();
+    await expect(service.cancel(1, actorId, "Cancel" )).rejects.toMatchObject({ statusCode: 409,
+      details: { code: "SHIPMENT_CANCELLATION_HISTORY_PROTECTED", blockers: ["receivingHistory"] } });
+    expect(await state()).toEqual(before);
+    expect((await pool.query("SELECT status,inbound_shipment_id FROM procurement.receiving_orders WHERE id=60")).rows)
+      .toEqual([{ status: receiptStatus, inbound_shipment_id: 1 }]);
+  });
+
+  it("protects a receipt line even if its header shipment link is absent", async () => {
+    await prepareCancellableShipment();
+    await pool.query("INSERT INTO procurement.receiving_orders(id,receipt_number,source_type,status) VALUES(60,'TEST-CANCEL-LINE','shipment','closed')");
+    await pool.query("INSERT INTO procurement.receiving_lines(id,receiving_order_id,inbound_shipment_line_id,expected_qty,received_qty,reversed_qty) VALUES(61,60,11,5,5,5)");
+    await expect(service.cancel(1, actorId, "Fully reversed is still history" )).rejects.toMatchObject({ details: { blockers: ["receivingHistory"] } });
+    expect((await pool.query("SELECT status FROM procurement.inbound_shipments WHERE id=1")).rows).toEqual([{ status: "delivered" }]);
+  });
+
+  it.each([
+    ["zero actual", "UPDATE procurement.inbound_freight_costs SET actual_cents=0 WHERE id=31"],
+    ["paid marker", "UPDATE procurement.inbound_freight_costs SET paid_date='2026-10-01' WHERE id=31"],
+    ["unknown cost state", "UPDATE procurement.inbound_freight_costs SET cost_status=NULL WHERE id=31"],
+    ["finalized snapshot", "INSERT INTO procurement.landed_cost_snapshots(inbound_shipment_line_id,qty,total_landed_cost_cents) VALUES(11,5,0)"],
+    ["signed adjustment", "INSERT INTO procurement.landed_cost_adjustments(inbound_shipment_line_id,purchase_order_line_id,adjustment_amount_cents,reason) VALUES(11,21,-500,'Retained evidence')"],
+  ])("protects %s financial evidence", async (_name, seed) => {
+    await prepareCancellableShipment();
+    await pool.query(seed);
+    const before = await state();
+    await expect(service.cancel(1, actorId, "Cancel" )).rejects.toMatchObject({ statusCode: 409,
+      details: { code: "SHIPMENT_CANCELLATION_HISTORY_PROTECTED", blockers: ["finalizedCostHistory"] } });
+    expect(await state()).toEqual(before);
+  });
+
+  it.each(["header", "cost", "line"])("protects voided invoice history discoverable through the %s link", async association => {
+    await prepareCancellableShipment();
+    await pool.query("INSERT INTO procurement.vendor_invoices(id,invoice_number,vendor_id,status,inbound_shipment_id,invoiced_amount_cents,balance_cents) VALUES(71,'TEST-CANCEL-VOID',5,'voided',$1,0,0)", [association === "header" ? 1 : null]);
+    if (association === "cost") await pool.query("UPDATE procurement.inbound_freight_costs SET vendor_invoice_id=71 WHERE id=31");
+    if (association === "line") await pool.query("INSERT INTO procurement.vendor_invoice_lines(vendor_invoice_id,freight_cost_id,line_number,description,qty_invoiced,unit_cost_cents,line_total_cents) VALUES(71,31,1,'Retained cost invoice',1,0,0)");
+    const before = await state();
+    await expect(service.cancel(1, actorId, "Cancel" )).rejects.toMatchObject({ details: { blockers: ["invoiceHistory"] } });
+    expect(await state()).toEqual(before);
+  });
+
+  it("protects legacy invoice markers without an invoice FK", async () => {
+    await prepareCancellableShipment();
+    await pool.query("UPDATE procurement.inbound_freight_costs SET invoice_number='LEGACY-REFERENCE',invoice_date='2026-10-01',due_date='2026-10-15' WHERE id=31");
+    const before = await state();
+    await expect(service.cancel(1, actorId, "Cancel" )).rejects.toMatchObject({ details: { blockers: ["invoiceHistory"] } });
+    expect(await state()).toEqual(before);
+  });
+
+  it("protects a depleted zero-value lot even when its original receipt link is missing", async () => {
+    await prepareCancellableShipment();
+    await pool.query("INSERT INTO inventory.inventory_lots(id,lot_number,product_variant_id,warehouse_location_id,inbound_shipment_id,received_at,status,qty_on_hand) VALUES(801,'TEST-CANCEL-LOT',10,20,1,$1,'depleted',0)", [NOW]);
+    try {
+      const before = await state();
+      await expect(service.cancel(1, actorId, "Cancel" )).rejects.toMatchObject({ details: { blockers: ["inventoryHistory"] } });
+      expect(await state()).toEqual(before);
+      expect((await pool.query("SELECT inbound_shipment_id FROM inventory.inventory_lots WHERE id=801")).rows).toEqual([{ inbound_shipment_id: 1 }]);
+    } finally { await pool.query("DELETE FROM inventory.inventory_lots WHERE id=801"); }
+  });
+
+  it("rolls back a cancellation when its history insert is rejected", async () => {
+    await prepareCancellableShipment();
+    const before = await state();
+    await pool.query("ALTER TABLE procurement.inbound_shipment_status_history ADD CONSTRAINT reject_cancellation_history CHECK(to_status <> 'cancelled')");
+    try {
+      await expect(service.cancel(1, actorId, "Cancel" )).rejects.toThrow();
+      expect(await state()).toEqual(before);
+    } finally { await pool.query("ALTER TABLE procurement.inbound_shipment_status_history DROP CONSTRAINT reject_cancellation_history"); }
+  });
+
+  it.each(["receipt", "invoice"])("rechecks %s evidence committed while cancellation waits on the graph", async association => {
+    await prepareCancellableShipment();
+    const holder = await pool.connect();
+    let open = false;
+    let cancellation: Promise<unknown> | undefined;
+    try {
+      await holder.query("BEGIN"); open = true;
+      // Canonical receipt preparation/posting and AP invoice creation acquire
+      // this graph lock before their shipment/source writes.
+      await holder.query("SELECT pg_advisory_xact_lock(hashtext('inventory.cost_graph'),hashtext('version_1'))");
+      await holder.query("SELECT id FROM procurement.inbound_shipments WHERE id=1 FOR UPDATE");
+      if (association === "receipt") await holder.query("INSERT INTO procurement.receiving_orders(id,receipt_number,source_type,status,inbound_shipment_id) VALUES(60,'TEST-CANCEL-RACE','shipment','closed',1)");
+      else await holder.query("INSERT INTO procurement.vendor_invoices(id,invoice_number,vendor_id,inbound_shipment_id,invoiced_amount_cents,balance_cents) VALUES(71,'TEST-CANCEL-RACE',5,1,500,500)");
+      let reportPid!: (pid: number) => void;
+      const ready = new Promise<number>(resolveReady => { reportPid = resolveReady; });
+      const cancellationDatabase = { transaction: (work: (tx: unknown) => Promise<unknown>) => database.transaction(async tx => {
+        await tx.execute(sql`SET LOCAL statement_timeout = '8s'`);
+        reportPid(Number((await tx.execute(sql`SELECT pg_backend_pid() AS pid`)).rows[0].pid));
+        return work(tx);
+      }) };
+      cancellation = createService(cancellationDatabase, storage as Parameters<typeof createService>[1], undefined, () => NOW)
+        .cancel(1, actorId, "Concurrent cancellation")
+        .then(value => ({ ok: true, value }), (error: unknown) => ({ ok: false, error }));
+      await waitUntilBlocked(await ready);
+      await holder.query("COMMIT"); open = false;
+      expect(await cancellation).toMatchObject({ ok: false, error: { statusCode: 409,
+        details: { code: "SHIPMENT_CANCELLATION_HISTORY_PROTECTED", blockers: [association === "receipt" ? "receivingHistory" : "invoiceHistory"] } } });
+      expect((await pool.query("SELECT status FROM procurement.inbound_shipments WHERE id=1")).rows).toEqual([{ status: "delivered" }]);
+      expect((await pool.query("SELECT * FROM procurement.inbound_shipment_status_history WHERE inbound_shipment_id=1")).rows).toEqual([]);
+    } finally {
+      if (open) await holder.query("ROLLBACK");
+      holder.release();
+      await cancellation;
     }
   });
 

@@ -93,7 +93,7 @@ describe("ReceivingService.discardDraftReceivingOrder", () => {
       const service = new ReceivingService(db, {} as any, {} as any, storage);
 
       await expect(service.discardDraftReceivingOrder(1, "user-1")).rejects.toMatchObject({
-        message: "Cannot discard a started receipt",
+        message: status === "closed" || status === "cancelled" ? `Receiving order in '${status}' status is immutable` : "Cannot discard a started receipt",
         statusCode: 409,
       });
 
@@ -114,7 +114,7 @@ describe("ReceivingService.discardDraftReceivingOrder", () => {
       const service = new ReceivingService(db, {} as any, {} as any, storage);
 
       await expect(service.discardDraftReceivingOrder(2, "user-1")).rejects.toMatchObject({
-        message: "Receipt has received quantities; cannot discard",
+        message: "Receipt has received or damaged quantities or putaway activity; cannot discard",
         statusCode: 409,
       });
 
@@ -207,7 +207,7 @@ describe("ReceivingService.discardDraftReceivingOrder", () => {
             selectCallCount++;
             return { rows: selectRows };
           }
-          if (queryStr.includes("insert")) {
+          if (queryStr.includes("insert into procurement.po_status_history")) {
             insertCalls.push(queryStr);
           }
           return { rows: [] };
@@ -246,7 +246,7 @@ describe("ReceivingService.discardDraftReceivingOrder", () => {
           if (queryStr.includes("from procurement.receiving_orders") && queryStr.includes("for update")) {
             return { rows: [{ id: order.id }] };
           }
-          if (queryStr.includes("insert")) {
+          if (queryStr.includes("insert into procurement.po_status_history")) {
             insertCalls.push(queryStr);
           }
           return { rows: [] };
@@ -264,5 +264,44 @@ describe("ReceivingService.discardDraftReceivingOrder", () => {
       // No INSERT should have been made
       expect(insertCalls.length).toBe(0);
     });
+  });
+});
+
+
+describe("receipt deletion uses the guarded discard owner", () => {
+  it.each(["open", "receiving", "closed", "cancelled"])("preserves %s receipts via the compatibility entry point", async status => {
+    const tx = makeTx();
+    const service = new ReceivingService(makeDb(tx), {} as any, {} as any,
+      makeStorage({ id: 1, status }, [{ id: 2, receivedQty: 5 }]));
+    await expect(service.deleteOrder(1, "operator")).rejects.toMatchObject({ statusCode: 409 });
+    expect(tx.execute.mock.calls.map(([query]) => sqlToStr(query)).join(" ")).not.toContain("delete from");
+  });
+
+  it.each([
+    { receivedQty: 1 }, { damagedQty: 1 }, { putawayComplete: 1 },
+    { receivedQty: -1 }, { receivedQty: "bad" },
+  ])("preserves draft activity %j", async line => {
+    const tx = makeTx();
+    const service = new ReceivingService(makeDb(tx), {} as any, {} as any,
+      makeStorage({ id: 1, status: "draft" }, [line]));
+    await expect(service.deleteOrder(1, "operator")).rejects.toMatchObject({
+      statusCode: 409, details: { code: "RECEIVING_DISCARD_ACTIVITY_EXISTS" },
+    });
+    expect(tx.execute.mock.calls.map(([query]) => sqlToStr(query)).join(" ")).not.toContain("delete from");
+  });
+
+  it.each([0, -1, NaN, 1.5, Infinity])("rejects invalid ID %s before opening a transaction", async id => {
+    const db = makeDb(makeTx());
+    const service = new ReceivingService(db, {} as any, {} as any, makeStorage(null));
+    await expect(service.deleteOrder(id, "operator")).rejects.toMatchObject({ statusCode: 400 });
+    expect(db.transaction).not.toHaveBeenCalled();
+  });
+
+  it("keeps a durable discard audit for a blind draft", async () => {
+    const tx = makeTx();
+    const service = new ReceivingService(makeDb(tx), {} as any, {} as any,
+      makeStorage({ id: 1, status: "draft", purchaseOrderId: null }, []));
+    await expect(service.deleteOrder(1, "operator")).resolves.toBe(true);
+    expect(tx.execute.mock.calls.map(([query]) => sqlToStr(query)).join(" ")).toContain("insert into public.audit_events");
   });
 });

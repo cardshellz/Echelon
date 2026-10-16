@@ -40,6 +40,7 @@ let allPoLinks: any[] = [];
 let allInvoiceLines: any[] = [];
 let resolvedMatchExceptions: any[] = [];
 let lockedPo: any;
+let lockedLines: any[] = [];
 
 function buildMockDb() {
   const insertedRows: any[] = [];
@@ -57,7 +58,7 @@ function buildMockDb() {
         { id: line.invoiceId, invoiceNumber: line.invoiceNumber },
       ])).values()];
     }
-    if (table === purchaseOrderLines) return [];
+    if (table === purchaseOrderLines) return lockedLines;
     if (table === poExceptions) return resolvedMatchExceptions;
     return [];
   };
@@ -163,6 +164,7 @@ describe("PR 2 — 3-way match gate at PO close", () => {
     allInvoiceLines = [];
     resolvedMatchExceptions = [];
     lockedPo = poReceived;
+    lockedLines = [{ id: 100, lineType: "product", status: "received", orderQty: 10, receivedQty: 10, cancelledQty: 0 }];
     mockDetectMatchMismatch.mockClear();
     mockDetectMatchMismatch.mockResolvedValue(undefined);
     mockRecomputePurchaseOrderInvoiceMatches.mockReset();
@@ -208,6 +210,50 @@ describe("PR 2 — 3-way match gate at PO close", () => {
     expect(mockDb.lockCalls).toContainEqual({ table: purchaseOrders, mode: "update" });
     expect(storage.updatePurchaseOrderStatusWithHistory).not.toHaveBeenCalled();
     expect(mockDetectMatchMismatch).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { status: "partially_received", physicalStatus: "receiving" },
+    { status: "received", physicalStatus: "receiving" },
+  ])("blocks incomplete physical state before any invoice or cost write: %j", async (state) => {
+    lockedPo = { ...poReceived, ...state };
+    storage.getPurchaseOrderById.mockResolvedValue(lockedPo);
+    const reconcileApprovedInvoiceCost = vi.fn();
+    svc = createPurchasingService(mockDb, storage, { reconcileApprovedInvoiceCost });
+    await expect(svc.close(1, "user-1")).rejects.toMatchObject({ statusCode: 409, details: { code: "PO_CLOSE_RECEIPT_INCOMPLETE" } });
+    expect(mockRecomputePurchaseOrderInvoiceMatches).not.toHaveBeenCalled();
+    expect(reconcileApprovedInvoiceCost).not.toHaveBeenCalled();
+    expect(mockDb.updateCalls).toEqual([]);
+    expect(mockDb.insertedRows).toEqual([]);
+  });
+
+  it("checks locked quantities rather than trusting a received header", async () => {
+    storage.getPurchaseOrderById.mockResolvedValue(poReceived);
+    lockedLines[0].receivedQty = 6;
+    await expect(svc.close(1, "user-1")).rejects.toMatchObject({ statusCode: 409, details: { code: "PO_CLOSE_RECEIPT_INCOMPLETE", lineIds: [100] } });
+    expect(mockDb.lockCalls).toContainEqual({ table: purchaseOrderLines, mode: "update" });
+    expect(mockRecomputePurchaseOrderInvoiceMatches).not.toHaveBeenCalled();
+    expect(mockDb.updateCalls).toEqual([]);
+    expect(mockDb.insertedRows).toEqual([]);
+  });
+
+  it("uses one injected timestamp for match, close, history and event", async () => {
+    const at = new Date("2026-10-16T12:00:00Z");
+    const clock = vi.fn(() => at);
+    storage.getPurchaseOrderById.mockResolvedValue(poReceived);
+    svc = createPurchasingService(mockDb, storage, { now: clock });
+    await svc.close(1, "user-1");
+    expect(clock).toHaveBeenCalledTimes(1);
+    expect(mockRecomputePurchaseOrderInvoiceMatches).toHaveBeenCalledWith(1, expect.anything(), "user-1", at);
+    expect(mockDb.updateCalls).toContainEqual({ table: purchaseOrders, patch: expect.objectContaining({ closedAt: at, updatedAt: at }) });
+    expect(mockDb.insertedRows).toContainEqual(expect.objectContaining({ toStatus: "closed", changedAt: at }));
+    expect(mockDb.insertedRows).toContainEqual(expect.objectContaining({ eventType: "closed", createdAt: at }));
+  });
+
+  it.each(["", "  \n", null, 7, {}])("rejects invalid close-short reason before reading or writing: %j", async (reason) => {
+    await expect(svc.closeShort(1, reason as string, "user-1")).rejects.toMatchObject({ statusCode: 400, details: { code: "PO_CLOSE_SHORT_REASON_REQUIRED" } });
+    expect(storage.getPurchaseOrderById).not.toHaveBeenCalled();
+    expect(mockDb.transaction).not.toHaveBeenCalled();
   });
 
   it("closes cleanly when linked invoices have all lines 'matched'", async () => {

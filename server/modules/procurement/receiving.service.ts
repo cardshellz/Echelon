@@ -631,7 +631,7 @@ export class ReceivingService {
    *
    * Business rules (Rule #7 — single transaction):
    *   1. Order must be in 'draft' status — 409 otherwise.
-   *   2. No receiving line may have receivedQty > 0 — 409 otherwise.
+   *   2. No counts, putaway activity, or custody history — 409 otherwise.
    *   3. Delete lines + order atomically.
    *   4. If linked to a PO, append an audit row to po_status_history
    *      (Rule #8 — who/what/when, fromStatus = toStatus = current physical
@@ -642,22 +642,42 @@ export class ReceivingService {
     receivingOrderId: number,
     userId?: string,
   ): Promise<void> {
-    // Lock, validate, delete, and audit as one transaction so a concurrent
-    // open or line receipt cannot pass the checks and then be deleted.
+    if (!Number.isSafeInteger(receivingOrderId) || receivingOrderId <= 0) {
+      throw new ReceivingError("A positive receiving order ID is required", 400, {
+        code: "RECEIVING_ORDER_ID_INVALID",
+      });
+    }
+    // Both deletion endpoints use this owner. The header lock is also taken by
+    // open/count/close commands, so validation and deletion cannot race them.
     await this.db.transaction(async (tx) => {
       const order = await this.lockReceivingOrder(tx, receivingOrderId);
+      this.assertReceivingOrderMutable(order);
       if (order.status !== "draft") {
-        throw new ReceivingError("Cannot discard a started receipt", 409);
+        throw new ReceivingError("Cannot discard a started receipt", 409, {
+          code: "RECEIVING_DISCARD_STARTED", receivingOrderId, status: order.status,
+        });
       }
       await assertNoReceivingCustodyHistory(tx, { receivingOrderId });
 
       const lines = await this.storage.getReceivingLines(receivingOrderId, tx);
-      if (lines.some((line: any) => (Number(line.receivedQty) || 0) > 0)) {
+      // Null is the pre-count value on legacy rows. Any nonzero or malformed
+      // count must remain reviewable rather than disappearing with the draft.
+      const hasCount = (value: unknown): boolean => value != null && value !== 0;
+      if (lines.some((line: { receivedQty: unknown; damagedQty: unknown; putawayComplete: unknown }) =>
+        hasCount(line.receivedQty) || hasCount(line.damagedQty) || hasCount(line.putawayComplete))) {
         throw new ReceivingError(
-          "Receipt has received quantities; cannot discard",
+          "Receipt has received or damaged quantities or putaway activity; cannot discard",
           409,
+          { code: "RECEIVING_DISCARD_ACTIVITY_EXISTS", receivingOrderId },
         );
       }
+      const discardedAt = this.clock();
+      await tx.execute(sql`
+        INSERT INTO public.audit_events (timestamp, level, actor, action, target, changes, context)
+        VALUES (${discardedAt}, 'AUDIT', ${userId ?? null}, 'procurement.receiving.discard', ${`receiving-order:${receivingOrderId}`},
+          ${JSON.stringify({ before: { order, lines }, after: null })}::jsonb,
+          ${JSON.stringify({ receivingOrderId, purchaseOrderId: order.purchaseOrderId ?? null })}::jsonb)
+      `);
 
       // Explicit line deletion before order (defense-in-depth; the DB
       // schema also has ON DELETE CASCADE but we make the intent clear).
@@ -686,15 +706,18 @@ export class ReceivingService {
             (po as any).physical_status ?? (po as any).status ?? "draft";
           const receiptNumber: string =
             (order as any).receiptNumber ?? `RCV-${receivingOrderId}`;
+          // Match Drizzle's UTC timestamp-without-zone mapping; binding a raw
+          // Date through pg would otherwise use the host's local wall clock.
           await tx.execute(sql`
             INSERT INTO procurement.po_status_history
-              (purchase_order_id, from_status, to_status, changed_by, notes)
+              (purchase_order_id, from_status, to_status, changed_by, changed_at, notes)
             VALUES (
               ${poId},
               ${physicalStatus},
               ${physicalStatus},
               ${userId ?? null},
-              ${`Receipt ${receiptNumber} discarded before save`}
+              ${discardedAt.toISOString()}::timestamp,
+              ${`Unused draft receipt ${receiptNumber} discarded`}
             )
           `);
         }
@@ -1327,13 +1350,11 @@ export class ReceivingService {
     });
   }
 
-  async deleteOrder(orderId: number): Promise<boolean> {
-    return await this.db.transaction(async (tx) => {
-      const order = await this.lockReceivingOrder(tx, orderId);
-      this.assertReceivingOrderMutable(order);
-      await assertNoReceivingCustodyHistory(tx, { receivingOrderId: orderId });
-      return await this.storage.deleteReceivingOrder(orderId, tx);
-    });
+  async deleteOrder(orderId: number, userId?: string): Promise<boolean> {
+    // Compatibility entry point: list deletion has the same draft-only rules
+    // and durable audit as the detail screen's discard command.
+    await this.discardDraftReceivingOrder(orderId, userId);
+    return true;
   }
 
   private normalizeLineMutation(
