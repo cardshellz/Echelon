@@ -92,3 +92,73 @@ test("viewers can read costs but cannot start the approval-controlled update", a
   expect(state.keys).toEqual([]);
   expect(failures).toEqual([]);
 });
+
+
+const cancellationReviewMessage = "This shipment has receiving, inventory or recorded financial history. Review its receipts, invoices and Cost review before correcting it; cancellation would disconnect that evidence.";
+const cancellationUnavailableMessage = "Shipment cancellation could not be verified. Reload the shipment before trying again.";
+
+async function cancellableShipment(page: Page, outcome: "protected" | "unavailable" | "cancelled") {
+  const failures = await installFixtures(page);
+  const state = { status: "delivered", reasons: [] as string[] };
+  await page.route("**/api/inbound-shipments/42", route => route.fulfill({ json: {
+    id: 42, shipmentNumber: "TEST-CANCEL-42", status: state.status, mode: "ground",
+    purchaseOrders: [], lines: [], costs: [], statusHistory: [],
+  } }));
+  await page.route("**/api/inbound-shipments/42/allocation-status", route => route.fulfill({ json: {
+    shipmentId: 42, status: "no_costs", issues: [], costs: [], lineCount: 0,
+    blockerCount: 0, warningCount: 0, allocatableCostCount: 0, effectiveCostCents: 0, unallocatedCents: 0,
+  } }));
+  await page.route("**/api/inbound-shipments/42/cancel", route => {
+    const body: unknown = route.request().postDataJSON();
+    expect(body).toEqual({ reason: "Supplier withdrew the shipment" });
+    state.reasons.push("Supplier withdrew the shipment");
+    if (outcome === "protected") return route.fulfill({ status: 409, json: {
+      code: "SHIPMENT_CANCELLATION_HISTORY_PROTECTED", error: cancellationReviewMessage,
+      details: { shipmentId: 42, blockers: ["receivingHistory"] },
+    } });
+    if (outcome === "unavailable") return route.fulfill({ status: 503, json: {
+      code: "SHIPMENT_CANCELLATION_UNAVAILABLE", error: cancellationUnavailableMessage,
+    } });
+    state.status = "cancelled";
+    return route.fulfill({ json: { id: 42, status: "cancelled" } });
+  });
+  await page.goto("/shipments/42?tab=lines");
+  await expect(page.getByText("Delivered", { exact: true }).first()).toBeVisible();
+  await page.getByRole("button", { name: "Cancel", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "Cancel Shipment" });
+  await dialog.getByPlaceholder("Why is this shipment being cancelled?").fill("Supplier withdrew the shipment");
+  return { failures, state, dialog };
+}
+
+for (const outcome of ["protected", "unavailable"] as const) {
+  test(`shipment cancellation ${outcome} keeps the reason and explains the unresolved action`, async ({ page }) => {
+    const { failures, state, dialog } = await cancellableShipment(page, outcome);
+    await dialog.getByRole("button", { name: "Confirm Cancel", exact: true }).click();
+    await expect(dialog.getByRole("alert")).toHaveText(outcome === "protected" ? cancellationReviewMessage : cancellationUnavailableMessage);
+    await expect(dialog.getByRole("alert")).not.toContainText("SHIPMENT_CANCELLATION_");
+    await expect(dialog).toBeVisible();
+    await expect(dialog.getByPlaceholder("Why is this shipment being cancelled?")).toHaveValue("Supplier withdrew the shipment");
+    await expect(page.getByText("Shipment cancelled", { exact: true })).toHaveCount(0);
+    expect(state.status).toBe("delivered");
+    expect(state.reasons).toEqual(["Supplier withdrew the shipment"]);
+    await page.reload();
+    await expect(page.getByText("Delivered", { exact: true }).first()).toBeVisible();
+    await expect(page.getByRole("button", { name: "Cancel", exact: true })).toBeVisible();
+    await expect(page.getByText("Cancelled", { exact: true })).toHaveCount(0);
+    expect(failures).toEqual([]);
+  });
+}
+
+test("an unreceived shipment cancels once and the saved terminal state survives reload", async ({ page }) => {
+  const { failures, state, dialog } = await cancellableShipment(page, "cancelled");
+  await dialog.getByRole("button", { name: "Confirm Cancel", exact: true }).click();
+  await expect(dialog).not.toBeVisible();
+  await expect(page.getByText("Shipment cancelled", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Cancel", exact: true })).toHaveCount(0);
+  expect(state.reasons).toEqual(["Supplier withdrew the shipment"]);
+  await page.reload();
+  await expect(page.getByText("Cancelled", { exact: true }).first()).toBeVisible();
+  await expect(page.getByRole("button", { name: "Cancel", exact: true })).toHaveCount(0);
+  expect(state.status).toBe("cancelled");
+  expect(failures).toEqual([]);
+});

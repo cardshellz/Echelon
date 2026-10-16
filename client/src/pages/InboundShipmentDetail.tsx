@@ -26,6 +26,7 @@ import { Separator } from "@/components/ui/separator";
 import { Checkbox } from "@/components/ui/checkbox";
 import { useToast } from "@/hooks/use-toast";
 import { apiRequest } from "@/lib/queryClient";
+import { financialCommandFetchJson, FinancialCommandRequestError } from "@/lib/financial-command";
 import { useAuth } from "@/lib/auth";
 import { createShipmentCostRecoveryStore, type ShipmentCostCreateRecovery } from "@/lib/shipment-cost-create-recovery";
 import {
@@ -363,6 +364,12 @@ export default function InboundShipmentDetail() {
   const [showAddCostDialog, setShowAddCostDialog] = useState(false);
   const [showEditCostDialog, setShowEditCostDialog] = useState(false);
   const [cancelReason, setCancelReason] = useState("");
+  const [cancelError, setCancelError] = useState<string | null>(null);
+  useEffect(() => {
+    setShowCancelDialog(false);
+    setCancelReason("");
+    setCancelError(null);
+  }, [shipmentId]);
   const [shipmentReceiptPackResolution, setShipmentReceiptPackResolution] = useState<ShipmentReceiptPackResolution | null>(null);
   const [pendingShipmentReceipt, setPendingShipmentReceipt] = useState<{ shipmentId: number; purchaseOrderId: number } | null>(null);
   const [checkingShipmentReceiptPacks, setCheckingShipmentReceiptPacks] = useState(false);
@@ -769,20 +776,42 @@ export default function InboundShipmentDetail() {
   const closeMutation = createTransitionMutation("close");
 
   const cancelMutation = useMutation({
+    retry: false,
+    onMutate: () => { setCancelError(null); return captureNavigation(); },
     mutationFn: async (reason: string) => {
-      const res = await apiRequest("POST", `/api/inbound-shipments/${shipmentId}/cancel`, { reason });
-      return res.json();
+      const originatingShipmentId = shipmentId;
+      const result = await financialCommandFetchJson<unknown>(`/api/inbound-shipments/${originatingShipmentId}/cancel`, {
+        method: "POST", credentials: "include", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ reason }),
+      });
+      if (!result || typeof result !== "object" || !("id" in result) || result.id !== originatingShipmentId
+        || !("status" in result) || result.status !== "cancelled") {
+        throw new Error("Shipment cancellation response could not be verified.");
+      }
+      return { shipmentId: originatingShipmentId };
     },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: [`/api/inbound-shipments/${shipmentId}`] });
+    onSuccess: (result, _reason, context) => {
+      queryClient.invalidateQueries({ queryKey: [`/api/inbound-shipments/${result.shipmentId}`] });
       queryClient.invalidateQueries({ queryKey: ["/api/inbound-shipments"] });
       invalidatePoViews();
+      if (!context?.isCurrent()) return;
       setShowCancelDialog(false);
       setCancelReason("");
+      setCancelError(null);
       toast({ title: "Cancelled", description: "Shipment cancelled" });
     },
-    onError: (err: Error) => {
-      toast({ title: "Error", description: err.message, variant: "destructive" });
+    onError: (error: unknown, _reason, context) => {
+      if (!context?.isCurrent()) return;
+      const fallback = "We could not confirm shipment cancellation. Reload the shipment before trying again.";
+      // Cancellation has no durable intent key. Never display a transport
+      // helper's promise of replay; preserve the reason and require a readback.
+      if (error instanceof FinancialCommandRequestError) {
+        if (["SHIPMENT_CANCELLATION_HISTORY_PROTECTED", "SHIPMENT_CANCELLATION_INPUT_INVALID", "SHIPMENT_CANCELLATION_UNAVAILABLE"].includes(error.code ?? "")) {
+          setCancelError(error.message);
+        } else if (error.status === 401) setCancelError("Your session expired. Sign in again before cancelling the shipment.");
+        else if (error.status === 403) setCancelError("Purchasing edit permission is required to cancel this shipment.");
+        else setCancelError(fallback);
+      } else setCancelError(fallback);
     },
   });
 
@@ -1273,7 +1302,7 @@ export default function InboundShipmentDetail() {
           {isPreClosed && (
             <Button
               variant="outline"
-              onClick={() => setShowCancelDialog(true)}
+              onClick={() => { setCancelError(null); setShowCancelDialog(true); }}
               className="flex-1 sm:flex-none min-h-[44px] text-red-600 hover:text-red-700"
             >
               <Ban className="h-4 w-4 mr-2" />
@@ -2334,6 +2363,7 @@ export default function InboundShipmentDetail() {
                 rows={3}
               />
             </div>
+            {cancelError && <div role="alert" className="rounded-md border border-destructive/40 p-3 text-sm text-destructive">{cancelError}</div>}
             <div className="flex gap-2 justify-end">
               <Button variant="outline" onClick={() => setShowCancelDialog(false)}>Back</Button>
               <Button

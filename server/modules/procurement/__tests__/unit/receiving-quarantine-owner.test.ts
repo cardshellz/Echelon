@@ -284,7 +284,7 @@ describe("ordinary receiving cannot bypass custody", () => {
   });
   it.each(["line", "order", "discard", "complete_all", "warehouse"])("protects custody during %s actions", async action => {
     const test = harness(); guards.history.mockRejectedValue(custodyConflict());
-    if (action === "discard") test.orders[0].status = "draft";
+    if (action === "discard" || action === "order") test.orders[0].status = "draft";
     const operation = action === "line" ? test.service.deleteLine(11)
       : action === "order" ? test.service.deleteOrder(10)
       : action === "discard" ? test.service.discardDraftReceivingOrder(10, ACTOR)

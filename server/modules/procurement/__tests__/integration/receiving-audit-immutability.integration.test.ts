@@ -7,7 +7,12 @@ import { fixtureTable } from "./shipment-line-fixture";
 
 const databaseUrl = process.env.ECHELON_TEST_DATABASE_URL;
 const run = databaseUrl && process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true" ? describe : describe.skip;
-const protectedActions = ["procurement.receiving.source_resolved", "procurement.receiving.default_location_applied"];
+const discardAction = "procurement.receiving.discard";
+const protectedActions = ["procurement.receiving.source_resolved", "procurement.receiving.default_location_applied", discardAction];
+const discardAuditMigration = readFileSync(
+  resolve(process.cwd(), "scripts/migrations/pending/receiving_discard_audit_guard.sql"),
+  "utf8",
+);
 
 run.sequential("Receiving integrity audit migration", () => {
   let pool: pg.Pool | undefined;
@@ -29,7 +34,11 @@ run.sequential("Receiving integrity audit migration", () => {
     await client.query(readFileSync(resolve(process.cwd(), "migrations/900000001000017770001_receiving_integrity_audit_guard.sql"), "utf8"));
   });
 
-  beforeEach(async () => { await client!.query("BEGIN"); });
+  beforeEach(async () => {
+    await client!.query("BEGIN");
+    await client!.query("SAVEPOINT original_audit_guard");
+    await client!.query(discardAuditMigration);
+  });
   afterEach(async () => { await client?.query("ROLLBACK"); });
   afterAll(async () => {
     if (client && ownsTable) {
@@ -68,6 +77,27 @@ run.sequential("Receiving integrity audit migration", () => {
       .toEqual([{ action: "unrelated.legacy" }]);
   });
 
+  it("protects discard evidence written before the upgrade without rewriting its snapshot", async () => {
+    // Return to the actual deployed function, then insert already-recorded
+    // discard evidence before applying the new forward-only migration.
+    await client!.query("ROLLBACK TO SAVEPOINT original_audit_guard");
+    const discarded = await client!.query(`INSERT INTO public.audit_events(timestamp,actor,action,target,changes,context)
+      VALUES('2026-10-15T12:00:00Z','discard-operator',$1,'receiving-order:50',
+        '{"before":{"order":{"id":50,"status":"draft"},"lines":[]},"after":null}',
+        '{"receivingOrderId":50,"purchaseOrderId":null}') RETURNING id`, [discardAction]);
+    const id = discarded.rows[0].id;
+    await insert(protectedActions[0]);
+    const before = (await client!.query("SELECT * FROM public.audit_events ORDER BY id")).rows;
+
+    await client!.query(discardAuditMigration);
+    expect((await client!.query("SELECT * FROM public.audit_events ORDER BY id")).rows).toEqual(before);
+    await rejectsMutation("UPDATE public.audit_events SET changes='{}' WHERE id=$1", [id]);
+    await rejectsMutation("UPDATE public.audit_events SET action='unrelated.legacy' WHERE id=$1", [id]);
+    await rejectsMutation("DELETE FROM public.audit_events WHERE id=$1", [id]);
+    await rejectsMutation("TRUNCATE public.audit_events");
+    expect((await client!.query("SELECT * FROM public.audit_events ORDER BY id")).rows).toEqual(before);
+  });
+
   it("leaves unrelated row maintenance available with protected evidence present", async () => {
     await insert(protectedActions[0]);
     const legacyId = await insert("unrelated.legacy");
@@ -76,9 +106,9 @@ run.sequential("Receiving integrity audit migration", () => {
     expect((await client!.query("SELECT action FROM public.audit_events")).rows).toEqual([{ action: protectedActions[0] }]);
   });
 
-  it("allows transaction rollback of a newly inserted decision", async () => {
+  it.each(protectedActions)("allows transaction rollback of a newly inserted %s decision", async (action) => {
     await client!.query("SAVEPOINT business_command");
-    await insert(protectedActions[0]);
+    await insert(action);
     await client!.query("ROLLBACK TO SAVEPOINT business_command");
     expect((await client!.query("SELECT count(*)::int AS count FROM public.audit_events")).rows).toEqual([{ count: 0 }]);
   });
