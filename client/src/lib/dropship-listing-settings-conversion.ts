@@ -8,6 +8,7 @@ import {
   type ConversionKept,
   type ConversionReport,
   type ConversionSizeView,
+  type ListingRulesConversionApplyResponse,
   type ListingRulesConversionCheck,
   type PricingRuleRef,
   type SizeRef,
@@ -15,12 +16,15 @@ import {
 import type { ListingSettingsCategoriesResponse, ListingSettingsSizePrice, ListingSettingsSummary } from "@shared/dropship/listing-settings";
 import {
   listingSettingsCategoriesQueryOptions,
+  listingSettingsConversionNoticeQueryOptions,
   listingSettingsConversionQueryOptions,
   listingSettingsSummaryQueryOptions,
 } from "./dropship-listing-settings";
-import type { ListingSettingsReadState } from "./dropship-listing-settings-access";
+import type { ListingSettingsReadState, ListingSettingsRight } from "./dropship-listing-settings-access";
 import { contentProfileQueryKey, ebayCategoryRulesQueryKey } from "./dropship-listing-settings-content-requests";
-import { LISTING_SETTINGS_SAVE_WORDS } from "./dropship-listing-settings-drafts";
+import type { ConversionNoticeModel } from "./dropship-listing-settings-conversion-notice";
+import { conversionDraftValue, isConversionDraft, type ConversionDraftValue } from "./dropship-listing-settings-conversion-requests";
+import { isDraftLocked, LISTING_SETTINGS_SAVE_WORDS, type ListingSettingsDraft } from "./dropship-listing-settings-drafts";
 import { DRAWER_WORDS, type DrawerSettingRowKey, type DrawerTarget } from "./dropship-listing-settings-drawer";
 import { builtFromWords, formatCents, recipeWords } from "./dropship-listing-settings-price-words";
 import { pricingRulesQueryKey } from "./dropship-listing-settings-recipe";
@@ -34,6 +38,7 @@ import {
   conversionBecomesUnlistableWords,
   conversionBuiltFromLineWords,
   conversionBuiltFromWithClassWords,
+  conversionChangesListedWords,
   conversionEbayCategoryAlsoCalledWords,
   conversionEbayCategoryLineWords,
   conversionFixLabel,
@@ -59,6 +64,7 @@ import {
   conversionWouldLosePriceWords,
   drawerStoreShelfValue,
   LISTING_SETTINGS_EDIT_WORDS,
+  rightReasonLine,
   type ConversionPriceSourceClass,
 } from "./dropship-listing-settings-words";
 import { DropshipApiError } from "./dropship-ops-surface";
@@ -83,7 +89,11 @@ import { DropshipApiError } from "./dropship-ops-surface";
  *   ids are keys only).
  * - The older-rules state is learned only from the summary's three counts,
  *   the same the writers refuse with (11.1; D16: no new summary key).
- * - Nothing can be moved here (11b): no apply, no notice, no job.
+ * - [Move them over] (11d) sends only page 0's two hashes, as shown, and only
+ *   when the vendor presses it (D1): the footer model says when it may, and
+ *   with which hashes (`footer.press`); the runner is
+ *   `dropship-listing-settings-conversion-requests.ts`. A confirmed outcome
+ *   stays on screen until the sheet closes (CUX#11).
  *
  * Pure: no React, no network, no clock. Never mutates its inputs.
  */
@@ -601,7 +611,13 @@ export type OlderRulesSheetEvent =
   /** A page answered with another plan than page 0's: back to page 0, which is read again, and the `changed` line. */
   | { type: "plan_changed" }
   /** The step re-read the summary and the profiles after page 0 found no older rules (11.5). */
-  | { type: "moved_reread" };
+  | { type: "moved_reread" }
+  /**
+   * A move was refused because its plan moved (8.3: 409 CHANGED, a 422 block, a key conflict): back to page 0 alone,
+   * which the runner reads again, so no further page of the old plan stays. The refusal's own words say why, so the
+   * `changed` line is left as it was.
+   */
+  | { type: "check_again" };
 
 /** The session of a sheet just opened: page 0 only, nothing seen yet. */
 export const OLDER_RULES_SHEET_OPENED: Readonly<OlderRulesSheetSession> = Object.freeze({ pageCount: 1, planChanged: false, movedReread: false });
@@ -612,6 +628,7 @@ export function olderRulesSheetSession(session: OlderRulesSheetSession, event: O
     case "load_more": return { ...session, pageCount: Math.min(session.pageCount + 1, MAX_CONVERSION_PAGE + 1) };
     case "plan_changed": return { ...session, pageCount: 1, planChanged: true };
     case "moved_reread": return { ...session, movedReread: true };
+    case "check_again": return { ...session, pageCount: 1 };
   }
 }
 
@@ -624,17 +641,33 @@ export function olderRulesSheetPages(session: Pick<OlderRulesSheetSession, "page
 /**
  * The query keys the step invalidates once per opening when page 0 finds the
  * store has no older rules any more (11.5, D25): the summary and the
- * categories (the line and the card re-decide) and the three profiles the
- * move empties (pricing rules, eBay category rules, description profile).
- * Never the conversion key, so it cannot loop. 11e1 adds the notice's key.
+ * categories (the line and the card re-decide), the one-time notice (11e1:
+ * the sheet then says what the job moved, with [Got it]) and the three
+ * profiles the move empties (pricing rules, eBay category rules, description
+ * profile). Never the conversion key, so it cannot loop.
  */
 export function olderRulesGoneRereadKeys(storeConnectionId: number): ReadonlyArray<readonly unknown[]> {
   return [
     listingSettingsSummaryQueryOptions(storeConnectionId).queryKey,
     listingSettingsCategoriesQueryOptions(storeConnectionId).queryKey,
+    listingSettingsConversionNoticeQueryOptions(storeConnectionId).queryKey,
     pricingRulesQueryKey(storeConnectionId),
     ebayCategoryRulesQueryKey(storeConnectionId),
     contentProfileQueryKey(storeConnectionId),
+  ];
+}
+
+/**
+ * The query keys the step's conflict hook invalidates, once per attempt, when
+ * its one draft is answered "this changed in another window" (8.2, D25): the
+ * change may be a move of the older group rules made elsewhere, so the
+ * summary (the line and the card re-decide) and the one-time notice (11e1:
+ * it says what the job moved) are read again. Exact keys only.
+ */
+export function conflictRereadKeys(storeConnectionId: number): ReadonlyArray<readonly unknown[]> {
+  return [
+    listingSettingsSummaryQueryOptions(storeConnectionId).queryKey,
+    listingSettingsConversionNoticeQueryOptions(storeConnectionId).queryKey,
   ];
 }
 
@@ -644,16 +677,58 @@ export function olderRulesGoneRereadKeys(storeConnectionId: number): ReadonlyArr
 
 /**
  * A confirmed outcome the sheet keeps on screen until it closes, whatever a
- * re-read answers (11.2, CUX#11). Nothing can be moved in 11b, so none
- * exists yet: 11d defines `converted`, `replayed` and `nothing_to_convert`.
+ * re-read answers (11.2, CUX#11): `moved` after `converted` or this key's
+ * `replayed`, `already_moved` after `nothing_to_convert` (8.3). The sheet's
+ * body holds it; it mounts per opening, so closing drops it.
  */
-export type OlderRulesSheetOutcome = never;
+export interface OlderRulesSheetOutcome {
+  kind: "moved" | "already_moved";
+  /** The move's re-reads failed, or its answer broke its contract: the view may be out of date ([Reload]). */
+  viewStale: boolean;
+}
+
+/**
+ * The outcome of an applied move (8.3): `nothing_to_convert` is "already
+ * moved"; `converted`, `replayed` and an answer off the contract (a 2xx all
+ * the same) are "moved". Either way the store holds no older group rules now.
+ */
+export function conversionOutcomeOf(answer: Pick<ListingRulesConversionApplyResponse, "outcome"> | null, viewStale: boolean): OlderRulesSheetOutcome {
+  return { kind: answer?.outcome === "nothing_to_convert" ? "already_moved" : "moved", viewStale };
+}
+
+/** What the footer reads besides the pages (8.3): the step's draft, W11's right, the page's other actions and page 0's read. */
+export interface OlderRulesApplyFacts {
+  /** The step's one draft; only a move's (`convert`) counts here, any other locks nothing but through `busy`. */
+  draft: ListingSettingsDraft | null;
+  /** W11's right (`rights.conversion`, PLAN10 D3): a paused account, .ops or store takes it away, with its line. */
+  right: ListingSettingsRight;
+  /** Another save on the page is in flight (the pending-save counter), or this sheet's own move is. */
+  busy: boolean;
+  /** Page 0 is being read (again): a press now would send hashes about to be replaced, so the button waits (8.3, D1). */
+  checking: boolean;
+  /** Why the last press didn't start (another listing action runs); null otherwise. Not the one-time notice (`OlderRulesSheetInput.notice`). */
+  notStartedLine: string | null;
+}
+
+/**
+ * The one-time notice as the sheet holds it (11e1, plan 9.2, D19, D25): the
+ * store's unseen system conversion (`conversionNoticeModel`, no summary gate:
+ * the sheet shows it only where it already knows the store holds no older
+ * rules), and whether its [Got it] is out.
+ */
+export interface OlderRulesSheetNotice {
+  model: ConversionNoticeModel;
+  sending: boolean;
+}
 
 export interface OlderRulesSheetInput {
   /** The reads of `olderRulesSheetPages(session)`, in page order, as React Query holds them. */
   pages: readonly ListingSettingsReadState<ListingRulesConversionCheck>[];
   session: OlderRulesSheetSession;
   outcome: OlderRulesSheetOutcome | null;
+  apply: OlderRulesApplyFacts;
+  /** An unseen system notice (11e1); null or absent when there is none. Shown only in `none` and after `nothing_to_convert`. */
+  notice?: OlderRulesSheetNotice | null;
 }
 
 export type OlderRulesSheetProblem =
@@ -698,6 +773,31 @@ export interface OlderRulesSheetContent {
   kept: string | null;
 }
 
+/** One line of the footer, top to bottom: what the last answer said, then what the page says of the move. */
+export interface OlderRulesFooterLine {
+  text: string;
+  /** `ok` a confirmed move, `alert` a failure or what stops the move, `info` the rest. */
+  tone: "ok" | "info" | "alert";
+}
+
+/** The footer (8.3): its lines, [Move them over], [Check again], [Reload], [Got it] and [Close]. */
+export interface OlderRulesSheetFooter {
+  lines: OlderRulesFooterLine[];
+  /** [Move them over]: on a report with no confirmed outcome and no unconfirmed move; off while anything in 8.3 stops it. */
+  move: { label: string; shown: boolean; disabled: boolean };
+  /** The notice's [Got it] (11e1): with the notice's words, when the sheet finds the store already moved by the job (D19). */
+  gotIt: { label: string; ariaLabel: string; shown: boolean; disabled: boolean };
+  /** [Check again]: resends the unconfirmed move, the same key and the same hashes (PLAN10 D7b). */
+  checkAgain: { label: string; shown: boolean; disabled: boolean };
+  /** [Reload]: a confirmed move whose views couldn't be read again (PLAN10 3.7). */
+  reload: { label: string; shown: boolean };
+  closeLabel: string;
+  /** Esc keeps the sheet open: a move is out or unconfirmed (PLAN10 3.4). */
+  escapeKeepsOpen: boolean;
+  /** The hashes a press sends: page 0's, as shown, exactly when [Move them over] is on; null otherwise (D1). */
+  press: ConversionDraftValue | null;
+}
+
 export interface OlderRulesSheetState {
   title: string;
   /** What the body shows: page 0 loading, a problem, the store has no older rules any more, or the report. */
@@ -706,7 +806,11 @@ export interface OlderRulesSheetState {
   problem: OlderRulesSheetProblem | null;
   /** The check refused the selection as too large, on page 0 or a later page: the step closes the sheet (the banner says why, D18; 5.3). */
   close: boolean;
-  /** "Your store has no older group rules any more."; null otherwise. */
+  /**
+   * "Your store has no older group rules any more.", or, when the job moved
+   * them and no one saw its notice yet, the notice's words (11.5, D19), with
+   * [Got it] in the footer; null otherwise.
+   */
   noneLine: string | null;
   /**
    * Page 0 found no older rules and no confirmed outcome is shown: the step
@@ -723,8 +827,7 @@ export interface OlderRulesSheetState {
   /** "Something changed since you opened this. Check the list again." from a reset until the sheet closes; null otherwise. */
   changedLine: string | null;
   content: OlderRulesSheetContent | null;
-  /** The read-only footer (11b): "This is a preview. Nothing is moved yet." [Close]. */
-  footer: { text: string; closeLabel: string };
+  footer: OlderRulesSheetFooter;
 }
 
 function isTooLargeError(error: unknown): boolean {
@@ -781,75 +884,215 @@ function planRows(pages: readonly PageState[]): ConversionRowModel[] {
 }
 
 /**
- * The sheet from its page reads and its session (5.3, 11.2, 11.5): page 0
- * decides the state (loading, a problem, `none`, or the report); a further
- * page joins the rows only while its plan hash is page 0's. A page of
- * another plan asks for a reset (`resetPages`) and shows only page 0's rows
- * meanwhile; the `changed` line then stays until the sheet closes. A page
- * refused as too large, page 0 or a later one, closes the sheet. Read-only:
- * the footer is the preview's.
+ * The fatal codes after which [Move them over] stays off until the sheet
+ * closes (8.3; PLAN10 D7c): "Reload to see what's saved", no [Try again] loop.
+ */
+const FINAL_CONVERSION_CODES: ReadonlySet<string> = new Set([
+  "DROPSHIP_LISTING_SETTINGS_INVARIANT_FAILED", "DROPSHIP_LISTING_SETTINGS_REPLAY_INCOMPLETE", "DROPSHIP_LISTING_PRICE_INVARIANT_FAILED",
+]);
+
+/**
+ * A move refused for good in this sheet (8.3): a fatal code, or TOO_LARGE
+ * with no reason (more than 10,000 sizes chosen; the classification words it
+ * `tooLargeApply`, and the draft keeps only the code and the words). The
+ * store text cap is TOO_LARGE too (`store_text_limit`, worded `changed`), but
+ * like D9a and D9b it is a block page 0 shows once read again: page 0 read
+ * again without it, with new hashes, turns the button back on.
+ */
+function finalRefusal(draft: ListingSettingsDraft): boolean {
+  if (draft.phase !== "refused" || draft.code === null) return false;
+  return FINAL_CONVERSION_CODES.has(draft.code) || (draft.code === TOO_LARGE_CODE && draft.message === W.tooLargeApply);
+}
+
+/** The step's draft when it is a move; any other editor's draft is not this sheet's. */
+function moveDraftOf(draft: ListingSettingsDraft | null): ListingSettingsDraft | null {
+  return isConversionDraft(draft) ? draft : null;
+}
+
+/**
+ * A move sent from this opening and not yet shown as an outcome: out, or
+ * confirmed in the moment before the sheet takes its outcome. Page 0
+ * answering `no_older_rules` then is the move's own doing, not one made
+ * elsewhere (no one-time re-read, 11.5), and a refusal of a re-read as too
+ * large doesn't close the sheet under it. Only an open draft counts: closing
+ * the sheet closes it (`open: false`), and a settled move's draft is kept
+ * closed after that (`saved_view_stale` until another editor opens), so a
+ * later opening would otherwise stay quiet for good.
+ */
+function moveSettling(draft: ListingSettingsDraft | null): boolean {
+  return draft !== null && draft.open
+    && (draft.phase === "saving" || draft.phase === "saved" || draft.phase === "saved_view_stale");
+}
+
+/** What the page says of the move, under the last answer's words (8.3): the right's line, what blocks it, how many sizes change. */
+function moveLine(content: OlderRulesSheetContent, right: ListingSettingsRight): OlderRulesFooterLine | null {
+  if (!right.editable) {
+    // The banner explains a paused account, .ops or store (its reason is `banner`, no line of its own).
+    const text = rightReasonLine(right.reason);
+    return text === null ? null : { text, tone: "alert" };
+  }
+  const { blocked, changes } = content;
+  if (blocked !== null) {
+    // Sizes first: their section lists the text cap too. The cap alone says what to shorten (D9c).
+    if (blocked.wouldLosePrice !== null || blocked.wouldBlockListing !== null) return { text: W.fixFirst, tone: "alert" };
+    if (blocked.tooMuchText !== null) return { text: blocked.tooMuchText, tone: "alert" };
+  }
+  return changes === null ? null : { text: conversionChangesListedWords(changes.total), tone: "info" };
+}
+
+/**
+ * The footer (8.3): with a confirmed outcome, its words and [Close] (plus
+ * [Reload] when its view is stale); otherwise the last answer's words, what
+ * stops the move, and [Move them over] or, for an unconfirmed move, [Check
+ * again]. [Move them over] is on only over page 0's report, with its hashes,
+ * while nothing blocks the move, the right is there, page 0 isn't being read
+ * again, no other action runs and no move is out (D1).
+ */
+function sheetFooter(input: {
+  outcome: OlderRulesSheetOutcome | null;
+  apply: OlderRulesApplyFacts;
+  /** Page 0's report, with nothing of another plan mixed in; null while it isn't one. */
+  report: { check: ListingRulesConversionCheck; content: OlderRulesSheetContent; resetPages: boolean } | null;
+  /** The notice where the sheet shows it (the `none` view, or after `nothing_to_convert`); null elsewhere. */
+  notice: OlderRulesSheetNotice | null;
+}): OlderRulesSheetFooter {
+  const { outcome, apply, report } = input;
+  const closeLabel = DRAWER_WORDS.close;
+  const hidden = { label: W.moveOver, shown: false, disabled: true };
+  const noCheckAgain = { label: LISTING_SETTINGS_SAVE_WORDS.checkAgain, shown: false, disabled: true };
+  // The notice only ever follows a store the job moved: never beside a move of the vendor's own (D19).
+  const notice = outcome === null || outcome.kind === "already_moved" ? input.notice : null;
+  const gotIt = { label: W.gotIt, ariaLabel: W.gotItName, shown: notice !== null, disabled: notice?.sending ?? true };
+  const noticeFailure: OlderRulesFooterLine[] = notice?.model.failure ? [{ text: notice.model.failure, tone: "alert" }] : [];
+  if (outcome !== null) {
+    // After `nothing_to_convert` with an unseen system notice, its words say what moved instead of "already moved" (8.3).
+    const said = outcome.kind === "moved" ? W.moved : notice !== null ? notice.model.text : W.alreadyMoved;
+    const lines: OlderRulesFooterLine[] = [{ text: said, tone: "ok" }, ...noticeFailure];
+    if (outcome.viewStale) lines.push({ text: W.viewStale, tone: "alert" });
+    return {
+      lines, move: hidden, gotIt, checkAgain: noCheckAgain, reload: { label: LISTING_SETTINGS_SAVE_WORDS.reload, shown: outcome.viewStale },
+      closeLabel, escapeKeepsOpen: false, press: null,
+    };
+  }
+
+  // A just-confirmed move's draft says nothing here: its outcome is about to show (or, after a reopen, shows no more).
+  const draft = moveDraftOf(apply.draft);
+  const live = draft !== null && draft.phase !== "saved" && draft.phase !== "saved_view_stale" ? draft : null;
+  const locked = isDraftLocked(live);
+  const uncertain = live?.phase === "uncertain";
+  const lines: OlderRulesFooterLine[] = [];
+  if (live?.phase === "saving") lines.push({ text: W.moving, tone: "info" });
+  else if (live !== null && live.phase !== "editing" && live.message !== null) lines.push({ text: live.message, tone: "alert" });
+  if (report !== null && !uncertain) {
+    const line = moveLine(report.content, apply.right);
+    if (line !== null) lines.push(line);
+  }
+  if (apply.notStartedLine !== null) lines.push({ text: apply.notStartedLine, tone: "alert" });
+  lines.push(...noticeFailure);
+
+  const press = report === null ? null : conversionDraftValue(report.check);
+  const final = live !== null && finalRefusal(live);
+  const off = press === null || report === null || report.resetPages || report.content.blocked !== null || !apply.right.editable
+    || apply.checking || apply.busy || locked || final;
+  return {
+    lines,
+    move: { label: W.moveOver, shown: report !== null && !uncertain, disabled: off },
+    gotIt,
+    checkAgain: { label: LISTING_SETTINGS_SAVE_WORDS.checkAgain, shown: uncertain, disabled: apply.busy },
+    reload: { label: LISTING_SETTINGS_SAVE_WORDS.reload, shown: false },
+    closeLabel,
+    escapeKeepsOpen: locked,
+    press: off ? null : press,
+  };
+}
+
+/**
+ * The sheet from its page reads, its session, a confirmed outcome and what
+ * the footer reads (5.3, 8.3, 11.2, 11.5): page 0 decides the state (loading,
+ * a problem, `none`, or the report); a further page joins the rows only while
+ * its plan hash is page 0's. A page of another plan asks for a reset
+ * (`resetPages`) and shows only page 0's rows meanwhile; the `changed` line
+ * then stays until the sheet closes. A page refused as too large, page 0 or a
+ * later one, closes the sheet, unless a move is settling or confirmed. A
+ * confirmed outcome stays in the footer until the sheet closes, whatever the
+ * re-reads answer (CUX#11).
  */
 export function olderRulesSheetState(input: OlderRulesSheetInput): OlderRulesSheetState {
   const pages = (input.pages.length === 0 ? [undefined] : [...input.pages]).map(pageState);
   const first = pages[0];
+  const { outcome, apply } = input;
+  // The move's own answer (or its outcome) explains a store found moved or a re-read refused: nothing here reacts to it.
+  const quiet = outcome !== null || moveSettling(moveDraftOf(apply.draft));
   const base = {
     title: W.sheetTitle,
     loadingLine: null,
     problem: null,
     // A 422 on any page closes the sheet (5.3): over 10,000 sizes no page can be checked.
-    close: conversionTooLargeError(input.pages) !== undefined,
+    close: !quiet && conversionTooLargeError(input.pages) !== undefined,
     noneLine: null,
     rereadAfterMoved: false,
     resetPages: false,
     changedLine: input.session.planChanged ? W.changed : null,
     content: null,
-    footer: { text: W.preview, closeLabel: DRAWER_WORDS.close },
-  } satisfies Omit<OlderRulesSheetState, "view">;
+  } satisfies Omit<OlderRulesSheetState, "view" | "footer">;
+  // The notice shows after a confirmed `nothing_to_convert` whatever page 0 says (the outcome wins, CUX#11), and without
+  // an outcome only where page 0 finds the store moved (`none`); never over a report, which means older rules remain (D21).
+  const notice = input.notice ?? null;
+  const outcomeNotice = outcome !== null ? notice : null;
+  const footerWithout = (shownNotice: OlderRulesSheetNotice | null = outcomeNotice) =>
+    sheetFooter({ outcome, apply, report: null, notice: shownNotice });
 
-  if (first.state === "loading") return { ...base, view: "loading", loadingLine: W.loading };
+  if (first.state === "loading") return { ...base, view: "loading", loadingLine: W.loading, footer: footerWithout() };
   if (first.state === "failed") {
-    return { ...base, view: "problem", problem: sheetProblem(first.error) };
+    return { ...base, view: "problem", problem: sheetProblem(first.error), footer: footerWithout() };
   }
   const check = first.check;
   if (check.state === "no_older_rules") {
-    return { ...base, view: "none", noneLine: W.none, rereadAfterMoved: input.outcome === null && !input.session.movedReread };
+    // A confirmed outcome says it in the footer; without one, the job's unseen notice explains the store found moved (D19, D25).
+    const noneNotice = outcome === null ? notice : null;
+    return { ...base, view: "none", noneLine: noneNotice?.model.text ?? W.none, rereadAfterMoved: !quiet && !input.session.movedReread,
+      footer: footerWithout(outcome === null ? noneNotice : outcomeNotice) };
   }
 
-  // One plan per screen: a further page of another plan (or of a store moved meanwhile) never joins page 0's rows.
-  const resetPages = pages.slice(1).some((page) => page.state === "answered" && page.check.planHash !== check.planHash);
-  const joined = resetPages ? [first] : pages;
+  // One plan per screen: a further page of another plan (or of a store moved meanwhile) never joins page 0's rows. While
+  // a move settles, its own re-reads answer page by page: the pages are not reset under it, and no "changed" line shows.
+  const mismatched = pages.slice(1).some((page) => page.state === "answered" && page.check.planHash !== check.planHash);
+  const resetPages = mismatched && !quiet;
+  const joined = mismatched ? [first] : pages;
   const rows = planRows(joined);
-  const pending = resetPages ? undefined : joined.slice(1).find((page) => page.state !== "answered");
+  const pending = mismatched ? undefined : joined.slice(1).find((page) => page.state !== "answered");
   const more: OlderRulesSheetMore | null = pending === undefined ? null
     : pending.state === "failed" ? { kind: "problem", problem: sheetProblem(pending.error) }
       : { kind: "loading", text: W.loading };
   const total = check.changes.total;
   // The next page exists while the pages read hold fewer rows than the server counts, up to its last page (199).
-  const hasNext = !resetPages && joined.length * CONVERSION_PAGE_SIZE < total && joined.length <= MAX_CONVERSION_PAGE;
+  const hasNext = !mismatched && joined.length * CONVERSION_PAGE_SIZE < total && joined.length <= MAX_CONVERSION_PAGE;
   const report = reportLines(check.report, check.state);
+  const content: OlderRulesSheetContent = {
+    state: check.state,
+    // A store held back by its text alone changes no listing: its summary says so, and its block says why (beyond 11.4).
+    summary: total === 0 ? W.clean : conversionNotCleanWords(total),
+    laterProducts: laterProductsLine(check.state),
+    blocked: blockedLines(check.blocked),
+    becomes: becomesLines(check.becomes),
+    reasons: report.reasons,
+    changes: total === 0 ? null : {
+      heading: W.changesHeading,
+      total,
+      rows,
+      loadMore: { label: W.loadMore, shown: hasNext && more === null },
+      more,
+    },
+    neverApplies: report.neverApplies,
+    kept: keptLine(check.kept),
+  };
 
   return {
     ...base,
     view: "report",
     resetPages,
     changedLine: resetPages || input.session.planChanged ? W.changed : null,
-    content: {
-      state: check.state,
-      // A store held back by its text alone changes no listing: its summary says so, and its block says why (beyond 11.4).
-      summary: total === 0 ? W.clean : conversionNotCleanWords(total),
-      laterProducts: laterProductsLine(check.state),
-      blocked: blockedLines(check.blocked),
-      becomes: becomesLines(check.becomes),
-      reasons: report.reasons,
-      changes: total === 0 ? null : {
-        heading: W.changesHeading,
-        total,
-        rows,
-        loadMore: { label: W.loadMore, shown: hasNext && more === null },
-        more,
-      },
-      neverApplies: report.neverApplies,
-      kept: keptLine(check.kept),
-    },
+    content,
+    footer: sheetFooter({ outcome, apply, report: { check, content, resetPages: mismatched }, notice: outcomeNotice }),
   };
 }

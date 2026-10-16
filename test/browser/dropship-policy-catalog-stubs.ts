@@ -13,9 +13,19 @@ import { decideDropshipListingAccess } from "../../shared/dropship/listing-acces
 import { contentProfileStateSchema, saveContentProfileInputSchema, type ContentProfileState } from "../../shared/dropship/listing-content";
 import {
   CONVERSION_PAGE_SIZE,
+  LISTING_RULES_CONVERSION_ERROR_CODES,
+  listingRulesConversionApplyInputSchema,
+  listingRulesConversionApplyResponseSchema,
   listingRulesConversionCheckInputSchema,
   listingRulesConversionCheckSchema,
+  listingRulesConversionNoticeAcknowledgeInputSchema,
+  listingRulesConversionNoticeAcknowledgeResponseSchema,
+  listingRulesConversionNoticeResponseSchema,
+  listingRulesConversionNoticeSchema,
+  type ListingRulesConversionApplyInput,
+  type ListingRulesConversionApplyResponse,
   type ListingRulesConversionCheck,
+  type ListingRulesConversionNotice,
 } from "../../shared/dropship/listing-rules-conversion";
 import {
   MAX_BULK_TEXT_BYTES,
@@ -540,6 +550,26 @@ export interface StubState {
    * never computes a diff: older group rules are not modelled here.
    */
   conversionPages: Record<number, ListingRulesConversionCheck | ScriptedError>;
+  /** W11 moves ([Move them over], POST …/listing-settings/conversion/apply; plan PR 11, 8.2), and how the next ones answer. */
+  conversionApplies: StubWrite[];
+  conversionApplyAnswers: WriteAnswer[];
+  /**
+   * What the scripted plan writes when a move commits (plan PR 11, 8.2): the category and product layers the rules
+   * become, by categoryKey / productKey, as a journey scripts them beside page 0's `becomes` (the stub computes no
+   * plan). A move bound to page 0's two hashes empties the three profiles' groups, adds these layers with new
+   * revisions, and drops the scripted pages, so the dry run then answers by the store's own (now empty) rules.
+   */
+  conversionLayers: { categorySettings: Record<string, CategorySettingsLayer>; productSettings: Record<string, ProductSettingsLayer> };
+  /**
+   * The one-time notice of a system conversion by store (`GET …/listing-settings/conversion/notice`; plan PR 11, 9.2),
+   * and whether someone saw it: a store left out has none (`notice: null`). Read on mount by the step (D18), answered
+   * over 10,000 sizes too (the server reads no selection for it). `stubSystemConversion` moves a store as the job and
+   * sets it; a vendor's own move (W11 here) never does.
+   */
+  conversionNotices: Record<number, { notice: ListingRulesConversionNotice; seen: boolean }>;
+  /** [Got it] on it (POST …/conversion/notice/acknowledge; plan PR 11, 9.3), and how the next ones answer (no request key). */
+  conversionNoticeAcknowledges: StubWrite[];
+  conversionNoticeAcknowledgeAnswers: WriteAnswer[];
   /** The W7 checks made, by review id: the stored input and every row, for paging and the apply's hash. */
   priceChangeChecks: Record<string, PriceChangeCheck>;
   /** W7 checks already applied, by review id, with the request key that applied them (another key is 409 IDEMPOTENCY_CONFLICT). */
@@ -1785,6 +1815,134 @@ function conversionPageAnswer(state: StubState, storeConnectionId: number, page:
   return Object.keys(state.conversionPages).length === 0 ? defaultConversionCheck(state, storeConnectionId, page) : null;
 }
 
+/** A W11 answer through the shared strict contract; a replay of a commit says `replayed`, `nothing_to_convert` stays as it was (it records nothing). */
+const CONVERSION_APPLY_ANSWER: KeyedAnswerShape = (json, replayed) => listingRulesConversionApplyResponseSchema.parse(
+  replayed && json.outcome !== "nothing_to_convert" ? { ...json, outcome: "replayed" } : json);
+
+function conversionRefusal(status: number, code: string, message: string, context: Record<string, unknown>): ScriptedError {
+  return { status, code, message, context: { ...context, retryable: false, classification: "permanent" } };
+}
+
+/**
+ * W11 as dropship-listing-rules-conversion-service.ts applies it, in its order (after the replay probe, which keyedWrite
+ * runs before this): no older group rule left is `nothing_to_convert`, nothing written; more than 10,000 sizes is the
+ * 422 with no reason; then the plan, which here is the scripted page 0 (the stub computes none): another writes hash is
+ * 409 CHANGED `settings_changed`, another plan hash `listed_changes_moved`; then its blocks, in the server's order (422
+ * WOULD_BE_LOST, WOULD_BLOCK_LISTING, TOO_LARGE `store_text_limit`). A move that passes empties the three profiles'
+ * groups (each a new revision, its defaults kept), adds the scripted layers, and drops the scripted pages.
+ */
+function applyConversion(state: StubState, storeConnectionId: number, input: ListingRulesConversionApplyInput): ListingRulesConversionApplyResponse | ScriptedError {
+  const counts = olderGroupRuleCounts(state, storeConnectionId);
+  if (counts.pricingGroups + counts.contentGroups + counts.ebayCategoryRules === 0) {
+    return listingRulesConversionApplyResponseSchema.parse({ outcome: "nothing_to_convert", conversionId: null, categoryCount: 0, productCount: 0 });
+  }
+  if (state.tooLarge) {
+    return conversionRefusal(422, "DROPSHIP_LISTING_SETTINGS_TOO_LARGE",
+      "More than 10,000 sizes are chosen for this store. Choose 10,000 or fewer to move its older group rules over.", { storeConnectionId });
+  }
+  const plan = conversionPageAnswer(state, storeConnectionId, 0);
+  if (plan === null || "status" in plan || plan.planHash === null || plan.writesHash === null) {
+    // The server always has a plan for a store with older rules; a journey that moves one scripts page 0 as a plan.
+    state.unexpected.push(`POST …/conversion/apply with no scripted plan on page 0 (${JSON.stringify(plan)})`);
+    return { status: 500, code: "STUB_NO_CONVERSION_PLAN", message: "The stub has no plan for this store." };
+  }
+  const changed = (reason: string) => conversionRefusal(409, LISTING_RULES_CONVERSION_ERROR_CODES.changed,
+    "Your listings changed since you checked what moving the older group rules over does. Check again before moving them.", { storeConnectionId, reason });
+  if (input.writesHash !== plan.writesHash) return changed("settings_changed");
+  if (input.planHash !== plan.planHash) return changed("listed_changes_moved");
+  const { wouldLosePrice, wouldBlockListing, tooMuchText } = plan.blocked;
+  if (wouldLosePrice.total > 0) {
+    return conversionRefusal(422, "DROPSHIP_LISTING_PRICE_WOULD_BE_LOST",
+      "Moving the older group rules over would leave some sizes without a price. Give them a price first.", {
+        storeConnectionId, sizeCount: wouldLosePrice.total,
+        sizes: wouldLosePrice.items.map((size) => ({ productVariantId: size.productVariantId, priceCents: size.priceCents })),
+      });
+  }
+  if (wouldBlockListing.total > 0) {
+    return conversionRefusal(422, LISTING_RULES_CONVERSION_ERROR_CODES.wouldBlockListing,
+      "Moving the older group rules over would stop some listed sizes from getting stock updates. Fix them first.", {
+        storeConnectionId, sizeCount: wouldBlockListing.total,
+        sizes: wouldBlockListing.items.map((size) => ({ productVariantId: size.productVariantId, blockers: [...size.reasons] })),
+      });
+  }
+  if (tooMuchText) {
+    return conversionRefusal(422, "DROPSHIP_LISTING_SETTINGS_TOO_LARGE",
+      "This store's saved listing text is at its limit. Shorten or remove text on other products, or set it once on a category or as the store default.",
+      { storeConnectionId, reason: "store_text_limit", textBytes: 30_000_001, maxTextBytes: 30_000_000 });
+  }
+  commitConversion(state, storeConnectionId);
+  return listingRulesConversionApplyResponseSchema.parse({
+    outcome: "converted", conversionId: state.nextRevision++, categoryCount: plan.becomes.categories.total, productCount: plan.becomes.products.total,
+  });
+}
+
+/**
+ * A move's commit, the vendor's (W11) or the job's (`stubSystemConversion`): only the profiles that held groups get a new
+ * revision (11c step 14), their defaults kept; the scripted layers are added with new revisions; the scripted pages go,
+ * so the dry run then answers by the store's own (now empty) rules.
+ */
+function commitConversion(state: StubState, storeConnectionId: number): void {
+  const pricing = state.pricingRules[storeConnectionId];
+  if (pricing?.profile && pricing.profile.groups.length > 0) {
+    state.pricingRules[storeConnectionId] = pricingProfileStateSchema.parse({ revisionId: state.nextRevision++, updatedAt: STAMP,
+      profile: { ...pricing.profile, groups: [] } });
+  }
+  const content = state.contentProfiles[storeConnectionId];
+  if (content?.profile && content.profile.groups.length > 0) {
+    state.contentProfiles[storeConnectionId] = contentProfileStateSchema.parse({ revisionId: state.nextRevision++, updatedAt: STAMP,
+      profile: { ...content.profile, groups: [] } });
+  }
+  const ebay = state.categoryRules[storeConnectionId];
+  if (ebay?.profile && ebay.profile.rules.length > 0) {
+    state.categoryRules[storeConnectionId] = ebayCategoryRulesStateSchema.parse({ revisionId: state.nextRevision++, updatedAt: STAMP,
+      profile: { ...ebay.profile, rules: [] } });
+  }
+  for (const [key, layer] of Object.entries(state.conversionLayers.categorySettings)) {
+    state.categorySettings[key] = categorySettingsLayerSchema.parse({ revisionId: state.nextRevision++, values: layer.values });
+  }
+  for (const [key, layer] of Object.entries(state.conversionLayers.productSettings)) {
+    state.productSettings[key] = productSettingsLayerSchema.parse({ revisionId: state.nextRevision++, values: layer.values });
+  }
+  state.conversionPages = {};
+}
+
+/**
+ * The hourly job moves the store's older group rules as the system (plan PR 11, 13; the stub runs no job): the commit a
+ * vendor's move makes, then the one-time notice it leaves, with the record's counts (the categories and products of the
+ * scripted layers unless given), unseen. A journey calls it between steps: the page open then finds the store moved
+ * (11.5). Returns the notice.
+ */
+export function stubSystemConversion(state: StubState, storeConnectionId: number,
+  counts: { categoryCount?: number; productCount?: number } = {}): ListingRulesConversionNotice {
+  const categoryCount = counts.categoryCount ?? Object.keys(state.conversionLayers.categorySettings).length;
+  const productCount = counts.productCount ?? Object.keys(state.conversionLayers.productSettings).length;
+  commitConversion(state, storeConnectionId);
+  const notice = listingRulesConversionNoticeSchema.parse({ conversionId: state.nextRevision++, convertedAt: STAMP, categoryCount, productCount });
+  state.conversionNotices[storeConnectionId] = { notice, seen: false };
+  return notice;
+}
+
+/** The notice read's answer: the store's unseen notice, or `notice: null`. */
+function conversionNoticeAnswer(state: StubState, storeConnectionId: number) {
+  const held = state.conversionNotices[storeConnectionId];
+  return listingRulesConversionNoticeResponseSchema.parse({ storeConnectionId, notice: held && !held.seen ? held.notice : null });
+}
+
+/**
+ * [Got it] as dropship-listing-rules-conversion-notice-service.ts answers it: the store's notice by its id, marked seen
+ * once (`acknowledged`), then `already_seen`; any other id is the permanent 404. No request key: idempotent by state.
+ */
+function acknowledgeConversionNotice(state: StubState, storeConnectionId: number, conversionId: number) {
+  const held = state.conversionNotices[storeConnectionId];
+  if (!held || held.notice.conversionId !== conversionId) {
+    return conversionRefusal(404, LISTING_RULES_CONVERSION_ERROR_CODES.noticeNotFound,
+      "That note about moved group rules was not found for this store. Reload the page.", { storeConnectionId });
+  }
+  const outcome = held.seen ? "already_seen" : "acknowledged";
+  held.seen = true;
+  return listingRulesConversionNoticeAcknowledgeResponseSchema.parse({ outcome });
+}
+
 /** W12's 409 when the clear set is not the one the server derives (the service's productSetConflict), with the server's delay note. */
 function categoryProductSetConflict(storeConnectionId: number, categoryId: number, productIds: readonly number[]): ScriptedError {
   return { status: 409, code: "DROPSHIP_PRODUCT_LISTING_SETTINGS_VERSION_CONFLICT",
@@ -2353,7 +2511,8 @@ export const defaultStubState = (): StubState => ({
   sizePricesWrites: [], sizePricesWriteAnswers: [],
   priceChangeReviews: [], priceChangeReviewAnswers: [], priceChangePageAnswers: [], priceChangeApplies: [], priceChangeApplyAnswers: [],
   priceChangeChecks: {}, priceChangeApplied: {}, categoryMovesAcknowledges: [], categoryMovesAcknowledgeAnswers: [],
-  conversionPages: {},
+  conversionPages: {}, conversionApplies: [], conversionApplyAnswers: [], conversionLayers: { categorySettings: {}, productSettings: {} },
+  conversionNotices: {}, conversionNoticeAcknowledges: [], conversionNoticeAcknowledgeAnswers: [],
   reviews: {}, keyedAnswers: {}, nextRevision: 40, unexpected: [], errors: [],
 });
 
@@ -2601,6 +2760,30 @@ async function answerListingWrite(state: StubState, route: Route, storeId: numbe
     return keyedWrite(state, route, parsed.data.idempotencyKey, body, state.categoryMovesAcknowledgeAnswers,
       () => acknowledgeCategoryMoves(state, storeId, parsed.data.items), CATEGORY_MOVES_ANSWER);
   }
+  // W11 (plan PR 11, 8.2): [Move them over], keyed, bound to the scripted page 0's two hashes; it asks eBay nothing.
+  if (method === "POST" && path === `${listings}/listing-settings/conversion/apply`) {
+    const body = json();
+    state.conversionApplies.push({ method, path, body });
+    // The shared contract refuses an extra field, a hash that isn't sha256 hex, and the reserved key prefixes.
+    const parsed = listingRulesConversionApplyInputSchema.safeParse(body);
+    if (!parsed.success) return refuseBody(state, route, method, path, parsed.error.message);
+    return keyedWrite(state, route, parsed.data.idempotencyKey, body, state.conversionApplyAnswers,
+      () => applyConversion(state, storeId, parsed.data), CONVERSION_APPLY_ANSWER);
+  }
+  // The one-time notice's [Got it] (plan PR 11, 9.3): no request key (idempotent by state), no size check, no eBay.
+  if (method === "POST" && path === `${listings}/listing-settings/conversion/notice/acknowledge`) {
+    const body = json();
+    state.conversionNoticeAcknowledges.push({ method, path, body });
+    const parsed = listingRulesConversionNoticeAcknowledgeInputSchema.safeParse(body);
+    if (!parsed.success) return refuseBody(state, route, method, path, parsed.error.message);
+    const scripted = state.conversionNoticeAcknowledgeAnswers.shift();
+    if (scripted && scripted !== "drop") return fulfillError(route, scripted);
+    const answer = acknowledgeConversionNotice(state, storeId, parsed.data.conversionId);
+    if ("status" in answer) return fulfillError(route, answer);
+    // The press reached the server, but its answer never came back.
+    if (scripted === "drop") return route.abort("connectionreset");
+    return route.fulfill({ json: answer });
+  }
   // W7 (plan PR 10, 7.3, 9.4): the check, its pages and the apply, for one or many products, or a category's price.
   if (method === "POST" && path === `${listings}/listing-settings/price-changes/review`) {
     const body = json();
@@ -2755,6 +2938,15 @@ async function answerStoreRead(state: StubState, route: Route, storeId: number, 
       return route.fulfill({ status: 400, json: { error: { code: "STUB_INVALID_INPUT", message: "The query is not what the route takes." } } });
     }
     return route.fulfill({ json: listingSettingsUpdatedProducts(state, storeId, parsed.data.page) });
+  }
+  // The one-time notice (plan PR 11, 9.2): a mount read of the step (D18), answered over 10,000 sizes too, because the
+  // server reads no selection for it; no query.
+  if (path === `${listings}/listing-settings/conversion/notice`) {
+    if (url.search !== "") {
+      state.unexpected.push(`GET ${path}${url.search} (query off contract)`);
+      return route.fulfill({ status: 400, json: { error: { code: "STUB_INVALID_INPUT", message: "The query is not what the route takes." } } });
+    }
+    return route.fulfill({ json: conversionNoticeAnswer(state, storeId) });
   }
   // The dry run (plan PR 11, 5.2): read only while its sheet is open, never on mount; refused while too large (D18).
   if (path === `${listings}/listing-settings/conversion`) {
@@ -3154,6 +3346,67 @@ export function oldSetupPanel(page: Page) {
     || ruledCheck.changes.page !== 3 || conversionPageAnswer(scriptedPages, store, 0) !== scriptedPages.conversionPages[0]
     || conversionPageAnswer(scriptedPages, store, 1) !== null) {
     throw new Error(`The stub's dry run changed: ${JSON.stringify({ noRules, ruledCheck })}`);
+  }
+
+  // W11 (plan PR 11, 8.2): a move bound to page 0's two hashes commits once (the group emptied with its default kept, the
+  // scripted category layer added, the pages dropped, so the default dry run says no older rules) and its replay says
+  // `replayed`; another writes hash or plan hash is CHANGED with its reason; a block refuses in the server's order; a
+  // store with no older rule left is `nothing_to_convert`.
+  const sleevesGroup = { id: "g1", name: "Sleeves", priority: 1, scope: { type: "category" as const, category: "Sleeves" }, recipe: SAVED_PRICING_RULES.profile!.defaultRecipe };
+  const cleanPlan = conversionCheck(store, { becomes: { categories: { total: 1, items: [{ categoryId: 40, categoryName: "Sleeves", settings: ["price"] }] }, products: noConversionItems() } });
+  const moving11: StubState = { ...defaultStubState(), pricingRules: { [store]: { ...SAVED_PRICING_RULES, profile: { ...SAVED_PRICING_RULES.profile!, groups: [sleevesGroup] } } },
+    conversionPages: { 0: cleanPlan },
+    conversionLayers: { categorySettings: { [categoryKey(store, 40)]: { revisionId: 1, values: { ...NO_CATEGORY_VALUES, price: sleevesGroup.recipe } } }, productSettings: {} } };
+  const hashes = { planHash: cleanPlan.planHash!, writesHash: cleanPlan.writesHash! };
+  const otherWrites = applyConversion(moving11, store, { idempotencyKey: "ls-convert:load-1", ...hashes, writesHash: "0".repeat(64) });
+  const otherPlan = applyConversion(moving11, store, { idempotencyKey: "ls-convert:load-2", ...hashes, planHash: "0".repeat(64) });
+  // Read through the counts, so a check above doesn't narrow what a later one reads.
+  const groupsOf = (state: StubState) => olderGroupRuleCounts(state, store).pricingGroups;
+  if (!("status" in otherWrites) || otherWrites.context?.reason !== "settings_changed" || !("status" in otherPlan) || otherPlan.context?.reason !== "listed_changes_moved"
+    || groupsOf(moving11) !== 1) {
+    throw new Error(`The stub's W11 CHANGED answers changed: ${JSON.stringify({ otherWrites, otherPlan })}`);
+  }
+  const moved11 = applyConversion(moving11, store, { idempotencyKey: "ls-convert:load-3", ...hashes });
+  if ("status" in moved11 || moved11.outcome !== "converted" || moved11.categoryCount !== 1 || CONVERSION_APPLY_ANSWER(moved11, true).outcome !== "replayed"
+    || groupsOf(moving11) !== 0
+    || JSON.stringify(moving11.pricingRules[store]?.profile?.defaultRecipe) !== JSON.stringify(SAVED_PRICING_RULES.profile!.defaultRecipe)
+    || JSON.stringify(categoryLayerOf(moving11, store, 40)?.values.price) !== JSON.stringify(sleevesGroup.recipe)
+    || Object.keys(moving11.conversionPages).length !== 0 || defaultConversionCheck(moving11, store, 0).state !== "no_older_rules") {
+    throw new Error(`The stub's W11 move changed: ${JSON.stringify(moved11)}`);
+  }
+  const again11 = applyConversion(moving11, store, { idempotencyKey: "ls-convert:load-4", ...hashes });
+  if ("status" in again11 || again11.outcome !== "nothing_to_convert" || CONVERSION_APPLY_ANSWER(again11, true).outcome !== "nothing_to_convert") {
+    throw new Error(`The stub's W11 nothing-to-convert answer changed: ${JSON.stringify(again11)}`);
+  }
+  const blockedPlan = conversionCheck(store, { state: "not_clean", blocked: { wouldLosePrice: { total: 1, items: [{ productId: ENVELOPE.productId,
+    productVariantId: ENVELOPE.sizes[0].productVariantId, productName: ENVELOPE.productName, sizeName: ENVELOPE.sizes[0].sizeName, priceCents: 499 }] },
+    wouldBlockListing: noConversionItems(), tooMuchText: true } });
+  const blocking11: StubState = { ...moving11, pricingRules: { [store]: { ...SAVED_PRICING_RULES, profile: { ...SAVED_PRICING_RULES.profile!, groups: [sleevesGroup] } } },
+    conversionPages: { 0: blockedPlan } };
+  const lost11 = applyConversion(blocking11, store, { idempotencyKey: "ls-convert:load-5", planHash: blockedPlan.planHash!, writesHash: blockedPlan.writesHash! });
+  const textOnly = conversionCheck(store, { state: "not_clean", blocked: { wouldLosePrice: noConversionItems(), wouldBlockListing: noConversionItems(), tooMuchText: true } });
+  const text11 = applyConversion({ ...blocking11, conversionPages: { 0: textOnly } }, store, { idempotencyKey: "ls-convert:load-6", planHash: textOnly.planHash!, writesHash: textOnly.writesHash! });
+  if (!("status" in lost11) || lost11.code !== "DROPSHIP_LISTING_PRICE_WOULD_BE_LOST" || lost11.context?.sizeCount !== 1
+    || !("status" in text11) || text11.code !== "DROPSHIP_LISTING_SETTINGS_TOO_LARGE" || text11.context?.reason !== "store_text_limit"
+    || groupsOf(blocking11) !== 1) {
+    throw new Error(`The stub's W11 blocks changed: ${JSON.stringify({ lost11, text11 })}`);
+  }
+
+  // The one-time notice (plan PR 11, 9.2, 9.3): none by default; the job's move empties the groups and leaves one, unseen,
+  // with the scripted layers' counts; [Got it] marks it seen once, then already seen; another id is the 404.
+  const noticed11: StubState = { ...moving11, pricingRules: { [store]: { ...SAVED_PRICING_RULES, profile: { ...SAVED_PRICING_RULES.profile!,
+    groups: [sleevesGroup] } } }, conversionPages: { 0: cleanPlan }, conversionNotices: {} };
+  const none11 = conversionNoticeAnswer(noticed11, store);
+  const notice11 = stubSystemConversion(noticed11, store);
+  const shown11 = conversionNoticeAnswer(noticed11, store);
+  const wrong11 = acknowledgeConversionNotice(noticed11, store, notice11.conversionId + 1);
+  const first11 = acknowledgeConversionNotice(noticed11, store, notice11.conversionId);
+  const second11 = acknowledgeConversionNotice(noticed11, store, notice11.conversionId);
+  if (none11.notice !== null || shown11.notice?.conversionId !== notice11.conversionId || notice11.categoryCount !== 1 || notice11.productCount !== 0
+    || groupsOf(noticed11) !== 0 || !("status" in wrong11) || wrong11.status !== 404 || "status" in first11 || first11.outcome !== "acknowledged"
+    || "status" in second11 || second11.outcome !== "already_seen" || conversionNoticeAnswer(noticed11, store).notice !== null
+    || defaultStubState().conversionNotices[store] !== undefined) {
+    throw new Error(`The stub's one-time notice changed: ${JSON.stringify({ none11, shown11, wrong11, first11, second11 })}`);
   }
 
   // The resolver's order, pinned once here: size, then product, then category (named), then the store default.

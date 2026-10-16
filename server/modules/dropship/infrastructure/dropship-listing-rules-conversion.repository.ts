@@ -14,6 +14,16 @@ import {
   type ListingRulesConversionRepository,
   type ListingRulesConversionTransaction,
 } from "../application/dropship-listing-rules-conversion-service";
+import {
+  RULES_CONVERSION_FAILED_EVENT,
+  rulesConversionFailureAuditSchema,
+  rulesConversionHeadRevisionsSchema,
+  type RulesConversionFailureAudit,
+  type RulesConversionFailureRecordOutcome,
+  type RulesConversionHeadRevisions,
+  type RulesConversionJobRepository,
+  type RulesConversionStoreLoad,
+} from "../application/dropship-rules-conversion-job-service";
 import type { DropshipListingCatalogCandidate } from "../application/dropship-listing-preview-service";
 import type { CategoryListingSettingSaveResult } from "../application/dropship-listing-setting-writes";
 import { olderGroupRuleCounts } from "../application/dropship-listing-settings-facts";
@@ -156,7 +166,45 @@ const REQUIRES: Readonly<Partial<Record<ConversionCall, readonly ConversionCall[
   insertStoreAudit: ["insertConversion"],
 };
 
-export class PgDropshipListingRulesConversionRepository implements ListingRulesConversionRepository {
+/**
+ * The system job's check (PR 11e2, plan 13.3 step 3): the store's owner by
+ * the store alone (the system has no member), with no lock, inside the read
+ * snapshot (FOR SHARE is refused in a READ ONLY transaction, and the check
+ * must hold up no writer, plan 13.8).
+ */
+const STORE_OWNER_READ_SQL = "SELECT sc.vendor_id FROM dropship.dropship_store_connections sc WHERE sc.id = $1";
+/** One snapshot, no lock, as the dry run's own load opens (dropship-listing-settings.repository.ts). */
+const READ_SNAPSHOT_BEGIN_SQL = "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY";
+
+/**
+ * A failure record's view of the store (PR 11e2, D20): its vendor and the
+ * three profile heads its older rules are read from (the readers' own
+ * predicate: the head of this store and its vendor), null for a profile the
+ * store never saved.
+ */
+const STORE_HEADS_SQL = `SELECT sc.vendor_id,
+    (SELECT p.revision_id FROM dropship.dropship_pricing_profiles p
+      WHERE p.store_connection_id = sc.id AND p.vendor_id = sc.vendor_id) AS pricing_revision_id,
+    (SELECT p.revision_id FROM dropship.dropship_content_profiles p
+      WHERE p.store_connection_id = sc.id AND p.vendor_id = sc.vendor_id) AS content_revision_id,
+    (SELECT p.revision_id FROM dropship.dropship_ebay_category_rule_profiles p
+      WHERE p.store_connection_id = sc.id AND p.vendor_id = sc.vendor_id) AS ebay_rules_revision_id
+  FROM dropship.dropship_store_connections sc WHERE sc.id = $1`;
+/**
+ * The store's failure audit row (D20): entity the store (the `(entity_type,
+ * entity_id)` index the source's exclusion reads), actor the system's run,
+ * severity `error`. Written only when no row of the store already names the
+ * same planner version and revisions, so a replayed record writes nothing.
+ */
+const FAILURE_AUDIT_SQL = `INSERT INTO dropship.dropship_audit_events
+       (vendor_id, store_connection_id, entity_type, entity_id, event_type, actor_type, actor_id, severity, payload, created_at)
+     SELECT $1::int, $2::int, 'dropship_store_connection', $3::text, $4::text, 'system', $5::text, 'error', $6::jsonb, $7::timestamptz
+     WHERE NOT EXISTS (SELECT 1 FROM dropship.dropship_audit_events a
+       WHERE a.entity_type = 'dropship_store_connection' AND a.entity_id = $3::text AND a.event_type = $4::text
+         AND a.payload->'plannerVersion' = $6::jsonb->'plannerVersion' AND a.payload->'revisions' = $6::jsonb->'revisions')
+     RETURNING id`;
+
+export class PgDropshipListingRulesConversionRepository implements ListingRulesConversionRepository, RulesConversionJobRepository {
   constructor(
     private readonly dbPool: Pick<Pool, "connect"> = defaultPool,
     /** Told when the .ops cost read fails inside the load (it goes on, and the body refuses it). */
@@ -201,6 +249,142 @@ export class PgDropshipListingRulesConversionRepository implements ListingRulesC
     } finally {
       client.release();
     }
+  }
+
+  /**
+   * The system job's check of one store (PR 11e2, plan 9.2 `checkForStore`,
+   * 13.3 step 3): the dry run's own load (loadConversionInputsWithClient, as
+   * GET …/conversion composes it) in one REPEATABLE READ READ ONLY snapshot,
+   * with the owner found by the store and no lock of any kind, so a store
+   * that is not clean holds up no writer and no queue (plan 13.8). Null when
+   * the store is gone. The plan is the caller's (the job service): this
+   * reads only. A failed .ops cost read is reported (the constructor's
+   * reporter) and comes back in the load. COMMIT, or ROLLBACK on any failure
+   * (the read's own failure is the one thrown, mapped once); a connection
+   * whose rollback failed is destroyed, never handed back mid-transaction.
+   */
+  async loadConversionInputsForStore(input: { storeConnectionId: number; now: Date }): Promise<RulesConversionStoreLoad | null> {
+    if (!isInt4Id(input.storeConnectionId) || !(input.now instanceof Date) || !Number.isFinite(input.now.getTime())) {
+      throw listingSettingsInvariantFailed("The rules conversion job's check was asked outside its contract.", {
+        invalid: [isInt4Id(input.storeConnectionId) ? null : "storeConnectionId",
+          input.now instanceof Date && Number.isFinite(input.now.getTime()) ? null : "now"].filter((field): field is string => field !== null),
+      });
+    }
+    let client: PoolClient;
+    try {
+      client = await this.dbPool.connect();
+    } catch (error) {
+      throw mapListingSettingDatabaseError(error);
+    }
+    let rollbackFailure: Error | undefined;
+    try {
+      await client.query(READ_SNAPSHOT_BEGIN_SQL);
+      const owner = (await client.query<{ vendor_id: unknown }>(STORE_OWNER_READ_SQL, [input.storeConnectionId])).rows[0];
+      let result: RulesConversionStoreLoad | null = null;
+      if (owner !== undefined) {
+        const vendorId = ownerVendorId(owner, input.storeConnectionId);
+        result = { vendorId, load: await loadConversionInputsWithClient(client,
+          { vendorId, storeConnectionId: input.storeConnectionId, now: input.now }, this.reportCostReadFailure) };
+      }
+      await client.query("COMMIT");
+      return result;
+    } catch (error) {
+      rollbackFailure = await rollbackQuietly(client);
+      throw mapListingSettingDatabaseError(error);
+    } finally {
+      client.release(rollbackFailure);
+    }
+  }
+
+  /**
+   * A store the job dead-letters (PR 11e2, plan 9.2, 13.3, D20), in one
+   * short READ COMMITTED transaction of its own (the conversion's rolled
+   * back): recordRulesConversionFailureWithClient, then COMMIT. ROLLBACK and
+   * the original error, mapped once, on any failure; released once.
+   */
+  async recordFailure(input: { storeConnectionId: number; expectedVendorId: number; payload: RulesConversionFailureAudit; now: Date }):
+    Promise<RulesConversionFailureRecordOutcome> {
+    let client: PoolClient;
+    try {
+      client = await this.dbPool.connect();
+    } catch (error) {
+      throw mapListingSettingDatabaseError(error);
+    }
+    let rollbackFailure: Error | undefined;
+    try {
+      await client.query("BEGIN");
+      const outcome = await recordRulesConversionFailureWithClient(client, input);
+      await client.query("COMMIT");
+      return outcome;
+    } catch (error) {
+      rollbackFailure = await rollbackQuietly(client);
+      throw mapListingSettingWriteError(error);
+    } finally {
+      client.release(rollbackFailure);
+    }
+  }
+}
+
+/**
+ * The failure record's two statements on the caller's transaction (PR 11e2,
+ * D20): the store's vendor and three head revisions now, then one
+ * `listing_rules_conversion_failed` audit row naming the planner version and
+ * exactly the revisions the failed check or apply was planned from. A head
+ * moves only forward (each profile's coherence trigger requires a new
+ * revision to follow the current head, migrations 0659, 0660, 0717), so heads
+ * equal to the ones the job's list read are the ones the failure read; when
+ * any moved, the store's rules changed since, nothing is written, and the
+ * job checks the store again next tick with its new rules (re-armed, as D20
+ * asks). Inputs are checked before any statement (fatal on a breach).
+ */
+export async function recordRulesConversionFailureWithClient(client: QueryClient, input: {
+  storeConnectionId: number; expectedVendorId: number; payload: RulesConversionFailureAudit; now: Date;
+}): Promise<RulesConversionFailureRecordOutcome> {
+  const parsed = rulesConversionFailureAuditSchema.safeParse(input.payload);
+  if (!isInt4Id(input.storeConnectionId) || !isInt4Id(input.expectedVendorId) || !parsed.success
+    || !(input.now instanceof Date) || !Number.isFinite(input.now.getTime())) {
+    throw listingSettingsInvariantFailed("A rules conversion failure record was asked outside its contract.", {
+      storeConnectionId: isInt4Id(input.storeConnectionId) ? input.storeConnectionId : null,
+    });
+  }
+  const payload = parsed.data;
+  const store = (await client.query<{ vendor_id: unknown; pricing_revision_id: unknown; content_revision_id: unknown;
+    ebay_rules_revision_id: unknown }>(STORE_HEADS_SQL, [input.storeConnectionId])).rows[0];
+  if (store === undefined) return "store_gone";
+  const heads = storeHeads(store, input.storeConnectionId);
+  if (store.vendor_id !== input.expectedVendorId || !sameHeads(heads, payload.revisions)) return "rules_changed";
+  const inserted = await client.query(FAILURE_AUDIT_SQL, [input.expectedVendorId, input.storeConnectionId, String(input.storeConnectionId),
+    RULES_CONVERSION_FAILED_EVENT, payload.jobKey, JSON.stringify(payload), input.now]);
+  return inserted.rows.length === 1 ? "recorded" : "already_recorded";
+}
+
+/** The three heads as stored: positive int4 ids or null; anything else breaks the profiles' schema (fatal). */
+function storeHeads(row: { pricing_revision_id: unknown; content_revision_id: unknown; ebay_rules_revision_id: unknown },
+  storeConnectionId: number): RulesConversionHeadRevisions {
+  const parsed = rulesConversionHeadRevisionsSchema.safeParse({
+    pricing: row.pricing_revision_id, content: row.content_revision_id, ebayRules: row.ebay_rules_revision_id,
+  });
+  if (!parsed.success) {
+    throw listingSettingsInvariantFailed("A store's profile heads failed their contract.", { storeConnectionId });
+  }
+  return parsed.data;
+}
+
+function sameHeads(left: RulesConversionHeadRevisions, right: RulesConversionHeadRevisions): boolean {
+  return left.pricing === right.pricing && left.content === right.content && left.ebayRules === right.ebayRules;
+}
+
+/**
+ * The read's or the record's own failure is what the caller rethrows; a
+ * failed rollback must not replace it. Its error is returned so the
+ * connection is destroyed.
+ */
+async function rollbackQuietly(client: QueryClient): Promise<Error | undefined> {
+  try {
+    await client.query("ROLLBACK");
+    return undefined;
+  } catch (error) {
+    return error instanceof Error ? error : new Error(String(error));
   }
 }
 

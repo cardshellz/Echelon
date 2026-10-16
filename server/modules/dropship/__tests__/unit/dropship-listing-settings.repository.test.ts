@@ -411,3 +411,51 @@ describe("readStoreListingTextBytesWithClient (PR 11, plan 4.B.1, D9c)", () => {
       .rejects.toMatchObject({ code: "DROPSHIP_LISTING_SETTINGS_INVARIANT_FAILED" });
   });
 });
+
+describe("PgDropshipListingSettingsRepository.readConversionNotice (11e1, plan 9.3)", () => {
+  const OWNER_PLATFORM_READ = /^SELECT v\.id AS vendor_id, sc\.platform\s+FROM dropship\.dropship_vendors v\s+JOIN dropship\.dropship_store_connections sc/;
+  // The store's latest row of either actor, then only when it is an unseen system one (D19).
+  const UNSEEN_READ = /FROM dropship\.dropship_listing_rule_conversions\s+WHERE store_connection_id = \$1 AND vendor_id = \$2\s+ORDER BY id DESC\s+LIMIT 1\) latest\s+WHERE actor_type = 'system' AND notice_seen_at IS NULL$/;
+  const unseen = {
+    id: "41", vendor_id: VENDOR, store_connection_id: STORE, idempotency_key: `rules-conversion:${STORE}`, request_hash: "a".repeat(64),
+    plan_hash: "b".repeat(64), writes_hash: "c".repeat(64), clean: true, changed_size_count: 0, category_count: 2, product_count: 5,
+    pricing_groups_removed: 1, content_groups_removed: 0, ebay_rules_removed: 0, actor_type: "system", actor_id: `rules-conversion:${STORE}`,
+    created_at: SAVED_AT, notice_seen_at: null, notice_seen_by: null,
+  };
+
+  /** Two statements on the pool, never a client: the read opens no snapshot and takes no lock. */
+  function notices(answer: { owner: Record<string, unknown> | null; conversion: Record<string, unknown> | null }) {
+    const statements: Array<{ sql: string; params: readonly unknown[] }> = [];
+    const pool = {
+      connect: async (): Promise<never> => { throw new Error("The notice read took a client."); },
+      query: async (sql: string, params: readonly unknown[] = []) => {
+        statements.push({ sql, params });
+        if (OWNER_PLATFORM_READ.test(sql)) return { rows: answer.owner === null ? [] : [answer.owner] };
+        if (UNSEEN_READ.test(sql)) return { rows: answer.conversion === null ? [] : [answer.conversion] };
+        throw new Error(`The notice read sent another statement: ${sql}`);
+      },
+    } as unknown as Pick<Pool, "query" | "connect">;
+    return { statements, repository: new PgDropshipListingSettingsRepository(pool) };
+  }
+
+  it("reads the owner by member with the store's platform, then the latest conversion if an unseen system one, on the pool with no lock", async () => {
+    const { statements, repository } = notices({ owner: { vendor_id: VENDOR, platform: "ebay" }, conversion: unseen });
+    await expect(repository.readConversionNotice({ memberId: MEMBER, storeConnectionId: STORE })).resolves.toEqual({ state: "ok",
+      conversion: expect.objectContaining({ id: 41, actorType: "system", noticeSeenAt: null, categoryCount: 2, productCount: 5,
+        createdAt: SAVED_AT.toISOString() }) });
+    expect(statements.map((statement) => statement.params)).toEqual([[MEMBER, STORE], [STORE, VENDOR]]);
+    expect(statements[0].sql).toMatch(/WHERE v\.member_id::text = \$1 AND sc\.id = \$2$/);
+    expect(statements.some((statement) => ROW_LOCK.test(statement.sql) || TRANSACTION_STATEMENT.test(statement.sql))).toBe(false);
+  });
+
+  it("answers no conversion as null, a store not on eBay without reading conversions, and a store not the member's as null", async () => {
+    const none = notices({ owner: { vendor_id: VENDOR, platform: "ebay" }, conversion: null });
+    await expect(none.repository.readConversionNotice({ memberId: MEMBER, storeConnectionId: STORE })).resolves.toEqual({ state: "ok", conversion: null });
+    const shopify = notices({ owner: { vendor_id: VENDOR, platform: "shopify" }, conversion: unseen });
+    await expect(shopify.repository.readConversionNotice({ memberId: MEMBER, storeConnectionId: STORE })).resolves.toEqual({ state: "not_ebay" });
+    expect(shopify.statements).toHaveLength(1);
+    const notMine = notices({ owner: null, conversion: unseen });
+    await expect(notMine.repository.readConversionNotice({ memberId: MEMBER, storeConnectionId: STORE })).resolves.toBeNull();
+    expect(notMine.statements).toHaveLength(1);
+  });
+});

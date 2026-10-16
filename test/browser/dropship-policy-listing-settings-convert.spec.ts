@@ -1,15 +1,21 @@
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type Locator, type Page } from "@playwright/test";
 import type { ConversionChangeRow, ConversionSizeView, ListingRulesConversionCheck } from "../../shared/dropship/listing-rules-conversion";
+import type { ContentProfileState } from "../../shared/dropship/listing-content";
+import type { CategoryListingSettingValues } from "../../shared/dropship/listing-setting-values";
 import type { ListingSettingsSizePrice } from "../../shared/dropship/listing-settings";
 import {
   SAVED_PRICING_RULES,
+  categoryKey,
   conversionCheck,
+  openOlderSettings,
   shot,
+  stubSystemConversion,
   type ProductFixture,
   type ScriptedError,
   type StubState,
 } from "./dropship-policy-catalog-stubs";
 import {
+  KEY,
   LISTINGS,
   SETUP_PATH,
   STORE,
@@ -38,10 +44,14 @@ test.use({ serviceWorkers: "allow" });
  * button under its line, and its rows read "No category settings yet". The button puts the sheet in the address
  * (`?sheet=convert`), which reads the dry run (`GET …/listing-settings/conversion?page=N`) only while it is open:
  * the server's words and rows, 50 at a time with [Load more], one plan per screen, and for each blocked size
- * [Set a price] or [Fix], which open the drawer in one push so Back returns to the sheet. Nothing can be moved yet.
- * The stub serves scripted pages, each parsed with the strict contract where it is built (this file's load) and
- * when served; it never computes a diff. Every journey ends with nothing unexpected asked and no page error.
- * Desktop and phone.
+ * [Set a price] or [Fix], which open the drawer in one push so Back returns to the sheet. From part 11d (plan 8.2-8.5)
+ * its footer has [Move them over] (W11, `POST …/listing-settings/conversion/apply`): one keyed POST with page 0's two
+ * hashes, only when pressed, every outcome worded, a confirmed one kept until the sheet closes, and the views read
+ * again. The stub serves scripted pages, each parsed with the strict contract where it is built (this file's load) and
+ * when served; it never computes a diff, and a move is bound to the scripted page 0's hashes. From part 11e1 (plan
+ * 9.2-9.4) a store the job moved shows the one-time notice in the line's place, with [Got it] (`POST
+ * …/conversion/notice/acknowledge`, no key), and the sheet says the same when it finds the store moved. Every journey
+ * ends with nothing unexpected asked and no page error. Desktop and phone.
  */
 
 const CONVERSION_PATH = `${LISTINGS}/listing-settings/conversion`;
@@ -49,7 +59,9 @@ const SUMMARY_PATH = `${LISTINGS}/listing-settings/summary`;
 const CATEGORIES_PATH = `${LISTINGS}/listing-settings/categories`;
 const PLAN_A = "a".repeat(64);
 const PLAN_B = "b".repeat(64);
+const PLAN_C = "9".repeat(64);
 const WRITES = "c".repeat(64);
+const WRITES_B = "8".repeat(64);
 const DESCRIPTION = "d".repeat(64);
 const SLEEVES = 40;
 /** The line's, the card's and the editor's button. */
@@ -258,11 +270,11 @@ test("See what changes pushes ?sheet=convert and reads page 0 once; a clean answ
   await expect(sheet(page).getByTestId("older-rules-kept")).toHaveText("Kept as they are: 2 exact prices");
   await expect(sheet(page).getByTestId("older-rules-blocked")).toHaveCount(0);
   await expect(sheet(page).getByTestId("older-rules-changes")).toHaveCount(0);
-  // Read-only (11b): the footer says so and only closes.
+  // The footer (11d): [Close] and [Move them over]; nothing is moved until it is pressed (D1).
   const footer = sheet(page).getByTestId("older-rules-footer");
-  await expect(footer).toContainText("This is a preview. Nothing is moved yet.");
-  await expect(footer.getByRole("button")).toHaveText(["Close"]);
-  await expect(sheet(page).getByRole("button", { name: /Move them over/ })).toHaveCount(0);
+  await expect(footer).not.toContainText("This is a preview");
+  await expect(footer.getByRole("button")).toHaveText(["Close", "Move them over"]);
+  expect(state.conversionApplies).toEqual([]);
   await expectSheetLayout(page, testInfo, sheet(page));
   await expectInView(page, footer.getByRole("button", { name: "Close" }));
   if (phone(testInfo)) {
@@ -555,5 +567,448 @@ test("an old ?sheet=convert on a store with no older rules says so, and reads th
   await page.waitForTimeout(500);
   expect(conversionReads(state)).toEqual(["?page=0"]);
   expect(readsOf(state, "GET", SUMMARY_PATH)).toHaveLength(2);
+  expectNothingUnexpected(state);
+});
+
+// ---------------------------------------------------------------------------
+// [Move them over] (PR 11d, plan 8.2-8.5; D1, D12, D21, D25; CUX#4, CUX#11)
+// ---------------------------------------------------------------------------
+
+const APPLY_PATH = `${LISTINGS}/listing-settings/conversion/apply`;
+const MOVED = "Moved over. Category settings can be saved now.";
+const NO_CATEGORY_VALUES: CategoryListingSettingValues = {
+  price: null, ebayCategory: null, storeShelf: null, shippingPolicy: null, returnPolicy: null, paymentPolicy: null, textAbove: null, textBelow: null,
+};
+
+function footer(page: Page) {
+  return sheet(page).getByTestId("older-rules-footer");
+}
+
+function moveButton(page: Page) {
+  return footer(page).getByRole("button", { name: "Move them over", exact: true });
+}
+
+/** What the clean plan writes when it commits (the stub computes no plan): Sleeves gets the group's price. */
+function sleevesPriceLayer(): StubState["conversionLayers"] {
+  return { categorySettings: { [categoryKey(STORE, SLEEVES)]: { revisionId: 1, values: { ...NO_CATEGORY_VALUES, price: SAVED_PRICING_RULES.profile!.defaultRecipe } } }, productSettings: {} };
+}
+
+/** Not clean, nothing blocked: 60 sizes change, 50 on page 0. */
+function notCleanFreePage(page: 0 | 1): ListingRulesConversionCheck {
+  const first = page * 50;
+  return conversionCheck(STORE, {
+    state: "not_clean", planHash: PLAN_B, writesHash: WRITES,
+    changes: { page, pageSize: 50, total: 60, rows: Array.from({ length: page === 0 ? 50 : 10 }, (_, index) => changedRow(first + index, "Binder Pages")) },
+  });
+}
+
+/** The posts the move sent, as the page sent them. */
+function applies(state: StubState) {
+  return state.conversionApplies.map((write) => write.body);
+}
+
+test("Move them over on a clean store: one POST with the hashes shown and an ls-convert key; Moved over. stays; Close: the line goes and the card has Change, focus on its heading", async ({ page }, testInfo) => {
+  const state = await openStep(page, convertState({ conversionPages: { 0: CLEAN }, conversionLayers: sleevesPriceLayer() }));
+  await openSheet(page);
+  await expect(moveButton(page)).toBeEnabled();
+  if (phone(testInfo)) {
+    expect((await moveButton(page).boundingBox())!.height).toBeGreaterThanOrEqual(44);
+    await expectNoHorizontalScroll(page);
+  }
+  await expectInView(page, moveButton(page));
+  await moveButton(page).click();
+  await expect(footer(page)).toContainText(MOVED);
+  // One POST, bound to page 0's two hashes, under a key of its own (D1, D12).
+  expect(applies(state)).toEqual([{ idempotencyKey: KEY("ls-convert"), planHash: PLAN_A, writesHash: WRITES }]);
+  expect(readsOf(state, "POST", APPLY_PATH)).toHaveLength(1);
+  // The store as the move left it (the stub's): the group gone, its default kept; Sleeves' price set.
+  expect(state.pricingRules[STORE].profile?.groups).toEqual([]);
+  expect(state.pricingRules[STORE].profile?.defaultRecipe).toEqual(SAVED_PRICING_RULES.profile!.defaultRecipe);
+  // The views are read again: page 0 now says there are no older rules, and the outcome stays (CUX#11).
+  await expect(sheet(page).getByTestId("older-rules-none")).toBeVisible();
+  await page.waitForTimeout(300);
+  await expect(footer(page)).toContainText(MOVED);
+  await expect(footer(page).getByRole("button")).toHaveText(["Close"]);
+  // [Move them over] is gone: focus waits on [Close], beside the words.
+  await expect(footer(page).getByRole("button", { name: "Close" })).toBeFocused();
+  await expect(sheet(page)).not.toContainText("_");
+  await shot(page, testInfo, "listing-settings-older-rules-moved");
+
+  await footer(page).getByRole("button", { name: "Close" }).click();
+  await expect(sheet(page)).toHaveCount(0);
+  await expect(line(page)).toHaveCount(0);
+  await expect(card(page).getByRole("button", { name: "Change settings for Sleeves", exact: true })).toBeVisible();
+  await expect(card(page).getByTestId("category-settings-row-40")).toContainText("Sets: price");
+  await expect(card(page)).not.toContainText("older group rules");
+  // The line's button went with the line: focus goes to the card's heading (11.2).
+  await expect(card(page).getByRole("heading", { name: "Category settings" })).toBeFocused();
+  // Nothing sent again; the hidden older pricing and eBay rules panels read their new profiles once more (8.4).
+  expect(readsOf(state, "POST", APPLY_PATH)).toHaveLength(1);
+  expect(readsOf(state, "GET", `${LISTINGS}/pricing-rules`)).toHaveLength(2);
+  expect(readsOf(state, "GET", `${LISTINGS}/ebay-category-rules`)).toHaveLength(2);
+  expect(readsOf(state, "GET", `${LISTINGS}/content-profile`)).toEqual([]);
+  expectNothingUnexpected(state);
+});
+
+test("not clean: a size that would lose its price keeps Move them over off with its section; with nothing blocked the footer names how many sizes change, and the move goes", async ({ page }, testInfo) => {
+  const state = await openStep(page, convertState({ conversionPages: { 0: NOT_CLEAN_A[0], 1: NOT_CLEAN_A[1] } }));
+  await openSheet(page);
+  await expect(sheet(page).getByTestId("older-rules-blocked")).toContainText("1 size would have no price after the move.");
+  await expect(footer(page)).toContainText("Fix the sizes listed above first.");
+  await expect(moveButton(page)).toBeDisabled();
+  await footer(page).getByRole("button", { name: "Close" }).click();
+  expect(applies(state)).toEqual([]);
+
+  // Fixed meanwhile (the price given): the plan has no block now, and 60 sizes change.
+  state.conversionPages = { 0: notCleanFreePage(0), 1: notCleanFreePage(1) };
+  await openSheet(page);
+  await expect(sheet(page).getByTestId("older-rules-blocked")).toHaveCount(0);
+  await expect(footer(page)).toContainText("These 60 sizes change as listed.");
+  await expect(moveButton(page)).toBeEnabled();
+  if (phone(testInfo)) await expectNoHorizontalScroll(page);
+  await moveButton(page).click();
+  await expect(footer(page)).toContainText(MOVED);
+  expect(applies(state)).toEqual([{ idempotencyKey: KEY("ls-convert"), planHash: PLAN_B, writesHash: WRITES }]);
+  expectNothingUnexpected(state);
+});
+
+test("CHANGED: the words say why, page 0 is read again, and nothing more is sent until Move them over is pressed again, each time with a new key", async ({ page }) => {
+  const state = await openStep(page, convertState({ conversionPages: { 0: CLEAN }, conversionLayers: sleevesPriceLayer() }));
+  await openSheet(page);
+  await expect(moveButton(page)).toBeEnabled();
+  // The settings the move writes change in another window after the sheet read page 0.
+  state.conversionPages = { 0: conversionCheck(STORE, { ...CLEAN, planHash: PLAN_B, writesHash: WRITES_B }) };
+  await moveButton(page).click();
+  await expect(footer(page)).toContainText("Something changed since you opened this. Check the list again.");
+  // Page 0 is read again (the runner's re-read; the page's own refresh after any save reads it too), and the button
+  // comes back on its new hashes once it answers.
+  await expect.poll(() => conversionReads(state).length).toBeGreaterThanOrEqual(2);
+  await expect(moveButton(page)).toBeEnabled();
+  await page.waitForTimeout(300);
+  expect(applies(state)).toHaveLength(1);
+
+  // Now only the listed changes move (a cost, say): the same writes, another plan.
+  state.conversionPages = { 0: conversionCheck(STORE, { ...CLEAN, planHash: PLAN_C, writesHash: WRITES_B }) };
+  const readsBefore = conversionReads(state).length;
+  await moveButton(page).click();
+  await expect(footer(page)).toContainText("Some changes in the list are different now, for example because a cost changed. Check the list again.");
+  await expect.poll(() => conversionReads(state).length).toBeGreaterThan(readsBefore);
+  await expect(moveButton(page)).toBeEnabled();
+  await page.waitForTimeout(300);
+  expect(applies(state)).toHaveLength(2);
+
+  await moveButton(page).click();
+  await expect(footer(page)).toContainText(MOVED);
+  const bodies = applies(state);
+  expect(bodies).toEqual([
+    { idempotencyKey: KEY("ls-convert"), planHash: PLAN_A, writesHash: WRITES },
+    { idempotencyKey: KEY("ls-convert"), planHash: PLAN_B, writesHash: WRITES_B },
+    { idempotencyKey: KEY("ls-convert"), planHash: PLAN_C, writesHash: WRITES_B },
+  ]);
+  // One key per plan shown: a refusal never sends its key again (D12).
+  expect(new Set(bodies.map((body) => body.idempotencyKey)).size).toBe(3);
+  expectNothingUnexpected(state);
+});
+
+test("a dropped answer: We couldn't confirm the move.; Esc keeps the sheet, Back keeps the move, and Check again sends the same key and hashes, answered from the first move", async ({ page }) => {
+  const state = await openStep(page, convertState({ conversionPages: { 0: CLEAN }, conversionLayers: sleevesPriceLayer(), conversionApplyAnswers: ["drop"] }));
+  await openSheet(page);
+  await moveButton(page).click();
+  await expect(footer(page)).toContainText("We couldn't confirm the move.");
+  await expect(footer(page).getByRole("button")).toHaveText(["Check again", "Close"]);
+  // Esc keeps the sheet while the move is unconfirmed (PLAN10 3.4).
+  await page.keyboard.press("Escape");
+  await expect(sheet(page)).toBeVisible();
+  // The move did land: the views read after any save (the page's refresh) find no older rules, so the line goes; the
+  // unconfirmed move stays in the sheet to be checked (11.5).
+  await expect(sheet(page).getByTestId("older-rules-none")).toBeVisible();
+  await expect(line(page)).toHaveCount(0);
+  // Back closes it and keeps the move (D21); Forward opens it again on the same move, still unconfirmed.
+  await page.goBack();
+  await expect(sheet(page)).toHaveCount(0);
+  await page.goForward();
+  await expect(sheet(page)).toBeVisible();
+  await expect(page).toHaveURL(`${SETUP_PATH}?sheet=convert`);
+  await expect(sheet(page).getByTestId("older-rules-none")).toBeVisible();
+  await expect(footer(page)).toContainText("We couldn't confirm the move.");
+  await footer(page).getByRole("button", { name: "Check again", exact: true }).click();
+  await expect(footer(page)).toContainText(MOVED);
+  const bodies = applies(state);
+  expect(bodies).toHaveLength(2);
+  expect(bodies[0]).toEqual({ idempotencyKey: KEY("ls-convert"), planHash: PLAN_A, writesHash: WRITES });
+  // The same key and body: the stub answers it from the first move (replayed), which committed once.
+  expect(bodies[1]).toEqual(bodies[0]);
+  expect(state.pricingRules[STORE].profile?.groups).toEqual([]);
+  expectNothingUnexpected(state);
+});
+
+test("a move that never landed, closed by Back: Check again in the reopened sheet moves it, and says Moved over. alone while its own re-reads land", async ({ page }) => {
+  // A 5xx no route sends (a gateway's): the move may or may not have happened, but here it did not.
+  const gateway: ScriptedError = { status: 504, code: "STUB_GATEWAY_TIMEOUT", message: "Gateway timeout." };
+  const state = await openStep(page, convertState({ conversionPages: { 0: CLEAN }, conversionLayers: sleevesPriceLayer(), conversionApplyAnswers: [gateway] }));
+  await openSheet(page);
+  await moveButton(page).click();
+  await expect(footer(page)).toContainText("We couldn't confirm the move.");
+  expect(state.pricingRules[STORE].profile?.groups).toHaveLength(1);
+  // Back closes it and keeps the move (D21); Forward opens it again on the same move, page 0 still the report.
+  await page.goBack();
+  await expect(sheet(page)).toHaveCount(0);
+  await page.goForward();
+  await expect(sheet(page)).toBeVisible();
+  await expect(footer(page)).toContainText("We couldn't confirm the move.");
+  await expect(sheet(page).getByTestId("older-rules-none")).toHaveCount(0);
+  // From here the summary answers slowly, so page 0 (one of the move's own re-reads) finds no older rules first. The
+  // sheet must take that as the move's own doing: a one-time re-read (11.5) then would cancel the move's summary read,
+  // and a confirmed move would say the view may be out of date.
+  await page.route(`**${SUMMARY_PATH}*`, async (route) => {
+    await new Promise((done) => setTimeout(done, 1_500));
+    await route.fallback();
+  });
+
+  await footer(page).getByRole("button", { name: "Check again", exact: true }).click();
+  await expect(sheet(page).getByTestId("older-rules-none")).toBeVisible();
+  await expect(footer(page)).toContainText(MOVED);
+  await page.waitForTimeout(500);
+  await expect(footer(page)).toContainText(MOVED);
+  await expect(sheet(page)).not.toContainText("We couldn't load the latest view.");
+  await expect(sheet(page)).not.toContainText("Something changed");
+  await expect(footer(page).getByRole("button")).toHaveText(["Close"]);
+  const bodies = applies(state);
+  // Check again resends the same key and body; the stub, which refused the first, moves it now.
+  expect(bodies).toHaveLength(2);
+  expect(bodies[1]).toEqual(bodies[0]);
+  expect(state.pricingRules[STORE].profile?.groups).toEqual([]);
+  expectNothingUnexpected(state);
+});
+
+test("the costs can't be read when moving: Nothing was moved, never couldn't confirm; pressing again sends the same key", async ({ page }) => {
+  const state = await openStep(page, convertState({ conversionPages: { 0: CLEAN }, conversionLayers: sleevesPriceLayer(), conversionApplyAnswers: [CHECK_UNAVAILABLE] }));
+  await openSheet(page);
+  await moveButton(page).click();
+  await expect(footer(page)).toContainText("We couldn't read your costs just now. Nothing was moved. Try again in a minute.");
+  await expect(footer(page)).not.toContainText("confirm");
+  await expect(sheet(page)).not.toContainText("DROPSHIP_");
+  await expect(moveButton(page)).toBeEnabled();
+  expect(state.pricingRules[STORE].profile?.groups).toHaveLength(1);
+  await moveButton(page).click();
+  await expect(footer(page)).toContainText(MOVED);
+  const bodies = applies(state);
+  expect(bodies).toHaveLength(2);
+  // The key is kept: the first send moved nothing, and this is the same intent (PLAN10 D5).
+  expect(bodies[1]).toEqual(bodies[0]);
+  expectNothingUnexpected(state);
+});
+
+test("moved elsewhere meanwhile: Your rules have already been moved over.; Close: the line goes and the card has Change", async ({ page }) => {
+  const state = await openStep(page, convertState({ conversionPages: { 0: CLEAN } }));
+  await openSheet(page);
+  // Another window (or the system) moved the rules after the sheet read page 0.
+  state.pricingRules = { [STORE]: SAVED_PRICING_RULES };
+  await moveButton(page).click();
+  await expect(footer(page)).toContainText("Your rules have already been moved over.");
+  await expect(footer(page).getByRole("button")).toHaveText(["Close"]);
+  await page.waitForTimeout(300);
+  await expect(footer(page)).toContainText("Your rules have already been moved over.");
+  await footer(page).getByRole("button", { name: "Close" }).click();
+  await expect(line(page)).toHaveCount(0);
+  await expect(card(page).getByRole("button", { name: "Change settings for Sleeves", exact: true })).toBeVisible();
+  expect(applies(state)).toEqual([{ idempotencyKey: KEY("ls-convert"), planHash: PLAN_A, writesHash: WRITES }]);
+  expectNothingUnexpected(state);
+});
+
+/** One description group (a product-line template) beside the pricing group: the move empties both profiles. */
+function contentWithGroup(): ContentProfileState {
+  return {
+    revisionId: 6, updatedAt: "2026-10-15T12:00:00.000Z", profile: {
+      defaultTemplate: { introduction: "", footer: "" },
+      groups: [{ id: "binders", name: "Binder text", priority: 1, scope: { type: "category", category: "Sleeves" }, template: { introduction: "Fits any binder.", footer: "" } }],
+    },
+  };
+}
+
+test("Older settings' pricing and description panels read the new profiles after the move (8.4)", async ({ page }) => {
+  const state = await openStep(page, convertState({ conversionPages: { 0: CLEAN }, conversionLayers: sleevesPriceLayer(), contentProfiles: { [STORE]: contentWithGroup() } }));
+  await openOlderSettings(page);
+  await expect(page.getByRole("heading", { name: "Group rules (1)", exact: true })).toBeVisible();
+  expect(state.contentProfiles[STORE].profile?.groups.map((group) => group.name)).toEqual(["Binder text"]);
+  await openSheet(page);
+  await moveButton(page).click();
+  await expect(footer(page)).toContainText(MOVED);
+  await footer(page).getByRole("button", { name: "Close" }).click();
+  // The pricing panel's form follows the new revision: no group left, nothing to save onto an old one.
+  await expect(page.getByRole("heading", { name: "Group rules (0)", exact: true })).toBeVisible();
+  expect(state.contentProfiles[STORE].profile?.groups).toEqual([]);
+  // The description templates read the new profile when opened: the group is gone. The panel renders its form only once
+  // its read answered, so its form's own line shows first; only then does the group's absence mean anything.
+  await page.getByRole("button", { name: "Edit templates" }).click();
+  await expect.poll(() => readsOf(state, "GET", `${LISTINGS}/content-profile`).length).toBe(1);
+  await expect(page.getByText("A matching group replaces the store introduction/footer", { exact: false })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Add template group" })).toBeVisible();
+  await expect(page.getByText("Binder text · priority 1")).toHaveCount(0);
+  expectNothingUnexpected(state);
+});
+
+// ---------------------------------------------------------------------------
+// The one-time notice (PR 11e1, plan 9.2-9.4, 11.3, 11.5; D18, D19, D21, D25; CUX#1)
+// ---------------------------------------------------------------------------
+
+const NOTICE_PATH = `${LISTINGS}/listing-settings/conversion/notice`;
+const NOTICE_ACK_PATH = `${NOTICE_PATH}/acknowledge`;
+/** The job moved one category's rule (the scripted Sleeves layer). */
+const NOTICE_WORDS = "We moved your older group rules. 1 category now has its own settings. Nothing in your listings changed. "
+  + "Products you choose later use their category's settings or your store defaults.";
+const JOB_CONVERSION = 77;
+
+function noticeLine(page: Page) {
+  return page.getByTestId("conversion-notice-line");
+}
+
+function gotIt(scope: Locator) {
+  return scope.getByRole("button", { name: "Got it, hide this note", exact: true });
+}
+
+/** The presses sent, as the page sent them. */
+function acknowledges(state: StubState) {
+  return state.conversionNoticeAcknowledges.map((write) => write.body);
+}
+
+/** A store the job moved before the page opened: no group left, Sleeves' price set, its notice unseen. */
+function movedByTheJob(overrides: Partial<StubState> = {}): Partial<StubState> {
+  return {
+    catalog: structuredClone([PENNY, TEAM]), pricingRules: { [STORE]: SAVED_PRICING_RULES },
+    categorySettings: sleevesPriceLayer().categorySettings,
+    conversionNotices: { [STORE]: { notice: { conversionId: JOB_CONVERSION, convertedAt: "2026-10-16T05:00:00.000Z", categoryCount: 1, productCount: 0 },
+      seen: false } },
+    ...overrides,
+  };
+}
+
+test("a store the job moved shows the notice in the line's place; Got it sends one POST, the line goes, focus moves on; a reload doesn't bring it back", async ({ page }, testInfo) => {
+  const state = await openStep(page, movedByTheJob());
+  await expect(noticeLine(page)).toContainText(NOTICE_WORDS);
+  await expect(line(page)).toHaveCount(0);
+  await expect(card(page).getByRole("button", { name: "Change settings for Sleeves", exact: true })).toBeVisible();
+  // In the strip's slot, above the Store defaults card; a mount read of its own (D18), and no dry run.
+  const placed = await page.evaluate(() => {
+    const at = (id: string) => document.querySelector(`[data-testid="${id}"]`);
+    const noticeAt = at("conversion-notice-line");
+    const defaultsAt = at("store-defaults-card");
+    return noticeAt !== null && defaultsAt !== null && Boolean(noticeAt.compareDocumentPosition(defaultsAt) & Node.DOCUMENT_POSITION_FOLLOWING);
+  });
+  expect(placed).toBe(true);
+  expect(readsOf(state, "GET", NOTICE_PATH)).toHaveLength(1);
+  expect(conversionReads(state)).toEqual([]);
+  expectGatedReads(state);
+  if (phone(testInfo)) {
+    expect((await gotIt(noticeLine(page)).boundingBox())!.height).toBeGreaterThanOrEqual(44);
+    await expectNoHorizontalScroll(page);
+  }
+  await expect(noticeLine(page)).not.toContainText("_");
+  await shot(page, testInfo, "listing-settings-conversion-notice");
+
+  await gotIt(noticeLine(page)).click();
+  await expect(noticeLine(page)).toHaveCount(0);
+  expect(acknowledges(state)).toEqual([{ conversionId: JOB_CONVERSION }]);
+  expect(state.conversionNotices[STORE].seen).toBe(true);
+  // The button went with the line: focus moves to the Category settings card's heading (11.2).
+  await expect(card(page).getByRole("heading", { name: "Category settings" })).toBeFocused();
+  // The notice is read again after the press (its own key only).
+  await expect.poll(() => readsOf(state, "GET", NOTICE_PATH).length).toBe(2);
+  await page.waitForTimeout(300);
+  await expect(line(page)).toHaveCount(0);
+
+  // The server keeps that it was seen: a reload (or another device) never shows it again.
+  await page.reload();
+  await expect(card(page).getByRole("button", { name: "Change settings for Sleeves", exact: true })).toBeVisible();
+  await expect.poll(() => readsOf(state, "GET", NOTICE_PATH).length).toBe(3);
+  await page.waitForTimeout(300);
+  await expect(noticeLine(page)).toHaveCount(0);
+  expect(readsOf(state, "POST", NOTICE_ACK_PATH)).toHaveLength(1);
+  expectNothingUnexpected(state);
+});
+
+test("a Got it whose answer never came back keeps the notice with why; pressed again it goes: the server had marked it, so it is already seen", async ({ page }) => {
+  const state = await openStep(page, movedByTheJob({ conversionNoticeAcknowledgeAnswers: ["drop"] }));
+  await gotIt(noticeLine(page)).click();
+  await expect(noticeLine(page)).toContainText("Couldn't save that. Try again.");
+  await expect(noticeLine(page).getByRole("alert")).toHaveText("Couldn't save that. Try again.");
+  await expect(noticeLine(page)).toContainText(NOTICE_WORDS);
+  await expect(gotIt(noticeLine(page))).toBeEnabled();
+  await gotIt(noticeLine(page)).click();
+  await expect(noticeLine(page)).toHaveCount(0);
+  // The same body both times, and no request key: the press is idempotent by state.
+  expect(acknowledges(state)).toEqual([{ conversionId: JOB_CONVERSION }, { conversionId: JOB_CONVERSION }]);
+  expectNothingUnexpected(state);
+});
+
+test("too many Got its in a minute say so in the page's words, and the notice stays", async ({ page }) => {
+  const state = await openStep(page, movedByTheJob({ conversionNoticeAcknowledgeAnswers: [{ status: 429, code: "DROPSHIP_LISTING_SETTINGS_RATE_LIMITED",
+    message: "Too many saves in a minute. Wait a moment and try again." }] }));
+  await gotIt(noticeLine(page)).click();
+  await expect(noticeLine(page).getByRole("alert")).toHaveText("Too many saves in a minute. Wait a moment and try again.");
+  await expect(noticeLine(page)).toContainText(NOTICE_WORDS);
+  expect(state.conversionNotices[STORE].seen).toBe(false);
+  expectNothingUnexpected(state);
+});
+
+test("over 10,000 chosen sizes the notice still shows (its read takes no selection), beside the banner", async ({ page }) => {
+  const state = await openStep(page, movedByTheJob({ tooLarge: true }));
+  await expect(banner(page)).toBeVisible();
+  await expect(noticeLine(page)).toContainText(NOTICE_WORDS);
+  await gotIt(noticeLine(page)).click();
+  await expect(noticeLine(page)).toHaveCount(0);
+  expect(acknowledges(state)).toEqual([{ conversionId: JOB_CONVERSION }]);
+  expectNothingUnexpected(state);
+});
+
+test("the job moves the store while the page is open: the sheet finds it moved and says what moved; Close: the older-rules line is gone, the notice and Change show", async ({ page }) => {
+  const state = await openStep(page, convertState({ conversionLayers: sleevesPriceLayer() }));
+  await expect(line(page)).toBeVisible();
+  await expect(noticeLine(page)).toHaveCount(0);
+  const notice = stubSystemConversion(state, STORE);
+  // The summary on screen still says older rules (it is up to 60 seconds old): [See what changes] opens the sheet.
+  await openSheet(page);
+  await expect(sheet(page).getByTestId("older-rules-none")).toHaveText(NOTICE_WORDS);
+  await expect(gotIt(footer(page))).toBeVisible();
+  // The one-time re-read (11.5): the summary, the categories and the notice, never the dry run again.
+  await expect.poll(() => readsOf(state, "GET", NOTICE_PATH).length).toBe(2);
+  await expect.poll(() => readsOf(state, "GET", SUMMARY_PATH).length).toBe(2);
+  expect(conversionReads(state)).toEqual(["?page=0"]);
+  await expect(sheet(page)).not.toContainText("_");
+
+  await footer(page).getByRole("button", { name: "Close" }).click();
+  await expect(sheet(page)).toHaveCount(0);
+  await expect(line(page)).toHaveCount(0);
+  await expect(card(page).getByRole("button", { name: "Change settings for Sleeves", exact: true })).toBeVisible();
+  // Not seen yet: the notice takes the line's place, and goes with Got it there.
+  await expect(noticeLine(page)).toContainText(NOTICE_WORDS);
+  await gotIt(noticeLine(page)).click();
+  await expect(noticeLine(page)).toHaveCount(0);
+  expect(acknowledges(state)).toEqual([{ conversionId: notice.conversionId }]);
+  expectNothingUnexpected(state);
+});
+
+test("Move them over pressed after the job moved the store: the footer says what the job moved, with Got it; pressed, it says the rules were already moved", async ({ page }) => {
+  const state = await openStep(page, convertState({ conversionPages: { 0: CLEAN }, conversionLayers: sleevesPriceLayer() }));
+  await openSheet(page);
+  await expect(moveButton(page)).toBeEnabled();
+  // The job moves the store after the sheet read page 0.
+  const notice = stubSystemConversion(state, STORE);
+  await moveButton(page).click();
+  await expect(footer(page)).toContainText(NOTICE_WORDS);
+  await expect(footer(page)).not.toContainText("Your rules have already been moved over.");
+  expect(applies(state)).toEqual([{ idempotencyKey: KEY("ls-convert"), planHash: PLAN_A, writesHash: WRITES }]);
+  await expect(footer(page).getByRole("button")).toHaveText(["Got it", "Close"]);
+
+  await gotIt(footer(page)).click();
+  await expect(footer(page)).toContainText("Your rules have already been moved over.");
+  await expect(footer(page).getByRole("button")).toHaveText(["Close"]);
+  // [Got it] went from the footer: focus waits on [Close].
+  await expect(footer(page).getByRole("button", { name: "Close" })).toBeFocused();
+  expect(acknowledges(state)).toEqual([{ conversionId: notice.conversionId }]);
+  await footer(page).getByRole("button", { name: "Close" }).click();
+  await expect(line(page)).toHaveCount(0);
+  await expect(noticeLine(page)).toHaveCount(0);
+  expect(readsOf(state, "POST", APPLY_PATH)).toHaveLength(1);
   expectNothingUnexpected(state);
 });

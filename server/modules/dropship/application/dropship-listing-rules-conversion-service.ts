@@ -24,6 +24,7 @@ import type { DropshipListingStoreContext } from "./dropship-listing-preview-ser
 import { checkRulesConversion, type ConversionInputs, type RulesConversionPlan } from "./dropship-listing-rules-conversion";
 import {
   MAX_LISTED_SIZES,
+  WRITABLE_ENTITLEMENT_STATUS,
   WRITABLE_STORE_STATUSES,
   WRITABLE_VENDOR_STATUSES,
   assertListingSettingMember,
@@ -261,7 +262,7 @@ export type ConversionMode =
   | { kind: "system" };
 
 /** Why the system leaves a store alone at the gate (plan 13.2, 13.7): expected, never retried as a fault. */
-export type ConversionSkipReason = "store_not_found" | "not_ebay" | "vendor_not_eligible" | "store_not_eligible";
+export type ConversionSkipReason = "store_not_found" | "not_ebay" | "vendor_not_eligible" | "vendor_not_entitled" | "store_not_eligible";
 
 /**
  * What one transaction did. The vendor's refusals are thrown (plan 3.4); the
@@ -419,14 +420,19 @@ export async function convertInTransaction(tx: ListingRulesConversionTransaction
 
 /**
  * The system job's gate (plan 13.2): an eBay store, `connected`,
- * `needs_reauth` or `refresh_failed`, of an `active` or `onboarding` vendor:
- * the write gate's own two allow-lists (authorizeListingSettingWrite), which
- * 11e2's store query binds too, so the query and this re-check never differ.
+ * `needs_reauth` or `refresh_failed`, of an `active` or `onboarding` vendor
+ * whose .ops entitlement is `active`: the write gate's own two allow-lists
+ * and its entitlement rule (authorizeListingSettingWrite), which 11e2's store
+ * query binds too, so the query and this re-check never differ. The
+ * entitlement is read from authorize()'s context under the owner rows' FOR
+ * SHARE, as the vendor's own write gate reads it: the system never makes a
+ * write the vendor himself could not make.
  */
 function systemSkipReason(store: DropshipListingStoreContext | null): ConversionSkipReason | null {
   if (store === null) return "store_not_found";
   if (store.platform !== "ebay") return "not_ebay";
   if (!WRITABLE_VENDOR_STATUSES.has(store.vendorStatus)) return "vendor_not_eligible";
+  if (store.entitlementStatus !== WRITABLE_ENTITLEMENT_STATUS) return "vendor_not_entitled";
   if (!WRITABLE_STORE_STATUSES.has(store.storeStatus)) return "store_not_eligible";
   return null;
 }

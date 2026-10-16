@@ -24,6 +24,7 @@ import {
   countOlderSettingsDrafts,
   decideOpen,
   describeListingSettingsBar,
+  draftEnteredConflict,
   isDraftDirty,
 } from "@/lib/dropship-listing-settings-drafts";
 import {
@@ -36,7 +37,7 @@ import {
   sheetSearch,
   type DrawerTarget,
 } from "@/lib/dropship-listing-settings-drawer";
-import type { ConversionDrawerLanding } from "@/lib/dropship-listing-settings-conversion";
+import { conflictRereadKeys, type ConversionDrawerLanding } from "@/lib/dropship-listing-settings-conversion";
 import { isStoreDefaultPolicyEditor, policyEditorBase } from "@/lib/dropship-listing-settings-store-requests";
 import { LISTING_SETTINGS_CATEGORY_WORDS } from "@/lib/dropship-listing-settings-words";
 import type { DropshipEbayStoreCategoryResponse, DropshipStoreConnectionSummary } from "@/lib/dropship-ops-surface";
@@ -45,6 +46,7 @@ import { useLeaveGuard, useUnsavedDrafts } from "../catalog/UnsavedChangesGuard"
 import { AttentionStrip } from "./AttentionStrip";
 import { CategoryEditor, type CategoryEditorCloseReason } from "./CategoryEditor";
 import { CategorySettingsCard, type CategoryCardOpen } from "./CategorySettingsCard";
+import { ConversionNoticeLine } from "./ConversionNoticeLine";
 import { ConnectionBannerView } from "./ConnectionBanner";
 import { DescriptionDefaultRow } from "./DescriptionDefaultRow";
 import { EbayCategoryDefaultRow } from "./EbayCategoryDefaultRow";
@@ -78,10 +80,11 @@ import { UpdatedProductsSheet, type OwnTextCheckAction } from "./UpdatedProducts
  * `?sheet=bulk` for "Set for selected", `?sheet=updated` for "Card Shellz
  * updated products", `?sheet=give-prices` for "Give these sizes a price" and
  * `?category=<id>` for a category's editor; from PR 11b `?sheet=convert` for
- * the read-only "Your older group rules") to the right place, one surface
- * at a time (D20). The Category settings card sits between the Store defaults
- * card and the tabs (PR 10e, A5); the older-rules line sits under the strip,
- * above "Card Shellz updated products" (PR 11b, D17).
+ * "Your older group rules", with [Move them over] from PR 11d) to the right
+ * place, one surface at a time (D20). The Category settings card sits between
+ * the Store defaults card and the tabs (PR 10e, A5); the older-rules line sits
+ * under the strip, above "Card Shellz updated products" (PR 11b, D17), and
+ * after the job moved the rules, the one-time notice takes its place (11e1).
  */
 
 /** The onboarding read the page and portal shell share; its vendor status and entitlement gate every writer. */
@@ -206,6 +209,21 @@ export function ListingSettingsStep(props: ListingSettingsStepProps) {
   // The callbacks below read the latest reads through refs, so rows get stable functions.
   const latest = useRef({ summary, setupQuery, shelves, location, search });
   latest.current = { summary, setupQuery, shelves, location, search };
+
+  // The conflict hook (PR 11d, plan 8.2, D25): when the step's one draft is answered "this changed in another window",
+  // the change may be a move of the older group rules made elsewhere (the system's, or another window's), so the summary
+  // and the one-time notice (11e1) are read again, once per attempt: the line and the card re-decide, the notice says what
+  // the job moved, and nothing is lost (compare-and-set).
+  const seenDraft = useRef(drafts.draft);
+  useEffect(() => {
+    const before = seenDraft.current;
+    seenDraft.current = drafts.draft;
+    if (draftEnteredConflict(before, drafts.draft)) {
+      for (const queryKey of conflictRereadKeys(storeConnectionId)) {
+        void queryClient.invalidateQueries({ queryKey: [...queryKey], exact: true });
+      }
+    }
+  }, [drafts.draft, queryClient, storeConnectionId]);
 
   const accessInput: ListingSettingsAccessInput = {
     account,
@@ -518,6 +536,13 @@ export function ListingSettingsStep(props: ListingSettingsStepProps) {
         tooLarge={tooLarge}
         onOpen={openConvertSheet}
       />
+      {/* The same slot once the job moved the rules (PR 11e1, 11.1): the one-time notice with [Got it]; hidden while the
+          store holds older group rules, so it and the line never show together (D21). A mount read (D18). */}
+      <ConversionNoticeLine
+        storeConnectionId={storeConnectionId}
+        summary={{ data: summary.data, error: summary.error }}
+        focusFallbacks={convertFocusFallbacks}
+      />
       {/* Under the strip, never in a Category card (UX-M10); its read is off while the selection is too large (D18). */}
       <UpdatedProductsLine
         storeConnectionId={storeConnectionId}
@@ -702,6 +727,9 @@ export function ListingSettingsStep(props: ListingSettingsStepProps) {
         // (D18, K7): the dry run is read only while this is open, never on mount.
         open={sheet === "convert" && drawerTarget === null && !tooLarge}
         summary={{ data: summary.data, error: summary.error }}
+        right={rights.conversion}
+        saveCallbacks={saveCallbacks}
+        onSaved={onSettingsSaved}
         onClose={closeConvertSheet}
         onSetPrice={setPriceFromSheet}
         onFix={fixFromSheet}

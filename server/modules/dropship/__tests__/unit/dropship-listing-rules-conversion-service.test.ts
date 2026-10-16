@@ -618,6 +618,10 @@ describe("convertInTransaction, the system (plan 7.B.3's system column, shared w
     ["no store context", null, "store_not_found"],
     ["a store not on eBay", { ...storeContext(), platform: "shopify" as const }, "not_ebay"],
     ["a suspended vendor", { ...storeContext(), vendorStatus: "suspended" as const }, "vendor_not_eligible"],
+    // The vendor's own write gate refuses these (DROPSHIP_LISTING_ENTITLEMENT_BLOCKED): the system never writes what he could not.
+    ["a vendor whose .ops entitlement lapsed", { ...storeContext(), entitlementStatus: "lapsed" }, "vendor_not_entitled"],
+    ["a vendor whose .ops entitlement was never confirmed (the column's default)", { ...storeContext(), entitlementStatus: "unknown" },
+      "vendor_not_entitled"],
     ["a paused store", { ...storeContext(), storeStatus: "paused" as const }, "store_not_eligible"],
   ])("skips %s at the gate (plan 13.2), reading nothing more", async (_label, store, reason) => {
     const tx = new FakeTransaction(conversionInputs(cleanStore()), { actor: "system", store: store as ReturnType<typeof storeContext> | null });
