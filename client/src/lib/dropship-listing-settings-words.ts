@@ -14,6 +14,7 @@ import {
 } from "@shared/dropship/listing-settings";
 import { MAX_NAMED_CATALOG_GROUP_ITEMS } from "@shared/dropship/catalog-scope";
 import type { CategoryListingSettingField } from "@shared/dropship/listing-setting-values";
+import type { ConversionBlockerCode, ConversionKept, ConversionSetting, ConversionTieSetting } from "@shared/dropship/listing-rules-conversion";
 import type { ConnectionBanner, ListingSettingsReadState, ListingSettingsRightReason } from "./dropship-listing-settings-access";
 import { LISTING_SETUP_RELOAD_MESSAGE } from "./dropship-ebay-listing-setup";
 import { listingAccessLink, type ListingAccessLink } from "./dropship-listing-access";
@@ -1162,8 +1163,13 @@ export const LISTING_SETTINGS_CATEGORY_WORDS = Object.freeze({
   empty: "None of your chosen products is in a Card Shellz category.",
   // Interim (PR 10 PROPOSAL): the card's read failed (8.3); [Try again] reads it again.
   readFailed: "Couldn't load category settings.",
-  // Interim (PR 10 PROPOSAL): the store holds older group rules, so no category save can be made (D11, 8.3); also the 409's words (8.6).
-  olderRules: "Category settings can't be saved while your store has older group rules. They'll be moved over in a later update.",
+  // Interim (PR 11 PROPOSAL, D17): the store holds older group rules, so no category save can be made (PR 10 D11, 8.3); also the
+  // 409's words (8.6). It no longer promises a later move (a store that isn't clean is never moved by itself, CUX#5); the card
+  // and the editor show [See what changes] beside it (PR 11b).
+  olderRules: "Category settings can't be saved while your store has older group rules.",
+  // Interim (PR 11 PROPOSAL, D17): a category row with no setting of its own while older group rules are present: a group
+  // rule may still decide its products' values, so "Uses your store defaults" could be false (CUX#6).
+  noCategorySettingsYet: "No category settings yet",
   // The record's word for a category that follows the store (REC:871, D17).
   useStoreDefault: "Use store default",
   // Interim (PR 10 PROPOSAL): the tag beside a value the store default gives (8.3).
@@ -1185,23 +1191,33 @@ function categoryName(name: string): string {
   return trimmed || "this category";
 }
 
-/** One category row of the card (8.3): "Sleeves · 15 products · Sets: shipping policy, store shelf" or "… · Uses your store defaults". Interim (PR 10 PROPOSAL). */
+/** One category row of the card (8.3): "Sleeves · 15 products · Sets: shipping policy, store shelf", "… · Uses your store defaults" or, under older group rules, "… · No category settings yet" (PR 11b). Interim (PR 10/11 PROPOSAL). */
 export interface CategoryRowWords {
   name: string;
   /** "15 products". */
   products: string;
-  /** "Sets: shipping policy, store shelf" (the fields in the order given, the stored shape's) or "Uses your store defaults". */
+  /** "Sets: shipping policy, store shelf" (the fields in the order given, the stored shape's), "Uses your store defaults" or "No category settings yet". */
   sets: string;
   /** The three joined with " · ". */
   text: string;
 }
 
-export function categoryRowWords(category: { name: string; productCount: number; setFields: readonly CategoryListingSettingField[] }): CategoryRowWords {
+/**
+ * `olderRulesPresent` (PR 11b, D17): the store still holds older group rules (the summary's three counts). A row with no
+ * setting of its own then reads "No category settings yet", since a group rule may decide its products' values.
+ */
+export function categoryRowWords(
+  category: { name: string; productCount: number; setFields: readonly CategoryListingSettingField[] },
+  options: { olderRulesPresent: boolean },
+): CategoryRowWords {
   const name = category.name.trim() || DRAWER_UNNAMED_CATEGORY;
   const products = `${TEXT_NUMBER.format(category.productCount)} ${productsWord(category.productCount)}`;
+  const nothingSet = options.olderRulesPresent
+    ? LISTING_SETTINGS_CATEGORY_WORDS.noCategorySettingsYet
+    : LISTING_SETTINGS_CATEGORY_WORDS.usesStoreDefaults;
   // In the order given: the server lists a category's own settings in the stored shape's order (`SR` setFields).
   const sets = category.setFields.length === 0
-    ? LISTING_SETTINGS_CATEGORY_WORDS.usesStoreDefaults
+    ? nothingSet
     : `${LISTING_SETTINGS_CATEGORY_WORDS.sets}: ${category.setFields.map((field) => CATEGORY_SETTING_WORDS[field]).join(", ")}`;
   return { name, products, sets, text: `${name} · ${products} · ${sets}` };
 }
@@ -1410,4 +1426,358 @@ export function sizePriceBoxLabel(productName: string, sizeName: string): string
   const product = productName.trim() || UNNAMED_PRODUCT_WORDS;
   const size = sizeName.trim();
   return size ? `${LISTING_SETTINGS_SIZE_PRICES_WORDS.exactPrice} for ${product}, ${size}` : `${LISTING_SETTINGS_SIZE_PRICES_WORDS.exactPrice} for ${product}`;
+}
+
+// ---------------------------------------------------------------------------
+// Moving older group rules over: the line, the "what changes" sheet and its rows (PR 11b, plan 11.4, D17, D18, D21, D22)
+// ---------------------------------------------------------------------------
+
+/**
+ * Words of the older-rules line, its [See what changes] and the read-only
+ * sheet (PR 11b, plan 5.3, 11.2, 11.4). "older group rules" and "Category
+ * settings" are the record's; a size's price reads in the Prices tab's Built
+ * from words (D18, D22; the conversion module builds those lines); every
+ * other one is a proposal (plan 11.4, or "beyond 11.4" where marked), kept
+ * here so a later PR changes it in one place. None names a code, an id or an
+ * eBay category number.
+ */
+export const LISTING_SETTINGS_CONVERSION_WORDS = Object.freeze({
+  // Interim (PR 11 PROPOSAL): the line under the attention strip while the store holds older group rules and a chosen
+  // product is in a Card Shellz category (D17).
+  line: "Your store still has older group rules. Move them over to use category settings.",
+  // Interim (PR 11 PROPOSAL): the line when no chosen product is in a Card Shellz category (D17), and while the
+  // categories can't be read yet (beyond 11.4: true either way).
+  lineNoCategories: "Your store still has older group rules.",
+  // Interim (PR 11 PROPOSAL): the line over 10,000 chosen sizes (D17, K7): nothing can be checked, so no button.
+  lineTooLarge: "Your store still has older group rules. Choose 10,000 or fewer sizes to move them over.",
+  // Interim (PR 11 PROPOSAL): the line's, the Category settings card's and the category editor's button (D17).
+  seeWhatChanges: "See what changes",
+  // Interim (PR 11 PROPOSAL): the sheet's title (11.2).
+  sheetTitle: "Your older group rules",
+  // Interim (PR 11 PROPOSAL): while page 0 reads, or a further page (11.2, 3.7).
+  loading: "Checking what would change…",
+  // Interim (PR 11 PROPOSAL): a read that failed (5xx, refused, or off the contract); [Try again] reads it again (5.3).
+  failed: "Couldn't check what would change.",
+  // Interim (PR 11 PROPOSAL): 503 DROPSHIP_LISTING_CONVERSION_CHECK_UNAVAILABLE, the .ops costs couldn't be read (5.3).
+  checkUnavailable: "We couldn't read your costs just now, so we can't check yet. Try again in a minute.",
+  // Interim (PR 11 PROPOSAL): 422 TOO_LARGE on the check, as 11.4's apply words say it; the sheet closes and the banner shows.
+  tooLarge: "Choose 10,000 or fewer sizes to move them over.",
+  // Interim (PR 11 PROPOSAL): the check answers that the store has no older group rules (an old address, or moved meanwhile, 11.5).
+  none: "Your store has no older group rules any more.",
+  // Interim (PR 11 PROPOSAL): a clean store (5.3); also a store held back by its text alone, whose listings don't change.
+  clean: "Moving them over changes nothing in your listings.",
+  // Interim (PR 11 PROPOSAL): under the summary line, clean or not (REC:939).
+  laterProducts: "Products you choose later use their category's settings or your store defaults, not these rules.",
+  // Interim (PR 11 PROPOSAL): the blocks' heading (11.2).
+  blockedHeading: "Before you can move them over",
+  // Interim (PR 11 PROPOSAL): a size that would lose its price (CUX#3).
+  setPrice: "Set a price",
+  // Interim (PR 11 PROPOSAL): a listed size that would stop getting stock updates (CMC#3).
+  fix: "Fix",
+  // Interim (PR 11 PROPOSAL): the store text cap (D9c).
+  tooMuchText: "Moving these rules would save more text than your store can keep. Shorten your older description rules in Older settings, then check again.",
+  // Interim (PR 11 PROPOSAL): what the rules become (11.2).
+  becomesHeading: "They become:",
+  // Interim (PR 11 PROPOSAL): the report's heading (11.2); a clean sheet lists the same items without it (beyond 11.4).
+  reasonsHeading: "Why some sizes would change",
+  // Interim (PR 11 PROPOSAL): the changed sizes' heading (11.2).
+  changesHeading: "Sizes that would change",
+  // Interim (PR 11 PROPOSAL): the next page of changed sizes (5.2), as the page's other lists say it.
+  loadMore: "Load more",
+  // Interim (PR 11 PROPOSAL): the read-only sheet's footer (11b, 5.2).
+  preview: "This is a preview. Nothing is moved yet.",
+  // Interim (PR 11 PROPOSAL): a page of another plan than page 0's: the pages drop and page 0 is read again (CUX#12).
+  changed: "Something changed since you opened this. Check the list again.",
+  // Interim (PR 11 PROPOSAL): a size with no price, in a row's Price line (11.4).
+  noPrice: "—",
+  // Interim (PR 11 PROPOSAL): a nameless eBay category (a Card Shellz base category with no label, CMC#8).
+  cardShellzEbayCategory: "the Card Shellz eBay category",
+  // Interim (PR 11 PROPOSAL, beyond 11.4): two nameless eBay categories with different ids.
+  anotherCardShellzEbayCategory: "another Card Shellz eBay category",
+  // Interim (PR 11 PROPOSAL): a pricing rule line's tie (11.4).
+  ruleTie: "two rules that tie",
+  // Interim (PR 11 PROPOSAL): a pricing rule line's store default and product price (11.4).
+  storeDefaultRule: "Store default",
+  thisProductRule: "This product",
+  // Interim (PR 11 PROPOSAL): a row's description (11.4).
+  descriptionChanges: "Description changes",
+  // Interim (PR 11 PROPOSAL): a row's `listable` (11.4).
+  becomesUnlistable: "Can be listed → can't be listed",
+  becomesListable: "Can't be listed → can be listed",
+  stillUnlistable: "Still can't be listed, now because",
+} as const);
+
+/**
+ * Why a size can't be listed, one closed entry per `CONVERSION_BLOCKER_CODES`
+ * code (CMC#8, plan 11.4): the four fix codes in the Products tab's words
+ * (`fixReasonWords`), the rest the plan's. Interim (PR 11 PROPOSAL).
+ */
+export const CONVERSION_BLOCKER_WORDS: Readonly<Record<ConversionBlockerCode, string>> = Object.freeze({
+  no_ebay_category: fixReasonWords("no_ebay_category"),
+  size_cannot_be_priced: fixReasonWords("size_cannot_be_priced"),
+  own_text_needs_check: fixReasonWords("own_text_needs_check"),
+  description_group_conflict: fixReasonWords("description_group_conflict"),
+  price_outside_limit: "its price is outside a Card Shellz price limit",
+  listing_content_catalog_too_large: "the Card Shellz description is too long",
+  listing_content_description_required: "it has no description",
+  listing_content_description_too_large: "the description is too long",
+});
+
+/** A product in the sheet; one the answer gives no name for reads "A product". */
+function conversionProductName(name: string): string {
+  return name.trim() || UNNAMED_PRODUCT_WORDS;
+}
+
+/** "Penny Sleeves · Pack of 100": a size in the sheet (11.4 row head); a size with no name reads its product alone. Interim (PR 11 PROPOSAL). */
+export function conversionSizeWords(productName: string, sizeName: string): string {
+  const size = sizeName.trim();
+  return size ? `${conversionProductName(productName)} · ${size}` : conversionProductName(productName);
+}
+
+/** "Moving them over would change 12 sizes. They're listed below." (11.4 `notClean`). Interim (PR 11 PROPOSAL). */
+export function conversionNotCleanWords(count: number): string {
+  return count === 1
+    ? "Moving them over would change 1 size. It's listed below."
+    : `Moving them over would change ${TEXT_NUMBER.format(count)} sizes. They're listed below.`;
+}
+
+/** "3 sizes would have no price after the move. …" (11.4 `wouldLosePrice`), counted by the server. Interim (PR 11 PROPOSAL). */
+export function conversionWouldLosePriceWords(count: number): string {
+  return count === 1
+    ? "1 size would have no price after the move. Give it its own price, then check again."
+    : `${TEXT_NUMBER.format(count)} sizes would have no price after the move. Give each one its own price, then check again.`;
+}
+
+/** "2 sizes you list on eBay would stop getting stock updates after the move. …" (11.4 `wouldBlockListing`). Interim (PR 11 PROPOSAL). */
+export function conversionWouldBlockListingWords(count: number): string {
+  return count === 1
+    ? "1 size you list on eBay would stop getting stock updates after the move. Fix it, then check again."
+    : `${TEXT_NUMBER.format(count)} sizes you list on eBay would stop getting stock updates after the move. Fix each one, then check again.`;
+}
+
+/** [Set a price] read out with its size (plan 3.4): "Set a price for Penny Sleeves · Pack of 100". Interim (PR 11 PROPOSAL). */
+export function conversionSetPriceLabel(productName: string, sizeName: string): string {
+  return `${LISTING_SETTINGS_CONVERSION_WORDS.setPrice} for ${conversionSizeWords(productName, sizeName)}`;
+}
+
+/** [Fix] read out with its size (plan 3.4): "Fix Penny Sleeves · Pack of 100". Interim (PR 11 PROPOSAL). */
+export function conversionFixLabel(productName: string, sizeName: string): string {
+  return `${LISTING_SETTINGS_CONVERSION_WORDS.fix} ${conversionSizeWords(productName, sizeName)}`;
+}
+
+/** "and 12 more": the items of a list beyond the 100 the answer carries; null for none. Interim (PR 11 PROPOSAL). */
+export function conversionMoreWords(count: number): string | null {
+  return count > 0 ? `and ${TEXT_NUMBER.format(count)} more` : null;
+}
+
+/**
+ * The settings a rule becomes, in the contract's order: "price, eBay category,
+ * text above and below" (both text parts read as one, 11.4's example).
+ * Interim (PR 11 PROPOSAL).
+ */
+export function conversionSettingsWords(settings: readonly ConversionSetting[]): string {
+  const both = settings.includes("textAbove") && settings.includes("textBelow");
+  const parts = settings.flatMap((setting) => {
+    if (both && setting === "textAbove") return ["text above and below"];
+    if (both && setting === "textBelow") return [];
+    return [CATEGORY_SETTING_WORDS[setting]];
+  });
+  return parts.join(", ");
+}
+
+/** "Sleeves: price, text above and below" (11.4 `becomesCategory`). Interim (PR 11 PROPOSAL). */
+export function conversionBecomesCategoryWords(categoryName: string, settings: readonly ConversionSetting[]): string {
+  return `${categoryName.trim() || DRAWER_UNNAMED_CATEGORY}: ${conversionSettingsWords(settings)}`;
+}
+
+/** "2 products get their own price: Penny Sleeves, Team Bags" (11.4 `becomesProducts`). Interim (PR 11 PROPOSAL). */
+export function conversionBecomesProductsWords(settings: readonly ConversionSetting[], productNames: readonly string[]): string {
+  const names = productNames.map(conversionProductName).join(", ");
+  const what = conversionSettingsWords(settings);
+  return productNames.length === 1
+    ? `1 product gets its own ${what}: ${names}`
+    : `${TEXT_NUMBER.format(productNames.length)} products get their own ${what}: ${names}`;
+}
+
+/**
+ * Two rules tie for a product (11.4 `tie`). The price form says the rules
+ * "can't price it", not "it has no price": a size that follows the rules
+ * (`inherit`) uses its retail price on a tie (`L/dropship-listing-settings-price-words.ts`
+ * retailFallbackWords; beyond 11.4). Interim (PR 11 PROPOSAL).
+ */
+export function conversionTieWords(productName: string, setting: ConversionTieSetting): string {
+  const product = conversionProductName(productName);
+  return setting === "price"
+    ? `Two price rules tie for ${product}, so they can't price it today.`
+    : `Two description rules tie for ${product}, so it has no text above or below today.`;
+}
+
+/**
+ * A chosen product whose copy of its category name differs from its Card
+ * Shellz category (11.4 `mismatch`, D8): a copy and another category, a copy
+ * and no category, or a category and no copy. A blank copy (a Shopify
+ * product type left empty is copied as is) reads as no copy, and a blank
+ * category name as the page's unnamed category, so no sentence quotes
+ * nothing; a blank copy with no category says only that (beyond 11.4).
+ * Interim (PR 11 PROPOSAL).
+ */
+export function conversionMismatchWords(input: { productName: string; listedAs: string | null; categoryName: string | null }): string {
+  const product = conversionProductName(input.productName);
+  const copy = input.listedAs !== null && input.listedAs.trim() !== "" ? input.listedAs : null;
+  const category = input.categoryName === null ? null : input.categoryName.trim() || DRAWER_UNNAMED_CATEGORY;
+  if (copy !== null && category !== null) {
+    return `Card Shellz lists ${product} as “${copy}”, but it's in “${category}”. Its settings will follow “${category}”.`;
+  }
+  if (copy !== null) {
+    return `Card Shellz lists ${product} as “${copy}”, but it's in no category. It will use your store defaults.`;
+  }
+  if (category === null) return `${product} is in no Card Shellz category. It will use your store defaults.`;
+  return `Your older rules don't see ${product} as in “${category}”. After the move it follows “${category}”.`;
+}
+
+/** A rule for a category name no Card Shellz category has (11.4 `unmatched`, D8). Interim (PR 11 PROPOSAL). */
+export function conversionUnmatchedWords(ruleName: string, categoryName: string): string {
+  return `Your rule “${ruleName}” is for “${categoryName}”, but no Card Shellz category has that name. It goes away when you move them over.`;
+}
+
+/**
+ * A rule whose category name two or more Card Shellz categories share (11.4
+ * `shared`, D8). One of them that already sets the field keeps its own value
+ * (plan 4.A.4; the contract's `shared`), so the rule is written only on the
+ * others. Interim (PR 11 PROPOSAL).
+ */
+export function conversionSharedWords(categoryCount: number, ruleName: string, categoryName: string): string {
+  return `${TEXT_NUMBER.format(categoryCount)} Card Shellz categories are called “${categoryName}”. Your rule “${ruleName}” becomes a setting on each of them that doesn't already have its own.`;
+}
+
+/** A named-size rule that decides a setting for only some of a product's sizes (11.4 `someSizesOnly`). Interim (PR 11 PROPOSAL). */
+export function conversionSomeSizesOnlyWords(ruleName: string, setting: ConversionSetting, productName: string): string {
+  return `“${ruleName}” sets the ${CATEGORY_SETTING_WORDS[setting]} for only some sizes of ${conversionProductName(productName)}.`;
+}
+
+/** Different rules decide a setting for a product's sizes (11.4 `mixed`). Interim (PR 11 PROPOSAL). */
+export function conversionMixedWords(setting: ConversionSetting, productName: string): string {
+  return `Different rules set the ${CATEGORY_SETTING_WORDS[setting]} of ${conversionProductName(productName)}'s sizes.`;
+}
+
+/** A rule that decides none of the chosen sizes and is written nowhere (11.4 `neverApplies`, D5). Interim (PR 11 PROPOSAL). */
+export function conversionNeverAppliesWords(ruleName: string): string {
+  return `Your rule “${ruleName}” doesn't decide any of your chosen sizes, so it goes away.`;
+}
+
+/**
+ * "Kept as they are: 12 exact prices, 3 sizes with their own policies" (11.4
+ * `kept`, D6): the per-size rows the move leaves alone, counted by the
+ * server per size; null when it keeps none. Interim (PR 11 PROPOSAL).
+ */
+export function conversionKeptWords(kept: ConversionKept): string | null {
+  const parts: string[] = [];
+  const count = (value: number) => TEXT_NUMBER.format(value);
+  if (kept.exactPrices > 0) parts.push(kept.exactPrices === 1 ? "1 exact price" : `${count(kept.exactPrices)} exact prices`);
+  if (kept.catalogPrices > 0) {
+    parts.push(kept.catalogPrices === 1 ? "1 size on its retail price" : `${count(kept.catalogPrices)} sizes on their retail price`);
+  }
+  if (kept.sizePolicies > 0) {
+    parts.push(kept.sizePolicies === 1 ? "1 size with its own policies" : `${count(kept.sizePolicies)} sizes with their own policies`);
+  }
+  if (kept.sizeShelves > 0) {
+    parts.push(kept.sizeShelves === 1 ? "1 size with its own store shelf" : `${count(kept.sizeShelves)} sizes with their own store shelf`);
+  }
+  if (kept.sizeTexts > 0) {
+    parts.push(kept.sizeTexts === 1 ? "1 size with its own main text" : `${count(kept.sizeTexts)} sizes with their own main text`);
+  }
+  return parts.length === 0 ? null : `Kept as they are: ${parts.join(", ")}`;
+}
+
+/** "Shipping policy changes" (11.4 row policy): no policy name is in the read model, and the move never writes one (D6). Interim (PR 11 PROPOSAL). */
+export function conversionPolicyChangesWords(kind: "shipping" | "return" | "payment"): string {
+  const label = kind === "shipping" ? "Shipping" : kind === "return" ? "Return" : "Payment";
+  return `${label} policy changes`;
+}
+
+/** "Price: $4.99 → $3.99" (11.4 row `price`): each side already the server's cents through `formatCents`, or "—". Interim (PR 11 PROPOSAL). */
+export function conversionPriceLineWords(before: string, after: string): string {
+  return `Price: ${before} → ${after}`;
+}
+
+/** "Built from: {before} → {after}" (11.4 row `priceSource`): each side in the Prices tab's Built from words. Interim (PR 11 PROPOSAL). */
+export function conversionBuiltFromLineWords(before: string, after: string): string {
+  return `Built from: ${before} → ${after}`;
+}
+
+/**
+ * A price source class as the dry run compares it (plan 3.2): `rules` split
+ * by what the rule starts from. Worded only to tell two Built from sides
+ * apart when their words are the same (CUX#2), never for money.
+ */
+export type ConversionPriceSourceClass =
+  | "exact" | "rules_product_cost" | "rules_catalog_retail" | "rules" | "catalog_price" | "last_published" | "retail_fallback" | "none";
+
+/**
+ * Words for a source class, used only when the Built from words of two
+ * different classes read the same: a rules price whose rule the answer does
+ * not name reads "Your pricing rules" for both bases (`builtFromWords`), and
+ * 3.2 compares the basis. Interim (PR 11 PROPOSAL, beyond 11.4).
+ */
+export const CONVERSION_PRICE_SOURCE_CLASS_WORDS: Readonly<Record<ConversionPriceSourceClass, string>> = Object.freeze({
+  exact: "an exact price",
+  rules_product_cost: "from your cost",
+  rules_catalog_retail: "from the retail price",
+  rules: "from your pricing rules",
+  catalog_price: "the retail price",
+  last_published: "the last published price",
+  retail_fallback: "the retail price for now",
+  none: "no price",
+});
+
+/** "Your pricing rules (from your cost)": a Built from side with its class added (CUX#2). Interim (PR 11 PROPOSAL, beyond 11.4). */
+export function conversionBuiltFromWithClassWords(builtFrom: string, sourceClass: ConversionPriceSourceClass): string {
+  return `${builtFrom} (${CONVERSION_PRICE_SOURCE_CLASS_WORDS[sourceClass]})`;
+}
+
+/**
+ * A pricing rule as a row names it (11.4 row `pricingRule`), with its recipe
+ * in `recipeWords`' words: "Store default (…)", "“Sleeves” (…)" for an older
+ * group rule, "This product (…)", "Sleeves category (…)". Interim (PR 11 PROPOSAL).
+ */
+export function conversionPricingRuleWords(
+  rule: { kind: "store_default" | "product" } | { kind: "group" | "category"; name: string },
+  recipe: string,
+): string {
+  switch (rule.kind) {
+    case "store_default": return `${LISTING_SETTINGS_CONVERSION_WORDS.storeDefaultRule} (${recipe})`;
+    case "product": return `${LISTING_SETTINGS_CONVERSION_WORDS.thisProductRule} (${recipe})`;
+    case "group": return `“${rule.name}” (${recipe})`;
+    case "category": return `${rule.name} category (${recipe})`;
+  }
+}
+
+/** "Pricing rule: {before} → {after}" (11.4 row `pricingRule`). Interim (PR 11 PROPOSAL). */
+export function conversionPricingRuleLineWords(before: string, after: string): string {
+  return `Pricing rule: ${before} → ${after}`;
+}
+
+/** "eBay category: Toploaders → Sleeves" (11.4 row `ebayCategory`), by name only. Interim (PR 11 PROPOSAL). */
+export function conversionEbayCategoryLineWords(before: string, after: string): string {
+  return `eBay category: ${before} → ${after}`;
+}
+
+/** The after side when two different eBay categories share a name (CUX#2): "another eBay category also called “Card Sleeves”". Interim (PR 11 PROPOSAL). */
+export function conversionEbayCategoryAlsoCalledWords(name: string): string {
+  return `another eBay category also called “${name}”`;
+}
+
+/** "Store shelf: None → Supplies › Sleeves" (11.4 row `storeShelf`), each side in the drawer's shelf words. Interim (PR 11 PROPOSAL). */
+export function conversionStoreShelfLineWords(before: string, after: string): string {
+  return `Store shelf: ${before} → ${after}`;
+}
+
+/** "Can be listed → can't be listed: no eBay category" (11.4 row `listable`, a size that becomes blocked). Interim (PR 11 PROPOSAL). */
+export function conversionBecomesUnlistableWords(reasons: string): string {
+  return `${LISTING_SETTINGS_CONVERSION_WORDS.becomesUnlistable}: ${reasons}`;
+}
+
+/** "Still can't be listed, now because the description is too long" (11.4 row `listable`, still blocked). Interim (PR 11 PROPOSAL). */
+export function conversionStillUnlistableWords(reasons: string): string {
+  return `${LISTING_SETTINGS_CONVERSION_WORDS.stillUnlistable} ${reasons}`;
 }

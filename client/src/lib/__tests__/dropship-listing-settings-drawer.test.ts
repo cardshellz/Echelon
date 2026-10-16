@@ -288,17 +288,19 @@ describe("drawerSearch", () => {
   });
 });
 
-describe("the sheets in the page address (?sheet=, PR 10c, 10g, 10f, D21)", () => {
-  it("opens Set for selected from ?sheet=bulk, Card Shellz updated products from ?sheet=updated, Give these sizes a price from ?sheet=give-prices, and nothing from a sheet this page doesn't have", () => {
-    expect(LISTING_SETTINGS_SHEETS).toEqual(["bulk", "updated", "give-prices"]);
+describe("the sheets in the page address (?sheet=, PR 10c, 10g, 10f, 11b, D21)", () => {
+  it("opens Set for selected from ?sheet=bulk, Card Shellz updated products from ?sheet=updated, Give these sizes a price from ?sheet=give-prices, what moving older rules changes from ?sheet=convert, and nothing from a sheet this page doesn't have", () => {
+    expect(LISTING_SETTINGS_SHEETS).toEqual(["bulk", "updated", "give-prices", "convert"]);
     expect(sheetFromSearch("?sheet=bulk")).toBe("bulk");
     expect(sheetFromSearch("?sheet=updated")).toBe("updated");
     expect(sheetFromSearch("?sheet=give-prices")).toBe("give-prices");
+    expect(sheetFromSearch("?sheet=convert")).toBe("convert");
+    expect(sheetFromSearch("?store=22&sheet=convert&product=11")).toBe("convert");
     expect(sheetFromSearch("?store=22&sheet=updated&product=11")).toBe("updated");
     expect(sheetFromSearch("sheet=bulk&store=22")).toBe("bulk");
     expect(sheetFromSearch("?store=22&product=11&sheet=bulk")).toBe("bulk");
     expect(sheetFromSearch("?store=22&sheet=give-prices")).toBe("give-prices");
-    for (const search of ["", "?store=22", "?sheet=", "?sheet=Bulk", "?sheet=bulk%20", "?sheet=give-price", "?sheet=Give-Prices", "?sheet=prices", "?sheet=Updated", "?sheet=bulk&sheet=bulk", "?sheet=bulk&sheet=updated", "?sheet=give-prices&sheet=bulk", "?sheets=bulk"]) {
+    for (const search of ["", "?store=22", "?sheet=", "?sheet=Bulk", "?sheet=bulk%20", "?sheet=give-price", "?sheet=Give-Prices", "?sheet=prices", "?sheet=Updated", "?sheet=bulk&sheet=bulk", "?sheet=bulk&sheet=updated", "?sheet=give-prices&sheet=bulk", "?sheets=bulk", "?sheet=Convert", "?sheet=conversion", "?sheet=convert&sheet=convert", "?sheet=convert&sheet=bulk"]) {
       expect({ search, sheet: sheetFromSearch(search) }).toEqual({ search, sheet: null });
     }
   });
@@ -320,6 +322,11 @@ describe("the sheets in the page address (?sheet=, PR 10c, 10g, 10f, D21)", () =
     expect(sheetSearch("?sheet=give-prices&store=22", null)).toBe("?store=22");
     expect(sheetFromSearch(sheetSearch("", "give-prices"))).toBe("give-prices");
     expect(listingSettingsSurfaceFromSearch("?sheet=give-prices&category=40")).toEqual({ kind: "sheet", sheet: "give-prices" });
+    // The older-rules sheet (11b) the same way: pushed on open, replaced on close, one sheet at a time.
+    expect(sheetSearch("?store=22", "convert")).toBe("?store=22&sheet=convert");
+    expect(sheetSearch("?sheet=updated&store=22", "convert")).toBe("?store=22&sheet=convert");
+    expect(sheetSearch("?sheet=convert&store=22", null)).toBe("?store=22");
+    expect(sheetFromSearch(sheetSearch("", "convert"))).toBe("convert");
     // Each helper leaves the other's parameter alone, so a closed sheet never closes the drawer and the other way round.
     expect(drawerTargetFromSearch(sheetSearch("?product=11&size=101", "bulk"))).toEqual({ productId: 11, productVariantId: 101 });
     expect(sheetFromSearch(drawerSearch("?sheet=bulk", { productId: 11 }))).toBe("bulk");
@@ -365,6 +372,17 @@ describe("the category editor in the page address (?category=, PR 10e, D21)", ()
     expect(listingSettingsSurfaceFromSearch("?product=11&size=101&sheet=bulk&category=40")).toEqual({ kind: "drawer", target: { productId: 11, productVariantId: 101 } });
     expect(listingSettingsSurfaceFromSearch("?product=0&sheet=bulk")).toEqual({ kind: "sheet", sheet: "bulk" });
     expect(listingSettingsSurfaceFromSearch("?sheet=nope&category=40")).toEqual({ kind: "category", categoryId: 40 });
+  });
+
+  it("keeps one surface with the older-rules sheet (11b, D20): the drawer over it, it over the category editor, and its openers take the others off", () => {
+    expect(listingSettingsSurfaceFromSearch("?sheet=convert")).toEqual({ kind: "sheet", sheet: "convert" });
+    expect(listingSettingsSurfaceFromSearch("?sheet=convert&category=40")).toEqual({ kind: "sheet", sheet: "convert" });
+    expect(listingSettingsSurfaceFromSearch("?product=11&size=101&sheet=convert")).toEqual({ kind: "drawer", target: { productId: 11, productVariantId: 101 } });
+    // [See what changes] in the category editor: the editor off and the sheet on, in one address.
+    expect(sheetSearch(categorySearch("?store=22&category=40", null), "convert")).toBe("?store=22&sheet=convert");
+    // [Set a price] / [Fix]: the sheet off and the drawer on the size (or the product), in one address.
+    expect(drawerSearch(sheetSearch("?store=22&sheet=convert", null), { productId: 11, productVariantId: 101 })).toBe("?store=22&product=11&size=101");
+    expect(drawerSearch(sheetSearch("?store=22&sheet=convert", null), { productId: 11 })).toBe("?store=22&product=11");
   });
 });
 

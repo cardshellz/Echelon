@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, type ReactNode } from "react";
 import type { PriceChangeReviewResponse } from "@shared/dropship/listing-setting-writes";
 import { Button } from "@/components/ui/button";
 import type { SavePhase } from "@/lib/dropship-listing-settings-drafts";
@@ -60,6 +60,11 @@ export interface PriceChangeCheckBodyProps {
   onPage: (page: number) => void;
   /** [Try again] when the rows couldn't be read again. */
   onRetryRead?: () => void;
+  /**
+   * The owner's own button before the footer's two (the category editor's [See what changes] beside the older-rules
+   * line, PR 11b, plan 11.1); the drawer's and "Set for selected"'s checks pass none.
+   */
+  aside?: ReactNode;
 }
 
 /**
@@ -158,6 +163,7 @@ export function PriceChangeCheckBody(props: PriceChangeCheckBodyProps) {
         ))}
         <p className="text-sm text-zinc-600">{compact ? CHECK_NEW_PRICES_WORDS.footerPhone : CHECK_NEW_PRICES_WORDS.footer}</p>
         <div className="flex flex-wrap items-center justify-end gap-2">
+          {props.aside}
           <Button type="button" variant="outline" size="sm" className="min-h-11 sm:min-h-9" disabled={footer.backDisabled} onClick={props.onBack}>
             {compact ? CHECK_NEW_PRICES_WORDS.backPhone : CHECK_NEW_PRICES_WORDS.back}
           </Button>

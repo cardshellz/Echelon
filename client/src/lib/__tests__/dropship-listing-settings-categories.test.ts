@@ -65,6 +65,7 @@ import {
   categoryPriceCheckAnswers,
   categoryPriceCheckBack,
   categoryPriceCheckBody,
+  categoryPriceCheckOlderRulesOpener,
   categoryPriceCheckBaseOf,
   categoryPriceCheckChange,
   categoryPriceCheckShown,
@@ -318,6 +319,32 @@ describe("the card (plan 8.3, 3.7, D11, D18)", () => {
     const uncertain = card({ summary: summary({ price: 1 }), right: { editable: false, reason: "banner" }, draft: categoryDraft({ shippingPolicy: SET_F1 }, [],
       { type: "startSave", attempt: { signature: "s", key: "ls-cat:1" } }, { type: "failure", key: "ls-cat:1", failure: { phase: "uncertain", message: "x", code: null, status: null } }) });
     expect(uncertain.rows[0]).toMatchObject({ held: true, change: { shown: true, disabled: false } });
+  });
+
+  it("puts [See what changes] under the older-rules line and reads a row with nothing set as \"No category settings yet\" (PR 11b, D17)", () => {
+    const older = card({ summary: summary({ price: 1 }) });
+    expect(older).toMatchObject({ olderRulesLine: "Category settings can't be saved while your store has older group rules.", olderRulesOpener: { label: "See what changes" } });
+    expect(older.rows.map((row) => row.text)).toEqual([
+      "Sleeves · 15 products · Sets: eBay category, shipping policy, text above",
+      "Toploaders · 1 product · No category settings yet",
+    ]);
+    expect(older.rows[1].words.sets).toBe(LISTING_SETTINGS_CATEGORY_WORDS.noCategorySettingsYet);
+    // No line, no opener: no older rules, the check unknown, or no category listed (the line under the strip offers it then).
+    expect(card()).toMatchObject({ olderRulesLine: null, olderRulesOpener: null });
+    expect(card().rows[1].text).toBe("Toploaders · 1 product · Uses your store defaults");
+    for (const unknown of [{ data: undefined }, { data: summary({ price: 1 }).data, error: new TypeError("offline") }]) {
+      const state = card({ summary: unknown });
+      expect(state).toMatchObject({ olderRulesLine: null, olderRulesOpener: null });
+      expect(state.rows[1].text).toBe("Toploaders · 1 product · Uses your store defaults");
+    }
+    expect(card({ summary: summary({ ebayCategory: 2 }), read: { data: { ...LIST, categories: [] } } })).toMatchObject({ olderRulesLine: null, olderRulesOpener: null });
+    // Over 10,000 sizes the card is hidden, and nothing can be checked: no opener either (K7).
+    expect(card({ summary: summary({ price: 1 }, "too_large") })).toMatchObject({ hidden: true, olderRulesOpener: null });
+    // A list or a save was refused as too large before the summary says so: the line stays, the opener goes (it would open nothing).
+    expect(card({ summary: summary({ price: 1 }), tooLarge: true })).toMatchObject({
+      hidden: false, olderRulesLine: LISTING_SETTINGS_CATEGORY_WORDS.olderRules, olderRulesOpener: null,
+    });
+    expect(card({ summary: summary({ price: 1 }), tooLarge: false }).olderRulesOpener).toEqual({ label: "See what changes" });
   });
 
   it("turns [Change] off with Checking… while the older-rules check is unknown, and with the right's line while W12 can't be used", () => {
@@ -933,6 +960,28 @@ describe("the editor (plan 8.3, 8.4, 3.7)", () => {
     expect(editor({ summary: summary(), draft: OPENED }).rows.every((row) => row.row.edit?.change.shown === true)).toBe(true);
   });
 
+  it("puts [See what changes] beside the footer's older-rules line, whether the gate or a 409 put it there (PR 11b, D17)", () => {
+    const older = summary({ ebayCategory: 1 });
+    const opener = { label: "See what changes" };
+    expect(editor({ summary: older, draft: OPENED }).olderRulesOpener).toEqual(opener);
+    expect(editor({ summary: older, draft: categoryDraft({ shippingPolicy: SET_F1 }, ["shippingPolicy"]) }).olderRulesOpener).toEqual(opener);
+    const refused = run([{ type: "failure", key: "ls-cat:1", failure: { phase: "refused", message: LISTING_SETTINGS_CATEGORY_WORDS.olderRules, code: "O", status: 409, fields: [] } }], SAVING);
+    expect(editor({ summary: older, draft: refused, failure: { message: LISTING_SETTINGS_CATEGORY_WORDS.olderRules, fields: [] } }).olderRulesOpener).toEqual(opener);
+    // Other words in the footer (a save out, unconfirmed, a conflict), no older rules, or an unknown summary: none.
+    expect(editor({ summary: older, draft: SAVING }).olderRulesOpener).toBeNull();
+    expect(editor({ summary: older, draft: UNCERTAIN }).olderRulesOpener).toBeNull();
+    const conflict = run([{ type: "failure", key: "ls-cat:1", failure: { phase: "conflict", message: "This changed in another window.", code: "C", status: 409 } }], SAVING);
+    expect(editor({ summary: older, draft: conflict }).olderRulesOpener).toBeNull();
+    expect(editor({ summary: summary(), draft: OPENED }).olderRulesOpener).toBeNull();
+    expect(editor({ summary: { data: undefined }, draft: OPENED }).olderRulesOpener).toBeNull();
+    // A 409 refused while the summary still says nothing: the line, but the opener waits for the summary's re-read.
+    expect(editor({ summary: summary(), draft: refused, failure: { message: LISTING_SETTINGS_CATEGORY_WORDS.olderRules, fields: [] } })).toMatchObject({
+      footer: { message: { text: LISTING_SETTINGS_CATEGORY_WORDS.olderRules } }, olderRulesOpener: null,
+    });
+    // Over 10,000 sizes nothing can be checked (K7).
+    expect(editor({ summary: summary({ ebayCategory: 1 }, "too_large"), draft: OPENED }).olderRulesOpener).toBeNull();
+  });
+
   it("offers only Use store default under a sign-in, says so, and nothing while W12 is off", () => {
     const draft = run([{ type: "open", editor: categoryEditorId(CATEGORY), place: "Sleeves", base: categoryDraftValue(DETAIL) }]);
     const signIn = editor({ draft, rights: rights({ setup: { data: undefined, error: apiError(403, "DROPSHIP_EBAY_LISTING_SETUP_PERMISSION_REQUIRED") } }) });
@@ -1242,6 +1291,21 @@ describe("the category price (PR 10f, plan 9.2, 9.6; D1, D2, D16)", () => {
     expect(categoryPriceCheckAlsoLines(priceOnly({ choice: SET_COST, check: null }))).toEqual([]);
     expect(categoryPriceCheckChange(value)).toEqual({ price: SET_COST, releaseExactPrices: false });
     expect(categoryPriceCheckChange(priceOnly({ choice: { mode: "default" }, check: null }, OWN_PRICED))).toEqual({ price: { mode: "default" }, releaseExactPrices: false });
+  });
+
+  it("puts [See what changes] beside the check's footer line when Save new prices was refused for older group rules (PR 11b, plan 11.1)", () => {
+    const older = summary({ price: 1 });
+    const checked = pricedDraft({ choice: SET_COST, check: CHECK });
+    const saving = run([{ type: "startSave", attempt: { signature: "s", key: "ls-price-check:1" } }], checked)!;
+    const refused = (message: string) => categoryPriceCheckShown(run([{ type: "failure", key: "ls-price-check:1",
+      failure: { phase: "refused", message, code: "O", status: 409, fields: [] } }], saving), CATEGORY);
+    expect(categoryPriceCheckOlderRulesOpener(refused(LISTING_SETTINGS_CATEGORY_WORDS.olderRules), older)).toEqual({ label: "See what changes" });
+    // Other words, no check, the summary not caught up yet, or over 10,000 sizes: none.
+    expect(categoryPriceCheckOlderRulesOpener(refused("Server words."), older)).toBeNull();
+    expect(categoryPriceCheckOlderRulesOpener(categoryPriceCheckShown(checked, CATEGORY), older)).toBeNull();
+    expect(categoryPriceCheckOlderRulesOpener(null, older)).toBeNull();
+    expect(categoryPriceCheckOlderRulesOpener(refused(LISTING_SETTINGS_CATEGORY_WORDS.olderRules), summary())).toBeNull();
+    expect(categoryPriceCheckOlderRulesOpener(refused(LISTING_SETTINGS_CATEGORY_WORDS.olderRules), summary({ price: 1 }, "too_large"))).toBeNull();
   });
 
   it("shows the check in place of the editor's body while the draft holds one, and says what Back does (D20, D21)", () => {
