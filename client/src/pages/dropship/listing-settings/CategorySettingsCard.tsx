@@ -27,6 +27,10 @@ export interface CategorySettingsCardProps {
   onTooLarge?: (error: unknown) => void;
   /** The step's line under the card: the editor closed because no chosen product is in its category any more (8.6). */
   notice?: string | null;
+  /** [See what changes] under the older-rules line (PR 11b, D17): the step opens the read-only sheet (`?sheet=convert`). */
+  onSeeWhatChanges: () => void;
+  /** The step's banner says more than 10,000 sizes are chosen (D18): no [See what changes], which would open nothing (K7). */
+  tooLarge?: boolean;
 }
 
 /** How many skeleton rows the loading card shows (PROPOSAL): about one card's worth. */
@@ -37,26 +41,29 @@ const SKELETON_ROWS = 2;
  * REC:819): every Card Shellz category that holds a chosen product, with what
  * it sets ("Sleeves · 15 products · Sets: shipping policy, store shelf") and
  * [Change], the products with no category, and the one line while the store
- * still holds older group rules, when no row has [Change] (D11). Sits between
- * the Store defaults card and the tabs (A5). Hidden while the selection is
- * too large (D18). Every decision is the lib's (`categorySettingsCardState`).
+ * still holds older group rules, when no row has [Change] (D11), with [See
+ * what changes] under it (PR 11b, D17); the rows then read "No category
+ * settings yet" in place of "Uses your store defaults". Sits between the
+ * Store defaults card and the tabs (A5). Hidden while the selection is too
+ * large (D18). Every decision is the lib's (`categorySettingsCardState`).
  */
 export function CategorySettingsCard(props: CategorySettingsCardProps) {
-  const { storeConnectionId, summary, right, onChange, onTooLarge, notice } = props;
+  const { storeConnectionId, summary, right, onChange, onTooLarge, notice, onSeeWhatChanges, tooLarge } = props;
   const drafts = useListingSettingsDrafts();
   // A list read (60 s), off while the summary says too large (D18).
   const read = useQuery(categoriesCardQueryOptions(storeConnectionId, summary));
   useReportListTooLarge(read.error, onTooLarge);
-  const card = categorySettingsCardState({ read: { data: read.data, error: read.error }, summary, draft: drafts.draft, right, notice });
+  const card = categorySettingsCardState({ read: { data: read.data, error: read.error }, summary, draft: drafts.draft, right, notice, tooLarge });
   if (card.hidden) return null;
-  return <CategorySettingsCardView card={card} onChange={onChange} onRetry={() => void read.refetch()} />;
+  return <CategorySettingsCardView card={card} onChange={onChange} onRetry={() => void read.refetch()} onSeeWhatChanges={onSeeWhatChanges} />;
 }
 
 /** The card as its model says, hook-free (but for its title id), so every state renders in a test. */
-export function CategorySettingsCardView({ card, onChange, onRetry }: {
+export function CategorySettingsCardView({ card, onChange, onRetry, onSeeWhatChanges }: {
   card: CategoryCardState;
   onChange: (row: CategoryCardOpen) => void;
   onRetry: () => void;
+  onSeeWhatChanges: () => void;
 }) {
   const titleId = useId();
   return (
@@ -66,7 +73,8 @@ export function CategorySettingsCardView({ card, onChange, onRetry }: {
       data-testid="category-settings-card"
       className="rounded-lg border border-zinc-200 bg-white p-4 sm:p-5"
     >
-      <h3 id={titleId} className="text-base font-semibold text-zinc-900">{card.title}</h3>
+      {/* Focusable from code only: focus lands here when the older-rules sheet closes and its opener is gone (11.2). */}
+      <h3 id={titleId} tabIndex={-1} className="text-base font-semibold text-zinc-900 focus:outline-none">{card.title}</h3>
       <p className="mt-1 text-sm text-zinc-600">{card.intro}</p>
       {card.read === "loading" && (
         <ul aria-hidden="true" className="mt-3 space-y-2" data-testid="category-settings-loading">
@@ -98,11 +106,40 @@ export function CategorySettingsCardView({ card, onChange, onRetry }: {
         </ul>
       )}
       {card.empty && <p role="status" className="mt-3 text-sm text-zinc-700" data-testid="category-settings-empty">{card.empty}</p>}
-      {card.olderRulesLine && (
-        <p role="status" className="mt-3 text-sm text-amber-900" data-testid="category-settings-older-rules">{card.olderRulesLine}</p>
-      )}
+      <CardOlderRules line={card.olderRulesLine} opener={card.olderRulesOpener} onSeeWhatChanges={onSeeWhatChanges} />
       {card.uncategorized && <p className="mt-3 text-sm text-zinc-600" data-testid="category-settings-uncategorized">{card.uncategorized}</p>}
     </section>
+  );
+}
+
+/**
+ * The card's older-rules line and, under it, [See what changes] (PR 11b,
+ * D17): the opener shows only with the line, while the selection is not too
+ * large. Hook-free, so a test can press it.
+ */
+export function CardOlderRules({ line, opener, onSeeWhatChanges }: {
+  line: string | null;
+  opener: CategoryCardState["olderRulesOpener"];
+  onSeeWhatChanges: () => void;
+}) {
+  return (
+    <>
+      {line && <p role="status" className="mt-3 text-sm text-amber-900" data-testid="category-settings-older-rules">{line}</p>}
+      {opener && (
+        <div className="mt-2">
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            className="min-h-11 sm:min-h-9"
+            data-testid="category-settings-see-what-changes"
+            onClick={onSeeWhatChanges}
+          >
+            {opener.label}
+          </Button>
+        </div>
+      )}
+    </>
   );
 }
 

@@ -319,7 +319,8 @@ describe("header words", () => {
     }
     expect(OLDER_SETTINGS_WORDS).toEqual({
       title: "Older settings",
-      intro: "Per-size policies and shelves, group rules and text templates. They still work.",
+      // D21 (PR 11b): a group rule added here returns the store to the older-rules state (CUX#14).
+      intro: "Per-size policies and shelves, group rules and text templates. A group rule added here stops category settings from being saved.",
       show: "Show older settings",
       hide: "Hide older settings",
     });

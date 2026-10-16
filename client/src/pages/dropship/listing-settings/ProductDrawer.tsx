@@ -181,6 +181,16 @@ export interface ProductDrawerProps {
   returnFocusTo?: FocusReturnTarget;
 }
 
+/**
+ * Whether another dialog is open while this one closes: Back from the drawer reopens the sheet it came from (PR 11b's
+ * older-rules sheet, 10g's updated products), or a sheet's [Set a price] / [Fix] / [Check] opened the drawer. That
+ * dialog took focus as it opened, so the closing one gives none back: its opener sits behind the open dialog, hidden
+ * from the accessibility tree (plan 3.4).
+ */
+export function anotherDialogOpen(): boolean {
+  return typeof document !== "undefined" && document.querySelector('[role="dialog"][data-state="open"]') !== null;
+}
+
 /** Full screen below 640 px (R:412); a wide right-side sheet above. The built-in × is replaced by the header's own. */
 export const PRODUCT_DRAWER_CLASS =
   "flex h-full w-full flex-col gap-0 p-0 sm:max-w-2xl [&>button]:hidden motion-reduce:animate-none motion-reduce:transition-none";
@@ -270,6 +280,11 @@ export function ProductDrawer(props: ProductDrawerProps) {
           if (escape.current?.()) event.preventDefault();
         }}
         onCloseAutoFocus={(event) => {
+          // Closed into another dialog (Back to the sheet the drawer came from): that dialog keeps the focus it took.
+          if (anotherDialogOpen()) {
+            event.preventDefault();
+            return;
+          }
           const opener = props.returnFocusTo?.current ?? null;
           if (!opener || !opener.isConnected) return;
           event.preventDefault();
@@ -1479,7 +1494,7 @@ function DrawerContent({
  * The drawer's sticky footer (R:272): "● Not saved · 1 change" [Discard] [Save product]; also "Set for selected"'s
  * ([Save for 312 products], PR 10 plan 6.3). Stateless, so every state renders in tests.
  */
-export function DrawerFooterBar({ footer, message, onDiscard, onPrimary, testIdPrefix = "product-drawer" }: {
+export function DrawerFooterBar({ footer, message, onDiscard, onPrimary, testIdPrefix = "product-drawer", aside = null }: {
   footer: DrawerFooter;
   /** Words outside the draft (a save that didn't start, a read that failed); they replace the draft's. */
   message: string | null;
@@ -1487,6 +1502,8 @@ export function DrawerFooterBar({ footer, message, onDiscard, onPrimary, testIdP
   onPrimary: () => void;
   /** The surface's test ids: `<prefix>-footer`, `<prefix>-not-saved`; the drawer's when left out. */
   testIdPrefix?: string;
+  /** Beside the message: the surface's own button that is not the footer's (the category editor's [See what changes], PR 11b). */
+  aside?: ReactNode;
 }) {
   const shown = message !== null ? { text: message, tone: "alert" as const } : footer.message;
   return (
@@ -1502,6 +1519,7 @@ export function DrawerFooterBar({ footer, message, onDiscard, onPrimary, testIdP
           {shown.text}
         </span>
       )}
+      {aside}
       <Button type="button" variant="outline" size="sm" disabled={footer.discardDisabled} onClick={onDiscard}>{DRAWER_WORDS.discard}</Button>
       <Button type="button" size="sm" disabled={footer.primary.disabled} onClick={onPrimary}>{footer.primary.label}</Button>
     </div>

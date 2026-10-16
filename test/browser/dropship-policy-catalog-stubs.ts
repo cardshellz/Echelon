@@ -12,6 +12,12 @@ import {
 import { decideDropshipListingAccess } from "../../shared/dropship/listing-access";
 import { contentProfileStateSchema, saveContentProfileInputSchema, type ContentProfileState } from "../../shared/dropship/listing-content";
 import {
+  CONVERSION_PAGE_SIZE,
+  listingRulesConversionCheckInputSchema,
+  listingRulesConversionCheckSchema,
+  type ListingRulesConversionCheck,
+} from "../../shared/dropship/listing-rules-conversion";
+import {
   MAX_BULK_TEXT_BYTES,
   MAX_PRICE_RELEASES_PER_APPLY,
   acknowledgeCategoryMovesInputSchema,
@@ -525,6 +531,15 @@ export interface StubState {
   /** W13 "Got it"s (POST …/listing-settings/category-moves/acknowledge; plan PR 10, 10.4), and how the next ones answer. */
   categoryMovesAcknowledges: StubWrite[];
   categoryMovesAcknowledgeAnswers: WriteAnswer[];
+  /**
+   * The dry run of moving older group rules over (`GET …/listing-settings/conversion?page=N`; plan PR 11, 5.2), by
+   * page: each scripted page answers as given (a check, parsed with the strict contract when served, or a refusal),
+   * and a journey may change a page between reads. With no page scripted, every page answers the default:
+   * `no_older_rules` while the store holds no older group rule (the live summary's counts), else a clean answer
+   * that changes nothing (`defaultConversionCheck`). With some scripted, a page left out is unexpected. The stub
+   * never computes a diff: older group rules are not modelled here.
+   */
+  conversionPages: Record<number, ListingRulesConversionCheck | ScriptedError>;
   /** The W7 checks made, by review id: the stored input and every row, for paging and the apply's hash. */
   priceChangeChecks: Record<string, PriceChangeCheck>;
   /** W7 checks already applied, by review id, with the request key that applied them (another key is 409 IDEMPOTENCY_CONFLICT). */
@@ -1726,6 +1741,50 @@ function olderGroupRuleCounts(state: StubState, storeConnectionId: number) {
   };
 }
 
+const STUB_CONVERSION_PLAN_HASH = "e".repeat(64);
+const STUB_CONVERSION_WRITES_HASH = "f".repeat(64);
+const noConversionItems = () => ({ total: 0, items: [] });
+
+/**
+ * One page of the dry run (`GET …/conversion`, plan PR 11, 4.A.3) built over `overrides` and parsed with the strict
+ * contract, so a scripted page that drifts from it fails where it is built (a spec's load, or the stub's own
+ * check below). Defaults: a clean answer for one pricing group with nothing to list.
+ */
+export function conversionCheck(storeConnectionId: number, overrides: Partial<ListingRulesConversionCheck> = {}): ListingRulesConversionCheck {
+  return listingRulesConversionCheckSchema.parse({
+    storeConnectionId, generatedAt: STAMP, state: "clean", planHash: STUB_CONVERSION_PLAN_HASH, writesHash: STUB_CONVERSION_WRITES_HASH,
+    olderRules: { pricingGroups: 1, contentGroups: 0, ebayCategoryRules: 0 },
+    blocked: { wouldLosePrice: noConversionItems(), wouldBlockListing: noConversionItems(), tooMuchText: false },
+    becomes: { categories: noConversionItems(), products: noConversionItems() },
+    report: { unmatched: noConversionItems(), shared: noConversionItems(), nameMismatches: noConversionItems(), neverApplies: noConversionItems(),
+      ties: noConversionItems(), someSizesOnly: noConversionItems(), mixed: noConversionItems() },
+    kept: { exactPrices: 0, catalogPrices: 0, sizePolicies: 0, sizeShelves: 0, sizeTexts: 0 },
+    changes: { page: 0, pageSize: CONVERSION_PAGE_SIZE, total: 0, rows: [] },
+    ...overrides,
+  });
+}
+
+/**
+ * The dry run's answer when no page is scripted: `no_older_rules` while the store holds no older group rule (the
+ * counts the live summary shows), else a clean answer that changes nothing and lists nothing. Never a diff: the
+ * stub does not model what the rules decide.
+ */
+export function defaultConversionCheck(state: StubState, storeConnectionId: number, page: number): ListingRulesConversionCheck {
+  const olderRules = olderGroupRuleCounts(state, storeConnectionId);
+  const none = olderRules.pricingGroups + olderRules.contentGroups + olderRules.ebayCategoryRules === 0;
+  return conversionCheck(storeConnectionId, {
+    state: none ? "no_older_rules" : "clean", planHash: none ? null : STUB_CONVERSION_PLAN_HASH, writesHash: none ? null : STUB_CONVERSION_WRITES_HASH,
+    olderRules, changes: { page, pageSize: CONVERSION_PAGE_SIZE, total: 0, rows: [] },
+  });
+}
+
+/** Page `page`'s answer: the scripted one, else the default when nothing is scripted, else null (a page the journey did not expect). */
+function conversionPageAnswer(state: StubState, storeConnectionId: number, page: number): ListingRulesConversionCheck | ScriptedError | null {
+  const scripted = state.conversionPages[page];
+  if (scripted !== undefined) return scripted;
+  return Object.keys(state.conversionPages).length === 0 ? defaultConversionCheck(state, storeConnectionId, page) : null;
+}
+
 /** W12's 409 when the clear set is not the one the server derives (the service's productSetConflict), with the server's delay note. */
 function categoryProductSetConflict(storeConnectionId: number, categoryId: number, productIds: readonly number[]): ScriptedError {
   return { status: 409, code: "DROPSHIP_PRODUCT_LISTING_SETTINGS_VERSION_CONFLICT",
@@ -2294,6 +2353,7 @@ export const defaultStubState = (): StubState => ({
   sizePricesWrites: [], sizePricesWriteAnswers: [],
   priceChangeReviews: [], priceChangeReviewAnswers: [], priceChangePageAnswers: [], priceChangeApplies: [], priceChangeApplyAnswers: [],
   priceChangeChecks: {}, priceChangeApplied: {}, categoryMovesAcknowledges: [], categoryMovesAcknowledgeAnswers: [],
+  conversionPages: {},
   reviews: {}, keyedAnswers: {}, nextRevision: 40, unexpected: [], errors: [],
 });
 
@@ -2696,6 +2756,24 @@ async function answerStoreRead(state: StubState, route: Route, storeId: number, 
     }
     return route.fulfill({ json: listingSettingsUpdatedProducts(state, storeId, parsed.data.page) });
   }
+  // The dry run (plan PR 11, 5.2): read only while its sheet is open, never on mount; refused while too large (D18).
+  if (path === `${listings}/listing-settings/conversion`) {
+    if (state.tooLarge) return fulfillTooLarge(route);
+    const query = url.searchParams;
+    const parsed = listingRulesConversionCheckInputSchema.safeParse({ storeConnectionId: storeId, ...(query.has("page") ? { page: Number(query.get("page")) } : {}) });
+    const unknown = [...query.keys()].filter((key) => key !== "page");
+    if (!parsed.success || unknown.length > 0 || query.getAll("page").length > 1) {
+      state.unexpected.push(`GET ${path}${url.search} (query off contract)`);
+      return route.fulfill({ status: 400, json: { error: { code: "STUB_INVALID_INPUT", message: "The query is not what the route takes." } } });
+    }
+    const answer = conversionPageAnswer(state, storeId, parsed.data.page);
+    if (answer === null) {
+      state.unexpected.push(`GET ${path}${url.search} (page not scripted)`);
+      return route.fulfill({ status: 500, json: { error: { code: "STUB_NOT_SCRIPTED", message: "No answer is scripted for this page." } } });
+    }
+    if ("status" in answer) return fulfillError(route, answer);
+    return route.fulfill({ json: listingRulesConversionCheckSchema.parse(answer) });
+  }
   // The Category settings card (read on mount) and the category editor (plan PR 10, 8.5): refused while too large (D18).
   if (path === `${listings}/listing-settings/categories`) {
     if (state.tooLarge) return fulfillTooLarge(route);
@@ -2766,7 +2844,7 @@ async function answerStoreRead(state: StubState, route: Route, storeId: number, 
   return NOT_MINE;
 }
 
-/** More than 10,000 sizes chosen: the lists, the ids read, the updated products, the categories, the product read and its own settings are refused (dropship-listing-settings.routes.ts). */
+/** More than 10,000 sizes chosen: the lists, the ids read, the updated products, the categories, the dry run, the product read and its own settings are refused (dropship-listing-settings.routes.ts). */
 function fulfillTooLarge(route: Route) {
   return fulfillError(route, { status: 422, code: "DROPSHIP_LISTING_SETTINGS_TOO_LARGE",
     message: "More than 10,000 sizes are chosen.", context: { limit: 10_000 } });
@@ -3061,6 +3139,21 @@ export function oldSetupPanel(page: Page) {
     || !("status" in wrongNine) || wrongNine.code !== CATEGORY_PRICE_SET_CONFLICT || (wrongNine as ScriptedError).context?.conflictCount !== 1
     || !("status" in ruledNine) || ruledNine.code !== "DROPSHIP_LISTING_SETTINGS_OLDER_RULES_PRESENT") {
     throw new Error(`The stub's category check refusals changed: ${JSON.stringify({ staleNine, wrongNine, ruledNine })}`);
+  }
+
+  // The dry run (plan PR 11, 5.2): the default answers by the store's older group rules, page by page, through the
+  // strict contract; a scripted page is served as given; with some scripted, a page left out has no answer.
+  const noRules = defaultConversionCheck(loaded, store, 0);
+  const ruledCheck = defaultConversionCheck({ ...loaded, pricingRules: { [store]: { ...SAVED_PRICING_RULES, profile: { ...SAVED_PRICING_RULES.profile!,
+    groups: [{ id: "g1", name: "Mailers", priority: 1, scope: { type: "category", category: "Mailers" }, recipe: SAVED_PRICING_RULES.profile!.defaultRecipe }] } } } }, store, 3);
+  const scriptedPages: StubState = { ...loaded, conversionPages: { 0: conversionCheck(store, { state: "not_clean",
+    changes: { page: 0, pageSize: CONVERSION_PAGE_SIZE, total: 0, rows: [] },
+    blocked: { wouldLosePrice: { total: 1, items: [{ productId: ENVELOPE.productId, productVariantId: ENVELOPE.sizes[0].productVariantId,
+      productName: ENVELOPE.productName, sizeName: ENVELOPE.sizes[0].sizeName, priceCents: null }] }, wouldBlockListing: noConversionItems(), tooMuchText: false } }) } };
+  if (noRules.state !== "no_older_rules" || noRules.planHash !== null || ruledCheck.state !== "clean" || ruledCheck.olderRules.pricingGroups !== 1
+    || ruledCheck.changes.page !== 3 || conversionPageAnswer(scriptedPages, store, 0) !== scriptedPages.conversionPages[0]
+    || conversionPageAnswer(scriptedPages, store, 1) !== null) {
+    throw new Error(`The stub's dry run changed: ${JSON.stringify({ noRules, ruledCheck })}`);
   }
 
   // The resolver's order, pinned once here: size, then product, then category (named), then the store default.
