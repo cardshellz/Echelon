@@ -10,7 +10,7 @@ const run = databaseUrl && process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "tru
 const discardAction = "procurement.receiving.discard";
 const protectedActions = ["procurement.receiving.source_resolved", "procurement.receiving.default_location_applied", discardAction];
 const discardAuditMigration = readFileSync(
-  resolve(process.cwd(), "scripts/migrations/pending/receiving_discard_audit_guard.sql"),
+  resolve(process.cwd(), "migrations/900000010000018200001_receiving_discard_audit_guard.sql"),
   "utf8",
 );
 

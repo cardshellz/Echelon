@@ -28,7 +28,7 @@ The receipt-creation and shipment-invoice writers use the compatible graph-to-sh
 
 Both list layouts offer discard only for drafts and call the same command as receipt detail. A concurrent-start rejection preserves the row and shows its reason. The detail action requires loaded lines with no recorded activity.
 
-The forward-only audit migration extends the existing receiving-integrity guard to `procurement.receiving.discard`. It preserves previous protected actions and existing snapshots and rejects update, delete, relabel and truncate. No deployed migration is edited. The SQL is staged at `scripts/migrations/pending/receiving_discard_audit_guard.sql` pending allocation from the actual draft PR number; the final filename and dependent test reference must be allocated before merge. Apply this migration before deploying the application change.
+The forward-only audit migration extends the existing receiving-integrity guard to `procurement.receiving.discard`. It preserves previous protected actions and existing snapshots and rejects update, delete, relabel and truncate. No deployed migration is edited. The SQL is allocated to PR #1820 at `migrations/900000010000018200001_receiving_discard_audit_guard.sql`; its SHA256 remains `6aeac60c85ceb7ad039d6278ee0fa9637e1de5a10d9ed21ab1380414e8769498`, byte-for-byte identical to the approved and tested SQL. Apply this migration before deploying the application change.
 
 ## Assumptions and limits
 
@@ -39,7 +39,7 @@ No historical repair, inferred financial ownership, email connection or producti
 - Procurement unit/HTTP regressions: 3,272 passed across 218 files; seven existing skips.
 - PostgreSQL: 232 passed across six existing registered suites: purchase approval/close 71, receipt audit 12, receipt integrity 18, quarantine 20, shipment cost/cancellation 59, shipment lines 52. Each suite ran in a fresh disposable local database with production URLs removed.
 - Desktop/mobile: 64 passed across cancellation authority, receiving integrity and shipment cost/cancellation workflows.
-- Early CI guards: 202 passed. Existing migration inventory validates at 520; the new audit SQL awaits PR allocation.
+- Early CI guards: 202 passed. The final allocation is checked against the base inventory; no existing migration bytes changed.
 - Application/server-test/client-test typechecks and production build: all passed on the final code.
 
 Initial failures were corrected and the affected full suites rerun: a shipment fixture leaked line associations, a BigInt literal conflicted with the configured TS target, and raw timestamp binding shifted PO discard history in a non-UTC host. The final receipt case checks the actual persisted timestamp using the application schema mapping. Audit tests cover upgrade of an existing snapshot, mutation/relabel/truncate rejection, and transaction rollback.
