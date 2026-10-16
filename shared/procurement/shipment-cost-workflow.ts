@@ -32,3 +32,11 @@ export const shipmentCostReviewSchema = z.object({
   }).strict()),
 }).strict();
 export type ShipmentCostReview = z.infer<typeof shipmentCostReviewSchema>;
+
+/** A historical application issue remains in the audit after its cost is posted.
+ * A current source issue always takes precedence over that saved posting. */
+export function isShipmentCostLinePosted(line: ShipmentCostReview["lines"][number]): boolean {
+  return !line.sourceIssue && (line.exceptionReview
+    ? line.exceptionReview.reconciliation?.status === "posted"
+    : line.application?.status === "applied");
+}

@@ -3,6 +3,8 @@ import {
   type PoShipmentCostSummary,
 } from "@shared/procurement/po-shipment-cost-summary";
 import { z } from "zod";
+import { canonicalJson } from "@shared/utils/canonical-json";
+import { shipmentCostExceptionSchema } from "@shared/procurement/shipment-cost-exception";
 import {
   costIssueSchema,
   type CostIssue,
@@ -53,6 +55,7 @@ const inputSchema = z
           evidence: z.string().nullable(),
           applicationStatus: z.string().nullable(),
           issue: z.string().nullable(),
+          reconciled: z.boolean().optional(),
         })
         .strict(),
     ),
@@ -82,6 +85,7 @@ export interface PoShipmentCostLine {
   evidence: string | null;
   applicationStatus: string | null;
   issue: string | null;
+  reconciled?: boolean;
 }
 
 function safeAmount(value: bigint): number {
@@ -177,7 +181,7 @@ function evaluatePoShipmentCosts(
     if (
       charge.amountCents === null ||
       total !== BigInt(charge.amountCents) ||
-      allocations.length === 0
+      (allocations.length === 0 && charge.amountCents !== 0)
     )
       unallocated++;
     if (charge.currency !== input.currency) {
@@ -212,7 +216,12 @@ function evaluatePoShipmentCosts(
       BigInt(line.sourceTotalMills) === amount &&
       line.sourceQuantity === line.quantity;
     let status: LineStatus;
-    if (
+    if (current && line.reconciled && !line.issue && (lineAllocations.length > 0 || amount === BigInt(0))) {
+      // The immutable application retains its historical issues. A current,
+      // balanced posting resolves their cost without rewriting that history.
+      applied++;
+      status = "applied";
+    } else if (
       line.issue ||
       line.applicationStatus === "review_required" ||
       line.applicationStatus === "retry_required"
@@ -309,6 +318,7 @@ const lineDetailSchema = z
     recordedAt: z.string().datetime({ offset: true }).nullable(),
     sourceIssue: z.unknown(),
     applicationIssues: z.unknown(),
+    exceptionReview: shipmentCostExceptionSchema.nullable().optional(),
   })
   .strict();
 export type PoShipmentCostLineDetail = z.infer<typeof lineDetailSchema>;
@@ -386,6 +396,12 @@ export function buildPoShipmentCosts(
       const unreadable =
         (detail.sourceIssue != null && !sourceIssue.success) ||
         (detail.applicationId !== null && !applicationIssues.success);
+      const reviewedIssues = new Set(detail.exceptionReview?.issues.map(canonicalJson));
+      const reconciled = detail.exceptionReview?.reconciliation?.status === "posted"
+        && detail.sourceIssue == null && detail.applicationId !== null && applicationIssues.success
+        && applicationIssues.data.length > 0
+        && applicationIssues.data.length === reviewedIssues.size
+        && applicationIssues.data.every(issue => reviewedIssues.has(canonicalJson(issue)));
       const recordedIssue = sourceIssue.success
         ? sourceIssue.data.code
         : applicationIssues.success && applicationIssues.data.length > 0
@@ -393,9 +409,10 @@ export function buildPoShipmentCosts(
           : null;
       return {
         ...line,
+        reconciled,
         issue:
           line.issue ??
-          (unreadable ? "COST_REVIEW_DETAILS_MISSING" : recordedIssue),
+          (unreadable ? "COST_REVIEW_DETAILS_MISSING" : reconciled ? null : recordedIssue),
       };
     }),
   });
@@ -422,6 +439,7 @@ export function buildPoShipmentCosts(
       const detail = detailsById.get(line.lineId)!;
       return {
         lineId: line.lineId,
+        exceptionReview: detail.exceptionReview ?? null,
         shipmentId: detail.shipmentId,
         shipmentNumber: detail.shipmentNumber,
         shipmentStatus: detail.shipmentStatus,

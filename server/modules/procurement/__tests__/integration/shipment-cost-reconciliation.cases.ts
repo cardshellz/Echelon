@@ -82,9 +82,10 @@ export function registerShipmentReconciliationCases(fixture: {
       const approved = (await query("SELECT evidence FROM inventory.cost_reconciliation_approvals")).rows[0].evidence;
       expect(approved.preview).toEqual(preview);
       expect(approved).toMatchObject({ inventoryQuantityDelta: 0, approval: { userId: "admin-user", active: true } });
-      expect(
-        (await readPoShipmentCosts(fixture.database(), 10))?.lines[0].exceptionReview?.reconciliation?.status,
-      ).toBe("posted");
+      const poCosts = await readPoShipmentCosts(fixture.database(), 10);
+      expect(poCosts?.lines[0]).toMatchObject({ status: "applied", exceptionReview: { reconciliation: { status: "posted" } } });
+      expect(poCosts?.summary.reviewLines).toBe(poCosts?.lines.filter(line => line.status === "review_required").length);
+      expect(poCosts?.summary.appliedLines).toBe(poCosts?.lines.filter(line => line.status === "applied").length);
       const event = inventoryCostReportEventSchema.parse(
         (await query("SELECT payload FROM inventory.cost_reporting_events ORDER BY id DESC LIMIT 1")).rows[0].payload,
       );
@@ -126,6 +127,10 @@ export function registerShipmentReconciliationCases(fixture: {
       const physical = await fixture.physicalSnapshot();
       for (const cents of [140000, 10000, 0]) {
         await query("UPDATE procurement.inbound_freight_costs SET actual_cents=$1 WHERE id=31", [cents]);
+        // The modal and PO must agree immediately, before the next cost update.
+        expect((await context()).state.status).toBe("review_required");
+        const stalePo = await readPoShipmentCosts(fixture.database(), 10);
+        expect(stalePo?.lines[0]).toMatchObject({ status: "review_required", exceptionReview: { reconciliation: { status: "review_required" } } });
         await fixture.updateCosts();
         const updated = await context();
         expect(updated.state).toMatchObject({
@@ -133,6 +138,8 @@ export function registerShipmentReconciliationCases(fixture: {
           unassignedMills: 0,
           postedMills: updated.historicalAmountMills,
         });
+        const currentPo = await readPoShipmentCosts(fixture.database(), 10);
+        expect(currentPo?.lines[0].status, JSON.stringify({ cents, line: currentPo?.lines[0], summary: currentPo?.summary })).toBe("applied");
         const rows = await postings();
         expect(rows.reduce((sum, row) => sum + BigInt(row.delta_mills), BigInt(0))).toBe(
           BigInt(updated.historicalAmountMills),

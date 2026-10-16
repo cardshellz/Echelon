@@ -213,6 +213,7 @@ export async function readPoShipmentCosts(
           const contract = row.contract as Record<string, unknown> | null;
           return {
             lineId,
+            exceptionReview: exceptions.get(lineId) ?? null,
             shipmentId: costInteger(line.inbound_shipment_id, "shipmentId", 1),
             shipmentNumber:
               line.shipment_number == null
@@ -232,7 +233,7 @@ export async function readPoShipmentCosts(
           };
         }),
       );
-      return { ...costs, lines: costs.lines.map(line => ({ ...line, exceptionReview: exceptions.get(line.lineId) ?? null })) };
+      return costs;
     },
     { isolationLevel: "repeatable read", accessMode: "read only" },
   );

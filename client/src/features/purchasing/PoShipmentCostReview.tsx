@@ -17,10 +17,11 @@ export function PoShipmentCostReview({
   costs: PoShipmentCosts;
 }) {
   const navigation = useProcurementNavigation();
-  const pending = costs.lines.filter((line) => line.status !== "applied");
+  const visible = costs.lines.filter((line) => line.status !== "applied" || line.exceptionReview?.reconciliation?.status === "posted");
+  const pending = visible.filter(line => line.status !== "applied");
   const groups = [
     ...new Map(
-      pending.map((line) => [
+      visible.map((line) => [
         line.shipmentId,
         {
           id: line.shipmentId,
@@ -36,17 +37,12 @@ export function PoShipmentCostReview({
       className="space-y-4 border-t pt-3"
     >
       <div>
-        <h3 className="font-semibold text-sm">Inventory cost updates and exceptions</h3>
+        <h3 className="font-semibold text-sm">{pending.length ? "Cost updates and approvals" : "Cost postings"}</h3>
         <p className="text-xs text-muted-foreground">
-          Shipment charges are saved separately. Cost updates refresh their allocation to stock and sold items.
-          Historical inventory differences have their own administrator review below.
+          {pending.length ? "Items still needing attention are shown with their next step. Completed postings include their saved approval."
+            : "These costs are posted. Open a posting to see the amount, destination and administrator approval."}
         </p>
       </div>
-      {pending.length === 0 && (
-        <p className="text-sm text-green-700 dark:text-green-400">
-          All confirmed shipment costs have been applied to inventory.
-        </p>
-      )}
       {groups.map((shipment) => (
         <div
           key={shipment.id}
@@ -66,11 +62,14 @@ export function PoShipmentCostReview({
               </Button>
             </div>
           </div>
-          {["costing", "closed"].includes(shipment.status) && <ShipmentCostUpdateAction key={shipment.id} shipmentId={shipment.id} />}
+          {["costing", "closed"].includes(shipment.status) && pending.some(line => line.shipmentId === shipment.id
+            && (!line.exceptionReview || line.exceptionReview.reconciliation?.status === "review_required")) && <>
+          <ShipmentCostUpdateAction key={shipment.id} shipmentId={shipment.id} />
           <p className="text-xs text-muted-foreground">
             This updates the entire shipment, including its other linked POs. Closed-shipment adjustments are recorded automatically.
           </p>
-          {pending
+          </>}
+          {visible
             .filter((line) => line.shipmentId === shipment.id)
             .map((line) => {
               const guidance = shipmentCostReviewGuidance(line.issues);
@@ -105,7 +104,7 @@ export function PoShipmentCostReview({
                     </Badge>}
                     {line.recordedAt && (
                       <div className="text-xs text-muted-foreground">
-                        Last attempt:{" "}
+                        {line.status === "applied" ? "Cost update recorded:" : "Last attempt:"}{" "}
                         {new Date(line.recordedAt).toLocaleString()}
                       </div>
                     )}
@@ -127,7 +126,7 @@ export function PoShipmentCostReview({
                     </>}
                     <details className="text-xs text-muted-foreground">
                       <summary className="cursor-pointer">
-                        Cost review details · line #{line.lineId}
+                        {line.status === "applied" ? "Original inventory history" : "Cost review details"} · line #{line.lineId}
                       </summary>
                       <ul className="list-disc pl-4 mt-1 space-y-1">
                         {line.issues.map((issue) => (
