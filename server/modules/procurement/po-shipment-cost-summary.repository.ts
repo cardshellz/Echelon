@@ -5,7 +5,7 @@ import type { PoShipmentCostSummary } from "@shared/procurement/po-shipment-cost
 import type { PoShipmentCosts } from "@shared/procurement/po-shipment-costs";
 import { resolveShipmentChargeEvidence } from "./domain/shipment-charge-evidence";
 import { dateValues } from "./purchase-workspace-read";
-import { readShipmentCostExceptions } from "./shipment-cost-exception.repository";
+import { readShipmentCostPostingEvidence } from "./shipment-cost-posting-read.repository";
 
 type SummaryReader = {
   execute(query: SQL): Promise<{ rows: Record<string, unknown>[] }>;
@@ -126,7 +126,12 @@ export async function readPoShipmentCosts(
       const linkedById = new Map(
         linked.rows.map((row) => [costInteger(row.id, "lineId", 1), row]),
       );
-      const exceptions = await readShipmentCostExceptions(tx, linked.rows.map(row => costInteger(row.id, "lineId", 1)));
+      const { exceptions, sourceIssues } = await readShipmentCostPostingEvidence(tx, readiness.rows.map(row => {
+        const lineId = costInteger(row.id, "lineId", 1);
+        const linkedLine = linkedById.get(lineId);
+        if (!linkedLine) throw new Error("Shipment costing review refers to an unlinked line.");
+        return { lineId, shipmentId: costInteger(linkedLine.inbound_shipment_id, "shipmentId", 1), contract: row.contract };
+      }));
       const costs = buildPoShipmentCosts(
         {
           poId,
@@ -195,10 +200,7 @@ export async function readPoShipmentCosts(
               evidence:
                 contract?.evidence == null ? null : String(contract.evidence),
               applicationStatus: row.status == null ? null : String(row.status),
-              issue:
-                contract?.issue == null
-                  ? null
-                  : String((contract.issue as { code: unknown }).code),
+              issue: sourceIssues.get(costInteger(row.id, "shipmentLineId", 1))?.code ?? null,
             };
           }),
         },
@@ -228,7 +230,7 @@ export async function readPoShipmentCosts(
             recordedAt: dateValues({ recordedAt: row.recorded_at ?? null }, [
               "recordedAt",
             ]).recordedAt as string | null,
-            sourceIssue: contract?.issue ?? null,
+            sourceIssue: sourceIssues.get(lineId) ?? null,
             applicationIssues: row.application_issues ?? null,
           };
         }),

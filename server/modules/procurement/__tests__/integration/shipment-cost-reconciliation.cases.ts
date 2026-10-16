@@ -1,3 +1,4 @@
+import type { LandedCostHealth } from "@shared/procurement/landed-cost-health";
 import { randomUUID } from "node:crypto";
 import { sql } from "drizzle-orm";
 import type pg from "pg";
@@ -8,9 +9,14 @@ import {
   shipmentReconciliationScope,
 } from "../../shipment-cost-reconciliation.service";
 import { costFingerprint, recordReceiptCostOrigin } from "../../../inventory/infrastructure/cost-evidence.repository";
+import { readPurchaseCostApplications } from "../../purchase-cost-application-read.repository";
+import { projectPurchaseCostApplications } from "../../purchase-cost-application-read.service";
+import type { Transaction } from "../../purchase-workspace-read";
+import { readShipmentCostReview } from "../../shipment-cost-review.repository";
+import { isShipmentCostLinePosted } from "@shared/procurement/shipment-cost-workflow";
 import { readPoShipmentCosts } from "../../po-shipment-cost-summary.repository";
 import { inventoryCostReportEventSchema } from "@shared/procurement/cost-report-delivery";
-import { reconciliationPreview, type ReconciliationRequest } from "@shared/procurement/cost-reconciliation";
+import { reconciliationPreview, reconciliationResultSchema, type ReconciliationRequest } from "@shared/procurement/cost-reconciliation";
 import { readUnallocatedLotCosts } from "../../../inventory/infrastructure/cost-quantity.repository";
 
 /** Runs inside the real receiving/AP/freight fixture with synthetic records. */
@@ -21,9 +27,19 @@ export function registerShipmentReconciliationCases(fixture: {
   prepareGaps: () => Promise<void>;
   updateCosts: () => Promise<unknown>;
   physicalSnapshot: () => Promise<unknown>;
+  costHealth: () => Promise<LandedCostHealth>;
 }) {
   const service = () => createShipmentCostReconciliationService(fixture.database(), () => fixture.at);
   const context = () => service().context(11, "admin-user");
+  const history = () => fixture.database().transaction(async (tx) =>
+    projectPurchaseCostApplications(await readPurchaseCostApplications(tx as Transaction, 10), 10),
+    { isolationLevel: "repeatable read", accessMode: "read only" });
+  const shipmentLinePosted = async () => {
+    const review = await readShipmentCostReview(fixture.database(), 1);
+    const line = review?.lines.find((line) => line.lineId === 11);
+    expect(line).toBeDefined();
+    return isShipmentCostLinePosted(line!);
+  };
   const query = (text: string, params: unknown[] = []) => fixture.pool().query(text, params);
   const post = (request: ReconciliationRequest, key = randomUUID(), actor = "admin-user") =>
     service().reconcile(11, request, actor, {
@@ -64,6 +80,8 @@ export function registerShipmentReconciliationCases(fixture: {
       const { before, request } = await prepare(missing),
         physical = await fixture.physicalSnapshot(),
         key = randomUUID();
+      const unresolvedHealth = await fixture.costHealth();
+      expect(unresolvedHealth.items.some((item) => item.shipmentId === 1 && item.action === "review_cost_evidence")).toBe(true);
       const preview = reconciliationPreview(before, request.destination);
       expect(preview.before.unassignedMills).toBeGreaterThan(0);
       expect(preview.after.unassignedMills).toBe(0);
@@ -75,6 +93,19 @@ export function registerShipmentReconciliationCases(fixture: {
       });
       expect(await post(request, key)).toMatchObject({ replayed: true, body: saved.body });
       expect(await fixture.physicalSnapshot()).toEqual(physical);
+      const savedResult = reconciliationResultSchema.parse(saved.body);
+      const currentHistory = await history();
+      const currentRevision = currentHistory.revisions.find((revision) => revision.shipmentLineId === 11 && revision.latestRecordedSourceRevision)!;
+      expect(currentRevision.currentResolution).toMatchObject({ sourceRevisionId: currentRevision.id,
+        applicationId: savedResult.applicationId, destination: request.destination, postedMills: before.historicalAmountMills,
+        postings: [expect.objectContaining({ actorName: expect.any(String), reason: request.reason })] });
+      expect(currentRevision.applications.every((application) => application.status === "review_required")).toBe(true);
+      expect(currentRevision.applications.find((application) => application.id === savedResult.applicationId)?.reportingEvent?.evidenceState).toBe("verified_record");
+      expect(currentRevision.applications.flatMap((application) => application.issues).some((issue) => issue.code === "COST_REPORTING_EVENT_UNVERIFIED")).toBe(false);
+      expect(await shipmentLinePosted()).toBe(true);
+      const postedHealth = await fixture.costHealth();
+      expect(postedHealth.items.filter((item) => item.shipmentId === 1).every((item) =>
+        !["stale_provisional_lots", "finalized_not_pushed", "posting_review_required"].includes(item.type) && item.action !== "push_costs_to_lots")).toBe(true);
       const rows = await postings();
       expect(rows).toHaveLength(1);
       expect(BigInt(rows[0].delta_mills) + BigInt(rows[0].unassigned_delta_mills)).toBe(BigInt(0));
@@ -129,6 +160,10 @@ export function registerShipmentReconciliationCases(fixture: {
         await query("UPDATE procurement.inbound_freight_costs SET actual_cents=$1 WHERE id=31", [cents]);
         // The modal and PO must agree immediately, before the next cost update.
         expect((await context()).state.status).toBe("review_required");
+        expect(await shipmentLinePosted()).toBe(false);
+        expect((await fixture.costHealth()).items.some((item) => item.shipmentId === 1
+          && ["review_cost_evidence", "review_allocation"].includes(item.action))).toBe(true);
+        expect((await history()).revisions.every((revision) => revision.currentResolution == null)).toBe(true);
         const stalePo = await readPoShipmentCosts(fixture.database(), 10);
         expect(stalePo?.lines[0]).toMatchObject({ status: "review_required", exceptionReview: { reconciliation: { status: "review_required" } } });
         await fixture.updateCosts();
@@ -138,6 +173,12 @@ export function registerShipmentReconciliationCases(fixture: {
           unassignedMills: 0,
           postedMills: updated.historicalAmountMills,
         });
+        expect(await shipmentLinePosted()).toBe(true);
+        const revisedHistory = await history();
+        const resolved = revisedHistory.revisions.filter((revision) => revision.currentResolution != null);
+        expect(resolved).toHaveLength(1);
+        expect(resolved[0]).toMatchObject({ latestRecordedSourceRevision: true, currentResolution: { postedMills: updated.historicalAmountMills } });
+        expect(revisedHistory.revisions.filter((revision) => !revision.latestRecordedSourceRevision).every((revision) => revision.currentResolution == null)).toBe(true);
         const currentPo = await readPoShipmentCosts(fixture.database(), 10);
         expect(currentPo?.lines[0].status, JSON.stringify({ cents, line: currentPo?.lines[0], summary: currentPo?.summary })).toBe("applied");
         const rows = await postings();

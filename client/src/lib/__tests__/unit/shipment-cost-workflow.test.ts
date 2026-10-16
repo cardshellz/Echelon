@@ -26,6 +26,7 @@ describe("shipment cost completion", () => {
       issues: [{ code: "COST_HISTORICAL_LINEAGE_MISSING", message: "Missing history." }],
       reconciliation: { status, destination: "historical_cogs", postedMills: 100, unassignedMills: 0 },
     };
+    input.application!.issues = [...input.exceptionReview.issues];
     expect(isShipmentCostLinePosted(input)).toBe(status === "posted");
     input.sourceIssue = { code: "LANDED_ALLOCATION_STALE", message: "Charges changed." };
     expect(isShipmentCostLinePosted(input)).toBe(false);

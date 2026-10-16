@@ -99,7 +99,7 @@ export function PoShipmentCostSummary({
           </p>}
           {costs.inventoryCosting === "pending" && (
             <p className="text-amber-700 dark:text-amber-400">
-              Inventory costing is awaiting receipt, confirmed charges or a cost
+              Inventory costing is awaiting receipt, allocation or a cost
               update.
             </p>
           )}

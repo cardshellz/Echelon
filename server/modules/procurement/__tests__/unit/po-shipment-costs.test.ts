@@ -249,15 +249,15 @@ describe("PO card totals and recorded shipment cost review", () => {
       issues: [{ code: "COST_UPDATE_NOT_RECORDED" }],
     });
   });
-  it("explains applied estimates awaiting supplier confirmation", () => {
+  it("keeps supplier confirmation separate from completed estimate posting", () => {
     const input = source();
     input.charges[0].confirmed = false;
     input.lines[0].evidence = "estimated";
     expect(
       buildPoShipmentCosts(input, supplier, [detail()]).lines[0],
     ).toMatchObject({
-      status: "pending",
-      issues: [{ code: "LANDED_CHARGES_UNCONFIRMED" }],
+      status: "applied",
+      issues: [],
     });
   });
   it("explains an applied result that is outdated after an allocation changes", () => {
