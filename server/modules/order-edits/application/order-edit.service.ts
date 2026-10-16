@@ -1125,39 +1125,46 @@ export class OrderEditService {
         "This edit has already been submitted. Check its status.",
       );
     try {
-      await this.codes(record, "release");
       const proof = await this.warehouse.releaseUnsubmitted(
         record.omsOrderId,
         record.id,
       );
       if (
-        !proof.wmsOrderIds.length &&
-        !proof.shipmentIds.length &&
-        record.status !== "committing" &&
-        record.error?.code !== "ORDER_EDIT_HOLD_RELEASE_PENDING"
+        proof.wmsOrderIds.length ||
+        proof.shipmentIds.length ||
+        record.status === "committing"
       )
-        return record;
-      return await this.update(
-        record,
-        {
-          ...(record.error?.code === "ORDER_EDIT_HOLD_RELEASE_PENDING"
-            ? { error: null }
-            : {}),
-          // A crash before sending must not resume the approved submission automatically.
-          ...(record.status === "committing"
-            ? {
-                status: "review_required" as const,
-                error: {
-                  code: "ORDER_EDIT_SUBMISSION_INTERRUPTED",
-                  message: "Your changes were not submitted. Please try again.",
-                },
-              }
-            : {}),
-        },
-        actorId,
-        "unsubmitted_hold_released",
-        proof,
-      );
+        record = await this.update(
+          record,
+          {
+            // A crash before sending must not resume the approved submission automatically.
+            ...(record.status === "committing"
+              ? {
+                  status: "review_required" as const,
+                  error: {
+                    code: "ORDER_EDIT_SUBMISSION_INTERRUPTED",
+                    message:
+                      "Your changes were not submitted. Please try again.",
+                  },
+                }
+              : {}),
+          },
+          actorId,
+          "unsubmitted_hold_released",
+          proof,
+        );
+      // Legacy reservation cleanup has no authority over fulfillment when no
+      // order command was sent. Release warehouse ownership first; a reservation
+      // outage remains retryable without holding the customer's original order.
+      await this.codes(record, "release");
+      if (record.error?.code === "ORDER_EDIT_HOLD_RELEASE_PENDING")
+        record = await this.update(
+          record,
+          { error: null },
+          actorId,
+          "unsubmitted_cleanup_completed",
+        );
+      return record;
     } catch (error) {
       // Keep a durable retryable state. The worker selects unsubmitted ownership
       // even in review_required, unlike the previous quote-time hold lifecycle.
