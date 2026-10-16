@@ -283,8 +283,9 @@ export function attentionStripContent(
 
 export const OLDER_SETTINGS_WORDS = Object.freeze({
   title: "Older settings",
-  // Interim.
-  intro: "Per-size policies and shelves, group rules and text templates. They still work.",
+  // Interim (PR 11 PROPOSAL, D21): the panels stay until PR 12, and a group rule added here puts the store back in the
+  // older-rules state, so it says what that does instead of "They still work." (CUX#14).
+  intro: "Per-size policies and shelves, group rules and text templates. A group rule added here stops category settings from being saved.",
   show: "Show older settings",
   hide: "Hide older settings",
 });

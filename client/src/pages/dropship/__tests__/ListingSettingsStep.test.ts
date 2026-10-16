@@ -350,6 +350,26 @@ describe("ListingSettingsStep", () => {
     expect(markup).not.toContain('data-testid="product-drawer"');
   });
 
+  it("puts the older-rules line under the strip and before the Store defaults card while the store holds older group rules (PR 11b, D17)", () => {
+    const withRules = summaryAnswer({ storeDefaults: { ...summaryAnswer().storeDefaults, price: { recipe: null, groupRules: 1 } } });
+    const markup = renderStep({ summary: read(withRules) });
+    expectInOrder(markup, [
+      "listing-settings-header",
+      "listing-settings-attention",
+      // 10g's slot, above "Card Shellz updated products" (not read here, so that line is hidden).
+      "older-rules-line",
+      "store-defaults-card",
+      ...ROW_ORDER.map((field) => `store-default-row-${field}`),
+      "category-settings-card",
+      "listing-settings-tabs",
+    ]);
+    expect(markup).toContain("Your store still has older group rules.");
+    // The sheet opens from the address only, and is not read on mount (D18).
+    expect(markup).not.toContain('data-testid="older-rules-sheet"');
+    // No older rules: no line.
+    expect(renderStep()).not.toContain('data-testid="older-rules-line"');
+  });
+
   it("puts the ship-from note under Shipping, before Return", () => {
     const outdated = setupAnswer({ complete: false, missingFields: ["merchantLocationKey"],
       selection: { merchantLocationKey: "old-warehouse", fulfillmentPolicyId: "ground", returnPolicyId: "returns", paymentPolicyId: "payments" } });

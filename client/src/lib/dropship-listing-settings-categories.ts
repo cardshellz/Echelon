@@ -54,6 +54,15 @@ import {
   type ProductPriceEditorModel,
   type ProductPriceEditorState,
 } from "./dropship-listing-settings-price-check";
+import {
+  olderGroupRulesPresent,
+  olderRulesOpener,
+  olderRulesState,
+  type ConversionSummaryFacts,
+  type OlderRulesOpener,
+  type OlderRulesState,
+  type OlderRulesSummaryFacts,
+} from "./dropship-listing-settings-conversion";
 import { recipeWords } from "./dropship-listing-settings-price-words";
 import {
   choicesFromOwn,
@@ -181,28 +190,10 @@ export function categoryEditorQueryOptions(storeConnectionId: number, categoryId
 // Older group rules (D11; plan P21)
 // ---------------------------------------------------------------------------
 
-/** What the older-rules check reads from the summary. */
-export type OlderRulesSummaryFacts = Pick<ListingSettingsSummary, "storeDefaults">;
-
-/**
- * Whether the store still holds older group rules (D11): the summary's three
- * counts, the same the writers refuse with (`S/application/dropship-listing-setting-write-support.ts`
- * listingSettingOlderRulesPresent; `SR` storeDefaults.*.groupRules). Any one
- * above zero means no category save goes through until PR 11.
- */
-export function olderGroupRulesPresent(summary: OlderRulesSummaryFacts): boolean {
-  const { price, ebayCategory, description } = summary.storeDefaults;
-  return price.groupRules + ebayCategory.groupRules + description.groupRules > 0;
-}
-
-/** The check as the card uses it: unknown while the summary loads or after its latest attempt failed (UX-M9). */
-export type OlderRulesState = "present" | "absent" | "unknown";
-
-export function olderRulesState(summary: ListingSettingsReadState<OlderRulesSummaryFacts>): OlderRulesState {
-  if (summary.error !== undefined && summary.error !== null) return "unknown";
-  if (summary.data === undefined) return "unknown";
-  return olderGroupRulesPresent(summary.data) ? "present" : "absent";
-}
+// The older-rules state moved to the conversion module with PR 11b (it owns the older-rules line and its sheet, plan
+// 11.1); 10e's names stay importable from here.
+export { olderGroupRulesPresent, olderRulesState };
+export type { OlderRulesState, OlderRulesSummaryFacts };
 
 // ---------------------------------------------------------------------------
 // The card (plan 8.3, 3.7, D11, D18)
@@ -219,6 +210,11 @@ export interface CategoryCardInput {
   right: ListingSettingsRight;
   /** A line the step has for the card: the editor closed because no chosen product is in its category any more (8.6). */
   notice?: string | null;
+  /**
+   * The step's banner says more than 10,000 sizes are chosen (a read or a save was refused, D18) while the summary
+   * on screen may still say they fit: [See what changes] would open nothing, so the card has none (K7).
+   */
+  tooLarge?: boolean;
 }
 
 /** A refresh of a view already shown failed (3.7): the view stays, with these words and Try again, as the drawer's "Couldn't load the latest view.". */
@@ -261,8 +257,10 @@ export interface CategoryCardState {
   /** "None of your chosen products is in a Card Shellz category." when the read lists none; null otherwise. */
   empty: string | null;
   olderRules: OlderRulesState;
-  /** The one line while the store holds older group rules (D11); null otherwise. */
+  /** The one line while the store holds older group rules (D11, D17); null otherwise. */
   olderRulesLine: string | null;
+  /** [See what changes] under that line (PR 11b, D17): shown with it, unless the selection is too large; null otherwise. */
+  olderRulesOpener: OlderRulesOpener | null;
   /** The step's line under the card (`CategoryCardInput.notice`); null for none. */
   notice: string | null;
 }
@@ -315,7 +313,9 @@ export function categorySettingsCardState(input: CategoryCardInput): CategoryCar
   const rows = (view?.categories ?? []).map((category): CategoryCardRow => {
     const draft = input.draft !== null && input.draft.editor === categoryEditorId(category.categoryId) ? input.draft : null;
     const held = draft !== null && isDraftLocked(draft);
-    const words = categoryRowWords(category);
+    // Under older group rules a group may decide the category's products' values, so a row with no setting of its own
+    // reads "No category settings yet", not "Uses your store defaults" (D17, CUX#6).
+    const words = categoryRowWords(category, { olderRulesPresent: older === "present" });
     let shown = true;
     let disabled = false;
     let line: string | null = null;
@@ -345,6 +345,7 @@ export function categorySettingsCardState(input: CategoryCardInput): CategoryCar
       held,
     };
   });
+  const olderRulesLine = older === "present" && view !== null && view.categories.length > 0 ? LISTING_SETTINGS_CATEGORY_WORDS.olderRules : null;
   return {
     title: LISTING_SETTINGS_CATEGORY_WORDS.title,
     intro: LISTING_SETTINGS_CATEGORY_WORDS.intro,
@@ -356,7 +357,8 @@ export function categorySettingsCardState(input: CategoryCardInput): CategoryCar
     uncategorized: view === null ? null : uncategorizedWords(view.uncategorizedProductCount),
     empty: view !== null && view.categories.length === 0 ? LISTING_SETTINGS_CATEGORY_WORDS.empty : null,
     olderRules: older,
-    olderRulesLine: older === "present" && view !== null && view.categories.length > 0 ? LISTING_SETTINGS_CATEGORY_WORDS.olderRules : null,
+    olderRulesLine,
+    olderRulesOpener: olderRulesLine === null ? null : olderRulesOpener(summary, { tooLarge: input.tooLarge }),
     notice: input.notice ?? null,
   };
 }
@@ -1223,6 +1225,18 @@ export function categoryPriceCheckBody(input: {
 }
 
 /**
+ * [See what changes] beside the price check's footer line (plan 11.1, D17): when [Save new prices] was refused
+ * because the store holds older group rules now (W7's 409, `L/dropship-listing-settings-drafts.ts`), the check's
+ * footer shows the same one line the editor's does, with the same opener; null otherwise.
+ */
+export function categoryPriceCheckOlderRulesOpener(
+  check: Pick<CategoryPriceCheckShown, "message"> | null,
+  summary: ConversionSummaryFacts,
+): OlderRulesOpener | null {
+  return check !== null && check.message === LISTING_SETTINGS_CATEGORY_WORDS.olderRules ? olderRulesOpener(summary) : null;
+}
+
+/**
  * Whether this category's draft went through the price check (W7): it holds a
  * check (a saved draft keeps its value, so after a confirmed apply too). The
  * editor's [Reload] after "Saved. We couldn't load the latest view." then
@@ -1504,8 +1518,11 @@ export interface CategoryEditorInput {
   categoryId: number;
   /** The editor's read (`categoryEditorQueryOptions`), as React Query holds it. */
   detail: ListingSettingsReadState<ListingSettingsCategoryDetail>;
-  /** The step's summary read: the older-rules counts (D11); while they are present no save is offered here either. */
-  summary: ListingSettingsReadState<OlderRulesSummaryFacts>;
+  /**
+   * The step's summary read: the older-rules counts (D11); while they are present no save is offered here either, and
+   * the footer's line has [See what changes] beside it unless the selection is too large (PR 11b, D17).
+   */
+  summary: ConversionSummaryFacts;
   /** The step's one draft, whoever holds it. */
   draft: ListingSettingsDraft | null;
   rights: CategorySettingsRights;
@@ -1625,6 +1642,12 @@ export interface CategoryEditorState {
   /** The draft holds a price change: the footer's Save runs the check (plan 9.2); the other changes ride along (D2). */
   priceHoldsChange: boolean;
   footer: DrawerFooter;
+  /**
+   * [See what changes] beside the footer's older-rules line (PR 11b, D17): a sibling of the footer, not a
+   * `DrawerFooter` field (that shape has one action). Shown whenever the footer's message is that line; from the
+   * editor it closes the editor and opens the sheet in one push (D20). Null otherwise.
+   */
+  olderRulesOpener: OlderRulesOpener | null;
   /** Esc keeps the editor open: a save is out or unconfirmed (3.4). */
   escapeKeepsOpen: boolean;
   /** This category's save is out or unconfirmed. */
@@ -1944,6 +1967,8 @@ export function categoryEditorState(input: CategoryEditorInput): CategoryEditorS
     priceCheck: categoryPriceCheckShown(input.draft, categoryId),
     priceHoldsChange,
     footer,
+    // Beside the D11 line, whether the gate put it there or a save's 409 did (8.6, the same words).
+    olderRulesOpener: footer.message?.text === LISTING_SETTINGS_CATEGORY_WORDS.olderRules ? olderRulesOpener(input.summary) : null,
     escapeKeepsOpen: locked,
     held: locked,
   };

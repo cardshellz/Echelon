@@ -29,6 +29,11 @@ import {
   type ListingSettingsSummary,
   type ListingSettingsUpdatedProductsResponse,
 } from "@shared/dropship/listing-settings";
+import {
+  listingRulesConversionCheckInputSchema,
+  listingRulesConversionCheckSchema,
+  type ListingRulesConversionCheck,
+} from "@shared/dropship/listing-rules-conversion";
 import { fetchJson } from "./dropship-ops-surface";
 
 /**
@@ -69,7 +74,9 @@ export class ListingSettingsReadError extends Error {
   }
 }
 
-type ListingSettingsRead = "summary" | "products" | "prices" | "product" | "product-own" | "product-ids" | "updated-products" | "categories" | "category";
+type ListingSettingsRead =
+  | "summary" | "products" | "prices" | "product" | "product-own" | "product-ids" | "updated-products" | "categories" | "category"
+  | "conversion";
 
 /** At most this many contract issues are kept on the error: enough to find the field, never the values. */
 const MAX_REPORTED_ISSUES = 5;
@@ -423,6 +430,43 @@ export function listingSettingsCategoryQueryOptions(
     enabled: (options.enabled ?? true) && parsed.success,
     // The editor starts from what is saved now.
     staleTime: 0,
+    retry: false,
+  } as const;
+}
+
+/**
+ * What moving the store's older group rules over would change (`GET
+ * …/listing-settings/conversion?page=N`, PR 11a2; plan 4.B.2, 5.2): the dry
+ * run, computed fresh by the server on every request and stored nowhere
+ * (D14), with one page of 50 changed sizes. Read fresh on every opening of
+ * the sheet (staleTime 0), and dropped as soon as the sheet closes (gcTime
+ * 0), so a reopened sheet never shows an older plan first (plan 11.2). The
+ * key is built from the checked page, under the store's prefix. An answer
+ * for another store or page is off the contract. The caller keeps it off
+ * while the sheet is closed or the selection is too large (D18): the server
+ * refuses it with the lists' 422 then.
+ */
+export function listingSettingsConversionQueryOptions(storeConnectionId: number, page: number, options: ListingSettingsReadOptions = {}) {
+  const parsed = listingRulesConversionCheckInputSchema.safeParse({ storeConnectionId, page });
+  const asked = parsed.success ? parsed.data.page : page;
+  return {
+    queryKey: [...listingSettingsQueryKey(storeConnectionId), "conversion", asked] as const,
+    queryFn: async ({ signal }: { signal: AbortSignal }): Promise<ListingRulesConversionCheck> => {
+      if (!parsed.success) throw invalidRequest("conversion", parsed.error);
+      const { storeConnectionId: store, page: wanted } = parsed.data;
+      const params = new URLSearchParams({ page: String(wanted) });
+      return readListingSettings("conversion", `${listingSettingsPath(store)}/conversion?${params.toString()}`,
+        listingRulesConversionCheckSchema.refine(
+          (answer) => answer.storeConnectionId === store && answer.changes.page === wanted,
+          { message: "The answer is for another store or page.", path: ["changes", "page"] },
+        ), signal);
+    },
+    enabled: (options.enabled ?? true) && parsed.success,
+    // Each opening reads the plan as it is now: the apply (11d) is bound to the hashes of the plan shown (D1).
+    staleTime: 0,
+    // No page outlives the sheet, so its next opening starts from page 0 again, never from an older plan's pages.
+    gcTime: 0,
+    // A failed check says so with Try again (a 503 asks for a minute's wait), rather than retrying out of sight.
     retry: false,
   } as const;
 }

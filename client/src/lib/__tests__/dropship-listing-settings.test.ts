@@ -15,6 +15,7 @@ import {
   type ListingSettingsSizePrice,
   type ListingSettingsSummary,
 } from "@shared/dropship/listing-settings";
+import { listingRulesConversionCheckSchema } from "@shared/dropship/listing-rules-conversion";
 import { DropshipApiError } from "../dropship-ops-surface";
 import {
   LISTING_SETTINGS_INVALID_REQUEST,
@@ -22,6 +23,7 @@ import {
   ListingSettingsReadError,
   listingSettingsCategoriesQueryOptions,
   listingSettingsCategoryQueryOptions,
+  listingSettingsConversionQueryOptions,
   listingSettingsPricesQueryOptions,
   listingSettingsProductIdsQueryOptions,
   listingSettingsProductOwnQueryOptions,
@@ -519,6 +521,72 @@ describe("listing settings categories queries (the Category settings card and ed
       stubFetch({ error: { code, message: "Refused." } }, status);
       await expect(listingSettingsCategoryQueryOptions(22, 40).queryFn({ signal })).rejects.toBeInstanceOf(DropshipApiError);
       await expect(listingSettingsCategoryQueryOptions(22, 40).queryFn({ signal })).rejects.toMatchObject({ status, code });
+    }
+  });
+});
+
+describe("the older-rules dry run query (what moving older group rules over changes, PR 11b, plan 5.2, 11.2, D14, D18)", () => {
+  const noRules = { pricingGroups: 0, contentGroups: 0, ebayCategoryRules: 0 };
+  const emptyList = { total: 0, items: [] };
+  const check = (page: number, overrides: Record<string, unknown> = {}) => listingRulesConversionCheckSchema.parse({
+    storeConnectionId: 22, generatedAt: GENERATED_AT, state: "no_older_rules", planHash: null, writesHash: null, olderRules: noRules,
+    blocked: { wouldLosePrice: emptyList, wouldBlockListing: emptyList, tooMuchText: false },
+    becomes: { categories: emptyList, products: emptyList },
+    report: { unmatched: emptyList, shared: emptyList, nameMismatches: emptyList, neverApplies: emptyList, ties: emptyList, someSizesOnly: emptyList, mixed: emptyList },
+    kept: { exactPrices: 0, catalogPrices: 0, sizePolicies: 0, sizeShelves: 0, sizeTexts: 0 },
+    changes: { page, pageSize: 50, total: 0, rows: [] },
+    ...overrides,
+  });
+
+  it("reads one page fresh on every opening, under the store's prefix, and drops it when the sheet closes", async () => {
+    const answer = check(3);
+    const fetchMock = stubFetch(answer);
+    const options = listingSettingsConversionQueryOptions(22, 3);
+    expect(options.queryKey).toEqual(["/api/dropship/listings/stores", 22, "listing-settings", "conversion", 3]);
+    expect(options.queryKey.slice(0, 3)).toEqual(listingSettingsQueryKey(22));
+    expect(options).toMatchObject({ enabled: true, retry: false, staleTime: 0, gcTime: 0 });
+    await expect(options.queryFn({ signal })).resolves.toEqual(answer);
+    expect(fetchMock.mock.calls[0][0]).toBe("/api/dropship/listings/stores/22/listing-settings/conversion?page=3");
+    expect(listingSettingsConversionQueryOptions(22, 0, { enabled: false }).enabled).toBe(false);
+  });
+
+  it("never asks for a page or a store outside the contract (0..199), and keeps the asked page in the key", async () => {
+    const fetchMock = stubFetch(check(0));
+    expect(listingSettingsConversionQueryOptions(22, 199).enabled).toBe(true);
+    for (const [store, page] of [[22, -1], [22, 200], [22, 1.5], [22, Number.NaN], [0, 0], [-3, 0], [1.5, 0]] as const) {
+      const options = listingSettingsConversionQueryOptions(store, page);
+      expect({ store, page, enabled: options.enabled }).toEqual({ store, page, enabled: false });
+      expect(options.queryKey[4]).toBe(page);
+      // `refetch()` runs even a disabled read: it is refused here, before any request.
+      await expect(options.queryFn({ signal })).rejects.toMatchObject({ code: LISTING_SETTINGS_INVALID_REQUEST, context: { read: "conversion" } });
+    }
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("refuses an answer outside the strict contract, or for another store or page", async () => {
+    for (const answer of [
+      { ...check(0), extra: 1 },
+      { ...check(0), storeConnectionId: 23 },
+      check(1),
+      { ...check(0), state: "clean" },
+      { ...check(0), planHash: "a".repeat(64) },
+      { ...check(0), changes: { page: 0, pageSize: 25, total: 0, rows: [] } },
+      "ok",
+      null,
+    ]) {
+      stubFetch(answer);
+      await expect(listingSettingsConversionQueryOptions(22, 0).queryFn({ signal })).rejects.toMatchObject({ code: LISTING_SETTINGS_OFF_CONTRACT, context: { read: "conversion" } });
+    }
+  });
+
+  it("passes the server's refusals on, for the sheet's words, its Try again and the too-large banner (D18)", async () => {
+    for (const [status, code] of [
+      [422, "DROPSHIP_LISTING_SETTINGS_TOO_LARGE"], [429, "DROPSHIP_LISTING_SETTINGS_RATE_LIMITED"], [503, "DROPSHIP_LISTING_CONVERSION_CHECK_UNAVAILABLE"],
+      [404, "DROPSHIP_STORE_CONNECTION_REQUIRED"], [500, "DROPSHIP_LISTING_SETTINGS_INVARIANT_FAILED"],
+    ] as const) {
+      stubFetch({ error: { code, message: "Refused.", context: { retryAfterSeconds: 60 } } }, status);
+      await expect(listingSettingsConversionQueryOptions(22, 0).queryFn({ signal })).rejects.toBeInstanceOf(DropshipApiError);
+      await expect(listingSettingsConversionQueryOptions(22, 0).queryFn({ signal })).rejects.toMatchObject({ status, code });
     }
   });
 });

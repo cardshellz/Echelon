@@ -762,7 +762,10 @@ describe("Category settings (PR 10e proposals, plan 8.3, 8.6, 12.2)", () => {
       sets: "Sets",
       empty: "None of your chosen products is in a Card Shellz category.",
       readFailed: "Couldn't load category settings.",
-      olderRules: "Category settings can't be saved while your store has older group rules. They'll be moved over in a later update.",
+      // D17 (PR 11b): no promise of a later move (CUX#5); [See what changes] stands beside it.
+      olderRules: "Category settings can't be saved while your store has older group rules.",
+      // D17 (PR 11b): a row with nothing set while older group rules may decide its products' values (CUX#6).
+      noCategorySettingsYet: "No category settings yet",
       useStoreDefault: "Use store default",
       storeDefault: "Store default",
       alsoClear: "Also clear theirs",
@@ -774,14 +777,23 @@ describe("Category settings (PR 10e proposals, plan 8.3, 8.6, 12.2)", () => {
     for (const words of Object.values(LISTING_SETTINGS_CATEGORY_WORDS)) expectPlain(words);
     // No advice to delete the rules: removing description groups changes listing text with no check (plan 8.3).
     expect(LISTING_SETTINGS_CATEGORY_WORDS.olderRules).not.toMatch(/delete|remove/i);
+    // And no promise of a move that a store that isn't clean never gets by itself (D17, CUX#5).
+    expect(LISTING_SETTINGS_CATEGORY_WORDS.olderRules).not.toMatch(/later|moved over|yet/i);
   });
 
   it("builds the card's rows in the order given, the uncategorized line, the editor's title and tags, the box and the conflict, one or many", () => {
-    expect(categoryRowWords({ name: "Sleeves", productCount: 15, setFields: ["shippingPolicy", "storeShelf"] })).toEqual({
+    const absent = { olderRulesPresent: false };
+    const present = { olderRulesPresent: true };
+    expect(categoryRowWords({ name: "Sleeves", productCount: 15, setFields: ["shippingPolicy", "storeShelf"] }, absent)).toEqual({
       name: "Sleeves", products: "15 products", sets: "Sets: shipping policy, store shelf", text: "Sleeves · 15 products · Sets: shipping policy, store shelf",
     });
-    expect(categoryRowWords({ name: "Toploaders", productCount: 1, setFields: [] }).text).toBe("Toploaders · 1 product · Uses your store defaults");
-    expect(categoryRowWords({ name: " ", productCount: 1_240, setFields: ["textBelow", "price"] }).text).toBe("Category · 1,240 products · Sets: text below, price");
+    expect(categoryRowWords({ name: "Toploaders", productCount: 1, setFields: [] }, absent).text).toBe("Toploaders · 1 product · Uses your store defaults");
+    expect(categoryRowWords({ name: " ", productCount: 1_240, setFields: ["textBelow", "price"] }, absent).text).toBe("Category · 1,240 products · Sets: text below, price");
+    // Under older group rules (D17): nothing set reads "No category settings yet"; what a category sets reads as before.
+    expect(categoryRowWords({ name: "Toploaders", productCount: 1, setFields: [] }, present)).toEqual({
+      name: "Toploaders", products: "1 product", sets: "No category settings yet", text: "Toploaders · 1 product · No category settings yet",
+    });
+    expect(categoryRowWords({ name: "Sleeves", productCount: 15, setFields: ["shippingPolicy"] }, present).text).toBe("Sleeves · 15 products · Sets: shipping policy");
     expect(uncategorizedWords(4)).toBe("4 products have no Card Shellz category. They use your store defaults.");
     expect(uncategorizedWords(1)).toBe("1 product has no Card Shellz category. It uses your store defaults.");
     expect(uncategorizedWords(1_000)).toBe("1,000 products have no Card Shellz category. They use your store defaults.");
@@ -803,7 +815,8 @@ describe("Category settings (PR 10e proposals, plan 8.3, 8.6, 12.2)", () => {
     expect(categoryProductsChangedWords("Sleeves")).toBe("The products in Sleeves changed. Load the latest and save again. A Card Shellz change can take a minute to show.");
     expect(categoryProductsChangedWords(" ")).toBe("The products in this category changed. Load the latest and save again. A Card Shellz change can take a minute to show.");
     for (const words of [
-      categoryRowWords({ name: "Sleeves", productCount: 15, setFields: [...CATEGORY_LISTING_SETTING_FIELDS] }).text, uncategorizedWords(4), categoryEditorTitleWords("Sleeves", 15),
+      categoryRowWords({ name: "Sleeves", productCount: 15, setFields: [...CATEGORY_LISTING_SETTING_FIELDS] }, absent).text,
+      categoryRowWords({ name: "Sleeves", productCount: 15, setFields: [] }, present).text, uncategorizedWords(4), categoryEditorTitleWords("Sleeves", 15),
       loadingCategoryWords("Sleeves"), setForCategoryWords("Sleeves"), changeCategoryLabel("Sleeves"), ownValuesLineWords(3, "Sleeves", "shippingPolicy"),
       alsoClearLabelWords(15), categoryProductsChangedWords("Sleeves"),
     ]) expectPlain(words);
