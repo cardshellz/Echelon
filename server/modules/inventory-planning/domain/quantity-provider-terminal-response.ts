@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { canonicalJson } from "@shared/utils/canonical-json";
 import { createHash } from "node:crypto";
+import { isDocumentedEbayInputRejection } from "@shared/ebay-provider-rejection";
 
 export const terminalRequestReceiptSchema = z
   .object({
@@ -24,9 +25,24 @@ export type TerminalRequestReceipt = z.infer<
   typeof terminalRequestReceiptSchema
 >;
 
+export function isEbayPublicationRequest(method: string, path: string): boolean {
+  return method === "POST" && (path === "/sell/inventory/v1/offer/publish_by_inventory_item_group"
+    || /^\/sell\/inventory\/v1\/offer\/[^/?#\s]+\/publish$/.test(path));
+}
+
+/** A publish cannot be repeated merely because its request stopped. It must have
+ * been refused, rather than accepted or left with unknown effects. Preserve the
+ * original outcome: old title-case Request errors were recorded as uncertain. */
+export function isRejectedEbayPublicationReceipt(receipt: TerminalRequestReceipt): boolean {
+  if (!isEbayPublicationRequest(receipt.method, receipt.path) || receipt.requestTerminated !== true
+    || !receipt.responseHash || !receipt.recordedAt) return false;
+  return (receipt.outcome === "rejected" && [400, 401, 403, 429].includes(receipt.httpStatus ?? 0))
+    || (receipt.outcome === "uncertain" && isDocumentedEbayInputRejection(receipt.httpStatus, receipt.errorCodes));
+}
+
 /** eBay's REST error contract says processing stops on an errors response.
  * This proves request termination, NEVER rejection/no effect or historical success.
- * Only synchronous replace/quantity endpoints are supported. Missing responses,
+ * Synchronous replace/quantity responses and proved publication refusals are supported. Missing responses,
  * 202, malformed/partial 2xx and gateway error pages cannot release a fence.
  * https://developer.ebay.com/develop/guides/sell/using-ebay-restful-apis
  */
@@ -49,7 +65,8 @@ export function terminalEbayResponseEvidence(
             row.path,
           )) ||
         (row.method === "POST" &&
-          row.path === "/sell/inventory/v1/bulk_update_price_quantity");
+          row.path === "/sell/inventory/v1/bulk_update_price_quantity") ||
+        isRejectedEbayPublicationReceipt(row);
       const completed =
         row.outcome === "completed" &&
         [200, 201, 204].includes(row.httpStatus ?? 0) &&

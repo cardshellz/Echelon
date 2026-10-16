@@ -7,7 +7,7 @@ const fixture = vi.hoisted(() => ({
   queued: [] as unknown[],
   failures: [] as Array<Record<string, unknown>>,
   products: [] as Array<{ id: number; name: string }>,
-  saved: new Map<string, { actor: string; job: unknown }>(),
+  saved: new Map<string, { actor: string; job: unknown; requestedOperation?: "sync" | "publish" | "withdraw" }>(),
   rejections: new Map<string, unknown>(),
 }));
 vi.mock("../../../../db", () => ({
@@ -29,6 +29,7 @@ vi.mock("../../infrastructure/ebay-api-runtime", () => ({ EBAY_CHANNEL_ID: 67,
 vi.mock("../../infrastructure/ebay-listing-sync.repository", () => ({ PostgresEbayListingSyncRepository: class {} }));
 vi.mock("../../../inventory-planning/quantity-publication", () => ({ quantityProviderResponseRecovery: {},
   automaticEbayPublicationRecovery: {}, ebayPublicationReconciliationRepository: {},
+  ebayPublicationRejectionReader: { read: vi.fn() },
   EbayPublicationContentRefreshRejectedError: class extends Error {
     constructor(readonly code: string, message: string) { super(message); }
   },
@@ -41,13 +42,15 @@ vi.mock("../../ebay-listing-sync.service", async importOriginal => {
       const job = storedEbayListingSyncJobSchema.parse({ id: key, productId: identity.productId, state: "queued", kind: "sync", code: null, message: null,
         nextAttemptAt: "2026-10-09T20:00:00.000Z", updatedAt: "2026-10-09T20:00:00.000Z", identity,
         revision: "1", claimedRevision: null, ownerToken: null, attempts: 0, result: null, verificationIntentHash: null, verificationRevision: null });
-      fixture.saved.set(key, { actor, job });
+      fixture.saved.set(key, { actor, job, requestedOperation: "sync" });
       return job;
     }
-    async getByCommand(key: string, _channelId: number, expectedActor?: string) {
+    async getByCommand(key: string, _channelId: number, expectedActor?: string, expectedOperation?: "sync" | "publish" | "withdraw") {
       const saved = fixture.saved.get(key);
       if (saved && expectedActor !== undefined && saved.actor !== expectedActor)
         throw Object.assign(new Error("Different requester"), { code: "EBAY_SYNC_REPLAY_CONFLICT" });
+      if (saved && expectedOperation !== undefined && saved.requestedOperation !== expectedOperation)
+        throw Object.assign(new Error("Different requested operation"), { code: "EBAY_SYNC_REPLAY_CONFLICT" });
       return saved ? storedEbayListingSyncJobSchema.parse(saved.job) : null;
     }
     async getAdmission(key: string) {
@@ -65,7 +68,7 @@ import { syncActiveListings, refreshRecoveredEbayListing } from "../../infrastru
 
 function rows(productId: number, catalog: string, external: string, invalid = false) {
   return ["PACK", "CASE"].map((unit, index) => ({ product_id: productId, product_name: `Toploader ${productId}`, product_sku: catalog,
-    product_is_active: true, variant_is_active: true, variant_sales_eligibility: "sellable",
+    product_is_active: true, variant_is_active: true, variant_sales_eligibility: "sellable", listing_sync_status: "synced",
     variant_id: productId * 10 + index, variant_sku: invalid ? null : `${catalog}-${unit}`, external_sku: `${external}-${unit}`,
     external_variant_id: `offer-${productId}-${index}`, external_product_id: `listing-${productId}` }));
 }
@@ -79,6 +82,45 @@ beforeEach(() => {
 });
 
 describe("active existing-listing selection to admission composition", () => {
+  it("returns a normal Sync's accepted publication receipt after a lost acknowledgement and mapping changes", async () => {
+    fixture.rows = rows(3, "CAT-3", "EBAY-3");
+    const commandKey = "00000000-0000-4000-8000-000000000003";
+    await syncActiveListings({ productIds: [3] }, "operator", commandKey);
+    const saved = fixture.saved.get(commandKey)!;
+    const job = storedEbayListingSyncJobSchema.parse(saved.job);
+    saved.job = { ...job, operation: "publish" };
+    fixture.rows = rows(3, "RENAMED", "EBAY-3").map(row => ({ ...row, external_product_id: "newly-published-listing" }));
+    expect(await syncActiveListings({ productIds: [3] }, "operator", commandKey))
+      .toMatchObject({ pending: 1, errors: 0, jobs: [{ id: commandKey, operation: "publish" }] });
+    expect(fixture.queued).toHaveLength(1);
+    expect(fixture.failures).toEqual([]);
+  });
+  it("bulk Sync admits pending saved offers and retains their excluded or ended identity members", async () => {
+    fixture.rows = rows(3, "CAT-3", "EBAY-3").map((row, index) => ({ ...row,
+      external_product_id: null, listing_sync_status: index === 0 ? "pending" : "ended", variant_excluded: index === 1 }));
+    const result = await syncActiveListings(null, "operator");
+    expect(result).toMatchObject({ pending: 1, errors: 0 });
+    expect(fixture.queued).toEqual([expect.objectContaining({ identity: expect.objectContaining({ productId: 3,
+      variants: [expect.objectContaining({ offerId: "offer-3-0", listingId: null, contentSyncEnabled: true }),
+        expect.objectContaining({ offerId: "offer-3-1", listingId: null, contentSyncEnabled: false })] }) })]);
+  });
+
+  it("bulk Sync excludes ended, deleted, excluded, inactive and SKU-only products without publishing new selections", async () => {
+    fixture.rows = [
+      ...rows(1, "ACTIVE", "ACTIVE"),
+      ...rows(2, "ENDED", "ENDED").map(row => ({ ...row, listing_sync_status: "ended" })),
+      ...rows(3, "DELETED", "DELETED").map(row => ({ ...row, listing_sync_status: "deleted" })),
+      ...rows(4, "EXCLUDED", "EXCLUDED").map(row => ({ ...row, product_excluded: true })),
+      ...rows(5, "INACTIVE", "INACTIVE").map(row => ({ ...row, variant_is_active: false })),
+      ...rows(6, "SKU-ONLY", "SKU-ONLY").map(row => ({ ...row, external_product_id: null, external_variant_id: null })),
+    ];
+    const result = await syncActiveListings(null, "operator");
+    expect(result).toMatchObject({ pending: 1, errors: 0 });
+    expect(result.jobs.map(job => job.productId)).toEqual([1]);
+    expect(fixture.queued).toHaveLength(1);
+    expect(fixture.failures).toEqual([]);
+  });
+
   it("queues recovery content through normal Sync with the exact account and stable command", async () => {
     fixture.rows = rows(3, "CAT-3", "EBAY-3");
     const commandKey = "00000000-0000-4000-8000-000000000003";
@@ -105,9 +147,24 @@ describe("active existing-listing selection to admission composition", () => {
     const saved = fixture.saved.get(request.commandKey)!;
     const job = storedEbayListingSyncJobSchema.parse(saved.job);
     saved.job = { ...job, ...changes, identity: { ...job.identity, ...changes } };
-    if ("operation" in changes) saved.job = { ...job, operation: changes.operation };
+    if ("operation" in changes) {
+      saved.job = { ...job, operation: changes.operation };
+      saved.requestedOperation = "publish";
+    }
     await expect(refreshRecoveredEbayListing(request)).rejects.toMatchObject({ code: "EBAY_SYNC_REPLAY_CONFLICT" });
     expect(fixture.queued).toHaveLength(1);
+  });
+  it("replays the original Sync receipt when recovery joined a saved publication", async () => {
+    fixture.rows = rows(3, "CAT-3", "EBAY-3");
+    const request = { productId: 3, connectionId: 12, accountId: "seller", commandKey: "00000000-0000-4000-8000-000000000003" };
+    const first = await refreshRecoveredEbayListing(request);
+    const saved = fixture.saved.get(request.commandKey)!;
+    const job = storedEbayListingSyncJobSchema.parse(saved.job);
+    saved.job = { ...job, operation: "publish" };
+    fixture.rows = rows(3, "RENAMED", "EBAY-3");
+    expect(await refreshRecoveredEbayListing(request)).toEqual(first);
+    expect(fixture.queued).toHaveLength(1);
+    expect(fixture.failures).toEqual([]);
   });
   it("consumes a saved admission rejection without trying to reuse its key after catalog changes", async () => {
     const request = { productId: 3, connectionId: 12, accountId: "seller", commandKey: "00000000-0000-4000-8000-000000000003" };
@@ -193,8 +250,9 @@ describe("active existing-listing selection to admission composition", () => {
     const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
     try {
       fixture.rows = rows(3, "CAT-3", "EBAY-3").map(row => ({ ...row, variant_is_active: false }));
+      fixture.products = [{ id: 3, name: "All disabled" }];
       const result = await syncActiveListings({ productIds: [3] }, "operator");
-      expect(result).toMatchObject({ pending: 0, errors: 2, jobs: [{ productId: 3, kind: "admission", code: "EBAY_SYNC_CONTENT_SCOPE_EMPTY" }] });
+      expect(result).toMatchObject({ pending: 0, errors: 1, jobs: [{ productId: 3, kind: "admission", code: "EBAY_SYNC_PRODUCT_NOT_ELIGIBLE" }] });
       expect(fixture.queued).toEqual([]);
     } finally { errorLog.mockRestore(); }
   });

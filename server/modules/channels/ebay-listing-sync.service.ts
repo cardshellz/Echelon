@@ -21,11 +21,11 @@ import {
   type EbayListingLifecycleClient,
 } from "./listing-connectors/ebay-listing.connector";
 import { syncContentIntentHash } from "./ebay-listing-sync-content";
-import type { QuantityPublicationScope } from "../inventory-planning/domain/quantity-publication-admission";
 import { assertEbayListingSourceIdentityUnchanged } from "./ebay-existing-listing-identity";
 import { resolveEbayListingIssue } from "@shared/ebay-listing-issue";
 import { ebayListingFailureDiagnostic, type EbayListingFailureDiagnostic } from "./ebay-listing-failure-diagnostic";
 import type { EbayAutomaticPublicationRecoveryService } from "../inventory-planning/quantity-publication";
+import { recoverPriorEbayListingRequests, type EbayListingRequestRecovery } from "./ebay-listing-request-recovery";
 
 export interface PreparedEbayListingSync {
   sourceIdentity?: EbayListingSyncIdentity;
@@ -51,11 +51,7 @@ export class EbayExistingListingSyncExecution
     private readonly prepare: (
       identity: EbayListingSyncIdentity,
     ) => Promise<PreparedEbayListingSync>,
-    private readonly recovery: {
-      reconcile(
-        scopes: readonly QuantityPublicationScope[],
-      ): Promise<{ busy: boolean; resolved: string[]; unresolved: string[] }>;
-    },
+    private readonly recovery: EbayListingRequestRecovery,
     private readonly connector: EbayMarketplaceListingConnector,
     private readonly automaticRecovery?: Pick<EbayAutomaticPublicationRecoveryService, "recover">,
   ) {}
@@ -81,45 +77,10 @@ export class EbayExistingListingSyncExecution
     // Persist the exact observed provider resources before any provider mutation.
     // A later retry cannot silently switch this job to another group or offer.
     await bindProviderIdentity?.(resolvedIdentity);
-    const scope = (item: string, variantId: number | null = null): QuantityPublicationScope => ({
-      destinationKind: "channel_connection",
-      connectionId: identity.connectionId,
-      providerKey: "ebay",
-      providerScopeType: "account",
-      externalScopeId: identity.accountId,
-      externalInventoryItemId: item,
-      productId: identity.productId,
-      productVariantId: variantId,
-    });
     let hasRecurringRecovery = false;
     await stage("recover_prior_requests", syncIdentityHash(resolvedIdentity), async () => {
-      const scopes = [
-        ...(resolvedIdentity.groupKey === null ? [] : [scope(`group:${resolvedIdentity.groupKey}`)]),
-        ...resolvedIdentity.variants.map((member) => scope(member.sku, member.variantId)),
-      ];
-      let recovery = await this.recovery.reconcile(scopes);
-      if (recovery.busy)
-        throw new EbayListingSyncError(
-          "PUBLICATION_SCOPE_BUSY",
-          "Waiting for an active quantity publisher before checking prior response evidence.",
-        );
-      // Recovery is part of this saved Sync command. Inventory checks supported
-      // request kinds and exact scope ownership, preserves unknown history, and
-      // atomically retains recurring checks for late provider effects. A readback
-      // or elapsed timeout is never substituted for historical response evidence.
-      if (this.automaticRecovery && context?.jobId && context.operation === "sync") {
-        const resumed = await this.automaticRecovery.recover({ scopes,
-          syncJobId: context.jobId, syncRevision: context.claimedRevision });
-        if (resumed.busy) throw new EbayListingSyncError("PUBLICATION_SCOPE_BUSY",
-          "Another stock update is still running. This saved sync will continue automatically.");
-        hasRecurringRecovery = resumed.watchId !== null;
-        recovery = { busy: false, resolved: [...recovery.resolved, ...resumed.superseded], unresolved: resumed.unresolved };
-      }
-      if (recovery.unresolved.length)
-        throw new EbayListingSyncError(
-          "EBAY_SYNC_RESPONSE_EVIDENCE_REQUIRED",
-          `A prior request has no provable final response (attempts ${recovery.unresolved.join(", ")}). Reconcile that request before another write.`,
-        );
+      ({ hasRecurringRecovery } = await recoverPriorEbayListingRequests({ identity: resolvedIdentity,
+        recovery: this.recovery, automaticRecovery: this.automaticRecovery, context }));
     });
     const contentHash = syncContentIntentHash(prepared.draft);
     const prepareInventory = async (): Promise<void> => {
@@ -214,6 +175,7 @@ export interface EbayListingSyncClaim {
   release(): Promise<void>;
 }
 export interface EbayListingSyncStore {
+  recoverRejectedPublicationWrite?(job: StoredEbayListingSyncJob, identity: EbayListingSyncIdentity, now: Date): Promise<boolean>;
   authorizePublicationRetry(input: EbayPublicationRetryAuthorization, now: Date): Promise<{ job: StoredEbayListingSyncJob; replayed: boolean }>;
   recordAdmissionFailure(input: EbaySyncAdmissionFailure, now: Date): Promise<EbayListingSyncJob>;
   bindProviderIdentity(job: StoredEbayListingSyncJob, identity: EbayListingSyncIdentity, now: Date, publicationObservation?: MarketplaceObservedListingPublication): Promise<void>;
@@ -228,7 +190,7 @@ export interface EbayListingSyncStore {
   ): Promise<StoredEbayListingSyncJob>;
   list(channelId: number): Promise<EbayListingSyncJob[]>;
   get(id: string): Promise<StoredEbayListingSyncJob>;
-  getByCommand(commandKey: string, channelId: number, options?: { expectedActor?: string }): Promise<StoredEbayListingSyncJob | null>;
+  getByCommand(commandKey: string, channelId: number, options?: { expectedActor?: string; expectedOperation?: "sync" | "publish" | "withdraw" }): Promise<StoredEbayListingSyncJob | null>;
   getAdmission(id: string, channelId: number): Promise<EbayListingSyncJob | null>;
   claim(
     now: Date,
@@ -274,6 +236,7 @@ export interface EbayListingSyncExecution {
   ): Promise<EbayProductSyncResult>;
 }
 export interface EbayListingExecutionContext {
+  recoverRejectedPublicationWrite?: (identity: EbayListingSyncIdentity) => Promise<boolean>;
   jobId?: string;
   requestedBy?: string;
   providerIdentity?: EbayListingSyncIdentity | null;
@@ -391,6 +354,11 @@ export class EbayListingSyncService {
                 publicationWriteStarted: job.publicationWriteStarted, publicationAcceptedRevision: job.publicationAcceptedRevision,
                 publicationIntentHash: job.publicationIntentHash,
                 claimedRevision: job.claimedRevision ?? job.revision,
+                ...(this.store.recoverRejectedPublicationWrite ? { recoverRejectedPublicationWrite: async (identity: EbayListingSyncIdentity) => {
+                  const recovered = await this.store.recoverRejectedPublicationWrite!(job, identity, this.now());
+                  if (recovered) publicationProgress.started = false;
+                  return recovered;
+                } } : {}),
                 bindPublicationTarget: target => this.store.bindPublicationTarget(job, target, this.now()),
                 bindPublicationAccepted: async accepted => { await this.store.bindPublicationAccepted(job, accepted, this.now()); publicationProgress.accepted = accepted; } },
             ),
@@ -449,11 +417,14 @@ export class EbayListingSyncService {
     const job = await this.store.get(z.string().uuid().parse(id));
     return (await this.withInventoryStatus([job]))[0];
   }
-  async getByCommand(commandKey: string, channelId: number, expectedActor?: string): Promise<StoredEbayListingSyncJob | null> {
+  async getByCommand(commandKey: string, channelId: number, expectedActor?: string,
+    expectedOperation?: "sync" | "publish" | "withdraw"): Promise<StoredEbayListingSyncJob | null> {
     const key = z.string().uuid().parse(commandKey);
     const channel = z.number().int().positive().max(2147483647).parse(channelId);
-    const job = expectedActor === undefined ? await this.store.getByCommand(key, channel)
-      : await this.store.getByCommand(key, channel, { expectedActor: z.string().trim().min(1).max(200).parse(expectedActor) });
+    const options = z.object({ expectedActor: z.string().trim().min(1).max(200).optional(),
+      expectedOperation: z.enum(["sync", "publish", "withdraw"]).optional() }).strict().parse({ expectedActor, expectedOperation });
+    const job = expectedActor === undefined && expectedOperation === undefined ? await this.store.getByCommand(key, channel)
+      : await this.store.getByCommand(key, channel, options);
     return job ? (await this.withInventoryStatus([job]))[0] : null;
   }
   async getAdmission(id: string, channelId: number): Promise<EbayListingSyncJob | null> {
