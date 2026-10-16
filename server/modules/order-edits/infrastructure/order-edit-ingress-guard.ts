@@ -8,6 +8,7 @@ import {
   releaseOrderEditWarehouseHold,
 } from "../../wms/order-edit-hold.commands";
 import { enqueueShipStationHoldSyncInTransaction } from "../../oms/shipstation-hold-retry.command";
+import { transferOrderEditProviderHolds } from "../../oms/order-edit-provider-hold.commands";
 import { OrderEditError } from "../domain/order-edit-error";
 
 interface Transaction {
@@ -226,24 +227,11 @@ export async function guardOrderEditShopifyIngress(
     }
     // A pre-send acquisition may already have a remote receipt. Preserve its
     // prior hold status and identity under the certified operation's protection.
-    const receipts =
-      await tx.execute(sql`SELECT shipment_id,provider_order_id,was_held FROM oms.order_edit_provider_holds
-      WHERE operation_id=${String(active.id)}::uuid AND released_at IS NULL ORDER BY shipment_id FOR UPDATE`);
-    for (const receipt of receipts.rows) {
-      const transferred =
-        await tx.execute(sql`INSERT INTO oms.order_edit_provider_holds(operation_id,shipment_id,provider_order_id,was_held)
-        VALUES(${String(owner.id)}::uuid,${Number(receipt.shipment_id)},${String(receipt.provider_order_id)}::bigint,${Boolean(receipt.was_held)})
-        ON CONFLICT(operation_id,shipment_id) DO UPDATE SET was_held=oms.order_edit_provider_holds.was_held OR EXCLUDED.was_held,released_at=NULL
-        WHERE oms.order_edit_provider_holds.provider_order_id=EXCLUDED.provider_order_id RETURNING shipment_id`);
-      if (transferred.rows.length !== 1)
-        throw new OrderEditError(
-          "ORDER_EDIT_PROVIDER_IDENTITY_CHANGED",
-          "Provider hold ownership changed.",
-        );
-    }
-    await tx.execute(
-      sql`UPDATE oms.order_edit_provider_holds SET released_at=${now} WHERE operation_id=${String(active.id)}::uuid AND released_at IS NULL`,
-    );
+    await transferOrderEditProviderHolds(tx, {
+      fromOperationId: String(active.id),
+      toOperationId: String(owner.id),
+      now,
+    });
     await tx.execute(
       sql`UPDATE oms.order_edit_operations SET status='expired',version=${draftAfter.version},document=${JSON.stringify(draftAfter)}::jsonb,updated_at=${now} WHERE id=${String(active.id)}::uuid`,
     );

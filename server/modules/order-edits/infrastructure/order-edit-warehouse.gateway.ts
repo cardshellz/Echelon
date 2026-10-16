@@ -9,6 +9,7 @@ import type { OrderEditSnapshot } from "../application/order-edit-provider";
 import { orderEditSnapshotSchema } from "../application/order-edit-provider.schema";
 import type { OrderEditReleaseProof } from "../application/order-edit-store";
 import { getOmsLineMaterializableQuantity } from "../../oms/oms-line-authority";
+import { retireOrderEditProviderHolds } from "../../oms/order-edit-provider-hold.commands";
 import {
   assertOrderEditWarehouseItemIdentities,
   readOrderEditWarehouseItems,
@@ -590,11 +591,11 @@ export async function finalizeOrderEditWarehouseRelease(
       "Warehouse state changed after provider verification; verify the edit again.",
     );
   if (proof.unsubmitted) {
-    z.string().datetime().parse(releasedAt);
-    await client.query(
-      "UPDATE oms.order_edit_provider_holds SET released_at=$2 WHERE operation_id=$1 AND released_at IS NULL",
-      [operationId, releasedAt],
-    );
+    const retirementTime = z.string().datetime().parse(releasedAt);
+    await retireOrderEditProviderHolds(client, {
+      operationId,
+      now: new Date(retirementTime),
+    });
   }
   if (proof.ownership === "none") return;
   const released = await releaseOrderEditWarehouseHold(client, {
