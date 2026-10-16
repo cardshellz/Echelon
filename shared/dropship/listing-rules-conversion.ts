@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { MAX_NAMED_CATALOG_GROUP_ITEMS } from "./catalog-scope";
 import { listingPriceCentsSchema } from "./listing-price";
+import { LISTING_SETTING_KEY_PATTERN, listingSettingRequestKeySchema } from "./listing-setting-values";
 import { LISTING_SETTINGS_FIX_CODES, listingSettingsPriceRuleSchema, listingSettingsSizePriceSchema } from "./listing-settings";
 
 /**
@@ -8,7 +9,8 @@ import { LISTING_SETTINGS_FIX_CODES, listingSettingsPriceRuleSchema, listingSett
  * (PR 11, design record 8.7): the dry run's input and its strict answer
  * (plan 4.A.3). The answer is computed fresh on every read and stores
  * nothing (plan D14); ids are keys only and are never shown (owner rule). The
- * apply (11c2) and the one-time notice (11e1) add their contracts here.
+ * apply's input and answer (11c2) and the conversion record (plan 12) are
+ * here too; the one-time notice (11e1) adds its contracts here.
  *
  * Every price is integer cents (the size price is the read model's own,
  * `listingSettingsSizePriceSchema`), and every list is closed and capped.
@@ -60,8 +62,9 @@ export const CONVERSION_RULE_KINDS = ["price", "description", "ebayCategory"] as
 export const CONVERSION_TIE_SETTINGS = ["price", "description"] as const;
 
 /**
- * The refusals the conversion adds (plan 3.4). No route answers them yet: the
- * check (11a2) answers `checkUnavailable`, the apply (11c2) all three.
+ * The refusals the conversion adds (plan 3.4): the check (11a2) answers
+ * `checkUnavailable`, the apply (11c2) all three. The shared write code list
+ * (LISTING_SETTING_WRITE_ERROR_CODES) names the same three.
  */
 export const LISTING_RULES_CONVERSION_ERROR_CODES = Object.freeze({
   /** 409, permanent: the plan recomputed under the store lock differs from the one the vendor was shown. */
@@ -232,7 +235,118 @@ export const listingRulesConversionCheckSchema = z.object({
   }
 });
 
+/** Who applies a conversion (plan D10): the vendor from the sheet (11c2), or the system job (11e2). */
+export const LISTING_RULE_CONVERSION_ACTOR_TYPES = ["vendor", "system"] as const;
+/**
+ * The most rules of one kind a store holds, so the most one conversion removes:
+ * 100 pricing groups and 100 description groups (their profile schemas) and
+ * MAX_EBAY_CATEGORY_RULES eBay category rules. The record's CHECK repeats it.
+ */
+export const MAX_CONVERSION_REMOVED_RULES = 100;
+/** = the record's varchar(255) actor and notice reader columns, as the listing-settings writers bound their actors. */
+export const MAX_CONVERSION_ACTOR_ID_LENGTH = 255;
+const removedCount = count.max(MAX_CONVERSION_REMOVED_RULES);
+const sizeCount = count.max(MAX_NAMED_CATALOG_GROUP_ITEMS);
+const actorId = z.string().max(MAX_CONVERSION_ACTOR_ID_LENGTH).refine((value) => value.trim() !== "", "An actor is named.");
+
+/** What a conversion records when it is applied (plan 12): its key, the request, plan and writes hashes, and integer counts. */
+const conversionRecordValues = {
+  vendorId: id,
+  storeConnectionId: id,
+  idempotencyKey: z.string().regex(LISTING_SETTING_KEY_PATTERN),
+  requestHash: sha256Hex,
+  planHash: sha256Hex,
+  writesHash: sha256Hex,
+  clean: z.boolean(),
+  changedSizeCount: sizeCount,
+  categoryCount: sizeCount,
+  productCount: sizeCount,
+  pricingGroupsRemoved: removedCount,
+  contentGroupsRemoved: removedCount,
+  ebayRulesRemoved: removedCount,
+  actorType: z.enum(LISTING_RULE_CONVERSION_ACTOR_TYPES),
+  actorId,
+};
+
+/** The record's rules on clean conversions, as its CHECKs hold them (plan D1). */
+function refineConversionRecord(record: { clean: boolean; changedSizeCount: number; actorType: string }, context: z.RefinementCtx): void {
+  if (record.clean && record.changedSizeCount !== 0) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "A clean conversion changes no size.", path: ["changedSizeCount"] });
+  }
+  if (record.actorType === "system" && !record.clean) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "The system applies only a clean store.", path: ["clean"] });
+  }
+}
+
+/** A conversion about to be recorded, before the database gives it an id and the clock stamps it. */
+export const listingRuleConversionValuesSchema = z.object(conversionRecordValues).strict().superRefine(refineConversionRecord);
+
+/**
+ * A recorded conversion (plan 12): the row as the database holds it. Only a
+ * system conversion has a notice, seen once by someone (plan D19).
+ */
+export const listingRuleConversionRecordSchema = z.object({
+  id: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+  ...conversionRecordValues,
+  createdAt: z.string().datetime(),
+  noticeSeenAt: z.string().datetime().nullable(),
+  noticeSeenBy: actorId.nullable(),
+}).strict().superRefine((record, context) => {
+  refineConversionRecord(record, context);
+  if ((record.noticeSeenAt === null) !== (record.noticeSeenBy === null)) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "A notice is seen at a time, by someone.", path: ["noticeSeenBy"] });
+  }
+  if (record.actorType !== "system" && record.noticeSeenAt !== null) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "Only a system conversion has a notice.", path: ["noticeSeenAt"] });
+  }
+});
+
+/**
+ * The vendor's apply (plan 7.B.1, 7.B.2): the request key, and the two hashes
+ * of the dry run he was shown. The server keeps no copy of that plan, so it
+ * recomputes both under the store lock and writes only when they are these
+ * (plan D1, 3.3). The key is reused while the plan hash is the same (plan D12);
+ * a reserved key (RESERVED_CONVERSION_KEY_PREFIXES, listing-rules-conversion-keys.ts)
+ * is refused (400) by the request key schema itself.
+ */
+export const listingRulesConversionApplyInputSchema = z.object({
+  idempotencyKey: listingSettingRequestKeySchema,
+  planHash: sha256Hex,
+  writesHash: sha256Hex,
+}).strict();
+
+/**
+ * What an apply answers (plan 7.B.2): `converted` (this request moved the
+ * rules), `replayed` (this key already did; answered from its record) or
+ * `nothing_to_convert` (the store holds no older group rules now: nothing is
+ * written and nothing recorded).
+ */
+export const LISTING_RULES_CONVERSION_APPLY_OUTCOMES = ["converted", "replayed", "nothing_to_convert"] as const;
+
+/**
+ * The apply's strict answer: the record's id and the categories and products
+ * it wrote. Only `nothing_to_convert` has no record, and then it wrote
+ * nothing (both counts 0).
+ */
+export const listingRulesConversionApplyResponseSchema = z.object({
+  outcome: z.enum(LISTING_RULES_CONVERSION_APPLY_OUTCOMES),
+  conversionId: z.number().int().positive().max(Number.MAX_SAFE_INTEGER).nullable(),
+  categoryCount: sizeCount,
+  productCount: sizeCount,
+}).strict().superRefine((answer, context) => {
+  const nothing = answer.outcome === "nothing_to_convert";
+  if (nothing !== (answer.conversionId === null)) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "Only a store with nothing to convert has no record.", path: ["conversionId"] });
+  }
+  if (nothing && (answer.categoryCount !== 0 || answer.productCount !== 0)) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "Nothing to convert writes nothing.", path: ["categoryCount"] });
+  }
+});
+
 export type ListingRulesConversionCheckInput = z.infer<typeof listingRulesConversionCheckInputSchema>;
+export type ListingRulesConversionApplyInput = z.infer<typeof listingRulesConversionApplyInputSchema>;
+export type ListingRulesConversionApplyResponse = z.infer<typeof listingRulesConversionApplyResponseSchema>;
+export type ListingRulesConversionApplyOutcome = (typeof LISTING_RULES_CONVERSION_APPLY_OUTCOMES)[number];
 export type ListingRulesConversionCheck = z.infer<typeof listingRulesConversionCheckSchema>;
 export type ConversionState = (typeof CONVERSION_STATES)[number];
 export type ConversionChangedField = (typeof CONVERSION_CHANGED_FIELDS)[number];
@@ -242,6 +356,9 @@ export type ConversionSetting = (typeof CONVERSION_SETTINGS)[number];
 export type ConversionRuleKind = (typeof CONVERSION_RULE_KINDS)[number];
 export type ConversionTieSetting = (typeof CONVERSION_TIE_SETTINGS)[number];
 export type ConversionChangedReason = (typeof CONVERSION_CHANGED_REASONS)[number];
+export type ListingRuleConversionActorType = (typeof LISTING_RULE_CONVERSION_ACTOR_TYPES)[number];
+export type ListingRuleConversionValues = z.infer<typeof listingRuleConversionValuesSchema>;
+export type ListingRuleConversionRecord = z.infer<typeof listingRuleConversionRecordSchema>;
 export type PricingRuleRef = z.infer<typeof pricingRuleRefSchema>;
 export type SizeRef = z.infer<typeof sizeRefSchema>;
 export type ConversionSizeView = z.infer<typeof conversionSizeViewSchema>;

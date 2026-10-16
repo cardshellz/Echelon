@@ -9,6 +9,7 @@ import { selectedCatalogReaderForTransaction } from "./dropship-selected-catalog
 import { LISTING_SELECTION_LOCK_SQL } from "./dropship-listing-setting-writes.repository";
 import { readListingSettingLayers } from "./dropship-listing-setting-layers.reader";
 import { readPricingProfile } from "./dropship-pricing-profile.reader";
+import { PRICING_PROFILE_HEAD_UPSERT_SQL, PRICING_PROFILE_REVISION_INSERT_SQL } from "./dropship-pricing-profile.writer";
 import { PgShellzClubProductCostAdapter } from "./shellz-club-product-cost.adapter";
 
 export class PgDropshipPricingRulesRepository implements PricingRulesRepository {
@@ -87,15 +88,11 @@ async function findApplication(client: PoolClient, target: Target, input: ApplyP
   return { revisionId: result.rows[0].revision_id };
 }
 async function applyReview(client: PoolClient, target: Target, review: StoredPricingReview, input: ApplyPricingRulesInput, now: Date): Promise<number> {
-  const result = await client.query<{ id: number }>(`INSERT INTO dropship.dropship_pricing_profile_revisions
-    (vendor_id, store_connection_id, previous_revision_id, profile, actor_id, created_at)
-    VALUES ($1,$2,$3,$4::jsonb,$5,$6) RETURNING id`,
+  const result = await client.query<{ id: number }>(PRICING_PROFILE_REVISION_INSERT_SQL,
     [target.vendorId, target.storeConnectionId, review.input.expectedRevisionId, JSON.stringify(review.input.profile), target.memberId, now]);
   const revisionId = result.rows[0]?.id;
   if (!revisionId) throw new Error("Pricing profile revision insert returned no identity.");
-  await client.query(`INSERT INTO dropship.dropship_pricing_profiles (vendor_id, store_connection_id, revision_id)
-    VALUES ($1,$2,$3) ON CONFLICT (store_connection_id) DO UPDATE SET revision_id = EXCLUDED.revision_id`,
-    [target.vendorId, target.storeConnectionId, revisionId]);
+  await client.query(PRICING_PROFILE_HEAD_UPSERT_SQL, [target.vendorId, target.storeConnectionId, revisionId]);
   // A size that follows the store's pricing (`inherit`) already takes the new
   // rules; re-saving it as `rules` would drop its retail fallback.
   const adoption = review.rows.filter((row) => !row.preserved && row.followsStorePricing !== true).map((row) => ({

@@ -131,10 +131,10 @@ export interface CategoryMovesAcknowledgeResult {
  * client (plan PR 9, 6.2 #2): the price writer's, plus saved prices, Card
  * Shellz price limits and the listing config, AND NOTHING ELSE. The runtime
  * object is the preview repository bound to the transaction's client, and
- * five of its methods (loadListingSettingLayers, loadRulePrices,
- * loadListingContents, loadEbayCategories, createListingPushJob) run their
- * own BEGIN ... COMMIT on that client, which would commit the transaction
- * mid-flight. This type is the only guard; a type test pins its keys.
+ * three of its methods (loadListingSettingLayers, loadResolverInputs,
+ * createListingPushJob) run their own BEGIN ... COMMIT on that client, which
+ * would commit the transaction mid-flight. This type is the only guard; a
+ * type test pins its keys.
  */
 export type ListingSettingCatalogReader = ListingPriceCatalogReader
   & Pick<DropshipListingPreviewRepository, "listSavedListingPrices" | "listPricingPolicies" | "getStoreListingConfig">;

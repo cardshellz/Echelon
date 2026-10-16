@@ -10,6 +10,7 @@ import { DROPSHIP_BULK_JSON_LIMIT_BYTES } from "../../interfaces/http/dropship-b
 import { installGlobalJsonBodyParser } from "../../../shipping-engine/interfaces/http/rate-table-admin-body.middleware";
 import { logger } from "../../../../platform/observability/logger";
 import { SLEEVES, categoryOption, rulesProfile, rulesState } from "../fixtures/ebay-category-rules.fixture";
+import { saveEbayCategoryRulesInputSchema } from "../../../../../shared/dropship/ebay-category-rules";
 
 vi.mock("../../../../db", () => ({ db: {}, pool: {} }));
 vi.mock("../../infrastructure/dropship-ebay-category-rules.factory", () => ({
@@ -29,6 +30,8 @@ class FakeService {
   calls: Array<{ method: string; memberId: string; storeId: unknown; input?: unknown }> = [];
   failure: unknown = null;
   stateResult: unknown = rulesState(rulesProfile({ defaultCategory: SLEEVES }));
+  /** On: the save parses its input as the real service does first (DropshipEbayCategoryRulesService.saveForMember). */
+  validateSave = false;
 
   private record(method: string, memberId: string, storeId: unknown, input?: unknown) {
     this.calls.push({ method, memberId, storeId, input });
@@ -40,7 +43,11 @@ class FakeService {
   async browseForMember(memberId: string, storeId: unknown, parentId: unknown) { this.record("browse", memberId, storeId, parentId); return { parent: null, children: [] }; }
   async describeForMember(memberId: string, storeId: unknown, categoryId: unknown) { this.record("describe", memberId, storeId, categoryId); return { category: categoryOption(SLEEVES) }; }
   async reviewForMember(memberId: string, storeId: unknown, input: unknown) { this.record("review", memberId, storeId, input); return review; }
-  async saveForMember(memberId: string, storeId: unknown, input: unknown) { this.record("save", memberId, storeId, input); return { state: this.stateResult, idempotentReplay: false }; }
+  async saveForMember(memberId: string, storeId: unknown, input: unknown) {
+    this.record("save", memberId, storeId, input);
+    if (this.validateSave) saveEbayCategoryRulesInputSchema.parse(input);
+    return { state: this.stateResult, idempotentReplay: false };
+  }
 }
 
 describe("dropship eBay category rules routes", () => {
@@ -92,6 +99,22 @@ describe("dropship eBay category rules routes", () => {
 
     expect(response.status).toBe(200);
     expect(service.calls[0]).toMatchObject({ method: "save", storeId: 44, input: body });
+  });
+
+  it("answers a save under a conversion's reserved key with 400 and the key's issue, and takes the client's own key (plan D12)", async () => {
+    server = await startServer(buildApp(service, true));
+    service.validateSave = true;
+    const save = (idempotencyKey: string) => fetch(`${server!.url}/api/dropship/listings/stores/44/ebay-category-rules`, {
+      method: "PUT", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ expectedRevisionId: null, idempotencyKey, draft: { defaultCategoryId: null, rules: [] } }),
+    });
+    // A rules conversion writes the store's rules under `lc:<hash>:ebay_rules:<store>`.
+    const refused = await save(`lc:${"a".repeat(64)}:ebay_rules:44`);
+    expect(refused.status).toBe(400);
+    expect(await refused.json()).toMatchObject({ error: { code: "DROPSHIP_EBAY_CATEGORY_RULES_INVALID_INPUT",
+      context: { issues: [expect.objectContaining({ path: ["idempotencyKey"], message: "This key is kept for the system's own conversions." })] } } });
+    expect((await save("rules-conversion:44")).status).toBe(400);
+    expect((await save("ebay-category-rules:7f9c2ba4-e88f-4a5e-9d1b-1c2d3e4f5a6b")).status).toBe(200);
   });
 
   it("refuses a body over the bulk limit with a clear code", async () => {

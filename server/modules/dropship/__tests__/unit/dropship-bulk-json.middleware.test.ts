@@ -88,6 +88,8 @@ describe("the bulk JSON path table (plan PR 9, P8, section 3.6)", () => {
     ["PUT", `${STORE}/listing-settings/category-moves/acknowledge`],
     ["POST", `${STORE}/listing-settings/category-moves`],
     ["POST", `${STORE}/listing-settings/category-moves/acknowledge/extra`],
+    // PR 11's conversion apply: a key and two hashes, so the global parser (plan 7.B.1).
+    ["POST", `${STORE}/listing-settings/conversion/apply`],
   ])("leaves %s %s to the global parser", (method, path) => {
     expect(isDropshipBulkJsonRequest(method, path)).toBe(false);
   });

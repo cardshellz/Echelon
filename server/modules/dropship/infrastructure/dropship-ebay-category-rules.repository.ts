@@ -92,10 +92,12 @@ export async function findEbayCategoryRulesReplayWithClient(client: Pick<PoolCli
  * Writes a new rules revision, points the store at it and audits before and after.
  * The caller holds the push-job store lock and the owner rows (see execute) and
  * checks the request key; this takes no lock. A stale expected revision is
- * DROPSHIP_EBAY_CATEGORY_RULES_VERSION_CONFLICT before any write.
+ * DROPSHIP_EBAY_CATEGORY_RULES_VERSION_CONFLICT before any write. The audit row
+ * takes `actorType`, a vendor when absent; only the rules conversion's system
+ * job passes "system" (PR 11, plan D11).
  */
 export async function saveEbayCategoryRulesProfileWithClient(client: Pick<PoolClient, "query">,
-  target: { vendorId: number; storeConnectionId: number; actorId: string },
+  target: { vendorId: number; storeConnectionId: number; actorId: string; actorType?: "vendor" | "system" },
   save: SaveEbayCategoryRulesProfileInput): Promise<{ revisionId: number }> {
   const before = await readEbayCategoryRules(client, target.vendorId, target.storeConnectionId);
   if (before.revisionId !== save.expectedRevisionId) throw versionConflict(target.storeConnectionId);
@@ -111,9 +113,10 @@ export async function saveEbayCategoryRulesProfileWithClient(client: Pick<PoolCl
   [target.vendorId, target.storeConnectionId, revisionId]);
   await client.query(`INSERT INTO dropship.dropship_audit_events
     (vendor_id, store_connection_id, entity_type, entity_id, event_type, actor_type, actor_id, severity, payload, created_at)
-    VALUES ($1,$2,'dropship_ebay_category_rules',$3,'ebay_category_rules_saved','vendor',$4,'info',$5::jsonb,$6)`,
+    VALUES ($1,$2,'dropship_ebay_category_rules',$3,'ebay_category_rules_saved',$7,$4,'info',$5::jsonb,$6)`,
+  // The actor type is the last parameter, so every earlier one keeps the position it has always had.
   [target.vendorId, target.storeConnectionId, String(target.storeConnectionId), target.actorId, JSON.stringify({
     revisionId, previousRevisionId: before.revisionId, before: before.profile, after: save.profile,
-  }), save.now]);
+  }), save.now, target.actorType ?? "vendor"]);
   return { revisionId };
 }

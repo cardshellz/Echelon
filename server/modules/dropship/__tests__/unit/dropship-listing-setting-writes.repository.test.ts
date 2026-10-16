@@ -683,6 +683,10 @@ describe("error mapping (plan 3.9)", () => {
     // 0750's one-apply-per-review index: a second apply of one review under another key (plan 9.1). The store lock
     // serializes two applies and the second one's by-review read sees the first, so this is a backstop (plan 3.7).
     ["a second apply of one review", { code: "23505", constraint: "dropship_product_listing_setting_requests_review_idx" }, "DROPSHIP_IDEMPOTENCY_CONFLICT", "permanent"],
+    // A rules conversion's description templates and eBay rules saves meet an older row holding their `lc:` key (PR 11, D12).
+    // 0660 and 0717 leave them unnamed; PostgreSQL's names (the table cut to fit 63 characters), pinned by the PostgreSQL suite.
+    ["a reused description templates key", { code: "23505", constraint: "dropship_content_profile_revision_vendor_id_idempotency_key_key" }, "DROPSHIP_IDEMPOTENCY_CONFLICT", "permanent"],
+    ["a reused eBay rules key", { code: "23505", constraint: "dropship_ebay_category_rule_revis_vendor_id_idempotency_key_key" }, "DROPSHIP_IDEMPOTENCY_CONFLICT", "permanent"],
     ["a missing product on a revision", { code: "23503", constraint: "dropship_product_listing_setting_revision_product_fk" }, "DROPSHIP_LISTING_SETTINGS_PRODUCT_NOT_FOUND", "permanent"],
     ["a missing product on a current row", { code: "23503", constraint: "dropship_product_listing_setting_product_fk" }, "DROPSHIP_LISTING_SETTINGS_PRODUCT_NOT_FOUND", "permanent"],
     ["a missing category on a revision", { code: "23503", constraint: "dropship_category_listing_setting_revision_category_fk" }, "DROPSHIP_LISTING_SETTINGS_CATEGORY_NOT_FOUND", "permanent"],
@@ -1132,24 +1136,28 @@ describe("the W5 reads (plan PR 9, 6.2 #1, #2, #6)", () => {
     expect(client.sql.at(-1)).toBe("ROLLBACK");
   });
 
-  it("types tx.catalog without the five readers that commit on the transaction's client (plan 6.2 #2, R9)", () => {
+  it("types tx.catalog without the readers that commit on the transaction's client (plan 6.2 #2, R9)", () => {
     type Catalog = ListingSettingWriteTransaction["catalog"];
     expectTypeOf<keyof Catalog>().toEqualTypeOf<"loadStoreContext" | "listCatalogCandidates" | "listCatalogExposureRules"
       | "listSelectionRules" | "listVariantOverrides" | "listExistingListings" | "listSavedListingPrices" | "listPricingPolicies"
       | "getStoreListingConfig">();
     expectTypeOf<keyof ListingSettingPreflightTransaction["catalog"]>().toEqualTypeOf<"loadStoreContext" | "getStoreListingConfig">();
-    // Never called: these lines are checked by the compiler (npm run check:tests), each a self-committing reader.
+    // Never called: these lines are checked by the compiler (npm run check:tests). The first three are the
+    // runtime object's self-committing readers; the last three are the port's optional loaders, which PR 11c
+    // removed from the runtime object and which stay out of this type.
     const unreachable = (catalog: Catalog) => [
-      // @ts-expect-error loadRulePrices runs its own BEGIN ... COMMIT on the transaction's client.
-      catalog.loadRulePrices,
       // @ts-expect-error loadListingSettingLayers runs its own BEGIN ... COMMIT on the transaction's client.
       catalog.loadListingSettingLayers,
-      // @ts-expect-error loadListingContents runs its own BEGIN ... COMMIT on the transaction's client.
-      catalog.loadListingContents,
-      // @ts-expect-error loadEbayCategories runs its own BEGIN ... COMMIT on the transaction's client.
-      catalog.loadEbayCategories,
+      // @ts-expect-error loadResolverInputs runs its own BEGIN ... COMMIT on the transaction's client.
+      catalog.loadResolverInputs,
       // @ts-expect-error createListingPushJob runs its own BEGIN ... COMMIT on the transaction's client.
       catalog.createListingPushJob,
+      // @ts-expect-error loadRulePrices is not a listing-settings transaction's read.
+      catalog.loadRulePrices,
+      // @ts-expect-error loadListingContents is not a listing-settings transaction's read.
+      catalog.loadListingContents,
+      // @ts-expect-error loadEbayCategories is not a listing-settings transaction's read.
+      catalog.loadEbayCategories,
     ];
     expect(typeof unreachable).toBe("function");
   });

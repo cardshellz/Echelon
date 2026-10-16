@@ -30,6 +30,8 @@ import {
   type DropshipListingCatalogCandidate,
   type DropshipListingPackageReadiness,
   type DropshipListingPreviewRepository,
+  type DropshipListingResolverInputs,
+  type DropshipListingResolverInputsLoadInput,
   type DropshipListingStoreContext,
   type DropshipListingPushJobItemRecord,
   type DropshipListingPushJobRecord,
@@ -1805,6 +1807,144 @@ describe("DropshipListingPreviewService", () => {
       expect(repository.ruleCandidateIds).toEqual([]);
     });
   });
+
+  describe("one snapshot for the resolver inputs (PR 11c, plan 7.A, D23)", () => {
+    const pushTime = { actorType: "system" as const, actorId: "inventory_publication_catchup" };
+    /** As the push-time refresh and the stock catch-up call it (IR, CU): sizes 101 and 102, built as the system. */
+    const pushTimePreview = () => service.generatePreview({ vendorId: 10, storeConnectionId: 22, productVariantIds: [101, 102], actor: pushTime });
+    const idsOf = (candidates: readonly DropshipListingCatalogCandidate[]) => candidates.map((candidate) => candidate.productVariantId);
+    const contentsFor = (candidates: readonly DropshipListingCatalogCandidate[], layers: ListingSettingLayers | undefined) =>
+      new Map(candidates.map((candidate) => [candidate.productVariantId,
+        resolveListingContent({ candidate, profile: noContentProfile, saved: null, layers })]));
+    const categoriesFor = (candidates: readonly DropshipListingCatalogCandidate[], layers: ListingSettingLayers | undefined) => {
+      const prepared = prepareEbayCategoryRules(null, null, layers);
+      return new Map(candidates.map((candidate) => [candidate.productVariantId, resolveEbayListingCategory(candidate, prepared)]));
+    };
+
+    /**
+     * An eBay store whose product 501 has its own text and eBay category, a rule
+     * price for size 101, and a second size 102 that is not active: it is a
+     * catalog size of the preview but not rule-eligible.
+     */
+    function ebayStoreWithTwoSizes() {
+      repository.context = { ...repository.context, platform: "ebay" };
+      repository.config = { ...repository.config!, platform: "ebay", marketplaceConfig: { profileId: "profile-1" } };
+      const inactive: DropshipListingCatalogCandidate = { ...makeCandidate(), productVariantId: 102, variantIsActive: false, sku: "CS-TOPLOADER-55PT" };
+      repository.listCatalogCandidates = async () => [repository.candidate, inactive];
+      repository.layers = { products: new Map([[501, { storeConnectionId: 22, productId: 501, revisionId: 71, updatedAt: now.toISOString(),
+        values: { ...EMPTY_PRODUCT_LISTING_SETTING_VALUES, textAbove: { mode: "own", text: "Shipped today." }, ebayCategory: TOPLOADERS } }]]),
+      categories: new Map() };
+      repository.rulePrices.set(101, rulePrice());
+      repository.savedPrices = [{ productVariantId: 101, revisionId: 7, overridePriceCents: null, pricingMode: "rules", updatedAt: now.toISOString() }];
+    }
+
+    /** A port without loadResolverInputs (today's fakes): the four separate reads. */
+    function separateReads() {
+      repository.loadListingContents = async (input) => contentsFor(input.candidates, input.layers);
+      repository.loadEbayCategories = async (input) => categoriesFor(input.candidates, input.layers);
+    }
+
+    /**
+     * A port with loadResolverInputs answering the same store. Its four separate
+     * reads would answer a store whose groups were just emptied over the old
+     * layers (the mix D23 removes); they throw if the preview ever reaches them.
+     */
+    function oneCall(answer?: (input: DropshipListingResolverInputsLoadInput) => Promise<DropshipListingResolverInputs>) {
+      const calls: DropshipListingResolverInputsLoadInput[] = [];
+      const { layers, rulePrices } = repository;
+      repository.loadResolverInputs = async (input) => {
+        calls.push(input);
+        if (answer) return answer(input);
+        const eligible = new Set(idsOf(input.ruleEligibleCandidates));
+        return { layers, rulePrices: new Map([...rulePrices].filter(([id]) => eligible.has(id))),
+          contents: contentsFor(input.ruleEligibleCandidates, layers),
+          ...(input.platform === "ebay" ? { ebayCategories: categoriesFor(input.candidates, layers) } : {}) };
+      };
+      const split = (what: string) => async (): Promise<never> => {
+        throw new Error(`The preview read ${what} apart from the other resolver inputs.`);
+      };
+      repository.loadListingSettingLayers = split("the layers");
+      repository.loadRulePrices = split("the rule prices");
+      repository.loadListingContents = split("the descriptions");
+      repository.loadEbayCategories = split("the eBay categories");
+      return calls;
+    }
+
+    it("takes all four from one call, for the same sizes, and gives the preview the separate reads gave", async () => {
+      ebayStoreWithTwoSizes();
+      separateReads();
+      const separate = await pushTimePreview();
+      const separateLayerReads = repository.layerReads.map((read) => read.productVariantIds);
+      const separateRuleIds = [...repository.ruleCandidateIds];
+      // The separate reads' preview uses every input, so the comparison below means something.
+      expect(separate.rows.find((row) => row.productVariantId === 101)).toMatchObject({ priceCents: 1152,
+        marketplaceCategoryId: TOPLOADERS.categoryId, rulePriceEvidenceHash: "a".repeat(64) });
+      expect(separate.rows.find((row) => row.productVariantId === 101)?.listingIntent?.description).toContain("Shipped today.");
+      expect(separateLayerReads).toEqual([[101, 102]]);
+      expect(separateRuleIds).toEqual([101]);
+
+      const calls = oneCall();
+      const together = await pushTimePreview();
+
+      expect(calls).toHaveLength(1);
+      expect(calls[0]).toMatchObject({ vendorId: 10, storeConnectionId: 22, platform: "ebay" });
+      expect(idsOf(calls[0].candidates)).toEqual(separateLayerReads[0]);
+      expect(idsOf(calls[0].ruleEligibleCandidates)).toEqual(separateRuleIds);
+      expect(together).toStrictEqual(separate);
+    });
+
+    it("gives the push-time refresh the intent the separate reads gave", async () => {
+      ebayStoreWithTwoSizes();
+      const refresh = () => refreshQueuedListingIntent({
+        generatePreview: (input) => service.generatePreview(input),
+        resolveCostChangePolicy: async () => ({ policyId: null, settings: DEFAULT_DROPSHIP_COST_CHANGE_POLICY }),
+        logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+      }, { jobId: 30, jobItemId: 1, vendorId: 10, storeConnectionId: 22, productVariantId: 101, queuedPriceCents: 1152 });
+      separateReads();
+      const separate = await refresh();
+
+      const calls = oneCall();
+      const together = await refresh();
+
+      expect(calls).toHaveLength(1);
+      expect(together).toStrictEqual(separate);
+      expect(together).toMatchObject({ priceCents: 1152, marketplaceCategoryId: TOPLOADERS.categoryId });
+    });
+
+    it("asks a store that is not eBay for no eBay category, and refuses an answer that has them", async () => {
+      separateReads();
+      const separate = await service.previewForMember("member-1", { storeConnectionId: 22, productVariantIds: [101], requestedRetailPriceCents: 1299 });
+      const calls = oneCall();
+      const result = await service.previewForMember("member-1", { storeConnectionId: 22, productVariantIds: [101], requestedRetailPriceCents: 1299 });
+      expect(calls).toHaveLength(1);
+      expect(calls[0].platform).toBe("shopify");
+      expect(result).toStrictEqual(separate);
+
+      oneCall(async (input) => ({ layers: EMPTY_LISTING_SETTING_LAYERS, rulePrices: new Map(),
+        contents: contentsFor(input.ruleEligibleCandidates, undefined), ebayCategories: categoriesFor(input.candidates, undefined) }));
+      await expect(service.previewForMember("member-1", { storeConnectionId: 22, productVariantIds: [101], requestedRetailPriceCents: 1299 }))
+        .rejects.toThrow("incomplete catalog result");
+    });
+
+    it("refuses an eBay answer with no eBay categories, or with one missing, instead of publishing the catalog fallback", async () => {
+      ebayStoreWithTwoSizes();
+      oneCall(async (input) => ({ layers: repository.layers, rulePrices: new Map(), contents: contentsFor(input.ruleEligibleCandidates, repository.layers) }));
+      await expect(pushTimePreview()).rejects.toThrow("incomplete catalog result");
+
+      oneCall(async (input) => ({ layers: repository.layers, rulePrices: new Map(), contents: contentsFor(input.ruleEligibleCandidates, repository.layers),
+        ebayCategories: categoriesFor(input.candidates.slice(0, 1), repository.layers) }));
+      await expect(pushTimePreview()).rejects.toThrow("incomplete catalog result");
+    });
+
+    it("fails the preview with the call's own error and never falls back to the separate reads", async () => {
+      ebayStoreWithTwoSizes();
+      const failure = new DropshipError("DROPSHIP_LISTING_SETTINGS_INVARIANT_FAILED", "A stored row broke its contract.");
+      const calls = oneCall(async () => { throw failure; });
+
+      await expect(pushTimePreview()).rejects.toBe(failure);
+      expect(calls).toHaveLength(1);
+    });
+  });
 });
 
 describe("ConfigDrivenDropshipMarketplaceListingProvider", () => {
@@ -1933,6 +2073,8 @@ class FakeAtpProvider implements DropshipAtpProvider {
 }
 
 class FakeListingPreviewRepository implements DropshipListingPreviewRepository {
+  /** Absent unless a test sets it (PR 11c, D23): today's fakes take the four separate reads. */
+  loadResolverInputs?: DropshipListingPreviewRepository["loadResolverInputs"];
   loadListingContents?: DropshipListingPreviewRepository["loadListingContents"];
   loadEbayCategories?: DropshipListingPreviewRepository["loadEbayCategories"];
   /** The store's product and category listing settings; none unless a test saves some. */
