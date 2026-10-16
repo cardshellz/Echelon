@@ -29,8 +29,7 @@ vi.mock("@shared/schema", () => ({
 }));
 vi.mock("../../po-exceptions.service", () => ({
   detectMatchMismatch: vi.fn(),
-  detectOverpaid: vi.fn(),
-  detectPastDue: vi.fn(),
+  detectFinancialExceptions: vi.fn(),
 }));
 
 describe("AP invoice editing boundary validation", () => {

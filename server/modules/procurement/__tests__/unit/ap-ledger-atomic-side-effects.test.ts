@@ -82,8 +82,7 @@ const mocks = vi.hoisted(() => ({
     insert: vi.fn(),
     transaction: vi.fn(),
   },
-  detectOverpaid: vi.fn(),
-  detectPastDue: vi.fn(),
+  detectFinancialExceptions: vi.fn(),
   reconcilePurchaseCostEvidence: vi.fn(),
 }));
 
@@ -91,8 +90,7 @@ vi.mock("../../../../db", () => ({ db: mocks.db }));
 vi.mock("@shared/schema", () => tables);
 vi.mock("../../po-exceptions.service", () => ({
   detectMatchMismatch: vi.fn(),
-  detectOverpaid: mocks.detectOverpaid,
-  detectPastDue: mocks.detectPastDue,
+  detectFinancialExceptions: mocks.detectFinancialExceptions,
 }));
 vi.mock("../../../inventory/cogs.service", () => ({ COGSService: class {} }));
 vi.mock("../../purchase-cost-application.service", () => ({
@@ -143,8 +141,7 @@ function buildTx(selectResults: unknown[][]) {
 describe("AP ledger atomic side effects", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    mocks.detectOverpaid.mockResolvedValue(undefined);
-    mocks.detectPastDue.mockResolvedValue(undefined);
+    mocks.detectFinancialExceptions.mockResolvedValue(undefined);
     mocks.reconcilePurchaseCostEvidence.mockResolvedValue({
       lotsUpdated: 0,
       cogsRowsUpdated: 0,
@@ -183,8 +180,7 @@ describe("AP ledger atomic side effects", () => {
     expect(tx.insert).toHaveBeenCalledWith(tables.apPaymentAllocations);
     expect(tx.update).toHaveBeenCalledWith(tables.vendorInvoices);
     expect(tx.update).toHaveBeenCalledWith(tables.purchaseOrders);
-    expect(mocks.detectOverpaid).toHaveBeenCalledWith(7);
-    expect(mocks.detectPastDue).toHaveBeenCalledWith(7);
+    expect(mocks.detectFinancialExceptions).toHaveBeenCalledWith(7);
   });
 
   it("locks the PO and writes financial transition history in the aggregate transaction", async () => {
@@ -635,7 +631,6 @@ describe("AP ledger atomic side effects", () => {
     expect(tx.update).toHaveBeenCalledWith(tables.apPayments);
     expect(tx.update).toHaveBeenCalledWith(tables.vendorInvoices);
     expect(tx.update).toHaveBeenCalledWith(tables.purchaseOrders);
-    expect(mocks.detectOverpaid).toHaveBeenCalledWith(7);
-    expect(mocks.detectPastDue).toHaveBeenCalledWith(7);
+    expect(mocks.detectFinancialExceptions).toHaveBeenCalledWith(7);
   });
 });

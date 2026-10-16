@@ -72,6 +72,45 @@ databaseTests.sequential("PO financial evidence from real invoice and payment re
     expect(await evidence.read(10)).toMatchObject({ state: "review_required", invoicedAmountCents: null,
       reviewReasons: [expect.objectContaining({ code: "PO_INVOICE_OWNERSHIP_INVALID" })] });
   });
+  it("discovers owned invoices after every PO header link is missing", async () => {
+    await fixture.pool.query("DELETE FROM procurement.vendor_invoice_po_links WHERE vendor_invoice_id=$1", [invoiceId]);
+    const before = await fixture.snapshot();
+    const workflows = await evidence.readManyWorkflows([10, 20, 30, 999]);
+    for (const poId of [10, 20]) {
+      expect(workflows.get(poId)).toMatchObject({ state: "review_required", evidence: { invoiceCount: 1, invoicedAmountCents: null,
+        reviewReasons: [expect.objectContaining({ code: "PO_INVOICE_OWNERSHIP_INVALID" })] } });
+    }
+    expect(workflows.get(30)?.state).toBe("unbilled");
+    expect(workflows.has(999)).toBe(false);
+    expect(await fixture.snapshot()).toEqual(before);
+  });
+  it("does not turn a legacy cached paid PO without invoices into current settlement", async () => {
+    await fixture.pool.query("UPDATE procurement.purchase_orders SET financial_status='paid', paid_total_cents=3000, fully_paid_at=NOW() WHERE id=30");
+    expect(await evidence.readWorkflow(30)).toMatchObject({ state: "unbilled", evidence: { invoiceCount: 0, outstandingAmountCents: 0 } });
+  });
+  it.each([
+    ["received", "awaiting_approval"],
+    ["approved", "review_required"],
+    ["disputed", "review_required"],
+    ["paid", "settled"],
+  ])("requires the actual %s document state for zero-value invoice workflow", async (status, state) => {
+    await fixture.pool.query("UPDATE procurement.vendor_invoice_lines SET line_total_cents=0 WHERE vendor_invoice_id=$1", [invoiceId]);
+    await fixture.pool.query("UPDATE procurement.vendor_invoices SET status=$2, invoiced_amount_cents=0, paid_amount_cents=0, balance_cents=0 WHERE id=$1", [invoiceId, status]);
+    const before = await fixture.snapshot();
+    expect(await evidence.readWorkflow(10)).toMatchObject({ state, evidence: { state: "complete", invoiceCount: 1, outstandingAmountCents: 0 } });
+    expect(await fixture.snapshot()).toEqual(before);
+  });
+  it("reads a shared fully paid invoice once for each exact PO share in a batch", async () => {
+    await pay(3000);
+    const before = await fixture.snapshot();
+    const workflows = await evidence.readManyWorkflows([20, 10, 30, 10]);
+    expect(workflows.get(10)).toMatchObject({ state: "settled", evidence: { invoiceCount: 1, paidAmountCents: 1000 } });
+    expect(workflows.get(20)).toMatchObject({ state: "settled", evidence: { invoiceCount: 1, paidAmountCents: 2000 } });
+    expect(workflows.get(30)?.state).toBe("unbilled");
+    const amounts = await evidence.readMany([10, 20]);
+    expect(amounts.get(10)?.paidAmountCents! + amounts.get(20)?.paidAmountCents!).toBe(3000);
+    expect(await fixture.snapshot()).toEqual(before);
+  });
   it("reads the canonical payment void without treating retained allocations as settled", async () => {
     const payment = await pay(1000);
     await fixture.service.voidPayment(payment.id, "Synthetic payment reversal", REFRESH_ACTOR);
@@ -95,7 +134,7 @@ databaseTests.sequential("PO financial evidence from real invoice and payment re
   });
   it("excludes a canonically voided non-product invoice and distinguishes missing PO from no invoices", async () => {
     // Financial-read scope: fee lines take the real non-product reconciliation
-    // branch. Product cost/inventory reversal is covered by the cost fixture.
+    // branch. Direct product invoice void/cost reconciliation is outside this read test.
     await fixture.pool.query("UPDATE procurement.purchase_order_lines SET line_type='fee' WHERE id IN (21,22)");
     await fixture.service.voidInvoice(invoiceId, "Synthetic invoice cancellation", REFRESH_ACTOR);
     expect(await evidence.read(10)).toMatchObject({ state: "complete", invoiceCount: 0, invoicedAmountCents: 0, paidAmountCents: 0, outstandingAmountCents: 0 });
@@ -138,7 +177,10 @@ databaseTests.sequential("PO financial evidence from real invoice and payment re
       return client;
     }) as typeof modulePool.connect;
     try {
-      expect(await evidence.read(10)).toMatchObject({ state: "complete", invoicedAmountCents: 1000, outstandingAmountCents: 1000 });
+      const workflows = await evidence.readManyWorkflows([10, 20, 30]);
+      expect(workflows.get(10)).toMatchObject({ state: "awaiting_approval", evidence: { state: "complete", invoicedAmountCents: 1000, outstandingAmountCents: 1000 } });
+      expect(workflows.get(20)).toMatchObject({ state: "awaiting_approval", evidence: { state: "complete", invoicedAmountCents: 2000, outstandingAmountCents: 2000 } });
+      expect(workflows.get(30)?.state).toBe("unbilled");
       expect(changed).toBe(true);
     } finally { modulePool.connect = originalConnect; }
     expect(await evidence.read(10)).toMatchObject({ state: "review_required", invoicedAmountCents: null });

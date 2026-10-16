@@ -36,8 +36,7 @@ import {
 } from "@shared/utils/money";
 import {
   detectMatchMismatch,
-  detectOverpaid,
-  detectPastDue,
+  detectFinancialExceptions,
 } from "./po-exceptions.service";
 import {
   computePurchaseOrderInvoiceMatchSourceFingerprint,
@@ -722,8 +721,7 @@ async function requireLinkedPoLine(
 
 async function runPoFinancialDetectionHooks(poId: number): Promise<void> {
   try {
-    await detectOverpaid(poId);
-    await detectPastDue(poId);
+    await detectFinancialExceptions(poId);
   } catch (detectionErr) {
     console.error("[po-exceptions] detection hook failed in recomputePoFinancialAggregates:", detectionErr);
   }

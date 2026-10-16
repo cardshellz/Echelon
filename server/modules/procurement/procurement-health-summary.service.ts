@@ -16,9 +16,7 @@ import {
 import { loadPurchasingRecommendationContext } from "./purchasing-recommendation-context.service";
 import { buildSupplierSetupGaps } from "./supplier-setup-gaps.service";
 
-type DbWithExecute = {
-  execute: (query: any) => Promise<{ rows: unknown[] }>;
-};
+type ProcurementHealthDatabase = Pick<typeof defaultDb, "execute" | "transaction">;
 
 type ProcurementHealthStorage = {
   getAutoDraftSettings: () => Promise<AutoDraftRecommendationSettings & {
@@ -41,7 +39,7 @@ const defaultStorage = { ...procurementStorage, ...inventoryStorage } as Procure
 export async function loadProcurementHealthSummary(options: {
   shipmentTracking: ShipmentTrackingHealthSource;
   limit: number;
-  db?: DbWithExecute;
+  db?: ProcurementHealthDatabase;
   storage?: ProcurementHealthStorage;
   asOf?: Date;
 }): Promise<ProcurementHealthSummary> {
@@ -59,7 +57,7 @@ export async function loadProcurementHealthSummary(options: {
     recommendationPipelineHealth,
   ] = await Promise.all([
     shipmentTracking.getLandedCostHealth({ limit }),
-    fetchAutoDraftPoAgingRows(db, { scanLimit: 500 }),
+    fetchAutoDraftPoAgingRows(db, { pageSize: 500 }),
     fetchInFlightPoAgingRows(db, { scanLimit: 500 }),
     storage.getAutoDraftSettings(),
     storage.getVelocityLookbackDays(),
@@ -78,10 +76,12 @@ export async function loadProcurementHealthSummary(options: {
   const forecastTrustHealth = buildForecastTrustHealth(recommendationResult);
 
   const staleAutoDraftPos = buildStaleAutoDraftPoDiagnostics(autoDraftRows, {
+    now: asOf,
     limit,
     thresholds: settings.stalePoThresholds,
   });
   const inFlightPoAging = buildInFlightPoAgingDiagnostics(inFlightPoRows, {
+    now: asOf,
     limit,
     thresholds: settings.stalePoThresholds,
   });

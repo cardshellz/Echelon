@@ -14,13 +14,13 @@
  */
 
 import { createHash } from "crypto";
+import { synchronizePoFinancialExceptions } from "./po-financial-exceptions.service";
 import { db } from "../../db";
 import {
   poExceptions,
   poStatusHistory,
   purchaseOrders,
   purchaseOrderLines,
-  vendors,
   vendorInvoices,
   vendorInvoicePoLinks,
   vendorInvoiceLines,
@@ -75,18 +75,6 @@ function sortKeys(obj: Record<string, unknown>): Record<string, unknown> {
       acc[k] = obj[k];
       return acc;
     }, {});
-}
-
-/**
- * Format cents as a dollar string for human-readable audit notes.
- * Integer math only (Rule #3).
- */
-function formatCents(cents: number | null | undefined): string {
-  const n = Number(cents ?? 0);
-  const dollars = Math.floor(Math.abs(n) / 100);
-  const c = Math.abs(n) % 100;
-  const sign = n < 0 ? "-" : "";
-  return `${sign}$${dollars}.${c.toString().padStart(2, "0")}`;
 }
 
 // ─── Core CRUD ───────────────────────────────────────────────────────────────
@@ -627,79 +615,17 @@ export async function detectMatchMismatch(invoiceId: number): Promise<void> {
   }
 }
 
-/**
- * Detect overpaid exception for a PO.
- *
- * Triggers when paidTotalCents > invoicedTotalCents. Uses integer arithmetic
- * only (Rule #3 — no floats).
- */
-export async function detectOverpaid(poId: number): Promise<void> {
-  const po = await _getPo(poId);
-  if (!po || _isTerminalPo(po)) return;
-
-  const paid = Number(po.paidTotalCents ?? 0);
-  const invoiced = Number(po.invoicedTotalCents ?? 0);
-
-  if (paid <= invoiced) return;
-
-  const overageCents = paid - invoiced;
-
-  await upsertException({
-    poId,
-    kind: EXCEPTION_KINDS[12], // 'overpaid'
-    severity: "warn",
-    title: "PO overpaid",
-    message: `Paid ${formatCents(paid)} against ${formatCents(invoiced)} invoiced. Overpayment: ${formatCents(overageCents)}.`,
-    payload: { paidCents: paid, invoicedCents: invoiced, overageCents },
-    detectedBy: "system",
-  });
+/** Financial detection shares one invoice-evidence synchronization owner. */
+export async function detectFinancialExceptions(poId: number): Promise<void> {
+  await synchronizePoFinancialExceptions(poId, { asOf: new Date() });
 }
-
-/**
- * Detect past_due exception for a PO.
- *
- * Triggers when:
- *   - PO has been invoiced (firstInvoicedAt is set)
- *   - Outstanding balance > 0
- *   - Age since first invoice > vendor payment terms (default: Net 30)
- *
- * Excludes terminal POs (cancelled, closed, short_closed, paid).
- * Uses integer arithmetic (Rule #3).
- */
+/** Compatibility wrapper for callers that request a single detector. */
+export async function detectOverpaid(poId: number): Promise<void> {
+  await synchronizePoFinancialExceptions(poId, { asOf: new Date(), kinds: ["overpaid"] });
+}
+/** Compatibility wrapper; recorded invoice due dates are the only due source. */
 export async function detectPastDue(poId: number): Promise<void> {
-  const po = await _getPo(poId);
-  if (!po || _isTerminalPo(po)) return;
-
-  // No invoice yet or already paid in full.
-  if (!po.firstInvoicedAt || Number(po.outstandingCents ?? 0) <= 0) return;
-
-  // Get vendor payment terms.
-  const [vendor] = await db
-    .select({ paymentTermsDays: vendors.paymentTermsDays })
-    .from(vendors)
-    .where(eq(vendors.id, po.vendorId));
-
-  const termsDays = Number(vendor?.paymentTermsDays ?? 30);
-  const termsMs = termsDays * 24 * 60 * 60 * 1000;
-  const ageMs = Date.now() - new Date(po.firstInvoicedAt).getTime();
-
-  if (ageMs <= termsMs) return;
-
-  const daysOverdue = Math.floor(ageMs / 86400000) - termsDays;
-
-  await upsertException({
-    poId,
-    kind: EXCEPTION_KINDS[13], // 'past_due'
-    severity: "warn",
-    title: "Invoice past due",
-    message: `Outstanding ${formatCents(Number(po.outstandingCents))} on PO. Vendor terms: Net ${termsDays}. Overdue by ${daysOverdue} day${daysOverdue !== 1 ? "s" : ""}.`,
-    payload: {
-      outstandingCents: Number(po.outstandingCents),
-      termsDays,
-      daysOverdue,
-    },
-    detectedBy: "system",
-  });
+  await synchronizePoFinancialExceptions(poId, { asOf: new Date(), kinds: ["past_due"] });
 }
 
 // ─── Internal helpers ─────────────────────────────────────────────────────────
@@ -721,12 +647,8 @@ async function _getPo(poId: number): Promise<any | null> {
   return po ?? null;
 }
 
-/**
- * POs in terminal states should not generate new exceptions.
- * Terminal physical: 'cancelled', 'short_closed'
- * Terminal financial: 'paid' (but overpaid can still fire for paid POs
- *   where paid > invoiced, so we only skip truly closed/cancelled ones)
- */
+/** Physical receiving and matching detectors skip cancelled/short-closed POs.
+ * Financial alerts use their separate invoice-evidence owner. */
 function _isTerminalPo(po: { physicalStatus?: string | null; financialStatus?: string | null }): boolean {
   const physicalTerminal = ["cancelled", "short_closed"];
   return physicalTerminal.includes(po.physicalStatus ?? "");

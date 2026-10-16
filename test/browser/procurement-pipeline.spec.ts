@@ -225,6 +225,32 @@ async function expectMoneyInsideCells(table: Locator) {
   expect(unreadableAmounts).toEqual([]);
 }
 
+test("AP closeout review stays visible on the dashboard despite a recorded paid status", async ({ page }) => {
+  const { failures } = await setup(page, true, true);
+  await page.route("**/api/purchasing/auto-draft/stale-pos?*", route => route.fulfill({ json: {
+    generatedAt: "2026-10-15T12:00:00Z", scannedAutoDraftPos: 501, totalStale: 1,
+    counts: { critical: 1, warning: 0, info: 0, reviewPending: 0, supplierSendPending: 0,
+      supplierFollowupPending: 0, receivingPending: 0, apCloseoutPending: 1, exceptionBlocked: 0, closeoutPending: 0 },
+    items: [{ id: "stale-auto-draft-po-17", poId: 17, poNumber: "REVIEW-PO-17", vendorId: 2, vendorName: "Test vendor",
+      status: "closed", physicalStatus: "received", financialStatus: "paid", financialWorkflowState: "review_required",
+      stage: "ap_closeout_pending", stageLabel: "AP closeout pending", ageDays: 20, severity: "critical",
+      detail: "Review linked invoices; this PO's financial completion has not been verified.",
+      action: { action: "review_financial_evidence", label: "Review linked invoices", href: "/purchase-orders/17?tab=invoices" },
+      expectedDeliveryDate: null, openExceptionCount: 0 }],
+  } }));
+  await page.goto("/purchasing");
+  await page.locator("summary", { hasText: "Planning and system details" }).click();
+  const queue = page.getByRole("region", { name: "Stale auto-draft purchase orders", exact: true });
+  await expect(queue).toContainText("REVIEW-PO-17");
+  await expect(queue).toContainText("Financial review: review required");
+  await expect(queue).toContainText("Recorded linked invoice status: paid");
+  await expect(queue).toContainText("financial completion has not been verified");
+  await queue.getByRole("button", { name: "Review linked invoices", exact: true }).click();
+  await expect(page).toHaveURL(/\/purchase-orders\/17\?tab=invoices$/);
+  await expect(page.getByRole("tab", { name: "Invoices", exact: true })).toHaveAttribute("data-state", "active");
+  expect(failures).toEqual([]);
+});
+
 async function scrollDashboardTo(target: Locator) {
   await target.evaluate((element) => {
     let container = element.parentElement;

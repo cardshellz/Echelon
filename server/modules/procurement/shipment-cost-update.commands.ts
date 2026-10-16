@@ -4,6 +4,7 @@ import { FinancialCommandError, runTransactionalFinancialCommand,
   type FinancialCommandDescriptor, type FinancialCommandFailureDisposition, type FinancialCommandRepository,
 } from "../../platform/commands/transactional-command.service";
 import { ShipmentTrackingError, type ShipmentTrackingService } from "./shipment-tracking.service";
+import { CostEvidenceError } from "../inventory/infrastructure/cost-evidence.repository";
 
 export const SHIPMENT_COST_UPDATE_PRINCIPAL = "procurement.shipment-cost-update";
 export function shipmentCostUpdateScope(shipmentId: number) {
@@ -13,6 +14,10 @@ export function shipmentCostUpdateScope(shipmentId: number) {
 }
 
 export function classifyShipmentCostUpdateFailure(error: unknown): FinancialCommandFailureDisposition {
+  if (error instanceof CostEvidenceError && error.code === "COST_RECONCILIATION_PARTIAL_HISTORY") {
+    return { kind: "rejected", httpStatus: 409, body: { code: error.code, error: error.message },
+      errorCode: error.code, errorMessage: error.message };
+  }
   if (error instanceof ShipmentTrackingError && error.statusCode >= 400 && error.statusCode < 500) {
     const code = String(error.details?.code ?? "SHIPMENT_COST_UPDATE_REJECTED");
     return { kind: "rejected", httpStatus: error.statusCode, body: { code, error: error.message, details: error.details },

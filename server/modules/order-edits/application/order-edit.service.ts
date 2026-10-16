@@ -48,6 +48,7 @@ import type {
   OrderEditWarehouse,
 } from "./order-edit-store";
 import { OrderEditError } from "../domain/order-edit-error";
+import { sameOrderEditPlan } from "../domain/order-edit-plan-identity";
 import type { OrderEditCodeRedemptions } from "./order-edit-code-redemptions";
 import { requiresLegacyCodeReceipt } from "../domain/order-edit-coupon-boundary";
 import { presentOrderEditCodeBreakdown } from "./order-edit-code-presentation";
@@ -417,20 +418,7 @@ export class OrderEditService {
           quote.orderId !== baseline.orderId ||
           quote.connectionId !== record.connectionId ||
           quote.baselineFingerprint !== baseline.fingerprint ||
-          JSON.stringify({
-            changes: quote.plan.changes,
-            additions: quote.plan.additions,
-            ...(quote.plan.discountCodes !== undefined
-              ? { discountCodes: quote.plan.discountCodes }
-              : {}),
-          }) !==
-            JSON.stringify({
-              changes: input.changes,
-              additions: input.additions,
-              ...(input.discountCodes !== undefined
-                ? { discountCodes: input.discountCodes }
-                : {}),
-            }) ||
+          !sameOrderEditPlan(quote.plan, input) ||
           (input.discountCodes?.length && !quote.codePricing)
         )
           throw new OrderEditError(

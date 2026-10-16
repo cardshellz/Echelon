@@ -13,7 +13,7 @@ it("requests the exception-aware read contract with the current session", async 
   vi.stubGlobal("fetch", fetch);
   expect(await readShipmentCostWorkflow("/api/inbound-shipments/42/cost-review")).toEqual(saved);
   expect(fetch).toHaveBeenCalledExactlyOnceWith("/api/inbound-shipments/42/cost-review", {
-    method: "GET", credentials: "include", headers: { "X-Shipment-Cost-Review-Version": "2" },
+    method: "GET", credentials: "include", headers: { "X-Shipment-Cost-Review-Version": "3" },
   });
 });
 

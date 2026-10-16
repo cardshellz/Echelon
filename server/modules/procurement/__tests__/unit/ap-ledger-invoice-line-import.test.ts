@@ -56,8 +56,7 @@ const mocks = vi.hoisted(() => ({
     execute: vi.fn(),
     transaction: vi.fn(),
   },
-  detectOverpaid: vi.fn(),
-  detectPastDue: vi.fn(),
+  detectFinancialExceptions: vi.fn(),
   insertedLine: null as any,
 }));
 
@@ -74,8 +73,7 @@ vi.mock("@shared/schema", () => ({
 vi.mock("@shared/schema/procurement.schema", () => ({}));
 vi.mock("../../po-exceptions.service", () => ({
   detectMatchMismatch: vi.fn(),
-  detectOverpaid: mocks.detectOverpaid,
-  detectPastDue: mocks.detectPastDue,
+  detectFinancialExceptions: mocks.detectFinancialExceptions,
 }));
 
 function makeSelectChain(result: unknown[]) {
@@ -142,8 +140,7 @@ function importSelectResults(poLines: any[], existingLines: any[], totalCents: n
 describe("AP ledger invoice line imports", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    mocks.detectOverpaid.mockResolvedValue(undefined);
-    mocks.detectPastDue.mockResolvedValue(undefined);
+    mocks.detectFinancialExceptions.mockResolvedValue(undefined);
   });
 
   it("does not duplicate PO-backed invoice lines on repeated import", async () => {
