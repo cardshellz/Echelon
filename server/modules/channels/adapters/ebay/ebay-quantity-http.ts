@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
+import { isEbayProviderRefusalCategory } from "@shared/ebay-provider-rejection";
 import { createProviderRequestDeadline } from "../../provider-request-limits";
 import { readEbayBulkQuantityResponse } from "./ebay-quantity-update";
 import { QuantityProviderRejectionError, recordQuantityProviderResponse,
@@ -41,30 +42,26 @@ export function ebayRetryNotBefore(value: string | null, observedAt: Date, minim
  * and a missing category proves nothing; both stay uncertain and block the
  * scope until retained response evidence or explicit recovery permits a fresh write.
  */
-const PROVIDER_REFUSAL_CATEGORIES: ReadonlySet<string> = new Set(["REQUEST", "BUSINESS"]);
-
-function isProviderRefusalCategory(category: string | undefined): boolean {
-  return category !== undefined && PROVIDER_REFUSAL_CATEGORIES.has(category);
-}
-
 export function classifyEbayQuantityResponse(status: number, body: unknown): { rejected: boolean; dailyLimit: boolean; errorCodes: string[]; rejectionCode: string } {
   const parsed = errorsSchema.safeParse(body);
   const errors = parsed.success ? parsed.data.errors : [];
   const isDaily = (error: typeof errors[number]): boolean => error.errorId === 25001
     && /exceeded your maximum call limit of 250 for item per day/i.test(error.message ?? "");
   const dailyLimit = status === 400 && errors.length > 0 && errors.every(isDaily);
-  const validation = status === 400 && errors.length > 0 && errors.every(error => isProviderRefusalCategory(error.category));
+  const validation = status === 400 && errors.length > 0 && errors.every(error => isEbayProviderRefusalCategory(error.category));
+  const shippingPolicy = validation && errors.every(error => error.errorId === 25007);
   // HTTP 401 establishes rejected authentication, not why the token failed.
   // Only eBay's documented OAuth permission error establishes a scope problem;
   // other 403s may concern seller/resource access and must not promise reconnect.
   // https://www.developer.ebay.com/develop/api/sell/error_codes
   const missingScope = status === 403 && errors.length > 0
-    && errors.every(error => error.errorId === 1100 && error.category === "REQUEST");
+    && errors.every(error => error.errorId === 1100 && error.category?.toUpperCase() === "REQUEST");
   const rejectionCode = status === 401 ? "EBAY_AUTH_REQUIRED"
     : missingScope ? "EBAY_OAUTH_SCOPE_MISSING"
     : status === 403 ? "EBAY_PROVIDER_ACCESS_DENIED"
     : status === 429 ? "EBAY_PROVIDER_RATE_LIMITED"
-    : dailyLimit ? "EBAY_QUANTITY_DAILY_LIMIT" : "EBAY_QUANTITY_REJECTED";
+    : dailyLimit ? "EBAY_QUANTITY_DAILY_LIMIT"
+    : shippingPolicy ? "EBAY_SHIPPING_POLICY_REJECTED" : "EBAY_QUANTITY_REJECTED";
   return { rejected: dailyLimit || validation || [401, 403, 429].includes(status), dailyLimit,
     errorCodes: errors.map(error => String(error.errorId)), rejectionCode };
 }
@@ -160,7 +157,7 @@ export async function executeEbayQuantityHttpResponse<T>(input: EbayQuantityHttp
     if (!response.ok) await input.onFailure?.(response.status,text);
     if (classification.rejected) throw new QuantityProviderRejectionError(
       classification.rejectionCode,
-      `eBay quantity request rejected (HTTP ${response.status}; codes ${classification.errorCodes.join(",") || "not supplied"}).${diagnostics}`);
+      `eBay rejected this update (HTTP ${response.status}; codes ${classification.errorCodes.join(",") || "not supplied"}).${diagnostics}`);
     if (!completed) {
       throw new EbayQuantityResponseUncertainError(response.status,
         `eBay quantity request has an uncertain outcome (HTTP ${response.status}; codes ${classification.errorCodes.join(",") || "not supplied"}).${diagnostics}`);

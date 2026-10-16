@@ -6,7 +6,7 @@ type Phase = NonNullable<EbayListingSyncJob["progress"]>["phase"];
 export function ebayListingPhaseFromStage(key: string | null): Phase {
   if (!key) return null;
   if (key === "prepare_listing" || key === "provider_identity" || key === "publication_target") return "prepare_listing";
-  if (key === "recover_prior_requests") return "recover_prior_requests";
+  if (key === "recover_prior_requests" || key === "publication_rejected") return "recover_prior_requests";
   if (key === "inspection") return "inspect_content";
   if (key === "prepare_inventory") return "prepare_inventory";
   if (key.startsWith("offer:")) return "update_offer";

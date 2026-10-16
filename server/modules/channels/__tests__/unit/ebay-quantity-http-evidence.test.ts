@@ -23,6 +23,42 @@ function setup(request: typeof fetch) {
 }
 
 describe("eBay quantity request evidence and rejection handling", () => {
+  it.each(["REQUEST", "Request", "request", "BUSINESS", "Business"])(
+    "records a shipping-policy refusal with provider category %s as a terminal rejection", async category => {
+      const request = vi.fn<typeof fetch>(async (_url, options) => options?.method === "GET"
+        ? new Response(JSON.stringify({ variantSKUs: ["P5"] }), { status: 200 })
+        : new Response(JSON.stringify({ errors: [{ errorId: 25007, category,
+          message: "You've provided an invalid shipping policy." }] }), { status: 400 }));
+      const test = setup(request);
+      await expect(test.collector.run(() => test.client.publishOfferByInventoryItemGroup("GROUP", "EBAY_US")))
+        .rejects.toMatchObject({ code: "EBAY_SHIPPING_POLICY_REJECTED", message: expect.stringContaining("invalid shipping policy") });
+      expect(test.results).toEqual([expect.objectContaining({ outcome: "rejected", httpStatus: 400,
+        requestTerminated: true, errorCodes: ["25007"] })]);
+      expect(test.collector.provesTerminalRejection()).toBe(true);
+      expect(request.mock.calls.filter(([, options]) => options?.method === "POST")).toHaveLength(1);
+    },
+  );
+  it("classifies an observed title-case invalid-description refusal without losing the actual reason", async () => {
+    const request = vi.fn<typeof fetch>(async () => new Response(JSON.stringify({ errors: [{ errorId: 25016,
+      category: "Request", message: "The A description is required. value is invalid." }] }), { status: 400 }));
+    const test = setup(request);
+    await expect(test.collector.run(() => test.client.createOrReplaceInventoryItem("P5", item)))
+      .rejects.toMatchObject({ code: "EBAY_QUANTITY_REJECTED", message: expect.stringContaining("A description is required") });
+    expect(test.results[0]).toMatchObject({ outcome: "rejected", requestTerminated: true, errorCodes: ["25016"] });
+    expect(test.collector.provesTerminalRejection()).toBe(true);
+    expect(request).toHaveBeenCalledOnce();
+  });
+  it.each([undefined, "Application", "APPLICATION", "not-a-category"])(
+    "does not reinterpret an unknown live error category %s from a status or code alone", async category => {
+      const test = setup(async (_url, options) => options?.method === "GET"
+        ? new Response(JSON.stringify({ variantSKUs: ["P5"] }), { status: 200 })
+        : new Response(JSON.stringify({ errors: [{ errorId: 25007, category }] }), { status: 400 }));
+      await expect(test.collector.run(() => test.client.publishOfferByInventoryItemGroup("GROUP", "EBAY_US")))
+        .rejects.toMatchObject({ code: "EBAY_QUANTITY_RESPONSE_UNCERTAIN" });
+      expect(test.collector.provesTerminalRejection()).toBe(false);
+      expect(test.results[0].outcome).toBe("uncertain");
+    },
+  );
   it("does not accept a top-level error body as successful HTTP 200", async () => {
     const request = vi.fn<typeof fetch>(async () => new Response(JSON.stringify(daily),{ status: 200 }));
     const test = setup(request);

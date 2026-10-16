@@ -242,6 +242,35 @@ dbDescribe.sequential("automatic eBay recovery and continuing reconciliation on 
     expect(await f.watch.processDue()).toEqual({ checked: 1, repaired: 1, blocked: 0 });
     expect((await database.pool.query("SELECT id::text,desired_revision::text,state FROM inventory.inventory_publication_outbox WHERE publication_target_id=3 ORDER BY id")).rows).toEqual(before);
   });
+  it.each([9, 99])("uses the current numeric stock revision after revision %s and completes recovery", async priorRevision => {
+    const f = fixture(); const { input } = await start(f);
+    // Retained history must remain present: deleting old revisions would hide
+    // the production bug where the text alias sorted 9 ahead of 10.
+    await database.pool.query(`INSERT INTO inventory.inventory_publication_outbox (
+      activation_run_id,publication_target_id,product_variant_id,desired_revision,desired_quantity,
+      destination_kind_snapshot,channel_connection_id_snapshot,dropship_store_connection_id_snapshot,
+      external_scope_id_snapshot,external_inventory_item_id_snapshot,publication_phase,channel_id_snapshot,
+      provider_key_snapshot,provider_scope_type_snapshot,external_sku_snapshot,publication_target_revision_snapshot,
+      state,idempotency_key,payload_hash,available_at)
+      SELECT activation_run_id,publication_target_id,product_variant_id,$1,desired_quantity,
+      destination_kind_snapshot,channel_connection_id_snapshot,dropship_store_connection_id_snapshot,
+      external_scope_id_snapshot,external_inventory_item_id_snapshot,publication_phase,channel_id_snapshot,
+      provider_key_snapshot,provider_scope_type_snapshot,external_sku_snapshot,publication_target_revision_snapshot,
+      'queued',$2,repeat('c',64),transaction_timestamp()
+      FROM inventory.inventory_publication_outbox o WHERE publication_target_id=3 AND product_variant_id=101
+      ORDER BY o.desired_revision DESC LIMIT 1`, [priorRevision, `numeric-recovery-fixture:${priorRevision}`]);
+    await database.pool.query(`UPDATE inventory.inventory_levels SET variant_qty=10 WHERE product_variant_id=101;
+      UPDATE inventory.inventory_lots SET qty_on_hand=10 WHERE product_variant_id=101`);
+    // Three units are already claimed in this fixture: the canonical quantity
+    // is seven, not the ten units physically present.
+    f.adapter.readAbsolute.mockResolvedValue({ observedQuantity: 7, quantityConsistent: true, providerResponse: { quantity: 7 } });
+    expect(await f.watch.processDue()).toEqual({ checked: 1, repaired: 0, blocked: 0 });
+    expect((await f.repository.readStatuses([input.syncJobId]))[input.syncJobId]).toMatchObject({ state: "verified", code: null });
+    const evidence = (await database.pool.query(`SELECT o.desired_revision::text,o.desired_quantity::text,observation.matches_desired
+      FROM inventory.ebay_publication_reconciliation_observations observation
+      JOIN inventory.inventory_publication_outbox o ON o.id=observation.outbox_id ORDER BY observation.id DESC LIMIT 1`)).rows[0];
+    expect(evidence).toEqual({ desired_revision: String(priorRevision + 1), desired_quantity: "7", matches_desired: true });
+  });
   it("rejects stale read evidence when the canonical quantity changes during the provider read", async () => {
     const f = fixture(); const { input } = await start(f);
     f.adapter.readAbsolute.mockImplementationOnce(async () => {
@@ -251,9 +280,14 @@ dbDescribe.sequential("automatic eBay recovery and continuing reconciliation on 
     });
     expect(await f.watch.processDue()).toEqual({ checked: 0, repaired: 0, blocked: 1 });
     expect(f.content).toHaveBeenCalledOnce();
-    expect((await f.repository.readStatuses([input.syncJobId]))[input.syncJobId]).toMatchObject({ state: "needs_attention", code: "PUBLICATION_RECONCILIATION_PLAN_CHANGED" });
+    expect((await f.repository.readStatuses([input.syncJobId]))[input.syncJobId]).toMatchObject({ state: "pending", code: "PUBLICATION_RECONCILIATION_PLAN_CHANGED" });
+    advance();
+    f.adapter.readAbsolute.mockResolvedValue({ observedQuantity: 7, quantityConsistent: true, providerResponse: { quantity: 7 } });
+    expect(await f.watch.processDue()).toEqual({ checked: 1, repaired: 0, blocked: 0 });
+    expect((await f.repository.readStatuses([input.syncJobId]))[input.syncJobId]).toMatchObject({ state: "verified", code: null });
     expect((await database.pool.query("SELECT desired_quantity::text FROM inventory.inventory_publication_outbox WHERE publication_target_id=3 ORDER BY desired_revision DESC LIMIT 1")).rows[0].desired_quantity).toBe("7");
-    expect((await database.pool.query("SELECT current_revision FROM inventory.ebay_publication_reconciliation_observations")).rows).toEqual([{ current_revision: false }]);
+    expect((await database.pool.query("SELECT current_revision FROM inventory.ebay_publication_reconciliation_observations ORDER BY id")).rows)
+      .toEqual([{ current_revision: false }, { current_revision: true }]);
   });
   it("continues indefinitely and advances rejected content commands after correction while replaying uncertain ones", async () => {
     const f = fixture(); await start(f);

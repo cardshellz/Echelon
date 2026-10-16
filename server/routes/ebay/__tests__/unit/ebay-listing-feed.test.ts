@@ -36,7 +36,7 @@ describe("eBay listing feed current content intent", () => {
     fixture.variants = [1, 2, 3].map(id => ({ id, product_id: 20, sku: `SKU-${id}`, name: `Variant ${id}`, price_cents: 1000,
       requires_shipping: true, track_inventory: true,
       ebay_listing_excluded: id === 3, variant_override_is_listed: id === 3 ? 0 : 1,
-      listing_id: id, external_listing_id: "listing-20", listing_status: id === 3 ? "error" : "synced", listing_sync_error: id === 3 ? "Old excluded member failed" : null }));
+      listing_id: id, external_listing_id: "listing-20", external_offer_id: `offer-${id}`, listing_status: id === 3 ? "error" : "synced", listing_sync_error: id === 3 ? "Old excluded member failed" : null }));
     fixture.query.mockReset().mockImplementation(async (sql: string) => {
       if (sql.includes("FROM products p")) return { rows: (fixture.secondProduct ? [20, 21] : [20]).map(id => ({ id, name: `Product ${id}`, sku: `PRODUCT-${id}`, product_type: "Toploaders", product_type_name: "Toploaders",
         is_active: true, ebay_browse_category_id: "183454", variant_count: "3", image_count: "1", type_listing_enabled: true,
@@ -94,8 +94,22 @@ describe("eBay listing feed current content intent", () => {
   it("does not present a quantity-synced offer-only row as a published listing", async () => {
     for (const variant of fixture.variants.slice(0, 2)) variant.external_listing_id = null;
     const { feed } = await (await fetch(url)).json();
-    expect(feed[0]).toMatchObject({ status: "publication_incomplete", isListed: false });
+    expect(feed[0]).toMatchObject({ status: "publication_incomplete", isListed: false, canSyncExistingListing: true });
     expect(fixture.query.mock.calls.some(([sql]) => sql.includes("cl.external_product_id AS external_listing_id"))).toBe(true);
+  });
+
+  it("offers normal Sync for pending saved offers without declaring their publication complete", async () => {
+    for (const variant of fixture.variants.slice(0, 2)) Object.assign(variant, { listing_status: "pending", external_listing_id: null });
+    const { feed } = await (await fetch(url)).json();
+    expect(feed[0]).toMatchObject({ status: "publication_incomplete", isListed: false, canSyncExistingListing: true });
+  });
+
+  it.each(["ended", "deleted", "no_identity"])("does not nominate %s mappings for Sync All", async status => {
+    for (const variant of fixture.variants.slice(0, 2)) Object.assign(variant, status === "no_identity"
+      ? { listing_status: "pending", external_listing_id: null, external_offer_id: null }
+      : { listing_status: status });
+    const { feed } = await (await fetch(url)).json();
+    expect(feed[0].canSyncExistingListing).toBe(false);
   });
 
   it("requires publication identity for every included member", async () => {
@@ -209,7 +223,7 @@ describe("eBay listing feed current content intent", () => {
     fixture.productExcluded = true;
     fixture.getQuantities.mockResolvedValueOnce([]);
     const { feed } = await (await fetch(url)).json();
-    expect(feed[0]).toMatchObject({ status: "excluded", inventoryIssue: null });
+    expect(feed[0]).toMatchObject({ status: "excluded", inventoryIssue: null, canSyncExistingListing: false });
   });
 
   it("returns safe diagnostics and a reference when the feed itself cannot be read", async () => {
