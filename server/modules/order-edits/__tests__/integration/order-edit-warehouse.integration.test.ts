@@ -337,6 +337,13 @@ function inventoryProjection(): CanonicalAvailabilityReservationStatusProjection
         input: { ...original.input, omsOrderId: 21, requestKey: "99999999-9999-4999-8999-999999999999" },
         baseline: { ...original.baseline, customerId: "gid://shopify/Customer/100", orderId: "gid://shopify/Order/2", name: "#2" } };
     }
+    it("exempts only the same operation hold while preserving warehouse cutoff blockers", async () => {
+      await gateway.acquire(20, OP);
+      expect(await gateway.inspect(20, OP)).toMatchObject({ editable: true, reasons: [] });
+      expect((await gateway.inspect(20, "99999999-9999-4999-8999-999999999999")).reasons).toContain("Another order edit holds this order.");
+      await database.pool.query("UPDATE wms.orders SET started_at='2026-10-05T00:01:00Z' WHERE id=10");
+      expect(await gateway.inspect(20, OP)).toMatchObject({ editable: false, reasons: ["Picking has already started."] });
+    });
     async function customerParent() {
       await database.pool.query("INSERT INTO oms.oms_orders(id,channel_id,external_order_id,status,financial_status,updated_at) VALUES(21,36,'2','open','paid','2026-10-05T00:00:00Z')");
     }
@@ -359,11 +366,12 @@ function inventoryProjection(): CanonicalAvailabilityReservationStatusProjection
       expect((await database.pool.query("SELECT count(*)::int AS count FROM oms.order_edit_operations WHERE oms_order_id=21")).rows[0].count).toBe(0);
     });
     it.each([
-      { label: "legacy omitted codes", discountCodes: undefined },
-      { label: "explicit empty codes", discountCodes: [] },
+      { label: "legacy omitted codes", discountCodes: undefined, resume: false },
+      { label: "explicit empty codes", discountCodes: [], resume: false },
+      { label: "resumed failed quote with empty codes", discountCodes: [], resume: true },
     ])(
       "persists a provider-parsed customer quote with $label and reloads its exact plan",
-      async ({ discountCodes }) => {
+      async ({ discountCodes, resume }) => {
         await customerParent();
         const store = new PostgresOrderEditStore(database.pool);
         const original = customerRecord();
@@ -372,6 +380,7 @@ function inventoryProjection(): CanonicalAvailabilityReservationStatusProjection
         await database.pool.query(
           "UPDATE oms.oms_orders SET external_customer_id='100' WHERE id=21",
         );
+        await database.pool.query("INSERT INTO wms.orders(id,source,oms_fulfillment_order_id,channel_id,external_order_id) VALUES(11,'oms','21',36,'2')");
         await store.saveSettings(
           4,
           { enabled: true, paymentWindowMinutes: 30 },
@@ -422,12 +431,32 @@ function inventoryProjection(): CanonicalAvailabilityReservationStatusProjection
         const service = new OrderEditService(
           store,
           external.provider,
-          external.warehouse,
+          gateway,
           () => new Date(original.createdAt),
           () => original.id,
           external.report,
         );
-        const response = await service.quote(original.input, original.actorId);
+        if (resume) {
+          external.provider.quote.mockRejectedValueOnce(new Error("Fixture preparation failure"));
+          expect(await service.quote(original.input, original.actorId)).toMatchObject({ status: "review_required" });
+          expect((await gateway.inspect(21)).reasons).toContain("Another order edit holds this order.");
+          expect(await service.order(4, 21, "v1", original.actorId)).toMatchObject({ activeOperationId: original.id, eligibility: { editable: true, reasons: [] } });
+          expect(await service.order(4, 21, "v1", "customer:36:101")).toMatchObject({ eligibility: { editable: false } });
+        }
+        let response;
+        if (resume) {
+          let entered!: () => void;
+          let release!: () => void;
+          const started = new Promise<void>(resolve => { entered = resolve; });
+          const gate = new Promise<void>(resolve => { release = resolve; });
+          external.provider.quote.mockImplementationOnce(async () => { entered(); await gate; return quote; });
+          const first = service.resume(original.id, original.actorId);
+          await started;
+          try {
+            await expect(service.resume(original.id, original.actorId)).rejects.toMatchObject({ code: "ORDER_EDIT_BUSY" });
+          } finally { release(); }
+          response = await first;
+        } else response = await service.quote(original.input, original.actorId);
         expect(response).toMatchObject({
           status: "ready",
           quoteAvailable: true,
@@ -435,22 +464,22 @@ function inventoryProjection(): CanonicalAvailabilityReservationStatusProjection
           error: null,
         });
         const next = await store.get(original.id);
-        expect(next).toMatchObject({ status: "ready", version: 1, quote });
+        const version = resume ? 3 : 1;
+        expect(next).toMatchObject({ status: "ready", version, quote });
         expect(await store.findByRequestKey(original.requestKey)).toEqual(next);
-        expect(await service.quote(original.input, original.actorId)).toEqual(
-          response,
-        );
-        expect(external.provider.quote).toHaveBeenCalledTimes(1);
+        expect(await service.quote(original.input, original.actorId)).toMatchObject({ operationId: original.id, status: "ready", updatedTotalCents: response.updatedTotalCents });
+        if (resume) await service.resume(original.id, original.actorId);
+        expect(external.provider.quote).toHaveBeenCalledTimes(resume ? 2 : 1);
         expect(external.provider.commit).not.toHaveBeenCalled();
         expect(external.provider.refund).not.toHaveBeenCalled();
-        expect(external.report).not.toHaveBeenCalled();
+        if (!resume) expect(external.report).not.toHaveBeenCalled();
         const changedPlan = {
           ...next,
-          version: 2,
+          version: version + 1,
           input: { ...next.input, discountCodes: ["DIFFERENT"] },
         };
         await expect(
-          store.save(changedPlan, 1, original.actorId, "quoted"),
+          store.save(changedPlan, version, original.actorId, "quoted"),
         ).rejects.toMatchObject({
           issues: expect.arrayContaining([
             expect.objectContaining({ path: ["quote", "plan"] }),
@@ -464,7 +493,8 @@ function inventoryProjection(): CanonicalAvailabilityReservationStatusProjection
               [original.id],
             )
           ).rows.map((row) => row.action),
-        ).toEqual(["created", "quoted"]);
+        ).toEqual(resume ? ["created", "quote_failed_held", "quote_preparation_resumed", "quoted"] : ["created", "quoted"]);
+        expect((await database.pool.query("SELECT order_edit_operation_id FROM wms.orders WHERE id=11")).rows[0].order_edit_operation_id).toBe(original.id);
         expect(next.commitStartedAt).toBeNull();
         expect(next.refundStartedAt).toBeNull();
       },

@@ -642,12 +642,16 @@ export class OrderEditWarehouseGateway {
       throw new OrderEditError("ORDER_EDIT_PICKING_CUTOFF", reasons.join(" "));
   }
 
-  async inspect(omsOrderId: number): Promise<OrderEditWarehouseInspection> {
+  async inspect(
+    omsOrderId: number,
+    operationId?: string,
+  ): Promise<OrderEditWarehouseInspection> {
+    if (operationId !== undefined) operationIdSchema.parse(operationId);
     // Availability is advisory. Use one consistent committed snapshot without
     // competing with cancellation/picking; commands recheck under update locks.
     return this.transaction(async (client) => {
       const { orders } = await this.evidence(client, omsOrderId, "none");
-      const reasons = orderEditWarehouseBlockers(orders);
+      const reasons = orderEditWarehouseBlockers(orders, operationId);
       return {
         editable: reasons.length === 0,
         reasons,

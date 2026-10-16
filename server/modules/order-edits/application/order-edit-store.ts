@@ -88,6 +88,7 @@ export interface OrderEditStore {
 export interface OrderEditWarehouse {
   inspect(
     omsOrderId: number,
+    operationId?: string,
   ): Promise<{ editable: boolean; reasons: string[]; wmsOrderIds: number[] }>;
   acquire(omsOrderId: number, operationId: string): Promise<void>;
   assertHeld(omsOrderId: number, operationId: string): Promise<void>;
