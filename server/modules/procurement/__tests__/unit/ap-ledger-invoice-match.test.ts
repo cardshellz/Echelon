@@ -65,8 +65,7 @@ vi.mock("drizzle-orm", () => ({
 }));
 vi.mock("../../po-exceptions.service", () => ({
   detectMatchMismatch: mocks.detectMatchMismatch,
-  detectOverpaid: vi.fn(),
-  detectPastDue: vi.fn(),
+  detectFinancialExceptions: vi.fn(),
 }));
 vi.mock("../../../inventory/cogs.service", () => ({ COGSService: class {} }));
 

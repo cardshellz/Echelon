@@ -157,7 +157,7 @@ export async function sendCriticalStaleAutoDraftPoEscalation(
 
 export async function runStaleAutoDraftPoEscalationCheck(
   options: {
-    db?: DbWithExecute;
+    db?: Pick<typeof defaultDb, "execute" | "transaction">;
     notify?: NotifyFn;
     thresholds?: Partial<AutoDraftPoAgingThresholds>;
     dedupeHours?: number;
@@ -166,7 +166,7 @@ export async function runStaleAutoDraftPoEscalationCheck(
   } = {},
 ): Promise<StaleAutoDraftPoEscalationResult> {
   const db = options.db ?? defaultDb;
-  const rows = await fetchAutoDraftPoAgingRows(db, { scanLimit: 500 });
+  const rows = await fetchAutoDraftPoAgingRows(db, { pageSize: 500 });
   const diagnostics = buildStaleAutoDraftPoDiagnostics(rows, {
     limit: 100,
     thresholds: options.thresholds,

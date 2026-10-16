@@ -47,3 +47,7 @@ After deployment, use a permitted read to verify a single-PO invoice, a shared u
 ## Validation
 
 Validation results are recorded in `PO-FINANCIAL-EVIDENCE-VALIDATION.md`. The PostgreSQL fixtures are disposable and local; no production financial records are changed. The invoice-void read case uses a canonical non-product fee path. Direct product-invoice void reconciliation is not exercised by this batch; that existing mutation path is unchanged.
+
+## Follow-up consumers
+
+The subsequent workflow and financial-alert correction is documented in `PO-FINANCIAL-FOLLOWUP.md`. It reuses this projection, adds batched reads and line-owned invoice discovery, and replaces selected cache-dependent consumers without rewriting legacy financial history.

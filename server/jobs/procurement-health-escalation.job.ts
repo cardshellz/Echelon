@@ -9,9 +9,7 @@ import {
 import { loadProcurementHealthSummary } from "../modules/procurement/procurement-health-summary.service";
 import type { ProcurementHealthSummary } from "../modules/procurement/procurement-health.service";
 
-type DbWithExecute = {
-  execute: (query: any) => Promise<{ rows: unknown[] }>;
-};
+type ProcurementHealthDatabase = NonNullable<Parameters<typeof loadProcurementHealthSummary>[0]["db"]>;
 
 type ShipmentTrackingHealthSource = {
   getLandedCostHealth: (input: { limit: number }) => Promise<{
@@ -34,7 +32,7 @@ function normalizeLimit(value: unknown): number {
   return Math.min(parsed, 100);
 }
 
-function createDefaultShipmentTracking(db: DbWithExecute): ShipmentTrackingHealthSource {
+function createDefaultShipmentTracking(db: ProcurementHealthDatabase): ShipmentTrackingHealthSource {
   return createShipmentTrackingService(db as any, {
     ...procurementStorage,
     ...catalogStorage,
@@ -42,7 +40,7 @@ function createDefaultShipmentTracking(db: DbWithExecute): ShipmentTrackingHealt
 }
 
 export async function runProcurementHealthEscalationJob(options: {
-  db?: DbWithExecute;
+  db?: ProcurementHealthDatabase;
   storage?: Parameters<typeof loadProcurementHealthSummary>[0]["storage"];
   shipmentTracking?: ShipmentTrackingHealthSource;
   limit?: number;

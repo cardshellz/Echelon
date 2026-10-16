@@ -314,18 +314,22 @@ function readSettlement(
   return paid;
 }
 
-function evaluateInvoice(
+function readInvoiceFootprint(
   raw: unknown,
   input: PoFinancialEvidenceInput,
   addReason: AddReason,
-): Amounts {
+): {
+  invoice: Invoice;
+  invoiceAmount: bigint;
+  buckets: Map<number, bigint>;
+} | null {
   const parsed = invoiceSchema.safeParse(raw);
   if (!parsed.success) {
     addReason(
       "PO_INVOICE_EVIDENCE_INVALID",
       "Invoice evidence contains a missing field, malformed identity or unsupported status.",
     );
-    return unknownAmounts;
+    return null;
   }
   const invoice = parsed.data;
   if (
@@ -336,7 +340,7 @@ function evaluateInvoice(
       "PO_INVOICE_OWNERSHIP_INVALID",
       "Invoice vendor or currency does not match this purchase order.",
     );
-    return unknownAmounts;
+    return null;
   }
   const invoiceAmount = money(invoice.invoicedAmountCents);
   if (invoiceAmount === null) {
@@ -344,10 +348,10 @@ function evaluateInvoice(
       "PO_INVOICE_AMOUNT_INVALID",
       "Invoice amount is missing or outside the supported nonnegative exact integer range.",
     );
-    return unknownAmounts;
+    return null;
   }
   const buckets = readOwnership(invoice, input, addReason);
-  if (buckets === null) return unknownAmounts;
+  if (buckets === null) return null;
   const total = [...buckets.values()].reduce(
     (sum, amount) => sum + amount,
     BigInt(0),
@@ -357,8 +361,40 @@ function evaluateInvoice(
       "PO_INVOICE_LINE_TOTAL_MISMATCH",
       "Mapped invoice line amounts do not reconcile to the entire invoice amount.",
     );
-    return unknownAmounts;
+    return null;
   }
+  return { invoice, invoiceAmount, buckets };
+}
+
+/** Validate only source identity, currency, complete line ownership and exact
+ * invoice conservation. Approval and payment settlement are separate policies.
+ * Voided sources are deliberately checked here for callers auditing retained
+ * financial history; the current PO projection may exclude them. */
+export function validatePoFinancialInvoiceFootprint(
+  input: PoFinancialEvidenceInput,
+  invoice: unknown,
+): { valid: boolean; codes: string[] } {
+  const root = rootSchema.safeParse(input);
+  if (!root.success)
+    return { valid: false, codes: ["PO_FINANCIAL_ROOT_INVALID"] };
+  if (root.data.currency !== "USD") {
+    return { valid: false, codes: ["PO_FINANCIAL_CURRENCY_UNSUPPORTED"] };
+  }
+  const codes: string[] = [];
+  const result = readInvoiceFootprint(invoice, input, (code) =>
+    codes.push(code),
+  );
+  return { valid: result !== null, codes: [...new Set(codes)].sort() };
+}
+
+function evaluateInvoice(
+  raw: unknown,
+  input: PoFinancialEvidenceInput,
+  addReason: AddReason,
+): Amounts {
+  const footprint = readInvoiceFootprint(raw, input, addReason);
+  if (footprint === null) return unknownAmounts;
+  const { invoice, invoiceAmount, buckets } = footprint;
   const invoiced = buckets.get(input.purchaseOrderId)!;
   const paid = readSettlement(invoice, invoiceAmount, addReason);
   if (paid === null) return { invoiced, paid: null, outstanding: null };

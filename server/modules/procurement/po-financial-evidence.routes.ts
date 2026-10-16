@@ -18,7 +18,7 @@ const pathIdSchema = z
 
 export function registerPoFinancialEvidenceRoutes(
   app: Express,
-  service = createPoFinancialEvidenceService(db),
+  service: Pick<ReturnType<typeof createPoFinancialEvidenceService>, "read"> = createPoFinancialEvidenceService(db),
 ): void {
   app.get(
     "/api/purchase-orders/:id/financial-evidence",

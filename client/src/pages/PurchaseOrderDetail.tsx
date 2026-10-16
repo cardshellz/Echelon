@@ -3,6 +3,8 @@ import { PoShipmentCostSummary } from "@/features/purchasing/PoShipmentCostSumma
 import { PoFinancialEvidence, usePoFinancialEvidence } from "@/features/purchasing/PoFinancialEvidence";
 import { usePoShipmentCosts } from "@/features/purchasing/use-po-shipment-costs";
 import { formatIntegerCents } from "@shared/utils/format-integer-cents";
+import { poFinancialWorkflowSchema } from "@shared/procurement/po-financial-workflow";
+import { canonicalJson } from "@shared/utils/canonical-json";
 import { parseShipmentReceiptResolution, requiresReceiptUnitReview } from "@/lib/shipment-receipt-units";
 import React from "react";
 import { poEmailDeliveryPresentation } from "@/lib/po-email-delivery";
@@ -187,6 +189,8 @@ type AutoDraftActionPlanActionId =
   | "open_exceptions"
   | "create_invoice"
   | "record_payment"
+  | "review_financial_evidence"
+  | "review_invoice_approval"
   | "done"
   | "cancelled";
 
@@ -996,10 +1000,6 @@ export default function PurchaseOrderDetail() {
   const [cancelLineIntent] = useState(() =>
     createFinancialCommandIntentStore(genPoLineIdempotencyKey),
   );
-  const [paymentIntent] = useState(() =>
-    createFinancialCommandIntentStore(genPoLineIdempotencyKey),
-  );
-
   const activeTab = procurementNavigation.tab;
   const setActiveTab = procurementNavigation.setTab;
   const requestedTabs = new URLSearchParams(searchStr).getAll("tab");
@@ -1149,23 +1149,10 @@ export default function PurchaseOrderDetail() {
   const [selectedCatalogEntry, setSelectedCatalogEntry] = useState<any>(null);
   const [catalogPricingUntouched, setCatalogPricingUntouched] = useState(false);
 
-  // Inline Record Payment dialog (replaces navigate-to-/ap-payments flow)
-  const [showPaymentDialog, setShowPaymentDialog] = useState(false);
-  const [payment, setPayment] = useState({
-    paymentDate: format(new Date(), "yyyy-MM-dd"),
-    paymentMethod: "ach",
-    referenceNumber: "",
-    checkNumber: "",
-    bankAccountLabel: "",
-    amountDollars: "",   // pre-filled when dialog opens from first unpaid invoice
-    notes: "",
-    invoiceId: null as number | null,  // which invoice this payment allocates to
-  });
-
   const [newLine, setNewLine] = useState(createEmptyNewLine);
 
   // Queries
-  const { data: po, isLoading, error: poError, refetch: refetchPo } = useQuery<any>({
+  const { data: po, isLoading, isFetching: isPoRefreshing, error: poError, refetch: refetchPo } = useQuery<any>({
     queryKey: [`/api/purchase-orders/${poId}`],
     enabled: !!poId,
   });
@@ -1182,19 +1169,31 @@ export default function PurchaseOrderDetail() {
   const autoDraftActionPlan = (po as any)?.autoDraftActionPlan as AutoDraftActionPlan | null | undefined;
   const financialEvidenceLoading = financialEvidence.isPending || financialEvidence.isFetching;
   const financialEvidenceAvailable = financialEvidence.isSuccess && !financialEvidenceLoading;
+  const financialGuidanceLoading = financialEvidenceLoading || isPoRefreshing;
   const financialReviewRequired = financialEvidenceAvailable && financialEvidence.data?.state === "review_required";
-  const financialCompletionSupported = financialEvidenceAvailable && financialEvidence.data?.state === "complete" &&
-    financialEvidence.data.invoiceCount > 0 && financialEvidence.data.outstandingAmountCents === 0;
-  const financialGuidanceLabel = financialEvidenceLoading ? "Loading financial evidence…"
-    : financialEvidence.isError ? "Reload financial evidence" : "Review linked invoices";
-  const financialGuidanceDetail = financialEvidenceLoading ? "Wait for the current invoice and payment evidence before deciding the next financial action."
-    : financialEvidence.isError ? "Purchase order financial amounts could not be verified. Reload the evidence before relying on payment or balance totals."
+  const parsedFinancialWorkflow = poFinancialWorkflowSchema.safeParse((po as any)?.financialWorkflow);
+  // Both reads can succeed across an intervening invoice write. A newer amount
+  // snapshot must never inherit a financial action from an older assessment.
+  const financialSnapshotsAgree = parsedFinancialWorkflow.success && parsedFinancialWorkflow.data.purchaseOrderId === poId &&
+    financialEvidenceAvailable && canonicalJson(parsedFinancialWorkflow.data.evidence) === canonicalJson(financialEvidence.data);
+  const financialSnapshotsConflict = parsedFinancialWorkflow.success && financialEvidenceAvailable && !financialSnapshotsAgree;
+  const financialGuidanceFailed = financialEvidence.isError || !!poError || financialSnapshotsConflict;
+  const financialContextAvailable = financialEvidenceAvailable && !isPoRefreshing && !poError && financialSnapshotsAgree;
+  const financialCompletionSupported = financialContextAvailable && financialEvidence.data?.state === "complete" &&
+    parsedFinancialWorkflow.success && parsedFinancialWorkflow.data.state === "settled";
+  const financialGuidanceLabel = financialGuidanceLoading ? "Loading financial evidence…"
+    : financialGuidanceFailed ? "Reload financial evidence" : "Review linked invoices";
+  const financialGuidanceDetail = financialGuidanceLoading ? "Wait for the current invoice and payment evidence before deciding the next financial action."
+    : financialSnapshotsConflict ? "Invoice evidence changed between reads. Reload the financial evidence before choosing the next action."
+    : financialGuidanceFailed ? "Purchase order financial amounts could not be verified. Reload the evidence before relying on payment or balance totals."
       : "Review linked invoices before relying on this PO's payment or balance totals.";
   // This affects displayed financial guidance only. Server lifecycle authority
   // and every physical action remain unchanged.
   const reviewAutoDraftFinances = !!autoDraftActionPlan &&
-    ["done", "record_payment", "create_invoice"].includes(autoDraftActionPlan.primaryAction.id) &&
-    (!financialEvidenceAvailable || financialReviewRequired || (autoDraftActionPlan.primaryAction.id === "done" && !financialCompletionSupported));
+    ["done", "record_payment", "create_invoice", "review_financial_evidence", "review_invoice_approval"].includes(autoDraftActionPlan.primaryAction.id) &&
+    (!financialContextAvailable ||
+      (financialReviewRequired && autoDraftActionPlan.primaryAction.id !== "review_financial_evidence") ||
+      (autoDraftActionPlan.primaryAction.id === "done" && !financialCompletionSupported));
   const lifecycleActionIds = new Set(
     (lifecycle?.nextActions ?? []).map((action) => action.id),
   );
@@ -1278,16 +1277,14 @@ export default function PurchaseOrderDetail() {
     enabled: !!poId && showReceivePicker,
   });
 
-  // Eagerly fetched (not tab-gated) so the side-rail Record Payment button
-  // can pre-populate the invoice dropdown without requiring the invoices tab
-  // to have been visited first.
-  const { data: invoicesData } = useQuery<{ invoices: any[] }>({
+  // Load linked documents on entry so the financial review handoff is ready.
+  const { data: invoicesData, isPending: invoicesLoading, isFetching: invoicesRefreshing, isError: invoicesError, refetch: refetchInvoices } = useQuery<{ invoices: any[] }>({
     queryKey: [`/api/purchase-orders/${poId}/invoices`],
     enabled: !!poId,
   });
 
   // Phase 2: payments tab
-  const { data: paymentsData } = useQuery<{ payments: any[] }>({
+  const { data: paymentsData, isPending: paymentsLoading, isFetching: paymentsRefreshing, isError: paymentsError, refetch: refetchPayments } = useQuery<{ payments: any[] }>({
     queryKey: [`/api/purchase-orders/${poId}/payments`],
     enabled: !!poId && activeTab === "payments",
   });
@@ -1981,73 +1978,6 @@ export default function PurchaseOrderDetail() {
     onError: (err: Error) => toast({ title: "Error", description: err.message, variant: "destructive" }),
   });
 
-  // Inline payment mutation — posts directly to /api/ap-payments so
-  // the user never has to navigate away from PO detail. The financial-command
-  // intent store retains one Idempotency-Key across ambiguous retries.
-  const paymentMutation = useMutation({
-    mutationFn: async () => {
-      if (!payment.invoiceId) throw new Error("No invoice selected");
-      const body = {
-        vendorId: po?.vendorId,
-        paymentDate: payment.paymentDate,
-        paymentMethod: payment.paymentMethod,
-        referenceNumber: payment.referenceNumber || undefined,
-        checkNumber: payment.checkNumber || undefined,
-        bankAccountLabel: payment.bankAccountLabel || undefined,
-        totalAmountCents: dollarsToCents(payment.amountDollars || "0"),
-        notes: payment.notes || undefined,
-        allocations: [{
-          vendorInvoiceId: payment.invoiceId,
-          appliedAmountCents: dollarsToCents(payment.amountDollars || "0"),
-        }],
-      };
-      const idempotencyKey = paymentIntent.acquire({ method: "POST", url: "/api/ap-payments", body });
-      try {
-        const result = await financialCommandFetchJson<any>("/api/ap-payments", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "Idempotency-Key": idempotencyKey,
-          },
-          body: JSON.stringify(body),
-        });
-        return { result, idempotencyKey };
-      } catch (error) {
-        paymentIntent.fail(idempotencyKey, error);
-        throw error;
-      }
-    },
-    retry: shouldRetryFinancialCommand,
-    retryDelay: financialCommandRetryDelay,
-    onSuccess: ({ result, idempotencyKey }) => {
-      paymentIntent.complete(idempotencyKey);
-      queryClient.invalidateQueries({ queryKey: [`/api/purchase-orders/${poId}`] });
-      queryClient.invalidateQueries({ queryKey: [`/api/purchase-orders/${poId}/payments`] });
-      queryClient.invalidateQueries({ queryKey: [`/api/purchase-orders/${poId}/invoices`] });
-      queryClient.invalidateQueries({ queryKey: ["/api/purchase-orders"] });
-      queryClient.invalidateQueries({ queryKey: ["/api/ap-payments"] });
-      setShowPaymentDialog(false);
-      setPayment(p => ({
-        ...p,
-        amountDollars: "",
-        invoiceId: null,
-        referenceNumber: "",
-        checkNumber: "",
-        bankAccountLabel: "",
-        notes: "",
-      }));
-      toast({ title: "Payment recorded", description: apLedgerOutcomeDescription(result) });
-    },
-    onError: (err: Error) => {
-      // A response can be lost after commit. Reload the recorded evidence and
-      // entire-invoice balances before the operator decides whether to retry.
-      void queryClient.invalidateQueries({ queryKey: [`/api/purchase-orders/${poId}`] });
-      void queryClient.invalidateQueries({ queryKey: [`/api/purchase-orders/${poId}/payments`] });
-      void queryClient.invalidateQueries({ queryKey: [`/api/purchase-orders/${poId}/invoices`] });
-      toast({ title: "Error", description: err.message, variant: "destructive" });
-    },
-  });
-
   const cancelMutation = useMutation({
     mutationFn: async (reason: string) => {
       if (!canCancelPo || !cancellationAction?.endpoint) {
@@ -2478,26 +2408,11 @@ export default function PurchaseOrderDetail() {
     setShowCreateInvoiceDialog(true);
   };
 
-  const openPaymentDialogFromPo = () => {
-    const unpaidInvoices = invoicesData?.invoices?.filter((i: any) => i.balanceCents > 0) ?? [];
-    if (unpaidInvoices.length === 0) {
-      setShowPaymentDialog(true);
-      return;
-    }
-    const first = unpaidInvoices[0];
-    setPayment(p => ({
-      ...p,
-      invoiceId: first.id,
-      amountDollars: (first.balanceCents / 100).toFixed(2),
-    }));
-    setShowPaymentDialog(true);
-  };
-
   const runAutoDraftPrimaryAction = async () => {
     if (reviewAutoDraftFinances) {
-      if (financialEvidenceLoading) return;
-      if (financialEvidence.isError) {
-        await financialEvidence.refetch();
+      if (financialGuidanceLoading) return;
+      if (financialGuidanceFailed) {
+        await Promise.all([financialEvidence.refetch(), refetchPo()]);
         return;
       }
       setActiveTab("invoices");
@@ -2510,6 +2425,8 @@ export default function PurchaseOrderDetail() {
     switch (action.id) {
       case "open_lines":
       case "open_exceptions":
+      case "review_financial_evidence":
+      case "review_invoice_approval":
       case "done":
       case "cancelled":
         return;
@@ -2517,7 +2434,9 @@ export default function PurchaseOrderDetail() {
         await openCreateInvoiceDialogFromPo();
         return;
       case "record_payment":
-        openPaymentDialogFromPo();
+        // The current server plan asks for invoice review; direct payment controls
+        // remain available on the invoice and retain their own authorization.
+        setActiveTab("invoices");
         return;
       case "submit":
         submitMutation.mutate();
@@ -2605,7 +2524,7 @@ export default function PurchaseOrderDetail() {
       case "create_invoice":
         return "Create invoice";
       case "record_payment":
-        return "Record invoice payment";
+        return "Review invoice payment";
       case "done":
         return "No action";
       case "cancelled":
@@ -2618,7 +2537,7 @@ export default function PurchaseOrderDetail() {
   const autoDraftPrimaryButtonDisabled =
     !autoDraftActionPlan ||
     autoDraftPrimaryActionPending ||
-    (reviewAutoDraftFinances && financialEvidenceLoading) ||
+    (reviewAutoDraftFinances && financialGuidanceLoading) ||
     (!reviewAutoDraftFinances && ["done", "cancelled"].includes(autoDraftActionPlan.primaryAction.id));
 
   if (isLoading) {
@@ -2961,7 +2880,8 @@ export default function PurchaseOrderDetail() {
         </div>
       )}
 
-      <PoFinancialEvidence query={financialEvidence} onViewInvoices={() => setActiveTab("invoices")} />
+      <PoFinancialEvidence query={financialEvidence} onViewInvoices={() => setActiveTab("invoices")}
+        invoiceHref={(invoiceId) => procurementNavigation.childHref(`/ap-invoices/${invoiceId}`)} />
 
       {/* Phase 2: Dual-track header. We pass the history rows so the
           tooltip can derive timestamps for stages that don't have
@@ -3174,7 +3094,7 @@ export default function PurchaseOrderDetail() {
       )}
 
       {autoDraftActionPlan && (
-        <Card className="border-amber-200">
+        <Card className="border-amber-200" role="region" aria-label="Auto-draft next action">
           <CardContent className="p-4 space-y-4">
             <div className="flex flex-col lg:flex-row lg:items-start gap-4">
               <div className="flex-1 min-w-0 space-y-2">
@@ -3212,8 +3132,10 @@ export default function PurchaseOrderDetail() {
             <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-2">
               {autoDraftActionPlan.checklist.map((recordedStep) => {
                 const step = recordedStep.id === "ap_closeout" &&
-                  (!financialEvidenceAvailable || financialReviewRequired || (recordedStep.status === "done" && !financialCompletionSupported))
-                  ? { ...recordedStep, status: financialEvidenceLoading ? "pending" as const : financialEvidence.isError ? "blocked" as const : "current" as const,
+                  (!financialContextAvailable ||
+                    (financialReviewRequired && autoDraftActionPlan.primaryAction.id !== "review_financial_evidence") ||
+                    (recordedStep.status === "done" && !financialCompletionSupported))
+                  ? { ...recordedStep, status: financialGuidanceLoading ? "pending" as const : financialGuidanceFailed ? "blocked" as const : "current" as const,
                     detail: financialGuidanceDetail }
                   : recordedStep;
                 return (
@@ -3671,11 +3593,26 @@ export default function PurchaseOrderDetail() {
             <p className="text-sm text-muted-foreground">
               Linked vendor invoices. Amounts and balances cover each entire invoice, which may include other purchase orders.
             </p>
-            <a href="/ap-invoices" className="text-sm text-blue-600 hover:underline">
-              Manage all invoices →
-            </a>
+            <div className="flex shrink-0 flex-wrap items-center gap-2">
+              {hasPermission("purchasing", "create") &&
+                ["approved", "sent", "acknowledged", "partially_received", "received", "closed"].includes(po.status) && (
+                <Button variant="outline" size="sm" onClick={() => void openCreateInvoiceDialogFromPo()}>
+                  Add invoice
+                </Button>
+              )}
+              <a href="/ap-invoices" className="text-sm text-blue-600 hover:underline">
+                Manage all invoices →
+              </a>
+            </div>
           </div>
-          {!invoicesData?.invoices?.length ? (
+          {invoicesLoading || invoicesRefreshing ? (
+            <p role="status" className="text-sm text-muted-foreground">{invoicesData ? "Refreshing linked invoices…" : "Loading linked invoices…"}</p>
+          ) : invoicesError || !invoicesData || !Array.isArray(invoicesData.invoices) ? (
+            <div role="alert" className="space-y-2 rounded-md border border-amber-300 p-4">
+              <p>Linked invoices could not be loaded. Their approval and payment status is unavailable.</p>
+              <Button variant="outline" size="sm" onClick={() => void refetchInvoices()}>Reload linked invoices</Button>
+            </div>
+          ) : invoicesData.invoices.length === 0 ? (
             <Card>
               <CardContent className="p-8 text-center text-muted-foreground">
                 <p className="text-sm">No invoices linked to this PO yet.</p>
@@ -3729,7 +3666,14 @@ export default function PurchaseOrderDetail() {
           <p className="text-sm text-muted-foreground">
             Payments applied to entire linked invoices. These amounts are not payment allocations to this purchase order.
           </p>
-          {!paymentsData?.payments?.length ? (
+          {paymentsLoading || paymentsRefreshing ? (
+            <p role="status" className="text-sm text-muted-foreground">{paymentsData ? "Refreshing invoice payments…" : "Loading invoice payments…"}</p>
+          ) : paymentsError || !paymentsData || !Array.isArray(paymentsData.payments) ? (
+            <div role="alert" className="space-y-2 rounded-md border border-amber-300 p-4">
+              <p>Linked invoice payments could not be loaded. Payment history is unavailable.</p>
+              <Button variant="outline" size="sm" onClick={() => void refetchPayments()}>Reload invoice payments</Button>
+            </div>
+          ) : paymentsData.payments.length === 0 ? (
             <Card>
               <CardContent className="p-8 text-center text-muted-foreground">
                 <DollarSign className="h-8 w-8 mx-auto mb-2 opacity-30" />
@@ -3925,7 +3869,7 @@ export default function PurchaseOrderDetail() {
 
       {/* ── Quick Actions Side Rail (Phase 2) ── */}
       <div className={activeTab === "lifecycle" ? "hidden" : "w-full md:w-64 shrink-0 space-y-3"}>
-        <Card>
+        <Card role="region" aria-label="Purchase order actions">
           <CardHeader className="pb-2 pt-3 px-4">
             <CardTitle className="text-sm">Quick actions</CardTitle>
           </CardHeader>
@@ -4046,75 +3990,16 @@ export default function PurchaseOrderDetail() {
               </Button>
             )}
 
-            {/* Financial: Add invoice */}
-            {["unbilled", "invoiced"].includes(po.financialStatus ?? "") &&
-              ["approved", "sent", "acknowledged", "partially_received", "received", "closed"].includes(po.status) && (
-              <Button
-                className="w-full justify-start"
-                variant="outline"
-                size="sm"
-                onClick={async () => {
-                  let invoiceNumber = "";
-                  try {
-                    const r = await fetch("/api/vendor-invoices/next-number");
-                    if (r.ok) invoiceNumber = (await r.json()).invoiceNumber;
-                  } catch {}
-                  setInvoiceForm({
-                    invoiceNumber,
-                    amountDollars: ((Number(po.totalCents) || 0) / 100).toString(),
-                    invoiceDate: new Date().toISOString().slice(0, 10),
-                    dueDate: "",
-                    notes: "",
-                  });
-                  setShowCreateInvoiceDialog(true);
-                }}
-              >
+            {/* Invoice approval and payment belong to the linked invoice screen. */}
+            {!financialCompletionSupported && (
+              <Button className="w-full justify-start" variant="outline" size="sm" onClick={() => setActiveTab("invoices")}>
                 <FileText className="h-3.5 w-3.5 mr-2" />
-                Add invoice
+                Review linked invoices
               </Button>
             )}
 
-            {/* Financial: Record payment */}
-            {["invoiced", "partially_paid"].includes(po.financialStatus ?? "") && (
-              <>
-                <Button
-                  className="w-full justify-start"
-                  variant="outline"
-                  size="sm"
-                  onClick={() => {
-                    // Pre-fill from the first unpaid invoice; guard if none exist
-                    const unpaidInvoices = invoicesData?.invoices?.filter((i: any) => i.balanceCents > 0) ?? [];
-                    if (unpaidInvoices.length === 0) {
-                      // invoicesData might not be loaded yet (tab not visited) — open the
-                      // dialog anyway and let the user select; it will validate on submit.
-                      setShowPaymentDialog(true);
-                      return;
-                    }
-                    const first = unpaidInvoices[0];
-                    setPayment(p => ({
-                      ...p,
-                      invoiceId: first.id,
-                      amountDollars: (first.balanceCents / 100).toFixed(2),
-                    }));
-                    setShowPaymentDialog(true);
-                  }}
-                >
-                  <DollarSign className="h-3.5 w-3.5 mr-2" />
-                  Record invoice payment
-                </Button>
-                {/* Fallback link for users who want the full AP payments list */}
-                <button
-                  className="w-full text-left text-xs text-muted-foreground underline-offset-2 hover:underline px-1"
-                  onClick={() => navigate("/ap-payments")}
-                >
-                  View all payments →
-                </button>
-              </>
-            )}
-
             {/* Fallback: no actions available */}
-            {po.physicalStatus === "received" &&
-              po.financialStatus === "paid" && financialCompletionSupported && (
+            {po.physicalStatus === "received" && financialCompletionSupported && (
               <p className="text-xs text-muted-foreground text-center py-2">
                 All done — PO fully received and paid.
               </p>
@@ -5585,105 +5470,6 @@ export default function PurchaseOrderDetail() {
         </DialogContent>
       </Dialog>
 
-      {/* ═══════ Inline Record Payment Dialog ═══════ */}
-      {/* Mirrors APInvoiceDetail.tsx paymentMutation/dialog structure. Adds an
-          invoice dropdown at the top because the user is acting from PO context
-          rather than a specific invoice. */}
-      <Dialog open={showPaymentDialog} onOpenChange={setShowPaymentDialog}>
-        <DialogContent className="max-w-md">
-          <DialogHeader>
-            <DialogTitle>Record invoice payment</DialogTitle>
-            <DialogDescription>
-              Choose an invoice linked to {po?.poNumber}. This records payment against the entire invoice, which may cover other purchase orders.
-            </DialogDescription>
-          </DialogHeader>
-          <div className="space-y-4">
-            {/* Invoice selector — PO context-specific, not present in invoice-level dialog */}
-            <div className="space-y-2">
-              <Label>Invoice *</Label>
-              {(() => {
-                const unpaidInvoices = invoicesData?.invoices?.filter((i: any) => i.balanceCents > 0) ?? [];
-                if (unpaidInvoices.length === 0) {
-                  return (
-                    <div className="rounded-md border border-amber-300 bg-amber-50 dark:bg-amber-950/30 p-3 text-sm">
-                      No linked invoices with an outstanding balance are available.
-                    </div>
-                  );
-                }
-                return (
-                  <select
-                    className="w-full border rounded-md h-10 px-3 text-sm bg-background"
-                    value={payment.invoiceId ?? ""}
-                    onChange={(e) => {
-                      const inv = unpaidInvoices.find((i: any) => i.id === Number(e.target.value));
-                      setPayment(p => ({
-                        ...p,
-                        invoiceId: inv ? inv.id : null,
-                        amountDollars: inv ? (inv.balanceCents / 100).toFixed(2) : p.amountDollars,
-                      }));
-                    }}
-                  >
-                    <option value="" disabled>Select invoice…</option>
-                    {unpaidInvoices.map((inv: any) => (
-                      <option key={inv.id} value={inv.id}>
-                        {inv.invoiceNumber} — {formatCents(inv.balanceCents)} due on entire invoice
-                      </option>
-                    ))}
-                  </select>
-                );
-              })()}
-            </div>
-            <div className="grid grid-cols-2 gap-4">
-              <div className="space-y-2">
-                <Label>Payment Date *</Label>
-                <Input type="date" value={payment.paymentDate} onChange={(e) => setPayment(p => ({ ...p, paymentDate: e.target.value }))} />
-              </div>
-              <div className="space-y-2">
-                <Label>Method *</Label>
-                <select className="w-full border rounded-md h-10 px-3 text-sm bg-background" value={payment.paymentMethod} onChange={(e) => setPayment(p => ({ ...p, paymentMethod: e.target.value }))}>
-                  <option value="ach">ACH</option>
-                  <option value="check">Check</option>
-                  <option value="wire">Wire</option>
-                  <option value="credit_card">Credit Card</option>
-                  <option value="other">Other</option>
-                </select>
-              </div>
-            </div>
-            <div className="space-y-2">
-              <Label>Amount ($) *</Label>
-              <Input type="number" step="0.01" min="0" value={payment.amountDollars} onChange={(e) => setPayment(p => ({ ...p, amountDollars: e.target.value }))} />
-            </div>
-            <div className="grid grid-cols-2 gap-4">
-              <div className="space-y-2">
-                <Label>Reference # <span className="text-muted-foreground text-xs">(ACH/wire)</span></Label>
-                <Input placeholder="Trace / wire ref" value={payment.referenceNumber} onChange={(e) => setPayment(p => ({ ...p, referenceNumber: e.target.value }))} />
-              </div>
-              <div className="space-y-2">
-                <Label>Check #</Label>
-                <Input placeholder="If paying by check" value={payment.checkNumber} onChange={(e) => setPayment(p => ({ ...p, checkNumber: e.target.value }))} />
-              </div>
-            </div>
-            <div className="space-y-2">
-              <Label>Bank Account</Label>
-              <Input placeholder="e.g. Chase Operating" value={payment.bankAccountLabel} onChange={(e) => setPayment(p => ({ ...p, bankAccountLabel: e.target.value }))} />
-            </div>
-            <div className="space-y-2">
-              <Label>Notes</Label>
-              <Input placeholder="Optional" value={payment.notes} onChange={(e) => setPayment(p => ({ ...p, notes: e.target.value }))} />
-            </div>
-
-            <div className="flex gap-2 justify-end">
-              <Button variant="outline" onClick={() => setShowPaymentDialog(false)}>Cancel</Button>
-              <Button
-                onClick={() => paymentMutation.mutate()}
-                disabled={!payment.amountDollars || !payment.invoiceId || paymentMutation.isPending}
-              >
-                {paymentMutation.isPending ? "Recording..." : "Record invoice payment"}
-              </Button>
-            </div>
-          </div>
-        </DialogContent>
-      </Dialog>
       <ShipmentReceiptPackResolutionDialog
         open={!!shipmentReceiptPackResolution}
         onOpenChange={(open) => {
