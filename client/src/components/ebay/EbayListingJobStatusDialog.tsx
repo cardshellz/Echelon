@@ -3,7 +3,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { z } from "zod";
 import { ebayListingSyncJobSchema } from "@shared/types/ebay-listing-sync";
 import type { EbayListingIssue } from "@shared/types/ebay-listing-issue";
-import { resolveEbayListingIssue } from "@shared/ebay-listing-issue";
+import { resolveEbayListingJobIssue } from "@shared/ebay-listing-issue";
 import { presentEbayListingJob } from "@shared/ebay-listing-progress";
 import { apiRequest } from "@/lib/queryClient";
 import { Button } from "@/components/ui/button";
@@ -28,7 +28,9 @@ export function EbayListingJobStatusDialog({ jobId, productId, productName, onCl
       return job;
     },
     retry: false, staleTime: 0,
-    refetchInterval: query => query.state.data?.state === "completed" ? false : 10_000,
+    // A content-complete job can still be monitoring stock after an unknown
+    // earlier response. Keep observing the inventory owner's current evidence.
+    refetchInterval: query => query.state.data?.state === "completed" && !query.state.data.inventoryReconciliation ? false : 10_000,
   });
   useEffect(() => {
     const job = status.data;
@@ -44,8 +46,7 @@ export function EbayListingJobStatusDialog({ jobId, productId, productName, onCl
   const title = withdrawal ? "Removal status" : sync ? "Listing update status" : "Publishing status";
   const operation = withdrawal ? "removal" : sync ? "listing update" : "publication";
   const refreshLabel = withdrawal ? "Refresh removal status" : sync ? "Refresh update status" : "Refresh publishing status";
-  const issue = job && job.state !== "completed" && job.code
-    ? job.issue ?? resolveEbayListingIssue({ code: job.code, message: job.message, productId, jobId, state: job.state }) : null;
+  const issue = job ? resolveEbayListingJobIssue(job) : null;
   return <Dialog open onOpenChange={value => { if (!value) onClose(); }}><DialogContent className="max-w-xl max-h-[90vh] overflow-y-auto">
     <DialogHeader><DialogTitle>{title}</DialogTitle><DialogDescription>{productName}. This view checks the saved request without starting another {operation}.</DialogDescription></DialogHeader>
     {status.isLoading && <p role="status">Loading saved request status…</p>}

@@ -190,7 +190,7 @@ dbDescribe.sequential("reviewed eBay publication stock enrollment, real PostgreS
     expect(send).not.toHaveBeenCalled();
   });
 
-  it("updates and verifies existing group pictures after automatically preparing an inactive member's missing stock mapping", async () => {
+  async function retainedListingSyncFixture(options: { currentPhotos?: boolean; recurringWatch?: boolean } = {}) {
     // Match the incident: the active pack already has a sealed connection; only
     // the inactive case retained in the existing group is missing its mapping.
     await ensureEbayPublicationReady(database.pool, source(),
@@ -198,7 +198,7 @@ dbDescribe.sequential("reviewed eBay publication stock enrollment, real PostgreS
     const selected = await retainedSource();
     const photos = ["https://example.test/current-front.jpg", "https://example.test/current-back.jpg"];
     const item = (sku: string): EbayInventoryItem => ({ sku, condition: "NEW", product: {
-      title: "Pack", description: "Description", imageUrls: [], aspects: { Style: [sku] },
+      title: "Pack", description: "Description", imageUrls: options.currentPhotos && sku === "P5" ? [...photos] : [], aspects: { Style: [sku] },
     }, availability: { shipToLocationAvailability: { quantity: 999 } } });
     const items = new Map(selected.variants.map(member => [member.sku, item(member.sku)]));
     const offers = new Map<string, EbayObservedOffer>(selected.variants.map(member => [member.sku, {
@@ -208,7 +208,7 @@ dbDescribe.sequential("reviewed eBay publication stock enrollment, real PostgreS
       pricingSummary: { price: { value: "10.00", currency: "USD" } },
     }]));
     let group: EbayInventoryItemGroup = { title: "Pack", description: "Description", aspects: {},
-      imageUrls: ["https://example.test/deleted.png"], variantSKUs: ["NEW", "P5"],
+      imageUrls: options.currentPhotos ? [...photos] : ["https://example.test/deleted.png"], variantSKUs: ["NEW", "P5"],
       variesBy: { specifications: [{ name: "Style", values: ["P5", "NEW"] }] } };
     runtime.api.mockImplementation(async (method: string, path: string, _token: string, body: unknown) => {
       const url = new URL(path, "https://example.test");
@@ -242,20 +242,30 @@ dbDescribe.sequential("reviewed eBay publication stock enrollment, real PostgreS
     // Reproduce the next failure hidden by the old mapping-review UI.
     await expect(client.createOrReplaceInventoryItemGroup("PACK", group)).rejects.toMatchObject({ code: "PUBLICATION_LISTING_TARGET_UNMAPPED" });
     expect(runtime.api).not.toHaveBeenCalled();
+    const assertInventoryReady = vi.fn((context?: { commandKey: string; actor: string }) =>
+      ensureEbayListingInventoryReady(selected, context, WALMART_INVENTORY_NOW));
     const prepared: PreparedEbayListingSync = {
       identity: { channelId: 67, connectionId: 9, accountId: "seller-36", productId: 20, marketplaceId: "EBAY_US", groupKey: "PACK",
         variants: selected.variants.map(member => ({ variantId: member.productVariantId, sku: member.sku,
           externalSku: member.sku, offerId: `offer-${member.sku}`, listingId: "listing-20", contentSyncEnabled: member.productVariantId === 101 })) },
-      client, assertInventoryReady: context => ensureEbayListingInventoryReady(selected, context, WALMART_INVENTORY_NOW),
+      client, assertInventoryReady,
       draft: { productId: 20, marketplaceId: "EBAY_US",
         inventoryItems: [{ sku: "P5", payload: { ...item("P5"), product: { ...item("P5").product, imageUrls: photos } } }],
         offers: [{ variantId: 101, sku: "P5", payload: offers.get("P5")! }],
         itemGroup: { groupKey: "PACK", payload: { ...group, imageUrls: photos } } },
       variants: [{ variantId: 101, sku: "P5", productName: "Pack", priceCents: 1000, priceChanged: false }],
     };
-    const execution = new EbayExistingListingSyncExecution(async () => prepared,
-      { reconcile: async () => ({ busy: false, unresolved: [], resolved: [] }) },
-      new EbayMarketplaceListingConnector({ delay: async () => {}, inventoryDelayMs: 0, offerDelayMs: 0 }));
+    const recovery = { reconcile: vi.fn(async () => ({ busy: false, unresolved: [] as string[], resolved: [] as string[] })) };
+    const watchId = options.recurringWatch ? randomUUID() : null;
+    // The automatic-recovery receipt/crash behavior is tested with its real
+    // repository in the channel full-flow suite. This fixture isolates the
+    // composition seam while retaining the real stock preparation owner/DB.
+    const automaticRecovery = { recover: vi.fn(async () => ({
+      busy: false, superseded: [] as string[], unresolved: [] as string[], watchId,
+    })) };
+    const execution = new EbayExistingListingSyncExecution(async () => prepared, recovery,
+      new EbayMarketplaceListingConnector({ delay: async () => {}, inventoryDelayMs: 0, offerDelayMs: 0 }),
+      options.recurringWatch ? automaticRecovery : undefined);
     const jobId = randomUUID();
     const context: EbayListingExecutionContext = { jobId, requestedBy: "operator", operation: "sync",
       publicationTarget: null, bindPublicationTarget: async () => {}, publicationAccepted: null,
@@ -263,9 +273,14 @@ dbDescribe.sequential("reviewed eBay publication stock enrollment, real PostgreS
       publicationIntentHash: null, claimedRevision: "1", bindPublicationAccepted: async () => {} };
     const stages: string[] = [];
     const run = () => execution.execute(prepared.identity, async (key, _hash, work) => { stages.push(key); await work(); }, null, async () => {}, context);
+    return { run, stages, photos, items, offers, group: () => group, jobId, assertInventoryReady, recovery, automaticRecovery, watchId };
+  }
+
+  it("updates and verifies existing group pictures after automatically preparing an inactive member's missing stock mapping", async () => {
+    const { run, stages, photos, items, offers, group, jobId } = await retainedListingSyncFixture();
     expect(await run()).toMatchObject({ synced: 1, errors: 0 });
     expect(stages).toContain("verification");
-    expect(group).toMatchObject({ variantSKUs: ["NEW", "P5"], imageUrls: photos });
+    expect(group()).toMatchObject({ variantSKUs: ["NEW", "P5"], imageUrls: photos });
     expect(items.get("P5")).toMatchObject({ product: { imageUrls: photos }, availability: { shipToLocationAvailability: { quantity: 17 } } });
     expect(items.get("NEW")).toMatchObject({ product: { imageUrls: [], aspects: { Style: ["NEW"] } }, availability: { shipToLocationAvailability: { quantity: 0 } } });
     expect(offers.get("NEW")).toMatchObject({ offerId: "offer-NEW", listingId: "listing-20", availableQuantity: 0 });
@@ -283,6 +298,38 @@ dbDescribe.sequential("reviewed eBay publication stock enrollment, real PostgreS
     expect((await database.pool.query("SELECT count(*)::int AS n FROM inventory.ebay_publication_readiness_applications WHERE command_key=$1", [jobId])).rows[0].n).toBe(1);
     expect((await database.pool.query("SELECT is_active FROM catalog.product_variants WHERE id=102")).rows[0].is_active).toBe(false);
     expect((await database.pool.query("SELECT state FROM inventory.quantity_publication_attempts WHERE state IN ('running','uncertain')")).rows).toEqual([]);
+  });
+
+  it.each([false, true])("prepares missing retained stock even when pictures already match (crash before preparation: %s)", async crashBeforePreparation => {
+    const f = await retainedListingSyncFixture({ currentPhotos: true, recurringWatch: true });
+    f.recovery.reconcile.mockResolvedValueOnce({ busy: false, unresolved: ["17032"], resolved: [] });
+    f.automaticRecovery.recover.mockResolvedValueOnce({ busy: false, superseded: ["17032"], unresolved: [], watchId: f.watchId });
+    expect((await counts()).mappings).toBe(1);
+    if (crashBeforePreparation) {
+      f.assertInventoryReady.mockRejectedValueOnce(new Error("injected crash after automatic recovery committed"));
+      await expect(f.run()).rejects.toThrow("injected crash after automatic recovery committed");
+      expect((await counts()).mappings).toBe(1);
+      expect(runtime.api.mock.calls.filter(call => call[0] !== "GET")).toEqual([]);
+    }
+
+    expect(await f.run()).toMatchObject({ synced: 1, errors: 0 });
+    expect(f.stages).toContain("prepare_inventory");
+    expect(f.stages).toContain("inspection");
+    expect(f.assertInventoryReady).toHaveBeenLastCalledWith({ commandKey: f.jobId, actor: "operator" });
+    expect(f.automaticRecovery.recover).toHaveBeenCalledTimes(crashBeforePreparation ? 2 : 1);
+    // On retry terminal reconciliation no longer sees the old unknown attempt.
+    // The persisted watch still requires stock preparation before completion.
+    if (crashBeforePreparation) await expect(f.recovery.reconcile.mock.results[1].value).resolves.toEqual({ busy: false, unresolved: [], resolved: [] });
+    expect((await database.pool.query(`SELECT product_variant_id FROM inventory.publication_variant_mapping_heads
+      WHERE publication_target_id=3 AND active_mapping_id IS NOT NULL ORDER BY product_variant_id`)).rows)
+      .toEqual([{ product_variant_id: 101 }, { product_variant_id: 102 }]);
+    expect((await database.pool.query(`SELECT desired_quantity::text,state FROM inventory.inventory_publication_outbox
+      WHERE publication_target_id=3 AND product_variant_id=102`)).rows)
+      .toEqual([{ desired_quantity: "0", state: "queued" }]);
+    expect((await database.pool.query("SELECT count(*)::int AS n FROM inventory.ebay_publication_readiness_applications WHERE command_key=$1", [f.jobId])).rows[0].n).toBe(1);
+    expect((await database.pool.query("SELECT is_active FROM catalog.product_variants WHERE id=102")).rows[0].is_active).toBe(false);
+    expect(runtime.api.mock.calls.filter(call => call[0] !== "GET")).toEqual([]);
+    expect(f.group()).toMatchObject({ variantSKUs: ["NEW", "P5"], imageUrls: f.photos });
   });
 
   it("rolls back retained-zero preparation and then resumes the same saved command concurrently", async () => {

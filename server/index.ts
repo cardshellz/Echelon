@@ -852,7 +852,9 @@ function startEchelonSyncScheduler(
 
       if (!schedulersDisabled("INVENTORY_PUBLICATION_WORKER_DISABLED")) {
         startInventoryPublicationOutboxWorker(services.inventoryPublicationOutbox, services.inventoryPublicationSelectionWork);
-        const catchupWorker = startQuantityPublicationCatchupWorker(services.quantityPublicationCatchup);
+        const catchupWorker = startQuantityPublicationCatchupWorker(services.quantityPublicationCatchup, {
+          reconcile: () => services.ebayPublicationReconciliation.processDue(),
+        });
         httpServer.once("close", () => {
           void catchupWorker.stop().catch(() => {
             console.error(JSON.stringify({ event: "quantity_publication_catchup_shutdown_failed", code: "PUBLICATION_CATCHUP_SHUTDOWN_FAILED" }));

@@ -27,7 +27,7 @@ describe("shared eBay absolute inventory quantity protocol", () => {
     await expect(publishEbayInventoryQuantity(client, sku, market, quantity)).resolves.toEqual({
       sku, marketplaceId: market, offerId: "offer-1", quantity, effect: "already_current", providerWriteAttempted: false,
       observation: { sku, marketplaceId: market, offerId: "offer-1", inventoryItemQuantity: quantity,
-        offerQuantity: quantity, observedQuantity: quantity },
+        offerQuantity: quantity, observedQuantity: quantity, quantityConsistent: true },
     });
     expect(client.bulkUpdatePriceQuantity).not.toHaveBeenCalled();
     expect(client.getInventoryItem).toHaveBeenCalledExactlyOnceWith(sku);
@@ -59,6 +59,7 @@ describe("shared eBay absolute inventory quantity protocol", () => {
       client.getInventoryOffersPage.mockResolvedValue({ total: 1, offers: [offer(offerQty)] });
       await expect(readEbayInventoryQuantity(client, sku, market)).resolves.toEqual({
         sku, marketplaceId: market, offerId: "offer-1", inventoryItemQuantity: itemQty, offerQuantity: offerQty, observedQuantity: expected,
+        quantityConsistent: false,
       });
       expect(client.bulkUpdatePriceQuantity).not.toHaveBeenCalled();
     },

@@ -3,7 +3,6 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { z } from "zod";
 import type { EbayListingIssue } from "@shared/types/ebay-listing-issue";
 import { ebayListingSyncJobSchema, type EbayListingSyncJob } from "@shared/types/ebay-listing-sync";
-import { resolveEbayListingIssue } from "@shared/ebay-listing-issue";
 import { ebayListingRecoveryPreviewSchema, ebayListingRecoveryResultSchema } from "@shared/types/ebay-listing-recovery";
 import { apiRequest } from "@/lib/queryClient";
 import { listingIssueFromError } from "@/lib/ebay-listing-issue";
@@ -22,18 +21,16 @@ interface EbaySyncRecoveryDialogProps {
   issue: EbayListingIssue | null;
   onClose: () => void;
   onRecheck: () => void;
-  onRecovered: () => void;
+  onRecovered: (job: EbayListingSyncJob | null) => void;
   checking: boolean;
   operation?: EbayListingSyncJob["operation"];
-  onIssueAction: (issue: EbayListingIssue, productId: number, jobId?: string) => void;
 }
 
-export function EbaySyncRecoveryDialog({ jobId, productId, productName, issue, onClose, onRecheck, onRecovered, checking, onIssueAction, operation }: EbaySyncRecoveryDialogProps) {
+export function EbaySyncRecoveryDialog({ jobId, productId, productName, issue, onClose, onRecheck, onRecovered, checking, operation }: EbaySyncRecoveryDialogProps) {
   const queryClient = useQueryClient();
   const [acknowledged, setAcknowledged] = useState(false);
   const [recovered, setRecovered] = useState(false);
   const [retryPublish, setRetryPublish] = useState(false);
-  const [resumedJob, setResumedJob] = useState<EbayListingSyncJob | null>(null);
   const resourcePath = jobId ? `/api/ebay/listings/sync-jobs/${jobId}` : `/api/ebay/listings/products/${productId}`;
   const savedRequest = useQuery({
     queryKey: [resourcePath, "recovery-operation"],
@@ -73,20 +70,20 @@ export function EbaySyncRecoveryDialog({ jobId, productId, productName, issue, o
       return result;
     },
     onSuccess: (result) => {
-      setRecovered(true); setResumedJob(result.job); setRetryPublish(result.nextAction === "retry_publish"); setAcknowledged(false);
+      setRecovered(true); setRetryPublish(result.nextAction === "retry_publish"); setAcknowledged(false);
       void queryClient.invalidateQueries({ queryKey: ["/api/ebay/listings/sync-jobs"] });
       void queryClient.invalidateQueries({ queryKey: ["/api/ebay/listing-feed"] });
-      onRecovered();
+      // The saved-status view owns observation after recovery. Keeping the
+      // returned job here would freeze a queued or blocked response forever.
+      onRecovered(result.job);
     },
   });
   useEffect(() => {
-    setAcknowledged(false); setRecovered(false); setRetryPublish(false); setResumedJob(null); recoveryCommand.current = null; resume.reset();
+    setAcknowledged(false); setRecovered(false); setRetryPublish(false); recoveryCommand.current = null; resume.reset();
   }, [jobId, productId]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => { setAcknowledged(false); }, [recovery.data?.previewHash, recovery.data?.publicationRetry?.reviewHash]);
   const publicationRetry = recovery.data?.publicationRetry;
   const withdrawal = resolvedOperation === "withdraw";
-  const resumedIssue = resumedJob && ["needs_attention", "awaiting_evidence"].includes(resumedJob.state)
-    ? resumedJob.issue ?? resolveEbayListingIssue({ code: resumedJob.code, message: resumedJob.message, productId: resumedJob.productId, jobId: resumedJob.id, state: resumedJob.state }) : null;
 
   return (
     <Dialog open={productId !== null} onOpenChange={(open) => { if (!open && !resume.isPending) onClose(); }}>
@@ -96,10 +93,9 @@ export function EbaySyncRecoveryDialog({ jobId, productId, productName, issue, o
           <DialogDescription>{productName}. Review the saved request before resuming updates.</DialogDescription>
         </DialogHeader>
         {recovered ? <div role="status" className="space-y-2 text-sm">
-          <p className="font-medium">{resumedIssue ? "Recovery saved. The listing still needs the correction below." : retryPublish ? "Recovery saved. Retry Publish to finish listing setup using current inventory." : resumedJob?.operation === "withdraw" ? resumedJob.state === "completed" ? "Recovery saved. Removal from eBay is verified." : "Recovery saved. The saved removal will continue. Removal from eBay is not yet verified." : resumedJob?.state === "completed" ? "Recovery saved. The listing update is verified." : resumedJob?.operation === "publish" ? "Recovery saved. The saved publication will continue. Listing and pictures are not yet verified." : "Recovery saved. The listing update will continue using current inventory."}</p>
+          <p className="font-medium">{retryPublish ? "Recovery saved. Retry Publish to finish listing setup using current inventory." : "Recovery saved. Opening the current saved request status…"}</p>
           <p>The original request remains in the audit history. {retryPublish ? "The listing has not been confirmed published." : "Check the listing's saved sync status for completion."}</p>
           {retryPublish && <Button onClick={() => { onClose(); onRecheck(); }}>Retry Publish</Button>}
-          {resumedIssue && resumedJob && <EbayListingIssueCard issue={resumedIssue} onAction={(nextIssue) => { onClose(); onIssueAction(nextIssue, resumedJob.productId, resumedJob.id); }} />}
         </div> : <>
           {issue && <EbayListingIssueCard issue={issue} />}
           {recovery.isLoading && <p role="status">Loading saved request details…</p>}

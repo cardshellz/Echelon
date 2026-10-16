@@ -607,10 +607,22 @@
   "inventory.demand_evidence_snapshots": [
     "modules/inventory-planning"
   ],
+  "inventory.ebay_automatic_publication_recoveries": [
+    "modules/inventory-planning"
+  ],
   "inventory.ebay_publication_readiness_applications": [
     "modules/inventory-planning"
   ],
   "inventory.ebay_publication_readiness_rejections": [
+    "modules/inventory-planning"
+  ],
+  "inventory.ebay_publication_reconciliation_cycles": [
+    "modules/inventory-planning"
+  ],
+  "inventory.ebay_publication_reconciliation_observations": [
+    "modules/inventory-planning"
+  ],
+  "inventory.ebay_publication_reconciliation_watches": [
     "modules/inventory-planning"
   ],
   "inventory.integrity_alert_outbox": [

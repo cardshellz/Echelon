@@ -133,8 +133,10 @@ test("lost response finds the exact saved receipt without submitting another rep
 test("a replayed publication repair shows its result without replacing a newer product failure", async ({ page }) => {
   const { state, mapping, dialog } = await setup(page, true);
   const completedJob = { ...job, operation: "publish", state: "completed" };
+  const newerJob = { ...job, id: "e5b498fd-9fa5-4c86-81ac-e4f69ae571e5", operation: "sync", state: "needs_attention",
+    code: "EBAY_CATALOG_PHOTO_REQUIRED", message: "A newer request needs a catalog photo.", updatedAt: "2026-10-10T12:00:02.000Z" };
   mapping.post = async (route, command) => {
-    state.jobs = [{ ...job, id: "e5b498fd-9fa5-4c86-81ac-e4f69ae571e5", state: "needs_attention", code: "EBAY_CATALOG_PHOTO_REQUIRED", message: "A newer request needs a catalog photo." }];
+    state.jobs = [newerJob];
     state.feedStatus = "listed"; state.externalListingId = "verified-listing";
     return route.fulfill({ json: { ...queued(command), replayed: true, job: completedJob } });
   };
@@ -143,7 +145,19 @@ test("a replayed publication repair shows its result without replacing a newer p
   await expect(dialog.getByRole("status")).toHaveText("Published on eBay. Listing and pictures verified.");
   await dialog.getByRole("button", { name: "Close", exact: true }).first().click();
   await expect(page.getByText("A newer request needs a catalog photo.", { exact: true })).toBeVisible();
-  await expect(page.getByText("Listed · update paused", { exact: true }).filter({ visible: true })).toBeVisible();
+  await expect(page.getByText("Listed", { exact: true }).filter({ visible: true })).toBeVisible();
+  const currentStatus = page.getByRole("status", { name: /^Sync status for / });
+  await expect(currentStatus).toContainText("Review this product's photos");
+  await expect(currentStatus).not.toContainText("Listing and pictures verified.");
+  await expect(page.getByRole("button", { name: "Errors (1)", exact: true })).toBeVisible();
+  await expect(page.getByRole("link", { name: "Open product images", exact: true })).toHaveAttribute("href", "/products/1?tab=images");
+  await page.getByRole("button", { name: "View update status", exact: true }).click();
+  await expect(dialog.getByRole("heading", { name: "Listing update status", exact: true })).toBeVisible();
+  await expect(dialog).toContainText(newerJob.id);
+  await expect(dialog).toContainText(newerJob.message);
+  await expect(dialog).not.toContainText(completedJob.id);
+  await expect(dialog).not.toContainText("Listing and pictures verified.");
+  expect(mapping.commands).toHaveLength(1); expect(state.commands).toEqual([]); expect(state.requests).toEqual([]);
   expect(state.errors).toEqual([]); expect(state.unexpected).toEqual([]);
 });
 

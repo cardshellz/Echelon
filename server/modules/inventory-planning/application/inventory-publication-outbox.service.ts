@@ -29,7 +29,7 @@ export interface InventoryPublicationOutboxStore {
   ): Promise<{ status: "current"; value: T } | { status: "superseded" }>;
   recordVerified(
     claim: ClaimedInventoryPublication,
-    input: { observedQuantity: number; providerResponse: unknown; completedAt: Date },
+    input: { observedQuantity: number; quantityConsistent?: boolean; providerResponse: unknown; completedAt: Date },
   ): Promise<"verified" | "drifted" | null>;
   recordFailure(
     claim: ClaimedInventoryPublication,
@@ -129,11 +129,13 @@ export class InventoryPublicationOutboxService {
           );
         }
         const readback = await adapter.readAbsolute(request);
-        if (!Number.isSafeInteger(readback.observedQuantity) || readback.observedQuantity < 0) {
+        if (!Number.isSafeInteger(readback.observedQuantity) || readback.observedQuantity < 0
+          || (readback.quantityConsistent !== undefined && typeof readback.quantityConsistent !== "boolean")) {
           throw retryable("PROVIDER_READBACK_INVALID", "Provider returned an invalid inventory quantity.");
         }
         const recorded = await this.store.recordVerified(claim, {
           observedQuantity: readback.observedQuantity,
+          quantityConsistent: readback.quantityConsistent,
           providerResponse: {
             push: push.providerResponse,
             readback: readback.providerResponse,

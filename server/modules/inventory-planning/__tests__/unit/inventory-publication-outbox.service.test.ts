@@ -145,6 +145,26 @@ describe("InventoryPublicationOutboxService", () => {
     expect(store.recordFailure).not.toHaveBeenCalled();
   });
 
+  it("preserves provider inconsistency even when the scalar equals the desired quantity", async () => {
+    store.recordVerified.mockResolvedValueOnce("drifted");
+    const adapter = { supportedScopeTypes: ["location"] as const,
+      publishAbsolute: async () => ({ publishedQuantity: 7, providerResponse: {} }),
+      readAbsolute: async () => ({ observedQuantity: 7, quantityConsistent: false, providerResponse: { item: 8, offer: 7 } }) };
+    const service = new InventoryPublicationOutboxService(store, { get: () => adapter as never }, { now: () => NOW }, () => "lease-1", quantityAdmission);
+    expect(await service.processDue()).toMatchObject({ verified: 0, failed: 1 });
+    expect(store.recordVerified).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ observedQuantity: 7, quantityConsistent: false }));
+  });
+
+  it("rejects malformed provider consistency evidence before saving a verification", async () => {
+    const adapter = { supportedScopeTypes: ["location"] as const,
+      publishAbsolute: async () => ({ publishedQuantity: 7, providerResponse: {} }),
+      readAbsolute: async () => ({ observedQuantity: 7, quantityConsistent: "false", providerResponse: {} }) };
+    const service = new InventoryPublicationOutboxService(store, { get: () => adapter as never }, { now: () => NOW }, () => "lease-1", quantityAdmission);
+    expect(await service.processDue()).toMatchObject({ verified: 0, failed: 1 });
+    expect(store.recordVerified).not.toHaveBeenCalled();
+    expect(store.recordFailure).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ errorClass: "PROVIDER_READBACK_INVALID" }));
+  });
+
   it("dead-letters an unsupported adapter without attempting a provider call", async () => {
     const service = new InventoryPublicationOutboxService(
       store,
