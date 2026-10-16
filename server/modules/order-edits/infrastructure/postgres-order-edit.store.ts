@@ -14,6 +14,7 @@ import type {
   OrderEditReleaseProof,
 } from "../application/order-edit-store";
 import { OrderEditError } from "../domain/order-edit-error";
+import { sameOrderEditPlan } from "../domain/order-edit-plan-identity";
 import { unchangedFulfilledOrderEdit } from "../application/order-edit-evidence";
 import { finalizeOrderEditWarehouseRelease } from "./order-edit-warehouse.gateway";
 import { appendOrderEditAudit } from "./order-edit-audit.writer";
@@ -92,15 +93,7 @@ const documentSchema = z
           record.quote.connectionId !== record.connectionId ||
           record.quote.channelId !== record.baseline.channelId ||
           record.quote.orderId !== record.baseline.orderId ||
-          record.quote.baselineFingerprint !== record.baseline.fingerprint ||
-          JSON.stringify(record.quote.plan) !==
-            JSON.stringify({
-              changes: record.input.changes,
-              additions: record.input.additions,
-              ...(record.input.discountCodes !== undefined
-                ? { discountCodes: record.input.discountCodes }
-                : {}),
-            }))) ||
+          record.quote.baselineFingerprint !== record.baseline.fingerprint)) ||
       (record.refundIntent !== null &&
         (record.refundIntent.operationId !== record.id ||
           record.refundIntent.connectionId !== record.connectionId ||
@@ -117,6 +110,16 @@ const documentSchema = z
       context.addIssue({
         code: "custom",
         message: "Persisted operation identities do not match",
+      });
+    }
+    if (
+      record.quote !== null &&
+      !sameOrderEditPlan(record.quote.plan, record.input)
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["quote", "plan"],
+        message: "Persisted quote plan does not match the requested edit",
       });
     }
     if (
