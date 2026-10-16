@@ -431,6 +431,7 @@ type StaleAutoDraftPoDiagnostics = {
     status: string | null;
     physicalStatus: string | null;
     financialStatus: string | null;
+    financialWorkflowState?: string;
     stage: string;
     stageLabel: string;
     stageStartedAt: string | null;
@@ -1161,7 +1162,7 @@ export default function PurchasingDashboard() {
         )}
 
         {showStaleAutoDraftPos && staleAutoDraftPos && (
-          <Card className={staleAutoDraftPos.counts.critical > 0 ? "border-red-300 bg-red-50/30" : "border-amber-300 bg-amber-50/30"}>
+          <Card role="region" aria-label="Stale auto-draft purchase orders" className={staleAutoDraftPos.counts.critical > 0 ? "border-red-300 bg-red-50/30" : "border-amber-300 bg-amber-50/30"}>
             <CardContent className="p-4 space-y-3">
               <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
                 <div className="flex items-start gap-3">
@@ -1211,8 +1212,9 @@ export default function PurchasingDashboard() {
                         <span className="text-[10px] text-muted-foreground">{item.ageDays}d</span>
                       </div>
                       <div className="text-xs text-muted-foreground mt-1 truncate">{item.detail}</div>
-                      <div className="text-[11px] text-muted-foreground mt-1 truncate">
-                        {formatPoTrack(item.physicalStatus)} / {formatPoTrack(item.financialStatus)}
+                      <div className="text-[11px] text-muted-foreground mt-1">
+                        {formatPoTrack(item.physicalStatus)} / Financial review: {formatPoTrack(item.financialWorkflowState ?? "unavailable")}
+                        {` - Recorded linked invoice status: ${formatPoTrack(item.financialStatus)}`}
                         {item.expectedDeliveryDate ? ` - ETA ${formatDate(item.expectedDeliveryDate)}` : ""}
                         {item.openExceptionCount > 0 ? ` - ${item.openExceptionCount} open exception${item.openExceptionCount === 1 ? "" : "s"}` : ""}
                       </div>

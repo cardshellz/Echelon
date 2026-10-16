@@ -15,8 +15,7 @@ const tables = vi.hoisted(() => ({
 }));
 const mocks = vi.hoisted(() => ({
   db: { select: vi.fn(), update: vi.fn(), insert: vi.fn(), transaction: vi.fn() },
-  detectOverpaid: vi.fn(),
-  detectPastDue: vi.fn(),
+  detectFinancialExceptions: vi.fn(),
 }));
 vi.mock("../../../../db", () => ({ db: mocks.db }));
 vi.mock("@shared/schema", () => ({
@@ -25,7 +24,6 @@ vi.mock("@shared/schema", () => ({
   poStatusHistory: {}, purchaseOrderLines: {}, purchaseOrders: {}, vendorInvoiceAttachments: {}, vendors: {},
 }));
 vi.mock("../../po-exceptions.service", () => ({
-  detectMatchMismatch: vi.fn(), detectOverpaid: mocks.detectOverpaid, detectPastDue: mocks.detectPastDue,
 }));
 
 type RecordedLine = {
@@ -103,8 +101,7 @@ describe("invoice line metadata preserves recorded economics", () => {
     expect(updated).toEqual({ ...record, notes: "Revised packing instructions", updatedAt: fixedTime });
     expect(state.writes).toEqual([{ table: tables.vendorInvoiceLines, values: { notes: "Revised packing instructions", updatedAt: fixedTime } }]);
     expect(state.locks).toEqual(["update", "update"]);
-    expect(mocks.detectOverpaid).not.toHaveBeenCalled();
-    expect(mocks.detectPastDue).not.toHaveBeenCalled();
+    expect(mocks.detectFinancialExceptions).not.toHaveBeenCalled();
     expect(state.audits).toEqual([expect.objectContaining({
       actor: "operator-9", action: "ap_ledger.invoice_line_updated", target: "invoice:12",
       context: {

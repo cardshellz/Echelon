@@ -1,4 +1,7 @@
 import { sql, type SQL } from "drizzle-orm";
+import { costSourceRevisionSchema } from "@shared/procurement/cost-source-contracts";
+import { readReconciliationLedger, readReconciliationRecords } from "../inventory/infrastructure/cost-reconciliation.repository";
+import { reconciliationEligibility, reconciliationState } from "../inventory/domain/cost-reconciliation";
 import { canonicalJson } from "@shared/utils/canonical-json";
 import { shipmentExceptionDecisionSchema, shipmentExceptionHistorySchema, type ShipmentCostException, type ShipmentExceptionContext,
   type ShipmentExceptionRequest } from "@shared/procurement/shipment-cost-exception";
@@ -61,11 +64,14 @@ export async function readShipmentCostExceptions(tx: ShipmentExceptionReader, li
   for (const fact of facts) {
     const review = buildShipmentCostException(fact);
     if (!review) continue;
-    if (review.state === "accepted") {
+    const source=costSourceRevisionSchema.parse(fact.contract);
+    const records=await readReconciliationRecords(tx,source,review.issues);
+    review.reconciliation = reconciliationState(reconciliationEligibility(source,review.issues,records),await readReconciliationLedger(tx,fact.lineId));
+    if (review.state === "accepted" || review.reconciliation.status === "posted") {
       if (!current.has(fact.shipmentId)) current.set(fact.shipmentId, await readCurrentShipmentSourceFingerprints(tx, fact.shipmentId));
       const contract = fact.contract as { fingerprint: string };
       if (current.get(fact.shipmentId)!.get(fact.lineId) !== contract.fingerprint) {
-        reviews.set(fact.lineId, { ...review, state: "open" });
+        reviews.set(fact.lineId, { ...review, state: "open", reconciliation:{...review.reconciliation,status:"review_required"} });
         continue;
       }
     }

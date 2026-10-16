@@ -42,6 +42,9 @@ async function setup(page: Page) {
     if (path === "/api/cogs/order") return route.fulfill({ json: orderCogs });
     if (path === "/api/cogs/lots") return route.fulfill({ json: { lots, total: lots.length } });
     if (path === "/api/cogs/manual-lots") return route.fulfill({ json: lots });
+    if (path === "/api/cogs/historical-adjustments") return route.fulfill({ json: {
+      currency: "USD", balances: { historical_cogs: 0, inventory_variance: 0 }, entries: [], truncated: false,
+    } });
     if (path === "/api/cogs/adjustments") return route.fulfill({ json: [
       { lotId: 9, lotNumber: "INCREASE-LOT", sku: "COST-A", oldCostCents: 230, newCostCents: 240, deltaCents: 10, adjustedAt: "2026-09-08T12:00:00Z", reason: "freight_revision" },
       { lotId: 10, lotNumber: "DECREASE-LOT", sku: "COST-B", oldCostCents: 440, newCostCents: 430, deltaCents: -10, adjustedAt: "2026-09-08T12:00:00Z", reason: "cost_credit" },
@@ -286,6 +289,45 @@ test("adjustments preserve the direction of increases and credits without multip
   await expect(increase.getByRole("cell", { name: "$2.40", exact: true })).toBeVisible();
   await expect(increase.getByRole("cell", { name: "+$0.10", exact: true })).toBeVisible();
   await expect(page.getByRole("row").filter({ hasText: "DECREASE-LOT" }).getByRole("cell", { name: "-$0.10", exact: true })).toBeVisible();
+  expect(failures).toEqual([]);
+});
+
+test("historical cost postings show exact balances and the approved before and after", async ({ page }) => {
+  const failures = await setup(page);
+  await page.route("**/api/cogs/historical-adjustments", route => route.fulfill({ json: {
+    currency: "USD", balances: { historical_cogs: 41234, inventory_variance: 0 }, truncated: false,
+    entries: [{ id: 1, lineId: 41, shipmentId: 9, purchaseOrderId: 4, poNumber: "PO-TEST-4", sku: "HISTORICAL-COST-A",
+      destination: "historical_cogs", beforeMills: 50000, afterMills: 41234, deltaMills: -8766,
+      actorName: "Synthetic approver", reason: "Confirmed lower freight amount for historical sold goods.",
+      recordedAt: "2026-09-08T12:00:00Z" }],
+  } }));
+  await page.getByRole("tab", { name: "Adjustments", exact: true }).click();
+  await expect(page.getByText("$4.1234", { exact: true })).toBeVisible();
+  await expect(page.getByText(/These postings are separate from costs assigned to individual orders/)).toBeVisible();
+  await page.getByText("Posted activity (1)", { exact: true }).click();
+  await expect(page.getByText("Cost of goods already sold: $5.00 → $4.1234", { exact: true })).toBeVisible();
+  await expect(page.getByText(/HISTORICAL-COST-A · Approved by Synthetic approver/)).toBeVisible();
+  await expect(page.getByText("Confirmed lower freight amount for historical sold goods.", { exact: true })).toBeVisible();
+  await expect(page.getByRole("link", { name: "PO-TEST-4", exact: true })).toHaveAttribute("href", "/purchase-orders/4");
+  expect(failures).toEqual([]);
+});
+
+test("a failed historical cost report is not shown as a zero balance and supports retry", async ({ page }) => {
+  const failures = await setup(page);
+  let failed = true;
+  await page.route("**/api/cogs/historical-adjustments", route => failed
+    ? route.fulfill({ status: 500, json: { error: "Historical cost report unavailable" } })
+    : route.fulfill({ json: { currency: "USD", balances: { historical_cogs: 0, inventory_variance: 0 }, entries: [], truncated: false } }));
+  await page.getByRole("tab", { name: "Adjustments", exact: true }).click();
+  const reportError = page.getByRole("alert").filter({ hasText: "Posted adjustments could not be loaded." });
+  await expect(reportError).toBeVisible();
+  await expect(page.getByText("Posted activity (0)", { exact: true })).toHaveCount(0);
+  await expect(page.getByText("Cost of goods already sold", { exact: true })).toHaveCount(0);
+  failed = false;
+  await reportError.getByRole("button", { name: "Retry", exact: true }).click();
+  await expect(reportError).toHaveCount(0);
+  await expect(page.getByText("Posted activity (0)", { exact: true })).toBeVisible();
+  await expect(page.getByText("$0.00", { exact: true })).toHaveCount(2);
   expect(failures).toEqual([]);
 });
 

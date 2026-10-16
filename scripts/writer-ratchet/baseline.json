@@ -583,6 +583,12 @@
   "inventory.cost_component_protections": [
     "modules/inventory"
   ],
+  "inventory.cost_reconciliation_approvals": [
+    "modules/inventory"
+  ],
+  "inventory.cost_reconciliation_postings": [
+    "modules/inventory"
+  ],
   "inventory.cost_reporting_events": [
     "modules/inventory"
   ],

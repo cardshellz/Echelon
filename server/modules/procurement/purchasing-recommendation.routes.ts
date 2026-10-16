@@ -2100,7 +2100,7 @@ export function registerPurchasingRecommendationAdminRoutes(app: Express) {
     try {
       const limit = parseStalePoLimit(req.query.limit);
       const includeInfo = req.query.includeInfo === "true";
-      const rows = await fetchAutoDraftPoAgingRows(db, { scanLimit: 500 });
+      const rows = await fetchAutoDraftPoAgingRows(db, { pageSize: 500 });
       const settings = await storage.getAutoDraftSettings();
       res.json(buildStaleAutoDraftPoDiagnostics(rows, {
         limit,
@@ -2108,7 +2108,7 @@ export function registerPurchasingRecommendationAdminRoutes(app: Express) {
         thresholds: settings.stalePoThresholds,
       }));
     } catch (error) {
-      console.error("Error fetching stale auto-draft PO diagnostics:", error);
+      console.error(JSON.stringify({ code: "AUTO_DRAFT_FINANCIAL_REVIEW_READ_FAILED", errorType: error instanceof Error ? error.name : "Unknown" }));
       res.status(500).json({ error: "Failed to fetch stale auto-draft PO diagnostics" });
     }
   });

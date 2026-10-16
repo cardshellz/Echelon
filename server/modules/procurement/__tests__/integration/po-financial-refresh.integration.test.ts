@@ -136,9 +136,9 @@ databaseTests.sequential("Shared-invoice PO financial context refresh (real Post
   }
 
   it.each(["link", "unlink", "import"] as const)("records all affected POs and runs their postcommit detection after %s", async change => {
-    const { run } = await prepareChange(change);
-    // An old first invoice makes the *other* PO's real past-due hook observable.
-    await fixture.pool.query("UPDATE procurement.purchase_orders SET first_invoiced_at='2000-01-01' WHERE id=10");
+    const { run, invoiceId } = await prepareChange(change);
+    // A recorded old invoice due date makes the other PO detection observable.
+    await fixture.pool.query("UPDATE procurement.vendor_invoices SET due_date='2000-01-01' WHERE id=$1", [invoiceId]);
     await run();
     const expectedTotal = change === "unlink" ? 1000 : 3000;
     const audit = await fixture.pool.query("SELECT actor,context FROM public.audit_events WHERE action=$1 ORDER BY id DESC LIMIT 1", [actions[change]]);

@@ -1,4 +1,5 @@
 import { buildPoAutoDraftActionPlan } from "./purchase-order-lifecycle.service";
+import type { PoFinancialWorkflow } from "@shared/procurement/po-financial-workflow";
 
 export type AutoDraftPoAgingSeverity = "critical" | "warning" | "info";
 
@@ -36,6 +37,7 @@ export type AutoDraftPoAgingRow = {
   status: string | null;
   physicalStatus: string | null;
   financialStatus: string | null;
+  financialWorkflow?: PoFinancialWorkflow | null;
   lineCount: number | null;
   totalCents: number | null;
   source: string | null;
@@ -65,6 +67,7 @@ export type StaleAutoDraftPoItem = {
   status: string | null;
   physicalStatus: string | null;
   financialStatus: string | null;
+  financialWorkflowState: PoFinancialWorkflow["state"];
   stage: AutoDraftPoAgingStage;
   stageLabel: string;
   stageStartedAt: string | null;
@@ -198,7 +201,7 @@ function classifyStage(actionId: string): AutoDraftPoAgingStage | null {
   if (["send", "send_to_vendor"].includes(actionId)) return "supplier_send_pending";
   if (["acknowledge", "mark_shipped", "mark_in_transit", "mark_arrived"].includes(actionId)) return "supplier_followup_pending";
   if (actionId === "create_receipt") return "receiving_pending";
-  if (["create_invoice", "record_payment"].includes(actionId)) return "ap_closeout_pending";
+  if (["create_invoice", "record_payment", "review_financial_evidence", "review_invoice_approval"].includes(actionId)) return "ap_closeout_pending";
   if (actionId === "close") return "closeout_pending";
   return null;
 }
@@ -231,7 +234,7 @@ function severityForAge(
   return null;
 }
 
-function buildDetail(stage: AutoDraftPoAgingStage, ageDays: number, threshold: StageThreshold): string {
+function buildDetail(stage: AutoDraftPoAgingStage, ageDays: number, threshold: StageThreshold, actionDetail: string): string {
   const base = `${STAGE_LABELS[stage]} for ${ageDays} day${ageDays === 1 ? "" : "s"}`;
   if (stage === "receiving_pending") {
     return `${base} after the current receive-by baseline; verify shipment/receiving status.`;
@@ -240,7 +243,7 @@ function buildDetail(stage: AutoDraftPoAgingStage, ageDays: number, threshold: S
     return `${base}; confirm supplier acknowledgement, shipment, or expected delivery.`;
   }
   if (stage === "ap_closeout_pending") {
-    return `${base}; create invoice or record payment so landed cost and financial reporting close out.`;
+    return `${base}. ${actionDetail}`;
   }
   if (stage === "exception_blocked") {
     return `${base}; resolve PO exceptions before advancing the supplier or receiving flow.`;
@@ -271,7 +274,7 @@ export function buildStaleAutoDraftPoDiagnostics(
 
   for (const row of rows) {
     const openExceptionCount = Math.max(0, Number(row.openExceptionCount ?? 0) || 0);
-    const actionPlan = buildPoAutoDraftActionPlan(row, { lineCount: row.lineCount, openExceptionCount });
+    const actionPlan = buildPoAutoDraftActionPlan(row, { lineCount: row.lineCount, openExceptionCount, financialWorkflow: row.financialWorkflow });
     if (!actionPlan) continue;
 
     const poId = Number(row.id);
@@ -295,6 +298,7 @@ export function buildStaleAutoDraftPoDiagnostics(
       status: row.status,
       physicalStatus: row.physicalStatus,
       financialStatus: row.financialStatus,
+      financialWorkflowState: actionPlan.context.financialWorkflowState,
       stage,
       stageLabel: STAGE_LABELS[stage],
       stageStartedAt: startedAt.toISOString(),
@@ -302,11 +306,11 @@ export function buildStaleAutoDraftPoDiagnostics(
       severity,
       detail: severity === "info"
         ? `${STAGE_LABELS[stage]} is not stale yet.`
-        : buildDetail(stage, Math.max(0, ageDays), stageThreshold),
+        : buildDetail(stage, Math.max(0, ageDays), stageThreshold, actionPlan.primaryAction.detail),
       action: {
         action: actionPlan.primaryAction.id,
         label: actionPlan.primaryAction.label,
-        href: `/purchase-orders/${poId}`,
+        href: `/purchase-orders/${poId}${stage === "ap_closeout_pending" ? "?tab=invoices" : ""}`,
       },
       lineCount: nullableNumber(row.lineCount),
       totalCents: nullableNumber(row.totalCents),

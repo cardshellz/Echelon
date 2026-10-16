@@ -17,8 +17,7 @@ const { mockInvoiceRows, mockTxUpdate, mockDetectionHooks } = vi.hoisted(() => (
   mockTxUpdate: vi.fn(),
   mockDetectionHooks: {
     detectMatchMismatch: vi.fn(),
-    detectOverpaid: vi.fn(),
-    detectPastDue: vi.fn(),
+    detectFinancialExceptions: vi.fn(),
   },
 }));
 
@@ -91,8 +90,7 @@ describe("approveInvoice", () => {
     mockInvoiceRows.rows = [];
     mockTxUpdate.mockReset();
     mockDetectionHooks.detectMatchMismatch.mockReset();
-    mockDetectionHooks.detectOverpaid.mockReset();
-    mockDetectionHooks.detectPastDue.mockReset();
+    mockDetectionHooks.detectFinancialExceptions.mockReset();
   });
 
   it.each(["approved", "partially_paid", "paid"])(
@@ -104,8 +102,7 @@ describe("approveInvoice", () => {
       await expect(approveInvoice(143, "user-1")).resolves.toBe(invoice);
       expect(mockTxUpdate).not.toHaveBeenCalled();
       expect(mockDetectionHooks.detectMatchMismatch).not.toHaveBeenCalled();
-      expect(mockDetectionHooks.detectOverpaid).not.toHaveBeenCalled();
-      expect(mockDetectionHooks.detectPastDue).not.toHaveBeenCalled();
+      expect(mockDetectionHooks.detectFinancialExceptions).not.toHaveBeenCalled();
     },
   );
 });

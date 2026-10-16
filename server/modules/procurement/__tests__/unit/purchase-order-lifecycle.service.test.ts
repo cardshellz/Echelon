@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { financialWorkflowFixture } from "../../../../../test/fixtures/po-financial-workflow";
 import {
   PoLifecycleError,
   buildPoAutoDraftActionPlan,
@@ -264,7 +265,7 @@ describe("purchase-order-lifecycle.service", () => {
         physicalStatus: "received",
         financialStatus: "unbilled",
       },
-      { lineCount: 3, openExceptionCount: 0 },
+      { lineCount: 3, openExceptionCount: 0, financialWorkflow: financialWorkflowFixture(17, "unbilled") },
     );
 
     expect(plan?.primaryAction).toMatchObject({
@@ -288,5 +289,67 @@ describe("purchase-order-lifecycle.service", () => {
         financialStatus: "unbilled",
       }),
     ).toBeNull();
+  });
+
+  const closedPo = { id: 19, source: "auto_draft", status: "closed", physicalStatus: "received", financialStatus: "paid" };
+
+  it.each([
+    ["review_required", "review_financial_evidence"],
+    ["unbilled", "create_invoice"],
+    ["awaiting_approval", "review_invoice_approval"],
+    ["payment_due", "record_payment"],
+    ["settled", "done"],
+  ] as const)("uses current %s evidence instead of a cached paid status", (state, actionId) => {
+    const plan = buildPoAutoDraftActionPlan(closedPo, { lineCount: 1, financialWorkflow: financialWorkflowFixture(19, state) });
+    expect(plan?.primaryAction.id).toBe(actionId);
+    expect(plan?.context.financialStatus).toBe("paid");
+    expect(plan?.context.financialWorkflowState).toBe(state);
+    expect(plan?.checklist.find(step => step.id === "ap_closeout")?.status).toBe(state === "settled" ? "done" : "current");
+  });
+
+  it.each([
+    undefined,
+    null,
+    financialWorkflowFixture(20, "settled"),
+    { ...financialWorkflowFixture(19, "settled"), evidence: financialWorkflowFixture(19, "review_required").evidence },
+  ])("requires review when financial workflow evidence is missing, mismatched or invalid (%#)", (financialWorkflow) => {
+    const plan = buildPoAutoDraftActionPlan(closedPo, { lineCount: 1, financialWorkflow });
+    expect(plan?.primaryAction.id).toBe("review_financial_evidence");
+    expect(plan?.checklist.find(step => step.id === "ap_closeout")?.status).toBe("current");
+  });
+
+  it("keeps physical close authority separate while recommending financial review first", () => {
+    const po = { ...closedPo, status: "received" };
+    expect(buildPoLifecycleSummary(po).nextActions.map(action => action.id)).toContain("close");
+    expect(buildPoAutoDraftActionPlan(po, { lineCount: 1 })?.primaryAction.id).toBe("review_financial_evidence");
+    expect(buildPoAutoDraftActionPlan(po, { lineCount: 1, financialWorkflow: financialWorkflowFixture(19, "settled") })?.primaryAction.id).toBe("close");
+  });
+
+  it("preserves receiving and exception priorities even when finance requires review", () => {
+    const po = { ...closedPo, status: "acknowledged", physicalStatus: "arrived" };
+    const context = { lineCount: 1, financialWorkflow: financialWorkflowFixture(19, "review_required") };
+    expect(buildPoAutoDraftActionPlan(po, context)?.primaryAction.id).toBe("create_receipt");
+    expect(buildPoAutoDraftActionPlan(po, { ...context, openExceptionCount: 1 })?.primaryAction.id).toBe("open_exceptions");
+  });
+
+  it.each([
+    ["review_required", "review_financial_evidence"],
+    ["awaiting_approval", "review_invoice_approval"],
+    ["payment_due", "record_payment"],
+    ["unbilled", "cancelled"],
+    ["settled", "cancelled"],
+  ] as const)("keeps cancellation physical while routing %s finance to %s", (state, actionId) => {
+    const po = { ...closedPo, status: "cancelled", physicalStatus: "cancelled" };
+    const plan = buildPoAutoDraftActionPlan(po, { lineCount: 0, financialWorkflow: financialWorkflowFixture(19, state) });
+    expect(plan?.primaryAction.id).toBe(actionId);
+    expect(plan?.context.physicalStatus).toBe("cancelled");
+    expect(plan?.checklist.find(step => step.id === "receive_inventory")?.status).toBe("blocked");
+    expect(plan?.checklist.find(step => step.id === "ap_closeout")?.status).toBe(state === "settled" ? "done" : state === "unbilled" ? "blocked" : "current");
+  });
+
+  it("requires review for cancelled POs with unavailable financial evidence", () => {
+    const po = { ...closedPo, status: "cancelled", physicalStatus: "cancelled" };
+    expect(buildPoAutoDraftActionPlan(po, { lineCount: 0 })?.primaryAction.id).toBe("review_financial_evidence");
+    expect(buildPoAutoDraftActionPlan(po, { lineCount: 0, openExceptionCount: 1 })?.primaryAction.id).toBe("open_exceptions");
   });
 });

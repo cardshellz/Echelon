@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { costCurrencySchema, costFingerprintSchema, costIssueSchema } from "./cost-source-contracts";
+import { reconciliationStateSchema } from "./cost-reconciliation";
 
 export const shipmentExceptionIdSchema = z.number().int().positive().max(2_147_483_647);
 const sequence = z.number().int().positive().safe();
@@ -27,6 +28,7 @@ export const shipmentCostExceptionSchema = z.object({
   cogsRowsUpdated: amount,
   issues: z.array(costIssueSchema).min(1),
   decision: shipmentExceptionDecisionSchema.nullable(),
+  reconciliation: reconciliationStateSchema.optional(),
 }).strict();
 export type ShipmentCostException = z.infer<typeof shipmentCostExceptionSchema>;
 export type ShipmentExceptionDecision = z.infer<typeof shipmentExceptionDecisionSchema>;
@@ -57,13 +59,13 @@ export const shipmentExceptionResultSchema = z.object({
 
 /** Exact sub-cent display: inventory mills are 1/100 of a cent. */
 export function formatShipmentExceptionAmount(mills: number, currency: string): string {
-  amount.parse(mills);
+  z.number().int().safe().parse(mills);
   costCurrencySchema.parse(currency);
-  const value = BigInt(mills);
+  const value = BigInt(mills) < BigInt(0) ? -BigInt(mills) : BigInt(mills);
   const exactFraction = (value % BigInt(10_000)).toString().padStart(4, "0");
   const fraction = exactFraction.endsWith("00") ? exactFraction.slice(0, 2) : exactFraction;
   const formatter = new Intl.NumberFormat("en-US", { style: "currency", currency,
     minimumFractionDigits: fraction.length, maximumFractionDigits: fraction.length });
-  return formatter.formatToParts(value / BigInt(10_000))
+  return (mills < 0 ? "-" : "") + formatter.formatToParts(value / BigInt(10_000))
     .map(part => part.type === "fraction" ? fraction : part.value).join("");
 }
