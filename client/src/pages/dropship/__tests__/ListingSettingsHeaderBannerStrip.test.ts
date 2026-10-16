@@ -463,7 +463,7 @@ describe("OlderListingSettings", () => {
     expect(contentId).toBeTruthy();
     expect(toggle).toContain(`aria-controls="${contentId}"`);
     const text = visibleText(markup);
-    expect(text).toMatch(/^Older settings Per-size policies and shelves, group rules and text templates\. They still work\. Show older settings/);
+    expect(text).toMatch(/^Older settings Per-size policies and shelves, group rules and text templates\. A group rule added here stops category settings from being saved\. Show older settings/);
     expect(text).not.toContain("Not saved");
     expect(openingTag(markup, 'data-testid="older-listing-settings"')).toContain('role="region"');
   });

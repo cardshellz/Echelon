@@ -454,12 +454,19 @@ test("a clear-only save on a value the category already sets resends it as ids a
   expectNothingUnexpected(state);
 });
 
-test("while the store holds older group rules, no row has Change and the one line says why; nothing is sent (D11)", async ({ page }) => {
+test("while the store holds older group rules, no row has Change and the one line says why, with See what changes; nothing is sent (D11, PR 11b D17)", async ({ page }) => {
   const state = await openStep(page, { ...categoriesState(), pricingRules: { [STORE]: pricingRulesWithGroup() } });
   await expect(card(page)).toBeVisible();
   await expect(cardRow(page, TOPLOADERS)).toContainText("Toploaders · 1 product · Sets: store shelf");
+  // A category that sets nothing: a group may still decide its products, so never "Uses your store defaults" (D17).
+  await expect(cardRow(page, SLEEVES)).toContainText("Sleeves · 3 products · No category settings yet");
+  await expect(cardRow(page, CASES)).toContainText("Cases · 1 product · No category settings yet");
+  await expect(card(page)).not.toContainText("Uses your store defaults");
   await expect(card(page).getByRole("button", { name: /^Change settings for/ })).toHaveCount(0);
-  await expect(card(page)).toContainText("Category settings can't be saved while your store has older group rules. They'll be moved over in a later update.");
+  // The line no longer promises a later move (D17); the card's one button opens the read-only sheet (PR 11b).
+  await expect(card(page)).toContainText("Category settings can't be saved while your store has older group rules.");
+  await expect(card(page)).not.toContainText("later update");
+  await expect(card(page).getByRole("button")).toHaveText(["See what changes"]);
   // No read-only editor (UX-m3): the card's [Change] was the one way in.
   await expect(editor(page)).toHaveCount(0);
   expect(state.categorySettingsWrites).toEqual([]);
@@ -474,14 +481,17 @@ test("a 409 for older group rules added after the editor opened is worded in the
   // Older settings gets a pricing group while the editor is open: the next save is refused for good (the backstop).
   state.pricingRules[STORE] = pricingRulesWithGroup();
   await saveButton(page).click();
-  const line = "Category settings can't be saved while your store has older group rules. They'll be moved over in a later update.";
+  const line = "Category settings can't be saved while your store has older group rules.";
   await expect(footer(page)).toContainText(line);
+  // The read-only sheet's opener beside the line (PR 11b, D17), once the card read the summary again.
+  await expect(footer(page).getByRole("button", { name: "See what changes", exact: true })).toBeVisible();
   expect(state.categorySettingsWrites).toHaveLength(1);
   // The change is kept (refused, not dropped); the card read the summary again and took every Change away.
   await expect(settingRow(page, "shippingPolicy")).toContainText("→ USPS Priority Mail · Not saved");
   await expect(bar(page)).toHaveText("Not saved · 1 change in Sleeves");
-  // By element, not by role: the open sheet hides the page behind it from the accessibility tree.
-  await expect(card(page).locator("button")).toHaveCount(0);
+  // By element, not by role: the open sheet hides the page behind it from the accessibility tree. The card's one
+  // button is See what changes (PR 11b).
+  await expect(card(page).locator("button")).toHaveText(["See what changes"]);
   await expect(card(page)).toContainText(line);
   // The editor learned of the rules from the summary too (D11): no second save is offered, no row can be changed, Discard still can.
   await expect(saveButton(page)).toBeDisabled();
@@ -500,7 +510,9 @@ test("while the store holds older group rules, a link opens the editor with no C
   await expect(editor(page).getByRole("button", { name: /^Change / })).toHaveCount(0);
   await expect(editor(page).locator("[data-testid^='category-clear-']")).toHaveCount(0);
   await expect(saveButton(page)).toBeDisabled();
-  await expect(footer(page)).toContainText("Category settings can't be saved while your store has older group rules. They'll be moved over in a later update.");
+  await expect(footer(page)).toContainText("Category settings can't be saved while your store has older group rules.");
+  await expect(footer(page)).not.toContainText("later update");
+  await expect(footer(page).getByRole("button", { name: "See what changes", exact: true })).toBeVisible();
   expect(state.categorySettingsWrites).toEqual([]);
   expectNothingUnexpected(state);
 });
@@ -855,14 +867,16 @@ test("while the store holds older group rules the Price row has no Change (D11);
   await expect(check(page)).toBeVisible();
   state.pricingRules[STORE] = pricingRulesWithGroup();
   await checkFooter(page).getByRole("button", { name: "Save new prices" }).click();
-  const line = "Category settings can't be saved while your store has older group rules. They'll be moved over in a later update.";
+  const line = "Category settings can't be saved while your store has older group rules.";
   await expect(checkFooter(page)).toContainText(line);
   await expect(checkFooter(page).getByRole("button", { name: "Save new prices" })).toBeDisabled();
+  // [See what changes] beside the line in the check's footer too (PR 11b, plan 11.1), before Back to editing.
+  await expect(checkFooter(page).getByRole("button")).toHaveText(["See what changes", /^Back( to editing)?$/, "Save new prices"]);
   expect(state.priceChangeApplies).toHaveLength(1);
   expect(state.categorySettings[categoryKey(STORE, SLEEVES)]).toBeUndefined();
   // The card read the summary again and took every Change away (D11), as after W12's refusal (by element: the open
-  // sheet hides the page behind it from the accessibility tree).
-  await expect(card(page).locator("button")).toHaveCount(0);
+  // sheet hides the page behind it from the accessibility tree); its one button is See what changes (PR 11b).
+  await expect(card(page).locator("button")).toHaveText(["See what changes"]);
   await expect(card(page)).toContainText(line);
   // Back to editing: the editor's body with the change kept, no Change on the Price row either, Check new prices off
   // with the one line, and no second apply.

@@ -254,16 +254,17 @@ export function drawerSearch(search: string, target: DrawerTarget | null): strin
 }
 
 // ---------------------------------------------------------------------------
-// The sheets in the page address (?sheet=bulk|updated|give-prices; plan PR 10, D21)
+// The sheets in the page address (?sheet=bulk|updated|give-prices|convert; plan PR 10, D21; PR 11, 11.2)
 // ---------------------------------------------------------------------------
 
 export const LISTING_SETTINGS_SHEET_PARAM = "sheet";
 /**
  * The sheets the page address opens, each added in its part: "Set for
  * selected" (10c), "Card Shellz updated products" (10g), "Give these sizes a
- * price" (10f, `give-prices`).
+ * price" (10f, `give-prices`), and what moving the older group rules over
+ * changes (PR 11b, `convert`, plan 11.2).
  */
-export const LISTING_SETTINGS_SHEETS = ["bulk", "updated", "give-prices"] as const;
+export const LISTING_SETTINGS_SHEETS = ["bulk", "updated", "give-prices", "convert"] as const;
 export type ListingSettingsSheet = (typeof LISTING_SETTINGS_SHEETS)[number];
 
 function isListingSettingsSheet(value: string): value is ListingSettingsSheet {
@@ -342,6 +343,10 @@ export type ListingSettingsSurface =
  * over a sheet, which wins over the category editor (the order the parts
  * arrived in; an address naming two comes only from Forward or by hand,
  * since each opener takes the others off the address first). Null for none.
+ * The older-rules sheet (`?sheet=convert`, PR 11b) is a sheet like the
+ * others: [See what changes] in the category editor takes `category` off as
+ * it pushes the sheet, and [Set a price] / [Fix] take the sheet off as they
+ * open the drawer, so Back returns to the surface before (D21).
  */
 export function listingSettingsSurfaceFromSearch(search: string): ListingSettingsSurface | null {
   const target = drawerTargetFromSearch(search);
