@@ -274,7 +274,7 @@ function cardState(overrides: Partial<CategoryCardInput> = {}) {
 }
 
 function renderCardView(overrides: Partial<CategoryCardInput> = {}): string {
-  return render(React.createElement(CategorySettingsCardView, { card: cardState(overrides), onChange: noop, onRetry: noop }));
+  return render(React.createElement(CategorySettingsCardView, { card: cardState(overrides), onChange: noop, onRetry: noop, onSeeWhatChanges: noop }));
 }
 
 describe("the Category settings card", () => {
@@ -337,7 +337,7 @@ describe("the Category settings card", () => {
   it("takes every Change away with the one line while the store holds older group rules; a category whose save is out or unconfirmed keeps its Change (D11)", () => {
     const older = renderCardView({ summary: summaryFacts(2) });
     expect(older).not.toContain('aria-label="Change settings for');
-    expect(older).toContain('<p role="status" class="mt-3 text-sm text-amber-900" data-testid="category-settings-older-rules">Category settings can\'t be saved while your store has older group rules. They\'ll be moved over in a later update.</p>');
+    expect(older).toContain('<p role="status" class="mt-3 text-sm text-amber-900" data-testid="category-settings-older-rules">Category settings can\'t be saved while your store has older group rules.</p>');
     // The rows still say what each category sets.
     expect(older).toContain("Sets: shipping policy, text above");
 
@@ -375,18 +375,18 @@ describe("the Category settings card", () => {
     draftsValue(null);
     const cache = client();
     seed(cache, listingSettingsCategoriesQueryOptions(STORE), LIST);
-    const shown = render(React.createElement(CategorySettingsCard, { storeConnectionId: STORE, summary: summaryFacts(), right: EDITABLE, onChange: noop }), cache);
+    const shown = render(React.createElement(CategorySettingsCard, { storeConnectionId: STORE, summary: summaryFacts(), right: EDITABLE, onChange: noop, onSeeWhatChanges: noop }), cache);
     expect(shown).toContain("Sets: shipping policy, text above");
 
     const tooLarge = client();
     seed(tooLarge, listingSettingsCategoriesQueryOptions(STORE), LIST);
-    expect(render(React.createElement(CategorySettingsCard, { storeConnectionId: STORE, summary: summaryFacts(0, "too_large"), right: EDITABLE, onChange: noop }), tooLarge)).toBe("");
+    expect(render(React.createElement(CategorySettingsCard, { storeConnectionId: STORE, summary: summaryFacts(0, "too_large"), right: EDITABLE, onChange: noop, onSeeWhatChanges: noop }), tooLarge)).toBe("");
     // Refused as too large by its own read, before the summary said so: hidden too (the banner explains, through onTooLarge).
     const refused = client();
     seed(refused, listingSettingsCategoriesQueryOptions(STORE), { error: new DropshipApiError({ status: 422, code: "DROPSHIP_LISTING_SETTINGS_TOO_LARGE", message: "Too many." }) });
-    expect(render(React.createElement(CategorySettingsCard, { storeConnectionId: STORE, summary: summaryFacts(), right: EDITABLE, onChange: noop }), refused)).toBe("");
+    expect(render(React.createElement(CategorySettingsCard, { storeConnectionId: STORE, summary: summaryFacts(), right: EDITABLE, onChange: noop, onSeeWhatChanges: noop }), refused)).toBe("");
     // Nothing cached: the skeleton.
-    expect(render(React.createElement(CategorySettingsCard, { storeConnectionId: STORE, summary: summaryFacts(), right: EDITABLE, onChange: noop }))).toContain('data-testid="category-settings-loading"');
+    expect(render(React.createElement(CategorySettingsCard, { storeConnectionId: STORE, summary: summaryFacts(), right: EDITABLE, onChange: noop, onSeeWhatChanges: noop }))).toContain('data-testid="category-settings-loading"');
   });
 
   it("Change hands the step the row it opens the editor on", () => {
@@ -410,7 +410,7 @@ function editorProps(overrides: Partial<CategoryEditorProps> = {}): CategoryEdit
   return {
     storeConnectionId: STORE, categoryId: CATEGORY, category: { categoryId: CATEGORY, name: "Sleeves", productCount: 15 },
     summary: summaryFacts(), rights: RIGHTS, setup: LIVE, shelves: [], saveCallbacks: { onSaveStarted: noop, onSaveSettled: noop },
-    onSaved: noop, onClose: noop, ...overrides,
+    onSaved: noop, onClose: noop, onSeeWhatChanges: noop, ...overrides,
   };
 }
 
@@ -540,7 +540,7 @@ describe("the category editor", () => {
     expect(gated).not.toContain('aria-label="Change ');
     expect(gated).not.toContain('data-testid="category-clear-');
     expect(gated).toMatch(/<button class="[^"]*" type="button" disabled="">Save<\/button>/);
-    expect(sliceOf(gated, "category-editor-footer", "div")).toContain("Category settings can't be saved while your store has older group rules. They'll be moved over in a later update.");
+    expect(sliceOf(gated, "category-editor-footer", "div")).toContain("Category settings can't be saved while your store has older group rules.");
     // A change held from before the rules came: kept, Discard on, Save off.
     const held = renderEditor(categoryDraft({ shippingPolicy: { mode: "set", value: { id: "ground" } } }, ["shippingPolicy"]), DETAIL, { summary: summaryFacts(2) });
     expect(held).toContain("→ USPS Ground Advantage · Not saved");
@@ -600,6 +600,33 @@ describe("the category editor", () => {
     expect(gated).not.toContain('aria-label="Change price for Sleeves"');
     expect(gated).toMatch(/<button class="[^"]*" type="button" disabled="">Check new prices<\/button>/);
     expect(sliceOf(gated, "category-editor-footer", "div")).toContain("Category settings can't be saved while your store has older group rules.");
+  });
+
+  it("puts See what changes beside the footer's older-rules line, from the gate or a save's 409, and nowhere else (PR 11b, D17)", () => {
+    const button = /<button class="[^"]*min-h-11[^"]*" type="button" data-testid="category-editor-see-what-changes">See what changes<\/button>/;
+    const older = "Category settings can't be saved while your store has older group rules.";
+    const gated = sliceOf(renderEditor(OPENED, DETAIL, { summary: summaryFacts(2) }), "category-editor-footer", "div");
+    expect(gated).toMatch(button);
+    // Beside the line, before the footer's own Discard and Save.
+    expect(gated.indexOf(older)).toBeLessThan(gated.indexOf("See what changes"));
+    expect(gated.indexOf("See what changes")).toBeLessThan(gated.indexOf(">Discard</button>"));
+    // A save refused with the same line after the rules came (the 409), once the summary says so too.
+    const refused = renderEditor(categoryDraft({ shippingPolicy: { mode: "default" } }, [], "refused", older), DETAIL, { summary: summaryFacts(1) });
+    expect(sliceOf(refused, "category-editor-footer", "div")).toMatch(button);
+    // No older rules: no opener, whatever the footer says; over 10,000 sizes the editor is shut anyway (D18).
+    expect(renderEditor(OPENED, DETAIL)).not.toContain("See what changes");
+    expect(renderEditor(categoryDraft({ shippingPolicy: { mode: "default" } }, [], "refused", older), DETAIL)).not.toContain("See what changes");
+
+    // Save new prices refused because older rules arrived (W7's 409): the price check's footer has the same line and
+    // the opener beside it, before Back to editing (plan 11.1).
+    const priced = { choice: { mode: "set" as const, value: RETAIL_20_UP }, check: CHECK };
+    const checkFooter = sliceOf(renderEditor(pricedDraft(priced, {}, [], "refused", older), WITH_EXAMPLES, { summary: summaryFacts(1) }), "price-check-footer", "div");
+    expect(checkFooter).toContain(older);
+    expect(checkFooter).toMatch(/<button class="[^"]*min-h-11[^"]*" type="button" data-testid="category-check-see-what-changes">See what changes<\/button>/);
+    expect(checkFooter.indexOf("See what changes")).toBeLessThan(checkFooter.indexOf(">Back to editing</button>"));
+    // Other words in the check's footer, or no older rules in the summary: none.
+    expect(renderEditor(pricedDraft(priced, {}, [], "refused", "Server words."), WITH_EXAMPLES, { summary: summaryFacts(1) })).not.toContain("See what changes");
+    expect(renderEditor(pricedDraft(priced, {}, [], "refused", older), WITH_EXAMPLES)).not.toContain("See what changes");
   });
 
   it("shows the price check in place of its body while the draft holds one (D20), with the category's head and Also saves lines; the editor's body is back for a conflict and a stale view", () => {
@@ -736,7 +763,7 @@ describe("the category editor", () => {
     expect(conflict).toContain("This changed in another window.");
     expect(conflict).toMatch(/<button class="[^"]*" type="button">Load latest and keep my changes<\/button>/);
 
-    const older = "Category settings can't be saved while your store has older group rules. They'll be moved over in a later update.";
+    const older = "Category settings can't be saved while your store has older group rules.";
     const refused = renderEditor(categoryDraft({ shippingPolicy: { mode: "default" } }, [], "refused", older), DETAIL);
     expect(refused).toContain(`<span role="alert" class="text-sm text-amber-900">${older}</span>`);
     expect(refused).toMatch(/<button class="[^"]*" type="button">Save<\/button>/);

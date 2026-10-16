@@ -322,6 +322,8 @@ describe("fast CI preserves coverage and required checks", () => {
       "client/src/lib/__tests__/dropship-listing-settings-size-prices.test.ts",
       "client/src/lib/__tests__/dropship-listing-settings-size-prices-requests.test.ts",
       "client/src/pages/dropship/__tests__/ListingSettingsSizePrices.test.ts",
+      "client/src/lib/__tests__/dropship-listing-settings-conversion.test.ts",
+      "client/src/pages/dropship/__tests__/ListingSettingsConversion.test.ts",
       "client/src/lib/__tests__/dropship-listing-settings-attention.test.ts",
       "client/src/pages/dropship/__tests__/ListingSettingsHeaderBannerStrip.test.ts",
       "client/src/pages/dropship/__tests__/ListingSettingsStep.test.ts",

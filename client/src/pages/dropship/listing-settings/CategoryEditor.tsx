@@ -25,6 +25,7 @@ import {
   categoryPriceCheckBack,
   categoryPriceCheckBaseOf,
   categoryPriceCheckBody,
+  categoryPriceCheckOlderRulesOpener,
   categoryPriceDraftWithCheck,
   categoryPriceReviewRequest,
   categorySavedThroughCheck,
@@ -112,6 +113,11 @@ export interface CategoryEditorProps {
   onBlocked?: (error: unknown) => void;
   /** Gets focus back when the editor closes: the card row's [Change] (plan 3.4). */
   returnFocusTo?: FocusReturnTarget;
+  /**
+   * [See what changes] beside the footer's older-rules line (PR 11b, D17): the step closes the editor and opens the
+   * read-only sheet in one push (`?sheet=convert`, D20), so Back returns here.
+   */
+  onSeeWhatChanges: () => void;
 }
 
 /**
@@ -885,6 +891,8 @@ function CategoryEditorBody(props: CategoryEditorBodyProps) {
 
   // The check replaces the editor's body (D20): the draft's check, or the stale one while a refused apply's new check is made.
   const bodyCheck = categoryPriceCheckBody({ shown: shownCheck, lastShown: lastShown.current, rechecking, draft: drafts.draft, categoryId });
+  // [Save new prices] refused because older group rules arrived: the check's footer has the one line and the opener (11.1).
+  const checkOlderRulesOpener = categoryPriceCheckOlderRulesOpener(bodyCheck, props.summary);
 
   const shelves = props.shelves ?? null;
   const facts = state.own;
@@ -983,6 +991,9 @@ function CategoryEditorBody(props: CategoryEditorBodyProps) {
           onResend={() => void applyPrices()}
           onPage={(page) => void showCheckPage(page)}
           onRetryRead={() => { readFor.current = null; setCheckRead(null); }}
+          aside={checkOlderRulesOpener && (
+            <SeeWhatChangesButton label={checkOlderRulesOpener.label} testId="category-check-see-what-changes" onClick={props.onSeeWhatChanges} />
+          )}
         />
       ) : (
       <>
@@ -1056,6 +1067,10 @@ function CategoryEditorBody(props: CategoryEditorBodyProps) {
           testIdPrefix="category-editor"
           footer={state.footer}
           message={footerMessage}
+          // Beside the older-rules line, whether the gate or a save's 409 put it there (D17, 8.6).
+          aside={state.olderRulesOpener && (
+            <SeeWhatChangesButton label={state.olderRulesOpener.label} testId="category-editor-see-what-changes" onClick={props.onSeeWhatChanges} />
+          )}
           onDiscard={() => void discard()}
           onPrimary={() => {
             // The draft's shape decides the writer (plan 9.2, 9.7): a price change is checked (W7), never saved through
@@ -1075,6 +1090,18 @@ function CategoryEditorBody(props: CategoryEditorBodyProps) {
       </>
       )}
     </>
+  );
+}
+
+/**
+ * [See what changes] beside the older-rules line in the editor's footer or its price check's footer (PR 11b, D17,
+ * plan 11.1): the step closes the editor and opens the read-only sheet in one push (D20). Hook-free.
+ */
+export function SeeWhatChangesButton({ label, testId, onClick }: { label: string; testId: string; onClick: () => void }) {
+  return (
+    <Button type="button" variant="outline" size="sm" className="min-h-11 sm:min-h-8" data-testid={testId} onClick={onClick}>
+      {label}
+    </Button>
   );
 }
 

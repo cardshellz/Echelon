@@ -36,6 +36,7 @@ import {
   sheetSearch,
   type DrawerTarget,
 } from "@/lib/dropship-listing-settings-drawer";
+import type { ConversionDrawerLanding } from "@/lib/dropship-listing-settings-conversion";
 import { isStoreDefaultPolicyEditor, policyEditorBase } from "@/lib/dropship-listing-settings-store-requests";
 import { LISTING_SETTINGS_CATEGORY_WORDS } from "@/lib/dropship-listing-settings-words";
 import type { DropshipEbayStoreCategoryResponse, DropshipStoreConnectionSummary } from "@/lib/dropship-ops-surface";
@@ -51,6 +52,8 @@ import { GiveSizesPriceSheet } from "./GiveSizesPriceSheet";
 import { useListingSettingsDrafts } from "./ListingSettingsDraftsProvider";
 import { ListingSettingsHeader } from "./ListingSettingsHeader";
 import { ListingSettingsTabs, type ListingSettingsProductTarget, type ListingSettingsTabsRequest } from "./ListingSettingsTabs";
+import { OlderRulesLine } from "./OlderRulesLine";
+import { OlderRulesSheet, type FixFromSheetAction, type SetPriceFromSheetAction } from "./OlderRulesSheet";
 import { PolicyDefaultRow, liveSetup } from "./PolicyDefaultRow";
 import { PriceDefaultRow } from "./PriceDefaultRow";
 import { ProductDrawer, type DrawerLandingRequest } from "./ProductDrawer";
@@ -74,9 +77,11 @@ import { UpdatedProductsSheet, type OwnTextCheckAction } from "./UpdatedProducts
  * strip's buttons and the address (`?product=&size=`, and from PR 10
  * `?sheet=bulk` for "Set for selected", `?sheet=updated` for "Card Shellz
  * updated products", `?sheet=give-prices` for "Give these sizes a price" and
- * `?category=<id>` for a category's editor) to the right place, one surface
+ * `?category=<id>` for a category's editor; from PR 11b `?sheet=convert` for
+ * the read-only "Your older group rules") to the right place, one surface
  * at a time (D20). The Category settings card sits between the Store defaults
- * card and the tabs (PR 10e, A5).
+ * card and the tabs (PR 10e, A5); the older-rules line sits under the strip,
+ * above "Card Shellz updated products" (PR 11b, D17).
  */
 
 /** The onboarding read the page and portal shell share; its vendor status and entitlement gate every writer. */
@@ -187,6 +192,9 @@ export function ListingSettingsStep(props: ListingSettingsStepProps) {
   const updatedOpener = useRef<HTMLElement | null>(null);
   const givePricesOpener = useRef<HTMLElement | null>(null);
   const categoryOpener = useRef<HTMLElement | null>(null);
+  const convertOpener = useRef<HTMLElement | null>(null);
+  const stepRef = useRef<HTMLDivElement | null>(null);
+  const categoryCardRef = useRef<HTMLDivElement | null>(null);
   const mounted = useRef(false);
   useEffect(() => {
     mounted.current = true;
@@ -340,6 +348,47 @@ export function ListingSettingsStep(props: ListingSettingsStepProps) {
   }, [navigate]);
 
   /**
+   * [See what changes] on the older-rules line, the Category settings card or the category editor (PR 11b, D17)
+   * puts the read-only sheet in the address (D21), so Back closes it; the drawer's and the category's addresses go
+   * with it in the same push (D20: from the editor, the editor closes and the sheet opens, and Back returns to the
+   * editor). The sheet holds no change, so nothing is asked about. The opener is taken now for focus (11.2).
+   */
+  const openConvertSheet = useCallback(() => {
+    const active = typeof document === "undefined" ? null : document.activeElement;
+    convertOpener.current = active instanceof HTMLElement ? active : null;
+    const { location: path, search: query } = latest.current;
+    navigate(`${path}${sheetSearch(drawerSearch(categorySearch(query, null), null), "convert")}`);
+  }, [navigate]);
+
+  const closeConvertSheet = useCallback(() => {
+    const { location: path, search: query } = latest.current;
+    navigate(`${path}${sheetSearch(query, null)}`, { replace: true });
+  }, [navigate]);
+
+  /** When [See what changes] is gone (the editor it was in closed), focus goes to the card's heading, then the step's (11.2). */
+  const convertFocusFallbacks = useCallback(() => [
+    categoryCardRef.current?.querySelector<HTMLElement>("h3"),
+    stepRef.current?.querySelector<HTMLElement>('[data-testid="listing-settings-header"] h2'),
+  ], []);
+
+  /**
+   * A blocked size's [Set a price] or [Fix] in that sheet (11.2, CUX#3): one push that takes the sheet off the address
+   * and opens the drawer on the size (its Exact price) or on the product with the blocker's row (10b's landing
+   * request), so Back returns to the sheet, which reads page 0 again (D20, D21). The lib chose the landing.
+   */
+  const openDrawerFromSheet = useCallback((landing: ConversionDrawerLanding) => {
+    // The button goes with the sheet, so the drawer gives focus back to what opened the sheet (plan 3.4).
+    drawerOpener.current = convertOpener.current;
+    const { target, row } = landing;
+    if (row !== null) setLanding((previous) => ({ productId: target.productId, row, requestId: (previous?.requestId ?? 0) + 1 }));
+    const { location: path, search: query } = latest.current;
+    navigate(`${path}${drawerSearch(sheetSearch(categorySearch(query, null), null), target)}`);
+  }, [navigate]);
+
+  const setPriceFromSheet = useCallback((action: SetPriceFromSheetAction) => openDrawerFromSheet(action.landing), [openDrawerFromSheet]);
+  const fixFromSheet = useCallback((action: FixFromSheetAction) => openDrawerFromSheet(action.landing), [openDrawerFromSheet]);
+
+  /**
    * A category row's [Change] (PR 10e, plan 8.2) puts that category's editor in the address (D21), so Back closes
    * it and keeps its draft. Another editor's unsaved change is asked about first (D16, through the step's one
    * draft); the drawer's and the sheets' addresses go with it: one surface at a time (D20). The opener is taken
@@ -443,7 +492,7 @@ export function ListingSettingsStep(props: ListingSettingsStepProps) {
   const shelfOptions = shelves.data !== undefined && (shelves.error === undefined || shelves.error === null) ? shelves.data.categories : null;
 
   return (
-    <div data-testid="listing-settings-step">
+    <div ref={stepRef} data-testid="listing-settings-step">
       <ListingSettingsHeader storeName={storeName} ebayStoreCount={props.ebayStoreCount} />
       {banner && (
         <ConnectionBannerView
@@ -460,6 +509,14 @@ export function ListingSettingsStep(props: ListingSettingsStepProps) {
         storeName={storeName}
         onAction={onAttention}
         onRetry={() => void summary.refetch()}
+      />
+      {/* Under the strip, above the updated-products line (PR 11b, 10g's slot); the summary's counts decide it, no read of its own (D18). */}
+      <OlderRulesLine
+        storeConnectionId={storeConnectionId}
+        summary={{ data: summary.data, error: summary.error }}
+        // A refusal as too large shows the banner before the summary is read again: the line's button would open nothing (K7).
+        tooLarge={tooLarge}
+        onOpen={openConvertSheet}
       />
       {/* Under the strip, never in a Category card (UX-M10); its read is off while the selection is too large (D18). */}
       <UpdatedProductsLine
@@ -541,7 +598,7 @@ export function ListingSettingsStep(props: ListingSettingsStepProps) {
         </StoreDefaultsCard>
       </div>
       {/* Between the Store defaults card and the tabs (PR 10e, A5); its read is off and it hides while the selection is too large (D18). */}
-      <div className="mt-4">
+      <div ref={categoryCardRef} className="mt-4">
         <CategorySettingsCard
           storeConnectionId={storeConnectionId}
           summary={{ data: summary.data, error: summary.error }}
@@ -549,6 +606,8 @@ export function ListingSettingsStep(props: ListingSettingsStepProps) {
           onChange={openCategoryEditor}
           onTooLarge={onWriteBlocked}
           notice={categoryNotice}
+          onSeeWhatChanges={openConvertSheet}
+          tooLarge={tooLarge}
         />
       </div>
       <div ref={tabsRef} className="mt-6">
@@ -635,6 +694,20 @@ export function ListingSettingsStep(props: ListingSettingsStepProps) {
         onClose={closeCategoryEditor}
         onBlocked={onWriteBlocked}
         returnFocusTo={categoryOpener}
+        onSeeWhatChanges={openConvertSheet}
+      />
+      <OlderRulesSheet
+        storeConnectionId={storeConnectionId}
+        // One surface at a time (D20): the drawer, when the address opens both. Shut while the selection is too large
+        // (D18, K7): the dry run is read only while this is open, never on mount.
+        open={sheet === "convert" && drawerTarget === null && !tooLarge}
+        summary={{ data: summary.data, error: summary.error }}
+        onClose={closeConvertSheet}
+        onSetPrice={setPriceFromSheet}
+        onFix={fixFromSheet}
+        onBlocked={onWriteBlocked}
+        returnFocusTo={convertOpener}
+        focusFallbacks={convertFocusFallbacks}
       />
     </div>
   );
