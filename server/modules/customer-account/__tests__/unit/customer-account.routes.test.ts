@@ -99,6 +99,19 @@ describe("customer account signed storefront HTTP boundary", () => {
     expect((await request({ path: "/order-edits/settings/4", method: "POST", body: {}, sessionKey: bootstrap.session.sessionKey })).status).toBe(404);
     expect((await request({ path: "/order-edits/orders", sessionKey: bootstrap.session.sessionKey })).status).toBe(404);
   });
+  it("dispatches resume through the authenticated operation command boundary", async () => {
+    const bootstrap = await (await request()).json();
+    const operationId = "22222222-2222-4222-8222-222222222222";
+    const progress = vi.fn(async () => ({ operationId, orderNumber: "#64043", currency: "USD", status: "ready", canAbandon: true,
+      previousTotalCents: 829, updatedTotalCents: 1076, balanceDueCents: 247, refundDueCents: 0,
+      lines: [], warnings: [], expiresAt: null, paymentDeadline: null, paymentUrl: null, error: null }));
+    services.mockImplementation(() => ({ edits: { connection, progress }, returns: vi.fn() }));
+    const body = { path: `/order-edits/operations/${operationId}/resume`, method: "POST", body: {}, sessionKey: bootstrap.session.sessionKey, commandKey: operationId };
+    expect((await request({ ...body, commandKey: undefined })).status).toBe(400);
+    expect(progress).not.toHaveBeenCalled();
+    expect((await request(body)).status).toBe(200);
+    expect(progress).toHaveBeenCalledWith(operationId, "resume", operationId);
+  });
   it.each([undefined, "v1", "v2"])("negotiates pricing display through the signed customer bridge, opt-in=%s", async (optIn) => {
     const bootstrap = await (await request()).json();
     const calculation = previewCalculation();

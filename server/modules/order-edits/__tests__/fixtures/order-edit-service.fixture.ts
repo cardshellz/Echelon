@@ -90,6 +90,7 @@ export function serviceHarness(
   let saved: OrderEditRecord | null = null;
   let enabled = true;
   let locked = false;
+  let held = false;
   const events: Array<{
     action: string;
     releaseProof?: OrderEditReleaseProof;
@@ -154,6 +155,7 @@ export function serviceHarness(
         throw new Error("missing proof");
       saved = structuredClone(record);
       events.push({ action, releaseProof });
+      if (releaseProof) held = false;
     },
     pending: async () => (saved ? [saved.id] : []),
   };
@@ -210,7 +212,7 @@ export function serviceHarness(
         return structuredClone(current);
       },
     ),
-    reconcileCommit: vi.fn(async () => ({
+    reconcileCommit: vi.fn<OrderEditProvider["reconcileCommit"]>(async () => ({
       status: "applied" as const,
       snapshot: structuredClone(current),
     })),
@@ -261,8 +263,17 @@ export function serviceHarness(
       reasons: [],
       wmsOrderIds: [9],
     })),
-    acquire: vi.fn(async () => {}),
+    acquire: vi.fn(async () => {
+      held = true;
+    }),
     assertHeld: vi.fn(async () => {}),
+    releaseUnsubmitted: vi.fn(async () => ({
+      unsubmitted: true,
+      ownership: held ? ("owned" as const) : ("none" as const),
+      wmsOrderIds: held ? [9] : [],
+      shipmentIds: [],
+      contentFingerprint: "release-proof",
+    })),
     reconcileAndRelease: vi.fn(async () => proof),
     releaseUnchanged: vi.fn(async () => proof),
     releaseFulfilledUnsubmitted: vi.fn(async () => ({
@@ -294,6 +305,10 @@ export function serviceHarness(
     store,
     quote,
     record: () => saved!,
+    setHeld: (value: boolean) => {
+      held = value;
+    },
+    held: () => held,
     snapshot: () => current,
     setCurrent: (patch: Partial<OrderEditSnapshot>) => {
       current = { ...current, ...patch };

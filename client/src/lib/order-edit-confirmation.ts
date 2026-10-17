@@ -8,6 +8,21 @@ import type { OrderEditFinancials } from "@shared/order-edits/order-edit-financi
 import { canonicalJson } from "@shared/utils/canonical-json";
 import { orderEditCanCommit } from "./order-edits";
 
+/** Only a known unsubmitted draft may be prepared again; submitted outcomes stay in reconciliation. */
+export function orderEditNeedsPreparation(
+  operation: OrderEditOperation,
+  now: number,
+): boolean {
+  return (
+    operation.canAbandon === true &&
+    operation.requestedPlan !== undefined &&
+    (operation.status === "preparing" ||
+      operation.status === "review_required" ||
+      (operation.status === "ready" &&
+        (!orderEditCanCommit(operation, now) || !operation.quoteAvailable)))
+  );
+}
+
 export function orderEditMatchesInput(
   operation: OrderEditOperation,
   input: Omit<OrderEditQuoteInput, "requestKey">,

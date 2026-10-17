@@ -48,6 +48,9 @@ describe("browser CI impact selection", () => {
     ".github/workflows/order-edits.yml",
     "playwright.order-edits.config.ts",
     "test/browser/order-edits.spec.ts",
+    "test/browser/customer-order-edit-resume.spec.ts",
+    "test/browser/fixtures/customer-order-edit-harness.tsx",
+    "client/src/customer-account/entry.tsx",
     "client/src/pages/OrderEdits.tsx",
     "server/modules/order-edits/application/order-edit.service.ts",
     "server/modules/order-edits/interfaces/order-edit.routes.ts",
@@ -62,13 +65,25 @@ describe("browser CI impact selection", () => {
   );
 
   it("keeps the full application startup graph for the order editor and skips unrelated server work", () => {
-    expect(BROWSER_SUITES.orderEdits.roots).toEqual(["client/src/main.tsx"]);
+    expect(BROWSER_SUITES.orderEdits.roots).toEqual([
+      "client/src/main.tsx", "client/src/customer-account/entry.tsx", "test/browser/fixtures/customer-order-edit-harness.tsx",
+    ]);
     const startupDependency = "client/src/components/shipping/BoxSuitesPanel.tsx";
     expect(selection(startupDependency, "orderEdits")).toEqual({ run: true, reason: `Transitive suite dependency: ${startupDependency}` });
     const unrelated = "server/modules/inventory/unrelated.service.ts";
     expect(selection(unrelated, "orderEdits", { [unrelated]: "export const unrelated = true;" })).toEqual({
       run: false, reason: "Only known paths outside this suite's dependency graph changed",
     });
+  });
+
+  it("follows customer editor dependencies from the storefront and browser harness", () => {
+    const editor = "client/src/customer-account/CustomerOrderEditor.tsx";
+    for (const root of ["client/src/customer-account/entry.tsx", "test/browser/fixtures/customer-order-edit-harness.tsx"]) {
+      expect(selection(editor, "orderEdits", {
+        [root]: 'import "@/customer-account/CustomerOrderEditor";',
+        [editor]: "export const editor = true;",
+      })).toEqual({ run: true, reason: `Transitive suite dependency: ${editor}` });
+    }
   });
 
   it("preserves eagerly imported packaging startup dependencies in procurement", () => {
