@@ -66,6 +66,7 @@ describe("order edit staff HTTP boundary", () => {
   const commit = vi.fn();
   const reconcile = vi.fn();
   const abandon = vi.fn();
+  const resume = vi.fn();
   const preview = vi.fn();
   const warmPreview = vi.fn();
   const catalogCategories = vi.fn();
@@ -127,6 +128,7 @@ describe("order edit staff HTTP boundary", () => {
         commit,
         reconcile,
         abandon,
+        resume,
         preview,
         warmPreview,
         catalogCategories,
@@ -177,10 +179,10 @@ describe("order edit staff HTTP boundary", () => {
     expect(financials.lines[0].productNetCents).toBe(financials.lines[0].netCents);
   });
 
-  it.each(["", "/commit", "/reconcile", "/abandon"])(
+  it.each(["", "/commit", "/reconcile", "/abandon", "/resume"])(
     "preserves strict legacy operation responses and opts new clients into SKU display metadata for %s",
     async (action) => {
-      for (const handler of [getOperation, commit, reconcile, abandon])
+      for (const handler of [getOperation, commit, reconcile, abandon, resume])
         handler.mockResolvedValue(displayOperation);
       const legacyLineSchema = orderEditOperationSchema.shape.lines.element
         .omit({ variantId: true, added: true });

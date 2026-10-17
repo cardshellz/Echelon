@@ -25,6 +25,7 @@ function setup() {
   };
   let baseline: { provider_order_id: string; was_held: boolean } | undefined;
   let timeoutAfterHold = false;
+  let submitted = false;
   let incorrectReadback = false;
   let labels: unknown[] = [];
   let split = false;
@@ -47,6 +48,8 @@ function setup() {
     const query = dialect.sqlToQuery(statement);
     if (query.sql.includes("SELECT oo.id FROM oms.oms_orders"))
       return { rows: [{ id: 20 }] };
+    if (query.sql.includes("SELECT id FROM oms.order_edit_operations"))
+      return { rows: submitted ? [] : [{ id: OPERATION }] };
     if (query.sql.includes("SELECT COALESCE(os.shipstation_order_id"))
       return { rows: [{ provider_order_id: 55 }] };
     if (query.sql.includes("SELECT wo.id FROM wms.orders"))
@@ -143,7 +146,13 @@ function setup() {
     sessionLock: async (_lock, callback) => callback(),
   });
   const run = (
-    mode: "hold" | "verify" | "synchronize" | "release" | "verify_shipped",
+    mode:
+      | "hold"
+      | "verify"
+      | "synchronize"
+      | "release"
+      | "verify_shipped"
+      | "release_unsubmitted",
   ) =>
     service.synchronizeOrderEditShipment({
       shipmentId: 9,
@@ -155,6 +164,9 @@ function setup() {
     service,
     calls,
     header,
+    submit: () => {
+      submitted = true;
+    },
     get live() {
       return live;
     },
@@ -194,6 +206,62 @@ afterEach(() => {
 });
 
 describe("ShipStation order-edit ownership and readback", () => {
+  it("releases a timed-out pre-submit hold without changing quantities, linking splits, or placing another hold", async () => {
+    const f = setup();
+    f.loseHoldResponse();
+    await expect(f.run("hold")).rejects.toThrow();
+    expect(f.live.orderStatus).toBe("on_hold");
+    f.split();
+    f.wrongReadback();
+    const prior = f.calls.length;
+    await f.run("release_unsubmitted");
+    expect(f.live.orderStatus).toBe("awaiting_shipment");
+    expect(
+      f.calls
+        .slice(prior)
+        .filter((call) => call.body !== null)
+        .map((call) => call.path),
+    ).toEqual(["/orders/restorefromhold"]);
+    await f.run("release_unsubmitted");
+    expect(
+      f.calls.filter((call) => call.path === "/orders/restorefromhold"),
+    ).toHaveLength(1);
+  });
+  it.each(["provider", "order", "shipment", "review"])(
+    "preserves an unrelated %s hold when submission never happens",
+    async (kind) => {
+      const f = setup();
+      if (kind === "provider") f.alreadyHeld();
+      await f.run("hold");
+      if (kind === "order") f.header.on_hold = 1;
+      if (kind === "shipment") f.header.held = true;
+      if (kind === "review") f.header.requires_review = true;
+      await f.run("release_unsubmitted");
+      expect(f.live.orderStatus).toBe("on_hold");
+      expect(
+        f.calls.some((call) => call.path === "/orders/restorefromhold"),
+      ).toBe(false);
+    },
+  );
+  it("cleans up an unsubmitted shipped order with no provider write", async () => {
+    const f = setup();
+    await f.run("hold");
+    f.ship();
+    f.header.status = "shipped";
+    const prior = f.calls.length;
+    await f.run("release_unsubmitted");
+    expect(f.calls.slice(prior).every((call) => call.body === null)).toBe(true);
+  });
+  it("rejects unsubmitted cleanup once a Shopify command may have been sent", async () => {
+    const f = setup();
+    await f.run("hold");
+    f.submit();
+    const prior = f.calls.length;
+    await expect(f.run("release_unsubmitted")).rejects.toMatchObject({
+      code: "ORDER_EDIT_ALREADY_SUBMITTED",
+    });
+    expect(f.calls).toHaveLength(prior);
+  });
   it("verifies completed provider splits with GET only instead of restoring shipped orders from hold", async () => {
     const f = setup();
     await f.run("hold");

@@ -251,7 +251,7 @@ const scope = () => {
   return s;
 };
 describe("preview scope and read-only cache", () => {
-  it("validates code changes against the same actor's unsubmitted held review, including cache hits", async () => {
+  it("validates code changes against the same actor's unsubmitted draft, including cache hits", async () => {
     const h = harness();
     const fixture = serviceHarness();
     await fixture.service.quote(fixture.input, "staff-a");
@@ -265,8 +265,8 @@ describe("preview scope and read-only cache", () => {
     const input = { ...previewInput(), operationId: OP };
     await h.service.preview(input, "staff-a");
     await h.service.preview(input, "staff-a");
-    expect(h.warehouse.assertHeld).toHaveBeenCalledTimes(2);
-    expect(h.warehouse.inspect).not.toHaveBeenCalled();
+    expect(h.warehouse.assertHeld).not.toHaveBeenCalled();
+    expect(h.warehouse.inspect).toHaveBeenCalledTimes(2);
     expect(h.provider.preview).toHaveBeenCalledTimes(1);
     await expect(h.service.preview(input, "other-actor")).rejects.toMatchObject(
       { code: "ORDER_EDIT_PREVIEW_OPERATION_UNAVAILABLE" },
@@ -276,9 +276,9 @@ describe("preview scope and read-only cache", () => {
       code: "ORDER_EDIT_PREVIEW_OPERATION_UNAVAILABLE",
     });
     record.commitStartedAt = null;
-    h.warehouse.assertHeld.mockRejectedValue(new Error("Hold changed"));
+    h.warehouse.inspect.mockResolvedValue({ editable: false, reasons: ["Picking started"], wmsOrderIds: [1] });
     await expect(h.service.preview(input, "staff-a")).rejects.toThrow(
-      "Hold changed",
+      "Picking started",
     );
     expect(h.provider.preview).toHaveBeenCalledTimes(1);
     expect(h.provider.commit).not.toHaveBeenCalled();

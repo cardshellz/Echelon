@@ -1,7 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 import { serviceHarness } from "../fixtures/order-edit-service.fixture";
 import { priceOrderEditCodes } from "../../domain/order-edit-code-pricing";
-import { OrderEditCommitNotSentError, OrderEditProviderError } from "../../application/order-edit-provider";
+import {
+  OrderEditCommitNotSentError,
+  OrderEditProviderError,
+} from "../../application/order-edit-provider";
 import type { OrderEditCodeRedemptions } from "../../application/order-edit-code-redemptions";
 
 const key = "44444444-4444-4444-8444-444444444444";
@@ -99,7 +102,9 @@ describe("code settlement boundaries in order editing", () => {
     const result = await h.service.commit(h.record().id, key, "staff");
     expect(result.status).toBe("completed");
     expect(h.provider.refund).toHaveBeenCalledWith(
-      4, expect.objectContaining({ amountCents: 200 }), expect.any(String),
+      4,
+      expect.objectContaining({ amountCents: 200 }),
+      expect.any(String),
     );
     await h.service.commit(h.record().id, key, "staff");
     expect(h.provider.commit).toHaveBeenCalledTimes(1);
@@ -111,16 +116,26 @@ describe("code settlement boundaries in order editing", () => {
   it("reconciles an uncertain unrestricted-coupon refund with the same intent", async () => {
     const h = harness(2, "shopify_coupon");
     h.provider.refund.mockRejectedValueOnce(
-      new OrderEditProviderError("SHOPIFY_UNAVAILABLE", "Response lost", "unknown"),
+      new OrderEditProviderError(
+        "SHOPIFY_UNAVAILABLE",
+        "Response lost",
+        "unknown",
+      ),
     );
     await h.service.quote(h.input, "staff");
-    expect((await h.service.commit(h.record().id, key, "staff")).status).toBe("refunding");
+    expect((await h.service.commit(h.record().id, key, "staff")).status).toBe(
+      "refunding",
+    );
     const intent = structuredClone(h.record().refundIntent);
     expect(intent?.amountCents).toBe(200);
-    expect((await h.service.reconcile(h.record().id, "staff")).status).toBe("completed");
+    expect((await h.service.reconcile(h.record().id, "staff")).status).toBe(
+      "completed",
+    );
     expect(h.provider.commit).toHaveBeenCalledTimes(1);
     expect(h.provider.refund).toHaveBeenCalledTimes(2);
-    expect(h.provider.refund.mock.calls[1]).toEqual(h.provider.refund.mock.calls[0]);
+    expect(h.provider.refund.mock.calls[1]).toEqual(
+      h.provider.refund.mock.calls[0],
+    );
     expect(h.codes.reserve).not.toHaveBeenCalled();
     expect(h.codes.finalize).not.toHaveBeenCalled();
     expect(h.codes.release).not.toHaveBeenCalled();
@@ -205,7 +220,7 @@ describe("code settlement boundaries in order editing", () => {
       h.codes.finalize.mock.invocationCallOrder[0],
     );
   });
-  it("releases an uncertain code reservation only after a proven unsubmitted cancellation", async () => {
+  it("automatically releases a code reservation after a proven unsubmitted attempt", async () => {
     const h = harness();
     await h.service.quote(h.input, "staff");
     h.provider.commit.mockRejectedValueOnce(
@@ -216,19 +231,40 @@ describe("code settlement boundaries in order editing", () => {
     );
     const rejected = await h.service.commit(h.record().id, key, "staff");
     expect(rejected.canAbandon).toBe(true);
-    expect(h.codes.release).not.toHaveBeenCalled();
+    expect(h.codes.release).toHaveBeenCalledOnce();
     await h.service.abandon(h.record().id, "staff");
-    expect(h.codes.release).toHaveBeenCalledTimes(1);
-    expect(h.codes.release.mock.invocationCallOrder[0]).toBeLessThan(
-      h.warehouse.releaseUnchanged.mock.invocationCallOrder[0],
+    expect(h.codes.release).toHaveBeenCalledTimes(2);
+    expect(h.codes.release.mock.invocationCallOrder[0]).toBeGreaterThan(
+      h.warehouse.releaseUnsubmitted.mock.invocationCallOrder[0],
     );
   });
-  it("does not release a code when the order changed before cancellation", async () => {
+  it("does not retain an unsubmitted warehouse hold when legacy reservation cleanup is unavailable", async () => {
+    const h = harness();
+    await h.service.quote(h.input, "staff");
+    h.provider.commit.mockRejectedValueOnce(
+      new OrderEditCommitNotSentError("RESERVE_UNKNOWN", "Reply lost"),
+    );
+    h.codes.release.mockRejectedValueOnce(
+      new Error("Legacy cleanup unavailable"),
+    );
+    expect(await h.service.commit(h.record().id, key, "staff")).toMatchObject({
+      status: "review_required",
+      error: { code: "ORDER_EDIT_HOLD_RELEASE_PENDING" },
+      canAbandon: true,
+    });
+    expect(h.held()).toBe(false);
+    await h.service.sweep();
+    expect(h.record().error).toBeNull();
+    expect(h.codes.release).toHaveBeenCalledTimes(2);
+    expect(h.provider.commit).toHaveBeenCalledOnce();
+    expect(h.warehouse.acquire).toHaveBeenCalledOnce();
+  });
+  it("releases its unsubmitted reservation even when an external order change prevents applying the draft", async () => {
     const h = harness();
     await h.service.quote(h.input, "staff");
     h.setCurrent({ fingerprint: "changed" });
     const result = await h.service.abandon(h.record().id, "staff");
-    expect(result.status).toBe("review_required");
-    expect(h.codes.release).not.toHaveBeenCalled();
+    expect(result.status).toBe("expired");
+    expect(h.codes.release).toHaveBeenCalledOnce();
   });
 });

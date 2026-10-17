@@ -11,6 +11,7 @@ import type {
   OrderEditQuoteInput,
 } from "@shared/order-edits/order-edit.contract";
 import type { CustomerAccountTransport } from "./customer-account.transport";
+import { orderEditNeedsPreparation } from "@/lib/order-edit-confirmation";
 
 const closed = new Set<OrderEditOperation["status"]>([
   "completed",
@@ -96,8 +97,12 @@ export function CustomerOrderEditor({
           setOperation(active);
           setDiscountCodes(active.requestedPlan?.discountCodes ?? []);
           setDraftVisible(active.canAbandon && Boolean(active.requestedPlan));
-        }
-        setOrder(current);
+          // Mount the draft only once its saved plan is available; mounting it
+          // earlier would initialize quantities from the unchanged order.
+          setOrder(current);
+          if (orderEditNeedsPreparation(active, Date.now()))
+            await progress("resume", active);
+        } else setOrder(current);
       } catch (cause) {
         if (!controller.signal.aborted) setError(message(cause));
       }
@@ -184,15 +189,15 @@ export function CustomerOrderEditor({
     }
   }
   async function progress(
-    action: "commit" | "reconcile" | "abandon",
+    action: "commit" | "reconcile" | "abandon" | "resume",
     target = operation,
   ): Promise<boolean> {
     if (!target || inFlight.current) return false;
     inFlight.current = true;
     setBusy(true);
-    setBusyAction(action);
+    setBusyAction(action === "resume" ? "reconcile" : action);
     setError(null);
-    setNotice(null);
+    setNotice(action === "resume" ? "Recalculating your saved changes…" : null);
     if (action === "abandon") {
       setClosingQuote(true);
       // Show the retained draft immediately; another review waits for release.
@@ -227,6 +232,7 @@ export function CustomerOrderEditor({
       inFlight.current = false;
       setBusy(false);
       setBusyAction(undefined);
+      if (action === "resume") setNotice(null);
       setLocked(false);
     }
     return false;
@@ -312,6 +318,9 @@ export function CustomerOrderEditor({
               uncertain,
               onCommit: async () => {
                 await progress("commit");
+              },
+              onResume: async () => {
+                await progress("resume");
               },
               onChange: () => {
                 if (operation) void releaseForEditing();

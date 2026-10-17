@@ -42,6 +42,7 @@ export class CustomerOrderEditService {
         | "get"
         | "commit"
         | "reconcile"
+        | "resume"
         | "abandon"
       >;
     },
@@ -93,6 +94,7 @@ export class CustomerOrderEditService {
       connectionId,
       omsOrderId,
       codeEntryVersion,
+      this.actorId,
     );
     if (order.activeOperationId) {
       const active = await this.dependencies.store.get(order.activeOperationId);
@@ -163,7 +165,7 @@ export class CustomerOrderEditService {
   }
   async progress(
     raw: string,
-    action: "commit" | "reconcile" | "abandon",
+    action: "commit" | "reconcile" | "abandon" | "resume",
     key: string,
   ) {
     z.string().uuid().parse(key);

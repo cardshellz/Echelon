@@ -373,7 +373,7 @@ export function registerOrderEditRoutes(
       );
     }),
   );
-  for (const action of ["commit", "reconcile", "abandon"] as const) {
+  for (const action of ["commit", "reconcile", "abandon", "resume"] as const) {
     app.post(
       `${ORDER_EDIT_API}/operations/:operationId/${action}`,
       handle(false, async (req, res, actor) => {
