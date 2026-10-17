@@ -60,10 +60,10 @@ async function fixture(automaticRecovery?: ConstructorParameters<typeof EbayPubl
 }
 
 describe("saved eBay publication completion", () => {
-  it.each([
+  it.each<[string, Error]>([
     ["rate limit", new EbayApiRequestError(429, "Rate limited", "{}")],
     ["provider outage", new EbayApiRequestError(503, "Unavailable", "{}")],
-    ...["ECONNRESET", "ETIMEDOUT", "ECONNREFUSED", "ENOTFOUND", "EAI_AGAIN"].map(code => [code, Object.assign(new Error("Lookup failed"), { code })]),
+    ...["ECONNRESET", "ETIMEDOUT", "ECONNREFUSED", "ENOTFOUND", "EAI_AGAIN"].map((code): [string, Error] => [code, Object.assign(new Error("Lookup failed"), { code })]),
     ["HTTPS deadline", Object.assign(new Error("The operation was aborted", { cause: new QuantityProviderRequestTimeoutError() }), { code: "ABORT_ERR" })],
   ])("keeps a proved pre-publication %s on automatic retry", async (_name, failure) => {
     const f = await fixture();
