@@ -8,7 +8,7 @@ import { resolveEbayPublicationTarget } from "../../ebay-publication-completion.
 import { syncContentIntentHash } from "../../ebay-listing-sync-content";
 import { syncIdentity, syncProviderFixture } from "../fixtures/ebay-listing-sync.fixture";
 
-async function fixture() {
+async function fixture(automaticRecovery?: ConstructorParameters<typeof EbayPublicationCompletionExecution>[4]) {
   const base = syncProviderFixture();
   let published = false; let visible = true;
   const source: EbayListingSyncIdentity = { ...syncIdentity, groupKey: null,
@@ -51,7 +51,7 @@ async function fixture() {
     await work(); stages.push(`done:${key}`);
     if (key === "publish") context.publicationWriteCompleted = true;
   });
-  const executor = new EbayPublicationCompletionExecution(prepare, recovery, new EbayMarketplaceListingConnector(), compatibility);
+  const executor = new EbayPublicationCompletionExecution(prepare, recovery, new EbayMarketplaceListingConnector(), compatibility, automaticRecovery);
   return { ...base, source, prepare, recovery, context, bind, compatibility, stages, assertInventoryReady,
     run: () => executor.execute(source, stage, null, bind, context),
     setVisibility: (value: boolean) => { visible = value; }, setPublished: () => { published = true; } };
@@ -121,6 +121,69 @@ describe("saved eBay publication completion", () => {
     // Content still differs; verification waits without rewriting accepted work.
     await expect(f.run()).rejects.toMatchObject({ code: "EBAY_PUBLICATION_READBACK_PENDING" });
     expect(f.client.publishOffer).not.toHaveBeenCalled(); expect(f.client.updateOffer).not.toHaveBeenCalled();
+  });
+  it("resumes the exact rejected publication with current photos and the existing offer after saving rejection proof", async () => {
+    const f = await fixture();
+    f.context.publicationWriteStarted = true;
+    f.context.recoverRejectedPublicationWrite = vi.fn(async () => true);
+    const prepared = await f.prepare();
+    prepared.draft.inventoryItems[0].payload.product!.imageUrls = ["https://example.com/current-product-photo.jpg"];
+    expect((await f.run()).synced).toBe(1);
+    expect(f.context.recoverRejectedPublicationWrite).toHaveBeenCalledWith(expect.objectContaining({
+      variants: [expect.objectContaining({ sku: "P5", offerId: "offer-101", listingId: null })],
+    }));
+    expect(vi.mocked(f.context.recoverRejectedPublicationWrite).mock.invocationCallOrder[0]).toBeLessThan(
+      vi.mocked(f.client.createOrReplaceInventoryItem).mock.invocationCallOrder[0]);
+    expect(f.currentItem().product.imageUrls).toEqual(["https://example.com/current-product-photo.jpg"]);
+    expect(f.client.createOffer).not.toHaveBeenCalled();
+    expect(f.client.publishOffer).toHaveBeenCalledExactlyOnceWith("offer-101");
+  });
+  it("retains a started publication when its HTTP evidence cannot prove rejection", async () => {
+    const f = await fixture();
+    f.context.publicationWriteStarted = true;
+    f.context.recoverRejectedPublicationWrite = vi.fn(async () => false);
+    await expect(f.run()).rejects.toMatchObject({ code: "EBAY_PUBLICATION_RESPONSE_UNCERTAIN" });
+    expect(f.client.publishOffer).not.toHaveBeenCalled();
+    expect(f.client.updateOffer).not.toHaveBeenCalled();
+  });
+  it("does not write if the rejection checkpoint cannot commit", async () => {
+    const f = await fixture();
+    f.context.publicationWriteStarted = true;
+    f.context.recoverRejectedPublicationWrite = vi.fn(async () => { throw new Error("rejection receipt rollback"); });
+    await expect(f.run()).rejects.toThrow("rejection receipt rollback");
+    expect(f.client.publishOffer).not.toHaveBeenCalled();
+    expect(f.client.updateOffer).not.toHaveBeenCalled();
+  });
+  it("records a current refusal and preserves the provider's actionable error instead of reporting uncertainty", async () => {
+    const f = await fixture();
+    const rejected = new EbayListingSyncError("EBAY_SHIPPING_POLICY_REJECTED", "eBay rejected the shipping policy.");
+    vi.mocked(f.client.publishOffer).mockRejectedValue(rejected);
+    f.context.recoverRejectedPublicationWrite = vi.fn(async () => true);
+    await expect(f.run()).rejects.toBe(rejected);
+    expect(f.context.recoverRejectedPublicationWrite).toHaveBeenCalledOnce();
+    expect(f.client.publishOffer).toHaveBeenCalledOnce();
+  });
+  it("uses automatic stock recovery when a saved publication is already live without publishing again", async () => {
+    const recover = vi.fn(async () => ({ busy: false, superseded: ["17032"], unresolved: [], watchId: "1" }));
+    const f = await fixture({ recover });
+    f.context.jobId = "f52374be-d3aa-4542-a83c-127285c582db";
+    f.context.requestedBy = "operator";
+    f.setPublished();
+    f.recovery.reconcile.mockResolvedValue({ busy: false, resolved: [], unresolved: ["17032"] });
+    expect((await f.run()).synced).toBe(1);
+    expect(recover).toHaveBeenCalledWith(expect.objectContaining({ syncJobId: f.context.jobId, syncRevision: "1" }));
+    expect(f.assertInventoryReady).toHaveBeenCalledWith({ commandKey: f.context.jobId, actor: "operator" });
+    expect(f.client.createOrReplaceInventoryItem).toHaveBeenCalledOnce();
+    expect(f.client.publishOffer).not.toHaveBeenCalled();
+  });
+  it("never requests rejection recovery after accepted publication while visibility is delayed", async () => {
+    const f = await fixture();
+    f.setVisibility(false);
+    await expect(f.run()).rejects.toMatchObject({ code: "EBAY_PUBLICATION_READBACK_PENDING" });
+    f.context.recoverRejectedPublicationWrite = vi.fn(async () => true);
+    await expect(f.run()).rejects.toMatchObject({ code: "EBAY_PUBLICATION_READBACK_PENDING" });
+    expect(f.context.recoverRejectedPublicationWrite).not.toHaveBeenCalled();
+    expect(f.client.publishOffer).toHaveBeenCalledOnce();
   });
   it("refuses regrouping between Finish Publishing review and execution", async () => {
     const f = await fixture(); f.source.groupKey = "REVIEWED-GROUP";

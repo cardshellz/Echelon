@@ -6,13 +6,13 @@ const oldJob = { id: "543b9237-920d-4786-a950-31c6fe941c8f", productId: 1, opera
   code: "EBAY_PUBLICATION_STOCK_REVIEW_REQUIRED", message: "The previous publication stopped before stock preparation.",
   nextAttemptAt: "2026-10-12T12:00:00.000Z", updatedAt: "2026-10-12T12:00:00.000Z" };
 const queuedJob = { ...oldJob, id: "1a1300a8-0586-4905-9220-5e72e9d48a4a", state: "queued", code: null, message: null };
-const queuedResponse = { results: [{ productName: "55PT Toploader Combo Pack", productId: 1, variantCount: 2, success: false, status: "queued", job: queuedJob }],
-  summary: { succeeded: 0, failed: 0, skipped: 0, queued: 1, total: 1 }, cancelled: false };
+const queuedResponse = { synced: 0, priceChanges: 0, qtyChanges: 0, policyChanges: 0, errors: 0,
+  pending: 1, details: [], jobs: [queuedJob] };
 async function setup(page: Page, code = oldJob.code, message = oldJob.message) {
   const feed = await setupEbayChannelPage(page);
   feed.jobs = [{ ...oldJob, code, message }]; feed.feedStatus = "error"; feed.externalListingId = null;
-  const requests: { productIds: number[]; commands: { productId: number; commandKey: string }[] }[] = [];
-  await page.route("**/api/ebay/listings/push", route => {
+  const requests: { commandKey: string }[] = [];
+  await page.route("**/api/ebay/listings/sync-product/1", route => {
     requests.push(route.request().postDataJSON()); feed.jobs = [queuedJob];
     return route.fulfill({ json: queuedResponse });
   });
@@ -20,13 +20,15 @@ async function setup(page: Page, code = oldJob.code, message = oldJob.message) {
   return { feed, requests };
 }
 
-test("channel selection publishes through the saved workflow without a second inventory approval", async ({ page }, info) => {
+test("channel selection resumes its saved publication through normal Sync without a second inventory approval", async ({ page }, info) => {
   const { feed, requests } = await setup(page);
   await page.getByRole("button", { name: "Retry publishing", exact: true }).click();
-  const dialog = page.getByRole("dialog");
-  await expect(dialog).toContainText("Publication is not yet confirmed.");
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  await expect(page.getByRole("status", { name: "Sync status for 55PT Toploader Combo Pack" })).toContainText("publication and current pictures");
   await expect(page.getByRole("button", { name: "Connect stock and publish", exact: true })).toHaveCount(0);
-  expect(requests).toEqual([{ productIds: [1], commands: [{ productId: 1, commandKey: expect.stringMatching(/^[a-f0-9-]{36}$/) }] }]);
+  expect(requests).toEqual([{ commandKey: expect.stringMatching(/^[a-f0-9-]{36}$/) }]);
+  await page.getByRole("button", { name: "View publishing status", exact: true }).filter({ visible: true }).click();
+  const dialog = page.getByRole("dialog");
   await dialog.screenshot({ path: info.outputPath("normal-publication-stock-preparation.png") });
   feed.jobs = [{ ...queuedJob, state: "completed" }];
   await dialog.getByRole("button", { name: "Refresh publishing status", exact: true }).click();
@@ -43,23 +45,23 @@ test("an older stock-enrollment action enters normal publishing and preserves it
   await page.evaluate(value => sessionStorage.setItem("ebay:publication-stock:1", JSON.stringify(value)), prior);
   await page.reload();
   await page.getByRole("button", { name: "Review stock setup", exact: true }).click();
-  await expect(page.getByRole("dialog")).toContainText("Publication is not yet confirmed.");
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  await expect(page.getByRole("status", { name: "Sync status for 55PT Toploader Combo Pack" })).toContainText("publication and current pictures");
   expect(await page.evaluate(() => JSON.parse(sessionStorage.getItem("ebay:publication-stock:1")!))).toEqual(prior);
   expect(requests).toHaveLength(1); expect(feed.unexpected).toEqual([]); expect(feed.errors).toEqual([]);
 });
 
 test("a lost normal publication response retries the exact command after automatic stock preparation", async ({ page }) => {
   const { feed, requests } = await setup(page); let accept = false;
-  await page.route("**/api/ebay/listings/push", route => {
+  await page.route("**/api/ebay/listings/sync-product/1", route => {
     requests.push(route.request().postDataJSON());
     if (!accept) return route.abort("failed");
     feed.jobs = [queuedJob]; return route.fulfill({ json: queuedResponse });
   });
   await page.getByRole("button", { name: "Retry publishing", exact: true }).click();
-  const dialog = page.getByRole("dialog");
-  await expect(dialog.getByRole("button", { name: "Retry saved publishing requests", exact: true })).toBeEnabled();
-  accept = true; await dialog.getByRole("button", { name: "Retry saved publishing requests", exact: true }).click();
-  await expect(dialog).toContainText("Publication is not yet confirmed.");
+  await expect(page.getByRole("button", { name: "Retry this request", exact: true })).toBeEnabled();
+  accept = true; await page.getByRole("button", { name: "Retry this request", exact: true }).click();
+  await expect(page.getByRole("status", { name: "Sync status for 55PT Toploader Combo Pack" })).toContainText("publication and current pictures");
   expect(requests).toHaveLength(2); expect(requests[1]).toEqual(requests[0]);
   expect(feed.errors).toEqual([]); expect(feed.unexpected).toEqual([]);
 });

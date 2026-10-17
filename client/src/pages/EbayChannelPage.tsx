@@ -197,6 +197,7 @@ interface FeedItem {
   missingItems: string[];
   missingAspects: string[];
   isListed: boolean;
+  canSyncExistingListing?: boolean;
   isExcluded: boolean;
   syncError: string | null;
   inventoryIssue?: EbayListingIssue | null;
@@ -809,10 +810,6 @@ export default function EbayChannelPage() {
     syncProductMutation.mutate({ productId, commandKey });
   };
 
-  const handlePublicationReview = (item: FeedItem) => {
-    setRecoveryTarget({ productId: item.id, name: item.name, jobId: null, issue: null, mode: "mapping" });
-  };
-
   const clearUntrackedLocalIssue = (productId: number) => {
     setLocalSyncIssues(previous => {
       // Mapping/recovery completion proves its own command only. An unrelated
@@ -842,8 +839,10 @@ export default function EbayChannelPage() {
       if (job.operation === "withdraw" || ["queued", "running", "recovering", "completed"].includes(job.state)) {
         setPublicationStatusTarget({ jobId: job.id, productId: job.productId, name: recoveryTarget.name });
         setRecoveryTarget(null);
-      } else if (job.operation === "publish") handlePushSingle(job.productId);
-      else handleSyncProduct(job.productId);
+      } else {
+        setRecoveryTarget(null);
+        handleSyncProduct(job.productId);
+      }
     } catch {
       toast({ title: "Saved request could not be checked", description: "Refresh this recovery view and try again. No new listing operation was sent.", variant: "destructive" });
     } finally { setCheckingRecovery(false); }
@@ -879,7 +878,7 @@ export default function EbayChannelPage() {
       // older job's operation must not redirect that retry to publish/withdraw.
       if (commandKey) handleSyncProduct(productId, commandKey);
       else if (latestSyncJobs.get(productId)?.operation === "withdraw") retryWithdrawal(productId);
-      else if (latestSyncJobs.get(productId)?.operation === "publish" && latestSyncJobs.get(productId)?.state !== "completed") handlePushSingle(productId);
+      else if (latestSyncJobs.get(productId)?.operation === "publish" && latestSyncJobs.get(productId)?.state !== "completed") handleSyncProduct(productId);
       // A missing aggregate listing ID can mean conflicting saved identities,
       // not a new listing. Keep a sync retry in the existing-listing owner so
       // its fresh identity check reports the conflict without publishing.
@@ -1143,7 +1142,7 @@ export default function EbayChannelPage() {
   }, [feedData, latestSyncJobs, localSyncIssues]);
 
   const existingListingCount = (feedData?.feed ?? []).filter((item) =>
-    item.externalListingId && ["listed", "error"].includes(item.status),
+    item.canSyncExistingListing ?? Boolean(item.externalListingId && ["listed", "error"].includes(item.status)),
   ).length;
 
   const storeCats = storeCatsData?.categories || [];
@@ -1335,7 +1334,7 @@ export default function EbayChannelPage() {
           <Separator />
 
           {/* Default Business Policies */}
-          <div>
+          <div id="business-policies">
             <Label className="text-xs uppercase tracking-wider text-muted-foreground font-medium">Default Business Policies</Label>
             {!config?.connected ? (
               <p className="text-sm text-muted-foreground mt-2">Connect to eBay to load policies.</p>
@@ -2078,13 +2077,17 @@ export default function EbayChannelPage() {
                       const syncPending = syncJob && ["queued","running","recovering"].includes(syncJob.state);
                       const publicationPending = syncPending && syncJob?.operation === "publish";
                       const withdrawalJob = syncJob?.operation === "withdraw" ? syncJob : null;
+                      const withdrawalUnfinished = withdrawalJob != null && withdrawalJob.state !== "completed";
                       const savedSyncIssue = syncJob ? resolveEbayListingJobIssue(syncJob) : null;
                       const syncIssue = localSyncIssues.get(item.id)?.issue ?? (syncJob && ["awaiting_evidence", "needs_attention"].includes(syncJob.state)
                         ? savedSyncIssue
                         : item.status === "error" && item.syncError && !syncPending
                           ? resolveEbayListingIssue({ message: item.syncError, productId: item.id }) : null);
-                      const canSyncExistingListing = !syncIssue || (syncIssue.retryable && syncIssue.action.kind === "retry_sync"
-                        && (localSyncIssues.get(item.id)?.commandKey != null || !syncJob?.operation || syncJob.operation === "sync"));
+                      // Sync admission checks saved responses and current settings;
+                      // requesting that check does not bypass the provider-write guard.
+                      const canSyncExistingListing = !withdrawalUnfinished && (!syncIssue || (syncIssue.retryable && syncIssue.action.kind === "retry_sync")
+                        || ["EBAY_SYNC_RESPONSE_EVIDENCE_REQUIRED", "PUBLICATION_PRIOR_OUTCOME_UNRESOLVED",
+                          "PUBLICATION_REQUEST_EVIDENCE_INCOMPLETE", "EBAY_SHIPPING_POLICY_REJECTED", "EBAY_QUANTITY_REJECTED"].includes(syncIssue.code));
                       const syncExistingListing = () => handleSyncProduct(item.id, localSyncIssues.get(item.id)?.commandKey ?? undefined);
                       const isExcluded = item.isExcluded;
                       const isExpanded = expandedProducts.has(item.id);
@@ -2215,8 +2218,13 @@ export default function EbayChannelPage() {
                               </Badge>
                               {publicationPending && <><Badge className="bg-blue-600 text-xs">Publishing</Badge><Button variant="outline" size="sm" className="min-h-[44px] px-3 text-xs" onClick={event => { event.stopPropagation(); setPublicationStatusTarget({ jobId: syncJob.id, productId: item.id, name: item.name }); }}>View publishing status</Button></>}
                               {item.status === "publication_incomplete" && !publicationPending && <>
-                                <Badge variant="outline" className="text-amber-700 border-amber-300 text-xs">Publication needs checking</Badge>
-                                <Button variant="outline" size="sm" className="min-h-[44px] px-3 text-xs" disabled={!!syncPending} onClick={(event) => { event.stopPropagation(); handlePublicationReview(item); }}>Check publication</Button>
+                                <Badge variant="outline" className="text-amber-700 border-amber-300 text-xs">Publication incomplete</Badge>
+                                <Button variant="outline" size="sm" className="min-h-[44px] px-3 text-xs"
+                                  disabled={syncingProductIds.has(item.id) || !!syncPending || withdrawalUnfinished || syncJobsQuery.isError || syncJobsQuery.isPending}
+                                  onClick={(event) => { event.stopPropagation(); syncExistingListing(); }} title="Sync this listing">
+                                  {syncingProductIds.has(item.id) ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
+                                  <span className="ml-1">Sync</span>
+                                </Button>
                               </>}
                               {item.status === "ready" && !publicationPending && (
                                 <>
@@ -2357,8 +2365,13 @@ export default function EbayChannelPage() {
                               <div className="flex items-center justify-center gap-1.5 flex-wrap">
                                 {publicationPending && <><Badge className="bg-blue-600 text-xs">Publishing</Badge><Button variant="outline" size="sm" className="min-h-9 text-xs" onClick={event => { event.stopPropagation(); setPublicationStatusTarget({ jobId: syncJob.id, productId: item.id, name: item.name }); }}>View publishing status</Button></>}
                                 {item.status === "publication_incomplete" && !publicationPending && <>
-                                  <Badge variant="outline" className="text-amber-700 border-amber-300 text-xs">Publication needs checking</Badge>
-                                  <Button variant="outline" size="sm" className="min-h-9 text-xs" disabled={!!syncPending} onClick={(event) => { event.stopPropagation(); handlePublicationReview(item); }}>Check publication</Button>
+                                  <Badge variant="outline" className="text-amber-700 border-amber-300 text-xs">Publication incomplete</Badge>
+                                  <Button variant="outline" size="sm" className="min-h-9 text-xs"
+                                    disabled={syncingProductIds.has(item.id) || !!syncPending || withdrawalUnfinished || syncJobsQuery.isError || syncJobsQuery.isPending}
+                                    onClick={(event) => { event.stopPropagation(); syncExistingListing(); }} title="Sync this listing">
+                                    {syncingProductIds.has(item.id) ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
+                                    <span className="ml-1">Sync</span>
+                                  </Button>
                                 </>}
                                 {item.status === "ready" && !publicationPending && (
                                   <>

@@ -6,10 +6,16 @@ import { EBAY_RECONCILIATION_INTERVAL_MS, EBAY_RECONCILIATION_LEASE_MS,
 } from "../application/ebay-publication-reconciliation.service";
 import { ebayReconciliationCommandKey } from "../domain/ebay-automatic-publication-recovery";
 import { quantityPublicationScopeSchema } from "../domain/quantity-publication-admission";
-import { createTransactionScopedInventoryPublicationService } from "./inventory-availability-runtime-publication.repository";
+import { createTransactionScopedInventoryPublicationService, LATEST_PUBLICATION_ROW_SQL } from "./inventory-availability-runtime-publication.repository";
 import { reconciliationFailure, withReconciliationTransaction } from "./ebay-publication-reconciliation.persistence";
 
 const BACKOFF_BASE_MS = 60_000;
+// These conditions are retried by the saved watch; they require no user decision.
+const RETRYABLE_RECONCILIATION_CODES = new Set([
+  "PUBLICATION_RECONCILIATION_PLAN_CHANGED",
+  "INVENTORY_PUBLICATION_TARGET_BUSY",
+  "PUBLICATION_SCOPE_BUSY",
+]);
 type Failure = { code: string; message: string; commandConsumed: boolean; contentJobId?: string };
 interface WatchRow {
   id: string; revision: string; cycle: string; attempts: number; lease_token: string;
@@ -117,9 +123,10 @@ export class PostgresEbayPublicationReconciliationRepository implements EbayPubl
           ebayReconciliationCommandKey(claim.watchId, claim.cycle), failure.contentJobId ?? null, failure.code, failure.message, now.toISOString()]);
       }
       const delay = Math.min(EBAY_RECONCILIATION_INTERVAL_MS, BACKOFF_BASE_MS * 2 ** Math.min(claim.attempts - 1, 4));
-      await client.query(`UPDATE inventory.ebay_publication_reconciliation_watches SET cycle=cycle+$2,state='needs_attention',
+      await client.query(`UPDATE inventory.ebay_publication_reconciliation_watches SET cycle=cycle+$2,state=$7,
         next_check_at=$3,last_error_code=$4,last_error_message=$5,updated_at=$6,lease_token=NULL,lease_expires_at=NULL WHERE id=$1`,
-      [claim.watchId, failure.commandConsumed ? 1 : 0, new Date(now.getTime() + delay).toISOString(), failure.code, failure.message, now.toISOString()]);
+      [claim.watchId, failure.commandConsumed ? 1 : 0, new Date(now.getTime() + delay).toISOString(), failure.code, failure.message, now.toISOString(),
+        RETRYABLE_RECONCILIATION_CODES.has(failure.code) ? "pending" : "needs_attention"]);
     });
   }
 
@@ -156,7 +163,8 @@ export class PostgresEbayPublicationReconciliationRepository implements EbayPubl
       const priority = { verified: 0, pending: 1, needs_attention: 2 } as const;
       for (const row of rows) {
         const stale = row.state === "verified" && !row.still_current;
-        const status: EbayPublicationReconciliationStatus = { state: stale ? "pending" : row.state, checkedAt: row.checked_at?.toISOString() ?? null,
+        const retrying = row.state === "needs_attention" && row.last_error_code !== null && RETRYABLE_RECONCILIATION_CODES.has(row.last_error_code);
+        const status: EbayPublicationReconciliationStatus = { state: stale || retrying ? "pending" : row.state, checkedAt: row.checked_at?.toISOString() ?? null,
           nextCheckAt: row.next_check_at.toISOString(), code: stale ? "PUBLICATION_RECONCILIATION_PLAN_CHANGED" : row.last_error_code,
           message: stale ? "Current inventory changed after the last stock check. The saved recurring check will verify its new quantity." : row.last_error_message };
         const previous = statuses[row.job_id];
@@ -203,9 +211,10 @@ export class PostgresEbayPublicationReconciliationRepository implements EbayPubl
       if (candidates.length !== 1) throw reconciliationFailure("PUBLICATION_RECONCILIATION_SCOPE_CHANGED",
         "The saved recovery's exact catalog, eBay account, or SKU mapping is no longer current. Review that listing's inventory connection.");
       const intent = candidates[0]!;
-      const row = (await client.query<{ id: string; desired_revision: string; desired_quantity: string }>(`SELECT id::text,desired_revision::text,desired_quantity::text
-        FROM inventory.inventory_publication_outbox WHERE publication_target_id=$1 AND product_variant_id=$2
-        ORDER BY desired_revision DESC LIMIT 1`, [intent.publicationTargetId, intent.productVariantId])).rows[0];
+      // Use the publisher's numeric revision selection. A second query previously
+      // sorted the text alias and selected revision 9 ahead of 10, stalling recovery.
+      const row = (await client.query<{ id: string; desired_revision: string; desired_quantity: string }>(
+        LATEST_PUBLICATION_ROW_SQL, [intent.publicationTargetId, intent.productVariantId])).rows[0];
       if (!row || row.desired_quantity !== intent.desiredQuantity) throw reconciliationFailure("PUBLICATION_RECONCILIATION_PLAN_CHANGED", "The canonical stock plan changed before its exact readback could be selected.");
       targets.push({ outboxId: row.id, desiredRevision: row.desired_revision, desiredQuantity: row.desired_quantity,
         publicationTargetId: intent.publicationTargetId, publicationTargetRevision: intent.publicationTargetRevision,

@@ -10,6 +10,7 @@ import { resolveChannelPrice } from "../../modules/channels/infrastructure/ebay-
 import {
   isProductEffectivelyListed,
   isVariantEffectivelyListed,
+  isExistingEbayListingSyncCandidate,
 } from "../../modules/channels/ebay-listing-eligibility";
 import {
   EbayMarketplaceListingConnector,
@@ -117,7 +118,7 @@ interface ListingFeedVariant {
         // Fetch variants for all products in the feed
         const productIds = result.rows.map((r: any) => r.id);
         const variantsByProduct = new Map<number, ListingFeedVariant[]>();
-        const listingStatesByProduct = new Map<number, EbayFeedVariantListingState[]>();
+        const listingStatesByProduct = new Map<number, Array<EbayFeedVariantListingState & { externalOfferId: string | null }>>();
         const inventoryManagedVariantIds = new Set<number>();
         if (productIds.length > 0) {
           const varResult = await client.query(`
@@ -135,6 +136,7 @@ interface ListingFeedVariant {
               pv.ebay_return_policy_override AS variant_return_override,
               pv.ebay_payment_policy_override AS variant_payment_override,
               cl.id AS listing_id, cl.external_product_id AS external_listing_id,
+              cl.external_variant_id AS external_offer_id,
               cl.sync_status AS listing_status, cl.sync_error AS listing_sync_error
             FROM product_variants pv
             LEFT JOIN channels.channel_variant_overrides cvo ON cvo.product_variant_id = pv.id AND cvo.channel_id = $2
@@ -152,6 +154,7 @@ interface ListingFeedVariant {
             if (!listingStatesByProduct.has(pid)) listingStatesByProduct.set(pid, []);
             listingStatesByProduct.get(pid)!.push({ variantId: v.id, listingRecordId: v.listing_id,
               externalListingId: v.external_listing_id?.trim() || null,
+              externalOfferId: v.external_offer_id?.trim() || null,
               syncStatus: v.listing_status, syncError: v.listing_sync_error });
             if (!variantsByProduct.has(pid)) variantsByProduct.set(pid, []);
             variantsByProduct.get(pid)!.push({
@@ -274,6 +277,21 @@ interface ListingFeedVariant {
           const variants = listingVariants.map((variant) => ({ ...variant,
             inventoryQuantity: inventory.quantities.get(variant.id) ?? null }));
           const includedVariants = variants.filter((v: any) => v.effectivelyListed);
+          const includedVariantIds = new Set(includedVariants.map(variant => variant.id));
+          const canSyncExistingListing = (listingStatesByProduct.get(row.id) ?? []).some(state =>
+            isExistingEbayListingSyncCandidate({
+              productActive: row.is_active,
+              // The variant query admits only active, sellable catalog rows.
+              variantActive: true,
+              salesEligibility: "sellable",
+              productExcluded: row.ebay_listing_excluded,
+              productOverrideIsListed: row.product_override_is_listed,
+              typeListingEnabled: row.type_listing_enabled,
+              variantExcluded: !includedVariantIds.has(state.variantId),
+              syncStatus: state.syncStatus,
+              externalListingId: state.listingRecordId === null ? null : state.externalListingId,
+              externalOfferId: state.listingRecordId === null ? null : state.externalOfferId,
+            }));
           const listingState = resolveEbayFeedListingState(listingStatesByProduct.get(row.id) ?? [], includedVariants.map((variant: { id: number }) => variant.id));
           const isListed = listingState.isListed;
           const isEnded = listingState.isEnded;
@@ -350,6 +368,7 @@ interface ListingFeedVariant {
             missingPriceSkus,
             missingAspects,
             isListed,
+            canSyncExistingListing,
             isExcluded,
             syncError: listingSyncError,
             inventoryIssue: inventory.issue,

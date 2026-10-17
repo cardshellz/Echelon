@@ -106,9 +106,14 @@ describe("listing recovery application boundary", () => {
     const f = fixture(); const result = await f.service.inspect(id, 1);
     expect(result.sourceIdentity?.groupKey).toBe("PACK");
     expect(result.providerIdentity?.groupKey).toBe("ACTUAL-EBAY-GROUP");
-    expect(result.job.issue?.action.kind).toBe("check_recovery");
+    expect(result.job.issue).toMatchObject({
+      retryable: true,
+      action: { kind: "retry_sync", label: "Sync" },
+      diagnosticAction: { kind: "check_recovery", label: "Saved request details" },
+    });
     expect(result.job).not.toHaveProperty("ownerToken");
     expect(f.recovery.resume).not.toHaveBeenCalled();
+    expect(f.enqueue).not.toHaveBeenCalled();
   });
   it("previews only exact observed provider scopes and carries real local variant identity", async () => {
     const f = fixture(); await f.service.preview(id, 1);

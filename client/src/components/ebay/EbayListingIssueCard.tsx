@@ -12,6 +12,7 @@ interface EbayListingIssueCardProps {
 /** Present the server's recovery decision without inventing client-side retry policy. */
 export function EbayListingIssueCard({ issue, onAction, busy = false, showTitle = true }: EbayListingIssueCardProps) {
   const [copyResult, setCopyResult] = useState<string | null>(null);
+  const diagnosticAction = issue.diagnosticAction;
   const safeHref = issue.action.href?.startsWith("/") && !issue.action.href.startsWith("//")
     ? issue.action.href : null;
   const copyDetails = async () => {
@@ -42,6 +43,10 @@ export function EbayListingIssueCard({ issue, onAction, busy = false, showTitle 
         ) : onAction && (issue.action.kind !== "retry_sync" || issue.retryable) ? (
           <Button variant="outline" size="sm" className="min-h-[44px] whitespace-normal h-auto py-2" disabled={busy} onClick={() => onAction(issue)}>{busy ? "Checking…" : issue.action.label}</Button>
         ) : null}
+        {diagnosticAction && onAction && <Button variant="ghost" size="sm" className="min-h-[44px] whitespace-normal h-auto py-2"
+          disabled={busy} onClick={() => onAction({ ...issue, retryable: false, action: diagnosticAction, diagnosticAction: undefined })}>
+          {diagnosticAction.label}
+        </Button>}
       </div>
       {copyResult && <p role="status" className="text-xs">{copyResult}</p>}
       <details className="text-xs text-muted-foreground">
