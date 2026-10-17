@@ -9,20 +9,24 @@ import { syncStageHash, type EbayListingSyncIdentity } from "./ebay-listing-sync
 export function ebayPublicationRequestJournalContract(target: {
   groupKey: string | null; marketplaceId: string; offerId?: string | null;
 }): EbayRequestJournalContract {
-  const path = target.groupKey === null
-    ? `/sell/inventory/v1/offer/${target.offerId}/publish`
+  const parsed = z.object({ groupKey: z.string().min(1).max(234).refine(value => value.trim() === value).nullable(),
+    marketplaceId: z.string().regex(/^EBAY_[A-Z_]{2,30}$/), offerId: z.string().regex(/^[^/?#\s]{1,255}$/).nullable().optional(),
+  }).parse(target);
+  const path = parsed.groupKey === null
+    ? `/sell/inventory/v1/offer/${encodeURIComponent(parsed.offerId ?? "")}/publish`
     : "/sell/inventory/v1/offer/publish_by_inventory_item_group";
-  if (target.groupKey === null && !target.offerId) throw new Error("A publication journal contract requires an exact offer.");
+  if (parsed.groupKey === null && !parsed.offerId) throw new Error("A publication journal contract requires an exact offer.");
   return ebayRequestJournalContractSchema.parse({ version: 1, provider: "ebay", method: "POST", path,
-    requestHash: syncStageHash(target.groupKey === null ? null : { inventoryItemGroupKey: target.groupKey, marketplaceId: target.marketplaceId }) });
+    requestHash: syncStageHash(parsed.groupKey === null ? null : { inventoryItemGroupKey: parsed.groupKey, marketplaceId: parsed.marketplaceId }) });
 }
 
 export function validateEbayPublicationStageContract(input: unknown, target: EbayListingSyncIdentity): EbayRequestJournalContract {
   const contract = ebayRequestJournalContractSchema.parse(input);
   // A new single offer is created after target binding. Its exact ID is first
   // available at the publish stage and must still match fresh recovery readback.
+  const encodedOfferId = contract.path.match(/^\/sell\/inventory\/v1\/offer\/([^/?#\s]+)\/publish$/)?.[1];
   const offerId = target.groupKey === null && target.variants.length === 1
-    ? target.variants[0].offerId ?? contract.path.match(/^\/sell\/inventory\/v1\/offer\/([^/?#\s]+)\/publish$/)?.[1] : null;
+    ? target.variants[0].offerId ?? (encodedOfferId ? decodeURIComponent(encodedOfferId) : null) : null;
   const expected = ebayPublicationRequestJournalContract({ groupKey: target.groupKey, marketplaceId: target.marketplaceId, offerId });
   if (syncStageHash(contract) !== syncStageHash(expected)) throw new Error("The publication journal contract differs from its exact target.");
   return contract;

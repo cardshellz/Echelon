@@ -65,6 +65,13 @@ describe("durable publication-stage journal contract", () => {
     expect(validateEbayPublicationStageContract(contract, target)).toEqual(contract);
     expect(() => ebayPublicationRequestJournalContract(target)).toThrow("exact offer");
   });
+  it.each(["offer:123", "offer%123"])("uses the protocol's encoded request path for %s", offerId => {
+    const target = { ...syncIdentity, groupKey: null, variants: [{ ...syncIdentity.variants[0], offerId }] };
+    const contract = ebayPublicationRequestJournalContract({ ...target, offerId });
+    expect(contract.path).toBe(`/sell/inventory/v1/offer/${encodeURIComponent(offerId)}/publish`);
+    expect(validateEbayPublicationStageContract(contract, target)).toEqual(contract);
+    expect(validateEbayPublicationStageContract(contract, { ...target, variants: [{ ...target.variants[0], offerId: null }] })).toEqual(contract);
+  });
   it.each([
     { version: 2 }, { method: "GET" }, { provider: "other" }, { requestHash: "b".repeat(64) },
     { path: "/sell/inventory/v1/bulk_update_price_quantity" },

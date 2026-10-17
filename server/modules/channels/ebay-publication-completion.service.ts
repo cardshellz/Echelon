@@ -9,6 +9,7 @@ import { assertEbayPublicationTargetUnchanged, resolveEbayPublicationTarget } fr
 import type { EbayListingConnectorDraft, EbayMarketplaceListingConnector, EbayPublishedListingIdentityResolver } from "./listing-connectors/ebay-listing.connector";
 import { recoverPriorEbayListingRequests, type EbayListingRequestRecovery } from "./ebay-listing-request-recovery";
 import { EbayApiRequestError } from "./adapters/ebay/ebay-api-error";
+import { QuantityProviderRequestTimeoutError } from "./provider-request-limits";
 
 export interface PreparedEbayPublication extends PreparedEbayListingSync {
   sourceIdentity: EbayListingSyncIdentity;
@@ -44,7 +45,8 @@ export class EbayPublicationCompletionExecution implements EbayListingSyncExecut
     await this.assertCompatible(source, prepared.inspection, target);
 
     // A retained start is a delivery barrier, not proof that eBay accepted it.
-    // Inventory can prove rejection or that preparation never sent a mutation.
+    // Inventory can prove rejection or that publication was never sent, even
+    // when an earlier stock preparation has its own completed request receipt.
     // The job owner commits that evidence before continuing the same request.
     let publicationWriteStarted = context.publicationWriteStarted;
     if (publicationWriteStarted && !context.publicationWriteCompleted && !context.publicationAccepted
@@ -145,8 +147,12 @@ export class EbayPublicationCompletionExecution implements EbayListingSyncExecut
 function isTemporaryPublicationPreflightFailure(error: unknown): boolean {
   if (error instanceof EbayApiRequestError) return error.statusCode === 429
     || (error.statusCode !== undefined && error.statusCode >= 500 && error.statusCode <= 599);
+  // Node HTTPS wraps this application's deadline reason in AbortError. A
+  // generic cancellation is not enough; only our explicit deadline is transient.
+  if (error instanceof Error && "code" in error && error.code === "ABORT_ERR"
+    && error.cause instanceof QuantityProviderRequestTimeoutError) return true;
   return error instanceof Error && "code" in error && typeof error.code === "string"
-    && ["ECONNRESET", "ETIMEDOUT", "ECONNREFUSED", "QUANTITY_PROVIDER_REQUEST_TIMEOUT",
+    && ["ECONNRESET", "ETIMEDOUT", "ECONNREFUSED", "ENOTFOUND", "EAI_AGAIN", "QUANTITY_PROVIDER_REQUEST_TIMEOUT",
       "EBAY_REGISTRATION_READ_TIMEOUT", "EBAY_REGISTRATION_READ_FAILED"].includes(error.code);
 }
 

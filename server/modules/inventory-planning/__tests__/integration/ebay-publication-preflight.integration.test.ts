@@ -8,7 +8,8 @@ import { cutoverCompositionBaseSql, cutoverCompositionSeedSql, cutoverCompositio
 import { PostgresQuantityPublicationAdmission, quantityPublicationScopeLockKey } from "../../infrastructure/quantity-publication-admission.repository";
 import { PostgresQuantityProviderResponseRecovery } from "../../infrastructure/quantity-provider-response-recovery.repository";
 import { PostgresEbayPublicationRejectionReader, type EbayPublicationRejectionInput } from "../../infrastructure/ebay-publication-rejection.reader";
-import { observeEbayQuantityRequest, recordQuantityProviderResponse, withEbayQuantityRequestJournal } from "../../application/quantity-provider-request-evidence";
+import { observeEbayQuantityRequest, recordQuantityProviderResponse, withEbayQuantityRequestJournal,
+  withEbayQuantityRequestJournalContract } from "../../application/quantity-provider-request-evidence";
 import { preflightEvidenceHash, type EbayRequestJournalContract, type LegacyEbayPublicationPreflightProof } from "../../domain/ebay-publication-preflight";
 import type { QuantityPublicationScope } from "../../domain/quantity-publication-admission";
 import { EbayApiClient } from "../../../channels/adapters/ebay/ebay-api.client";
@@ -28,7 +29,7 @@ dbDescribe.sequential("eBay preflight no-send recovery on disposable PostgreSQL"
     for (const file of ["0709_walmart_quantity_admission.sql", "0716_inventory_publication_reconciliation.sql",
       "0729_ebay_listing_sync_recovery.sql", "0733_ebay_provider_response_finality.sql", "0734_ebay_operator_republication_recovery.sql",
       "0749_quantity_outbox_preflight_completion.sql", "900000008000018120001_ebay_automatic_sync_recovery.sql",
-      "900000011000018270001_ebay_publication_preflight_recovery.sql"]) {
+      "900000011000018230001_ebay_publication_preflight_recovery.sql"]) {
       await database.pool.query(readFileSync(resolve(process.cwd(), "migrations", file), "utf8"));
     }
     await database.pool.query(cutoverCompositionSeedSql);
@@ -176,6 +177,34 @@ dbDescribe.sequential("eBay preflight no-send recovery on disposable PostgreSQL"
     expect((await f.recover(undefined, f.stageContract)).evidence).not.toBeNull();
   });
 
+  it("prevents an old pre-admission callback from writing after its original owner connection dies", async () => {
+    const f = fixture(); f.allowRead(43);
+    const owner = await database.pool.connect();
+    let release!: () => void, entered!: () => void;
+    const held = new Promise<void>(resolve => { release = resolve; });
+    const started = new Promise<void>(resolve => { entered = resolve; });
+    // pg can emit both the administrative shutdown and socket termination.
+    // Retain the listener until this deliberately killed client is discarded.
+    const lost = new Promise<void>(resolve => owner.on("error", () => resolve()));
+    const pid = (await owner.query("SELECT pg_backend_pid() AS pid")).rows[0].pid;
+    f.request.mockImplementationOnce(async () => { entered(); await held;
+      return Response.json({ variantSKUs: f.members.map(member => member.externalInventoryItemId) }); });
+    const assertOwner = vi.fn(async () => { await owner.query("SELECT 1"); });
+    const pending = withEbayQuantityRequestJournalContract(f.stageContract, () => f.publish(), assertOwner);
+    const failed = expect(pending).rejects.toThrow();
+    try {
+      await started;
+      await database.pool.query("SELECT pg_terminate_backend($1)", [pid]);
+      await lost;
+      expect((await f.recover(undefined, f.stageContract)).evidence?.attemptIds).toEqual([]);
+      release(); await failed;
+      expect(assertOwner).toHaveBeenCalledOnce();
+      expect(await f.attempts()).toEqual([]);
+      expect(f.request.mock.calls.filter(([, options]) => options?.method !== "GET")).toEqual([]);
+      await f.publish(); expect(f.publishCount()).toBe(1);
+    } finally { release(); await pending.catch(() => undefined); owner.release(true); }
+  });
+
   it("does not mistake completed same-millisecond preparations for the publish stage", async () => {
     const f = fixture();
     for (const path of [`/sell/inventory/v1/inventory_item/${f.members[0].externalInventoryItemId}`,
@@ -187,6 +216,93 @@ dbDescribe.sequential("eBay preflight no-send recovery on disposable PostgreSQL"
     expect(attempts.slice(0, 3).every(attempt => attempt.state === "succeeded")).toBe(true);
     expect((await f.recover(f.proof)).evidence?.attemptIds).toEqual([attempts[3].id]);
     expect((await f.attempts()).map(attempt => attempt.state)).toEqual(["succeeded", "succeeded", "succeeded", "not_sent"]);
+  });
+
+  it("recovers completed first-member stock followed by a failed second-member read without inventing a no-send quantity outcome", async () => {
+    const f = fixture(); f.allowRead(19);
+    const originalRequest = f.request.getMockImplementation()!;
+    f.request.mockImplementation(async (url, options) => {
+      const parsed = new URL(String(url));
+      if (options?.method === "GET" && parsed.pathname.endsWith("/offer")
+        && parsed.searchParams.get("sku") === f.members[1].externalInventoryItemId) {
+        return Response.json({ errors: [{ errorId: 25001, category: "System", message: "Second lookup failed" }] }, { status: 500 });
+      }
+      return originalRequest(url, options);
+    });
+    await expect(f.publish()).rejects.toThrow("GET /sell/inventory/v1/offer?");
+    const [attempt] = await f.attempts(); expect(attempt.state).toBe("uncertain");
+    const journal = (await database.pool.query(`SELECT to_jsonb(q) AS request,to_jsonb(r) AS result
+      FROM inventory.quantity_provider_requests q JOIN inventory.quantity_provider_request_results r ON r.request_id=q.id
+      WHERE q.attempt_id=$1`, [attempt.id])).rows;
+    expect(journal).toHaveLength(1);
+    const recovered = await f.recover();
+    expect(recovered.evidence).toMatchObject({ attemptIds: [attempt.id], proofs: [], preparations: [{ attemptId: attempt.id,
+      contract: f.stageContract, requests: [{ path: "/sell/inventory/v1/bulk_update_price_quantity", outcome: "completed", requestTerminated: true }] }] });
+    expect(await f.recover()).toEqual(recovered);
+    expect((await f.attempts())[0].record).toMatchObject({ state: "resolved", resolution_basis: "provider_response_terminal" });
+    expect((await database.pool.query("SELECT count(*)::int AS n FROM inventory.quantity_publication_no_request_recoveries WHERE attempt_id=$1", [attempt.id])).rows[0].n).toBe(0);
+    expect((await database.pool.query("SELECT count(*)::int AS n FROM inventory.quantity_publication_response_recoveries WHERE attempt_id=$1", [attempt.id])).rows[0].n).toBe(1);
+    expect((await database.pool.query(`SELECT to_jsonb(q) AS request,to_jsonb(r) AS result
+      FROM inventory.quantity_provider_requests q JOIN inventory.quantity_provider_request_results r ON r.request_id=q.id
+      WHERE q.attempt_id=$1`, [attempt.id])).rows).toEqual(journal);
+    f.request.mockImplementation(originalRequest); f.allowRead(37);
+    await f.publish(); expect(f.publishCount()).toBe(1);
+    const bulk = f.request.mock.calls.filter(([url]) => String(url).endsWith("bulk_update_price_quantity"));
+    expect(bulk).toHaveLength(3);
+    expect(bulk.slice(1).map(([, options]) => JSON.parse(String(options?.body)).requests[0].shipToLocationAvailability.quantity)).toEqual([37, 37]);
+    expect((await f.recover()).evidence).toBeNull();
+  });
+
+  it("rolls back preparation response recovery with its checkpoint transaction and replays the exact proof once", async () => {
+    let fail = true;
+    const f = fixture(faultyPool(sql => fail && sql.includes("SET state='resolved'") ? "before" : null));
+    const publication = { method: "POST", path: groupPath, body: { inventoryItemGroupKey: f.input.groupKey, marketplaceId: "EBAY_US" } };
+    await expect(withEbayQuantityRequestJournal(publication, () => f.admission.runListingGroup(f.group, f.members,
+      async () => { throw new Error("No plan expected"); }, async () => {
+        await observeEbayQuantityRequest({ method: "POST", path: "/sell/inventory/v1/bulk_update_price_quantity", body: { fixture: "first member" } }, async () => {
+          recordQuantityProviderResponse({ outcome: "completed", httpStatus: 200, requestTerminated: true,
+            responseHash: "a".repeat(64), providerRequestId: null, errorCodes: [], retryNotBefore: null, cooldownScope: null });
+        });
+        throw new Error("crash after first stock acknowledgement");
+      }))).rejects.toThrow("crash after first stock acknowledgement");
+    const [before] = await f.attempts();
+    await expect(f.recover()).rejects.toThrow("injected process interruption");
+    expect((await f.attempts())[0].record).toEqual(before.record);
+    expect((await database.pool.query("SELECT count(*)::int AS n FROM inventory.quantity_publication_response_recoveries WHERE attempt_id=$1", [before.id])).rows[0].n).toBe(0);
+    fail = false;
+    const client = await database.pool.connect();
+    try {
+      await client.query("BEGIN");
+      expect((await f.reader.recoverNotSent(f.input, client)).evidence?.preparations).toHaveLength(1);
+      expect((await client.query("SELECT state FROM inventory.quantity_publication_attempts WHERE id=$1", [before.id])).rows[0].state).toBe("resolved");
+      // The channel checkpoint belongs to this same transaction. A failure
+      // after inventory recovery must roll back both its receipt and transition.
+      await client.query("ROLLBACK");
+    } finally { client.release(); }
+    expect((await f.attempts())[0].record).toEqual(before.record);
+    expect((await database.pool.query("SELECT count(*)::int AS n FROM inventory.quantity_publication_response_recoveries WHERE attempt_id=$1", [before.id])).rows[0].n).toBe(0);
+    const proof = await f.recover();
+    expect(proof.evidence?.preparations).toHaveLength(1);
+    expect(await f.recover()).toEqual(proof);
+    expect((await database.pool.query("SELECT count(*)::int AS n FROM inventory.quantity_publication_response_recoveries WHERE attempt_id=$1", [before.id])).rows[0].n).toBe(1);
+  });
+
+  it("does not infer an unsent publication from a stock request whose response was lost", async () => {
+    const f = fixture(); f.allowRead(19);
+    const originalRequest = f.request.getMockImplementation()!;
+    let bulkRequests = 0;
+    f.request.mockImplementation(async (url, options) => {
+      if (String(url).endsWith("bulk_update_price_quantity") && ++bulkRequests === 2) throw new Error("transport response lost");
+      return originalRequest(url, options);
+    });
+    await expect(f.publish()).rejects.toThrow("transport response lost");
+    const [attempt] = await f.attempts(); expect(attempt.state).toBe("uncertain");
+    expect(bulkRequests).toBe(2);
+    expect((await f.recover(undefined, f.stageContract)).evidence).toBeNull();
+    expect(await new PostgresQuantityProviderResponseRecovery(database.pool, clock).reconcile(f.input.scopes))
+      .toEqual({ busy: false, resolved: [], unresolved: [attempt.id] });
+    expect(f.publishCount()).toBe(0);
+    expect((await f.attempts())[0].record).toEqual(attempt.record);
   });
 
   it("keeps old no-send proof replayable after multiple pages of later completed stock updates", async () => {

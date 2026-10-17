@@ -81,7 +81,7 @@ const configured =
         "0737_ebay_publication_completion.sql",
         "0741_ebay_durable_withdrawal.sql",
         "900000008000018120001_ebay_automatic_sync_recovery.sql",
-        "900000011000018270001_ebay_publication_preflight_recovery.sql",
+        "900000011000018230001_ebay_publication_preflight_recovery.sql",
       ])
         await database.pool.query(
           readFileSync(resolve(process.cwd(), "migrations", file), "utf8"),

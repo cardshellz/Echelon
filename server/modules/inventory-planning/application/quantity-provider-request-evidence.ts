@@ -47,7 +47,7 @@ export class QuantityProviderEvidenceError extends Error {
 interface RequestObservation { response: QuantityProviderResponseEvidence | null }
 const currentRequest = new AsyncLocalStorage<RequestObservation>();
 const currentOwner = new AsyncLocalStorage<QuantityProviderEvidenceCollector>();
-const currentJournalContract = new AsyncLocalStorage<EbayRequestJournalContract>();
+const currentJournalContract = new AsyncLocalStorage<{ contract: EbayRequestJournalContract; assertOwner?: () => Promise<void> }>();
 // Accommodates the bounded 250-member listing protocol plus lifecycle requests.
 const MAX_PROVIDER_REQUESTS_PER_OWNER = 2000;
 const digest = (value: unknown): string => createHash("sha256").update(canonicalJson(value)).digest("hex");
@@ -55,14 +55,30 @@ const digest = (value: unknown): string => createHash("sha256").update(canonical
 /** Only the eBay protocol that durably journals every mutation before HTTP may
  * declare this contract. Persist it with admission, before any callback runs,
  * so a process death before the first request remains independently provable. */
-export function withEbayQuantityRequestJournal<T>(request: { method: string; path: string; body?: unknown }, work: () => Promise<T>): Promise<T> {
+export function withEbayQuantityRequestJournal<T>(request: { method: string; path: string; body?: unknown }, work: () => Promise<T>,
+  assertOwner?: () => Promise<void>): Promise<T> {
   const contract = ebayRequestJournalContractSchema.parse({ version: 1, provider: "ebay",
     method: request.method, path: request.path, requestHash: digest(request.body ?? null) });
-  return currentJournalContract.run(contract, work);
+  return withEbayQuantityRequestJournalContract(contract, work, assertOwner);
+}
+
+/** The channel stage may start before its first inventory admission. Retain the
+ * original channel owner's fence through nested protocol calls so a callback
+ * that resumes after losing that connection cannot publish through a new one. */
+export function withEbayQuantityRequestJournalContract<T>(raw: EbayRequestJournalContract, work: () => Promise<T>,
+  assertOwner?: () => Promise<void>): Promise<T> {
+  const contract = ebayRequestJournalContractSchema.parse(raw);
+  const inherited = currentJournalContract.getStore()?.assertOwner;
+  const owner = inherited && assertOwner ? async () => { await inherited(); await assertOwner(); } : inherited ?? assertOwner;
+  return currentJournalContract.run({ contract, ...(owner ? { assertOwner: owner } : {}) }, work);
 }
 
 export function currentEbayQuantityRequestJournal(): EbayRequestJournalContract | null {
-  return currentJournalContract.getStore() ?? null;
+  return currentJournalContract.getStore()?.contract ?? null;
+}
+
+export async function assertCurrentEbayQuantityRequestOwner(): Promise<void> {
+  await currentJournalContract.getStore()?.assertOwner?.();
 }
 
 /** Transport metadata only: never headers containing credentials or raw provider bodies. */

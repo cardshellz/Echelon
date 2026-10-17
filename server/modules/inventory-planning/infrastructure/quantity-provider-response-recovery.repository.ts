@@ -6,11 +6,35 @@ import {
   type QuantityPublicationScope,
 } from "../domain/quantity-publication-admission";
 import { terminalEbayResponseEvidence } from "../domain/quantity-provider-terminal-response";
+import type { InventoryAvailabilityTransactionQueryClient as Client } from "../application/inventory-availability-transaction-query.port";
 import {
   QUANTITY_PUBLICATION_LOCK_NAMESPACE,
   quantityPublicationScopeLockKey,
 } from "./quantity-publication-admission.repository";
-import { journalContractNoRequestProof, recoverNoRequestAttemptInsideTransaction } from "./quantity-provider-preflight-recovery.repository";
+import { journalContractNoRequestProof, recoverNoRequestAttemptInsideTransaction, type QuantityNoRequestAttempt } from "./quantity-provider-preflight-recovery.repository";
+
+/** One writer for canonical response recovery, shared by scheduled recovery and
+ * the exact publication checkpoint transaction. Caller holds every scope lock
+ * and supplies the complete journal validated by terminalEbayResponseEvidence.
+ * This resolves the request fence without claiming delivery or completing stock. */
+export async function recoverTerminalRequestAttemptInsideTransaction(client: Client, attempt: QuantityNoRequestAttempt,
+  evidence: NonNullable<ReturnType<typeof terminalEbayResponseEvidence>>, timestamp: Date): Promise<void> {
+  if (!["running", "uncertain"].includes(String(attempt.before_record.state)))
+    throw new Error("Terminal response recovery requires an unresolved attempt.");
+  await client.query(`INSERT INTO inventory.quantity_publication_response_recoveries
+    (attempt_id,evidence_hash,request_receipts,before_record,created_at) VALUES($1,$2,$3::jsonb,$4::jsonb,$5)`,
+  [attempt.id, evidence.hash, JSON.stringify(evidence.receipts), JSON.stringify(attempt.before_record), timestamp.toISOString()]);
+  const changed = await client.query(`UPDATE inventory.quantity_publication_attempts SET state='resolved',completed_at=$2,
+    outcome_hash=$3,resolution_basis='provider_response_terminal' WHERE id=$1 AND state IN ('running','uncertain')`,
+  [attempt.id, timestamp.toISOString(), evidence.hash]);
+  if (changed.rowCount !== 1) throw new Error("Terminal response recovery lost its exact attempt ownership.");
+  // Historical delivery is still unknown. A newer admitted publication must
+  // prove completion; don't complete catch-up or replay stored quantities.
+  await client.query(`UPDATE inventory.quantity_publication_catchup SET next_attempt_at=$2,updated_at=$2
+    WHERE completed_revision<revision AND scope_key IN
+      (SELECT unnest(affected_scope_keys) FROM inventory.quantity_publication_attempts WHERE id=$1)`,
+  [attempt.id, timestamp.toISOString()]);
+}
 
 /** Inventory owns request fences and their audit trail. No provider writes, quantity
  * acknowledgement, activation, operator impersonation, or age-based clearing. */
@@ -121,29 +145,7 @@ export class PostgresQuantityProviderResponseRecovery {
           unresolved.push(attempt.id);
           continue;
         }
-        await client.query(
-          `INSERT INTO inventory.quantity_publication_response_recoveries
-          (attempt_id,evidence_hash,request_receipts,before_record,created_at) VALUES($1,$2,$3::jsonb,$4::jsonb,$5)`,
-          [
-            attempt.id,
-            evidence.hash,
-            JSON.stringify(evidence.receipts),
-            JSON.stringify(attempt.before_record),
-            timestamp.toISOString(),
-          ],
-        );
-        await client.query(
-          `UPDATE inventory.quantity_publication_attempts SET state='resolved',completed_at=$2,
-          outcome_hash=$3,resolution_basis='provider_response_terminal' WHERE id=$1 AND state IN ('running','uncertain')`,
-          [attempt.id, timestamp.toISOString(), evidence.hash],
-        );
-        // Historical delivery is still unknown. A newer admitted publication must
-        // prove completion; don't complete catch-up or replay stored quantities.
-        await client.query(
-          `UPDATE inventory.quantity_publication_catchup SET next_attempt_at=$2,updated_at=$2
-          WHERE completed_revision<revision AND scope_key IN (SELECT unnest(affected_scope_keys) FROM inventory.quantity_publication_attempts WHERE id=$1)`,
-          [attempt.id, timestamp.toISOString()],
-        );
+        await recoverTerminalRequestAttemptInsideTransaction(client, attempt, evidence, timestamp);
         resolved.push(attempt.id);
       }
       await client.query("COMMIT");

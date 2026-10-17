@@ -7,9 +7,11 @@ import { quantityPublicationScopeSchema } from "../domain/quantity-publication-a
 import { isEbayPublicationRequest, isRejectedEbayPublicationReceipt, terminalEbayResponseEvidence,
   type TerminalRequestReceipt } from "../domain/quantity-provider-terminal-response";
 import { QUANTITY_PUBLICATION_LOCK_NAMESPACE, quantityPublicationScopeLockKey } from "./quantity-publication-admission.repository";
-import { ebayRequestJournalContractSchema, isCompletedEbayNonPublicationAttempt, legacyEbayPublicationPreflightProofSchema, type EbayNoRequestProof,
+import { ebayRequestJournalContractSchema, isCompletedEbayNonPublicationAttempt, legacyEbayPublicationPreflightProofSchema,
+  terminalEbayPublicationPreparationEvidence, type EbayNoRequestProof,
   type EbayRequestJournalContract, type LegacyEbayPublicationPreflightProof } from "../domain/ebay-publication-preflight";
 import { journalContractNoRequestProof, recoverNoRequestAttemptInsideTransaction } from "./quantity-provider-preflight-recovery.repository";
+import { recoverTerminalRequestAttemptInsideTransaction } from "./quantity-provider-response-recovery.repository";
 
 const inputSchema = z.object({
   scopes: z.array(quantityPublicationScopeSchema).min(1).max(251),
@@ -50,6 +52,7 @@ export interface EbayPublicationRejectionReader {
 export interface EbayPublicationNotSentRead {
   busy: boolean;
   evidence: { hash: string; attemptIds: string[]; proofs: Array<{ attemptId: string; proof: EbayNoRequestProof }>;
+    preparations?: Array<{ attemptId: string; contract: EbayRequestJournalContract; requests: TerminalRequestReceipt[]; requestEvidenceHash: string }>;
     stageJournalContract?: EbayRequestJournalContract } | null;
 }
 const digest = (value: unknown): string => createHash("sha256").update(canonicalJson(value)).digest("hex");
@@ -88,7 +91,7 @@ export class PostgresEbayPublicationRejectionReader implements EbayPublicationRe
         "SELECT pg_try_advisory_xact_lock(hashtextextended($1,918420)) AS acquired", [key])).rows[0];
       if (!locked?.acquired) return { busy: true, evidence: null };
     }
-    const expectedPath = input.groupKey === null ? `/sell/inventory/v1/offer/${input.offerIds[0]}/publish`
+    const expectedPath = input.groupKey === null ? `/sell/inventory/v1/offer/${encodeURIComponent(input.offerIds[0])}/publish`
       : "/sell/inventory/v1/offer/publish_by_inventory_item_group";
     const expectedHash = digest(input.groupKey === null ? null : { inventoryItemGroupKey: input.groupKey, marketplaceId: input.marketplaceId });
     if (stageContract && (stageContract.method !== "POST" || stageContract.path !== expectedPath
@@ -96,13 +99,19 @@ export class PostgresEbayPublicationRejectionReader implements EbayPublicationRe
     const attempts = await this.readPreflightCandidates(client, keys, input.startedAt);
     if (!attempts || (!attempts.length && !stageContract)) return { busy: false, evidence: null };
     const proofs: Array<{ attemptId: string; proof: EbayNoRequestProof }> = [];
+    const preparations: Array<{ attemptId: string; evidence: NonNullable<ReturnType<typeof terminalEbayPublicationPreparationEvidence>> }> = [];
     const legacyCandidates = attempts.filter(attempt => !attempt.before_record.request_journal_contract);
     for (const attempt of attempts) {
-      if (!attempt.affected_scope_keys.length || attempt.affected_scope_keys.some(key => !keys.includes(key))
-        || !["running", "uncertain", "not_sent"].includes(String(attempt.before_record.state))) return { busy: false, evidence: null };
-      const requests = (await client.query<{ count: string }>(
-        "SELECT count(*)::text AS count FROM inventory.quantity_provider_requests WHERE attempt_id=$1", [attempt.id])).rows[0];
-      if (requests?.count !== "0") return { busy: false, evidence: null };
+      if (!attempt.affected_scope_keys.length || attempt.affected_scope_keys.some(key => !keys.includes(key))) return { busy: false, evidence: null };
+      const state = String(attempt.before_record.state);
+      const requests = await this.readRequestReceipts(client, attempt.id);
+      const preparation = terminalEbayPublicationPreparationEvidence(attempt.before_record.request_journal_contract,
+        { path: expectedPath, requestHash: expectedHash }, requests);
+      if (preparation && ["running", "uncertain", "resolved", "rejected", "succeeded"].includes(state)) {
+        preparations.push({ attemptId: attempt.id, evidence: preparation });
+        continue;
+      }
+      if (requests.length || !["running", "uncertain", "not_sent"].includes(state)) return { busy: false, evidence: null };
       let proof = journalContractNoRequestProof(attempt);
       if (proof?.source === "request_journal_contract") {
         if (proof.contract.method !== "POST" || proof.contract.path !== expectedPath || proof.contract.requestHash !== expectedHash)
@@ -130,6 +139,12 @@ export class PostgresEbayPublicationRejectionReader implements EbayPublicationRe
     // Validate every candidate before the first mutation. Partial proof must not
     // release any old attempt when a later publication might have been sent.
     for (const attempt of attempts) {
+      const preparation = preparations.find(row => row.attemptId === attempt.id);
+      if (preparation) {
+        if (["running", "uncertain"].includes(String(attempt.before_record.state)))
+          await recoverTerminalRequestAttemptInsideTransaction(client, attempt, preparation.evidence.terminal, timestamp);
+        continue;
+      }
       if (attempt.before_record.state === "not_sent") continue;
       const proof = proofs.find(row => row.attemptId === attempt.id)!.proof;
       if (!await recoverNoRequestAttemptInsideTransaction(client, attempt, proof, timestamp))
@@ -141,6 +156,8 @@ export class PostgresEbayPublicationRejectionReader implements EbayPublicationRe
     // channel's original contract in its checkpoint rather than inventing an
     // inventory attempt or assuming an unversioned legacy stage was instrumented.
     const evidence = { attemptIds: attempts.map(row => row.id), proofs,
+      ...(preparations.length ? { preparations: preparations.map(row => ({ attemptId: row.attemptId,
+        contract: row.evidence.contract, requests: row.evidence.terminal.receipts, requestEvidenceHash: row.evidence.terminal.hash })) } : {}),
       ...(stageContract ? { stageJournalContract: stageContract } : {}) };
     return { busy: false, evidence: { ...evidence, hash: digest(evidence) } };
   }
@@ -161,12 +178,7 @@ export class PostgresEbayPublicationRejectionReader implements EbayPublicationRe
       for (const attempt of page) {
         const state = String(attempt.before_record.state);
         if (["succeeded", "resolved", "rejected", "not_sent"].includes(state)) {
-          const receipts = (await client.query<TerminalRequestReceipt>(`SELECT q.id::text AS "requestId",q.ordinal,q.method,q.path,
-            q.request_hash AS "requestHash",r.outcome,r.http_status AS "httpStatus",r.response_hash AS "responseHash",
-            COALESCE(r.error_codes,'{}') AS "errorCodes",r.request_terminated AS "requestTerminated",
-            CASE WHEN r.recorded_at IS NULL THEN NULL ELSE to_char(r.recorded_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') END AS "recordedAt"
-            FROM inventory.quantity_provider_requests q LEFT JOIN inventory.quantity_provider_request_results r ON r.request_id=q.id
-            WHERE q.attempt_id=$1 ORDER BY q.ordinal LIMIT 2001`, [attempt.id])).rows;
+          const receipts = await this.readRequestReceipts(client, attempt.id);
           if (isCompletedEbayNonPublicationAttempt({ state, journalContract: attempt.before_record.request_journal_contract,
             canonicalOutboxStock: attempt.before_record.owner_kind === "outbox" && attempt.before_record.outbox_id != null
               && attempt.affected_scope_keys.length === 1 }, receipts)) continue;
@@ -177,6 +189,15 @@ export class PostgresEbayPublicationRejectionReader implements EbayPublicationRe
       if (page.length < ATTEMPT_PAGE_SIZE) return candidates;
       afterId = page[page.length - 1].id;
     }
+  }
+
+  private async readRequestReceipts(client: Client, attemptId: string): Promise<TerminalRequestReceipt[]> {
+    return (await client.query<TerminalRequestReceipt>(`SELECT q.id::text AS "requestId",q.ordinal,q.method,q.path,
+      q.request_hash AS "requestHash",r.outcome,r.http_status AS "httpStatus",r.response_hash AS "responseHash",
+      COALESCE(r.error_codes,'{}') AS "errorCodes",r.request_terminated AS "requestTerminated",
+      CASE WHEN r.recorded_at IS NULL THEN NULL ELSE to_char(r.recorded_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') END AS "recordedAt"
+      FROM inventory.quantity_provider_requests q LEFT JOIN inventory.quantity_provider_request_results r ON r.request_id=q.id
+      WHERE q.attempt_id=$1 ORDER BY q.ordinal LIMIT 2001`, [attemptId])).rows;
   }
 
   async read(raw: EbayPublicationRejectionInput, transactionClient?: Client): Promise<EbayPublicationRejectionRead> {
@@ -219,7 +240,7 @@ export class PostgresEbayPublicationRejectionReader implements EbayPublicationRe
        ORDER BY a.id LIMIT 101`, [keys, input.startedAt])).rows;
     if (attempts.length === 0 || attempts.length > 100) return noEvidence();
     const expectedPath = input.groupKey === null
-      ? `/sell/inventory/v1/offer/${input.offerIds[0]}/publish`
+      ? `/sell/inventory/v1/offer/${encodeURIComponent(input.offerIds[0])}/publish`
       : "/sell/inventory/v1/offer/publish_by_inventory_item_group";
     const expectedRequestHash = digest(input.groupKey === null ? null
       : { inventoryItemGroupKey: input.groupKey, marketplaceId: input.marketplaceId });

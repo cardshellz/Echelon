@@ -653,6 +653,11 @@ export class PostgresEbayListingSyncRepository implements EbayListingSyncStore {
       throw error;
     }
   }
+  async assertPublicationOwner(job: StoredEbayListingSyncJob): Promise<void> {
+    // Do not replace a failed client with a pool connection: the retained
+    // session lock and original fencing token are the publication authority.
+    await this.assertOwner(this.client(job), job);
+  }
   async stage(
     job: StoredEbayListingSyncJob,
     key: string,

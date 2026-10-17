@@ -25,6 +25,7 @@ import { assertEbayListingSourceIdentityUnchanged } from "./ebay-existing-listin
 import { resolveEbayListingIssue } from "@shared/ebay-listing-issue";
 import { ebayListingFailureDiagnostic, type EbayListingFailureDiagnostic } from "./ebay-listing-failure-diagnostic";
 import type { EbayAutomaticPublicationRecoveryService, EbayRequestJournalContract } from "../inventory-planning/quantity-publication";
+import { withEbayQuantityRequestJournalContract } from "../inventory-planning/quantity-publication";
 import { recoverPriorEbayListingRequests, type EbayListingRequestRecovery } from "./ebay-listing-request-recovery";
 
 export interface PreparedEbayListingSync {
@@ -114,10 +115,12 @@ export class EbayExistingListingSyncExecution
     // Also adopt already-current content after a lost checkpoint or final local
     // commit. This read never substitutes for the response evidence checked above.
     try {
-      // A Sync joined while publishing may advance the saved request revision.
-      // Publication completion needs this owner's verified current revision even
-      // when the accepted listing already has exactly the requested content.
-      await stage(context?.operation === "publish" ? "verification" : "inspection", contentHash, verify);
+      await stage("inspection", contentHash, verify);
+      // Only a successful probe may establish publication's current-revision
+      // verification checkpoint. Record that completed read without repeating
+      // it: a second failed read must not leave a pre-write checkpoint that
+      // prevents retrying the required content writes.
+      if (context?.operation === "publish") await stage("verification", contentHash, async () => {});
       return completedEbayListingSyncResult(prepared, new Set());
     } catch (error) {
       if (
@@ -180,6 +183,7 @@ export interface EbayListingSyncClaim {
   release(): Promise<void>;
 }
 export interface EbayListingSyncStore {
+  assertPublicationOwner?(job: StoredEbayListingSyncJob): Promise<void>;
   recoverTerminalPublicationWrite?(job: StoredEbayListingSyncJob, identity: EbayListingSyncIdentity, now: Date): Promise<"rejected" | "not_sent" | null>;
   authorizePublicationRetry(input: EbayPublicationRetryAuthorization, now: Date): Promise<{ job: StoredEbayListingSyncJob; replayed: boolean }>;
   recordAdmissionFailure(input: EbaySyncAdmissionFailure, now: Date): Promise<EbayListingSyncJob>;
@@ -345,7 +349,14 @@ export class EbayListingSyncService {
                 if (job.operation === "publish" && key === "publish") {
                   publicationProgress.started = true;
                 }
-                await work();
+                if (journalContract) {
+                  if (!this.store.assertPublicationOwner) throw new EbayListingSyncError("EBAY_SYNC_OWNER_LOST", "Publication requires its original saved-job owner before admission.");
+                  // Revalidate this exact channel session/token after inventory
+                  // has acquired its scope locks. A delayed pre-admission read
+                  // must not let an old worker publish after session takeover.
+                  await withEbayQuantityRequestJournalContract(journalContract, work,
+                    () => this.store.assertPublicationOwner!(job));
+                } else await work();
                 await this.store.stage(job, key, hash, "completed", this.now());
                 if (job.operation === "publish" && key === "publish") publicationProgress.completed = true;
                 if (job.operation === "withdraw" && key === "withdraw") withdrawalCompleted = true;

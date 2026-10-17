@@ -8,7 +8,7 @@ import { admitListingSetupInsideTransaction, validateListingSetupReadinessInside
 import type { InventoryAvailabilityTransactionQueryClient as Client } from "../application/inventory-availability-transaction-query.port";
 import type { QuantityPublicationAdmission, QuantityPublicationCatchup, QuantityPublicationCatchupStore, QuantityPublicationOutboxClaim } from "../application/quantity-publication-admission.port";
 import { readPublicationStockSelection, selectionRequiresPublication } from "./inventory-publication-selection.reader";
-import { currentEbayQuantityRequestJournal, QuantityProviderEvidenceCollector } from "../application/quantity-provider-request-evidence";
+import { assertCurrentEbayQuantityRequestOwner, currentEbayQuantityRequestJournal, QuantityProviderEvidenceCollector } from "../application/quantity-provider-request-evidence";
 import { InventoryPublicationNotSentError } from "../application/inventory-publication-transport";
 import { PostgresQuantityProviderRequestEvidenceStore } from "./quantity-provider-request-evidence.repository";
 import { QuantityPublicationAdmissionError, quantityPublicationScopeSchema, quantityPublicationRecoverySchema,
@@ -515,6 +515,12 @@ export class PostgresQuantityPublicationAdmission implements QuantityPublication
         fail("PUBLICATION_PROVIDER_COOLDOWN", "The provider retry window has not opened; no quantity request was sent.",
           { retryNotBefore: cooldown.toISOString() });
       }
+      // Recheck the original channel owner after exact inventory locks are held.
+      // A callback whose old job connection died during a preflight GET must not
+      // acquire a fresh inventory connection and send after its stage recovered.
+      // Keep these scope locks through the request so takeover cannot race this
+      // check. The supplied owner callback must never replace its lost client.
+      await assertCurrentEbayQuantityRequestOwner();
       // Per-scope session lock serializes providers without holding a DB transaction during HTTP.
       attemptId = (await client.query<{ id: string }>(`INSERT INTO inventory.quantity_publication_attempts
         (owner_token,owner_kind,gate_epoch,scope_key,scope,outbox_id,state,started_at,planned_outbox_id,affected_scope_keys,planned_outbox_ids,affected_scopes${setupRequest ? ",listing_setup_operation_id,listing_setup_intent" : ""}${requestJournalContract ? ",request_journal_contract" : ""})

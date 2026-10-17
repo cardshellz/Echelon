@@ -19,7 +19,7 @@ export async function installEbayPublicationInventoryFixture(pool: Pool, options
     for (const name of ["236_inventory_cutover_admission.sql", "0721_inventory_publication_direct_enable.sql",
       ...(includeQuantityRecovery ? [] : ["0733_ebay_provider_response_finality.sql"]), "0742_ebay_publication_stock_readiness.sql",
       ...(options.includePreflightRecoveryMigrations ? ["900000008000018120001_ebay_automatic_sync_recovery.sql",
-        "900000011000018270001_ebay_publication_preflight_recovery.sql"] : [])])
+        "900000011000018230001_ebay_publication_preflight_recovery.sql"] : [])])
       await pool.query(readFileSync(resolve("migrations", name), "utf8"));
     await pool.query(`
       CREATE TABLE ebay.ebay_oauth_tokens(channel_id integer,environment text,external_account_id text,external_account_identity_scheme text,external_account_verified_at timestamptz);

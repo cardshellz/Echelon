@@ -66,3 +66,19 @@ export function isCompletedEbayNonPublicationAttempt(input: {
   return contentContract || stockContract
     || receipts.every(receipt => receipt.method === "POST" && receipt.path === bulkPath);
 }
+
+/** Stock can finish before a later member lookup fails. Its receipts prove
+ * termination of the preparations, not successful delivery of publication.
+ * Only the versioned original publish contract proves the final publish would
+ * have its own durable request row; an old empty/mixed journal is insufficient. */
+export function terminalEbayPublicationPreparationEvidence(rawContract: unknown,
+  expected: { path: string; requestHash: string }, requests: unknown): {
+    contract: EbayRequestJournalContract; terminal: NonNullable<ReturnType<typeof terminalEbayResponseEvidence>>;
+  } | null {
+  const parsed = ebayRequestJournalContractSchema.safeParse(rawContract);
+  if (!parsed.success || parsed.data.method !== "POST" || parsed.data.path !== expected.path
+    || parsed.data.requestHash !== expected.requestHash || !isEbayPublicationRequest(parsed.data.method, parsed.data.path)) return null;
+  const terminal = terminalEbayResponseEvidence(requests);
+  if (!terminal || terminal.receipts.some(receipt => isEbayPublicationRequest(receipt.method, receipt.path))) return null;
+  return { contract: parsed.data, terminal };
+}

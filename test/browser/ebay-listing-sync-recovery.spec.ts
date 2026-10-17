@@ -27,7 +27,7 @@ const recordedProgress = {
   lastActivityAt: "2026-10-15T13:34:50.000Z", lastWorkerActivityAt: "2026-10-15T13:45:00.000Z", queuedAhead: 28,
 };
 
-test("a pre-publication lookup failure explains automatic retry and reaches verified publication without another click", async ({ page }) => {
+test("a pre-publication lookup failure explains automatic retry and reaches verified publication without another click", async ({ page }, info) => {
   const state = await setupEbayChannelPage(page);
   state.feedStatus = "publication_incomplete"; state.externalListingId = null;
   const retrying = { ...job, operation: "publish", state: "recovering", code: "EBAY_PUBLICATION_PREFLIGHT_RETRY",
@@ -38,10 +38,13 @@ test("a pre-publication lookup failure explains automatic retry and reaches veri
   await expect(status).toContainText("Retrying the eBay check before publishing");
   await expect(page.getByText("Echelon will retry this saved update automatically", { exact: false }).first()).toBeVisible();
   await expect(page.getByRole("button", { name: "Review listing mapping", exact: true })).toHaveCount(0);
+  await page.screenshot({ path: info.outputPath("ebay-publication-automatic-preflight-retry.png"), fullPage: true });
   state.jobs = [{ ...retrying, state: "completed", code: null, message: null }];
   state.feedStatus = "listed"; state.externalListingId = "verified-listing";
   await page.clock.fastForward(10_100);
-  await expect(page.getByRole("link", { name: "View on eBay" }).filter({ visible: true })).toHaveAttribute("href", "https://www.ebay.com/itm/verified-listing");
+  // Both layouts remove the completed job and return the listing to normal Sync.
+  await expect(page.getByRole("button", { name: "Listed (1)", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Sync", exact: true }).filter({ visible: true })).toBeEnabled();
   await expect(page.getByText("Retrying the eBay check before publishing", { exact: true })).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Errors (0)", exact: true })).toBeVisible();
   expect(state.commands).toEqual([]); expect(state.requests).toEqual([]);

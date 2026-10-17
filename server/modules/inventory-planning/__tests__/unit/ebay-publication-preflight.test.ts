@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
-import { currentEbayQuantityRequestJournal, withEbayQuantityRequestJournal } from "../../application/quantity-provider-request-evidence";
-import { isCompletedEbayNonPublicationAttempt, legacyEbayPublicationPreflightProofSchema, preflightEvidenceHash } from "../../domain/ebay-publication-preflight";
+import { assertCurrentEbayQuantityRequestOwner, currentEbayQuantityRequestJournal, withEbayQuantityRequestJournal,
+  withEbayQuantityRequestJournalContract } from "../../application/quantity-provider-request-evidence";
+import { isCompletedEbayNonPublicationAttempt, legacyEbayPublicationPreflightProofSchema, preflightEvidenceHash,
+  terminalEbayPublicationPreparationEvidence } from "../../domain/ebay-publication-preflight";
 import { journalContractNoRequestProof } from "../../infrastructure/quantity-provider-preflight-recovery.repository";
 import type { TerminalRequestReceipt } from "../../domain/quantity-provider-terminal-response";
 
@@ -27,6 +29,19 @@ describe("eBay preflight evidence contracts", () => {
     const work = vi.fn(async () => undefined);
     expect(() => withEbayQuantityRequestJournal(request, work)).toThrow();
     expect(work).not.toHaveBeenCalled();
+  });
+
+  it("retains the original owner fence through nested protocol calls and propagates lost ownership", async () => {
+    const request = { method: "POST", path: "/sell/inventory/v1/offer/publish_by_inventory_item_group", body: { group: "A" } };
+    const contract = { version: 1 as const, provider: "ebay" as const, method: "POST" as const, path: request.path,
+      requestHash: preflightEvidenceHash(request.body) };
+    const failure = new Error("Original channel connection was lost");
+    const owner = vi.fn(async () => { throw failure; });
+    await expect(withEbayQuantityRequestJournalContract(contract,
+      () => withEbayQuantityRequestJournal(request, () => assertCurrentEbayQuantityRequestOwner()), owner)).rejects.toBe(failure);
+    expect(owner).toHaveBeenCalledOnce();
+    await expect(assertCurrentEbayQuantityRequestOwner()).resolves.toBeUndefined();
+    expect(owner).toHaveBeenCalledOnce();
   });
 
   it("does not infer old or malformed callback coverage from its provider name", () => {
@@ -64,6 +79,25 @@ describe("eBay preflight evidence contracts", () => {
       expect(isCompletedEbayNonPublicationAttempt({ ...input, journalContract: { ...contract, method: "PUT", path } },
         [{ ...receipt, method: "PUT", path }])).toBe(true);
     }
+  });
+
+  it("proves completed publication preparations only from the exact versioned publish intent and every final receipt", () => {
+    const contract = { version: 1, provider: "ebay", method: "POST",
+      path: "/sell/inventory/v1/offer/publish_by_inventory_item_group", requestHash: "a".repeat(64) };
+    const expected = { path: contract.path, requestHash: contract.requestHash };
+    const receipt: TerminalRequestReceipt = { requestId: "1", ordinal: 1, method: "POST",
+      path: "/sell/inventory/v1/bulk_update_price_quantity", requestHash: "c".repeat(64), outcome: "completed",
+      httpStatus: 200, responseHash: "b".repeat(64), errorCodes: [], recordedAt: "2026-10-17T12:00:00.000Z", requestTerminated: true };
+    expect(terminalEbayPublicationPreparationEvidence(contract, expected, [receipt])).toMatchObject({ contract, terminal: { receipts: [receipt] } });
+    expect(terminalEbayPublicationPreparationEvidence(null, expected, [receipt])).toBeNull();
+    expect(terminalEbayPublicationPreparationEvidence({ ...contract, version: 2 }, expected, [receipt])).toBeNull();
+    expect(terminalEbayPublicationPreparationEvidence({ ...contract, requestHash: "d".repeat(64) }, expected, [receipt])).toBeNull();
+    expect(terminalEbayPublicationPreparationEvidence(contract, expected, [])).toBeNull();
+    expect(terminalEbayPublicationPreparationEvidence(contract, expected, [{ ...receipt, requestTerminated: null }])).toBeNull();
+    expect(terminalEbayPublicationPreparationEvidence(contract, expected, [receipt, { ...receipt, requestId: "2", ordinal: 2,
+      outcome: "uncertain", httpStatus: null, responseHash: null, requestTerminated: null }])).toBeNull();
+    expect(terminalEbayPublicationPreparationEvidence(contract, expected, [{ ...receipt, path: contract.path,
+      outcome: "rejected", httpStatus: 400 }])).toBeNull();
   });
 
   const proof = { jobId: "a431361e-5bf5-4249-9b17-bf3dc860a980", revision: "1", stageEventId: "101",
