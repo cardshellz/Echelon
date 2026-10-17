@@ -1,11 +1,37 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createShipmentCostUpdateClient, readShipmentCostWorkflow, shipmentCostWorkflowError } from "../../shipment-cost-workflow";
 import { FinancialCommandRequestError } from "../../financial-command";
+import { isShipmentCostLinePosted, type ShipmentCostReview } from "@shared/procurement/shipment-cost-workflow";
 
 afterEach(() => vi.unstubAllGlobals());
 const result = (shipmentId = 42) => ({ shipmentId, finalizedLines: 2, adjustments: 1,
   status: "applied", updated: 2, total: 2, skipped: [] });
 const response = (body = result(), status = 200) => new Response(JSON.stringify(body), { status });
+
+describe("shipment cost completion", () => {
+  const line = (): ShipmentCostReview["lines"][number] => ({
+    lineId: 1, sku: "TEST", sourceIssue: null,
+    application: { id: 2, status: "applied", recordedAt: "2026-10-16T12:00:00Z", lotsUpdated: 1, cogsRowsUpdated: 0, issues: [] },
+  });
+  it("distinguishes a recorded application from an unrecorded update", () => {
+    expect(isShipmentCostLinePosted(line())).toBe(true);
+    expect(isShipmentCostLinePosted({ ...line(), application: null })).toBe(false);
+  });
+  it.each(["posted", "unresolved", "review_required"] as const)("uses the current %s reconciliation over the historical application result", status => {
+    const input = line();
+    input.application!.status = "review_required";
+    input.exceptionReview = {
+      state: "open", fingerprint: "a".repeat(64), currency: "USD", kind: "missing_receipt_history",
+      allocatedMills: 100, amountMills: 100, lotsUpdated: 0, cogsRowsUpdated: 0, decision: null,
+      issues: [{ code: "COST_HISTORICAL_LINEAGE_MISSING", message: "Missing history." }],
+      reconciliation: { status, destination: "historical_cogs", postedMills: 100, unassignedMills: 0 },
+    };
+    input.application!.issues = [...input.exceptionReview.issues];
+    expect(isShipmentCostLinePosted(input)).toBe(status === "posted");
+    input.sourceIssue = { code: "LANDED_ALLOCATION_STALE", message: "Charges changed." };
+    expect(isShipmentCostLinePosted(input)).toBe(false);
+  });
+});
 
 it("requests the exception-aware read contract with the current session", async () => {
   const saved = { shipmentId: 42, lines: [] };

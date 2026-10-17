@@ -85,14 +85,36 @@ function startServer(app: Express): Promise<{ url: string; close: () => Promise<
   });
 }
 
-async function requestJson(baseUrl: string, method: string, path: string, body?: any) {
-  const res = await fetch(`${baseUrl}${path}`, {
-    method,
-    headers: { "content-type": "application/json", "idempotency-key": "test-key" },
-    body: body === undefined ? undefined : JSON.stringify(body),
+async function requestJson(baseUrl: string, method: string, path: string, body?: unknown): Promise<{ status: number; body: any }> {
+  const payload = body === undefined ? undefined : JSON.stringify(body);
+  // These tests exercise the real HTTP route on an OS-assigned loopback port.
+  // Fetch's browser blocked-port list can reject that port before Express sees
+  // the request; Node HTTP preserves the route/body/auth checks on every port.
+  return new Promise((resolve, reject) => {
+    const request = http.request(new URL(path, baseUrl), {
+      method,
+      agent: false,
+      headers: {
+        "content-type": "application/json",
+        "idempotency-key": "test-key",
+        ...(payload === undefined ? {} : { "content-length": Buffer.byteLength(payload) }),
+      },
+    }, (response) => {
+      let text = "";
+      response.setEncoding("utf8");
+      response.on("data", (chunk: string) => { text += chunk; });
+      response.on("error", reject);
+      response.on("end", () => {
+        try {
+          if (response.statusCode === undefined) throw new Error("Test HTTP response has no status code");
+          resolve({ status: response.statusCode, body: text ? JSON.parse(text) : null });
+        } catch (error) { reject(error); }
+      });
+    });
+    request.on("error", reject);
+    request.setTimeout(5_000, () => request.destroy(new Error("Test HTTP request timed out")));
+    request.end(payload);
   });
-  const text = await res.text();
-  return { status: res.status, body: text ? JSON.parse(text) : null };
 }
 
 describe("purchasing admin routes", () => {

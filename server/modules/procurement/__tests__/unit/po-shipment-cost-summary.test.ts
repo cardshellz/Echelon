@@ -99,14 +99,14 @@ describe("PO shipment cost summary", () => {
       inventoryCosting: "pending",
     });
   });
-  it("does not call estimates confirmed inventory costs", () => {
+  it("reports applied estimates as posted while retaining supplier confirmation separately", () => {
     const data = input();
     data.charges[0].confirmed = false;
     expect(buildPoShipmentCostSummary(data)).toMatchObject({
       estimatedCents: 600,
-      appliedLines: 0,
-      pendingLines: 1,
-      inventoryCosting: "pending",
+      appliedLines: 1,
+      pendingLines: 0,
+      inventoryCosting: "applied",
     });
   });
   it("exposes a rejected application", () => {
