@@ -8,7 +8,7 @@ import { admitListingSetupInsideTransaction, validateListingSetupReadinessInside
 import type { InventoryAvailabilityTransactionQueryClient as Client } from "../application/inventory-availability-transaction-query.port";
 import type { QuantityPublicationAdmission, QuantityPublicationCatchup, QuantityPublicationCatchupStore, QuantityPublicationOutboxClaim } from "../application/quantity-publication-admission.port";
 import { readPublicationStockSelection, selectionRequiresPublication } from "./inventory-publication-selection.reader";
-import { QuantityProviderEvidenceCollector } from "../application/quantity-provider-request-evidence";
+import { currentEbayQuantityRequestJournal, QuantityProviderEvidenceCollector } from "../application/quantity-provider-request-evidence";
 import { InventoryPublicationNotSentError } from "../application/inventory-publication-transport";
 import { PostgresQuantityProviderRequestEvidenceStore } from "./quantity-provider-request-evidence.repository";
 import { QuantityPublicationAdmissionError, quantityPublicationScopeSchema, quantityPublicationRecoverySchema,
@@ -331,6 +331,10 @@ export class PostgresQuantityPublicationAdmission implements QuantityPublication
     work: () => Promise<T>, resolveCurrentPlan?: () => Promise<Array<{ outboxId: string; quantity: number; scope: QuantityPublicationScope }>>,
     memberScopes: readonly QuantityPublicationScope[] = [], setupRequest?: Readonly<ListingSetupIntent>,
     receiveSetup?: (intent: Readonly<ListingSetupIntent>) => void): Promise<T> {
+    const requestJournalContract = currentEbayQuantityRequestJournal();
+    if (requestJournalContract && scope.providerKey !== "ebay") {
+      fail("PUBLICATION_REQUEST_JOURNAL_SCOPE_INVALID", "An eBay request journal cannot authorize another provider.");
+    }
     let initialStock: Readonly<ListingSetupIntent> | null = null;
     const expectedCatchup = legacyCatchupScope.getStore();
     if (expectedCatchup && (claim !== null || memberScopes.length > 0 || key(expectedCatchup.scope) !== key(scope))) {
@@ -513,12 +517,13 @@ export class PostgresQuantityPublicationAdmission implements QuantityPublication
       }
       // Per-scope session lock serializes providers without holding a DB transaction during HTTP.
       attemptId = (await client.query<{ id: string }>(`INSERT INTO inventory.quantity_publication_attempts
-        (owner_token,owner_kind,gate_epoch,scope_key,scope,outbox_id,state,started_at,planned_outbox_id,affected_scope_keys,planned_outbox_ids,affected_scopes${setupRequest ? ",listing_setup_operation_id,listing_setup_intent" : ""})
-        VALUES ($1,$2,$3,$4,$5,$6,'running',$7,$8,$9,$10,$11${setupRequest ? ",$12,$13::jsonb" : ""}) RETURNING id::text`,
+        (owner_token,owner_kind,gate_epoch,scope_key,scope,outbox_id,state,started_at,planned_outbox_id,affected_scope_keys,planned_outbox_ids,affected_scopes${setupRequest ? ",listing_setup_operation_id,listing_setup_intent" : ""}${requestJournalContract ? ",request_journal_contract" : ""})
+        VALUES ($1,$2,$3,$4,$5,$6,'running',$7,$8,$9,$10,$11${setupRequest ? ",$12,$13::jsonb" : ""}${requestJournalContract ? `,$${setupRequest ? 14 : 12}::jsonb` : ""}) RETURNING id::text`,
       [ownerToken, claim ? "outbox" : setupRequest ? "listing_setup_zero" : "legacy", gate.epoch, key(scope), scope, claim?.outboxId ?? null, now(this.clock()),
         planned[0]?.outboxId ?? null,lockedScopeKeys,planned.map(row => row.outboxId),
         JSON.stringify(lockedScopeKeys.map(scopeKey => [scope, ...memberScopes].find(member => key(member) === scopeKey))),
-        ...(setupRequest ? [setupRequest.operationId, JSON.stringify(initialStock)] : [])])).rows[0].id;
+        ...(setupRequest ? [setupRequest.operationId, JSON.stringify(initialStock)] : []),
+        ...(requestJournalContract ? [JSON.stringify(requestJournalContract)] : [])])).rows[0].id;
       await client.query("COMMIT"); inTransaction = false;
       const requestEvidence = new QuantityProviderEvidenceCollector(
         new PostgresQuantityProviderRequestEvidenceStore(client, attemptId!, ownerToken, [scope,...memberScopes]), this.clock);
@@ -531,18 +536,20 @@ export class PostgresQuantityPublicationAdmission implements QuantityPublication
       } catch (error) {
         await client.query("BEGIN"); inTransaction = true;
         const rejected = requestEvidence.provesTerminalRejection();
-        // Only a caught, explicitly classified preflight failure can prove no
-        // request. A crashed worker never reaches this branch and stays running.
+        // Generic callbacks still need an explicit preflight failure. The eBay
+        // protocol's versioned contract additionally proves all mutations pass
+        // through this journal; zero started requests proves any preflight error
+        // did not send, including failed GETs and rejected local validation.
         const setupNotSent = setupRequest !== undefined && error instanceof Error && "effect" in error && error.effect === "not_sent";
-        const outboxNotSent = claim !== undefined && error instanceof InventoryPublicationNotSentError;
-        const notSent = (setupNotSent || outboxNotSent) && requestEvidence.provesNoRequestsStarted();
+        const outboxNotSent = claim !== null && error instanceof InventoryPublicationNotSentError;
+        const notSent = (setupNotSent || outboxNotSent || requestJournalContract !== null) && requestEvidence.provesNoRequestsStarted();
         const terminal = rejected || notSent;
         await client.query(`UPDATE inventory.quantity_publication_attempts
           SET state=$4,error_code=$3,completed_at=$5,outcome_hash=$6,resolution_basis=$7
           WHERE id=$1 AND owner_token=$2 AND state='running'`,
         [attemptId, ownerToken, error instanceof Error && "code" in error ? String(error.code) : notSent ? "PROVIDER_PREFLIGHT_NOT_SENT" : "PROVIDER_OUTCOME_UNCERTAIN",
           rejected ? "rejected" : notSent ? "not_sent" : "uncertain", terminal ? now(this.clock()) : null,
-          rejected ? requestEvidence.evidenceHash() : notSent ? hash({intent:setupRequest ?? { scope, claim },outcome:"owner_preflight_no_request",errorCode:error instanceof Error && "code" in error ? error.code : "PROVIDER_PREFLIGHT_NOT_SENT"}) : null,
+          rejected ? requestEvidence.evidenceHash() : notSent ? hash({intent:setupRequest ?? { scope, claim, requestJournalContract },outcome:"owner_preflight_no_request",errorCode:error instanceof Error && "code" in error ? error.code : "PROVIDER_PREFLIGHT_NOT_SENT"}) : null,
           rejected ? "provider_rejection" : notSent ? "owner_preflight_no_request" : null]);
         await retainWork(client, gate.activation_run_id, rejected ? "provider_rejected_quantity_write" : notSent ? "provider_preflight_not_sent" : "uncertain_provider_outcome");
         await client.query("COMMIT"); inTransaction = false;

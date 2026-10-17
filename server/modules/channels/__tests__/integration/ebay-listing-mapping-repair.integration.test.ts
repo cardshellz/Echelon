@@ -44,7 +44,9 @@ const enabled = process.env.ECHELON_TEST_DATABASE_URL && process.env.ECHELON_TES
         RAISE EXCEPTION 'immutable evidence' USING ERRCODE='23514'; END $$;
       -- Read-model fixture for the inventory-owned evidence reader. The separate
       -- response-recovery integration suite installs all journal constraints.
-      CREATE TABLE inventory.quantity_publication_attempts(id bigserial PRIMARY KEY,scope jsonb NOT NULL,affected_scope_keys text[] NOT NULL);
+      CREATE TABLE inventory.quantity_publication_attempts(id bigserial PRIMARY KEY,scope jsonb NOT NULL,affected_scope_keys text[] NOT NULL,
+        started_at timestamptz NOT NULL DEFAULT '2026-10-10T15:00:00Z',state text NOT NULL DEFAULT 'uncertain',
+        owner_kind text NOT NULL DEFAULT 'legacy',affected_scopes jsonb NOT NULL DEFAULT '[]',request_journal_contract jsonb);
       CREATE TABLE inventory.quantity_provider_requests(id bigserial PRIMARY KEY,attempt_id bigint REFERENCES inventory.quantity_publication_attempts,
         ordinal integer,method text,path text,request_hash text,started_at timestamptz);
       CREATE TABLE inventory.quantity_provider_request_results(request_id bigint PRIMARY KEY REFERENCES inventory.quantity_provider_requests,
@@ -115,10 +117,10 @@ const enabled = process.env.ECHELON_TEST_DATABASE_URL && process.env.ECHELON_TES
     const provenIdentity = { ...source.identity,groupKey:`OLD-${productId}`,variants:source.identity.variants.map(member => ({...member,externalSku:member.sku,offerId:`offer-${member.variantId}`,listingId:`listing-${productId}`})) };
     plan = { source,provenIdentity,reviewHash:"1".repeat(64),requestHash:"2".repeat(64),commandKey:randomUUID(),actor:"user:42",now,
       observation:{ providerAccount:{provider:"ebay",accountNamespace:"production",externalAccountId:"account-67",identityScheme:"provider_user_id",externalDisplayNameSnapshot:null,evidenceHash:"3".repeat(64)},
-        marketplaceId:"EBAY_US",publicationKeyIdentity:{externalId:`OLD-${productId}`,identityNamespace:"ebay.inventory_item_group"},
-        listingIdentity:{externalId:`listing-${productId}`,identityNamespace:"ebay.listing"},externalUrl:`https://www.ebay.com/itm/listing-${productId}`,isPublished:true,
-        members:provenIdentity.variants.map(member => ({sku:member.sku,variantIdentity:null,offerIdentity:{externalId:member.offerId!,identityNamespace:"ebay.offer"},
-          inventoryItemIdentity:{externalId:member.sku,identityNamespace:"ebay.inventory_item"}})),evidence:{},observedAt:now} };
+        marketplaceId:"EBAY_US",publicationKeyIdentity:{externalId:`OLD-${productId}`,identityNamespace:"ebay:production:EBAY_US:inventory_item_group"},
+        listingIdentity:{externalId:`listing-${productId}`,identityNamespace:"ebay:production:EBAY_US:listing"},externalUrl:`https://www.ebay.com/itm/listing-${productId}`,isPublished:true,
+        members:provenIdentity.variants.map(member => ({sku:member.sku,variantIdentity:null,offerIdentity:{externalId:member.offerId!,identityNamespace:"ebay:production:EBAY_US:offer"},
+          inventoryItemIdentity:{externalId:member.sku,identityNamespace:"ebay:production:EBAY_US:inventory_item"}})),evidence:{},observedAt:now} };
     plan.requestHash=syncStageHash({productId,channelId:67,actor:plan.actor,reviewHash:plan.reviewHash});
   });
   async function readSource(client: PoolClient, productId: number): Promise<EbayListingMappingSourceSnapshot> {
@@ -378,7 +380,7 @@ const enabled = process.env.ECHELON_TEST_DATABASE_URL && process.env.ECHELON_TES
   });
   it("refuses conflicting canonical identity claims without modifying either owner",async()=>{
     await database.pool.query("INSERT INTO marketplace.provider_accounts VALUES(1,'channel',67,'ebay','production','account-67')");
-    await database.pool.query("INSERT INTO marketplace.provider_identity_claims VALUES(1,999,999,NULL,'listing_id','ebay.listing',$1)",[plan.observation.listingIdentity.externalId]);
+    await database.pool.query("INSERT INTO marketplace.provider_identity_claims VALUES(1,999,999,NULL,'listing_id','ebay:production:EBAY_US:listing',$1)",[plan.observation.listingIdentity.externalId]);
     const before=await mappings();await expect(repository.apply(plan)).rejects.toMatchObject({code:"EBAY_MAPPING_CANONICAL_CONFLICT"});
     expect(await mappings()).toEqual(before);expect(await counts()).toEqual({receipts:0,jobs:0});
   });
@@ -429,11 +431,11 @@ const enabled = process.env.ECHELON_TEST_DATABASE_URL && process.env.ECHELON_TES
     return {publish,saved,sync,claim:claim!,target,final,result};
   }
   function publicationObservation(identity: typeof plan.provenIdentity) {
-    return { ...plan.observation, publicationKeyIdentity: identity.groupKey === null ? null : { identityNamespace: "ebay.inventory_item_group", externalId: identity.groupKey },
-      listingIdentity: { identityNamespace: "ebay.listing", externalId: identity.variants[0].listingId! },
+    return { ...plan.observation, publicationKeyIdentity: identity.groupKey === null ? null : { identityNamespace: "ebay:production:EBAY_US:inventory_item_group", externalId: identity.groupKey },
+      listingIdentity: { identityNamespace: "ebay:production:EBAY_US:listing", externalId: identity.variants[0].listingId! },
       members: identity.variants.map(member => ({ sku: member.sku, variantIdentity: null,
-        offerIdentity: { identityNamespace: "ebay.offer", externalId: member.offerId! },
-        inventoryItemIdentity: { identityNamespace: "ebay.inventory_item", externalId: member.sku } })) };
+        offerIdentity: { identityNamespace: "ebay:production:EBAY_US:offer", externalId: member.offerId! },
+        inventoryItemIdentity: { identityNamespace: "ebay:production:EBAY_US:inventory_item", externalId: member.sku } })) };
   }
   async function verifyPublication(sync:PostgresEbayListingSyncRepository,job:Awaited<ReturnType<PostgresEbayListingSyncRepository["get"]>>) {
     await sync.stage(job,"verification","8".repeat(64),"started",now);
@@ -448,6 +450,38 @@ const enabled = process.env.ECHELON_TEST_DATABASE_URL && process.env.ECHELON_TES
     expect(receipt.before_rows).toEqual(receipt.after_rows);
     expect(await repository.findReplay(lookup())).toEqual({...saved,replayed:true});
     expect((await new PostgresEbayListingSyncRepository(database.pool).list(67)).find(job=>job.id===saved.job.id)?.operation).toBe("publish");
+  });
+  it.each(["inventory_item_group","inventory_item","offer"] as const)("refuses unpublished %s already claimed in the canonical eBay namespace",async role=>{
+    const publish=await publicationPlan();
+    const externalId=role==="inventory_item_group"?publish.targetIdentity.groupKey!:
+      role==="inventory_item"?publish.targetIdentity.variants[0].sku:publish.targetIdentity.variants[0].offerId!;
+    await database.pool.query("INSERT INTO marketplace.provider_accounts VALUES(1,'channel',67,'ebay','production','account-67')");
+    await database.pool.query("INSERT INTO marketplace.provider_identity_claims VALUES(1,999,999,NULL,$1,$2,$3)",
+      [role,`ebay:production:EBAY_US:${role}`,externalId]);
+    const before=await mappings();
+    await expect(repository.apply(publish)).rejects.toMatchObject({code:"EBAY_MAPPING_CANONICAL_CONFLICT"});
+    expect(await mappings()).toEqual(before);expect(await counts()).toEqual({receipts:0,jobs:0});
+    expect((await database.pool.query("SELECT identity_namespace,external_id FROM marketplace.provider_identity_claims")).rows)
+      .toEqual([{identity_namespace:`ebay:production:EBAY_US:${role}`,external_id:externalId}]);
+  });
+  it("does not confuse an identity claim from another marketplace with this unpublished listing",async()=>{
+    const publish=await publicationPlan();
+    await database.pool.query("INSERT INTO marketplace.provider_accounts VALUES(1,'channel',67,'ebay','production','account-67')");
+    await database.pool.query("INSERT INTO marketplace.provider_identity_claims VALUES(1,999,999,NULL,'offer','ebay:production:EBAY_GB:offer',$1)",
+      [publish.targetIdentity.variants[0].offerId]);
+    expect((await repository.apply(publish)).job).toMatchObject({operation:"publish",state:"queued"});
+    expect((await database.pool.query("SELECT count(*)::integer AS count FROM marketplace.provider_identity_claims")).rows[0].count).toBe(1);
+  });
+  it("validates unpublished eBay environment and marketplace before reading or changing compatibility state",async()=>{
+    const publish=await publicationPlan();
+    const input={owner:{kind:"channel" as const,channelId:67,productId:publish.source.identity.productId,provider:"ebay",marketplaceId:"EBAY_US"},
+      providerAccount:{provider:"ebay" as const,accountNamespace:"production" as const,externalAccountId:"account-67"},
+      groupKey:publish.targetIdentity.groupKey,members:publish.targetIdentity.variants.map(member=>({productVariantId:member.variantId,sku:member.sku,offerId:member.offerId}))};
+    await expect(canonical.assertCompatibleUnpublishedPublication({...input,owner:{...input.owner,marketplaceId:"EBAY_US:offer"}}))
+      .rejects.toMatchObject({code:"EBAY_REGISTRATION_MARKETPLACE_INVALID"});
+    const invalidEnvironment=JSON.parse(JSON.stringify(input));invalidEnvironment.providerAccount.accountNamespace="other";
+    await expect(canonical.assertCompatibleUnpublishedPublication(invalidEnvironment)).rejects.toThrow();
+    expect(await counts()).toEqual({receipts:0,jobs:0});
   });
   it("keeps publish commands immutable and refuses reuse for maintenance sync",async()=>{
     const publish=await publicationPlan();const sync=new PostgresEbayListingSyncRepository(database.pool);
@@ -503,7 +537,7 @@ const enabled = process.env.ECHELON_TEST_DATABASE_URL && process.env.ECHELON_TES
       await verifyPublication(sync,claim.job);
       if (kind === "canonical") {
         await database.pool.query("INSERT INTO marketplace.provider_accounts VALUES(1,'channel',67,'ebay','production','account-67')");
-        await database.pool.query("INSERT INTO marketplace.provider_identity_claims VALUES(1,999,999,NULL,'offer_id','ebay.offer',$1)",[final.variants[0].offerId]);
+        await database.pool.query("INSERT INTO marketplace.provider_identity_claims VALUES(1,999,999,NULL,'offer_id','ebay:production:EBAY_US:offer',$1)",[final.variants[0].offerId]);
       } else if (kind === "local") {
         const otherVariant = target.variants[0].variantId + 900000;
         await database.pool.query("INSERT INTO catalog.product_variants(id,product_id,sku,is_active) VALUES($1,$2,'unrelated',true)", [otherVariant,target.productId]);
@@ -557,7 +591,7 @@ const enabled = process.env.ECHELON_TEST_DATABASE_URL && process.env.ECHELON_TES
   it("refuses unpublished completion when another canonical scope owns any exact offer or SKU",async()=>{
     const publish=await publicationPlan();
     await database.pool.query("INSERT INTO marketplace.provider_accounts VALUES(1,'channel',67,'ebay','production','account-67')");
-    await database.pool.query("INSERT INTO marketplace.provider_identity_claims VALUES(1,999,999,NULL,'offer_id','ebay.offer',$1)",[publish.targetIdentity.variants[0].offerId]);
+    await database.pool.query("INSERT INTO marketplace.provider_identity_claims VALUES(1,999,999,NULL,'offer_id','ebay:production:EBAY_US:offer',$1)",[publish.targetIdentity.variants[0].offerId]);
     await expect(repository.apply(publish)).rejects.toMatchObject({code:"EBAY_MAPPING_CANONICAL_CONFLICT"});expect(await counts()).toEqual({receipts:0,jobs:0});
   });
   it("requires existing canonical publication lifecycle recovery instead of publishing an unpublished replacement",async()=>{
@@ -666,10 +700,10 @@ const enabled = process.env.ECHELON_TEST_DATABASE_URL && process.env.ECHELON_TES
       await sync.stage(claim.job, "publish", "7".repeat(64), "started", now);
       await expect(sync.stage(claim.job, "publication_rejected", "7".repeat(64), "completed", now)).rejects.toThrow("Invalid listing stage evidence");
       const response = await recordPublicationResponse(target, new Date(now.getTime() + 1));
-      expect(await sync.recoverRejectedPublicationWrite(claim.job, target, next)).toBe(true);
+      expect(await sync.recoverTerminalPublicationWrite(claim.job, target, next)).toBe("rejected");
       expect(await sync.get(claim.job.id)).toMatchObject({ publicationWriteStarted: false, publicationIntentHash: null,
         progress: { phase: "recover_prior_requests", phaseState: "completed" } });
-      expect(await sync.recoverRejectedPublicationWrite(claim.job, target, next)).toBe(false);
+      expect(await sync.recoverTerminalPublicationWrite(claim.job, target, next)).toBe(null);
       const receipts = (await database.pool.query(`SELECT evidence FROM channels.ebay_listing_sync_events
         WHERE job_id=$1 AND event='stage_completed' AND evidence->>'key'='publication_rejected'`, [claim.job.id])).rows;
       expect(receipts).toHaveLength(1);
@@ -677,7 +711,7 @@ const enabled = process.env.ECHELON_TEST_DATABASE_URL && process.env.ECHELON_TES
       await expect(database.pool.query("DELETE FROM channels.ebay_listing_sync_events WHERE job_id=$1", [claim.job.id])).rejects.toMatchObject({ code: "23514" });
       await sync.stage(claim.job, "publish", "8".repeat(64), "started", new Date(next.getTime() + 1));
       await recordPublicationResponse(target, new Date(next.getTime() + 2), "unknown");
-      expect(await sync.recoverRejectedPublicationWrite(claim.job, target, new Date(next.getTime() + 3))).toBe(false);
+      expect(await sync.recoverTerminalPublicationWrite(claim.job, target, new Date(next.getTime() + 3))).toBe(null);
       expect(await sync.get(claim.job.id)).toMatchObject({ publicationWriteStarted: true, publicationIntentHash: "8".repeat(64) });
     } finally { await claim.release(); }
   });
@@ -687,7 +721,7 @@ const enabled = process.env.ECHELON_TEST_DATABASE_URL && process.env.ECHELON_TES
       await sync.bindPublicationTarget(claim.job, target, now);
       await sync.stage(claim.job, "publish", "7".repeat(64), "started", now);
       await recordPublicationResponse(target, new Date(now.getTime() + 1), response);
-      expect(await sync.recoverRejectedPublicationWrite(claim.job, target, new Date(now.getTime() + 2))).toBe(false);
+      expect(await sync.recoverTerminalPublicationWrite(claim.job, target, new Date(now.getTime() + 2))).toBe(null);
       expect(await sync.get(claim.job.id)).toMatchObject({ publicationWriteStarted: true });
     } finally { await claim.release(); }
   });
@@ -700,18 +734,18 @@ const enabled = process.env.ECHELON_TEST_DATABASE_URL && process.env.ECHELON_TES
       await recordPublicationResponse(target, new Date(now.getTime() + 1));
       await other.query("BEGIN");
       await other.query("SELECT pg_advisory_xact_lock(hashtextextended($1,918420))", [quantityPublicationScopeLockKey(ebayListingPublicationScopes(target)[0])]);
-      await expect(sync.recoverRejectedPublicationWrite(claim.job, target, now)).rejects.toMatchObject({ code: "PUBLICATION_SCOPE_BUSY" });
+      await expect(sync.recoverTerminalPublicationWrite(claim.job, target, now)).rejects.toMatchObject({ code: "PUBLICATION_SCOPE_BUSY" });
       await other.query("ROLLBACK");
       await database.pool.query(`CREATE FUNCTION channels.test_rejection_audit_failure() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
         IF NEW.evidence->>'key'='publication_rejected' THEN RAISE EXCEPTION 'injected rejection audit failure'; END IF; RETURN NEW; END $$;
         CREATE TRIGGER test_rejection_audit_failure BEFORE INSERT ON channels.ebay_listing_sync_events FOR EACH ROW EXECUTE FUNCTION channels.test_rejection_audit_failure()`);
       try {
-        await expect(sync.recoverRejectedPublicationWrite(claim.job, target, now)).rejects.toMatchObject({ code: "EBAY_SYNC_PERSISTENCE_FAILED" });
+        await expect(sync.recoverTerminalPublicationWrite(claim.job, target, now)).rejects.toMatchObject({ code: "EBAY_SYNC_PERSISTENCE_FAILED" });
         expect(await sync.get(claim.job.id)).toMatchObject({ publicationWriteStarted: true });
       } finally {
         await database.pool.query("DROP TRIGGER test_rejection_audit_failure ON channels.ebay_listing_sync_events; DROP FUNCTION channels.test_rejection_audit_failure()");
       }
-      expect(await sync.recoverRejectedPublicationWrite(claim.job, target, now)).toBe(true);
+      expect(await sync.recoverTerminalPublicationWrite(claim.job, target, now)).toBe("rejected");
     } finally { await other.query("ROLLBACK"); other.release(); await claim.release(); }
   });
   it("keeps post-send business failure recoverable and authorizes one audited retry even with no inventory attempts",async()=>{
@@ -800,7 +834,7 @@ const enabled = process.env.ECHELON_TEST_DATABASE_URL && process.env.ECHELON_TES
       await sync.stage(claim.job, "publish", "7".repeat(64), "started", now);
       if (provedRejection) {
         await recordPublicationResponse(target, new Date(now.getTime() + 1));
-        expect(await sync.recoverRejectedPublicationWrite(claim.job, target, new Date(now.getTime() + 2))).toBe(true);
+        expect(await sync.recoverTerminalPublicationWrite(claim.job, target, new Date(now.getTime() + 2))).toBe("rejected");
       }
       await sync.finish(claim.job, { state: "needs_attention", result: null, code: "EBAY_SHIPPING_POLICY_REJECTED",
         message: "Choose a valid shipping policy", nextAttemptAt: now }, now);
@@ -1167,9 +1201,9 @@ const enabled = process.env.ECHELON_TEST_DATABASE_URL && process.env.ECHELON_TES
     const inspect=async():Promise<EbayListingInspection>=>({providerAccount:plan.observation.providerAccount,observedAt:now,
       groupKey,groupSkus:source.variants.map(member=>member.sku),publicationIssue:null,unpublishedTarget:published?null:{groupKey,skus:source.variants.map(member=>member.sku)},
       skus:source.variants.map(member=>({sku:member.sku,inventoryItemExists:true,issue:null,offers:[{sku:member.sku,offerId:member.offerId!,status:published?"PUBLISHED":"UNPUBLISHED",listingId:published?member.listingId:null,listingStatus:published?"ACTIVE":null}]})),
-      publication:published?{...plan.observation,publicationKeyIdentity:{externalId:groupKey,identityNamespace:"ebay.inventory_item_group"},
-        listingIdentity:{externalId:source.variants[0].listingId!,identityNamespace:"ebay.listing"},members:source.variants.map(member=>({sku:member.sku,variantIdentity:null,
-          offerIdentity:{externalId:member.offerId!,identityNamespace:"ebay.offer"},inventoryItemIdentity:{externalId:member.sku,identityNamespace:"ebay.inventory_item"}}))}:null});
+      publication:published?{...plan.observation,publicationKeyIdentity:{externalId:groupKey,identityNamespace:"ebay:production:EBAY_US:inventory_item_group"},
+        listingIdentity:{externalId:source.variants[0].listingId!,identityNamespace:"ebay:production:EBAY_US:listing"},members:source.variants.map(member=>({sku:member.sku,variantIdentity:null,
+          offerIdentity:{externalId:member.offerId!,identityNamespace:"ebay:production:EBAY_US:offer"},inventoryItemIdentity:{externalId:member.sku,identityNamespace:"ebay:production:EBAY_US:inventory_item"}}))}:null});
     const client={withdrawOffer:vi.fn(async()=>{published=false;}),withdrawOfferByInventoryItemGroup:vi.fn(async()=>{published=false;})};
     const recovery={reconcile:vi.fn(async()=>({busy:false,resolved:[],unresolved:[]}))};
     const execute=new EbayListingWithdrawalExecution(async()=>({sourceIdentity:source,inspect,client}),recovery);
@@ -1196,8 +1230,8 @@ const enabled = process.env.ECHELON_TEST_DATABASE_URL && process.env.ECHELON_TES
       return{providerAccount:plan.observation.providerAccount,observedAt:now,groupKey,groupSkus:source.variants.map(member=>member.sku),publicationIssue:null,
         unpublishedTarget:active?null:{groupKey,skus:source.variants.map(member=>member.sku)},
         skus:source.variants.map(member=>({sku:member.sku,inventoryItemExists:true,issue:null,offers:[{sku:member.sku,offerId:member.offerId!,status:active?"PUBLISHED":"UNPUBLISHED",listingId:active?member.listingId:null,listingStatus:active?"ACTIVE":null}]})),
-        publication:active?{...plan.observation,publicationKeyIdentity:{externalId:groupKey,identityNamespace:"ebay.inventory_item_group"},listingIdentity:{externalId:source.variants[0].listingId!,identityNamespace:"ebay.listing"},
-          members:source.variants.map(member=>({sku:member.sku,variantIdentity:null,offerIdentity:{externalId:member.offerId!,identityNamespace:"ebay.offer"},inventoryItemIdentity:{externalId:member.sku,identityNamespace:"ebay.inventory_item"}}))}:null};
+        publication:active?{...plan.observation,publicationKeyIdentity:{externalId:groupKey,identityNamespace:"ebay:production:EBAY_US:inventory_item_group"},listingIdentity:{externalId:source.variants[0].listingId!,identityNamespace:"ebay:production:EBAY_US:listing"},
+          members:source.variants.map(member=>({sku:member.sku,variantIdentity:null,offerIdentity:{externalId:member.offerId!,identityNamespace:"ebay:production:EBAY_US:offer"},inventoryItemIdentity:{externalId:member.sku,identityNamespace:"ebay:production:EBAY_US:inventory_item"}}))}:null};
     };
     const client={withdrawOffer:vi.fn(async()=>{published=false;}),withdrawOfferByInventoryItemGroup:vi.fn(async()=>{published=false;})};
     const execute=new EbayListingWithdrawalExecution(async()=>({sourceIdentity:source,inspect,client}),{reconcile:async()=>({busy:false,resolved:[],unresolved:[]})});

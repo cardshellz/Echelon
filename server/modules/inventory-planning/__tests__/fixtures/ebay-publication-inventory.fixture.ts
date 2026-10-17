@@ -8,14 +8,18 @@ import { installCutoverAdmissionFixturePrerequisites } from "./inventory-cutover
  * or membership. Catalog, channel credentials and provider records are synthetic. */
 export async function installEbayPublicationInventoryFixture(pool: Pool, options: {
     includeQuantityRecoveryMigrations?: boolean;
+    includePreflightRecoveryMigrations?: boolean;
     seedPublicationJob?: boolean;
 } = {}): Promise<void> {
+    const includeQuantityRecovery = options.includeQuantityRecoveryMigrations === true || options.includePreflightRecoveryMigrations === true;
     await installWalmartPublicationInventoryFixture(pool, { includeWalmartMapping: false, targetState: "preview",
-      includeQuantityRecoveryMigrations: options.includeQuantityRecoveryMigrations });
+      includeQuantityRecoveryMigrations: includeQuantityRecovery });
     await activateWalmartPublicationInventoryFixture(pool);
     await installCutoverAdmissionFixturePrerequisites(pool);
     for (const name of ["236_inventory_cutover_admission.sql", "0721_inventory_publication_direct_enable.sql",
-      ...(options.includeQuantityRecoveryMigrations ? [] : ["0733_ebay_provider_response_finality.sql"]), "0742_ebay_publication_stock_readiness.sql"])
+      ...(includeQuantityRecovery ? [] : ["0733_ebay_provider_response_finality.sql"]), "0742_ebay_publication_stock_readiness.sql",
+      ...(options.includePreflightRecoveryMigrations ? ["900000008000018120001_ebay_automatic_sync_recovery.sql",
+        "900000011000018270001_ebay_publication_preflight_recovery.sql"] : [])])
       await pool.query(readFileSync(resolve("migrations", name), "utf8"));
     await pool.query(`
       CREATE TABLE ebay.ebay_oauth_tokens(channel_id integer,environment text,external_account_id text,external_account_identity_scheme text,external_account_verified_at timestamptz);
@@ -24,7 +28,7 @@ export async function installEbayPublicationInventoryFixture(pool: Pool, options
 
       INSERT INTO channels.channels(id,name,provider,status,sync_enabled,sync_mode) VALUES(67,'Test eBay','ebay','active',true,'live');
       INSERT INTO channels.channel_connections(id,channel_id) VALUES(9,67);
-      ${options.seedPublicationJob === false ? "" : options.includeQuantityRecoveryMigrations ? `
+      ${options.seedPublicationJob === false ? "" : includeQuantityRecovery ? `
       INSERT INTO channels.ebay_listing_sync_jobs(id,channel_id,connection_id,product_id,state,identity,identity_hash,requested_by,next_attempt_at,created_at,updated_at)
         VALUES('00000000-0000-4000-8000-000000000001',67,9,20,'queued',
           '{"channelId":67,"connectionId":9,"productId":20,"variants":[{"variantId":101,"sku":"P5","offerId":"offer-P5","listingId":null}]}',

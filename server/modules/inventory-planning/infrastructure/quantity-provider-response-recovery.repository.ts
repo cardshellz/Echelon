@@ -10,6 +10,7 @@ import {
   QUANTITY_PUBLICATION_LOCK_NAMESPACE,
   quantityPublicationScopeLockKey,
 } from "./quantity-publication-admission.repository";
+import { journalContractNoRequestProof, recoverNoRequestAttemptInsideTransaction } from "./quantity-provider-preflight-recovery.repository";
 
 /** Inventory owns request fences and their audit trail. No provider writes, quantity
  * acknowledgement, activation, operator impersonation, or age-based clearing. */
@@ -58,7 +59,7 @@ export class PostgresQuantityProviderResponseRecovery {
       const attempts = (
         await client.query<{
           id: string;
-          before_record: unknown;
+          before_record: Record<string, unknown>;
           affected_scope_keys: unknown;
         }>(
           `SELECT a.id::text,to_jsonb(a) AS before_record,a.affected_scope_keys
@@ -110,6 +111,11 @@ export class PostgresQuantityProviderResponseRecovery {
             [attempt.id],
           )
         ).rows;
+        const noRequestProof = receipts.length === 0 ? journalContractNoRequestProof(attempt) : null;
+        if (noRequestProof && await recoverNoRequestAttemptInsideTransaction(client, attempt, noRequestProof, timestamp)) {
+          resolved.push(attempt.id);
+          continue;
+        }
         const evidence = terminalEbayResponseEvidence(receipts);
         if (!evidence) {
           unresolved.push(attempt.id);

@@ -27,6 +27,27 @@ const recordedProgress = {
   lastActivityAt: "2026-10-15T13:34:50.000Z", lastWorkerActivityAt: "2026-10-15T13:45:00.000Z", queuedAhead: 28,
 };
 
+test("a pre-publication lookup failure explains automatic retry and reaches verified publication without another click", async ({ page }) => {
+  const state = await setupEbayChannelPage(page);
+  state.feedStatus = "publication_incomplete"; state.externalListingId = null;
+  const retrying = { ...job, operation: "publish", state: "recovering", code: "EBAY_PUBLICATION_PREFLIGHT_RETRY",
+    message: "eBay could not finish the check before publishing. No publication was sent. Echelon will retry this saved update automatically." };
+  state.jobs = [retrying];
+  await page.reload(); await page.clock.install();
+  const status = page.getByRole("status", { name: statusName });
+  await expect(status).toContainText("Retrying the eBay check before publishing");
+  await expect(page.getByText("Echelon will retry this saved update automatically", { exact: false }).first()).toBeVisible();
+  await expect(page.getByRole("button", { name: "Review listing mapping", exact: true })).toHaveCount(0);
+  state.jobs = [{ ...retrying, state: "completed", code: null, message: null }];
+  state.feedStatus = "listed"; state.externalListingId = "verified-listing";
+  await page.clock.fastForward(10_100);
+  await expect(page.getByRole("link", { name: "View on eBay" }).filter({ visible: true })).toHaveAttribute("href", "https://www.ebay.com/itm/verified-listing");
+  await expect(page.getByText("Retrying the eBay check before publishing", { exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Errors (0)", exact: true })).toBeVisible();
+  expect(state.commands).toEqual([]); expect(state.requests).toEqual([]);
+  expect(state.errors).toEqual([]); expect(state.unexpected).toEqual([]);
+});
+
 test("an incomplete publication uses normal Sync to resume the saved workflow without a mapping detour", async ({ page }, info) => {
   const state = await setupEbayChannelPage(page);
   state.feedStatus = "publication_incomplete";

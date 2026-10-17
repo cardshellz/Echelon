@@ -62,7 +62,7 @@ dbDescribe.sequential("reviewed eBay publication stock enrollment, real PostgreS
   beforeEach(async () => {
     database = await createInventoryCutoverTestDatabase(url, disposable, cutoverCompositionBaseSql);
     runtime.pool = database.pool; runtime.api.mockReset();
-    await installEbayPublicationInventoryFixture(database.pool);
+    await installEbayPublicationInventoryFixture(database.pool, { includePreflightRecoveryMigrations: true });
     await database.pool.query('CREATE TABLE saved_publication_work(command_key uuid PRIMARY KEY)');
   }, 30_000);
   afterEach(async () => { await database?.close(); });

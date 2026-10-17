@@ -8,6 +8,7 @@ import { syncContentIntentHash } from "./ebay-listing-sync-content";
 import { assertEbayPublicationTargetUnchanged, resolveEbayPublicationTarget } from "./ebay-publication-completion.domain";
 import type { EbayListingConnectorDraft, EbayMarketplaceListingConnector, EbayPublishedListingIdentityResolver } from "./listing-connectors/ebay-listing.connector";
 import { recoverPriorEbayListingRequests, type EbayListingRequestRecovery } from "./ebay-listing-request-recovery";
+import { EbayApiRequestError } from "./adapters/ebay/ebay-api-error";
 
 export interface PreparedEbayPublication extends PreparedEbayListingSync {
   sourceIdentity: EbayListingSyncIdentity;
@@ -43,12 +44,12 @@ export class EbayPublicationCompletionExecution implements EbayListingSyncExecut
     await this.assertCompatible(source, prepared.inspection, target);
 
     // A retained start is a delivery barrier, not proof that eBay accepted it.
-    // Inventory's immutable HTTP evidence can prove rejection; the job owner
-    // appends that proof before allowing this same saved request to continue.
+    // Inventory can prove rejection or that preparation never sent a mutation.
+    // The job owner commits that evidence before continuing the same request.
     let publicationWriteStarted = context.publicationWriteStarted;
     if (publicationWriteStarted && !context.publicationWriteCompleted && !context.publicationAccepted
-      && context.recoverRejectedPublicationWrite) {
-      publicationWriteStarted = !await context.recoverRejectedPublicationWrite(observed);
+      && context.recoverTerminalPublicationWrite) {
+      publicationWriteStarted = !await context.recoverTerminalPublicationWrite(observed);
     }
 
     // Published readback does not resolve an uncertain prior publish response.
@@ -77,20 +78,24 @@ export class EbayPublicationCompletionExecution implements EbayListingSyncExecut
         result = await this.connector.pushListing({ client: prepared.client, draft: prepared.draft,
           resolvePublishedIdentity: prepared.resolvePublishedIdentity, stage });
       } catch (error) {
-        // A known provider refusal should surface its actual correction (for
-        // example shipping policy), not turn into an indefinite unknown outcome.
-        // Missing/accepted response evidence still leaves the original barrier.
+        // Keep actual business refusals actionable. A proved pre-send temporary
+        // read failure retries automatically; an escaped write remains fenced.
+        let recovered: "rejected" | "not_sent" | null = null;
         try {
-          if (context.recoverRejectedPublicationWrite) {
+          if (context.recoverTerminalPublicationWrite) {
             const current = observed.variants.some(member => member.offerId === null)
               ? resolveEbayPublicationTarget(source, await prepared.inspect()) : observed;
-            await context.recoverRejectedPublicationWrite(current);
+            recovered = await context.recoverTerminalPublicationWrite(current);
           }
         }
         catch (recoveryError) {
           throw new EbayListingSyncError("EBAY_SYNC_PERSISTENCE_FAILED",
             "The publication response could not be recorded completely. The saved request will check it again before another write.",
-            { cause: new AggregateError([error, recoveryError], "Publication rejection recovery failed.") });
+            { cause: new AggregateError([error, recoveryError], "Publication outcome recovery failed.") });
+        }
+        if (recovered === "not_sent" && isTemporaryPublicationPreflightFailure(error)) {
+          throw new EbayListingSyncError("EBAY_PUBLICATION_PREFLIGHT_RETRY",
+            "eBay could not finish the check before publishing. No publication was sent. Echelon will retry this saved update automatically.", { cause: error });
         }
         throw error;
       }
@@ -135,6 +140,14 @@ export class EbayPublicationCompletionExecution implements EbayListingSyncExecut
   private maintain(prepared: PreparedEbayPublication, identity: EbayListingSyncIdentity): EbayExistingListingSyncExecution {
     return new EbayExistingListingSyncExecution(async () => ({ ...prepared, identity }), this.recovery, this.connector, this.automaticRecovery);
   }
+}
+
+function isTemporaryPublicationPreflightFailure(error: unknown): boolean {
+  if (error instanceof EbayApiRequestError) return error.statusCode === 429
+    || (error.statusCode !== undefined && error.statusCode >= 500 && error.statusCode <= 599);
+  return error instanceof Error && "code" in error && typeof error.code === "string"
+    && ["ECONNRESET", "ETIMEDOUT", "ECONNREFUSED", "QUANTITY_PROVIDER_REQUEST_TIMEOUT",
+      "EBAY_REGISTRATION_READ_TIMEOUT", "EBAY_REGISTRATION_READ_FAILED"].includes(error.code);
 }
 
 export class EbayListingOperationExecution implements EbayListingSyncExecution {

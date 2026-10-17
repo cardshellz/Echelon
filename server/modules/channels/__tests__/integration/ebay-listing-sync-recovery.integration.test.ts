@@ -49,6 +49,8 @@ import {
   syncProviderFixture,
 } from "../fixtures/ebay-listing-sync.fixture";
 import { EbayListingSyncError, type EbayListingSyncIdentity } from "../../ebay-listing-sync.domain";
+import { resolveExistingEbayListingIdentity } from "../../ebay-existing-listing-identity";
+import { EbayMarketplaceRegistrationObserver } from "../../../marketplace-listings/infrastructure/providers/ebay/ebay-registration-observer";
 vi.mock("../../../../db", () => ({ pool: {} }));
 const configured =
   process.env.ECHELON_TEST_DATABASE_URL &&
@@ -78,6 +80,8 @@ const configured =
         "0736_ebay_listing_mapping_repairs.sql",
         "0737_ebay_publication_completion.sql",
         "0741_ebay_durable_withdrawal.sql",
+        "900000008000018120001_ebay_automatic_sync_recovery.sql",
+        "900000011000018270001_ebay_publication_preflight_recovery.sql",
       ])
         await database.pool.query(
           readFileSync(resolve(process.cwd(), "migrations", file), "utf8"),
@@ -273,6 +277,43 @@ const configured =
       code: "INVENTORY_PUBLICATION_TARGET_BUSY", context: { retryable: true },
     });
     const galleryPhotos = ["https://example.com/current-front.jpg", "https://example.com/current-back.jpg"];
+
+    function withRetiredUnpublishedMember(f: ReturnType<typeof fixture>) {
+      const currentSource: EbayListingSyncIdentity = { ...identity, variants: [
+        { ...identity.variants[0], contentSyncEnabled: true },
+        { variantId: 7777, sku: "RETIRED-C200", externalSku: "RETIRED-C200", offerId: "retired-offer", listingId: null, contentSyncEnabled: false },
+      ] };
+      // The original command predates optional eligibility snapshots. Its exact
+      // saved identifiers remain fenced against the fresh complete source read.
+      identity = { ...currentSource, variants: currentSource.variants.map(({ contentSyncEnabled: _enabled, ...member }) => member) };
+      const retired = { status: "UNPUBLISHED", groupIds: [] as string[] };
+      const observer = new EbayMarketplaceRegistrationObserver({ loadFreshCredential: async () => ({ accessToken: "test-only", environment: "production" }) },
+        { get: async request => {
+          const url = new URL(request.path, "https://api.ebay.com");
+          if (url.pathname === "/commerce/identity/v1/user/") return { status: 200, body: { userId: identity.accountId } };
+          if (url.pathname.endsWith("/inventory_item_group/PACK")) return { status: 200, body: await f.client.getInventoryItemGroup("PACK") };
+          if (url.pathname.includes("/inventory_item/")) {
+            const sku = decodeURIComponent(url.pathname.split("/").at(-1)!);
+            return { status: 200, body: { sku, groupIds: sku === "RETIRED-C200" ? retired.groupIds : ["PACK"] } };
+          }
+          if (url.pathname.endsWith("/offer")) {
+            const sku = url.searchParams.get("sku")!;
+            const offer = sku === "RETIRED-C200"
+              ? { sku, marketplaceId: "EBAY_US", offerId: "retired-offer", status: retired.status }
+              : { ...(await f.client.getOffers(sku, "EBAY_US")).offers[0], listing: { listingId: "listing-20", listingStatus: "ACTIVE" } };
+            return { status: 200, body: { offers: [offer], total: 1 } };
+          }
+          throw new Error(`Unexpected provider read ${request.path}`);
+        } }, { now: clock });
+      const prepare = f.prepare.getMockImplementation()!;
+      f.prepare.mockImplementation(async () => {
+        const { identity: resolved, observation } = await resolveExistingEbayListingIdentity(currentSource, observer,
+          currentSource.variants.map(member => ({ productVariantId: member.variantId, sku: member.sku,
+            isActive: member.contentSyncEnabled !== false, availableQuantity: member.contentSyncEnabled === false ? 0 : 7 })));
+        return { ...await prepare(), sourceIdentity: structuredClone(currentSource), identity: resolved, providerObservation: observation };
+      });
+      return { currentSource, retired };
+    }
 
     it("shows only the current claim's phase across a crash, joined command and requeue", async () => {
       await database.pool.query("INSERT INTO catalog.products(id,sku) VALUES(900,'PROGRESS')");
@@ -1322,6 +1363,83 @@ const configured =
       advance();
       await f.service.processDue(1, job.id);
       expect((await f.store.get(job.id)).state).toBe("completed");
+    });
+    it("recovers a crash after retired-member reconciliation and provider writes without repeating writes or changing retired mappings", async () => {
+      await database.pool.query("INSERT INTO catalog.product_variants(id,product_id,sku) VALUES(7777,20,'RETIRED-C200') ON CONFLICT(id) DO NOTHING");
+      await database.pool.query(`INSERT INTO channels.channel_listings VALUES(1,7777,'RETIRED-C200','retired-offer',NULL,231,0,'ended','historic retired state',NULL,NULL)`);
+      try {
+        const f = fixture({ photoUrls: galleryPhotos });
+        const { currentSource } = withRetiredUnpublishedMember(f);
+        const retiredBefore = (await database.pool.query("SELECT * FROM channels.channel_listings WHERE product_variant_id=7777")).rows[0];
+        f.prepare.mockRejectedValueOnce(new EbayListingSyncError("EBAY_SYNC_MEMBERSHIP_CHANGED", "Historical three-versus-two membership failure"));
+        const old = await f.service.enqueue(identity, "operator");
+        await f.service.processDue(1, old.id);
+        expect((await f.store.get(old.id)).state).toBe("needs_attention");
+        const historicalEvents = (await database.pool.query("SELECT * FROM channels.ebay_listing_sync_events WHERE job_id=$1 ORDER BY id", [old.id])).rows;
+        advance();
+        const command = randomUUID();
+        const saved = await f.service.enqueue(identity, "operator", command);
+        const claim = (await f.store.claim(clock(), randomUUID(), saved.id))!;
+        try {
+          await f.executor.execute(claim.job.identity, async (key, hash, work) => {
+          await f.store.stage(claim.job, key, hash, "started", clock());
+          const result = await work();
+          await f.store.stage(claim.job, key, hash, "completed", clock());
+          return result;
+        }, null, (resolved, observation, source) => f.store.bindProviderIdentity(claim.job, resolved, clock(), observation, source));
+          const afterWrites = await f.store.get(saved.id);
+          expect(afterWrites).toMatchObject({ state: "running", providerIdentity: { variants: [expect.objectContaining({ variantId: 101 })] } });
+          expect(afterWrites.identity.variants.map(member => member.variantId)).toEqual([101, 7777]);
+        } finally {
+          // Process loss after verified provider writes, before local completion.
+          await claim.release();
+        }
+        const writes = structuredClone(f.mutations);
+        expect(writes).toHaveLength(3);
+        const restartedStore = new PostgresEbayListingSyncRepository(database.pool);
+        const restarted = new EbayListingSyncService(restartedStore, f.executor, clock, randomUUID);
+        const results = await Promise.all([f.service.processDue(1, saved.id), restarted.processDue(1, saved.id)]);
+        expect(results.reduce((count, result) => count + result.processed, 0)).toBe(1);
+        expect(await restartedStore.get(saved.id)).toMatchObject({ state: "completed", result: { synced: 1, errors: 0 } });
+        expect(f.mutations).toEqual(writes);
+        expect(f.provider.currentItem().product.imageUrls).toEqual(galleryPhotos);
+        expect(f.provider.currentGroup().imageUrls).toEqual(galleryPhotos);
+        expect((await database.pool.query("SELECT * FROM channels.channel_listings WHERE product_variant_id=7777")).rows[0]).toEqual(retiredBefore);
+        const proof = (await database.pool.query(`SELECT evidence FROM channels.ebay_listing_sync_events
+          WHERE job_id=$1 AND evidence->>'key'='provider_identity'`, [saved.id])).rows;
+        expect(proof).toHaveLength(1);
+        expect(proof[0].evidence.sourceIdentity).toEqual(currentSource);
+        expect(proof[0].evidence.observation.evidence.nonMemberCandidates).toEqual([
+          expect.objectContaining({ sku: "RETIRED-C200", groupIds: [], offers: [expect.objectContaining({ offerId: "retired-offer", status: "UNPUBLISHED" })] }),
+        ]);
+        expect((await f.service.enqueue(identity, "operator", command)).id).toBe(saved.id);
+        expect(await restarted.processDue(1, saved.id)).toEqual({ processed: 0, failed: 0 });
+        expect(f.mutations).toEqual(writes);
+        expect((await database.pool.query("SELECT * FROM channels.ebay_listing_sync_events WHERE job_id=$1 ORDER BY id", [old.id])).rows).toEqual(historicalEvents);
+        expect(f.provider.client.createOffer).not.toHaveBeenCalled();
+        expect(f.provider.client.publishOfferByInventoryItemGroup).not.toHaveBeenCalled();
+      } finally {
+        await database.pool.query("DELETE FROM channels.channel_listings WHERE product_variant_id=7777");
+      }
+    });
+
+    it("rolls back a provider binding that drops a disabled mapping without complete unpublished evidence", async () => {
+      const f = fixture();
+      withRetiredUnpublishedMember(f);
+      const saved = await f.service.enqueue(identity, "operator");
+      const claim = (await f.store.claim(clock(), randomUUID(), saved.id))!;
+      try {
+        const prepared = await f.prepare();
+        const unproved = { ...prepared.providerObservation!, evidence: {} };
+        await expect(f.store.bindProviderIdentity(claim.job, prepared.identity, clock(), unproved, prepared.sourceIdentity))
+          .rejects.toMatchObject({ code: "EBAY_SYNC_MEMBERSHIP_CHANGED" });
+        expect((await f.store.get(saved.id)).providerIdentity).toBeNull();
+        expect((await database.pool.query(`SELECT count(*)::int AS count FROM channels.ebay_listing_sync_events
+          WHERE job_id=$1 AND evidence->>'key'='provider_identity'`, [saved.id])).rows[0].count).toBe(0);
+        expect(f.mutations).toEqual([]);
+        await f.store.finish(claim.job, { state: "needs_attention", result: null, code: "EBAY_SYNC_MEMBERSHIP_CHANGED",
+          message: "Unproved membership", nextAttemptAt: clock() }, clock());
+      } finally { await claim.release(); }
     });
   },
 );

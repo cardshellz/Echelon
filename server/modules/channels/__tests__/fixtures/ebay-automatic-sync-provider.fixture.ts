@@ -5,6 +5,7 @@ import type {
   EbayOffer,
 } from "../../adapters/ebay/ebay-types";
 import { executeEbayQuantityHttp } from "../../adapters/ebay/ebay-quantity-http";
+import { EbayApiRequestError } from "../../adapters/ebay/ebay-api-error";
 import type { EbayObservedOffer } from "../../listing-connectors/ebay-listing.connector";
 import type { EbayQuantityHttpRequest } from "../../quantity-publication-request";
 
@@ -21,6 +22,8 @@ export class AutomaticSyncEbayProvider {
   readonly writes: EbayQuantityHttpRequest[] = [];
   readonly lateWrites: EbayQuantityHttpRequest[] = [];
   private fault: { path: string; applyBeforeFailure: boolean } | null = null;
+  private failPublicationPreflight: "offer" | "group" | null = null;
+  private publicationGroupPrepared = false;
   private held: { path: string; entered: () => void; gate: Promise<void> } | null = null;
   private item: EbayInventoryItem = {
     sku: "P5",
@@ -41,7 +44,11 @@ export class AutomaticSyncEbayProvider {
     variesBy: { specifications: [{ name: "Pack Size", values: ["5"] }] },
   };
 
-  constructor(private readonly clock: () => Date) {}
+  constructor(private readonly clock: () => Date, private readonly publicationEnabled = false) {
+    if (publicationEnabled) this.offer = { ...this.offer, listingId: undefined, status: "UNPUBLISHED" };
+  }
+
+  failNextPublicationPreflight(read: "offer" | "group" = "offer"): void { this.failPublicationPreflight = read; }
 
   snapshot() {
     return structuredClone({ item: this.item, offer: this.offer, group: this.group });
@@ -71,7 +78,18 @@ export class AutomaticSyncEbayProvider {
     return executeEbayQuantityHttp<T>({
       url: `https://example.test${request.path}`, path: request.path,
       method: request.method, body: request.body, headers: {}, now: this.clock,
+      // Production read requests preserve the API's HTTP error contract;
+      // mutations retain the quantity transport's uncertainty classification.
+      onFailure: request.method === "GET" ? async (status, body) => {
+        throw new EbayApiRequestError(status, `eBay API GET ${request.path} failed (${status}): ${body}`, body);
+      } : undefined,
       request: async () => {
+        if (request.method === "GET" && this.failPublicationPreflight && this.publicationGroupPrepared
+          && (this.failPublicationPreflight === "offer" ? request.path.startsWith("/sell/inventory/v1/offer?")
+            : request.path === "/sell/inventory/v1/inventory_item_group/PACK")) {
+          this.failPublicationPreflight = null;
+          return new Response(JSON.stringify({ errors: [{ errorId: 25001, domain: "API_INVENTORY", category: "System", message: "Injected provider lookup failure" }] }), { status: 500 });
+        }
         if (request.method === "GET") return this.response(this.read(request.path));
         this.writes.push(request);
         if (this.held?.path === request.path) {
@@ -99,11 +117,13 @@ export class AutomaticSyncEbayProvider {
 
   private read(path: string): unknown {
     const url = new URL(path, "https://example.test");
-    if (url.pathname === "/sell/inventory/v1/inventory_item/P5") return structuredClone(this.item);
+    if (url.pathname === "/commerce/identity/v1/user/") return { userId: "seller-36" };
+    if (url.pathname === "/sell/inventory/v1/inventory_item/P5") return { ...structuredClone(this.item), groupIds: ["PACK"] };
     if (url.pathname === "/sell/inventory/v1/inventory_item_group/PACK") return structuredClone(this.group);
     if (url.pathname === "/sell/inventory/v1/offer/offer-P5") return structuredClone(this.offer);
     if (url.pathname === "/sell/inventory/v1/offer" && url.searchParams.get("sku") === "P5") {
-      return { offers: [structuredClone(this.offer)], total: 1 };
+      return { offers: [{ ...structuredClone(this.offer), ...(this.offer.status === "PUBLISHED"
+        ? { listing: { listingId: this.offer.listingId, listingStatus: "ACTIVE" } } : {}) }], total: 1 };
     }
     throw new Error(`Unexpected fake eBay GET ${path}`);
   }
@@ -114,12 +134,13 @@ export class AutomaticSyncEbayProvider {
       return;
     }
     if (request.method === "PUT" && request.path === "/sell/inventory/v1/offer/offer-P5") {
-      this.offer = { ...structuredClone(request.body as EbayOffer), offerId: "offer-P5", listingId: "listing-20", status: "PUBLISHED" };
+      this.offer = { ...structuredClone(request.body as EbayOffer), offerId: "offer-P5", listingId: this.offer.listingId, status: this.offer.status };
       return;
     }
     if (request.method === "PUT" && request.path === "/sell/inventory/v1/inventory_item_group/PACK") {
       const { inventoryItemGroupKey: _requestIdentity, ...body } = structuredClone(request.body as EbayInventoryItemGroup);
       this.group = body;
+      this.publicationGroupPrepared = true;
       return;
     }
     if (request.method === "POST" && request.path === "/sell/inventory/v1/bulk_update_price_quantity") {
@@ -135,6 +156,10 @@ export class AutomaticSyncEbayProvider {
           return { offerId: offer.offerId, statusCode: 200 };
         }) };
       }) };
+    }
+    if (this.publicationEnabled && request.method === "POST" && request.path === "/sell/inventory/v1/offer/publish_by_inventory_item_group") {
+      this.offer = { ...this.offer, status: "PUBLISHED", listingId: "listing-20" };
+      return { listingId: "listing-20" };
     }
     // Any accidental create/publish/delete in existing-listing recovery fails
     // the test instead of quietly manufacturing another listing.
