@@ -5,6 +5,7 @@ import {
   type PoShipmentCostLineDetail,
 } from "../../domain/po-shipment-cost-summary";
 import { shipmentCostReviewGuidance } from "@shared/procurement/po-shipment-costs";
+import type { ShipmentCostException } from "@shared/procurement/shipment-cost-exception";
 
 const source = (): PoShipmentCostSummaryInput => ({
   poId: 1,
@@ -49,6 +50,82 @@ const detail = (): PoShipmentCostLineDetail => ({
   applicationIssues: [],
 });
 const supplier = { freightCents: 300, dutyCents: 200 };
+
+function postedReview(): ShipmentCostException {
+  return {
+    state: "open", fingerprint: "a".repeat(64), kind: "missing_receipt_history", currency: "USD",
+    allocatedMills: 60000, amountMills: 60000, lotsUpdated: 0, cogsRowsUpdated: 0, decision: null,
+    issues: [{ code: "COST_HISTORICAL_LINEAGE_MISSING", message: "Receipt cost links were not recorded." }],
+    reconciliation: { status: "posted", destination: "historical_cogs", postedMills: 60000, unassignedMills: 0 },
+  };
+}
+
+describe("current reconciliation resolves the PO cost status, preserving its audit", () => {
+  function reconciled() {
+    const input = source(), review = postedReview();
+    input.lines[0].applicationStatus = "review_required";
+    const recorded = { ...detail(), applicationIssues: review.issues, exceptionReview: review };
+    return { input, recorded, review };
+  }
+  it.each(["confirmed", "estimated"])("counts a posted %s charge as complete", evidence => {
+    const { input, recorded } = reconciled();
+    input.lines[0].evidence = evidence;
+    input.charges[0].confirmed = evidence === "confirmed";
+    const before = JSON.stringify({ input, recorded });
+    expect(buildPoShipmentCosts(input, supplier, [recorded])).toMatchObject({
+      summary: { appliedLines: 1, reviewLines: 0, pendingLines: 0, inventoryCosting: "applied",
+        estimatedCents: evidence === "estimated" ? 600 : 0 },
+      lines: [{ status: "applied", issues: recorded.applicationIssues, exceptionReview: recorded.exceptionReview }],
+      totals: { freightCents: 900, dutyCents: 200, combinedCostCents: 10600 },
+    });
+    expect(JSON.stringify({ input, recorded })).toBe(before);
+  });
+  it.each(["unresolved", "review_required"] as const)("keeps %s costs actionable", status => {
+    const { input, recorded } = reconciled();
+    recorded.exceptionReview.reconciliation!.status = status;
+    expect(buildPoShipmentCosts(input, supplier, [recorded])).toMatchObject({
+      summary: { reviewLines: 1, inventoryCosting: "review_required" }, lines: [{ status: "review_required" }],
+    });
+  });
+  it("keeps a fully reversed zero charge complete when the allocator removes zero allocations", () => {
+    const { input, recorded } = reconciled();
+    input.charges[0].amountCents = 0;
+    input.allocations = [];
+    input.lines[0].sourceTotalMills = 0;
+    recorded.exceptionReview.allocatedMills = 0;
+    recorded.exceptionReview.amountMills = 0;
+    recorded.exceptionReview.reconciliation!.postedMills = 0;
+    expect(buildPoShipmentCosts(input, supplier, [recorded])).toMatchObject({
+      summary: { totalCents: 0, appliedLines: 1, reviewLines: 0, unallocatedChargeCount: 0, inventoryCosting: "applied" },
+      totals: { combinedCostCents: 10000 }, lines: [{ status: "applied" }],
+    });
+  });
+  it.each(["amount", "quantity", "source issue", "new issue", "unreadable issues", "no application"])(
+    "never lets a saved posting hide changed or invalid evidence: %s", change => {
+      const { input, recorded } = reconciled();
+      const row: PoShipmentCostLineDetail = recorded;
+      if (change === "amount") input.lines[0].sourceTotalMills = 50000;
+      if (change === "quantity") input.lines[0].sourceQuantity = 79;
+      if (change === "source issue") row.sourceIssue = { code: "LANDED_ALLOCATION_STALE", message: "Split changed." };
+      if (change === "new issue") row.applicationIssues = [{ code: "COST_GRAPH_INCOMPLETE", message: "New missing history." }];
+      if (change === "unreadable issues") row.applicationIssues = null;
+      if (change === "no application") row.applicationId = null;
+      expect(buildPoShipmentCosts(input, supplier, [row])).toMatchObject({
+        summary: { reviewLines: 1, inventoryCosting: "review_required" }, lines: [{ status: "review_required" }],
+      });
+    },
+  );
+  it("counts only the remaining unresolved line in a mixed PO", () => {
+    const { input, recorded } = reconciled();
+    input.allocations[1].poId = input.poId;
+    input.lines.push({ ...input.lines[0], id: 31, sourceTotalMills: 40000 });
+    const outstanding = { ...detail(), lineId: 31, applicationIssues: [{ code: "COST_GRAPH_INCOMPLETE", message: "Missing attribution." }] };
+    expect(buildPoShipmentCosts(input, supplier, [recorded, outstanding])).toMatchObject({
+      summary: { appliedLines: 1, reviewLines: 1, pendingLines: 0, inventoryCosting: "review_required" },
+      lines: [{ status: "applied" }, { status: "review_required" }],
+    });
+  });
+});
 
 describe("PO card totals and recorded shipment cost review", () => {
   it("keeps a retained quantity review visible and does not suggest retrying away missing history", () => {
@@ -172,15 +249,15 @@ describe("PO card totals and recorded shipment cost review", () => {
       issues: [{ code: "COST_UPDATE_NOT_RECORDED" }],
     });
   });
-  it("explains applied estimates awaiting supplier confirmation", () => {
+  it("keeps supplier confirmation separate from completed estimate posting", () => {
     const input = source();
     input.charges[0].confirmed = false;
     input.lines[0].evidence = "estimated";
     expect(
       buildPoShipmentCosts(input, supplier, [detail()]).lines[0],
     ).toMatchObject({
-      status: "pending",
-      issues: [{ code: "LANDED_CHARGES_UNCONFIRMED" }],
+      status: "applied",
+      issues: [],
     });
   });
   it("explains an applied result that is outdated after an allocation changes", () => {

@@ -94,3 +94,41 @@ non-admin access, approval, stale review, response-loss retry and saved results.
 
 Deployment and a reviewed production approval are separate from these tests.
 Production investigation evidence remains local and is not a test fixture.
+
+## Consistent completion across purchasing screens
+
+Posting and supplier confirmation are separate facts. A current estimated charge
+can be posted. `resolveCostPostingStatus` and `isCostReconciliationPosted` supply
+one completion rule to the PO summary and shipment workflow. Estimated amounts
+remain visible as estimates; an approval alone does not prove a posting.
+
+The PO, shipment and health readers compare the saved revision with the live
+source fingerprint in a read-only repeatable-read snapshot. A supplier, allocation
+or invoice change can invalidate posting evidence even when the amount is
+unchanged. Missing, malformed, stale or unsupported evidence must not display
+current completion. These reads do not create revisions or post costs.
+
+Both the shipments overview and purchasing dashboard consume the same validated
+landed-cost health contract. Current posted estimates and approved historical
+balances no longer produce another push-cost action. A remaining lot provisional
+flag stays visible as a warning: that flag does not identify which cost component
+still needs review. A failed or malformed health response displays an unavailable
+state with retry, including after an earlier successful response.
+
+Purchase history keeps the original result, issues and immutable lot snapshots.
+A separate current-resolution panel identifies the amount, destination, approval,
+actor, reason and posting. The server projects the resolved label only when the
+current source, balanced ledger and every supporting application/reporting event
+verify in the same PO/shipment scope. This includes postings carried forward from
+an earlier revision. Changed source evidence removes the current-resolution claim;
+it does not erase historical failures or approvals.
+
+The focused acceptance coverage lives in `cost-posting-status.test.ts`,
+`current-shipment-cost-source.test.ts`, the purchase-cost-application and landed-cost
+health unit tests, `receiving-cost-application.integration.test.ts` (including its
+reconciliation cases), and `procurement-cost-cross-screen.spec.ts`. It exercises
+ordinary applied estimates, approved historical costs, changed sources at equal
+amounts, invalid backing evidence, unresolved reviews, unavailable reads, reload
+and desktop/mobile navigation across all five affected surfaces. Browser API
+fixtures prove screen behavior; disposable PostgreSQL cases prove the real read
+and reconciliation paths. Neither establishes production acceptance.

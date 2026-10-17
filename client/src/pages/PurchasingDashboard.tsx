@@ -1,3 +1,4 @@
+import { landedCostHealthSchema, type LandedCostHealth } from "@shared/procurement/landed-cost-health";
 import { DailyBuyingReview } from "@/features/purchasing/DailyBuyingReview";
 import { PurchasePipeline } from "@/features/purchasing/PurchasePipeline";
 import { useState } from "react";
@@ -287,29 +288,7 @@ interface AutoDraftRunHistoryResponse {
   runs: AutoDraftRunHistoryItem[];
 }
 
-type LandedCostHealth = {
-  status: "healthy" | "warning" | "critical";
-  scannedShipments: number;
-  critical: number;
-  warning: number;
-  counts: {
-    allocationBlockers: number;
-    allocationWarnings: number;
-    pendingFinalization: number;
-    finalizedNotPushed: number;
-    staleProvisionalLots: number;
-  };
-  items: Array<{
-    id: string;
-    type: string;
-    severity: "critical" | "warning";
-    shipmentId: number;
-    shipmentNumber: string | null;
-    shipmentStatus: string;
-    detail: string;
-    action: string;
-  }>;
-};
+
 
 type SupplierSetupGaps = {
   generatedAt: string;
@@ -675,15 +654,16 @@ export default function PurchasingDashboard() {
     refetchInterval: 5 * 60 * 1000,
   });
 
-  const { data: landedCostHealth } = useQuery<LandedCostHealth>({
+  const landedCostHealthQuery = useQuery<LandedCostHealth>({
     queryKey: ["/api/procurement/landed-cost-health"],
     queryFn: async () => {
       const res = await fetch("/api/procurement/landed-cost-health?limit=25", { credentials: "include" });
       if (!res.ok) throw new Error("Failed to fetch landed cost health");
-      return res.json();
+      return landedCostHealthSchema.parse(await res.json());
     },
     refetchInterval: 5 * 60 * 1000,
   });
+  const landedCostHealth = landedCostHealthQuery.isError ? undefined : landedCostHealthQuery.data;
 
   const { data: supplierSetupGaps } = useQuery<SupplierSetupGaps>({
     queryKey: ["/api/purchasing/supplier-setup-gaps"],
@@ -758,6 +738,8 @@ export default function PurchasingDashboard() {
         { label: "Needs finalization", value: landedCostHealth.counts.pendingFinalization },
         { label: "Ready to push", value: landedCostHealth.counts.finalizedNotPushed },
         { label: "Stale provisional lots", value: landedCostHealth.counts.staleProvisionalLots },
+        { label: "Posting review", value: landedCostHealth.counts.postingReviewRequired },
+        { label: "Other provisional costs", value: landedCostHealth.counts.provisionalOtherCosts },
       ]
     : [];
   const showSupplierSetupGaps = Boolean(supplierSetupGaps?.totalGapItems);
@@ -1017,8 +999,21 @@ export default function PurchasingDashboard() {
           </Card>
         )}
 
+        {(landedCostHealthQuery.isPending || landedCostHealthQuery.isError) && (
+          <Card role="region" aria-label="Landed Cost Health">
+            <CardContent className="p-4 space-y-2">
+              <h2 className="font-semibold">Landed Cost Health</h2>
+              {landedCostHealthQuery.isError ? <>
+                <p role="alert">Landed cost health is unavailable. Retry to verify current cost evidence.</p>
+                <Button variant="outline" size="sm" disabled={landedCostHealthQuery.isFetching}
+                  onClick={() => void landedCostHealthQuery.refetch()}>Retry cost health</Button>
+              </> : <p role="status">Loading landed cost health…</p>}
+            </CardContent>
+          </Card>
+        )}
+
         {showLandedCostHealth && landedCostHealth && (
-          <Card className={landedCostHealth.status === "critical" ? "border-red-300 bg-red-50/40" : "border-amber-300 bg-amber-50/40"}>
+          <Card role="region" aria-label="Landed Cost Health" className={landedCostHealth.status === "critical" ? "border-red-300 bg-red-50/40" : "border-amber-300 bg-amber-50/40"}>
             <CardContent className="p-4 space-y-3">
               <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
                 <div className="flex items-start gap-3">
@@ -1036,7 +1031,7 @@ export default function PurchasingDashboard() {
                       </span>
                     </div>
                     <p className="text-xs text-muted-foreground mt-1">
-                      Inbound costs need attention before receiving history, lots, and financial reporting can be treated as final.
+                      Review current posting evidence and remaining provisional sources separately.
                     </p>
                   </div>
                 </div>
@@ -1068,7 +1063,7 @@ export default function PurchasingDashboard() {
                         </span>
                         <span className="text-[10px] text-muted-foreground">{item.shipmentStatus}</span>
                       </div>
-                      <div className="text-xs text-muted-foreground mt-1 truncate">{item.detail}</div>
+                      <div className="text-xs text-muted-foreground mt-1 break-words">{item.detail}</div>
                     </div>
                     <Button size="sm" variant="outline" className="text-[11px] h-7 flex-shrink-0" onClick={() => navigate(`/shipments/${item.shipmentId}`)}>
                       Review
@@ -1211,7 +1206,7 @@ export default function PurchasingDashboard() {
                         <span className="text-[10px] text-muted-foreground truncate">{item.vendorName ?? "No vendor"}</span>
                         <span className="text-[10px] text-muted-foreground">{item.ageDays}d</span>
                       </div>
-                      <div className="text-xs text-muted-foreground mt-1 truncate">{item.detail}</div>
+                      <div className="text-xs text-muted-foreground mt-1 break-words">{item.detail}</div>
                       <div className="text-[11px] text-muted-foreground mt-1">
                         {formatPoTrack(item.physicalStatus)} / Financial review: {formatPoTrack(item.financialWorkflowState ?? "unavailable")}
                         {` - Recorded linked invoice status: ${formatPoTrack(item.financialStatus)}`}

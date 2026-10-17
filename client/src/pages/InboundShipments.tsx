@@ -1,3 +1,4 @@
+import { landedCostHealthSchema, type LandedCostHealth } from "@shared/procurement/landed-cost-health";
 import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useLocation } from "wouter";
@@ -59,33 +60,7 @@ function formatCents(cents: number | null | undefined): string {
 }
 
 type Warehouse = { id: number; code: string; name: string };
-type LandedCostHealth = {
-  status: "healthy" | "warning" | "critical";
-  scannedShipments: number;
-  critical: number;
-  warning: number;
-  counts: {
-    allocationBlockers: number;
-    allocationWarnings: number;
-    pendingFinalization: number;
-    finalizedNotPushed: number;
-    staleProvisionalLots: number;
-  };
-  items: Array<{
-    id: string;
-    type: string;
-    severity: "critical" | "warning";
-    shipmentId: number;
-    shipmentNumber: string | null;
-    shipmentStatus: string;
-    detail: string;
-    action: string;
-    provisionalLotCount?: number;
-    missingSnapshotLineIds?: number[];
-    blockerCount?: number;
-    warningCount?: number;
-  }>;
-};
+
 type LandedCostPushResult = {
   updated: number;
   total: number;
@@ -177,14 +152,15 @@ export default function InboundShipments() {
     },
   });
 
-  const { data: landedCostHealth } = useQuery<LandedCostHealth>({
+  const landedCostHealthQuery = useQuery<LandedCostHealth>({
     queryKey: ["/api/procurement/landed-cost-health"],
     queryFn: async () => {
       const res = await fetch("/api/procurement/landed-cost-health?limit=100", { credentials: "include" });
       if (!res.ok) throw new Error("Failed to fetch landed cost health");
-      return res.json();
+      return landedCostHealthSchema.parse(await res.json());
     },
   });
+  const landedCostHealth = landedCostHealthQuery.isError ? undefined : landedCostHealthQuery.data;
 
   const baseShipments = statusFilter === "active"
     ? (shipmentData?.shipments ?? []).filter(s => !["cancelled"].includes(s.status))
@@ -415,8 +391,21 @@ export default function InboundShipments() {
         </Card>
       </div>
 
+      {(landedCostHealthQuery.isPending || landedCostHealthQuery.isError) && (
+        <Card role="region" aria-label="Landed Cost Health">
+          <CardContent className="p-4 space-y-2">
+            <h2 className="font-semibold">Landed Cost Health</h2>
+            {landedCostHealthQuery.isError ? <>
+              <p role="alert">Landed cost health is unavailable. Retry to verify current cost evidence.</p>
+              <Button variant="outline" size="sm" disabled={landedCostHealthQuery.isFetching}
+                onClick={() => void landedCostHealthQuery.refetch()}>Retry cost health</Button>
+            </> : <p role="status">Loading landed cost health…</p>}
+          </CardContent>
+        </Card>
+      )}
+
       {landedCostHealth && (
-        <Card className={landedCostHealth.status === "critical" ? "border-red-300" : landedCostHealth.status === "warning" ? "border-amber-300" : "border-emerald-300"}>
+        <Card role="region" aria-label="Landed Cost Health" className={landedCostHealth.status === "critical" ? "border-red-300" : landedCostHealth.status === "warning" ? "border-amber-300" : "border-emerald-300"}>
           <CardContent className="p-4 space-y-3">
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div className="flex items-center gap-2">
@@ -437,7 +426,7 @@ export default function InboundShipments() {
               </div>
             </div>
 
-            <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-5 text-sm">
+            <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-7 text-sm">
               <div>
                 <div className="text-xs text-muted-foreground">Allocation Blockers</div>
                 <div className="font-mono">{landedCostHealth.counts.allocationBlockers}</div>
@@ -457,6 +446,14 @@ export default function InboundShipments() {
               <div>
                 <div className="text-xs text-muted-foreground">Stale Provisional Lots</div>
                 <div className="font-mono">{landedCostHealth.counts.staleProvisionalLots}</div>
+              </div>
+              <div>
+                <div className="text-xs text-muted-foreground">Posting Review</div>
+                <div className="font-mono">{landedCostHealth.counts.postingReviewRequired}</div>
+              </div>
+              <div>
+                <div className="text-xs text-muted-foreground">Other Provisional Costs</div>
+                <div className="font-mono">{landedCostHealth.counts.provisionalOtherCosts}</div>
               </div>
             </div>
 
