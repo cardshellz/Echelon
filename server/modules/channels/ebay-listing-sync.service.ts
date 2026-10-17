@@ -24,11 +24,13 @@ import { syncContentIntentHash } from "./ebay-listing-sync-content";
 import { assertEbayListingSourceIdentityUnchanged } from "./ebay-existing-listing-identity";
 import { resolveEbayListingIssue } from "@shared/ebay-listing-issue";
 import { ebayListingFailureDiagnostic, type EbayListingFailureDiagnostic } from "./ebay-listing-failure-diagnostic";
-import type { EbayAutomaticPublicationRecoveryService } from "../inventory-planning/quantity-publication";
+import type { EbayAutomaticPublicationRecoveryService, EbayRequestJournalContract } from "../inventory-planning/quantity-publication";
+import { withEbayQuantityRequestJournalContract } from "../inventory-planning/quantity-publication";
 import { recoverPriorEbayListingRequests, type EbayListingRequestRecovery } from "./ebay-listing-request-recovery";
 
 export interface PreparedEbayListingSync {
   sourceIdentity?: EbayListingSyncIdentity;
+  providerObservation?: MarketplaceObservedListingPublication;
   identity: EbayListingSyncIdentity;
   assertInventoryReady?(context?: { commandKey: string; actor: string }): Promise<void>;
   client: EbayListingLifecycleClient;
@@ -59,7 +61,7 @@ export class EbayExistingListingSyncExecution
     identity: EbayListingSyncIdentity,
     stage: Parameters<EbayListingSyncExecution["execute"]>[1],
     verificationIntentHash: string | null = null,
-    bindProviderIdentity?: (identity: EbayListingSyncIdentity) => Promise<void>,
+    bindProviderIdentity?: (identity: EbayListingSyncIdentity, observation?: MarketplaceObservedListingPublication, sourceIdentity?: EbayListingSyncIdentity) => Promise<void>,
     context?: EbayListingExecutionContext,
   ): Promise<EbayProductSyncResult> {
     let prepared!: PreparedEbayListingSync;
@@ -76,7 +78,8 @@ export class EbayExistingListingSyncExecution
     const resolvedIdentity = ebayListingSyncIdentitySchema.parse(prepared.identity);
     // Persist the exact observed provider resources before any provider mutation.
     // A later retry cannot silently switch this job to another group or offer.
-    await bindProviderIdentity?.(resolvedIdentity);
+    if (prepared.providerObservation) await bindProviderIdentity?.(resolvedIdentity, prepared.providerObservation, prepared.sourceIdentity);
+    else await bindProviderIdentity?.(resolvedIdentity);
     let hasRecurringRecovery = false;
     await stage("recover_prior_requests", syncIdentityHash(resolvedIdentity), async () => {
       ({ hasRecurringRecovery } = await recoverPriorEbayListingRequests({ identity: resolvedIdentity,
@@ -113,6 +116,11 @@ export class EbayExistingListingSyncExecution
     // commit. This read never substitutes for the response evidence checked above.
     try {
       await stage("inspection", contentHash, verify);
+      // Only a successful probe may establish publication's current-revision
+      // verification checkpoint. Record that completed read without repeating
+      // it: a second failed read must not leave a pre-write checkpoint that
+      // prevents retrying the required content writes.
+      if (context?.operation === "publish") await stage("verification", contentHash, async () => {});
       return completedEbayListingSyncResult(prepared, new Set());
     } catch (error) {
       if (
@@ -175,10 +183,11 @@ export interface EbayListingSyncClaim {
   release(): Promise<void>;
 }
 export interface EbayListingSyncStore {
-  recoverRejectedPublicationWrite?(job: StoredEbayListingSyncJob, identity: EbayListingSyncIdentity, now: Date): Promise<boolean>;
+  assertPublicationOwner?(job: StoredEbayListingSyncJob): Promise<void>;
+  recoverTerminalPublicationWrite?(job: StoredEbayListingSyncJob, identity: EbayListingSyncIdentity, now: Date): Promise<"rejected" | "not_sent" | null>;
   authorizePublicationRetry(input: EbayPublicationRetryAuthorization, now: Date): Promise<{ job: StoredEbayListingSyncJob; replayed: boolean }>;
   recordAdmissionFailure(input: EbaySyncAdmissionFailure, now: Date): Promise<EbayListingSyncJob>;
-  bindProviderIdentity(job: StoredEbayListingSyncJob, identity: EbayListingSyncIdentity, now: Date, publicationObservation?: MarketplaceObservedListingPublication): Promise<void>;
+  bindProviderIdentity(job: StoredEbayListingSyncJob, identity: EbayListingSyncIdentity, now: Date, publicationObservation?: MarketplaceObservedListingPublication, sourceIdentity?: EbayListingSyncIdentity): Promise<void>;
   bindPublicationTarget(job: StoredEbayListingSyncJob, identity: EbayListingSyncIdentity, now: Date): Promise<void>;
   bindPublicationAccepted(job: StoredEbayListingSyncJob, accepted: EbayPublicationAccepted, now: Date): Promise<void>;
   enqueue(
@@ -203,6 +212,7 @@ export interface EbayListingSyncStore {
     hash: string,
     state: "started" | "completed",
     now: Date,
+    journalContract?: EbayRequestJournalContract,
   ): Promise<void>;
   finish(
     job: StoredEbayListingSyncJob,
@@ -229,14 +239,15 @@ export interface EbayListingSyncExecution {
       key: string,
       hash: string,
       work: () => Promise<void>,
+      journalContract?: EbayRequestJournalContract,
     ) => Promise<void>,
     verificationIntentHash?: string | null,
-    bindProviderIdentity?: (identity: EbayListingSyncIdentity, publicationObservation?: MarketplaceObservedListingPublication) => Promise<void>,
+    bindProviderIdentity?: (identity: EbayListingSyncIdentity, publicationObservation?: MarketplaceObservedListingPublication, sourceIdentity?: EbayListingSyncIdentity) => Promise<void>,
     context?: EbayListingExecutionContext,
   ): Promise<EbayProductSyncResult>;
 }
 export interface EbayListingExecutionContext {
-  recoverRejectedPublicationWrite?: (identity: EbayListingSyncIdentity) => Promise<boolean>;
+  recoverTerminalPublicationWrite?: (identity: EbayListingSyncIdentity) => Promise<"rejected" | "not_sent" | null>;
   jobId?: string;
   requestedBy?: string;
   providerIdentity?: EbayListingSyncIdentity | null;
@@ -332,13 +343,20 @@ export class EbayListingSyncService {
           const output = ebayProductSyncResultSchema.parse(
             await this.executor.execute(
               job.identity,
-              async (key, hash, work) => {
-                await this.store.stage(job, key, hash, "started", this.now());
+              async (key, hash, work, journalContract) => {
+                await this.store.stage(job, key, hash, "started", this.now(), journalContract);
                 if (job.operation === "withdraw" && key === "withdraw") withdrawalStarted = true;
                 if (job.operation === "publish" && key === "publish") {
                   publicationProgress.started = true;
                 }
-                await work();
+                if (journalContract) {
+                  if (!this.store.assertPublicationOwner) throw new EbayListingSyncError("EBAY_SYNC_OWNER_LOST", "Publication requires its original saved-job owner before admission.");
+                  // Revalidate this exact channel session/token after inventory
+                  // has acquired its scope locks. A delayed pre-admission read
+                  // must not let an old worker publish after session takeover.
+                  await withEbayQuantityRequestJournalContract(journalContract, work,
+                    () => this.store.assertPublicationOwner!(job));
+                } else await work();
                 await this.store.stage(job, key, hash, "completed", this.now());
                 if (job.operation === "publish" && key === "publish") publicationProgress.completed = true;
                 if (job.operation === "withdraw" && key === "withdraw") withdrawalCompleted = true;
@@ -346,7 +364,7 @@ export class EbayListingSyncService {
               job.verificationRevision === job.claimedRevision
                 ? job.verificationIntentHash
                 : null,
-              (resolved, observation) => this.store.bindProviderIdentity(job, resolved, this.now(), observation),
+              (resolved, observation, source) => this.store.bindProviderIdentity(job, resolved, this.now(), observation, source),
               { operation: job.operation, jobId: job.id, requestedBy: job.requestedBy, providerIdentity: job.providerIdentity, publicationTarget: job.publicationTarget,
                 withdrawalWriteCompleted: job.withdrawalWriteCompleted,
                 withdrawalWriteStarted: job.withdrawalWriteStarted,
@@ -354,8 +372,8 @@ export class EbayListingSyncService {
                 publicationWriteStarted: job.publicationWriteStarted, publicationAcceptedRevision: job.publicationAcceptedRevision,
                 publicationIntentHash: job.publicationIntentHash,
                 claimedRevision: job.claimedRevision ?? job.revision,
-                ...(this.store.recoverRejectedPublicationWrite ? { recoverRejectedPublicationWrite: async (identity: EbayListingSyncIdentity) => {
-                  const recovered = await this.store.recoverRejectedPublicationWrite!(job, identity, this.now());
+                ...(this.store.recoverTerminalPublicationWrite ? { recoverTerminalPublicationWrite: async (identity: EbayListingSyncIdentity) => {
+                  const recovered = await this.store.recoverTerminalPublicationWrite!(job, identity, this.now());
                   if (recovered) publicationProgress.started = false;
                   return recovered;
                 } } : {}),

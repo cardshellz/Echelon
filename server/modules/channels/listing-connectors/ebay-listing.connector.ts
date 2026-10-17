@@ -1,5 +1,7 @@
 import { createHash } from "node:crypto";
 import { canonicalJson } from "@shared/utils/canonical-json";
+import type { EbayRequestJournalContract } from "../../inventory-planning/quantity-publication";
+import { ebayPublicationRequestJournalContract } from "../ebay-publication-preflight-evidence";
 import {
   EbayListingSyncError,
   syncStageHash,
@@ -39,6 +41,8 @@ export interface EbayObservedOffer extends EbayOffer {
 }
 
 export interface EbayListingConnectorClient {
+  /** Every mutation is admitted and journaled before network I/O. */
+  readonly quantityRequestJournalVersion?: 1;
   getInventoryItem(sku: string): Promise<EbayInventoryItem | null>;
   createOrReplaceInventoryItem(
     sku: string,
@@ -107,11 +111,13 @@ export type EbayPublishedListingIdentityResolver = (
   discovered: EbayDiscoveredPublishedListing,
 ) => Promise<MarketplaceObservedListingPublication>;
 
-async function runPublicationStage<T>(stage: ((key: string, hash: string, work: () => Promise<void>) => Promise<void>) | undefined,
-  key: string, value: unknown, work: () => Promise<T>): Promise<T> {
+type EbayPublicationStage = (key: string, hash: string, work: () => Promise<void>, journalContract?: EbayRequestJournalContract) => Promise<void>;
+
+async function runPublicationStage<T>(stage: EbayPublicationStage | undefined,
+  key: string, value: unknown, work: () => Promise<T>, journalContract?: EbayRequestJournalContract): Promise<T> {
   if (!stage) return work();
   let result: T | undefined;
-  await stage(key, syncStageHash(value), async () => { result = await work(); });
+  await stage(key, syncStageHash(value), async () => { result = await work(); }, journalContract);
   return result as T;
 }
 
@@ -229,7 +235,7 @@ export class EbayMarketplaceListingConnector {
     client: EbayListingConnectorClient;
     draft: EbayListingConnectorDraft;
     resolvePublishedIdentity?: EbayPublishedListingIdentityResolver;
-    stage?: (key: string, hash: string, work: () => Promise<void>) => Promise<void>;
+    stage?: EbayPublicationStage;
   }): Promise<EbayListingConnectorResult> {
     validateDraft(input.draft);
 
@@ -1064,7 +1070,7 @@ export class EbayMarketplaceListingConnector {
     offerIdsByVariantId: Record<number, string>;
     firstListingId?: string;
     verifiedPublishedListingId?: string;
-    stage?: (key: string, hash: string, work: () => Promise<void>) => Promise<void>;
+    stage?: EbayPublicationStage;
   }): Promise<string | undefined> {
     if (input.draft.publishMode === "stage") {
       return (
@@ -1079,12 +1085,12 @@ export class EbayMarketplaceListingConnector {
       await runPublicationStage(input.stage, `group:${group.groupKey}`, group.payload,
         () => input.client.createOrReplaceInventoryItemGroup(group.groupKey, group.payload));
       if (input.verifiedPublishedListingId) return input.verifiedPublishedListingId;
-      const publishResult = await runPublicationStage(input.stage ? (key, _hash, work) => input.stage!(key, syncContentIntentHash(input.draft), work) : undefined,
+      const publishResult = await runPublicationStage(input.stage ? (key, _hash, work, contract) => input.stage!(key, syncContentIntentHash(input.draft), work, contract) : undefined,
         "publish", { groupKey: group.groupKey, offers: input.offerIdsByVariantId }, () => this.publishGroupWithConsistencyRetry({
         client: input.client,
         groupKey: group.groupKey,
         marketplaceId: input.draft.marketplaceId,
-      }));
+      }), input.client.quantityRequestJournalVersion === 1 ? ebayPublicationRequestJournalContract({ groupKey: group.groupKey, marketplaceId: input.draft.marketplaceId }) : undefined);
       return (
         publishResult.listingId ??
         input.draft.existingExternalProductId ??
@@ -1097,8 +1103,9 @@ export class EbayMarketplaceListingConnector {
     if (!offerId) {
       throw new EbayListingSyncError("EBAY_SYNC_PROVIDER_RESPONSE_INVALID", "Cannot publish eBay listing without an offer id. Review the existing provider offers before another publication attempt.");
     }
-    const publishResult = await runPublicationStage(input.stage ? (key, _hash, work) => input.stage!(key, syncContentIntentHash(input.draft), work) : undefined,
-      "publish", { offerId }, () => input.client.publishOffer(offerId));
+    const publishResult = await runPublicationStage(input.stage ? (key, _hash, work, contract) => input.stage!(key, syncContentIntentHash(input.draft), work, contract) : undefined,
+      "publish", { offerId }, () => input.client.publishOffer(offerId), input.client.quantityRequestJournalVersion === 1
+        ? ebayPublicationRequestJournalContract({ groupKey: null, marketplaceId: input.draft.marketplaceId, offerId }) : undefined);
     return (
       publishResult.listingId ??
       input.draft.existingExternalProductId ??
