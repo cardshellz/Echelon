@@ -5,6 +5,11 @@ function isAutomaticResponseRecovery(code: string | null | undefined, state: str
   return state === "recovering" && (code === "EBAY_QUANTITY_RESPONSE_UNCERTAIN" || code === "QUANTITY_PROVIDER_REQUEST_TIMEOUT");
 }
 
+function isUnresolvedListingRequest(code: string | null | undefined): boolean {
+  return code === "EBAY_SYNC_RESPONSE_EVIDENCE_REQUIRED" || code === "PUBLICATION_PRIOR_OUTCOME_UNRESOLVED"
+    || code === "PUBLICATION_REQUEST_EVIDENCE_INCOMPLETE";
+}
+
 /** A previous attempt's error can remain on a queued/running snapshot. Only
  * the saved stopped or recovering state makes that diagnostic actionable. */
 export function resolveEbayListingJobIssue(job: EbayListingSyncJob): EbayListingIssue | null {
@@ -15,6 +20,10 @@ export function resolveEbayListingJobIssue(job: EbayListingSyncJob): EbayListing
   const code = job.code ?? job.issue?.code;
   if (isAutomaticResponseRecovery(code, job.state)) return resolveEbayListingIssue({ code,
     productId: job.productId, jobId: job.id, state: job.state });
+  // These codes cover publication and content requests as well as quantities.
+  // Replace older cached quantity-only copy without changing the saved outcome.
+  if (isUnresolvedListingRequest(code)) return resolveEbayListingIssue({ code,
+    message: job.message, productId: job.productId, jobId: job.id, state: job.state, operation: job.operation });
   return job.issue ?? resolveEbayListingIssue({ code: job.code, message: job.message,
     productId: job.productId, jobId: job.id, state: job.state });
 }
@@ -25,6 +34,7 @@ export interface EbayListingIssueInput {
   productId?: number;
   jobId?: string;
   state?: string;
+  operation?: EbayListingSyncJob["operation"];
   quantityBlockerCodes?: readonly string[];
 }
 
@@ -42,7 +52,8 @@ export function resolveEbayListingIssue(input: EbayListingIssueInput): EbayListi
     || input.code?.startsWith("CANONICAL_CHANNEL_QUANTITY_");
   // Older jobs saved generic contention prose and described invalid prepared
   // drafts as mapping faults. Present the classified cause and current action.
-  const message = isFeedReadIssue || automaticResponseRecovery || ["INVENTORY_PUBLICATION_TARGET_BUSY", "EBAY_SYNC_DRAFT_SCOPE_INVALID", "CANONICAL_PUBLICATION_MAPPING_MISSING", "PUBLICATION_AUTOMATIC_RECOVERY_FAILED"].includes(code)
+  const message = isFeedReadIssue || automaticResponseRecovery || (input.state === "recovering" && isUnresolvedListingRequest(code))
+    || ["INVENTORY_PUBLICATION_TARGET_BUSY", "EBAY_SYNC_DRAFT_SCOPE_INVALID", "CANONICAL_PUBLICATION_MAPPING_MISSING", "PUBLICATION_AUTOMATIC_RECOVERY_FAILED"].includes(code)
     ? undefined : safeListingDiagnostic(input.message);
   const issue = (title: string, fallback: string, nextStep: string, retryable: boolean,
     kind: EbayListingIssue["action"]["kind"], label: string, href?: string): EbayListingIssue =>
@@ -170,8 +181,22 @@ export function resolveEbayListingIssue(input: EbayListingIssueInput): EbayListi
       : "Echelon could not finish preparing a fresh update after an earlier eBay response was lost.",
       "The saved update will retry automatically using current listing content and inventory. View its status for the recorded step and retry eligibility.",
       false, "check_status", "View update status");
-  if (["EBAY_SYNC_RESPONSE_EVIDENCE_REQUIRED", "PUBLICATION_PRIOR_OUTCOME_UNRESOLVED", "PUBLICATION_REQUEST_EVIDENCE_INCOMPLETE",
-    "EBAY_QUANTITY_RESPONSE_UNCERTAIN", "QUANTITY_PROVIDER_REQUEST_TIMEOUT"].includes(code))
+  if (isUnresolvedListingRequest(code)) {
+    const recovering = input.state === "recovering";
+    const withdrawal = input.operation === "withdraw";
+    const result = issue(recovering ? "Checking an earlier eBay request" : "An earlier eBay request needs checking",
+      "Echelon has not yet confirmed the outcome of an earlier request for this listing.",
+      input.state === "recovering"
+        ? "The saved update will check the earlier request again automatically. View its status for the recorded result and next check."
+        : input.operation === "withdraw"
+          ? "Review the saved removal and the earlier request's response. Continue through removal recovery; this product must not be republished while removal is unfinished."
+        : "Use Sync to check the saved response and continue this listing's existing request. If eBay's response is still unknown, the recovery details show what could be verified before another write.",
+      !recovering && !withdrawal, recovering ? "check_status" : withdrawal ? "check_recovery" : "retry_sync",
+      recovering ? "View update status" : withdrawal ? "Review blocked update" : "Sync");
+    return recovering || withdrawal ? result : ebayListingIssueSchema.parse({ ...result,
+      diagnosticAction: { kind: "check_recovery", label: "Saved request details" } });
+  }
+  if (["EBAY_QUANTITY_RESPONSE_UNCERTAIN", "QUANTITY_PROVIDER_REQUEST_TIMEOUT"].includes(code))
     return issue("An earlier quantity update needs review", "Echelon cannot confirm the outcome of an earlier eBay quantity request.",
       "Review the saved request and its response. An inventory administrator can authorize a fresh update using current inventory when the old outcome remains unknown.",
       false, "check_recovery", "Review blocked update");
@@ -318,6 +343,10 @@ export function resolveEbayListingIssue(input: EbayListingIssueInput): EbayListi
     return issue("Review which variants are included", "This product has no eligible existing listing update.",
       "Check the product and variant inclusion switches in the eBay listing feed. Enable the intended sellable variants; use Publish for a product without an existing eBay listing.",
       false, "edit_listing", "Open listing feed", "/channels/ebay");
+  if (code === "EBAY_SHIPPING_POLICY_REJECTED")
+    return issue("eBay rejected the shipping policy", "eBay rejected this listing's selected shipping policy. This update did not complete.",
+      "Open business policies and check Shipping. A product type, product or variant Fulfillment override may supply a different policy. Correct the rejected policy, save, then Sync this product to continue with its current inventory and pictures.",
+      false, "edit_listing", "Open business policies", "/channels/ebay#business-policies");
   if (["EBAY_QUANTITY_REJECTED", "EBAY_LISTING_VALIDATION_FAILED", "EBAY_LISTING_PREFLIGHT_FAILED"].includes(code))
     return issue("Listing details need attention", "The listing does not meet a required eBay or inventory condition.",
       "Review the specific requirement above. Open this product's listing settings to correct its category, item specifics, policies or availability, then retry.",

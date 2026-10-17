@@ -22,7 +22,7 @@ import {
   createEbayRouteListingLifecycleClient,
   getExistingEbayListingPhotos,
 } from "./ebay-listing-client";
-import { isVariantSellable } from "../ebay-listing-eligibility";
+import { isVariantSellable, isExistingEbayListingSyncCandidate } from "../ebay-listing-eligibility";
 
 import { pool } from "../../../db";
 import { channelConnections } from "@shared/schema";
@@ -45,7 +45,7 @@ import {
 } from "../ebay-existing-listing-identity";
 import { admitEbayListingSyncProducts } from "../ebay-listing-sync-admission";
 import { createEbayMarketplaceRegistrationAdapters } from "../adapters/ebay/ebay-marketplace-registration.factory";
-import { quantityProviderResponseRecovery, automaticEbayPublicationRecovery, ebayPublicationReconciliationRepository,
+import { quantityProviderResponseRecovery, automaticEbayPublicationRecovery, ebayPublicationReconciliationRepository, ebayPublicationRejectionReader,
   EbayPublicationContentRefreshRejectedError } from "../../inventory-planning/quantity-publication";
 import {
   type EbayProductSyncResult,
@@ -77,29 +77,12 @@ const filterSchema = z
   .nullable();
 type EbayListingReadDatabase = Pick<typeof db, "select">;
 async function readActiveEbaySyncRows(filter: SyncFilter | null, allSavedMembers = false, readDb: EbayListingReadDatabase = db) {
-  // Build the filter clause for active listings. Do not filter variants by
-  // catalog or eBay listing state here: sold variants must remain in an
-  // existing variation group even when they are no longer sellable.
-  const conditions = allSavedMembers ? [
+  // Read retained mappings before applying the canonical selection predicate.
+  // Complete identity reads keep sold, excluded and ended members: they still
+  // belong to the existing variation group even when they cannot select it.
+  const conditions = [
     eq(channelListings.channelId, EBAY_CHANNEL_ID),
     or(eq(channelListings.syncStatus, "synced"), isNotNull(channelListings.externalProductId), isNotNull(channelListings.externalVariantId), isNotNull(channelListings.externalSku)),
-  ] : [
-    eq(channelListings.channelId, EBAY_CHANNEL_ID),
-    or(
-      eq(channelListings.syncStatus, "synced"),
-      and(
-        eq(channelListings.syncStatus, "error"),
-        or(
-          isNotNull(channelListings.externalProductId),
-          isNotNull(channelListings.externalVariantId),
-          isNotNull(channelListings.externalSku),
-        ),
-      ),
-    ),
-    eq(products.isActive, true),
-    sql`COALESCE(${products.ebayListingExcluded}, false) = false`,
-    sql`COALESCE(${channelProductOverrides.isListed}, 1) <> 0`,
-    sql`COALESCE(${ebayCategoryMappings.listingEnabled}, true) = true`,
   ];
 
   if (filter?.productIds && filter.productIds.length > 0) {
@@ -112,11 +95,11 @@ async function readActiveEbaySyncRows(filter: SyncFilter | null, allSavedMembers
     conditions.push(inArray(productVariants.id, filter.variantIds));
   }
 
-  // Get all synced listings with their product/variant data
-  return await readDb
+  const rows = await readDb
     .select({
       listing_id: channelListings.id,
       mapping_exists: sql<boolean>`true`,
+      listing_sync_status: channelListings.syncStatus,
       product_variant_id: channelListings.productVariantId,
       external_product_id: channelListings.externalProductId,
       external_variant_id: channelListings.externalVariantId,
@@ -187,6 +170,19 @@ async function readActiveEbaySyncRows(filter: SyncFilter | null, allSavedMembers
       asc(productVariants.position),
       asc(productVariants.id),
     );
+  return allSavedMembers ? rows : rows.filter(row => isExistingEbayListingSyncCandidate({
+    productActive: row.product_is_active,
+    variantActive: row.variant_is_active,
+    salesEligibility: row.variant_sales_eligibility,
+    productExcluded: row.product_excluded,
+    productOverrideIsListed: row.product_override_is_listed,
+    typeListingEnabled: row.type_listing_enabled,
+    variantExcluded: row.variant_excluded,
+    variantOverrideIsListed: row.variant_override_is_listed,
+    syncStatus: row.listing_sync_status,
+    externalListingId: row.external_product_id,
+    externalOfferId: row.external_variant_id,
+  }));
 }
 async function context(readDb: EbayListingReadDatabase = db, authService = getAuthService()) {
   if (!authService)
@@ -514,14 +510,14 @@ const existingListingConnector = new EbayMarketplaceListingConnector({
   offerDelayMs: 200,
 });
 export const ebayListingSyncService = new EbayListingSyncService(
-  new PostgresEbayListingSyncRepository(pool),
+  new PostgresEbayListingSyncRepository(pool, ebayPublicationRejectionReader),
   new EbayWithdrawalOperationExecution(new EbayListingOperationExecution(new EbayExistingListingSyncExecution(
     prepareActiveEbayListingSync,
     quantityProviderResponseRecovery,
     existingListingConnector,
     automaticEbayPublicationRecovery,
   ), new EbayPublicationCompletionExecution(prepareEbayPublicationCompletion, quantityProviderResponseRecovery,
-    existingListingConnector, assertEbayPublicationCompatibility)),new EbayListingWithdrawalExecution(prepareEbayWithdrawal,quantityProviderResponseRecovery)),
+    existingListingConnector, assertEbayPublicationCompatibility, automaticEbayPublicationRecovery)),new EbayListingWithdrawalExecution(prepareEbayWithdrawal,quantityProviderResponseRecovery)),
   () => new Date(),
   randomUUID,
   ebayPublicationReconciliationRepository,
@@ -573,6 +569,13 @@ export async function syncActiveListings(
       },
     };
   }), { channelId: EBAY_CHANNEL_ID, actor: validatedActor, commandKey: productIds.length ? commandKey : undefined }, {
+    findAcceptedCommand: async (key, productId, requestedBy) => {
+      const saved = await ebayListingSyncService.getByCommand(key, EBAY_CHANNEL_ID, requestedBy, "sync");
+      if (saved && (saved.productId !== productId || saved.identity.connectionId !== ctx.conn.id
+        || saved.identity.accountId !== ctx.account.externalAccountId))
+        throw new EbayListingSyncError("EBAY_SYNC_REPLAY_CONFLICT", "This saved Sync command belongs to another product or eBay destination.");
+      return saved;
+    },
     enqueue: (identity, requestedBy, key) => ebayListingSyncService.enqueue(identity, requestedBy, key),
     recordFailure: failure => ebayListingSyncService.recordAdmissionFailure(failure),
     uuid: randomUUID,
@@ -599,9 +602,11 @@ export async function refreshRecoveredEbayListing(input: {
   // lost enqueue acknowledgement followed by a rename/inclusion change traps
   // the old key in a permanent replay conflict. This is a receipt read only;
   // the next durable watch cycle requests fresh content with its own key.
-  const prior = await ebayListingSyncService.getByCommand(request.commandKey, EBAY_CHANNEL_ID, actor);
+  const prior = await ebayListingSyncService.getByCommand(request.commandKey, EBAY_CHANNEL_ID, actor, "sync");
   if (prior) {
-    if (prior.operation !== "sync" || prior.productId !== request.productId
+    // The receipt proves this was a Sync command even when it joined an existing
+    // publication. The job's original operation remains immutable.
+    if (prior.productId !== request.productId
       || prior.identity.connectionId !== request.connectionId || prior.identity.accountId !== request.accountId)
       throw new EbayListingSyncError("EBAY_SYNC_REPLAY_CONFLICT", "The saved recovery command belongs to another listing or destination.");
     return { jobId: prior.id };

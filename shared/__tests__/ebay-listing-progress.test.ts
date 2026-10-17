@@ -49,7 +49,7 @@ describe("saved eBay listing progress presentation", () => {
   });
   it("does not present a manual-review timestamp as an automatic way to unblock an unknown operation", () => {
     const result = presentEbayListingJob({ ...job, state: "awaiting_evidence", code: "EBAY_SYNC_RESPONSE_EVIDENCE_REQUIRED", progress });
-    expect(result.summary).toBe("An earlier quantity update needs review");
+    expect(result.summary).toBe("An earlier eBay request needs checking");
     expect(result.times.map(({ label }) => label)).not.toContain("Next automatic check eligible at");
   });
   it.each(["queued", "running", "completed"] as const)("does not revive a prior blocker while the saved request is %s", state => {
@@ -149,6 +149,45 @@ describe("independent stock reconciliation evidence", () => {
 });
 
 describe("actionable saved eBay failures", () => {
+  it("does not mislabel a saved publication request as a quantity failure", () => {
+    const staleIssue = resolveEbayListingIssue({ code: "EBAY_SYNC_RESPONSE_EVIDENCE_REQUIRED", jobId: job.id });
+    const current = { ...job, operation: "publish" as const, state: "awaiting_evidence" as const,
+      code: staleIssue.code, message: "The earlier publication response remains unknown.",
+      issue: { ...staleIssue, title: "An earlier quantity update needs review" } };
+    const issue = resolveEbayListingJobIssue(current);
+    expect(issue).toMatchObject({ title: "An earlier eBay request needs checking", message: current.message,
+      retryable: true, action: { kind: "retry_sync", label: "Sync" },
+      diagnosticAction: { kind: "check_recovery", label: "Saved request details" } });
+    expect(presentEbayListingJob(current).summary).not.toContain("quantity");
+    expect(issue?.nextStep).toContain("Use Sync");
+  });
+  it("uses the saved automatic state for an unresolved earlier request without claiming it succeeded", () => {
+    const issue = resolveEbayListingIssue({ code: "PUBLICATION_PRIOR_OUTCOME_UNRESOLVED", jobId: job.id });
+    const current = resolveEbayListingJobIssue({ ...job, state: "recovering", code: issue.code, issue,
+      message: "Ask an inventory administrator to reconcile this old request." });
+    expect(current).toMatchObject({ title: "Checking an earlier eBay request", retryable: false,
+      action: { kind: "check_status" } });
+    expect(current?.nextStep).toContain("automatically");
+    expect(current?.message).toContain("not yet confirmed");
+    expect(current?.message).not.toContain("administrator");
+  });
+  it("keeps an unfinished removal's unresolved request on removal recovery", () => {
+    const issue = resolveEbayListingJobIssue({ ...job, operation: "withdraw", state: "awaiting_evidence",
+      code: "EBAY_SYNC_RESPONSE_EVIDENCE_REQUIRED" });
+    expect(issue?.nextStep).toContain("removal recovery");
+    expect(issue?.nextStep).not.toContain("Use Sync");
+    expect(issue?.action.kind).toBe("check_recovery");
+  });
+  it("preserves eBay's shipping rejection and points to real policy settings instead of inventory recovery", () => {
+    const message = "The offer has invalid data in the associated Fulfillment policy. You've provided an invalid shipping policy.";
+    const issue = resolveEbayListingIssue({ code: "EBAY_SHIPPING_POLICY_REJECTED", productId: 1, jobId: job.id,
+      state: "needs_attention", message });
+    expect(issue).toMatchObject({ title: "eBay rejected the shipping policy", message, retryable: false,
+      action: { kind: "edit_listing", label: "Open business policies", href: "/channels/ebay#business-policies" } });
+    expect(issue.nextStep).toContain("Fulfillment override");
+    expect(issue.nextStep).toContain("save, then Sync");
+    expect(issue.nextStep).not.toMatch(/administrator|automatically|inventory settings/);
+  });
   it("offers normal sync for the classified canonical mapping preparation failure", () => {
     const issue = resolveEbayListingIssue({ code: "CANONICAL_PUBLICATION_MAPPING_MISSING", jobId: job.id,
       productId: job.productId, state: "needs_attention", message: "The listing update could not finish. Inspect the saved sync job before retrying." });
@@ -176,7 +215,7 @@ describe("actionable saved eBay failures", () => {
       times: expect.arrayContaining([{ label: "Next automatic check eligible at", at: job.nextAttemptAt }]) });
     expect(resolveEbayListingIssue({ code, state: "recovering", message: "Ask an administrator to resume." }).message).not.toContain("administrator");
   });
-  it.each(["EBAY_SYNC_RESPONSE_EVIDENCE_REQUIRED", "EBAY_PUBLICATION_RESPONSE_UNCERTAIN", "EBAY_WITHDRAWAL_RESPONSE_UNCERTAIN",
+  it.each(["EBAY_PUBLICATION_RESPONSE_UNCERTAIN", "EBAY_WITHDRAWAL_RESPONSE_UNCERTAIN",
     "EBAY_QUANTITY_RESPONSE_UNCERTAIN", "QUANTITY_PROVIDER_REQUEST_TIMEOUT"])("keeps genuine uncertain %s in its existing reviewed recovery flow", code => {
     expect(resolveEbayListingIssue({ code, jobId: job.id, state: "awaiting_evidence" }))
       .toMatchObject({ retryable: false, action: { kind: "check_recovery" } });

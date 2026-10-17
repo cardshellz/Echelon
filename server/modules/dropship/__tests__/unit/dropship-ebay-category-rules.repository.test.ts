@@ -4,7 +4,10 @@ import type { ProductListingSettingValues } from "../../../../../shared/dropship
 import { EMPTY_LISTING_SETTING_LAYERS } from "../../application/dropship-listing-setting-layers";
 import { EMPTY_CATEGORY_LISTING_SETTING_VALUES, EMPTY_PRODUCT_LISTING_SETTING_VALUES } from "../../domain/listing-setting-values";
 import { readResolvedEbayCategories } from "../../infrastructure/dropship-ebay-category-rules.reader";
-import { PgDropshipEbayCategoryRulesRepository } from "../../infrastructure/dropship-ebay-category-rules.repository";
+import {
+  PgDropshipEbayCategoryRulesRepository,
+  saveEbayCategoryRulesProfileWithClient,
+} from "../../infrastructure/dropship-ebay-category-rules.repository";
 import { productValuesToColumns } from "../../infrastructure/dropship-listing-setting-shared.repository";
 import { MAILERS, SLEEVES, TOPLOADERS, categoryCandidate, rulesProfile } from "../fixtures/ebay-category-rules.fixture";
 
@@ -173,6 +176,46 @@ describe("PgDropshipEbayCategoryRulesRepository", () => {
 
     await expect(repository.execute({ memberId: "member-1", storeConnectionId: 44, mode: "read" }, (tx) => tx.loadState()))
       .rejects.toThrow("failed their contract");
+  });
+});
+
+// PR 11, plan D11: the conversion writes the rules document as its actor; every other caller passes no type.
+describe("saveEbayCategoryRulesProfileWithClient's actor type", () => {
+  const AUDIT_VALUES = "VALUES ($1,$2,'dropship_ebay_category_rules',$3,'ebay_category_rules_saved',$7,$4,'info',$5::jsonb,$6)";
+
+  it("audits as a vendor when no actor type is given, and as the type given otherwise", async () => {
+    const before = rulesProfile({ defaultCategory: SLEEVES });
+    const after = rulesProfile({ defaultCategory: SLEEVES, rules: [] });
+    for (const [actorType, expected] of [[undefined, "vendor"], ["vendor", "vendor"], ["system", "system"]] as const) {
+      const client = new ScriptedClient();
+      client.headRevision = { id: 5, profile: before, created_at: NOW };
+
+      const saved = await saveEbayCategoryRulesProfileWithClient(client as unknown as PoolClient,
+        { vendorId: 10, storeConnectionId: 44, actorId: "rules-conversion:44", ...(actorType ? { actorType } : {}) },
+        { expectedRevisionId: 5, profile: after, idempotencyKey: "lc:child-ebay-rules-1", requestHash: "a".repeat(64), now: NOW });
+
+      expect(saved).toEqual({ revisionId: 12 });
+      const auditIndex = client.sql.findIndex((sql) => sql.includes("dropship_audit_events"));
+      expect(client.sql[auditIndex].replace(/\s+/g, " ")).toContain(AUDIT_VALUES);
+      expect({ actorType, params: client.params[auditIndex] }).toEqual({ actorType, params: [10, 44, "44", "rules-conversion:44",
+        JSON.stringify({ revisionId: 12, previousRevisionId: 5, before, after }), NOW, expected] });
+      // The revision table has no actor type: the revision keeps the actor id only, as before.
+      const insertIndex = client.sql.findIndex((sql) => sql.startsWith("INSERT INTO dropship.dropship_ebay_category_rule_revisions"));
+      expect(client.params[insertIndex]).toEqual([10, 44, 5, JSON.stringify(after), "lc:child-ebay-rules-1", "a".repeat(64),
+        "rules-conversion:44", NOW]);
+    }
+  });
+
+  it("audits as a vendor through the repository's own transaction, which passes no actor type", async () => {
+    const client = new ScriptedClient();
+    const repository = new PgDropshipEbayCategoryRulesRepository(poolFor(client));
+
+    await repository.execute({ memberId: "member-1", storeConnectionId: 44, mode: "write", idempotencyKey: "category-rules:6" },
+      (tx) => tx.saveProfile({ expectedRevisionId: null, profile: rulesProfile(), idempotencyKey: "category-rules:6",
+        requestHash: "a".repeat(64), now: NOW }));
+
+    const auditIndex = client.sql.findIndex((sql) => sql.includes("dropship_audit_events"));
+    expect([client.params[auditIndex][3], client.params[auditIndex][6]]).toEqual(["member-1", "vendor"]);
   });
 });
 

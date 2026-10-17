@@ -3,6 +3,7 @@ import { pricingRecipeSchema } from "./pricing-rules";
 import { ebayCategorySchema } from "./ebay-category-rules";
 import { descriptionTemplateSchema, descriptionTextSchema } from "./listing-content";
 import { MAX_NAMED_CATALOG_GROUP_ITEMS } from "./catalog-scope";
+import { refusingReservedConversionKeys } from "./listing-rules-conversion-keys";
 
 /**
  * Product and category listing settings (design record
@@ -20,7 +21,14 @@ const sha256Hex = z.string().regex(/^[a-f0-9]{64}$/);
 
 /** Every new listing-settings key column has this CHECK; client keys are `<prefix>:<uuid>`, always at least 8 characters. */
 export const LISTING_SETTING_KEY_PATTERN = /^[A-Za-z0-9:_-]{8,200}$/;
-export const listingSettingRequestKeySchema = z.string().regex(LISTING_SETTING_KEY_PATTERN);
+/**
+ * A vendor's PR 9+ request key (every listing-settings write and the
+ * conversion's apply). It also refuses the conversion's reserved prefixes:
+ * W5 and W12 store it as a product or category revision's own key, which a
+ * conversion's `lc:` child key must find free. A vendor input only; stored
+ * rows are read with LISTING_SETTING_KEY_PATTERN alone.
+ */
+export const listingSettingRequestKeySchema = refusingReservedConversionKeys(z.string().regex(LISTING_SETTING_KEY_PATTERN));
 /** A bulk change covers at most as many products as a named catalog group (10,000). */
 export const MAX_LISTING_SETTING_BULK_PRODUCTS = MAX_NAMED_CATALOG_GROUP_ITEMS;
 /** eBay takes a first and a second store shelf. Mirrors MAX_EBAY_STORE_SHELVES (server domain/ebay-listing-setup-config.ts); a test pins them equal. */

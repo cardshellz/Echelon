@@ -64,15 +64,25 @@ describe("automatic recovery inside the existing Sync command", () => {
     if (watchId !== null) expect(assertInventoryReady).toHaveBeenCalledWith({ commandKey: jobId, actor: "operator" });
     expect(provider.client.createOrReplaceInventoryItem).not.toHaveBeenCalled();
   });
-  it.each(["publish", "withdraw"] as const)("does not authorize unknown %s operations as a maintenance retry", async operation => {
+  it("does not authorize unknown withdrawal operations as a maintenance retry", async () => {
     const provider = syncProviderFixture();
     const recover = vi.fn();
     const execution = new EbayExistingListingSyncExecution(provider.prepare,
       { reconcile: async () => ({ busy: false, resolved: [], unresolved: ["17032"] }) },
       new EbayMarketplaceListingConnector(), { recover });
-    await expect(execution.execute(syncIdentity, stage, null, vi.fn(), context(operation))).rejects.toMatchObject({ code: "EBAY_SYNC_RESPONSE_EVIDENCE_REQUIRED" });
+    await expect(execution.execute(syncIdentity, stage, null, vi.fn(), context("withdraw"))).rejects.toMatchObject({ code: "EBAY_SYNC_RESPONSE_EVIDENCE_REQUIRED" });
     expect(recover).not.toHaveBeenCalled();
     expect(provider.client.updateOffer).not.toHaveBeenCalled();
+  });
+  it("maintains a verified live publication through the same automatic stock recovery owner", async () => {
+    const provider = syncProviderFixture();
+    const recover = vi.fn(async () => ({ superseded: ["17032"], unresolved: [], busy: false, watchId: "1" }));
+    const execution = new EbayExistingListingSyncExecution(provider.prepare,
+      { reconcile: async () => ({ busy: false, resolved: [], unresolved: ["17032"] }) },
+      new EbayMarketplaceListingConnector(), { recover });
+    await expect(execution.execute(syncIdentity, stage, null, vi.fn(), context("publish"))).resolves.toMatchObject({ synced: 1, errors: 0 });
+    expect(recover).toHaveBeenCalledOnce();
+    expect(provider.client.publishOffer).not.toHaveBeenCalled();
   });
   it.each(["ECONNRESET", "QUANTITY_PROVIDER_REQUEST_TIMEOUT", "PUBLICATION_AUTOMATIC_RECOVERY_FAILED", "EBAY_SYNC_READBACK_PENDING"])(
     "keeps %s retryable after a long outage without unbounded rapid retries", code => {

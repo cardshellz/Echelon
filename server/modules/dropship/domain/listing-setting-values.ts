@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { LISTING_CONVERSION_CHILD_KEY_PREFIX } from "../../../../shared/dropship/listing-rules-conversion-keys";
 import {
   LISTING_SETTING_KEY_PATTERN,
   type CategoryListingSettingValues,
@@ -121,15 +122,7 @@ const CHILD_ID_PATTERN = /^[1-9][0-9]{0,9}$/;
  * a non-positive integer id is a programming fault.
  */
 export function listingSettingChildKey(parentKey: string, kind: ListingSettingChildKind, id: number): string {
-  if (!LISTING_SETTING_KEY_PATTERN.test(parentKey)) {
-    throw listingSettingsInvariantFailed("A listing setting child key needs a valid parent request key.", { kind });
-  }
-  if (!(LISTING_SETTING_CHILD_KINDS as readonly string[]).includes(kind)) {
-    throw listingSettingsInvariantFailed("A listing setting child key needs a known kind.", { kind: String(kind) });
-  }
-  if (!Number.isSafeInteger(id) || id <= 0 || id > MAX_LISTING_SETTING_CHILD_ID) {
-    throw listingSettingsInvariantFailed("A listing setting child key needs a positive integer id.", { kind, id: String(id) });
-  }
+  assertChildKeyParts(LISTING_SETTING_CHILD_KEY_WORDS, LISTING_SETTING_CHILD_KINDS, parentKey, kind, id);
   return `${childKeyPrefix(parentKey, kind)}${id}`;
 }
 
@@ -163,7 +156,53 @@ export function listingSettingChildKeyPrefix(parentKey: string, kind: ListingSet
 }
 
 function childKeyPrefix(parentKey: string, kind: ListingSettingChildKind): string {
-  return `ls:${createHash("sha256").update(parentKey, "utf8").digest("hex")}:${kind}:`;
+  return hashedChildKeyPrefix("ls:", parentKey, kind);
+}
+
+/** `<prefix><sha256hex(parentKey)>:<kind>:`, the shape of PR 9's `ls:` and PR 11's `lc:` child keys. */
+function hashedChildKeyPrefix(prefix: string, parentKey: string, kind: string): string {
+  return `${prefix}${createHash("sha256").update(parentKey, "utf8").digest("hex")}:${kind}:`;
+}
+
+/** How a child key's refusals name it and its parent. */
+interface ChildKeyWords { subject: string; parent: string }
+const LISTING_SETTING_CHILD_KEY_WORDS: ChildKeyWords = { subject: "A listing setting child key", parent: "parent request key" };
+const LISTING_CONVERSION_CHILD_KEY_WORDS: ChildKeyWords = { subject: "A conversion child key", parent: "conversion key" };
+
+/** A child key's three guards: a valid parent key, a known kind, a positive int4 id. A breach is a programming fault. */
+function assertChildKeyParts(words: ChildKeyWords, kinds: readonly string[], parentKey: string, kind: string, id: number): void {
+  if (!LISTING_SETTING_KEY_PATTERN.test(parentKey)) {
+    throw listingSettingsInvariantFailed(`${words.subject} needs a valid ${words.parent}.`, { kind });
+  }
+  if (!kinds.includes(kind)) {
+    throw listingSettingsInvariantFailed(`${words.subject} needs a known kind.`, { kind: String(kind) });
+  }
+  if (!Number.isSafeInteger(id) || id <= 0 || id > MAX_LISTING_SETTING_CHILD_ID) {
+    throw listingSettingsInvariantFailed(`${words.subject} needs a positive integer id.`, { kind, id: String(id) });
+  }
+}
+
+/**
+ * What a conversion's child key belongs to (PR 11, plan D12): a category's
+ * or a product's revision, the store's description templates, the store's
+ * eBay category rules. The store kinds take the store connection id.
+ */
+export const LISTING_CONVERSION_CHILD_KINDS = ["category", "product", "content_profile", "ebay_rules"] as const;
+export type ListingConversionChildKind = (typeof LISTING_CONVERSION_CHILD_KINDS)[number];
+
+/**
+ * `lc:<sha256hex(conversionKey)>:<kind>:<id>` (plan D12, 3.3): the key of
+ * each revision a conversion writes. Its own prefix, apart from PR 9's `ls:`
+ * children, so no PR 9 replay probe (which reads `ls:` prefixes) takes a
+ * conversion's revision for its own request's, and no two conversions'
+ * children meet. At most 94 characters (`content_profile` is the longest
+ * kind), so it fits every varchar(200) key column and matches
+ * LISTING_SETTING_KEY_PATTERN. A malformed parent key, an unknown kind or a
+ * non-positive integer id is a programming fault.
+ */
+export function listingConversionChildKey(conversionKey: string, kind: ListingConversionChildKind, id: number): string {
+  assertChildKeyParts(LISTING_CONVERSION_CHILD_KEY_WORDS, LISTING_CONVERSION_CHILD_KINDS, conversionKey, kind, id);
+  return `${hashedChildKeyPrefix(LISTING_CONVERSION_CHILD_KEY_PREFIX, conversionKey, kind)}${id}`;
 }
 
 /**

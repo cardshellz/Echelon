@@ -12,7 +12,9 @@
  * of a store and its stored rows (G2 passed a scenario holding both), and it
  * reads a product's own main text from that product's stored row, which is
  * what G2's scenario values become (productValuesToColumns). G2's pins and
- * assertions are as before.
+ * assertions are as before. PR 11c (D23): the port answers the four
+ * resolver reads through loadResolverInputs, as the PostgreSQL repository
+ * does, unless a run asks for the separate reads (GoldenResolverReads).
  */
 import { createHash } from "node:crypto";
 import type { PoolClient } from "pg";
@@ -45,6 +47,7 @@ import { ConfigDrivenDropshipMarketplaceListingProvider } from "../../infrastruc
 import { readEbayCategoryRules, readResolvedEbayCategories } from "../../infrastructure/dropship-ebay-category-rules.reader";
 import { readContentProfile, readListingContentSettings, readResolvedListingContents } from "../../infrastructure/dropship-listing-content.reader";
 import { readCatalogCategoryNames, readListingSettingLayers } from "../../infrastructure/dropship-listing-setting-layers.reader";
+import { readListingResolverInputs } from "../../infrastructure/dropship-listing-resolver-inputs.reader";
 import { readPricingProfile } from "../../infrastructure/dropship-pricing-profile.reader";
 import { loadListingRulePrices } from "../../infrastructure/dropship-rule-price.loader";
 import { PgShellzClubProductCostAdapter } from "../../infrastructure/shellz-club-product-cost.adapter";
@@ -148,26 +151,46 @@ export function inVariantIds<T extends { productVariantId: number }>(rows: reado
 }
 
 /**
+ * How the golden port answers the preview's four resolver reads (PR 11, D23):
+ * `one_snapshot` (the default) as the PostgreSQL repository does, through
+ * loadResolverInputs and the real composition (readListingResolverInputs);
+ * `separate` as a port without it, the four separate loaders. G2 runs both
+ * over every store and pins that they read the same and give the same preview.
+ */
+export type GoldenResolverReads = "one_snapshot" | "separate";
+
+/**
  * The preview's port over one store's fixture. Prices, descriptions and eBay
  * categories go through the real loaders over the store's client, as the
- * PostgreSQL repository runs them inside its read-only transactions; the
+ * PostgreSQL repository runs them inside its read-only transaction; the
  * other reads hand back the fixture's rows.
  */
 export class GoldenPreviewRepository implements DropshipListingPreviewRepository {
-  constructor(private readonly store: GoldenPreviewStore, private readonly client: GoldenStoreClient) {}
+  loadResolverInputs?: DropshipListingPreviewRepository["loadResolverInputs"];
+  loadRulePrices?: DropshipListingPreviewRepository["loadRulePrices"];
+  loadListingContents?: DropshipListingPreviewRepository["loadListingContents"];
+  loadEbayCategories?: DropshipListingPreviewRepository["loadEbayCategories"];
 
-  /** The preview's one read of the product and category settings (plan D26), through the real reader. */
+  constructor(private readonly store: GoldenPreviewStore, private readonly client: GoldenStoreClient,
+    private readonly resolverReads: GoldenResolverReads = "one_snapshot") {
+    if (resolverReads === "one_snapshot") {
+      this.loadResolverInputs = (input) => readListingResolverInputs(this.client.asPgClient(), input);
+    } else {
+      this.loadRulePrices = (input) => loadListingRulePrices(this.client.asPgClient(), input);
+      this.loadListingContents = (input) => readResolvedListingContents(this.client.asPgClient(), input);
+      this.loadEbayCategories = (input) => readResolvedEbayCategories(this.client.asPgClient(), input);
+    }
+  }
+
+  /**
+   * The preview's one read of the product and category settings (plan D26), through the real reader. A port
+   * with loadResolverInputs reads them there, so the preview reaching this one would be the split read D23 removed.
+   */
   loadListingSettingLayers(input: PortInput<"loadListingSettingLayers">) {
+    if (this.resolverReads === "one_snapshot") {
+      throw new Error("The preview read its settings apart from the profiles (PR 11, D23).");
+    }
     return readListingSettingLayers(this.client.asPgClient(), input);
-  }
-  loadRulePrices(input: PortInput<"loadRulePrices">) {
-    return loadListingRulePrices(this.client.asPgClient(), input);
-  }
-  loadListingContents(input: PortInput<"loadListingContents">) {
-    return readResolvedListingContents(this.client.asPgClient(), input);
-  }
-  loadEbayCategories(input: PortInput<"loadEbayCategories">) {
-    return readResolvedEbayCategories(this.client.asPgClient(), input);
   }
   async listSavedListingPrices(input: PortInput<"listSavedListingPrices">) {
     return inVariantIds(this.store.savedPrices, input.productVariantIds);
@@ -244,6 +267,8 @@ export interface GoldenPreviewOptions {
   layerRows?: GoldenLayerRows;
   /** Variants (8b-W): shipping policies the live eBay check finds incompatible. */
   incompatibleFulfillmentPolicyIds?: ReadonlySet<string>;
+  /** PR 11 (D23): how the port answers the four resolver reads; one snapshot unless a test asks for the separate reads. */
+  resolverReads?: GoldenResolverReads;
 }
 
 export async function runGoldenPreview(store: GoldenPreviewStore, options: GoldenPreviewOptions = {}): Promise<{
@@ -255,7 +280,7 @@ export async function runGoldenPreview(store: GoldenPreviewStore, options: Golde
     vendorProvisioning: {
       provisionForMember: async () => { throw new Error("The golden preview names its vendor."); },
     } as unknown as DropshipVendorProvisioningService,
-    repository: new GoldenPreviewRepository(store, client),
+    repository: new GoldenPreviewRepository(store, client, options.resolverReads),
     listingPhotos: {
       listPublicationPhotos: async ({ productVariantIds }) => new Map(productVariantIds.map((id) => [id, goldenPublicationPhotos(id)])),
     },

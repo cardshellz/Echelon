@@ -121,10 +121,14 @@ type QueryClient = Pick<PoolClient, "query">;
 /** int4 keys (store connection, product, category, size). */
 const MAX_INT4_ID = 2_147_483_647;
 
-/** The request key's advisory lock namespace (new in PR 8); the store lock below is the one every listing writer shares. */
-const REQUEST_LOCK_SQL = "SELECT pg_advisory_xact_lock(hashtext('dropship_listing_settings_request'), hashtext($1))";
-const STORE_LOCK_SQL = "SELECT pg_advisory_xact_lock(hashtext('dropship_listing_push_job'), $1::integer)";
-const VENDOR_OWNER_SQL = `SELECT v.id AS vendor_id FROM dropship.dropship_vendors v
+/**
+ * The request key's advisory lock namespace (new in PR 8); the store lock below is the one every listing writer shares.
+ * These locks, the owner reads, the catalog FOR SHARE reads and the guarded client are exported for the rules
+ * conversion's own transaction (PR 11, dropship-listing-rules-conversion.repository.ts), so both take the same locks.
+ */
+export const REQUEST_LOCK_SQL = "SELECT pg_advisory_xact_lock(hashtext('dropship_listing_settings_request'), hashtext($1))";
+export const STORE_LOCK_SQL = "SELECT pg_advisory_xact_lock(hashtext('dropship_listing_push_job'), $1::integer)";
+export const VENDOR_OWNER_SQL = `SELECT v.id AS vendor_id FROM dropship.dropship_vendors v
        JOIN dropship.dropship_store_connections sc ON sc.vendor_id = v.id
        WHERE v.member_id::text = $1 AND sc.id = $2 FOR SHARE OF v, sc`;
 /** The preflight's owner read: PostgreSQL refuses a row lock in a read-only transaction, and the preflight holds none. */
@@ -133,7 +137,7 @@ const PREFLIGHT_OWNER_SQL = `SELECT v.id AS vendor_id FROM dropship.dropship_ven
        WHERE v.member_id::text = $1 AND sc.id = $2`;
 /** A snapshot with no lock, as the listing-settings read load opens (dropship-listing-settings.repository.ts). */
 const PREFLIGHT_BEGIN_SQL = "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY";
-const SYSTEM_OWNER_SQL = `SELECT sc.vendor_id FROM dropship.dropship_store_connections sc
+export const SYSTEM_OWNER_SQL = `SELECT sc.vendor_id FROM dropship.dropship_store_connections sc
        JOIN dropship.dropship_vendors v ON v.id = sc.vendor_id
        WHERE sc.id = $1 FOR SHARE OF v, sc`;
 /**
@@ -143,9 +147,9 @@ const SYSTEM_OWNER_SQL = `SELECT sc.vendor_id FROM dropship.dropship_store_conne
  */
 export const LISTING_SELECTION_LOCK_SQL = `LOCK TABLE dropship.dropship_catalog_rules, dropship.dropship_vendor_selection_rules,
        dropship.dropship_vendor_variant_overrides, catalog.product_line_products IN SHARE MODE`;
-const CATEGORY_LOCK_SQL = "SELECT id FROM catalog.product_categories WHERE id = ANY($1::int[]) ORDER BY id FOR SHARE";
-const PRODUCT_LOCK_SQL = "SELECT id FROM catalog.products WHERE id = ANY($1::int[]) ORDER BY id FOR SHARE";
-const VARIANT_LOCK_SQL = "SELECT id FROM catalog.product_variants WHERE id = ANY($1::int[]) ORDER BY id FOR SHARE";
+export const CATEGORY_LOCK_SQL = "SELECT id FROM catalog.product_categories WHERE id = ANY($1::int[]) ORDER BY id FOR SHARE";
+export const PRODUCT_LOCK_SQL = "SELECT id FROM catalog.products WHERE id = ANY($1::int[]) ORDER BY id FOR SHARE";
+export const VARIANT_LOCK_SQL = "SELECT id FROM catalog.product_variants WHERE id = ANY($1::int[]) ORDER BY id FOR SHARE";
 /**
  * The sizes of the products a vendor could choose: the selected-catalog
  * scan's sellable filter (dropship-selected-catalog.reader.ts), as the read
@@ -257,6 +261,14 @@ const CATEGORY_SETTING_FACTS_SQL = `SELECT s.category_id, s.revision_id, ${PRICE
  * 23505 on any other constraint is not a key reuse and is rethrown. The
  * content key is unnamed in 0660; its name is PostgreSQL's (pinned by the
  * PostgreSQL suite).
+ *
+ * The last two are the description templates' (0660) and the eBay rules'
+ * (0717) revision keys, also unnamed (PostgreSQL's names, the table name
+ * cut to fit 63 characters; pinned by the PostgreSQL suite). A rules
+ * conversion (PR 11) writes both under its `lc:` child key, taking no probe
+ * first. The save routes refuse those prefixes (listing-rules-conversion-keys.ts),
+ * so only a row stored before that refusal can hold one: the conversion then
+ * meets it as this key reuse (409, permanent), never as a raw 500.
  */
 const REQUEST_KEY_CONSTRAINTS: ReadonlySet<string> = new Set([
   "dropship_product_listing_setting_requests_key_idx",
@@ -267,6 +279,8 @@ const REQUEST_KEY_CONSTRAINTS: ReadonlySet<string> = new Set([
   "dropship_ebay_store_category_revision_idem_uk",
   "dropship_listing_content_revision_vendor_id_idempotency_key_key",
   "dropship_product_listing_setting_requests_review_idx",
+  "dropship_content_profile_revision_vendor_id_idempotency_key_key",
+  "dropship_ebay_category_rule_revis_vendor_id_idempotency_key_key",
 ]);
 const PRODUCT_FOREIGN_KEYS: ReadonlySet<string> = new Set([
   "dropship_product_listing_setting_revision_product_fk",
@@ -931,14 +945,24 @@ async function readProductSizes(client: QueryClient, productIds: readonly number
   return result.rows.map((row) => storedInt4Id(row.id, "product_variants.id"));
 }
 
-/** D16's counts (plan P21) over the store's three profiles, each read in its own argument order. */
+/** D16's counts (plan P21) over the store's three profiles. */
 async function readOlderGroupRuleCounts(client: QueryClient,
   target: { vendorId: number; storeConnectionId: number }): Promise<OlderGroupRuleCounts> {
+  return olderGroupRuleCounts(await readListingRuleProfiles(client, target));
+}
+
+/**
+ * The store's three rule profiles (pricing, description, eBay category
+ * rules) on the caller's client, each read in its own argument order. No
+ * lock: the caller holds the store lock every writer of them takes (PR 9's
+ * writes and PR 11's rules conversion).
+ */
+export async function readListingRuleProfiles(client: QueryClient, target: { vendorId: number; storeConnectionId: number }) {
   // The three readers' own argument orders differ (store, vendor for pricing).
   const pricing = await readPricingProfile(client, target.storeConnectionId, target.vendorId);
   const content = await readContentProfile(client, target.vendorId, target.storeConnectionId);
   const ebayCategoryRules = await readEbayCategoryRules(client, target.vendorId, target.storeConnectionId);
-  return olderGroupRuleCounts({ pricing, content, ebayCategoryRules });
+  return { pricing, content, ebayCategoryRules };
 }
 
 /** Every Card Shellz product in the category, ascending (CATEGORY_PRODUCTS_SQL). */
@@ -1223,7 +1247,8 @@ export function mapListingSettingWriteError(error: unknown): unknown {
   if (code === UNIQUE_VIOLATION && constraint !== undefined && REQUEST_KEY_CONSTRAINTS.has(constraint)) {
     // PR 9's routes never reach this (one member per vendor, the request lock is member:key); an older
     // per-size policy or shelf route given a child-key-shaped key can, between a PR 9 write's probe and
-    // its insert (those take no store lock). For the other keys it is a backstop (REQUEST_KEY_CONSTRAINTS).
+    // its insert (those take no store lock), and so can a rules conversion's template or eBay rules save
+    // against an older row holding its `lc:` key. For the other keys it is a backstop (REQUEST_KEY_CONSTRAINTS).
     return listingSettingsIdempotencyConflict({ constraint });
   }
   if (code === FOREIGN_KEY_VIOLATION && constraint !== undefined && PRODUCT_FOREIGN_KEYS.has(constraint)) {
@@ -1311,7 +1336,7 @@ function missingKey(detail: string | undefined, column: string, field: string): 
  * the transaction is still open, so a delegate called after commit or
  * rollback fails instead of running on a connection back in the pool.
  */
-function guardedClient(client: QueryClient, isOpen: () => boolean): QueryClient {
+export function guardedClient(client: QueryClient, isOpen: () => boolean): QueryClient {
   const query = (...args: unknown[]): unknown => {
     if (!isOpen()) throw transactionEnded();
     return (client.query as (...queryArgs: unknown[]) => unknown).apply(client, args);
@@ -1319,11 +1344,11 @@ function guardedClient(client: QueryClient, isOpen: () => boolean): QueryClient 
   return { query: query as PoolClient["query"] };
 }
 
-function transactionEnded(): DropshipError {
+export function transactionEnded(): DropshipError {
   return listingSettingsInvariantFailed("A listing settings transaction was used after it ended.");
 }
 
-function ownerVendorId(row: { vendor_id: unknown } | undefined, storeConnectionId: number): number {
+export function ownerVendorId(row: { vendor_id: unknown } | undefined, storeConnectionId: number): number {
   const vendorId = row?.vendor_id;
   if (typeof vendorId === "number" && isInt4Id(vendorId)) return vendorId;
   throw new DropshipError("DROPSHIP_STORE_CONNECTION_REQUIRED", "Store connection was not found.", {
