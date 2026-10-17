@@ -1,3 +1,7 @@
+import { readShipmentCostExceptions } from "./shipment-cost-exception.repository";
+import { readReconciliationLedger } from "../inventory/infrastructure/cost-reconciliation.repository";
+import { isCostReconciliationPosted } from "@shared/procurement/cost-posting-status";
+import { costIssueSchema } from "@shared/procurement/cost-source-contracts";
 import { sql } from "drizzle-orm";
 import { purchaseCostApplicationReadSchema, type PurchaseCostApplicationRead } from "./purchase-cost-application-read.service";
 import { dateValues, moneyValues, readRows, PURCHASE_WORKSPACE_LINE_LIMIT, type Transaction } from "./purchase-workspace-read";
@@ -54,6 +58,8 @@ export async function readPurchaseCostApplications(tx: Transaction, purchaseOrde
         event.payload->'sourceRevisionId' AS "sourceRevisionId", event.payload->'sourceFingerprint' AS "sourceFingerprint",
         event.payload->'component' AS component, event.payload->'currency' AS currency, event.payload->'cogsDeltaCents' AS "cogsDeltaCents",
         event.payload->'contractVersion' AS "payloadContractVersion",
+        event.payload->'historicalCostAdjustments' AS "historicalCostAdjustments",
+        event.payload->'unresolvedQuantities' AS "unresolvedQuantities",
         CASE WHEN jsonb_typeof(event.payload->'changes')='array' THEN jsonb_array_length(event.payload->'changes') ELSE NULL END AS "changeCount"
       FROM inventory.cost_reporting_events event
       JOIN inventory.cost_applications application ON application.id=event.application_id
@@ -62,11 +68,47 @@ export async function readPurchaseCostApplications(tx: Transaction, purchaseOrde
       WHERE line.purchase_order_id=${purchaseOrderId} ORDER BY event.id DESC LIMIT ${COST_REVISION_HISTORY_LIMIT + 1}
     `, "internal cost reporting events", COST_REVISION_HISTORY_LIMIT),
   ] as const;
-  return purchaseCostApplicationReadSchema.parse({
+  const shipmentLineIds = [...new Set(revisions.flatMap((revision) => revision.component === "landed" && typeof revision.shipmentLineId === "number" ? [revision.shipmentLineId] : []))];
+  const postings = shipmentLineIds.length === 0 ? [] : await readRows(tx, sql`
+    SELECT posting.id, posting.approval_id AS "approvalId", posting.application_id AS "applicationId",
+      posting.source_revision_id AS "sourceRevisionId", posting.destination, posting.before_mills AS "beforeMills",
+      posting.after_mills AS "afterMills", posting.delta_mills AS "deltaMills", approval.actor_name AS "actorName",
+      approval.reason, posting.recorded_at AS "recordedAt"
+    FROM inventory.cost_reconciliation_postings posting
+    JOIN inventory.cost_reconciliation_approvals approval ON approval.id=posting.approval_id
+    JOIN procurement.cost_source_revisions revision ON revision.id=posting.source_revision_id
+    JOIN procurement.purchase_order_lines line ON line.id=revision.purchase_order_line_id
+    WHERE line.purchase_order_id=${purchaseOrderId} ORDER BY posting.id
+    LIMIT ${COST_REVISION_HISTORY_LIMIT + 1}
+  `, "historical cost reconciliation postings", COST_REVISION_HISTORY_LIMIT);
+  const data = purchaseCostApplicationReadSchema.parse({
     revisions: revisions.map((row) => dateValues(moneyValues(row, ["id"]), ["recordedAt"])),
     applications: applications.map((row) => dateValues(moneyValues(row, ["id", "sourceRevisionId"]), ["recordedAt"])),
     lotChanges: lotChanges.map((row) => moneyValues(row, ["applicationId"])),
     contributions: contributions.map((row) => moneyValues(row, ["id"])),
+    reconciliationPostings: postings.map((row) => dateValues(moneyValues(row,
+      ["id", "approvalId", "applicationId", "sourceRevisionId", "beforeMills", "afterMills", "deltaMills"]), ["recordedAt"])),
     reportingEvents: reportingEvents.map((row) => dateValues(moneyValues(row, ["id", "applicationId"]), ["recordedAt"])),
   });
+  // The workspace owns a read-only repeatable-read transaction. The canonical
+  // exception reader checks the live source fingerprint before trusting approval.
+  const reviews = await readShipmentCostExceptions(tx, shipmentLineIds);
+  data.currentResolutions = [];
+  for (const lineId of shipmentLineIds) {
+    const revision = data.revisions.filter((row) => row.shipmentLineId === lineId && row.component === "landed")
+      .sort((left, right) => right.revision - left.revision || right.id - left.id)[0];
+    const application = data.applications.filter((row) => row.sourceRevisionId === revision.id).sort((left, right) => right.id - left.id)[0];
+    const issues = costIssueSchema.array().safeParse((application?.result as { issues?: unknown } | null)?.issues);
+    const review = reviews.get(lineId);
+    if (!application || !issues.success || !isCostReconciliationPosted(issues.data, review)) continue;
+    const state = review!.reconciliation!;
+    const ledger = await readReconciliationLedger(tx, lineId);
+    const currentPostings = (data.reconciliationPostings ?? []).filter((posting) => Object.values(ledger.lastIds).includes(posting.id));
+    if (!state.destination || currentPostings.length === 0) continue;
+    data.currentResolutions.push({
+      sourceRevisionId: revision.id, sourceFingerprint: revision.fingerprint, applicationId: application.id,
+      currency: "USD", destination: state.destination, postedMills: state.postedMills, postings: currentPostings,
+    });
+  }
+  return data;
 }

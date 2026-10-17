@@ -1,22 +1,16 @@
-import { useQuery } from "@tanstack/react-query";
-import { shipmentCostReviewSchema } from "@shared/procurement/shipment-cost-workflow";
+import { isShipmentCostLinePosted } from "@shared/procurement/shipment-cost-workflow";
 import { shipmentCostReviewGuidance } from "@shared/procurement/po-shipment-costs";
-import { readShipmentCostWorkflow } from "@/lib/shipment-cost-workflow";
+import { useShipmentCostReview } from "./use-shipment-cost-review";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { ShipmentCostExceptionReview } from "./ShipmentCostExceptionReview";
 
 export function ShipmentCostApplicationReview({ shipmentId }: { shipmentId: number }) {
-  const review = useQuery({ queryKey: [`/api/inbound-shipments/${shipmentId}/cost-review`], queryFn: async () => {
-    const response = await readShipmentCostWorkflow(`/api/inbound-shipments/${shipmentId}/cost-review`);
-    const parsed = shipmentCostReviewSchema.parse(response);
-    if (parsed.shipmentId !== shipmentId) throw new Error("Cost results belong to another shipment.");
-    return parsed;
-  } });
+  const review = useShipmentCostReview(shipmentId);
   const lines = review.data?.lines ?? [];
-  const completed = lines.filter(line => !line.sourceIssue && (line.application?.status === "applied" || line.exceptionReview?.reconciliation?.status === "posted"));
-  const pending = lines.filter(line => !completed.includes(line) || line.exceptionReview);
+  const completed = lines.filter(isShipmentCostLinePosted);
+  const visible = lines.filter(line => !isShipmentCostLinePosted(line) || line.exceptionReview);
   return <Card role="region" aria-label="Inventory cost results">
     <CardHeader className="pb-3"><CardTitle className="text-base">Inventory and sold-order costs</CardTitle></CardHeader>
     <CardContent className="space-y-3 text-sm">
@@ -27,9 +21,12 @@ export function ShipmentCostApplicationReview({ shipmentId }: { shipmentId: numb
         <Button variant="outline" onClick={() => void review.refetch()}>Reload cost results</Button>
       </div>}
       {review.isSuccess && <>
-        {completed.length > 0 && <p className="text-green-700 dark:text-green-400">{completed.length} of {lines.length} shipment lines updated successfully.</p>}
+        {completed.length > 0 && <p className="text-green-700 dark:text-green-400">
+          Costs posted on {completed.length} of {lines.length} shipment lines.
+          {completed.length === lines.length && " No cost approval is outstanding."}
+        </p>}
         {lines.length === 0 && <p>Add shipment lines before reviewing inventory costs.</p>}
-        {pending.map(line => {
+        {visible.map(line => {
           const issues = [...(line.sourceIssue ? [line.sourceIssue] : []), ...(line.application?.issues ?? [])];
           const unique = [...new Map(issues.map(issue => [`${issue.code}:${issue.message}`, issue])).values()];
           const guidance = shipmentCostReviewGuidance(unique.length ? unique : [{

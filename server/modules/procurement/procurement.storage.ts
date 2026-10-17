@@ -176,7 +176,7 @@ export interface IProcurementStorage {
     lineUpdates: Partial<InsertPurchaseOrderLine>;
     receipt: InsertPoReceipt;
   }, executor?: any): Promise<{ applied: boolean; receipt?: PoReceipt; purchaseOrderLine?: PurchaseOrderLine | null }>;
-  getInboundShipments(filters?: any): Promise<InboundShipment[]>;
+  getInboundShipments(filters?: any, executor?: any): Promise<InboundShipment[]>;
   getInboundShipmentPurchaseOrders(shipmentIds: readonly number[]): Promise<Map<number, ShipmentPurchaseOrderReference[]>>;
   getInboundShipmentsCount(filters?: any): Promise<number>;
   getInboundShipmentById(id: number, executor?: any): Promise<InboundShipment | undefined>;
@@ -1044,7 +1044,7 @@ export const procurementMethods: IProcurementStorage = {
     }
   },
 
-  async getInboundShipments(filters?: any): Promise<InboundShipment[]> {
+  async getInboundShipments(filters?: any, executor: any = db): Promise<InboundShipment[]> {
     const conditions: any[] = [];
     if (filters?.status) {
       if (Array.isArray(filters.status)) conditions.push(inArray(inboundShipments.status, filters.status));
@@ -1059,7 +1059,7 @@ export const procurementMethods: IProcurementStorage = {
         like(inboundShipments.containerNumber, `%${filters.search}%`),
       ));
     }
-    let query = db.select().from(inboundShipments).orderBy(desc(inboundShipments.createdAt)) as any;
+    let query = executor.select().from(inboundShipments).orderBy(desc(inboundShipments.createdAt)) as any;
     if (conditions.length > 0) query = query.where(and(...conditions));
     if (filters?.limit) query = query.limit(filters.limit);
     if (filters?.offset) query = query.offset(filters.offset);

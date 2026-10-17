@@ -285,7 +285,7 @@ async function dispatch(
     );
   }
   const operation =
-    /^\/order-edits\/operations\/([a-f0-9-]+)(?:\/(commit|reconcile|abandon))?$/.exec(
+    /^\/order-edits\/operations\/([a-f0-9-]+)(?:\/(commit|reconcile|abandon|resume))?$/.exec(
       path,
     );
   if (operation) {
@@ -309,7 +309,7 @@ async function dispatch(
         orderEditOperationSchema.parse(
           await services.edits.progress(
             operationId,
-            z.enum(["commit", "reconcile", "abandon"]).parse(operation[2]),
+            z.enum(["commit", "reconcile", "abandon", "resume"]).parse(operation[2]),
             commandKey(input),
           ),
         ),

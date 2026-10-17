@@ -303,7 +303,7 @@ export function createOrderEditTransport(request: typeof fetch = fetch) {
   ) => orderEditRequest(path, schema, { signal }, request);
   const operation = async (
     id: string,
-    action?: "commit" | "reconcile" | "abandon",
+    action?: "commit" | "reconcile" | "abandon" | "resume",
     signal?: AbortSignal,
   ) => {
     operationId.parse(id);
@@ -473,6 +473,7 @@ export function createOrderEditTransport(request: typeof fetch = fetch) {
     commit: (id: string) => operation(id, "commit"),
     reconcile: (id: string) => operation(id, "reconcile"),
     abandon: (id: string) => operation(id, "abandon"),
+    resume: (id: string) => operation(id, "resume"),
   };
   async function catalogRead<
     T extends { connectionId: number; input: unknown },

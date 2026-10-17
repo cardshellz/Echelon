@@ -138,9 +138,7 @@ test("shows freight, duties and total cost in the actual summary cards", async (
     "Supplier PO: $64,655.50",
   );
   await expect(
-    page.getByText("$446.60 is estimated or awaiting confirmation.", {
-      exact: true,
-    }),
+    page.getByText(/Supplier confirmation:.*\$446.60 uses estimated or unconfirmed charges/),
   ).toBeVisible();
   await expect(page.getByText("$231.98", { exact: true })).toBeVisible();
   await page

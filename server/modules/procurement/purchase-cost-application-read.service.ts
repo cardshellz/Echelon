@@ -1,8 +1,11 @@
+import { isHistoricalCostIssue } from "@shared/procurement/cost-posting-status";
 import { createHash } from "node:crypto";
 import { z } from "zod";
+import { reconciliationPostingSchema } from "@shared/procurement/cost-reconciliation";
+import { unresolvedCostQuantitySchema } from "@shared/procurement/cost-source-contracts";
 import { canonicalJson } from "@shared/utils/canonical-json";
 import { costComponentSchema, costIssueSchema, costSourceRevisionSchema, type CostIssue } from "@shared/procurement/cost-source-contracts";
-import { appliedCostBalanceSnapshotSchema, costBalanceSnapshotSchema, purchaseCostApplicationHistorySchema, type PurchaseCostApplicationHistory } from "@shared/procurement/purchase-cost-applications";
+import { appliedCostBalanceSnapshotSchema, costBalanceSnapshotSchema, purchaseCostApplicationHistorySchema, isPurchaseCostResolutionVerified, purchaseCostCurrentResolutionSchema, purchaseCostResolutionPostingSchema, type PurchaseCostApplicationHistory } from "@shared/procurement/purchase-cost-applications";
 
 const id = z.number().int().positive().safe();
 const integer = z.number().int().safe();
@@ -27,8 +30,11 @@ export const purchaseCostApplicationReadSchema = z.object({
     id, sourceLotId: id, outputLotId: id, sourceQty: integer.positive(), outputQty: integer.positive(),
     outputStartQty: integer.nonnegative(), operationKind: z.enum(["transfer", "conversion", "assembly", "build"]), operationKey: z.string(),
   })),
+  currentResolutions: z.array(purchaseCostCurrentResolutionSchema).optional(),
+  reconciliationPostings: z.array(purchaseCostResolutionPostingSchema).optional(),
   reportingEvents: z.array(z.object({
     id, applicationId: id, contractVersion: integer.positive(), recordedAt: date,
+    historicalCostAdjustments: z.unknown().optional(), unresolvedQuantities: z.unknown().optional(),
     sourceRevisionId: z.unknown(), sourceFingerprint: z.unknown(), component: z.unknown(), currency: z.unknown(), cogsDeltaCents: z.unknown(), payloadContractVersion: z.unknown(), changeCount: integer.nonnegative().nullable(),
   })),
 });
@@ -92,6 +98,7 @@ export function projectPurchaseCostApplications(input: PurchaseCostApplicationRe
   const changesByApplication = groupById(data.lotChanges, (row) => row.applicationId);
   const edgesByOutput = groupById(data.contributions, (row) => row.outputLotId);
   const eventsByApplication = groupById(data.reportingEvents, (row) => row.applicationId);
+  const postingsByApplication = groupById(data.reconciliationPostings ?? [], (row) => row.applicationId);
   const latestRevision = new Map<string, number>();
   const revisionKey = (row: PurchaseCostApplicationRead["revisions"][number]) => `${row.purchaseOrderLineId}:${row.shipmentLineId ?? 0}:${row.component}`;
   for (const row of data.revisions) latestRevision.set(revisionKey(row), Math.max(latestRevision.get(revisionKey(row)) ?? 0, row.revision));
@@ -132,15 +139,33 @@ export function projectPurchaseCostApplications(input: PurchaseCostApplicationRe
         projectChange(change, edgesByOutput.get(change.lotId) ?? [], row.component));
       const snapshotIssues = changes.flatMap((change) => change.issues);
       if (snapshotIssues.length) problems.push(...snapshotIssues);
-      if (result.success && (result.data.lotsUpdated !== changes.length || (application.status !== "applied" && changes.length > 0))) {
+      const retainedQuantityReview = result.success && application.status === "review_required" && result.data.status === application.status
+        && result.data.issues.length > 0 && result.data.issues.every((problem) => problem.code === "COST_UNRESOLVED_QUANTITY_RETAINED" && problem.unresolvedQuantity?.component === row.component);
+      const historicalLineageReview = result.success && application.status === "review_required" && result.data.status === application.status
+        && result.data.issues.length > 0 && result.data.issues.every((problem) => problem.code === "COST_HISTORICAL_LINEAGE_MISSING" && !problem.unresolvedQuantity)
+        && changes.length === 0 && result.data.cogsRowsUpdated === 0 && result.data.totalCogsDeltaCents === 0;
+      if (result.success && (result.data.lotsUpdated !== changes.length || (application.status !== "applied" && !retainedQuantityReview && changes.length > 0))) {
         problems.push(issue("COST_APPLICATION_LOTS_CONFLICT", "The recorded changed-lot count does not reconcile to the immutable application rows."));
       }
       const events = eventsByApplication.get(application.id) ?? [];
       const event = events[0];
-      const validEvent = event !== undefined && events.length === 1 && application.status === "applied" && result.success && source !== null
+      const postings = postingsByApplication.get(application.id) ?? [];
+      const eventPostings = reconciliationPostingSchema.array().safeParse(event?.historicalCostAdjustments ?? []);
+      const postingsMatch = eventPostings.success && canonicalJson(eventPostings.data) === canonicalJson(postings.map((posting) => ({
+        id: posting.id, approvalId: posting.approvalId, destination: posting.destination,
+        beforeMills: posting.beforeMills, afterMills: posting.afterMills, deltaMills: posting.deltaMills,
+      }))) && postings.every((posting) => posting.sourceRevisionId === row.id)
+        && (postings.length === 0 || (row.component === "landed" && source?.currency === "USD"));
+      const unresolved = unresolvedCostQuantitySchema.array().safeParse(event?.unresolvedQuantities ?? []);
+      const unresolvedMatch = unresolved.success && canonicalJson(unresolved.data) === canonicalJson(retainedQuantityReview && result.success
+        ? result.data.issues.map((problem) => problem.unresolvedQuantity) : []);
+      const eventOutcomeAllowed = application.status === "applied" || retainedQuantityReview || (historicalLineageReview && postings.length > 0);
+      const validEvent = event !== undefined && events.length === 1 && eventOutcomeAllowed && result.success && source !== null
+        && result.data.status === application.status
         && event.contractVersion === 1 && event.payloadContractVersion === 1 && event.changeCount === changes.length && event.sourceRevisionId === row.id && event.sourceFingerprint === row.fingerprint
-        && event.component === row.component && event.currency === source.currency && event.cogsDeltaCents === result.data.totalCogsDeltaCents;
-      if ((application.status === "applied" || events.length > 0) && !validEvent) problems.push(issue("COST_REPORTING_EVENT_UNVERIFIED", "The internal reporting event is missing, unsupported or inconsistent with this application."));
+        && event.component === row.component && event.currency === source.currency && event.cogsDeltaCents === result.data.totalCogsDeltaCents
+        && postingsMatch && unresolvedMatch;
+      if ((application.status === "applied" || retainedQuantityReview || postings.length > 0 || events.length > 0) && !validEvent) problems.push(issue("COST_REPORTING_EVENT_UNVERIFIED", "The internal reporting event is missing, unsupported or inconsistent with this application."));
       return {
         id: application.id, status: application.status, latestRecordedApplication: application.id === latestApplicationId,
         recordedBy: application.recordedBy, recordedAt: application.recordedAt,
@@ -152,11 +177,35 @@ export function projectPurchaseCostApplications(input: PurchaseCostApplicationRe
           evidenceState: validEvent ? "verified_record" as const : "review_required" as const, externalDelivery: "not_verified" as const } : null,
       };
     });
+    const candidateResolutions = (data.currentResolutions ?? []).filter((resolution) => resolution.sourceRevisionId === row.id);
+    const candidate = candidateResolutions.length === 1 ? candidateResolutions[0] : null;
+    const latestApplication = applications.find((application) => application.id === latestApplicationId);
+    // An approval resolves the current source, never rewrites an older source or
+    // claims that an earlier failed attempt performed the later posting.
+    const currentResolution = candidate && source?.component === "landed" && source.scope.kind === "shipment_line"
+      && source.currency === "USD" && source.issue === null && ["estimated", "confirmed"].includes(source.evidence)
+      && source.totalMills !== null && candidate.postedMills <= source.totalMills
+      && row.revision === latestRevision.get(revisionKey(row)) && candidate.sourceFingerprint === row.fingerprint
+      && candidate.applicationId === latestApplicationId && latestApplication?.status === "review_required"
+      && latestApplication.issues.length > 0 && latestApplication.issues.every(isHistoricalCostIssue)
+      && new Set(candidate.postings.map((posting) => posting.id)).size === candidate.postings.length
+      && new Set(candidate.postings.map((posting) => posting.destination)).size === candidate.postings.length
+      && candidate.postings.every((posting) => (data.reconciliationPostings ?? []).some((record) => canonicalJson(record) === canonicalJson(posting)))
+      && candidate.postings.reduce((total, posting) => total + BigInt(posting.afterMills), BigInt(0)) === BigInt(candidate.postedMills)
+      && candidate.postings.every((posting) => posting.destination === candidate.destination || posting.afterMills === 0)
+      ? candidate : null;
     return {
       id: row.id, purchaseOrderLineId: row.purchaseOrderLineId, shipmentLineId: row.shipmentLineId, component: row.component,
       revision: row.revision, fingerprint: row.fingerprint, latestRecordedSourceRevision: row.revision === latestRevision.get(revisionKey(row)),
-      recordedBy: row.recordedBy, recordedAt: row.recordedAt, source, issues, applications,
+      recordedBy: row.recordedBy, recordedAt: row.recordedAt, source, issues, applications, currentResolution,
     };
   });
-  return purchaseCostApplicationHistorySchema.parse({ coverage: "recorded_application_snapshots", revisions });
+  const history = { coverage: "recorded_application_snapshots" as const, revisions };
+  return purchaseCostApplicationHistorySchema.parse({ ...history, revisions: revisions.map((revision) => {
+    const currentResolution = isPurchaseCostResolutionVerified(history, revision) ? revision.currentResolution : null;
+    return { ...revision, currentResolution, applications: revision.applications.map((application) => ({ ...application,
+      resolvedByCurrentPosting: currentResolution !== null && application.status === "review_required"
+        && application.issues.length > 0 && application.issues.every(isHistoricalCostIssue),
+    })) };
+  }) });
 }

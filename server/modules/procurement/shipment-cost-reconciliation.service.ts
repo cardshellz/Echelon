@@ -77,6 +77,7 @@ async function loadContext(tx: AmendmentTransaction, lineId: number, actorId: st
   const eligible = reconciliationEligibility(source, result.issues, records);
   const canApprove = hasQuantityAmendmentAuthority(actor);
   const blocker = reconciliationBlocker(source, result.issues, records, await hasReconciliationRoots(tx, source));
+  const savedState = reconciliationState(eligible, ledger);
   const context = reconciliationContextSchema.parse({
     lineId,
     shipmentId: facts.shipmentId,
@@ -87,7 +88,11 @@ async function loadContext(tx: AmendmentTransaction, lineId: number, actorId: st
     sourceEvidence: source.evidence,
     historicalAmountMills: eligible?.amountMills ?? 0,
     balances: ledger.balances,
-    state: reconciliationState(eligible, ledger),
+    // Match the upstream read: a posting for an older charge revision is history,
+    // not proof that the current shipment costs are complete.
+    state: current !== source.fingerprint && savedState.status === "posted"
+      ? { ...savedState, status: "review_required" }
+      : savedState,
     records: records.map((row) => row.record),
     issues: result.issues,
     canApprove,
