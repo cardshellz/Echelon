@@ -40,8 +40,8 @@ export function PoShipmentCostSummary({
   const costs = query.data.summary;
   if (costs.shipmentCount === 0) return null;
   const money = (cents: number) => formatIntegerCents(cents, costs.currency);
-  const accepted = query.data.lines.filter(line => line.exceptionReview?.reconciliation?.status === "posted").length;
-  const needsReview = Math.max(0, costs.reviewLines - accepted);
+  const posted = query.data.lines.filter(line => line.status === "applied" && line.exceptionReview?.reconciliation?.status === "posted").length;
+  const needsReview = costs.reviewLines;
   return (
     <Card>
       <CardContent className="p-3 space-y-3">
@@ -69,9 +69,9 @@ export function PoShipmentCostSummary({
             </p>
           )}
           {costs.estimatedCents !== 0 && (
-            <p className="text-amber-700 dark:text-amber-400">
-              {money(costs.estimatedCents)} is estimated or awaiting
-              confirmation.
+            <p className="text-muted-foreground">
+              <strong>Supplier confirmation:</strong> {money(costs.estimatedCents)} uses estimated or unconfirmed charges.
+              {costs.inventoryCosting === "applied" ? " Their costs are already posted. Confirm the final charges when the supplier invoice is available." : " Check the final charges against the supplier invoice."}
             </p>
           )}
           {costs.unallocatedChargeCount > 0 && (
@@ -87,29 +87,29 @@ export function PoShipmentCostSummary({
               conversion before calculating the combined cost.
             </p>
           )}
-          {costs.inventoryCosting === "review_required" && (needsReview > 0 || costs.reviewLines === 0) && (
+          {costs.inventoryCosting === "review_required" && (
             <p className="text-destructive">
               {needsReview > 0
                 ? `${needsReview} shipment line${needsReview === 1 ? " has" : "s have"} an inventory cost exception awaiting review. Saved shipment charges are included above.`
                 : "Shipment charge evidence needs review before inventory costs can be updated."}
             </p>
           )}
-          {accepted > 0 && <p className="text-muted-foreground">
-            Costs reconciled on {accepted} shipment line{accepted === 1 ? "" : "s"}. Approved postings and the original stock history are available below.
+          {posted > 0 && <p className="text-muted-foreground">
+            Approved historical cost postings: {posted} shipment line{posted === 1 ? "" : "s"}. Amounts and approval details are available below.
           </p>}
           {costs.inventoryCosting === "pending" && (
             <p className="text-amber-700 dark:text-amber-400">
-              Inventory costing is awaiting receipt, confirmed charges or a cost
+              Inventory costing is awaiting receipt, allocation or a cost
               update.
             </p>
           )}
           {costs.inventoryCosting === "applied" && (
             <p className="text-green-700 dark:text-green-400">
-              Confirmed shipment costs applied to inventory.
+              Cost posting complete. No cost approval is outstanding.
             </p>
           )}
         </div>
-        {(costs.reviewLines > 0 || costs.pendingLines > 0 || showReview) && (
+        {(costs.reviewLines > 0 || costs.pendingLines > 0 || posted > 0 || showReview) && (
           <Button
             size="sm"
             variant="outline"
@@ -117,10 +117,10 @@ export function PoShipmentCostSummary({
             onClick={() => setShowReview(!showReview)}
           >
             {showReview
-              ? "Hide cost review"
+              ? "Hide cost details"
               : needsReview > 0
                 ? `Review ${needsReview} line${needsReview === 1 ? "" : "s"}`
-                : accepted > 0 ? "View reconciled costs"
+                : costs.pendingLines === 0 && posted > 0 ? "View cost postings"
                 : "Review inventory costs"}
           </Button>
         )}

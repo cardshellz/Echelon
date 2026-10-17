@@ -11,6 +11,7 @@ const runners = [
   ["dropship-usdc-watcher-runner.ts", "usdcWatcher"],
   ["dropship-cost-detection-runner.ts", "costDetection"],
   ["dropship-category-marks-runner.ts", "categoryMarks"],
+  ["dropship-rules-conversion-runner.ts", "rulesConversion"],
 ] as const;
 
 describe("dropship worker runner scheduling", () => {

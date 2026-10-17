@@ -57,10 +57,10 @@ export async function readShipmentExceptionHistory(tx: ShipmentExceptionReader, 
 
 /** A saved acceptance is valid only while its source and issue evidence still
  * match. Check current sources once per shipment, not once per line. */
-export async function readShipmentCostExceptions(tx: ShipmentExceptionReader, lineIds: number[]): Promise<Map<number, ShipmentCostException>> {
+export async function readShipmentCostExceptions(tx: ShipmentExceptionReader, lineIds: number[], currentSources: ReadonlyMap<number, Map<number, string>> = new Map()): Promise<Map<number, ShipmentCostException>> {
   const facts = await readShipmentExceptionFacts(tx, lineIds);
   const reviews = new Map<number, ShipmentCostException>();
-  const current = new Map<number, Map<number, string>>();
+  const current = new Map(currentSources);
   for (const fact of facts) {
     const review = buildShipmentCostException(fact);
     if (!review) continue;

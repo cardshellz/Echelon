@@ -8,6 +8,8 @@ import { useProcurementNavigation } from "@/hooks/use-procurement-navigation";
 import { ShipmentPurchaseOrderLinks } from "@/features/purchasing/ShipmentPurchaseOrderLinks";
 import { ShipmentCostUpdateAction } from "@/features/purchasing/ShipmentCostUpdateAction";
 import { ShipmentCostApplicationReview } from "@/features/purchasing/ShipmentCostApplicationReview";
+import { useShipmentCostReview } from "@/features/purchasing/use-shipment-cost-review";
+import { isShipmentCostLinePosted } from "@shared/procurement/shipment-cost-workflow";
 import { shipmentCostWorkflowError } from "@/lib/shipment-cost-workflow";
 import { Decimal } from "decimal.js";
 import { parseProcurementJourney, procurementRecordHref } from "@/lib/procurement-navigation";
@@ -474,6 +476,10 @@ export default function InboundShipmentDetail() {
     // (and the close-blocked auto-open) always have allocation data, regardless of tab.
     enabled: !!shipmentId,
   });
+
+  const costReview = useShipmentCostReview(shipmentId, !!shipment && ["costing", "closed"].includes(shipment.status));
+  const costsPosted = costReview.isSuccess && costReview.data.lines.length > 0
+    && costReview.data.lines.every(isShipmentCostLinePosted) && allocationStatus?.blockerCount === 0;
 
   const { data: vendorsData = [], isPending: vendorsLoading, isError: vendorsError, refetch: refetchVendors } = useQuery({
     queryKey: ["/api/vendors"],
@@ -1814,7 +1820,14 @@ export default function InboundShipmentDetail() {
                     ))}
                   </div>
                 )}
-                {["costing", "closed"].includes(shipment.status) ? <div className="space-y-2 rounded-md bg-muted/40 p-3">
+                {["costing", "closed"].includes(shipment.status) ? costsPosted ? <div className="space-y-2 rounded-md bg-green-50 p-3 dark:bg-green-950/30">
+                  <p className="text-sm font-medium text-green-800 dark:text-green-300">Costs posted. No update or approval is needed for the saved charges.</p>
+                  <details className="text-sm">
+                    <summary className="cursor-pointer">Reapply costs (optional)</summary>
+                    <p className="my-2 text-muted-foreground">Use this only to refresh costs after a change. The recorded postings remain in the audit.</p>
+                    <ShipmentCostUpdateAction key={shipment.id} shipmentId={shipment.id} />
+                  </details>
+                </div> : <div className="space-y-2 rounded-md bg-muted/40 p-3">
                   <p className="text-sm">Update shipment costs recalculates this split and updates stock and sold-order costs. {shipment.status === "closed" && "This shipment stays closed; cost adjustments are recorded automatically."}</p>
                   <ShipmentCostUpdateAction key={shipment.id} shipmentId={shipment.id} disabled={allocationStatusError || lines.length === 0} />
                 </div> : shipment.status !== "cancelled" && <div className="space-y-2">

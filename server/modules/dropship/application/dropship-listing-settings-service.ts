@@ -20,7 +20,9 @@ import {
 import {
   LISTING_RULES_CONVERSION_ERROR_CODES,
   listingRulesConversionCheckInputSchema,
+  type ListingRuleConversionRecord,
   type ListingRulesConversionCheck,
+  type ListingRulesConversionNoticeResponse,
 } from "../../../../shared/dropship/listing-rules-conversion";
 import type { ProductListingSettingRow } from "../../../../shared/dropship/listing-setting-values";
 import { DropshipError } from "../domain/errors";
@@ -99,6 +101,15 @@ export type ListingSettingsConversionLoad =
   | { state: "not_ebay"; store: DropshipListingStoreContext };
 
 /**
+ * What the one-time notice's read finds for a store the member's vendor owns
+ * (PR 11e1, plan 9.3): a store not on eBay, or the store's latest system
+ * conversion whose notice no one has seen (null when there is none).
+ */
+export type ListingSettingsConversionNoticeRead =
+  | { state: "not_ebay" }
+  | { state: "ok"; conversion: ListingRuleConversionRecord | null };
+
+/**
  * The `Retry-After` of a check the .ops cost read could not finish (plan 3.4,
  * D14): a sooner retry would likely fail the same way and spend the dry
  * run's small budget. Carried in the error's context, as the write map
@@ -161,6 +172,14 @@ export interface ListingSettingsRepository {
    * member's vendor does not own the store.
    */
   loadConversionInputs(input: { memberId: string; storeConnectionId: number; now: Date }): Promise<ListingSettingsConversionLoad | null>;
+  /**
+   * The one-time notice (PR 11e1, plan 9.3): the store's platform and its
+   * latest conversion when that is an unseen system one (a later vendor move
+   * ends the job's notice, D19), by the owner predicate every read here
+   * uses. No selection is read (so no too-large refusal), nothing is locked
+   * or cached. Null when the member's vendor does not own the store.
+   */
+  readConversionNotice(input: { memberId: string; storeConnectionId: number }): Promise<ListingSettingsConversionNoticeRead | null>;
   /**
    * One product's own settings row (null when it has none), read with PR 8a's
    * reader, and, only when that row holds a main text, the product's catalog
@@ -392,6 +411,40 @@ export class DropshipListingSettingsService {
     if (!memberId.trim()) throw new DropshipError("DROPSHIP_AUTH_REQUIRED", "Dropship authentication is required.");
     const { plan, diff, now } = await this.joinConversionCheck(memberId, parsed.storeConnectionId);
     return conversionCheckView(plan, diff, parsed.page, now);
+  }
+
+  /**
+   * The one-time notice of a system conversion (PR 11e1, plan 9.2, 9.3,
+   * D19): the store's latest conversion the job applied whose notice no one
+   * has seen, with its counts, or `notice: null`. Read on every request from
+   * one indexed statement, never cached, so a [Got it] on one device hides it
+   * on every other. The same member check, 404 and 422 (not eBay) as the
+   * other reads, but no too-large refusal: it reads no selection, so a store
+   * over 10,000 sizes still learns what moved. No lock, no write.
+   */
+  async getConversionNoticeForMember(memberId: string, input: unknown): Promise<ListingRulesConversionNoticeResponse> {
+    const { storeConnectionId } = listingSettingsStoreInputSchema.parse(input);
+    if (!memberId.trim()) throw new DropshipError("DROPSHIP_AUTH_REQUIRED", "Dropship authentication is required.");
+    const read = await this.deps.repository.readConversionNotice({ memberId, storeConnectionId });
+    if (!read) throw storeNotFound(storeConnectionId);
+    if (read.state === "not_ebay") throw ebayOnly(storeConnectionId);
+    const conversion = read.conversion;
+    if (conversion === null) return { storeConnectionId, notice: null };
+    // The read asks for exactly an unseen system row of this store; anything else is a broken contract, never a notice.
+    if (conversion.actorType !== "system" || conversion.noticeSeenAt !== null || conversion.storeConnectionId !== storeConnectionId) {
+      throw listingSettingsInvariantFailed("The conversion notice read answered a row that is not an unseen system conversion of this store.", {
+        storeConnectionId, conversionId: conversion.id,
+      });
+    }
+    return {
+      storeConnectionId,
+      notice: {
+        conversionId: conversion.id,
+        convertedAt: conversion.createdAt,
+        categoryCount: conversion.categoryCount,
+        productCount: conversion.productCount,
+      },
+    };
   }
 
   /** The waiting run for this member and store, or a new one that starts when the newest settles (see `conversionChecks`). */
