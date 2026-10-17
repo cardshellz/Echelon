@@ -25,6 +25,7 @@ import {
   keptLine,
   laterProductsLine,
   olderGroupRulesPresent,
+  conflictRereadKeys,
   olderRulesGoneRereadKeys,
   olderRulesLineModel,
   olderRulesOpener,
@@ -33,14 +34,34 @@ import {
   olderRulesSheetState,
   olderRulesState,
   reportLines,
+  conversionOutcomeOf,
+  type OlderRulesApplyFacts,
   type OlderRulesSheetInput,
+  type OlderRulesSheetNotice,
+  type OlderRulesSheetOutcome,
   type OlderRulesSheetSession,
   type OlderRulesSheetState,
 } from "../dropship-listing-settings-conversion";
+import type { ListingSettingsRight } from "../dropship-listing-settings-access";
+import {
+  CONVERSION_EDITOR_ID,
+  LISTING_SETTINGS_SAVE_WORDS,
+  classifyWriteFailure,
+  productEditorId,
+  reduceListingSettingsDraft,
+  type ListingSettingsDraft,
+  type WriteFailure,
+} from "../dropship-listing-settings-drafts";
 import { LISTING_SETTINGS_OFF_CONTRACT, ListingSettingsReadError, listingSettingsQueryKey } from "../dropship-listing-settings";
 import { DRAWER_WORDS, DRAWER_SETTING_ROWS } from "../dropship-listing-settings-drawer";
 import { builtFromWords, formatCents, recipeWords } from "../dropship-listing-settings-price-words";
-import { CONVERSION_BLOCKER_WORDS, LISTING_SETTINGS_CONVERSION_WORDS, fixReasonWords } from "../dropship-listing-settings-words";
+import {
+  CONVERSION_BLOCKER_WORDS,
+  LISTING_SETTINGS_CONVERSION_WORDS,
+  LISTING_SETTINGS_EDIT_WORDS,
+  conversionChangesListedWords,
+  fixReasonWords,
+} from "../dropship-listing-settings-words";
 import { DropshipApiError } from "../dropship-ops-surface";
 
 /** Moving older group rules over, on screen and read-only (PR 11b, plan 5.3, 5.4, 11.1, 11.2, 11.4, 11.5; D17, D18, D21, D25). */
@@ -207,8 +228,16 @@ const apiError = (status: number, code: string | null, context?: Record<string, 
   new DropshipApiError({ message: "Server words.", status, code, context: context ?? null });
 
 const answered = (value: ListingRulesConversionCheck) => ({ data: value, error: null });
-function sheet(pages: OlderRulesSheetInput["pages"], session: OlderRulesSheetSession = OLDER_RULES_SHEET_OPENED): OlderRulesSheetState {
-  return olderRulesSheetState(deepFreeze({ pages, session, outcome: null }));
+const EDITABLE: ListingSettingsRight = { editable: true, reason: null };
+/** Nothing in the way of a move: no draft, the right, no other action, page 0 read (11d's footer facts). */
+const IDLE: OlderRulesApplyFacts = { draft: null, right: EDITABLE, busy: false, checking: false, notStartedLine: null };
+function sheet(
+  pages: OlderRulesSheetInput["pages"],
+  session: OlderRulesSheetSession = OLDER_RULES_SHEET_OPENED,
+  outcome: OlderRulesSheetOutcome | null = null,
+  apply: Partial<OlderRulesApplyFacts> = {},
+): OlderRulesSheetState {
+  return olderRulesSheetState(deepFreeze({ pages, session, outcome, apply: { ...IDLE, ...apply } }));
 }
 
 /** Every string a model shows: its words, lines, labels and headings (never its keys, kinds or forms). */
@@ -698,11 +727,12 @@ describe("why some sizes would change, never applies, kept (11.2, 11.4, D5, D6, 
 // ---------------------------------------------------------------------------
 
 describe("the sheet's states (5.3, 11.2)", () => {
-  it("is loading until page 0 answers, with the preview footer", () => {
+  it("is loading until page 0 answers, with Close and no Move them over", () => {
     for (const pages of [[], [{ data: undefined }], [{ data: undefined, error: null }]]) {
       expect(sheet(pages)).toMatchObject({
         title: "Your older group rules", view: "loading", loadingLine: "Checking what would change…", problem: null, content: null, close: false,
-        footer: { text: "This is a preview. Nothing is moved yet.", closeLabel: DRAWER_WORDS.close },
+        footer: { lines: [], move: { label: "Move them over", shown: false, disabled: true }, checkAgain: { shown: false }, reload: { shown: false },
+          closeLabel: DRAWER_WORDS.close, escapeKeepsOpen: false, press: null },
       });
     }
   });
@@ -862,16 +892,363 @@ describe("the sheet's pages: Load more and one plan per screen (11.2, D25; CUX#1
     expect(sheet(pages, { ...OLDER_RULES_SHEET_OPENED, pageCount: 200 }).content?.changes).toMatchObject({ total: 10_000, loadMore: { shown: false } });
   });
 
-  it("re-reads exactly the summary, the categories and the three profiles once the store is found moved, never the check itself (11.5)", () => {
+  it("has the step's conflict hook read exactly the summary and the notice again (8.2, 11e1, D25)", () => {
+    expect(conflictRereadKeys(STORE)).toEqual([
+      [...listingSettingsQueryKey(STORE), "summary"],
+      [...listingSettingsQueryKey(STORE), "conversion-notice"],
+    ]);
+  });
+
+  it("re-reads exactly the summary, the categories, the notice and the three profiles once the store is found moved, never the check itself (11.5)", () => {
     const keys = olderRulesGoneRereadKeys(STORE);
     expect(keys).toEqual([
       [...listingSettingsQueryKey(STORE), "summary"],
       [...listingSettingsQueryKey(STORE), "categories"],
+      // 11e1: the one-time notice, so the sheet says what the job moved, with [Got it].
+      [...listingSettingsQueryKey(STORE), "conversion-notice"],
       ["/api/dropship/listings/stores/22/pricing-rules"],
       ["/api/dropship/listings/stores/22/ebay-category-rules"],
       ["/api/dropship/listings/stores/22/content-profile"],
     ]);
     for (const key of keys) expect(key).not.toContain("conversion");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// [Move them over]: the footer, every 8.3 row (PR 11d, plan 8.3, 11.2; D1, D9; CUX#11)
+// ---------------------------------------------------------------------------
+
+const SHOWN = Object.freeze({ planHash: PLAN_A, writesHash: WRITES });
+const KEY = "ls-convert:first";
+
+/** The step's draft for a move of page 0's plan, sent with KEY and then answered `failure` (or still out). */
+function moveDraft(answer: WriteFailure | "saving" | "saved" = "saving"): ListingSettingsDraft {
+  const opened = reduceListingSettingsDraft(null, { type: "open", editor: CONVERSION_EDITOR_ID, place: W.sheetTitle, base: SHOWN });
+  const sent = reduceListingSettingsDraft(opened, { type: "startSave", attempt: { signature: "plan A", key: KEY } });
+  if (answer === "saving") return sent!;
+  if (answer === "saved") return reduceListingSettingsDraft(sent, { type: "saved", key: KEY, nowMs: 1 })!;
+  return reduceListingSettingsDraft(sent, { type: "failure", key: KEY, failure: answer })!;
+}
+
+/** The move answered `error`, classified as the runner classifies it (W11). */
+function refusedMove(error: unknown): ListingSettingsDraft {
+  return moveDraft(classifyWriteFailure("W11", error));
+}
+
+/** The refusals of 8.3, as the server answers them (and a dropped connection, last). */
+const MOVE_REFUSALS: readonly DropshipApiError[] = [
+  apiError(409, "DROPSHIP_LISTING_CONVERSION_CHANGED", { reason: "settings_changed" }),
+  apiError(409, "DROPSHIP_LISTING_CONVERSION_CHANGED", { reason: "listed_changes_moved" }),
+  apiError(422, "DROPSHIP_LISTING_PRICE_WOULD_BE_LOST", { sizeCount: 1 }),
+  apiError(422, "DROPSHIP_LISTING_CONVERSION_WOULD_BLOCK_LISTING", { sizeCount: 1 }),
+  apiError(422, "DROPSHIP_LISTING_SETTINGS_TOO_LARGE", { reason: "store_text_limit" }),
+  apiError(422, "DROPSHIP_LISTING_SETTINGS_TOO_LARGE"),
+  apiError(503, "DROPSHIP_LISTING_CONVERSION_CHECK_UNAVAILABLE"),
+  apiError(409, "DROPSHIP_IDEMPOTENCY_CONFLICT"),
+  apiError(500, "DROPSHIP_LISTING_SETTINGS_INVARIANT_FAILED"),
+  apiError(503, "DROPSHIP_LISTING_SETTINGS_BUSY", { reason: "catalog_changed" }),
+  apiError(429, "DROPSHIP_LISTING_SETTINGS_RATE_LIMITED"),
+  apiError(403, "DROPSHIP_LISTING_STORE_BLOCKED", { reason: "paused" }),
+];
+const DROPPED = new TypeError("Failed to fetch");
+
+const footerOf = (state: OlderRulesSheetState) => state.footer;
+const linesOf = (state: OlderRulesSheetState) => state.footer.lines.map((line) => line.text);
+const blockedSizes = { wouldLosePrice: list([sizeRef(PENNY_100, "Pack of 100")]), wouldBlockListing: list([]), tooMuchText: false };
+
+describe("the one-time notice in the sheet (11e1, plan 9.2, D19, D25)", () => {
+  const NOTICE: OlderRulesSheetNotice = { model: { conversionId: 41,
+    text: "We moved your older group rules. 1 category now has its own settings. Nothing in your listings changed.",
+    gotIt: { label: "Got it", ariaLabel: "Got it, hide this note" }, failure: null }, sending: false };
+  const withNotice = (pages: OlderRulesSheetInput["pages"], outcome: OlderRulesSheetOutcome | null, notice: OlderRulesSheetNotice | null = NOTICE,
+    apply: Partial<OlderRulesApplyFacts> = {}) =>
+    olderRulesSheetState(deepFreeze({ pages, session: OLDER_RULES_SHEET_OPENED, outcome, apply: { ...IDLE, ...apply }, notice }));
+
+  it("says what the job moved instead of 'no older group rules any more', with [Got it] beside Close, when the sheet finds the store moved", () => {
+    const state = withNotice([answered(NO_OLDER_RULES)], null);
+    expect(state).toMatchObject({ view: "none", noneLine: NOTICE.model.text, rereadAfterMoved: true });
+    expect(state.footer).toMatchObject({ lines: [], move: { shown: false }, gotIt: { label: "Got it", ariaLabel: "Got it, hide this note", shown: true,
+      disabled: false }, press: null });
+    // With [Got it] out, the button waits; seen (no notice), the plain words and no [Got it] again.
+    expect(withNotice([answered(NO_OLDER_RULES)], null, { ...NOTICE, sending: true }).footer.gotIt).toMatchObject({ shown: true, disabled: true });
+    expect(withNotice([answered(NO_OLDER_RULES)], null, null)).toMatchObject({ noneLine: W.none, footer: { gotIt: { shown: false } } });
+  });
+
+  it("says what the job moved after nothing_to_convert, whatever page 0 answers after it, and keeps a failed Got it's words", () => {
+    const already = { kind: "already_moved", viewStale: false } as const;
+    for (const pages of [[answered(NO_OLDER_RULES)], [answered(check())], [{ data: undefined }]]) {
+      const state = withNotice(pages, already);
+      expect(state.footer.lines).toEqual([{ text: NOTICE.model.text, tone: "ok" }]);
+      expect(state.footer.gotIt).toMatchObject({ shown: true, disabled: false });
+    }
+    const failed = withNotice([answered(NO_OLDER_RULES)], already, { ...NOTICE, model: { ...NOTICE.model, failure: W.noticeFailed } });
+    expect(failed.footer.lines).toEqual([{ text: NOTICE.model.text, tone: "ok" }, { text: "Couldn't save that. Try again.", tone: "alert" }]);
+    // Seen: "Your rules have already been moved over." again.
+    expect(withNotice([answered(NO_OLDER_RULES)], already, null).footer.lines).toEqual([{ text: W.alreadyMoved, tone: "ok" }]);
+  });
+
+  it("never shows it beside the vendor's own move, nor over a report (older rules are there), nor while page 0 loads or failed", () => {
+    const moved = withNotice([answered(NO_OLDER_RULES)], { kind: "moved", viewStale: false });
+    expect(moved.footer).toMatchObject({ lines: [{ text: W.moved, tone: "ok" }], gotIt: { shown: false } });
+    for (const pages of [[answered(check())], [{ data: undefined }], [{ data: undefined, error: new TypeError("offline") }]]) {
+      const state = withNotice(pages, null);
+      expect(state.footer.gotIt.shown).toBe(false);
+      expect(shownStrings(state)).not.toContain(NOTICE.model.text);
+    }
+  });
+
+  it("keeps the notice's words plain", () => {
+    for (const text of shownStrings(withNotice([answered(NO_OLDER_RULES)], null))) expectPlain(text);
+  });
+});
+
+describe("[Move them over]: the footer (8.3)", () => {
+  it("clean: [Move them over] on, nothing else said, and it sends page 0's two hashes as shown (D1)", () => {
+    const footer = footerOf(sheet([answered(check())]));
+    expect(footer).toEqual({
+      lines: [], move: { label: "Move them over", shown: true, disabled: false },
+      gotIt: { label: "Got it", ariaLabel: "Got it, hide this note", shown: false, disabled: true },
+      checkAgain: { label: "Check again", shown: false, disabled: false }, reload: { label: "Reload", shown: false },
+      closeLabel: DRAWER_WORDS.close, escapeKeepsOpen: false, press: SHOWN,
+    });
+  });
+
+  it("not clean, nothing blocked: the footer counts the sizes that change, and the button is on (8.3 changesListed)", () => {
+    const state = sheet([answered(notCleanPage(0, 60))]);
+    expect(state.footer).toMatchObject({ lines: [{ text: "These 60 sizes change as listed.", tone: "info" }], move: { shown: true, disabled: false }, press: SHOWN });
+    expect(linesOf(sheet([answered(notCleanPage(0, 1))]))).toEqual(["This size changes as listed."]);
+  });
+
+  it("a size would lose its price, or a listed size would stop updating: the button is off and the section above names them (D9a, D9b)", () => {
+    for (const blocked of [
+      blockedSizes,
+      { wouldLosePrice: list([]), wouldBlockListing: list([{ ...sizeRef(PENNY_100, "Pack of 100"), reasons: ["no_ebay_category" as const] }]), tooMuchText: false },
+      { ...blockedSizes, tooMuchText: true },
+    ]) {
+      const state = sheet([answered(notCleanPage(0, 3, PLAN_A, { blocked }))]);
+      expect(state.content?.blocked).not.toBeNull();
+      expect(state.footer).toMatchObject({ lines: [{ text: "Fix the sizes listed above first.", tone: "alert" }], move: { shown: true, disabled: true }, press: null });
+    }
+  });
+
+  it("too much text alone: the button is off with the text cap's words (D9c)", () => {
+    const state = sheet([answered(check({ state: "not_clean", blocked: { wouldLosePrice: list([]), wouldBlockListing: list([]), tooMuchText: true } }))]);
+    expect(state.footer).toMatchObject({ lines: [{ text: W.tooMuchText, tone: "alert" }], move: { shown: true, disabled: true }, press: null });
+  });
+
+  it("no right: off with the right's own line, or none when the banner says why (PLAN10 D3)", () => {
+    expect(sheet([answered(check())], OLDER_RULES_SHEET_OPENED, null, { right: { editable: false, reason: "loading" } }).footer)
+      .toMatchObject({ lines: [{ text: "Checking…", tone: "alert" }], move: { shown: true, disabled: true }, press: null });
+    // Paused account, .ops inactive or store blocked: the banner explains.
+    expect(sheet([answered(check())], OLDER_RULES_SHEET_OPENED, null, { right: { editable: false, reason: "banner" } }).footer)
+      .toMatchObject({ lines: [], move: { shown: true, disabled: true }, press: null });
+  });
+
+  it("saving: Moving them over…, locked, Esc keeps the sheet; another action or a page 0 read in flight keeps the button off too", () => {
+    expect(sheet([answered(check())], OLDER_RULES_SHEET_OPENED, null, { draft: moveDraft("saving"), busy: true }).footer).toMatchObject({
+      lines: [{ text: "Moving them over…", tone: "info" }], move: { shown: true, disabled: true }, checkAgain: { shown: false }, escapeKeepsOpen: true, press: null,
+    });
+    expect(sheet([answered(check())], OLDER_RULES_SHEET_OPENED, null, { busy: true }).footer).toMatchObject({ move: { disabled: true }, press: null });
+    expect(sheet([answered(check())], OLDER_RULES_SHEET_OPENED, null, { checking: true }).footer).toMatchObject({ move: { disabled: true }, press: null });
+    // Why a press didn't start (another listing action runs), said under the rest.
+    expect(linesOf(sheet([answered(check())], OLDER_RULES_SHEET_OPENED, null, { notStartedLine: DRAWER_WORDS.busy }))).toEqual([DRAWER_WORDS.busy]);
+  });
+
+  it("converted or replayed: Moved over., [Close] only, and it stays until the sheet closes, even after page 0 answers no older rules (CUX#11)", () => {
+    const moved = conversionOutcomeOf({ outcome: "converted" }, false);
+    expect(moved).toEqual({ kind: "moved", viewStale: false });
+    expect(conversionOutcomeOf({ outcome: "replayed" }, false)).toEqual(moved);
+    // An answer off the contract was a 2xx all the same: moved, with a stale view.
+    expect(conversionOutcomeOf(null, true)).toEqual({ kind: "moved", viewStale: true });
+    for (const pages of [[answered(check())], [answered(NO_OLDER_RULES)], [{ data: undefined }], [{ data: undefined, error: apiError(500, null) }]]) {
+      const state = sheet(pages, OLDER_RULES_SHEET_OPENED, moved);
+      expect(state.footer).toMatchObject({
+        lines: [{ text: "Moved over. Category settings can be saved now.", tone: "ok" }], move: { shown: false }, checkAgain: { shown: false },
+        reload: { shown: false }, escapeKeepsOpen: false, press: null,
+      });
+      // The prefix re-read finding the store moved is the move's own doing: no one-time re-read (11.5), nothing closes.
+      expect(state.rereadAfterMoved).toBe(false);
+      expect(state.close).toBe(false);
+    }
+    expect(sheet([{ data: undefined, error: apiError(422, "DROPSHIP_LISTING_SETTINGS_TOO_LARGE") }], OLDER_RULES_SHEET_OPENED, moved).close).toBe(false);
+    // A stale view says so, with [Reload].
+    expect(sheet([answered(NO_OLDER_RULES)], OLDER_RULES_SHEET_OPENED, { kind: "moved", viewStale: true }).footer).toMatchObject({
+      lines: [{ text: W.moved, tone: "ok" }, { text: "We couldn't load the latest view.", tone: "alert" }], reload: { label: "Reload", shown: true },
+    });
+  });
+
+  it("nothing_to_convert: Your rules have already been moved over., [Close] (8.3)", () => {
+    const already = conversionOutcomeOf({ outcome: "nothing_to_convert" }, false);
+    expect(already).toEqual({ kind: "already_moved", viewStale: false });
+    expect(sheet([answered(NO_OLDER_RULES)], OLDER_RULES_SHEET_OPENED, already).footer)
+      .toMatchObject({ lines: [{ text: "Your rules have already been moved over.", tone: "ok" }], move: { shown: false }, press: null });
+  });
+
+  it("while a confirmed move settles, page 0 finding no older rules asks for no re-read and a page refused as too large closes nothing", () => {
+    for (const draft of [moveDraft("saving"), moveDraft("saved")]) {
+      expect(sheet([answered(NO_OLDER_RULES)], OLDER_RULES_SHEET_OPENED, null, { draft }).rereadAfterMoved).toBe(false);
+      expect(sheet([{ data: undefined, error: apiError(422, "DROPSHIP_LISTING_SETTINGS_TOO_LARGE") }], OLDER_RULES_SHEET_OPENED, null, { draft }).close).toBe(false);
+      // Its own re-reads answer page by page: no reset and no "changed" line under it.
+      const mixed = sheet([answered(notCleanPage(0, 120, PLAN_A)), answered(notCleanPage(1, 120, PLAN_B))], OLDER_RULES_SHEET_OPENED, null, { draft });
+      expect(mixed).toMatchObject({ resetPages: false, changedLine: null });
+      expect(mixed.content?.changes?.rows).toHaveLength(50);
+    }
+    // A just-confirmed move's draft says nothing in the footer (its outcome shows), and a reopened sheet starts clean.
+    expect(sheet([answered(check())], OLDER_RULES_SHEET_OPENED, null, { draft: moveDraft("saved") }).footer).toMatchObject({ lines: [], move: { shown: true } });
+  });
+
+  it("a settled move's draft left closed from an earlier opening is not settling: a later opening reacts to its pages again", () => {
+    // Confirmed with failed re-reads (saved_view_stale), then the sheet closed: the draft stays, closed, past any tick.
+    const settled = reduceListingSettingsDraft(moveDraft("saving"), { type: "saved", key: KEY, nowMs: 1, viewStale: true });
+    const closed = reduceListingSettingsDraft(reduceListingSettingsDraft(settled, { type: "close" }), { type: "tick", nowMs: 10_000_000 });
+    expect(closed).toMatchObject({ phase: "saved_view_stale", open: false });
+    // Open (this opening's own move settling), it still keeps the sheet quiet.
+    expect(sheet([answered(NO_OLDER_RULES)], OLDER_RULES_SHEET_OPENED, null, { draft: settled }).rereadAfterMoved).toBe(false);
+
+    // Closed: page 0 finding the store moved elsewhere asks for the one-time re-read (11.5), and a too-large page closes the sheet.
+    expect(sheet([answered(NO_OLDER_RULES)], OLDER_RULES_SHEET_OPENED, null, { draft: closed }).rereadAfterMoved).toBe(true);
+    expect(sheet([{ data: undefined, error: apiError(422, "DROPSHIP_LISTING_SETTINGS_TOO_LARGE") }], OLDER_RULES_SHEET_OPENED, null,
+      { draft: closed }).close).toBe(true);
+    // A later page of another plan resets the pages and says so (CUX#12), as with no draft at all.
+    const mixed = [answered(notCleanPage(0, 120, PLAN_A)), answered(notCleanPage(1, 120, PLAN_B))];
+    const later = sheet(mixed, OLDER_RULES_SHEET_OPENED, null, { draft: closed });
+    expect(later).toMatchObject({ resetPages: true, changedLine: W.changed });
+    expect(later.footer.move.disabled).toBe(true);
+    expect({ ...later, footer: { ...later.footer } }).toEqual(sheet(mixed, OLDER_RULES_SHEET_OPENED, null, { draft: null }));
+  });
+
+  it("an unconfirmed move closed by Back, then Check again in the reopened sheet: the draft is opened, and the sheet stays quiet while it settles", () => {
+    // A first send that never committed (a 5xx with no code is a gateway's: uncertain), then Back: the draft is kept, closed (D21).
+    const uncertain = moveDraft(classifyWriteFailure("W11", apiError(504, null)));
+    const closed = reduceListingSettingsDraft(uncertain, { type: "close" })!;
+    expect(closed).toMatchObject({ phase: "uncertain", open: false, attempt: { key: KEY } });
+    const mixed = [answered(notCleanPage(0, 120, PLAN_A)), answered(notCleanPage(1, 120, PLAN_B))];
+    const tooLarge = [{ data: undefined, error: apiError(422, "DROPSHIP_LISTING_SETTINGS_TOO_LARGE") }];
+
+    // [Check again] (OlderRulesSheet's checkAgain): open (a locked draft of the same editor is kept, now open), then the
+    // start with the same key, as the runner's startSave makes it; then the confirmation.
+    const reopened = reduceListingSettingsDraft(closed, { type: "open", editor: CONVERSION_EDITOR_ID, place: W.sheetTitle, base: closed.value })!;
+    expect(reopened).toMatchObject({ phase: "uncertain", open: true, attempt: closed.attempt, value: closed.value });
+    const started = reduceListingSettingsDraft(reopened, { type: "startSave", attempt: closed.attempt! })!;
+    expect(started).toMatchObject({ phase: "saving", open: true, attempt: { key: KEY } });
+    const confirmed = reduceListingSettingsDraft(started, { type: "saved", key: KEY, nowMs: 2 })!;
+    for (const draft of [started, confirmed]) {
+      // Page 0 then finds no older rules: the move's own doing, so no one-time re-read (11.5) under it.
+      expect(sheet([answered(NO_OLDER_RULES)], OLDER_RULES_SHEET_OPENED, null, { draft }).rereadAfterMoved).toBe(false);
+      // A re-read refused as too large doesn't close the sheet before the vendor sees the outcome.
+      expect(sheet(tooLarge, OLDER_RULES_SHEET_OPENED, null, { draft }).close).toBe(false);
+      // Its own re-reads answer page by page: no reset, and no "changed" line beside the move.
+      expect(sheet(mixed, OLDER_RULES_SHEET_OPENED, null, { draft })).toMatchObject({ resetPages: false, changedLine: null });
+    }
+
+    // Why the sheet opens it: the lib counts only an open draft as this opening's move (MC1), so a start on the draft left
+    // closed would have the sheet react to the move's own re-reads.
+    const startedClosed = reduceListingSettingsDraft(closed, { type: "startSave", attempt: closed.attempt! })!;
+    expect(startedClosed).toMatchObject({ phase: "saving", open: false });
+    expect(sheet([answered(NO_OLDER_RULES)], OLDER_RULES_SHEET_OPENED, null, { draft: startedClosed }).rereadAfterMoved).toBe(true);
+  });
+
+  it("409 CHANGED: the reason's words; the button comes back with the new hashes once page 0 is read again, and waits while it is", () => {
+    for (const [reason, words] of [["settings_changed", W.changed], ["listed_changes_moved", W.listedChangesMoved]] as const) {
+      const draft = refusedMove(apiError(409, "DROPSHIP_LISTING_CONVERSION_CHANGED", { reason }));
+      expect(draft).toMatchObject({ phase: "conflict", attempt: null });
+      // Page 0 read again: the new plan's hashes, the words of the refusal above what the page says.
+      const reread = check({ planHash: PLAN_B });
+      expect(sheet([answered(reread)], OLDER_RULES_SHEET_OPENED, null, { draft }).footer).toMatchObject({
+        lines: [{ text: words, tone: "alert" }], move: { shown: true, disabled: false }, press: { planHash: PLAN_B, writesHash: WRITES },
+      });
+      expect(sheet([answered(check())], OLDER_RULES_SHEET_OPENED, null, { draft, checking: true }).footer).toMatchObject({ move: { disabled: true }, press: null });
+    }
+  });
+
+  it("422 blocks: the changed words, and page 0 read again shows the matching section with the button off (8.3)", () => {
+    for (const error of MOVE_REFUSALS.slice(2, 5)) {
+      const draft = refusedMove(error);
+      const page = notCleanPage(0, 3, PLAN_B, { blocked: error.code === "DROPSHIP_LISTING_SETTINGS_TOO_LARGE" ? { ...blockedSizes, wouldLosePrice: list([]), tooMuchText: true } : blockedSizes });
+      const state = sheet([answered(page)], OLDER_RULES_SHEET_OPENED, null, { draft });
+      expect(state.footer.lines[0]).toEqual({ text: W.changed, tone: "alert" });
+      expect(state.footer.lines[1].text).toBe(error.code === "DROPSHIP_LISTING_SETTINGS_TOO_LARGE" ? W.tooMuchText : "Fix the sizes listed above first.");
+      expect(state.footer).toMatchObject({ move: { disabled: true }, press: null });
+    }
+  });
+
+  it("422 TOO_LARGE store_text_limit is a block, not final: page 0 read again without it, with new hashes, turns the button on (D9c)", () => {
+    const draft = refusedMove(MOVE_REFUSALS[4]);
+    expect(draft).toMatchObject({ phase: "refused", code: "DROPSHIP_LISTING_SETTINGS_TOO_LARGE", message: W.changed, attempt: null });
+    const reread = check({ planHash: PLAN_B });
+    expect(sheet([answered(reread)], OLDER_RULES_SHEET_OPENED, null, { draft }).footer).toMatchObject({
+      lines: [{ text: W.changed, tone: "alert" }], move: { shown: true, disabled: false }, press: { planHash: PLAN_B, writesHash: WRITES },
+    });
+    // As WOULD_BE_LOST does in the same case.
+    expect(sheet([answered(reread)], OLDER_RULES_SHEET_OPENED, null, { draft: refusedMove(MOVE_REFUSALS[2]) }).footer)
+      .toMatchObject({ move: { disabled: false }, press: { planHash: PLAN_B, writesHash: WRITES } });
+  });
+
+  it("422 TOO_LARGE with no reason and a fatal 500: refused for good in this sheet, the button stays off (no Try again loop)", () => {
+    for (const [error, words] of [[MOVE_REFUSALS[5], W.tooLargeApply], [MOVE_REFUSALS[8], LISTING_SETTINGS_EDIT_WORDS.fatal]] as const) {
+      expect(sheet([answered(check())], OLDER_RULES_SHEET_OPENED, null, { draft: refusedMove(error) }).footer).toMatchObject({
+        lines: [{ text: words, tone: "alert" }], move: { shown: true, disabled: true }, checkAgain: { shown: false }, press: null,
+      });
+    }
+  });
+
+  it("503 CHECK_UNAVAILABLE, BUSY catalog_changed and 429: nothing was moved; the button is on with the same plan (its key is kept)", () => {
+    for (const [error, words] of [[MOVE_REFUSALS[6], W.checkUnavailableApply], [MOVE_REFUSALS[9], W.busyCatalogChanged], [MOVE_REFUSALS[10], LISTING_SETTINGS_SAVE_WORDS.rateLimited]] as const) {
+      const draft = refusedMove(error);
+      expect(draft.attempt?.key).toBe(KEY);
+      expect(sheet([answered(check())], OLDER_RULES_SHEET_OPENED, null, { draft }).footer).toMatchObject({
+        lines: [{ text: words, tone: "alert" }], move: { shown: true, disabled: false }, checkAgain: { shown: false }, press: SHOWN,
+      });
+    }
+  });
+
+  it("409 IDEMPOTENCY_CONFLICT: its words; page 0 read again, and the button on (the next press gets a new key)", () => {
+    const draft = refusedMove(MOVE_REFUSALS[7]);
+    expect(draft).toMatchObject({ phase: "refused", attempt: null });
+    expect(sheet([answered(check())], OLDER_RULES_SHEET_OPENED, null, { draft }).footer)
+      .toMatchObject({ lines: [{ text: W.idempotencyConflict, tone: "alert" }], move: { disabled: false }, press: SHOWN });
+  });
+
+  it("uncertain: We couldn't confirm the move., [Check again] instead of the button, locked, wherever page 0 stands (PLAN10 3.3 row 9, D21)", () => {
+    const draft = refusedMove(DROPPED);
+    expect(draft.phase).toBe("uncertain");
+    for (const pages of [[answered(check())], [answered(notCleanPage(0, 60))], [answered(NO_OLDER_RULES)], [{ data: undefined }], [{ data: undefined, error: apiError(500, null) }]]) {
+      expect(sheet(pages, OLDER_RULES_SHEET_OPENED, null, { draft }).footer).toMatchObject({
+        lines: [{ text: "We couldn't confirm the move.", tone: "alert" }], move: { shown: false, disabled: true },
+        checkAgain: { label: "Check again", shown: true, disabled: false }, escapeKeepsOpen: true, press: null,
+      });
+    }
+    expect(sheet([answered(check())], OLDER_RULES_SHEET_OPENED, null, { draft, busy: true }).footer.checkAgain).toMatchObject({ shown: true, disabled: true });
+  });
+
+  it("a block goes to the banner: Nothing was saved., and the button is on again once the right is", () => {
+    const draft = refusedMove(MOVE_REFUSALS[11]);
+    expect(draft.phase).toBe("blocked");
+    expect(sheet([answered(check())], OLDER_RULES_SHEET_OPENED, null, { draft, right: { editable: false, reason: "banner" } }).footer)
+      .toMatchObject({ lines: [{ text: "Nothing was saved.", tone: "alert" }], move: { disabled: true } });
+  });
+
+  it("another editor's draft is not the sheet's: its words never show here, only the page's counter keeps the button off", () => {
+    const other = reduceListingSettingsDraft(null, { type: "open", editor: productEditorId(11), place: "Penny Sleeves", base: { a: 1 } });
+    const failed = reduceListingSettingsDraft(reduceListingSettingsDraft(other, { type: "startSave", attempt: { signature: "x", key: "ls-product:1" } }),
+      { type: "failure", key: "ls-product:1", failure: { phase: "refused", message: "Product words.", code: "X", status: 422 } });
+    expect(sheet([answered(check())], OLDER_RULES_SHEET_OPENED, null, { draft: failed }).footer).toMatchObject({ lines: [], move: { disabled: false }, press: SHOWN });
+  });
+
+  it("one plan per screen: while a later page of another plan is on screen, the button waits for page 0 again (CUX#12)", () => {
+    expect(sheet([answered(notCleanPage(0, 120, PLAN_A)), answered(notCleanPage(1, 120, PLAN_B))]).footer).toMatchObject({ move: { disabled: true }, press: null });
+  });
+
+  it("goes back to page 0 alone after a refusal that says the plan moved, keeping the changed line as it was (8.3)", () => {
+    const more = olderRulesSheetSession(olderRulesSheetSession(OLDER_RULES_SHEET_OPENED, { type: "load_more" }), { type: "load_more" });
+    expect(olderRulesSheetSession(more, { type: "check_again" })).toEqual({ pageCount: 1, planChanged: false, movedReread: false });
+    expect(olderRulesSheetSession({ ...more, planChanged: true }, { type: "check_again" })).toEqual({ pageCount: 1, planChanged: true, movedReread: false });
+  });
+
+  it("never names an id or a code, whatever the answer", () => {
+    for (const error of [...MOVE_REFUSALS, DROPPED]) {
+      for (const text of linesOf(sheet([answered(check())], OLDER_RULES_SHEET_OPENED, null, { draft: refusedMove(error) }))) expectPlain(text);
+    }
   });
 });
 
@@ -900,12 +1277,27 @@ describe("the words (11.4)", () => {
       becomesHeading: "They become:",
       reasonsHeading: "Why some sizes would change",
       changesHeading: "Sizes that would change",
-      preview: "This is a preview. Nothing is moved yet.",
       changed: "Something changed since you opened this. Check the list again.",
+      // 11d (8.3, 11.4).
+      moveOver: "Move them over",
+      moving: "Moving them over…",
+      moved: "Moved over. Category settings can be saved now.",
+      alreadyMoved: "Your rules have already been moved over.",
+      listedChangesMoved: "Some changes in the list are different now, for example because a cost changed. Check the list again.",
+      idempotencyConflict: "Something changed since you last tried. Check the list again.",
+      checkUnavailableApply: "We couldn't read your costs just now. Nothing was moved. Try again in a minute.",
+      tooLargeApply: "Choose 10,000 or fewer sizes to move them over.",
+      uncertain: "We couldn't confirm the move.",
     });
+    expect(conversionChangesListedWords(12)).toBe("These 12 sizes change as listed.");
+    expect(conversionChangesListedWords(1_234)).toBe("These 1,234 sizes change as listed.");
+    expect(conversionChangesListedWords(1)).toBe("This size changes as listed.");
     for (const text of Object.values(LISTING_SETTINGS_CONVERSION_WORDS)) expectPlain(text);
-    // Nothing here moves rules yet (11b): no word offers it.
-    for (const text of Object.values(LISTING_SETTINGS_CONVERSION_WORDS)) expect(text).not.toMatch(/^Move them over$|Moved over|delete/i);
+    // The read-only preview's footer is gone (11d), and no word says the rules are deleted or removed.
+    expect(Object.values(LISTING_SETTINGS_CONVERSION_WORDS)).not.toContain("This is a preview. Nothing is moved yet.");
+    for (const text of Object.values(LISTING_SETTINGS_CONVERSION_WORDS)) expect(text).not.toMatch(/delete/i);
+    // A cost read failure on the move never reads "couldn't confirm" (CUX#4); nothing promised moved says "saved".
+    expect(W.checkUnavailableApply).not.toMatch(/confirm/i);
   });
 
   it("shows only plain words in every model the line and the sheet build", () => {
@@ -950,6 +1342,11 @@ describe("the words (11.4)", () => {
       olderRulesLineModel(summary({ price: 1 }), categoriesNone),
       olderRulesLineModel(summary({ price: 1 }, "too_large"), categoriesListed),
       olderRulesOpener(summary({ price: 1 })),
+      // 11d's footers: every outcome, failure and stop (8.3).
+      sheet([answered(check())], OLDER_RULES_SHEET_OPENED, { kind: "moved", viewStale: true }),
+      sheet([answered(NO_OLDER_RULES)], OLDER_RULES_SHEET_OPENED, { kind: "already_moved", viewStale: false }),
+      sheet([answered(notCleanPage(0, 12))], OLDER_RULES_SHEET_OPENED, null, { right: { editable: false, reason: "loading" }, notStartedLine: DRAWER_WORDS.busy }),
+      ...MOVE_REFUSALS.map((error) => sheet([answered(busy)], OLDER_RULES_SHEET_OPENED, null, { draft: refusedMove(error) })),
     ];
     const strings = models.flatMap((model) => shownStrings(model));
     expect(strings.length).toBeGreaterThan(60);

@@ -35,7 +35,9 @@ const TABLE: ReadonlyArray<[number, "permanent" | "transient" | "fatal", readonl
     // 9c: eBay refused the store's grant for a read the eBay values step makes.
     "DROPSHIP_EBAY_LISTING_SETUP_ACCESS_DENIED", "DROPSHIP_EBAY_STORE_CATEGORIES_ACCESS_DENIED", "DROPSHIP_EBAY_CATEGORIES_ACCESS_DENIED"]],
   [404, "permanent", ["DROPSHIP_STORE_CONNECTION_REQUIRED", "DROPSHIP_LISTING_SETTINGS_PRODUCT_NOT_FOUND",
-    "DROPSHIP_LISTING_SETTINGS_CATEGORY_NOT_FOUND", "DROPSHIP_LISTING_PRICE_NOT_AVAILABLE", "DROPSHIP_PRICING_REVIEW_NOT_FOUND"]],
+    "DROPSHIP_LISTING_SETTINGS_CATEGORY_NOT_FOUND", "DROPSHIP_LISTING_PRICE_NOT_AVAILABLE", "DROPSHIP_PRICING_REVIEW_NOT_FOUND",
+    // 11e1: the notice's [Got it] names no system conversion of this store.
+    "DROPSHIP_LISTING_CONVERSION_NOTICE_NOT_FOUND"]],
   [409, "permanent", ["DROPSHIP_IDEMPOTENCY_CONFLICT", "DROPSHIP_PRODUCT_LISTING_SETTINGS_VERSION_CONFLICT",
     "DROPSHIP_CATEGORY_LISTING_SETTINGS_VERSION_CONFLICT", "DROPSHIP_LISTING_PRICE_VERSION_CONFLICT", "DROPSHIP_LISTING_PRICES_MOVED",
     "DROPSHIP_LISTING_SETTINGS_OLDER_RULES_PRESENT",
@@ -130,9 +132,14 @@ describe("listing-settings write errors (plan PR 9, section 3.3)", () => {
     }
   });
 
-  it("maps the shared write code list's three conversion codes to 409, 503 and 422 (PR 11, plan 3.4)", () => {
+  it("maps the shared write code list's four conversion codes to 409, 503, 422 and 404 (PR 11, plan 3.4)", () => {
     expect([LISTING_SETTING_WRITE_ERROR_CODES.conversionChanged, LISTING_SETTING_WRITE_ERROR_CODES.conversionCheckUnavailable,
-      LISTING_SETTING_WRITE_ERROR_CODES.conversionWouldBlockListing].map((code) => LISTING_SETTING_WRITE_STATUS.get(code))).toEqual([409, 503, 422]);
+      LISTING_SETTING_WRITE_ERROR_CODES.conversionWouldBlockListing, LISTING_SETTING_WRITE_ERROR_CODES.conversionNoticeNotFound]
+      .map((code) => LISTING_SETTING_WRITE_STATUS.get(code))).toEqual([409, 503, 422, 404]);
+    // The notice's 404 is permanent and names no wait: a press on a notice that isn't there is never retried.
+    expect(listingSettingWriteErrorAnswer(new DropshipError(LISTING_SETTING_WRITE_ERROR_CODES.conversionNoticeNotFound, "Not found.", {
+      storeConnectionId: 22, conversionId: 41, retryable: false, classification: "permanent" })))
+      .toMatchObject({ status: 404, errorClass: "permanent", retryAfterSeconds: null });
     expect(Object.values(LISTING_RULES_CONVERSION_ERROR_CODES).every((code) => LISTING_SETTING_WRITE_STATUS.has(code))).toBe(true);
   });
 

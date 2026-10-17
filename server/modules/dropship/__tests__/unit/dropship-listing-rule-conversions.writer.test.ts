@@ -9,10 +9,13 @@ import {
 import { DropshipError } from "../../domain/errors";
 import {
   LISTING_RULE_CONVERSION_KEY_CONSTRAINT,
+  acknowledgeNoticeWithClient,
   findRuleConversionByKeyWithClient,
+  findUnseenSystemConversionWithClient,
   hasRuleConversionWithClient,
   insertRuleConversionWithClient,
   type ListingRuleConversionInsert,
+  type ListingRuleConversionNoticeAcknowledge,
 } from "../../infrastructure/dropship-listing-rule-conversions.writer";
 
 const NOW = new Date("2026-10-15T09:00:00.000Z");
@@ -35,6 +38,16 @@ const SQL = {
     + `RETURNING ${COLUMNS}`,
   findByKey: `SELECT ${COLUMNS} FROM dropship.dropship_listing_rule_conversions WHERE vendor_id = $1 AND idempotency_key = $2`,
   hasAny: "SELECT EXISTS (SELECT 1 FROM dropship.dropship_listing_rule_conversions WHERE store_connection_id = $1) AS found",
+  unseenSystem: `SELECT ${COLUMNS} FROM (SELECT ${COLUMNS} FROM dropship.dropship_listing_rule_conversions `
+    + "WHERE store_connection_id = $1 AND vendor_id = $2 ORDER BY id DESC LIMIT 1) latest "
+    + "WHERE actor_type = 'system' AND notice_seen_at IS NULL",
+  noticeSeen: "UPDATE dropship.dropship_listing_rule_conversions SET notice_seen_at = $4, notice_seen_by = $5 WHERE id = $1 "
+    + "AND vendor_id = $2 AND store_connection_id = $3 AND actor_type = 'system' AND notice_seen_at IS NULL RETURNING id",
+  systemExists: "SELECT EXISTS (SELECT 1 FROM dropship.dropship_listing_rule_conversions WHERE id = $1 AND vendor_id = $2 "
+    + "AND store_connection_id = $3 AND actor_type = 'system') AS found",
+  noticeAudit: "INSERT INTO dropship.dropship_audit_events (vendor_id, store_connection_id, entity_type, entity_id, event_type, "
+    + "actor_type, actor_id, severity, payload, created_at) VALUES ($1, $2, 'dropship_listing_rule_conversion', $3, "
+    + "'listing_rules_conversion_notice_seen', 'vendor', $4, 'info', $5::jsonb, $6)",
 };
 
 interface Call { sql: string; params: unknown[] }
@@ -237,6 +250,119 @@ describe("hasRuleConversionWithClient", () => {
     expect(strange.code).toBe("DROPSHIP_LISTING_SETTINGS_INVARIANT_FAILED");
     const client = new ScriptedClient();
     await caught(hasRuleConversionWithClient(asClient(client), { storeConnectionId: -1 }));
+    expect(client.calls).toEqual([]);
+  });
+});
+
+describe("findUnseenSystemConversionWithClient (11e1, plan 9.3)", () => {
+  it("reads the store's latest unseen system conversion in one indexed statement with no lock, and null when there is none", async () => {
+    const row = storedRow(systemInsert(), { id: "12" });
+    const client = new ScriptedClient((_sql, params) => params[0] === STORE ? [row] : []);
+
+    await expect(findUnseenSystemConversionWithClient(asClient(client), { vendorId: VENDOR, storeConnectionId: STORE }))
+      .resolves.toMatchObject({ id: 12, actorType: "system", noticeSeenAt: null, categoryCount: 2, productCount: 5 });
+    await expect(findUnseenSystemConversionWithClient(asClient(client), { vendorId: VENDOR, storeConnectionId: 45 })).resolves.toBeNull();
+
+    expect(client.calls).toEqual([
+      { sql: SQL.unseenSystem, params: [STORE, VENDOR] },
+      { sql: SQL.unseenSystem, params: [45, VENDOR] },
+    ]);
+    expect(client.calls.some((call) => /\bFOR (UPDATE|SHARE)\b|pg_advisory/.test(call.sql))).toBe(false);
+  });
+
+  it("never answers a row it did not ask for (a vendor's, one already seen, another store's or vendor's) as a notice", async () => {
+    for (const row of [
+      storedRow(vendorInsert()),
+      storedRow(systemInsert(), { notice_seen_at: SEEN, notice_seen_by: "member-1" }),
+      storedRow(systemInsert({ storeConnectionId: 45 })),
+      storedRow(systemInsert({ vendorId: 11 })),
+    ]) {
+      const error = await caught(findUnseenSystemConversionWithClient(asClient(new ScriptedClient(() => [row])),
+        { vendorId: VENDOR, storeConnectionId: STORE }));
+      expect(error.code).toBe("DROPSHIP_LISTING_SETTINGS_INVARIANT_FAILED");
+      expect(error.context).toMatchObject({ classification: "fatal" });
+    }
+  });
+
+  it("refuses a stored row that breaks the record's contract, and ids outside theirs before any SQL", async () => {
+    const broken = await caught(findUnseenSystemConversionWithClient(asClient(new ScriptedClient(() => [storedRow(systemInsert(),
+      { clean: false })])), { vendorId: VENDOR, storeConnectionId: STORE }));
+    expect(broken.context?.issues).toEqual(expect.arrayContaining([{ path: "clean", code: "custom" }]));
+    const client = new ScriptedClient();
+    for (const [input, field] of [
+      [{ vendorId: 0, storeConnectionId: STORE }, "vendorId"],
+      [{ vendorId: VENDOR, storeConnectionId: 2_147_483_648 }, "storeConnectionId"],
+      [{ vendorId: VENDOR, storeConnectionId: 1.5 }, "storeConnectionId"],
+    ] as const) {
+      const error = await caught(findUnseenSystemConversionWithClient(asClient(client), input));
+      expect(error.context).toMatchObject({ invalid: [field] });
+    }
+    expect(client.calls).toEqual([]);
+  });
+});
+
+describe("acknowledgeNoticeWithClient (11e1, plan 9.3)", () => {
+  const press = (overrides: Partial<ListingRuleConversionNoticeAcknowledge> = {}): ListingRuleConversionNoticeAcknowledge =>
+    ({ vendorId: VENDOR, storeConnectionId: STORE, conversionId: 12, actorId: "member-1", now: SEEN, ...overrides });
+
+  it("marks the notice seen with the guarded UPDATE and writes its audit row with before and after: acknowledged", async () => {
+    const client = new ScriptedClient((sql) => sql === SQL.noticeSeen ? [{ id: "12" }] : []);
+    await expect(acknowledgeNoticeWithClient(asClient(client), press())).resolves.toBe("acknowledged");
+    expect(client.calls).toEqual([
+      { sql: SQL.noticeSeen, params: [12, VENDOR, STORE, SEEN, "member-1"] },
+      { sql: SQL.noticeAudit, params: [VENDOR, STORE, "12", "member-1", JSON.stringify({
+        conversionId: 12,
+        before: { noticeSeenAt: null, noticeSeenBy: null },
+        after: { noticeSeenAt: SEEN.toISOString(), noticeSeenBy: "member-1" },
+      }), SEEN] },
+    ]);
+    // The guard trigger allows exactly this: only the two notice columns, from null, on a system row of this store.
+    expect(client.calls[0].sql).toMatch(/SET notice_seen_at = \$4, notice_seen_by = \$5 WHERE id = \$1 AND vendor_id = \$2 AND store_connection_id = \$3 AND actor_type = 'system' AND notice_seen_at IS NULL/);
+  });
+
+  it("answers already_seen, writing nothing, when the id names a system conversion of this store someone saw first", async () => {
+    const client = new ScriptedClient((sql) => sql === SQL.systemExists ? [{ found: true }] : []);
+    await expect(acknowledgeNoticeWithClient(asClient(client), press())).resolves.toBe("already_seen");
+    expect(client.calls).toEqual([
+      { sql: SQL.noticeSeen, params: [12, VENDOR, STORE, SEEN, "member-1"] },
+      { sql: SQL.systemExists, params: [12, VENDOR, STORE] },
+    ]);
+  });
+
+  it("answers not_found, writing nothing, when the id names no system conversion of this store (a vendor's, another store's, none)", async () => {
+    const client = new ScriptedClient((sql) => sql === SQL.systemExists ? [{ found: false }] : []);
+    await expect(acknowledgeNoticeWithClient(asClient(client), press({ conversionId: 13 }))).resolves.toBe("not_found");
+    expect(client.calls.map((call) => call.sql)).toEqual([SQL.noticeSeen, SQL.systemExists]);
+    expect(client.calls.some((call) => call.sql === SQL.noticeAudit)).toBe(false);
+  });
+
+  it("refuses an UPDATE that answers another row or two, and a lookup with no answer, as broken contracts", async () => {
+    for (const rows of [[{ id: "13" }], [{ id: "12" }, { id: "12" }]]) {
+      const client = new ScriptedClient((sql) => sql === SQL.noticeSeen ? rows : []);
+      const error = await caught(acknowledgeNoticeWithClient(asClient(client), press()));
+      expect(error.code).toBe("DROPSHIP_LISTING_SETTINGS_INVARIANT_FAILED");
+      expect(client.calls.some((call) => call.sql === SQL.noticeAudit)).toBe(false);
+    }
+    const silent = await caught(acknowledgeNoticeWithClient(asClient(new ScriptedClient(() => [])), press()));
+    expect(silent.context).toMatchObject({ conversionId: 12, classification: "fatal" });
+  });
+
+  it("passes a database failure through as it is, for the transaction's one mapping after rollback", async () => {
+    const guard = Object.assign(new Error("A system conversion's notice is marked seen once, and nothing else changes"), { code: "23514" });
+    const client = new ScriptedClient(() => guard);
+    await expect(acknowledgeNoticeWithClient(asClient(client), press())).rejects.toBe(guard);
+  });
+
+  it("refuses a press outside its contract before any SQL", async () => {
+    const client = new ScriptedClient();
+    for (const [overrides, field] of [
+      [{ vendorId: 0 }, "vendorId"], [{ storeConnectionId: -1 }, "storeConnectionId"], [{ conversionId: 0 }, "conversionId"],
+      [{ conversionId: Number.MAX_SAFE_INTEGER + 1 }, "conversionId"], [{ actorId: "  " }, "actorId"], [{ actorId: "m".repeat(256) }, "actorId"],
+      [{ now: new Date(Number.NaN) }, "now"],
+    ] as const) {
+      const error = await caught(acknowledgeNoticeWithClient(asClient(client), press(overrides as Partial<ListingRuleConversionNoticeAcknowledge>)));
+      expect(error.context).toMatchObject({ invalid: [field], classification: "fatal" });
+    }
     expect(client.calls).toEqual([]);
   });
 });

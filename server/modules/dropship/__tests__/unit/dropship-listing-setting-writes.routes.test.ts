@@ -13,7 +13,10 @@ import {
   saveProductsBulkInputSchema,
   saveSizePricesInputSchema,
 } from "../../../../../shared/dropship/listing-setting-writes";
-import { listingRulesConversionApplyInputSchema } from "../../../../../shared/dropship/listing-rules-conversion";
+import {
+  listingRulesConversionApplyInputSchema,
+  listingRulesConversionNoticeAcknowledgeInputSchema,
+} from "../../../../../shared/dropship/listing-rules-conversion";
 import { listingSettingStoreIdSchema, parseListingSettingInput } from "../../application/dropship-listing-setting-write-support";
 import { DropshipError } from "../../domain/errors";
 import type { ListingSettingWriteServices } from "../../infrastructure/dropship-listing-setting-writes.factory";
@@ -206,6 +209,23 @@ class FakeConversion {
     // The real service's parsing: the vendor's input is refused as DROPSHIP_LISTING_SETTINGS_INVALID_INPUT.
     parseListingSettingInput(listingSettingStoreIdSchema, storeId);
     parseListingSettingInput(listingRulesConversionApplyInputSchema, input);
+    return this.result;
+  }
+}
+
+const NOTICE_PATH = "/api/dropship/listings/stores/22/listing-settings/conversion/notice/acknowledge";
+const NOTICE_ROUTE = "/api/dropship/listings/stores/:storeConnectionId/listing-settings/conversion/notice/acknowledge";
+
+/** The notice's [Got it] service (11e1): the real one's parsing, then what the test scripts. */
+class FakeConversionNotice {
+  calls: Array<{ memberId: string; storeId: unknown; input: unknown }> = [];
+  failure: unknown = null;
+  result: unknown = { outcome: "acknowledged" };
+  async acknowledgeForMember(memberId: string, storeId: unknown, input: unknown) {
+    this.calls.push({ memberId, storeId, input });
+    parseListingSettingInput(listingSettingStoreIdSchema, storeId);
+    parseListingSettingInput(listingRulesConversionNoticeAcknowledgeInputSchema, input);
+    if (this.failure) throw this.failure;
     return this.result;
   }
 }
@@ -1571,11 +1591,142 @@ describe("POST …/listing-settings/conversion/apply (PR 11, plan 7.B.2)", () =>
   });
 });
 
+describe("POST …/listing-settings/conversion/notice/acknowledge (11e1, plan 9.2, 9.3)", () => {
+  let sizePrices: FakeSizePrices;
+  let products: FakeProducts;
+  let conversion: FakeConversion;
+  let notice: FakeConversionNotice;
+  let server: { url: string; close: () => Promise<void> } | null;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    sizePrices = new FakeSizePrices();
+    products = new FakeProducts();
+    conversion = new FakeConversion();
+    notice = new FakeConversionNotice();
+    server = null;
+  });
+  afterEach(async () => {
+    await server?.close();
+  });
+
+  const start = async () => {
+    server = await startServer(buildApp(sizePrices, products, undefined, undefined, undefined, conversion, notice));
+  };
+  const post = (payload: unknown, options: { member?: string | null; path?: string } = {}) =>
+    fetch(`${server!.url}${options.path ?? NOTICE_PATH}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...(options.member === null ? {} : { "X-Test-Member": options.member ?? "member-1" }) },
+      body: JSON.stringify(payload),
+    });
+
+  it("refuses a request without a dropship session with 401, before the limiter and the service", async () => {
+    await start();
+    for (let index = 0; index < LISTING_SETTING_SINGLE_WRITES_PER_MINUTE + 1; index += 1) {
+      expect((await post({ conversionId: 41 }, { member: null })).status).toBe(401);
+    }
+    expect(notice.calls).toEqual([]);
+    expect((await post({ conversionId: 41 })).status).toBe(200);
+  });
+
+  it("passes the member, the parsed store id and the body to the notice service only, never cached; acknowledged or already seen", async () => {
+    await start();
+    const response = await post({ conversionId: 41 });
+    expect(response.status).toBe(200);
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    expect(await response.json()).toEqual({ outcome: "acknowledged" });
+    expect(notice.calls).toEqual([{ memberId: "member-1", storeId: 22, input: { conversionId: 41 } }]);
+    expect([conversion.calls, products.calls, sizePrices.calls]).toEqual([[], [], []]);
+    notice.result = { outcome: "already_seen" };
+    expect(await (await post({ conversionId: 41 })).json()).toEqual({ outcome: "already_seen" });
+  });
+
+  it("answers an answer off its contract with the fixed 500, logged at ERROR", async () => {
+    await start();
+    for (const broken of [{ outcome: "seen" }, { outcome: "acknowledged", conversionId: 41 }, {}]) {
+      notice.result = broken;
+      const response = await post({ conversionId: 41 });
+      expect(response.status).toBe(500);
+      expect((await response.json()).error.code).toBe("DROPSHIP_LISTING_SETTINGS_INTERNAL_ERROR");
+    }
+    expect(logger.error).toHaveBeenCalledWith("dropship.listing_settings.write_failed", expect.objectContaining({ status: 500,
+      path: NOTICE_ROUTE, conversion_id: 41 }));
+  });
+
+  it.each([
+    ["no conversion id", {}],
+    ["a conversion id of 0", { conversionId: 0 }],
+    ["a conversion id as text", { conversionId: "41" }],
+    ["a request key (none is taken: idempotent by state)", { conversionId: 41, idempotencyKey: "ls-notice:7f9c2ba4" }],
+  ])("answers %s with 400, logged at DEBUG", async (_label, payload) => {
+    await start();
+    const response = await post(payload);
+    expect(response.status).toBe(400);
+    expect((await response.json()).error.code).toBe("DROPSHIP_LISTING_SETTINGS_INVALID_INPUT");
+    expect(logger.debug).toHaveBeenCalledWith("dropship.listing_settings.write_refused", expect.objectContaining({ status: 400 }));
+  });
+
+  it.each([
+    [new DropshipError("DROPSHIP_LISTING_CONVERSION_NOTICE_NOT_FOUND", "That note was not found for this store. Reload the page.", {
+      storeConnectionId: 22, conversionId: 41, retryable: false, classification: "permanent" }), 404,
+    { storeConnectionId: 22, retryable: false, classification: "permanent" }],
+    [new DropshipError("DROPSHIP_STORE_CONNECTION_REQUIRED", "Store connection was not found.", { storeConnectionId: 22,
+      retryable: false, classification: "permanent" }), 404, { storeConnectionId: 22, retryable: false, classification: "permanent" }],
+  ])("answers %s with its status and the public context only, logged at DEBUG with the conversion id", async (error, status, context) => {
+    await start();
+    notice.failure = error;
+    const response = await post({ conversionId: 41 });
+    expect(response.status).toBe(status);
+    expect(await response.json()).toEqual({ error: { code: error.code, message: error.message, context } });
+    expect(logger.debug).toHaveBeenCalledWith("dropship.listing_settings.write_refused", expect.objectContaining({
+      outcome: "refused", error_code: error.code, error_class: "permanent", status, store_connection_id: 22, conversion_id: 41,
+      actor_id: "member-1", path: NOTICE_ROUTE }));
+    expect(logger.warn).not.toHaveBeenCalled();
+  });
+
+  it("answers a lost connection as the retryable 503 with Retry-After, logged at WARN", async () => {
+    await start();
+    notice.failure = new DropshipError("DROPSHIP_LISTING_SETTINGS_BUSY", "Listing settings couldn't be reached right now. Try again in a few seconds.",
+      { failure: "08006", retryable: true, classification: "transient" });
+    const response = await post({ conversionId: 41 });
+    expect(response.status).toBe(503);
+    expect(response.headers.get("retry-after")).toBe("5");
+    expect(logger.warn).toHaveBeenCalledWith("dropship.listing_settings.write_deferred", expect.objectContaining({ status: 503 }));
+  });
+
+  it("keeps the global 100 KB parser (one id): it is not in the 1 MiB table", async () => {
+    await start();
+    expect(isDropshipBulkJsonRequest("POST", NOTICE_PATH)).toBe(false);
+    const large = await post({ conversionId: 41, padding: "x".repeat(200 * 1024) });
+    expect(large.status).toBe(413);
+    expect(notice.calls).toEqual([]);
+  });
+
+  it("spends the single budget (60 a minute) it shares with W5, not the bulk one W11's apply spends", async () => {
+    await start();
+    expect(LISTING_SETTING_SINGLE_WRITES_PER_MINUTE).toBe(60);
+    const half = LISTING_SETTING_SINGLE_WRITES_PER_MINUTE / 2;
+    for (let index = 0; index < half; index += 1) {
+      expect((await post({ conversionId: 41 })).status).toBe(200);
+      expect((await fetch(`${server!.url}${PRODUCT_PATH}`, { method: "PUT", headers: { "Content-Type": "application/json",
+        "X-Test-Member": "member-1" }, body: JSON.stringify(productBody()) })).status).toBe(200);
+    }
+    const limited = await post({ conversionId: 41 });
+    expect(limited.status).toBe(429);
+    expect((await limited.json()).error.code).toBe("DROPSHIP_LISTING_SETTINGS_RATE_LIMITED");
+    expect(notice.calls).toHaveLength(half);
+    // The bulk budget is another counter, and another member has their own.
+    expect((await fetch(`${server!.url}${CONVERSION_PATH}`, { method: "POST", headers: { "Content-Type": "application/json",
+      "X-Test-Member": "member-1" }, body: JSON.stringify(conversionBody()) })).status).toBe(200);
+    expect((await post({ conversionId: 41 }, { member: "member-2" })).status).toBe(200);
+  });
+});
+
 /**
  * Every writer the router takes, with the given fakes; any other member is a
  * stub that throws, so a route reaching the wrong service fails here. Each
  * later sub-PR adds its member (plan 6.1, C-feas-6); 9f adds `priceChanges`,
- * 9g `categoryMoves`, PR 11 `conversion`.
+ * 9g `categoryMoves`, PR 11 `conversion`, 11e1 `conversionNotice`.
  */
 function writeServices(overrides: Partial<ListingSettingWriteServices>): ListingSettingWriteServices {
   const unexpected = (name: string) => ({
@@ -1593,13 +1744,15 @@ function writeServices(overrides: Partial<ListingSettingWriteServices>): Listing
     priceChanges: unexpected("priceChanges") as unknown as ListingSettingWriteServices["priceChanges"],
     categoryMoves: unexpected("categoryMoves") as unknown as ListingSettingWriteServices["categoryMoves"],
     conversion: unexpected("conversion") as unknown as ListingSettingWriteServices["conversion"],
+    conversionNotice: unexpected("conversionNotice") as unknown as ListingSettingWriteServices["conversionNotice"],
     ...overrides,
   };
 }
 
 /** The W8 cases pass no products fake, so a W8 route that reached the W5 service would fail on its throwing stub. */
 function buildApp(sizePrices: FakeSizePrices, products?: FakeProducts, categories?: FakeCategories,
-  priceChanges?: FakePriceChanges, categoryMoves?: FakeCategoryMoves, conversion?: FakeConversion): express.Express {
+  priceChanges?: FakePriceChanges, categoryMoves?: FakeCategoryMoves, conversion?: FakeConversion,
+  conversionNotice?: FakeConversionNotice): express.Express {
   const app = express();
   app.use((req: Request, _res: Response, next: NextFunction) => {
     const memberId = req.header("X-Test-Member");
@@ -1615,6 +1768,7 @@ function buildApp(sizePrices: FakeSizePrices, products?: FakeProducts, categorie
     ...(priceChanges ? { priceChanges: priceChanges as unknown as ListingSettingWriteServices["priceChanges"] } : {}),
     ...(categoryMoves ? { categoryMoves: categoryMoves as unknown as ListingSettingWriteServices["categoryMoves"] } : {}),
     ...(conversion ? { conversion: conversion as unknown as ListingSettingWriteServices["conversion"] } : {}),
+    ...(conversionNotice ? { conversionNotice: conversionNotice as unknown as ListingSettingWriteServices["conversionNotice"] } : {}),
   }));
   return app;
 }

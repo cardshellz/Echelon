@@ -1,3 +1,5 @@
+import { LISTING_RULES_CONVERSION_ERROR_CODES } from "@shared/dropship/listing-rules-conversion";
+import { LISTING_SETTING_BUSY_REASONS } from "@shared/dropship/listing-setting-writes";
 import { DropshipApiError } from "./dropship-ops-surface";
 import { LISTING_SETUP_RELOAD_MESSAGE, listingSetupSaveErrorMessage } from "./dropship-ebay-listing-setup";
 import {
@@ -6,6 +8,7 @@ import {
   LISTING_SETTINGS_BULK_WORDS,
   LISTING_SETTINGS_CATEGORY_PRICE_WORDS,
   LISTING_SETTINGS_CATEGORY_WORDS,
+  LISTING_SETTINGS_CONVERSION_WORDS,
   LISTING_SETTINGS_EDIT_WORDS,
   LISTING_SETTINGS_PRICE_CHECK_WORDS,
   LISTING_SETTINGS_SIZE_PRICES_WORDS,
@@ -79,10 +82,13 @@ export const STORE_DEFAULTS_CARD_WORDS = Object.freeze({
  * products" (`updatedProducts`, a "Got it" in flight; it holds no change,
  * like `shipFrom`; plan PR 10, 10.2, D16), the category editor of one Card
  * Shellz category (`category:<id>`; plan PR 10, 8.2, D16; its price check
- * lives inside it too, 9.2), or "Give these sizes a price" (`sizePrices`,
- * typed prices for many sizes; plan PR 10, 9.2, D16).
+ * lives inside it too, 9.2), "Give these sizes a price" (`sizePrices`,
+ * typed prices for many sizes; plan PR 10, 9.2, D16), or "Your older group
+ * rules" (`convert`, a [Move them over] in flight; it holds no change, like
+ * `updatedProducts`; plan PR 11, 8.2).
  */
-export type EditorId = StoreDefaultField | "shipFrom" | `product:${number}` | "bulk" | "updatedProducts" | `category:${number}` | "sizePrices";
+export type EditorId =
+  | StoreDefaultField | "shipFrom" | `product:${number}` | "bulk" | "updatedProducts" | `category:${number}` | "sizePrices" | "convert";
 
 /** "Set for selected"'s editor id: one sheet for the ticked products (plan PR 10, 6.2, D16). */
 export const BULK_EDITOR_ID = "bulk" satisfies EditorId;
@@ -98,6 +104,16 @@ export const UPDATED_PRODUCTS_EDITOR_ID = "updatedProducts" satisfies EditorId;
 
 /** "Give these sizes a price"'s editor id (plan PR 10, 9.2, D16): one sheet, the typed prices of up to 200 sizes in one draft. */
 export const SIZE_PRICES_EDITOR_ID = "sizePrices" satisfies EditorId;
+
+/**
+ * "Your older group rules"' editor id (plan PR 11, 8.2; the W13 pattern
+ * above): the draft holds the move being sent, as base and value alike (the
+ * two hashes of the page 0 the vendor pressed [Move them over] on), never a
+ * change, so another editor opens over it. Its key goes with it then; that is
+ * safe, because the server recomputes the plan under the store lock and
+ * answers `nothing_to_convert` for a store already moved (plan 8.4).
+ */
+export const CONVERSION_EDITOR_ID = "convert" satisfies EditorId;
 
 /** The drawer's editor id for one product. Refuses an id that is not a positive whole number. */
 export function productEditorId(productId: number): EditorId {
@@ -213,6 +229,9 @@ export const LISTING_SETTINGS_KEY_PREFIXES = Object.freeze({
   categorySettings: "ls-cat",
   // W8, "Give these sizes a price": up to 200 typed prices in one request; one key per intent, reused on Check again (plan PR 10, D5).
   sizePrices: "ls-size-prices",
+  // W11, [Move them over]: one key per plan shown (its two hashes), reused on Check again (plan PR 11, 8.2, D12). The server
+  // refuses the system's `rules-conversion:` and the revisions' `lc:` prefixes (listing-rules-conversion-keys.ts).
+  conversion: "ls-convert",
 } as const);
 
 /** The words every editor shares (R:535-545). */
@@ -524,11 +543,12 @@ function answersAttempt(draft: ListingSettingsDraft | null, key: string): draft 
  * apply is keyed), W13 "Got it" for products Card Shellz moved ("Card Shellz
  * updated products", plan PR 10, 10.4), W12 one Card Shellz category's
  * settings with "Also clear theirs" (the category editor, plan PR 10, 8.5),
- * W8 typed prices for many sizes ("Give these sizes a price", plan PR 10, 9.5).
+ * W8 typed prices for many sizes ("Give these sizes a price", plan PR 10, 9.5),
+ * W11 moving the older group rules over ([Move them over], plan PR 11, 8.3).
  * W7's `category_price` kind takes the category's rows too (plan 9.4), told
  * apart by `ClassifyWriteFailureOptions.priceCheckKind`.
  */
-export type ListingSettingsWriter = "W1" | "W2" | "W3" | "W4" | "W5" | "W6" | "W7" | "W8" | "W9" | "W10" | "W12" | "W13";
+export type ListingSettingsWriter = "W1" | "W2" | "W3" | "W4" | "W5" | "W6" | "W7" | "W8" | "W9" | "W10" | "W11" | "W12" | "W13";
 
 export interface WriteFailure {
   phase: WriteFailurePhase;
@@ -773,8 +793,8 @@ function refusesAnOlderRule(error: DropshipApiError, pickedCategoryId: string | 
 // Failed saves of the PR 9 writers (plan PR 10, 3.3, 4.7, D7, D8)
 // ---------------------------------------------------------------------------
 
-type Pr9Writer = "W5" | "W6" | "W7" | "W8" | "W12" | "W13";
-const PR9_WRITERS: ReadonlySet<ListingSettingsWriter> = new Set<Pr9Writer>(["W5", "W6", "W7", "W8", "W12", "W13"]);
+type Pr9Writer = "W5" | "W6" | "W7" | "W8" | "W11" | "W12" | "W13";
+const PR9_WRITERS: ReadonlySet<ListingSettingsWriter> = new Set<Pr9Writer>(["W5", "W6", "W7", "W8", "W11", "W12", "W13"]);
 
 function isPr9Writer(writer: ListingSettingsWriter): writer is Pr9Writer {
   return PR9_WRITERS.has(writer);
@@ -856,6 +876,27 @@ const PR9_WRITER_CODES: Readonly<Record<Pr9Writer, Pr9WriterCodes>> = {
       "DROPSHIP_EBAY_FULFILLMENT_POLICY_INCOMPATIBLE", "DROPSHIP_EBAY_CATEGORY_RULE_INVALID", "DROPSHIP_EBAY_STORE_CATEGORY_INVALID",
     ]),
   },
+  W11: {
+    // The plan recomputed under the store lock is not the one shown (plan D1, 3.3): `context.reason` says whether the
+    // writes moved or only the listed changes did. A conflict, never "Load latest": the sheet reads page 0 again and the
+    // vendor presses once more on the new hashes (plan 8.3).
+    conflict: new Set([LISTING_RULES_CONVERSION_ERROR_CODES.changed]),
+    cannotHappen: new Set([
+      // The move names no price of its own: a size that would lose a price, or leave a limit, is WOULD_BE_LOST (D9a), and
+      // no rule, release, review or size price is asked for (`S/application/dropship-listing-rules-conversion-service.ts`).
+      "DROPSHIP_LISTING_PRICE_OUTSIDE_LIMIT", "DROPSHIP_PRICING_RULES_NOT_CONFIGURED", "DROPSHIP_LISTING_PRICE_RELEASE_LIMIT",
+      "DROPSHIP_LISTING_PRICES_MOVED", "DROPSHIP_LISTING_PRICE_VERSION_CONFLICT", "DROPSHIP_LISTING_PRICE_NOT_AVAILABLE",
+      "DROPSHIP_PRICING_REVIEW_NOT_FOUND",
+      // A writer's version conflict under the store lock is a broken contract (D24: INVARIANT_FAILED); the move removes the
+      // older rules rather than meet them, names no product or category by path, and its text cap is TOO_LARGE (D9c).
+      "DROPSHIP_PRODUCT_LISTING_SETTINGS_VERSION_CONFLICT", "DROPSHIP_CATEGORY_LISTING_SETTINGS_VERSION_CONFLICT",
+      "DROPSHIP_LISTING_SETTINGS_OLDER_RULES_PRESENT", "DROPSHIP_LISTING_SETTINGS_BULK_TOO_LARGE",
+      "DROPSHIP_LISTING_SETTINGS_CATEGORY_NOT_FOUND", "DROPSHIP_LISTING_SETTINGS_PRODUCT_NOT_FOUND",
+      // The move asks eBay nothing (plan D13: no eBay call): no eBay value can be refused, no sign-in asked.
+      "DROPSHIP_LISTING_SETTINGS_EBAY_SIGN_IN_REQUIRED", "DROPSHIP_EBAY_LISTING_SETUP_SELECTION_INVALID",
+      "DROPSHIP_EBAY_FULFILLMENT_POLICY_INCOMPATIBLE", "DROPSHIP_EBAY_CATEGORY_RULE_INVALID", "DROPSHIP_EBAY_STORE_CATEGORY_INVALID",
+    ]),
+  },
   W12: {
     // The category's compare-and-set (`S/application/dropship-listing-category-settings-service.ts` saveCategory), and the
     // "Also clear theirs" set: a product moved in or out, or whose own values changed, since the editor opened
@@ -911,6 +952,8 @@ const BUSY_CODE = "DROPSHIP_LISTING_SETTINGS_BUSY";
 /** BUSY reasons that are refused before anything is written: the same key may be sent again (D7a). */
 const BUSY_HEAVY_WRITE = "heavy_write_in_progress";
 const BUSY_REQUEST_KEY_CHANGED = "request_key_changed";
+/** W11's own busy answer (11c): Card Shellz moved a chosen size, product or category between its reads and its locks; nothing was written. */
+const BUSY_CATALOG_CHANGED = LISTING_SETTING_BUSY_REASONS.catalogChanged;
 /**
  * 500s with their own code: a broken contract or a replay that can't be
  * answered. The same key would repeat them forever, so they are final (D7c);
@@ -963,6 +1006,11 @@ const PRICING_REVIEW_NOT_FOUND_CODE = "DROPSHIP_PRICING_REVIEW_NOT_FOUND";
 /** W8's own refusals (plan 9.5; `S/application/dropship-listing-size-prices-service.ts`). */
 const PRICE_OUTSIDE_LIMIT_CODE = "DROPSHIP_LISTING_PRICE_OUTSIDE_LIMIT";
 const PRICE_NOT_AVAILABLE_CODE = "DROPSHIP_LISTING_PRICE_NOT_AVAILABLE";
+/** W11's own refusals (plan PR 11, 3.4, 8.3; `S/application/dropship-listing-rules-conversion-service.ts`). */
+const CONVERSION_CHECK_UNAVAILABLE_CODE = LISTING_RULES_CONVERSION_ERROR_CODES.checkUnavailable;
+const CONVERSION_WOULD_BLOCK_LISTING_CODE = LISTING_RULES_CONVERSION_ERROR_CODES.wouldBlockListing;
+/** `context.reason` of W11's 409 CHANGED when only the listed changes moved (the writes are the same; CUX#13). */
+const CONVERSION_LISTED_CHANGES_MOVED = "listed_changes_moved";
 
 /** A whole number the answer's context carries under `key`, else null. */
 function contextCount(error: DropshipApiError, key: string): number | null {
@@ -997,9 +1045,12 @@ function conflictCountOf(error: DropshipApiError): number | null {
  */
 function classifyPr9WriteFailure(writer: Pr9Writer, error: unknown, options: ClassifyWriteFailureOptions): WriteFailure {
   const words = LISTING_SETTINGS_EDIT_WORDS;
+  // W11 is a move, not a save (plan 11.4 `uncertain`): "We couldn't confirm the move."
+  const conversion = writer === "W11";
+  const uncertainWords = conversion ? LISTING_SETTINGS_CONVERSION_WORDS.uncertain : LISTING_SETTINGS_SAVE_WORDS.uncertain;
   if (!(error instanceof DropshipApiError)) {
     // No answer arrived (row 9): the save may have happened.
-    return { phase: "uncertain", message: LISTING_SETTINGS_SAVE_WORDS.uncertain, code: null, status: null, fields: [] };
+    return { phase: "uncertain", message: uncertainWords, code: null, status: null, fields: [] };
   }
   const { status, code } = error;
   // W7's category kind takes the category's rows (plan 9.4); every other call is its writer's own.
@@ -1015,7 +1066,9 @@ function classifyPr9WriteFailure(writer: Pr9Writer, error: unknown, options: Cla
     const reason = contextReason(error);
     if (reason === BUSY_HEAVY_WRITE) return failure("unreachable", words.busyHeavy);
     if (reason === BUSY_REQUEST_KEY_CHANGED) return failure("unreachable", words.busyKeyChanged);
-    return failure("uncertain", LISTING_SETTINGS_SAVE_WORDS.uncertain);
+    // W11 (11c): refused before any write, so "nothing moved; send the same key again", never "We couldn't confirm".
+    if (conversion && reason === BUSY_CATALOG_CHANGED) return failure("unreachable", LISTING_SETTINGS_CONVERSION_WORDS.busyCatalogChanged);
+    return failure("uncertain", uncertainWords);
   }
   if ((status === HTTP_BAD_GATEWAY || status === HTTP_SERVICE_UNAVAILABLE) && code !== null && CARD_SHELLZ_SHIPPING_CODE.test(code)) {
     // Card Shellz shipping, read before the write (3.3 row 6): its own words and a reference.
@@ -1025,14 +1078,24 @@ function classifyPr9WriteFailure(writer: Pr9Writer, error: unknown, options: Cla
     // eBay runs before the write transaction (3.3 row 7).
     return failure("unreachable", LISTING_SETTINGS_SAVE_WORDS.unreachable);
   }
+  // W11's cost read failed (plan 3.6, CUX#4): the plan could not be compared, nothing was written, so the same key may be
+  // sent again; named before the 5xx fall-through, so it never reads "We couldn't confirm".
+  if (conversion && status === HTTP_SERVICE_UNAVAILABLE && code === CONVERSION_CHECK_UNAVAILABLE_CODE) {
+    return failure("unreachable", LISTING_SETTINGS_CONVERSION_WORDS.checkUnavailableApply);
+  }
   if (status === HTTP_INTERNAL_ERROR && code !== null && FATAL_CODES.has(code)) return failure("refused", words.fatal);
-  if (status >= 500) return failure("uncertain", LISTING_SETTINGS_SAVE_WORDS.uncertain);
-  if (status < 400) return failure("uncertain", LISTING_SETTINGS_SAVE_WORDS.uncertain);
+  if (status >= 500) return failure("uncertain", uncertainWords);
+  if (status < 400) return failure("uncertain", uncertainWords);
 
   // A 4xx this writer can't answer to a request this page builds (3.3 row 22): refused, never unconfirmed, and never
   // worded as another writer's refusal (W13 asks eBay nothing, so "pick another policy" would send the vendor nowhere).
   if (code !== null && codes.cannotHappen.has(code)) return failure("refused", words.invalid);
   if (code !== null && codes.conflict.has(code)) {
+    // W11 (plan 8.3, CUX#13): the writes moved, or only the listed changes did; page 0 is read again either way.
+    if (conversion) {
+      const reason = contextReason(error);
+      return failure("conflict", reason === CONVERSION_LISTED_CHANGES_MOVED ? LISTING_SETTINGS_CONVERSION_WORDS.listedChangesMoved : LISTING_SETTINGS_CONVERSION_WORDS.changed);
+    }
     // W6: "3 of the selected products changed in another window." (plan 6.5), as the server counts them.
     const count = writer === "W6" ? conflictCountOf(error) : null;
     // W12, and W7's category kind: the "Also clear theirs" set moved (plan 8.6, 9.4); the category's own conflict keeps the shared words.
@@ -1046,7 +1109,10 @@ function classifyPr9WriteFailure(writer: Pr9Writer, error: unknown, options: Cla
     }
     return failure("conflict", count === null ? LISTING_SETTINGS_SAVE_WORDS.conflict : bulkConflictWords(count));
   }
-  if (code === IDEMPOTENCY_CONFLICT_CODE) return failure("refused", LISTING_SETTINGS_SAVE_WORDS.keyReused);
+  // W11 (plan 8.3): the key went with another plan or store; page 0 is read again and the next press gets a new key.
+  if (code === IDEMPOTENCY_CONFLICT_CODE) {
+    return failure("refused", conversion ? LISTING_SETTINGS_CONVERSION_WORDS.idempotencyConflict : LISTING_SETTINGS_SAVE_WORDS.keyReused);
+  }
   if (code !== null && OTHER_SITE_CODES.has(code)) return failure("blocked", LISTING_SETTINGS_SAVE_WORDS.blocked);
   if (status === HTTP_CONFLICT && code !== null && CARD_SHELLZ_SHIPPING_CODE.test(code)) {
     // Card Shellz can't back a new shipping policy yet (3.3 row 11): plain words and a reference.
@@ -1068,6 +1134,11 @@ function classifyPr9WriteFailure(writer: Pr9Writer, error: unknown, options: Cla
       return failure("refused", contextReason(error) === "too_long" ? words.shelfTooLong : LISTING_SETTINGS_SAVE_WORDS.shelfGone,
         ["storeShelf"]);
     case TOO_LARGE_CODE:
+      // W11 (plan 8.3): the store text cap is a block the dry run shows (D9c), so page 0 is read again and its section says
+      // why; with no reason, more than 10,000 sizes are chosen now. Refused either way, never the banner (D8).
+      if (conversion) {
+        return failure("refused", contextReason(error) === STORE_TEXT_LIMIT ? LISTING_SETTINGS_CONVERSION_WORDS.changed : LISTING_SETTINGS_CONVERSION_WORDS.tooLargeApply);
+      }
       // W7 with no reason: more than 10,000 sizes (P35, plan 7.5); the store text cap keeps its reason and words. The
       // category kind names step 1 (plan 9.4), as its `tooHeavy` does: the category's products are fixed there.
       if (writer === "W7" && contextReason(error) !== STORE_TEXT_LIMIT) {
@@ -1097,7 +1168,14 @@ function classifyPr9WriteFailure(writer: Pr9Writer, error: unknown, options: Cla
       const releaseCount = contextCount(error, "releaseCount");
       return failure("refused", maxReleases !== null && releaseCount !== null ? releaseLimitWords(maxReleases, releaseCount) : error.message);
     }
+    case CONVERSION_WOULD_BLOCK_LISTING_CODE:
+      // W11 (plan D9b, 8.3): a listed size would stop getting stock updates, which the plan shown didn't say. Page 0 is
+      // read again and its section names the sizes; the move is refused for good under this key.
+      if (conversion) return failure("refused", LISTING_SETTINGS_CONVERSION_WORDS.changed);
+      break;
     case WOULD_BE_LOST_CODE: {
+      // W11 (plan D9a, 8.3): as above, for a size that would lose its price.
+      if (conversion) return failure("refused", LISTING_SETTINGS_CONVERSION_WORDS.changed);
       // W7's apply refusing the sizes the check already named (plan 7.5): counted from `sizeCount`, never the list,
       // which the server caps. Without a count (a release's W9 refusal naming one size) the server's words stand.
       if (writer !== "W7") break;
@@ -1153,13 +1231,33 @@ const PR9_GATE_CODES: ReadonlySet<string> = new Set([
  * It stays `uncertain`, locked with the same key, and the words say why it
  * couldn't be checked; after a gate refusal the banner says why, and [Check
  * again] comes back with the right. Any other answer stands as it is. For the
- * PR 9 writers' runners, which still hand a gate refusal to the banner.
+ * PR 9 writers' runners, which still hand a gate refusal to the banner. A
+ * runner whose words aren't a save's passes its own (W11's: "We couldn't
+ * confirm the move.", `CONVERSION_UNCONFIRMED_WORDS`).
  */
-export function failureAfterUnconfirmed(wasUncertain: boolean, failure: WriteFailure): WriteFailure {
+export interface UnconfirmedWords {
+  uncertain: string;
+  stillUnconfirmed: string;
+  stillUnconfirmedRateLimited: string;
+}
+
+const SAVE_UNCONFIRMED_WORDS: UnconfirmedWords = Object.freeze({
+  uncertain: LISTING_SETTINGS_SAVE_WORDS.uncertain,
+  stillUnconfirmed: LISTING_SETTINGS_EDIT_WORDS.stillUnconfirmed,
+  stillUnconfirmedRateLimited: LISTING_SETTINGS_EDIT_WORDS.stillUnconfirmedRateLimited,
+});
+
+/** W11's words for an unconfirmed move (plan 8.3, 11.4 `uncertain`; PLAN10 D7b). */
+export const CONVERSION_UNCONFIRMED_WORDS: UnconfirmedWords = Object.freeze({
+  uncertain: LISTING_SETTINGS_CONVERSION_WORDS.uncertain,
+  stillUnconfirmed: LISTING_SETTINGS_CONVERSION_WORDS.stillUnconfirmed,
+  stillUnconfirmedRateLimited: LISTING_SETTINGS_CONVERSION_WORDS.stillUnconfirmedRateLimited,
+});
+
+export function failureAfterUnconfirmed(wasUncertain: boolean, failure: WriteFailure, words: UnconfirmedWords = SAVE_UNCONFIRMED_WORDS): WriteFailure {
   if (!wasUncertain) return failure;
-  const words = LISTING_SETTINGS_EDIT_WORDS;
   if (failure.phase === "blocked" && failure.code !== null && PR9_GATE_CODES.has(failure.code)) {
-    return { ...failure, phase: "uncertain", message: LISTING_SETTINGS_SAVE_WORDS.uncertain };
+    return { ...failure, phase: "uncertain", message: words.uncertain };
   }
   if (failure.phase !== "unreachable" && failure.phase !== "rate_limited") return failure;
   return {
@@ -1167,6 +1265,21 @@ export function failureAfterUnconfirmed(wasUncertain: boolean, failure: WriteFai
     phase: "uncertain",
     message: failure.phase === "rate_limited" ? words.stillUnconfirmedRateLimited : words.stillUnconfirmed,
   };
+}
+
+/**
+ * Whether the step's one draft has just entered `conflict` (plan PR 11, 8.2,
+ * D25): its save was answered "this changed in another window", which may be
+ * a move of the older group rules made elsewhere (the system's, or another
+ * window's). True once per attempt: an attempt goes `saving` → `conflict`; a
+ * draft already in conflict (the same editor's) is not new.
+ */
+export function draftEnteredConflict(
+  before: Pick<ListingSettingsDraft, "editor" | "phase"> | null,
+  after: Pick<ListingSettingsDraft, "editor" | "phase"> | null,
+): boolean {
+  if (after === null || after.phase !== "conflict") return false;
+  return before === null || before.phase !== "conflict" || before.editor !== after.editor;
 }
 
 // ---------------------------------------------------------------------------

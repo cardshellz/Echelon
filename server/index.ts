@@ -34,6 +34,7 @@ import { startDropshipReturnIntakeWorker } from "./modules/dropship/infrastructu
 import { startDropshipUsdcWatcherWorker } from "./modules/dropship/infrastructure/dropship-usdc-watcher-runner";
 import { startDropshipCostDetectionWorker } from "./modules/dropship/infrastructure/dropship-cost-detection-runner";
 import { startDropshipCategoryMarksWorker } from "./modules/dropship/infrastructure/dropship-category-marks-runner";
+import { startDropshipRulesConversionWorker } from "./modules/dropship/infrastructure/dropship-rules-conversion-runner";
 import {
   setDropshipFulfillmentSync,
   setDropshipInventoryRuntimeAuthorityGate,
@@ -991,6 +992,7 @@ function startEchelonSyncScheduler(
         startDropshipUsdcWatcherWorker();
         startDropshipCostDetectionWorker();
         startDropshipCategoryMarksWorker();
+        startDropshipRulesConversionWorker();
       } else {
         logSchedulerDisabled("scheduler", "Dropship workers");
       }

@@ -32,9 +32,12 @@ import {
   olderRulesLineModel,
   olderRulesSheetState,
   type ConversionBlockedSize,
+  type OlderRulesApplyFacts,
+  type OlderRulesSheetOutcome,
   type OlderRulesSheetSession,
   type OlderRulesSheetState,
 } from "@/lib/dropship-listing-settings-conversion";
+import { CONVERSION_EDITOR_ID, classifyWriteFailure, reduceListingSettingsDraft, type ListingSettingsDraft } from "@/lib/dropship-listing-settings-drafts";
 import { builtFromWords } from "@/lib/dropship-listing-settings-price-words";
 import { DropshipApiError } from "@/lib/dropship-ops-surface";
 import { CardOlderRules, CategoryCardRowItem, CategorySettingsCardView } from "../listing-settings/CategorySettingsCard";
@@ -46,9 +49,10 @@ import {
   OlderRulesSheet,
   OlderRulesSheetView,
   ReportBody,
-  sheetFocusTarget,
+  SheetFooterBar,
   type OlderRulesSheetProps,
 } from "../listing-settings/OlderRulesSheet";
+import { firstConnected } from "../listing-settings/focusTarget";
 
 /**
  * The older-rules line, the read-only "Your older group rules" sheet and its openers (Listing settings PR 11b, plan
@@ -304,31 +308,57 @@ function elementsOf(node: unknown): Element[] {
 }
 
 function sheetProps(overrides: Partial<OlderRulesSheetProps> = {}): OlderRulesSheetProps {
-  return { storeConnectionId: STORE, open: true, summary: summaryFacts(), onClose: noop, onSetPrice: noop, onFix: noop, ...overrides };
+  return {
+    storeConnectionId: STORE, open: true, summary: summaryFacts(), right: EDITABLE, saveCallbacks: { onSaveStarted: noop, onSaveSettled: noop },
+    onSaved: noop, onClose: noop, onSetPrice: noop, onFix: noop, ...overrides,
+  };
 }
 
-/** The open sheet over page 0's answer (`answer`), its failure, or nothing yet. */
+/** The open sheet over page 0's answer (`answer`), its failure, or nothing yet, inside the step's drafts provider. */
 function renderSheet(answer: Seeded<ListingRulesConversionCheck>, overrides: Partial<OlderRulesSheetProps> = {}): string {
   const cache = client();
   seed(cache, conversionKey(0), answer);
-  return render(React.createElement(OlderRulesSheet, sheetProps(overrides)), cache);
+  return render(React.createElement(ListingSettingsDraftsProvider, { storeConnectionId: STORE, children: React.createElement(OlderRulesSheet, sheetProps(overrides)) }), cache);
 }
 
-function sheetState(pages: readonly (ListingRulesConversionCheck | { error: unknown } | undefined)[], session: Partial<OlderRulesSheetSession> = {}): OlderRulesSheetState {
+const IDLE: OlderRulesApplyFacts = { draft: null, right: EDITABLE, busy: false, checking: false, notStartedLine: null };
+
+function sheetState(
+  pages: readonly (ListingRulesConversionCheck | { error: unknown } | undefined)[],
+  session: Partial<OlderRulesSheetSession> = {},
+  outcome: OlderRulesSheetOutcome | null = null,
+  apply: Partial<OlderRulesApplyFacts> = {},
+): OlderRulesSheetState {
   return olderRulesSheetState({
     pages: pages.map((page) => page === undefined ? { data: undefined, error: null } : "error" in page ? { data: undefined, error: page.error } : { data: page, error: null }),
     session: { ...OLDER_RULES_SHEET_OPENED, pageCount: Math.max(1, pages.length), ...session },
-    outcome: null,
+    outcome,
+    apply: { ...IDLE, ...apply },
   });
 }
 
 function renderView(state: OlderRulesSheetState, compact = false): string {
   return render(React.createElement(OlderRulesSheetView, {
     state, compact, onClose: noop, onRetry: noop, onSetPrice: noop, onFix: noop, onLoadMore: noop, onRetryMore: noop,
+    onMove: noop, onCheckAgain: noop, onReload: noop, onGotIt: noop,
   }));
 }
 
+/** The step's draft for a move of PLAN_A sent with one key, then answered `error` (classified as the runner does), or still out. */
+function moveDraft(error?: unknown): ListingSettingsDraft {
+  const opened = reduceListingSettingsDraft(null, { type: "open", editor: CONVERSION_EDITOR_ID, place: "Your older group rules", base: { planHash: PLAN_A, writesHash: WRITES } });
+  const sent = reduceListingSettingsDraft(opened, { type: "startSave", attempt: { signature: "plan A", key: "ls-convert:1" } });
+  if (error === undefined) return sent!;
+  return reduceListingSettingsDraft(sent, { type: "failure", key: "ls-convert:1", failure: classifyWriteFailure("W11", error) })!;
+}
+
+/** The footer bar alone, over a lib-built state. */
+function renderFooter(state: OlderRulesSheetState): string {
+  return render(React.createElement(SheetFooterBar, { footer: state.footer, onClose: noop, onMove: noop, onCheckAgain: noop, onReload: noop, onGotIt: noop }));
+}
+
 const apiError = (status: number, code: string) => new DropshipApiError({ status, code, message: "Refused." });
+const apiErrorWith = (status: number, code: string, context?: Record<string, unknown>) => new DropshipApiError({ status, code, message: "Refused.", context });
 
 // ---------------------------------------------------------------------------
 // The line under the attention strip (plan 5.3, D17, K7)
@@ -395,18 +425,21 @@ describe("the older-rules line", () => {
 // ---------------------------------------------------------------------------
 
 describe("the older-rules sheet", () => {
-  it("is a right sheet titled by its words, read-only, with the preview footer and Close; × on a wide screen, ← on a phone", () => {
+  it("is a right sheet titled by its words, with Close and Move them over in its footer; × on a wide screen, ← on a phone", () => {
     const markup = renderSheet(CLEAN);
     expect(markup).toContain('data-side="right" data-testid="older-rules-sheet">');
     expect(markup).toContain("<h2>Your older group rules</h2>");
-    expect(markup).toMatch(/data-testid="older-rules-footer"><span class="[^"]*">This is a preview\. Nothing is moved yet\.<\/span><button class="[^"]*min-h-11[^"]*" type="button">Close<\/button><\/div>/);
+    // 11d: the read-only preview's words are gone; [Close] then [Move them over], the sheet's one write, last.
+    expect(markup).not.toContain("This is a preview");
+    // A static render is the first one, while page 0 is (re)read on mount (staleTime 0): the button waits for it (D1).
+    expect(markup).toMatch(/data-testid="older-rules-footer"><div class="[^"]*"><button class="[^"]*min-h-11[^"]*" type="button">Close<\/button><button class="[^"]*min-h-11[^"]*" type="button" disabled="" data-testid="older-rules-move">Move them over<\/button><\/div><\/div>/);
     expect(markup).toContain('aria-label="Close"');
-    // Nothing can be moved in 11b (11c-11f): no move button, no notice.
-    expect(markup).not.toContain("Move them over</button>");
+    // No notice yet (11e1).
     expect(markup).not.toContain("Got it");
 
     vi.stubGlobal("window", { matchMedia: (query: string) => ({ matches: false, media: query, addEventListener: noop, removeEventListener: noop }) });
-    const phone = render(React.createElement(OlderRulesSheet, sheetProps()), (() => { const cache = client(); seed(cache, conversionKey(0), CLEAN); return cache; })());
+    const phone = render(React.createElement(ListingSettingsDraftsProvider, { storeConnectionId: STORE, children: React.createElement(OlderRulesSheet, sheetProps()) }),
+      (() => { const cache = client(); seed(cache, conversionKey(0), CLEAN); return cache; })());
     expect(phone).toContain('aria-label="Back"');
     expect(phone).not.toContain('aria-label="Close"');
   });
@@ -419,7 +452,9 @@ describe("the older-rules sheet", () => {
     const markup = renderSheet(undefined);
     expect(markup).toContain('<p role="status" class="text-sm text-zinc-600" data-testid="older-rules-loading">Checking what would change…</p>');
     expect(markup).not.toContain('data-testid="older-rules-summary"');
-    expect(markup).toContain("This is a preview. Nothing is moved yet.");
+    // Nothing to move from yet: [Close] only.
+    expect(markup).toContain(">Close</button>");
+    expect(markup).not.toContain('data-testid="older-rules-move"');
   });
 
   it("words each failed read (5xx, 429, the costs unavailable) with Try again, and a 422 too large without one", () => {
@@ -597,6 +632,114 @@ describe("the older-rules sheet", () => {
 });
 
 // ---------------------------------------------------------------------------
+// [Move them over]: the footer in every 8.3 state (PR 11d, plan 8.3, 11.2, 11.4)
+// ---------------------------------------------------------------------------
+
+/** Not clean and nothing blocked: 60 sizes change, page 0 lists two of them. */
+const NOT_CLEAN_FREE = check({ state: "not_clean", changes: { page: 0, pageSize: 50, total: 60, rows: [changeRow(PENNY_100, PENNY, "Penny Sleeves", "Pack of 100")] } });
+const TEXT_ONLY = check({ state: "not_clean", blocked: { wouldLosePrice: list([]), wouldBlockListing: list([]), tooMuchText: true } });
+const moveButton = (markup: string) => /<button class="[^"]*"( type="button")?( disabled="")?( type="button")? data-testid="older-rules-move">Move them over<\/button>/.exec(markup);
+/** The footer's lines in order, with their role. */
+function footerLines(markup: string): string[] {
+  return [...markup.matchAll(/<p role="(status|alert)" class="[^"]*" data-testid="older-rules-footer-line">([^<]*)<\/p>/g)].map((match) => `${match[1]}: ${match[2]}`);
+}
+/** The footer's buttons, by their words, and whether each is off. */
+function footerButtons(markup: string): string[] {
+  return [...markup.matchAll(/<button ([^>]*)>([^<]*)<\/button>/g)].map((match) => `${match[2]}${/ disabled=""/.test(` ${match[1]}`) ? " (off)" : ""}`);
+}
+
+describe("[Move them over] in the footer (8.3)", () => {
+  const cases: ReadonlyArray<[string, OlderRulesSheetState, string[], string[]]> = [
+    ["clean", sheetState([CLEAN]), [], ["Close", "Move them over"]],
+    ["not clean, nothing blocked", sheetState([NOT_CLEAN_FREE]), ["status: These 60 sizes change as listed."], ["Close", "Move them over"]],
+    ["a size would lose its price, a listed size would stop updating (D9a, D9b)", sheetState([notClean()]), ["alert: Fix the sizes listed above first."], ["Close", "Move them over (off)"]],
+    ["too much text (D9c)", sheetState([TEXT_ONLY]), [`alert: ${"Moving these rules would save more text than your store can keep. Shorten your older description rules in Older settings, then check again."}`], ["Close", "Move them over (off)"]],
+    ["no right, the summary still loading", sheetState([CLEAN], {}, null, { right: { editable: false, reason: "loading" } }), ["alert: Checking…"], ["Close", "Move them over (off)"]],
+    ["no right, the banner says why", sheetState([CLEAN], {}, null, { right: { editable: false, reason: "banner" } }), [], ["Close", "Move them over (off)"]],
+    ["saving", sheetState([CLEAN], {}, null, { draft: moveDraft(), busy: true }), ["status: Moving them over…"], ["Close", "Move them over (off)"]],
+    ["converted / replayed", sheetState([NO_OLDER_RULES], {}, { kind: "moved", viewStale: false }), ["status: Moved over. Category settings can be saved now."], ["Close"]],
+    ["converted, its view stale", sheetState([NO_OLDER_RULES], {}, { kind: "moved", viewStale: true }),
+      ["status: Moved over. Category settings can be saved now.", "alert: We couldn't load the latest view."], ["Reload", "Close"]],
+    ["nothing_to_convert", sheetState([NO_OLDER_RULES], {}, { kind: "already_moved", viewStale: false }), ["status: Your rules have already been moved over."], ["Close"]],
+    ["409 CHANGED settings_changed", sheetState([CLEAN], {}, null, { draft: moveDraft(apiErrorWith(409, "DROPSHIP_LISTING_CONVERSION_CHANGED", { reason: "settings_changed" })) }),
+      ["alert: Something changed since you opened this. Check the list again."], ["Close", "Move them over"]],
+    ["409 CHANGED listed_changes_moved", sheetState([CLEAN], {}, null, { draft: moveDraft(apiErrorWith(409, "DROPSHIP_LISTING_CONVERSION_CHANGED", { reason: "listed_changes_moved" })) }),
+      ["alert: Some changes in the list are different now, for example because a cost changed. Check the list again."], ["Close", "Move them over"]],
+    ["422 WOULD_BE_LOST, page 0 read again", sheetState([notClean()], {}, null, { draft: moveDraft(apiErrorWith(422, "DROPSHIP_LISTING_PRICE_WOULD_BE_LOST", { sizeCount: 2 })) }),
+      ["alert: Something changed since you opened this. Check the list again.", "alert: Fix the sizes listed above first."], ["Close", "Move them over (off)"]],
+    ["422 WOULD_BLOCK_LISTING, page 0 read again", sheetState([notClean()], {}, null, { draft: moveDraft(apiErrorWith(422, "DROPSHIP_LISTING_CONVERSION_WOULD_BLOCK_LISTING", { sizeCount: 2 })) }),
+      ["alert: Something changed since you opened this. Check the list again.", "alert: Fix the sizes listed above first."], ["Close", "Move them over (off)"]],
+    ["422 TOO_LARGE store_text_limit, page 0 read again", sheetState([TEXT_ONLY], {}, null, { draft: moveDraft(apiErrorWith(422, "DROPSHIP_LISTING_SETTINGS_TOO_LARGE", { reason: "store_text_limit" })) }),
+      ["alert: Something changed since you opened this. Check the list again.", `alert: ${"Moving these rules would save more text than your store can keep. Shorten your older description rules in Older settings, then check again."}`], ["Close", "Move them over (off)"]],
+    ["422 TOO_LARGE with no reason", sheetState([CLEAN], {}, null, { draft: moveDraft(apiErrorWith(422, "DROPSHIP_LISTING_SETTINGS_TOO_LARGE")) }),
+      ["alert: Choose 10,000 or fewer sizes to move them over."], ["Close", "Move them over (off)"]],
+    ["503 CHECK_UNAVAILABLE", sheetState([CLEAN], {}, null, { draft: moveDraft(apiErrorWith(503, "DROPSHIP_LISTING_CONVERSION_CHECK_UNAVAILABLE")) }),
+      ["alert: We couldn't read your costs just now. Nothing was moved. Try again in a minute."], ["Close", "Move them over"]],
+    ["409 IDEMPOTENCY_CONFLICT", sheetState([CLEAN], {}, null, { draft: moveDraft(apiErrorWith(409, "DROPSHIP_IDEMPOTENCY_CONFLICT")) }),
+      ["alert: Something changed since you last tried. Check the list again."], ["Close", "Move them over"]],
+    ["500 INVARIANT_FAILED", sheetState([CLEAN], {}, null, { draft: moveDraft(apiErrorWith(500, "DROPSHIP_LISTING_SETTINGS_INVARIANT_FAILED")) }),
+      ["alert: Something went wrong on our side. Reload to see what's saved. If it happens again, contact support."], ["Close", "Move them over (off)"]],
+    ["BUSY catalog_changed", sheetState([CLEAN], {}, null, { draft: moveDraft(apiErrorWith(503, "DROPSHIP_LISTING_SETTINGS_BUSY", { reason: "catalog_changed" })) }),
+      ["alert: Card Shellz was changing your chosen products just then. Nothing was moved. Try again in a few seconds."], ["Close", "Move them over"]],
+    ["uncertain (a dropped answer)", sheetState([CLEAN], {}, null, { draft: moveDraft(new TypeError("Failed to fetch")) }),
+      ["alert: We couldn't confirm the move."], ["Check again", "Close"]],
+    ["uncertain, reopened while page 0 reads", sheetState([undefined], {}, null, { draft: moveDraft(new TypeError("Failed to fetch")) }),
+      ["alert: We couldn't confirm the move."], ["Check again", "Close"]],
+    ["rate limited", sheetState([CLEAN], {}, null, { draft: moveDraft(apiErrorWith(429, "DROPSHIP_LISTING_SETTINGS_RATE_LIMITED")) }),
+      ["alert: Too many saves in a minute. Wait a moment and try again."], ["Close", "Move them over"]],
+    ["blocked (the banner explains)", sheetState([CLEAN], {}, null, { draft: moveDraft(apiErrorWith(403, "DROPSHIP_LISTING_STORE_BLOCKED", { reason: "paused" })), right: { editable: false, reason: "banner" } }),
+      ["alert: Nothing was saved."], ["Close", "Move them over (off)"]],
+    ["signed out", sheetState([CLEAN], {}, null, { draft: moveDraft(apiErrorWith(401, "DROPSHIP_AUTH_REQUIRED")) }),
+      ["alert: You're signed out. Sign in again, then save."], ["Close", "Move them over"]],
+  ];
+
+  it.each(cases)("%s", (_name, state, lines, buttons) => {
+    const markup = renderFooter(state);
+    expect(footerLines(markup)).toEqual(lines);
+    expect(footerButtons(markup)).toEqual(buttons);
+    expect(markup).toMatch(/min-h-11/);
+    expectPlainWords(markup);
+  });
+
+  it("hands each button to the sheet: Move them over, Check again, Reload and Close, once each", () => {
+    const onMove = vi.fn();
+    const onCheckAgain = vi.fn();
+    const onReload = vi.fn();
+    const onClose = vi.fn();
+    const press = (state: OlderRulesSheetState, label: string) => {
+      const buttons = pressable(SheetFooterBar({ footer: state.footer, onClose, onMove, onCheckAgain, onReload, onGotIt: noop }))
+        .filter((element) => element.props.children === label);
+      expect(buttons).toHaveLength(1);
+      buttons[0].props.onClick?.();
+    };
+    press(sheetState([CLEAN]), "Move them over");
+    press(sheetState([CLEAN], {}, null, { draft: moveDraft(new TypeError("Failed to fetch")) }), "Check again");
+    press(sheetState([NO_OLDER_RULES], {}, { kind: "moved", viewStale: true }), "Reload");
+    press(sheetState([CLEAN]), "Close");
+    expect([onMove, onCheckAgain, onReload, onClose].map((fn) => fn.mock.calls.length)).toEqual([1, 1, 1, 1]);
+    // The view hands the footer its own handlers: [Move them over] there is the sheet's onMove.
+    const viewMove = vi.fn();
+    const view = OlderRulesSheetView({ state: sheetState([CLEAN]), compact: false, onClose: noop, onRetry: noop, onSetPrice: noop, onFix: noop, onLoadMore: noop,
+      onRetryMore: noop, onMove: viewMove, onCheckAgain: noop, onReload: noop, onGotIt: noop });
+    const footer = elementsOf(view).find((element) => element.type === SheetFooterBar);
+    expect((footer?.props as { onMove?: () => void } | undefined)?.onMove).toBe(viewMove);
+  });
+
+  it("a confirmed outcome stays in the sheet whatever page 0 answers after it (CUX#11)", () => {
+    for (const page of [CLEAN, NO_OLDER_RULES, undefined]) {
+      const markup = renderView(sheetState([page], {}, { kind: "moved", viewStale: false }));
+      expect(markup).toContain(">Moved over. Category settings can be saved now.</p>");
+      expect(moveButton(markup)).toBeNull();
+    }
+  });
+
+  it("the step gives the sheet W11's right, the page's counter and its re-reads: the footer offers Move them over", () => {
+    const { markup } = renderStep("/dropship-portal/catalog/setup?sheet=convert", { page0: CLEAN });
+    expect(markup).toContain('data-testid="older-rules-move">Move them over</button>');
+  });
+});
+
+// ---------------------------------------------------------------------------
 // The Category settings card's opener (plan 5.2, D17)
 // ---------------------------------------------------------------------------
 
@@ -642,20 +785,20 @@ describe("the Category settings card under older group rules", () => {
 // Focus when the sheet closes (11.2, CUX#11)
 // ---------------------------------------------------------------------------
 
-describe("sheetFocusTarget", () => {
+describe("firstConnected (the sheet's and the notice line's focus rule)", () => {
   const element = (isConnected: boolean) => ({ isConnected }) as unknown as HTMLElement;
 
   it("is the opener while it is on the page, else the Category settings card's heading, else the step's heading", () => {
     const opener = element(true);
     const cardHeading = element(true);
     const stepHeading = element(true);
-    expect(sheetFocusTarget([opener, cardHeading, stepHeading])).toBe(opener);
+    expect(firstConnected([opener, cardHeading, stepHeading])).toBe(opener);
     // The editor's See what changes went with the editor: the card's heading.
-    expect(sheetFocusTarget([element(false), cardHeading, stepHeading])).toBe(cardHeading);
+    expect(firstConnected([element(false), cardHeading, stepHeading])).toBe(cardHeading);
     // No card (no category, or too large): the step's heading.
-    expect(sheetFocusTarget([null, undefined, stepHeading])).toBe(stepHeading);
-    expect(sheetFocusTarget([null, element(false)])).toBeNull();
-    expect(sheetFocusTarget([])).toBeNull();
+    expect(firstConnected([null, undefined, stepHeading])).toBe(stepHeading);
+    expect(firstConnected([null, element(false)])).toBeNull();
+    expect(firstConnected([])).toBeNull();
   });
 });
 

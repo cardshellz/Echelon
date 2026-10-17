@@ -8,14 +8,15 @@ import type { DropshipListingStoreContext } from "../application/dropship-listin
 import { conversionCategoryNamesToRead } from "../application/dropship-listing-rules-conversion";
 import type { ListingSettingsInputs } from "../application/dropship-listing-settings-facts";
 import type {
-  ListingSettingsConversionLoad, ListingSettingsCostReadFailure, ListingSettingsLoad, ListingSettingsProductOwnRead,
-  ListingSettingsRepository, ListingSettingsStoreLevelInputs,
+  ListingSettingsConversionLoad, ListingSettingsConversionNoticeRead, ListingSettingsCostReadFailure, ListingSettingsLoad,
+  ListingSettingsProductOwnRead, ListingSettingsRepository, ListingSettingsStoreLevelInputs,
 } from "../application/dropship-listing-settings-service";
 import { loadSelectedCandidates } from "../application/dropship-selected-catalog";
 import { readCategoryListingSettings } from "./dropship-category-listing-settings.repository";
 import { readEbayCategoryRules } from "./dropship-ebay-category-rules.reader";
 import { readContentProfile, readListingContentSettings } from "./dropship-listing-content.reader";
 import { PgDropshipListingPreviewRepository } from "./dropship-listing-preview.repository";
+import { findUnseenSystemConversionWithClient } from "./dropship-listing-rule-conversions.writer";
 import {
   readCatalogCategoriesByName, readCatalogCategoryNames, readListingSettingLayers,
 } from "./dropship-listing-setting-layers.reader";
@@ -74,6 +75,10 @@ const OWNER_BY_MEMBER = `FROM dropship.dropship_vendors v
  * hash every listing row of the store only to be thrown away.
  */
 const OWNER_SQL = `SELECT v.id AS vendor_id
+  ${OWNER_BY_MEMBER}`;
+
+/** The owner and the store's platform, for the one-time notice's read (PR 11e1): never cached, no selection read. */
+const OWNER_PLATFORM_SQL = `SELECT v.id AS vendor_id, sc.platform
   ${OWNER_BY_MEMBER}`;
 
 /**
@@ -205,6 +210,26 @@ export class PgDropshipListingSettingsRepository implements ListingSettingsRepos
       return loadConversionInputsWithClient(client, { vendorId, storeConnectionId: input.storeConnectionId, now: input.now },
         this.reportCostReadFailure);
     });
+  }
+
+  /**
+   * The one-time notice's read (PR 11e1, plan 9.3): the owner by member and
+   * the store's platform (one small statement, the predicate every read here
+   * uses), then, for an eBay store, its latest conversion when that is an
+   * unseen system one (one statement the (store_connection_id, id) index
+   * serves; a later vendor move ends the job's notice, D19). Two pool
+   * statements, no snapshot and no lock: each answers on its own, and a
+   * [Got it] committing between them only makes this answer a moment old.
+   */
+  async readConversionNotice(input: { memberId: string; storeConnectionId: number }): Promise<ListingSettingsConversionNoticeRead | null> {
+    const owner = (await this.dbPool.query<{ vendor_id: number; platform: unknown }>(OWNER_PLATFORM_SQL,
+      [input.memberId, input.storeConnectionId])).rows[0];
+    if (!owner) return null;
+    if (owner.platform !== "ebay") return { state: "not_ebay" };
+    const conversion = await findUnseenSystemConversionWithClient(this.dbPool, {
+      vendorId: owner.vendor_id, storeConnectionId: input.storeConnectionId,
+    });
+    return { state: "ok", conversion };
   }
 
   async readProductOwnSettings(input: {

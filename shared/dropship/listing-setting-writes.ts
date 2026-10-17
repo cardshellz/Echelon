@@ -66,6 +66,8 @@ export const LISTING_SETTING_WRITE_ERROR_CODES = Object.freeze({
   conversionCheckUnavailable: LISTING_RULES_CONVERSION_ERROR_CODES.checkUnavailable,
   /** 422, permanent: a size listed on eBay that can be sent today would be blocked after the move (plan D9b). */
   conversionWouldBlockListing: LISTING_RULES_CONVERSION_ERROR_CODES.wouldBlockListing,
+  /** 404, permanent: the notice's acknowledge names no system conversion of this store (PR 11, plan 9.3). */
+  conversionNoticeNotFound: LISTING_RULES_CONVERSION_ERROR_CODES.noticeNotFound,
 } as const);
 
 /**

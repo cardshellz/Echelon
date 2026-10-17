@@ -80,6 +80,8 @@ export const WRITABLE_VENDOR_STATUSES: ReadonlySet<string> = new Set(["active", 
 // Token health is not authority for a local setting: a store that needs a
 // sign-in keeps its settings writable; paused and disconnected stores do not.
 export const WRITABLE_STORE_STATUSES: ReadonlySet<string> = new Set(["connected", "needs_reauth", "refresh_failed"]);
+/** The .ops entitlement every listing writer needs, the rules conversion's system job included (its store query and gate). */
+export const WRITABLE_ENTITLEMENT_STATUS = "active";
 
 export function assertListingSettingMember(memberId: string): void {
   if (typeof memberId !== "string" || !memberId.trim()) {
@@ -105,7 +107,7 @@ export async function authorizeListingSettingWrite(
     throw permanent("DROPSHIP_LISTING_VENDOR_BLOCKED", "Your vendor status does not permit listing settings changes.",
       { storeConnectionId, reason: context.vendorStatus });
   }
-  if (context.entitlementStatus !== "active") {
+  if (context.entitlementStatus !== WRITABLE_ENTITLEMENT_STATUS) {
     throw permanent("DROPSHIP_LISTING_ENTITLEMENT_BLOCKED", "An active .ops entitlement is required to change listing settings.",
       { storeConnectionId, reason: context.entitlementStatus });
   }

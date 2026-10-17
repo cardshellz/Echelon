@@ -11,7 +11,8 @@ export type DropshipWorkerScheduleName =
   | "returnsMaintenance"
   | "usdcWatcher"
   | "costDetection"
-  | "categoryMarks";
+  | "categoryMarks"
+  | "rulesConversion";
 
 interface DropshipWorkerScheduleDefinition {
   initialDelayEnvironmentVariable: string;
@@ -63,6 +64,12 @@ const SCHEDULE_DEFINITIONS: Record<
   categoryMarks: {
     initialDelayEnvironmentVariable: "DROPSHIP_CATEGORY_MARKS_WORKER_INITIAL_DELAY_MS",
     defaultInitialDelayMs: 180_000,
+  },
+  // The listing settings rules conversion job (PR 11e2) runs hourly; it boots
+  // after the first-mark job, in a phase of its own.
+  rulesConversion: {
+    initialDelayEnvironmentVariable: "DROPSHIP_RULES_CONVERSION_WORKER_INITIAL_DELAY_MS",
+    defaultInitialDelayMs: 240_000,
   },
 };
 

@@ -16,6 +16,11 @@ describe("resolveDropshipWorkerSchedule", () => {
     expect(resolveDropshipWorkerSchedule("categoryMarks", environment)).toEqual({
       initialDelayMs: 180_000, initialDelayEnvironmentVariable: "DROPSHIP_CATEGORY_MARKS_WORKER_INITIAL_DELAY_MS",
     });
+    // The rules conversion job (PR 11e2, plan 9.2): hourly, after the first-mark job's 180 s phase, on a delay no other worker uses.
+    expect(resolveDropshipWorkerSchedule("rulesConversion", environment)).toEqual({
+      initialDelayMs: 240_000, initialDelayEnvironmentVariable: "DROPSHIP_RULES_CONVERSION_WORKER_INITIAL_DELAY_MS",
+    });
+    expect(resolveDropshipWorkerSchedule("rulesConversion", { DROPSHIP_RULES_CONVERSION_WORKER_INITIAL_DELAY_MS: "5" }).initialDelayMs).toBe(5);
   });
 
   it("accepts a non-negative per-worker environment override", () => {

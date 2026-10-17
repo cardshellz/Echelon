@@ -8,6 +8,10 @@ import { systemDropshipListingPreviewClock } from "../application/dropship-listi
 import { DropshipListingProductSettingsService } from "../application/dropship-listing-product-settings-service";
 import { DropshipListingProductsBulkService } from "../application/dropship-listing-products-bulk-service";
 import {
+  DropshipListingRulesConversionNoticeService,
+  type ListingRulesConversionNoticeRepository,
+} from "../application/dropship-listing-rules-conversion-notice-service";
+import {
   DropshipListingRulesConversionService,
   rulesConversionCostReadReporter,
   type ListingRulesConversionRepository,
@@ -17,6 +21,7 @@ import { ListingSettingHeavyWriteGate, type ListingSettingWriteLog } from "../ap
 import type { ListingSettingWriteRepository } from "../application/dropship-listing-setting-writes";
 import { DropshipListingSizePricesService } from "../application/dropship-listing-size-prices-service";
 import { createDropshipListingSettingEbayAdapterFromEnv } from "./dropship-listing-setting-ebay.adapter";
+import { PgDropshipListingRulesConversionNoticeRepository } from "./dropship-listing-rules-conversion-notice.repository";
 import { PgDropshipListingRulesConversionRepository } from "./dropship-listing-rules-conversion.repository";
 import { PgDropshipListingSettingWritesRepository } from "./dropship-listing-setting-writes.repository";
 
@@ -33,6 +38,8 @@ export interface ListingSettingWriteServices {
   categoryMoves: Pick<DropshipListingCategoryMovesService, "acknowledgeForMember">;
   /** W11's vendor apply (PR 11, plan 7.B): moving the store's older group rules into category and product settings. */
   conversion: Pick<DropshipListingRulesConversionService, "applyForMember">;
+  /** [Got it] on the one-time notice of a system conversion (PR 11e1, plan 9.3). */
+  conversionNotice: Pick<DropshipListingRulesConversionNoticeService, "acknowledgeForMember">;
 }
 
 /** What a test may put in place of the production wiring; everything else is built as in production. */
@@ -41,6 +48,8 @@ export interface ListingSettingWriteServiceOverrides {
   ebay?: ListingSettingEbayPort;
   /** The rules conversion's own transaction (PR 11, plan D10): it is not the PR 9 wrapper. */
   conversionRepository?: ListingRulesConversionRepository;
+  /** The notice's own short transaction (PR 11e1): no store lock, no request key. */
+  noticeRepository?: ListingRulesConversionNoticeRepository;
 }
 
 /** The services' success lines, through the platform logger (it merges the request's correlation context). */
@@ -69,8 +78,9 @@ const reportConversionCostReadFailure = rulesConversionCostReadReporter({
  * when it clears, and W7's check and apply), so one process runs one heavy
  * write at a time. W7's review ids are randomUUID (W1's pattern,
  * dropship-pricing-rules.factory.ts). The rules conversion's apply (PR 11) has
- * its own transaction (plan D10) and is a heavy write behind the same gate.
- * `overrides` is the factory test's seam: an injected repository or eBay
+ * its own transaction (plan D10) and is a heavy write behind the same gate;
+ * its one-time notice's [Got it] (11e1) is a single write with its own short
+ * transaction. `overrides` is the factory test's seam: an injected repository or eBay
  * port, never a module mock.
  */
 export function createDropshipListingSettingWriteServices(overrides: ListingSettingWriteServiceOverrides = {}): ListingSettingWriteServices {
@@ -94,6 +104,11 @@ export function createDropshipListingSettingWriteServices(overrides: ListingSett
     repository: overrides.conversionRepository ?? new PgDropshipListingRulesConversionRepository(undefined, reportConversionCostReadFailure),
     clock: deps.clock, timer: deps.timer, log: deps.log, heavyWrites,
   });
+  // The notice's [Got it] (PR 11e1): one row and one audit row, a single write, never behind the gate.
+  const conversionNotice = new DropshipListingRulesConversionNoticeService({
+    repository: overrides.noticeRepository ?? new PgDropshipListingRulesConversionNoticeRepository(),
+    clock: deps.clock, timer: deps.timer, log: deps.log,
+  });
   return {
     sizePrices: new DropshipListingSizePricesService(deps),
     products: {
@@ -113,6 +128,9 @@ export function createDropshipListingSettingWriteServices(overrides: ListingSett
     },
     conversion: {
       applyForMember: (memberId, storeId, body) => conversion.applyForMember(memberId, storeId, body),
+    },
+    conversionNotice: {
+      acknowledgeForMember: (memberId, storeId, body) => conversionNotice.acknowledgeForMember(memberId, storeId, body),
     },
   };
 }
