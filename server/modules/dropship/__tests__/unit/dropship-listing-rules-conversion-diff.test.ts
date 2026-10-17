@@ -589,6 +589,18 @@ describe("what blocks a move (plan D9)", () => {
     }
   });
 
+  it.each(["queued", "pushing"])("D9b: a size with a push %s and no eBay id yet is listed: the push can go live after the move", (status) => {
+    // The worker writes the eBay id without the store lock, after a preview it may have refreshed before the move committed.
+    const { diff } = run(ebayOnlyFromRule({ existingListings: new Map([[101, listed(101, { status, externalListingId: null })]]) }));
+    expect(diff.blocked.wouldBlockListing.map((size) => [size.productVariantId, size.reasons])).toEqual([[101, ["no_ebay_category"]]]);
+  });
+
+  it.each(["not_listed", "preview_ready", "failed", "blocked"])("D9b: a size with no eBay id and no push in flight (%s) is not listed",
+    (status) => {
+      const { diff } = run(ebayOnlyFromRule({ existingListings: new Map([[101, listed(101, { status, externalListingId: null })]]) }));
+      expect(diff.blocked.wouldBlockListing).toEqual([]);
+    });
+
   it("D9b: a listed size whose description would be too large to send", () => {
     // The body fits alone; the store template the move falls back to takes it past the limit.
     const description = `<p>${"x".repeat(MAX_DESCRIPTION_HTML_LENGTH - 20)}</p>`;

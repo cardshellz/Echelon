@@ -9,6 +9,7 @@ import type { OrderEditSnapshot } from "../application/order-edit-provider";
 import { orderEditSnapshotSchema } from "../application/order-edit-provider.schema";
 import type { OrderEditReleaseProof } from "../application/order-edit-store";
 import { getOmsLineMaterializableQuantity } from "../../oms/oms-line-authority";
+import { retireOrderEditProviderHolds } from "../../oms/order-edit-provider-hold.commands";
 import {
   assertOrderEditWarehouseItemIdentities,
   readOrderEditWarehouseItems,
@@ -60,7 +61,13 @@ export interface OrderEditWarehouseProvider {
   synchronizeOrderEditShipment(input: {
     shipmentId: number;
     operationId: string;
-    mode: "hold" | "verify" | "synchronize" | "release" | "verify_shipped";
+    mode:
+      | "hold"
+      | "verify"
+      | "synchronize"
+      | "release"
+      | "verify_shipped"
+      | "release_unsubmitted";
   }): Promise<void>;
 }
 export interface OrderEditWarehouseInspection {
@@ -450,12 +457,98 @@ async function readAllocationProof(
   return { claims, claimLines, resources, lots };
 }
 
-/** Caller must update operation terminal state + audit in THIS SAME transaction. */
+/** Read only ownership evidence: an unsubmitted draft has no authority over quantities or picking. */
+async function readUnsubmittedReleaseProof(
+  client: PoolClient,
+  omsOrderId: number,
+  operationId: string,
+): Promise<OrderEditReleaseProof> {
+  await client.query("SELECT id FROM oms.oms_orders WHERE id=$1 FOR UPDATE", [
+    omsOrderId,
+  ]);
+  const operation = await client.query(
+    `SELECT
+    document ?& ARRAY['commitStartedAt','commitKey','refundIntent','refundStartedAt','recoveryStartedAt'] AS has_intent_fields,
+    document->>'commitStartedAt' AS commit_started_at, document->>'commitKey' AS commit_key,
+    document->>'refundIntent' AS refund_intent, document->>'refundStartedAt' AS refund_started_at,
+    document->>'recoveryStartedAt' AS recovery_started_at
+    FROM oms.order_edit_operations WHERE id=$1 AND oms_order_id=$2
+    AND status NOT IN ('completed','recovered','failed','expired')
+    AND NOT EXISTS (SELECT 1 FROM oms.order_edit_paid_projections WHERE operation_id=$1) FOR UPDATE`,
+    [operationId, omsOrderId],
+  );
+  const row = operation.rows[0];
+  if (
+    operation.rows.length !== 1 ||
+    row.has_intent_fields !== true ||
+    [
+      row.commit_started_at,
+      row.commit_key,
+      row.refund_intent,
+      row.refund_started_at,
+      row.recovery_started_at,
+    ].some((value) => value !== null)
+  )
+    throw new OrderEditError(
+      "ORDER_EDIT_ALREADY_SUBMITTED",
+      "A submitted or uncertain edit cannot release an unsubmitted hold.",
+    );
+  const orders = await client.query(
+    `SELECT wo.id,wo.channel_id,wo.external_order_id,wo.order_edit_operation_id
+    FROM wms.orders wo WHERE ${binding}=$1 ORDER BY wo.id FOR UPDATE OF wo`,
+    [omsOrderId],
+  );
+  if (
+    orders.rows.some(
+      (order) =>
+        order.order_edit_operation_id !== null &&
+        order.order_edit_operation_id !== operationId,
+    )
+  )
+    throw new OrderEditError(
+      "ORDER_EDIT_RELEASE_OWNER_CHANGED",
+      "Warehouse hold ownership changed.",
+    );
+  const owned = orders.rows.filter(
+    (order) => order.order_edit_operation_id === operationId,
+  );
+  const ids = owned.map((order) => positiveId.parse(order.id));
+  const holds = await client.query(
+    `SELECT h.shipment_id,h.provider_order_id,h.was_held,os.order_id
+    FROM oms.order_edit_provider_holds h JOIN wms.outbound_shipments os ON os.id=h.shipment_id
+    WHERE h.operation_id=$1 AND h.released_at IS NULL ORDER BY h.shipment_id FOR UPDATE OF h,os`,
+    [operationId],
+  );
+  if (holds.rows.some((hold) => !ids.includes(hold.order_id)))
+    throw new OrderEditError(
+      "ORDER_EDIT_RELEASE_OWNER_CHANGED",
+      "Provider hold ownership changed.",
+    );
+  return {
+    unsubmitted: true,
+    ownership: ids.length ? "owned" : "none",
+    wmsOrderIds: ids,
+    shipmentIds: holds.rows.map((hold) => positiveId.parse(hold.shipment_id)),
+    contentFingerprint: createHash("sha256")
+      .update(
+        JSON.stringify({
+          omsOrderId,
+          operationId,
+          orders: owned,
+          holds: holds.rows,
+        }),
+      )
+      .digest("hex"),
+  };
+}
+
+/** Caller must update operation state + audit in THIS SAME transaction. */
 export async function finalizeOrderEditWarehouseRelease(
   client: PoolClient,
   omsOrderId: number,
   operationId: string,
   proof: OrderEditReleaseProof,
+  releasedAt?: string,
 ): Promise<void> {
   positiveId.parse(omsOrderId);
   operationIdSchema.parse(operationId);
@@ -466,17 +559,28 @@ export async function finalizeOrderEditWarehouseRelease(
     ownership: z.enum(["owned", "none"]).optional(),
     allocationRequired: z.boolean().optional(),
     fulfilledCancellation: z.boolean().optional(),
+    unsubmitted: z.boolean().optional(),
   })
     .strict()
     .parse(proof);
-  const current = await readReleaseProof(
-    client,
-    omsOrderId,
-    operationId,
-    proof.ownership ?? "owned",
-    proof.allocationRequired ?? false,
-    proof.fulfilledCancellation ?? false,
-  );
+  if (
+    proof.unsubmitted &&
+    (proof.allocationRequired || proof.fulfilledCancellation)
+  )
+    throw new OrderEditError(
+      "ORDER_EDIT_RELEASE_STATE_INVALID",
+      "Unsubmitted cleanup cannot certify changed order contents.",
+    );
+  const current = proof.unsubmitted
+    ? await readUnsubmittedReleaseProof(client, omsOrderId, operationId)
+    : await readReleaseProof(
+        client,
+        omsOrderId,
+        operationId,
+        proof.ownership ?? "owned",
+        proof.allocationRequired ?? false,
+        proof.fulfilledCancellation ?? false,
+      );
   if (
     current.contentFingerprint !== proof.contentFingerprint ||
     current.wmsOrderIds.join(",") !== proof.wmsOrderIds.join(",") ||
@@ -486,6 +590,13 @@ export async function finalizeOrderEditWarehouseRelease(
       "ORDER_EDIT_RELEASE_CHANGED",
       "Warehouse state changed after provider verification; verify the edit again.",
     );
+  if (proof.unsubmitted) {
+    const retirementTime = z.string().datetime().parse(releasedAt);
+    await retireOrderEditProviderHolds(client, {
+      operationId,
+      now: new Date(retirementTime),
+    });
+  }
   if (proof.ownership === "none") return;
   const released = await releaseOrderEditWarehouseHold(client, {
     operationId,
@@ -554,7 +665,11 @@ export class OrderEditWarehouseGateway {
     const client = await this.pool.connect();
     let destroyClient = false;
     try {
-      await client.query(mode === "read" ? "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY" : "BEGIN");
+      await client.query(
+        mode === "read"
+          ? "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY"
+          : "BEGIN",
+      );
       await client.query("SET LOCAL lock_timeout='5000ms'");
       const result = await work(client);
       await client.query("COMMIT");
@@ -642,12 +757,16 @@ export class OrderEditWarehouseGateway {
       throw new OrderEditError("ORDER_EDIT_PICKING_CUTOFF", reasons.join(" "));
   }
 
-  async inspect(omsOrderId: number): Promise<OrderEditWarehouseInspection> {
+  async inspect(
+    omsOrderId: number,
+    operationId?: string,
+  ): Promise<OrderEditWarehouseInspection> {
+    if (operationId !== undefined) operationIdSchema.parse(operationId);
     // Availability is advisory. Use one consistent committed snapshot without
     // competing with cancellation/picking; commands recheck under update locks.
     return this.transaction(async (client) => {
       const { orders } = await this.evidence(client, omsOrderId, "none");
-      const reasons = orderEditWarehouseBlockers(orders);
+      const reasons = orderEditWarehouseBlockers(orders, operationId);
       return {
         editable: reasons.length === 0,
         reasons,
@@ -668,8 +787,9 @@ export class OrderEditWarehouseGateway {
       this.requireEditable(orders, operationId);
       const operation = await client.query(
         `SELECT id FROM oms.order_edit_operations WHERE id=$1 AND oms_order_id=$2
-        AND status NOT IN ('completed','recovered','failed','expired') FOR UPDATE`,
-        [operationId, omsOrderId],
+        AND status NOT IN ('completed','recovered','failed','expired')
+        AND ($3::boolean=false OR status='committing' OR document->>'commitStartedAt' IS NOT NULL) FOR UPDATE`,
+        [operationId, omsOrderId, acquire],
       );
       if (operation.rows.length !== 1)
         throw new OrderEditError(
@@ -701,7 +821,13 @@ export class OrderEditWarehouseGateway {
   private async providerPhase(
     shipments: Array<Pick<Shipment, "id" | "provider_order_id">>,
     operationId: string,
-    mode: "hold" | "verify" | "synchronize" | "release" | "verify_shipped",
+    mode:
+      | "hold"
+      | "verify"
+      | "synchronize"
+      | "release"
+      | "verify_shipped"
+      | "release_unsubmitted",
   ): Promise<void> {
     for (const shipment of shipments) {
       // Even an unlinked shipment must pass the provider's push lock: a push
@@ -730,6 +856,33 @@ export class OrderEditWarehouseGateway {
       operationId,
       "verify",
     );
+  }
+
+  async releaseUnsubmitted(
+    omsOrderId: number,
+    operationId: string,
+  ): Promise<OrderEditReleaseProof> {
+    positiveId.parse(omsOrderId);
+    operationIdSchema.parse(operationId);
+    const before = await this.transaction((client) =>
+      readUnsubmittedReleaseProof(client, omsOrderId, operationId),
+    );
+    // Only receipts persisted before an attempted remote hold require provider
+    // cleanup. Never acquire a new hold, link a shipment, or amend its contents.
+    await this.providerPhase(
+      before.shipmentIds.map((id) => ({ id, provider_order_id: null })),
+      operationId,
+      "release_unsubmitted",
+    );
+    const after = await this.transaction((client) =>
+      readUnsubmittedReleaseProof(client, omsOrderId, operationId),
+    );
+    if (before.contentFingerprint !== after.contentFingerprint)
+      throw new OrderEditError(
+        "ORDER_EDIT_RELEASE_CHANGED",
+        "Warehouse hold ownership changed during cleanup. Please try again.",
+      );
+    return after;
   }
 
   private async assertContents(

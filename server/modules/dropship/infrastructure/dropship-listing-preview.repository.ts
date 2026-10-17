@@ -9,7 +9,8 @@ import type {
   DropshipListingCatalogCandidate,
   DropshipListingPackageReadiness,
   DropshipListingPreviewRepository,
-  DropshipListingResolverLoadInput,
+  DropshipListingResolverInputs,
+  DropshipListingResolverInputsLoadInput,
   DropshipListingStoreContext,
   DropshipListingPushJobItemRecord,
   DropshipListingPushJobRecord,
@@ -21,15 +22,18 @@ import type { DropshipCatalogExposureRule } from "../domain/catalog-exposure";
 import { isDropshipStoreConnectionLaunchReady } from "../domain/store-connection";
 import type { DropshipVendorSelectionRule, DropshipVendorVariantOverride } from "../domain/vendor-selection";
 import type { SavedListingPriceRevision } from "../../../../shared/dropship/listing-price";
-import type { ListingRulePrice } from "../application/dropship-rule-price";
 import {
   EMPTY_LISTING_SETTING_LAYERS,
   type ListingSettingLayers,
 } from "../application/dropship-listing-setting-layers";
 import { loadListingRulePrices } from "./dropship-rule-price.loader";
 import { readResolvedListingContents } from "./dropship-listing-content.reader";
-import { readResolvedEbayCategories } from "./dropship-ebay-category-rules.reader";
 import { readListingSettingLayers } from "./dropship-listing-setting-layers.reader";
+import {
+  assertListingResolverScope,
+  emptyListingResolverInputs,
+  readListingResolverInputs,
+} from "./dropship-listing-resolver-inputs.reader";
 
 type ListingDatabasePool = Pick<Pool, "query"> & {
   connect(): Promise<Pick<PoolClient, "query" | "release">>;
@@ -193,17 +197,38 @@ export class PgDropshipListingPreviewRepository implements DropshipListingPrevie
     finally { client.release(); }
   }
 
-  /** The three resolver reads below take the preview's `layers` and pass them on, so the loaders read no settings again. */
-  async loadRulePrices(input: DropshipListingResolverLoadInput): Promise<Map<number, ListingRulePrice>> {
+  /**
+   * The preview's four resolver inputs in ONE read-only snapshot (PR 11, plan
+   * 7.A, D23): the layers, the rule prices with the pricing profile, the
+   * descriptions with the content profile and (eBay) the eBay categories with
+   * the rules document, on one pooled client (readListingResolverInputs). So
+   * a push-time refresh or a stock catch-up, which build their preview outside
+   * the store lock, never mix layers from before a commit with a profile from
+   * after it. No lock and no write: a long scan must not block listing queues.
+   * COMMIT, or ROLLBACK on any failure, the read's own error being the one
+   * thrown (a failed COMMIT's included); the client is released once on every
+   * path. No size, no transaction: nothing to read (as loadListingSettingLayers).
+   */
+  async loadResolverInputs(input: DropshipListingResolverInputsLoadInput): Promise<DropshipListingResolverInputs> {
+    assertListingResolverScope(input);
+    if (input.candidates.length === 0) return emptyListingResolverInputs(input.platform);
     const client = await this.dbPool.connect();
     try {
       await client.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
-      const prices = await loadListingRulePrices(client, input);
+      const inputs = await readListingResolverInputs(client, input);
       await client.query("COMMIT");
-      return prices;
+      return inputs;
     } catch (error) { await rollbackQuietly(client); throw error; }
     finally { client.release(); }
   }
+
+  /*
+   * No separate rule price, description or eBay category loader (the port's
+   * optional loadRulePrices, loadListingContents, loadEbayCategories): each
+   * would read in its own snapshot, the half-conversion mix D23 removed. The
+   * preview reads all four inputs through loadResolverInputs; only fakes
+   * implement the separate loaders (PS's fallback).
+   */
 
   /** The owner retains commit/release authority; these are the same catalog reads
    * as preview, but all execute inside the price-setting transaction. */
@@ -610,32 +635,6 @@ export class PgDropshipListingPreviewRepository implements DropshipListingPrevie
     } finally {
       client.release();
     }
-  }
-
-  async loadListingContents(input: DropshipListingResolverLoadInput) {
-    const client = await this.dbPool.connect();
-    try {
-      await client.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
-      const result = await readResolvedListingContents(client, input);
-      await client.query("COMMIT");
-      return result;
-    } catch (error) {
-      try { await client.query("ROLLBACK"); } catch { /* Preserve original failure. */ }
-      throw error;
-    } finally { client.release(); }
-  }
-
-  async loadEbayCategories(input: DropshipListingResolverLoadInput) {
-    const client = await this.dbPool.connect();
-    try {
-      await client.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
-      const result = await readResolvedEbayCategories(client, input);
-      await client.query("COMMIT");
-      return result;
-    } catch (error) {
-      try { await client.query("ROLLBACK"); } catch { /* Preserve original failure. */ }
-      throw error;
-    } finally { client.release(); }
   }
 
   async createListingPushJob(

@@ -29,6 +29,7 @@ import {
   EMPTY_PRODUCT_LISTING_SETTING_VALUES,
   applyListingSettingPatch,
   changedListingSettingFields,
+  listingConversionChildKey,
   listingSettingBulkAuditValues,
   listingSettingChildKey,
   listingSettingsInvariantFailed,
@@ -54,8 +55,9 @@ import { insertPriceChangeApplyRequestWithClient } from "./dropship-price-change
 /**
  * A vendor's own listing settings for Card Shellz products (plan PR 8a,
  * section 3.8; migration 0738): the current-row read, the one-product
- * compare-and-set save (W5) and the set-based save for many products (W6, and
- * W12's "Also clear theirs"). Every function runs on the caller's transaction
+ * compare-and-set save (W5), the set-based save for many products (W6, and
+ * W12's "Also clear theirs") and the conversion's save of each product's own
+ * values (PR 11, plan 7.A.2 row 10). Every function runs on the caller's transaction
  * client, assumes the caller holds the locks of plan 3.9 (request key, store,
  * owner rows, catalog) and takes no lock itself except FOR UPDATE on its own
  * target rows. Audit rows are written in the same transaction, so they commit
@@ -205,6 +207,26 @@ interface ProductChange {
   before: ProductListingSettingRow | null;
   after: ProductListingSettingValues;
   changedFields: ProductListingSettingField[];
+}
+
+/**
+ * The conversion's products (PR 11, plan 7.A.2 row 10): each with the
+ * revision the plan read and its own patch, which may set a price (the bulk
+ * patch cannot). Built by the conversion from its plan, never by a vendor.
+ */
+export interface ProductListingSettingsPerProductInput {
+  /** The conversion record this save belongs to (the audit rows name it). */
+  conversionId: number;
+  products: ReadonlyArray<{ productId: number; expectedRevisionId: number | null; patch: ProductListingSettingPatch }>;
+  /** The conversion's request hash, on every revision it writes. */
+  requestHash: string;
+  now: Date;
+}
+export interface ProductListingSettingsPerProductResult {
+  /** The revisions written, in ascending product order. */
+  changed: Array<{ productId: number; revisionId: number }>;
+  /** Products whose patch sets what is already stored: nothing written for them. */
+  unchangedProductIds: number[];
 }
 
 // ---------------------------------------------------------------------------
@@ -377,7 +399,8 @@ export async function saveProductListingSettingsBulkWithClient(
     : await insertListingSettingRequestWithClient(client, { ...ledgerRow, operation: request.operation });
   if (changes.length === 0) return { outcome: "unchanged", requestId, changed: [], unchangedProductIds };
 
-  const changed = await insertBulkRevisions(client, scope, requestId, input, changes);
+  const changed = await insertBulkRevisions(client, scope, { requestId, requestHash: input.requestHash, now: input.now }, changes,
+    (productId) => listingSettingChildKey(scope.requestKey, "product", productId));
   await client.query(BULK_CURRENT_UPSERT_SQL, [
     scope.vendorId, scope.storeConnectionId,
     JSON.stringify(changed.map((entry) => ({ product_id: entry.productId, revision_id: entry.revisionId }))),
@@ -425,33 +448,109 @@ async function replayBulk(
   };
 }
 
+// ---------------------------------------------------------------------------
+// Each product its own values (PR 11's conversion)
+// ---------------------------------------------------------------------------
+
+/**
+ * The conversion's product rows (PR 11, plan 7.A.2 row 10, 7.B.3 step 13):
+ * each product its own patch, all or nothing, set-based. The caller holds
+ * the store lock, the selection lock and the catalog rows (plan D13) and has
+ * claimed the conversion's key with its record, so this has no replay of its
+ * own: a second use of the key never reaches it.
+ * 1. the input is checked before any SQL; it comes from the conversion's
+ *    plan, never from a vendor, so a breach is a programming fault (fatal).
+ *    Each patch is parsed with the one-product patch contract, which allows a
+ *    price (the bulk patch does not);
+ * 2. every product's current row FOR UPDATE must be the revision the plan
+ *    read; one mismatch refuses the whole save with
+ *    DROPSHIP_PRODUCT_LISTING_SETTINGS_VERSION_CONFLICT naming at most 100
+ *    products (under the store lock that is a broken contract, which the
+ *    conversion raises as fatal, plan D24);
+ * 3. each product merged with its own patch; a product it leaves as stored
+ *    is not written;
+ * 4. the bulk revision insert (no ledger request: request_id NULL, keys
+ *    `lc:<sha256(conversion key)>:product:<id>`, in 8 MiB statements), one
+ *    current-row upsert and one audit insert naming the conversion, texts by
+ *    digest, as W6 writes them.
+ */
+export async function saveProductListingSettingsPerProductWithClient(
+  client: QueryClient,
+  scope: ListingSettingWriteScope,
+  input: ProductListingSettingsPerProductInput,
+): Promise<ProductListingSettingsPerProductResult> {
+  assertWriteScope(scope);
+  assertRequestStamp(input.requestHash, input.now);
+  const products = parsePerProductRequest(input);
+
+  const current = await readProductListingSettings(client, {
+    vendorId: scope.vendorId, storeConnectionId: scope.storeConnectionId,
+    productIds: products.map((product) => product.productId), forUpdate: true,
+  });
+  assertExpectedRevisions(scope.storeConnectionId, products, current);
+
+  const changes: ProductChange[] = [];
+  const unchangedProductIds: number[] = [];
+  for (const { productId, patch } of products) {
+    const before = current.get(productId) ?? null;
+    const after = mergedValues(productId, before, patch);
+    const changedFields = changedListingSettingFields(before?.values ?? null, after, PRODUCT_LISTING_SETTING_FIELDS);
+    if (changedFields.length === 0) unchangedProductIds.push(productId);
+    else changes.push({ productId, before, after, changedFields });
+  }
+  if (changes.length === 0) return { changed: [], unchangedProductIds };
+
+  const changed = await insertBulkRevisions(client, scope, { requestId: null, requestHash: input.requestHash, now: input.now }, changes,
+    (productId) => listingConversionChildKey(scope.requestKey, "product", productId));
+  await client.query(BULK_CURRENT_UPSERT_SQL, [
+    scope.vendorId, scope.storeConnectionId,
+    JSON.stringify(changed.map((entry) => ({ product_id: entry.productId, revision_id: entry.revisionId }))),
+  ]);
+  await client.query(BULK_AUDIT_SQL, [
+    scope.vendorId, scope.storeConnectionId, scope.actor.actorType, scope.actor.actorId, input.now,
+    JSON.stringify(changes.map((change, index) => ({
+      product_id: change.productId,
+      payload: {
+        conversionId: input.conversionId, requestKey: scope.requestKey,
+        revisionId: changed[index].revisionId, previousRevisionId: change.before?.revisionId ?? null,
+        changedFields: change.changedFields,
+        before: listingSettingBulkAuditValues(change.before?.values ?? null, change.changedFields),
+        after: listingSettingBulkAuditValues(change.after, change.changedFields),
+      },
+    }))),
+  ]);
+  return { changed, unchangedProductIds };
+}
+
 /**
  * One statement per MAX_BULK_REVISION_PAYLOAD_BYTES of records (one while
  * the records are short, more when texts are long), in product order, so
  * only one statement's JSON is in the heap at a time; the returned ids must
  * cover exactly the changed products. RETURNING order is not guaranteed, so
  * the result is rebuilt in `changes` order: entry i is the revision of
- * changes[i].
+ * changes[i]. A ledger request names its revisions (`requestId`); the
+ * conversion's have none (its record is in another table) and carry its
+ * `lc:` child keys instead.
  */
 async function insertBulkRevisions(
   client: QueryClient,
   scope: ListingSettingWriteScope,
-  requestId: number,
-  input: ProductListingSettingsBulkInput,
+  stamp: { requestId: number | null; requestHash: string; now: Date },
   changes: readonly ProductChange[],
+  childKey: (productId: number) => string,
 ): Promise<Array<{ productId: number; revisionId: number }>> {
   const records = changes.map((change) => ({
     product_id: change.productId,
     previous_revision_id: change.before?.revisionId ?? null,
     ...productValuesToColumns(change.after),
-    child_key: listingSettingChildKey(scope.requestKey, "product", change.productId),
+    child_key: childKey(change.productId),
   }));
   const revisionIds = new Map<number, number>();
   let returnedCount = 0;
   for (const recordsJson of jsonArrayChunks(records, MAX_BULK_REVISION_PAYLOAD_BYTES)) {
     const inserted = await client.query<{ id: unknown; product_id: unknown }>(BULK_REVISION_INSERT_SQL, [
-      scope.vendorId, scope.storeConnectionId, requestId, input.requestHash, scope.actor.actorType, scope.actor.actorId,
-      input.now, recordsJson,
+      scope.vendorId, scope.storeConnectionId, stamp.requestId, stamp.requestHash, scope.actor.actorType, scope.actor.actorId,
+      stamp.now, recordsJson,
     ]);
     returnedCount += inserted.rows.length;
     for (const row of inserted.rows) revisionIds.set(returnedId(row.product_id), returnedId(row.id));
@@ -536,6 +635,44 @@ function parseSingleSave(input: ProductListingSettingSaveInput): ProductListingS
     });
   }
   return patch.data;
+}
+
+/**
+ * The conversion's products, ascending: 1 to 10,000, each once, each patch
+ * parsed on its own (the contract refuses one that changes nothing). A breach is fatal with
+ * issue paths and codes only, so no text reaches an error.
+ */
+function parsePerProductRequest(
+  input: ProductListingSettingsPerProductInput,
+): Array<{ productId: number; expectedRevisionId: number | null; patch: ProductListingSettingPatch }> {
+  const invalid = [
+    typeof input.conversionId === "number" && Number.isSafeInteger(input.conversionId) && input.conversionId > 0 ? null : "conversionId",
+    Array.isArray(input.products) && input.products.length > 0 && input.products.length <= MAX_LISTING_SETTING_BULK_PRODUCTS
+      ? null : "products",
+  ].filter((field): field is string => field !== null);
+  if (invalid.length > 0) {
+    throw listingSettingsInvariantFailed("A product listing settings write was called outside its contract.", { invalid });
+  }
+  if (!eachProductOnce(input.products)) {
+    throw listingSettingsInvariantFailed("A product listing settings write was called outside its contract.", { invalid: ["products"] });
+  }
+  const products = input.products.map((product) => {
+    const ids = [
+      isInt4Id(product.productId) ? null : "productId",
+      product.expectedRevisionId === null || isInt4Id(product.expectedRevisionId) ? null : "expectedRevisionId",
+    ].filter((field): field is string => field !== null);
+    if (ids.length > 0) {
+      throw listingSettingsInvariantFailed("A product listing settings write was called outside its contract.", { invalid: ids });
+    }
+    const patch = productListingSettingPatchSchema.safeParse(product.patch);
+    if (!patch.success) {
+      throw listingSettingsInvariantFailed("A product listing settings change failed its contract.", {
+        productId: product.productId, issues: issueCodes(patch.error),
+      });
+    }
+    return { productId: product.productId, expectedRevisionId: product.expectedRevisionId, patch: patch.data };
+  });
+  return products.sort((left, right) => left.productId - right.productId);
 }
 
 /**

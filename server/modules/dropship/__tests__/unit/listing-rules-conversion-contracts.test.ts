@@ -1,12 +1,28 @@
 import { describe, expect, it } from "vitest";
+import type { z } from "zod";
 import { LISTING_SETTINGS_FIX_CODES, listingSettingsSizePriceSchema } from "../../../../../shared/dropship/listing-settings";
 import {
   CONVERSION_BLOCKER_CODES, CONVERSION_CHANGED_FIELDS, CONVERSION_CHANGED_REASONS, CONVERSION_CONTENT_BLOCKER_CODES, CONVERSION_PAGE_SIZE,
   CONVERSION_RULE_KINDS,
   CONVERSION_SETTINGS, CONVERSION_STATES, CONVERSION_TIE_SETTINGS, LISTING_RULES_CONVERSION_ERROR_CODES, MAX_CONVERSION_PAGE,
   MAX_CONVERSION_REPORT_ITEMS, conversionChangeRowSchema, conversionKeptSchema, conversionReportSchema, conversionSizeViewSchema,
+  LISTING_RULES_CONVERSION_APPLY_OUTCOMES, listingRulesConversionApplyInputSchema, listingRulesConversionApplyResponseSchema,
   listingRulesConversionCheckInputSchema, listingRulesConversionCheckSchema, pricingRuleRefSchema, sizeRefSchema,
 } from "../../../../../shared/dropship/listing-rules-conversion";
+import {
+  LISTING_CONVERSION_CHILD_KEY_PREFIX, RESERVED_CONVERSION_KEY_MESSAGE, RESERVED_CONVERSION_KEY_PREFIXES, RULES_CONVERSION_SYSTEM_KEY_PREFIX,
+  isReservedConversionKey,
+} from "../../../../../shared/dropship/listing-rules-conversion-keys";
+import {
+  LISTING_SETTING_BUSY_REASONS, LISTING_SETTING_WRITE_ERROR_CODES, acknowledgeCategoryMovesInputSchema, applyPriceChangesInputSchema,
+  saveCategorySettingsInputSchema, saveProductSettingsInputSchema, saveProductsBulkInputSchema, saveSizePricesInputSchema,
+} from "../../../../../shared/dropship/listing-setting-writes";
+import { listingSettingRequestKeySchema } from "../../../../../shared/dropship/listing-setting-values";
+import { saveContentProfileInputSchema, saveListingContentInputSchema } from "../../../../../shared/dropship/listing-content";
+import { saveEbayCategoryRulesInputSchema } from "../../../../../shared/dropship/ebay-category-rules";
+import { applyPricingRulesInputSchema } from "../../../../../shared/dropship/pricing-rules";
+import { listingConversionChildKey } from "../../domain/listing-setting-values";
+import { rulesConversionSystemKey } from "../../application/dropship-listing-rules-conversion-service";
 
 /*
  * The dry run's contracts (plan 4.A.1, 4.A.3, 4.A.9 "Contracts"): every
@@ -294,5 +310,138 @@ describe("the dry run's answer", () => {
     expect(blockedBy(["no_ebay_category", "listing_content_description_required"])).toBe(true);
     expect(blockedBy([])).toBe(false);
     expect(blockedBy(["listing_content_description_required", "no_ebay_category"])).toBe(false);
+  });
+});
+
+describe("the apply's contracts (plan 7.B.1, 7.B.2)", () => {
+  const apply = (patch: Record<string, unknown> = {}) =>
+    ({ idempotencyKey: "ls-convert:7f9c2ba4-e88f-4a5e-9d1b-1c2d3e4f5a6b", planHash: "a".repeat(64), writesHash: "b".repeat(64), ...patch });
+
+  it("takes a request key and the two hashes of the plan shown, strictly", () => {
+    expect(listingRulesConversionApplyInputSchema.parse(apply())).toEqual(apply());
+    for (const patch of [{ idempotencyKey: "abcdefg" }, { idempotencyKey: "has space key" }, { idempotencyKey: "x".repeat(201) },
+      { planHash: "A".repeat(64) }, { planHash: "a".repeat(63) }, { writesHash: null }, { writesHash: "g".repeat(64) },
+      { storeConnectionId: 22 }]) {
+      expect(listingRulesConversionApplyInputSchema.safeParse(apply(patch)).success).toBe(false);
+    }
+    expect(listingRulesConversionApplyInputSchema.safeParse({ planHash: "a".repeat(64), writesHash: "b".repeat(64) }).success).toBe(false);
+    expect(listingRulesConversionApplyInputSchema.parse(apply({ idempotencyKey: "x".repeat(200) })).idempotencyKey).toHaveLength(200);
+  });
+
+  it("refuses the system job's key and a conversion's child key, so a vendor can never take the job's one key for a store (D12)", () => {
+    expect(RESERVED_CONVERSION_KEY_PREFIXES).toEqual([RULES_CONVERSION_SYSTEM_KEY_PREFIX, LISTING_CONVERSION_CHILD_KEY_PREFIX]);
+    // The keys the server derives start with them, so the refusal covers exactly what the job and the children use.
+    expect(rulesConversionSystemKey(23).startsWith(RULES_CONVERSION_SYSTEM_KEY_PREFIX)).toBe(true);
+    expect(listingConversionChildKey(apply().idempotencyKey as string, "category", 5).startsWith(LISTING_CONVERSION_CHILD_KEY_PREFIX)).toBe(true);
+    for (const idempotencyKey of [rulesConversionSystemKey(23), "rules-conversion:anything-else",
+      listingConversionChildKey(apply().idempotencyKey as string, "product", 7)]) {
+      expect(isReservedConversionKey(idempotencyKey)).toBe(true);
+      const parsed = listingRulesConversionApplyInputSchema.safeParse(apply({ idempotencyKey }));
+      expect(parsed.success).toBe(false);
+      expect(parsed.error?.issues.map((issue) => issue.path)).toEqual([["idempotencyKey"]]);
+    }
+    // Only the prefix is reserved: the client's own key and keys that merely contain the words pass.
+    for (const idempotencyKey of ["ls-convert:rules-conversion:23", "Rules-Conversion:23", "lcx:12345678"]) {
+      expect(listingRulesConversionApplyInputSchema.safeParse(apply({ idempotencyKey })).success).toBe(true);
+    }
+  });
+
+  it("answers converted, replayed or nothing to convert; only nothing to convert has no record, and then writes nothing", () => {
+    expect(LISTING_RULES_CONVERSION_APPLY_OUTCOMES).toEqual(["converted", "replayed", "nothing_to_convert"]);
+    const ok = (answer: Record<string, unknown>) => listingRulesConversionApplyResponseSchema.safeParse(answer).success;
+    expect(ok({ outcome: "converted", conversionId: 1, categoryCount: 2, productCount: 3 })).toBe(true);
+    expect(ok({ outcome: "replayed", conversionId: Number.MAX_SAFE_INTEGER, categoryCount: 10_000, productCount: 0 })).toBe(true);
+    expect(ok({ outcome: "nothing_to_convert", conversionId: null, categoryCount: 0, productCount: 0 })).toBe(true);
+    for (const broken of [
+      { outcome: "converted", conversionId: null, categoryCount: 0, productCount: 0 },
+      { outcome: "replayed", conversionId: null, categoryCount: 0, productCount: 0 },
+      { outcome: "nothing_to_convert", conversionId: 1, categoryCount: 0, productCount: 0 },
+      { outcome: "nothing_to_convert", conversionId: null, categoryCount: 0, productCount: 1 },
+      { outcome: "converted", conversionId: 0, categoryCount: 0, productCount: 0 },
+      { outcome: "converted", conversionId: 1, categoryCount: 10_001, productCount: 0 },
+      { outcome: "converted", conversionId: 1, categoryCount: 1.5, productCount: 0 },
+      { outcome: "not_clean", conversionId: null, categoryCount: 0, productCount: 0 },
+      { outcome: "converted", conversionId: 1, categoryCount: 0, productCount: 0, clean: true },
+    ]) {
+      expect(ok(broken)).toBe(false);
+    }
+  });
+
+  it("names its three refusals in the shared write code list too", () => {
+    expect([LISTING_SETTING_WRITE_ERROR_CODES.conversionChanged, LISTING_SETTING_WRITE_ERROR_CODES.conversionCheckUnavailable,
+      LISTING_SETTING_WRITE_ERROR_CODES.conversionWouldBlockListing]).toEqual([LISTING_RULES_CONVERSION_ERROR_CODES.changed,
+      LISTING_RULES_CONVERSION_ERROR_CODES.checkUnavailable, LISTING_RULES_CONVERSION_ERROR_CODES.wouldBlockListing]);
+    expect(Object.isFrozen(LISTING_SETTING_WRITE_ERROR_CODES)).toBe(true);
+  });
+
+  it("names every BUSY reason a write raises before it writes, catalog_changed included", () => {
+    expect(LISTING_SETTING_BUSY_REASONS).toEqual({ heavyWrite: "heavy_write_in_progress", requestKeyChanged: "request_key_changed",
+      catalogChanged: "catalog_changed" });
+    expect(Object.isFrozen(LISTING_SETTING_BUSY_REASONS)).toBe(true);
+  });
+});
+
+describe("the reserved conversion keys on every vendor key schema (verify round, plan D12)", () => {
+  // The keys a store's system conversion writes are a function of its id alone (CVR openingOf, childKey).
+  const SYSTEM_KEY = rulesConversionSystemKey(22);
+  const RESERVED = [
+    ["the system job's key", SYSTEM_KEY],
+    ["its description templates' child key", listingConversionChildKey(SYSTEM_KEY, "content_profile", 22)],
+    ["its eBay rules' child key", listingConversionChildKey(SYSTEM_KEY, "ebay_rules", 22)],
+    ["its category child key", listingConversionChildKey(SYSTEM_KEY, "category", 5)],
+    ["its product child key", listingConversionChildKey(SYSTEM_KEY, "product", 8)],
+  ] as const;
+  const UUID = "7f9c2ba4-e88f-4a5e-9d1b-1c2d3e4f5a6b";
+  // Each schema with a body it accepts and the key its client sends (client/src: LISTING_SETTINGS_KEY_PREFIXES and the older pages).
+  const SCHEMAS: ReadonlyArray<readonly [string, { safeParse: (body: unknown) => { success: boolean; error?: z.ZodError } },
+    (idempotencyKey: string) => unknown, string]> = [
+    ["W8 size prices", saveSizePricesInputSchema,
+      (idempotencyKey) => ({ idempotencyKey, rows: [{ productVariantId: 101, priceCents: 1_499, expectedRevisionId: null }] }), `ls-size-prices:${UUID}`],
+    ["W5 one product", saveProductSettingsInputSchema,
+      (idempotencyKey) => ({ idempotencyKey, expectedRevisionId: null, patch: { storeShelf: { mode: "none" } } }), `ls-product:${UUID}`],
+    ["W6 bulk", saveProductsBulkInputSchema, (idempotencyKey) => ({ idempotencyKey,
+      products: [{ productId: 7, expectedRevisionId: null }], patch: { storeShelf: { mode: "none" } } }), `ls-bulk:${UUID}`],
+    ["W12 one category", saveCategorySettingsInputSchema,
+      (idempotencyKey) => ({ idempotencyKey, expectedRevisionId: null, patch: { storeShelf: { mode: "none" } } }), `ls-cat:${UUID}`],
+    ["W7 price changes apply", applyPriceChangesInputSchema,
+      (idempotencyKey) => ({ reviewId: UUID, reviewHash: HASH_B, idempotencyKey }), `ls-price-check:${UUID}`],
+    ["W13 category moves", acknowledgeCategoryMovesInputSchema,
+      (idempotencyKey) => ({ idempotencyKey, items: [{ productId: 7, shownCategoryId: 3 }] }), `ls-moves:${UUID}`],
+    ["the conversion's apply", listingRulesConversionApplyInputSchema,
+      (idempotencyKey) => ({ idempotencyKey, planHash: HASH_A, writesHash: HASH_B }), `ls-convert:${UUID}`],
+    ["W4 description templates", saveContentProfileInputSchema, (idempotencyKey) => ({ expectedRevisionId: null,
+      profile: { defaultTemplate: { introduction: "", footer: "" }, groups: [] }, idempotencyKey }), `listing-content:${UUID}`],
+    ["one size's description", saveListingContentInputSchema, (idempotencyKey) => ({ customText: "My copy", expectedRevisionId: null,
+      expectedProfileRevisionId: null, expectedCatalogHash: HASH_A, idempotencyKey }), `listing-content:${UUID}`],
+    ["W3 eBay category rules", saveEbayCategoryRulesInputSchema,
+      (idempotencyKey) => ({ expectedRevisionId: null, draft: { defaultCategoryId: null, rules: [] }, idempotencyKey }), `ls-category:${UUID}`],
+    ["W1 pricing rules apply", applyPricingRulesInputSchema,
+      (idempotencyKey) => ({ reviewId: UUID, reviewHash: HASH_A, idempotencyKey }), `pricing-rules:${UUID}`],
+  ];
+
+  it("derives each refused key from the reserved prefixes", () => {
+    for (const [, key] of RESERVED) expect(isReservedConversionKey(key)).toBe(true);
+    expect(RESERVED_CONVERSION_KEY_MESSAGE).toBe("This key is kept for the system's own conversions.");
+  });
+
+  it("the PR 9 request key schema refuses them and takes every other key it took before", () => {
+    for (const [, key] of RESERVED) {
+      expect(listingSettingRequestKeySchema.safeParse(key).error?.issues).toEqual([
+        expect.objectContaining({ code: "custom", path: [], message: RESERVED_CONVERSION_KEY_MESSAGE })]);
+    }
+    for (const key of [`listing-settings:${UUID}`, "k".repeat(8), "ls-convert:rules-conversion:22", "LC:abcdefgh", "lcx:12345678"]) {
+      expect(listingSettingRequestKeySchema.safeParse(key).success).toBe(true);
+    }
+  });
+
+  it.each(SCHEMAS)("%s refuses each reserved key on the key alone, and takes its client's own key", (_label, schema, body, clientKey) => {
+    expect(schema.safeParse(body(clientKey)).success).toBe(true);
+    // A key that merely contains a reserved word, or differs in case, is not reserved (the unique keys are case-sensitive).
+    expect(schema.safeParse(body("Rules-Conversion:22")).success).toBe(true);
+    for (const [, key] of RESERVED) {
+      const parsed = schema.safeParse(body(key));
+      expect(parsed.success).toBe(false);
+      expect(parsed.error?.issues.map((issue) => [issue.path, issue.message])).toEqual([[["idempotencyKey"], RESERVED_CONVERSION_KEY_MESSAGE]]);
+    }
   });
 });

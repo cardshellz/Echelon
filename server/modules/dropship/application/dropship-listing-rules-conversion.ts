@@ -466,14 +466,21 @@ export function conversionList<T>(items: readonly T[]): { total: number; items: 
  * each once, by UTF-16 code units. The planner refuses inputs without a key
  * for each, so the loader and the planner read the same list.
  */
-export function conversionCategoryNamesToRead(listing: ListingSettingsInputs): string[] {
+export function conversionCategoryNamesToRead(listing: ConversionRuleProfiles): string[] {
   const names = new Set<string>();
   for (const rule of olderRules(listing).values()) if (rule.scope.type === "category") names.add(rule.scope.category);
   return [...names].sort(compareIds);
 }
 
+/**
+ * The three profiles the older rules live in: all the name lookup reads, so
+ * the apply (11c2) names the categories to lock from the profiles alone,
+ * before it loads the whole inputs (plan 7.B.3 step 8).
+ */
+export type ConversionRuleProfiles = Pick<ListingSettingsInputs, "pricing" | "content" | "ebayCategoryRules">;
+
 /** Every older rule of the store's three profiles, by `kind:id` (ids are unique within each profile's list). */
-function olderRules(listing: ListingSettingsInputs): ReadonlyMap<string, ConversionRule> {
+function olderRules(listing: ConversionRuleProfiles): ReadonlyMap<string, ConversionRule> {
   const rules = new Map<string, ConversionRule>();
   const add = (rule: ConversionRule) => {
     const key = ruleKey(rule.kind, rule.id);
@@ -1153,6 +1160,17 @@ export interface ConversionBlocks {
 
 /** A listing in this status is off eBay and gets no stock updates (migration 0086's status list). */
 const ENDED_LISTING_STATUS = "ended";
+/**
+ * A listing in these statuses has a push queued or running (queue creation
+ * and an operator's retry set `queued`, under or beside the store lock), and
+ * that push can go live with no eBay id read yet: the worker refreshes its
+ * preview, calls eBay, then writes the eBay id without the store lock
+ * (dropship-listing-push-worker.repository.ts, completeItem). A refresh taken
+ * before a conversion commits would publish from the old settings and mark
+ * the listing live after it, then be blocked from stock updates, which D9b
+ * exists to refuse; so it counts as listed.
+ */
+const PUSH_IN_FLIGHT_LISTING_STATUSES: ReadonlySet<string> = new Set(["queued", "pushing"]);
 
 /**
  * What blocks the move (plan D9, 3.2), each size listed once:
@@ -1160,7 +1178,8 @@ const ENDED_LISTING_STATUS = "ended";
  *   (refuseListingPriceSave, listing-price-save-guard.ts): a usable price
  *   today (one, and no blocking limit breached) and none after;
  * - `wouldBlockListing`: not already losing its price, it has a listing on
- *   eBay (an eBay listing id, not ended) that can be sent today (no blocker)
+ *   eBay (an eBay listing id, or a push queued or running, and not ended)
+ *   that can be sent today (no blocker)
  *   and would have a blocker after: a blocked listing stops getting stock
  *   updates and can oversell. Its fix is not the price, so it is listed here;
  * - `tooMuchText`, by the writers' own rule: only the planned product text
@@ -1187,7 +1206,8 @@ export function conversionBlocks(input: {
       continue;
     }
     const listing = input.listing.existingListings.get(row.productVariantId) ?? null;
-    const listed = listing !== null && listing.externalListingId !== null && listing.status !== ENDED_LISTING_STATUS;
+    const listed = listing !== null && listing.status !== ENDED_LISTING_STATUS
+      && (listing.externalListingId !== null || PUSH_IN_FLIGHT_LISTING_STATUSES.has(listing.status));
     if (listed && row.before.blockers.length === 0 && row.after.blockers.length > 0) {
       wouldBlockListing.push({ ...ref, reasons: [...row.after.blockers] });
     }

@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { LISTING_SETTING_WRITE_ERROR_CODES } from "../../../../shared/dropship/listing-setting-writes";
+import { LISTING_SETTING_BUSY_REASONS, LISTING_SETTING_WRITE_ERROR_CODES } from "../../../../shared/dropship/listing-setting-writes";
 import { evaluateDropshipCatalogExposure } from "../domain/catalog-exposure";
 import { DropshipError } from "../domain/errors";
 import type { RequestKeyUseDecision } from "../domain/listing-setting-request-key-use";
@@ -72,11 +72,14 @@ export function listingSettingIssues(issues: readonly unknown[]): ListingSetting
   return echoed;
 }
 
-/** W9's allow-lists (plan P10): one rule for every listing writer. */
-const WRITABLE_VENDOR_STATUSES: ReadonlySet<string> = new Set(["active", "onboarding"]);
+/**
+ * W9's allow-lists (plan P10): one rule for every listing writer, and the
+ * rules conversion's system job (PR 11, plan 13.2) uses the same two.
+ */
+export const WRITABLE_VENDOR_STATUSES: ReadonlySet<string> = new Set(["active", "onboarding"]);
 // Token health is not authority for a local setting: a store that needs a
 // sign-in keeps its settings writable; paused and disconnected stores do not.
-const WRITABLE_STORE_STATUSES: ReadonlySet<string> = new Set(["connected", "needs_reauth", "refresh_failed"]);
+export const WRITABLE_STORE_STATUSES: ReadonlySet<string> = new Set(["connected", "needs_reauth", "refresh_failed"]);
 
 export function assertListingSettingMember(memberId: string): void {
   if (typeof memberId !== "string" || !memberId.trim()) {
@@ -239,7 +242,7 @@ export class ListingSettingHeavyWriteGate {
     if (this.held) {
       throw new DropshipError(LISTING_SETTING_WRITE_ERROR_CODES.busy,
         "Another large listing settings change is being saved. Try again in a few seconds.", {
-          reason: "heavy_write_in_progress", retryAfterSeconds: HEAVY_WRITE_RETRY_AFTER_SECONDS,
+          reason: LISTING_SETTING_BUSY_REASONS.heavyWrite, retryAfterSeconds: HEAVY_WRITE_RETRY_AFTER_SECONDS,
           retryable: true, classification: "transient",
         });
     }
@@ -264,7 +267,7 @@ const REQUEST_KEY_CHANGED_RETRY_AFTER_SECONDS = 5;
 export function listingSettingRequestKeyChanged(storeConnectionId: number): DropshipError {
   return new DropshipError(LISTING_SETTING_WRITE_ERROR_CODES.busy,
     "Listing settings are being changed by another request. Try again.", {
-      storeConnectionId, reason: "request_key_changed", retryAfterSeconds: REQUEST_KEY_CHANGED_RETRY_AFTER_SECONDS,
+      storeConnectionId, reason: LISTING_SETTING_BUSY_REASONS.requestKeyChanged, retryAfterSeconds: REQUEST_KEY_CHANGED_RETRY_AFTER_SECONDS,
       retryable: true, classification: "transient",
     });
 }

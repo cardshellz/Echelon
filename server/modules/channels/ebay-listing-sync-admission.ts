@@ -26,6 +26,7 @@ export interface EbayListingSyncAdmissionFailure {
   readonly message: string;
 }
 export interface EbayListingSyncAdmissionDependencies {
+  findAcceptedCommand?(commandKey: string, productId: number, actor: string): Promise<StoredEbayListingSyncJob | null>;
   enqueue(identity: EbayListingSyncIdentity, actor: string, commandKey: string): Promise<StoredEbayListingSyncJob>;
   recordFailure(failure: EbayListingSyncAdmissionFailure): Promise<EbayListingSyncJob>;
   uuid(): string;
@@ -44,7 +45,11 @@ export async function admitEbayListingSyncProducts(
   for (const product of products) {
     const commandKey = input.commandKey ?? dependencies.uuid();
     try {
-      const job = await dependencies.enqueue(product.captureIdentity(), input.actor, commandKey);
+      // A lost acknowledgement must recover the accepted command before current
+      // catalog/mapping changes are captured. A fresh Sync uses a fresh key.
+      const accepted = input.commandKey
+        ? await dependencies.findAcceptedCommand?.(commandKey, product.productId, input.actor) : null;
+      const job = accepted ?? await dependencies.enqueue(product.captureIdentity(), input.actor, commandKey);
       addJobResult(summary, job, product.productName);
     } catch (error) {
       const failure = classifyAdmissionFailure(error);

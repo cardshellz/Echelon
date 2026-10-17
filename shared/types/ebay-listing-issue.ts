@@ -12,6 +12,11 @@ export const ebayListingIssueSchema = z.object({
     // Navigation stays inside the application; provider error text cannot supply a URL.
     href: z.string().regex(/^\/(?!\/)[A-Za-z0-9/_?=&.#%-]*$/).max(500).optional(),
   }).strict(),
+  // Optional inspection must not replace a safe normal Sync action.
+  diagnosticAction: z.object({
+    kind: z.literal("check_recovery"),
+    label: z.string().min(1).max(100),
+  }).strict().optional(),
   reference: z.string().max(240).optional(),
   details: z.array(z.object({ label: z.string().max(100), value: z.string().max(1000) }).strict()).max(25).optional(),
 }).strict();

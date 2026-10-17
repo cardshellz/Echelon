@@ -124,7 +124,7 @@ function CustomerAccount({ root, api, statusTarget }: { root: HTMLElement; api: 
         if (editResult.status === "fulfilled" && editResult.value && (editResult.value.activeOperationId || (currentSession.connection.enabled && editResult.value.eligibility.editable))) {
           bind("edit");
           const address = row.querySelector<HTMLElement>("[data-csz-account-action='address']");
-          if (address && editResult.value.eligibility.editable) address.hidden = false;
+          if (address && editResult.value.eligibility.editable && !editResult.value.activeOperationId) address.hidden = false;
         }
         if (returnResult.status === "fulfilled" && returnResult.value?.order.lines.some(line => line.eligibleQuantity > 0)) bind("return", returnResult.value);
         const failed = results.some(result => result.status === "rejected");

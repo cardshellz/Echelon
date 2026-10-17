@@ -41,6 +41,22 @@ export function isVariantSellable(input: VariantSellabilityInput): boolean {
   );
 }
 
+export interface ExistingEbayListingSyncCandidate extends VariantSellabilityInput {
+  syncStatus: string | null | undefined;
+  externalListingId: string | null | undefined;
+  externalOfferId: string | null | undefined;
+}
+
+/** A saved offer can finish its publication through Sync. This only selects
+ * work for inspection; provider identity and publication recovery still own
+ * admission. Ended or excluded members remain in the full identity snapshot,
+ * but cannot nominate a product for another sync. A SKU alone is not an offer. */
+export function isExistingEbayListingSyncCandidate(input: ExistingEbayListingSyncCandidate): boolean {
+  return isVariantSellable(input)
+    && ["pending", "synced", "error"].includes(input.syncStatus ?? "")
+    && Boolean(input.externalListingId?.trim() || input.externalOfferId?.trim());
+}
+
 import {
   isCustomerSellableVariant,
   type VariantSalesEligibility,

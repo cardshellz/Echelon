@@ -24,10 +24,12 @@ import { MAX_EBAY_STORE_SHELVES } from "../../domain/ebay-listing-setup-config";
 import {
   EMPTY_CATEGORY_LISTING_SETTING_VALUES,
   EMPTY_PRODUCT_LISTING_SETTING_VALUES,
+  LISTING_CONVERSION_CHILD_KINDS,
   LISTING_SETTING_CHILD_KINDS,
   applyListingSettingPatch,
   changedListingSettingFields,
   isListingSettingChildKey,
+  listingConversionChildKey,
   listingSettingBulkAuditValues,
   listingSettingChildKey,
   listingSettingChildKeyPrefix,
@@ -360,6 +362,51 @@ describe("listing setting child keys", () => {
     for (const invalid of [0, -5, 5.5, Number.NaN]) {
       expect(isListingSettingChildKey(PARENT_KEY, variantFive, "content", invalid)).toBe(false);
     }
+  });
+});
+
+describe("conversion child keys (PR 11, plan D12)", () => {
+  const CONVERSION_KEY = "ls-convert:7f9c2ba4-e88f-4a5e-9d1b-1c2d3e4f5a6b";
+
+  it("is lc:<sha256(conversion key)>:<kind>:<id>, deterministic, and a valid key of at most 94 characters for any kind", () => {
+    expect(LISTING_CONVERSION_CHILD_KINDS).toEqual(["category", "product", "content_profile", "ebay_rules"]);
+    expect(listingConversionChildKey(CONVERSION_KEY, "product", 7))
+      .toBe(`lc:${createHash("sha256").update(CONVERSION_KEY).digest("hex")}:product:7`);
+    for (const kind of LISTING_CONVERSION_CHILD_KINDS) {
+      const key = listingConversionChildKey("p".repeat(200), kind, 2_147_483_647);
+      expect(key).toBe(listingConversionChildKey("p".repeat(200), kind, 2_147_483_647));
+      expect(key.length).toBeLessThanOrEqual(94);
+      expect(LISTING_SETTING_KEY_PATTERN.test(key)).toBe(true);
+    }
+    expect(Math.max(...LISTING_CONVERSION_CHILD_KINDS.map((kind) => kind.length))).toBe("content_profile".length);
+  });
+
+  it("never meets a PR 9 child key: another prefix, which no PR 9 replay probe reads", () => {
+    for (const kind of ["product", "ebay_rules"] as const) {
+      const conversion = listingConversionChildKey(CONVERSION_KEY, kind, 7);
+      expect(conversion).not.toBe(listingSettingChildKey(CONVERSION_KEY, kind, 7));
+      expect(conversion.startsWith("lc:")).toBe(true);
+      expect(conversion.startsWith(listingSettingChildKeyPrefix(CONVERSION_KEY, kind))).toBe(false);
+      expect(isListingSettingChildKey(CONVERSION_KEY, conversion, kind)).toBe(false);
+    }
+    // One key per kind and target: two kinds or two conversions never share one.
+    expect(listingConversionChildKey(CONVERSION_KEY, "category", 7)).not.toBe(listingConversionChildKey(CONVERSION_KEY, "product", 7));
+    expect(listingConversionChildKey(CONVERSION_KEY, "product", 7)).not.toBe(listingConversionChildKey(`${CONVERSION_KEY}x`, "product", 7));
+  });
+
+  it.each([0, -1, 1.5, Number.NaN, 2_147_483_648])("refuses id %s", (id) => {
+    expect(() => listingConversionChildKey(CONVERSION_KEY, "category", id)).toThrow(expect.objectContaining({
+      code: "DROPSHIP_LISTING_SETTINGS_INVARIANT_FAILED",
+      context: expect.objectContaining({ classification: "fatal", retryable: false }),
+    }));
+  });
+
+  it("refuses a malformed conversion key and an unknown kind", () => {
+    for (const key of ["short", "not a valid key"]) {
+      expect(() => listingConversionChildKey(key, "product", 1)).toThrow(expect.objectContaining({ code: "DROPSHIP_LISTING_SETTINGS_INVARIANT_FAILED" }));
+    }
+    expect(() => listingConversionChildKey(CONVERSION_KEY, "size" as never, 1))
+      .toThrow(expect.objectContaining({ code: "DROPSHIP_LISTING_SETTINGS_INVARIANT_FAILED", context: expect.objectContaining({ kind: "size" }) }));
   });
 });
 

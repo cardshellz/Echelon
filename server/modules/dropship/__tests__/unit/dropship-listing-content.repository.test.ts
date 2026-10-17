@@ -58,7 +58,7 @@ const SQL = {
     + "VALUES ($1,$2,$3,$4) ON CONFLICT (store_connection_id, product_variant_id) DO UPDATE SET revision_id = EXCLUDED.revision_id",
   audit: "INSERT INTO dropship.dropship_audit_events "
     + "(vendor_id, store_connection_id, entity_type, entity_id, event_type, actor_type, actor_id, severity, payload, created_at) "
-    + "VALUES ($1,$2,$3,$4,'listing_content_saved','vendor',$5,'info',$6::jsonb,$7)",
+    + "VALUES ($1,$2,$3,$4,'listing_content_saved',$8,$5,'info',$6::jsonb,$7)",
   replay: (table: string) => `SELECT request_hash, store_connection_id FROM dropship.${table} WHERE vendor_id = $1 AND idempotency_key = $2`,
 };
 
@@ -160,7 +160,7 @@ describe("PgDropshipListingContentRepository (pinned statements)", () => {
       [SQL.audit, [VENDOR, STORE, "dropship_content_profile", String(STORE), MEMBER, JSON.stringify({
         before: { revisionId: 20, profile: OLD_PROFILE, updatedAt: EARLIER.toISOString() },
         after: { revisionId: 21, profile: PROFILE, updatedAt: NOW.toISOString() },
-      }), NOW]],
+      }), NOW, "vendor"]],
       [SQL.commit, []],
     ]);
     expect(client.release).toHaveBeenCalledOnce();
@@ -201,7 +201,7 @@ describe("PgDropshipListingContentRepository (pinned statements)", () => {
       [SQL.audit, [VENDOR, STORE, "dropship_listing_content_setting", String(VARIANT), MEMBER, JSON.stringify({
         before: { revisionId: 30, customText: "Old words", catalogHash: CATALOG_HASH, updatedAt: EARLIER.toISOString() },
         after: { revisionId: 31, customText: "Own words", catalogHash: CATALOG_HASH, updatedAt: NOW.toISOString() },
-      }), NOW]],
+      }), NOW, "vendor"]],
       [SQL.commit, []],
     ]);
     expect(client.release).toHaveBeenCalledOnce();
@@ -394,7 +394,7 @@ describe("client-scoped content writers", () => {
       [SQL.audit, [VENDOR, STORE, "dropship_content_profile", String(STORE), MEMBER, JSON.stringify({
         before: { revisionId: 20, profile: OLD_PROFILE, updatedAt: EARLIER.toISOString() },
         after: { revisionId: 21, profile: PROFILE, updatedAt: NOW.toISOString() },
-      }), NOW]],
+      }), NOW, "vendor"]],
     ]);
   });
 
@@ -412,8 +412,50 @@ describe("client-scoped content writers", () => {
       [SQL.audit, [VENDOR, STORE, "dropship_listing_content_setting", String(VARIANT), "member-2", JSON.stringify({
         before: null,
         after: { revisionId: 31, customText: "Own words", catalogHash: CATALOG_HASH, updatedAt: NOW.toISOString() },
-      }), NOW]],
+      }), NOW, "vendor"]],
     ]);
+  });
+
+  // PR 11, plan D11: the conversion writes the store's templates as its actor; every other caller passes no type.
+  it("audits a template as a vendor when no actor type is given, and as the type given otherwise", async () => {
+    for (const [actorType, expected] of [[undefined, "vendor"], ["vendor", "vendor"], ["system", "system"]] as const) {
+      const client = new ScriptedClient();
+      client.profileHead = { id: 20, profile: OLD_PROFILE, created_at: EARLIER };
+
+      await saveContentProfileWithClient(onClient(client), { ...target, actorId: "rules-conversion:44", ...(actorType ? { actorType } : {}) },
+        profileSave({ idempotencyKey: "lc:child-content-profile-1" }), HASH, NOW);
+
+      const audit = client.calls.find(([sql]) => sql === SQL.audit);
+      expect({ actorType, params: audit?.[1] }).toEqual({ actorType, params: [VENDOR, STORE, "dropship_content_profile", String(STORE),
+        "rules-conversion:44", JSON.stringify({
+          before: { revisionId: 20, profile: OLD_PROFILE, updatedAt: EARLIER.toISOString() },
+          after: { revisionId: 21, profile: PROFILE, updatedAt: NOW.toISOString() },
+        }), NOW, expected] });
+      // The revision table has no actor type: the revision keeps the actor id only, as before.
+      expect(client.calls.find(([sql]) => sql === SQL.insertProfileRevision)?.[1])
+        .toEqual([VENDOR, STORE, 20, JSON.stringify(PROFILE), "lc:child-content-profile-1", HASH, "rules-conversion:44", NOW]);
+    }
+  });
+
+  it("audits a size as the type given too, since both writers share the audit insert", async () => {
+    const client = new ScriptedClient();
+
+    await saveListingContentWithClient(onClient(client), { ...target, actorType: "system" }, VARIANT,
+      listingSave({ expectedRevisionId: null, idempotencyKey: "ls:child-content-2" }), HASH, NOW);
+
+    expect(client.calls.find(([sql]) => sql === SQL.audit)?.[1]).toEqual([VENDOR, STORE, "dropship_listing_content_setting", String(VARIANT),
+      MEMBER, expect.any(String), NOW, "system"]);
+  });
+
+  it("audits as a vendor through the repository's own transaction, which passes no actor type", async () => {
+    const client = new ScriptedClient();
+    client.profileHead = { id: 20, profile: OLD_PROFILE, created_at: EARLIER };
+    const repository = new PgDropshipListingContentRepository(poolFor(client));
+
+    await repository.execute(writeTarget("content:profile-1"), (tx) => tx.saveProfile(profileSave(), HASH, NOW));
+
+    const audits = client.calls.filter(([sql]) => sql === SQL.audit);
+    expect(audits.map(([, params]) => [params[4], params[7]])).toEqual([[MEMBER, "vendor"]]);
   });
 
   it("finds a replay on the caller's client in the table of its kind", async () => {

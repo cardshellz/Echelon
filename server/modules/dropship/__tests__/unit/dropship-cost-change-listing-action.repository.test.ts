@@ -112,6 +112,43 @@ describe("PgDropshipCostChangeListingActionRepository", () => {
     expect(facts.layersByStore.get(12)).toEqual({ products: new Map(), categories: new Map() });
   });
 
+  it("reads the stores' pricing profiles before any listing settings row (PR 11c, plan 7.A, D23)", async () => {
+    // The pool runs each read in its own snapshot. The rules conversion empties a store's groups and writes its category and
+    // product rows in one commit; a commit between the two reads must give old groups with the new rows (the old groups still
+    // win, and a new product row equals the group that won), never emptied groups over the old rows (the store default
+    // price). So no settings read may start until the profile read has answered: here it is held open until the test lets go.
+    let answerProfiles!: () => void;
+    const profilesHeld = new Promise<void>((resolve) => { answerProfiles = resolve; });
+    const reads: string[] = [];
+    const listingsRow = (id: number, store: number, variant: number) => ({ id, store_connection_id: store, product_variant_id: variant,
+      status: "active", vendor_retail_price_cents: null, platform: "ebay", variant_sku: null, variant_name: "Single", product_name: "Armor Envelope" });
+    const pool = {
+      query: vi.fn(async (sql: string) => {
+        if (sql.includes("FROM dropship.dropship_vendor_listings l")) { reads.push("listings"); return result([listingsRow(1, 9, 61), listingsRow(2, 12, 62)]); }
+        if (sql.includes("FROM dropship.dropship_listing_price_settings")) { reads.push("saved prices"); return result([]); }
+        if (sql.includes("FROM dropship.dropship_pricing_profiles p")) {
+          reads.push("profiles sent");
+          await profilesHeld;
+          reads.push("profiles answered");
+          return result([]);
+        }
+        if (sql.includes("FROM dropship.dropship_product_listing_settings s")) { reads.push("product settings"); return result([]); }
+        if (sql.includes("FROM dropship.dropship_category_listing_settings s")) { reads.push("category settings"); return result([]); }
+        throw new Error(`Unexpected query: ${sql}`);
+      }),
+    } as unknown as Pool;
+
+    const pending = repository(pool).loadVendorFacts({ vendorId: 5, productVariantIds: [61, 62] });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(reads).toEqual(["listings", "saved prices", "profiles sent"]);
+
+    answerProfiles();
+    const facts = await pending;
+    expect(reads).toEqual(["listings", "saved prices", "profiles sent", "profiles answered",
+      "product settings", "category settings", "product settings", "category settings"]);
+    expect([...facts.layersByStore.keys()]).toEqual([9, 12]);
+  });
+
   it("answers without a query when no variant is named, and skips the profile read when no listing names a store", async () => {
     const { pool, calls } = fakePool([result([]), result([])]);
     expect(await repository(pool).loadVendorFacts({ vendorId: 5, productVariantIds: [] }))

@@ -33,6 +33,7 @@ describe("customer order edit ownership", () => {
     const fixture = setup();
     fixture.store.get.mockResolvedValue({ actorId, connectionId: 4, omsOrderId: 9, baseline: { channelId: 2, customerId: "gid://shopify/Customer/100" } });
     await expect(fixture.service.operation(uuid)).rejects.toMatchObject({ status: 404 });
+    await expect(fixture.service.progress(uuid, "resume", uuid)).rejects.toMatchObject({ status: 404 });
     await expect(fixture.service.progress(uuid, "commit", uuid)).rejects.toMatchObject({ status: 404 });
     expect(fixture.edits.get).not.toHaveBeenCalled(); expect(fixture.edits.commit).not.toHaveBeenCalled();
   });
@@ -59,6 +60,11 @@ describe("customer order edit ownership", () => {
     const fixture = setup();
     await expect(fixture.service.catalogVariants(4, { productId: "gid://shopify/Product/1" })).rejects.toMatchObject({ status: 404 });
     expect(fixture.edits.catalogVariants).not.toHaveBeenCalled();
+  });
+  it("passes the authenticated actor into eligibility checks for the current edit hold", async () => {
+    const fixture = setup();
+    await fixture.service.order(4, 9, "v1");
+    expect(fixture.edits.order).toHaveBeenCalledWith(4, 9, "v1", "customer:2:100");
   });
 });
 describe("external Shopify edit audit identity", () => {
