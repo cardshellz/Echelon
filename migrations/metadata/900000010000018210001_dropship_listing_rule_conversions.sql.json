@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "migration": "900000010000018210001_dropship_listing_rule_conversions.sql",
+  "generation": 10,
+  "pr": 1821,
+  "ordinal": 1,
+  "after": [
+    "900000009000018120002_inventory_publication_quantity_consistency.sql"
+  ]
+}

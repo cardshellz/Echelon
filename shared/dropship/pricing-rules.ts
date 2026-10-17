@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { catalogScopeSchema, matchesCatalogScope, catalogTargetsInputSchema, catalogTargetsResponseSchema } from "./catalog-scope";
+import { refusingReservedConversionKeys } from "./listing-rules-conversion-keys";
 import {
   listingAmountCentsSchema, listingPriceBasisSchema, listingPriceCentsSchema, MAX_LISTING_PRICE_CENTS, rulePriceLevelSchema,
   type RulePriceLevel,
@@ -43,7 +44,9 @@ export const reviewPricingRulesInputSchema = z.object({
 }).strict();
 export const applyPricingRulesInputSchema = z.object({
   reviewId: z.string().uuid(), reviewHash: z.string().regex(/^[a-f0-9]{64}$/),
-  idempotencyKey: z.string().min(1).max(200).regex(/^[A-Za-z0-9:_-]+$/),
+  // The key lands only in dropship_pricing_applications, which a conversion never writes; the reserved
+  // prefixes are refused anyway, so no vendor key on a listing rules save is ever a conversion's.
+  idempotencyKey: refusingReservedConversionKeys(z.string().min(1).max(200).regex(/^[A-Za-z0-9:_-]+$/)),
 }).strict();
 export const pricingImpactRowSchema = z.object({
   productVariantId: id, title: z.string(), sku: z.string().nullable(),

@@ -55,6 +55,17 @@ describe("content HTTP boundary", () => {
   it.each([{ ...input, sku: "forged" }, { ...input, customText: "" }, { ...input, vendorId: 999 }, { ...input, expectedCatalogHash: "bad" }])("rejects invalid or extra authority fields", async (body) => {
     expect((await request("PUT", path, body)).status).toBe(400);
   });
+  // A rules conversion writes the store's templates under `lc:<hash>:content_profile:<store>` (plan D12): no vendor save may take it.
+  const RESERVED_KEY = `lc:${"a".repeat(64)}:content_profile:22`;
+  const profileInput = { expectedRevisionId: null, profile: { defaultTemplate: { introduction: "", footer: "" }, groups: [] }, idempotencyKey: "content-profile-save" };
+  it.each([["PUT", "/content-profile", profileInput], ["PUT", path, input]])("refuses a conversion's reserved key on %s %s with 400", async (method, suffix, body) => {
+    const refused = await request(method, suffix, { ...body, idempotencyKey: RESERVED_KEY });
+    expect(refused.status).toBe(400);
+    expect(await refused.json()).toEqual({ error: { code: "DROPSHIP_CONTENT_INVALID_INPUT",
+      message: "Check the description fields and reload if the draft is out of date." } });
+    expect((await request(method, suffix, { ...body, idempotencyKey: "rules-conversion:22" })).status).toBe(400);
+    expect((await request(method, suffix, body)).status).toBe(200);
+  });
   it.each([["DROPSHIP_CONTENT_VERSION_CONFLICT", 409], ["DROPSHIP_IDEMPOTENCY_CONFLICT", 409],
     ["DROPSHIP_CONTENT_NOT_ALLOWED", 403], ["DROPSHIP_CONTENT_NOT_AVAILABLE", 404], ["DROPSHIP_STORE_CONNECTION_REQUIRED", 404]])("maps %s to %s", async (code, status) => {
     service.saveForMember.mockRejectedValueOnce(new DropshipError(String(code), "Controlled error."));

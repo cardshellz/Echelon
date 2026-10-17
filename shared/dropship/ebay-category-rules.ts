@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { catalogScopeSchema, MAX_NAMED_CATALOG_GROUP_ITEMS, type CatalogScope } from "./catalog-scope";
+import { refusingReservedConversionKeys } from "./listing-rules-conversion-keys";
 
 /**
  * Vendor eBay category rules for one store connection.
@@ -36,7 +37,8 @@ export const MAX_EBAY_CATEGORY_IMPACT_GROUPS = 200;
 const revisionId = z.number().int().positive().max(2_147_483_647);
 const productVariantId = z.number().int().positive().max(2_147_483_647);
 const count = z.number().int().nonnegative();
-const saveKey = z.string().min(1).max(200).regex(/^[A-Za-z0-9:_-]+$/);
+// A conversion writes the store's rules under its own `lc:` child key, so a vendor key never takes those prefixes.
+const saveKey = refusingReservedConversionKeys(z.string().min(1).max(200).regex(/^[A-Za-z0-9:_-]+$/));
 const ruleId = z.string().min(1).max(80).regex(/^[A-Za-z0-9_-]+$/);
 const ruleName = z.string().trim().min(1).max(120);
 const categoryName = z.string().trim().min(1).max(MAX_EBAY_CATEGORY_NAME_LENGTH);

@@ -12,6 +12,7 @@ import {
   saveProductsBulkResponseSchema,
   saveSizePricesResponseSchema,
 } from "../../../../../shared/dropship/listing-setting-writes";
+import { listingRulesConversionApplyResponseSchema } from "../../../../../shared/dropship/listing-rules-conversion";
 import { logger } from "../../../../platform/observability/logger";
 import {
   createDropshipListingSettingWriteServices,
@@ -25,8 +26,9 @@ import { listingSettingWriteErrorAnswer } from "./dropship-listing-setting-write
  * The listing-settings writes (Listing settings design 8.5; plan PR 9). Reads
  * stay in dropship-listing-settings.routes.ts, which has no write dependency.
  * Every route: sign-in, its member budget, then the 1 MiB parser, so no
- * anonymous or over-budget caller makes the server parse a large body. Routes
- * orchestrate only: the services check, write and log each save.
+ * anonymous or over-budget caller makes the server parse a large body; the
+ * rules conversion's apply has a small body and keeps the global 100 KB
+ * parser. Routes orchestrate only: the services check, write and log each save.
  */
 
 /** Bulk writes and price checks share one budget per member (design 8.8). */
@@ -85,6 +87,11 @@ export function registerDropshipListingSettingWritesRoutes(
   // budget it shares with W5 and W12 (plan P7); the 1 MiB parser, as a 10,000-item body is about 530 KB.
   app.post(`${base}/category-moves/acknowledge`, requireDropshipAuth, singleLimiter, parseBody, (req, res) => respond(req, res,
     acknowledgeCategoryMovesResponseSchema, () => services.categoryMoves.acknowledgeForMember(memberId(req),
+      parseId(req.params.storeConnectionId), req.body)));
+  // W11's vendor apply (PR 11, plan 7.B.2): a heavy write on the bulk budget, its transaction behind the service's
+  // heavy-write gate. Its body is a key and two hashes, so it keeps the global parser and is not in the 1 MiB table.
+  app.post(`${base}/conversion/apply`, requireDropshipAuth, bulkLimiter, (req, res) => respond(req, res,
+    listingRulesConversionApplyResponseSchema, () => services.conversion.applyForMember(memberId(req),
       parseId(req.params.storeConnectionId), req.body)));
 }
 

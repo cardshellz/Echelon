@@ -1,12 +1,15 @@
 import { z } from "zod";
 import { catalogScopeSchema, MAX_NAMED_CATALOG_GROUP_ITEMS } from "./catalog-scope";
+import { refusingReservedConversionKeys } from "./listing-rules-conversion-keys";
 
 export const MAX_DESCRIPTION_TEXT_LENGTH = 20_000;
 export const MAX_TEMPLATE_TEXT_LENGTH = 4_000;
 export const MAX_DESCRIPTION_HTML_LENGTH = 200_000;
 const id = z.number().int().positive().max(2_147_483_647);
 const hash = z.string().regex(/^[a-f0-9]{64}$/);
-const saveKey = z.string().min(1).max(200).regex(/^[A-Za-z0-9:_-]+$/);
+// Both saves' key. A conversion writes the store's templates (never a size's text) under its own `lc:`
+// child key, so no vendor key takes the reserved prefixes on either save.
+const saveKey = refusingReservedConversionKeys(z.string().min(1).max(200).regex(/^[A-Za-z0-9:_-]+$/));
 // Vendor-authored content is text, never HTML. Normalize before hashing/saving.
 const text = (max: number) => z.string().max(max).transform((value) => value.replace(/\r\n?/g, "\n").trim())
   .refine((value) => !/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(value), "Control characters are not allowed.");

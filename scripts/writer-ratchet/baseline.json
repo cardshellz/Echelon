@@ -273,6 +273,9 @@
   "dropship.dropship_listing_push_jobs": [
     "modules/dropship"
   ],
+  "dropship.dropship_listing_rule_conversions": [
+    "modules/dropship"
+  ],
   "dropship.dropship_listing_sync_events": [
     "modules/dropship"
   ],

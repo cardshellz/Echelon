@@ -668,3 +668,25 @@ describe("golden listing previews: every path gives the preview's values (8b-G)"
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// PR 11c (plan 7.A, D23): the preview reads its four resolver inputs in one
+// call (loadResolverInputs, as the PostgreSQL repository answers it). On a
+// store that nothing converts, that call reads exactly what the four separate
+// reads read, in the same order, and every preview is the same: the push-time
+// refresh and the stock catch-up, which build their intent from this
+// preview, publish what they published before.
+// ---------------------------------------------------------------------------
+
+describe("golden listing previews: one snapshot for the resolver reads (PR 11c, D23)", () => {
+  it.each(scenarios)("the one-snapshot read gives the separate reads' preview and statements: %s", async (_name, scenario) => {
+    const layerRows = layerRowsOf(scenario);
+    const separate = await runGoldenPreview(scenario.store, { layerRows, resolverReads: "separate" });
+    const oneSnapshot = await runGoldenPreview(scenario.store, { layerRows });
+
+    expect(oneSnapshot.preview).toStrictEqual(separate.preview);
+    expect(oneSnapshot.checks).toStrictEqual(separate.checks);
+    expect(oneSnapshot.statements).toEqual(separate.statements);
+    expect(oneSnapshot.statements.filter((sql) => PRODUCT_SETTINGS_READ.test(sql))).toHaveLength(1);
+  });
+});

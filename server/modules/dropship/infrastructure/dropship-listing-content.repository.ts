@@ -8,8 +8,12 @@ import { readContentProfile, readListingContentSettings } from "./dropship-listi
 import { readListingSettingLayers } from "./dropship-listing-setting-layers.reader";
 
 type Client = Pick<PoolClient, "query">;
-/** Whose content is written, and who writes it (audited as a vendor). */
-export interface ContentWriteTarget { vendorId: number; storeConnectionId: number; actorId: string }
+/**
+ * Whose content is written, and who writes it. The audit row takes
+ * `actorType`, a vendor when absent (every vendor route passes none); only
+ * the rules conversion's system job passes "system" (PR 11, plan D11).
+ */
+export interface ContentWriteTarget { vendorId: number; storeConnectionId: number; actorId: string; actorType?: "vendor" | "system" }
 
 export class PgDropshipListingContentRepository implements ContentRepository {
   constructor(private readonly dbPool: Pool = defaultPool) {}
@@ -83,9 +87,10 @@ export async function findContentReplayWithClient(client: Client, target: Pick<C
  * the store lock and the owner rows (see execute) and checks the request key; this
  * takes no lock. A stale expected revision is DROPSHIP_CONTENT_VERSION_CONFLICT
  * before any write, so a reused caller gets the 409 rather than the trigger's 23514.
+ * Answers the new revision's id (the rules conversion's store audit row names it).
  */
 export async function saveContentProfileWithClient(client: Client, target: ContentWriteTarget,
-  save: SaveContentProfileInput, hash: string, now: Date): Promise<void> {
+  save: SaveContentProfileInput, hash: string, now: Date): Promise<{ revisionId: number }> {
   const before = await readContentProfile(client, target.vendorId, target.storeConnectionId);
   if (before.revisionId !== save.expectedRevisionId) throw contentConflict();
   const revision = await client.query<{ id: number }>(`INSERT INTO dropship.dropship_content_profile_revisions
@@ -98,6 +103,7 @@ export async function saveContentProfileWithClient(client: Client, target: Conte
     VALUES ($1,$2,$3) ON CONFLICT (store_connection_id) DO UPDATE SET revision_id = EXCLUDED.revision_id`, [target.vendorId, target.storeConnectionId, id]);
   await insertContentAudit(client, target, "dropship_content_profile", target.storeConnectionId, before,
     await readContentProfile(client, target.vendorId, target.storeConnectionId), now);
+  return { revisionId: id };
 }
 
 /**
@@ -133,6 +139,8 @@ async function insertContentAudit(client: Client, target: ContentWriteTarget, ki
   before: unknown, after: unknown, now: Date): Promise<void> {
   await client.query(`INSERT INTO dropship.dropship_audit_events
     (vendor_id, store_connection_id, entity_type, entity_id, event_type, actor_type, actor_id, severity, payload, created_at)
-    VALUES ($1,$2,$3,$4,'listing_content_saved','vendor',$5,'info',$6::jsonb,$7)`,
-  [target.vendorId, target.storeConnectionId, kind, String(entityId), target.actorId, JSON.stringify({ before, after }), now]);
+    VALUES ($1,$2,$3,$4,'listing_content_saved',$8,$5,'info',$6::jsonb,$7)`,
+  // The actor type is the last parameter, so every earlier one keeps the position it has always had.
+  [target.vendorId, target.storeConnectionId, kind, String(entityId), target.actorId, JSON.stringify({ before, after }), now,
+    target.actorType ?? "vendor"]);
 }

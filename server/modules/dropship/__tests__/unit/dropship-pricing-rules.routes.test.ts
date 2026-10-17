@@ -54,6 +54,12 @@ describe("store pricing HTTP contracts", () => {
     { ...reviewInput, releaseFixedOverrides: undefined }])("rejects invalid rule input %j", async (body) => {
     expect((await request("/reviews", "POST", body)).status).toBe(400);
   });
+  it.each(["rules-conversion:22", `lc:${"a".repeat(64)}:category:5`])("refuses an apply under a conversion's reserved key %s with 400 (plan D12)", async (idempotencyKey) => {
+    const refused = await request("/apply", "POST", { ...applyInput, idempotencyKey });
+    expect(refused.status).toBe(400);
+    expect((await refused.json()).error.code).toBe("DROPSHIP_PRICING_INVALID_INPUT");
+    expect((await request("/apply", "POST", applyInput)).status).toBe(200);
+  });
   it.each([["DROPSHIP_PRICING_REVIEW_STALE", 409], ["DROPSHIP_IDEMPOTENCY_CONFLICT", 409], ["DROPSHIP_PRICING_REVIEW_BLOCKED", 422],
     ["DROPSHIP_PRICING_NOT_ALLOWED", 403], ["DROPSHIP_PRICING_REVIEW_NOT_FOUND", 404]])("classifies %s", async (code, status) => {
     service.applyForMember.mockRejectedValueOnce(new DropshipError(String(code), "Controlled failure."));

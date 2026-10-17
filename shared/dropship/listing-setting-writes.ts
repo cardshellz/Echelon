@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { ebayCategoryIdSchema } from "./ebay-category-rules";
 import { descriptionTextSchema } from "./listing-content";
+import { LISTING_RULES_CONVERSION_ERROR_CODES } from "./listing-rules-conversion";
 import { listingPriceCentsSchema } from "./listing-price";
 import {
   CATEGORY_LISTING_SETTING_FIELDS,
@@ -59,6 +60,28 @@ export const LISTING_SETTING_WRITE_ERROR_CODES = Object.freeze({
   pricesMoved: "DROPSHIP_LISTING_PRICES_MOVED",
   /** The store needs an eBay sign-in and the change names eBay values not saved yet (plan P13). */
   ebaySignInRequired: "DROPSHIP_LISTING_SETTINGS_EBAY_SIGN_IN_REQUIRED",
+  /** The rules conversion's apply (PR 11, plan 3.4): 409, the plan recomputed under the store lock is not the one shown. */
+  conversionChanged: LISTING_RULES_CONVERSION_ERROR_CODES.changed,
+  /** 503, transient: the .ops costs could not be read, so prices from cost can't be compared (Retry-After 60). */
+  conversionCheckUnavailable: LISTING_RULES_CONVERSION_ERROR_CODES.checkUnavailable,
+  /** 422, permanent: a size listed on eBay that can be sent today would be blocked after the move (plan D9b). */
+  conversionWouldBlockListing: LISTING_RULES_CONVERSION_ERROR_CODES.wouldBlockListing,
+} as const);
+
+/**
+ * The `context.reason` of a DROPSHIP_LISTING_SETTINGS_BUSY answer (503,
+ * transient). Each is raised before the write's first statement that
+ * writes, so nothing was written and the same request key may be sent again
+ * after `Retry-After`. A lost connection or a deadlock is BUSY too, but
+ * carries `failure` instead: whether its COMMIT landed is unknown.
+ */
+export const LISTING_SETTING_BUSY_REASONS = Object.freeze({
+  /** Another heavy write holds this process's gate (plan PR 9, 3.10 (a)). */
+  heavyWrite: "heavy_write_in_progress",
+  /** The preflight's rows under the key are gone in the write transaction (plan PR 9, 6.13 #7). */
+  requestKeyChanged: "request_key_changed",
+  /** The rules conversion: Card Shellz changed a chosen size, product or category between its reads and its locks (PR 11). */
+  catalogChanged: "catalog_changed",
 } as const);
 
 /**
