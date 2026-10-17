@@ -5,6 +5,7 @@ import {
   LISTING_SETTINGS_BULK_WORDS,
   LISTING_SETTINGS_CATEGORY_PRICE_WORDS,
   LISTING_SETTINGS_CATEGORY_WORDS,
+  LISTING_SETTINGS_CONVERSION_WORDS,
   LISTING_SETTINGS_EDIT_WORDS,
   LISTING_SETTINGS_PRICE_CHECK_WORDS,
   LISTING_SETTINGS_SIZE_PRICES_WORDS,
@@ -13,6 +14,8 @@ import {
 } from "../dropship-listing-settings-words";
 import {
   BULK_EDITOR_ID,
+  CONVERSION_EDITOR_ID,
+  CONVERSION_UNCONFIRMED_WORDS,
   LISTING_SETTINGS_GUARD_ID_PREFIX,
   LISTING_SETTINGS_KEY_PREFIXES,
   LISTING_SETTINGS_SAVE_WORDS,
@@ -31,6 +34,7 @@ import {
   decideOpen,
   describeLeavePrompt,
   describeListingSettingsBar,
+  draftEnteredConflict,
   failureAfterUnconfirmed,
   isDraftDirty,
   isDraftLocked,
@@ -101,8 +105,11 @@ describe("store default rows", () => {
       policy: "ls-policy", shelf: "ls-shelf", shipFrom: "ls-ship-from", pricingApply: "ls-apply",
       category: "ls-category", description: "ls-text", sizePrice: "ls-price", productSettings: "ls-product",
       bulkSettings: "ls-bulk", priceCheck: "ls-price-check", categoryMoves: "ls-moves", categorySettings: "ls-cat",
-      sizePrices: "ls-size-prices",
+      sizePrices: "ls-size-prices", conversion: "ls-convert",
     });
+    // W11's key is one of its own (plan PR 11, D12): never the system's `rules-conversion:` nor a revision's `lc:`.
+    expect(LISTING_SETTINGS_KEY_PREFIXES.conversion).not.toMatch(/^(rules-conversion|lc)$/);
+    expect(new Set(Object.values(LISTING_SETTINGS_KEY_PREFIXES)).size).toBe(Object.keys(LISTING_SETTINGS_KEY_PREFIXES).length);
     // W9's "ls-price" (one size) and W8's "ls-size-prices" (many sizes) are two prefixes, never one key shape.
     expect(LISTING_SETTINGS_KEY_PREFIXES.sizePrices).not.toBe(LISTING_SETTINGS_KEY_PREFIXES.sizePrice);
   });
@@ -199,6 +206,41 @@ describe("store default rows", () => {
     // The other way round: a held change elsewhere is asked about before a Got it starts.
     const product = run([{ type: "open", editor: productEditorId(11), place: "Penny Sleeves", base: { a: 1 } }, { type: "edit", value: { a: 2 } }]);
     expect(decideOpen(product, UPDATED_PRODUCTS_EDITOR_ID)).toBe("ask");
+  });
+
+  it("names Your older group rules' editor \"convert\", a move that holds no change, the W13 pattern (PR 11d, plan 8.2)", () => {
+    expect(CONVERSION_EDITOR_ID).toBe("convert");
+    const hashes = Object.freeze({ planHash: "a".repeat(64), writesHash: "c".repeat(64) });
+    const move = Object.freeze({ signature: `{"v":1,"writer":"W11","storeConnectionId":22,"planHash":"${"a".repeat(64)}","writesHash":"${"c".repeat(64)}"}`, key: "ls-convert:first" });
+    const opened = run([{ type: "open", editor: CONVERSION_EDITOR_ID, place: "Your older group rules", base: hashes }, { type: "startSave", attempt: move }]);
+    expect(opened).toMatchObject({ editor: "convert", phase: "saving", changes: 0, base: hashes, value: hashes, attempt: move });
+    expect(isDraftDirty(opened)).toBe(false);
+    // While it is sent, nothing else opens.
+    expect(decideOpen(opened, "price")).toBe("refuse");
+    expect(decideOpen(opened, categoryEditorId(40))).toBe("refuse");
+    const uncertain = run([{ type: "failure", key: move.key, failure: failure("uncertain") }], opened);
+    expect(uncertain).toMatchObject({ editor: "convert", phase: "uncertain", changes: 0, attempt: move });
+    // Check again resends the same plan with the same key; another plan can't start meanwhile.
+    expect(nextSaveAttempt(uncertain, move.signature, () => "ls-convert:new")).toBe(move);
+    expect(nextSaveAttempt(uncertain, "another plan", () => "ls-convert:new")).toBeNull();
+    // It holds no change: another editor opens over it without a word, and its key goes (the server answers a store
+    // already moved with nothing_to_convert, plan 8.4).
+    expect(decideOpen(uncertain, categoryEditorId(40))).toBe("open");
+    expect(decideOpen(uncertain, productEditorId(5))).toBe("open");
+    expect(run([{ type: "open", editor: productEditorId(5), place: "Team Bags", base: { a: 1 } }], uncertain))
+      .toMatchObject({ editor: "product:5", phase: "editing", attempt: null });
+    // A refused move opens fresh on new hashes, with no key: the next press gets a new one.
+    const refused = run([{ type: "failure", key: move.key, failure: failure("conflict") }], opened);
+    expect(refused).toMatchObject({ phase: "conflict", attempt: null });
+    const newer = Object.freeze({ planHash: "b".repeat(64), writesHash: "c".repeat(64) });
+    expect(run([{ type: "open", editor: CONVERSION_EDITOR_ID, place: "Your older group rules", base: newer }], refused))
+      .toMatchObject({ editor: "convert", phase: "editing", base: newer, attempt: null });
+    // A confirmed move is never named as a change in the bar.
+    const saved = run([{ type: "saved", key: move.key, nowMs: T0 }], opened);
+    expect(describeListingSettingsBar({ draft: saved, olderDraftCount: 0, saving: false })).toBe("All saved");
+    // The other way round: a held change elsewhere is asked about before a move starts.
+    const product = run([{ type: "open", editor: productEditorId(11), place: "Penny Sleeves", base: { a: 1 } }, { type: "edit", value: { a: 2 } }]);
+    expect(decideOpen(product, CONVERSION_EDITOR_ID)).toBe("ask");
   });
 });
 
@@ -467,7 +509,7 @@ describe("reduceListingSettingsDraft", () => {
 });
 
 /** The PR 7 writers; W5, W6, W7, W8, W12 and W13 (PR 10) have their own tables below. */
-type Pr7Writer = Exclude<ListingSettingsWriter, "W5" | "W6" | "W7" | "W8" | "W12" | "W13">;
+type Pr7Writer = Exclude<ListingSettingsWriter, "W5" | "W6" | "W7" | "W8" | "W11" | "W12" | "W13">;
 
 describe("classifyWriteFailure", () => {
   const writers: readonly Pr7Writer[] = ["W1", "W2", "W3", "W4", "W9", "W10"];
@@ -848,11 +890,46 @@ describe("failureAfterUnconfirmed (D7b)", () => {
     }
   });
 
+  it("takes a runner's own words: the move's (W11) say \"the move\", never \"your save\" (PR 11d, plan 8.3)", () => {
+    const words = LISTING_SETTINGS_CONVERSION_WORDS;
+    expect(failureAfterUnconfirmed(true, answer("unreachable"), CONVERSION_UNCONFIRMED_WORDS)).toEqual({ ...answer("unreachable"), phase: "uncertain", message: words.stillUnconfirmed });
+    expect(failureAfterUnconfirmed(true, answer("rate_limited"), CONVERSION_UNCONFIRMED_WORDS))
+      .toEqual({ ...answer("rate_limited"), phase: "uncertain", message: words.stillUnconfirmedRateLimited });
+    const block: WriteFailure = { phase: "blocked", message: "Nothing was saved.", code: "DROPSHIP_LISTING_STORE_BLOCKED", status: 403, fields: [] };
+    expect(failureAfterUnconfirmed(true, block, CONVERSION_UNCONFIRMED_WORDS)).toEqual({ ...block, phase: "uncertain", message: words.uncertain });
+    for (const text of Object.values(CONVERSION_UNCONFIRMED_WORDS)) {
+      expect(text.startsWith("We couldn't confirm the move.")).toBe(true);
+      expect(text).not.toMatch(/Nothing was (saved|moved)/);
+    }
+  });
+
   it("keeps the request key, so the next Check again resends the same request", () => {
     const sent = run([{ type: "failure", key: ATTEMPT.key, failure: failure("uncertain") }, startSave], savingDraft());
     const still = run([{ type: "failure", key: ATTEMPT.key, failure: failureAfterUnconfirmed(true, answer("unreachable")) }], sent);
     expect(still).toMatchObject({ phase: "uncertain", attempt: ATTEMPT });
     expect(isDraftLocked(still)).toBe(true);
+  });
+});
+
+describe("draftEnteredConflict (PR 11d, plan 8.2, D25)", () => {
+  const at = (phase: ListingSettingsDraft["phase"], editor: ListingSettingsDraft["editor"] = categoryEditorId(40)) => ({ editor, phase });
+
+  it("is true once per attempt: when a draft's save is answered as a conflict, not while it stays in conflict", () => {
+    expect(draftEnteredConflict(at("saving"), at("conflict"))).toBe(true);
+    expect(draftEnteredConflict(null, at("conflict"))).toBe(true);
+    expect(draftEnteredConflict(at("conflict"), at("conflict"))).toBe(false);
+    // A rebase and a second save that conflicts again is another attempt.
+    expect(draftEnteredConflict(at("saving"), at("conflict"))).toBe(true);
+    // Another editor's conflict is new even when the last draft was in conflict too.
+    expect(draftEnteredConflict(at("conflict", productEditorId(11)), at("conflict"))).toBe(true);
+  });
+
+  it("is false for every other phase, and with no draft", () => {
+    for (const phase of ["editing", "saving", "saved", "saved_view_stale", "uncertain", "unreachable", "refused", "rate_limited", "reload_required", "blocked"] as const) {
+      expect(draftEnteredConflict(at("saving"), at(phase))).toBe(false);
+    }
+    expect(draftEnteredConflict(at("conflict"), null)).toBe(false);
+    expect(draftEnteredConflict(null, null)).toBe(false);
   });
 });
 

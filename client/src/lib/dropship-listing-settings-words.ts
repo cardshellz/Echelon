@@ -1484,9 +1484,9 @@ export const LISTING_SETTINGS_CONVERSION_WORDS = Object.freeze({
   changesHeading: "Sizes that would change",
   // Interim (PR 11 PROPOSAL): the next page of changed sizes (5.2), as the page's other lists say it.
   loadMore: "Load more",
-  // Interim (PR 11 PROPOSAL): the read-only sheet's footer (11b, 5.2).
-  preview: "This is a preview. Nothing is moved yet.",
-  // Interim (PR 11 PROPOSAL): a page of another plan than page 0's: the pages drop and page 0 is read again (CUX#12).
+  // Interim (PR 11 PROPOSAL): a page of another plan than page 0's: the pages drop and page 0 is read again (CUX#12); and
+  // the move refused because its plan moved (409 CHANGED `settings_changed`) or now has a block the plan shown didn't
+  // (422 WOULD_BE_LOST, WOULD_BLOCK_LISTING, the store text cap; beyond 11.4): page 0 is read again and says why (8.3).
   changed: "Something changed since you opened this. Check the list again.",
   // Interim (PR 11 PROPOSAL): a size with no price, in a row's Price line (11.4).
   noPrice: "—",
@@ -1505,7 +1505,71 @@ export const LISTING_SETTINGS_CONVERSION_WORDS = Object.freeze({
   becomesUnlistable: "Can be listed → can't be listed",
   becomesListable: "Can't be listed → can be listed",
   stillUnlistable: "Still can't be listed, now because",
+  // --- [Move them over] (PR 11d, plan 8.3, 11.4) ---
+  // Interim (PR 11 PROPOSAL): the sheet's one write button (8.3).
+  moveOver: "Move them over",
+  // Interim (PR 11 PROPOSAL): the footer's line while the move is out (8.3 `moving`); the button keeps its label and is off.
+  moving: "Moving them over…",
+  // Interim (PR 11 PROPOSAL): a confirmed move (`converted`, or this key's `replayed`); it stays until the sheet closes (11.2).
+  moved: "Moved over. Category settings can be saved now.",
+  // Interim (PR 11 PROPOSAL): `nothing_to_convert`: the store held no older group rules when the move was checked (8.3).
+  alreadyMoved: "Your rules have already been moved over.",
+  // Interim (PR 11 PROPOSAL): 409 CHANGED `listed_changes_moved`: the same writes, but the listed changes moved (a cost, say; CUX#13).
+  listedChangesMoved: "Some changes in the list are different now, for example because a cost changed. Check the list again.",
+  // Interim (PR 11 PROPOSAL): 409 IDEMPOTENCY_CONFLICT on the move: page 0 is read again and the next press gets a new key.
+  idempotencyConflict: "Something changed since you last tried. Check the list again.",
+  // Interim (PR 11 PROPOSAL): 503 CHECK_UNAVAILABLE on the move: the costs couldn't be read, nothing was written (CUX#4).
+  checkUnavailableApply: "We couldn't read your costs just now. Nothing was moved. Try again in a minute.",
+  // Interim (PR 11 PROPOSAL): 422 TOO_LARGE with no reason on the move: more than 10,000 sizes are chosen now.
+  tooLargeApply: "Choose 10,000 or fewer sizes to move them over.",
+  // Interim (PR 11 PROPOSAL): an answer that never came back, or a 5xx with no code of ours: [Check again] resends the same key (8.3).
+  uncertain: "We couldn't confirm the move.",
+  // Interim (PR 11 PROPOSAL, beyond 11.4): a [Check again] answered "not now" keeps its doubt (PLAN10 D7b): the first send may have moved them.
+  stillUnconfirmed: "We couldn't confirm the move. Wait a few seconds, then check again.",
+  stillUnconfirmedRateLimited: "We couldn't confirm the move. Too many tries in a minute. Wait a moment, then check again.",
+  // Interim (PR 11 PROPOSAL, beyond 11.4): 503 BUSY `catalog_changed`: Card Shellz moved a chosen size, product or category
+  // between the move's reads and its locks; refused before any write, so the same key may be sent again (11c).
+  busyCatalogChanged: "Card Shellz was changing your chosen products just then. Nothing was moved. Try again in a few seconds.",
+  // Interim (PR 11 PROPOSAL, beyond 11.4): the footer while a size would lose its price or a listed size would stop updating (D9a, D9b).
+  fixFirst: "Fix the sizes listed above first.",
+  // Interim (PR 11 PROPOSAL, beyond 11.4): a confirmed move whose re-reads failed; [Reload] reads them again (PLAN10 3.7).
+  viewStale: "We couldn't load the latest view.",
+  // --- The one-time notice of a system conversion (PR 11e1, plan 9.3, 11.3, 11.4) ---
+  // Interim (PR 11 PROPOSAL): the notice's second sentence (REC:939): what products chosen later follow.
+  noticeLater: "Products you choose later use their category's settings or your store defaults.",
+  // Interim (PR 11 PROPOSAL): a system conversion whose rules decided no category and no product (both counts 0).
+  noticeRemoved: "We removed your older group rules. They didn't decide any of your listings.",
+  // Interim (PR 11 PROPOSAL): the notice's one button, and its accessible name (plan 9.2).
+  gotIt: "Got it",
+  gotItName: "Got it, hide this note",
+  // Interim (PR 11 PROPOSAL): a [Got it] the server didn't confirm; the line stays and the button works again (9.3).
+  noticeFailed: "Couldn't save that. Try again.",
 } as const);
+
+/**
+ * The one-time notice's first sentence (11.4 `noticeMoved`): what the system
+ * moved, by the record's two counts. One count 0 names only the other; one
+ * thing in all says "has its own settings" (beyond 11.4, for the grammar).
+ * Both counts 0 are `noticeRemoved`'s words, never these. Interim (PR 11
+ * PROPOSAL).
+ */
+export function conversionNoticeMovedWords(categoryCount: number, productCount: number): string {
+  const categories = categoryCount === 1 ? "1 category" : `${TEXT_NUMBER.format(categoryCount)} categories`;
+  const products = productCount === 1 ? "1 product" : `${TEXT_NUMBER.format(productCount)} products`;
+  const subject = categoryCount > 0 && productCount > 0 ? `${categories} and ${products}` : categoryCount > 0 ? categories : products;
+  const one = categoryCount + productCount === 1;
+  return `We moved your older group rules. ${subject} now ${one ? "has its own settings" : "have their own settings"}. `
+    + "Nothing in your listings changed.";
+}
+
+/**
+ * "These 12 sizes change as listed." (11.4 `changesListed`): the footer of a
+ * move that is not clean and that nothing blocks, counted by the server (one
+ * size beyond 11.4). Interim (PR 11 PROPOSAL).
+ */
+export function conversionChangesListedWords(count: number): string {
+  return count === 1 ? "This size changes as listed." : `These ${TEXT_NUMBER.format(count)} sizes change as listed.`;
+}
 
 /**
  * Why a size can't be listed, one closed entry per `CONVERSION_BLOCKER_CODES`

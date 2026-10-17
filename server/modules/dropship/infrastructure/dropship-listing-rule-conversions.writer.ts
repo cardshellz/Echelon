@@ -1,6 +1,7 @@
 import type { PoolClient } from "pg";
 import type { z } from "zod";
 import {
+  MAX_CONVERSION_ACTOR_ID_LENGTH,
   listingRuleConversionRecordSchema,
   listingRuleConversionValuesSchema,
   type ListingRuleConversionActorType,
@@ -17,8 +18,9 @@ import { listingSettingsIdempotencyConflict } from "./dropship-listing-setting-s
  * caller's transaction client and takes no lock: the caller holds the
  * request lock (vendor) and the store lock (both actors), which serialize
  * every use of a key and every conversion of a store. Rows never change
- * except a system row's notice (11e), so a read needs no row lock.
- * Repositories do not log; the conversion service does.
+ * except a system row's notice (11e1), so a read needs no row lock; marking
+ * a notice seen is one guarded UPDATE whose row lock serializes two presses
+ * (acknowledgeNoticeWithClient). Repositories do not log; the services do.
  */
 
 type QueryClient = Pick<PoolClient, "query">;
@@ -48,6 +50,57 @@ const FIND_BY_KEY_SQL = `SELECT ${RECORD_COLUMNS}
 
 /** One row is enough to answer; the (store_connection_id, id) index serves it. */
 const HAS_ANY_SQL = `SELECT EXISTS (SELECT 1 FROM dropship.dropship_listing_rule_conversions WHERE store_connection_id = $1) AS found`;
+
+/**
+ * The store's latest conversion, when it is the system's and no one has seen
+ * its notice (plan 9.3, D19): one statement the (store_connection_id, id)
+ * index serves, no lock. A vendor's own conversion never has a notice (the
+ * record's CHECK), and one made after the job's (D21: rules added back, then
+ * moved by the vendor) ends the job's notice: the vendor saw "Moved over."
+ * for his own move, and the job's "Nothing in your listings changed." would
+ * no longer be true of the store.
+ */
+const UNSEEN_SYSTEM_SQL = `SELECT ${RECORD_COLUMNS}
+     FROM (SELECT ${RECORD_COLUMNS}
+       FROM dropship.dropship_listing_rule_conversions
+       WHERE store_connection_id = $1 AND vendor_id = $2
+       ORDER BY id DESC
+       LIMIT 1) latest
+     WHERE actor_type = 'system' AND notice_seen_at IS NULL`;
+
+/**
+ * Marks a system conversion's notice seen, once (plan 9.3): the only UPDATE
+ * the table's guard trigger allows (the two notice columns from null to
+ * values, on a system row). The WHERE re-checks `notice_seen_at IS NULL`
+ * after any row lock it waited on, so of two presses exactly one updates.
+ */
+const NOTICE_SEEN_SQL = `UPDATE dropship.dropship_listing_rule_conversions
+     SET notice_seen_at = $4, notice_seen_by = $5
+     WHERE id = $1 AND vendor_id = $2 AND store_connection_id = $3 AND actor_type = 'system' AND notice_seen_at IS NULL
+     RETURNING id`;
+
+/** Whether the id names a system conversion of this store at all (seen or not): `already_seen`, else 404. */
+const SYSTEM_CONVERSION_EXISTS_SQL = `SELECT EXISTS (SELECT 1 FROM dropship.dropship_listing_rule_conversions
+       WHERE id = $1 AND vendor_id = $2 AND store_connection_id = $3 AND actor_type = 'system') AS found`;
+
+/** The notice's audit row (plan 9.3, CLAUDE.md §10): the conversion, who saw it, before and after. */
+const NOTICE_AUDIT_SQL = `INSERT INTO dropship.dropship_audit_events
+       (vendor_id, store_connection_id, entity_type, entity_id, event_type, actor_type, actor_id, severity, payload, created_at)
+     VALUES ($1, $2, 'dropship_listing_rule_conversion', $3, 'listing_rules_conversion_notice_seen', 'vendor', $4, 'info', $5::jsonb, $6)`;
+
+/** What a press of the notice's [Got it] did: marked it seen now, found it seen already, or found no such system conversion. */
+export type ListingRuleConversionNoticeOutcome = "acknowledged" | "already_seen" | "not_found";
+
+/** A press of [Got it] as the notice's transaction passes it: the owner it resolved, the conversion named, who pressed, when. */
+export interface ListingRuleConversionNoticeAcknowledge {
+  vendorId: number;
+  storeConnectionId: number;
+  conversionId: number;
+  /** The member who pressed it: the row's `notice_seen_by` and the audit row's actor. */
+  actorId: string;
+  /** The injected clock: the row's `notice_seen_at` and the audit row's time. */
+  now: Date;
+}
 
 /** A conversion about to be recorded, as the conversion transaction builds it. */
 export interface ListingRuleConversionInsert {
@@ -152,6 +205,85 @@ export async function hasRuleConversionWithClient(client: QueryClient, input: { 
     throw listingSettingsInvariantFailed("The listing rule conversion lookup returned no answer.");
   }
   return found;
+}
+
+/**
+ * The store's latest conversion when it is a system one whose notice no one
+ * has seen, else null (plan 9.3, D19): the notice's read. One indexed
+ * statement, no lock: a press that marks it seen at the same time is
+ * answered by its own transaction.
+ */
+export async function findUnseenSystemConversionWithClient(
+  client: QueryClient,
+  input: { vendorId: number; storeConnectionId: number },
+): Promise<ListingRuleConversionRecord | null> {
+  const invalid = [
+    isInt4Id(input.vendorId) ? null : "vendorId",
+    isInt4Id(input.storeConnectionId) ? null : "storeConnectionId",
+  ].filter((field): field is string => field !== null);
+  if (invalid.length > 0) throw outsideContract(invalid);
+  const result = await client.query<StoredConversionRow>(UNSEEN_SYSTEM_SQL, [input.storeConnectionId, input.vendorId]);
+  const row = result.rows[0];
+  if (!row) return null;
+  const record = recordFromRow(row);
+  // The statement asked for exactly this; another row is a broken contract, never shown as a notice.
+  if (record.actorType !== "system" || record.noticeSeenAt !== null || record.vendorId !== input.vendorId
+    || record.storeConnectionId !== input.storeConnectionId) {
+    throw listingSettingsInvariantFailed("The unseen system conversion read returned another row.", { conversionId: record.id });
+  }
+  return record;
+}
+
+/**
+ * [Got it] on a system conversion's notice (plan 9.3), on the caller's
+ * transaction client after it resolved the store's owner by member (FOR
+ * SHARE): the guarded UPDATE, and for the one row it marks, the audit row in
+ * the same transaction; `acknowledged`. When it marks none: `already_seen`
+ * when the id names a system conversion of this store (someone saw it
+ * first), else `not_found` (the caller's 404). Idempotent by state, so a
+ * replayed press writes nothing (CLAUDE.md §7, "status checks"). Inputs are
+ * checked before any SQL (a breach is a programming fault, fatal).
+ */
+export async function acknowledgeNoticeWithClient(
+  client: QueryClient,
+  input: ListingRuleConversionNoticeAcknowledge,
+): Promise<ListingRuleConversionNoticeOutcome> {
+  assertNoticeAcknowledge(input);
+  const { vendorId, storeConnectionId, conversionId, actorId, now } = input;
+  const updated = await client.query<{ id: unknown }>(NOTICE_SEEN_SQL, [conversionId, vendorId, storeConnectionId, now, actorId]);
+  if (updated.rows.length > 1) {
+    throw listingSettingsInvariantFailed("Marking a conversion notice seen updated more than one row.", { conversionId, updatedCount: updated.rows.length });
+  }
+  if (updated.rows.length === 1) {
+    if (storedNumber(updated.rows[0].id) !== conversionId) {
+      throw listingSettingsInvariantFailed("Marking a conversion notice seen updated another row.", { conversionId });
+    }
+    const seenAt = now.toISOString();
+    await client.query(NOTICE_AUDIT_SQL, [vendorId, storeConnectionId, String(conversionId), actorId, JSON.stringify({
+      conversionId,
+      before: { noticeSeenAt: null, noticeSeenBy: null },
+      after: { noticeSeenAt: seenAt, noticeSeenBy: actorId },
+    }), now]);
+    return "acknowledged";
+  }
+  const exists = await client.query<{ found: unknown }>(SYSTEM_CONVERSION_EXISTS_SQL, [conversionId, vendorId, storeConnectionId]);
+  const found = exists.rows[0]?.found;
+  if (typeof found !== "boolean") {
+    throw listingSettingsInvariantFailed("The conversion notice lookup returned no answer.", { conversionId });
+  }
+  return found ? "already_seen" : "not_found";
+}
+
+function assertNoticeAcknowledge(input: ListingRuleConversionNoticeAcknowledge): void {
+  const invalid = [
+    isInt4Id(input.vendorId) ? null : "vendorId",
+    isInt4Id(input.storeConnectionId) ? null : "storeConnectionId",
+    Number.isSafeInteger(input.conversionId) && input.conversionId > 0 ? null : "conversionId",
+    typeof input.actorId === "string" && input.actorId.trim() !== "" && input.actorId.length <= MAX_CONVERSION_ACTOR_ID_LENGTH
+      ? null : "actorId",
+    input.now instanceof Date && Number.isFinite(input.now.getTime()) ? null : "now",
+  ].filter((field): field is string => field !== null);
+  if (invalid.length > 0) throw outsideContract(invalid);
 }
 
 function assertInsert(input: ListingRuleConversionInsert): void {

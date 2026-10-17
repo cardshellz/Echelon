@@ -32,6 +32,8 @@ import {
 import {
   listingRulesConversionCheckInputSchema,
   listingRulesConversionCheckSchema,
+  listingRulesConversionNoticeResponseSchema,
+  type ListingRulesConversionNoticeResponse,
   type ListingRulesConversionCheck,
 } from "@shared/dropship/listing-rules-conversion";
 import { fetchJson } from "./dropship-ops-surface";
@@ -76,7 +78,7 @@ export class ListingSettingsReadError extends Error {
 
 type ListingSettingsRead =
   | "summary" | "products" | "prices" | "product" | "product-own" | "product-ids" | "updated-products" | "categories" | "category"
-  | "conversion";
+  | "conversion" | "conversion-notice";
 
 /** At most this many contract issues are kept on the error: enough to find the field, never the values. */
 const MAX_REPORTED_ISSUES = 5;
@@ -467,6 +469,33 @@ export function listingSettingsConversionQueryOptions(storeConnectionId: number,
     // No page outlives the sheet, so its next opening starts from page 0 again, never from an older plan's pages.
     gcTime: 0,
     // A failed check says so with Try again (a 503 asks for a minute's wait), rather than retrying out of sight.
+    retry: false,
+  } as const;
+}
+
+/**
+ * The one-time notice of a system conversion (`GET
+ * …/listing-settings/conversion/notice`, PR 11e1; plan 9.2, 9.3): the store's
+ * latest conversion the job applied whose notice no one has seen, or `notice:
+ * null`. A mount read of the step (D18), under the store's prefix, so a save's
+ * prefix refresh reads it again; at most 60 seconds old otherwise, as the
+ * summary is. No retry. It reads no selection, so the server answers it over
+ * 10,000 sizes too. An answer for another store is off the contract.
+ */
+export function listingSettingsConversionNoticeQueryOptions(storeConnectionId: number, options: ListingSettingsReadOptions = {}) {
+  const parsed = listingSettingsStoreInputSchema.safeParse({ storeConnectionId });
+  return {
+    queryKey: [...listingSettingsQueryKey(storeConnectionId), "conversion-notice"] as const,
+    queryFn: async ({ signal }: { signal: AbortSignal }): Promise<ListingRulesConversionNoticeResponse> => {
+      if (!parsed.success) throw invalidRequest("conversion-notice", parsed.error);
+      const { storeConnectionId: store } = parsed.data;
+      return readListingSettings("conversion-notice", `${listingSettingsPath(store)}/conversion/notice`,
+        listingRulesConversionNoticeResponseSchema.refine((answer) => answer.storeConnectionId === store,
+          { message: "The answer is for another store.", path: ["storeConnectionId"] }), signal);
+    },
+    enabled: (options.enabled ?? true) && parsed.success,
+    staleTime: LISTING_SETTINGS_STALE_MS,
+    // A failed read shows no notice (and no error): the line is a courtesy, never a gate.
     retry: false,
   } as const;
 }

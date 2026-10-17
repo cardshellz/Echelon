@@ -8,6 +8,8 @@ import {
   MAX_CONVERSION_REPORT_ITEMS, conversionChangeRowSchema, conversionKeptSchema, conversionReportSchema, conversionSizeViewSchema,
   LISTING_RULES_CONVERSION_APPLY_OUTCOMES, listingRulesConversionApplyInputSchema, listingRulesConversionApplyResponseSchema,
   listingRulesConversionCheckInputSchema, listingRulesConversionCheckSchema, pricingRuleRefSchema, sizeRefSchema,
+  LISTING_RULES_CONVERSION_NOTICE_OUTCOMES, listingRulesConversionNoticeAcknowledgeInputSchema,
+  listingRulesConversionNoticeAcknowledgeResponseSchema, listingRulesConversionNoticeResponseSchema, listingRulesConversionNoticeSchema,
 } from "../../../../../shared/dropship/listing-rules-conversion";
 import {
   LISTING_CONVERSION_CHILD_KEY_PREFIX, RESERVED_CONVERSION_KEY_MESSAGE, RESERVED_CONVERSION_KEY_PREFIXES, RULES_CONVERSION_SYSTEM_KEY_PREFIX,
@@ -114,11 +116,12 @@ describe("the closed lists", () => {
     expect(CONVERSION_CHANGED_REASONS).toEqual(["settings_changed", "listed_changes_moved"]);
   });
 
-  it("names the three new refusals by their codes, and the codes cannot be changed", () => {
+  it("names the four new refusals by their codes, and the codes cannot be changed", () => {
     expect(LISTING_RULES_CONVERSION_ERROR_CODES).toEqual({
       changed: "DROPSHIP_LISTING_CONVERSION_CHANGED",
       checkUnavailable: "DROPSHIP_LISTING_CONVERSION_CHECK_UNAVAILABLE",
       wouldBlockListing: "DROPSHIP_LISTING_CONVERSION_WOULD_BLOCK_LISTING",
+      noticeNotFound: "DROPSHIP_LISTING_CONVERSION_NOTICE_NOT_FOUND",
     });
     expect(Object.isFrozen(LISTING_RULES_CONVERSION_ERROR_CODES)).toBe(true);
   });
@@ -374,10 +377,53 @@ describe("the apply's contracts (plan 7.B.1, 7.B.2)", () => {
     expect(Object.isFrozen(LISTING_SETTING_WRITE_ERROR_CODES)).toBe(true);
   });
 
+  it("names the notice's refusal in the shared write code list too (11e1)", () => {
+    expect(LISTING_SETTING_WRITE_ERROR_CODES.conversionNoticeNotFound).toBe(LISTING_RULES_CONVERSION_ERROR_CODES.noticeNotFound);
+  });
+
   it("names every BUSY reason a write raises before it writes, catalog_changed included", () => {
     expect(LISTING_SETTING_BUSY_REASONS).toEqual({ heavyWrite: "heavy_write_in_progress", requestKeyChanged: "request_key_changed",
       catalogChanged: "catalog_changed" });
     expect(Object.isFrozen(LISTING_SETTING_BUSY_REASONS)).toBe(true);
+  });
+});
+
+describe("the one-time notice's contracts (11e1, plan 9.2, 9.3)", () => {
+  const notice = { conversionId: 9, convertedAt: "2026-10-16T12:00:00.000Z", categoryCount: 2, productCount: 5 };
+
+  it("reads the store's notice, or null, strictly, with the record's integer counts only", () => {
+    expect(listingRulesConversionNoticeResponseSchema.parse({ storeConnectionId: 22, notice })).toEqual({ storeConnectionId: 22, notice });
+    expect(listingRulesConversionNoticeResponseSchema.parse({ storeConnectionId: 22, notice: null })).toEqual({ storeConnectionId: 22, notice: null });
+    // Both counts 0 is a store whose rules decided nothing: still a notice ("We removed your older group rules.").
+    expect(listingRulesConversionNoticeSchema.safeParse({ ...notice, categoryCount: 0, productCount: 0 }).success).toBe(true);
+    expect(listingRulesConversionNoticeSchema.safeParse({ ...notice, conversionId: Number.MAX_SAFE_INTEGER, categoryCount: 10_000 }).success)
+      .toBe(true);
+    for (const broken of [
+      { ...notice, conversionId: 0 }, { ...notice, conversionId: 1.5 }, { ...notice, conversionId: "9" },
+      { ...notice, convertedAt: "yesterday" }, { ...notice, categoryCount: -1 }, { ...notice, productCount: 10_001 },
+      { ...notice, categoryCount: 0.5 }, { ...notice, actorType: "system" }, { ...notice, noticeSeenAt: null },
+    ]) {
+      expect(listingRulesConversionNoticeSchema.safeParse(broken).success).toBe(false);
+    }
+    for (const broken of [{ storeConnectionId: 22 }, { storeConnectionId: 0, notice: null }, { storeConnectionId: 22, notice: null, extra: 1 },
+      { notice: null }]) {
+      expect(listingRulesConversionNoticeResponseSchema.safeParse(broken).success).toBe(false);
+    }
+  });
+
+  it("acknowledges by the conversion's id alone (no request key: idempotent by state), answering acknowledged or already seen", () => {
+    expect(listingRulesConversionNoticeAcknowledgeInputSchema.parse({ conversionId: 9 })).toEqual({ conversionId: 9 });
+    for (const broken of [{}, { conversionId: 0 }, { conversionId: -3 }, { conversionId: 1.5 }, { conversionId: "9" },
+      { conversionId: Number.MAX_SAFE_INTEGER + 1 }, { conversionId: 9, idempotencyKey: "ls-notice:12345678" }, null, []]) {
+      expect(listingRulesConversionNoticeAcknowledgeInputSchema.safeParse(broken).success).toBe(false);
+    }
+    expect(LISTING_RULES_CONVERSION_NOTICE_OUTCOMES).toEqual(["acknowledged", "already_seen"]);
+    for (const outcome of LISTING_RULES_CONVERSION_NOTICE_OUTCOMES) {
+      expect(listingRulesConversionNoticeAcknowledgeResponseSchema.parse({ outcome })).toEqual({ outcome });
+    }
+    for (const broken of [{ outcome: "not_found" }, { outcome: "acknowledged", conversionId: 9 }, {}]) {
+      expect(listingRulesConversionNoticeAcknowledgeResponseSchema.safeParse(broken).success).toBe(false);
+    }
   });
 });
 

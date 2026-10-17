@@ -13,6 +13,7 @@ import type {
   ListingRulesConversionRepository,
   ListingRulesConversionTransaction,
 } from "../../application/dropship-listing-rules-conversion-service";
+import type { ListingRulesConversionNoticeRepository } from "../../application/dropship-listing-rules-conversion-notice-service";
 import { DropshipError } from "../../domain/errors";
 
 // The production repository's module opens the shared pool on import; nothing here reaches it, a repository is injected.
@@ -363,6 +364,27 @@ describe("createDropshipListingSettingWriteServices (plan 3.10 (a), 7.12)", () =
       expect([w5.code, w8.code, w13.code]).toEqual([NOT_GATED, NOT_GATED, NOT_GATED]);
       expect(repository.executed).toEqual([W6_KEY, "product-settings:7f9c2ba4-e88f-4a5e-9d1b-1c2d3e4f5a6b",
         "size-prices:7f9c2ba4-e88f-4a5e-9d1b-1c2d3e4f5a6b", "category-moves:7f9c2ba4-e88f-4a5e-9d1b-1c2d3e4f5a6b"]);
+    } finally {
+      repository.releaseAll();
+      await heavy;
+    }
+  });
+
+  it("never gates the notice's Got it (11e1): sent while a W6 holds the gate it reaches its own transaction, and logs one INFO", async () => {
+    const presses: Array<{ memberId: string; storeConnectionId: number; conversionId: number; now: Date }> = [];
+    const noticeRepository: ListingRulesConversionNoticeRepository = {
+      acknowledgeNotice: async (input) => { presses.push(input); return { vendorId: 7, outcome: "acknowledged" }; },
+    };
+    const services = createDropshipListingSettingWriteServices({ repository, ebay, noticeRepository });
+    const heavy = services.products.saveBulkForMember(MEMBER, STORE, w6Body());
+    await repository.opened;
+    try {
+      await expect(services.conversionNotice.acknowledgeForMember(MEMBER, STORE, { conversionId: 41 })).resolves.toEqual({ outcome: "acknowledged" });
+      expect(presses).toEqual([{ memberId: MEMBER, storeConnectionId: STORE, conversionId: 41, now: expect.any(Date) }]);
+      // The W6 transaction alone used the PR 9 wrapper: the notice has its own (no request key, no store lock).
+      expect(repository.executed).toEqual([W6_KEY]);
+      expect(logger.info).toHaveBeenCalledWith("dropship.listing_settings.rules_conversion_notice_seen", expect.objectContaining({
+        outcome: "acknowledged", vendor_id: 7, store_connection_id: STORE, conversion_id: 41, actor_id: MEMBER }));
     } finally {
       repository.releaseAll();
       await heavy;
