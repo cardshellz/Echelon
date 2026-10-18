@@ -478,7 +478,9 @@ test("a 409 for older group rules added after the editor opened is worded in the
   const state = await openStep(page, categoriesState());
   await openEditor(page, "Sleeves", SLEEVES);
   await pickPolicy(page, "shippingPolicy", "Sleeves", "USPS Priority Mail");
-  // Older settings gets a pricing group while the editor is open: the next save is refused for good (the backstop).
+  // The store gets a pricing group while the editor is open, set in the stub's state: since Listing settings PR 12 no
+  // writer adds one (W1, W3 and W4 refuse a new group, D9), so this stands for a store left with groups by a server from
+  // before it. The next save is refused for good (the backstop, P21).
   state.pricingRules[STORE] = pricingRulesWithGroup();
   await saveButton(page).click();
   const line = "Category settings can't be saved while your store has older group rules.";

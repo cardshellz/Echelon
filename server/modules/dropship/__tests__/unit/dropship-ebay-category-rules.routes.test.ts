@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ZodError } from "zod";
 import type { DropshipEbayCategoryRulesService } from "../../application/dropship-ebay-category-rules-service";
 import { DropshipError } from "../../domain/errors";
+import { olderGroupRulesClosed } from "../../domain/older-group-rules-edit";
 import { registerDropshipEbayCategoryRulesRoutes } from "../../interfaces/http/dropship-ebay-category-rules.routes";
 import { DROPSHIP_BULK_JSON_LIMIT_BYTES } from "../../interfaces/http/dropship-bulk-json.middleware";
 import { installGlobalJsonBodyParser } from "../../../shipping-engine/interfaces/http/rate-table-admin-body.middleware";
@@ -38,7 +39,6 @@ class FakeService {
     if (this.failure) throw this.failure;
   }
   async getForMember(memberId: string, storeId: unknown) { this.record("get", memberId, storeId); return this.stateResult; }
-  async targetsForMember(memberId: string, storeId: unknown, input: unknown) { this.record("targets", memberId, storeId, input); return { total: 0, rows: [] }; }
   async searchForMember(memberId: string, storeId: unknown, query: unknown) { this.record("search", memberId, storeId, query); return { categories: [categoryOption(SLEEVES)] }; }
   async browseForMember(memberId: string, storeId: unknown, parentId: unknown) { this.record("browse", memberId, storeId, parentId); return { parent: null, children: [] }; }
   async describeForMember(memberId: string, storeId: unknown, categoryId: unknown) { this.record("describe", memberId, storeId, categoryId); return { category: categoryOption(SLEEVES) }; }
@@ -70,6 +70,13 @@ describe("dropship eBay category rules routes", () => {
     expect(response.headers.get("cache-control")).toBe("no-store");
     expect(await response.json()).toMatchObject({ revisionId: 7, profile: { defaultCategory: { categoryId: SLEEVES.categoryId } } });
     expect(service.calls).toEqual([{ method: "get", memberId: "member-1", storeId: 44, input: undefined }]);
+  });
+
+  it("no longer serves the rule targets read, deleted in Listing settings PR 12", async () => {
+    server = await startServer(buildApp(service, true));
+    const response = await fetch(`${server.url}/api/dropship/listings/stores/44/ebay-category-rules/targets?type=category`);
+    expect(response.status).toBe(404);
+    expect(service.calls).toEqual([]);
   });
 
   it("refuses every route without a dropship session", async () => {
@@ -145,6 +152,8 @@ describe("dropship eBay category rules routes", () => {
     [new DropshipError("DROPSHIP_EBAY_CATEGORY_RULES_VERSION_CONFLICT", "Reload.", { storeConnectionId: 44 }), 409],
     [new DropshipError("DROPSHIP_EBAY_CATEGORY_RULE_INVALID", "Pick a leaf.", { categoryId: "10", ruleId: "a", reason: "not_leaf" }), 422],
     [new DropshipError("DROPSHIP_EBAY_CATEGORY_NOT_FOUND", "Unknown.", { categoryId: "999" }), 404],
+    // Listing settings PR 12 (plan D11, T5): a new, changed or reordered older rule is refused for good.
+    [olderGroupRulesClosed(44, "ebay_category", { allowed: false, addedIds: ["new"], changedIds: [], reordered: true }), 422],
     [new DropshipError("DROPSHIP_EBAY_CATEGORIES_UNAVAILABLE", "Down.", { retryable: true, status: 503 }), 502],
     [new DropshipError("DROPSHIP_EBAY_TOKEN_REFRESH_FAILED", "Refresh failed.", { retryable: true }), 503],
   ])("maps %s to its status", async (error, status) => {

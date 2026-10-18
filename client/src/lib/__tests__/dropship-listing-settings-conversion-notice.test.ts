@@ -146,7 +146,8 @@ describe("the notice's model and the line's gate (9.3, 11.1, D21)", () => {
 
   it("puts the line in the slot only while the summary says the store holds no older group rules", () => {
     expect(noticeLineModel(read(answer({})), summary())).toMatchObject({ conversionId: 41 });
-    // A group added back in Older settings (D21): the older-rules line shows instead, never both.
+    // A store that holds older group rules again (D21; after PR 12 only a revert or a direct write could add one):
+    // the older-rules line shows instead, never both.
     for (const counts of [{ price: 1 }, { ebay: 2 }, { description: 1 }]) {
       expect(noticeLineModel(read(answer({})), summary(counts))).toBeNull();
     }

@@ -127,7 +127,6 @@ describe("DropshipEbayListingSetupService", () => {
     service = new DropshipEbayListingSetupService({
       listingConfig: listingConfig as unknown as Pick<
         DropshipListingConfigService,
-        | "getForMember"
         | "getViewForMember"
         | "findKeyedRequest"
         | "findConfig"
@@ -398,17 +397,6 @@ describe("DropshipEbayListingSetupService", () => {
         paymentPolicyName: null,
       });
     });
-  });
-
-  it("reads saved selections without provider discovery, location reconciliation, or config replacement", async () => {
-    listingConfig.config = makeConfig({ businessPolicies: { fulfillmentPolicyId: "saved-ground", returnPolicyId: "saved-return", paymentPolicyId: "saved-payment" } });
-    const discover = vi.spyOn(directory, "discoverForStoreConnection").mockRejectedValue(new Error("Provider outage"));
-    await expect(service.getSavedSelectionForMember("member-1", 44)).resolves.toEqual({
-      merchantLocationKey: null, fulfillmentPolicyId: "saved-ground", returnPolicyId: "saved-return", paymentPolicyId: "saved-payment",
-    });
-    expect(discover).not.toHaveBeenCalled();
-    expect(listingConfig.replaceMember).not.toHaveBeenCalled();
-    expect(listingConfig.replaceAdmin).not.toHaveBeenCalled();
   });
 
   describe("getViewForMember (the setup page read)", () => {
@@ -686,9 +674,8 @@ describe("DropshipEbayListingSetupService", () => {
         paymentPolicyName: "Managed payments",
       });
     });
-  });
-
-  describe("getForMember (the live setup other writers validate against)", () => {
+    // Ported in Listing settings PR 12 from the deleted getForMember read: the page read
+    // marks the same saved ids incomplete once eBay stops returning them.
     it("marks persisted location and policy ids incomplete after eBay stops returning them", async () => {
       listingConfig.config = makeConfig({
         marketplaceId: "EBAY_US",
@@ -700,7 +687,7 @@ describe("DropshipEbayListingSetupService", () => {
         },
       });
 
-      const result = await service.getForMember("member-1", 44);
+      const result = await service.getViewForMember("member-1", 44);
 
       expect(result.complete).toBe(false);
       expect(result.missingFields).toEqual([
@@ -709,93 +696,6 @@ describe("DropshipEbayListingSetupService", () => {
         "returnPolicyId",
         "paymentPolicyId",
       ]);
-    });
-
-    it.each([
-      { vendorStatus: "suspended", storeStatus: "connected", code: "DROPSHIP_LISTING_CONFIG_VENDOR_BLOCKED" },
-      { vendorStatus: "closed", storeStatus: "connected", code: "DROPSHIP_LISTING_CONFIG_VENDOR_BLOCKED" },
-      { vendorStatus: "active", storeStatus: "paused", code: "DROPSHIP_LISTING_CONFIG_STORE_PAUSED" },
-      { vendorStatus: "active", storeStatus: "grace_period", code: "DROPSHIP_LISTING_CONFIG_STORE_DISCONNECTING" },
-      { vendorStatus: "active", storeStatus: "disconnected", code: "DROPSHIP_LISTING_CONFIG_STORE_DISCONNECTED" },
-    ] as const)("refuses a $vendorStatus vendor on a $storeStatus store with $code instead of a read-only view", async ({
-      vendorStatus,
-      storeStatus,
-      code,
-    }) => {
-      listingConfig.vendorStatus = vendorStatus;
-      listingConfig.storeStatus = storeStatus;
-
-      await expect(service.getForMember(MEMBER_ID, STORE_CONNECTION_ID)).rejects.toMatchObject({
-        code,
-        context: { vendorId: 10, storeConnectionId: 44, retryable: false },
-      });
-      expectNoProviderCalls();
-    });
-
-    it.each(CAPABILITY_FAILURES)(
-      "fails with $label's own error ($kind) instead of judging every shipping policy unchecked",
-      async ({ error }) => {
-        const failure = error();
-        getCapability.mockRejectedValue(failure);
-
-        await expect(service.getForMember(MEMBER_ID, STORE_CONNECTION_ID)).rejects.toBe(failure);
-        // It reads the cached Card Shellz shipping answer, as the page read does.
-        expect(getCapability).toHaveBeenCalledWith({ storeConnectionId: 44, marketplaceId: "EBAY_US" });
-        // The failure is the caller's to report; this read logs no "shown without the shipping check" line.
-        expect(logs.map((event) => event.code)).not.toContain("DROPSHIP_EBAY_LISTING_SETUP_CAPABILITY_UNAVAILABLE");
-        expect(listingConfig.replaceMember).not.toHaveBeenCalled();
-      },
-    );
-
-    it.each(CAPABILITY_FAILURES)(
-      "reports $label as unavailable ($kind) on the page read, where getForMember fails",
-      async ({ kind, error }) => {
-        const failure = error();
-        getCapability.mockRejectedValue(failure);
-
-        const view = await service.getViewForMember(MEMBER_ID, STORE_CONNECTION_ID);
-
-        expect(view.checks.fulfillment).toEqual({ status: "unavailable", reference: failure.code, kind });
-      },
-    );
-
-    it("refuses an editable view that came back without a config, before any eBay call", async () => {
-      vi.spyOn(listingConfig, "getViewForMember").mockResolvedValue({
-        vendor: { vendorId: VENDOR_ID, status: "active" },
-        storeConnection: {
-          vendorId: VENDOR_ID,
-          storeConnectionId: STORE_CONNECTION_ID,
-          platform: "ebay",
-          status: "connected",
-          setupStatus: "ready",
-        },
-        config: null,
-        access: { canEdit: true, reason: null },
-      });
-
-      await expect(service.getForMember(MEMBER_ID, STORE_CONNECTION_ID)).rejects.toMatchObject({
-        code: "DROPSHIP_LISTING_CONFIG_REQUIRED",
-        context: { storeConnectionId: 44, retryable: false },
-      });
-      expectNoProviderCalls();
-    });
-
-    it("returns the checked live setup when eBay and Card Shellz shipping can both be read", async () => {
-      listingConfig.config = makeConfig(completeMarketplaceConfig(), { revision: 3 });
-      directory.discovery = withManagedLocationListed(directory.discovery);
-
-      const result = await service.getForMember(MEMBER_ID, STORE_CONNECTION_ID);
-
-      expect(result).toMatchObject({
-        complete: true,
-        missingFields: [],
-        revision: 3,
-        access: { canEdit: true, reason: null },
-        checks: { ebay: "checked", fulfillment: { status: "checked" } },
-        fulfillmentCapability: { source: { originWarehouseId: 1 } },
-      });
-      expect(locations.ensureForStoreConnection).not.toHaveBeenCalled();
-      expect(listingConfig.replaceMember).not.toHaveBeenCalled();
     });
   });
 
@@ -1421,7 +1321,7 @@ describe("DropshipEbayListingSetupService", () => {
           body: { expectedRevision: 1, idempotencyKey: SAVE_KEY, merchantLocationKey: "warehouse-main" },
         },
       ])("requires at least one field to save ($label)", async ({ body }) => {
-        const getForMember = vi.spyOn(listingConfig, "getForMember");
+        const getViewForMember = vi.spyOn(listingConfig, "getViewForMember");
 
         const error = await service.replaceForMember(MEMBER_ID, STORE_CONNECTION_ID, body).catch((caught) => caught);
 
@@ -1429,7 +1329,7 @@ describe("DropshipEbayListingSetupService", () => {
         expect((error as ZodError).issues.map((issue) => issue.message)).toContain(
           "Send at least one policy or the shelf default to save.",
         );
-        expect(getForMember).not.toHaveBeenCalled();
+        expect(getViewForMember).not.toHaveBeenCalled();
         expectNoProviderCalls();
       });
 
@@ -1448,10 +1348,10 @@ describe("DropshipEbayListingSetupService", () => {
         { label: "shelf names sent by the client", body: saveBody({ storeShelfDefault: { ids: ["101"], names: ["x"] } }) },
         { label: "an unknown field", body: saveBody({ returnPolicyId: "return-1", listingMode: "live" }) },
       ])("rejects $label before loading the config", async ({ body }) => {
-        const getForMember = vi.spyOn(listingConfig, "getForMember");
+        const getViewForMember = vi.spyOn(listingConfig, "getViewForMember");
 
         await expect(service.replaceForMember(MEMBER_ID, STORE_CONNECTION_ID, body)).rejects.toBeInstanceOf(ZodError);
-        expect(getForMember).not.toHaveBeenCalled();
+        expect(getViewForMember).not.toHaveBeenCalled();
         expectNoProviderCalls();
       });
     });
@@ -3473,11 +3373,6 @@ class FakeListingConfig {
   ) => this.write(input, options, DROPSHIP_LISTING_CONFIG_STAFF_WRITE_STATUSES));
   /** Read-only, as the real port: the stored config now, or null; never creates one. */
   findConfig = vi.fn(async (_input: { storeConnectionId: number }) => this.config);
-
-  async getForMember(_memberId: string, _storeConnectionId: number) {
-    this.assertVendorCanEdit();
-    return { vendor: this.vendor(), storeConnection: this.storeConnection(), config: this.ensureConfig() };
-  }
 
   async getViewForMember(_memberId: string, _storeConnectionId: number) {
     const access = decideDropshipListingConfigAccess(this.vendorStatus, this.storeStatus);

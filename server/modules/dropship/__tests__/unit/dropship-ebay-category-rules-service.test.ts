@@ -15,6 +15,7 @@ import { EMPTY_LISTING_SETTING_LAYERS, type ListingSettingLayers } from "../../a
 import type { DropshipStoreListingConfig } from "../../application/dropship-marketplace-listing-provider";
 import type { DropshipLogEvent } from "../../application/dropship-ports";
 import { DropshipError } from "../../domain/errors";
+import { DROPSHIP_LISTING_GROUP_RULES_CLOSED, GROUP_RULES_CLOSED_MESSAGE } from "../../domain/older-group-rules-edit";
 import { EMPTY_CATEGORY_LISTING_SETTING_VALUES, EMPTY_PRODUCT_LISTING_SETTING_VALUES } from "../../domain/listing-setting-values";
 import type { CatalogScope } from "../../../../../shared/dropship/catalog-scope";
 import type { EbayCategory, EbayCategoryBrowseResult, EbayCategoryOption, EbayCategoryRulesState } from "../../../../../shared/dropship/ebay-category-rules";
@@ -127,6 +128,27 @@ const draft = {
   rules: [{ id: "mailers", name: "Mailers", scope: { type: "category" as const, category: "Mailers" }, categoryId: MAILERS.categoryId }],
 };
 
+/**
+ * The store's one older rule, as `draft` sends it back. Since Listing settings PR 12 (D9) a save or review may keep
+ * the stored rules or fewer of them, never add one, so the cases whose subject is not the rules themselves send
+ * `draft` to a store that holds this rule (plan 6.3, the W3 triage "b"), and only the store default can be new.
+ */
+const STORED_MAILERS = { id: "mailers", name: "Mailers", scope: { type: "category" as const, category: "Mailers" }, category: MAILERS };
+
+/** A store whose current rules (revision 7) are STORED_MAILERS alone, with no store default. */
+function mailersFixture() {
+  const fixture = makeFixture();
+  fixture.repository.state = rulesState(rulesProfile({ rules: [STORED_MAILERS] }), 7);
+  return fixture;
+}
+
+/** The permanent refusal of a draft that adds, changes or reorders a rule (Listing settings PR 12, D9), in full. */
+function groupRulesClosed(change: { addedIds?: string[]; changedIds?: string[]; reordered?: boolean }) {
+  return { code: DROPSHIP_LISTING_GROUP_RULES_CLOSED, message: GROUP_RULES_CLOSED_MESSAGE, context: { storeConnectionId: 44,
+    kind: "ebay_category", addedIds: change.addedIds ?? [], changedIds: change.changedIds ?? [], reordered: change.reordered ?? false,
+    retryable: false, classification: "permanent" } };
+}
+
 // Two more test categories, outside the shared fixture; the ids are not claimed to match eBay's live tree.
 const BOXES: EbayCategory = { categoryId: "900104", categoryName: "Boxes", path: ["Collectibles", "Card Storage", "Boxes"] };
 const BINDERS: EbayCategory = { categoryId: "900105", categoryName: "Binders", path: ["Collectibles", "Card Storage", "Binders"] };
@@ -153,26 +175,24 @@ const NOT_FOUND_WORDS = "That eBay category is not in eBay's current category li
 const NOT_LEAF_WORDS = "Pick a more specific eBay category. eBay accepts listings only in the last level of a category path.";
 
 describe("DropshipEbayCategoryRulesService save", () => {
-  it("verifies every category at eBay and stores eBay's names and paths", async () => {
-    const fixture = makeFixture();
-    const input = { expectedRevisionId: null, idempotencyKey: "category-rules:1", draft };
+  it("verifies a new store default at eBay and stores eBay's name and path, keeping the stored rule's", async () => {
+    // Since PR 12 (D9) the rules go back as stored, so only the store default can be new: the triage "b" (plan 6.3).
+    const fixture = mailersFixture();
+    const input = { expectedRevisionId: 7, idempotencyKey: "category-rules:1", draft };
 
     const result = await fixture.service.saveForMember("member-1", 44, input);
 
     expect(result.idempotentReplay).toBe(false);
-    expect(result.state.profile).toEqual(rulesProfile({
-      defaultCategory: SLEEVES,
-      rules: [{ id: "mailers", name: "Mailers", scope: { type: "category", category: "Mailers" }, category: MAILERS }],
-    }));
-    expect(fixture.taxonomy.calls).toEqual([`describe:${SLEEVES.categoryId},${MAILERS.categoryId}`]);
+    expect(result.state.profile).toEqual(rulesProfile({ defaultCategory: SLEEVES, rules: [STORED_MAILERS] }));
+    expect(fixture.taxonomy.calls).toEqual([`describe:${SLEEVES.categoryId}`]);
     expect(fixture.repository.saves[0]).toMatchObject({
-      expectedRevisionId: null, idempotencyKey: "category-rules:1",
+      expectedRevisionId: 7, idempotencyKey: "category-rules:1",
       requestHash: hashEbayCategoryRulesRequest(44, input), now: NOW,
     });
     expect(fixture.repository.executions.at(-1)).toEqual({ mode: "write", idempotencyKey: "category-rules:1" });
     expect(fixture.logs).toContainEqual(expect.objectContaining({
       code: "DROPSHIP_EBAY_CATEGORY_RULES_SAVED", level: "info",
-      context: expect.objectContaining({ actorId: "member-1", revisionId: 1, ruleCount: 1, defaultCategoryId: SLEEVES.categoryId }),
+      context: expect.objectContaining({ actorId: "member-1", revisionId: 8, ruleCount: 1, defaultCategoryId: SLEEVES.categoryId }),
     }));
   });
 
@@ -190,8 +210,8 @@ describe("DropshipEbayCategoryRulesService save", () => {
   });
 
   it("replays a lost-response retry from the database without asking eBay again", async () => {
-    const fixture = makeFixture();
-    const input = { expectedRevisionId: null, idempotencyKey: "category-rules:3", draft };
+    const fixture = mailersFixture();
+    const input = { expectedRevisionId: 7, idempotencyKey: "category-rules:3", draft };
     await fixture.service.saveForMember("member-1", 44, input);
     fixture.taxonomy.calls = [];
 
@@ -206,7 +226,8 @@ describe("DropshipEbayCategoryRulesService save", () => {
 
   it("refuses a save made against an older revision", async () => {
     const fixture = makeFixture();
-    fixture.repository.state = rulesState(rulesProfile(), 5);
+    // The draft sends the stored rule back, so it takes today's path to the version check (not D10's early conflict).
+    fixture.repository.state = rulesState(rulesProfile({ rules: [STORED_MAILERS] }), 5);
 
     await expect(fixture.service.saveForMember("member-1", 44, { expectedRevisionId: 4, idempotencyKey: "category-rules:4", draft }))
       .rejects.toMatchObject({ code: "DROPSHIP_EBAY_CATEGORY_RULES_VERSION_CONFLICT" });
@@ -214,50 +235,46 @@ describe("DropshipEbayCategoryRulesService save", () => {
   });
 
   it("asks for a reconnect, without calling eBay, when the store needs reauthorization", async () => {
-    const fixture = makeFixture();
+    const fixture = mailersFixture();
     fixture.repository.context = { ...fixture.repository.context, storeStatus: "needs_reauth" };
 
-    await expect(fixture.service.saveForMember("member-1", 44, { expectedRevisionId: null, idempotencyKey: "category-rules:5", draft }))
+    await expect(fixture.service.saveForMember("member-1", 44, { expectedRevisionId: 7, idempotencyKey: "category-rules:5", draft }))
       .rejects.toMatchObject({ code: "DROPSHIP_EBAY_CATEGORIES_PERMISSION_REQUIRED" });
     await expect(fixture.service.searchForMember("member-1", 44, "toploader"))
       .rejects.toMatchObject({ code: "DROPSHIP_EBAY_CATEGORIES_PERMISSION_REQUIRED" });
     expect(fixture.taxonomy.calls).toEqual([]);
     // The saved rules stay readable while the connection is being fixed.
-    await expect(fixture.service.getForMember("member-1", 44)).resolves.toEqual(rulesState(null));
+    await expect(fixture.service.getForMember("member-1", 44)).resolves.toEqual(rulesState(rulesProfile({ rules: [STORED_MAILERS] }), 7));
   });
 });
 
 /**
  * How a save and a review treat a category the current rules do not hold.
  * Written and run on the code before PR 9b; PR 9b must not change any of it.
+ * Listing settings PR 12 changes it on purpose (D9, plan 6.3 and 11): a draft
+ * can no longer add, change or reorder a rule, so the cases whose subject was
+ * a new rule's category are now that refusal (before any eBay call), and the
+ * others name their new category through the store default.
  */
 describe("DropshipEbayCategoryRulesService new categories (pinned before PR 9b)", () => {
-  it("asks eBay once for each category, in draft order, and stores eBay's own name and path", async () => {
+  it("refuses a draft that adds rules before asking eBay about any of their categories (PR 12, D9)", async () => {
     const fixture = makeFixture();
-    const renamedSleeves: EbayCategory = { ...SLEEVES, categoryName: "Card Sleeves", path: ["Collectibles", "Card Storage", "Card Sleeves"] };
-    fixture.taxonomy.options.set(SLEEVES.categoryId, categoryOption(renamedSleeves));
 
-    const result = await fixture.service.saveForMember("member-1", 44, { expectedRevisionId: null, idempotencyKey: "category-rules:pin-1", draft: {
+    expect(await refusal(fixture.service.saveForMember("member-1", 44, { expectedRevisionId: null, idempotencyKey: "category-rules:pin-1", draft: {
       defaultCategoryId: MAILERS.categoryId,
       rules: [
         draftRule("sleeves", { type: "category", category: "Sleeves" }, SLEEVES.categoryId),
         draftRule("mailers", { type: "product", productId: 7 }, MAILERS.categoryId),
         draftRule("toploaders", { type: "product", productId: 8 }, TOPLOADERS.categoryId),
       ],
-    } });
+    } }))).toEqual(groupRulesClosed({ addedIds: ["sleeves", "mailers", "toploaders"] }));
 
-    expect(fixture.taxonomy.calls).toEqual([`describe:${MAILERS.categoryId},${SLEEVES.categoryId},${TOPLOADERS.categoryId}`]);
-    expect(result.state.profile).toEqual(rulesProfile({
-      defaultCategory: MAILERS,
-      rules: [
-        storedRule("sleeves", { type: "category", category: "Sleeves" }, renamedSleeves),
-        storedRule("mailers", { type: "product", productId: 7 }, MAILERS),
-        storedRule("toploaders", { type: "product", productId: 8 }, TOPLOADERS),
-      ],
-    }));
+    expect(fixture.taxonomy.calls).toEqual([]);
+    expect(fixture.repository.saves).toEqual([]);
+    expect(fixture.repository.executions).toEqual([{ mode: "read", idempotencyKey: undefined }]);
   });
 
-  it("refuses the first category eBay does not list, in draft order, naming its rule", async () => {
+  it("refuses new rules on categories eBay does not list as new rules, without asking eBay (PR 12, D9)", async () => {
     const fixture = makeFixture();
 
     const answer = await refusal(fixture.service.saveForMember("member-1", 44, { expectedRevisionId: null, idempotencyKey: "category-rules:pin-2", draft: {
@@ -268,14 +285,13 @@ describe("DropshipEbayCategoryRulesService new categories (pinned before PR 9b)"
       ],
     } }));
 
-    expect(answer).toEqual({ code: "DROPSHIP_EBAY_CATEGORY_RULE_INVALID", message: NOT_FOUND_WORDS,
-      context: { storeConnectionId: 44, categoryId: UNKNOWN_ID, ruleId: "first-unknown", reason: "not_found" } });
-    expect(fixture.taxonomy.calls).toEqual([`describe:${SLEEVES.categoryId},${UNKNOWN_ID},${OTHER_UNKNOWN_ID}`]);
+    expect(answer).toEqual(groupRulesClosed({ addedIds: ["first-unknown", "second-unknown"] }));
+    expect(fixture.taxonomy.calls).toEqual([]);
     expect(fixture.repository.saves).toEqual([]);
     expect(fixture.repository.executions.map((execution) => execution.mode)).not.toContain("write");
   });
 
-  it("checks the store default before the rules and refuses a category that is not the last level", async () => {
+  it("refuses a new rule before checking any category, the store default's included (PR 12, D9)", async () => {
     const fixture = makeFixture();
     fixture.taxonomy.options.set(SLEEVES.categoryId, categoryOption(SLEEVES, false));
 
@@ -284,8 +300,8 @@ describe("DropshipEbayCategoryRulesService new categories (pinned before PR 9b)"
       rules: [draftRule("unknown", { type: "product", productId: 7 }, UNKNOWN_ID)],
     } }));
 
-    expect(answer).toEqual({ code: "DROPSHIP_EBAY_CATEGORY_RULE_INVALID", message: NOT_LEAF_WORDS,
-      context: { storeConnectionId: 44, categoryId: SLEEVES.categoryId, ruleId: null, reason: "not_leaf" } });
+    expect(answer).toEqual(groupRulesClosed({ addedIds: ["unknown"] }));
+    expect(fixture.taxonomy.calls).toEqual([]);
     expect(fixture.repository.saves).toEqual([]);
   });
 
@@ -304,13 +320,13 @@ describe("DropshipEbayCategoryRulesService new categories (pinned before PR 9b)"
   });
 
   it("passes on an eBay failure while checking categories, logged as a verify read, and writes nothing", async () => {
-    const fixture = makeFixture();
+    const fixture = mailersFixture();
     const failure = new DropshipError("DROPSHIP_EBAY_TOKEN_REFRESH_FAILED", "The eBay token could not be refreshed.", { retryable: true });
     fixture.taxonomy.failure = failure;
 
-    await expect(fixture.service.saveForMember("member-1", 44, { expectedRevisionId: null, idempotencyKey: "category-rules:pin-5", draft }))
+    await expect(fixture.service.saveForMember("member-1", 44, { expectedRevisionId: 7, idempotencyKey: "category-rules:pin-5", draft }))
       .rejects.toBe(failure);
-    await expect(fixture.service.reviewForMember("member-1", 44, { expectedRevisionId: null, draft })).rejects.toBe(failure);
+    await expect(fixture.service.reviewForMember("member-1", 44, { expectedRevisionId: 7, draft })).rejects.toBe(failure);
 
     const readFailed = {
       code: "DROPSHIP_EBAY_CATEGORIES_READ_FAILED", level: "warn",
@@ -318,26 +334,27 @@ describe("DropshipEbayCategoryRulesService new categories (pinned before PR 9b)"
       context: { vendorId: 10, storeConnectionId: 44, operation: "verify", errorCode: "DROPSHIP_EBAY_TOKEN_REFRESH_FAILED", errorName: "DropshipError" },
     };
     expect(fixture.logs.filter((log) => log.code === "DROPSHIP_EBAY_CATEGORIES_READ_FAILED")).toEqual([readFailed, readFailed]);
+    expect(fixture.taxonomy.calls).toEqual([`describe:${SLEEVES.categoryId}`, `describe:${SLEEVES.categoryId}`]);
     expect(fixture.repository.saves).toEqual([]);
     expect(fixture.repository.layerReads).toEqual([]);
   });
 
-  it("checks a review's categories like a save, before reading the selected listings", async () => {
+  it("checks a review's new store default like a save, before reading the selected listings", async () => {
     const fixture = makeFixture();
     fixture.repository.candidates = [categoryCandidate({ productVariantId: 1, category: "Mailers" })];
 
     const answer = await refusal(fixture.service.reviewForMember("member-1", 44, { expectedRevisionId: null, draft: {
-      defaultCategoryId: null, rules: [draftRule("unknown", { type: "category", category: "Mailers" }, UNKNOWN_ID)],
+      defaultCategoryId: UNKNOWN_ID, rules: [],
     } }));
 
     expect(answer).toEqual({ code: "DROPSHIP_EBAY_CATEGORY_RULE_INVALID", message: NOT_FOUND_WORDS,
-      context: { storeConnectionId: 44, categoryId: UNKNOWN_ID, ruleId: "unknown", reason: "not_found" } });
+      context: { storeConnectionId: 44, categoryId: UNKNOWN_ID, ruleId: null, reason: "not_found" } });
     expect(fixture.taxonomy.calls).toEqual([`describe:${UNKNOWN_ID}`]);
     expect(fixture.repository.layerReads).toEqual([]);
   });
 
   it("asks for a reconnect before eBay is called when a save or review adds a category on a store that needs reauthorization", async () => {
-    const fixture = makeFixture();
+    const fixture = mailersFixture();
     fixture.repository.context = { ...fixture.repository.context, storeStatus: "needs_reauth" };
     const reconnect = {
       code: "DROPSHIP_EBAY_CATEGORIES_PERMISSION_REQUIRED",
@@ -345,9 +362,9 @@ describe("DropshipEbayCategoryRulesService new categories (pinned before PR 9b)"
       context: { storeConnectionId: 44, retryable: false },
     };
 
-    expect(await refusal(fixture.service.saveForMember("member-1", 44, { expectedRevisionId: null, idempotencyKey: "category-rules:pin-7", draft })))
+    expect(await refusal(fixture.service.saveForMember("member-1", 44, { expectedRevisionId: 7, idempotencyKey: "category-rules:pin-7", draft })))
       .toEqual(reconnect);
-    expect(await refusal(fixture.service.reviewForMember("member-1", 44, { expectedRevisionId: null, draft }))).toEqual(reconnect);
+    expect(await refusal(fixture.service.reviewForMember("member-1", 44, { expectedRevisionId: 7, draft }))).toEqual(reconnect);
     expect(fixture.taxonomy.calls).toEqual([]);
     expect(fixture.repository.saves).toEqual([]);
     expect(fixture.repository.layerReads).toEqual([]);
@@ -426,27 +443,22 @@ describe("DropshipEbayCategoryRulesService categories the current rules hold (P3
     expect(fixture.taxonomy.calls).toEqual([]);
   });
 
-  it("re-saves known categories in another order, under other names and in other places without asking eBay, even while eBay is down", async () => {
+  it("refuses re-saving known categories in another order, under other names or in other places, without asking eBay (PR 12, D9)", async () => {
     const fixture = storedFixture("refresh_failed");
     fixture.taxonomy.failure = new DropshipError("DROPSHIP_EBAY_CATEGORIES_UNAVAILABLE", "down", { retryable: true });
 
-    const result = await fixture.service.saveForMember("member-1", 44, { expectedRevisionId: 7, idempotencyKey: "category-rules:p30-3", draft: {
+    const answer = await refusal(fixture.service.saveForMember("member-1", 44, { expectedRevisionId: 7, idempotencyKey: "category-rules:p30-3", draft: {
       defaultCategoryId: TOPLOADERS.categoryId,
       rules: [
         { ...draftRule("toploaders", { type: "product", productId: 7 }, TOPLOADERS.categoryId), name: "Top loaders" },
         { ...draftRule("mailers", { type: "category", category: "Mailers" }, SLEEVES.categoryId), name: "Envelopes" },
       ],
-    } });
+    } }));
 
-    expect(result.state.profile).toEqual(rulesProfile({
-      defaultCategory: TOPLOADERS,
-      rules: [
-        { ...storedRule("toploaders", { type: "product", productId: 7 }, TOPLOADERS), name: "Top loaders" },
-        { ...storedRule("mailers", { type: "category", category: "Mailers" }, SLEEVES), name: "Envelopes" },
-      ],
-    }));
+    expect(answer).toEqual(groupRulesClosed({ changedIds: ["toploaders", "mailers"], reordered: true }));
     expect(fixture.taxonomy.calls).toEqual([]);
     expect(fixture.logs.filter((log) => log.code === "DROPSHIP_EBAY_CATEGORIES_READ_FAILED")).toEqual([]);
+    expect(fixture.repository.saves).toEqual([]);
   });
 
   it("keeps a known category's stored name and path even when eBay renamed it, dropped it or gave it children", async () => {
@@ -464,13 +476,13 @@ describe("DropshipEbayCategoryRulesService categories the current rules hold (P3
     expect(fixture.taxonomy.calls).toEqual([]);
   });
 
-  it("asks eBay only about new categories, each once, in draft order, and keeps the known ones' stored values", async () => {
+  it("refuses new rules beside the kept ones, before asking eBay about any new category (PR 12, D9)", async () => {
     const fixture = storedFixture();
     for (const category of [BOXES, BINDERS, renamed(MAILERS, "Shipping mailers")]) {
       fixture.taxonomy.options.set(category.categoryId, categoryOption(category));
     }
 
-    const result = await fixture.service.saveForMember("member-1", 44, { expectedRevisionId: 7, idempotencyKey: "category-rules:p30-5", draft: {
+    const answer = await refusal(fixture.service.saveForMember("member-1", 44, { expectedRevisionId: 7, idempotencyKey: "category-rules:p30-5", draft: {
       defaultCategoryId: BOXES.categoryId,
       rules: [
         draftRule("mailers", { type: "category", category: "Mailers" }, MAILERS.categoryId),
@@ -478,48 +490,46 @@ describe("DropshipEbayCategoryRulesService categories the current rules hold (P3
         draftRule("boxes", { type: "product", productId: 10 }, BOXES.categoryId),
         draftRule("toploaders", { type: "product", productId: 7 }, TOPLOADERS.categoryId),
       ],
-    } });
+    } }));
 
-    expect(fixture.taxonomy.calls).toEqual([`describe:${BOXES.categoryId},${BINDERS.categoryId}`]);
-    expect(result.state.profile).toEqual(rulesProfile({
-      defaultCategory: BOXES,
-      rules: [
-        storedRule("mailers", { type: "category", category: "Mailers" }, MAILERS),
-        storedRule("binders", { type: "product", productId: 9 }, BINDERS),
-        storedRule("boxes", { type: "product", productId: 10 }, BOXES),
-        storedRule("toploaders", { type: "product", productId: 7 }, TOPLOADERS),
-      ],
-    }));
+    expect(answer).toEqual(groupRulesClosed({ addedIds: ["binders", "boxes"] }));
+    expect(fixture.taxonomy.calls).toEqual([]);
+    expect(fixture.repository.state).toEqual(rulesState(storedRules(), 7));
   });
 
   it("still asks for a reconnect, before eBay or any write, when a save adds a category on a store that needs a sign-in", async () => {
     const fixture = storedFixture("needs_reauth");
     const known = storedDraft();
 
+    // The store default is the one place a new category can go since PR 12 (D9).
     expect(await refusal(fixture.service.saveForMember("member-1", 44, { expectedRevisionId: 7, idempotencyKey: "category-rules:p30-6", draft: {
-      ...known, rules: [...known.rules, draftRule("boxes", { type: "product", productId: 10 }, BOXES.categoryId)],
+      ...known, defaultCategoryId: BOXES.categoryId,
     } }))).toEqual(RECONNECT);
+    // A new rule is refused first: no sign-in is asked for a draft that can't be saved anyway.
+    expect(await refusal(fixture.service.saveForMember("member-1", 44, { expectedRevisionId: 7, idempotencyKey: "category-rules:p30-6b", draft: {
+      ...known, rules: [...known.rules, draftRule("boxes", { type: "product", productId: 10 }, BOXES.categoryId)],
+    } }))).toEqual(groupRulesClosed({ addedIds: ["boxes"] }));
     expect(fixture.taxonomy.calls).toEqual([]);
     expect(fixture.repository.saves).toEqual([]);
     expect(fixture.repository.executions.every((execution) => execution.mode === "read")).toBe(true);
   });
 
-  it("names the new category eBay refuses, not a known one eBay dropped", async () => {
+  it("names the new store default eBay refuses, not a known rule's category eBay dropped", async () => {
     const fixture = storedFixture();
     fixture.taxonomy.options.delete(MAILERS.categoryId);
     const known = storedDraft();
 
     const answer = await refusal(fixture.service.saveForMember("member-1", 44, { expectedRevisionId: 7, idempotencyKey: "category-rules:p30-7", draft: {
-      ...known, rules: [...known.rules, draftRule("unknown", { type: "product", productId: 9 }, UNKNOWN_ID)],
+      ...known, defaultCategoryId: UNKNOWN_ID,
     } }));
 
     expect(answer).toEqual({ code: "DROPSHIP_EBAY_CATEGORY_RULE_INVALID", message: NOT_FOUND_WORDS,
-      context: { storeConnectionId: 44, categoryId: UNKNOWN_ID, ruleId: "unknown", reason: "not_found" } });
+      context: { storeConnectionId: 44, categoryId: UNKNOWN_ID, ruleId: null, reason: "not_found" } });
     expect(fixture.taxonomy.calls).toEqual([`describe:${UNKNOWN_ID}`]);
     expect(fixture.repository.saves).toEqual([]);
   });
 
-  it("refuses a new category eBay does not list, naming it, beside known ones eBay still lists", async () => {
+  it("refuses a rule inserted between known ones as a new rule, keeping the known ones' order as stored (PR 12, D9)", async () => {
     const fixture = storedFixture();
     const known = storedDraft();
 
@@ -527,8 +537,8 @@ describe("DropshipEbayCategoryRulesService categories the current rules hold (P3
       ...known, rules: [known.rules[0], draftRule("unknown", { type: "product", productId: 9 }, UNKNOWN_ID), known.rules[1]],
     } }));
 
-    expect(answer).toEqual({ code: "DROPSHIP_EBAY_CATEGORY_RULE_INVALID", message: NOT_FOUND_WORDS,
-      context: { storeConnectionId: 44, categoryId: UNKNOWN_ID, ruleId: "unknown", reason: "not_found" } });
+    expect(answer).toEqual(groupRulesClosed({ addedIds: ["unknown"] }));
+    expect(fixture.taxonomy.calls).toEqual([]);
     expect(fixture.repository.saves).toEqual([]);
   });
 
@@ -637,22 +647,26 @@ describe("DropshipEbayCategoryRulesService categories the current rules hold (P3
     const renamedToploaders = renamed(TOPLOADERS, "Top Loaders");
     fixture.taxonomy.options.set(TOPLOADERS.categoryId, categoryOption(renamedToploaders));
 
+    // The removed rule can't come back (PR 12, D9): it is a new rule now, refused before eBay.
+    expect(await refusal(fixture.service.saveForMember("member-1", 44, {
+      expectedRevisionId: 8, idempotencyKey: "category-rules:p30-14x", draft: known,
+    }))).toEqual(groupRulesClosed({ addedIds: ["toploaders"] }));
+    expect(fixture.taxonomy.calls).toEqual([]);
+    // Its category is new to revision 8 as the store default too, so the sign-in check and eBay come back.
+    const asDefault = { ...withoutToploaders, defaultCategoryId: TOPLOADERS.categoryId };
     fixture.repository.context = { ...fixture.repository.context, storeStatus: "needs_reauth" };
     expect(await refusal(fixture.service.saveForMember("member-1", 44, {
-      expectedRevisionId: 8, idempotencyKey: "category-rules:p30-14b", draft: known,
+      expectedRevisionId: 8, idempotencyKey: "category-rules:p30-14b", draft: asDefault,
     }))).toEqual(RECONNECT);
     fixture.repository.context = { ...fixture.repository.context, storeStatus: "connected" };
     const result = await fixture.service.saveForMember("member-1", 44, {
-      expectedRevisionId: 8, idempotencyKey: "category-rules:p30-14c", draft: known,
+      expectedRevisionId: 8, idempotencyKey: "category-rules:p30-14c", draft: asDefault,
     });
 
     expect(fixture.taxonomy.calls).toEqual([`describe:${TOPLOADERS.categoryId}`]);
     expect(result.state.profile).toEqual(rulesProfile({
-      defaultCategory: SLEEVES,
-      rules: [
-        storedRule("mailers", { type: "category", category: "Mailers" }, MAILERS),
-        storedRule("toploaders", { type: "product", productId: 7 }, renamedToploaders),
-      ],
+      defaultCategory: renamedToploaders,
+      rules: [storedRule("mailers", { type: "category", category: "Mailers" }, MAILERS)],
     }));
   });
 
@@ -752,6 +766,115 @@ describe("DropshipEbayCategoryRulesService categories the current rules hold (P3
   });
 });
 
+/**
+ * Listing settings PR 12 (plan D9-D10, 6.4 T4): a draft may keep the stored rules, or fewer of them in their stored
+ * order; it may not add, change or reorder one. The check runs at the request's first read, before any eBay call or
+ * write. A draft it refuses whose read revision is not the one it names gets today's version conflict instead (D10,
+ * SAFETY4, FIDELITY1), so a tab opened before a move keeps PR 11's "This changed in another window." path.
+ */
+describe("DropshipEbayCategoryRulesService older rules are closed (PR 12)", () => {
+  const known = storedDraft();
+  const boxesRule = draftRule("boxes", { type: "product", productId: 10 }, BOXES.categoryId);
+
+  it("refuses a save or review that adds a rule at the current revision, with no eBay call and no write", async () => {
+    const fixture = storedFixture();
+    fixture.taxonomy.options.set(BOXES.categoryId, categoryOption(BOXES));
+    fixture.repository.candidates = [categoryCandidate({ productVariantId: 1, category: "Mailers" })];
+    const adding = { ...known, rules: [...known.rules, boxesRule] };
+
+    expect(await refusal(fixture.service.saveForMember("member-1", 44, { expectedRevisionId: 7, idempotencyKey: "category-rules:closed-1", draft: adding })))
+      .toEqual(groupRulesClosed({ addedIds: ["boxes"] }));
+    expect(await refusal(fixture.service.reviewForMember("member-1", 44, { expectedRevisionId: 7, draft: adding })))
+      .toEqual(groupRulesClosed({ addedIds: ["boxes"] }));
+
+    expect(fixture.taxonomy.calls).toEqual([]);
+    expect(fixture.repository.saves).toEqual([]);
+    expect(fixture.repository.layerReads).toEqual([]);
+    // One read each: the refusal comes before compiling the draft and before the review's second read.
+    expect(fixture.repository.executions).toEqual([{ mode: "read", idempotencyKey: undefined }, { mode: "read", idempotencyKey: undefined }]);
+  });
+
+  it("refuses the kept rules in another order, and each changed field of a rule", async () => {
+    const fixture = storedFixture();
+    const reordered = { ...known, rules: [known.rules[1], known.rules[0]] };
+    expect(await refusal(fixture.service.saveForMember("member-1", 44, { expectedRevisionId: 7, idempotencyKey: "category-rules:closed-2", draft: reordered })))
+      .toEqual(groupRulesClosed({ reordered: true }));
+    expect(await refusal(fixture.service.reviewForMember("member-1", 44, { expectedRevisionId: 7, draft: reordered })))
+      .toEqual(groupRulesClosed({ reordered: true }));
+    for (const [index, change] of [
+      [0, { name: "Shipping mailers" }],
+      [0, { scope: { type: "category" as const, category: "Envelopes" } }],
+      [1, { categoryId: SLEEVES.categoryId }],
+    ] as const) {
+      const rules = known.rules.map((rule, at) => (at === index ? { ...rule, ...change } : rule));
+      expect(await refusal(fixture.service.saveForMember("member-1", 44, { expectedRevisionId: 7,
+        idempotencyKey: `category-rules:closed-3-${index}-${Object.keys(change)[0]}`, draft: { ...known, rules } })))
+        .toEqual(groupRulesClosed({ changedIds: [known.rules[index].id] }));
+    }
+    expect(fixture.taxonomy.calls).toEqual([]);
+    expect(fixture.repository.saves).toEqual([]);
+  });
+
+  it("saves and reviews the stored rules unchanged, and fewer of them in their stored order", async () => {
+    const fixture = storedFixture();
+    fixture.repository.candidates = [categoryCandidate({ productVariantId: 1, category: "Mailers" })];
+
+    await expect(fixture.service.reviewForMember("member-1", 44, { expectedRevisionId: 7, draft: known })).resolves.toMatchObject({ changedCount: 0 });
+    await expect(fixture.service.saveForMember("member-1", 44, { expectedRevisionId: 7, idempotencyKey: "category-rules:closed-4", draft: known }))
+      .resolves.toMatchObject({ idempotentReplay: false, state: { revisionId: 8, profile: storedRules() } });
+    await expect(fixture.service.saveForMember("member-1", 44, { expectedRevisionId: 8, idempotencyKey: "category-rules:closed-5",
+      draft: { ...known, rules: [known.rules[1]] } })).resolves.toMatchObject({ state: { revisionId: 9 } });
+    expect(fixture.repository.state.profile?.rules.map((rule) => rule.id)).toEqual(["toploaders"]);
+    expect(fixture.taxonomy.calls).toEqual([]);
+  });
+
+  it("answers a stale draft that adds a rule with the version conflict, not the refusal, and asks eBay nothing", async () => {
+    const fixture = storedFixture();
+    fixture.taxonomy.options.set(BOXES.categoryId, categoryOption(BOXES));
+    fixture.repository.state = rulesState(storedRules(), 8);
+    const adding = { ...known, rules: [...known.rules, boxesRule] };
+
+    for (const expectedRevisionId of [7, 9]) {
+      const saved = await refusal(fixture.service.saveForMember("member-1", 44, { expectedRevisionId,
+        idempotencyKey: `category-rules:closed-6-${expectedRevisionId}`, draft: adding }));
+      expect(saved).toMatchObject({ code: "DROPSHIP_EBAY_CATEGORY_RULES_VERSION_CONFLICT", context: { storeConnectionId: 44 } });
+      expect(await refusal(fixture.service.reviewForMember("member-1", 44, { expectedRevisionId, draft: adding })))
+        .toMatchObject({ code: "DROPSHIP_EBAY_CATEGORY_RULES_VERSION_CONFLICT" });
+    }
+    expect(fixture.taxonomy.calls).toEqual([]);
+    expect(fixture.repository.saves).toEqual([]);
+    expect(fixture.repository.executions.every((execution) => execution.mode === "read")).toBe(true);
+  });
+
+  it("gives a tab opened before a move, sending the old rules back at the old revision, the version conflict (the move case)", async () => {
+    const fixture = storedFixture();
+    // The move (W11 or the job) emptied the rules and kept the store default: a newer revision.
+    fixture.repository.state = rulesState(rulesProfile({ defaultCategory: SLEEVES }), 8);
+
+    expect(await refusal(fixture.service.saveForMember("member-1", 44, { expectedRevisionId: 7, idempotencyKey: "category-rules:closed-7", draft: known })))
+      .toMatchObject({ code: "DROPSHIP_EBAY_CATEGORY_RULES_VERSION_CONFLICT" });
+    // Loaded again, the same rules at the current revision are new rules: the refusal.
+    expect(await refusal(fixture.service.saveForMember("member-1", 44, { expectedRevisionId: 8, idempotencyKey: "category-rules:closed-8", draft: known })))
+      .toEqual(groupRulesClosed({ addedIds: ["mailers", "toploaders"] }));
+    // And the draft the step builds after the reload, rules [], saves.
+    await expect(fixture.service.saveForMember("member-1", 44, { expectedRevisionId: 8, idempotencyKey: "category-rules:closed-9",
+      draft: { defaultCategoryId: SLEEVES.categoryId, rules: [] } })).resolves.toMatchObject({ state: { revisionId: 9 } });
+    expect(fixture.taxonomy.calls).toEqual([]);
+  });
+
+  it("replays a committed save that added a rule before PR 12, from its first read, without the check", async () => {
+    const fixture = makeFixture();
+    const input = { expectedRevisionId: null, idempotencyKey: "category-rules:closed-10", draft };
+    // Committed before the deploy: the key and its hash are in the revisions, the rule is the head.
+    fixture.repository.revisions.set(input.idempotencyKey, { hash: hashEbayCategoryRulesRequest(44, input), storeConnectionId: 44 });
+    fixture.repository.state = rulesState(rulesProfile({ defaultCategory: SLEEVES, rules: [STORED_MAILERS] }), 1);
+
+    await expect(fixture.service.saveForMember("member-1", 44, input)).resolves.toMatchObject({ idempotentReplay: true, state: { revisionId: 1 } });
+    expect(fixture.repository.saves).toEqual([]);
+    expect(fixture.taxonomy.calls).toEqual([]);
+  });
+});
+
 describe("DropshipEbayCategoryRulesService access", () => {
   it.each([
     ["a non-eBay store", { platform: "shopify" as const }, "DROPSHIP_EBAY_STORE_REQUIRED"],
@@ -784,14 +907,15 @@ describe("DropshipEbayCategoryRulesService access", () => {
 
 describe("DropshipEbayCategoryRulesService review", () => {
   it("summarizes what a draft would change and writes nothing", async () => {
-    const fixture = makeFixture();
+    const fixture = mailersFixture();
     fixture.repository.candidates = [
-      categoryCandidate({ productVariantId: 1, category: "Mailers", ebayBrowseCategoryId: null, ebayBrowseCategoryName: null }),
-      categoryCandidate({ productVariantId: 2, category: "Sleeves", ebayBrowseCategoryId: SLEEVES.categoryId }),
+      categoryCandidate({ productVariantId: 1, category: "Boxes", ebayBrowseCategoryId: null, ebayBrowseCategoryName: null }),
+      categoryCandidate({ productVariantId: 2, category: "Mailers" }),
     ];
 
-    const review = await fixture.service.reviewForMember("member-1", 44, { expectedRevisionId: null, draft });
+    const review = await fixture.service.reviewForMember("member-1", 44, { expectedRevisionId: 7, draft });
 
+    // The new store default gives Boxes a category; Mailers keeps its rule's.
     expect(review).toMatchObject({ selectedCount: 2, changedCount: 1, unchangedCount: 1, withoutCategoryBefore: 1, withoutCategoryAfter: 0,
       bySource: { rule: 1, store_default: 1, catalog: 0, none: 0 } });
     expect(fixture.repository.saves).toEqual([]);
@@ -799,7 +923,7 @@ describe("DropshipEbayCategoryRulesService review", () => {
   });
 
   it("reads the product and category settings once and resolves before and after with them", async () => {
-    const fixture = makeFixture();
+    const fixture = mailersFixture();
     fixture.repository.candidates = [
       categoryCandidate({ productVariantId: 1, productId: 7, category: "Mailers", categoryId: null }),
       categoryCandidate({ productVariantId: 2, productId: 8, category: "Boxes", categoryId: 31, ebayBrowseCategoryId: null, ebayBrowseCategoryName: null }),
@@ -812,12 +936,12 @@ describe("DropshipEbayCategoryRulesService review", () => {
         values: { ...EMPTY_CATEGORY_LISTING_SETTING_VALUES, ebayCategory: TOPLOADERS } }]]),
     };
 
-    const review = await fixture.service.reviewForMember("member-1", 44, { expectedRevisionId: null, draft });
+    const review = await fixture.service.reviewForMember("member-1", 44, { expectedRevisionId: 7, draft });
 
     expect(fixture.repository.layerReads).toEqual([[
       { productId: 7, categoryId: null }, { productId: 8, categoryId: 31 }, { productId: 9, categoryId: null },
     ]]);
-    // The product's own category beats the draft's Mailers rule and the category setting beats its store
+    // The product's own category beats the stored Mailers rule and the category setting beats the draft's store
     // default, before and after alike, so only the size with neither moves (none → the draft's store default).
     expect(review).toMatchObject({ selectedCount: 3, changedCount: 1, unchangedCount: 2, withoutCategoryBefore: 1, withoutCategoryAfter: 0,
       bySource: { rule: 0, store_default: 1, catalog: 0, none: 0, product: 1, category: 1 },
@@ -827,10 +951,10 @@ describe("DropshipEbayCategoryRulesService review", () => {
   });
 
   it("keeps today's four counts when no product or category sets an eBay category", async () => {
-    const fixture = makeFixture();
+    const fixture = mailersFixture();
     fixture.repository.candidates = [categoryCandidate({ productVariantId: 1, category: "Mailers", categoryId: 31 })];
 
-    const review = await fixture.service.reviewForMember("member-1", 44, { expectedRevisionId: null, draft });
+    const review = await fixture.service.reviewForMember("member-1", 44, { expectedRevisionId: 7, draft });
 
     expect(Object.keys(review.bySource)).toEqual(["rule", "store_default", "catalog", "none"]);
     expect(fixture.repository.layerReads).toHaveLength(1);
@@ -838,7 +962,8 @@ describe("DropshipEbayCategoryRulesService review", () => {
 
   it("refuses to review against rules that changed since they were loaded", async () => {
     const fixture = makeFixture();
-    fixture.repository.state = rulesState(rulesProfile(), 3);
+    // The draft sends the stored rule back, so the review reaches the version check on today's path.
+    fixture.repository.state = rulesState(rulesProfile({ rules: [STORED_MAILERS] }), 3);
 
     await expect(fixture.service.reviewForMember("member-1", 44, { expectedRevisionId: null, draft }))
       .rejects.toMatchObject({ code: "DROPSHIP_EBAY_CATEGORY_RULES_VERSION_CONFLICT" });

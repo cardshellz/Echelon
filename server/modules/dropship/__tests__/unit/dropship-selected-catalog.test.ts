@@ -137,8 +137,6 @@ describe("loadSelectedProductIds (plan PR 9, 10.1)", () => {
     const over = syntheticCatalog(10_001);
     await expect(loadSelectedCandidates(readerOver({ candidates: over }).reader, GOLDEN_PREVIEW_NOW))
       .rejects.toMatchObject({ code: "DROPSHIP_PRICING_REVIEW_TOO_LARGE" });
-    await expect(loadSelectedCandidates(readerOver({ candidates: over }).reader, GOLDEN_PREVIEW_NOW, "catalog_targets"))
-      .rejects.toMatchObject({ code: "DROPSHIP_CATALOG_TARGETS_TOO_LARGE" });
     await expect(loadSelectedCandidates(readerOver({ candidates: over }).reader, GOLDEN_PREVIEW_NOW, "category_review"))
       .rejects.toMatchObject({ code: "DROPSHIP_EBAY_CATEGORY_REVIEW_TOO_LARGE" });
   });

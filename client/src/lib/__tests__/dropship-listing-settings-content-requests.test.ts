@@ -161,7 +161,7 @@ describe("store default reads open only with their editor (D8)", () => {
     expect(storeDefaultContentProfileQueryOptions(22, { editorOpen: true, right: EDITABLE }).enabled).toBe(true);
   });
 
-  it("shares the old category panel's key, gives the profile its own, reads fresh on open and never retries out of sight", () => {
+  it("keys both reads by their endpoints, reads fresh on open and never retries out of sight", () => {
     const rules = storeDefaultEbayCategoryRulesQueryOptions(22, { editorOpen: true, right: EDITABLE });
     expect(rules.queryKey).toEqual([ebayCategoryRulesEndpoint(22)]);
     expect(ebayCategoryRulesQueryKey(22)).toEqual(["/api/dropship/listings/stores/22/ebay-category-rules"]);
@@ -331,6 +331,20 @@ describe("W4 store default description request", () => {
     });
   });
 
+  it("words both older-rule refusals plainly, with no place that is gone (Interim, PR 12 PROPOSAL; D12 B3)", () => {
+    expect(EBAY_CATEGORY_DEFAULT_WORDS.olderRuleInvalid).toBe(
+      "One of your older eBay category rules couldn't be sent back as it is. Nothing was saved. Reload the page; if this keeps happening, contact support.");
+    expect(DESCRIPTION_DEFAULT_WORDS.olderRuleInvalid).toBe(
+      "One of your older description rules couldn't be sent back as it is. Nothing was saved. Reload the page; if this keeps happening, contact support.");
+    for (const words of [EBAY_CATEGORY_DEFAULT_WORDS.olderRuleInvalid, DESCRIPTION_DEFAULT_WORDS.olderRuleInvalid]) {
+      expect(words.trim()).toBe(words);
+      expect(words.length).toBeGreaterThan(0);
+      expect(words).not.toMatch(/\b[a-z]+_[a-z_]+\b|DROPSHIP_/);
+      // The older section was deleted in Listing settings PR 12; the words point at a reload instead.
+      expect(words).not.toContain("Older settings");
+    }
+  });
+
   it("counts characters as the server does: N / 4,000", () => {
     expect(descriptionLengthWords("")).toBe("0 / 4,000");
     expect(descriptionLengthWords("abc")).toBe("3 / 4,000");
@@ -467,7 +481,6 @@ describe("runStoreDefaultSave", () => {
       reread,
       onSaved,
       onBlocked,
-      classify: { pickedEbayCategoryId: "183436" },
       ...overrides,
     };
     return { run, steps, cb, send, reread, onSaved, onBlocked };
@@ -550,7 +563,6 @@ describe("runStoreDefaultSave", () => {
       request: descriptionDefaultSaveInput,
       send: async () => { throw new DropshipApiError({ status: 429, code: "DROPSHIP_CONTENT_RATE_LIMITED", message: "Slow down." }); },
       checkAnswer: checkDescriptionDefaultAnswer,
-      classify: undefined,
     });
     expect(outcome).toMatchObject({ kind: "failed", failure: { phase: "rate_limited" } });
     expect(drafts.draft).toMatchObject({ phase: "rate_limited", message: "Too many saves in a minute. Wait a moment and try again.",
@@ -568,18 +580,16 @@ describe("runStoreDefaultSave", () => {
     expect(cb.onSaveSettled).toHaveBeenCalledTimes(1);
   });
 
-  it("tells a bad pick from an older rule's category in a W3 refusal", async () => {
-    const pickRefused = fakeDrafts("ebayCategory", W3_BASE, W3_VALUE);
-    await runStoreDefaultSave(w3Run(pickRefused, {
-      send: async () => { throw new DropshipApiError({ status: 422, code: "DROPSHIP_EBAY_CATEGORY_RULE_INVALID", message: "x", context: { categoryId: "183436" } }); },
-    }).run);
-    expect(pickRefused.draft).toMatchObject({ phase: "refused", message: "Pick a final eBay category.", attempt: null });
-
-    const olderRefused = fakeDrafts("ebayCategory", W3_BASE, W3_VALUE);
-    await runStoreDefaultSave(w3Run(olderRefused, {
-      send: async () => { throw new DropshipApiError({ status: 422, code: "DROPSHIP_EBAY_CATEGORY_RULE_INVALID", message: "x", context: { categoryId: "261328" } }); },
-    }).run);
-    expect(olderRefused.draft).toMatchObject({ phase: "refused", message: "One of your older eBay category rules uses a category eBay no longer accepts." });
+  it("says to pick a final category for a W3 category refusal, whichever category it names", async () => {
+    // Since Listing settings PR 12 (D9-D10) W3 asks eBay only about the picked store default: the saved rules go back
+    // unchanged and their categories are never checked again, so no refusal can be about an older rule (review CT3).
+    for (const categoryId of ["183436", "261328"]) {
+      const refused = fakeDrafts("ebayCategory", W3_BASE, W3_VALUE);
+      await runStoreDefaultSave(w3Run(refused, {
+        send: async () => { throw new DropshipApiError({ status: 422, code: "DROPSHIP_EBAY_CATEGORY_RULE_INVALID", message: "x", context: { categoryId } }); },
+      }).run);
+      expect(refused.draft).toMatchObject({ phase: "refused", message: "Pick a final eBay category.", attempt: null });
+    }
   });
 
   it("says a description too big to save (413 with no code) needs support", async () => {
@@ -591,7 +601,6 @@ describe("runStoreDefaultSave", () => {
       request: descriptionDefaultSaveInput,
       send: async () => { throw new DropshipApiError({ status: 413, message: "request entity too large" }); },
       checkAnswer: checkDescriptionDefaultAnswer,
-      classify: undefined,
     });
     expect(drafts.draft).toMatchObject({ phase: "refused", message: "This is too big to save here. Contact support.", value: { introduction: "Hi.", footer: "" } });
   });

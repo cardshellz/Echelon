@@ -1,5 +1,13 @@
 # eBay listing policy assignments
 
+> **Status: removed in Listing settings PR 12.** The per-size listing policy panel (`EbayListingPolicyOverridePanel`,
+> `EbayListingPolicyBulkDialog`), the four routes under `/api/dropship/ebay/listing-policy-overrides` (the saved read,
+> the read, the bulk write and the single write), their service, repository, DTOs and their unit, route and PostgreSQL
+> tests were deleted. Per-size policy rows already saved are not dropped: they still apply through
+> `applyEbayListingPolicyOverride` (`server/modules/dropship/application/dropship-listing-preview-service.ts`), no page
+> can add new ones, and the Listing settings drawer's "Sizes differ" fix still clears them. Store policies are set in
+> Catalog → Listing settings. The rest of this page describes the removed design and is kept as history.
+
 ## Authority and inheritance
 
 - Card Shellz fulfillment capabilities remain operational limits, not vendor shipping prices.
@@ -94,7 +102,7 @@ Follow-on work must capture the actual provider shipping-selection fields, prese
 ## Verification
 
 - Unit/HTTP tests cover service mapping, independent defaults, bulk validation, authorization, revision conflicts, request identity, and transaction boundaries.
-- `dropship-ebay-listing-policy-bulk.integration.test.ts` runs the real repository and existing migration in an isolated schema, testing concurrency, rollback, replay, clearing, and audit retention. CI includes it in the PostgreSQL hardening job.
+- `dropship-ebay-listing-policy-bulk.integration.test.ts` ran the real repository and existing migration in an isolated schema, testing concurrency, rollback, replay, clearing, and audit retention. It was retired with the bulk writer in Listing settings PR 12; the guarantees that still hold for the surviving writers of these rows are covered by `dropship-listing-setting-writes.integration.test.ts`.
 - Local browser smoke testing uses mocked API data only: check two listings, change fulfillment while leaving return/payment unchanged, confirm only checked rows change, and retry a simulated lost response with the same key.
 - Save/refresh regression tests use real QueryClient observers for stale in-flight reads,
   cache isolation, preserved overrides, and refresh failure/retry. An SSR test verifies

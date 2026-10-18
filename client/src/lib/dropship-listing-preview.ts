@@ -101,8 +101,8 @@ const ISSUE_WORDS: ReadonlyMap<string, string> = new Map<string, string>([
   ["pricing_rule_priority_conflict", "Two of your older price rules apply to this size. Give it a price in Listing settings."],
   ["pricing_basis_unavailable", "Card Shellz doesn't have the cost or retail price this price starts from."],
   ["pricing_result_out_of_range", "This price works out too high or too low. Change it in Listing settings."],
-  // keep
-  ["pricing_rule_outside_limit", "Your pricing rules give this size a price outside a Card Shellz price limit, so it can't be listed at that price."],
+  // Interim (PR 12 PROPOSAL): the neighbours' action, now that pricing rules can't be edited.
+  ["pricing_rule_outside_limit", "Your pricing rules give this size a price outside a Card Shellz price limit, so it can't be listed at that price. Give it an exact price in Listing settings."],
   // keep
   ["price_below_product_cost", "Priced below your .ops product cost: you lose money on every sale at this price. Raise the price, or list anyway and take the loss."],
   // The description (listing-content-resolver.ts).

@@ -193,4 +193,25 @@ const target = { storeConnectionId: 22, productVariantId: 101 };
     expect(other.resolved).toEqual(resolveListingContent({ candidate: contentCandidate(), profile: noContentProfile, saved: null }));
     expect((await service.getForMember("member-1", target)).resolved.descriptionText).toContain("Store 22 only");
   });
+  it("refuses a templates save that adds a group, writing no revision, head or audit (Listing settings PR 12, D9, T6)", async () => {
+    const profile = { defaultTemplate: { introduction: "Welcome", footer: "" }, groups: [] };
+    const first = await service.saveProfile("member-1", 22, { profile, expectedRevisionId: null, idempotencyKey: "profile-1" });
+    const profileCounts = async () => (await query(`SELECT
+      (SELECT count(*)::int FROM dropship.dropship_content_profile_revisions) AS revisions,
+      (SELECT count(*)::int FROM dropship.dropship_content_profiles) AS heads,
+      (SELECT count(*)::int FROM dropship.dropship_audit_events) AS audits`)).rows[0];
+    const before = await profileCounts();
+    expect(before).toEqual({ revisions: 1, heads: 1, audits: 1 });
+    const group = { id: "mailers", name: "Mailers", priority: 1, scope: { type: "category" as const, category: "Mailers" },
+      template: { introduction: "Mailers ship flat.", footer: "" } };
+    await expect(service.saveProfile("member-1", 22, { profile: { ...profile, groups: [group] }, expectedRevisionId: first.state.revisionId,
+      idempotencyKey: "profile-2" })).rejects.toMatchObject({ code: "DROPSHIP_LISTING_GROUP_RULES_CLOSED",
+      context: { kind: "description", addedIds: ["mailers"], classification: "permanent" } });
+    expect(await profileCounts()).toEqual(before);
+    // Nothing was recorded under the key: the same key saves the next request, groups unchanged (none).
+    const next = await service.saveProfile("member-1", 22, { profile: { ...profile, defaultTemplate: { introduction: "Hello", footer: "" } },
+      expectedRevisionId: first.state.revisionId, idempotencyKey: "profile-2" });
+    expect(next).toMatchObject({ idempotentReplay: false, state: { revisionId: 2 } });
+    expect(await profileCounts()).toEqual({ revisions: 2, heads: 1, audits: 2 });
+  });
 });

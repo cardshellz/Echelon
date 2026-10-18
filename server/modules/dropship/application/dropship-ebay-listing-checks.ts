@@ -203,8 +203,8 @@ export function listingPolicyNamesFromDiscovery(
  * The connected store's current leaf shelves (store categories) for the
  * requested ids, in request order, each with the path an offer sends (eBay
  * takes store categories by name). The first id the store does not have
- * throws the caller's own refusal: the setup save and the per-size shelf
- * service word it differently, and the client shows those words as they are.
+ * throws the caller's own refusal: the setup save and the listing-settings
+ * shelf writers word it differently, and the client shows those words as they are.
  */
 export function resolveStoreShelfIds(
   ids: readonly string[],

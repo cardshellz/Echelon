@@ -32,6 +32,13 @@ import { ListingSettingHeavyWriteGate } from "../../application/dropship-listing
 import type { ListingSettingEbayPort } from "../../application/dropship-listing-setting-ebay-values";
 import type { DropshipEbayListingSetupDiscovery } from "../../application/dropship-ebay-listing-setup-service";
 import { DropshipPricingRulesService } from "../../application/dropship-pricing-rules-service";
+import { DropshipListingContentService } from "../../application/dropship-listing-content-service";
+import { contentProfileStateSchema } from "../../../../../shared/dropship/listing-content";
+import { pricingProfileStateSchema } from "../../../../../shared/dropship/pricing-rules";
+// The step's own W1 and W4 body builders (as SDU/dropship-listing-preview-service.test.ts imports client code), so the
+// round trip below sends exactly what the page sends (plan T10, SAFETY9).
+import { buildPricingReviewRequest } from "../../../../../client/src/lib/dropship-listing-settings-recipe";
+import { descriptionDefaultSaveInput, prepareDescriptionDefaultSave } from "../../../../../client/src/lib/dropship-listing-settings-content-requests";
 import { RULES_CONVERSION_PLANNER_VERSION, checkRulesConversion } from "../../application/dropship-listing-rules-conversion";
 import { DropshipListingRulesConversionNoticeService } from "../../application/dropship-listing-rules-conversion-notice-service";
 import { DropshipListingSettingsService } from "../../application/dropship-listing-settings-service";
@@ -58,7 +65,7 @@ import {
 } from "../../infrastructure/dropship-listing-rule-conversions.writer";
 import { savePricingProfileWithClient } from "../../infrastructure/dropship-pricing-profile.writer";
 import { saveProductListingSettingsPerProductWithClient } from "../../infrastructure/dropship-product-listing-settings.repository";
-import { PgDropshipEbayListingPolicyOverrideRepository } from "../../infrastructure/dropship-ebay-listing-policy-override.repository";
+import { POLICY_FEATURE_LOCK_SQL } from "../../infrastructure/dropship-listing-setting-leftovers.repository";
 import {
   PgDropshipListingSettingWritesRepository,
   mapListingSettingWriteError,
@@ -73,6 +80,18 @@ import { PgDropshipRulesConversionJobSource } from "../../infrastructure/dropshi
 import { LISTING_RULE_CONVERSIONS_MIGRATION_FILE } from "../fixtures/listing-rule-conversions-migration";
 
 vi.mock("../../../../db", () => ({ pool: {}, db: {} }));
+/**
+ * The code before Listing settings PR 12 had no older group refusal. One case (verify VS5) turns the rule off while it
+ * stores a W1 review as that code did, then on again for the apply; every other case runs the real rule.
+ */
+const beforePr12 = vi.hoisted(() => ({ noGroupRefusal: false }));
+vi.mock("../../domain/older-group-rules-edit", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../domain/older-group-rules-edit")>();
+  const edit = ((...args: Parameters<typeof actual.olderGroupRulesEdit>) => beforePr12.noGroupRefusal
+    ? { allowed: true, addedIds: [], changedIds: [], reordered: false }
+    : (actual.olderGroupRulesEdit as (...input: unknown[]) => unknown)(...args)) as typeof actual.olderGroupRulesEdit;
+  return { ...actual, olderGroupRulesEdit: edit };
+});
 config({ path: resolve(process.cwd(), ".env.test") });
 const testUrl = process.env.ECHELON_TEST_DATABASE_URL;
 const disposable = process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true";
@@ -339,19 +358,66 @@ describeDatabase.sequential("listing-settings writes on PostgreSQL (plan PR 9)",
     return Array.from({ length: total }, (_, index) => firstSize + index);
   }
 
-  /** Per-size leftovers as today's per-size panels leave them, for one vendor's store (revision and current row each). */
-  async function seedPolicyOverride(input: { vendorId?: number; storeId?: number; sizeId: number; fulfillment: string | null;
-    returnPolicy?: string | null; label: string }): Promise<void> {
+  type PolicyLeftover = { vendorId?: number; storeId?: number; sizeId: number; fulfillment: string | null;
+    returnPolicy?: string | null; label: string };
+  /**
+   * Per-size leftovers as the per-size panels (deleted in PR 12) left them, for one vendor's store (revision and current
+   * row each). `run` is the client the rows are written on: the pool by default, or a lock holder's open transaction.
+   */
+  async function seedPolicyOverride(input: PolicyLeftover,
+    run: (sql: string, values?: unknown[]) => Promise<pg.QueryResult> = execute): Promise<void> {
     const vendorId = input.vendorId ?? VENDOR;
     const storeId = input.storeId ?? STORE;
-    const revision = await execute(`INSERT INTO dropship.dropship_ebay_listing_policy_override_revisions
+    const revision = await run(`INSERT INTO dropship.dropship_ebay_listing_policy_override_revisions
       (vendor_id, store_connection_id, product_variant_id, idempotency_key, request_hash, fulfillment_policy_id, return_policy_id,
        actor_type, actor_id, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7, 'vendor', 'seed', $8) RETURNING id`,
     [vendorId, storeId, input.sizeId, `seed-policy:${input.label}`, "d".repeat(64), input.fulfillment, input.returnPolicy ?? null, NOW]);
-    await execute(`INSERT INTO dropship.dropship_ebay_listing_policy_overrides
+    await run(`INSERT INTO dropship.dropship_ebay_listing_policy_overrides
       (vendor_id, store_connection_id, product_variant_id, revision_id, fulfillment_policy_id, return_policy_id, created_at, updated_at)
       VALUES ($1, $2, $3, $4, $5, $6, $7, $7)`,
     [vendorId, storeId, input.sizeId, revision.rows[0].id, input.fulfillment, input.returnPolicy ?? null, NOW]);
+  }
+  /**
+   * An older per-size writer's lock holder. PR 12 deleted the per-size policy writer, but a revert of PR 12 (which
+   * deploys automatically) brings it back, and the leftover clean-up keeps taking its feature lock for that reason
+   * (dropship-listing-setting-leftovers.repository.ts). The holder does what that writer did around the lock: one
+   * client opens a transaction, takes POLICY_FEATURE_LOCK_SQL for STORE (waiting while another transaction holds it),
+   * writes one leftover row with the seed SQL, and commits.
+   */
+  async function olderPolicyWriterLockHolder() {
+    const client = await pool.connect();
+    let released = false;
+    const release = () => {
+      if (released) return;
+      released = true;
+      client.release();
+    };
+    return {
+      lock: async () => {
+        await client.query("BEGIN");
+        await client.query(POLICY_FEATURE_LOCK_SQL, [STORE]);
+      },
+      write: (row: PolicyLeftover) => seedPolicyOverride(row, (sql, values) => client.query(qualify(sql), values)),
+      commit: async () => {
+        try { await client.query("COMMIT"); } finally { release(); }
+      },
+      /** A case's clean-up: rolls an unfinished transaction back and releases the client; nothing once committed. */
+      abandon: async () => {
+        if (released) return;
+        try { await client.query("ROLLBACK"); } finally { release(); }
+      },
+    };
+  }
+  /** Lock, write and commit at once: an older per-size writer that finishes before anything else runs. */
+  async function commitAsOlderPolicyWriter(row: PolicyLeftover): Promise<void> {
+    const holder = await olderPolicyWriterLockHolder();
+    try {
+      await holder.lock();
+      await holder.write(row);
+      await holder.commit();
+    } finally {
+      await holder.abandon();
+    }
   }
   async function seedShelf(input: { vendorId?: number; storeId?: number; sizeId: number; label: string }): Promise<void> {
     const vendorId = input.vendorId ?? VENDOR;
@@ -922,6 +988,138 @@ describeDatabase.sequential("listing-settings writes on PostgreSQL (plan PR 9)",
     });
   });
 
+  describe("Listing settings PR 12: older groups are kept or removed, never added or changed (plan D9, T8, T10)", () => {
+    const GROUP_RECIPE = { basis: "catalog_retail", markupBps: 2_000, flatCents: 0, rounding: "up_99" } as const;
+    const TOPLOADERS_GROUP = { id: "toploaders", name: "Toploaders", priority: 1, scope: { type: "category", category: "Toploaders" },
+      recipe: GROUP_RECIPE } as const;
+    const TWO_SIZES_GROUP = { id: "two-sizes", name: "Two sizes", priority: 5, scope: { type: "listings", productVariantIds: [102, 101] },
+      recipe: { basis: "product_cost", markupBps: 2_000, flatCents: 0, rounding: "cent" } } as const;
+    const contentService = () => new DropshipListingContentService({ repository: new PgDropshipListingContentRepository(scopedPool()),
+      clock: { now: () => NOW }, logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() } });
+    /** One transaction on one pooled client: BEGIN, the work, COMMIT; ROLLBACK on any failure. */
+    async function inOneTransaction<T>(work: (client: Pick<PoolClient, "query">) => Promise<T>): Promise<T> {
+      const client = await scopedPool().connect();
+      try {
+        await client.query("BEGIN");
+        const result = await work(client);
+        await client.query("COMMIT");
+        return result;
+      } catch (error) {
+        await client.query("ROLLBACK");
+        throw error;
+      } finally {
+        client.release();
+      }
+    }
+    /** The head revision's stored groups, as the database holds them (jsonb text), and the head's id. */
+    async function headGroups(kind: "pricing" | "content"): Promise<{ revisionId: number; groups: string }> {
+      const [heads, revisions] = kind === "pricing"
+        ? ["dropship.dropship_pricing_profiles", "dropship.dropship_pricing_profile_revisions"]
+        : ["dropship.dropship_content_profiles", "dropship.dropship_content_profile_revisions"];
+      const result = await execute(`SELECT r.id, (r.profile -> 'groups')::text AS groups FROM ${heads} p
+        JOIN ${revisions} r ON r.id = p.revision_id WHERE p.store_connection_id = $1`, [STORE]);
+      return { revisionId: result.rows[0].id as number, groups: result.rows[0].groups as string };
+    }
+
+    it("refuses a W1 review that adds or changes a group on a store holding one and stores no review; a review removing it is stored and applied (T8)", async () => {
+      const revision = await setStoreDefault({ defaultRecipe: D1.defaultRecipe, groups: [TOPLOADERS_GROUP] });
+      const review = (groups: readonly unknown[]) => pricingRules().reviewForMember(MEMBER, STORE, { expectedRevisionId: revision,
+        releaseFixedOverrides: false, profile: { defaultRecipe: D1.defaultRecipe, groups } });
+
+      const added = await expectDropshipError(review([TOPLOADERS_GROUP, TWO_SIZES_GROUP]), "DROPSHIP_LISTING_GROUP_RULES_CLOSED");
+      expect(added.context).toMatchObject({ storeConnectionId: STORE, kind: "pricing", addedIds: ["two-sizes"], changedIds: [],
+        retryable: false, classification: "permanent" });
+      await expectDropshipError(review([{ ...TOPLOADERS_GROUP, recipe: { ...GROUP_RECIPE, markupBps: 2_500 } }]), "DROPSHIP_LISTING_GROUP_RULES_CLOSED");
+      expect(await count("dropship.dropship_pricing_reviews")).toBe(0);
+
+      const removal = await review([]);
+      expect(await count("dropship.dropship_pricing_reviews")).toBe(1);
+      const applied = await pricingRules().applyForMember(MEMBER, STORE, { reviewId: removal.reviewId, reviewHash: removal.reviewHash,
+        idempotencyKey: "pr12-remove-group" });
+      expect(applied.idempotentReplay).toBe(false);
+      expect(await headGroups("pricing")).toEqual({ revisionId: applied.revisionId, groups: "[]" });
+    });
+
+    it("never applies a W1 review stored before PR 12 that adds a group: the apply is refused, no application, no new revision (verify VS5, K12)", async () => {
+      const revision = await setStoreDefault({ defaultRecipe: D1.defaultRecipe, groups: [TOPLOADERS_GROUP] });
+      // Stored by the real service with the rule off, as the code before PR 12 stored it: rows, hash and all. With the
+      // refusal removed from the apply, its recompute matches and the review is applied (the deliberate break shows it).
+      beforePr12.noGroupRefusal = true;
+      let stored: Awaited<ReturnType<DropshipPricingRulesService["reviewForMember"]>>;
+      try {
+        stored = await pricingRules().reviewForMember(MEMBER, STORE, { expectedRevisionId: revision, releaseFixedOverrides: false,
+          profile: { defaultRecipe: D1.defaultRecipe, groups: [TOPLOADERS_GROUP, TWO_SIZES_GROUP] } });
+      } finally {
+        beforePr12.noGroupRefusal = false;
+      }
+      expect(stored.summary.blocked).toBe(0);
+      const revisionsBefore = await count("dropship.dropship_pricing_profile_revisions");
+      const headBefore = await headGroups("pricing");
+
+      const refused = await expectDropshipError(pricingRules().applyForMember(MEMBER, STORE, { reviewId: stored.reviewId,
+        reviewHash: stored.reviewHash, idempotencyKey: "pr12-pre-deploy-apply" }), "DROPSHIP_LISTING_GROUP_RULES_CLOSED");
+      expect(refused.context).toMatchObject({ storeConnectionId: STORE, kind: "pricing", addedIds: ["two-sizes"], changedIds: [],
+        retryable: false, classification: "permanent" });
+      // The transaction rolled back: nothing was applied or recorded under the key.
+      expect(await count("dropship.dropship_pricing_applications")).toBe(0);
+      expect(await count("dropship.dropship_pricing_profile_revisions")).toBe(revisionsBefore);
+      expect(await headGroups("pricing")).toEqual(headBefore);
+
+      // So the same key takes a review that keeps the group as it is.
+      const kept = await pricingRules().reviewForMember(MEMBER, STORE, { expectedRevisionId: revision, releaseFixedOverrides: false,
+        profile: { defaultRecipe: D2.defaultRecipe, groups: [TOPLOADERS_GROUP] } });
+      const applied = await pricingRules().applyForMember(MEMBER, STORE, { reviewId: kept.reviewId, reviewHash: kept.reviewHash,
+        idempotencyKey: "pr12-pre-deploy-apply" });
+      expect(applied.idempotentReplay).toBe(false);
+      const head = await headGroups("pricing");
+      expect(head.revisionId).toBe(applied.revisionId);
+      expect(JSON.parse(head.groups)).toEqual([TOPLOADERS_GROUP]);
+    });
+
+    it("round-trips the stored groups through the GET schemas and the step's own builders: W1 and W4 save them back unchanged (T10)", async () => {
+      // Seeded as older group saves stored them, before the reads' normalising: an untrimmed name, CRLF and a trailing space.
+      await setStoreDefault({ defaultRecipe: D1.defaultRecipe, groups: [{ ...TOPLOADERS_GROUP, name: "  Toploaders " }, TWO_SIZES_GROUP] });
+      await inOneTransaction((client) => saveContentProfileWithClient(client, { vendorId: VENDOR, storeConnectionId: STORE, actorId: MEMBER }, {
+        expectedRevisionId: null, idempotencyKey: "content:pr12-seed", profile: { defaultTemplate: { introduction: "Old store text", footer: "" },
+          groups: [{ id: "toploaders", name: "Toploaders text", priority: 1, scope: { type: "category", category: "Toploaders" },
+            template: { introduction: "Fits any binder.\r\nTwo lines ", footer: "" } }] } }, "f".repeat(64), NOW));
+      const asJsonb = async (value: unknown) => (await execute("SELECT $1::jsonb::text AS text", [JSON.stringify(value)])).rows[0].text as string;
+
+      for (const round of [1, 2]) {
+        // W1, as the Price row does: the GET answer (its output schema, then the wire), the step's builder, the check, Save.
+        const pricingBefore = await headGroups("pricing");
+        const pricingRead = JSON.parse(JSON.stringify(pricingProfileStateSchema.parse(await pricingRules().getForMember(MEMBER, STORE))));
+        const reviewBody = buildPricingReviewRequest(pricingRead, round === 1 ? D2.defaultRecipe : D1.defaultRecipe);
+        const review = await pricingRules().reviewForMember(MEMBER, STORE, JSON.parse(JSON.stringify(reviewBody)));
+        const applied = await pricingRules().applyForMember(MEMBER, STORE, { reviewId: review.reviewId, reviewHash: review.reviewHash,
+          idempotencyKey: `pr12-roundtrip-apply-${round}` });
+        const pricingAfter = await headGroups("pricing");
+        expect(pricingAfter.revisionId).toBe(applied.revisionId);
+        expect(pricingAfter.revisionId).not.toBe(pricingBefore.revisionId);
+        // Byte for byte what the page read and sent back: the read's normalised groups (round 1 normalises the seed's
+        // name once; round 2 stores the very same bytes again).
+        expect(pricingAfter.groups).toBe(await asJsonb(pricingRead.profile.groups));
+        if (round === 2) expect(pricingAfter.groups).toBe(pricingBefore.groups);
+
+        // W4, as the Description row does: the GET answer, the step's builder, its save input under the step's key.
+        const contentBefore = await headGroups("content");
+        const contentRead = JSON.parse(JSON.stringify(contentProfileStateSchema.parse(await contentService().getProfile(MEMBER, STORE))));
+        const prepared = prepareDescriptionDefaultSave(contentRead, { introduction: `Store text ${round}`, footer: "" });
+        if (!prepared.ok) throw new Error(`The step refused its own body: ${prepared.code}`);
+        const saved = await contentService().saveProfile(MEMBER, STORE,
+          JSON.parse(JSON.stringify(descriptionDefaultSaveInput(prepared.signature, `ls-text:pr12-roundtrip-${round}`))));
+        expect(saved.idempotentReplay).toBe(false);
+        const contentAfter = await headGroups("content");
+        expect(contentAfter.revisionId).toBe(saved.state.revisionId);
+        expect(contentAfter.revisionId).not.toBe(contentBefore.revisionId);
+        expect(contentAfter.groups).toBe(await asJsonb(contentRead.profile.groups));
+        if (round === 2) expect(contentAfter.groups).toBe(contentBefore.groups);
+      }
+      expect(JSON.parse((await headGroups("pricing")).groups)).toEqual([TOPLOADERS_GROUP, TWO_SIZES_GROUP]);
+      expect(JSON.parse((await headGroups("content")).groups)[0].template.introduction).toBe("Fits any binder.\nTwo lines");
+    });
+  });
+
   describe("W5, one product (PUT …/products/:productId, plan PR 9, section 6)", () => {
     const BIG_PRODUCT = 3_000;
     const BIG_FIRST_SIZE = 300_000;
@@ -1156,25 +1354,22 @@ describeDatabase.sequential("listing-settings writes on PostgreSQL (plan PR 9)",
     });
 
     describe("concurrency (PG 6)", () => {
-      it("(a) waits for an old per-size policy writer that holds its feature lock; both finish, no deadlock", async () => {
+      it("(a) waits for an older per-size writer's lock holder that holds its feature lock; both finish, no deadlock", async () => {
         await seedPolicyOverride({ sizeId: 101, fulfillment: "ship-a", returnPolicy: "ret-a", label: "101" });
-        const paused = gate((sql) => sql.includes("INSERT INTO dropship.dropship_ebay_listing_policy_override_revisions"));
-        const oldWriter = new PgDropshipEbayListingPolicyOverrideRepository(scopedPool(undefined, paused.hook)).replaceAssignment({
-          vendorId: VENDOR, storeConnectionId: STORE, productVariantId: 102, expectedRevisionId: null, fulfillmentPolicyId: null,
-          returnPolicyId: "ret-b", paymentPolicyId: null, idempotencyKey: "old-policy-writer:1", requestHash: "e".repeat(64),
-          actor: { actorType: "vendor", actorId: MEMBER }, now: NOW });
+        // The holder takes the policy feature lock first and writes its row, as the old writer did before its commit.
+        const holder = await olderPolicyWriterLockHolder();
         let w5: Promise<unknown> | undefined;
         try {
-          await within(paused.reached, "the old writer's revision insert");
+          await within(holder.lock(), "the holder's feature lock");
+          await within(holder.write({ sizeId: 102, fulfillment: null, returnPolicy: "ret-b", label: "older-writer-102" }), "the holder's row");
           w5 = products().saveForMember(MEMBER, STORE, PRODUCT_7, { idempotencyKey: productKey("feature-lock"), expectedRevisionId: null,
             patch: { shippingPolicy: null } });
           await waitUntilLockWait("dropship_ebay_listing_policy_override", 1);
-          paused.open();
-          await expect(within(oldWriter, "the old writer")).resolves.toMatchObject({ idempotentReplay: false });
+          await within(holder.commit(), "the holder's commit");
           await expect(within(w5, "W5")).resolves.toMatchObject({ outcome: "changed", clearedSizeCount: 1 });
         } finally {
-          paused.open();
-          await within(Promise.allSettled([oldWriter, ...(w5 ? [w5] : [])]), "the feature-lock case's clean-up");
+          await holder.abandon();
+          await within(Promise.allSettled(w5 ? [w5] : []), "the feature-lock case's clean-up");
         }
         const rows = await execute(`SELECT product_variant_id, fulfillment_policy_id, return_policy_id FROM dropship.dropship_ebay_listing_policy_overrides
           ORDER BY product_variant_id`);
@@ -2133,30 +2328,32 @@ describeDatabase.sequential("listing-settings writes on PostgreSQL (plan PR 9)",
         expect(await categoryWrites()).toEqual(before);
       });
 
-      it("(d) holds the feature locks from the leftover read: an old policy writer waits, or commits first and makes the set differ", async () => {
+      it("(d) holds the feature locks from the leftover read: an older per-size writer's lock holder waits, or commits first and makes the set differ", async () => {
         await seedPolicyOverride({ sizeId: 101, fulfillment: null, returnPolicy: "ret-101", label: "pg7d-101" });
         const clearReturns = (label: string) => body(label, { patch: { returnPolicy: { id: "return-new" } },
           clear: { fields: ["returnPolicy"], products: [{ productId: PRODUCT_7, expectedRevisionId: null }] } });
-        const oldWriter = (label: string, repositoryPool: Pool = scopedPool()) => new PgDropshipEbayListingPolicyOverrideRepository(repositoryPool)
-          .replaceAssignment({ vendorId: VENDOR, storeConnectionId: STORE, productVariantId: SECOND_SIZE, expectedRevisionId: null,
-            fulfillmentPolicyId: null, returnPolicyId: "ret-105", paymentPolicyId: null, idempotencyKey: `old-policy-writer:${label}`,
-            requestHash: "e".repeat(64), actor: { actorType: "vendor", actorId: MEMBER }, now: NOW });
+        const holderRow = (label: string) => ({ sizeId: SECOND_SIZE, fulfillment: null, returnPolicy: "ret-105", label: `older-writer-${label}` });
 
-        // 1. W12 holds both feature locks (paused right before its leftover read); the old writer waits on the policy one.
+        // 1. W12 holds both feature locks (paused right before its leftover read); the holder waits on the policy one.
         const paused = gate((sql) => sql.startsWith("SELECT o.product_variant_id"));
         const w12 = save(clearReturns("pg7d-wait"), scopedPool(undefined, paused.hook));
-        let writer: Promise<unknown> | undefined;
+        const holder = await olderPolicyWriterLockHolder();
+        let holderLocked: Promise<void> | undefined;
         try {
           await within(paused.reached, "W12's leftover read");
-          writer = oldWriter("wait");
+          holderLocked = holder.lock();
           await waitUntilLockWait("dropship_ebay_listing_policy_override", 1);
           paused.open();
           // W12 commits with the set it derived, and its clean-up's second request for the held locks returned at once.
           await expect(within(w12, "W12")).resolves.toMatchObject({ outcome: "changed", clearedProductCount: 1 });
-          await expect(within(writer, "the old writer")).resolves.toMatchObject({ idempotentReplay: false });
+          // Only then does the holder get the lock; it writes its row after W12's commit.
+          await within(holderLocked, "the holder's feature lock");
+          await within(holder.write(holderRow("wait")), "the holder's row");
+          await within(holder.commit(), "the holder's commit");
         } finally {
           paused.open();
-          await within(Promise.allSettled([w12, ...(writer ? [writer] : [])]), "the waiting case's clean-up");
+          await within(Promise.allSettled([w12, ...(holderLocked ? [holderLocked] : [])]), "the waiting case's clean-up");
+          await holder.abandon();
         }
         const rows = await execute(`SELECT product_variant_id, return_policy_id FROM dropship.dropship_ebay_listing_policy_overrides
           ORDER BY product_variant_id`);
@@ -2169,7 +2366,7 @@ describeDatabase.sequential("listing-settings writes on PostgreSQL (plan PR 9)",
         const before = scopedPool(undefined, async (sql) => {
           if (ranFirst || !sql.includes("hashtext('dropship_ebay_listing_policy_override')")) return;
           ranFirst = true;
-          await within(oldWriter("first"), "the old writer, first");
+          await within(commitAsOlderPolicyWriter(holderRow("first")), "the holder, first");
         });
         const error = await expectDropshipError(within(save(clearReturns("pg7d-first"), before), "W12 after the writer"),
           "DROPSHIP_PRODUCT_LISTING_SETTINGS_VERSION_CONFLICT");
@@ -4102,7 +4299,7 @@ describeDatabase.sequential("listing-settings writes on PostgreSQL (plan PR 9)",
         }
       });
 
-      it("an Older settings description group save commits first: the profile moved, so settings_changed", async () => {
+      it("an older group save to the description templates commits first: the profile moved, so settings_changed", async () => {
         const { body } = await dryRun();
         const before = await conversionState();
         const contentHead = before.heads[0].content as number;
@@ -4344,8 +4541,9 @@ describeDatabase.sequential("listing-settings writes on PostgreSQL (plan PR 9)",
         expect(conversionJobLog.info).not.toHaveBeenCalled();
         expect(conversionJobLog.debug).toHaveBeenCalledWith(TICK_ACTION, expect.objectContaining({ stores_checked: 0, stores_left: 0 }));
 
-        // Older settings adds a group back (D21): the store holds older rules again, but it was converted once, so the job
-        // never lists it again; the vendor can move it from the sheet.
+        // A group comes back by SQL (D21), as only a server from before Listing settings PR 12 could add one (W1, W3 and W4
+        // refuse a new group since, D9): the store holds older rules again, but it was converted once, so the job never
+        // lists it again; the vendor can move it from the sheet.
         await setStoreDefault(PRICING);
         expect((await dryRun()).diff.state).toBe("clean");
         const regrouped = await conversionState();

@@ -209,7 +209,9 @@ export function listingPushNextStep(errorCode: string | null, retryable: boolean
       // Interim (PR 10 PROPOSAL): the reasons above name where each fix is (Listing settings, step 1, or support).
       return "Fix what's named above, then preview the listing again and queue it.";
     case "DROPSHIP_EBAY_MANAGED_LOCATION_CONFIG_MISMATCH":
-      return "Card Shellz changed the warehouse your listings ship from. In Listing settings, choose Update ship-from location, then queue the listing again.";
+      // Interim (PR 12 PROPOSAL): the step's [Update now] under the Shipping policy row (ShipFromRepairNote); the
+      // "Update ship-from location" button went with the old setup panel (verify VC1).
+      return "Card Shellz changed the warehouse your listings ship from. In Listing settings, choose Update now under Shipping policy, then queue the listing again.";
     case "DROPSHIP_LISTING_ENTITLEMENT_BLOCKED":
     case "DROPSHIP_LISTING_STORE_BLOCKED":
     case "DROPSHIP_LISTING_VENDOR_BLOCKED":

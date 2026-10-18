@@ -44,7 +44,7 @@ import type {
   DropshipCanonicalListingContent,
   DropshipStoreListingConfig,
 } from "../../application/dropship-marketplace-listing-provider";
-import type { DropshipEbayListingPolicyOverride } from "../../application/dropship-ebay-listing-policy-override-service";
+import type { DropshipEbayListingPolicyOverride } from "../../application/dropship-ebay-listing-policy-override";
 import {
   EMPTY_LISTING_SETTING_LAYERS,
   type ListingSettingLayers,

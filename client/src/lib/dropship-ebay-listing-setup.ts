@@ -1,39 +1,18 @@
 import {
   DropshipApiError,
-  createDropshipIdempotencyKey,
   queryErrorCode,
   type DropshipEbayListingSetupResponse,
-  type DropshipEbayListingSetupSaveRequest,
-  type DropshipEbayShipFromRepairRequest,
-  type ReplaceDropshipEbayListingSetupInput,
 } from "./dropship-ops-surface";
 
 /**
- * The words and request bodies for the eBay listing setup panel (Listing
- * settings PR 6). Pure: no React, no network.
+ * The eBay listing setup words the Listing settings step's policy, shelf and
+ * ship-from rows share (Listing settings PR 6): the reload message, the
+ * shipping check notice, the revision a save is sent against and the save
+ * error words. Pure: no React, no network.
  */
 
 /** Shown when this page was loaded from a server without revisions, or before one was read. */
 export const LISTING_SETUP_RELOAD_MESSAGE = "This page is out of date. Reload it, then save again.";
-
-/** Why the vendor can see but not change these settings, in their words (design 3.5); null when they can change them. */
-export function listingSetupReadOnlyMessage(
-  setup: Pick<DropshipEbayListingSetupResponse, "access">,
-  storeName: string,
-): string | null {
-  const access = setup.access;
-  if (!access || access.canEdit) return null;
-  switch (access.reason) {
-    case "store_paused":
-      return `${storeName} is paused, so its settings can't be changed now.`;
-    case "store_disconnecting":
-      return `${storeName} is being disconnected, so its settings can't be changed now.`;
-    case "store_disconnected":
-      return `${storeName} is disconnected, so its settings can't be changed now.`;
-    case "vendor_not_active":
-      return "Your dropship account isn't active, so listing settings can't be changed. Contact support.";
-  }
-}
 
 /**
  * When Card Shellz shipping could not be read, the shipping policy can't be
@@ -64,37 +43,6 @@ export function listingSetupShippingCheckNotice(
   }
 }
 
-/**
- * Whether this answer carries eBay's live option lists. A read-only view and
- * a replayed save do not: they show the saved values only.
- */
-export function listingSetupShowsSavedValuesOnly(setup: Pick<DropshipEbayListingSetupResponse, "checks">): boolean {
-  return setup.checks !== undefined && setup.checks.ebay !== "checked";
-}
-
-/** Whether Card Shellz shipping was checked for this answer (always, for a server from before the check states existed). */
-export function listingSetupShippingChecked(setup: Pick<DropshipEbayListingSetupResponse, "checks">): boolean {
-  return setup.checks === undefined || setup.checks.fulfillment.status === "checked";
-}
-
-type PolicyField = keyof ReplaceDropshipEbayListingSetupInput;
-const POLICY_FIELDS: readonly PolicyField[] = ["fulfillmentPolicyId", "returnPolicyId", "paymentPolicyId"];
-const NAME_BY_FIELD = {
-  fulfillmentPolicyId: "fulfillmentPolicyName",
-  returnPolicyId: "returnPolicyName",
-  paymentPolicyId: "paymentPolicyName",
-} as const;
-
-/** One option per saved policy, named as eBay listed it at the last save (or by its id), for a view without eBay's lists. */
-export function listingSetupSavedOption(
-  setup: Pick<DropshipEbayListingSetupResponse, "selection" | "storedNames">,
-  field: PolicyField,
-): Array<{ id: string; name: string }> {
-  const id = setup.selection[field];
-  if (!id) return [];
-  return [{ id, name: setup.storedNames?.[NAME_BY_FIELD[field]] ?? id }];
-}
-
 /** The revision to save against, or null when this answer carries none (the page must reload). */
 export function listingSetupRevision(setup: Pick<DropshipEbayListingSetupResponse, "revision">): number | null {
   const revision = setup.revision;
@@ -102,65 +50,7 @@ export function listingSetupRevision(setup: Pick<DropshipEbayListingSetupRespons
 }
 
 /**
- * The PUT body for this panel's save: all three policies, against the
- * revision the options were loaded with. Throws when there is no revision,
- * since the server refuses a save without one.
- */
-export function buildEbayListingSetupSaveRequest(
-  setup: Pick<DropshipEbayListingSetupResponse, "revision" | "selection">,
-  draft: ReplaceDropshipEbayListingSetupInput,
-  idempotencyKey: string,
-): DropshipEbayListingSetupSaveRequest {
-  const expectedRevision = listingSetupRevision(setup);
-  if (expectedRevision === null) throw new Error(LISTING_SETUP_RELOAD_MESSAGE);
-  // Only what changed is sent, so a return or payment change needs no Card
-  // Shellz shipping check. With nothing changed, every chosen policy is sent.
-  const changed = POLICY_FIELDS.filter((field) => draft[field] !== "" && draft[field] !== (setup.selection[field] ?? ""));
-  const fields = changed.length > 0 ? changed : POLICY_FIELDS.filter((field) => draft[field] !== "");
-  const request: DropshipEbayListingSetupSaveRequest = { expectedRevision, idempotencyKey };
-  for (const field of fields) request[field] = draft[field];
-  return request;
-}
-
-export function buildEbayShipFromRepairRequest(
-  setup: Pick<DropshipEbayListingSetupResponse, "revision">,
-  idempotencyKey: string,
-): DropshipEbayShipFromRepairRequest {
-  const expectedRevision = listingSetupRevision(setup);
-  if (expectedRevision === null) throw new Error(LISTING_SETUP_RELOAD_MESSAGE);
-  return { expectedRevision, idempotencyKey };
-}
-
-/**
- * One request key per save attempt. A retry of the same choices against the
- * same revision (after a dropped connection, say) reuses the key, so the
- * server answers it from the first save instead of saving twice. Any other
- * change starts a new attempt with a new key.
- */
-export class ListingSetupRequestKeys {
-  private current: { signature: string; key: string } | null = null;
-
-  constructor(
-    private readonly prefix: string,
-    private readonly newKey: (prefix: string) => string = createDropshipIdempotencyKey,
-  ) {}
-
-  keyFor(attempt: unknown): string {
-    const signature = JSON.stringify(attempt);
-    if (this.current?.signature !== signature) {
-      this.current = { signature, key: this.newKey(this.prefix) };
-    }
-    return this.current.key;
-  }
-
-  /** Call once the server confirmed the save, so the next save gets a new key. */
-  settled(): void {
-    this.current = null;
-  }
-}
-
-/**
- * A save or ship-from repair error in words this panel can act on; other
+ * A save or ship-from repair error in words the vendor can act on; other
  * errors keep the server's own message.
  */
 export function listingSetupSaveErrorMessage(

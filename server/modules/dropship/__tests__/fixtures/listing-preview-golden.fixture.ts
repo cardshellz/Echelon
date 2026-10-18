@@ -25,7 +25,7 @@ import type { ListingSettingsPriceSource, ListingSettingsSettingKey, ListingSett
 import type { PricingProfile } from "../../../../../shared/dropship/pricing-rules";
 import type { CatalogVariantPublicationPhotos } from "../../../catalog/catalog-publication-images.reader";
 import type { DropshipEbayFulfillmentPolicyPreflight } from "../../application/dropship-ebay-fulfillment-policy-guard";
-import type { DropshipEbayListingPolicyOverride } from "../../application/dropship-ebay-listing-policy-override-service";
+import type { DropshipEbayListingPolicyOverride } from "../../application/dropship-ebay-listing-policy-override";
 import { productCatalogHash } from "../../application/dropship-listing-content-resolver";
 import type {
   DropshipExistingVendorListing,

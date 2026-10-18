@@ -20,7 +20,7 @@ import {
 } from "../../../../../shared/dropship/listing-setting-values";
 import type { PricingProfileState } from "../../../../../shared/dropship/pricing-rules";
 import { prepareEbayCategoryRules, resolveEbayListingCategory } from "../../application/dropship-ebay-category-resolver";
-import type { DropshipEbayListingPolicyOverride } from "../../application/dropship-ebay-listing-policy-override-service";
+import type { DropshipEbayListingPolicyOverride } from "../../application/dropship-ebay-listing-policy-override";
 import { listingCatalogHash, productCatalogHash, resolveListingContent } from "../../application/dropship-listing-content-resolver";
 import {
   evaluateListingPricingPolicy,

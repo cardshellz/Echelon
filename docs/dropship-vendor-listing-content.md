@@ -1,5 +1,14 @@
 # Vendor-owned listing descriptions
 
+> **Status: partly removed in Listing settings PR 12.** The description templates panel
+> (`DropshipContentTemplatesPanel`), the per-size description editor (`DropshipListingContentEditor`, `useContentDraft`)
+> and their browser spec (`test/browser/dropship-content-editor.spec.ts`) were deleted. The store's description text is
+> set in Catalog → Listing settings (Description), which saves through the same content-profile route; a product's own
+> text is set in the product drawer. The per-size content routes in
+> `server/modules/dropship/interfaces/http/dropship-listing-content.routes.ts` stay, with no page calling them. Older
+> description group rules still apply until the store moves them over. The rest of this page describes the original
+> design and is kept as history.
+
 ## Summary of changes
 
 The existing Catalog workflow now supports a description draft per store and product variant, plus reusable store/group introductions and footers. No new navigation item, catalog mutation, or automatic marketplace update is introduced.
@@ -53,7 +62,7 @@ Rolling the application back leaves the additive tables intact, but the older ap
 - `dropship-listing-preview-service.test.ts`: exact description intent, missing/stale evidence rejection, catalog review blockers, and fail-closed incomplete content reads.
 - `dropship-listing-content.integration.test.ts`: real PostgreSQL migration syntax, simultaneous saves, idempotency, store isolation, immutable history, predecessor/FK enforcement and audit rollback.
 - `dropship-listing-price.integration.test.ts`: description changes between preview/queue and frozen content after later edits, alongside the existing pricing transaction tests.
-- `test/browser/dropship-content-editor.spec.ts`: desktop/mobile button placement/count, edit-save-cancel-reset, inherited formatting preservation, uncertain retries, conflict reconciliation, refresh recovery without another write, hidden template draft preservation, group selectors and open-preview refresh.
+- `test/browser/dropship-content-editor.spec.ts` (deleted in Listing settings PR 12 with the panel and editor it drove): desktop/mobile button placement/count, edit-save-cancel-reset, inherited formatting preservation, uncertain retries, conflict reconciliation, refresh recovery without another write, hidden template draft preservation, group selectors and open-preview refresh.
 - Existing pricing browser journeys, full unit suite, typecheck, production build, writer-ratchet and migration-prefix guard are included in validation. Browser tests use synthetic local APIs, not customer data.
 
 ## Deployment acceptance test

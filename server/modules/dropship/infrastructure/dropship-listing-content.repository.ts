@@ -3,7 +3,7 @@ import { pool as defaultPool } from "../../../db";
 import type { SaveContentProfileInput, SaveListingContentInput } from "../../../../shared/dropship/listing-content";
 import { contentConflict, type ContentRepository, type ContentTransaction } from "../application/dropship-listing-content-service";
 import { DropshipError } from "../domain/errors";
-import { selectedCatalogReaderForTransaction } from "./dropship-selected-catalog.reader";
+import { PgDropshipListingPreviewRepository } from "./dropship-listing-preview.repository";
 import { readContentProfile, readListingContentSettings } from "./dropship-listing-content.reader";
 import { readListingSettingLayers } from "./dropship-listing-setting-layers.reader";
 
@@ -43,7 +43,10 @@ export class PgDropshipListingContentRepository implements ContentRepository {
         if (!input.idempotencyKey || input.idempotencyKey !== key) throw new Error("Content write requires its transaction's original request key.");
       };
       const result = await operation({
-        vendorId, ...selectedCatalogReaderForTransaction(client), loadProfile, loadSaved,
+        // The catalog reader every W4 path uses (execute, authorizeListing), bound to this
+        // transaction's client. Until PR 12 it came from the selected-catalog reader spread,
+        // which also carried the scan reads only the deleted targets route used.
+        vendorId, catalog: PgDropshipListingPreviewRepository.readerForTransaction(client), loadProfile, loadSaved,
         // A plain read on this client: the store lock above already keeps product
         // and category setting writers out until commit (they take the same lock).
         loadListingSettingLayers: (candidate) => readListingSettingLayers(client,

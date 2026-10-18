@@ -11,11 +11,11 @@ import { MAX_LISTING_SETTING_ACTOR_ID_LENGTH, type ListingSettingWriteScope } fr
 
 /**
  * Per-size leftover clean-ups (plan PR 9, P17, section 6.6). A size's own
- * policy override, store shelf or main text, left by today's per-size
- * panels, beats the product's and the category's value. When a product or
- * category change touches one of those fields (a value or a reset), every
- * size of the products loses its own row for it, so the change takes effect
- * and nothing "comes back later".
+ * policy override, store shelf or main text, left by the per-size panels
+ * (deleted in Listing settings PR 12; their rows stay), beats the product's
+ * and the category's value. When a product or category change touches one
+ * of those fields (a value or a reset), every size of the products loses its
+ * own row for it, so the change takes effect and nothing "comes back later".
  *
  * - Runs on the listing-settings transaction's client, after the parent
  *   writer and the size prices, with the store lock, the owner rows and
@@ -23,8 +23,11 @@ import { MAX_LISTING_SETTING_ACTOR_ID_LENGTH, type ListingSettingWriteScope } fr
  *   locks, not size locks: a leftover can sit on a size that is no longer
  *   sellable, which no size list would name.
  * - Takes the old per-size writers' own feature locks, policy then shelf,
- *   before any row. Those writers never take the store lock, so this order
- *   adds no cycle (plan 3.9 step 7).
+ *   before any row. No current writer takes them: those writers (the per-size
+ *   policy and shelf routes) were deleted in Listing settings PR 12. The locks
+ *   stay because a revert of PR 12, which deploys automatically, brings the
+ *   old writers back, and they never take the store lock, so this order adds
+ *   no cycle (plan 3.9 step 7).
  * - Set-based: one statement per kind, whatever the size count. Each locks
  *   its rows FOR UPDATE in ascending size order, writes one revision per size
  *   under the request's child key with the parent request hash (plan D10),
@@ -44,7 +47,11 @@ type QueryClient = Pick<PoolClient, "query">;
 const MAX_INT4_ID = 2_147_483_647;
 const REQUEST_HASH_PATTERN = /^[a-f0-9]{64}$/;
 
-/** The old per-size writers' own feature locks (dropship-ebay-listing-policy-override.repository.ts, dropship-ebay-store-category.repository.ts). */
+/**
+ * The old per-size writers' own feature locks (the policy override and store category
+ * repositories' replaceAssignment, deleted in Listing settings PR 12). Kept so a revert of
+ * PR 12 that brings those writers back still serializes with this clean-up.
+ */
 export const POLICY_FEATURE_LOCK_SQL = "SELECT pg_advisory_xact_lock(hashtext('dropship_ebay_listing_policy_override'), $1::integer)";
 export const SHELF_FEATURE_LOCK_SQL = "SELECT pg_advisory_xact_lock(hashtext('dropship_ebay_store_category_assignment'), $1::integer)";
 

@@ -132,7 +132,7 @@ describe("local description authority", () => {
         entitlementStatus: "active", storeStatus: "needs_reauth", setupStatus: "incomplete", storeLaunchReady: false })),
       listCatalogCandidates: vi.fn(async () => [contentCandidate()]), listCatalogExposureRules: vi.fn(async () => [{ scopeType: "catalog", action: "include" }]),
       listSelectionRules: vi.fn(async () => [{ id: 1, scopeType: "catalog", action: "include" }]), listVariantOverrides: vi.fn(async () => []), listExistingListings: vi.fn(async () => []),
-    }, listVariantIds: vi.fn(async () => []), listProductLines: vi.fn(async () => []),
+    },
       loadProfile: vi.fn(async () => profile), loadSaved: vi.fn(async () => saved), findReplay: vi.fn(async () => false),
       loadListingSettingLayers: vi.fn(async () => EMPTY_LISTING_SETTING_LAYERS),
       saveProfile: vi.fn(async (input) => { profile = { profile: input.profile, revisionId: 1, updatedAt: now.toISOString() }; }),
@@ -176,12 +176,6 @@ describe("local description authority", () => {
     vi.mocked(tx.catalog.loadStoreContext).mockResolvedValue(null);
     await expect(service.getForMember("member", target)).rejects.toMatchObject({ code: "DROPSHIP_STORE_CONNECTION_REQUIRED" });
     expect(tx.loadSaved).not.toHaveBeenCalled();
-  });
-  it("reports a bounded catalog-picker limit without partially saving settings", async () => {
-    vi.mocked(tx.listVariantIds).mockImplementation(async (after, limit) => Array.from({ length: Math.min(limit, 10001 - after) }, (_, index) => after + index + 1));
-    vi.mocked(tx.catalog.listCatalogCandidates).mockImplementation(async (ids) => ids.map((id) => ({ ...contentCandidate(), productVariantId: id })));
-    await expect(service.targetsForMember("member", 22, { type: "listings" })).rejects.toMatchObject({ code: "DROPSHIP_CATALOG_TARGETS_TOO_LARGE" });
-    expect(tx.saveListing).not.toHaveBeenCalled(); expect(tx.saveProfile).not.toHaveBeenCalled();
   });
   it("saves reusable templates with optimistic version and never writes individual descriptions", async () => {
     const input = { expectedRevisionId: null, idempotencyKey: "template", profile: { defaultTemplate: { introduction: "Welcome", footer: "" }, groups: [] } };

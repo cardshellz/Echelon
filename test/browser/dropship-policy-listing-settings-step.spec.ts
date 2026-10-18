@@ -16,7 +16,6 @@ import {
   liveListingSettingsSummary,
   listingSetupWithAnotherShippingPolicy,
   listingSetupWithNothingSaved,
-  openOlderSettings,
   shot,
   sizeKey,
   step,
@@ -35,6 +34,7 @@ import {
   expectGatedReads,
   expectInView,
   expectNoHorizontalScroll,
+  expectNoOlderSettings,
   expectNothingUnexpected,
   expectSheetLayout,
   openProductRow,
@@ -89,7 +89,7 @@ function policyChoice(page: Page, name: string) {
   return editor(page).locator("label").filter({ has: page.getByText(name, { exact: true }) }).getByRole("radio");
 }
 
-test("the step shows its title, timing line and seven store defaults in order, Products first, with Older settings closed", async ({ page }, testInfo) => {
+test("the step shows its title, timing line and seven store defaults in order, Products first, and nothing of the older panels", async ({ page }, testInfo) => {
   const state = await openStep(page);
   const stepRoot = page.getByTestId("listing-settings-step");
 
@@ -116,23 +116,14 @@ test("the step shows its title, timing line and seven store defaults in order, P
   await expect(page.getByTestId("listing-settings-product-11")).toContainText(ENVELOPE.productName);
   await expect(page.getByTestId(phone(testInfo) ? "listing-settings-product-cards" : "listing-settings-products-table")).toBeVisible();
 
-  // Today's panels are mounted under "Older settings", closed: hidden, so none of their headings is in view (D3).
-  const older = page.getByRole("button", { name: "Show older settings" });
-  await expect(older).toHaveAttribute("aria-expanded", "false");
-  await expect(page.getByTestId("older-listing-settings-content")).toHaveAttribute("hidden", "");
-  await expect(page.getByTestId("older-listing-settings-content")).toContainText("eBay listing setup");
-  for (const heading of ["eBay listing setup", "Listing policies", "eBay categories", "Listing pricing rules"]) {
+  // The step is all of step 2 (Listing settings PR 12, D3, D4): no "Older settings" section, toggle or panel, mounted or hidden.
+  await expectNoOlderSettings(page);
+  for (const heading of ["eBay listing setup", "Listing policies", "eBay categories", "Listing pricing rules", "Description templates"]) {
     await expect(page.getByRole("heading", { name: heading, exact: true })).toHaveCount(0);
   }
   await expect(bar(page)).toHaveText("All saved");
   await expectNoHorizontalScroll(page);
   await shot(page, testInfo, "listing-settings-step");
-
-  await older.click();
-  await expect(page.getByRole("button", { name: "Hide older settings" })).toHaveAttribute("aria-expanded", "true");
-  await expect(page.getByRole("heading", { name: "eBay listing setup", exact: true })).toBeVisible();
-  await expect(page.getByRole("heading", { name: "Listing pricing rules", exact: true })).toBeVisible();
-  await expectNoHorizontalScroll(page);
   expectGatedReads(state);
   expectNothingUnexpected(state);
 });
@@ -171,38 +162,8 @@ test("Task 1: a new store price is checked first, the check sends the older grou
   // The step reads the summary again after the save (D9) and never trusts the save's answer.
   await expect.poll(() => state.summaryReads.length).toBeGreaterThan(summaryReadsBefore);
   expect(state.pricingRules[STORE]).toMatchObject({ profile: { defaultRecipe: { markupBps: 2_000 }, groups: [TOPLOADER_GROUP] } });
-  // The closed older pricing panel shares the saved-rules read; its untouched form follows the new
-  // rules, so nothing reports a change the vendor never made (pricingFormTakesSavedRules).
+  // Nothing else on the page holds the saved rules, so nothing reports a change the vendor never made.
   await expect(bar(page)).toHaveText("All saved");
-  await openOlderSettings(page);
-  const olderPricing = page.getByRole("heading", { name: /^Listing pricing rules/ });
-  await expect(olderPricing).not.toContainText("Not saved");
-  await expect(page.getByRole("region", { name: "Listing pricing rules" }).getByLabel("Markup (%)").first()).toHaveValue("20.00");
-  expectNothingUnexpected(state);
-});
-
-test("a store price saved in the step leaves a change the vendor made in the older pricing panel as it is", async ({ page }) => {
-  const state = await openStep(page, { pricingRules: { [STORE]: SAVED_PRICING_RULES } });
-  await openOlderSettings(page);
-  const olderPricing = page.getByRole("region", { name: "Listing pricing rules" });
-  const olderMarkup = olderPricing.getByLabel("Markup (%)").first();
-  await expect(olderMarkup).toHaveValue("15.00");
-  await olderMarkup.fill("25.00");
-  await expect(page.getByRole("heading", { name: /^Listing pricing rules/ })).toContainText("Not saved");
-
-  await row(page, "price").getByRole("button", { name: "Change Price" }).click();
-  await editor(page).getByRole("textbox", { name: "Add" }).fill("20");
-  await editor(page).getByRole("button", { name: "Check new prices" }).click();
-  const sheet = page.getByTestId("check-new-prices");
-  await sheet.getByRole("button", { name: "Save new prices" }).click();
-  await expect(sheet).toHaveCount(0);
-  await expect(row(page, "price")).toContainText("Saved");
-  expect(state.pricingApplies).toHaveLength(1);
-
-  // The vendor's own change in the older panel is kept, and still counts as not saved.
-  await expect(olderMarkup).toHaveValue("25.00");
-  await expect(page.getByRole("heading", { name: /^Listing pricing rules/ })).toContainText("Not saved");
-  await expect(bar(page)).toHaveText("Not saved · changes in Older settings");
   expectNothingUnexpected(state);
 });
 
@@ -431,6 +392,105 @@ test("an eBay category picked by search saves as the store default and sends the
     expectedRevisionId: 7, idempotencyKey: KEY("ls-category"),
     draft: { defaultCategoryId: "183435", rules: [{ id: "toploaders", name: "Toploaders", scope: { type: "category", category: "Toploaders" },
       categoryId: TOPLOADERS.categoryId }] } } }]);
+  expectNothingUnexpected(state);
+});
+
+test("the eBay category editor browses eBay's tree level by level to a final category and saves it as the store default (J9)", async ({ page }, testInfo) => {
+  // Ported from the deleted eBay categories panel's journey (Listing settings PR 12, plan 6.5).
+  const state = await openStep(page);
+  const category = row(page, "ebayCategory");
+  await category.getByRole("button", { name: "Change eBay category" }).click();
+  await editor(page).getByRole("radio", { name: "One eBay category for every product" }).check();
+  await editor(page).getByRole("tab", { name: "Browse all categories" }).click();
+  const list = editor(page).getByRole("list", { name: "eBay categories" });
+  await list.getByRole("listitem").filter({ hasText: "Collectibles" }).getByRole("button", { name: "Open" }).click();
+  await list.getByRole("listitem").filter({ hasText: "Card Supplies" }).getByRole("button", { name: "Open" }).click();
+  await expect(editor(page).getByRole("navigation", { name: "eBay category path" })).toContainText("Card Supplies");
+  // Only a final category can be used; the levels above it only open.
+  const toploaders = list.getByRole("listitem").filter({ hasText: "Toploaders" });
+  await expect(toploaders.getByRole("button", { name: "Open" })).toHaveCount(0);
+  await toploaders.getByRole("button", { name: "Use this category" }).click();
+  await expect(editor(page).getByTestId("ebay-category-default-path")).toContainText("Toploaders");
+  // Words only on this step: no eBay category number is shown (hideIds).
+  await expect(editor(page)).not.toContainText(`#${TOPLOADERS.categoryId}`);
+  await editor(page).getByRole("button", { name: "Save", exact: true }).click();
+  await expect(editor(page)).toHaveCount(0);
+  await expect(category).toContainText("Toploaders");
+  await expect(category).toContainText("Saved");
+  await expect(bar(page)).toHaveText("All saved");
+  // One level read at a time, from the top: no search was made.
+  expect(readsOf(state, "GET", `${LISTINGS}/ebay-categories`).map((read) => read.search)).toEqual(["", "?parentId=1", "?parentId=261328"]);
+  expect(state.categorySearches).toEqual([]);
+  expect(state.categoryWrites).toEqual([{ method: "PUT", path: `${LISTINGS}/ebay-category-rules`, body: {
+    expectedRevisionId: null, idempotencyKey: KEY("ls-category"), draft: { defaultCategoryId: TOPLOADERS.categoryId, rules: [] } } }]);
+  if (phone(testInfo)) await expectNoHorizontalScroll(page);
+  expectNothingUnexpected(state);
+});
+
+test("an eBay category search eBay refuses for the store's connection says it needs a refresh and links to Reconnect eBay, with no Try again (J8)", async ({ page }) => {
+  // Ported from the deleted eBay categories panel's journey (Listing settings PR 12, plan 6.5, TESTS10, D17). The inline
+  // eBay sign-in that panel put in this alert is gone; since the PR 12 review (DUX1) the alert carries the sign-in
+  // banner's own Reconnect eBay link instead.
+  const state = await openStep(page);
+  const searches: string[] = [];
+  await page.route((url) => url.pathname === `${LISTINGS}/ebay-categories/search`, async (route) => {
+    searches.push(new URL(route.request().url()).searchParams.get("q") ?? "");
+    await route.fulfill({ status: 403, json: { error: { code: "DROPSHIP_EBAY_CATEGORIES_PERMISSION_REQUIRED",
+      message: "Your eBay connection needs a refresh.", context: { storeConnectionId: STORE, retryable: false } } } });
+  });
+  await row(page, "ebayCategory").getByRole("button", { name: "Change eBay category" }).click();
+  await editor(page).getByRole("radio", { name: "One eBay category for every product" }).check();
+  await editor(page).getByRole("textbox", { name: "Search eBay categories" }).fill("sleeves");
+  const refused = editor(page).getByRole("alert").filter({ hasText: "Your eBay connection needs a refresh." });
+  await expect(refused).toContainText("eBay categories load through your own eBay connection. Reconnect eBay, then try again.");
+  // Asking again can't help until the connection is refreshed: no Try again, and no code.
+  await expect(refused.getByRole("button")).toHaveCount(0);
+  // The way to refresh it: the store connection page, where the vendor signs in to eBay again (the banner's link).
+  await expect(refused.getByRole("link")).toHaveCount(1);
+  await expect(refused.getByRole("link", { name: "Reconnect eBay" })).toHaveAttribute("href", /\/onboarding$/);
+  await expect(refused).not.toContainText("DROPSHIP_");
+  await expect(editor(page).getByRole("list", { name: "eBay categories" })).toHaveCount(0);
+  // The picker's refusal stays inside the editor: the step raises no banner for it (the sign-in banner shows only when
+  // the setup or shelves read, or a save, names the sign-in, bannerFromWriteError), so this is the page's only link.
+  await expect(banner(page)).toHaveCount(0);
+  await expect(page.getByRole("link", { name: "Reconnect eBay" })).toHaveCount(1);
+  expect(searches).toEqual(["sleeves"]);
+  expect(state.categoryWrites).toEqual([]);
+  expectNothingUnexpected(state);
+});
+
+test("the picker's Reconnect eBay link asks about an unsaved pick before it leaves, and Keep editing keeps it (J8; verify VC6)", async ({ page }) => {
+  // The link leaves Listing settings for the store connection page, whose eBay sign-in returns there, not here (the PR
+  // body tells the owner). So a pick made before the refusal is asked about first, over the editor (a sheet on a phone).
+  const state = await openStep(page);
+  await page.route((url) => url.pathname === `${LISTINGS}/ebay-categories/search`, (route) => route.fulfill({ status: 403,
+    json: { error: { code: "DROPSHIP_EBAY_CATEGORIES_PERMISSION_REQUIRED", message: "Your eBay connection needs a refresh.",
+      context: { storeConnectionId: STORE, retryable: false } } } }));
+  await row(page, "ebayCategory").getByRole("button", { name: "Change eBay category" }).click();
+  await editor(page).getByRole("radio", { name: "One eBay category for every product" }).check();
+  await editor(page).getByRole("tab", { name: "Browse all categories" }).click();
+  const list = editor(page).getByRole("list", { name: "eBay categories" });
+  await list.getByRole("listitem").filter({ hasText: "Collectibles" }).getByRole("button", { name: "Open" }).click();
+  await list.getByRole("listitem").filter({ hasText: "Card Supplies" }).getByRole("button", { name: "Open" }).click();
+  await list.getByRole("listitem").filter({ hasText: "Toploaders" }).getByRole("button", { name: "Use this category" }).click();
+  await expect(editor(page).getByTestId("ebay-category-default-path")).toContainText("Toploaders");
+  await expect(bar(page)).toHaveText("Not saved · 1 change in eBay category");
+  // Looking for another category: eBay refuses the search for the store's connection.
+  await editor(page).getByRole("button", { name: "Pick another" }).click();
+  await editor(page).getByRole("tab", { name: "Search eBay categories" }).click();
+  await editor(page).getByRole("textbox", { name: "Search eBay categories" }).fill("sleeves");
+  const refused = editor(page).getByRole("alert").filter({ hasText: "Your eBay connection needs a refresh." });
+  await expect(refused).toContainText("Reconnect eBay, then try again.");
+
+  const dialog = page.getByRole("alertdialog");
+  await refused.getByRole("link", { name: "Reconnect eBay" }).click();
+  await expect(dialog).toContainText("You have 1 change that isn't saved.");
+  await dialog.getByRole("button", { name: "Keep editing" }).click();
+  await expect(dialog).toHaveCount(0);
+  await expect(page).toHaveURL(SETUP_PATH);
+  await expect(refused).toBeVisible();
+  await expect(bar(page)).toHaveText("Not saved · 1 change in eBay category");
+  expect(state.categoryWrites).toEqual([]);
   expectNothingUnexpected(state);
 });
 

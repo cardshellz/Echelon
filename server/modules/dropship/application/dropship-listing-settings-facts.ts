@@ -34,7 +34,7 @@ import { LISTING_SETTING_LEFTOVER_FIELDS, listingSettingsInvariantFailed, type L
 import { evaluateListingPriceAgainstCost } from "../domain/listing-price-cost";
 import { computeDropshipMarketplaceQuantity, type DropshipVendorVariantOverride } from "../domain/vendor-selection";
 import type { ResolvedEbayListingCategory } from "./dropship-ebay-category-resolver";
-import type { DropshipEbayListingPolicyOverride } from "./dropship-ebay-listing-policy-override-service";
+import type { DropshipEbayListingPolicyOverride } from "./dropship-ebay-listing-policy-override";
 import {
   listingCatalogHash, needsListingCatalogReview, needsProductCatalogReview, prepareContentProfile, productCatalogHash,
   resolveContentTemplate, textDescriptionHtml, type TemplatePartSource,

@@ -87,8 +87,10 @@ describe("DropshipListingConfigService", () => {
     });
   });
 
+  // Ported in Listing settings PR 12 from the deleted vendor read (getForMember): the
+  // editable view creates the same neutral default config.
   it("ensures a neutral listing config for a connected store", async () => {
-    const result = await service.getForMember("member-1", 22);
+    const result = await service.getViewForMember("member-1", 22);
 
     expect(result.config).toMatchObject({
       storeConnectionId: 22,
@@ -108,16 +110,6 @@ describe("DropshipListingConfigService", () => {
       platform: "shopify",
       actor: { actorType: "vendor", actorId: "member-1" },
     });
-  });
-
-  it("refuses the editable member read for a closed vendor before loading the store", async () => {
-    vendorProvisioning.vendor = makeVendor({ status: "closed" });
-
-    await expect(service.getForMember("member-1", 22)).rejects.toMatchObject({
-      code: "DROPSHIP_LISTING_CONFIG_VENDOR_BLOCKED",
-    });
-    expect(repository.storeLookups).toEqual([]);
-    expect(repository.ensureInputs).toEqual([]);
   });
 
   it("defaults new eBay configs to live while Shopify remains draft-first", () => {

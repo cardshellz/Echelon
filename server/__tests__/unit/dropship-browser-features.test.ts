@@ -137,7 +137,8 @@ describe("affected feature browser selection", () => {
   it.each([
     ["client/src/pages/dropship/DropshipPortalWallet.tsx", ["wallet"]],
     ["shared/dropship/program-finance-money.ts", ["finance"]],
-    ["client/src/pages/dropship/DropshipPricingRulesPanel.tsx", ["pricing", "listings"]],
+    // Listing settings PR 12 deleted the pricing rules panel and its own feature group; a step row is the listings group's.
+    ["client/src/pages/dropship/listing-settings/PriceDefaultRow.tsx", ["listings"]],
     ["test/browser/dropship-policy-listing-settings-helpers.ts", ["listings"]],
     ["shared/ebay-listing-issue.ts", []],
     ["docs/migration-allocation.md", []],

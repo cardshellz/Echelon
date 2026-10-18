@@ -603,6 +603,25 @@ describe("ListingSettingsTabs, rendered", () => {
     expect(markup).not.toContain('data-testid="listing-settings-prices-tab"');
   });
 
+  // Ported in Listing settings PR 12 from the deleted per-size policy panel's test (REC:935;
+  // docs/DROPSHIP-EBAY-LISTING-POLICY-ASSIGNMENTS.md "10,000 supplied rows mount only 50 table rows"): the step's lists
+  // are server pages, so a 10,000-product store reads one page and mounts one page.
+  it("reads one page for a 10,000-product store and mounts its 50 rows with the pager, and the contract refuses a bigger page", () => {
+    const client = newClient();
+    const page = Array.from({ length: 50 }, (_, index) => productRow({ productId: index + 1, productName: `Product ${index + 1}` }));
+    seedProducts(client, {}, productsAnswer(page, 10_000));
+    let reads: unknown[][] = [];
+    const markup = render(tabs(), client, (cache) => { reads = listReads(cache); });
+
+    expect(reads).toEqual([["products", { search: "", show: "all", page: 0 }]]);
+    expect(count(markup, 'data-testid="listing-settings-product-')).toBe(50);
+    expect(markup).not.toContain('data-testid="listing-settings-product-51"');
+    expect(markup).toContain("1–50 of 10,000");
+    expect(markup).toContain(">Next</button>");
+    // A server answer with more than one page of rows never reaches the list.
+    expect(() => productsAnswer([...page, productRow({ productId: 51 })], 10_000)).toThrow();
+  });
+
   it("draws one row per product with sizes, price range, own settings and status (C15)", () => {
     const client = newClient();
     seedProducts(client, {}, productsAnswer([TOPLOADER, TEAM_BAGS, EASY_GLIDE, PENNY, UNPRICED], 312));
