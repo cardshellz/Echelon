@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { costIssueSchema } from "./cost-source-contracts";
 import { resolveCostPostingStatus } from "./cost-posting-status";
+import { originRepairApprovalSchema } from "./cost-origin-repair";
 
 const id = z.number().int().positive().safe();
 export const purchaseCostComponentStatusSchema = z
@@ -17,6 +18,7 @@ export const purchaseCostComponentStatusSchema = z
     sourceRevisionId: id.nullable(),
     applicationId: id.nullable(),
     issues: z.array(costIssueSchema),
+    historicalPosting: z.object({ destination: z.enum(["historical_cogs", "inventory_variance"]), amountMills: z.number().int().nonnegative().safe() }).optional(),
   })
   .superRefine((value, context) => {
     if (
@@ -65,6 +67,7 @@ export const purchaseLineCostStatusSchema = z
         origin: z.enum(["receipt", "transformation", "unproven"]),
       }),
     ),
+    originRepairs: z.array(originRepairApprovalSchema.extend({ lotId: id })).optional(),
   })
   .superRefine((line, context) => {
     if (

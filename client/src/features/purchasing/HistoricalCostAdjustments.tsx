@@ -18,7 +18,7 @@ export function HistoricalCostAdjustments() {
   return (
     <Card>
       <CardHeader>
-        <CardTitle>Historical shipment cost adjustments</CardTitle>
+        <CardTitle>Historical cost adjustments</CardTitle>
         <CardDescription>
           Approved costs for stock with incomplete movement history. These postings are separate from costs assigned to
           individual orders.
@@ -65,7 +65,7 @@ export function HistoricalCostAdjustments() {
                         </span>
                       </div>
                       <p>
-                        {posting.sku} · Approved by {posting.actorName} ·{" "}
+                        {posting.sku} · {posting.component ?? "landed"} · Approved by {posting.actorName} ·{" "}
                         {new Date(posting.recordedAt).toLocaleString()}
                       </p>
                       <p>{posting.reason}</p>

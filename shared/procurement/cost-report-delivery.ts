@@ -37,9 +37,9 @@ export const inventoryCostReportEventSchema = z.object({
   unresolvedQuantities: z.array(unresolvedCostQuantitySchema).min(1).max(10_000).optional(),
   historicalCostAdjustments: z.array(reconciliationPostingSchema).min(1).max(2).optional(),
 }).strict().superRefine((event, context) => {
-  if (event.historicalCostAdjustments && (event.component !== "landed" || event.currency !== "USD"
+  if (event.historicalCostAdjustments && (event.currency !== "USD"
     || new Set(event.historicalCostAdjustments.map(posting=>posting.destination)).size !== event.historicalCostAdjustments.length)) {
-    context.addIssue({code:"custom",path:["historicalCostAdjustments"],message:"Historical cost postings must have unique USD landed-cost destinations"});
+    context.addIssue({code:"custom",path:["historicalCostAdjustments"],message:"Historical cost postings must have unique USD component destinations"});
   }
   const ids = new Set<number>();
   for (const [index, change] of event.changes.entries()) {

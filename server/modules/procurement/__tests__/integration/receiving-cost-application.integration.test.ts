@@ -22,6 +22,7 @@ import { createShipmentCostExceptionService, shipmentExceptionScope } from "../.
 import { costFingerprint } from "../../../inventory/infrastructure/cost-evidence-values";
 import type { ShipmentExceptionRequest } from "@shared/procurement/shipment-cost-exception";
 import { registerShipmentReconciliationCases } from "./shipment-cost-reconciliation.cases";
+import { registerOriginRepairCases } from "./cost-origin-repair.cases";
 import { readPurchaseCostStatus } from "../../purchase-cost-status.repository";
 import { readReceiptCostQueue } from "../../receipt-cost-queue-read.repository";
 import { projectReceiptCostQueue } from "../../receipt-cost-queue-read.service";
@@ -96,6 +97,7 @@ audit.sequential("receipt/AP/freight cost revisions with real owners", () => {
     await pool.query(readFileSync(resolve(process.cwd(), "migrations/900000007000018030001_shipment_cost_exception_decisions.sql"), "utf8"));
     await pool.query(readFileSync(resolve(process.cwd(), "migrations/0751_exact_inventory_cost_totals.sql"), "utf8"));
     await pool.query(readFileSync(resolve(process.cwd(), "migrations/900000008000018110001_shipment_cost_reconciliation.sql"), "utf8"));
+    await pool.query(readFileSync(resolve(process.cwd(), "migrations/900000009000018290001_historical_cost_origin_repairs.sql"), "utf8"));
     await pool.query(readFileSync(resolve(process.cwd(), "migrations/0725_inventory_cost_admission_evidence.sql"), "utf8"));
     await pool.query(readFileSync(resolve(process.cwd(), "migrations/231_receipt_cost_recovery.sql"), "utf8"));
     await pool.query(readFileSync(resolve(process.cwd(), "migrations/900000004000017890001_receiving_quarantine.sql"), "utf8"));
@@ -181,10 +183,12 @@ audit.sequential("receipt/AP/freight cost revisions with real owners", () => {
     // These schemas are exclusively owned by this disposable local fixture.
     // Restore production immutability guards before any owner code executes.
     await pool.query(`ALTER TABLE inventory.cost_reconciliation_approvals DISABLE TRIGGER cost_reconciliation_approval_no_truncate;
-      ALTER TABLE inventory.cost_reconciliation_postings DISABLE TRIGGER cost_reconciliation_posting_no_truncate`);
+      ALTER TABLE inventory.cost_reconciliation_postings DISABLE TRIGGER cost_reconciliation_posting_no_truncate;
+      ALTER TABLE inventory.cost_origin_repairs DISABLE TRIGGER cost_origin_repair_no_truncate`);
     try { await resetFixtureWithEmptyReceivingCustody(pool, `TRUNCATE ${TABLES.map(qualifiedTable).join(",")},inventory.cost_adjustment_log RESTART IDENTITY CASCADE`); }
     finally { await pool.query(`ALTER TABLE inventory.cost_reconciliation_approvals ENABLE TRIGGER cost_reconciliation_approval_no_truncate;
-      ALTER TABLE inventory.cost_reconciliation_postings ENABLE TRIGGER cost_reconciliation_posting_no_truncate`); }
+      ALTER TABLE inventory.cost_reconciliation_postings ENABLE TRIGGER cost_reconciliation_posting_no_truncate;
+      ALTER TABLE inventory.cost_origin_repairs ENABLE TRIGGER cost_origin_repair_no_truncate`); }
     await pool.query("DELETE FROM public.audit_events WHERE actor=$1", [actorId]);
     await pool.query("TRUNCATE public.financial_command_results RESTART IDENTITY CASCADE");
     await pool.query("INSERT INTO identity.users(id,username,password,role,active) VALUES($1,'cost-audit-owner','unused','admin',1)", [actorId]);
@@ -867,6 +871,9 @@ audit.sequential("receipt/AP/freight cost revisions with real owners", () => {
   });
 
   function exceptionService() { return createShipmentCostExceptionService(database, () => NOW); }
+  registerOriginRepairCases({ pool: () => pool, database: () => database, at: NOW, updateCosts: updateShipmentCosts,
+    physicalSnapshot: costQuantityPhysicalSnapshot, costHealth: () => shipment.getLandedCostHealth(),
+    shipmentReview: () => shipment.getCostReview(1) });
   registerShipmentReconciliationCases({ pool:()=>pool, database:()=>database, at:NOW,
     prepareGaps:legacyQuantityGaps, updateCosts:updateShipmentCosts, physicalSnapshot:costQuantityPhysicalSnapshot,
     costHealth: () => shipment.getLandedCostHealth() });

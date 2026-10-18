@@ -9,6 +9,7 @@ import {
 } from "@shared/procurement/purchase-cost-status";
 import type { ProcurementNavigation } from "@/hooks/use-procurement-navigation";
 import { Badge } from "@/components/ui/badge";
+import { CostOriginRepair } from "./CostOriginRepair";
 
 export function PurchaseSupplierCostLine({
   line,
@@ -18,6 +19,7 @@ export function PurchaseSupplierCostLine({
   navigation: ProcurementNavigation;
 }) {
   const action = purchaseCostNextAction(line);
+  const missingOrigin = line.lots.some(lot => lot.origin === "unproven");
   const issues = [
     ...new Map(
       line.components
@@ -47,14 +49,22 @@ export function PurchaseSupplierCostLine({
           </Badge>
         ))}
       </div>
-      {action === "invoice" && (
+      {line.lots.filter(lot => lot.origin === "unproven" || line.originRepairs?.some(repair => repair.lotId === lot.id)).map(lot => {
+        const repair = line.originRepairs?.find(repair => repair.lotId === lot.id);
+        return <div key={lot.id} className="space-y-1 rounded border p-2">
+          <p>{lot.lotNumber}{repair && <> · Origin repaired · Approved by {repair.actorName} · {new Date(repair.recordedAt).toLocaleString()}</>}</p>
+          <CostOriginRepair lotId={lot.id} repaired={!!repair} />
+        </div>;
+      })}
+      {missingOrigin && <p>Use <strong>Repair historical cost origin</strong> to confirm this receipt and its supplier amounts, review the before and after, and request administrator approval.</p>}
+      {action === "invoice" && !missingOrigin && (
         <p>
           Confirm the product and packaging amounts on the supplier invoice.
           Saving that review applies the costs to linked stock and sold items.
           Freight and duty approvals do not supply these amounts.
         </p>
       )}
-      {action === "history" && (
+      {action === "history" && !missingOrigin && (
         <p>
           The supplier amounts are recorded, but some receipt or stock history
           is missing. Review the affected lots and receipts below before

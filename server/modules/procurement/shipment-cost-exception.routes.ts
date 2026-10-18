@@ -9,10 +9,12 @@ import { logger } from "../../platform/observability/logger";
 import { createShipmentCostExceptionService, shipmentExceptionScope } from "./shipment-cost-exception.service";
 import { ShipmentCostExceptionError } from "./shipment-cost-exception.policy";
 import { registerShipmentCostReconciliationRoutes } from "./shipment-cost-reconciliation.routes";
+import { registerCostOriginRepairRoutes } from "./cost-origin-repair.routes";
 
 const pathId = z.string().regex(/^[1-9]\d*$/).transform(Number).pipe(shipmentExceptionIdSchema);
 export function registerShipmentCostExceptionRoutes(app: Express, service = createShipmentCostExceptionService(db, () => new Date())) {
   registerShipmentCostReconciliationRoutes(app);
+  registerCostOriginRepairRoutes(app);
   const root = "/api/shipment-lines/:id/cost-exception";
   function failure(error: unknown, req: Request, res: Response) {
     const known = error instanceof FinancialCommandError || error instanceof ShipmentCostExceptionError;

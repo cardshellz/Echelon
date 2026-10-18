@@ -103,7 +103,7 @@ export const reconciliationReportSchema = z
     entries: z
       .array(
         reconciliationHistorySchema
-          .extend({ lineId: id, shipmentId: id, purchaseOrderId: id, poNumber: z.string(), sku: z.string().nullable() })
+          .extend({ lineId: id.nullable(), shipmentId: id.nullable(), purchaseOrderId: id, poNumber: z.string(), sku: z.string().nullable(), component: z.enum(["product", "packaging", "landed"]).optional() })
           .strict(),
       )
       .max(100),

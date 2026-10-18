@@ -8,10 +8,10 @@ export async function readCostReconciliationReport(tx: CostEvidenceTransaction) 
   const rows = await tx.execute(sql`WITH balances AS (
       SELECT destination,SUM(delta_mills)::text AS amount FROM inventory.cost_reconciliation_postings GROUP BY destination
     ), activity AS (
-      SELECT p.*,a.actor_name,a.reason,l.inbound_shipment_id,l.sku,po.id AS purchase_order_id,po.po_number
+      SELECT p.*,a.actor_name,a.reason,l.inbound_shipment_id,pol.sku,po.id AS purchase_order_id,po.po_number
       FROM inventory.cost_reconciliation_postings p JOIN inventory.cost_reconciliation_approvals a ON a.id=p.approval_id
-      JOIN procurement.inbound_shipment_lines l ON l.id=p.inbound_shipment_line_id
-      JOIN procurement.purchase_order_lines pol ON pol.id=l.purchase_order_line_id
+      LEFT JOIN procurement.inbound_shipment_lines l ON l.id=p.inbound_shipment_line_id
+      JOIN procurement.purchase_order_lines pol ON pol.id=COALESCE(p.purchase_order_line_id,l.purchase_order_line_id)
       JOIN procurement.purchase_orders po ON po.id=pol.purchase_order_id ORDER BY p.id DESC LIMIT 101
     ) SELECT (SELECT amount FROM balances WHERE destination='historical_cogs') AS historical_cogs,
       (SELECT amount FROM balances WHERE destination='inventory_variance') AS inventory_variance,
@@ -30,8 +30,9 @@ export async function readCostReconciliationReport(tx: CostEvidenceTransaction) 
       .slice(0, 100)
       .map((row) => ({
         id: costInteger(row.id, "postingId", 1),
-        lineId: costInteger(row.inbound_shipment_line_id, "lineId", 1),
-        shipmentId: costInteger(row.inbound_shipment_id, "shipmentId", 1),
+        lineId: row.inbound_shipment_line_id == null ? null : costInteger(row.inbound_shipment_line_id, "lineId", 1),
+        shipmentId: row.inbound_shipment_id == null ? null : costInteger(row.inbound_shipment_id, "shipmentId", 1),
+        component: row.component,
         purchaseOrderId: costInteger(row.purchase_order_id, "purchaseOrderId", 1),
         poNumber: row.po_number,
         sku: row.sku,

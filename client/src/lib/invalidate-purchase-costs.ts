@@ -17,6 +17,8 @@ export function invalidatePurchaseCosts(
           /^\/api\/vendor-invoice-lines(?:\/|\?|$)/.test(key) ||
           /^\/api\/procurement\/health(?:\?|$)/.test(key) ||
           key.startsWith("/api/procurement/landed-cost-health") ||
+          key.startsWith("/api/inventory-lots/") ||
+          key === "/api/cogs/historical-adjustments" ||
           key.startsWith("/api/purchasing/dashboard"))
       );
     },
