@@ -66,7 +66,11 @@ describe("canonical inventory claim lineage contract", () => {
   it("resolves order variants by active SKU and fails closed on conflicting stored identity", () => {
     expect(repository).toContain("upper(variant.sku) = upper(item.sku)");
     expect(repository).toContain("variant.is_active = true");
-    expect(repository).toContain("item.status IN ('cancelled', 'completed')");
+    // A shipped order's completed line still owes shipped-but-unrecorded units (#64254).
+    expect(repository).toContain("WHEN item.status = 'cancelled' THEN 0");
+    expect(repository).toContain("WHEN item.status = 'completed' THEN 0");
+    expect(repository.indexOf("WHEN $2::boolean THEN GREATEST("))
+      .toBeLessThan(repository.indexOf("WHEN item.status = 'completed' THEN 0"));
     expect(repository).not.toContain("item.status IN ('cancelled', 'completed', 'short')");
     expect(repository).toContain('row.short_reason === "refund_after_pick"');
     expect(repository).toContain("ORDER_REFUND_CUSTODY_REVIEW_REQUIRED");

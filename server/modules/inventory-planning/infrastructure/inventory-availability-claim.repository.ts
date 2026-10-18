@@ -702,12 +702,16 @@ async function loadOrder(client: PoolClient, orderId: number, lock: boolean): Pr
              item.short_reason AS short_reason,
              variant.id AS target_variant_id,
              CASE
-               WHEN item.status IN ('cancelled', 'completed') THEN 0
+               WHEN item.status = 'cancelled' THEN 0
                -- A shipped order cannot ship more: it owes only units the provider
                -- shipped that were never recorded as picked (a pick correction).
+               -- The shipment may already have closed the line as completed
+               -- (#64254: completed, 20 shipped, 8 recorded), so completed still
+               -- owes those units here.
                WHEN $2::boolean THEN GREATEST(
                  LEAST(COALESCE(item.quantity, 0), COALESCE(item.fulfilled_quantity, 0))
                  - COALESCE(item.picked_quantity, 0), 0)
+               WHEN item.status = 'completed' THEN 0
                ELSE GREATEST(COALESCE(item.quantity, 0) - COALESCE(item.picked_quantity, 0), 0)
              END AS requested_qty,
             variant.product_id AS root_product_id,
