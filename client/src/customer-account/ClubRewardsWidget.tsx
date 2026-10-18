@@ -161,6 +161,17 @@ export function ClubRewardsWidget({
           ].includes(cause.code ?? "")
         )
           sessionStorage.removeItem(storageKey);
+        // An error can arrive after Club reserved points. Read the canonical
+        // balance and pending request before showing controls again; never keep
+        // displaying the pre-request balance as spendable after an unknown reply.
+        try {
+          await refresh();
+        } catch (refreshCause) {
+          setData(null);
+          throw new Error(
+            `${issueMessage(cause)} Your latest rewards balance could not be loaded: ${issueMessage(refreshCause)}`,
+          );
+        }
         throw cause;
       }
       sessionStorage.removeItem(storageKey);
