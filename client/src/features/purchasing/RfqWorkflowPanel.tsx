@@ -5,7 +5,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "wouter";
 import { z } from "zod";
 import {
-  rfqConversionResultSchema, rfqQuoteRevisionSchema, rfqWorkflowDetailSchema,
+  hasUnverifiedRfqPurchase, releasableRfqLines, rfqConversionResultSchema, rfqQuoteRevisionSchema, rfqWorkflowDetailSchema,
   type RfqWorkflowDetail,
 } from "@shared/procurement/rfq-workflow";
 import { formatMills } from "@shared/utils/money";
@@ -126,6 +126,9 @@ export function RfqWorkflowPanel({ rfqId }: { rfqId: number }) {
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const [selectionVersion, setSelectionVersion] = useState<string | null>(null);
   const [overrideReason, setOverrideReason] = useState("");
+  const [releaseReason, setReleaseReason] = useState("");
+  const [releaseVersion, setReleaseVersion] = useState<string | null>(null);
+  const [released, setReleased] = useState(false);
   const [createdPo, setCreatedPo] = useState<{ id: number; number: string } | null>(null);
   const queryKey = ["rfq-workflow", rfqId];
   const workflowQuery = useQuery({ queryKey, queryFn: async () => rfqWorkflowDetailSchema.parse(await (await apiRequest("GET", `/api/purchasing/rfqs/${rfqId}`)).json()) });
@@ -141,10 +144,13 @@ export function RfqWorkflowPanel({ rfqId }: { rfqId: number }) {
     setOverrideReason("");
     refresh();
   });
+  const release = useRfqCommand(() => { setReleased(true); setReleaseReason(""); setReleaseVersion(null); setSelected(new Set()); refresh(); });
   if (workflowQuery.isPending) return <p className="mt-3 text-sm text-muted-foreground">Loading quote workflow…</p>;
   if (workflowQuery.error || !workflowQuery.data) return <div className="mt-3 text-sm" role="alert">Could not load the quote workflow. <Button variant="link" onClick={() => workflowQuery.refetch()}>Retry</Button></div>;
   const workflow = workflowQuery.data;
-  const locked = conversion.isPending || conversion.unresolved !== null;
+  const locked = conversion.isPending || conversion.unresolved !== null || release.isPending || release.unresolved !== null;
+  const releasable = releasableRfqLines(workflow);
+  const releaseChanged = releaseVersion !== null && releaseVersion !== workflow.version;
   const selectionChanged = selected.size > 0 && selectionVersion !== workflow.version;
   const selectedLines = workflow.lines.filter((line) => selected.has(line.id));
   const quantitiesDiffer = selectedLines.some((line) => line.latestQuote?.quotedPieces !== line.requestedPieces);
@@ -154,6 +160,8 @@ export function RfqWorkflowPanel({ rfqId }: { rfqId: number }) {
     <div><h3 className="text-sm font-semibold">{workflow.rfqNumber} · Supplier quotes → draft purchase order</h3><p className="text-xs text-muted-foreground">Capture the final quote, review selected lines, and open the linked draft purchase.</p></div>
     <Button size="sm" variant="outline" disabled={locked || workflowQuery.isFetching} onClick={() => workflowQuery.refetch()}>Refresh quotes</Button>
     {workflow.currency !== "USD" && <p className="text-xs text-amber-700 dark:text-amber-300">Quote currency: {workflow.currency}. Purchase orders currently require USD; currency review is required before conversion.</p>}
+    {hasUnverifiedRfqPurchase(workflow) && <p role="alert" className="text-sm text-amber-700 dark:text-amber-300">An ordered request line has no verified purchase-order link. Review its original purchase evidence before releasing this request.</p>}
+    {released && <p role="status" className="text-sm">Unconverted request reservations released. Linked purchase orders remain unchanged.</p>}
     {createdPo && <p className="rounded border border-emerald-300 bg-emerald-50 p-2 text-sm text-emerald-900 dark:bg-emerald-950 dark:text-emerald-100">Draft created: <Link className="font-semibold underline" href={`/purchase-orders/${createdPo.id}`}>{createdPo.number}</Link></p>}
     <div className="space-y-2">{workflow.lines.map((line) => {
       const quote = line.latestQuote;
@@ -182,6 +190,16 @@ export function RfqWorkflowPanel({ rfqId }: { rfqId: number }) {
       </div>;
     })}</div>
     {editingLine && <QuoteEditor key={editingLine.id} workflow={workflow} line={editingLine} onClose={() => setEditingId(null)} onSaved={() => { setEditingId(null); setSelected(new Set()); refresh(); }} />}
+    {canEdit && (releasable.length > 0 || release.unresolved) && <div className="space-y-2 rounded border p-3" aria-label="Release unconverted request reservations">
+      <p className="text-sm">Release this request's {releasable.length} unconverted lines so their demand can be sourced again. Captured quotes and linked purchase orders are preserved.</p>
+      <Label htmlFor={`rfq-${rfqId}-release`}>Reason for releasing the request</Label>
+      <Textarea id={`rfq-${rfqId}-release`} disabled={locked} maxLength={2000} value={releaseReason} onChange={(event) => { if (releaseVersion === null) setReleaseVersion(workflow.version); setReleaseReason(event.target.value); }} />
+      {releaseChanged && <p role="alert">The request changed after your review. <Button variant="link" onClick={() => { setReleaseVersion(null); setReleaseReason(""); }}>Clear release reason and review current request</Button></p>}
+      <Button size="sm" variant="outline" disabled={locked || editingId !== null || releaseChanged || !releaseReason.trim()} onClick={() => release.submit(`/api/purchasing/rfqs/${rfqId}/release`, { expectedVersion: releaseVersion ?? workflow.version, reason: releaseReason.trim() }, "quote")}>{release.isPending ? "Releasing�" : "Release unconverted request"}</Button>
+      {release.error && <p role="alert" className="text-sm text-destructive">{release.error.message}</p>}
+      {release.error instanceof FinancialCommandRequestError && release.error.code === "RFQ_VERSION_CONFLICT" && <Button variant="link" onClick={() => { setReleaseVersion(null); setReleaseReason(""); refresh(); }}>Refresh request before release</Button>}
+      {release.unresolved && <Button size="sm" variant="outline" disabled={release.isPending} onClick={release.retryUnresolved}>Retry saved release</Button>}
+    </div>}
     {canEdit && <div className="space-y-2 rounded border p-3">
       {selectionChanged && <p role="alert" className="text-sm text-amber-700 dark:text-amber-300">The quote request changed after selection. <Button variant="link" onClick={() => { setSelected(new Set()); setSelectionVersion(null); setOverrideReason(""); }}>Clear selection and review current quotes</Button></p>}
       {requiresQuantityReason && <div><Label htmlFor={`rfq-${rfqId}-override`}>Reason for accepting the quoted quantity</Label><Textarea id={`rfq-${rfqId}-override`} disabled={locked} value={overrideReason} onChange={(event) => setOverrideReason(event.target.value)} /><p className="mt-1 text-xs text-muted-foreground">Quoted quantities are preserved. This review reason is saved with the draft purchase.</p></div>}

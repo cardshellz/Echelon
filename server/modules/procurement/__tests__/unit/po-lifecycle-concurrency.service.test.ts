@@ -451,11 +451,11 @@ describe("purchase-order lifecycle concurrency", () => {
 
     const result = await service.sendPurchaseOrder(1, "buyer-current");
 
-    expect(result.status).toBe("sent");
+    expect(result.status).toBe("approved");
     expect(db.lockCalls).toContainEqual({ table: vendorProducts, mode: "share" });
     expect(db.insertedRows).toContainEqual(expect.objectContaining({
       table: poEvents,
-      row: expect.objectContaining({ eventType: "sent_to_vendor" }),
+      row: expect.objectContaining({ eventType: "approved" }),
     }));
   });
 

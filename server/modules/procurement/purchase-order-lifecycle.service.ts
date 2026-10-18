@@ -226,10 +226,10 @@ export function buildPoLifecycleSummary(po: Record<string, any>): PoLifecycleSum
       }),
       action(po, {
         id: "send_to_vendor",
-        label: "Send to vendor",
+        label: "Prepare for supplier",
         track: "physical",
         endpointSuffix: "send-to-vendor",
-        targetStatus: "sent",
+        targetStatus: "approved",
         requiredPermission: { resource: "purchasing", action: "create" },
       }),
     );
@@ -261,18 +261,19 @@ export function buildPoLifecycleSummary(po: Record<string, any>): PoLifecycleSum
     nextActions.push(
       action(po, {
         id: "send",
-        label: "Mark as sent",
+        label: "Record external send",
         track: "physical",
         endpointSuffix: "send",
         targetStatus: "sent",
+        requiresDialog: true,
         requiredPermission: { resource: "purchasing", action: "create" },
       }),
       action(po, {
         id: "send_to_vendor",
-        label: "Send to vendor",
+        label: "Prepare for supplier",
         track: "physical",
         endpointSuffix: "send-to-vendor",
-        targetStatus: "sent",
+        targetStatus: "approved",
         requiredPermission: { resource: "purchasing", action: "create" },
       }),
     );
@@ -458,9 +459,9 @@ export function buildPoAutoDraftActionPlan(
     },
     {
       id: "send_supplier",
-      label: "Send to supplier",
+      label: "Record supplier send",
       status: sendStatus,
-      detail: sentToSupplier ? "Supplier send has been recorded." : "Send the reviewed PO to the vendor.",
+      detail: sentToSupplier ? "Supplier send has been recorded." : "Send the reviewed PO outside Echelon, then record that action here.",
     },
     {
       id: "receive_inventory",
@@ -566,12 +567,12 @@ export function buildPoAutoDraftActionPlan(
   }
 
   if (hasAction("send_to_vendor", "send")) {
-    const actionId = hasAction("send_to_vendor") ? "send_to_vendor" : "send";
+    const actionId = hasAction("send") ? "send" : "send_to_vendor";
     return makePrimary({
       id: actionId,
       lifecycleActionId: actionId,
-      label: actionId === "send_to_vendor" ? "Send to vendor" : "Mark as sent",
-      detail: "The PO is approved and ready for supplier communication.",
+      label: actionId === "send_to_vendor" ? "Prepare for supplier" : "Record external send",
+      detail: actionId === "send" ? "Record that these approved terms were sent outside Echelon." : "Prepare the document for supplier review; this does not record a send.",
       severity: "info",
     });
   }

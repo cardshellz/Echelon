@@ -1,3 +1,4 @@
+import type { PendingSourcingReview } from "@shared/procurement/automatic-sourcing-review";
 // Run report page — design surface 04 (/procurement/runs, mockup
 // 04-run-report.html). Read-only report over the auto-draft run ledger:
 //   1. run history (auto_draft_runs via GET /api/purchasing/auto-draft/runs),
@@ -154,6 +155,7 @@ interface AutoDraftRunReport {
   approvalPolicyDiagnostics: RunApprovalPolicyDiagnostics | null;
   forecastDiagnostics: RunForecastDiagnostics | null;
   poMutationCount: number;
+  pendingSourcingReviews?: PendingSourcingReview[];
   recommendationSamples: {
     actionable: RunRecommendationSample[];
     approvalPolicyBlocked: RunRecommendationSample[];
@@ -650,6 +652,16 @@ function RunDetailCard({ run }: { run: AutoDraftRunReport }) {
         ) : null}
 
         <RunCountsGrid run={run} />
+        {(run.pendingSourcingReviews?.length ?? 0) > 0 && <div className="space-y-2 rounded border border-amber-300 p-3" aria-label="Pending sourcing requires review">
+          <h4 className="text-sm font-semibold">Existing sourcing needs review</h4>
+          {run.pendingSourcingReviews!.map((review) => <div key={review.recommendationId} className="space-y-1 text-xs">
+            <p>{review.recommendationId}: {review.reservedPieces.toLocaleString()} pieces already reserved; {review.uncoveredPieces.toLocaleString()} pieces of this recommendation remain uncovered.</p>
+            <p>{review.message}</p>
+            <div className="flex flex-wrap gap-3">{review.reservations.map((source, index) => source.purchaseOrderId !== null
+              ? <Link key={`po-${source.purchaseOrderId}-${index}`} className="underline" href={`/purchase-orders/${source.purchaseOrderId}`}>Review PO #{source.purchaseOrderId}</Link>
+              : <Link key={`rfq-${source.rfqId}-${index}`} className="underline" href={`/procurement/rfqs?rfqId=${source.rfqId}`}>Review RFQ #{source.rfqId}</Link>)}</div>
+          </div>)}
+        </div>}
 
         {diagnostics ? (
           <div className="grid grid-cols-1 gap-3 rounded-md border bg-muted/30 p-3 lg:grid-cols-2">

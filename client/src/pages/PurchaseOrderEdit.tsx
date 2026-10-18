@@ -1,3 +1,4 @@
+import { parseSupplierSaveResult } from "@/lib/supplier-dispatch";
 import { CompactPoLineTable } from "@/features/po-edit/CompactPoLineTable";
 // PurchaseOrderEdit.tsx
 //
@@ -6,7 +7,7 @@ import { CompactPoLineTable } from "@/features/po-edit/CompactPoLineTable";
 // existing Echelon primitives — do NOT introduce new button/input components.
 //
 // Layout (per spec §4):
-//   Header: title + Save draft + Save & Send PDF + Cancel
+//   Header: title + Save draft + Save & Review + Cancel
 //   Vendor section: combobox typeahead + terms strip
 //   Lines editor: inline rows with product typeahead, qty, unit cost, total
 //   Totals: subtotal computed
@@ -16,7 +17,7 @@ import { CompactPoLineTable } from "@/features/po-edit/CompactPoLineTable";
 //
 // Keyboard (per spec §14):
 //   Cmd+S   — Save draft
-//   Cmd+Enter — Save & Send PDF
+//   Cmd+Enter — Save & Review
 //   Esc     — Cancel (with confirm if dirty)
 //
 // Per-unit cost carries 4-decimal precision via mills (1/10000 of a dollar).
@@ -999,7 +1000,7 @@ function buildEditorSnapshot(input: EditorSnapshotInput): string {
   return JSON.stringify(input);
 }
 
-// Idempotency-Key header value. Fresh per mutation attempt.
+// Idempotency-Key header value. Retained for retries of the same reviewed intent.
 function genIdempotencyKey(): string {
   if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
     return (crypto as any).randomUUID();
@@ -1052,6 +1053,7 @@ export default function PurchaseOrderEdit() {
   // Remember the initial snapshot so we only flip dirty on real changes.
   const snapshotRef = useRef<string>("");
   const loadedVersionRef = useRef<string | null>(null);
+  const saveIntent = useRef<{ endpoint: string; body: string; key: string } | null>(null);
   useEffect(() => {
     // Capture baseline after the first render completes.
     snapshotRef.current = buildEditorSnapshot({
@@ -1704,10 +1706,10 @@ export default function PurchaseOrderEdit() {
   // ── Save ──────────────────────────────────────────────────────────────
   const saveMutation = useMutation({
     mutationFn: async ({
-      advanceToSent,
+      prepareForSupplier,
       linesToSave,
     }: {
-      advanceToSent: boolean;
+      prepareForSupplier: boolean;
       linesToSave: LineDraft[];
     }) => {
       if (!selectedVendor) throw new Error("Vendor required");
@@ -1801,23 +1803,30 @@ export default function PurchaseOrderEdit() {
             unit_cost_cents: signedMillsToCents(l.unitCostMills),
           };
         }),
-        advance_to_sent: advanceToSent,
+        prepare_for_supplier: prepareForSupplier,
         ...(isEditMode ? { expected_updated_at: loadedVersionRef.current } : {}),
       };
-      const res = await fetch(
-        isEditMode ? `/api/purchase-orders/${editId}/draft` : "/api/purchase-orders",
-        {
-          method: isEditMode ? "PUT" : "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "Idempotency-Key": genIdempotencyKey(),
-          },
-          body: JSON.stringify(body),
+      const endpoint = isEditMode ? `/api/purchase-orders/${editId}/draft` : "/api/purchase-orders";
+      const serializedBody = JSON.stringify(body);
+      if (saveIntent.current?.endpoint !== endpoint || saveIntent.current?.body !== serializedBody) {
+        saveIntent.current = { endpoint, body: serializedBody, key: genIdempotencyKey() };
+      }
+      const res = await fetch(endpoint, {
+        method: isEditMode ? "PUT" : "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Idempotency-Key": saveIntent.current.key,
         },
-      );
+        body: serializedBody,
+      });
       const data = await res.json();
       if (!res.ok) throw new Error(data?.error || "Failed to save PO");
-      return data;
+      const verified = parseSupplierSaveResult(data, prepareForSupplier, isEditMode ? Number(editId) : undefined);
+      if (!prepareForSupplier && isEditMode && !verified.po.updatedAt) {
+        throw new Error("The saved draft version could not be verified. Reload this PO before continuing.");
+      }
+      saveIntent.current = null;
+      return { ...data, ...verified };
     },
   });
 
@@ -1836,7 +1845,7 @@ export default function PurchaseOrderEdit() {
     try {
       const linesToSave = lines;
       const result = await saveMutation.mutateAsync({
-        advanceToSent: false,
+        prepareForSupplier: false,
         linesToSave,
       });
       const po = result?.po ?? result;
@@ -1894,47 +1903,45 @@ export default function PurchaseOrderEdit() {
     }
   }
 
-  async function handleSaveAndSend() {
+  async function handleSaveAndReview() {
     if (immutableExistingPo) {
       if (existingPo?.id) navigate(`/purchase-orders/${existingPo.id}`);
       return;
     }
     const err = validateForSubmit();
     if (err) {
-      toast({ title: "Cannot send", description: err, variant: "destructive" });
+      toast({ title: "Cannot prepare PO", description: err, variant: "destructive" });
       return;
     }
     setSaving(true);
     try {
       const linesToSave = lines;
       const result = await saveMutation.mutateAsync({
-        advanceToSent: true,
+        prepareForSupplier: true,
         linesToSave,
       });
-      const po = result?.po ?? result;
-      if (result?.sendError) {
+      const { po, preparationError } = result;
+      if (preparationError) {
         toast({
-          title: isEditMode
-            ? "PO updated, but send to vendor failed"
-            : "PO created, but send to vendor failed",
-          description: result.sendError,
+          title: "PO saved; supplier review needs attention",
+          description: preparationError,
           variant: "destructive",
         });
-      } else if (result?.pending_approval) {
+      } else if (po.status === "pending_approval") {
         toast({
           title: "Submitted for approval",
           description: `${po?.poNumber ?? ""} is awaiting approval.`,
         });
       } else {
         toast({
-          title: isEditMode ? "PO updated and sent to vendor" : "PO created and sent to vendor",
-          description: po?.poNumber ?? "",
+          title: "PO ready for supplier review",
+          description: `${po?.poNumber ?? ""} is saved. Review the document and record supplier dispatch separately.`,
         });
       }
       setDirty(false);
       if (po?.id) navigate(`/purchase-orders/${po.id}`);
     } catch (e: any) {
-      toast({ title: "Send failed", description: e.message, variant: "destructive" });
+      toast({ title: "Preparation failed", description: e.message, variant: "destructive" });
     } finally {
       setSaving(false);
     }
@@ -1957,7 +1964,7 @@ export default function PurchaseOrderEdit() {
         handleSaveDraft();
       } else if (isMod && e.key === "Enter") {
         e.preventDefault();
-        handleSaveAndSend();
+        handleSaveAndReview();
       } else if (e.key === "Escape") {
         // Don't swallow Esc while the user is inside a Popover/Command; those
         // close themselves first.
@@ -2027,19 +2034,19 @@ export default function PurchaseOrderEdit() {
             Save draft
           </Button>
           <Button
-            onClick={handleSaveAndSend}
+            onClick={handleSaveAndReview}
             disabled={!canSave}
             title={
               hasLineErrors
-                ? "Fix line errors before sending"
+                ? "Fix line errors before supplier review"
                 : noVendor
-                ? "Pick a vendor before sending"
+                ? "Pick a vendor before supplier review"
                 : hasNoLines
-                ? "Add at least one line before sending"
+                ? "Add at least one line before supplier review"
                 : undefined
             }
           >
-            Save &amp; Send PDF
+            Save &amp; Review
           </Button>
         </div>
       </div>
@@ -2530,20 +2537,20 @@ export default function PurchaseOrderEdit() {
           Save draft
         </Button>
         <Button
-          onClick={handleSaveAndSend}
+          onClick={handleSaveAndReview}
           disabled={!canSave}
           className="flex-1"
           title={
             hasLineErrors
-              ? "Fix line errors before sending"
+              ? "Fix line errors before supplier review"
               : noVendor
-              ? "Pick a vendor before sending"
+              ? "Pick a vendor before supplier review"
               : hasNoLines
-              ? "Add at least one line before sending"
+              ? "Add at least one line before supplier review"
               : undefined
           }
         >
-          Send PDF
+          Save & Review
         </Button>
       </div>
 

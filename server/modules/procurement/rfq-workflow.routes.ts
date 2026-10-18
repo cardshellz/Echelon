@@ -48,5 +48,6 @@ export function registerRfqWorkflowRoutes(app: Express): void {
     try { res.json(await service.getQuoteHistory(pathId.parse(req.params.rfqId), pathId.parse(req.params.lineId), req.query.beforeRevision === undefined ? null : pathId.parse(req.query.beforeRevision))); } catch (error) { failure(error, req, res); }
   });
   app.post("/api/purchasing/rfqs/:rfqId/lines/:lineId/quotes", requirePermission("purchasing", "edit"), (req, res) => execute(req, res, "capture_quote"));
+  app.post("/api/purchasing/rfqs/:rfqId/release", requirePermission("purchasing", "edit"), (req, res) => execute(req, res, "release"));
   app.post("/api/purchasing/rfqs/:rfqId/convert", requirePermission("purchasing", "edit"), (req, res) => execute(req, res, "convert"));
 }

@@ -71,7 +71,7 @@ databaseTests.sequential("receiving frozen units PostgreSQL guarantees", () => {
       idempotencyKey: `receiving-${key}`, userId: actorId });
   }
 
-  async function failingWrite(table: "public.audit_events" | "inventory.inventory_transactions" | "procurement.receipt_reversals", event: "INSERT" | "UPDATE", work: () => Promise<void>) {
+  async function failingWrite(table: "public.audit_events" | "inventory.inventory_transactions" | "procurement.receipt_reversals" | "procurement.receiving_orders", event: "INSERT" | "UPDATE", work: () => Promise<void>) {
     await pool.query(`CREATE FUNCTION procurement.receiving_test_failure() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'receiving fixture injected write failure'; END $$;
       CREATE TRIGGER receiving_test_failure BEFORE ${event} ON ${table} FOR EACH ROW EXECUTE FUNCTION procurement.receiving_test_failure()`);
     try { await work(); }
@@ -157,6 +157,11 @@ databaseTests.sequential("receiving frozen units PostgreSQL guarantees", () => {
       defaultModulePool = dbModule.pool;
       const methods = procurementModule.procurementMethods;
       storage = {
+        getSetting: async () => "true",
+        getAllProducts: () => database.select().from(schema.products),
+        getAllProductVariants: () => database.select().from(schema.productVariants),
+        getAllWarehouseLocations: () => database.select().from(schema.warehouseLocations),
+        bulkCreateReceivingLines: (lines, tx = database) => methods.bulkCreateReceivingLines(lines, tx),
         getReceivingOrderById: (id, tx = database) => methods.getReceivingOrderById(id, tx),
         getReceivingLineById: (id, tx = database) => methods.getReceivingLineById(id, tx),
         getReceivingLines: (id, tx = database) => methods.getReceivingLines(id, tx),
@@ -265,6 +270,84 @@ databaseTests.sequential("receiving frozen units PostgreSQL guarantees", () => {
       await expect(work).rejects.toThrow(/receiving fixture injected write failure/);
     });
     expect(await state()).toEqual(before);
+  });
+
+  it.each(["empty", "one", "multiple"] as const)("rejects duplicate CSV identities on an %s receipt without changing any financial or physical evidence", async (shape) => {
+    if (shape === "empty") await pool.query("DELETE FROM procurement.receiving_lines WHERE receiving_order_id=50");
+    if (shape === "multiple") await pool.query(`INSERT INTO procurement.receiving_lines(id,receiving_order_id,sku,expected_qty,received_qty,putaway_location_id)
+      VALUES(52,50,'TEST-CASE',7,7,99)`);
+    const before = await state();
+    await expect(service.bulkImportLines(50, [
+      { sku: "TEST-CASE", qty: "5", location: "TEST-DOCK" },
+      { sku: " test-case ", qty: "7", location: "test-dock" },
+      { sku: "TEST-EACH", qty: "4", location: "TEST-DOCK" },
+    ], actorId)).rejects.toMatchObject({ details: { code: "RECEIVING_IMPORT_IDENTITY_REVIEW_REQUIRED" } });
+    expect(await state()).toEqual(before);
+  });
+
+  it("preserves separately recorded physical rows and rejects a CSV replacement that cannot select one", async () => {
+    await pool.query(`INSERT INTO procurement.receiving_lines(id,receiving_order_id,sku,expected_qty,received_qty,putaway_location_id)
+      VALUES(52,50,'TEST-CASE',7,7,99)`);
+    const before = await state();
+    await expect(service.bulkImportLines(50, [{ sku: "TEST-CASE", qty: "5", location: "TEST-DOCK" }], actorId))
+      .rejects.toMatchObject({ details: { rowErrors: [{ code: "RECEIVING_IMPORT_AMBIGUOUS_EXISTING_LINE" }] } });
+    expect(await state()).toEqual(before);
+    await expect(service.bulkImportLines(50, [{ sku: "TEST-EACH", qty: "4", location: "TEST-DOCK" }], actorId))
+      .resolves.toMatchObject({ created: 1, updated: 0 });
+    expect((await pool.query("SELECT id,received_qty FROM procurement.receiving_lines WHERE sku='TEST-CASE' ORDER BY id")).rows)
+      .toEqual([{ id: 51, received_qty: 2 }, { id: 52, received_qty: 7 }]);
+  });
+
+  it("replays a unique CSV as one total count and freezes the selected receive unit", async () => {
+    await pool.query("DELETE FROM procurement.receiving_lines WHERE receiving_order_id=50");
+    const rows = [{ sku: "TEST-CASE", qty: "5", damaged_qty: "1", location: "TEST-DOCK" }];
+    await expect(service.bulkImportLines(50, rows, actorId)).resolves.toMatchObject({ created: 1, updated: 0 });
+    const first = (await pool.query("SELECT id,received_qty,damaged_qty,units_per_variant_snapshot FROM procurement.receiving_lines")).rows;
+    await expect(service.bulkImportLines(50, rows, actorId)).resolves.toMatchObject({ created: 0, updated: 1 });
+    expect((await pool.query("SELECT id,received_qty,damaged_qty,units_per_variant_snapshot FROM procurement.receiving_lines")).rows).toEqual(first);
+    expect(first).toEqual([{ id: expect.any(Number), received_qty: 5, damaged_qty: 1, units_per_variant_snapshot: 250 }]);
+    expect((await pool.query("SELECT count(*)::int AS count FROM inventory.inventory_transactions")).rows[0].count).toBe(0);
+  });
+
+  it("rolls back both replacement and creation when final import totals cannot be saved", async () => {
+    const before = await state();
+    await failingWrite("procurement.receiving_orders", "UPDATE", async () => {
+      await expect(service.bulkImportLines(50, [
+        { sku: "TEST-CASE", qty: "5", location: "TEST-DOCK" },
+        { sku: "TEST-EACH", qty: "4", location: "TEST-DOCK" },
+      ], actorId)).rejects.toThrow(/receiving fixture injected write failure/);
+    });
+    expect(await state()).toEqual(before);
+  });
+
+  it("rejects piece overflow without saving earlier valid import rows", async () => {
+    const before = await state();
+    await expect(service.bulkImportLines(50, [
+      { sku: "TEST-EACH", qty: "4", location: "TEST-DOCK" },
+      { sku: "TEST-CASE", qty: "2147483647", location: "TEST-DOCK" },
+    ], actorId)).rejects.toMatchObject({ statusCode: 400, details: { field: "expectedQty in pieces" } });
+    expect(await state()).toEqual(before);
+  });
+
+  it.each(["header", "line", "added matching line"] as const)("rejects a concurrent %s change after CSV preparation without overwriting it", async (change) => {
+    const holder = await pool.connect();
+    let open = false;
+    let pending: ReturnType<typeof observed> | undefined;
+    try {
+      await holder.query("BEGIN"); open = true;
+      await holder.query("SELECT id FROM procurement.receiving_orders WHERE id=50 FOR UPDATE");
+      pending = observed((target) => target.bulkImportLines(50, [{ sku: "TEST-CASE", qty: "5", location: "TEST-DOCK" }], actorId));
+      await waitUntilBlocked(await pending.pid);
+      if (change === "header") await holder.query("UPDATE procurement.receiving_orders SET notes='Concurrent reviewed note' WHERE id=50");
+      else if (change === "line") await holder.query("UPDATE procurement.receiving_lines SET received_qty=3 WHERE id=51");
+      else await holder.query(`INSERT INTO procurement.receiving_lines(id,receiving_order_id,sku,expected_qty,received_qty,putaway_location_id)
+        VALUES(52,50,'TEST-CASE',7,7,99)`);
+      await holder.query("COMMIT"); open = false;
+      expect(await pending.result).toMatchObject({ ok: false, error: { details: { code: "RECEIVING_IMPORT_SNAPSHOT_CHANGED" } } });
+      expect((await line()).receivedQty).toBe(change === "line" ? 3 : 2);
+      expect((await pool.query("SELECT count(*)::int AS count FROM procurement.receiving_lines")).rows[0].count).toBe(change === "added matching line" ? 2 : 1);
+      expect((await pool.query("SELECT count(*)::int AS count FROM inventory.inventory_transactions")).rows[0].count).toBe(0);
+    } finally { if (open) await holder.query("ROLLBACK"); holder.release(); if (pending) await pending.result; }
   });
 
   it("allows only one of two conflicting unit/count edits using the same reviewed version", async () => {

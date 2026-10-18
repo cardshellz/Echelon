@@ -3131,6 +3131,17 @@ describe("purchasing recommendation routes", () => {
     });
   });
 
+  it("returns validated pending sourcing review evidence and exact recovery identities", async () => {
+    const review = { recommendationId: "100:200:30", reason: "pending_sourcing_reservation", reservedPieces: 100, suggestedPieces: 150, uncoveredPieces: 50,
+      message: "Review existing source", reservations: [{ productId: 100, pieces: 100, purchaseOrderId: 99, rfqId: null }] };
+    mocks.procurement.getRecentAutoDraftRuns.mockResolvedValue([{ id: 501, status: "success", summaryJson: { poMutationSkips: [review, { reason: "changed_after_run_started" }] } }]);
+    server = await startServer(buildApp());
+    const response = await requestJson(server.url, "GET", "/api/purchasing/auto-draft/runs");
+    expect(response.status).toBe(200); expect(response.body.runs[0].pendingSourcingReviews).toEqual([review]);
+    mocks.procurement.getRecentAutoDraftRuns.mockResolvedValue([{ id: 501, status: "success", summaryJson: { poMutationSkips: [{ ...review, reservedPieces: 1 }] } }]);
+    expect((await requestJson(server.url, "GET", "/api/purchasing/auto-draft/runs")).status).toBe(500);
+  });
+
   it("returns normalized recent auto-draft recommendation runs", async () => {
     mocks.procurement.getRecentAutoDraftRuns.mockResolvedValue([
       {

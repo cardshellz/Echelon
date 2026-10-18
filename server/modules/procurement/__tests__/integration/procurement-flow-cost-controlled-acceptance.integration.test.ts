@@ -186,7 +186,9 @@ controlled.sequential("FLOW persisted RFQ, partial receipts, sale and late freig
     ]);
     // This owner records the internal solo-mode send. No email/provider delivery is claimed.
     await harness.purchasing.sendToVendor(poA.purchaseOrderId, FLOW_ACTOR);
+    await harness.purchasing.send(poA.purchaseOrderId, FLOW_ACTOR, { confirmedSentExternally: true, expectedUpdatedAt: (await harness.storage.getPurchaseOrderById(poA.purchaseOrderId))!.updatedAt!.toISOString() });
     await harness.purchasing.sendToVendor(poB.purchaseOrderId, FLOW_ACTOR);
+    await harness.purchasing.send(poB.purchaseOrderId, FLOW_ACTOR, { confirmedSentExternally: true, expectedUpdatedAt: (await harness.storage.getPurchaseOrderById(poB.purchaseOrderId))!.updatedAt!.toISOString() });
 
     const x = await harness.shipment.createShipment({ shipmentNumber: "PROC-UAT-FLOW-X", mode: "sea_lcl", warehouseId: 1 }, FLOW_ACTOR);
     const y = await harness.shipment.createShipment({ shipmentNumber: "PROC-UAT-FLOW-Y", mode: "sea_lcl", warehouseId: 1 }, FLOW_ACTOR);
@@ -371,6 +373,7 @@ controlled.sequential("FLOW persisted RFQ, partial receipts, sale and late freig
     const created = await createPurchases();
     const purchase = created.purchases.get(FLOW_IDS.productA)!;
     await harness.purchasing.sendToVendor(purchase.purchaseOrderId, FLOW_ACTOR);
+    await harness.purchasing.send(purchase.purchaseOrderId, FLOW_ACTOR, { confirmedSentExternally: true, expectedUpdatedAt: (await harness.storage.getPurchaseOrderById(purchase.purchaseOrderId))!.updatedAt!.toISOString() });
     const shipment = await harness.shipment.createShipment({ shipmentNumber: "PROC-UAT-EVIDENCE", mode: "sea_lcl", warehouseId: 1 }, FLOW_ACTOR);
     const shipmentLineId = await addShipmentLine(shipment.id, purchase.purchaseOrderId, purchase.lines[0].purchaseOrderLineId, 1_000, "evidence-line");
     const createCost: ShipmentCostCommand = { operation: "create", resourceId: shipment.id,

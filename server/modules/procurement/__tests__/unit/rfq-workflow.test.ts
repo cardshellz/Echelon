@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { reviewRfqQuantity } from "@shared/procurement/rfq-quantity-review";
 import { describe, expect, it } from "vitest";
-import { rfqConvertSchema, rfqQuoteCaptureSchema, rfqQuoteRevisionSchema, type RfqQuoteRevision, type RfqWorkflowDetail } from "@shared/procurement/rfq-workflow";
+import { releasableRfqLines, rfqReleaseSchema, rfqConvertSchema, rfqQuoteCaptureSchema, rfqQuoteRevisionSchema, type RfqQuoteRevision, type RfqWorkflowDetail } from "@shared/procurement/rfq-workflow";
 import { assertRfqQuoteCanConvert, rfqWorkflowVersion } from "../../rfq-workflow.service";
 import { mapRfqQuoteRevision, RfqEvidenceIntegrityError } from "../../rfq-workflow.repository";
 import { classifyRfqWorkflowFailure } from "../../rfq-workflow.commands";
@@ -23,6 +23,16 @@ function fixture() {
 }
 
 describe("RFQ quote and conversion contracts", () => {
+  it("releases only active unconverted requests, preserving linked and legacy ordered obligations", () => {
+    const { workflow, line } = fixture();
+    expect(releasableRfqLines(workflow)).toEqual([line]);
+    expect(releasableRfqLines({ ...workflow, status: "cancelled" })).toEqual([]);
+    expect(releasableRfqLines({ ...workflow, lines: [line, { ...line, id: 3, status: "ordered" }] })).toEqual([]);
+    for (const status of ["ordered", "cancelled", "declined", "unknown"]) expect(releasableRfqLines({ ...workflow, lines: [{ ...line, status }] })).toEqual([]);
+    expect(releasableRfqLines({ ...workflow, lines: [{ ...line, purchaseOrder: { purchaseOrderId: 10, purchaseOrderLineId: 11, quoteRevisionId: 1, poNumber: "PO", status: "draft" } }] })).toEqual([]);
+    for (const reason of ["", " ", "a".repeat(2001), null]) expect(rfqReleaseSchema.safeParse({ expectedVersion: workflow.version, reason }).success).toBe(false);
+    expect(rfqReleaseSchema.parse({ expectedVersion: workflow.version, reason: "  Supplier cannot fulfill  " }).reason).toBe("Supplier cannot fulfill");
+  });
   it("preserves the original quote pricing basis and exact packaging", () => {
     const input = fixture();
     expect(assertRfqQuoteCanConvert(input)).toEqual(input.line.latestQuote);

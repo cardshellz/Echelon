@@ -218,7 +218,7 @@ describe("Spec A — sendPurchaseOrder status gate", () => {
   it("rejects PO already sent", async () => {
     storage.getPurchaseOrderById.mockResolvedValue({ id: 1, status: "sent" });
     await expect(svc.sendPurchaseOrder(1, "u1")).rejects.toThrow(
-      /Cannot send PO in 'sent' status/,
+      /Cannot prepare PO in 'sent' status/,
     );
   });
 
@@ -234,7 +234,7 @@ describe("Spec A — sendPurchaseOrder status gate", () => {
     );
   });
 
-  it("sends through the lifecycle transition so physicalStatus stays in sync", async () => {
+  it("prepares approval without claiming dispatch or a generated PDF", async () => {
     const po = {
       id: 1,
       status: "draft",
@@ -265,29 +265,28 @@ describe("Spec A — sendPurchaseOrder status gate", () => {
 
     const result = await svc.sendPurchaseOrder(1, "u1");
 
-    expect(result.status).toBe("sent");
-    const sentPatch = db.updatePatches.at(-1);
-    expect(sentPatch.status).toBe("sent");
-    expect(sentPatch.physicalStatus).toBe("sent");
-    expect(sentPatch.sentToVendorAt).toBeDefined();
-    expect(sentPatch.orderDate).toBeDefined();
-    expect(db.insertedRows).toContainEqual(
-      expect.objectContaining({
-        purchaseOrderId: 1,
-        fromStatus: "approved",
-        toStatus: "sent",
-        changedBy: "u1",
-      }),
-    );
-    expect(db.insertedRows).toContainEqual(
-      expect.objectContaining({
-        poId: 1,
-        eventType: "sent_to_vendor",
-        actorType: "user",
-        actorId: "u1",
-      }),
-    );
+    expect(result).toMatchObject({ status: "approved", pdf: null, dispatchRecorded: false });
+    const patch = db.updatePatches.at(-1);
+    expect(patch).toMatchObject({ status: "approved", physicalStatus: "draft" });
+    expect(patch).not.toHaveProperty("sentToVendorAt");
+    expect(patch).not.toHaveProperty("orderDate");
+    expect(db.insertedRows).toContainEqual(expect.objectContaining({ poId: 1, eventType: "approved", actorId: "u1" }));
+    expect(db.insertedRows.some((row: any) => row.eventType === "sent_to_vendor" || row.toStatus === "sent")).toBe(false);
   });
+  it.each([undefined, {}, { confirmedSentExternally: true }, { confirmedSentExternally: true, expectedUpdatedAt: "invalid" }, { confirmedSentExternally: false }, { confirmedSentExternally: "true" }])("rejects unconfirmed external dispatch before reading or writing (%j)", async confirmation => {
+    await expect(svc.send(1, "u1", confirmation)).rejects.toMatchObject({ statusCode: 400, details: { code: "PO_EXTERNAL_DISPATCH_CONFIRMATION_REQUIRED" } });
+    expect(storage.getPurchaseOrderById).not.toHaveBeenCalled();
+  });
+
+  it("cannot bypass reviewed dispatch through the generic physical transition owner", async () => {
+    await expect(svc.transitionPhysical(1, "sent", "u1")).rejects.toMatchObject({ statusCode: 400, details: { code: "PO_EXTERNAL_DISPATCH_CONFIRMATION_REQUIRED" } });
+    expect(storage.getPurchaseOrderById).not.toHaveBeenCalled();
+  });
+
+  it("requires an actor for external dispatch", async () => {
+    await expect(svc.send(1, undefined, { confirmedSentExternally: true })).rejects.toMatchObject({ statusCode: 401 });
+  });
+
 });
 
 describe("Spec A — duplicatePurchaseOrder", () => {

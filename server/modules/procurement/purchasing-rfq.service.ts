@@ -1,5 +1,5 @@
-import { assertRfqSupplySnapshotCurrent, isActiveRfqReservation, rfqPendingSourcingPieces } from "./domain/rfq-sourcing-reservation";
-import { loadLinkedRfqPurchases, loadRecommendationRunDates } from "./rfq-sourcing-reservation.repository";
+import { PendingPurchaseSourcingReviewError, sourcingScopesOverlap, assertRfqSupplySnapshotCurrent, isActiveRfqReservation, rfqPendingSourcingPieces } from "./domain/rfq-sourcing-reservation";
+import { loadPendingPurchaseSourcingReservations, type PendingPurchaseSourcingReservation, loadLinkedRfqPurchases, loadRecommendationRunDates } from "./rfq-sourcing-reservation.repository";
 import { and, desc, eq, inArray } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
 import {
@@ -61,13 +61,13 @@ export function purchasingSkuAllocationKey(input: {
   return `${input.productId}:${input.warehouseId ?? "all"}`;
 }
 
-export async function lockAndLoadActiveRfqAllocations(
+export async function lockAndLoadRfqSourcing(
   tx: any,
   recommendations: Array<{ id: number; productId: number; productVariantId?: number | null; warehouseId?: number | null }>,
-): Promise<Map<string, number>> {
+): Promise<{ allocatedBySku: Map<string, number>; pendingPurchases: Array<PendingPurchaseSourcingReservation & { recommendationIds: number[] }> }> {
   const productIds = Array.from(new Set<number>(recommendations.map((line) => Number(line.productId))))
     .sort((left, right) => left - right);
-  if (productIds.length === 0) return new Map();
+  if (productIds.length === 0) return { allocatedBySku: new Map(), pendingPurchases: [] };
 
   await tx.select({ id: productsTable.id }).from(productsTable)
     .where(inArray(productsTable.id, productIds))
@@ -107,6 +107,31 @@ export async function lockAndLoadActiveRfqAllocations(
     if (!Number.isSafeInteger(total)) throw new Error("RFQ allocation quantity exceeds the supported integer range");
     allocatedBySku.set(key, total);
   }
+  const purchases = await loadPendingPurchaseSourcingReservations(tx, productIds);
+  const pendingPurchases = purchases.flatMap((purchase) => {
+    const recommendationIds = recommendations.filter((line) => {
+      if (!sourcingScopesOverlap(line, purchase)) return false;
+      // A linked purchase is covered only by the exact RFQ allocation scope.
+      // Global/warehouse overlap still requires review when that baseline does
+      // not account for it; never silently waive a linked draft obligation.
+      const coveredByRfqBaseline = purchase.rfqLineId !== null && allocations.some((allocation: { id: number; productId: number; warehouseId?: number | null }) =>
+        Number(allocation.id) === purchase.rfqLineId && purchasingSkuAllocationKey(allocation) === purchasingSkuAllocationKey(line));
+      return !coveredByRfqBaseline;
+    }).map((line) => line.id);
+    return recommendationIds.length ? [{ ...purchase, recommendationIds }] : [];
+  });
+  return { allocatedBySku, pendingPurchases };
+}
+
+/** The RFQ-only allocation override baseline is also enforced in SQL. An
+ * unrelated draft PO therefore requires explicit owner review, not an altered
+ * override baseline that the database cannot corroborate. */
+export async function lockAndLoadActiveRfqAllocations(
+  tx: any,
+  recommendations: Array<{ id: number; productId: number; productVariantId?: number | null; warehouseId?: number | null }>,
+): Promise<Map<string, number>> {
+  const { allocatedBySku, pendingPurchases } = await lockAndLoadRfqSourcing(tx, recommendations);
+  if (pendingPurchases.length > 0) throw new PendingPurchaseSourcingReviewError(pendingPurchases.map((purchase) => purchase.purchaseOrderId));
   return allocatedBySku;
 }
 

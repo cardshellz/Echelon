@@ -474,6 +474,13 @@ export interface NewRecommendationDecisionRecord extends Omit<RecommendationDeci
 
 export interface NewRecommendationPoHandoffRecord extends Omit<RecommendationPoHandoffRecord, "id"> {}
 
+export interface PendingSourcingReservation {
+  productId: number;
+  pieces: number;
+  purchaseOrderId: number | null;
+  rfqId: number | null;
+}
+
 export interface RecommendationPoHandoffUnitOfWork {
   lockRecommendationKeys(keys: readonly string[]): Promise<void>;
   getTransactionClock(): Promise<{ timestamp: Date; date: string }>;
@@ -500,6 +507,7 @@ export interface RecommendationPoHandoffUnitOfWork {
   getLatestActiveDecisionsByRecommendationIds(
     recommendationIds: readonly string[],
   ): Promise<RecommendationDecisionRecord[]>;
+  lockAndLoadPendingSourcingReservations(productIds: readonly number[]): Promise<PendingSourcingReservation[]>;
   getHandoffsByAcceptedDecisionIds(ids: readonly number[]): Promise<RecommendationPoHandoffRecord[]>;
   getVendorProducts(ids: readonly number[]): Promise<RecommendationVendorProductRecord[]>;
   getVendors(ids: readonly number[]): Promise<RecommendationVendorRecord[]>;
@@ -556,8 +564,13 @@ export interface AutomaticRecommendationPoHandoffResult extends AcceptedRecommen
   skipped: Array<{
     recommendationId: string;
     kind: "auto_draft_eligible";
-    reason: "changed_after_run_started";
-    latestDecisionId: number;
+    reason: "changed_after_run_started" | "pending_sourcing_reservation";
+    latestDecisionId: number | null;
+    reservedPieces?: number;
+    suggestedPieces?: number;
+    uncoveredPieces?: number;
+    reservations?: PendingSourcingReservation[];
+    message?: string;
   }>;
 }
 
@@ -1676,6 +1689,9 @@ export function createRecommendationPoHandoffService(
           409, "AUTOMATIC_RECEIVE_SELECTION_REVIEW_REQUIRED", { recommendationId: item.recommendationId });
       }
     }
+    if (new Set(parsed.items.map((item) => item.productId)).size !== parsed.items.length) {
+      throw new RecommendationPoHandoffError("Automatic handoff may source each product demand only once per run", 400, "DUPLICATE_AUTOMATIC_PRODUCT_DEMAND");
+    }
     const keys = parsed.items.map((item) => recommendationKey(item.recommendationId, "auto_draft_eligible"));
     const mutationKeys = parsed.items.map((item) => recommendationMutationLockKey(item.recommendationId));
     if (new Set(keys).size !== parsed.items.length) {
@@ -1722,10 +1738,22 @@ export function createRecommendationPoHandoffService(
         const latestDecisions = await unitOfWork.getLatestActiveDecisionsByRecommendationIds(
           parsed.items.map((item) => item.recommendationId),
         );
+        const reservations = await unitOfWork.lockAndLoadPendingSourcingReservations(parsed.items.map((item) => item.productId));
         const latestById = latestDecisionByRecommendationId(latestDecisions);
         const skipped: AutomaticRecommendationPoHandoffResult["skipped"] = [];
         const currentItems = parsed.items.filter((item) => {
           const latest = latestById.get(item.recommendationId);
+          const existing = reservations.filter((entry) => entry.productId === item.productId);
+          const reservedPieces = existing.reduce((total, entry) => total + entry.pieces, 0);
+          if (!Number.isSafeInteger(reservedPieces)) throw new RecommendationPoHandoffError("Pending sourcing quantity exceeds the supported range", 409, "SOURCING_RESERVATION_INVALID");
+          if (reservedPieces > 0) {
+            // Do not silently resize a reviewed supplier quote: the remainder
+            // may cross MOQ, pack, price-tier or vendor-bundle thresholds.
+            skipped.push({ recommendationId: item.recommendationId, kind: "auto_draft_eligible", reason: "pending_sourcing_reservation", latestDecisionId: latest?.id ?? null,
+              reservedPieces, suggestedPieces: item.suggestedOrderPieces, uncoveredPieces: Math.max(item.suggestedOrderPieces - reservedPieces, 0), reservations: existing,
+              message: "Review the existing draft purchase or quote request before adding demand. Edit the draft or release an abandoned unconverted RFQ, then refresh recommendations." });
+            return false;
+          }
           if (!latest || latest.decidedAt.getTime() < runStartedAt.getTime()) return true;
           skipped.push({
             recommendationId: item.recommendationId,

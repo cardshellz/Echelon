@@ -30,6 +30,8 @@ type DrizzleDb = {
 
 // Import sql tagged template for raw queries
 import { sql } from "drizzle-orm";
+import { receivingImportRowSchema } from "@shared/procurement/receiving-import";
+import { planReceivingImportIdentities } from "./domain/receiving-import-identity";
 import { canonicalJson } from "@shared/utils/canonical-json";
 import { convertReceiptCounts, receiptInteger, receivingUnitVersion, withReceivingUnitVersion } from "./receiving-unit-contract";
 import { Decimal } from "decimal.js";
@@ -1913,15 +1915,7 @@ export class ReceivingService {
 
   async bulkImportLines(
     orderId: number,
-    lines: Array<{
-      sku?: string;
-      qty?: string | number;
-      location?: string;
-      damaged_qty?: string | number;
-      unit_cost?: string | number;
-      barcode?: string;
-      notes?: string;
-    }>,
+    lines: unknown,
     userId: string | null,
   ) {
     if (!Array.isArray(lines) || lines.length === 0) {
@@ -1941,15 +1935,7 @@ export class ReceivingService {
     // Fetch existing lines for this order to enable idempotent imports (update vs create)
     const existingLines = await this.storage.getReceivingLines(orderId);
     const existingLineSnapshot = receivingLinesSnapshot(existingLines);
-    const existingBySkuLocation = new Map(
-      existingLines
-        .filter((l: any) => l.sku)
-        .map((l: any) => {
-          const locationId = l.putawayLocationId || "none";
-          return [`${l.sku!.toUpperCase()}|${locationId}`, l];
-        }),
-    );
-
+    const preparedRows: Array<{ row: number; sku: string; putawayLocationId: number | null; values: Record<string, unknown> }> = [];
     const linesToCreate: any[] = [];
     const linesToUpdate: { id: number; updates: any }[] = [];
     const errors: string[] = [];
@@ -2000,13 +1986,16 @@ export class ReceivingService {
         .map((v: any) => [v.sku!.toUpperCase(), v]),
     );
 
-    for (const line of lines) {
-      const { sku, qty, location, damaged_qty, unit_cost, barcode, notes } = line;
-
-      if (!sku) {
-        errors.push("Missing SKU in line");
+    const importedAt = this.clock();
+    for (const [index, rawLine] of lines.entries()) {
+      const row = index + 1;
+      const parsed = receivingImportRowSchema.safeParse(rawLine);
+      if (!parsed.success) {
+        const sku = rawLine && typeof rawLine === "object" && typeof rawLine.sku === "string" ? rawLine.sku : "(missing)";
+        errors.push(`Data row ${row}, SKU ${sku}: ${parsed.error.issues.map((issue) => `${issue.path.join(".")} ${issue.message}`).join("; ")}`);
         continue;
       }
+      const { sku, qty: parsedQty, location, damaged_qty: parsedDamagedQty, unit_cost, barcode, notes } = parsed.data;
 
       // Source of truth: product_variants (sellable SKUs with product linkage)
       const lookupKey = sku.toUpperCase();
@@ -2098,20 +2087,6 @@ export class ReceivingService {
       // warning; the Decimal path is kept as a defensive fallback for cents
       // so we preserve prior behavior if mills parsing somehow rejects a
       // value that Decimal accepts.
-      const parseCount = (value: unknown, field: string): number => {
-        if (value === undefined || value === null || value === "") return 0;
-        if (typeof value === "string" && !/^[0-9]+$/.test(value.trim())) throw new ReceivingError(`${field} must contain a whole count`, 400);
-        return receiptInteger(typeof value === "string" ? Number(value.trim()) : value, field);
-      };
-      let parsedQty: number;
-      let parsedDamagedQty: number;
-      try {
-        parsedQty = parseCount(qty, "Quantity");
-        parsedDamagedQty = parseCount(damaged_qty, "Damaged quantity");
-      } catch (error) {
-        errors.push(`SKU ${sku}: ${error instanceof Error ? error.message : "invalid quantity"}`);
-        continue;
-      }
       let parsedUnitCostMills: number | null = null;
       let parsedUnitCost: number | null = null;
       if (unit_cost !== undefined && unit_cost !== null && String(unit_cost).trim() !== "") {
@@ -2139,49 +2114,25 @@ export class ReceivingService {
         lineNotes = lineNotes ? `${lineNotes} | CSV location: ${csvLocationRaw}` : `CSV location: ${csvLocationRaw}`;
       }
 
-      // Check if line with same SKU + Location already exists in this order (idempotent import)
-      const uniqueKey = `${sku.toUpperCase()}|${putawayLocationId || "none"}`;
-      const existingLine = existingBySkuLocation.get(uniqueKey);
-      if (existingLine) {
-        linesToUpdate.push({
-          id: existingLine.id,
-          updates: {
-            productName,
-            barcode: productBarcode,
-            expectedQty: parsedQty,
-            receivedQty: parsedQty,
-            damagedQty: parsedDamagedQty,
-            unitCost: parsedUnitCost,
-            unitCostMills: parsedUnitCostMills,
-            productVariantId,
-            productId,
-            putawayLocationId,
-            notes: lineNotes,
-            status: putawayLocationId ? "complete" : "pending",
-            receivedBy: userId,
-            receivedAt: new Date(),
-          },
-        });
-      } else {
-        linesToCreate.push({
-          receivingOrderId: orderId,
-          sku: sku.toUpperCase(),
-          productName,
-          barcode: productBarcode,
-          expectedQty: parsedQty,
-          receivedQty: parsedQty,
-          damagedQty: parsedDamagedQty,
-          unitCost: parsedUnitCost,
-          unitCostMills: parsedUnitCostMills,
-          productVariantId,
-          productId,
-          putawayLocationId,
-          notes: lineNotes,
-          status: putawayLocationId ? "complete" : "pending",
-          receivedBy: userId,
-          receivedAt: new Date(),
-        });
-      }
+      preparedRows.push({ row, sku: sku.toUpperCase(), putawayLocationId, values: {
+        sku: sku.toUpperCase(), productName, barcode: productBarcode,
+        expectedQty: parsedQty, receivedQty: parsedQty, damagedQty: parsedDamagedQty,
+        unitCost: parsedUnitCost, unitCostMills: parsedUnitCostMills, productVariantId, productId,
+        putawayLocationId, notes: lineNotes, status: putawayLocationId ? "complete" : "pending",
+        receivedBy: userId, receivedAt: importedAt,
+      } });
+    }
+
+    const identityPlan = planReceivingImportIdentities(existingLines, preparedRows);
+    if (identityPlan.issues.length) {
+      throw new ReceivingError("No lines were imported. Resolve the ambiguous CSV rows and retry.", 409, {
+        code: "RECEIVING_IMPORT_IDENTITY_REVIEW_REQUIRED", rowErrors: identityPlan.issues,
+      });
+    }
+    for (const row of preparedRows) {
+      const existingId = identityPlan.targets.get(row.row);
+      if (existingId == null) linesToCreate.push({ receivingOrderId: orderId, ...row.values });
+      else linesToUpdate.push({ id: existingId, updates: row.values });
     }
 
     const created = await this.db.transaction(async (tx) => {

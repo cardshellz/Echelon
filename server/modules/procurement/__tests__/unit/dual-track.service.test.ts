@@ -210,18 +210,18 @@ describe("transitionPhysical", () => {
     svc = createPurchasingService(mockDb, storage);
   });
 
-  it("(1) accepts a valid physical transition: draft → sent", async () => {
-    const po = makePo({ status: "approved", physicalStatus: "draft" });
+  it("(1) accepts a valid physical transition from sent to acknowledged", async () => {
+    const po = makePo({ status: "sent", physicalStatus: "sent" });
     storage.getPurchaseOrderById.mockResolvedValue(po);
     mockDb._poState = po;
 
-    await svc.transitionPhysical(1, "sent", "user-1");
+    await svc.transitionPhysical(1, "acknowledged", "user-1");
 
     expect(storage.updatePurchaseOrderStatusWithHistory).not.toHaveBeenCalled();
     expect(mockDb.transaction).toHaveBeenCalledOnce();
     const patch = mockDb._updateCalls[0];
-    expect(patch.physicalStatus).toBe("sent");
-    expect(patch.status).toBe("sent"); // legacy sync
+    expect(patch.physicalStatus).toBe("acknowledged");
+    expect(patch.status).toBe("acknowledged"); // legacy sync
   });
 
   it("(2) rejects an invalid physical transition: draft → received", async () => {
@@ -234,25 +234,25 @@ describe("transitionPhysical", () => {
     ).rejects.toThrow(/Cannot transition physical status from 'draft' to 'received'/);
   });
 
-  it("(2b) rejects a backward physical transition: acknowledged → sent", async () => {
-    const po = makePo({ physicalStatus: "acknowledged" });
+  it("(2b) rejects a backward physical transition from shipped to acknowledged", async () => {
+    const po = makePo({ physicalStatus: "shipped" });
     storage.getPurchaseOrderById.mockResolvedValue(po);
     mockDb._poState = po;
 
     await expect(
-      svc.transitionPhysical(1, "sent", "user-1"),
+      svc.transitionPhysical(1, "acknowledged", "user-1"),
     ).rejects.toThrow(/Cannot transition physical status/);
   });
 
-  it("(11) legacy status is synced when transitioning to sent", async () => {
-    const po = makePo({ status: "approved", physicalStatus: "draft" });
+  it("(11) legacy status is synced when transitioning to acknowledged", async () => {
+    const po = makePo({ status: "sent", physicalStatus: "sent" });
     storage.getPurchaseOrderById.mockResolvedValue(po);
     mockDb._poState = po;
 
-    await svc.transitionPhysical(1, "sent", "user-1");
+    await svc.transitionPhysical(1, "acknowledged", "user-1");
 
     const patch = mockDb._updateCalls[0];
-    expect(patch.status).toBe("sent");
+    expect(patch.status).toBe("acknowledged");
   });
 
   it("(12) cancellation sets physicalStatus=cancelled", async () => {

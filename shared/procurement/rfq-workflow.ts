@@ -38,6 +38,11 @@ export const rfqQuoteCaptureSchema = z.object({
   quote: rfqQuoteEvidenceSchema,
 }).strict();
 
+export const rfqReleaseSchema = z.object({
+  expectedVersion: version,
+  reason: text,
+}).strict();
+
 export const rfqConvertSchema = z.object({
   expectedVersion: version,
   lines: z.array(z.object({ rfqLineId: rfqResourceIdSchema, quoteRevisionId: rfqResourceIdSchema }).strict()).min(1).max(RFQ_WORKFLOW_MAX_LINES),
@@ -118,3 +123,14 @@ export type RfqQuoteCapture = z.infer<typeof rfqQuoteCaptureSchema>;
 export type RfqConvert = z.infer<typeof rfqConvertSchema>;
 export type RfqWorkflowDetail = z.infer<typeof rfqWorkflowDetailSchema>;
 export type RfqConversionResult = z.infer<typeof rfqConversionResultSchema>;
+
+/** A release ends only unconverted request reservations. Linked or legacy
+ * ordered lines remain owned by the purchase-order lifecycle. */
+export function hasUnverifiedRfqPurchase(workflow: Pick<RfqWorkflowDetail, "lines">): boolean {
+  return workflow.lines.some((line) => line.status === "ordered" && line.purchaseOrder === null);
+}
+
+export function releasableRfqLines(workflow: Pick<RfqWorkflowDetail, "status" | "lines">): RfqWorkflowDetail["lines"] {
+  if (hasUnverifiedRfqPurchase(workflow) || !["draft", "sent", "partially_quoted", "quoted"].includes(workflow.status)) return [];
+  return workflow.lines.filter((line) => line.purchaseOrder === null && ["draft", "sent", "quoted", "accepted"].includes(line.status));
+}

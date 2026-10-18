@@ -1,3 +1,4 @@
+import { pendingSourcingReviewSchema } from "@shared/procurement/automatic-sourcing-review";
 import { assertRfqSupplySnapshotCurrent, isActiveRfqReservation, rfqPendingSourcingPieces, RfqSourcingSnapshotError } from "./domain/rfq-sourcing-reservation";
 import { purchaseBuyingCounts } from "@shared/procurement/purchase-buying-review";
 import { loadLinkedRfqPurchases } from "./rfq-sourcing-reservation.repository";
@@ -317,6 +318,9 @@ function normalizeAutoDraftRun(row: any) {
     approvalPolicyDiagnostics,
     forecastDiagnostics: summaryJson?.forecastDiagnostics ?? null,
     poMutationCount: poMutations.length,
+    pendingSourcingReviews: (Array.isArray(summaryJson?.poMutationSkips) ? summaryJson.poMutationSkips : [])
+      .filter((entry: unknown) => entry !== null && typeof entry === "object" && "reason" in entry && entry.reason === "pending_sourcing_reservation")
+      .map((entry: unknown) => pendingSourcingReviewSchema.parse(entry)),
     recommendationSamples: {
       actionable: takeRunSamples(actionableRecommendations),
       approvalPolicyBlocked: takeRunSamples(approvalPolicyBlockedRecommendations),
