@@ -6,6 +6,7 @@ import {
   LISTING_RULES_CONVERSION_ERROR_CODES,
   listingRulesConversionCheckInputSchema,
   type ListingRulesConversionCheck,
+  type ListingRulesConversionNoticeResponse,
 } from "../../../../../shared/dropship/listing-rules-conversion";
 import { listingSettingsStoreInputSchema, type ListingSettingsSummary } from "../../../../../shared/dropship/listing-settings";
 import { checkRulesConversion, conversionCheckView } from "../../application/dropship-listing-rules-conversion";
@@ -81,6 +82,7 @@ describe("listing settings HTTP boundary: the rules conversion's dry run (PR 11,
     listProductIdsForMember: unexpected("the product ids"), getProductForMember: unexpected("one product"),
     getProductOwnSettings: unexpected("a product's own settings"), listCategoriesForMember: unexpected("the categories"),
     getCategoryForMember: unexpected("one category"), listUpdatedProductsForMember: unexpected("the updated products"),
+    getConversionNoticeForMember: unexpected("the conversion notice"),
   };
 
   beforeEach(async () => {
@@ -262,7 +264,7 @@ describe("listing settings HTTP boundary: the rules conversion's dry run (PR 11,
     const repository: ListingSettingsRepository = {
       loadConversionInputs: async () => new Promise<ListingSettingsConversionLoad>((settle) => { loads.push(settle); }),
       readFingerprint: unexpected("the views' fingerprint"), load: unexpected("the views' load"),
-      readProductOwnSettings: unexpected("a product's own settings"),
+      readProductOwnSettings: unexpected("a product's own settings"), readConversionNotice: unexpected("the conversion notice"),
     };
     const realService = new DropshipListingSettingsService({ repository,
       stock: { atp: { getVariantAtp: unexpected("stock") }, overrides: { listVariantOverrides: unexpected("stock caps") } },
@@ -313,5 +315,110 @@ describe("listing settings HTTP boundary: the rules conversion's dry run (PR 11,
     }
     expect((await get("/22/listing-settings/summary")).status).toBe(429);
     expect((await get("/22/listing-settings/conversion")).status).toBe(200);
+  });
+});
+
+describe("listing settings HTTP boundary: the one-time notice's read (11e1, plan 9.2)", () => {
+  const NOTICE_PATH = "/api/dropship/listings/stores/:storeConnectionId/listing-settings/conversion/notice";
+  let server: http.Server;
+  let base: string;
+  const answer: ListingRulesConversionNoticeResponse = { storeConnectionId: 22,
+    notice: { conversionId: 41, convertedAt: GENERATED_AT.toISOString(), categoryCount: 2, productCount: 5 } };
+  const getConversionNoticeForMember = vi.fn(async (_member: string, input: unknown): Promise<ListingRulesConversionNoticeResponse> => {
+    listingSettingsStoreInputSchema.parse(input);
+    return answer;
+  });
+  const getConversionForMember = vi.fn(async (_member: string, input: unknown) =>
+    bindersCheck(listingRulesConversionCheckInputSchema.parse(input).page));
+  const getSummaryForMember = vi.fn(async (_member: string, input: unknown) => { listingSettingsStoreInputSchema.parse(input); return summary; });
+  const others = {
+    listPricesForMember: unexpected("the prices"), listProductsForMember: unexpected("the products"),
+    listProductIdsForMember: unexpected("the product ids"), getProductForMember: unexpected("one product"),
+    getProductOwnSettings: unexpected("a product's own settings"), listCategoriesForMember: unexpected("the categories"),
+    getCategoryForMember: unexpected("one category"), listUpdatedProductsForMember: unexpected("the updated products"),
+  };
+
+  beforeEach(async () => {
+    for (const fn of [getConversionNoticeForMember, getConversionForMember, getSummaryForMember, logged.info, logged.warn, logged.error]) {
+      fn.mockClear();
+    }
+    const app = express();
+    app.use((req, _res, next) => {
+      const memberId = req.header("X-Test-Member");
+      req.session = { ...(memberId ? { dropship: { memberId } } : {}) } as Request["session"];
+      next();
+    });
+    registerDropshipListingSettingsRoutes(app, { ...others, getSummaryForMember, getConversionForMember, getConversionNoticeForMember });
+    server = http.createServer(app);
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    base = `http://127.0.0.1:${(server.address() as AddressInfo).port}/api/dropship/listings/stores`;
+  });
+  afterEach(async () => new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve())));
+
+  const get = (path: string, member: string | null = "member-1") =>
+    fetch(`${base}${path}`, { headers: member ? { "X-Test-Member": member } : {} });
+
+  it("answers the store's notice for the signed-in member, never cached, and never reaches the dry run", async () => {
+    const response = await get("/22/listing-settings/conversion/notice");
+    expect(response.status).toBe(200);
+    expect(response.headers.get("Cache-Control")).toBe("no-store");
+    expect(await response.json()).toEqual(answer);
+    expect(getConversionNoticeForMember).toHaveBeenCalledWith("member-1", { storeConnectionId: 22 });
+    expect(getConversionForMember).not.toHaveBeenCalled();
+    getConversionNoticeForMember.mockResolvedValueOnce({ storeConnectionId: 22, notice: null });
+    expect(await (await get("/22/listing-settings/conversion/notice")).json()).toEqual({ storeConnectionId: 22, notice: null });
+    expect([...logged.info.mock.calls, ...logged.warn.mock.calls, ...logged.error.mock.calls]).toEqual([]);
+  });
+
+  it("requires a signed-in member before the service, and refuses a bad store id with 400", async () => {
+    expect((await get("/22/listing-settings/conversion/notice", null)).status).toBe(401);
+    expect(getConversionNoticeForMember).not.toHaveBeenCalled();
+    for (const path of ["/22oops/listing-settings/conversion/notice", "/0/listing-settings/conversion/notice"]) {
+      const response = await get(path);
+      expect(response.status).toBe(400);
+      expect((await response.json()).error.code).toBe("DROPSHIP_LISTING_SETTINGS_INVALID_INPUT");
+    }
+  });
+
+  it.each([
+    ["DROPSHIP_STORE_CONNECTION_REQUIRED", 404],
+    ["DROPSHIP_LISTING_SETTINGS_EBAY_ONLY", 422],
+  ])("maps %s to %s with the store id only, logged as a refusal", async (code, status) => {
+    getConversionNoticeForMember.mockRejectedValueOnce(new DropshipError(String(code), "Controlled refusal.", { storeConnectionId: 22, vendorId: 7 }));
+    const response = await get("/22/listing-settings/conversion/notice");
+    expect(response.status).toBe(status);
+    expect(await response.json()).toEqual({ error: { code, message: "Controlled refusal.", context: { storeConnectionId: 22 } } });
+    expect(logged.info).toHaveBeenCalledWith("dropship.listing_settings.request_refused", expect.objectContaining({
+      error_code: code, status, error_class: "permanent", store_connection_id: 22, path: NOTICE_PATH }));
+  });
+
+  it("answers a broken contract or an answer off its schema with 500, logged for a human (ERROR)", async () => {
+    getConversionNoticeForMember.mockRejectedValueOnce(new DropshipError("DROPSHIP_LISTING_SETTINGS_INVARIANT_FAILED", "Not a notice.",
+      { storeConnectionId: 22, conversionId: 41, classification: "fatal" }));
+    expect((await get("/22/listing-settings/conversion/notice")).status).toBe(500);
+    // An answer the service should never give: the route's schema refuses it, so the page is never shown it.
+    getConversionNoticeForMember.mockResolvedValueOnce({ storeConnectionId: 22,
+      notice: { ...answer.notice, actorType: "system" } } as unknown as ListingRulesConversionNoticeResponse);
+    const offContract = await get("/22/listing-settings/conversion/notice");
+    expect(offContract.status).toBe(500);
+    expect((await offContract.json()).error.code).toBe("DROPSHIP_LISTING_SETTINGS_INTERNAL_ERROR");
+    expect(logged.error).toHaveBeenCalledTimes(2);
+    expect(logged.error).toHaveBeenLastCalledWith("dropship.listing_settings.request_failed", expect.objectContaining({
+      status: 500, error_class: "fatal", path: NOTICE_PATH }));
+  });
+
+  it("reads on the step's read budget, not the dry run's: a member over the check budget still reads the notice", async () => {
+    for (let index = 0; index < LISTING_SETTINGS_CONVERSION_CHECKS_PER_MINUTE; index += 1) {
+      expect((await get("/22/listing-settings/conversion")).status).toBe(200);
+    }
+    expect((await get("/22/listing-settings/conversion")).status).toBe(429);
+    expect((await get("/22/listing-settings/conversion/notice")).status).toBe(200);
+    for (let index = 1; index < LISTING_SETTINGS_READS_PER_MINUTE; index += 1) {
+      expect((await get("/22/listing-settings/summary")).status).toBe(200);
+    }
+    // The notice and the summary share the 120: the 121st read of the two is refused.
+    const limited = await get("/22/listing-settings/conversion/notice");
+    expect(limited.status).toBe(429);
+    expect((await limited.json()).error.code).toBe("DROPSHIP_LISTING_SETTINGS_RATE_LIMITED");
   });
 });

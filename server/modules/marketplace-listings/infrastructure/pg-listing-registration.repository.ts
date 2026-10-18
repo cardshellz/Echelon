@@ -3,6 +3,7 @@ import type { Pool, PoolClient, QueryResultRow } from "pg";
 import { z } from "zod";
 import { listingOwnerRefSchema } from "../application/dtos";
 import { appendListingVerification } from "./pg-listing-verification-writer";
+import { buildEbayRegistrationIdentityNamespace, type EbayRegistrationIdentityRole } from "./providers/ebay/ebay-registration-contracts";
 
 import { pool as defaultPool } from "../../../db";
 import {
@@ -209,6 +210,14 @@ export class PgMarketplaceListingRegistrationRepository implements MarketplaceLi
   async assertCompatibleUnpublishedPublication(input: UnpublishedMappingCompatibilityInput, transactionClient?: PoolClient): Promise<void> {
     const plan=unpublishedCompatibilitySchema.parse(input);
     if(plan.owner.kind!=="channel") throw mappingCompatibilityConflict();
+    const namespace=(role:EbayRegistrationIdentityRole)=>buildEbayRegistrationIdentityNamespace({
+      environment:plan.providerAccount.accountNamespace,marketplaceId:plan.owner.marketplaceId,role,
+    });
+    // Registration owns the namespace. Reuse its environment/marketplace scope
+    // so an unpublished offer cannot bypass an already claimed provider identity.
+    const claims=[...(plan.groupKey?[{namespace:namespace("inventory_item_group"),id:plan.groupKey}]:[]),
+      ...plan.members.flatMap(member=>[{namespace:namespace("inventory_item"),id:member.sku},
+        ...(member.offerId?[{namespace:namespace("offer"),id:member.offerId}]:[])])];
     const client=transactionClient??await this.dbPool.connect();
     try {
       if(!transactionClient){ await client.query("BEGIN"); await client.query("SET LOCAL lock_timeout='2s'"); await client.query("SET LOCAL statement_timeout='10s'"); }
@@ -222,8 +231,6 @@ export class PgMarketplaceListingRegistrationRepository implements MarketplaceLi
         UNION ALL SELECT 1 FROM marketplace.listing_replacement_operations WHERE scope_id=$1
         UNION ALL SELECT 1 FROM marketplace.listing_registrations WHERE scope_id=$1`,[scope.id])).rowCount) throw mappingCompatibilityConflict();
       if(account){
-        const claims=[...(plan.groupKey?[{namespace:"ebay.inventory_item_group",id:plan.groupKey}]:[]),
-          ...plan.members.flatMap(member=>[{namespace:"ebay.inventory_item",id:member.sku},...(member.offerId?[{namespace:"ebay.offer",id:member.offerId}]:[])])];
         if((await client.query(`SELECT 1 FROM marketplace.provider_identity_claims claim
           JOIN unnest($2::text[],$3::text[]) wanted(namespace,id) ON wanted.namespace=claim.identity_namespace AND wanted.id=claim.external_id
           WHERE claim.provider_account_id=$1 LIMIT 1`,[account.id,claims.map(claim=>claim.namespace),claims.map(claim=>claim.id)])).rowCount) throw mappingCompatibilityConflict();

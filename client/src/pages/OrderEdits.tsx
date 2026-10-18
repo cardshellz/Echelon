@@ -37,6 +37,7 @@ import { useOrderEditPreview } from "@/hooks/use-order-edit-preview";
 import { canonicalJson } from "@shared/utils/canonical-json";
 import {
   canConfirmOrderEditPreview,
+  orderEditNeedsPreparation,
   orderEditMatchesInput,
 } from "@/lib/order-edit-confirmation";
 import { OrderEditCodeEntry } from "@/components/order-edits/OrderEditCodeEntry";
@@ -287,6 +288,7 @@ export function OrderDraft({
     busy: boolean;
     uncertain: boolean;
     onCommit(): Promise<void>;
+    onResume?(): Promise<void>;
     onChange(): void;
     onAbandon(): void;
     beforeBrowse(): Promise<boolean>;
@@ -401,6 +403,11 @@ export function OrderDraft({
     prepared.financials?.quoted
       ? prepared
       : null;
+  const needsPreparation = Boolean(
+    inline?.operation &&
+      inline.onResume &&
+      orderEditNeedsPreparation(inline.operation, inline.now),
+  );
   const validationMessage =
     !validation.success && changes.length + additions.length > 0
       ? `Check the item quantities: ${validation.error.issues[0]?.message ?? "Enter valid whole numbers."}`
@@ -541,7 +548,9 @@ export function OrderDraft({
       inline &&
       (inline.busy ||
         inline.uncertain ||
-        (inline.operation ? !verified : !currentPreview && !locked))
+        (inline.operation
+          ? !verified && !needsPreparation
+          : !currentPreview && !locked))
     )
       return;
     inflight.current = true;
@@ -550,6 +559,11 @@ export function OrderDraft({
     setError(null);
     onLock(true);
     try {
+      if (needsPreparation && inline?.onResume) {
+        await inline.onResume();
+        onLock(false);
+        return;
+      }
       if (inline && verified) {
         await inline.onCommit();
         onLock(false);
@@ -1087,7 +1101,7 @@ export function OrderDraft({
                   (inline.busy ||
                     inline.uncertain ||
                     (inline.operation
-                      ? !verified
+                      ? !verified && !needsPreparation
                       : !currentPreview && !locked)),
               )
             }
@@ -1099,22 +1113,24 @@ export function OrderDraft({
                 : "Verifying changes…"
               : locked
                 ? "Retry same quote request"
-                : inline
-                  ? displayedDifference === null
-                    ? "Apply changes"
-                    : displayedDifference > 0
-                      ? `Apply changes · ${formatOrderEditMoney(displayedDifference, order.currency)} due`
-                      : displayedDifference < 0
-                        ? `Apply changes · ${formatOrderEditMoney(-displayedDifference, order.currency)} refund`
-                        : "Apply changes"
-                  : "Review changes"}
+                : needsPreparation
+                  ? "Retry changes"
+                  : inline
+                    ? displayedDifference === null
+                      ? "Apply changes"
+                      : displayedDifference > 0
+                        ? `Apply changes · ${formatOrderEditMoney(displayedDifference, order.currency)} due`
+                        : displayedDifference < 0
+                          ? `Apply changes · ${formatOrderEditMoney(-displayedDifference, order.currency)} refund`
+                          : "Apply changes"
+                    : "Review changes"}
           </Button>
         </div>
-        {inline?.operation?.error && (
+        {inline?.operation?.error && !inline.busy && (
           <ErrorMessage
             text={
               inline.operation.error.code === "ORDER_EDIT_UNAVAILABLE"
-                ? "We couldn't verify your changes. Your selections are saved. Cancel this attempt and try again."
+                ? "We couldn't calculate your changes. Your selections are saved. Retry changes to try again."
                 : inline.operation.error.message
             }
           />
@@ -1127,7 +1143,7 @@ export function OrderDraft({
         {prepared?.status === "ready" &&
           prepared.expiresAt !== null &&
           Date.parse(prepared.expiresAt) <= inline!.now && (
-            <ErrorMessage text="The verified total has expired. Cancel this attempt to calculate it again. Your selections are saved." />
+            <ErrorMessage text="This total has expired. Retry changes to refresh it. Your selections are saved." />
           )}
       </CardContent>
     </Card>

@@ -15,6 +15,7 @@ import {
 import {
   LISTING_RULES_CONVERSION_ERROR_CODES,
   listingRulesConversionCheckSchema,
+  listingRulesConversionNoticeResponseSchema,
 } from "../../../../../shared/dropship/listing-rules-conversion";
 import { logger } from "../../../../platform/observability/logger";
 import type { DropshipListingSettingsService } from "../../application/dropship-listing-settings-service";
@@ -25,7 +26,7 @@ import { requireDropshipAuth } from "./dropship-auth.routes";
 type ListingSettingsRouteService = Pick<DropshipListingSettingsService,
   "getSummaryForMember" | "listPricesForMember" | "listProductsForMember" | "listProductIdsForMember" | "getProductForMember"
   | "getProductOwnSettings" | "listCategoriesForMember" | "getCategoryForMember" | "listUpdatedProductsForMember"
-  | "getConversionForMember">;
+  | "getConversionForMember" | "getConversionNoticeForMember">;
 
 /** Reads only, so the read budget from the Listing settings design (8.8). */
 export const LISTING_SETTINGS_READS_PER_MINUTE = 120;
@@ -44,7 +45,8 @@ const MAX_RETRY_AFTER_SECONDS = 60;
  * here writes or calls eBay. Inputs are checked by the service's schemas and
  * every answer by its response schema. One product's view also reads its
  * sizes' stock, and one product's own settings its own row, through the same
- * budget. The rules conversion's dry run (PR 11) has a budget of its own.
+ * budget. The rules conversion's dry run (PR 11) has a budget of its own;
+ * its one-time notice (11e1) reads on the shared one.
  */
 export function registerDropshipListingSettingsRoutes(
   app: Express,
@@ -95,6 +97,12 @@ export function registerDropshipListingSettingsRoutes(
     listingRulesConversionCheckSchema, () => service.getConversionForMember(memberId(req), {
       storeConnectionId: parseId(req.params.storeConnectionId),
       page: queryId(req.query.page),
+    })));
+  // The one-time notice of a system conversion (PR 11e1, plan 9.2): one small read on the read budget, mounted with the
+  // step; its [Got it] is a write route. A longer path than the dry run's, so neither route answers the other.
+  app.get(`${base}/conversion/notice`, requireDropshipAuth, limiter, (req, res) => respond(req, res,
+    listingRulesConversionNoticeResponseSchema, () => service.getConversionNoticeForMember(memberId(req), {
+      storeConnectionId: parseId(req.params.storeConnectionId),
     })));
 }
 

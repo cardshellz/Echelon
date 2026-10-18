@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "migration": "900000010000018180001_order_edit_submission_holds.sql",
+  "generation": 10,
+  "pr": 1818,
+  "ordinal": 1,
+  "after": [
+    "900000009000018120002_inventory_publication_quantity_consistency.sql"
+  ]
+}

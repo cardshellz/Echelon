@@ -2,7 +2,7 @@ import { defineConfig } from "@playwright/test";
 
 export default defineConfig({
   testDir: "./test/browser",
-  testMatch: ["order-edits.spec.ts"],
+  testMatch: ["order-edits.spec.ts", "customer-order-edit-resume.spec.ts"],
   fullyParallel: true,
   workers: 1,
   timeout: 45_000,
@@ -20,7 +20,7 @@ export default defineConfig({
     { name: "mobile", use: { viewport: { width: 390, height: 844 } } },
   ],
   webServer: {
-    // All API requests are intercepted. This server only renders the staff UI.
+    // All API requests are intercepted; this server renders the staff and customer editors.
     command:
       "node node_modules/vite/bin/vite.js --host 127.0.0.1 --port 5192 --strictPort",
     url: "http://127.0.0.1:5192",

@@ -3,8 +3,12 @@ import { z } from "zod";
 import { wmsOmsOrderIdSql } from "../../oms/oms-wms-order-link.sql";
 import { orderEditSnapshotSchema } from "../application/order-edit-provider.schema";
 import type { OrderEditSnapshot } from "../application/order-edit-provider";
-import { acquireOrderEditWarehouseHold } from "../../wms/order-edit-hold.commands";
+import {
+  acquireOrderEditWarehouseHold,
+  releaseOrderEditWarehouseHold,
+} from "../../wms/order-edit-hold.commands";
 import { enqueueShipStationHoldSyncInTransaction } from "../../oms/shipstation-hold-retry.command";
+import { transferOrderEditProviderHolds } from "../../oms/order-edit-provider-hold.commands";
 import { OrderEditError } from "../domain/order-edit-error";
 
 interface Transaction {
@@ -119,10 +123,20 @@ export async function guardOrderEditShopifyIngress(
     WHERE oms_order_id=${omsOrderId} AND status NOT IN ('completed','recovered','expired','failed') FOR UPDATE`);
   const active = operations.rows[0];
   const activeDocument = active?.document as
-    | { baseline?: { fingerprint?: string } }
+    | ({ baseline?: { fingerprint?: string } } & Record<string, unknown>)
     | undefined;
+  const unsubmitted =
+    activeDocument &&
+    [
+      "commitStartedAt",
+      "commitKey",
+      "refundIntent",
+      "refundStartedAt",
+      "recoveryStartedAt",
+    ].every((field) => activeDocument[field] === null);
   const newOwnedEdit =
     active &&
+    !unsubmitted &&
     active.id !== projection.operation_id &&
     activeDocument?.baseline?.fingerprint === snapshot.fingerprint &&
     orders.rows.length > 0 &&
@@ -175,13 +189,56 @@ export async function guardOrderEditShopifyIngress(
   // An operation still synchronizing its own certified snapshot stays held.
   // A completed operation reopens only for a new pre-picking contradiction.
   const owner =
-    active ??
+    (active && !unsubmitted ? active : undefined) ??
     (
       await tx.execute(
         sql`SELECT id,status,document,version,connection_id FROM oms.order_edit_operations WHERE id=${String(projection.operation_id)}::uuid FOR UPDATE`,
       )
     ).rows[0];
   if (!owner) throw new Error("Certified order edit owner is missing");
+  if (active && unsubmitted && active.id !== owner.id) {
+    // The conflict belongs to the previously submitted, certified edit. A new
+    // draft must not become the owner of a financial reconciliation hold. Close
+    // it and transfer any pre-send hold atomically, before reopening that owner.
+    const draftBefore = z.record(z.unknown()).parse(active.document);
+    const draftAfter = {
+      ...draftBefore,
+      status: "expired",
+      version: Number(active.version) + 1,
+      updatedAt: now.toISOString(),
+      error: {
+        code: "ORDER_EDIT_STALE_ORDER",
+        message: "The order changed. Reload it before editing.",
+      },
+    };
+    const ownedIds = orders.rows
+      .filter((order) => order.order_edit_operation_id === active.id)
+      .map((order) => Number(order.id));
+    if (ownedIds.length) {
+      const released = await releaseOrderEditWarehouseHold(tx, {
+        operationId: String(active.id),
+        wmsOrderIds: ownedIds,
+      });
+      if (released !== ownedIds.length)
+        throw new OrderEditError(
+          "ORDER_EDIT_RELEASE_OWNER_CHANGED",
+          "Warehouse hold ownership changed.",
+        );
+    }
+    // A pre-send acquisition may already have a remote receipt. Preserve its
+    // prior hold status and identity under the certified operation's protection.
+    await transferOrderEditProviderHolds(tx, {
+      fromOperationId: String(active.id),
+      toOperationId: String(owner.id),
+      now,
+    });
+    await tx.execute(
+      sql`UPDATE oms.order_edit_operations SET status='expired',version=${draftAfter.version},document=${JSON.stringify(draftAfter)}::jsonb,updated_at=${now} WHERE id=${String(active.id)}::uuid`,
+    );
+    await tx.execute(sql`INSERT INTO oms.order_edit_events(operation_id,connection_id,actor_id,action,before_state,after_state,occurred_at)
+      VALUES(${String(active.id)}::uuid,${Number(active.connection_id)},NULL,'draft_superseded_by_source_conflict',${JSON.stringify(draftBefore)}::jsonb,
+        ${JSON.stringify({ ...draftAfter, holdTransferredTo: owner.id })}::jsonb,${now})`);
+  }
   const before = z.record(z.unknown()).parse(owner.document);
   const after = {
     ...before,

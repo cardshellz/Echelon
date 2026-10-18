@@ -15,6 +15,7 @@ import type {
 } from "../application/order-edit-store";
 import { OrderEditError } from "../domain/order-edit-error";
 import { sameOrderEditPlan } from "../domain/order-edit-plan-identity";
+import { orderEditHasSubmissionEvidence } from "../application/order-edit-submission";
 import { unchangedFulfilledOrderEdit } from "../application/order-edit-evidence";
 import { finalizeOrderEditWarehouseRelease } from "./order-edit-warehouse.gateway";
 import { appendOrderEditAudit } from "./order-edit-audit.writer";
@@ -368,7 +369,26 @@ export class PostgresOrderEditStore implements OrderEditStore {
           "ORDER_EDIT_CONCURRENT_CHANGE",
           "This order edit changed. Reload its status.",
         );
-      if (
+      if (releaseProof?.unsubmitted) {
+        if (
+          orderEditHasSubmissionEvidence(this.parseRecord(before.document)) ||
+          orderEditHasSubmissionEvidence(record) ||
+          !["preparing", "ready", "review_required", "expired"].includes(
+            record.status,
+          )
+        )
+          throw new OrderEditError(
+            "ORDER_EDIT_RELEASE_STATE_INVALID",
+            "Only an unsubmitted draft can release its submission hold.",
+          );
+        await finalizeOrderEditWarehouseRelease(
+          client,
+          record.omsOrderId,
+          record.id,
+          releaseProof,
+          record.updatedAt,
+        );
+      } else if (
         ["completed", "recovered", "expired", "failed"].includes(record.status)
       ) {
         if (!releaseProof)
@@ -421,7 +441,14 @@ export class PostgresOrderEditStore implements OrderEditStore {
           record.updatedAt,
         ],
       );
-      await this.audit(client, record, before.document, actorId, action);
+      await this.audit(
+        client,
+        record,
+        before.document,
+        actorId,
+        action,
+        releaseProof,
+      );
     });
   }
   async pending(limit: number, now: Date) {
@@ -431,10 +458,17 @@ export class PostgresOrderEditStore implements OrderEditStore {
     // refund reconciliation when a store has many simultaneous edit sessions.
     return (
       await this.pool.query<{ id: string }>(
-        `SELECT id FROM oms.order_edit_operations
-      WHERE status NOT IN ('completed','recovered','failed','expired','review_required')
-        AND (document->>'commitStartedAt' IS NOT NULL OR (document->>'quoteDeadline')::timestamptz <= $2)
-      ORDER BY updated_at,id LIMIT $1`,
+        `SELECT op.id FROM oms.order_edit_operations op
+      WHERE op.status NOT IN ('completed','recovered','failed','expired') AND (
+        (op.status <> 'review_required' AND op.document->>'commitStartedAt' IS NOT NULL)
+        OR (op.document->>'commitStartedAt' IS NULL AND op.document->>'commitKey' IS NULL
+          AND op.document->>'refundIntent' IS NULL AND op.document->>'refundStartedAt' IS NULL AND op.document->>'recoveryStartedAt' IS NULL
+          AND NOT EXISTS (SELECT 1 FROM oms.order_edit_paid_projections p WHERE p.operation_id=op.id)
+          AND (op.status='committing' OR (op.document->>'quoteDeadline')::timestamptz <= $2
+            OR op.document->'error'->>'code'='ORDER_EDIT_HOLD_RELEASE_PENDING'
+            OR EXISTS (SELECT 1 FROM wms.orders wo WHERE wo.order_edit_operation_id=op.id)
+            OR EXISTS (SELECT 1 FROM oms.order_edit_provider_holds h WHERE h.operation_id=op.id AND h.released_at IS NULL))))
+      ORDER BY op.updated_at,op.id LIMIT $1`,
         [limit, now],
       )
     ).rows.map((row) => row.id);
@@ -448,6 +482,7 @@ export class PostgresOrderEditStore implements OrderEditStore {
     before: unknown,
     actorId: string | null,
     action: string,
+    releaseProof?: OrderEditReleaseProof,
   ) {
     await appendOrderEditAudit(client, {
       operationId: record.id,
@@ -455,7 +490,9 @@ export class PostgresOrderEditStore implements OrderEditStore {
       actorId,
       action,
       before,
-      after: record,
+      after: releaseProof
+        ? { ...record, warehouseRelease: releaseProof }
+        : record,
       occurredAt: record.updatedAt,
     });
   }

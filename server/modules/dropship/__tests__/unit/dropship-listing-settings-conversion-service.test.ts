@@ -4,6 +4,8 @@ import {
   CONVERSION_PAGE_SIZE,
   LISTING_RULES_CONVERSION_ERROR_CODES,
   listingRulesConversionCheckSchema,
+  listingRulesConversionNoticeResponseSchema,
+  type ListingRuleConversionRecord,
 } from "../../../../../shared/dropship/listing-rules-conversion";
 import { checkRulesConversion, conversionCheckView, type ConversionInputs } from "../../application/dropship-listing-rules-conversion";
 import { buildListingSettingsFacts } from "../../application/dropship-listing-settings-facts";
@@ -12,6 +14,7 @@ import {
   DropshipListingSettingsService,
   conversionCostReadFailedError,
   type ListingSettingsConversionLoad,
+  type ListingSettingsConversionNoticeRead,
   type ListingSettingsRepository,
 } from "../../application/dropship-listing-settings-service";
 import type { DropshipLogEvent } from "../../application/dropship-ports";
@@ -81,6 +84,14 @@ class FakeRepository implements ListingSettingsRepository {
   readFingerprint = vi.fn(async (): Promise<string | null> => { throw new Error("The dry run read the views' fingerprint."); });
   load = vi.fn(async (): Promise<never> => { throw new Error("The dry run loaded the views."); });
   readProductOwnSettings = vi.fn(async (): Promise<never> => { throw new Error("The dry run read a product's own settings."); });
+  /** The one-time notice's read (11e1): what the next one answers, and every one made. */
+  notice: ListingSettingsConversionNoticeRead | null | Error = { state: "ok", conversion: null };
+  noticeReads: Array<{ memberId: string; storeConnectionId: number }> = [];
+  async readConversionNotice(input: { memberId: string; storeConnectionId: number }) {
+    this.noticeReads.push(input);
+    if (this.notice instanceof Error) throw this.notice;
+    return this.notice;
+  }
 }
 
 let repository: FakeRepository;
@@ -399,5 +410,71 @@ describe("listing settings service: overlapping dry runs share loads, and every 
     await Promise.all([mine, theirs, otherStore]);
     expect(repository.conversionLoads).toHaveLength(3);
     expect(keptRuns(service).size).toBe(0);
+  });
+});
+
+describe("listing settings service: the one-time notice of a system conversion (11e1, plan 9.2, 9.3, D19)", () => {
+  /** The record as the writer reads it back: a system conversion of STORE, unseen. */
+  function systemRecord(overrides: Partial<ListingRuleConversionRecord> = {}): ListingRuleConversionRecord {
+    return {
+      id: 41, vendorId: 7, storeConnectionId: STORE, idempotencyKey: `rules-conversion:${STORE}`, requestHash: "a".repeat(64),
+      planHash: "b".repeat(64), writesHash: "c".repeat(64), clean: true, changedSizeCount: 0, categoryCount: 2, productCount: 5,
+      pricingGroupsRemoved: 1, contentGroupsRemoved: 0, ebayRulesRemoved: 2, actorType: "system", actorId: `rules-conversion:${STORE}`,
+      createdAt: "2026-10-15T08:00:00.000Z", noticeSeenAt: null, noticeSeenBy: null, ...overrides,
+    };
+  }
+
+  it("answers the store's unseen system conversion as its notice: its id, time and two counts, nothing else of the record", async () => {
+    repository.notice = { state: "ok", conversion: systemRecord() };
+    const answer = await service.getConversionNoticeForMember(MEMBER, { storeConnectionId: STORE });
+    expect(answer).toEqual({ storeConnectionId: STORE,
+      notice: { conversionId: 41, convertedAt: "2026-10-15T08:00:00.000Z", categoryCount: 2, productCount: 5 } });
+    expect(listingRulesConversionNoticeResponseSchema.parse(answer)).toEqual(answer);
+    expect(repository.noticeReads).toEqual([{ memberId: MEMBER, storeConnectionId: STORE }]);
+    // One small read: no load, no plan, no clock (nothing is stamped), no view.
+    expect(repository.conversionLoads).toEqual([]);
+    expect(clockReads).toBe(0);
+    expect(vi.mocked(buildListingSettingsFacts)).not.toHaveBeenCalled();
+  });
+
+  it("answers notice null when the store has none, and reads again on every request (never cached: a Got it elsewhere shows at once)", async () => {
+    await expect(service.getConversionNoticeForMember(MEMBER, { storeConnectionId: STORE })).resolves.toEqual({ storeConnectionId: STORE, notice: null });
+    repository.notice = { state: "ok", conversion: systemRecord({ categoryCount: 0, productCount: 0 }) };
+    await expect(service.getConversionNoticeForMember(MEMBER, { storeConnectionId: STORE })).resolves.toMatchObject({
+      notice: { categoryCount: 0, productCount: 0 } });
+    repository.notice = { state: "ok", conversion: null };
+    await expect(service.getConversionNoticeForMember(MEMBER, { storeConnectionId: STORE })).resolves.toMatchObject({ notice: null });
+    expect(repository.noticeReads).toHaveLength(3);
+  });
+
+  it("refuses a bad store id and a blank member before reading, a store the member's vendor does not own (404) and a store not on eBay (422)", async () => {
+    await expect(service.getConversionNoticeForMember(MEMBER, { storeConnectionId: 0 })).rejects.toBeInstanceOf(ZodError);
+    await expect(service.getConversionNoticeForMember(MEMBER, { storeConnectionId: STORE, page: 0 })).rejects.toBeInstanceOf(ZodError);
+    await expect(service.getConversionNoticeForMember("  ", { storeConnectionId: STORE })).rejects.toMatchObject({ code: "DROPSHIP_AUTH_REQUIRED" });
+    expect(repository.noticeReads).toEqual([]);
+    repository.notice = null;
+    await expect(service.getConversionNoticeForMember(MEMBER, { storeConnectionId: STORE }))
+      .rejects.toMatchObject({ code: "DROPSHIP_STORE_CONNECTION_REQUIRED", context: { storeConnectionId: STORE } });
+    repository.notice = { state: "not_ebay" };
+    await expect(service.getConversionNoticeForMember(MEMBER, { storeConnectionId: STORE }))
+      .rejects.toMatchObject({ code: "DROPSHIP_LISTING_SETTINGS_EBAY_ONLY", context: { storeConnectionId: STORE } });
+  });
+
+  it("never shows a vendor's own conversion, one already seen, or another store's as the notice: a broken contract (fatal)", async () => {
+    for (const conversion of [
+      systemRecord({ actorType: "vendor", actorId: MEMBER, idempotencyKey: "ls-convert:0b8e7c1d-5f4a-4c3b-9a2e-1d0c9b8a7f6e" }),
+      systemRecord({ noticeSeenAt: "2026-10-15T09:00:00.000Z", noticeSeenBy: MEMBER }),
+      systemRecord({ storeConnectionId: STORE + 1 }),
+    ]) {
+      repository.notice = { state: "ok", conversion };
+      const error = await service.getConversionNoticeForMember(MEMBER, { storeConnectionId: STORE }).catch((reason: unknown) => reason);
+      expect(error).toBeInstanceOf(DropshipError);
+      expect(error).toMatchObject({ code: "DROPSHIP_LISTING_SETTINGS_INVARIANT_FAILED", context: { conversionId: 41, classification: "fatal" } });
+    }
+  });
+
+  it("fails the request when the read fails", async () => {
+    repository.notice = new Error("connection reset");
+    await expect(service.getConversionNoticeForMember(MEMBER, { storeConnectionId: STORE })).rejects.toThrow("connection reset");
   });
 });

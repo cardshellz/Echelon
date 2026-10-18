@@ -54,6 +54,7 @@ vi.mock("../../adapters/ebay/ebay-marketplace-registration.factory", async () =>
 vi.mock("../../infrastructure/ebay-listing-sync.repository", () => ({ PostgresEbayListingSyncRepository: class {} }));
 vi.mock("../../../inventory-planning/quantity-publication", () => ({ quantityProviderResponseRecovery: { reconcile: fixture.recovery },
   automaticEbayPublicationRecovery: { recover: fixture.automaticRecovery }, ebayPublicationReconciliationRepository: {},
+  ebayPublicationRejectionReader: { read: vi.fn() },
   EbayPublicationContentRefreshRejectedError: class extends Error {
     constructor(readonly code: string, message: string) { super(message); }
   },
@@ -120,6 +121,41 @@ function executionContext(): EbayListingExecutionContext {
 }
 
 describe("production existing-listing prepare through verified completion", () => {
+  it("updates the 260PT pictures without reintroducing its retired unpublished C200 and replays after completion loss", async () => {
+    const example = { productId: 4, catalog: "SHLZ-TOP-260PT", group: "SHLZ-TOP-260PT", suffixes: ["P10", "C500"],
+      ids: [7, 8], listing: "298148234050", offers: ["136406522011", "136406525011"] };
+    const f = provider(example);
+    const retiredSku = "SHLZ-TOP-260PT-C200";
+    fixture.rows.push({ ...fixture.rows[0], variant_id: 208, variant_sku: retiredSku, variant_is_active: false,
+      variant_excluded: true, external_sku: retiredSku, external_variant_id: "136406519011", external_product_id: null });
+    const get = fixture.transport!.get;
+    fixture.transport!.get = vi.fn(async request => {
+      const url = new URL(request.path, "https://api.ebay.com");
+      if (url.pathname.endsWith(`/inventory_item/${retiredSku}`)) return { status: 200, body: { sku: retiredSku, groupIds: [] } };
+      if (url.pathname.endsWith("/offer") && url.searchParams.get("sku") === retiredSku)
+        return { status: 200, body: { offers: [{ sku: retiredSku, marketplaceId: "EBAY_US", offerId: "136406519011", status: "UNPUBLISHED" }], total: 1 } };
+      return get(request);
+    });
+    const { identity: source } = await readExistingEbayListingMappingIdentity(4);
+    const beforeRows = structuredClone(fixture.rows);
+    const binding = vi.fn(async () => {});
+    const result = await fixture.execution!.execute(source, async (_stage, _hash, work) => work(), null, binding, executionContext());
+    expect(result).toMatchObject({ synced: 2, errors: 0 });
+    expect(result.details.map(detail => detail.variantId)).toEqual([7, 8]);
+    expect(binding).toHaveBeenCalledWith(expect.objectContaining({ variants: [expect.objectContaining({ variantId: 7 }), expect.objectContaining({ variantId: 8 })] }),
+      expect.objectContaining({ evidence: expect.objectContaining({ nonMemberCandidates: [expect.objectContaining({ sku: retiredSku })] }) }),
+      expect.objectContaining({ variants: expect.arrayContaining([expect.objectContaining({ variantId: 208, contentSyncEnabled: false })]) }));
+    expect(f.client.createOrReplaceInventoryItemGroup).toHaveBeenCalledExactlyOnceWith(example.group,
+      expect.objectContaining({ variantSKUs: ["SHLZ-TOP-260PT-P10", "SHLZ-TOP-260PT-C500"] }));
+    expect(vi.mocked(f.client.createOrReplaceInventoryItem).mock.calls.map(([sku]) => sku)).toEqual(["SHLZ-TOP-260PT-P10", "SHLZ-TOP-260PT-C500"]);
+    expect(fixture.photoRequests[0].variants.map(variant => variant.variantId)).toEqual([7, 8]);
+    expect(fixture.rows).toEqual(beforeRows);
+    await fixture.execution!.execute(source, async (_stage, _hash, work) => work(), null, binding, executionContext());
+    expect(f.client.createOrReplaceInventoryItem).toHaveBeenCalledTimes(2);
+    expect(f.client.createOrReplaceInventoryItemGroup).toHaveBeenCalledTimes(1);
+    expect(f.client.createOffer).not.toHaveBeenCalled();
+    expect(f.client.publishOfferByInventoryItemGroup).not.toHaveBeenCalled();
+  });
   it("syncs the Tobacco listing's missing photos from its old saved identity while retaining the inactive case", async () => {
     const example = { productId: 1, catalog: "SHLZ-TOP-TOB", group: "SHLZ-TOP-TOB", suffixes: ["P25", "C1000"],
       ids: [1, 2], listing: "298148233614", offers: ["136406476011", "136406478011"] };
@@ -146,7 +182,7 @@ describe("production existing-listing prepare through verified completion", () =
     expect(binding).toHaveBeenCalledWith(expect.objectContaining({ variants: [
       expect.objectContaining({ sku: "SHLZ-TOP-TOB-P25", contentSyncEnabled: true }),
       expect.objectContaining({ sku: "SHLZ-TOP-TOB-C1000", contentSyncEnabled: false }),
-    ] }));
+    ] }), expect.any(Object), expect.any(Object));
     expect(fixture.inventoryReady).toHaveBeenCalledExactlyOnceWith({}, {
       channelId: 67, connectionId: 12, accountId: "seller", environment: "production", productId: 1, purpose: "sync",
       variants: [{ productVariantId: 1, sku: "SHLZ-TOP-TOB-P25" }, { productVariantId: 2, sku: "SHLZ-TOP-TOB-C1000" }],
@@ -207,7 +243,7 @@ describe("production existing-listing prepare through verified completion", () =
     const result = await fixture.execution!.execute(source, async (_key, _hash, work) => work(), null, binding, executionContext());
     expect(result).toMatchObject({ synced: 2, errors: 0 });
     expect(result.details.map(detail => [detail.variantId, detail.variantSku])).toEqual(source.variants.map(member => [member.variantId, member.sku]));
-    expect(binding).toHaveBeenCalledWith(expect.objectContaining({ groupKey: example.group }));
+    expect(binding).toHaveBeenCalledWith(expect.objectContaining({ groupKey: example.group }), expect.any(Object), expect.any(Object));
     expect(fixture.recovery).toHaveBeenCalledWith([`group:${example.group}`, ...source.variants.map(member => member.sku)].map(sku => expect.objectContaining({ externalInventoryItemId: sku })));
     expect(fixture.photoRequests[0].variants.map(member => member.sku)).toEqual(source.variants.map(member => member.catalogSku));
     expect(vi.mocked(client.createOrReplaceInventoryItem).mock.calls.map(([sku]) => sku)).toEqual(source.variants.map(member => member.sku));

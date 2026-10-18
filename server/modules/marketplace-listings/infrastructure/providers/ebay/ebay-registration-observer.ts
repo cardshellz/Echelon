@@ -120,6 +120,8 @@ interface SelectedPublication {
   readonly groupKey: string | null;
   readonly groupVariantSkus: readonly string[];
   readonly members: readonly SelectedMember[];
+  /** Complete SKU reads which did not resolve into this live publication. */
+  readonly nonMemberCandidates?: readonly ObservedSku[];
 }
 
 export interface EbayMarketplaceRegistrationObserverConfig {
@@ -467,6 +469,7 @@ export class EbayMarketplaceRegistrationObserver
     inspectedSkus?: ReadonlyMap<string, ObservedSku>,
   ): Promise<SelectedPublication> {
     const matched: Array<{ observed: ObservedSku; member: SelectedMember }> = [];
+    const observedCandidates: ObservedSku[] = [];
     for (const candidate of candidates) {
       const observed = inspectedSkus?.get(candidate.sku) ?? await this.observeSku(
         credential,
@@ -477,6 +480,7 @@ export class EbayMarketplaceRegistrationObserver
         observed.offers,
         listingId,
       );
+      observedCandidates.push(observed);
       if (matchingOffers.length > 1) {
         throw observationError(
           "EBAY_REGISTRATION_OFFER_AMBIGUOUS",
@@ -520,12 +524,14 @@ export class EbayMarketplaceRegistrationObserver
       );
     }
     if (groupKeys.length === 1) {
-      return this.observeGroupPublication(
+      const publication = await this.observeGroupPublication(
         credential,
         marketplaceId,
         groupKeys[0],
         listingId,
       );
+      const publishedSkus = new Set(publication.members.map(member => member.sku));
+      return { ...publication, nonMemberCandidates: observedCandidates.filter(candidate => !publishedSkus.has(candidate.sku)) };
     }
     if (matched.length !== 1) {
       throw observationError(
@@ -539,6 +545,7 @@ export class EbayMarketplaceRegistrationObserver
       groupKey: null,
       groupVariantSkus: [],
       members: [matched[0].member],
+      nonMemberCandidates: observedCandidates.filter(candidate => candidate.sku !== matched[0].member.sku),
     };
   }
 
@@ -1012,6 +1019,18 @@ function buildPublicationEvidence(
     listingId: selected.listingId,
     inventoryItemGroupKey: selected.groupKey,
     groupVariantSkus: [...selected.groupVariantSkus],
+    // Absence from a live group's members is not enough to discard a saved
+    // mapping. Preserve the complete validated read so the owner can establish
+    // that an excluded SKU has only its exact unpublished offer and no group.
+    ...(selected.nonMemberCandidates?.length ? { nonMemberCandidates: selected.nonMemberCandidates.map(candidate => ({
+      sku: candidate.sku,
+      inventoryItemExists: candidate.inventoryItem !== null,
+      groupIds: [...(candidate.inventoryItem?.groupIds ?? [])],
+      offers: candidate.offers.map(offer => ({
+        sku: offer.sku ?? null, marketplaceId: offer.marketplaceId ?? null, offerId: offer.offerId,
+        status: offer.status, listingId: offer.listing?.listingId ?? null, listingStatus: offer.listing?.listingStatus ?? null,
+      })),
+    })) } : {}),
     members: selected.members
       .map((member) => ({
         sku: member.sku,

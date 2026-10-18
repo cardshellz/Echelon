@@ -9,6 +9,9 @@ import {
   parseListingSettingInput,
 } from "../../application/dropship-listing-setting-write-support";
 import { DropshipError } from "../../domain/errors";
+import { LISTING_RULES_CONVERSION_ERROR_CODES } from "../../../../../shared/dropship/listing-rules-conversion";
+import { LISTING_SETTING_WRITE_ERROR_CODES } from "../../../../../shared/dropship/listing-setting-writes";
+import { CONVERSION_CHECK_RETRY_AFTER_SECONDS } from "../../application/dropship-listing-settings-service";
 import { selectRateBookAssignment, type RateBookAssignmentCandidate } from "../../../shipping-engine/domain/rate-book";
 import {
   DEFAULT_RETRY_AFTER_SECONDS,
@@ -32,10 +35,14 @@ const TABLE: ReadonlyArray<[number, "permanent" | "transient" | "fatal", readonl
     // 9c: eBay refused the store's grant for a read the eBay values step makes.
     "DROPSHIP_EBAY_LISTING_SETUP_ACCESS_DENIED", "DROPSHIP_EBAY_STORE_CATEGORIES_ACCESS_DENIED", "DROPSHIP_EBAY_CATEGORIES_ACCESS_DENIED"]],
   [404, "permanent", ["DROPSHIP_STORE_CONNECTION_REQUIRED", "DROPSHIP_LISTING_SETTINGS_PRODUCT_NOT_FOUND",
-    "DROPSHIP_LISTING_SETTINGS_CATEGORY_NOT_FOUND", "DROPSHIP_LISTING_PRICE_NOT_AVAILABLE", "DROPSHIP_PRICING_REVIEW_NOT_FOUND"]],
+    "DROPSHIP_LISTING_SETTINGS_CATEGORY_NOT_FOUND", "DROPSHIP_LISTING_PRICE_NOT_AVAILABLE", "DROPSHIP_PRICING_REVIEW_NOT_FOUND",
+    // 11e1: the notice's [Got it] names no system conversion of this store.
+    "DROPSHIP_LISTING_CONVERSION_NOTICE_NOT_FOUND"]],
   [409, "permanent", ["DROPSHIP_IDEMPOTENCY_CONFLICT", "DROPSHIP_PRODUCT_LISTING_SETTINGS_VERSION_CONFLICT",
     "DROPSHIP_CATEGORY_LISTING_SETTINGS_VERSION_CONFLICT", "DROPSHIP_LISTING_PRICE_VERSION_CONFLICT", "DROPSHIP_LISTING_PRICES_MOVED",
     "DROPSHIP_LISTING_SETTINGS_OLDER_RULES_PRESENT",
+    // PR 11: the rules conversion's plan recomputed under the store lock is not the one shown.
+    "DROPSHIP_LISTING_CONVERSION_CHANGED",
     // 9c: the store paused while eBay was asked, no token, and the Card Shellz shipping checks behind a new shipping policy.
     "DROPSHIP_STORE_CONNECTION_NOT_CONNECTED", "DROPSHIP_EBAY_LISTING_SETUP_ACCESS_TOKEN_REQUIRED",
     "DROPSHIP_EBAY_FULFILLMENT_MARKETPLACE_UNSUPPORTED", "DROPSHIP_EBAY_FULFILLMENT_SERVICES_REQUIRED",
@@ -46,7 +53,8 @@ const TABLE: ReadonlyArray<[number, "permanent" | "transient" | "fatal", readonl
   [413, "permanent", ["DROPSHIP_REQUEST_TOO_LARGE"]],
   [422, "permanent", ["DROPSHIP_LISTING_PRICE_WOULD_BE_LOST", "DROPSHIP_LISTING_PRICE_OUTSIDE_LIMIT", "DROPSHIP_PRICING_RULES_NOT_CONFIGURED",
     "DROPSHIP_LISTING_PRICE_RELEASE_LIMIT", "DROPSHIP_LISTING_SETTINGS_EBAY_ONLY", "DROPSHIP_LISTING_SETTINGS_TOO_LARGE",
-    "DROPSHIP_LISTING_SETTINGS_BULK_TOO_LARGE", "DROPSHIP_EBAY_LISTING_SETUP_SELECTION_INVALID", "DROPSHIP_EBAY_FULFILLMENT_POLICY_INCOMPATIBLE",
+    "DROPSHIP_LISTING_SETTINGS_BULK_TOO_LARGE", "DROPSHIP_LISTING_CONVERSION_WOULD_BLOCK_LISTING",
+    "DROPSHIP_EBAY_LISTING_SETUP_SELECTION_INVALID", "DROPSHIP_EBAY_FULFILLMENT_POLICY_INCOMPATIBLE",
     "DROPSHIP_EBAY_STORE_CATEGORY_INVALID", "DROPSHIP_EBAY_CATEGORY_RULE_INVALID", "DROPSHIP_EBAY_CATEGORY_MARKETPLACE_UNSUPPORTED"]],
   [429, "transient", ["DROPSHIP_LISTING_SETTINGS_RATE_LIMITED"]],
   [502, "transient", ["DROPSHIP_EBAY_CATEGORIES_UNAVAILABLE", "DROPSHIP_EBAY_CATEGORIES_INVALID_RESPONSE",
@@ -56,7 +64,8 @@ const TABLE: ReadonlyArray<[number, "permanent" | "transient" | "fatal", readonl
     "DROPSHIP_EBAY_MANAGED_LOCATION_CREATE_CONFLICT", "DROPSHIP_EBAY_STORE_CATEGORIES_UNAVAILABLE",
     "DROPSHIP_EBAY_STORE_CATEGORIES_INVALID_RESPONSE"]],
   [503, "transient", ["DROPSHIP_LISTING_SETTINGS_BUSY", "DROPSHIP_EBAY_FULFILLMENT_ROUTING_UNAVAILABLE", "DROPSHIP_EBAY_TOKEN_REFRESH_FAILED", "DROPSHIP_EBAY_REFRESH_LOCK_UNAVAILABLE",
-    "DROPSHIP_CREDENTIAL_CHANGED", "DROPSHIP_EBAY_TOKEN_REFRESH_INVALID_RESPONSE", "DROPSHIP_EBAY_OAUTH_NOT_CONFIGURED"]],
+    "DROPSHIP_CREDENTIAL_CHANGED", "DROPSHIP_EBAY_TOKEN_REFRESH_INVALID_RESPONSE", "DROPSHIP_EBAY_OAUTH_NOT_CONFIGURED",
+    "DROPSHIP_LISTING_CONVERSION_CHECK_UNAVAILABLE"]],
   [500, "fatal", ["DROPSHIP_LISTING_SETTINGS_INVARIANT_FAILED", "DROPSHIP_LISTING_SETTINGS_REPLAY_INCOMPLETE",
     "DROPSHIP_LISTING_PRICE_INVARIANT_FAILED"]],
 ];
@@ -96,7 +105,7 @@ describe("listing-settings write errors (plan PR 9, section 3.3)", () => {
       .toBe("permanent");
   });
 
-  it("sends Retry-After on a busy answer only: the error's own wait, else 5 seconds", () => {
+  it("sends Retry-After on a busy answer (and the conversion's cost read failure, below): the error's own wait, else 5 seconds", () => {
     expect(listingSettingWriteErrorAnswer(new DropshipError("DROPSHIP_LISTING_SETTINGS_BUSY", "Busy.", { retryAfterSeconds: 9 })).retryAfterSeconds).toBe(9);
     expect(listingSettingWriteErrorAnswer(new DropshipError("DROPSHIP_LISTING_SETTINGS_BUSY", "Busy.")).retryAfterSeconds).toBe(DEFAULT_RETRY_AFTER_SECONDS);
     expect(DEFAULT_RETRY_AFTER_SECONDS).toBe(5);
@@ -105,6 +114,33 @@ describe("listing-settings write errors (plan PR 9, section 3.3)", () => {
         .toBe(DEFAULT_RETRY_AFTER_SECONDS);
     }
     expect(listingSettingWriteErrorAnswer(new DropshipError("DROPSHIP_EBAY_TOKEN_REFRESH_FAILED", "x", { retryAfterSeconds: 9 })).retryAfterSeconds).toBeNull();
+  });
+
+  it("sends Retry-After on the rules conversion's cost read failure too: the error's own minute, else a minute (PR 11, plan D14)", () => {
+    const code = LISTING_SETTING_WRITE_ERROR_CODES.conversionCheckUnavailable;
+    expect(code).toBe(LISTING_RULES_CONVERSION_ERROR_CODES.checkUnavailable);
+    expect(CONVERSION_CHECK_RETRY_AFTER_SECONDS).toBe(60);
+    expect(listingSettingWriteErrorAnswer(new DropshipError(code, "Later.", { retryAfterSeconds: 60, classification: "transient" })))
+      .toMatchObject({ status: 503, errorClass: "transient", retryAfterSeconds: 60 });
+    expect(listingSettingWriteErrorAnswer(new DropshipError(code, "Later.", { retryAfterSeconds: 30 })).retryAfterSeconds).toBe(30);
+    for (const odd of [undefined, 0, -1, 2.5, 3_600, "60"]) {
+      expect(listingSettingWriteErrorAnswer(new DropshipError(code, "Later.", { retryAfterSeconds: odd })).retryAfterSeconds).toBe(60);
+    }
+    // The other two conversion codes, and a 409 or a 422 generally, never carry one.
+    for (const other of [LISTING_SETTING_WRITE_ERROR_CODES.conversionChanged, LISTING_SETTING_WRITE_ERROR_CODES.conversionWouldBlockListing]) {
+      expect(listingSettingWriteErrorAnswer(new DropshipError(other, "x", { retryAfterSeconds: 9 })).retryAfterSeconds).toBeNull();
+    }
+  });
+
+  it("maps the shared write code list's four conversion codes to 409, 503, 422 and 404 (PR 11, plan 3.4)", () => {
+    expect([LISTING_SETTING_WRITE_ERROR_CODES.conversionChanged, LISTING_SETTING_WRITE_ERROR_CODES.conversionCheckUnavailable,
+      LISTING_SETTING_WRITE_ERROR_CODES.conversionWouldBlockListing, LISTING_SETTING_WRITE_ERROR_CODES.conversionNoticeNotFound]
+      .map((code) => LISTING_SETTING_WRITE_STATUS.get(code))).toEqual([409, 503, 422, 404]);
+    // The notice's 404 is permanent and names no wait: a press on a notice that isn't there is never retried.
+    expect(listingSettingWriteErrorAnswer(new DropshipError(LISTING_SETTING_WRITE_ERROR_CODES.conversionNoticeNotFound, "Not found.", {
+      storeConnectionId: 22, conversionId: 41, retryable: false, classification: "permanent" })))
+      .toMatchObject({ status: 404, errorClass: "permanent", retryAfterSeconds: null });
+    expect(Object.values(LISTING_RULES_CONVERSION_ERROR_CODES).every((code) => LISTING_SETTING_WRITE_STATUS.has(code))).toBe(true);
   });
 
   it("answers an unlisted code and a plain error with the generic 500, keeping their words for the log only", () => {

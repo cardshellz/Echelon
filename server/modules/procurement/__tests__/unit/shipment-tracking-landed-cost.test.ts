@@ -1,3 +1,7 @@
+import { readShipmentCostReviewInTransaction } from "../../shipment-cost-review.repository";
+import { shipmentCostReviewSchema, type ShipmentCostReview } from "@shared/procurement/shipment-cost-workflow";
+import { landedCostHealthSchema } from "@shared/procurement/landed-cost-health";
+vi.mock("../../shipment-cost-review.repository", () => ({ readShipmentCostReview: vi.fn(), readShipmentCostReviewInTransaction: vi.fn() }));
 import { recordShipmentCostRevisions, applyShipmentCostRevisions } from "../../shipment-cost-application.service";
 vi.mock("../../shipment-cost-application.service", () => ({ recordShipmentCostRevisions: vi.fn(), applyShipmentCostRevisions: vi.fn() }));
 import { shipmentLineVersion } from "../../shipment-line-version";
@@ -11,6 +15,8 @@ import {
 } from "../../shipment-tracking.service";
 
 beforeEach(() => {
+  vi.mocked(readShipmentCostReviewInTransaction).mockReset().mockResolvedValue({ shipmentId: 1,
+    lines: [{ lineId: 11, sku: "SKU-1", sourceIssue: null, exceptionReview: null, application: null }] });
   vi.mocked(recordShipmentCostRevisions).mockReset().mockResolvedValue({ revisions: [], issues: [] } as any);
   vi.mocked(applyShipmentCostRevisions).mockReset().mockResolvedValue({ updated: 0, total: 0, skipped: [], costApplications: [] });
 });
@@ -585,11 +591,12 @@ describe("ShipmentTrackingService.getLandedCostHealth", () => {
         { inboundShipmentLineId: 11, landedUnitCostCents: 110 },
       ]),
     });
-    const service = createShipmentTrackingService({} as any, storage);
+    const { db, tx } = buildTransactionalDb();
+    const service = createShipmentTrackingService(db as any, storage);
 
     const result = await service.getLandedCostHealth({ limit: 25 });
 
-    expect(storage.getInboundShipments).toHaveBeenCalledWith({ status: ["costing", "closed"], limit: 25 });
+    expect(storage.getInboundShipments).toHaveBeenCalledWith({ status: ["costing", "closed"], limit: 25 }, tx);
     expect(result.status).toBe("critical");
     expect(result.counts.staleProvisionalLots).toBe(1);
     expect(result.items[0]).toEqual(expect.objectContaining({
@@ -623,7 +630,8 @@ describe("ShipmentTrackingService.getLandedCostHealth", () => {
         { inboundShipmentLineId: 11, landedUnitCostCents: 110 },
       ]),
     });
-    const service = createShipmentTrackingService({} as any, storage);
+    const { db, tx } = buildTransactionalDb();
+    const service = createShipmentTrackingService(db as any, storage);
 
     const result = await service.getLandedCostHealth();
 
@@ -635,6 +643,139 @@ describe("ShipmentTrackingService.getLandedCostHealth", () => {
       shipmentId: 1,
       action: "push_costs_to_lots",
     }));
+  });
+
+  function healthFixture(overrides: Record<string, unknown> = {}) {
+    const storage = buildStorage({
+      getInboundShipments: vi.fn().mockResolvedValue([{ id: 1, shipmentNumber: "INB-1", status: "closed" }]),
+      getInboundShipmentById: vi.fn().mockResolvedValue({ id: 1, status: "closed", allocationMethodDefault: "by_volume" }),
+      getInboundShipmentLines: vi.fn().mockResolvedValue([{ id: 11, productVariantId: 10, purchaseOrderLineId: 21,
+        qtyShipped: 5, totalVolumeCbm: "1" }]),
+      getInboundFreightCosts: vi.fn().mockResolvedValue([{ id: 31, costType: "freight", estimatedCents: 500, actualCents: null }]),
+      getInboundFreightCostAllocations: vi.fn().mockResolvedValue([{ shipmentCostId: 31, inboundShipmentLineId: 11,
+        allocationBasisValue: "1", allocationBasisTotal: "1", allocatedCents: 500 }]),
+      getProvisionalLotsByShipment: vi.fn().mockResolvedValue([{ id: 501, productVariantId: 10, costProvisional: 1 }]),
+      getLandedCostSnapshots: vi.fn().mockResolvedValue([{ inboundShipmentLineId: 11, landedUnitCostCents: 110 }]),
+      ...overrides,
+    });
+    const { db, tx } = buildTransactionalDb();
+    return { storage, db, tx, service: createShipmentTrackingService(db as any, storage) };
+  }
+  function application(status: "applied" | "review_required" = "applied", issues: ShipmentCostReview["lines"][number]["sourceIssue"][] = []) {
+    return { id: 8, recordedAt: "2026-10-16T12:00:00Z", status, lotsUpdated: 1, cogsRowsUpdated: 0,
+      issues: issues.filter((issue): issue is NonNullable<typeof issue> => issue !== null) };
+  }
+  function setReview(line: Partial<ShipmentCostReview["lines"][number]> = {}) {
+    const review = shipmentCostReviewSchema.parse({ shipmentId: 1, lines: [{ lineId: 11, sku: "SKU-1",
+      sourceIssue: null, exceptionReview: null, application: application(), ...line }] });
+    vi.mocked(readShipmentCostReviewInTransaction).mockResolvedValue(review);
+    return review;
+  }
+  const historicalIssue = { code: "COST_HISTORICAL_LINEAGE_MISSING", message: "Historical receipt source is missing." };
+  function historicalReview(status: "posted" | "review_required" | "unresolved" = "posted") {
+    return { state: "open" as const, fingerprint: "a".repeat(64), kind: "missing_receipt_history" as const,
+      currency: "USD", allocatedMills: 50000, amountMills: 50000, lotsUpdated: 0, cogsRowsUpdated: 0,
+      issues: [historicalIssue], decision: null, reconciliation: { status, postedMills: status === "posted" ? 50000 : 0,
+        unassignedMills: status === "posted" ? 0 : 50000, destination: status === "posted" ? "historical_cogs" as const : null } };
+  }
+
+  it("treats a current applied estimate as posted while retaining other provisional sources", async () => {
+    const { service, storage, db, tx } = healthFixture();
+    setReview();
+    const result = await service.getLandedCostHealth();
+    expect(result).toMatchObject({ status: "warning", critical: 0, warning: 1,
+      counts: { staleProvisionalLots: 0, finalizedNotPushed: 0, provisionalOtherCosts: 1 } });
+    expect(result.items).toEqual([expect.objectContaining({ type: "provisional_other_costs",
+      action: "review_cost_evidence", detail: expect.stringContaining("Landed costs are posted.") })]);
+    expect(result.items[0].detail).toBe("Landed costs are posted. 1 lot still has a provisional cost flag; review remaining cost evidence before treating the complete lot cost as final.");
+    expect(db.transaction).toHaveBeenCalledWith(expect.any(Function), { isolationLevel: "repeatable read", accessMode: "read only" });
+    expect(readShipmentCostReviewInTransaction).toHaveBeenCalledWith(tx, 1);
+    expect(storage.getProvisionalLotsByShipment).toHaveBeenCalledWith(1, tx);
+    expect(storage.getLandedCostSnapshots).toHaveBeenCalledWith(11, tx);
+  });
+
+  it("recognizes approved historical posting without recommending re-finalization or another push", async () => {
+    const { service } = healthFixture({ getLandedCostSnapshots: vi.fn().mockResolvedValue([]) });
+    setReview({ application: application("review_required", [historicalIssue]), exceptionReview: historicalReview() });
+    const result = await service.getLandedCostHealth();
+    expect(result.status).toBe("warning");
+    expect(result.counts.pendingFinalization).toBe(0);
+    expect(result.items.map(item => item.type)).toEqual(["provisional_other_costs"]);
+    expect(result.items.every(item => item.action === "review_cost_evidence")).toBe(true);
+  });
+
+  it("reports healthy landed posting when no other provisional evidence remains", async () => {
+    const { service } = healthFixture({ getProvisionalLotsByShipment: vi.fn().mockResolvedValue([]) });
+    setReview({ application: application("review_required", [historicalIssue]), exceptionReview: historicalReview() });
+    expect(await service.getLandedCostHealth()).toMatchObject({ status: "healthy", critical: 0, warning: 0, items: [] });
+  });
+
+  it.each(["COST_UPDATE_OUTDATED", "COST_CURRENCY_REVIEW", "COST_SOURCE_UNKNOWN"])("keeps %s source evidence actionable after a recorded posting", async code => {
+    const { service } = healthFixture();
+    setReview({ sourceIssue: { code, message: "Review the current source." },
+      application: application("review_required", [historicalIssue]), exceptionReview: historicalReview() });
+    const result = await service.getLandedCostHealth();
+    expect(result.status).toBe("critical");
+    expect(result.counts.provisionalOtherCosts).toBe(0);
+    expect(result.items).toEqual([expect.objectContaining({ type: "stale_provisional_lots", action: "review_cost_evidence" })]);
+  });
+
+  it.each(["review_required", "unresolved"] as const)("does not clear %s reconciliation", async status => {
+    const { service } = healthFixture();
+    setReview({ application: application("review_required", [historicalIssue]), exceptionReview: historicalReview(status) });
+    const result = await service.getLandedCostHealth();
+    expect(result).toMatchObject({ status: "critical", counts: { staleProvisionalLots: 1, provisionalOtherCosts: 0 } });
+    expect(result.items[0].action).toBe("review_cost_evidence");
+  });
+
+  it("keeps a contradictory applied result with retained issues in review", async () => {
+    const { service } = healthFixture();
+    setReview({ application: application("applied", [historicalIssue]) });
+    const result = await service.getLandedCostHealth();
+    expect(result.status).toBe("critical");
+    expect(result.items[0].action).toBe("review_cost_evidence");
+  });
+
+  it("finds changed current sources even when the legacy provisional flag was cleared", async () => {
+    const { service } = healthFixture({ getProvisionalLotsByShipment: vi.fn().mockResolvedValue([]) });
+    setReview({ sourceIssue: { code: "COST_UPDATE_OUTDATED", message: "Costs changed." } });
+    const result = await service.getLandedCostHealth();
+    expect(result).toMatchObject({ status: "critical", counts: { postingReviewRequired: 1 } });
+    expect(result.items[0]).toMatchObject({ type: "posting_review_required", action: "review_cost_evidence" });
+  });
+
+  it("retains allocation blockers after a posted application", async () => {
+    const { service } = healthFixture({ getInboundFreightCostAllocations: vi.fn().mockResolvedValue([]) });
+    setReview();
+    const result = await service.getLandedCostHealth();
+    expect(result.status).toBe("critical");
+    expect(result.counts.allocationBlockers).toBe(1);
+  });
+
+  it.each([null, { shipmentId: 2, lines: [{ lineId: 11, sku: null, sourceIssue: null, application: null }] }, { shipmentId: 1, lines: [] }, { shipmentId: 1, lines: [
+    { lineId: 12, sku: null, sourceIssue: null, application: null }] }])("refuses incomplete line evidence: %j", async review => {
+    const { service } = healthFixture();
+    vi.mocked(readShipmentCostReviewInTransaction).mockResolvedValue(review);
+    await expect(service.getLandedCostHealth()).rejects.toMatchObject({ statusCode: 503,
+      details: { code: "SHIPMENT_COST_HEALTH_EVIDENCE_INCOMPLETE" } });
+  });
+
+  it("does not turn a failed posting read into healthy or an actionable push", async () => {
+    const { service } = healthFixture();
+    vi.mocked(readShipmentCostReviewInTransaction).mockRejectedValue(new Error("posting read failed"));
+    await expect(service.getLandedCostHealth()).rejects.toThrow("posting read failed");
+  });
+
+  it.each([0, -1, 1.5, Number.NaN, 251])("validates health limit %s", async limit => {
+    const { service, db } = healthFixture();
+    await expect(service.getLandedCostHealth({ limit })).rejects.toThrow("Cost health limit");
+    expect(db.transaction).not.toHaveBeenCalled();
+  });
+
+  it("rejects conflicting completion counts at the shared response boundary", () => {
+    expect(landedCostHealthSchema.safeParse({ status: "healthy", scannedShipments: 1, critical: 1, warning: 0,
+      counts: { allocationBlockers: 0, allocationWarnings: 0, pendingFinalization: 0, finalizedNotPushed: 0, staleProvisionalLots: 0 },
+      items: [] }).success).toBe(false);
   });
 });
 

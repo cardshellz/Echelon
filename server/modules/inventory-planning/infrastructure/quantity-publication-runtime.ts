@@ -8,10 +8,12 @@ import { PostgresQuantityProviderResponseRecovery } from "./quantity-provider-re
 import { EbayAutomaticPublicationRecoveryService } from "../application/ebay-automatic-publication-recovery.service";
 import { PostgresEbayAutomaticPublicationRecoveryRepository } from "./ebay-automatic-publication-recovery.repository";
 import { PostgresEbayPublicationReconciliationRepository } from "./ebay-publication-reconciliation.repository";
+import { PostgresEbayPublicationRejectionReader } from "./ebay-publication-rejection.reader";
 
 /** Shared production instance bounds nested provider connections across the known quantity owners. */
 export const quantityPublicationAdmission = new PostgresQuantityPublicationAdmission(pool);
 export const quantityProviderResponseRecovery = new PostgresQuantityProviderResponseRecovery(pool, () => new Date());
+export const ebayPublicationRejectionReader = new PostgresEbayPublicationRejectionReader(pool);
 export const automaticEbayPublicationRecovery = new EbayAutomaticPublicationRecoveryService(new PostgresEbayAutomaticPublicationRecoveryRepository(pool));
 export const ebayPublicationReconciliationRepository = new PostgresEbayPublicationReconciliationRepository(pool);
 

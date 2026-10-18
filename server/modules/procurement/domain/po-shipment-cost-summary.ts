@@ -3,6 +3,8 @@ import {
   type PoShipmentCostSummary,
 } from "@shared/procurement/po-shipment-cost-summary";
 import { z } from "zod";
+import { isCostReconciliationPosted, resolveCostPostingStatus } from "@shared/procurement/cost-posting-status";
+import { shipmentCostExceptionSchema } from "@shared/procurement/shipment-cost-exception";
 import {
   costIssueSchema,
   type CostIssue,
@@ -53,6 +55,7 @@ const inputSchema = z
           evidence: z.string().nullable(),
           applicationStatus: z.string().nullable(),
           issue: z.string().nullable(),
+          reconciled: z.boolean().optional(),
         })
         .strict(),
     ),
@@ -82,6 +85,7 @@ export interface PoShipmentCostLine {
   evidence: string | null;
   applicationStatus: string | null;
   issue: string | null;
+  reconciled?: boolean;
 }
 
 function safeAmount(value: bigint): number {
@@ -154,7 +158,7 @@ function evaluatePoShipmentCosts(
     review = 0,
     pending = 0;
   const supportedCostIds = new Set<number>();
-  const confirmedCostIds = new Set<number>();
+  const unresolvedCostIds = new Set<number>();
   const allocationsByCost = new Map<number, PoShipmentChargeAllocation[]>();
   const allocationsByLine = new Map<number, PoShipmentChargeAllocation[]>();
   const lineStates: EvaluatedCosts["lines"] = [];
@@ -177,15 +181,17 @@ function evaluatePoShipmentCosts(
     if (
       charge.amountCents === null ||
       total !== BigInt(charge.amountCents) ||
-      allocations.length === 0
-    )
+      (allocations.length === 0 && charge.amountCents !== 0)
+    ) {
       unallocated++;
+      unresolvedCostIds.add(charge.id);
+    }
+    if (charge.issue) unresolvedCostIds.add(charge.id);
     if (charge.currency !== input.currency) {
       unsupported++;
       continue;
     }
     supportedCostIds.add(charge.id);
-    if (charge.confirmed && !charge.issue) confirmedCostIds.add(charge.id);
     const amount = allocations
       .filter((allocation) => allocation.poId === input.poId)
       .reduce(
@@ -211,29 +217,18 @@ function evaluatePoShipmentCosts(
       line.sourceTotalMills !== null &&
       BigInt(line.sourceTotalMills) === amount &&
       line.sourceQuantity === line.quantity;
-    let status: LineStatus;
-    if (
-      line.issue ||
-      line.applicationStatus === "review_required" ||
-      line.applicationStatus === "retry_required"
-    ) {
-      review++;
-      status = "review_required";
-    } else if (
-      current &&
-      line.evidence === "confirmed" &&
-      line.applicationStatus === "applied" &&
-      lineAllocations.length > 0 &&
-      lineAllocations.every((allocation) =>
-        confirmedCostIds.has(allocation.costId),
-      )
-    ) {
-      applied++;
-      status = "applied";
-    } else {
-      pending++;
-      status = "pending";
-    }
+    const status = resolveCostPostingStatus({
+      sourceCurrent: current && ["estimated", "confirmed"].includes(line.evidence ?? "")
+        && (lineAllocations.length > 0 || amount === BigInt(0))
+        && lineAllocations.every(allocation => supportedCostIds.has(allocation.costId)
+          && !unresolvedCostIds.has(allocation.costId)),
+      sourceIssue: Boolean(line.issue),
+      applicationStatus: line.applicationStatus,
+      reconciled: line.reconciled === true,
+    });
+    if (status === "applied") applied++;
+    else if (status === "review_required") review++;
+    else pending++;
     lineStates.push({
       lineId: line.id,
       status,
@@ -241,17 +236,11 @@ function evaluatePoShipmentCosts(
       pendingIssue:
         status !== "pending"
           ? null
-          : line.evidence === "estimated"
-            ? {
-                code: "LANDED_CHARGES_UNCONFIRMED",
-                message:
-                  "The shipment charge amounts are still estimated or awaiting supplier confirmation.",
-              }
-            : line.applicationStatus === "applied"
+          : line.applicationStatus === "applied"
               ? {
                   code: "COST_UPDATE_OUTDATED",
                   message:
-                    "The last applied cost update is not current for this shipment line's confirmed charges and quantity.",
+                    "The last applied cost update is not current for this shipment line's charges and quantity.",
                 }
               : {
                   code: "COST_UPDATE_NOT_RECORDED",
@@ -309,6 +298,7 @@ const lineDetailSchema = z
     recordedAt: z.string().datetime({ offset: true }).nullable(),
     sourceIssue: z.unknown(),
     applicationIssues: z.unknown(),
+    exceptionReview: shipmentCostExceptionSchema.nullable().optional(),
   })
   .strict();
 export type PoShipmentCostLineDetail = z.infer<typeof lineDetailSchema>;
@@ -386,6 +376,8 @@ export function buildPoShipmentCosts(
       const unreadable =
         (detail.sourceIssue != null && !sourceIssue.success) ||
         (detail.applicationId !== null && !applicationIssues.success);
+      const reconciled = detail.sourceIssue == null && detail.applicationId !== null && applicationIssues.success
+        && isCostReconciliationPosted(applicationIssues.data, detail.exceptionReview);
       const recordedIssue = sourceIssue.success
         ? sourceIssue.data.code
         : applicationIssues.success && applicationIssues.data.length > 0
@@ -393,9 +385,11 @@ export function buildPoShipmentCosts(
           : null;
       return {
         ...line,
+        reconciled,
         issue:
           line.issue ??
-          (unreadable ? "COST_REVIEW_DETAILS_MISSING" : recordedIssue),
+          (unreadable ? "COST_REVIEW_DETAILS_MISSING" : reconciled ? null
+            : detail.exceptionReview != null ? "COST_RECONCILIATION_EVIDENCE_UNRESOLVED" : recordedIssue),
       };
     }),
   });
@@ -422,6 +416,7 @@ export function buildPoShipmentCosts(
       const detail = detailsById.get(line.lineId)!;
       return {
         lineId: line.lineId,
+        exceptionReview: detail.exceptionReview ?? null,
         shipmentId: detail.shipmentId,
         shipmentNumber: detail.shipmentNumber,
         shipmentStatus: detail.shipmentStatus,

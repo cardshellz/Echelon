@@ -12,6 +12,7 @@ import pg from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import * as schema from "@shared/schema";
 import { lockInventoryCostGraph } from "../../../inventory/infrastructure/cost-evidence.repository";
+import { isShipmentCostLinePosted } from "@shared/procurement/shipment-cost-workflow";
 import { readPoShipmentCostSummary, readPoShipmentCosts } from "../../po-shipment-cost-summary.repository";
 import { installPreOpeningQuantityAuthorityFixture } from "../../../inventory/__tests__/fixtures/pre-opening-quantity-authority.fixture";
 import { receivingUnitVersion } from "../../receiving-unit-contract";
@@ -816,7 +817,8 @@ audit.sequential("receipt/AP/freight cost revisions with real owners", () => {
 
   function exceptionService() { return createShipmentCostExceptionService(database, () => NOW); }
   registerShipmentReconciliationCases({ pool:()=>pool, database:()=>database, at:NOW,
-    prepareGaps:legacyQuantityGaps, updateCosts:updateShipmentCosts, physicalSnapshot:costQuantityPhysicalSnapshot });
+    prepareGaps:legacyQuantityGaps, updateCosts:updateShipmentCosts, physicalSnapshot:costQuantityPhysicalSnapshot,
+    costHealth: () => shipment.getLandedCostHealth() });
   async function prepareException() {
     await legacyQuantityGaps();
     await pool.query("UPDATE procurement.inbound_shipments SET status='closed' WHERE id=1");
@@ -1156,6 +1158,42 @@ audit.sequential("receipt/AP/freight cost revisions with real owners", () => {
     expect((await pool.query("SELECT total_cents,shipping_cost_cents,tax_cents FROM procurement.purchase_orders WHERE id=10")).rows[0])
       .toEqual({total_cents:"22000",shipping_cost_cents:"0",tax_cents:"0"});
     expect(await readPoShipmentCostSummary(database,999999)).toBeNull();
+  });
+
+  it("agrees across PO, shipment and health for posted estimates and reopens changed equal-value sources", async () => {
+    await pool.query("UPDATE procurement.inbound_freight_costs SET actual_cents=NULL,estimated_cents=5000,cost_status='estimated' WHERE id=31");
+    await shipment.finalizeAllocations(1, actorId);
+    await receive();
+    await shipment.pushLandedCostsToLots(1, actorId);
+    await pool.query("UPDATE procurement.inbound_shipments SET status='closed' WHERE id=1");
+    const saved = await state();
+    const po = await readPoShipmentCosts(database, 10);
+    const review = await shipment.getCostReview(1);
+    expect(po?.summary).toMatchObject({ inventoryCosting: "applied", appliedLines: 1, pendingLines: 0, estimatedCents: 5000 });
+    expect(review?.lines).toHaveLength(1);
+    expect(isShipmentCostLinePosted(review!.lines[0])).toBe(true);
+    const health = await shipment.getLandedCostHealth();
+    expect(health.counts.staleProvisionalLots).toBe(0);
+    expect(health.counts.postingReviewRequired).toBe(0);
+    expect(health.items.some(item => item.action === "push_costs_to_lots")).toBe(false);
+    expect(await state()).toEqual(saved);
+
+    // Equal money is deliberately insufficient: changed supplier evidence must
+    // invalidate the old source fingerprint until the owner applies it again.
+    await pool.query("UPDATE procurement.inbound_freight_costs SET vendor_id=5 WHERE id=31");
+    // A legacy advisory flag must not hide a newly stale posting.
+    await pool.query("UPDATE inventory.inventory_lots SET cost_provisional=0");
+    const changed = await state();
+    expect((await readPoShipmentCosts(database, 10))?.lines[0]).toMatchObject({ status: "review_required",
+      issues: expect.arrayContaining([expect.objectContaining({ code: "COST_UPDATE_OUTDATED" })]) });
+    const staleReview = await shipment.getCostReview(1);
+    expect(isShipmentCostLinePosted(staleReview!.lines[0])).toBe(false);
+    expect(staleReview?.lines[0].sourceIssue?.code).toBe("COST_UPDATE_OUTDATED");
+    expect((await shipment.getLandedCostHealth()).counts.postingReviewRequired).toBe(1);
+    expect(await state()).toEqual(changed);
+    await shipment.pushLandedCostsToLots(1, actorId);
+    expect((await readPoShipmentCosts(database, 10))?.summary.inventoryCosting).toBe("applied");
+    expect(isShipmentCostLinePosted((await shipment.getCostReview(1))!.lines[0])).toBe(true);
   });
 
   it("reads persistent line reasons and supplier plus shipment cards in a read-only snapshot", async () => {

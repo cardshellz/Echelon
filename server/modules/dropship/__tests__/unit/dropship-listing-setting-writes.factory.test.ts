@@ -8,6 +8,12 @@ import type {
   StoredPriceChangeReview,
 } from "../../application/dropship-listing-setting-writes";
 import { priceChangeReviewHash } from "../../application/dropship-listing-price-changes-service";
+import type {
+  ListingRulesConversionExecuteInput,
+  ListingRulesConversionRepository,
+  ListingRulesConversionTransaction,
+} from "../../application/dropship-listing-rules-conversion-service";
+import type { ListingRulesConversionNoticeRepository } from "../../application/dropship-listing-rules-conversion-notice-service";
 import { DropshipError } from "../../domain/errors";
 
 // The production repository's module opens the shared pool on import; nothing here reaches it, a repository is injected.
@@ -17,6 +23,7 @@ vi.mock("../../../../platform/observability/logger", () => ({
 }));
 import { logger } from "../../../../platform/observability/logger";
 import { createDropshipListingSettingWriteServices } from "../../infrastructure/dropship-listing-setting-writes.factory";
+import { PgDropshipListingRulesConversionRepository } from "../../infrastructure/dropship-listing-rules-conversion.repository";
 
 /**
  * The real wiring (plan PR 9, 3.10 (a), 7.12; v3r, C-feas-9): the services
@@ -169,6 +176,37 @@ class BlockingRepository implements ListingSettingWriteRepository {
 
   async preflight<T>(_input: unknown, _operation: (tx: ListingSettingPreflightTransaction) => Promise<T>): Promise<T> {
     throw new Error("No eBay id is set here, so no preflight runs.");
+  }
+}
+
+const CONVERSION_KEY = "ls-convert:7f9c2ba4-e88f-4a5e-9d1b-1c2d3e4f5a6b";
+const conversionBody = (idempotencyKey = CONVERSION_KEY) => ({ idempotencyKey, planHash: "a".repeat(64), writesHash: "b".repeat(64) });
+
+/**
+ * The rules conversion's own transaction (PR 11, plan D10): it records every
+ * apply it opens, holds it until released, and answers with a body that
+ * converts nothing (no older rules), so no plan is needed here.
+ */
+class BlockingConversionRepository implements ListingRulesConversionRepository {
+  readonly executed: string[] = [];
+  private release!: () => void;
+  private readonly hold = new Promise<void>((done) => { this.release = done; });
+  private markOpened!: () => void;
+  readonly opened = new Promise<void>((done) => { this.markOpened = done; });
+
+  releaseAll(): void { this.release(); }
+
+  async executeConversion<T>(input: ListingRulesConversionExecuteInput, operation: (tx: ListingRulesConversionTransaction) => Promise<T>): Promise<T> {
+    this.executed.push(input.actorType === "vendor" ? input.idempotencyKey : input.jobKey);
+    this.markOpened();
+    await this.hold;
+    return operation({
+      vendorId: 10, storeConnectionId: STORE, requestKey: CONVERSION_KEY, actor: { actorType: "vendor", actorId: MEMBER },
+      authorize: async () => ({ vendorId: 10, vendorStatus: "active", entitlementStatus: "active", storeConnectionId: STORE,
+        storeStatus: "connected", setupStatus: "ready", platform: "ebay", storeLaunchReady: true }),
+      findConversionByKey: async () => null,
+      loadOlderGroupRuleCounts: async () => ({ pricingGroups: 0, contentGroups: 0, ebayCategoryRules: 0 }),
+    } as unknown as ListingRulesConversionTransaction);
   }
 }
 
@@ -330,6 +368,97 @@ describe("createDropshipListingSettingWriteServices (plan 3.10 (a), 7.12)", () =
       repository.releaseAll();
       await heavy;
     }
+  });
+
+  it("never gates the notice's Got it (11e1): sent while a W6 holds the gate it reaches its own transaction, and logs one INFO", async () => {
+    const presses: Array<{ memberId: string; storeConnectionId: number; conversionId: number; now: Date }> = [];
+    const noticeRepository: ListingRulesConversionNoticeRepository = {
+      acknowledgeNotice: async (input) => { presses.push(input); return { vendorId: 7, outcome: "acknowledged" }; },
+    };
+    const services = createDropshipListingSettingWriteServices({ repository, ebay, noticeRepository });
+    const heavy = services.products.saveBulkForMember(MEMBER, STORE, w6Body());
+    await repository.opened;
+    try {
+      await expect(services.conversionNotice.acknowledgeForMember(MEMBER, STORE, { conversionId: 41 })).resolves.toEqual({ outcome: "acknowledged" });
+      expect(presses).toEqual([{ memberId: MEMBER, storeConnectionId: STORE, conversionId: 41, now: expect.any(Date) }]);
+      // The W6 transaction alone used the PR 9 wrapper: the notice has its own (no request key, no store lock).
+      expect(repository.executed).toEqual([W6_KEY]);
+      expect(logger.info).toHaveBeenCalledWith("dropship.listing_settings.rules_conversion_notice_seen", expect.objectContaining({
+        outcome: "acknowledged", vendor_id: 7, store_connection_id: STORE, conversion_id: 41, actor_id: MEMBER }));
+    } finally {
+      repository.releaseAll();
+      await heavy;
+    }
+  });
+
+  it("answers a rules conversion apply sent while a W6 holds the gate with BUSY, before its transaction (PR 11, plan 7.B.1)", async () => {
+    const conversionRepository = new BlockingConversionRepository();
+    conversionRepository.releaseAll();
+    const services = createDropshipListingSettingWriteServices({ repository, ebay, conversionRepository });
+    const heavy = services.products.saveBulkForMember(MEMBER, STORE, w6Body());
+    await repository.opened;
+    try {
+      const busy = await failure(services.conversion.applyForMember(MEMBER, STORE, conversionBody()));
+      expect(busy).toMatchObject({ code: "DROPSHIP_LISTING_SETTINGS_BUSY", context: {
+        reason: "heavy_write_in_progress", retryAfterSeconds: 5, retryable: true, classification: "transient" } });
+      expect(conversionRepository.executed).toEqual([]);
+    } finally {
+      repository.releaseAll();
+      await heavy;
+    }
+    // Released: the apply opens its own transaction (not the PR 9 wrapper's) and answers.
+    await expect(services.conversion.applyForMember(MEMBER, STORE, conversionBody())).resolves.toEqual({ outcome: "nothing_to_convert",
+      conversionId: null, categoryCount: 0, productCount: 0 });
+    expect(conversionRepository.executed).toEqual([CONVERSION_KEY]);
+    expect(repository.executed).toEqual([W6_KEY]);
+    expect(logger.info).toHaveBeenCalledWith("dropship.listing_settings.rules_conversion_applied", expect.objectContaining({
+      outcome: "nothing_to_convert", store_connection_id: STORE, actor_id: MEMBER, request_key: CONVERSION_KEY }));
+  });
+
+  it("answers a W6 and a second apply sent while a rules conversion holds the gate with BUSY: one gate for every heavy writer", async () => {
+    const conversionRepository = new BlockingConversionRepository();
+    const services = createDropshipListingSettingWriteServices({ repository, ebay, conversionRepository });
+    const applying = services.conversion.applyForMember(MEMBER, STORE, conversionBody());
+    await conversionRepository.opened;
+    try {
+      expect((await failure(services.products.saveBulkForMember(MEMBER, STORE, w6Body()))).context)
+        .toMatchObject({ reason: "heavy_write_in_progress" });
+      expect((await failure(services.conversion.applyForMember(MEMBER, STORE, conversionBody(`${CONVERSION_KEY}-second`)))).code)
+        .toBe("DROPSHIP_LISTING_SETTINGS_BUSY");
+      expect(repository.executed).toEqual([]);
+      expect(conversionRepository.executed).toEqual([CONVERSION_KEY]);
+    } finally {
+      conversionRepository.releaseAll();
+      await expect(applying).resolves.toMatchObject({ outcome: "nothing_to_convert" });
+    }
+  });
+
+  it("wires the production conversion repository with the cost-read reporter: WARN for a transient failure, DEBUG for a fatal one", async () => {
+    // No conversionRepository override: the factory builds the real one. Its transaction is not opened (the pool is the mock's);
+    // the spy reads the reporter the factory gave it, then stops the apply before any connection.
+    let reporter: ((failure: Record<string, unknown>) => void) | null = null;
+    const stopped = new Error("stopped before a connection");
+    const spy = vi.spyOn(PgDropshipListingRulesConversionRepository.prototype, "executeConversion").mockImplementation(async function (
+      this: PgDropshipListingRulesConversionRepository) {
+      reporter = (this as unknown as { reportCostReadFailure: (failure: Record<string, unknown>) => void }).reportCostReadFailure;
+      throw stopped;
+    });
+    try {
+      const services = createDropshipListingSettingWriteServices({ repository, ebay });
+      await expect(services.conversion.applyForMember(MEMBER, STORE, conversionBody())).rejects.toBe(stopped);
+    } finally {
+      spy.mockRestore();
+    }
+    expect(reporter).not.toBeNull();
+    const failure = { vendorId: 10, storeConnectionId: STORE, variantCount: 3, stage: "load_costs" };
+    reporter!({ ...failure, sqlState: "57014" });
+    expect(logger.warn).toHaveBeenCalledWith("dropship.listing_settings.rules_conversion_cost_read_failed", { outcome: "deferred",
+      error_code: "DROPSHIP_PRODUCT_COST_SOURCE_UNAVAILABLE", error_class: "transient", vendor_id: 10, store_connection_id: STORE,
+      variant_count: 3, stage: "load_costs", sql_state: "57014" });
+    reporter!({ ...failure, sqlState: "42P01" });
+    expect(logger.debug).toHaveBeenCalledWith("dropship.listing_settings.rules_conversion_cost_read_failed", expect.objectContaining({
+      outcome: "failed", error_class: "fatal", stage: "load_costs", sql_state: "42P01" }));
+    expect(logger.warn).toHaveBeenCalledTimes(1);
   });
 
   it("builds the gate per factory call, not per module: production calls it once per process", async () => {

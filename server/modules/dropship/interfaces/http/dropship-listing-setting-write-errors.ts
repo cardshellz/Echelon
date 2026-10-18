@@ -1,6 +1,7 @@
 import { ZodError } from "zod";
 import { LISTING_SETTING_WRITE_ERROR_CODES } from "../../../../../shared/dropship/listing-setting-writes";
 import { listingSettingIssues } from "../../application/dropship-listing-setting-write-support";
+import { CONVERSION_CHECK_RETRY_AFTER_SECONDS } from "../../application/dropship-listing-settings-service";
 import { DropshipError } from "../../domain/errors";
 
 /**
@@ -27,11 +28,15 @@ const CODES_BY_STATUS: ReadonlyArray<readonly [number, readonly string[]]> = [
   [404, [
     "DROPSHIP_STORE_CONNECTION_REQUIRED", "DROPSHIP_LISTING_SETTINGS_PRODUCT_NOT_FOUND", "DROPSHIP_LISTING_SETTINGS_CATEGORY_NOT_FOUND",
     "DROPSHIP_LISTING_PRICE_NOT_AVAILABLE", "DROPSHIP_PRICING_REVIEW_NOT_FOUND",
+    // The one-time notice's [Got it] (PR 11e1, plan 3.4): no system conversion with that id on this store.
+    LISTING_SETTING_WRITE_ERROR_CODES.conversionNoticeNotFound,
   ]],
   [409, [
     "DROPSHIP_IDEMPOTENCY_CONFLICT", "DROPSHIP_PRODUCT_LISTING_SETTINGS_VERSION_CONFLICT",
     "DROPSHIP_CATEGORY_LISTING_SETTINGS_VERSION_CONFLICT", "DROPSHIP_LISTING_PRICE_VERSION_CONFLICT",
     "DROPSHIP_LISTING_PRICES_MOVED", "DROPSHIP_LISTING_SETTINGS_OLDER_RULES_PRESENT",
+    // The rules conversion's apply (PR 11, plan 3.4): the plan recomputed under the store lock is not the one shown.
+    LISTING_SETTING_WRITE_ERROR_CODES.conversionChanged,
     // The store was paused or disconnected while the eBay step ran, or has no token for it (the setup routes' 409s).
     "DROPSHIP_STORE_CONNECTION_NOT_CONNECTED", "DROPSHIP_EBAY_LISTING_SETUP_ACCESS_TOKEN_REQUIRED",
     // Card Shellz shipping cannot back a new shipping policy until the setup is fixed (the capability check, W2's 409s).
@@ -48,6 +53,8 @@ const CODES_BY_STATUS: ReadonlyArray<readonly [number, readonly string[]]> = [
     "DROPSHIP_LISTING_PRICE_WOULD_BE_LOST", "DROPSHIP_LISTING_PRICE_OUTSIDE_LIMIT", "DROPSHIP_PRICING_RULES_NOT_CONFIGURED",
     "DROPSHIP_LISTING_PRICE_RELEASE_LIMIT", "DROPSHIP_LISTING_SETTINGS_EBAY_ONLY", "DROPSHIP_LISTING_SETTINGS_TOO_LARGE",
     "DROPSHIP_LISTING_SETTINGS_BULK_TOO_LARGE",
+    // The rules conversion's apply (PR 11, plan D9b): a listed size that can be sent today would be blocked after the move.
+    LISTING_SETTING_WRITE_ERROR_CODES.conversionWouldBlockListing,
     // eBay values the vendor chose that eBay or the stored contract refuses.
     "DROPSHIP_EBAY_LISTING_SETUP_SELECTION_INVALID", "DROPSHIP_EBAY_FULFILLMENT_POLICY_INCOMPATIBLE",
     "DROPSHIP_EBAY_STORE_CATEGORY_INVALID", "DROPSHIP_EBAY_CATEGORY_RULE_INVALID", "DROPSHIP_EBAY_CATEGORY_MARKETPLACE_UNSUPPORTED",
@@ -66,6 +73,8 @@ const CODES_BY_STATUS: ReadonlyArray<readonly [number, readonly string[]]> = [
     "DROPSHIP_LISTING_SETTINGS_BUSY", "DROPSHIP_EBAY_FULFILLMENT_ROUTING_UNAVAILABLE",
     "DROPSHIP_EBAY_TOKEN_REFRESH_FAILED", "DROPSHIP_EBAY_REFRESH_LOCK_UNAVAILABLE", "DROPSHIP_CREDENTIAL_CHANGED",
     "DROPSHIP_EBAY_TOKEN_REFRESH_INVALID_RESPONSE", "DROPSHIP_EBAY_OAUTH_NOT_CONFIGURED",
+    // The rules conversion's apply (PR 11, plan 3.4, D14): the .ops costs could not be read; Retry-After from the error.
+    LISTING_SETTING_WRITE_ERROR_CODES.conversionCheckUnavailable,
   ]],
   // A broken contract: a human looks, nothing was saved.
   [500, ["DROPSHIP_LISTING_SETTINGS_INVARIANT_FAILED", "DROPSHIP_LISTING_SETTINGS_REPLAY_INCOMPLETE", "DROPSHIP_LISTING_PRICE_INVARIANT_FAILED"]],
@@ -89,6 +98,16 @@ export const LISTING_SETTINGS_INTERNAL_MESSAGE = "Something went wrong. We could
 const BUSY_CODE = LISTING_SETTING_WRITE_ERROR_CODES.busy;
 /** When a busy answer names no wait of its own. */
 export const DEFAULT_RETRY_AFTER_SECONDS = 5;
+/**
+ * The codes answered with `Retry-After`, and the wait when the error names
+ * none of its own: a busy write's 5 seconds, and a cost read that failed
+ * the rules conversion's apply the check's minute (plan 3.4, D14), so the
+ * page never retries it sooner than the dry run would.
+ */
+const RETRY_AFTER_DEFAULTS: ReadonlyMap<string, number> = new Map([
+  [BUSY_CODE, DEFAULT_RETRY_AFTER_SECONDS],
+  [LISTING_SETTING_WRITE_ERROR_CODES.conversionCheckUnavailable, CONVERSION_CHECK_RETRY_AFTER_SECONDS],
+]);
 const MAX_RETRY_AFTER_SECONDS = 60;
 const MAX_LISTED_ITEMS = 100;
 /** A fatal failure's context on its ERROR line is cut at this many JSON characters. */
@@ -99,7 +118,7 @@ export interface ListingSettingWriteErrorAnswer {
   errorClass: ListingSettingWriteErrorClass;
   code: string;
   body: { error: { code: string; message: string; context?: Record<string, unknown> } };
-  /** Set only for a busy answer: the `Retry-After` header. */
+  /** Set only for a busy answer or a conversion's cost read failure: the `Retry-After` header. */
   retryAfterSeconds: number | null;
   /** The failure's own message, for the ERROR line of a fatal failure only; never sent. */
   internalMessage: string | null;
@@ -132,7 +151,7 @@ export function listingSettingWriteErrorAnswer(error: unknown): ListingSettingWr
     status: mapped,
     errorClass: classOf(error.context?.classification) ?? classForStatus(mapped),
     code: error.code,
-    retryAfterSeconds: error.code === BUSY_CODE ? retryAfterSeconds(error.context?.retryAfterSeconds) : null,
+    retryAfterSeconds: retryAfterFor(error),
     internalMessage: null,
     internalContext: null,
     body: { error: { code: error.code, message: error.message, ...(context ? { context } : {}) } },
@@ -189,9 +208,13 @@ function classForStatus(status: number): ListingSettingWriteErrorClass {
   return status === 429 || status === 502 || status === 503 ? "transient" : "permanent";
 }
 
-function retryAfterSeconds(value: unknown): number {
+/** The error's own wait when it names one in bounds, else its code's default; null for a code answered without one. */
+function retryAfterFor(error: DropshipError): number | null {
+  const fallback = RETRY_AFTER_DEFAULTS.get(error.code);
+  if (fallback === undefined) return null;
+  const value = error.context?.retryAfterSeconds;
   return typeof value === "number" && Number.isSafeInteger(value) && value > 0 && value <= MAX_RETRY_AFTER_SECONDS
-    ? value : DEFAULT_RETRY_AFTER_SECONDS;
+    ? value : fallback;
 }
 
 /** Scalars that may leave the server: ids, counts, flags and our own enum words. */

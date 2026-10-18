@@ -19,7 +19,9 @@ describe("shared eBay issue actions", () => {
     ["CANONICAL_CHANNEL_QUANTITY_BLOCKED","edit_listing",false],
     ["CANONICAL_CHANNEL_QUANTITY_TARGET_AMBIGUOUS","edit_listing",false],
     ["CANONICAL_CHANNEL_QUANTITY_TARGET_DUPLICATE","edit_listing",false],
-    ["EBAY_SYNC_RESPONSE_EVIDENCE_REQUIRED","check_recovery",false],
+    ["EBAY_SYNC_RESPONSE_EVIDENCE_REQUIRED","retry_sync",true],
+    ["PUBLICATION_PRIOR_OUTCOME_UNRESOLVED","retry_sync",true],
+    ["PUBLICATION_REQUEST_EVIDENCE_INCOMPLETE","retry_sync",true],
     ["EBAY_PUBLICATION_RESPONSE_UNCERTAIN","check_recovery",false],
     ["EBAY_PUBLICATION_PRIOR_WORK_REQUIRED","check_status",false],
     ["EBAY_PUBLICATION_RETRY_NOT_ALLOWED","check_status",false],
@@ -39,6 +41,7 @@ describe("shared eBay issue actions", () => {
     ["EBAY_SYNC_ACCOUNT_CHANGED","reconnect",false],
     ["EBAY_AUTH_RESPONSE_INVALID","reconnect",false],
     ["EBAY_QUANTITY_DAILY_LIMIT","check_status",false],
+    ["EBAY_SHIPPING_POLICY_REJECTED","edit_listing",false],
     ["PUBLICATION_GLOBAL_DISABLED","edit_listing",false],
     ["EBAY_REGISTRATION_READ_TIMEOUT","retry_sync",true],
     ["EBAY_SYNC_ADMISSION_UNSAVED","retry_sync",true],
@@ -162,7 +165,8 @@ describe("shared eBay issue actions", () => {
     expect(changed.action).toEqual({ kind: "review_mapping", label: "Review publication" });
     expect(changed.nextStep).toContain("every SKU");
     const unknown = resolveEbayListingIssue({ code: "EBAY_SYNC_RESPONSE_EVIDENCE_REQUIRED", productId: 232 });
-    expect(unknown.action.kind).toBe("check_recovery");
+    expect(unknown.action).toEqual({ kind: "retry_sync", label: "Sync" });
+    expect(unknown.diagnosticAction).toEqual({ kind: "check_recovery", label: "Saved request details" });
     expect(resolveEbayListingIssue({ code: "EBAY_SYNC_ACCOUNT_CHANGED" }).action.href).toBe("/channels/ebay#connection");
   });
   it("redacts credentials and bounded provider prose without interpreting it as instructions", () => {

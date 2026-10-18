@@ -5,7 +5,7 @@ import { performance } from "node:perf_hooks";
 import { setFlagsFromString } from "node:v8";
 import { runInNewContext } from "node:vm";
 import { config } from "dotenv";
-import pg, { type Pool } from "pg";
+import pg, { type Pool, type PoolClient } from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { SaveListingPriceInput } from "../../../../../shared/dropship/listing-price";
 import type { ProductListingSettingPatch } from "../../../../../shared/dropship/listing-setting-values";
@@ -27,15 +27,37 @@ import { DropshipListingCategorySettingsService } from "../../application/dropsh
 import { DropshipListingPriceChangesService } from "../../application/dropship-listing-price-changes-service";
 import { DropshipListingCategoryMovesService } from "../../application/dropship-listing-category-moves-service";
 import { DropshipCategoryMarksJobService } from "../../application/dropship-category-marks-job-service";
+import { DropshipRulesConversionJobService, RULES_CONVERSION_FAILED_EVENT } from "../../application/dropship-rules-conversion-job-service";
 import { ListingSettingHeavyWriteGate } from "../../application/dropship-listing-setting-write-support";
 import type { ListingSettingEbayPort } from "../../application/dropship-listing-setting-ebay-values";
 import type { DropshipEbayListingSetupDiscovery } from "../../application/dropship-ebay-listing-setup-service";
 import { DropshipPricingRulesService } from "../../application/dropship-pricing-rules-service";
+import { RULES_CONVERSION_PLANNER_VERSION, checkRulesConversion } from "../../application/dropship-listing-rules-conversion";
+import { DropshipListingRulesConversionNoticeService } from "../../application/dropship-listing-rules-conversion-notice-service";
+import { DropshipListingSettingsService } from "../../application/dropship-listing-settings-service";
+import {
+  DropshipListingRulesConversionService,
+  RULES_CONVERSION_APPLIED_ACTION,
+  convertInTransaction,
+  rulesConversionRequestHash,
+  rulesConversionSystemKey,
+} from "../../application/dropship-listing-rules-conversion-service";
+import { olderGroupRuleCounts } from "../../application/dropship-listing-settings-facts";
 import type { ListingSettingWriteTransaction, StoredPriceChangeReview } from "../../application/dropship-listing-setting-writes";
 import { DropshipError } from "../../domain/errors";
-import { listingSettingChildKey, listingSettingRequestHash } from "../../domain/listing-setting-values";
+import { listingConversionChildKey, listingSettingChildKey, listingSettingRequestHash } from "../../domain/listing-setting-values";
 import { PgDropshipListingPriceRepository } from "../../infrastructure/dropship-listing-price.repository";
-import { PgDropshipListingContentRepository } from "../../infrastructure/dropship-listing-content.repository";
+import { PgDropshipListingContentRepository, saveContentProfileWithClient } from "../../infrastructure/dropship-listing-content.repository";
+import { saveEbayCategoryRulesProfileWithClient } from "../../infrastructure/dropship-ebay-category-rules.repository";
+import {
+  LISTING_RULE_CONVERSION_KEY_CONSTRAINT,
+  findRuleConversionByKeyWithClient,
+  hasRuleConversionWithClient,
+  insertRuleConversionWithClient,
+  type ListingRuleConversionInsert,
+} from "../../infrastructure/dropship-listing-rule-conversions.writer";
+import { savePricingProfileWithClient } from "../../infrastructure/dropship-pricing-profile.writer";
+import { saveProductListingSettingsPerProductWithClient } from "../../infrastructure/dropship-product-listing-settings.repository";
 import { PgDropshipEbayListingPolicyOverrideRepository } from "../../infrastructure/dropship-ebay-listing-policy-override.repository";
 import {
   PgDropshipListingSettingWritesRepository,
@@ -43,6 +65,12 @@ import {
 } from "../../infrastructure/dropship-listing-setting-writes.repository";
 import { PgDropshipPricingRulesRepository } from "../../infrastructure/dropship-pricing-rules.repository";
 import { PgDropshipCategoryMarksJobSource } from "../../infrastructure/dropship-category-marks-job.source";
+import { readListingResolverInputs } from "../../infrastructure/dropship-listing-resolver-inputs.reader";
+import { PgDropshipListingRulesConversionRepository } from "../../infrastructure/dropship-listing-rules-conversion.repository";
+import { PgDropshipListingSettingsRepository } from "../../infrastructure/dropship-listing-settings.repository";
+import { PgDropshipListingRulesConversionNoticeRepository } from "../../infrastructure/dropship-listing-rules-conversion-notice.repository";
+import { PgDropshipRulesConversionJobSource } from "../../infrastructure/dropship-rules-conversion-job.source";
+import { LISTING_RULE_CONVERSIONS_MIGRATION_FILE } from "../fixtures/listing-rule-conversions-migration";
 
 vi.mock("../../../../db", () => ({ pool: {}, db: {} }));
 config({ path: resolve(process.cwd(), ".env.test") });
@@ -75,6 +103,8 @@ const OBJECTS: ReadonlySet<string> = new Set([
   "dropship.dropship_product_listing_settings",
   "dropship.dropship_category_listing_setting_revisions", "dropship.dropship_category_listing_settings",
   "dropship.dropship_product_category_seen",
+  // PR 11's conversion record (plan section 12) and its guard.
+  "dropship.dropship_listing_rule_conversions",
   "dropship.guard_listing_price_revision_immutable", "dropship.guard_listing_price_setting_coherence",
   "dropship.guard_pricing_profile_coherence", "dropship.guard_content_revision_immutable",
   "dropship.guard_content_profile_coherence", "dropship.guard_listing_content_coherence",
@@ -83,6 +113,7 @@ const OBJECTS: ReadonlySet<string> = new Set([
   "dropship.guard_product_listing_setting_request_append_only",
   "dropship.guard_category_listing_setting_revision_immutable", "dropship.guard_category_listing_setting_coherence",
   "dropship.guard_product_category_seen",
+  "dropship.guard_listing_rule_conversion",
   "catalog.products", "catalog.product_variants", "catalog.product_categories", "catalog.product_line_products", "catalog.product_assets",
   "ebay.ebay_category_mappings", "channels.channels", "public.shopify_variants", "public.app_settings",
   "membership.plans", "membership.member_subscriptions", "membership.plan_channel_access",
@@ -101,6 +132,8 @@ const REAL_MIGRATIONS = [
   "0740_dropship_pricing_review_kind.sql",
   // W7's apply ledger (plan PR 9, 9.3): the review id, its pairing CHECK, foreign key and one-apply index.
   "0750_dropship_price_change_apply_ledger.sql",
+  // PR 11's conversion record (plan section 12), named by its fixture's constant: its number changes on adoption.
+  LISTING_RULE_CONVERSIONS_MIGRATION_FILE,
 ];
 
 const MEMBER = "member-1";
@@ -3157,5 +3190,1431 @@ describeDatabase.sequential("listing-settings writes on PostgreSQL (plan PR 9)",
       expect(await count("dropship.dropship_product_category_seen", "store_connection_id = $1 AND category_id = $2 AND seen_at = $3",
         [STORE, SLEEVES, LATER])).toBe(PRODUCTS);
     }, BULK_TEST_TIMEOUT_MS);
+  });
+
+  describe("PR 11's conversion record and its writers (plan section 12, 7.A.2 rows 4-10, 7.A.3 PG)", () => {
+    const RECORDS = "dropship_listing_rule_conversions";
+    const RECORDS_TABLE = `dropship.${RECORDS}`;
+    const CONVERSION_KEY = "ls-convert:0b8e7c1d-5f4a-4c3b-9a2e-1d0c9b8a7f6e";
+    const SYSTEM_KEY = `rules-conversion:${STORE}`;
+    const HASHES = { requestHash: "a".repeat(64), planHash: "b".repeat(64), writesHash: "c".repeat(64) };
+    const RECIPE = { basis: "catalog_retail", markupBps: 2_000, flatCents: 0, rounding: "up_99" } as const;
+    const LATER_SEEN = new Date("2026-10-13T08:00:00.000Z");
+    type Client = Pick<PoolClient, "query">;
+
+    /** One transaction on one pooled client, as the conversion will run (11c2): BEGIN, the work, COMMIT; ROLLBACK on any failure. */
+    async function inTransaction<T>(work: (client: Client) => Promise<T>, repositoryPool: Pool = scopedPool()): Promise<T> {
+      const client = await repositoryPool.connect();
+      try {
+        await client.query("BEGIN");
+        const result = await work(client);
+        await client.query("COMMIT");
+        return result;
+      } catch (error) {
+        await client.query("ROLLBACK");
+        throw error;
+      } finally {
+        client.release();
+      }
+    }
+    const record = (overrides: Partial<ListingRuleConversionInsert> = {}): ListingRuleConversionInsert => ({
+      vendorId: VENDOR, storeConnectionId: STORE, idempotencyKey: CONVERSION_KEY, ...HASHES, clean: false, changedSizeCount: 3,
+      categoryCount: 1, productCount: 2, pricingGroupsRemoved: 1, contentGroupsRemoved: 1, ebayRulesRemoved: 1,
+      actor: { actorType: "vendor", actorId: MEMBER }, now: NOW, ...overrides });
+    const systemRecord = (overrides: Partial<ListingRuleConversionInsert> = {}) => record({ idempotencyKey: SYSTEM_KEY, clean: true,
+      changedSizeCount: 0, actor: { actorType: "system", actorId: "rules-conversion-job" }, ...overrides });
+    /** A row written straight to the table (no writer), so the database's own rules are what refuses it. */
+    function rawRecord(fields: Record<string, unknown> = {}) {
+      const row: Record<string, unknown> = { vendor_id: VENDOR, store_connection_id: STORE, idempotency_key: `ls-convert:raw-${randomUUID()}`,
+        request_hash: HASHES.requestHash, plan_hash: HASHES.planHash, writes_hash: HASHES.writesHash, clean: true, changed_size_count: 0,
+        category_count: 0, product_count: 0, pricing_groups_removed: 0, content_groups_removed: 0, ebay_rules_removed: 0,
+        actor_type: "system", actor_id: "rules-conversion-job", created_at: NOW, notice_seen_at: null, notice_seen_by: null, ...fields };
+      const columns = Object.keys(row);
+      return execute(`INSERT INTO ${RECORDS_TABLE} (${columns.join(", ")}) VALUES (${columns.map((_, index) => `$${index + 1}`).join(", ")})
+        RETURNING id`, Object.values(row));
+    }
+    async function pgError(promise: Promise<unknown>): Promise<{ code?: string; constraint?: string; message: string }> {
+      const error = await promise.then(() => null, (reason: unknown) => reason);
+      expect(error).toBeInstanceOf(Error);
+      expect(error).not.toBeInstanceOf(DropshipError);
+      return error as { code?: string; constraint?: string; message: string };
+    }
+    async function recordsShape() {
+      const constraints = await pool.query(`SELECT conname, contype, convalidated, pg_get_constraintdef(oid) AS definition
+        FROM pg_constraint WHERE conrelid = $1::regclass ORDER BY conname`, [`"${schema}"."${RECORDS}"`]);
+      const indexes = await pool.query(`SELECT indexname, indexdef FROM pg_indexes WHERE schemaname = $1 AND tablename = $2 ORDER BY indexname`,
+        [schema, RECORDS]);
+      const triggers = await pool.query(`SELECT tgname, tgtype, tgenabled FROM pg_trigger WHERE tgrelid = $1::regclass AND NOT tgisinternal
+        ORDER BY tgname`, [`"${schema}"."${RECORDS}"`]);
+      return { constraints: constraints.rows, indexes: indexes.rows, triggers: triggers.rows };
+    }
+    const allRecords = async () => (await execute(`SELECT * FROM ${RECORDS_TABLE} ORDER BY id`)).rows;
+
+    it("refuses by its CHECKs, 23514 each, what a record must never hold: D1 first, and accepts the rows the plan writes", async () => {
+      for (const [label, fields, purpose] of [
+        ["a system row that is not clean (D1)", { clean: false }, "system_clean_chk"],
+        ["a clean system row that changed a size", { changed_size_count: 1 }, "clean_chk"],
+        ["a clean vendor row that changed a size", { actor_type: "vendor", actor_id: MEMBER, changed_size_count: 2 }, "clean_chk"],
+        ["an admin actor", { actor_type: "admin" }, "actor_chk"],
+        ["a blank actor", { actor_id: "  " }, "actor_id_chk"],
+        ["a short key", { idempotency_key: "short" }, "key_chk"],
+        ["an upper-case plan hash", { plan_hash: "B".repeat(64) }, "hash_chk"],
+        ["10,001 products", { product_count: 10_001 }, "count_chk"],
+        ["a negative category count", { category_count: -1 }, "count_chk"],
+        ["101 eBay rules removed", { ebay_rules_removed: 101 }, "removed_chk"],
+        ["a vendor row with a notice", { actor_type: "vendor", actor_id: MEMBER, clean: false, changed_size_count: 1, notice_seen_at: NOW,
+          notice_seen_by: MEMBER }, "notice_chk"],
+        ["a notice with no reader", { notice_seen_at: NOW }, "notice_chk"],
+        ["a notice read by a blank reader", { notice_seen_at: NOW, notice_seen_by: " " }, "notice_chk"],
+      ] as const) {
+        const error = await pgError(rawRecord(fields));
+        expect({ label, code: error.code, constraint: error.constraint })
+          .toEqual({ label, code: "23514", constraint: `dropship_listing_rule_conversion_${purpose}` });
+      }
+      // The wrapper answers a CHECK as the fatal INVARIANT_FAILED, as for every CHECK (plan 3.4).
+      expect(mapListingSettingWriteError(await pgError(rawRecord({ clean: false })))).toMatchObject({
+        code: "DROPSHIP_LISTING_SETTINGS_INVARIANT_FAILED",
+        context: { constraint: "dropship_listing_rule_conversion_system_clean_chk", classification: "fatal" } });
+      // Another vendor's store: the owner foreign key (23503).
+      const owner = await pgError(rawRecord({ store_connection_id: OTHER_VENDOR_STORE }));
+      expect({ code: owner.code, constraint: owner.constraint }).toEqual({ code: "23503", constraint: "dropship_listing_rule_conversion_owner_fk" });
+      expect(await count(RECORDS_TABLE)).toBe(0);
+
+      // What the plan writes: a clean system row, a vendor row that is not clean, a vendor row that is, a system row seen once.
+      await rawRecord();
+      await rawRecord({ actor_type: "vendor", actor_id: MEMBER, clean: false, changed_size_count: 10_000, category_count: 10_000,
+        product_count: 10_000, pricing_groups_removed: 100, content_groups_removed: 100, ebay_rules_removed: 100 });
+      await rawRecord({ actor_type: "vendor", actor_id: MEMBER });
+      await rawRecord({ notice_seen_at: NOW, notice_seen_by: MEMBER });
+      expect(await count(RECORDS_TABLE)).toBe(4);
+    });
+
+    it("refuses every DELETE, and every UPDATE but marking a system row's notice seen once (the guard, 23514)", async () => {
+      const vendorId = (await rawRecord({ actor_type: "vendor", actor_id: MEMBER, clean: false, changed_size_count: 2 })).rows[0].id as string;
+      const systemId = (await rawRecord()).rows[0].id as string;
+      const otherSystemId = (await rawRecord({ store_connection_id: OTHER_VENDOR_STORE, vendor_id: 11 })).rows[0].id as string;
+      const update = (id: string, set: string, values: unknown[] = []) =>
+        execute(`UPDATE ${RECORDS_TABLE} SET ${set} WHERE id = $1`, [id, ...values]);
+      // Each attempt runs only when its turn comes, one at a time.
+      const refusals: Array<[string, () => Promise<unknown>]> = [
+        ["a vendor row's notice", () => update(vendorId, "notice_seen_at = $2, notice_seen_by = $3", [NOW, MEMBER])],
+        ["a system row's notice time alone", () => update(systemId, "notice_seen_at = $2", [NOW])],
+        ["a system row's notice with its plan hash", () => update(systemId, "notice_seen_at = $2, notice_seen_by = $3, plan_hash = $4",
+          [NOW, MEMBER, "d".repeat(64)])],
+        ["a system row's clean flag", () => update(systemId, "clean = false")],
+        ["a system row's counts", () => update(systemId, "category_count = 1")],
+        ["a system row's key", () => update(systemId, "idempotency_key = 'rules-conversion:other'")],
+        ["a no-op update", () => update(vendorId, "actor_id = actor_id")],
+        ["a delete of a vendor row", () => execute(`DELETE FROM ${RECORDS_TABLE} WHERE id = $1`, [vendorId])],
+        ["a delete of a system row", () => execute(`DELETE FROM ${RECORDS_TABLE} WHERE id = $1`, [systemId])],
+      ];
+      for (const [label, attempt] of refusals) {
+        const error = await pgError(attempt());
+        expect({ label, code: error.code }).toEqual({ label, code: "23514" });
+      }
+      const before = await allRecords();
+
+      // The one change allowed: the notice, null to values, on a system row.
+      expect((await update(systemId, "notice_seen_at = $2, notice_seen_by = $3", [NOW, MEMBER])).rowCount).toBe(1);
+      // Once: seeing it again, or clearing it, is refused.
+      for (const [set, values] of [["notice_seen_at = $2, notice_seen_by = $3", [LATER_SEEN, "member-2"]],
+        ["notice_seen_at = NULL, notice_seen_by = NULL", []]] as const) {
+        expect((await pgError(update(systemId, set, [...values]))).code).toBe("23514");
+      }
+      // Its message names what the guard allows; the wrapper maps the trigger's 23514 to the fatal INVARIANT_FAILED.
+      const again = await pgError(update(systemId, "notice_seen_at = $2, notice_seen_by = $3", [LATER_SEEN, "member-2"]));
+      expect(again.message).toBe("A system conversion's notice is marked seen once, and nothing else changes");
+      expect(mapListingSettingWriteError(again)).toMatchObject({ code: "DROPSHIP_LISTING_SETTINGS_INVARIANT_FAILED",
+        context: { sqlState: "23514", classification: "fatal" } });
+      expect((await pgError(execute(`DELETE FROM ${RECORDS_TABLE} WHERE id = $1`, [systemId]))).message)
+        .toBe("Listing rule conversions are kept; they cannot be deleted");
+
+      const after = await allRecords();
+      expect(after).toEqual(before.map((row: Row) => String(row.id) === String(systemId)
+        ? { ...row, notice_seen_at: NOW, notice_seen_by: MEMBER } : row));
+      expect(after.find((row: Row) => String(row.id) === String(otherSystemId))).toMatchObject({ notice_seen_at: null });
+    });
+
+    it("re-runs over existing rows: no error, every constraint validated, the guard in place, the rows as they were", async () => {
+      await rawRecord();
+      await rawRecord({ actor_type: "vendor", actor_id: MEMBER, clean: false, changed_size_count: 4, notice_seen_at: null });
+      const shapeBefore = await recordsShape();
+      const rowsBefore = await allRecords();
+
+      await execute(readFileSync(resolve(process.cwd(), "migrations", LISTING_RULE_CONVERSIONS_MIGRATION_FILE), "utf8"));
+
+      const shapeAfter = await recordsShape();
+      expect(shapeAfter).toEqual(shapeBefore);
+      expect(shapeAfter.constraints.map((constraint: Row) => constraint.conname)).toEqual([
+        "dropship_listing_rule_conversion_actor_chk", "dropship_listing_rule_conversion_actor_id_chk",
+        "dropship_listing_rule_conversion_clean_chk", "dropship_listing_rule_conversion_count_chk",
+        "dropship_listing_rule_conversion_hash_chk", "dropship_listing_rule_conversion_key_chk",
+        LISTING_RULE_CONVERSION_KEY_CONSTRAINT, "dropship_listing_rule_conversion_notice_chk",
+        "dropship_listing_rule_conversion_owner_fk", "dropship_listing_rule_conversion_removed_chk",
+        "dropship_listing_rule_conversion_system_clean_chk", `${RECORDS}_pkey`,
+      ]);
+      expect(shapeAfter.constraints.every((constraint: Row) => constraint.convalidated === true)).toBe(true);
+      expect(shapeAfter.indexes.map((index: Row) => index.indexname)).toEqual([
+        "dropship_listing_rule_conversion_key_uk", "dropship_listing_rule_conversion_store_idx", `${RECORDS}_pkey`]);
+      expect(shapeAfter.indexes.find((index: Row) => index.indexname === "dropship_listing_rule_conversion_store_idx")?.indexdef)
+        .toMatch(/USING btree \(store_connection_id, id\)$/);
+      expect(shapeAfter.triggers.map((trigger: Row) => [trigger.tgname, trigger.tgenabled])).toEqual([["listing_rule_conversion_guard", "O"]]);
+      expect(await allRecords()).toEqual(rowsBefore);
+      // The guard still refuses after the re-run.
+      expect((await pgError(execute(`DELETE FROM ${RECORDS_TABLE}`))).code).toBe("23514");
+    });
+
+    it("records a conversion through its writer, claims the key (23505 is the key conflict), and finds it by key and by store", async () => {
+      const inserted = await inTransaction((client) => insertRuleConversionWithClient(client, record()));
+      expect(inserted).toMatchObject({ vendorId: VENDOR, storeConnectionId: STORE, idempotencyKey: CONVERSION_KEY, clean: false,
+        changedSizeCount: 3, actorType: "vendor", actorId: MEMBER, createdAt: NOW.toISOString(), noticeSeenAt: null, noticeSeenBy: null });
+      expect(Number.isSafeInteger(inserted.id)).toBe(true);
+
+      // The key's real constraint name is the writer's, so a concurrent first use is the permanent 409.
+      const raw = await pgError(rawRecord({ idempotency_key: CONVERSION_KEY, actor_type: "vendor", actor_id: MEMBER }));
+      expect({ code: raw.code, constraint: raw.constraint }).toEqual({ code: "23505", constraint: LISTING_RULE_CONVERSION_KEY_CONSTRAINT });
+      const conflict = await expectDropshipError(inTransaction((client) => insertRuleConversionWithClient(client,
+        record({ ...HASHES, planHash: "e".repeat(64) }))), "DROPSHIP_IDEMPOTENCY_CONFLICT");
+      expect(conflict.context).toMatchObject({ constraint: LISTING_RULE_CONVERSION_KEY_CONSTRAINT, classification: "permanent" });
+      // The same key is another vendor's to use.
+      await inTransaction((client) => insertRuleConversionWithClient(client, record({ vendorId: 11, storeConnectionId: OTHER_VENDOR_STORE })));
+      expect(await count(RECORDS_TABLE)).toBe(2);
+
+      const found = await inTransaction(async (client) => ({
+        own: await findRuleConversionByKeyWithClient(client, { vendorId: VENDOR, idempotencyKey: CONVERSION_KEY }),
+        missing: await findRuleConversionByKeyWithClient(client, { vendorId: VENDOR, idempotencyKey: SYSTEM_KEY }),
+        store22: await hasRuleConversionWithClient(client, { storeConnectionId: STORE }),
+        store24: await hasRuleConversionWithClient(client, { storeConnectionId: 24 }),
+      }));
+      expect(found).toEqual({ own: inserted, missing: null, store22: true, store24: false });
+
+      // A system conversion on another store, then its notice: the record reads it back.
+      await addVendorStore(24);
+      const system = await inTransaction((client) => insertRuleConversionWithClient(client, systemRecord({ storeConnectionId: 24,
+        idempotencyKey: "rules-conversion:24" })));
+      await execute(`UPDATE ${RECORDS_TABLE} SET notice_seen_at = $2, notice_seen_by = $3 WHERE id = $1`, [system.id, NOW, MEMBER]);
+      expect(await inTransaction((client) => findRuleConversionByKeyWithClient(client, { vendorId: VENDOR, idempotencyKey: "rules-conversion:24" })))
+        .toEqual({ ...system, noticeSeenAt: NOW.toISOString(), noticeSeenBy: MEMBER });
+      expect(await inTransaction((client) => hasRuleConversionWithClient(client, { storeConnectionId: 24 }))).toBe(true);
+    });
+
+    it("saves the pricing profile with its groups emptied: revision, head and audit row as the system, and no size price row (D11)", async () => {
+      const grouped = { defaultRecipe: D1.defaultRecipe, groups: [{ id: "toploaders", name: "Toploaders rule", priority: 10,
+        scope: { type: "category", category: "Toploaders" }, recipe: RECIPE }] };
+      const emptied = { defaultRecipe: D1.defaultRecipe, groups: [] };
+      const groupedRevision = await setStoreDefault(grouped);
+      // A typed price and W1's rule adoption would both be per-size rows; the conversion must leave every one as it is.
+      await typePrice(101, 1_299, "pg-convert:typed-101");
+      const sizesBefore = (await execute("SELECT * FROM dropship.dropship_listing_price_revisions ORDER BY id")).rows;
+      const settingsBefore = (await execute("SELECT * FROM dropship.dropship_listing_price_settings ORDER BY product_variant_id")).rows;
+      const auditBefore = await count("dropship.dropship_audit_events");
+      const target = { vendorId: VENDOR, storeConnectionId: STORE, actorId: "rules-conversion-job", actorType: "system" as const };
+
+      const saved = await inTransaction(async (client) => {
+        const conversion = await insertRuleConversionWithClient(client, systemRecord());
+        const profile = await savePricingProfileWithClient(client, target,
+          { expectedRevisionId: groupedRevision, profile: emptied, conversionId: conversion.id, now: NOW });
+        return { conversion, profile };
+      });
+
+      expect(saved.profile).toEqual({ revisionId: expect.any(Number), previousRevisionId: groupedRevision });
+      const revision = await execute(`SELECT previous_revision_id, profile, actor_id, created_at FROM dropship.dropship_pricing_profile_revisions
+        WHERE id = $1`, [saved.profile.revisionId]);
+      expect(revision.rows).toEqual([{ previous_revision_id: groupedRevision, profile: emptied, actor_id: "rules-conversion-job", created_at: NOW }]);
+      expect((await execute("SELECT revision_id FROM dropship.dropship_pricing_profiles WHERE store_connection_id = $1", [STORE])).rows)
+        .toEqual([{ revision_id: saved.profile.revisionId }]);
+      const audits = await execute(`SELECT entity_type, entity_id, actor_type, actor_id, severity, payload, created_at
+        FROM dropship.dropship_audit_events WHERE event_type = 'pricing_profile_saved'`);
+      // The entity is the new revision, as W1's pricing_rules_applied rows name it: one id space under dropship_pricing_profile.
+      expect(audits.rows).toEqual([{ entity_type: "dropship_pricing_profile", entity_id: String(saved.profile.revisionId), actor_type: "system",
+        actor_id: "rules-conversion-job", severity: "info", created_at: NOW, payload: { conversionId: saved.conversion.id,
+          revisionId: saved.profile.revisionId, previousRevisionId: groupedRevision, before: grouped, after: emptied } }]);
+      expect(await count("dropship.dropship_audit_events")).toBe(auditBefore + 1);
+      expect((await execute("SELECT * FROM dropship.dropship_listing_price_revisions ORDER BY id")).rows).toEqual(sizesBefore);
+      expect((await execute("SELECT * FROM dropship.dropship_listing_price_settings ORDER BY product_variant_id")).rows).toEqual(settingsBefore);
+      expect(await count("dropship.dropship_pricing_applications")).toBe(0);
+
+      // A stale expected revision is W1's 409 before any INSERT; the transaction rolls back its conversion row with it.
+      const revisionsBefore = await count("dropship.dropship_pricing_profile_revisions");
+      await expectDropshipError(inTransaction(async (client) => {
+        const conversion = await insertRuleConversionWithClient(client, systemRecord({ storeConnectionId: STORE,
+          idempotencyKey: "rules-conversion:22-again" }));
+        return savePricingProfileWithClient(client, target, { expectedRevisionId: groupedRevision, profile: emptied,
+          conversionId: conversion.id, now: NOW });
+      }), "DROPSHIP_PRICING_REVIEW_STALE");
+      expect(await count("dropship.dropship_pricing_profile_revisions")).toBe(revisionsBefore);
+      expect(await count(RECORDS_TABLE)).toBe(1);
+      expect(await count("dropship.dropship_audit_events")).toBe(auditBefore + 1);
+    });
+
+    it("saves the description templates and the eBay rules document with the actor type it is given (D11)", async () => {
+      const template = { introduction: "Hello", footer: "" };
+      const groupedContent = { defaultTemplate: template, groups: [{ id: "toploaders", name: "Toploaders text", priority: 10,
+        scope: { type: "category" as const, category: "Toploaders" }, template: { introduction: "For toploaders.", footer: "" } }] };
+      const emptiedContent = { defaultTemplate: template, groups: [] };
+      const category = { categoryId: "183454", categoryName: "Toploaders", path: ["Collectibles", "Toploaders"] };
+      const groupedRules = { version: 1 as const, defaultCategory: category, rules: [{ id: "toploaders", name: "Toploaders rule",
+        scope: { type: "category" as const, category: "Toploaders" }, category }] };
+      const emptiedRules = { version: 1 as const, defaultCategory: category, rules: [] };
+      const vendor = { vendorId: VENDOR, storeConnectionId: STORE, actorId: MEMBER };
+      const system = { ...vendor, actorId: "rules-conversion-job", actorType: "system" as const };
+
+      // Today's vendor saves (no actor type), then the conversion's (the system), each on one transaction.
+      await inTransaction(async (client) => {
+        await saveContentProfileWithClient(client, vendor, { expectedRevisionId: null, profile: groupedContent,
+          idempotencyKey: "content:pg-convert-seed" }, HASHES.requestHash, NOW);
+        await saveEbayCategoryRulesProfileWithClient(client, vendor, { expectedRevisionId: null, profile: groupedRules,
+          idempotencyKey: "category-rules:pg-convert-seed", requestHash: HASHES.requestHash, now: NOW });
+      });
+      const heads = await execute(`SELECT (SELECT revision_id FROM dropship.dropship_content_profiles WHERE store_connection_id = $1) AS content,
+        (SELECT revision_id FROM dropship.dropship_ebay_category_rule_profiles WHERE store_connection_id = $1) AS rules`, [STORE]);
+      const { content: contentRevision, rules: rulesRevision } = heads.rows[0] as { content: number; rules: number };
+      const contentKey = listingConversionChildKey(SYSTEM_KEY, "content_profile", STORE);
+      const rulesKey = listingConversionChildKey(SYSTEM_KEY, "ebay_rules", STORE);
+      const savedContent = await inTransaction(async (client) => {
+        await insertRuleConversionWithClient(client, systemRecord());
+        const result = await saveContentProfileWithClient(client, system, { expectedRevisionId: contentRevision, profile: emptiedContent,
+          idempotencyKey: contentKey }, HASHES.requestHash, NOW);
+        await saveEbayCategoryRulesProfileWithClient(client, system, { expectedRevisionId: rulesRevision, profile: emptiedRules,
+          idempotencyKey: rulesKey, requestHash: HASHES.requestHash, now: NOW });
+        return result;
+      });
+      // The content writer answers its new revision (the conversion's store audit row names it).
+      expect(savedContent).toEqual({ revisionId: (await execute("SELECT revision_id FROM dropship.dropship_content_profiles WHERE store_connection_id = $1",
+        [STORE])).rows[0].revision_id });
+
+      const audits = await execute(`SELECT event_type, actor_type, actor_id FROM dropship.dropship_audit_events
+        WHERE event_type IN ('listing_content_saved', 'ebay_category_rules_saved') ORDER BY id`);
+      expect(audits.rows).toEqual([
+        { event_type: "listing_content_saved", actor_type: "vendor", actor_id: MEMBER },
+        { event_type: "ebay_category_rules_saved", actor_type: "vendor", actor_id: MEMBER },
+        { event_type: "listing_content_saved", actor_type: "system", actor_id: "rules-conversion-job" },
+        { event_type: "ebay_category_rules_saved", actor_type: "system", actor_id: "rules-conversion-job" },
+      ]);
+      const content = await execute(`SELECT r.previous_revision_id, r.profile, r.idempotency_key, r.actor_id FROM dropship.dropship_content_profiles p
+        JOIN dropship.dropship_content_profile_revisions r ON r.id = p.revision_id WHERE p.store_connection_id = $1`, [STORE]);
+      expect(content.rows).toEqual([{ previous_revision_id: contentRevision, profile: emptiedContent, idempotency_key: contentKey,
+        actor_id: "rules-conversion-job" }]);
+      const rules = await execute(`SELECT r.previous_revision_id, r.profile, r.idempotency_key FROM dropship.dropship_ebay_category_rule_profiles p
+        JOIN dropship.dropship_ebay_category_rule_revisions r ON r.id = p.revision_id WHERE p.store_connection_id = $1`, [STORE]);
+      // The version 1 document with no rules and its default kept (plan D7).
+      expect(rules.rows).toEqual([{ previous_revision_id: rulesRevision, profile: emptiedRules, idempotency_key: rulesKey }]);
+    });
+
+    it("saves each product its own values on a real database: no ledger, request_id NULL, lc: keys, chained, audited", async () => {
+      await execute(`INSERT INTO catalog.products (id, sku, name, category, category_id, product_type, shopify_product_id)
+        VALUES (8, 'TL-2', 'Toploader 35pt', 'Toploaders', 3, 'toploader', '8000000008')`);
+      const writesBefore = await allWrites();
+      const scope = { vendorId: VENDOR, storeConnectionId: STORE, requestKey: CONVERSION_KEY,
+        actor: { actorType: "vendor" as const, actorId: MEMBER } };
+      const textAbove = { mode: "own" as const, text: "From the toploader group." };
+
+      const first = await inTransaction(async (client) => {
+        const conversion = await insertRuleConversionWithClient(client, record());
+        const products = await saveProductListingSettingsPerProductWithClient(client, scope, { conversionId: conversion.id,
+          products: [{ productId: 8, expectedRevisionId: null, patch: { ebayCategory: { categoryId: "183454", categoryName: "Toploaders",
+            path: ["Collectibles", "Toploaders"] } } },
+          { productId: PRODUCT_7, expectedRevisionId: null, patch: { price: RECIPE, textAbove } }],
+          requestHash: HASHES.requestHash, now: NOW });
+        return { conversion, products };
+      });
+
+      expect(first.products.unchangedProductIds).toEqual([]);
+      expect(first.products.changed.map((entry) => entry.productId)).toEqual([PRODUCT_7, 8]);
+      const revisions = await execute(`SELECT product_id, previous_revision_id, request_id, idempotency_key, request_hash, actor_type, actor_id,
+        price_basis, price_markup_bps, text_above_mode, text_above, ebay_category_id, created_at
+        FROM dropship.dropship_product_listing_setting_revisions ORDER BY product_id`);
+      expect(revisions.rows).toEqual([
+        { product_id: PRODUCT_7, previous_revision_id: null, request_id: null, idempotency_key: listingConversionChildKey(CONVERSION_KEY, "product", PRODUCT_7),
+          request_hash: HASHES.requestHash, actor_type: "vendor", actor_id: MEMBER, price_basis: "catalog_retail", price_markup_bps: 2_000,
+          text_above_mode: "own", text_above: textAbove.text, ebay_category_id: null, created_at: NOW },
+        { product_id: 8, previous_revision_id: null, request_id: null, idempotency_key: listingConversionChildKey(CONVERSION_KEY, "product", 8),
+          request_hash: HASHES.requestHash, actor_type: "vendor", actor_id: MEMBER, price_basis: null, price_markup_bps: null,
+          text_above_mode: null, text_above: null, ebay_category_id: "183454", created_at: NOW },
+      ]);
+      const currents = await execute("SELECT product_id, revision_id FROM dropship.dropship_product_listing_settings ORDER BY product_id");
+      expect(currents.rows).toEqual(first.products.changed.map((entry) => ({ product_id: entry.productId, revision_id: entry.revisionId })));
+      const audits = await execute(`SELECT entity_id, actor_type, actor_id, payload FROM dropship.dropship_audit_events
+        WHERE event_type = 'product_listing_settings_saved' ORDER BY entity_id`);
+      expect(audits.rows.map((row: Row) => [row.entity_id, row.actor_type, row.actor_id, (row.payload as Row).conversionId,
+        (row.payload as Row).requestKey, (row.payload as Row).changedFields])).toEqual([
+        [String(PRODUCT_7), "vendor", MEMBER, first.conversion.id, CONVERSION_KEY, ["price", "textAbove"]],
+        ["8", "vendor", MEMBER, first.conversion.id, CONVERSION_KEY, ["ebayCategory"]],
+      ]);
+      // Texts by digest only in the audit rows (the full text is in the revision).
+      expect(JSON.stringify(audits.rows)).not.toContain(textAbove.text);
+      // No ledger request (its record is the conversion's), and no size row of any kind.
+      expect(await count("dropship.dropship_product_listing_setting_requests")).toBe(0);
+      const writesAfter = await allWrites();
+      expect({ ...writesAfter, productRevisions: writesBefore.productRevisions, audit: writesBefore.audit }).toEqual(writesBefore);
+      expect(writesAfter.productRevisions).toBe(writesBefore.productRevisions + 2);
+
+      // A later conversion chains to the revision it read (the coherence trigger accepts it); a stale one is the
+      // version conflict naming the product, and nothing it began is kept.
+      const SECOND_KEY = "ls-convert:9f8e7d6c-5b4a-4c3b-8a2e-1d0c9b8a7f6e";
+      const revision7 = first.products.changed[0].revisionId;
+      await expectDropshipError(inTransaction(async (client) => {
+        const conversion = await insertRuleConversionWithClient(client, record({ idempotencyKey: SECOND_KEY }));
+        return saveProductListingSettingsPerProductWithClient(client, { ...scope, requestKey: SECOND_KEY }, { conversionId: conversion.id,
+          products: [{ productId: PRODUCT_7, expectedRevisionId: null, patch: { textBelow: { mode: "none" } } }],
+          requestHash: HASHES.requestHash, now: NOW });
+      }), "DROPSHIP_PRODUCT_LISTING_SETTINGS_VERSION_CONFLICT");
+      expect(await count(RECORDS_TABLE)).toBe(1);
+      const chained = await inTransaction(async (client) => {
+        const conversion = await insertRuleConversionWithClient(client, record({ idempotencyKey: SECOND_KEY }));
+        return saveProductListingSettingsPerProductWithClient(client, { ...scope, requestKey: SECOND_KEY }, { conversionId: conversion.id,
+          products: [{ productId: PRODUCT_7, expectedRevisionId: revision7, patch: { textBelow: { mode: "none" } } }],
+          requestHash: HASHES.requestHash, now: NOW });
+      });
+      const latest = await execute(`SELECT previous_revision_id, price_basis, text_above, text_below_mode, idempotency_key
+        FROM dropship.dropship_product_listing_setting_revisions WHERE id = $1`, [chained.changed[0].revisionId]);
+      expect(latest.rows).toEqual([{ previous_revision_id: revision7, price_basis: "catalog_retail", text_above: textAbove.text,
+        text_below_mode: "none", idempotency_key: listingConversionChildKey(SECOND_KEY, "product", PRODUCT_7) }]);
+    });
+
+    /** The one-time notice's read through the real read repository and service (11e1); stock is never read. */
+    function noticeReader() {
+      const repository = new PgDropshipListingSettingsRepository(scopedPool());
+      const service = new DropshipListingSettingsService({ repository,
+        stock: { atp: { getVariantAtp: async () => { throw new Error("The notice read stock."); } },
+          overrides: { listVariantOverrides: async () => { throw new Error("The notice read stock caps."); } } },
+        clock: { now: () => NOW }, logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() } });
+      return { repository, service };
+    }
+    /** [Got it] through the real notice service and its own transaction (11e1). */
+    const noticeService = (repositoryPool: Pool = scopedPool()) => new DropshipListingRulesConversionNoticeService({
+      repository: new PgDropshipListingRulesConversionNoticeRepository(repositoryPool), clock: { now: () => LATER_SEEN },
+      timer: () => 0, log });
+    const noticeAudits = () => execute(`SELECT vendor_id, store_connection_id, entity_type, entity_id, event_type, actor_type, actor_id,
+      severity, payload, created_at FROM dropship.dropship_audit_events WHERE event_type = 'listing_rules_conversion_notice_seen' ORDER BY id`);
+
+    it("reads the store's latest conversion as its notice when it is an unseen system one (11e1, D19): never a vendor's, a seen one, one a vendor move followed or another store's", async () => {
+      const vendorRow = (await rawRecord({ actor_type: "vendor", actor_id: MEMBER, clean: false, changed_size_count: 2 })).rows[0].id as string;
+      const older = (await rawRecord({ category_count: 1, product_count: 1 })).rows[0].id as string;
+      const newer = (await rawRecord({ category_count: 2, product_count: 5, created_at: LATER_SEEN })).rows[0].id as string;
+      const otherStore = (await rawRecord({ store_connection_id: OTHER_VENDOR_STORE, vendor_id: 11 })).rows[0].id as string;
+      const { repository, service } = noticeReader();
+
+      expect(await repository.readConversionNotice({ memberId: MEMBER, storeConnectionId: STORE })).toMatchObject({ state: "ok",
+        conversion: { id: Number(newer), actorType: "system", noticeSeenAt: null } });
+      expect(await service.getConversionNoticeForMember(MEMBER, { storeConnectionId: STORE })).toEqual({ storeConnectionId: STORE,
+        notice: { conversionId: Number(newer), convertedAt: LATER_SEEN.toISOString(), categoryCount: 2, productCount: 5 } });
+      // Seen, it never shows again, and only the latest row counts: an older unseen row never shows (the vendor row never does).
+      await expect(noticeService().acknowledgeForMember(MEMBER, STORE, { conversionId: Number(newer) })).resolves.toEqual({ outcome: "acknowledged" });
+      expect(await service.getConversionNoticeForMember(MEMBER, { storeConnectionId: STORE })).toEqual({ storeConnectionId: STORE, notice: null });
+      expect((await allRecords()).find((row: Row) => String(row.id) === String(older))).toMatchObject({ notice_seen_at: null });
+      expect((await allRecords()).find((row: Row) => String(row.id) === String(vendorRow))).toMatchObject({ notice_seen_at: null });
+      // Another vendor's store is its own: refused for member-1 (404), read by member-2.
+      await expectDropshipError(service.getConversionNoticeForMember(MEMBER, { storeConnectionId: OTHER_VENDOR_STORE }),
+        "DROPSHIP_STORE_CONNECTION_REQUIRED");
+      expect((await service.getConversionNoticeForMember("member-2", { storeConnectionId: OTHER_VENDOR_STORE })).notice?.conversionId)
+        .toBe(Number(otherStore));
+      // The job's unseen notice, then the vendor's own move (D21: rules added back and moved again): the job's notice ends,
+      // its row stays unseen, and the read answers none (D19: the vendor saw "Moved over." for his own move).
+      await addVendorStore(24);
+      const jobRow = (await rawRecord({ store_connection_id: 24, category_count: 3, product_count: 4 })).rows[0].id as string;
+      expect((await service.getConversionNoticeForMember(MEMBER, { storeConnectionId: 24 })).notice?.conversionId).toBe(Number(jobRow));
+      await rawRecord({ store_connection_id: 24, actor_type: "vendor", actor_id: MEMBER, clean: false, changed_size_count: 2 });
+      expect(await service.getConversionNoticeForMember(MEMBER, { storeConnectionId: 24 })).toEqual({ storeConnectionId: 24, notice: null });
+      expect((await allRecords()).find((row: Row) => String(row.id) === String(jobRow))).toMatchObject({ notice_seen_at: null });
+      // A store with only the vendor's own conversion has none; a store not on eBay is the reads' 422.
+      await addVendorStore(26);
+      await rawRecord({ store_connection_id: 26, actor_type: "vendor", actor_id: MEMBER });
+      expect(await service.getConversionNoticeForMember(MEMBER, { storeConnectionId: 26 })).toEqual({ storeConnectionId: 26, notice: null });
+      await execute(`INSERT INTO dropship.dropship_store_connections (id, vendor_id, platform, access_token_ref, refresh_token_ref, status, setup_status)
+        VALUES (25, $1, 'shopify', 'vault:a', 'vault:r', 'connected', 'ready')`, [VENDOR]);
+      await expectDropshipError(service.getConversionNoticeForMember(MEMBER, { storeConnectionId: 25 }), "DROPSHIP_LISTING_SETTINGS_EBAY_ONLY");
+    });
+
+    it("marks a notice seen once (11e1): its audit row in the same commit, then already_seen writing nothing; 404 for any other id", async () => {
+      const systemId = Number((await rawRecord({ category_count: 2, product_count: 5 })).rows[0].id);
+      const vendorId = Number((await rawRecord({ actor_type: "vendor", actor_id: MEMBER, clean: false, changed_size_count: 2 })).rows[0].id);
+      const otherStoreId = Number((await rawRecord({ store_connection_id: OTHER_VENDOR_STORE, vendor_id: 11 })).rows[0].id);
+      const before = await allRecords();
+
+      await expect(noticeService().acknowledgeForMember(MEMBER, STORE, { conversionId: systemId })).resolves.toEqual({ outcome: "acknowledged" });
+      // Only the two notice columns changed, on that row only: the one UPDATE the guard trigger allows.
+      expect(await allRecords()).toEqual(before.map((row: Row) => Number(row.id) === systemId
+        ? { ...row, notice_seen_at: LATER_SEEN, notice_seen_by: MEMBER } : row));
+      expect((await noticeAudits()).rows).toEqual([{ vendor_id: VENDOR, store_connection_id: STORE, entity_type: "dropship_listing_rule_conversion",
+        entity_id: String(systemId), event_type: "listing_rules_conversion_notice_seen", actor_type: "vendor", actor_id: MEMBER, severity: "info",
+        payload: { conversionId: systemId, before: { noticeSeenAt: null, noticeSeenBy: null },
+          after: { noticeSeenAt: LATER_SEEN.toISOString(), noticeSeenBy: MEMBER } }, created_at: LATER_SEEN }]);
+      expect(log.info).toHaveBeenCalledWith("dropship.listing_settings.rules_conversion_notice_seen", expect.objectContaining({
+        outcome: "acknowledged", vendor_id: VENDOR, store_connection_id: STORE, conversion_id: systemId, actor_id: MEMBER }));
+      const seen = await allRecords();
+
+      // Again, from this device or another member's: already seen, nothing written (idempotent by state, no key).
+      await expect(noticeService().acknowledgeForMember(MEMBER, STORE, { conversionId: systemId })).resolves.toEqual({ outcome: "already_seen" });
+      expect(await allRecords()).toEqual(seen);
+      expect((await noticeAudits()).rows).toHaveLength(1);
+      // The guard still refuses any later change to the seen notice, so nothing but this transaction could ever mark it.
+      const rewrite = await execute(`UPDATE ${RECORDS_TABLE} SET notice_seen_at = $2, notice_seen_by = $3 WHERE id = $1`,
+        [systemId, NOW, "member-2"]).then(() => null, (error: unknown) => error as { code?: string });
+      expect(rewrite?.code).toBe("23514");
+
+      // A vendor's own conversion has no notice; another store's id is not this store's: both the permanent 404, nothing written.
+      for (const conversionId of [vendorId, otherStoreId, 999_999]) {
+        const error = await expectDropshipError(noticeService().acknowledgeForMember(MEMBER, STORE, { conversionId }),
+          "DROPSHIP_LISTING_CONVERSION_NOTICE_NOT_FOUND");
+        expect(error.context).toMatchObject({ storeConnectionId: STORE, conversionId, classification: "permanent" });
+      }
+      // Another vendor's store by member-1: the owner rows refuse it first; member-2 marks their own.
+      await expectDropshipError(noticeService().acknowledgeForMember(MEMBER, OTHER_VENDOR_STORE, { conversionId: otherStoreId }),
+        "DROPSHIP_STORE_CONNECTION_REQUIRED");
+      expect(await allRecords()).toEqual(seen);
+      await expect(noticeService().acknowledgeForMember("member-2", OTHER_VENDOR_STORE, { conversionId: otherStoreId }))
+        .resolves.toEqual({ outcome: "acknowledged" });
+      expect((await noticeAudits()).rows.map((row: Row) => [row.vendor_id, row.actor_id])).toEqual([[VENDOR, MEMBER], [11, "member-2"]]);
+    });
+
+    it("answers two presses of one notice at once (11e1): one acknowledged, the other waits on the row and answers already_seen; one audit row", async () => {
+      const systemId = Number((await rawRecord()).rows[0].id);
+      // The first press pauses after its UPDATE, holding the row lock, until the second has sent its own UPDATE.
+      let releaseFirst: () => void = () => undefined;
+      const firstHolds = new Promise<void>((resolve) => { releaseFirst = resolve; });
+      let firstUpdated: () => void = () => undefined;
+      const firstReached = new Promise<void>((resolve) => { firstUpdated = resolve; });
+      const first = noticeService(scopedPool(undefined, async (sql) => {
+        if (/^INSERT INTO dropship\.dropship_audit_events/.test(sql.trim())) {
+          firstUpdated();
+          await firstHolds;
+        }
+      })).acknowledgeForMember(MEMBER, STORE, { conversionId: systemId });
+      await firstReached;
+      const second = noticeService().acknowledgeForMember(MEMBER, STORE, { conversionId: systemId });
+      // The second must be blocked on the first's row lock in its UPDATE before the first commits: the case proves the wait.
+      await waitUntilLockWait("SET notice_seen_at", 1);
+      releaseFirst();
+      expect(await Promise.all([first, second])).toEqual([{ outcome: "acknowledged" }, { outcome: "already_seen" }]);
+      expect((await noticeAudits()).rows).toHaveLength(1);
+      expect((await allRecords())[0]).toMatchObject({ notice_seen_at: LATER_SEEN, notice_seen_by: MEMBER });
+    });
+  });
+
+  describe("PR 11's conversion apply: one transaction per store (plan 7.B.3, 7.B.4 PG (a)-(h))", () => {
+    const SLEEVES = 5;
+    const MAILERS = 6;
+    const PRODUCT_8 = 8;
+    const SIZE_801 = 801;
+    const KEY_1 = "ls-convert:1f9c2ba4-e88f-4a5e-9d1b-1c2d3e4f5a6b";
+    const KEY_2 = "ls-convert:2f9c2ba4-e88f-4a5e-9d1b-1c2d3e4f5a6b";
+    const TOP_RECIPE = { basis: "product_cost", markupBps: 4_000, flatCents: 0, rounding: "cent" } as const;
+    const STORE_TEMPLATE = { introduction: "Store above.", footer: "Store below." };
+    const EBAY_DEFAULT = { categoryId: "261328", categoryName: "Card Supplies", path: ["Collectibles", "Card Supplies"] };
+    const EBAY_TOP = { categoryId: "183439", categoryName: "Card Toploaders", path: ["Collectibles", "Card Toploaders"] };
+    const EBAY_SLEEVES = { categoryId: "183438", categoryName: "Card Sleeves", path: ["Collectibles", "Card Sleeves"] };
+    const PRICING = { defaultRecipe: D1.defaultRecipe, groups: [{ id: "toploaders", name: "Toploaders price", priority: 10,
+      scope: { type: "category", category: "Toploaders" }, recipe: TOP_RECIPE }] };
+    const CONTENT = { defaultTemplate: STORE_TEMPLATE, groups: [
+      { id: "c-top", name: "Toploaders text", priority: 10, scope: { type: "category" as const, category: "Toploaders" },
+        template: { introduction: "For toploaders.", footer: "Thanks." } },
+      { id: "c-35", name: "35pt text", priority: 1, scope: { type: "product" as const, productId: PRODUCT_8 },
+        template: { introduction: "Thick ones.", footer: "Thick footer." } },
+    ] };
+    const EBAY_RULES = { version: 1, defaultCategory: EBAY_DEFAULT, rules: [
+      { id: "e-top", name: "Toploaders eBay", scope: { type: "category", category: "Toploaders" }, category: EBAY_TOP },
+      { id: "e-sleeves", name: "Sleeves eBay", scope: { type: "category", category: "Sleeves" }, category: EBAY_SLEEVES },
+    ] };
+    const conversion = (repositoryPool: Pool = scopedPool(), heavyWrites = new ListingSettingHeavyWriteGate()) =>
+      new DropshipListingRulesConversionService({ repository: new PgDropshipListingRulesConversionRepository(repositoryPool),
+        clock: { now: () => NOW }, timer: () => performance.now(), log, heavyWrites });
+
+    /** The dry run, exactly as GET …/conversion computes it (11a2): one read-only snapshot, then the planner. */
+    async function dryRun(repositoryPool: Pool = scopedPool()) {
+      const load = await new PgDropshipListingSettingsRepository(repositoryPool).loadConversionInputs({ memberId: MEMBER,
+        storeConnectionId: STORE, now: NOW });
+      if (load === null || load.state !== "ok" || load.costReadFailure !== null) throw new Error("The dry run did not load.");
+      const { plan, diff } = checkRulesConversion(load.inputs);
+      const body = (idempotencyKey: string) => ({ idempotencyKey, planHash: diff.hashes?.planHash, writesHash: diff.hashes?.writesHash });
+      return { inputs: load.inputs, plan, diff, body };
+    }
+
+    /** A profile revision and its head, as the profile writers leave them (the coherence triggers check the chain). */
+    async function seedProfile(table: "content" | "ebay", profile: unknown, idempotencyKey = `seed-${table}:${randomUUID()}`): Promise<number> {
+      const [revisions, heads] = table === "content"
+        ? ["dropship.dropship_content_profile_revisions", "dropship.dropship_content_profiles"]
+        : ["dropship.dropship_ebay_category_rule_revisions", "dropship.dropship_ebay_category_rule_profiles"];
+      const current = await execute(`SELECT revision_id FROM ${heads} WHERE store_connection_id = $1`, [STORE]);
+      const revision = await execute(`INSERT INTO ${revisions} (vendor_id, store_connection_id, previous_revision_id, profile,
+        idempotency_key, request_hash, actor_id, created_at) VALUES ($1, $2, $3, $4::jsonb, $5, $6, $7, $8) RETURNING id`,
+      [VENDOR, STORE, current.rows[0]?.revision_id ?? null, JSON.stringify(profile), idempotencyKey, "d".repeat(64), MEMBER, NOW]);
+      await execute(`INSERT INTO ${heads} (vendor_id, store_connection_id, revision_id) VALUES ($1, $2, $3)
+        ON CONFLICT (store_connection_id) DO UPDATE SET revision_id = EXCLUDED.revision_id`, [VENDOR, STORE, revision.rows[0].id]);
+      return revision.rows[0].id as number;
+    }
+
+    /** Every row the apply may write, in full where it is small, by count where it is not. */
+    async function conversionState() {
+      const rows = async (sql: string) => (await execute(sql)).rows;
+      return {
+        records: await rows("SELECT * FROM dropship.dropship_listing_rule_conversions ORDER BY id"),
+        categoryRevisions: await count("dropship.dropship_category_listing_setting_revisions"),
+        categoryRows: await rows("SELECT category_id, revision_id FROM dropship.dropship_category_listing_settings ORDER BY category_id"),
+        productRevisions: await count("dropship.dropship_product_listing_setting_revisions"),
+        productRows: await rows("SELECT product_id, revision_id FROM dropship.dropship_product_listing_settings ORDER BY product_id"),
+        pricingRevisions: await count("dropship.dropship_pricing_profile_revisions"),
+        contentRevisions: await count("dropship.dropship_content_profile_revisions"),
+        ebayRevisions: await count("dropship.dropship_ebay_category_rule_revisions"),
+        heads: await rows(`SELECT (SELECT revision_id FROM dropship.dropship_pricing_profiles WHERE store_connection_id = 22) AS pricing,
+          (SELECT revision_id FROM dropship.dropship_content_profiles WHERE store_connection_id = 22) AS content,
+          (SELECT revision_id FROM dropship.dropship_ebay_category_rule_profiles WHERE store_connection_id = 22) AS ebay`),
+        marks: await rows("SELECT product_id, category_id, seen_at FROM dropship.dropship_product_category_seen ORDER BY store_connection_id, product_id"),
+        ledger: await count("dropship.dropship_product_listing_setting_requests"),
+        audit: await count("dropship.dropship_audit_events"),
+      };
+    }
+
+    /** Every per-size row of every kind, in full (plan 7.B.4 (g), D6). */
+    async function sizeRows() {
+      const rows = async (table: string) => (await execute(`SELECT * FROM ${table} ORDER BY id`)).rows;
+      const current = async (table: string) => (await execute(`SELECT * FROM ${table} ORDER BY store_connection_id, product_variant_id`)).rows;
+      return {
+        priceRevisions: await rows("dropship.dropship_listing_price_revisions"),
+        prices: await current("dropship.dropship_listing_price_settings"),
+        policyRevisions: await rows("dropship.dropship_ebay_listing_policy_override_revisions"),
+        policies: await current("dropship.dropship_ebay_listing_policy_overrides"),
+        shelfRevisions: await rows("dropship.dropship_ebay_store_category_assignment_revisions"),
+        shelves: await current("dropship.dropship_ebay_store_category_assignments"),
+        contentRevisions: await rows("dropship.dropship_listing_content_revisions"),
+        contents: await current("dropship.dropship_listing_content_settings"),
+      };
+    }
+
+    beforeEach(async () => {
+      await execute("INSERT INTO catalog.product_categories (id, name) VALUES (5, 'Sleeves'), (6, 'Mailers')");
+      await execute(`INSERT INTO catalog.products (id, sku, name, category, category_id, product_type, shopify_product_id)
+        VALUES (8, 'TL-35', 'Toploader 35pt', 'Toploaders', 3, 'toploader', '8000000008')`);
+      await execute(`INSERT INTO catalog.product_variants (id, product_id, sku, name, shopify_variant_id, weight_grams, sales_eligibility)
+        VALUES (801, 8, 'TL35-25', 'Pack of 25', '7000000801', 100, 'sellable')`);
+      await execute("INSERT INTO public.shopify_variants VALUES ('7000000801', '8000000008', 'TL35-25', 12.99)");
+      await execute(`INSERT INTO membership.plan_variant_overrides VALUES ('ops-801', 'ops', '7000000801', '8000000008', 'fixed_price', 10.00,
+        NULL, true)`);
+      await setStoreDefault(PRICING);
+      await seedProfile("content", CONTENT);
+      await seedProfile("ebay", EBAY_RULES);
+      // Product 7 already has its first mark; product 8 gets one from the move.
+      await execute(`INSERT INTO dropship.dropship_product_category_seen (vendor_id, store_connection_id, product_id, category_id, seen_at)
+        VALUES (10, 22, 7, 3, $1)`, [NOW]);
+    });
+
+    it("plans this store clean: every kind of write, nothing that changes (the fixture's own check)", async () => {
+      const { plan, diff } = await dryRun();
+      expect(diff.state).toBe("clean");
+      expect(plan.categories.map((write) => [write.categoryId, write.settings])).toEqual([
+        [TOPLOADERS, ["price", "ebayCategory", "textAbove", "textBelow"]], [SLEEVES, ["ebayCategory"]]]);
+      expect(plan.products.map((write) => [write.productId, write.settings])).toEqual([[PRODUCT_8, ["textAbove", "textBelow"]]]);
+      expect(plan.firstMarks).toEqual([PRODUCT_8]);
+      expect([plan.profiles.pricing?.removedIds, plan.profiles.content?.removedIds, plan.profiles.ebayRules?.removedIds])
+        .toEqual([["toploaders"], ["c-35", "c-top"], ["e-sleeves", "e-top"]]);
+    });
+
+    it("(b) commits the plan: groups emptied with the defaults kept, category and product rows, first marks, one audit row per mutation as the vendor", async () => {
+      const { plan, diff, body } = await dryRun();
+      const before = await conversionState();
+      const answer = await conversion().applyForMember(MEMBER, STORE, body(KEY_1));
+
+      expect(answer).toEqual({ outcome: "converted", conversionId: expect.any(Number), categoryCount: 2, productCount: 1 });
+      const record = (await execute("SELECT * FROM dropship.dropship_listing_rule_conversions")).rows;
+      expect(record).toEqual([expect.objectContaining({ id: String(answer.conversionId), vendor_id: VENDOR, store_connection_id: STORE,
+        idempotency_key: KEY_1, request_hash: rulesConversionRequestHash(STORE, diff.hashes!.planHash), plan_hash: diff.hashes!.planHash,
+        writes_hash: diff.hashes!.writesHash, clean: true, changed_size_count: 0, category_count: 2, product_count: 1,
+        pricing_groups_removed: 1, content_groups_removed: 2, ebay_rules_removed: 2, actor_type: "vendor", actor_id: MEMBER,
+        created_at: NOW, notice_seen_at: null, notice_seen_by: null })]);
+      // The three profiles: groups (rules) emptied, the store defaults kept, version 1 eBay document with rules: [] (D7).
+      const profiles = await execute(`SELECT
+        (SELECT r.profile FROM dropship.dropship_pricing_profiles p JOIN dropship.dropship_pricing_profile_revisions r ON r.id = p.revision_id
+          WHERE p.store_connection_id = 22) AS pricing,
+        (SELECT r.profile FROM dropship.dropship_content_profiles p JOIN dropship.dropship_content_profile_revisions r ON r.id = p.revision_id
+          WHERE p.store_connection_id = 22) AS content,
+        (SELECT r.profile FROM dropship.dropship_ebay_category_rule_profiles p
+          JOIN dropship.dropship_ebay_category_rule_revisions r ON r.id = p.revision_id WHERE p.store_connection_id = 22) AS ebay`);
+      expect(profiles.rows).toEqual([{ pricing: { defaultRecipe: D1.defaultRecipe, groups: [] },
+        content: { defaultTemplate: STORE_TEMPLATE, groups: [] }, ebay: { version: 1, defaultCategory: EBAY_DEFAULT, rules: [] } }]);
+      // Category rows, each revision with the category's name at save and its lc: key; values as planned.
+      const categories = await execute(`SELECT r.category_id, r.category_name, r.previous_revision_id, r.idempotency_key, r.request_hash,
+        r.actor_type, r.actor_id, r.price_basis, r.price_markup_bps, r.ebay_category_id, r.text_above_mode, r.text_above, r.text_below
+        FROM dropship.dropship_category_listing_settings s JOIN dropship.dropship_category_listing_setting_revisions r ON r.id = s.revision_id
+        ORDER BY r.category_id`);
+      const requestHash = rulesConversionRequestHash(STORE, diff.hashes!.planHash);
+      expect(categories.rows).toEqual([
+        { category_id: TOPLOADERS, category_name: "Toploaders", previous_revision_id: null,
+          idempotency_key: listingConversionChildKey(KEY_1, "category", TOPLOADERS), request_hash: requestHash, actor_type: "vendor",
+          actor_id: MEMBER, price_basis: "product_cost", price_markup_bps: 4_000, ebay_category_id: EBAY_TOP.categoryId,
+          text_above_mode: "own", text_above: "For toploaders.", text_below: "Thanks." },
+        { category_id: SLEEVES, category_name: "Sleeves", previous_revision_id: null,
+          idempotency_key: listingConversionChildKey(KEY_1, "category", SLEEVES), request_hash: requestHash, actor_type: "vendor",
+          actor_id: MEMBER, price_basis: null, price_markup_bps: null, ebay_category_id: EBAY_SLEEVES.categoryId,
+          text_above_mode: null, text_above: null, text_below: null },
+      ]);
+      const products = await execute(`SELECT r.product_id, r.request_id, r.idempotency_key, r.request_hash, r.actor_type, r.actor_id,
+        r.price_basis, r.text_above_mode, r.text_above, r.text_below FROM dropship.dropship_product_listing_settings s
+        JOIN dropship.dropship_product_listing_setting_revisions r ON r.id = s.revision_id ORDER BY r.product_id`);
+      expect(products.rows).toEqual([{ product_id: PRODUCT_8, request_id: null, idempotency_key: listingConversionChildKey(KEY_1, "product", PRODUCT_8),
+        request_hash: requestHash, actor_type: "vendor", actor_id: MEMBER, price_basis: null, text_above_mode: "own",
+        text_above: "Thick ones.", text_below: "Thick footer." }]);
+      // First marks only for the product with none.
+      expect((await conversionState()).marks).toEqual([{ product_id: PRODUCT_7, category_id: TOPLOADERS, seen_at: NOW },
+        { product_id: PRODUCT_8, category_id: TOPLOADERS, seen_at: NOW }]);
+      // One audit row per mutation, each as the vendor, each naming its own entity; the store's row last.
+      const heads = (await conversionState()).heads[0] as { pricing: number; content: number; ebay: number };
+      const audits = await execute(`SELECT entity_type, entity_id, event_type, actor_type, actor_id FROM dropship.dropship_audit_events
+        ORDER BY id OFFSET $1`, [before.audit]);
+      expect(audits.rows).toEqual([
+        { entity_type: "dropship_category_listing_setting", entity_id: String(TOPLOADERS), event_type: "category_listing_settings_saved" },
+        { entity_type: "dropship_category_listing_setting", entity_id: String(SLEEVES), event_type: "category_listing_settings_saved" },
+        { entity_type: "dropship_product_listing_setting", entity_id: String(PRODUCT_8), event_type: "product_listing_settings_saved" },
+        { entity_type: "dropship_pricing_profile", entity_id: String(heads.pricing), event_type: "pricing_profile_saved" },
+        { entity_type: "dropship_content_profile", entity_id: String(STORE), event_type: "listing_content_saved" },
+        { entity_type: "dropship_ebay_category_rules", entity_id: String(STORE), event_type: "ebay_category_rules_saved" },
+        { entity_type: "dropship_store_connection", entity_id: String(STORE), event_type: "category_marks_seeded" },
+        { entity_type: "dropship_store_connection", entity_id: String(STORE), event_type: "listing_rules_converted" },
+      ].map((row) => ({ ...row, actor_type: "vendor", actor_id: MEMBER })));
+      const storeAudit = await execute(`SELECT payload FROM dropship.dropship_audit_events WHERE event_type = 'listing_rules_converted'`);
+      expect(storeAudit.rows).toEqual([{ payload: { conversionId: answer.conversionId, requestKey: KEY_1, planHash: diff.hashes!.planHash,
+        writesHash: diff.hashes!.writesHash, clean: true, counts: { categories: 2, products: 1, changedSizes: 0, firstMarks: 1 },
+        removed: { pricingGroups: [{ id: "toploaders", name: "Toploaders price", scopeType: "category" }],
+          contentGroups: [{ id: "c-top", name: "Toploaders text", scopeType: "category" }, { id: "c-35", name: "35pt text", scopeType: "product" }],
+          ebayRules: [{ id: "e-top", name: "Toploaders eBay", scopeType: "category" }, { id: "e-sleeves", name: "Sleeves eBay", scopeType: "category" }] },
+        categoryIds: plan.categories.map((write) => write.categoryId), productIds: [PRODUCT_8],
+        // The index to the three profile audit rows; the description and eBay rules rows' payloads do not name the conversion.
+        revisions: { pricing: heads.pricing, content: heads.content, ebayRules: heads.ebay } } }]);
+      // Each revision the store row names leads to exactly its profile's audit row (CLAUDE.md §10).
+      const indexed = await execute(`SELECT event_type FROM dropship.dropship_audit_events
+        WHERE (event_type = 'pricing_profile_saved' AND payload->>'revisionId' = $1)
+          OR (event_type = 'listing_content_saved' AND payload->'after'->>'revisionId' = $2)
+          OR (event_type = 'ebay_category_rules_saved' AND payload->>'revisionId' = $3) ORDER BY id`,
+      [String(heads.pricing), String(heads.content), String(heads.ebay)]);
+      expect(indexed.rows).toEqual([{ event_type: "pricing_profile_saved" }, { event_type: "listing_content_saved" },
+        { event_type: "ebay_category_rules_saved" }]);
+      // Vendor 11's store is untouched; no ledger request is written (the record is the conversion's).
+      expect((await conversionState()).ledger).toBe(0);
+      expect(await count("dropship.dropship_audit_events", "store_connection_id = $1", [OTHER_VENDOR_STORE])).toBe(0);
+      // One INFO line after COMMIT, ids and counts only.
+      expect(log.info).toHaveBeenCalledTimes(1);
+      expect(log.info).toHaveBeenCalledWith(RULES_CONVERSION_APPLIED_ACTION, expect.objectContaining({ outcome: "converted", vendor_id: VENDOR,
+        store_connection_id: STORE, actor_type: "vendor", actor_id: MEMBER, request_key: KEY_1, conversion_id: answer.conversionId,
+        clean: true, category_count: 2, product_count: 1, pricing_groups_removed: 1, content_groups_removed: 2, ebay_rules_removed: 2,
+        changed_size_count: 0, marks_inserted: 1, elapsed_ms: expect.any(Number) }));
+      expect(JSON.stringify(log.info.mock.calls)).not.toMatch(/Toploaders|Thick|Sleeves/);
+    });
+
+    it("(c) after it the store holds no older rule, the dry run says so, and a category save (W12) is no longer refused", async () => {
+      const { body } = await dryRun();
+      await conversion().applyForMember(MEMBER, STORE, body(KEY_1));
+      const after = await dryRun();
+      expect(after.diff).toMatchObject({ state: "no_older_rules", hashes: null });
+      expect(olderGroupRuleCounts(after.inputs.listing)).toEqual({ pricingGroups: 0, contentGroups: 0, ebayCategoryRules: 0 });
+      const revision = (await execute("SELECT revision_id FROM dropship.dropship_category_listing_settings WHERE category_id = $1",
+        [TOPLOADERS])).rows[0].revision_id as number;
+      const saved = await new DropshipListingCategorySettingsService({ repository: new PgDropshipListingSettingWritesRepository(scopedPool()),
+        ebay: fakeEbay, heavyWrites: new ListingSettingHeavyWriteGate(), clock: { now: () => NOW }, timer: () => performance.now(), log })
+        .saveForMember(MEMBER, STORE, TOPLOADERS, { idempotencyKey: "category-settings:after-conversion", expectedRevisionId: revision,
+          patch: { storeShelf: { mode: "none" } } });
+      expect(saved).toMatchObject({ outcome: "changed", categoryId: TOPLOADERS });
+      // Another apply finds nothing to convert, and records nothing.
+      await expect(conversion().applyForMember(MEMBER, STORE, body(KEY_2))).resolves.toEqual({ outcome: "nothing_to_convert",
+        conversionId: null, categoryCount: 0, productCount: 0 });
+      expect(await count("dropship.dropship_listing_rule_conversions")).toBe(1);
+    });
+
+    it("(d) answers the same key again as replayed in 7 statements, and the key for another plan or store as the 409", async () => {
+      const { body } = await dryRun();
+      const first = await conversion().applyForMember(MEMBER, STORE, body(KEY_1));
+      const before = await conversionState();
+      const counter: StatementCounter = { statements: 0 };
+
+      const again = await conversion(scopedPool(counter)).applyForMember(MEMBER, STORE, body(KEY_1));
+
+      expect(again).toEqual({ ...first, outcome: "replayed" });
+      expect(await conversionState()).toEqual(before);
+      // BEGIN, the request lock, the store lock, the owner rows, the gate's store read, the record by key, ROLLBACK: no writer.
+      expect(counter.statements).toBe(7);
+      const other = await expectDropshipError(conversion().applyForMember(MEMBER, STORE, { ...body(KEY_1), planHash: "e".repeat(64) }),
+        "DROPSHIP_IDEMPOTENCY_CONFLICT");
+      expect(other.context).toMatchObject({ storeConnectionId: STORE, mismatched: ["requestHash"], classification: "permanent" });
+      await addVendorStore(24);
+      const otherStore = await expectDropshipError(conversion().applyForMember(MEMBER, 24, body(KEY_1)), "DROPSHIP_IDEMPOTENCY_CONFLICT");
+      expect(otherStore.context?.mismatched).toEqual(["storeConnectionId", "requestHash"]);
+      expect(await conversionState()).toEqual(before);
+    });
+
+    it.each([
+      ["description templates", "content", "content_profile", "dropship_content_profile_revision_vendor_id_idempotency_key_key"],
+      ["eBay rules", "ebay", "ebay_rules", "dropship_ebay_category_rule_revis_vendor_id_idempotency_key_key"],
+    ] as const)("answers the system's clean conversion with the 409 key conflict when an older %s row holds its `lc:` key, writing nothing (D12)",
+      async (_label, table, kind, constraint) => {
+        // The vendor's head revision under the system's child key: a row saved before the save routes refused the reserved
+        // prefixes (they answer 400 to this key now), written directly as such a row would be.
+        const claimed = listingConversionChildKey(rulesConversionSystemKey(STORE), kind, STORE);
+        await seedProfile(table, table === "content" ? CONTENT : EBAY_RULES, claimed);
+        expect((await dryRun()).diff.state).toBe("clean");
+        const before = await conversionState();
+        const sizesBefore = await sizeRows();
+
+        // The system job's transaction (11e2 builds the job; the repository and the transaction body are this PR's).
+        const refused = await expectDropshipError(new PgDropshipListingRulesConversionRepository(scopedPool()).executeConversion(
+          { actorType: "system", jobKey: "rules-conversion-job:2026-10-16T01", storeConnectionId: STORE },
+          (tx) => convertInTransaction(tx, { kind: "system" }, NOW)), "DROPSHIP_IDEMPOTENCY_CONFLICT");
+
+        // PostgreSQL's own name for the unnamed UNIQUE (vendor_id, idempotency_key), mapped to the permanent 409.
+        expect(refused.context).toEqual({ constraint, retryable: false, classification: "permanent" });
+        // Every write before it (the record, the categories, the product, the pricing and, for eBay, the templates) rolled back.
+        expect(await conversionState()).toEqual(before);
+        expect(await sizeRows()).toEqual(sizesBefore);
+        expect(await count(table === "content" ? "dropship.dropship_content_profile_revisions" : "dropship.dropship_ebay_category_rule_revisions",
+          "idempotency_key = $1", [claimed])).toBe(1);
+      });
+
+    it("(a) rolls everything back when its store audit row or any writer's first statement fails, then commits the same request once", async () => {
+      const { body } = await dryRun();
+      const before = await conversionState();
+      const sizesBefore = await sizeRows();
+      const failingAt = [
+        "INSERT INTO dropship.dropship_listing_rule_conversions",
+        "INSERT INTO dropship.dropship_category_listing_setting_revisions",
+        "INSERT INTO dropship.dropship_product_listing_setting_revisions",
+        "INSERT INTO dropship.dropship_pricing_profile_revisions",
+        "INSERT INTO dropship.dropship_content_profile_revisions",
+        "INSERT INTO dropship.dropship_ebay_category_rule_revisions",
+        "INSERT INTO dropship.dropship_product_category_seen",
+        "'listing_rules_converted'",
+      ];
+      for (const fragment of failingAt) {
+        let injected = false;
+        const failing = scopedPool(undefined, (sql) => {
+          if (!injected && sql.includes(fragment)) {
+            injected = true;
+            throw new Error(`injected failure at ${fragment}`);
+          }
+        });
+        await expect(conversion(failing).applyForMember(MEMBER, STORE, body(KEY_1))).rejects.toThrow(`injected failure at ${fragment}`);
+        expect(injected).toBe(true);
+        expect(await conversionState()).toEqual(before);
+        expect(await sizeRows()).toEqual(sizesBefore);
+      }
+      expect(log.info).not.toHaveBeenCalled();
+
+      // No rolled-back attempt spent the key: the same request commits once, and then replays.
+      await expect(conversion().applyForMember(MEMBER, STORE, body(KEY_1))).resolves.toMatchObject({ outcome: "converted" });
+      await expect(conversion().applyForMember(MEMBER, STORE, body(KEY_1))).resolves.toMatchObject({ outcome: "replayed" });
+      expect(await count("dropship.dropship_listing_rule_conversions")).toBe(1);
+      expect(await count("dropship.dropship_audit_events", "event_type = 'listing_rules_converted'")).toBe(1);
+    });
+
+    it("(g) touches no size price, policy, shelf or text row (D6)", async () => {
+      await typePrice(102, 1_299, "pg-convert:typed-102");
+      await seedPolicyOverride({ sizeId: 103, fulfillment: "ful-103", label: "convert-103" });
+      await seedShelf({ sizeId: 104, label: "convert-104" });
+      const { diff, body } = await dryRun();
+      expect(diff.state).toBe("clean");
+      const sizesBefore = await sizeRows();
+      expect([sizesBefore.prices.length, sizesBefore.policies.length, sizesBefore.shelves.length]).toEqual([1, 1, 1]);
+
+      await expect(conversion().applyForMember(MEMBER, STORE, body(KEY_1))).resolves.toMatchObject({ outcome: "converted" });
+
+      expect(await sizeRows()).toEqual(sizesBefore);
+      expect(await count("dropship.dropship_pricing_applications")).toBe(0);
+    });
+
+    it.each([
+      ["a size that would lose its price (D9a): the 422, nothing written", async () => {
+        // Folder 901: no Card Shellz category (its copy names "Folders", which no category has) and an .ops cost the plan
+        // excludes, so only the Folders price group (from retail) prices it; after the move the store default (from cost) cannot.
+        await execute(`INSERT INTO catalog.products (id, sku, name, category, category_id, product_type, shopify_product_id)
+          VALUES (9, 'FD', 'Folder', 'Folders', NULL, 'folder', '8000000009')`);
+        await execute(`INSERT INTO catalog.product_variants (id, product_id, sku, name, shopify_variant_id, weight_grams, sales_eligibility)
+          VALUES (901, 9, 'FD-25', 'Pack of 25', '7000000901', 100, 'sellable')`);
+        await execute("INSERT INTO public.shopify_variants VALUES ('7000000901', '8000000009', 'FD-25', 12.99)");
+        await execute("INSERT INTO membership.product_collections VALUES ('pc-folders', '8000000009', 'col-folders')");
+        await execute("INSERT INTO membership.plan_collection_exclusions VALUES ('ex-folders', 'ops', 'col-folders')");
+        await setStoreDefault({ ...PRICING, groups: [...PRICING.groups, { id: "folders", name: "Folders price", priority: 5,
+          scope: { type: "category", category: "Folders" }, recipe: { basis: "catalog_retail", markupBps: 2_000, flatCents: 0, rounding: "cent" } }] });
+        const repository = new PgDropshipListingPriceRepository(scopedPool());
+        const input: SaveListingPriceInput = { priceCents: null, pricingMode: "rules", expectedRevisionId: null, idempotencyKey: "pg-convert:rules-901" };
+        await repository.execute({ memberId: MEMBER, storeConnectionId: STORE, productVariantId: 901, idempotencyKey: input.idempotencyKey },
+          (tx) => saveListingPriceInTransaction(tx, { storeConnectionId: STORE, productVariantId: 901 }, input, "f".repeat(64), NOW));
+        const { diff } = await dryRun();
+        expect(diff.blocked.wouldLosePrice.map((size) => [size.productVariantId, size.priceCents])).toEqual([[901, 1_559]]);
+        return { pool: scopedPool(), code: "DROPSHIP_LISTING_PRICE_WOULD_BE_LOST" };
+      }],
+      ["a cost read that times out under the locks: the transient 503, nothing written", async () => {
+        let injected = false;
+        const pool = scopedPool(undefined, (sql) => {
+          if (!injected && sql.includes("FROM membership.plan_variant_overrides")) {
+            injected = true;
+            throw Object.assign(new Error("canceling statement due to statement timeout"), { code: "57014" });
+          }
+        });
+        return { pool, code: "DROPSHIP_LISTING_CONVERSION_CHECK_UNAVAILABLE", injected: () => injected };
+      }],
+    ] as Array<[string, () => Promise<{ pool: Pool; code: string; injected?: () => boolean }>]>)(
+      "refuses %s (plan 7.B.5)", async (_label, seed) => {
+        const refusal = await seed();
+        const { body } = await dryRun();
+        const before = await conversionState();
+        const sizesBefore = await sizeRows();
+
+        await expectDropshipError(conversion(refusal.pool).applyForMember(MEMBER, STORE, body(KEY_1)), refusal.code);
+
+        if (refusal.injected) expect(refusal.injected()).toBe(true);
+        expect(await conversionState()).toEqual(before);
+        expect(await sizeRows()).toEqual(sizesBefore);
+        expect(log.info).not.toHaveBeenCalled();
+      });
+
+    describe("(e) a write that commits while the apply waits for the store lock, or a Card Shellz change, ends in CHANGED with nothing written", () => {
+      /** Starts `work` on a pool that pauses at its COMMIT; resolves once it holds its locks there. */
+      async function heldAtCommit<T>(work: (repositoryPool: Pool) => Promise<T>) {
+        const paused = gate((sql) => sql === "COMMIT");
+        const running = work(scopedPool(undefined, paused.hook));
+        await within(paused.reached, "the other write's commit");
+        return { running, open: paused.open };
+      }
+
+      it("a product save (W5's writer) commits first: the plan's product row moved, so settings_changed", async () => {
+        const { body } = await dryRun();
+        const held = await heldAtCommit((repositoryPool) => new PgDropshipListingSettingWritesRepository(repositoryPool).execute(
+          { memberId: MEMBER, storeConnectionId: STORE, idempotencyKey: "product-settings:race-8" },
+          (tx) => tx.saveProduct({ productId: PRODUCT_8, expectedRevisionId: null, patch: { storeShelf: { mode: "none" } },
+            requestHash: "d".repeat(64), now: NOW })));
+        let applying: Promise<unknown> | undefined;
+        try {
+          applying = conversion().applyForMember(MEMBER, STORE, body(KEY_1)).then(() => null, (reason: unknown) => reason);
+          await waitUntilLockWait("dropship_listing_push_job", 1);
+          const waiting = await conversionState();
+          held.open();
+          await within(held.running, "the product save");
+          const refused = await within(applying, "the apply");
+          expect(refused).toBeInstanceOf(DropshipError);
+          expect(refused).toMatchObject({ code: "DROPSHIP_LISTING_CONVERSION_CHANGED", context: { reason: "settings_changed",
+            classification: "permanent" } });
+          const after = await conversionState();
+          // Only the product save's own revision, row and audit row: the apply wrote nothing.
+          expect({ ...after, productRevisions: waiting.productRevisions, productRows: waiting.productRows, audit: waiting.audit })
+            .toEqual(waiting);
+          expect(after.records).toEqual([]);
+          expect(after.productRevisions).toBe(waiting.productRevisions + 1);
+          expect(after.audit).toBe(waiting.audit + 1);
+        } finally {
+          held.open();
+          await within(Promise.allSettled([held.running, ...(applying ? [applying] : [])]), "the race's clean-up");
+        }
+      });
+
+      it("an Older settings description group save commits first: the profile moved, so settings_changed", async () => {
+        const { body } = await dryRun();
+        const before = await conversionState();
+        const contentHead = before.heads[0].content as number;
+        const changed = { ...CONTENT, groups: [CONTENT.groups[0]] };
+        const held = await heldAtCommit((repositoryPool) => new PgDropshipListingContentRepository(repositoryPool).execute(
+          { memberId: MEMBER, storeConnectionId: STORE, idempotencyKey: "content:race-profile" },
+          (tx) => tx.saveProfile({ expectedRevisionId: contentHead, profile: changed, idempotencyKey: "content:race-profile" },
+            "d".repeat(64), NOW)));
+        let applying: Promise<unknown> | undefined;
+        try {
+          applying = conversion().applyForMember(MEMBER, STORE, body(KEY_1)).then(() => null, (reason: unknown) => reason);
+          await waitUntilLockWait("dropship_listing_push_job", 1);
+          held.open();
+          await within(held.running, "the description group save");
+          expect(await within(applying, "the apply")).toMatchObject({ code: "DROPSHIP_LISTING_CONVERSION_CHANGED",
+            context: { reason: "settings_changed" } });
+          // Only the description save's own revision, head and audit row: the apply wrote nothing.
+          const after = await conversionState();
+          expect(after.records).toEqual([]);
+          expect(after.heads[0].content).not.toBe(contentHead);
+          expect({ ...after, contentRevisions: before.contentRevisions, heads: before.heads, audit: before.audit }).toEqual(before);
+          expect([after.contentRevisions, after.audit]).toEqual([before.contentRevisions + 1, before.audit + 1]);
+        } finally {
+          held.open();
+          await within(Promise.allSettled([held.running, ...(applying ? [applying] : [])]), "the race's clean-up");
+        }
+      });
+
+      it("Card Shellz moves a product between the check and the apply: only the listed changes moved, so listed_changes_moved", async () => {
+        const { body } = await dryRun();
+        // The move updates the id only; the product keeps its copy of the old name, which the older rules match.
+        await execute("UPDATE catalog.products SET category_id = $1 WHERE id = $2", [SLEEVES, PRODUCT_8]);
+        const before = await conversionState();
+        const now = await dryRun();
+        expect(now.diff.hashes!.writesHash).toBe((body(KEY_1)).writesHash);
+        expect(now.diff.hashes!.planHash).not.toBe((body(KEY_1)).planHash);
+        expect(await expectDropshipError(conversion().applyForMember(MEMBER, STORE, body(KEY_1)), "DROPSHIP_LISTING_CONVERSION_CHANGED"))
+          .toMatchObject({ context: { reason: "listed_changes_moved" } });
+        expect(await conversionState()).toEqual(before);
+      });
+
+      it("Card Shellz names a second category like a rule's between the check and the apply: the writes moved, so settings_changed", async () => {
+        const { body } = await dryRun();
+        await execute("UPDATE catalog.product_categories SET name = 'Sleeves' WHERE id = $1", [MAILERS]);
+        const before = await conversionState();
+        expect(await expectDropshipError(conversion().applyForMember(MEMBER, STORE, body(KEY_1)), "DROPSHIP_LISTING_CONVERSION_CHANGED"))
+          .toMatchObject({ context: { reason: "settings_changed" } });
+        expect(await conversionState()).toEqual(before);
+      });
+
+      it("two applies of one plan at once under one key: one converts, the other waits on the request lock and replays", async () => {
+        const { body } = await dryRun();
+        const held = await heldAtCommit((repositoryPool) => conversion(repositoryPool).applyForMember(MEMBER, STORE, body(KEY_1)));
+        let second: Promise<unknown> | undefined;
+        try {
+          second = conversion().applyForMember(MEMBER, STORE, body(KEY_1));
+          await waitUntilLockWait("dropship_listing_settings_request", 1);
+          held.open();
+          const first = await within(held.running, "the first apply");
+          expect(first).toMatchObject({ outcome: "converted" });
+          await expect(within(second, "the second apply")).resolves.toEqual({ ...first, outcome: "replayed" });
+        } finally {
+          held.open();
+          await within(Promise.allSettled([held.running, ...(second ? [second] : [])]), "the race's clean-up");
+        }
+        expect(await count("dropship.dropship_listing_rule_conversions")).toBe(1);
+        expect(await count("dropship.dropship_audit_events", "event_type = 'listing_rules_converted'")).toBe(1);
+      });
+
+      it("two applies of one plan at once under two keys: one converts, the other finds nothing to convert", async () => {
+        const { body } = await dryRun();
+        const held = await heldAtCommit((repositoryPool) => conversion(repositoryPool).applyForMember(MEMBER, STORE, body(KEY_1)));
+        let second: Promise<unknown> | undefined;
+        try {
+          second = conversion().applyForMember(MEMBER, STORE, body(KEY_2));
+          await waitUntilLockWait("dropship_listing_push_job", 1);
+          held.open();
+          await expect(within(held.running, "the first apply")).resolves.toMatchObject({ outcome: "converted" });
+          await expect(within(second, "the second apply")).resolves.toEqual({ outcome: "nothing_to_convert", conversionId: null,
+            categoryCount: 0, productCount: 0 });
+        } finally {
+          held.open();
+          await within(Promise.allSettled([held.running, ...(second ? [second] : [])]), "the race's clean-up");
+        }
+        expect(await count("dropship.dropship_listing_rule_conversions")).toBe(1);
+        expect(await count("dropship.dropship_audit_events", "event_type = 'listing_rules_converted'")).toBe(1);
+      });
+    });
+
+    it("(f) a reader that took its snapshot before the commit still reads every resolver input as before: a push never sees a mix", async () => {
+      const { inputs, body } = await dryRun();
+      const resolverInput = { vendorId: VENDOR, storeConnectionId: STORE, candidates: inputs.listing.candidates,
+        ruleEligibleCandidates: inputs.listing.candidates, platform: "ebay" as const };
+      let first!: Awaited<ReturnType<typeof readListingResolverInputs>>;
+      const reader = await scopedPool().connect();
+      try {
+        await reader.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
+        first = await readListingResolverInputs(reader, resolverInput);
+        expect(first.layers.categories.size + first.layers.products.size).toBe(0);
+
+        await expect(conversion().applyForMember(MEMBER, STORE, body(KEY_1))).resolves.toMatchObject({ outcome: "converted" });
+
+        // The same four readers on the open snapshot: the old layers with the old profiles, never the new layers with emptied groups.
+        const second = await readListingResolverInputs(reader, resolverInput);
+        expect(second).toEqual(first);
+        await reader.query("COMMIT");
+      } finally {
+        reader.release();
+      }
+      // A snapshot taken after the commit reads the new layers, and the same values: the store was clean.
+      const fresh = await scopedPool().connect();
+      try {
+        await fresh.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
+        const after = await readListingResolverInputs(fresh, resolverInput);
+        await fresh.query("COMMIT");
+        expect([...after.layers.categories.keys()]).toEqual([TOPLOADERS]);
+        expect([...after.layers.products.keys()]).toEqual([PRODUCT_8]);
+        const cents = (inputs: typeof after) => [...inputs.rulePrices].map(([id, price]) => [id, price.priceCents]);
+        expect(cents(after)).toEqual(cents(first));
+        expect([...after.contents].map(([id, content]) => [id, content.descriptionHtml]))
+          .toEqual([...first.contents].map(([id, content]) => [id, content.descriptionHtml]));
+        expect([...after.ebayCategories!].map(([id, category]) => [id, category.categoryId]))
+          .toEqual([...first.ebayCategories!].map(([id, category]) => [id, category.categoryId]));
+        // The rule under the Toploaders sizes is the category's own now, no longer a group's.
+        expect(after.rulePrices.get(101)?.ruleLevel).toBe("category");
+        expect(first.rulePrices.get(101)).toMatchObject({ ruleId: "toploaders" });
+        expect(first.rulePrices.get(101)?.ruleLevel).toBeUndefined();
+      } finally {
+        fresh.release();
+      }
+    });
+
+    it("(h) measures a 10,000-product store: the dry run and the apply (logged, not asserted)", async () => {
+      const total = MAX_LISTING_SETTING_BULK_PRODUCTS;
+      const first = 20_001;
+      // The fixture's own sizes leave the selection, so the store holds exactly 10,000 chosen sizes, one per product.
+      await execute("UPDATE catalog.product_variants SET sales_eligibility = 'blocked' WHERE product_id IN (7, 8)");
+      await execute(`INSERT INTO catalog.products (id, sku, name, category, category_id, product_type, shopify_product_id)
+        SELECT g, 'CV-' || g, 'Converted product ' || g, 'Toploaders', $3, 'toploader', (9200000000 + g)::text
+        FROM generate_series($1::int, $2::int) g`, [first, first + total - 1, TOPLOADERS]);
+      await execute(`INSERT INTO catalog.product_variants (id, product_id, sku, name, shopify_variant_id, weight_grams, sales_eligibility)
+        SELECT 300000 + g, g, 'CV-SIZE-' || g, 'One', (7300000000 + g)::text, 100, 'sellable' FROM generate_series($1::int, $2::int) g`,
+      [first, first + total - 1]);
+      await execute(`INSERT INTO public.shopify_variants (id, product_id, sku, price)
+        SELECT (7300000000 + g)::text, (9200000000 + g)::text, 'CV-SIZE-' || g, 9.99 FROM generate_series($1::int, $2::int) g`,
+      [first, first + total - 1]);
+      await execute(`INSERT INTO membership.plan_variant_overrides
+        SELECT 'ops-cv-' || g, 'ops', (7300000000 + g)::text, (9200000000 + g)::text, 'fixed_price', 6.00, NULL, true
+        FROM generate_series($1::int, $2::int) g`, [first, first + total - 1]);
+      await execute("INSERT INTO catalog.product_line_products (product_id, product_line_id) SELECT g, 77 FROM generate_series($1::int, $2::int) g",
+        [first, first + total - 1]);
+      // Every product's own text from a product-line group: 10,000 product writes.
+      await seedProfile("content", { defaultTemplate: STORE_TEMPLATE, groups: [{ id: "line", name: "Line text", priority: 1,
+        scope: { type: "product_line", productLineId: 77 }, template: { introduction: "Line above.", footer: "Line below." } }] });
+      const checkCounter: StatementCounter = { statements: 0 };
+      const checked = await measure("rules_conversion_dry_run_10000", 1, checkCounter, () => dryRun(scopedPool(checkCounter)),
+        { products: total });
+      expect(checked.inputs.listing.candidates).toHaveLength(total);
+      const applyCounter: StatementCounter = { statements: 0 };
+      const answer = await measure("rules_conversion_apply_10000", 1, applyCounter,
+        () => conversion(scopedPool(applyCounter)).applyForMember(MEMBER, STORE, checked.body(KEY_1)),
+        { products: total, state: checked.diff.state, productWrites: checked.plan.products.length });
+      process.stdout.write(`${JSON.stringify({ measurement: "rules_conversion_apply_10000_answer", ...answer })}\n`);
+    }, BULK_TEST_TIMEOUT_MS);
+
+    describe("PR 11e2's system job: clean stores moved over by the hour (plan 9.4 11e2 PG, 13, D1, D20)", () => {
+      const JOB_KEY = "rules-conversion-job:2026-10-12T09";
+      const TICK_ACTION = "dropship.listing_settings.rules_conversion_tick";
+      const conversionJobLog = { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+      const conversionJob = (repositoryPool: Pool = scopedPool(), now = NOW) => new DropshipRulesConversionJobService({
+        source: new PgDropshipRulesConversionJobSource(repositoryPool),
+        repository: new PgDropshipListingRulesConversionRepository(repositoryPool),
+        clock: { now: () => now }, timer: () => performance.now(), log: conversionJobLog, failureContext: () => ({}) });
+      /** The vendor's one-time notice through the real read service (11e1); stock is never read. */
+      const noticeOf = () => new DropshipListingSettingsService({ repository: new PgDropshipListingSettingsRepository(scopedPool()),
+        stock: { atp: { getVariantAtp: async () => { throw new Error("The notice read stock."); } },
+          overrides: { listVariantOverrides: async () => { throw new Error("The notice read stock caps."); } } },
+        clock: { now: () => NOW }, logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() } })
+        .getConversionNoticeForMember(MEMBER, { storeConnectionId: STORE });
+      const failureRows = async () => (await execute(`SELECT vendor_id, store_connection_id, entity_type, entity_id, actor_type, actor_id,
+        severity, payload, created_at FROM dropship.dropship_audit_events WHERE event_type = $1 ORDER BY id`, [RULES_CONVERSION_FAILED_EVENT])).rows;
+      /** The store's three heads now, as the failure row names them. */
+      const headsNow = async () => {
+        const heads = (await conversionState()).heads[0] as { pricing: number | null; content: number | null; ebay: number | null };
+        return { pricing: heads.pricing, content: heads.content, ebayRules: heads.ebay };
+      };
+      /** A store of `vendorId` with a pricing head holding one group (the older-rules state), as W1 leaves it. */
+      async function storeWithGroup(storeId: number, vendorId: number, status = "connected", platform = "ebay"): Promise<void> {
+        await execute(`INSERT INTO dropship.dropship_store_connections (id, vendor_id, platform, access_token_ref, refresh_token_ref, status, setup_status)
+          VALUES ($1, $2, $3, 'vault:a', 'vault:r', $4, 'ready')`, [storeId, vendorId, platform, status]);
+        const revision = await execute(`INSERT INTO dropship.dropship_pricing_profile_revisions
+          (vendor_id, store_connection_id, previous_revision_id, profile, actor_id, created_at) VALUES ($1, $2, NULL, $3::jsonb, $4, $5) RETURNING id`,
+        [vendorId, storeId, JSON.stringify(PRICING), MEMBER, NOW]);
+        await execute("INSERT INTO dropship.dropship_pricing_profiles (vendor_id, store_connection_id, revision_id) VALUES ($1, $2, $3)",
+          [vendorId, storeId, revision.rows[0].id]);
+      }
+
+      beforeEach(() => { for (const level of Object.values(conversionJobLog)) level.mockClear(); });
+
+      it("converts a clean store once as the system (clean, its store key, the notice unseen); reruns insert and audit nothing", async () => {
+        expect((await dryRun()).diff.state).toBe("clean");
+        const before = await conversionState();
+
+        const result = await conversionJob().runOnce();
+
+        expect(result).toMatchObject({ jobKey: JOB_KEY, storesChecked: 1, converted: 1, notClean: 0, failed: 0, deferred: 0, deadLettered: 0 });
+        const { records } = await conversionState();
+        expect(records).toEqual([expect.objectContaining({ vendor_id: VENDOR, store_connection_id: STORE, idempotency_key: rulesConversionSystemKey(STORE),
+          clean: true, changed_size_count: 0, category_count: 2, product_count: 1, pricing_groups_removed: 1, content_groups_removed: 2,
+          ebay_rules_removed: 2, actor_type: "system", actor_id: JOB_KEY, created_at: NOW, notice_seen_at: null, notice_seen_by: null })]);
+        // One audit row per mutation, every one the system's run.
+        const audits = (await execute(`SELECT event_type, actor_type, actor_id FROM dropship.dropship_audit_events ORDER BY id OFFSET $1`,
+          [before.audit])).rows;
+        expect(audits.map((row: Row) => row.event_type)).toEqual(["category_listing_settings_saved", "category_listing_settings_saved",
+          "product_listing_settings_saved", "pricing_profile_saved", "listing_content_saved", "ebay_category_rules_saved",
+          "category_marks_seeded", "listing_rules_converted"]);
+        expect(new Set(audits.map((row: Row) => `${row.actor_type}:${row.actor_id}`))).toEqual(new Set([`system:${JOB_KEY}`]));
+        // No older rule left; the vendor is told once, with the record's counts (11e1).
+        expect((await dryRun()).diff.state).toBe("no_older_rules");
+        await expect(noticeOf()).resolves.toEqual({ storeConnectionId: STORE, notice: { conversionId: Number(records[0].id),
+          convertedAt: NOW.toISOString(), categoryCount: 2, productCount: 1 } });
+        expect(conversionJobLog.info).toHaveBeenCalledWith(RULES_CONVERSION_APPLIED_ACTION, expect.objectContaining({ outcome: "converted",
+          vendor_id: VENDOR, store_connection_id: STORE, actor_type: "system", actor_id: JOB_KEY, request_key: rulesConversionSystemKey(STORE),
+          clean: true, changed_size_count: 0 }));
+        expect(conversionJobLog.info).toHaveBeenCalledWith(TICK_ACTION, expect.objectContaining({ converted_count: 1, converted_store_ids: [STORE],
+          stores_left: 0 }));
+        expect(conversionJobLog.warn).not.toHaveBeenCalled();
+        expect(conversionJobLog.error).not.toHaveBeenCalled();
+        const after = await conversionState();
+        const sizes = await sizeRows();
+
+        // Restarted later in the hour, and the next hour: nothing listed, nothing written, a quiet tick.
+        conversionJobLog.info.mockClear();
+        for (const now of [new Date("2026-10-12T09:45:00.000Z"), new Date("2026-10-12T10:05:00.000Z")]) {
+          await expect(conversionJob(scopedPool(), now).runOnce()).resolves.toMatchObject({ storesChecked: 0, converted: 0 });
+        }
+        expect(await conversionState()).toEqual(after);
+        expect(await sizeRows()).toEqual(sizes);
+        expect(conversionJobLog.info).not.toHaveBeenCalled();
+        expect(conversionJobLog.debug).toHaveBeenCalledWith(TICK_ACTION, expect.objectContaining({ stores_checked: 0, stores_left: 0 }));
+
+        // Older settings adds a group back (D21): the store holds older rules again, but it was converted once, so the job
+        // never lists it again; the vendor can move it from the sheet.
+        await setStoreDefault(PRICING);
+        expect((await dryRun()).diff.state).toBe("clean");
+        const regrouped = await conversionState();
+        await expect(conversionJob(scopedPool(), new Date("2026-10-12T11:05:00.000Z")).runOnce())
+          .resolves.toMatchObject({ storesChecked: 0, converted: 0, notEligible: 0 });
+        expect(await conversionState()).toEqual(regrouped);
+      });
+
+      it("leaves a store that is not clean exactly as it was, takes no store lock for it, and reports it at INFO every hour", async () => {
+        // Two of product 7's sizes follow a named-size price group the move cannot carry (D5): their prices would change.
+        await setStoreDefault({ ...PRICING, groups: [...PRICING.groups, { id: "two-sizes", name: "Two sizes", priority: 5,
+          scope: { type: "listings", productVariantIds: [101, 102] },
+          recipe: { basis: "product_cost", markupBps: 2_000, flatCents: 0, rounding: "cent" } }] });
+        const { diff } = await dryRun();
+        expect(diff.state).toBe("not_clean");
+        expect(diff.rows.length).toBeGreaterThan(0);
+        const before = { state: await conversionState(), sizes: await sizeRows(), writes: await allWrites() };
+        const statements: string[] = [];
+
+        for (const now of [NOW, new Date("2026-10-12T10:05:00.000Z")]) {
+          conversionJobLog.info.mockClear();
+          const result = await conversionJob(scopedPool(undefined, (sql) => { statements.push(sql); }), now).runOnce();
+          expect(result).toMatchObject({ storesChecked: 1, notClean: 1, converted: 0, failed: 0, deferred: 0 });
+          expect(conversionJobLog.info).toHaveBeenCalledExactlyOnceWith(TICK_ACTION, expect.objectContaining({ stores_left: 1, not_clean_count: 1,
+            not_clean_stores: [{ store_connection_id: STORE, changed_size_count: diff.rows.length,
+              would_lose_price_count: diff.blocked.wouldLosePrice.length, would_block_listing_count: diff.blocked.wouldBlockListing.length,
+              too_much_text: diff.blocked.tooMuchText }] }));
+        }
+
+        expect({ state: await conversionState(), sizes: await sizeRows(), writes: await allWrites() }).toEqual(before);
+        // Only the check's read-only snapshot ran: no transaction that locks the store or writes (plan 13.8).
+        expect(statements.filter((sql) => sql.startsWith("BEGIN"))).toEqual(["BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY",
+          "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY"]);
+        expect(statements.some((sql) => /advisory|FOR SHARE|FOR UPDATE|LOCK TABLE|INSERT|UPDATE /.test(sql))).toBe(false);
+      });
+
+      it("leaves a store whose vendor's .ops entitlement is not active: not eligible in the list, skipped by the gate under the lock, moved once active", async () => {
+        expect((await dryRun()).diff.state).toBe("clean");
+        // The vendor's own write gate refuses such a store (DROPSHIP_LISTING_ENTITLEMENT_BLOCKED); the job never writes it either.
+        await execute("UPDATE dropship.dropship_vendors SET entitlement_status = 'lapsed' WHERE id = $1", [VENDOR]);
+        const before = { state: await conversionState(), writes: await allWrites() };
+        const statements: string[] = [];
+
+        const result = await conversionJob(scopedPool(undefined, (sql) => { statements.push(sql); })).runOnce();
+
+        expect(result).toMatchObject({ storesChecked: 0, notEligible: 1, converted: 0, failed: 0, deferred: 0, skipped: 0 });
+        expect(conversionJobLog.info).toHaveBeenCalledExactlyOnceWith(TICK_ACTION, expect.objectContaining({ stores_left: 1,
+          not_eligible_count: 1, not_eligible_store_ids: [STORE] }));
+        // Only the store list ran: the store was never checked.
+        expect(statements.some((sql) => sql.startsWith("BEGIN"))).toBe(false);
+
+        // A job that listed the store before the entitlement lapsed meets the same rule under the store lock, and writes nothing.
+        await expect(new PgDropshipListingRulesConversionRepository(scopedPool()).executeConversion(
+          { actorType: "system", jobKey: JOB_KEY, storeConnectionId: STORE }, (tx) => convertInTransaction(tx, { kind: "system" }, NOW)))
+          .resolves.toEqual({ outcome: "skipped", reason: "vendor_not_entitled" });
+        expect({ state: await conversionState(), writes: await allWrites() }).toEqual(before);
+
+        // Active again: the next tick checks the store and moves it.
+        await execute("UPDATE dropship.dropship_vendors SET entitlement_status = 'active' WHERE id = $1", [VENDOR]);
+        await expect(conversionJob().runOnce()).resolves.toMatchObject({ storesChecked: 1, converted: 1, notEligible: 0 });
+      });
+
+      it("waits for a listing write holding the store lock, then converts on what that write committed", async () => {
+        const paused = gate((sql) => sql === "COMMIT");
+        const w5 = new PgDropshipListingSettingWritesRepository(scopedPool(undefined, paused.hook)).execute(
+          { memberId: MEMBER, storeConnectionId: STORE, idempotencyKey: "product-settings:before-the-job" },
+          (tx) => tx.saveProduct({ productId: PRODUCT_8, expectedRevisionId: null, patch: { storeShelf: { mode: "none" } },
+            requestHash: "d".repeat(64), now: NOW }));
+        let tick: Promise<unknown> | undefined;
+        try {
+          await within(paused.reached, "the product save's commit");
+          tick = conversionJob().runOnce();
+          // The check needs no lock; the conversion's transaction waits on the store lock the product save holds.
+          await waitUntilLockWait("dropship_listing_push_job", 1);
+          expect(await count("dropship.dropship_listing_rule_conversions")).toBe(0);
+          paused.open();
+          await within(w5, "the product save");
+          await expect(within(tick, "the tick")).resolves.toMatchObject({ converted: 1, failed: 0, deferred: 0 });
+        } finally {
+          paused.open();
+          await within(Promise.allSettled([w5, ...(tick ? [tick] : [])]), "the store-lock case's clean-up");
+        }
+        // The conversion built product 8's row on the revision the product save committed while it waited.
+        const chain = await execute(`SELECT r.previous_revision_id, p.idempotency_key AS previous_key, r.actor_type
+          FROM dropship.dropship_product_listing_settings s JOIN dropship.dropship_product_listing_setting_revisions r ON r.id = s.revision_id
+          JOIN dropship.dropship_product_listing_setting_revisions p ON p.id = r.previous_revision_id WHERE s.product_id = $1`, [PRODUCT_8]);
+        expect(chain.rows).toEqual([{ previous_revision_id: expect.any(Number), previous_key: "product-settings:before-the-job", actor_type: "system" }]);
+      });
+
+      it("the job and a vendor's apply at once, the vendor's first: the job waits on the store lock and finds the store already converted", async () => {
+        const { body } = await dryRun();
+        const paused = gate((sql) => sql === "COMMIT");
+        const vendor = conversion(scopedPool(undefined, paused.hook)).applyForMember(MEMBER, STORE, body(KEY_1));
+        let tick: Promise<unknown> | undefined;
+        try {
+          await within(paused.reached, "the vendor's commit");
+          tick = conversionJob().runOnce();
+          await waitUntilLockWait("dropship_listing_push_job", 1);
+          paused.open();
+          await expect(within(vendor, "the vendor's apply")).resolves.toMatchObject({ outcome: "converted" });
+          await expect(within(tick, "the tick")).resolves.toMatchObject({ storesChecked: 1, converted: 0, alreadyConverted: 1, failed: 0 });
+        } finally {
+          paused.open();
+          await within(Promise.allSettled([vendor, ...(tick ? [tick] : [])]), "the race's clean-up");
+        }
+        expect((await conversionState()).records).toEqual([expect.objectContaining({ actor_type: "vendor", idempotency_key: KEY_1 })]);
+        expect(await count("dropship.dropship_audit_events", "event_type = 'listing_rules_converted'")).toBe(1);
+        // A vendor's own move is never a notice.
+        await expect(noticeOf()).resolves.toEqual({ storeConnectionId: STORE, notice: null });
+      });
+
+      it("the job and a vendor's apply at once, the job's first: the vendor waits on the store lock and finds nothing to convert", async () => {
+        const { body } = await dryRun();
+        let recorded = false;
+        // The conversion's own COMMIT (after its record), not the check's read-only one.
+        const paused = gate((sql) => {
+          if (sql.includes("INSERT INTO dropship.dropship_listing_rule_conversions")) recorded = true;
+          return recorded && sql === "COMMIT";
+        });
+        const tick = conversionJob(scopedPool(undefined, paused.hook)).runOnce();
+        let vendor: Promise<unknown> | undefined;
+        try {
+          await within(paused.reached, "the job's commit");
+          vendor = conversion().applyForMember(MEMBER, STORE, body(KEY_1));
+          await waitUntilLockWait("dropship_listing_push_job", 1);
+          paused.open();
+          await expect(within(tick, "the tick")).resolves.toMatchObject({ converted: 1, failed: 0 });
+          await expect(within(vendor, "the vendor's apply")).resolves.toEqual({ outcome: "nothing_to_convert", conversionId: null,
+            categoryCount: 0, productCount: 0 });
+        } finally {
+          paused.open();
+          await within(Promise.allSettled([tick, ...(vendor ? [vendor] : [])]), "the race's clean-up");
+        }
+        expect((await conversionState()).records).toEqual([expect.objectContaining({ actor_type: "system",
+          idempotency_key: rulesConversionSystemKey(STORE) })]);
+        await expect(noticeOf()).resolves.toMatchObject({ notice: { categoryCount: 2, productCount: 1 } });
+      });
+
+      it("records a fatal store once, skips it unchecked while its three heads and the planner are the ones it failed on, and re-arms it after a pricing save", async () => {
+        const heads = await headsNow();
+        let injected = false;
+        const failing = scopedPool(undefined, (sql) => {
+          if (!injected && sql.includes("INSERT INTO dropship.dropship_listing_rule_conversions")) {
+            injected = true;
+            throw Object.assign(new Error("new row violates check constraint"), { code: "23514", constraint: "injected_chk" });
+          }
+        });
+        const before = await conversionState();
+        const sizesBefore = await sizeRows();
+
+        await expect(conversionJob(failing).runOnce()).resolves.toMatchObject({ storesChecked: 1, failed: 1, converted: 0 });
+
+        expect(injected).toBe(true);
+        expect(await failureRows()).toEqual([{ vendor_id: VENDOR, store_connection_id: STORE, entity_type: "dropship_store_connection",
+          entity_id: String(STORE), actor_type: "system", actor_id: JOB_KEY, severity: "error", created_at: NOW,
+          payload: { plannerVersion: RULES_CONVERSION_PLANNER_VERSION, revisions: heads, stage: "apply",
+            errorCode: "DROPSHIP_LISTING_SETTINGS_INVARIANT_FAILED", errorClass: "fatal", causeCode: "23514", jobKey: JOB_KEY } }]);
+        expect(conversionJobLog.error).toHaveBeenCalledExactlyOnceWith("dropship.listing_settings.rules_conversion_failed",
+          expect.objectContaining({ store_connection_id: STORE, record_outcome: "recorded", dead_lettered: true }));
+        // The conversion rolled back whole: the failure row is the only new row.
+        expect({ ...(await conversionState()), audit: before.audit }).toEqual(before);
+        expect((await conversionState()).audit).toBe(before.audit + 1);
+        expect(await sizeRows()).toEqual(sizesBefore);
+
+        // The next hours, on a pool that would convert it: the source leaves it out, so nothing connects to check it.
+        const statements: string[] = [];
+        for (const now of [new Date("2026-10-12T10:05:00.000Z"), new Date("2026-10-12T11:05:00.000Z")]) {
+          conversionJobLog.error.mockClear();
+          conversionJobLog.info.mockClear();
+          await expect(conversionJob(scopedPool(undefined, (sql) => { statements.push(sql); }), now).runOnce())
+            .resolves.toMatchObject({ storesChecked: 0, deadLettered: 1, failed: 0 });
+          expect(conversionJobLog.error).not.toHaveBeenCalled();
+          expect(conversionJobLog.info).toHaveBeenCalledWith(TICK_ACTION, expect.objectContaining({ dead_lettered_count: 1,
+            dead_lettered_store_ids: [STORE], stores_left: 1 }));
+        }
+        expect(statements).toEqual([]);
+        expect(await failureRows()).toHaveLength(1);
+
+        // A pricing save (the same groups, a new revision) moves the pricing head: the store is re-armed, checked and moved.
+        await setStoreDefault(PRICING);
+        await expect(conversionJob(scopedPool(), new Date("2026-10-12T12:05:00.000Z")).runOnce())
+          .resolves.toMatchObject({ storesChecked: 1, converted: 1, deadLettered: 0 });
+        expect((await conversionState()).records).toEqual([expect.objectContaining({ actor_type: "system" })]);
+      });
+
+      it("writes the failure row once, and nothing when a head moved since the list or the store is gone (the record's compare)", async () => {
+        const heads = await headsNow();
+        const repository = new PgDropshipListingRulesConversionRepository(scopedPool());
+        const payload = { plannerVersion: RULES_CONVERSION_PLANNER_VERSION, revisions: heads, stage: "check" as const,
+          errorCode: "DROPSHIP_LISTING_SETTINGS_INVARIANT_FAILED", errorClass: "fatal" as const, causeCode: null, jobKey: JOB_KEY };
+        const record = (input: Partial<Parameters<typeof repository.recordFailure>[0]> = {}) => repository.recordFailure({
+          storeConnectionId: STORE, expectedVendorId: VENDOR, payload, now: NOW, ...input });
+
+        // A pricing save since the list: the failure was planned from the old head, so nothing is written.
+        const listedHeads = { ...heads };
+        await setStoreDefault(PRICING);
+        await expect(record({ payload: { ...payload, revisions: listedHeads } })).resolves.toBe("rules_changed");
+        expect(await failureRows()).toEqual([]);
+        // The heads as they are now: written once; the same record again writes nothing.
+        const now = await headsNow();
+        await expect(record({ payload: { ...payload, revisions: now } })).resolves.toBe("recorded");
+        await expect(record({ payload: { ...payload, revisions: now } })).resolves.toBe("already_recorded");
+        expect(await failureRows()).toEqual([expect.objectContaining({ entity_id: String(STORE), severity: "error", actor_type: "system",
+          payload: { ...payload, revisions: now } })]);
+        // Another vendor named for the store, or a store that is gone: nothing.
+        await expect(record({ expectedVendorId: 11, payload: { ...payload, revisions: now, stage: "apply" } })).resolves.toBe("rules_changed");
+        await expect(record({ storeConnectionId: 999 })).resolves.toBe("store_gone");
+        expect(await failureRows()).toHaveLength(1);
+      });
+
+      it("lists the eligible stores with older rules and no conversion, and dead-letters only on all three heads and the planner version", async () => {
+        // Vendor 10's needs-sign-in store with a group (eligible), its paused one (not eligible), its Shopify one and one it
+        // converted itself (never listed); a closed vendor's store (not eligible); vendor 11's store 23 holds no older rule.
+        await storeWithGroup(24, VENDOR, "needs_reauth");
+        await storeWithGroup(25, VENDOR, "paused");
+        await storeWithGroup(26, VENDOR, "connected", "shopify");
+        await storeWithGroup(27, VENDOR);
+        await execute(`INSERT INTO membership.member_subscriptions VALUES ('sub-3', 'member-3', 'ops');
+          INSERT INTO dropship.dropship_vendors (id, member_id, current_subscription_id, current_plan_id, status, entitlement_status)
+            VALUES (12, 'member-3', 'sub-3', 'ops', 'closed', 'active')`);
+        await storeWithGroup(28, 12);
+        const converter = await scopedPool().connect();
+        try {
+          await insertRuleConversionWithClient(converter, { vendorId: VENDOR, storeConnectionId: 27, idempotencyKey: KEY_2,
+            requestHash: "a".repeat(64), planHash: "b".repeat(64), writesHash: "c".repeat(64), clean: false, changedSizeCount: 1,
+            categoryCount: 1, productCount: 0, pricingGroupsRemoved: 1, contentGroupsRemoved: 0, ebayRulesRemoved: 0,
+            actor: { actorType: "vendor", actorId: MEMBER }, now: NOW });
+        } finally {
+          converter.release();
+        }
+        const source = new PgDropshipRulesConversionJobSource(scopedPool());
+        const heads = await headsNow();
+        const list = () => source.listStores({ plannerVersion: RULES_CONVERSION_PLANNER_VERSION });
+        const pricing24 = (await execute("SELECT revision_id FROM dropship.dropship_pricing_profiles WHERE store_connection_id = 24")).rows[0].revision_id;
+
+        await expect(list()).resolves.toEqual({
+          eligible: [{ vendorId: VENDOR, storeConnectionId: STORE, revisions: heads },
+            { vendorId: VENDOR, storeConnectionId: 24, revisions: { pricing: pricing24, content: null, ebayRules: null } }],
+          notEligibleStoreIds: [25, 28],
+          deadLetteredStoreIds: [],
+        });
+
+        const failure = (storeId: number, revisions: unknown, plannerVersion: number, eventType = RULES_CONVERSION_FAILED_EVENT) => execute(
+          `INSERT INTO dropship.dropship_audit_events (vendor_id, store_connection_id, entity_type, entity_id, event_type, actor_type,
+            actor_id, severity, payload, created_at) VALUES ($1, $2, 'dropship_store_connection', $3, $4, 'system', $5, 'error', $6::jsonb, $7)
+            RETURNING id`, [VENDOR, storeId, String(storeId), eventType, JOB_KEY, JSON.stringify({ plannerVersion, revisions, stage: "apply",
+            errorCode: "DROPSHIP_LISTING_SETTINGS_INVARIANT_FAILED", errorClass: "fatal", causeCode: null, jobKey: JOB_KEY }), NOW]);
+        const eligibleIds = async () => (await list()).eligible.map((store) => store.storeConnectionId);
+        // Each near miss leaves store 22 eligible; only the exact match dead-letters it.
+        for (const [label, write] of [
+          ["the pricing head differs", () => failure(STORE, { ...heads, pricing: heads.pricing! + 1_000 }, RULES_CONVERSION_PLANNER_VERSION)],
+          ["the description head differs", () => failure(STORE, { ...heads, content: null }, RULES_CONVERSION_PLANNER_VERSION)],
+          ["the eBay rules head differs", () => failure(STORE, { ...heads, ebayRules: heads.ebayRules! + 1_000 }, RULES_CONVERSION_PLANNER_VERSION)],
+          ["another planner version", () => failure(STORE, heads, RULES_CONVERSION_PLANNER_VERSION + 1)],
+          ["another store's row", () => failure(24, heads, RULES_CONVERSION_PLANNER_VERSION)],
+          ["another event", () => failure(STORE, heads, RULES_CONVERSION_PLANNER_VERSION, "listing_rules_converted")],
+        ] as const) {
+          const written = await write();
+          expect([label, await eligibleIds()]).toEqual([label, [STORE, 24]]);
+          await execute("DELETE FROM dropship.dropship_audit_events WHERE id = $1", [written.rows[0].id]);
+        }
+        await failure(STORE, heads, RULES_CONVERSION_PLANNER_VERSION);
+        await expect(list()).resolves.toMatchObject({ deadLetteredStoreIds: [STORE], notEligibleStoreIds: [25, 28] });
+        expect(await eligibleIds()).toEqual([24]);
+        // A not-eligible store is reported as not eligible whatever it failed on.
+        await failure(25, { pricing: (await execute("SELECT revision_id FROM dropship.dropship_pricing_profiles WHERE store_connection_id = 25"))
+          .rows[0].revision_id, content: null, ebayRules: null }, RULES_CONVERSION_PLANNER_VERSION);
+        await expect(list()).resolves.toMatchObject({ notEligibleStoreIds: [25, 28], deadLetteredStoreIds: [STORE] });
+      });
+    });
   });
 });

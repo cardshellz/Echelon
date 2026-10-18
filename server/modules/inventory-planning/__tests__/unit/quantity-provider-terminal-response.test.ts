@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   terminalEbayResponseEvidence,
+  isRejectedEbayPublicationReceipt,
   type TerminalRequestReceipt,
 } from "../../domain/quantity-provider-terminal-response";
 const receipt = (
@@ -19,6 +20,52 @@ const receipt = (
   ...overrides,
 });
 describe("eBay final response recovery proof", () => {
+  const publication = (patch: Partial<TerminalRequestReceipt> = {}): TerminalRequestReceipt => receipt({
+    method: "POST", path: "/sell/inventory/v1/offer/publish_by_inventory_item_group",
+    outcome: "uncertain", httpStatus: 400, errorCodes: ["25007"], requestTerminated: true, ...patch,
+  });
+  it.each(["25007", "25016"])("recovers the retained misclassified HTTP400 input refusal %s without changing its outcome", code => {
+    const input = publication({ errorCodes: [code] });
+    const before = JSON.stringify(input);
+    expect(isRejectedEbayPublicationReceipt(input)).toBe(true);
+    expect(terminalEbayResponseEvidence([input])?.receipts).toEqual([input]);
+    expect(JSON.stringify(input)).toBe(before);
+    expect(input.outcome).toBe("uncertain");
+  });
+  it("requires both completed stock receipts before the saved group-publication rejection", () => {
+    const stock = (ordinal: number): TerminalRequestReceipt => receipt({ requestId: String(5000 + ordinal), ordinal,
+      method: "POST", path: "/sell/inventory/v1/bulk_update_price_quantity", outcome: "completed", httpStatus: 200,
+      requestTerminated: true, errorCodes: [] });
+    const third = publication({ requestId: "5003", ordinal: 3 });
+    expect(terminalEbayResponseEvidence([stock(1), stock(2), third])).not.toBeNull();
+    expect(terminalEbayResponseEvidence([stock(1), { ...stock(2), responseHash: null }, third])).toBeNull();
+  });
+  it.each([
+    { outcome: "rejected" as const, httpStatus: 400, errorCodes: ["25002"] },
+    { outcome: "rejected" as const, httpStatus: 401, errorCodes: [] },
+    { outcome: "rejected" as const, httpStatus: 403, errorCodes: ["1100"] },
+    { outcome: "rejected" as const, httpStatus: 429, errorCodes: [] },
+  ])("accepts an instrumented explicit publication refusal %j", patch => {
+    expect(terminalEbayResponseEvidence([publication({ path: "/sell/inventory/v1/offer/offer-1/publish", ...patch })])).not.toBeNull();
+  });
+  it.each([
+    { httpStatus: 500, errorCodes: ["25007"] },
+    { httpStatus: 408 },
+    { httpStatus: 202 },
+    { httpStatus: 200, outcome: "completed" as const, errorCodes: [] },
+    { httpStatus: 400, errorCodes: ["25001"] },
+    { httpStatus: 400, errorCodes: ["25007", "25001"] },
+    { errorCodes: [] },
+    { requestTerminated: false },
+    { requestTerminated: null },
+    { responseHash: null },
+    { recordedAt: null },
+    { method: "POST" as const, path: "/sell/inventory/v1/offer" },
+    { method: "DELETE" as const, path: "/sell/inventory/v1/offer/offer-1" },
+  ])("never treats missing, accepted, server-failed, or unrelated lifecycle evidence as publication rejection %j", patch => {
+    expect(isRejectedEbayPublicationReceipt(publication(patch))).toBe(false);
+    expect(terminalEbayResponseEvidence([publication(patch)])).toBeNull();
+  });
   it("retains a 500 as unknown effect while proving the synchronous error response terminated", () => {
     const result = terminalEbayResponseEvidence([receipt()]);
     expect(result?.receipts[0]).toMatchObject({

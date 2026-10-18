@@ -1197,6 +1197,56 @@ export const dropshipProductCategorySeen = dropshipSchema.table("dropship_produc
     foreignColumns: [dropshipStoreConnections.id, dropshipStoreConnections.vendorId] }),
 ]);
 
+/**
+ * One applied move of a store's older group rules into category and product
+ * settings (PR 11, the dropship_listing_rule_conversions migration): the key
+ * it claimed, its hashes and integer counts, and the one-time notice of a
+ * system conversion. A trigger refuses DELETE and every UPDATE but marking a
+ * system conversion's notice seen, once. Declared so a forced schema push
+ * keeps the table; the writers are raw SQL.
+ */
+export const dropshipListingRuleConversions = dropshipSchema.table("dropship_listing_rule_conversions", {
+  id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
+  vendorId: integer("vendor_id").notNull(),
+  storeConnectionId: integer("store_connection_id").notNull(),
+  idempotencyKey: varchar("idempotency_key", { length: 200 }).notNull(),
+  requestHash: varchar("request_hash", { length: 64 }).notNull(),
+  planHash: varchar("plan_hash", { length: 64 }).notNull(),
+  writesHash: varchar("writes_hash", { length: 64 }).notNull(),
+  clean: boolean("clean").notNull(),
+  changedSizeCount: integer("changed_size_count").notNull(),
+  categoryCount: integer("category_count").notNull(),
+  productCount: integer("product_count").notNull(),
+  pricingGroupsRemoved: integer("pricing_groups_removed").notNull(),
+  contentGroupsRemoved: integer("content_groups_removed").notNull(),
+  ebayRulesRemoved: integer("ebay_rules_removed").notNull(),
+  actorType: varchar("actor_type", { length: 20 }).notNull(),
+  actorId: varchar("actor_id", { length: 255 }).notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
+  noticeSeenAt: timestamp("notice_seen_at", { withTimezone: true }),
+  noticeSeenBy: varchar("notice_seen_by", { length: 255 }),
+}, (table) => [
+  foreignKey({ name: "dropship_listing_rule_conversion_owner_fk", columns: [table.storeConnectionId, table.vendorId],
+    foreignColumns: [dropshipStoreConnections.id, dropshipStoreConnections.vendorId] }),
+  unique("dropship_listing_rule_conversion_key_uk").on(table.vendorId, table.idempotencyKey),
+  check("dropship_listing_rule_conversion_key_chk", sql`${table.idempotencyKey} ~ '^[A-Za-z0-9:_-]{8,200}$'`),
+  check("dropship_listing_rule_conversion_hash_chk", sql`${table.requestHash} ~ '^[a-f0-9]{64}$'
+    AND ${table.planHash} ~ '^[a-f0-9]{64}$' AND ${table.writesHash} ~ '^[a-f0-9]{64}$'`),
+  check("dropship_listing_rule_conversion_count_chk", sql`${table.changedSizeCount} BETWEEN 0 AND 10000
+    AND ${table.categoryCount} BETWEEN 0 AND 10000 AND ${table.productCount} BETWEEN 0 AND 10000`),
+  check("dropship_listing_rule_conversion_removed_chk", sql`${table.pricingGroupsRemoved} BETWEEN 0 AND 100
+    AND ${table.contentGroupsRemoved} BETWEEN 0 AND 100 AND ${table.ebayRulesRemoved} BETWEEN 0 AND 100`),
+  check("dropship_listing_rule_conversion_actor_chk", sql`${table.actorType} IN ('vendor', 'system')`),
+  check("dropship_listing_rule_conversion_actor_id_chk", sql`btrim(${table.actorId}) <> ''`),
+  check("dropship_listing_rule_conversion_clean_chk", sql`NOT ${table.clean} OR ${table.changedSizeCount} = 0`),
+  check("dropship_listing_rule_conversion_system_clean_chk",
+    sql`${table.actorType} <> 'system' OR (${table.clean} AND ${table.changedSizeCount} = 0)`),
+  check("dropship_listing_rule_conversion_notice_chk", sql`(${table.noticeSeenAt} IS NULL) = (${table.noticeSeenBy} IS NULL)
+    AND (${table.noticeSeenBy} IS NULL OR btrim(${table.noticeSeenBy}) <> '')
+    AND (${table.actorType} = 'system' OR ${table.noticeSeenAt} IS NULL)`),
+  index("dropship_listing_rule_conversion_store_idx").on(table.storeConnectionId, table.id),
+]);
+
 export const dropshipStoreSetupChecks = dropshipSchema.table(
   "dropship_store_setup_checks",
   {

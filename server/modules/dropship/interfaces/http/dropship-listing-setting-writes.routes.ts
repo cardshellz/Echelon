@@ -12,6 +12,10 @@ import {
   saveProductsBulkResponseSchema,
   saveSizePricesResponseSchema,
 } from "../../../../../shared/dropship/listing-setting-writes";
+import {
+  listingRulesConversionApplyResponseSchema,
+  listingRulesConversionNoticeAcknowledgeResponseSchema,
+} from "../../../../../shared/dropship/listing-rules-conversion";
 import { logger } from "../../../../platform/observability/logger";
 import {
   createDropshipListingSettingWriteServices,
@@ -25,8 +29,10 @@ import { listingSettingWriteErrorAnswer } from "./dropship-listing-setting-write
  * The listing-settings writes (Listing settings design 8.5; plan PR 9). Reads
  * stay in dropship-listing-settings.routes.ts, which has no write dependency.
  * Every route: sign-in, its member budget, then the 1 MiB parser, so no
- * anonymous or over-budget caller makes the server parse a large body. Routes
- * orchestrate only: the services check, write and log each save.
+ * anonymous or over-budget caller makes the server parse a large body; the
+ * rules conversion's apply and its notice's [Got it] have small bodies and
+ * keep the global 100 KB parser. Routes orchestrate only: the services check,
+ * write and log each save.
  */
 
 /** Bulk writes and price checks share one budget per member (design 8.8). */
@@ -46,6 +52,8 @@ const WRITE_RATE_LIMIT_MESSAGE = "Too many saves in a minute. Wait a moment and 
 const READ_RATE_LIMIT_MESSAGE = "Too many listing settings requests. Try again in a minute.";
 /** W7's POSTs name their category and review in the body, not the path (plan 9.4): the refusal line takes them from there. */
 const W7_BODY_IDS = { logBodyIds: true } as const;
+/** The notice's [Got it] names its conversion in the body (PR 11e1): the refusal line takes it from there. */
+const NOTICE_BODY_IDS = { logConversionId: true } as const;
 
 export function registerDropshipListingSettingWritesRoutes(
   app: Express,
@@ -86,6 +94,16 @@ export function registerDropshipListingSettingWritesRoutes(
   app.post(`${base}/category-moves/acknowledge`, requireDropshipAuth, singleLimiter, parseBody, (req, res) => respond(req, res,
     acknowledgeCategoryMovesResponseSchema, () => services.categoryMoves.acknowledgeForMember(memberId(req),
       parseId(req.params.storeConnectionId), req.body)));
+  // W11's vendor apply (PR 11, plan 7.B.2): a heavy write on the bulk budget, its transaction behind the service's
+  // heavy-write gate. Its body is a key and two hashes, so it keeps the global parser and is not in the 1 MiB table.
+  app.post(`${base}/conversion/apply`, requireDropshipAuth, bulkLimiter, (req, res) => respond(req, res,
+    listingRulesConversionApplyResponseSchema, () => services.conversion.applyForMember(memberId(req),
+      parseId(req.params.storeConnectionId), req.body)));
+  // The one-time notice's [Got it] (PR 11e1, plan 9.2, 9.3): one vendor action, so the single budget (plan P7). Idempotent
+  // by state, so no request key; its body is one id, so it keeps the global parser and is not in the 1 MiB table.
+  app.post(`${base}/conversion/notice/acknowledge`, requireDropshipAuth, singleLimiter, (req, res) => respond(req, res,
+    listingRulesConversionNoticeAcknowledgeResponseSchema, () => services.conversionNotice.acknowledgeForMember(memberId(req),
+      parseId(req.params.storeConnectionId), req.body), NOTICE_BODY_IDS));
 }
 
 /** One budget per call: build each once and share it (plan 3.5). The words are the write's unless a read's are given. */
@@ -132,7 +150,7 @@ function bodyReviewId(body: unknown): string | null {
 }
 
 async function respond<T>(req: Request, res: Response, schema: z.ZodType<T>, operation: () => Promise<unknown>,
-  options: { logBodyIds?: boolean } = {}): Promise<Response> {
+  options: { logBodyIds?: boolean; logConversionId?: boolean } = {}): Promise<Response> {
   res.setHeader("Cache-Control", "no-store");
   try {
     const output = schema.safeParse(await operation());
@@ -146,6 +164,7 @@ async function respond<T>(req: Request, res: Response, schema: z.ZodType<T>, ope
     const categoryId = options.logBodyIds === true ? bodyWholeNumber(req.body, "categoryId") : parseId(req.params.categoryId);
     const reviewId = options.logBodyIds === true ? bodyReviewId(req.body)
       : typeof req.params.reviewId === "string" ? req.params.reviewId : null;
+    const conversionId = options.logConversionId === true ? bodyWholeNumber(req.body, "conversionId") : Number.NaN;
     const entry = {
       outcome: answer.errorClass === "transient" ? "deferred" : answer.errorClass === "fatal" ? "failed" : "refused",
       error_code: answer.code,
@@ -153,11 +172,12 @@ async function respond<T>(req: Request, res: Response, schema: z.ZodType<T>, ope
       status: answer.status,
       method: req.method,
       path: req.route?.path ?? req.path,
-      // Correlation: one query on a store, product, category, review or member returns every refused or failed write.
+      // Correlation: one query on a store, product, category, review, conversion or member returns every refused or failed write.
       store_connection_id: Number.isSafeInteger(storeConnectionId) ? storeConnectionId : null,
       ...(Number.isSafeInteger(productId) ? { product_id: productId } : {}),
       ...(Number.isSafeInteger(categoryId) ? { category_id: categoryId } : {}),
       ...(reviewId === null ? {} : { review_id: reviewId }),
+      ...(Number.isSafeInteger(conversionId) ? { conversion_id: conversionId } : {}),
       actor_id: req.session?.dropship?.memberId ?? null,
     };
     // Expected refusals are DEBUG; a retryable failure is WARN; a broken contract needs a human (ERROR).

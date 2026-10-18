@@ -45,7 +45,9 @@ import { eq, sql as sqlTag } from "drizzle-orm";
 import { canonicalJson } from "@shared/utils/canonical-json";
 import { shipmentAllocationEvidenceSchema } from "@shared/procurement/shipment-allocation";
 import { shipmentCostWorkflowIdSchema, shipmentCostUpdateInputSchema, shipmentCostUpdateResultSchema } from "@shared/procurement/shipment-cost-workflow";
-import { readShipmentCostReview } from "./shipment-cost-review.repository";
+import { isShipmentCostLinePosted } from "@shared/procurement/shipment-cost-workflow";
+import { landedCostHealthSchema, type LandedCostHealth } from "@shared/procurement/landed-cost-health";
+import { readShipmentCostReview, readShipmentCostReviewInTransaction } from "./shipment-cost-review.repository";
 import { shipmentAllocationsEqual } from "./domain/shipment-allocation-equality";
 import { shipmentCancellationBlockers, SHIPMENT_CANCELLATION_REASON_MAX_LENGTH } from "./domain/shipment-cancellation";
 import { readShipmentCancellationEvidence } from "./shipment-cancellation.repository";
@@ -84,7 +86,7 @@ export function allocateCentsByBasis(
 
 interface Storage {
   // Inbound Shipments
-  getInboundShipments(filters?: any): Promise<InboundShipment[]>;
+  getInboundShipments(filters?: any, executor?: any): Promise<InboundShipment[]>;
   getInboundShipmentPurchaseOrders(shipmentIds: readonly number[]): Promise<Map<number, ShipmentPurchaseOrderReference[]>>;
   getInboundShipmentsCount(filters?: any): Promise<number>;
   getInboundShipmentById(id: number, executor?: any): Promise<InboundShipment | undefined>;
@@ -1292,136 +1294,145 @@ export function createShipmentTrackingService(
     };
   }
 
-  async function getLandedCostHealth(options: { limit?: number } = {}) {
-    const limit = Math.min(Math.max(Number(options.limit || 100), 1), 250);
-    const shipments = await storage.getInboundShipments({
-      status: ["costing", "closed"],
-      limit,
-    });
-    const items: Array<{
-      id: string;
-      type: string;
-      severity: "critical" | "warning";
-      shipmentId: number;
-      shipmentNumber: string | null;
-      shipmentStatus: string;
-      detail: string;
-      action: string;
-      provisionalLotCount?: number;
-      missingSnapshotLineIds?: number[];
-      blockerCount?: number;
-      warningCount?: number;
-    }> = [];
-    const counts = {
-      allocationBlockers: 0,
-      allocationWarnings: 0,
-      pendingFinalization: 0,
-      finalizedNotPushed: 0,
-      staleProvisionalLots: 0,
-    };
+  async function getLandedCostHealth(options: { limit?: number } = {}): Promise<LandedCostHealth> {
+    const limit = options.limit ?? 100;
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 250) {
+      throw new ShipmentTrackingError("Cost health limit must be an integer between 1 and 250.");
+    }
+    // The posting evidence and advisory lot flags must describe the same source
+    // snapshot. A failed evidence read rejects the response, never a healthy default.
+    return db.transaction(async (tx: any): Promise<LandedCostHealth> => {
+      const shipments = await storage.getInboundShipments({
+        status: ["costing", "closed"],
+        limit,
+      }, tx);
+      const items: LandedCostHealth["items"] = [];
+      const counts = {
+        allocationBlockers: 0,
+        allocationWarnings: 0,
+        pendingFinalization: 0,
+        finalizedNotPushed: 0,
+        staleProvisionalLots: 0,
+        postingReviewRequired: 0,
+        provisionalOtherCosts: 0,
+      };
 
-    for (const shipment of shipments) {
-      const lines = await storage.getInboundShipmentLines(shipment.id);
-      const provisionalLots = await storage.getProvisionalLotsByShipment(shipment.id);
-      const allocation = await getAllocationStatus(shipment.id);
-      const missingSnapshotLineIds: number[] = [];
-      let finalizedLineCount = 0;
-
-      for (const line of lines) {
-        const snapshots = await storage.getLandedCostSnapshots(line.id);
-        if (snapshots.length > 0 && snapshots[0]?.landedUnitCostCents != null) {
-          finalizedLineCount += 1;
-        } else {
-          missingSnapshotLineIds.push(line.id);
+      for (const shipment of shipments) {
+        const lines = await storage.getInboundShipmentLines(shipment.id, tx);
+        const provisionalLots = await storage.getProvisionalLotsByShipment(shipment.id, tx);
+        const allocation = await getAllocationStatus(shipment.id, tx);
+        const review = await readShipmentCostReviewInTransaction(tx, shipment.id);
+        if (!review || review.shipmentId !== shipment.id || review.lines.length !== lines.length
+          || new Set(review.lines.map(line => line.lineId)).size !== lines.length
+          || review.lines.some(line => !lines.some(source => source.id === line.lineId))) {
+          throw new ShipmentTrackingError("Current shipment cost evidence is incomplete. Reload cost health.", 503,
+            { code: "SHIPMENT_COST_HEALTH_EVIDENCE_INCOMPLETE", shipmentId: shipment.id });
         }
-      }
+        const postedLineIds = new Set(review.lines.filter(isShipmentCostLinePosted).map(line => line.lineId));
+        const unpostedLines = review.lines.filter(line => !postedLineIds.has(line.lineId));
+        const needsSourceReview = unpostedLines.some(line => line.sourceIssue || line.exceptionReview
+          || line.application?.status === "review_required" || (line.application?.issues.length ?? 0) > 0);
+        const missingSnapshotLineIds: number[] = [];
+        let finalizedLineCount = 0;
 
-      if (allocation.blockerCount > 0) {
-        counts.allocationBlockers += 1;
-        items.push({
-          id: `allocation_blocked-${shipment.id}`,
-          type: "allocation_blocked",
-          severity: "critical",
-          shipmentId: shipment.id,
-          shipmentNumber: shipment.shipmentNumber ?? null,
-          shipmentStatus: shipment.status,
-          detail: `${allocation.blockerCount} allocation blocker${allocation.blockerCount === 1 ? "" : "s"} need review before landed cost can be trusted`,
-          action: "review_allocation",
-          blockerCount: allocation.blockerCount,
-        });
-      } else if (allocation.warningCount > 0) {
-        counts.allocationWarnings += 1;
-        items.push({
-          id: `allocation_warning-${shipment.id}`,
-          type: "allocation_warning",
-          severity: "warning",
-          shipmentId: shipment.id,
-          shipmentNumber: shipment.shipmentNumber ?? null,
-          shipmentStatus: shipment.status,
-          detail: `${allocation.warningCount} allocation warning${allocation.warningCount === 1 ? "" : "s"} present`,
-          action: "review_allocation",
-          warningCount: allocation.warningCount,
-        });
-      }
+        for (const line of lines) {
+          const snapshots = await storage.getLandedCostSnapshots(line.id, tx);
+          if (snapshots.length > 0 && snapshots[0]?.landedUnitCostCents != null) {
+            finalizedLineCount += 1;
+          } else if (!postedLineIds.has(line.id)) {
+            missingSnapshotLineIds.push(line.id);
+          }
+        }
 
-      if (lines.length > 0 && allocation.allocatableCostCount > 0 && missingSnapshotLineIds.length > 0) {
-        counts.pendingFinalization += 1;
-        items.push({
-          id: `pending_finalization-${shipment.id}`,
-          type: "pending_finalization",
-          severity: shipment.status === "closed" ? "critical" : "warning",
-          shipmentId: shipment.id,
-          shipmentNumber: shipment.shipmentNumber ?? null,
-          shipmentStatus: shipment.status,
-          detail: `${missingSnapshotLineIds.length} shipment line${missingSnapshotLineIds.length === 1 ? "" : "s"} do not have finalized landed cost snapshots`,
-          action: "finalize_landed_cost",
-          missingSnapshotLineIds,
-        });
-      }
-
-      if (provisionalLots.length > 0) {
-        if (shipment.status === "closed") {
-          counts.staleProvisionalLots += 1;
+        if (allocation.blockerCount > 0) {
+          counts.allocationBlockers += 1;
           items.push({
-            id: `stale_provisional_lots-${shipment.id}`,
-            type: "stale_provisional_lots",
+            id: `allocation_blocked-${shipment.id}`,
+            type: "allocation_blocked",
             severity: "critical",
             shipmentId: shipment.id,
             shipmentNumber: shipment.shipmentNumber ?? null,
             shipmentStatus: shipment.status,
-            detail: `${provisionalLots.length} provisional lot${provisionalLots.length === 1 ? "" : "s"} remain after shipment close`,
-            action: finalizedLineCount === lines.length ? "push_costs_to_lots" : "finalize_landed_cost",
-            provisionalLotCount: provisionalLots.length,
+            detail: `${allocation.blockerCount} allocation blocker${allocation.blockerCount === 1 ? "" : "s"} need review before landed cost can be trusted`,
+            action: "review_allocation",
+            blockerCount: allocation.blockerCount,
           });
-        } else if (finalizedLineCount === lines.length && lines.length > 0) {
-          counts.finalizedNotPushed += 1;
+        } else if (allocation.warningCount > 0) {
+          counts.allocationWarnings += 1;
           items.push({
-            id: `finalized_not_pushed-${shipment.id}`,
-            type: "finalized_not_pushed",
+            id: `allocation_warning-${shipment.id}`,
+            type: "allocation_warning",
             severity: "warning",
             shipmentId: shipment.id,
             shipmentNumber: shipment.shipmentNumber ?? null,
             shipmentStatus: shipment.status,
-            detail: `${provisionalLots.length} provisional lot${provisionalLots.length === 1 ? "" : "s"} can receive finalized landed cost`,
-            action: "push_costs_to_lots",
+            detail: `${allocation.warningCount} allocation warning${allocation.warningCount === 1 ? "" : "s"} present`,
+            action: "review_allocation",
+            warningCount: allocation.warningCount,
+          });
+        }
+
+        if (lines.length > 0 && allocation.allocatableCostCount > 0 && missingSnapshotLineIds.length > 0) {
+          counts.pendingFinalization += 1;
+          items.push({
+            id: `pending_finalization-${shipment.id}`,
+            type: "pending_finalization",
+            severity: shipment.status === "closed" ? "critical" : "warning",
+            shipmentId: shipment.id,
+            shipmentNumber: shipment.shipmentNumber ?? null,
+            shipmentStatus: shipment.status,
+            detail: `${missingSnapshotLineIds.length} shipment line${missingSnapshotLineIds.length === 1 ? "" : "s"} do not have finalized landed cost snapshots`,
+            action: "finalize_landed_cost",
+            missingSnapshotLineIds,
+          });
+        }
+
+        if (provisionalLots.length > 0 && lines.length > 0 && unpostedLines.length === 0) {
+          // The legacy flag covers product and packaging estimates as well as
+          // freight. A posted landed component cannot clear those other sources.
+          counts.provisionalOtherCosts += 1;
+          items.push({
+            id: `provisional_other_costs-${shipment.id}`, type: "provisional_other_costs", severity: "warning",
+            shipmentId: shipment.id, shipmentNumber: shipment.shipmentNumber ?? null, shipmentStatus: shipment.status,
+            detail: `Landed costs are posted. ${provisionalLots.length} lot${provisionalLots.length === 1 ? "" : "s"} still ${provisionalLots.length === 1 ? "has" : "have"} a provisional cost flag; review remaining cost evidence before treating the complete lot cost as final.`,
+            action: "review_cost_evidence", provisionalLotCount: provisionalLots.length,
+          });
+        } else if (unpostedLines.length > 0 && (provisionalLots.length > 0
+          || allocation.allocatableCostCount > 0 || needsSourceReview)) {
+          const fullyFinalized = finalizedLineCount === lines.length && lines.length > 0;
+          const closedProvisional = shipment.status === "closed" && provisionalLots.length > 0;
+          const readyToPush = !needsSourceReview && fullyFinalized && !closedProvisional;
+          const type = closedProvisional ? "stale_provisional_lots"
+            : readyToPush ? "finalized_not_pushed" : "posting_review_required";
+          if (closedProvisional) counts.staleProvisionalLots += 1;
+          else if (readyToPush) counts.finalizedNotPushed += 1;
+          else counts.postingReviewRequired += 1;
+          items.push({
+            id: `${type}-${shipment.id}`, type,
+            severity: shipment.status === "closed" ? "critical" : "warning",
+            shipmentId: shipment.id, shipmentNumber: shipment.shipmentNumber ?? null, shipmentStatus: shipment.status,
+            detail: `${unpostedLines.length} shipment line${unpostedLines.length === 1 ? " does" : "s do"} not have current posted landed costs. ${needsSourceReview
+              ? "Review the current source or reconciliation evidence before updating costs."
+              : "Update shipment costs to apply the current source to inventory and sold costs."}`,
+            action: needsSourceReview ? "review_cost_evidence" : fullyFinalized ? "push_costs_to_lots" : "finalize_landed_cost",
             provisionalLotCount: provisionalLots.length,
           });
         }
       }
-    }
 
-    const critical = items.filter((item) => item.severity === "critical").length;
-    const warning = items.filter((item) => item.severity === "warning").length;
-    const status = critical > 0 ? "critical" : warning > 0 ? "warning" : "healthy";
+      const critical = items.filter((item) => item.severity === "critical").length;
+      const warning = items.filter((item) => item.severity === "warning").length;
+      const status = critical > 0 ? "critical" : warning > 0 ? "warning" : "healthy";
 
-    return {
-      status,
-      scannedShipments: shipments.length,
-      critical,
-      warning,
-      counts,
-      items: items.slice(0, limit),
-    };
+      return landedCostHealthSchema.parse({
+        status,
+        scannedShipments: shipments.length,
+        critical,
+        warning,
+        counts,
+        items: items.slice(0, limit),
+      });
+    }, { isolationLevel: "repeatable read", accessMode: "read only" });
   }
 
   function getCostCategory(costType: string): "freight" | "duty" | "insurance" | "other" {

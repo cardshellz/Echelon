@@ -35,7 +35,9 @@ const publicationReview: EbayListingMappingReview = {
 };
 async function setup(page: Page, publication = false) {
   const state = await setupEbayChannelPage(page);
-  state.jobs = publication ? [] : [{ ...job, state: "needs_attention", code: "EBAY_SYNC_PROVIDER_IDENTITY_CHANGED", message: "The offer identity needs verification." }];
+  state.jobs = [{ ...job, operation: publication ? "publish" : "sync", state: "needs_attention",
+    code: publication ? "EBAY_PUBLICATION_TARGET_UNVERIFIED" : "EBAY_SYNC_PROVIDER_IDENTITY_CHANGED",
+    message: "The offer identity needs verification." }];
   if (publication) { state.feedStatus = "publication_incomplete"; state.externalListingId = null; }
   const currentJob = publication ? { ...job, operation: "publish" } : job;
   const mapping = {
@@ -58,7 +60,7 @@ async function setup(page: Page, publication = false) {
       : route.fulfill({ status: 404, json: { code: "EBAY_MAPPING_REPAIR_NOT_FOUND", error: "No saved receipt was found." } });
   });
   await page.reload();
-  await page.getByRole("button", { name: publication ? "Check publication" : "Review listing mapping", exact: true }).filter({ visible: true }).click();
+  await page.getByRole("button", { name: publication ? "Review publication" : "Review listing mapping", exact: true }).filter({ visible: true }).click();
   const dialog = page.getByRole("dialog");
   await expect(dialog.getByRole("heading", { name: publication ? "Finish publishing on eBay" : "Fix eBay listing mapping" })).toBeVisible();
   return { state, mapping, dialog };
@@ -165,6 +167,7 @@ test("a replayed mapping receipt preserves a newer unsaved sync command until it
   const { state, mapping, dialog } = await setup(page, true);
   await dialog.getByRole("button", { name: "Close", exact: true }).first().click();
   state.feedStatus = "listed"; state.externalListingId = "verified-listing";
+  state.jobs = [];
   state.response = { synced: 0, priceChanges: 0, qtyChanges: 0, policyChanges: 0, errors: 1, pending: 0, jobs: [],
     details: [{ productId: 1, success: false, code: "EBAY_SYNC_MAPPING_INVALID", error: "The newer unsaved request needs mapping review." }] };
   const oldCommand = { commandKey: "5e29b623-84d5-4f63-98de-bf9427b54bdc", reviewHash: review.reviewHash! };
@@ -387,11 +390,11 @@ test("a viewer is not sent into the registered listing workflow without its requ
   expect(mapping.commands).toEqual([]); expect(state.errors).toEqual([]); expect(state.unexpected).toEqual([]);
 });
 
-test("offer-only publication uses a fresh review and stays Publishing until live completion", async ({ page }, info) => {
+test("an explicitly requested publication review stays Publishing until live completion", async ({ page }, info) => {
   const { state, mapping, dialog } = await setup(page, true);
   await expect(dialog).toContainText("Reuse the existing eBay offers");
   expect(mapping.commands).toEqual([]);
-  await expect(page.getByTitle("Sync this listing", { exact: true })).toHaveCount(0);
+  expect(state.commands).toEqual([]);
   await expect(page.getByText("Listed", { exact: true })).toHaveCount(0);
   await dialog.getByRole("button", { name: "Finish publishing", exact: true }).click();
   await expect(dialog.getByRole("status")).toContainText("Publishing is queued or running");
@@ -416,7 +419,7 @@ test("finish publishing preserves its reviewed request after a lost response and
   await expect(dialog.getByRole("button", { name: "Retry this fix" })).toBeEnabled();
   const command = mapping.commands[0];
   await page.reload();
-  await page.getByRole("button", { name: "Check publication", exact: true }).filter({ visible: true }).click();
+  await page.getByRole("button", { name: "Review publication", exact: true }).filter({ visible: true }).click();
   await expect(dialog).toContainText("No saved receipt was found yet");
   mapping.post = null;
   await dialog.getByRole("button", { name: "Retry this fix" }).click();

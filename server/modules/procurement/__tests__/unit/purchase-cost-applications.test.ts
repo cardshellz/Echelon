@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
+import { purchaseCostApplicationHistorySchema } from "@shared/procurement/purchase-cost-applications";
 import { canonicalJson } from "@shared/utils/canonical-json";
 import { projectPurchaseCostApplications, type PurchaseCostApplicationRead } from "../../purchase-cost-application-read.service";
 import { projectReceiptCostQueue, type ReceiptCostQueueRead } from "../../receipt-cost-queue-read.service";
@@ -123,6 +124,122 @@ describe("immutable purchase cost application projection", () => {
     const revision = projectPurchaseCostApplications(input, 17).revisions[0];
     expect(revision.source?.totalMills).toBe(0);
     expect(revision.applications[0]).toMatchObject({ evidenceState: "verified_record", outcome: { lotsUpdated: 0 } });
+  });
+});
+
+function reconciledHistoryFixture(): PurchaseCostApplicationRead {
+  const input = applicationReadFixture();
+  const contract = withFingerprint({ ...(input.revisions[0].contract as object), component: "landed", evidence: "estimated",
+    scope: { kind: "shipment_line", purchaseOrderId: 17, purchaseOrderLineId: 171, inboundShipmentId: 7, inboundShipmentLineId: 71 } });
+  Object.assign(input.revisions[0], { component: "landed", shipmentId: 7, shipmentLineId: 71, contract, fingerprint: contract.fingerprint });
+  const issues = [{ code: "COST_HISTORICAL_LINEAGE_MISSING", message: "Historical stock destination remains unknown." }];
+  const result = { status: "review_required", lotsUpdated: 0, cogsRowsUpdated: 0, totalCogsDeltaCents: 0, issues };
+  input.applications = [
+    { ...input.applications[0], status: "review_required", result },
+    { ...input.applications[0], id: 22, status: "review_required", result },
+  ];
+  input.lotChanges = []; input.contributions = [];
+  const posting = { id: 51, approvalId: 61, applicationId: 22, sourceRevisionId: 11,
+    destination: "inventory_variance" as const, beforeMills: 0, afterMills: 2000, deltaMills: 2000,
+    actorName: "Approval reviewer", reason: "Historical destination reviewed and approved.", recordedAt };
+  input.reconciliationPostings = [posting];
+  input.currentResolutions = [{ sourceRevisionId: 11, sourceFingerprint: contract.fingerprint, applicationId: 22,
+    currency: "USD", destination: "inventory_variance", postedMills: 2000, postings: [posting] }];
+  input.reportingEvents = [{ ...input.reportingEvents[0], id: 42, applicationId: 22, component: "landed", sourceFingerprint: contract.fingerprint,
+    cogsDeltaCents: 0, changeCount: 0,
+    historicalCostAdjustments: [{ id: 51, approvalId: 61, destination: "inventory_variance", beforeMills: 0, afterMills: 2000, deltaMills: 2000 }] }];
+  return input;
+}
+
+describe("purchase history current cost reconciliation", () => {
+  it("shows verified current approval and reporting while preserving the original failed attempt", () => {
+    const input = reconciledHistoryFixture(), before = structuredClone(input);
+    const revision = projectPurchaseCostApplications(input, 17).revisions[0];
+    expect(revision.currentResolution).toEqual(input.currentResolutions![0]);
+    expect(revision.applications[0]).toMatchObject({ id: 21, status: "review_required", latestRecordedApplication: false, resolvedByCurrentPosting: true,
+      issues: [{ code: "COST_HISTORICAL_LINEAGE_MISSING" }], reportingEvent: null });
+    expect(revision.applications[1]).toMatchObject({ id: 22, status: "review_required", evidenceState: "review_required", resolvedByCurrentPosting: true,
+      issues: [{ code: "COST_HISTORICAL_LINEAGE_MISSING" }], reportingEvent: { evidenceState: "verified_record" } });
+    expect(input).toEqual(before);
+  });
+
+  it.each(["stale_fingerprint", "old_revision", "old_attempt", "unknown_issue", "missing_posting", "conflicting_posted_amount", "duplicate_resolution", "duplicate_posting"])(
+    "does not assert current resolution from %s evidence", (kind) => {
+      const input = reconciledHistoryFixture();
+      if (kind === "stale_fingerprint") input.currentResolutions![0].sourceFingerprint = "f".repeat(64);
+      if (kind === "old_revision") input.revisions.unshift({ ...input.revisions[0], id: 12, revision: 3 });
+      if (kind === "old_attempt") input.applications.push({ ...input.applications[1], id: 23 });
+      if (kind === "unknown_issue") input.applications[1].result = { ...(input.applications[1].result as object), issues: [{ code: "COST_GRAPH_CONFLICT", message: "Graph requires repair." }] };
+      if (kind === "missing_posting") input.reconciliationPostings = [];
+      if (kind === "conflicting_posted_amount") input.currentResolutions![0].postedMills = 2001;
+      if (kind === "duplicate_resolution") input.currentResolutions!.push(input.currentResolutions![0]);
+      if (kind === "duplicate_posting") { input.currentResolutions![0].postings.push(input.currentResolutions![0].postings[0]); input.currentResolutions![0].postedMills = 4000; }
+      expect(projectPurchaseCostApplications(input, 17).revisions.every((revision) => revision.currentResolution === null)).toBe(true);
+    },
+  );
+
+  it.each(["wrong_delta", "wrong_approval", "wrong_posting", "missing_event", "wrong_posting_revision"])(
+    "keeps %s reporting evidence under review even with a current approval", (kind) => {
+      const input = reconciledHistoryFixture();
+      const adjustments = input.reportingEvents[0].historicalCostAdjustments as Array<Record<string, unknown>>;
+      if (kind === "wrong_delta") adjustments[0].deltaMills = 2001;
+      if (kind === "wrong_approval") adjustments[0].approvalId = 62;
+      if (kind === "wrong_posting") adjustments[0].id = 52;
+      if (kind === "missing_event") input.reportingEvents = [];
+      if (kind === "wrong_posting_revision") input.reconciliationPostings![0].sourceRevisionId = 12;
+      const revision = projectPurchaseCostApplications(input, 17).revisions[0];
+      expect(revision.currentResolution).toBeNull();
+      expect(revision.applications[1].issues.map((issue) => issue.code)).toContain("COST_REPORTING_EVENT_UNVERIFIED");
+    },
+  );
+
+  it("allows an unchanged approved balance on a new current revision without attributing the old posting to the new attempt", () => {
+    const input = reconciledHistoryFixture();
+    const contract = withFingerprint({ ...(input.revisions[0].contract as object), revision: 3 });
+    input.revisions.unshift({ ...input.revisions[0], id: 12, revision: 3, contract, fingerprint: contract.fingerprint });
+    input.applications.push({ ...input.applications[1], id: 23, sourceRevisionId: 12 });
+    input.currentResolutions = [{ ...input.currentResolutions![0], sourceRevisionId: 12, sourceFingerprint: contract.fingerprint, applicationId: 23 }];
+    const history = projectPurchaseCostApplications(input, 17);
+    expect(history.revisions[0].currentResolution).toMatchObject({ sourceRevisionId: 12, applicationId: 23,
+      postings: [{ applicationId: 22, sourceRevisionId: 11 }] });
+    expect(history.revisions[1].currentResolution).toBeNull();
+    expect(history.revisions[0].applications[0].reportingEvent).toBeNull();
+  });
+
+  it.each(["fingerprint", "source", "missing_event", "unknown_issue"])("does not carry forward an invalid backing posting %s", (kind) => {
+    const input = reconciledHistoryFixture();
+    const contract = withFingerprint({ ...(input.revisions[0].contract as object), revision: 3 });
+    input.revisions.unshift({ ...input.revisions[0], id: 12, revision: 3, contract, fingerprint: contract.fingerprint });
+    input.applications.push({ ...input.applications[1], id: 23, sourceRevisionId: 12 });
+    input.currentResolutions = [{ ...input.currentResolutions![0], sourceRevisionId: 12, sourceFingerprint: contract.fingerprint, applicationId: 23 }];
+    if (kind === "fingerprint") input.reportingEvents[0].sourceFingerprint = "e".repeat(64);
+    if (kind === "source") input.reportingEvents[0].sourceRevisionId = 12;
+    if (kind === "missing_event") input.reportingEvents = [];
+    if (kind === "unknown_issue") input.applications[1].result = { ...(input.applications[1].result as object), issues: [{ code: "COST_GRAPH_CONFLICT", message: "Unverified graph." }] };
+    expect(projectPurchaseCostApplications(input, 17).revisions.every((revision) => revision.currentResolution === null)).toBe(true);
+  });
+
+  it.each(["unknown_issue", "wrong_application", "wrong_source", "missing_event"])("rejects malformed %s resolution at the outbound/browser contract", (kind) => {
+    const history = projectPurchaseCostApplications(reconciledHistoryFixture(), 17);
+    const revision = history.revisions[0];
+    if (kind === "unknown_issue") revision.applications[1].issues = [{ code: "COST_GRAPH_CONFLICT", message: "Unknown authority." }];
+    if (kind === "wrong_application") revision.currentResolution!.applicationId = 21;
+    if (kind === "wrong_source") revision.currentResolution!.sourceRevisionId = 12;
+    if (kind === "missing_event") revision.applications[1].reportingEvent = null;
+    expect(purchaseCostApplicationHistorySchema.safeParse(history).success).toBe(false);
+  });
+
+  it("verifies a retained-quantity reporting event without treating its recorded review as a failed lot write", () => {
+    const input = applicationReadFixture();
+    const unresolved = { allocationId: 71, inventoryLotId: 901, lotNumber: "ROOT-901", component: "product", quantity: 2, originalQuantity: 10, onHandQuantityAtReview: 5, recordedOutflowQuantityAtReview: 3, amountMills: 400 };
+    input.applications[0].status = "review_required";
+    input.applications[0].result = { ...(input.applications[0].result as object), status: "review_required",
+      issues: [{ code: "COST_UNRESOLVED_QUANTITY_RETAINED", message: "Two units retain their historical gap.", unresolvedQuantity: unresolved }] };
+    input.reportingEvents[0].unresolvedQuantities = [unresolved];
+    const application = projectPurchaseCostApplications(input, 17).revisions[0].applications[0];
+    expect(application.reportingEvent?.evidenceState).toBe("verified_record");
+    expect(application.issues.map((issue) => issue.code)).toEqual(["COST_UNRESOLVED_QUANTITY_RETAINED"]);
+    expect(application.status).toBe("review_required");
   });
 });
 

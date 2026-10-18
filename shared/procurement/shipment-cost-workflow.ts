@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { isCostReconciliationPosted, resolveCostPostingStatus } from "./cost-posting-status";
 import { costIssueSchema } from "./cost-source-contracts";
 import { shipmentCostPushResultSchema } from "./po-shipment-costs";
 import { shipmentCostExceptionSchema } from "./shipment-cost-exception";
@@ -32,3 +33,15 @@ export const shipmentCostReviewSchema = z.object({
   }).strict()),
 }).strict();
 export type ShipmentCostReview = z.infer<typeof shipmentCostReviewSchema>;
+
+/** A historical application issue remains in the audit after its cost is posted.
+ * A current source issue always takes precedence over that saved posting. */
+export function isShipmentCostLinePosted(line: ShipmentCostReview["lines"][number]): boolean {
+  const reconciled = isCostReconciliationPosted(line.application?.issues ?? [], line.exceptionReview);
+  return resolveCostPostingStatus({
+    sourceCurrent: line.sourceIssue === null,
+    sourceIssue: line.sourceIssue !== null || (!reconciled && (line.exceptionReview != null || (line.application?.issues.length ?? 0) > 0)),
+    applicationStatus: line.application?.status ?? null,
+    reconciled,
+  }) === "applied";
+}

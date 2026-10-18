@@ -18,7 +18,11 @@ import type {
   ProductListingSettingsBulkSaveInput,
 } from "../../application/dropship-listing-setting-writes";
 import { DropshipError } from "../../domain/errors";
-import { EMPTY_PRODUCT_LISTING_SETTING_VALUES, listingSettingChildKey } from "../../domain/listing-setting-values";
+import {
+  EMPTY_PRODUCT_LISTING_SETTING_VALUES,
+  listingConversionChildKey,
+  listingSettingChildKey,
+} from "../../domain/listing-setting-values";
 import {
   LISTING_SETTING_VALUE_COLUMN_TYPES,
   PRODUCT_LISTING_SETTING_VALUE_COLUMNS,
@@ -30,6 +34,8 @@ import {
   readProductListingSettings,
   saveProductListingSettingWithClient,
   saveProductListingSettingsBulkWithClient,
+  saveProductListingSettingsPerProductWithClient,
+  type ProductListingSettingsPerProductInput,
 } from "../../infrastructure/dropship-product-listing-settings.repository";
 
 const NOW = new Date("2026-10-10T12:00:00.000Z");
@@ -997,5 +1003,181 @@ describe("saveProductListingSettingsBulkWithClient, W7's price apply (plan PR 9,
       Array<{ payload: Record<string, unknown> }>;
     expect(audits[0].payload).not.toHaveProperty("reviewId");
     expect(client.callTo("INSERT INTO dropship.dropship_product_listing_setting_requests").sql).not.toContain("review_id");
+  });
+});
+
+describe("saveProductListingSettingsPerProductWithClient, the conversion's product rows (PR 11, plan 7.A.2 row 10)", () => {
+  const CONVERSION_KEY = "ls-convert:0b8e7c1d-5f4a-4c3b-9a2e-1d0c9b8a7f6e";
+  const CONVERSION_SCOPE: ListingSettingWriteScope = { ...SCOPE, requestKey: CONVERSION_KEY };
+  const CONVERSION_ID = 4_000_000_001;
+  const RECIPE = { basis: "catalog_retail", markupBps: 2_000, flatCents: 0, rounding: "up_99" } as const;
+  const SLEEVES = { categoryId: "261328", categoryName: "Sleeves", path: ["Collectibles", "Sleeves"] };
+  const perProduct = (products: ProductListingSettingsPerProductInput["products"],
+    overrides: Partial<ProductListingSettingsPerProductInput> = {}): ProductListingSettingsPerProductInput =>
+    ({ conversionId: CONVERSION_ID, products, requestHash: HASH, now: NOW, ...overrides });
+
+  it("gives each product its own values, a price included: no ledger, request_id NULL, lc: keys, one audit row each", async () => {
+    const client = new ScriptedClient();
+    client.current.set(3, currentRow(3, 30, storedValues({ price: null, textAbove: null })));
+    client.current.set(4, currentRow(4, 40, storedValues()));
+
+    const result = await saveProductListingSettingsPerProductWithClient(asClient(client), CONVERSION_SCOPE, perProduct([
+      // Out of order on purpose: rows are locked, compared and written in ascending product order.
+      { productId: 5, expectedRevisionId: null, patch: { ebayCategory: SLEEVES } },
+      { productId: 3, expectedRevisionId: 30, patch: { price: RECIPE, textAbove: { mode: "own", text: "From the group." } } },
+      // Sets what is stored: nothing is written for it.
+      { productId: 4, expectedRevisionId: 40, patch: { price: storedValues().price } },
+    ]));
+
+    // No replay probe and no ledger: the conversion's record claimed the key in its own table.
+    expect(client.calls.map((call) => call.sql.split(" ").slice(0, 3).join(" "))).toEqual([
+      "SELECT s.product_id, s.revision_id,",
+      "INSERT INTO dropship.dropship_product_listing_setting_revisions",
+      "INSERT INTO dropship.dropship_product_listing_settings",
+      "INSERT INTO dropship.dropship_audit_events",
+    ]);
+    const read = client.callTo("SELECT s.product_id");
+    expect(read.sql).toBe(SQL.readCurrent(true));
+    expect(read.params).toEqual([VENDOR, STORE, [3, 4, 5]]);
+
+    // W6's statements as they are, with no request (request_id NULL) and the conversion's hash.
+    const revisions = client.callTo("INSERT INTO dropship.dropship_product_listing_setting_revisions");
+    expect(revisions.sql).toBe(SQL.bulkRevisionInsert);
+    expect(revisions.params.slice(0, 7)).toEqual([VENDOR, STORE, null, HASH, "vendor", "member-1", NOW]);
+    const records = JSON.parse(String(revisions.params[7])) as Array<Record<string, unknown>>;
+    expect(records.map((record) => [record.product_id, record.previous_revision_id, record.child_key])).toEqual([
+      [3, 30, listingConversionChildKey(CONVERSION_KEY, "product", 3)],
+      [5, null, listingConversionChildKey(CONVERSION_KEY, "product", 5)],
+    ]);
+    expect(records.every((record) => String(record.child_key).startsWith("lc:"))).toBe(true);
+    // Each product its own patch over its own stored values.
+    expect(records[0]).toMatchObject({ ...storedColumns(storedValues({ price: RECIPE, textAbove: { mode: "own", text: "From the group." } })),
+      product_id: 3 });
+    expect(records[1]).toMatchObject({ ...storedColumns({ ...EMPTY_PRODUCT_LISTING_SETTING_VALUES, ebayCategory: SLEEVES }), product_id: 5 });
+
+    expect(client.callTo("INSERT INTO dropship.dropship_product_listing_settings").sql).toBe(SQL.bulkCurrentUpsert);
+    const revisionOf = new Map(result.changed.map((entry) => [entry.productId, entry.revisionId]));
+    expect(JSON.parse(String(client.callTo("INSERT INTO dropship.dropship_product_listing_settings").params[2])))
+      .toEqual([{ product_id: 3, revision_id: revisionOf.get(3) }, { product_id: 5, revision_id: revisionOf.get(5) }]);
+
+    const audit = client.callTo("INSERT INTO dropship.dropship_audit_events");
+    expect(audit.sql).toBe(SQL.bulkAudit);
+    expect(audit.params.slice(0, 5)).toEqual([VENDOR, STORE, "vendor", "member-1", NOW]);
+    expect(String(audit.params[5])).not.toContain("From the group.");
+    expect(JSON.parse(String(audit.params[5]))).toEqual([
+      { product_id: 3, payload: { conversionId: CONVERSION_ID, requestKey: CONVERSION_KEY, revisionId: revisionOf.get(3),
+        previousRevisionId: 30, changedFields: ["price", "textAbove"], before: { price: null, textAbove: null },
+        after: { price: RECIPE, textAbove: { mode: "own", length: 15, sha256: sha256("From the group.") } } } },
+      { product_id: 5, payload: { conversionId: CONVERSION_ID, requestKey: CONVERSION_KEY, revisionId: revisionOf.get(5),
+        previousRevisionId: null, changedFields: ["ebayCategory"], before: null, after: { ebayCategory: SLEEVES } } },
+    ]);
+    expect(result).toEqual({ changed: [{ productId: 3, revisionId: revisionOf.get(3) }, { productId: 5, revisionId: revisionOf.get(5) }],
+      unchangedProductIds: [4] });
+  });
+
+  it("writes the actor it is given on every revision and audit row: the system for the job", async () => {
+    const client = new ScriptedClient();
+    const system: ListingSettingWriteScope = { ...CONVERSION_SCOPE, requestKey: "rules-conversion:44",
+      actor: { actorType: "system", actorId: "rules-conversion-job" } };
+
+    await saveProductListingSettingsPerProductWithClient(asClient(client), system,
+      perProduct([{ productId: 3, expectedRevisionId: null, patch: { price: RECIPE } }]));
+
+    const revisions = client.callTo("INSERT INTO dropship.dropship_product_listing_setting_revisions");
+    expect(revisions.params.slice(0, 7)).toEqual([VENDOR, STORE, null, HASH, "system", "rules-conversion-job", NOW]);
+    expect((JSON.parse(String(revisions.params[7])) as Array<{ child_key: string }>)[0].child_key)
+      .toBe(listingConversionChildKey("rules-conversion:44", "product", 3));
+    expect(client.callTo("INSERT INTO dropship.dropship_audit_events").params.slice(2, 4)).toEqual(["system", "rules-conversion-job"]);
+  });
+
+  it("writes nothing when every product already holds its patch", async () => {
+    const client = new ScriptedClient();
+    client.current.set(3, currentRow(3, 30, storedValues()));
+
+    const result = await saveProductListingSettingsPerProductWithClient(asClient(client), CONVERSION_SCOPE,
+      perProduct([{ productId: 3, expectedRevisionId: 30, patch: { price: storedValues().price, ebayCategory: storedValues().ebayCategory } }]));
+
+    expect(result).toEqual({ changed: [], unchangedProductIds: [3] });
+    expect(client.writes()).toEqual([]);
+  });
+
+  it("refuses the whole save when products moved, naming the first 100 and counting all, with nothing written", async () => {
+    const client = new ScriptedClient();
+    const ids = Array.from({ length: 200 }, (_, index) => index + 1);
+    for (const id of ids) client.current.set(id, currentRow(id, id + 1_000, storedValues({ price: null })));
+
+    const error = await caught(saveProductListingSettingsPerProductWithClient(asClient(client), CONVERSION_SCOPE, perProduct(
+      ids.map((productId) => ({ productId, expectedRevisionId: productId > 50 ? productId + 999 : productId + 1_000, patch: { price: RECIPE } })))));
+
+    expect(error.code).toBe("DROPSHIP_PRODUCT_LISTING_SETTINGS_VERSION_CONFLICT");
+    expect(error.context).toMatchObject({ storeConnectionId: STORE, conflictCount: 150, retryable: false, classification: "permanent" });
+    const conflicts = error.context?.conflicts as Array<{ productId: number; expectedRevisionId: number; actualRevisionId: number }>;
+    expect(conflicts).toHaveLength(100);
+    expect(conflicts[0]).toEqual({ productId: 51, expectedRevisionId: 1_050, actualRevisionId: 1_051 });
+    expect(conflicts.at(-1)?.productId).toBe(150);
+    expect(client.writes()).toEqual([]);
+  });
+
+  it("splits the revision insert into 8 MiB statements when each product's values are at the contract's bounds", async () => {
+    const client = new ScriptedClient();
+    const values = largestValues();
+    const columns = storedColumns(values);
+    const ids = Array.from({ length: 250 }, (_, index) => index + 1);
+    for (const id of ids) client.current.set(id, { product_id: id, revision_id: id + 100_000, ...columns, created_at: EARLIER });
+
+    const result = await saveProductListingSettingsPerProductWithClient(asClient(client), CONVERSION_SCOPE, perProduct(
+      ids.map((productId) => ({ productId, expectedRevisionId: productId + 100_000,
+        patch: { price: { ...RECIPE, markupBps: productId } } }))));
+
+    const inserts = client.calls.filter((call) => call.sql.startsWith(`INSERT INTO ${REVISIONS_TABLE}`));
+    expect(inserts.length).toBeGreaterThan(1);
+    const records = inserts.flatMap((call) => {
+      expect(call.sql).toBe(SQL.bulkRevisionInsert);
+      expect(call.params.slice(0, 7)).toEqual([VENDOR, STORE, null, HASH, "vendor", "member-1", NOW]);
+      expect(Buffer.byteLength(String(call.params[7]), "utf8")).toBeLessThanOrEqual(MAX_PAYLOAD_BYTES);
+      return JSON.parse(String(call.params[7])) as Array<Record<string, unknown>>;
+    });
+    // Each product once, in order, with its own price and its stored texts copied unchanged.
+    expect(records.map((record) => [record.product_id, record.price_markup_bps])).toEqual(ids.map((id) => [id, id]));
+    expect(records.every((record) => record.body_text === values.mainText?.text && record.text_above === columns.text_above)).toBe(true);
+    expect(records.map((record) => record.child_key)).toEqual(ids.map((id) => listingConversionChildKey(CONVERSION_KEY, "product", id)));
+    expect(result.changed.map((entry) => entry.productId)).toEqual(ids);
+    expect(JSON.parse(String(client.callTo("INSERT INTO dropship.dropship_audit_events").params[5]))).toHaveLength(ids.length);
+  });
+
+  it.each<[string, Partial<ProductListingSettingsPerProductInput>]>([
+    ["no products", { products: [] }],
+    ["10,001 products", { products: Array.from({ length: 10_001 }, (_, index) => ({ productId: index + 1, expectedRevisionId: null,
+      patch: { price: null } })) }],
+    ["a product twice", { products: [{ productId: 3, expectedRevisionId: null, patch: { price: null } },
+      { productId: 3, expectedRevisionId: null, patch: { textAbove: null } }] }],
+    ["product id 0", { products: [{ productId: 0, expectedRevisionId: null, patch: { price: null } }] }],
+    ["a revision id that is not an id", { products: [{ productId: 3, expectedRevisionId: 1.5, patch: { price: null } }] }],
+    ["an empty patch", { products: [{ productId: 3, expectedRevisionId: null, patch: {} }] }],
+    ["a patch outside the contract", { products: [{ productId: 3, expectedRevisionId: null,
+      patch: { price: { ...RECIPE, markupBps: -1 } } as unknown as ProductListingSettingPatch }] }],
+    ["an unknown setting", { products: [{ productId: 3, expectedRevisionId: null,
+      patch: { "secret vendor words": true } as unknown as ProductListingSettingPatch }] }],
+    ["no conversion id", { conversionId: 0 }],
+    ["a request hash that is not one", { requestHash: "not-a-hash" }],
+  ])("refuses %s before any SQL, as a fatal fault naming no text", async (_label, overrides) => {
+    const client = new ScriptedClient();
+
+    const error = await caught(saveProductListingSettingsPerProductWithClient(asClient(client), CONVERSION_SCOPE,
+      perProduct([{ productId: 3, expectedRevisionId: null, patch: { price: RECIPE } }], overrides)));
+
+    expect(error.code).toBe("DROPSHIP_LISTING_SETTINGS_INVARIANT_FAILED");
+    expect(error.context).toMatchObject({ retryable: false, classification: "fatal" });
+    expect(JSON.stringify(error.context)).not.toContain("secret vendor words");
+    expect(client.calls).toEqual([]);
+  });
+
+  it("refuses a scope outside its contract before any SQL", async () => {
+    const client = new ScriptedClient();
+    const error = await caught(saveProductListingSettingsPerProductWithClient(asClient(client), { ...CONVERSION_SCOPE, requestKey: "short" },
+      perProduct([{ productId: 3, expectedRevisionId: null, patch: { price: RECIPE } }])));
+    expect(error.code).toBe("DROPSHIP_LISTING_SETTINGS_INVARIANT_FAILED");
+    expect(error.context).toMatchObject({ invalid: ["requestKey"] });
+    expect(client.calls).toEqual([]);
   });
 });

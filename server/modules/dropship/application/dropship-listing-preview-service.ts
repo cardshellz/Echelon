@@ -4,6 +4,7 @@ import { listingPriceFollowsRules, resolveListingPrice, type SavedListingPriceRe
 import { decideDropshipListingAccess } from "../../../../shared/dropship/listing-access";
 import type { ListingRulePrice } from "./dropship-rule-price";
 import type { ResolvedEbayListingCategory } from "./dropship-ebay-category-resolver";
+import type { ResolvedListingContent } from "../../../../shared/dropship/listing-content";
 import type { EbayCategorySource } from "../../../../shared/dropship/ebay-category-rules";
 import { z } from "zod";
 import type { DropshipListingPresentation, DropshipListingEconomics } from "../../../../shared/dropship/listing-presentation";
@@ -270,7 +271,44 @@ export interface DropshipListingResolverLoadInput {
   layers?: ListingSettingLayers;
 }
 
+/**
+ * What loadResolverInputs reads (PR 11, plan 7.A, D23). `candidates` are
+ * every catalog size of the preview: the layers and the eBay categories cover
+ * them all. `ruleEligibleCandidates` are the exposed and selected sizes among
+ * them: rule prices and descriptions are resolved for these only, as the
+ * preview has always resolved them.
+ */
+export interface DropshipListingResolverInputsLoadInput {
+  vendorId: number;
+  storeConnectionId: number;
+  candidates: readonly DropshipListingCatalogCandidate[];
+  ruleEligibleCandidates: readonly DropshipListingCatalogCandidate[];
+  platform: DropshipListingStoreContext["platform"];
+}
+
+/** The preview's four resolver inputs, read in one snapshot. `ebayCategories` is present exactly when the store is eBay. */
+export interface DropshipListingResolverInputs {
+  layers: ListingSettingLayers;
+  rulePrices: Map<number, ListingRulePrice>;
+  contents: Map<number, ResolvedListingContent>;
+  ebayCategories?: Map<number, ResolvedEbayListingCategory>;
+}
+
 export interface DropshipListingPreviewRepository {
+  /**
+   * The layers, the rule prices with the pricing profile, the descriptions
+   * with the content profile and (eBay) the eBay categories with the rules
+   * document, all in ONE read snapshot (PR 11, plan 7.A, D23). The push
+   * worker's refresh and the stock catch-up build their preview outside the
+   * store lock; with four snapshots, a writer that empties the groups and
+   * writes the layers in one commit (the rules conversion) could land between
+   * the layers read and a profile read, and the push would publish the store
+   * default price, eBay category and text that neither side of it has. The
+   * PostgreSQL repository always has it; only a test fake may lack it, and
+   * then the preview reads the four separately
+   * (DropshipListingPreviewService.loadResolverInputs).
+   */
+  loadResolverInputs?(input: DropshipListingResolverInputsLoadInput): Promise<DropshipListingResolverInputs>;
   /**
    * The product and category listing settings of the candidates, read once
    * per preview in one snapshot (plan PR 8b, D26). Required, never defaulted
@@ -282,7 +320,7 @@ export interface DropshipListingPreviewRepository {
     storeConnectionId: number;
     candidates: readonly DropshipListingCatalogCandidate[];
   }): Promise<ListingSettingLayers>;
-  loadListingContents?(input: DropshipListingResolverLoadInput): Promise<Map<number, import("../../../../shared/dropship/listing-content").ResolvedListingContent>>;
+  loadListingContents?(input: DropshipListingResolverLoadInput): Promise<Map<number, ResolvedListingContent>>;
   loadEbayCategories?(input: DropshipListingResolverLoadInput): Promise<Map<number, ResolvedEbayListingCategory>>;
   loadRulePrices?(input: DropshipListingResolverLoadInput): Promise<Map<number, ListingRulePrice>>;
   listSavedListingPrices(input: {
@@ -465,15 +503,28 @@ export class DropshipListingPreviewService {
         storeConnectionId: parsed.storeConnectionId, productVariantIds: uniqueVariantIds }),
     ]);
 
+    // Computed before the settings are read: it reads no layer. Rule prices and
+    // descriptions are resolved for these sizes only.
+    const ruleEligibleCandidates = candidates.filter((candidate) => {
+      const exposure = evaluateDropshipCatalogExposure(candidate, adminRules, generatedAt);
+      return exposure.exposed && evaluateDropshipVendorCatalogSelection({ candidate, adminExposureDecision: exposure,
+        rules: selectionRules, rawAtpUnits: 0, override: overrides.find((row) => row.productVariantId === candidate.productVariantId) ?? null }).selected;
+    });
     // One read of the product and category listing settings per preview (plan
     // PR 8b, D26), for every platform: price and description apply to every
     // store. The price, description and eBay category loaders, the policies
     // and the shelves all follow these rows, so a preview never disagrees with
-    // itself. The queue's re-check reads them again under the store lock.
-    const layers = await this.deps.repository.loadListingSettingLayers({
+    // itself; and the rows and the three profiles come from one snapshot (PR
+    // 11, D23). The queue's re-check reads them again under the store lock.
+    // Every eBay row resolves its category through the store's current rules. The
+    // push-time refresh calls this again, so a push publishes the category the rules
+    // name when it is sent; a changed category never refuses a queue or fails a push.
+    const { layers, rulePrices, contents, ebayCategories } = await this.loadResolverInputs({
       vendorId: parsed.vendorId,
       storeConnectionId: parsed.storeConnectionId,
       candidates,
+      ruleEligibleCandidates,
+      platform: context.platform,
     });
     // Built before the live eBay checks below, so a policy that only a product
     // or its category sets is checked like a size's own (plan F5).
@@ -484,22 +535,6 @@ export class DropshipListingPreviewService {
       ? readEbayStoreShelfDefault(config.marketplaceConfig)
       : null;
 
-    const ruleEligibleCandidates = candidates.filter((candidate) => {
-      const exposure = evaluateDropshipCatalogExposure(candidate, adminRules, generatedAt);
-      return exposure.exposed && evaluateDropshipVendorCatalogSelection({ candidate, adminExposureDecision: exposure,
-        rules: selectionRules, rawAtpUnits: 0, override: overrides.find((row) => row.productVariantId === candidate.productVariantId) ?? null }).selected;
-    });
-    const rulePrices = await this.deps.repository.loadRulePrices?.({ vendorId: parsed.vendorId,
-      storeConnectionId: parsed.storeConnectionId, candidates: ruleEligibleCandidates, layers }) ?? new Map<number, ListingRulePrice>();
-    const contents = await this.deps.repository.loadListingContents?.({ vendorId: parsed.vendorId,
-      storeConnectionId: parsed.storeConnectionId, candidates: ruleEligibleCandidates, layers });
-    // Every eBay row resolves its category through the store's current rules. The
-    // push-time refresh calls this again, so a push publishes the category the rules
-    // name when it is sent; a changed category never refuses a queue or fails a push.
-    const ebayCategories = context.platform === "ebay"
-      ? await this.deps.repository.loadEbayCategories?.({ vendorId: parsed.vendorId,
-        storeConnectionId: parsed.storeConnectionId, candidates, layers })
-      : undefined;
     if (ebayCategories && candidates.some((candidate) => !ebayCategories.has(candidate.productVariantId))) {
       throw new Error("eBay category resolution returned an incomplete catalog result.");
     }
@@ -655,6 +690,41 @@ export class DropshipListingPreviewService {
       rows: enrichedRows,
       summary: summarizeRows(rows),
     };
+  }
+
+  /**
+   * The four resolver inputs. With the repository's loadResolverInputs (the
+   * PostgreSQL repository always has it) they come from one call and one
+   * snapshot (PR 11, D23); a failure there fails the preview and never falls
+   * back to the separate reads. Only a repository without it (a test fake)
+   * takes the four separate reads, in today's order and with today's inputs.
+   * A repository that answers eBay categories for a store that is not eBay,
+   * or none for an eBay store, broke its contract: the preview fails rather
+   * than build eBay rows with no category resolved for them.
+   */
+  private async loadResolverInputs(input: DropshipListingResolverInputsLoadInput): Promise<{
+    layers: ListingSettingLayers;
+    rulePrices: Map<number, ListingRulePrice>;
+    contents: Map<number, ResolvedListingContent> | undefined;
+    ebayCategories: Map<number, ResolvedEbayListingCategory> | undefined;
+  }> {
+    const { repository } = this.deps;
+    if (repository.loadResolverInputs) {
+      const loaded = await repository.loadResolverInputs(input);
+      if ((input.platform === "ebay") !== (loaded.ebayCategories !== undefined)) {
+        throw new Error("eBay category resolution returned an incomplete catalog result.");
+      }
+      return { layers: loaded.layers, rulePrices: loaded.rulePrices, contents: loaded.contents, ebayCategories: loaded.ebayCategories };
+    }
+    const scope = { vendorId: input.vendorId, storeConnectionId: input.storeConnectionId };
+    const layers = await repository.loadListingSettingLayers({ ...scope, candidates: input.candidates });
+    const rulePrices = await repository.loadRulePrices?.({ ...scope, candidates: input.ruleEligibleCandidates, layers })
+      ?? new Map<number, ListingRulePrice>();
+    const contents = await repository.loadListingContents?.({ ...scope, candidates: input.ruleEligibleCandidates, layers });
+    const ebayCategories = input.platform === "ebay"
+      ? await repository.loadEbayCategories?.({ ...scope, candidates: input.candidates, layers })
+      : undefined;
+    return { layers, rulePrices, contents, ebayCategories };
   }
 
   /**

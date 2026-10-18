@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "migration": "900000011000018230001_ebay_publication_preflight_recovery.sql",
+  "generation": 11,
+  "pr": 1823,
+  "ordinal": 1,
+  "after": [
+    "900000010000018210001_dropship_listing_rule_conversions.sql"
+  ]
+}

@@ -23,7 +23,7 @@ import {
   type EbayListingSyncStore,
   type EbaySyncAdmissionFailure,
 } from "../ebay-listing-sync.service";
-import { assertEbayListingSourceIdentityUnchanged } from "../ebay-existing-listing-identity";
+import { assertEbayListingSourceIdentityUnchanged, bindObservedEbayListingMembers } from "../ebay-existing-listing-identity";
 import { EBAY_LISTING_WORKFLOW_LOCK_NAMESPACE, ebayListingWorkflowLockKey } from "../ebay-listing-workflow-lock";
 import { PgMarketplaceListingRegistrationRepository, type MarketplaceObservedListingPublication } from "../../marketplace-listings";
 import { assertEbayPublicationObservation } from "../ebay-publication-observation";
@@ -31,14 +31,18 @@ import { assertEbayPublicationTargetUnchanged } from "../ebay-publication-comple
 import { assertEbayMappingOwnership } from "./ebay-listing-mapping-ownership";
 import { withEbayListingJobProgress } from "./ebay-listing-job-progress.reader";
 import { ebayListingFailureDiagnosticSchema } from "../ebay-listing-failure-diagnostic";
+import type { EbayPublicationRejectionReader, EbayRequestJournalContract } from "../../inventory-planning/quantity-publication";
+import { ebayListingPublicationScopes } from "../ebay-listing-request-recovery";
+import { proveLegacyEbayPublicationPreflight, validateEbayPublicationStageContract, type EbayPublicationStageEvent } from "../ebay-publication-preflight-evidence";
 
 const LOCK_NAMESPACE = 918427;
 const PUBLICATION_EVIDENCE_RECHECK_MS = 30_000;
-// Authorization retains the original evidence. Only starts after that explicit
-// acknowledgement prevent a new send; successful responses remain permanent.
+// Terminal rejection/no-send evidence retires only the corresponding start.
+// The original events stay immutable; accepted responses remain barriers.
 const currentPublicationStart = `evidence.event='stage_started' AND evidence.evidence->>'key'='publish'
   AND evidence.id>COALESCE((SELECT max(retry_receipt.id) FROM channels.ebay_listing_sync_events retry_receipt
-    WHERE retry_receipt.job_id=evidence.job_id AND retry_receipt.event='publication_retry_authorized'),0)`;
+    WHERE retry_receipt.job_id=evidence.job_id AND (retry_receipt.event='publication_retry_authorized'
+      OR (retry_receipt.event='stage_completed' AND retry_receipt.evidence->>'key' IN ('publication_rejected','publication_not_sent')))),0)`;
 const rowSql = `SELECT id::text,product_id AS "productId",state,error_code AS code,error_message AS message,
   next_attempt_at AS "nextAttemptAt",updated_at AS "updatedAt",identity,revision::text,claimed_revision::text AS "claimedRevision",
   owner_token::text AS "ownerToken",attempts,result,verification_intent_hash AS "verificationIntentHash",
@@ -89,7 +93,8 @@ const publicationRetryInputSchema = z.object({
 }).strict();
 export class PostgresEbayListingSyncRepository implements EbayListingSyncStore {
   private readonly clients = new Map<string, PoolClient>();
-  constructor(private readonly pool: Pick<Pool, "connect" | "query">) {}
+  constructor(private readonly pool: Pick<Pool, "connect" | "query">,
+    private readonly publicationRejections?: EbayPublicationRejectionReader) {}
   async enqueue(
     identity: EbayListingSyncIdentity,
     commandKey: string,
@@ -166,16 +171,16 @@ export class PostgresEbayListingSyncRepository implements EbayListingSyncStore {
         (await client.query(rowSql + " WHERE id=$1", [replay.job_id]))
           .rows[0],
       );
-      if (job.operation !== operation) throw new EbayListingSyncError("EBAY_SYNC_REPLAY_CONFLICT", "This command already belongs to a different listing operation.");
+      await this.assertCommandOperation(client, job, commandKey, operation);
       if (reviewedTarget) {
         if (!job.publicationTarget) throw new EbayListingSyncError("EBAY_SYNC_REPLAY_CONFLICT", "This command was saved without the reviewed publication target.");
         assertEbayPublicationTargetUnchanged(job.publicationTarget, reviewedTarget);
       }
       return job;
     }
-    const priorTerminal = (await client.query(rowSql + " WHERE channel_id=$1 AND product_id=$2 AND operation='publish' AND state='needs_attention'", [identity.channelId,identity.productId])).rows.map(decode).find(hasPublicationBarrier);
-    if (priorTerminal) throw this.priorPublicationRequired(priorTerminal.id);
-    const active = (
+    const terminalPublications = (await client.query(rowSql + " WHERE channel_id=$1 AND product_id=$2 AND operation='publish' AND state='needs_attention' ORDER BY updated_at DESC,id DESC", [identity.channelId,identity.productId])).rows.map(decode);
+    const terminalBarriers = terminalPublications.filter(hasPublicationBarrier);
+    let active = (
       await client.query<{ id: string; identity: EbayListingSyncIdentity; providerIdentity: EbayListingSyncIdentity | null;
         operation: "sync" | "publish" | "withdraw"; state: StoredEbayListingSyncJob["state"]; ownerToken: string | null }>(
         `SELECT id::text,identity,provider_identity AS "providerIdentity",operation,state,owner_token::text AS "ownerToken" FROM channels.ebay_listing_sync_jobs
@@ -183,13 +188,32 @@ export class PostgresEbayListingSyncRepository implements EbayListingSyncStore {
         [identity.channelId, identity.productId],
       )
     ).rows[0];
+    // Failed preparation history cannot outrank a newer active request. An older
+    // unresolved send remains a separate barrier, even when another job exists.
+    const priorTerminal = terminalBarriers[0] ?? (!active && operation === "sync" ? terminalPublications.find(previous => {
+      try { assertEbayListingSourceIdentityUnchanged(previous.identity, identity); return true; }
+      catch (error) { if (!(error instanceof EbayListingSyncError)) throw error; return false; }
+    }) : undefined);
+    // Sync continues an already saved publication for this exact source. It
+    // grants no permission to repeat an uncertain publish: the executor still
+    // owns rejection evidence, publication checkpoints, and provider readback.
+    if (priorTerminal) {
+      if (operation !== "sync" || terminalBarriers.length > 1 || active)
+        throw this.priorPublicationRequired(priorTerminal.id);
+      try { assertEbayListingSourceIdentityUnchanged(priorTerminal.identity, identity); }
+      catch (error) { if (!(error instanceof EbayListingSyncError)) throw error; throw this.priorPublicationRequired(priorTerminal.id); }
+      const locked = (await client.query(rowSql + " WHERE id=$1 FOR UPDATE", [priorTerminal.id])).rows[0];
+      active = decode(locked);
+    }
     let id: string;
+    let continuationReceiptSaved = false;
     let reusable = !!active;
     if (active) {
       if (active.operation === "withdraw" && operation !== "withdraw")
         throw Object.assign(new EbayListingSyncError("EBAY_WITHDRAWAL_IN_PROGRESS", "This product's saved withdrawal must finish before another listing operation can start."), { jobId: active.id });
       try {
-        if (active.operation !== operation) throw new EbayListingSyncError("EBAY_SYNC_OPERATION_CHANGED", "A new listing operation requires its own durable request.");
+        if (active.operation !== operation && !(operation === "sync" && active.operation === "publish"))
+          throw new EbayListingSyncError("EBAY_SYNC_OPERATION_CHANGED", "A new listing operation requires its own durable request.");
         assertEbayListingSourceIdentityUnchanged(active.identity, identity);
         if (verifiedProviderIdentity && active.providerIdentity
           && syncIdentityHash(active.providerIdentity) !== syncIdentityHash(verifiedProviderIdentity))
@@ -240,8 +264,22 @@ export class PostgresEbayListingSyncRepository implements EbayListingSyncStore {
     }
     if (active && reusable) {
       id = active.id;
-      const requeueIdle = active.operation === "sync" && active.state !== "running" && active.ownerToken === null
+      const requeueIdle = (active.operation === "sync" || operation === "sync" && active.operation === "publish")
+        && active.state !== "running" && active.ownerToken === null
         && (await client.query<{ acquired: boolean }>("SELECT pg_try_advisory_xact_lock($1,hashtext($2)) AS acquired", [LOCK_NAMESPACE, id])).rows[0]?.acquired === true;
+      if (active.state === "needs_attention") {
+        const ownsWorkflow = requeueIdle && (await client.query<{ acquired: boolean }>(
+          "SELECT pg_try_advisory_xact_lock($1,hashtext($2)) AS acquired",
+          [LOCK_NAMESPACE, ebayListingWorkflowLockKey(identity.channelId, identity.productId)])).rows[0]?.acquired === true;
+        if (!ownsWorkflow) throw new EbayListingSyncError("PUBLICATION_SCOPE_BUSY", "The saved publication is still in use. Sync will continue it after that operation finishes.");
+        const previous = decode((await client.query(rowSql + " WHERE id=$1", [id])).rows[0]);
+        await client.query(`INSERT INTO channels.ebay_listing_sync_commands(command_key,job_id,identity_hash,actor,created_at) VALUES($1,$2,$3,$4,$5)`,
+          [commandKey, id, syncIdentityHash(identity), actor, now.toISOString()]);
+        await this.event(client, previous, "requested", { commandKey, actor, requestedOperation: "sync", continuationOnly: true,
+          beforeRevision: previous.revision, identity: previous.identity, sourceIdentityHash: syncIdentityHash(identity),
+          ownerTransactionId: (await client.query("SELECT pg_current_xact_id()::text AS id")).rows[0].id }, now);
+        continuationReceiptSaved = true;
+      }
       await client.query(
         // A new maintenance revision is queued work, not a repetition of the
         // previous error. Preserve live ownership and publication/withdrawal
@@ -272,7 +310,7 @@ export class PostgresEbayListingSyncRepository implements EbayListingSyncStore {
         ],
       );
     }
-    await client.query(
+    if (!continuationReceiptSaved) await client.query(
       `INSERT INTO channels.ebay_listing_sync_commands(command_key,job_id,identity_hash,actor,created_at) VALUES($1,$2,$3,$4,$5)`,
       [commandKey, id, syncIdentityHash(identity), actor, now.toISOString()],
     );
@@ -297,11 +335,26 @@ export class PostgresEbayListingSyncRepository implements EbayListingSyncStore {
       await client.query("UPDATE channels.ebay_listing_sync_jobs SET publication_target=$2::jsonb,publication_target_hash=$3 WHERE id=$1",
         [job.id, canonicalJson(retainedTarget), targetHash]);
       job = decode((await client.query(rowSql + " WHERE id=$1", [job.id])).rows[0]);
-    } else await this.event(client, job, "requested", { commandKey, actor }, now);
+    } else if (!continuationReceiptSaved) await this.event(client, job, "requested", { commandKey, actor, requestedOperation: operation }, now);
     return job;
   }
   private priorPublicationRequired(jobId: string): EbayListingSyncError {
     return Object.assign(new EbayListingSyncError("EBAY_PUBLICATION_PRIOR_WORK_REQUIRED", `A prior publication may already have reached eBay. Review its saved status before starting a different request.`), { jobId });
+  }
+  private async assertCommandOperation(client: Pick<Pool, "query">, job: StoredEbayListingSyncJob,
+    commandKey: string, expectedOperation: StoredEbayListingSyncJob["operation"]): Promise<void> {
+    const receipts = (await client.query<{ requestedOperation: string }>(
+      `SELECT DISTINCT evidence->>'requestedOperation' AS "requestedOperation" FROM channels.ebay_listing_sync_events
+       WHERE job_id=$1 AND event='requested' AND evidence->>'commandKey'=$2 AND evidence ? 'requestedOperation'`,
+      [job.id, commandKey])).rows;
+    // A command owns its requested action even when Sync continues an existing
+    // Publish job. Older receipts without this field retain their original job
+    // operation; absence never grants permission to cross operation types.
+    const requestedOperation = receipts.length === 0 ? job.operation : receipts[0].requestedOperation;
+    const syncContinuation = receipts.length === 1 && expectedOperation === "sync" && job.operation === "publish";
+    if (receipts.length > 1 || requestedOperation !== expectedOperation
+      || (job.operation !== expectedOperation && !syncContinuation))
+      throw new EbayListingSyncError("EBAY_SYNC_REPLAY_CONFLICT", "This saved command belongs to a different listing operation.");
   }
 
   async authorizePublicationRetry(input: EbayPublicationRetryAuthorization, now: Date): Promise<{job:StoredEbayListingSyncJob;replayed:boolean}> {
@@ -394,17 +447,26 @@ export class PostgresEbayListingSyncRepository implements EbayListingSyncStore {
       });
     } finally { client.release(); }
   }
-  async bindProviderIdentity(job: StoredEbayListingSyncJob, identity: EbayListingSyncIdentity, now: Date, publicationObservation?: MarketplaceObservedListingPublication): Promise<void> {
+  async bindProviderIdentity(job: StoredEbayListingSyncJob, identity: EbayListingSyncIdentity, now: Date, publicationObservation?: MarketplaceObservedListingPublication, sourceIdentity?: EbayListingSyncIdentity): Promise<void> {
     identity = ebayListingSyncIdentitySchema.parse(identity);
-    const observation = job.operation === "publish" ? assertEbayPublicationObservation(identity, publicationObservation) : null;
+    const currentSource = sourceIdentity ? ebayListingSyncIdentitySchema.parse(sourceIdentity) : job.identity;
+    assertEbayListingSourceIdentityUnchanged(job.identity, currentSource);
+    const observation = job.operation === "publish" || publicationObservation !== undefined
+      ? assertEbayPublicationObservation(identity, publicationObservation) : null;
+    // A source snapshot retains obsolete mappings for audit. Only a complete
+    // fresh provider receipt can prove that a disabled saved SKU is outside the
+    // live publication; the same membership rule owns preparation and binding.
+    const source = job.operation === "sync" && identity.variants.length !== job.identity.variants.length
+      ? bindObservedEbayListingMembers(currentSource, observation ?? assertEbayPublicationObservation(identity, publicationObservation))
+      : currentSource;
     const client = this.client(job);
     const hash = syncIdentityHash(identity);
     if (identity.productId !== job.identity.productId || identity.channelId !== job.identity.channelId
       || identity.connectionId !== job.identity.connectionId || identity.accountId !== job.identity.accountId
-      || identity.marketplaceId !== job.identity.marketplaceId || identity.variants.length !== job.identity.variants.length
-      || job.identity.variants.some(member => !identity.variants.some(resolved => resolved.variantId === member.variantId && resolved.sku === member.sku
+      || identity.marketplaceId !== job.identity.marketplaceId || identity.variants.length !== source.variants.length
+      || source.variants.some(member => !identity.variants.some(resolved => resolved.variantId === member.variantId && resolved.sku === member.sku
         && (member.catalogSku === undefined || member.catalogSku === resolved.catalogSku)
-        && (member.contentSyncEnabled ?? true) === (resolved.contentSyncEnabled ?? true)
+        && (member.contentSyncEnabled === undefined || member.contentSyncEnabled === resolved.contentSyncEnabled)
         && resolved.externalSku === (job.operation === "publish" ? member.externalSku ?? member.sku : member.externalSku) && (member.offerId === null || resolved.offerId === member.offerId)
         && (member.listingId === null || resolved.listingId === member.listingId))))
       throw new EbayListingSyncError("EBAY_SYNC_PROVIDER_IDENTITY_CHANGED", "The observed provider identity does not match this saved request.");
@@ -427,6 +489,7 @@ export class PostgresEbayListingSyncRepository implements EbayListingSyncStore {
         return;
       }
       await this.event(client, job, "stage_completed", { key: "provider_identity", preparedIntentHash: hash, identity,
+        ...(sourceIdentity ? { sourceIdentity: currentSource } : {}),
         ...(observation ? { observation: { ...observation, observedAt: observation.observedAt.toISOString() } } : {}) }, now);
       await client.query("UPDATE channels.ebay_listing_sync_jobs SET provider_identity=$3::jsonb,provider_identity_hash=$4 WHERE id=$1 AND owner_token=$2", [job.id,job.ownerToken,canonicalJson(identity),hash]);
     });
@@ -478,7 +541,8 @@ export class PostgresEbayListingSyncRepository implements EbayListingSyncStore {
       );
     return (await withEbayListingJobProgress(this.pool, [decode(row)]))[0];
   }
-  async getByCommand(commandKey: string, channelId: number, options: { transactionClient?: PoolClient; expectedActor?: string } = {}): Promise<StoredEbayListingSyncJob | null> {
+  async getByCommand(commandKey: string, channelId: number, options: { transactionClient?: PoolClient; expectedActor?: string;
+    expectedOperation?: StoredEbayListingSyncJob["operation"] } = {}): Promise<StoredEbayListingSyncJob | null> {
     // A second command can join an existing job. Recover a lost HTTP response
     // through that durable membership, never by assuming command ID equals job ID.
     const client = options.transactionClient ?? this.pool;
@@ -492,7 +556,10 @@ export class PostgresEbayListingSyncRepository implements EbayListingSyncStore {
       if (command?.actor !== options.expectedActor) throw new EbayListingSyncError(
         "EBAY_SYNC_REPLAY_CONFLICT", "This saved command belongs to a different requester.");
     }
-    return row ? (await withEbayListingJobProgress(client, [decode(row)]))[0] : null;
+    if (!row) return null;
+    const job = decode(row);
+    if (options.expectedOperation !== undefined) await this.assertCommandOperation(client, job, commandKey, options.expectedOperation);
+    return (await withEbayListingJobProgress(client, [job]))[0];
   }
   async getAdmission(id: string, channelId: number): Promise<EbayListingSyncJob | null> {
     const row = (await this.pool.query(`SELECT command_key::text AS id,product_id AS "productId",operation,error_code AS code,error_message AS message,created_at
@@ -586,25 +653,40 @@ export class PostgresEbayListingSyncRepository implements EbayListingSyncStore {
       throw error;
     }
   }
+  async assertPublicationOwner(job: StoredEbayListingSyncJob): Promise<void> {
+    // Do not replace a failed client with a pool connection: the retained
+    // session lock and original fencing token are the publication authority.
+    await this.assertOwner(this.client(job), job);
+  }
   async stage(
     job: StoredEbayListingSyncJob,
     key: string,
     hash: string,
     state: "started" | "completed",
     now: Date,
+    journalContract?: EbayRequestJournalContract,
   ): Promise<void> {
-    if (!key || key.length > 300 || !/^[a-f0-9]{64}$/.test(hash))
+    // Only the inventory evidence reader may produce this semantic checkpoint;
+    // an ordinary stage callback is not proof of a rejected provider request.
+    if (!key || ["publication_rejected", "publication_not_sent"].includes(key) || key.length > 300 || !/^[a-f0-9]{64}$/.test(hash))
       throw new Error("Invalid listing stage evidence.");
     const client = this.client(job);
     await this.transaction(client, async () => {
       await this.assertOwner(client, job);
+      let contract: EbayRequestJournalContract | undefined;
+      if (journalContract) {
+        if (key !== "publish" || state !== "started" || job.operation !== "publish")
+          throw new Error("A publication journal contract belongs only to a publish start.");
+        const target = (await client.query("SELECT publication_target FROM channels.ebay_listing_sync_jobs WHERE id=$1", [job.id])).rows[0]?.publication_target;
+        contract = validateEbayPublicationStageContract(journalContract, ebayListingSyncIdentitySchema.parse(target));
+      }
       // This is prepared intent, not the actual quantity-bearing request body;
       // inventory admission separately hashes its freshly authorized payload.
       await this.event(
         client,
         job,
         `stage_${state}`,
-        { key, preparedIntentHash: hash },
+        { key, preparedIntentHash: hash, ...(contract ? { requestJournalContract: contract } : {}) },
         now,
       );
       if (key === "verification" && state === "started") {
@@ -614,6 +696,60 @@ export class PostgresEbayListingSyncRepository implements EbayListingSyncStore {
           [job.id, job.ownerToken, hash],
         );
       }
+    });
+  }
+  async recoverTerminalPublicationWrite(job: StoredEbayListingSyncJob, identity: EbayListingSyncIdentity, now: Date): Promise<"rejected" | "not_sent" | null> {
+    const publicationRejections = this.publicationRejections;
+    if (!publicationRejections || job.operation !== "publish") return null;
+    const client = this.client(job);
+    return this.transaction(client, async () => {
+      await this.assertOwner(client, job);
+      const current = decode((await client.query(rowSql + " WHERE id=$1", [job.id])).rows[0]);
+      if (current.publicationAccepted || current.publicationWriteCompleted || !current.publicationWriteStarted
+        || !current.publicationTarget) return null;
+      const start = (await client.query<EbayPublicationStageEvent>(
+        `SELECT evidence.id::text,evidence.revision::text,evidence.event,evidence.evidence,
+          to_char(evidence.created_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS "createdAt"
+         FROM channels.ebay_listing_sync_events evidence WHERE evidence.job_id=$1 AND ${currentPublicationStart}
+         ORDER BY evidence.id DESC LIMIT 1`, [job.id])).rows[0];
+      if (!start) return null;
+      // The inventory owner reads every publish request since this exact start
+      // while holding its scope locks through the channel receipt's commit.
+      // A completed stock write is not evidence that publication was rejected.
+      const target = ebayListingSyncIdentitySchema.parse(identity);
+      assertEbayPublicationTargetUnchanged(current.publicationTarget, target);
+      if (target.variants.some(member => member.offerId === null)) return null;
+      const input = { scopes: ebayListingPublicationScopes(target),
+        startedAt: start.createdAt, groupKey: target.groupKey, marketplaceId: target.marketplaceId,
+        offerIds: target.variants.flatMap(member => member.offerId ? [member.offerId] : []) };
+      const read = await publicationRejections.read(input, client);
+      if (read.busy) throw new EbayListingSyncError("PUBLICATION_SCOPE_BUSY",
+        "Another inventory update is still running. This saved listing request will check its publication response again.");
+      const evidence = read.evidence;
+      if (!evidence && publicationRejections.recoverNotSent) {
+        // Do not filter by event kind or revision: any intervening event defeats
+        // the historical proof that this stage stopped at its first offer read.
+        const next = (await client.query<EbayPublicationStageEvent>(
+          `SELECT id::text,revision::text,event,evidence,
+            to_char(created_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS "createdAt"
+           FROM channels.ebay_listing_sync_events WHERE job_id=$1 AND id>$2 ORDER BY id LIMIT 1`, [job.id, start.id])).rows[0] ?? null;
+        const legacyPreflightProof = proveLegacyEbayPublicationPreflight({ jobId: job.id, target, start, next });
+        const stageJournalContract = start.evidence.requestJournalContract === undefined ? undefined
+          : validateEbayPublicationStageContract(start.evidence.requestJournalContract, target);
+        const recovered = await publicationRejections.recoverNotSent({ ...input, legacyPreflightProof, stageJournalContract }, client);
+        if (recovered.busy) throw new EbayListingSyncError("PUBLICATION_SCOPE_BUSY",
+          "Another inventory update is still running. This saved publication will check its preparation again.");
+        if (!recovered.evidence) return null;
+        await this.event(client, job, "stage_completed", { key: "publication_not_sent",
+          preparedIntentHash: recovered.evidence.hash, startedEventId: start.id,
+          startedAt: start.createdAt, targetHash: syncIdentityHash(target), responseEvidence: recovered.evidence }, now);
+        return "not_sent";
+      }
+      if (!evidence) return null;
+      await this.event(client, job, "stage_completed", { key: "publication_rejected",
+        preparedIntentHash: evidence.hash, startedEventId: start.id,
+        startedAt: start.createdAt, targetHash: syncIdentityHash(target), responseEvidence: evidence }, now);
+      return "rejected";
     });
   }
   async finish(

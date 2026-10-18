@@ -22,6 +22,10 @@ import {
   productValuesToColumns,
 } from "../../infrastructure/dropship-listing-setting-shared.repository";
 import { PgShellzClubProductCostAdapter } from "../../infrastructure/shellz-club-product-cost.adapter";
+import { readResolvedEbayCategories } from "../../infrastructure/dropship-ebay-category-rules.reader";
+import { readResolvedListingContents } from "../../infrastructure/dropship-listing-content.reader";
+import { readListingSettingLayers } from "../../infrastructure/dropship-listing-setting-layers.reader";
+import { loadListingRulePrices } from "../../infrastructure/dropship-rule-price.loader";
 import type { ProductListingSettingValues } from "../../../../../shared/dropship/listing-setting-values";
 
 describe("PgDropshipListingPreviewRepository", () => {
@@ -185,12 +189,19 @@ describe("PgDropshipListingPreviewRepository", () => {
     };
     const LAYER_READ = /FROM dropship\.dropship_(product|category)_listing_settings\b/;
 
-    /** Answers the resolver and settings reads with the given rows; anything else fails the test. */
-    function scriptedClient(answers: { productRows?: unknown[]; categoryRows?: unknown[] } = {}) {
+    /**
+     * Answers the resolver and settings reads with the given rows; anything else fails the test.
+     * `fail` makes the first statement it matches throw that error; `rollbackFails` makes ROLLBACK throw.
+     */
+    function scriptedClient(answers: {
+      productRows?: unknown[]; categoryRows?: unknown[]; fail?: { at: RegExp; error: Error }; rollbackFails?: boolean;
+    } = {}) {
       const statements: string[] = [];
       const client = {
         query: vi.fn(async (sql: string, _params?: readonly unknown[]) => {
           statements.push(sql.trim());
+          if (answers.fail?.at.test(sql.trim())) throw answers.fail.error;
+          if (answers.rollbackFails && /^ROLLBACK\b/.test(sql.trim())) throw new Error("The connection was lost.");
           if (/^(BEGIN|COMMIT|ROLLBACK)\b/.test(sql.trim())) return { rows: [] };
           if (sql.includes("FROM dropship.dropship_product_listing_settings")) return { rows: structuredClone(answers.productRows ?? []) };
           if (sql.includes("FROM dropship.dropship_category_listing_settings")) return { rows: structuredClone(answers.categoryRows ?? []) };
@@ -256,7 +267,12 @@ describe("PgDropshipListingPreviewRepository", () => {
       expect(client.release).toHaveBeenCalledTimes(1);
     });
 
-    it("prices with the preview's layers and reads no settings of its own", async () => {
+    it("has no separate rule price, description or eBay category loader: each would read in its own snapshot (D23)", () => {
+      const repository = new PgDropshipListingPreviewRepository(scriptedClient().pool) as unknown as Record<string, unknown>;
+      expect([repository.loadRulePrices, repository.loadListingContents, repository.loadEbayCategories]).toEqual([undefined, undefined, undefined]);
+    });
+
+    it("hands each resolver loader the snapshot's layers: it reads no settings itself, and answers what it answers reading them", async () => {
       const cost: DropshipProductCost = { status: "available", unitCostCents: 809, planId: "ops", source: "variant_fixed_price",
         overrideId: "fixed", issue: null, retailPriceCents: null, discountBps: null };
       vi.spyOn(PgShellzClubProductCostAdapter, "forTransaction").mockReturnValue({
@@ -264,50 +280,212 @@ describe("PgDropshipListingPreviewRepository", () => {
           new Map(productVariantIds.map((id) => [id, cost])),
       } as unknown as PgShellzClubProductCostAdapter);
       const { pool, statements } = scriptedClient({ productRows: [productRow(501)] });
-      const repository = new PgDropshipListingPreviewRepository(pool);
+      const connection = await pool.connect();
       const candidate = listingCandidate({ productVariantId: 101, productId: 501, categoryId: null, defaultRetailPriceCents: 1_299 });
+      const loaders = [
+        ["rule prices", (input: Parameters<typeof loadListingRulePrices>[1]) => loadListingRulePrices(connection, input)],
+        ["descriptions", (input: Parameters<typeof readResolvedListingContents>[1]) => readResolvedListingContents(connection, input)],
+        ["eBay categories", (input: Parameters<typeof readResolvedEbayCategories>[1]) => readResolvedEbayCategories(connection, input)],
+      ] as const;
 
-      const given = await repository.loadRulePrices({ ...scope([candidate]), layers: LAYERS });
-      expect(statements.some((sql) => LAYER_READ.test(sql))).toBe(false);
-      expect(given.get(101)).toMatchObject({ priceCents: 1_299, ruleName: "Product price" });
-
-      // Without them it reads the same rows itself, inside its own snapshot.
-      statements.length = 0;
-      const own = await repository.loadRulePrices(scope([candidate]));
-      const layerRead = statements.findIndex((sql) => LAYER_READ.test(sql));
-      expect(layerRead).toBeGreaterThan(statements.indexOf("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY"));
-      expect(layerRead).toBeLessThan(statements.indexOf("COMMIT"));
-      expect(own).toEqual(given);
+      for (const [label, load] of loaders) {
+        statements.length = 0;
+        const given = await load({ ...scope([candidate]), layers: LAYERS });
+        expect(statements.some((sql) => LAYER_READ.test(sql)), label).toBe(false);
+        statements.length = 0;
+        const own = await load(scope([candidate]));
+        expect(statements.filter((sql) => LAYER_READ.test(sql)), label).toHaveLength(1);
+        expect(own, label).toEqual(given);
+      }
+      const answers = await Promise.all(loaders.map(([, load]) => load({ ...scope([candidate]), layers: LAYERS })));
+      expect((answers[0] as Map<number, unknown>).get(101)).toMatchObject({ priceCents: 1_299, ruleName: "Product price" });
+      expect((answers[1] as Map<number, { descriptionHtml: string }>).get(101)?.descriptionHtml).toContain("Shipped from our shop.");
+      expect((answers[2] as Map<number, unknown>).get(101)).toMatchObject({ categoryId: "900200", source: "product" });
     });
 
-    it("describes with the preview's layers and reads no settings of its own", async () => {
-      const { pool, statements } = scriptedClient({ productRows: [productRow(501)] });
-      const repository = new PgDropshipListingPreviewRepository(pool);
-      const candidate = listingCandidate({ productVariantId: 101, productId: 501, categoryId: null });
+    describe("the four resolver inputs in one snapshot (PR 11c, plan 7.A, D23)", () => {
+      const SNAPSHOT_BEGIN = "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY";
+      const PRICING_PROFILE_READ = /FROM dropship\.dropship_pricing_profiles\b/;
+      const CONTENT_PROFILE_READ = /FROM dropship\.dropship_content_profiles\b/;
+      const CONTENT_SETTINGS_READ = /FROM dropship\.dropship_listing_content_settings\b/;
+      const EBAY_RULES_READ = /FROM dropship\.dropship_ebay_category_rule_profiles\b/;
+      const PRODUCT_READ = /FROM dropship\.dropship_product_listing_settings\b/;
+      const CATEGORY_READ = /FROM dropship\.dropship_category_listing_settings\b/;
+      const cost: DropshipProductCost = { status: "available", unitCostCents: 809, planId: "ops", source: "variant_fixed_price",
+        overrideId: "fixed", issue: null, retailPriceCents: null, discountBps: null };
+      const costReads: number[][] = [];
+      function mockCosts(read: (ids: readonly number[]) => Promise<Map<number, DropshipProductCost>> =
+        async (ids) => new Map(ids.map((id) => [id, cost]))) {
+        costReads.length = 0;
+        vi.spyOn(PgShellzClubProductCostAdapter, "forTransaction").mockReturnValue({
+          loadProductCosts: async ({ productVariantIds }: { productVariantIds: readonly number[] }) => {
+            costReads.push([...productVariantIds]);
+            return read(productVariantIds);
+          },
+        } as unknown as PgShellzClubProductCostAdapter);
+      }
+      // Sizes 101 and 102 are product 501's (its own price, text and eBay category) in category 31; 201 is product 601's, with no
+      // category. 102 is a size of the preview that is not rule-eligible.
+      const CANDIDATES = [
+        listingCandidate({ productVariantId: 101, productId: 501, categoryId: 31, defaultRetailPriceCents: 1_299 }),
+        listingCandidate({ productVariantId: 102, productId: 501, categoryId: 31 }),
+        listingCandidate({ productVariantId: 201, productId: 601, categoryId: null }),
+      ];
+      const RULE_ELIGIBLE = [CANDIDATES[0], CANDIDATES[2]];
+      const input = (platform: "ebay" | "shopify" = "ebay") => ({ ...scope(CANDIDATES), ruleEligibleCandidates: RULE_ELIGIBLE, platform });
+      const indexOf = (statements: readonly string[], read: RegExp) => statements.findIndex((sql) => read.test(sql));
 
-      const given = await repository.loadListingContents({ ...scope([candidate]), layers: LAYERS });
-      expect(statements.some((sql) => LAYER_READ.test(sql))).toBe(false);
-      expect(given.get(101)?.descriptionHtml).toContain("Shipped from our shop.");
+      it("reads the layers, the pricing profile, the content profile and the eBay rules after one BEGIN and before its one COMMIT", async () => {
+        mockCosts();
+        const { pool, client, statements } = scriptedClient({ productRows: [productRow(501)], categoryRows: [categoryRow(31)] });
+        const repository = new PgDropshipListingPreviewRepository(pool);
 
-      statements.length = 0;
-      const own = await repository.loadListingContents(scope([candidate]));
-      expect(statements.filter((sql) => LAYER_READ.test(sql))).toHaveLength(1);
-      expect(own).toEqual(given);
-    });
+        const inputs = await repository.loadResolverInputs(input());
 
-    it("picks the eBay category with the preview's layers and reads no settings of its own", async () => {
-      const { pool, statements } = scriptedClient({ productRows: [productRow(501)] });
-      const repository = new PgDropshipListingPreviewRepository(pool);
-      const candidate = listingCandidate({ productVariantId: 101, productId: 501, categoryId: null });
+        expect(statements[0]).toBe(SNAPSHOT_BEGIN);
+        expect(statements.at(-1)).toBe("COMMIT");
+        expect(statements.filter((sql) => /^BEGIN\b/.test(sql))).toHaveLength(1);
+        expect(statements.filter((sql) => sql === "COMMIT")).toHaveLength(1);
+        expect(statements).not.toContain("ROLLBACK");
+        // In order, each once: the layers (products, then categories), the pricing profile, the content profile and
+        // its size texts, the eBay rules. The loaders are given the layers, so no settings are read twice.
+        const order = [PRODUCT_READ, CATEGORY_READ, PRICING_PROFILE_READ, CONTENT_PROFILE_READ, CONTENT_SETTINGS_READ, EBAY_RULES_READ]
+          .map((read) => indexOf(statements, read));
+        expect(order.every((index) => index > 0 && index < statements.length - 1)).toBe(true);
+        expect(order).toEqual([...order].sort((left, right) => left - right));
+        expect(statements).toHaveLength(order.length + 2);
+        for (const sql of statements) {
+          expect(sql).not.toMatch(/\bFOR\s+(UPDATE|NO\s+KEY\s+UPDATE|SHARE|KEY\s+SHARE)\b/i);
+          expect(sql).not.toMatch(/^\s*(INSERT|UPDATE|DELETE|LOCK)\b/i);
+        }
+        // One client: the same connection for all of them, released once.
+        expect(pool.connect).toHaveBeenCalledTimes(1);
+        expect(client.release).toHaveBeenCalledTimes(1);
+        // Every size's settings; rule prices and descriptions for the rule-eligible sizes only; eBay categories for every size.
+        expect([...inputs.layers.products.keys()]).toEqual([501]);
+        expect([...inputs.layers.categories.keys()]).toEqual([31]);
+        expect([...inputs.rulePrices.keys()]).toEqual([101]);
+        expect(costReads).toEqual([[101]]);
+        expect(inputs.rulePrices.get(101)).toMatchObject({ priceCents: 1_299, ruleName: "Product price" });
+        expect([...inputs.contents.keys()]).toEqual([101, 201]);
+        expect(inputs.contents.get(101)?.descriptionHtml).toContain("Shipped from our shop.");
+        expect([...(inputs.ebayCategories?.keys() ?? [])]).toEqual([101, 102, 201]);
+        expect(inputs.ebayCategories?.get(101)).toMatchObject({ categoryId: "900200", source: "product" });
+      });
 
-      const given = await repository.loadEbayCategories({ ...scope([candidate]), layers: LAYERS });
-      expect(statements.some((sql) => LAYER_READ.test(sql))).toBe(false);
-      expect(given.get(101)).toMatchObject({ categoryId: "900200", source: "product" });
+      it("answers what the four readers answer one by one for the same store", async () => {
+        mockCosts();
+        const { pool } = scriptedClient({ productRows: [productRow(501)], categoryRows: [categoryRow(31)] });
+        const repository = new PgDropshipListingPreviewRepository(pool);
 
-      statements.length = 0;
-      const own = await repository.loadEbayCategories(scope([candidate]));
-      expect(statements.filter((sql) => LAYER_READ.test(sql))).toHaveLength(1);
-      expect(own).toEqual(given);
+        const together = await repository.loadResolverInputs(input());
+        const connection = await pool.connect();
+        const layers = await readListingSettingLayers(connection, scope(CANDIDATES));
+        const separate = {
+          layers,
+          rulePrices: await loadListingRulePrices(connection, { ...scope(RULE_ELIGIBLE), layers }),
+          contents: await readResolvedListingContents(connection, { ...scope(RULE_ELIGIBLE), layers }),
+          ebayCategories: await readResolvedEbayCategories(connection, { ...scope(CANDIDATES), layers }),
+        };
+
+        expect(together).toEqual(separate);
+      });
+
+      it("reads no eBay rules for a store that is not eBay, and answers no eBay categories", async () => {
+        mockCosts();
+        const { pool, statements } = scriptedClient({ productRows: [productRow(501)] });
+        const repository = new PgDropshipListingPreviewRepository(pool);
+
+        const inputs = await repository.loadResolverInputs(input("shopify"));
+
+        expect(statements.some((sql) => EBAY_RULES_READ.test(sql))).toBe(false);
+        expect(inputs).not.toHaveProperty("ebayCategories");
+        expect(statements[0]).toBe(SNAPSHOT_BEGIN);
+        expect(statements.at(-1)).toBe("COMMIT");
+      });
+
+      it.each([
+        ["the BEGIN", /^BEGIN\b/],
+        ["the product settings read", PRODUCT_READ],
+        ["the category settings read", CATEGORY_READ],
+        ["the pricing profile read", PRICING_PROFILE_READ],
+        ["the content profile read", CONTENT_PROFILE_READ],
+        ["the size texts read", CONTENT_SETTINGS_READ],
+        ["the eBay rules read", EBAY_RULES_READ],
+        ["the COMMIT", /^COMMIT$/],
+      ])("rolls back once, releases once and throws the failure's own error when %s fails", async (_name, at) => {
+        mockCosts();
+        const error = new Error("The read failed.");
+        const { pool, client, statements } = scriptedClient({ productRows: [productRow(501)], categoryRows: [categoryRow(31)], fail: { at, error } });
+        const repository = new PgDropshipListingPreviewRepository(pool);
+
+        await expect(repository.loadResolverInputs(input())).rejects.toBe(error);
+
+        expect(statements.at(-1)).toBe("ROLLBACK");
+        expect(statements.filter((sql) => sql === "ROLLBACK")).toHaveLength(1);
+        expect(statements.filter((sql) => sql === "COMMIT")).toHaveLength(at.test("COMMIT") ? 1 : 0);
+        // Nothing is read after the failure.
+        expect(statements.findIndex((sql) => at.test(sql))).toBe(statements.length - 2);
+        expect(pool.connect).toHaveBeenCalledTimes(1);
+        expect(client.release).toHaveBeenCalledTimes(1);
+      });
+
+      it("rolls back once and releases once when the cost read fails", async () => {
+        const error = new Error("The cost source failed.");
+        mockCosts(async () => { throw error; });
+        const { pool, client, statements } = scriptedClient({ productRows: [productRow(501)] });
+        const repository = new PgDropshipListingPreviewRepository(pool);
+
+        await expect(repository.loadResolverInputs(input())).rejects.toBe(error);
+
+        expect(statements.filter((sql) => sql === "ROLLBACK")).toHaveLength(1);
+        expect(statements).not.toContain("COMMIT");
+        expect(statements.some((sql) => CONTENT_PROFILE_READ.test(sql) || EBAY_RULES_READ.test(sql))).toBe(false);
+        expect(client.release).toHaveBeenCalledTimes(1);
+      });
+
+      it("keeps the read's own error when the ROLLBACK fails too, and still releases once", async () => {
+        mockCosts();
+        const error = new Error("The read failed.");
+        const { pool, client, statements } = scriptedClient({ productRows: [productRow(501)], fail: { at: CONTENT_PROFILE_READ, error },
+          rollbackFails: true });
+        const repository = new PgDropshipListingPreviewRepository(pool);
+
+        await expect(repository.loadResolverInputs(input())).rejects.toBe(error);
+
+        expect(statements.filter((sql) => sql === "ROLLBACK")).toHaveLength(1);
+        expect(client.release).toHaveBeenCalledTimes(1);
+      });
+
+      it.each(["ebay", "shopify"] as const)("opens no transaction and reads nothing with no catalog sizes (%s)", async (platform) => {
+        const { pool } = scriptedClient();
+        const repository = new PgDropshipListingPreviewRepository(pool);
+
+        const inputs = await repository.loadResolverInputs({ ...scope([]), ruleEligibleCandidates: [], platform });
+
+        expect(pool.connect).not.toHaveBeenCalled();
+        expect(inputs.layers).toBe(EMPTY_LISTING_SETTING_LAYERS);
+        expect(inputs.rulePrices).toEqual(new Map());
+        expect(inputs.contents).toEqual(new Map());
+        if (platform === "ebay") expect(inputs.ebayCategories).toEqual(new Map());
+        else expect(inputs).not.toHaveProperty("ebayCategories");
+      });
+
+      it.each([
+        ["with sizes", CANDIDATES.slice(0, 2)],
+        ["with none", []],
+      ])("refuses a rule-eligible size that is not one of the preview's sizes, before any statement (%s)", async (_name, candidates) => {
+        const { pool } = scriptedClient();
+        const repository = new PgDropshipListingPreviewRepository(pool);
+
+        const failure = await repository.loadResolverInputs({ ...scope(candidates), ruleEligibleCandidates: RULE_ELIGIBLE, platform: "ebay" })
+          .catch((error: unknown) => error);
+
+        expect(failure).toBeInstanceOf(DropshipError);
+        expect(failure).toMatchObject({ code: "DROPSHIP_LISTING_SETTINGS_INVARIANT_FAILED",
+          context: { storeConnectionId: 22, outsideCount: candidates.length === 0 ? 2 : 1, classification: "fatal" } });
+        expect(pool.connect).not.toHaveBeenCalled();
+      });
     });
   });
 });

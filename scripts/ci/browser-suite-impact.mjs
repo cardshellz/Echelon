@@ -12,9 +12,9 @@ export const BROWSER_SUITES = {
   orderEdits: {
     config: "playwright.order-edits.config.ts",
     workflow: ".github/workflows/order-edits.yml",
-    tests: /^test\/browser\/order-edits\.spec\.ts$/,
+    tests: /^test\/browser\/(order-edits|customer-order-edit-resume)\.spec\.ts$/,
     // The pilot renders the real application, including its eager page imports.
-    roots: ["client/src/main.tsx"],
+    roots: ["client/src/main.tsx", "client/src/customer-account/entry.tsx", "test/browser/fixtures/customer-order-edit-harness.tsx"],
     ownedPrefixes: ["server/modules/order-edits/", "client/src/pages/OrderEdits.tsx"],
   },
   procurement: {

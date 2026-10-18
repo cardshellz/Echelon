@@ -17,6 +17,7 @@ import { Badge } from "@/components/ui/badge";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
+import { ShipmentCostPostingDetails, ShipmentCostPostingHistory } from "./ShipmentCostPostingDetails";
 
 export function ShipmentCostExceptionReview({ lineId, review }: { lineId: number; review: ShipmentCostException }) {
   const [open, setOpen] = useState(false);
@@ -27,8 +28,8 @@ export function ShipmentCostExceptionReview({ lineId, review }: { lineId: number
   );
   return (
     <div className="space-y-2 text-sm">
-      <Badge variant={posted ? "outline" : "destructive"}>
-        {posted ? "Costs reconciled" : "Cost reconciliation needed"}
+      <Badge variant={posted ? "outline" : "destructive"} className={posted ? "border-green-600/40 text-green-800 dark:text-green-300" : undefined}>
+        {posted ? "Costs posted" : "Cost reconciliation needed"}
       </Badge>
       <p>
         {posted
@@ -39,20 +40,14 @@ export function ShipmentCostExceptionReview({ lineId, review }: { lineId: number
       </p>
       {posted && (
         <p className="text-xs text-muted-foreground">
-          The original stock history remains in the audit. Later cost changes follow the approved destination.
+          No further cost approval is needed. The approval and original stock history are saved below.
         </p>
       )}
       <Button size="sm" variant="outline" onClick={() => setOpen(true)}>
-        {posted ? "View reconciliation" : "Reconcile costs"}
+        {posted ? "View posting and approval" : "Reconcile costs"}
       </Button>
       <Dialog open={open} onOpenChange={setOpen}>
         <DialogContent className="w-[calc(100vw-2rem)] sm:max-w-2xl max-h-[90dvh] flex flex-col overflow-hidden">
-          <DialogHeader>
-            <DialogTitle>Reconcile shipment costs</DialogTitle>
-            <DialogDescription>
-              Review the recorded history and approve where the unresolved cost belongs.
-            </DialogDescription>
-          </DialogHeader>
           {open && <ShipmentReconciliation lineId={lineId} onClose={() => setOpen(false)} />}
         </DialogContent>
       </Dialog>
@@ -78,6 +73,7 @@ function ShipmentReconciliation({ lineId, onClose }: { lineId: number; onClose: 
   const [destination, setDestination] = useState<ReconciliationDestination | null>(null);
   const [client] = useState(() => createShipmentReconciliationClient(() => crypto.randomUUID()));
   const [attempt, setAttempt] = useState<ReconciliationRequest | null>(null);
+  const [changingDestination, setChangingDestination] = useState(false);
   const save = useMutation({
     mutationFn: (request: ReconciliationRequest) => client.reconcile(lineId, request),
     onSuccess: async () => {
@@ -93,7 +89,9 @@ function ShipmentReconciliation({ lineId, onClose }: { lineId: number; onClose: 
           );
         },
       });
-      onClose();
+      setChangingDestination(false);
+      setDestination(null);
+      setReason("");
     },
   });
   const data = context.data;
@@ -102,6 +100,7 @@ function ShipmentReconciliation({ lineId, onClose }: { lineId: number; onClose: 
   const preview = data && destination ? reconciliationPreview(data, destination) : null;
   const money = (mills: number) => formatShipmentExceptionAmount(mills, "USD");
   const sameDestination = data?.state.status === "posted" && data.state.destination === destination;
+  const viewingPosting = data?.state.status === "posted" && !changingDestination && !ambiguous && !context.isError;
   const submit = () => {
     if (ambiguous && attempt) {
       save.mutate(attempt);
@@ -119,12 +118,20 @@ function ShipmentReconciliation({ lineId, onClose }: { lineId: number; onClose: 
   };
   return (
     <>
+      <DialogHeader>
+        <DialogTitle>{viewingPosting ? "Shipment costs posted" : changingDestination ? "Change cost destination" : "Reconcile shipment costs"}</DialogTitle>
+        <DialogDescription>
+          {viewingPosting ? "The saved posting and administrator approval for this shipment line."
+            : "Review the recorded history and approve where the unresolved cost belongs."}
+        </DialogDescription>
+      </DialogHeader>
       <div className="min-h-0 overflow-y-auto space-y-4 pr-1 text-sm">
         {context.isPending && <p role="status">Loading receipt, stock history and saved postings…</p>}
         {context.isError && <p role="alert">The history could not be loaded. Reload before approving.</p>}
-        {data && (
+        {data && !context.isError && (
           <>
             <strong className="block break-all">{data.sku ?? `Shipment line ${lineId}`}</strong>
+            {viewingPosting ? <ShipmentCostPostingDetails data={data} /> : <>
             {data.sourceEvidence === "estimated" && (
               <p className="text-amber-700 dark:text-amber-400">
                 This shipment charge is still estimated. Approval uses the saved estimate; confirming the final charge
@@ -234,24 +241,8 @@ function ShipmentReconciliation({ lineId, onClose }: { lineId: number; onClose: 
               />
             </div>
             {sameDestination && <p role="status">These costs are already reconciled to this destination.</p>}
-            {data.history.length > 0 && (
-              <details className="text-xs">
-                <summary className="cursor-pointer">
-                  Posted adjustments ({data.history.length}
-                  {data.history.length === 50 ? " most recent" : ""})
-                </summary>
-                <ol className="mt-2 space-y-2">
-                  {data.history.map((posting) => (
-                    <li key={posting.id} className="border-t pt-2">
-                      <strong>{reconciliationDestinations[posting.destination]}</strong> · {money(posting.beforeMills)}{" "}
-                      → {money(posting.afterMills)} · approved by {posting.actorName} ·{" "}
-                      {new Date(posting.recordedAt).toLocaleString()}
-                      <p>{posting.reason}</p>
-                    </li>
-                  ))}
-                </ol>
-              </details>
-            )}
+            <ShipmentCostPostingHistory data={data} />
+            </>}
           </>
         )}
         {save.isError && (
@@ -265,15 +256,22 @@ function ShipmentReconciliation({ lineId, onClose }: { lineId: number; onClose: 
         )}
       </div>
       <div className="shrink-0 border-t pt-3 flex flex-wrap justify-end gap-2">
-        <Button variant="outline" onClick={onClose} disabled={save.isPending}>
-          Close review
-        </Button>
-        {(context.isError || (save.isError && !ambiguous) || data?.blockedReason) && (
+        {!viewingPosting && <Button variant="outline" onClick={onClose} disabled={save.isPending}>Close review</Button>}
+        {(context.isError || (save.isError && !ambiguous) || (!viewingPosting && data?.blockedReason)
+          || (viewingPosting && !data?.history.some(posting => posting.destination === data.state.destination))) && (
           <Button variant="outline" disabled={locked} onClick={reload}>
             Reload review
           </Button>
         )}
-        {data?.canApprove && (
+        {viewingPosting && data?.canApprove && !data.blockedReason && <Button variant="outline" onClick={() => {
+          setChangingDestination(true);
+          setDestination(null);
+          setReason("");
+          save.reset();
+        }}>Change cost destination</Button>}
+        {viewingPosting && <Button onClick={onClose}>Done</Button>}
+        {changingDestination && !locked && <Button variant="outline" onClick={() => setChangingDestination(false)}>Cancel change</Button>}
+        {!context.isError && !viewingPosting && data?.canApprove && (
           <Button
             className="min-h-[44px] bg-green-700 hover:bg-green-800 text-white"
             onClick={submit}

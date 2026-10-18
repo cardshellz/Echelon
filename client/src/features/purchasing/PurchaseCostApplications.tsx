@@ -1,6 +1,7 @@
 import React from "react";
 import { Link } from "wouter";
 import type { PurchaseWorkspace } from "@shared/procurement/purchase-workspace";
+import { reconciliationDestinations } from "@shared/procurement/cost-reconciliation";
 import type { PurchaseCostApplicationHistory } from "@shared/procurement/purchase-cost-applications";
 import type { ReceiptCostRequestHistory } from "@shared/procurement/receipt-cost-queue";
 import { describeReceiptCostRecovery } from "@shared/procurement/receipt-cost-recovery";
@@ -23,6 +24,9 @@ function EvidenceIssues({ issues }: { issues: readonly { code: string; message: 
 }
 
 function applicationLabel(application: Revision["applications"][number], source: Revision["source"]): string {
+  if (application.resolvedByCurrentPosting) {
+    return "Recorded review · costs posted after approval";
+  }
   if (application.evidenceState === "review_required") return application.status === "retry_required" ? "Retry required" : "Review required";
   if (application.status !== "applied") return formatWorkspaceStatus(application.status);
   if (application.outcome?.lotsUpdated === 0) return "Processed · no lots changed";
@@ -43,10 +47,15 @@ function RevisionDetails({ revision, navigation }: { revision: Revision; navigat
       })}</div>}
       {source?.manualOverride && <p className="text-xs">Manual source review: {source.manualOverride.reason} · {source.manualOverride.actorId} · {formatWorkspaceDate(source.manualOverride.recordedAt)}</p>}
       <EvidenceIssues issues={revision.issues} />
+      {revision.currentResolution && <div className="space-y-2 rounded-md border p-3 text-xs" data-testid={`cost-resolution-${revision.id}`}>
+        <p className="font-semibold">Costs posted after approval</p>
+        <p>{formatWorkspaceMills(revision.currentResolution.postedMills, revision.currentResolution.currency)} posted to {reconciliationDestinations[revision.currentResolution.destination].toLowerCase()} for this current source. Application #{revision.currentResolution.applicationId}. Original attempts and stock-history gaps remain below.</p>
+        {revision.currentResolution.postings.map((posting) => <p key={posting.id}>Posting #{posting.id} · Approval #{posting.approvalId} · {posting.actorName} · {formatWorkspaceDate(posting.recordedAt)}<span className="block">{posting.reason}</span></p>)}
+      </div>}
       {revision.applications.length === 0 ? <p className="rounded-md bg-muted/40 p-3 text-xs">No application has been recorded for this source revision.</p> : revision.applications.map((application) => <details key={application.id} id={`cost-application-${application.id}`} className="rounded-md bg-muted/30 p-3" data-testid={`cost-application-${application.id}`}>
         <summary className="cursor-pointer text-xs font-semibold">{applicationLabel(application, source)} · Application #{application.id}<span className="mt-1 block font-normal text-muted-foreground">{formatWorkspaceDate(application.recordedAt)}{application.latestRecordedApplication ? " · Latest attempt for this revision" : " · Historical attempt"}</span></summary>
         <div className="mt-3 space-y-3">
-          <p className="text-xs text-muted-foreground">Recorded by {application.recordedBy}. These snapshots describe the lots captured by this application.</p>
+          <p className="text-xs text-muted-foreground">Original result: {formatWorkspaceStatus(application.status)}. Recorded by {application.recordedBy}. These snapshots describe the lots captured by this application.</p>
           {application.outcome && <dl className="grid grid-cols-2 gap-3 text-xs"><div><dt className="text-muted-foreground">Lots updated</dt><dd>{application.outcome.lotsUpdated.toLocaleString()}</dd></div><div><dt className="text-muted-foreground">Sold-cost rows updated</dt><dd>{application.outcome.cogsRowsUpdated.toLocaleString()}</dd></div><div className="col-span-2"><dt className="text-muted-foreground">Recorded COGS adjustment</dt><dd className="break-words font-mono">{formatWorkspaceMoney(application.outcome.totalCogsDeltaCents, source?.currency ?? null)}</dd></div></dl>}
           <EvidenceIssues issues={application.issues} />
           {application.reportingEvent && <p className="rounded-md border p-2 text-xs">Internal reporting event #{application.reportingEvent.id} · {formatWorkspaceDate(application.reportingEvent.recordedAt)} · {application.reportingEvent.evidenceState === "verified_record" ? "Recorded" : "Needs review"}. Delivery to Archon or another external system is not verified.</p>}

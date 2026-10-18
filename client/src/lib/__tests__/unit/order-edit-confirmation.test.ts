@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   canConfirmOrderEditPreview,
   orderEditMatchesInput,
+  orderEditNeedsPreparation,
 } from "../../order-edit-confirmation";
 import type {
   OrderEditOperation,
@@ -119,6 +120,49 @@ function fixture() {
 }
 
 describe("same-screen order edit confirmation", () => {
+  it("only refreshes resumable, unsubmitted interrupted, failed or expired drafts", () => {
+    const { operation } = fixture();
+    expect(orderEditNeedsPreparation(operation, now)).toBe(false);
+    expect(
+      orderEditNeedsPreparation({ ...operation, status: "preparing" }, now),
+    ).toBe(true);
+    expect(
+      orderEditNeedsPreparation(
+        { ...operation, status: "review_required" },
+        now,
+      ),
+    ).toBe(true);
+    expect(
+      orderEditNeedsPreparation(operation, Date.parse(operation.expiresAt!)),
+    ).toBe(true);
+    expect(
+      orderEditNeedsPreparation({ ...operation, quoteAvailable: false }, now),
+    ).toBe(true);
+    for (const status of [
+      "awaiting_payment",
+      "committing",
+      "refunding",
+      "recovering",
+      "synchronizing",
+      "completed",
+      "expired",
+    ] as const)
+      expect(orderEditNeedsPreparation({ ...operation, status }, now)).toBe(
+        false,
+      );
+    expect(
+      orderEditNeedsPreparation(
+        { ...operation, status: "review_required", canAbandon: false },
+        now,
+      ),
+    ).toBe(false);
+    expect(
+      orderEditNeedsPreparation(
+        { ...operation, status: "review_required", requestedPlan: undefined },
+        now,
+      ),
+    ).toBe(false);
+  });
   it("accepts a matching verified quote despite native calculated line IDs", () => {
     const f = fixture();
     expect(

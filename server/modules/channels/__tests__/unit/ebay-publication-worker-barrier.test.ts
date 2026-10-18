@@ -9,11 +9,13 @@ function fixture() {
     nextAttemptAt: "2026-10-11T20:00:00Z", updatedAt: "2026-10-11T20:00:00Z", identity: syncIdentity,
     revision: "1", claimedRevision: "1", ownerToken: uuid, attempts: 10, result: null, verificationIntentHash: null, verificationRevision: null });
   const finish = vi.fn(); const release = vi.fn(); const stage = vi.fn();
+  const recoverTerminalPublicationWrite = vi.fn<NonNullable<EbayListingSyncStore["recoverTerminalPublicationWrite"]>>(async () => null);
   const store = { claim: vi.fn().mockResolvedValueOnce({ job, release }), stage, finish,
+    recoverTerminalPublicationWrite,
     bindPublicationAccepted: vi.fn(), bindPublicationTarget: vi.fn(), bindProviderIdentity: vi.fn() } as unknown as EbayListingSyncStore;
   const execute = vi.fn<EbayListingSyncExecution["execute"]>();
   const service = new EbayListingSyncService(store, { execute }, () => new Date("2026-10-11T20:00:00Z"), () => uuid);
-  return { job, finish, release, stage, execute, service };
+  return { job, finish, release, stage, execute, service, recoverTerminalPublicationWrite };
 }
 describe("durable publication barriers survive worker errors", () => {
   it("retains an interrupted publish even after the ordinary retry limit", async () => {
@@ -48,5 +50,23 @@ describe("durable publication barriers survive worker errors", () => {
     await f.service.processDue(1);
     expect(f.finish).toHaveBeenCalledWith(f.job, expect.objectContaining({ state: "awaiting_evidence" }), expect.any(Date));
     expect(f.job.publicationWriteCompleted).toBe(false); expect(f.job.publicationWriteStarted).toBe(false);
+  });
+  it("shows a proved provider refusal as actionable after its rejection checkpoint commits", async () => {
+    const f = fixture();
+    f.recoverTerminalPublicationWrite.mockResolvedValue("rejected");
+    f.execute.mockImplementation(async (_source, stage, _hash, _bind, context) => {
+      try {
+        await stage("publish", "b".repeat(64), async () => {
+          throw new EbayListingSyncError("EBAY_SHIPPING_POLICY_REJECTED", "Choose a valid shipping policy.");
+        });
+      } catch (error) {
+        await context!.recoverTerminalPublicationWrite!(syncIdentity);
+        throw error;
+      }
+      throw new Error("unreachable");
+    });
+    await f.service.processDue(1);
+    expect(f.finish).toHaveBeenCalledWith(f.job, expect.objectContaining({ state: "needs_attention",
+      code: "EBAY_SHIPPING_POLICY_REJECTED", message: "Choose a valid shipping policy." }), expect.any(Date));
   });
 });
