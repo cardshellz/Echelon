@@ -7,6 +7,7 @@ import type {
 import { OrderEditProviderError } from "../application/order-edit-provider";
 import { orderEditQuoteSchema } from "../application/order-edit-provider.schema";
 import { withOrderEditCodePricing } from "../application/order-edit-code-presentation";
+import { preservesAutomaticOrderEditLine } from "../application/order-edit-evidence";
 
 export class PostgresOrderEditCodeHistory implements OrderEditCodeHistory {
   constructor(private readonly pool: Pool) {}
@@ -96,7 +97,19 @@ export function mapOrderEditCodeLines(
           ?.netCents === evidence.netCents &&
         (BigInt(evidence.netCents) ===
           BigInt(evidence.retailCents) * BigInt(evidence.quantity) ||
-          descriptions.get(line.id)?.includes(quote.codePricing!.description)),
+          (evidence.preserveAutomaticDiscount
+            ? Boolean(
+                expected.originalLineId &&
+                  preservesAutomaticOrderEditLine(
+                    snapshot,
+                    quote.baseline,
+                    expected.originalLineId,
+                    evidence.quantity,
+                  ),
+              )
+            : descriptions
+                .get(line.id)
+                ?.includes(quote.codePricing!.description))),
     );
     if (!matches.length) return null;
     const matched = matches.sort((a, b) => a.id.localeCompare(b.id))[0];
