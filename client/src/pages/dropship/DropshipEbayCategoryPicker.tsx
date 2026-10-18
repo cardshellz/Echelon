@@ -1,5 +1,6 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
+import { ArrowRight } from "lucide-react";
 import type { EbayCategory, EbayCategoryOption } from "@shared/dropship/ebay-category-rules";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -11,15 +12,15 @@ import {
   isSearchableEbayCategoryQuery,
   searchEbayCategories,
 } from "@/lib/dropship-ebay-category-rules";
+import { dropshipPortalPath } from "@/lib/dropship-auth";
+import { EBAY_CATEGORY_PICKER_PERMISSION_WORDS } from "@/lib/dropship-listing-settings-words";
 import { queryErrorCode, queryErrorMessage } from "@/lib/dropship-ops-surface";
+import { GuardedLink } from "./catalog/UnsavedChangesGuard";
 
 /** The server refreshes eBay's tree once a day, so answers can be reused for the whole visit. */
 const EBAY_CATEGORY_ANSWER_STALE_MS = 60 * 60 * 1000;
 /** Search waits for a pause in typing, so each keystroke does not spend the vendor's request budget. */
 const EBAY_CATEGORY_SEARCH_DEBOUNCE_MS = 300;
-
-/** Renders the reconnect control for an error that says the eBay connection needs a refresh. */
-export type RenderEbayAuthorizationRecovery = (error: unknown) => ReactNode;
 
 type PickerMode = "search" | "browse";
 
@@ -37,7 +38,6 @@ export function DropshipEbayCategoryPicker({
   initialQuery = "",
   onPick,
   onCancel,
-  renderAuthorizationRecovery,
   hideIds = false,
   showLeafHint = false,
 }: {
@@ -46,8 +46,7 @@ export function DropshipEbayCategoryPicker({
   initialQuery?: string;
   onPick: (category: EbayCategory) => void;
   onCancel: () => void;
-  renderAuthorizationRecovery?: RenderEbayAuthorizationRecovery;
-  /** Leaves out each category's eBay number (Listing settings shows words only). Off by default, as the old step shows it. */
+  /** Leaves out each category's eBay number (Listing settings shows words only). Off by default. */
   hideIds?: boolean;
   /** Says that only the last level can be picked. Off by default. */
   showLeafHint?: boolean;
@@ -110,7 +109,6 @@ export function DropshipEbayCategoryPicker({
       onRetryBrowse={() => void browseQuery.refetch()}
       onPick={pick}
       onOpen={open}
-      renderAuthorizationRecovery={renderAuthorizationRecovery}
       hideIds={hideIds}
       showLeafHint={showLeafHint}
     />
@@ -141,11 +139,12 @@ export function EbayCategoryPickerView(props: {
   onRetryBrowse: () => void;
   onPick: (option: EbayCategoryOption) => void;
   onOpen: (option: EbayCategoryOption) => void;
-  renderAuthorizationRecovery?: RenderEbayAuthorizationRecovery;
   /** Leaves out each category's eBay number. Off by default. */
   hideIds?: boolean;
   /** Says that only the last level can be picked. Off by default. */
   showLeafHint?: boolean;
+  /** Resolves a portal route to its URL; injected in tests, which have no window. */
+  portalHref?: (path: string) => string;
 }) {
   return (
     <div className="space-y-3 rounded-md border border-zinc-200 bg-zinc-50 p-3" role="group" aria-label={props.label}>
@@ -196,7 +195,7 @@ function SearchResults(props: Parameters<typeof EbayCategoryPickerView>[0]) {
   }
   if (props.searchStatus === "loading") return <p className="text-xs" role="status">Searching eBay categories…</p>;
   if (props.searchStatus === "error") {
-    return <PickerError error={props.searchError} onRetry={props.onRetrySearch} render={props.renderAuthorizationRecovery} />;
+    return <PickerError error={props.searchError} onRetry={props.onRetrySearch} portalHref={props.portalHref} />;
   }
   if (props.searchStatus !== "ready") return null;
   if (props.searchResults.length === 0) {
@@ -208,7 +207,7 @@ function SearchResults(props: Parameters<typeof EbayCategoryPickerView>[0]) {
 function BrowseResults(props: Parameters<typeof EbayCategoryPickerView>[0]) {
   if (props.browseStatus === "loading") return <p className="text-xs" role="status">Loading eBay categories…</p>;
   if (props.browseStatus === "error") {
-    return <PickerError error={props.browseError} onRetry={props.onRetryBrowse} render={props.renderAuthorizationRecovery} />;
+    return <PickerError error={props.browseError} onRetry={props.onRetryBrowse} portalHref={props.portalHref} />;
   }
   if (props.browseStatus !== "ready") return null;
   return (
@@ -252,13 +251,29 @@ function OptionList({ options, onPick, onOpen, hideIds }: {
   );
 }
 
-function PickerError({ error, onRetry, render }: { error: unknown; onRetry: () => void; render?: RenderEbayAuthorizationRecovery }) {
+/**
+ * A failed search or browse. A permission error has no Try again: asking again
+ * can't help until the store's eBay connection is refreshed, so it links to
+ * the store connection page instead, the sign-in banner's own link, which asks
+ * first when changes aren't saved. Every other error can be tried again.
+ */
+function PickerError({ error, onRetry, portalHref = dropshipPortalPath }: {
+  error: unknown;
+  onRetry: () => void;
+  portalHref?: (path: string) => string;
+}) {
   if (queryErrorCode(error) === EBAY_CATEGORIES_PERMISSION_REQUIRED) {
+    const words = EBAY_CATEGORY_PICKER_PERMISSION_WORDS;
     return (
       <div role="alert" className="rounded border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900">
-        <p className="font-medium">Your eBay connection needs a refresh.</p>
-        <p className="mt-1">eBay categories load through your own eBay connection. Refresh it, then search again.</p>
-        {render?.(error)}
+        <p className="font-medium">{words.title}</p>
+        <p className="mt-1">{words.detail}</p>
+        <Button asChild size="sm" variant="outline" className="mt-2 gap-2 bg-white">
+          <GuardedLink href={portalHref(words.reconnect.href)}>
+            {words.reconnect.label}
+            <ArrowRight aria-hidden="true" className="h-4 w-4" />
+          </GuardedLink>
+        </Button>
       </div>
     );
   }

@@ -5,7 +5,8 @@ import { PgDropshipListingPreviewRepository } from "./dropship-listing-preview.r
 
 /**
  * The catalog reads a selected-catalog scan needs, bound to one transaction's
- * client. Shared by the pricing-rules, content and eBay category repositories.
+ * client. Shared by the pricing-rules, eBay category, listing-settings,
+ * listing-setting writes, rules-conversion and category-marks repositories.
  */
 export function selectedCatalogReaderForTransaction(
   client: Pick<PoolClient, "query">,

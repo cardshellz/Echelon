@@ -1,5 +1,14 @@
 # eBay saved-policy read recovery
 
+> **Status: removed in Listing settings PR 12.** The saved-policy read (`GET
+> /api/dropship/ebay/listing-policy-overrides/:storeConnectionId/saved`, `listSavedForMember`,
+> `getSavedSelectionForMember`) and the panel that used it (`EbayListingPolicyOverridePanel`) were deleted with the
+> per-size policy panel. The bounded retry of eBay setup reads (`retryEbaySetupRead`,
+> `server/modules/dropship/infrastructure/dropship-ebay-setup-read-retry.ts`) stays. On Catalog → Listing settings a
+> setup read eBay doesn't answer shows the "Can't reach eBay right now. Your saved settings still apply." banner with
+> Try again, and the rows that need eBay wait until it answers. The rest of this page describes the removed design and is
+> kept as history.
+
 ## Confirmed failure path
 
 `DropshipEbayListingPolicyOverrideService.listForMember` joined saved database assignments with `DropshipEbayListingSetupService.getForMember` using `Promise.all`. A provider discovery failure therefore rejected the entire response, including policies already saved in our database. `EbayDropshipListingSetupDirectory.fetchResource` classified temporary HTTP failures as retryable but previously did not retry them. The portal query defaults also disabled retries.

@@ -16,6 +16,7 @@ import {
   type SaveEbayCategoryRulesInput,
 } from "../../../../shared/dropship/ebay-category-rules";
 import { DropshipError } from "../domain/errors";
+import { olderGroupRulesClosed, olderGroupRulesEdit } from "../domain/older-group-rules-edit";
 import { prepareEbayCategoryRules, summarizeEbayCategoryRulesReview } from "./dropship-ebay-category-resolver";
 import { verifyEbayLeafCategories, type EbayCategoryRequest } from "./dropship-ebay-listing-checks";
 import { DROPSHIP_DEFAULT_EBAY_MARKETPLACE_ID } from "./dropship-listing-config-service";
@@ -23,7 +24,7 @@ import type { DropshipListingStoreContext } from "./dropship-listing-preview-ser
 import type { ListingSettingLayers } from "./dropship-listing-setting-layers";
 import type { DropshipStoreListingConfig } from "./dropship-marketplace-listing-provider";
 import type { DropshipClock, DropshipLogger } from "./dropship-ports";
-import { loadSelectedCandidates, selectedCatalogTargets, type SelectedCatalogReader } from "./dropship-selected-catalog";
+import { loadSelectedCandidates, type SelectedCatalogReader } from "./dropship-selected-catalog";
 
 /** Raised when the vendor's eBay connection must be reauthorized before eBay can be asked. */
 export const EBAY_CATEGORIES_PERMISSION_REQUIRED = "DROPSHIP_EBAY_CATEGORIES_PERMISSION_REQUIRED";
@@ -94,11 +95,6 @@ export class DropshipEbayCategoryRulesService {
     return this.read(memberId, storeId, (tx) => tx.loadState());
   }
 
-  /** Scope choices for a rule: the store's selected catalog grouped by category, product line or product. */
-  async targetsForMember(memberId: string, storeId: unknown, input: unknown) {
-    return this.read(memberId, storeId, (tx) => selectedCatalogTargets(tx, this.deps.clock.now(), input));
-  }
-
   async searchForMember(memberId: string, storeId: unknown, query: unknown): Promise<{ categories: EbayCategoryOption[] }> {
     const parsedQuery = ebayCategorySearchQuerySchema.parse(query);
     const identity = await this.ebayIdentity(memberId, storeId);
@@ -130,6 +126,7 @@ export class DropshipEbayCategoryRulesService {
     // needs no eBay call (plan P30).
     const { storeConnectionId, stored } = await this.read(memberId, storeId, async (tx, context) =>
       ({ storeConnectionId: context.storeConnectionId, stored: await tx.loadState() }));
+    refuseClosedGroupRules(storeConnectionId, stored, parsed.expectedRevisionId, parsed.draft);
     const proposed = await this.compileDraft(memberId, storeConnectionId, stored.profile, parsed.draft);
     return this.read(memberId, storeConnectionId, async (tx) => {
       const current = await tx.loadState();
@@ -162,6 +159,7 @@ export class DropshipEbayCategoryRulesService {
       this.logSaved(memberId, storeConnectionId, first.state, true);
       return { state: first.state, idempotentReplay: true };
     }
+    refuseClosedGroupRules(storeConnectionId, first.state, parsed.expectedRevisionId, parsed.draft);
     const profile = await this.compileDraft(memberId, storeConnectionId, first.state.profile, parsed.draft);
     const result = await this.deps.repository.execute(
       { memberId, storeConnectionId, mode: "write", idempotencyKey: parsed.idempotencyKey },
@@ -370,6 +368,27 @@ function isUnmovedRevision(
   expectedRevisionId: number | null,
 ): boolean {
   return current.revisionId === expectedRevisionId && current.revisionId === firstRead.revisionId;
+}
+
+/**
+ * Older group rules are closed (Listing settings PR 12, D9-D10): a draft may
+ * keep the stored rules, or fewer of them in their stored order, never add,
+ * change or reorder one. Checked once per request at its first read (the
+ * write's `isUnmovedRevision` requires the head to still be that revision,
+ * and revisions are immutable, so these are the rules under the lock), before
+ * any eBay call. This service checks the revision only after eBay, so a draft
+ * the rule refuses whose read revision is not the one it names gets today's
+ * version conflict, not the permanent refusal: a tab opened before a move
+ * that sends the old rules back is told "This changed in another window." and
+ * can load the latest (plan D10, FIDELITY1). An allowed draft takes today's
+ * path unchanged (the P30 pins).
+ */
+function refuseClosedGroupRules(storeConnectionId: number, read: EbayCategoryRulesState, expectedRevisionId: number | null,
+  draft: EbayCategoryRulesDraft): void {
+  const edit = olderGroupRulesEdit("ebay_category", read.profile?.rules ?? [], draft.rules);
+  if (edit.allowed) return;
+  if (read.revisionId !== expectedRevisionId) throw versionConflict(storeConnectionId);
+  throw olderGroupRulesClosed(storeConnectionId, "ebay_category", edit);
 }
 
 /** Every category a draft names, in draft order: the store default first, then each rule's. */

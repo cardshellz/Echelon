@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { catalogScopeSchema, matchesCatalogScope, catalogTargetsInputSchema, catalogTargetsResponseSchema } from "./catalog-scope";
+import { catalogScopeSchema, matchesCatalogScope } from "./catalog-scope";
 import { refusingReservedConversionKeys } from "./listing-rules-conversion-keys";
 import {
   listingAmountCentsSchema, listingPriceBasisSchema, listingPriceCentsSchema, MAX_LISTING_PRICE_CENTS, rulePriceLevelSchema,
@@ -104,8 +104,6 @@ export type ReviewPricingRulesInput = z.infer<typeof reviewPricingRulesInputSche
 export type ApplyPricingRulesInput = z.infer<typeof applyPricingRulesInputSchema>;
 export type PricingImpactRow = z.infer<typeof pricingImpactRowSchema>;
 export type PricingReviewResponse = z.infer<typeof pricingReviewResponseSchema>;
-export const pricingTargetsInputSchema = catalogTargetsInputSchema;
-export const pricingTargetsResponseSchema = catalogTargetsResponseSchema;
 
 export interface PricingRuleCandidate {
   productVariantId: number; productId: number; category: string | null; productLineIds: readonly number[];

@@ -30,7 +30,6 @@ import {
   categoryIdOfEditor,
   changedFields,
   classifyWriteFailure,
-  countOlderSettingsDrafts,
   decideOpen,
   describeLeavePrompt,
   describeListingSettingsBar,
@@ -71,6 +70,9 @@ const startSave: ListingSettingsDraftAction = { type: "startSave", attempt: ATTE
 function failure(phase: WriteFailurePhase): WriteFailure {
   return { phase, message: `words for ${phase}`, code: `CODE_${phase}`, status: 400 };
 }
+
+/** The words of the W1/W3/W4 group refusal (Listing settings PR 12, plan 8), the same as the server's message. */
+const GROUP_RULES_CLOSED_WORDS = "Older group rules can't be added or changed any more. Nothing was saved. Use See what changes on Listing settings to move them over.";
 
 function apiError(status: number, code: string | null, message = "Server words.", context?: Record<string, unknown>): DropshipApiError {
   return new DropshipApiError({ status, code, message, context });
@@ -127,7 +129,7 @@ describe("store default rows", () => {
     expect(decideOpen(sizes, categoryEditorId(40))).toBe("ask");
     expect(decideOpen(sizes, "price")).toBe("ask");
     expect(decideOpen(sizes, SIZE_PRICES_EDITOR_ID)).toBe("open");
-    expect(describeListingSettingsBar({ draft: sizes, olderDraftCount: 0, saving: false })).toBe("Not saved · 1 change in Give these sizes a price");
+    expect(describeListingSettingsBar({ draft: sizes, saving: false })).toBe("Not saved · 1 change in Give these sizes a price");
   });
 
   it("names the category editor by category, one draft beside the others (PR 10e, D16)", () => {
@@ -153,7 +155,7 @@ describe("store default rows", () => {
     expect(decideOpen(category, "shipping")).toBe("ask");
     expect(decideOpen(category, categoryEditorId(41))).toBe("ask");
     expect(decideOpen(category, categoryEditorId(40))).toBe("open");
-    expect(describeListingSettingsBar({ draft: category, olderDraftCount: 0, saving: false })).toBe("Not saved · 1 change in Sleeves");
+    expect(describeListingSettingsBar({ draft: category, saving: false })).toBe("Not saved · 1 change in Sleeves");
   });
 
   it("names Set for selected's editor \"bulk\", one draft beside the others (PR 10c, D16)", () => {
@@ -168,7 +170,7 @@ describe("store default rows", () => {
     expect(decideOpen(bulk, productEditorId(11))).toBe("ask");
     expect(decideOpen(bulk, "shipping")).toBe("ask");
     expect(decideOpen(bulk, BULK_EDITOR_ID)).toBe("open");
-    expect(describeListingSettingsBar({ draft: bulk, olderDraftCount: 0, saving: false })).toBe("Not saved · 1 change in Set for selected");
+    expect(describeListingSettingsBar({ draft: bulk, saving: false })).toBe("Not saved · 1 change in Set for selected");
   });
 
   it("names Card Shellz updated products' editor \"updatedProducts\", which holds no change, like the ship-from repair (PR 10g, D16)", () => {
@@ -200,7 +202,7 @@ describe("store default rows", () => {
     // A saved Got it reopens fresh for the next one, and the bar never names it as a change.
     const saved = run([{ type: "saved", key: gotIt.key, nowMs: T0 }], opened);
     expect(saved).toMatchObject({ phase: "saved", changes: 0, attempt: null });
-    expect(describeListingSettingsBar({ draft: saved, olderDraftCount: 0, saving: false })).toBe("All saved");
+    expect(describeListingSettingsBar({ draft: saved, saving: false })).toBe("All saved");
     expect(run([{ type: "open", editor: UPDATED_PRODUCTS_EDITOR_ID, place: "Card Shellz updated products", base: { items: [] } }], saved))
       .toMatchObject({ editor: "updatedProducts", phase: "editing", base: { items: [] }, attempt: null });
     // The other way round: a held change elsewhere is asked about before a Got it starts.
@@ -237,7 +239,7 @@ describe("store default rows", () => {
       .toMatchObject({ editor: "convert", phase: "editing", base: newer, attempt: null });
     // A confirmed move is never named as a change in the bar.
     const saved = run([{ type: "saved", key: move.key, nowMs: T0 }], opened);
-    expect(describeListingSettingsBar({ draft: saved, olderDraftCount: 0, saving: false })).toBe("All saved");
+    expect(describeListingSettingsBar({ draft: saved, saving: false })).toBe("All saved");
     // The other way round: a held change elsewhere is asked about before a move starts.
     const product = run([{ type: "open", editor: productEditorId(11), place: "Penny Sleeves", base: { a: 1 } }, { type: "edit", value: { a: 2 } }]);
     expect(decideOpen(product, CONVERSION_EDITOR_ID)).toBe("ask");
@@ -546,6 +548,8 @@ describe("classifyWriteFailure", () => {
       [422, "DROPSHIP_PRICING_REVIEW_TOO_LARGE", "refused", null],
       [400, "DROPSHIP_PRICING_INVALID_INPUT", "refused", null],
       [404, "DROPSHIP_PRICING_REVIEW_NOT_FOUND", "refused", "This price check has expired. Check new prices again."],
+      // Listing settings PR 12 (D9, T9): a new or changed older group, refused for good.
+      [422, "DROPSHIP_LISTING_GROUP_RULES_CLOSED", "refused", GROUP_RULES_CLOSED_WORDS],
       [403, "DROPSHIP_PRICING_NOT_ALLOWED", "blocked", "Nothing was saved."],
     ],
     W2: [
@@ -602,6 +606,7 @@ describe("classifyWriteFailure", () => {
       [400, "DROPSHIP_EBAY_CATEGORY_RULES_INVALID_INPUT", "refused", null],
       [413, null, "refused", null],
       [404, "DROPSHIP_EBAY_CATEGORY_NOT_FOUND", "refused", "Pick a final eBay category."],
+      [422, "DROPSHIP_LISTING_GROUP_RULES_CLOSED", "refused", GROUP_RULES_CLOSED_WORDS],
       [403, "DROPSHIP_EBAY_CATEGORIES_PERMISSION_REQUIRED", "blocked", "Nothing was saved."],
       [403, "DROPSHIP_EBAY_CATEGORIES_ACCESS_DENIED", "blocked", "Nothing was saved."],
       [403, "DROPSHIP_EBAY_CATEGORY_RULES_NOT_ALLOWED", "blocked", "Nothing was saved."],
@@ -617,7 +622,8 @@ describe("classifyWriteFailure", () => {
       [400, "DROPSHIP_CONTENT_INVALID_INPUT", "refused", "Keep each text to 4,000 characters, with no special characters."],
       [413, null, "refused", "This is too big to save here. Contact support."],
       [404, "DROPSHIP_CONTENT_NOT_AVAILABLE", "refused", null],
-      [422, "DROPSHIP_CATALOG_TARGETS_TOO_LARGE", "refused", null],
+      // The targets route's 422 went with the route (PR 12, S1); the content route's one 422 is now the group refusal.
+      [422, "DROPSHIP_LISTING_GROUP_RULES_CLOSED", "refused", GROUP_RULES_CLOSED_WORDS],
       [403, "DROPSHIP_CONTENT_NOT_ALLOWED", "blocked", "Nothing was saved."],
     ],
     W9: [
@@ -648,6 +654,26 @@ describe("classifyWriteFailure", () => {
     });
   }
 
+  it("words the group refusal the same for W1, W3 and W4, in plain words, and keeps the draft to change (PR 12, T9)", () => {
+    expect(LISTING_SETTINGS_SAVE_WORDS.groupRulesClosed).toBe(GROUP_RULES_CLOSED_WORDS);
+    const words = LISTING_SETTINGS_SAVE_WORDS.groupRulesClosed;
+    expect(words).not.toMatch(/\b[a-z]+_[a-z_]+\b|DROPSHIP_/);
+    expect(words).not.toMatch(/older settings/i);
+    expect(words.trim()).toBe(words);
+    // The eBay route sends its public context (store, retryable); the words don't depend on it.
+    for (const [writer, context] of [["W1", undefined], ["W3", { storeConnectionId: 22, retryable: false }], ["W4", undefined]] as const) {
+      const failure = classifyWriteFailure(writer, apiError(422, "DROPSHIP_LISTING_GROUP_RULES_CLOSED", "Server words.", context));
+      expect(failure).toEqual({ phase: "refused", message: words, code: "DROPSHIP_LISTING_GROUP_RULES_CLOSED", status: 422 });
+      // A refusal keeps the vendor's change and drops the request key: nothing was saved, the same request would fail again.
+      const kept = run([{ type: "failure", key: ATTEMPT.key, failure }], savingDraft());
+      expect(kept).toMatchObject({ phase: "refused", message: words, attempt: null, changes: 1, value: { policyId: "ship-b" } });
+      expect(isDraftDirty(kept)).toBe(true);
+      expect(isDraftLocked(kept)).toBe(false);
+    }
+    // Any other writer never gets this code; if one did, it would keep the server's words.
+    expect(classifyWriteFailure("W2", apiError(422, "DROPSHIP_LISTING_GROUP_RULES_CLOSED")).message).toBe("Server words.");
+  });
+
   it("refuses an unlisted 4xx with the server's words and treats an unlisted 5xx as unconfirmed", () => {
     for (const writer of writers) {
       expect(classifyWriteFailure(writer, apiError(401, "DROPSHIP_AUTH_REQUIRED", "Sign in again."))).toMatchObject({ phase: "refused", message: "Sign in again." });
@@ -666,17 +692,16 @@ describe("classifyWriteFailure", () => {
     });
   });
 
-  it("tells a bad pick from an older rule's category on a W3 refusal", () => {
+  it("words every W3 category refusal as a pick to change: since PR 12 only the picked store default reaches eBay", () => {
+    // Listing settings PR 12 (D9-D10, review CT3/DUX3): W3 refuses an added or changed rule before eBay is asked, and
+    // never asks eBay about a category its stored rules hold, so a refusal can only name the default the vendor picked.
+    // The words for "an older rule's category" (and the picked id they needed) went with the last path that reached them.
     const named = (categoryId: unknown) => apiError(422, "DROPSHIP_EBAY_CATEGORY_RULE_INVALID", "Category is not a leaf.", categoryId === undefined ? undefined : { categoryId });
-    expect(classifyWriteFailure("W3", named("261"), { pickedEbayCategoryId: "261" }).message).toBe("Pick a final eBay category.");
-    expect(classifyWriteFailure("W3", named(261), { pickedEbayCategoryId: "261" }).message).toBe("Pick a final eBay category.");
-    expect(classifyWriteFailure("W3", named("999"), { pickedEbayCategoryId: "261" }).message)
-      .toBe("One of your older eBay category rules uses a category eBay no longer accepts.");
-    // Card Shellz picks (no category picked): any named category is an older rule's.
-    expect(classifyWriteFailure("W3", named("999"), { pickedEbayCategoryId: null }).message)
-      .toBe("One of your older eBay category rules uses a category eBay no longer accepts.");
-    expect(classifyWriteFailure("W3", named(undefined)).message).toBe("Pick a final eBay category.");
-    expect(classifyWriteFailure("W3", named({ nested: true }), { pickedEbayCategoryId: "261" }).message).toBe("Pick a final eBay category.");
+    for (const error of [named("261"), named(261), named("999"), named(undefined), named({ nested: true })]) {
+      expect(classifyWriteFailure("W3", error)).toMatchObject({ phase: "refused", message: "Pick a final eBay category." });
+    }
+    expect(Object.keys(LISTING_SETTINGS_SAVE_WORDS)).not.toContain("olderCategoryRule");
+    expect(Object.values(LISTING_SETTINGS_SAVE_WORDS).join(" ")).not.toMatch(/older eBay category rules uses/);
   });
 
   it("never returns a raw code as words", () => {
@@ -937,32 +962,30 @@ describe("describeListingSettingsBar", () => {
   const draft = (changes: number, place = "Price", phase: ListingSettingsDraft["phase"] = "editing") => ({ place, changes, phase });
 
   it("says what is saved, not saved or saving", () => {
-    expect(describeListingSettingsBar({ draft: null, olderDraftCount: 0, saving: false })).toBe("All saved");
-    expect(describeListingSettingsBar({ draft: draft(0), olderDraftCount: 0, saving: false })).toBe("All saved");
-    expect(describeListingSettingsBar({ draft: draft(1, "Shipping policy"), olderDraftCount: 0, saving: false }))
+    expect(describeListingSettingsBar({ draft: null, saving: false })).toBe("All saved");
+    expect(describeListingSettingsBar({ draft: draft(0), saving: false })).toBe("All saved");
+    expect(describeListingSettingsBar({ draft: draft(1, "Shipping policy"), saving: false }))
       .toBe("Not saved · 1 change in Shipping policy");
-    expect(describeListingSettingsBar({ draft: draft(2), olderDraftCount: 0, saving: false })).toBe("Not saved · 2 changes in Price");
-    expect(describeListingSettingsBar({ draft: draft(1, "Easy Glide Soft Sleeves", "uncertain"), olderDraftCount: 0, saving: false }))
+    expect(describeListingSettingsBar({ draft: draft(2), saving: false })).toBe("Not saved · 2 changes in Price");
+    expect(describeListingSettingsBar({ draft: draft(1, "Easy Glide Soft Sleeves", "uncertain"), saving: false }))
       .toBe("Not saved · 1 change in Easy Glide Soft Sleeves");
-    expect(describeListingSettingsBar({ draft: null, olderDraftCount: 2, saving: false })).toBe("Not saved · changes in Older settings");
-    expect(describeListingSettingsBar({ draft: draft(0, "Price", "saved"), olderDraftCount: 0, saving: false })).toBe("All saved");
+    expect(describeListingSettingsBar({ draft: draft(0, "Price", "saved"), saving: false })).toBe("All saved");
   });
 
   it("says Saving… while any save is in flight, before anything else", () => {
-    expect(describeListingSettingsBar({ draft: draft(1, "Price", "saving"), olderDraftCount: 0, saving: false })).toBe("Saving…");
-    expect(describeListingSettingsBar({ draft: draft(2), olderDraftCount: 1, saving: true })).toBe("Saving…");
+    expect(describeListingSettingsBar({ draft: draft(1, "Price", "saving"), saving: false })).toBe("Saving…");
+    expect(describeListingSettingsBar({ draft: draft(2), saving: true })).toBe("Saving…");
   });
 
-  it("names the step's own draft before the older panels'", () => {
-    expect(describeListingSettingsBar({ draft: draft(1, "Store shelf"), olderDraftCount: 3, saving: false })).toBe("Not saved · 1 change in Store shelf");
-  });
-
-  it("counts only the older panels' leave-guard drafts as Older settings", () => {
+  it("reads the step's own draft only, so no wording names the deleted older section (Listing settings PR 12, D7)", () => {
     expect(LISTING_SETTINGS_GUARD_ID_PREFIX).toBe("listing-settings:");
-    expect(countOlderSettingsDrafts([])).toBe(0);
-    expect(countOlderSettingsDrafts([
-      { id: "listing-settings:22" }, { id: "listing-setup:22" }, { id: "pricing-rules:22" }, { id: "exact-price:22" },
-    ])).toBe(3);
+    const words = [
+      describeListingSettingsBar({ draft: null, saving: false }),
+      describeListingSettingsBar({ draft: draft(1, "Store shelf"), saving: false }),
+      describeListingSettingsBar({ draft: draft(1), saving: true }),
+    ];
+    expect(words).toEqual(["All saved", "Not saved · 1 change in Store shelf", "Saving…"]);
+    for (const text of words) expect(text).not.toContain("Older settings");
   });
 });
 

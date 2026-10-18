@@ -128,8 +128,9 @@ describe("every step 3 issue code has vendor words (plan 12.3)", () => {
   it("keeps the words the older rows already had", () => {
     expect(formatListingPreviewIssue("listing_content_description_required")).toBe("Add a description or contact support to complete the catalog copy.");
     expect(formatListingPreviewIssue("listing_content_catalog_too_large")).toBe("The catalog description exceeds the supported size. Contact support.");
+    // Interim (PR 12 PROPOSAL): the older sentence, now with the fix its neighbours name, since pricing rules can't be edited.
     expect(formatListingPreviewIssue("pricing_rule_outside_limit"))
-      .toBe("Your pricing rules give this size a price outside a Card Shellz price limit, so it can't be listed at that price.");
+      .toBe("Your pricing rules give this size a price outside a Card Shellz price limit, so it can't be listed at that price. Give it an exact price in Listing settings.");
     expect(formatListingPreviewIssue("missing_product_field:imageUrls")).toBe("This product has no photo that can be sent to the marketplace. Contact support.");
     // The shipping estimate's one warning is a sentence already and passes through as it is.
     expect(formatListingPreviewIssue(LISTING_SHIPPING_ESTIMATE_WARNING)).toBe(LISTING_SHIPPING_ESTIMATE_WARNING);

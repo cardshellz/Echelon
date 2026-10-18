@@ -228,7 +228,7 @@ describe("the re-reads after a confirmed move (plan 8.4)", () => {
     expect(calls.slice(5).every((call) => call.startsWith("invalidate"))).toBe(true);
     for (const queryKey of keys) {
       expect(client.cancelQueries).toHaveBeenCalledWith({ queryKey: [...queryKey] });
-      // Invalidations only: a query refetches only if mounted, so Older settings' closed forms read nothing now.
+      // Invalidations only: a query refetches only if mounted, so a closed editor reads nothing now.
       expect(client.invalidateQueries).toHaveBeenCalledWith({ queryKey: [...queryKey] }, { throwOnError: true });
     }
     // Every size price read of this store, and only this store's.

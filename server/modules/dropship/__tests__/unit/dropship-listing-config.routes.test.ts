@@ -5,8 +5,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { DropshipListingConfigService } from "../../application/dropship-listing-config-service";
 import { DropshipError } from "../../domain/errors";
 import { registerDropshipListingConfigRoutes } from "../../interfaces/http/dropship-listing-config.routes";
+import { logger } from "../../../../platform/observability/logger";
 
 vi.mock("../../../../db", () => ({ db: {}, pool: {} }));
+vi.mock("../../../../platform/observability/logger", () => ({
+  logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+}));
 vi.mock("../../infrastructure/dropship-listing-config.factory", () => ({
   createDropshipListingConfigServiceFromEnv: vi.fn(),
 }));
@@ -21,10 +25,11 @@ vi.mock("../../../../routes/middleware", () => ({
 }));
 
 const ADMIN_PATH = "/api/dropship/admin/store-connections/44/listing-config";
+/** The vendor's own listing-config path; its GET and PUT were deleted in Listing settings PR 12. */
 const VENDOR_PATH = "/api/dropship/store-connections/44/listing-config";
 /**
- * The vendor PUT checks its step-up proof against the wall clock, so the
- * clock is pinned and the proof expires five minutes after it.
+ * A vendor session carries a step-up proof checked against the wall clock, so
+ * the clock is pinned and the proof expires five minutes after it.
  */
 const FIXED_NOW = new Date("2026-10-01T12:00:00.000Z");
 const PROOF_EXPIRES_AT = "2026-10-01T12:05:00.000Z";
@@ -40,13 +45,14 @@ const CONFIG_BODY = {
   isActive: true,
 } as const;
 
-type SessionKind = "vendor" | "vendor_without_proof" | "admin" | "anonymous";
+type SessionKind = "vendor" | "admin" | "anonymous";
 
 describe("dropship listing config routes", () => {
   let service: FakeService;
   let server: Awaited<ReturnType<typeof startServer>> | null;
 
   beforeEach(() => {
+    vi.clearAllMocks();
     vi.useFakeTimers({ toFake: ["Date"], now: FIXED_NOW });
     permissionChecks.length = 0;
     service = new FakeService();
@@ -198,97 +204,19 @@ describe("dropship listing config routes", () => {
     });
   });
 
-  describe("vendor PUT", () => {
-    it("passes the parsed config and the revision it was read at for the session member", async () => {
-      server = await startServer(buildApp(service, "vendor"));
-      const body = { ...CONFIG_BODY, expectedRevision: 12 };
-
-      const response = await putJson(`${server.url}${VENDOR_PATH}`, body);
-
-      expect(response.status).toBe(200);
-      expect(service.calls).toEqual([{
-        method: "replaceForMember",
-        memberId: "member-1",
-        storeConnectionId: 44,
-        input: body,
-      }]);
-      expect(response.body).toMatchObject({ outcome: "changed", revisionBefore: 7, revisionAfter: 8, config: { revision: 8 } });
-    });
-
-    it("asks a page without the revision to reload (428) and does not call the service", async () => {
+  describe("vendor routes (deleted in Listing settings PR 12)", () => {
+    it.each(["GET", "PUT"] as const)("answers a vendor %s of the store's listing config with no route, even with a step-up proof", async (method) => {
       server = await startServer(buildApp(service, "vendor"));
 
-      const response = await putJson(`${server.url}${VENDOR_PATH}`, CONFIG_BODY);
-
-      expect(response.status).toBe(428);
-      expect(response.body).toMatchObject({ error: { code: "DROPSHIP_LISTING_CONFIG_REVISION_REQUIRED" } });
-      expect(service.calls).toEqual([]);
-    });
-
-    it("sends no write options, so the service's vendor setup statuses apply and no request key is recorded", async () => {
-      server = await startServer(buildApp(service, "vendor"));
-
-      const response = await putJson(`${server.url}${VENDOR_PATH}`, { ...CONFIG_BODY, expectedRevision: 12 });
-
-      expect(response.status).toBe(200);
-      expect(service.replaceOptions).toEqual([[]]);
-    });
-
-    it("asks for a reload (428) over a validation error when the revision is missing and another field is invalid", async () => {
-      server = await startServer(buildApp(service, "vendor"));
-
-      const response = await putJson(`${server.url}${VENDOR_PATH}`, { ...CONFIG_BODY, listingMode: "bogus" });
-
-      expect(response.status).toBe(428);
-      expect(response.body).toEqual({
-        error: {
-          code: "DROPSHIP_LISTING_CONFIG_REVISION_REQUIRED",
-          message: "Reload the page to load the latest listing config, then save again.",
-          context: { retryable: false },
-        },
+      const response = await fetch(`${server.url}${VENDOR_PATH}`, method === "GET" ? undefined : {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ...CONFIG_BODY, expectedRevision: 12 }),
       });
+
+      expect(response.status).toBe(404);
       expect(service.calls).toEqual([]);
-    });
-
-    it("rejects a zero revision with 400 before invoking the service", async () => {
-      server = await startServer(buildApp(service, "vendor"));
-
-      const response = await putJson(`${server.url}${VENDOR_PATH}`, { ...CONFIG_BODY, expectedRevision: 0 });
-
-      expect(response.status).toBe(400);
-      expect(response.body).toMatchObject({ error: { code: "DROPSHIP_INVALID_LISTING_CONFIG_REQUEST" } });
-      expect(service.calls).toEqual([]);
-    });
-
-    it("still requires the listing-push step-up before it reads the body", async () => {
-      server = await startServer(buildApp(service, "vendor_without_proof"));
-
-      const response = await putJson(`${server.url}${VENDOR_PATH}`, CONFIG_BODY);
-
-      expect(response.status).toBe(403);
-      expect(response.body).toMatchObject({
-        error: { code: "DROPSHIP_STEP_UP_REQUIRED", context: { action: "bulk_listing_push" } },
-      });
-      expect(service.calls).toEqual([]);
-    });
-
-    it("requires a dropship session", async () => {
-      server = await startServer(buildApp(service, "anonymous"));
-
-      const response = await putJson(`${server.url}${VENDOR_PATH}`, { ...CONFIG_BODY, expectedRevision: 12 });
-
-      expect(response.status).toBe(401);
-      expect(response.body).toMatchObject({ error: { code: "DROPSHIP_AUTH_REQUIRED" } });
-      expect(service.calls).toEqual([]);
-    });
-
-    it("loads the config for the session member", async () => {
-      server = await startServer(buildApp(service, "vendor"));
-
-      const response = await jsonRequest(`${server.url}${VENDOR_PATH}`);
-
-      expect(response.status).toBe(200);
-      expect(service.calls).toEqual([{ method: "getForMember", memberId: "member-1", storeConnectionId: 44 }]);
+      expect(permissionChecks).toEqual([]);
     });
   });
 
@@ -301,13 +229,7 @@ describe("dropship listing config routes", () => {
       ["admin", ADMIN_PATH, "DROPSHIP_LISTING_CONFIG_STORE_DISCONNECTED", 409],
       ["admin", ADMIN_PATH, "DROPSHIP_LISTING_CONFIG_REVISION_REQUIRED", 428],
       ["admin", ADMIN_PATH, "DROPSHIP_STORE_CONNECTION_NOT_FOUND", 404],
-      ["vendor", VENDOR_PATH, "DROPSHIP_LISTING_CONFIG_REVISION_CONFLICT", 409],
-      ["vendor", VENDOR_PATH, "DROPSHIP_LISTING_CONFIG_STORE_PAUSED", 409],
-      ["vendor", VENDOR_PATH, "DROPSHIP_LISTING_CONFIG_STORE_DISCONNECTING", 409],
-      ["vendor", VENDOR_PATH, "DROPSHIP_LISTING_CONFIG_STORE_NOT_WRITABLE", 409],
-      ["vendor", VENDOR_PATH, "DROPSHIP_LISTING_CONFIG_STORE_DISCONNECTED", 409],
-      ["vendor", VENDOR_PATH, "DROPSHIP_LISTING_CONFIG_VENDOR_BLOCKED", 403],
-      ["vendor", VENDOR_PATH, "DROPSHIP_SOMETHING_UNMAPPED", 500],
+      ["admin", ADMIN_PATH, "DROPSHIP_SOMETHING_UNMAPPED", 500],
     ] as const)("maps a %s save failing with %s (via %s) to %i", async (kind, path, code, status) => {
       service.error = new DropshipError(code, "Controlled failure.", { storeConnectionId: 44, retryable: false });
       server = await startServer(buildApp(service, kind));
@@ -337,12 +259,13 @@ describe("dropship listing config routes", () => {
       });
     });
 
-    it("hides an unexpected failure behind a generic 500", async () => {
-      const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    it("hides an unexpected failure behind a generic 500 and logs one structured ERROR line as the staff actor, never console", async () => {
+      const consoleSpies = (["log", "info", "warn", "error"] as const).map((method) =>
+        vi.spyOn(console, method).mockImplementation(() => undefined));
       service.error = new Error("connection string postgres://secret");
-      server = await startServer(buildApp(service, "vendor"));
+      server = await startServer(buildApp(service, "admin"));
 
-      const response = await putJson(`${server.url}${VENDOR_PATH}`, { ...CONFIG_BODY, expectedRevision: 7 });
+      const response = await putJson(`${server.url}${ADMIN_PATH}`, { ...CONFIG_BODY, expectedRevision: 7 });
 
       expect(response.status).toBe(500);
       expect(response.body).toEqual({
@@ -351,13 +274,21 @@ describe("dropship listing config routes", () => {
           message: "Dropship listing config request failed.",
         },
       });
-      expect(consoleError).toHaveBeenCalledTimes(1);
+      // PR 12 verify VS4 (CLAUDE.md section 10): the platform logger, the listing settings routes' entry, the staff
+      // user as the actor; the error's own message stays in the server log (ERROR needs a human), never in the answer.
+      for (const spy of consoleSpies) expect(spy).not.toHaveBeenCalled();
+      expect(vi.mocked(logger.error).mock.calls).toEqual([["dropship.listing_config.request_failed", {
+        outcome: "failed", error_code: "DROPSHIP_LISTING_CONFIG_INTERNAL_ERROR", status: 500, method: "PUT",
+        path: "/api/dropship/admin/store-connections/:storeConnectionId/listing-config", store_connection_id: 44,
+        actor_id: "staff-7", error_class: "fatal", error_message: "connection string postgres://secret" }]]);
+      expect(logger.warn).not.toHaveBeenCalled();
+      expect(logger.info).not.toHaveBeenCalled();
     });
 
-    it.each(["admin", "vendor"] as const)("returns a retryable stock-selection conflict for %s", async kind => {
+    it("returns a retryable stock-selection conflict for admin", async () => {
       service.error = new Error("private SQL", { cause: { code: "55P03", message: "PUBLICATION_SELECTION_BUSY" } });
-      server = await startServer(buildApp(service, kind));
-      const response = await putJson(`${server.url}${kind === "admin" ? ADMIN_PATH : VENDOR_PATH}`, { ...CONFIG_BODY, expectedRevision: 7 });
+      server = await startServer(buildApp(service, "admin"));
+      const response = await putJson(`${server.url}${ADMIN_PATH}`, { ...CONFIG_BODY, expectedRevision: 7 });
       expect(response.status).toBe(409);
       expect(response.body).toEqual({ error: { code: "PUBLICATION_SELECTION_BUSY", retryable: true,
         message: "A stock update is finishing. Your selection was not saved; retry it in a moment." } });
@@ -368,7 +299,6 @@ describe("dropship listing config routes", () => {
 type FakeCall =
   | { method: "getForAdmin"; storeConnectionId: number; actor: unknown }
   | { method: "replaceForAdmin"; storeConnectionId: number; input: unknown; actor: unknown }
-  | { method: "getForMember"; memberId: string; storeConnectionId: number }
   | { method: "replaceForMember"; memberId: string; storeConnectionId: number; input: unknown };
 
 class FakeService {
@@ -392,12 +322,7 @@ class FakeService {
     return this.replaceResult ?? changedResult();
   }
 
-  async getForMember(memberId: string, storeConnectionId: number) {
-    this.calls.push({ method: "getForMember", memberId, storeConnectionId });
-    if (this.error) throw this.error;
-    return { storeConnection: storeConnection(), config: configRecord() };
-  }
-
+  /** No route calls it any more (PR 12); recorded so a regression would show in `calls`. */
   async replaceForMember(memberId: string, storeConnectionId: number, input: unknown, ...options: unknown[]) {
     this.calls.push({ method: "replaceForMember", memberId, storeConnectionId, input });
     this.replaceOptions.push(options);

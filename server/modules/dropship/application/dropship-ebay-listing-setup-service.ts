@@ -240,7 +240,6 @@ export type RepairDropshipEbayShipFromInput = z.infer<typeof repairDropshipEbayS
 
 type ListingConfigPort = Pick<
   DropshipListingConfigService,
-  | "getForMember"
   | "getViewForMember"
   | "findKeyedRequest"
   | "findConfig"
@@ -273,14 +272,6 @@ export class DropshipEbayListingSetupService {
     logger: DropshipLogger;
   }) {}
 
-  /** Saved selections are readable independently of live provider availability.
-   * Never use this display-only read for mutation or publication validation. */
-  async getSavedSelectionForMember(memberId: string, storeConnectionId: number): Promise<DropshipEbayListingSetupSelection> {
-    const current = await this.deps.listingConfig.getForMember(memberId, storeConnectionId);
-    assertEbayStore(current.storeConnection.platform, storeConnectionId);
-    return readSelection(current.config);
-  }
-
   /**
    * The setup page's read (GET). A vendor who can't change these settings (an
    * inactive account, or a paused, disconnecting or disconnected store) gets
@@ -305,23 +296,6 @@ export class DropshipEbayListingSetupService {
       });
     }
     return this.buildLiveView(view.vendor.vendorId, storeConnectionId, view.config, view.access);
-  }
-
-  /**
-   * The live setup used by other writers (per-size policies) to validate
-   * against. Unlike the page read it refuses, rather than shows read-only,
-   * when the settings can't be changed, and a Card Shellz shipping failure
-   * fails it with that failure's own error (often a temporary one), as before,
-   * instead of making every shipping policy look incompatible.
-   */
-  async getForMember(
-    memberId: string,
-    storeConnectionId: number,
-  ): Promise<DropshipEbayListingSetupResult> {
-    const view = await this.deps.listingConfig.getViewForMember(memberId, storeConnectionId);
-    assertEbayStore(view.storeConnection.platform, storeConnectionId);
-    const config = requireEditableConfig(view, storeConnectionId);
-    return this.buildLiveView(view.vendor.vendorId, storeConnectionId, config, view.access, "throw");
   }
 
   async replaceForMember(
@@ -744,15 +718,11 @@ export class DropshipEbayListingSetupService {
     storeConnectionId: number,
     config: DropshipStoreListingConfigRecord,
     access: DropshipListingConfigAccess,
-    capabilityFailure: "report" | "throw" = "report",
   ): Promise<DropshipEbayListingSetupResult> {
     const marketplaceId = resolveMarketplaceId(config);
     const [discovery, capability] = await Promise.all([
       this.deps.directory.discoverForStoreConnection({ vendorId, storeConnectionId, marketplaceId }),
-      capabilityFailure === "throw"
-        ? this.deps.fulfillmentCapabilities.getForStoreConnection({ storeConnectionId, marketplaceId })
-          .then((checked): CapabilityRead => ({ status: "checked", capability: checked }))
-        : this.readCapability(vendorId, storeConnectionId, marketplaceId),
+      this.readCapability(vendorId, storeConnectionId, marketplaceId),
     ]);
     return buildListingSetupResult({
       storeConnectionId,
@@ -810,7 +780,7 @@ export class DropshipEbayListingSetupService {
       { storeConnectionId, invalidFields: ["storeShelfDefault"], retryable: false },
     ));
     // eBay takes store categories by name; the path is what an offer sends
-    // (dropship-ebay-store-category-service.ts, replaceForMember).
+    // (resolveStoreShelfIds, dropship-ebay-listing-checks.ts).
     return { ids: resolved.map((shelf) => shelf.id), names: resolved.map((shelf) => shelf.name) };
   }
 

@@ -296,6 +296,23 @@ describe("PolicyDefaultRow, editing", () => {
     expect(markup).not.toContain("What your shipping policy needs");
   });
 
+  // Ported in Listing settings PR 12 from the deleted setup panel's rebase cases (REC:935): there a re-read dropped a
+  // pick eBay no longer lists or that no longer fits. The step keeps the vendor's pick in the draft but never saves it.
+  it("keeps Save off for a pick eBay no longer lists, or a shipping pick that no longer fits, after the setup is read again", () => {
+    drafts(draft({ base: { policyId: "pol-ship-1" }, value: { policyId: "pol-ship-gone" }, changes: 1 }));
+    const gone = policyRow();
+    expect(gone).toMatch(/<button[^>]*disabled=""[^>]*>Save<\/button>/);
+    expect(gone).not.toMatch(/<input type="radio"[^>]*checked=""/);
+    drafts(draft({ base: { policyId: "pol-ship-1" }, value: { policyId: "pol-ship-2" }, changes: 1 }));
+    // eBay still lists it, but it no longer works with Card Shellz shipping (TOO_SHORT).
+    expect(policyRow()).toMatch(/<button[^>]*disabled=""[^>]*>Save<\/button>/);
+    drafts(draft({ editor: "return", place: "Return policy", base: { policyId: "pol-ret-1" }, value: { policyId: "pol-ret-gone" }, changes: 1 }));
+    expect(policyRow({ kind: "return", savedPolicyId: "pol-ret-1" })).toMatch(/<button[^>]*disabled=""[^>]*>Save<\/button>/);
+    // The same draft on a policy eBay still lists can be saved.
+    drafts(draft({ editor: "return", place: "Return policy", base: { policyId: "pol-ret-1" }, value: { policyId: "pol-ret-2" }, changes: 1 }));
+    expect(policyRow({ kind: "return", savedPolicyId: "pol-ret-1" })).not.toMatch(/<button[^>]*disabled=""[^>]*>Save<\/button>/);
+  });
+
   it("keeps Save off while the page's counter is off or the setup is being read again", () => {
     drafts(draft({ editor: "return", place: "Return policy", base: { policyId: "pol-ret-1" }, value: { policyId: "pol-ret-2" }, changes: 1 }));
     expect(policyRow({ kind: "return", saveCallbacks: { disabled: true, onSaveStarted: noop, onSaveSettled: noop } }))

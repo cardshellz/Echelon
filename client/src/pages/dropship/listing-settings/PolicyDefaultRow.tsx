@@ -47,7 +47,7 @@ import { StoreDefaultRow } from "./StoreDefaultRow";
 // Shared by the W2 and W10 rows (PolicyDefaultRow, ShelfDefaultRow, ShipFromRepairNote)
 // ---------------------------------------------------------------------------
 
-/** The live eBay setup read, shared with the old panel and the rail (`ebayListingSetupQueryOptions`). */
+/** The live eBay setup read, shared with the rail and step 3 (`ebayListingSetupQueryOptions`). */
 export interface ListingSetupRead {
   data?: DropshipEbayListingSetupResponse;
   error?: unknown;

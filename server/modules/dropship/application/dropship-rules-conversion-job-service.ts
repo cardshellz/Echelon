@@ -214,7 +214,8 @@ export const RULES_CONVERSION_FAILED_ACTION = "dropship.listing_settings.rules_c
  * The UTC hour whose tick logs its line at INFO even when nothing is left
  * (`stores_left: 0`), once a day: a quiet tick is otherwise DEBUG, which the
  * default level drops, so without it the latest INFO line would keep naming
- * a store the vendor has since moved by hand (D15; PR 12's evidence).
+ * a store the vendor has since moved by hand (D15). The tick line is the
+ * job's own INFO record; it is no longer the evidence for a PR gate.
  */
 export const DAILY_TICK_REPORT_UTC_HOUR = 0;
 
@@ -331,7 +332,7 @@ export class DropshipRulesConversionJobService {
       skipped: ids("skipped").length,
       elapsedMs: Math.max(0, Math.round(this.deps.timer() - started)),
     };
-    // Every store still holding older rules after this tick, each in one outcome: PR 12's evidence (D15).
+    // Every store still holding older rules after this tick, each in one outcome (D15).
     const left = result.notClean + result.tooLarge + result.notEligible + result.failed + result.deferred + result.costSourceFailed
       + result.deadLettered;
     const fields = {

@@ -1,32 +1,30 @@
-import type { Express, Response } from "express";
+import type { Express, Request, Response } from "express";
 import rateLimit from "express-rate-limit";
 import { z, ZodError } from "zod";
-import { pricingProfileStateSchema, pricingReviewResponseSchema, pricingTargetsResponseSchema } from "../../../../../shared/dropship/pricing-rules";
+import { pricingProfileStateSchema, pricingReviewResponseSchema } from "../../../../../shared/dropship/pricing-rules";
 import type { DropshipPricingRulesService } from "../../application/dropship-pricing-rules-service";
 import { createDropshipPricingRulesService } from "../../infrastructure/dropship-pricing-rules.factory";
 import { DropshipError } from "../../domain/errors";
+import { DROPSHIP_LISTING_GROUP_RULES_CLOSED } from "../../domain/older-group-rules-edit";
 import { requireDropshipAuth } from "./dropship-auth.routes";
 import { PRICING_RULES_TOO_LARGE_MESSAGE, parseDropshipBulkJsonFor } from "./dropship-bulk-json.middleware";
+import { logDropshipRouteFailure } from "./dropship-route-failure-log";
 
 export function registerDropshipPricingRulesRoutes(app: Express,
-  service: Pick<DropshipPricingRulesService, "getForMember" | "reviewForMember" | "reviewPageForMember" | "applyForMember" | "targetsForMember"> = createDropshipPricingRulesService()): void {
+  service: Pick<DropshipPricingRulesService, "getForMember" | "reviewForMember" | "reviewPageForMember" | "applyForMember"> = createDropshipPricingRulesService()): void {
   const path = "/api/dropship/listings/stores/:storeConnectionId/pricing-rules";
   const limiter = rateLimit({ windowMs: 60_000, max: 30, keyGenerator: (req) => req.session.dropship!.memberId,
     standardHeaders: true, legacyHeaders: false,
     message: { error: { code: "DROPSHIP_PRICING_RATE_LIMITED", message: "Too many pricing requests. Retry in a minute." } } });
-  app.get(path, requireDropshipAuth, async (req, res) => respond(res, async () =>
+  app.get(path, requireDropshipAuth, async (req, res) => respond(req, res, async () =>
     validateOutput(pricingProfileStateSchema, await service.getForMember(req.session.dropship!.memberId, parseId(req.params.storeConnectionId)))));
-  app.get(`${path}/targets`, requireDropshipAuth, limiter, async (req, res) => respond(res, async () =>
-    validateOutput(pricingTargetsResponseSchema, await service.targetsForMember(req.session.dropship!.memberId, parseId(req.params.storeConnectionId), {
-      type: req.query.type, search: req.query.search ?? "", page: parsePage(req.query.page),
-    }))));
   // A rule set with long lists of single sizes can pass the 100 KB global limit; this route parses up to 1 MiB after auth.
-  app.post(`${path}/reviews`, requireDropshipAuth, limiter, parseDropshipBulkJsonFor(PRICING_RULES_TOO_LARGE_MESSAGE), async (req, res) => respond(res, async () =>
+  app.post(`${path}/reviews`, requireDropshipAuth, limiter, parseDropshipBulkJsonFor(PRICING_RULES_TOO_LARGE_MESSAGE), async (req, res) => respond(req, res, async () =>
     validateOutput(pricingReviewResponseSchema, await service.reviewForMember(req.session.dropship!.memberId, parseId(req.params.storeConnectionId), req.body))));
-  app.get(`${path}/reviews/:reviewId`, requireDropshipAuth, async (req, res) => respond(res, async () =>
+  app.get(`${path}/reviews/:reviewId`, requireDropshipAuth, async (req, res) => respond(req, res, async () =>
     validateOutput(pricingReviewResponseSchema, await service.reviewPageForMember(req.session.dropship!.memberId, parseId(req.params.storeConnectionId),
       req.params.reviewId, parsePage(req.query.page)))));
-  app.post(`${path}/apply`, requireDropshipAuth, limiter, async (req, res) => respond(res, async () =>
+  app.post(`${path}/apply`, requireDropshipAuth, limiter, async (req, res) => respond(req, res, async () =>
     validateOutput(z.object({ revisionId: z.number().int().positive(), idempotentReplay: z.boolean() }).strict(),
       await service.applyForMember(req.session.dropship!.memberId, parseId(req.params.storeConnectionId), req.body))));
 }
@@ -37,21 +35,22 @@ function validateOutput(schema: z.ZodTypeAny, value: unknown): unknown {
 }
 function parseId(value: string): number { return /^[1-9]\d*$/.test(value) ? Number(value) : NaN; }
 function parsePage(value: unknown): number { return value === undefined ? 0 : typeof value === "string" && /^\d+$/.test(value) ? Number(value) : NaN; }
-async function respond(res: Response, operation: () => Promise<unknown>): Promise<Response> {
+async function respond(req: Request, res: Response, operation: () => Promise<unknown>): Promise<Response> {
   res.setHeader("Cache-Control", "no-store");
   try { return res.json(await operation()); }
   catch (error) {
-    if (error instanceof ZodError) return res.status(400).json({ error: { code: "DROPSHIP_PRICING_INVALID_INPUT", message: "Check the pricing rule values and reload if this page is out of date." } });
+    const failed = (status: number, code: string, message: string) => {
+      logDropshipRouteFailure("dropship.pricing_rules", req, { status, code, error, storeConnectionId: parseId(req.params.storeConnectionId ?? "") });
+      return res.status(status).json({ error: { code, message } });
+    };
+    if (error instanceof ZodError) return failed(400, "DROPSHIP_PRICING_INVALID_INPUT", "Check the pricing rule values and reload if this page is out of date.");
     if (error instanceof DropshipError) {
       const status = error.code === "DROPSHIP_AUTH_REQUIRED" ? 401 : error.code === "DROPSHIP_PRICING_NOT_ALLOWED" ? 403
         : ["DROPSHIP_STORE_CONNECTION_REQUIRED", "DROPSHIP_PRICING_REVIEW_NOT_FOUND"].includes(error.code) ? 404
           : ["DROPSHIP_PRICING_REVIEW_STALE", "DROPSHIP_IDEMPOTENCY_CONFLICT"].includes(error.code) ? 409
-            : ["DROPSHIP_PRICING_REVIEW_BLOCKED", "DROPSHIP_PRICING_REVIEW_TOO_LARGE", "DROPSHIP_CATALOG_TARGETS_TOO_LARGE"].includes(error.code) ? 422 : 500;
-      console.warn(JSON.stringify({ code: error.code, message: "Pricing-rule request rejected.", context: error.context }));
-      return res.status(status).json({ error: { code: error.code, message: error.message } });
+            : ["DROPSHIP_PRICING_REVIEW_BLOCKED", "DROPSHIP_PRICING_REVIEW_TOO_LARGE", DROPSHIP_LISTING_GROUP_RULES_CLOSED].includes(error.code) ? 422 : 500;
+      return failed(status, error.code, error.message);
     }
-    console.error(JSON.stringify({ code: "DROPSHIP_PRICING_INTERNAL_ERROR", message: "Pricing-rule operation failed.",
-      error: error instanceof Error ? error.message : "Unknown error" }));
-    return res.status(500).json({ error: { code: "DROPSHIP_PRICING_INTERNAL_ERROR", message: "Pricing rules could not be loaded or applied. Retry the same action to confirm its outcome." } });
+    return failed(500, "DROPSHIP_PRICING_INTERNAL_ERROR", "Pricing rules could not be loaded or applied. Retry the same action to confirm its outcome.");
   }
 }

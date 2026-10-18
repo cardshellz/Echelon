@@ -417,7 +417,9 @@ export async function goldenPerSizePrice(store: GoldenPreviewStore, layerRows: G
  * It never applies.
  */
 export async function goldenPricingReview(store: GoldenPreviewStore, layerRows: GoldenLayerRows,
-  propose: (current: PricingProfileState) => PricingProfile): Promise<{ current: PricingProfileState; review: StoredPricingReview }> {
+  propose: (current: PricingProfileState) => PricingProfile,
+  /** Every review the service stores, in order (a refused review stores none: Listing settings PR 12, D26). */
+  storedReviews: StoredPricingReview[] = []): Promise<{ current: PricingProfileState; review: StoredPricingReview }> {
   const client = new GoldenStoreClient(store, layerRows);
   const storeId = store.context.storeConnectionId;
   const current = await readPricingProfile(client.asPgClient(), storeId, GOLDEN_PREVIEW_VENDOR_ID);
@@ -427,7 +429,7 @@ export async function goldenPricingReview(store: GoldenPreviewStore, layerRows: 
     loadProfile: async () => current,
     loadRuleLayers: (candidates: readonly { productId: number; categoryId: number | null }[]) => readListingSettingLayers(client.asPgClient(),
       { vendorId: GOLDEN_PREVIEW_VENDOR_ID, storeConnectionId: storeId, candidates }),
-    storeReview: async (review: StoredPricingReview) => { stored = review; },
+    storeReview: async (review: StoredPricingReview) => { stored = review; storedReviews.push(review); },
     loadReview: async () => stored, findApplication: async () => null,
     lockSelection: async () => { throw new Error("The golden review never applies."); },
     applyReview: async () => { throw new Error("The golden review never applies."); },

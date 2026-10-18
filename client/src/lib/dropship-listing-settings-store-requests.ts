@@ -284,10 +284,9 @@ function plan(content: Omit<SignatureContent, "v">): StoreSetupSavePlan {
 }
 
 /**
- * W2 for one store default policy. Only that policy is sent: today's builder
- * sends every chosen policy when nothing changed
- * (`buildEbayListingSetupSaveRequest`), which would make a return policy
- * save wait on the Card Shellz shipping check.
+ * W2 for one store default policy. Only that policy is sent, never every
+ * chosen one (as the setup panel PR 12 deleted did when nothing changed), so
+ * a return policy save never waits on the Card Shellz shipping check.
  */
 export function planStoreDefaultPolicySave(
   setup: StoreSetupRevisionFacts,

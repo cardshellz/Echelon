@@ -18,18 +18,13 @@ import {
   managedMerchantLocationKeyForWarehouse,
   type DropshipEbayManagedLocationProvider,
 } from "../../application/dropship-ebay-managed-location-service";
-import {
-  DropshipEbayStoreCategoryService,
-  type DropshipEbayStoreCategory,
-  type DropshipEbayStoreCategoryRepository,
-} from "../../application/dropship-ebay-store-category-service";
+import type { DropshipEbayStoreCategory } from "../../application/dropship-ebay-store-category-service";
 import {
   buildDefaultDropshipStoreListingConfig,
   type DropshipListingConfigService,
   type DropshipStoreListingConfigRecord,
 } from "../../application/dropship-listing-config-service";
 import type { DropshipLogger } from "../../application/dropship-ports";
-import type { DropshipVendorProvisioningService } from "../../application/dropship-vendor-provisioning-service";
 import type {
   DropshipEbayFulfillmentCapability,
   DropshipEbayFulfillmentPolicy,
@@ -133,7 +128,6 @@ function makeSetupFixture() {
     })),
     findKeyedRequest: vi.fn(async () => null),
     replaceForMember,
-    getForMember: unexpected("getForMember"),
     findConfig: unexpected("findConfig"),
     getForAdmin: unexpected("getForAdmin"),
     replaceForAdmin: unexpected("replaceForAdmin"),
@@ -157,7 +151,7 @@ function makeSetupFixture() {
   const service = new DropshipEbayListingSetupService({
     listingConfig: listingConfig as unknown as Pick<
       DropshipListingConfigService,
-      "getForMember" | "getViewForMember" | "findKeyedRequest" | "findConfig" | "replaceForMember" | "getForAdmin" | "replaceForAdmin"
+      "getViewForMember" | "findKeyedRequest" | "findConfig" | "replaceForMember" | "getForAdmin" | "replaceForAdmin"
     >,
     directory,
     storeShelves: { listLeafCategories: vi.fn(async () => shelves()) },
@@ -166,26 +160,6 @@ function makeSetupFixture() {
     logger: silentLogger,
   });
   return { service, replaceForMember };
-}
-
-/** The per-size shelf service with a connected eBay store whose leaf shelves are 101 and 102. */
-function makeShelfFixture() {
-  const replaceAssignment = unexpected("replaceAssignment");
-  const repository: DropshipEbayStoreCategoryRepository = {
-    loadStoreContext: async () => ({ vendorId: VENDOR_ID, storeConnectionId: STORE_CONNECTION_ID, platform: "ebay", status: "connected" }),
-    listAssignments: async () => [],
-    replaceAssignment,
-  };
-  const service = new DropshipEbayStoreCategoryService({
-    vendorProvisioning: {
-      provisionForMember: async (memberId: string) => ({ vendor: { vendorId: VENDOR_ID, memberId }, created: false, changedFields: [] }),
-    } as unknown as DropshipVendorProvisioningService,
-    repository,
-    directory: { listLeafCategories: async () => shelves() },
-    clock: { now: () => NOW },
-    logger: silentLogger,
-  });
-  return { service, replaceAssignment };
 }
 
 /** Inputs are frozen all the way down, so a check that mutated one would throw. */
@@ -258,22 +232,6 @@ describe("eBay listing check callers (pinned before PR 9b)", () => {
       context: { storeConnectionId: STORE_CONNECTION_ID, invalidFields: ["storeShelfDefault"], retryable: false },
     });
     expect(fixture.replaceForMember).not.toHaveBeenCalled();
-  });
-
-  it("per-size shelves: refuses the first shelf the store no longer has, in request order, in the shelf service's own words", async () => {
-    const fixture = makeShelfFixture();
-
-    const answer = await refusal(fixture.service.replaceForMember("member-1", {
-      storeConnectionId: STORE_CONNECTION_ID, productVariantId: 501, storeCategoryIds: ["shelf-gone-b", "shelf-gone-a"],
-      idempotencyKey: "store-category-pin-1",
-    }));
-
-    expect(answer).toEqual({
-      code: "DROPSHIP_EBAY_STORE_CATEGORY_INVALID",
-      message: "Select a current leaf category from the connected eBay Store.",
-      context: { storeConnectionId: STORE_CONNECTION_ID, productVariantId: 501, categoryId: "shelf-gone-b" },
-    });
-    expect(fixture.replaceAssignment).not.toHaveBeenCalled();
   });
 });
 

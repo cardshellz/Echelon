@@ -20,6 +20,7 @@ import { LISTING_SETTINGS_OFF_CONTRACT, ListingSettingsReadError } from "./drops
 import type { ListingSettingsRight } from "./dropship-listing-settings-access";
 import {
   classifyWriteFailure,
+  GROUP_RULES_CLOSED_CODE,
   LISTING_SETTINGS_KEY_PREFIXES,
   LISTING_SETTINGS_SAVE_WORDS,
   sameDraftValue,
@@ -241,9 +242,9 @@ export function priceDefaultBase(state: PricingProfileState | null, summaryRecip
 
 /**
  * Whether the store has no store price, so the editor shows the suggestion
- * marked "Suggested · not saved". The suggestion is not counted as a change
- * (as in the older pricing panel): leaving the editor loses nothing the vendor
- * did, and "Check new prices" works on it as it is.
+ * marked "Suggested · not saved". The suggestion is not counted as a change:
+ * leaving the editor loses nothing the vendor did, and "Check new prices"
+ * works on it as it is.
  */
 export function isPriceSuggestion(state: PricingProfileState | null, summaryRecipe: PricingRecipe | null): boolean {
   return state ? state.profile === null : summaryRecipe === null;
@@ -260,7 +261,7 @@ export function readPriceRecipeDraft(value: DraftValue): PriceRecipeDraft | null
   return parsed.success ? parsed.data : null;
 }
 
-/** Whether what is saved moved away from what the draft started from (another window or the older panel saved). */
+/** Whether what is saved moved away from what the draft started from (another window saved, or the rules were moved over). */
 export function priceBaseMoved(base: DraftValue, latest: PriceRecipeDraft): boolean {
   return !sameDraftValue(base, latest);
 }
@@ -293,7 +294,7 @@ export function pricingRulesEndpoint(storeConnectionId: number): string {
   return `/api/dropship/listings/stores/${storeConnectionId}/pricing-rules`;
 }
 
-/** The pricing rules read, under the key the older pricing panel uses too, so it is one cached read. */
+/** The pricing rules read, keyed by its endpoint; a confirmed move re-reads it (`conversionRereadKeys`). */
 export function pricingRulesQueryKey(storeConnectionId: number) {
   return [pricingRulesEndpoint(storeConnectionId)] as const;
 }
@@ -361,8 +362,8 @@ export async function rereadPricingRules(
 
 /**
  * After a store price is saved: the profile is read again, then every size
- * price read of the store is marked stale (the old panel's predicate,
- * DropshipPricingRulesPanel.tsx). Throws when the profile read fails.
+ * price read of the store is marked stale (`isStoreSizePriceQuery`). Throws
+ * when the profile read fails.
  */
 export async function refreshAfterPricingApply(
   queryClient: Pick<QueryClient, "cancelQueries" | "fetchQuery" | "invalidateQueries">,
@@ -485,7 +486,10 @@ export async function requestPricingReview(send: () => Promise<unknown>): Promis
       case "rate_limited":
         return { kind: "failed", message: failure.message };
       case "refused":
-        // A 400 or 422 has the server's own words (a check too large, values it refused).
+        // The older group refusal is permanent: its own words, the same as W3, W4 and the apply give, never
+        // "Try again" (verify VC5; plan D11).
+        if (failure.code === GROUP_RULES_CLOSED_CODE) return { kind: "failed", message: failure.message };
+        // Any other 400 or 422 has the server's own words (a check too large, values it refused).
         return { kind: "failed", message: error instanceof DropshipApiError && error.message.trim() ? error.message : PRICE_DEFAULT_WORDS.reviewFailed };
       default:
         return { kind: "failed", message: PRICE_DEFAULT_WORDS.reviewFailed };

@@ -4,13 +4,8 @@ import type {
   DropshipEbayStoreCategoryContext,
   DropshipEbayStoreCategoryDirectory,
   DropshipEbayStoreCategoryRepository,
-  ReplaceDropshipEbayStoreCategoryAssignmentRepositoryInput,
-  ReplaceDropshipEbayStoreCategoryAssignmentRepositoryResult,
 } from "../../application/dropship-ebay-store-category-service";
-import {
-  DropshipEbayStoreCategoryService,
-  hashEbayStoreCategoryAssignment,
-} from "../../application/dropship-ebay-store-category-service";
+import { DropshipEbayStoreCategoryService } from "../../application/dropship-ebay-store-category-service";
 import type { DropshipVendorProvisioningService } from "../../application/dropship-vendor-provisioning-service";
 
 const NOW = new Date("2026-08-29T12:00:00.000Z");
@@ -29,51 +24,6 @@ describe("DropshipEbayStoreCategoryService", () => {
     });
     expect(fixture.repository.lastContextInput).toEqual({ vendorId: 10, storeConnectionId: 44 });
     expect(fixture.directory.lastInput).toEqual({ vendorId: 10, storeConnectionId: 44 });
-  });
-
-  it("persists canonical full paths instead of trusting client-provided names", async () => {
-    const fixture = makeFixture();
-
-    const result = await fixture.service.replaceForMember("member-1", {
-      storeConnectionId: 44,
-      productVariantId: 501,
-      storeCategoryIds: ["22", "30"],
-      idempotencyKey: "store-category-001",
-    });
-
-    expect(result).toMatchObject({ revisionId: 91, idempotentReplay: false });
-    expect(fixture.repository.lastReplaceInput).toEqual({
-      vendorId: 10,
-      storeConnectionId: 44,
-      productVariantId: 501,
-      storeCategoryIds: ["22", "30"],
-      storeCategoryNames: ["Supplies:Toploaders", "Clearance"],
-      idempotencyKey: "store-category-001",
-      requestHash: hashEbayStoreCategoryAssignment({
-        storeConnectionId: 44,
-        productVariantId: 501,
-        storeCategoryIds: ["22", "30"],
-        storeCategoryNames: ["Supplies:Toploaders", "Clearance"],
-      }),
-      actor: { actorType: "vendor", actorId: "member-1" },
-      now: NOW,
-    });
-    expect(fixture.logs).toContainEqual(expect.objectContaining({
-      code: "DROPSHIP_EBAY_STORE_CATEGORY_ASSIGNMENT_REPLACED",
-      context: expect.objectContaining({ storeCategoryCount: 2, revisionId: 91 }),
-    }));
-  });
-
-  it("rejects a stale or non-leaf category before any write", async () => {
-    const fixture = makeFixture();
-
-    await expect(fixture.service.replaceForMember("member-1", {
-      storeConnectionId: 44,
-      productVariantId: 501,
-      storeCategoryIds: ["not-current"],
-      idempotencyKey: "store-category-002",
-    })).rejects.toMatchObject({ code: "DROPSHIP_EBAY_STORE_CATEGORY_INVALID" });
-    expect(fixture.repository.lastReplaceInput).toBeNull();
   });
 
   it.each([
@@ -95,19 +45,6 @@ describe("DropshipEbayStoreCategoryService", () => {
     await expect(fixture.service.listForMember("member-1", { storeConnectionId: 44 }))
       .resolves.toMatchObject({ storeConnectionId: 44 });
     expect(fixture.directory.lastInput).toEqual({ vendorId: 10, storeConnectionId: 44 });
-  });
-
-  it("rejects duplicate Store category choices at the input boundary", async () => {
-    const fixture = makeFixture();
-
-    await expect(fixture.service.replaceForMember("member-1", {
-      storeConnectionId: 44,
-      productVariantId: 501,
-      storeCategoryIds: ["22", "22"],
-      idempotencyKey: "store-category-003",
-    })).rejects.toMatchObject({ name: "ZodError" });
-    expect(fixture.directory.lastInput).toBeNull();
-    expect(fixture.repository.lastReplaceInput).toBeNull();
   });
 
   it("records a safe operational warning when eBay category retrieval fails", async () => {
@@ -140,7 +77,6 @@ class FakeRepository implements DropshipEbayStoreCategoryRepository {
     updatedAt: NOW,
   }];
   lastContextInput: unknown = null;
-  lastReplaceInput: ReplaceDropshipEbayStoreCategoryAssignmentRepositoryInput | null = null;
 
   async loadStoreContext(input: { vendorId: number; storeConnectionId: number }) {
     this.lastContextInput = input;
@@ -149,22 +85,6 @@ class FakeRepository implements DropshipEbayStoreCategoryRepository {
 
   async listAssignments() {
     return this.assignments;
-  }
-
-  async replaceAssignment(
-    input: ReplaceDropshipEbayStoreCategoryAssignmentRepositoryInput,
-  ): Promise<ReplaceDropshipEbayStoreCategoryAssignmentRepositoryResult> {
-    this.lastReplaceInput = input;
-    return {
-      assignment: {
-        productVariantId: input.productVariantId,
-        storeCategoryIds: input.storeCategoryIds,
-        storeCategoryNames: input.storeCategoryNames,
-        updatedAt: input.now,
-      },
-      revisionId: 91,
-      idempotentReplay: false,
-    };
   }
 }
 

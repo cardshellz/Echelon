@@ -34,18 +34,6 @@ const PRODUCT_COST_SOURCE_LABELS = {
   retail: "catalog retail (.ops discount excluded or not applicable)",
 } as const;
 
-/**
- * The save callbacks of the older Listing settings panels (the pricing rules
- * panel and the exact price box), which the Catalog page still wires. Step 3
- * no longer takes them; the type stays here until PR 12 removes those panels.
- */
-export interface ListingPriceSaveCallbacks {
-  disabled?: boolean;
-  onSaveStarted: () => void;
-  onSaveSettled: () => void;
-  onSaved: () => Promise<void>;
-}
-
 /** Resolves a portal route to its URL (`dropshipPortalPath` reads the browser's host); injected in tests, which have no window. */
 type PortalHref = (path: string) => string;
 
@@ -200,7 +188,7 @@ export function ListingPreviewDetailsContent({ row, generatedAt, shippingEstimat
 
 /**
  * Every step 3 link leads to Listing settings (step 2), through the page's
- * leave guard as the rail's link there does: a draft held by an older panel is
+ * leave guard as the rail's link there does: a draft held by another editor is
  * asked about first, but the Listing settings step's own draft is left out of
  * the question, since the page keeps it across steps and going there drops
  * nothing (`scopeWithoutPrefix`, as `DropshipPortalCatalog`'s `toSetupScope`).

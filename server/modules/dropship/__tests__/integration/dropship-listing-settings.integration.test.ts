@@ -211,7 +211,7 @@ describeDatabase.sequential("listing settings PostgreSQL read guarantees", () =>
     await execute(`INSERT INTO dropship.dropship_ebay_category_rule_profiles (vendor_id, store_connection_id, revision_id) VALUES (10, $1, $2)
       ON CONFLICT (store_connection_id) DO UPDATE SET revision_id = EXCLUDED.revision_id`, [STORE_RULES, revision.rows[0].id]);
   }
-  /** As dropship-ebay-listing-policy-override.repository.ts: a revision, then the current row. */
+  /** A revision, then the current row, as the old per-size policy writer did (deleted in PR 12). */
   async function setPolicyOverride(productVariantId: number, fulfillmentPolicyId: string) {
     const revision = await execute(`INSERT INTO dropship.dropship_ebay_listing_policy_override_revisions
       (vendor_id, store_connection_id, product_variant_id, idempotency_key, request_hash, fulfillment_policy_id, actor_type, actor_id)
@@ -222,7 +222,7 @@ describeDatabase.sequential("listing settings PostgreSQL read guarantees", () =>
       ON CONFLICT (store_connection_id, product_variant_id) DO UPDATE SET revision_id = EXCLUDED.revision_id,
         fulfillment_policy_id = EXCLUDED.fulfillment_policy_id`, [STORE_RULES, productVariantId, revision.rows[0].id, fulfillmentPolicyId]);
   }
-  /** As dropship-ebay-store-category.repository.ts: a revision, then the current row. */
+  /** A revision, then the current row, as the old per-size shelf writer did (deleted in PR 12). */
   async function setShelf(productVariantId: number, shelf: string) {
     const revision = await execute(`INSERT INTO dropship.dropship_ebay_store_category_assignment_revisions
       (vendor_id, store_connection_id, product_variant_id, idempotency_key, request_hash, store_category_ids, store_category_names, actor_type, actor_id)
@@ -575,10 +575,10 @@ describeDatabase.sequential("listing settings PostgreSQL read guarantees", () =>
     ["a size's own description", () => saveOwnText(201, "Newer words.", "change-own-text-201")],
     ["the eBay category rules", () => saveCategoryRules("261328")],
     ["a policy override set", () => setPolicyOverride(101, "ship-c")],
-    // dropship-ebay-listing-policy-override.repository.ts deletes the row on reset.
+    // The old per-size policy writer (deleted in PR 12) deleted the row on reset.
     ["a policy override reset", () => execute("DELETE FROM dropship.dropship_ebay_listing_policy_overrides WHERE product_variant_id = 102")],
     ["a store shelf set", () => setShelf(102, "Mailers")],
-    // dropship-ebay-store-category.repository.ts deletes the row on clear.
+    // The old per-size shelf writer (deleted in PR 12) deleted the row on clear.
     ["a store shelf cleared", () => execute("DELETE FROM dropship.dropship_ebay_store_category_assignments WHERE product_variant_id = 101")],
     ["the vendor's selection", () => execute("UPDATE dropship.dropship_vendor_selection_rules SET is_active = false WHERE id = 2")],
     ["a size switched off", () => execute("INSERT INTO dropship.dropship_vendor_variant_overrides (vendor_id, product_variant_id, enabled_override) VALUES (10, 102, false)")],
