@@ -1,4 +1,4 @@
-import type { Express, Response } from "express";
+import type { Express, Request, Response } from "express";
 import type { z } from "zod";
 import { requirePermission } from "../../../../routes/middleware";
 import type { DropshipListingConfigService } from "../../application/dropship-listing-config-service";
@@ -6,10 +6,10 @@ import { replaceDropshipStoreListingConfigRequestSchema } from "../../applicatio
 import { DropshipError } from "../../domain/errors";
 import { publicationSelectionBusyIssue } from "../../../inventory-planning/publication-selection-work";
 import { createDropshipListingConfigServiceFromEnv } from "../../infrastructure/dropship-listing-config.factory";
-import {
-  requireDropshipAuth,
-  requireDropshipSensitiveActionProof,
-} from "./dropship-auth.routes";
+import { logDropshipRouteFailure } from "./dropship-route-failure-log";
+
+const INTERNAL_ERROR_CODE = "DROPSHIP_LISTING_CONFIG_INTERNAL_ERROR";
+const HTTP_INTERNAL_ERROR = 500;
 
 export function registerDropshipListingConfigRoutes(
   app: Express,
@@ -27,7 +27,7 @@ export function registerDropshipListingConfigRoutes(
         });
         return res.json(result);
       } catch (error) {
-        return sendDropshipListingConfigError(res, error);
+        return sendDropshipListingConfigError(req, res, error);
       }
     },
   );
@@ -45,37 +45,7 @@ export function registerDropshipListingConfigRoutes(
         });
         return res.json(result);
       } catch (error) {
-        return sendDropshipListingConfigError(res, error);
-      }
-    },
-  );
-
-  app.get(
-    "/api/dropship/store-connections/:storeConnectionId/listing-config",
-    requireDropshipAuth,
-    async (req, res) => {
-      try {
-        const storeConnectionId = parsePositiveInteger(req.params.storeConnectionId, "storeConnectionId");
-        const result = await service.getForMember(req.session.dropship!.memberId, storeConnectionId);
-        return res.json(result);
-      } catch (error) {
-        return sendDropshipListingConfigError(res, error);
-      }
-    },
-  );
-
-  app.put(
-    "/api/dropship/store-connections/:storeConnectionId/listing-config",
-    requireDropshipAuth,
-    requireDropshipSensitiveActionProof("bulk_listing_push"),
-    async (req, res) => {
-      try {
-        const storeConnectionId = parsePositiveInteger(req.params.storeConnectionId, "storeConnectionId");
-        const input = parseBody(replaceDropshipStoreListingConfigRequestSchema, req.body);
-        const result = await service.replaceForMember(req.session.dropship!.memberId, storeConnectionId, input);
-        return res.json(result);
-      } catch (error) {
-        return sendDropshipListingConfigError(res, error);
+        return sendDropshipListingConfigError(req, res, error);
       }
     },
   );
@@ -106,7 +76,7 @@ function parseBody<T>(schema: z.ZodType<T, z.ZodTypeDef, unknown>, body: unknown
   return result.data;
 }
 
-function sendDropshipListingConfigError(res: Response, error: unknown): Response {
+function sendDropshipListingConfigError(req: Request, res: Response, error: unknown): Response {
   const busy = publicationSelectionBusyIssue(error);
   if (busy) return res.status(409).json({ error: busy });
   if (error instanceof DropshipError) {
@@ -119,10 +89,16 @@ function sendDropshipListingConfigError(res: Response, error: unknown): Response
     });
   }
 
-  console.error("[DropshipListingConfig] Unexpected listing config error:", error);
-  return res.status(500).json({
+  // An unexpected failure needs a human: one structured ERROR line through the platform logger, with the staff user
+  // as the actor (CLAUDE.md §10; Listing settings PR 12 verify VS4; it was a raw console line), never the error in the answer.
+  const storeConnectionId = Number(req.params.storeConnectionId);
+  logDropshipRouteFailure("dropship.listing_config", req, {
+    status: HTTP_INTERNAL_ERROR, code: INTERNAL_ERROR_CODE, error, actorId: sessionUserId(req),
+    storeConnectionId: Number.isSafeInteger(storeConnectionId) && storeConnectionId > 0 ? storeConnectionId : null,
+  });
+  return res.status(HTTP_INTERNAL_ERROR).json({
     error: {
-      code: "DROPSHIP_LISTING_CONFIG_INTERNAL_ERROR",
+      code: INTERNAL_ERROR_CODE,
       message: "Dropship listing config request failed.",
     },
   });
@@ -142,7 +118,6 @@ function statusForDropshipListingConfigError(code: string): number {
     case "DROPSHIP_AUTH_REQUIRED":
       return 401;
     case "DROPSHIP_ENTITLEMENT_REQUIRED":
-    case "DROPSHIP_LISTING_CONFIG_VENDOR_BLOCKED":
       return 403;
     case "DROPSHIP_STORE_CONNECTION_NOT_FOUND":
       return 404;

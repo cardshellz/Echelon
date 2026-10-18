@@ -1,24 +1,12 @@
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { Router } from "wouter";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { listingSettingsSummarySchema, type ListingSettingsSummary } from "@shared/dropship/listing-settings";
-import { ebayListingSetupQueryKey } from "@/lib/dropship-ebay-listing-query-sync";
 import { CONNECTION_BANNER_KINDS, type ConnectionBanner, type ConnectionBannerKind } from "@/lib/dropship-listing-settings-access";
-import type { DropshipEbayListingSetupResponse } from "@/lib/dropship-ops-surface";
-import {
-  EbayListingSetupPanel,
-  buildEbayListingSetupDraft,
-  listingSetupHasUnsavedChange,
-  listingSetupHasUnsavedPolicy,
-} from "../EbayListingSetupPanel";
 import { AttentionStrip, type AttentionStripProps } from "../listing-settings/AttentionStrip";
 import { ConnectionBannerView, type ConnectionBannerViewProps } from "../listing-settings/ConnectionBanner";
 import { ListingSettingsHeader } from "../listing-settings/ListingSettingsHeader";
-import { OlderListingSettings, type OlderListingSettingsProps } from "../listing-settings/OlderListingSettings";
 
 /**
  * Every Button rendered in a test, with its words and its click handler: a
@@ -72,9 +60,6 @@ vi.mock("@/components/ui/sheet", async () => {
     SheetDescription: ({ children }: Props) => createElement("p", null, children),
   };
 });
-vi.mock("../EbayStoreCategoryAuthorizationRecovery", () => ({
-  EbayStoreCategoryAuthorizationRecovery: () => null,
-}));
 
 const noop = () => undefined;
 const STORE = "Marz Cards";
@@ -425,181 +410,5 @@ describe("AttentionStrip", () => {
       rail: { state: "too_many_sizes", productsNeedingFix: 0, missingPolicy: null },
     });
     expect(strip({ summary: { data: tooLarge }, bannerShown: true })).toBe("");
-  });
-});
-
-// ---------------------------------------------------------------------------
-// Older settings
-// ---------------------------------------------------------------------------
-
-/** Stand-ins for today's panels: each has its heading, as the real panels do. */
-function oldPanels(): React.ReactElement {
-  return React.createElement(React.Fragment, null,
-    React.createElement("section", null, React.createElement("h2", null, "Policy overrides")),
-    React.createElement("section", null, React.createElement("h2", null, "Listing pricing rules")));
-}
-
-function older(overrides: Partial<OlderListingSettingsProps>, children: React.ReactNode = oldPanels()): string {
-  return render(React.createElement(OlderListingSettings, {
-    collapsible: true, open: false, onOpenChange: noop, unsaved: false, ...overrides, children,
-  }));
-}
-
-describe("OlderListingSettings", () => {
-  it("keeps the panels in the page while closed, inside an element with the hidden attribute", () => {
-    const markup = older({ open: false });
-    const content = openingTag(markup, 'data-testid="older-listing-settings-content"');
-    expect(content).toMatch(/ hidden=""/);
-    // The panels' headings are still there, inside the hidden element.
-    const contentAt = markup.indexOf(content);
-    expect(markup.indexOf("Policy overrides")).toBeGreaterThan(contentAt);
-    expect(markup.indexOf("Listing pricing rules")).toBeGreaterThan(contentAt);
-    // No display class on it: one would override the hidden attribute.
-    expect(content).not.toMatch(/\b(?:block|flex|grid)\b/);
-
-    const toggle = openingTag(markup, "aria-expanded=");
-    expect(toggle).toContain('aria-expanded="false"');
-    const contentId = /id="([^"]+)"/.exec(content)?.[1];
-    expect(contentId).toBeTruthy();
-    expect(toggle).toContain(`aria-controls="${contentId}"`);
-    const text = visibleText(markup);
-    expect(text).toMatch(/^Older settings Per-size policies and shelves, group rules and text templates\. A group rule added here stops category settings from being saved\. Show older settings/);
-    expect(text).not.toContain("Not saved");
-    expect(openingTag(markup, 'data-testid="older-listing-settings"')).toContain('role="region"');
-  });
-
-  it("shows the panels when open, and the button hides them again", () => {
-    const onOpenChange = vi.fn();
-    const markup = older({ open: true, onOpenChange });
-    expect(openingTag(markup, 'data-testid="older-listing-settings-content"')).not.toContain("hidden");
-    expect(openingTag(markup, "aria-expanded=")).toContain('aria-expanded="true"');
-    button("Hide older settings").onClick?.();
-    expect(onOpenChange).toHaveBeenCalledWith(false);
-
-    buttons.length = 0;
-    older({ open: false, onOpenChange });
-    button("Show older settings").onClick?.();
-    expect(onOpenChange).toHaveBeenLastCalledWith(true);
-  });
-
-  it("says \"Not saved\" by the title while an older panel holds a change", () => {
-    const markup = older({ unsaved: true });
-    expect(visibleText(markup)).toMatch(/^Older settings ● Not saved Per-size policies/);
-  });
-
-  it("renders the panels plainly when it can't collapse (no eBay store ready)", () => {
-    const markup = older({ collapsible: false, open: false, unsaved: true });
-    expect(visibleText(markup)).toBe("Policy overrides Listing pricing rules");
-    expect(markup).not.toContain("hidden");
-    expect(markup).not.toContain("aria-expanded");
-    expect(markup).not.toContain('role="region"');
-    expect(buttons).toEqual([]);
-    expect(openingTag(markup, 'data-testid="older-listing-settings"')).toContain('data-collapsible="false"');
-  });
-
-  it("keeps one shape either way, so a change of collapsible never remounts the panels", () => {
-    // The panels sit at the same place in the tree: the wrapper's second child.
-    const open = older({ collapsible: true, open: true });
-    const plain = older({ collapsible: false, open: true });
-    const panelsIn = (markup: string) => markup.slice(markup.indexOf('data-testid="older-listing-settings-content"'));
-    expect(panelsIn(open)).toContain("<section><h2>Policy overrides</h2></section>");
-    expect(panelsIn(plain)).toContain("<section><h2>Policy overrides</h2></section>");
-    const source = readFileSync(join(process.cwd(), "client", "src", "pages", "dropship", "listing-settings", "OlderListingSettings.tsx"), "utf8");
-    // Not Radix forceMount: it leaves closed content visible (plan D3).
-    expect(source).not.toMatch(/components\/ui\/collapsible|@radix-ui\/react-collapsible/);
-    expect(source).not.toMatch(/<CollapsibleContent|\bforceMount\s*[={]/);
-  });
-
-  it("keeps a real old panel mounted while closed", () => {
-    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-    client.setQueryData(ebayListingSetupQueryKey(44), setupResponse({}));
-    const markup = render(React.createElement(QueryClientProvider, { client },
-      React.createElement(OlderListingSettings, {
-        collapsible: true, open: false, onOpenChange: noop, unsaved: false,
-        children: React.createElement(EbayListingSetupPanel, { storeConnectionId: 44, storeName: STORE, onConfigurationChange: noop, suggestionsCountAsUnsaved: false }),
-      })));
-    const contentAt = markup.indexOf(openingTag(markup, 'data-testid="older-listing-settings-content"'));
-    expect(openingTag(markup, 'data-testid="older-listing-settings-content"')).toContain('hidden=""');
-    expect(markup.indexOf("eBay listing setup")).toBeGreaterThan(contentAt);
-  });
-});
-
-// ---------------------------------------------------------------------------
-// L2: the old setup panel's lone-policy suggestion while "Older settings" is closed
-// ---------------------------------------------------------------------------
-
-function setupResponse(overrides: Partial<DropshipEbayListingSetupResponse>): DropshipEbayListingSetupResponse {
-  return {
-    storeConnectionId: 44,
-    marketplaceId: "EBAY_US",
-    complete: false,
-    missingFields: [],
-    fulfillmentCapability: null,
-    selection: { merchantLocationKey: null, fulfillmentPolicyId: null, returnPolicyId: null, paymentPolicyId: null },
-    options: { merchantLocations: [], fulfillmentPolicies: [], returnPolicies: [], paymentPolicies: [] },
-    ...overrides,
-  };
-}
-
-const policyOption = (id: string, name: string) => ({ id, name, compatible: true, compatibilityIssues: [] });
-
-/** eBay offers one payment policy and nothing is saved: Card Shellz fills it in. Two return policies: the vendor picks. */
-const LONE_PAYMENT = setupResponse({
-  options: {
-    merchantLocations: [],
-    fulfillmentPolicies: [policyOption("ship-standard", "Standard"), policyOption("ship-fast", "Fast")],
-    returnPolicies: [{ id: "return-30", name: "Thirty days" }, { id: "return-60", name: "Sixty days" }],
-    paymentPolicies: [{ id: "payment-managed", name: "Managed payments" }],
-  },
-});
-
-describe("listingSetupHasUnsavedChange (L2)", () => {
-  it("does not count a policy Card Shellz filled in when suggestions don't count, and does by default", () => {
-    const draft = buildEbayListingSetupDraft(LONE_PAYMENT);
-    expect(draft.paymentPolicyId).toBe("payment-managed");
-    expect(listingSetupHasUnsavedChange(LONE_PAYMENT, draft, { countSuggestions: true })).toBe(true);
-    expect(listingSetupHasUnsavedChange(LONE_PAYMENT, draft, { countSuggestions: false })).toBe(false);
-  });
-
-  it("always counts a policy the vendor picked", () => {
-    const picked = { ...buildEbayListingSetupDraft(LONE_PAYMENT), returnPolicyId: "return-60" };
-    expect(listingSetupHasUnsavedChange(LONE_PAYMENT, picked, { countSuggestions: false })).toBe(true);
-    expect(listingSetupHasUnsavedChange(LONE_PAYMENT, picked, { countSuggestions: true })).toBe(true);
-  });
-
-  it("is today's rule when suggestions count", () => {
-    const saved = setupResponse({
-      ...LONE_PAYMENT,
-      selection: { merchantLocationKey: null, fulfillmentPolicyId: "ship-fast", returnPolicyId: "return-30", paymentPolicyId: "payment-managed" },
-    });
-    const drafts = [
-      buildEbayListingSetupDraft(LONE_PAYMENT),
-      { fulfillmentPolicyId: "", returnPolicyId: "", paymentPolicyId: "" },
-      { fulfillmentPolicyId: "ship-fast", returnPolicyId: "return-30", paymentPolicyId: "payment-managed" },
-      { fulfillmentPolicyId: "ship-standard", returnPolicyId: "return-30", paymentPolicyId: "payment-managed" },
-    ];
-    for (const setup of [LONE_PAYMENT, saved]) {
-      for (const draft of drafts) {
-        expect(listingSetupHasUnsavedChange(setup, draft, { countSuggestions: true })).toBe(listingSetupHasUnsavedPolicy(setup, draft));
-      }
-    }
-    // A saved store has nothing filled in, so the suggestion rule changes nothing there.
-    for (const draft of drafts) {
-      expect(listingSetupHasUnsavedChange(saved, draft, { countSuggestions: false })).toBe(listingSetupHasUnsavedPolicy(saved, draft));
-    }
-  });
-
-  it("is wired to the leave guard and the badge, and is on by default", () => {
-    const source = readFileSync(join(process.cwd(), "client", "src", "pages", "dropship", "EbayListingSetupPanel.tsx"), "utf8");
-    expect(source).toContain("suggestionsCountAsUnsaved = true,");
-    const unsavedPolicy = /const unsavedPolicy = useMemo\(([\s\S]*?)\n {2}\);/.exec(source)?.[1] ?? "";
-    expect(unsavedPolicy).toContain("listingSetupHasUnsavedChange(setupQuery.data, draft, { countSuggestions: suggestionsCountAsUnsaved })");
-    expect(unsavedPolicy).toContain("suggestionsCountAsUnsaved]");
-    expect(source).toContain('useUnsavedDraft(`listing-setup:${storeConnectionId}`, "eBay listing setup", unsavedPolicy);');
-    expect(source).toContain("eBay listing setup{unsavedPolicy && <NotSavedBadge />}");
-    // Saving still works on a suggestion: Save is about what the server lacks, not what the guard reports.
-    expect(source).toContain("const canSave = setupQuery.data !== undefined && listingSetupHasUnsavedPolicy(setupQuery.data, draft);");
-    // One guard report only.
-    expect(source.split("useUnsavedDraft(").length - 1).toBe(1);
   });
 });

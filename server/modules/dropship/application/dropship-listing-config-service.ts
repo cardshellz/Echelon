@@ -183,25 +183,6 @@ export type NormalizedDropshipStoreListingConfigInput = ReplaceDropshipStoreList
 export class DropshipListingConfigService {
   constructor(private readonly deps: DropshipListingConfigServiceDependencies) {}
 
-  async getForMember(memberId: string, storeConnectionId: number): Promise<{
-    vendor: DropshipProvisionedVendorProfile;
-    storeConnection: DropshipListingConfigStoreConnectionContext;
-    config: DropshipStoreListingConfigRecord;
-  }> {
-    const vendor = (await this.deps.vendorProvisioning.provisionForMember(memberId)).vendor;
-    assertVendorCanManageListingConfig(vendor);
-    const storeConnection = await this.requireStoreConnection(vendor.vendorId, storeConnectionId);
-    const config = await this.deps.repository.ensureDefaultConfig({
-      vendorId: vendor.vendorId,
-      storeConnectionId,
-      platform: storeConnection.platform,
-      actor: { actorType: "vendor", actorId: memberId },
-      now: this.deps.clock.now(),
-    });
-
-    return { vendor, storeConnection, config };
-  }
-
   /**
    * The vendor's view of a store's listing config, readable even when it can't
    * be changed (design 3.5, 8.8): a closed, lapsed or suspended account, or a

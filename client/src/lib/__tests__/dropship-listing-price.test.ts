@@ -1,8 +1,7 @@
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 import type { ListingPriceSetting } from "@shared/dropship/listing-price";
-import { belowCostNote, describeListingPriceBuiltFrom, displayListingPrice, draftFromListingPrice, followsRulesNow, inheritedListingPrice,
-  isListingPriceDirty, listingPriceEndpoint, listingPriceInput, parseListingPriceCents, prepareListingPriceSave, readListingPrice,
-  readSavedListingPrice, reconcileListingPriceDraft } from "../dropship-listing-price";
+import { displayListingPrice, inheritedListingPrice, listingPriceEndpoint, listingPriceInput, parseListingPriceCents, readListingPrice,
+  readSavedListingPrice } from "../dropship-listing-price";
 
 const identity = { storeConnectionId: 12, productVariantId: 34 };
 function price(): ListingPriceSetting {
@@ -29,112 +28,17 @@ describe("listing-price decimal boundary", () => {
   });
 });
 
-describe("saved price draft and retry identity", () => {
-  it("starts pristine and only becomes dirty after an actual price change or reset", () => {
-    const draft = draftFromListingPrice(price());
-    expect(draft).toMatchObject({ useDefault: false, value: "9.99" });
-    expect(isListingPriceDirty(draft)).toBe(false);
-    expect(isListingPriceDirty({ ...draft, value: "09.99" })).toBe(false);
-    expect(isListingPriceDirty({ ...draft, value: "10" })).toBe(true);
-    expect(isListingPriceDirty({ ...draft, value: "" })).toBe(true);
-    expect(isListingPriceDirty({ ...draft, useDefault: true })).toBe(true);
-  });
-  it("keeps legacy saved-listing prices distinct from an explicit catalog reset", () => {
-    const saved = { ...price(), revisionId: null, overridePriceCents: null, source: "saved_listing" as const, updatedAt: null };
-    const draft = draftFromListingPrice(saved);
-    expect(draft.useDefault).toBe(false);
-    expect(isListingPriceDirty(draft)).toBe(false);
-    expect(isListingPriceDirty({ ...draft, useDefault: true })).toBe(true);
-    expect(prepareListingPriceSave(identity, { ...draft, useDefault: true }, null, () => "reset-key").request)
-      .toEqual({ priceCents: null, expectedRevisionId: null, idempotencyKey: "reset-key" });
-  });
-  it("uses a real default and leaves missing defaults unavailable", () => {
-    const defaults = draftFromListingPrice({ ...price(), overridePriceCents: null, effectivePriceCents: 899, source: "catalog_default" });
-    expect(defaults).toMatchObject({ useDefault: true, value: "8.99" });
-    expect(isListingPriceDirty(defaults)).toBe(false);
-    const unavailable = draftFromListingPrice({ ...price(), overridePriceCents: null, effectivePriceCents: null,
-      defaultPriceCents: null, source: "unavailable" });
-    expect(unavailable.value).toBe("");
-    expect(isListingPriceDirty(unavailable)).toBe(false);
-  });
-  it("reuses exactly the same payload and key for an ambiguous retry", () => {
-    const draft = { ...draftFromListingPrice(price()), value: "12.34" };
-    const createKey = vi.fn(() => "first-key");
-    const first = prepareListingPriceSave(identity, draft, null, createKey);
-    const retry = prepareListingPriceSave(identity, { ...draft, value: "012.34" }, first, createKey);
-    expect(retry).toBe(first);
-    expect(first.request).toEqual({ priceCents: 1234, expectedRevisionId: 9, idempotencyKey: "first-key" });
-    expect(createKey).toHaveBeenCalledTimes(1);
-  });
-  it("allocates a new key for a changed amount, revision, store or variant", () => {
-    const draft = { ...draftFromListingPrice(price()), value: "12.34" };
-    const first = prepareListingPriceSave(identity, draft, null, () => "first-key");
-    const cases = [
-      { identity, draft: { ...draft, value: "12.35" } },
-      { identity, draft: { ...draft, baseline: { ...draft.baseline, revisionId: 10 } } },
-      { identity: { ...identity, storeConnectionId: 13 }, draft },
-      { identity: { ...identity, productVariantId: 35 }, draft },
-    ];
-    for (const value of cases) {
-      const next = prepareListingPriceSave(value.identity, value.draft, first, () => "changed-key");
-      expect(next.request.idempotencyKey).toBe("changed-key");
-      expect(next.fingerprint).not.toBe(first.fingerprint);
-    }
-  });
-  it("never accepts invalid keys or identities", () => {
-    const draft = { ...draftFromListingPrice(price()), value: "12.34" };
-    expect(() => prepareListingPriceSave(identity, draft, null, () => "unsafe key")).toThrow();
+// The draft, retry-key, built-from and below-cost cases tested the per-size price editor's helpers, deleted with
+// the editor in Listing settings PR 12. The two kept exports they also covered keep their assertions here.
+describe("the price endpoint", () => {
+  it("names one size of one store, and refuses an invalid identity", () => {
     expect(() => listingPriceEndpoint({ ...identity, storeConnectionId: 0 })).toThrow();
     expect(() => listingPriceEndpoint({ ...identity, productVariantId: 2147483648 })).toThrow();
     expect(listingPriceEndpoint(identity)).toBe("/api/dropship/listings/stores/12/variants/34/price");
   });
-  it("preserves an unsaved amount and concurrency revision on a background refresh", () => {
-    const draft = { ...draftFromListingPrice(price()), value: "12.34" };
-    const changed = { ...price(), revisionId: 10, overridePriceCents: 1500, effectivePriceCents: 1500 };
-    expect(reconcileListingPriceDraft(draft, changed)).toBe(draft);
-    expect(reconcileListingPriceDraft(draft, changed).baseline.revisionId).toBe(9);
-    expect(reconcileListingPriceDraft(draftFromListingPrice(price()), changed)).toMatchObject({ value: "15.00", baseline: { revisionId: 10 } });
-    expect(reconcileListingPriceDraft(null, changed)).toMatchObject({ value: "15.00", baseline: { revisionId: 10 } });
-  });
 });
 
-describe("an inherit size in the old price editors (A3, L1)", () => {
-  const onRules = { ...price(), overridePriceCents: null, effectivePriceCents: 1152, source: "rules" as const, pricingMode: "inherit" as const,
-    ruleName: "Store default rule", rulePriceCents: 1152, rulesConfigured: true };
-  const onRetail = { ...price(), overridePriceCents: null, effectivePriceCents: 899, source: "catalog_default" as const,
-    pricingMode: "inherit" as const, ruleName: null, rulePriceCents: null, rulesConfigured: false };
-  it("shows Use pricing rules for an inherit size the rules price, and is not dirty", () => {
-    expect(followsRulesNow(onRules)).toBe(true);
-    const draft = draftFromListingPrice(onRules);
-    expect(draft).toMatchObject({ useDefault: false, useRules: true, value: "11.52" });
-    expect(isListingPriceDirty(draft)).toBe(false);
-  });
-  it("shows the catalog default for an inherit size with no rules, and is not dirty", () => {
-    expect(followsRulesNow(onRetail)).toBe(false);
-    const draft = draftFromListingPrice(onRetail);
-    expect(draft).toMatchObject({ useDefault: true, value: "8.99" });
-    expect(draft.useRules).toBeUndefined();
-    expect(isListingPriceDirty(draft)).toBe(false);
-  });
-  it("shows the catalog default for an inherit size its rules can't price, since it is on the retail price", () => {
-    const fallback = { ...onRetail, rulesConfigured: true, pricingIssue: "pricing_rule_priority_conflict" };
-    expect(followsRulesNow(fallback)).toBe(false);
-    expect(draftFromListingPrice(fallback)).toMatchObject({ useDefault: true, value: "8.99" });
-    expect(isListingPriceDirty(draftFromListingPrice(fallback))).toBe(false);
-  });
-  it("treats choosing Use catalog default or a typed price on an inherit-with-rules size as a change", () => {
-    const draft = draftFromListingPrice(onRules);
-    const toDefault = { ...draft, useRules: false, useDefault: true };
-    expect(isListingPriceDirty(toDefault)).toBe(true);
-    expect(prepareListingPriceSave(identity, toDefault, null, () => "to-default").request)
-      .toEqual({ priceCents: null, expectedRevisionId: 9, idempotencyKey: "to-default" });
-    expect(isListingPriceDirty({ ...draft, useRules: false, value: "12.00" })).toBe(true);
-  });
-  it("keeps a rules size following the rules even when they can't price it", () => {
-    expect(followsRulesNow({ pricingMode: "rules", source: "unavailable" })).toBe(true);
-    expect(followsRulesNow({ pricingMode: "catalog_default", source: "catalog_default" })).toBe(false);
-    expect(followsRulesNow({ pricingMode: undefined, source: "rules" })).toBe(false);
-  });
+describe("what an inherit save would price a size at (A3, L1)", () => {
   it("says what an inherit save would price the size at: the rule price, else retail, else nothing", () => {
     expect(inheritedListingPrice({ rulePriceCents: 1152, defaultPriceCents: 899 })).toEqual({ priceCents: 1152, from: "rules" });
     expect(inheritedListingPrice({ rulePriceCents: null, defaultPriceCents: 899 })).toEqual({ priceCents: 899, from: "retail" });
@@ -168,31 +72,5 @@ describe("price response boundary", () => {
   it("requires the save replay indicator and does not accept a save response for a GET", () => {
     expect(() => readSavedListingPrice({ price: price() }, identity)).toThrow();
     expect(() => readListingPrice({ price: price(), idempotentReplay: true }, identity)).toThrow();
-  });
-});
-
-describe("what a size's price is built from", () => {
-  const rules = { ...price(), source: "rules" as const, ruleName: "Store default rule", productCostCents: 1089 };
-  it.each([
-    [{ ...price(), source: "override" as const }, "Exact price"],
-    [{ ...price(), source: "catalog_default" as const }, "Catalog reference retail"],
-    [{ ...price(), source: "saved_listing" as const }, "Price last sent to eBay"],
-    [{ ...price(), source: "unavailable" as const }, "No price yet"],
-    [{ ...rules, ruleBasis: "catalog_retail" as const, defaultPriceCents: 1249 }, "Store default rule, from reference retail $12.49"],
-    [{ ...rules, ruleBasis: "product_cost" as const }, "Store default rule, from .ops cost $10.89"],
-    // A starting amount that is not known is left out rather than shown as $0.00.
-    [{ ...rules, ruleBasis: "product_cost" as const, productCostCents: null }, "Store default rule"],
-    [{ ...rules, ruleBasis: "catalog_retail" as const, defaultPriceCents: null }, "Store default rule"],
-    [{ ...rules, ruleName: null, ruleBasis: null }, "Pricing rules"],
-  ])("%#: %s", (setting, words) => {
-    expect(describeListingPriceBuiltFrom(setting)).toBe(words);
-  });
-  it("notes a typed price below the .ops cost, and only then", () => {
-    expect(belowCostNote("10.88", 1089)).toBe("This is below your .ops cost of $10.89.");
-    expect(belowCostNote("10.89", 1089)).toBeNull();
-    expect(belowCostNote("14.99", 1089)).toBeNull();
-    expect(belowCostNote("14.99", null)).toBeNull();
-    expect(belowCostNote("not a price", 1089)).toBeNull();
-    expect(belowCostNote("0.01", 0)).toBeNull();
   });
 });

@@ -17,7 +17,7 @@ import type {
   DropshipPricingPolicyRecord,
 } from "../application/dropship-listing-preview-service";
 import type { DropshipStoreListingConfig } from "../application/dropship-marketplace-listing-provider";
-import type { DropshipEbayListingPolicyOverride } from "../application/dropship-ebay-listing-policy-override-service";
+import type { DropshipEbayListingPolicyOverride } from "../application/dropship-ebay-listing-policy-override";
 import type { DropshipCatalogExposureRule } from "../domain/catalog-exposure";
 import { isDropshipStoreConnectionLaunchReady } from "../domain/store-connection";
 import type { DropshipVendorSelectionRule, DropshipVendorVariantOverride } from "../domain/vendor-selection";

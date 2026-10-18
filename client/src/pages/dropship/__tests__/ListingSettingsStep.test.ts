@@ -188,24 +188,28 @@ describe("Catalog page wiring of the Listing settings step", () => {
   const source = readFileSync(join(process.cwd(), "client/src/pages/dropship/DropshipPortalCatalog.tsx"), "utf8");
   const setupStart = source.indexOf('{activeStep === "setup" && (');
   const setupBlock = source.slice(setupStart, source.indexOf('{activeStep === "publish" && (', setupStart));
-  const OLD_PANELS = ["<EbayListingSetupPanel", "<EbayListingPolicyOverridePanel", "<DropshipEbayCategoryRulesPanel",
-    "<EbayStoreCategoryAssignmentPanel", "<DropshipPricingRulesPanel", "<DropshipContentTemplatesPanel"];
+  // The six older panels and their wrapper, deleted in Listing settings PR 12.
+  const OLD_PANELS = ["EbayListingSetupPanel", "EbayListingPolicyOverridePanel", "DropshipEbayCategoryRulesPanel",
+    "EbayStoreCategoryAssignmentPanel", "DropshipPricingRulesPanel", "DropshipContentTemplatesPanel", "OlderListingSettings"];
 
-  it("mounts the new step first, then Older settings around today's step 2 intro and panels", () => {
+  it("mounts the step for a ready store, and with none the step 2 intro and the Connect notice, with no wrapper (D4)", () => {
     expect(setupStart).toBeGreaterThan(-1);
     // One setup block only, so the other Catalog page tests read the same one.
     expect(source.split('{activeStep === "setup" && (').length - 1).toBe(1);
-    const step = setupBlock.indexOf("<ListingSettingsStep");
-    const older = setupBlock.indexOf("<OlderListingSettings");
-    const intro = setupBlock.indexOf('<CatalogStepIntro step="setup"');
-    const olderEnd = setupBlock.indexOf("</OlderListingSettings>");
+    const step = setupBlock.indexOf("{storeReady && (\n              <ListingSettingsStep");
+    const none = setupBlock.indexOf("{!storeReady && (");
     expect(step).toBeGreaterThan(-1);
-    expect(older).toBeGreaterThan(step);
-    expect(intro).toBeGreaterThan(older);
-    expect(olderEnd).toBeGreaterThan(intro);
-    // The step only for a launch-ready eBay store; with none, the old notice shows plainly.
-    expect(setupBlock).toContain("{storeReady && (\n              <ListingSettingsStep");
-    expect(setupBlock).toContain("<OlderListingSettings collapsible={storeReady} open={olderOpen} onOpenChange={setOlderOpen} unsaved={olderUnsaved}>");
+    expect(none).toBeGreaterThan(step);
+    const noStore = setupBlock.slice(none);
+    // The intro shows only without a ready store, as before (the step's header names the store).
+    expect(source.split('<CatalogStepIntro step="setup"').length - 1).toBe(1);
+    expect(noStore).toContain('<CatalogStepIntro step="setup" detail={null} />');
+    // The notice waits for the stores to load, so a slow load never asks for a store the vendor has.
+    expect(noStore).toContain("{settingsQuery.data && (");
+    expect(noStore).toContain('message: "Connect your eBay store and finish its setup to set how your listings look.",');
+    expect(noStore.indexOf("{settingsQuery.data && (")).toBeLessThan(noStore.indexOf("Connect your eBay store"));
+    expect(source).not.toContain("older-listing-settings");
+    expect(source).not.toContain("Older settings");
   });
 
   it("keys the step by store with a key no other sibling uses", () => {
@@ -215,22 +219,12 @@ describe("Catalog page wiring of the Listing settings step", () => {
     expect(source).not.toContain("key={selectedStoreConnectionIdNumber}");
   });
 
-  it("keeps each of today's six panels inside Older settings, once each", () => {
-    const older = setupBlock.slice(setupBlock.indexOf("<OlderListingSettings"), setupBlock.indexOf("</OlderListingSettings>"));
-    for (const panel of OLD_PANELS) {
-      expect(older, panel).toContain(panel);
-      expect(source.split(panel).length - 1, panel).toBe(1);
-    }
-    // The setup panel's lone-policy suggestion counts only while Older settings is open (L2).
-    const setupTag = older.slice(older.indexOf("<EbayListingSetupPanel"), older.indexOf("/>", older.indexOf("<EbayListingSetupPanel")));
-    expect(setupTag).toContain("suggestionsCountAsUnsaved={olderOpen}");
-  });
-
-  it("adds no second eBay-store block before the category rules panel", () => {
-    const ebayBlock = '{selectedStoreConnection?.platform === "ebay" && (';
-    expect(source.split(ebayBlock).length - 1).toBe(1);
-    expect(source.indexOf(ebayBlock)).toBeLessThan(source.indexOf("<DropshipEbayCategoryRulesPanel"));
-    expect(source.indexOf(ebayBlock)).toBeGreaterThan(source.indexOf("<OlderListingSettings"));
+  it("mounts none of the older panels, and no eBay-store block of their own", () => {
+    for (const panel of OLD_PANELS) expect(source, panel).not.toContain(panel);
+    expect(source).not.toContain("suggestionsCountAsUnsaved");
+    expect(setupBlock).not.toContain('selectedStoreConnection?.platform === "ebay"');
+    // The selection preload no longer feeds step 2 (D5): the step's lists are server pages.
+    expect(setupBlock).not.toContain("selectedCatalogRows");
   });
 
   it("passes the step the page's reads, the save counter without its preview, and a guarded way to other steps", () => {
@@ -242,8 +236,17 @@ describe("Catalog page wiring of the Listing settings step", () => {
     expect(tag).toContain("saveCallbacks={listingSettingsSaveCallbacks}");
     expect(tag).toContain("onSettingsSaved={() => { invalidateListingPreview(true); refreshListingSettings(); }}");
     expect(tag).toContain("goToStep={(target) => leaveGuard(() => navigate(stepHref(target)))}");
-    // D9, D10: the counter stays; the step never posts a new preview after a save.
-    expect(source).toContain("const listingSettingsSaveCallbacks: ListingPriceSaveCallbacks = { ...priceSaveCallbacks, onSaved: async () => undefined };");
+    // D9, D10: the counter stays; the step never posts a new preview after a save. One callback object (PR 12, D6).
+    const start = source.indexOf("const listingSettingsSaveCallbacks: ListingSettingsStepSaveCallbacks = {");
+    expect(start).toBeGreaterThan(-1);
+    const callbacks = source.slice(start, source.indexOf("\n  };\n", start));
+    expect(callbacks).toContain("disabled: pendingListingAction !== null && pendingListingAction !== \"preview\",");
+    expect(callbacks).toContain("onSaveStarted: () => {");
+    expect(callbacks).toContain("onSaveSettled: () => {");
+    expect(callbacks).not.toContain("onSaved");
+    expect(callbacks).not.toContain("refreshListingPreview");
+    expect(source).not.toContain("priceSaveCallbacks");
+    expect(source).not.toContain("ListingPriceSaveCallbacks");
     // C28: counted from every store, not only the launch-ready ones.
     expect(source).toContain("const ebayStoreCount = countEbayStores(settingsQuery.data?.settings.storeConnections ?? []);");
   });
@@ -267,7 +270,9 @@ describe("Catalog page wiring of the Listing settings step", () => {
     expect(source).not.toMatch(/<ListingSettingsDraftsProvider\s+key=/);
     expect(source).toContain('{activeStep === "setup" && storeReady\n          ? <ListingSettingsActionBar next={nextAction} saving={pendingPriceSaves > 0} />\n          : <CatalogActionBar summary={actionBar.summary} next={nextAction} />}');
     expect(source).toContain("const guardDrafts = useUnsavedDrafts();");
-    expect(source).toContain("const olderUnsaved = countOlderSettingsDrafts(guardDrafts) > 0;");
+    // No older panel's draft to count any more (D7).
+    expect(source).not.toContain("olderUnsaved");
+    expect(source).not.toContain("countOlderSettingsDrafts");
   });
 });
 
@@ -505,9 +510,10 @@ describe("ListingSettingsActionBar", () => {
     expect(barSummary(renderBar())).toBe("Not saved · 2 changes in Price");
   });
 
-  it("names Older settings when only an old panel holds a change, and ignores the step's own guard entry", () => {
+  it("reads only the step's own draft: no other guard entry changes it, and it never names the deleted older section (D7)", () => {
     state.guardDrafts = [{ id: "listing-setup:5", label: "eBay listing setup" }];
-    expect(barSummary(renderBar())).toBe("Not saved · changes in Older settings");
+    expect(barSummary(renderBar())).toBe("All saved");
+    expect(renderBar()).not.toContain("Older settings");
     state.guardDrafts = [{ id: `listing-settings:${STORE_ID}`, label: "Price", changes: 1, discard: noop }];
     expect(barSummary(renderBar())).toBe("All saved");
   });

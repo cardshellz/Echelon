@@ -576,7 +576,7 @@ describe("what blocks a move (11.2, D9; CUX#3, CMC#3)", () => {
       { key: `size:${TEAM_BAGS_50}`, text: "Team Bags · Pack of 50", priceNow: null, reasons: "its price is outside a Card Shellz price limit",
         action: { kind: "fix", label: "Fix", ariaLabel: "Fix Team Bags · Pack of 50", blocker: "price_outside_limit", landing: { target: { productId: TEAM_BAGS, productVariantId: TEAM_BAGS_50 }, row: null } } },
     ]);
-    expect(blocked?.tooMuchText).toBe("Moving these rules would save more text than your store can keep. Shorten your older description rules in Older settings, then check again.");
+    expect(blocked?.tooMuchText).toBe("Moving these rules would save more text than your store can keep. Choose fewer products in Choose what to sell, then check again. Listed products you take out stop selling on eBay.");
     // Each [Set a price] / [Fix] has its own accessible name.
     const names = blocked?.wouldBlockListing?.sizes.map((size) => size.action.ariaLabel) ?? [];
     expect(new Set(names).size).toBe(names.length);
@@ -1273,7 +1273,7 @@ describe("the words (11.4)", () => {
       blockedHeading: "Before you can move them over",
       setPrice: "Set a price",
       fix: "Fix",
-      tooMuchText: "Moving these rules would save more text than your store can keep. Shorten your older description rules in Older settings, then check again.",
+      tooMuchText: "Moving these rules would save more text than your store can keep. Choose fewer products in Choose what to sell, then check again. Listed products you take out stop selling on eBay.",
       becomesHeading: "They become:",
       reasonsHeading: "Why some sizes would change",
       changesHeading: "Sizes that would change",

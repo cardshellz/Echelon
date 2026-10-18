@@ -84,11 +84,27 @@ const SUPPORT: ConnectionBannerAction = { kind: "link", link: requiredLink("cont
 const STORE_CONNECTION: ConnectionBannerAction = { kind: "link", link: requiredLink("reconnect_store") };
 const WALLET: ConnectionBannerAction = { kind: "link", link: requiredLink("resolve_pause") };
 // The store connection page is where a vendor signs in to eBay again (C7).
-const RECONNECT_EBAY: ConnectionBannerAction = { kind: "link", link: { ...requiredLink("reconnect_store"), label: "Reconnect eBay" } };
+const RECONNECT_EBAY_LINK: ListingAccessLink = Object.freeze({ ...requiredLink("reconnect_store"), label: "Reconnect eBay" });
+const RECONNECT_EBAY: ConnectionBannerAction = { kind: "link", link: RECONNECT_EBAY_LINK };
 const TRY_AGAIN: ConnectionBannerAction = { kind: "retry", label: "Try again" };
 const GO_TO_STEP_1: ConnectionBannerAction = { kind: "go_to_step_1", label: "Go to step 1" };
 
 const SIZE_LIMIT = MAX_NAMED_CATALOG_GROUP_ITEMS.toLocaleString("en-US");
+
+/**
+ * The eBay category picker's alert when eBay refuses the store's connection
+ * for a search or a browse (`DROPSHIP_EBAY_CATEGORIES_PERMISSION_REQUIRED`).
+ * The step raises no banner for a picker read, so the alert carries the sign-in
+ * banner's own link: the inline eBay sign-in that filled it went with the old
+ * eBay category rules panel (Listing settings PR 12, D17; review DUX1).
+ */
+export const EBAY_CATEGORY_PICKER_PERMISSION_WORDS = Object.freeze({
+  title: "Your eBay connection needs a refresh.",
+  // Interim (PR 12 PROPOSAL): it names the link beside it. It said "Refresh it, then search again." with nothing on
+  // the page to refresh it with. "try again", not "search again": a browse shows the same alert (verify VC8).
+  detail: "eBay categories load through your own eBay connection. Reconnect eBay, then try again.",
+  reconnect: RECONNECT_EBAY_LINK,
+});
 
 /** The banner's words and its one button (plan 4.4; R:500-507, R:521). */
 export function connectionBannerWords(banner: ConnectionBanner, store: string): ConnectionBannerWords {
@@ -170,7 +186,7 @@ export function rightReasonLine(reason: ListingSettingsRightReason): string | nu
     case "shipping_setup":
       return "Card Shellz is finishing shipping setup for your store. You can pick a shipping policy when it's done.";
     case "shipping_unavailable":
-      // Interim: the old panel's words without its button name.
+      // Interim: the words of the setup panel PR 12 deleted, without its button name.
       return "Can't check Card Shellz shipping right now. Try again in a few minutes.";
     case "save_policy_first":
       // Interim (C19).
@@ -1474,8 +1490,13 @@ export const LISTING_SETTINGS_CONVERSION_WORDS = Object.freeze({
   setPrice: "Set a price",
   // Interim (PR 11 PROPOSAL): a listed size that would stop getting stock updates (CMC#3).
   fix: "Fix",
-  // Interim (PR 11 PROPOSAL): the store text cap (D9c).
-  tooMuchText: "Moving these rules would save more text than your store can keep. Shorten your older description rules in Older settings, then check again.",
+  // Interim (PR 12 PROPOSAL): the store text cap (D9c). Older description rules can no longer be edited, so it names
+  // what always lowers the text: fewer chosen products, so the move writes text onto fewer of them. Not "remove text
+  // you gave some products" (review DUX2): on a product an older description rule covers, that makes the move write
+  // the rule's text there as the product's own, which can be longer than the text removed. It says what taking a
+  // listed product out costs (verify VC2): a size no longer chosen but listed is published with quantity zero
+  // (server/modules/dropship/domain/stock-publication-selection.ts).
+  tooMuchText: "Moving these rules would save more text than your store can keep. Choose fewer products in Choose what to sell, then check again. Listed products you take out stop selling on eBay.",
   // Interim (PR 11 PROPOSAL): what the rules become (11.2).
   becomesHeading: "They become:",
   // Interim (PR 11 PROPOSAL): the report's heading (11.2); a clean sheet lists the same items without it (beyond 11.4).

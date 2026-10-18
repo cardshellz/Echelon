@@ -15,12 +15,16 @@ import {
   type ListingSettingsRightsInput,
 } from "../dropship-listing-settings-access";
 import { DropshipApiError, type DropshipEbayFulfillmentCapability, type DropshipEbayListingSetupResponse } from "../dropship-ops-surface";
+import { GROUP_RULES_CLOSED_CODE, LISTING_SETTINGS_SAVE_WORDS } from "../dropship-listing-settings-drafts";
+import { DROPSHIP_LISTING_GROUP_RULES_CLOSED, GROUP_RULES_CLOSED_MESSAGE } from "../../../../server/modules/dropship/domain/older-group-rules-edit";
 import {
   CHECKING_EBAY,
+  EBAY_CATEGORY_PICKER_PERMISSION_WORDS,
   GROUP_RULE_ORDER_NOTE,
   LISTING_SETTINGS_BULK_WORDS,
   LISTING_SETTINGS_CATEGORY_PRICE_WORDS,
   LISTING_SETTINGS_CATEGORY_WORDS,
+  LISTING_SETTINGS_CONVERSION_WORDS,
   LISTING_SETTINGS_EDIT_WORDS,
   LISTING_SETTINGS_PRICE_CHECK_WORDS,
   LISTING_SETTINGS_SIZE_PRICES_WORDS,
@@ -886,5 +890,64 @@ describe("the category price and Give these sizes a price (PR 10f proposals, pla
     for (const words of [
       sizePricesNotSavedWords(12, false), sizePricesLeftListWords(2), sizePricesConflictWords(3), sizePricesOutsideLimitWords(3), sizeCostWords(210), sizePriceBoxLabel("Penny Sleeves", "Pack of 100"),
     ]) expectPlain(words);
+  });
+});
+
+describe("the text cap's words on the move sheet (Interim, PR 12 PROPOSAL; D12 B1)", () => {
+  it("names what still lowers the text, not a place that is gone, in plain words", () => {
+    const words = LISTING_SETTINGS_CONVERSION_WORDS.tooMuchText;
+    expect(words).toBe("Moving these rules would save more text than your store can keep. "
+      + "Choose fewer products in Choose what to sell, then check again. Listed products you take out stop selling on eBay.");
+    expectPlain(words);
+    expect(words.trim()).toBe(words);
+    // The older section and its description rule editor were deleted in Listing settings PR 12.
+    expect(words).not.toContain("Older settings");
+    expect(words).not.toContain("Shorten your older description rules");
+    // Review DUX2: removing a product's own text can raise the total (an older description rule covering that product
+    // then writes its own, longer text there), so the words offer only the action that always lowers it.
+    expect(words).not.toMatch(/remove text/i);
+    // Verify VC2: a size taken out of the selection while it has a live listing is published with quantity zero
+    // (server/modules/dropship/domain/stock-publication-selection.ts, retainedDuty), so the words say so.
+    expect(words).toContain("Listed products you take out stop selling on eBay.");
+  });
+
+  it("names no deleted place in any of the move sheet's words", () => {
+    for (const [name, value] of Object.entries(LISTING_SETTINGS_CONVERSION_WORDS)) {
+      if (typeof value !== "string") continue;
+      expect({ name, older: value.includes("Older settings") }).toEqual({ name, older: false });
+    }
+  });
+});
+
+describe("the eBay category picker's words when eBay refuses the store's connection (Interim, PR 12 PROPOSAL; review DUX1)", () => {
+  it("names the link it carries, the sign-in banner's own, in plain words", () => {
+    const words = EBAY_CATEGORY_PICKER_PERMISSION_WORDS;
+    expect(words.title).toBe("Your eBay connection needs a refresh.");
+    // "try again", not "search again": the same alert answers a browse (verify VC8).
+    expect(words.detail).toBe("eBay categories load through your own eBay connection. Reconnect eBay, then try again.");
+    for (const text of [words.title, words.detail, words.reconnect.label]) expectPlain(text);
+    expect(words.reconnect).toEqual({ label: "Reconnect eBay", href: "/onboarding", external: false });
+    // The same place and label as the step's sign-in banner, so the two never send the vendor to different pages.
+    expect(connectionBannerWords({ kind: "sign_in", diagnosticReference: null }, "MyShop").action)
+      .toEqual({ kind: "link", link: words.reconnect });
+    // It no longer asks the vendor to refresh something the page gives no way to refresh.
+    expect(words.detail).not.toContain("Refresh it");
+  });
+});
+
+describe("the group refusal's words (Interim, PR 12 PROPOSAL; D9, plan 8)", () => {
+  it("says what happened and what still helps, in plain words, the same as the server's message", () => {
+    const words = LISTING_SETTINGS_SAVE_WORDS.groupRulesClosed;
+    expect(words).toBe("Older group rules can't be added or changed any more. Nothing was saved. "
+      + "Use See what changes on Listing settings to move them over.");
+    expectPlain(words);
+    expect(words.trim()).toBe(words);
+    expect(words).not.toContain("Older settings");
+    // One wording in both homes (FIDELITY5): the client's and the server's.
+    expect(words).toBe(GROUP_RULES_CLOSED_MESSAGE);
+  });
+
+  it("is chosen by the server's own code, so a rename on either side fails here (verify VS6)", () => {
+    expect(GROUP_RULES_CLOSED_CODE).toBe(DROPSHIP_LISTING_GROUP_RULES_CLOSED);
   });
 });

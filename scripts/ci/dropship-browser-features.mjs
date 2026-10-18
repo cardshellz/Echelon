@@ -12,8 +12,6 @@ function feature(label, tests, harnesses, shards = 1) {
 }
 
 export const DROPSHIP_BROWSER_FEATURES = Object.freeze({
-  pricing: feature("Listing prices", ["dropship-pricing-rules"], ["dropship-pricing"]),
-  content: feature("Listing content", ["dropship-content-editor"], ["dropship-content"]),
   listings: feature("Catalog and listing settings", [
     "dropship-policy-catalog-steps", "dropship-policy-listing-access",
     "dropship-policy-listing-settings-bulk", "dropship-policy-listing-settings-categories",
@@ -21,9 +19,6 @@ export const DROPSHIP_BROWSER_FEATURES = Object.freeze({
     "dropship-policy-listing-settings-drawer", "dropship-policy-listing-settings-prices",
     "dropship-policy-listing-settings-step", "dropship-policy-listing-settings-updated",
   ], ["dropship-catalog"], 3),
-  policies: feature("eBay policies and categories", [
-    "dropship-policy-recovery", "dropship-policy-ebay-categories",
-  ], ["dropship-policy", "dropship-ebay-categories"]),
   "cost-changes": feature("Cost change notices", [
     "dropship-policy-cost-changes", "dropship-policy-cost-changes-portal",
   ], ["dropship-cost-change-policy", "dropship-cost-changes"]),

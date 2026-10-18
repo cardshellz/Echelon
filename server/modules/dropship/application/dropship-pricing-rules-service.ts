@@ -1,13 +1,13 @@
 import { z } from "zod";
-import { loadSelectedCandidates, selectedCatalogTargets } from "./dropship-selected-catalog";
+import { loadSelectedCandidates } from "./dropship-selected-catalog";
 import { RULE_PRICE_OUTSIDE_LIMIT_ISSUE, isTypedListingPrice, resolveListingPrice } from "../../../../shared/dropship/listing-price";
 import { applyPricingRulesInputSchema, reviewPricingRulesInputSchema, pricingImpactRowSchema,
   PRICING_REVIEW_PAGE_SIZE, MAX_PRICING_REVIEW_ITEMS, RETAIL_FALLBACK_RULE_NAME, pricingAmountCentsSchema, pricingBasisCents,
   type PricingProfileState, type ReviewPricingRulesInput, type RulePriceBasis,
   type PricingImpactRow, type PricingReviewResponse, type ApplyPricingRulesInput } from "../../../../shared/dropship/pricing-rules";
-import { pricingTargetsInputSchema } from "../../../../shared/dropship/pricing-rules";
 import { DropshipError } from "../domain/errors";
 import { evaluateListingPriceAgainstCost } from "../domain/listing-price-cost";
+import { olderGroupRulesClosed, olderGroupRulesEdit } from "../domain/older-group-rules-edit";
 import { evaluateListingPricingPolicy, withRulePriceLimitCheck, type DropshipListingPreviewRepository,
   type DropshipListingCatalogCandidate } from "./dropship-listing-preview-service";
 import type { ListingSettingLayers } from "./dropship-listing-setting-layers";
@@ -54,13 +54,6 @@ export class DropshipPricingRulesService {
 
   async getForMember(memberId: string, storeId: unknown): Promise<PricingProfileState> {
     return this.execute(memberId, storeId, async (tx) => tx.loadProfile());
-  }
-
-  async targetsForMember(memberId: string, storeId: unknown, input: unknown): Promise<{ total: number; rows: Array<{ id: string; name: string }> }> {
-    const parsed = pricingTargetsInputSchema.parse(input);
-    return this.execute(memberId, storeId, async (tx) => {
-      return selectedCatalogTargets(tx, this.deps.clock.now(), parsed);
-    });
   }
 
   async reviewForMember(memberId: string, storeId: unknown, input: unknown): Promise<PricingReviewResponse> {
@@ -119,6 +112,11 @@ export class DropshipPricingRulesService {
   private async buildImpact(tx: PricingRulesTransaction, storeConnectionId: number, input: ReviewPricingRulesInput, now: Date): Promise<PricingImpactRow[]> {
     const current = await tx.loadProfile();
     if (current.revisionId !== input.expectedRevisionId) throw staleReview();
+    // Older group rules are closed (Listing settings PR 12, D9-D10): after the revision check, so a stale page gets its
+    // conflict, and before any read or write. The review and the apply's recompute both pass here, so a review stored
+    // before PR 12 that adds or changes a group is never applied.
+    const groupEdit = olderGroupRulesEdit("pricing", current.profile?.groups ?? [], input.profile.groups);
+    if (!groupEdit.allowed) throw olderGroupRulesClosed(storeConnectionId, "pricing", groupEdit);
     const selected = await loadSelectedCandidates(tx, now);
     const ids = selected.map((row) => row.productVariantId);
     const [saved, listings, costs, guardrails] = await Promise.all([

@@ -1,4 +1,4 @@
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type Page, type TestInfo } from "@playwright/test";
 import {
   CATALOG_PATH,
   ENVELOPE,
@@ -12,14 +12,12 @@ import {
   listingSettingsSummary,
   listingSetup,
   listingSetupWithAnotherShippingPolicy,
-  listingSetupWithNothingSaved,
   listingSetupWithSavedShippingGone,
-  oldSetupPanel,
   openCatalog,
-  openOlderSettings,
   shot,
   step,
   withShippingNotChecked,
+  type StubState,
 } from "./dropship-policy-catalog-stubs";
 
 // Playwright's serviceWorkers:block init script reads navigator.serviceWorker in
@@ -29,6 +27,11 @@ test.use({ serviceWorkers: "allow" });
 
 // The stub server and fixtures live in dropship-policy-catalog-stubs.ts, shared with the
 // Listing settings step's own journeys (dropship-policy-listing-settings-step.spec.ts).
+// Since Listing settings PR 12 step 2 is the step alone: the journeys that drove the older
+// panels drive the step's own rows, banner and editors, and the rail lines stay as they were.
+
+/** The headings of the older step 2 panels (deleted in Listing settings PR 12): none may show. */
+const OLDER_PANEL_HEADINGS = ["eBay listing setup", "Listing policies", "eBay categories", "Listing pricing rules", "Description templates"];
 
 test("a bare Catalog address opens Choose, and moving between steps keeps the vendor's work", async ({ page }, testInfo) => {
   const state = await openCatalog(page, CATALOG_PATH);
@@ -50,15 +53,15 @@ test("a bare Catalog address opens Choose, and moving between steps keeps the ve
   await expect(step(page, "setup")).toHaveAttribute("aria-current", "step");
   await expect(step(page, "setup")).toContainText("All set");
   await expect(page.getByTestId("listing-settings-step")).toBeVisible();
-  await openOlderSettings(page);
-  await expect(page.getByRole("heading", { name: "eBay listing setup" })).toBeVisible();
-  await expect(page.getByRole("heading", { name: "eBay categories" })).toBeVisible();
-  await expect(page.getByRole("heading", { name: "Listing pricing rules" })).toBeVisible();
+  await expect(page.getByTestId("store-default-row-shipping")).toContainText("USPS Ground Advantage");
+  // Step 2 is the step alone (PR 12, D3, D4): no older panel, and no "Older settings" section to open.
+  for (const heading of OLDER_PANEL_HEADINGS) await expect(page.getByRole("heading", { name: heading, exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: /older settings/i })).toHaveCount(0);
   await expect(page.getByRole("heading", { name: "Available catalog" })).toHaveCount(0);
   // Listing settings has its own bar (R:597); the other steps keep theirs.
   await expect(page.getByTestId("catalog-action-summary")).toHaveText("All saved");
   await shot(page, testInfo, "catalog-step-setup");
-  // eBay is asked once: the new step, the old setup panel and the rail share one read.
+  // eBay is asked once: the step and the rail share one read.
   expect(state.setupReads).toEqual([5]);
   // The step's only new read on mount is the Products tab's first page.
   await expect.poll(() => state.productsReads).toEqual([`${MARZ.storeConnectionId}?search=&show=all&page=0`]);
@@ -95,105 +98,6 @@ test("Next stays off until something is selected", async ({ page }) => {
   // The rail still opens any step.
   await step(page, "publish").click();
   await expect(page.getByText("Choose items in step 1, Choose what to sell.", { exact: false })).toBeVisible();
-  expect(state.unexpected).toEqual([]);
-  expect(state.errors).toEqual([]);
-});
-
-test("asks before leaving Listing settings with changes that aren't saved", async ({ page }) => {
-  const state = await openCatalog(page, `${CATALOG_PATH}/setup`, { stores: [MARZ, OUTLET],
-    pricingRules: { [OUTLET.storeConnectionId]: SAVED_PRICING_RULES } });
-  await openOlderSettings(page);
-  const markup = page.getByLabel("Markup (%)", { exact: true });
-  const dialog = page.getByRole("alertdialog");
-  await expect(page.getByRole("heading", { name: "Listing pricing rules" })).toBeVisible();
-
-  // With no saved pricing rules the form opens on a suggestion, which is not a change on its own.
-  await expect(page.getByText("Suggested · not saved")).toBeVisible();
-  await expect(markup).toHaveValue("0.00");
-  await page.getByRole("link", { name: "Next: Publish" }).click();
-  await expect(page).toHaveURL(`${CATALOG_PATH}/publish`);
-  await step(page, "setup").click();
-
-  await markup.fill("20");
-  await expect(page.getByRole("heading", { name: "Listing pricing rules" })).toContainText("Not saved");
-
-  // The Next button asks first, and Keep editing keeps the change.
-  await page.getByRole("link", { name: "Next: Publish" }).click();
-  await expect(dialog).toContainText("Leave without saving?");
-  await expect(dialog).toContainText("You have changes that aren't saved in Listing pricing rules.");
-  await dialog.getByRole("button", { name: "Keep editing" }).click();
-  await expect(dialog).toHaveCount(0);
-  await expect(page).toHaveURL(`${CATALOG_PATH}/setup`);
-  await expect(markup).toHaveValue("20");
-
-  // So do the step links and the store picker.
-  await step(page, "choose").click();
-  await expect(dialog).toBeVisible();
-  await dialog.getByRole("button", { name: "Keep editing" }).click();
-  await expect(page).toHaveURL(`${CATALOG_PATH}/setup`);
-  await page.getByTestId("catalog-store-select").click();
-  await page.getByRole("option", { name: "Marz Cards Outlet (eBay)" }).click();
-  await expect(dialog).toBeVisible();
-  await dialog.getByRole("button", { name: "Keep editing" }).click();
-  // The store is unchanged, and the bar names the older panel's change.
-  await expect(page.getByText("These settings apply to Marz Cards.", { exact: true })).toBeVisible();
-  await expect(page.getByTestId("catalog-action-summary")).toHaveText("Not saved · changes in Older settings");
-  await expect(markup).toHaveValue("20");
-
-  // Discard and leave goes where the vendor asked, and the change is gone when they come back.
-  await page.getByRole("link", { name: "Next: Publish" }).click();
-  await dialog.getByRole("button", { name: "Discard and leave" }).click();
-  await expect(page).toHaveURL(`${CATALOG_PATH}/publish`);
-  await step(page, "setup").click();
-  await expect(markup).toHaveValue("0.00");
-
-  // Discarding through the store picker opens the other store's own saved rules, not this store's draft.
-  await markup.fill("20");
-  await page.getByTestId("catalog-store-select").click();
-  await page.getByRole("option", { name: "Marz Cards Outlet (eBay)" }).click();
-  await dialog.getByRole("button", { name: "Discard and leave" }).click();
-  // Older settings stays open across the store switch.
-  await expect(page.getByText("These settings apply to Marz Cards Outlet.", { exact: true })).toBeVisible();
-  await expect(page.getByTestId("catalog-action-summary")).toHaveText("All saved");
-  await expect(markup).toHaveValue("15.00");
-  await expect(page.getByRole("heading", { name: "Listing pricing rules" })).not.toContainText("Not saved");
-  await expect(page.getByText("Suggested · not saved")).toHaveCount(0);
-  expect(state.unexpected).toEqual([]);
-  expect(state.errors).toEqual([]);
-
-  // Closing the tab with a change gets the browser's own question.
-  await markup.fill("25");
-  await expect(page.getByRole("heading", { name: "Listing pricing rules" })).toContainText("Not saved");
-  const asked = page.waitForEvent("dialog");
-  await page.close({ runBeforeUnload: true });
-  const unload = await asked;
-  expect(unload.type()).toBe("beforeunload");
-  await unload.accept();
-});
-
-test("asks before leaving with an exact price that isn't saved, and before choosing another size", async ({ page }) => {
-  const state = await openCatalog(page, `${CATALOG_PATH}/setup`);
-  await openOlderSettings(page);
-  const box = page.getByRole("region", { name: "Exact price for one size" });
-  const dialog = page.getByRole("alertdialog");
-  await box.getByLabel("Find a size by name or SKU").fill("ENV");
-  await box.getByRole("button", { name: "Envelope Single Pocket · Pack of 50 · ENV-SGL-P50" }).click();
-  await expect(box).toContainText("Catalog reference retail");
-  await box.getByLabel("Your listing price (USD)").fill("14.99");
-
-  await page.getByRole("link", { name: "Next: Publish" }).click();
-  await expect(dialog).toContainText("You have changes that aren't saved in Exact price for one size.");
-  await dialog.getByRole("button", { name: "Keep editing" }).click();
-  await expect(box.getByLabel("Your listing price (USD)")).toHaveValue("14.99");
-
-  await box.getByRole("button", { name: "Choose another size" }).click();
-  await expect(dialog).toContainText("Exact price for one size");
-  await dialog.getByRole("button", { name: "Discard and leave" }).click();
-  await expect(box.getByLabel("Find a size by name or SKU")).toBeVisible();
-
-  // Nothing is left unsaved, so Next goes straight on.
-  await page.getByRole("link", { name: "Next: Publish" }).click();
-  await expect(page).toHaveURL(`${CATALOG_PATH}/publish`);
   expect(state.unexpected).toEqual([]);
   expect(state.errors).toEqual([]);
 });
@@ -352,195 +256,96 @@ test("closing the tab while a save is in flight still gets the browser's own que
   await unload.accept();
 });
 
-test("eBay listing setup with nothing saved is not a change until the vendor picks a policy", async ({ page }) => {
-  const state = await openCatalog(page, `${CATALOG_PATH}/setup`,
-    { listingSetups: { [MARZ.storeConnectionId]: listingSetupWithNothingSaved(MARZ.storeConnectionId) } });
-  await openOlderSettings(page);
-  const heading = page.getByRole("heading", { name: /^eBay listing setup/ });
-  const fulfillment = page.getByRole("combobox", { name: "Fulfillment policy", exact: true });
+/** A policy in the open Shipping, Return or Payment editor, by its exact eBay name (the label also carries its fit line). */
+function policyChoice(page: Page, name: string) {
+  return policyEditor(page).locator("label").filter({ has: page.getByText(name, { exact: true }) }).getByRole("radio");
+}
+
+/** A Store defaults row of the step (`store-default-row-<field>`). */
+function storeDefaultRow(page: Page, field: string) {
+  return page.getByTestId(`store-default-row-${field}`);
+}
+
+/** The step's one connection banner (R:88). */
+function stepBanner(page: Page) {
+  return page.getByTestId("listing-settings-banner");
+}
+
+/** The step's title: "Listing settings for <store>" from 640 px, "Listing settings" on a phone (R:420). */
+function stepTitle(testInfo: TestInfo, storeName: string) {
+  return testInfo.project.name === "mobile" ? "Listing settings" : `Listing settings for ${storeName}`;
+}
+
+/**
+ * The step's way to read the live setup again while nothing failed: [Check eBay again] in a policy editor (R:196), as
+ * the older setup panel's Refresh options did. Opens the Return policy editor, presses it, waits for the read, cancels.
+ */
+async function checkEbayAgain(page: Page, state: StubState) {
+  const reads = state.setupReads.length;
+  await storeDefaultRow(page, "return").getByRole("button", { name: "Change Return policy" }).click();
+  await policyEditor(page).getByRole("button", { name: "Check eBay again" }).click();
+  await expect.poll(() => state.setupReads.length).toBe(reads + 1);
+  await policyEditor(page).getByRole("button", { name: "Cancel" }).click();
+  await expect(policyEditor(page)).toHaveCount(0);
+}
+
+/** "When is that?" names the store the settings are for when the vendor has more than one eBay store; read on every screen. */
+async function expectSettingsFor(page: Page, storeName: string) {
+  await page.getByRole("button", { name: "When is that?" }).click();
+  await expect(page.getByTestId("listing-settings-timing-details")).toContainText(`These settings are for ${storeName} only. Each store has its own.`);
+  await page.keyboard.press("Escape");
+  await expect(page.getByTestId("listing-settings-timing-details")).toHaveCount(0);
+}
+
+test("discarding a change through the store picker opens the other store's own saved settings, and the change is gone back on the first store", async ({ page }) => {
+  // Ported from the older pricing panel's journey (Listing settings PR 12, plan 6.5): the outlet saved a store price, Marz Cards has none.
+  const state = await openCatalog(page, `${CATALOG_PATH}/setup`, { stores: [MARZ, OUTLET], liveSummary: true,
+    pricingRules: { [OUTLET.storeConnectionId]: SAVED_PRICING_RULES } });
   const dialog = page.getByRole("alertdialog");
+  const storeSelect = page.getByTestId("catalog-store-select");
+  const price = storeDefaultRow(page, "price");
+  const exactPrice = productDrawer(page).getByLabel("Exact price for Pack of 50 · ENV-SGL-P50", { exact: true });
+  const openEnvelope = async () => {
+    await page.getByTestId("listing-settings-product-11").getByRole("button", { name: new RegExp(`^${ENVELOPE.productName}`) }).click();
+    await expect(productDrawer(page)).toBeVisible();
+  };
+  await expect(price.getByRole("button", { name: "Set price" })).toBeVisible();
 
-  // Several policies to choose from and none saved: the fields open empty, which is nothing to lose.
-  await expect(fulfillment).toBeVisible();
-  await expect(heading).not.toContainText("Not saved");
-  await page.getByRole("link", { name: "Next: Publish" }).click();
-  await expect(page).toHaveURL(`${CATALOG_PATH}/publish`);
-  await step(page, "setup").click();
+  // A change on Marz Cards, kept by the browser's Back.
+  await openEnvelope();
+  await exactPrice.fill("9.99");
+  await page.goBack();
+  await expect(productDrawer(page)).toHaveCount(0);
+  await expect(bar(page)).toHaveText(`Not saved · 1 change in ${ENVELOPE.productName}`);
 
-  // Picking one is a change until saved.
-  await fulfillment.click();
-  await page.getByRole("option", { name: /USPS Priority Mail/ }).click();
-  await expect(heading).toContainText("Not saved");
-  await page.getByRole("link", { name: "Next: Publish" }).click();
-  await expect(dialog).toContainText("You have changes that aren't saved in eBay listing setup.");
+  // The store picker asks first; Discard and leave opens the outlet's own saved settings, not this store's draft.
+  await storeSelect.click();
+  await page.getByRole("option", { name: "Marz Cards Outlet (eBay)" }).click();
+  await expect(dialog).toContainText("You have 1 change that isn't saved.");
   await dialog.getByRole("button", { name: "Discard and leave" }).click();
-  await expect(page).toHaveURL(`${CATALOG_PATH}/publish`);
-  await step(page, "setup").click();
-  await expect(heading).not.toContainText("Not saved");
+  await expect(dialog).toHaveCount(0);
+  await expect(storeSelect).toHaveText("Marz Cards Outlet (eBay)");
+  await expect(price).toContainText(/Retail( price)? \+ 15%, to the cent/);
+  await expect(price.getByRole("button", { name: "Change Price" })).toBeVisible();
+  await expect(bar(page)).toHaveText("All saved");
+  await expect(page.getByText("Not saved", { exact: false })).toHaveCount(0);
+
+  // Back on Marz Cards nothing asks, and the discarded change is gone.
+  await storeSelect.click();
+  await page.getByRole("option", { name: "Marz Cards (eBay)", exact: true }).click();
+  await expect(dialog).toHaveCount(0);
+  await expect(storeSelect).toHaveText("Marz Cards (eBay)");
+  await expect(price.getByRole("button", { name: "Set price" })).toBeVisible();
+  await expect(bar(page)).toHaveText("All saved");
+  await openEnvelope();
+  await expect(exactPrice).toHaveValue("");
+  expect(state.priceWrites).toEqual([]);
   expect(state.unexpected).toEqual([]);
   expect(state.errors).toEqual([]);
 });
 
-test("saving eBay listing setup sends the loaded revision and a request key; a retry after a lost answer reuses the key", async ({ page }) => {
-  const state = await openCatalog(page, `${CATALOG_PATH}/setup`, {
-    listingSetups: { [MARZ.storeConnectionId]: listingSetupWithAnotherShippingPolicy(MARZ.storeConnectionId) },
-    setupWriteAnswers: ["drop"],
-  });
-  await openOlderSettings(page);
-  const fulfillment = page.getByRole("combobox", { name: "Fulfillment policy", exact: true });
-  const save = page.getByRole("button", { name: "Save eBay listing setup" });
-
-  // Nothing changed yet: there is nothing to save.
-  await expect(fulfillment).toBeVisible();
-  await expect(save).toBeDisabled();
-  await fulfillment.click();
-  await page.getByRole("option", { name: /USPS Priority Mail/ }).click();
-  await expect(save).toBeEnabled();
-
-  // The first save's answer is lost; saving the same choice again is the same request.
-  await save.click();
-  await expect(page.getByRole("alert").filter({ hasText: /fetch/i })).toBeVisible();
-  await expect(save).toBeEnabled();
-  await save.click();
-  await expect(page.getByText("Store defaults saved and listing policies updated. Generate a new preview to use them.", { exact: true })).toBeVisible();
-
-  expect(state.setupWrites).toHaveLength(2);
-  const [lost, retry] = state.setupWrites;
-  // Only the changed policy is sent; the saved return and payment policies stay as they are.
-  expect(lost).toEqual({ method: "PUT", path: `/api/dropship/ebay/listing-setup/${MARZ.storeConnectionId}`, body: {
-    expectedRevision: SETUP_REVISION, idempotencyKey: expect.stringMatching(/^ebay-setup:[A-Za-z0-9-]+$/),
-    fulfillmentPolicyId: "priority" } });
-  expect(retry.body).toEqual(lost.body);
-
-  // Once the server confirmed it, the next change is a new request against the new revision.
-  await fulfillment.click();
-  await page.getByRole("option", { name: /USPS Ground Advantage/ }).click();
-  await save.click();
-  await expect.poll(() => state.setupWrites.length).toBe(3);
-  expect(state.setupWrites[2].body).toMatchObject({ expectedRevision: SETUP_REVISION + 1, fulfillmentPolicyId: "ground" });
-  expect(state.setupWrites[2].body.idempotencyKey).not.toBe(lost.body.idempotencyKey);
-  await expect(page.getByText("Store defaults saved and listing policies updated. Generate a new preview to use them.", { exact: true })).toBeVisible();
-  expect(state.unexpected).toEqual([]);
-  expect(state.errors).toEqual([]);
-});
-
-test("a save refused because the settings changed elsewhere says to refresh, and nothing is overwritten", async ({ page }) => {
-  const state = await openCatalog(page, `${CATALOG_PATH}/setup`, {
-    listingSetups: { [MARZ.storeConnectionId]: listingSetupWithAnotherShippingPolicy(MARZ.storeConnectionId) },
-    setupWriteAnswers: [{ status: 409, code: "DROPSHIP_LISTING_CONFIG_REVISION_CONFLICT",
-      message: "These store settings changed after they were loaded. Load the latest settings and save again." }],
-  });
-  await openOlderSettings(page);
-  await page.getByRole("combobox", { name: "Fulfillment policy", exact: true }).click();
-  await page.getByRole("option", { name: /USPS Priority Mail/ }).click();
-  await page.getByRole("button", { name: "Save eBay listing setup" }).click();
-
-  // The words now also say the vendor's picks survive the refresh (Refresh options keeps them; see
-  // the journey below), so the vendor isn't told to choose everything again.
-  await expect(page.getByRole("alert").filter({ hasText: "These settings changed in another window. Choose Refresh options to load what is saved now. Your changes stay chosen; check them, then save again." })).toBeVisible();
-  expect(state.setupWrites).toHaveLength(1);
-  expect(state.listingSetups[MARZ.storeConnectionId]).toMatchObject({ revision: SETUP_REVISION });
-  expect(state.unexpected).toEqual([]);
-  expect(state.errors).toEqual([]);
-});
-
-const SAVED_MESSAGE = "Store defaults saved and listing policies updated. Generate a new preview to use them.";
-
-test("with the saved shipping policy gone from eBay, changing only the return policy can be saved and sends just that policy", async ({ page }) => {
-  const state = await openCatalog(page, `${CATALOG_PATH}/setup`,
-    { listingSetups: { [MARZ.storeConnectionId]: listingSetupWithSavedShippingGone(MARZ.storeConnectionId) } });
-  await openOlderSettings(page);
-  const heading = page.getByRole("heading", { name: /^eBay listing setup/ });
-  const fulfillment = page.getByRole("combobox", { name: "Fulfillment policy", exact: true });
-  const returns = page.getByRole("combobox", { name: "Return policy", exact: true });
-  const save = page.getByRole("button", { name: "Save eBay listing setup" });
-
-  // eBay no longer lists the saved shipping policy and two others fit, so that field opens empty.
-  // An empty field holds nothing to save, so on its own it is no change.
-  await expect(fulfillment).toHaveText("Choose a fulfillment policy");
-  await expect(returns).toHaveText("30-day returns");
-  await expect(heading).not.toContainText("Not saved");
-  await expect(save).toBeDisabled();
-
-  // The empty shipping field does not keep the vendor from saving another policy.
-  await returns.click();
-  await page.getByRole("option", { name: /No returns/ }).click();
-  await expect(heading).toContainText("Not saved");
-  await expect(save).toBeEnabled();
-  await save.click();
-  await expect(page.getByText(SAVED_MESSAGE, { exact: true })).toBeVisible();
-
-  // Only the return policy is sent; the saved shipping and payment policies are left as they are.
-  expect(state.setupWrites).toEqual([{ method: "PUT", path: `/api/dropship/ebay/listing-setup/${MARZ.storeConnectionId}`, body: {
-    expectedRevision: SETUP_REVISION, idempotencyKey: expect.stringMatching(/^ebay-setup:[A-Za-z0-9-]+$/), returnPolicyId: "no-returns" } }]);
-  expect(state.listingSetups[MARZ.storeConnectionId]).toMatchObject({ revision: SETUP_REVISION + 1,
-    selection: { fulfillmentPolicyId: "ground", returnPolicyId: "no-returns", paymentPolicyId: "payments" } });
-  // That save skipped the Card Shellz shipping check, so its answer could not replace the loaded
-  // view: the panel read the setup again.
-  expect(state.setupReads).toEqual([MARZ.storeConnectionId, MARZ.storeConnectionId]);
-  await expect(returns).toHaveText("No returns");
-  await expect(fulfillment).toHaveText("Choose a fulfillment policy");
-  await expect(heading).not.toContainText("Not saved");
-  await expect(save).toBeDisabled();
-  expect(state.unexpected).toEqual([]);
-  expect(state.errors).toEqual([]);
-});
-
-test("after a save refused for a newer revision, Refresh options shows the other window's change, keeps the vendor's pick, and saves it against the new revision", async ({ page }) => {
-  const loaded = listingSetupWithAnotherShippingPolicy(MARZ.storeConnectionId);
-  const setup = { ...loaded, options: { ...loaded.options,
-    returnPolicies: [...loaded.options.returnPolicies, { id: "no-returns", name: "No returns" }] } };
-  const state = await openCatalog(page, `${CATALOG_PATH}/setup`, { listingSetups: { [MARZ.storeConnectionId]: setup } });
-  await openOlderSettings(page);
-  const heading = page.getByRole("heading", { name: /^eBay listing setup/ });
-  const fulfillment = page.getByRole("combobox", { name: "Fulfillment policy", exact: true });
-  const returns = page.getByRole("combobox", { name: "Return policy", exact: true });
-  const save = page.getByRole("button", { name: "Save eBay listing setup" });
-  const conflict = page.getByRole("alert").filter({ hasText: "These settings changed in another window." });
-  await expect(fulfillment).toHaveText("USPS Ground Advantage");
-  await expect(returns).toHaveText("30-day returns");
-
-  // Another window saves a different return policy after this page loaded.
-  state.listingSetups[MARZ.storeConnectionId] = { ...setup, revision: SETUP_REVISION + 1,
-    selection: { ...setup.selection, returnPolicyId: "no-returns" } };
-
-  await fulfillment.click();
-  await page.getByRole("option", { name: /USPS Priority Mail/ }).click();
-  await save.click();
-  await expect(conflict).toContainText("Choose Refresh options to load what is saved now. Your changes stay chosen; check them, then save again.");
-  expect(state.setupWrites).toHaveLength(1);
-  expect(state.setupWrites[0].body).toMatchObject({ expectedRevision: SETUP_REVISION, fulfillmentPolicyId: "priority" });
-  // The refused save changed nothing.
-  expect(state.listingSetups[MARZ.storeConnectionId]).toMatchObject({ revision: SETUP_REVISION + 1,
-    selection: { fulfillmentPolicyId: "ground", returnPolicyId: "no-returns" } });
-
-  await page.getByRole("button", { name: "Refresh options", exact: true }).click();
-  // The newer answer is loaded: the other window's return policy shows, and the vendor's
-  // shipping pick is still chosen and still not saved.
-  await expect(returns).toHaveText("No returns");
-  await expect(fulfillment).toHaveText("USPS Priority Mail");
-  await expect(heading).toContainText("Not saved");
-  await expect(conflict).toHaveCount(0);
-  expect(state.setupReads).toEqual([MARZ.storeConnectionId, MARZ.storeConnectionId]);
-
-  await expect(save).toBeEnabled();
-  await save.click();
-  await expect(page.getByText(SAVED_MESSAGE, { exact: true })).toBeVisible();
-  expect(state.setupWrites).toHaveLength(2);
-  // Only the vendor's pick is sent, against the revision just loaded, as a new request.
-  expect(state.setupWrites[1].body).toEqual({ expectedRevision: SETUP_REVISION + 1,
-    idempotencyKey: expect.stringMatching(/^ebay-setup:[A-Za-z0-9-]+$/), fulfillmentPolicyId: "priority" });
-  expect(state.setupWrites[1].body.idempotencyKey).not.toBe(state.setupWrites[0].body.idempotencyKey);
-  // Both changes stand: the vendor's shipping policy and the other window's return policy.
-  expect(state.listingSetups[MARZ.storeConnectionId]).toMatchObject({ revision: SETUP_REVISION + 2,
-    selection: { fulfillmentPolicyId: "priority", returnPolicyId: "no-returns", paymentPolicyId: "payments" } });
-  await expect(returns).toHaveText("No returns");
-  await expect(heading).not.toContainText("Not saved");
-  expect(state.unexpected).toEqual([]);
-  expect(state.errors).toEqual([]);
-});
-
-test("a save refused because the shipping policy doesn't fit Card Shellz shipping names the issue, and Refresh options lets the vendor pick another", async ({ page }) => {
+test("a shipping policy save refused because the policy doesn't fit Card Shellz shipping says so in plain words and keeps the pick; Check eBay again shows it can't be used", async ({ page }) => {
+  // Ported from the older setup panel's journey (Listing settings PR 12, plan 6.5): the step's own words for this refusal.
   const loaded = listingSetupWithAnotherShippingPolicy(MARZ.storeConnectionId);
   const state = await openCatalog(page, `${CATALOG_PATH}/setup`, {
     listingSetups: { [MARZ.storeConnectionId]: loaded },
@@ -549,284 +354,85 @@ test("a save refused because the shipping policy doesn't fit Card Shellz shippin
       message: "The selected eBay fulfillment policy exceeds Card Shellz fulfillment capabilities.",
       context: { storeConnectionId: MARZ.storeConnectionId, fulfillmentPolicyId: "priority", issues: [HANDLING_TIME_ISSUE], retryable: false } }],
   });
-  await openOlderSettings(page);
-  const heading = page.getByRole("heading", { name: /^eBay listing setup/ });
-  const fulfillment = page.getByRole("combobox", { name: "Fulfillment policy", exact: true });
-  const save = page.getByRole("button", { name: "Save eBay listing setup" });
-  const refused = page.getByRole("alert").filter({ hasText: "This shipping policy doesn't work with Card Shellz shipping" });
+  const shipping = storeDefaultRow(page, "shipping");
+  await shipping.getByRole("button", { name: "Change Shipping policy" }).click();
+  await policyChoice(page, "USPS Priority Mail").check();
+  await policyEditor(page).getByRole("button", { name: "Save", exact: true }).click();
 
-  await fulfillment.click();
-  await page.getByRole("option", { name: /USPS Priority Mail/ }).click();
-  await save.click();
-  // The vendor's words with the server's first issue, never the staff-facing message. Changed on
-  // purpose (review round 3): the issue's own closing period is dropped before the words add theirs
-  // (dropship-ebay-listing-setup.ts firstIssueMessage), so the sentence ends with one period where
-  // it used to read "handling time.. Choose". The whole message is matched, so the period is checked.
-  await expect(refused).toHaveText("This shipping policy doesn't work with Card Shellz shipping: "
-    + "Policy must allow at least 1 business day of handling time. Choose Refresh options, then pick another shipping policy.");
-  await expect(refused).not.toContainText("..");
-  await expect(refused).not.toContainText("exceeds Card Shellz fulfillment capabilities");
+  // The vendor's words, never the staff-facing message or a code; the pick stays, not saved.
+  await expect(policyEditor(page)).toContainText("This shipping policy doesn't work with Card Shellz shipping. Check eBay again, then pick another one.");
+  await expect(policyEditor(page)).not.toContainText("exceeds Card Shellz fulfillment capabilities");
+  await expect(policyEditor(page)).not.toContainText("DROPSHIP_");
+  await expect(policyChoice(page, "USPS Priority Mail")).toBeChecked();
+  await expect(bar(page)).toHaveText("Not saved · 1 change in Shipping policy");
   expect(state.setupWrites).toHaveLength(1);
   expect(state.listingSetups[MARZ.storeConnectionId]).toMatchObject({ revision: SETUP_REVISION });
 
-  // Refresh options shows eBay's policy no longer fits: the pick can't be kept, so the field goes
-  // back to the saved policy, and the one that doesn't fit can't be picked again.
+  // The words' [Check eBay again] (R:196) reads the setup again: eBay's policy no longer fits, so the step shows why it
+  // can't be used, won't let it be picked, and keeps Save off with the refused pick still in the draft.
   state.listingSetups[MARZ.storeConnectionId] = { ...loaded, options: { ...loaded.options, fulfillmentPolicies: [
     loaded.options.fulfillmentPolicies[0],
     { id: "priority", name: "USPS Priority Mail", compatible: false, compatibilityIssues: [HANDLING_TIME_ISSUE] }] } };
-  await page.getByRole("button", { name: "Refresh options", exact: true }).click();
-  await expect(fulfillment).toHaveText("USPS Ground Advantage");
-  await expect(refused).toHaveCount(0);
-  await expect(heading).not.toContainText("Not saved");
-  await expect(save).toBeDisabled();
-  await fulfillment.click();
-  const doesNotFit = page.getByRole("option", { name: /USPS Priority Mail/ });
-  await expect(doesNotFit).toHaveAttribute("aria-disabled", "true");
-  await expect(doesNotFit).toContainText(HANDLING_TIME_ISSUE.message);
-  await page.keyboard.press("Escape");
+  const readsBefore = state.setupReads.length;
+  await policyEditor(page).getByRole("button", { name: "Check eBay again" }).click();
+  await expect.poll(() => state.setupReads.length).toBe(readsBefore + 1);
+  await expect(policyEditor(page)).toContainText("✗ Can't use: handling time must be 1 business day or more");
+  await expect(policyChoice(page, "USPS Priority Mail")).toBeDisabled();
+  await expect(policyChoice(page, "USPS Priority Mail")).toBeChecked();
+  await expect(bar(page)).toHaveText("Not saved · 1 change in Shipping policy");
+  await expect(policyEditor(page).getByRole("button", { name: "Save", exact: true })).toBeDisabled();
+  await policyEditor(page).getByRole("button", { name: "Cancel" }).click();
+  await expect(policyEditor(page)).toHaveCount(0);
+  await expect(bar(page)).toHaveText("All saved");
+  await expect(shipping).toContainText("USPS Ground Advantage");
   expect(state.setupWrites).toHaveLength(1);
   expect(state.unexpected).toEqual([]);
   expect(state.errors).toEqual([]);
 });
 
-test("Update ship-from location repairs the warehouse destination on its own, without a policy save", async ({ page }) => {
-  const setup = listingSetup(MARZ.storeConnectionId);
-  const outdated = { ...setup, complete: false, missingFields: ["merchantLocationKey"],
-    selection: { ...setup.selection, merchantLocationKey: "old-warehouse" } };
-  const state = await openCatalog(page, `${CATALOG_PATH}/setup`, { listingSetups: { [MARZ.storeConnectionId]: outdated } });
-  await openOlderSettings(page);
-  const repair = page.getByRole("button", { name: "Update ship-from location" });
-
-  await expect(page.getByText("Card Shellz needs to update where your items ship from. It changes no policy.", { exact: true })).toBeVisible();
-  await expect(page.getByText("Save setup to reconcile it automatically", { exact: false })).toHaveCount(0);
-  // The policies are as saved, so there is nothing for Save to do.
-  await expect(page.getByRole("button", { name: "Save eBay listing setup" })).toBeDisabled();
-  await repair.click();
-  await expect(page.getByText("Ship-from location updated. Queue any listing that failed for it again.", { exact: true })).toBeVisible();
-  await expect(repair).toHaveCount(0);
-
-  expect(state.setupWrites).toEqual([{ method: "POST",
-    path: `/api/dropship/ebay/listing-setup/${MARZ.storeConnectionId}/ship-from/repair`,
-    body: { expectedRevision: SETUP_REVISION, idempotencyKey: expect.stringMatching(/^ebay-ship-from:[A-Za-z0-9-]+$/) } }]);
-  expect(state.unexpected).toEqual([]);
-  expect(state.errors).toEqual([]);
-});
-
-test("Update ship-from location waits while a policy change isn't saved, and is offered again once the change is undone", async ({ page }) => {
-  const setup = listingSetupWithAnotherShippingPolicy(MARZ.storeConnectionId);
-  const outdated = { ...setup, complete: false, missingFields: ["merchantLocationKey"],
-    selection: { ...setup.selection, merchantLocationKey: "old-warehouse" } };
-  const state = await openCatalog(page, `${CATALOG_PATH}/setup`, { listingSetups: { [MARZ.storeConnectionId]: outdated } });
-  await openOlderSettings(page);
-  const heading = page.getByRole("heading", { name: /^eBay listing setup/ });
-  const fulfillment = page.getByRole("combobox", { name: "Fulfillment policy", exact: true });
-  const repair = page.getByRole("button", { name: "Update ship-from location" });
-  const waitHint = page.getByText("Save or undo your policy change first.", { exact: true });
-
-  await expect(repair).toBeEnabled();
-  await expect(waitHint).toHaveCount(0);
-
-  // The repair reloads the setup, which would drop the unsaved pick, so it waits.
-  await fulfillment.click();
-  await page.getByRole("option", { name: /USPS Priority Mail/ }).click();
-  await expect(heading).toContainText("Not saved");
-  await expect(repair).toBeDisabled();
-  await expect(waitHint).toBeVisible();
-
-  // Choosing the saved policy again undoes the change.
-  await fulfillment.click();
-  await page.getByRole("option", { name: /USPS Ground Advantage/ }).click();
-  await expect(heading).not.toContainText("Not saved");
-  await expect(repair).toBeEnabled();
-  await expect(waitHint).toHaveCount(0);
-  expect(state.setupWrites).toEqual([]);
-
-  await repair.click();
-  await expect(page.getByText("Ship-from location updated. Queue any listing that failed for it again.", { exact: true })).toBeVisible();
-  // Only the repair was sent, against the loaded revision; no policy was saved.
-  expect(state.setupWrites).toEqual([{ method: "POST",
-    path: `/api/dropship/ebay/listing-setup/${MARZ.storeConnectionId}/ship-from/repair`,
-    body: { expectedRevision: SETUP_REVISION, idempotencyKey: expect.stringMatching(/^ebay-ship-from:[A-Za-z0-9-]+$/) } }]);
-  expect(state.unexpected).toEqual([]);
-  expect(state.errors).toEqual([]);
-});
-
-const SHIP_FROM_UPDATED_MESSAGE = "Ship-from location updated. Queue any listing that failed for it again.";
-
-/** Where items ship from is out of date (the server names merchantLocationKey); a second shipping policy can be picked. */
-function listingSetupWithShipFromOutdated(storeConnectionId: number) {
-  const setup = listingSetupWithAnotherShippingPolicy(storeConnectionId);
-  return { ...setup, complete: false, missingFields: ["merchantLocationKey"],
-    selection: { ...setup.selection, merchantLocationKey: "old-warehouse" } };
-}
-
-test("Update ship-from location is not held up by a policy Card Shellz suggested, only by one the vendor picked", async ({ page }) => {
-  const outdated = listingSetupWithShipFromOutdated(MARZ.storeConnectionId);
-  // The saved return policy is gone from eBay, which now lists exactly one, so Card Shellz fills
-  // that one in as a suggestion (buildEbayListingSetupDraft): unsaved, but not the vendor's pick.
-  const setup = { ...outdated, missingFields: ["returnPolicyId", "merchantLocationKey"],
-    selection: { ...outdated.selection, returnPolicyId: "returns-retired" } };
-  const state = await openCatalog(page, `${CATALOG_PATH}/setup`, { listingSetups: { [MARZ.storeConnectionId]: setup } });
-  await openOlderSettings(page);
-  const heading = page.getByRole("heading", { name: /^eBay listing setup/ });
-  // Scoped to the panel: the pricing rules form shows its own "Suggested · not saved".
-  const panel = page.locator("section").filter({ has: heading }).last();
-  const suggested = panel.getByText("Suggested · not saved", { exact: true });
-  const fulfillment = page.getByRole("combobox", { name: "Fulfillment policy", exact: true });
-  const returns = page.getByRole("combobox", { name: "Return policy", exact: true });
-  const repair = page.getByRole("button", { name: "Update ship-from location" });
-  const waitHint = page.getByText("Save or undo your policy change first.", { exact: true });
-
-  await expect(returns).toHaveText("30-day returns");
-  await expect(suggested).toHaveCount(1);
-  await expect(heading).toContainText("Not saved");
-  // Changed on purpose (review round 3): the repair waits only for a policy the vendor picked
-  // (EbayListingSetupPanel unsavedPick). The vendor can't undo a suggestion, and the repair's
-  // reload fills it in again, so it no longer holds the repair up.
-  await expect(repair).toBeEnabled();
-  await expect(waitHint).toHaveCount(0);
-
-  // A policy the vendor picks would be lost by the reload, so the repair waits for it.
-  await fulfillment.click();
-  await page.getByRole("option", { name: /USPS Priority Mail/ }).click();
-  await expect(repair).toBeDisabled();
-  await expect(waitHint).toBeVisible();
-
-  // Undoing the pick leaves only the suggestion, and the repair is offered again.
-  await fulfillment.click();
-  await page.getByRole("option", { name: /USPS Ground Advantage/ }).click();
-  await expect(repair).toBeEnabled();
-  await expect(waitHint).toHaveCount(0);
-  expect(state.setupWrites).toEqual([]);
-
-  await repair.click();
-  await expect(page.getByText(SHIP_FROM_UPDATED_MESSAGE, { exact: true })).toBeVisible();
-  await expect(repair).toHaveCount(0);
-  // Only the repair was sent; the suggested return policy was not saved with it.
-  expect(state.setupWrites).toEqual([{ method: "POST",
-    path: `/api/dropship/ebay/listing-setup/${MARZ.storeConnectionId}/ship-from/repair`,
-    body: { expectedRevision: SETUP_REVISION, idempotencyKey: expect.stringMatching(/^ebay-ship-from:[A-Za-z0-9-]+$/) } }]);
-  expect(state.listingSetups[MARZ.storeConnectionId]).toMatchObject({ revision: SETUP_REVISION + 1,
-    selection: { merchantLocationKey: "managed", returnPolicyId: "returns-retired" } });
-  // The reloaded setup fills the suggestion in again, still not saved.
-  await expect(returns).toHaveText("30-day returns");
-  await expect(suggested).toHaveCount(1);
-  expect(state.unexpected).toEqual([]);
-  expect(state.errors).toEqual([]);
-});
-
-test("Update ship-from location refused because the settings changed elsewhere says to refresh and update again, and the retry is a new request", async ({ page }) => {
-  const outdated = listingSetupWithShipFromOutdated(MARZ.storeConnectionId);
-  const state = await openCatalog(page, `${CATALOG_PATH}/setup`, { listingSetups: { [MARZ.storeConnectionId]: outdated } });
-  await openOlderSettings(page);
-  const heading = page.getByRole("heading", { name: /^eBay listing setup/ });
-  const fulfillment = page.getByRole("combobox", { name: "Fulfillment policy", exact: true });
-  const repair = page.getByRole("button", { name: "Update ship-from location" });
-  const refused = page.getByRole("alert").filter({ hasText: "These settings changed in another window." });
-  const repairPath = `/api/dropship/ebay/listing-setup/${MARZ.storeConnectionId}/ship-from/repair`;
-  await expect(fulfillment).toHaveText("USPS Ground Advantage");
-  await expect(repair).toBeEnabled();
-
-  // Another window saves a different shipping policy after this page loaded; where items ship
-  // from is still out of date.
-  state.listingSetups[MARZ.storeConnectionId] = { ...outdated, revision: SETUP_REVISION + 1,
-    selection: { ...outdated.selection, fulfillmentPolicyId: "priority" } };
-
-  // The stub refuses the older revision with 409 DROPSHIP_LISTING_CONFIG_REVISION_CONFLICT, as the
-  // server's compare-and-set does.
-  await repair.click();
-  // The repair's own words (review round 3): it has nothing to save again, only the update to run
-  // again, so it does not borrow the save's "check them, then save again".
-  await expect(refused).toHaveText("These settings changed in another window. Choose Refresh options, then Update ship-from location again.");
-  expect(state.setupWrites).toEqual([{ method: "POST", path: repairPath,
-    body: { expectedRevision: SETUP_REVISION, idempotencyKey: expect.stringMatching(/^ebay-ship-from:[A-Za-z0-9-]+$/) } }]);
-  // The refused repair changed nothing.
-  expect(state.listingSetups[MARZ.storeConnectionId]).toMatchObject({ revision: SETUP_REVISION + 1,
-    selection: { merchantLocationKey: "old-warehouse", fulfillmentPolicyId: "priority" } });
-
-  // Refresh options loads what the other window saved; the repair is still offered.
-  await page.getByRole("button", { name: "Refresh options", exact: true }).click();
-  await expect(fulfillment).toHaveText("USPS Priority Mail");
-  await expect(refused).toHaveCount(0);
-  await expect(heading).not.toContainText("Not saved");
-  await expect(repair).toBeEnabled();
-
-  await repair.click();
-  await expect(page.getByText(SHIP_FROM_UPDATED_MESSAGE, { exact: true })).toBeVisible();
-  await expect(repair).toHaveCount(0);
-  // Sent against the revision just loaded, as a new request.
-  expect(state.setupWrites).toHaveLength(2);
-  expect(state.setupWrites[1]).toEqual({ method: "POST", path: repairPath,
-    body: { expectedRevision: SETUP_REVISION + 1, idempotencyKey: expect.stringMatching(/^ebay-ship-from:[A-Za-z0-9-]+$/) } });
-  expect(state.setupWrites[1].body.idempotencyKey).not.toBe(state.setupWrites[0].body.idempotencyKey);
-  // Both stand: the other window's shipping policy and the repaired ship-from location.
-  expect(state.listingSetups[MARZ.storeConnectionId]).toMatchObject({ revision: SETUP_REVISION + 2,
-    selection: { merchantLocationKey: "managed", fulfillmentPolicyId: "priority" } });
-  expect(state.unexpected).toEqual([]);
-  expect(state.errors).toEqual([]);
-});
-
-test("a paused store's eBay listing setup is read-only and sends nothing", async ({ page }) => {
+test("a paused store's settings are read-only on Listing settings, and the rail says View only with nothing to retry; nothing is sent", async ({ page }) => {
   const setup = listingSetup(MARZ.storeConnectionId);
   const paused = { ...setup, access: { canEdit: false, reason: "store_paused" },
     checks: { ebay: "not_checked", fulfillment: { status: "not_checked" } }, fulfillmentCapability: null,
     options: { merchantLocations: [], fulfillmentPolicies: [], returnPolicies: [], paymentPolicies: [] } };
   const state = await openCatalog(page, `${CATALOG_PATH}/setup`, { listingSetups: { [MARZ.storeConnectionId]: paused } });
-  await openOlderSettings(page);
 
-  // Scoped to the old panel: the new step's banner says the same words (R:504).
-  await expect(oldSetupPanel(page).getByText("Marz Cards is paused, so its settings can't be changed now.", { exact: true })).toBeVisible();
+  // The step's one banner says why (R:504); only support lifts a store pause.
+  await expect(stepBanner(page)).toHaveCount(1);
+  await expect(stepBanner(page)).toHaveAttribute("data-kind", "store_paused");
+  await expect(stepBanner(page)).toContainText("Marz Cards is paused, so its settings can't be changed now.");
   // The rail says so too, with nothing to retry (review round 3, describeListingSettingsRail): the
   // unchecked answer is not an outage, and there is nothing the vendor can do here.
   await expect(step(page, "setup")).toContainText("View only");
   await expect(step(page, "setup")).toContainText("not known yet");
   await expect(step(page, "setup")).not.toContainText("All set");
   await expect(page.getByTestId("catalog-step-setup-action")).toHaveCount(0);
-  await expect(page.getByRole("combobox", { name: "Fulfillment policy", exact: true })).toBeDisabled();
-  await expect(page.getByRole("button", { name: "Save eBay listing setup" })).toBeDisabled();
-  await expect(page.getByRole("button", { name: "Update ship-from location" })).toHaveCount(0);
+  // Nothing on the step can be changed (a store pause takes every right), and there is no ship-from repair.
+  for (const field of ["price", "shipping", "return", "payment", "ebayCategory", "shelf", "description"]) {
+    await expect(storeDefaultRow(page, field).getByRole("button", { name: /^(Change|Set) / })).toHaveCount(0);
+  }
+  await expect(page.getByRole("button", { name: "Update now" })).toHaveCount(0);
   await expect(page.getByText("Card Shellz fulfillment capabilities", { exact: true })).toHaveCount(0);
   expect(state.setupWrites).toEqual([]);
   expect(state.unexpected).toEqual([]);
   expect(state.errors).toEqual([]);
 });
 
-test("description templates still say Not saved after the vendor hides them", async ({ page }) => {
-  const state = await openCatalog(page, `${CATALOG_PATH}/setup`);
-  await openOlderSettings(page);
-  const heading = page.getByRole("heading", { name: "Description templates" });
-  const dialog = page.getByRole("alertdialog");
-  await page.getByRole("button", { name: "Edit templates" }).click();
-  const introduction = page.getByLabel(/introduction/i);
-  await expect(introduction).toHaveValue("");
-  await expect(heading).not.toContainText("Not saved");
-
-  await introduction.fill("Ships from Card Shellz.");
-  await expect(heading).toContainText("Not saved");
-  await page.getByRole("button", { name: "Hide templates" }).click();
-  await expect(introduction).toBeHidden();
-  await expect(heading).toContainText("Not saved");
-  await page.getByRole("link", { name: "Next: Publish" }).click();
-  await expect(dialog).toContainText("You have changes that aren't saved in Description templates.");
-  await dialog.getByRole("button", { name: "Keep editing" }).click();
-  await page.getByRole("button", { name: "Edit templates" }).click();
-  await expect(introduction).toHaveValue("Ships from Card Shellz.");
-  expect(state.unexpected).toEqual([]);
-  expect(state.errors).toEqual([]);
-});
-
-test("remembers the chosen eBay store for this member, and never offers a store on another platform", async ({ page }) => {
+test("remembers the chosen eBay store for this member, and never offers a store on another platform", async ({ page }, testInfo) => {
   const state = await openCatalog(page, `${CATALOG_PATH}/setup`, { stores: [SHOP, MARZ, OUTLET] });
-  await openOlderSettings(page);
   const storeSelect = page.getByTestId("catalog-store-select");
+  const title = page.getByTestId("listing-settings-header").getByRole("heading", { level: 2 });
 
   // The first eBay store is used until the vendor chooses; the Shopify store listed first is skipped.
   await expect(storeSelect).toHaveText("Marz Cards (eBay)");
+  await expect(title).toHaveText(stepTitle(testInfo, MARZ.name));
   await storeSelect.click();
   await expect(page.getByRole("option", { name: "Test Shop (Shopify) · Not supported yet" })).toHaveAttribute("aria-disabled", "true");
   await page.getByRole("option", { name: "Marz Cards Outlet (eBay)" }).click();
   await expect(storeSelect).toHaveText("Marz Cards Outlet (eBay)");
-  await expect(page.getByText("These settings apply to Marz Cards Outlet.", { exact: true })).toBeVisible();
+  // The step is the outlet's: its title (from 640 px) and "When is that?" (every screen) name it.
+  await expect(title).toHaveText(stepTitle(testInfo, OUTLET.name));
+  await expectSettingsFor(page, OUTLET.name);
   await expect(page.getByTestId("catalog-action-summary")).toHaveText("All saved");
   await expect.poll(() => state.setupReads.includes(9)).toBe(true);
   expect(await page.evaluate((key) => window.localStorage.getItem(key), `dropship.catalog.store:${MEMBER_ID}`)).toBe("9");
@@ -834,37 +440,33 @@ test("remembers the chosen eBay store for this member, and never offers a store 
   await page.reload();
   await expect(page).toHaveURL(`${CATALOG_PATH}/setup`);
   await expect(page.getByTestId("catalog-store-select")).toHaveText("Marz Cards Outlet (eBay)");
-  // A reload starts with Older settings closed again; the remembered store's settings show.
-  await openOlderSettings(page);
-  await expect(page.getByText("These settings apply to Marz Cards Outlet.", { exact: true })).toBeVisible();
+  // A reload opens the remembered store's step.
+  await expect(title).toHaveText(stepTitle(testInfo, OUTLET.name));
+  await expectSettingsFor(page, OUTLET.name);
   await expect(page.getByTestId("catalog-action-summary")).toHaveText("All saved");
   expect(state.unexpected).toEqual([]);
   expect(state.errors).toEqual([]);
 });
 
-test("switching eBay stores on Listing settings and back shows one setup panel, the chosen store's, and leaving afterwards asks nothing", async ({ page }) => {
-  // React reports a key shared by two siblings as a console error. The setup and policy panels
+test("switching eBay stores on Listing settings and back shows one step, the chosen store's, and leaving afterwards asks nothing", async ({ page }) => {
+  // React reports a key shared by two siblings as a console error. The older setup and policy panels
   // once shared the store id as their key, which left the previous store's panel mounted after a
-  // switch (fixed in review round 3: DropshipPortalCatalog keys them listing-setup-<id> and
-  // policy-override-<id>).
+  // switch; the step is keyed listing-settings-<id> (DropshipPortalCatalog), and this keeps it to one.
   const keyErrors: string[] = [];
   page.on("console", (message) => {
     if (message.type() === "error" && message.text().includes("same key")) keyErrors.push(message.text());
   });
-  // The outlet saved another shipping policy, so each store's panel shows which store it belongs to.
+  // The outlet saved another shipping policy, so each store's step shows which store it belongs to.
   const outlet = listingSetupWithAnotherShippingPolicy(OUTLET.storeConnectionId);
-  const state = await openCatalog(page, `${CATALOG_PATH}/setup`, { stores: [MARZ, OUTLET], listingSetups: {
+  const state = await openCatalog(page, `${CATALOG_PATH}/setup`, { stores: [MARZ, OUTLET], liveSummary: true, listingSetups: {
     [OUTLET.storeConnectionId]: { ...outlet, selection: { ...outlet.selection, fulfillmentPolicyId: "priority" } } } });
-  await openOlderSettings(page);
   const storeSelect = page.getByTestId("catalog-store-select");
-  const setupHeadings = page.getByRole("heading", { name: /^eBay listing setup/ });
-  const policyHeadings = page.getByRole("heading", { name: "Listing policies", exact: true });
-  const fulfillment = page.getByRole("combobox", { name: "Fulfillment policy", exact: true });
+  const steps = page.getByTestId("listing-settings-step");
+  const shipping = storeDefaultRow(page, "shipping");
   const dialog = page.getByRole("alertdialog");
 
-  await expect(fulfillment).toHaveText("USPS Ground Advantage");
-  await expect(setupHeadings).toHaveCount(1);
-  await expect(policyHeadings).toHaveCount(1);
+  await expect(steps).toHaveCount(1);
+  await expect(shipping).toContainText("USPS Ground Advantage");
 
   // Marz Cards -> Marz Cards Outlet -> Marz Cards.
   for (const [store, shippingPolicy] of [[OUTLET, "USPS Priority Mail"], [MARZ, "USPS Ground Advantage"]] as const) {
@@ -872,16 +474,14 @@ test("switching eBay stores on Listing settings and back shows one setup panel, 
     await page.getByRole("option", { name: `${store.name} (eBay)`, exact: true }).click();
     // Nothing is unsaved, so the picker switches at once.
     await expect(storeSelect).toHaveText(`${store.name} (eBay)`);
-    await expect(page.getByText(`These settings apply to ${store.name}.`, { exact: true })).toBeVisible();
+    await expect(shipping).toContainText(shippingPolicy);
     await expect(page.getByTestId("catalog-action-summary")).toHaveText("All saved");
     await expect(dialog).toHaveCount(0);
-    // The switch has rendered (the store's line above), so these counts are settled: one setup panel and
-    // one policy panel, the chosen store's. The previous store's are gone.
-    await expect(setupHeadings).toHaveCount(1);
-    await expect(policyHeadings).toHaveCount(1);
-    await expect(fulfillment).toHaveCount(1);
-    await expect(fulfillment).toHaveText(shippingPolicy);
-    await expect(setupHeadings).not.toContainText("Not saved");
+    // The switch has rendered (the store's policy above), so these counts are settled: one step and one
+    // Shipping row, the chosen store's. The previous store's are gone.
+    await expect(steps).toHaveCount(1);
+    await expect(shipping).toHaveCount(1);
+    await expect(shipping).not.toContainText("Not saved");
   }
 
   // Nothing is unsaved in either store, so leaving the step asks nothing: not the Next button,
@@ -890,8 +490,8 @@ test("switching eBay stores on Listing settings and back shows one setup panel, 
   await expect(page).toHaveURL(`${CATALOG_PATH}/publish`);
   await expect(dialog).toHaveCount(0);
   await step(page, "setup").click();
-  await expect(setupHeadings).toHaveCount(1);
-  await expect(fulfillment).toHaveText("USPS Ground Advantage");
+  await expect(steps).toHaveCount(1);
+  await expect(shipping).toContainText("USPS Ground Advantage");
   await step(page, "choose").click();
   await expect(page).toHaveURL(`${CATALOG_PATH}/choose`);
   await expect(page.getByRole("heading", { name: "Available catalog" })).toBeVisible();
@@ -945,8 +545,8 @@ test("the live eBay check on Listing settings keeps the rail from saying All set
   // Saved settings alone look complete, and eBay has not been asked yet.
   await expect(step(page, "setup")).toContainText("All set");
   await step(page, "setup").click();
-  await openOlderSettings(page);
-  await expect(page.getByRole("heading", { name: /^eBay listing setup/ })).toBeVisible();
+  // The step reads the live setup as it mounts.
+  await expect(storeDefaultRow(page, "shipping")).toBeVisible();
   await expect(step(page, "setup")).toContainText("Choose a shipping policy");
   // Back on Choose, the rail keeps eBay's newest answer without asking again.
   await step(page, "choose").click();
@@ -961,13 +561,15 @@ test("the rail won't say All set over a live setup that couldn't check Card Shel
   const setup = listingSetup(MARZ.storeConnectionId);
   const shippingUnavailable = withShippingNotChecked(setup, { status: "unavailable", kind: "temporary", reference: "browser-test-ship-check" });
   const state = await openCatalog(page, `${CATALOG_PATH}/setup`, { listingSetups: { [MARZ.storeConnectionId]: shippingUnavailable } });
-  await openOlderSettings(page);
   const retry = page.getByTestId("catalog-step-setup-action");
-  const notice = page.getByText("Can't check Card Shellz shipping right now. Your saved settings still apply. Choose Refresh options in a few minutes.", { exact: true });
+  const shipping = storeDefaultRow(page, "shipping");
+  // The step's Shipping row says why it can't be changed now (the older panel's words, without its button's name).
+  const notice = shipping.getByText("Can't check Card Shellz shipping right now. Try again in a few minutes.", { exact: true });
 
   // The saved settings look complete, but the live check found no problem only because it could
   // not check shipping, so the rail does not vouch for them.
   await expect(notice).toBeVisible();
+  await expect(shipping.getByRole("button", { name: "Change Shipping policy" })).toHaveCount(0);
   await expect(step(page, "setup")).toContainText("Couldn't check");
   await expect(step(page, "setup")).not.toContainText("All set");
   await expect(retry).toHaveText("Try again");
@@ -978,6 +580,7 @@ test("the rail won't say All set over a live setup that couldn't check Card Shel
   await expect(step(page, "setup")).toContainText("All set");
   await expect(retry).toHaveCount(0);
   await expect(notice).toHaveCount(0);
+  await expect(shipping.getByRole("button", { name: "Change Shipping policy" })).toBeVisible();
   expect(state.summaryReads).toEqual([MARZ.storeConnectionId, MARZ.storeConnectionId]);
   expect(state.setupReads).toEqual([MARZ.storeConnectionId, MARZ.storeConnectionId]);
   expect(state.unexpected).toEqual([]);
@@ -992,47 +595,51 @@ test("while Card Shellz finishes shipping setup, the rail asks for a missing ret
     selection: { ...setup.selection, returnPolicyId: "returns-retired", merchantLocationKey: "old-warehouse" } },
   { status: "unavailable", kind: "setup_incomplete", reference: "browser-test-ship-setup" });
   const state = await openCatalog(page, `${CATALOG_PATH}/setup`, { listingSetups: { [MARZ.storeConnectionId]: finishing } });
-  await openOlderSettings(page);
   const retry = page.getByTestId("catalog-step-setup-action");
-  // Scoped to the old panel: the new step's Shipping row says the same words (R:503).
-  const notice = oldSetupPanel(page).getByText("Card Shellz is finishing shipping setup for your store. You can pick a shipping policy when it's done.", { exact: true });
-  const repair = page.getByRole("button", { name: "Update ship-from location" });
-  const refresh = page.getByRole("button", { name: "Refresh options", exact: true });
+  const shipping = storeDefaultRow(page, "shipping");
+  // The step's Shipping row says what the older setup panel said (R:503).
+  const notice = shipping.getByText("Card Shellz is finishing shipping setup for your store. You can pick a shipping policy when it's done.", { exact: true });
+  const repairNote = page.getByTestId("ship-from-repair-note");
+  const update = repairNote.locator("button", { hasText: "Update now" });
 
   // The return policy is the vendor's to choose now, so the rail names it first (review round 4,
-  // describeListingSettingsRail).
+  // describeListingSettingsRail). The shipping policy and the ship-from repair wait on Card Shellz.
   await expect(notice).toBeVisible();
+  await expect(shipping.getByRole("button", { name: "Change Shipping policy" })).toHaveCount(0);
   await expect(step(page, "setup")).toContainText("Choose a return policy");
   await expect(retry).toHaveCount(0);
-  await expect(repair).toHaveCount(0);
+  await expect(update).toHaveCount(0);
+  expect(state.setupReads).toEqual([MARZ.storeConnectionId]);
 
-  // The return policy is chosen elsewhere; what is left waits on Card Shellz, and a retry would
-  // change nothing.
+  // The return policy is chosen in another window; Check eBay again reads it. What is left waits on Card Shellz, and a
+  // retry would change nothing.
   state.listingSetups[MARZ.storeConnectionId] = { ...finishing, missingFields: ["fulfillmentPolicyId", "merchantLocationKey"],
     selection: { ...finishing.selection, returnPolicyId: "returns" } };
-  await refresh.click();
+  await checkEbayAgain(page, state);
   await expect(step(page, "setup")).toContainText("Card Shellz is finishing setup");
   for (const line of ["Choose a shipping policy", "Ship-from location needs updating", "Couldn't check", "All set"]) {
     await expect(step(page, "setup")).not.toContainText(line);
   }
-  await expect(retry).toHaveCount(0);
-  await expect(repair).toHaveCount(0);
   await expect(notice).toBeVisible();
+  await expect(retry).toHaveCount(0);
+  await expect(update).toHaveCount(0);
+  expect(state.setupReads).toEqual([MARZ.storeConnectionId, MARZ.storeConnectionId]);
 
   // Card Shellz has finished and the vendor picked a shipping policy elsewhere: shipping is checked,
-  // so the ship-from line and its repair show again, and the repair leaves nothing to do.
+  // so the ship-from line and the step's Update now show again, and the repair leaves nothing to do.
   state.listingSetups[MARZ.storeConnectionId] = { ...setup, missingFields: ["merchantLocationKey"],
     selection: { ...setup.selection, fulfillmentPolicyId: "priority", merchantLocationKey: "old-warehouse" } };
-  await refresh.click();
+  await checkEbayAgain(page, state);
   await expect(step(page, "setup")).toContainText("Ship-from location needs updating");
   await expect(notice).toHaveCount(0);
-  await repair.click();
-  await expect(page.getByText(SHIP_FROM_UPDATED_MESSAGE, { exact: true })).toBeVisible();
+  await expect(repairNote).toContainText("Card Shellz needs to update where your items ship from.");
+  await update.click();
+  await expect(repairNote).toContainText("Saved");
   await expect(step(page, "setup")).toContainText("All set");
   await expect(retry).toHaveCount(0);
   expect(state.setupWrites).toEqual([{ method: "POST",
     path: `/api/dropship/ebay/listing-setup/${MARZ.storeConnectionId}/ship-from/repair`,
-    body: { expectedRevision: SETUP_REVISION, idempotencyKey: expect.stringMatching(/^ebay-ship-from:[A-Za-z0-9-]+$/) } }]);
+    body: { expectedRevision: SETUP_REVISION, idempotencyKey: expect.stringMatching(/^ls-ship-from:[A-Za-z0-9-]+$/) } }]);
   expect(state.unexpected).toEqual([]);
   expect(state.errors).toEqual([]);
 });
@@ -1047,10 +654,11 @@ test("a store on an eBay site Card Shellz doesn't list on says Contact support i
     listingSetups: { [MARZ.storeConnectionId]: otherSite },
     summaries: { [MARZ.storeConnectionId]: listingSettingsSummary(MARZ.storeConnectionId,
       { state: "products_need_fix", productsNeedingFix: 2, missingPolicy: null }) } });
-  await openOlderSettings(page);
 
-  await expect(page.getByText("Card Shellz lists on eBay US only. This store is set up for another eBay site. Contact support.", { exact: true }))
-    .toBeVisible();
+  // The step's one banner names the store (the older panel said "This store"), with Contact support.
+  await expect(stepBanner(page)).toHaveCount(1);
+  await expect(stepBanner(page)).toHaveAttribute("data-kind", "other_site");
+  await expect(stepBanner(page)).toContainText("Card Shellz lists on eBay US only. Marz Cards is set up for another eBay site. Contact support.");
   // Card Shellz can't list on this eBay site at all, so the rail names the one thing that helps
   // (review round 4, describeListingSettingsRail), with nothing to retry.
   await expect(step(page, "setup")).toContainText("Contact support");
@@ -1058,61 +666,68 @@ test("a store on an eBay site Card Shellz doesn't list on says Contact support i
     await expect(step(page, "setup")).not.toContainText(line);
   }
   await expect(page.getByTestId("catalog-step-setup-action")).toHaveCount(0);
+  // Nothing on the step can be changed for this store.
+  for (const field of ["shipping", "return", "payment"]) {
+    await expect(storeDefaultRow(page, field).getByRole("button", { name: /^Change / })).toHaveCount(0);
+  }
   expect(state.setupWrites).toEqual([]);
   expect(state.unexpected).toEqual([]);
   expect(state.errors).toEqual([]);
 });
 
-test("a live eBay check that fails on Listing settings keeps the rail from saying All set, and Try again reads it again", async ({ page }) => {
-  // eBay does not answer the first read.
-  const state = await openCatalog(page, `${CATALOG_PATH}/setup`, { setupReadFailures: 1 });
-  await openOlderSettings(page);
+test("a live eBay check that fails on Listing settings keeps the rail from saying All set, Try again reads it again, and a later failed read does the same", async ({ page }) => {
+  // eBay does not answer the first read. A second return policy lets the vendor save one later.
+  const setup = listingSetup(MARZ.storeConnectionId);
+  const state = await openCatalog(page, `${CATALOG_PATH}/setup`, { setupReadFailures: 1, listingSetups: { [MARZ.storeConnectionId]:
+    { ...setup, options: { ...setup.options, returnPolicies: [...setup.options.returnPolicies, { id: "no-returns", name: "No returns" }] } } } });
   const retry = page.getByTestId("catalog-step-setup-action");
-  const fulfillment = page.getByRole("combobox", { name: "Fulfillment policy", exact: true });
-  const lastLoaded = page.getByText("Showing the last loaded setup. Use Refresh options to try again.", { exact: true });
+  const shipping = storeDefaultRow(page, "shipping");
   const reads = (count: number) => Array.from({ length: count }, () => MARZ.storeConnectionId);
 
   // The saved settings look complete, but nothing has checked them with eBay, so the rail does not
   // vouch for them (review round 3: a failed live read is an unchecked answer, DropshipPortalCatalog
-  // liveSetup). Before, a failed first read counted as no live check and the rail said All set.
-  // Scoped to the setup panel: the policy panel shows the same read's error.
-  const setupPanel = page.locator("section").filter({ has: page.getByRole("heading", { name: /^eBay listing setup/ }) }).last();
-  await expect(setupPanel.getByText("eBay listing setup is unavailable.", { exact: true })).toBeVisible();
+  // liveSetup). The step shows its unreachable banner, and the rows that read eBay wait.
+  await expect(stepBanner(page)).toHaveAttribute("data-kind", "unreachable");
+  await expect(stepBanner(page)).toContainText("Can't reach eBay right now. Your saved settings still apply.");
+  await expect(shipping).toContainText("Can't check eBay right now.");
+  await expect(shipping.getByRole("button", { name: "Change Shipping policy" })).toHaveCount(0);
   await expect(step(page, "setup")).toContainText("Couldn't check");
   await expect(step(page, "setup")).not.toContainText("All set");
   await expect(retry).toHaveText("Try again");
   expect(state.setupReads).toEqual(reads(1));
 
-  // Try again reads the live setup too, even with no answer to show yet (review round 3), and the
-  // summary. (The policy panel also re-reads the summary when the setup read fails, as a
-  // configuration change, so only "read again" is checked for the summary.)
-  let summaryReadsBefore = state.summaryReads.length;
+  // The rail's Try again reads the live setup too, and the summary.
+  const summaryReadsBefore = state.summaryReads.length;
   await retry.click();
-  await expect(fulfillment).toHaveText("USPS Ground Advantage");
+  await expect(shipping.getByRole("button", { name: "Change Shipping policy" })).toBeVisible();
+  await expect(stepBanner(page)).toHaveCount(0);
   await expect(step(page, "setup")).toContainText("All set");
   await expect(retry).toHaveCount(0);
   expect(state.setupReads).toEqual(reads(2));
   await expect.poll(() => state.summaryReads.length).toBeGreaterThan(summaryReadsBefore);
 
-  // eBay stops answering later. The panel keeps the last loaded setup, but that answer can no
-  // longer vouch for the settings either.
+  // eBay stops answering later: a return-only save is confirmed, but its answer didn't check shipping, so the step
+  // reads the setup again, and that read fails. The rail can't vouch for the settings either.
   state.setupReadFailures = 1;
-  await page.getByRole("button", { name: "Refresh options", exact: true }).click();
-  await expect(lastLoaded).toBeVisible();
-  await expect(fulfillment).toHaveText("USPS Ground Advantage");
+  await storeDefaultRow(page, "return").getByRole("button", { name: "Change Return policy" }).click();
+  await policyChoice(page, "No returns").check();
+  await policyEditor(page).getByRole("button", { name: "Save", exact: true }).click();
+  await expect.poll(() => state.setupReads.length).toBe(3);
+  await expect(stepBanner(page)).toHaveAttribute("data-kind", "unreachable");
   await expect(step(page, "setup")).toContainText("Couldn't check");
   await expect(step(page, "setup")).not.toContainText("All set");
   await expect(retry).toHaveText("Try again");
-  expect(state.setupReads).toEqual(reads(3));
+  expect(state.setupWrites).toEqual([{ method: "PUT", path: `/api/dropship/ebay/listing-setup/${MARZ.storeConnectionId}`,
+    body: { expectedRevision: SETUP_REVISION, idempotencyKey: expect.stringMatching(/^ls-policy:[A-Za-z0-9-]+$/), returnPolicyId: "no-returns" } }]);
 
-  // eBay is back: Try again reads the summary and the live setup again.
-  summaryReadsBefore = state.summaryReads.length;
-  await retry.click();
+  // eBay is back: the banner's Try again reads the setup again (the rail's would too).
+  await stepBanner(page).getByRole("button", { name: "Try again" }).click();
+  await expect(stepBanner(page)).toHaveCount(0);
   await expect(step(page, "setup")).toContainText("All set");
   await expect(retry).toHaveCount(0);
-  await expect(lastLoaded).toHaveCount(0);
+  await expect(storeDefaultRow(page, "return")).toContainText("No returns");
   expect(state.setupReads).toEqual(reads(4));
-  await expect.poll(() => state.summaryReads.length).toBeGreaterThan(summaryReadsBefore);
+  expect(state.setupWrites).toHaveLength(1);
   expect(state.unexpected).toEqual([]);
   expect(state.errors).toEqual([]);
 });

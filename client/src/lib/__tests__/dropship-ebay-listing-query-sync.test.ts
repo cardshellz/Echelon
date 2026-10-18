@@ -1,12 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { QueryClient, QueryObserver } from "@tanstack/react-query";
-import type {
-  DropshipEbayListingPolicyOverrideResponse,
-  DropshipEbayListingSetupResponse,
-} from "../dropship-ops-surface";
+import type { DropshipEbayListingSetupResponse } from "../dropship-ops-surface";
 import {
   EBAY_LISTING_SETUP_CONTRACT_HEADERS,
-  ebayListingPolicyQueryKey,
   ebayListingSetupQueryKey,
   ebayListingSetupQueryOptions,
   refreshEbayListingConfiguration,
@@ -55,99 +51,64 @@ describe("eBay listing setup read", () => {
   });
 });
 
+// Listing settings PR 12 dropped the per-size policy view's cache key (D16): its only reader, the per-size policy
+// panel, was deleted, so these cases observe and assert the setup read alone. The cases that were about the policy
+// view only (its re-read, the two-read ordering and failures, no fabricated assignments) went with it.
 describe("saved eBay listing setup synchronization", () => {
-  it("publishes defaults and current options while preserving listing choices and revisions", async () => {
+  it("publishes the confirmed setup for its own store only, and leaves it fresh", async () => {
     const client = queryClient();
     const setup = savedSetup();
-    const before = policyResponse();
-    client.setQueryData(ebayListingPolicyQueryKey(44), before);
-    const otherStore = { ...policyResponse(), storeConnectionId: 45 };
-    client.setQueryData(ebayListingPolicyQueryKey(45), otherStore);
+    const otherStore = { ...savedSetup(), storeConnectionId: 45 };
+    client.setQueryData(ebayListingSetupQueryKey(45), otherStore);
 
     await synchronizeSavedEbayListingSetup(client, setup);
 
     expect(client.getQueryData(ebayListingSetupQueryKey(44))).toEqual(setup);
-    expect(client.getQueryData(ebayListingPolicyQueryKey(44))).toEqual({
-      ...before,
-      defaults: policiesFrom(setup),
-      options: {
-        fulfillmentPolicies: setup.options.fulfillmentPolicies,
-        returnPolicies: setup.options.returnPolicies,
-        paymentPolicies: setup.options.paymentPolicies,
-      },
-    });
-    expect(client.getQueryData(ebayListingPolicyQueryKey(45))).toEqual(otherStore);
-    expect(client.getQueryState(ebayListingPolicyQueryKey(44))?.isInvalidated).toBe(true);
-    expect(client.getQueryState(ebayListingPolicyQueryKey(45))?.isInvalidated).toBe(false);
+    expect(client.getQueryState(ebayListingSetupQueryKey(44))?.isInvalidated).toBe(false);
+    expect(client.getQueryData(ebayListingSetupQueryKey(45))).toEqual(otherStore);
+    expect(client.getQueryState(ebayListingSetupQueryKey(45))?.isInvalidated).toBe(false);
+    // Only the setup read is in the cache: no other key is written for the store.
+    expect(client.getQueryCache().getAll().map((query) => query.queryKey)).toEqual([
+      ebayListingSetupQueryKey(45), ebayListingSetupQueryKey(44),
+    ]);
   });
 
-  it("reloads active policy views so they include current assignments, not only new defaults", async () => {
-    const client = queryClient();
-    const before = policyResponse();
-    const updated = { ...before, defaults: policiesFrom(savedSetup()), assignments: [] };
-    client.setQueryData(ebayListingPolicyQueryKey(44), before);
-    const fetchPolicies = vi.fn().mockResolvedValue(updated);
-    const observer = new QueryObserver(client, {
-      queryKey: ebayListingPolicyQueryKey(44), queryFn: fetchPolicies, staleTime: Infinity,
-    });
-    const unsubscribe = observer.subscribe(() => undefined);
-
-    await synchronizeSavedEbayListingSetup(client, savedSetup());
-
-    expect(fetchPolicies).toHaveBeenCalledOnce();
-    expect(client.getQueryData(ebayListingPolicyQueryKey(44))).toEqual(updated);
-    unsubscribe();
-  });
-
-  it("rejects a failed reread without rolling back the confirmed defaults, and supports refresh-only retry", async () => {
+  it("publishes a checked answer without reading again, and a refresh-only retry reads the server's setup", async () => {
     const client = queryClient();
     const setup = savedSetup();
-    client.setQueryData(ebayListingPolicyQueryKey(44), policyResponse());
-    const fetchPolicies = vi.fn().mockRejectedValueOnce(new Error("offline"))
-      .mockResolvedValue({ ...policyResponse(), defaults: policiesFrom(setup) });
+    const current = { ...savedSetup(), revision: 6 };
+    const fetchSetup = vi.fn().mockResolvedValue(current);
     const observer = new QueryObserver(client, {
-      queryKey: ebayListingPolicyQueryKey(44), queryFn: fetchPolicies, staleTime: Infinity,
+      queryKey: ebayListingSetupQueryKey(44), queryFn: fetchSetup, staleTime: Infinity,
     });
+    client.setQueryData(ebayListingSetupQueryKey(44), savedSetup());
     const unsubscribe = observer.subscribe(() => undefined);
 
-    await expect(synchronizeSavedEbayListingSetup(client, setup)).rejects.toThrow("offline");
-    expect(client.getQueryData<DropshipEbayListingPolicyOverrideResponse>(ebayListingPolicyQueryKey(44))?.defaults)
-      .toEqual(policiesFrom(setup));
+    await expect(synchronizeSavedEbayListingSetup(client, setup)).resolves.toBeUndefined();
+    expect(fetchSetup).not.toHaveBeenCalled();
     expect(client.getQueryData(ebayListingSetupQueryKey(44))).toEqual(setup);
 
     await expect(refreshEbayListingConfiguration(client, setup.storeConnectionId)).resolves.toBeUndefined();
-    expect(fetchPolicies).toHaveBeenCalledTimes(2);
+    expect(fetchSetup).toHaveBeenCalledOnce();
+    expect(client.getQueryData(ebayListingSetupQueryKey(44))).toEqual(current);
     unsubscribe();
   });
 
-  it("cancels pre-save reads so late responses cannot restore missing defaults", async () => {
+  it("cancels pre-save reads so a late response cannot restore missing defaults", async () => {
     const client = queryClient();
     const setup = savedSetup();
     const oldSetup = deferred<DropshipEbayListingSetupResponse>();
-    const oldPolicies = deferred<DropshipEbayListingPolicyOverrideResponse>();
-    const updated = { ...policyResponse(), defaults: policiesFrom(setup) };
-    client.setQueryData(ebayListingPolicyQueryKey(44), policyResponse());
-    const fetchPolicies = vi.fn().mockImplementationOnce(() => oldPolicies.promise).mockResolvedValue(updated);
-    const observer = new QueryObserver(client, {
-      queryKey: ebayListingPolicyQueryKey(44), queryFn: fetchPolicies, staleTime: Infinity,
-    });
-    const unsubscribe = observer.subscribe(() => undefined);
-    const stalePolicyRead = observer.refetch();
     const staleSetupRead = client.fetchQuery({
       queryKey: ebayListingSetupQueryKey(44), queryFn: () => oldSetup.promise,
     }).catch(() => undefined);
 
     await synchronizeSavedEbayListingSetup(client, setup);
-    oldPolicies.resolve(policyResponse());
     oldSetup.resolve({ ...setup, selection: {
       merchantLocationKey: null, fulfillmentPolicyId: null, returnPolicyId: null, paymentPolicyId: null,
     } });
-    await Promise.all([stalePolicyRead, staleSetupRead]);
+    await staleSetupRead;
 
-    expect(fetchPolicies).toHaveBeenCalledTimes(2);
     expect(client.getQueryData(ebayListingSetupQueryKey(44))).toEqual(setup);
-    expect(client.getQueryData(ebayListingPolicyQueryKey(44))).toEqual(updated);
-    unsubscribe();
   });
 
   it("refresh-only retry preserves newer defaults instead of republishing the old confirmed save", async () => {
@@ -158,19 +119,12 @@ describe("saved eBay listing setup synchronization", () => {
     } };
     let currentSetup = savedA;
     client.setQueryData(ebayListingSetupQueryKey(44), savedA);
-    client.setQueryData(ebayListingPolicyQueryKey(44), policyResponse());
     const fetchSetup = vi.fn().mockImplementation(async () => currentSetup);
-    const fetchPolicies = vi.fn().mockRejectedValueOnce(new Error("policy read failed"))
-      .mockImplementation(async () => ({ ...policyResponse(), defaults: policiesFrom(currentSetup) }));
     const setupObserver = new QueryObserver(client, {
       queryKey: ebayListingSetupQueryKey(44), queryFn: fetchSetup, staleTime: Infinity,
     });
-    const policyObserver = new QueryObserver(client, {
-      queryKey: ebayListingPolicyQueryKey(44), queryFn: fetchPolicies, staleTime: Infinity,
-    });
     const stopSetup = setupObserver.subscribe(() => undefined);
-    const stopPolicies = policyObserver.subscribe(() => undefined);
-    await expect(synchronizeSavedEbayListingSetup(client, savedA)).rejects.toThrow("policy read failed");
+    await synchronizeSavedEbayListingSetup(client, savedA);
 
     // Another tab saves B, then the setup view sees B through a focus/refetch.
     currentSetup = currentB;
@@ -182,81 +136,55 @@ describe("saved eBay listing setup synchronization", () => {
     await refreshEbayListingConfiguration(client, 44);
 
     expect(fetchSetup).toHaveBeenCalledTimes(2);
-    expect(fetchPolicies).toHaveBeenCalledTimes(2);
     expect(valuesDuringRetry).not.toContain(savedA.selection.fulfillmentPolicyId);
     expect(client.getQueryData(ebayListingSetupQueryKey(44))).toEqual(currentB);
-    expect(client.getQueryData<DropshipEbayListingPolicyOverrideResponse>(ebayListingPolicyQueryKey(44))?.defaults)
-      .toEqual(policiesFrom(currentB));
     stopWatching();
-    stopPolicies();
     stopSetup();
   });
 
-  it("refresh-only retry reports setup read failure without discarding either cached view", async () => {
+  it("refresh-only retry reports a setup read failure without discarding the cached view", async () => {
     const client = queryClient();
     const setup = savedSetup();
-    const policies = { ...policyResponse(), defaults: policiesFrom(setup) };
     client.setQueryData(ebayListingSetupQueryKey(44), setup);
-    client.setQueryData(ebayListingPolicyQueryKey(44), policies);
-    const setupObserver = new QueryObserver(client, {
+    const stopSetup = new QueryObserver(client, {
       queryKey: ebayListingSetupQueryKey(44), queryFn: async () => { throw new Error("setup offline"); }, staleTime: Infinity,
-    });
-    const policyObserver = new QueryObserver(client, {
-      queryKey: ebayListingPolicyQueryKey(44), queryFn: async () => policies, staleTime: Infinity,
-    });
-    const stopSetup = setupObserver.subscribe(() => undefined);
-    const stopPolicies = policyObserver.subscribe(() => undefined);
+    }).subscribe(() => undefined);
 
     await expect(refreshEbayListingConfiguration(client, 44)).rejects.toThrow("setup offline");
     expect(client.getQueryData(ebayListingSetupQueryKey(44))).toEqual(setup);
-    expect(client.getQueryData(ebayListingPolicyQueryKey(44))).toEqual(policies);
     stopSetup();
-    stopPolicies();
   });
 
-  it("reads both views again instead of caching an answer that did not read eBay", async () => {
+  it("reads the setup again instead of caching an answer that did not read eBay", async () => {
     // A replayed save (or a shelf-only one) answers without eBay's option lists.
     const client = queryClient();
     const loaded = savedSetup();
-    const loadedPolicies = policyResponse();
     client.setQueryData(ebayListingSetupQueryKey(44), loaded);
-    client.setQueryData(ebayListingPolicyQueryKey(44), loadedPolicies);
 
     await synchronizeSavedEbayListingSetup(client, notReadFromEbay(loaded));
 
-    // Nothing from the answer is published: no empty option lists, no defaults copied over.
+    // Nothing from the answer is published: no empty option lists.
     expect(client.getQueryData(ebayListingSetupQueryKey(44))).toEqual(loaded);
-    expect(client.getQueryData(ebayListingPolicyQueryKey(44))).toEqual(loadedPolicies);
-    // Both are stale, so a view mounted later reads the server, not the cache.
+    // It is stale, so a view mounted later reads the server, not the cache.
     expect(client.getQueryState(ebayListingSetupQueryKey(44))?.isInvalidated).toBe(true);
-    expect(client.getQueryState(ebayListingPolicyQueryKey(44))?.isInvalidated).toBe(true);
   });
 
-  it("an answer that did not read eBay refreshes open views from the server", async () => {
+  it("an answer that did not read eBay refreshes an open setup view from the server", async () => {
     const client = queryClient();
     const loaded = savedSetup();
     const current = { ...savedSetup(), revision: 6, selection: { ...savedSetup().selection, returnPolicyId: "return-60" },
       options: { ...savedSetup().options, returnPolicies: [{ id: "return-60", name: "60-day returns" }] } };
-    const currentPolicies = { ...policyResponse(), defaults: policiesFrom(current) };
     client.setQueryData(ebayListingSetupQueryKey(44), loaded);
-    client.setQueryData(ebayListingPolicyQueryKey(44), policyResponse());
     const fetchSetup = vi.fn().mockResolvedValue(current);
-    const fetchPolicies = vi.fn().mockResolvedValue(currentPolicies);
     const stopSetup = new QueryObserver(client, {
       queryKey: ebayListingSetupQueryKey(44), queryFn: fetchSetup, staleTime: Infinity,
-    }).subscribe(() => undefined);
-    const stopPolicies = new QueryObserver(client, {
-      queryKey: ebayListingPolicyQueryKey(44), queryFn: fetchPolicies, staleTime: Infinity,
     }).subscribe(() => undefined);
 
     await synchronizeSavedEbayListingSetup(client, notReadFromEbay({ ...current, outcome: "replayed" }));
 
     expect(fetchSetup).toHaveBeenCalledOnce();
-    expect(fetchPolicies).toHaveBeenCalledOnce();
     expect(client.getQueryData(ebayListingSetupQueryKey(44))).toEqual(current);
-    expect(client.getQueryData(ebayListingPolicyQueryKey(44))).toEqual(currentPolicies);
     stopSetup();
-    stopPolicies();
   });
 
   it("reports a failed reread of the setup after an answer that did not read eBay, keeping the loaded setup", async () => {
@@ -268,26 +196,22 @@ describe("saved eBay listing setup synchronization", () => {
     }).subscribe(() => undefined);
 
     await expect(synchronizeSavedEbayListingSetup(client, notReadFromEbay(loaded))).rejects.toThrow("setup offline");
-    // The empty-option answer never replaces what was loaded; the panel then
-    // offers its refresh-only retry (refreshEbayListingConfiguration).
+    // The empty-option answer never replaces what was loaded; the step's save runner then reports
+    // "Saved. We couldn't load the latest view." and the refresh-only retry is refreshEbayListingConfiguration.
     expect(client.getQueryData(ebayListingSetupQueryKey(44))).toEqual(loaded);
     stopSetup();
   });
 
   it("publishes an answer that says it read eBay, as before checks existed", async () => {
     const client = queryClient();
-    const before = policyResponse();
     const setup = { ...savedSetup(), revision: 5, outcome: "changed" as const,
       checks: { ebay: "checked" as const, fulfillment: { status: "checked" as const } } };
-    client.setQueryData(ebayListingPolicyQueryKey(44), before);
 
     await synchronizeSavedEbayListingSetup(client, setup);
 
     // Published as a read answers it: the save's outcome is not part of the setup view.
     expect(client.getQueryData(ebayListingSetupQueryKey(44))).toEqual(asRead(setup));
     expect(client.getQueryData(ebayListingSetupQueryKey(44))).not.toHaveProperty("outcome");
-    expect(client.getQueryData<DropshipEbayListingPolicyOverrideResponse>(ebayListingPolicyQueryKey(44))?.defaults)
-      .toEqual(policiesFrom(setup));
   });
 
   it.each(["changed", "unchanged", "replayed"] as const)(
@@ -302,7 +226,7 @@ describe("saved eBay listing setup synchronization", () => {
       expect(cached).not.toHaveProperty("outcome");
       expect(cached).toEqual({ ...savedSetup(), revision: 5, checks: CHECKED });
       expect(cached).not.toBe(answer);
-      // The panel still reads the outcome from the answer it was handed.
+      // The caller still reads the outcome from the answer it was handed.
       expect(answer.outcome).toBe(outcome);
     },
   );
@@ -311,8 +235,8 @@ describe("saved eBay listing setup synchronization", () => {
     { path: "the refresh-only retry", reread: (client: QueryClient) => refreshEbayListingConfiguration(client, 44) },
     { path: "an invalidation", reread: (client: QueryClient) => client.invalidateQueries({ queryKey: ebayListingSetupQueryKey(44) }) },
   ])("keeps the cached setup's reference when a read after the save says the same, through $path", async ({ reread }) => {
-    // The panel rebuilds its draft whenever the setup data changes reference
-    // (EbayListingSetupPanel); an unchanged read must not hand it new data.
+    // Every observer of the setup read (the step and its policy and shelf rows) renders again whenever the
+    // data changes reference; an unchanged read must not hand them new data.
     const client = queryClient();
     const saved: DropshipEbayListingSetupResponse = { ...savedSetup(), revision: 5, checks: CHECKED };
     client.setQueryData(ebayListingSetupQueryKey(44), savedSetup());
@@ -336,7 +260,7 @@ describe("saved eBay listing setup synchronization", () => {
     stop();
   });
 
-  it("hands the panel a new setup when the read after the save differs, or when the cache held the save outcome", async () => {
+  it("hands observers a new setup when the read after the save differs, or when the cache held the save outcome", async () => {
     // Why the outcome is left out: a cached outcome makes every read differ.
     const saved: DropshipEbayListingSetupResponse = { ...savedSetup(), revision: 5, checks: CHECKED };
     for (const { cache, read } of [
@@ -362,14 +286,12 @@ describe("saved eBay listing setup synchronization", () => {
     { status: "unavailable" as const, reference: "DROPSHIP_EBAY_FULFILLMENT_ROUTING_UNAVAILABLE", kind: "temporary" as const },
     { status: "unavailable" as const, reference: "DROPSHIP_EBAY_FULFILLMENT_ROUTING_REQUIRED", kind: "setup_incomplete" as const },
     { status: "not_checked" as const },
-  ])("reads both views again instead of caching an answer whose shipping was $status", async (fulfillment) => {
+  ])("reads the setup again instead of caching an answer whose shipping was $status", async (fulfillment) => {
     // eBay was read, but shipping policies in this answer are unchecked: it
     // must not replace a loaded view whose policies were checked.
     const client = queryClient();
     const loaded = savedSetup();
-    const loadedPolicies = policyResponse();
     client.setQueryData(ebayListingSetupQueryKey(44), loaded);
-    client.setQueryData(ebayListingPolicyQueryKey(44), loadedPolicies);
     const setQueryData = vi.spyOn(client, "setQueryData");
     const answer: DropshipEbayListingSetupResponse = { ...savedSetup(), revision: 5, fulfillmentCapability: null,
       checks: { ebay: "checked", fulfillment } };
@@ -378,9 +300,7 @@ describe("saved eBay listing setup synchronization", () => {
 
     expect(setQueryData).not.toHaveBeenCalled();
     expect(client.getQueryData(ebayListingSetupQueryKey(44))).toEqual(loaded);
-    expect(client.getQueryData(ebayListingPolicyQueryKey(44))).toEqual(loadedPolicies);
     expect(client.getQueryState(ebayListingSetupQueryKey(44))?.isInvalidated).toBe(true);
-    expect(client.getQueryState(ebayListingPolicyQueryKey(44))?.isInvalidated).toBe(true);
   });
 
   it("publishes nothing from an answer that did not read eBay, even when no view has loaded", async () => {
@@ -391,111 +311,6 @@ describe("saved eBay listing setup synchronization", () => {
 
     expect(setQueryData).not.toHaveBeenCalled();
     expect(client.getQueryData(ebayListingSetupQueryKey(44))).toBeUndefined();
-    expect(client.getQueryData(ebayListingPolicyQueryKey(44))).toBeUndefined();
-  });
-
-  it("still rereads the policy view when the setup reread fails after a partial answer, then reports the setup failure", async () => {
-    const client = queryClient();
-    const loaded = savedSetup();
-    const currentPolicies = { ...policyResponse(), defaults: policiesFrom(loaded) };
-    client.setQueryData(ebayListingSetupQueryKey(44), loaded);
-    client.setQueryData(ebayListingPolicyQueryKey(44), policyResponse());
-    const setQueryData = vi.spyOn(client, "setQueryData");
-    const fetchPolicies = vi.fn().mockResolvedValue(currentPolicies);
-    const stopSetup = new QueryObserver(client, {
-      queryKey: ebayListingSetupQueryKey(44), queryFn: async () => { throw new Error("setup offline"); }, staleTime: Infinity,
-    }).subscribe(() => undefined);
-    const stopPolicies = new QueryObserver(client, {
-      queryKey: ebayListingPolicyQueryKey(44), queryFn: fetchPolicies, staleTime: Infinity,
-    }).subscribe(() => undefined);
-
-    await expect(synchronizeSavedEbayListingSetup(client, notReadFromEbay(loaded))).rejects.toThrow("setup offline");
-
-    // The answer itself was never written to either cache.
-    expect(setQueryData).not.toHaveBeenCalled();
-    expect(fetchPolicies).toHaveBeenCalledOnce();
-    expect(client.getQueryData(ebayListingPolicyQueryKey(44))).toEqual(currentPolicies);
-    expect(client.getQueryData(ebayListingSetupQueryKey(44))).toEqual(loaded);
-    stopSetup();
-    stopPolicies();
-  });
-
-  it("still rereads the setup when the policy reread fails after a partial answer, then reports the policy failure", async () => {
-    const client = queryClient();
-    const loaded = savedSetup();
-    const current = { ...savedSetup(), revision: 6 };
-    client.setQueryData(ebayListingSetupQueryKey(44), loaded);
-    client.setQueryData(ebayListingPolicyQueryKey(44), policyResponse());
-    const setQueryData = vi.spyOn(client, "setQueryData");
-    const fetchSetup = vi.fn().mockResolvedValue(current);
-    const stopSetup = new QueryObserver(client, {
-      queryKey: ebayListingSetupQueryKey(44), queryFn: fetchSetup, staleTime: Infinity,
-    }).subscribe(() => undefined);
-    const stopPolicies = new QueryObserver(client, {
-      queryKey: ebayListingPolicyQueryKey(44), queryFn: async () => { throw new Error("policies offline"); }, staleTime: Infinity,
-    }).subscribe(() => undefined);
-
-    await expect(synchronizeSavedEbayListingSetup(client, notReadFromEbay(loaded))).rejects.toThrow("policies offline");
-
-    expect(setQueryData).not.toHaveBeenCalled();
-    expect(fetchSetup).toHaveBeenCalledOnce();
-    expect(client.getQueryData(ebayListingSetupQueryKey(44))).toEqual(current);
-    stopSetup();
-    stopPolicies();
-  });
-
-  it("reports the setup failure first when both rereads fail after a partial answer", async () => {
-    const client = queryClient();
-    client.setQueryData(ebayListingSetupQueryKey(44), savedSetup());
-    client.setQueryData(ebayListingPolicyQueryKey(44), policyResponse());
-    const stopSetup = new QueryObserver(client, {
-      queryKey: ebayListingSetupQueryKey(44), queryFn: async () => { throw new Error("setup offline"); }, staleTime: Infinity,
-    }).subscribe(() => undefined);
-    const stopPolicies = new QueryObserver(client, {
-      queryKey: ebayListingPolicyQueryKey(44), queryFn: async () => { throw new Error("policies offline"); }, staleTime: Infinity,
-    }).subscribe(() => undefined);
-
-    await expect(synchronizeSavedEbayListingSetup(client, notReadFromEbay(savedSetup()))).rejects.toThrow("setup offline");
-    stopSetup();
-    stopPolicies();
-  });
-
-  it("waits for the policy reread to finish before reporting a setup reread that failed first", async () => {
-    // A retry started on the error must not race an unfinished sibling read.
-    const client = queryClient();
-    client.setQueryData(ebayListingSetupQueryKey(44), savedSetup());
-    client.setQueryData(ebayListingPolicyQueryKey(44), policyResponse());
-    const policies = deferred<DropshipEbayListingPolicyOverrideResponse>();
-    const stopSetup = new QueryObserver(client, {
-      queryKey: ebayListingSetupQueryKey(44), queryFn: async () => { throw new Error("setup offline"); }, staleTime: Infinity,
-    }).subscribe(() => undefined);
-    const stopPolicies = new QueryObserver(client, {
-      queryKey: ebayListingPolicyQueryKey(44), queryFn: () => policies.promise, staleTime: Infinity,
-    }).subscribe(() => undefined);
-    let settled = false;
-    const sync = synchronizeSavedEbayListingSetup(client, notReadFromEbay(savedSetup()))
-      .finally(() => { settled = true; });
-    const outcome = sync.catch((error: unknown) => error);
-
-    // Let the setup read fail; the policy read is still open.
-    for (let turn = 0; turn < 10; turn += 1) await Promise.resolve();
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    expect(client.getQueryState(ebayListingSetupQueryKey(44))?.status).toBe("error");
-    expect(client.getQueryState(ebayListingPolicyQueryKey(44))?.fetchStatus).toBe("fetching");
-    expect(settled).toBe(false);
-
-    policies.resolve(policyResponse());
-    await expect(outcome).resolves.toMatchObject({ message: "setup offline" });
-    expect(settled).toBe(true);
-    stopSetup();
-    stopPolicies();
-  });
-
-  it("does not fabricate empty assignments when the policy view has not loaded", async () => {
-    const client = queryClient();
-    await synchronizeSavedEbayListingSetup(client, savedSetup());
-    expect(client.getQueryData(ebayListingPolicyQueryKey(44))).toBeUndefined();
-    expect(client.getQueryData(ebayListingSetupQueryKey(44))).toEqual(savedSetup());
   });
 });
 
@@ -503,25 +318,6 @@ function queryClient(): QueryClient {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: Infinity } } });
   clients.push(client);
   return client;
-}
-
-function policiesFrom(setup: DropshipEbayListingSetupResponse) {
-  return {
-    fulfillmentPolicyId: setup.selection.fulfillmentPolicyId,
-    returnPolicyId: setup.selection.returnPolicyId,
-    paymentPolicyId: setup.selection.paymentPolicyId,
-  };
-}
-
-function policyResponse(): DropshipEbayListingPolicyOverrideResponse {
-  return {
-    storeConnectionId: 44,
-    defaults: { fulfillmentPolicyId: null, returnPolicyId: null, paymentPolicyId: null },
-    options: { fulfillmentPolicies: [], returnPolicies: [], paymentPolicies: [] },
-    assignments: [{ productVariantId: 11, revisionId: 27, fulfillmentPolicyId: "ups-ground",
-      returnPolicyId: null, paymentPolicyId: null, updatedAt: "2026-09-05T12:00:00Z" }],
-    fetchedAt: "2026-09-05T12:00:00Z",
-  };
 }
 
 function savedSetup(): DropshipEbayListingSetupResponse {

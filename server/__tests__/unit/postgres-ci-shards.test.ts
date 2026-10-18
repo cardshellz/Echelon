@@ -56,7 +56,7 @@ function runnerFixture() {
 }
 
 describe("PostgreSQL CI coverage and isolation", () => {
-  it("preserves prior coverage with the explicitly retired duplicate invoice owner and reviewed additions", () => {
+  it("preserves prior coverage with the explicitly retired duplicate invoice owner, the retired bulk policy writer suite and reviewed additions", () => {
     const addedSuites = [
       "server/modules/procurement/__tests__/integration/procurement-settings.integration.test.ts",
       "server/modules/warehouse/__tests__/integration/warehouse-settings-ownership.integration.test.ts",
@@ -169,7 +169,12 @@ describe("PostgreSQL CI coverage and isolation", () => {
     );
     const retiredInvoiceSuite = "server/modules/inventory/__tests__/integration/invoice-variance-cogs.integration.test.ts";
     expect(POSTGRES_TEST_FILES).not.toContain(retiredInvoiceSuite);
-    const priorSuiteCount = 69;
+    // Listing settings PR 12 deleted the per-size eBay policy writer (its routes, service and
+    // repository) this suite ran; the guarantees that hold for the surviving writers of those
+    // rows are in dropship-listing-setting-writes.integration.test.ts.
+    const retiredPolicyBulkSuite = "server/modules/dropship/__tests__/integration/dropship-ebay-listing-policy-bulk.integration.test.ts";
+    expect(POSTGRES_TEST_FILES).not.toContain(retiredPolicyBulkSuite);
+    const priorSuiteCount = 68;
     // Derive the total from the protected baseline and this independent review list,
     // so concurrent reviewed additions cannot leave a stale hardcoded total.
     const expectedSuiteCount = priorSuiteCount + addedSuites.length;
@@ -181,9 +186,10 @@ describe("PostgreSQL CI coverage and isolation", () => {
     // adding hardening coverage must not silently remove an older suite.
     const priorFiles = POSTGRES_TEST_FILES.filter((file) => !addedSuites.includes(file));
     expect(priorFiles).toHaveLength(priorSuiteCount);
-    // Include the one reviewed retirement when checking the original digest.
-    // The live source-application suites replace that unused duplicate algorithm.
-    const digest = createHash("sha256").update([...priorFiles,retiredInvoiceSuite].sort().join("\n")).digest("hex");
+    // Include the two reviewed retirements when checking the original digest.
+    // The live source-application suites replace that unused duplicate algorithm;
+    // the bulk policy suite's writer no longer exists.
+    const digest = createHash("sha256").update([...priorFiles, retiredInvoiceSuite, retiredPolicyBulkSuite].sort().join("\n")).digest("hex");
     expect(digest).toBe("8d6c96c5651ea0352e914985eb98ce15267503b535b50d63dec5a0780a80868a");
     expect(() => validatePostgresManifest(POSTGRES_REPOSITORY_ROOT, POSTGRES_TEST_FILES)).not.toThrow();
   });
@@ -207,8 +213,15 @@ describe("PostgreSQL CI coverage and isolation", () => {
     const oldLoads = Array.from({ length: 8 }, (_, shard) => measuredFiles
       .filter((_, index) => index % 8 === shard).reduce((sum, file) => sum + POSTGRES_TEST_DURATION_MS[file], 0));
     const newLoads = plan.shards.map((shard) => shard.estimatedDurationMs);
-    expect(newLoads.reduce((sum, value) => sum + value, 0)).toBe(oldLoads.reduce((sum, value) => sum + value, 0));
-    expect(Math.max(...newLoads)).toBeLessThan(Math.max(...oldLoads) * 0.75);
+    const totalMs = newLoads.reduce((sum, value) => sum + value, 0);
+    expect(totalMs).toBe(oldLoads.reduce((sum, value) => sum + value, 0));
+    // The modulo baseline depends on manifest order. Retiring a suite from the middle of the
+    // manifest (Listing settings PR 12, the bulk policy suite) moves every later file to another
+    // modulo shard, and today's order happens to balance modulo better (longest 190,050 ms, was
+    // 233,562 ms), so a fixed 25% margin over it measured the order, not the planner. The margin is
+    // gone (PR 12 review CT2): the planner must still beat modulo, and its shards must stay within
+    // 1 s of each other, which also keeps the longest within 1 s of the mean load.
+    expect(Math.max(...newLoads)).toBeLessThan(Math.max(...oldLoads));
     expect(Math.max(...newLoads) - Math.min(...newLoads)).toBeLessThan(1000);
     expect(plan.shards.flatMap((shard) => shard.files).sort()).toEqual([...measuredFiles].sort());
     expect(plan.unmeasuredFiles).toEqual([]);

@@ -1,5 +1,4 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { ReactNode } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useLocation } from "wouter";
 import {
@@ -32,7 +31,6 @@ import { InputOTP, InputOTPGroup, InputOTPSlot } from "@/components/ui/input-otp
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
-import { EbayStoreCategoryCombobox } from "@/components/dropship/EbayStoreCategoryCombobox";
 import {
   Table,
   TableBody,
@@ -55,12 +53,10 @@ import {
   listLaunchReadyStoreConnections,
   postJson,
   putJson,
-  queryErrorCode,
   queryErrorMessage,
   type DropshipCatalogResponse,
   type DropshipCatalogListingTier,
   type DropshipCatalogRow,
-  type DropshipEbayStoreCategoryAssignmentResponse,
   type DropshipEbayStoreCategoryResponse,
   type DropshipListingPreviewResponse,
   type DropshipListingPreviewResult,
@@ -80,20 +76,18 @@ import {
   type ListingAccessNotice,
 } from "@/lib/dropship-listing-access";
 import { DropshipPortalShell } from "./DropshipPortalShell";
-import { EbayListingSetupPanel } from "./EbayListingSetupPanel";
-import { EbayListingPolicyOverridePanel } from "./EbayListingPolicyOverridePanel";
-import { EbayStoreCategoryAuthorizationRecovery } from "./EbayStoreCategoryAuthorizationRecovery";
-import { DropshipListingPreview, type ListingPriceSaveCallbacks } from "./DropshipListingPreview";
-import { DropshipPricingRulesPanel } from "./DropshipPricingRulesPanel";
-import { DropshipContentTemplatesPanel } from "./DropshipContentTemplatesPanel";
-import { DropshipEbayCategoryRulesPanel } from "./DropshipEbayCategoryRulesPanel";
+import { DropshipListingPreview } from "./DropshipListingPreview";
 import { CatalogStepRail } from "./catalog/CatalogStepRail";
 import { CatalogActionBar, type CatalogNextStepAction } from "./catalog/CatalogActionBar";
 import { UnsavedChangesProvider, useLeaveGuard, useUnsavedDrafts } from "./catalog/UnsavedChangesGuard";
 import { ListingSettingsDraftsProvider } from "./listing-settings/ListingSettingsDraftsProvider";
-import { ListingSettingsActionBar, ListingSettingsStep, countEbayStores } from "./listing-settings/ListingSettingsStep";
-import { OlderListingSettings } from "./listing-settings/OlderListingSettings";
-import { LISTING_SETTINGS_GUARD_ID_PREFIX, countOlderSettingsDrafts } from "@/lib/dropship-listing-settings-drafts";
+import {
+  ListingSettingsActionBar,
+  ListingSettingsStep,
+  countEbayStores,
+  type ListingSettingsStepSaveCallbacks,
+} from "./listing-settings/ListingSettingsStep";
+import { LISTING_SETTINGS_GUARD_ID_PREFIX } from "@/lib/dropship-listing-settings-drafts";
 import { scopeWithoutPrefix } from "@/lib/dropship-unsaved-changes";
 import { ebayListingSetupQueryOptions } from "@/lib/dropship-ebay-listing-query-sync";
 import { listingSettingsQueryKey, listingSettingsSummaryQueryOptions } from "@/lib/dropship-listing-settings";
@@ -217,14 +211,7 @@ function DropshipPortalCatalogPage() {
   // Failures of the listing card's own actions (preview, verification, push)
   // show inside that card, next to the buttons that caused them.
   const [listingError, setListingError] = useState<ListingActionError | null>(null);
-  const [pendingStoreCategoryVariantIds, setPendingStoreCategoryVariantIds] = useState<Set<number>>(
-    () => new Set(),
-  );
-  // "Older settings" on Listing settings starts closed and stays as the vendor left it across steps and stores (A1).
-  const [olderOpen, setOlderOpen] = useState(false);
   const guardDrafts = useUnsavedDrafts();
-  // Every leave-guard draft other than the new step's own belongs to an older panel.
-  const olderUnsaved = countOlderSettingsDrafts(guardDrafts) > 0;
   // The ways onto Listing settings leave the step's own draft out of their question: the page keeps
   // that draft on the other steps, so going back to finish it drops nothing (browser Back to step 1, then Next).
   const toSetupScope = scopeWithoutPrefix(guardDrafts, LISTING_SETTINGS_GUARD_ID_PREFIX);
@@ -325,8 +312,9 @@ function DropshipPortalCatalogPage() {
   });
   // The rail's line under Listing settings comes from saved settings, read on every step without asking eBay.
   const listingSettingsSummaryQuery = useQuery(listingSettingsSummaryQueryOptions(selectedStoreConnectionIdNumber));
-  // The live eBay setup check runs on Listing settings only, in EbayListingSetupPanel. This never
-  // fetches: it reads that panel's newest answer from the shared cache, for what only eBay can tell.
+  // The live eBay setup check runs on Listing settings only, in the step's own setup read
+  // (ListingSettingsStep). This never fetches: it reads the step's newest answer from the shared
+  // cache, for what only eBay can tell.
   const liveListingSetupQuery = useQuery({ ...ebayListingSetupQueryOptions(selectedStoreConnectionIdNumber), enabled: false });
   const activeBulkPushProof = useMemo(() => {
     return isDropshipSensitiveProofActive({
@@ -447,7 +435,9 @@ function DropshipPortalCatalogPage() {
     }
   }
 
-  const priceSaveCallbacks: ListingPriceSaveCallbacks = {
+  // The step's saves share one pending-save counter with step 3 (PR 10 D10). A save never posts a preview:
+  // it marks step 3's preview stale, and step 3 checks again when the vendor gets there (PR 10 D9).
+  const listingSettingsSaveCallbacks: ListingSettingsStepSaveCallbacks = {
     disabled: pendingListingAction !== null && pendingListingAction !== "preview",
     onSaveStarted: () => {
       if (pendingListingActionRef.current !== null && pendingListingActionRef.current !== "preview") {
@@ -462,18 +452,15 @@ function DropshipPortalCatalogPage() {
       setPendingPriceSaves(pendingPriceSavesRef.current);
       refreshListingSettings();
     },
-    onSaved: () => refreshListingPreview(previewContextKey),
   };
-  // The new step keeps the pending-save counter (D10) but never posts a preview after a save:
-  // it marks step 3's preview stale instead, and step 3 checks again when the vendor gets there (D9).
-  const listingSettingsSaveCallbacks: ListingPriceSaveCallbacks = { ...priceSaveCallbacks, onSaved: async () => undefined };
 
   async function pushListings() {
     // Blocked accounts never reach verification, so no code is emailed for a
     // push the server would refuse. The card already says what to do.
     if (pushAccessNotice) return;
     if (pendingPriceSavesRef.current > 0) {
-      setListingError({ message: "Wait for your listing price to finish saving, then queue again.", notice: null });
+      // Interim (PR 12 PROPOSAL): any Listing settings save holds the queue, not only a price.
+      setListingError({ message: "Wait for your listing settings to finish saving, then queue again.", notice: null });
       return;
     }
     if (selectedCatalogRows.length === 0) {
@@ -591,50 +578,6 @@ function DropshipPortalCatalogPage() {
     // disconnected). Reload it so the card's notice and buttons match.
     if (notice) void queryClient.invalidateQueries({ queryKey: [...ONBOARDING_QUERY_KEY] });
     setListingError({ message: caught instanceof Error ? caught.message : fallback, notice });
-  }
-
-  async function updateEbayStoreCategoryAssignment(
-    productVariantId: number,
-    storeCategoryIds: string[],
-  ) {
-    setPendingStoreCategoryVariantIds((current) => new Set(current).add(productVariantId));
-    setError("");
-    setMessage("");
-    try {
-      const result = await putJson<DropshipEbayStoreCategoryAssignmentResponse>(
-        `/api/dropship/ebay/store-category-assignments/${productVariantId}`,
-        {
-          storeConnectionId: selectedStoreConnectionIdNumber,
-          storeCategoryIds,
-          idempotencyKey: createDropshipIdempotencyKey("ebay-store-category"),
-        },
-      );
-      queryClient.setQueryData<DropshipEbayStoreCategoryResponse>(
-        ebayStoreCategoryQueryKey,
-        (current) => current ? {
-          ...current,
-          assignments: [
-            ...current.assignments.filter(
-              (assignment) => assignment.productVariantId !== productVariantId,
-            ),
-            ...(result.assignment ? [result.assignment] : []),
-          ].sort((left, right) => left.productVariantId - right.productVariantId),
-        } : current,
-      );
-      invalidateListingPreview();
-      refreshListingSettings();
-      setMessage(storeCategoryIds.length > 0
-        ? "eBay Store category assignment saved."
-        : "Optional eBay Store category assignment cleared.");
-    } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "eBay Store category update failed.");
-    } finally {
-      setPendingStoreCategoryVariantIds((current) => {
-        const next = new Set(current);
-        next.delete(productVariantId);
-        return next;
-      });
-    }
   }
 
   function applyCatalogFilters() {
@@ -872,79 +815,20 @@ function DropshipPortalCatalogPage() {
                 goToStep={(target) => leaveGuard(() => navigate(stepHref(target)))}
               />
             )}
-            {/* Today's step 2 panels under "Older settings" (A1): still mounted while closed, so their
-                reads, drafts and leave guard work as before. The lines inside keep their indentation,
-                so their text stays as it was (plan D2); only the setup panel takes one prop (L2). */}
-            <OlderListingSettings collapsible={storeReady} open={olderOpen} onOpenChange={setOlderOpen} unsaved={olderUnsaved}>
-            <CatalogStepIntro step="setup" detail={storeReady ? `These settings apply to ${selectedStoreName}.` : null} />
-            {/* Only once the stores have loaded, so a slow load never tells the vendor to connect a store they have. */}
-            {settingsQuery.data && !storeReady && (
-              <ListingAccessNoticeView tone="notice" notice={{
-                message: "Connect your eBay store and finish its setup to set how your listings look.",
-                resolution: "finish_store_setup",
-                link: listingAccessLink("finish_store_setup"),
-              }} />
-            )}
-            {selectedStoreConnection?.platform === "ebay" && (
+            {/* With no launch-ready eBay store the step can't mount: step 2 says what to do instead (PR 12 D4).
+                Only once the stores have loaded, so a slow load never tells the vendor to connect a store they have. */}
+            {!storeReady && (
               <>
-                {/* Keys unique among these siblings: a shared key would leave the
-                    previous store's panel mounted after a store switch. */}
-                <EbayListingSetupPanel
-                  key={`listing-setup-${selectedStoreConnectionIdNumber}`}
-                  storeConnectionId={selectedStoreConnectionIdNumber}
-                  storeName={selectedStoreName}
-                  onConfigurationChange={() => {
-                    invalidateListingPreview();
-                    refreshListingSettings();
-                  }}
-                  suggestionsCountAsUnsaved={olderOpen}
-                />
-                <EbayListingPolicyOverridePanel
-                  key={`policy-override-${selectedStoreConnectionIdNumber}`}
-                  storeConnectionId={selectedStoreConnectionIdNumber}
-                  storeName={selectedStoreName}
-                  rows={selectedCatalogRows}
-                  onConfigurationChange={() => {
-                    invalidateListingPreview();
-                    refreshListingSettings();
-                  }}
-                />
-                <DropshipEbayCategoryRulesPanel
-                  storeConnectionId={selectedStoreConnectionIdNumber}
-                  storeName={selectedStoreName}
-                  renderAuthorizationRecovery={(error) => (
-                    <EbayStoreCategoryAuthorizationRecovery
-                      error={error}
-                      storeConnectionId={selectedStoreConnectionIdNumber}
-                      storeName={selectedStoreName}
-                    />
-                  )}
-                  {...priceSaveCallbacks}
-                />
-                <EbayStoreCategoryAssignmentPanel
-                  authorizationRecovery={(
-                    <EbayStoreCategoryAuthorizationRecovery
-                      error={ebayStoreCategoryQuery.error}
-                      storeConnectionId={selectedStoreConnectionIdNumber}
-                      storeName={selectedStoreName}
-                    />
-                  )}
-                  data={ebayStoreCategoryQuery.data ?? null}
-                  error={ebayStoreCategoryQuery.error}
-                  isLoading={ebayStoreCategoryQuery.isLoading}
-                  pendingProductVariantIds={pendingStoreCategoryVariantIds}
-                  rows={selectedCatalogRows}
-                  onAssignmentChange={updateEbayStoreCategoryAssignment}
-                />
+                <CatalogStepIntro step="setup" detail={null} />
+                {settingsQuery.data && (
+                  <ListingAccessNoticeView tone="notice" notice={{
+                    message: "Connect your eBay store and finish its setup to set how your listings look.",
+                    resolution: "finish_store_setup",
+                    link: listingAccessLink("finish_store_setup"),
+                  }} />
+                )}
               </>
             )}
-
-            {selectedStoreConnectionIdNumber > 0 && <DropshipPricingRulesPanel storeConnectionId={selectedStoreConnectionIdNumber}
-              storeName={selectedStoreName} onConfigurationChange={() => { invalidateListingPreview(true); refreshListingSettings(); }}
-              priceSaveCallbacks={priceSaveCallbacks} />}
-            {selectedStoreConnectionIdNumber > 0 && <DropshipContentTemplatesPanel storeConnectionId={selectedStoreConnectionIdNumber}
-              storeName={selectedStoreName} {...priceSaveCallbacks} />}
-            </OlderListingSettings>
           </>
         )}
 
@@ -1165,204 +1049,6 @@ function FilterSelect({
   );
 }
 
-const EBAY_STORE_CATEGORY_RECONNECT_ERROR_CODES = new Set([
-  "DROPSHIP_EBAY_STORE_CATEGORIES_PERMISSION_REQUIRED",
-]);
-
-export function shouldOfferEbayStoreReconnect(error: unknown): boolean {
-  const code = queryErrorCode(error);
-  return code !== null && EBAY_STORE_CATEGORY_RECONNECT_ERROR_CODES.has(code);
-}
-
-export function EbayStoreCategoryAssignmentPanel({
-  authorizationRecovery,
-  data,
-  error,
-  isLoading,
-  onAssignmentChange,
-  pendingProductVariantIds,
-  rows,
-}: {
-  authorizationRecovery?: ReactNode;
-  data: DropshipEbayStoreCategoryResponse | null;
-  error: unknown;
-  isLoading: boolean;
-  onAssignmentChange: (productVariantId: number, storeCategoryIds: string[]) => void;
-  pendingProductVariantIds: ReadonlySet<number>;
-  rows: DropshipCatalogRow[];
-}) {
-  const pageSize = 25;
-  const [page, setPage] = useState(1);
-  const pageCount = Math.max(1, Math.ceil(rows.length / pageSize));
-  useEffect(() => {
-    setPage((current) => Math.min(current, pageCount));
-  }, [pageCount]);
-  const pageRows = rows.slice((page - 1) * pageSize, page * pageSize);
-  const assignmentByVariantId = new Map(
-    (data?.assignments ?? []).map((assignment) => [assignment.productVariantId, assignment]),
-  );
-  const errorCode = queryErrorCode(error);
-  const permissionRequired = errorCode === "DROPSHIP_EBAY_STORE_CATEGORIES_PERMISSION_REQUIRED";
-  const reconnectAvailable = shouldOfferEbayStoreReconnect(error);
-
-  return (
-    <section className="mt-5 overflow-hidden rounded-md border border-zinc-200 bg-white">
-      <div className="border-b border-zinc-200 p-4">
-        <h2 className="text-lg font-semibold">Your eBay Store organization (optional)</h2>
-        <p className="mt-1 text-sm text-zinc-500">
-          The required eBay category comes from your eBay categories above. Use these searchable fields only if you want a listing organized inside one or two custom categories in your own eBay Store.
-        </p>
-        <p className="mt-1 text-xs text-zinc-500">
-          Leaving both fields blank does not block preview or push. Category changes save immediately and are shown again in listing preview.
-        </p>
-      </div>
-
-      {isLoading ? (
-        <div className="space-y-2 p-4">
-          <Skeleton className="h-12 w-full" />
-          <Skeleton className="h-12 w-full" />
-        </div>
-      ) : error ? (
-        <div className="m-4 rounded-md border border-amber-300 bg-amber-50 p-4 text-sm text-amber-900">
-          <div className="font-medium">
-            {permissionRequired
-              ? "eBay Store-category authorization needs attention."
-              : "Custom Store categories are unavailable."}
-          </div>
-          <div className="mt-1">
-            {permissionRequired
-              ? "The eBay authorization has expired or been revoked. Reauthorize the connected store to load its custom Store categories."
-              : queryErrorMessage(error, "The connected eBay account did not return its Store categories.")}
-          </div>
-          <div className="mt-1 text-xs">You can still preview and push listings without this optional organization.</div>
-          {reconnectAvailable && authorizationRecovery}
-        </div>
-      ) : rows.length === 0 ? (
-        <div className="p-4 text-sm text-zinc-500">
-          Choose items in step 1, Choose what to sell, before assigning your eBay Store categories.
-        </div>
-      ) : (data?.categories.length ?? 0) === 0 ? (
-        <div className="p-4 text-sm text-zinc-500">
-          No custom leaf categories were returned by this eBay Store. Listings will use eBay&apos;s default Store organization.
-        </div>
-      ) : (
-        <div>
-          <div className="max-h-96 overflow-auto">
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>Selected item</TableHead>
-                  <TableHead>Primary Store category</TableHead>
-                  <TableHead>Secondary Store category</TableHead>
-                  <TableHead>Status</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {pageRows.map((row) => {
-                const assignment = assignmentByVariantId.get(row.productVariantId);
-                const selectedIds = assignment?.storeCategoryIds ?? [];
-                const primaryId = selectedIds[0] ?? null;
-                const secondaryId = selectedIds[1] ?? null;
-                const pending = pendingProductVariantIds.has(row.productVariantId);
-                const categoryPathById = new Map(
-                  data?.categories.map((category) => [category.categoryId, category.path]) ?? [],
-                );
-                const staleAssignment = selectedIds.some((categoryId, index) => (
-                  categoryPathById.get(categoryId) !== assignment?.storeCategoryNames[index]
-                ));
-                return (
-                  <TableRow key={row.productVariantId}>
-                    <TableCell>
-                      <div className="font-medium">{row.productName}</div>
-                      <div className="font-mono text-xs text-zinc-500">
-                        {row.variantSku || `Variant ${row.productVariantId}`}
-                      </div>
-                    </TableCell>
-                    <TableCell>
-                      <EbayStoreCategoryCombobox
-                        ariaLabel={`Primary eBay Store category for ${row.variantSku || row.variantName}`}
-                        categories={data?.categories ?? []}
-                        disabled={pending}
-                        placeholder="Use eBay default"
-                        value={primaryId}
-                        onValueChange={(categoryId) => {
-                          const nextIds = categoryId === null
-                            ? selectedIds.slice(1, 2)
-                            : [categoryId, ...selectedIds.filter((value) => value !== categoryId).slice(0, 1)];
-                          onAssignmentChange(row.productVariantId, nextIds);
-                        }}
-                      />
-                    </TableCell>
-                    <TableCell>
-                      <EbayStoreCategoryCombobox
-                        ariaLabel={`Secondary eBay Store category for ${row.variantSku || row.variantName}`}
-                        categories={(data?.categories ?? []).filter((category) => category.categoryId !== primaryId)}
-                        disabled={pending || primaryId === null}
-                        placeholder={primaryId === null ? "Select primary first" : "No secondary category"}
-                        value={secondaryId}
-                        onValueChange={(categoryId) => {
-                          if (primaryId === null) return;
-                          const nextIds = categoryId === null
-                            ? selectedIds.slice(0, 1)
-                            : [primaryId, categoryId];
-                          onAssignmentChange(row.productVariantId, nextIds);
-                        }}
-                      />
-                    </TableCell>
-                    <TableCell>
-                      {pending ? (
-                        <Badge variant="outline">Saving</Badge>
-                      ) : staleAssignment ? (
-                        <Badge variant="outline" className="border-amber-300 bg-amber-50 text-amber-900">
-                          Category changed on eBay
-                        </Badge>
-                      ) : selectedIds.length > 0 ? (
-                        <Badge variant="outline" className="border-emerald-200 bg-emerald-50 text-emerald-800">
-                          Assigned
-                        </Badge>
-                      ) : (
-                        <Badge variant="outline">eBay default</Badge>
-                      )}
-                    </TableCell>
-                  </TableRow>
-                );
-                })}
-              </TableBody>
-            </Table>
-          </div>
-          {pageCount > 1 && (
-            <div className="flex items-center justify-between gap-3 border-t border-zinc-200 px-4 py-3 text-sm text-zinc-600">
-              <span>
-                Showing {(page - 1) * pageSize + 1}-{Math.min(page * pageSize, rows.length)} of {rows.length} selected items
-              </span>
-              <div className="flex gap-2">
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  disabled={page === 1}
-                  onClick={() => setPage((current) => Math.max(1, current - 1))}
-                >
-                  Previous
-                </Button>
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  disabled={page === pageCount}
-                  onClick={() => setPage((current) => Math.min(pageCount, current + 1))}
-                >
-                  Next
-                </Button>
-              </div>
-            </div>
-          )}
-        </div>
-      )}
-    </section>
-  );
-}
-
 function ListingPreviewPanel({
   accessNotice,
   emailCodeSent,
@@ -1537,7 +1223,8 @@ function ListingPreviewPanel({
       )}
 
       {listingPreview && listingPreviewStale && <div role="status" className="mt-4 rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900">
-        {priceSavePending ? "Saving your listing price and refreshing the preview…" : "This preview is out of date. Preview again to see current details."}
+        {/* Interim (PR 12 PROPOSAL): a Listing settings save no longer refreshes the preview (PR 12 D6). */}
+        {priceSavePending ? "Saving your listing settings…" : "This preview is out of date. Preview again to see current details."}
       </div>}
       {listingPreview && <DropshipListingPreview key={listingPreview.storeConnectionId} preview={listingPreview} stale={listingPreviewStale} />}
 

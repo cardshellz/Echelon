@@ -70,7 +70,8 @@ describe("rich listing preview", () => {
     expect(markup).toContain("Envelopes");
     expect(markup).not.toContain("#123"); expect(markup).not.toContain("· #");
     expect(markup).toContain("Category source");
-    expect(markup).toContain("From your rule &quot;Envelopes&quot;");
+    // Interim (PR 12 PROPOSAL): the step's and the sheet's name for these rules.
+    expect(markup).toContain("From your older group rule “Envelopes”");
     const withoutSource = sheet(row(), setup(), "2026-09-30T12:00:00.000Z");
     expect(withoutSource).not.toContain("Category source");
     expect(markup).not.toMatch(FORBIDDEN);
@@ -189,7 +190,7 @@ describe("rich listing preview", () => {
   });
   it("leaves the Listing settings draft out of every link's leave question, as the rail's link to that step does", () => {
     // The page keeps that step's draft across steps, so going there drops nothing (scopeWithoutPrefix, as the
-    // page's toSetupScope); only an older panel's draft is asked about. Pinned in the source, as the sibling
+    // page's toSetupScope); only another editor's draft is asked about. Pinned in the source, as the sibling
     // tests pin wiring: one GuardedLink, always with that scope, and every link on the step goes through it.
     const source = readFileSync(join(process.cwd(), "client/src/pages/dropship/DropshipListingPreview.tsx"), "utf8");
     expect(source.match(/<GuardedLink/g)).toHaveLength(1);

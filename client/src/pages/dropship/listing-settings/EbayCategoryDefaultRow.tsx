@@ -145,7 +145,6 @@ export function EbayCategoryDefaultRow({ storeConnectionId, saved, right, saveCa
       }
       signature = prepared.signature;
     }
-    const pickedId = value.defaultCategory?.categoryId ?? null;
     const outcome = await runStoreDefaultSave({
       writer: "W3",
       signature,
@@ -157,7 +156,6 @@ export function EbayCategoryDefaultRow({ storeConnectionId, saved, right, saveCa
       reread,
       onSaved,
       onBlocked,
-      classify: { pickedEbayCategoryId: pickedId },
     });
     if (outcome.kind === "not_started" && outcome.message) setLocalMessage(outcome.message);
     if (outcome.kind === "saved") {

@@ -3,6 +3,7 @@ import { LISTING_SETTINGS_SETTING_KEYS } from "../../../../../shared/dropship/li
 import { CATEGORY_PRICE_RULE_NAME, PRODUCT_PRICE_RULE_NAME } from "../../../../../shared/dropship/pricing-rules";
 import { DropshipEbayCategoryRulesService, type EbayCategoryRulesTransaction } from "../../application/dropship-ebay-category-rules-service";
 import { DropshipListingContentService, type ContentTransaction } from "../../application/dropship-listing-content-service";
+import type { StoredPricingReview } from "../../application/dropship-pricing-rules-service";
 import {
   type DropshipListingPreviewResult,
   type DropshipListingPreviewRow,
@@ -559,8 +560,10 @@ describe("golden listing previews: every path gives the preview's values (8b-G)"
     const layerRows = layerRowsOf(scenario);
     const { preview } = await runGoldenPreview(scenario.store, { layerRows });
 
-    // The rules store's own rules, proposed again (to the store without rules, proposed for the first time).
-    const { current, review } = await goldenPricingReview(scenario.store, layerRows, () => GOLDEN_PREVIEW_RULES_STORE.pricingProfile!.profile);
+    // Each store's own rules, proposed again; the store without rules is proposed the rules store's default recipe with no
+    // groups for the first time (Listing settings PR 12, D26: W1 refuses a group the store doesn't hold, D9).
+    const { current, review } = await goldenPricingReview(scenario.store, layerRows,
+      (held) => held.profile ?? { ...GOLDEN_PREVIEW_RULES_STORE.pricingProfile!.profile, groups: [] });
 
     const rows = new Map(review.rows.map((reviewRow) => [reviewRow.productVariantId, reviewRow]));
     expect(rows.size).toBe(preview.rows.length);
@@ -570,6 +573,19 @@ describe("golden listing previews: every path gives the preview's values (8b-G)"
       // Proposing the rules a store already has changes no price.
       if (current.profile) expect(reviewRow.priceCents, `size ${row.productVariantId}`).toBe(row.priceCents);
     }
+  });
+
+  it("the pricing review (W1) refuses the rules store's groups proposed to the store without rules, and stores no review (PR 12, D26)", async () => {
+    // What this case proposed before Listing settings PR 12: the rules store's whole profile, groups and all.
+    const [, scenario] = scenarios.find(([, entry]) => entry.store === GOLDEN_PREVIEW_NO_RULES_STORE)!;
+    const reviews: StoredPricingReview[] = [];
+
+    const error = await goldenPricingReview(scenario.store, layerRowsOf(scenario), () => GOLDEN_PREVIEW_RULES_STORE.pricingProfile!.profile, reviews)
+      .then(() => null, (caught: unknown) => caught);
+
+    expect(error).toMatchObject({ code: "DROPSHIP_LISTING_GROUP_RULES_CLOSED", context: { kind: "pricing",
+      addedIds: GOLDEN_PREVIEW_RULES_STORE.pricingProfile!.profile.groups.map((group) => group.id), changedIds: [], classification: "permanent" } });
+    expect(reviews).toEqual([]);
   });
 
   it.each(scenarios)("the cost-change classifier prices each size at its .ops cost as the preview does: %s", async (_name, scenario) => {

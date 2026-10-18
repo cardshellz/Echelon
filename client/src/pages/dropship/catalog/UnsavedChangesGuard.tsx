@@ -74,8 +74,8 @@ export function UnsavedChangesProvider({ children }: { children: ReactNode }) {
     const pending = pendingLeave;
     setPendingLeave(null);
     if (!pending) return;
-    // Editors that can drop their own changes do so; the older panels keep
-    // theirs until they unmount, as before.
+    // Editors that can drop their own changes do so (`discard`); an editor
+    // without one keeps its changes until it unmounts.
     for (const draft of scopeUnsavedDrafts(draftsRef.current, pending.scope)) draft.discard?.();
     pending.leave();
   };
@@ -141,7 +141,7 @@ export function useBrowserLeavePrompt(asking: boolean): void {
   }, [asking]);
 }
 
-/** Every editor's unsaved draft on the page (the bar and "Older settings" read them). Empty outside an UnsavedChangesProvider. */
+/** Every editor's unsaved draft on the page (the leave-guard scopes read them). Empty outside an UnsavedChangesProvider. */
 export function useUnsavedDrafts(): readonly UnsavedDraft[] {
   return useContext(UnsavedDraftsContext);
 }

@@ -61,7 +61,7 @@ import type {
 } from "./dropship-ebay-fulfillment-policy-guard";
 import type {
   DropshipEbayListingPolicyOverride,
-} from "./dropship-ebay-listing-policy-override-service";
+} from "./dropship-ebay-listing-policy-override";
 import {
   layersFor,
   mergeListingPolicyOverride,

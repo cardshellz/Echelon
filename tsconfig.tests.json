@@ -79,7 +79,6 @@
     "server/modules/dropship/__tests__/unit/dropship-carrier-claim.repository.test.ts",
     "server/modules/dropship/__tests__/unit/dropship-carrier-protection-service.test.ts",
     "server/modules/dropship/__tests__/unit/dropship-carrier-protection.repository.test.ts",
-    "server/modules/dropship/__tests__/unit/dropship-ebay-listing-policy-override.routes.test.ts",
     "server/modules/dropship/__tests__/unit/dropship-ebay-listing-setup-service.test.ts",
     "server/modules/dropship/__tests__/unit/dropship-ebay-listing-setup.routes.test.ts",
     "server/modules/dropship/__tests__/unit/dropship-ebay-managed-location.provider.test.ts",

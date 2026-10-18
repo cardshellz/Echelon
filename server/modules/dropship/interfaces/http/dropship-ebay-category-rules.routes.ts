@@ -1,7 +1,6 @@
 import type { Express, Request, Response } from "express";
 import rateLimit from "express-rate-limit";
 import { ZodError, type z } from "zod";
-import { catalogTargetsResponseSchema } from "../../../../../shared/dropship/catalog-scope";
 import {
   ebayCategoryBrowseResponseSchema,
   ebayCategoryResponseSchema,
@@ -10,15 +9,16 @@ import {
   ebayCategorySearchResponseSchema,
   saveEbayCategoryRulesResponseSchema,
 } from "../../../../../shared/dropship/ebay-category-rules";
-import { logger } from "../../../../platform/observability/logger";
 import type { DropshipEbayCategoryRulesService } from "../../application/dropship-ebay-category-rules-service";
 import { DropshipError } from "../../domain/errors";
+import { DROPSHIP_LISTING_GROUP_RULES_CLOSED } from "../../domain/older-group-rules-edit";
 import { createDropshipEbayCategoryRulesServiceFromEnv } from "../../infrastructure/dropship-ebay-category-rules.factory";
 import { requireDropshipAuth } from "./dropship-auth.routes";
 import { parseDropshipBulkJson } from "./dropship-bulk-json.middleware";
+import { logDropshipRouteFailure } from "./dropship-route-failure-log";
 
 type EbayCategoryRulesRouteService = Pick<DropshipEbayCategoryRulesService,
-  "getForMember" | "targetsForMember" | "searchForMember" | "browseForMember" | "describeForMember" | "reviewForMember" | "saveForMember">;
+  "getForMember" | "searchForMember" | "browseForMember" | "describeForMember" | "reviewForMember" | "saveForMember">;
 
 /** Rule reads and writes follow the description-template budget. */
 const RULES_REQUESTS_PER_MINUTE = 60;
@@ -35,12 +35,6 @@ export function registerDropshipEbayCategoryRulesRoutes(
 
   app.get(`${base}/ebay-category-rules`, requireDropshipAuth, rulesLimiter, (req, res) => respond(req, res, ebayCategoryRulesStateSchema,
     () => service.getForMember(memberId(req), parseId(req.params.storeConnectionId))));
-  app.get(`${base}/ebay-category-rules/targets`, requireDropshipAuth, rulesLimiter, (req, res) => respond(req, res, catalogTargetsResponseSchema,
-    () => service.targetsForMember(memberId(req), parseId(req.params.storeConnectionId), {
-      type: req.query.type,
-      search: req.query.search ?? "",
-      page: req.query.page === undefined ? 0 : parseId(String(req.query.page)),
-    })));
   app.post(`${base}/ebay-category-rules/review`, requireDropshipAuth, rulesLimiter, parseDropshipBulkJson,
     (req, res) => respond(req, res, ebayCategoryRulesReviewSchema,
       () => service.reviewForMember(memberId(req), parseId(req.params.storeConnectionId), req.body)));
@@ -87,25 +81,8 @@ async function respond<T>(req: Request, res: Response, schema: z.ZodType<T>, ope
     const code = error instanceof DropshipError
       ? error.code
       : status === 400 ? "DROPSHIP_EBAY_CATEGORY_RULES_INVALID_INPUT" : "DROPSHIP_EBAY_CATEGORY_RULES_INTERNAL_ERROR";
-    // eBay or token outages recover on their own (transient); a 500 needs a human (fatal);
-    // everything else is a refusal the vendor can fix (permanent).
-    const errorClass = status === 502 || status === 503 ? "transient" : status >= 500 ? "fatal" : "permanent";
-    const storeConnectionId = parseId(req.params.storeConnectionId ?? "");
-    const entry = {
-      outcome: "failed",
-      error_code: code,
-      status,
-      method: req.method,
-      path: req.route?.path ?? req.path,
-      // Correlation: one query on a store or a member returns every refused or failed request.
-      store_connection_id: Number.isSafeInteger(storeConnectionId) ? storeConnectionId : null,
-      actor_id: req.session?.dropship?.memberId ?? null,
-      error_class: errorClass,
-      error_message: errorClass === "fatal" && error instanceof Error ? error.message : undefined,
-    };
-    if (errorClass === "fatal") logger.error("dropship.ebay_category_rules.request_failed", entry);
-    else if (errorClass === "transient") logger.warn("dropship.ebay_category_rules.request_failed", entry);
-    else logger.info("dropship.ebay_category_rules.request_refused", entry);
+    logDropshipRouteFailure("dropship.ebay_category_rules", req, { status, code, error,
+      storeConnectionId: parseId(req.params.storeConnectionId ?? "") });
     return res.status(status).json({ error: {
       code,
       message: error instanceof DropshipError
@@ -137,8 +114,8 @@ function statusFor(error: unknown): number {
       return 409;
     case "DROPSHIP_EBAY_CATEGORY_RULE_INVALID":
     case "DROPSHIP_EBAY_CATEGORY_MARKETPLACE_UNSUPPORTED":
-    case "DROPSHIP_CATALOG_TARGETS_TOO_LARGE":
     case "DROPSHIP_EBAY_CATEGORY_REVIEW_TOO_LARGE":
+    case DROPSHIP_LISTING_GROUP_RULES_CLOSED:
       return 422;
     case "DROPSHIP_EBAY_CATEGORIES_UNAVAILABLE":
     case "DROPSHIP_EBAY_CATEGORIES_INVALID_RESPONSE":

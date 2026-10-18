@@ -370,7 +370,7 @@ describe("the per-size description editor follows the same settings as the previ
       listCatalogExposureRules: vi.fn(async () => [{ id: 1, scopeType: "catalog" as const, action: "include" as const }]),
       listSelectionRules: vi.fn(async () => [{ id: 1, scopeType: "catalog" as const, action: "include" as const }]),
       listVariantOverrides: vi.fn(async () => []), listExistingListings: vi.fn(async () => []),
-    }, listVariantIds: vi.fn(async () => []), listProductLines: vi.fn(async () => []),
+    },
     loadProfile: vi.fn(async () => noContentProfile), loadSaved: vi.fn(async () => saved), findReplay: vi.fn(async () => false),
     loadListingSettingLayers: vi.fn(async () => layers), saveProfile: vi.fn(async () => undefined),
     saveListing: vi.fn(async (_variant, input) => { saved = { revisionId: 1, customText: input.customText, catalogHash: input.expectedCatalogHash,

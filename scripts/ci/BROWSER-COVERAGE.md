@@ -38,18 +38,20 @@ selection behavior as well.
 ## Selecting affected feature groups
 
 `dropship-browser-impact.mjs` selects groups declared in
-`dropship-browser-features.mjs`: prices, content, catalog/listing settings,
-policies/categories, cost changes, wallet, orders, finance, onboarding, shipping
-estimates, shipping configuration, catalog conversions, page loading, and
-inventory opening. Each group starts from its own specs and HTML-injected
-harnesses. These harnesses do not load App, so unrelated application pages and
-unimported shared modules do not trigger them.
+`dropship-browser-features.mjs`: catalog/listing settings, cost changes, wallet,
+orders, finance, onboarding, shipping estimates, shipping configuration, catalog
+conversions, page loading, and inventory opening. (The prices, content and
+policies/categories groups went with the older panels in Listing settings
+PR 12.) Each group starts from its own specs and HTML-injected harnesses. These
+harnesses do not load App, so unrelated application pages and unimported shared
+modules do not trigger them.
 
 Imports are followed transitively, including spec helpers and shared components.
 For example, a wallet page edit runs wallet coverage, a finance money helper edit
-runs finance coverage, and a pricing rules panel edit runs both prices and the
-catalog/listing settings that embed that panel. A spec edit runs its owning group.
-The selector logs the decision and reason for every group.
+runs finance coverage, and a Listing settings price row edit runs the
+catalog/listing settings group, whose catalog harness mounts the real step. A
+spec edit runs its owning group. The selector logs the decision and reason for
+every group.
 
 These browser journeys mock their API responses. Unimported backend changes do
 not trigger them; existing unit, contract and PostgreSQL checks remain unchanged.

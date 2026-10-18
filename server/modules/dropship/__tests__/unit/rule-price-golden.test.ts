@@ -7,7 +7,7 @@ import type {
   CategoryListingSettingRow, CategoryListingSettingValues, ProductListingSettingRow,
 } from "../../../../../shared/dropship/listing-setting-values";
 import {
-  CATEGORY_PRICE_RULE_NAME, PRODUCT_PRICE_RULE_NAME, pricingProfileStateSchema, type PricingProfileState, type PricingRecipe,
+  CATEGORY_PRICE_RULE_NAME, PRODUCT_PRICE_RULE_NAME, pricingProfileStateSchema, type PricingProfile, type PricingProfileState, type PricingRecipe,
 } from "../../../../../shared/dropship/pricing-rules";
 import {
   createRulePriceResolver, NO_PRICING_PROFILE_STATE, pricingHash, rulePriceContextOf, withRecipes, type ListingRulePrice, type RulePriceCandidate,
@@ -129,13 +129,30 @@ function allowedCatalog(candidates: readonly DropshipListingCatalogCandidate[], 
 }
 
 /**
- * The store's rules proposed again in a pricing review (W1) over the given
- * sizes: the golden profile, reviewed against the store's current profile
+ * The golden store default proposed in a pricing review (W1) over the given
+ * sizes, with the groups the store already holds (Listing settings PR 12,
+ * D26): W1 refuses a new or changed group (D9), so a store with no pricing
+ * profile is proposed the golden recipe with no groups, and the golden store
+ * its own seven groups again. Reviewed against the store's current profile
  * `current` and the given listing settings layers.
  */
+function goldenProposal(current: PricingProfileState): PricingProfile {
+  return { ...GOLDEN_RULE_PROFILE_STATE.profile!, groups: current.profile?.groups ?? [] };
+}
+
 async function goldenReview(layers: ListingSettingLayers, options: { current?: PricingProfileState;
   candidates?: DropshipListingCatalogCandidate[]; saved?: SavedListingPriceRevision[] } = {}):
   Promise<Map<number, StoredPricingReview["rows"][number]>> {
+  const { tx, review, stored } = goldenReviewRun(layers, options);
+  const current = options.current ?? GOLDEN_RULE_PROFILE_STATE;
+  await review(goldenProposal(current));
+  expect(tx.loadRuleLayers).toHaveBeenCalledTimes(1);
+  return new Map(stored()!.rows.map((row) => [row.productVariantId, row]));
+}
+
+/** The W1 review service over a fake transaction: `review` proposes a profile, `stored` is the review it stored, if any. */
+function goldenReviewRun(layers: ListingSettingLayers, options: { current?: PricingProfileState;
+  candidates?: DropshipListingCatalogCandidate[]; saved?: SavedListingPriceRevision[] } = {}) {
   const candidates = options.candidates ?? catalogCandidates();
   const current = options.current ?? GOLDEN_RULE_PROFILE_STATE;
   let stored: StoredPricingReview | null = null;
@@ -152,10 +169,9 @@ async function goldenReview(layers: ListingSettingLayers, options: { current?: P
     clock: { now: () => new Date("2026-10-06T12:00:00.000Z") }, newId: () => "02892196-a1f2-4e72-823a-32188b9cb234",
     logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() } });
 
-  await service.reviewForMember("member-1", STORE_ID, { profile: GOLDEN_RULE_PROFILE_STATE.profile,
+  const review = (profile: PricingProfile) => service.reviewForMember("member-1", STORE_ID, { profile,
     expectedRevisionId: current.revisionId, releaseFixedOverrides: false });
-  expect(tx.loadRuleLayers).toHaveBeenCalledTimes(1);
-  return new Map(stored!.rows.map((row) => [row.productVariantId, row]));
+  return { tx, review, stored: () => stored };
 }
 
 /**
@@ -805,6 +821,22 @@ describe("every price path gives the pinned product and category prices", () => 
       basis: pin.basis, preserved: false, issues: [] });
     expect(reviewRow.ruleLevel ?? null).toBe(pin.ruleLevel);
     expect(reviewRow.followsStorePricing ?? false).toBe(row.savedPricingMode === "inherit");
+  });
+
+  it("pricing review (W1): the golden groups proposed to a store with no pricing profile are refused, and no review is stored (PR 12, D26)", async () => {
+    // What this helper proposed before Listing settings PR 12: the full golden profile, its seven groups onto a store with none.
+    const [, row] = pricedV2Cases.find(([, entry]) => entry.pricingProfile === "none")!;
+    const { catalog } = v2Size(row);
+    const { tx, review, stored } = goldenReviewRun(v2Layers(row), { current: NO_PRICING_PROFILE_STATE, candidates: [catalog] });
+
+    const error = await review(GOLDEN_RULE_PROFILE_STATE.profile!).then(() => null, (caught: unknown) => caught);
+
+    expect(error).toMatchObject({ code: "DROPSHIP_LISTING_GROUP_RULES_CLOSED", context: { kind: "pricing",
+      addedIds: GOLDEN_RULE_PROFILE_STATE.profile!.groups.map((group) => group.id), changedIds: [], classification: "permanent" } });
+    expect(tx.storeReview).not.toHaveBeenCalled();
+    expect(stored()).toBeNull();
+    // Refused before the selection or the layers were read.
+    expect(tx.loadRuleLayers).not.toHaveBeenCalled();
   });
 
   it.each(pricedV2Cases)("cost-change classifier: the listing is priced by the pinned rule at its cost: %s", (_name, row, pin) => {

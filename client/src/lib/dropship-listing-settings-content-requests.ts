@@ -31,7 +31,6 @@ import {
   LISTING_SETTINGS_KEY_PREFIXES,
   LISTING_SETTINGS_SAVE_WORDS,
   sameDraftValue,
-  type ClassifyWriteFailureOptions,
   type DraftValue,
   type ListingSettingsDraft,
   type WriteFailure,
@@ -75,8 +74,9 @@ export const EBAY_CATEGORY_DEFAULT_WORDS = Object.freeze({
   pickerLabel: "eBay category for every product",
   pickCategory: "Pick an eBay category",
   pickAnother: "Pick another",
-  // Interim: a saved older rule this editor can't send back (it never should happen).
-  olderRuleInvalid: "One of your older eBay category rules needs a fix. Open it under Older settings.",
+  // Interim (PR 12 PROPOSAL): a saved older rule this editor can't send back. Unreachable while the page and the
+  // server parse with the same schemas, so it points at a reload, not at a place to fix the rule (D12 B3).
+  olderRuleInvalid: "One of your older eBay category rules couldn't be sent back as it is. Nothing was saved. Reload the page; if this keeps happening, contact support.",
 } as const);
 
 /** The Description row and its editor (R:582). */
@@ -85,8 +85,9 @@ export const DESCRIPTION_DEFAULT_WORDS = Object.freeze({
   mainText: "Card Shellz writes the main text for each product.",
   textBelow: "Text below (optional)",
   invalid: LISTING_SETTINGS_SAVE_WORDS.descriptionInvalid,
-  // Interim: a saved older description group this editor can't send back (it never should happen).
-  olderRuleInvalid: "One of your older description rules needs a fix. Open it under Older settings.",
+  // Interim (PR 12 PROPOSAL): a saved older description group this editor can't send back. Unreachable while the
+  // page and the server parse with the same schemas, so it points at a reload (D12 B3).
+  olderRuleInvalid: "One of your older description rules couldn't be sent back as it is. Nothing was saved. Reload the page; if this keeps happening, contact support.",
 } as const);
 
 /** Words both editors share that the framework doesn't give. All interim. */
@@ -181,7 +182,7 @@ async function readContentState<T>(
   });
 }
 
-/** The eBay category rules read, under the key the old category panel uses too, so it is one cached read. */
+/** The eBay category rules read, keyed by its endpoint; a confirmed move re-reads it (`conversionRereadKeys`). */
 export function ebayCategoryRulesQueryKey(storeConnectionId: number) {
   return [ebayCategoryRulesEndpoint(storeConnectionId)] as const;
 }
@@ -202,7 +203,7 @@ export function contentProfileEndpoint(storeConnectionId: number): string {
   return `/api/dropship/listings/stores/${storeConnectionId}/content-profile`;
 }
 
-/** The description profile read. The old templates panel reads it outside React Query, so this key is the step's own. */
+/** The description profile read, keyed by its endpoint; a confirmed move re-reads it (`conversionRereadKeys`). */
 export function contentProfileQueryKey(storeConnectionId: number) {
   return [contentProfileEndpoint(storeConnectionId)] as const;
 }
@@ -271,7 +272,7 @@ export function readDescriptionDefaultValue(value: DraftValue): DescriptionDefau
 
 /**
  * Whether what is saved now moved away from what the draft started from
- * (another window or the older panel saved). Then the vendor is shown the
+ * (another window saved, or the rules were moved over). Then the vendor is shown the
  * conflict before anything is sent, as for a 409, so a change made elsewhere
  * is never overwritten unseen.
  */
@@ -294,8 +295,8 @@ export type DescriptionDefaultSaveBody = { expectedRevisionId: number | null; pr
  * The W3 body for a new store default: every saved rule goes back in saved
  * order (order is precedence) in the shape the save takes, `{ id, name,
  * scope, categoryId }`. The saved rules carry their eBay names, which the
- * save refuses, so they are converted with the old panel's own helpers
- * (checker change 3). `expectedRevisionId` is the revision `state` was read at.
+ * save refuses, so they are converted with the editor-model helpers of
+ * `dropship-ebay-category-rules.ts` (checker change 3). `expectedRevisionId` is the revision `state` was read at.
  */
 export function prepareEbayCategoryDefaultSave(
   state: EbayCategoryRulesState,
@@ -365,7 +366,7 @@ export function sendEbayCategoryDefaultSave(storeConnectionId: number, input: Sa
   return putJson<unknown>(ebayCategoryRulesEndpoint(storeConnectionId), input);
 }
 
-/** PUT …/content-profile. Not through useContentDraft, which locks the draft on any 4xx (useContentDraft.ts:88). */
+/** PUT …/content-profile. Resolves with the server's answer, unread (D9). */
 export function sendDescriptionDefaultSave(storeConnectionId: number, input: SaveContentProfileInput): Promise<unknown> {
   return putJson<unknown>(contentProfileEndpoint(storeConnectionId), input);
 }
@@ -487,7 +488,6 @@ export interface StoreDefaultSaveRun<Input> {
   onSaved: () => void;
   /** A save refused because of a block a banner explains (plan 4.4); the step decides which banner. */
   onBlocked?: (error: unknown) => void;
-  classify?: ClassifyWriteFailureOptions;
 }
 
 export type StoreDefaultSaveOutcome =
@@ -541,7 +541,7 @@ export async function runStoreDefaultSave<Input>(run: StoreDefaultSaveRun<Input>
     try {
       answer = await run.send(input);
     } catch (error) {
-      const failure = classifyWriteFailure(run.writer, error, run.classify);
+      const failure = classifyWriteFailure(run.writer, error);
       run.drafts.settle(key, { kind: "failure", failure });
       if (failure.phase === "blocked") run.onBlocked?.(error);
       return { kind: "failed", failure };
