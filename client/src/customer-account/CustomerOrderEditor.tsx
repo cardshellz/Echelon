@@ -12,6 +12,7 @@ import type {
 } from "@shared/order-edits/order-edit.contract";
 import type { CustomerAccountTransport } from "./customer-account.transport";
 import { orderEditNeedsPreparation } from "@/lib/order-edit-confirmation";
+import { ClubRewardsWidget } from "./ClubRewardsWidget";
 
 const closed = new Set<OrderEditOperation["status"]>([
   "completed",
@@ -49,6 +50,7 @@ export function CustomerOrderEditor({
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [rewardBusy, setRewardBusy] = useState(false);
   const [busyAction, setBusyAction] = useState<
     "commit" | "reconcile" | "abandon"
   >();
@@ -63,9 +65,9 @@ export function CustomerOrderEditor({
   const [now, setNow] = useState(Date.now);
   const inFlight = useRef(false);
   useEffect(() => {
-    onBusy(busy || locked);
+    onBusy(busy || locked || rewardBusy);
     return () => onBusy(false);
-  }, [busy, locked, onBusy]);
+  }, [busy, locked, rewardBusy, onBusy]);
   useEffect(() => {
     const timer = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(timer);
@@ -308,6 +310,9 @@ export function CustomerOrderEditor({
             closedOperationId={closedOperationId}
             discountCodes={discountCodes}
             onDiscountCodesChange={setDiscountCodes}
+            renderRewards={order.codeEntryAvailable ? (props) => <ClubRewardsWidget {...props}
+              api={api} connectionId={connectionId} omsOrderId={omsOrderId} actorKey={actorKey}
+              onBusy={(value) => { props.onBusy(value); setRewardBusy(value); }} /> : undefined}
             initialOperation={initialOperation}
             onLock={setLocked}
             onQuote={received}

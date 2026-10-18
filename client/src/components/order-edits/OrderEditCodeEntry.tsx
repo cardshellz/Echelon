@@ -78,7 +78,7 @@ export function OrderEditCodeEntry({
           autoCapitalize="characters"
           spellCheck={false}
           placeholder="Enter code"
-          aria-describedby={`${id}-help${error ? ` ${id}-error` : ""}`}
+          aria-describedby={error ? `${id}-error` : !available ? `${id}-help` : undefined}
           aria-invalid={error !== null}
           disabled={disabled || pending || !available}
           onChange={(event) => {
@@ -114,13 +114,9 @@ export function OrderEditCodeEntry({
           Clear code
         </button>
       )}
-      <p id={`${id}-help`} className="oe-code-help">
-        {available
-          ? value.trim()
-            ? "Apply this code or clear it before continuing."
-            : "Codes with usage limits must be used at checkout. Other eligible codes follow your existing discount combination rules."
-          : "Codes are temporarily unavailable. Your order has not changed."}
-      </p>
+      {!available && <p id={`${id}-help`} className="oe-code-help">
+        Codes are temporarily unavailable. Your order has not changed.
+      </p>}
       {codes.length > 0 && (
         <ul className="oe-code-list" aria-label="Codes added to your changes">
           {codes.map((code) => (

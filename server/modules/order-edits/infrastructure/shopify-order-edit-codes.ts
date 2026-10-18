@@ -22,6 +22,7 @@ import {
   type OrderEditSnapshot,
 } from "../application/order-edit-provider";
 import type { OrderEditCodePricingLine } from "../domain/order-edit-code-pricing";
+import type { OrderEditRewards } from "../application/order-edit-rewards";
 
 const money = z.object({ amount: z.string(), currencyCode: z.literal("USD") });
 const bag = z.object({ shopMoney: money, presentmentMoney: money });
@@ -192,7 +193,7 @@ export function readOrderEditCodeRule(
 }
 
 export class ShopifyOrderEditCodes {
-  constructor(private readonly request: Request) {}
+  constructor(private readonly request: Request, private readonly rewards?: OrderEditRewards) {}
 
   async rules(
     snapshot: OrderEditSnapshot,
@@ -225,7 +226,23 @@ export class ShopifyOrderEditCodes {
         ),
       ),
     );
-    return results;
+    const requestedRewards = new Set(this.rewards?.available()
+      ? await this.rewards.identify({ customerId: snapshot.customerId, codes })
+      : []);
+    const verifiedRules = results.map((rule) => {
+      if (!requestedRewards.has(rule.code)) return rule;
+      if (rule.value.type !== "fixed" || rule.usageLimit !== 1 || rule.appliesOncePerCustomer !== true)
+        fail("ORDER_EDIT_REWARD_TERMS_CHANGED", "This reward's details have changed. It has not been added to your order.");
+      return orderEditCodeRuleSchema.parse({ ...rule, redemption: "club_reward" });
+    });
+    const rewardRules = verifiedRules.filter((rule) => rule.redemption === "club_reward");
+    if (rewardRules.length) {
+      if (!this.rewards)
+        fail("ORDER_EDIT_REWARDS_UNAVAILABLE", "We couldn't check your Club reward. Please try again shortly.");
+      // Canonical issuance identifies rewards; restrictions and code prefixes do not.
+      await this.rewards.verify({ customerId: snapshot.customerId, orderId: snapshot.orderId, rules: rewardRules });
+    }
+    return verifiedRules;
   }
 
   async assertCombinations(
@@ -389,7 +406,7 @@ export class ShopifyOrderEditCodes {
   ): Promise<Array<{ code: string; amountCents: number }>> {
     if (!rules.length) return [];
     const nativeCoupons = rules.every(
-      (rule) => rule.redemption === "shopify_coupon",
+      (rule) => rule.redemption === "shopify_coupon" || rule.redemption === "club_reward",
     );
     const result = parse(
       z.object({

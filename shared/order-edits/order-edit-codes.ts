@@ -50,15 +50,17 @@ export const orderEditCodeRuleSchema = z
     combinesWith: orderEditCombinesWithSchema,
     value: orderEditCodeValueSchema,
     fingerprint: z.string().regex(/^[a-f0-9]{64}$/),
-    // The first two values only describe persisted operations from the legacy
-    // receipt integration. New coupon entry never infers a points reward from
-    // customer eligibility, a fixed amount, or a single-use restriction.
-    redemption: z.enum(["unlimited", "single_use_reward", "shopify_coupon"]),
+    // Legacy values remain readable. New rewards require explicit Club issuance
+    // verification; customer eligibility or usage limits never identify a reward.
+    redemption: z.enum(["unlimited", "single_use_reward", "shopify_coupon", "club_reward"]),
     usageLimit: z.number().int().positive().safe().nullable().optional(),
     appliesOncePerCustomer: z.boolean().optional(),
   })
   .strict()
   .superRefine((rule, context) => {
+    if (rule.redemption === "club_reward" &&
+        (rule.value.type !== "fixed" || rule.usageLimit !== 1 || rule.appliesOncePerCustomer !== true))
+      context.addIssue({ code: "custom", message: "Club rewards require their original single-use terms." });
     if (
       rule.redemption === "shopify_coupon" &&
       (rule.usageLimit === undefined || rule.appliesOncePerCustomer === undefined)
