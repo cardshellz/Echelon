@@ -220,6 +220,6 @@ describe("receiving routes", () => {
     }));
     expect(receiving.updateLine).toHaveBeenCalledWith(7, { receivedQty: 3 }, "test-user");
     expect(receiving.deleteLine).toHaveBeenCalledWith(7);
-    expect(receiving.deleteOrder).toHaveBeenCalledWith(20);
+    expect(receiving.deleteOrder).toHaveBeenCalledWith(20, "test-user");
   });
 });

@@ -517,11 +517,15 @@ describe("PO lifecycle actions", () => {
       getPurchaseOrderLines: vi.fn().mockResolvedValue(lines),
     });
     const reconcileApprovedInvoiceCost = vi.fn().mockResolvedValue(undefined);
-    const svc = createPurchasingService(db, storage, { reconcileApprovedInvoiceCost });
+    const at = new Date("2026-10-16T12:00:00Z");
+    const clock = vi.fn(() => at);
+    const svc = createPurchasingService(db, storage, { reconcileApprovedInvoiceCost, now: clock });
 
-    await svc.closeShort(4, "vendor short-shipped", "user-4");
+    await svc.closeShort(4, "  vendor short-shipped  ", "user-4");
 
     expect(db.transaction).toHaveBeenCalledTimes(1);
+    expect(clock).toHaveBeenCalledTimes(1);
+    expect(db.updateCalls.every((call: { patch: { updatedAt: Date } }) => call.patch.updatedAt.getTime() === at.getTime())).toBe(true);
     expect(storage.updatePurchaseOrderLine).not.toHaveBeenCalled();
     expect(storage.updatePurchaseOrderStatusWithHistory).not.toHaveBeenCalled();
     expect(reconcileApprovedInvoiceCost).toHaveBeenCalledWith(40, db, "user-4");
@@ -540,12 +544,14 @@ describe("PO lifecycle actions", () => {
         purchaseOrderId: 4,
         toStatus: "closed",
         notes: "Closed short: vendor short-shipped",
+        changedAt: at,
       }),
     );
     expect(db.insertedRows).toContainEqual(
       expect.objectContaining({
         poId: 4,
         eventType: "closed_short",
+        createdAt: at,
         actorId: "user-4",
         payloadJson: expect.objectContaining({
           reason: "vendor short-shipped",

@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "migration": "900000010000018200001_receiving_discard_audit_guard.sql",
+  "generation": 10,
+  "pr": 1820,
+  "ordinal": 1,
+  "after": [
+    "900000001000017770001_receiving_integrity_audit_guard.sql",
+    "900000009000018120002_inventory_publication_quantity_consistency.sql"
+  ]
+}
