@@ -273,7 +273,37 @@ describe("WMS order-item command boundary", () => {
       0,
       true,
       "partial",
+      false,
     ]);
+  });
+
+  // #64254 (2026-10-18): ShipStation shipped 20 unpicked units and the line was
+  // closed as completed with 0 picked; every corrective pick was refused.
+  const shippedLineProgress = (overrides: Record<string, unknown> = {}) => ({
+    movementType: "pick" as const, movementQuantity: 20, orderId: 209703, orderItemId: 324152,
+    targetVariantId: 105, warehouseLocationId: 9, occurredAt: new Date("2026-10-18T16:52:34Z"),
+    progress: { expectedStatus: "completed" as const, expectedPickedQuantity: 0, expectedFulfilledQuantity: 20,
+      targetStatus: "completed" as const, targetPickedQuantity: 20, pickCorrectionId: 209, pickCorrectionRevision: 11,
+      ...overrides },
+  });
+
+  it("lets an authorized correction add pick records to a line its shipment closed, keeping it completed", async () => {
+    const query = vi.fn(async (statement: string) => statement.includes("FROM wms.pick_corrections")
+      ? { rows: [{ id: 209 }] } : { rows: [{ id: 324152 }], rowCount: 1 });
+    await persistCanonicalWmsPickProgress({ query }, { ...shippedLineProgress({ targetStatus: "in_progress",
+      targetPickedQuantity: 1 }), movementQuantity: 1 } as any);
+    const update = query.mock.calls.find(([statement]) => String(statement).startsWith("UPDATE wms.order_items"))!;
+    expect(update[0]).toContain("CASE WHEN $11::boolean THEN 'completed' ELSE $1 END");
+    expect(update[1]).toEqual(expect.arrayContaining(["completed", 0, 20]));
+    expect(update[1]?.at(-1)).toBe(true);
+  });
+
+  it("still refuses a completed line without an authorized correction", async () => {
+    const query = vi.fn();
+    await expect(persistCanonicalWmsPickProgress({ query }, shippedLineProgress({
+      pickCorrectionId: undefined, pickCorrectionRevision: undefined, expectedFulfilledQuantity: 0 }) as any))
+      .rejects.toMatchObject({ code: "INVALID_WMS_PICK_PROGRESS" });
+    expect(query).not.toHaveBeenCalled();
   });
 
   it("rejects a short reason attached to non-short canonical progress", async () => {
