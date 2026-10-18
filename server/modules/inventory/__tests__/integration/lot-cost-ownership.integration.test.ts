@@ -20,6 +20,7 @@ import { fixtureForeignKeys, fixtureTable, qualifiedTable } from "../../../procu
 import { installPreOpeningQuantityAuthorityFixture } from "../fixtures/pre-opening-quantity-authority.fixture";
 import { returnCommandResultFor } from "@shared/inventory/return-command";
 import { lotCostFollowUpReportSchema } from "@shared/inventory/lot-cost-follow-up";
+import { resetFixtureCostHistory } from "../../../procurement/__tests__/integration/cost-history-fixture";
 import { executeMigrationWithRetry } from "../../../../../migrations/migration-executor";
 
 // Exercise registered HTTP handlers against the real application/PG owners.
@@ -65,7 +66,7 @@ suite.sequential("physical return and cost-only recovery ownership on PostgreSQL
     // Empty prerequisites for unrelated document/portal owners. This suite
     // proves the real return cost/stock and financial application SQL, not
     // portal authorization, receipt close or active quantity-journal admission.
-    await pool.query(`CREATE TABLE procurement.inbound_shipment_lines(id integer PRIMARY KEY);
+    await pool.query(`CREATE TABLE procurement.inbound_shipment_lines(id integer PRIMARY KEY,inbound_shipment_id integer);
       CREATE TABLE procurement.vendor_invoice_lines(id integer PRIMARY KEY);
       CREATE TABLE procurement.receipt_reversals(receiving_line_id integer);
       CREATE TABLE oms.oms_order_lines(id integer PRIMARY KEY,product_variant_id integer);
@@ -82,14 +83,18 @@ suite.sequential("physical return and cost-only recovery ownership on PostgreSQL
         product_variant_id integer,sku text,old_cost_cents bigint,new_cost_cents bigint,delta_cents bigint,
         reason text,created_at timestamp NOT NULL);`);
     await installPreOpeningQuantityAuthorityFixture(pool);
-    for (const name of ["222_procurement_cost_evidence.sql","0751_exact_inventory_cost_totals.sql","0725_inventory_cost_admission_evidence.sql","0726_inventory_return_cost_allocations.sql"]) {
+    for (const name of ["222_procurement_cost_evidence.sql","0751_exact_inventory_cost_totals.sql","0725_inventory_cost_admission_evidence.sql","0726_inventory_return_cost_allocations.sql",
+      "900000007000018030001_shipment_cost_exception_decisions.sql",
+      "900000008000018110001_shipment_cost_reconciliation.sql",
+      "900000009000018290001_historical_cost_origin_repairs.sql"]) {
       await pool.query(readFileSync(resolve(process.cwd(),"migrations",name),"utf8"));
     }
     database = drizzle(pool,{ schema }); cogs = new COGSService(database,()=>now);
   });
 
   beforeEach(async () => {
-    await pool.query(`TRUNCATE ${tables.map(qualifiedTable).join(",")},inventory.cost_adjustment_log RESTART IDENTITY CASCADE`);
+    if (ownedSchemas.length !== 7) throw new Error("Fixture schema ownership missing");
+    await resetFixtureCostHistory(pool, `TRUNCATE ${tables.map(qualifiedTable).join(",")},inventory.cost_adjustment_log RESTART IDENTITY CASCADE`);
     await pool.query(`INSERT INTO catalog.products(id,sku,name) VALUES(10,'COST-TEST','Synthetic product');
       INSERT INTO catalog.product_variants(id,product_id,sku,name,units_per_variant,is_active,last_cost_cents)
         VALUES(101,10,'COST-P5','Synthetic pack',5,true,999);

@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "migration": "900000009000018290001_historical_cost_origin_repairs.sql",
+  "generation": 9,
+  "pr": 1829,
+  "ordinal": 1,
+  "after": ["900000008000018110001_shipment_cost_reconciliation.sql"]
+}
