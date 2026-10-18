@@ -155,6 +155,27 @@ test("resolves supplier evidence from health and refreshes both shipments, PO re
   expect(failures).toEqual([]);
 });
 
+test("mixed receipt history keeps supplier issues visible for lines without queue requests", async ({ page }) => {
+  const { state, failures } = await installCostScreens(page);
+  const covered = supplierCosts(true).lines[0];
+  const legacy = { ...supplierCosts(false).lines[0], purchaseOrderLineId: 172, sku: "LEGACY-SUPPLIER-LINE",
+    invoices: [{ invoiceId: 71, invoiceNumber: "TEST-INV-71", lineId: 73, lineNumber: 2 }] };
+  state.workspace.costTrace!.currentCosts = { lines: [covered, legacy] };
+  const request = state.workspace.costTrace!.receiptCostRequests![0];
+  request.currentCosts = covered;
+  request.state = "applied";
+  request.recordedState = "review_required";
+  await page.goto("/purchase-orders/17?tab=lifecycle");
+  await expect(page.getByTestId("supplier-cost-line-171")).toHaveCount(1);
+  await expect(page.getByTestId("receipt-cost-request-61")).toContainText("Current supplier costs posted");
+  const outstanding = page.getByTestId("supplier-cost-line-172");
+  await expect(outstanding).toContainText("LEGACY-SUPPLIER-LINE");
+  await expect(outstanding).toContainText("Product: Needs review");
+  await expect(outstanding.getByRole("link", { name: "Review invoice TEST-INV-71 · line 2", exact: true }))
+    .toHaveAttribute("href", /costLine=73/);
+  expect(failures).toEqual([]);
+});
+
 test("ordinary applied estimates stay posted on PO and shipment after navigation and reload", async ({ page }, info) => {
   const { failures } = await installCostScreens(page);
   await page.goto("/purchase-orders/17?tab=lines");

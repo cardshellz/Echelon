@@ -123,6 +123,13 @@ export function PurchaseReceiptCostLines({ trace, receiptId, navigation, data }:
 
 export function PurchaseCostTrace({ data, navigation, costActions }: Props) {
   const trace = data.costTrace;
+  const receiptCostLineIds = new Set(trace?.receiptCostRequests
+    ?.filter(request => request.currentCosts)
+    .map(request => request.purchaseOrderLineId));
+  // Older receipts can lack queue requests while newer lines have them. Keep
+  // those lines' current costs visible without repeating the queued lines.
+  const otherCurrentCosts = trace?.currentCosts?.lines.filter(line =>
+    !receiptCostLineIds.has(line.purchaseOrderLineId)) ?? [];
   return <Card className="min-w-0" data-testid="purchase-cost-trace">
     <CardHeader className="space-y-2 p-4">
       <div className="flex flex-wrap items-center justify-between gap-2"><h3 className="flex items-center gap-2 font-semibold"><Coins className="h-4 w-4" aria-hidden="true" />Cost trace</h3><Badge variant="outline">{trace?.applicationEvidence === "recorded" ? "Revision history" : "Source preview"}</Badge></div>
@@ -132,7 +139,7 @@ export function PurchaseCostTrace({ data, navigation, costActions }: Props) {
       {!trace ? <p className="text-xs text-muted-foreground">Detailed cost evidence is unavailable from this workspace response. Refresh after the cost workspace release is available.</p> : <>
         {trace.applicationEvidence === "not_verified" && <p className="rounded-md border border-amber-500/30 bg-amber-500/5 p-3 text-xs text-amber-800 dark:text-amber-300">Cost application needs verification. Source records, shipment completion and a lot's provisional flag do not prove that every component reached inventory and sold-order COGS.</p>}
         {trace.receiptCostRequests && <PurchaseReceiptCostQueue requests={trace.receiptCostRequests} data={data} navigation={navigation} actions={costActions} />}
-        {!trace.receiptCostRequests?.length && trace.currentCosts && <PurchaseSupplierCostReview status={trace.currentCosts} navigation={navigation} />}
+        {otherCurrentCosts.length > 0 && <PurchaseSupplierCostReview status={{ lines: otherCurrentCosts }} navigation={navigation} />}
         {trace.applicationHistory && <details open><summary className="cursor-pointer text-sm font-semibold">Recorded cost history</summary><div className="mt-3"><PurchaseCostApplications history={trace.applicationHistory} data={data} navigation={navigation} /></div></details>}
         <section className="space-y-2" aria-label="Purchase quote cost sources"><h4 className="text-sm font-semibold">Quote components and expected goods</h4>{trace.purchaseLines.length === 0 ? <p className="text-xs text-muted-foreground">No purchase cost lines recorded.</p> : trace.purchaseLines.map((line) => <QuoteLine key={line.id} line={line} purchaseOrderId={data.purchase.id} navigation={navigation} />)}</section>
         <section className="space-y-2" aria-label="Purchase invoice cost evidence">
