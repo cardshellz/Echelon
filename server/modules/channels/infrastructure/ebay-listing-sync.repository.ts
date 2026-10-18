@@ -729,10 +729,13 @@ export class PostgresEbayListingSyncRepository implements EbayListingSyncStore {
       if (!evidence && publicationRejections.recoverNotSent) {
         // Do not filter by event kind or revision: any intervening event defeats
         // the historical proof that this stage stopped at its first offer read.
+        // Qualify the bigint column: the selected id::text output alias would
+        // order lexically and could skip the immediate event in either direction.
         const next = (await client.query<EbayPublicationStageEvent>(
-          `SELECT id::text,revision::text,event,evidence,
-            to_char(created_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS "createdAt"
-           FROM channels.ebay_listing_sync_events WHERE job_id=$1 AND id>$2 ORDER BY id LIMIT 1`, [job.id, start.id])).rows[0] ?? null;
+          `SELECT evidence.id::text,evidence.revision::text,evidence.event,evidence.evidence,
+            to_char(evidence.created_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS "createdAt"
+           FROM channels.ebay_listing_sync_events evidence WHERE evidence.job_id=$1 AND evidence.id>$2
+           ORDER BY evidence.id LIMIT 1`, [job.id, start.id])).rows[0] ?? null;
         const legacyPreflightProof = proveLegacyEbayPublicationPreflight({ jobId: job.id, target, start, next });
         const stageJournalContract = start.evidence.requestJournalContract === undefined ? undefined
           : validateEbayPublicationStageContract(start.evidence.requestJournalContract, target);

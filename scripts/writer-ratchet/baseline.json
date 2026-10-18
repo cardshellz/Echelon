@@ -586,6 +586,9 @@
   "inventory.cost_component_protections": [
     "modules/inventory"
   ],
+  "inventory.cost_origin_repairs": [
+    "modules/procurement"
+  ],
   "inventory.cost_reconciliation_approvals": [
     "modules/inventory"
   ],

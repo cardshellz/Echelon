@@ -63,6 +63,8 @@ export async function reviewMappingPreparation(client: PoolClient, input: {
     productId: number;
     productVariantIds: readonly number[];
     allowRetainedZero?: boolean;
+    /** Present only after the listing owner validates the complete binding proof. */
+    verifiedListingScopeHash?: string;
 }, lock: boolean, proposal?: PublicationMappingProposal) {
     const authority = await loadAndLockRuntimeAuthority(client);
     const target = (await readTargets(client, undefined, undefined, input.publicationTargetId, lock))[0];
@@ -129,7 +131,8 @@ export async function reviewMappingPreparation(client: PoolClient, input: {
         quantities.push({ productVariantId: variantId, desiredQuantity: row.desiredQuantity });
     }
     const review = { publicationTargetId: target.id, targetRevision: target.revision, productId: input.productId, productVariantIds: [...input.productVariantIds].sort((a, b) => a - b),
-        ready: blockers.length === 0, blockers, quantities, selectionFingerprint: selection.fingerprint };
+        ready: blockers.length === 0, blockers, quantities, selectionFingerprint: selection.fingerprint,
+        ...(input.verifiedListingScopeHash ? { verifiedListingScopeHash: input.verifiedListingScopeHash } : {}) };
     return { target, review: { ...review, reviewHash: mappingPreparationDigest({ review, plan: plan.evidenceHash, proposal }) } };
 }
 /** Shares rollback and provider session locks with mapping promotion. No remote
@@ -182,6 +185,7 @@ export async function applyMappingPreparation(client: PoolClient, scopeKeys: str
     productId: number;
     productVariantIds: readonly number[];
     allowRetainedZero?: boolean;
+    verifiedListingScopeHash?: string;
     expectedReviewHash: string;
     idempotencyKey: string;
 }, actor: string, requestHash: string, now: Date, changedVariantIds: readonly number[], replacementListingVariantIds: readonly number[] = []): Promise<PublicationMappingPreparationReceipt> {
@@ -216,7 +220,9 @@ export async function applyMappingPreparation(client: PoolClient, scopeKeys: str
     // target/variant pair and supersedes only a changed desired revision.
     const publisher = createTransactionScopedInventoryPublicationService(client, { channelId: target.channel_id,
         replacementListings: replacementListingVariantIds.map(productVariantId => ({ publicationTargetId: target.id, productVariantId })) });
-    const result = await publisher.publishProduct({ productId: input.productId, publicationTargetId: target.id, dryRun: false, triggeredBy: "listing_mapping_preparation" }, async () => null);
+    const result = await publisher.publishProduct({ productId: input.productId, publicationTargetId: target.id,
+        ...(input.verifiedListingScopeHash ? { productVariantIds: input.productVariantIds } : {}),
+        dryRun: false, triggeredBy: "listing_mapping_preparation" }, async () => null);
     if (result.authority !== "canonical")
         return fail("STOCK_MAPPING_AUTHORITY_CHANGED", "Canonical stock authority changed during preparation.");
     const receipt = publicationMappingPreparationReceiptSchema.parse({ publicationTargetId: target.id, revision: target.revision, reviewHash: evidence.review.reviewHash, changedProductVariantIds: [...changedVariantIds], publicationRows: result.publication.enqueuedRows, appliedAt: now.toISOString(), appliedBy: actor, alreadyApplied: false });

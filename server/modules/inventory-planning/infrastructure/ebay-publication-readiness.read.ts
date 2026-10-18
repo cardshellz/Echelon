@@ -6,6 +6,7 @@ import type { PublicationMembershipBlocker } from "@shared/types/inventory-publi
 import { ebayPublicationMappingRowSchema, reviewEbayPublicationMember, type EbayPublicationMappingRow } from "../domain/ebay-publication-readiness";
 import { reviewMappingPreparation, readTargets, type PublicationMappingProposal } from "./publication-mapping-preparation.repository";
 import type { ActivePublicationVariantMappingSnapshot } from "../application/inventory-channel-exposure-runtime.service";
+import { readEbayListingPreparationScope, type VerifiedEbayListingPreparation } from "../../channels/ebay-listing-preparation-scope";
 
 export const readinessDigest = (value: unknown): string => createHash("sha256").update(canonicalJson(value)).digest("hex");
 const blocker = (code: string, message: string, productVariantId: number | null = null,
@@ -13,7 +14,8 @@ const blocker = (code: string, message: string, productVariantId: number | null 
 
 /** Read-only proposal: uses the active ATP/model/policy/source owners. Only
  * proposed exact SKU mappings are overlaid, never selection or draft policy. */
-export async function captureEbayPublicationReadiness(client: PoolClient, source: InventoryEbayPublicationReadinessInput, lock: boolean) {
+export async function captureEbayPublicationReadiness(client: PoolClient, source: InventoryEbayPublicationReadinessInput, lock: boolean,
+  verifiedListing?: VerifiedEbayListingPreparation) {
   const blockers: PublicationMembershipBlocker[] = [];
   const targets = await readTargets(client, source.channelId, source.connectionId, undefined, lock);
   const target = targets.length === 1 ? targets[0] : null;
@@ -30,6 +32,7 @@ export async function captureEbayPublicationReadiness(client: PoolClient, source
   const enabled = await client.query(`SELECT global_enabled FROM channels.sync_settings ${lock ? "FOR SHARE" : ""}`);
   if (enabled.rows.length !== 1 || enabled.rows[0].global_enabled !== true) blockers.push(blocker("STOCK_LISTING_GLOBAL_STOP", "Automatic stock publication is paused globally."));
   if (target?.held_at) blockers.push(blocker("STOCK_LISTING_HELD", "This stock destination is on hold. Review the hold before publishing."));
+  const listingScope = verifiedListing ? await readEbayListingPreparationScope(client, source, verifiedListing, lock) : null;
   if (lock) {
     await client.query("SELECT id FROM catalog.products WHERE id=$1 FOR SHARE", [source.productId]);
     await client.query("SELECT id FROM catalog.product_variants WHERE id=ANY($1::integer[]) ORDER BY id FOR SHARE", [source.variants.map(row => row.productVariantId)]);
@@ -74,7 +77,8 @@ export async function captureEbayPublicationReadiness(client: PoolClient, source
   if (target && blockers.length === 0) {
     mappingReview = (await reviewMappingPreparation(client, { publicationTargetId: target.id, expectedTargetRevision: target.revision,
       productId: source.productId, productVariantIds: source.variants.map(row => row.productVariantId),
-      allowRetainedZero: source.purpose === "sync" }, lock, proposal)).review;
+      allowRetainedZero: source.purpose === "sync",
+      ...(listingScope ? { verifiedListingScopeHash: listingScope.fingerprint } : {}) }, lock, proposal)).review;
     blockers.push(...mappingReview.blockers);
     for (const variant of variants) {
       const quantity = mappingReview.quantities.find(row => row.productVariantId === variant.productVariantId);
@@ -89,5 +93,7 @@ export async function captureEbayPublicationReadiness(client: PoolClient, source
       ["Seal only the verified exact eBay SKU mappings for the existing channel selection.",
         "Recalculate destination quantities with the existing active stock model, source, and policies.", "Save publication work in the same transaction."] };
   return { review: inventoryEbayPublicationReadinessSchema.parse({ ...body,
-    reviewHash: readinessDigest({ source, body, target, rows, mappingReview }) }), target, rows, proposal, mappingReview };
+    reviewHash: readinessDigest({ source, body, target, rows, mappingReview,
+      ...(listingScope ? { listingScope: { fingerprint: listingScope.fingerprint, selectionFingerprint: listingScope.selectionFingerprint } } : {}) }) }),
+    target, rows, proposal, mappingReview, listingScope };
 }

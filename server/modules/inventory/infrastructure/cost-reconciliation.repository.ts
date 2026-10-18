@@ -31,14 +31,23 @@ export interface ReconciliationLedger {
   balances: ReconciliationBalance;
   lastIds: Partial<Record<Approval["destination"], number>>;
 }
+export type ReconciliationScope = number | { purchaseOrderLineId: number; component: "product" | "packaging" };
+export function reconciliationScope(source: CostSourceRevision): ReconciliationScope {
+  return source.scope.kind === "shipment_line" ? source.scope.inboundShipmentLineId
+    : { purchaseOrderLineId: source.scope.purchaseOrderLineId, component: z.enum(["product", "packaging"]).parse(source.component) };
+}
+function scopePredicate(scope: ReconciliationScope) {
+  return typeof scope === "number" ? sql`inbound_shipment_line_id=${scope}`
+    : sql`purchase_order_line_id=${scope.purchaseOrderLineId} AND component=${scope.component}`;
+}
 export async function readReconciliationLedger(
   tx: CostEvidenceTransaction,
-  lineId: number,
+  lineId: ReconciliationScope,
 ): Promise<ReconciliationLedger> {
   const approvals = await tx.execute(sql`SELECT id,destination,evidence_fingerprint,actor_name,reason
-    FROM inventory.cost_reconciliation_approvals WHERE inbound_shipment_line_id=${lineId} ORDER BY id DESC LIMIT 1`);
+    FROM inventory.cost_reconciliation_approvals WHERE ${scopePredicate(lineId)} ORDER BY id DESC LIMIT 1`);
   const postings = await tx.execute(sql`SELECT DISTINCT ON(destination) id,destination,after_mills
-    FROM inventory.cost_reconciliation_postings WHERE inbound_shipment_line_id=${lineId} ORDER BY destination,id DESC`);
+    FROM inventory.cost_reconciliation_postings WHERE ${scopePredicate(lineId)} ORDER BY destination,id DESC`);
   const row = approvals.rows[0];
   const approval = row
     ? approvalSchema.parse({
@@ -64,7 +73,6 @@ export async function readReconciliationRecords(
   source: CostSourceRevision,
   issues: CostIssue[],
 ) {
-  if (source.scope.kind !== "shipment_line") return [];
   const ids = issues.flatMap((issue) => (issue.unresolvedQuantity ? [issue.unresolvedQuantity.inventoryLotId] : []));
   const missingOrigin = issues.some((issue) => issue.code === "COST_HISTORICAL_LINEAGE_MISSING");
   const rows =
@@ -77,7 +85,8 @@ export async function readReconciliationRecords(
       EXISTS(SELECT 1 FROM inventory.lot_cost_contributions c WHERE c.source_lot_id=lot.id OR c.output_lot_id=lot.id) AS has_contribution,
       COALESCE(lot.landed_total_cost_mills,lot.landed_cost_mills::bigint*lot.qty_received) AS existing_landed_mills
     FROM inventory.inventory_lots lot WHERE
-      (${missingOrigin} AND lot.po_line_id=${source.scope.purchaseOrderLineId} AND lot.inbound_shipment_id=${source.scope.inboundShipmentId}
+      (${missingOrigin} AND lot.po_line_id=${source.scope.purchaseOrderLineId}
+        AND (${source.scope.kind === "purchase_order_line"} OR lot.inbound_shipment_id=${source.scope.kind === "shipment_line" ? source.scope.inboundShipmentId : null})
         AND NOT EXISTS(SELECT 1 FROM inventory.lot_cost_origins o WHERE o.inventory_lot_id=lot.id))
       OR lot.id IN (SELECT value::integer FROM jsonb_array_elements_text(${JSON.stringify(ids)}::jsonb)) ORDER BY lot.id LIMIT 1001`);
   if (rows.rows.length > 1000)
@@ -110,9 +119,9 @@ export async function hasReconciliationRoots(
   tx: CostEvidenceTransaction,
   source: CostSourceRevision,
 ): Promise<boolean> {
-  if (source.scope.kind !== "shipment_line") return false;
   const roots = await tx.execute(
-    sql`SELECT inventory_lot_id FROM inventory.lot_cost_origins WHERE inbound_shipment_line_id=${source.scope.inboundShipmentLineId} LIMIT 1`,
+    sql`SELECT inventory_lot_id FROM inventory.lot_cost_origins WHERE purchase_order_line_id=${source.scope.purchaseOrderLineId}
+      AND (${source.scope.kind === "purchase_order_line"} OR inbound_shipment_line_id=${source.scope.kind === "shipment_line" ? source.scope.inboundShipmentLineId : null}) LIMIT 1`,
   );
   return roots.rows.length > 0;
 }
@@ -131,8 +140,8 @@ export async function postCostReconciliation(
   now: Date,
 ): Promise<ReconciliationPosting[]> {
   const scope = revision.contract.scope;
-  if (scope.kind !== "shipment_line" || !plan.ledger.approval)
-    throw new CostEvidenceError("COST_RECONCILIATION_SCOPE", "A shipment reconciliation approval is required.");
+  if (!plan.ledger.approval)
+    throw new CostEvidenceError("COST_RECONCILIATION_SCOPE", "A component reconciliation approval is required.");
   const changes = reconciliationDeltas(plan.ledger.balances, plan.targets);
   const destination = plan.ledger.approval.destination;
   if (!changes.length && !plan.ledger.lastIds[destination])
@@ -141,9 +150,9 @@ export async function postCostReconciliation(
   for (const change of changes) {
     const prior = plan.ledger.lastIds[change.destination] ?? null;
     const inserted = await tx.execute(sql`INSERT INTO inventory.cost_reconciliation_postings
-      (inbound_shipment_line_id,approval_id,source_revision_id,application_id,previous_posting_id,destination,currency,
+      (inbound_shipment_line_id,purchase_order_line_id,component,approval_id,source_revision_id,application_id,previous_posting_id,destination,currency,
        before_mills,after_mills,delta_mills,unassigned_delta_mills,actor_id,recorded_at)
-      VALUES(${scope.inboundShipmentLineId},${plan.ledger.approval.id},${revision.id},${applicationId},${prior},${change.destination},'USD',
+      VALUES(${scope.kind === "shipment_line" ? scope.inboundShipmentLineId : null},${scope.kind === "purchase_order_line" ? scope.purchaseOrderLineId : null},${revision.contract.component},${plan.ledger.approval.id},${revision.id},${applicationId},${prior},${change.destination},'USD',
         ${change.beforeMills},${change.afterMills},${change.deltaMills},${-change.deltaMills},${actorId},${now}) RETURNING id`);
     result.push(
       reconciliationPostingSchema.parse({
@@ -159,7 +168,7 @@ export async function postCostReconciliation(
 export async function recordReconciliationApproval(
   tx: CostEvidenceTransaction,
   input: {
-    lineId: number;
+    lineId: ReconciliationScope;
     revisionId: number;
     applicationId: number;
     fingerprint: string;
@@ -171,15 +180,18 @@ export async function recordReconciliationApproval(
     evidence: unknown;
   },
 ) {
-  await tx.execute(sql`INSERT INTO inventory.cost_reconciliation_approvals(inbound_shipment_line_id,source_revision_id,application_id,
+  const scope = input.lineId;
+  await tx.execute(sql`INSERT INTO inventory.cost_reconciliation_approvals(inbound_shipment_line_id,purchase_order_line_id,component,source_revision_id,application_id,
     evidence_fingerprint,destination,actor_id,actor_name,reason,recorded_at,evidence)
-    VALUES(${input.lineId},${input.revisionId},${input.applicationId},${input.fingerprint},${input.destination},${input.actorId},${input.actorName},${input.reason},${input.now},${canonicalJson(input.evidence)}::jsonb)`);
+    VALUES(${typeof scope === "number" ? scope : null},${typeof scope === "number" ? null : scope.purchaseOrderLineId},${typeof scope === "number" ? "landed" : scope.component},${input.revisionId},${input.applicationId},${input.fingerprint},${input.destination},${input.actorId},${input.actorName},${input.reason},${input.now},${canonicalJson(input.evidence)}::jsonb)`);
 }
-export async function readReconciliationHistory(tx: CostEvidenceTransaction, lineId: number) {
+export async function readReconciliationHistory(tx: CostEvidenceTransaction, lineId: ReconciliationScope) {
+  const predicate = typeof lineId === "number" ? sql`p.inbound_shipment_line_id=${lineId}`
+    : sql`p.purchase_order_line_id=${lineId.purchaseOrderLineId} AND p.component=${lineId.component}`;
   const rows =
     await tx.execute(sql`SELECT p.id,p.destination,p.before_mills,p.after_mills,p.delta_mills,p.recorded_at,a.actor_name,a.reason
     FROM inventory.cost_reconciliation_postings p JOIN inventory.cost_reconciliation_approvals a ON a.id=p.approval_id
-    WHERE p.inbound_shipment_line_id=${lineId} ORDER BY p.id DESC LIMIT 50`);
+    WHERE ${predicate} ORDER BY p.id DESC LIMIT 50`);
   return rows.rows.map((row) =>
     reconciliationHistorySchema.parse({
       id: costInteger(row.id, "postingId", 1),

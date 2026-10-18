@@ -1,6 +1,8 @@
 import type { ClaimPlanDto } from "@shared/types/inventory-availability-planner";
 
 const MAX_INLINE_CLAIM_OPERATIONS = 1000;
+/** Claim operation states that have no execution, release, or handoff progress. */
+const EXECUTABLE_OPERATION_STATES: ReadonlySet<string> = new Set(["pending", "ready"]);
 
 export class ClaimPickPackageConversionError extends Error {
   constructor(readonly code: string, message: string, readonly context: Readonly<Record<string, unknown>>) {
@@ -10,8 +12,12 @@ export class ClaimPickPackageConversionError extends Error {
 }
 
 /** Select only missing finished units, in prerequisite-first execution order.
- * Packaging operations still require transactional inline-policy approval before
- * execution. A component build always requires its separate work handoff.
+ * Packaging operations still require transactional authority/inline-policy
+ * approval before execution. Component builds are selected too: the owner's
+ * decision (2026-10-18, order #64366) is that every assembled SKU assembles
+ * automatically at pick, inside the pick's transaction, with no work handoff.
+ * A build already handed to assembly work (status "executing") is owned by
+ * that work item and is never executed a second time here.
  */
 export function selectClaimPickPackageConversions(input: {
   operations: ClaimPlanDto["operations"];
@@ -37,8 +43,14 @@ export function selectClaimPickPackageConversions(input: {
     if (visiting.has(operation.operationKey)) {
       throw new ClaimPickPackageConversionError("CLAIM_PICK_OPERATION_GRAPH_INVALID", "The claim conversion graph contains a cycle.", { operationKey: operation.operationKey });
     }
-    if (operation.operationType === "component_build" || operation.warehouseId !== input.warehouseId || operation.outputLocationId === null
-      || !["pending", "ready"].includes(input.states.get(operation.operationKey) ?? "")) {
+    const state = input.states.get(operation.operationKey) ?? "";
+    if (operation.operationType === "component_build" && state === "executing") {
+      throw new ClaimPickPackageConversionError("CLAIM_PICK_BUILD_HANDED_OFF",
+        "This build was already sent to assembly work; complete or cancel that assembly job before picking.",
+        { operationKey: operation.operationKey });
+    }
+    if (operation.warehouseId !== input.warehouseId || operation.outputLocationId === null
+      || !EXECUTABLE_OPERATION_STATES.has(state)) {
       throw new ClaimPickPackageConversionError("CLAIM_PICK_OPERATION_REQUIRES_WORK",
         "This pick requires warehouse work before its finished stock can be picked.", { operationKey: operation.operationKey });
     }

@@ -27,7 +27,7 @@ export function isHistoricalCostIssue(issue: CostIssue): boolean {
   const parsed = costIssueSchema.safeParse(issue);
   return parsed.success && (parsed.data.code === "COST_HISTORICAL_LINEAGE_MISSING"
     ? parsed.data.unresolvedQuantity === undefined
-    : parsed.data.code === "COST_UNRESOLVED_QUANTITY_RETAINED" && parsed.data.unresolvedQuantity?.component === "landed");
+    : parsed.data.code === "COST_UNRESOLVED_QUANTITY_RETAINED" && parsed.data.unresolvedQuantity !== undefined);
 }
 
 /** A posted balance resolves exactly the retained issues that were reviewed.

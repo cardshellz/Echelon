@@ -353,7 +353,11 @@ suite.sequential("canonical picker case conversions with active quantity authori
     await context.pool.query("UPDATE inventory.availability_claim_operations SET authority_id=$2,operation_type=$3 WHERE claim_id=$1",
       [claimId,operation.authorityId,operation.operationType]);
     const before = await evidence();
-    await expect(owner.pickClaimLine(remaining)).rejects.toMatchObject({ code:"CLAIM_PICK_OPERATION_REQUIRES_WORK" });
+    // A component build now assembles at pick (#64366) through the build owner,
+    // never through the packaging writer. This owner has no build port, so the
+    // build path must fail closed and leave zero postings.
+    await expect(owner.pickClaimLine(remaining)).rejects.toMatchObject({ code: fault === "missing_path"
+      ? "CLAIM_PICK_OPERATION_REQUIRES_WORK" : "CLAIM_BUILD_EXECUTION_NOT_CONFIGURED" });
     expect(await evidence()).toEqual(before);
   });
 

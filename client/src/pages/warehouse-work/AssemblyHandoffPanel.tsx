@@ -44,9 +44,14 @@ export default function AssemblyHandoffPanel({ orderId, onHandedOff }: { orderId
   const query = useQuery({ queryKey: ["assembly", "order", user?.id, orderId], queryFn: () => assemblyRequest(`/api/warehouse/assembly-work/orders/${orderId}`, assemblyOrderInstructionsSchema), retry: false, staleTime: 0 });
   if (query.isPending) return <p className="p-3 text-sm">Checking committed assembly work…</p>;
   if (query.error) return <div className="p-3 text-sm" role="status">Assembly check unavailable: {query.error.message} <Button variant="outline" onClick={() => query.refetch()}>Retry check</Button></div>;
-  if (!query.data.instructions.length) return null;
+  // Assembled SKUs now build automatically inside the pick itself (owner
+  // decision 2026-10-18, #64366): the picker just picks. Only builds that were
+  // already sent to an assembly station before that change still need the
+  // station, so only those are shown here; nothing else blocks or nags the gun.
+  const handedOff = query.data.instructions.filter((instruction) => instruction.task !== null);
+  if (!handedOff.length) return null;
   return <div className="p-3 space-y-3 max-w-3xl mx-auto w-full">
-    {query.data.instructions.map((instruction) => <AssemblyHandoffCard key={`${user?.id}:${instruction.claimId}:${instruction.operationKey}`} instruction={instruction} onHandedOff={onHandedOff} />)}
+    {handedOff.map((instruction) => <AssemblyHandoffCard key={`${user?.id}:${instruction.claimId}:${instruction.operationKey}`} instruction={instruction} onHandedOff={onHandedOff} />)}
     <Link href="/assembly" className="text-sm underline">Open assembly work</Link>
   </div>;
 }

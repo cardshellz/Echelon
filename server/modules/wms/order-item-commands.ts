@@ -398,10 +398,15 @@ export async function persistCanonicalWmsPickProgress(
       if (correction.rows?.length !== 1) throw new WmsOrderItemCommandError("WMS_PICK_CORRECTION_CHANGED",
         "The authorized corrective pick changed before inventory could be posted.");
     }
+    // A shipment can close a line before anyone picked it (#64254, 2026-10-18:
+    // completed, 0 of 20 picked, 20 shipped). Only an authorized corrective
+    // pick may then add the missing pick records, and the line stays completed.
+    const shippedLineCorrection = Boolean(progress.pickCorrectionId)
+      && (progress.expectedStatus as string) === "completed";
     if (!["in_progress", "completed", "short"].includes(progress.targetStatus)
       || progress.targetPickedQuantity - progress.expectedPickedQuantity !== input.movementQuantity
       || progress.expectedPickedQuantity > progress.targetPickedQuantity
-      || !["pending", "in_progress", "short"].includes(progress.expectedStatus)) {
+      || (!shippedLineCorrection && !["pending", "in_progress", "short"].includes(progress.expectedStatus))) {
       throw new WmsOrderItemCommandError(
         "INVALID_WMS_PICK_PROGRESS",
         "A canonical runtime pick must atomically add one positive WMS progress delta.",
@@ -420,7 +425,7 @@ export async function persistCanonicalWmsPickProgress(
 
     const updated = await executor.query(
       `UPDATE wms.order_items
-       SET status = $1,
+       SET status = CASE WHEN $11::boolean THEN 'completed' ELSE $1 END,
            picked_quantity = $2,
            picked_at = COALESCE(picked_at, $3),
            short_reason = CASE WHEN $9::boolean THEN $10::text ELSE short_reason END
@@ -430,7 +435,8 @@ export async function persistCanonicalWmsPickProgress(
          AND picked_quantity = $7
          AND COALESCE(fulfilled_quantity, 0) = $8
          AND $2 BETWEEN 1 AND quantity
-         AND (($1 = 'completed' AND $2 = quantity)
+         AND ($11::boolean
+           OR ($1 = 'completed' AND $2 = quantity)
            OR ($1 IN ('in_progress', 'short') AND $2 < quantity))
        RETURNING id`,
       [
@@ -444,6 +450,7 @@ export async function persistCanonicalWmsPickProgress(
         expectedFulfilledQuantity,
         progress.targetShortReason !== undefined,
         targetShortReason ?? null,
+        shippedLineCorrection,
       ],
     );
     if (Number(updated.rowCount ?? updated.rows?.length ?? 0) !== 1) {

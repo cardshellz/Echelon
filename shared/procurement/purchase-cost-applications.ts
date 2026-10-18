@@ -114,7 +114,7 @@ export function isPurchaseCostResolutionVerified(history: CostHistory, revision:
     (current, application) => !current || application.id > current.id ? application : current, null);
   const historicalIssuesOnly = (application: NonNullable<typeof latest>) => application.status === "review_required"
     && application.issues.length > 0 && application.issues.every(isHistoricalCostIssue);
-  if (!resolution || !source || source.component !== "landed" || source.scope.kind !== "shipment_line"
+  if (!resolution || !source
     || source.issue !== null || source.currency !== "USD" || source.totalMills === null
     || !["estimated", "confirmed"].includes(source.evidence) || !revision.latestRecordedSourceRevision
     || resolution.sourceRevisionId !== revision.id || resolution.sourceFingerprint !== revision.fingerprint
@@ -131,12 +131,13 @@ export function isPurchaseCostResolutionVerified(history: CostHistory, revision:
     if (backingRevisions.length !== 1) return false;
     const backing = backingRevisions[0], backingSource = backing.source;
     const applications = backing.applications.filter((application) => application.id === posting.applicationId);
-    if (!backingSource || backingSource.scope.kind !== "shipment_line" || backingSource.component !== "landed"
+    if (!backingSource || backingSource.scope.kind !== source.scope.kind || backingSource.component !== source.component
       || backingSource.issue !== null || backingSource.currency !== "USD" || applications.length !== 1
       || backing.purchaseOrderLineId !== revision.purchaseOrderLineId || backing.shipmentLineId !== revision.shipmentLineId
       || backingSource.scope.purchaseOrderId !== sourceScope.purchaseOrderId
-      || backingSource.scope.inboundShipmentId !== sourceScope.inboundShipmentId
-      || backingSource.scope.inboundShipmentLineId !== sourceScope.inboundShipmentLineId) return false;
+      || (sourceScope.kind === "shipment_line" && (backingSource.scope.kind !== "shipment_line"
+        || backingSource.scope.inboundShipmentId !== sourceScope.inboundShipmentId
+        || backingSource.scope.inboundShipmentLineId !== sourceScope.inboundShipmentLineId))) return false;
     const application = applications[0];
     return historicalIssuesOnly(application) && application.reportingEvent?.evidenceState === "verified_record";
   });
