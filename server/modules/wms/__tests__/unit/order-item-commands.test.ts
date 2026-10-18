@@ -288,7 +288,7 @@ describe("WMS order-item command boundary", () => {
   });
 
   it("lets an authorized correction add pick records to a line its shipment closed, keeping it completed", async () => {
-    const query = vi.fn(async (statement: string) => statement.includes("FROM wms.pick_corrections")
+    const query = vi.fn(async (statement: string, _parameters?: unknown[]) => statement.includes("FROM wms.pick_corrections")
       ? { rows: [{ id: 209 }] } : { rows: [{ id: 324152 }], rowCount: 1 });
     await persistCanonicalWmsPickProgress({ query }, { ...shippedLineProgress({ targetStatus: "in_progress",
       targetPickedQuantity: 1 }), movementQuantity: 1 } as any);
