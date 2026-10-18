@@ -47,6 +47,10 @@ test("Yes/No only, No survives refresh, partial scans preserve the earlier pick"
   await page.reload();
   await expect(page.getByRole("alertdialog")).not.toBeVisible();
   await expect(page.getByText("2 still need a pick record")).toBeVisible();
+  // The quantity defaults to everything still missing (2); pick one at a time
+  // here to prove a partial scan preserves the earlier pick.
+  await expect(page.getByLabel("Quantity picked now")).toHaveValue("2");
+  await page.getByLabel("Quantity picked now").fill("1");
   await page.getByLabel("Scan item barcode or SKU").fill("WRONG");
   await page.getByRole("button", { name: "Record corrective pick" }).click();
   await expect(page.getByRole("alert")).toContainText("does not match");
