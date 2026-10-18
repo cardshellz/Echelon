@@ -6,6 +6,8 @@ import type { EbayRegistrationReadTransport } from "../../../marketplace-listing
 import { captureExistingEbayListingIdentity } from "../../ebay-existing-listing-identity";
 import { syncProviderFixture } from "../fixtures/ebay-listing-sync.fixture";
 
+type BindProviderIdentity = NonNullable<Parameters<EbayListingSyncExecution["execute"]>[3]>;
+
 const fixture = vi.hoisted(() => ({
   execution: null as EbayListingSyncExecution | null,
   rows: [] as Array<Record<string, unknown>>,
@@ -138,13 +140,20 @@ describe("production existing-listing prepare through verified completion", () =
     });
     const { identity: source } = await readExistingEbayListingMappingIdentity(4);
     const beforeRows = structuredClone(fixture.rows);
-    const binding = vi.fn(async () => {});
+    const binding = vi.fn<BindProviderIdentity>(async () => {});
     const result = await fixture.execution!.execute(source, async (_stage, _hash, work) => work(), null, binding, executionContext());
     expect(result).toMatchObject({ synced: 2, errors: 0 });
     expect(result.details.map(detail => detail.variantId)).toEqual([7, 8]);
     expect(binding).toHaveBeenCalledWith(expect.objectContaining({ variants: [expect.objectContaining({ variantId: 7 }), expect.objectContaining({ variantId: 8 })] }),
       expect.objectContaining({ evidence: expect.objectContaining({ nonMemberCandidates: [expect.objectContaining({ sku: retiredSku })] }) }),
       expect.objectContaining({ variants: expect.arrayContaining([expect.objectContaining({ variantId: 208, contentSyncEnabled: false })]) }));
+    const [, observation, sourceIdentity] = binding.mock.calls[0];
+    expect(sourceIdentity).toEqual(source);
+    expect(fixture.inventoryReady).toHaveBeenCalledExactlyOnceWith({}, {
+      channelId: 67, connectionId: 12, accountId: "seller", environment: "production", productId: 4, purpose: "sync",
+      variants: [{ productVariantId: 7, sku: "SHLZ-TOP-260PT-P10" }, { productVariantId: 8, sku: "SHLZ-TOP-260PT-C500" }],
+    }, { commandKey: executionContext().jobId, actor: "operator", now: expect.any(Date),
+      verifiedListing: { sourceIdentity, observation } });
     expect(f.client.createOrReplaceInventoryItemGroup).toHaveBeenCalledExactlyOnceWith(example.group,
       expect.objectContaining({ variantSKUs: ["SHLZ-TOP-260PT-P10", "SHLZ-TOP-260PT-C500"] }));
     expect(vi.mocked(f.client.createOrReplaceInventoryItem).mock.calls.map(([sku]) => sku)).toEqual(["SHLZ-TOP-260PT-P10", "SHLZ-TOP-260PT-C500"]);
@@ -176,17 +185,30 @@ describe("production existing-listing prepare through verified completion", () =
       imageUrls: ["https://example.com/deleted-old-photo.png"], variesBy: { specifications: [{ name: "Style", values: styles }] } });
     const retainedBefore = structuredClone(f.items.get("SHLZ-TOP-TOB-C1000"));
     const stages: string[] = [];
-    const binding = vi.fn(async () => {});
+    const binding = vi.fn<BindProviderIdentity>(async () => {});
     const result = await fixture.execution!.execute(legacyIdentity, async (stage, _hash, work) => { stages.push(stage); return work(); }, null, binding, executionContext());
     expect(result).toMatchObject({ synced: 1, errors: 0 });
     expect(binding).toHaveBeenCalledWith(expect.objectContaining({ variants: [
       expect.objectContaining({ sku: "SHLZ-TOP-TOB-P25", contentSyncEnabled: true }),
       expect.objectContaining({ sku: "SHLZ-TOP-TOB-C1000", contentSyncEnabled: false }),
     ] }), expect.any(Object), expect.any(Object));
+    const [, observation, sourceIdentity] = binding.mock.calls[0];
+    expect(sourceIdentity).toEqual({ ...f.source, variants: f.source.variants.map((member, index) => ({
+      ...member, contentSyncEnabled: index === 0, mappingExists: true,
+    })) });
+    expect(observation).toMatchObject({
+      providerAccount: { provider: "ebay", accountNamespace: "production", externalAccountId: "seller" },
+      marketplaceId: "EBAY_US", isPublished: true, observedAt: new Date("2026-10-09T20:00:00Z"),
+      listingIdentity: { externalId: example.listing }, publicationKeyIdentity: { externalId: example.group },
+      members: [1, 0].map(index => ({ sku: f.source.variants[index].sku,
+        inventoryItemIdentity: { externalId: f.source.variants[index].sku },
+        offerIdentity: { externalId: example.offers[index] } })),
+    });
     expect(fixture.inventoryReady).toHaveBeenCalledExactlyOnceWith({}, {
       channelId: 67, connectionId: 12, accountId: "seller", environment: "production", productId: 1, purpose: "sync",
       variants: [{ productVariantId: 1, sku: "SHLZ-TOP-TOB-P25" }, { productVariantId: 2, sku: "SHLZ-TOP-TOB-C1000" }],
-    }, { commandKey: executionContext().jobId, actor: "operator", now: expect.any(Date) });
+    }, { commandKey: executionContext().jobId, actor: "operator", now: expect.any(Date),
+      verifiedListing: { sourceIdentity, observation } });
     expect(binding.mock.invocationCallOrder[0]).toBeLessThan(fixture.inventoryReady.mock.invocationCallOrder[0]);
     expect(fixture.inventoryReady.mock.invocationCallOrder[0]).toBeLessThan(vi.mocked(f.client.createOrReplaceInventoryItem).mock.invocationCallOrder[0]);
     expect(f.client.createOrReplaceInventoryItem).toHaveBeenCalledExactlyOnceWith("SHLZ-TOP-TOB-P25", expect.objectContaining({
