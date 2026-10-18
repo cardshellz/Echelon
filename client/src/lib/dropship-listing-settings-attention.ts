@@ -11,8 +11,8 @@ import { LISTING_SETTINGS_SIZE_PRICES_WORDS, LISTING_SETTINGS_UPDATED_WORDS, UNN
 
 /**
  * The words at the top of the Listing settings step (Listing settings PR 7,
- * sub-part 2F): the header and its "When is that?" popover, the "Needs your
- * attention" strip, and the "Older settings" section around today's panels.
+ * sub-part 2F): the header and its "When is that?" popover and the "Needs
+ * your attention" strip.
  *
  * Words come from the design record (R:87-89, R:111-114, R:508, R:565-570)
  * unless marked interim. Interim words live here only, so a later PR can
@@ -276,16 +276,3 @@ export function attentionStripContent(
   if (lines.length === 0 && more === null) return { state: "empty", text: ATTENTION_STRIP_WORDS.empty };
   return { state: "lines", lines, more };
 }
-
-// ---------------------------------------------------------------------------
-// "Older settings" (plan 2F; A1)
-// ---------------------------------------------------------------------------
-
-export const OLDER_SETTINGS_WORDS = Object.freeze({
-  title: "Older settings",
-  // Interim (PR 11 PROPOSAL, D21): the panels stay until PR 12, and a group rule added here puts the store back in the
-  // older-rules state, so it says what that does instead of "They still work." (CUX#14).
-  intro: "Per-size policies and shelves, group rules and text templates. A group rule added here stops category settings from being saved.",
-  show: "Show older settings",
-  hide: "Hide older settings",
-});

@@ -326,7 +326,9 @@ export class EbayDropshipListingPushProvider implements DropshipMarketplaceListi
         "DROPSHIP_EBAY_MANAGED_LOCATION_CONFIG_MISMATCH",
         // This text reaches the vendor's failure email as is
         // (dropship-listing-push-worker-service.ts, describeFailedListingPushJob).
-        "Card Shellz needs to update where your eBay listings ship from. Open Listing settings, choose Update ship-from location, then queue the listing again.",
+        // Interim (PR 12 PROPOSAL): it names the step's [Update now] under the
+        // Shipping policy row; the old setup panel's button is gone (verify VC1).
+        "Card Shellz needs to update where your eBay listings ship from. Open Listing settings, choose Update now under Shipping policy, then queue the listing again.",
         {
           storeConnectionId: input.credential.storeConnectionId,
           originWarehouseId,

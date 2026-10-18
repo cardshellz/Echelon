@@ -21,7 +21,6 @@ import {
   LISTING_SETTINGS_GUARD_ID_PREFIX,
   STORE_DEFAULT_LABELS,
   categoryEditorId,
-  countOlderSettingsDrafts,
   decideOpen,
   describeListingSettingsBar,
   draftEnteredConflict,
@@ -42,7 +41,7 @@ import { isStoreDefaultPolicyEditor, policyEditorBase } from "@/lib/dropship-lis
 import { LISTING_SETTINGS_CATEGORY_WORDS } from "@/lib/dropship-listing-settings-words";
 import type { DropshipEbayStoreCategoryResponse, DropshipStoreConnectionSummary } from "@/lib/dropship-ops-surface";
 import { CatalogActionBar, type CatalogNextStepAction } from "../catalog/CatalogActionBar";
-import { useLeaveGuard, useUnsavedDrafts } from "../catalog/UnsavedChangesGuard";
+import { useLeaveGuard } from "../catalog/UnsavedChangesGuard";
 import { AttentionStrip } from "./AttentionStrip";
 import { CategoryEditor, type CategoryEditorCloseReason } from "./CategoryEditor";
 import { CategorySettingsCard, type CategoryCardOpen } from "./CategorySettingsCard";
@@ -69,9 +68,8 @@ import { UpdatedProductsSheet, type OwnTextCheckAction } from "./UpdatedProducts
  * The Listing settings step (Listing settings PR 7, plan 3A and 4.1): the
  * header, at most one connection banner, "Needs your attention", the Store
  * defaults card with one editor per row, the Products and Prices tabs, and
- * the product drawer. The page mounts it above "Older settings" for a
- * launch-ready eBay store, keyed by the store, so another store is another
- * step.
+ * the product drawer. The page mounts it for a launch-ready eBay store,
+ * keyed by the store, so another store is another step.
  *
  * It decides nothing about saving. Each row owns its writer; this shell reads
  * the facts every row shares (the live eBay setup, the summary, the store
@@ -157,7 +155,7 @@ export function ListingSettingsStep(props: ListingSettingsStepProps) {
   const { storeConnectionId, storeName, account, summary, shelves, saveCallbacks, onSettingsSaved, goToStep } = props;
   const queryClient = useQueryClient();
   const drafts = useListingSettingsDrafts();
-  // The same key as the old setup panel and the rail, so the three share one eBay read.
+  // The same key as the rail's cached read and step 3's policy names, so all three share one eBay read.
   const setupQuery = useQuery(ebayListingSetupQueryOptions(storeConnectionId));
   const [location, navigate] = useLocation();
   const search = useSearch();
@@ -743,12 +741,11 @@ export function ListingSettingsStep(props: ListingSettingsStepProps) {
 
 /**
  * The bottom bar on the Listing settings step (R:597): "All saved",
- * "Not saved · N changes in <place>", "Not saved · changes in Older settings"
- * or "Saving…", read out as it changes. Other steps keep their own bar.
+ * "Not saved · N changes in <place>" or "Saving…", read out as it changes.
+ * Other steps keep their own bar.
  */
 export function ListingSettingsActionBar({ next, saving }: { next: CatalogNextStepAction | null; saving: boolean }) {
   const { draft } = useListingSettingsDrafts();
-  const guardDrafts = useUnsavedDrafts();
-  const summary = describeListingSettingsBar({ draft, olderDraftCount: countOlderSettingsDrafts(guardDrafts), saving });
+  const summary = describeListingSettingsBar({ draft, saving });
   return <CatalogActionBar live summary={summary} next={next} />;
 }

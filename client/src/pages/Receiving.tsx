@@ -427,25 +427,6 @@ DEF-456,25,,,5.00,,Location TBD`;
     },
   });
 
-  const deleteReceiptMutation = useMutation({
-    mutationFn: async (id: number) => {
-      if (quarantineCommandPending) throw new Error("Confirm the saved quarantine command before deleting a receipt.");
-      const res = await fetch(`/api/receiving/${id}`, { method: "DELETE" });
-      if (!res.ok) {
-        const data = await res.json();
-        throw new Error(data.error || "Failed to delete receipt");
-      }
-      return res.json();
-    },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["/api/receiving"] });
-      toast({ title: "Receipt deleted" });
-    },
-    onError: (error: Error) => {
-      toast({ title: "Error", description: error.message, variant: "destructive" });
-    },
-  });
-
   const discardReceiptMutation = useMutation({
     onMutate: captureReceiptNavigation,
     mutationFn: async (id: number) => {
@@ -457,13 +438,14 @@ DEF-456,25,,,5.00,,Location TBD`;
       }
       return res.json();
     },
-    onSuccess: (_result, _variables, context) => {
+    onSuccess: (_result, discardedId, context) => {
       queryClient.invalidateQueries({ queryKey: ["/api/receiving"] });
       queryClient.invalidateQueries({ queryKey: ["/api/purchase-orders"] });
       if (!isCurrentReceiptNavigation(context)) return;
+      toast({ title: "Receipt discarded" });
+      if (selectedReceipt?.id !== discardedId) return;
       setSelectedReceipt(null);
       setShowReceiptDetail(false);
-      toast({ title: "Receipt discarded" });
       navigate(procurementNavigation.backHref(
         selectedReceipt?.purchaseOrderId
           ? `/purchase-orders/${selectedReceipt.purchaseOrderId}`
@@ -1425,18 +1407,19 @@ DEF-456,25,,,5.00,,Location TBD`;
                             <FileText className="h-4 w-4" />
                           </Link>
                         </Button>
-                        {receipt.status !== "closed" && (
+                        {receipt.status === "draft" && (
                           <Button 
                             variant="ghost" 
                             size="sm"
                             className="min-h-[44px] min-w-[44px] p-0"
                             onClick={(e) => { 
                               e.stopPropagation(); 
-                              if (confirm(`Delete receipt ${receipt.receiptNumber}?`)) {
-                                deleteReceiptMutation.mutate(receipt.id);
+                              if (confirm(`Discard unused draft ${receipt.receiptNumber}?`)) {
+                                discardReceiptMutation.mutate(receipt.id);
                               }
                             }}
-                            disabled={quarantineCommandPending || deleteReceiptMutation.isPending}
+                            disabled={quarantineCommandPending || discardReceiptMutation.isPending}
+                            aria-label={`Discard draft ${receipt.receiptNumber}`}
                             data-testid={`btn-delete-receipt-mobile-${receipt.id}`}
                           >
                             <Trash2 className="h-4 w-4 text-red-500" />
@@ -1514,17 +1497,18 @@ DEF-456,25,,,5.00,,Location TBD`;
                               <FileText className="h-4 w-4" />
                             </Link>
                           </Button>
-                          {receipt.status !== "closed" && (
+                          {receipt.status === "draft" && (
                             <Button 
                               variant="ghost" 
                               size="sm" 
                               onClick={(e) => { 
                                 e.stopPropagation(); 
-                                if (confirm(`Delete receipt ${receipt.receiptNumber}?`)) {
-                                  deleteReceiptMutation.mutate(receipt.id);
+                                if (confirm(`Discard unused draft ${receipt.receiptNumber}?`)) {
+                                  discardReceiptMutation.mutate(receipt.id);
                                 }
                               }}
-                              disabled={quarantineCommandPending || deleteReceiptMutation.isPending}
+                              disabled={quarantineCommandPending || discardReceiptMutation.isPending}
+                              aria-label={`Discard draft ${receipt.receiptNumber}`}
                               data-testid={`btn-delete-receipt-${receipt.id}`}
                             >
                               <Trash2 className="h-4 w-4 text-red-500" />
@@ -1998,7 +1982,7 @@ DEF-456,25,,,5.00,,Location TBD`;
                         Start
                       </Button>
                       {/* Discard draft — only when no lines have been received */}
-                      {(!selectedReceipt.lines || selectedReceipt.lines.every(l => (l.receivedQty ?? 0) <= 0)) && (
+                      {(selectedReceipt.lines && selectedReceipt.lines.every(l => (l.receivedQty ?? 0) === 0 && (l.damagedQty ?? 0) === 0 && (l.putawayComplete ?? 0) === 0)) && (
                         <AlertDialog>
                           <AlertDialogTrigger asChild>
                             <Button

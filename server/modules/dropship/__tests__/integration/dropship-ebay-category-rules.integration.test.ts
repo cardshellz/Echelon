@@ -21,6 +21,7 @@ const now = new Date("2026-09-30T12:00:00Z");
   const schema = `dropship_category_rules_${process.pid}`;
   let pool: pg.Pool;
   let service: DropshipEbayCategoryRulesService;
+  let repository: PgDropshipEbayCategoryRulesRepository;
   let created = false;
   const qualify = (sql: string) => sql.replaceAll("dropship.", `"${schema}".`).replaceAll("catalog.", `"${schema}".`);
   const query = (sql: string, values?: unknown[]) => pool.query(qualify(sql), values);
@@ -47,7 +48,7 @@ const now = new Date("2026-09-30T12:00:00Z");
       const client = await pool.connect();
       return { query: (sql: string, values?: unknown[]) => client.query(qualify(sql), values), release: () => client.release() };
     } } as unknown as Pool;
-    const repository = new PgDropshipEbayCategoryRulesRepository(scoped);
+    repository = new PgDropshipEbayCategoryRulesRepository(scoped);
     // Real ownership, locks, revisions, triggers and audits. Store context is a
     // deterministic fixture; the service tests cover the access policy itself.
     const withStoreFixture: EbayCategoryRulesRepository = { execute: (input, operation) => repository.execute(input, (tx) => operation({
@@ -78,10 +79,21 @@ const now = new Date("2026-09-30T12:00:00Z");
     await pool?.end();
   });
 
+  // The store default's history, heads, concurrency, stores and rollback; no rule, since Listing settings PR 12 refuses a
+  // new one (D9). The rule cases below seed the rule first, as an older group save made it, and resend it.
   function save(key: string, defaultCategoryId: string | null, expectedRevisionId: number | null = null, store = 22, member = "member-1") {
-    return service.saveForMember(member, store, { expectedRevisionId, idempotencyKey: key, draft: { defaultCategoryId, rules: [
-      { id: "mailers", name: "Mailers", scope: { type: "category", category: "Mailers" }, categoryId: MAILERS.categoryId },
-    ] } });
+    return service.saveForMember(member, store, { expectedRevisionId, idempotencyKey: key, draft: { defaultCategoryId, rules: [] } });
+  }
+
+  const MAILERS_RULE = { id: "mailers", name: "Mailers", scope: { type: "category" as const, category: "Mailers" }, categoryId: MAILERS.categoryId };
+
+  /** The Mailers rule stored through the real writer, as an older group save made it before PR 12; its revision. */
+  async function seedMailersRule(key = "seed-mailers"): Promise<number> {
+    await repository.execute({ memberId: "member-1", storeConnectionId: 22, mode: "write", idempotencyKey: key }, (tx) => tx.saveProfile({
+      expectedRevisionId: null, idempotencyKey: key, requestHash: "e".repeat(64), now,
+      profile: { version: 1, defaultCategory: null, rules: [{ id: "mailers", name: "Mailers", scope: { type: "category", category: "Mailers" },
+        category: MAILERS }] } }));
+    return (await service.getForMember("member-1", 22)).revisionId!;
   }
 
   async function counts() {
@@ -148,5 +160,68 @@ const now = new Date("2026-09-30T12:00:00Z");
     await expect(query("UPDATE dropship.dropship_ebay_category_rule_profiles SET revision_id = 1")).rejects.toMatchObject({ code: "23514" });
     await expect(query(`INSERT INTO dropship.dropship_ebay_category_rule_profiles (vendor_id, store_connection_id, revision_id)
       VALUES (10, 24, 1)`)).rejects.toMatchObject({ code: "23503" });
+  });
+
+  it("refuses a save that adds a rule with the permanent code, writing no revision, head or audit (PR 12, D9, T7)", async () => {
+    await save("first", SLEEVES.categoryId);
+    const before = await counts();
+    await expect(service.saveForMember("member-1", 22, { expectedRevisionId: 1, idempotencyKey: "adds-rule",
+      draft: { defaultCategoryId: SLEEVES.categoryId, rules: [MAILERS_RULE] } }))
+      .rejects.toMatchObject({ code: "DROPSHIP_LISTING_GROUP_RULES_CLOSED", context: { kind: "ebay_category", addedIds: ["mailers"] } });
+    expect(await counts()).toEqual(before);
+    expect(await counts()).toEqual({ revisions: 1, heads: 1, audits: 1 });
+    // Nothing was recorded under the key: the same key takes the next request.
+    await expect(service.saveForMember("member-1", 22, { expectedRevisionId: 1, idempotencyKey: "adds-rule",
+      draft: { defaultCategoryId: TOPLOADERS.categoryId, rules: [] } })).resolves.toMatchObject({ state: { revisionId: 2 } });
+  });
+
+  it("refuses a review that adds a rule at the current revision and answers a stale one with the version conflict, writing nothing (PR 12, D9-D10, verify VS5)", async () => {
+    const seeded = await seedMailersRule();
+    const TOPLOADERS_RULE = { id: "toploaders", name: "Toploaders", scope: { type: "category" as const, category: "Toploaders" },
+      categoryId: TOPLOADERS.categoryId };
+    const review = (expectedRevisionId: number) => service.reviewForMember("member-1", 22, { expectedRevisionId,
+      draft: { defaultCategoryId: SLEEVES.categoryId, rules: [MAILERS_RULE, TOPLOADERS_RULE] } });
+    const before = await counts();
+    await expect(review(seeded)).rejects.toMatchObject({ code: "DROPSHIP_LISTING_GROUP_RULES_CLOSED",
+      context: { kind: "ebay_category", addedIds: ["toploaders"], changedIds: [], reordered: false, retryable: false } });
+    expect(await counts()).toEqual(before);
+
+    // Another window removes the rule; this tab still sends its draft at the old revision: the conflict (Load latest).
+    const later = await service.saveForMember("member-1", 22, { expectedRevisionId: seeded, idempotencyKey: "removes-mailers",
+      draft: { defaultCategoryId: SLEEVES.categoryId, rules: [] } });
+    const afterSave = await counts();
+    await expect(review(seeded)).rejects.toMatchObject({ code: "DROPSHIP_EBAY_CATEGORY_RULES_VERSION_CONFLICT" });
+    // At the current revision both rules are new.
+    await expect(review(later.state.revisionId!)).rejects.toMatchObject({ code: "DROPSHIP_LISTING_GROUP_RULES_CLOSED",
+      context: { addedIds: ["mailers", "toploaders"] } });
+    expect(await counts()).toEqual(afterSave);
+  });
+
+  it("saves the stored rule sent back unchanged with a new store default, and keeps eBay's stored value for it", async () => {
+    const seeded = await seedMailersRule();
+    const saved = await service.saveForMember("member-1", 22, { expectedRevisionId: seeded, idempotencyKey: "keeps-rule",
+      draft: { defaultCategoryId: SLEEVES.categoryId, rules: [MAILERS_RULE] } });
+    expect(saved.state).toMatchObject({ revisionId: seeded + 1, profile: { defaultCategory: SLEEVES, rules: [{ id: "mailers", category: MAILERS }] } });
+    expect(await counts()).toEqual({ revisions: 2, heads: 1, audits: 2 });
+    // Removing it saves too.
+    await expect(service.saveForMember("member-1", 22, { expectedRevisionId: seeded + 1, idempotencyKey: "removes-rule",
+      draft: { defaultCategoryId: SLEEVES.categoryId, rules: [] } })).resolves.toMatchObject({ state: { profile: { rules: [] } } });
+  });
+
+  it("answers an old-revision resend of the rules a move emptied with the version conflict, not the refusal (D10)", async () => {
+    const seeded = await seedMailersRule();
+    // The move: a newer revision with the rules emptied and the default kept.
+    const moved = await service.saveForMember("member-1", 22, { expectedRevisionId: seeded, idempotencyKey: "the-move",
+      draft: { defaultCategoryId: null, rules: [] } });
+    const before = await counts();
+    // A tab opened before the move sends the old rule back at the old revision.
+    await expect(service.saveForMember("member-1", 22, { expectedRevisionId: seeded, idempotencyKey: "old-tab",
+      draft: { defaultCategoryId: SLEEVES.categoryId, rules: [MAILERS_RULE] } }))
+      .rejects.toMatchObject({ code: "DROPSHIP_EBAY_CATEGORY_RULES_VERSION_CONFLICT" });
+    // Reloaded, the same rule at the current revision is a new rule.
+    await expect(service.saveForMember("member-1", 22, { expectedRevisionId: moved.state.revisionId, idempotencyKey: "old-tab-reloaded",
+      draft: { defaultCategoryId: SLEEVES.categoryId, rules: [MAILERS_RULE] } }))
+      .rejects.toMatchObject({ code: "DROPSHIP_LISTING_GROUP_RULES_CLOSED" });
+    expect(await counts()).toEqual(before);
   });
 });

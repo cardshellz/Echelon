@@ -7,6 +7,7 @@ import type { EbayCategoryOption } from "@shared/dropship/ebay-category-rules";
 import type { ListingSettingsSummary } from "@shared/dropship/listing-settings";
 import type { ListingSettingsRight } from "@/lib/dropship-listing-settings-access";
 import type { StoreDefaultEditorFooter } from "@/lib/dropship-listing-settings-content-requests";
+import { DropshipApiError } from "@/lib/dropship-ops-surface";
 import { UnsavedChangesProvider } from "../catalog/UnsavedChangesGuard";
 import { DropshipEbayCategoryPicker, EbayCategoryPickerView } from "../DropshipEbayCategoryPicker";
 import {
@@ -76,7 +77,7 @@ function pickerProps(overrides: Partial<Parameters<typeof EbayCategoryPickerView
     search: "sleeves", onSearchChange: noop, searchStatus: "ready", searchError: null,
     searchResults: [{ ...SLEEVES, leaf: true }, SUPPLIES], searchedText: "sleeves",
     onRetrySearch: noop, trail: [], onTrailChange: noop, browseStatus: "idle", browseError: null, browseParent: null, browseChildren: [],
-    onRetryBrowse: noop, onPick: noop, onOpen: noop, ...overrides,
+    onRetryBrowse: noop, onPick: noop, onOpen: noop, portalHref: (path) => `/dropship-portal${path}`, ...overrides,
   };
 }
 
@@ -105,9 +106,9 @@ function descriptionEditor(overrides: Partial<DescriptionEditorViewProps> = {}):
 }
 
 describe("eBay category picker", () => {
-  it("keeps today's words and prints each category's number when no new prop is passed", () => {
+  it("keeps its words and prints each category's number when no option prop is passed", () => {
     const markup = render(React.createElement(EbayCategoryPickerView, pickerProps()));
-    // The old step's exact output: the path, then " · #" and the number.
+    // The default output: the path, then " · #" and the number.
     expect(markup).toContain('<p class="text-xs text-zinc-500">Collectibles › Trading Cards › Card Sleeves · #183435</p>');
     expect(markup).toContain("#261328");
     expect(markup).not.toContain("Pick the last level.");
@@ -133,6 +134,67 @@ describe("eBay category picker", () => {
     })));
     expect(markup).toContain("Card Supplies");
     expect(markup).not.toContain("261328");
+  });
+
+  // Ported in Listing settings PR 12 from the deleted eBay category rules panel's test (REC:935): the picker
+  // stays, used by the store-default eBay category editor and the drawer. Since the PR 12 review (DUX1) it carries
+  // the sign-in banner's Reconnect eBay link: the step raises no banner for a picker read, and the inline eBay sign-in
+  // that panel 3 put here went with it (D17).
+  it("says the eBay connection needs a refresh and links to Reconnect eBay, with no Try again, when a search or a browse is refused for permission", () => {
+    const error = new DropshipApiError({ status: 403, code: "DROPSHIP_EBAY_CATEGORIES_PERMISSION_REQUIRED", message: "Reconnect the store." });
+    for (const props of [
+      pickerProps({ searchStatus: "error", searchError: error }),
+      pickerProps({ mode: "browse", browseStatus: "error", browseError: error }),
+    ]) {
+      const markup = render(React.createElement(EbayCategoryPickerView, props));
+      expect(markup).toContain("Your eBay connection needs a refresh.");
+      expect(markup).toContain("eBay categories load through your own eBay connection. Reconnect eBay, then try again.");
+      expect(markup).not.toContain("Try again");
+      // The alert is the last thing the picker draws: it holds no button and one link, to the store connection page,
+      // where the vendor signs in to eBay again.
+      const alert = markup.slice(markup.indexOf('role="alert"'));
+      expect(alert).not.toMatch(/<button/);
+      expect(alert.match(/<a /g)).toHaveLength(1);
+      expect(alert).toMatch(/<a [^>]*href="\/dropship-portal\/onboarding"[^>]*>Reconnect eBay/);
+      // No code, and not the server's words.
+      expect(markup).not.toContain("DROPSHIP_");
+      expect(markup).not.toContain("Reconnect the store.");
+    }
+  });
+
+  it("keeps other failures retryable and says why, in search and in browse", () => {
+    const error = new DropshipApiError({ status: 502, code: "DROPSHIP_EBAY_CATEGORIES_UNAVAILABLE", message: "eBay categories could not be loaded. Try again shortly." });
+    for (const props of [
+      pickerProps({ searchStatus: "error", searchError: error }),
+      pickerProps({ mode: "browse", browseStatus: "error", browseError: error }),
+    ]) {
+      const markup = render(React.createElement(EbayCategoryPickerView, props));
+      expect(markup).toContain("eBay categories could not be loaded. Try again shortly.");
+      expect(markup).toMatch(/<button[^>]*>Try again<\/button>/);
+      expect(markup).not.toContain("Your eBay connection needs a refresh.");
+    }
+  });
+
+  it("tells the vendor what to do when a search finds nothing or is too short", () => {
+    expect(render(React.createElement(EbayCategoryPickerView, pickerProps({ searchResults: [] }))))
+      .toContain("eBay has no suggestions for &quot;sleeves&quot;. Try other words, or browse all categories.");
+    expect(render(React.createElement(EbayCategoryPickerView, pickerProps({ search: "s", searchStatus: "too_short" }))))
+      .toContain("Type at least 2 characters to search.");
+    // An empty box says nothing yet.
+    expect(render(React.createElement(EbayCategoryPickerView, pickerProps({ search: "", searchStatus: "too_short" }))))
+      .not.toContain("Type at least 2 characters to search.");
+  });
+
+  it("browses the tree with a path back to the top, and lets a final category be used from inside it", () => {
+    const parent = { ...SLEEVES, leaf: true };
+    const markup = render(React.createElement(EbayCategoryPickerView, pickerProps({
+      mode: "browse", browseStatus: "ready", trail: [{ categoryId: "1", categoryName: "Collectibles", path: ["Collectibles"], leaf: false }, parent],
+      browseParent: parent, browseChildren: [],
+    })));
+    expect(markup).toContain("All categories");
+    expect(markup).toContain("Collectibles");
+    expect(markup).toContain("This is a final eBay category.");
+    expect(markup).toContain("Use this category");
   });
 
   it("passes both props through from the picker that reads eBay", () => {

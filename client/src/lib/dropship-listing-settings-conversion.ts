@@ -933,7 +933,7 @@ function moveLine(content: OlderRulesSheetContent, right: ListingSettingsRight):
   }
   const { blocked, changes } = content;
   if (blocked !== null) {
-    // Sizes first: their section lists the text cap too. The cap alone says what to shorten (D9c).
+    // Sizes first: their section lists the text cap too. The cap alone says what still lowers the text (D9c).
     if (blocked.wouldLosePrice !== null || blocked.wouldBlockListing !== null) return { text: W.fixFirst, tone: "alert" };
     if (blocked.tooMuchText !== null) return { text: blocked.tooMuchText, tone: "alert" };
   }

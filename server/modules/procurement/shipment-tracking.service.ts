@@ -49,6 +49,8 @@ import { isShipmentCostLinePosted } from "@shared/procurement/shipment-cost-work
 import { landedCostHealthSchema, type LandedCostHealth } from "@shared/procurement/landed-cost-health";
 import { readShipmentCostReview, readShipmentCostReviewInTransaction } from "./shipment-cost-review.repository";
 import { shipmentAllocationsEqual } from "./domain/shipment-allocation-equality";
+import { shipmentCancellationBlockers, SHIPMENT_CANCELLATION_REASON_MAX_LENGTH } from "./domain/shipment-cancellation";
+import { readShipmentCancellationEvidence } from "./shipment-cancellation.repository";
 
 /**
  * Allocate a shipment line's NON-PRODUCT landed cost (freight+duty+insurance+other,
@@ -643,6 +645,13 @@ export function createShipmentTrackingService(
       // close must not apply a decision made from the previous costing state.
       const shipment = await lockShipment(tx, id);
       assertTransition(shipment.status, targetStatus);
+      if (targetStatus === "cancelled") {
+        const blockers = shipmentCancellationBlockers(await readShipmentCancellationEvidence(tx, id));
+        if (blockers.length > 0) throw new ShipmentTrackingError(
+          "This shipment has receiving, inventory or recorded financial history. Review its receipts, invoices and Cost review before correcting it; cancellation would disconnect that evidence.",
+          409, { code: "SHIPMENT_CANCELLATION_HISTORY_PROTECTED", shipmentId: id, blockers },
+        );
+      }
       const changedAt = finalizationTime();
       const updates: Partial<InsertInboundShipment> = { status: targetStatus, ...extraUpdates };
 
@@ -746,8 +755,15 @@ export function createShipmentTrackingService(
   }
 
   async function cancel(id: number, userId?: string, reason?: string) {
-    if (!reason) throw new ShipmentTrackingError("Cancellation reason is required");
-    return transitionTo(id, "cancelled", userId, `Cancelled: ${reason}`);
+    if (!shipmentCostResourceIdSchema.safeParse(id).success) {
+      throw new ShipmentTrackingError("Shipment ID must be a positive PostgreSQL integer.", 400,
+        { code: "SHIPMENT_CANCELLATION_INPUT_INVALID" });
+    }
+    if (typeof reason !== "string" || !reason.trim() || reason.length > SHIPMENT_CANCELLATION_REASON_MAX_LENGTH) {
+      throw new ShipmentTrackingError("A cancellation reason of 1 to 10,000 characters is required.", 400,
+        { code: "SHIPMENT_CANCELLATION_INPUT_INVALID" });
+    }
+    return transitionTo(id, "cancelled", userId, `Cancelled: ${reason.trim()}`);
   }
 
   // ─── Line management ───────────────────────────────────────────

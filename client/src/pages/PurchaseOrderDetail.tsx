@@ -1007,6 +1007,8 @@ export default function PurchaseOrderDetail() {
   const hasExplicitLifecycleTab = requestedTabs.length === 1 && requestedTabs[0] === activeTab;
   const [showAddLineDialog, setShowAddLineDialog] = useState(false);
   const [showCancelDialog, setShowCancelDialog] = useState(false);
+  const [showCloseShortDialog, setShowCloseShortDialog] = useState(false);
+  const [closeShortReason, setCloseShortReason] = useState("");
   const [showAckDialog, setShowAckDialog] = useState(false);
   type ExternalSendReview = NavigationSnapshot & { poId: number; poNumber: string; expectedUpdatedAt: string };
   const [externalSendReview, setExternalSendReview] = useState<ExternalSendReview | null>(null);
@@ -1366,6 +1368,11 @@ export default function PurchaseOrderDetail() {
     && hasPermission(cancellationAction.requiredPermission.resource, cancellationAction.requiredPermission.action));
   const cancellationLabel = cancellationAction?.label ?? "Cancel";
   const canClosePo = canLifecycleAction("close", po?.status === "received");
+  const closeShortAction = lifecycle?.nextActions?.find((action) => action.id === "close_short");
+  const canCloseShortPo = Boolean(canLifecycleAction("close_short", false) && !poError && !isPoRefreshing
+    && closeShortAction?.endpoint === `/api/purchase-orders/${poId}/close-short`
+    && closeShortAction.requiredPermission
+    && hasPermission(closeShortAction.requiredPermission.resource, closeShortAction.requiredPermission.action));
   const scheduleStatus = po?.physicalStatus ?? po?.status;
   const canEditSchedule = Boolean(
     po && !["received", "closed", "cancelled", "short_closed"].includes(scheduleStatus),
@@ -2058,6 +2065,51 @@ export default function PurchaseOrderDetail() {
     },
   });
 
+  const refreshCloseShortState = async (purchaseOrderId: number) => {
+    await Promise.all([
+      queryClient.invalidateQueries({ queryKey: [`/api/purchase-orders/${purchaseOrderId}`] }),
+      queryClient.invalidateQueries({ queryKey: [`/api/purchase-orders/${purchaseOrderId}/history`] }),
+      queryClient.invalidateQueries({ queryKey: [`/api/purchase-orders/${purchaseOrderId}/workspace`] }),
+      queryClient.invalidateQueries({ queryKey: ["/api/purchase-orders"] }),
+    ]);
+  };
+  const closeShortMutation = useMutation({
+    onMutate: captureNavigation,
+    mutationFn: async (command: { purchaseOrderId: number; endpoint: string; reason: string }) => {
+      if (!canCloseShortPo || command.purchaseOrderId !== poId || command.endpoint !== closeShortAction?.endpoint) {
+        throw new Error("Close-short is unavailable. Refresh the purchase order and review your current permissions.");
+      }
+      const reason = command.reason.trim();
+      if (!reason) throw new Error("Enter a reason for closing the receipt short.");
+      const response = await fetch(command.endpoint, {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ reason }),
+      });
+      const body = await response.json().catch(() => null);
+      if (!response.ok) throw new Error(body?.error || "Unable to close this purchase order short.");
+      if (body?.id !== command.purchaseOrderId || body.status !== "closed" || body.physicalStatus !== "short_closed") {
+        throw new Error("The close-short response could not be confirmed. Reload the purchase order before retrying.");
+      }
+      return body;
+    },
+    onSuccess: async (_result, command, context) => {
+      await refreshCloseShortState(command.purchaseOrderId);
+      if (!context?.isCurrent()) return;
+      setShowCloseShortDialog(false);
+      setCloseShortReason("");
+      toast({ title: "PO closed short", description: "The reason was saved with the remaining receipt work." });
+    },
+    onError: async (_error: Error, command) => {
+      // A lost response can follow a committed close. Reload before enabling a
+      // second attempt; retain the entered reason and error for operator review.
+      await refreshCloseShortState(command.purchaseOrderId);
+    },
+  });
+  useEffect(() => {
+    setShowCloseShortDialog(false);
+    setCloseShortReason("");
+    closeShortMutation.reset();
+  }, [poId]);
+
   const addLineMutation = useMutation({
     mutationFn: ({ idempotencyKey, requestUrl, body }: PoLineHttpCommand<AddPoLineRequestBody>) =>
       financialCommandFetchJson(requestUrl, {
@@ -2531,6 +2583,7 @@ export default function PurchaseOrderDetail() {
         setShowCancelDialog(true);
         return;
       case "close_short":
+        if (canCloseShortPo) setShowCloseShortDialog(true);
         return;
     }
   };
@@ -2557,6 +2610,8 @@ export default function PurchaseOrderDetail() {
         return createInvoiceMutation.isPending;
       case "close":
         return closeMutation.isPending;
+      case "close_short":
+        return closeShortMutation.isPending;
       case "return_to_draft":
         return returnToDraftMutation.isPending;
       default:
@@ -2796,6 +2851,12 @@ export default function PurchaseOrderDetail() {
             <Button onClick={() => closeMutation.mutate()} disabled={closeMutation.isPending} className="flex-1 sm:flex-none min-h-[44px]">
               <Archive className="h-4 w-4 mr-2" />
               Close PO
+            </Button>
+          )}
+          {canCloseShortPo && (
+            <Button variant="outline" onClick={() => setShowCloseShortDialog(true)} disabled={closeShortMutation.isPending} className="flex-1 sm:flex-none min-h-[44px]">
+              <Archive className="h-4 w-4 mr-2" />
+              Close short
             </Button>
           )}
           {canCancelPo && (
@@ -4700,6 +4761,34 @@ export default function PurchaseOrderDetail() {
                 disabled={!selectedReceiveVariantId || !linePricingEvaluation.pricing || !lineQuoteMetadataEvaluation.metadata || catalogQuoteDateMissing || !po.updatedAt || addLineMutation.isPending}
               >
                 {addLineMutation.isPending ? "Adding..." : "Add Line"}
+              </Button>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={showCloseShortDialog} onOpenChange={(open) => { if (!closeShortMutation.isPending) setShowCloseShortDialog(open); }}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>Close Purchase Order Short</DialogTitle>
+            <DialogDescription>{po.status === "closed" && po.physicalStatus === "short_closed"
+              ? "The saved purchase order is already closed short. Close this dialog to review its current state."
+              : canCloseShortPo
+                ? "Close the remaining receipt work with an approved reason. This does not record additional received goods."
+                : "Close-short is unavailable for the current purchase order or your current permissions. Reload the purchase order to review its state."}</DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4">
+            <Label htmlFor="po-close-short-reason">Reason *</Label>
+            <Textarea id="po-close-short-reason" value={closeShortReason} disabled={closeShortMutation.isPending}
+              onChange={(event) => setCloseShortReason(event.target.value)} placeholder="Why will the remaining goods not be received?" rows={3} />
+            {closeShortMutation.error && <p role="alert" className="text-sm text-destructive">{closeShortMutation.error.message}</p>}
+            <div className="flex justify-end gap-2">
+              <Button variant="outline" disabled={closeShortMutation.isPending} onClick={() => setShowCloseShortDialog(false)}>Back</Button>
+              <Button disabled={!canCloseShortPo || !closeShortReason.trim() || closeShortMutation.isPending}
+                onClick={() => {
+                  if (poId && closeShortAction?.endpoint) closeShortMutation.mutate({ purchaseOrderId: poId, endpoint: closeShortAction.endpoint, reason: closeShortReason });
+                }}>
+                {closeShortMutation.isPending ? "Saving…" : "Confirm close short"}
               </Button>
             </div>
           </div>

@@ -9,11 +9,11 @@
 export interface UnsavedDraft {
   /** Stable per editor and store, so one editor never clears another's entry. */
   id: string;
-  /** The editor's title as the vendor sees it, e.g. "Listing pricing rules". */
+  /** The editor's title as the vendor sees it, e.g. "Price". */
   label: string;
   /**
-   * How many changes the editor holds, when it counts them (the new Listing
-   * settings step does; the older panels do not).
+   * How many changes the editor holds, when it counts them (the Listing
+   * settings step does).
    */
   changes?: number;
   /**

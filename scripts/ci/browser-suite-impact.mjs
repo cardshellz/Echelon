@@ -30,8 +30,7 @@ export const BROWSER_SUITES = {
     tests: /^test\/browser\/(?:dropship-(?:pricing|content|policy)-.*\.ts|dropship-shipping-estimate\.spec\.ts|dropship-wallet\.spec\.ts|dropship-orders\.spec\.ts|dropship-finance\.spec\.ts|dropship-onboarding\.spec\.ts|shared-shipping-configuration\.spec\.ts|bounded-page-loading\.spec\.ts|catalog-conversions\.spec\.ts)$/,
     // These modules are injected by mocked HTML, not imported by the specs.
     roots: [
-      "dropship-pricing", "dropship-content", "dropship-policy", "dropship-catalog", "dropship-cost-change-policy",
-      "dropship-ebay-categories",
+      "dropship-catalog", "dropship-cost-change-policy",
       "dropship-cost-changes",
       "dropship-shipping-estimate", "dropship-wallet", "dropship-orders", "dropship-finance", "dropship-onboarding",
       "shared-shipping-configuration", "bounded-page-loading", "catalog-conversion",

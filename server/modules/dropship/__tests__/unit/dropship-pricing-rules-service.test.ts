@@ -204,11 +204,10 @@ describe("store pricing review and approval", () => {
     expect(order(tx.lockSelection)).toBeLessThan(order(tx.listVariantIds));
     expect(order(tx.lockSelection)).toBeLessThan(order(tx.applyReview));
   });
-  it("takes no selection lock to read the profile, review, page a review or list targets", async () => {
+  it("takes no selection lock to read the profile, review or page a review", async () => {
     await service.getForMember("member-1", 22);
     const result = await review();
     await service.reviewPageForMember("member-1", 22, result.reviewId, 1);
-    await service.targetsForMember("member-1", 22, { type: "listings", search: "", page: 0 });
     expect(tx.lockSelection).not.toHaveBeenCalled();
   });
   it("fails authorization before reading costs or catalog selections", async () => {
@@ -270,10 +269,5 @@ describe("store pricing review and approval", () => {
   it("cannot loop forever on a broken cursor", async () => {
     vi.mocked(tx.listVariantIds).mockResolvedValue([1]);
     await expect(review()).rejects.toThrow("cursor did not advance");
-  });
-  it("paginates searchable scope choices without returning the whole catalog", async () => {
-    const result = await service.targetsForMember("member-1", 22, { type: "listings", search: "SKU-", page: 19 });
-    expect(result.total).toBe(1000); expect(result.rows).toHaveLength(50);
-    expect(await service.targetsForMember("member-1", 22, { type: "product_line" })).toEqual({ total: 1, rows: [{ id: "2", name: "Mailing supplies" }] });
   });
 });

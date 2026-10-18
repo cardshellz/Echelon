@@ -1,12 +1,7 @@
-import { createHash } from "crypto";
 import { DropshipError } from "../domain/errors";
-import { resolveStoreShelfIds } from "./dropship-ebay-listing-checks";
 import type { DropshipVendorProvisioningService } from "./dropship-vendor-provisioning-service";
 import type { DropshipClock, DropshipLogger } from "./dropship-ports";
-import {
-  listDropshipEbayStoreCategoriesForMemberInputSchema,
-  replaceDropshipEbayStoreCategoryAssignmentForMemberInputSchema,
-} from "./dropship-ebay-store-category-dtos";
+import { listDropshipEbayStoreCategoriesForMemberInputSchema } from "./dropship-ebay-store-category-dtos";
 
 export interface DropshipEbayStoreCategory {
   categoryId: string;
@@ -29,27 +24,6 @@ export interface DropshipEbayStoreCategoryContext {
   status: string;
 }
 
-export interface ReplaceDropshipEbayStoreCategoryAssignmentRepositoryInput {
-  vendorId: number;
-  storeConnectionId: number;
-  productVariantId: number;
-  storeCategoryIds: string[];
-  storeCategoryNames: string[];
-  idempotencyKey: string;
-  requestHash: string;
-  actor: {
-    actorType: "vendor" | "admin" | "system";
-    actorId: string | null;
-  };
-  now: Date;
-}
-
-export interface ReplaceDropshipEbayStoreCategoryAssignmentRepositoryResult {
-  assignment: DropshipEbayStoreCategoryAssignment | null;
-  revisionId: number;
-  idempotentReplay: boolean;
-}
-
 export interface DropshipEbayStoreCategoryRepository {
   loadStoreContext(input: {
     vendorId: number;
@@ -60,9 +34,6 @@ export interface DropshipEbayStoreCategoryRepository {
     storeConnectionId: number;
     productVariantIds?: readonly number[];
   }): Promise<DropshipEbayStoreCategoryAssignment[]>;
-  replaceAssignment(
-    input: ReplaceDropshipEbayStoreCategoryAssignmentRepositoryInput,
-  ): Promise<ReplaceDropshipEbayStoreCategoryAssignmentRepositoryResult>;
 }
 
 export interface DropshipEbayStoreCategoryDirectory {
@@ -105,61 +76,6 @@ export class DropshipEbayStoreCategoryService {
       assignments,
       fetchedAt: this.deps.clock.now(),
     };
-  }
-
-  async replaceForMember(memberId: string, input: unknown): Promise<
-    ReplaceDropshipEbayStoreCategoryAssignmentRepositoryResult
-  > {
-    const parsed = replaceDropshipEbayStoreCategoryAssignmentForMemberInputSchema.parse(input);
-    const vendor = (await this.deps.vendorProvisioning.provisionForMember(memberId)).vendor;
-    await this.requireConnectedEbayStore(vendor.vendorId, parsed.storeConnectionId);
-
-    const categories = await this.loadLeafCategories(vendor.vendorId, parsed.storeConnectionId);
-    // This service's own words, naming the size and the first shelf the store does not have.
-    const selectedCategories = resolveStoreShelfIds(parsed.storeCategoryIds, categories, (categoryId) => new DropshipError(
-      "DROPSHIP_EBAY_STORE_CATEGORY_INVALID",
-      "Select a current leaf category from the connected eBay Store.",
-      {
-        storeConnectionId: parsed.storeConnectionId,
-        productVariantId: parsed.productVariantId,
-        categoryId,
-      },
-    ));
-    const storeCategoryIds = selectedCategories.map((category) => category.id);
-    const storeCategoryNames = selectedCategories.map((category) => category.name);
-    const requestHash = hashEbayStoreCategoryAssignment({
-      storeConnectionId: parsed.storeConnectionId,
-      productVariantId: parsed.productVariantId,
-      storeCategoryIds,
-      storeCategoryNames,
-    });
-    const result = await this.deps.repository.replaceAssignment({
-      vendorId: vendor.vendorId,
-      storeConnectionId: parsed.storeConnectionId,
-      productVariantId: parsed.productVariantId,
-      storeCategoryIds,
-      storeCategoryNames,
-      idempotencyKey: parsed.idempotencyKey,
-      requestHash,
-      actor: { actorType: "vendor", actorId: memberId },
-      now: this.deps.clock.now(),
-    });
-    this.deps.logger.info({
-      code: result.idempotentReplay
-        ? "DROPSHIP_EBAY_STORE_CATEGORY_ASSIGNMENT_REPLAYED"
-        : "DROPSHIP_EBAY_STORE_CATEGORY_ASSIGNMENT_REPLACED",
-      message: result.idempotentReplay
-        ? "eBay Store category assignment replayed by idempotency key."
-        : "eBay Store category assignment replaced.",
-      context: {
-        vendorId: vendor.vendorId,
-        storeConnectionId: parsed.storeConnectionId,
-        productVariantId: parsed.productVariantId,
-        storeCategoryCount: storeCategoryIds.length,
-        revisionId: result.revisionId,
-      },
-    });
-    return result;
   }
 
   private async requireConnectedEbayStore(
@@ -220,18 +136,4 @@ export class DropshipEbayStoreCategoryService {
       throw error;
     }
   }
-}
-
-export function hashEbayStoreCategoryAssignment(input: {
-  storeConnectionId: number;
-  productVariantId: number;
-  storeCategoryIds: readonly string[];
-  storeCategoryNames: readonly string[];
-}): string {
-  return createHash("sha256").update(JSON.stringify({
-    storeConnectionId: input.storeConnectionId,
-    productVariantId: input.productVariantId,
-    storeCategoryIds: input.storeCategoryIds,
-    storeCategoryNames: input.storeCategoryNames,
-  })).digest("hex");
 }

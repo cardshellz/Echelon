@@ -1,13 +1,15 @@
 import { expect, test, type Locator, type Page } from "@playwright/test";
+import type { EbayCategoryRulesState } from "../../shared/dropship/ebay-category-rules";
 import type { ConversionChangeRow, ConversionSizeView, ListingRulesConversionCheck } from "../../shared/dropship/listing-rules-conversion";
 import type { ContentProfileState } from "../../shared/dropship/listing-content";
 import type { CategoryListingSettingValues } from "../../shared/dropship/listing-setting-values";
 import type { ListingSettingsSizePrice } from "../../shared/dropship/listing-settings";
+import { DROPSHIP_LISTING_GROUP_RULES_CLOSED } from "../../server/modules/dropship/domain/older-group-rules-edit";
 import {
   SAVED_PRICING_RULES,
+  SLEEVES as EBAY_SLEEVES,
   categoryKey,
   conversionCheck,
-  openOlderSettings,
   shot,
   stubSystemConversion,
   type ProductFixture,
@@ -24,12 +26,15 @@ import {
   exactBox,
   expectGatedReads,
   expectInView,
+  expectNoDeletedRouteCalls,
   expectNoHorizontalScroll,
+  expectNoOlderSettings,
   expectNothingUnexpected,
   expectSheetLayout,
   openStep,
   phone,
   readsOf,
+  row,
 } from "./dropship-policy-listing-settings-helpers";
 
 // Playwright's serviceWorkers:block init script reads navigator.serviceWorker in
@@ -50,8 +55,13 @@ test.use({ serviceWorkers: "allow" });
  * again. The stub serves scripted pages, each parsed with the strict contract where it is built (this file's load) and
  * when served; it never computes a diff, and a move is bound to the scripted page 0's hashes. From part 11e1 (plan
  * 9.2-9.4) a store the job moved shows the one-time notice in the line's place, with [Got it] (`POST
- * …/conversion/notice/acknowledge`, no key), and the sheet says the same when it finds the store moved. Every journey
- * ends with nothing unexpected asked and no page error. Desktop and phone.
+ * …/conversion/notice/acknowledge`, no key), and the sheet says the same when it finds the store moved. From Listing
+ * settings PR 12 (plan 6.5, J1-J3, J6) "Older settings" and its panels are gone: a store with older rules of every kind
+ * still moves over from the sheet, the text cap names no deleted section, and nothing reads a profile until its editor
+ * opens; and (J4, J5, J7; D9, D27) the stubs refuse a new, changed or reordered older group as the server does, so the
+ * step's store default saves show they send every group back as stored, a refusal keeps the draft, and a save opened
+ * before a move gets the conflict, not the refusal. Every journey ends with nothing unexpected asked and no page error.
+ * Desktop and phone.
  */
 
 const CONVERSION_PATH = `${LISTINGS}/listing-settings/conversion`;
@@ -558,15 +568,15 @@ test("an old ?sheet=convert on a store with no older rules says so, and reads th
   await expect(sheet(page)).toBeVisible();
   await expect(sheet(page).getByTestId("older-rules-none")).toHaveText("Your store has no older group rules any more.");
   await expect(line(page)).toHaveCount(0);
-  // Once per opening: the summary, the categories and the open profiles' reads, each one more (D25); the dry run stays at one.
+  // Once per opening: the summary and the categories, each one more (D25); the dry run stays at one.
   await expect.poll(() => readsOf(state, "GET", SUMMARY_PATH).length).toBe(2);
   await expect.poll(() => readsOf(state, "GET", CATEGORIES_PATH).length).toBe(2);
-  await expect.poll(() => readsOf(state, "GET", `${LISTINGS}/pricing-rules`).length).toBe(2);
-  await expect.poll(() => readsOf(state, "GET", `${LISTINGS}/ebay-category-rules`).length).toBe(2);
-  expect(readsOf(state, "GET", `${LISTINGS}/content-profile`)).toEqual([]);
   await page.waitForTimeout(500);
   expect(conversionReads(state)).toEqual(["?page=0"]);
   expect(readsOf(state, "GET", SUMMARY_PATH)).toHaveLength(2);
+  // The re-read refetches only the profiles someone reads (D25); with no editor open nothing does since PR 12 (the older
+  // panels read them on mount), so none is read, settled after the wait above rather than polled.
+  expectGatedReads(state);
   expectNothingUnexpected(state);
 });
 
@@ -642,11 +652,68 @@ test("Move them over on a clean store: one POST with the hashes shown and an ls-
   await expect(card(page)).not.toContainText("older group rules");
   // The line's button went with the line: focus goes to the card's heading (11.2).
   await expect(card(page).getByRole("heading", { name: "Category settings" })).toBeFocused();
-  // Nothing sent again; the hidden older pricing and eBay rules panels read their new profiles once more (8.4).
+  // Nothing sent again. The move's re-read (8.4) refetches only the profiles someone reads: with no editor open nothing
+  // does since PR 12, so none is read (settled: the views' re-reads landed before the 300 ms wait above).
   expect(readsOf(state, "POST", APPLY_PATH)).toHaveLength(1);
-  expect(readsOf(state, "GET", `${LISTINGS}/pricing-rules`)).toHaveLength(2);
-  expect(readsOf(state, "GET", `${LISTINGS}/ebay-category-rules`)).toHaveLength(2);
-  expect(readsOf(state, "GET", `${LISTINGS}/content-profile`)).toEqual([]);
+  expectGatedReads(state);
+  expectNothingUnexpected(state);
+});
+
+/** The store's older eBay category rule (J1): Sleeves listings go to eBay's Card Sleeves. */
+function categoryRulesWithRule(): EbayCategoryRulesState {
+  return { revisionId: 8, updatedAt: "2026-10-15T12:00:00.000Z", profile: { version: 1, defaultCategory: null, rules: [
+    { id: "sleeves", name: "Sleeves", scope: { type: "category", category: "Sleeves" },
+      category: { categoryId: EBAY_SLEEVES.categoryId, categoryName: EBAY_SLEEVES.categoryName, path: [...EBAY_SLEEVES.path] } }] } };
+}
+
+/** Clean, for a store holding a pricing group, a description group and an eBay category rule: all three become Sleeves' settings. */
+const CLEAN_ALL_KINDS = conversionCheck(STORE, {
+  planHash: PLAN_A, writesHash: WRITES, olderRules: { pricingGroups: 1, contentGroups: 1, ebayCategoryRules: 1 },
+  becomes: { categories: { total: 1, items: [{ categoryId: SLEEVES, categoryName: "Sleeves", settings: ["price", "ebayCategory", "textAbove"] }] }, products: none() },
+});
+
+/** What CLEAN_ALL_KINDS writes when it commits (the stub computes no plan): Sleeves gets the group's price, the rule's category and the group's text. */
+function sleevesAllKindsLayer(): StubState["conversionLayers"] {
+  return { categorySettings: { [categoryKey(STORE, SLEEVES)]: { revisionId: 1, values: { ...NO_CATEGORY_VALUES,
+    price: SAVED_PRICING_RULES.profile!.defaultRecipe,
+    ebayCategory: { categoryId: EBAY_SLEEVES.categoryId, categoryName: EBAY_SLEEVES.categoryName, path: [...EBAY_SLEEVES.path] },
+    textAbove: { mode: "own", text: "Fits any binder." } } } }, productSettings: {} };
+}
+
+test("with Older settings gone, a store holding pricing groups, description groups and eBay rules moves over from the sheet; nothing calls a deleted route (J1)", async ({ page }, testInfo) => {
+  const state = await openStep(page, convertState({ conversionPages: { 0: CLEAN_ALL_KINDS }, conversionLayers: sleevesAllKindsLayer(),
+    contentProfiles: { [STORE]: contentWithGroup() }, categoryRules: { [STORE]: categoryRulesWithRule() } }));
+  // The line is the only way to the older rules: no "Older settings" section, toggle or panel (PR 12, D3, D13).
+  await expect(line(page)).toContainText("Your store still has older group rules. Move them over to use category settings.");
+  await expectNoOlderSettings(page);
+  await openSheet(page);
+  await expect(sheet(page).getByTestId("older-rules-summary")).toHaveText("Moving them over changes nothing in your listings.");
+  await expect(moveButton(page)).toBeEnabled();
+  await moveButton(page).click();
+  await expect(footer(page)).toContainText(MOVED);
+  expect(applies(state)).toEqual([{ idempotencyKey: KEY("ls-convert"), planHash: PLAN_A, writesHash: WRITES }]);
+  // Every kind moved (the stub's commit): no group or rule left, each default kept.
+  expect(state.pricingRules[STORE].profile?.groups).toEqual([]);
+  expect(state.pricingRules[STORE].profile?.defaultRecipe).toEqual(SAVED_PRICING_RULES.profile!.defaultRecipe);
+  expect(state.contentProfiles[STORE].profile?.groups).toEqual([]);
+  expect(state.contentProfiles[STORE].profile?.defaultTemplate).toEqual(contentWithGroup().profile!.defaultTemplate);
+  expect(state.categoryRules[STORE].profile?.rules).toEqual([]);
+  expect(state.categoryRules[STORE].profile?.defaultCategory).toBeNull();
+  await expect(sheet(page).getByTestId("older-rules-none")).toBeVisible();
+
+  await footer(page).getByRole("button", { name: "Close" }).click();
+  await expect(sheet(page)).toHaveCount(0);
+  await expect(line(page)).toHaveCount(0);
+  await expect(card(page).getByRole("button", { name: "Change settings for Sleeves", exact: true })).toBeVisible();
+  await expect(card(page).getByTestId("category-settings-row-40")).toContainText("Sets: price");
+  await expect(card(page)).not.toContainText("older group rules");
+  await expectNoOlderSettings(page);
+  if (phone(testInfo)) await expectNoHorizontalScroll(page);
+  // Settled (the move's re-reads have landed), not polled: no profile was read, and no deleted route was asked.
+  await page.waitForTimeout(300);
+  expect(readsOf(state, "POST", APPLY_PATH)).toHaveLength(1);
+  expectGatedReads(state);
+  expectNoDeletedRouteCalls(state);
   expectNothingUnexpected(state);
 });
 
@@ -669,6 +736,40 @@ test("not clean: a size that would lose its price keeps Move them over off with 
   await moveButton(page).click();
   await expect(footer(page)).toContainText(MOVED);
   expect(applies(state)).toEqual([{ idempotencyKey: KEY("ls-convert"), planHash: PLAN_B, writesHash: WRITES }]);
+  expectNothingUnexpected(state);
+});
+
+/** Not clean only because the move would save more text than the store can keep (D9c): nothing else changes or blocks. */
+const TEXT_CAP = conversionCheck(STORE, {
+  state: "not_clean", planHash: PLAN_A, writesHash: WRITES, olderRules: { pricingGroups: 1, contentGroups: 1, ebayCategoryRules: 0 },
+  blocked: { wouldLosePrice: none(), wouldBlockListing: none(), tooMuchText: true },
+});
+/** The text cap's words since PR 12 (plan 8, B1): they say what still helps, and name no deleted section. */
+const TOO_MUCH_TEXT = "Moving these rules would save more text than your store can keep. Choose fewer products in Choose what to sell, "
+  + "then check again. Listed products you take out stop selling on eBay.";
+
+test("the text cap: the section and the footer say what still helps, naming no Older settings, and Move them over stays off (J3)", async ({ page }, testInfo) => {
+  const state = await openStep(page, convertState({ conversionPages: { 0: TEXT_CAP }, contentProfiles: { [STORE]: contentWithGroup() } }));
+  await openSheet(page);
+  const blocked = sheet(page).getByTestId("older-rules-blocked");
+  await expect(blocked).toContainText("Before you can move them over");
+  await expect(blocked.getByTestId("older-rules-too-much-text")).toHaveText(TOO_MUCH_TEXT);
+  // Nothing else blocks: no size to give a price or to fix.
+  await expect(blocked.getByTestId("older-rules-lose-price")).toHaveCount(0);
+  await expect(blocked.getByTestId("older-rules-block-listing")).toHaveCount(0);
+  // The cap alone: the footer says the same words, and the move can't be pressed.
+  await expect(footer(page)).toContainText(TOO_MUCH_TEXT);
+  await expect(moveButton(page)).toBeDisabled();
+  await expect(sheet(page)).not.toContainText(/older settings/i);
+  await expect(sheet(page)).not.toContainText("_");
+  if (phone(testInfo)) await expectNoHorizontalScroll(page);
+  await shot(page, testInfo, "listing-settings-older-rules-text-cap");
+  await footer(page).getByRole("button", { name: "Close" }).click();
+  await expect(sheet(page)).toHaveCount(0);
+  await expect(line(page)).toBeVisible();
+  expect(applies(state)).toEqual([]);
+  expect(conversionReads(state)).toEqual(["?page=0"]);
+  expectGatedReads(state);
   expectNothingUnexpected(state);
 });
 
@@ -826,25 +927,174 @@ function contentWithGroup(): ContentProfileState {
   };
 }
 
-test("Older settings' pricing and description panels read the new profiles after the move (8.4)", async ({ page }) => {
-  const state = await openStep(page, convertState({ conversionPages: { 0: CLEAN }, conversionLayers: sleevesPriceLayer(), contentProfiles: { [STORE]: contentWithGroup() } }));
-  await openOlderSettings(page);
-  await expect(page.getByRole("heading", { name: "Group rules (1)", exact: true })).toBeVisible();
-  expect(state.contentProfiles[STORE].profile?.groups.map((group) => group.name)).toEqual(["Binder text"]);
+test("after a move, the Price editor reads the moved rules once and checks with no group, and the Description editor reads its moved text once (J6)", async ({ page }) => {
+  // No category layer is scripted: the stub's W1 check prices from the store default only (it refuses a category price),
+  // and this journey is about what the editors read and send after the move, not about what the move wrote.
+  const state = await openStep(page, convertState({ conversionPages: { 0: CLEAN }, contentProfiles: { [STORE]: contentWithGroup() } }));
   await openSheet(page);
   await moveButton(page).click();
   await expect(footer(page)).toContainText(MOVED);
   await footer(page).getByRole("button", { name: "Close" }).click();
-  // The pricing panel's form follows the new revision: no group left, nothing to save onto an old one.
-  await expect(page.getByRole("heading", { name: "Group rules (0)", exact: true })).toBeVisible();
+  await expect(line(page)).toHaveCount(0);
+  expect(state.pricingRules[STORE].profile?.groups).toEqual([]);
   expect(state.contentProfiles[STORE].profile?.groups).toEqual([]);
-  // The description templates read the new profile when opened: the group is gone. The panel renders its form only once
-  // its read answered, so its form's own line shows first; only then does the group's absence mean anything.
-  await page.getByRole("button", { name: "Edit templates" }).click();
+  // Nothing holds the profiles while no editor is open, so the move made no profile read (settled, not polled).
+  await page.waitForTimeout(300);
+  expectGatedReads(state);
+
+  // The Price editor reads the moved rules once as it opens; the check it sends has no group to send back, and no
+  // size is priced by an older group rule any more.
+  await row(page, "price").getByRole("button", { name: "Change Price" }).click();
+  const editor = page.getByTestId("editor-surface");
+  await expect.poll(() => readsOf(state, "GET", `${LISTINGS}/pricing-rules`).length).toBe(1);
+  await editor.getByRole("textbox", { name: "Add" }).fill("20");
+  await editor.getByRole("button", { name: "Check new prices" }).click();
+  const check = page.getByTestId("check-new-prices");
+  await expect(check).toContainText("Check new prices · Not saved yet");
+  expect(state.pricingReviews).toHaveLength(1);
+  expect(state.pricingReviews[0].body).toMatchObject({ profile: { groups: [] } });
+  await expect(check).not.toContainText(/older group rule/i);
+  await expect(editor).not.toContainText(/older group rule/i);
+  await check.getByRole("button", { name: /^Back( to editing)?$/ }).click();
+  await editor.getByRole("button", { name: "Cancel" }).click();
+  await expect(editor).toHaveCount(0);
+
+  // The Description editor reads the moved templates once as it opens: the group's text is not the store's.
+  await row(page, "description").getByRole("button", { name: "Change Description" }).click();
   await expect.poll(() => readsOf(state, "GET", `${LISTINGS}/content-profile`).length).toBe(1);
-  await expect(page.getByText("A matching group replaces the store introduction/footer", { exact: false })).toBeVisible();
-  await expect(page.getByRole("button", { name: "Add template group" })).toBeVisible();
-  await expect(page.getByText("Binder text · priority 1")).toHaveCount(0);
+  await expect(editor.getByRole("textbox", { name: "Text above (optional)" })).toHaveValue("");
+  await expect(editor).not.toContainText("Fits any binder.");
+  await page.waitForTimeout(300);
+  expect(readsOf(state, "GET", `${LISTINGS}/pricing-rules`)).toHaveLength(1);
+  expect(readsOf(state, "GET", `${LISTINGS}/content-profile`)).toHaveLength(1);
+  await expectNoOlderSettings(page);
+  expectNothingUnexpected(state);
+});
+
+// ---------------------------------------------------------------------------
+// Older group rules are closed (Listing settings PR 12, plan D9, D10, D27; 6.5 J4, J5, J7): the stubs refuse a new,
+// changed or reordered group as the server does, after their revision checks. The step sends every stored group back
+// unchanged, so it never trips the rule; a refusal it is answered with keeps the draft; a stale save after a move gets
+// the conflict, not the refusal.
+// ---------------------------------------------------------------------------
+
+/** The server's words for the refusal (plan 3.1, 8), which the page shows as they are. */
+const GROUP_RULES_CLOSED = "Older group rules can't be added or changed any more. Nothing was saved. Use See what changes on Listing settings to move them over.";
+
+test("before a move, the store price, description and eBay category save on a store holding every kind of older rule, each sending its rules back as stored (J4)", async ({ page }, testInfo) => {
+  const content = contentWithGroup();
+  const rules = categoryRulesWithRule();
+  const state = await openStep(page, convertState({ contentProfiles: { [STORE]: content }, categoryRules: { [STORE]: rules } }));
+  const editor = page.getByTestId("editor-surface");
+  await expect(line(page)).toContainText("Your store still has older group rules.");
+
+  // Price (W1): the check sends the pricing group back as stored, and Save applies it.
+  await row(page, "price").getByRole("button", { name: "Change Price" }).click();
+  await editor.getByRole("textbox", { name: "Add" }).fill("25");
+  await editor.getByRole("button", { name: "Check new prices" }).click();
+  const check = page.getByTestId("check-new-prices");
+  await expect(check).toContainText("Check new prices · Not saved yet");
+  expect(state.pricingReviews.map((review) => review.body)).toEqual([{ expectedRevisionId: pricingRulesWithGroup().revisionId,
+    releaseFixedOverrides: false, profile: { defaultRecipe: { ...pricingRulesWithGroup().profile.defaultRecipe, markupBps: 2_500 },
+      groups: pricingRulesWithGroup().profile.groups } }]);
+  await check.getByRole("button", { name: "Save new prices" }).click();
+  await expect(check).toHaveCount(0);
+  await expect(row(page, "price")).toContainText("Saved");
+  expect(state.pricingApplies).toHaveLength(1);
+  expect(state.pricingRules[STORE].profile?.groups).toEqual(pricingRulesWithGroup().profile.groups);
+
+  // Description (W4): the store's text, and the description group back as stored.
+  await row(page, "description").getByRole("button", { name: "Change Description" }).click();
+  await editor.getByRole("textbox", { name: "Text above (optional)" }).fill("Ships from Card Shellz.");
+  await editor.getByRole("button", { name: "Save", exact: true }).click();
+  await expect(editor).toHaveCount(0);
+  await expect(row(page, "description")).toContainText("Saved");
+  expect(state.contentWrites.map((write) => write.body)).toEqual([{ expectedRevisionId: content.revisionId, idempotencyKey: KEY("ls-text"),
+    profile: { defaultTemplate: { introduction: "Ships from Card Shellz.", footer: "" }, groups: content.profile!.groups } }]);
+  expect(state.contentProfiles[STORE].profile?.groups).toEqual(content.profile!.groups);
+
+  // eBay category (W3): one category for every product, and the eBay rule back as stored, in its place.
+  await row(page, "ebayCategory").getByRole("button", { name: "Change eBay category" }).click();
+  await editor.getByRole("radio", { name: "One eBay category for every product" }).check();
+  await editor.getByRole("textbox", { name: "Search eBay categories" }).fill("toploaders");
+  await editor.getByRole("button", { name: "Use this category" }).click();
+  await editor.getByRole("button", { name: "Save", exact: true }).click();
+  await expect(editor).toHaveCount(0);
+  await expect(row(page, "ebayCategory")).toContainText("Toploaders");
+  await expect(row(page, "ebayCategory")).toContainText("Saved");
+  const [stored] = rules.profile!.rules;
+  expect(state.categoryWrites.map((write) => write.body)).toEqual([{ expectedRevisionId: rules.revisionId, idempotencyKey: KEY("ls-category"),
+    draft: { defaultCategoryId: "183436", rules: [{ id: stored.id, name: stored.name, scope: stored.scope, categoryId: stored.category.categoryId }] } }]);
+  expect(state.categoryRules[STORE].profile?.rules).toEqual(rules.profile!.rules);
+
+  // None of the three tripped the refusal, and the store still holds every older rule: the line stays, the move is still offered.
+  await expect(page.getByText(GROUP_RULES_CLOSED)).toHaveCount(0);
+  await expect(line(page)).toContainText("Your store still has older group rules.");
+  if (phone(testInfo)) await expectNoHorizontalScroll(page);
+  expectNothingUnexpected(state);
+});
+
+test("a description save the server refuses as a group change shows the refusal's words and keeps the text; nothing else is sent (J5)", async ({ page }) => {
+  const content = contentWithGroup();
+  const state = await openStep(page, convertState({ contentProfiles: { [STORE]: content },
+    contentWriteAnswers: [{ status: 422, code: DROPSHIP_LISTING_GROUP_RULES_CLOSED, message: GROUP_RULES_CLOSED }] }));
+  const editor = page.getByTestId("editor-surface");
+  await row(page, "description").getByRole("button", { name: "Change Description" }).click();
+  const above = editor.getByRole("textbox", { name: "Text above (optional)" });
+  await above.fill("Ships from Card Shellz.");
+  await editor.getByRole("button", { name: "Save", exact: true }).click();
+
+  await expect(editor).toContainText(GROUP_RULES_CLOSED);
+  await expect(editor).not.toContainText("DROPSHIP_");
+  // Refused, not lost: the text stays to change, nothing was saved, and the bar still counts the change.
+  await expect(above).toBeEditable();
+  await expect(above).toHaveValue("Ships from Card Shellz.");
+  await expect(page.getByTestId("catalog-action-summary")).toHaveText("Not saved · 1 change in Description");
+  await expect(row(page, "description")).not.toContainText("Saved");
+  // Settled (not polled): one write, sent once, and nothing else.
+  await page.waitForTimeout(300);
+  expect(state.contentWrites).toHaveLength(1);
+  expect(state.contentWrites[0].body).toMatchObject({ profile: { groups: content.profile!.groups } });
+  expect(state.contentProfiles[STORE]).toEqual(content);
+  expect([state.pricingReviews, state.pricingApplies, state.categoryWrites, state.setupWrites]).toEqual([[], [], [], []]);
+  expectNothingUnexpected(state);
+});
+
+test("an eBay category save opened before the system moved the rules gets the conflict and Load latest, not the refusal, and then saves (J7)", async ({ page }) => {
+  const rules = categoryRulesWithRule();
+  const state = await openStep(page, convertState({ categoryRules: { [STORE]: rules } }));
+  const editor = page.getByTestId("editor-surface");
+  await row(page, "ebayCategory").getByRole("button", { name: "Change eBay category" }).click();
+  await editor.getByRole("radio", { name: "One eBay category for every product" }).check();
+  await editor.getByRole("textbox", { name: "Search eBay categories" }).fill("toploaders");
+  await editor.getByRole("button", { name: "Use this category" }).click();
+
+  // The job moves the store while the editor is open: the rules are emptied at a newer revision.
+  stubSystemConversion(state, STORE);
+  const moved = state.categoryRules[STORE];
+  expect(moved.revisionId).not.toBe(rules.revisionId);
+  expect(moved.profile?.rules).toEqual([]);
+
+  // The page sends the old rule back at the old revision: the stub's revision check answers first (D10's 409).
+  await editor.getByRole("button", { name: "Save", exact: true }).click();
+  await expect(editor).toContainText("This changed in another window.");
+  await expect(editor).not.toContainText(GROUP_RULES_CLOSED);
+  const latest = editor.getByRole("button", { name: "Load latest and keep my changes" });
+  await expect(latest).toBeVisible();
+  expect(state.categoryWrites).toHaveLength(1);
+  expect(state.categoryWrites[0].body).toMatchObject({ expectedRevisionId: rules.revisionId,
+    draft: { defaultCategoryId: "183436", rules: [{ id: "sleeves", categoryId: EBAY_SLEEVES.categoryId }] } });
+
+  // Load latest: the moved rules (none) under the vendor's pick; the next save sends no rule and saves.
+  await latest.click();
+  await editor.getByRole("button", { name: "Save", exact: true }).click();
+  await expect(editor).toHaveCount(0);
+  await expect(row(page, "ebayCategory")).toContainText("Saved");
+  expect(state.categoryWrites).toHaveLength(2);
+  expect(state.categoryWrites[1].body).toEqual({ expectedRevisionId: moved.revisionId, idempotencyKey: KEY("ls-category"),
+    draft: { defaultCategoryId: "183436", rules: [] } });
+  expect(state.categoryWrites[1].body.idempotencyKey).not.toBe(state.categoryWrites[0].body.idempotencyKey);
+  await expect(page.getByText(GROUP_RULES_CLOSED)).toHaveCount(0);
   expectNothingUnexpected(state);
 });
 

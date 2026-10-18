@@ -259,11 +259,20 @@ export function registerInboundShipmentRoutes(app: Express) {
 
   app.post("/api/inbound-shipments/:id/cancel", requirePermission("purchasing", "edit"), async (req, res) => {
     try {
-      const shipment = await shipmentTracking.cancel(Number(req.params.id), req.session.user?.id, req.body.reason);
+      const shipmentId = z.string().regex(/^[1-9]\d*$/).transform(Number).pipe(shipmentCostResourceIdSchema).parse(req.params.id);
+      const shipment = await shipmentTracking.cancel(shipmentId, req.session.user?.id, req.body.reason);
       res.json(shipment);
-    } catch (error: any) {
-      if (error instanceof ShipmentTrackingError) return res.status(error.statusCode).json({ error: error.message });
-      res.status(500).json({ error: error.message });
+    } catch (error: unknown) {
+      if (error instanceof z.ZodError) return res.status(400).json({ code: "SHIPMENT_CANCELLATION_INPUT_INVALID",
+        error: "Shipment ID must be a positive PostgreSQL integer." });
+      if (error instanceof ShipmentTrackingError) return res.status(error.statusCode).json({
+        code: error.details?.code, error: error.message, details: error.details,
+      });
+      console.error(JSON.stringify({ event: "procurement.shipment.cancellation_failed", shipmentId: req.params.id,
+        actorId: req.session.user?.id ?? null, code: "SHIPMENT_CANCELLATION_UNAVAILABLE",
+        errorType: error instanceof Error ? error.name : typeof error }));
+      res.status(503).json({ code: "SHIPMENT_CANCELLATION_UNAVAILABLE",
+        error: "Shipment cancellation could not be verified. Reload the shipment before trying again." });
     }
   });
 

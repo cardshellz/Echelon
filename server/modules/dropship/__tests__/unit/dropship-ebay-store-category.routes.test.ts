@@ -5,10 +5,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { DropshipEbayStoreCategoryService } from "../../application/dropship-ebay-store-category-service";
 import { DropshipError } from "../../domain/errors";
 import { registerDropshipEbayStoreCategoryRoutes } from "../../interfaces/http/dropship-ebay-store-category.routes";
+import { logger } from "../../../../platform/observability/logger";
 
 vi.mock("../../../../db", () => ({ db: {}, pool: {} }));
 vi.mock("../../infrastructure/dropship-ebay-store-category.factory", () => ({
   createDropshipEbayStoreCategoryServiceFromEnv: vi.fn(),
+}));
+vi.mock("../../../../platform/observability/logger", () => ({
+  logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
 }));
 
 describe("dropship eBay Store category routes", () => {
@@ -16,11 +20,13 @@ describe("dropship eBay Store category routes", () => {
   let server: { url: string; close: () => Promise<void> } | null;
 
   beforeEach(() => {
+    vi.clearAllMocks();
     service = new FakeService();
     server = null;
   });
 
   afterEach(async () => {
+    vi.restoreAllMocks();
     await server?.close();
   });
 
@@ -36,60 +42,17 @@ describe("dropship eBay Store category routes", () => {
     });
   });
 
-  it("passes assignment identity and one unambiguous idempotency key", async () => {
+  it("no longer serves the per-size shelf write, deleted in Listing settings PR 12", async () => {
     server = await startServer(buildApp(service, true));
 
-    const response = await jsonRequest(
-      `${server.url}/api/dropship/ebay/store-category-assignments/501`,
-      {
-        method: "PUT",
-        headers: {
-          "Content-Type": "application/json",
-          "Idempotency-Key": "store-category-route-001",
-        },
-        body: JSON.stringify({
-          storeConnectionId: 44,
-          storeCategoryIds: ["22"],
-        }),
-      },
-    );
-
-    expect(response.status).toBe(201);
-    expect(service.replaceCall).toEqual({
-      memberId: "member-1",
-      input: {
-        storeConnectionId: 44,
-        productVariantId: 501,
-        storeCategoryIds: ["22"],
-        idempotencyKey: "store-category-route-001",
-      },
+    const response = await fetch(`${server.url}/api/dropship/ebay/store-category-assignments/501`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json", "Idempotency-Key": "store-category-route-001" },
+      body: JSON.stringify({ storeConnectionId: 44, storeCategoryIds: ["22"] }),
     });
-  });
 
-  it("rejects conflicting body and header idempotency keys before the service call", async () => {
-    server = await startServer(buildApp(service, true));
-
-    const response = await jsonRequest(
-      `${server.url}/api/dropship/ebay/store-category-assignments/501`,
-      {
-        method: "PUT",
-        headers: {
-          "Content-Type": "application/json",
-          "Idempotency-Key": "store-category-route-002",
-        },
-        body: JSON.stringify({
-          storeConnectionId: 44,
-          storeCategoryIds: ["22"],
-          idempotencyKey: "store-category-route-003",
-        }),
-      },
-    );
-
-    expect(response.status).toBe(409);
-    expect(response.body).toMatchObject({
-      error: { code: "DROPSHIP_EBAY_STORE_CATEGORY_IDEMPOTENCY_CONFLICT" },
-    });
-    expect(service.replaceCall).toBeNull();
+    expect(response.status).toBe(404);
+    expect(service.listCall).toBeNull();
   });
 
   it("rejects category access without a dropship session", async () => {
@@ -124,22 +87,47 @@ describe("dropship eBay Store category routes", () => {
     });
     expect(JSON.stringify(response.body)).not.toContain("provider-secret-diagnostic");
   });
+
+  it("hides an unexpected failure behind a generic 500 and logs one structured ERROR line, never console (PR 12 verify VS4)", async () => {
+    const consoleSpies = (["log", "info", "warn", "error"] as const).map((method) =>
+      vi.spyOn(console, method).mockImplementation(() => undefined));
+    service.listError = new Error("unexpected directory failure");
+    server = await startServer(buildApp(service, true));
+
+    const response = await jsonRequest(`${server.url}/api/dropship/ebay/store-categories/44`);
+
+    expect(response).toEqual({ status: 500, body: { error: {
+      code: "DROPSHIP_EBAY_STORE_CATEGORY_INTERNAL_ERROR", message: "eBay Store category request failed." } } });
+    for (const spy of consoleSpies) expect(spy).not.toHaveBeenCalled();
+    // CLAUDE.md section 10: the platform logger, the listing settings routes' entry (dropship-route-failure-log.ts).
+    expect(vi.mocked(logger.error).mock.calls).toEqual([["dropship.ebay_store_categories.request_failed", {
+      outcome: "failed", error_code: "DROPSHIP_EBAY_STORE_CATEGORY_INTERNAL_ERROR", status: 500, method: "GET",
+      path: "/api/dropship/ebay/store-categories/:storeConnectionId", store_connection_id: 44, actor_id: "member-1",
+      error_class: "fatal", error_message: "unexpected directory failure" }]]);
+    expect(logger.warn).not.toHaveBeenCalled();
+    expect(logger.info).not.toHaveBeenCalled();
+  });
+
+  it("logs nothing for a refusal it answers with its own status", async () => {
+    service.listError = new DropshipError("DROPSHIP_EBAY_STORE_CATEGORIES_PERMISSION_REQUIRED", "Reauthorize.",
+      { storeConnectionId: 44, retryable: false });
+    server = await startServer(buildApp(service, true));
+
+    const response = await jsonRequest(`${server.url}/api/dropship/ebay/store-categories/44`);
+
+    expect(response.status).toBe(403);
+    for (const level of ["info", "warn", "error"] as const) expect(logger[level]).not.toHaveBeenCalled();
+  });
 });
 
 class FakeService {
   listCall: unknown = null;
-  replaceCall: unknown = null;
   listError: Error | null = null;
 
   async listForMember(memberId: string, input: unknown) {
     this.listCall = { memberId, input };
     if (this.listError) throw this.listError;
     return { storeConnectionId: 44, categories: [], assignments: [], fetchedAt: new Date(0) };
-  }
-
-  async replaceForMember(memberId: string, input: unknown) {
-    this.replaceCall = { memberId, input };
-    return { assignment: null, revisionId: 9, idempotentReplay: false };
   }
 }
 

@@ -259,8 +259,6 @@ export const LISTING_SETTINGS_SAVE_WORDS = Object.freeze({
   keyReused: "Something changed since you last tried. Save again.",
   shelfGone: "That shelf is gone from your eBay store.",
   pickFinalCategory: "Pick a final eBay category.",
-  // Interim (2B): a refusal that names a category of an older eBay category rule.
-  olderCategoryRule: "One of your older eBay category rules uses a category eBay no longer accepts.",
   // Interim (2B): the description fields the server refused.
   descriptionInvalid: "Keep each text to 4,000 characters, with no special characters.",
   // Interim (2B): a body over the server's size limit (413 with no code).
@@ -271,6 +269,10 @@ export const LISTING_SETTINGS_SAVE_WORDS = Object.freeze({
   pricingReviewBlocked: "Some sizes can't be priced this way, so nothing was saved.",
   // Interim (2A): the shipping policy refused by the Card Shellz check.
   shippingPolicyIncompatible: "This shipping policy doesn't work with Card Shellz shipping. Check eBay again, then pick another one.",
+  // Interim (PR 12 PROPOSAL): W1, W3 or W4 refused a new, changed or reordered older group rule (plan D9, 8); the same
+  // words as the server's message (S/domain/older-group-rules-edit.ts), so both places say one thing.
+  groupRulesClosed:
+    "Older group rules can't be added or changed any more. Nothing was saved. Use See what changes on Listing settings to move them over.",
 } as const);
 
 // ---------------------------------------------------------------------------
@@ -566,8 +568,6 @@ export interface WriteFailure {
 }
 
 export interface ClassifyWriteFailureOptions {
-  /** W3: the eBay category the vendor picked, to tell a bad pick from an older rule's category. */
-  pickedEbayCategoryId?: string | null;
   /** W5: the store's name, for "This product isn't chosen for <store>." */
   storeName?: string;
   /** W12, and W7's category kind: the category's name, for "The products in <category> changed." (plan 8.6, 9.4). */
@@ -591,6 +591,14 @@ interface WriterCodes {
 }
 
 const NONE: ReadonlySet<string> = new Set();
+
+/**
+ * W1, W3 and W4 refuse a new, changed or (eBay) reordered older group rule
+ * with this permanent 422 (Listing settings PR 12, plan D9-D11). The step
+ * sends the stored groups back unchanged, so it meets it only from a page
+ * whose groups differ from the server's; the draft stays, nothing was saved.
+ */
+export const GROUP_RULES_CLOSED_CODE = "DROPSHIP_LISTING_GROUP_RULES_CLOSED";
 
 /** The PR 7 writers, classified by the table below; the PR 9 writers have their own rules (`classifyPr9WriteFailure`). */
 type Pr7Writer = Exclude<ListingSettingsWriter, Pr9Writer>;
@@ -632,6 +640,7 @@ const WRITER_CODES: Readonly<Record<Pr7Writer, WriterCodes>> = (() => {
         "DROPSHIP_PRICING_REVIEW_TOO_LARGE",
         "DROPSHIP_PRICING_INVALID_INPUT",
         "DROPSHIP_PRICING_REVIEW_NOT_FOUND",
+        GROUP_RULES_CLOSED_CODE,
       ]),
       blocked: new Set(["DROPSHIP_PRICING_NOT_ALLOWED"]),
       reloadRequired: NONE,
@@ -646,6 +655,7 @@ const WRITER_CODES: Readonly<Record<Pr7Writer, WriterCodes>> = (() => {
         "DROPSHIP_EBAY_CATEGORY_RULE_INVALID",
         "DROPSHIP_EBAY_CATEGORY_RULES_INVALID_INPUT",
         "DROPSHIP_EBAY_CATEGORY_NOT_FOUND",
+        GROUP_RULES_CLOSED_CODE,
       ]),
       blocked: new Set([
         "DROPSHIP_EBAY_CATEGORIES_PERMISSION_REQUIRED",
@@ -660,7 +670,7 @@ const WRITER_CODES: Readonly<Record<Pr7Writer, WriterCodes>> = (() => {
     },
     W4: {
       conflict: new Set(["DROPSHIP_CONTENT_VERSION_CONFLICT"]),
-      refused: new Set(["DROPSHIP_IDEMPOTENCY_CONFLICT", "DROPSHIP_CONTENT_INVALID_INPUT"]),
+      refused: new Set(["DROPSHIP_IDEMPOTENCY_CONFLICT", "DROPSHIP_CONTENT_INVALID_INPUT", GROUP_RULES_CLOSED_CODE]),
       blocked: new Set(["DROPSHIP_CONTENT_NOT_ALLOWED"]),
       reloadRequired: NONE,
       unreachableOnBadGateway: false,
@@ -727,7 +737,7 @@ export function classifyWriteFailure(
     }
     return failure("uncertain", LISTING_SETTINGS_SAVE_WORDS.uncertain);
   }
-  if (status >= 400) return failure("refused", refusedWords(writer, error, options));
+  if (status >= 400) return failure("refused", refusedWords(writer, error));
   // A DropshipApiError is only made from a failed answer; anything else could not be confirmed.
   return failure("uncertain", LISTING_SETTINGS_SAVE_WORDS.uncertain);
 }
@@ -739,13 +749,14 @@ function unreachableWords(writer: Pr7Writer, error: DropshipApiError): string {
   return LISTING_SETTINGS_SAVE_WORDS.unreachable;
 }
 
-function refusedWords(writer: Pr7Writer, error: DropshipApiError, options: ClassifyWriteFailureOptions): string {
+function refusedWords(writer: Pr7Writer, error: DropshipApiError): string {
   const code = error.code;
   if (code === "DROPSHIP_IDEMPOTENCY_CONFLICT" || code === "DROPSHIP_LISTING_CONFIG_IDEMPOTENCY_CONFLICT") {
     return LISTING_SETTINGS_SAVE_WORDS.keyReused;
   }
   switch (writer) {
     case "W1":
+      if (code === GROUP_RULES_CLOSED_CODE) return LISTING_SETTINGS_SAVE_WORDS.groupRulesClosed;
       if (code === "DROPSHIP_PRICING_REVIEW_NOT_FOUND") return LISTING_SETTINGS_SAVE_WORDS.pricingReviewGone;
       if (code === "DROPSHIP_PRICING_REVIEW_BLOCKED") return LISTING_SETTINGS_SAVE_WORDS.pricingReviewBlocked;
       break;
@@ -759,14 +770,15 @@ function refusedWords(writer: Pr7Writer, error: DropshipApiError, options: Class
       }
       break;
     case "W3":
+      if (code === GROUP_RULES_CLOSED_CODE) return LISTING_SETTINGS_SAVE_WORDS.groupRulesClosed;
       if (code === "DROPSHIP_EBAY_CATEGORY_NOT_FOUND") return LISTING_SETTINGS_SAVE_WORDS.pickFinalCategory;
-      if (code === "DROPSHIP_EBAY_CATEGORY_RULE_INVALID") {
-        return refusesAnOlderRule(error, options.pickedEbayCategoryId ?? null)
-          ? LISTING_SETTINGS_SAVE_WORDS.olderCategoryRule
-          : LISTING_SETTINGS_SAVE_WORDS.pickFinalCategory;
-      }
+      // Since Listing settings PR 12 (D9-D10) the server refuses an added or changed older rule before it asks eBay,
+      // and never asks eBay about a category its stored rules hold, so this refusal can only be about the store
+      // default the vendor picked (review CT3).
+      if (code === "DROPSHIP_EBAY_CATEGORY_RULE_INVALID") return LISTING_SETTINGS_SAVE_WORDS.pickFinalCategory;
       break;
     case "W4":
+      if (code === GROUP_RULES_CLOSED_CODE) return LISTING_SETTINGS_SAVE_WORDS.groupRulesClosed;
       // The server's 413 comes from the body parser and carries no code.
       if (error.status === HTTP_PAYLOAD_TOO_LARGE) return LISTING_SETTINGS_SAVE_WORDS.tooLarge;
       if (code === "DROPSHIP_CONTENT_INVALID_INPUT") return LISTING_SETTINGS_SAVE_WORDS.descriptionInvalid;
@@ -780,13 +792,6 @@ function refusedWords(writer: Pr7Writer, error: DropshipApiError, options: Class
       break;
   }
   return error.message;
-}
-
-/** A W3 refusal names a category (context.categoryId) other than the one the vendor picked. */
-function refusesAnOlderRule(error: DropshipApiError, pickedCategoryId: string | null): boolean {
-  const named = error.context?.categoryId;
-  if (typeof named !== "string" && typeof named !== "number") return false;
-  return pickedCategoryId === null || String(named) !== pickedCategoryId;
 }
 
 // ---------------------------------------------------------------------------
@@ -1288,30 +1293,24 @@ export function draftEnteredConflict(
 
 /**
  * The leave-guard id of the step's draft is this prefix and the store id.
- * Every other guard id on step 2 is an older panel's (plan 4.1).
+ * The page keeps that draft on every step, so the ways onto Listing settings
+ * leave ids with this prefix out of their question (`scopeWithoutPrefix`,
+ * plan 4.1).
  */
 export const LISTING_SETTINGS_GUARD_ID_PREFIX = "listing-settings:";
-
-/** How many leave-guard drafts belong to the older panels under "Older settings". */
-export function countOlderSettingsDrafts(drafts: readonly { id: string }[]): number {
-  return drafts.filter((draft) => !draft.id.startsWith(LISTING_SETTINGS_GUARD_ID_PREFIX)).length;
-}
 
 export interface ListingSettingsBarInput {
   /** The step's draft, if any. */
   draft: Pick<ListingSettingsDraft, "place" | "changes" | "phase"> | null;
-  /** Drafts the old panels under "Older settings" hold. */
-  olderDraftCount: number;
   /** Any save on the page still in flight (the page's pending-save counter). */
   saving: boolean;
 }
 
-/** "All saved", "Not saved · 2 changes in Price", "Not saved · changes in Older settings" or "Saving…". */
-export function describeListingSettingsBar({ draft, olderDraftCount, saving }: ListingSettingsBarInput): string {
+/** "All saved", "Not saved · 2 changes in Price" or "Saving…". */
+export function describeListingSettingsBar({ draft, saving }: ListingSettingsBarInput): string {
   if (saving || draft?.phase === "saving") return LISTING_SETTINGS_SAVE_WORDS.saving;
   if (draft !== null && isDraftDirty(draft)) {
     return `Not saved · ${draft.changes} ${draft.changes === 1 ? "change" : "changes"} in ${draft.place}`;
   }
-  if (olderDraftCount > 0) return "Not saved · changes in Older settings";
   return "All saved";
 }

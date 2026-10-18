@@ -84,7 +84,7 @@ export interface ListingSettingsAccessInput {
   account: ListingAccessAccount | null;
   /** The summary's store status and catalog size; null until the summary has answered. */
   summary: Pick<ListingSettingsSummary, "storeStatus" | "catalog"> | null;
-  /** The live eBay setup read (shared with the old panel and the rail). */
+  /** The live eBay setup read (shared with the rail and step 3). */
   setup: ListingSettingsReadState<ListingSetupFacts>;
   /** The store shelves read (`GET /api/dropship/ebay/store-categories/:id`). */
   shelves: ListingSettingsReadState<Pick<DropshipEbayStoreCategoryResponse, "categories">>;

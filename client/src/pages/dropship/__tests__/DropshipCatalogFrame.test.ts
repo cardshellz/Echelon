@@ -153,11 +153,13 @@ describe("catalog page steps", () => {
     const publish = stepBlock("publish", "<CatalogActionBar");
     expect(choose).toContain("<CatalogFilterPanel");
     expect(choose).toContain("<CatalogTable");
-    for (const panel of ["<EbayListingSetupPanel", "<EbayListingPolicyOverridePanel", "<DropshipEbayCategoryRulesPanel",
-      "<EbayStoreCategoryAssignmentPanel", "<DropshipPricingRulesPanel", "<DropshipContentTemplatesPanel"]) {
-      expect(setup).toContain(panel);
-      expect(choose).not.toContain(panel);
-      expect(publish).not.toContain(panel);
+    // Step 2 is the Listing settings step alone; the six older panels went in Listing settings PR 12.
+    expect(setup).toContain("<ListingSettingsStep");
+    expect(choose).not.toContain("<ListingSettingsStep");
+    expect(publish).not.toContain("<ListingSettingsStep");
+    for (const panel of ["EbayListingSetupPanel", "EbayListingPolicyOverridePanel", "DropshipEbayCategoryRulesPanel",
+      "EbayStoreCategoryAssignmentPanel", "DropshipPricingRulesPanel", "DropshipContentTemplatesPanel", "OlderListingSettings"]) {
+      expect(source).not.toContain(panel);
     }
     expect(publish).toContain("<ListingPreviewPanel");
     expect(choose).not.toContain("<ListingPreviewPanel");

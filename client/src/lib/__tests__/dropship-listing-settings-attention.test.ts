@@ -10,7 +10,6 @@ import { DropshipApiError } from "../dropship-ops-surface";
 import {
   ATTENTION_STRIP_WORDS,
   LISTING_SETTINGS_HEADER_WORDS,
-  OLDER_SETTINGS_WORDS,
   attentionLines,
   attentionStripContent,
   listingSettingsTitle,
@@ -311,18 +310,12 @@ describe("header words", () => {
     const words = [
       ...Object.values(LISTING_SETTINGS_HEADER_WORDS),
       ...Object.values(ATTENTION_STRIP_WORDS),
-      ...Object.values(OLDER_SETTINGS_WORDS),
     ];
     for (const text of words) {
       expect(text).not.toMatch(RAW_CODE);
       expect(text.trim()).toBe(text);
+      // The older section and its words went in Listing settings PR 12; no fixed word names it.
+      expect(text).not.toContain("Older settings");
     }
-    expect(OLDER_SETTINGS_WORDS).toEqual({
-      title: "Older settings",
-      // D21 (PR 11b): a group rule added here returns the store to the older-rules state (CUX#14).
-      intro: "Per-size policies and shelves, group rules and text templates. A group rule added here stops category settings from being saved.",
-      show: "Show older settings",
-      hide: "Hide older settings",
-    });
   });
 });

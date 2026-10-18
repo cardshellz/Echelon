@@ -37,7 +37,10 @@ export const MAX_LISTING_STORE_SHELVES = 2;
 export const MAX_LISTING_POLICY_ID_LENGTH = 100;
 /** = the varchar(200) policy name columns. */
 export const MAX_LISTING_POLICY_NAME_LENGTH = 200;
-/** Today's shelf id bound (dropship-ebay-store-category-dtos.ts). */
+/**
+ * The bound on one store shelf id for every listing-settings writer: 40, the bound the per-size shelf
+ * writer's request schema used. That writer was deleted in Listing settings PR 12; this is the bound itself now.
+ */
 export const MAX_LISTING_SHELF_ID_LENGTH = 40;
 /** Writer bound on a shelf's path name. HYPOTHESIS that it covers eBay's longest path; eBay's limit was not checked. */
 export const MAX_LISTING_SHELF_NAME_LENGTH = 500;

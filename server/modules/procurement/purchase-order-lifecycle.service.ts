@@ -102,6 +102,11 @@ export function getAllowedFinancialTransitions(status: PoFinancialStatus): PoFin
   return PO_FINANCIAL_TRANSITIONS[status] ?? [];
 }
 
+/** Ordinary close must not substitute for the separately authorized close-short command. */
+export function canOrdinarilyClosePurchaseOrder(po: Record<string, any>): boolean {
+  return po.status === "received" && resolveCurrentPhysicalStatus(po) === "received";
+}
+
 export type PoLifecycleTrack = "legacy" | "physical" | "financial" | "receiving";
 
 export type PoLifecycleCommand =
@@ -345,7 +350,7 @@ export function buildPoLifecycleSummary(po: Record<string, any>): PoLifecycleSum
     }));
   }
 
-  if (allowedLegacyTransitions.includes("closed")) {
+  if (canOrdinarilyClosePurchaseOrder(po)) {
     nextActions.push(action(po, {
       id: "close",
       label: "Close PO",

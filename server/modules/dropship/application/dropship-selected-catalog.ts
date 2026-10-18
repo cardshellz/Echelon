@@ -3,15 +3,14 @@ import type { DropshipListingCatalogCandidate } from "./dropship-listing-preview
 import { evaluateDropshipCatalogExposure } from "../domain/catalog-exposure";
 import { evaluateDropshipVendorCatalogSelection } from "../domain/vendor-selection";
 import { DropshipError } from "../domain/errors";
-import { MAX_NAMED_CATALOG_GROUP_ITEMS, CATALOG_TARGET_PAGE_SIZE,
-  catalogTargetsInputSchema } from "../../../../shared/dropship/catalog-scope";
+import { MAX_NAMED_CATALOG_GROUP_ITEMS } from "../../../../shared/dropship/catalog-scope";
 
 export interface SelectedCatalogReader {
   vendorId: number; catalog: ListingPriceCatalogReader;
   listVariantIds(afterId: number, limit: number): Promise<number[]>;
   listProductLines(ids: number[]): Promise<Array<{ id: number; name: string }>>;
 }
-export type SelectedCatalogPurpose = "pricing_review" | "catalog_targets" | "category_review" | "listing_settings";
+export type SelectedCatalogPurpose = "pricing_review" | "category_review" | "listing_settings";
 /** The keyset scan's batch: this many sellable sizes are read, and their candidates held, at a time. */
 const SELECTED_CATALOG_BATCH_SIZE = 250;
 
@@ -56,8 +55,6 @@ export async function loadSelectedCandidates(tx: SelectedCatalogReader, now: Dat
   for await (const batch of selectedCandidateBatches(tx, now)) {
     selected.push(...batch);
     if (selected.length > MAX_NAMED_CATALOG_GROUP_ITEMS) {
-      if (purpose === "catalog_targets") throw new DropshipError("DROPSHIP_CATALOG_TARGETS_TOO_LARGE",
-        "This selection exceeds the 10,000-item group picker limit. Reduce the catalog selection before choosing group targets.");
       if (purpose === "category_review") throw new DropshipError("DROPSHIP_EBAY_CATEGORY_REVIEW_TOO_LARGE",
         "This store exceeds the 10,000-listing eBay category review limit. No category rules were changed.");
       if (purpose === "listing_settings") throw new DropshipError("DROPSHIP_LISTING_SETTINGS_TOO_LARGE",
@@ -81,18 +78,4 @@ export async function loadSelectedProductIds(tx: SelectedCatalogReader, now: Dat
     for (const candidate of batch) productIds.add(candidate.productId);
   }
   return [...productIds].sort((left, right) => left - right);
-}
-
-export async function selectedCatalogTargets(tx: SelectedCatalogReader, now: Date, input: unknown) {
-  const parsed = catalogTargetsInputSchema.parse(input);
-  const candidates = await loadSelectedCandidates(tx, now, "catalog_targets");
-  const options = parsed.type === "product_line"
-    ? (await tx.listProductLines([...new Set(candidates.flatMap((row) => [...row.productLineIds]))])).map((row) => ({ id: String(row.id), name: row.name }))
-    : candidates.flatMap((row) => parsed.type === "category" ? row.category ? [{ id: row.category, name: row.category }] : []
-      : [{ id: String(parsed.type === "product" ? row.productId : row.productVariantId),
-        name: parsed.type === "product" ? row.productName : `${row.productName} · ${row.variantName} · ${row.sku ?? "No SKU"}` }]);
-  const unique = [...new Map(options.map((row) => [row.id, row])).values()]
-    .filter((row) => row.name.toLocaleLowerCase("en-US").includes(parsed.search.toLocaleLowerCase("en-US")))
-    .sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id));
-  return { total: unique.length, rows: unique.slice(parsed.page * CATALOG_TARGET_PAGE_SIZE, (parsed.page + 1) * CATALOG_TARGET_PAGE_SIZE) };
 }

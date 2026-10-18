@@ -3,79 +3,17 @@ import {
   DropshipApiError,
   putJson,
   type DropshipEbayListingSetupFulfillmentCheck,
-  type DropshipEbayListingSetupResponse,
-  type DropshipListingConfigReadOnlyReason,
-  type ReplaceDropshipEbayListingSetupInput,
 } from "../dropship-ops-surface";
 import {
   LISTING_SETUP_RELOAD_MESSAGE,
-  ListingSetupRequestKeys,
-  buildEbayListingSetupSaveRequest,
-  buildEbayShipFromRepairRequest,
-  listingSetupReadOnlyMessage,
   listingSetupRevision,
   listingSetupSaveErrorMessage,
-  listingSetupSavedOption,
   listingSetupShippingCheckNotice,
-  listingSetupShippingChecked,
-  listingSetupShowsSavedValuesOnly,
 } from "../dropship-ebay-listing-setup";
-
-/**
- * The characters the server accepts in a request key
- * (server/modules/dropship/application/dropship-listing-config-dtos.ts,
- * dropshipListingConfigIdempotencyKeySchema: 8 to 200 of these).
- */
-const SERVER_REQUEST_KEY = /^[A-Za-z0-9:_-]{8,200}$/;
-
-const DRAFT: ReplaceDropshipEbayListingSetupInput = {
-  fulfillmentPolicyId: "usps-ground",
-  returnPolicyId: "return-30",
-  paymentPolicyId: "managed-payments",
-};
-
-/** What the server has saved for the store when the draft was loaded. */
-const SAVED: DropshipEbayListingSetupResponse["selection"] = {
-  merchantLocationKey: "warehouse",
-  fulfillmentPolicyId: "usps-ground",
-  returnPolicyId: "return-30",
-  paymentPolicyId: "managed-payments",
-};
-const NOTHING_SAVED: DropshipEbayListingSetupResponse["selection"] = {
-  merchantLocationKey: null,
-  fulfillmentPolicyId: null,
-  returnPolicyId: null,
-  paymentPolicyId: null,
-};
 
 afterEach(() => {
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
-});
-
-describe("listingSetupReadOnlyMessage", () => {
-  it("says nothing when the vendor can change the settings, or the server predates access", () => {
-    expect(listingSetupReadOnlyMessage({ access: { canEdit: true, reason: null } }, "Marz Cards")).toBeNull();
-    expect(listingSetupReadOnlyMessage({}, "Marz Cards")).toBeNull();
-    expect(listingSetupReadOnlyMessage({ access: undefined }, "Marz Cards")).toBeNull();
-  });
-
-  it.each<{ reason: DropshipListingConfigReadOnlyReason; message: string }>([
-    { reason: "store_paused", message: "Marz Cards is paused, so its settings can't be changed now." },
-    { reason: "store_disconnecting", message: "Marz Cards is being disconnected, so its settings can't be changed now." },
-    { reason: "store_disconnected", message: "Marz Cards is disconnected, so its settings can't be changed now." },
-    {
-      reason: "vendor_not_active",
-      message: "Your dropship account isn't active, so listing settings can't be changed. Contact support.",
-    },
-  ])("names why the settings are read-only for $reason", ({ reason, message }) => {
-    expect(listingSetupReadOnlyMessage({ access: { canEdit: false, reason } }, "Marz Cards")).toBe(message);
-  });
-
-  it("speaks about the account, not the store, when the vendor is not active", () => {
-    expect(listingSetupReadOnlyMessage({ access: { canEdit: false, reason: "vendor_not_active" } }, "Marz Cards"))
-      .not.toContain("Marz Cards");
-  });
 });
 
 describe("listingSetupShippingCheckNotice", () => {
@@ -135,67 +73,6 @@ describe("listingSetupShippingCheckNotice", () => {
   });
 });
 
-describe("listingSetupShowsSavedValuesOnly", () => {
-  it("is true only when the answer says eBay's lists were not read", () => {
-    expect(listingSetupShowsSavedValuesOnly({ checks: { ebay: "not_checked", fulfillment: { status: "not_checked" } } })).toBe(true);
-    expect(listingSetupShowsSavedValuesOnly({ checks: { ebay: "checked", fulfillment: { status: "checked" } } })).toBe(false);
-  });
-
-  it("does not depend on whether Card Shellz shipping was read", () => {
-    expect(listingSetupShowsSavedValuesOnly({ checks: { ebay: "checked", fulfillment: {
-      status: "unavailable", reference: "DROPSHIP_EBAY_FULFILLMENT_ROUTING_UNAVAILABLE", kind: "temporary",
-    } } })).toBe(false);
-  });
-
-  it("treats an answer from a server before the check states as carrying eBay's lists", () => {
-    expect(listingSetupShowsSavedValuesOnly({})).toBe(false);
-  });
-});
-
-describe("listingSetupShippingChecked", () => {
-  it("is true only when Card Shellz shipping was checked for this answer", () => {
-    expect(listingSetupShippingChecked({ checks: { ebay: "checked", fulfillment: { status: "checked" } } })).toBe(true);
-    expect(listingSetupShippingChecked({ checks: { ebay: "not_checked", fulfillment: { status: "not_checked" } } })).toBe(false);
-    for (const kind of ["temporary", "setup_incomplete", "marketplace_unsupported"] as const) {
-      expect(listingSetupShippingChecked({ checks: { ebay: "checked", fulfillment: {
-        status: "unavailable", reference: "DROPSHIP_EBAY_FULFILLMENT_NO_RATE_BOOK", kind,
-      } } }), kind).toBe(false);
-    }
-  });
-
-  it("treats an answer from a server before the check states as checked, since that server always checked", () => {
-    expect(listingSetupShippingChecked({})).toBe(true);
-  });
-});
-
-describe("listingSetupSavedOption", () => {
-  const storedNames = {
-    fulfillmentPolicyName: "USPS Ground Advantage",
-    returnPolicyName: "30-day returns",
-    paymentPolicyName: "Managed payments",
-  };
-
-  it("offers each saved policy under the name eBay gave it at the last save", () => {
-    const setup = { selection: SAVED, storedNames };
-    expect(listingSetupSavedOption(setup, "fulfillmentPolicyId")).toEqual([{ id: "usps-ground", name: "USPS Ground Advantage" }]);
-    expect(listingSetupSavedOption(setup, "returnPolicyId")).toEqual([{ id: "return-30", name: "30-day returns" }]);
-    expect(listingSetupSavedOption(setup, "paymentPolicyId")).toEqual([{ id: "managed-payments", name: "Managed payments" }]);
-  });
-
-  it("names a saved policy by its id when no name was stored for it", () => {
-    expect(listingSetupSavedOption({ selection: SAVED, storedNames: { ...storedNames, returnPolicyName: null } }, "returnPolicyId"))
-      .toEqual([{ id: "return-30", name: "return-30" }]);
-    // A server from before stored names sends none at all.
-    expect(listingSetupSavedOption({ selection: SAVED }, "paymentPolicyId"))
-      .toEqual([{ id: "managed-payments", name: "managed-payments" }]);
-  });
-
-  it("offers nothing for a policy that is not saved, whatever name is stored", () => {
-    expect(listingSetupSavedOption({ selection: NOTHING_SAVED, storedNames }, "fulfillmentPolicyId")).toEqual([]);
-    expect(listingSetupSavedOption({ selection: { ...SAVED, paymentPolicyId: "" }, storedNames }, "paymentPolicyId")).toEqual([]);
-  });
-});
-
 describe("listingSetupRevision", () => {
   it("returns a positive whole revision as it is", () => {
     expect(listingSetupRevision({ revision: 1 })).toBe(1);
@@ -215,194 +92,6 @@ describe("listingSetupRevision", () => {
   });
 });
 
-describe("buildEbayListingSetupSaveRequest", () => {
-  it("sends every chosen policy against the revision they were chosen at, with the request key, when nothing is saved yet", () => {
-    expect(buildEbayListingSetupSaveRequest({ revision: 7, selection: NOTHING_SAVED }, DRAFT, "ebay-setup:key-0001")).toEqual({
-      expectedRevision: 7,
-      idempotencyKey: "ebay-setup:key-0001",
-      fulfillmentPolicyId: "usps-ground",
-      returnPolicyId: "return-30",
-      paymentPolicyId: "managed-payments",
-    });
-  });
-
-  it("sends only the policy that changed, so a return change needs no Card Shellz shipping check", () => {
-    const body = buildEbayListingSetupSaveRequest(
-      { revision: 7, selection: SAVED }, { ...DRAFT, returnPolicyId: "return-60" }, "ebay-setup:key-0001",
-    );
-    expect(body).toEqual({ expectedRevision: 7, idempotencyKey: "ebay-setup:key-0001", returnPolicyId: "return-60" });
-    expect(body).not.toHaveProperty("fulfillmentPolicyId");
-  });
-
-  it("sends each changed policy and leaves the unchanged ones out", () => {
-    const body = buildEbayListingSetupSaveRequest(
-      { revision: 7, selection: SAVED },
-      { fulfillmentPolicyId: "ups-ground", returnPolicyId: "return-30", paymentPolicyId: "other-payments" },
-      "ebay-setup:key-0001",
-    );
-    expect(body).toEqual({
-      expectedRevision: 7, idempotencyKey: "ebay-setup:key-0001",
-      fulfillmentPolicyId: "ups-ground", paymentPolicyId: "other-payments",
-    });
-  });
-
-  it("counts a policy picked where none was saved as a change", () => {
-    const body = buildEbayListingSetupSaveRequest(
-      { revision: 7, selection: { ...SAVED, paymentPolicyId: null } }, DRAFT, "ebay-setup:key-0001",
-    );
-    expect(body).toEqual({ expectedRevision: 7, idempotencyKey: "ebay-setup:key-0001", paymentPolicyId: "managed-payments" });
-  });
-
-  it("sends every chosen policy when nothing changed, so the server can confirm the whole selection", () => {
-    expect(buildEbayListingSetupSaveRequest({ revision: 7, selection: SAVED }, DRAFT, "ebay-setup:key-0001")).toEqual({
-      expectedRevision: 7,
-      idempotencyKey: "ebay-setup:key-0001",
-      fulfillmentPolicyId: "usps-ground",
-      returnPolicyId: "return-30",
-      paymentPolicyId: "managed-payments",
-    });
-  });
-
-  it("never sends an empty policy, changed or not", () => {
-    // A saved shipping policy eBay no longer offers opens empty: clearing is not a change to send.
-    const changedReturn = buildEbayListingSetupSaveRequest(
-      { revision: 7, selection: SAVED }, { ...DRAFT, fulfillmentPolicyId: "", returnPolicyId: "return-60" }, "ebay-setup:key-0001",
-    );
-    expect(changedReturn).toEqual({ expectedRevision: 7, idempotencyKey: "ebay-setup:key-0001", returnPolicyId: "return-60" });
-    // With nothing changed, only the chosen policies are sent.
-    const nothingChanged = buildEbayListingSetupSaveRequest(
-      { revision: 7, selection: SAVED }, { ...DRAFT, fulfillmentPolicyId: "" }, "ebay-setup:key-0001",
-    );
-    expect(nothingChanged).toEqual({
-      expectedRevision: 7, idempotencyKey: "ebay-setup:key-0001",
-      returnPolicyId: "return-30", paymentPolicyId: "managed-payments",
-    });
-    // With nothing chosen at all, no policy is invented.
-    const empty = { fulfillmentPolicyId: "", returnPolicyId: "", paymentPolicyId: "" };
-    expect(buildEbayListingSetupSaveRequest({ revision: 7, selection: NOTHING_SAVED }, empty, "ebay-setup:key-0001"))
-      .toEqual({ expectedRevision: 7, idempotencyKey: "ebay-setup:key-0001" });
-  });
-
-  it("never sends the shelf default or anything else the draft happens to carry", () => {
-    const draft = { ...DRAFT, merchantLocationKey: "vendor-chosen", storeShelfDefault: { ids: ["1"] } };
-    const body = buildEbayListingSetupSaveRequest({ revision: 7, selection: NOTHING_SAVED }, draft, "ebay-setup:key-0001");
-    expect(Object.keys(body).sort()).toEqual([
-      "expectedRevision", "fulfillmentPolicyId", "idempotencyKey", "paymentPolicyId", "returnPolicyId",
-    ]);
-    const unchanged = buildEbayListingSetupSaveRequest({ revision: 7, selection: SAVED }, draft, "ebay-setup:key-0001");
-    expect(unchanged).not.toHaveProperty("merchantLocationKey");
-    expect(unchanged).not.toHaveProperty("storeShelfDefault");
-  });
-
-  it("does not change the draft or the loaded setup it was built from", () => {
-    const draft = Object.freeze({ ...DRAFT, returnPolicyId: "return-60" });
-    const setup = Object.freeze({ revision: 7, selection: Object.freeze({ ...SAVED }) });
-    const body = buildEbayListingSetupSaveRequest(setup, draft, "ebay-setup:key-0001");
-    expect(draft).toEqual({ ...DRAFT, returnPolicyId: "return-60" });
-    expect(setup).toEqual({ revision: 7, selection: SAVED });
-    expect(body).not.toBe(draft);
-  });
-
-  it("refuses to build a save without a revision and tells the vendor to reload", () => {
-    for (const revision of [undefined, null, 0, -3, 2.5]) {
-      expect(() => buildEbayListingSetupSaveRequest({ revision, selection: SAVED }, DRAFT, "ebay-setup:key-0001"), String(revision))
-        .toThrow(LISTING_SETUP_RELOAD_MESSAGE);
-    }
-    expect(() => buildEbayListingSetupSaveRequest({ selection: NOTHING_SAVED }, DRAFT, "ebay-setup:key-0001"))
-      .toThrow(LISTING_SETUP_RELOAD_MESSAGE);
-    expect(LISTING_SETUP_RELOAD_MESSAGE).toBe("This page is out of date. Reload it, then save again.");
-  });
-});
-
-describe("buildEbayShipFromRepairRequest", () => {
-  it("sends only the revision and the request key: the repair changes no policy", () => {
-    expect(buildEbayShipFromRepairRequest({ revision: 9 }, "ebay-ship-from:key-0001")).toEqual({
-      expectedRevision: 9,
-      idempotencyKey: "ebay-ship-from:key-0001",
-    });
-  });
-
-  it("refuses to build a repair without a revision and tells the vendor to reload", () => {
-    for (const setup of [{}, { revision: null }, { revision: 0 }, { revision: Number.NaN }]) {
-      expect(() => buildEbayShipFromRepairRequest(setup, "ebay-ship-from:key-0001")).toThrow(LISTING_SETUP_RELOAD_MESSAGE);
-    }
-  });
-});
-
-describe("ListingSetupRequestKeys", () => {
-  function counterKeys(prefix = "ebay-setup") {
-    let issued = 0;
-    const newKey = vi.fn((keyPrefix: string) => `${keyPrefix}:key-${String(++issued).padStart(4, "0")}`);
-    return { keys: new ListingSetupRequestKeys(prefix, newKey), newKey };
-  }
-
-  it("reuses the key for a retry of the same choices against the same revision", () => {
-    const { keys, newKey } = counterKeys();
-    const first = keys.keyFor({ revision: 3, draft: DRAFT });
-    // A new object with the same content is the same attempt (a retry after a lost answer).
-    const retry = keys.keyFor({ revision: 3, draft: { ...DRAFT } });
-    expect(first).toBe("ebay-setup:key-0001");
-    expect(retry).toBe(first);
-    expect(newKey).toHaveBeenCalledOnce();
-    expect(newKey).toHaveBeenCalledWith("ebay-setup");
-  });
-
-  it("starts a new attempt with a new key when the choices or the revision change", () => {
-    const { keys } = counterKeys();
-    const first = keys.keyFor({ revision: 3, draft: DRAFT });
-    const otherPolicy = keys.keyFor({ revision: 3, draft: { ...DRAFT, returnPolicyId: "return-60" } });
-    const otherRevision = keys.keyFor({ revision: 4, draft: { ...DRAFT, returnPolicyId: "return-60" } });
-    expect(new Set([first, otherPolicy, otherRevision]).size).toBe(3);
-  });
-
-  it("remembers only the current attempt, so going back to earlier choices is a new attempt", () => {
-    // The earlier choices may already be saved; reusing their key would replay
-    // that save instead of saving what the vendor now asks for.
-    const { keys } = counterKeys();
-    const a = keys.keyFor({ revision: 3, draft: DRAFT });
-    keys.keyFor({ revision: 3, draft: { ...DRAFT, paymentPolicyId: "other-payments" } });
-    const aAgain = keys.keyFor({ revision: 3, draft: DRAFT });
-    expect(aAgain).not.toBe(a);
-    expect(aAgain).toBe("ebay-setup:key-0003");
-  });
-
-  it("gives the next save a new key once the server confirmed the last one", () => {
-    const { keys, newKey } = counterKeys();
-    const saved = keys.keyFor({ revision: 3, draft: DRAFT });
-    keys.settled();
-    const next = keys.keyFor({ revision: 3, draft: DRAFT });
-    expect(next).not.toBe(saved);
-    expect(newKey).toHaveBeenCalledTimes(2);
-  });
-
-  it("settling with no attempt in progress is harmless", () => {
-    const { keys } = counterKeys();
-    keys.settled();
-    expect(keys.keyFor({ revision: 1 })).toBe("ebay-setup:key-0001");
-  });
-
-  it("keeps the save and the ship-from repair keys apart", () => {
-    let issued = 0;
-    const newKey = (prefix: string) => `${prefix}:key-${String(++issued).padStart(4, "0")}`;
-    const save = new ListingSetupRequestKeys("ebay-setup", newKey);
-    const repair = new ListingSetupRequestKeys("ebay-ship-from", newKey);
-    const saveKey = save.keyFor({ revision: 3 });
-    const repairKey = repair.keyFor({ revision: 3 });
-    expect(saveKey).toBe("ebay-setup:key-0001");
-    expect(repairKey).toBe("ebay-ship-from:key-0002");
-    expect(save.keyFor({ revision: 3 })).toBe(saveKey);
-  });
-
-  it("by default makes a prefixed key the server accepts", () => {
-    vi.spyOn(globalThis.crypto, "randomUUID").mockReturnValue("00000000-0000-4000-8000-000000000001");
-    const keys = new ListingSetupRequestKeys("ebay-setup");
-    const key = keys.keyFor({ revision: 3, draft: DRAFT });
-    expect(key).toBe("ebay-setup:00000000-0000-4000-8000-000000000001");
-    expect(key).toMatch(SERVER_REQUEST_KEY);
-    expect(keys.keyFor({ revision: 3, draft: DRAFT })).toBe(key);
-  });
-});
-
 describe("listingSetupSaveErrorMessage", () => {
   function apiError(code: string, message = "Server words.", status = 409) {
     return new DropshipApiError({ status, code, message });
@@ -410,7 +99,7 @@ describe("listingSetupSaveErrorMessage", () => {
 
   it.each([
     {
-      // The reload keeps the vendor's picks (EbayListingSetupPanel, rebaseEbayListingSetupDraft), so the words say so.
+      // The words say the vendor's picks stay chosen over the reload.
       code: "DROPSHIP_LISTING_CONFIG_REVISION_CONFLICT",
       message: "These settings changed in another window. Choose Refresh options to load what is saved now. Your changes stay chosen; check them, then save again.",
     },
@@ -428,7 +117,7 @@ describe("listingSetupSaveErrorMessage", () => {
       code: "DROPSHIP_LISTING_CONFIG_STORE_DISCONNECTED",
       message: "This store is disconnected, so its settings can't be changed now.",
     },
-  ])("says what to do about $code in the panel's words", ({ code, message }) => {
+  ])("says what to do about $code in plain words", ({ code, message }) => {
     expect(listingSetupSaveErrorMessage(apiError(code), "fallback")).toBe(message);
   });
 
@@ -605,7 +294,7 @@ describe("listingSetupSaveErrorMessage", () => {
     });
 
     it("reads the reason from the server's error body", async () => {
-      // The whole client path: the PUT's 422 body, through fetch, to the panel's words.
+      // The whole client path: the PUT's 422 body, through fetch, to the vendor's words.
       vi.stubGlobal("fetch", vi.fn(async () => ({
         ok: false,
         status: 422,
@@ -672,7 +361,7 @@ describe("listingSetupSaveErrorMessage", () => {
     });
 
     it("maps a retryable refusal read from the server's error body", async () => {
-      // The whole client path: the PUT's error body, through fetch, to the panel's words.
+      // The whole client path: the PUT's error body, through fetch, to the vendor's words.
       vi.stubGlobal("fetch", vi.fn(async () => ({
         ok: false,
         status: 503,

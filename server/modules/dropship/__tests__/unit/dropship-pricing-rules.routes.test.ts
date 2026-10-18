@@ -3,7 +3,7 @@ import type { AddressInfo } from "node:net";
 import express, { type Request } from "express";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
-import { reviewPricingRulesInputSchema, applyPricingRulesInputSchema, pricingTargetsInputSchema } from "../../../../../shared/dropship/pricing-rules";
+import { reviewPricingRulesInputSchema, applyPricingRulesInputSchema } from "../../../../../shared/dropship/pricing-rules";
 import { DropshipError } from "../../domain/errors";
 vi.mock("../../../../db", () => ({ pool: {}, db: {} }));
 import { registerDropshipPricingRulesRoutes } from "../../interfaces/http/dropship-pricing-rules.routes";
@@ -24,7 +24,6 @@ describe("store pricing HTTP contracts", () => {
     reviewForMember: vi.fn(async (_member: string, store: unknown, body: unknown) => { target(store); reviewPricingRulesInputSchema.parse(body); return review; }),
     reviewPageForMember: vi.fn(async (_member: string, store: unknown, id: unknown, page: unknown) => { target(store); z.string().uuid().parse(id); z.number().int().nonnegative().parse(page); return review; }),
     applyForMember: vi.fn(async (_member: string, store: unknown, body: unknown) => { target(store); applyPricingRulesInputSchema.parse(body); return { revisionId: 1, idempotentReplay: false }; }),
-    targetsForMember: vi.fn(async (_member: string, store: unknown, body: unknown) => { target(store); pricingTargetsInputSchema.parse(body); return { total: 0, rows: [] }; }),
   };
   beforeEach(async () => {
     vi.clearAllMocks(); const app = express(); app.use(express.json());
@@ -39,9 +38,13 @@ describe("store pricing HTTP contracts", () => {
     return fetch(`${url}${path}`, { method, headers: { "Content-Type": "application/json", ...(member ? { "X-Test-Member": member } : {}) },
       ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
   }
-  it.each([["", "GET"], ["/targets?type=category", "GET"], ["/reviews", "POST"], [`/reviews/${reviewId}`, "GET"], ["/apply", "POST"]])("requires auth for %s", async (path, method) => {
+  it.each([["", "GET"], ["/reviews", "POST"], [`/reviews/${reviewId}`, "GET"], ["/apply", "POST"]])("requires auth for %s", async (path, method) => {
     expect((await request(path, method, method === "POST" ? {} : undefined, null)).status).toBe(401);
     expect(service.applyForMember).not.toHaveBeenCalled();
+  });
+  it("no longer serves the group targets read, deleted in Listing settings PR 12", async () => {
+    expect((await request("/targets?type=category")).status).toBe(404);
+    expect(service.getForMember).not.toHaveBeenCalled();
   });
   it("uses the authenticated member and disables caching", async () => {
     const result = await request("/reviews", "POST", reviewInput);
@@ -79,7 +82,7 @@ describe("store pricing HTTP contracts", () => {
 describe("store pricing review body behind the 1 MiB parser (plan PR 9, P8)", () => {
   let server: http.Server; let url: string;
   const service = {
-    getForMember: vi.fn(), reviewPageForMember: vi.fn(), applyForMember: vi.fn(), targetsForMember: vi.fn(),
+    getForMember: vi.fn(), reviewPageForMember: vi.fn(), applyForMember: vi.fn(),
     reviewForMember: vi.fn(async (_member: string, _store: unknown, body: unknown) => { reviewPricingRulesInputSchema.parse(body); return review; }),
   };
   beforeEach(async () => {

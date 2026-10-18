@@ -4,21 +4,17 @@ import * as React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 import {
-  DropshipApiError,
   type DropshipCatalogResponse,
   type DropshipCatalogRow,
 } from "@/lib/dropship-ops-surface";
 import {
-  EbayStoreCategoryAssignmentPanel,
   ListingAccessNoticeView,
   describeCatalogListingTier,
   fetchAllSelectedCatalogRows,
   formatIssue,
-  shouldOfferEbayStoreReconnect,
 } from "../DropshipPortalCatalog";
 import { describeListingAccess, listingAccessLink } from "@/lib/dropship-listing-access";
 import { Router } from "wouter";
-import { EbayStoreCategoryAuthorizationRecoveryView } from "../EbayStoreCategoryAuthorizationRecovery";
 
 function row(productVariantId: number): DropshipCatalogRow {
   return { productVariantId } as DropshipCatalogRow;
@@ -89,7 +85,7 @@ describe("DropshipPortalCatalog workflow", () => {
     expect(source).toContain('startEmailStepUp("bulk_listing_push")');
   });
 
-  it("separates required marketplace categorization from optional seller Store organization", () => {
+  it("names the required eBay category and the optional store shelf in step 3's preview, and keeps the shelf picker's words", () => {
     const source = readFileSync(
       join(process.cwd(), "client", "src", "pages", "dropship", "DropshipPortalCatalog.tsx"),
       "utf8",
@@ -99,9 +95,9 @@ describe("DropshipPortalCatalog workflow", () => {
       "utf8",
     );
 
-    expect(source).toContain("Your eBay Store organization (optional)");
-    expect(source).toContain("The required eBay category comes from your eBay categories above.");
-    expect(source).toContain("Leaving both fields blank does not block preview or push.");
+    // The per-size store category panel went in Listing settings PR 12; the step's Store shelf row replaces it.
+    expect(source).not.toContain("Your eBay Store organization (optional)");
+    expect(source).not.toContain("The required eBay category comes from your eBay categories above.");
     const previewSource = readFileSync(join(process.cwd(), "client/src/pages/dropship/DropshipListingPreview.tsx"), "utf8");
     expect(source).toContain("<DropshipListingPreview");
     expect(previewSource).toContain("Marketplace category");
@@ -112,136 +108,24 @@ describe("DropshipPortalCatalog workflow", () => {
     expect(comboboxSource).toContain('className="max-h-64 overflow-y-auto overscroll-contain"');
   });
 
-  it("keeps store policy defaults separate from revision-safe listing overrides", () => {
-    const catalogSource = readFileSync(
-      join(process.cwd(), "client", "src", "pages", "dropship", "DropshipPortalCatalog.tsx"),
-      "utf8",
-    );
-    const overrideSource = readFileSync(
-      join(process.cwd(), "client", "src", "pages", "dropship", "EbayListingPolicyOverridePanel.tsx"),
-      "utf8",
-    );
-    const setupPosition = catalogSource.indexOf("<EbayListingSetupPanel");
-    const overridePosition = catalogSource.indexOf("<EbayListingPolicyOverridePanel");
-    const storeCategoryPosition = catalogSource.indexOf("<EbayStoreCategoryAssignmentPanel");
-
-    expect(overridePosition).toBeGreaterThan(setupPosition);
-    expect(storeCategoryPosition).toBeGreaterThan(overridePosition);
-    expect(overrideSource).toContain("summarizeEbayListingPolicy");
-    expect(overrideSource).toContain("Edit policies");
-    expect(overrideSource).toContain("currentPage.rows.map");
-    expect(overrideSource).toContain("Check listings on this page");
-    expect(overrideSource).toContain("checked across pages and filters");
-    expect(overrideSource).toContain("<EbayListingPolicyBulkDialog");
-    // Each store-scoped panel is keyed by the store, with keys unique among
-    // the siblings, so a store switch unmounts the previous store's panels.
-    expect(catalogSource).toContain("key={`listing-setup-${selectedStoreConnectionIdNumber}`}");
-    expect(catalogSource).toContain("key={`policy-override-${selectedStoreConnectionIdNumber}`}");
-    expect(catalogSource).not.toContain("key={selectedStoreConnectionIdNumber}");
-    expect(overrideSource).toContain("Refresh policies");
-    expect(overrideSource).not.toContain("putJson");
-  });
-
-  it("keeps bulk edits distinct from publication and retries confirmed saves as refreshes only", () => {
-    const source = readFileSync(join(process.cwd(), "client/src/pages/dropship/EbayListingPolicyBulkDialog.tsx"), "utf8");
-    expect(source).toContain("Leave unchanged preserves each listing");
-    expect(source).toContain("This does not push listings to eBay.");
-    expect(source).toContain("requestIdentity.current.key");
-    expect(source).toContain("buildEbayBulkPolicyAssignments");
-    expect(source).toContain("if (savedCount !== null)");
-    expect(source).toContain("Refresh saved policies");
-    expect(source).not.toContain("startEmailStepUp");
-    expect(source).not.toContain("verifyPasskeyStepUp");
-  });
-
-  it("offers authorization recovery only for reconnectable eBay Store-category errors", () => {
-    vi.stubGlobal("React", React);
-    const permissionError = new DropshipApiError({
-      status: 403,
-      code: "DROPSHIP_EBAY_STORE_CATEGORIES_PERMISSION_REQUIRED",
-      message: "Reconnect the eBay store to grant Store-category access.",
-    });
-    const providerError = new DropshipApiError({
-      status: 502,
-      code: "DROPSHIP_EBAY_STORE_CATEGORIES_UNAVAILABLE",
-      message: "The connected eBay account did not return a Store category hierarchy.",
-    });
-
-    expect(shouldOfferEbayStoreReconnect(permissionError)).toBe(true);
-    expect(shouldOfferEbayStoreReconnect(providerError)).toBe(false);
-    expect(shouldOfferEbayStoreReconnect(new DropshipApiError({
-      status: 403, code: "DROPSHIP_EBAY_STORE_CONNECTION_BLOCKED", message: "Store paused",
-    }))).toBe(false);
-    expect(shouldOfferEbayStoreReconnect(new DropshipApiError({
-      status: 403,
-      code: "DROPSHIP_EBAY_STORE_CATEGORIES_ACCESS_DENIED",
-      message: "eBay denied access after automatic refresh.",
-    }))).toBe(false);
-
-    const markup = renderToStaticMarkup(React.createElement(EbayStoreCategoryAssignmentPanel, {
-      authorizationRecovery: React.createElement("button", null, "Refresh eBay authorization"),
-      data: null,
-      error: permissionError,
-      isLoading: false,
-      onAssignmentChange: () => undefined,
-      pendingProductVariantIds: new Set<number>(),
-      rows: [],
-    }));
-
-    expect(markup).toContain("eBay Store-category authorization needs attention.");
-    expect(markup).toContain("Refresh eBay authorization");
-    expect(markup).toContain("You can still preview and push listings");
-  });
-
-  it("runs Store-category reauthorization inline and returns directly to Catalog", () => {
-    const catalogSource = readFileSync(
-      join(process.cwd(), "client", "src", "pages", "dropship", "DropshipPortalCatalog.tsx"),
-      "utf8",
-    );
-    const recoverySource = readFileSync(
-      join(process.cwd(), "client", "src", "pages", "dropship", "EbayStoreCategoryAuthorizationRecovery.tsx"),
-      "utf8",
-    );
-
-    expect(catalogSource).toContain("<EbayStoreCategoryAuthorizationRecovery");
-    expect(recoverySource).toContain('verifyPasskeyStepUp("connect_store")');
-    expect(recoverySource).toContain('startEmailStepUp("connect_store")');
-    expect(recoverySource).toContain('action: "connect_store"');
-    expect(recoverySource).toContain('"/api/dropship/store-connections/oauth/start"');
-    expect(recoverySource).toContain('intent: "refresh_connection"');
-    expect(recoverySource).toContain('returnTo: dropshipPortalPath("/catalog/setup")');
-    expect(recoverySource).toContain("window.location.assign(result.authorizationUrl)");
-    expect(catalogSource).not.toContain('setLocation(dropshipPortalPath("/settings"))');
-  });
-
   it("turns raw eBay preview config keys into plain words that name Listing settings (PR 10h)", () => {
     expect(formatIssue("missing_config:merchantLocationKey")).toBe("Your ship-from location isn't set. Update it in Listing settings.");
     expect(formatIssue("missing_config:businessPolicies.returnPolicyId")).toBe("No return policy. Choose one in Listing settings.");
     expect(formatIssue("ebay_browse_category_required")).toBe("No eBay category. Pick one in Listing settings.");
   });
 
-  it("places an explicit authorization confirmation beside the emailed code", () => {
-    vi.stubGlobal("React", React);
-    const markup = renderToStaticMarkup(React.createElement(EbayStoreCategoryAuthorizationRecoveryView, {
-      connectProofActive: false,
-      emailCodeSent: true,
-      errorMessage: "",
-      hasPasskey: false,
-      message: "Verification code sent to your email address.",
-      onCancel: () => undefined,
-      onStart: () => undefined,
-      onVerificationCodeChange: () => undefined,
-      pendingAction: null,
-      permissionRequired: true,
-      storeName: "marz_cards",
-      verificationCode: "813606",
-    }));
-
-    expect(markup).toContain("Verification code sent to your email address.");
-    expect(markup).toContain("Store authorization verification code");
-    expect(markup).toContain("Verify and continue to eBay for marz_cards");
-    expect(markup).not.toContain("Settings");
+  it("has no step 2 writer or eBay reauthorization of its own (Listing settings PR 12)", () => {
+    const source = readFileSync(join(process.cwd(), "client/src/pages/dropship/DropshipPortalCatalog.tsx"), "utf8");
+    // The per-size shelf PUT and the inline eBay sign-in went with the older panels; the step's rows write, and its
+    // sign-in banner sends the vendor to Onboarding.
+    expect(source).not.toContain("/api/dropship/ebay/store-category-assignments");
+    expect(source).not.toContain("updateEbayStoreCategoryAssignment");
+    expect(source).not.toContain("EbayStoreCategoryAuthorizationRecovery");
+    expect(source).not.toContain("/api/dropship/store-connections/oauth/start");
+    // The store shelves read stays: the step shows it as `shelves`.
+    expect(source).toContain("shelves={ebayStoreCategoryQuery}");
   });
+
 });
 
 describe("catalog listing tier", () => {
@@ -313,8 +197,29 @@ describe("listing access notice", () => {
     expect(source).toContain("{listingError && (listingError.notice");
     expect(source).not.toContain("A launch-ready store connection is required before listing preview or push.");
     // An expired verification reloads the proof so the next click asks again.
-    const errorHandler = source.slice(source.indexOf("function showListingError("), source.indexOf("async function updateEbayStoreCategoryAssignment("));
+    const start = source.indexOf("function showListingError(");
+    const end = source.indexOf("function applyCatalogFilters(");
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    const errorHandler = source.slice(start, end);
     expect(errorHandler).toContain("if (isStepUpRequiredError(caught)) {");
     expect(errorHandler).toContain("void refetchAuth();");
+  });
+
+  it("says any Listing settings save holds step 3, in plain words (Interim, PR 12 PROPOSAL)", () => {
+    const source = readFileSync(join(process.cwd(), "client/src/pages/dropship/DropshipPortalCatalog.tsx"), "utf8");
+    const words = ["Wait for your listing settings to finish saving, then queue again.", "Saving your listing settings…"];
+    for (const sentence of words) {
+      expect(source.split(sentence).length - 1, sentence).toBe(1);
+      expect(sentence).not.toMatch(/[A-Z]{2,}_[A-Z_]+/);
+      expect(sentence).not.toContain("Older settings");
+    }
+    // The queue guard sits where a pending save stops the push.
+    const pushHandler = source.slice(source.indexOf("async function pushListings()"), source.indexOf("async function queueListingsOnce("));
+    expect(pushHandler).toContain(`if (pendingPriceSavesRef.current > 0) {`);
+    expect(pushHandler).toContain(words[0]);
+    // A save no longer refreshes the preview, so the stale-preview line no longer says it does.
+    expect(source).not.toContain("Saving your listing price and refreshing the preview");
+    expect(source).not.toContain("Wait for your listing price to finish saving");
   });
 });

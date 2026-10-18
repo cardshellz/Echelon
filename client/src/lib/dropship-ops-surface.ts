@@ -1752,12 +1752,6 @@ export interface DropshipEbayStoreCategoryResponse {
   fetchedAt: string;
 }
 
-export interface DropshipEbayStoreCategoryAssignmentResponse {
-  assignment: DropshipEbayStoreCategoryAssignment | null;
-  revisionId: number;
-  idempotentReplay: boolean;
-}
-
 export interface DropshipEbayListingSetupOption {
   id: string;
   name: string;
@@ -1855,12 +1849,6 @@ export interface DropshipEbayListingSetupResponse {
   outcome?: "changed" | "unchanged" | "replayed";
 }
 
-export interface ReplaceDropshipEbayListingSetupInput {
-  fulfillmentPolicyId: string;
-  returnPolicyId: string;
-  paymentPolicyId: string;
-}
-
 /** The setup PUT's body: the policies, the revision they were chosen against, and a request key. */
 export interface DropshipEbayListingSetupSaveRequest {
   expectedRevision: number;
@@ -1875,42 +1863,6 @@ export interface DropshipEbayListingSetupSaveRequest {
 export interface DropshipEbayShipFromRepairRequest {
   expectedRevision: number;
   idempotencyKey: string;
-}
-
-export interface DropshipEbayListingPolicyOverride {
-  productVariantId: number;
-  revisionId: number;
-  fulfillmentPolicyId: string | null;
-  returnPolicyId: string | null;
-  paymentPolicyId: string | null;
-  updatedAt: string;
-}
-
-export interface DropshipEbayListingPolicyOverrideResponse {
-  storeConnectionId: number;
-  defaults: {
-    fulfillmentPolicyId: string | null;
-    returnPolicyId: string | null;
-    paymentPolicyId: string | null;
-  };
-  options: {
-    fulfillmentPolicies: DropshipEbayFulfillmentPolicyOption[];
-    returnPolicies: DropshipEbayListingSetupOption[];
-    paymentPolicies: DropshipEbayListingSetupOption[];
-  };
-  assignments: DropshipEbayListingPolicyOverride[];
-  fetchedAt: string;
-}
-
-export interface ReplaceDropshipEbayListingPolicyOverrideResponse {
-  assignment: DropshipEbayListingPolicyOverride | null;
-  revisionId: number;
-  idempotentReplay: boolean;
-}
-
-export interface ReplaceDropshipEbayListingPoliciesResponse {
-  results: Array<ReplaceDropshipEbayListingPolicyOverrideResponse & { productVariantId: number }>;
-  idempotentReplay: boolean;
 }
 
 export type DropshipVendorSelectionScope =

@@ -99,7 +99,7 @@ databaseTests.sequential("purchase approval authority PostgreSQL owner and HTTP 
       ownedSchemas.push(name);
     }
     for (const table of [schema.users, schema.authRoles, schema.authPermissions, schema.authUserRoles, schema.authRolePermissions,
-      schema.purchaseOrders, schema.purchaseOrderLines, schema.poApprovalTiers, schema.poStatusHistory, schema.poEvents, schema.poRevisions, schema.purchasingRecommendationPoHandoffs, schema.warehouseSettings]) {
+      schema.purchaseOrders, schema.purchaseOrderLines, schema.vendorInvoicePoLinks, schema.poApprovalTiers, schema.poStatusHistory, schema.poEvents, schema.poRevisions, schema.purchasingRecommendationPoHandoffs, schema.warehouseSettings]) {
       await pool.query(fixtureTable(table));
     }
     await pool.query(`
@@ -147,19 +147,19 @@ databaseTests.sequential("purchase approval authority PostgreSQL owner and HTTP 
       DROP TRIGGER IF EXISTS purchase_order_history_retention_truncate ON procurement.purchase_orders;
       TRUNCATE identity.auth_user_roles, identity.auth_role_permissions, identity.auth_permissions, identity.auth_roles, identity.users RESTART IDENTITY CASCADE;
       TRUNCATE procurement.purchase_orders, procurement.purchase_order_lines, procurement.po_approval_tiers,
-        procurement.po_events, procurement.po_status_history, procurement.po_revisions, procurement.purchasing_recommendation_po_handoffs, inventory.warehouse_settings RESTART IDENTITY CASCADE;
+        procurement.po_events, procurement.po_status_history, procurement.po_revisions, procurement.vendor_invoice_po_links, procurement.purchasing_recommendation_po_handoffs, inventory.warehouse_settings RESTART IDENTITY CASCADE;
       INSERT INTO identity.users(id,username,password,role,active) VALUES
         ('admin-user','admin','unused','admin',1), ('lead-user','lead','unused','picker',1),
         ('wrong-user','wrong','unused','admin',1), ('inactive-user','inactive','unused','admin',0),
         ('scoped-user','scoped','unused','admin',1), ('no-grant-user','no-grant','unused','admin',1),
-        ('cancel-user','cancel-only','unused','admin',1);
+        ('cancel-user','cancel-only','unused','admin',1), ('close-user','close-only','unused','picker',1);
       INSERT INTO identity.auth_roles(id,name,is_system) VALUES
-        (1,'Administrator',1),(2,'Team Lead',1),(3,'Other Buyer',0),(4,'Scoped Approver',0),(5,'No Grant',0),(6,'Cancel Only',0);
+        (1,'Administrator',1),(2,'Team Lead',1),(3,'Other Buyer',0),(4,'Scoped Approver',0),(5,'No Grant',0),(6,'Cancel Only',0),(7,'Close Buyer',0);
       INSERT INTO identity.auth_permissions(id,resource,action,category) VALUES (1,'purchasing','approve','purchasing'),(2,'purchasing','edit','purchasing'),(3,'purchasing','cancel','purchasing'),(4,'purchasing','create','purchasing');
       INSERT INTO identity.auth_role_permissions(id,role_id,permission_id,constraints) VALUES
-        (1,1,1,NULL),(2,2,1,NULL),(3,3,1,NULL),(4,4,1,'{"warehouseId":1}'),(5,1,2,NULL),(6,1,3,NULL),(7,6,3,NULL),(8,1,4,NULL);
+        (1,1,1,NULL),(2,2,1,NULL),(3,3,1,NULL),(4,4,1,'{"warehouseId":1}'),(5,1,2,NULL),(6,1,3,NULL),(7,6,3,NULL),(8,1,4,NULL),(9,7,4,NULL);
       INSERT INTO identity.auth_user_roles(id,user_id,role_id) VALUES
-        (1,'admin-user',1),(2,'lead-user',2),(3,'wrong-user',3),(4,'inactive-user',1),(5,'scoped-user',4),(6,'no-grant-user',5),(7,'cancel-user',6);
+        (1,'admin-user',1),(2,'lead-user',2),(3,'wrong-user',3),(4,'inactive-user',1),(5,'scoped-user',4),(6,'no-grant-user',5),(7,'cancel-user',6),(8,'close-user',7);
       INSERT INTO procurement.purchase_orders(id,po_number,vendor_id,status,physical_status,financial_status,currency,
         approval_tier_id,subtotal_cents,total_cents,discount_cents,tax_cents,shipping_cost_cents,updated_at)
       VALUES (1,'APPROVAL-001',1,'pending_approval','draft','unbilled','USD',1,10000,10000,0,0,0,'2026-09-01T12:00:00');
@@ -260,6 +260,103 @@ databaseTests.sequential("purchase approval authority PostgreSQL owner and HTTP 
     } finally {
       await pool.query("DROP TRIGGER fail_dispatch_audit ON procurement.po_events; DROP FUNCTION procurement.fail_dispatch_audit()");
     }
+  });
+
+  const seedReceiptState = async (status = "received", physicalStatus = "received", receivedQty = 10) => {
+    await pool.query("UPDATE procurement.purchase_orders SET status=$1,physical_status=$2 WHERE id=1", [status, physicalStatus]);
+    await pool.query("UPDATE procurement.purchase_order_lines SET order_qty=10,received_qty=$1,cancelled_qty=0,status=$2 WHERE id=11", [receivedQty, receivedQty >= 10 ? "received" : "partially_received"]);
+  };
+  const postClose = async (endpoint: "close" | "close-short", body: unknown = {}) => {
+    const response = await fetch(`${url}/api/purchase-orders/1/${endpoint}`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+    });
+    return { status: response.status, body: await response.json() as any };
+  };
+
+  it("cannot bypass close-short authority through ordinary close with no linked invoices", async () => {
+    await seedReceiptState("partially_received", "receiving", 5);
+    requestActor = "close-user";
+    const before = await evidence();
+    expect(await postClose("close")).toMatchObject({ status: 409, body: { details: { code: "PO_CLOSE_RECEIPT_INCOMPLETE" } } });
+    expect((await postClose("close-short", { reason: "Supplier short-shipped" })).status).toBe(403);
+    expect(await evidence()).toEqual(before);
+  });
+
+  it("rejects a received header with an outstanding locked product quantity", async () => {
+    await seedReceiptState("received", "received", 5);
+    const before = await evidence();
+    await expect(service.close(1, "admin-user")).rejects.toMatchObject({ statusCode: 409, details: { code: "PO_CLOSE_RECEIPT_INCOMPLETE", lineIds: [11] } });
+    expect(await evidence()).toEqual(before);
+  });
+
+  it.each(["received", "draft"])("closes a fully received PO with physical %s using one command time", async (physicalStatus) => {
+    await seedReceiptState("received", physicalStatus);
+    const at = new Date("2026-10-16T12:34:56.789Z");
+    const clock = vi.fn(() => at);
+    await makeService({ now: clock }).close(1, "admin-user", "All goods received");
+    expect(clock).toHaveBeenCalledTimes(1);
+    const after = await evidence();
+    expect(after.header[0]).toMatchObject({ status: "closed", closed_by: "admin-user" });
+    expect(after.events).toHaveLength(1);
+    expect(after.history).toHaveLength(1);
+    const timestamps = await pool.query(`SELECT to_char(po.closed_at,'YYYY-MM-DD"T"HH24:MI:SS.MS') AS closed_at,
+      to_char(po.updated_at,'YYYY-MM-DD"T"HH24:MI:SS.MS') AS updated_at,
+      to_char(history.changed_at,'YYYY-MM-DD"T"HH24:MI:SS.MS') AS changed_at,
+      to_char(event.created_at,'YYYY-MM-DD"T"HH24:MI:SS.MS') AS created_at
+      FROM procurement.purchase_orders po JOIN procurement.po_status_history history ON history.purchase_order_id=po.id
+      JOIN procurement.po_events event ON event.po_id=po.id WHERE po.id=1`);
+    expect(Object.values(timestamps.rows[0])).toEqual(Array(4).fill("2026-10-16T12:34:56.789"));
+  });
+
+  it.each([" \n\t ", 7])("rejects invalid HTTP close-short reason %j without mutation", async (reason) => {
+    await seedReceiptState("partially_received", "receiving", 5);
+    requestActor = "lead-user";
+    const before = await evidence();
+    expect(await postClose("close-short", { reason })).toMatchObject({ status: 400, body: { details: { code: "PO_CLOSE_SHORT_REASON_REQUIRED" } } });
+    expect(await evidence()).toEqual(before);
+  });
+
+  it("retains the approved close-short path and its normalized reason", async () => {
+    await seedReceiptState("partially_received", "receiving", 5);
+    requestActor = "lead-user";
+    expect((await postClose("close-short", { reason: "  Supplier short-shipped  " })).status).toBe(200);
+    const after = await evidence();
+    expect(after.header[0]).toMatchObject({ status: "closed", physical_status: "short_closed", closed_by: "lead-user" });
+    expect(after.lines[0]).toMatchObject({ status: "closed", received_qty: 5, close_short_reason: "Supplier short-shipped" });
+    expect(after.history[0]).toMatchObject({ notes: "Closed short: Supplier short-shipped" });
+    expect(after.events[0]).toMatchObject({ event_type: "closed_short", payload_json: { reason: "Supplier short-shipped" } });
+  });
+
+  it.each(["close", "closeShort"] as const)("rolls back %s when close audit insertion fails", async (command) => {
+    await seedReceiptState(command === "close" ? "received" : "partially_received", command === "close" ? "received" : "receiving", command === "close" ? 10 : 5);
+    const before = await evidence();
+    await pool.query(`CREATE FUNCTION procurement.fail_close_audit() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected close audit failure'; END $$;
+      CREATE TRIGGER fail_close_audit BEFORE INSERT ON procurement.po_events FOR EACH ROW EXECUTE FUNCTION procurement.fail_close_audit()`);
+    try {
+      await expect(command === "close" ? service.close(1, "admin-user") : service.closeShort(1, "Supplier short-shipped", "admin-user")).rejects.toThrow(/injected close audit failure/);
+      expect(await evidence()).toEqual(before);
+    } finally {
+      await pool.query("DROP TRIGGER fail_close_audit ON procurement.po_events; DROP FUNCTION procurement.fail_close_audit()");
+    }
+  });
+
+  it("serializes simultaneous close attempts and records only one completion", async () => {
+    await seedReceiptState();
+    const bothObserved = deferred();
+    let observations = 0;
+    const controlled = createPurchasingService(database, { ...storage, getPurchaseOrderById: async (id: number) => {
+      const po = await storage.getPurchaseOrderById(id);
+      if (++observations === 2) bothObserved.resolve();
+      await bothObserved.promise;
+      return po;
+    } } as any, { now: () => new Date("2026-10-16T12:00:00Z") });
+    const results = await Promise.allSettled([controlled.close(1, "admin-user"), controlled.close(1, "admin-user")]);
+    expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+    expect(results.filter((result) => result.status === "rejected")).toEqual([expect.objectContaining({ reason: expect.objectContaining({ statusCode: 409 }) })]);
+    const after = await evidence();
+    expect(after.header[0].status).toBe("closed");
+    expect(after.history).toHaveLength(1);
+    expect(after.events).toHaveLength(1);
   });
 
   it.each(["cancel", "void"] as const)("allows a cancel-only actor to cancel an unissued PO through /%s", async (endpoint) => {

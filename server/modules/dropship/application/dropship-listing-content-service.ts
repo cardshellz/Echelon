@@ -1,5 +1,4 @@
 import { z } from "zod";
-import { selectedCatalogTargets, type SelectedCatalogReader } from "./dropship-selected-catalog";
 import { listingContentTargetSchema, listingContentSettingSchema, previewListingContentInputSchema,
   saveListingContentInputSchema, saveContentProfileInputSchema, type ContentProfileState, type ListingContentTarget,
   type ListingContentSetting, type SavedListingContent, type SaveContentProfileInput, type SaveListingContentInput } from "../../../../shared/dropship/listing-content";
@@ -10,9 +9,10 @@ import type { DropshipClock, DropshipLogger } from "./dropship-ports";
 import { evaluateDropshipCatalogExposure } from "../domain/catalog-exposure";
 import { evaluateDropshipVendorCatalogSelection } from "../domain/vendor-selection";
 import { DropshipError } from "../domain/errors";
+import { olderGroupRulesClosed, olderGroupRulesEdit } from "../domain/older-group-rules-edit";
 import { contentHash, resolveListingContent } from "./dropship-listing-content-resolver";
 
-export interface ContentTransaction extends SelectedCatalogReader {
+export interface ContentTransaction {
   vendorId: number;
   catalog: ListingPriceCatalogReader;
   loadProfile(): Promise<ContentProfileState>;
@@ -39,9 +39,6 @@ export class DropshipListingContentService {
   async getProfile(memberId: string, storeId: unknown): Promise<ContentProfileState> {
     return this.execute(memberId, storeId, {}, (tx) => tx.loadProfile());
   }
-  async targetsForMember(memberId: string, storeId: unknown, input: unknown) {
-    return this.execute(memberId, storeId, {}, (tx) => selectedCatalogTargets(tx, this.deps.clock.now(), input));
-  }
   async saveProfile(memberId: string, storeId: unknown, input: unknown): Promise<{ state: ContentProfileState; idempotentReplay: boolean }> {
     const parsed = saveContentProfileInputSchema.parse(input);
     const id = storeIdSchema.parse(storeId);
@@ -51,6 +48,10 @@ export class DropshipListingContentService {
       if (!replay) {
         const before = await tx.loadProfile();
         if (before.revisionId !== parsed.expectedRevisionId) throw contentConflict();
+        // Older group rules are closed (Listing settings PR 12, D9-D10): after the replay probe and the revision check,
+        // so a committed save still replays and a stale page gets its conflict; nothing is written.
+        const groupEdit = olderGroupRulesEdit("description", before.profile?.groups ?? [], parsed.profile.groups);
+        if (!groupEdit.allowed) throw olderGroupRulesClosed(id, "description", groupEdit);
         await tx.saveProfile(parsed, hash, this.deps.clock.now());
       }
       return { state: await tx.loadProfile(), idempotentReplay: replay };

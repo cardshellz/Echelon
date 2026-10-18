@@ -108,7 +108,6 @@ export const POSTGRES_TEST_FILES: readonly string[] = Object.freeze([
   "server/modules/shipping/__tests__/integration/ordinary-split-parcels.integration.test.ts",
   "server/modules/shipping/__tests__/integration/carrier-tracking-recovery.integration.test.ts",
   "server/modules/shipping-engine/__tests__/integration/fulfillment-provider-connections.integration.test.ts",
-  "server/modules/dropship/__tests__/integration/dropship-ebay-listing-policy-bulk.integration.test.ts",
   "server/modules/dropship/__tests__/integration/dropship-listing-price.integration.test.ts",
   "server/modules/dropship/__tests__/integration/dropship-listing-content.integration.test.ts",
   "server/modules/dropship/__tests__/integration/dropship-product-cost.integration.test.ts",

@@ -89,14 +89,39 @@ export async function expectInView(page: Page, locator: Locator) {
 }
 
 /**
- * C3: the step reads no description templates unless their editor is open, and adds no
- * pricing-rules or category-rules read of its own. The one of each comes from the hidden
- * older panels, which read on mount under the same query keys.
+ * C3: the step reads no saved profile until an editor opens. The Price, eBay category and
+ * Description editors read the pricing rules, the category rules and the description templates
+ * only while they are open (PriceDefaultRow, EbayCategoryDefaultRow, DescriptionDefaultRow), and
+ * nothing else on the page reads them any more (the older panels that read them on mount went in
+ * Listing settings PR 12).
  */
 export function expectGatedReads(state: StubState) {
   expect(readsOf(state, "GET", `${LISTINGS}/content-profile`)).toEqual([]);
-  expect(readsOf(state, "GET", `${LISTINGS}/pricing-rules`)).toHaveLength(1);
-  expect(readsOf(state, "GET", `${LISTINGS}/ebay-category-rules`)).toHaveLength(1);
+  expect(readsOf(state, "GET", `${LISTINGS}/pricing-rules`)).toEqual([]);
+  expect(readsOf(state, "GET", `${LISTINGS}/ebay-category-rules`)).toEqual([]);
+}
+
+/**
+ * The routes Listing settings PR 12 deleted (plan 4.1, R1-R10): the three targets reads, the four listing policy
+ * override routes, the vendor listing-config read and write, and the per-size store shelf write. The stub answers none
+ * of them (an ask is `unexpected`); this names them, so a journey says which ones it proves nothing calls.
+ */
+const DELETED_ROUTE_PATH = new RegExp([
+  String.raw`^/api/dropship/listings/stores/\d+/(?:pricing-rules|content-profile|ebay-category-rules)/targets$`,
+  String.raw`^/api/dropship/ebay/listing-policy-overrides(?:/|$)`,
+  String.raw`^/api/dropship/store-connections/\d+/listing-config$`,
+  String.raw`^/api/dropship/ebay/store-category-assignments(?:/|$)`,
+].join("|"));
+
+export function expectNoDeletedRouteCalls(state: StubState) {
+  expect(state.reads.filter((read) => DELETED_ROUTE_PATH.test(read.path)).map((read) => `${read.method} ${read.path}`)).toEqual([]);
+}
+
+/** Step 2 has no "Older settings" section any more (PR 12, D3, D13): no toggle, no section, no words naming it. */
+export async function expectNoOlderSettings(page: Page) {
+  await expect(page.getByRole("button", { name: /older settings/i })).toHaveCount(0);
+  await expect(page.locator("[data-testid^='older-listing-settings']")).toHaveCount(0);
+  await expect(page.getByText(/older settings/i)).toHaveCount(0);
 }
 
 export function expectNothingUnexpected(state: StubState) {

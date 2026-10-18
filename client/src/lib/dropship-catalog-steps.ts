@@ -143,7 +143,7 @@ const KNOWN_LIVE_FIELDS: ReadonlySet<string> = new Set([...Object.values(LIVE_PO
  * store's policies, where items ship from, then products that need a fix. The
  * summary says what saved settings show; a live eBay check, when there is one,
  * adds what only eBay can tell, so the rail never says "All set" over a
- * problem the setup panel shows.
+ * problem the step's rows or banner show.
  */
 export function describeListingSettingsRail(input: ListingSettingsRailInput): ListingSettingsRailLine {
   if (!input.storesLoaded) return { tick: "unknown", line: "Checking…", retry: false };

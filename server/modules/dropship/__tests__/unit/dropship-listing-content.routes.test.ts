@@ -19,7 +19,6 @@ describe("content HTTP boundary", () => {
   const service = {
     getProfile: vi.fn(async () => noContentProfile),
     saveProfile: vi.fn(async (_member: string, _store: unknown, body: unknown) => { saveContentProfileInputSchema.parse(body); return { state: noContentProfile, idempotentReplay: false }; }),
-    targetsForMember: vi.fn(async () => ({ total: 0, rows: [] })),
     getForMember: vi.fn(async (_member: string, target: unknown) => { listingContentTargetSchema.parse(target); return content; }),
     saveForMember: vi.fn(async (_member: string, target: unknown, body: unknown) => {
       listingContentTargetSchema.parse(target); saveListingContentInputSchema.parse(body); return { content, idempotentReplay: false };
@@ -43,9 +42,13 @@ describe("content HTTP boundary", () => {
     return fetch(url + suffix, { method, headers: { "Content-Type": "application/json", ...(member ? { "X-Test-Member": member } : {}) },
       ...(method !== "GET" ? { body: JSON.stringify(body) } : {}) });
   }
-  it.each([["GET", path], ["PUT", path], ["POST", path + "/preview"], ["GET", "/content-profile"], ["PUT", "/content-profile"], ["GET", "/content-profile/targets"]])("requires member auth for %s %s", async (method, suffix) => {
+  it.each([["GET", path], ["PUT", path], ["POST", path + "/preview"], ["GET", "/content-profile"], ["PUT", "/content-profile"]])("requires member auth for %s %s", async (method, suffix) => {
     expect((await request(method, suffix, input, "")).status).toBe(401);
     expect(service.getForMember).not.toHaveBeenCalled(); expect(service.saveForMember).not.toHaveBeenCalled();
+  });
+  it("no longer serves the group targets read, deleted in Listing settings PR 12", async () => {
+    expect((await request("GET", "/content-profile/targets")).status).toBe(404);
+    expect(service.getProfile).not.toHaveBeenCalled();
   });
   it("returns no-store content and uses the authenticated member for writes", async () => {
     const loaded = await request("GET"); expect(loaded.status).toBe(200); expect(loaded.headers.get("Cache-Control")).toBe("no-store");
@@ -80,7 +83,7 @@ describe("content HTTP boundary", () => {
 describe("content profile body behind the 1 MiB parser (plan PR 9, P8)", () => {
   let server: http.Server; let url: string;
   const service = {
-    getProfile: vi.fn(), targetsForMember: vi.fn(), getForMember: vi.fn(), saveForMember: vi.fn(), previewForMember: vi.fn(),
+    getProfile: vi.fn(), getForMember: vi.fn(), saveForMember: vi.fn(), previewForMember: vi.fn(),
     saveProfile: vi.fn(async (_member: string, _store: unknown, body: unknown) => {
       saveContentProfileInputSchema.parse(body); return { state: noContentProfile, idempotentReplay: false };
     }),

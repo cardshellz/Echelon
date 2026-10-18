@@ -14,7 +14,9 @@ import {
   type PricingReviewResponse,
 } from "@shared/dropship/pricing-rules";
 import {
+  GROUP_RULES_CLOSED_CODE,
   LISTING_SETTINGS_SAVE_WORDS,
+  classifyWriteFailure,
   nextSaveAttempt,
   reduceListingSettingsDraft,
   type DraftValue,
@@ -288,7 +290,7 @@ describe("the Price editor's draft", () => {
 });
 
 describe("the pricing rules read (D8)", () => {
-  it("shares the older pricing panel's key and runs only while the editor is open and W1 takes a save", () => {
+  it("is keyed by its endpoint and runs only while the editor is open and W1 takes a save", () => {
     expect(pricingRulesQueryKey(STORE)).toEqual([ENDPOINT]);
     expect(pricingRulesQueryOptions(STORE, { editorOpen: false, right: EDITABLE }).enabled).toBe(false);
     expect(pricingRulesQueryOptions(STORE, { editorOpen: true, right: NOT_EDITABLE }).enabled).toBe(false);
@@ -379,6 +381,17 @@ describe("the check request (POST …/reviews)", () => {
       .resolves.toEqual({ kind: "failed", message: PRICE_DEFAULT_WORDS.reviewFailed });
     await expect(requestPricingReview(async () => ({ ...review(), extra: true })))
       .resolves.toEqual({ kind: "failed", message: PRICE_DEFAULT_WORDS.reviewFailed });
+  });
+
+  it("words a check the server refuses as an older group change as W3 and W4 do, never as a check to try again (verify VC5)", async () => {
+    // The step's first W1 request is the check (POST .../reviews), so the refusal reaches the vendor here first.
+    for (const message of ["The server's own words.", "", "   "]) {
+      await expect(requestPricingReview(async () => { throw apiError(422, GROUP_RULES_CLOSED_CODE, message); }), JSON.stringify(message))
+        .resolves.toEqual({ kind: "failed", message: LISTING_SETTINGS_SAVE_WORDS.groupRulesClosed });
+    }
+    // The same words the apply gets for the same refusal.
+    expect(classifyWriteFailure("W1", apiError(422, GROUP_RULES_CLOSED_CODE, "")).message).toBe(LISTING_SETTINGS_SAVE_WORDS.groupRulesClosed);
+    expect(LISTING_SETTINGS_SAVE_WORDS.groupRulesClosed).not.toContain("Try again");
   });
 
   it("runs a check against what is saved and keeps the request it sent", async () => {

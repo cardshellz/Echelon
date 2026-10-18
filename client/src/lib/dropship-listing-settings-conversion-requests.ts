@@ -175,9 +175,9 @@ export type ConversionQueryClient = Pick<QueryClient, "cancelQueries" | "invalid
  * The reads a confirmed move changes (8.4): the whole listing-settings prefix
  * (the summary, the categories, the products, the prices, every product's
  * reads and the dry run's pages), the pricing rules, the eBay category rules
- * and the description profile Older settings' panels show (so their open
- * forms read the new revisions instead of saving onto old ones; CFC#10), and
- * every size price read of the store (W1's rule).
+ * and the description profile the step's store-default editors read (so an
+ * open editor reads the new revisions instead of saving onto old ones;
+ * CFC#10), and every size price read of the store (W1's rule).
  */
 export function conversionRereadKeys(storeConnectionId: number): ReadonlyArray<readonly unknown[]> {
   return [
@@ -191,7 +191,7 @@ export function conversionRereadKeys(storeConnectionId: number): ReadonlyArray<r
 /**
  * After a confirmed move (8.4): the reads above are marked stale, so the shown
  * ones read now and the rest on their next mount (invalidations: a query
- * refetches only if mounted, so Older settings' closed forms send nothing).
+ * refetches only if mounted, so a closed editor sends nothing).
  * Reads in flight are cancelled first, so an older answer can't land after
  * these. Never taken from the answer. Throws when a refetch fails.
  */

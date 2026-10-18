@@ -1,4 +1,4 @@
-import { expect, type Page, type Route, type TestInfo } from "@playwright/test";
+import type { Page, Route, TestInfo } from "@playwright/test";
 import { createHash } from "node:crypto";
 import { join, resolve } from "node:path";
 import { z } from "zod";
@@ -124,6 +124,12 @@ import {
   type PricingReviewResponse,
   type ReviewPricingRulesInput,
 } from "../../shared/dropship/pricing-rules";
+import {
+  DROPSHIP_LISTING_GROUP_RULES_CLOSED,
+  GROUP_RULES_CLOSED_MESSAGE,
+  olderGroupRulesEdit,
+  type OlderGroupRulesKind,
+} from "../../server/modules/dropship/domain/older-group-rules-edit";
 
 /**
  * The stub Card Shellz server and fixtures the Catalog page's browser journeys run against
@@ -363,15 +369,16 @@ export interface SavedSizePrice {
 
 /**
  * The layers a size's settings come from besides the store defaults (plan PR 10, 3.2, CI-M6):
- * each product's own row (W5, W6), each Card Shellz category's row (W12), and what today's
- * per-size panels left on single sizes. They are stored in the server's own shapes and parsed
+ * each product's own row (W5, W6), each Card Shellz category's row (W12), and what the older
+ * per-size panels left on single sizes (the panels went in Listing settings PR 12; their rows
+ * stay and still apply). They are stored in the server's own shapes and parsed
  * with its stored contract each time a read uses them (productLayerOf, categoryLayerOf,
  * sizeLeftoverOf), because test/ is not type-checked in CI: a fixture that drifts fails the
  * journey with the schema's words.
  */
 export interface ProductSettingsLayer { revisionId: number; values: ProductListingSettingValues }
 export interface CategorySettingsLayer { revisionId: number; values: CategoryListingSettingValues }
-/** What today's per-size panels left on one size: policy ids (an override), one or two shelf names, its own main text. */
+/** What the older per-size panels left on one size: policy ids (an override), one or two shelf names, its own main text. */
 export interface SizeLeftoverLayer {
   shippingPolicyId?: string;
   returnPolicyId?: string;
@@ -425,7 +432,7 @@ export function sizeKey(storeConnectionId: number, productVariantId: number): st
 }
 
 // ---------------------------------------------------------------------------
-// eBay categories the picker can search and browse (as dropship-policy-ebay-categories.spec.ts)
+// eBay categories the picker can search and browse (the store-default eBay category editor and the drawer's)
 // ---------------------------------------------------------------------------
 
 export const COLLECTIBLES: EbayCategoryOption = { categoryId: "1", categoryName: "Collectibles", path: ["Collectibles"], leaf: false };
@@ -489,7 +496,7 @@ export interface StubState {
   productSettings: Record<string, ProductSettingsLayer>;
   /** Each Card Shellz category's settings row by categoryKey(store, category); a category left out has none. */
   categorySettings: Record<string, CategorySettingsLayer>;
-  /** What today's per-size panels left on single sizes, by sizeKey(store, size); a size left out has none. */
+  /** What the older per-size panels left on single sizes, by sizeKey(store, size); a size left out has none. */
   sizeLeftovers: Record<string, SizeLeftoverLayer>;
   /** Each product's category mark by productKey(store, product) (plan PR 10, 10.4); a product left out has none. */
   categoryMarks: Record<string, CategoryMark>;
@@ -1506,7 +1513,7 @@ function patchedValues(state: StubState, storeConnectionId: number, before: Prod
   return values;
 }
 
-/** Saving a field clears what today's per-size panels left on the product's sizes for it; the sizes cleared. */
+/** Saving a field clears what the older per-size panels left on the product's sizes for it; the sizes cleared. */
 function clearSizeLeftovers(state: StubState, storeConnectionId: number, product: ProductFixture, saved: readonly string[]): number {
   let clearedSizeCount = 0;
   for (const size of product.sizes) {
@@ -2553,7 +2560,7 @@ async function answerApi(state: StubState, route: Route) {
   const method = route.request().method();
   const path = url.pathname;
   state.reads.push({ method, path, search: url.search });
-  const storePath = /^\/api\/dropship\/(?:ebay\/(?:listing-setup|store-categories|listing-policy-overrides)|listings\/stores)\/(\d+)(\/.*)?$/.exec(path);
+  const storePath = /^\/api\/dropship\/(?:ebay\/(?:listing-setup|store-categories)|listings\/stores)\/(\d+)(\/.*)?$/.exec(path);
   const storeId = storePath ? Number(storePath[1]) : null;
   const listings = storeId === null ? null : `/api/dropship/listings/stores/${storeId}`;
   if (path === "/api/dropship/auth/me") {
@@ -2591,6 +2598,17 @@ async function answerApi(state: StubState, route: Route) {
   }
   state.unexpected.push(`${method} ${path}`);
   return route.fulfill({ status: 500, json: { error: { message: "Unexpected request" } } });
+}
+
+/**
+ * W1's review, W3 and W4 refuse a new, changed or reordered older group rule as the server does (Listing settings PR 12,
+ * plan D9, D27): the server's own rule, after the stub's revision check, with the route's 422 and the eBay route's public
+ * context. The step sends the stored groups back unchanged, so a journey on a store with groups shows it never trips it.
+ */
+function groupRulesClosed(storeConnectionId: number, kind: OlderGroupRulesKind): ScriptedError {
+  // The server's error also carries the kind and ids; no route sends them (plan D11), so neither does the stub.
+  return { status: 422, code: DROPSHIP_LISTING_GROUP_RULES_CLOSED, message: GROUP_RULES_CLOSED_MESSAGE,
+    ...(kind === "ebay_category" ? { context: { storeConnectionId, retryable: false } } : {}) };
 }
 
 /** W2 (`PUT …/listing-setup/:id`) and W10 (`POST …/ship-from/repair`). */
@@ -2642,6 +2660,8 @@ async function answerListingWrite(state: StubState, route: Route, storeId: numbe
     if (parsed.data.expectedRevisionId !== saved.revisionId) {
       return fulfillError(route, { status: 409, code: "DROPSHIP_PRICING_REVIEW_STALE", message: "The pricing rules changed. Review them again." });
     }
+    const pricingGroups = olderGroupRulesEdit("pricing", saved.profile?.groups ?? [], parsed.data.profile.groups);
+    if (!pricingGroups.allowed) return fulfillError(route, groupRulesClosed(storeId, "pricing"));
     const review = buildReview(state, storeId, parsed.data, state.pricingReviews.length);
     state.reviews[review.reviewId] = { storeConnectionId: storeId, input: parsed.data, review };
     return route.fulfill({ json: reviewPage(review, 0) });
@@ -2679,9 +2699,13 @@ async function answerListingWrite(state: StubState, route: Route, storeId: numbe
     if (!parsed.success) return refuseBody(state, route, method, path, parsed.error.message);
     return keyedWrite(state, route, parsed.data.idempotencyKey, body, state.categoryWriteAnswers, () => {
       const current = state.categoryRules[storeId] ?? NO_RULES_STATE;
+      // The stub checks the revision before anything else, so a stale draft the rule would refuse already gets the 409
+      // the server gives it (plan D10's branch); at the current revision the rule answers.
       if (parsed.data.expectedRevisionId !== current.revisionId) {
         return { status: 409, code: "DROPSHIP_EBAY_CATEGORY_RULES_VERSION_CONFLICT", message: "The eBay category rules changed since you opened them." };
       }
+      const ebayRules = olderGroupRulesEdit("ebay_category", current.profile?.rules ?? [], parsed.data.draft.rules);
+      if (!ebayRules.allowed) return groupRulesClosed(storeId, "ebay_category");
       const lookup = (categoryId: string) => EBAY_CATEGORIES.find((option) => option.categoryId === categoryId && option.leaf) ?? null;
       const { defaultCategoryId, rules } = parsed.data.draft;
       const missing = [defaultCategoryId, ...rules.map((rule) => rule.categoryId)].find((id) => id !== null && lookup(id) === null);
@@ -2707,6 +2731,8 @@ async function answerListingWrite(state: StubState, route: Route, storeId: numbe
       if (parsed.data.expectedRevisionId !== current.revisionId) {
         return { status: 409, code: "DROPSHIP_CONTENT_VERSION_CONFLICT", message: "The description templates changed. Reload to review." };
       }
+      const descriptionGroups = olderGroupRulesEdit("description", current.profile?.groups ?? [], parsed.data.profile.groups);
+      if (!descriptionGroups.allowed) return groupRulesClosed(storeId, "description");
       const saved = contentProfileStateSchema.parse({ revisionId: state.nextRevision++, profile: parsed.data.profile, updatedAt: STAMP });
       state.contentProfiles[storeId] = saved;
       return { state: saved };
@@ -2999,16 +3025,9 @@ async function answerStoreRead(state: StubState, route: Route, storeId: number, 
     }
     return route.fulfill({ json: detail });
   }
-  if (path === `/api/dropship/ebay/listing-policy-overrides/${storeId}/saved`) {
-    return route.fulfill({ json: { storeConnectionId: storeId, verification: "not_checked",
-      defaults: { fulfillmentPolicyId: "ground", returnPolicyId: "returns", paymentPolicyId: "payments" }, assignments: [], fetchedAt: STAMP } });
-  }
   if (path === `/api/dropship/ebay/store-categories/${storeId}`) {
     if (state.storeShelvesError) return fulfillError(route, state.storeShelvesError);
     return route.fulfill({ json: { storeConnectionId: storeId, categories: state.storeShelves[storeId] ?? [], assignments: [], fetchedAt: STAMP } });
-  }
-  if (path === `${listings}/pricing-rules/targets` && url.searchParams.get("type") === "listings") {
-    return route.fulfill({ json: { total: 1, rows: [{ id: "101", name: "Envelope Single Pocket · Pack of 50 · ENV-SGL-P50" }] } });
   }
   const pricePath = new RegExp(`^${listings}/variants/(\\d+)/price$`).exec(path);
   if (pricePath) {
@@ -3049,21 +3068,6 @@ export async function shot(page: Page, testInfo: TestInfo, name: string) {
 
 export function step(page: Page, name: "choose" | "setup" | "publish") {
   return page.getByTestId(`catalog-step-${name}`);
-}
-
-/**
- * Today's step 2 panels sit in the collapsed "Older settings" section under the new step (A1).
- * Closed, they stay mounted but hidden, and hidden elements are not in the role tree, so a journey
- * that reads or clicks inside them opens the section first. It stays open across steps and stores.
- */
-export async function openOlderSettings(page: Page) {
-  await page.getByRole("button", { name: "Show older settings" }).click();
-  await expect(page.getByRole("button", { name: "Hide older settings" })).toHaveAttribute("aria-expanded", "true");
-}
-
-/** The old setup panel, for words the new step's banner or Shipping row also show (R:503, R:504). */
-export function oldSetupPanel(page: Page) {
-  return page.locator("section").filter({ has: page.getByRole("heading", { name: /^eBay listing setup/ }) }).last();
 }
 
 // The default fixtures are checked against the contract when a spec loads, so one that drifts
