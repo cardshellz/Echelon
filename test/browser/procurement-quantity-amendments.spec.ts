@@ -147,9 +147,20 @@ test("keeps the prefilled piece price when quantity doubles", async ({ page }) =
 test("edits price and charges without changing quantity", async ({ page }) => {
   const state = await setup(page), modal = page.getByRole("dialog");
   await modal.getByLabel("Product price per piece (USD)").fill("0.5355"); await modal.getByLabel("Packaging total (USD)").fill("100.00");
-  await modal.getByRole("button", { name: "Tax and discount for line 1" }).click();
-  await page.getByLabel("Discount (USD)", { exact: true }).fill("25.00"); await page.getByLabel("Tax (USD)", { exact: true }).fill("10.00"); await page.keyboard.press("Escape");
-  await modal.getByLabel("Reason for editing / supplier reference").fill("Correct price from the supplier document"); await modal.getByRole("button", { name: "Review changes", exact: true }).click();
+  const detailsTrigger = modal.getByRole("button", { name: "Tax and discount for line 1" });
+  const discount = page.getByLabel("Discount (USD)", { exact: true });
+  await detailsTrigger.click();
+  await discount.fill("25.00");
+  await page.getByLabel("Tax (USD)", { exact: true }).fill("10.00");
+  await page.keyboard.press("Escape");
+  // Escape starts an animated dismissal. Wait for unmount and focus restoration
+  // before interacting with the editor footer underneath the popover.
+  await expect(discount).toHaveCount(0);
+  await expect(detailsTrigger).toBeFocused();
+  await modal.getByLabel("Reason for editing / supplier reference").fill("Correct price from the supplier document");
+  await modal.getByRole("button", { name: "Review changes", exact: true }).click();
+  await expect.poll(() => state.previews.length).toBe(1);
+  expect(state.approvals).toHaveLength(0);
   await expect(modal.getByText("PO total: 6250.00 → 6778.75 USD", { exact: true })).toBeVisible(); await save(page);
   expect(state.approvals[0].body.changes[0]).toMatchObject({ quantityPieces: 12500, pricing: { unitCostMills: 5355 }, packagingCostCents: 10000, discountCents: 2500, taxCents: 1000 }); expect(state.failures).toEqual([]);
 });
