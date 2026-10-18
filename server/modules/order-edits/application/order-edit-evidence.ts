@@ -90,10 +90,11 @@ function preservesRecoveryDiscountRules(
           !(
             codeRecovery?.codePricing &&
             rule.targetType === "LINE_ITEM" &&
-            [
-              "AutomaticDiscountApplication",
-              "ManualDiscountApplication",
-            ].includes(rule.type)
+            (rule.type === "ManualDiscountApplication" ||
+              (rule.type === "AutomaticDiscountApplication" &&
+                !codeRecovery.codePricing.lines.some(
+                  (line) => line.preserveAutomaticDiscount,
+                )))
           ),
       )
       .map((rule) => canonicalJson(rule)),
@@ -219,7 +220,10 @@ export function matchesOrderEditQuote(
                 !(
                   rule.targetType === "LINE_ITEM" &&
                   (quote.codePricing ||
-                    quote.evidence.codeDiscountRecovery === true)
+                    quote.evidence.codeDiscountRecovery === true) &&
+                  !quote.codePricing?.lines.some(
+                    (line) => line.preserveAutomaticDiscount,
+                  )
                 )) ||
               rule.targetType === "SHIPPING_LINE"),
         )
@@ -257,7 +261,18 @@ export function matchesOrderEditQuote(
       return false;
     const line = candidates.sort((a, b) => a.id.localeCompare(b.id))[0];
     used.add(line.id);
+    const preservedAutomatic = quote.codePricing?.lines.find(
+      (entry) => entry.id === expected.calculatedLineId,
+    )?.preserveAutomaticDiscount;
     if (
+      (preservedAutomatic &&
+        (!expected.originalLineId ||
+          !preservesAutomaticOrderEditLine(
+            snapshot,
+            quote.baseline,
+            expected.originalLineId,
+            expected.quantity,
+          ))) ||
       line.variantId !== expected.variantId ||
       line.title !== expected.title ||
       line.variantTitle !== expected.variantTitle ||
@@ -280,6 +295,88 @@ export function matchesOrderEditQuote(
     (line) => line.quantity > 0 && !used.has(line.id),
   );
 }
+
+/** Bind preserved automatic pricing to the original native line, rule identities and exact allocation. */
+export function preservesAutomaticOrderEditLine(
+  current: OrderEditSnapshot,
+  baseline: OrderEditSnapshot,
+  originalId: string,
+  quantity: number,
+): boolean {
+  const original = baseline.lines.find((line) => line.id === originalId);
+  const observed = current.lines.find((line) => line.id === originalId);
+  const before = baseline.previewProductDiscounts?.find(
+    (line) => line.lineId === originalId,
+  );
+  const after = current.previewProductDiscounts?.find(
+    (line) => line.lineId === originalId,
+  );
+  const rules = baseline.discountRules?.filter(
+    (rule) =>
+      rule.type === "AutomaticDiscountApplication" &&
+      rule.targetType === "LINE_ITEM",
+  );
+  if (
+    !original ||
+    !observed ||
+    !before ||
+    !after ||
+    !rules?.length ||
+    original.quantity < 1 ||
+    before.automaticCents <= 0 ||
+    observed.quantity !== quantity
+  )
+    return false;
+  return (
+    observed.variantId === original.variantId &&
+    observed.originalUnitPriceCents === original.originalUnitPriceCents &&
+    BigInt(after.automaticCents) * BigInt(original.quantity) ===
+      BigInt(before.automaticCents) * BigInt(quantity) &&
+    BigInt(after.amountCents) * BigInt(original.quantity) ===
+      BigInt(before.amountCents) * BigInt(quantity) &&
+    rules.every((rule) =>
+      current.discountRules?.some(
+        (entry) => canonicalJson(entry) === canonicalJson(rule),
+      ),
+    )
+  );
+}
+function recoveredLinePriceMatches(
+  current: OrderEditSnapshot,
+  baseline: OrderEditSnapshot,
+  original: OrderEditSnapshot["lines"][number],
+  observed: OrderEditSnapshot["lines"][number],
+  quote?: OrderEditQuote,
+): boolean {
+  const preservedAutomatic = quote?.codePricing?.lines.some(
+    (line) => line.sourceId === original.id && line.preserveAutomaticDiscount,
+  );
+  if (!quote?.codePricing || preservedAutomatic)
+    return (
+      observed.discountedUnitPriceCents === original.discountedUnitPriceCents &&
+      observed.totalCents === original.totalCents &&
+      (!preservedAutomatic ||
+        preservesAutomaticOrderEditLine(
+          current,
+          baseline,
+          original.id,
+          original.quantity,
+        ))
+    );
+
+  // Legacy/manual code edits restore the original net price using a manual
+  // adjustment. Preserved automatic lines retain their native raw fields.
+  const financial = baseline.financials?.lines.find(
+    (line) => line.id === original.id,
+  );
+  return Boolean(
+    financial &&
+      BigInt(observed.discountedUnitPriceCents) * BigInt(original.quantity) ===
+        BigInt(financial.netCents) &&
+      observed.totalCents === financial.netCents,
+  );
+}
+
 /** A removed added line remains in Shopify at quantity zero. It must not prevent proving the original order was restored. */
 export function isUnpaidRecoveryRestored(
   observed: OrderEditSnapshot,
@@ -347,18 +444,13 @@ export function isUnpaidRecoveryRestored(
             entry.quantity === line.quantity &&
             entry.unfulfilledQuantity === line.unfulfilledQuantity &&
             entry.originalUnitPriceCents === line.originalUnitPriceCents &&
-            (originalQuote?.codePricing
-              ? baseline.financials?.lines.some(
-                  (financial) =>
-                    financial.id === line.id &&
-                    BigInt(entry.discountedUnitPriceCents) *
-                      BigInt(line.quantity) ===
-                      BigInt(financial.netCents) &&
-                    entry.totalCents === financial.netCents,
-                )
-              : entry.discountedUnitPriceCents ===
-                  line.discountedUnitPriceCents &&
-                entry.totalCents === line.totalCents),
+            recoveredLinePriceMatches(
+              observed,
+              baseline,
+              line,
+              entry,
+              originalQuote,
+            ),
         ) &&
         (!baseline.financials ||
           observed.financials?.lines.find((entry) => entry.id === line.id)

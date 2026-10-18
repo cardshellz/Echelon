@@ -13,6 +13,7 @@ import { orderEditShippingRepricingSchema } from "@shared/order-edits/order-edit
 import type {
   OrderEditSnapshot,
   OrderEditQuote,
+  OrderEditExpectedLine,
   OrderEditRefundIntent,
 } from "./order-edit-provider";
 
@@ -338,6 +339,39 @@ const plan = z
       .max(250),
   })
   .strict();
+function preservesAutomaticQuotePrice(
+  baseline: OrderEditSnapshot,
+  priced: NonNullable<OrderEditQuote["codePricing"]>["lines"][number],
+  native: OrderEditExpectedLine,
+): boolean {
+  const original = baseline.lines.find(
+    (line) => line.id === native.originalLineId,
+  );
+  const allocation = baseline.previewProductDiscounts?.find(
+    (line) => line.lineId === original?.id,
+  );
+  const financial = baseline.financials?.lines.find(
+    (line) => line.id === original?.id,
+  );
+  if (
+    !original ||
+    original.quantity < 1 ||
+    !allocation ||
+    allocation.automaticCents <= 0 ||
+    !financial
+  )
+    return false;
+  return (
+    priced.sourceId === original.id &&
+    native.variantId === original.variantId &&
+    native.discountedUnitPriceCents === original.discountedUnitPriceCents &&
+    BigInt(native.totalCents) * BigInt(original.quantity) ===
+      BigInt(original.totalCents) * BigInt(native.quantity) &&
+    BigInt(priced.netCents) * BigInt(original.quantity) ===
+      BigInt(financial.netCents) * BigInt(native.quantity)
+  );
+}
+
 export const orderEditQuoteSchema: z.ZodType<OrderEditQuote> = z
   .object({
     codePricing: orderEditCodePricingSchema.optional(),
@@ -512,7 +546,9 @@ export const orderEditQuoteSchema: z.ZodType<OrderEditQuote> = z
                 native.variantId === line.variantId &&
                 native.quantity === line.quantity &&
                 native.originalUnitPriceCents === line.retailCents &&
-                native.totalCents === line.netCents &&
+                (line.preserveAutomaticDiscount
+                  ? preservesAutomaticQuotePrice(value.baseline, line, native)
+                  : native.totalCents === line.netCents) &&
                 value.financials!.lines.some(
                   (amount) =>
                     amount.id === line.id && amount.netCents === line.netCents,

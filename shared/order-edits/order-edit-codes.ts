@@ -52,18 +52,31 @@ export const orderEditCodeRuleSchema = z
     fingerprint: z.string().regex(/^[a-f0-9]{64}$/),
     // Legacy values remain readable. New rewards require explicit Club issuance
     // verification; customer eligibility or usage limits never identify a reward.
-    redemption: z.enum(["unlimited", "single_use_reward", "shopify_coupon", "club_reward"]),
+    redemption: z.enum([
+      "unlimited",
+      "single_use_reward",
+      "shopify_coupon",
+      "club_reward",
+    ]),
     usageLimit: z.number().int().positive().safe().nullable().optional(),
     appliesOncePerCustomer: z.boolean().optional(),
   })
   .strict()
   .superRefine((rule, context) => {
-    if (rule.redemption === "club_reward" &&
-        (rule.value.type !== "fixed" || rule.usageLimit !== 1 || rule.appliesOncePerCustomer !== true))
-      context.addIssue({ code: "custom", message: "Club rewards require their original single-use terms." });
+    if (
+      rule.redemption === "club_reward" &&
+      (rule.value.type !== "fixed" ||
+        rule.usageLimit !== 1 ||
+        rule.appliesOncePerCustomer !== true)
+    )
+      context.addIssue({
+        code: "custom",
+        message: "Club rewards require their original single-use terms.",
+      });
     if (
       rule.redemption === "shopify_coupon" &&
-      (rule.usageLimit === undefined || rule.appliesOncePerCustomer === undefined)
+      (rule.usageLimit === undefined ||
+        rule.appliesOncePerCustomer === undefined)
     )
       context.addIssue({
         code: "custom",
@@ -89,6 +102,8 @@ export const orderEditCodePricingLineSchema = z
     retailCents: z.number().int().nonnegative().safe(),
     productNetCents: z.number().int().nonnegative().safe(),
     netCents: z.number().int().nonnegative().safe(),
+    /** The original automatic discount remains native; no manual adjustment may target this line. */
+    preserveAutomaticDiscount: z.literal(true).optional(),
   })
   .strict()
   .refine(
@@ -100,6 +115,8 @@ export const orderEditCodePricingLineSchema = z
         line.quantity,
       ].every(Number.isSafeInteger) &&
       line.netCents <= line.productNetCents &&
+      (!line.preserveAutomaticDiscount ||
+        line.netCents === line.productNetCents) &&
       BigInt(line.productNetCents) <=
         BigInt(line.retailCents) * BigInt(line.quantity),
   );

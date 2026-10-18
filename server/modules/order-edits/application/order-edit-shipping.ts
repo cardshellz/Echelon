@@ -28,17 +28,19 @@ export interface OrderEditShippingItem {
 }
 
 /** Reevaluate checkout delivery pricing without creating an order or collecting payment. */
+export interface OrderEditShippingPreview {
+  shippingRepricing: OrderEditShippingRepricing;
+  taxCents: number;
+  taxLines?: OrderEditTaxLine[];
+  totalCents: number;
+}
+
 export interface OrderEditShippingCalculator {
   /** Read-only checkout totals for display; never evidence authorizing an order commit. */
   calculatePreview?(
     snapshot: OrderEditSnapshot,
     items: OrderEditShippingItem[],
-  ): Promise<{
-    shippingRepricing: OrderEditShippingRepricing;
-    taxCents: number;
-    taxLines?: OrderEditTaxLine[];
-    totalCents: number;
-  }>;
+  ): Promise<OrderEditShippingPreview>;
   calculate(
     snapshot: OrderEditSnapshot,
     items: OrderEditShippingItem[],

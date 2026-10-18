@@ -62,6 +62,26 @@ export function withOrderEditCodePricing(
       "ORDER_EDIT_CODE_FINANCIAL_MISSING",
       "The complete order amounts are required to verify its codes.",
     );
+  const automaticByLine = new Map(
+    snapshot.previewProductDiscounts?.map((line) => [
+      line.lineId,
+      line.automaticCents,
+    ]),
+  );
+  if (
+    pricing.lines.some(
+      (line) =>
+        line.preserveAutomaticDiscount &&
+        !(
+          Number.isSafeInteger(automaticByLine.get(line.id)) &&
+          automaticByLine.get(line.id)! > 0
+        ),
+    )
+  )
+    throw new OrderEditError(
+      "ORDER_EDIT_CODE_AUTOMATIC_EVIDENCE_MISSING",
+      "The existing automatic discount could not be verified. Refresh the order before continuing.",
+    );
   return {
     ...snapshot,
     codePricing: pricing,
@@ -72,7 +92,9 @@ export function withOrderEditCodePricing(
         BigInt(line.retailCents) * BigInt(line.quantity) -
           BigInt(line.productNetCents),
       ),
-      automaticCents: 0,
+      automaticCents: line.preserveAutomaticDiscount
+        ? automaticByLine.get(line.id)!
+        : 0,
     })),
   };
 }
