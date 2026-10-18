@@ -91,7 +91,8 @@ function TakeOver({ item }: { item: PickCorrection }) {
 function CorrectionAction({ item, onChanged }: { item: PickCorrection; onChanged(item: PickCorrection): void }) {
   const client = useQueryClient();
   const [barcode, setBarcode] = useState("");
-  const [quantity, setQuantity] = useState("1");
+  // Default to everything still missing: one tap clears the correction.
+  const [quantity, setQuantity] = useState(String(Math.max(1, item.declaredQuantity - item.pickedQuantity)));
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // An uncertain response retries the identical command, not a second inventory request.
