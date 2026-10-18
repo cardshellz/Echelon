@@ -329,6 +329,11 @@ export function resolveEbayListingIssue(input: EbayListingIssueInput): EbayListi
         : "Use Retry this product to finish updating the existing listing and pictures. Echelon checks the saved requests and current inventory before continuing.",
       !automatic, automatic ? "check_status" : "retry_sync", automatic ? "View update status" : "Retry this product");
   }
+  if (code === "EBAY_PUBLICATION_PREFLIGHT_RETRY")
+    return issue("Retrying the eBay check before publishing",
+      "eBay could not complete a check before publication. Echelon confirmed that no publication request was sent.",
+      "Echelon will retry this saved update automatically, using current inventory and pictures. No mapping review is needed for this failure.",
+      false, "check_status", "View publishing status");
   if (["EBAY_SYNC_READBACK_PENDING", "EBAY_PHOTO_READ_FAILED", "EBAY_SYNC_PERSISTENCE_FAILED", "PUBLICATION_RESPONSE_RECOVERY_FAILED",
     "PUBLICATION_SCOPE_BUSY", "PUBLICATION_ADMISSION_CAPACITY_BUSY", "QUANTITY_PUBLICATION_DRAIN_BUSY", "EBAY_SYNC_ADMISSION_UNSAVED",
     "EBAY_SYNC_ADMISSION_FAILED", "EBAY_REGISTRATION_READ_TIMEOUT", "EBAY_REGISTRATION_READ_FAILED", "EBAY_AUTH_UNAVAILABLE", "EBAY_AUTH_REFRESH_SUPERSEDED",

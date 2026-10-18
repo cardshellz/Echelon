@@ -7,6 +7,8 @@ import type { EbayListingExecutionContext } from "../../ebay-listing-sync.servic
 import { resolveEbayPublicationTarget } from "../../ebay-publication-completion.domain";
 import { syncContentIntentHash } from "../../ebay-listing-sync-content";
 import { syncIdentity, syncProviderFixture } from "../fixtures/ebay-listing-sync.fixture";
+import { EbayApiRequestError } from "../../adapters/ebay/ebay-api-error";
+import { QuantityProviderRequestTimeoutError } from "../../provider-request-limits";
 
 async function fixture(automaticRecovery?: ConstructorParameters<typeof EbayPublicationCompletionExecution>[4]) {
   const base = syncProviderFixture();
@@ -52,12 +54,55 @@ async function fixture(automaticRecovery?: ConstructorParameters<typeof EbayPubl
     if (key === "publish") context.publicationWriteCompleted = true;
   });
   const executor = new EbayPublicationCompletionExecution(prepare, recovery, new EbayMarketplaceListingConnector(), compatibility, automaticRecovery);
-  return { ...base, source, prepare, recovery, context, bind, compatibility, stages, assertInventoryReady,
+  return { ...base, source, prepare, recovery, context, bind, compatibility, stages, stage, executor, assertInventoryReady,
     run: () => executor.execute(source, stage, null, bind, context),
     setVisibility: (value: boolean) => { visible = value; }, setPublished: () => { published = true; } };
 }
 
 describe("saved eBay publication completion", () => {
+  it.each<[string, Error]>([
+    ["rate limit", new EbayApiRequestError(429, "Rate limited", "{}")],
+    ["provider outage", new EbayApiRequestError(503, "Unavailable", "{}")],
+    ...["ECONNRESET", "ETIMEDOUT", "ECONNREFUSED", "ENOTFOUND", "EAI_AGAIN"].map((code): [string, Error] => [code, Object.assign(new Error("Lookup failed"), { code })]),
+    ["HTTPS deadline", Object.assign(new Error("The operation was aborted", { cause: new QuantityProviderRequestTimeoutError() }), { code: "ABORT_ERR" })],
+  ])("keeps a proved pre-publication %s on automatic retry", async (_name, failure) => {
+    const f = await fixture();
+    vi.mocked(f.client.publishOffer).mockRejectedValueOnce(failure);
+    f.context.recoverTerminalPublicationWrite = vi.fn(async () => "not_sent" as const);
+    await expect(f.run()).rejects.toMatchObject({ code: "EBAY_PUBLICATION_PREFLIGHT_RETRY" });
+    expect(f.context.publicationAccepted).toBeNull();
+  });
+
+  it.each([
+    new EbayApiRequestError(400, "Invalid listing policy", "{}"),
+    Object.assign(new Error("Cancelled by owner"), { code: "ABORT_ERR" }),
+  ])("preserves a business refusal or unclassified cancellation after proving no publication", async failure => {
+    const f = await fixture();
+    vi.mocked(f.client.publishOffer).mockRejectedValueOnce(failure);
+    f.context.recoverTerminalPublicationWrite = vi.fn(async () => "not_sent" as const);
+    await expect(f.run()).rejects.toBe(failure);
+  });
+
+  it("retries a proved pre-send provider outage automatically and publishes the same offer on recovery", async () => {
+    const f = await fixture();
+    const originalPublish = vi.mocked(f.client.publishOffer).getMockImplementation()!;
+    vi.mocked(f.client.publishOffer).mockRejectedValueOnce(new EbayApiRequestError(500, "Provider lookup failed", "{}"));
+    f.context.recoverTerminalPublicationWrite = vi.fn(async () => "not_sent" as const);
+    await expect(f.run()).rejects.toMatchObject({ code: "EBAY_PUBLICATION_PREFLIGHT_RETRY" });
+    expect(f.context.publicationAccepted).toBeNull();
+    vi.mocked(f.client.publishOffer).mockImplementation(originalPublish);
+    expect((await f.run()).errors).toBe(0);
+    expect(f.client.createOffer).not.toHaveBeenCalled();
+    expect(f.client.publishOffer).toHaveBeenLastCalledWith("offer-101");
+  });
+
+  it("does not turn an unproved failed read into permission to publish again", async () => {
+    const f = await fixture();
+    f.context.publicationWriteStarted = true;
+    f.context.recoverTerminalPublicationWrite = vi.fn(async () => null);
+    await expect(f.run()).rejects.toMatchObject({ code: "EBAY_PUBLICATION_RESPONSE_UNCERTAIN" });
+    expect(f.client.publishOffer).not.toHaveBeenCalled();
+  });
   it("rejects missing stock enrollment before any provider preparation write", async () => {
     const f = await fixture();
     f.assertInventoryReady.mockRejectedValue(new EbayListingSyncError("EBAY_PUBLICATION_STOCK_REVIEW_REQUIRED", "Connect stock first."));
@@ -108,6 +153,44 @@ describe("saved eBay publication completion", () => {
     expect(f.currentItem().product.imageUrls).toEqual(["https://example.com/new-current-photo.jpg"]);
     expect(f.client.publishOffer).toHaveBeenCalledTimes(1);
   });
+  it("verifies the current revision when another Sync joined an already-current publication", async () => {
+    const f = await fixture();
+    expect((await f.run()).synced).toBe(1);
+    f.context.publicationAcceptedRevision = "1"; f.context.claimedRevision = "2";
+    f.stages.length = 0;
+    const writes = vi.mocked(f.client.createOrReplaceInventoryItem).mock.calls.length;
+    expect((await f.run()).synced).toBe(1);
+    expect(f.stages).toContain("done:verification");
+    expect(f.stages.indexOf("done:verification")).toBeGreaterThan(f.stages.indexOf("done:inspection"));
+    expect(f.client.publishOffer).toHaveBeenCalledTimes(1);
+    expect(f.client.createOrReplaceInventoryItem).toHaveBeenCalledTimes(writes);
+  });
+  it("retries photo writes after a mismatched initial probe and failed inventory preparation without retaining a false verification checkpoint", async () => {
+    const f = await fixture();
+    f.setPublished();
+    const prepared = await f.prepare();
+    prepared.draft.inventoryItems[0].payload.product!.imageUrls = ["https://example.com/current-photo.jpg"];
+    // Match the repository: verification START persists the content hash before
+    // its callback; a retry receives it even if that callback never completed.
+    let verificationCheckpoint: string | null = null;
+    const stage = async (key: string, hash: string, work: () => Promise<void>): Promise<void> => {
+      if (key === "verification") verificationCheckpoint = hash;
+      await f.stage(key, hash, work);
+    };
+    const run = () => f.executor.execute(f.source, stage, verificationCheckpoint, f.bind, f.context);
+    f.assertInventoryReady.mockRejectedValueOnce(new EbayListingSyncError("PUBLICATION_SCOPE_BUSY", "A stock update still owns this SKU."));
+    await expect(run()).rejects.toMatchObject({ code: "PUBLICATION_SCOPE_BUSY" });
+    expect(f.client.createOrReplaceInventoryItem).not.toHaveBeenCalled();
+    expect(f.client.publishOffer).not.toHaveBeenCalled();
+    expect(verificationCheckpoint).toBeNull();
+
+    expect((await run()).synced).toBe(1);
+    expect(f.currentItem().product.imageUrls).toEqual(["https://example.com/current-photo.jpg"]);
+    expect(f.client.createOrReplaceInventoryItem).toHaveBeenCalledOnce();
+    expect(f.client.publishOffer).not.toHaveBeenCalled();
+    expect(f.stages).toContain("done:verification");
+    expect(verificationCheckpoint).toBe(syncContentIntentHash(prepared.draft));
+  });
   it("does not treat current published readback as proof of an uncertain old HTTP outcome", async () => {
     const f = await fixture(); f.setPublished(); f.recovery.reconcile.mockResolvedValue({ busy: false, resolved: [], unresolved: ["16323"] });
     await expect(f.run()).rejects.toMatchObject({ code: "EBAY_SYNC_RESPONSE_EVIDENCE_REQUIRED" });
@@ -125,14 +208,14 @@ describe("saved eBay publication completion", () => {
   it("resumes the exact rejected publication with current photos and the existing offer after saving rejection proof", async () => {
     const f = await fixture();
     f.context.publicationWriteStarted = true;
-    f.context.recoverRejectedPublicationWrite = vi.fn(async () => true);
+    f.context.recoverTerminalPublicationWrite = vi.fn(async () => "rejected" as const);
     const prepared = await f.prepare();
     prepared.draft.inventoryItems[0].payload.product!.imageUrls = ["https://example.com/current-product-photo.jpg"];
     expect((await f.run()).synced).toBe(1);
-    expect(f.context.recoverRejectedPublicationWrite).toHaveBeenCalledWith(expect.objectContaining({
+    expect(f.context.recoverTerminalPublicationWrite).toHaveBeenCalledWith(expect.objectContaining({
       variants: [expect.objectContaining({ sku: "P5", offerId: "offer-101", listingId: null })],
     }));
-    expect(vi.mocked(f.context.recoverRejectedPublicationWrite).mock.invocationCallOrder[0]).toBeLessThan(
+    expect(vi.mocked(f.context.recoverTerminalPublicationWrite).mock.invocationCallOrder[0]).toBeLessThan(
       vi.mocked(f.client.createOrReplaceInventoryItem).mock.invocationCallOrder[0]);
     expect(f.currentItem().product.imageUrls).toEqual(["https://example.com/current-product-photo.jpg"]);
     expect(f.client.createOffer).not.toHaveBeenCalled();
@@ -141,7 +224,7 @@ describe("saved eBay publication completion", () => {
   it("retains a started publication when its HTTP evidence cannot prove rejection", async () => {
     const f = await fixture();
     f.context.publicationWriteStarted = true;
-    f.context.recoverRejectedPublicationWrite = vi.fn(async () => false);
+    f.context.recoverTerminalPublicationWrite = vi.fn(async () => null);
     await expect(f.run()).rejects.toMatchObject({ code: "EBAY_PUBLICATION_RESPONSE_UNCERTAIN" });
     expect(f.client.publishOffer).not.toHaveBeenCalled();
     expect(f.client.updateOffer).not.toHaveBeenCalled();
@@ -149,7 +232,7 @@ describe("saved eBay publication completion", () => {
   it("does not write if the rejection checkpoint cannot commit", async () => {
     const f = await fixture();
     f.context.publicationWriteStarted = true;
-    f.context.recoverRejectedPublicationWrite = vi.fn(async () => { throw new Error("rejection receipt rollback"); });
+    f.context.recoverTerminalPublicationWrite = vi.fn(async () => { throw new Error("rejection receipt rollback"); });
     await expect(f.run()).rejects.toThrow("rejection receipt rollback");
     expect(f.client.publishOffer).not.toHaveBeenCalled();
     expect(f.client.updateOffer).not.toHaveBeenCalled();
@@ -158,9 +241,9 @@ describe("saved eBay publication completion", () => {
     const f = await fixture();
     const rejected = new EbayListingSyncError("EBAY_SHIPPING_POLICY_REJECTED", "eBay rejected the shipping policy.");
     vi.mocked(f.client.publishOffer).mockRejectedValue(rejected);
-    f.context.recoverRejectedPublicationWrite = vi.fn(async () => true);
+    f.context.recoverTerminalPublicationWrite = vi.fn(async () => "rejected" as const);
     await expect(f.run()).rejects.toBe(rejected);
-    expect(f.context.recoverRejectedPublicationWrite).toHaveBeenCalledOnce();
+    expect(f.context.recoverTerminalPublicationWrite).toHaveBeenCalledOnce();
     expect(f.client.publishOffer).toHaveBeenCalledOnce();
   });
   it("uses automatic stock recovery when a saved publication is already live without publishing again", async () => {
@@ -180,9 +263,9 @@ describe("saved eBay publication completion", () => {
     const f = await fixture();
     f.setVisibility(false);
     await expect(f.run()).rejects.toMatchObject({ code: "EBAY_PUBLICATION_READBACK_PENDING" });
-    f.context.recoverRejectedPublicationWrite = vi.fn(async () => true);
+    f.context.recoverTerminalPublicationWrite = vi.fn(async () => "rejected" as const);
     await expect(f.run()).rejects.toMatchObject({ code: "EBAY_PUBLICATION_READBACK_PENDING" });
-    expect(f.context.recoverRejectedPublicationWrite).not.toHaveBeenCalled();
+    expect(f.context.recoverTerminalPublicationWrite).not.toHaveBeenCalled();
     expect(f.client.publishOffer).toHaveBeenCalledOnce();
   });
   it("refuses regrouping between Finish Publishing review and execution", async () => {

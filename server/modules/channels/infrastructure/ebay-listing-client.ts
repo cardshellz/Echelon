@@ -201,6 +201,7 @@ export function createEbayRouteListingClient(
 ): EbayListingConnectorClient {
   const request = createEbayRouteRequest(input);
   return {
+    quantityRequestJournalVersion: 1,
     getInventoryItem: async (sku) => {
       try {
         return await request<EbayInventoryItem>(

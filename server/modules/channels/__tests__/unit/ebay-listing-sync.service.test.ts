@@ -13,6 +13,12 @@ import {
 import { safeEbayErrorMessage } from "../../adapters/ebay/ebay-quantity-http";
 import { syncContentIntentHash } from "../../ebay-listing-sync-content";
 describe("existing eBay listing sync execution", () => {
+  it("keeps proven pre-publication outages automatically retryable beyond the ordinary retry budget", () => {
+    const now = new Date("2026-10-17T12:00:00Z");
+    const failure = new EbayListingSyncError("EBAY_PUBLICATION_PREFLIGHT_RETRY", "No publication was sent; retrying automatically.");
+    expect(syncFailure(failure, 50, now)).toMatchObject({ state: "recovering", code: failure.code,
+      message: failure.message, nextAttemptAt: new Date(now.getTime() + 15 * 60_000) });
+  });
   it.each([1, 5, 50])("waits for canonical inventory target contention at attempt %i without exhausting the sync", attempts => {
     const now = new Date("2026-10-14T12:00:00Z");
     const failure = Object.assign(new Error("Publication target is busy; retry the complete owning transaction."), {

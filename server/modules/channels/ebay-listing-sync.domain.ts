@@ -139,6 +139,7 @@ export const SYNC_RETRY_LIMIT = 5;
 // a counter cannot repair a lost response or an outage; recovery owns those cases.
 // Unclassified failures and business rejections still require a finite budget.
 const AUTOMATIC_RECOVERY_CODES = new Set([
+  "EBAY_PUBLICATION_PREFLIGHT_RETRY",
   "EBAY_QUANTITY_RESPONSE_UNCERTAIN", "QUANTITY_PROVIDER_REQUEST_TIMEOUT",
   "EBAY_SYNC_READBACK_PENDING", "EBAY_SYNC_PERSISTENCE_FAILED",
   "PUBLICATION_RESPONSE_RECOVERY_FAILED", "PUBLICATION_AUTOMATIC_RECOVERY_FAILED",

@@ -9,7 +9,10 @@ export {
 } from "./infrastructure/quantity-publication-runtime";
 export { PostgresEbayPublicationRejectionReader } from "./infrastructure/ebay-publication-rejection.reader";
 export type { EbayPublicationRejectionReader, EbayPublicationRejectionInput, EbayPublicationRejectionEvidence,
-  EbayPublicationRejectionRead } from "./infrastructure/ebay-publication-rejection.reader";
+  EbayPublicationRejectionRead, EbayPublicationNotSentRead } from "./infrastructure/ebay-publication-rejection.reader";
+export { ebayRequestJournalContractSchema, legacyEbayPublicationPreflightProofSchema } from "./domain/ebay-publication-preflight";
+export type { EbayRequestJournalContract, LegacyEbayPublicationPreflightProof } from "./domain/ebay-publication-preflight";
+export { withEbayQuantityRequestJournalContract } from "./application/quantity-provider-request-evidence";
 export { EbayAutomaticPublicationRecoveryService } from "./application/ebay-automatic-publication-recovery.service";
 export { PostgresEbayAutomaticPublicationRecoveryRepository } from "./infrastructure/ebay-automatic-publication-recovery.repository";
 export { EbayPublicationReconciliationService, EbayPublicationContentRefreshRejectedError } from "./application/ebay-publication-reconciliation.service";

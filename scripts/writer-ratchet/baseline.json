@@ -826,6 +826,9 @@
   "inventory.quantity_publication_gate": [
     "modules/inventory-planning"
   ],
+  "inventory.quantity_publication_no_request_recoveries": [
+    "modules/inventory-planning"
+  ],
   "inventory.quantity_publication_operator_resume_attempts": [
     "modules/inventory-planning"
   ],

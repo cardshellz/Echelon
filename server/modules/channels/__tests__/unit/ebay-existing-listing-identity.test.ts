@@ -56,6 +56,30 @@ function provider(source: EbayListingSyncIdentity, groupKey: string | null, extr
 function candidates(source: EbayListingSyncIdentity) {
   return source.variants.map(member => ({ productVariantId: member.variantId, sku: member.sku, isActive: true, availableQuantity: 17 }));
 }
+function retiredNonmemberFixture() {
+  const incident = { productId: 4, catalogGroup: "SHLZ-TOP-260PT", group: "SHLZ-TOP-260PT", suffixes: ["P10", "C500"],
+    ids: [7, 8], listing: "298148234050", offers: ["136406522011", "136406525011"] };
+  const live = captureExistingEbayListingIdentity(rowsFor(incident), account);
+  const retiredSku = "SHLZ-TOP-260PT-C200";
+  const source = captureExistingEbayListingIdentity([...rowsFor(incident), {
+    product_id: 4, variant_id: 208, variant_sku: retiredSku, external_sku: retiredSku,
+    external_variant_id: "136406519011", external_product_id: null, content_sync_enabled: false,
+  }], account);
+  const remote = provider(live, incident.group);
+  const originalGet = remote.get.getMockImplementation()!;
+  const retired = { inventoryItemExists: true, groupIds: [] as string[],
+    offers: [{ sku: retiredSku, marketplaceId: "EBAY_US", offerId: "136406519011", status: "UNPUBLISHED" } as Record<string, unknown>],
+    status: 200 };
+  remote.get.mockImplementation(async request => {
+    const url = new URL(request.path, "https://api.ebay.com");
+    if (url.pathname.endsWith(`/inventory_item/${retiredSku}`)) return { status: retired.inventoryItemExists ? 200 : 404,
+      body: { sku: retiredSku, groupIds: retired.groupIds } };
+    if (url.pathname.endsWith("/offer") && url.searchParams.get("sku") === retiredSku)
+      return { status: retired.status, body: { offers: retired.offers, total: retired.offers.length } };
+    return originalGet(request);
+  });
+  return { source, remote, retired, retiredSku };
+}
 function draft(source: EbayListingSyncIdentity, catalogGroup: string) {
   return buildEbayRouteListingDraft({ productId: source.productId, product: { sku: catalogGroup, name: "Toploader" },
     variants: source.variants.map((member, index) => ({ id: member.variantId, sku: member.sku, name: `Pack ${index + 1}`, weight_grams: 100,
@@ -70,6 +94,67 @@ function draft(source: EbayListingSyncIdentity, catalogGroup: string) {
 }
 
 describe("existing eBay identity composition", () => {
+  it("keeps the retired C200 mapping in the source but resolves only the exact published P10 and C500 members", async () => {
+    const f = retiredNonmemberFixture();
+    const before = structuredClone(f.source);
+    const result = await resolveExistingEbayListingIdentity(f.source, f.remote.observer, candidates(f.source));
+    expect(result.identity.variants.map(member => member.variantId)).toEqual([7, 8]);
+    expect(result.observation.evidence.nonMemberCandidates).toEqual([expect.objectContaining({ sku: f.retiredSku,
+      inventoryItemExists: true, groupIds: [], offers: [expect.objectContaining({ offerId: "136406519011", status: "UNPUBLISHED", listingId: null })] })]);
+    expect(f.source).toEqual(before);
+    const output = draft(result.identity, "SHLZ-TOP-260PT");
+    expect(output.itemGroup?.payload.variantSKUs).toEqual(["SHLZ-TOP-260PT-P10", "SHLZ-TOP-260PT-C500"]);
+    expect(output.inventoryItems.map(item => item.sku)).not.toContain(f.retiredSku);
+  });
+
+  it.each(["included", "missing item", "missing offer", "duplicate offers", "wrong offer", "wrong sku", "unknown group", "published elsewhere", "listing reference"])(
+    "does not omit a nonmember with %s evidence", async scenario => {
+      const f = retiredNonmemberFixture();
+      if (scenario === "included") f.source.variants[2].contentSyncEnabled = true;
+      if (scenario === "missing item") f.retired.inventoryItemExists = false;
+      if (scenario === "missing offer") f.retired.offers = [];
+      if (scenario === "duplicate offers") f.retired.offers.push({ ...f.retired.offers[0], offerId: "another-offer" });
+      if (scenario === "wrong offer") f.retired.offers[0].offerId = "another-offer";
+      if (scenario === "wrong sku") f.retired.offers[0].sku = "another-sku";
+      if (scenario === "unknown group") f.retired.groupIds = ["another-group"];
+      if (scenario === "published elsewhere") {
+        f.retired.offers[0].status = "PUBLISHED";
+        f.retired.offers[0].listing = { listingId: "another-listing", listingStatus: "ACTIVE" };
+      }
+      if (scenario === "listing reference") f.retired.offers[0].listing = { listingId: "old-listing", listingStatus: "ENDED" };
+      await expect(resolveExistingEbayListingIdentity(f.source, f.remote.observer, candidates(f.source))).rejects.toThrow();
+    });
+
+  it("retries a transient read and re-observes the retired member instead of inferring absence from a failure", async () => {
+    const f = retiredNonmemberFixture();
+    f.retired.status = 503;
+    await expect(resolveExistingEbayListingIdentity(f.source, f.remote.observer, candidates(f.source))).rejects.toMatchObject({ code: "EBAY_REGISTRATION_READ_FAILED" });
+    f.retired.status = 200;
+    expect((await resolveExistingEbayListingIdentity(f.source, f.remote.observer, candidates(f.source))).identity.variants).toHaveLength(2);
+  });
+
+  it("does not let a retired offer's historical listing ID replace the current included listing", async () => {
+    const f = retiredNonmemberFixture();
+    f.source.variants[2].listingId = "historical-ended-listing";
+    const { identity } = await resolveExistingEbayListingIdentity(f.source, f.remote.observer, candidates(f.source));
+    expect(identity.variants.map(member => member.listingId)).toEqual(["298148234050", "298148234050"]);
+    expect(f.source.variants[2].listingId).toBe("historical-ended-listing");
+  });
+
+  it("retains an excluded still-published member in the complete provider identity", async () => {
+    const source = captureExistingEbayListingIdentity(rowsFor().map((row, index) => ({ ...row, content_sync_enabled: index === 0 })), account);
+    const remote = provider(source, cases[0].group);
+    const { identity } = await resolveExistingEbayListingIdentity(source, remote.observer, candidates(source));
+    expect(identity.variants).toHaveLength(2);
+    expect(identity.variants[1].contentSyncEnabled).toBe(false);
+  });
+
+  it("rejects an excluded live member whose saved listing identity differs, instead of silently repairing it", async () => {
+    const source = captureExistingEbayListingIdentity(rowsFor().map((row, index) => ({ ...row, content_sync_enabled: index === 0 })), account);
+    const remote = provider(source, cases[0].group);
+    source.variants[1].listingId = "different-saved-listing";
+    await expect(resolveExistingEbayListingIdentity(source, remote.observer, candidates(source))).rejects.toMatchObject({ code: "EBAY_SYNC_IDENTITY_CHANGED" });
+  });
   it.each([
     [401, "EBAY_AUTH_REQUIRED"], [403, "EBAY_PROVIDER_ACCESS_DENIED"], [429, "EBAY_PROVIDER_RATE_LIMITED"],
     [408, "EBAY_REGISTRATION_READ_FAILED"], [503, "EBAY_REGISTRATION_READ_FAILED"], [404, "EBAY_SYNC_PROVIDER_IDENTITY_INVALID"],
@@ -96,7 +181,7 @@ describe("existing eBay identity composition", () => {
     expect(source.variants[0]).toMatchObject({ variantId: fixture.ids[0], catalogSku: `${fixture.catalogGroup}-${fixture.suffixes[0]}`,
       sku: `${fixture.group}-${fixture.suffixes[0]}`, externalSku: `${fixture.group}-${fixture.suffixes[0]}` });
     const remote = provider(source, fixture.group);
-    const bound = await resolveExistingEbayListingIdentity(source, remote.observer, candidates(source));
+    const { identity: bound } = await resolveExistingEbayListingIdentity(source, remote.observer, candidates(source));
     expect(bound.groupKey).toBe(fixture.group);
     const output = draft(bound, fixture.catalogGroup);
     expect(output.itemGroup?.groupKey).toBe(fixture.group);
@@ -115,7 +200,7 @@ describe("existing eBay identity composition", () => {
     const remote = provider(source, cases[0].group);
     source.variants[0].externalSku = null;
     source.variants[0].offerId = null;
-    const bound = await resolveExistingEbayListingIdentity(source, remote.observer, candidates(source));
+    const { identity: bound } = await resolveExistingEbayListingIdentity(source, remote.observer, candidates(source));
     expect(bound.variants[0]).toMatchObject({ externalSku: null, offerId: cases[0].offers[0] });
     expect(source.variants[0].offerId).toBeNull();
   });
@@ -173,7 +258,7 @@ describe("existing eBay identity composition", () => {
   it("supports a verified single item without a fabricated group and reads its photos by exact SKU", async () => {
     const source = captureExistingEbayListingIdentity(rowsFor().slice(0, 1), account);
     const remote = provider(source, null);
-    const bound = await resolveExistingEbayListingIdentity(source, remote.observer, candidates(source));
+    const { identity: bound } = await resolveExistingEbayListingIdentity(source, remote.observer, candidates(source));
     expect(bound.groupKey).toBeNull();
     expect(draft(bound, cases[0].catalogGroup).itemGroup).toBeNull();
     const getInventoryItemGroup = vi.fn();
@@ -186,7 +271,7 @@ describe("existing eBay identity composition", () => {
   it("preserves a verified group that has one remaining member", async () => {
     const source = captureExistingEbayListingIdentity(rowsFor().slice(0, 1), account);
     const remote = provider(source, cases[0].group);
-    const bound = await resolveExistingEbayListingIdentity(source, remote.observer, candidates(source));
+    const { identity: bound } = await resolveExistingEbayListingIdentity(source, remote.observer, candidates(source));
     expect(draft(bound, cases[0].catalogGroup).itemGroup?.groupKey).toBe(cases[0].group);
   });
 
