@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "wouter";
-import { reconciliationDestinations, reconciliationReportSchema } from "@shared/procurement/cost-reconciliation";
+import { historicalCostComponentLabels, reconciliationDestinations, reconciliationReportSchema } from "@shared/procurement/cost-reconciliation";
 import { formatShipmentExceptionAmount } from "@shared/procurement/shipment-cost-exception";
 import { apiRequest } from "@/lib/queryClient";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
@@ -65,7 +65,7 @@ export function HistoricalCostAdjustments() {
                         </span>
                       </div>
                       <p>
-                        {posting.sku} · {posting.component ?? "landed"} · Approved by {posting.actorName} ·{" "}
+                        {posting.sku} · {historicalCostComponentLabels[posting.component ?? "landed"]} · Approved by {posting.actorName} ·{" "}
                         {new Date(posting.recordedAt).toLocaleString()}
                       </p>
                       <p>{posting.reason}</p>

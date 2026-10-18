@@ -10,6 +10,11 @@ export const reconciliationDestinations: Record<ReconciliationDestination, strin
   historical_cogs: "Cost of goods already sold",
   inventory_variance: "Historical inventory cost adjustment",
 };
+export const historicalCostComponentLabels = {
+  product: "Product",
+  packaging: "Packaging",
+  landed: "Shipment charges",
+} as const;
 export const reconciliationBalanceSchema = z.object({ historical_cogs: amount, inventory_variance: amount }).strict();
 export type ReconciliationBalance = z.infer<typeof reconciliationBalanceSchema>;
 export const reconciliationStateSchema = z

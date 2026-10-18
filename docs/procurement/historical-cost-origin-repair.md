@@ -21,6 +21,8 @@ receipt evidence, appends its missing cost interval, posts approved historical
 supplier costs and rebinds existing freight approvals without duplicating their
 amounts. Existing immutable receipt intervals are never rewritten.
 
+The repair audit has one writer, the Procurement command owner, enforced by the
+writer-ownership guard. Financial postings remain owned by Inventory.
 The approval retains actor, reason, timestamp and exact before/after amounts.
 Completed dialogs show the approval rather than a disabled posting action.
 Current PO, receipt, shipment, dashboard and history status verifies current

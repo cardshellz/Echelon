@@ -1,3 +1,4 @@
+import { historicalCostComponentLabels } from "@shared/procurement/cost-reconciliation";
 import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
@@ -143,9 +144,7 @@ function Summary({ summary }: { summary: OriginRepairSummary }) {
           {summary.components.map((row) => (
             <tr className="border-b" key={row.component}>
               <td className="py-2 capitalize">
-                {row.component === "landed"
-                  ? "Shipment charges"
-                  : row.component}
+                {historicalCostComponentLabels[row.component]}
               </td>
               <td className="text-right">{money(row.historicalBeforeMills)}</td>
               <td className="text-right font-semibold">
