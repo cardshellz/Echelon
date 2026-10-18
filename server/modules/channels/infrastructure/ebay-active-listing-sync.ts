@@ -39,7 +39,7 @@ import {
   type EbayListingSyncIdentity,
 } from "../ebay-listing-sync.domain";
 import {
-  captureExistingEbayListingIdentity,
+  captureEbayListingSourceIdentity,
   assertEbayListingSourceIdentityUnchanged,
   resolveExistingEbayListingIdentity,
 } from "../ebay-existing-listing-identity";
@@ -213,16 +213,7 @@ function identityFromRows(
   rows: Awaited<ReturnType<typeof readActiveEbaySyncRows>>,
   ctx: Awaited<ReturnType<typeof context>>,
 ): EbayListingSyncIdentity {
-  return captureExistingEbayListingIdentity(rows.map(row => ({ ...row, mapping_exists: true, content_sync_enabled: isVariantSellable({
-    productActive: row.product_is_active,
-    variantActive: row.variant_is_active,
-    salesEligibility: row.variant_sales_eligibility,
-    productExcluded: row.product_excluded === true,
-    productOverrideIsListed: row.product_override_is_listed,
-    typeListingEnabled: row.type_listing_enabled,
-    variantExcluded: row.variant_excluded === true,
-    variantOverrideIsListed: row.variant_override_is_listed,
-  }) })), {
+  return captureEbayListingSourceIdentity(rows, {
     channelId: EBAY_CHANNEL_ID,
     connectionId: ctx.conn.id,
     accountId: ctx.account.externalAccountId,
@@ -489,7 +480,7 @@ async function prepareActiveEbayListingSync(
       accountId: boundIdentity.accountId, environment: ctx.authService.getEnvironment(),
       productId, purpose: "sync",
       variants: boundIdentity.variants.map(member => ({ productVariantId: member.variantId, sku: member.sku })),
-    }, execution, new Date()),
+    }, execution, new Date(), { sourceIdentity, observation: providerObservation }),
     variants: variants
       .filter((variant) =>
         routeDraft.offers.some(

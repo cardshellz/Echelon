@@ -152,6 +152,8 @@ describe("PostgreSQL CI coverage and isolation", () => {
       "server/modules/channels/__tests__/integration/ebay-listing-mapping-repair.integration.test.ts",
       "server/modules/channels/__tests__/integration/ebay-publication-stock.integration.test.ts",
       "server/modules/inventory-planning/__tests__/integration/ebay-publication-readiness.integration.test.ts",
+      "server/modules/inventory-planning/__tests__/integration/ebay-listing-preparation-scope.integration.test.ts",
+      "server/modules/inventory-planning/__tests__/integration/ebay-listing-preparation-scope-authority.integration.test.ts",
       "server/modules/inventory-planning/__tests__/integration/ebay-publication-preflight.integration.test.ts",
       "server/modules/inventory-planning/__tests__/integration/ebay-publication-rejection.integration.test.ts",
       "server/modules/inventory-planning/__tests__/integration/quantity-provider-request-evidence.integration.test.ts",

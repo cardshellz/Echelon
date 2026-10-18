@@ -27,6 +27,12 @@ export class ChannelStockSelectionError extends Error {
  * independent membership setting. Every query uses the caller's transaction. */
 export async function readChannelStockSelection(client: StockSelectionQueryClient,
   raw: { channelId: number; channelConnectionId: number; productId: number; productVariantIds: readonly number[] }): Promise<StockPublicationSelection> {
+  return resolveChannelStockSelection(await readChannelStockSelectionFacts(client, raw));
+}
+
+/** Channels-internal source facts shared by selection and exact source fencing. */
+export async function readChannelStockSelectionFacts(client: StockSelectionQueryClient,
+  raw: { channelId: number; channelConnectionId: number; productId: number; productVariantIds: readonly number[] }): Promise<ChannelStockSelectionFacts> {
   const input = inputSchema.parse(raw);
   const context = z.array(z.object({ channel_id: id, connection_id: id.nullable(), provider: z.enum(["shopify", "ebay", "walmart"]) })).parse(
     (await client.query(`SELECT c.id AS channel_id,cc.id AS connection_id,lower(c.provider) AS provider
@@ -70,5 +76,5 @@ export async function readChannelStockSelection(client: StockSelectionQueryClien
         listing: listing ? { status: listing.sync_status, externalProductId: listing.external_product_id,
           externalVariantId: listing.external_variant_id, externalSku: listing.external_sku } : null };
     }) };
-  return resolveChannelStockSelection(facts);
+  return facts;
 }

@@ -209,6 +209,9 @@ export class AuthorityAwareInventoryPublicationService {
     dryRun: boolean;
     channelId?: number;
     publicationTargetId?: number;
+    /** Exact owner-reviewed members, including retained zero obligations. ATP
+     * still uses the full product; this only limits emitted publication work. */
+    productVariantIds?: readonly number[];
     triggeredBy?: string;
   }, legacyPublisher: () => Promise<T>): Promise<InventoryPublicationRouteResult<T>> {
     const productId = positiveInteger(input.productId, "productId");
@@ -219,15 +222,25 @@ export class AuthorityAwareInventoryPublicationService {
     const publicationTargetId = input.publicationTargetId == null
       ? undefined
       : positiveInteger(input.publicationTargetId, "publicationTargetId");
+    const productVariantIds = input.productVariantIds === undefined ? undefined
+      : uniquePositiveIntegers(input.productVariantIds, "productVariantIds");
+    if (productVariantIds && (publicationTargetId === undefined || productVariantIds.length === 0
+      || productVariantIds.length !== input.productVariantIds!.length)) {
+      throw new InventoryAvailabilityRuntimePublicationError("INVALID_INVENTORY_PUBLICATION_SCOPE",
+        "Scoped publication requires one exact target and a nonempty set of unique variant IDs.");
+    }
     const triggeredBy = nonblank(input.triggeredBy ?? "inventory_publication", "triggeredBy", 200);
     return this.executor.execute(async (context) => {
       if (context.authority === "legacy") {
+        if (productVariantIds) throw new InventoryAvailabilityRuntimePublicationError("CANONICAL_PUBLICATION_SCOPE_REQUIRED",
+          "An exact member publication scope requires canonical inventory authority.");
         return { authority: "legacy", legacyResult: await legacyPublisher() };
       }
       const publication = await this.planAndPublishCanonical(context, {
          productId,
          channelId,
          publicationTargetId,
+          productVariantIds,
          dryRun,
         triggeredBy,
       });
@@ -280,6 +293,7 @@ export class AuthorityAwareInventoryPublicationService {
       productVariantId?: number;
       channelId?: number;
       publicationTargetId?: number;
+      productVariantIds?: readonly number[];
       dryRun: boolean;
       triggeredBy: string;
     },
@@ -294,11 +308,19 @@ export class AuthorityAwareInventoryPublicationService {
       context,
       input.productVariantId,
       input.publicationTargetId,
+      input.productVariantIds,
     );
     for (const variantId of await context.listUnmanagedPublicationVariantIds?.(input.productId) ?? []) {
       if (input.productVariantId != null && input.productVariantId !== variantId) continue;
+      if (input.productVariantIds && !input.productVariantIds.includes(variantId)) continue;
       rows.push(...await zeroPublicationIntents(context, input.productId, variantId,
         input.channelId ?? this.channelId, input.publicationTargetId));
+    }
+    if (input.productVariantIds?.some(variantId => !rows.some(row => row.productVariantId === variantId
+      && row.publicationTargetId === input.publicationTargetId))) {
+      throw publicationError("CANONICAL_PUBLICATION_VARIANT_NOT_ELIGIBLE",
+        "Every requested variant must belong to this product and exact publication target.", context,
+        { productId: input.productId, publicationTargetId: input.publicationTargetId, productVariantIds: input.productVariantIds });
     }
     assertUnambiguousProviderScopes(rows, context, input.productId);
     for (const row of rows.filter((candidate) => candidate.blockerCodes.length > 0)) {
@@ -406,6 +428,7 @@ function publicationIntentsFromPlan(
   context: InventoryAvailabilityRuntimePublicationContext,
   productVariantId?: number,
   publicationTargetId?: number,
+  productVariantIds?: readonly number[],
 ): CanonicalInventoryPublicationIntent[] {
   if (plan.authority !== "canonical"
     || plan.activationRunId !== context.activationRunId
@@ -425,7 +448,7 @@ function publicationIntentsFromPlan(
   const rows: CanonicalInventoryPublicationIntent[] = [];
   for (const target of plan.targets) {
     if (publicationTargetId != null && target.publicationTargetId !== publicationTargetId) continue;
-    if (!target.publishable || !target.sourceBinding) {
+    if ((!target.publishable && (!productVariantIds || target.blockers.length > 0)) || !target.sourceBinding) {
       const blockerCodes = uniqueStrings([
         ...target.blockers.map((blocker) => blocker.code),
         ...target.rows.flatMap((row) => row.blockers.map((blocker) => blocker.code)),
@@ -443,6 +466,7 @@ function publicationIntentsFromPlan(
     }
     for (const row of target.rows) {
       if (productVariantId != null && row.productVariantId !== productVariantId) continue;
+      if (productVariantIds && !productVariantIds.includes(row.productVariantId)) continue;
       if (!row.mapping || row.blockers.length > 0) {
         throw publicationError(
           "CANONICAL_PUBLICATION_ROW_BLOCKED",
