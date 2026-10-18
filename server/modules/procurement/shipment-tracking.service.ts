@@ -1,3 +1,6 @@
+import { executeCreateShipmentInTransaction as createShipmentInTransaction, assertShipmentCreateActor } from "./shipment-create.service";
+import { shipmentDefaultAllocation } from "./domain/shipment-create";
+import type { ShipmentCreateTransaction } from "./shipment-create.repository";
 import { buildShipmentAllocationBasis, resolveShipmentAllocationMethod, shipmentAllocationBasisMatches, DIMENSIONAL_ALLOCATION_METHODS,
   allocateShipmentCents, buildShipmentAllocationEvidence, shipmentAllocationEvidenceMatches, storedBasisMirror,
   allocateCentsFromNumericBasis, projectShipmentProductValue,
@@ -38,7 +41,7 @@ import { centsToMills, millsToCents, perUnitMills } from "@shared/utils/money";
 import { createCOGSService } from "../inventory";
 import { Decimal } from "decimal.js";
 import { shipmentCostCreateSchema, shipmentCostResourceIdSchema, shipmentCostPatchSchema, shipmentCostDeleteSchema, SHIPMENT_COST_EDITABLE_FIELDS, type ShipmentCostCreateCommand } from "@shared/procurement/shipment-cost-command";
-import { shipmentHeaderCreateSchema, shipmentHeaderPatchSchema } from "@shared/procurement/shipment-header-input";
+import { shipmentHeaderPatchSchema } from "@shared/procurement/shipment-header-input";
 import { shipmentCostVersion, versionShipmentCost } from "./shipment-cost-version";
 import type { ShipmentCostCommand } from "./shipment-cost-commands";
 import { eq, sql as sqlTag } from "drizzle-orm";
@@ -46,6 +49,8 @@ import { canonicalJson } from "@shared/utils/canonical-json";
 import { shipmentAllocationEvidenceSchema } from "@shared/procurement/shipment-allocation";
 import { shipmentCostWorkflowIdSchema, shipmentCostUpdateInputSchema, shipmentCostUpdateResultSchema } from "@shared/procurement/shipment-cost-workflow";
 import { isShipmentCostLinePosted } from "@shared/procurement/shipment-cost-workflow";
+import { shipmentWorkListQuerySchema, shipmentWorkListPageSchema, matchesShipmentCostFilter, SHIPMENT_SCAN_PAGE_SIZE, type ShipmentWorkListPage } from "@shared/procurement/shipment-work-list";
+import type { ShipmentListFilters } from "./shipment-work-list.repository";
 import { landedCostHealthSchema, type LandedCostHealth } from "@shared/procurement/landed-cost-health";
 import { readShipmentCostReview, readShipmentCostReviewInTransaction } from "./shipment-cost-review.repository";
 import { purchaseLineNeedsCostReview, purchaseCostNextAction } from "@shared/procurement/purchase-cost-status";
@@ -87,15 +92,13 @@ export function allocateCentsByBasis(
 
 interface Storage {
   // Inbound Shipments
-  getInboundShipments(filters?: any, executor?: any): Promise<InboundShipment[]>;
-  getInboundShipmentPurchaseOrders(shipmentIds: readonly number[]): Promise<Map<number, ShipmentPurchaseOrderReference[]>>;
-  getInboundShipmentsCount(filters?: any): Promise<number>;
+  getInboundShipments(filters?: ShipmentListFilters, executor?: any): Promise<InboundShipment[]>;
+  getInboundShipmentPurchaseOrders(shipmentIds: readonly number[], executor?: any): Promise<Map<number, ShipmentPurchaseOrderReference[]>>;
+  getInboundShipmentsCount(filters?: ShipmentListFilters, executor?: any): Promise<number>;
   getInboundShipmentById(id: number, executor?: any): Promise<InboundShipment | undefined>;
   getInboundShipmentByNumber(shipmentNumber: string): Promise<InboundShipment | undefined>;
-  createInboundShipment(data: InsertInboundShipment): Promise<InboundShipment>;
   updateInboundShipment(id: number, updates: Partial<InsertInboundShipment>, executor?: any, recordedAt?: Date): Promise<InboundShipment | null>;
   deleteInboundShipment(id: number, executor?: any): Promise<boolean>;
-  generateShipmentNumber(): Promise<string>;
   // Lines
   getInboundShipmentLines(inboundShipmentId: number, executor?: any): Promise<InboundShipmentLine[]>;
   getInboundShipmentLineById(id: number, executor?: any): Promise<InboundShipmentLine | undefined>;
@@ -169,17 +172,6 @@ const VALID_TRANSITIONS: Record<string, string[]> = {
   customs_clearance:  ["delivered", "cancelled"],
   delivered:          ["costing", "cancelled"],
   costing:            ["closed", "cancelled"],
-};
-
-const MODE_DEFAULT_ALLOCATION: Record<string, string> = {
-  sea_fcl: "by_volume",
-  sea_lcl: "by_volume",
-  air: "by_chargeable_weight",
-  ground: "by_weight",
-  ltl: "by_weight",
-  ftl: "by_weight",
-  parcel: "by_weight",
-  courier: "by_weight",
 };
 
 // Allocation methods that require physical line dimensions. If a cost uses one of
@@ -556,33 +548,13 @@ export function createShipmentTrackingService(
 
   // ─── CRUD ───────────────────────────────────────────────────────
 
-  async function createShipment(rawData: unknown, userId?: string) {
-    const parsed = shipmentHeaderCreateSchema.parse(rawData);
-    const data = {
-      ...parsed,
-      ...(parsed.eta !== undefined ? { eta: parsed.eta === null ? null : new Date(parsed.eta) } : {}),
-      ...(parsed.etd !== undefined ? { etd: parsed.etd === null ? null : new Date(parsed.etd) } : {}),
-    };
-    const shipmentNumber = data.shipmentNumber || await storage.generateShipmentNumber();
-    const allocationMethodDefault = data.mode ? MODE_DEFAULT_ALLOCATION[data.mode] || "by_volume" : "by_volume";
+  async function executeCreateShipmentInTransaction(tx: ShipmentCreateTransaction, rawData: unknown, actorId: string, now: Date) {
+    return createShipmentInTransaction(tx, rawData, actorId, now, lineMutationOwner);
+  }
 
-    let shipment: InboundShipment;
-    try {
-      shipment = await storage.createInboundShipment({
-        ...data,
-        shipmentNumber,
-        status: "draft",
-        allocationMethodDefault,
-        createdBy: userId || null,
-      } as InsertInboundShipment);
-    } catch (error: any) {
-      if (error?.code === "23505") {
-        throw new ShipmentTrackingError(`Shipment number '${shipmentNumber}' already in use by an active record.`, 409);
-      }
-      throw error;
-    }
-    await recordStatusChange(shipment.id, null, "draft", userId, "Shipment created");
-    return shipment;
+  async function createShipment(rawData: unknown, userId?: string) {
+    assertShipmentCreateActor(userId);
+    return runInTransaction(tx => executeCreateShipmentInTransaction(tx, rawData, userId, clock()));
   }
 
   async function getShipment(id: number, executor?: any) {
@@ -614,7 +586,7 @@ export function createShipmentTrackingService(
         throw new ShipmentTrackingError("Cannot edit a closed or cancelled shipment");
       }
       if (updates.mode && updates.mode !== shipment.mode) {
-        updates.allocationMethodDefault = MODE_DEFAULT_ALLOCATION[updates.mode] || "by_volume";
+        updates.allocationMethodDefault = shipmentDefaultAllocation(updates.mode);
       }
       return storage.updateInboundShipment(id, updates, tx);
     });
@@ -1295,151 +1267,191 @@ export function createShipmentTrackingService(
     };
   }
 
+  /** Both list membership and overview consume this current posting/reconciliation evidence. */
+  async function readShipmentHealthIssues(shipment: InboundShipment, tx: any): Promise<LandedCostHealth["items"]> {
+    const items: LandedCostHealth["items"] = [];
+    if (shipment.status !== "costing" && shipment.status !== "closed") return items;
+    const lines = await storage.getInboundShipmentLines(shipment.id, tx);
+    const provisionalLots = await storage.getProvisionalLotsByShipment(shipment.id, tx);
+    const allocation = await getAllocationStatus(shipment.id, tx);
+    const review = await readShipmentCostReviewInTransaction(tx, shipment.id);
+    if (!review || review.shipmentId !== shipment.id || review.lines.length !== lines.length
+      || new Set(review.lines.map(line => line.lineId)).size !== lines.length
+      || review.lines.some(line => !lines.some(source => source.id === line.lineId))) {
+      throw new ShipmentTrackingError("Current shipment cost evidence is incomplete. Reload cost health.", 503,
+        { code: "SHIPMENT_COST_HEALTH_EVIDENCE_INCOMPLETE", shipmentId: shipment.id });
+    }
+    const postedLineIds = new Set(review.lines.filter(isShipmentCostLinePosted).map(line => line.lineId));
+    const unpostedLines = review.lines.filter(line => !postedLineIds.has(line.lineId));
+    const needsSourceReview = unpostedLines.some(line => line.sourceIssue || line.exceptionReview
+      || line.application?.status === "review_required" || (line.application?.issues.length ?? 0) > 0);
+    const missingSnapshotLineIds: number[] = [];
+    let finalizedLineCount = 0;
+
+    for (const line of lines) {
+      const snapshots = await storage.getLandedCostSnapshots(line.id, tx);
+      if (snapshots.length > 0 && snapshots[0]?.landedUnitCostCents != null) {
+        finalizedLineCount += 1;
+      } else if (!postedLineIds.has(line.id)) {
+        missingSnapshotLineIds.push(line.id);
+      }
+    }
+
+    if (allocation.blockerCount > 0) {
+
+      items.push({
+        id: `allocation_blocked-${shipment.id}`,
+        type: "allocation_blocked",
+        severity: "critical",
+        shipmentId: shipment.id,
+        shipmentNumber: shipment.shipmentNumber ?? null,
+        shipmentStatus: shipment.status,
+        detail: `${allocation.blockerCount} allocation blocker${allocation.blockerCount === 1 ? "" : "s"} need review before landed cost can be trusted`,
+        action: "review_allocation",
+        blockerCount: allocation.blockerCount,
+      });
+    } else if (allocation.warningCount > 0) {
+
+      items.push({
+        id: `allocation_warning-${shipment.id}`,
+        type: "allocation_warning",
+        severity: "warning",
+        shipmentId: shipment.id,
+        shipmentNumber: shipment.shipmentNumber ?? null,
+        shipmentStatus: shipment.status,
+        detail: `${allocation.warningCount} allocation warning${allocation.warningCount === 1 ? "" : "s"} present`,
+        action: "review_allocation",
+        warningCount: allocation.warningCount,
+      });
+    }
+
+    if (lines.length > 0 && allocation.allocatableCostCount > 0 && missingSnapshotLineIds.length > 0) {
+
+      items.push({
+        id: `pending_finalization-${shipment.id}`,
+        type: "pending_finalization",
+        severity: shipment.status === "closed" ? "critical" : "warning",
+        shipmentId: shipment.id,
+        shipmentNumber: shipment.shipmentNumber ?? null,
+        shipmentStatus: shipment.status,
+        detail: `${missingSnapshotLineIds.length} shipment line${missingSnapshotLineIds.length === 1 ? "" : "s"} do not have finalized landed cost snapshots`,
+        action: "finalize_landed_cost",
+        missingSnapshotLineIds,
+      });
+    }
+
+    const supplierReview = review.supplierCosts?.lines.filter(purchaseLineNeedsCostReview) ?? [];
+    const tracedLotIds = new Set(review.supplierCosts?.lines.flatMap(line => line.lots.map(lot => lot.id)) ?? []);
+    const unverifiedFlags = provisionalLots.filter(lot => !tracedLotIds.has(lot.id));
+    if (lines.length > 0 && (supplierReview.length > 0 || (unverifiedFlags.length > 0 && unpostedLines.length === 0))) {
+      // A flag alone cannot contradict verified current component postings.
+      // Untraced flagged lots remain actionable; estimates and genuine source
+      // issues are independently projected even when the legacy flag is 0.
+
+      items.push({
+        id: `provisional_other_costs-${shipment.id}`, type: "provisional_other_costs", severity: "warning",
+        shipmentId: shipment.id, shipmentNumber: shipment.shipmentNumber ?? null, shipmentStatus: shipment.status,
+        detail: `${unpostedLines.length === 0 ? "Landed costs are posted. " : ""}${supplierReview.length > 0
+          ? `${supplierReview.length} PO lines need product / packaging cost review (${provisionalLots.length} provisional lots on this shipment). ${supplierReview.some(line => purchaseCostNextAction(line) === "invoice") ? "Confirm the supplier invoice amounts in cost review." : "Open cost review for the affected receipts and lot history."}`
+          : `${unverifiedFlags.length} lot${unverifiedFlags.length === 1 ? " retains" : "s retain"} a provisional flag without verified supplier-cost coverage. Open cost review to compare their current component evidence; this flag alone does not mean freight is unposted.`}`,
+        action: "review_cost_evidence", provisionalLotCount: provisionalLots.length,
+      });
+    }
+    if (unpostedLines.length > 0 && (provisionalLots.length > 0
+      || allocation.allocatableCostCount > 0 || needsSourceReview)) {
+      const fullyFinalized = finalizedLineCount === lines.length && lines.length > 0;
+      const closedProvisional = shipment.status === "closed" && provisionalLots.length > 0;
+      const readyToPush = !needsSourceReview && fullyFinalized && !closedProvisional;
+      const type = closedProvisional ? "stale_provisional_lots"
+        : readyToPush ? "finalized_not_pushed" : "posting_review_required";
+      items.push({
+        id: `${type}-${shipment.id}`, type,
+        severity: shipment.status === "closed" ? "critical" : "warning",
+        shipmentId: shipment.id, shipmentNumber: shipment.shipmentNumber ?? null, shipmentStatus: shipment.status,
+        detail: `${unpostedLines.length} shipment line${unpostedLines.length === 1 ? " does" : "s do"} not have current posted landed costs. ${needsSourceReview
+          ? "Review the current source or reconciliation evidence before updating costs."
+          : "Update shipment costs to apply the current source to inventory and sold costs."}`,
+        action: needsSourceReview ? "review_cost_evidence" : fullyFinalized ? "push_costs_to_lots" : "finalize_landed_cost",
+        provisionalLotCount: provisionalLots.length,
+      });
+    }
+    return items;
+  }
+
   async function getLandedCostHealth(options: { limit?: number } = {}): Promise<LandedCostHealth> {
     const limit = options.limit ?? 100;
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 250) {
       throw new ShipmentTrackingError("Cost health limit must be an integer between 1 and 250.");
     }
-    // The posting evidence and advisory lot flags must describe the same source
-    // snapshot. A failed evidence read rejects the response, never a healthy default.
+    // Scan all eligible shipments in bounded pages in one snapshot. The limit is
+    // a display limit, never a cap on the evidence behind health or work-list membership.
     return db.transaction(async (tx: any): Promise<LandedCostHealth> => {
-      const shipments = await storage.getInboundShipments({
-        status: ["costing", "closed"],
-        limit,
-      }, tx);
       const items: LandedCostHealth["items"] = [];
-      const counts = {
-        allocationBlockers: 0,
-        allocationWarnings: 0,
-        pendingFinalization: 0,
-        finalizedNotPushed: 0,
-        staleProvisionalLots: 0,
-        postingReviewRequired: 0,
-        provisionalOtherCosts: 0,
+      const counts = { allocationBlockers: 0, allocationWarnings: 0, pendingFinalization: 0,
+        finalizedNotPushed: 0, staleProvisionalLots: 0, postingReviewRequired: 0, provisionalOtherCosts: 0 };
+      const countKeys: Record<string, keyof typeof counts> = {
+        allocation_blocked: "allocationBlockers", allocation_warning: "allocationWarnings",
+        pending_finalization: "pendingFinalization", finalized_not_pushed: "finalizedNotPushed",
+        stale_provisional_lots: "staleProvisionalLots", posting_review_required: "postingReviewRequired",
+        provisional_other_costs: "provisionalOtherCosts",
       };
-
-      for (const shipment of shipments) {
-        const lines = await storage.getInboundShipmentLines(shipment.id, tx);
-        const provisionalLots = await storage.getProvisionalLotsByShipment(shipment.id, tx);
-        const allocation = await getAllocationStatus(shipment.id, tx);
-        const review = await readShipmentCostReviewInTransaction(tx, shipment.id);
-        if (!review || review.shipmentId !== shipment.id || review.lines.length !== lines.length
-          || new Set(review.lines.map(line => line.lineId)).size !== lines.length
-          || review.lines.some(line => !lines.some(source => source.id === line.lineId))) {
-          throw new ShipmentTrackingError("Current shipment cost evidence is incomplete. Reload cost health.", 503,
-            { code: "SHIPMENT_COST_HEALTH_EVIDENCE_INCOMPLETE", shipmentId: shipment.id });
-        }
-        const postedLineIds = new Set(review.lines.filter(isShipmentCostLinePosted).map(line => line.lineId));
-        const unpostedLines = review.lines.filter(line => !postedLineIds.has(line.lineId));
-        const needsSourceReview = unpostedLines.some(line => line.sourceIssue || line.exceptionReview
-          || line.application?.status === "review_required" || (line.application?.issues.length ?? 0) > 0);
-        const missingSnapshotLineIds: number[] = [];
-        let finalizedLineCount = 0;
-
-        for (const line of lines) {
-          const snapshots = await storage.getLandedCostSnapshots(line.id, tx);
-          if (snapshots.length > 0 && snapshots[0]?.landedUnitCostCents != null) {
-            finalizedLineCount += 1;
-          } else if (!postedLineIds.has(line.id)) {
-            missingSnapshotLineIds.push(line.id);
+      let scannedShipments = 0, critical = 0, warning = 0;
+      for (let offset = 0; ; offset += SHIPMENT_SCAN_PAGE_SIZE) {
+        const page = await storage.getInboundShipments({ status: ["costing", "closed"], limit: SHIPMENT_SCAN_PAGE_SIZE, offset }, tx);
+        for (const shipment of page) {
+          scannedShipments++;
+          for (const item of await readShipmentHealthIssues(shipment, tx)) {
+            if (item.severity === "critical") critical++; else warning++;
+            const key = countKeys[item.type];
+            if (key) counts[key]++;
+            if (items.length < limit) items.push(item);
           }
         }
+        if (page.length < SHIPMENT_SCAN_PAGE_SIZE) break;
+      }
+      return landedCostHealthSchema.parse({ status: critical > 0 ? "critical" : warning > 0 ? "warning" : "healthy",
+        scannedShipments, critical, warning, counts, items });
+    }, { isolationLevel: "repeatable read", accessMode: "read only" });
+  }
 
-        if (allocation.blockerCount > 0) {
-          counts.allocationBlockers += 1;
-          items.push({
-            id: `allocation_blocked-${shipment.id}`,
-            type: "allocation_blocked",
-            severity: "critical",
-            shipmentId: shipment.id,
-            shipmentNumber: shipment.shipmentNumber ?? null,
-            shipmentStatus: shipment.status,
-            detail: `${allocation.blockerCount} allocation blocker${allocation.blockerCount === 1 ? "" : "s"} need review before landed cost can be trusted`,
-            action: "review_allocation",
-            blockerCount: allocation.blockerCount,
-          });
-        } else if (allocation.warningCount > 0) {
-          counts.allocationWarnings += 1;
-          items.push({
-            id: `allocation_warning-${shipment.id}`,
-            type: "allocation_warning",
-            severity: "warning",
-            shipmentId: shipment.id,
-            shipmentNumber: shipment.shipmentNumber ?? null,
-            shipmentStatus: shipment.status,
-            detail: `${allocation.warningCount} allocation warning${allocation.warningCount === 1 ? "" : "s"} present`,
-            action: "review_allocation",
-            warningCount: allocation.warningCount,
-          });
-        }
-
-        if (lines.length > 0 && allocation.allocatableCostCount > 0 && missingSnapshotLineIds.length > 0) {
-          counts.pendingFinalization += 1;
-          items.push({
-            id: `pending_finalization-${shipment.id}`,
-            type: "pending_finalization",
-            severity: shipment.status === "closed" ? "critical" : "warning",
-            shipmentId: shipment.id,
-            shipmentNumber: shipment.shipmentNumber ?? null,
-            shipmentStatus: shipment.status,
-            detail: `${missingSnapshotLineIds.length} shipment line${missingSnapshotLineIds.length === 1 ? "" : "s"} do not have finalized landed cost snapshots`,
-            action: "finalize_landed_cost",
-            missingSnapshotLineIds,
-          });
-        }
-
-        const supplierReview = review.supplierCosts?.lines.filter(purchaseLineNeedsCostReview) ?? [];
-        const tracedLotIds = new Set(review.supplierCosts?.lines.flatMap(line => line.lots.map(lot => lot.id)) ?? []);
-        const unverifiedFlags = provisionalLots.filter(lot => !tracedLotIds.has(lot.id));
-        if (lines.length > 0 && (supplierReview.length > 0 || (unverifiedFlags.length > 0 && unpostedLines.length === 0))) {
-          // A flag alone cannot contradict verified current component postings.
-          // Untraced flagged lots remain actionable; estimates and genuine source
-          // issues are independently projected even when the legacy flag is 0.
-          counts.provisionalOtherCosts += 1;
-          items.push({
-            id: `provisional_other_costs-${shipment.id}`, type: "provisional_other_costs", severity: "warning",
-            shipmentId: shipment.id, shipmentNumber: shipment.shipmentNumber ?? null, shipmentStatus: shipment.status,
-            detail: `${unpostedLines.length === 0 ? "Landed costs are posted. " : ""}${supplierReview.length > 0
-              ? `${supplierReview.length} PO lines need product / packaging cost review (${provisionalLots.length} provisional lots on this shipment). ${supplierReview.some(line => purchaseCostNextAction(line) === "invoice") ? "Confirm the supplier invoice amounts in cost review." : "Open cost review for the affected receipts and lot history."}`
-              : `${unverifiedFlags.length} lot${unverifiedFlags.length === 1 ? " retains" : "s retain"} a provisional flag without verified supplier-cost coverage. Open cost review to compare their current component evidence; this flag alone does not mean freight is unposted.`}`,
-            action: "review_cost_evidence", provisionalLotCount: provisionalLots.length,
-          });
-        }
-        if (unpostedLines.length > 0 && (provisionalLots.length > 0
-          || allocation.allocatableCostCount > 0 || needsSourceReview)) {
-          const fullyFinalized = finalizedLineCount === lines.length && lines.length > 0;
-          const closedProvisional = shipment.status === "closed" && provisionalLots.length > 0;
-          const readyToPush = !needsSourceReview && fullyFinalized && !closedProvisional;
-          const type = closedProvisional ? "stale_provisional_lots"
-            : readyToPush ? "finalized_not_pushed" : "posting_review_required";
-          if (closedProvisional) counts.staleProvisionalLots += 1;
-          else if (readyToPush) counts.finalizedNotPushed += 1;
-          else counts.postingReviewRequired += 1;
-          items.push({
-            id: `${type}-${shipment.id}`, type,
-            severity: shipment.status === "closed" ? "critical" : "warning",
-            shipmentId: shipment.id, shipmentNumber: shipment.shipmentNumber ?? null, shipmentStatus: shipment.status,
-            detail: `${unpostedLines.length} shipment line${unpostedLines.length === 1 ? " does" : "s do"} not have current posted landed costs. ${needsSourceReview
-              ? "Review the current source or reconciliation evidence before updating costs."
-              : "Update shipment costs to apply the current source to inventory and sold costs."}`,
-            action: needsSourceReview ? "review_cost_evidence" : fullyFinalized ? "push_costs_to_lots" : "finalize_landed_cost",
-            provisionalLotCount: provisionalLots.length,
-          });
+  async function getShipmentPage(rawQuery: unknown): Promise<ShipmentWorkListPage> {
+    const query = shipmentWorkListQuerySchema.parse(rawQuery);
+    return db.transaction(async (tx: any): Promise<ShipmentWorkListPage> => {
+      const { costFilter, ...filters } = query;
+      let shipments: InboundShipment[] = [];
+      let total = 0;
+      const costHealthItems: LandedCostHealth["items"] = [];
+      if (costFilter === "all") {
+        total = await storage.getInboundShipmentsCount(filters, tx);
+        shipments = await storage.getInboundShipments(filters, tx);
+        for (const shipment of shipments) costHealthItems.push(...await readShipmentHealthIssues(shipment, tx));
+      } else {
+        // Cost evidence is an application projection, not a SQL status flag. Stream
+        // matching headers and retain only the requested page; no full-list materialization.
+        for (let offset = 0; ; offset += SHIPMENT_SCAN_PAGE_SIZE) {
+          const candidates = await storage.getInboundShipments({ ...filters, limit: SHIPMENT_SCAN_PAGE_SIZE, offset }, tx);
+          for (const shipment of candidates) {
+            const issues = await readShipmentHealthIssues(shipment, tx);
+            if (!matchesShipmentCostFilter(issues, costFilter)) continue;
+            if (total >= query.offset && shipments.length < query.limit) {
+              shipments.push(shipment);
+              costHealthItems.push(...issues);
+            }
+            total++;
+          }
+          if (candidates.length < SHIPMENT_SCAN_PAGE_SIZE) break;
         }
       }
-
-      const critical = items.filter((item) => item.severity === "critical").length;
-      const warning = items.filter((item) => item.severity === "warning").length;
-      const status = critical > 0 ? "critical" : warning > 0 ? "warning" : "healthy";
-
-      return landedCostHealthSchema.parse({
-        status,
-        scannedShipments: shipments.length,
-        critical,
-        warning,
-        counts,
-        items: items.slice(0, limit),
-      });
+      const purchaseOrders = await storage.getInboundShipmentPurchaseOrders(shipments.map(shipment => shipment.id), tx);
+      // JSON serialization is also the existing HTTP date boundary. Validate the
+      // entire outgoing page before sending it, including exact integer money.
+      const result = shipmentWorkListPageSchema.safeParse(JSON.parse(JSON.stringify({
+        shipments: shipments.map(shipment => ({ ...shipment, purchaseOrders: purchaseOrders.get(shipment.id) ?? [] })),
+        total, limit: query.limit, offset: query.offset, hasMore: query.offset + shipments.length < total, costHealthItems,
+      })));
+      if (!result.success) throw new ShipmentTrackingError("Current shipment list evidence is incomplete or invalid. Reload shipments.", 500,
+        { code: "SHIPMENT_LIST_EVIDENCE_INVALID", issues: result.error.issues });
+      return result.data;
     }, { isolationLevel: "repeatable read", accessMode: "read only" });
   }
 
@@ -1764,11 +1776,22 @@ export function createShipmentTrackingService(
 
   // ─── Public API ────────────────────────────────────────────────
 
+  const lineMutationOwner = createShipmentLineMutationOwner({
+    storage, lockShipment, resolveDimensions: resolveDimensionsForVariant,
+    recomputeTotals: recomputeShipmentTotals,
+    refreshAllocations: async (tx, shipmentId, shipment, recordedAt) => {
+      for (const cost of await storage.getInboundFreightCosts(shipmentId, tx)) assertCostCurrencyBasis(cost);
+      return refreshAllocationsForShipmentInTransaction(tx, shipmentId, shipment, recordedAt);
+    },
+  });
+
   return {
     // CRUD
     createShipment,
+    executeCreateShipmentInTransaction,
     getShipment,
     getShipments,
+    getShipmentPage,
     getShipmentPurchaseOrders,
     getShipmentsCount: (filters?: any) => storage.getInboundShipmentsCount(filters),
     getShipmentByNumber: (num: string) => storage.getInboundShipmentByNumber(num),
@@ -1786,16 +1809,7 @@ export function createShipmentTrackingService(
     cancel,
 
     // Lines
-    executeLineCommandInTransaction: createShipmentLineMutationOwner({
-      storage, lockShipment, resolveDimensions: resolveDimensionsForVariant,
-      recomputeTotals: recomputeShipmentTotals,
-      refreshAllocations: async (tx, shipmentId, shipment, recordedAt) => {
-        // Physical line edits change charge distribution. Preserve the same
-        // verified currency basis required by the shipment charge owner.
-        for (const cost of await storage.getInboundFreightCosts(shipmentId, tx)) assertCostCurrencyBasis(cost);
-        return refreshAllocationsForShipmentInTransaction(tx, shipmentId, shipment, recordedAt);
-      },
-    }).executeLineCommandInTransaction,
+    executeLineCommandInTransaction: lineMutationOwner.executeLineCommandInTransaction,
     getLines: (shipmentId: number) => storage.getInboundShipmentLines(shipmentId),
     getEnrichedLines: getEnrichedLines,
     getLinesByPo: (poId: number) => storage.getInboundShipmentLinesByPo(poId),

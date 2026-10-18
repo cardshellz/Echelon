@@ -1,3 +1,4 @@
+import { invoiceWorkListQuerySchema, paymentWorkListQuerySchema } from "@shared/procurement/ap-work-list";
 import { registerPoFinancialEvidenceRoutes } from "./po-financial-evidence.routes";
 import { invoiceCostReviewCommands } from "./invoice-cost-review.service";
 import { registerInvoiceQuantityCorrectionRoutes } from "./invoice-quantity-correction.routes";
@@ -47,6 +48,36 @@ export function registerApLedgerRoutes(app: Express) {
   // ============================================================
   // AP LEDGER - Vendor invoices
   // ============================================================
+
+  // Dedicated paged reads preserve legacy array/envelope consumers.
+  // Register these before /:id so "work-list" is never interpreted as a record ID.
+  app.get("/api/vendor-invoices/work-list", requirePermission("purchasing", "view"), async (req, res) => {
+    const query = invoiceWorkListQuerySchema.safeParse(req.query);
+    if (!query.success) {
+      res.status(400).json({ error: "Invalid invoice list filters", details: { code: "AP_WORK_LIST_QUERY_INVALID", issues: query.error.issues } });
+      return;
+    }
+    try {
+      res.json(await apLedger.listInvoiceWorkList(query.data, new Date()));
+    } catch (error) {
+      console.error("AP invoice work list failed", { code: "AP_WORK_LIST_READ_FAILED", error });
+      res.status(500).json({ error: "Unable to load invoices. Retry the list.", details: { code: "AP_WORK_LIST_READ_FAILED" } });
+    }
+  });
+
+  app.get("/api/ap-payments/work-list", requirePermission("purchasing", "view"), async (req, res) => {
+    const query = paymentWorkListQuerySchema.safeParse(req.query);
+    if (!query.success) {
+      res.status(400).json({ error: "Invalid payment list filters", details: { code: "AP_WORK_LIST_QUERY_INVALID", issues: query.error.issues } });
+      return;
+    }
+    try {
+      res.json(await apLedger.listPaymentWorkList(query.data));
+    } catch (error) {
+      console.error("AP payment work list failed", { code: "AP_WORK_LIST_READ_FAILED", error });
+      res.status(500).json({ error: "Unable to load payments. Retry the list.", details: { code: "AP_WORK_LIST_READ_FAILED" } });
+    }
+  });
 
   app.get("/api/vendor-invoices", requirePermission("purchasing", "view"), async (req, res) => {
     try {

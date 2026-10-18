@@ -1,3 +1,6 @@
+import { readInvoiceWorkList, readPaymentWorkList } from "./ap-work-list.repository";
+import type { InvoiceWorkListQuery, PaymentWorkListQuery, InvoiceWorkListPage, PaymentWorkListPage } from "@shared/procurement/ap-work-list";
+
 import { deriveInvoiceFinancialState } from "./domain/invoice-financial-state";
 import { invoiceEditCapability } from "./domain/ap-invoice-edit-policy";
 import { classifyApPaymentState, COMPLETED_AP_PAYMENT_STATUS, isRecordableApPaymentStatus } from "./domain/ap-payment-state";
@@ -1196,6 +1199,10 @@ export async function getInvoiceById(id: number) {
   }, { isolationLevel: "repeatable read", accessMode: "read only" });
 }
 
+export function listInvoiceWorkList(query: InvoiceWorkListQuery, now: Date): Promise<InvoiceWorkListPage> {
+  return readInvoiceWorkList(query, now);
+}
+
 export async function listInvoices(filters: {
   vendorId?: number;
   inboundShipmentId?: number;
@@ -2069,6 +2076,10 @@ export async function getPaymentById(id: number) {
     .where(eq(apPaymentAllocations.apPaymentId, id));
 
   return { ...payment.payment, vendorName: payment.vendorName, vendorCode: payment.vendorCode, allocations };
+}
+
+export function listPaymentWorkList(query: PaymentWorkListQuery): Promise<PaymentWorkListPage> {
+  return readPaymentWorkList(query);
 }
 
 export async function listPayments(filters: {

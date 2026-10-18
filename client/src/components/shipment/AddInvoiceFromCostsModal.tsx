@@ -1,3 +1,4 @@
+import { invalidateApInvoiceQueries } from "@/features/purchasing/ap-work-list-query";
 import { useState, useMemo } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
@@ -161,6 +162,7 @@ export function AddInvoiceFromCostsModal({
       return res.json();
     },
     onSuccess: () => {
+      void invalidateApInvoiceQueries(queryClient);
       queryClient.invalidateQueries({
         queryKey: [`/api/inbound-shipments/${shipmentId}`],
       });

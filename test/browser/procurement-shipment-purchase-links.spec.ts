@@ -1,3 +1,4 @@
+import { shipmentListItem } from "../fixtures/shipment-work-list";
 import { expect, test, type Page } from "@playwright/test";
 import { installFixtures } from "./procurement-fixtures";
 
@@ -19,7 +20,7 @@ async function installShipmentFixtures(page: Page) {
       failures.push(`Unexpected mutation: ${request.method()} ${request.url()}`);
     }
   });
-  await page.route(/\/api\/inbound-shipments\?/, (route) => route.fulfill({ json: { shipments, total: 4 } }));
+  await page.route(/\/api\/inbound-shipments\?/, (route) => route.fulfill({ json: { shipments: shipments.map(shipmentListItem), total: 4, limit: 50, offset: 0, hasMore: false, costHealthItems: [] } }));
   await page.route(/\/api\/procurement\/landed-cost-health\?/, (route) => route.fulfill({ json: {
     status: "healthy", scannedShipments: shipments.length, critical: 0, warning: 0,
     counts: { allocationBlockers: 0, allocationWarnings: 0, pendingFinalization: 0, finalizedNotPushed: 0, staleProvisionalLots: 0 },

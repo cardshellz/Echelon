@@ -1,3 +1,4 @@
+import { workListPage } from "./procurement-ap-work-list-fixtures";
 import { expect, test, type Page, type Route } from "@playwright/test";
 import { installFixtures, po } from "./procurement-fixtures";
 
@@ -23,7 +24,8 @@ async function setup(page: Page, options: { conflict?: boolean; lostImport?: boo
       if (options.poCaller && path === "/api/purchase-orders/17") return route.fulfill({ json: { ...po(17), lines: [{ id: 15, purchaseOrderId: 17, lineType: "product", lineNumber: 1, sku: "PO-REMAINING", productName: "PO product", orderQty: 1000, receivedQty: 0, unitCostCents: 10, subtotalCents: 10000 }] } });
       if (path === "/api/vendors") return route.fulfill({ json: [{ id: 2, name: "Test vendor" }] });
       if (path === "/api/purchase-orders") return route.fulfill({ json: { purchaseOrders: [{ id: 17, poNumber: "TEST-PO-17" }] } });
-      if (path === "/api/purchase-orders/17/shippable-lines") return route.fulfill({ json: { lines: [{ id: 15, sku: "PO-REMAINING", remainingQty: 501, orderQty: 1000 }], reviewRequiredLines: [{ id: 16, sku: "REVIEW-PO", remainingQty: null, code: "SOURCE_REVIEW_REQUIRED", error: "Finish or cancel the pending receipt, then review this line." }] } });
+      if (path === "/api/purchase-orders/work-list") return route.fulfill({ json: workListPage([{ id: 17, poNumber: "TEST-PO-17", vendorId: 2, status: "received", totalCents: 10000 }], request.url()) });
+      if (path === "/api/purchase-orders/17/shippable-lines") return route.fulfill({ json: { lines: [{ id: 15, purchaseOrderId: 17, sku: "PO-REMAINING", productName: "PO product", description: null, remainingQty: 501, orderQty: 1000, alreadyShippedQty: 499, directReceivedQty: 0 }], reviewRequiredLines: [{ id: 16, purchaseOrderId: 17, sku: "REVIEW-PO", remainingQty: null, code: "SOURCE_REVIEW_REQUIRED", error: "Finish or cancel the pending receipt, then review this line." }] } });
       if (path === "/api/inbound-shipments/42" || path === "/api/inbound-shipments/43") {
         state.detailReads += 1;
         if (options.failRefresh && state.committed) return route.fulfill({ status: 503, json: { error: "Fixture refresh failed" } });
@@ -39,7 +41,17 @@ async function setup(page: Page, options: { conflict?: boolean; lostImport?: boo
       } });
       return route.fallback();
     }
-    if (options.poCaller && path === "/api/inbound-shipments" && request.method() === "POST") { state.lines = []; return route.fulfill({ status: 201, json: { id: 42, shipmentNumber: "TEST-SHIP-42" } }); }
+    if (options.poCaller && path === "/api/inbound-shipments" && request.method() === "POST") {
+      const command = { method: request.method(), path, key: request.headers()["idempotency-key"], body: request.postDataJSON() };
+      state.commands.push(command);
+      if (!command.key) return route.fulfill({ status: 400, json: { error: "Missing command key" } });
+      if (replays.has(command.key)) return route.fulfill({ status: 201, json: replays.get(command.key) });
+      state.lines = command.body.purchaseOrder.lineSelections.map((selected: { poLineId: number; qty: number }) => ({ ...fixtureLine(state.nextId++), purchaseOrderLineId: selected.poLineId, qtyShipped: selected.qty }));
+      const result = { id: 42, shipmentNumber: "TEST-SHIP-42", status: "draft", lineCount: state.lines.length, createdBy: "test-user", createdAt: "2026-10-18T12:00:00.000Z", updatedAt: "2026-10-18T12:00:00.000Z" };
+      replays.set(command.key, result);
+      if (options.lostAdd && !lost) { lost = true; return route.abort("connectionreset"); }
+      return route.fulfill({ status: 201, json: result });
+    }
     if (!/^\/api\/inbound-shipments\/(42\/lines\/(from-po|import-packing-list|resolve-dimensions)|lines\/\d+)$/.test(path)) return route.fallback();
     const command = { method: request.method(), path, key: request.headers()["idempotency-key"], body: request.postDataJSON() };
     state.commands.push(command);
@@ -246,20 +258,20 @@ test("dimension batch adopts only allocation-induced sibling versions without ma
   expect(state.lines.every((line) => line.qtyShipped === 501)).toBe(true); expect(failures).toEqual([]);
 });
 
-test("PO shipment creation appends explicit pieces and hands uncertain append recovery to the shipment", async ({ page }) => {
+test("PO shipment creation commits explicit pieces atomically and recovers the original create command", async ({ page }) => {
   const { state, failures } = await setup(page, { poCaller: true, lostAdd: true });
   await page.goto("/purchase-orders/17?tab=shipments");
   await page.getByRole("button", { name: "Create Shipment", exact: true }).click();
   await expect(page.getByRole("dialog").getByText(/REVIEW-PO: Finish or cancel/)).toBeVisible();
   await expect(page.getByRole("dialog").getByRole("spinbutton")).toHaveValue("501");
   await page.getByRole("dialog").getByRole("button", { name: "Create Shipment", exact: true }).click();
+  await expect(page.getByRole("dialog").getByText("Shipment creation needs confirmation", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Recover shipment creation", exact: true }).click();
   await expect(page.getByRole("heading", { name: "TEST-SHIP-42", exact: true })).toBeVisible();
-  await page.getByRole("button", { name: "Review pending line command", exact: true }).click();
-  await page.getByRole("button", { name: "Retry original line command", exact: true }).click();
-  await expect(page.getByRole("dialog")).not.toBeVisible();
   expect(state.commands).toHaveLength(2);
-  expect(state.commands[0].body).toEqual({ purchaseOrderId: 17, lineSelections: [{ poLineId: 15, qty: 501 }] });
-  expect(state.commands[1].key).toBe(state.commands[0].key);
+  expect(state.commands[0].path).toBe("/api/inbound-shipments");
+  expect(state.commands[0].body.purchaseOrder).toEqual({ purchaseOrderId: 17, lineSelections: [{ poLineId: 15, qty: 501 }] });
+  expect(state.commands[1]).toEqual(state.commands[0]);
   expect(state.lines).toHaveLength(1); expect(state.lines[0].qtyShipped).toBe(501); expect(failures).toEqual([]);
 });
 
@@ -274,4 +286,60 @@ test("failed import optional values can be cleared before retrying only rejected
   await expect(page.getByRole("dialog").getByText("All submitted rows were imported.")).toBeVisible();
   expect(state.commands[1].body.rows).toEqual([{ sku: "BAD", qtyShipped: 6 }]);
   expect(state.lines.filter((line) => line.sku === "GOOD")).toHaveLength(1); expect(failures).toEqual([]);
+});
+
+
+test("shipment add-lines searches POs beyond 200 and preserves selected quantities across pages and search", async ({ page }) => {
+  const { state, failures } = await setup(page); const requests: URLSearchParams[] = [];
+  const all = Array.from({ length: 225 }, (_, index) => ({ id: index + 1, poNumber: `OLDER-PO-${index + 1}`, vendorId: 2, status: "received", totalCents: 10000 }));
+  await page.route("**/api/purchase-orders/work-list?*", route => {
+    const params = new URL(route.request().url()).searchParams; requests.push(params);
+    return route.fulfill({ json: workListPage(params.get("search") ? all.filter(po => po.poNumber === params.get("search")) : all, route.request().url()) });
+  });
+  await page.route("**/api/purchase-orders/225/shippable-lines", route => route.fulfill({ json: { lines: [{ id: 2251, sku: "OLDER-PIECES", remainingQty: 12, orderQty: 12 }], reviewRequiredLines: [] } }));
+  await page.getByRole("button", { name: "Add from PO", exact: true }).click();
+  const dialog = page.getByRole("dialog"); const pages = dialog.getByRole("navigation", { name: "purchase orders pages" });
+  await expect(pages).toContainText("1–20 of 225 purchase orders"); await pages.getByRole("button", { name: "Next", exact: true }).click();
+  await expect(pages).toContainText("21–40 of 225 purchase orders");
+  await dialog.getByLabel("Find purchase order", { exact: true }).fill("OLDER-PO-225");
+  await expect(pages).toContainText("1–1 of 1 purchase orders");
+  await dialog.getByLabel("Purchase order", { exact: true }).selectOption("225");
+  await dialog.getByRole("checkbox", { name: "OLDER-PIECES" }).check();
+  await dialog.getByLabel("Pieces for OLDER-PIECES", { exact: true }).fill("7");
+  await dialog.getByLabel("Find purchase order", { exact: true }).fill("");
+  await expect(pages).toContainText("1–20 of 225 purchase orders");
+  await expect(dialog.getByLabel("Purchase order", { exact: true })).toHaveValue("225");
+  await expect(dialog.getByLabel("Pieces for OLDER-PIECES", { exact: true })).toHaveValue("7");
+  expect(requests.every(params => params.get("purpose") === "shipment-lines" && !params.has("vendorId"))).toBe(true);
+  expect(state.commands).toEqual([]); expect(failures).toEqual([]);
+});
+
+test("shipment PO filter failures retry truthfully and stale searches cannot replace the selected PO or a new shipment visit", async ({ page }) => {
+  const { state, failures } = await setup(page); let failed = true; let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  await page.route("**/api/purchase-orders/work-list?*", async route => {
+    if (failed) return route.fulfill({ status: 503, json: { error: "Unavailable" } });
+    const search = new URL(route.request().url()).searchParams.get("search");
+    if (search === "delayed") await gate;
+    return route.fulfill({ json: workListPage([{ id: search === "delayed" ? 99 : 17, poNumber: search === "delayed" ? "STALE-PO-99" : "TEST-PO-17", vendorId: 2, status: "received", totalCents: 10000 }], route.request().url()) });
+  });
+  await page.getByRole("button", { name: "Add from PO", exact: true }).click(); const dialog = page.getByRole("dialog");
+  await expect(dialog.getByRole("alert")).toContainText("Purchase orders could not be loaded");
+  await expect(dialog.getByText("No purchase orders match this search.")).toHaveCount(0);
+  failed = false; await dialog.getByRole("button", { name: "Retry purchase orders", exact: true }).click();
+  await dialog.getByLabel("Purchase order", { exact: true }).selectOption("17");
+  await dialog.getByRole("checkbox", { name: "PO-REMAINING" }).check();
+  await dialog.getByLabel("Find purchase order", { exact: true }).fill("delayed");
+  await expect(dialog.getByText("Loading purchase orders…", { exact: true })).toBeVisible();
+  await dialog.getByLabel("Find purchase order", { exact: true }).fill(""); release();
+  await expect(dialog.getByLabel("Purchase order", { exact: true })).toBeEnabled();
+  await expect(dialog.getByLabel("Purchase order", { exact: true })).toHaveValue("17");
+  await expect(dialog.getByRole("option", { name: "STALE-PO-99" })).toHaveCount(0);
+  await dialog.getByRole("button", { name: "Close", exact: true }).last().click();
+  await page.evaluate(() => { window.history.pushState(null, "", "/shipments/43?tab=lines"); window.dispatchEvent(new PopStateEvent("popstate")); });
+  await expect(page.getByRole("heading", { name: "TEST-SHIP-43", exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Add from PO", exact: true }).click();
+  await expect(page.getByLabel("Purchase order", { exact: true })).toHaveValue("");
+  await expect(page.getByRole("checkbox", { name: "PO-REMAINING" })).toHaveCount(0);
+  expect(state.commands).toEqual([]); expect(failures).toEqual([]);
 });

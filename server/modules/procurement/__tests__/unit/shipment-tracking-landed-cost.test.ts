@@ -596,7 +596,7 @@ describe("ShipmentTrackingService.getLandedCostHealth", () => {
 
     const result = await service.getLandedCostHealth({ limit: 25 });
 
-    expect(storage.getInboundShipments).toHaveBeenCalledWith({ status: ["costing", "closed"], limit: 25 }, tx);
+    expect(storage.getInboundShipments).toHaveBeenCalledWith({ status: ["costing", "closed"], limit: 100, offset: 0 }, tx);
     expect(result.status).toBe("critical");
     expect(result.counts.staleProvisionalLots).toBe(1);
     expect(result.items[0]).toEqual(expect.objectContaining({

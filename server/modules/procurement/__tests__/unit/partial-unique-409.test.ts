@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Unit tests for partial unique index 409 error handling.
@@ -10,126 +10,32 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 
 // ── Shipment Tracking ────────────────────────────────────────────────────────
 
-describe("createShipment — 409 on duplicate shipment number", () => {
-  let createShipmentTrackingService: any;
-  let ShipmentTrackingError: any;
+describe("createShipment atomic duplicate shipment number rejection", () => {
+  async function fixture(error: unknown) {
+    const { createShipmentTrackingService } = await import("../../shipment-tracking.service");
+    const returning = vi.fn().mockRejectedValue(error);
+    const tx = { execute: vi.fn().mockResolvedValue({ rows: [] }), insert: vi.fn(() => ({ values: vi.fn(() => ({ returning })) })) };
+    const database = { transaction: vi.fn(async (work: (executor: typeof tx) => Promise<unknown>) => work(tx)) };
+    const storage = {} as Parameters<typeof createShipmentTrackingService>[1];
+    return { service: createShipmentTrackingService(database, storage), database, tx };
+  }
 
-  beforeEach(async () => {
-    vi.resetModules();
-    const mod = await import("../../shipment-tracking.service");
-    createShipmentTrackingService = mod.createShipmentTrackingService;
-    ShipmentTrackingError = mod.ShipmentTrackingError;
-  });
-
-  it("throws ShipmentTrackingError with 409 on unique violation", async () => {
-    const mockDb = {};
-    const mockStorage = {
-      generateShipmentNumber: vi.fn().mockResolvedValue("SHP-20260503-001"),
-      createInboundShipment: vi.fn().mockRejectedValue({ code: "23505", constraint: "inbound_shipments_shipment_number_active_uidx" }),
-      getInboundShipments: vi.fn(),
-      getInboundShipmentsCount: vi.fn(),
-      getInboundShipmentById: vi.fn(),
-      getInboundShipmentByNumber: vi.fn(),
-      updateInboundShipment: vi.fn(),
-      deleteInboundShipment: vi.fn(),
-      getInboundShipmentLines: vi.fn(),
-      getInboundShipmentLineById: vi.fn(),
-      getInboundShipmentLinesByPo: vi.fn(),
-      createInboundShipmentLine: vi.fn(),
-      bulkCreateInboundShipmentLines: vi.fn(),
-      updateInboundShipmentLine: vi.fn(),
-      deleteInboundShipmentLine: vi.fn(),
-      getInboundFreightCosts: vi.fn(),
-      getInboundFreightCostById: vi.fn(),
-      createInboundFreightCost: vi.fn(),
-      updateInboundFreightCost: vi.fn(),
-      deleteInboundFreightCost: vi.fn(),
-      getInboundFreightCostAllocations: vi.fn(),
-      getAllocationsForLine: vi.fn(),
-      createInboundFreightCostAllocation: vi.fn(),
-      bulkCreateInboundFreightCostAllocations: vi.fn(),
-      deleteAllocationsForShipment: vi.fn(),
-      getLandedCostSnapshots: vi.fn(),
-      getLandedCostSnapshotByPoLine: vi.fn(),
-      createLandedCostSnapshot: vi.fn(),
-      bulkCreateLandedCostSnapshots: vi.fn(),
-      deleteLandedCostSnapshotsForShipment: vi.fn(),
-      createLandedCostAdjustment: vi.fn(),
-      createInboundShipmentStatusHistory: vi.fn(),
-      getInboundShipmentStatusHistory: vi.fn(),
-      getInboundShipmentsByPo: vi.fn(),
-      getProvisionalLotsByShipment: vi.fn(),
-      getPurchaseOrderById: vi.fn(),
-      getPurchaseOrderLines: vi.fn(),
-      getPurchaseOrderLineById: vi.fn(),
-      getVendorProducts: vi.fn(),
-      getProductVariantById: vi.fn(),
-      getProductById: vi.fn(),
-      updateInventoryLot: vi.fn(),
-    };
-
-    const service = createShipmentTrackingService(mockDb, mockStorage);
-
-    await expect(service.createShipment({})).rejects.toMatchObject({
-      name: "ShipmentTrackingError",
-      statusCode: 409,
+  it("preserves the 409 domain outcome for the active number constraint inside the transaction", async () => {
+    const { service, database } = await fixture(new Error("insert failed", {
+      cause: { code: "23505", constraint: "inbound_shipments_shipment_number_active_uidx" },
+    }));
+    await expect(service.createShipment({ shipmentNumber: "MANUAL" }, "operator")).rejects.toMatchObject({
+      name: "ShipmentCreateError", code: "SHIPMENT_CREATE_NUMBER_CONFLICT", statusCode: 409,
     });
+    expect(database.transaction).toHaveBeenCalledOnce();
   });
 
-  it("re-throws non-23505 errors unchanged", async () => {
-    const mockDb = {};
-    const mockStorage = {
-      generateShipmentNumber: vi.fn().mockResolvedValue("SHP-20260503-001"),
-      createInboundShipment: vi.fn().mockRejectedValue(new Error("connection refused")),
-      getInboundShipments: vi.fn(),
-      getInboundShipmentsCount: vi.fn(),
-      getInboundShipmentById: vi.fn(),
-      getInboundShipmentByNumber: vi.fn(),
-      updateInboundShipment: vi.fn(),
-      deleteInboundShipment: vi.fn(),
-      getInboundShipmentLines: vi.fn(),
-      getInboundShipmentLineById: vi.fn(),
-      getInboundShipmentLinesByPo: vi.fn(),
-      createInboundShipmentLine: vi.fn(),
-      bulkCreateInboundShipmentLines: vi.fn(),
-      updateInboundShipmentLine: vi.fn(),
-      deleteInboundShipmentLine: vi.fn(),
-      getInboundFreightCosts: vi.fn(),
-      getInboundFreightCostById: vi.fn(),
-      createInboundFreightCost: vi.fn(),
-      updateInboundFreightCost: vi.fn(),
-      deleteInboundFreightCost: vi.fn(),
-      getInboundFreightCostAllocations: vi.fn(),
-      getAllocationsForLine: vi.fn(),
-      createInboundFreightCostAllocation: vi.fn(),
-      bulkCreateInboundFreightCostAllocations: vi.fn(),
-      deleteAllocationsForShipment: vi.fn(),
-      getLandedCostSnapshots: vi.fn(),
-      getLandedCostSnapshotByPoLine: vi.fn(),
-      createLandedCostSnapshot: vi.fn(),
-      bulkCreateLandedCostSnapshots: vi.fn(),
-      deleteLandedCostSnapshotsForShipment: vi.fn(),
-      createLandedCostAdjustment: vi.fn(),
-      createInboundShipmentStatusHistory: vi.fn(),
-      getInboundShipmentStatusHistory: vi.fn(),
-      getInboundShipmentsByPo: vi.fn(),
-      getProvisionalLotsByShipment: vi.fn(),
-      getPurchaseOrderById: vi.fn(),
-      getPurchaseOrderLines: vi.fn(),
-      getPurchaseOrderLineById: vi.fn(),
-      getVendorProducts: vi.fn(),
-      getProductVariantById: vi.fn(),
-      getProductById: vi.fn(),
-      updateInventoryLot: vi.fn(),
-    };
-
-    const service = createShipmentTrackingService(mockDb, mockStorage);
-
-    await expect(service.createShipment({})).rejects.toThrow("connection refused");
+  it("rethrows unrelated persistence errors instead of calling them duplicate shipment numbers", async () => {
+    const failure = new Error("connection refused");
+    const { service } = await fixture(failure);
+    await expect(service.createShipment({ shipmentNumber: "MANUAL" }, "operator")).rejects.toBe(failure);
   });
 });
-
-// ── AP Ledger (recordPayment) ────────────────────────────────────────────────
 
 describe("recordPayment — 409 on duplicate payment number", () => {
   it("throws ApLedgerError with 409 on unique violation", async () => {
