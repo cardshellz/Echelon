@@ -1,3 +1,4 @@
+import { resetFixtureCostHistory } from "./cost-history-fixture";
 import { readFile } from "node:fs/promises";
 import { recordCostRevision } from "../../cost-source-revision.repository";
 import { resolve } from "node:path";
@@ -67,6 +68,9 @@ databaseTests.sequential("purchase workspace PostgreSQL read model", () => {
     for (const ddl of tables) await pool.query(ddl);
     await pool.query(await readFile(resolve(process.cwd(), "migrations/222_procurement_cost_evidence.sql"), "utf8"));
     await pool.query(await readFile(resolve(process.cwd(), "migrations/231_receipt_cost_recovery.sql"), "utf8"));
+    await pool.query(await readFile(resolve(process.cwd(), "migrations/900000007000018030001_shipment_cost_exception_decisions.sql"), "utf8"));
+    await pool.query(await readFile(resolve(process.cwd(), "migrations/900000008000018110001_shipment_cost_reconciliation.sql"), "utf8"));
+    await pool.query(await readFile(resolve(process.cwd(), "migrations/900000009000018290001_historical_cost_origin_repairs.sql"), "utf8"));
     // The complete RFQ command/migration proof lives in rfq-workflow.integration.
     // This read fixture supplies the exact origin projection's empty relations.
     await pool.query(`CREATE TABLE procurement.request_for_quotes(id integer PRIMARY KEY,rfq_number text NOT NULL);
@@ -335,7 +339,7 @@ databaseTests.sequential("purchase workspace PostgreSQL read model", () => {
       expect(queue[0].attempts[0]).toMatchObject({ evidenceState: "verified_record", applicationIds: [applicationId] });
       expect(queue[0].attempts[1].state).toBe("retry_required");
     } finally {
-      await pool.query(`TRUNCATE inventory.cost_applications,procurement.cost_source_revisions,inventory.lot_cost_origins,
+      await resetFixtureCostHistory(pool, `TRUNCATE inventory.cost_applications,procurement.cost_source_revisions,inventory.lot_cost_origins,
         inventory.lot_cost_contributions,procurement.receipt_cost_requests RESTART IDENTITY CASCADE`);
       await pool.query("DELETE FROM inventory.inventory_lots WHERE id IN (901,902)");
       await pool.query("UPDATE procurement.receiving_orders SET status='open' WHERE id=34");
@@ -348,7 +352,7 @@ databaseTests.sequential("purchase workspace PostgreSQL read model", () => {
     try {
       await expect(workspace()).rejects.toMatchObject({ code: "PURCHASE_WORKSPACE_TOO_LARGE", statusCode: 422 });
     } finally {
-      await pool.query("TRUNCATE procurement.cost_source_revisions CASCADE");
+      await resetFixtureCostHistory(pool, "TRUNCATE procurement.cost_source_revisions CASCADE");
     }
   });
   it("returns not found for an absent purchase without reading an unrelated graph", async () => {

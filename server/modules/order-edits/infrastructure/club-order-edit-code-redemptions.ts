@@ -1,9 +1,13 @@
 import { z } from "zod";
 import type { OrderEditCodeRedemptions } from "../application/order-edit-code-redemptions";
 import { OrderEditProviderError } from "../application/order-edit-provider";
+import type { OrderEditRewards } from "../application/order-edit-rewards";
+import { orderEditCodeRuleSchema } from "@shared/order-edits/order-edit-codes";
+import { rewardWidgetScopeSchema, rewardWidgetIssueSchema, rewardWidgetStateSchema, rewardWidgetIssueResultSchema } from "@shared/customer-account/reward-widget";
+import type { CustomerRewards } from "../../customer-account/application/customer-rewards";
 
-/** Finishes receipts created by the legacy integration; never validates new coupons. */
-export class ClubOrderEditCodeRedemptions implements OrderEditCodeRedemptions {
+/** Club's existing issuance and receipt service; ordinary coupons never use it. */
+export class ClubOrderEditCodeRedemptions implements OrderEditCodeRedemptions, OrderEditRewards, CustomerRewards {
   constructor(
     private readonly baseUrl: string | undefined,
     private readonly apiKey: string | undefined,
@@ -25,8 +29,27 @@ export class ClubOrderEditCodeRedemptions implements OrderEditCodeRedemptions {
       return false;
     }
   }
+  async state(input: Parameters<CustomerRewards["state"]>[0]) {
+    return rewardWidgetStateSchema.parse(await this.request("rewards/state", rewardWidgetScopeSchema.parse(input), true));
+  }
+  async issue(input: Parameters<CustomerRewards["issue"]>[0]) {
+    return rewardWidgetIssueResultSchema.parse(await this.request("rewards/issue", rewardWidgetIssueSchema.parse(input), true));
+  }
   reserve(id: string) {
     return this.command(id, "reserve");
+  }
+  async identify(input: { customerId: string; codes: string[] }): Promise<string[]> {
+    const checked = z.object({ customerId: z.string().regex(/^gid:\/\/shopify\/Customer\/[1-9]\d*$/),
+      codes: z.array(z.string().trim().min(1).max(255)).min(1).max(5) }).strict().parse(input);
+    return z.object({ codes: z.array(z.string()).max(5) }).strict().parse(await this.request("identify", checked, true)).codes;
+  }
+  verify(input: Parameters<OrderEditRewards["verify"]>[0]): Promise<void> {
+    const checked = z.object({
+      customerId: z.string().regex(/^gid:\/\/shopify\/Customer\/[1-9]\d*$/),
+      orderId: z.string().regex(/^gid:\/\/shopify\/Order\/[1-9]\d*$/),
+      rules: z.array(orderEditCodeRuleSchema.refine((rule) => rule.redemption === "club_reward")).min(1).max(5),
+    }).strict().parse(input);
+    return this.request("validate", checked).then(() => undefined);
   }
   finalize(id: string) {
     return this.command(id, "finalize");
@@ -35,9 +58,9 @@ export class ClubOrderEditCodeRedemptions implements OrderEditCodeRedemptions {
     return this.command(id, "release");
   }
   private command(id: string, action: string) {
-    return this.request(`${z.string().uuid().parse(id)}/${action}`, {});
+    return this.request(`${z.string().uuid().parse(id)}/${action}`, {}).then(() => undefined);
   }
-  private async request(path: string, input: unknown): Promise<void> {
+  private async request(path: string, input: unknown, result = false): Promise<unknown> {
     if (!this.available())
       throw new OrderEditProviderError(
         "ORDER_EDIT_CODES_UNAVAILABLE",
@@ -59,6 +82,7 @@ export class ClubOrderEditCodeRedemptions implements OrderEditCodeRedemptions {
         },
       );
       const body: unknown = await response.json();
+      if (response.ok && result) return body;
       if (
         response.ok &&
         z
@@ -69,7 +93,7 @@ export class ClubOrderEditCodeRedemptions implements OrderEditCodeRedemptions {
         return;
       const failure = z
         .object({
-          code: z.string().regex(/^ORDER_EDIT_[A-Z0-9_]+$/),
+          code: z.string().regex(/^(ORDER_EDIT|REWARD)_[A-Z0-9_]+$/),
           message: z.string().min(1).max(1000),
         })
         .safeParse(body);

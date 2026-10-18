@@ -95,7 +95,7 @@ export class PickCorrectionService {
   }
 
   /** Moves an idle "No" (corrective scan not done) to the requesting picker. */
-  async takeOver(id: number, raw: unknown, actor: string): Promise<PickCorrection> {
+  async takeOver(id: number, raw: unknown, actor: string, options: { supervisor?: boolean } = {}): Promise<PickCorrection> {
     const command = takeOverPickCorrectionSchema.parse(raw);
     if (!actor.trim()) throw new PickCorrectionError("INVALID_ACTOR", "A signed-in picker is required.");
     const hash = correctionHash({ id, actor, command, action: "take_over" });
@@ -107,7 +107,7 @@ export class PickCorrectionService {
         return before;
       }
       const now = this.clock();
-      if (before.revision !== command.expectedRevision || !canTakeOverPickCorrection(before, actor, now)) {
+      if (before.revision !== command.expectedRevision || !canTakeOverPickCorrection(before, actor, now, options.supervisor === true)) {
         throw new PickCorrectionError("CORRECTION_CHANGED", "This correction changed or is not idle long enough to take over. Refresh it.");
       }
       await reassignPickCorrection(tx, id, actor, now);

@@ -155,7 +155,7 @@ export function projectPurchaseCostApplications(input: PurchaseCostApplicationRe
         id: posting.id, approvalId: posting.approvalId, destination: posting.destination,
         beforeMills: posting.beforeMills, afterMills: posting.afterMills, deltaMills: posting.deltaMills,
       }))) && postings.every((posting) => posting.sourceRevisionId === row.id)
-        && (postings.length === 0 || (row.component === "landed" && source?.currency === "USD"));
+        && (postings.length === 0 || source?.currency === "USD");
       const unresolved = unresolvedCostQuantitySchema.array().safeParse(event?.unresolvedQuantities ?? []);
       const unresolvedMatch = unresolved.success && canonicalJson(unresolved.data) === canonicalJson(retainedQuantityReview && result.success
         ? result.data.issues.map((problem) => problem.unresolvedQuantity) : []);
@@ -182,7 +182,7 @@ export function projectPurchaseCostApplications(input: PurchaseCostApplicationRe
     const latestApplication = applications.find((application) => application.id === latestApplicationId);
     // An approval resolves the current source, never rewrites an older source or
     // claims that an earlier failed attempt performed the later posting.
-    const currentResolution = candidate && source?.component === "landed" && source.scope.kind === "shipment_line"
+    const currentResolution = candidate && source
       && source.currency === "USD" && source.issue === null && ["estimated", "confirmed"].includes(source.evidence)
       && source.totalMills !== null && candidate.postedMills <= source.totalMills
       && row.revision === latestRevision.get(revisionKey(row)) && candidate.sourceFingerprint === row.fingerprint

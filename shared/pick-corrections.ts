@@ -56,11 +56,17 @@ export const takeOverPickCorrectionSchema = z.object({
   commandId: z.string().uuid(),
   expectedRevision: id,
 }).strict();
+/**
+ * A supervisor (picking:release_any) may take over at any time: admins must be
+ * able to clear every correction from the UI without waiting (2026-10-18).
+ * Taking over never skips the pick itself, so inventory still posts.
+ */
 export function canTakeOverPickCorrection(correction: Pick<PickCorrection,
-  "state" | "answer" | "assignedPickerId" | "updatedAt">, actor: string, now: Date): boolean {
+  "state" | "answer" | "assignedPickerId" | "updatedAt">, actor: string, now: Date,
+  supervisor = false): boolean {
   return correction.state === "picking_required" && correction.answer === "no"
     && correction.assignedPickerId !== null && correction.assignedPickerId !== actor
-    && now.getTime() - correction.updatedAt.getTime() >= PICK_CORRECTION_TAKEOVER_IDLE_MS;
+    && (supervisor || now.getTime() - correction.updatedAt.getTime() >= PICK_CORRECTION_TAKEOVER_IDLE_MS);
 }
 
 /** The shipment declaration is packing evidence, never a synthetic pick. */

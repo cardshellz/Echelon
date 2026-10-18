@@ -36,12 +36,50 @@ describe("claim-backed inline package conversion selection", () => {
   it.each(["assemble_pack", "directed_conversion"] as const)("selects approved %s work for policy validation before picking", operationType => {
     expect(select([operation({ operationType })])).toEqual([operation({ operationType })]);
   });
-  it("surfaces a root component build as required work rather than a missing-bin reservation", () => {
-    expect(() => select([operation({ operationType:"component_build" })])).toThrow("requires warehouse work");
+  it("assembles a root component build at pick", () => {
+    const build = operation({ operationKey: "build", operationType: "component_build",
+      inputs: [{ sourceVariantId: 201, requiredQty: "1" }, { sourceVariantId: 202, requiredQty: "1" }], sourceVariantIds: [201, 202] });
+    expect(select([build])).toEqual([build]);
   });
-  it("never silently auto-builds a dependency or re-executes a completed case break", () => {
-    expect(() => select([operation(), operation({ operationKey: "build", parentOperationKey: "case-pack", operationType: "component_build" })]))
+  it("orders the #64366 shape prerequisite-first: component build, then the P5 package conversion", () => {
+    const pack = operation({ operationKey: "p5-pack", operationType: "directed_conversion", committedOutputQty: "2", outputQty: "2" });
+    const build = operation({ operationKey: "box-build", parentOperationKey: "p5-pack", operationType: "component_build",
+      destinationVariantId: 102, outputQty: "10", committedOutputQty: "10", outputLocationId: 300 });
+    expect(select([pack, build]).map(op => op.operationKey)).toEqual(["box-build", "p5-pack"]);
+    // A completed build is never rebuilt: only the remaining conversion runs.
+    expect(select([pack, build], { states: new Map([["box-build", "completed"], ["p5-pack", "pending"]]) })
+      .map(op => op.operationKey)).toEqual(["p5-pack"]);
+  });
+  it("orders nested builds deepest-first under a package conversion", () => {
+    const pack = operation({ operationKey: "pack", operationType: "assemble_pack" });
+    const outer = operation({ operationKey: "outer-build", parentOperationKey: "pack", operationType: "component_build", destinationVariantId: 102 });
+    const inner = operation({ operationKey: "inner-build", parentOperationKey: "outer-build", operationType: "component_build", destinationVariantId: 103 });
+    const sibling = operation({ operationKey: "a-sibling", parentOperationKey: "outer-build", operationType: "break_pack", destinationVariantId: 104 });
+    expect(select([pack, outer, inner, sibling]).map(op => op.operationKey))
+      .toEqual(["a-sibling", "inner-build", "outer-build", "pack"]);
+  });
+  it("never re-executes a build already sent to assembly work", () => {
+    const build = operation({ operationKey: "build", operationType: "component_build" });
+    expect(() => select([build], { states: new Map([["build", "executing"]]) })).toThrow("already sent to assembly work");
+  });
+  it("keeps warehouse, output-location, cycle and bound fences for builds", () => {
+    const pack = operation();
+    expect(() => select([pack, operation({ operationKey: "build", parentOperationKey: "case-pack", operationType: "component_build", warehouseId: 2 })]))
       .toThrow("requires warehouse work");
+    expect(() => select([pack, operation({ operationKey: "build", parentOperationKey: "case-pack", operationType: "component_build", outputLocationId: null })]))
+      .toThrow("requires warehouse work");
+    // A parent loop with no root is never walked (and never spins).
+    const loop = [
+      operation({ operationKey: "a", parentOperationKey: "c", operationType: "component_build" }),
+      operation({ operationKey: "b", parentOperationKey: "a", operationType: "component_build" }),
+      operation({ operationKey: "c", parentOperationKey: "b", operationType: "component_build" }),
+    ];
+    expect(select(loop)).toEqual([]);
+    const bounded = Array.from({ length: 1001 }, (_, index) =>
+      operation({ operationKey: `op-${index}`, operationType: "component_build" }));
+    expect(() => select(bounded)).toThrow("unique and bounded");
+  });
+  it("never re-executes a completed case break", () => {
     expect(select(undefined, { states: new Map([["case-pack", "completed"]]) })).toEqual([]);
     expect(() => select(undefined, { states: new Map([["case-pack", "released"]]) })).toThrow("requires warehouse work");
     expect(() => select([operation(), operation()])).toThrow("unique and bounded");

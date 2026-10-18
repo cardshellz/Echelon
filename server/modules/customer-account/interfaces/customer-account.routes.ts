@@ -42,6 +42,7 @@ import {
 import type { customerAccountServices } from "../infrastructure/customer-account.composition";
 import { orderEditPricingDisplayVersionSchema } from "@shared/order-edits/order-edit-financials";
 import { orderEditResponsePresentation } from "../../order-edits/application/order-edit-response-presentation";
+import { rewardWidgetStateSchema, rewardWidgetIssueResultSchema } from "@shared/customer-account/reward-widget";
 
 type Services = ReturnType<ReturnType<typeof customerAccountServices>>;
 export interface CustomerAccountRouteDependencies {
@@ -230,6 +231,13 @@ async function dispatch(
     return services.edits.resolve(body);
   }
   const order = /^\/order-edits\/orders\/([1-9][0-9]*)$/.exec(path);
+  const rewards = /^\/order-edits\/orders\/([1-9][0-9]*)\/rewards(?:\/(issue))?$/.exec(path);
+  if (rewards) {
+    const params = connectionQuery.parse(query);
+    if (read && !rewards[2]) return rewardWidgetStateSchema.parse(await services.edits.rewardsState(params.connectionId, id.parse(rewards[1])));
+    if (!read && rewards[2] === "issue") return rewardWidgetIssueResultSchema.parse(await services.edits.issueReward(params.connectionId, id.parse(rewards[1]), body, commandKey(input)));
+    throw new OrderEditError("REWARD_REQUEST_INVALID", "This rewards action is unavailable.", 400);
+  }
   if (order && read) {
     const params = connectionQuery
       .extend({ codeEntryVersion: z.literal("v1").optional() })

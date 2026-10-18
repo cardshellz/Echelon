@@ -47,7 +47,7 @@ import { OrderEditError } from "../domain/order-edit-error";
 import { sameOrderEditPlan } from "../domain/order-edit-plan-identity";
 import { orderEditHasSubmissionEvidence } from "./order-edit-submission";
 import type { OrderEditCodeRedemptions } from "./order-edit-code-redemptions";
-import { requiresLegacyCodeReceipt } from "../domain/order-edit-coupon-boundary";
+import { requiresOrderEditCodeReceipt } from "../domain/order-edit-coupon-boundary";
 import { presentOrderEditCodeBreakdown } from "./order-edit-code-presentation";
 import {
   orderEditActorFingerprint,
@@ -1216,7 +1216,7 @@ export class OrderEditService {
     record: OrderEditRecord,
     action: "reserve" | "finalize" | "release",
   ): Promise<void> {
-    if (!requiresLegacyCodeReceipt(record.quote?.codePricing)) return;
+    if (!requiresOrderEditCodeReceipt(record.quote?.codePricing)) return;
     if (!this.codeRedemptions?.available())
       throw new OrderEditError(
         "ORDER_EDIT_CODES_UNAVAILABLE",
