@@ -47,6 +47,7 @@ vi.mock("../../purchasing.service", () => ({
 }));
 
 import { registerPurchasingAdminRoutes } from "../../purchasing-admin.routes";
+import { PurchasingError } from "../../purchasing.service";
 
 function buildPurchasingMock(overrides: Record<string, any> = {}) {
   return {
@@ -56,6 +57,7 @@ function buildPurchasingMock(overrides: Record<string, any> = {}) {
     updateVendorProduct: vi.fn(),
     deleteVendorProduct: vi.fn(),
     bulkUpsertVendorCatalog: vi.fn(),
+    applyReviewedSupplierEvidenceImport: vi.fn(),
     getApprovalTiers: vi.fn(),
     createApprovalTier: vi.fn(),
     updateApprovalTier: vi.fn(),
@@ -643,7 +645,7 @@ describe("purchasing admin routes", () => {
 
     expect(status).toBe(200);
     expect(body).toMatchObject({
-      contractVersion: 1,
+      contractVersion: 2,
       vendor: { id: 4, code: "VEND-4", name: "Vendor Four" },
       summary: { total: 1, creates: 1, updates: 0, reactivations: 0 },
       items: [{
@@ -656,6 +658,7 @@ describe("purchasing admin routes", () => {
     });
     expect(body.previewHash).toMatch(/^[a-f0-9]{64}$/);
     expect(body.catalogEntries).toBeUndefined();
+    expect(body.catalogStateFingerprint).toBeUndefined();
     expect(purchasing.bulkUpsertVendorCatalog).not.toHaveBeenCalled();
   });
 
@@ -689,7 +692,7 @@ describe("purchasing admin routes", () => {
   it("requires the exact preview hash before atomically applying supplier evidence", async () => {
     const purchasing = buildPurchasingMock({
       getVendorProducts: vi.fn().mockResolvedValue([]),
-      bulkUpsertVendorCatalog: vi.fn().mockResolvedValue({
+      applyReviewedSupplierEvidenceImport: vi.fn().mockResolvedValue({
         created: [{ vendorProductId: 91, productId: 10, productVariantId: 20 }],
         updated: [],
         skipped: [],
@@ -737,8 +740,10 @@ describe("purchasing admin routes", () => {
       { ...input, previewHash: preview.body.previewHash },
     );
     expect(applied.status).toBe(200);
+    expect(applied.body.catalogStateFingerprint).toBeUndefined();
+    expect(purchasing.bulkUpsertVendorCatalog).not.toHaveBeenCalled();
     expect(applied.body.result.created[0].vendorProductId).toBe(91);
-    expect(purchasing.bulkUpsertVendorCatalog).toHaveBeenCalledWith(
+    expect(purchasing.applyReviewedSupplierEvidenceImport).toHaveBeenCalledWith(
       4,
       [expect.objectContaining({
         productId: 10,
@@ -754,8 +759,20 @@ describe("purchasing admin routes", () => {
           quotedCostMillsPerUom: 123456,
         },
       })],
+      expect.stringMatching(/^[a-f0-9]{64}$/),
       "test-user",
     );
+
+    // The same stale response is preserved if a writer wins after HTTP preflight.
+    purchasing.applyReviewedSupplierEvidenceImport.mockRejectedValue(new PurchasingError(
+      "Supplier evidence changed after preview; preview the file again before applying it", 409,
+      { code: "SUPPLIER_EVIDENCE_PREVIEW_STALE" },
+    ));
+    const lockedStale = await requestJson(server.url, "POST", "/api/purchasing/supplier-evidence-import/apply",
+      { ...input, previewHash: preview.body.previewHash });
+    expect(lockedStale.status).toBe(409);
+    expect(lockedStale.body.details.code).toBe("SUPPLIER_EVIDENCE_PREVIEW_STALE");
+    expect(purchasing.bulkUpsertVendorCatalog).not.toHaveBeenCalled();
   });
 
   it("serves approval tiers from the purchasing service", async () => {

@@ -756,7 +756,7 @@ async function executeAutoDraftJob(
 
     console.log(
       `[Auto-draft] Complete: ${itemsAnalyzed} analyzed, ${posCreated} created, ${linesAdded} lines added, ` +
-      `${handoffResult.skipped.length} stale snapshots skipped, ${skippedNoVendor} skipped (no vendor), ` +
+      `${handoffResult.skipped.length} sourcing or snapshot reviews required, ${skippedNoVendor} skipped (no vendor), ` +
       `${skippedExcluded} excluded`,
     );
 

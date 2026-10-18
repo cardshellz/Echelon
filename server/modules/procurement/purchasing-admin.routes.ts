@@ -479,9 +479,10 @@ export function registerPurchasingAdminRoutes(app: Express) {
           });
         }
         const userId = req.session.user?.id;
-        const result = await purchasing.bulkUpsertVendorCatalog(
+        const result = await purchasing.applyReviewedSupplierEvidenceImport(
           body.vendorId,
           preview.catalogEntries,
+          preview.catalogStateFingerprint,
           userId,
         );
         res.json({

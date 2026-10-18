@@ -267,6 +267,74 @@ describe("ReceivingService imported whole counts", () => {
   });
 });
 
+describe("ReceivingService deterministic CSV row identity", () => {
+  it.each([0, 1, 2])("rejects repeated input identities against %s existing matches without writing", async (count) => {
+    const test = harness({ lines: Array.from({ length: count }, (_, index) => ({ ...receiptLine(), id: 11 + index })) });
+    const before = structuredClone(test.state);
+    await expect(test.service.bulkImportLines(10, [
+      { sku: "PACK-250", qty: "5", location: "A-01" },
+      { sku: " pack-250 ", qty: "7", location: "Receiving" },
+      { sku: "OTHER", qty: "2" },
+    ], ACTOR)).rejects.toMatchObject({ statusCode: 409, details: {
+      code: "RECEIVING_IMPORT_IDENTITY_REVIEW_REQUIRED", rowErrors: [
+        { row: 1, code: "RECEIVING_IMPORT_DUPLICATE_IDENTITY" },
+        { row: 2, code: "RECEIVING_IMPORT_DUPLICATE_IDENTITY" },
+      ],
+    } });
+    expect(test.state).toEqual(before);
+    expectNoWrites(test);
+  });
+
+  it("does not pick one of multiple separately recorded physical lines", async () => {
+    const test = harness({ lines: [receiptLine(), { ...receiptLine(), id: 12, receivedQty: 7 }] });
+    const before = structuredClone(test.state);
+    await expect(test.service.bulkImportLines(10, [{ sku: "PACK-250", qty: "5", location: "A-01" }], ACTOR))
+      .rejects.toMatchObject({ details: { rowErrors: [{ row: 1, code: "RECEIVING_IMPORT_AMBIGUOUS_EXISTING_LINE",
+        message: expect.stringContaining("11, 12") }] } });
+    expect(test.state).toEqual(before); expectNoWrites(test);
+  });
+
+  it("permits unrelated input while preserving existing separate physical lines", async () => {
+    const lines = [receiptLine(), { ...receiptLine(), id: 12, receivedQty: 7 }];
+    const test = harness({ lines });
+    await expect(test.service.bulkImportLines(10, [{ sku: "OTHER", qty: "3" }], ACTOR)).resolves.toMatchObject({ created: 1, updated: 0 });
+    expect(test.state.lines.slice(0, 2)).toEqual(lines);
+  });
+
+  it("retries a unique import as total replacement instead of adding or multiplying counts", async () => {
+    const test = harness();
+    const input = [{ sku: " pack-250 ", qty: "5", location: "A-01" }];
+    await expect(test.service.bulkImportLines(10, input, ACTOR)).resolves.toMatchObject({ created: 1, updated: 0 });
+    await expect(test.service.bulkImportLines(10, input, ACTOR)).resolves.toMatchObject({ created: 0, updated: 1 });
+    expect(test.state.lines).toHaveLength(1);
+    expect(test.state.lines[0]).toMatchObject({ sku: "PACK-250", expectedQty: 5, receivedQty: 5, unitsPerVariantSnapshot: 250 });
+    expect(test.storage.updateReceivingLine).toHaveBeenCalledWith(20, expect.objectContaining({ receivedAt: NOW }), test.tx);
+  });
+
+  it("allows the same SKU in distinct resolved locations including unassigned", async () => {
+    const test = harness();
+    await expect(test.service.bulkImportLines(10, [
+      { sku: "PACK-250", qty: "5", location: "A-01" }, { sku: "PACK-250", qty: "7" },
+    ], ACTOR)).resolves.toMatchObject({ created: 2, updated: 0 });
+    expect(test.state.lines.map((line) => [line.putawayLocationId, line.receivedQty])).toEqual([[99, 5], [null, 7]]);
+  });
+
+  it("treats two unresolved locations as ambiguous rather than inventing separate resolved bins", async () => {
+    const test = harness();
+    await expect(test.service.bulkImportLines(10, [
+      { sku: "PACK-250", qty: "5", location: "UNKNOWN-A" }, { sku: "PACK-250", qty: "7", location: "UNKNOWN-B" },
+    ], ACTOR)).rejects.toMatchObject({ details: { code: "RECEIVING_IMPORT_IDENTITY_REVIEW_REQUIRED" } });
+    expectNoWrites(test);
+  });
+
+  it("rejects a concurrent new matching physical line before any import update", async () => {
+    const test = harness({ lines: [receiptLine()], atTransactionStart: (state) => state.lines.push({ ...receiptLine(), id: 12 }) });
+    await expect(test.service.bulkImportLines(10, [{ sku: "PACK-250", qty: "5", location: "A-01" }], ACTOR))
+      .rejects.toMatchObject({ details: { code: "RECEIVING_IMPORT_SNAPSHOT_CHANGED" } });
+    expectNoWrites(test);
+  });
+});
+
 describe("ReceivingService import source preservation", () => {
   const linkedLine = () => ({ ...receiptLine(), purchaseOrderLineId: 31 });
   const imported = [{ sku: "PACK-250", qty: "3", location: "A-01" }];

@@ -1,3 +1,4 @@
+import { parseSupplierDispatchResult, parseSupplierPreparationResult, supplierDispatchReviewedVersion } from "@/lib/supplier-dispatch";
 import { PoVarianceApproval, hasPendingPoVarianceApproval } from "@/features/purchasing/PoVarianceApproval";
 import { PoShipmentCostSummary } from "@/features/purchasing/PoShipmentCostSummary";
 import { PoFinancialEvidence, usePoFinancialEvidence } from "@/features/purchasing/PoFinancialEvidence";
@@ -1009,6 +1010,8 @@ export default function PurchaseOrderDetail() {
   const [showCloseShortDialog, setShowCloseShortDialog] = useState(false);
   const [closeShortReason, setCloseShortReason] = useState("");
   const [showAckDialog, setShowAckDialog] = useState(false);
+  type ExternalSendReview = NavigationSnapshot & { poId: number; poNumber: string; expectedUpdatedAt: string };
+  const [externalSendReview, setExternalSendReview] = useState<ExternalSendReview | null>(null);
   const [showScheduleDialog, setShowScheduleDialog] = useState(false);
   const [showDocDialog, setShowDocDialog] = useState(false);
   const [showEmailDialog, setShowEmailDialog] = useState(false);
@@ -1453,10 +1456,51 @@ export default function PurchaseOrderDetail() {
   const submitMutation = createTransitionMutation("submit");
   const returnToDraftMutation = createTransitionMutation("return-to-draft");
   const approveMutation = createTransitionMutation("approve");
-  const sendMutation = createTransitionMutation("send");
+  const sendMutation = useMutation({
+    mutationFn: async (review: ExternalSendReview) => {
+      if (!review.isCurrent()) throw new Error("The selected PO changed. Review the current PO before recording an external send.");
+      const res = await fetch(`/api/purchase-orders/${review.poId}/send`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ confirmedSentExternally: true, expectedUpdatedAt: review.expectedUpdatedAt }),
+      });
+      const body: unknown = await res.json().catch(() => null);
+      if (!res.ok) {
+        const message = body && typeof body === "object" && "error" in body && typeof body.error === "string" ? body.error : "Supplier dispatch was not confirmed.";
+        throw new Error(message);
+      }
+      return parseSupplierDispatchResult(body, review.poId);
+    },
+    onSuccess: (outcome, review) => {
+      queryClient.invalidateQueries({ queryKey: [`/api/purchase-orders/${review.poId}`] });
+      queryClient.invalidateQueries({ queryKey: [`/api/purchase-orders/${review.poId}/history`] });
+      queryClient.invalidateQueries({ queryKey: ["/api/purchase-orders"] });
+      if (!review.isCurrent()) return;
+      setExternalSendReview(null);
+      if (outcome === "recorded") toast({ title: "External send recorded", description: "The operator confirmation is saved in PO history." });
+      else toast({ title: "Approval required", description: "Supplier dispatch was not recorded. Review the current approval requirements before continuing.", variant: "destructive" });
+    },
+    onError: (error: Error, review) => {
+      if (review.isCurrent()) toast({ title: "External send was not confirmed", description: error.message, variant: "destructive" });
+    },
+  });
+  useEffect(() => {
+    setExternalSendReview(null);
+    sendMutation.reset();
+  }, [navigationIdentity]);
+
+  function openExternalSendConfirmation() {
+    if (!poId || !po || po.id !== poId || po.status !== "approved") return;
+    try {
+      const expectedUpdatedAt = supplierDispatchReviewedVersion(po.updatedAt);
+      sendMutation.reset();
+      setExternalSendReview({ ...captureNavigation(), poId, poNumber: po.poNumber, expectedUpdatedAt });
+    } catch (error) {
+      toast({ title: "PO review required", description: error instanceof Error ? error.message : "Reload the PO before recording supplier dispatch.", variant: "destructive" });
+    }
+  }
   const closeMutation = createTransitionMutation("close");
 
-  // Check if solo mode (no approval tiers) for combined "Send to Vendor" button
+  // Check if solo mode (no approval tiers) for supplier preparation.
   const { data: approvalTiersData } = useQuery<{ tiers: any[] }>({
     queryKey: ["/api/purchasing/approval-tiers"],
   });
@@ -1541,22 +1585,27 @@ export default function PurchaseOrderDetail() {
   });
 
   const sendToVendorMutation = useMutation({
+    onMutate: captureNavigation,
     mutationFn: async () => {
-      const res = await fetch(`/api/purchase-orders/${poId}/send-to-vendor`, { method: "POST" });
-      if (!res.ok) { const err = await res.json(); throw new Error(err.error || "Failed to send to vendor"); }
-      return res.json();
+      const targetId = poId;
+      if (!targetId) throw new Error("Select a PO before preparing supplier review.");
+      const res = await fetch(`/api/purchase-orders/${targetId}/send-to-vendor`, { method: "POST" });
+      if (!res.ok) { const err = await res.json(); throw new Error(err.error || "Failed to prepare PO for supplier review"); }
+      return parseSupplierPreparationResult(await res.json(), targetId);
     },
-    onSuccess: (updatedPo) => {
-      queryClient.invalidateQueries({ queryKey: [`/api/purchase-orders/${poId}`] });
+    onSuccess: (updatedPo, _variables, context) => {
+      queryClient.invalidateQueries({ queryKey: [`/api/purchase-orders/${updatedPo.id}`] });
       queryClient.invalidateQueries({ queryKey: ["/api/purchase-orders"] });
-      toast({ title: "PO sent to vendor", description: `${updatedPo.poNumber} is now marked as sent` });
-      // Open email dialog with vendor email pre-filled
-      setEmailForm(f => ({ ...f, toEmail: updatedPo.vendor?.email || po?.vendor?.email || po?.vendorContactEmail || "" }));
-      // Fetch doc HTML for the email
-      void loadDocumentPreview();
-      setShowEmailDialog(true);
+      if (!context?.isCurrent()) return;
+      toast({ title: updatedPo.status === "pending_approval" ? "Submitted for approval" : "PO ready for supplier review",
+        description: "Supplier dispatch has not been recorded. Review the document before sending it outside Echelon." });
+      if (updatedPo.status === "approved") {
+        setShowDocDialog(true);
+        void loadDocumentPreview();
+      }
     },
-    onError: (err: Error) => {
+    onError: (err: Error, _variables, context) => {
+      if (!context?.isCurrent()) return;
       toast({ title: "Error", description: err.message, variant: "destructive" });
     },
   });
@@ -2497,11 +2546,12 @@ export default function PurchaseOrderDetail() {
         approveMutation.mutate();
         return;
       case "send":
-        sendMutation.mutate();
+        openExternalSendConfirmation();
         return;
       case "send_to_vendor":
         if (po?.status === "approved") {
-          sendMutation.mutate();
+          setShowDocDialog(true);
+          void loadDocumentPreview();
         } else if (isSoloMode) {
           sendToVendorMutation.mutate();
         } else {
@@ -2747,11 +2797,11 @@ export default function PurchaseOrderDetail() {
 
         {/* Context-sensitive action buttons */}
         <div className="flex gap-2 flex-wrap w-full sm:w-auto">
-          {/* Solo mode: combined "Send to Vendor" button (draft → approved → sent in one click) */}
+          {/* Prepare approved terms; external dispatch is recorded separately. */}
           {canSendPoToVendor && po.status === "draft" && isSoloMode && (
             <Button onClick={() => sendToVendorMutation.mutate()} disabled={sendToVendorMutation.isPending} className="flex-1 sm:flex-none min-h-[44px]">
               <Send className="h-4 w-4 mr-2" />
-              {sendToVendorMutation.isPending ? "Submitting..." : "Submit & Send"}
+              {sendToVendorMutation.isPending ? "Submitting..." : "Prepare for supplier"}
             </Button>
           )}
           {/* Multi-person mode: individual Submit button */}
@@ -2778,9 +2828,9 @@ export default function PurchaseOrderDetail() {
             </>
           )}
           {canSendPo && po.status === "approved" && (
-            <Button onClick={() => sendMutation.mutate()} disabled={sendMutation.isPending} className="flex-1 sm:flex-none min-h-[44px]">
+            <Button onClick={() => openExternalSendConfirmation()} disabled={sendMutation.isPending} className="flex-1 sm:flex-none min-h-[44px]">
               <Send className="h-4 w-4 mr-2" />
-              Mark as Sent
+              Record external send
             </Button>
           )}
           {/* Acknowledge button: only shown when acknowledgment is required (multi-person mode) */}
@@ -3946,7 +3996,7 @@ export default function PurchaseOrderDetail() {
                 disabled={sendToVendorMutation.isPending}
               >
                 <Send className="h-3.5 w-3.5 mr-2" />
-                Send to vendor
+                Prepare for supplier
               </Button>
             )}
 
@@ -4838,7 +4888,21 @@ export default function PurchaseOrderDetail() {
         </DialogContent>
       </Dialog>
 
-      {/* ── Acknowledge Dialog ── */}
+      {/* Explicit operator attestation for an external supplier send. */}
+      <Dialog open={externalSendReview !== null} onOpenChange={(open) => { if (!open && !sendMutation.isPending) setExternalSendReview(null); }}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Record an external supplier send</DialogTitle>
+            <DialogDescription>Continue only after you have sent the reviewed {externalSendReview?.poNumber} to the supplier outside Echelon. This records your confirmation; it does not send an email or document, or record supplier acknowledgement.</DialogDescription>
+          </DialogHeader>
+          {sendMutation.isError && <p role="alert" className="text-sm text-destructive">{sendMutation.error.message} Reload the PO to verify its current state before trying again.</p>}
+          <div className="flex justify-end gap-2">
+            <Button variant="outline" disabled={sendMutation.isPending} onClick={() => setExternalSendReview(null)}>Cancel</Button>
+            <Button disabled={sendMutation.isPending} onClick={() => { if (externalSendReview) sendMutation.mutate(externalSendReview); }}>{sendMutation.isPending ? "Recording..." : "Confirm external send"}</Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+
       <Dialog open={showAckDialog} onOpenChange={setShowAckDialog}>
         <DialogContent className="max-w-md">
           <DialogHeader>

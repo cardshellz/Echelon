@@ -1,6 +1,6 @@
 import { sql } from "drizzle-orm";
 import { z } from "zod";
-import { linkedRfqPurchaseSchema, type LinkedRfqPurchase } from "./domain/rfq-sourcing-reservation";
+import { pendingPurchaseSourcingPieces, linkedRfqPurchaseSchema, type LinkedRfqPurchase } from "./domain/rfq-sourcing-reservation";
 import { RfqEvidenceIntegrityError, type RfqWorkflowExecutor } from "./rfq-workflow.repository";
 
 export async function loadLinkedRfqPurchases(executor: RfqWorkflowExecutor, rfqLineIds: number[]): Promise<Map<number, LinkedRfqPurchase>> {
@@ -40,4 +40,40 @@ export async function loadRecommendationRunDates(executor: RfqWorkflowExecutor, 
   }
   if (dates.size !== new Set(recommendationIds).size) throw new RfqEvidenceIntegrityError();
   return dates;
+}
+
+export interface PendingPurchaseSourcingReservation {
+  productId: number;
+  warehouseId: number | null;
+  pieces: number;
+  purchaseOrderId: number;
+  purchaseOrderLineId: number;
+  rfqLineId: number | null;
+}
+
+/** Read after the caller holds the product/graph locks used by sourcing owners. */
+export async function loadPendingPurchaseSourcingReservations(executor: RfqWorkflowExecutor, productIds: readonly number[]): Promise<PendingPurchaseSourcingReservation[]> {
+  if (productIds.length === 0) return [];
+  const rows = await executor.execute(sql`SELECT p.id AS purchase_order_id, p.warehouse_id, p.status, line.id AS purchase_order_line_id, line.status AS line_status, line.product_id,
+    line.order_qty, COALESCE(line.received_qty, 0) AS received_qty, COALESCE(line.cancelled_qty, 0) AS cancelled_qty,
+    EXTRACT(EPOCH FROM (GREATEST(p.updated_at, line.updated_at) AT TIME ZONE 'UTC')) * 1000 AS updated_at_ms,
+    link.rfq_line_id
+    FROM procurement.purchase_order_lines line JOIN procurement.purchase_orders p ON p.id = line.purchase_order_id
+    LEFT JOIN procurement.rfq_purchase_order_line_links link ON link.purchase_order_line_id = line.id
+    WHERE line.product_id = ANY(${sql.param(productIds)}::integer[]) AND p.status IN ('draft','pending_approval') AND line.line_type = 'product'
+    ORDER BY line.id`);
+  const id = z.number().int().positive().max(2_147_483_647);
+  const seen = new Set<number>();
+  const result: PendingPurchaseSourcingReservation[] = [];
+  for (const row of rows.rows) {
+    const purchaseOrderId = id.parse(Number(row.purchase_order_id));
+    const purchaseOrderLineId = id.parse(Number(row.purchase_order_line_id));
+    if (seen.has(purchaseOrderLineId)) throw new RfqEvidenceIntegrityError();
+    seen.add(purchaseOrderLineId);
+    const pieces = pendingPurchaseSourcingPieces({ purchaseOrderId, status: row.status, lineStatus: row.line_status,
+      orderQty: Number(row.order_qty), receivedQty: Number(row.received_qty), cancelledQty: Number(row.cancelled_qty), updatedAt: row.updated_at_ms === null ? null : new Date(Number(row.updated_at_ms)) });
+    if (pieces > 0) result.push({ productId: id.parse(Number(row.product_id)), warehouseId: row.warehouse_id === null ? null : id.parse(Number(row.warehouse_id)),
+      pieces, purchaseOrderId, purchaseOrderLineId, rfqLineId: row.rfq_line_id === null ? null : id.parse(Number(row.rfq_line_id)) });
+  }
+  return result;
 }

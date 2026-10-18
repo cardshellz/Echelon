@@ -291,12 +291,12 @@ describe("POST /api/purchase-orders (dual-mode)", () => {
     expect(purchasing.createPurchaseOrderWithLines).not.toHaveBeenCalled();
   });
 
-  it("advance_to_sent=true also calls sendPurchaseOrder", async () => {
+  it("legacy advance_to_sent prepares but explicitly reports that no dispatch occurred", async () => {
     purchasing.createPurchaseOrderWithLines.mockResolvedValue({ id: 7, poNumber: "PO-1" });
     purchasing.sendPurchaseOrder.mockResolvedValue({
-      po: { id: 7, status: "sent" },
-      status: "sent",
-      pdf: { pdf_placeholder: true, reason: "PDF generation not yet implemented" },
+      po: { id: 7, status: "approved" },
+      status: "approved",
+      pdf: null,
       pendingApproval: false,
     });
     const { status, body } = await jsonRequest(server.url, "POST", "/api/purchase-orders", {
@@ -306,8 +306,10 @@ describe("POST /api/purchase-orders (dual-mode)", () => {
     });
     expect(status).toBe(201);
     expect(purchasing.sendPurchaseOrder).toHaveBeenCalledWith(7, "test-user");
-    expect(body.pdf.pdf_placeholder).toBe(true);
-    expect(body.status).toBe("sent");
+    expect(body.pdf).toBeNull();
+    expect(body.dispatch_recorded).toBe(false);
+    expect(body.status).toBe("approved");
+    expect(body.sendError).toContain("No supplier dispatch was recorded");
   });
 
   it("returns the created draft when the follow-up send fails", async () => {
@@ -330,6 +332,7 @@ describe("POST /api/purchase-orders (dual-mode)", () => {
     expect(body).toEqual({
       po: { id: 8, poNumber: "PO-2", status: "draft" },
       status: "draft",
+      dispatch_recorded: false,
       sendError: "Purchase order changed during the lifecycle transition",
     });
     expect(purchasing.createPurchaseOrderWithLines).toHaveBeenCalledTimes(1);
@@ -410,15 +413,15 @@ describe("PUT /api/purchase-orders/:id/draft", () => {
     expect(purchasing.createPurchaseOrderWithLines).not.toHaveBeenCalled();
   });
 
-  it("sends the same PO after an atomic draft update", async () => {
+  it("prepares the same PO after an atomic draft update", async () => {
     purchasing.updateDraftPurchaseOrderWithLines.mockResolvedValue({
       po: { id: 42, status: "draft" },
       lines: [{ id: 10, clientId: "line-10" }],
     });
     purchasing.sendPurchaseOrder.mockResolvedValue({
-      po: { id: 42, status: "sent" },
-      status: "sent",
-      pdf: { pdf_placeholder: true, reason: "not implemented" },
+      po: { id: 42, status: "approved" },
+      status: "approved",
+      pdf: null,
       pendingApproval: false,
     });
 
@@ -429,7 +432,7 @@ describe("PUT /api/purchase-orders/:id/draft", () => {
       {
         vendor_id: 3,
         expected_updated_at: "2026-07-11T00:30:00.000Z",
-        advance_to_sent: true,
+        prepare_for_supplier: true,
         lines: [
           {
             line_id: 10,
@@ -445,7 +448,7 @@ describe("PUT /api/purchase-orders/:id/draft", () => {
 
     expect(status).toBe(200);
     expect(purchasing.sendPurchaseOrder).toHaveBeenCalledWith(42, "test-user");
-    expect(body.status).toBe("sent");
+    expect(body.status).toBe("approved");
     expect(body.lines).toEqual([{ id: 10, clientId: "line-10" }]);
   });
 
@@ -454,7 +457,7 @@ describe("PUT /api/purchase-orders/:id/draft", () => {
       po: { id: 42, status: "draft", updatedAt: "2026-07-11T01:00:00.000Z" },
       lines: [{ id: 10, clientId: "line-10" }],
     });
-    purchasing.sendPurchaseOrder.mockRejectedValue(new Error("email provider unavailable"));
+    purchasing.sendPurchaseOrder.mockRejectedValue(new Error("supplier review temporarily unavailable"));
 
     const { status, body } = await jsonRequest(
       server.url,
@@ -463,7 +466,7 @@ describe("PUT /api/purchase-orders/:id/draft", () => {
       {
         vendor_id: 3,
         expected_updated_at: "2026-07-11T00:30:00.000Z",
-        advance_to_sent: true,
+        prepare_for_supplier: true,
         lines: [
           {
             line_id: 10,
@@ -478,7 +481,7 @@ describe("PUT /api/purchase-orders/:id/draft", () => {
 
     expect(status).toBe(200);
     expect(body.po).toMatchObject({ id: 42, status: "draft" });
-    expect(body.sendError).toBe("email provider unavailable");
+    expect(body.sendError).toBe("supplier review temporarily unavailable");
   });
 
   it("requires an optimistic concurrency version", async () => {
@@ -521,9 +524,9 @@ describe("POST /api/purchase-orders/:id/send-pdf", () => {
 
   it("returns { po, status, pdf, pending_approval }", async () => {
     purchasing.sendPurchaseOrder.mockResolvedValue({
-      po: { id: 42, status: "sent" },
-      status: "sent",
-      pdf: { pdf_placeholder: true, reason: "PDF generation not yet implemented" },
+      po: { id: 42, status: "approved" },
+      status: "approved",
+      pdf: null,
       pendingApproval: false,
     });
     const { status, body } = await jsonRequest(
@@ -532,7 +535,8 @@ describe("POST /api/purchase-orders/:id/send-pdf", () => {
       "/api/purchase-orders/42/send-pdf",
     );
     expect(status).toBe(200);
-    expect(body.pdf.pdf_placeholder).toBe(true);
+    expect(body.pdf).toBeNull();
+    expect(body.dispatch_recorded).toBe(false);
     expect(body.pending_approval).toBe(false);
   });
 
@@ -704,14 +708,14 @@ describe("purchase-order email outbox routes", () => {
   });
 
   it("lists delivery state without returning immutable message bodies", async () => {
-    poEmailOutboxMocks.list.mockResolvedValue([{ id: 91, status: "sent" }]);
+    poEmailOutboxMocks.list.mockResolvedValue([{ id: 91, status: "approved" }]);
     const { status, body } = await jsonRequest(
       server.url,
       "GET",
       "/api/purchase-orders/42/email-deliveries",
     );
     expect(status).toBe(200);
-    expect(body).toEqual({ deliveries: [{ id: 91, status: "sent" }] });
+    expect(body).toEqual({ deliveries: [{ id: 91, status: "approved" }] });
     expect(poEmailOutboxMocks.list).toHaveBeenCalledWith(42);
   });
 

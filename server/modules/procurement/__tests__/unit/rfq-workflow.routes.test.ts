@@ -54,7 +54,7 @@ describe("RFQ workflow HTTP authority and durable command identity", () => {
     });
   }
 
-  it.each(["/api/purchasing/rfqs/10/convert", "/api/purchasing/rfqs/10/lines/20/quotes"])("requires edit permission before invoking %s", async (path) => {
+  it.each(["/api/purchasing/rfqs/10/release", "/api/purchasing/rfqs/10/convert", "/api/purchasing/rfqs/10/lines/20/quotes"])("requires edit permission before invoking %s", async (path) => {
     mocks.hasPermission.mockResolvedValue(false);
     expect((await request(path, { body: {}, key: "rfq-command-123" })).status).toBe(403);
     expect(mocks.hasPermission).toHaveBeenCalledWith("reviewer", "purchasing", "edit");
@@ -94,6 +94,14 @@ describe("RFQ workflow HTTP authority and durable command identity", () => {
     expect(mocks.execute).toHaveBeenCalledWith({ operation: "convert", rfqId: 10, body }, "delegate", expect.objectContaining({
       actorType: "service", actorId: "procurement.rfq-workflow", resourceKey: "rfq:10", routeTemplate: "/api/purchasing/rfqs/:rfqId/convert", commandName: "procurement.rfq.convert", idempotencyKey: "rfq-command-123", requestHash: expect.stringMatching(/^[a-f0-9]{64}$/),
     }));
+  });
+  it("uses the dedicated durable release scope and exact review body", async () => {
+    mocks.execute.mockResolvedValue({ httpStatus: 200, body: { status: "cancelled" }, replayed: true });
+    const body = { expectedVersion: "a".repeat(64), reason: "Supplier cannot fulfill" };
+    const response = await request("/api/purchasing/rfqs/10/release", { body, key: "rfq-release-123" });
+    expect(response.status).toBe(200);
+    expect(response.headers.get("Idempotency-Replayed")).toBe("true");
+    expect(mocks.execute).toHaveBeenCalledWith({ operation: "release", rfqId: 10, body }, "reviewer", expect.objectContaining({ commandName: "procurement.rfq.release", routeTemplate: "/api/purchasing/rfqs/:rfqId/release", resourceKey: "rfq:10" }));
   });
   it("maps review conflicts separately from invalid stored evidence without leaking details", async () => {
     mocks.detail.mockRejectedValueOnce(new RfqWorkflowError("RFQ_NOT_FOUND", "Quote request was not found", 404));

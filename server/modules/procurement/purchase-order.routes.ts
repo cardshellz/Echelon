@@ -312,6 +312,8 @@ export function registerPurchaseOrderRoutes(app: Express, financialEvidence: Pic
   const buildLifecycleCommandInput = (req: any) => {
     const input: Record<string, unknown> = {};
     if (req.body?.notes !== undefined) input.notes = req.body.notes;
+    if (req.body?.confirmedSentExternally !== undefined) input.confirmedSentExternally = req.body.confirmedSentExternally;
+    if (req.body?.expectedUpdatedAt !== undefined) input.expectedUpdatedAt = req.body.expectedUpdatedAt;
     if (req.body?.reason !== undefined) input.reason = req.body.reason;
     if (req.body?.vendorRefNumber !== undefined) input.vendorRefNumber = req.body.vendorRefNumber;
     if (req.body?.confirmedDeliveryDate !== undefined) {
@@ -565,7 +567,7 @@ export function registerPurchaseOrderRoutes(app: Express, financialEvidence: Pic
   // Dual-mode to preserve the legacy "create empty PO" flow while enabling the
   // Spec A inline flow:
   //   - If req.body.lines is a non-empty array:
-  //       Use createPurchaseOrderWithLines. If req.body.advance_to_sent === true,
+  //       Use createPurchaseOrderWithLines. If preparation is requested,
   //       immediately call sendPurchaseOrder and return the combined result.
   //       Idempotent: requires an Idempotency-Key header (Rule #6).
   //   - Else:
@@ -608,8 +610,8 @@ export function registerPurchaseOrderRoutes(app: Express, financialEvidence: Pic
           userId,
         );
 
-        const advanceToSent = req.body.advance_to_sent === true;
-        if (!advanceToSent) {
+        const prepareForSupplier = req.body.prepare_for_supplier === true || req.body.advance_to_sent === true;
+        if (!prepareForSupplier) {
           return res.status(201).json({ po: created });
         }
 
@@ -617,14 +619,15 @@ export function registerPurchaseOrderRoutes(app: Express, financialEvidence: Pic
         try {
           sendResult = await purchasing.sendPurchaseOrder(created.id, userId);
         } catch (sendError: any) {
-          console.error("[POST /api/purchase-orders] PO created but send failed", {
+          console.error("[POST /api/purchase-orders] PO created but supplier preparation failed", {
             purchaseOrderId: created.id,
             error: sendError?.message,
           });
           return res.status(201).json({
             po: created,
             status: created.status ?? "draft",
-            sendError: sendError?.message || "Failed to send purchase order",
+            dispatch_recorded: false,
+            sendError: sendError?.message || "Failed to prepare purchase order",
           });
         }
         return res.status(201).json({
@@ -632,6 +635,8 @@ export function registerPurchaseOrderRoutes(app: Express, financialEvidence: Pic
           status: sendResult.status,
           pdf: sendResult.pdf,
           pending_approval: sendResult.pendingApproval,
+          dispatch_recorded: false,
+          ...(req.body.advance_to_sent === true ? { sendError: "PO saved for review. No supplier dispatch was recorded; review the document and record an external send separately." } : {}),
         });
       } catch (error: any) {
         if (error instanceof PurchasingError) {
@@ -674,7 +679,7 @@ export function registerPurchaseOrderRoutes(app: Express, financialEvidence: Pic
           req.session.user?.id,
         );
 
-        if (req.body?.advance_to_sent !== true) {
+        if (req.body?.prepare_for_supplier !== true && req.body?.advance_to_sent !== true) {
           return res.json(updated);
         }
 
@@ -682,13 +687,14 @@ export function registerPurchaseOrderRoutes(app: Express, financialEvidence: Pic
         try {
           sendResult = await purchasing.sendPurchaseOrder(id, req.session.user?.id);
         } catch (sendError: any) {
-          console.error("[PUT /api/purchase-orders/:id/draft] draft updated but send failed", {
+          console.error("[PUT /api/purchase-orders/:id/draft] draft updated but supplier preparation failed", {
             purchaseOrderId: id,
             error: sendError?.message,
           });
           return res.json({
             ...updated,
-            sendError: sendError?.message || "Failed to send purchase order",
+            dispatch_recorded: false,
+            sendError: sendError?.message || "Failed to prepare purchase order",
           });
         }
         return res.json({
@@ -697,6 +703,8 @@ export function registerPurchaseOrderRoutes(app: Express, financialEvidence: Pic
           status: sendResult.status,
           pdf: sendResult.pdf,
           pending_approval: sendResult.pendingApproval,
+          dispatch_recorded: false,
+          ...(req.body.advance_to_sent === true ? { sendError: "PO saved for review. No supplier dispatch was recorded; review the document and record an external send separately." } : {}),
         });
       } catch (error: any) {
         if (error instanceof PurchasingError) {
@@ -708,7 +716,7 @@ export function registerPurchaseOrderRoutes(app: Express, financialEvidence: Pic
     },
   );
 
-  // Spec A: one-click send for an already-saved draft.
+  // Legacy route retained for preparation only; it cannot attest supplier dispatch.
   // Returns { po, status, pdf, pending_approval } in the same shape the
   // inline create endpoint uses so the client can handle both uniformly.
   app.post(
@@ -726,6 +734,8 @@ export function registerPurchaseOrderRoutes(app: Express, financialEvidence: Pic
           status: result.status,
           pdf: result.pdf,
           pending_approval: result.pendingApproval,
+          dispatch_recorded: false,
+          sendError: "Prepared for supplier review. No PDF was sent; review the document and record an external send separately.",
         });
       } catch (error: any) {
         if (error instanceof PurchasingError) {
@@ -1023,7 +1033,7 @@ export function registerPurchaseOrderRoutes(app: Express, financialEvidence: Pic
     await handleLifecycleCommand(req, res, "send");
   });
 
-  // Combined send-to-vendor: draft -> approved -> sent in one click (solo mode only)
+  // Legacy preparation endpoint: a separate attested command records dispatch.
   app.post("/api/purchase-orders/:id/send-to-vendor", requirePermission("purchasing", "create"), async (req, res) => {
     await handleLifecycleCommand(req, res, "send_to_vendor");
   });

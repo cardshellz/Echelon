@@ -1,3 +1,4 @@
+import { sql } from "drizzle-orm";
 import { SupplierSourcingService } from "../../supplier-sourcing.service";
 import { SupplierSourcingRepository, attachSupplierSourcingCandidates } from "../../supplier-sourcing.repository";
 import { DEFAULT_SUPPLIER_SOURCING_POLICY } from "@shared/procurement/supplier-sourcing";
@@ -15,6 +16,7 @@ import * as schema from "@shared/schema";
 import { rfqConversionResultSchema, rfqWorkflowDetailSchema } from "@shared/procurement/rfq-workflow";
 import { hashHttpFinancialCommand } from "../../../../platform/commands/http-command";
 import type { FinancialCommandDescriptor } from "../../../../platform/commands/transactional-command.service";
+import type { AutomaticRecommendationPoHandoffCommand } from "../../recommendation-po-handoff.service";
 import type { RfqWorkflowCommand } from "../../rfq-workflow.service";
 import { fixtureForeignKeys, fixtureTable, qualifiedTable } from "./shipment-line-fixture";
 
@@ -32,6 +34,7 @@ integration.sequential("RFQ quote revisions and real purchase-owner transaction"
   let ownsAudit = false;
   let ownsCommands = false;
   let ownsRecoveries = false;
+  let ownsAutoDraftRuns = false;
   let pool: pg.Pool;
   let lease: pg.PoolClient | undefined;
   let modulePool: pg.Pool | undefined;
@@ -51,10 +54,12 @@ integration.sequential("RFQ quote revisions and real purchase-owner transaction"
     if (!lock.rows[0].acquired) throw new Error("Another procurement fixture owns the schema lease");
     for (const name of ["catalog", "procurement", "warehouse"]) { await pool.query(`CREATE SCHEMA ${name}`); ownedSchemas.push(name); }
     for (const table of TABLES) await pool.query(fixtureTable(table));
+    await pool.query(fixtureTable(schema.autoDraftRuns)); ownsAutoDraftRuns = true;
     await pool.query("CREATE UNIQUE INDEX purch_rec_decisions_id_rec_kind_uidx ON procurement.purchasing_recommendation_decisions(id,recommendation_id,kind)");
     await pool.query("CREATE UNIQUE INDEX purchase_order_lines_po_id_line_id_uidx ON procurement.purchase_order_lines(purchase_order_id,id)");
     for (const statement of fixtureForeignKeys(TABLES)) await pool.query(statement);
     await pool.query("CREATE UNIQUE INDEX purchase_orders_po_number_unique ON procurement.purchase_orders(po_number)");
+    await pool.query("CREATE UNIQUE INDEX vendor_products_vendor_product_variant_key_uidx ON procurement.vendor_products(vendor_id,product_id,COALESCE(product_variant_id,0))");
     for (const migration of ["130_atomic_recommendation_po_handoffs.sql", "148_purchase_rfq_requests.sql", "158_rfq_allocation_override_evidence.sql", "224_rfq_quote_revisions_and_purchase_links.sql", "228_supplier_sourcing_policies.sql", "232_rfq_product_reservation_scope.sql"]) await pool.query(readFileSync(resolve(process.cwd(), "migrations", migration), "utf8"));
     if (!(await pool.query("SELECT to_regclass('public.audit_events') AS relation")).rows[0].relation) { await pool.query(fixtureTable(schema.auditEvents)); ownsAudit = true; }
     ownsCommands = !(await pool.query("SELECT to_regclass('public.financial_command_results') AS relation")).rows[0].relation;
@@ -95,6 +100,7 @@ integration.sequential("RFQ quote revisions and real purchase-owner transaction"
     if (ownedSchemas.length !== 3) throw new Error("RFQ fixture schema ownership missing");
     // Disable only the fixture's immutable TRUNCATE guard for isolated reset.
     await pool.query(`BEGIN; ALTER TABLE procurement.supplier_sourcing_revisions DISABLE TRIGGER supplier_sourcing_history_truncate_immutable; TRUNCATE ${TABLES.map(qualifiedTable).join(",")}, procurement.purchase_recommendation_runs RESTART IDENTITY CASCADE; ALTER TABLE procurement.supplier_sourcing_revisions ENABLE TRIGGER supplier_sourcing_history_truncate_immutable; COMMIT`);
+    await pool.query("TRUNCATE public.auto_draft_runs RESTART IDENTITY CASCADE");
     await pool.query("DELETE FROM public.audit_events WHERE actor = ANY($1::text[])", [[actorId, `user:${actorId}`]]);
     await pool.query("DELETE FROM public.financial_command_results WHERE idempotency_key LIKE $1", [`rfq-${suffix}-%`]);
     await pool.query(`
@@ -116,6 +122,7 @@ integration.sequential("RFQ quote revisions and real purchase-owner transaction"
         if (ownsAudit) await pool.query("DROP TABLE public.audit_events"); else if ((await pool.query("SELECT to_regclass('public.audit_events') AS relation")).rows[0].relation) await pool.query("DELETE FROM public.audit_events WHERE actor = ANY($1::text[])", [[actorId, `user:${actorId}`]]);
         if (ownsRecoveries) await pool.query("DROP TABLE public.financial_command_recoveries");
         if (ownsCommands) await pool.query("DROP TABLE public.financial_command_results"); else if ((await pool.query("SELECT to_regclass('public.financial_command_results') AS relation")).rows[0].relation) await pool.query("DELETE FROM public.financial_command_results WHERE idempotency_key LIKE $1", [`rfq-${suffix}-%`]);
+        if (ownsAutoDraftRuns) await pool.query("DROP TABLE public.auto_draft_runs CASCADE");
         for (const name of [...ownedSchemas].reverse()) await pool.query(`DROP SCHEMA ${name} CASCADE`);
       }
     } finally {
@@ -142,6 +149,220 @@ integration.sequential("RFQ quote revisions and real purchase-owner transaction"
     const command: RfqWorkflowCommand = { operation: "convert", rfqId: 10, body: { expectedVersion: workflow.version, lines: lineIds.map((rfqLineId) => ({ rfqLineId, quoteRevisionId: workflow.lines.find((line) => line.id === rfqLineId)!.latestQuote!.id })), quantityOverrideReason: null } };
     return { command, identity: descriptor(command) };
   }
+
+  async function releaseRequest(reason = "Supplier cannot fulfill this unconverted request") {
+    const workflow = await service.getDetail(10);
+    const command: RfqWorkflowCommand = { operation: "release", rfqId: 10, body: { expectedVersion: workflow.version, reason } };
+    const identity = descriptor(command);
+    return { command, identity, result: await commands.execute(command, actorId, identity) };
+  }
+
+  it("releases unconverted demand exactly once while preserving request and quote history", async () => {
+    await capture();
+    const before = await service.getDetail(10);
+    const release = await releaseRequest();
+    expect(release.result.httpStatus).toBe(200);
+    const after = rfqWorkflowDetailSchema.parse(release.result.body);
+    expect(after.status).toBe("cancelled");
+    expect(after.lines.map((line) => line.status)).toEqual(["cancelled", "cancelled"]);
+    expect(after.lines[0].latestQuote).toEqual(before.lines[0].latestQuote);
+    expect((await pendingAllocation(1)).get("100:1")).toBe(0);
+    const replay = await commands.execute(release.command, actorId, release.identity);
+    expect(replay.replayed).toBe(true); expect(replay.body).toEqual(release.result.body);
+    const audit = await pool.query("SELECT changes,context FROM public.audit_events WHERE actor=$1 AND action='purchase_rfq.reservation_released'", [actorId]);
+    expect(audit.rows).toHaveLength(1);
+    expect(audit.rows[0].context).toMatchObject({ reason: "Supplier cannot fulfill this unconverted request", releasedLines: [{ rfqLineId: 20, requestedPieces: 150 }, { rfqLineId: 21, requestedPieces: 150 }], retainedPurchaseOrderIds: [] });
+    expect(audit.rows[0].changes).toMatchObject({ before: { status: "partially_quoted" }, after: { status: "cancelled" } });
+    expect((await releaseRequest()).result.body).toMatchObject({ code: "RFQ_NOT_RELEASABLE" });
+    expect((await capture()).result.body).toMatchObject({ code: "RFQ_NOT_ACTIVE" });
+  });
+
+  it("holds a mixed request when legacy ordered evidence has no verified purchase link", async () => {
+    await capture();
+    await pool.query("UPDATE procurement.request_for_quote_lines SET status='ordered' WHERE id=21");
+    const before = await service.getDetail(10);
+    expect((await releaseRequest()).result.body).toMatchObject({ code: "RFQ_PURCHASE_LINK_REVIEW_REQUIRED" });
+    expect((await service.getDetail(10)).version).toBe(before.version);
+    const { lockAndLoadActiveRfqAllocations } = await import("../../purchasing-rfq.service");
+    expect((await database.transaction((tx) => lockAndLoadActiveRfqAllocations(tx, [{ id: 2, productId: 101, productVariantId: 201, warehouseId: 1 }]))).get("101:1")).toBe(150);
+  });
+
+  it("releases only the unconverted remainder and keeps a converted draft's real obligation", async () => {
+    await capture(); const attempt = await conversion();
+    const po = rfqConversionResultSchema.parse((await commands.execute(attempt.command, actorId, attempt.identity)).body);
+    const release = await releaseRequest();
+    expect(release.result.httpStatus).toBe(200);
+    expect(rfqWorkflowDetailSchema.parse(release.result.body).lines.map((line) => line.status)).toEqual(["ordered", "cancelled"]);
+    expect((await pendingAllocation(1)).get("100:1")).toBe(150);
+    expect((await pool.query("SELECT status FROM procurement.purchase_orders WHERE id=$1", [po.purchaseOrderId])).rows[0].status).toBe("draft");
+    const audit = (await pool.query("SELECT context FROM public.audit_events WHERE actor=$1 AND action='purchase_rfq.reservation_released'", [actorId])).rows[0];
+    expect(audit.context).toMatchObject({ releasedLines: [{ rfqLineId: 21, requestedPieces: 150 }], retainedPurchaseOrderIds: [po.purchaseOrderId] });
+  });
+
+  it("rejects stale release review and blank reasons without changing reservations", async () => {
+    const before = await service.getDetail(10);
+    await capture();
+    const stale: RfqWorkflowCommand = { operation: "release", rfqId: 10, body: { expectedVersion: before.version, reason: "Old review" } };
+    expect((await commands.execute(stale, actorId, descriptor(stale))).body).toMatchObject({ code: "RFQ_VERSION_CONFLICT" });
+    expect((await releaseRequest(" ")).result.body).toMatchObject({ code: "RFQ_INPUT_INVALID" });
+    expect((await pendingAllocation(1)).get("100:1")).toBe(150);
+    expect((await pool.query("SELECT count(*)::int AS count FROM public.audit_events WHERE actor=$1 AND action='purchase_rfq.reservation_released'", [actorId])).rows[0].count).toBe(0);
+  });
+
+  it("replays concurrent release clicks without duplicate audit or releasing any linked order", async () => {
+    const workflow = await service.getDetail(10);
+    const command: RfqWorkflowCommand = { operation: "release", rfqId: 10, body: { expectedVersion: workflow.version, reason: "Same operator request retried" } };
+    const identity = descriptor(command);
+    const results = await Promise.all([commands.execute(command, actorId, identity), commands.execute(command, actorId, identity)]);
+    expect(results.map((result) => result.httpStatus)).toEqual([200, 200]);
+    expect(results[0].body).toEqual(results[1].body);
+    expect(results.filter((result) => result.replayed)).toHaveLength(1);
+    expect((await pool.query("SELECT count(*)::int AS count FROM public.audit_events WHERE actor=$1 AND action='purchase_rfq.reservation_released'", [actorId])).rows[0].count).toBe(1);
+  });
+
+  it("rolls reservation release back when its audit fails and recovers with the same durable intent", async () => {
+    const workflow = await service.getDetail(10);
+    const command: RfqWorkflowCommand = { operation: "release", rfqId: 10, body: { expectedVersion: workflow.version, reason: "Retriable audit outage" } };
+    const identity = descriptor(command);
+    await pool.query("CREATE FUNCTION procurement.fail_release_audit() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.action='purchase_rfq.reservation_released' THEN RAISE EXCEPTION 'synthetic audit outage'; END IF; RETURN NEW; END $$; CREATE TRIGGER fail_release_audit BEFORE INSERT ON public.audit_events FOR EACH ROW EXECUTE FUNCTION procurement.fail_release_audit()");
+    try {
+      await expect(commands.execute(command, actorId, identity)).rejects.toMatchObject({ code: "P0001", message: "synthetic audit outage" });
+      expect((await pool.query("SELECT status,last_error_code FROM public.financial_command_results WHERE idempotency_key=$1", [identity.idempotencyKey])).rows).toEqual([{ status: "retryable", last_error_code: "RFQ_TRANSIENT_FAILURE" }]);
+      expect((await service.getDetail(10)).version).toBe(workflow.version);
+      expect((await pendingAllocation(1)).get("100:1")).toBe(150);
+    } finally { await pool.query("DROP TRIGGER fail_release_audit ON public.audit_events; DROP FUNCTION procurement.fail_release_audit()"); }
+    // Honor the durable command owner's persisted retry backoff before replay.
+    await pool.query("SELECT pg_sleep(GREATEST(0, EXTRACT(EPOCH FROM next_attempt_at-clock_timestamp())) + 0.01) FROM public.financial_command_results WHERE idempotency_key=$1", [identity.idempotencyKey]);
+    expect((await commands.execute(command, actorId, identity)).httpStatus).toBe(200);
+    expect((await pendingAllocation(1)).get("100:1")).toBe(0);
+  });
+
+  it("serializes release against conversion so a stale release never cancels an ordered obligation", async () => {
+    await capture(); const attempt = await conversion();
+    const release: RfqWorkflowCommand = { operation: "release", rfqId: 10, body: { expectedVersion: (attempt.command.body as { expectedVersion: string }).expectedVersion, reason: "Abandoned supplier request" } };
+    const results = await Promise.all([commands.execute(attempt.command, actorId, attempt.identity), commands.execute(release, actorId, descriptor(release))]);
+    expect(results.filter((result) => result.httpStatus < 300)).toHaveLength(1);
+    expect(results.find((result) => result.httpStatus === 409)?.body).toMatchObject({ code: "RFQ_VERSION_CONFLICT" });
+    const after = await service.getDetail(10);
+    if (after.lines[0].purchaseOrder) {
+      expect(after.lines[0].status).toBe("ordered"); expect(after.lines[1].status).toBe("draft");
+      expect((await pendingAllocation(1)).get("100:1")).toBe(150);
+    } else {
+      expect(after.status).toBe("cancelled"); expect((await pendingAllocation(1)).get("100:1")).toBe(0);
+    }
+  });
+
+  async function automaticPoCommand(runId: number): Promise<AutomaticRecommendationPoHandoffCommand> {
+    const accepted = await tierAcceptance();
+    const source = accepted.command.items[0]; const item = source.recommendationSnapshot.item;
+    if (item.pricingBasis === "legacy_unknown") throw new Error("Synthetic automatic fixture requires a verified quote");
+    // The application stores JS Date values as UTC in timestamp-without-zone
+    // fields. This fixture cluster uses America/New_York; make raw SQL match
+    // that owner storage convention instead of shifting the run four hours.
+    await pool.query("INSERT INTO public.auto_draft_runs(id,run_at,status,triggered_by,lease_expires_at) OVERRIDING SYSTEM VALUE VALUES($1,clock_timestamp() AT TIME ZONE 'UTC','running','manual',(clock_timestamp() AT TIME ZONE 'UTC')+interval '10 minutes')", [runId]);
+    return { actorId, autoDraftRunId: runId, items: [{ recommendationId: source.recommendationId, productId: 100, productVariantId: 200,
+      suggestedOrderQty: item.suggestedOrderQty, suggestedOrderPieces: item.suggestedOrderPieces, orderUomUnits: item.orderUomUnits, orderUomLabel: source.orderUomLabel,
+      vendorId: 5, vendorProductId: 300, sku: source.sku, productName: source.productName, estimatedCostMills: item.estimatedCostMills, estimatedCostCents: item.estimatedCostCents,
+      pricingBasis: item.pricingBasis, purchaseUom: item.purchaseUom, quotedUnitCostMills: item.quotedUnitCostMills!, piecesPerPurchaseUom: item.piecesPerPurchaseUom,
+      quoteReference: item.quoteReference, quotedAt: new Date(item.quotedAt!), quoteValidUntil: item.quoteValidUntil, candidateScore: null, candidateBand: null,
+      recommendationSnapshot: { item: { ...item, receiveVariantSelection: { version: 1, highestHierarchyLevel: 1, candidateCount: 1, selectedVariantId: 200 } } } }],
+      completion: { itemsAnalyzed: 1, skippedNoVendor: 0, skippedOnOrder: 0, skippedExcluded: 0, summaryJson: {} } };
+  }
+
+  it("prevents sequential automatic duplicate drafts across changed lookback identities", async () => {
+    await releaseRequest(); const command = await automaticPoCommand(500);
+    const first = await recommendationHandoff.createAutomaticHandoff(command);
+    expect(first.pos).toHaveLength(1);
+    await pool.query("INSERT INTO public.auto_draft_runs(id,run_at,status,triggered_by,lease_expires_at) OVERRIDING SYSTEM VALUE VALUES(501,clock_timestamp() AT TIME ZONE 'UTC','running','manual',(clock_timestamp() AT TIME ZONE 'UTC')+interval '10 minutes')");
+    const second = await recommendationHandoff.createAutomaticHandoff({ ...command, autoDraftRunId: 501, items: command.items.map((item) => ({ ...item, recommendationId: '100:200:90' })) });
+    expect(second.pos).toEqual([]); expect(second.skipped).toMatchObject([{ reason: "pending_sourcing_reservation", reservedPieces: command.items[0].suggestedOrderPieces, uncoveredPieces: 0 }]);
+    expect((await pool.query("SELECT count(*)::int AS count FROM procurement.purchase_orders")).rows[0].count).toBe(1);
+  });
+
+  it("holds both manual and automatic RFQs after an unlinked automatic draft reserves the demand", async () => {
+    await releaseRequest(); const command = await automaticPoCommand(500);
+    const created = await recommendationHandoff.createAutomaticHandoff(command);
+    expect(created.pos).toHaveLength(1);
+    await freshRecommendation(3, 1, 150);
+    await expect(purchasingOwner.createRfqBatch({ idempotencyKey: "reverse-manual-rfq", lines: [{ recommendationLineId: 3, vendorId: 5, vendorProductId: 300, requestedPieces: 150 }] }, actorId))
+      .rejects.toMatchObject({ code: "RFQ_PENDING_PURCHASE_REVIEW_REQUIRED", context: { purchaseOrderIds: [created.pos[0].id] } });
+    await pool.query("INSERT INTO procurement.vendor_products(id,vendor_id,product_id,product_variant_id) VALUES(302,5,100,NULL)");
+    const line = await receivingChoiceRecommendation(4, 200, 150, 1, automaticReceivingEvidence(200));
+    const automatic = await createAutomaticRfqDraftService(database).createDrafts({ recommendationRunId: 1, lines: [line], actorId, policy: normalizeAutomaticRfqDraftPolicy({ rfqDraftAutomationMode: "preferred_vendor" }) });
+    expect(automatic).toMatchObject({ rfqs: [], lines: [], skipped: [{ code: "pending_purchase_review_required" }] });
+    expect((await pool.query("SELECT count(*)::int AS count FROM procurement.request_for_quote_lines WHERE recommendation_line_id IN(3,4)")).rows[0].count).toBe(0);
+    // Closing the draft obligation restores the original RFQ allocation path.
+    await pool.query("UPDATE procurement.purchase_orders SET status='cancelled' WHERE id=$1", [created.pos[0].id]);
+    expect((await purchasingOwner.createRfqBatch({ idempotencyKey: "reverse-after-cancellation", lines: [{ recommendationLineId: 3, vendorId: 5, vendorProductId: 300, requestedPieces: 150 }] }, actorId)).lines).toHaveLength(1);
+  });
+
+  it("serializes automatic PO creation against manual RFQ creation for the same product demand", async () => {
+    await releaseRequest(); const command = await automaticPoCommand(500);
+    await freshRecommendation(3, 1, 150);
+    const [automatic, request] = await Promise.allSettled([
+      recommendationHandoff.createAutomaticHandoff(command),
+      purchasingOwner.createRfqBatch({ idempotencyKey: "concurrent-auto-po-manual-rfq", lines: [{ recommendationLineId: 3, vendorId: 5, vendorProductId: 300, requestedPieces: 150 }] }, actorId),
+    ]);
+    expect(automatic.status).toBe("fulfilled");
+    if (automatic.status !== "fulfilled") throw automatic.reason;
+    if (automatic.value.pos.length > 0) {
+      expect(request.status).toBe("rejected");
+      if (request.status === "rejected") expect(request.reason).toMatchObject({ code: "RFQ_PENDING_PURCHASE_REVIEW_REQUIRED" });
+    } else {
+      expect(request.status).toBe("fulfilled"); expect(automatic.value.skipped).toMatchObject([{ reason: "pending_sourcing_reservation" }]);
+    }
+    const rfqs = (await pool.query("SELECT count(*)::int AS count FROM procurement.request_for_quote_lines WHERE recommendation_line_id=3")).rows[0].count;
+    expect(rfqs + automatic.value.pos.length).toBe(1);
+  });
+
+  it("serializes automatic PO creation against automatic RFQ creation across supplier choices", async () => {
+    await releaseRequest(); const command = await automaticPoCommand(500);
+    await pool.query("INSERT INTO procurement.vendor_products(id,vendor_id,product_id,product_variant_id) VALUES(302,5,100,NULL)");
+    const line = await receivingChoiceRecommendation(3, 200, 150, 1, automaticReceivingEvidence(200));
+    const [purchase, request] = await Promise.all([
+      recommendationHandoff.createAutomaticHandoff(command),
+      createAutomaticRfqDraftService(database).createDrafts({ recommendationRunId: 1, lines: [line], actorId, policy: normalizeAutomaticRfqDraftPolicy({ rfqDraftAutomationMode: "preferred_vendor" }) }),
+    ]);
+    expect(purchase.pos.length + request.lines.length).toBe(1);
+    if (purchase.pos.length) expect(request.skipped).toMatchObject([{ code: "pending_purchase_review_required" }]);
+    else expect(purchase.skipped).toMatchObject([{ reason: "pending_sourcing_reservation" }]);
+  });
+
+  it("uses real converted PO remainder once and excludes committed supply from pending reservations", async () => {
+    await capture(); const attempt = await conversion();
+    const po = rfqConversionResultSchema.parse((await commands.execute(attempt.command, actorId, attempt.identity)).body);
+    await releaseRequest();
+    await pool.query("UPDATE procurement.purchase_order_lines SET order_qty=100,received_qty=20,cancelled_qty=10 WHERE id=$1", [po.lines[0].purchaseOrderLineId]);
+    const repo = (await import("../../recommendation-po-handoff.repository")).createDrizzleRecommendationPoHandoffRepository(database);
+    expect(await repo.transaction((tx) => tx.lockAndLoadPendingSourcingReservations([100]))).toEqual([{ productId: 100, pieces: 70, purchaseOrderId: po.purchaseOrderId, rfqId: null }]);
+    await pool.query("UPDATE procurement.purchase_orders SET status='approved' WHERE id=$1", [po.purchaseOrderId]);
+    expect(await repo.transaction((tx) => tx.lockAndLoadPendingSourcingReservations([100]))).toEqual([]);
+  });
+
+  it.each([null, 2])("holds linked draft demand when the next recommendation scope is %s and the RFQ baseline does not cover it", async (warehouseId) => {
+    await capture(); const attempt = await conversion();
+    const po = rfqConversionResultSchema.parse((await commands.execute(attempt.command, actorId, attempt.identity)).body);
+    // Keep the original RFQ scope at warehouse 1; the pending PO is global.
+    await pool.query("UPDATE procurement.purchase_orders SET warehouse_id=NULL WHERE id=$1", [po.purchaseOrderId]);
+    if (warehouseId !== null) await pool.query("INSERT INTO warehouse.warehouses(id,code,name) VALUES(2,'OVERLAP','Overlap fixture')");
+    await pool.query("INSERT INTO procurement.vendor_products(id,vendor_id,product_id,product_variant_id) VALUES(302,5,100,NULL)");
+    const line = await receivingChoiceRecommendation(3, 200, 150, warehouseId);
+    const { lockAndLoadActiveRfqAllocations } = await import("../../purchasing-rfq.service");
+    await expect(database.transaction((tx) => lockAndLoadActiveRfqAllocations(tx, [line]))).rejects.toMatchObject({ code: "RFQ_PENDING_PURCHASE_REVIEW_REQUIRED", context: { purchaseOrderIds: [po.purchaseOrderId] } });
+    expect((await pendingAllocation(1)).get("100:1")).toBe(150);
+  });
+
+  it("serializes release and automatic sourcing without duplicating the active request", async () => {
+    const command = await automaticPoCommand(500);
+    const before = await service.getDetail(10);
+    const release: RfqWorkflowCommand = { operation: "release", rfqId: 10, body: { expectedVersion: before.version, reason: "Release abandoned request" } };
+    const [automatic, released] = await Promise.all([recommendationHandoff.createAutomaticHandoff(command), commands.execute(release, actorId, descriptor(release))]);
+    expect(released.httpStatus).toBe(200);
+    if (automatic.pos.length === 0) expect(automatic.skipped).toMatchObject([{ reason: "pending_sourcing_reservation", reservations: [{ rfqId: 10 }] }]);
+    expect(automatic.pos.length).toBeLessThanOrEqual(1);
+    expect((await service.getDetail(10)).status).toBe("cancelled");
+    expect((await pool.query("SELECT count(*)::int AS count FROM procurement.purchase_orders")).rows[0].count).toBe(automatic.pos.length);
+  });
 
   it.each([
     { name: "historical", evidence: {} },
@@ -341,6 +562,58 @@ integration.sequential("RFQ quote revisions and real purchase-owner transaction"
     } finally { await competing.query("RESET lock_timeout"); competing.release(); }
   });
 
+  it("queues a reviewed catalog import before supplier locks while the real RFQ conversion holds product custody", async () => {
+    await capture();
+    const attempt = await conversion();
+    const { loadRfqWorkflow } = await import("../../rfq-workflow.repository");
+    const { lockInventoryCostGraph } = await import("../../../inventory/infrastructure/cost-evidence.repository");
+    const { supplierEvidenceCatalogStateFingerprint } = await import("../../supplier-evidence-catalog-state");
+    const { createPurchasingService } = await import("../../purchasing.service");
+    const entries: Parameters<typeof purchasingOwner.applyReviewedSupplierEvidenceImport>[1] = [{
+      productId: 100, productVariantId: 200, pricing: { basis: "per_piece", quantityPieces: 1, unitCostMills: 20000 },
+      quotedAt: NOW, quoteReference: "LATER-CATALOG-QUOTE", packSize: 1, moq: 1, isPreferred: false,
+    }];
+    // Use the preview owner's Drizzle timestamp decoding, not node-postgres's local-time parser.
+    const mappings = await database.select().from(schema.vendorProducts);
+    const fingerprint = supplierEvidenceCatalogStateFingerprint(5, entries, mappings);
+    const importer = await pool.connect();
+    let outcome: Promise<{ ok: true; result: Awaited<ReturnType<typeof purchasingOwner.applyReviewedSupplierEvidenceImport>> } | { ok: false; error: unknown }> | undefined;
+    try {
+      const importerPid = Number((await importer.query("SELECT pg_backend_pid() AS pid")).rows[0].pid);
+      const importOwner = createPurchasingService(drizzle(importer, { schema }), {} as never, { now: () => NOW });
+      const converted = await database.transaction(async (tx) => {
+        await lockInventoryCostGraph(tx);
+        await loadRfqWorkflow(tx, 10, true);
+        outcome = importOwner.applyReviewedSupplierEvidenceImport(5, entries, fingerprint, actorId)
+          .then(result => ({ ok: true as const, result }), error => ({ ok: false as const, error }));
+        const deadline = Date.now() + 5_000;
+        let waitEvent: string | null = null;
+        while (Date.now() < deadline) {
+          const activity = (await pool.query<{ blocked: boolean; wait_event: string | null }>(
+            "SELECT cardinality(pg_blocking_pids(pid))>0 AS blocked,wait_event FROM pg_stat_activity WHERE pid=$1", [importerPid],
+          )).rows[0];
+          if (activity?.blocked) { waitEvent = activity.wait_event; break; }
+          await new Promise(resolve => setTimeout(resolve, 10));
+        }
+        // Without the common graph lock the importer holds this supplier row
+        // while waiting for our product row, preventing conversion from finishing.
+        expect(waitEvent).toBe("advisory");
+        await tx.execute(sql`SELECT id FROM procurement.vendors WHERE id=5 FOR SHARE NOWAIT`);
+        return service.executeInTransaction(tx, attempt.command, actorId, NOW, `rfq-${suffix}-catalog-overlap`);
+      });
+      expect(rfqConversionResultSchema.parse(converted).status).toBe("draft");
+      const imported = await outcome;
+      if (imported && !imported.ok) throw imported.error;
+      expect(imported).toMatchObject({ ok: true, result: { created: [], updated: [{ vendorProductId: 300, productId: 100, productVariantId: 200 }] } });
+      expect((await pool.query("SELECT unit_cost_mills::text AS cost,quote_reference FROM procurement.vendor_products WHERE id=300")).rows)
+        .toEqual([{ cost: "20000", quote_reference: "LATER-CATALOG-QUOTE" }]);
+      expect((await pool.query("SELECT order_qty,total_product_cost_cents::text AS total FROM procurement.purchase_order_lines WHERE line_type='product'")).rows)
+        .toEqual([{ order_qty: 150, total: "10000" }]);
+      expect((await pool.query("SELECT count(*)::int AS count FROM procurement.rfq_purchase_order_line_links WHERE rfq_line_id=20")).rows[0].count).toBe(1);
+      expect((await pool.query("SELECT changes FROM public.audit_events WHERE actor=$1 AND action='vendor_catalog.updated'", [`user:${actorId}`])).rows)
+        .toEqual([expect.objectContaining({ changes: expect.objectContaining({ before: expect.any(Object), after: expect.objectContaining({ unitCostMills: 20000 }) }) })]);
+    } finally { await outcome; importer.release(); }
+  });
   it("supports selected subsets as separate POs while each RFQ line converts only once", async () => {
     await capture(); await capture(21);
     const first = await conversion([20]);

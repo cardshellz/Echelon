@@ -12,7 +12,7 @@ export function rfqWorkflowCommandScope(command: RfqWorkflowCommand) {
   if (command.operation === "capture_quote") rfqResourceIdSchema.parse(command.lineId);
   return {
     method: "POST",
-    routeTemplate: command.operation === "capture_quote" ? "/api/purchasing/rfqs/:rfqId/lines/:lineId/quotes" : "/api/purchasing/rfqs/:rfqId/convert",
+    routeTemplate: command.operation === "capture_quote" ? "/api/purchasing/rfqs/:rfqId/lines/:lineId/quotes" : command.operation === "release" ? "/api/purchasing/rfqs/:rfqId/release" : "/api/purchasing/rfqs/:rfqId/convert",
     resourceKey: command.operation === "capture_quote" ? `rfq:${command.rfqId}:line:${command.lineId}` : `rfq:${command.rfqId}`,
     commandName: `procurement.rfq.${command.operation}`,
   };

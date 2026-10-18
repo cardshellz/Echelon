@@ -106,12 +106,13 @@ describeWithDisposableDb.sequential("purchase recommendation and RFQ PostgreSQL 
     }
   });
 
+  let fixtureRfqSequence = 0;
   async function createRfq(vendorId: number, key: string) {
     const requestHash = createHash("sha256").update(`${vendorId}:${key}`).digest("hex");
     return (await pool.query(
       `INSERT INTO procurement.request_for_quotes (rfq_number, vendor_id, idempotency_key, request_hash)
        VALUES ($1, $2, $3, $4) RETURNING id`,
-      [`RFQ-${key}`, vendorId, key, requestHash],
+      [`RFQ-${suffix}-${++fixtureRfqSequence}`, vendorId, key, requestHash],
     )).rows[0].id as number;
   }
 

@@ -10,7 +10,7 @@
 - An RFQ can produce multiple POs from disjoint selected lines. Each line converts once; a cancelled PO retains its original source link. A new purchasing request is needed for a replacement purchase.
 - Conversion validates the reviewed workflow version, selected quote revision, quote expiry, supplier/catalog identity through the PO owner, and warehouse. A changed purchase quantity needs an explicit reason.
 - `createPurchaseOrderWithLines` accepts an internal transaction. Its existing create attempt runs as a savepoint, preserving PO-number collision retries while quote links, line states, PO events, and RFQ audit commit or roll back together.
-- Both write commands use durable financial command identities. An uncertain browser response retries the same payload and key. Quote edits preserve the version opened for review; changing the workflow after line selection requires renewed selection.
+- Quote capture, conversion and reservation release use durable financial command identities. An uncertain browser response retries the same payload and key. Quote edits preserve the version opened for review; changing the workflow after line selection requires renewed selection.
 
 ## Current supplier quantity review
 
@@ -24,7 +24,7 @@ Current and historical rules participate in the reviewed workflow version. The c
 
 The existing data contracts support one reusable supplier price and one price/quantity basis per immutable RFQ quote revision. `shared/schema/procurement.schema.ts:vendorProducts` stores scalar `pricingBasis`, `quotedUnitCostMills`, `piecesPerPurchaseUom`, and MOQ, with a unique supplier/product/variant business key. `shared/procurement/rfq-workflow.ts:rfqQuotePricingSchema` stores one per-piece, per-purchase-unit, or extended-total price for a quoted quantity. `assertRfqQuoteCanConvert` accepts only the latest revision; older revisions preserve history.
 
-There is no quantity-tier schedule in those contracts: no breakpoint ranges, concurrent alternative tiers, tier-selection rule, or automatic discount evaluation in `purchasing-recommendation.engine.ts:resolveSupplierCost`. A vendor's selected discounted quote can be recorded explicitly today, including its exact quantity and price; a reusable multi-tier schedule and optimization across tiers remain unsupported. This change does not add a catalog redesign.
+Reusable supplier schedules are owned by `SupplierSourcingService`, with tier selection in `shared/procurement/supplier-sourcing.ts:selectSupplierPriceTier`. An RFQ quote revision records the final selected quantity and price. Conversion preserves that quote; it does not silently resize a quoted quantity or select a different tier when another source already reserves part of the demand.
 
 ## Sourcing reservation handoff
 
@@ -41,10 +41,23 @@ The locked allocation reader, requirement queue, automatic RFQ owner, and databa
 
 `ProcurementRfqs.tsx` loads an exact `?rfqId=` workflow independently of recent-list pagination. `RfqWorkflowPanel.tsx` provides quote authoring, exact totals and packaging, preserved revision history, selection, draft conversion, and direct purchase links. View permission allows inspection; purchasing edit permission controls writes.
 
-Focused unit tests cover input bounds, exact decimal parsing, pricing consistency, lifecycle gates, authority, durable command scope, currency, and reservation handoff. Sixteen disposable PostgreSQL cases exercise the real PO owner, idempotent replay, overlapping conversions, audit rollback, immutable history, draft quantity changes, stale supply, and later purchasing after approval or completion. Twelve browser cases cover desktop/mobile authoring, lost-response retry, direct links, permissions, ambiguous packaging, currency display, changed selections, and explicit MOQ/order-multiple review without altering quoted pieces.
+Focused unit tests cover input bounds, exact decimal parsing, pricing consistency, lifecycle gates, authority, durable command scope, currency, and reservation handoff. The disposable PostgreSQL suite exercises the real PO owner, idempotent replay, overlapping conversions and catalog imports, audit rollback, immutable history, draft quantity changes, stale supply, and later purchasing after approval or completion. The browser suite covers desktop/mobile authoring, lost-response retry, direct links, permissions, ambiguous packaging, currency display, changed selections, and explicit MOQ/order-multiple review without altering quoted pieces. Current execution counts are recorded in the batch validation evidence.
 
 ## Purchase-to-RFQ navigation
 
 `readPurchaseRfqOrigins` in `purchase-rfq-origin.repository.ts` reads the immutable conversion link and verifies its purchase, line and quote identities. `PurchaseRfqOrigins.tsx` opens the existing RFQ workflow inline on the purchase lifecycle page; its full RFQ link retains the exact RFQ ID. Older purchases without recorded conversion links remain unlinked rather than using a supplier/SKU guess. Conflicting identities or an over-limit history fail explicitly.
 
 The real RFQ conversion PostgreSQL fixture verifies the reverse reader against the PO and exact line that the actual purchasing owner created, and excludes an unrelated purchase. Seven focused origin tests cover identity conflicts, bounded history and missing quote evidence. Two additional desktop/mobile browser cases verify opening and closing the RFQ details, then inspecting a shipment while the purchase URL stays open.
+
+
+## Abandoned request recovery and overlapping draft demand
+
+`POST /api/purchasing/rfqs/:rfqId/release` requires purchasing edit permission, a durable command key, the reviewed `expectedVersion`, and a nonempty reason. The existing RFQ command owner takes the graph/header/source locks, cancels only unconverted active lines, and cancels the request header. The audit records actor, time, reason, before/after workflow, exact released line quantities and retained purchase IDs in the same transaction. Quotes, requested quantities and linked purchases remain intact. A lost response retries the exact key and payload; changed request evidence requires a fresh review. An audit failure rolls back release. An ordered line without a verified purchase link blocks release of the whole request because header cancellation would otherwise erase its unresolved reservation.
+
+The RFQ panel displays this recovery beside quote history and purchase links. Release is an internal sourcing action; it does not communicate with a supplier or cancel a purchase order. Converted draft obligations must be edited or cancelled through their purchase owner.
+
+`rfq-sourcing-reservation.repository.ts:loadPendingPurchaseSourcingReservations` is the shared pending-purchase reader for automatic PO and RFQ owners. `pendingPurchaseSourcingPieces` calculates the same validated open draft/pending-approval remainder for both. Automatic PO creation checks current pending purchases and active unconverted requests under common graph/product locks, independent of old decision timestamps, receive variants or recommendation lookback identity. Converted RFQs are counted through their PO once; committed supply remains separate.
+
+A partially covered automatic recommendation is held for review rather than silently repriced. The Runs page shows reserved, suggested and uncovered quantities with exact PO/RFQ recovery links. New manual RFQs overlapping an unrelated pending purchase return `RFQ_PENDING_PURCHASE_REVIEW_REQUIRED`; automatic RFQs record `pending_purchase_review_required`. Linked draft purchases also require review when their global/warehouse scope overlaps but the exact RFQ allocation baseline does not account for them. The existing SQL-enforced RFQ excess-allocation baseline is unchanged. Distinct explicit warehouses remain separate; an unassigned warehouse overlaps explicit warehouse demand.
+
+No data migration, automatic release policy, production repair, supplier dispatch or automation activation accompanies this correction. The existing RFQ integration suite now includes sequential and competing PO/RFQ owners, release versus conversion, same-key release, audit rollback, linked/legacy purchase preservation and overlapping warehouse evidence. The RFQ browser suite covers release/retry/conflict/permissions, linked purchase navigation, and partial reservation recovery from Runs. Final execution counts and release status belong to the batch validation evidence.

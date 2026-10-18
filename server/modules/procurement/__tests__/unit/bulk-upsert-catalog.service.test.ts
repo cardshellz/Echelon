@@ -1,4 +1,6 @@
+import { PgDialect } from "drizzle-orm/pg-core";
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import { supplierEvidenceCatalogStateFingerprint } from "../../supplier-evidence-catalog-state";
 import { createPurchasingService, PurchasingError } from "../../purchasing.service";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -51,7 +53,7 @@ function buildMockDb(options: {
   const updateQueue = [...(options.updateReturns ?? [])];
 
   const tx = {
-    execute: vi.fn(async () => ({ rows: executeQueue.shift() ?? [] })),
+    execute: vi.fn(async (query: any) => ({ rows: new PgDialect().sqlToQuery(query).sql.includes("pg_advisory_xact_lock") ? [] : executeQueue.shift() ?? [] })),
     select: vi.fn(() => buildSelectChain([])),
     insert: vi.fn(() => buildInsertChain([])),
     update: vi.fn(() => buildUpdateChain(updateQueue.shift() ?? [])),
@@ -248,7 +250,7 @@ describe("Spec A follow-up \u2014 bulkUpsertVendorCatalog flow", () => {
       { vendorProductId: 100, productId: 1, productVariantId: 11 },
     ]);
     expect(result.updated).toEqual([]);
-    expect(db._tx.execute).toHaveBeenCalledTimes(4);
+    expect(db._tx.execute).toHaveBeenCalledTimes(5);
     expect(db._tx.insert).toHaveBeenCalledTimes(1); // durable audit
     expect(db._tx.update).not.toHaveBeenCalled();
   });
@@ -311,5 +313,39 @@ describe("Spec A follow-up \u2014 bulkUpsertVendorCatalog flow", () => {
       ], "u1"),
     ).rejects.toThrow("db explode");
     // Nothing was logged/returned \u2014 the caller gets an error.
+  });
+});
+
+
+describe("reviewed supplier catalog transaction", () => {
+  const entry = { productId: 1, unitCostCents: 100, isPreferred: true };
+  it("requires reviewed evidence before opening a transaction", async () => {
+    const db = buildMockDb();
+    const service = createPurchasingService(db as any, buildMockStorage());
+    await expect(service.applyReviewedSupplierEvidenceImport(42, [entry], "", "reviewer"))
+      .rejects.toMatchObject({ details: { code: "SUPPLIER_EVIDENCE_PREVIEW_REQUIRED" } });
+    expect(db.transaction).not.toHaveBeenCalled();
+  });
+  it("compares locked current mappings before demotion, catalog write or audit", async () => {
+    const db = buildMockDb({ executeRows: [ [{ id: 42, active: 1 }], [{ id: 1, is_active: true }],
+      [{ id: 100, vendor_id: 42, product_id: 1, unit_cost_mills: "90000" }] ] });
+    const service = createPurchasingService(db as any, buildMockStorage());
+    await expect(service.applyReviewedSupplierEvidenceImport(42, [entry],
+      supplierEvidenceCatalogStateFingerprint(42, [entry], []), "reviewer"))
+      .rejects.toMatchObject({ statusCode: 409, details: { code: "SUPPLIER_EVIDENCE_PREVIEW_STALE" } });
+    expect(db._tx.execute).toHaveBeenCalledTimes(4);
+    expect(db._tx.insert).not.toHaveBeenCalled();
+    expect(db._tx.update).not.toHaveBeenCalled();
+  });
+  it("retains the existing atomic catalog owner when reviewed evidence is unchanged", async () => {
+    const db = buildMockDb({ executeRows: [ [{ id: 42, active: 1 }], [{ id: 1, is_active: true }], [], [],
+      [{ id: 100, vendor_id: 42, product_id: 1, product_variant_id: null, unit_cost_cents: 100,
+        unit_cost_mills: 10000, is_preferred: 1, is_active: 1 }] ] });
+    const service = createPurchasingService(db as any, buildMockStorage());
+    const result = await service.applyReviewedSupplierEvidenceImport(42, [entry],
+      supplierEvidenceCatalogStateFingerprint(42, [entry], []), "reviewer");
+    expect(result.created).toEqual([{ vendorProductId: 100, productId: 1, productVariantId: null }]);
+    expect(db.transaction).toHaveBeenCalledTimes(1);
+    expect(db._tx.insert).toHaveBeenCalledTimes(1);
   });
 });
