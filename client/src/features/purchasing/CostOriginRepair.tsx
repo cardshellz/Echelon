@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   originRepairContextSchema,
@@ -235,6 +235,12 @@ function RepairForm({
     onSettled: () => invalidatePurchaseCosts(queryClient),
   });
   const approval = saved?.approval ?? data.approval;
+  const bodyRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    // The short approval step replaces a potentially scrolled input form.
+    // Start at the named lot and summary instead of retaining the form offset.
+    if (bodyRef.current) bodyRef.current.scrollTop = 0;
+  }, [preview.data, approval]);
   const ambiguous =
     save.error instanceof FinancialCommandRequestError && save.error.ambiguous;
   const locked = preview.isPending || save.isPending || ambiguous;
@@ -245,7 +251,10 @@ function RepairForm({
   };
   return (
     <>
-      <div className="overflow-y-auto min-h-0 space-y-4 pr-2 text-sm">
+      <div
+        ref={bodyRef}
+        className="overflow-y-auto min-h-0 space-y-4 pr-2 text-sm"
+      >
         <p>
           <strong>
             {data.sku} · {data.lotNumber}

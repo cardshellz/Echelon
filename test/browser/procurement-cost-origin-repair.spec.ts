@@ -235,6 +235,9 @@ test("admin repairs origin with visible before/after and sees the approval acros
   await expect(dialog.getByRole("table")).toContainText("25.00");
   await expect(dialog.getByRole("table")).toContainText("12.34");
   await expect(dialog.getByRole("table")).toBeInViewport();
+  await expect(
+    dialog.getByText("TEST-COST-SKU · TEST-JULY-LOT", { exact: true }),
+  ).toBeInViewport();
   const approve = page.getByRole("button", {
     name: "Approve repair & post costs",
   });
