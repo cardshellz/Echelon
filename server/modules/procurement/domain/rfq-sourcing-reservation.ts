@@ -26,6 +26,13 @@ export function isActiveRfqReservation(rfqStatus: string, lineStatus: string): b
   return ["draft", "sent", "partially_quoted", "quoted"].includes(rfqStatus) && ["draft", "sent", "quoted", "accepted", "ordered"].includes(lineStatus);
 }
 
+export const pendingPurchaseSourcingSchema = linkedRfqPurchaseSchema.omit({ rfqLineId: true });
+export function pendingPurchaseSourcingPieces(purchase: unknown): number {
+  const source = pendingPurchaseSourcingSchema.parse(purchase);
+  if (!["draft", "pending_approval"].includes(source.status) || !["open", "partially_received"].includes(source.lineStatus)) return 0;
+  return Math.max(source.orderQty - source.receivedQty - source.cancelledQty, 0);
+}
+
 export function rfqPendingSourcingPieces(requestedPieces: number, purchase: LinkedRfqPurchase | null, activeRequest = true): number {
   quantity.parse(requestedPieces);
   if (purchase === null) return activeRequest ? requestedPieces : 0; // Unknown legacy links retain their existing allocation.
@@ -33,8 +40,8 @@ export function rfqPendingSourcingPieces(requestedPieces: number, purchase: Link
   // Drafts are not part of the planning engine's committed PO supply. After
   // approval, the PO/receipt supply owns the quantity; retaining an RFQ reserve
   // would subtract the same purchase twice and eventually suppress future buys.
-  if (!["draft", "pending_approval"].includes(source.status) || !["open", "partially_received"].includes(source.lineStatus)) return 0;
-  return Math.max(source.orderQty - source.receivedQty - source.cancelledQty, 0);
+  const { rfqLineId: _rfqLineId, ...purchaseSource } = source;
+  return pendingPurchaseSourcingPieces(purchaseSource);
 }
 
 export function assertRfqSupplySnapshotCurrent(purchases: LinkedRfqPurchase[], asOf: Date): void {
@@ -42,5 +49,23 @@ export function assertRfqSupplySnapshotCurrent(purchases: LinkedRfqPurchase[], a
   for (const purchase of purchases) {
     const source = linkedRfqPurchaseSchema.parse(purchase);
     if (!["draft", "pending_approval"].includes(source.status) && source.updatedAt.getTime() > asOf.getTime()) throw new RfqSourcingSnapshotError();
+  }
+}
+
+/** Unassigned warehouse demand intersects every warehouse; explicit distinct
+ * warehouses remain independent. Receive variants never partition base demand. */
+export function sourcingScopesOverlap(left: { productId: number; warehouseId?: number | null }, right: { productId: number; warehouseId?: number | null }): boolean {
+  return left.productId === right.productId && (left.warehouseId == null || right.warehouseId == null || left.warehouseId === right.warehouseId);
+}
+
+export class PendingPurchaseSourcingReviewError extends Error {
+  readonly code = "RFQ_PENDING_PURCHASE_REVIEW_REQUIRED";
+  readonly statusCode = 409;
+  readonly context: { purchaseOrderIds: number[] };
+  constructor(purchaseOrderIds: readonly number[]) {
+    const ids = [...new Set(purchaseOrderIds)].sort((a, b) => a - b);
+    super(`Draft purchase orders ${ids.map((id) => `#${id}`).join(", ")} already reserve this demand. Review or cancel those draft obligations before creating another quote request.`);
+    this.name = "PendingPurchaseSourcingReviewError";
+    this.context = { purchaseOrderIds: ids };
   }
 }

@@ -8,6 +8,7 @@ import {
   RFQ_HISTORY_PAGE_SIZE,
   rfqConversionResultSchema,
   rfqConvertSchema,
+  rfqReleaseSchema, releasableRfqLines, hasUnverifiedRfqPurchase,
   rfqQuoteCaptureSchema,
   rfqQuoteRevisionSchema,
   rfqResourceIdSchema,
@@ -17,7 +18,7 @@ import {
 } from "@shared/procurement/rfq-workflow";
 import type { CreatePurchaseOrderWithLinesInput } from "./purchasing.service";
 import {
-  appendRfqAudit, insertRfqPurchaseLink, insertRfqQuoteRevision, loadCreatedPurchaseLines,
+  releaseRfqRequest, appendRfqAudit, insertRfqPurchaseLink, insertRfqQuoteRevision, loadCreatedPurchaseLines,
   loadRfqWorkflow, readRfqLineAuditSnapshot, readRfqQuoteHistory, updateRfqQuoteMirrors, type RfqWorkflowExecutor, type RfqWorkflowSnapshot,
 } from "./rfq-workflow.repository";
 
@@ -47,7 +48,7 @@ export interface RfqPurchaseOrderOwner {
 }
 export type RfqWorkflowCommand =
   | { operation: "capture_quote"; rfqId: number; lineId: number; body: unknown }
-  | { operation: "convert"; rfqId: number; body: unknown };
+  | { operation: "convert" | "release"; rfqId: number; body: unknown };
 
 export function rfqWorkflowVersion(snapshot: Omit<RfqWorkflowDetail, "version">): string {
   return createHash("sha256").update(canonicalJson(snapshot)).digest("hex");
@@ -135,6 +136,19 @@ export function createRfqWorkflowService(database: RfqWorkflowDatabase, purchasi
         await updateRfqQuoteMirrors(tx, command.rfqId, saved, allQuoted ? "quoted" : "partially_quoted", at);
         await appendRfqAudit(tx, { actorId, action: "purchase_rfq.quote_captured", rfqId: command.rfqId, before: { revision: line.latestQuote, lineSnapshot: priorLineSnapshot }, after: saved, at, context: { rfqLineId: line.id, idempotencyKey } });
         return requireWorkflow(tx, command.rfqId, false);
+      }
+      if (command.operation === "release") {
+        const input = rfqReleaseSchema.parse(command.body);
+        const workflow = await requireWorkflow(tx, command.rfqId, true);
+        if (input.expectedVersion !== workflow.version) throw new RfqWorkflowError("RFQ_VERSION_CONFLICT", "This quote request changed; review its remaining reservations before releasing it");
+        if (hasUnverifiedRfqPurchase(workflow)) throw new RfqWorkflowError("RFQ_PURCHASE_LINK_REVIEW_REQUIRED", "An ordered request line has no verified purchase-order link. Review its original purchase evidence before releasing this request.");
+        const released = releasableRfqLines(workflow);
+        if (released.length === 0) throw new RfqWorkflowError("RFQ_NOT_RELEASABLE", "This request has no active unconverted lines to release. Linked purchases must be managed from their purchase orders.");
+        await releaseRfqRequest(tx, workflow.id, released.map((line) => line.id), at);
+        const after = await requireWorkflow(tx, workflow.id, false);
+        await appendRfqAudit(tx, { actorId, action: "purchase_rfq.reservation_released", rfqId: workflow.id, before: workflow, after, at,
+          context: { reason: input.reason, idempotencyKey, releasedLines: released.map((line) => ({ rfqLineId: line.id, requestedPieces: line.requestedPieces })), retainedPurchaseOrderIds: workflow.lines.flatMap((line) => line.purchaseOrder ? [line.purchaseOrder.purchaseOrderId] : []) } });
+        return after;
       }
       const input = rfqConvertSchema.parse(command.body);
       const workflow = await requireWorkflow(tx, command.rfqId, true);

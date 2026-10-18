@@ -70,6 +70,16 @@ databaseTests.sequential("purchase approval authority PostgreSQL owner and HTTP 
     });
     return { status: response.status, body: await response.json() as any };
   };
+  const dispatchConfirmation = async () => ({
+    confirmedSentExternally: true as const,
+    expectedUpdatedAt: (await storage.getPurchaseOrderById(1)).updatedAt.toISOString(),
+  });
+  const postDispatch = async (body: unknown) => {
+    const response = await fetch(`${url}/api/purchase-orders/1/send`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+    });
+    return { status: response.status, body: await response.json() as any };
+  };
   const evidence = async () => {
     const header = (await pool.query("SELECT * FROM procurement.purchase_orders WHERE id=1")).rows;
     const lines = (await pool.query("SELECT * FROM procurement.purchase_order_lines ORDER BY id")).rows;
@@ -145,9 +155,9 @@ databaseTests.sequential("purchase approval authority PostgreSQL owner and HTTP 
         ('cancel-user','cancel-only','unused','admin',1);
       INSERT INTO identity.auth_roles(id,name,is_system) VALUES
         (1,'Administrator',1),(2,'Team Lead',1),(3,'Other Buyer',0),(4,'Scoped Approver',0),(5,'No Grant',0),(6,'Cancel Only',0);
-      INSERT INTO identity.auth_permissions(id,resource,action,category) VALUES (1,'purchasing','approve','purchasing'),(2,'purchasing','edit','purchasing'),(3,'purchasing','cancel','purchasing');
+      INSERT INTO identity.auth_permissions(id,resource,action,category) VALUES (1,'purchasing','approve','purchasing'),(2,'purchasing','edit','purchasing'),(3,'purchasing','cancel','purchasing'),(4,'purchasing','create','purchasing');
       INSERT INTO identity.auth_role_permissions(id,role_id,permission_id,constraints) VALUES
-        (1,1,1,NULL),(2,2,1,NULL),(3,3,1,NULL),(4,4,1,'{"warehouseId":1}'),(5,1,2,NULL),(6,1,3,NULL),(7,6,3,NULL);
+        (1,1,1,NULL),(2,2,1,NULL),(3,3,1,NULL),(4,4,1,'{"warehouseId":1}'),(5,1,2,NULL),(6,1,3,NULL),(7,6,3,NULL),(8,1,4,NULL);
       INSERT INTO identity.auth_user_roles(id,user_id,role_id) VALUES
         (1,'admin-user',1),(2,'lead-user',2),(3,'wrong-user',3),(4,'inactive-user',1),(5,'scoped-user',4),(6,'no-grant-user',5),(7,'cancel-user',6);
       INSERT INTO procurement.purchase_orders(id,po_number,vendor_id,status,physical_status,financial_status,currency,
@@ -180,6 +190,77 @@ databaseTests.sequential("purchase approval authority PostgreSQL owner and HTTP 
     });
     return { status: response.status, body: await response.json() as any };
   };
+
+  it("prepares an approved supplier document without recording dispatch and repeats without new audit", async () => {
+    await pool.query("UPDATE procurement.purchase_orders SET status='draft' WHERE id=1; UPDATE inventory.warehouse_settings SET require_approval=false; DELETE FROM procurement.po_approval_tiers");
+    const result = await service.sendPurchaseOrder(1, "admin-user");
+    expect(result).toMatchObject({ status: "approved", pdf: null, pendingApproval: false, dispatchRecorded: false });
+    const prepared = await evidence();
+    expect(prepared.header[0]).toMatchObject({ status: "approved", physical_status: "draft", sent_to_vendor_at: null, order_date: null });
+    expect(prepared.events.map(row => row.event_type)).toEqual(["approved"]);
+    await service.sendToVendor(1, "admin-user");
+    expect(await evidence()).toEqual(prepared);
+    expect(await postDispatch(await dispatchConfirmation())).toMatchObject({ status: 200, body: { status: "sent", physicalStatus: "sent" } });
+    const sent = await evidence();
+    expect(sent.events.map(row => row.event_type)).toEqual(["approved", "sent_to_vendor"]);
+    expect(sent.events[1]).toMatchObject({ actor_id: "admin-user", payload_json: { method: "operator_recorded", delivery_verified: false, total_cents: 10000 } });
+    expect(sent.header[0].sent_to_vendor_at).toBeInstanceOf(Date);
+    const retry = await postDispatch(await dispatchConfirmation());
+    expect(retry.status).toBe(400);
+    expect(await evidence()).toEqual(sent);
+  });
+
+  it.each([{}, { confirmedSentExternally: false }, { confirmedSentExternally: true, expectedUpdatedAt: "bad" }])("rejects missing or malformed dispatch attestation without writing %j", async body => {
+    await service.approve(1, "admin-user");
+    const before = await evidence();
+    expect(await postDispatch(body)).toMatchObject({ status: 400, body: { details: { code: "PO_EXTERNAL_DISPATCH_CONFIRMATION_REQUIRED" } } });
+    expect(await evidence()).toEqual(before);
+  });
+
+  it("rejects a changed reviewed PO version before recording dispatch", async () => {
+    await service.approve(1, "admin-user");
+    const reviewed = await dispatchConfirmation();
+    await pool.query("UPDATE procurement.purchase_orders SET updated_at=updated_at + interval '1 second' WHERE id=1");
+    const before = await evidence();
+    expect(await postDispatch(reviewed)).toMatchObject({ status: 409, body: { details: { code: "PO_DISPATCH_REVIEW_STALE" } } });
+    expect(await evidence()).toEqual(before);
+  });
+
+  it("returns approval-required without dispatch when authority changes after document review", async () => {
+    await service.approve(1, "admin-user");
+    const reviewed = await dispatchConfirmation();
+    await pool.query("UPDATE procurement.po_approval_tiers SET approver_role='lead' WHERE id=1");
+    expect(await postDispatch(reviewed)).toMatchObject({ status: 200, body: { status: "pending_approval", physicalStatus: "draft", sentToVendorAt: null } });
+    const after = await evidence();
+    expect(after.events.filter(row => row.event_type === "sent_to_vendor")).toHaveLength(0);
+    expect(after.header[0].sent_to_vendor_at).toBeNull();
+  });
+
+  it("records only one dispatch when two operators confirm the same reviewed version concurrently", async () => {
+    await service.approve(1, "admin-user");
+    const reviewed = await dispatchConfirmation();
+    const attempts = await Promise.allSettled([service.send(1, "admin-user", reviewed), service.send(1, "admin-user", reviewed)]);
+    expect(attempts.filter(attempt => attempt.status === "fulfilled")).toHaveLength(1);
+    const rejected = attempts.find(attempt => attempt.status === "rejected") as PromiseRejectedResult;
+    expect([400, 409]).toContain(rejected.reason.statusCode);
+    const after = await evidence();
+    expect(after.events.filter(row => row.event_type === "sent_to_vendor")).toHaveLength(1);
+    expect(after.history.filter(row => row.to_status === "sent")).toHaveLength(1);
+  });
+
+  it("rolls back dispatch and history when its audit persistence fails", async () => {
+    await service.approve(1, "admin-user");
+    const reviewed = await dispatchConfirmation();
+    const before = await evidence();
+    await pool.query(`CREATE FUNCTION procurement.fail_dispatch_audit() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected dispatch audit failure'; END $$;
+      CREATE TRIGGER fail_dispatch_audit BEFORE INSERT ON procurement.po_events FOR EACH ROW EXECUTE FUNCTION procurement.fail_dispatch_audit()`);
+    try {
+      await expect(service.send(1, "admin-user", reviewed)).rejects.toThrow("injected dispatch audit failure");
+      expect(await evidence()).toEqual(before);
+    } finally {
+      await pool.query("DROP TRIGGER fail_dispatch_audit ON procurement.po_events; DROP FUNCTION procurement.fail_dispatch_audit()");
+    }
+  });
 
   it.each(["cancel", "void"] as const)("allows a cancel-only actor to cancel an unissued PO through /%s", async (endpoint) => {
     requestActor = "cancel-user";
@@ -374,7 +455,7 @@ databaseTests.sequential("purchase approval authority PostgreSQL owner and HTTP 
       UPDATE procurement.purchase_order_lines SET unit_cost_cents=20000,unit_cost_mills=2000000,quoted_unit_cost_mills=2000000,total_product_cost_cents=20000,line_total_cents=20000,updated_at=now() WHERE id=11;
       COMMIT`);
     await pool.query("INSERT INTO procurement.po_events(po_id,event_type,actor_type,actor_id,payload_json) VALUES(1,$1,'user','admin-user',$2)", [eventType, JSON.stringify({ approval_authority: { ...snapshot, totalCents: 20000 } })]);
-    expect((await service.send(1, "admin-user")).status).toBe("sent");
+    expect((await service.send(1, "admin-user", await dispatchConfirmation())).status).toBe("sent");
     expect((await evidence()).header[0]).toMatchObject({ status: "sent", total_cents: "20000", revision_number: 1 });
   });
 
@@ -427,7 +508,7 @@ databaseTests.sequential("purchase approval authority PostgreSQL owner and HTTP 
     expect(result.events[0].created_at).toBeInstanceOf(Date);
     await expect(service.approve(1, "admin-user")).rejects.toMatchObject({ statusCode: 400 });
     expect((await evidence()).events).toEqual(result.events);
-    expect((await service.send(1, "admin-user")).status).toBe("sent");
+    expect((await service.send(1, "admin-user", await dispatchConfirmation())).status).toBe("sent");
   });
 
   it("requires Team Lead membership exactly and accepts its explicit grant despite a stale legacy picker role", async () => {
@@ -448,7 +529,7 @@ databaseTests.sequential("purchase approval authority PostgreSQL owner and HTTP 
     if (change === "threshold") await pool.query("UPDATE procurement.po_approval_tiers SET threshold_cents=999 WHERE id=1");
     if (change === "total") await pool.query("UPDATE procurement.purchase_orders SET shipping_cost_cents=1 WHERE id=1");
     const beforeSend = await evidence();
-    expect((await service.send(1, "admin-user")).status).toBe("pending_approval");
+    expect((await service.send(1, "admin-user", await dispatchConfirmation())).status).toBe("pending_approval");
     const after = await evidence();
     expect(after.events.filter((row) => row.event_type === "sent_to_vendor")).toHaveLength(0);
     expect(after.events.filter((row) => row.event_type === "approved")).toEqual(beforeSend.events);
@@ -464,7 +545,7 @@ databaseTests.sequential("purchase approval authority PostgreSQL owner and HTTP 
   });
   it("keeps solo sending available without a tier approval snapshot or approval-role capability", async () => {
     await pool.query("UPDATE inventory.warehouse_settings SET require_approval=false; UPDATE procurement.purchase_orders SET status='approved'");
-    expect((await service.send(1, "wrong-user")).status).toBe("sent");
+    expect((await service.send(1, "wrong-user", await dispatchConfirmation())).status).toBe("sent");
     expect((await evidence()).events.filter((row) => row.event_type === "approved")).toHaveLength(0);
   });
 
@@ -473,7 +554,7 @@ databaseTests.sequential("purchase approval authority PostgreSQL owner and HTTP 
       INSERT INTO procurement.po_approval_tiers(id,tier_name,threshold_cents,approver_role,active) VALUES (2,'Duplicate dormant rule',1000,'lead',1)`);
     expect((await service.approve(1, "wrong-user")).status).toBe("approved");
     expect((await evidence()).events[0].payload_json.approval_authority).toMatchObject({ requireApproval: false, tier: null, matchedRoleId: null });
-    expect((await service.send(1, "wrong-user")).status).toBe("sent");
+    expect((await service.send(1, "wrong-user", await dispatchConfirmation())).status).toBe("sent");
   });
   it("rolls back provisional legacy cost repairs on role denial", async () => {
     await pool.query(`INSERT INTO procurement.purchase_order_lines(id,purchase_order_id,line_number,line_type,status,order_qty,unit_cost_cents,
@@ -529,7 +610,7 @@ databaseTests.sequential("purchase approval authority PostgreSQL owner and HTTP 
     await service.approve(1, "admin-user");
     const originalApproval = (await evidence()).events[0];
     await pool.query("UPDATE procurement.po_approval_tiers SET approver_role='lead'");
-    await service.send(1, "admin-user");
+    await service.send(1, "admin-user", await dispatchConfirmation());
     await service.returnToDraft(1, "admin-user", "Review the changed policy");
     const before = await evidence();
     const response = await fetch(`${url}/api/purchase-orders/1`, { method: "DELETE" });
@@ -544,9 +625,9 @@ databaseTests.sequential("purchase approval authority PostgreSQL owner and HTTP 
     await service.approve(1, "admin-user");
     const originalApproval = (await evidence()).events[0];
     await pool.query("UPDATE procurement.po_approval_tiers SET approver_role='lead'");
-    await service.send(1, "admin-user");
+    await service.send(1, "admin-user", await dispatchConfirmation());
     await service.approve(1, "lead-user");
-    expect((await service.send(1, "lead-user")).status).toBe("sent");
+    expect((await service.send(1, "lead-user", await dispatchConfirmation())).status).toBe("sent");
     const approvals = (await evidence()).events.filter((row) => row.event_type === "approved");
     expect(approvals).toHaveLength(2);
     expect(approvals[0]).toEqual(originalApproval);

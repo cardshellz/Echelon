@@ -20,7 +20,12 @@ export interface PurchasingRecommendationRunPoMutationSkip {
   recommendationId: string;
   kind: string;
   reason: string;
-  latestDecisionId: number;
+  latestDecisionId: number | null;
+  reservedPieces?: number;
+  suggestedPieces?: number;
+  uncoveredPieces?: number;
+  reservations?: Array<{ productId: number; pieces: number; purchaseOrderId: number | null; rfqId: number | null }>;
+  message?: string;
 }
 
 export interface PurchasingRecommendationRunDetailOptions {

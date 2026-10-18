@@ -1,3 +1,7 @@
+import { lockInventoryCostGraph } from "../inventory/infrastructure/cost-evidence.repository";
+import { isActiveRfqReservation, rfqPendingSourcingPieces } from "./domain/rfq-sourcing-reservation";
+import { z } from "zod";
+import { loadPendingPurchaseSourcingReservations } from "./rfq-sourcing-reservation.repository";
 import { loadSupplierSourcingRecords } from "./supplier-sourcing.repository";
 import { and, desc, eq, inArray, like, or, sql } from "drizzle-orm";
 import {
@@ -21,6 +25,7 @@ import type {
   NewRecommendationPoHandoffRecord,
   NewRecommendationPurchaseOrder,
   NewRecommendationPurchaseOrderLine,
+  PendingSourcingReservation,
   RecommendationDecisionRecord,
   RecommendationAutoDraftRunRecord,
   RecommendationKind,
@@ -164,6 +169,31 @@ function createUnitOfWork(tx: Transaction): RecommendationPoHandoffUnitOfWork {
           desc(purchasingRecommendationDecisions.decidedAt),
           desc(purchasingRecommendationDecisions.id),
         ) as RecommendationDecisionRecord[];
+    },
+
+    async lockAndLoadPendingSourcingReservations(productIds) {
+      const ids = uniquePositiveIds(productIds);
+      if (ids.length === 0) return [];
+      // Product base demand is shared by receive configurations and lookback
+      // windows. Use the same product lock as RFQ allocation, after graph lock.
+      await tx.select({ id: products.id }).from(products).where(inArray(products.id, ids)).orderBy(products.id).for("update");
+      const pending = await loadPendingPurchaseSourcingReservations(tx, ids);
+      const result: PendingSourcingReservation[] = pending.map(({ productId, pieces, purchaseOrderId }) => ({ productId, pieces, purchaseOrderId, rfqId: null }));
+      // Converted lines are already represented by their PO above, or by the
+      // planning engine's committed supply. Never reserve both the RFQ and PO.
+      const requests = await tx.execute(sql`SELECT q.id AS rfq_id, q.status AS rfq_status, line.status, line.requested_pieces, recommendation.product_id
+        FROM procurement.request_for_quote_lines line
+        JOIN procurement.request_for_quotes q ON q.id = line.rfq_id
+        JOIN procurement.purchase_recommendation_lines recommendation ON recommendation.id = line.recommendation_line_id
+        WHERE recommendation.product_id = ANY(${sql.param(ids)}::integer[])
+          AND NOT EXISTS (SELECT 1 FROM procurement.rfq_purchase_order_line_links link WHERE link.rfq_line_id = line.id)`);
+      for (const row of requests.rows) {
+        const productId = z.number().int().positive().safe().parse(Number(row.product_id));
+        const rfqId = z.number().int().positive().safe().parse(Number(row.rfq_id));
+        const pieces = rfqPendingSourcingPieces(Number(row.requested_pieces), null, isActiveRfqReservation(String(row.rfq_status), String(row.status)));
+        if (pieces > 0) result.push({ productId, pieces, purchaseOrderId: null, rfqId });
+      }
+      return result;
     },
 
     async getHandoffsByAcceptedDecisionIds(ids) {
@@ -332,7 +362,10 @@ export function createDrizzleRecommendationPoHandoffRepository(
 ): RecommendationPoHandoffRepository {
   return {
     transaction<T>(work: (unitOfWork: RecommendationPoHandoffUnitOfWork) => Promise<T>): Promise<T> {
-      return database.transaction(async (tx) => work(createUnitOfWork(tx as Transaction)));
+      return database.transaction(async (tx) => {
+        await lockInventoryCostGraph(tx);
+        return work(createUnitOfWork(tx as Transaction));
+      });
     },
   };
 }

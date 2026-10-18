@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { supplierEvidenceCatalogStateFingerprint } from "./supplier-evidence-catalog-state";
 import type { PoLinePricingInput } from "@shared/utils/po-line-pricing";
 import { PurchasingError } from "./purchasing.service";
 import {
@@ -9,7 +10,7 @@ import {
 const PG_INTEGER_MAX = 2_147_483_647;
 const MAX_IMPORT_ROWS = 200;
 const MAX_QUOTE_CLOCK_SKEW_MS = 5 * 60 * 1_000;
-const IMPORT_CONTRACT_VERSION = 1;
+const IMPORT_CONTRACT_VERSION = 2;
 
 export type SupplierEvidencePricingBasis = "per_piece" | "per_purchase_uom";
 
@@ -94,6 +95,7 @@ export type SupplierEvidenceImportPreview = {
   };
   items: SupplierEvidenceImportPreviewItem[];
   catalogEntries: SupplierEvidenceCatalogEntry[];
+  catalogStateFingerprint: string;
 };
 
 export type SupplierEvidenceImportDependencies = {
@@ -148,31 +150,6 @@ function stablePreviewHash(input: unknown): string {
     .digest("hex");
 }
 
-function mappingFingerprint(mapping: any): Record<string, unknown> | null {
-  if (!mapping) return null;
-  return {
-    id: Number(mapping.id),
-    vendorId: Number(mapping.vendorId ?? mapping.vendor_id),
-    productId: Number(mapping.productId ?? mapping.product_id),
-    productVariantId: mapping.productVariantId == null && mapping.product_variant_id == null
-      ? null
-      : Number(mapping.productVariantId ?? mapping.product_variant_id),
-    unitCostMills: mapping.unitCostMills ?? mapping.unit_cost_mills ?? null,
-    pricingBasis: mapping.pricingBasis ?? mapping.pricing_basis ?? null,
-    purchaseUom: mapping.purchaseUom ?? mapping.purchase_uom ?? null,
-    quotedUnitCostMills: mapping.quotedUnitCostMills ?? mapping.quoted_unit_cost_mills ?? null,
-    piecesPerPurchaseUom: mapping.piecesPerPurchaseUom ?? mapping.pieces_per_purchase_uom ?? null,
-    quoteReference: mapping.quoteReference ?? mapping.quote_reference ?? null,
-    quotedAt: mapping.quotedAt ?? mapping.quoted_at ?? null,
-    quoteValidUntil: mapping.quoteValidUntil ?? mapping.quote_valid_until ?? null,
-    moq: mapping.moq ?? null,
-    leadTimeDays: mapping.leadTimeDays ?? mapping.lead_time_days ?? null,
-    vendorSku: mapping.vendorSku ?? mapping.vendor_sku ?? null,
-    isPreferred: Number(mapping.isPreferred ?? mapping.is_preferred ?? 0),
-    isActive: Number(mapping.isActive ?? mapping.is_active ?? 0),
-    updatedAt: mapping.updatedAt ?? mapping.updated_at ?? null,
-  };
-}
 
 function pushError(
   errors: SupplierEvidenceImportError[],
@@ -361,10 +338,6 @@ export async function buildSupplierEvidenceImportPreview(input: {
   const errors: SupplierEvidenceImportError[] = [];
   const items: SupplierEvidenceImportPreviewItem[] = [];
   const catalogEntries: SupplierEvidenceCatalogEntry[] = [];
-  const mappingHashState: Array<{
-    existing: Record<string, unknown> | null;
-    competingPreferred: Array<Record<string, unknown> | null>;
-  }> = [];
   const firstRowBySku = new Map<string, number>();
 
   for (const [index, row] of rows.entries()) {
@@ -568,12 +541,6 @@ export async function buildSupplierEvidenceImportPreview(input: {
       leadTimeDays: row.leadTimeDays,
       isPreferred: row.isPreferred,
     });
-    mappingHashState.push({
-      existing: mappingFingerprint(existing),
-      competingPreferred: competingPreferred
-        .map(mappingFingerprint)
-        .sort((a, b) => Number(a?.id ?? 0) - Number(b?.id ?? 0)),
-    });
   }
 
   if (errors.length > 0) {
@@ -583,11 +550,14 @@ export async function buildSupplierEvidenceImportPreview(input: {
     });
   }
 
+  const catalogStateFingerprint = supplierEvidenceCatalogStateFingerprint(vendorId, catalogEntries, vendorProducts);
   const hashPayload = {
+    catalogStateFingerprint,
     contractVersion: IMPORT_CONTRACT_VERSION,
     vendorId,
     items: items.map((item, index) => ({
       sku: item.sku,
+      vendorSku: catalogEntries[index].vendorSku,
       productId: item.productId,
       productVariantId: item.productVariantId,
       action: item.action,
@@ -604,7 +574,6 @@ export async function buildSupplierEvidenceImportPreview(input: {
       moqPieces: item.moqPieces,
       leadTimeDays: item.leadTimeDays,
       isPreferred: item.isPreferred,
-      mappingState: mappingHashState[index],
     })),
   };
 
@@ -627,12 +596,13 @@ export async function buildSupplierEvidenceImportPreview(input: {
     },
     items,
     catalogEntries,
+    catalogStateFingerprint,
   };
 }
 
 export function publicSupplierEvidenceImportPreview(
   preview: SupplierEvidenceImportPreview,
-): Omit<SupplierEvidenceImportPreview, "catalogEntries"> {
-  const { catalogEntries: _catalogEntries, ...publicPreview } = preview;
+): Omit<SupplierEvidenceImportPreview, "catalogEntries" | "catalogStateFingerprint"> {
+  const { catalogEntries: _catalogEntries, catalogStateFingerprint: _catalogStateFingerprint, ...publicPreview } = preview;
   return publicPreview;
 }

@@ -1,3 +1,5 @@
+import { parseReceivingImportCsv, parseReceivingImportResult, receivingImportError } from "@/lib/receiving-import";
+import type { ReceivingImportRowInput } from "@shared/procurement/receiving-import";
 import { useState, useRef, useEffect, useLayoutEffect, useCallback } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Link, useLocation, useSearch } from "wouter";
@@ -271,6 +273,7 @@ export default function Receiving() {
   }, [requestedReceiptId, captureReceiptNavigation, isCurrentReceiptNavigation, queryClient]);
   const [showCSVImport, setShowCSVImport] = useState(false);
   const [csvText, setCsvText] = useState("");
+  const [csvImportError, setCsvImportError] = useState<string | null>(null);
   const [importResults, setImportResults] = useState<{ errors: string[]; warnings: string[]; created: number; updated: number } | null>(null);
   const [showImportResults, setShowImportResults] = useState(false);
   const [showAddLineDialog, setShowAddLineDialog] = useState(false);
@@ -730,21 +733,23 @@ DEF-456,25,,,5.00,,Location TBD`;
 
   const bulkImportMutation = useMutation({
     onMutate: captureReceiptNavigation,
-    mutationFn: async ({ orderId, lines }: { orderId: number; lines: any[] }) => {
+    mutationFn: async ({ orderId, lines }: { orderId: number; lines: ReceivingImportRowInput[] }) => {
       assertReceiptSettingsConfirmed();
       const res = await fetch(`/api/receiving/${orderId}/lines/bulk`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ lines }),
       });
-      if (!res.ok) throw new Error("Failed to import lines");
-      return res.json();
+      const body: unknown = await res.json().catch(() => null);
+      if (!res.ok) throw receivingImportError(body);
+      return parseReceivingImportResult(body);
     },
     onSuccess: (result, _variables, context) => {
       queryClient.invalidateQueries({ queryKey: ["/api/receiving"] });
       if (!isCurrentReceiptNavigation(context)) return;
       setShowCSVImport(false);
-      setCsvText("");
+      setCsvImportError(null);
+      if (!result.errors?.length) setCsvText("");
       
       const totalProcessed = (result.created || 0) + (result.updated || 0);
       const createdMsg = result.created ? `${result.created} created` : "";
@@ -761,8 +766,8 @@ DEF-456,25,,,5.00,,Location TBD`;
         });
         setShowImportResults(true);
         toast({ 
-          title: `Import complete with issues`, 
-          description: `${totalProcessed} lines processed. Click to view details.`,
+          title: result.errors?.length ? (totalProcessed ? "Import partially saved" : "Import needs correction") : "Import complete with warnings",
+          description: `${totalProcessed} rows saved. ${result.errors?.length || 0} rows need correction.`,
           duration: 5000,
         });
       } else {
@@ -774,6 +779,7 @@ DEF-456,25,,,5.00,,Location TBD`;
     },
     onError: (error: Error, _variables, context) => {
       if (!isCurrentReceiptNavigation(context)) return;
+      setCsvImportError(error.message);
       toast({ title: "Import was not confirmed", description: error.message, variant: "destructive" });
     },
   });
@@ -1118,70 +1124,13 @@ DEF-456,25,,,5.00,,Location TBD`;
     draft: receipts.filter(r => r.status === "draft").length,
   };
 
-  // Parse CSV for import
-  const parseCSV = (text: string) => {
-    const lines = text.trim().split("\n");
-    const header = lines[0].toLowerCase().split(",").map(h => h.trim());
-    
-    // Required columns
-    const skuIdx = header.findIndex(h => h === "sku" || h === "product_sku");
-    const qtyIdx = header.findIndex(h => h === "qty" || h === "quantity" || h === "count");
-    
-    // Optional columns
-    const locIdx = header.findIndex(h => h === "location" || h === "bin" || h === "loc");
-    const damagedIdx = header.findIndex(h => h === "damaged_qty" || h === "damaged");
-    const costIdx = header.findIndex(h => h === "unit_cost" || h === "cost" || h === "price");
-    const barcodeIdx = header.findIndex(h => h === "barcode" || h === "upc" || h === "ean");
-    const notesIdx = header.findIndex(h => h === "notes" || h === "note" || h === "comments");
-    
-    if (skuIdx === -1 || qtyIdx === -1) {
-      return { error: "CSV must have 'sku' and 'qty' columns" };
-    }
-    
-    const parsedLines = [];
-    for (let i = 1; i < lines.length; i++) {
-      const line = lines[i];
-      if (!line.trim()) continue;
-      
-      // Handle CSV with quoted fields (simple parser)
-      const parts: string[] = [];
-      let current = "";
-      let inQuotes = false;
-      for (const char of line) {
-        if (char === '"') {
-          inQuotes = !inQuotes;
-        } else if (char === ',' && !inQuotes) {
-          parts.push(current.trim());
-          current = "";
-        } else {
-          current += char;
-        }
-      }
-      parts.push(current.trim());
-      
-      if (parts.length > Math.max(skuIdx, qtyIdx)) {
-        parsedLines.push({
-          sku: parts[skuIdx],
-          qty: parseInt(parts[qtyIdx], 10) || 0,
-          location: locIdx >= 0 && parts[locIdx] ? parts[locIdx] : null,
-          damaged_qty: damagedIdx >= 0 && parts[damagedIdx] ? parts[damagedIdx] : null,
-          unit_cost: costIdx >= 0 && parts[costIdx] ? parts[costIdx] : null,
-          barcode: barcodeIdx >= 0 && parts[barcodeIdx] ? parts[barcodeIdx] : null,
-          notes: notesIdx >= 0 && parts[notesIdx] ? parts[notesIdx] : null,
-        });
-      }
-    }
-    
-    return { lines: parsedLines };
-  };
-
   const handleCSVImport = () => {
     if (!selectedReceipt) {
       toast({ title: "Error", description: "No receipt selected", variant: "destructive" });
       return;
     }
-    const result = parseCSV(csvText);
-    console.log("CSV parse result:", result);
+    setCsvImportError(null);
+    const result = parseReceivingImportCsv(csvText);
     if (result.error) {
       toast({ title: "Error", description: result.error, variant: "destructive" });
       return;
@@ -1190,7 +1139,6 @@ DEF-456,25,,,5.00,,Location TBD`;
       toast({ title: "Error", description: "No valid lines found in CSV", variant: "destructive" });
       return;
     }
-    console.log("Importing lines:", result.lines);
     bulkImportMutation.mutate({ orderId: selectedReceipt.id, lines: result.lines });
   };
 
@@ -1281,6 +1229,7 @@ DEF-456,25,,,5.00,,Location TBD`;
     setAddLineError(null);
     setLegacyResolveVariant(null);
     setShowCSVImport(false);
+    setCsvImportError(null);
     setShowImportResults(false);
     setImportResults(null);
     setShowAddLineDialog(false);
@@ -2030,7 +1979,7 @@ DEF-456,25,,,5.00,,Location TBD`;
                           <Button
                             variant="outline"
                             className="min-h-[44px] text-xs md:text-sm flex-1 sm:flex-none"
-                            onClick={() => { setShowCSVImport(true); }}
+                            onClick={() => { setCsvImportError(null); setShowCSVImport(true); }}
                             data-testid="btn-import-csv"
                             disabled={quarantineCommandPending}
                           >
@@ -2697,7 +2646,7 @@ DEF-456,25,,,5.00,,Location TBD`;
           <DialogHeader>
             <DialogTitle>Import from CSV</DialogTitle>
             <DialogDescription className="text-xs md:text-sm">
-              Paste CSV data with columns: sku, qty, location (optional). Qty and damaged_qty count the selected SKU variant. unit_cost is the cost per piece, not per case.
+              Paste CSV data with columns: sku, qty, location (optional). Qty and damaged_qty are total counts of the selected SKU variant, replacing a single matching receipt line. Use one row per SKU/location. Separate physical lines must be edited individually. unit_cost is the cost per piece, not per case.
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-4">
@@ -2740,6 +2689,7 @@ DEF-456,25,,,5.00,,Location TBD`;
 
             <div className="text-center text-xs text-muted-foreground">— or paste directly —</div>
             
+            {csvImportError && <div role="alert" className="whitespace-pre-wrap rounded border border-destructive p-3 text-sm text-destructive" data-testid="csv-import-error">{csvImportError}</div>}
             <Textarea 
               value={csvText}
               onChange={(e) => setCsvText(e.target.value)}
@@ -2933,7 +2883,8 @@ DEF-456,25,,,5.00,,Location TBD`;
               Import Results
             </DialogTitle>
             <DialogDescription className="text-xs md:text-sm">
-              {importResults?.created || 0} lines created, {importResults?.updated || 0} lines updated
+              Saved rows: {(importResults?.created || 0) + (importResults?.updated || 0)}. Rows not imported: {importResults?.errors.length || 0}.
+              {importResults?.errors.length ? " Review the failed rows before importing again. A unique SKU/location replaces its total count on retry; it does not add the count again." : ""}
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-4 py-2 max-h-[50vh] overflow-y-auto">
@@ -2986,6 +2937,11 @@ DEF-456,25,,,5.00,,Location TBD`;
               <Download className="h-4 w-4 mr-2" />
               Download Log
             </Button>
+            {!!importResults?.errors.length && !!csvText.trim() && <Button variant="outline" className="min-h-[44px]" onClick={() => {
+              setShowImportResults(false);
+              setCsvImportError(null);
+              setShowCSVImport(true);
+            }} data-testid="btn-review-import-csv">Review CSV</Button>}
             <Button className="min-h-[44px]" onClick={() => setShowImportResults(false)} data-testid="btn-close-results">
               Close
             </Button>

@@ -38,7 +38,7 @@ describe("atomic PO and vendor-catalog persistence", () => {
     );
     const updateFlow = section(
       "async function updateDraftPurchaseOrderWithLines(",
-      "// ── NEW SEND FLOW",
+      "async function sendPurchaseOrder(",
     );
 
     const createCatalogPosition = createFlow.indexOf("await persistPurchaseOrderCatalogWritesTx(");

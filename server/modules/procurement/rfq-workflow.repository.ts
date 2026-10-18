@@ -145,3 +145,12 @@ export async function readRfqLineAuditSnapshot(executor: RfqWorkflowExecutor, li
   if (result.rows.length !== 1) throw new Error("RFQ line audit snapshot is unavailable");
   return result.rows[0].snapshot;
 }
+export async function releaseRfqRequest(executor: RfqWorkflowExecutor, rfqId: number, lineIds: readonly number[], at: Date): Promise<void> {
+  const result = await executor.execute(sql`UPDATE procurement.request_for_quote_lines SET status = 'cancelled', updated_at = ${at}
+    WHERE rfq_id = ${rfqId} AND id = ANY(${sql.param(lineIds)}::integer[])
+      AND status IN ('draft', 'sent', 'quoted', 'accepted')
+      AND NOT EXISTS (SELECT 1 FROM procurement.rfq_purchase_order_line_links link WHERE link.rfq_line_id = request_for_quote_lines.id)
+    RETURNING id`);
+  if (result.rows.length !== lineIds.length) throw new RfqEvidenceIntegrityError();
+  await executor.execute(sql`UPDATE procurement.request_for_quotes SET status = 'cancelled', cancelled_at = ${at}, updated_at = ${at} WHERE id = ${rfqId}`);
+}

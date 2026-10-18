@@ -14,7 +14,7 @@ import {
   vendors as vendorsTable,
 } from "@shared/schema";
 import {
-  lockAndLoadActiveRfqAllocations,
+  lockAndLoadRfqSourcing,
   purchasingSkuAllocationKey,
 } from "./purchasing-rfq.service";
 import { buildRfqBatchRequestHash } from "./purchasing-rfq-allocation";
@@ -53,6 +53,7 @@ export type AutomaticRfqDraftSkipCode =
   | "supplier_selection_review_required"
   | "recommendation_changed"
   | "inactive_supplier_catalog"
+  | "pending_purchase_review_required"
   | "already_allocated"
   | "run_limit";
 
@@ -257,7 +258,7 @@ export function createAutomaticRfqDraftService(database: any) {
         .filter((vendor: any) => Number(vendor.active) === 1)
         .map((vendor: any) => [Number(vendor.id), vendor]));
 
-      const allocatedBySku = await lockAndLoadActiveRfqAllocations(tx, pending);
+      const { allocatedBySku, pendingPurchases } = await lockAndLoadRfqSourcing(tx, pending);
       const vendorProductIds = Array.from(new Set<number>(pending.map((line) => Number(line.preferredVendorProductId))))
         .sort((left, right) => left - right);
       const mappings = await tx.select().from(vendorProductsTable)
@@ -270,6 +271,12 @@ export function createAutomaticRfqDraftService(database: any) {
       const sourcingPolicies = await loadSupplierSourcingRecords(tx, vendorProductIds);
       const resolvedByVendor = new Map<number, ResolvedAutomaticRfqLine[]>();
       for (const line of pending) {
+        const draftPurchases = pendingPurchases.filter((purchase) => purchase.recommendationIds.includes(line.id));
+        if (draftPurchases.length > 0) {
+          skipped.push({ recommendationLineId: line.id, sku: line.sku, code: "pending_purchase_review_required",
+            detail: `Draft purchase orders ${[...new Set(draftPurchases.map((purchase) => purchase.purchaseOrderId))].map((id) => `#${id}`).join(", ")} already reserve this demand. Review their quantities before creating another quote request.` });
+          continue;
+        }
         const vendorId = Number(line.preferredVendorId);
         const mapping = mappingById.get(Number(line.preferredVendorProductId)) as any;
         const selection = supplierSelectionEvidenceSchema.parse(line.evidenceSnapshot.supplierBasis.sourcingSelection);

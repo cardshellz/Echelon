@@ -1,7 +1,8 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useLocation } from "wouter";
 import { formatProcurementScheduleDate } from "@/lib/procurement-schedule-date";
+import { parseSupplierSaveResult } from "@/lib/supplier-dispatch";
 import {
   PO_PHYSICAL_STATUSES,
   PO_FINANCIAL_STATUSES,
@@ -373,7 +374,7 @@ export default function PurchaseOrders() {
     enabled: showCreateDialog && !!newPO.vendorId,
   });
 
-  // Check if solo mode (no approval tiers) for "Create & Send" button
+  // Check if solo mode (no approval tiers) for supplier preparation.
   const { data: approvalTiersData } = useQuery<{ tiers: any[] }>({
     queryKey: ["/api/purchasing/approval-tiers"],
   });
@@ -409,68 +410,70 @@ export default function PurchaseOrders() {
     awaitingReceipt: purchaseOrders.filter(po => ["sent", "acknowledged"].includes(po.status)).length,
   };
 
-  // Create mutation with inline lines + optional send-to-vendor
+  // Keep the same command identity after an uncertain response or a retry.
+  const createIntent = useRef<{ body: string; key: string } | null>(null);
+
+  // Create atomically, then optionally prepare the supplier document for review.
   const createMutation = useMutation({
-    mutationFn: async ({ poData, lines, sendToVendor }: { poData: typeof newPO; lines: InlineLineItem[]; sendToVendor: boolean }) => {
+    mutationFn: async ({ poData, lines, prepareForSupplier }: { poData: typeof newPO; lines: InlineLineItem[]; prepareForSupplier: boolean }) => {
       if (lines.length === 0) {
         throw new Error("Add at least one line before creating the purchase order.");
       }
       // Header and lines are one atomic, idempotent purchasing command.
+      const body = JSON.stringify({
+        vendorId: poData.vendorId,
+        poType: poData.poType,
+        priority: poData.priority,
+        incoterms: poData.incoterms || undefined,
+        expectedDeliveryDate: poData.expectedDeliveryDate || undefined,
+        vendorNotes: poData.vendorNotes || undefined,
+        internalNotes: poData.internalNotes || undefined,
+        lines: lines.map((line) => ({
+          productId: line.productId,
+          expectedReceiveVariantId: line.expectedReceiveVariantId,
+          expectedReceiveUnitsPerVariant: line.expectedReceiveUnitsPerVariant,
+          vendorProductId: line.vendorProductId,
+          vendorSku: line.vendorSku || undefined,
+          pricingSource: line.pricingSource,
+          pricing: line.pricing,
+          ...populatedPoLineQuoteMetadata(line.quoteMetadata),
+          ...(line.saveToVendorCatalog &&
+            line.pricingSource === "manual" &&
+            line.pricing.basis !== "extended_total"
+            ? { catalogWrite: { mode: "upsert" as const } }
+            : {}),
+        })),
+        prepare_for_supplier: prepareForSupplier,
+      });
+      if (createIntent.current?.body !== body) {
+        createIntent.current = { body, key: genPoCreateIdempotencyKey() };
+      }
       const res = await fetch("/api/purchase-orders", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          "Idempotency-Key": genPoCreateIdempotencyKey(),
+          "Idempotency-Key": createIntent.current.key,
         },
-        body: JSON.stringify({
-          vendorId: poData.vendorId,
-          poType: poData.poType,
-          priority: poData.priority,
-          incoterms: poData.incoterms || undefined,
-          expectedDeliveryDate: poData.expectedDeliveryDate || undefined,
-          vendorNotes: poData.vendorNotes || undefined,
-          internalNotes: poData.internalNotes || undefined,
-          lines: lines.map((line) => ({
-            productId: line.productId,
-            expectedReceiveVariantId: line.expectedReceiveVariantId,
-            expectedReceiveUnitsPerVariant: line.expectedReceiveUnitsPerVariant,
-            vendorProductId: line.vendorProductId,
-            vendorSku: line.vendorSku || undefined,
-            pricingSource: line.pricingSource,
-            pricing: line.pricing,
-            ...populatedPoLineQuoteMetadata(line.quoteMetadata),
-            ...(line.saveToVendorCatalog &&
-              line.pricingSource === "manual" &&
-              line.pricing.basis !== "extended_total"
-              ? { catalogWrite: { mode: "upsert" as const } }
-              : {}),
-          })),
-          advance_to_sent: sendToVendor,
-        }),
+        body,
       });
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
         throw new Error(err.error || "Failed to create PO");
       }
-      const result = await res.json();
-      const po = result?.po ?? result;
-
-      return {
-        ...po,
-        wasSent: sendToVendor && (result?.status === "sent" || po?.status === "sent"),
-        sendError: result?.sendError,
-      };
-
+      return parseSupplierSaveResult(await res.json(), prepareForSupplier);
     },
-    onSuccess: (po) => {
+    onSuccess: ({ po, preparationError }) => {
+      createIntent.current = null;
       queryClient.invalidateQueries({ queryKey: ["/api/purchase-orders"] });
       setShowCreateDialog(false);
       setNewPO({ vendorId: 0, poType: "standard", priority: "normal", incoterms: "", expectedDeliveryDate: "", vendorNotes: "", internalNotes: "" });
       setInlineLines([]);
-      if (po.sendError) {
-        toast({ title: "PO created (send failed)", description: po.sendError, variant: "destructive" });
-      } else if (po.wasSent) {
-        toast({ title: "PO created & sent", description: `${po.poNumber} sent to vendor` });
+      if (preparationError) {
+        toast({ title: "PO saved; preparation needs attention", description: `${preparationError} Open the saved PO to resolve this. No supplier dispatch was recorded.`, variant: "destructive" });
+      } else if (po.status === "approved") {
+        toast({ title: "PO ready for supplier review", description: `${po.poNumber} is approved. Review the document before sending it externally. No supplier dispatch was recorded.` });
+      } else if (po.status === "pending_approval") {
+        toast({ title: "PO awaiting approval", description: `${po.poNumber} requires approval before supplier review. No supplier dispatch was recorded.` });
       } else {
         toast({ title: "Purchase order created", description: `${po.poNumber} created as draft` });
       }
@@ -906,7 +909,7 @@ export default function PurchaseOrders() {
         <DialogContent className="max-w-[calc(100vw-1rem)] sm:max-w-2xl max-h-[90vh] flex flex-col overflow-hidden p-0">
           <DialogHeader className="px-4 pt-4 pb-2 sm:px-6">
             <DialogTitle>New Purchase Order</DialogTitle>
-            <DialogDescription>Select a vendor, add line items, then create.</DialogDescription>
+            <DialogDescription>Select a vendor and add line items. Create &amp; Review prepares the PO; it does not send it to the supplier.</DialogDescription>
           </DialogHeader>
           <div className="space-y-4 overflow-y-auto flex-1 px-4 pb-4 sm:px-6">
             {/* Vendor typeahead */}
@@ -917,6 +920,7 @@ export default function PurchaseOrders() {
                   <Button
                     variant="outline"
                     role="combobox"
+                    aria-label="Vendor"
                     className="w-full justify-between h-11 font-normal min-w-0"
                   >
                     <span className="truncate">{selectedVendor ? `${selectedVendor.code} — ${selectedVendor.name}` : "Select vendor..."}</span>
@@ -1405,7 +1409,7 @@ export default function PurchaseOrders() {
                 <Button
                   variant="outline"
                   className="min-h-[44px]"
-                  onClick={() => createMutation.mutate({ poData: newPO, lines: inlineLines, sendToVendor: false })}
+                  onClick={() => createMutation.mutate({ poData: newPO, lines: inlineLines, prepareForSupplier: false })}
                   disabled={!newPO.vendorId || inlineLines.length === 0 || createMutation.isPending}
                 >
                   {createMutation.isPending ? "Creating..." : "Save Draft"}
@@ -1413,11 +1417,11 @@ export default function PurchaseOrders() {
               )}
               <Button
                 className="min-h-[44px]"
-                onClick={() => createMutation.mutate({ poData: newPO, lines: inlineLines, sendToVendor: isSoloMode && inlineLines.length > 0 })}
+                onClick={() => createMutation.mutate({ poData: newPO, lines: inlineLines, prepareForSupplier: isSoloMode && inlineLines.length > 0 })}
                 disabled={!newPO.vendorId || inlineLines.length === 0 || createMutation.isPending}
               >
                 {createMutation.isPending ? "Creating..." : (
-                  isSoloMode && inlineLines.length > 0 ? "Create & Send" : "Create Draft"
+                  isSoloMode && inlineLines.length > 0 ? "Create & Review" : "Create Draft"
                 )}
               </Button>
             </div>

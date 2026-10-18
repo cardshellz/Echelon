@@ -206,3 +206,13 @@ describe("supplier evidence import preview", () => {
     expect(first.previewHash).not.toBe(changed.previewHash);
   });
 });
+
+
+describe("reviewed supplier import fingerprint", () => {
+  it("binds vendor SKU changes to the reviewed request", async () => {
+    const original = await buildSupplierEvidenceImportPreview({ vendorId: 7, rows: [row()], dependencies: dependencies() });
+    const changed = await buildSupplierEvidenceImportPreview({ vendorId: 7, rows: [row({ vendorSku: "OTHER" })], dependencies: dependencies() });
+    expect(changed.previewHash).not.toBe(original.previewHash);
+    expect(changed.catalogStateFingerprint).toBe(original.catalogStateFingerprint);
+  });
+});

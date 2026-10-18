@@ -1,3 +1,5 @@
+import { supplierDispatchConfirmationSchema } from "@shared/procurement/supplier-dispatch";
+import { supplierEvidenceCatalogStateFingerprint } from "./supplier-evidence-catalog-state";
 import { RECEIVABLE_SHIPMENT_STATUSES } from "./receiving-close-integrity.domain";
 import { readPrimaryReceivingLocations } from "./receiving-close-integrity.repository";
 import type { SupplierPriceList } from "@shared/procurement/supplier-sourcing";
@@ -370,6 +372,8 @@ const PHYSICAL_LIFECYCLE_EVENTS: Partial<Record<PoPhysicalStatus, string>> = {
 };
 
 type PoLifecycleCommandInput = {
+  confirmedSentExternally?: unknown;
+  expectedUpdatedAt?: unknown;
   notes?: string;
   reason?: string;
   vendorRefNumber?: string;
@@ -1495,6 +1499,10 @@ export function createPurchasingService(
     extraPatch?: Record<string, any>,
     historyFromStatus?: string,
   ): Promise<any> {
+    // Supplier dispatch must use the reviewed, explicitly attested send owner.
+    if (target === "sent") {
+      throw new PurchasingError("Use Record external send with the reviewed PO version to record supplier dispatch.", 400, { code: "PO_EXTERNAL_DISPATCH_CONFIRMATION_REQUIRED" });
+    }
     // Every cancellation entry point uses the same authority and line/audit owner.
     const acknowledgementFields = new Set(["vendorAckDate", "vendorRefNumber", "confirmedDeliveryDate"]);
     if (extraPatch && Object.keys(extraPatch).some(key => target !== "acknowledged" || !acknowledgementFields.has(key))) {
@@ -2564,7 +2572,7 @@ export function createPurchasingService(
 
   type LockedSendResult = {
     po: any;
-    status: "pending_approval" | "sent";
+    status: "pending_approval" | "approved" | "sent";
     pendingApproval: boolean;
   };
 
@@ -2576,6 +2584,7 @@ export function createPurchasingService(
       allowDraft: boolean;
       soloModeOnly: boolean;
       sentNotes: string;
+      recordExternalSend: boolean;
     },
   ): Promise<LockedSendResult> {
     return db.transaction(async (tx: any) => {
@@ -2641,6 +2650,11 @@ export function createPurchasingService(
         }
       }
 
+      // Preparing documents is not supplier dispatch. A repeated preparation
+      // of unchanged approved terms has no lifecycle or audit side effects.
+      if (!options.recordExternalSend && po.status === "approved") {
+        return { po, status: "approved", pendingApproval: false };
+      }
       const dbTimestamp = sql`date_trunc('milliseconds', transaction_timestamp())`;
       const autoApproved = po.status === "draft";
       const approvalNotes = requireApproval
@@ -2650,16 +2664,18 @@ export function createPurchasingService(
           : "Auto-approved (approval not required)";
       const updated = await updateLockedLifecycleHeader(tx, economics, {
         ...lifecycleTotalsPatch(economics),
-        status: "sent",
-        physicalStatus: "sent",
+        status: options.recordExternalSend ? "sent" : "approved",
+        physicalStatus: options.recordExternalSend ? "sent" : "draft",
         ...(autoApproved ? {
           approvedBy: userId ?? null,
           approvedAt: dbTimestamp,
           approvalNotes,
           approvalTierId: null,
         } : {}),
-        sentToVendorAt: dbTimestamp,
-        orderDate: po.orderDate ?? dbTimestamp,
+        ...(options.recordExternalSend ? {
+          sentToVendorAt: dbTimestamp,
+          orderDate: po.orderDate ?? dbTimestamp,
+        } : {}),
         updatedBy: userId ?? null,
       });
 
@@ -2678,17 +2694,20 @@ export function createPurchasingService(
           },
         });
       }
-      histories.push({ fromStatus: "approved", toStatus: "sent", notes: options.sentNotes });
-      events.push({
-        type: "sent_to_vendor",
-        payload: {
-          method: "pdf_placeholder",
-          pdf_placeholder: true,
-          total_cents: economics.totalCents,
-        },
-      });
+      if (options.recordExternalSend) {
+        histories.push({ fromStatus: "approved", toStatus: "sent", notes: options.sentNotes });
+        events.push({
+          type: "sent_to_vendor",
+          payload: {
+            method: "operator_recorded",
+            delivery_verified: false,
+            total_cents: economics.totalCents,
+            source_updated_at: po.updatedAt,
+          },
+        });
+      }
       await writeLifecycleAuditTx(tx, poId, histories, events, userId);
-      return { po: updated, status: "sent", pendingApproval: false };
+      return { po: updated, status: options.recordExternalSend ? "sent" : "approved", pendingApproval: false };
     });
   }
 
@@ -2855,24 +2874,34 @@ export function createPurchasingService(
     });
   }
 
-  async function send(id: number, userId?: string) {
+  async function send(id: number, userId?: string, confirmation?: unknown) {
+    if (!userId?.trim()) throw new PurchasingError("An authenticated operator is required to record supplier dispatch.", 401, { code: "PO_DISPATCH_ACTOR_REQUIRED" });
+    const parsedConfirmation = supplierDispatchConfirmationSchema.safeParse(confirmation);
+    if (!parsedConfirmation.success) {
+      throw new PurchasingError("Confirm that the reviewed PO was already sent outside Echelon before recording dispatch.", 400, { code: "PO_EXTERNAL_DISPATCH_CONFIRMATION_REQUIRED" });
+    }
     const expectation = await observeLifecycleState(
       id,
       ["approved"],
       (status) => `Cannot send PO in '${status}' status`,
     );
+    // Bind the operator attestation to the displayed PO terms. The same
+    // expectation is checked again under the header lock for waiting writers.
+    if (expectation.updatedAtMs !== Date.parse(parsedConfirmation.data.expectedUpdatedAt)) {
+      throw new PurchasingError("Purchase order changed since your review. Reload and review the supplier document before recording dispatch.", 409, { code: "PO_DISPATCH_REVIEW_STALE" });
+    }
     const result = await sendWithLockedEconomics(id, userId, expectation, {
       allowDraft: false,
       soloModeOnly: false,
-      sentNotes: "Sent to vendor",
+      sentNotes: "Operator recorded that the PO was sent outside Echelon",
+      recordExternalSend: true,
     });
     return result.po;
   }
 
   /**
-   * Combined "Send to Vendor" flow for solo mode (no approval tiers configured).
-   * Saves → auto-approves → sets status to "sent" in one operation.
-   * Returns the updated PO. Caller can then optionally open the email dialog.
+   * Legacy preparation entry point for solo mode. Approval makes the supplier
+   * document available; recording external dispatch is a separate command.
    */
   async function sendToVendor(id: number, userId?: string) {
     const expectation = await observeLifecycleState(
@@ -2883,7 +2912,8 @@ export function createPurchasingService(
     const result = await sendWithLockedEconomics(id, userId, expectation, {
       allowDraft: true,
       soloModeOnly: true,
-      sentNotes: "Sent to vendor (solo mode)",
+      sentNotes: "Prepared for supplier review",
+      recordExternalSend: false,
     });
     return result.po;
   }
@@ -3363,7 +3393,7 @@ export function createPurchasingService(
       case "approve":
         return approve(id, userId, input.notes);
       case "send":
-        return send(id, userId);
+        return send(id, userId, { confirmedSentExternally: input.confirmedSentExternally, expectedUpdatedAt: input.expectedUpdatedAt });
       case "send_to_vendor":
         return sendToVendor(id, userId);
       case "acknowledge":
@@ -6280,48 +6310,30 @@ export function createPurchasingService(
     });
   }
 
-  // ── NEW SEND FLOW (Spec A) ───────────────────────────────────────────────
-  //
-  // Replaces Submit -> Approve -> Send with a single call that honors the
-  // current procurement settings:
-  //  - require_approval=true AND tier matches on total  → pending_approval
-  //  - else  → cascade draft→approved→sent in one transaction
-  //
-  // PDF is STUBBED. Returning { pdf_placeholder: true, reason } keeps the
-  // wire contract stable for when real generation lands.
-
+  // Retain the legacy service name for existing callers. This prepares the PO
+  // for supplier review; it never claims delivery or returns a placeholder PDF.
   type SendPurchaseOrderResult = {
     po: any;
-    status: string;
-    pdf: { pdf_placeholder: true; reason: string } | null;
+    status: "pending_approval" | "approved";
+    pdf: null;
     pendingApproval: boolean;
+    dispatchRecorded: false;
   };
 
-  async function sendPurchaseOrder(
-    poId: number,
-    userId?: string,
-  ): Promise<SendPurchaseOrderResult> {
+  async function sendPurchaseOrder(poId: number, userId?: string): Promise<SendPurchaseOrderResult> {
     const expectation = await observeLifecycleState(
-      poId,
-      ["draft", "approved"],
-      (status) => `Cannot send PO in '${status}' status (must be draft or approved)`,
+      poId, ["draft", "approved"],
+      (status) => `Cannot prepare PO in '${status}' status (must be draft or approved)`,
     );
     const result = await sendWithLockedEconomics(poId, userId, expectation, {
       allowDraft: true,
       soloModeOnly: false,
-      sentNotes: "Sent to vendor (PDF placeholder)",
+      sentNotes: "Prepared for supplier review",
+      recordExternalSend: false,
     });
-    return {
-      po: result.po,
-      status: result.status,
-      pdf: result.pendingApproval
-        ? null
-        : {
-            pdf_placeholder: true,
-            reason: "PDF generation not yet implemented",
-          },
-      pendingApproval: result.pendingApproval,
-    };
+    if (result.status === "sent") throw new Error("PO preparation unexpectedly recorded dispatch");
+    return { po: result.po, status: result.status, pdf: null,
+      pendingApproval: result.pendingApproval, dispatchRecorded: false };
   }
 
   // ── DUPLICATE (Spec A) ──────────────────────────────────────────────────
@@ -7748,11 +7760,27 @@ export function createPurchasingService(
     }
   }
 
+  /** Reviewed imports always use the same locked owner as ordinary catalog writes. */
+  async function applyReviewedSupplierEvidenceImport(
+    vendorId: number,
+    entries: BulkCatalogEntry[],
+    reviewedCatalogStateFingerprint: string,
+    userId: string | null | undefined,
+  ): Promise<BulkCatalogResult> {
+    if (typeof reviewedCatalogStateFingerprint !== "string" || !/^[a-f0-9]{64}$/.test(reviewedCatalogStateFingerprint)) {
+      throw new PurchasingError("Supplier evidence preview is required before applying this import", 400, {
+        code: "SUPPLIER_EVIDENCE_PREVIEW_REQUIRED",
+      });
+    }
+    return bulkUpsertVendorCatalog(vendorId, entries, userId, undefined, reviewedCatalogStateFingerprint);
+  }
+
   async function bulkUpsertVendorCatalog(
     vendorId: number,
     entries: BulkCatalogEntry[],
     userId: string | null | undefined,
     existingTransaction?: any,
+    reviewedCatalogStateFingerprint?: string,
   ): Promise<BulkCatalogResult> {
     assertPositivePgInteger(vendorId, "vendorId");
     if (!Array.isArray(entries) || entries.length === 0) {
@@ -7935,6 +7963,10 @@ export function createPurchasingService(
     const result: BulkCatalogResult = { created: [], updated: [], skipped: [] };
 
     const execute = async (tx: any) => {
+      // RFQ conversion locks products before the reused PO owner locks its
+      // supplier. Join their graph-first protocol before taking supplier locks
+      // so reviewed imports and conversions cannot invert that lock order.
+      await lockInventoryCostGraph(tx);
       // Lock references in a stable order. This makes validation current at
       // commit time and serializes overlapping batches for one vendor.
       const vendorLock = await tx.execute(sql`
@@ -8026,6 +8058,30 @@ export function createPurchasingService(
             productId: entry.productId,
             productVariantId: variantId,
           });
+        }
+      }
+
+      if (reviewedCatalogStateFingerprint !== undefined) {
+        // Product locks serialize canonical catalog writers, including new competing
+        // mappings. Lock existing rows too, then compare the full affected footprint
+        // before demotion, upsert, or audit. An outside preflight cannot provide this guarantee.
+        const currentMappings = await tx.execute(sql`
+          SELECT * FROM procurement.vendor_products
+          WHERE product_id IN (${sql.join(productIds.map((id) => sql`${id}`), sql`, `)})
+          ORDER BY id
+          FOR UPDATE
+        `);
+        const currentFingerprint = supplierEvidenceCatalogStateFingerprint(
+          vendorId,
+          validatedEntries.map(({ entry }) => entry),
+          currentMappings.rows ?? [],
+        );
+        if (currentFingerprint !== reviewedCatalogStateFingerprint) {
+          throw new PurchasingError(
+            "Supplier evidence changed after preview; preview the file again before applying it",
+            409,
+            { code: "SUPPLIER_EVIDENCE_PREVIEW_STALE" },
+          );
         }
       }
 
@@ -8613,6 +8669,7 @@ export function createPurchasingService(
     updateVendorProduct,
     deleteVendorProduct: deactivateVendorProduct,
     bulkUpsertVendorCatalog,
+    applyReviewedSupplierEvidenceImport,
     snapshotPurchaseRecommendations,
     createRfqBatch,
 

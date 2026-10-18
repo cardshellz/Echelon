@@ -275,7 +275,7 @@ export function SupplierEvidenceImportDialog({
 
   return (
     <Dialog open={open} onOpenChange={(next) => !applying && onOpenChange(next)}>
-      <DialogContent className="max-h-[92vh] max-w-5xl overflow-y-auto">
+      <DialogContent className="max-h-[92vh] min-w-0 max-w-5xl overflow-y-auto">
         <DialogHeader>
           <DialogTitle>Import verified supplier evidence</DialogTitle>
           <DialogDescription>
@@ -283,7 +283,7 @@ export function SupplierEvidenceImportDialog({
           </DialogDescription>
         </DialogHeader>
 
-        <div className="space-y-5">
+        <div className="min-w-0 space-y-5">
           <div className="rounded-md border border-blue-200 bg-blue-50 p-3 text-sm text-blue-900">
             Enter the quote exactly as the supplier provided it. Use <code>per_piece</code> for a per-piece quote or <code>per_purchase_uom</code> for a case, roll, pallet, or other quoted UOM. Never enter a line-item extended total as reusable catalog pricing.
           </div>

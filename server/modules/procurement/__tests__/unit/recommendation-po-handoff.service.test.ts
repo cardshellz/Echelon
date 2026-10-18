@@ -291,6 +291,9 @@ function buildHarness(initialState = baseState()) {
               return timeDelta || right.id - left.id;
             });
         },
+        async lockAndLoadPendingSourcingReservations(ids) {
+          return staged.lines.filter((line) => ids.includes(line.productId) && staged.pos.some((po) => po.id === line.purchaseOrderId)).map((line) => ({ productId: line.productId, pieces: line.orderQty, purchaseOrderId: line.purchaseOrderId, rfqId: null }));
+        },
         async getHandoffsByAcceptedDecisionIds(ids) {
           return staged.handoffs.filter((row) => ids.includes(row.acceptedDecisionId));
         },
@@ -1433,6 +1436,31 @@ describe("recommendation PO handoff service", () => {
         }),
       },
     ]);
+  });
+
+  it.each([150, 300, 600])("blocks a later automatic run while %i draft pieces remain and records any uncovered remainder", async (reservedPieces) => {
+    const first = buildHarness();
+    await createRecommendationPoHandoffService(first.repository).createAutomaticHandoff(automaticCommand());
+    const state = cloneState(first.state);
+    state.autoDraftRuns.push({ ...state.autoDraftRuns[0], id: 501, runAt: new Date(NOW.getTime() + 60_000), status: "running" });
+    state.lines[0].orderQty = reservedPieces;
+    const second = buildHarness(state);
+    const command = automaticCommand(); command.autoDraftRunId = 501;
+    // A lookback change must not bypass product-base demand ownership.
+    command.items[0].recommendationId = "101:1001:90";
+    const result = await createRecommendationPoHandoffService(second.repository).createAutomaticHandoff(command);
+    expect(result.pos).toEqual([]);
+    expect(result.skipped).toMatchObject([{ reason: "pending_sourcing_reservation", reservedPieces, suggestedPieces: 300, uncoveredPieces: Math.max(300 - reservedPieces, 0), reservations: [{ purchaseOrderId: 100 }] }]);
+    expect(second.state.pos).toHaveLength(1);
+    expect(second.state.decisions).toHaveLength(state.decisions.length);
+    expect(second.state.runCompletions.at(-1)?.values.summaryJson).toMatchObject({ poMutationSkips: result.skipped });
+  });
+
+  it("rejects repeated product demand across distinct recommendation identities in one automatic batch", async () => {
+    const command = automaticCommand(); command.items.push({ ...command.items[0], recommendationId: "101:1001:90" });
+    const harness = buildHarness();
+    await expect(createRecommendationPoHandoffService(harness.repository).createAutomaticHandoff(command)).rejects.toMatchObject({ code: "DUPLICATE_AUTOMATIC_PRODUCT_DEMAND" });
+    expect(harness.state.pos).toEqual([]);
   });
 
   it("skips an automatic snapshot when another review path commits after its run started", async () => {
