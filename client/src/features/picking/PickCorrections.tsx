@@ -14,7 +14,9 @@ async function readCorrections(signal: AbortSignal): Promise<PickCorrection[]> {
 }
 
 /** Independent of the ordinary queue: a shipped header must never hide this work. */
-export function PickCorrections({ userId, canPerform }: { userId: string; canPerform: boolean }) {
+export function PickCorrections({ userId, canPerform, canOverride = false }: {
+  userId: string; canPerform: boolean; canOverride?: boolean;
+}) {
   const query = useQuery({ queryKey, queryFn: ({ signal }) => readCorrections(signal), refetchInterval: 5_000 });
   const [notice, setNotice] = useState<string | null>(null);
   const corrections = query.data ?? [];
@@ -34,7 +36,7 @@ export function PickCorrections({ userId, canPerform }: { userId: string; canPer
         <h3 className="font-semibold">{item.orderNumber} · {item.sku}</h3>
         <p className="text-sm">{item.declaredQuantity - item.pickedQuantity} still need a pick record · {item.location || "Source bin missing"}</p>
         {item.assignedPickerId !== null && item.assignedPickerId !== userId
-          ? canPerform && canTakeOverPickCorrection(item, userId, new Date())
+          ? canPerform && canTakeOverPickCorrection(item, userId, new Date(), canOverride)
             ? <TakeOver item={item} />
             : <p className="text-sm">Being resolved by another picker.</p>
           : canPerform && item.state === "picking_required"

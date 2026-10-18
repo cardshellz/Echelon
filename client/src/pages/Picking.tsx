@@ -693,11 +693,7 @@ import {
 } from "@/lib/sounds";
 
 export default function Picking() {
-  const { user, hasPermission } = useAuth();
-  return <>
-    {user && hasPermission("picking", "view") && <PickCorrections userId={user.id} canPerform={hasPermission("picking", "perform")} />}
-    <PickingWorkspace />
-  </>;
+  return <PickingWorkspace />;
 }
 
 function PickingWorkspace() {
@@ -1773,8 +1769,10 @@ function PickingWorkspace() {
       const item = activeWork.items[firstPendingIndex];
       const element = itemRefs.current.get(item.id);
       if (element) {
-        // Scroll the item into view with some padding at top
-        element.scrollIntoView({ behavior: "smooth", block: "start" });
+        // Only scroll when the item is off screen, and never past the order
+        // header: "start" scrolled the page so the header and item details
+        // went off the top (2026-10-18).
+        element.scrollIntoView({ behavior: "smooth", block: "nearest" });
       }
     }
   }, [view, activeWork?.items.map(i => `${i.id}:${i.status}`).join(",")]);
@@ -3151,6 +3149,10 @@ function PickingWorkspace() {
     
     return (
       <>
+      {/* Queue view only: above an open order it pushed the items to pick off
+          screen once the gun scrolled to them (2026-10-18). */}
+      {user && hasPermission("picking", "view") && <PickCorrections userId={user.id}
+        canPerform={hasPermission("picking", "perform")} canOverride={hasPermission("picking", "release_any")} />}
       <div className="flex flex-col min-h-full bg-muted/20 overflow-auto">
         {/* Compact Header - Row 1: Title + Actions */}
         <div className="bg-card border-b px-3 py-2 md:px-4 md:py-3">
