@@ -5,7 +5,7 @@ import {
 } from "@shared/order-edits/order-edit-codes";
 import {
   assertCouponAdjustmentSupported,
-  requiresLegacyCodeReceipt,
+  requiresOrderEditCodeReceipt,
 } from "../../domain/order-edit-coupon-boundary";
 import { priceOrderEditCodes } from "../../domain/order-edit-code-pricing";
 
@@ -45,7 +45,7 @@ describe("Shopify coupon / points-accounting boundary", () => {
       [{ ...coupon, ...limits }],
       [coupon.code],
     );
-    expect(requiresLegacyCodeReceipt(pricing)).toBe(false);
+    expect(requiresOrderEditCodeReceipt(pricing)).toBe(false);
   });
   it("preserves recovery of legacy reward receipts and ignores retained codes", () => {
     const legacy = {
@@ -54,14 +54,14 @@ describe("Shopify coupon / points-accounting boundary", () => {
       value: { type: "fixed" as const, amountCents: 100 },
     };
     expect(
-      requiresLegacyCodeReceipt(
+      requiresOrderEditCodeReceipt(
         priceOrderEditCodes(lines, [legacy], [legacy.code]),
       ),
     ).toBe(true);
     expect(
-      requiresLegacyCodeReceipt(priceOrderEditCodes(lines, [legacy], [])),
+      requiresOrderEditCodeReceipt(priceOrderEditCodes(lines, [legacy], [])),
     ).toBe(false);
-    expect(requiresLegacyCodeReceipt(undefined)).toBe(false);
+    expect(requiresOrderEditCodeReceipt(undefined)).toBe(false);
   });
   it("preserves unlimited-campaign adjustments without a rewards record", () => {
     expect(() => assertCouponAdjustmentSupported([coupon])).not.toThrow();
@@ -96,7 +96,7 @@ describe("Shopify coupon / points-accounting boundary", () => {
     expect(pricing.applications).toEqual([
       { code: fixedCoupon.code, amountCents: 800 },
     ]);
-    expect(requiresLegacyCodeReceipt(pricing)).toBe(false);
+    expect(requiresOrderEditCodeReceipt(pricing)).toBe(false);
   });
   it.each([
     { usageLimit: 1, appliesOncePerCustomer: false },

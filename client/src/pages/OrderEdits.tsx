@@ -259,6 +259,7 @@ export function OrderDraft({
   discountCodes: controlledCodes,
   onDiscountCodesChange,
   initialOperation,
+  renderRewards,
   inline,
 }: {
   order: OrderEditOrder;
@@ -281,6 +282,8 @@ export function OrderDraft({
   onDiscountCodesChange?: (codes: string[]) => void;
   /** Hydrate an existing review from its persisted plan, never from baseline quantities. */
   initialOperation?: OrderEditOperation | null;
+  renderRewards?: (input: { disabled: boolean; maxDiscountCents: number; appliedCodes: string[];
+    onApply(code: string): Promise<void>; onBusy(busy: boolean): void }) => React.ReactNode;
   /** Customer confirmation stays in the editable form; staff retain their existing review. */
   inline?: {
     operation: OrderEditOperation | null;
@@ -297,6 +300,7 @@ export function OrderDraft({
   const queryClient = useQueryClient();
   const [localCodes, setLocalCodes] = useState<string[]>([]);
   const [codeEditing, setCodeEditing] = useState(false);
+  const [rewardBusy, setRewardBusy] = useState(false);
   const discountCodes = controlledCodes ?? localCodes;
   const changeCodes = onDiscountCodesChange ?? setLocalCodes;
   const [quantities, setQuantities] = useState<Record<string, string>>(() =>
@@ -542,7 +546,7 @@ export function OrderDraft({
     [displayPreview],
   );
   async function quote() {
-    if (!canEdit || !valid || reviewBlocked || codeEditing || inflight.current)
+    if (!canEdit || !valid || reviewBlocked || codeEditing || rewardBusy || inflight.current)
       return;
     if (
       inline &&
@@ -955,7 +959,7 @@ export function OrderDraft({
               codes={discountCodes}
               applications={currentPreview?.appliedCodes ?? []}
               available={order.codeEntryAvailable === true}
-              disabled={!mutable || reviewBlocked}
+              disabled={!mutable || reviewBlocked || rewardBusy}
               onEditing={setCodeEditing}
               onApply={applyCode}
               onRemove={(code) => {
@@ -966,11 +970,12 @@ export function OrderDraft({
                 );
               }}
             />
-            <p className="text-xs text-muted-foreground">
-              {audience === "customer"
-                ? "To change the shipping address, use Change address on your order page."
-                : "Shipping address changes are not supported in this pilot."}
-            </p>
+            {renderRewards?.({ disabled: !mutable || reviewBlocked || codeEditing,
+              maxDiscountCents: (currentPreview?.financials ?? order.financials)?.itemsNetCents ?? 0,
+              appliedCodes: discountCodes, onApply: applyCode, onBusy: setRewardBusy })}
+            {audience === "staff" && <p className="text-xs text-muted-foreground">
+              Shipping address changes are not supported in this pilot.
+            </p>}
             <ErrorMessage text={validationMessage} />
             <ErrorMessage text={error} />
           </section>
@@ -1061,13 +1066,11 @@ export function OrderDraft({
           <OrderEditPaymentDetails settlement={order.settlement} />
         )}
         <div className="oe-editor-footer">
-          <p className="text-xs text-muted-foreground">
+            {(!inline || pending) && <p className="text-xs text-muted-foreground">
             {inline
-              ? pending
                 ? "Verifying and applying your changes…"
-                : "Apply changes to confirm the total shown."
               : "Review the updated total before applying changes."}
-          </p>
+            </p>}
           {inline?.operation?.canAbandon && (
             <Button
               type="button"
@@ -1096,6 +1099,7 @@ export function OrderDraft({
               pending ||
               reviewBlocked ||
               codeEditing ||
+              rewardBusy ||
               Boolean(
                 inline &&
                   (inline.busy ||

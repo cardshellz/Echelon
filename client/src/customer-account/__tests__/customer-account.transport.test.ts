@@ -6,6 +6,23 @@ const connection = { connectionId: 4, channelId: 2, name: "Shopify", shopDomain:
 const key = "a".repeat(43);
 const bootstrap = { session: { authenticated: true, privateTesting: true, sessionKey: key }, connection };
 describe("storefront transport reuses canonical clients", () => {
+  it("binds rewards issuance to the same signed session and preserves its request identity", async () => {
+    const request = vi.fn(async () => Response.json(bootstrap));
+    const api = createCustomerAccountTransport(config, request);
+    await api.bootstrap();
+    request.mockImplementation(async () => Response.json({ code: "ISSUED", value: "1.00", balance: "900.00", expiresAt: "2030-01-01T00:00:00.000Z" }));
+    const command = { requestKey: "22222222-2222-4222-8222-222222222222", points: 100 };
+    await api.rewards.issue(4, 9, command);
+    const [url, options] = request.mock.calls[1] as unknown as [string, RequestInit];
+    expect(url).toBe("/apps/echelon-returns/account");
+    expect(JSON.parse(String(options.body))).toMatchObject({ expectedCustomerId: "100", sessionKey: key,
+      path: "/order-edits/orders/9/rewards/issue", commandKey: command.requestKey, body: command });
+  });
+  it("retains classified reward failures so retries preserve uncertain issuance", async () => {
+    const api = createCustomerAccountTransport(config, async () => Response.json({ error: { code: "REWARD_ISSUANCE_PENDING", message: "Retry this same reward." } }, { status: 503 }));
+    await expect(api.rewards.issue(4, 9, { requestKey: "22222222-2222-4222-8222-222222222222", points: 100 }))
+      .rejects.toMatchObject({ code: "REWARD_ISSUANCE_PENDING" });
+  });
   afterEach(() => vi.useRealTimers());
   it("bounds a stalled account read without retrying it", async () => {
     vi.useFakeTimers();
