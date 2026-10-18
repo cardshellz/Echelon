@@ -4,6 +4,7 @@ import { buildStaleAutoDraftPoDiagnostics } from "../../server/modules/procureme
 import type { PoShipmentCosts } from "../../shared/procurement/po-shipment-costs";
 import type { ShipmentCostReview } from "../../shared/procurement/shipment-cost-workflow";
 import type { PurchaseWorkspace } from "../../shared/procurement/purchase-workspace";
+import type { PurchaseCostStatus } from "../../shared/procurement/purchase-cost-status";
 import { installFixtures, po } from "./procurement-fixtures";
 import {
   currentAllocation, currentCostIssue, currentSourceNeedsReview, emptyDashboard, historyWorkspace,
@@ -56,8 +57,103 @@ async function installCostScreens(page: Page) {
   return { state, failures };
 }
 
-const postedSummary = "Cost posting complete. No cost approval is outstanding.";
+const postedSummary = "Shipment costs are posted. No shipment cost approval is outstanding.";
 const postedShipment = "Costs posted on 1 of 1 shipment lines.";
+
+function supplierCosts(posted: boolean): PurchaseCostStatus {
+  return { lines: [{ purchaseOrderId: 17, purchaseOrderLineId: 171, sku: "TEST-COST-SKU",
+    components: (["product", "packaging"] as const).map(component => ({ component,
+      status: posted ? "applied" : "review_required", sourceEvidence: posted ? "confirmed" : "review_required",
+      sourceCurrent: true, sourceRevisionId: 11, applicationId: posted ? 22 : 21,
+      issues: posted ? [] : [{ code: "INVOICE_COMPONENT_REVIEW_REQUIRED", message: "Supplier product and packaging amounts have not been recorded." }] })),
+    invoices: [{ invoiceId: 71, invoiceNumber: "TEST-INV-71", lineId: 72, lineNumber: 1 }],
+    receipts: [{ receiptId: 31, receiptNumber: "TEST-RCV-31", status: "closed" }],
+    lots: Array.from({length:16}, (_, index) => ({ id: 901+index, lotNumber: `TEST-LOT-${901+index}`, onHandUnits: 1,
+      shipmentId: 42, provisional: true, origin: index === 0 ? "receipt" : "transformation" })),
+  }] };
+}
+
+test("resolves supplier evidence from health and refreshes both shipments, PO receipt processing and history", async ({ page }, info) => {
+  const { state, failures } = await installCostScreens(page);
+  const commands: unknown[] = [];
+  function reflect(posted: boolean) {
+    const current = supplierCosts(posted);
+    state.review.supplierCosts = current;
+    state.costs.supplierCosts = current;
+    state.workspace.costTrace!.currentCosts = current;
+    const request = state.workspace.costTrace!.receiptCostRequests![0];
+    request.currentCosts = current.lines[0];
+    request.recordedState = "review_required";
+    request.state = posted ? "applied" : "review_required";
+    request.attempts[0].state = "review_required";
+    request.attempts[0].issues = [{ code: "INVOICE_COMPONENT_REVIEW_REQUIRED", message: "Supplier amounts were missing at receipt." }];
+    state.health = posted ? postedHealth() : { ...postedWithOtherProvisionalCosts(), items: [{
+      ...postedWithOtherProvisionalCosts().items[0], detail: "Landed costs are posted. 16 lots need supplier product and packaging evidence.",
+    }] };
+  }
+  reflect(false);
+  const invoice = { id: 71, invoiceNumber: "TEST-INV-71", vendorId: 2, vendorName: "Test vendor", status: "approved", currency: "USD",
+    invoicedAmountCents: 11800, balanceCents: 11800, paidAmountCents: 0, poLinks: [{purchaseOrderId:17,poNumber:"TEST-PO-17"}], attachments: [], payments: [],
+    lines: [{ id: 72, lineNumber: 1, sku: "TEST-COST-SKU", productName: "Test product", qtyInvoiced: 100, unitCostCents: 100,
+      lineTotalCents: 11800, matchStatus: "over_billed", costComponentEvidence: null as unknown, costReviewVersion: "a".repeat(64) }] };
+  await page.route("**/api/vendor-invoices/71", route => route.fulfill({json:invoice}));
+  await page.route("**/api/inbound-shipments/43", route => route.fulfill({json:{...shipmentDocument,id:43,shipmentNumber:"TEST-COST-43"}}));
+  await page.route("**/api/inbound-shipments/43/allocation-status", route => route.fulfill({json:{...currentAllocation,shipmentId:43}}));
+  await page.route("**/api/inbound-shipments/43/cost-review", route => route.fulfill({json:{...state.review,shipmentId:43}}));
+  await page.route("**/api/inbound-shipments/43/invoices", route => route.fulfill({json:{invoices:[],summary:{invoiceCount:0}}}));
+  await page.route("**/api/vendor-invoice-lines/72/cost-components", async route => {
+    const body = route.request().postDataJSON();
+    commands.push(body);
+    invoice.lines[0].costComponentEvidence = { contractVersion:1, source:"operator_review", packagingTreatment:body.packagingTreatment,
+      productMills:body.productMills,packagingMills:body.packagingMills,adjustmentMills:body.adjustmentMills };
+    invoice.lines[0].costReviewVersion = "b".repeat(64);
+    reflect(true);
+    await route.fulfill({json:{id:72,costComponentEvidence:invoice.lines[0].costComponentEvidence,costReviewVersion:invoice.lines[0].costReviewVersion,
+      application:{costSources:[],lotsUpdated:16,cogsRowsUpdated:1,totalCogsDeltaCents:50,costApplications:[{
+        applicationId:22,status:"applied",lotsUpdated:16,cogsRowsUpdated:1,totalCogsDeltaCents:50,issues:[],replayed:false,
+      }]}}});
+  });
+  await page.goto("/purchase-orders/17?tab=lines");
+  await expect(page.getByText("Shipment costs are posted. Supplier product and packaging costs still need review below.", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Review supplier costs", exact: true }).click();
+  await expect(page.getByRole("region", { name: "Supplier product and packaging costs" })).toContainText("TEST-COST-SKU");
+  const health = await openHealth(page, "/purchasing");
+  await health.getByRole("button",{name:"Review",exact:true}).click();
+  await expect(page.getByRole("tab",{name:"Cost review",exact:true})).toHaveAttribute("data-state","active");
+  const supplier = page.getByRole("region",{name:"Supplier product and packaging costs"});
+  await expect(supplier).toContainText("Confirm the product and packaging amounts");
+  await supplier.getByText("Affected lot history (16)",{exact:true}).click();
+  await expect(supplier).toContainText("TEST-LOT-916");
+  await supplier.getByRole("link",{name:"Review invoice TEST-INV-71 · line 1",exact:true}).click();
+  await expect(page.getByRole("dialog")).toContainText("Invoice cost breakdown");
+  await page.getByLabel("Is packaging included in the product price?",{exact:true}).click();
+  await page.getByRole("option",{name:"No, packaging is charged separately"}).click();
+  await page.getByLabel(/^Product total/).fill("100");
+  await page.getByLabel(/^Packaging total/).fill("18");
+  await page.getByLabel(/^Other adjustments/).fill("0");
+  await page.getByLabel("Notes / supplier invoice reference").fill("Supplier invoice amounts reviewed");
+  await page.getByRole("button",{name:"Save cost review",exact:true}).click();
+  await expect(page.getByRole("dialog").getByRole("status")).toContainText("Cost evidence saved");
+  await page.getByRole("button",{name:"Close review",exact:true}).click();
+  await page.getByRole("link",{name:"Back to shipment #42",exact:true}).first().click();
+  await expect(supplier).toContainText("Product: Posted");
+  await expect(supplier).not.toContainText("Needs review");
+  await page.goto("/shipments/43?tab=allocation");
+  await expect(supplier).toContainText("Packaging: Posted");
+  await page.goto("/purchase-orders/17?tab=lifecycle");
+  const receipt = page.getByTestId("receipt-cost-request-61");
+  await expect(receipt).toContainText("Current supplier costs posted");
+  await expect(receipt.getByRole("button",{name:"Apply current supplier costs"})).toHaveCount(0);
+  await receipt.getByText("1 recorded cost attempt",{exact:true}).click();
+  await expect(receipt).toContainText("Supplier amounts were missing at receipt.");
+  await expect(receipt).toContainText("A later supplier-cost application completed");
+  await page.screenshot({path:info.outputPath("supplier-receipt-current-status.png"),fullPage:true});
+  await openHealth(page,"/purchasing");
+  await expect(page.getByText("16 lots need supplier product and packaging evidence.",{exact:false})).toHaveCount(0);
+  expect(commands).toHaveLength(1);
+  expect(invoice.lines[0].lineTotalCents).toBe(11800);
+  expect(failures).toEqual([]);
+});
 
 test("ordinary applied estimates stay posted on PO and shipment after navigation and reload", async ({ page }, info) => {
   const { failures } = await installCostScreens(page);
@@ -71,7 +167,7 @@ test("ordinary applied estimates stay posted on PO and shipment after navigation
   await page.goto("/shipments/42?tab=allocation&purchase=purchase%3A17%3Alines");
   const results = page.getByRole("region", { name: "Inventory cost results", exact: true });
   await expect(results).toContainText(postedShipment);
-  await expect(results).toContainText("No cost approval is outstanding.");
+  await expect(results).toContainText("No shipment cost approval is outstanding.");
   await expect(page.getByRole("button", { name: "Update shipment costs", exact: true })).toHaveCount(0);
   await page.reload();
   await expect(results).toContainText(postedShipment);
@@ -144,7 +240,7 @@ for (const path of ["/shipments", "/purchasing"] as const) {
     await expect(health.getByRole("button", { name: /^Push Costs/ })).toHaveCount(0);
     await expect(health).not.toContainText("1 provisional lot(s) still linked to a closed shipment");
     await health.getByRole("button", { name: "Review", exact: true }).click();
-    await page.getByRole("tab", { name: "Cost review", exact: true }).click();
+    await expect(page.getByRole("tab", { name: "Cost review", exact: true })).toHaveAttribute("data-state", "active");
     await expect(page.getByRole("region", { name: "Inventory cost results", exact: true })).toContainText(postedShipment);
     await openHealth(page, path);
     await expect(health).toContainText(postedOtherCostWarning);
@@ -167,7 +263,7 @@ for (const path of ["/shipments", "/purchasing"] as const) {
     await expect(health).toContainText(currentCostIssue.message);
     await expect(health).not.toContainText(postedOtherCostWarning);
     await health.getByRole("button", { name: "Review", exact: true }).click();
-    await page.getByRole("tab", { name: "Cost review", exact: true }).click();
+    await expect(page.getByRole("tab", { name: "Cost review", exact: true })).toHaveAttribute("data-state", "active");
     const results = page.getByRole("region", { name: "Inventory cost results", exact: true });
     await expect(results).toContainText(currentCostIssue.message);
     await expect(results).not.toContainText(postedShipment);

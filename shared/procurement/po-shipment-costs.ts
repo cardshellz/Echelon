@@ -2,6 +2,7 @@ import { z } from "zod";
 import { costIssueSchema, type CostIssue } from "./cost-source-contracts";
 import { poShipmentCostSummarySchema } from "./po-shipment-cost-summary";
 import { shipmentCostExceptionSchema } from "./shipment-cost-exception";
+import { purchaseCostStatusSchema } from "./purchase-cost-status";
 
 const id = z.number().int().positive().max(2_147_483_647);
 const applicationId = z.number().int().positive().safe();
@@ -15,6 +16,7 @@ export const shipmentCostLineStatusSchema = z.enum([
 export const poShipmentCostsSchema = z
   .object({
     summary: poShipmentCostSummarySchema,
+    supplierCosts: purchaseCostStatusSchema.optional(),
     supplier: z.object({ freightCents: cents, dutyCents: cents }).strict(),
     totals: z
       .object({

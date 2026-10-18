@@ -22,6 +22,9 @@ import { createShipmentCostExceptionService, shipmentExceptionScope } from "../.
 import { costFingerprint } from "../../../inventory/infrastructure/cost-evidence-values";
 import type { ShipmentExceptionRequest } from "@shared/procurement/shipment-cost-exception";
 import { registerShipmentReconciliationCases } from "./shipment-cost-reconciliation.cases";
+import { readPurchaseCostStatus } from "../../purchase-cost-status.repository";
+import { readReceiptCostQueue } from "../../receipt-cost-queue-read.repository";
+import { projectReceiptCostQueue } from "../../receipt-cost-queue-read.service";
 
 // Real PostgreSQL regression coverage for the coordinated receipt/AP/freight owners.
 config({ path: resolve(process.cwd(), ".env.test") });
@@ -321,6 +324,54 @@ audit.sequential("receipt/AP/freight cost revisions with real owners", () => {
     const sources = (await pool.query("SELECT component,contract FROM procurement.cost_source_revisions ORDER BY id")).rows;
     expect(sources.some((source) => source.component === "packaging" && source.contract.totalMills === 200000)).toBe(true);
     expect((await pool.query("SELECT units_per_variant_snapshot FROM inventory.lot_cost_origins")).rows).toEqual([{ units_per_variant_snapshot: 50 }]);
+  });
+
+  it("uses current supplier applications across shipment and receipt status while preserving earlier review attempts", async () => {
+    await pool.query("UPDATE procurement.vendor_invoices SET status='approved' WHERE id=71");
+    const original = (await pool.query("SELECT cost_component_evidence FROM procurement.vendor_invoice_lines WHERE id=72")).rows[0].cost_component_evidence;
+    await pool.query("UPDATE procurement.vendor_invoice_lines SET cost_component_evidence=NULL WHERE id=72");
+    const receipt = await receive();
+    await shipment.finalizeAllocations(1, actorId);
+    await shipment.pushLandedCostsToLots(1, actorId);
+    await pool.query("UPDATE procurement.inbound_shipments SET status='closed' WHERE id=1");
+    const before = await shipment.getCostReview(1);
+    expect(isShipmentCostLinePosted(before!.lines[0])).toBe(true);
+    expect(before!.supplierCosts!.lines[0].components.every(component => component.status === 'review_required')).toBe(true);
+    expect((await readPoShipmentCosts(database, 10))?.supplierCosts).toEqual(before!.supplierCosts);
+    expect((await shipment.getLandedCostHealth()).items).toEqual(expect.arrayContaining([expect.objectContaining({
+      type: 'provisional_other_costs', detail: expect.stringContaining('Confirm the supplier invoice amounts'),
+    })]));
+    const attempts = (await pool.query("SELECT * FROM procurement.receipt_cost_attempts ORDER BY id")).rows;
+    await pool.query("UPDATE procurement.vendor_invoice_lines SET cost_component_evidence=$1 WHERE id=72", [original]);
+    await approveEvidence();
+    const current = await database.transaction(tx => readPurchaseCostStatus(tx, [21]), { isolationLevel: 'repeatable read', accessMode: 'read only' });
+    expect(current.lines[0].components).toEqual(expect.arrayContaining([
+      expect.objectContaining({component:'product',status:'applied',sourceEvidence:'confirmed'}),
+      expect.objectContaining({component:'packaging',status:'applied',sourceEvidence:'confirmed'}),
+    ]));
+    const queue = await database.transaction(tx => readReceiptCostQueue(tx,10));
+    expect(projectReceiptCostQueue(queue,new Map(),current)[0]).toMatchObject({ state:'applied',recordedState:'review_required' });
+    expect((await pool.query("SELECT * FROM procurement.receipt_cost_attempts ORDER BY id")).rows).toEqual(attempts);
+    expect((await shipment.getCostReview(1))!.supplierCosts).toEqual(current);
+    expect((await readPoShipmentCosts(database, 10))?.supplierCosts).toEqual(current);
+    expect((await shipment.getLandedCostHealth()).items).toEqual([]);
+    // Explicit retry traverses the current owner; an unchanged replay must not
+    // append another application or financial adjustment.
+    const applicationCount = (await pool.query("SELECT count(*)::int AS n FROM inventory.cost_applications")).rows[0].n;
+    await receiving.retryCosts(receipt.receiptId, actorId);
+    await receiving.retryCosts(receipt.receiptId, actorId);
+    expect((await pool.query("SELECT count(*)::int AS n FROM inventory.cost_applications")).rows[0].n).toBe(applicationCount);
+
+    // The request now has a successful attempt. A subsequent invoice change
+    // must still reach the financial owner instead of replaying that old state.
+    await pool.query("UPDATE procurement.vendor_invoice_lines SET cost_component_evidence=NULL WHERE id=72");
+    expect(await receiving.retryCosts(receipt.receiptId, actorId)).toMatchObject({ state: 'review_required' });
+    const changed = await database.transaction(tx => readPurchaseCostStatus(tx, [21]), { isolationLevel: 'repeatable read', accessMode: 'read only' });
+    expect(changed.lines[0].components.every(component => component.status === 'review_required')).toBe(true);
+    await pool.query("UPDATE procurement.vendor_invoice_lines SET cost_component_evidence=$1 WHERE id=72", [original]);
+    expect(await receiving.retryCosts(receipt.receiptId, actorId)).toMatchObject({ state: 'applied' });
+    const restored = await database.transaction(tx => readPurchaseCostStatus(tx, [21]), { isolationLevel: 'repeatable read', accessMode: 'read only' });
+    expect(restored.lines[0].components.every(component => component.status === 'applied')).toBe(true);
   });
 
   it.each(["receipt-invoice-freight", "freight-receipt-invoice", "receipt-freight-invoice", "invoice-receipt-freight", "invoice-freight-receipt", "freight-invoice-receipt"])("converges product, packaging, freight and sold COGS for %s", async (order) => {

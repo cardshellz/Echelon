@@ -2,6 +2,7 @@ import { receiptCostRequestHistorySchema } from "./receipt-cost-queue";
 import { purchaseCostApplicationHistorySchema } from "./purchase-cost-applications";
 import { invoiceCostComponentEvidenceSchema } from "./invoice-cost-evidence";
 import { z } from "zod";
+import { purchaseCostStatusSchema } from "./purchase-cost-status";
 
 const id = z.number().int().positive().safe();
 const integer = z.number().int().safe();
@@ -16,6 +17,7 @@ export const purchaseCostTraceSchema = z.object({
   applicationEvidence: z.enum(["not_verified", "recorded"]),
   applicationHistory: purchaseCostApplicationHistorySchema.optional(),
   receiptCostRequests: receiptCostRequestHistorySchema.optional(),
+  currentCosts: purchaseCostStatusSchema.optional(),
   purchaseLines: z.array(z.object({
     id,
     sku: z.string().nullable(),

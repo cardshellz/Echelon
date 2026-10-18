@@ -358,7 +358,7 @@ test("an already posted estimate shows its approval across the PO, shipment and 
   await dialog.screenshot({ path: info.outputPath("posted-cost-approval.png") });
   await done.click();
   await expect(dialog).toHaveCount(0);
-  await expect(page.getByText("Cost posting complete. No cost approval is outstanding.", { exact: true })).toBeVisible();
+  await expect(page.getByText("Shipment costs are posted. No shipment cost approval is outstanding.", { exact: true })).toBeVisible();
   await expect(page.getByText(/Supplier confirmation:.*Their costs are already posted/)).toBeVisible();
   await expect(page.getByRole("button", { name: "Update shipment costs", exact: true })).toHaveCount(0);
   await expect(page.getByRole("button", { name: /^Review \d+ line/ })).toHaveCount(0);

@@ -9,6 +9,7 @@ import { Badge } from "@/components/ui/badge";
 import { ShipmentCostUpdateAction } from "./ShipmentCostUpdateAction";
 import { useProcurementNavigation } from "@/hooks/use-procurement-navigation";
 import { ShipmentCostExceptionReview } from "./ShipmentCostExceptionReview";
+import { PurchaseSupplierCostReview } from "./PurchaseSupplierCostReview";
 
 export function PoShipmentCostReview({
   costs,
@@ -40,9 +41,10 @@ export function PoShipmentCostReview({
         <h3 className="font-semibold text-sm">{pending.length ? "Cost updates and approvals" : "Cost postings"}</h3>
         <p className="text-xs text-muted-foreground">
           {pending.length ? "Items still needing attention are shown with their next step. Completed postings include their saved approval."
-            : "These costs are posted. Open a posting to see the amount, destination and administrator approval."}
+            : "Shipment charges are posted. Open a posting to see the amount, destination and administrator approval. Supplier product and packaging costs are shown separately below."}
         </p>
       </div>
+      {costs.supplierCosts && <PurchaseSupplierCostReview status={costs.supplierCosts} navigation={navigation} />}
       {groups.map((shipment) => (
         <div
           key={shipment.id}

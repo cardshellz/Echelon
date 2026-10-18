@@ -244,11 +244,11 @@ test("recorded cost history shows exact lot lineage and COGS with a separate rec
   expect(new URL(page.url()).searchParams.get("inspect")).toBe("invoice:71");
   const request = trace.getByTestId("receipt-cost-request-61");
   await expect(request).toContainText("Physical receipt: Closed");
-  await expect(request).toContainText("The stock receipt remains recorded");
-  await request.getByRole("button", { name: "Retry receipt costs", exact: true }).click();
+  await expect(request).toContainText("The stock receipt is recorded separately from its costs");
+  await request.getByRole("button", { name: "Apply current supplier costs", exact: true }).click();
   await expect(trace.getByRole("alert")).toContainText("physical receipt is separate");
-  await expect(request.getByRole("button", { name: "Retry receipt costs", exact: true })).toBeEnabled();
-  await request.getByRole("button", { name: "Retry receipt costs", exact: true }).click();
+  await expect(request.getByRole("button", { name: "Apply current supplier costs", exact: true })).toBeEnabled();
+  await request.getByRole("button", { name: "Apply current supplier costs", exact: true }).click();
   await expect(request).toContainText("Receipt cost attempt completed");
   await expect(request.getByRole("button")).toHaveCount(0);
   await request.locator("summary").click();
@@ -270,7 +270,7 @@ test("cost history stays inspectable without exposing a retry to users without a
   await page.route("**/api/purchase-orders/17/workspace", (route) => route.fulfill({ json: { ...workspace(), costTrace: purchaseCostApplicationsFixture() } }));
   await page.goto("/purchase-orders/17?tab=lifecycle");
   await expect(page.getByTestId("receipt-cost-request-61")).toContainText("Retry required");
-  await expect(page.getByRole("button", { name: "Retry receipt costs", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Apply current supplier costs", exact: true })).toHaveCount(0);
   await expect(page.getByTestId("cost-revision-11")).toBeVisible();
   expect(failures).toEqual([]);
 });

@@ -48,6 +48,7 @@ import { shipmentCostWorkflowIdSchema, shipmentCostUpdateInputSchema, shipmentCo
 import { isShipmentCostLinePosted } from "@shared/procurement/shipment-cost-workflow";
 import { landedCostHealthSchema, type LandedCostHealth } from "@shared/procurement/landed-cost-health";
 import { readShipmentCostReview, readShipmentCostReviewInTransaction } from "./shipment-cost-review.repository";
+import { purchaseLineNeedsCostReview, purchaseCostNextAction } from "@shared/procurement/purchase-cost-status";
 import { shipmentAllocationsEqual } from "./domain/shipment-allocation-equality";
 
 /**
@@ -1371,17 +1372,24 @@ export function createShipmentTrackingService(
           });
         }
 
-        if (provisionalLots.length > 0 && lines.length > 0 && unpostedLines.length === 0) {
-          // The legacy flag covers product and packaging estimates as well as
-          // freight. A posted landed component cannot clear those other sources.
+        const supplierReview = review.supplierCosts?.lines.filter(purchaseLineNeedsCostReview) ?? [];
+        const tracedLotIds = new Set(review.supplierCosts?.lines.flatMap(line => line.lots.map(lot => lot.id)) ?? []);
+        const unverifiedFlags = provisionalLots.filter(lot => !tracedLotIds.has(lot.id));
+        if (lines.length > 0 && (supplierReview.length > 0 || (unverifiedFlags.length > 0 && unpostedLines.length === 0))) {
+          // A flag alone cannot contradict verified current component postings.
+          // Untraced flagged lots remain actionable; estimates and genuine source
+          // issues are independently projected even when the legacy flag is 0.
           counts.provisionalOtherCosts += 1;
           items.push({
             id: `provisional_other_costs-${shipment.id}`, type: "provisional_other_costs", severity: "warning",
             shipmentId: shipment.id, shipmentNumber: shipment.shipmentNumber ?? null, shipmentStatus: shipment.status,
-            detail: `Landed costs are posted. ${provisionalLots.length} lot${provisionalLots.length === 1 ? "" : "s"} still ${provisionalLots.length === 1 ? "has" : "have"} a provisional cost flag; review remaining cost evidence before treating the complete lot cost as final.`,
+            detail: `${unpostedLines.length === 0 ? "Landed costs are posted. " : ""}${supplierReview.length > 0
+              ? `${supplierReview.length} PO lines need product / packaging cost review (${provisionalLots.length} provisional lots on this shipment). ${supplierReview.some(line => purchaseCostNextAction(line) === "invoice") ? "Confirm the supplier invoice amounts in cost review." : "Open cost review for the affected receipts and lot history."}`
+              : `${unverifiedFlags.length} lot${unverifiedFlags.length === 1 ? " retains" : "s retain"} a provisional flag without verified supplier-cost coverage. Open cost review to compare their current component evidence; this flag alone does not mean freight is unposted.`}`,
             action: "review_cost_evidence", provisionalLotCount: provisionalLots.length,
           });
-        } else if (unpostedLines.length > 0 && (provisionalLots.length > 0
+        }
+        if (unpostedLines.length > 0 && (provisionalLots.length > 0
           || allocation.allocatableCostCount > 0 || needsSourceReview)) {
           const fullyFinalized = finalizedLineCount === lines.length && lines.length > 0;
           const closedProvisional = shipment.status === "closed" && provisionalLots.length > 0;

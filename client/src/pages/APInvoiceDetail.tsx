@@ -1,4 +1,5 @@
 import { InvoiceLineCostReview } from "@/features/purchasing/InvoiceLineCostReview";
+import { invalidatePurchaseCosts } from "@/lib/invalidate-purchase-costs";
 import { InvoiceShipmentReplacement } from "@/features/purchasing/InvoiceShipmentReplacement";
 import { apInvoiceEditCapabilitySchema } from "@shared/procurement/ap-invoice-capabilities";
 import { useAuth } from "@/lib/auth";
@@ -252,6 +253,7 @@ export default function APInvoiceDetail() {
   }
 
   const invalidate = () => {
+    void invalidatePurchaseCosts(queryClient);
     queryClient.invalidateQueries({ queryKey: [`/api/vendor-invoices/${invoiceId}`] });
     queryClient.invalidateQueries({ predicate: (query) => typeof query.queryKey[0] === "string" && /^\/api\/vendor-invoices(?:\?|$)/.test(query.queryKey[0]) });
     queryClient.invalidateQueries({ queryKey: ["/api/ap/summary"] });
@@ -786,7 +788,7 @@ export default function APInvoiceDetail() {
                             <span className={`text-xs px-1.5 py-0.5 rounded ${match.className}`}>{match.label}</span>
                             <InvoiceQuantityCorrection lineId={line.id} lineNumber={line.lineNumber} needsCorrection={["qty_discrepancy", "over_billed", "price_discrepancy"].includes(line.matchStatus)} allowMatched={line.purchaseOrderLineId != null && invoice.status !== "voided"} onSaved={invalidate} />
                           </TableCell>
-                          <TableCell>{["qty_discrepancy", "over_billed", "price_discrepancy"].includes(line.matchStatus) ? <span className="text-xs text-muted-foreground">Review invoice or PO first</span> : <InvoiceLineCostReview line={line} currency={invoice.currency} invoiceStatus={invoice.status} onSaved={invalidate} />}</TableCell>
+                          <TableCell><InvoiceLineCostReview line={line} currency={invoice.currency} invoiceStatus={invoice.status} onSaved={invalidate} /></TableCell>
                           {canEdit && (
                             <TableCell>
                               <Button size="sm" variant="ghost" className="h-7 text-muted-foreground"

@@ -3,6 +3,7 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useAuth } from "@/lib/auth";
 import { createShipmentCostUpdateClient, shipmentCostWorkflowError } from "@/lib/shipment-cost-workflow";
 import { Button } from "@/components/ui/button";
+import { invalidatePurchaseCosts } from "@/lib/invalidate-purchase-costs";
 
 export function ShipmentCostUpdateAction({ shipmentId, disabled = false }: { shipmentId: number; disabled?: boolean }) {
   const { hasPermission } = useAuth();
@@ -12,14 +13,7 @@ export function ShipmentCostUpdateAction({ shipmentId, disabled = false }: { shi
     mutationFn: (id: number) => client.update(id),
     // The response can be lost after commit. Always reload persisted outcomes,
     // including other linked POs; never leave a success toast over stale totals.
-    onSettled: async (_result, _error, id) => {
-      const shipmentPath = `/api/inbound-shipments/${id}`;
-      await queryClient.invalidateQueries({ predicate: query => {
-        const path = query.queryKey[0];
-        return typeof path === "string" && (path === shipmentPath || path.startsWith(`${shipmentPath}/`)
-          || path.startsWith("/api/purchase-orders/"));
-      } });
-    },
+    onSettled: () => invalidatePurchaseCosts(queryClient),
   });
   if (!hasPermission("purchasing", "approve")) return <p className="text-sm text-muted-foreground">
     A purchasing approver can update these costs. You can review the saved details below.

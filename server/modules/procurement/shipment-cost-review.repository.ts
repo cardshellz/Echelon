@@ -1,4 +1,5 @@
 import { sql } from "drizzle-orm";
+import { readPurchaseCostStatus } from "./purchase-cost-status.repository";
 import { shipmentCostWorkflowIdSchema, shipmentCostReviewSchema, type ShipmentCostReview } from "@shared/procurement/shipment-cost-workflow";
 import type { PoShipmentCostSummaryDatabase } from "./po-shipment-cost-summary.repository";
 import { costInteger } from "../inventory/infrastructure/cost-evidence-values";
@@ -18,7 +19,7 @@ export async function readShipmentCostReviewInTransaction(tx: ShipmentExceptionR
   shipmentCostWorkflowIdSchema.parse(shipmentId);
   const shipment = await tx.execute(sql`SELECT id FROM procurement.inbound_shipments WHERE id=${shipmentId}`);
   if (!shipment.rows.length) return null;
-  const result = await tx.execute(sql`SELECT line.id,line.sku,revision.contract,
+  const result = await tx.execute(sql`SELECT line.id,line.sku,line.purchase_order_line_id,revision.contract,
     application.id AS application_id,application.status,application.recorded_at,application.evidence->'result' AS result
     FROM procurement.inbound_shipment_lines line
     LEFT JOIN LATERAL (SELECT id,contract FROM procurement.cost_source_revisions revision
@@ -30,7 +31,9 @@ export async function readShipmentCostReviewInTransaction(tx: ShipmentExceptionR
   const { exceptions, sourceIssues } = await readShipmentCostPostingEvidence(tx, result.rows.map(row => ({
     lineId: costInteger(row.id, "line.id", 1), shipmentId, contract: row.contract,
   })));
-  return shipmentCostReviewSchema.parse({ shipmentId, lines: result.rows.map(row => {
+  return shipmentCostReviewSchema.parse({ shipmentId,
+    supplierCosts: await readPurchaseCostStatus(tx, result.rows.flatMap(row => row.purchase_order_line_id == null ? [] : [costInteger(row.purchase_order_line_id, "purchaseOrderLineId", 1)])),
+    lines: result.rows.map(row => {
     const outcome = row.result as Record<string, unknown> | null;
     return {
       lineId: costInteger(row.id, "line.id", 1), sku: row.sku == null ? null : String(row.sku),

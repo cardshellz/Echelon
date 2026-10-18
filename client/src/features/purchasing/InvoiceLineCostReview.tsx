@@ -1,5 +1,8 @@
-import { useRef, useState, type FormEvent } from "react";
-import { useMutation } from "@tanstack/react-query";
+import { useEffect, useRef, useState, type FormEvent } from "react";
+import { useSearch } from "wouter";
+import { INVOICE_COST_QUERY_PARAM } from "@/lib/procurement-navigation";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { invalidatePurchaseCosts } from "@/lib/invalidate-purchase-costs";
 import {
   invoiceCostComponentEvidenceSchema, invoiceCostReviewResultSchema,
   type InvoiceCostReview, type InvoiceCostReviewResult,
@@ -45,6 +48,7 @@ function ReviewEditor({ line, currency, blockedReason, onSaved, onDiscard, onClo
   // The editor receives a frozen row snapshot. Refetches cannot silently replace
   // the version or amounts on which an in-progress review was based.
   const [form, setForm] = useState<InvoiceCostReviewForm>(() => invoiceCostReviewForm(line.costComponentEvidence));
+  const queryClient = useQueryClient();
   const [validationError, setValidationError] = useState<string | null>(null);
   const [unresolved, setUnresolved] = useState<ReviewIntent | null>(null);
   const [saved, setSaved] = useState<InvoiceCostReviewResult | null>(null);
@@ -74,6 +78,9 @@ function ReviewEditor({ line, currency, blockedReason, onSaved, onDiscard, onClo
       const ambiguous = error instanceof FinancialCommandRequestError && error.ambiguous;
       setUnresolved(ambiguous ? intent : null); setBusy(ambiguous);
     },
+    // A lost response may follow a committed posting. Keep the frozen edit
+    // intent, but refresh every current-status reader even after an error.
+    onSettled: () => invalidatePurchaseCosts(queryClient),
   });
   const locked = mutation.isPending || unresolved !== null || saved !== null || blockedReason !== null;
   const stale = mutation.error instanceof FinancialCommandRequestError && mutation.error.code === "INVOICE_COST_REVIEW_STALE";
@@ -130,6 +137,17 @@ export function InvoiceLineCostReview({ line, currency, invoiceStatus, onSaved }
   const { hasPermission } = useAuth();
   const [snapshot, setSnapshot] = useState<ReviewLine | null>(null);
   const [busy, setBusy] = useState(false);
+  const search = useSearch();
+  const openedFromLink = useRef<string | null>(null);
+  useEffect(() => {
+    const values = new URLSearchParams(search).getAll(INVOICE_COST_QUERY_PARAM);
+    // Only the actual invoice row can open the linked editor. Duplicate,
+    // malformed and foreign line identifiers never select a different row.
+    if (values.length === 1 && values[0] === String(line.id) && openedFromLink.current !== search) {
+      openedFromLink.current = search;
+      setSnapshot({ ...line });
+    }
+  }, [search, line]);
   const known = invoiceCostComponentEvidenceSchema.safeParse(line.costComponentEvidence).success;
   const blockedReason = !hasPermission("purchasing", "approve") ? "Purchasing approval permission is required to save cost evidence."
     : invoiceStatus === "voided" ? "Voided invoice cost evidence is read only."

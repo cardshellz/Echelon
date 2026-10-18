@@ -108,6 +108,18 @@ describe("procurement document journeys", () => {
 });
 
 describe("direct invoice line correction navigation", () => {
+  it("opens the supplier cost editor from shipment costing with a stable return path", () => {
+    const href = procurementChildHref("/shipments/42", "tab=allocation", "/ap-invoices/71", { invoiceCostLineId: 72 });
+    expect(new URLSearchParams(parts(href)[1]).getAll("costLine")).toEqual(["72"]);
+    expect(procurementBackHref(parts(href)[1], "/ap-invoices")).toBe("/shipments/42?tab=allocation");
+  });
+  it.each([0,-1,1.5,NaN,2_147_483_648])("rejects invalid cost-review IDs %s", invoiceCostLineId => {
+    expect(() => procurementChildHref("/shipments/42","tab=allocation","/ap-invoices/71",{invoiceCostLineId})).toThrow();
+  });
+  it("does not combine cost review with invoice corrections or other documents", () => {
+    expect(() => procurementChildHref("/shipments/42","","/ap-invoices/71",{invoiceCostLineId:72,invoiceLineCorrectionId:72})).toThrow();
+    expect(() => procurementChildHref("/shipments/42","","/purchase-orders/17",{invoiceCostLineId:72})).toThrow();
+  });
   it("opens the selected line and preserves the PO return without repeating the editor action on a later journey", () => {
     const correction = procurementChildHref("/purchase-orders/17", "tab=lines", "/ap-invoices/71", { invoiceLineCorrectionId: 72 });
     expect(new URLSearchParams(parts(correction)[1]).getAll("correctLine")).toEqual(["72"]);

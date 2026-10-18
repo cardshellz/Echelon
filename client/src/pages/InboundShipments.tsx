@@ -1,4 +1,4 @@
-import { landedCostHealthSchema, type LandedCostHealth } from "@shared/procurement/landed-cost-health";
+import { landedCostHealthSchema, landedCostHealthHref, type LandedCostHealth } from "@shared/procurement/landed-cost-health";
 import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useLocation } from "wouter";
@@ -498,7 +498,7 @@ export default function InboundShipments() {
                       <Button
                         variant="outline"
                         size="sm"
-                        onClick={() => navigate(`/shipments/${item.shipmentId}`)}
+                        onClick={() => navigate(landedCostHealthHref(item))}
                       >
                         Review
                       </Button>

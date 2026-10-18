@@ -5,8 +5,11 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { ShipmentCostExceptionReview } from "./ShipmentCostExceptionReview";
+import { PurchaseSupplierCostReview } from "./PurchaseSupplierCostReview";
+import { useProcurementNavigation } from "@/hooks/use-procurement-navigation";
 
 export function ShipmentCostApplicationReview({ shipmentId }: { shipmentId: number }) {
+  const navigation = useProcurementNavigation();
   const review = useShipmentCostReview(shipmentId);
   const lines = review.data?.lines ?? [];
   const completed = lines.filter(isShipmentCostLinePosted);
@@ -23,9 +26,10 @@ export function ShipmentCostApplicationReview({ shipmentId }: { shipmentId: numb
       {review.isSuccess && <>
         {completed.length > 0 && <p className="text-green-700 dark:text-green-400">
           Costs posted on {completed.length} of {lines.length} shipment lines.
-          {completed.length === lines.length && " No cost approval is outstanding."}
+          {completed.length === lines.length && " No shipment cost approval is outstanding."}
         </p>}
         {lines.length === 0 && <p>Add shipment lines before reviewing inventory costs.</p>}
+        {review.data.supplierCosts && <PurchaseSupplierCostReview status={review.data.supplierCosts} navigation={navigation} />}
         {visible.map(line => {
           const issues = [...(line.sourceIssue ? [line.sourceIssue] : []), ...(line.application?.issues ?? [])];
           const unique = [...new Map(issues.map(issue => [`${issue.code}:${issue.message}`, issue])).values()];
