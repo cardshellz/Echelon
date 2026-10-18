@@ -12,6 +12,8 @@ const mocks = vi.hoisted(() => {
     requireIdempotency: vi.fn(() => idempotencyMiddleware),
     apLedger: {
       listInvoices: vi.fn(),
+      listInvoiceWorkList: vi.fn(),
+      listPaymentWorkList: vi.fn(),
       generateInvoiceNumber: vi.fn(),
       createInvoice: vi.fn(),
       getInvoiceById: vi.fn(),
@@ -135,6 +137,35 @@ describe("AP ledger routes", () => {
   afterEach(async () => {
     if (server) await server.close();
     server = undefined;
+  });
+
+  it.each([
+    ["vendor-invoices", "listInvoiceWorkList"], ["ap-payments", "listPaymentWorkList"],
+  ] as const)("serves the %s work list before the record route with validated paging", async (path, method) => {
+    const page = { items: [], total: 0, limit: 20, offset: 200, nextOffset: null };
+    mocks.apLedger[method].mockResolvedValue(page);
+    server = await startServer(buildApp());
+    const response = await requestJson(server.url, "GET", `/api/${path}/work-list?vendorId=6&limit=20&offset=200&search=older`);
+    expect(response).toMatchObject({ status: 200, body: page });
+    expect(mocks.apLedger[method].mock.calls[0][0]).toMatchObject({ vendorId: 6, limit: 20, offset: 200, search: "older" });
+    expect(mocks.apLedger.getInvoiceById).not.toHaveBeenCalled(); expect(mocks.apLedger.getPaymentById).not.toHaveBeenCalled();
+  });
+  it.each(["vendor-invoices", "ap-payments"])("rejects invalid or unauthorized %s work-list reads without invoking a read owner", async path => {
+    server = await startServer(buildApp());
+    expect((await requestJson(server.url, "GET", `/api/${path}/work-list?limit=-1`)).status).toBe(400);
+    mocks.deniedPermission = "purchasing:view";
+    expect((await requestJson(server.url, "GET", `/api/${path}/work-list`)).status).toBe(403);
+    expect(mocks.apLedger.listInvoiceWorkList).not.toHaveBeenCalled(); expect(mocks.apLedger.listPaymentWorkList).not.toHaveBeenCalled();
+  });
+  it("reports failed work-list reads as unavailable without exposing database messages", async () => {
+    mocks.apLedger.listInvoiceWorkList.mockRejectedValue(new Error("Internal connection detail"));
+    const log = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      server = await startServer(buildApp());
+      const response = await requestJson(server.url, "GET", "/api/vendor-invoices/work-list");
+      expect(response).toMatchObject({ status: 500, body: { details: { code: "AP_WORK_LIST_READ_FAILED" } } });
+      expect(JSON.stringify(response.body)).not.toContain("Internal connection detail"); expect(log).toHaveBeenCalled();
+    } finally { log.mockRestore(); }
   });
 
   it("keeps legacy idempotency only on AP writes not yet using the transactional ledger", () => {

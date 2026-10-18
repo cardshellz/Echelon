@@ -1,3 +1,4 @@
+import { getPurchaseOrderWorkList } from "./purchase-order-work-list.service";
 import { procurementSettingsCommands, PROCUREMENT_SETTINGS_COMMAND_SCOPE } from "./procurement-settings.commands";
 import type { Express, Request, Response } from "express";
 import { registerPoVarianceApprovalRoutes } from './po-variance-approval.routes';
@@ -396,6 +397,15 @@ export function registerPurchaseOrderRoutes(app: Express, financialEvidence: Pic
       res.json({ purchaseOrders: enriched, total: count });
     } catch (error: any) {
       res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.get("/api/purchase-orders/work-list", requirePermission("purchasing", "view"), async (req, res) => {
+    try { res.json(await getPurchaseOrderWorkList(req.query)); }
+    catch (error) {
+      if (error instanceof z.ZodError) return res.status(400).json({ code: "PO_WORK_LIST_QUERY_INVALID", error: "Invalid purchase order selection filters or page." });
+      console.error(JSON.stringify({ event: "procurement.po_work_list.failed", errorType: error instanceof Error ? error.name : typeof error }));
+      res.status(500).json({ code: "PO_WORK_LIST_UNAVAILABLE", error: "Purchase order selection could not be verified. Retry the list." });
     }
   });
 

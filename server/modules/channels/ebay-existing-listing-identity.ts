@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { isVariantSellable, type VariantSellabilityInput } from "./ebay-listing-eligibility";
 import {
   marketplaceObservedListingPublicationSchema,
   type MarketplaceListingRegistrationObserver,
@@ -29,6 +30,23 @@ export interface ExistingEbayListingIdentityContext {
   readonly connectionId: number;
   readonly accountId: string;
   readonly marketplaceId: string;
+}
+
+/** One source snapshot definition for ordinary maintenance and transaction
+ * fencing. Stock selection adds other rules and cannot replace this predicate. */
+export function captureEbayListingSourceIdentity(rows: readonly (Omit<ExistingEbayListingIdentityRow, "variant_sku"> & {
+  variant_sku: string | null;
+  product_is_active: boolean | null; variant_is_active: boolean | null;
+  variant_sales_eligibility?: VariantSellabilityInput["salesEligibility"];
+  product_excluded?: boolean | null; variant_excluded?: boolean | null;
+  product_override_is_listed?: number | boolean | null; variant_override_is_listed?: number | boolean | null;
+  type_listing_enabled?: boolean | null;
+})[], context: ExistingEbayListingIdentityContext): EbayListingSyncIdentity {
+  return captureExistingEbayListingIdentity(rows.map(row => ({ ...row, mapping_exists: true,
+    content_sync_enabled: isVariantSellable({ productActive: row.product_is_active, variantActive: row.variant_is_active,
+      salesEligibility: row.variant_sales_eligibility, productExcluded: row.product_excluded === true,
+      productOverrideIsListed: row.product_override_is_listed, typeListingEnabled: row.type_listing_enabled,
+      variantExcluded: row.variant_excluded === true, variantOverrideIsListed: row.variant_override_is_listed }) })), context);
 }
 
 /** Captures the mapping we actually saved. Catalog renames do not rename eBay resources. */

@@ -55,6 +55,7 @@ export async function installFixtures(page: Page) {
     else if (/\/purchase-orders\/\d+\/exceptions$/.test(path)) json = { exceptions: [] };
     else if (/\/purchase-orders\/\d+\/history$/.test(path)) json = { history: [] };
     else if (path === "/api/purchase-orders") json = { purchaseOrders: [] };
+    else if (["/api/purchase-orders/work-list", "/api/ap-payments/work-list", "/api/vendor-invoices/work-list"].includes(path)) json = { items: [], total: 0, limit: Number(new URL(request.url()).searchParams.get("limit") ?? 50), offset: Number(new URL(request.url()).searchParams.get("offset") ?? 0), nextOffset: null };
     else if (path === "/api/inbound-shipments/42") json = shipment;
     else if (/^\/api\/inbound-shipments\/\d+\/cost-review$/.test(path)) json = {
       shipmentId: Number(path.split("/")[3]), lines: [],

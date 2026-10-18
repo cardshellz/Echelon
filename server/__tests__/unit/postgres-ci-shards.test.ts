@@ -58,6 +58,9 @@ function runnerFixture() {
 describe("PostgreSQL CI coverage and isolation", () => {
   it("preserves prior coverage with the explicitly retired duplicate invoice owner, the retired bulk policy writer suite and reviewed additions", () => {
     const addedSuites = [
+      "server/modules/procurement/__tests__/integration/shipment-create-recovery.integration.test.ts",
+      "server/modules/procurement/__tests__/integration/shipment-work-list.integration.test.ts",
+      "server/modules/procurement/__tests__/integration/ap-work-lists.integration.test.ts",
       "server/modules/procurement/__tests__/integration/procurement-settings.integration.test.ts",
       "server/modules/procurement/__tests__/integration/supplier-evidence-import.integration.test.ts",
       "server/modules/procurement/__tests__/integration/purchase-rfq-requests.integration.test.ts",
@@ -152,6 +155,8 @@ describe("PostgreSQL CI coverage and isolation", () => {
       "server/modules/channels/__tests__/integration/ebay-listing-mapping-repair.integration.test.ts",
       "server/modules/channels/__tests__/integration/ebay-publication-stock.integration.test.ts",
       "server/modules/inventory-planning/__tests__/integration/ebay-publication-readiness.integration.test.ts",
+      "server/modules/inventory-planning/__tests__/integration/ebay-listing-preparation-scope.integration.test.ts",
+      "server/modules/inventory-planning/__tests__/integration/ebay-listing-preparation-scope-authority.integration.test.ts",
       "server/modules/inventory-planning/__tests__/integration/ebay-publication-preflight.integration.test.ts",
       "server/modules/inventory-planning/__tests__/integration/ebay-publication-rejection.integration.test.ts",
       "server/modules/inventory-planning/__tests__/integration/quantity-provider-request-evidence.integration.test.ts",

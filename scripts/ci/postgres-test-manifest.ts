@@ -7,6 +7,9 @@
 export const POSTGRES_SHARD_COUNT = 8;
 
 export const POSTGRES_TEST_FILES: readonly string[] = Object.freeze([
+  "server/modules/procurement/__tests__/integration/shipment-create-recovery.integration.test.ts",
+  "server/modules/procurement/__tests__/integration/shipment-work-list.integration.test.ts",
+  "server/modules/procurement/__tests__/integration/ap-work-lists.integration.test.ts",
   "server/modules/procurement/__tests__/integration/po-financial-evidence.integration.test.ts",
   "server/modules/procurement/__tests__/integration/po-financial-followup.integration.test.ts",
   "server/modules/procurement/__tests__/integration/po-financial-exceptions.integration.test.ts",
@@ -177,6 +180,8 @@ export const POSTGRES_TEST_FILES: readonly string[] = Object.freeze([
   "server/modules/channels/__tests__/integration/ebay-listing-mapping-repair.integration.test.ts",
   "server/modules/channels/__tests__/integration/ebay-publication-stock.integration.test.ts",
   "server/modules/inventory-planning/__tests__/integration/ebay-publication-readiness.integration.test.ts",
+  "server/modules/inventory-planning/__tests__/integration/ebay-listing-preparation-scope.integration.test.ts",
+  "server/modules/inventory-planning/__tests__/integration/ebay-listing-preparation-scope-authority.integration.test.ts",
   "server/modules/inventory-planning/__tests__/integration/ebay-publication-preflight.integration.test.ts",
   "server/modules/inventory-planning/__tests__/integration/ebay-publication-rejection.integration.test.ts",
   "server/modules/inventory-planning/__tests__/integration/quantity-provider-request-evidence.integration.test.ts",

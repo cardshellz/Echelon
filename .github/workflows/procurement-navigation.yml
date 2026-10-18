@@ -42,16 +42,19 @@ jobs:
         run: node scripts/ci/browser-suite-impact.mjs
 
   browser:
-    name: Procurement browser journeys (${{ matrix.shard }}/4)
+    name: Procurement browser journeys (${{ matrix.shard }}/${{ matrix.shards }})
     needs: select
     # Invalid migrations stop setup; later selector uncertainty still runs coverage.
     if: ${{ !cancelled() && needs.select.outputs.migrations == 'success' && (needs.select.result != 'success' || needs.select.outputs.run != 'false') }}
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # The budget includes dependency/browser setup, test execution, and artifacts.
+    # Eight shards reduce test load; headroom accommodates hosted runner variance.
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4]
+        shard: [1, 2, 3, 4, 5, 6, 7, 8]
+        shards: [8]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -62,8 +65,8 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npx playwright install --with-deps chromium
-      # Two page-isolated workers per runner; the four shards retain separate servers.
-      - run: npx playwright test --config playwright.procurement.config.ts --shard=${{ matrix.shard }}/4
+      # Two page-isolated workers per runner; the eight shards retain separate servers.
+      - run: npx playwright test --config playwright.procurement.config.ts --shard=${{ matrix.shard }}/${{ matrix.shards }}
       - uses: actions/upload-artifact@v4
         if: failure()
         with:

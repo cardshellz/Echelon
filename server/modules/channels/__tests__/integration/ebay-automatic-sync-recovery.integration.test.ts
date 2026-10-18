@@ -623,7 +623,11 @@ dbDescribe.sequential("automatic existing eBay Sync recovery through PostgreSQL 
         WHERE job_id=$1 AND event='stage_completed' AND evidence->>'key'='publication_not_sent'`, [job.id])).rows[0].count).toBe(0);
     });
 
-    it("recovers the historical first-member GET failure through immutable legacy proof and completes the same saved publication", async () => {
+    async function historicalFirstMemberFailure(options: {
+      stageEventId: string;
+      failureEventId: string;
+      interveningEvent?: "stage_completed" | "claimed";
+    }) {
       const f = fixture({ publication: true });
       // Reproduce the previous caller: group preparation preceded the publish
       // stage, but its admission had no versioned mutation-journal contract.
@@ -633,6 +637,7 @@ dbDescribe.sequential("automatic existing eBay Sync recovery through PostgreSQL 
       expect(claim).not.toBeNull();
       try {
         await f.store.bindPublicationTarget(claim!.job, f.sourceIdentity, clock());
+        await database.pool.query("SELECT setval(pg_get_serial_sequence('channels.ebay_listing_sync_events','id'),$1::bigint,false)", [options.stageEventId]);
         await f.store.stage(claim!.job, "publish", syncContentIntentHash((await f.prepare()).draft), "started", clock());
         f.provider.failNextPublicationPreflight();
         let failure: unknown;
@@ -643,6 +648,14 @@ dbDescribe.sequential("automatic existing eBay Sync recovery through PostgreSQL 
           });
         } catch (error) { failure = error; }
         expect(failure).toBeInstanceOf(Error);
+        if (options.interveningEvent) {
+          // Historical evidence is append-only. Even an otherwise valid later
+          // failure cannot prove what happened across an intervening event.
+          await database.pool.query(`INSERT INTO channels.ebay_listing_sync_events(job_id,revision,event,owner_token,evidence,created_at)
+            SELECT id,claimed_revision,$2,owner_token,'{}'::jsonb,$3 FROM channels.ebay_listing_sync_jobs WHERE id=$1`,
+          [job.id, options.interveningEvent, clock()]);
+        }
+        await database.pool.query("SELECT setval(pg_get_serial_sequence('channels.ebay_listing_sync_events','id'),$1::bigint,false)", [options.failureEventId]);
         await f.store.finish(claim!.job, { state: "awaiting_evidence", result: null, code: "EBAY_LISTING_SYNC_FAILED",
           message: (failure as Error).message, nextAttemptAt: clock() }, clock());
       } finally { await claim!.release(); }
@@ -651,16 +664,53 @@ dbDescribe.sequential("automatic existing eBay Sync recovery through PostgreSQL 
       expect(oldAttempt).toHaveLength(1);
       expect((await database.pool.query("SELECT count(*)::int AS count FROM inventory.quantity_provider_requests WHERE attempt_id=$1", [oldAttempt[0].id])).rows[0].count).toBe(0);
       const oldEvents = (await database.pool.query("SELECT id,event,evidence FROM channels.ebay_listing_sync_events WHERE job_id=$1 ORDER BY id", [job.id])).rows;
+      expect(oldEvents.find(event => event.id === options.stageEventId)).toMatchObject({ event: "stage_started", evidence: { key: "publish" } });
+      expect(oldEvents.find(event => event.id === options.failureEventId)).toMatchObject({ event: "awaiting_evidence", evidence: { code: "EBAY_LISTING_SYNC_FAILED" } });
       expect(publishCount(f.provider)).toBe(0);
+      return { f, job, oldAttempt: oldAttempt[0], oldEvents };
+    }
 
+    it.each([
+      { stageEventId: "57185", failureEventId: "57186", laterEventId: "100000" },
+      { stageEventId: "9007199254740993", failureEventId: "9007199254740994", laterEventId: "10000000000000000" },
+    ])("recovers immutable legacy proof in numeric event order and completes the same publication ($stageEventId)", async ordinals => {
+      const { f, job, oldAttempt, oldEvents } = await historicalFirstMemberFailure(ordinals);
+      // A later worker claim sorts before the failure if PostgreSQL orders the
+      // SELECT id::text output alias instead of the underlying bigint column.
+      await database.pool.query("SELECT setval(pg_get_serial_sequence('channels.ebay_listing_sync_events','id'),$1::bigint,false)", [ordinals.laterEventId]);
       advance();
       const restarted = fixture({ publication: true, provider: f.provider });
       await restarted.service.processDue(1, job.id);
       await assertPublicationComplete(restarted, job.id, 17);
-      expect((await database.pool.query("SELECT state,resolution_basis,request_journal_contract FROM inventory.quantity_publication_attempts WHERE id=$1", [oldAttempt[0].id])).rows)
+      expect((await database.pool.query("SELECT state,resolution_basis,request_journal_contract FROM inventory.quantity_publication_attempts WHERE id=$1", [oldAttempt.id])).rows)
         .toEqual([{ state: "not_sent", resolution_basis: "owner_preflight_no_request", request_journal_contract: null }]);
-      expect((await database.pool.query("SELECT proof->>'source' AS source FROM inventory.quantity_publication_no_request_recoveries WHERE attempt_id=$1", [oldAttempt[0].id])).rows)
-        .toEqual([{ source: "legacy_publish_preflight" }]);
+      expect((await database.pool.query("SELECT proof FROM inventory.quantity_publication_no_request_recoveries WHERE attempt_id=$1", [oldAttempt.id])).rows)
+        .toEqual([{ proof: expect.objectContaining({ source: "legacy_publish_preflight", evidence: expect.objectContaining({
+          stageEventId: ordinals.stageEventId, failureEventId: ordinals.failureEventId, sourceEvidenceHash: expect.stringMatching(/^[a-f0-9]{64}$/),
+        }) }) }]);
+      expect((await database.pool.query(`SELECT evidence->>'startedEventId' AS "startedEventId" FROM channels.ebay_listing_sync_events
+        WHERE job_id=$1 AND event='stage_completed' AND evidence->>'key'='publication_not_sent'`, [job.id])).rows)
+        .toEqual([{ startedEventId: ordinals.stageEventId }]);
+      expect((await database.pool.query("SELECT id::text FROM channels.ebay_listing_sync_events WHERE job_id=$1 AND id=$2", [job.id, ordinals.laterEventId])).rows)
+        .toEqual([{ id: ordinals.laterEventId }]);
+      expect((await database.pool.query("SELECT id,event,evidence FROM channels.ebay_listing_sync_events WHERE job_id=$1 AND id=ANY($2::bigint[]) ORDER BY id", [job.id, oldEvents.map(event => event.id)])).rows).toEqual(oldEvents);
+    });
+
+    it.each(["stage_completed", "claimed"] as const)("retains uncertainty when an intervening %s precedes a later valid legacy failure", async interveningEvent => {
+      const { f, job, oldAttempt, oldEvents } = await historicalFirstMemberFailure({ stageEventId: "57185", failureEventId: "100000", interveningEvent });
+      expect(oldEvents.find(event => event.id === "57186")).toMatchObject({ event: interveningEvent });
+      const writes = f.provider.writes.length;
+      advance();
+      const restarted = fixture({ publication: true, provider: f.provider });
+      await restarted.service.processDue(1, job.id);
+      expect(await restarted.store.get(job.id)).toMatchObject({ state: "awaiting_evidence", publicationWriteStarted: true });
+      expect(publishCount(f.provider)).toBe(0);
+      expect(f.provider.writes).toHaveLength(writes);
+      expect((await database.pool.query("SELECT state,resolution_basis FROM inventory.quantity_publication_attempts WHERE id=$1", [oldAttempt.id])).rows)
+        .toEqual([{ state: "uncertain", resolution_basis: null }]);
+      expect((await database.pool.query("SELECT count(*)::int AS count FROM inventory.quantity_publication_no_request_recoveries WHERE attempt_id=$1", [oldAttempt.id])).rows[0].count).toBe(0);
+      expect((await database.pool.query(`SELECT count(*)::int AS count FROM channels.ebay_listing_sync_events
+        WHERE job_id=$1 AND event='stage_completed' AND evidence->>'key'='publication_not_sent'`, [job.id])).rows[0].count).toBe(0);
       expect((await database.pool.query("SELECT id,event,evidence FROM channels.ebay_listing_sync_events WHERE job_id=$1 AND id=ANY($2::bigint[]) ORDER BY id", [job.id, oldEvents.map(event => event.id)])).rows).toEqual(oldEvents);
     });
 

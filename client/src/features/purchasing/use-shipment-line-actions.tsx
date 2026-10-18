@@ -1,3 +1,5 @@
+import { purchaseOrderWorkListPageSchema } from "@shared/procurement/purchase-order-work-list";
+import { WorkListPagination } from "./WorkListPagination";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import Papa from "papaparse";
@@ -55,6 +57,8 @@ export function useShipmentLineActions({ shipmentId, navigationIdentity, lines, 
   const [dimensionRows, setDimensionRows] = useState<DimensionRow[]>([]);
   const [poId, setPoId] = useState<number | null>(null);
   const [poSearch, setPoSearch] = useState("");
+  const [poOffset, setPoOffset] = useState(0);
+  const [selectedPo, setSelectedPo] = useState<{ id: number; poNumber: string } | null>(null);
   const [selections, setSelections] = useState<Record<number, string>>({});
   const [rawRows, setRawRows] = useState<PackingListRow[]>([]);
   const [headers, setHeaders] = useState<string[]>([]);
@@ -70,7 +74,7 @@ export function useShipmentLineActions({ shipmentId, navigationIdentity, lines, 
   };
   useEffect(() => {
     // Drafts cannot cross shipment visits. Durable collection recovery never auto-executes.
-    setModal(null); setEditor(null); setEditConflict(false); setDimensionRows([]); setPoId(null); setSelections({});
+    setModal(null); setEditor(null); setEditConflict(false); setDimensionRows([]); setPoId(null); setSelectedPo(null); setPoSearch(""); setPoOffset(0); setSelections({});
     setRawRows([]); setHeaders([]); setMapping({}); setImportRows(null); setRowErrors([]); setImportSummary(null);
     setError(null); setRecovery(null); setRecoveryError(null); setUncertainLine(null); uncertainRef.current = null;
     parseGeneration.current += 1;
@@ -83,13 +87,20 @@ export function useShipmentLineActions({ shipmentId, navigationIdentity, lines, 
     return () => window.removeEventListener("beforeunload", warn);
   }, [recovery, uncertainLine, busy]);
 
-  const { data: posData, error: poListError } = useQuery<{ pos?: Array<{ id: number; poNumber: string }>; purchaseOrders?: Array<{ id: number; poNumber: string }> }>({
-    queryKey: ["/api/purchase-orders?limit=200"], enabled: modal === "add" });
+  const poListUrl = `/api/purchase-orders/work-list?${new URLSearchParams({ purpose: "shipment-lines", search: poSearch, limit: "20", offset: String(poOffset) })}`;
+  const poList = useQuery({
+    queryKey: [poListUrl], enabled: modal === "add", staleTime: 0,
+    queryFn: async ({ signal }) => {
+      const response = await fetch(poListUrl, { credentials: "include", signal });
+      if (!response.ok) throw new Error("Purchase orders could not be loaded. Retry the list.");
+      return purchaseOrderWorkListPageSchema.parse(await response.json());
+    },
+  });
   const shippable = useQuery({ queryKey: [`/api/purchase-orders/${poId}/shippable-lines`], enabled: modal === "add" && poId !== null,
     queryFn: async () => { const response = await fetch(`/api/purchase-orders/${poId}/shippable-lines`, { credentials: "include" });
       if (!response.ok) throw new Error("Remaining purchase quantities could not be loaded. Refresh and try again.");
       return shippableSchema.parse(await response.json()); }, staleTime: 0, refetchOnMount: "always" });
-  const purchaseOrders = (posData?.pos ?? posData?.purchaseOrders ?? []).filter((po) => po.poNumber.toLowerCase().includes(poSearch.toLowerCase()));
+  const purchaseOrders = poList.data?.items ?? [];
 
   async function refresh(originId: number): Promise<boolean> {
     try {
@@ -145,7 +156,7 @@ export function useShipmentLineActions({ shipmentId, navigationIdentity, lines, 
     } else if (result.operation === "update" || result.operation === "delete") {
       setModal(null); setEditor(null); setEditConflict(false); setDimensionRows([]); notifySaved(result.operation === "update" ? "Line updated" : "Line removed", fresh);
     } else if (result.operation === "add-from-po") {
-      setModal(null); setPoId(null); setSelections({}); notifySaved(`${result.lines.length} lines added`, fresh);
+      setModal(null); setPoId(null); setSelectedPo(null); setSelections({}); notifySaved(`${result.lines.length} lines added`, fresh);
     }
   }
 
@@ -299,10 +310,20 @@ export function useShipmentLineActions({ shipmentId, navigationIdentity, lines, 
       </div>}
       {modal === "add" && <div className="min-w-0 space-y-4">
         <fieldset disabled={collectionLocked} className="min-w-0 space-y-3">
-          <Label htmlFor="shipment-po-search">Find purchase order</Label><Input id="shipment-po-search" value={poSearch} onChange={(event) => setPoSearch(event.target.value)} placeholder="Search PO number" />
-          {poListError && <p role="alert">Purchase orders could not be loaded. Close and reopen to retry.</p>}
-          <Label htmlFor="shipment-po-select">Purchase order</Label><select id="shipment-po-select" className="w-full rounded border bg-background p-2" value={poId ?? ""} onChange={(event) => { setPoId(event.target.value ? Number(event.target.value) : null); setSelections({}); }}>
-            <option value="">Select purchase order</option>{purchaseOrders.map((po) => <option key={po.id} value={po.id}>{po.poNumber}</option>)}</select>
+          <Label htmlFor="shipment-po-search">Find purchase order</Label><Input id="shipment-po-search" value={poSearch} onChange={(event) => { setPoSearch(event.target.value); setPoOffset(0); }} placeholder="Search PO number" />
+          {poList.isError && <div role="alert">Purchase orders could not be loaded. <Button type="button" variant="link" onClick={() => void poList.refetch()}>Retry purchase orders</Button></div>}
+          {poList.isFetching && <p role="status">Loading purchase orders…</p>}
+          {!poList.isError && !poList.isFetching && poList.data?.total === 0 && <p>No purchase orders match this search.</p>}
+          <Label htmlFor="shipment-po-select">Purchase order</Label><select id="shipment-po-select" className="w-full rounded border bg-background p-2"
+            disabled={poList.isFetching || poList.isError} value={poId ?? ""} onChange={(event) => {
+              const id = event.target.value ? Number(event.target.value) : null;
+              setPoId(id); setSelectedPo(purchaseOrders.find(po => po.id === id) ?? null); setSelections({});
+            }}>
+            <option value="">Select purchase order</option>
+            {selectedPo && !purchaseOrders.some(po => po.id === selectedPo.id) && <option value={selectedPo.id}>{selectedPo.poNumber} (selected)</option>}
+            {purchaseOrders.map(po => <option key={po.id} value={po.id}>{po.poNumber}</option>)}
+          </select>
+          {!poList.isError && <WorkListPagination page={poList.data} busy={poList.isFetching} onOffset={setPoOffset} label="purchase orders" />}
           {shippable.isFetching && poId && <p>Loading remaining quantities…</p>}
           {shippable.error && <p role="alert">{message(shippable.error)}</p>}
           {shippable.data?.reviewRequiredLines.map((line) => <p key={line.id} role="alert" className="rounded border border-amber-500/50 p-2 text-sm">{line.sku ?? `PO line ${line.id}`}: {line.error}</p>)}
