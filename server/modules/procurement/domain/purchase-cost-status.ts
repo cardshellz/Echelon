@@ -32,6 +32,7 @@ export interface CurrentPurchaseComponentEvidence {
     component: string;
     amountMatches: boolean;
   }[];
+  historicalPosting?: { destination: "historical_cogs" | "inventory_variance"; amountMills: number };
 }
 
 /** A successful old attempt is not current authority: compare the live source,
@@ -65,7 +66,8 @@ export function projectPurchaseComponentStatus(
         "The saved cost result cannot be verified. Review the recorded attempt before retrying.",
     });
   }
-  if (sourceCurrent && saved.success) issues.push(...saved.data.result.issues);
+  if (sourceCurrent && saved.success) issues.push(...saved.data.result.issues.filter(issue =>
+    !(evidence.historicalPosting && issue.code === "COST_UNRESOLVED_QUANTITY_RETAINED")));
   if (
     !issues.some((issue) => issue.code === "COST_HISTORICAL_LINEAGE_MISSING")
   ) {
@@ -76,7 +78,7 @@ export function projectPurchaseComponentStatus(
       });
     }
   }
-  if (sourceCurrent && application?.status === "applied" && saved.success) {
+  if (sourceCurrent && application && (application.status === "applied" || evidence.historicalPosting) && saved.success) {
     const expected = [...evidence.lotIds].sort((a, b) => a - b);
     const captured = [...saved.data.lotIds].sort((a, b) => a - b);
     if (
@@ -104,7 +106,7 @@ export function projectPurchaseComponentStatus(
           "A current lot component differs from its saved application. Review the cost history before applying again.",
       });
     }
-    if (!application.reportingVerified)
+    if (!application?.reportingVerified)
       issues.push({
         code: "COST_REPORTING_EVENT_UNVERIFIED",
         message:
@@ -125,12 +127,13 @@ export function projectPurchaseComponentStatus(
     status: purchaseComponentPostingStatus({
       sourceCurrent,
       issues: unique,
-      applicationStatus: sourceCurrent ? (application?.status ?? null) : null,
+      applicationStatus: sourceCurrent ? (evidence.historicalPosting ? "applied" : application?.status ?? null) : null,
     }),
     sourceEvidence: input.evidence,
     sourceCurrent,
     sourceRevisionId: revision?.id ?? null,
     applicationId: application?.id ?? null,
     issues: unique,
+    ...(evidence.historicalPosting ? { historicalPosting: evidence.historicalPosting } : {}),
   });
 }

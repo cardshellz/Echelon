@@ -14,6 +14,7 @@ import {
   hasReconciliationRoots,
   readReconciliationLedger,
   readReconciliationRecords,
+  reconciliationScope,
   type CostReconciliationPlan,
 } from "../infrastructure/cost-reconciliation.repository";
 
@@ -25,8 +26,7 @@ export async function planCostReconciliation(
   fullyApplied: boolean,
 ): Promise<CostReconciliationPlan | null> {
   const source = revision.contract;
-  if (source.scope.kind !== "shipment_line" || source.component !== "landed") return null;
-  const ledger = await readReconciliationLedger(tx, source.scope.inboundShipmentLineId);
+  const ledger = await readReconciliationLedger(tx, reconciliationScope(source));
   if (!ledger.approval) return null;
   const records = await readReconciliationRecords(tx, source, issues);
   const eligible = reconciliationEligibility(source, issues, records);
