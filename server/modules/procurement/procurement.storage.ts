@@ -1,3 +1,4 @@
+import { readShipmentList, countShipmentList, type ShipmentListFilters } from "./shipment-work-list.repository";
 import { attachSupplierSourcingCandidates } from "./supplier-sourcing.repository";
 import { comparePurchaseBuyingPriority, purchaseBuyingDisposition } from "@shared/procurement/purchase-buying-review";
 import { readShipmentPurchaseOrders } from "./shipment-purchase-orders.repository";
@@ -176,15 +177,13 @@ export interface IProcurementStorage {
     lineUpdates: Partial<InsertPurchaseOrderLine>;
     receipt: InsertPoReceipt;
   }, executor?: any): Promise<{ applied: boolean; receipt?: PoReceipt; purchaseOrderLine?: PurchaseOrderLine | null }>;
-  getInboundShipments(filters?: any, executor?: any): Promise<InboundShipment[]>;
-  getInboundShipmentPurchaseOrders(shipmentIds: readonly number[]): Promise<Map<number, ShipmentPurchaseOrderReference[]>>;
-  getInboundShipmentsCount(filters?: any): Promise<number>;
+  getInboundShipments(filters?: ShipmentListFilters, executor?: any): Promise<InboundShipment[]>;
+  getInboundShipmentPurchaseOrders(shipmentIds: readonly number[], executor?: any): Promise<Map<number, ShipmentPurchaseOrderReference[]>>;
+  getInboundShipmentsCount(filters?: ShipmentListFilters, executor?: any): Promise<number>;
   getInboundShipmentById(id: number, executor?: any): Promise<InboundShipment | undefined>;
   getInboundShipmentByNumber(shipmentNumber: string): Promise<InboundShipment | undefined>;
-  createInboundShipment(data: InsertInboundShipment): Promise<InboundShipment>;
   updateInboundShipment(id: number, updates: Partial<InsertInboundShipment>, executor?: any, recordedAt?: Date): Promise<InboundShipment | null>;
   deleteInboundShipment(id: number, executor?: any): Promise<boolean>;
-  generateShipmentNumber(): Promise<string>;
   getInboundShipmentLines(inboundShipmentId: number, executor?: any): Promise<InboundShipmentLine[]>;
   getInboundShipmentLineById(id: number, executor?: any): Promise<InboundShipmentLine | undefined>;
   getInboundShipmentLinesByPo(purchaseOrderId: number): Promise<InboundShipmentLine[]>;
@@ -1044,44 +1043,16 @@ export const procurementMethods: IProcurementStorage = {
     }
   },
 
-  async getInboundShipments(filters?: any, executor: any = db): Promise<InboundShipment[]> {
-    const conditions: any[] = [];
-    if (filters?.status) {
-      if (Array.isArray(filters.status)) conditions.push(inArray(inboundShipments.status, filters.status));
-      else conditions.push(eq(inboundShipments.status, filters.status));
-    }
-    if (filters?.mode) conditions.push(eq(inboundShipments.mode, filters.mode));
-    if (filters?.warehouseId) conditions.push(eq(inboundShipments.warehouseId, filters.warehouseId));
-    if (filters?.search) {
-      conditions.push(or(
-        like(inboundShipments.shipmentNumber, `%${filters.search}%`),
-        like(inboundShipments.carrierName, `%${filters.search}%`),
-        like(inboundShipments.containerNumber, `%${filters.search}%`),
-      ));
-    }
-    let query = executor.select().from(inboundShipments).orderBy(desc(inboundShipments.createdAt)) as any;
-    if (conditions.length > 0) query = query.where(and(...conditions));
-    if (filters?.limit) query = query.limit(filters.limit);
-    if (filters?.offset) query = query.offset(filters.offset);
-    return await query;
+  getInboundShipments(filters?: ShipmentListFilters, executor: any = db): Promise<InboundShipment[]> {
+    return readShipmentList(executor, filters);
   },
 
-  async getInboundShipmentsCount(filters?: any): Promise<number> {
-    const conditions: any[] = [];
-    if (filters?.status) {
-      if (Array.isArray(filters.status)) conditions.push(inArray(inboundShipments.status, filters.status));
-      else conditions.push(eq(inboundShipments.status, filters.status));
-    }
-    if (filters?.mode) conditions.push(eq(inboundShipments.mode, filters.mode));
-    if (filters?.warehouseId) conditions.push(eq(inboundShipments.warehouseId, filters.warehouseId));
-    let query = db.select({ count: sql<number>`count(*)` }).from(inboundShipments) as any;
-    if (conditions.length > 0) query = query.where(and(...conditions));
-    const result = await query;
-    return Number(result[0]?.count || 0);
+  getInboundShipmentsCount(filters?: ShipmentListFilters, executor: any = db): Promise<number> {
+    return countShipmentList(executor, filters);
   },
 
-  getInboundShipmentPurchaseOrders(shipmentIds: readonly number[]): Promise<Map<number, ShipmentPurchaseOrderReference[]>> {
-    return readShipmentPurchaseOrders(db, shipmentIds);
+  getInboundShipmentPurchaseOrders(shipmentIds: readonly number[], executor: any = db): Promise<Map<number, ShipmentPurchaseOrderReference[]>> {
+    return readShipmentPurchaseOrders(executor, shipmentIds);
   },
 
   async getInboundShipmentById(id: number, executor: any = db): Promise<InboundShipment | undefined> {
@@ -1094,11 +1065,6 @@ export const procurementMethods: IProcurementStorage = {
     return result[0];
   },
 
-  async createInboundShipment(data: InsertInboundShipment): Promise<InboundShipment> {
-    const result = await db.insert(inboundShipments).values(data as any).returning();
-    return result[0];
-  },
-
   async updateInboundShipment(id: number, updates: Partial<InsertInboundShipment>, executor: any = db, recordedAt = new Date()): Promise<InboundShipment | null> {
     const result = await executor.update(inboundShipments).set({ ...updates, updatedAt: recordedAt } as any).where(eq(inboundShipments.id, id)).returning();
     return result[0] || null;
@@ -1107,23 +1073,6 @@ export const procurementMethods: IProcurementStorage = {
   async deleteInboundShipment(id: number, executor: any = db): Promise<boolean> {
     const result = await executor.delete(inboundShipments).where(eq(inboundShipments.id, id)).returning();
     return result.length > 0;
-  },
-
-  async generateShipmentNumber(): Promise<string> {
-    const today = new Date();
-    const dateStr = today.toISOString().slice(0, 10).replace(/-/g, '');
-    const prefix = `SHP-${dateStr}-`;
-    const existing = await db.select({ shipmentNumber: inboundShipments.shipmentNumber })
-      .from(inboundShipments)
-      .where(like(inboundShipments.shipmentNumber, `${prefix}%`))
-      .orderBy(desc(inboundShipments.shipmentNumber))
-      .limit(1);
-    let nextNum = 1;
-    if (existing.length > 0 && existing[0].shipmentNumber) {
-      const lastNum = parseInt(existing[0].shipmentNumber.replace(prefix, ''), 10);
-      if (!isNaN(lastNum)) nextNum = lastNum + 1;
-    }
-    return `${prefix}${String(nextNum).padStart(3, '0')}`;
   },
 
   async getInboundShipmentLines(inboundShipmentId: number, executor: any = db): Promise<InboundShipmentLine[]> {

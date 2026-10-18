@@ -1,3 +1,4 @@
+import { shipmentWorkListQuerySchema } from "@shared/procurement/shipment-work-list";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import express from "express";
 import type { Express, Request, Response, NextFunction } from "express";
@@ -68,6 +69,7 @@ import { registerInboundShipmentRoutes } from "../../inbound-shipment.routes";
 
 function buildShipmentTrackingMock(overrides: Record<string, any> = {}) {
   return {
+    getShipmentPage: vi.fn(),
     getShipments: vi.fn(),
     getShipmentsCount: vi.fn(),
     getShipment: vi.fn(),
@@ -149,35 +151,32 @@ describe("inbound shipment routes", () => {
     expect(mocks.requireIdempotency).toHaveBeenCalledTimes(1);
   });
 
-  it("lists inbound shipments with parsed filters", async () => {
-    const shipmentTracking = buildShipmentTrackingMock({
-      getShipments: vi.fn().mockResolvedValue([{ id: 11, shipmentNumber: "S-11" }]),
-      getShipmentsCount: vi.fn().mockResolvedValue(1),
-    });
+  it("routes every list filter to one snapshot-owned page projection", async () => {
+    const page = { shipments: [{ id: 11, shipmentNumber: "S-11" }], total: 6, limit: 25, offset: 5, hasMore: false, costHealthItems: [] };
+    const shipmentTracking = buildShipmentTrackingMock({ getShipmentPage: vi.fn().mockResolvedValue(page) });
     server = await startServer(buildApp(shipmentTracking));
-
-    const { status, body } = await requestJson(
-      server.url,
-      "GET",
-      "/api/inbound-shipments?status=booked,in_transit&mode=ocean&warehouseId=1&limit=25&offset=5",
-    );
-
+    const { status, body } = await requestJson(server.url, "GET",
+      "/api/inbound-shipments?status=booked,in_transit&mode=ocean&warehouseId=1&limit=25&offset=5&search=carrier&costFilter=critical");
     expect(status).toBe(200);
-    expect(shipmentTracking.getShipments).toHaveBeenCalledWith({
-      status: ["booked", "in_transit"],
-      mode: "ocean",
-      warehouseId: 1,
-      limit: 25,
-      offset: 5,
-    });
-    expect(shipmentTracking.getShipmentsCount).toHaveBeenCalledWith({
-      status: ["booked", "in_transit"],
-      mode: "ocean",
-      warehouseId: 1,
-      limit: 25,
-      offset: 5,
-    });
-    expect(body).toEqual({ shipments: [{ id: 11, shipmentNumber: "S-11" }], total: 1 });
+    expect(shipmentTracking.getShipmentPage).toHaveBeenCalledWith({ status: "booked,in_transit", mode: "ocean",
+      warehouseId: "1", limit: "25", offset: "5", search: "carrier", costFilter: "critical" });
+    expect(shipmentTracking.getShipments).not.toHaveBeenCalled();
+    expect(shipmentTracking.getShipmentsCount).not.toHaveBeenCalled();
+    expect(body).toEqual(page);
+  });
+
+  it("classifies malformed page input as400 without exposing diagnostics", async () => {
+    const shipmentTracking = buildShipmentTrackingMock({getShipmentPage:vi.fn(async query=>shipmentWorkListQuerySchema.parse(query))});
+    server=await startServer(buildApp(shipmentTracking));
+    expect(await requestJson(server.url,"GET","/api/inbound-shipments?offset=-1")).toEqual({status:400,
+      body:{code:"SHIPMENT_LIST_QUERY_INVALID",error:"Invalid shipment filters or page."}});
+  });
+
+  it("classifies unavailable page evidence as500 rather than returning an empty list", async () => {
+    const shipmentTracking = buildShipmentTrackingMock({getShipmentPage:vi.fn().mockRejectedValue(new Error("private database details"))});
+    server=await startServer(buildApp(shipmentTracking));
+    expect(await requestJson(server.url,"GET","/api/inbound-shipments")).toEqual({status:500,
+      body:{code:"SHIPMENT_LIST_UNAVAILABLE",error:"Shipments could not be verified. Retry the work list."}});
   });
 
   it("returns actual PO references alongside shipment detail without changing line associations", async () => {

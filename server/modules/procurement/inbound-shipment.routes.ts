@@ -1,3 +1,4 @@
+import { createShipmentCreateCommands, shipmentCreateCommandScope, SHIPMENT_CREATE_COMMAND_PRINCIPAL } from "./shipment-create.commands";
 import { shipmentLineResourceIdSchema } from "@shared/procurement/shipment-line-command";
 import { createShipmentLineCommands, shipmentLineCommandScope, SHIPMENT_LINE_COMMAND_PRINCIPAL, type ShipmentLineCommand } from "./shipment-line-commands";
 import type { Express, Request, Response } from "express";
@@ -23,6 +24,7 @@ export function registerInboundShipmentRoutes(app: Express) {
   registerShipmentCostExceptionRoutes(app);
   const { shipmentTracking } = app.locals.services;
   const shipmentCostCommands = createShipmentCostCommands(shipmentTracking);
+  const shipmentCreateCommands = createShipmentCreateCommands(shipmentTracking);
   const shipmentLineCommands = createShipmentLineCommands(shipmentTracking);
   const shipmentCostUpdates = createShipmentCostUpdateCommands(shipmentTracking);
 
@@ -103,29 +105,20 @@ export function registerInboundShipmentRoutes(app: Express) {
         limit: req.query.limit ? Number(req.query.limit) : undefined,
       });
       res.json(result);
-    } catch (error: any) {
-      if (error instanceof ShipmentTrackingError) return res.status(error.statusCode).json({ error: error.message });
-      res.status(500).json({ error: error.message });
+    } catch (error) {
+      if (error instanceof ShipmentTrackingError && error.statusCode < 500) return res.status(error.statusCode).json({ error: error.message });
+      console.error(JSON.stringify({ event: "procurement.shipment_health.failed", errorType: error instanceof Error ? error.name : typeof error }));
+      res.status(500).json({ code: "SHIPMENT_HEALTH_UNAVAILABLE", error: "Shipment cost health could not be verified. Retry the overview." });
     }
   });
 
   app.get("/api/inbound-shipments", requirePermission("purchasing", "view"), async (req, res) => {
     try {
-      const filters: any = {};
-      if (req.query.status) filters.status = (req.query.status as string).includes(",") ? (req.query.status as string).split(",") : req.query.status;
-      if (req.query.mode) filters.mode = req.query.mode;
-      if (req.query.search) filters.search = req.query.search;
-      if (req.query.warehouseId) filters.warehouseId = Number(req.query.warehouseId);
-      if (req.query.limit) filters.limit = Number(req.query.limit);
-      if (req.query.offset) filters.offset = Number(req.query.offset);
-
-      const [shipmentsList, total] = await Promise.all([
-        shipmentTracking.getShipments(filters),
-        shipmentTracking.getShipmentsCount(filters),
-      ]);
-      res.json({ shipments: shipmentsList, total });
-    } catch (error: any) {
-      res.status(500).json({ error: error.message });
+      res.json(await shipmentTracking.getShipmentPage(req.query));
+    } catch (error) {
+      if (error instanceof z.ZodError) return res.status(400).json({ code: "SHIPMENT_LIST_QUERY_INVALID", error: "Invalid shipment filters or page." });
+      console.error(JSON.stringify({ event: "procurement.shipment_list.failed", errorType: error instanceof Error ? error.name : typeof error }));
+      res.status(500).json({ code: "SHIPMENT_LIST_UNAVAILABLE", error: "Shipments could not be verified. Retry the work list." });
     }
   });
 
@@ -148,12 +141,28 @@ export function registerInboundShipmentRoutes(app: Express) {
 
   app.post("/api/inbound-shipments", requirePermission("purchasing", "create"), async (req, res) => {
     try {
-      const shipment = await shipmentTracking.createShipment(req.body, req.session.user?.id);
-      res.status(201).json(shipment);
-    } catch (error: any) {
-      if (error instanceof z.ZodError) return res.status(400).json({ code: "SHIPMENT_HEADER_INPUT_INVALID", error: "Invalid shipment fields", details: error.issues });
-      if (error instanceof ShipmentTrackingError) return res.status(error.statusCode).json({ error: error.message });
-      res.status(500).json({ error: error.message });
+      const actorId = getActorId(req);
+      if (!actorId) throw new FinancialCommandError("An authenticated actor is required", 401, "SHIPMENT_CREATE_ACTOR_REQUIRED");
+      if (Object.keys(req.query).length) return res.status(400).json({ code: "SHIPMENT_CREATE_QUERY_INVALID", error: "Shipment creation does not accept query parameters." });
+      const descriptor = financialCommandFromRequest(req, {
+        actorType: "service", actorId: SHIPMENT_CREATE_COMMAND_PRINCIPAL, ...shipmentCreateCommandScope(),
+      });
+      const result = await shipmentCreateCommands.execute(req.body, actorId, descriptor);
+      res.setHeader("Idempotency-Replayed", result.replayed ? "true" : "false");
+      // Only a durable rejection proves that an earlier attempt cannot have
+      // created a shipment. Middleware/auth failures cannot clear recovery.
+      const body = result.terminalState === "rejected"
+        ? { ...(result.body as Record<string, unknown>), details: { shipmentCreateOutcome: "rejected", idempotencyKey: descriptor.idempotencyKey } }
+        : result.body;
+      return res.status(result.httpStatus).json(body);
+    } catch (error) {
+      if (error instanceof FinancialCommandError) {
+        for (const [name, value] of Object.entries(error.responseHeaders ?? {})) res.setHeader(name, value);
+        return res.status(error.statusCode).json({ code: error.code, error: error.message, details: error.details });
+      }
+      console.error(JSON.stringify({ event: "procurement.shipment_create.failed", actorId: getActorId(req) ?? null,
+        code: "SHIPMENT_CREATE_TRANSIENT_FAILURE", errorType: error instanceof Error ? error.name : typeof error }));
+      return res.status(500).json({ code: "SHIPMENT_CREATE_TRANSIENT_FAILURE", error: "Shipment creation could not be confirmed. Retry the saved request with the same command key." });
     }
   });
 

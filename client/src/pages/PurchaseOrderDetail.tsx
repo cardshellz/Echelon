@@ -1,3 +1,4 @@
+import { parseShipmentCreateSources } from "@shared/procurement/shipment-create-source";
 import { parseSupplierDispatchResult, parseSupplierPreparationResult, supplierDispatchReviewedVersion } from "@/lib/supplier-dispatch";
 import { PoVarianceApproval, hasPendingPoVarianceApproval } from "@/features/purchasing/PoVarianceApproval";
 import { PoShipmentCostSummary } from "@/features/purchasing/PoShipmentCostSummary";
@@ -11,7 +12,10 @@ import React from "react";
 import { poEmailDeliveryPresentation } from "@/lib/po-email-delivery";
 import { PoQuantityAmendment } from '@/features/purchasing/PoQuantityAmendment';
 import { useAuth } from "@/lib/auth";
-import { createShipmentLineCommandClient, createShipmentLineRecoveryStore } from "@/lib/shipment-line-command";
+import { useShipmentCreation } from "@/hooks/use-shipment-creation";
+import { ShipmentCreateRecovery } from "@/features/purchasing/ShipmentCreateRecovery";
+import { shipmentCreateSchema, type ShipmentCreateInput } from "@shared/procurement/shipment-create-command";
+import type { ShipmentCreateRecovery as ShipmentRecovery } from "@/lib/shipment-create-command";
 import {
   dollarsToCents,
   formatMills,
@@ -955,10 +959,7 @@ function parsePositiveInt(value: string | null): number | null {
 
 export default function PurchaseOrderDetail() {
   const { user: shipmentCommandUser, hasPermission } = useAuth();
-  const shipmentLineCommands = React.useMemo(() => shipmentCommandUser?.id ? createShipmentLineCommandClient(
-    () => "shipment-line-" + crypto.randomUUID(),
-    createShipmentLineRecoveryStore(() => window.sessionStorage, shipmentCommandUser.id),
-  ) : null, [shipmentCommandUser?.id]);
+  const shipmentCreation = useShipmentCreation();
   const { toast } = useToast();
   const queryClient = useQueryClient();
   const [location, navigate] = useLocation();
@@ -1079,10 +1080,19 @@ export default function PurchaseOrderDetail() {
   const [lineSelections, setLineSelections] = useState<Record<number, { checked: boolean; qty: number }>>({});
   const [lineQtyErrors, setLineQtyErrors] = useState<Record<number, string>>({});
 
-  const { data: shippableLinesData } = useQuery<{ lines: any[]; reviewRequiredLines?: Array<{ id: number; sku: string | null; code: string; error: string }> }>({
-    queryKey: [`/api/purchase-orders/${poId}/shippable-lines`],
-    enabled: !!poId && showCreateShipmentDialog,
+  const shippableLinesQuery = useQuery({
+    queryKey: [`/api/purchase-orders/${poId}/shippable-lines`, "shipment-create"],
+    enabled: !!poId && showCreateShipmentDialog, retry: false, staleTime: 0,
+    queryFn: async ({ signal }) => {
+      if (!poId) throw new Error("Select a purchase order before creating a shipment.");
+      const response = await fetch(`/api/purchase-orders/${poId}/shippable-lines`, { credentials: "include", signal });
+      if (!response.ok) throw new Error("Available purchase lines could not be loaded.");
+      try { return parseShipmentCreateSources(await response.json(), poId); }
+      catch { throw new Error("Available purchase line identities or quantities could not be verified."); }
+    },
   });
+  const { isError: shippableLinesError, isPending: shippableLinesLoading, refetch: refetchShippableLines } = shippableLinesQuery;
+  const shippableLinesData = shippableLinesError ? undefined : shippableLinesQuery.data;
 
   // Initialize line selections when shippable lines load
   useEffect(() => {
@@ -2430,65 +2440,49 @@ export default function PurchaseOrderDetail() {
     },
   });
 
+  type ShipmentCreateSubmission = { body: ShipmentCreateInput; recovery?: ShipmentRecovery; navigation: NavigationSnapshot; visit: ReturnType<typeof shipmentCreation.captureVisit> };
   const createShipmentMutation = useMutation({
     retry: false,
-    onMutate: captureNavigation,
-    mutationFn: async (form: typeof newShipmentForm) => {
-      if (!shipmentLineCommands) throw new Error("Sign in before creating a shipment.");
-      // Chain: add selected lines from PO
-      const selectedLines = (shippableLinesData?.lines ?? [])
-        .filter((line: any) => lineSelections[line.id]?.checked && lineSelections[line.id]?.qty > 0)
-        .map((line: any) => ({ poLineId: line.id, qty: lineSelections[line.id].qty }));
-
-
-      const res = await fetch("/api/inbound-shipments", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          mode: form.mode || undefined,
-          shipmentNumber: form.shipmentNumber || undefined,
-          shipperName: form.shipperName || undefined,
-          forwarderName: form.forwarderName || undefined,
-          carrierName: form.carrierName || undefined,
-        }),
-      });
-      if (!res.ok) { const err = await res.json(); throw new Error(err.error || "Failed to create shipment"); }
-      const shipment = await res.json();
-
-      if (selectedLines.length > 0) {
-        try {
-          const result = await shipmentLineCommands.execute(shipment.id, {
-            operation: "add-from-po", body: { purchaseOrderId: poId!, lineSelections: selectedLines },
-          });
-          return { shipment, lineError: null, lineCount: result.operation === "add-from-po" ? result.lines.length : 0 };
-        } catch (e: any) {
-          return { shipment, lineError: e.message, lineCount: 0 };
-        }
-      }
-      return { shipment, lineError: null, lineCount: 0 };
+    networkMode: "always",
+    mutationFn: (submission: ShipmentCreateSubmission) => {
+      if (!submission.visit.isCurrent() || !submission.navigation.isCurrent()) throw new Error("The shipment creation view changed. Review the saved request before sending.");
+      return shipmentCreation.execute(submission.body, submission.recovery);
     },
-    onSuccess: ({ shipment, lineError, lineCount }, _variables, context) => {
-      if (context?.poId) queryClient.invalidateQueries({ queryKey: [`/api/purchase-orders/${context.poId}/shipments`] });
-      if (lineError) {
-        toast({
-          title: "Shipment created",
-          description: `${shipment.shipmentNumber} created but failed to add lines: ${lineError}. Open the shipment and review any saved line command before adding more lines.`,
-          variant: "destructive",
-        });
-      } else if (lineCount > 0) {
-        toast({ title: "Shipment created", description: `${shipment.shipmentNumber} created with ${lineCount} line${lineCount === 1 ? "" : "s"}` });
-      } else {
-        toast({ title: "Shipment created", description: `${shipment.shipmentNumber} created` });
+    onSuccess: (shipment, submission) => {
+      const owningPoId = submission.body.purchaseOrder?.purchaseOrderId;
+      if (owningPoId) {
+        void queryClient.invalidateQueries({ queryKey: [`/api/purchase-orders/${owningPoId}/shipments`] });
+        void queryClient.invalidateQueries({ queryKey: [`/api/purchase-orders/${owningPoId}/shippable-lines`] });
       }
-      if (!context?.isCurrent()) return;
+      void queryClient.invalidateQueries({ queryKey: ["/api/inbound-shipments"] });
+      if (!submission.navigation.isCurrent() || !submission.visit.isCurrent()) return;
+      toast({ title: "Shipment confirmed", description: `${shipment.shipmentNumber} has ${shipment.lineCount} selected lines.` });
       setShowCreateShipmentDialog(false);
       setLineSelections({});
-      navigate(context.childHref(`/shipments/${shipment.id}`));
+      const href = `/shipments/${shipment.id}`;
+      navigate(owningPoId && owningPoId === submission.navigation.poId ? submission.navigation.childHref(href) : href);
     },
-    onError: (err: Error) => {
-      toast({ title: "Error", description: err.message, variant: "destructive" });
+    onError: (error: Error, submission) => {
+      if (submission.navigation.isCurrent() && submission.visit.isCurrent()) toast({ title: "Shipment creation needs attention", description: error.message, variant: "destructive" });
     },
   });
+  const recoverShipmentCreation = (recovery: ShipmentRecovery) => createShipmentMutation.mutate({
+    body: recovery.body, recovery, navigation: captureNavigation(), visit: shipmentCreation.captureVisit(),
+  });
+  const submitShipmentCreation = () => {
+    try {
+      if (!poId || shippableLinesError || !shippableLinesData) throw new Error("Load and review the available purchase lines before creating a shipment.");
+      const lineSelectionsForCreate = shippableLinesData.lines.filter((line: any) => lineSelections[line.id]?.checked)
+        .map((line: any) => ({ poLineId: line.id, qty: lineSelections[line.id].qty }));
+      if (!lineSelectionsForCreate.length) throw new Error("Select at least one purchase line for this shipment.");
+      const body = shipmentCreateSchema.parse({
+        mode: newShipmentForm.mode || undefined, shipmentNumber: newShipmentForm.shipmentNumber || undefined,
+        shipperName: newShipmentForm.shipperName || undefined, forwarderName: newShipmentForm.forwarderName || undefined,
+        carrierName: newShipmentForm.carrierName || undefined, purchaseOrder: { purchaseOrderId: poId, lineSelections: lineSelectionsForCreate },
+      });
+      createShipmentMutation.mutate({ body, navigation: captureNavigation(), visit: shipmentCreation.captureVisit() });
+    } catch (error) { toast({ title: "Review shipment details", description: error instanceof Error ? error.message : "Invalid shipment details", variant: "destructive" }); }
+  };
 
   const openCreateInvoiceDialogFromPo = async () => {
     let invoiceNumber = "";
@@ -5360,12 +5354,15 @@ export default function PurchaseOrderDetail() {
         setShowCreateShipmentDialog(open);
         if (!open) { setLineSelections({}); setLineQtyErrors({}); }
       }}>
-        <DialogContent className="max-w-2xl relative">
+        <DialogContent className="max-h-[calc(100dvh-2rem)] overflow-y-auto min-w-0 max-w-2xl relative">
           <DialogHeader>
             <DialogTitle>Create Inbound Shipment</DialogTitle>
             <DialogDescription>Set up shipment details and select PO lines to include in this shipment.</DialogDescription>
           </DialogHeader>
-          <div className="space-y-4">
+          <ShipmentCreateRecovery recovery={shipmentCreation.recovery} error={shipmentCreation.error} pending={createShipmentMutation.isPending} onRetry={recoverShipmentCreation} onRefresh={shipmentCreation.refresh} />
+          <fieldset disabled={createShipmentMutation.isPending || !shipmentCreation.ready || !!shipmentCreation.recovery || !!shipmentCreation.error} className="space-y-4 min-w-0">
+            {shippableLinesLoading && <p role="status">Loading available purchase lines...</p>}
+            {shippableLinesError && <div role="alert">Available purchase lines could not be loaded. <Button type="button" variant="outline" onClick={() => void refetchShippableLines()}>Retry purchase lines</Button></div>}
             <div className="space-y-2">
               <Label>Shipment # (optional — auto-generated if blank)</Label>
               <Input
@@ -5605,9 +5602,10 @@ export default function PurchaseOrderDetail() {
             <div className="flex gap-2 justify-end">
               <Button variant="outline" onClick={() => { setShowCreateShipmentDialog(false); setLineSelections({}); setLineQtyErrors({}); }}>Cancel</Button>
               <Button
-                onClick={() => createShipmentMutation.mutate(newShipmentForm)}
+                onClick={submitShipmentCreation}
                 disabled={
-                  createShipmentMutation.isPending ||
+                  createShipmentMutation.isPending || shippableLinesLoading || shippableLinesError || !shippableLinesData ||
+                  !Object.values(lineSelections).some(selection => selection.checked) ||
                   !newShipmentForm.shipperName.trim() ||
                   (shippableLinesData !== undefined && shippableLinesData.lines.length === 0) ||
                   Object.keys(lineQtyErrors).length > 0
@@ -5619,7 +5617,7 @@ export default function PurchaseOrderDetail() {
                 <p className="text-xs text-muted-foreground absolute -bottom-5 right-0">No eligible lines available to add.</p>
               )}
             </div>
-          </div>
+          </fieldset>
         </DialogContent>
       </Dialog>
 

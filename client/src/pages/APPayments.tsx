@@ -1,11 +1,11 @@
+import { invoiceWorkListQuery, paymentWorkListQuery, invalidateApPaymentQueries, apVendorOptionsQuery } from "@/features/purchasing/ap-work-list-query";
+import { WorkListPagination } from "@/features/purchasing/WorkListPagination";
 import { dollarsToCents } from "@shared/utils/money";
 import React, { useState } from "react";
 import { useAuth } from "@/lib/auth";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { Link, useLocation } from "wouter";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
@@ -88,8 +88,10 @@ export default function APPayments() {
   const [voidPaymentIntent] = useState(() =>
     createFinancialCommandIntentStore(createApPaymentIdempotencyKey),
   );
-  const [, navigate] = useLocation();
   const [search, setSearch] = useState("");
+  const [offset, setOffset] = useState(0);
+  const [invoiceOffset, setInvoiceOffset] = useState(0);
+  const [invoiceSearch, setInvoiceSearch] = useState("");
   const [showPaymentDialog, setShowPaymentDialog] = useState(false);
   const [showVoidDialog, setShowVoidDialog] = useState<number | null>(null);
   const [voidReason, setVoidReason] = useState("");
@@ -105,22 +107,22 @@ export default function APPayments() {
     notes: "",
   });
 
-  const { data, isLoading } = useQuery<{ payments: any[] }>({
-    queryKey: ["/api/ap-payments"],
-  });
+  const { data, isLoading, isFetching, isError, refetch } = useQuery(paymentWorkListQuery({ search, offset, limit: 50 }));
 
-  const { data: auditData, isLoading: isAuditLoading } = useQuery<{ events: any[] }>({
+  const { data: auditData, isLoading: isAuditLoading, isError: auditError, refetch: refetchAudit } = useQuery<{ events: any[] }>({
     queryKey: ["/api/ap/command-events?limit=8"],
   });
 
-  const { data: vendorsData } = useQuery<any>({ queryKey: ["/api/vendors"] });
-  const vendors: any[] = vendorsData?.vendors ?? [];
+  const { data: vendorsData, isError: vendorsError, isLoading: vendorsLoading, refetch: refetchVendors } = useQuery(apVendorOptionsQuery);
+  const vendors = vendorsData ?? [];
 
-  const { data: openInvoicesData } = useQuery<{ invoices: any[] }>({
-    queryKey: ["/api/vendor-invoices?status=approved,partially_paid"],
-    enabled: showPaymentDialog,
+  const { data: openInvoicesData, isLoading: invoicesLoading, isFetching: invoicesFetching, isError: invoicesError, refetch: refetchInvoices } = useQuery({
+    ...invoiceWorkListQuery({ status: "approved,partially_paid", vendorId: newPayment.vendorId, search: invoiceSearch, offset: invoiceOffset, limit: 20 }),
+    enabled: showPaymentDialog && !!newPayment.vendorId,
+    // Reopening the mounted dialog after settlement must refresh even when its key is unchanged.
+    staleTime: 0,
   });
-  const openInvoices = openInvoicesData?.invoices ?? [];
+  const vendorOpenInvoices = openInvoicesData?.items ?? [];
 
   const [allocations, setAllocations] = useState<Record<number, string>>({});
 
@@ -169,10 +171,7 @@ export default function APPayments() {
     retryDelay: financialCommandRetryDelay,
     onSuccess: ({ result, idempotencyKey }) => {
       recordPaymentIntent.complete(idempotencyKey);
-      queryClient.invalidateQueries({ queryKey: ["/api/ap-payments"] });
-      queryClient.invalidateQueries({ queryKey: ["/api/vendor-invoices"] });
-      queryClient.invalidateQueries({ queryKey: ["/api/ap/summary"] });
-      queryClient.invalidateQueries({ queryKey: ["/api/ap/command-events?limit=8"] });
+      void invalidateApPaymentQueries(queryClient);
       setShowPaymentDialog(false);
       setNewPayment({ vendorId: "", paymentDate: format(new Date(), "yyyy-MM-dd"), paymentMethod: "ach", referenceNumber: "", checkNumber: "", bankAccountLabel: "", totalAmountDollars: "", notes: "" });
       setAllocations({});
@@ -205,10 +204,7 @@ export default function APPayments() {
     retryDelay: financialCommandRetryDelay,
     onSuccess: ({ result, idempotencyKey }) => {
       voidPaymentIntent.complete(idempotencyKey);
-      queryClient.invalidateQueries({ queryKey: ["/api/ap-payments"] });
-      queryClient.invalidateQueries({ queryKey: ["/api/vendor-invoices"] });
-      queryClient.invalidateQueries({ queryKey: ["/api/ap/summary"] });
-      queryClient.invalidateQueries({ queryKey: ["/api/ap/command-events?limit=8"] });
+      void invalidateApPaymentQueries(queryClient);
       setShowVoidDialog(null);
       setVoidReason("");
       toast({ title: "Payment voided", description: apLedgerOutcomeDescription(result) });
@@ -216,22 +212,8 @@ export default function APPayments() {
     onError: (e: Error) => toast({ title: "Error", description: e.message, variant: "destructive" }),
   });
 
-  const payments = (data?.payments ?? []).filter((p: any) => {
-    if (!search) return true;
-    const q = search.toLowerCase();
-    return (
-      p.paymentNumber?.toLowerCase().includes(q) ||
-      p.vendorName?.toLowerCase().includes(q) ||
-      p.referenceNumber?.toLowerCase().includes(q) ||
-      p.checkNumber?.toLowerCase().includes(q)
-    );
-  });
+  const payments = data?.items ?? [];
   const auditEvents = auditData?.events ?? [];
-
-  // Filter open invoices by selected vendor in new payment dialog
-  const vendorOpenInvoices = openInvoices.filter((inv: any) =>
-    !newPayment.vendorId || inv.vendorId === parseInt(newPayment.vendorId)
-  );
 
   const allocTotal = Object.values(allocations).reduce((s, v) => s + (parseFloat(v) || 0), 0);
 
@@ -254,13 +236,15 @@ export default function APPayments() {
           placeholder="Search payments..."
           className="pl-9 h-9"
           value={search}
-          onChange={(e) => setSearch(e.target.value)}
+          onChange={(e) => { setSearch(e.target.value); setOffset(0); }}
         />
       </div>
 
       <Card>
         <CardContent className="p-0">
-          {isLoading ? (
+          {isError ? (
+            <div role="alert" className="p-6 space-y-2"><p>Unable to load payments. The list is unavailable.</p><Button variant="outline" onClick={() => void refetch()}>Retry payments</Button></div>
+          ) : isLoading ? (
             <div className="flex items-center justify-center h-48">
               <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-primary" />
             </div>
@@ -302,7 +286,7 @@ export default function APPayments() {
                     <TableCell>
                       {p.status !== "voided" && p.status !== "completed" && <span className="text-xs text-amber-700">Historical status requires review</span>}
                       {p.status === "completed" && hasPermission("purchasing", "approve") && (
-                        <Button size="sm" variant="ghost" className="h-7 text-muted-foreground"
+                        <Button size="sm" variant="ghost" className="h-7 text-muted-foreground" aria-label={`Void payment ${p.paymentNumber}`}
                           onClick={() => setShowVoidDialog(p.id)}>
                           <XCircle className="h-3.5 w-3.5" />
                         </Button>
@@ -314,6 +298,7 @@ export default function APPayments() {
             </Table>
           )}
         </CardContent>
+        {!isError && <WorkListPagination page={data} busy={isFetching} onOffset={setOffset} label="payments" />}
       </Card>
 
       <Card>
@@ -321,7 +306,7 @@ export default function APPayments() {
           <CardTitle className="text-base">Recent AP Activity</CardTitle>
         </CardHeader>
         <CardContent className="p-0">
-          {isAuditLoading ? (
+          {auditError ? <div role="alert" className="p-4">Unable to load recent AP activity. <Button variant="link" onClick={() => void refetchAudit()}>Retry activity</Button></div> : isAuditLoading ? (
             <div className="flex items-center justify-center h-24">
               <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-primary" />
             </div>
@@ -367,11 +352,15 @@ export default function APPayments() {
             <div className="space-y-2">
               <Label>Vendor *</Label>
               <select className="w-full border rounded-md h-10 px-3 text-sm bg-background"
-                value={newPayment.vendorId}
-                onChange={(e) => { setNewPayment(p => ({ ...p, vendorId: e.target.value })); setAllocations({}); }}>
+                aria-label="Payment vendor" value={newPayment.vendorId}
+                disabled={vendorsLoading || vendorsError}
+                onChange={(e) => { setNewPayment(p => ({ ...p, vendorId: e.target.value })); setAllocations({}); setInvoiceOffset(0); setInvoiceSearch(""); }}>
                 <option value="">Select vendor...</option>
                 {vendors.map((v: any) => <option key={v.id} value={v.id}>{v.name}</option>)}
               </select>
+              {vendorsError && <p role="alert">Unable to load vendors. <Button variant="link" onClick={() => void refetchVendors()}>Retry vendors</Button></p>}
+              {vendorsLoading && <p role="status">Loading vendors…</p>}
+              {!vendorsLoading && !vendorsError && vendors.length === 0 && <p>No vendors available.</p>}
             </div>
 
             <div className="grid grid-cols-2 gap-4">
@@ -413,10 +402,15 @@ export default function APPayments() {
             </div>
 
             {/* Invoice Allocations */}
-            {newPayment.vendorId && vendorOpenInvoices.length > 0 && (
+            {newPayment.vendorId && (
               <div className="space-y-2">
                 <Label>Apply to Invoices <span className="text-muted-foreground text-xs">(optional)</span></Label>
-                <div className="border rounded-md divide-y">
+                <Input aria-label="Search vendor invoices" placeholder="Search vendor invoices…" value={invoiceSearch} onChange={event => { setInvoiceSearch(event.target.value); setInvoiceOffset(0); }} />
+                {invoicesError ? <div role="alert">Unable to load this vendor's invoices. <Button variant="link" onClick={() => void refetchInvoices()}>Retry invoice selection</Button></div>
+                  : invoicesLoading ? <p role="status">Loading vendor invoices…</p>
+                  : vendorOpenInvoices.length === 0 ? <p>No approved open invoices match this vendor and search.</p> : null}
+                {invoicesFetching && !invoicesLoading && <p role="status">Refreshing vendor invoices…</p>}
+                {!invoicesError && !invoicesLoading && <div className="border rounded-md divide-y">
                   {vendorOpenInvoices.map((inv: any) => (
                     <div key={inv.id} className="flex items-center gap-3 px-3 py-2">
                       <div className="flex-1 min-w-0">
@@ -424,6 +418,7 @@ export default function APPayments() {
                         <p className="text-xs text-muted-foreground">Balance: {formatCents(inv.balanceCents)}</p>
                       </div>
                       <Input
+                        aria-label={`Apply to invoice ${inv.invoiceNumber}`}
                         type="number"
                         step="0.01"
                         min="0"
@@ -434,7 +429,9 @@ export default function APPayments() {
                       />
                     </div>
                   ))}
-                </div>
+                </div>}
+                {!invoicesError && <WorkListPagination page={openInvoicesData} busy={invoicesFetching} onOffset={setInvoiceOffset} label="vendor invoices" />}
+                {Object.keys(allocations).length > 0 && <p className="text-xs text-muted-foreground">Allocations are retained across invoice pages and searches. <button type="button" className="underline" onClick={() => setAllocations({})}>Clear allocations</button></p>}
                 {allocTotal > 0 && (
                   <p className={`text-xs ${allocTotal > parseFloat(newPayment.totalAmountDollars || "0") ? "text-red-500" : "text-muted-foreground"}`}>
                     Allocated: ${allocTotal.toFixed(2)} of ${parseFloat(newPayment.totalAmountDollars || "0").toFixed(2)}

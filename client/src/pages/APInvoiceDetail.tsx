@@ -1,3 +1,5 @@
+import { InvoicePurchaseOrderSelector } from "@/features/purchasing/InvoicePurchaseOrderSelector";
+import { invalidateApInvoiceQueries, invalidateApPaymentQueries } from "@/features/purchasing/ap-work-list-query";
 import { InvoiceLineCostReview } from "@/features/purchasing/InvoiceLineCostReview";
 import { invalidatePurchaseCosts } from "@/lib/invalidate-purchase-costs";
 import { InvoiceShipmentReplacement } from "@/features/purchasing/InvoiceShipmentReplacement";
@@ -42,7 +44,6 @@ import {
   Plus,
   CreditCard,
   Pencil,
-  Search,
   Upload,
   Download,
   Trash2,
@@ -137,46 +138,10 @@ function LinkPoDialogContent({ invoice, linkPoId, setLinkPoId, linkPoMutation, o
   canEdit: boolean;
   editUnavailableReason: string;
 }) {
-  const [poSearch, setPoSearch] = useState("");
-  const { data: posData } = useQuery<any>({
-    queryKey: [`/api/purchase-orders?vendorId=${invoice.vendorId}&limit=100`],
-    enabled: !!invoice.vendorId,
-  });
-  const allPos: any[] = posData?.purchaseOrders ?? posData ?? [];
-  const linkedPoIds = new Set((invoice.poLinks || []).map((l: any) => l.purchaseOrderId));
-  const availablePos = allPos.filter((p: any) => !linkedPoIds.has(p.id));
-  const filteredPos = poSearch
-    ? availablePos.filter((p: any) => p.poNumber?.toLowerCase().includes(poSearch.toLowerCase()))
-    : availablePos;
-
   return (
     <div className="space-y-4">
-      <div className="space-y-2">
-        <Label>Search POs</Label>
-        <div className="relative">
-          <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
-          <Input className="pl-8" placeholder="Filter by PO number..." value={poSearch} onChange={e => setPoSearch(e.target.value)} />
-        </div>
-        <div className="max-h-48 overflow-y-auto border rounded-md">
-          {filteredPos.length === 0 ? (
-            <p className="p-3 text-sm text-muted-foreground text-center">
-              {availablePos.length === 0 ? "All POs already linked." : "No matching POs."}
-            </p>
-          ) : (
-            filteredPos.map((p: any) => (
-              <button
-                key={p.id}
-                type="button"
-                className={`w-full text-left px-3 py-2 text-sm hover:bg-muted/50 flex items-center justify-between ${String(p.id) === linkPoId ? "bg-primary/10 border-l-2 border-primary" : ""}`}
-                onClick={() => setLinkPoId(String(p.id))}
-              >
-                <span className="font-mono">{p.poNumber}</span>
-                <span className="text-muted-foreground">{formatCents(p.totalCents)}</span>
-              </button>
-            ))
-          )}
-        </div>
-      </div>
+      <InvoicePurchaseOrderSelector key={invoice.vendorId} vendorId={invoice.vendorId} selectedId={linkPoId} onSelect={setLinkPoId}
+        purpose="invoice-link" excludeIds={(invoice.poLinks ?? []).map(link => link.purchaseOrderId)} />
       <p className="text-xs text-muted-foreground">PO line items will be automatically imported.</p>
       {!canEdit && <p role="alert" className="text-sm text-destructive">{editUnavailableReason}</p>}
       <div className="flex gap-2 justify-end">
@@ -255,7 +220,7 @@ export default function APInvoiceDetail() {
   const invalidate = () => {
     void invalidatePurchaseCosts(queryClient);
     queryClient.invalidateQueries({ queryKey: [`/api/vendor-invoices/${invoiceId}`] });
-    queryClient.invalidateQueries({ predicate: (query) => typeof query.queryKey[0] === "string" && /^\/api\/vendor-invoices(?:\?|$)/.test(query.queryKey[0]) });
+    void invalidateApInvoiceQueries(queryClient);
     queryClient.invalidateQueries({ queryKey: ["/api/ap/summary"] });
     queryClient.invalidateQueries({ queryKey: ["/api/ap/command-events?limit=8"] });
   };
@@ -412,7 +377,7 @@ export default function APInvoiceDetail() {
     onSuccess: ({ result, idempotencyKey }) => {
       paymentIntent.complete(idempotencyKey);
       invalidate();
-      queryClient.invalidateQueries({ queryKey: ["/api/ap-payments"] });
+      void invalidateApPaymentQueries(queryClient);
       setShowPaymentDialog(false);
       setPayment({ paymentDate: format(new Date(), "yyyy-MM-dd"), paymentMethod: "ach", referenceNumber: "", checkNumber: "", bankAccountLabel: "", amountDollars: "", notes: "" });
       toast({ title: "Payment recorded", description: apLedgerOutcomeDescription(result) });

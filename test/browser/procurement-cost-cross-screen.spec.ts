@@ -1,3 +1,5 @@
+import { shipmentListItem } from "../fixtures/shipment-work-list";
+import { landedCostHealthSchema } from "../../shared/procurement/landed-cost-health";
 import { expect, test, type Page } from "@playwright/test";
 import { buildProcurementHealthSummary } from "../../server/modules/procurement/procurement-health.service";
 import { buildStaleAutoDraftPoDiagnostics } from "../../server/modules/procurement/auto-draft-po-aging.service";
@@ -39,7 +41,7 @@ async function installCostScreens(page: Page) {
       ? { status: 503, json: { error: "Synthetic cost summary unavailable" } } : { json: state.costs });
     if (path === "/api/purchase-orders/17/workspace") return route.fulfill(state.failWorkspace
       ? { status: 503, json: { error: "Synthetic history unavailable" } } : { json: state.workspace });
-    if (path === "/api/inbound-shipments") return route.fulfill({ json: { shipments: [shipmentDocument], total: 1 } });
+    if (path === "/api/inbound-shipments") return route.fulfill({ json: { shipments: [shipmentListItem(shipmentDocument)], total: 1, limit: 50, offset: 0, hasMore: false, costHealthItems: landedCostHealthSchema.safeParse(state.health).success ? landedCostHealthSchema.parse(state.health).items : [] } });
     if (path === "/api/inbound-shipments/42") return route.fulfill({ json: shipmentDocument });
     if (path === "/api/inbound-shipments/42/allocation-status") return route.fulfill({ json: currentAllocation });
     if (path === "/api/inbound-shipments/42/cost-review") return route.fulfill(state.failReview
