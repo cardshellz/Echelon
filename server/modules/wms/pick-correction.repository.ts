@@ -132,7 +132,14 @@ export async function requireCorrectivePick(db: CorrectionExecutor, input: {
 
 export async function resolveCorrectivePick(db: CorrectionExecutor, correctionId: number, actor: string, occurredAt: Date): Promise<void> {
   const before = await readPickCorrection(db, correctionId);
-  if (before.state === "resolved" || before.pickedQuantity < before.declaredQuantity) return;
+  if (before.state === "resolved") return;
+  if (before.pickedQuantity < before.declaredQuantity) {
+    // Only reached after a pick posted: an earlier failure no longer describes
+    // this correction (#64254 kept showing a fixed error after 7 units posted).
+    if (before.reviewReason !== null) await db.execute(sql`UPDATE wms.pick_corrections SET review_reason=NULL,
+      updated_at=${occurredAt} WHERE id=${correctionId} AND state='picking_required'`);
+    return;
+  }
   await db.execute(sql`UPDATE wms.pick_corrections SET state='resolved',review_reason=NULL,
     revision=revision+1,updated_at=${occurredAt} WHERE id=${correctionId} AND state='picking_required'`);
   const after = await readPickCorrection(db, correctionId);

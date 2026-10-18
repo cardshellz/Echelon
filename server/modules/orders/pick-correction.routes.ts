@@ -1,6 +1,7 @@
 import type { Express, Response } from "express";
 import { ZodError } from "zod";
 import { requireAuth, requirePermission } from "../../routes/middleware";
+import { hasPermission } from "../identity";
 import { pickCorrectionListSchema, pickCorrectionSchema } from "@shared/pick-corrections";
 import { PickCorrectionError } from "../wms/pick-correction.repository";
 import type { PickCorrectionService } from "./pick-correction.service";
@@ -25,7 +26,9 @@ export function registerPickCorrectionRoutes(app: Express, service: PickCorrecti
         const id = Number(req.params.id);
         const result = action === "answer" ? await service.answer(id, req.body, actor)
           : action === "pick" ? await service.complete(id, req.body, actor)
-            : await service.takeOver(id, req.body, actor);
+            : await service.takeOver(id, req.body, actor, {
+              supervisor: await hasPermission(actor, "picking", "release_any"),
+            });
         res.json(pickCorrectionSchema.parse(result));
       } catch (error) { failure(res, error); }
     });

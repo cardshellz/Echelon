@@ -63,6 +63,13 @@ describe("taking over an idle corrective pick", () => {
     expect(state.assignedPickerId).toBe("eba26187");
   });
 
+  it("lets a supervisor take over at once, without the idle wait", async () => {
+    const { service, state } = fixture({}, answeredAt);
+    await expect(service.takeOver(168, { commandId, expectedRevision: 3 }, "admin-1", { supervisor: true }))
+      .resolves.toMatchObject({ assignedPickerId: "admin-1" });
+    expect(state.assignedPickerId).toBe("admin-1");
+  });
+
   it.each([
     ["a Yes (only the books are waiting)", { answer: "yes" as const }],
     ["an unanswered correction", { state: "confirmation_required" as const, answer: null, assignedPickerId: null }],
