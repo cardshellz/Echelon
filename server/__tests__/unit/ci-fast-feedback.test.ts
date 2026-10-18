@@ -371,6 +371,28 @@ describe("fast CI preserves coverage and required checks", () => {
     expect(workflow).not.toMatch(/continue-on-error:|paths(?:-ignore)?:/);
   });
 
+  it("gives procurement eight complete shards and setup headroom without weakening coverage", () => {
+    const procurement = source(".github/workflows/procurement-navigation.yml");
+    const browser = job(procurement, "browser");
+    // Parse the actual matrix: missing/duplicated indices or a mismatched total
+    // would silently repeat or omit cases even when every scheduled job succeeds.
+    const indices: number[] = JSON.parse(browser.match(/^        shard: (\[[\d, ]+\])$/m)?.[1] ?? "[]");
+    const totals: number[] = JSON.parse(browser.match(/^        shards: (\[[\d, ]+\])$/m)?.[1] ?? "[]");
+    expect(totals).toEqual([8]);
+    expect(indices).toEqual(Array.from({ length: totals[0] }, (_, index) => index + 1));
+    expect(browser).toContain("timeout-minutes: 20");
+    expect(browser).toContain("fail-fast: false");
+    expect(browser).toContain("name: Procurement browser journeys (${{ matrix.shard }}/${{ matrix.shards }})");
+    expect(browser).toContain("npx playwright test --config playwright.procurement.config.ts --shard=${{ matrix.shard }}/${{ matrix.shards }}\n");
+    expect(browser).not.toMatch(/--(?:grep|grep-invert|retries|max-failures|pass-with-no-tests)\b|continue-on-error:/);
+    expect(job(procurement, "result")).toContain("name: Procurement browser journeys\n");
+    const config = source("playwright.procurement.config.ts");
+    expect(config).toContain('testMatch: "procurement-*.spec.ts"');
+    expect(config).toContain("timeout: 45_000");
+    expect(config).toContain("expect: { timeout: 15_000 }");
+    expect(config).not.toMatch(/retries:|maxFailures:|testIgnore:|grep:/);
+  });
+
   it("runs all Returns shards and retains its original required check identity", () => {
     const returns = source(".github/workflows/returns-preview.yml");
     const shards = job(returns, "browser-shard");
