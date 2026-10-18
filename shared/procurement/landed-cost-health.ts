@@ -40,3 +40,9 @@ export const landedCostHealthSchema = z.object({
     message: "Cost health status conflicts with its evidence counts.", path: ["status"] });
 });
 export type LandedCostHealth = z.infer<typeof landedCostHealthSchema>;
+
+/** Every cost-health action lands in the costing workspace, not shipment lines. */
+export function landedCostHealthHref(item: LandedCostHealth["items"][number]): string {
+  const supplier = item.type === "provisional_other_costs" ? "#supplier-cost-review" : "";
+  return `/shipments/${item.shipmentId}?tab=allocation${supplier}`;
+}

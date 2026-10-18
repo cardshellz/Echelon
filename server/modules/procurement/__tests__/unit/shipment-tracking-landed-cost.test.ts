@@ -687,7 +687,8 @@ describe("ShipmentTrackingService.getLandedCostHealth", () => {
       counts: { staleProvisionalLots: 0, finalizedNotPushed: 0, provisionalOtherCosts: 1 } });
     expect(result.items).toEqual([expect.objectContaining({ type: "provisional_other_costs",
       action: "review_cost_evidence", detail: expect.stringContaining("Landed costs are posted.") })]);
-    expect(result.items[0].detail).toBe("Landed costs are posted. 1 lot still has a provisional cost flag; review remaining cost evidence before treating the complete lot cost as final.");
+    expect(result.items[0].detail).toContain("1 lot retains a provisional flag");
+    expect(result.items[0].detail).toContain("this flag alone does not mean freight is unposted");
     expect(db.transaction).toHaveBeenCalledWith(expect.any(Function), { isolationLevel: "repeatable read", accessMode: "read only" });
     expect(readShipmentCostReviewInTransaction).toHaveBeenCalledWith(tx, 1);
     expect(storage.getProvisionalLotsByShipment).toHaveBeenCalledWith(1, tx);

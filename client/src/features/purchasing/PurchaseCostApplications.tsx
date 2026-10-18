@@ -5,6 +5,8 @@ import { reconciliationDestinations } from "@shared/procurement/cost-reconciliat
 import type { PurchaseCostApplicationHistory } from "@shared/procurement/purchase-cost-applications";
 import type { ReceiptCostRequestHistory } from "@shared/procurement/receipt-cost-queue";
 import { describeReceiptCostRecovery } from "@shared/procurement/receipt-cost-recovery";
+import { purchaseCostNextAction } from "@shared/procurement/purchase-cost-status";
+import { PurchaseSupplierCostLine } from "./PurchaseSupplierCostReview";
 import type { ProcurementNavigation } from "@/hooks/use-procurement-navigation";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -83,16 +85,17 @@ export function PurchaseReceiptCostQueue({ requests, data, navigation, actions }
   return <section className="space-y-2" aria-label="Receipt cost processing"><h4 className="text-sm font-semibold">Receipt cost processing</h4>{actions?.error && <p role="alert" className="rounded-md border border-destructive/30 p-3 text-xs">{actions.error} The physical receipt is separate; refresh to check the recorded cost outcome.</p>}{actions?.message && <p role="status" className="rounded-md border p-3 text-xs">{actions.message}</p>}{requests.length === 0 ? <p className="text-xs text-muted-foreground">No durable receipt cost requests are recorded for this purchase. This does not establish that historical costs were processed.</p> : requests.map((request) => {
     const receipt = data.receipts.find((row) => row.id === request.receiptId);
     return <div key={request.id} className="space-y-2 rounded-lg border p-3" data-testid={`receipt-cost-request-${request.id}`}>
-      <div className="flex flex-wrap items-center justify-between gap-2"><Link href={navigation.inspectHref({ kind: "receipt", id: request.receiptId })} className="text-xs font-semibold text-primary underline underline-offset-4">{receipt?.receiptNumber ?? `Receipt #${request.receiptId}`}</Link><Badge variant="outline">{request.state === "pending" ? "Costs queued" : request.state === "applied" ? "Receipt cost attempt completed" : formatWorkspaceStatus(request.state)}</Badge></div>
+      <div className="flex flex-wrap items-center justify-between gap-2"><Link href={navigation.inspectHref({ kind: "receipt", id: request.receiptId })} className="text-xs font-semibold text-primary underline underline-offset-4">{receipt?.receiptNumber ?? `Receipt #${request.receiptId}`}</Link><Badge variant="outline">{request.state === "pending" ? "Costs pending" : request.state === "applied" ? request.currentCosts ? "Current supplier costs posted" : "Receipt cost attempt completed" : formatWorkspaceStatus(request.state)}</Badge></div>
       <p className="text-xs">PO line #{request.purchaseOrderLineId} · Request #{request.id} · Physical receipt: {formatWorkspaceStatus(request.receiptStatus)}.</p>
-      <p className="text-xs text-muted-foreground">Requested {formatWorkspaceDate(request.requestedAt)} by {request.requestedBy}.{request.state === "applied" ? " Later source revisions are tracked separately above." : request.receiptStatus === "closed" ? " The stock receipt remains recorded while its costs are processed." : ""}</p>
-      {request.attempts[0] && <EvidenceIssues issues={request.attempts[0].issues} />}
-      {request.automaticRecovery && <div className="space-y-1 rounded-md bg-muted/40 p-3 text-xs" data-testid={`receipt-cost-recovery-${request.id}`}>
+      <p className="text-xs text-muted-foreground">Requested {formatWorkspaceDate(request.requestedAt)} by {request.requestedBy}. The stock receipt is recorded separately from its costs.</p>
+      {request.currentCosts ? <PurchaseSupplierCostLine line={request.currentCosts} navigation={navigation} /> : request.attempts[0] && <EvidenceIssues issues={request.attempts[0].issues} />}
+      {request.currentCosts && request.state === "applied" && request.recordedState !== "applied" && <p className="text-xs">A later supplier-cost application completed this receipt's costs. The earlier attempt remains below as history.</p>}
+      {request.automaticRecovery && request.state !== "applied" && (!request.currentCosts || purchaseCostNextAction(request.currentCosts) === "apply") && <div className="space-y-1 rounded-md bg-muted/40 p-3 text-xs" data-testid={`receipt-cost-recovery-${request.id}`}>
         <p>{describeReceiptCostRecovery(request.automaticRecovery, request.state)}</p>
         {request.automaticRecovery.state === "queued" && ["pending", "retry_required"].includes(request.state) && <p>Next scheduled attempt: {formatWorkspaceDate(request.automaticRecovery.nextAttemptAt)}.</p>}
-        {request.automaticRecovery.lastErrorCode && request.state !== "applied" && <p className="break-all text-muted-foreground">{request.automaticRecovery.lastErrorCode}</p>}
+        {request.automaticRecovery.lastErrorCode && <p className="break-all text-muted-foreground">{request.automaticRecovery.lastErrorCode}</p>}
       </div>}
-      {request.state !== "applied" && request.receiptStatus === "closed" && actions?.canRetry && <Button size="sm" variant="outline" disabled={actions.pendingReceiptId !== null} onClick={() => actions.onRetry(request.receiptId)}>{actions.pendingReceiptId === request.receiptId ? "Processing costs…" : "Retry receipt costs"}</Button>}
+      {request.state !== "applied" && request.receiptStatus === "closed" && actions?.canRetry && (!request.currentCosts || purchaseCostNextAction(request.currentCosts) === "apply") && <Button size="sm" variant="outline" disabled={actions.pendingReceiptId !== null} onClick={() => actions.onRetry(request.receiptId)}>{actions.pendingReceiptId === request.receiptId ? "Processing costs…" : "Apply current supplier costs"}</Button>}
       {request.attempts.length > 0 && <details className="text-xs"><summary className="cursor-pointer font-medium">{request.attempts.length} recorded cost {request.attempts.length === 1 ? "attempt" : "attempts"}</summary><div className="mt-2 space-y-3">{request.attempts.map((attempt) => <div key={attempt.id} className="space-y-1 border-t pt-2"><p>Attempt #{attempt.id} · {formatWorkspaceStatus(attempt.state)} · {formatWorkspaceDate(attempt.recordedAt)} · {attempt.recordedBy}</p>{attempt.applicationIds.length > 0 && <p>Applications: {attempt.applicationIds.map((id) => `#${id}`).join(", ")}</p>}<EvidenceIssues issues={attempt.issues} /></div>)}</div></details>}
     </div>;
   })}</section>;

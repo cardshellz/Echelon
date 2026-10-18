@@ -1,0 +1,263 @@
+import { sql } from "drizzle-orm";
+import { z } from "zod";
+import {
+  purchaseCostStatusSchema,
+  type PurchaseCostStatus,
+} from "@shared/procurement/purchase-cost-status";
+import { canonicalJson } from "@shared/utils/canonical-json";
+import {
+  costFingerprint,
+  costInteger,
+  CostEvidenceError,
+  type CostEvidenceTransaction,
+} from "../inventory/infrastructure/cost-evidence.repository";
+import { readPurchaseCostSources } from "./purchase-cost-source.repository";
+import { resolvePurchaseCostSource } from "./domain/purchase-cost-source";
+import { projectPurchaseComponentStatus } from "./domain/purchase-cost-status";
+
+const MAX_LINES = 500;
+const MAX_LOTS = 10_000;
+const idSchema = z.number().int().positive().safe();
+function bounded<T>(rows: T[], limit: number, kind: string): T[] {
+  if (rows.length > limit)
+    throw new CostEvidenceError(
+      "COST_REVIEW_LIMIT",
+      `The complete ${kind} exceeds this review's supported scope.`,
+    );
+  return rows;
+}
+
+/** Shared current supplier-cost read for receipt processing, shipment review and
+ * health. Callers own a read-only repeatable-read transaction. No flag is cleared. */
+export async function readPurchaseCostStatus(
+  tx: CostEvidenceTransaction,
+  purchaseOrderLineIds: readonly number[],
+): Promise<PurchaseCostStatus> {
+  const ids = [
+    ...new Set(purchaseOrderLineIds.map((value) => idSchema.parse(value))),
+  ].sort((a, b) => a - b);
+  bounded(ids, MAX_LINES, "purchase line set");
+  if (!ids.length) return { lines: [] };
+  const lines = (
+    await tx.execute(sql`SELECT id,purchase_order_id,sku FROM procurement.purchase_order_lines
+    WHERE id=ANY(${sql.param(ids)}::int[]) AND line_type='product' ORDER BY id`)
+  ).rows;
+  if (lines.length !== ids.length)
+    throw new CostEvidenceError(
+      "COST_SOURCE_MISSING",
+      "Some purchase cost sources could not be read completely.",
+    );
+  const sources = await readPurchaseCostSources(tx, ids);
+  const revisions = (
+    await tx.execute(sql`SELECT revision.id,revision.purchase_order_line_id,revision.component,revision.contract,
+    application.id AS application_id,application.status,application.evidence,
+    event.payload AS reporting_payload
+    FROM procurement.cost_source_revisions revision
+    LEFT JOIN LATERAL (SELECT id,status,evidence FROM inventory.cost_applications WHERE source_revision_id=revision.id ORDER BY id DESC LIMIT 1) application ON true
+    LEFT JOIN inventory.cost_reporting_events event ON event.application_id=application.id
+    WHERE revision.purchase_order_line_id=ANY(${sql.param(ids)}::int[]) AND revision.component IN ('product','packaging')
+      AND NOT EXISTS(SELECT 1 FROM procurement.cost_source_revisions newer WHERE newer.purchase_order_line_id=revision.purchase_order_line_id
+        AND newer.component=revision.component AND newer.inbound_shipment_line_id IS NULL AND newer.revision>revision.revision)
+      AND revision.inbound_shipment_line_id IS NULL ORDER BY revision.purchase_order_line_id,revision.component`)
+  ).rows;
+  const lots = bounded(
+    (
+      await tx.execute(sql`WITH RECURSIVE descendants(line_id,id) AS (
+      SELECT purchase_order_line_id,inventory_lot_id FROM inventory.lot_cost_origins WHERE purchase_order_line_id=ANY(${sql.param(ids)}::int[])
+      UNION SELECT d.line_id,edge.output_lot_id FROM inventory.lot_cost_contributions edge JOIN descendants d ON edge.source_lot_id=d.id
+    ), scoped AS (SELECT line_id,id FROM descendants UNION SELECT po_line_id,id FROM inventory.inventory_lots WHERE po_line_id=ANY(${sql.param(ids)}::int[]))
+    SELECT scoped.line_id,lot.id,lot.lot_number,lot.qty_on_hand,lot.inbound_shipment_id,lot.cost_provisional,
+      lot.po_unit_cost_mills,lot.packaging_cost_mills,lot.product_total_cost_mills,lot.packaging_total_cost_mills,
+      EXISTS(SELECT 1 FROM inventory.lot_cost_origins origin WHERE origin.inventory_lot_id=lot.id) AS receipt_origin,
+      EXISTS(SELECT 1 FROM inventory.lot_cost_contributions edge WHERE edge.output_lot_id=lot.id) AS transformed,
+      EXISTS(SELECT 1 FROM descendants d WHERE d.line_id=scoped.line_id AND d.id=lot.id) AS graph_member
+    FROM scoped JOIN inventory.inventory_lots lot ON lot.id=scoped.id ORDER BY scoped.line_id,lot.id LIMIT ${MAX_LOTS + 1}`)
+    ).rows,
+    MAX_LOTS,
+    "cost lot graph",
+  );
+  const applicationIds = revisions.flatMap((row) =>
+    row.application_id == null
+      ? []
+      : [costInteger(row.application_id, "application.id", 1)],
+  );
+  const changes =
+    applicationIds.length === 0
+      ? []
+      : bounded(
+          (
+            await tx.execute(sql`SELECT application_id,inventory_lot_id,after_state
+    FROM inventory.cost_application_lots WHERE application_id=ANY(${sql.param(applicationIds)}::bigint[]) ORDER BY application_id,inventory_lot_id LIMIT ${MAX_LOTS * 2 + 1}`)
+          ).rows,
+          MAX_LOTS * 2,
+          "component snapshots",
+        );
+  const invoices = bounded(
+    (
+      await tx.execute(sql`SELECT line.id,line.line_number,line.purchase_order_line_id,line.vendor_invoice_id,
+    invoice.invoice_number FROM procurement.vendor_invoice_lines line
+    JOIN procurement.vendor_invoices invoice ON invoice.id=line.vendor_invoice_id
+    WHERE line.purchase_order_line_id=ANY(${sql.param(ids)}::int[]) AND invoice.status IN ('approved','partially_paid','paid')
+    ORDER BY line.id LIMIT ${MAX_LOTS + 1}`)
+    ).rows,
+    MAX_LOTS,
+    "invoice evidence",
+  );
+  const receipts = bounded(
+    (
+      await tx.execute(sql`SELECT DISTINCT line.purchase_order_line_id,receipt.id,receipt.receipt_number,receipt.status
+    FROM procurement.receiving_lines line JOIN procurement.receiving_orders receipt ON receipt.id=line.receiving_order_id
+    WHERE line.purchase_order_line_id=ANY(${sql.param(ids)}::int[]) AND receipt.status='closed' ORDER BY line.purchase_order_line_id,receipt.id LIMIT ${MAX_LOTS + 1}`)
+    ).rows,
+    MAX_LOTS,
+    "receipt evidence",
+  );
+  const result: PurchaseCostStatus = { lines: [] };
+  for (const line of lines) {
+    const lineId = costInteger(line.id, "purchaseOrderLineId", 1);
+    const source = sources.get(lineId);
+    if (!source)
+      throw new CostEvidenceError(
+        "COST_SOURCE_MISSING",
+        "The purchase cost source changed during its read.",
+      );
+    const lineLots = lots.filter((lot) => Number(lot.line_id) === lineId);
+    const components = resolvePurchaseCostSource(source).map((input) => {
+      const matches = revisions.filter(
+        (row) =>
+          Number(row.purchase_order_line_id) === lineId &&
+          row.component === input.component,
+      );
+      if (matches.length > 1)
+        throw new CostEvidenceError(
+          "COST_REVISION_AMBIGUOUS",
+          "More than one current component revision was recorded.",
+        );
+      const row = matches[0];
+      const currentFingerprint = costFingerprint({
+        input,
+        sourceEvidence: source,
+      });
+      const event = row?.reporting_payload as Record<string, unknown> | null;
+      const recorded = row?.evidence as {
+        result?: { lotsUpdated?: number; totalCogsDeltaCents?: number };
+      } | null;
+      const snapshotRows = changes.filter(
+        (change) =>
+          String(change.application_id) === String(row?.application_id),
+      );
+      const reportingVerified =
+        event?.contractVersion === 1 &&
+        event?.sourceRevisionId === Number(row?.id) &&
+        event?.sourceFingerprint === currentFingerprint &&
+        event?.component === input.component &&
+        event?.currency === input.currency &&
+        event?.cogsDeltaCents === recorded?.result?.totalCogsDeltaCents &&
+        Array.isArray(event?.changes) &&
+        event.changes.length === snapshotRows.length &&
+        event.changes.every((change: { lotId?: unknown; after?: unknown }) =>
+          snapshotRows.some(
+            (snapshot) =>
+              Number(snapshot.inventory_lot_id) === change.lotId &&
+              canonicalJson(snapshot.after_state) ===
+                canonicalJson(change.after),
+          ),
+        );
+      return projectPurchaseComponentStatus({
+        input,
+        currentFingerprint,
+        revision: row
+          ? {
+              id: costInteger(row.id, "revision.id", 1),
+              contract: row.contract,
+            }
+          : null,
+        application: row?.application_id
+          ? {
+              id: costInteger(row.application_id, "application.id", 1),
+              status: String(row.status),
+              evidence: row.evidence,
+              reportingVerified,
+            }
+          : null,
+        lotIds: lineLots
+          .filter((lot) => lot.graph_member === true)
+          .map((lot) => costInteger(lot.id, "lot.id", 1)),
+        unprovenLotIds: lineLots
+          .filter(
+            (lot) =>
+              lot.graph_member !== true ||
+              lot.receipt_origin === lot.transformed,
+          )
+          .map((lot) => costInteger(lot.id, "lot.id", 1)),
+        changedLots: snapshotRows.map((snapshot) => {
+          const lot = lineLots.find(
+            (lot) => Number(lot.id) === Number(snapshot.inventory_lot_id),
+          );
+          const after = snapshot.after_state as Record<string, unknown>;
+          const unit =
+            input.component === "product"
+              ? "po_unit_cost_mills"
+              : "packaging_cost_mills";
+          const total =
+            input.component === "product"
+              ? "product_total_cost_mills"
+              : "packaging_total_cost_mills";
+          const afterUnit =
+            input.component === "product" ? "productMills" : "packagingMills";
+          return {
+            lotId: costInteger(snapshot.inventory_lot_id, "lot.id", 1),
+            component: String(after?.component),
+            amountMatches:
+              !!lot &&
+              String(lot[unit]) === String(after?.[afterUnit]) &&
+              lot[total] != null &&
+              String(lot[total]) === String(after?.allocatedMills),
+          };
+        }),
+      });
+    });
+    result.lines.push({
+      purchaseOrderId: costInteger(
+        line.purchase_order_id,
+        "purchaseOrderId",
+        1,
+      ),
+      purchaseOrderLineId: lineId,
+      sku: line.sku == null ? null : String(line.sku),
+      components,
+      invoices: invoices
+        .filter((invoice) => Number(invoice.purchase_order_line_id) === lineId)
+        .map((invoice) => ({
+          invoiceId: costInteger(invoice.vendor_invoice_id, "invoice.id", 1),
+          invoiceNumber: String(invoice.invoice_number),
+          lineId: costInteger(invoice.id, "invoiceLine.id", 1),
+          lineNumber: costInteger(invoice.line_number, "lineNumber", 1),
+        })),
+      receipts: receipts
+        .filter((receipt) => Number(receipt.purchase_order_line_id) === lineId)
+        .map((receipt) => ({
+          receiptId: costInteger(receipt.id, "receipt.id", 1),
+          receiptNumber: String(receipt.receipt_number),
+          status: String(receipt.status),
+        })),
+      lots: lineLots.map((lot) => ({
+        id: costInteger(lot.id, "lot.id", 1),
+        lotNumber: String(lot.lot_number),
+        onHandUnits: costInteger(lot.qty_on_hand, "lot.onHand"),
+        shipmentId:
+          lot.inbound_shipment_id == null
+            ? null
+            : costInteger(lot.inbound_shipment_id, "shipment.id", 1),
+        provisional: lot.cost_provisional === 1,
+        origin:
+          lot.receipt_origin === true && lot.transformed !== true
+            ? "receipt"
+            : lot.transformed === true && lot.receipt_origin !== true
+              ? "transformation"
+              : "unproven",
+      })),
+    });
+  }
+  return purchaseCostStatusSchema.parse(result);
+}

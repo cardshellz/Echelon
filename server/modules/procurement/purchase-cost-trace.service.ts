@@ -3,6 +3,7 @@ import { invoiceCostComponentEvidenceSchema } from "@shared/procurement/invoice-
 import { projectPurchaseCostApplications, purchaseCostApplicationReadSchema } from "./purchase-cost-application-read.service";
 import { PurchaseWorkspaceError } from "./purchase-workspace.service";
 import { z } from "zod";
+import { purchaseCostStatusSchema } from "@shared/procurement/purchase-cost-status";
 import { purchaseCostTraceSchema, type PurchaseCostTrace } from "@shared/procurement/purchase-cost-trace";
 import type { PurchaseWorkspace } from "@shared/procurement/purchase-workspace";
 
@@ -26,6 +27,7 @@ export const purchaseCostEvidenceSchema = z.object({
   invoiceLines: z.array(purchaseCostTraceSchema.shape.invoiceLines.element.omit({ componentEvidence: true, components: true, componentIssues: true }).extend({ costComponentEvidence: z.unknown().optional() })),
   applications: purchaseCostApplicationReadSchema.optional(),
   receiptCostQueue: receiptCostQueueReadSchema.optional(),
+  currentCosts: purchaseCostStatusSchema.optional(),
   shipmentCharges: z.array(purchaseCostTraceSchema.shape.shipmentCharges.element.omit({ amountEvidence: true, amountScope: true, allocations: true })),
   allocations: z.array(z.object({
     id, chargeId: id, chargeShipmentId: id, shipmentId: id, shipmentLineId: id,
@@ -182,7 +184,8 @@ export function projectPurchaseCostTrace(input: PurchaseCostEvidence, purchase: 
     version: 1,
     applicationEvidence: evidence.applications?.revisions.length ? "recorded" : "not_verified",
     applicationHistory: evidence.applications ? projectPurchaseCostApplications(evidence.applications, purchase.id) : undefined,
-    receiptCostRequests: evidence.receiptCostQueue ? projectReceiptCostQueue(evidence.receiptCostQueue, applicationScopes) : undefined,
+    receiptCostRequests: evidence.receiptCostQueue ? projectReceiptCostQueue(evidence.receiptCostQueue, applicationScopes, evidence.currentCosts) : undefined,
+    currentCosts: evidence.currentCosts,
     purchaseLines: evidence.purchaseLines.map((line) => projectPurchaseLine(line, purchase)),
     invoiceLines: evidence.invoiceLines.map(projectInvoiceLine),
     shipmentCharges: evidence.shipmentCharges.map((charge) => ({

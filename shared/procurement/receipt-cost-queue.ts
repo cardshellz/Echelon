@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { costIssueSchema } from "./cost-source-contracts";
 import { receiptCostRecoverySchema } from "./receipt-cost-recovery";
+import { purchaseLineCostStatusSchema } from "./purchase-cost-status";
 
 const id = z.number().int().positive().safe();
 const date = z.string().datetime({ offset: true });
@@ -39,6 +40,8 @@ export const receiptCostRequestHistorySchema = z.array(z.object({
   requestedBy: z.string(),
   requestedAt: date,
   state: z.enum(["pending", "applied", "review_required", "retry_required"]),
+  recordedState: z.enum(["pending", "applied", "review_required", "retry_required"]).optional(),
+  currentCosts: purchaseLineCostStatusSchema.optional(),
   automaticRecovery: receiptCostRecoverySchema.nullable().optional(),
   attempts: z.array(z.object({
     id,

@@ -66,7 +66,10 @@ export async function processReceiptCostRequests(db: Database, receiptId: number
           const receipt = (await tx.execute(sql`SELECT status FROM procurement.receiving_orders WHERE id=${receiptId} FOR SHARE`)).rows[0];
           if (receipt?.status !== "closed") throw new Error("Automatic cost recovery requires a closed receipt");
         }
-        if (latest?.state === "applied" || (automaticRequestId !== undefined && latest?.state === "review_required")) {
+        // Automatic recovery finishes a queued request. An explicit retry asks
+        // the cost owner to apply CURRENT sources/descendants; an older success
+        // cannot short-circuit it. The owner deduplicates unchanged applications.
+        if (automaticRequestId !== undefined && ["applied", "review_required"].includes(latest?.state)) {
           return readSavedResult(latest.result.summary, requestId, purchaseOrderLineId, latest.state);
         }
         if (!owner) throw new Error("Approved invoice cost owner is unavailable");
@@ -90,7 +93,7 @@ export async function processReceiptCostRequests(db: Database, receiptId: number
           await lockInventoryCostGraph(tx);
           // Another retry may have completed while this failure was being logged.
           const latest = (await tx.execute(sql`SELECT state,result FROM procurement.receipt_cost_attempts WHERE request_id=${requestId} ORDER BY id DESC LIMIT 1`)).rows[0];
-          if (latest?.state === "applied" || (automaticRequestId !== undefined && latest?.state === "review_required")) {
+          if (automaticRequestId !== undefined && ["applied", "review_required"].includes(latest?.state)) {
             Object.assign(summary, readSavedResult(latest.result.summary, requestId, purchaseOrderLineId, latest.state));
             return;
           }

@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { invalidatePurchaseCosts } from "@/lib/invalidate-purchase-costs";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { formatShipmentExceptionAmount, type ShipmentCostException } from "@shared/procurement/shipment-cost-exception";
 import {
@@ -93,6 +94,7 @@ function ShipmentReconciliation({ lineId, onClose }: { lineId: number; onClose: 
       setDestination(null);
       setReason("");
     },
+    onSettled: () => invalidatePurchaseCosts(queryClient),
   });
   const data = context.data;
   const ambiguous = save.isError && save.error instanceof FinancialCommandRequestError && save.error.ambiguous;

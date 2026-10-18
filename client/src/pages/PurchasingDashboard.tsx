@@ -1,4 +1,4 @@
-import { landedCostHealthSchema, type LandedCostHealth } from "@shared/procurement/landed-cost-health";
+import { landedCostHealthSchema, landedCostHealthHref, type LandedCostHealth } from "@shared/procurement/landed-cost-health";
 import { DailyBuyingReview } from "@/features/purchasing/DailyBuyingReview";
 import { PurchasePipeline } from "@/features/purchasing/PurchasePipeline";
 import { useState } from "react";
@@ -1065,7 +1065,7 @@ export default function PurchasingDashboard() {
                       </div>
                       <div className="text-xs text-muted-foreground mt-1 break-words">{item.detail}</div>
                     </div>
-                    <Button size="sm" variant="outline" className="text-[11px] h-7 flex-shrink-0" onClick={() => navigate(`/shipments/${item.shipmentId}`)}>
+                    <Button size="sm" variant="outline" className="text-[11px] h-7 flex-shrink-0" onClick={() => navigate(landedCostHealthHref(item))}>
                       Review
                     </Button>
                   </div>

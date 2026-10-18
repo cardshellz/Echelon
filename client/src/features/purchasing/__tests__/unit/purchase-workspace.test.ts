@@ -283,7 +283,7 @@ describe("recorded cost application rendering", () => {
     expect(markup).toContain("Contribution #31: source lot #901");
     expect(markup).toContain("Internal reporting event #41");
     expect(markup).toContain("Delivery to Archon or another external system is not verified");
-    expect(markup).toContain("The stock receipt remains recorded");
+    expect(markup).toContain("The stock receipt is recorded separately from its costs");
     expect(markup).not.toContain("Retry receipt costs");
     expect(markup).not.toContain("Cost application needs verification");
   });

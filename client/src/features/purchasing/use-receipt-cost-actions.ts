@@ -3,6 +3,7 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useAuth } from "@/lib/auth";
 import type { ReceiptCostActions } from "./PurchaseCostApplications";
 import { createReceiptCostRetryClient } from "./receipt-cost-retry";
+import { invalidatePurchaseCosts } from "@/lib/invalidate-purchase-costs";
 
 export function useReceiptCostActions(purchaseOrderId: number): ReceiptCostActions {
   const { hasPermission } = useAuth();
@@ -17,10 +18,10 @@ export function useReceiptCostActions(purchaseOrderId: number): ReceiptCostActio
         : result.state === "review_required" ? "The receipt is recorded. Its cost evidence needs review; see the recorded reasons."
         : result.state === "retry_required" ? "The receipt is recorded. Cost processing still requires a retry."
         : "No cost request is recorded for this receipt.");
-      await queryClient.invalidateQueries({ queryKey: [`/api/purchase-orders/${purchaseOrderId}`, "workspace"] });
+      await invalidatePurchaseCosts(queryClient);
     },
     onError: async () => {
-      await queryClient.invalidateQueries({ queryKey: [`/api/purchase-orders/${purchaseOrderId}`, "workspace"] });
+      await invalidatePurchaseCosts(queryClient);
     },
   });
   return {

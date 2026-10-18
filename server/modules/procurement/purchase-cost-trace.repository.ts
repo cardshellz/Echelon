@@ -1,4 +1,5 @@
 import { readReceiptCostQueue } from "./receipt-cost-queue-read.repository";
+import { readPurchaseCostStatus } from "./purchase-cost-status.repository";
 import { readPurchaseCostApplications } from "./purchase-cost-application-read.repository";
 import { sql } from "drizzle-orm";
 import { purchaseCostEvidenceSchema, type PurchaseCostEvidence } from "./purchase-cost-trace.service";
@@ -89,6 +90,7 @@ export async function readPurchaseCostEvidence(tx: Transaction, purchaseOrderId:
   ] as const;
 
   return purchaseCostEvidenceSchema.parse({
+    currentCosts: await readPurchaseCostStatus(tx, purchaseLines.filter(line => line.lineType === "product").map(line => Number(line.id))),
     applications, receiptCostQueue,
     purchaseLines: purchaseLines.map((row) => dateValues(moneyValues(row, [
       "productCents", "packagingCents", "discountCents", "taxCents", "lineTotalCents", "productUnitMills", "pricingRemainderMills",

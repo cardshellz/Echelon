@@ -13,10 +13,12 @@ export interface ProcurementRecord {
 // Opening an editor is navigation only; the amendment service still owns approval.
 export const PO_EDITOR_QUERY_PARAM = "editPo";
 export const INVOICE_CORRECTION_QUERY_PARAM = "correctLine";
+export const INVOICE_COST_QUERY_PARAM = "costLine";
 export interface ProcurementChildNavigationOptions {
   replaceCurrent?: boolean;
   editPo?: boolean;
   invoiceLineCorrectionId?: number;
+  invoiceCostLineId?: number;
 }
 
 export interface ProcurementJourney {
@@ -138,6 +140,12 @@ export function procurementChildHref(
   const purchase = journey.purchase ?? (current?.kind === "purchase" ? current : null);
   const trail = current && !options.replaceCurrent ? [...journey.trail, current] : journey.trail;
   const href = procurementRecordHref(target, { purchase, trail: trail.slice(-MAX_TRAIL_DEPTH) });
+  if (options.invoiceCostLineId !== undefined) {
+    const lineId = options.invoiceCostLineId;
+    if (target.kind !== "invoice" || options.editPo || options.invoiceLineCorrectionId !== undefined
+      || !Number.isSafeInteger(lineId) || lineId <= 0 || lineId > 2_147_483_647) throw new Error("Cost review requires a valid invoice line destination");
+    return `${href}&${INVOICE_COST_QUERY_PARAM}=${lineId}`;
+  }
   if (options.editPo) {
     if (target.kind !== "purchase" || options.invoiceLineCorrectionId !== undefined) throw new Error("The PO editor requires a purchase order destination");
     return `${href}&${PO_EDITOR_QUERY_PARAM}=1`;

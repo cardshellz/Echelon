@@ -343,7 +343,9 @@ describe("ReceivingService.close — stamps unit_cost + unit_cost_mills", () => 
     reconcilePurchaseOrderLine.mockResolvedValue({ costApplications: [{ status: "applied", issues: [] }] });
     await expect(svc.retryCosts(1, "u1")).resolves.toMatchObject({ state: "applied" });
     await expect(svc.retryCosts(1, "u1")).resolves.toMatchObject({ state: "applied" });
-    expect(reconcilePurchaseOrderLine).toHaveBeenCalledTimes(2);
+    // Explicit retries recheck current sources, including after an older success.
+    // The cost owner deduplicates financial applications; stock is never received again.
+    expect(reconcilePurchaseOrderLine).toHaveBeenCalledTimes(3);
     expect(receiveInventoryCalls).toHaveLength(1);
   });
 

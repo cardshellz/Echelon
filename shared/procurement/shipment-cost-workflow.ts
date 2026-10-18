@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { purchaseCostStatusSchema } from "./purchase-cost-status";
 import { isCostReconciliationPosted, resolveCostPostingStatus } from "./cost-posting-status";
 import { costIssueSchema } from "./cost-source-contracts";
 import { shipmentCostPushResultSchema } from "./po-shipment-costs";
@@ -17,6 +18,7 @@ export type ShipmentCostUpdateResult = z.infer<typeof shipmentCostUpdateResultSc
 /** Recorded outcomes, not a claim that an old application matches today's split. */
 export const shipmentCostReviewSchema = z.object({
   shipmentId: shipmentCostWorkflowIdSchema,
+  supplierCosts: purchaseCostStatusSchema.optional(),
   lines: z.array(z.object({
     lineId: shipmentCostWorkflowIdSchema,
     sku: z.string().nullable(),

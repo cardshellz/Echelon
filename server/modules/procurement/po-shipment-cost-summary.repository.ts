@@ -6,6 +6,7 @@ import type { PoShipmentCosts } from "@shared/procurement/po-shipment-costs";
 import { resolveShipmentChargeEvidence } from "./domain/shipment-charge-evidence";
 import { dateValues } from "./purchase-workspace-read";
 import { readShipmentCostPostingEvidence } from "./shipment-cost-posting-read.repository";
+import { readPurchaseCostStatus } from "./purchase-cost-status.repository";
 
 type SummaryReader = {
   execute(query: SQL): Promise<{ rows: Record<string, unknown>[] }>;
@@ -29,7 +30,7 @@ export async function readPoShipmentCosts(
       );
       if (!header.rows[0]) return null;
       const linked =
-        await tx.execute(sql`SELECT line.id,line.inbound_shipment_id,line.qty_shipped,line.sku,
+        await tx.execute(sql`SELECT line.id,line.inbound_shipment_id,line.purchase_order_line_id,line.qty_shipped,line.sku,
           shipment.shipment_number,shipment.status AS shipment_status
       FROM procurement.inbound_shipment_lines line JOIN procurement.inbound_shipments shipment ON shipment.id=line.inbound_shipment_id
       WHERE line.purchase_order_id=${poId} AND shipment.status<>'cancelled' ORDER BY line.id`);
@@ -235,7 +236,11 @@ export async function readPoShipmentCosts(
           };
         }),
       );
-      return costs;
+      return {
+        ...costs,
+        supplierCosts: await readPurchaseCostStatus(tx, linked.rows.flatMap(line => line.purchase_order_line_id == null
+          ? [] : [costInteger(line.purchase_order_line_id, "purchaseOrderLineId", 1)])),
+      };
     },
     { isolationLevel: "repeatable read", accessMode: "read only" },
   );

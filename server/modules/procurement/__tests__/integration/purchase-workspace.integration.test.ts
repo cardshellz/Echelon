@@ -320,7 +320,7 @@ databaseTests.sequential("purchase workspace PostgreSQL read model", () => {
       expect(revisions[0].applications[0]).toMatchObject({ id: applicationId, evidenceState: "verified_record", outcome: { totalCogsDeltaCents: -500 },
         reportingEvent: { evidenceState: "verified_record", externalDelivery: "not_verified" } });
       expect(revisions[0].applications[0].lotChanges.map((change) => [change.lotId, change.lineage])).toEqual([[901,"original_receipt"],[902,"transformed"]]);
-      expect(result.costTrace?.receiptCostRequests).toEqual([expect.objectContaining({ id: requestId, state: "pending", receiptStatus: "closed" })]);
+      expect(result.costTrace?.receiptCostRequests).toEqual([expect.objectContaining({ id: requestId, state: "review_required", recordedState: "pending", receiptStatus: "closed" })]);
       await pool.query(`INSERT INTO procurement.receipt_cost_attempts(request_id,state,result,recorded_by,recorded_at)
         VALUES ($1,'retry_required',$2,'fixture-owner',$3)`, [requestId, { summary: { requestId, purchaseOrderLineId: 11, state: "retry_required", attemptRecorded: true,
         issues: [{ code: "RECEIPT_COST_RETRY_REQUIRED", message: "Synthetic transaction failure." }] } }, now]);
@@ -328,7 +328,10 @@ databaseTests.sequential("purchase workspace PostgreSQL read model", () => {
         VALUES ($1,'applied',$2,'fixture-owner',$3)`, [requestId, { summary: { requestId, purchaseOrderLineId: 11, state: "applied", attemptRecorded: true, issues: [] },
         reconciliation: { costApplications: [{ ...outcome, applicationId }] } }, now]);
       const queue = (await workspace()).costTrace!.receiptCostRequests!;
-      expect(queue[0].state).toBe("applied"); expect(queue[0].attempts).toHaveLength(2);
+      // An old successful product-only attempt cannot establish current supplier
+      // costs: this fixture has no confirmed invoice component evidence.
+      expect(queue[0].state).toBe("review_required");
+      expect(queue[0].recordedState).toBe("applied"); expect(queue[0].attempts).toHaveLength(2);
       expect(queue[0].attempts[0]).toMatchObject({ evidenceState: "verified_record", applicationIds: [applicationId] });
       expect(queue[0].attempts[1].state).toBe("retry_required");
     } finally {
