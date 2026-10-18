@@ -24,6 +24,12 @@ export async function readCatalogStockVariantOwners(client: StockSelectionQueryC
     'SELECT id,product_id AS "productId" FROM catalog.product_variants WHERE id=ANY($1::integer[]) ORDER BY id', [ids])).rows);
 }
 
+/** Complete product scope for a caller that must detect omitted saved members. */
+export async function readCatalogStockProductVariantIds(client: StockSelectionQueryClient, productId: number): Promise<number[]> {
+  return z.array(z.object({ id })).parse((await client.query(
+    "SELECT id FROM catalog.product_variants WHERE product_id=$1 ORDER BY id", [id.parse(productId)])).rows).map(row => row.id);
+}
+
 /** Catalog owns these lifecycle/identity facts; callers own the decision to list.
  * A requested ID from another product is not silently reassigned to this product. */
 export async function readCatalogStockSelectionFacts(client: StockSelectionQueryClient,

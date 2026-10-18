@@ -13,6 +13,7 @@ import { PublicationMappingPreparationStore, applyMappingPreparation, reviewMapp
 import { PostgresInventoryChannelExposureAdminStore } from "./inventory-channel-exposure-admin.repository";
 import { promoteInventoryCutoverDefinitionsInsideTransaction } from "./inventory-cutover-definitions.repository";
 import { captureEbayPublicationReadiness, readinessDigest } from "./ebay-publication-readiness.read";
+import { lockEbayListingPreparationScope, validateEbayListingPreparationScope, type VerifiedEbayListingPreparation } from "../../channels/ebay-listing-preparation-scope";
 
 type ConnectionPool = Pick<Pool, "connect">;
 const fail = (code: string, message: string): never => { throw new InventoryPublicationMembershipError(code, message); };
@@ -21,16 +22,18 @@ const normalize = (raw: unknown): InventoryEbayPublicationReadinessInput => {
   return { ...source, variants: [...source.variants].sort((a, b) => a.productVariantId - b.productVariantId) };
 };
 
-export async function reviewEbayPublicationReadiness(pool: ConnectionPool, input: InventoryEbayPublicationReadinessInput) {
+export async function reviewEbayPublicationReadiness(pool: ConnectionPool, input: InventoryEbayPublicationReadinessInput,
+  verifiedListing?: VerifiedEbayListingPreparation) {
   const source = normalize(input);
   return new PublicationMappingPreparationStore(pool).transaction(false,
-    async client => (await captureEbayPublicationReadiness(client, source, false)).review);
+    async client => (await captureEbayPublicationReadiness(client, source, false, verifiedListing)).review);
 }
 
 /** Preflight is read-only and must run before the first provider mutation.
  * Admission still rechecks canonical quantities immediately around each write. */
-export async function assertEbayPublicationReady(pool: ConnectionPool, input: InventoryEbayPublicationReadinessInput): Promise<void> {
-  const review = await reviewEbayPublicationReadiness(pool, input);
+export async function assertEbayPublicationReady(pool: ConnectionPool, input: InventoryEbayPublicationReadinessInput,
+  verifiedListing?: VerifiedEbayListingPreparation): Promise<void> {
+  const review = await reviewEbayPublicationReadiness(pool, input, verifiedListing);
   if (!review.currentlyReady) fail(review.blockers[0]?.code ?? "EBAY_PUBLICATION_STOCK_REVIEW_REQUIRED",
     review.blockers.map(row => row.message).join(" ") || "Exact stock mappings have not finished automatic preparation. Retry this saved listing request.");
 }
@@ -39,27 +42,37 @@ export async function assertEbayPublicationReady(pool: ConnectionPool, input: In
  * identities. Prepare its exact mappings automatically; selection, holds, ATP,
  * source/model/policy and provider admission remain with their existing owners. */
 export async function ensureEbayPublicationReady(pool: ConnectionPool, input: InventoryEbayPublicationReadinessInput,
-  context: { commandKey: string; actor: string; now: Date }): Promise<void> {
-  const source = normalize(input), contextHash = readinessDigest(source);
-  const previous = await findEbayPublicationReadinessReceipt(pool, { channelId: source.channelId, productId: source.productId,
-    commandKey: context.commandKey, actor: context.actor, contextHash });
+  context: { commandKey: string; actor: string; now: Date; verifiedListing?: VerifiedEbayListingPreparation }): Promise<void> {
+  const source = normalize(input);
+  const verifiedScope = context.verifiedListing ? validateEbayListingPreparationScope(source, context.verifiedListing) : null;
+  const legacyContextHash = readinessDigest(source);
+  const contextHash = readinessDigest(verifiedScope ? { source, verifiedListingScopeHash: verifiedScope.fingerprint } : source);
+  const findCompatibleReceipt = async () => {
+    const receipt = await findEbayPublicationReadinessReceipt(pool, { channelId: source.channelId, productId: source.productId,
+      commandKey: context.commandKey, actor: context.actor, ...(verifiedScope ? {} : { contextHash }) });
+    // A pre-upgrade receipt already prepared the broader product. It remains
+    // valid for the same source; fresh proof is still checked below on replay.
+    if (receipt && receipt.contextHash !== contextHash && (!verifiedScope || receipt.contextHash !== legacyContextHash))
+      fail("EBAY_PUBLICATION_STOCK_COMMAND_CONFLICT", "This saved preparation belongs to a different verified listing scope.");
+    return receipt;
+  };
+  const previous = await findCompatibleReceipt();
   if (!previous) {
-    const review = await reviewEbayPublicationReadiness(pool, source);
+    const review = await reviewEbayPublicationReadiness(pool, source, context.verifiedListing);
     if (!review.ready) fail(review.blockers[0]?.code ?? "STOCK_MAPPING_NOT_READY", review.blockers.map(row => row.message).join(" "));
     try {
       await withEbayPublicationReadinessApplied(pool, { source, commandKey: context.commandKey, contextHash,
-        expectedReviewHash: review.reviewHash }, context.actor, context.now, async () => undefined);
+        expectedReviewHash: review.reviewHash }, context.actor, context.now, async () => undefined, undefined, context.verifiedListing);
     } catch (error) {
       // Another delivery may finish this exact saved job between our initial
       // receipt read and the fresh stock preview. Its committed source+actor
       // receipt wins even though the internal before/after review hash changed.
       if (!(error instanceof InventoryPublicationMembershipError)
         || !["EBAY_PUBLICATION_STOCK_COMMAND_CONFLICT", "EBAY_PUBLICATION_STOCK_REVIEW_STALE"].includes(error.code)
-        || !await findEbayPublicationReadinessReceipt(pool, { channelId: source.channelId, productId: source.productId,
-          commandKey: context.commandKey, actor: context.actor, contextHash })) throw error;
+        || !await findCompatibleReceipt()) throw error;
     }
   }
-  await assertEbayPublicationReady(pool, source);
+  await assertEbayPublicationReady(pool, source, context.verifiedListing);
 }
 
 const receiptQuerySchema = z.object({ channelId: z.number().int().positive(), productId: z.number().int().positive(),
@@ -125,27 +138,38 @@ export async function rejectEbayPublicationReadinessCommand(pool: ConnectionPool
 export async function withEbayPublicationReadinessApplied<T>(pool: ConnectionPool,
   raw: InventoryEbayPublicationReadinessApply, actorInput: string, nowInput: Date,
   followUp: (client: PoolClient, receipt: InventoryEbayPublicationReadinessReceipt) => Promise<T>,
-  beforeCapture?: (client: PoolClient) => Promise<void>): Promise<{ receipt: InventoryEbayPublicationReadinessReceipt; result: T }> {
+  beforeCapture?: (client: PoolClient) => Promise<void>, verifiedListing?: VerifiedEbayListingPreparation): Promise<{ receipt: InventoryEbayPublicationReadinessReceipt; result: T }> {
   const parsed = inventoryEbayPublicationReadinessApplySchema.parse(raw);
   const input = { ...parsed, source: normalize(parsed.source) };
+  const verifiedScope = verifiedListing ? validateEbayListingPreparationScope(input.source, verifiedListing) : null;
+  const scopeContextHash = verifiedScope ? readinessDigest({ source: input.source, verifiedListingScopeHash: verifiedScope.fingerprint }) : null;
+  if (verifiedScope && input.contextHash !== scopeContextHash && input.contextHash !== readinessDigest(input.source))
+    fail("EBAY_PUBLICATION_STOCK_COMMAND_CONFLICT", "The preparation request does not match its verified listing scope.");
   const actor = z.string().trim().min(1).max(100).parse(actorInput), now = z.date().parse(nowInput);
   const requestHash = readinessDigest({ input, actor });
   const preparation = new PublicationMappingPreparationStore(pool);
   return preparation.transaction("configuration", async (client, scopeKeys) => {
     await acquireInventoryCutoverFenceInsideTransaction(client, { expectedAuthority: "canonical", expectedConfigurationRunId: null });
     await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))", [`ebay-stock:${input.commandKey}`]);
+    if (verifiedListing) await lockEbayListingPreparationScope(client, input.source, verifiedListing);
     const previous = await findReceipt(client, { channelId: input.source.channelId, productId: input.source.productId,
       commandKey: input.commandKey, actor, expectedReviewHash: input.expectedReviewHash, contextHash: input.contextHash });
     if (previous) {
-      const row = (await client.query<{ request_hash: string }>("SELECT request_hash FROM inventory.ebay_publication_readiness_applications WHERE command_key=$1::uuid", [input.commandKey])).rows[0];
+      const row = (await client.query<{ request_hash: string; requires_listing_proof: boolean }>(
+        "SELECT request_hash,source ? 'verifiedListing' AS requires_listing_proof FROM inventory.ebay_publication_readiness_applications WHERE command_key=$1::uuid", [input.commandKey])).rows[0];
       if (row?.request_hash !== requestHash) fail("EBAY_PUBLICATION_STOCK_COMMAND_CONFLICT", "This command reference belongs to another stock publication source.");
+      if (row.requires_listing_proof && !verifiedListing)
+        fail("EBAY_PUBLICATION_STOCK_COMMAND_CONFLICT", "This preparation requires its verified listing evidence on replay.");
+      if (verifiedListing) await captureEbayPublicationReadiness(client, input.source, true, verifiedListing);
       return { receipt: previous, result: await followUp(client, previous) };
     }
+    if (verifiedScope && input.contextHash !== scopeContextHash)
+      fail("EBAY_PUBLICATION_STOCK_COMMAND_CONFLICT", "A new verified preparation must retain its exact listing scope.");
     // Canonical publication registration takes account locks before catalog
     // locks. The composed channel owner reserves that prefix here, after the
     // inventory fence and before capture takes OAuth/catalog/listing row locks.
     await beforeCapture?.(client);
-    const evidence = await captureEbayPublicationReadiness(client, input.source, true);
+    const evidence = await captureEbayPublicationReadiness(client, input.source, true, verifiedListing);
     if (evidence.review.reviewHash !== input.expectedReviewHash) fail("EBAY_PUBLICATION_STOCK_REVIEW_STALE", "Stock, mappings, or publication settings changed. Review the current plan again.");
     if (!evidence.review.ready || !evidence.target) fail("EBAY_PUBLICATION_STOCK_REVIEW_BLOCKED", evidence.review.blockers.map(row => row.message).join(" "));
     const target = evidence.target!;
@@ -170,10 +194,11 @@ export async function withEbayPublicationReadinessApplied<T>(pool: ConnectionPoo
     if (selectors.length) await promoteInventoryCutoverDefinitionsInsideTransaction(client, {
       contractVersion: "inventory_cutover_selection_manifest_v1", productIds: [], publicationTargetIds: [target.id], selections: selectors,
     }, { actor, reason: "Reviewed exact eBay SKU stock enrollment before publication.", occurredAt: now });
-    const promoted = await captureEbayPublicationReadiness(client, input.source, true);
+    const promoted = await captureEbayPublicationReadiness(client, input.source, true, verifiedListing);
     if (!promoted.review.ready) fail("EBAY_PUBLICATION_STOCK_REVIEW_BLOCKED", promoted.review.blockers.map(row => row.message).join(" "));
     const command = { publicationTargetId: target.id, expectedTargetRevision: target.revision, productId: input.source.productId,
-      productVariantIds: input.source.variants.map(row => row.productVariantId), allowRetainedZero: input.source.purpose === "sync" };
+      productVariantIds: input.source.variants.map(row => row.productVariantId), allowRetainedZero: input.source.purpose === "sync",
+      ...(evidence.listingScope ? { verifiedListingScopeHash: evidence.listingScope.fingerprint } : {}) };
     const reviewed = (await reviewMappingPreparation(client, command, true)).review;
     const applied = await applyMappingPreparation(client, scopeKeys, { ...command, expectedReviewHash: reviewed.reviewHash,
       idempotencyKey: `ebay-stock:${input.commandKey}` }, actor, requestHash, now,
@@ -183,7 +208,7 @@ export async function withEbayPublicationReadinessApplied<T>(pool: ConnectionPoo
       contextHash: input.contextHash, appliedAt: now.toISOString(), appliedBy: actor, mappingPreparation: applied, alreadyApplied: false });
     await client.query(`INSERT INTO inventory.ebay_publication_readiness_applications(command_key,channel_id,product_id,request_hash,actor,occurred_at,source,review,receipt)
       VALUES($1::uuid,$2,$3,$4,$5,$6,$7::jsonb,$8::jsonb,$9::jsonb)`, [input.commandKey, input.source.channelId, input.source.productId,
-      requestHash, actor, now, JSON.stringify(input.source), JSON.stringify(evidence.review), JSON.stringify(receipt)]);
+      requestHash, actor, now, JSON.stringify(verifiedListing ? { ...input.source, verifiedListing } : input.source), JSON.stringify(evidence.review), JSON.stringify(receipt)]);
     await client.query(`INSERT INTO public.audit_events(timestamp,level,actor,action,target,changes,context)
       VALUES($1,'AUDIT',$2,'inventory_availability.ebay_publication_stock.enrolled',$3,$4::jsonb,$5::jsonb)`,
     [now, actor, `inventory.inventory_publication_target:${target.id}`, JSON.stringify({ before: evidence.review, after: receipt }),
