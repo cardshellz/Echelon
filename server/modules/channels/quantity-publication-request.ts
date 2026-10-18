@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { QuantityPublicationAdmissionError } from "../inventory-planning/domain/quantity-publication-admission";
-import { observeEbayQuantityRequest } from "../inventory-planning/application/quantity-provider-request-evidence";
+import { observeEbayQuantityRequest, withEbayQuantityRequestJournal } from "../inventory-planning/application/quantity-provider-request-evidence";
 import { readEbayBulkQuantityResponse } from "./adapters/ebay/ebay-quantity-update";
 
 export interface EbayQuantityHttpRequest {
@@ -54,6 +54,15 @@ export function rewriteEbayCanonicalQuantities(value: unknown, quantity: number)
  * refreshes ALL member inventory items/offers under the group's held member locks.
  */
 export async function executeAdmittedEbayQuantityRequest<T>(input: EbayQuantityHttpRequest,
+  admission: EbayQuantityRequestAdmission, rawRequest: <R>(input: EbayQuantityHttpRequest) => Promise<R>): Promise<T> {
+  if (!ebayQuantityMutationIdentity(input.method, input.path, input.body)) return rawRequest<T>(input);
+  // This protocol journals every mutation before network I/O. Persist that
+  // contract with admission so a crash during its read-only preparation can be
+  // distinguished from a request that may have reached eBay.
+  return withEbayQuantityRequestJournal(input, () => executeAdmittedEbayQuantityRequestInsideJournal<T>(input, admission, rawRequest));
+}
+
+async function executeAdmittedEbayQuantityRequestInsideJournal<T>(input: EbayQuantityHttpRequest,
   admission: EbayQuantityRequestAdmission, rawRequest: <R>(input: EbayQuantityHttpRequest) => Promise<R>): Promise<T> {
   const request = <R>(next: EbayQuantityHttpRequest): Promise<R> =>
     observeEbayQuantityRequest(next, () => rawRequest<R>(next));

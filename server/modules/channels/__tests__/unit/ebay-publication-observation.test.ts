@@ -6,11 +6,11 @@ function observation() {
   return { providerAccount: { provider: "ebay", accountNamespace: "production", externalAccountId: syncIdentity.accountId,
     identityScheme: "provider_user_id", externalDisplayNameSnapshot: null, evidenceHash: "a".repeat(64) },
     marketplaceId: syncIdentity.marketplaceId, isPublished: true, externalUrl: null,
-    publicationKeyIdentity: { identityNamespace: "ebay.inventory_item_group", externalId: syncIdentity.groupKey },
-    listingIdentity: { identityNamespace: "ebay.listing", externalId: syncIdentity.variants[0].listingId },
+    publicationKeyIdentity: { identityNamespace: "ebay:production:EBAY_US:inventory_item_group", externalId: syncIdentity.groupKey },
+    listingIdentity: { identityNamespace: "ebay:production:EBAY_US:listing", externalId: syncIdentity.variants[0].listingId },
     members: syncIdentity.variants.map(member => ({ sku: member.sku, variantIdentity: null,
-      offerIdentity: { identityNamespace: "ebay.offer", externalId: member.offerId },
-      inventoryItemIdentity: { identityNamespace: "ebay.inventory_item", externalId: member.sku } })),
+      offerIdentity: { identityNamespace: "ebay:production:EBAY_US:offer", externalId: member.offerId },
+      inventoryItemIdentity: { identityNamespace: "ebay:production:EBAY_US:inventory_item", externalId: member.sku } })),
     evidence: {}, observedAt: new Date("2026-10-11T21:25:00Z") };
 }
 describe("retained publication identity evidence", () => {
@@ -22,6 +22,12 @@ describe("retained publication identity evidence", () => {
   it("requires the actual complete observation, not just saved provider IDs", () => {
     expect(() => assertEbayPublicationObservation(syncIdentity, undefined)).toThrow(expect.objectContaining({ code: "EBAY_SYNC_PUBLICATION_UNVERIFIED" }));
   });
+  it.each(["ebay.offer", "ebay:sandbox:EBAY_US:offer", "ebay:production:EBAY_GB:offer", "ebay:production:EBAY_US:listing"])(
+    "rejects a noncanonical or differently scoped offer namespace %s", identityNamespace => {
+      const receipt = observation();
+      receipt.members[0].offerIdentity.identityNamespace = identityNamespace;
+      expect(() => assertEbayPublicationObservation(syncIdentity, receipt)).toThrow(expect.objectContaining({ code: "EBAY_SYNC_PROVIDER_IDENTITY_CHANGED" }));
+    });
   it.each(["account", "group", "offer", "listing", "unpublished", "extra-member"] as const)("rejects %s evidence mismatch before projection", kind => {
     const receipt = observation();
     if (kind === "account") receipt.providerAccount.externalAccountId = "another-seller";

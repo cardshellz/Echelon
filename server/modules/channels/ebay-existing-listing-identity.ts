@@ -3,6 +3,7 @@ import {
   marketplaceObservedListingPublicationSchema,
   type MarketplaceListingRegistrationObserver,
   type ListingRegistrationVariantCandidate,
+  type MarketplaceObservedListingPublication,
 } from "../marketplace-listings";
 import {
   EbayListingSyncError,
@@ -101,8 +102,14 @@ export async function resolveExistingEbayListingIdentity(
   source: EbayListingSyncIdentity,
   observer: MarketplaceListingRegistrationObserver,
   candidates: readonly ListingRegistrationVariantCandidate[],
-): Promise<EbayListingSyncIdentity> {
-  const listingIds = [...new Set(source.variants.map(member => member.listingId).filter((value): value is string => value !== null))];
+): Promise<{ identity: EbayListingSyncIdentity; observation: MarketplaceObservedListingPublication }> {
+  // A retired offer can retain an older listing ID. Included saved members
+  // choose the maintenance target; every other mapping is still observed and
+  // must either belong to that live listing or prove the nonmember rule below.
+  const includedListingIds = source.variants.filter(member => member.contentSyncEnabled !== false)
+    .map(member => member.listingId).filter((value): value is string => value !== null);
+  const listingIds = [...new Set(includedListingIds.length ? includedListingIds
+    : source.variants.map(member => member.listingId).filter((value): value is string => value !== null))];
   if (listingIds.length !== 1) {
     throw identityError("EBAY_SYNC_LISTING_IDENTITY_REQUIRED", `Product ${source.productId} must map to one existing eBay listing; ${listingIds.length} saved listing IDs were found.`);
   }
@@ -116,19 +123,62 @@ export async function resolveExistingEbayListingIdentity(
     locator: { providerPublicationKey: null, externalListingId: listingIds[0] },
     memberCandidates: candidates,
   }, observer, source.accountId);
+  return { identity: bindObservedEbayListingMembers(source, observation), observation };
+}
+
+const nonMemberEvidenceSchema = z.array(z.object({
+  sku,
+  inventoryItemExists: z.boolean(),
+  groupIds: z.array(z.string().trim().min(1).max(255)).max(1_000),
+  offers: z.array(z.object({
+    sku: sku.nullable(), marketplaceId: z.string().trim().min(1).max(100).nullable(),
+    offerId: z.string().trim().min(1).max(255), status: z.enum(["PUBLISHED", "UNPUBLISHED"]),
+    listingId: z.string().trim().min(1).max(255).nullable(), listingStatus: z.string().trim().min(1).max(100).nullable(),
+  }).strict()).max(10_000),
+}).strict()).max(250);
+
+/** One rule for preparation and durable binding: preserve every live member,
+ * but a disabled, exact unpublished offer outside all groups is not a member
+ * of this listing. Saved source mappings remain intact for replay and audit. */
+export function bindObservedEbayListingMembers(
+  source: EbayListingSyncIdentity,
+  observation: MarketplaceObservedListingPublication,
+): EbayListingSyncIdentity {
   const observedBySku = new Map(observation.members.map(member => [member.sku, member]));
-  if (observedBySku.size !== observation.members.length || observation.members.length !== source.variants.length
-    || source.variants.some(member => !observedBySku.has(member.sku))) {
+  const missing = source.variants.filter(member => !observedBySku.has(member.sku));
+  if (observedBySku.size !== observation.members.length
+    || observation.members.some(member => !source.variants.some(saved => saved.sku === member.sku))) {
     throw identityError("EBAY_SYNC_MEMBERSHIP_CHANGED", `Product ${source.productId}'s eBay listing membership differs from its saved variant mappings. Review the complete listing before syncing.`);
   }
+  if (missing.length) {
+    const evidence = nonMemberEvidenceSchema.safeParse(observation.evidence.nonMemberCandidates);
+    const groupSkus = z.array(sku).max(10_000).safeParse(observation.evidence.groupVariantSkus);
+    if (!evidence.success || !groupSkus.success || new Set(evidence.data.map(member => member.sku)).size !== evidence.data.length
+      || (observation.publicationKeyIdentity !== null
+        ? groupSkus.data.length !== observation.members.length || groupSkus.data.some(sku => !observedBySku.has(sku))
+          || new Set(groupSkus.data).size !== groupSkus.data.length
+        : groupSkus.data.length !== 0)
+      || evidence.data.length !== missing.length || missing.some(member => {
+        const read = evidence.data.find(candidate => candidate.sku === member.sku);
+        const offer = read?.offers[0];
+        return member.contentSyncEnabled !== false || member.offerId === null || !read?.inventoryItemExists
+          || read.groupIds.length !== 0 || groupSkus.data.includes(member.sku) || read.offers.length !== 1
+          || offer?.offerId !== member.offerId || offer.sku !== member.sku || offer.marketplaceId !== source.marketplaceId
+          || offer.status !== "UNPUBLISHED" || offer.listingId !== null || offer.listingStatus !== null;
+      })) {
+      throw identityError("EBAY_SYNC_MEMBERSHIP_CHANGED", `Product ${source.productId} has saved variants outside its live eBay listing whose unpublished status is not verified. Sync cannot change the listing membership.`);
+    }
+  }
   const groupKey = observation.publicationKeyIdentity?.externalId ?? null;
-  if (source.variants.length > 1 && groupKey === null) {
+  const published = source.variants.filter(member => observedBySku.has(member.sku));
+  if (published.length > 1 && groupKey === null) {
     throw identityError("EBAY_SYNC_GROUP_IDENTITY_REQUIRED", `Product ${source.productId}'s multi-variant eBay listing has no verified inventory group.`);
   }
-  const variants = source.variants.map(member => {
+  const variants = published.map(member => {
     const observed = observedBySku.get(member.sku)!;
     if (observed.inventoryItemIdentity?.externalId !== member.sku
       || observed.offerIdentity === null
+      || (member.listingId !== null && member.listingId !== observation.listingIdentity.externalId)
       || (member.offerId !== null && member.offerId !== observed.offerIdentity.externalId)) {
       throw identityError("EBAY_SYNC_IDENTITY_CHANGED", `Saved eBay SKU ${member.sku} no longer matches its exact inventory item and offer. Review variant ${member.variantId}.`);
     }

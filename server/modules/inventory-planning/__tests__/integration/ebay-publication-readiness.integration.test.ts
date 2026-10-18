@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import type { Pool } from "pg";
 import { createInventoryCutoverTestDatabase, type InventoryCutoverTestDatabase } from "../../../inventory/__tests__/fixtures/inventory-cutover-database";
 import { cutoverCompositionBaseSql } from "../fixtures/inventory-cutover-composition-database.fixture";
@@ -62,7 +64,11 @@ dbDescribe.sequential("reviewed eBay publication stock enrollment, real PostgreS
   beforeEach(async () => {
     database = await createInventoryCutoverTestDatabase(url, disposable, cutoverCompositionBaseSql);
     runtime.pool = database.pool; runtime.api.mockReset();
-    await installEbayPublicationInventoryFixture(database.pool);
+    await installEbayPublicationInventoryFixture(database.pool, { includePreflightRecoveryMigrations: true, seedPublicationJob: false });
+    for (const file of ["0731_ebay_listing_sync_verification_checkpoint.sql", "0732_ebay_listing_sync_identity_admission.sql",
+      "0736_ebay_listing_mapping_repairs.sql", "0737_ebay_publication_completion.sql"]) {
+      await database.pool.query(readFileSync(resolve(process.cwd(), "migrations", file), "utf8"));
+    }
     await database.pool.query('CREATE TABLE saved_publication_work(command_key uuid PRIMARY KEY)');
   }, 30_000);
   afterEach(async () => { await database?.close(); });
@@ -444,8 +450,11 @@ dbDescribe.sequential("reviewed eBay publication stock enrollment, real PostgreS
     expect((await database.pool.query("SELECT * FROM inventory.ebay_publication_readiness_rejections")).rows).toEqual([]);
   });
   it("uses the real route client, inventory admission, planner and request journal after enrollment", async () => {
-    await database.pool.query(`UPDATE channels.ebay_listing_sync_jobs SET identity=jsonb_set(identity,'{variants}',
-      identity->'variants'||'[{"variantId":102,"sku":"NEW","offerId":null,"listingId":null}]'::jsonb)`);
+    await database.pool.query(`INSERT INTO channels.ebay_listing_sync_jobs(id,channel_id,connection_id,product_id,operation,state,
+      identity,identity_hash,requested_by,next_attempt_at,created_at,updated_at)
+      VALUES('00000000-0000-4000-8000-000000000001',67,9,20,'publish','queued',
+        '{"channelId":67,"connectionId":9,"productId":20,"variants":[{"variantId":101,"sku":"P5","offerId":"offer-P5","listingId":null},{"variantId":102,"sku":"NEW","offerId":null,"listingId":null}]}',
+        repeat('a',64),'fixture',transaction_timestamp(),transaction_timestamp(),transaction_timestamp())`);
     await database.pool.query("INSERT INTO inventory.inventory_levels(id,warehouse_location_id,product_variant_id,variant_qty,reserved_qty,picked_qty,packed_qty) VALUES(12,100,102,8,0,0,0)");
     const selected = { ...source(), variants: [...source().variants, { productVariantId: 102, sku: "NEW" }] };
     const item = { availability: { shipToLocationAvailability: { quantity: 999 } }, condition: "NEW" as const,

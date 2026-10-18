@@ -18,3 +18,4 @@ export * from "./infrastructure/pg-listing-replacement-execution.repository";
 export * from "./infrastructure/pg-listing-replacement-owner-reader";
 export * from "./infrastructure/pg-listing-replacement.repository";
 export * from "./infrastructure/providers/ebay/ebay-listing-replacement.provider";
+export { buildEbayRegistrationIdentityNamespace } from "./infrastructure/providers/ebay/ebay-registration-contracts";

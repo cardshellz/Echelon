@@ -7,6 +7,11 @@ import { quantityPublicationScopeSchema } from "../domain/quantity-publication-a
 import { isEbayPublicationRequest, isRejectedEbayPublicationReceipt, terminalEbayResponseEvidence,
   type TerminalRequestReceipt } from "../domain/quantity-provider-terminal-response";
 import { QUANTITY_PUBLICATION_LOCK_NAMESPACE, quantityPublicationScopeLockKey } from "./quantity-publication-admission.repository";
+import { ebayRequestJournalContractSchema, isCompletedEbayNonPublicationAttempt, legacyEbayPublicationPreflightProofSchema,
+  terminalEbayPublicationPreparationEvidence, type EbayNoRequestProof,
+  type EbayRequestJournalContract, type LegacyEbayPublicationPreflightProof } from "../domain/ebay-publication-preflight";
+import { journalContractNoRequestProof, recoverNoRequestAttemptInsideTransaction } from "./quantity-provider-preflight-recovery.repository";
+import { recoverTerminalRequestAttemptInsideTransaction } from "./quantity-provider-response-recovery.repository";
 
 const inputSchema = z.object({
   scopes: z.array(quantityPublicationScopeSchema).min(1).max(251),
@@ -40,15 +45,160 @@ export interface EbayPublicationRejectionRead {
 }
 export interface EbayPublicationRejectionReader {
   read(input: EbayPublicationRejectionInput, client?: Client): Promise<EbayPublicationRejectionRead>;
+  recoverNotSent?(input: EbayPublicationRejectionInput & { legacyPreflightProof?: LegacyEbayPublicationPreflightProof;
+    stageJournalContract?: EbayRequestJournalContract },
+    client: Client): Promise<EbayPublicationNotSentRead>;
+}
+export interface EbayPublicationNotSentRead {
+  busy: boolean;
+  evidence: { hash: string; attemptIds: string[]; proofs: Array<{ attemptId: string; proof: EbayNoRequestProof }>;
+    preparations?: Array<{ attemptId: string; contract: EbayRequestJournalContract; requests: TerminalRequestReceipt[]; requestEvidenceHash: string }>;
+    stageJournalContract?: EbayRequestJournalContract } | null;
 }
 const digest = (value: unknown): string => createHash("sha256").update(canonicalJson(value)).digest("hex");
 const noEvidence = (): EbayPublicationRejectionRead => ({ busy: false, evidence: null });
+const ATTEMPT_PAGE_SIZE = 100;
+const MAX_PUBLICATION_CANDIDATES = 100;
+type PreflightAttempt = { id: string; before_record: Record<string, unknown>; affected_scope_keys: string[]; started_at: Date };
 
-/** Read-only proof for a saved publish stage. The supplied transaction retains
- * exact scope locks until its owner appends the channels recovery receipt. This
- * never changes inventory evidence, acknowledges quantity, or sends provider I/O. */
+/** Terminal evidence for a saved publish stage. The supplied transaction retains
+ * exact scope locks until its owner appends the channels recovery checkpoint.
+ * No method acknowledges quantity or sends provider I/O. */
 export class PostgresEbayPublicationRejectionReader implements EbayPublicationRejectionReader {
-  constructor(private readonly pool: Pick<Pool, "connect">) {}
+  constructor(private readonly pool: Pick<Pool, "connect">, private readonly clock: () => Date = () => new Date()) {}
+
+  /** The channel owns its publish-stage checkpoint. Recover the inventory
+   * attempt in that same transaction so a crash cannot commit half a recovery.
+   * A journal contract proves only the exact original mutation identified here;
+   * historical callbacks additionally require the channel's immutable event proof. */
+  async recoverNotSent(raw: EbayPublicationRejectionInput & { legacyPreflightProof?: LegacyEbayPublicationPreflightProof;
+    stageJournalContract?: EbayRequestJournalContract },
+    client: Client): Promise<EbayPublicationNotSentRead> {
+    const { legacyPreflightProof: historical, stageJournalContract: stageRaw, ...base } = raw;
+    const input = inputSchema.parse(base);
+    const legacy = historical === undefined ? null : legacyEbayPublicationPreflightProofSchema.parse(historical);
+    const stageContract = stageRaw === undefined ? null : ebayRequestJournalContractSchema.parse(stageRaw);
+    if (legacy && (legacy.groupKey !== input.groupKey || legacy.marketplaceId !== input.marketplaceId
+      || Date.parse(legacy.stageStartedAt) !== Date.parse(input.startedAt))) return { busy: false, evidence: null };
+    const timestamp = this.clock();
+    if (!Number.isFinite(timestamp.getTime())) throw new Error("Invalid publication preflight recovery clock.");
+    const keys = [...new Set(input.scopes.map(quantityPublicationScopeLockKey))].sort();
+    const gate = (await client.query<{ acquired: boolean }>(
+      "SELECT pg_try_advisory_xact_lock_shared($1,0) AS acquired", [QUANTITY_PUBLICATION_LOCK_NAMESPACE])).rows[0];
+    if (!gate?.acquired) return { busy: true, evidence: null };
+    for (const key of keys) {
+      const locked = (await client.query<{ acquired: boolean }>(
+        "SELECT pg_try_advisory_xact_lock(hashtextextended($1,918420)) AS acquired", [key])).rows[0];
+      if (!locked?.acquired) return { busy: true, evidence: null };
+    }
+    const expectedPath = input.groupKey === null ? `/sell/inventory/v1/offer/${encodeURIComponent(input.offerIds[0])}/publish`
+      : "/sell/inventory/v1/offer/publish_by_inventory_item_group";
+    const expectedHash = digest(input.groupKey === null ? null : { inventoryItemGroupKey: input.groupKey, marketplaceId: input.marketplaceId });
+    if (stageContract && (stageContract.method !== "POST" || stageContract.path !== expectedPath
+      || stageContract.requestHash !== expectedHash)) return { busy: false, evidence: null };
+    const attempts = await this.readPreflightCandidates(client, keys, input.startedAt);
+    if (!attempts || (!attempts.length && !stageContract)) return { busy: false, evidence: null };
+    const proofs: Array<{ attemptId: string; proof: EbayNoRequestProof }> = [];
+    const preparations: Array<{ attemptId: string; evidence: NonNullable<ReturnType<typeof terminalEbayPublicationPreparationEvidence>> }> = [];
+    const legacyCandidates = attempts.filter(attempt => !attempt.before_record.request_journal_contract);
+    for (const attempt of attempts) {
+      if (!attempt.affected_scope_keys.length || attempt.affected_scope_keys.some(key => !keys.includes(key))) return { busy: false, evidence: null };
+      const state = String(attempt.before_record.state);
+      const requests = await this.readRequestReceipts(client, attempt.id);
+      const preparation = terminalEbayPublicationPreparationEvidence(attempt.before_record.request_journal_contract,
+        { path: expectedPath, requestHash: expectedHash }, requests);
+      if (preparation && ["running", "uncertain", "resolved", "rejected", "succeeded"].includes(state)) {
+        preparations.push({ attemptId: attempt.id, evidence: preparation });
+        continue;
+      }
+      if (requests.length || !["running", "uncertain", "not_sent"].includes(state)) return { busy: false, evidence: null };
+      let proof = journalContractNoRequestProof(attempt);
+      if (proof?.source === "request_journal_contract") {
+        if (proof.contract.method !== "POST" || proof.contract.path !== expectedPath || proof.contract.requestHash !== expectedHash)
+          return { busy: false, evidence: null };
+      } else {
+        if (!legacy || legacyCandidates.length !== 1 || attempt.before_record.owner_kind !== "legacy"
+          || attempt.started_at.getTime() > Date.parse(legacy.failureAt)
+          || attempt.affected_scope_keys.length !== keys.length) return { busy: false, evidence: null };
+        const actualScopes = z.array(quantityPublicationScopeSchema).safeParse(attempt.before_record.affected_scopes);
+        const root = quantityPublicationScopeSchema.safeParse(attempt.before_record.scope);
+        if (!actualScopes.success || !root.success || root.data.externalInventoryItemId !== `group:${legacy.groupKey}`)
+          return { busy: false, evidence: null };
+        const members = actualScopes.data.filter(scope => scope.externalInventoryItemId !== root.data.externalInventoryItemId)
+          .map(scope => scope.externalInventoryItemId).sort();
+        if (canonicalJson(members) !== canonicalJson(legacy.memberSkus)) return { busy: false, evidence: null };
+        proof = { source: "legacy_publish_preflight", evidence: legacy };
+        if (attempt.before_record.state === "not_sent") {
+          const retained = (await client.query<{ proof: unknown }>(
+            "SELECT proof FROM inventory.quantity_publication_no_request_recoveries WHERE attempt_id=$1", [attempt.id])).rows;
+          if (retained.length !== 1 || canonicalJson(retained[0].proof) !== canonicalJson(proof)) return { busy: false, evidence: null };
+        }
+      }
+      proofs.push({ attemptId: attempt.id, proof });
+    }
+    // Validate every candidate before the first mutation. Partial proof must not
+    // release any old attempt when a later publication might have been sent.
+    for (const attempt of attempts) {
+      const preparation = preparations.find(row => row.attemptId === attempt.id);
+      if (preparation) {
+        if (["running", "uncertain"].includes(String(attempt.before_record.state)))
+          await recoverTerminalRequestAttemptInsideTransaction(client, attempt, preparation.evidence.terminal, timestamp);
+        continue;
+      }
+      if (attempt.before_record.state === "not_sent") continue;
+      const proof = proofs.find(row => row.attemptId === attempt.id)!.proof;
+      if (!await recoverNoRequestAttemptInsideTransaction(client, attempt, proof, timestamp))
+        throw new Error("Publication preflight evidence changed inside its exact scope lock.");
+    }
+    // A newly journaled channel stage can crash before the first admission (for
+    // example during its initial group GET). Its owner holds the channel job
+    // lock; these inventory locks prove no admitted attempt exists. Preserve the
+    // channel's original contract in its checkpoint rather than inventing an
+    // inventory attempt or assuming an unversioned legacy stage was instrumented.
+    const evidence = { attemptIds: attempts.map(row => row.id), proofs,
+      ...(preparations.length ? { preparations: preparations.map(row => ({ attemptId: row.attemptId,
+        contract: row.evidence.contract, requests: row.evidence.terminal.receipts, requestEvidenceHash: row.evidence.terminal.hash })) } : {}),
+      ...(stageContract ? { stageJournalContract: stageContract } : {}) };
+    return { busy: false, evidence: { ...evidence, hash: digest(evidence) } };
+  }
+
+  private async readPreflightCandidates(client: Client, keys: string[], startedAt: string): Promise<PreflightAttempt[] | null> {
+    const candidates: PreflightAttempt[] = [];
+    let afterId = "0";
+    // Keyset pages bound memory without an age/history ceiling. All exact scope
+    // locks are already held, so no live owner can append requests while these
+    // immutable terminal histories are inspected.
+    for (;;) {
+      const page = (await client.query<PreflightAttempt>(
+        `SELECT a.id::text,to_jsonb(a) AS before_record,a.affected_scope_keys,a.started_at
+         FROM inventory.quantity_publication_attempts a
+         WHERE a.scope->>'providerKey'='ebay' AND a.affected_scope_keys && $1::text[]
+           AND a.started_at >= $2 AND a.id > $3::bigint
+         ORDER BY a.id LIMIT $4 FOR UPDATE OF a`, [keys, startedAt, afterId, ATTEMPT_PAGE_SIZE])).rows;
+      for (const attempt of page) {
+        const state = String(attempt.before_record.state);
+        if (["succeeded", "resolved", "rejected", "not_sent"].includes(state)) {
+          const receipts = await this.readRequestReceipts(client, attempt.id);
+          if (isCompletedEbayNonPublicationAttempt({ state, journalContract: attempt.before_record.request_journal_contract,
+            canonicalOutboxStock: attempt.before_record.owner_kind === "outbox" && attempt.before_record.outbox_id != null
+              && attempt.affected_scope_keys.length === 1 }, receipts)) continue;
+        }
+        candidates.push(attempt);
+        if (candidates.length > MAX_PUBLICATION_CANDIDATES) return null;
+      }
+      if (page.length < ATTEMPT_PAGE_SIZE) return candidates;
+      afterId = page[page.length - 1].id;
+    }
+  }
+
+  private async readRequestReceipts(client: Client, attemptId: string): Promise<TerminalRequestReceipt[]> {
+    return (await client.query<TerminalRequestReceipt>(`SELECT q.id::text AS "requestId",q.ordinal,q.method,q.path,
+      q.request_hash AS "requestHash",r.outcome,r.http_status AS "httpStatus",r.response_hash AS "responseHash",
+      COALESCE(r.error_codes,'{}') AS "errorCodes",r.request_terminated AS "requestTerminated",
+      CASE WHEN r.recorded_at IS NULL THEN NULL ELSE to_char(r.recorded_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') END AS "recordedAt"
+      FROM inventory.quantity_provider_requests q LEFT JOIN inventory.quantity_provider_request_results r ON r.request_id=q.id
+      WHERE q.attempt_id=$1 ORDER BY q.ordinal LIMIT 2001`, [attemptId])).rows;
+  }
 
   async read(raw: EbayPublicationRejectionInput, transactionClient?: Client): Promise<EbayPublicationRejectionRead> {
     const input = inputSchema.parse(raw);
@@ -90,7 +240,7 @@ export class PostgresEbayPublicationRejectionReader implements EbayPublicationRe
        ORDER BY a.id LIMIT 101`, [keys, input.startedAt])).rows;
     if (attempts.length === 0 || attempts.length > 100) return noEvidence();
     const expectedPath = input.groupKey === null
-      ? `/sell/inventory/v1/offer/${input.offerIds[0]}/publish`
+      ? `/sell/inventory/v1/offer/${encodeURIComponent(input.offerIds[0])}/publish`
       : "/sell/inventory/v1/offer/publish_by_inventory_item_group";
     const expectedRequestHash = digest(input.groupKey === null ? null
       : { inventoryItemGroupKey: input.groupKey, marketplaceId: input.marketplaceId });

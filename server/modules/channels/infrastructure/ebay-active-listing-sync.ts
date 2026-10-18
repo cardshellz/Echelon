@@ -78,8 +78,8 @@ const filterSchema = z
 type EbayListingReadDatabase = Pick<typeof db, "select">;
 async function readActiveEbaySyncRows(filter: SyncFilter | null, allSavedMembers = false, readDb: EbayListingReadDatabase = db) {
   // Read retained mappings before applying the canonical selection predicate.
-  // Complete identity reads keep sold, excluded and ended members: they still
-  // belong to the existing variation group even when they cannot select it.
+  // Keep every saved mapping for fencing and audit. Provider observation later
+  // distinguishes actual live members from disabled unpublished nonmembers.
   const conditions = [
     eq(channelListings.channelId, EBAY_CHANNEL_ID),
     or(eq(channelListings.syncStatus, "synced"), isNotNull(channelListings.externalProductId), isNotNull(channelListings.externalVariantId), isNotNull(channelListings.externalSku)),
@@ -257,7 +257,7 @@ async function readExistingEbayIdentitySnapshot(productId: number, expected?: Eb
   if (expected) assertEbayListingSourceIdentityUnchanged(expected, sourceIdentity);
   const syncVariantAtps = await atpService.getAtpPerVariant(productId);
   const syncAtpByVariantId = new Map(syncVariantAtps.map(variant => [variant.productVariantId, variant.atpUnits]));
-  const boundIdentity = await resolveExistingEbayListingIdentity(
+  const { identity: boundIdentity, observation: providerObservation } = await resolveExistingEbayListingIdentity(
     sourceIdentity,
     createEbayMarketplaceRegistrationAdapters({ authService: ctx.authService }).observer,
     sourceIdentity.variants.map(member => ({
@@ -272,7 +272,7 @@ async function readExistingEbayIdentitySnapshot(productId: number, expected?: Eb
   const freshContext = await context();
   assertEbayListingSourceIdentityUnchanged(sourceIdentity,
     identityFromRows(await readActiveEbaySyncRows({ productIds: [productId] }, true), freshContext));
-  return { ctx, listingsResult, sourceIdentity, boundIdentity, syncAtpByVariantId };
+  return { ctx, listingsResult, sourceIdentity, boundIdentity, providerObservation, syncAtpByVariantId };
 }
 
 /** Existing-listing previews and maintenance use the same provider observation,
@@ -285,7 +285,7 @@ export async function readExistingEbayListingIdentityForProduct(productId: numbe
 async function prepareActiveEbayListingSync(
   identity: EbayListingSyncIdentity,
 ): Promise<PreparedEbayListingSync> {
-  const { ctx, listingsResult, sourceIdentity, boundIdentity, syncAtpByVariantId } =
+  const { ctx, listingsResult, sourceIdentity, boundIdentity, providerObservation, syncAtpByVariantId } =
     await readExistingEbayIdentitySnapshot(identity.productId, identity);
   const { metadata, marketplaceId } = ctx,
     accessToken = await ctx.authService.getAccessToken(EBAY_CHANNEL_ID);
@@ -306,7 +306,10 @@ async function prepareActiveEbayListingSync(
       "EBAY_SYNC_SCOPE_UNAVAILABLE",
       "This product has no eligible existing listing.",
     );
-  const variants = listingsResult;
+  // Only verified live members belong in the group payload. The full source
+  // snapshot still fences retired mappings; they are never deleted or edited.
+  const boundVariantIds = new Set(boundIdentity.variants.map(member => member.variantId));
+  const variants = listingsResult.filter(row => boundVariantIds.has(row.variant_id));
   const productId = identity.productId;
   const product = variants[0];
   // Get effective eBay category
@@ -478,6 +481,7 @@ async function prepareActiveEbayListingSync(
   return {
     identity: boundIdentity,
     sourceIdentity,
+    providerObservation,
     client: ebayClient,
     draft: preparedDraft,
     assertInventoryReady: execution => ensureEbayListingInventoryReady({
