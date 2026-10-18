@@ -25,6 +25,12 @@ async function cancellationFixture(
     if (loseResponse) return route.abort("failed");
     await route.fulfill({ json: purchase });
   });
+  await page.route("**/api/purchase-orders/17/close-short", async (route) => {
+    calls.push({ path: new URL(route.request().url()).pathname, body: route.request().postDataJSON() });
+    purchase = { ...purchase, status: "closed", physicalStatus: "short_closed", lifecycle: buildPoLifecycleSummary({ id: 17, status: "closed", physicalStatus: "short_closed" }) };
+    if (loseResponse) return route.abort("failed");
+    await route.fulfill({ json: purchase });
+  });
   return { calls, failures };
 }
 
@@ -48,6 +54,65 @@ for (const scenario of [
     expect(fixture.failures).toEqual([]);
   });
 }
+
+test("an approver can close a partial PO short with a reason through the canonical action", async ({ page }) => {
+  const fixture = await cancellationFixture(page, ["purchasing:approve"], { status: "partially_received", physicalStatus: "receiving" });
+  await page.goto("/purchase-orders/17");
+  await expect(page.getByRole("button", { name: "Close PO", exact: true })).toHaveCount(0);
+  await page.getByRole("button", { name: "Close short", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "Close Purchase Order Short" });
+  const confirm = dialog.getByRole("button", { name: "Confirm close short", exact: true });
+  await expect(confirm).toBeDisabled();
+  await dialog.getByLabel("Reason *", { exact: true }).fill("   ");
+  await expect(confirm).toBeDisabled();
+  await dialog.getByLabel("Reason *", { exact: true }).fill("  Supplier short-shipped  ");
+  await confirm.click();
+  await expect(dialog).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Close short", exact: true })).toHaveCount(0);
+  expect(fixture.calls).toEqual([{ path: "/api/purchase-orders/17/close-short", body: { reason: "Supplier short-shipped" } }]);
+  expect(fixture.failures).toEqual([]);
+});
+
+for (const scenario of [
+  { name: "create-only actor", permissions: ["purchasing:create"], withAction: true },
+  { name: "missing server action", permissions: ["purchasing:approve"], withAction: false },
+]) {
+  test(`hides close-short for ${scenario.name}`, async ({ page }) => {
+    const fixture = await cancellationFixture(page, scenario.permissions, { status: "partially_received", physicalStatus: "receiving" }, { withAction: scenario.withAction });
+    await page.goto("/purchase-orders/17");
+    await expect(page.getByRole("heading", { level: 1, name: "TEST-PO-17", exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: /^(Close short|Close PO)$/ })).toHaveCount(0);
+    expect(fixture.calls).toEqual([]);
+    expect(fixture.failures).toEqual([]);
+  });
+}
+
+test("a close-short conflict preserves the reason and shows the owner error", async ({ page }) => {
+  const fixture = await cancellationFixture(page, ["purchasing:approve"], { status: "partially_received", physicalStatus: "receiving" });
+  await page.route("**/api/purchase-orders/17/close-short", (route) => route.fulfill({ status: 409, json: { error: "Receipt state changed. Review the current PO." } }));
+  await page.goto("/purchase-orders/17");
+  await page.getByRole("button", { name: "Close short", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "Close Purchase Order Short" });
+  await dialog.getByLabel("Reason *", { exact: true }).fill("Supplier short-shipped");
+  await dialog.getByRole("button", { name: "Confirm close short", exact: true }).click();
+  await expect(dialog.getByRole("alert")).toHaveText("Receipt state changed. Review the current PO.");
+  await expect(dialog.getByLabel("Reason *", { exact: true })).toHaveValue("Supplier short-shipped");
+  expect(fixture.failures).toEqual([]);
+});
+
+test("a lost close-short response refreshes committed state and blocks another submission", async ({ page }) => {
+  const fixture = await cancellationFixture(page, ["purchasing:approve"], { status: "partially_received", physicalStatus: "receiving" }, { loseResponse: true });
+  await page.goto("/purchase-orders/17");
+  await page.getByRole("button", { name: "Close short", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "Close Purchase Order Short" });
+  await dialog.getByLabel("Reason *", { exact: true }).fill("Supplier short-shipped");
+  await dialog.getByRole("button", { name: "Confirm close short", exact: true }).click();
+  await expect(dialog).toContainText("The saved purchase order is already closed short.");
+  await expect(dialog.getByRole("button", { name: "Confirm close short", exact: true })).toBeDisabled();
+  await expect(dialog.getByLabel("Reason *", { exact: true })).toHaveValue("Supplier short-shipped");
+  expect(fixture.calls).toHaveLength(1);
+  expect(fixture.failures).toEqual([]);
+});
 
 for (const scenario of [
   { name: "cancel-only actor on an issued order", permissions: ["purchasing:cancel"], state: { status: "sent", physicalStatus: "sent" }, withAction: true },
@@ -95,3 +160,20 @@ test("a lost cancellation response refreshes committed state and prevents anothe
   expect(fixture.calls).toHaveLength(1);
   expect(fixture.failures).toEqual([]);
 });
+
+for (const scenario of [
+  { name: "partial receipts", state: { status: "partially_received", physicalStatus: "receiving" }, showClose: false },
+  { name: "conflicting physical receipt state", state: { status: "received", physicalStatus: "receiving" }, showClose: false },
+  { name: "fully received goods", state: { status: "received", physicalStatus: "received" }, showClose: true },
+  { name: "legacy fully received goods", state: { status: "received", physicalStatus: "draft" }, showClose: true },
+]) {
+  test(`ordinary close follows the server receipt gate for ${scenario.name}`, async ({ page }) => {
+    const fixture = await cancellationFixture(page, ["purchasing:create", "purchasing:approve"], scenario.state);
+    await page.goto("/purchase-orders/17");
+    await expect(page.getByRole("heading", { level: 1, name: "TEST-PO-17", exact: true })).toBeVisible();
+    const close = page.getByRole("button", { name: "Close PO", exact: true });
+    if (scenario.showClose) await expect(close).toBeVisible();
+    else await expect(close).toHaveCount(0);
+    expect(fixture.failures).toEqual([]);
+  });
+}

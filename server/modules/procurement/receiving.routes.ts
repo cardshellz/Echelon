@@ -156,9 +156,9 @@ export function registerReceivingRoutes(app: Express) {
   
   app.delete("/api/receiving/:id", requirePermission("inventory", "adjust"), async (req, res) => {
     try {
-      const id = parseInt(req.params.id);
+      const id = Number(req.params.id);
       const { receiving: rcvService } = req.app.locals.services;
-      const deleted = await rcvService.deleteOrder(id);
+      const deleted = await rcvService.deleteOrder(id, req.session.user?.id);
       if (!deleted) {
         return res.status(404).json({ error: "Receiving order not found" });
       }
@@ -399,7 +399,7 @@ export function registerReceivingRoutes(app: Express) {
       );
       res.json({ success: true });
     } catch (error: any) {
-      if (error.statusCode) return res.status(error.statusCode).json({ error: error.message });
+      if (error.statusCode) return res.status(error.statusCode).json({ error: error.message, ...error.details });
       console.error("[Receiving] Error discarding draft receiving order:", error);
       res.status(500).json({ error: "Failed to discard receiving order" });
     }

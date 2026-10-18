@@ -4,7 +4,7 @@ import http from "node:http";
 import type { AddressInfo } from "node:net";
 import type { ServiceRegistry } from "../../../../services";
 
-const mocks = vi.hoisted(() => ({ execute: vi.fn(), getCostReview: vi.fn() }));
+const mocks = vi.hoisted(() => ({ execute: vi.fn(), getCostReview: vi.fn(), cancel: vi.fn() }));
 vi.mock("../../../../db", () => ({ db: {} }));
 vi.mock("../../../../routes/middleware", () => ({
   requirePermission: (resource: string, action: string) => (req: Request, res: Response, next: NextFunction) => {
@@ -20,6 +20,7 @@ vi.mock("../../shipment-cost-update.commands", async importOriginal => ({
   createShipmentCostUpdateCommands: () => ({ execute: mocks.execute }),
 }));
 import { registerInboundShipmentRoutes } from "../../inbound-shipment.routes";
+import { ShipmentTrackingError } from "../../shipment-tracking.service";
 import { FinancialCommandError } from "../../../../platform/commands/transactional-command.service";
 
 describe("shipment cost workflow HTTP boundaries", () => {
@@ -30,11 +31,12 @@ describe("shipment cost workflow HTTP boundaries", () => {
     const app = express();
     app.use(express.json());
     app.use((req, _res, next) => {
+      req.session = (req.headers["x-cancel-actor"] ? { user: { id: String(req.headers["x-cancel-actor"]) } } : {}) as typeof req.session;
       if (req.headers["x-test-actor"]) (req as Request & { user: { id: string } }).user = { id: String(req.headers["x-test-actor"]) };
       next();
     });
     // Only the workflow read is invoked here; the command owner is mocked above.
-    app.locals.services = { shipmentTracking: { getCostReview: mocks.getCostReview } } as unknown as ServiceRegistry;
+    app.locals.services = { shipmentTracking: { getCostReview: mocks.getCostReview, cancel: mocks.cancel } } as unknown as ServiceRegistry;
     registerInboundShipmentRoutes(app);
     server = http.createServer(app);
     await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
@@ -48,6 +50,37 @@ describe("shipment cost workflow HTTP boundaries", () => {
   const update = (options: { id?: string; permission?: string; actor?: string; key?: string } = {}) => fetch(`${base}/api/inbound-shipments/${options.id ?? "42"}/update-costs`, {
     method: "POST", body: "{}", headers: { "content-type": "application/json", "x-test-permission": options.permission ?? "purchasing:approve",
       "x-test-actor": options.actor ?? "approver", "idempotency-key": options.key ?? "workflow-test-42" },
+  });
+  const cancel = (permission = "purchasing:edit", id = "42") => fetch(`${base}/api/inbound-shipments/${id}/cancel`, {
+    method: "POST", body: JSON.stringify({ reason: "Supplier withdrew shipment" }),
+    headers: { "content-type": "application/json", "x-test-permission": permission, "x-cancel-actor": "cancelling-operator" },
+  });
+  it("requires edit permission for shipment cancellation", async () => {
+    expect((await cancel("purchasing:view")).status).toBe(403);
+    expect(mocks.cancel).not.toHaveBeenCalled();
+  });
+  it.each(["0", "-1", "1.5", "1x", "0x1", "1e2", "00042", "2147483648"])("rejects invalid cancellation ID %s before the service", async id => {
+    const response = await cancel("purchasing:edit", id);
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({ code: "SHIPMENT_CANCELLATION_INPUT_INVALID" });
+    expect(mocks.cancel).not.toHaveBeenCalled();
+  });
+  it("returns the cancellation evidence conflict without claiming success", async () => {
+    const details = { code: "SHIPMENT_CANCELLATION_HISTORY_PROTECTED", shipmentId: 42, blockers: ["receivingHistory"] };
+    mocks.cancel.mockRejectedValue(new ShipmentTrackingError("Review the shipment receipt before correcting it.", 409, details));
+    const response = await cancel();
+    expect(response.status).toBe(409);
+    expect(await response.json()).toEqual({ code: details.code, error: "Review the shipment receipt before correcting it.", details });
+    expect(mocks.cancel).toHaveBeenCalledWith(42, "cancelling-operator", "Supplier withdrew shipment");
+  });
+  it("returns a recoverable unavailable outcome without leaking source failures", async () => {
+    const logged = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    mocks.cancel.mockRejectedValue(new Error("private database credential"));
+    const response = await cancel();
+    expect(response.status).toBe(503);
+    expect(await response.json()).toEqual({ code: "SHIPMENT_CANCELLATION_UNAVAILABLE",
+      error: "Shipment cancellation could not be verified. Reload the shipment before trying again." });
+    expect(logged).toHaveBeenCalledWith(expect.not.stringContaining("private database credential"));
   });
   it("requires view permission for saved results and approval for the financial command", async () => {
     expect((await read("42", "inventory:view")).status).toBe(403);

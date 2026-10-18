@@ -103,6 +103,7 @@ import {
   buildPoCloseChange,
   buildPoCloseShortChange,
   buildPoCloseShortLinePatch,
+  normalizePoCloseShortReason,
 } from "./purchase-order-close.service";
 import {
   findOpenPoLineByProduct as findOpenPoLineByProductWithStorage,
@@ -3001,16 +3002,7 @@ export function createPurchasingService(
     return result;
   }
 
-  /**
-   * Close a PO.
-   *
-   * Before closing, checks every linked vendor-invoice line under the same
-   * transaction and refuses close unless every line is explicitly matched.
-   *
-   * There is no forceOverride flag on close(). To close despite mismatches,
-   * use closeShort(reason) which records per-line close-short reasons and
-   * is the single "close with known issues" path.
-   */
+  /** Persist supplier purchase evidence only after an authorized close. */
   async function persistCompletedVendorPurchaseEvidenceTx(
     tx: any,
     purchaseOrderId: number,
@@ -3099,7 +3091,7 @@ export function createPurchasingService(
           lastPurchasedAt: purchasedAt,
           lastCostMills: lastCost.lastCostMills,
           lastCostCents: lastCost.lastCostCents,
-          updatedAt: now(),
+          updatedAt: purchasedAt,
         })
         .where(eq(vendorProductsTable.id, Number(current.id)))
         .returning();
@@ -3114,6 +3106,7 @@ export function createPurchasingService(
         level: "AUDIT",
         actor: `${actorType}:${actorId}`,
         action: "vendor_catalog.purchase_evidence_updated",
+        timestamp: purchasedAt,
         target: `vendor_product:${updated.id}`,
         changes: {
           before: catalogAuditSnapshot(current),
@@ -3134,6 +3127,8 @@ export function createPurchasingService(
     }
   }
 
+  /** Ordinary close requires complete physical receipts and current invoice matching.
+   * Incomplete receipt disposition remains the separate close-short command. */
   async function close(id: number, userId?: string, notes?: string) {
     const expectation = await observeLifecycleState(
       id,
@@ -3145,12 +3140,27 @@ export function createPurchasingService(
       await lockInventoryCostGraph(tx);
       const po = await lockLifecycleHeader(tx, id, expectation);
 
+      const lines = await tx.select().from(purchaseOrderLinesTable)
+        .where(eq(purchaseOrderLinesTable.purchaseOrderId, id))
+        .orderBy(purchaseOrderLinesTable.id).for("update");
+      // Check the locked physical state and quantities before match recomputation
+      // or approved-cost reconciliation can write any financial evidence.
+      const change = (() => {
+        try {
+          return buildPoCloseChange({ po, lines, userId, notes, now: now() });
+        } catch (error) {
+          return toPurchasingError(error);
+        }
+      })();
+      const closedAt = change.patch.closedAt as Date;
+
       // Receipts exist by close time, so derive the three-way match from the
       // locked source rows instead of trusting previously persisted statuses.
       const match = await recomputePurchaseOrderInvoiceMatchesInTransaction(
         id,
         tx,
         userId,
+        closedAt,
       );
       const varianceInvoiceIds = [...new Set(
         match.results
@@ -3221,19 +3231,12 @@ export function createPurchasingService(
         }
       }
 
-      const change = (() => {
-        try {
-          return buildPoCloseChange({ po, userId, notes });
-        } catch (error) {
-          return toPurchasingError(error);
-        }
-      })();
-
       const updated = await updatePurchaseOrderStatusWithHistoryTx(
         tx,
         id,
         change.patch,
         change.history,
+        closedAt,
       );
       await emitPoEventTx(tx, id, "closed", userId, {
         from_status: change.history.fromStatus,
@@ -3243,11 +3246,11 @@ export function createPurchasingService(
           (left, right) => left - right,
         ),
         match_source_fingerprint: match.sourceFingerprint,
-      });
+      }, closedAt);
       await persistCompletedVendorPurchaseEvidenceTx(
         tx,
         id,
-        change.patch.closedAt instanceof Date ? change.patch.closedAt : now(),
+        closedAt,
         userId,
       );
       return { kind: "closed" as const, updated };
@@ -3262,9 +3265,7 @@ export function createPurchasingService(
         console.error("[po-exceptions] close match detection failed:", detectionError);
       }
     }
-    const nextAction = outcome.poStatus === "partially_received"
-      ? "Correct missing mappings, resolve or accept current variances, or use close-short with a reason."
-      : "Correct missing mappings and resolve or accept current variances before closing the PO.";
+    const nextAction = "Correct missing mappings and resolve or accept current variances before closing the PO.";
     const unresolvedParts: string[] = [];
     if (outcome.unresolvedLineCount > 0) {
       unresolvedParts.push(
@@ -3290,7 +3291,11 @@ export function createPurchasingService(
   }
 
   async function closeShort(id: number, reason: string, userId?: string) {
-    if (!reason) throw new PurchasingError("Close-short reason is required", 400);
+    try {
+      reason = normalizePoCloseShortReason(reason);
+    } catch (error) {
+      return toPurchasingError(error);
+    }
     const expectation = await observeLifecycleState(
       id,
       ["partially_received"],
@@ -3308,15 +3313,16 @@ export function createPurchasingService(
         .for("update");
       const change = (() => {
         try {
-          return buildPoCloseShortChange({ po, reason, userId });
+          return buildPoCloseShortChange({ po, reason, userId, now: now() });
         } catch (error) {
           return toPurchasingError(error);
         }
       })();
+      const closedAt = change.patch.closedAt as Date;
       for (const line of lines) {
         const linePatch = buildPoCloseShortLinePatch(line, reason);
         if (linePatch) {
-          await updatePurchaseOrderLineTx(tx, line.id, linePatch);
+          await updatePurchaseOrderLineTx(tx, line.id, linePatch, closedAt);
         }
       }
 
@@ -3331,16 +3337,17 @@ export function createPurchasingService(
         id,
         change.patch,
         change.history,
+        closedAt,
       );
       await emitPoEventTx(tx, id, "closed_short", userId, {
         from_status: change.history.fromStatus,
         to_status: change.history.toStatus,
         reason,
-      });
+      }, closedAt);
       await persistCompletedVendorPurchaseEvidenceTx(
         tx,
         id,
-        change.patch.closedAt instanceof Date ? change.patch.closedAt : now(),
+        closedAt,
         userId,
       );
       return updated;
