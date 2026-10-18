@@ -112,6 +112,24 @@ describe("customer account signed storefront HTTP boundary", () => {
     expect((await request(body)).status).toBe(200);
     expect(progress).toHaveBeenCalledWith(operationId, "resume", operationId);
   });
+  it("dispatches rewards only inside the signed account boundary with a command key", async () => {
+    const bootstrap = await (await request()).json();
+    const rewardsState = vi.fn(async () => ({ version: "v1", balance: "1000.00", minimumPoints: 100,
+      pointsPerDollar: "100.00", currencyName: "points", rewards: [], pending: [] }));
+    const issueReward = vi.fn(async () => ({ code: "ISSUED", value: "1.00", balance: "900.00", expiresAt: "2030-01-01T00:00:00.000Z" }));
+    services.mockImplementation(() => ({ edits: { connection, rewardsState, issueReward }, returns: vi.fn() }));
+    const scope = { path: "/order-edits/orders/9/rewards", query: { connectionId: "4" }, sessionKey: bootstrap.session.sessionKey };
+    expect((await request(scope)).status).toBe(200);
+    expect(rewardsState).toHaveBeenCalledWith(4, 9);
+    const requestKey = "22222222-2222-4222-8222-222222222222";
+    const command = { ...scope, path: `${scope.path}/issue`, method: "POST", body: { requestKey, points: 100 } };
+    expect((await request(command)).status).toBe(400);
+    expect(issueReward).not.toHaveBeenCalled();
+    expect((await request({ ...command, commandKey: requestKey })).status).toBe(200);
+    expect(issueReward).toHaveBeenCalledWith(4, 9, command.body, requestKey);
+    expect((await request({ ...command, commandKey: requestKey, sessionKey: undefined })).status).toBe(401);
+    expect(issueReward).toHaveBeenCalledTimes(1);
+  });
   it.each([undefined, "v1", "v2"])("negotiates pricing display through the signed customer bridge, opt-in=%s", async (optIn) => {
     const bootstrap = await (await request()).json();
     const calculation = previewCalculation();

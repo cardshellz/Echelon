@@ -46,11 +46,13 @@ export function priceOrderEditCodes(
     })),
   });
   if (
+    rules.some((rule) => ["single_use_reward", "club_reward"].includes(rule.redemption) &&
+      (rule.value.type !== "fixed" || priced.discounts.find((discount) => discount.label === rule.code)?.amountCents !== rule.value.amountCents)) ||
     priced.unusedFixedCredits.some((credit) =>
       rules.some(
         (rule) =>
           `code:${rule.code}` === credit.ruleKey &&
-          rule.redemption === "single_use_reward",
+          ["single_use_reward", "club_reward"].includes(rule.redemption),
       ),
     )
   )

@@ -48,10 +48,11 @@ import {
   type OrderEditCodePricing,
 } from "@shared/order-edits/order-edit-codes";
 import type { OrderEditCodeHistory } from "../application/order-edit-code-history";
+import type { OrderEditRewards } from "../application/order-edit-rewards";
 import { ShopifyOrderEditCodes } from "./shopify-order-edit-codes";
 import {
   assertCouponAdjustmentSupported,
-  requiresLegacyCodeReceipt,
+  requiresOrderEditCodeReceipt,
 } from "../domain/order-edit-coupon-boundary";
 import { OrderEditError } from "../domain/order-edit-error";
 import {
@@ -313,6 +314,7 @@ export class ShopifyOrderEditProvider
       report?: (event: OrderEditDiagnosticEvent) => void;
       memberPresentation?: MemberPlanPresentationReader;
       codeHistory?: OrderEditCodeHistory;
+      rewards?: OrderEditRewards;
     },
   ) {
     this.fetchImpl = options.fetch ?? fetch;
@@ -667,7 +669,7 @@ export class ShopifyOrderEditProvider
   private async codes(connectionId: number): Promise<ShopifyOrderEditCodes> {
     const credentials = await this.credentials(connectionId);
     return new ShopifyOrderEditCodes((query, variables) =>
-      this.request(credentials, query, variables),
+      this.request(credentials, query, variables), this.options.rewards,
     );
   }
   private async codePricing(
@@ -1784,7 +1786,7 @@ export class ShopifyOrderEditProvider
     try {
       if (
         mode === "edit" &&
-        requiresLegacyCodeReceipt(quote.codePricing) &&
+        requiresOrderEditCodeReceipt(quote.codePricing) &&
         !beforeCommitRequest
       )
         fail(
@@ -1851,16 +1853,16 @@ export class ShopifyOrderEditProvider
       const gateway = await this.codes(connectionId);
       const added = quote.codePricing.newCodes;
       if (added.length) {
-        const rules = await gateway.rules(current, added);
         const expected = quote.codePricing.rules.filter((rule) =>
           added.some((code) => code.toUpperCase() === rule.code.toUpperCase()),
         );
+        const rules = await gateway.rules(current, added);
         // Persisted pre-separation operations retain their receipt lifecycle.
         // Only compare their original terms; never classify new coupon entry
         // as a points reward in order to make an old enum shape match.
         const comparable = rules.map((rule) => {
           const previous = expected.find((entry) => entry.code === rule.code);
-          if (!previous || previous.redemption === "shopify_coupon")
+          if (!previous || previous.redemption === "shopify_coupon" || previous.redemption === "club_reward")
             return rule;
           const {
             usageLimit: _limit,

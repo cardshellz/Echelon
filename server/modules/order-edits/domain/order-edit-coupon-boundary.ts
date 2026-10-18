@@ -4,8 +4,9 @@ import type {
 } from "@shared/order-edits/order-edit-codes";
 import { OrderEditError } from "./order-edit-error";
 
-/** Resume existing receipt sagas; ordinary coupon entry never calls a points ledger. */
-export function requiresLegacyCodeReceipt(
+/** Club rewards require a single-use receipt; resume legacy receipts too.
+ * Ordinary Shopify coupon adjustments never consume points or Club rewards. */
+export function requiresOrderEditCodeReceipt(
   pricing: OrderEditCodePricing | undefined,
 ): boolean {
   if (!pricing) return false;

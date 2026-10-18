@@ -6,6 +6,7 @@ import { PreviewAccessError } from "@/lib/customer-return-preview";
 import { createOrderEditTransport } from "@/lib/order-edits";
 import { createCustomerReturnTransport } from "@/lib/customer-return-customer";
 import { ORDER_EDIT_PRICING_DISPLAY_HEADER, ORDER_EDIT_PRICING_DISPLAY_VERSION } from "@shared/order-edits/order-edit-financials";
+import { rewardWidgetStateSchema, rewardWidgetIssueResultSchema } from "@shared/customer-account/reward-widget";
 
 export const customerAccountPageConfigSchema = z.object({
   themeId: z.string().max(30).regex(/^[1-9][0-9]*$/),
@@ -15,6 +16,9 @@ export const customerAccountPageConfigSchema = z.object({
 export type CustomerAccountPageConfig = z.infer<typeof customerAccountPageConfigSchema>;
 // Bound storefront waits; a timed-out mutation must still be reconciled.
 export const CUSTOMER_ACCOUNT_REQUEST_TIMEOUT_MS = 25_000;
+export class CustomerAccountRequestError extends Error {
+  constructor(public readonly code: string | undefined, message: string) { super(message); }
+}
 export function createCustomerAccountTransport(raw: CustomerAccountPageConfig, request: typeof fetch = fetch) {
   const config = customerAccountPageConfigSchema.parse(raw);
   let sessionKey: string | undefined;
@@ -43,8 +47,9 @@ export function createCustomerAccountTransport(raw: CustomerAccountPageConfig, r
   async function json<T>(response: Response, schema: z.ZodType<T, z.ZodTypeDef, unknown>): Promise<T> {
     const value: unknown = await response.json().catch(() => null);
     if (!response.ok) {
-      const error = z.object({ error: z.object({ message: z.string().max(500) }) }).safeParse(value);
-      throw new Error(error.success ? error.data.error.message : "Account tools are temporarily unavailable. Please try again.");
+      const error = z.object({ error: z.object({ code: z.string().max(100).optional(), message: z.string().max(500) }) }).safeParse(value);
+      throw new CustomerAccountRequestError(error.success ? error.data.error.code : undefined,
+        error.success ? error.data.error.message : "Account tools are temporarily unavailable. Please try again.");
     }
     const parsed = schema.safeParse(value);
     if (!parsed.success) throw new Error("Your account details could not be verified. Refresh this page before continuing.");
@@ -84,6 +89,15 @@ export function createCustomerAccountTransport(raw: CustomerAccountPageConfig, r
     },
     resolve: async (raw: unknown, signal?: AbortSignal) => json(await call({ method: "POST", path: "/account/resolve", body: customerAccountOrderIdentityInputSchema.parse(raw) }, signal), customerAccountOrderIdentitySchema),
     edits: createOrderEditTransport(bridge),
+    rewards: {
+      state: async (connectionId: number, omsOrderId: number, signal?: AbortSignal) => json(await call({
+        method: "GET", path: `/order-edits/orders/${omsOrderId}/rewards`, query: { connectionId: String(connectionId) },
+      }, signal), rewardWidgetStateSchema),
+      issue: async (connectionId: number, omsOrderId: number, input: { points: number; requestKey: string }) => json(await call({
+        method: "POST", path: `/order-edits/orders/${omsOrderId}/rewards/issue`, query: { connectionId: String(connectionId) },
+        body: input, commandKey: input.requestKey,
+      }), rewardWidgetIssueResultSchema),
+    },
     returns: (key: string) => createCustomerReturnTransport(bridge, key),
     request: bridge,
   };

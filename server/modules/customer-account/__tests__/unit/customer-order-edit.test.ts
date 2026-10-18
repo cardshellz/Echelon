@@ -12,10 +12,25 @@ function setup() {
   const access = { resolve: vi.fn(async () => owned), resolveOwned: vi.fn(async () => owned) };
   const store = { connections: vi.fn(async () => [connection]), get: vi.fn(async () => ({ actorId: "customer:2:100", connectionId: 4, omsOrderId: 9, baseline: { channelId: 2, customerId: "gid://shopify/Customer/100" } })) };
   const edits = { order: vi.fn(async () => ({ activeOperationId: null, eligibility: { editable: true, reasons: [] } })), catalogCategories: vi.fn(), catalogProducts: vi.fn(), catalogVariants: vi.fn(), warmPreview: vi.fn(), preview: vi.fn(), quote: vi.fn(), get: vi.fn(), commit: vi.fn(), reconcile: vi.fn(), abandon: vi.fn() };
-  const service = new CustomerOrderEditService({ principal, access, store, edits } as unknown as ConstructorParameters<typeof CustomerOrderEditService>[0]);
-  return { access, store, edits, service };
+  const rewards = { state: vi.fn(), issue: vi.fn() };
+  const service = new CustomerOrderEditService({ principal, access, store, edits, rewards } as unknown as ConstructorParameters<typeof CustomerOrderEditService>[0]);
+  return { access, store, edits, rewards, service };
 }
 describe("customer order edit ownership", () => {
+  it("binds rewards to the verified owner and prevents foreign-order issuance", async () => {
+    const h = setup();
+    await h.service.rewardsState(4, 9);
+    expect(h.rewards.state).toHaveBeenCalledWith({ customerId: "gid://shopify/Customer/100", channelId: 2 });
+    await h.service.issueReward(4, 9, { points: 100, requestKey: uuid }, uuid);
+    expect(h.rewards.issue).toHaveBeenCalledWith({ customerId: "gid://shopify/Customer/100", channelId: 2, points: 100, requestKey: uuid });
+    h.rewards.issue.mockClear();
+    await expect(h.service.issueReward(4, 9, { points: 100, requestKey: uuid, customerId: "someone-else" }, uuid)).rejects.toThrow();
+    await expect(h.service.issueReward(4, 9, { points: 100, requestKey: uuid }, "22222222-2222-4222-8222-222222222222")).rejects.toThrow();
+    h.access.resolveOwned.mockRejectedValue(new Error("foreign order"));
+    await expect(h.service.issueReward(4, 9, { points: 100, requestKey: uuid }, uuid)).rejects.toThrow("foreign order");
+    expect(h.rewards.issue).not.toHaveBeenCalled();
+  });
+
   it("resolves native Shopify order IDs through the existing owned-order resolver", async () => {
     const fixture = setup();
     await expect(fixture.service.resolve({ orderReference: "#10", externalOrderId: "99" })).resolves.toEqual({ omsOrderId: 9, connectionId: 4, externalOrderId: "99" });

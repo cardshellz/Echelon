@@ -6,11 +6,13 @@ import { PostgresCustomerReturnOrderAccessRepository } from "../../returns/infra
 import { createCustomerReturnCustomerServices } from "../../returns/infrastructure/customer-return-customer.composition";
 import { PostgresOrderEditStore } from "../../order-edits/infrastructure/postgres-order-edit.store";
 import { CustomerOrderEditService } from "../application/customer-order-edit.service";
+import { ClubOrderEditCodeRedemptions } from "../../order-edits/infrastructure/club-order-edit-code-redemptions";
 
 export function customerAccountServices(pool: Pool, edits: OrderEditService) {
   const store = new PostgresOrderEditStore(pool);
+  const rewards = new ClubOrderEditCodeRedemptions(process.env.SHELLZ_CLUB_API_URL, process.env.INTERNAL_API_KEY);
   return (principal: CustomerReturnCustomerSession) => ({
-    edits: new CustomerOrderEditService({ principal, edits, store,
+    edits: new CustomerOrderEditService({ principal, edits, store, rewards,
       access: new CustomerReturnOrderAccessService({ channelId: principal.channelId,
         principalReader: { getVerifiedPrincipal: async () => ({ kind: "customer", channelId: principal.channelId, externalCustomerId: principal.externalCustomerId }) },
         repository: new PostgresCustomerReturnOrderAccessRepository(pool) }) }),

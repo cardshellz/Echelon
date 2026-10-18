@@ -1,4 +1,5 @@
 import { z } from "zod";
+import type { CustomerRewards } from "./customer-rewards";
 import type { CustomerReturnCustomerSession } from "../../returns/application/customer-return-customer-auth.service";
 import type { CustomerReturnOrderAccessService } from "../../returns/application/customer-return-order-access.service";
 import type { OrderEditService } from "../../order-edits/application/order-edit.service";
@@ -25,6 +26,7 @@ export class CustomerOrderEditService {
   constructor(
     private readonly dependencies: {
       principal: CustomerReturnCustomerSession;
+      rewards?: CustomerRewards;
       access: Pick<
         CustomerReturnOrderAccessService,
         "resolve" | "resolveOwned"
@@ -142,6 +144,25 @@ export class CustomerOrderEditService {
     const input = orderEditPreviewScopeSchema.parse(raw);
     await this.ownedScope(input.connectionId, input.omsOrderId);
     return this.dependencies.edits.warmPreview(input, this.actorId);
+  }
+  async rewardsState(connectionId: number, omsOrderId: number) {
+    await this.ownedScope(connectionId, omsOrderId);
+    return this.rewardService().state(this.rewardScope());
+  }
+  async issueReward(connectionId: number, omsOrderId: number, raw: unknown, commandKey: string) {
+    const input = z.object({ points: z.number().int().positive().max(99_999_999), requestKey: z.string().uuid() }).strict().parse(raw);
+    if (input.requestKey !== z.string().uuid().parse(commandKey))
+      throw new OrderEditError("REWARD_KEY_MISMATCH", "The saved reward request does not match.", 400);
+    await this.ownedScope(connectionId, omsOrderId);
+    return this.rewardService().issue({ ...this.rewardScope(), ...input });
+  }
+  private rewardScope() {
+    const principal = this.dependencies.principal;
+    return { customerId: `gid://shopify/Customer/${principal.externalCustomerId}`, channelId: principal.channelId };
+  }
+  private rewardService() {
+    if (!this.dependencies.rewards) throw new OrderEditError("REWARD_UNAVAILABLE", "Rewards are temporarily unavailable.", 503);
+    return this.dependencies.rewards;
   }
   async preview(raw: unknown) {
     const input = orderEditPreviewInputSchema.parse(raw);
