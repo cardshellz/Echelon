@@ -32,6 +32,9 @@ export interface ObserveMarketplaceListingInput {
   readonly owner: ListingOwnerRef;
   readonly locator: ListingRegistrationLocator;
   readonly memberCandidates: readonly ListingRegistrationVariantCandidate[];
+  /** Existing-listing maintenance only: retain these owner-verified archived
+   * SKUs in group topology without reading or claiming their live offer state. */
+  readonly topologyOnlySkus?: readonly string[];
 }
 
 /** Read-only provider boundary. Preview and confirmation both use this port. */

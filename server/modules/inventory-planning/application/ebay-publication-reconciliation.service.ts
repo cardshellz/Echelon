@@ -9,8 +9,8 @@ import { InventoryAvailabilityRuntimePublicationError } from "./inventory-availa
 export const EBAY_RECONCILIATION_INTERVAL_MS = 15 * 60_000;
 export const EBAY_RECONCILIATION_LEASE_MS = 2 * 60_000;
 export interface EbayPublicationReconciliationStatus {
-  state: "pending" | "verified" | "needs_attention";
-  checkedAt: string | null; nextCheckAt: string; code: string | null; message: string | null;
+  state: "pending" | "verified" | "needs_attention" | "inactive";
+  checkedAt: string | null; nextCheckAt: string | null; code: string | null; message: string | null;
 }
 export interface EbayReconciliationClaim {
   watchId: string; revision: string; cycle: string; leaseToken: string; attempts: number;

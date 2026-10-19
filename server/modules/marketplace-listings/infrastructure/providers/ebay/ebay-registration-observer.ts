@@ -176,6 +176,10 @@ export class EbayMarketplaceRegistrationObserver
       memberCandidates: input.memberCandidates,
     });
     const owner = assertEbayOwner(snapshot.owner);
+    const topologyOnlySkus = z.array(z.string().trim().min(1).max(100)).max(250).parse(input.topologyOnlySkus ?? []);
+    if (new Set(topologyOnlySkus).size !== topologyOnlySkus.length
+      || snapshot.memberCandidates.some(member => topologyOnlySkus.includes(member.sku)))
+      throw observationError("EBAY_REGISTRATION_OBSERVATION_INPUT_INVALID", "Topology-only SKUs must be distinct from active observation candidates.");
     // Complete local member validation must precede access to any credential.
     const credential = parseReadCredential(
       await this.credentials.loadFreshCredential(owner),
@@ -188,12 +192,15 @@ export class EbayMarketplaceRegistrationObserver
           owner.marketplaceId,
           input.locator.providerPublicationKey,
           input.locator.externalListingId,
+          topologyOnlySkus,
         )
       : await this.discoverPublicationByListing(
           credential,
           owner.marketplaceId,
           requireListingLocator(input.locator.externalListingId),
           snapshot.memberCandidates,
+          undefined,
+          topologyOnlySkus,
         );
     assertDistinctMemberIdentities(selected.members);
 
@@ -384,6 +391,7 @@ export class EbayMarketplaceRegistrationObserver
     marketplaceId: string,
     groupKey: string,
     expectedListingId: string | null,
+    topologyOnlySkus: readonly string[] = [],
   ): Promise<SelectedPublication> {
     const normalizedGroupKey = normalizeProviderText(
       groupKey,
@@ -413,7 +421,7 @@ export class EbayMarketplaceRegistrationObserver
     );
     try {
     const observedSkus: ObservedSku[] = [];
-    for (const sku of variantSkus) {
+    for (const sku of variantSkus.filter(sku => !topologyOnlySkus.includes(sku))) {
       const observed = await this.observeSku(
         credential,
         marketplaceId,
@@ -467,6 +475,7 @@ export class EbayMarketplaceRegistrationObserver
     listingId: string,
     candidates: readonly ListingRegistrationVariantCandidate[],
     inspectedSkus?: ReadonlyMap<string, ObservedSku>,
+    topologyOnlySkus: readonly string[] = [],
   ): Promise<SelectedPublication> {
     const matched: Array<{ observed: ObservedSku; member: SelectedMember }> = [];
     const observedCandidates: ObservedSku[] = [];
@@ -529,6 +538,7 @@ export class EbayMarketplaceRegistrationObserver
         marketplaceId,
         groupKeys[0],
         listingId,
+        topologyOnlySkus,
       );
       const publishedSkus = new Set(publication.members.map(member => member.sku));
       return { ...publication, nonMemberCandidates: observedCandidates.filter(candidate => !publishedSkus.has(candidate.sku)) };

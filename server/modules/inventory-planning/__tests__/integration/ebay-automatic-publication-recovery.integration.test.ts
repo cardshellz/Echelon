@@ -92,6 +92,47 @@ dbDescribe.sequential("automatic eBay recovery and continuing reconciliation on 
       quantityConsistent: true, providerResponseHash: "a".repeat(64), observedAt: clock() })), clock());
   }
 
+  it("plans only the watch's exact target and members despite an archived link and an unrelated unmapped selected sibling", async () => {
+    const f = fixture(); await start(f);
+    await database.pool.query(`UPDATE catalog.product_variants SET is_active=false WHERE id=103;
+      INSERT INTO channels.channel_listings(id,channel_id,product_variant_id,external_sku,external_variant_id,sync_status)
+        VALUES(2,67,103,'ARCHIVED-OLD','old-offer','synced'),(3,67,102,'NEW','unrelated-offer','synced');`);
+    const unrelated = async () => (await database.pool.query(`SELECT to_jsonb(o) AS row FROM inventory.inventory_publication_outbox o
+      WHERE publication_target_id<>3 OR product_variant_id<>101 ORDER BY id`)).rows;
+    const before = await unrelated();
+    const [claim] = await f.repository.claimDue(1,clock(),randomUUID());
+    const targets = await f.repository.plan(claim,clock());
+    expect(targets.map(target => [target.publicationTargetId,target.productVariantId])).toEqual([[3,101]]);
+    expect(await unrelated()).toEqual(before);
+    expect((await database.pool.query("SELECT count(*)::int AS count FROM inventory.publication_variant_mapping_heads WHERE publication_target_id=3 AND product_variant_id=103")).rows[0].count).toBe(0);
+  });
+
+  it("excludes a later-archived member from an older multi-member watch without rewriting its historical scope", async () => {
+    const f = fixture(); const scopes = await addVerifiedMember();
+    await uncertain(f);
+    const input = command(scopes);
+    const { watchId } = await f.recovery.recover(input);
+    const before = (await savedWatch(watchId!)).scopes;
+    await database.pool.query("UPDATE catalog.product_variants SET is_active=false WHERE id=102");
+    const [claim] = await f.repository.claimDue(1,clock(),randomUUID());
+    expect((await f.repository.plan(claim,clock())).map(row => row.productVariantId)).toEqual([101]);
+    expect((await savedWatch(watchId!)).scopes).toEqual(before);
+    const checked = await checkCurrentStock(f,claim);
+    expect(checked.current).toBe(true);
+  });
+
+  it("suspends an entirely archived watch without provider calls and resumes that same watch after reactivation", async () => {
+    const f = fixture(); const { input, watchId } = await start(f);
+    await database.pool.query("UPDATE catalog.product_variants SET is_active=false WHERE id=101");
+    expect(await f.watch.processDue()).toEqual({ checked: 0, repaired: 0, blocked: 0 });
+    expect(f.adapter.readAbsolute).not.toHaveBeenCalled(); expect(f.content).not.toHaveBeenCalled();
+    expect((await f.repository.readStatuses([input.syncJobId]))[input.syncJobId]).toMatchObject({ state: "inactive", nextCheckAt: null, checkedAt: null });
+    await database.pool.query("UPDATE catalog.product_variants SET is_active=true WHERE id=101");
+    const [resumed] = await f.repository.claimDue(1,clock(),randomUUID());
+    expect(resumed.watchId).toBe(watchId);
+    expect((await f.repository.plan(resumed,clock())).map(row => row.productVariantId)).toEqual([101]);
+  });
+
   it("preserves unknown request history, atomically saves the recurring obligation, and replays without another receipt", async () => {
     const f = fixture(); const { old, input, watchId } = await start(f);
     const row = (await database.pool.query("SELECT to_jsonb(a) AS record FROM inventory.quantity_publication_attempts a WHERE id=$1", [old.id])).rows[0];

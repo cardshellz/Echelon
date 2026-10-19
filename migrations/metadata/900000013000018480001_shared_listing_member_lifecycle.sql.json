@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "migration": "900000013000018480001_shared_listing_member_lifecycle.sql",
+  "generation": 13,
+  "pr": 1848,
+  "ordinal": 1,
+  "after": [
+    "259_channel_listing_lifecycle.sql",
+    "900000012000018420001_ebay_category_policy_identity_capacity.sql"
+  ]
+}

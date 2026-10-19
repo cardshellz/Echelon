@@ -16,6 +16,9 @@ export const ebayListingSyncIdentitySchema = z
     accountId: z.string().trim().min(1).max(240),
     marketplaceId: z.string().trim().min(1).max(100),
     groupKey: z.string().trim().min(1).max(255).nullable(),
+    // Archived members still present in the provider's group are topology only.
+    // Maintenance preserves them; the shared lifecycle owns their removal.
+    retainedGroupSkus: z.array(z.string().trim().min(1).max(100)).max(250).optional(),
     variants: z
       .array(
         z
@@ -24,6 +27,7 @@ export const ebayListingSyncIdentitySchema = z
             sku: z.string().trim().min(1).max(100),
             catalogSku: z.string().trim().min(1).max(100).optional(),
             contentSyncEnabled: z.boolean().optional(),
+            catalogArchived: z.boolean().optional(),
             mappingExists: z.boolean().optional(),
             externalSku: z.string().min(1).max(100).nullable(),
             offerId: z.string().min(1).max(255).nullable(),
@@ -40,6 +44,8 @@ export const ebayListingSyncIdentitySchema = z
       new Set(value.variants.map((v) => v.variantId)).size !==
         value.variants.length ||
       new Set(value.variants.map((v) => v.sku)).size !== value.variants.length
+      || new Set(value.retainedGroupSkus).size !== (value.retainedGroupSkus?.length ?? 0)
+      || value.retainedGroupSkus?.some(sku => value.variants.some(member => member.sku === sku))
     )
       context.addIssue({
         code: z.ZodIssueCode.custom,

@@ -20,7 +20,7 @@ export const ebayListingSyncProgressSchema = z.object({
 export type EbayListingSyncPhase = z.infer<typeof ebayListingSyncPhaseSchema>;
 export type EbayListingSyncProgress = z.infer<typeof ebayListingSyncProgressSchema>;
 export const ebayInventoryReconciliationSchema = z.object({
-  state: z.enum(["pending", "verified", "needs_attention", "unavailable"]),
+  state: z.enum(["pending", "verified", "needs_attention", "unavailable", "inactive"]),
   checkedAt: z.string().datetime().nullable(),
   nextCheckAt: z.string().datetime().nullable(),
   code: z.string().max(100).nullable(),
