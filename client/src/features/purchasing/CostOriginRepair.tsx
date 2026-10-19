@@ -93,8 +93,9 @@ function OriginReview({
             : "Repair historical cost origin"}
         </DialogTitle>
         <DialogDescription>
-          Confirm the receipt and supplier amounts, then review the cost impact
-          before administrator approval.
+          {context.data?.approval
+            ? "This repair is posted. The administrator approval and recorded before and after values are shown below."
+            : "Confirm the receipt and supplier amounts, then review the cost impact before administrator approval."}
         </DialogDescription>
       </DialogHeader>
       {context.isPending && (

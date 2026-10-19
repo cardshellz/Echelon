@@ -247,6 +247,7 @@ test("admin repairs origin with visible before/after and sees the approval acros
   });
   await approve.click();
   await expect(dialog).toContainText("Test Administrator");
+  await expect(dialog).toContainText("This repair is posted.");
   await expect(
     dialog.getByRole("button", { name: "Approve repair & post costs" }),
   ).toHaveCount(0);
