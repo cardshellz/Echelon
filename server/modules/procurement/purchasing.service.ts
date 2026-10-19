@@ -1,3 +1,4 @@
+import { hasPoInvoiceHistory, readPoInvoiceHistory } from "./po-invoice-history.repository";
 import { supplierDispatchConfirmationSchema } from "@shared/procurement/supplier-dispatch";
 import { supplierEvidenceCatalogStateFingerprint } from "./supplier-evidence-catalog-state";
 import { RECEIVABLE_SHIPMENT_STATUSES } from "./receiving-close-integrity.domain";
@@ -91,7 +92,6 @@ import {
 } from "./po-exceptions.service";
 import {
   PoLifecycleError,
-  buildFinancialTransitionChange,
   buildPhysicalTransitionChange,
   getAllowedLegacyTransitions,
   type PoLifecycleCommand,
@@ -1576,49 +1576,20 @@ export function createPurchasingService(
     return result;
   }
 
-  /**
-   * Transition the financial (AP/payment) status of a PO.
-   *
-   * Validates through purchase-order-lifecycle.service, stamps lifecycle
-   * timestamps, and writes a po_status_history row.
-   *
-   * Does NOT modify the legacy `status` column — that is owned by the
-   * physical track.
-   */
+  /** @deprecated Invoice and payment commands exclusively own financial state.
+   * Retain the service signature so older callers receive an explicit rejection
+   * instead of silently bypassing ledger evidence or stamping false milestones. */
   async function transitionFinancial(
-    poId: number,
-    target: PoFinancialStatus,
-    userId?: string,
-    notes?: string,
+    _poId: number,
+    _target: PoFinancialStatus,
+    _userId?: string,
+    _notes?: string,
     extraPatch?: Record<string, any>,
-  ): Promise<any> {
+  ): Promise<never> {
     if (extraPatch && Object.keys(extraPatch).length > 0) {
       throw new PurchasingError("Financial transitions do not accept additional purchase order changes", 400, { code: "PO_LIFECYCLE_PATCH_UNSUPPORTED" });
     }
-    const expectation = await observeLifecycleVersion(poId);
-    return db.transaction(async (tx: any) => {
-      await lockInventoryCostGraph(tx);
-      const po = await lockLifecycleHeader(tx, poId, expectation);
-      const change = (() => {
-        try {
-          return buildFinancialTransitionChange({
-            po,
-            target,
-            userId,
-            notes,
-            extraPatch,
-          });
-        } catch (error) {
-          return toPurchasingError(error);
-        }
-      })();
-      return updatePurchaseOrderStatusWithHistoryTx(
-        tx,
-        poId,
-        change.patch,
-        change.history,
-      );
-    });
+    throw new PurchasingError("Purchase order financial state is derived from invoice and payment evidence. Update the source invoice or payment instead.", 409, { code: "PO_FINANCIAL_LEDGER_OWNED" });
   }
 
   /** @deprecated AP ledger owns invoice-derived PO financial aggregates. */
@@ -1713,23 +1684,17 @@ export function createPurchasingService(
     if (!po) throw new PurchasingError("Purchase order not found", 404);
 
     const physicalStatus = po.physicalStatus ?? po.status;
-    const financialStatus = po.financialStatus ?? "unbilled";
     if (
       po.status !== "draft" ||
-      physicalStatus !== "draft" ||
-      financialStatus !== "unbilled"
+      physicalStatus !== "draft"
     ) {
       throw new PurchasingError(`Cannot edit PO in '${po.status}' status`, 400, {
         code: "PO_NOT_EDITABLE",
         status: po.status,
         physicalStatus,
-        financialStatus,
       });
     }
-    if (
-      storedMoneyAsBigInt(po.invoicedTotalCents, "invoiced_total_cents") !== BigInt(0) ||
-      storedMoneyAsBigInt(po.paidTotalCents, "paid_total_cents") !== BigInt(0)
-    ) {
+    if (hasPoInvoiceHistory(await readPoInvoiceHistory(tx, id))) {
       throw new PurchasingError("Cannot edit a draft after financial activity exists", 409, {
         code: "PO_DRAFT_HAS_FINANCIAL_ACTIVITY",
       });
@@ -1759,7 +1724,6 @@ export function createPurchasingService(
       eq(purchaseOrdersTable.id, po.id),
       eq(purchaseOrdersTable.status, "draft"),
       eq(purchaseOrdersTable.physicalStatus, "draft"),
-      eq(purchaseOrdersTable.financialStatus, "unbilled"),
     ];
     if (po.updatedAt != null) {
       conditions.push(purchaseOrderUpdatedAtMatchesApplicationVersion(po.updatedAt));
@@ -6045,23 +6009,17 @@ export function createPurchasingService(
       }
 
       const physicalStatus = currentPo.physicalStatus ?? currentPo.status;
-      const financialStatus = currentPo.financialStatus ?? "unbilled";
       if (
         currentPo.status !== "draft" ||
-        physicalStatus !== "draft" ||
-        financialStatus !== "unbilled"
+        physicalStatus !== "draft"
       ) {
         throw new PurchasingError(`Cannot edit PO in '${currentPo.status}' status`, 400, {
           code: "PO_NOT_EDITABLE",
           status: currentPo.status,
           physicalStatus,
-          financialStatus,
         });
       }
-      if (
-        storedMoneyAsBigInt(currentPo.invoicedTotalCents, "invoiced_total_cents") !== BigInt(0) ||
-        storedMoneyAsBigInt(currentPo.paidTotalCents, "paid_total_cents") !== BigInt(0)
-      ) {
+      if (hasPoInvoiceHistory(await readPoInvoiceHistory(tx, id))) {
         throw new PurchasingError("Cannot replace lines after financial activity exists", 409, {
           code: "PO_DRAFT_HAS_FINANCIAL_ACTIVITY",
         });
@@ -6277,7 +6235,6 @@ export function createPurchasingService(
           eq(purchaseOrdersTable.id, id),
           eq(purchaseOrdersTable.status, "draft"),
           eq(purchaseOrdersTable.physicalStatus, "draft"),
-          eq(purchaseOrdersTable.financialStatus, "unbilled"),
           purchaseOrderUpdatedAtMatchesApplicationVersion(currentPo.updatedAt),
         ))
         .returning();

@@ -1,3 +1,5 @@
+import { InventoryQuantityError } from "../../inventory/domain/quantity-ledger";
+import type { CanonicalClaimTransactionClient } from "../application/canonical-claim-inventory.port";
 import { commitCanonicalPickingReceipt } from "../../wms/picking-command.repository";
 import { isUnmappedOrderLine } from "@shared/unmapped-order-line";
 import { lockInventoryCostGraph } from "../../inventory/infrastructure/cost-evidence.repository";
@@ -4300,6 +4302,56 @@ export async function persistReconstructedCutoverClaim(
       "Adopted relational custody must match the actual canonical runtime demand reader.", { orderId: order.orderId });
   }
   return claimId.toString();
+}
+
+// Bound the transaction's locked orders while leaving ordinary free-stock moves unchanged.
+const MAX_TRANSFER_CLAIMS = 500;
+
+/** Inventory's transfer transaction already holds the shared cost graph lock.
+ * Reuse the claim owner's validated model graph and lock hierarchy before any
+ * inventory row is locked. No connection or transaction is opened here. */
+export async function lockCanonicalClaimsForInventoryTransfer(
+  rawClient: CanonicalClaimTransactionClient,
+  input: { productVariantId: number; fromLocationId: number; toLocationId: number },
+): Promise<void> {
+  // The adapter exposes only query; these helpers never use PoolClient lifecycle methods.
+  const client = rawClient as PoolClient;
+  await requireCanonicalAuthority(client);
+  const discover = async () => rows(await client.query(
+    `SELECT DISTINCT claim.id::text, claim.order_id
+     FROM inventory.availability_claims claim
+     JOIN inventory.availability_claim_resources resource ON resource.claim_id=claim.id
+     WHERE claim.status='active' AND resource.source_variant_id=$1 AND resource.warehouse_location_id=$2
+       AND resource.claimed_qty-resource.released_qty-resource.consumed_qty-resource.picked_qty>0
+     ORDER BY claim.order_id,claim.id::text LIMIT $3`, [input.productVariantId, input.fromLocationId, MAX_TRANSFER_CLAIMS + 1]));
+  const preliminary = await discover();
+  if (preliminary.length > MAX_TRANSFER_CLAIMS) throw new InventoryQuantityError("TRANSFER_CLAIM_LIMIT", "This bin has too many reservations for one transfer; review its orders first.");
+  const products = new Set<number>();
+  for (const row of preliminary) {
+    const claim = await loadClaimById(client, BigInt(row.id), false);
+    if (!claim || claim.status !== "active") throw new InventoryQuantityError("TRANSFER_CLAIM_CHANGED", "The bin's reservations changed. Refresh and retry.");
+    for (const productId of await loadClaimProductIds(client, claim)) products.add(productId);
+  }
+  const variant = rows(await client.query("SELECT product_id FROM catalog.product_variants WHERE id=$1", [input.productVariantId]))[0];
+  if (!variant) throw new InventoryQuantityError("TRANSFER_VARIANT_MISSING", "The transfer SKU no longer exists.");
+  products.add(positiveInteger(variant.product_id, "transfer.productId"));
+  if (products.size > MAX_GRAPH_PRODUCTS) {
+    throw new InventoryQuantityError("TRANSFER_CLAIM_GRAPH_LIMIT", "The reservations span too many product models for one transfer; review their orders first.");
+  }
+  await lockGraphProducts(client, [...products].sort((a, b) => a - b));
+  await client.query(`SELECT warehouse_location_id FROM inventory.location_promise_policy_heads
+    WHERE warehouse_location_id=ANY($1::int[]) ORDER BY warehouse_location_id FOR SHARE`, [[input.fromLocationId, input.toLocationId].sort((a, b) => a - b)]);
+  for (const orderId of uniqueSorted(preliminary.map(row => positiveInteger(row.order_id, "transfer.orderId")))) {
+    await client.query("SELECT id FROM wms.orders WHERE id=$1 FOR UPDATE", [orderId]);
+    await client.query("SELECT id FROM wms.order_items WHERE order_id=$1 ORDER BY id FOR UPDATE", [orderId]);
+  }
+  for (const row of preliminary) {
+    const claim = await loadClaimById(client, BigInt(row.id), true);
+    if (!claim || claim.status !== "active") throw new InventoryQuantityError("TRANSFER_CLAIM_CHANGED", "The bin's reservations changed. Refresh and retry.");
+  }
+  if (canonicalJson(preliminary) !== canonicalJson(await discover())) {
+    throw new InventoryQuantityError("TRANSFER_CLAIM_CHANGED", "The bin's reservations changed. Refresh and retry.");
+  }
 }
 
 export class PostgresInventoryAvailabilityClaimRepository implements InventoryAvailabilityClaimStore {

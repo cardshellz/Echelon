@@ -24,6 +24,7 @@ vi.mock("../../../../db", () => ({ db: new Proxy({}, {
 import { procurementMethods } from "../../procurement.storage";
 import { isPurchaseOrderHistoryConstraintViolation } from "../../purchase-order-history.repository";
 import { createPurchasingService } from "../../purchasing.service";
+import { createPurchaseOrderLineCommands } from "../../purchase-order-line-commands";
 import { registerPurchaseOrderRoutes } from "../../purchase-order.routes";
 import { readPurchaseApprovalActor } from "../../../identity/infrastructure/purchase-approval-access.repository";
 import { readCommandAuthorityActor } from "../../../identity/infrastructure/command-authority.repository";
@@ -99,7 +100,7 @@ databaseTests.sequential("purchase approval authority PostgreSQL owner and HTTP 
       ownedSchemas.push(name);
     }
     for (const table of [schema.users, schema.authRoles, schema.authPermissions, schema.authUserRoles, schema.authRolePermissions,
-      schema.purchaseOrders, schema.purchaseOrderLines, schema.vendorInvoicePoLinks, schema.poApprovalTiers, schema.poStatusHistory, schema.poEvents, schema.poRevisions, schema.purchasingRecommendationPoHandoffs, schema.warehouseSettings]) {
+      schema.purchaseOrders, schema.purchaseOrderLines, schema.vendorInvoices, schema.vendorInvoiceLines, schema.vendorInvoicePoLinks, schema.poApprovalTiers, schema.poStatusHistory, schema.poEvents, schema.poRevisions, schema.purchasingRecommendationPoHandoffs, schema.warehouseSettings]) {
       await pool.query(fixtureTable(table));
     }
     await pool.query(`
@@ -147,7 +148,7 @@ databaseTests.sequential("purchase approval authority PostgreSQL owner and HTTP 
       DROP TRIGGER IF EXISTS purchase_order_history_retention_truncate ON procurement.purchase_orders;
       TRUNCATE identity.auth_user_roles, identity.auth_role_permissions, identity.auth_permissions, identity.auth_roles, identity.users RESTART IDENTITY CASCADE;
       TRUNCATE procurement.purchase_orders, procurement.purchase_order_lines, procurement.po_approval_tiers,
-        procurement.po_events, procurement.po_status_history, procurement.po_revisions, procurement.vendor_invoice_po_links, procurement.purchasing_recommendation_po_handoffs, inventory.warehouse_settings RESTART IDENTITY CASCADE;
+        procurement.po_events, procurement.po_status_history, procurement.po_revisions, procurement.vendor_invoice_po_links, procurement.vendor_invoice_lines, procurement.vendor_invoices, procurement.purchasing_recommendation_po_handoffs, inventory.warehouse_settings RESTART IDENTITY CASCADE;
       INSERT INTO identity.users(id,username,password,role,active) VALUES
         ('admin-user','admin','unused','admin',1), ('lead-user','lead','unused','picker',1),
         ('wrong-user','wrong','unused','admin',1), ('inactive-user','inactive','unused','admin',0),
@@ -829,4 +830,107 @@ databaseTests.sequential("purchase approval authority PostgreSQL owner and HTTP 
       revoker.release();
     }
   });
+
+  describe("PO financial authority from retained invoice sources", () => {
+    const makeDraft = () => pool.query("UPDATE procurement.purchase_orders SET status='draft',physical_status='draft',financial_status='unbilled',invoiced_total_cents=0,paid_total_cents=0 WHERE id=1");
+    const addInvoice = (status: string) => pool.query("INSERT INTO procurement.vendor_invoices(id,vendor_id,invoice_number,status,invoiced_amount_cents,paid_amount_cents,balance_cents,currency) VALUES(80,1,'OWNERSHIP-80',$1,0,0,0,'USD')", [status]);
+
+    it.each(["received", "voided"])("blocks a zero-value %s invoice's header association despite zero PO caches", async status => {
+      await makeDraft(); await addInvoice(status);
+      await pool.query("INSERT INTO procurement.vendor_invoice_po_links(vendor_invoice_id,purchase_order_id) VALUES(80,1)");
+      const before = await evidence();
+      await expect(service.updatePO(1, { priority: "high" }, "admin-user")).rejects.toMatchObject({
+        statusCode: 409, details: { code: "PO_DRAFT_HAS_FINANCIAL_ACTIVITY" },
+      });
+      expect(await evidence()).toEqual(before);
+    });
+
+    it("preserves line-owned history even when its invoice header link is missing", async () => {
+      await makeDraft(); await addInvoice("voided");
+      await pool.query("INSERT INTO procurement.vendor_invoice_lines(id,vendor_invoice_id,purchase_order_line_id,line_total_cents) VALUES(90,80,11,0)");
+      const before = await evidence();
+      await expect(service.updatePO(1, { priority: "high" }, "admin-user")).rejects.toMatchObject({ details: { code: "PO_DRAFT_HAS_FINANCIAL_ACTIVITY" } });
+      expect(await evidence()).toEqual(before);
+    });
+
+    it.each(["add", "bulk", "update", "cancel"] as const)("blocks direct %s line mutation from retained header-only financial history", async operation => {
+      await makeDraft(); await addInvoice("voided");
+      await pool.query("INSERT INTO procurement.vendor_invoice_po_links(vendor_invoice_id,purchase_order_id) VALUES(80,1)");
+      const before = await evidence();
+      const po = await storage.getPurchaseOrderById(1);
+      const [line] = await database.select().from(schema.purchaseOrderLines).where(eq(schema.purchaseOrderLines.id, 11));
+      const commands = createPurchaseOrderLineCommands(database);
+      const version = { expectedPoUpdatedAt: po.updatedAt.toISOString(), expectedLineUpdatedAt: line.updatedAt.toISOString() };
+      const newLine = { productId: 1, pricing: { basis: "per_piece", quantityPieces: 1, unitCostMills: 100 } };
+      const attempt = operation === "add" ? commands.addLine(1, { expectedPoUpdatedAt: version.expectedPoUpdatedAt, ...newLine }, "admin-user")
+        : operation === "bulk" ? commands.addBulkLines(1, { expectedPoUpdatedAt: version.expectedPoUpdatedAt, lines: [newLine] }, "admin-user")
+          : operation === "update" ? commands.updateLine(11, { ...version, notes: "Changed" }, "admin-user")
+            : commands.cancelLine(11, { ...version, reason: "Changed" }, "admin-user");
+      await expect(attempt).rejects.toMatchObject({ statusCode: 409, details: { code: "PO_LINE_COMMAND_FINANCIAL_ACTIVITY" } });
+      expect(await evidence()).toEqual(before);
+    });
+
+    it("does not treat stale paid caches as source authority on a clean draft", async () => {
+      await makeDraft();
+      await pool.query("UPDATE procurement.purchase_orders SET financial_status='paid',invoiced_total_cents=500,paid_total_cents=500 WHERE id=1");
+      await expect(service.updatePO(1, { priority: "high" }, "admin-user")).resolves.toMatchObject({ priority: "high", financialStatus: "paid" });
+      expect((await evidence()).events).toHaveLength(1);
+    });
+
+    it.each(["unbilled", "invoiced", "partially_paid", "paid", "disputed"] as const)("cannot manually stamp %s or its milestones", async target => {
+      const before = await evidence();
+      await expect(service.transitionFinancial(1, target, "admin-user")).rejects.toMatchObject({
+        statusCode: 409, details: { code: "PO_FINANCIAL_LEDGER_OWNED" },
+      });
+      expect(await evidence()).toEqual(before);
+    });
+
+    it.each(["commit", "rollback"] as const)("reads invoice linkage after waiting for the actual graph lock (%s)", async disposition => {
+      await makeDraft();
+      const blocker = await pool.connect();
+      let released = false;
+      const before = await evidence();
+      try {
+        await blocker.query("BEGIN");
+        await blocker.query("SELECT pg_advisory_xact_lock(hashtext('inventory.cost_graph'), hashtext('version_1'))");
+        const pid = (await blocker.query("SELECT pg_backend_pid() AS pid")).rows[0].pid;
+        await blocker.query("INSERT INTO procurement.vendor_invoice_po_links(vendor_invoice_id,purchase_order_id) VALUES(80,1)");
+        const attempt = service.updatePO(1, { priority: "high" }, "admin-user").then(value => ({ value, error: null }), error => ({ value: null, error }));
+        const deadline = Date.now() + 5000;
+        let waiting = false;
+        while (Date.now() < deadline) {
+          const waiters = await pool.query("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid)) AND wait_event_type='Lock' AND wait_event='advisory') AS waiting", [pid]);
+          if (waiters.rows[0].waiting) { waiting = true; break; }
+          await new Promise(resolve => setTimeout(resolve, 10));
+        }
+        expect(waiting, "draft owner must wait on the held production inventory graph lock").toBe(true);
+        expect(await evidence()).toEqual(before);
+        await blocker.query(disposition === "commit" ? "COMMIT" : "ROLLBACK"); released = true;
+        const result = await attempt;
+        if (disposition === "commit") {
+          expect(result.error).toMatchObject({ statusCode: 409, details: { code: "PO_DRAFT_HAS_FINANCIAL_ACTIVITY" } });
+          expect(await evidence()).toEqual(before);
+        } else {
+          expect(result.error).toBeNull(); expect(result.value).toMatchObject({ priority: "high" });
+        }
+      } finally {
+        if (!released) await blocker.query("ROLLBACK");
+        blocker.release();
+      }
+    });
+
+    it("rolls back a source-verified draft edit when its immutable audit cannot be written", async () => {
+      await makeDraft();
+      const before = await evidence();
+      await pool.query(`CREATE FUNCTION procurement.fail_draft_audit() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected draft audit failure'; END $$;
+        CREATE TRIGGER fail_draft_audit BEFORE INSERT ON procurement.po_events FOR EACH ROW EXECUTE FUNCTION procurement.fail_draft_audit()`);
+      try {
+        await expect(service.updatePO(1, { priority: "high" }, "admin-user")).rejects.toThrow();
+        expect(await evidence()).toEqual(before);
+      } finally {
+        await pool.query("DROP TRIGGER fail_draft_audit ON procurement.po_events; DROP FUNCTION procurement.fail_draft_audit()");
+      }
+    });
+  });
+
 });

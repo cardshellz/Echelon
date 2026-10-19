@@ -1080,7 +1080,8 @@ export class InventoryLotService {
     occurredAt?: Date;
     operationKey?: string;
     quantityPosting?: OperationalQuantityPosting | null;
-  }): Promise<void> {
+    reservedLots?: readonly { inventoryLotId: number; quantity: number }[];
+  }): Promise<readonly { sourceLotId: number; destinationLotId: number; quantity: number; reservedQuantity: number }[]> {
     for (const field of ["productVariantId", "fromLocationId", "toLocationId", "qty"] as const) {
       if (!Number.isInteger(params[field]) || params[field] <= 0 || params[field] > 2_147_483_647) {
         throw new CostEvidenceError("COST_TRANSFER_INPUT_INVALID", `${field} must be a positive PostgreSQL integer.`, { field });
@@ -1100,10 +1101,19 @@ export class InventoryLotService {
       params.fromLocationId,
     );
 
+    const reservedByLot = new Map((params.reservedLots ?? []).map(row => [row.inventoryLotId, row.quantity]));
+    const reservedTotal = [...reservedByLot.values()].reduce((sum, value) => sum + value, 0);
+    if ((reservedByLot.size > 0 && !params.quantityPosting) || reservedByLot.size !== (params.reservedLots?.length ?? 0)
+      || [...reservedByLot.entries()].some(([id, qty]) => !Number.isSafeInteger(id) || id <= 0 || !Number.isSafeInteger(qty) || qty <= 0)
+      || reservedTotal > params.qty || [...reservedByLot.keys()].some(id => !lots.some(lot => lot.id === id))) {
+      throw new IntegrityError("Reserved lot movements require exact canonical claim allocation evidence");
+    }
+    let freeRemaining = params.qty - reservedTotal;
     let remaining = params.qty;
     const layers: Array<{
       lotId: number;
       take: number;
+      reservedQuantity: number;
       unitCostCents: number;
       receivedAt: Date;
       purchaseOrderId: number | null;
@@ -1115,23 +1125,27 @@ export class InventoryLotService {
       totalUnitCostMills: number;
       packagingCostMills: number;
       landedCostMills: number;
-      exactAllocation?:LotQuantityCostAllocation;
+      exactAllocation?: LotQuantityCostAllocation;
     }> = [];
 
     for (const lot of lots) {
       if (remaining <= 0) break;
 
-      const available = calculateUnreservedLotOnHand(lot);
-      if (available <= 0) continue;
-
-      const take = Math.min(available, remaining);
+      const reservedQuantity = reservedByLot.get(lot.id) ?? 0;
+      if (reservedQuantity > lot.qtyReserved || reservedQuantity > lot.qtyOnHand) throw new IntegrityError("A reserved source lot no longer covers its claim");
+      const available = Math.max(0, calculateUnreservedLotOnHand(lot));
+      const freeTake = Math.min(available, freeRemaining);
+      const take = freeTake + reservedQuantity;
+      if (take === 0) continue;
+      freeRemaining -= freeTake;
       const normalizedCosts = normalizeBuildLotCosts(lotCostRecord(lot));
-      const exactAllocation=hasExactLotCostTotals(lotCostRecord(lot))
-        ? await allocateLotQuantityCost(this.db,lot.id,take,params.actorId,params.occurredAt,
-          {operationKey:params.operationKey ?? "inventory_transfer"}) : null;
+      const exactAllocation = hasExactLotCostTotals(lotCostRecord(lot))
+        ? await allocateLotQuantityCost(this.db, lot.id, take, params.actorId, params.occurredAt,
+          { operationKey: params.operationKey ?? "inventory_transfer" }) : null;
       layers.push({
         lotId: lot.id,
         take,
+        reservedQuantity,
         unitCostCents: lot.unitCostCents,
         receivedAt: lot.receivedAt,
         purchaseOrderId: lot.purchaseOrderId ?? null,
@@ -1143,7 +1157,7 @@ export class InventoryLotService {
         totalUnitCostMills: safeMillsNumber(normalizedCosts.totalMills, "transfer.totalUnitCostMills"),
         packagingCostMills: safeMillsNumber(normalizedCosts.packagingMills, "transfer.packagingCostMills"),
         landedCostMills: safeMillsNumber(normalizedCosts.landedMills, "transfer.landedCostMills"),
-        ...(exactAllocation?{exactAllocation}:{}),
+        ...(exactAllocation ? { exactAllocation } : {}),
       });
       remaining -= take;
     }
@@ -1163,13 +1177,13 @@ export class InventoryLotService {
     }
 
     // Decrement source lots
-    const transferUpdates = layers.map(l => ({ lotId: l.lotId, take: l.take }));
+    const transferUpdates = layers.map(l => ({ lotId: l.lotId, take: l.take, reservedQuantity: l.reservedQuantity }));
     if (params.quantityPosting) {
       for (const update of transferUpdates) await params.quantityPosting.addLot(update.lotId, {
-        onHand: -update.take, reserved: 0, picked: 0, packed: 0,
+        onHand: -update.take, reserved: -update.reservedQuantity, picked: 0, packed: 0,
       });
     } else {
-    const updated = await this.db.execute(sql`
+      const updated = await this.db.execute(sql`
       WITH updates AS (
         SELECT * FROM jsonb_to_recordset(${JSON.stringify(transferUpdates)}::jsonb) AS x("lotId" int, take int)
       )
@@ -1181,19 +1195,20 @@ export class InventoryLotService {
         AND il.qty_on_hand - il.qty_reserved >= u.take
       RETURNING il.id
     `);
-    if ((updated.rows ?? []).length !== transferUpdates.length) {
-      throw new LotInventoryConflictError(
-        "LOT_TRANSFER_CONFLICT",
-        "A FIFO lot changed while its unreserved stock was being transferred.",
-        {
-          productVariantId: params.productVariantId,
-          fromLocationId: params.fromLocationId,
-          toLocationId: params.toLocationId,
-        },
-      );
-    }
+      if ((updated.rows ?? []).length !== transferUpdates.length) {
+        throw new LotInventoryConflictError(
+          "LOT_TRANSFER_CONFLICT",
+          "A FIFO lot changed while its unreserved stock was being transferred.",
+          {
+            productVariantId: params.productVariantId,
+            fromLocationId: params.fromLocationId,
+            toLocationId: params.toLocationId,
+          },
+        );
+      }
     }
 
+    const transferredLots: Array<{ sourceLotId: number; destinationLotId: number; quantity: number; reservedQuantity: number }> = [];
     // Create one destination lot per source layer — cost identity preserved
     for (const layer of layers) {
       const outputLot = await this.createLot({
@@ -1213,18 +1228,23 @@ export class InventoryLotService {
         receivedAt: layer.receivedAt,
         notes: params.notes ?? "Transfer",
         quantityPosting: params.quantityPosting,
-        exactTotals:layer.exactAllocation?.costs,
+        exactTotals: layer.exactAllocation?.costs,
       });
+      if (layer.reservedQuantity > 0) await params.quantityPosting!.addLot(outputLot.id, {
+        onHand: 0, reserved: layer.reservedQuantity, picked: 0, packed: 0,
+      });
+      transferredLots.push({ sourceLotId: layer.lotId, destinationLotId: outputLot.id, quantity: layer.take, reservedQuantity: layer.reservedQuantity });
       await recordLotCostContribution(this.db, {
         sourceLotId: layer.lotId,
         outputLotId: outputLot.id,
         sourceQty: layer.take,
-        costQuantityAllocationId:layer.exactAllocation?.id,
+        costQuantityAllocationId: layer.exactAllocation?.id,
         outputQty: layer.take,
         operationKind: "transfer",
         operationKey: params.operationKey ?? `inventory_transfer:${layer.lotId}:${outputLot.id}`,
       }, params.actorId, params.occurredAt);
     }
+    return transferredLots;
   }
 
   // ---------------------------------------------------------------------------

@@ -1,6 +1,8 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { createPoFinancialEvidenceService } from "../../po-financial-evidence.service";
 import { readPoFinancialEvidenceSource } from "../../po-financial-evidence.repository";
+import { createPurchaseOrderListRepository } from "../../purchase-order-list.repository";
+import { createPurchaseOrderListService } from "../../purchase-order-list.service";
 import { PoFinancialRefreshFixture, REFRESH_ACTOR } from "./po-financial-refresh.fixture";
 
 const url = process.env.ECHELON_TEST_DATABASE_URL;
@@ -45,6 +47,37 @@ databaseTests.sequential("PO financial evidence from real invoice and payment re
     expect(await fixture.snapshot()).toEqual(before);
     expect((await fixture.service.getPaymentsForPo(10))[0].appliedAmountCents).toBe(1000);
     expect((await fixture.service.getPaymentsForPo(20))[0].appliedAmountCents).toBe(1000);
+  });
+  it("uses current canonical financial state for list filtering/counting despite stale paid caches", async () => {
+    await pay(1000);
+    await fixture.pool.query("UPDATE procurement.purchase_orders SET financial_status='paid', paid_total_cents=3000");
+    const read = createPurchaseOrderListService(createPurchaseOrderListRepository(fixture.db));
+    const before = await fixture.snapshot();
+    const first = await read({ financialWorkflow: "review_required", limit: 1, offset: 0 });
+    const second = await read({ financialWorkflow: "review_required", limit: 1, offset: 1 });
+    expect(first.total).toBe(2); expect(second.total).toBe(2);
+    expect(new Set([...first.purchaseOrders, ...second.purchaseOrders].map(row => row.id))).toEqual(new Set([10, 20]));
+    for (const row of [...first.purchaseOrders, ...second.purchaseOrders]) {
+      expect(row.financialWorkflow.evidence.paidAmountCents).toBeNull();
+      expect(row.financialWorkflow.evidence.outstandingAmountCents).toBeNull();
+    }
+    expect((await read({ financialWorkflow: "settled" })).total).toBe(0);
+    expect((await read({ financialWorkflow: "unbilled" })).purchaseOrders.map(row => row.id)).toEqual([30]);
+    expect(await fixture.snapshot()).toEqual(before);
+  });
+  it("stamps future payment milestones only after the PO share is proven", async () => {
+    const recorded = await fixture.pool.query("SELECT id,first_invoiced_at,first_paid_at,fully_paid_at FROM procurement.purchase_orders WHERE id IN (10,20) ORDER BY id");
+    expect(recorded.rows.every(row => row.first_invoiced_at instanceof Date)).toBe(true);
+    await pay(1000);
+    const partial = await fixture.pool.query("SELECT id,first_invoiced_at,first_paid_at,fully_paid_at FROM procurement.purchase_orders WHERE id IN (10,20) ORDER BY id");
+    expect(partial.rows).toEqual(recorded.rows);
+    expect(partial.rows.every(row => row.first_paid_at === null && row.fully_paid_at === null)).toBe(true);
+    await pay(2000);
+    const settled = await fixture.pool.query("SELECT id,first_invoiced_at,first_paid_at,fully_paid_at FROM procurement.purchase_orders WHERE id IN (10,20) ORDER BY id");
+    expect(settled.rows.every(row => row.first_paid_at instanceof Date && row.fully_paid_at instanceof Date)).toBe(true);
+    expect(settled.rows.map(row => row.first_invoiced_at)).toEqual(recorded.rows.map(row => row.first_invoiced_at));
+    const read = createPurchaseOrderListService(createPurchaseOrderListRepository(fixture.db));
+    expect((await read({ financialWorkflow: "settled" })).total).toBe(2);
   });
   it("derives exact conserved PO settlement at full invoice settlement", async () => {
     await pay(1000); await pay(2000);

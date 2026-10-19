@@ -7,6 +7,7 @@ import type { ServiceRegistry } from "../../../../services";
 const mocks = vi.hoisted(() => ({ execute: vi.fn(), getCostReview: vi.fn(), cancel: vi.fn() }));
 vi.mock("../../../../db", () => ({ db: {} }));
 vi.mock("../../../../routes/middleware", () => ({
+  requireAuth: (_req: Request, _res: Response, next: NextFunction) => next(),
   requirePermission: (resource: string, action: string) => (req: Request, res: Response, next: NextFunction) => {
     if (req.headers["x-test-permission"] !== `${resource}:${action}`) return res.status(403).json({ error: "Permission denied" });
     next();

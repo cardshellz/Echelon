@@ -1,3 +1,4 @@
+import { invoiceSourceFixture, unbilledOwnershipFixture } from "../fixtures/invoice-source";
 import { resolve } from "node:path";
 import { expect, test, type Page } from "@playwright/test";
 import { installFixtures } from "./procurement-fixtures";
@@ -100,8 +101,8 @@ test("shipment invoice creation refreshes an already mounted AP work list", asyn
   const failures = await setup(page); let created = false; let reads = 0;
   await page.route("**/api/vendor-invoices/work-list?*", route => { reads += 1; return route.fulfill({ json: workListPage(created ? [invoiceListItem({ id: 500, invoiceNumber: "FROM-SHIPMENT", status: "received" })] : [], route.request().url()) }); });
   await page.route("**/api/inbound-shipments/42/cost-vendors", route => route.fulfill({ json: { vendors: [{ vendorId: 2, vendorName: "Older supplier", unbilledCostCount: 1, unbilledTotalCents: 10000 }] } }));
-  await page.route("**/api/inbound-shipments/42/cost-vendors/2/costs", route => route.fulfill({ json: { costs: [{ id: 1, costType: "freight", description: "Freight", performedByName: null, actualCents: 10000, estimatedCents: null }] } }));
-  await page.route("**/api/inbound-shipments/42/create-invoice", route => { created = true; return route.fulfill({ json: { id: 500 } }); });
+  await page.route("**/api/inbound-shipments/42/cost-vendors/2/costs", route => route.fulfill({ json: { costs: [{ billingOwnership: unbilledOwnershipFixture(), inboundShipmentId: 42, vendorId: 2, id: 1, costType: "freight", description: "Freight", performedByName: null, actualCents: 10000, estimatedCents: null }] } }));
+  await page.route("**/api/inbound-shipments/42/create-invoice", route => { created = true; return route.fulfill({ json: { id: 500, invoiceId: 500, shipmentId: 42, inboundShipmentId: 42, vendorId: 2, invoiceNumber: "FROM-SHIPMENT", actorId: "ap-reader", idempotencyKey: route.request().headers()["idempotency-key"], costRowIds: [1], totalCents: 10000, currency: "USD" } }); });
   await page.route("**/__ap-work-list-refresh", route => route.fulfill({ contentType: "text/html", body: `<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1" /><script type="module">import RefreshRuntime from '/@react-refresh'; RefreshRuntime.injectIntoGlobalHook(window); window.$RefreshReg$=()=>{}; window.$RefreshSig$=()=>type=>type; window.__vite_plugin_react_preamble_installed__=true;</script></head><body><div id="root"></div><script type="module" src="/@fs/${resolve("test/browser/fixtures/ap-work-list-refresh-harness.tsx").replaceAll("\\", "/")}"></script></body></html>` }));
   await page.goto("/__ap-work-list-refresh");
   await expect(page.getByText("No invoices found", { exact: true })).toBeVisible();
@@ -116,7 +117,7 @@ test("shipment invoice creation refreshes an already mounted AP work list", asyn
 
 test("invoice PO linking searches beyond 100 without losing linked exclusions or hiding closed POs", async ({ page }) => {
   const failures = await setup(page); const requests: URLSearchParams[] = [];
-  await page.route("**/api/vendor-invoices/71", route => route.fulfill({ json: { id: 71, vendorId: 2, invoiceNumber: "LINK-INVOICE", vendorName: "Older supplier", status: "received", currency: "USD", invoicedAmountCents: 10000, balanceCents: 10000, paidAmountCents: 0, lines: [], attachments: [], payments: [], poLinks: [{ id: 1, purchaseOrderId: 17, poNumber: "PO-17" }], capabilities: { edit: { allowed: true, code: "AP_INVOICE_EDITABLE", requiredPermission: "purchasing:edit", reason: "This invoice can be edited." } } } }));
+  await page.route("**/api/vendor-invoices/71", route => route.fulfill({ json: { sourceCapabilities: invoiceSourceFixture(), id: 71, vendorId: 2, invoiceNumber: "LINK-INVOICE", vendorName: "Older supplier", status: "received", currency: "USD", invoicedAmountCents: 10000, balanceCents: 10000, paidAmountCents: 0, lines: [], attachments: [], payments: [], poLinks: [{ id: 1, purchaseOrderId: 17, poNumber: "PO-17" }], capabilities: { edit: { allowed: true, code: "AP_INVOICE_EDITABLE", requiredPermission: "purchasing:edit", reason: "This invoice can be edited." } } } }));
   await page.route("**/api/purchase-orders/work-list?*", route => {
     const params = new URL(route.request().url()).searchParams; requests.push(params);
     return route.fulfill({ json: workListPage(params.get("search") === "PO-125" ? [{ id: 125, poNumber: "PO-125", vendorId: 2, status: "closed", totalCents: 10000 }] : [], route.request().url()) });

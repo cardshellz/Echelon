@@ -25,6 +25,7 @@ const mocks = vi.hoisted(() => ({
   count: vi.fn(),
   list: vi.fn(),
   log: vi.fn(),
+  readList: vi.fn(),
 }));
 vi.mock("../../../../db", () => ({ db: {} }));
 vi.mock("../../../catalog", () => ({ catalogStorage: {} }));
@@ -32,8 +33,9 @@ vi.mock("../../../warehouse", () => ({ warehouseStorage: {} }));
 vi.mock("../../../inventory", () => ({ inventoryStorage: {} }));
 vi.mock("../../../orders", () => ({ ordersStorage: {} }));
 vi.mock("../..", () => ({
-  procurementStorage: { getVendorById: mocks.vendor },
+  procurementStorage: { getVendorById: mocks.vendor, getAllVendors: async () => [] },
 }));
+vi.mock("../../purchase-order-list.service", async original => ({ ...await original<typeof import("../../purchase-order-list.service")>(), getPurchaseOrderList: mocks.readList }));
 vi.mock("../../ap-ledger.service", () => ({}));
 vi.mock("../../po-exceptions.service", () => ({
   countOpenExceptions: mocks.count,
@@ -219,5 +221,26 @@ describe("PO detail financial workflow HTTP boundary", () => {
       evidence: { ...wrong.evidence, purchaseOrderId: 20 },
     });
     expect((await fetch(`${base}/api/purchase-orders/10`)).status).toBe(503);
+  });
+  it("returns canonical list evidence and forwards its separate workflow filter", async () => {
+    mocks.readList.mockResolvedValue({ purchaseOrders: [{ id: 10, status: "closed", physicalStatus: "received", financialStatus: "paid", financialWorkflow: workflow("disputed") }], total: 1 });
+    const response = await fetch(`${base}/api/purchase-orders?financial_workflow=review_required&limit=10&offset=0`);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ total: 1, purchaseOrders: [{ id: 10, financialWorkflow: { state: "review_required" }, lifecycle: { isTerminal: false, allowedFinancialTransitions: [] } }] });
+    expect(mocks.readList).toHaveBeenCalledWith(expect.objectContaining({ financialWorkflow: "review_required", financialStatus: undefined, limit: 10, offset: 0 }));
+  });
+  it("denies list permission before financial reads", async () => {
+    mocks.permission = false;
+    expect((await fetch(`${base}/api/purchase-orders`)).status).toBe(403);
+    expect(mocks.readList).not.toHaveBeenCalled();
+  });
+  it("does not expose failed list evidence or return a cached completion substitute", async () => {
+    mocks.readList.mockRejectedValue(new Error("private_list_secret"));
+    const response = await fetch(`${base}/api/purchase-orders`);
+    expect(response.status).toBe(503);
+    const body = await response.text();
+    expect(body).toContain("PURCHASE_ORDER_LIST_UNAVAILABLE");
+    expect(body).not.toContain("private_list_secret");
+    expect(body).not.toContain("purchaseOrders");
   });
 });
