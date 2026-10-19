@@ -15,6 +15,8 @@ import {
 import { PostgresInventoryPublicationOutboxRepository } from "../../infrastructure/inventory-publication-outbox.repository";
 import { dispatchRuntimeFixtureSql, dispatchRuntimeSeedSql } from "../fixtures/inventory-availability-dispatch-runtime-fixture";
 import { shipmentPublicationFixtureSql, shipmentPublicationIntent } from "../fixtures/shipment-publication.fixture";
+import { installStockSelectionFixture } from "../fixtures/stock-selection.fixture";
+import { readChannelStockSelection } from "../../../channels/channel-stock-selection";
 
 const databaseUrl = process.env.ECHELON_TEST_DATABASE_URL;
 const disposable = process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true";
@@ -38,11 +40,27 @@ describeDatabase.sequential("shipment publication caller-owned PostgreSQL transa
       dispatchRuntimeFixtureSql + shipmentPublicationFixtureSql);
     pool = database.pool;
     await pool.query(migration);
+    // runIfCurrent asks the real Catalog/Channels selection owner whether an
+    // archived member superseded this quantity request before taking action.
+    await pool.query(`CREATE TABLE catalog.products(id integer PRIMARY KEY,is_active boolean NOT NULL);
+      INSERT INTO catalog.products VALUES(100,true);
+      ALTER TABLE catalog.product_variants ADD COLUMN product_id integer REFERENCES catalog.products(id),
+        ADD COLUMN sku text,ADD COLUMN uom_type text,ADD COLUMN is_active boolean,
+        ADD COLUMN requires_shipping boolean,ADD COLUMN track_inventory boolean,ADD COLUMN sales_eligibility text;
+      CREATE TABLE channels.channels(id integer PRIMARY KEY,provider text NOT NULL);
+      CREATE TABLE channels.channel_connections(id integer PRIMARY KEY,channel_id integer NOT NULL REFERENCES channels.channels(id));
+      INSERT INTO channels.channels VALUES(3,'shopify');
+      INSERT INTO channels.channel_connections VALUES(33,3);`);
+    await installStockSelectionFixture(pool);
+    await pool.query(`INSERT INTO channels.channel_feeds(channel_id,product_variant_id,channel_sku,channel_inventory_item_id,is_active)
+      VALUES(3,105,'EA','inventory-item-105',1)`);
   });
   beforeEach(async () => {
     await pool.query(`TRUNCATE inventory.inventory_publication_attempts, inventory.inventory_publication_readbacks,
       inventory.inventory_publication_outbox, inventory.availability_activation_runs RESTART IDENTITY;
       ${dispatchRuntimeSeedSql}
+      UPDATE catalog.product_variants SET product_id=100,sku='EA',uom_type='each',is_active=true,
+        requires_shipping=true,track_inventory=true,sales_eligibility='sellable' WHERE id=105;
       INSERT INTO inventory.availability_activation_runs(id,mode,state) VALUES(1,'activation','active');`);
   });
   afterAll(async () => { await database?.close(); });
@@ -107,6 +125,8 @@ describeDatabase.sequential("shipment publication caller-owned PostgreSQL transa
   });
 
   it("breaks the real worker target-lock/activation-acknowledgement cycle by failing the owner immediately", async () => {
+    expect((await readChannelStockSelection(pool, { channelId: 3, channelConnectionId: 33, productId: 100, productVariantIds: [105] })).variants)
+      .toMatchObject([{ productVariantId: 105, action: "publish", blockers: [] }]);
     const standalone = new PostgresInventoryAvailabilityRuntimePublicationExecutor(pool);
     await standalone.execute(context => context.enqueueFullPublications("1", [shipmentPublicationIntent()]));
     const worker = new PostgresInventoryPublicationOutboxRepository(pool);

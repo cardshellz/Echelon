@@ -7,12 +7,14 @@ import { createInventoryCutoverTestDatabase, type InventoryCutoverTestDatabase }
 import { cutoverCompositionBaseSql } from "../fixtures/inventory-cutover-composition-database.fixture";
 import { WALMART_INVENTORY_NOW } from "../fixtures/walmart-publication-inventory.fixture";
 import { installEbayPublicationInventoryFixture } from "../fixtures/ebay-publication-inventory.fixture";
+import { installPublicationSelectionWorkFixture } from "../fixtures/publication-selection-work.fixture";
 import { calculatePublicationVariantMappingDefinitionHash } from "../../domain/inventory-channel-exposure";
 import { reviewEbayPublicationReadiness, assertEbayPublicationReady, ensureEbayPublicationReady, withEbayPublicationReadinessApplied, findEbayPublicationReadinessReceipt, rejectEbayPublicationReadinessCommand } from "../../infrastructure/ebay-publication-readiness.repository";
 import { createEbayRouteListingLifecycleClient } from "../../../channels/infrastructure/ebay-listing-client";
 import { recordQuantityProviderResponse } from "../../application/quantity-provider-request-evidence";
 import { PostgresQuantityPublicationAdmission, quantityPublicationScopeLockKey } from "../../infrastructure/quantity-publication-admission.repository";
 import { PostgresInventoryPublicationOutboxRepository } from "../../infrastructure/inventory-publication-outbox.repository";
+import { PostgresInventoryAvailabilityRuntimePublicationExecutor } from "../../infrastructure/inventory-availability-runtime-publication.repository";
 import { PUBLICATION_TARGET_SCOPE_LOCK_SEED } from "../../infrastructure/inventory-publication-target-stop.repository";
 import { EbayExistingListingSyncExecution, type EbayListingExecutionContext, type PreparedEbayListingSync } from "../../../channels/ebay-listing-sync.service";
 import { EbayMarketplaceListingConnector, type EbayObservedOffer } from "../../../channels/listing-connectors/ebay-listing.connector";
@@ -25,7 +27,7 @@ vi.mock("../../../../db", () => ({ pool: new Proxy({} as Pool, { get(_target, ke
 } }), db: {} }));
 vi.mock("../../../channels/infrastructure/ebay-api-runtime", () => ({ EBAY_CHANNEL_ID: 67,
   ebayApiRequest: (...args: unknown[]) => runtime.api(...args), ebayApiRequestWithRateNotify: (...args: unknown[]) => runtime.api(...args),
-  getAuthService: () => ({ getVerifiedProviderAccount: async () => ({ externalAccountId: "seller-36" }) }),
+  getAuthService: () => ({ getVerifiedProviderAccount: async () => ({ externalAccountId: "seller-36" }), getEnvironment: () => "production" }),
 }));
 const url = process.env.ECHELON_TEST_DATABASE_URL;
 const disposable = process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true";
@@ -69,12 +71,25 @@ dbDescribe.sequential("reviewed eBay publication stock enrollment, real PostgreS
       "0736_ebay_listing_mapping_repairs.sql", "0737_ebay_publication_completion.sql"]) {
       await database.pool.query(readFileSync(resolve(process.cwd(), "migrations", file), "utf8"));
     }
+    await installPublicationSelectionWorkFixture(database.pool);
+    // Group admission uses the shared lifecycle read model, including when no
+    // member is archived. Install its real migration over the reduced owner schema.
+    await database.pool.query(`ALTER TABLE catalog.products ADD COLUMN IF NOT EXISTS updated_at timestamptz DEFAULT now();
+      ALTER TABLE catalog.product_variants ADD COLUMN IF NOT EXISTS updated_at timestamptz DEFAULT now();
+      ALTER TABLE channels.channel_connections ADD COLUMN IF NOT EXISTS shop_domain text;
+      ALTER TABLE channels.channel_connections ADD COLUMN IF NOT EXISTS metadata jsonb;
+      ALTER TABLE channels.walmart_connections ADD COLUMN IF NOT EXISTS market text;
+      UPDATE channels.channel_connections SET metadata='{"marketplaceId":"EBAY_US"}' WHERE id=9;`);
+    for (const file of ["0707_channel_listing_publication.sql", "900000013000018480001_shared_listing_member_lifecycle.sql"])
+      await database.pool.query(readFileSync(resolve("migrations", file), "utf8"));
     await database.pool.query('CREATE TABLE saved_publication_work(command_key uuid PRIMARY KEY)');
   }, 30_000);
   afterEach(async () => { await database?.close(); });
 
   const retainedSource = async () => {
-    await database.pool.query(`UPDATE catalog.product_variants SET is_active=false WHERE id=102;
+    // Channel-only exclusion still owns a retained zero. Catalog archival has a
+    // separate removal lifecycle and must not be used to manufacture this case.
+    await database.pool.query(`UPDATE catalog.product_variants SET ebay_listing_excluded=true WHERE id=102;
       UPDATE channels.channel_listings SET external_product_id='listing-20' WHERE id=1;
       INSERT INTO channels.channel_listings(id,channel_id,product_variant_id,external_sku,external_variant_id,external_product_id,sync_status)
         VALUES(2,67,102,'NEW','offer-NEW','listing-20','synced')`);
@@ -84,7 +99,8 @@ dbDescribe.sequential("reviewed eBay publication stock enrollment, real PostgreS
   const unrelatedRetainedMappingGap = async () => {
     await database.pool.query(`BEGIN;
       INSERT INTO catalog.products(id,sku) VALUES(21,'OTHER');
-      INSERT INTO catalog.product_variants(id,product_id,sku,is_active) VALUES(201,21,'OTHER-PACK',true),(202,21,'OTHER-CASE',false);
+      INSERT INTO catalog.product_variants(id,product_id,sku,is_active) VALUES(201,21,'OTHER-PACK',true),(202,21,'OTHER-CASE',true);
+      UPDATE catalog.product_variants SET ebay_listing_excluded=true WHERE id=202;
       INSERT INTO inventory.inventory_levels(id,warehouse_location_id,product_variant_id,variant_qty,reserved_qty,picked_qty,packed_qty)
         VALUES(11,100,201,7,0,0,0);
       INSERT INTO inventory.transformation_model_versions(product_id,version,build_to_promise_enabled,definition_hash,validation_state,validation_errors,change_reason,idempotency_key,request_hash,created_by)
@@ -99,8 +115,8 @@ dbDescribe.sequential("reviewed eBay publication stock enrollment, real PostgreS
     await ensureEbayPublicationReady(database.pool, { ...source(), productId: 21,
       variants: [{ productVariantId: 201, sku: "OTHER-PACK" }] },
       { commandKey: randomUUID(), actor: "operator", now: WALMART_INVENTORY_NOW });
-    // The unrelated product has a valid active mapping and a retained inactive
-    // offer without a listing ID, exactly the production blocker shape.
+    // The unrelated product has a valid active mapping and a channel-excluded
+    // retained offer without a listing ID, so its zero still needs an exact mapping.
     await database.pool.query(`INSERT INTO channels.channel_listings(id,channel_id,product_variant_id,external_sku,external_variant_id,external_product_id,sync_status)
       VALUES(4,67,202,'OTHER-CASE','offer-OTHER-CASE',NULL,'synced')`);
   };
@@ -147,14 +163,35 @@ dbDescribe.sequential("reviewed eBay publication stock enrollment, real PostgreS
 
   it("still rolls back the complete requested product when another retained member of that product is unmapped", async () => {
     const selected = await retainedSource();
-    await database.pool.query(`UPDATE catalog.product_variants SET is_active=false WHERE id=103;
+    const commandKey = randomUUID();
+    await database.pool.query(`UPDATE catalog.product_variants SET ebay_listing_excluded=true WHERE id=103;
       INSERT INTO channels.channel_listings(id,channel_id,product_variant_id,external_sku,external_variant_id,external_product_id,sync_status)
         VALUES(3,67,103,'UNCERTAIN','offer-UNCERTAIN',NULL,'synced')`);
+    // These two requested mappings are eligible to be prepared. Whole-product
+    // publication must still reject the separate retained zero for member 103.
+    expect(await reviewEbayPublicationReadiness(database.pool, selected)).toMatchObject({ ready: true, variants: [
+      { productVariantId: 101, desiredQuantity: "17" }, { productVariantId: 102, desiredQuantity: "0" },
+    ] });
+    const executor = new PostgresInventoryAvailabilityRuntimePublicationExecutor(database.pool, { info: () => {}, warn: () => {} });
+    const plan = await executor.execute(context => context.planProduct(20, 67, "publication"));
+    expect(plan.targets.find(target => target.publicationTargetId === 3)?.rows.find(row => row.productVariantId === 103))
+      .toMatchObject({ publishedUnits: "0", mapping: null, blockers: [{ code: "PUBLICATION_TARGET_VARIANT_MAPPING_MISSING" }] });
     await expect(ensureEbayPublicationReady(database.pool, selected,
-      { commandKey: randomUUID(), actor: "operator", now: WALMART_INVENTORY_NOW }))
+      { commandKey, actor: "operator", now: WALMART_INVENTORY_NOW }))
       .rejects.toMatchObject({ code: "CANONICAL_PUBLICATION_MAPPING_MISSING",
-        context: { productId: 20, productVariantId: 103, publicationTargetId: 3 } });
+        context: { productId: 20, publicationTargetId: 3, blockerCodes: ["PUBLICATION_TARGET_VARIANT_MAPPING_MISSING"] } });
     expect(await counts()).toEqual({ mappings: 0, members: 0, updates: 0, receipts: 0, jobs: 0 });
+    expect(runtime.api).not.toHaveBeenCalled();
+    // Remove only the deliberately incomplete retained destination. The same
+    // request must now commit, proving that member 103 caused the rollback and
+    // that a failed preparation did not consume its command key.
+    await database.pool.query("DELETE FROM channels.channel_listings WHERE channel_id=67 AND product_variant_id=103");
+    await ensureEbayPublicationReady(database.pool, selected,
+      { commandKey, actor: "operator", now: WALMART_INVENTORY_NOW });
+    expect(await counts()).toEqual({ mappings: 2, members: 0, updates: 2, receipts: 1, jobs: 0 });
+    expect((await database.pool.query(`SELECT product_variant_id,desired_quantity::text
+      FROM inventory.inventory_publication_outbox WHERE publication_target_id=3 ORDER BY product_variant_id`)).rows)
+      .toEqual([{ product_variant_id: 101, desired_quantity: "17" }, { product_variant_id: 102, desired_quantity: "0" }]);
     expect(runtime.api).not.toHaveBeenCalled();
   });
 
@@ -197,8 +234,8 @@ dbDescribe.sequential("reviewed eBay publication stock enrollment, real PostgreS
   });
 
   async function retainedListingSyncFixture(options: { currentPhotos?: boolean; recurringWatch?: boolean } = {}) {
-    // Match the incident: the active pack already has a sealed connection; only
-    // the inactive case retained in the existing group is missing its mapping.
+    // The active pack already has a sealed connection; only the channel-excluded
+    // case retained in the existing group is missing its zero-quantity mapping.
     await ensureEbayPublicationReady(database.pool, source(),
       { commandKey: randomUUID(), actor: "operator", now: WALMART_INVENTORY_NOW });
     const selected = await retainedSource();
@@ -282,7 +319,7 @@ dbDescribe.sequential("reviewed eBay publication stock enrollment, real PostgreS
     return { run, stages, photos, items, offers, group: () => group, jobId, assertInventoryReady, recovery, automaticRecovery, watchId };
   }
 
-  it("updates and verifies existing group pictures after automatically preparing an inactive member's missing stock mapping", async () => {
+  it("updates and verifies existing group pictures after automatically preparing a channel-excluded member's missing zero mapping", async () => {
     const { run, stages, photos, items, offers, group, jobId } = await retainedListingSyncFixture();
     expect(await run()).toMatchObject({ synced: 1, errors: 0 });
     expect(stages).toContain("verification");
@@ -302,7 +339,8 @@ dbDescribe.sequential("reviewed eBay publication stock enrollment, real PostgreS
     expect(await run()).toMatchObject({ synced: 1, errors: 0 });
     expect(runtime.api.mock.calls.filter(call => call[0] !== "GET")).toHaveLength(writes);
     expect((await database.pool.query("SELECT count(*)::int AS n FROM inventory.ebay_publication_readiness_applications WHERE command_key=$1", [jobId])).rows[0].n).toBe(1);
-    expect((await database.pool.query("SELECT is_active FROM catalog.product_variants WHERE id=102")).rows[0].is_active).toBe(false);
+    expect((await database.pool.query("SELECT is_active,ebay_listing_excluded FROM catalog.product_variants WHERE id=102")).rows[0])
+      .toEqual({ is_active: true, ebay_listing_excluded: true });
     expect((await database.pool.query("SELECT state FROM inventory.quantity_publication_attempts WHERE state IN ('running','uncertain')")).rows).toEqual([]);
   });
 
@@ -333,7 +371,8 @@ dbDescribe.sequential("reviewed eBay publication stock enrollment, real PostgreS
       WHERE publication_target_id=3 AND product_variant_id=102`)).rows)
       .toEqual([{ desired_quantity: "0", state: "queued" }]);
     expect((await database.pool.query("SELECT count(*)::int AS n FROM inventory.ebay_publication_readiness_applications WHERE command_key=$1", [f.jobId])).rows[0].n).toBe(1);
-    expect((await database.pool.query("SELECT is_active FROM catalog.product_variants WHERE id=102")).rows[0].is_active).toBe(false);
+    expect((await database.pool.query("SELECT is_active,ebay_listing_excluded FROM catalog.product_variants WHERE id=102")).rows[0])
+      .toEqual({ is_active: true, ebay_listing_excluded: true });
     expect(runtime.api.mock.calls.filter(call => call[0] !== "GET")).toEqual([]);
     expect(f.group()).toMatchObject({ variantSKUs: ["NEW", "P5"], imageUrls: f.photos });
   });
@@ -356,13 +395,44 @@ dbDescribe.sequential("reviewed eBay publication stock enrollment, real PostgreS
     expect(runtime.api).not.toHaveBeenCalled();
   });
 
-  it("does not use maintenance to enroll an inactive variant without a retained listing", async () => {
+  it.each([false, true])("does not enroll a Catalog-archived member in stock maintenance (retained listing: %s)", async retained => {
+    if (retained) await retainedSource();
     await database.pool.query("UPDATE catalog.product_variants SET is_active=false WHERE id=102");
+    const selected = { ...source(), purpose: "sync" as const,
+      variants: [...source().variants, { productVariantId: 102, sku: "NEW" }] };
+    const review = await reviewEbayPublicationReadiness(database.pool, selected);
+    expect(review.ready).toBe(false);
+    expect(review.blockers).toContainEqual(expect.objectContaining({ code: "STOCK_LISTING_NOT_SELECTED", productVariantId: 102 }));
+    await expect(ensureEbayPublicationReady(database.pool, selected,
+      { commandKey: randomUUID(), actor: "operator", now: WALMART_INVENTORY_NOW }))
+      .rejects.toMatchObject({ code: "STOCK_LISTING_NOT_SELECTED" });
+    expect(await counts()).toEqual({ mappings: 0, members: 0, updates: 0, receipts: 0, jobs: 0 });
+    expect(runtime.api).not.toHaveBeenCalled();
+  });
+
+  it("does not create a retained zero for a channel-excluded member without a saved provider destination", async () => {
+    await database.pool.query("UPDATE catalog.product_variants SET ebay_listing_excluded=true WHERE id=102");
     const review = await reviewEbayPublicationReadiness(database.pool, { ...source(), purpose: "sync",
       variants: [...source().variants, { productVariantId: 102, sku: "NEW" }] });
     expect(review.ready).toBe(false);
     expect(review.blockers).toContainEqual(expect.objectContaining({ code: "STOCK_LISTING_NOT_SELECTED", productVariantId: 102 }));
     expect(await counts()).toEqual({ mappings: 0, members: 0, updates: 0, receipts: 0, jobs: 0 });
+    expect(runtime.api).not.toHaveBeenCalled();
+  });
+
+  it("prepares the active member without creating archive mappings or zero work for its retained sibling", async () => {
+    await retainedSource();
+    await database.pool.query("UPDATE catalog.product_variants SET is_active=false WHERE id=102");
+    const listingBefore = (await database.pool.query("SELECT * FROM channels.channel_listings WHERE product_variant_id=102")).rows;
+    expect(listingBefore).toHaveLength(1);
+    await ensureEbayPublicationReady(database.pool, { ...source(), purpose: "sync" },
+      { commandKey: randomUUID(), actor: "operator", now: WALMART_INVENTORY_NOW });
+    expect(await counts()).toEqual({ mappings: 1, members: 0, updates: 1, receipts: 1, jobs: 0 });
+    expect((await database.pool.query("SELECT product_variant_id,desired_quantity::text FROM inventory.inventory_publication_outbox WHERE publication_target_id=3")).rows)
+      .toEqual([{ product_variant_id: 101, desired_quantity: "17" }]);
+    expect((await database.pool.query("SELECT * FROM inventory.publication_variant_mapping_versions WHERE product_variant_id=102")).rows).toEqual([]);
+    expect((await database.pool.query("SELECT * FROM channels.channel_listings WHERE product_variant_id=102")).rows).toEqual(listingBefore);
+    expect(runtime.api).not.toHaveBeenCalled();
   });
 
   it("reviews the missing exact mapping without inventing IDs, then atomically creates, seals, enrolls and saves follow-up work", async () => {
