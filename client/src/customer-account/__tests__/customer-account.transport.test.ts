@@ -18,6 +18,18 @@ describe("storefront transport reuses canonical clients", () => {
     expect(JSON.parse(String(options.body))).toMatchObject({ expectedCustomerId: "100", sessionKey: key,
       path: "/order-edits/orders/9/rewards/issue", commandKey: command.requestKey, body: command });
   });
+  it("binds reward cancellation to the signed account and preserves the canonical ledger result", async () => {
+    const request = vi.fn(async () => Response.json(bootstrap));
+    const api = createCustomerAccountTransport(config, request);
+    await api.bootstrap();
+    const result = { points: "366.00", balance: "956.00", ledgerEntryId: "refund-1" };
+    request.mockImplementation(async () => Response.json(result));
+    const command = { rewardId: "11111111-1111-4111-8111-111111111111", requestKey: "22222222-2222-4222-8222-222222222222" };
+    expect(await api.rewards.cancel(4, 9, command)).toEqual(result);
+    const [, options] = request.mock.calls[1] as unknown as [string, RequestInit];
+    expect(JSON.parse(String(options.body))).toMatchObject({ expectedCustomerId: "100", sessionKey: key,
+      path: "/order-edits/orders/9/rewards/cancel", commandKey: command.requestKey, body: command });
+  });
   it("retains classified reward failures so retries preserve uncertain issuance", async () => {
     const api = createCustomerAccountTransport(config, async () => Response.json({ error: { code: "REWARD_ISSUANCE_PENDING", message: "Retry this same reward." } }, { status: 503 }));
     await expect(api.rewards.issue(4, 9, { requestKey: "22222222-2222-4222-8222-222222222222", points: 100 }))

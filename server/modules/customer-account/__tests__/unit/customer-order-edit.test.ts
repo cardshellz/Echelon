@@ -12,11 +12,25 @@ function setup() {
   const access = { resolve: vi.fn(async () => owned), resolveOwned: vi.fn(async () => owned) };
   const store = { connections: vi.fn(async () => [connection]), get: vi.fn(async () => ({ actorId: "customer:2:100", connectionId: 4, omsOrderId: 9, baseline: { channelId: 2, customerId: "gid://shopify/Customer/100" } })) };
   const edits = { order: vi.fn(async () => ({ activeOperationId: null, eligibility: { editable: true, reasons: [] } })), catalogCategories: vi.fn(), catalogProducts: vi.fn(), catalogVariants: vi.fn(), warmPreview: vi.fn(), preview: vi.fn(), quote: vi.fn(), get: vi.fn(), commit: vi.fn(), reconcile: vi.fn(), abandon: vi.fn() };
-  const rewards = { state: vi.fn(), issue: vi.fn() };
+  const rewards = { state: vi.fn(), manage: vi.fn(), cancel: vi.fn(), issue: vi.fn() };
   const service = new CustomerOrderEditService({ principal, access, store, edits, rewards } as unknown as ConstructorParameters<typeof CustomerOrderEditService>[0]);
   return { access, store, edits, rewards, service };
 }
 describe("customer order edit ownership", () => {
+  it("binds saved reward management and cancellation to the signed-in owner", async () => {
+    const h = setup();
+    await h.service.manageRewards(4, 9);
+    expect(h.rewards.manage).toHaveBeenCalledWith({ customerId: "gid://shopify/Customer/100", channelId: 2 });
+    const input = { rewardId: uuid, requestKey: uuid };
+    await h.service.cancelReward(4, 9, input, uuid);
+    expect(h.rewards.cancel).toHaveBeenCalledWith({ customerId: "gid://shopify/Customer/100", channelId: 2, rewardId: uuid });
+    h.rewards.cancel.mockClear();
+    await expect(h.service.cancelReward(4, 9, { ...input, customerId: "foreign" }, uuid)).rejects.toThrow();
+    await expect(h.service.cancelReward(4, 9, input, "22222222-2222-4222-8222-222222222222")).rejects.toThrow();
+    h.access.resolveOwned.mockRejectedValue(new Error("foreign order"));
+    await expect(h.service.cancelReward(4, 9, input, uuid)).rejects.toThrow("foreign order");
+    expect(h.rewards.cancel).not.toHaveBeenCalled();
+  });
   it("binds rewards to the verified owner and prevents foreign-order issuance", async () => {
     const h = setup();
     await h.service.rewardsState(4, 9);
