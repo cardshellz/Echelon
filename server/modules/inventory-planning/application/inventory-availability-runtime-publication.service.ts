@@ -96,7 +96,29 @@ export interface CanonicalInventoryPublicationResult {
   coalescedRows: number;
   enqueuedPublicationKeys: string[];
   coalescedPublicationKeys: string[];
+  /** Present only for `blockedTargets: "isolate"`: targets skipped this run. */
+  blockedTargets?: BlockedInventoryPublicationTarget[];
 }
+
+/** A destination that is not safe to publish. Isolation skips it so it cannot
+ * stop the product's other destinations, or the warehouse operation that changed
+ * stock; it stays fail-closed (no quantity is sent to it) until its data is fixed. */
+export interface BlockedInventoryPublicationTarget {
+  publicationTargetId: number;
+  channelId: number;
+  channelName: string;
+  errorCode: string;
+  blockerCodes: string[];
+  productVariantIds: number[];
+}
+
+/**
+ * "reject" (default) fails the whole call on any unsafe target: listing setup,
+ * enable/resume and exact-scope callers need that answer.
+ * "isolate" publishes every safe target and reports the unsafe ones: inventory
+ * change fan-out must never let one broken listing stop other channels or custody.
+ */
+export type BlockedPublicationTargetPolicy = "reject" | "isolate";
 
 export type InventoryPublicationRouteResult<T> =
   | { authority: "legacy"; legacyResult: T }
@@ -105,6 +127,8 @@ export type InventoryPublicationRouteResult<T> =
 export interface InventoryAvailabilityRuntimePublicationLogger {
   info(event: Readonly<Record<string, unknown>>): void;
   warn(event: Readonly<Record<string, unknown>>): void;
+  /** Needs a human. Optional for existing adapters; falls back to warn. */
+  error?(event: Readonly<Record<string, unknown>>): void;
 }
 
 const defaultLogger: InventoryAvailabilityRuntimePublicationLogger = {
@@ -113,6 +137,9 @@ const defaultLogger: InventoryAvailabilityRuntimePublicationLogger = {
   },
   warn(event) {
     console.warn(JSON.stringify(event));
+  },
+  error(event) {
+    console.error(JSON.stringify(event));
   },
 };
 
@@ -213,9 +240,15 @@ export class AuthorityAwareInventoryPublicationService {
      * still uses the full product; this only limits emitted publication work. */
     productVariantIds?: readonly number[];
     triggeredBy?: string;
+    blockedTargets?: BlockedPublicationTargetPolicy;
   }, legacyPublisher: () => Promise<T>): Promise<InventoryPublicationRouteResult<T>> {
     const productId = positiveInteger(input.productId, "productId");
     const dryRun = boolean(input.dryRun, "dryRun");
+    const blockedTargets = input.blockedTargets ?? "reject";
+    if (blockedTargets !== "reject" && blockedTargets !== "isolate") {
+      throw new InventoryAvailabilityRuntimePublicationError("INVALID_INVENTORY_PUBLICATION_SCOPE",
+        "Blocked-target policy must be reject or isolate.");
+    }
     const channelId = input.channelId == null
       ? this.channelId
       : positiveInteger(input.channelId, "channelId");
@@ -228,6 +261,11 @@ export class AuthorityAwareInventoryPublicationService {
       || productVariantIds.length !== input.productVariantIds!.length)) {
       throw new InventoryAvailabilityRuntimePublicationError("INVALID_INVENTORY_PUBLICATION_SCOPE",
         "Scoped publication requires one exact target and a nonempty set of unique variant IDs.");
+    }
+    // An exact-target caller asked about that target; isolating it would hide the answer.
+    if (blockedTargets === "isolate" && (publicationTargetId !== undefined || productVariantIds)) {
+      throw new InventoryAvailabilityRuntimePublicationError("INVALID_INVENTORY_PUBLICATION_SCOPE",
+        "Blocked-target isolation applies only to whole-product fan-out publication.");
     }
     const triggeredBy = nonblank(input.triggeredBy ?? "inventory_publication", "triggeredBy", 200);
     return this.executor.execute(async (context) => {
@@ -243,6 +281,7 @@ export class AuthorityAwareInventoryPublicationService {
           productVariantIds,
          dryRun,
         triggeredBy,
+        blockedTargets,
       });
       return { authority: "canonical", publication };
     });
@@ -296,6 +335,7 @@ export class AuthorityAwareInventoryPublicationService {
       productVariantIds?: readonly number[];
       dryRun: boolean;
       triggeredBy: string;
+      blockedTargets?: BlockedPublicationTargetPolicy;
     },
   ): Promise<CanonicalInventoryPublicationResult> {
     const activationRunId = canonicalActivationRunId(context);
@@ -303,18 +343,47 @@ export class AuthorityAwareInventoryPublicationService {
       input.productId,
       input.channelId ?? this.channelId,
     );
-    const rows = publicationIntentsFromPlan(
+    const isolate = input.blockedTargets === "isolate";
+    const blocked = new Map<number, BlockedInventoryPublicationTarget>();
+    const block = isolate ? (target: BlockedInventoryPublicationTarget) => {
+      const existing = blocked.get(target.publicationTargetId);
+      blocked.set(target.publicationTargetId, existing ? { ...existing,
+        blockerCodes: uniqueStrings([...existing.blockerCodes, ...target.blockerCodes]),
+        productVariantIds: [...new Set([...existing.productVariantIds, ...target.productVariantIds])].sort((a, b) => a - b),
+      } : target);
+    } : undefined;
+    const planned = publicationIntentsFromPlan(
       plan,
       context,
       input.productVariantId,
       input.publicationTargetId,
       input.productVariantIds,
+      block,
     );
     for (const variantId of await context.listUnmanagedPublicationVariantIds?.(input.productId) ?? []) {
       if (input.productVariantId != null && input.productVariantId !== variantId) continue;
       if (input.productVariantIds && !input.productVariantIds.includes(variantId)) continue;
-      rows.push(...await zeroPublicationIntents(context, input.productId, variantId,
-        input.channelId ?? this.channelId, input.publicationTargetId));
+      planned.push(...await zeroPublicationIntents(context, input.productId, variantId,
+        input.channelId ?? this.channelId, input.publicationTargetId, block));
+    }
+    // A target blocked for any member publishes nothing this run: a partial
+    // projection of one destination is not a safe quantity either.
+    const rows = planned.filter(row => !blocked.has(row.publicationTargetId));
+    for (const target of blocked.values()) {
+      (this.logger.error ?? this.logger.warn).call(this.logger, {
+        event: "canonical_inventory_publication_target_isolated",
+        level: "error",
+        outcome: "target_skipped",
+        error_code: target.errorCode,
+        productId: input.productId,
+        publicationTargetId: target.publicationTargetId,
+        channelId: target.channelId,
+        blockerCodes: target.blockerCodes,
+        productVariantIds: target.productVariantIds,
+        triggeredBy: input.triggeredBy,
+        authorityRevision: context.authorityRevision,
+        activationRunId,
+      });
     }
     if (input.productVariantIds?.some(variantId => !rows.some(row => row.productVariantId === variantId
       && row.publicationTargetId === input.publicationTargetId))) {
@@ -351,6 +420,7 @@ export class AuthorityAwareInventoryPublicationService {
       productId: input.productId,
       rows,
       ...queued,
+      ...(isolate ? { blockedTargets: [...blocked.values()].sort((a, b) => a.publicationTargetId - b.publicationTargetId) } : {}),
     };
     this.logger.info({
       event: "canonical_inventory_publication_routed",
@@ -411,15 +481,22 @@ export class AuthorityAwareInventoryPublicationService {
 export async function zeroPublicationIntents(context: Pick<InventoryAvailabilityRuntimePublicationContext,
   "authority" | "authorityRevision" | "activationRunId" | "loadActivePublicationTargets">,
   productId: number, productVariantId: number, channelId?: number, publicationTargetId?: number,
+  block?: (target: BlockedInventoryPublicationTarget) => void,
 ): Promise<CanonicalInventoryPublicationIntent[]> {
   const targets = await context.loadActivePublicationTargets({ productId, productVariantIds: [productVariantId], channelId });
   return targets.filter(target => publicationTargetId == null || target.publicationTargetId === publicationTargetId)
-    .map(target => {
+    .flatMap(target => {
       const mapping = target.mappings.find(candidate => candidate.productVariantId === productVariantId);
+      if (!mapping && block) {
+        block({ publicationTargetId: target.publicationTargetId, channelId: target.channelId, channelName: target.channelName,
+          errorCode: "CANONICAL_PUBLICATION_MAPPING_MISSING", blockerCodes: ["PUBLICATION_TARGET_VARIANT_MAPPING_MISSING"],
+          productVariantIds: [productVariantId] });
+        return [];
+      }
       if (!mapping) throw publicationError("CANONICAL_PUBLICATION_MAPPING_MISSING",
         "A retained listing has no exact provider identity to clear. Correct its saved listing link before retrying.",
         context, { productId, productVariantId, publicationTargetId: target.publicationTargetId });
-      return intent(target, mapping, productVariantId, null, "0", []);
+      return [intent(target, mapping, productVariantId, null, "0", [])];
     });
 }
 
@@ -429,6 +506,7 @@ function publicationIntentsFromPlan(
   productVariantId?: number,
   publicationTargetId?: number,
   productVariantIds?: readonly number[],
+  block?: (target: BlockedInventoryPublicationTarget) => void,
 ): CanonicalInventoryPublicationIntent[] {
   if (plan.authority !== "canonical"
     || plan.activationRunId !== context.activationRunId
@@ -453,6 +531,12 @@ function publicationIntentsFromPlan(
         ...target.blockers.map((blocker) => blocker.code),
         ...target.rows.flatMap((row) => row.blockers.map((blocker) => blocker.code)),
       ]);
+      if (block) {
+        block({ publicationTargetId: target.publicationTargetId, channelId: target.channelId, channelName: target.channelName,
+          errorCode: publicationBlockerErrorCode(blockerCodes), blockerCodes,
+          productVariantIds: blockedTargetVariantIds(target.rows) });
+        continue;
+      }
       throw publicationError(
         publicationBlockerErrorCode(blockerCodes),
         "The canonical channel-exposure plan contains a target that is not safe to publish.",
@@ -518,6 +602,13 @@ function publicationIntentsFromPlan(
   }
   assertUnambiguousProviderScopes(rows, context, plan.productId);
   return rows;
+}
+
+/** The members a blocked target withholds: its unsafe rows, or every row when
+ * the blocker is target-wide (source binding, policy, node). */
+function blockedTargetVariantIds(rows: InventoryChannelExposureRuntimePlan["targets"][number]["rows"]): number[] {
+  const unsafe = rows.filter(row => row.blockers.length > 0 || !row.mapping);
+  return (unsafe.length > 0 ? unsafe : rows).map(row => row.productVariantId).sort((a, b) => a - b);
 }
 
 function publicationBlockerErrorCode(blockerCodes: readonly string[]): string {

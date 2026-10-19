@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "migration": "900000014000018530001_pick_movement_exact_cost_total.sql",
+  "generation": 14,
+  "pr": 1853,
+  "ordinal": 1,
+  "after": [
+    "900000013000018460001_shipment_invoice_ownership_guard.sql"
+  ]
+}

@@ -14,8 +14,9 @@ const endpoint = "/api/inventory-planning/admin/product-definitions";
 const post = (body: unknown): RequestInit => ({ method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
 
 /** Mounted only by the planning-view-authorized product card. */
-export function ProductDefinitionReview({ view, onApplyBlockedChange }: {
+export function ProductDefinitionReview({ view, onApplyBlockedChange, onApplied }: {
   view: SupplyTransformationsAdminView; onApplyBlockedChange: (blocked: boolean) => void;
+  onApplied?: () => void;
 }) {
   const { hasPermission } = useAuth();
   const canApply = hasPermission("inventory_planning", "activate");
@@ -51,6 +52,7 @@ export function ProductDefinitionReview({ view, onApplyBlockedChange }: {
       command.current = null; setUncertain(false); setReview(null); setError(null);
       await Promise.all([client.invalidateQueries({ queryKey: transformationQueryKey(view.product.id) }),
         client.invalidateQueries({ queryKey: progressKey })]);
+      onApplied?.();
     },
     onError: failure => {
       const rejected = failure instanceof HttpResponseError && failure.status >= 400 && failure.status < 500;
