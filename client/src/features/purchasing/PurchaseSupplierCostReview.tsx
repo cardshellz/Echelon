@@ -123,7 +123,7 @@ export function PurchaseSupplierCostLine({
         )}
       </div>
       {issues.length > 0 && (
-        <details>
+        <details open={action !== "none"}>
           <summary className="cursor-pointer">
             Current reasons ({issues.length})
           </summary>

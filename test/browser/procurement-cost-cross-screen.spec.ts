@@ -75,6 +75,32 @@ function supplierCosts(posted: boolean): PurchaseCostStatus {
   }] };
 }
 
+test("a closed PO retains posted freight and offers direct supplier follow-ups without another approval", async ({ page }, info) => {
+  const { state, failures } = await installCostScreens(page);
+  state.costs = reconciledCosts().costs;
+  state.costs.supplierCosts = supplierCosts(false);
+  await page.route("**/api/purchase-orders/17", route => route.fulfill({ json: {
+    ...po(17), status: "closed", physicalStatus: "received", subtotalCents: 100000, totalCents: 100000,
+  } }));
+  await page.goto("/purchase-orders/17?tab=lines");
+  const closed = page.getByTestId("po-closed-summary");
+  await expect(closed).toContainText("This purchase order is closed");
+  await expect(closed).toContainText("They do not reopen this PO.");
+  await expect(page.getByRole("button", { name: "Close PO", exact: true })).toHaveCount(0);
+  await expect(page.getByText(/shipment lines have an inventory cost exception/)).toHaveCount(0);
+  await page.getByRole("button", { name: "Review supplier costs", exact: true }).click();
+  await expect(page.getByText("Supplier product and packaging amounts have not been recorded.", { exact: true })).toBeVisible();
+  await expect(page.getByRole("link", { name: "Review invoice TEST-INV-71 · line 1", exact: true }))
+    .toHaveAttribute("href", /costLine=72/);
+  await expect(page.getByRole("button", { name: "Approve & post costs", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Update shipment costs", exact: true })).toHaveCount(0);
+  await closed.getByRole("button", { name: "View closure history", exact: true }).click();
+  await expect(page.getByRole("tab", { name: "History", exact: true })).toHaveAttribute("data-state", "active");
+  await closed.scrollIntoViewIfNeeded();
+  await page.screenshot({ path: info.outputPath("closed-po-cost-followups.png") });
+  expect(failures).toEqual([]);
+});
+
 test("resolves supplier evidence from health and refreshes both shipments, PO receipt processing and history", async ({ page }, info) => {
   const { state, failures } = await installCostScreens(page);
   const commands: unknown[] = [];

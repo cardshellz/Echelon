@@ -3,12 +3,13 @@ import { buildShipmentAllocationBasis, resolveShipmentAllocationMethod, shipment
 import { recordCostRevision } from "./cost-source-revision.repository";
 import { sql } from "drizzle-orm";
 import type { CostIssue } from "@shared/procurement/cost-source-contracts";
-import { costFingerprint, costInteger, lockInventoryCostGraph, type CostEvidenceTransaction, type RecordedCostRevision, type CostRevisionInput } from "../inventory/infrastructure/cost-evidence.repository";
+import { costFingerprint, costInteger, lockInventoryCostGraph, type CostEvidenceTransaction, type RecordedCostRevision } from "../inventory/infrastructure/cost-evidence.repository";
 import { applyCostRevision, type CostComponentWriter } from "../inventory/application/apply-cost-revision";
 import { resolveShipmentChargeEvidence } from "./domain/shipment-charge-evidence";
+import { retainEquivalentShipmentCostSource, type ShipmentCostProposal } from "./shipment-cost-source-identity";
 
 type ShipmentRevisionOptions = { allocationJustFinalized?: boolean; inboundShipmentLineId?: number };
-type ShipmentRevisionProposal = { input: CostRevisionInput; sourceEvidence: unknown };
+type ShipmentRevisionProposal = ShipmentCostProposal;
 
 /** Shared read-only preparation for posting and admin review. A preview must
  * compare the current economic inputs using the same source authority. */
@@ -74,12 +75,21 @@ export async function prepareShipmentCostRevisions(tx: CostEvidenceTransaction, 
     WHERE charge.inbound_shipment_id=${shipmentId} ORDER BY allocation.id
   `);
   const previous = await tx.execute(sql`
-    SELECT DISTINCT ON (revision.inbound_shipment_line_id) revision.inbound_shipment_line_id,revision.source_evidence
-    FROM procurement.cost_source_revisions revision
-    JOIN procurement.inbound_shipment_lines line ON line.id=revision.inbound_shipment_line_id
-    WHERE line.inbound_shipment_id=${shipmentId} AND revision.component='landed'
-      AND revision.contract->>'issue' IS NULL AND revision.source_evidence IS NOT NULL
-    ORDER BY revision.inbound_shipment_line_id,revision.id DESC
+    WITH latest AS (
+      SELECT DISTINCT ON (revision.inbound_shipment_line_id)
+        revision.inbound_shipment_line_id,revision.contract,revision.fingerprint,revision.source_evidence
+      FROM procurement.cost_source_revisions revision
+      JOIN procurement.inbound_shipment_lines line ON line.id=revision.inbound_shipment_line_id
+      WHERE line.inbound_shipment_id=${shipmentId} AND revision.component='landed'
+      ORDER BY revision.inbound_shipment_line_id,revision.id DESC
+    )
+    SELECT latest.*,confirmed.source_evidence AS confirmed_source_evidence FROM latest
+    LEFT JOIN LATERAL (
+      SELECT revision.source_evidence FROM procurement.cost_source_revisions revision
+      WHERE revision.inbound_shipment_line_id=latest.inbound_shipment_line_id AND revision.component='landed'
+        AND revision.contract->>'issue' IS NULL AND revision.source_evidence IS NOT NULL
+      ORDER BY revision.id DESC LIMIT 1
+    ) confirmed ON true
   `);
   const validLineIds = new Set(lines.rows.map((line) => costInteger(line.id, "shipmentLineId", 1)));
   const allocationsComplete = charges.rows.every((charge) => {
@@ -136,7 +146,8 @@ export async function prepareShipmentCostRevisions(tx: CostEvidenceTransaction, 
       issues.push({ code: "LANDED_PURCHASE_SOURCE_MISSING", message: `Shipment line ${line.id} has no complete purchase source; review its inventory cost allocation.` });
       continue;
     }
-    const prior = previous.rows.find((revision) => Number(revision.inbound_shipment_line_id) === Number(line.id))?.source_evidence;
+    const saved = previous.rows.find((revision) => Number(revision.inbound_shipment_line_id) === Number(line.id));
+    const prior = saved?.confirmed_source_evidence;
     const chargeAuthorities = charges.rows.map((charge) => {
       const saved = prior?.chargeAuthorities?.find((authority: { chargeId: number }) => authority.chargeId === Number(charge.id));
       const previousCharge = prior?.charges?.find((entry: { id: number }) => Number(entry.id) === Number(charge.id));
@@ -173,7 +184,7 @@ export async function prepareShipmentCostRevisions(tx: CostEvidenceTransaction, 
       : sources.length === 0 ? { code: "LANDED_SOURCE_MISSING", message: "A zero allocation without charge evidence does not establish a confirmed zero freight cost." }
       : allocationStale ? { code: "LANDED_ALLOCATION_STALE", message: "The saved allocation no longer reconciles to the current charge, allocation basis, method or shipment quantity. Finalize allocation again before applying it." }
       : chargeAuthorities.find((authority) => authority.issue !== null)?.issue ?? null;
-    proposals.push({ input: {
+    proposals.push(retainEquivalentShipmentCostSource({ input: {
       contractVersion: 1, component: "landed",
       scope: { kind: "shipment_line", purchaseOrderId: costInteger(line.purchase_order_id, "purchaseOrderId", 1), purchaseOrderLineId: costInteger(line.purchase_order_line_id, "purchaseOrderLineId", 1), inboundShipmentId: shipmentId, inboundShipmentLineId: costInteger(line.id, "shipmentLineId", 1) },
       sources: sources.length > 0 ? sources : [{ kind: "purchase_order_line", documentId: Number(line.purchase_order_id), lineId: Number(line.purchase_order_line_id), version: costFingerprint(line) }],
@@ -181,7 +192,7 @@ export async function prepareShipmentCostRevisions(tx: CostEvidenceTransaction, 
       totalMills: amount === null ? null : costInteger(amount, "totalMills", -Number.MAX_SAFE_INTEGER), basePieces: line.qty == null ? null : costInteger(line.qty, "snapshot.qty", 1),
       evidence: issue ? "review_required" : actual ? "confirmed" : "estimated", packagingTreatment: "not_applicable", issue, manualOverride: null,
     }, sourceEvidence: { shipmentLineSnapshot: line, allocationBasis: currentBasis, charges: charges.rows, chargeAuthorities,
-      invoices: invoiceRows.rows, allocations: allocationRows.rows.filter((allocation) => Number(allocation.inbound_shipment_line_id) === Number(line.id)) } });
+      invoices: invoiceRows.rows, allocations: allocationRows.rows.filter((allocation) => Number(allocation.inbound_shipment_line_id) === Number(line.id)) } }, saved));
   }
   return { proposals, issues };
 }
