@@ -59,6 +59,7 @@ import { planConfirmedPickShipment, type ConfirmedPickShipmentPlan } from "./con
 import type { PickingAssignmentSnapshot } from "@shared/types/picking-assignment-release";
 import { releasePickingAssignment } from "./picking-assignment-release.service";
 import { createPickingAssignmentReleaseRepository } from "./picking-assignment-release.repository";
+import { logger as platformLogger } from "../../platform/observability/logger";
 
 type DrizzleDb = {
   select: (...args: any[]) => any;
@@ -2546,10 +2547,26 @@ export class PickingUseCases {
           }).catch((err: any) => console.warn("[PickingLog] replen failure log failed:", err.message));
         }
 
-        // The pick and required replenishment have committed. Publication failure
-        // retains the receipt-backed follow-up without preventing the bin refill.
+        // The pick and required replenishment have committed. Channel publication
+        // is downstream and never gates a physical pick (#64414): this call only
+        // marks the product changed for the publication worker, which isolates
+        // broken listings. If even the mark fails, log it; the scheduled sweep
+        // republishes current quantities.
         if (this.channelSync) {
-          await this.channelSync.queueSyncAfterInventoryChange(deductResult.productVariantId);
+          try {
+            await this.channelSync.queueSyncAfterInventoryChange(deductResult.productVariantId);
+          } catch (publicationError) {
+            platformLogger.error("pick_channel_publication_deferred", {
+              outcome: "deferred_to_publication_sweep",
+              error_code: (publicationError as { code?: unknown })?.code ?? "PICK_CHANNEL_PUBLICATION_FAILED",
+              error_class: "transient",
+              wms_order_id: item.orderId,
+              order_item_id: item.id,
+              product_variant_id: deductResult.productVariantId,
+              command_key: commandKey ?? null,
+              message: publicationError instanceof Error ? publicationError.message : String(publicationError),
+            });
+          }
         }
 
       } else if (!deductResult.success) {
