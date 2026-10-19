@@ -63,6 +63,25 @@ function buildMockStorage(source: any, sourceVariants: any[] = [], sourceAssets:
 const baseInput = { name: "100PT Toploader (Copy)", sku: "SHLZ-TOP-100PT-COPY" };
 
 describe("duplicateProduct", () => {
+  it("new drafts inherit policies instead of copying hidden product or variant selections", async () => {
+    const source = { ...makeSource(), ebayFulfillmentPolicyOverride: "unavailable-shipping",
+      ebayReturnPolicyOverride: "source-return", ebayPaymentPolicyOverride: "source-payment" };
+    const sourceVariant = { id: 50, productId: 10, sku: "V-A", name: "20ct", unitsPerVariant: 20,
+      isActive: true, ebayFulfillmentPolicyOverride: "variant-shipping",
+      ebayReturnPolicyOverride: "variant-return", ebayPaymentPolicyOverride: "variant-payment" };
+    const { storage } = buildMockStorage(source, [sourceVariant]);
+    await duplicateProduct(storage as any, 10, { ...baseInput,
+      variants: [{ sourceVariantId: 50, sku: "V-A-COPY" }] });
+    const product = storage.createProduct.mock.calls[0][0];
+    const variant = storage.createProductVariant.mock.calls[0][0];
+    for (const field of ["ebayFulfillmentPolicyOverride", "ebayReturnPolicyOverride", "ebayPaymentPolicyOverride"]) {
+      expect(product).not.toHaveProperty(field);
+      expect(variant).not.toHaveProperty(field);
+    }
+    expect(source.ebayFulfillmentPolicyOverride).toBe("unavailable-shipping");
+    expect(sourceVariant.ebayFulfillmentPolicyOverride).toBe("variant-shipping");
+  });
+
   it("copies base fields but resets identity, Shopify keys, lastPushedAt, and defaults status to draft", async () => {
     const { storage } = buildMockStorage(makeSource());
 

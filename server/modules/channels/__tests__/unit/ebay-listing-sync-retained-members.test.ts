@@ -17,7 +17,7 @@ function fixture() {
     photoPlan: { byVariantId: new Map([[1, ["https://example.com/pack.jpg"]]]), groupImageUrls: ["https://example.com/shared.jpg"] },
     aspects: { Brand: ["Card Shellz"] }, isMultiVariant: true, variationAspectName: "Size",
     variantPrices: new Map([[1, 1000]]), atpByVariantId: new Map([[1, 17]]), marketplaceId: "EBAY_US", ebayBrowseCategoryId: "183454",
-    effectivePolicies: { fulfillmentPolicyId: "shipping", paymentPolicyId: "payment", returnPolicyId: "returns" },
+    resolvedPoliciesByVariantId: new Map([[1, { fulfillmentPolicyId: "shipping", paymentPolicyId: "payment", returnPolicyId: "returns" }]]),
     merchantLocationKey: "warehouse", storeCategoryNames: [], retainUnlistedVariantsInGroup: true, existingGroupKey: identity.groupKey });
   let group: EbayInventoryItemGroup = { ...draft.itemGroup!.payload, variesBy: { specifications: [{ name: "Size", values: ["Pack", "Retired case"] }] } };
   const retainedItem = { ...draft.inventoryItems[0].payload, sku: "REMOTE-2",

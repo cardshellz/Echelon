@@ -1,3 +1,4 @@
+import { EbayBusinessPolicyError } from "@shared/ebay-business-policies";
 /**
  * Unit Tests — eBay Adapter
  *
@@ -980,16 +981,49 @@ describe("eBay listing photo ownership", () => {
     const photoPlan = { byVariantId: new Map(SAMPLE_LISTING.variants.map(variant => [variant.variantId, [`https://catalog.example.com/${variant.variantId}.jpg`]])),
       groupImageUrls: ["https://catalog.example.com/group.jpg"] };
     const resolve = vi.fn(async () => { if (error) throw error; return photoPlan; });
-    const adapter = new EbayAdapter(createMockDb() as any, { resolve });
+    const resolvePolicies = vi.fn(async () => ({
+      scope: { channelId: 2, connectionId: 22, accountId: "seller-42", environment: "sandbox" as const, marketplaceId: "EBAY_US" },
+      product: { fulfillmentPolicyId: "owner-shipping", returnPolicyId: "owner-returns", paymentPolicyId: "owner-payment" },
+      byVariantId: new Map(SAMPLE_LISTING.variants.map(variant => [variant.variantId, {
+        fulfillmentPolicyId: `owner-shipping-${variant.variantId}`, returnPolicyId: "owner-returns", paymentPolicyId: "owner-payment",
+      }])),
+    }));
+    const adapter = new EbayAdapter(createMockDb() as any, { resolve }, { resolveProductPolicies: resolvePolicies });
+    vi.spyOn(adapter as any, "getAuthService").mockResolvedValue({
+      getVerifiedProviderAccount: async () => ({ externalAccountId: "seller-42" }),
+      getAccessToken: async () => "test-only", getEnvironment: () => "sandbox",
+    });
     const client = { getInventoryItemGroup: vi.fn(), getInventoryItem: vi.fn() };
     vi.spyOn(adapter as any, "getApiClient").mockResolvedValue(client);
     vi.spyOn(adapter as any, "getChannelOverrides").mockResolvedValue(null);
     vi.spyOn(adapter as any, "delay").mockResolvedValue(undefined);
     const pushListing = vi.spyOn((adapter as any).listingConnector, "pushListing")
       .mockResolvedValue({ status: "created", externalProductId: "listing-42", externalVariantIds: {} });
-    return { adapter, resolve, pushListing, photoPlan };
+    return { adapter, resolve, resolvePolicies, pushListing, photoPlan };
   }
   afterEach(() => vi.restoreAllMocks());
+  it("uses validated per-variant policies instead of legacy nested metadata policies", async () => {
+    const { adapter, resolvePolicies, pushListing } = setup();
+    await adapter.pushListings(2, [SAMPLE_LISTING]);
+    expect(resolvePolicies).toHaveBeenCalledWith({ productId: SAMPLE_LISTING.productId,
+      variantIds: SAMPLE_LISTING.variants.filter(variant => variant.isListed && variant.sku).map(variant => variant.variantId) });
+    const { draft } = pushListing.mock.calls[0][0] as any;
+    expect(draft.offers.map((offer: any) => offer.payload.listingPolicies)).toEqual(
+      SAMPLE_LISTING.variants.filter(variant => variant.isListed && variant.sku).map(variant => ({
+        fulfillmentPolicyId: `owner-shipping-${variant.variantId}`, returnPolicyId: "owner-returns", paymentPolicyId: "owner-payment",
+      })),
+    );
+  });
+  it("stops unavailable policies before photos or any listing mutation", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const { adapter, resolvePolicies, resolve, pushListing } = setup();
+    resolvePolicies.mockRejectedValue(new EbayBusinessPolicyError("EBAY_POLICY_UNAVAILABLE", "The saved shipping policy is unavailable", 422));
+    await expect(adapter.pushListings(2, [SAMPLE_LISTING])).resolves.toEqual([
+      { productId: SAMPLE_LISTING.productId, status: "error", error: "The saved shipping policy is unavailable" },
+    ]);
+    expect(resolve).not.toHaveBeenCalled();
+    expect(pushListing).not.toHaveBeenCalled();
+  });
   it("replaces stale payload URLs with the resolver plan in both inventory items and the group", async () => {
     const { adapter, resolve, pushListing, photoPlan } = setup();
     const before = structuredClone(SAMPLE_LISTING);

@@ -42,6 +42,14 @@ vi.mock("../../infrastructure/ebay-api-runtime", () => ({ EBAY_CHANNEL_ID: 67,
   } },
 }));
 vi.mock("../../infrastructure/ebay-listing-client", () => ({ createEbayRouteListingLifecycleClient: () => fixture.client, getExistingEbayListingPhotos: vi.fn() }));
+// Policy persistence/catalog validation has real PostgreSQL/provider coverage in
+// ebay-business-policies.integration and ebay-policy-publication.integration.
+vi.mock("../../ebay-business-policies", () => ({ ebayBusinessPolicies: {
+  resolveProductPolicies: async (input: { variantIds: number[]; expectedScope: unknown }) => {
+    const policies = { fulfillmentPolicyId: "shipping", paymentPolicyId: "payment", returnPolicyId: "returns" };
+    return { scope: input.expectedScope, product: policies, byVariantId: new Map(input.variantIds.map(id => [id, { ...policies }])) };
+  },
+} }));
 vi.mock("../../infrastructure/ebay-listing-helpers", async importOriginal => ({
   ...await importOriginal<typeof import("../../infrastructure/ebay-listing-helpers")>(),
   resolveChannelPrice: async () => 1000, delay: async () => {},

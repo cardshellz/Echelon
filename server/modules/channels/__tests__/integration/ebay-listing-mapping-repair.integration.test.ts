@@ -715,7 +715,7 @@ const enabled = process.env.ECHELON_TEST_DATABASE_URL && process.env.ECHELON_TES
       const response = await recordPublicationResponse(target, new Date(now.getTime() + 1));
       expect(await sync.recoverTerminalPublicationWrite(claim.job, target, next)).toBe("rejected");
       expect(await sync.get(claim.job.id)).toMatchObject({ publicationWriteStarted: false, publicationIntentHash: null,
-        progress: { phase: "recover_prior_requests", phaseState: "completed" } });
+        progress: { phase: "publish", phaseState: "completed" } });
       expect(await sync.recoverTerminalPublicationWrite(claim.job, target, next)).toBe(null);
       const receipts = (await database.pool.query(`SELECT evidence FROM channels.ebay_listing_sync_events
         WHERE job_id=$1 AND event='stage_completed' AND evidence->>'key'='publication_rejected'`, [claim.job.id])).rows;
