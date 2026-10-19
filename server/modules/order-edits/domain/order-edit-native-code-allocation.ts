@@ -19,6 +19,9 @@ const protectedIdsSchema = z
  * ORDER discount on editable lines. This changes allocation, never entitlement,
  * combination rules, the approved saving, or product/member prices.
  *
+ * When new lines cannot carry the full saving, explicitly replace discounted
+ * originals with the same real variants. The adapter must verify replaceable
+ * item metadata, native tax, and recovery before allowing submission.
  * The adapter must also prove that this allocation leaves shipping and every
  * tax amount unchanged before preparing or committing the edit.
  */
@@ -52,10 +55,17 @@ export function allocateOrderEditNativeCodePricing(
     pricing.applications.map((entry) => entry.amountCents),
   );
   if (saving > sumOrderEditCents(editable.map((line) => line.productNetCents)))
-    throw new OrderEditError(
-      "ORDER_EDIT_CODE_AUTOMATIC_DISCOUNT_CAPACITY",
-      "This edit cannot keep the full discount on the selected items. Your order has not changed.",
-    );
+    return orderEditCodePricingSchema.parse({
+      ...pricing,
+      lines: pricing.lines.map((line) => ({
+        ...line,
+        ...(protectedIds.has(line.id)
+          ? line.netCents < line.productNetCents
+            ? { replacesAutomaticDiscount: true }
+            : { preserveAutomaticDiscount: true }
+          : {}),
+      })),
+    });
 
   // Reuse the exact-cent allocator. A single budget represents all accepted
   // order discounts; each code's verified terms and amount remain in pricing.

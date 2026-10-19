@@ -1,3 +1,4 @@
+import { createReservedInventoryTransferOwner } from "../../../inventory-planning/infrastructure/reserved-inventory-transfer.repository";
 import type { Pool, PoolClient } from "pg";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { legacyTransformationExecutionAuthority } from "../../application/transformation-execution-authority.port";
@@ -339,7 +340,7 @@ dbDescribe.sequential("single quantity owner / real PostgreSQL", () => {
 
   function operationalOwner(client: PoolClient) {
     const db = drizzle(client, { schema: inventorySchema });
-    return new InventoryUseCases(db as InventoryUseCaseDatabase, createInventoryMethods(db as any), new InventoryLotService(db), null, () => new Date(NOW)).withTx(db);
+    return new InventoryUseCases(db as InventoryUseCaseDatabase, createInventoryMethods(db as any), new InventoryLotService(db), null, () => new Date(NOW), createReservedInventoryTransferOwner()).withTx(db);
   }
 
   async function prepareOperationalMetadata(packageDirection?: "break" | "assemble") {
@@ -406,7 +407,7 @@ dbDescribe.sequential("single quantity owner / real PostgreSQL", () => {
     await expect(transaction(client => operationalOwner(client).transfer({ ...input, qty: 18 })))
       .rejects.toMatchObject({ code: "TRANSFER_BLOCKED_BY_RESERVATION" });
     await expect(transaction(client => operationalOwner(client).transfer({ ...input, qty: 18, moveReserved: true })))
-      .rejects.toThrow("cannot relocate canonical claim ownership");
+      .rejects.toMatchObject({code:"TRANSFER_RESERVED_WAREHOUSE_MISMATCH"});
     expect(await state()).toEqual(before);
   });
 

@@ -705,12 +705,14 @@ export class ShopifyOrderEditProvider
     const approved = rules.length
       ? await gateway.verifyNativeCalculation(snapshot, lines, rules)
       : undefined;
-    return allocateOrderEditNativeCodePricing(
+    const pricing = allocateOrderEditNativeCodePricing(
       priceOrderEditCodes(lines, [...retained, ...rules], newCodes, approved),
       (snapshot.previewProductDiscounts ?? [])
         .filter((line) => line.automaticCents > 0)
         .map((line) => line.lineId),
     );
+    await this.verifyReplacementLines(snapshot, pricing);
+    return pricing;
   }
 
   /** An alternative native allocation must not change checkout tax or delivery amounts. */
@@ -718,7 +720,12 @@ export class ShopifyOrderEditProvider
     snapshot: OrderEditSnapshot,
     pricing: OrderEditCodePricing,
   ): Promise<OrderEditShippingPreview | undefined> {
-    if (!pricing.lines.some((line) => line.preserveAutomaticDiscount))
+    if (
+      !pricing.lines.some(
+        (line) =>
+          line.preserveAutomaticDiscount || line.replacesAutomaticDiscount,
+      )
+    )
       return undefined;
     const calculate = this.shippingCalculator.calculatePreview?.bind(
       this.shippingCalculator,
@@ -744,6 +751,16 @@ export class ShopifyOrderEditProvider
     if (referenceResult.status === "rejected") throw referenceResult.reason;
     const native = nativeResult.value;
     const reference = referenceResult.value;
+    // A replacement changes native line identity. Do not allow an unpaid
+    // replacement until post-commit restoration of that identity is proven.
+    if (
+      pricing.lines.some((line) => line.replacesAutomaticDiscount) &&
+      native.totalCents > snapshot.totalCents
+    )
+      fail(
+        "ORDER_EDIT_REPLACEMENT_PAYMENT_UNSUPPORTED",
+        "This reward cannot be applied with these item changes. Remove the added items or contact us for help. Your reward is still available.",
+      );
     if (native.taxLines === undefined || reference.taxLines === undefined)
       fail(
         "ORDER_EDIT_CODE_ALLOCATION_UNVERIFIED",
@@ -759,6 +776,74 @@ export class ShopifyOrderEditProvider
         "This discount would change the order's tax or shipping calculation. It has not been applied.",
       );
     return native;
+  }
+
+  private async verifyReplacementLines(
+    snapshot: OrderEditSnapshot,
+    pricing: OrderEditCodePricing,
+  ): Promise<void> {
+    const replacements = pricing.lines.filter(
+      (line) => line.replacesAutomaticDiscount,
+    );
+    if (!replacements.length) return;
+    const result = parse(
+      z.object({
+        order: z
+          .object({
+            id: TEXT,
+            lineItems: z.object({
+              pageInfo: PAGE,
+              nodes: z.array(
+                z.object({
+                  id: TEXT,
+                  currentQuantity: INTEGER,
+                  unfulfilledQuantity: INTEGER,
+                  customAttributes: z.array(
+                    z.object({ key: z.string(), value: z.string() }),
+                  ),
+                  sellingPlan: z.object({ name: TEXT }).nullable(),
+                  lineItemGroup: z.object({ id: TEXT }).nullable(),
+                  variant: z.object({ id: TEXT }).nullable(),
+                }),
+              ),
+            }),
+          })
+          .nullable(),
+      }),
+      await this.request(
+        await this.credentials(snapshot.connectionId),
+        gql.REPLACEMENT_LINES_QUERY,
+        { id: snapshot.orderId },
+      ),
+    );
+    if (!result.order || result.order.id !== snapshot.orderId)
+      fail(
+        "ORDER_EDIT_REPLACEMENT_IDENTITY",
+        "The original items could not be verified. Your order has not changed.",
+      );
+    complete(result.order.lineItems);
+    for (const sourceId of new Set(replacements.map((line) => line.sourceId))) {
+      const original = snapshot.lines.find((line) => line.id === sourceId);
+      const matches = result.order.lineItems.nodes.filter(
+        (line) => line.id === sourceId,
+      );
+      const native = matches[0];
+      if (
+        !original ||
+        original.unsupported ||
+        matches.length !== 1 ||
+        native.variant?.id !== original.variantId ||
+        native.currentQuantity !== original.quantity ||
+        native.unfulfilledQuantity !== original.quantity ||
+        native.customAttributes.length > 0 ||
+        native.sellingPlan ||
+        native.lineItemGroup
+      )
+        fail(
+          "ORDER_EDIT_REPLACEMENT_UNSUPPORTED",
+          "This item's options cannot be preserved when applying the reward. Your order has not changed.",
+        );
+    }
   }
 
   private async previewVariants(
@@ -1061,7 +1146,11 @@ export class ShopifyOrderEditProvider
     for (const original of baseline.lines.filter(
       (line) =>
         line.quantity > 0 &&
-        !pricing.lines.some((priced) => priced.id === line.id),
+        (!pricing.lines.some((priced) => priced.id === line.id) ||
+          pricing.lines.some(
+            (priced) =>
+              priced.id === line.id && priced.replacesAutomaticDiscount,
+          )),
     )) {
       const native = originalCalculated.get(original.id)!;
       await updateQuantity(native.id, 0);
@@ -1083,7 +1172,9 @@ export class ShopifyOrderEditProvider
       for (let index = 0; index < groups.length; index++) {
         const group = groups[index];
         const native =
-          index === 0 && original ? originalCalculated.get(original.id)! : null;
+          index === 0 && original && !priced.replacesAutomaticDiscount
+            ? originalCalculated.get(original.id)!
+            : null;
         const calcId =
           native?.id ?? (await add(priced.variantId, group.quantity));
         if (native && native.quantity !== group.quantity)
@@ -1962,6 +2053,7 @@ export class ShopifyOrderEditProvider
       fail("ORDER_CHANGED", "The order changed after the quote was prepared.");
     assertEditable(current);
     if (mode === "edit" && quote.codePricing) {
+      await this.verifyReplacementLines(current, quote.codePricing);
       const gateway = await this.codes(connectionId);
       const added = quote.codePricing.newCodes;
       if (added.length) {

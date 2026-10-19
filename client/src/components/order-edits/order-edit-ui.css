@@ -992,3 +992,17 @@
 .oe-reward-existing span { font-size: 11px; overflow-wrap: anywhere; }
 .oe-reward-existing:disabled { opacity: .6; cursor: default; }
 .oe-rewards .csz-reward-widget { margin: 0; }
+.oe-saved-reward { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px 12px; margin-top: 8px; padding: 10px 12px; border: 1px solid #e9d8b5; border-radius: 8px; background: #fffaf1; }
+.oe-saved-reward-heading { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; color: #583e18; }
+.oe-saved-reward-heading strong { font-size: 13px; }
+.oe-reward-status { border-radius: 4px; padding: 2px 6px; background: #eee9df; color: #685c49; font-size: 11px; }
+.oe-reward-status.is-selected { color: #8a4000; background: #ffe3c5; }
+.oe-saved-reward-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.oe-saved-reward-actions button { min-height: 36px; padding: 6px 9px; border: 1px solid #dbc7aa; border-radius: 6px; color: #69451b; background: #fff; font: inherit; font-size: 12px; cursor: pointer; }
+.oe-saved-reward-actions .oe-reward-use { background: #fff0dc; border-color: #d9944b; }
+.oe-saved-reward-actions button:disabled { opacity: .5; cursor: default; }
+.oe-reward-value-note { flex-basis: 100%; margin: 0; font-size: 11px; color: #6a5b47; }
+.oe-reward-notice { margin: 8px 0; color: #37682f; font-size: 12px; }
+@media (max-width: 480px) {
+  .oe-saved-reward-actions button { min-height: 44px; }
+}

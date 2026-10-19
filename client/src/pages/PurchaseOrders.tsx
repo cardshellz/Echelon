@@ -2,10 +2,11 @@ import { useRef, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useLocation } from "wouter";
 import { formatProcurementScheduleDate } from "@/lib/procurement-schedule-date";
+import { purchaseOrderFinancialDisplay, PO_FINANCIAL_WORKFLOW_LABELS } from "@/lib/po-financial-display";
+import { poFinancialWorkflowStateSchema, type PoFinancialWorkflow } from "@shared/procurement/po-financial-workflow";
 import { parseSupplierSaveResult } from "@/lib/supplier-dispatch";
 import {
   PO_PHYSICAL_STATUSES,
-  PO_FINANCIAL_STATUSES,
 } from "@shared/schema/procurement.schema";
 import type { PoLinePricingInput } from "@shared/utils/po-line-pricing";
 
@@ -90,6 +91,7 @@ type PurchaseOrder = {
   // Phase 2: dual-track fields
   physicalStatus: string;
   financialStatus: string;
+  financialWorkflow?: unknown;
   invoicedTotalCents: number;
   paidTotalCents: number;
   outstandingCents: number;
@@ -115,9 +117,6 @@ const PHYSICAL_TRACK_STAGES = PO_PHYSICAL_STATUSES.filter(
   (s) => s !== "cancelled" && s !== "short_closed",
 ) as readonly string[];
 
-// Financial stages shown as segments (disputed overlaid on partially_paid)
-const FINANCIAL_TRACK_STAGES = ["unbilled", "invoiced", "partially_paid", "paid"] as const;
-
 type SegmentState = "done" | "current" | "warn" | "future";
 
 function physicalSegments(physicalStatus: string): SegmentState[] {
@@ -129,25 +128,6 @@ function physicalSegments(physicalStatus: string): SegmentState[] {
   return PHYSICAL_TRACK_STAGES.map((_, i) => {
     if (idx < 0) return "future"; // unknown status
     if (i <= idx) return "done";
-    if (i === idx + 1) return "current";
-    return "future";
-  });
-}
-
-function financialSegments(financialStatus: string): SegmentState[] {
-  // Same convention as physicalSegments: completed stages green, next stage
-  // blue. 'disputed' paints the IN-stage as warn so the row flags at a glance.
-  // This is recorded whole-invoice status, not PO payment attribution.
-  const effectiveStatus = financialStatus === "disputed" ? "partially_paid" : financialStatus;
-  const idx = FINANCIAL_TRACK_STAGES.indexOf(effectiveStatus as typeof FINANCIAL_TRACK_STAGES[number]);
-  return FINANCIAL_TRACK_STAGES.map((stage, i) => {
-    if (idx < 0) return "future";
-    if (i <= idx) {
-      if (financialStatus === "disputed" && stage === "partially_paid" && i === idx) {
-        return "warn";
-      }
-      return "done";
-    }
     if (i === idx + 1) return "current";
     return "future";
   });
@@ -174,22 +154,16 @@ function MiniTrack({ segments }: { segments: SegmentState[] }) {
 }
 
 function DualTrackCell({ po }: { po: PurchaseOrder }) {
-  if (po.physicalStatus === "cancelled") {
-    return (
-      <span className="inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium bg-red-100 text-red-700">
-        Cancelled
-      </span>
-    );
-  }
+  const financial = purchaseOrderFinancialDisplay(po.id, po.financialWorkflow);
   return (
     <div className="space-y-1">
       <div className="grid grid-cols-[50px_1fr] items-center gap-1.5">
         <span className="text-[10px] uppercase tracking-wide text-muted-foreground">Phys</span>
-        <MiniTrack segments={physicalSegments(po.physicalStatus)} />
+        {po.physicalStatus === "cancelled" ? <span className="text-xs text-red-700">Cancelled</span> : <MiniTrack segments={physicalSegments(po.physicalStatus)} />}
       </div>
-      <div className="flex flex-wrap items-center gap-1.5" title="Recorded status covers whole linked invoices. Open the purchase order to review its financial evidence.">
-        <span className="text-[10px] uppercase tracking-wide text-muted-foreground">Linked invoices</span>
-        <MiniTrack segments={financialSegments(po.financialStatus)} />
+      <div className="flex flex-wrap items-center gap-1.5">
+        <span className="text-[10px] uppercase tracking-wide text-muted-foreground">Financial</span>
+        <span className={`text-xs ${financial.state === "settled" ? "text-green-700" : financial.state === "review_required" || financial.state === null ? "text-amber-700" : "text-muted-foreground"}`}>{financial.label}</span>
       </div>
       {/* Exception pill — shown below the tracks when open exceptions exist (migration 0566) */}
       {(po.openExceptionCount ?? 0) > 0 && (
@@ -249,7 +223,7 @@ export default function PurchaseOrders() {
   const [vendorFilter, setVendorFilter] = useState<number | null>(null);
   // Phase 2: dual-track filter chips
   const [physicalFilter, setPhysicalFilter] = useState<string | null>(null);
-  const [financialFilter, setFinancialFilter] = useState<string | null>(null);
+  const [financialFilter, setFinancialFilter] = useState<PoFinancialWorkflow["state"] | null>(null);
 
   // Spec A feature flag. When true, '+ New Purchase Order' navigates to the
   // new full-page editor instead of opening the legacy dialog. Flag lives on
@@ -326,7 +300,7 @@ export default function PurchaseOrders() {
   const [inlineSaveToVendorCatalog, setInlineSaveToVendorCatalog] = useState(true);
 
   // Queries
-  const { data: poData } = useQuery<{ purchaseOrders: PurchaseOrder[]; total: number }>({
+  const { data: poData, isPending: poListLoading, isFetching: poListRefreshing, isError: poListError, refetch: refetchPoList } = useQuery<{ purchaseOrders: PurchaseOrder[]; total: number }>({
     queryKey: ["/api/purchase-orders", statusFilter, searchQuery, vendorFilter, physicalFilter, financialFilter],
     queryFn: async () => {
       const params = new URLSearchParams();
@@ -344,11 +318,13 @@ export default function PurchaseOrders() {
       if (vendorFilter) params.set("vendorId", String(vendorFilter));
       // Phase 2: dual-track filter chips
       if (physicalFilter) params.set("physical_status", physicalFilter);
-      if (financialFilter) params.set("financial_status", financialFilter);
+      if (financialFilter) params.set("financial_workflow", financialFilter);
       params.set("limit", "100");
       const res = await fetch(`/api/purchase-orders?${params}`);
       if (!res.ok) throw new Error("Failed to fetch POs");
-      return res.json();
+      const result = await res.json();
+      if (!result || !Array.isArray(result.purchaseOrders) || !Number.isSafeInteger(result.total) || result.total < 0) throw new Error("Purchase order list could not be verified.");
+      return result;
     },
   });
 
@@ -629,7 +605,7 @@ export default function PurchaseOrders() {
       </div>
 
       {/* Summary Bar */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-2 md:gap-4">
+      {!poListLoading && !poListRefreshing && !poListError && <div className="grid grid-cols-2 md:grid-cols-4 gap-2 md:gap-4">
         <Card>
           <CardContent className="p-3 md:p-4">
             <div className="text-xl md:text-2xl font-bold">{stats.total}</div>
@@ -654,7 +630,7 @@ export default function PurchaseOrders() {
             <div className="text-xs md:text-sm text-muted-foreground">Awaiting Receipt</div>
           </CardContent>
         </Card>
-      </div>
+      </div>}
 
       {/* Search + legacy status filter */}
       <div className="flex flex-col sm:flex-row gap-2">
@@ -737,10 +713,12 @@ export default function PurchaseOrders() {
           </button>
         ))}
         <span className="w-px h-4 bg-border mx-1" />
-        <span className="text-xs text-muted-foreground">Linked invoice status:</span>
-        {([null, "unbilled", "invoiced", "partially_paid", "paid"] as (string | null)[]).map((val) => (
+        <span className="text-xs text-muted-foreground">Financial:</span>
+        {([null, ...poFinancialWorkflowStateSchema.options] as (PoFinancialWorkflow["state"] | null)[]).map((val) => (
           <button
             key={val ?? "all-fin"}
+            aria-label={val === null ? "All financial states" : `Financial: ${PO_FINANCIAL_WORKFLOW_LABELS[val]}`}
+            aria-pressed={financialFilter === val}
             onClick={() => setFinancialFilter(val)}
             className={`px-2.5 py-0.5 rounded-full border text-xs transition-colors ${
               financialFilter === val
@@ -748,13 +726,15 @@ export default function PurchaseOrders() {
                 : "border-border bg-background hover:bg-muted"
             }`}
           >
-            {val === null ? "All" : val.charAt(0).toUpperCase() + val.slice(1).replace(/_/g, " ")}
+            {val === null ? "All" : PO_FINANCIAL_WORKFLOW_LABELS[val]}
           </button>
         ))}
       </div>
 
+      {(poListLoading || poListRefreshing) && <p role="status">Loading current purchase orders and financial evidence…</p>}
+      {poListError && !poListRefreshing && <div role="alert" className="rounded-md border p-4 space-y-2"><p>Purchase orders and financial evidence could not be loaded.</p><Button variant="outline" onClick={() => void refetchPoList()}>Reload purchase orders</Button></div>}
       {/* Mobile Card View */}
-      <div className="md:hidden space-y-3">
+      {!poListLoading && !poListRefreshing && !poListError && <div className="md:hidden space-y-3">
         {purchaseOrders.length === 0 ? (
           <Card>
             <CardContent className="p-4 text-center text-muted-foreground">
@@ -787,6 +767,7 @@ export default function PurchaseOrders() {
                       <span>{po.lineCount || 0} lines</span>
                       <span>{formatCents(po.totalCents)}</span>
                     </div>
+                    <div className="mt-2"><DualTrackCell po={po} /></div>
                     <div className="text-xs text-muted-foreground mt-1">
                       {format(new Date(po.createdAt), "MMM d, yyyy")}
                       {po.expectedDeliveryDate && ` • ETA ${formatProcurementScheduleDate(po.expectedDeliveryDate, { includeYear: false })}`}
@@ -812,10 +793,10 @@ export default function PurchaseOrders() {
             </Card>
           ))
         )}
-      </div>
+      </div>}
 
       {/* Desktop Table */}
-      <Card className="hidden md:block">
+      {!poListLoading && !poListRefreshing && !poListError && <Card className="hidden md:block">
         <Table>
           <TableHeader>
             <TableRow>
@@ -865,7 +846,7 @@ export default function PurchaseOrders() {
                         ? "cancelled"
                         : po.status === "closed"
                         ? "closed"
-                        : `${po.physicalStatus ?? "draft"} · Linked invoices: ${po.financialStatus ?? "unbilled"}`}
+                        : po.physicalStatus ?? "draft"}
                     </div>
                   </TableCell>
                   <TableCell className="text-right">{po.lineCount || 0}</TableCell>
@@ -895,7 +876,7 @@ export default function PurchaseOrders() {
             )}
           </TableBody>
         </Table>
-      </Card>
+      </Card>}
 
       {/* Create PO Dialog — Full page style with inline line items */}
       <Dialog open={showCreateDialog} onOpenChange={(open) => {

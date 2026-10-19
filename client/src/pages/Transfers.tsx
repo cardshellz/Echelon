@@ -48,8 +48,18 @@ interface SkuResult {
   name: string;
   variantId: number;
   available: number;
+  onHand?: number;
+  reserved?: number;
   locationId?: number;
   location?: string;
+}
+
+function stockSummary(stock: { available: number; onHand?: number; reserved?: number }): string {
+  return stock.onHand == null || stock.reserved == null ? `${stock.available} available`
+    : `${stock.onHand} on hand · ${stock.reserved} reserved · ${stock.available} available`;
+}
+function suggestedTransferQuantity(stock: { available: number; onHand?: number }): number {
+  return stock.available > 0 ? stock.available : Math.min(1,stock.onHand ?? 0);
 }
 
 type MobileStep = "source" | "sku" | "quantity" | "destination" | "confirm";
@@ -176,10 +186,17 @@ export default function Transfers() {
       setVariantId(result.variantId);
       setSelectedSkuAvailable(result.available);
       if (!quantity) {
-        setQuantity(String(result.available));
+        setQuantity(String(suggestedTransferQuantity(result)));
       }
     }
   }, [skusAtLocation, variantId, quantity]);
+  const currentSelectedStock = skusAtLocation.find(row => row.variantId === variantId);
+  useEffect(() => {
+    if (currentSelectedStock) {
+      setSelectedSkuAvailable(currentSelectedStock.available);
+      setSelectedSku(previous => previous?.variantId === currentSelectedStock.variantId ? currentSelectedStock : previous);
+    }
+  }, [currentSelectedStock]);
   
   const { data: lookupResults = [] } = useQuery<Array<{
     sku: string;
@@ -245,6 +262,7 @@ export default function Transfers() {
       resetForm();
     },
     onError: (error: any, variables) => {
+      queryClient.invalidateQueries({queryKey:["/api/inventory/skus/search"]});
       // Reserved stock blocks the transfer: offer to move the reservation too
       // (Option A) instead of dead-ending. Re-fires with moveReserved: true.
       const context = error?.context ?? error?.responseBody?.context;
@@ -343,6 +361,62 @@ export default function Transfers() {
     });
   };
   
+  // One confirmation contract for both desktop and the mobile transfer wizard.
+  const reservationDialog = (
+    <Dialog open={!!reservationPrompt} onOpenChange={(open) => { if (!open) setReservationPrompt(null); }}>
+      <DialogContent className="max-w-md">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <AlertTriangle className="h-5 w-5 text-amber-500" />
+            Reserved stock at {reservationPrompt?.sourceCode}
+          </DialogTitle>
+        </DialogHeader>
+        {reservationPrompt && (
+          <div className="space-y-4">
+            <p className="text-sm text-muted-foreground">
+              You're moving <span className="font-semibold">{reservationPrompt.needed}</span> unit(s) from{" "}
+              <span className="font-semibold">{reservationPrompt.sourceCode}</span> to{" "}
+              <span className="font-semibold">{reservationPrompt.destCode}</span>, but only{" "}
+              <span className="font-semibold">{reservationPrompt.availableAtSource}</span> are free —{" "}
+              <span className="font-semibold">{reservationPrompt.reservedAtSource}</span> are reserved for open orders.
+            </p>
+            <p className="text-sm text-muted-foreground">
+              Move the reserved stock too? Complete unpicked order lines and their reservations will move to{" "}
+              <span className="font-semibold">{reservationPrompt.destCode}</span>. Orders already being picked at this bin
+              must be finished or cancelled first.
+            </p>
+            <div className="flex justify-end gap-2 pt-2">
+              <Button
+                variant="ghost"
+                onClick={() => setReservationPrompt(null)}
+                disabled={transferMutation.isPending}
+                data-testid="button-cancel-move-reserved"
+              >
+                Cancel
+              </Button>
+              <Button
+                onClick={() => {
+                  const payload = reservationPrompt.payload;
+                  setReservationPrompt(null);
+                  transferMutation.mutate({ ...payload, moveReserved: true });
+                }}
+                disabled={transferMutation.isPending}
+                data-testid="button-confirm-move-reserved"
+              >
+                {transferMutation.isPending ? (
+                  <Loader2 className="h-4 w-4 animate-spin mr-2" />
+                ) : (
+                  <ArrowRight className="h-4 w-4 mr-2" />
+                )}
+                Move reserved too
+              </Button>
+            </div>
+          </div>
+        )}
+      </DialogContent>
+    </Dialog>
+  );
+
   if (isMobile) {
     return (
       <div className="min-h-screen bg-slate-50 p-4">
@@ -459,7 +533,7 @@ export default function Transfers() {
                     >
                       <div className="font-medium">{item.sku}</div>
                       <div className="text-sm text-muted-foreground truncate">{item.name}</div>
-                      <div className="text-sm text-green-600">Available: {item.available}</div>
+                      <div className="text-sm text-green-600">{stockSummary(item)}</div>
                     </button>
                   ))}
                   {skusAtLocation.length === 0 && (
@@ -472,7 +546,7 @@ export default function Transfers() {
                   disabled={!selectedSku}
                   onClick={() => {
                     playSoundWithHaptic("success", "classic", true);
-                    if (selectedSku) setMobileQuantity(String(selectedSku.available));
+                    if (selectedSku) setMobileQuantity(String(suggestedTransferQuantity(selectedSku)));
                     setMobileStep("quantity");
                   }}
                   data-testid="button-next-sku"
@@ -494,7 +568,7 @@ export default function Transfers() {
                 <div className="bg-slate-100 rounded-lg p-3">
                   <p className="font-medium">{selectedSku?.sku}</p>
                   <p className="text-sm text-muted-foreground">{selectedSku?.name}</p>
-                  <p className="text-sm text-green-600">Available: {selectedSku?.available}</p>
+                  <p className="text-sm text-green-600">{selectedSku ? stockSummary(selectedSku) : ""}</p>
                 </div>
                 
                 <Input
@@ -503,7 +577,7 @@ export default function Transfers() {
                   onChange={(e) => setMobileQuantity(e.target.value)}
                   placeholder="0"
                   className="h-20 text-4xl text-center"
-                  max={selectedSku?.available}
+                  max={selectedSku?.onHand ?? selectedSku?.available}
                   min={1}
                   autoFocus
                   data-testid="input-quantity"
@@ -514,7 +588,7 @@ export default function Transfers() {
                     <Button
                       key={n}
                       variant="outline"
-                      onClick={() => setMobileQuantity(String(Math.min(n, selectedSku?.available || n)))}
+                      onClick={() => setMobileQuantity(String(Math.min(n, selectedSku?.onHand ?? selectedSku?.available ?? n)))}
                     >
                       {n}
                     </Button>
@@ -522,15 +596,15 @@ export default function Transfers() {
                   <Button
                     variant="outline"
                     className="col-span-3"
-                    onClick={() => setMobileQuantity(String(selectedSku?.available || 0))}
+                    onClick={() => setMobileQuantity(String(selectedSku?.onHand ?? selectedSku?.available ?? 0))}
                   >
-                    All ({selectedSku?.available})
+                    All on hand ({selectedSku?.onHand ?? selectedSku?.available})
                   </Button>
                 </div>
                 
                 <Button
                   className="w-full h-14 text-lg"
-                  disabled={!mobileQuantity || parseInt(mobileQuantity) <= 0 || parseInt(mobileQuantity) > (selectedSku?.available || 0)}
+                  disabled={!mobileQuantity || parseInt(mobileQuantity) <= 0 || parseInt(mobileQuantity) > (selectedSku?.onHand ?? selectedSku?.available ?? 0)}
                   onClick={() => {
                     playSoundWithHaptic("success", "classic", true);
                     setMobileStep("destination");
@@ -700,6 +774,7 @@ export default function Transfers() {
             </CardContent>
           </Card>
         )}
+        {reservationDialog}
       </div>
     );
   }
@@ -801,7 +876,7 @@ export default function Transfers() {
                   <Package className="h-4 w-4 text-muted-foreground" />
                   <span className="font-medium flex-1">{selectedSkuLabel}</span>
                   {selectedSkuAvailable != null && (
-                    <span className="text-xs text-green-600">{selectedSkuAvailable.toLocaleString()} avail</span>
+                    <span className="text-xs text-green-600">{currentSelectedStock ? stockSummary(currentSelectedStock) : `${selectedSkuAvailable.toLocaleString()} available`}</span>
                   )}
                   <button
                     type="button"
@@ -838,7 +913,7 @@ export default function Transfers() {
                     >
                       <div className="font-medium">{result.sku}</div>
                       <div className="text-xs text-muted-foreground truncate">{result.name}</div>
-                      <div className="text-xs text-green-600">Available: {result.available.toLocaleString()}</div>
+                      <div className="text-xs text-green-600">{stockSummary(result)}</div>
                     </button>
                   ))}
                 </div>
@@ -1026,7 +1101,7 @@ export default function Transfers() {
                   <span>WH</span>
                   <span>Location</span>
                   <span>Type</span>
-                  <span className="text-right">Qty</span>
+                  <span className="text-right">Available</span>
                 </div>
                 {(() => {
                   const grouped = lookupResults.reduce((acc, r) => {
@@ -1041,7 +1116,7 @@ export default function Transfers() {
                         <div className="font-medium text-sm">{sku}</div>
                         <div className="text-xs text-muted-foreground truncate">{data.name}</div>
                         <div className="text-xs font-medium text-blue-600">
-                          Total: {data.locations.reduce((sum, l) => sum + l.available, 0)} units across {data.locations.length} location{data.locations.length !== 1 ? 's' : ''}
+                          Available: {data.locations.reduce((sum, l) => sum + l.available, 0)} units across {data.locations.length} location{data.locations.length !== 1 ? 's' : ''}
                         </div>
                       </div>
                       {data.locations.map((loc) => (
@@ -1069,60 +1144,7 @@ export default function Transfers() {
         </DialogContent>
       </Dialog>
 
-      {/* Reserved-stock confirm: offer to move the reservation with the stock
-          (Option A) instead of dead-ending the transfer. */}
-      <Dialog open={!!reservationPrompt} onOpenChange={(open) => { if (!open) setReservationPrompt(null); }}>
-        <DialogContent className="max-w-md">
-          <DialogHeader>
-            <DialogTitle className="flex items-center gap-2">
-              <AlertTriangle className="h-5 w-5 text-amber-500" />
-              Reserved stock at {reservationPrompt?.sourceCode}
-            </DialogTitle>
-          </DialogHeader>
-          {reservationPrompt && (
-            <div className="space-y-4">
-              <p className="text-sm text-muted-foreground">
-                You're moving <span className="font-semibold">{reservationPrompt.needed}</span> unit(s) from{" "}
-                <span className="font-semibold">{reservationPrompt.sourceCode}</span> to{" "}
-                <span className="font-semibold">{reservationPrompt.destCode}</span>, but only{" "}
-                <span className="font-semibold">{reservationPrompt.availableAtSource}</span> are free —{" "}
-                <span className="font-semibold">{reservationPrompt.reservedAtSource}</span> are reserved for open orders.
-              </p>
-              <p className="text-sm text-muted-foreground">
-                Move the reserved stock too? The reservation (and any waiting orders' pick location) will follow the stock to{" "}
-                <span className="font-semibold">{reservationPrompt.destCode}</span>. Orders already being picked at this bin
-                must be finished or cancelled first.
-              </p>
-              <div className="flex justify-end gap-2 pt-2">
-                <Button
-                  variant="ghost"
-                  onClick={() => setReservationPrompt(null)}
-                  disabled={transferMutation.isPending}
-                  data-testid="button-cancel-move-reserved"
-                >
-                  Cancel
-                </Button>
-                <Button
-                  onClick={() => {
-                    const payload = reservationPrompt.payload;
-                    setReservationPrompt(null);
-                    transferMutation.mutate({ ...payload, moveReserved: true });
-                  }}
-                  disabled={transferMutation.isPending}
-                  data-testid="button-confirm-move-reserved"
-                >
-                  {transferMutation.isPending ? (
-                    <Loader2 className="h-4 w-4 animate-spin mr-2" />
-                  ) : (
-                    <ArrowRight className="h-4 w-4 mr-2" />
-                  )}
-                  Move reserved too
-                </Button>
-              </div>
-            </div>
-          )}
-        </DialogContent>
-      </Dialog>
+      {reservationDialog}
     </div>
   );
 }

@@ -151,6 +151,19 @@ implements InventoryAvailabilityMasterDataAdminStore {
         ? await loadTransformationModel(tx, head.draftModelId)
         : null;
 
+      const modelReferenceIds = [activeModel, draftModel].flatMap(model => model ? [
+        ...model.paths.flatMap(path => [path.sourceVariantId, path.destinationVariantId]),
+        ...model.bindings.flatMap(binding => [binding.outputVariantIdSnapshot,
+          ...binding.components.map(component => component.componentVariantId)]),
+      ] : []);
+      const referencedIds = [...new Set([...modelReferenceIds, ...recipes.flatMap(recipe =>
+        [recipe.outputVariantId, ...recipe.components.map(component => component.componentVariantId)])])];
+      // Read actual lifecycle state in this same repeatable-read snapshot. Never
+      // infer archival from a missing shipping/tracking-filtered catalog row.
+      const archivedVariants = referencedIds.length === 0 ? [] : await tx
+        .select({ id: productVariants.id }).from(productVariants)
+        .where(and(inArray(productVariants.id, referencedIds), eq(productVariants.isActive, false)))
+        .orderBy(asc(productVariants.id));
       const [runtime] = await tx.select().from(inventoryAvailabilityRuntimeAuthority)
         .where(eq(inventoryAvailabilityRuntimeAuthority.singletonKey, true)).limit(1);
       return supplyTransformationsAdminViewSchema.parse({
@@ -163,6 +176,7 @@ implements InventoryAvailabilityMasterDataAdminStore {
         },
         variants,
         recipes,
+        archivedVariantIds: archivedVariants.map(variant => variant.id),
         head: head
           ? {
               revision: head.revision.toString(),

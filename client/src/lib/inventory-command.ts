@@ -1,8 +1,9 @@
+import { inventoryTransferRejectionReceiptSchema } from "@shared/types/inventory-transfer";
 import { useMemo } from "react";
 import { z } from "zod";
 import { canonicalJson } from "@shared/utils/canonical-json";
 import { useAuth } from "./auth";
-import { financialCommandFetchJson } from "./financial-command";
+import { FinancialCommandRequestError, financialCommandFetchJson } from "./financial-command";
 
 export interface InventoryCommandRequester {
   <T = unknown>(url: string, body: Record<string, unknown>, responseSchema?: { parse(value: unknown): T }): Promise<T>;
@@ -17,6 +18,9 @@ export interface InventoryIntentPersistence {
 const pendingSchema = z.object({
   url: z.string().min(1), fingerprint: z.string(), commandKey: z.string().min(1).max(120), requestBody: z.string(),
 }).strict();
+const rejectedTransferResponseSchema = z.object({
+  context: z.object({ transferCommandReceipt: inventoryTransferRejectionReceiptSchema }),
+});
 const savedSchema = z.object({ version: z.literal(1), pending: z.array(pendingSchema) }).strict();
 type PendingIntent = z.infer<typeof pendingSchema>;
 
@@ -30,8 +34,9 @@ export class InventoryIntentRecoveryError extends Error {
 
 /** One client intent survives a lost response. A successful command or an edited
  * payload starts a new intent; retry never generates another quantity command.
- * Retain on every failure: older inventory handlers can report a generic HTTP
- * error after a committed mutation, so status alone is not rejection evidence.
+ * Retain unproven failures: older handlers can report an HTTP error after a
+ * committed mutation. Only the transfer owner's persisted rejection receipt
+ * proves that this exact intent can be retired without duplicating stock.
  */
 export function createInventoryCommandRequester(
   generateKey: () => string,
@@ -69,10 +74,24 @@ export function createInventoryCommandRequester(
     catch (cause) { throw new InventoryIntentRecoveryError(cause); }
   };
   const sendIntent = async <T>(intent: PendingIntent, responseSchema?: { parse(value: unknown): T }): Promise<T> => {
-    const rawResult = await send<T>(intent.url, {
-      method: "POST", credentials: "include", headers: { "Content-Type": "application/json" },
-      body: intent.requestBody,
-    });
+    let rawResult: T;
+    try {
+      rawResult = await send<T>(intent.url, {
+        method: "POST", credentials: "include", headers: { "Content-Type": "application/json" },
+        body: intent.requestBody,
+      });
+    } catch (error) {
+      // Scope this exception to the owner that supplies persisted no-movement
+      // evidence. Network failures, generic 4xx/5xx, and other routes retain keys.
+      if (intent.url === "/api/inventory/transfer" && error instanceof FinancialCommandRequestError
+        && error.status !== null && error.status >= 400 && error.status < 500 && !error.ambiguous) {
+        const rejection = rejectedTransferResponseSchema.safeParse(error.responseBody);
+        if (rejection.success && rejection.data.context.transferCommandReceipt.commandKey === intent.commandKey) {
+          write(read().filter(entry => entry.commandKey !== intent.commandKey));
+        }
+      }
+      throw error;
+    }
     // A malformed success is ambiguous. Keep the original intent for replay.
     const result = responseSchema ? responseSchema.parse(rawResult) : rawResult;
     // Remove only the acknowledged command, preserving concurrent intents.

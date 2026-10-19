@@ -9,6 +9,7 @@ const mocks = vi.hoisted(() => ({
   repository: { reserve: vi.fn(), executeClaim: vi.fn(), rejectClaim: vi.fn(), markRetryable: vi.fn() },
 }));
 vi.mock("../../../../routes/middleware", () => ({
+  requireAuth: (_req: Request, _res: Response, next: NextFunction) => next(),
   requirePermission: (resource: string, action: string) => (req: Request, _res: Response, next: NextFunction) => {
     mocks.permission(resource, action);
     (req as Request & { user: unknown }).user = mocks.actorId ? { id: mocks.actorId } : undefined;

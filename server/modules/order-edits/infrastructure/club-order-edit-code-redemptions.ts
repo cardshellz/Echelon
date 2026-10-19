@@ -3,7 +3,8 @@ import type { OrderEditCodeRedemptions } from "../application/order-edit-code-re
 import { OrderEditProviderError } from "../application/order-edit-provider";
 import type { OrderEditRewards } from "../application/order-edit-rewards";
 import { orderEditCodeRuleSchema } from "@shared/order-edits/order-edit-codes";
-import { rewardWidgetScopeSchema, rewardWidgetIssueSchema, rewardWidgetStateSchema, rewardWidgetIssueResultSchema } from "@shared/customer-account/reward-widget";
+import { rewardWidgetScopeSchema, rewardWidgetIssueSchema, rewardWidgetStateSchema, rewardWidgetIssueResultSchema,
+  rewardWidgetManagementStateSchema, rewardWidgetCancelSchema, rewardWidgetCancelResultSchema } from "@shared/customer-account/reward-widget";
 import type { CustomerRewards } from "../../customer-account/application/customer-rewards";
 
 /** Club's existing issuance and receipt service; ordinary coupons never use it. */
@@ -31,6 +32,12 @@ export class ClubOrderEditCodeRedemptions implements OrderEditCodeRedemptions, O
   }
   async state(input: Parameters<CustomerRewards["state"]>[0]) {
     return rewardWidgetStateSchema.parse(await this.request("rewards/state", rewardWidgetScopeSchema.parse(input), true));
+  }
+  async manage(input: Parameters<CustomerRewards["manage"]>[0]) {
+    return rewardWidgetManagementStateSchema.parse(await this.request("rewards/manage", rewardWidgetScopeSchema.parse(input), true));
+  }
+  async cancel(input: Parameters<CustomerRewards["cancel"]>[0]) {
+    return rewardWidgetCancelResultSchema.parse(await this.request("rewards/cancel", rewardWidgetCancelSchema.parse(input), true));
   }
   async issue(input: Parameters<CustomerRewards["issue"]>[0]) {
     return rewardWidgetIssueResultSchema.parse(await this.request("rewards/issue", rewardWidgetIssueSchema.parse(input), true));

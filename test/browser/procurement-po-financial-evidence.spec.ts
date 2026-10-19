@@ -1,3 +1,4 @@
+import { invoiceSourceFixture, unbilledOwnershipFixture } from "../fixtures/invoice-source";
 import { expect, test, type Page } from "@playwright/test";
 import type { PoFinancialEvidence } from "../../shared/procurement/po-financial-evidence";
 import type { PoFinancialWorkflow } from "../../shared/procurement/po-financial-workflow";
@@ -46,7 +47,7 @@ async function installFinancialFixtures(page: Page, evidence: unknown, options: 
     invoicedAmountCents: 30000, paidAmountCents: 10000, balanceCents: 20000,
   }] } }));
   await page.route("**/api/vendor-invoices/71", route => route.fulfill({ json: {
-    id: 71, invoiceNumber: "TEST-SHARED-71", vendorId: 2, vendorName: "Test vendor", status: options.invoiceStatus ?? "partially_paid", currency: "USD",
+    sourceCapabilities: invoiceSourceFixture(), id: 71, invoiceNumber: "TEST-SHARED-71", vendorId: 2, vendorName: "Test vendor", status: options.invoiceStatus ?? "partially_paid", currency: "USD",
     invoicedAmountCents: 30000, paidAmountCents: 10000, balanceCents: 20000, paymentReviewRequired: false,
     lines: [], poLinks: [{ id: 1, purchaseOrderId: 17, poNumber: "TEST-PO-17" }], attachments: [], payments: [],
   } }));

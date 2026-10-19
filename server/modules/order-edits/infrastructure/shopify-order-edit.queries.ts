@@ -4,6 +4,14 @@ const MONEY = `presentmentMoney { amount currencyCode } shopMoney { amount curre
 const TRANSACTION = `id kind status gateway manualPaymentGateway processedAt parentTransaction { id } amountSet { ${MONEY} }`;
 const DISCOUNT_VALUE = `value { __typename ... on PricingPercentageValue { percentage } ... on MoneyV2 { amount currencyCode } }`;
 const CALCULATED_ALLOCATION = `calculatedDiscountAllocations { allocatedAmountSet { ${MONEY} } discountApplication { __typename id allocationMethod appliedTo targetType targetSelection description ${DISCOUNT_VALUE} ... on CalculatedDiscountCodeApplication { code } } }`;
+// Replacing a line cannot preserve customization or subscriptions through
+// orderEditAddVariant. Read these explicitly; never assume an empty value.
+export const REPLACEMENT_LINES_QUERY = `query EchelonEditReplacementLines($id: ID!) {
+  order(id: $id) { id lineItems(first: 250) { nodes {
+    id currentQuantity unfulfilledQuantity customAttributes { key value }
+    sellingPlan { name } lineItemGroup { id } variant { id }
+  } pageInfo { hasNextPage } } }
+}`;
 export const REFUND_FIELDS = `id note totalRefundedSet { ${MONEY} } transactions(first: 250) { nodes { ${TRANSACTION} } pageInfo { hasNextPage } }`;
 export const ORDER_QUERY = `query EchelonEditOrder($id: ID!) {
   shop { currencyCode primaryDomain { host } transformEnabled: metafield(namespace: "cardshellz", key: "transform_global_enabled") { value } }

@@ -4105,7 +4105,6 @@ export default function PurchaseOrderDetail() {
 
             {/* Cancel PO */}
             {canCancelPo &&
-              po.financialStatus === "unbilled" &&
               !["closed", "cancelled"].includes(po.status) && (
               <Button
                 className="w-full justify-start text-red-600 hover:text-red-700"

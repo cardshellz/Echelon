@@ -8,6 +8,8 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { useAuth } from "@/lib/auth";
 import { prefillPathsFromModel, transformationRuntimeLabel } from "@/pages/supply-transformations-model";
+import { archivedTransformationVariantIds, prepareTransformationDraft } from "@shared/inventory/transformation-draft-lifecycle";
+import { ArchivedTransformationNotice } from "./ArchivedTransformationNotice";
 import { ProductRecipeRules } from "./ProductRecipeRules";
 import { INVENTORY_BEHAVIORS } from "@shared/inventory/inventory-behavior";
 import { ProductDefinitionReview } from "./ProductDefinitionReview";
@@ -208,6 +210,8 @@ function AuthorizedConversionCard({ productId, enabled, canEdit }: Props & { can
                 <span className="mt-1 block text-xs text-muted-foreground">{option.description}</span></span>
             </label>)}</div>
           </fieldset>
+          {edit && model && <ArchivedTransformationNotice view={view}
+            lifecycle={prepareTransformationDraft(model, archivedTransformationVariantIds(view))} />}
           {edit && <p className="text-xs text-muted-foreground">Changing behavior clears incompatible directions and recipe selections in this draft. It does not delete recipe definitions or move physical inventory.</p>}
           {!edit && view.draftModel && <div className="rounded-md border bg-muted/30 p-3 text-sm">
             <p className="font-medium">Draft changes available · Draft v{view.draftModel.version}</p>

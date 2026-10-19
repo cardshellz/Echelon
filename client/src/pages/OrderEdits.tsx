@@ -283,7 +283,7 @@ export function OrderDraft({
   /** Hydrate an existing review from its persisted plan, never from baseline quantities. */
   initialOperation?: OrderEditOperation | null;
   renderRewards?: (input: { disabled: boolean; maxDiscountCents: number; appliedCodes: string[];
-    onApply(code: string): Promise<void>; onBusy(busy: boolean): void }) => React.ReactNode;
+    onApply(code: string): Promise<void>; onRemove(code: string): void; onBusy(busy: boolean): void }) => React.ReactNode;
   /** Customer confirmation stays in the editable form; staff retain their existing review. */
   inline?: {
     operation: OrderEditOperation | null;
@@ -629,6 +629,11 @@ export function OrderDraft({
     inline?.onChange();
     changeCodes(next.discountCodes!);
   }
+  function removeCode(code: string) {
+    inline?.onChange();
+    command.current = null;
+    changeCodes(discountCodes.filter((existing) => existing.toUpperCase() !== code.toUpperCase()));
+  }
   if (pending && !inline)
     return (
       <OrderEditPreviewReview
@@ -962,17 +967,12 @@ export function OrderDraft({
               disabled={!mutable || reviewBlocked || rewardBusy}
               onEditing={setCodeEditing}
               onApply={applyCode}
-              onRemove={(code) => {
-                inline?.onChange();
-                command.current = null;
-                changeCodes(
-                  discountCodes.filter((existing) => existing !== code),
-                );
-              }}
+              onRemove={removeCode}
             />
             {renderRewards?.({ disabled: !mutable || reviewBlocked || codeEditing,
-              maxDiscountCents: (currentPreview?.financials ?? order.financials)?.itemsNetCents ?? 0,
-              appliedCodes: discountCodes, onApply: applyCode, onBusy: setRewardBusy })}
+              maxDiscountCents: (verified?.financials?.quoted ?? currentPreview?.financials)?.itemsNetCents ??
+                (changes.length === 0 && additions.length === 0 && discountCodes.length === 0 ? order.financials?.itemsNetCents ?? 0 : 0),
+              appliedCodes: discountCodes, onApply: applyCode, onRemove: removeCode, onBusy: setRewardBusy })}
             {audience === "staff" && <p className="text-xs text-muted-foreground">
               Shipping address changes are not supported in this pilot.
             </p>}

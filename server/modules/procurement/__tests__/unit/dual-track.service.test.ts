@@ -23,8 +23,8 @@ import { createPurchasingService, PurchasingError } from "../../purchasing.servi
 // Covers:
 //   1.  transitionPhysical — valid transitions accepted
 //   2.  transitionPhysical — invalid transitions rejected
-//   3.  transitionFinancial — valid transitions accepted
-//   4.  transitionFinancial — invalid transitions rejected
+//   3.  transitionFinancial — every manual state is rejected before DB access
+//   4.  transitionFinancial — source ledger remains the only authority
 //   5.  recomputeFinancialAggregates — delegates to the AP-owned audited writer
 //   8.  onReceivingOrderClosed — rejects unpersisted source even with one matching line
 //   9.  onReceivingOrderClosed — leaves unlinked when zero matching lines
@@ -293,60 +293,17 @@ describe("transitionFinancial", () => {
     svc = createPurchasingService(mockDb, storage);
   });
 
-  it("(3) accepts valid financial transition: unbilled → invoiced", async () => {
-    const po = makePo({ financialStatus: "unbilled" });
-    storage.getPurchaseOrderById.mockResolvedValue(po);
-    mockDb._poState = po;
-
-    await svc.transitionFinancial(1, "invoiced", "user-1");
-
-    expect(storage.updatePurchaseOrderStatusWithHistory).not.toHaveBeenCalled();
-    const patch = mockDb._updateCalls[0];
-    expect(patch.financialStatus).toBe("invoiced");
+  it.each(["unbilled", "invoiced", "partially_paid", "paid", "disputed"] as const)("rejects manual financial state %s before any DB access", async target => {
+    await expect(svc.transitionFinancial(1, target, "user-1")).rejects.toMatchObject({
+      statusCode: 409, details: { code: "PO_FINANCIAL_LEDGER_OWNED" },
+    });
+    expect(mockDb.transaction).not.toHaveBeenCalled();
+    expect(mockDb.select).not.toHaveBeenCalled();
+    expect(storage.getPurchaseOrderById).not.toHaveBeenCalled();
+    expect(mockDb._updateCalls).toEqual([]);
+    expect(mockDb._insertRows).toEqual([]);
   });
 
-  it("(3b) accepts valid financial transition: invoiced → paid", async () => {
-    const po = makePo({ financialStatus: "invoiced" });
-    storage.getPurchaseOrderById.mockResolvedValue(po);
-    mockDb._poState = po;
-
-    await svc.transitionFinancial(1, "paid", "user-1");
-
-    const patch = mockDb._updateCalls[0];
-    expect(patch.financialStatus).toBe("paid");
-    expect(patch.fullyPaidAt).toBeInstanceOf(Date); // timestamp stamped
-  });
-
-  it("(3c) accepts disputed → paid", async () => {
-    const po = makePo({ financialStatus: "disputed" });
-    storage.getPurchaseOrderById.mockResolvedValue(po);
-    mockDb._poState = po;
-
-    await svc.transitionFinancial(1, "paid", "user-1");
-
-    const patch = mockDb._updateCalls[0];
-    expect(patch.financialStatus).toBe("paid");
-  });
-
-  it("(4) rejects invalid financial transition: paid → invoiced", async () => {
-    const po = makePo({ financialStatus: "paid" });
-    storage.getPurchaseOrderById.mockResolvedValue(po);
-    mockDb._poState = po;
-
-    await expect(
-      svc.transitionFinancial(1, "invoiced", "user-1"),
-    ).rejects.toThrow(/Cannot transition financial status from 'paid' to 'invoiced'/);
-  });
-
-  it("(14) rejects paid → unbilled (no backward transitions)", async () => {
-    const po = makePo({ financialStatus: "paid" });
-    storage.getPurchaseOrderById.mockResolvedValue(po);
-    mockDb._poState = po;
-
-    await expect(
-      svc.transitionFinancial(1, "unbilled", "user-1"),
-    ).rejects.toThrow(/Cannot transition financial status/);
-  });
 });
 
 describe("createReceiptFromPO — receipt idempotency", () => {
