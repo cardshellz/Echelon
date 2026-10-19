@@ -190,7 +190,7 @@ export class PostgresEbayPublicationReconciliationRepository implements EbayPubl
   }
 
   private async currentPlan(client: PoolClient, claim: EbayReconciliationClaim, reconciliationObservationIds: readonly string[] = []): Promise<EbayReconciliationTarget[]> {
-    const channels = (await client.query<{ channel_id: number }>(`SELECT DISTINCT channel_id
+    const channels = (await client.query<{ channel_id: number; id: number }>(`SELECT channel_id,id
       FROM inventory.inventory_publication_targets WHERE channel_connection_id=$1 AND external_scope_id=$2
         AND provider_scope_type='account' AND state='live' AND publication_authority='echelon'`,
     [claim.connectionId, claim.accountId])).rows;
@@ -200,6 +200,8 @@ export class PostgresEbayPublicationReconciliationRepository implements EbayPubl
       channelId: channels[0]!.channel_id, reconciliationObservationIds,
     }).publishProduct({
       productId: claim.productId, dryRun: false, triggeredBy: "ebay_unknown_request_reconciliation",
+      publicationTargetId: channels[0]!.id,
+      productVariantIds: [...new Set(claim.scopes.flatMap(scope => scope.productVariantId === null ? [] : [scope.productVariantId]))],
     }, async () => { throw reconciliationFailure("PUBLICATION_AUTHORITY_CHANGED", "This stock check requires the current canonical inventory owner."); });
     if (result.authority !== "canonical") throw reconciliationFailure("PUBLICATION_AUTHORITY_CHANGED", "This stock check requires the current canonical inventory owner.");
     const targets: EbayReconciliationTarget[] = [];
