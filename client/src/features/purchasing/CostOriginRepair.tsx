@@ -93,8 +93,9 @@ function OriginReview({
             : "Repair historical cost origin"}
         </DialogTitle>
         <DialogDescription>
-          Confirm the receipt and supplier amounts, then review the cost impact
-          before administrator approval.
+          {context.data?.approval
+            ? "This repair is posted. The administrator approval and recorded before and after values are shown below."
+            : "Confirm the receipt and supplier amounts, then review the cost impact before administrator approval."}
         </DialogDescription>
       </DialogHeader>
       {context.isPending && (
@@ -119,7 +120,7 @@ function OriginReview({
     </>
   );
 }
-function Summary({ summary }: { summary: OriginRepairSummary }) {
+export function CostOriginRepairSummary({ summary }: { summary: OriginRepairSummary }) {
   return (
     <div className="space-y-3">
       <p>
@@ -281,7 +282,7 @@ function RepairForm({
               These are the values posted by this approval. Later cost changes
               are shown in the current cost status and posting history.
             </p>
-            <Summary summary={approval.summary} />
+            <CostOriginRepairSummary summary={approval.summary} />
           </>
         ) : data.blockedReason ? (
           <p role="alert">{data.blockedReason}</p>
@@ -397,7 +398,7 @@ function RepairForm({
                   </strong>
                   .
                 </p>
-                <Summary summary={preview.data.result.summary} />
+                <CostOriginRepairSummary summary={preview.data.result.summary} />
                 <p className="text-muted-foreground">
                   Confirmed invoice split: product{" "}
                   {money(preview.data.request.productMills)} · packaging{" "}

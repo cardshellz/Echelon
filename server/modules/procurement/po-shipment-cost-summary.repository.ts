@@ -216,6 +216,8 @@ export async function readPoShipmentCosts(
           const contract = row.contract as Record<string, unknown> | null;
           return {
             lineId,
+            purchaseOrderLineId: line.purchase_order_line_id == null
+              ? null : costInteger(line.purchase_order_line_id, "purchaseOrderLineId", 1),
             exceptionReview: exceptions.get(lineId) ?? null,
             shipmentId: costInteger(line.inbound_shipment_id, "shipmentId", 1),
             shipmentNumber:
