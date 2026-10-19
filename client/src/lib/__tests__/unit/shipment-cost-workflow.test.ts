@@ -43,6 +43,15 @@ it("requests the exception-aware read contract with the current session", async 
   });
 });
 
+it("opts into PO line links without dropping the current reconciliation contract on older servers", async () => {
+  const fetch = vi.fn().mockResolvedValue(new Response(JSON.stringify({ lines: [] })));
+  vi.stubGlobal("fetch", fetch);
+  await readShipmentCostWorkflow("/api/purchase-orders/17/shipment-costs", { includePoLineLinks: true });
+  expect(fetch).toHaveBeenCalledExactlyOnceWith("/api/purchase-orders/17/shipment-costs", {
+    method: "GET", credentials: "include", headers: { "X-Shipment-Cost-Review-Version": "3", "X-Purchase-Order-Line-Cost-Version": "1" },
+  });
+});
+
 describe("shipment cost update intent", () => {
   it("keeps the same key after a lost response and rotates only after verified completion", async () => {
     const fetch = vi.fn().mockRejectedValueOnce(new TypeError("network lost"))

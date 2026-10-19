@@ -485,7 +485,8 @@ export function registerPurchaseOrderRoutes(app: Express, financialEvidence: Pic
       const costs = await purchasing.getPoShipmentCosts(parsed.data);
       if (!costs) return res.status(404).json({ code: "PURCHASE_ORDER_NOT_FOUND", error: "Purchase order not found" });
       res.vary("X-Shipment-Cost-Review-Version");
-      res.json(shipmentCostReviewResponse(costs,req.get("X-Shipment-Cost-Review-Version")));
+      res.vary("X-Purchase-Order-Line-Cost-Version");
+      res.json(shipmentCostReviewResponse(costs,req.get("X-Shipment-Cost-Review-Version"),req.get("X-Purchase-Order-Line-Cost-Version") === "1"));
     } catch (error: unknown) {
       console.error(JSON.stringify({ event: "procurement.po_shipment_costs_failed", poId: parsed.data,
         errorType: error instanceof Error ? error.name : "unknown" }));

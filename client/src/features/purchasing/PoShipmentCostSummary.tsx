@@ -60,6 +60,11 @@ export function PoShipmentCostSummary({
           </Button>
         </div>
         <div className="space-y-1 text-sm" role="status">
+          <div className="rounded-md bg-muted/50 p-3 mb-3" data-testid="po-landed-cost-breakdown">
+            <p className="font-semibold">Total landed cost</p>
+            <p className="font-mono text-lg font-bold">{costs.combinedCostCents === null ? "Incomplete" : money(costs.combinedCostCents)}</p>
+            <p className="text-xs text-muted-foreground">Supplier PO {money(costs.poAmountCents)} + shipment charges {money(costs.totalCents)}. Includes product, packaging and saved freight, duties and other charges.</p>
+          </div>
           <p>
             Saved and allocated shipment charges:{" "}
             <strong>{money(costs.totalCents)}</strong>

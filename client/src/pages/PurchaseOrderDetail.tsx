@@ -5,6 +5,9 @@ import { PoShipmentCostSummary } from "@/features/purchasing/PoShipmentCostSumma
 import { PoFinancialEvidence, usePoFinancialEvidence } from "@/features/purchasing/PoFinancialEvidence";
 import { usePoShipmentCosts } from "@/features/purchasing/use-po-shipment-costs";
 import { formatIntegerCents } from "@shared/utils/format-integer-cents";
+import { projectPoLineLandedCosts } from "@shared/procurement/po-line-landed-cost";
+import { PoLineLandedCost } from "@/features/purchasing/PoLineLandedCost";
+import { PurchaseCostOriginHistory } from "@/features/purchasing/PurchaseCostOriginHistory";
 import { poFinancialWorkflowSchema } from "@shared/procurement/po-financial-workflow";
 import { canonicalJson } from "@shared/utils/canonical-json";
 import { parseShipmentReceiptResolution, requiresReceiptUnitReview } from "@/lib/shipment-receipt-units";
@@ -842,7 +845,7 @@ function formatStoredLineQuote(line: {
   purchaseUom?: string | null;
   quotedUnitCostMills?: number | null;
   quotedTotalCents?: number | null;
-}): string {
+}): string | null {
   if (
     line.pricingBasis === "per_piece" &&
     line.quotedUnitCostMills != null
@@ -868,7 +871,7 @@ function formatStoredLineQuote(line: {
   ) {
     return "Stored quote is incomplete";
   }
-  return "Legacy price; quote basis unverified";
+  return null;
 }
 
 function createEmptyNewLine() {
@@ -1341,6 +1344,10 @@ export default function PurchaseOrderDetail() {
   }, null);
 
   const lines = po?.lines ?? [];
+  const landedCosts = projectPoLineLandedCosts({ poHeader: po, poLines: lines, costs: shipmentCosts.data });
+  const landedCostByLine = new Map(landedCosts.status === "complete"
+    ? landedCosts.lines.map(line => [line.purchaseOrderLineId, line]) : []);
+  const landedCurrency = shipmentCosts.data?.summary.currency ?? po?.currency ?? "USD";
   const history = historyData?.history ?? [];
   const receipts = receiptsData?.receipts ?? [];
   const isDraft = po?.status === "draft";
@@ -3170,7 +3177,7 @@ export default function PurchaseOrderDetail() {
         {/* Total — always read-only */}
         <Card data-testid="po-total-cost-summary-card">
           <CardContent className="p-3">
-            <div className="text-xs text-muted-foreground">Total cost</div>
+            <div className="text-xs text-muted-foreground">Total landed cost</div>
             <div className="font-mono font-bold text-lg">{costCardAmount(shipmentCosts.data?.totals.combinedCostCents)}</div>
             {shipmentCosts.isSuccess && <div className="text-xs text-muted-foreground mt-1">
               Supplier PO: {formatIntegerCents(shipmentCosts.data.summary.poAmountCents, shipmentCosts.data.summary.currency)}<br />
@@ -3298,6 +3305,13 @@ export default function PurchaseOrderDetail() {
 
         {/* ── Lines Tab ── */}
         <TabsContent value="lines" className="space-y-4">
+          {lines.length > 0 && <div className="text-xs text-muted-foreground" role="status">
+            {landedCosts.status === "complete"
+              ? <>Landed costs include the supplier line amount and its allocated shipment charges. Per-piece rates are rounded; line totals keep exact cents.
+                {landedCosts.poLevelAdjustmentCents !== 0 && <> PO-level charges or discounts of {formatIntegerCents(landedCosts.poLevelAdjustmentCents, landedCurrency)} are included in the PO total, separately from these lines.</>}</>
+              : shipmentCosts.isPending ? "Loading landed costs…" : landedCosts.reason}
+            {landedCosts.status === "unavailable" && !shipmentCosts.isPending && <Button variant="outline" size="sm" className="ml-2" onClick={() => void Promise.all([refetchPo(), shipmentCosts.refetch()])}>Reload costs</Button>}
+          </div>}
           {canEditLines && (
             <Button variant="outline" onClick={() => setShowAddLineDialog(true)} className="min-h-[44px]">
               <Plus className="h-4 w-4 mr-2" />
@@ -3372,12 +3386,17 @@ export default function PurchaseOrderDetail() {
                             onClick={() => canEditThisLine && startPricingEdit(line)}
                             title={canEditThisLine ? "Edit vendor quote and quantity" : undefined}
                           >
-                            @ {formatLineUnitCost(line)}/pc
+                            Product {formatLineUnitCost(line)}/pc
                           </span>
-                          <span className="font-medium">{formatCents(line.lineTotalCents)}</span>
+                          <span className="font-medium">Supplier {formatCents(line.lineTotalCents)}</span>
                         </div>
-                        <div className="mt-1 text-xs text-muted-foreground">
+                        {formatStoredLineQuote(line) && <div className="mt-1 text-xs text-muted-foreground">
                           Vendor quote: {formatStoredLineQuote(line)}
+                        </div>}
+                        <div className="mt-2 text-sm">
+                          <span className="text-xs text-muted-foreground">Total landed cost</span>
+                          <PoLineLandedCost line={landedCostByLine.get(line.id)} currency={landedCurrency} kind="total" supplierCents={line.lineTotalCents} />
+                          <PoLineLandedCost line={landedCostByLine.get(line.id)} currency={landedCurrency} kind="unit" />
                         </div>
                       </div>
                       {canEditThisLine && (
@@ -3414,8 +3433,8 @@ export default function PurchaseOrderDetail() {
                   <TableHead>Vendor SKU</TableHead>
                   <TableHead className="text-right">Ordered</TableHead>
                   <TableHead className="text-right">Received</TableHead>
-                  <TableHead className="text-right">Unit Cost</TableHead>
-                  <TableHead className="text-right">Line Total</TableHead>
+                  <TableHead className="text-right">Cost / piece</TableHead>
+                  <TableHead className="text-right">Total landed cost</TableHead>
                   <TableHead>Status</TableHead>
                   {canEditLines && <TableHead className="w-12"></TableHead>}
                 </TableRow>
@@ -3494,13 +3513,14 @@ export default function PurchaseOrderDetail() {
                           onClick={() => canEditThisLine && startPricingEdit(line)}
                           title={canEditThisLine ? "Edit vendor quote and quantity" : undefined}
                         >
-                          {formatLineUnitCost(line)}
+                          <span className="font-sans text-xs text-muted-foreground">Product </span>{formatLineUnitCost(line)}
                         </span>
-                        <div className="text-[11px] font-sans text-muted-foreground">
+                        {formatStoredLineQuote(line) && <div className="text-[11px] font-sans text-muted-foreground">
                           {formatStoredLineQuote(line)}
-                        </div>
+                        </div>}
+                        <PoLineLandedCost line={landedCostByLine.get(line.id)} currency={landedCurrency} kind="unit" />
                       </TableCell>
-                      <TableCell className="text-right font-mono font-medium">{formatCents(line.lineTotalCents)}</TableCell>
+                      <TableCell className="text-right"><PoLineLandedCost line={landedCostByLine.get(line.id)} currency={landedCurrency} kind="total" supplierCents={line.lineTotalCents} /></TableCell>
                       <TableCell>
                         <Badge variant="outline" className="text-xs">{line.status}</Badge>
                       </TableCell>
@@ -3931,6 +3951,9 @@ export default function PurchaseOrderDetail() {
         </TabsContent>
 
         <TabsContent value="history" className="space-y-4">
+          {shipmentCosts.isPending && <p role="status">Loading cost approval history…</p>}
+          {shipmentCosts.isError && <p role="alert">Cost approval history could not be loaded. <Button variant="outline" onClick={() => void shipmentCosts.refetch()}>Reload cost history</Button></p>}
+          {shipmentCosts.data?.supplierCosts && <PurchaseCostOriginHistory status={shipmentCosts.data.supplierCosts} />}
           {history.length === 0 ? (
             <Card>
               <CardContent className="p-4 text-center text-muted-foreground">
@@ -4138,7 +4161,7 @@ export default function PurchaseOrderDetail() {
                   {editingPricingLine.productName ? ` — ${editingPricingLine.productName}` : ""}
                 </div>
                 <div className="mt-1 text-xs text-muted-foreground">
-                  Stored vendor quote: {formatStoredLineQuote(editingPricingLine)}
+                  Stored vendor quote: {formatStoredLineQuote(editingPricingLine) ?? "Not recorded"}
                 </div>
               </div>
 

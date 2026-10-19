@@ -29,6 +29,8 @@ export const poShipmentCostsSchema = z
       z
         .object({
           lineId: id,
+          // Optional while an older server is still serving a rolling deployment.
+          purchaseOrderLineId: id.nullable().optional(),
           shipmentId: id,
           shipmentNumber: z.string().nullable(),
           shipmentStatus: z.string(),

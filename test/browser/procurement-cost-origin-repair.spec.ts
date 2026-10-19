@@ -273,11 +273,81 @@ test("admin repairs origin with visible before/after and sees the approval acros
       .getByRole("button", { name: "Close review", exact: true })
       .click();
   }
+  await page.goto("/purchase-orders/17?tab=history");
+  const approvals = page.getByRole("region", {
+    name: "Receipt cost repair approvals",
+  });
+  await expect(approvals).toContainText("Test Administrator");
+  await expect(approvals).toContainText(
+    "Supplier and receipt verified; goods were sold.",
+  );
+  await expect(approvals.getByRole("table")).toContainText("25.00");
+  await expect(approvals.getByRole("table")).toContainText("Before");
+  await expect(approvals.getByRole("table")).toContainText("After");
+  await page.goto("/receiving?open=31");
+  const receiptCosts = page.getByRole("region", {
+    name: "Receipt supplier cost status",
+  });
+  await expect(receiptCosts).toContainText("Product: Posted");
+  await expect(receiptCosts).toContainText("Packaging: Posted");
+  await expect(receiptCosts).toContainText("Test Administrator");
+  await expect(
+    receiptCosts.getByRole("button", {
+      name: "Repair historical cost origin",
+      exact: true,
+    }),
+  ).toHaveCount(0);
+  await receiptCosts
+    .getByRole("button", { name: "View origin repair and approval" })
+    .click();
+  await expect(page.getByRole("dialog").last()).toContainText(
+    "Test Administrator",
+  );
+  await page.getByRole("button", { name: "Close review", exact: true }).click();
+  // Another receipt on this shipment must not inherit this receipt's approval.
+  await page.goto("/receiving?open=32");
+  await expect(receiptCosts).toContainText(
+    "No supplier cost lines are linked to this receipt.",
+  );
+  await expect(
+    receiptCosts.getByText("Product: Posted", { exact: true }),
+  ).toHaveCount(0);
   await page.goto("/purchasing");
   await expect(
     page.getByText("Receipt cost origin is missing.", { exact: true }),
   ).toHaveCount(0);
   expect(commands).toHaveLength(1);
+  expect(failures).toEqual([]);
+});
+
+test("receipt cost read failures stay explicit and can be retried", async ({
+  page,
+}) => {
+  const { failures } = await install(page);
+  await page.getByRole("button", { name: "Close review", exact: true }).click();
+  let failed = true;
+  await page.route("**/api/inbound-shipments/42/cost-review", (route) =>
+    failed
+      ? route.fulfill({ status: 503, json: { error: "Unavailable" } })
+      : route.fallback(),
+  );
+  await page.goto("/receiving?open=31");
+  const receiptCosts = page.getByRole("region", {
+    name: "Receipt supplier cost status",
+  });
+  await expect(receiptCosts.getByRole("alert")).toContainText(
+    "Current receipt costs could not be loaded.",
+  );
+  await expect(
+    receiptCosts.getByText("Product: Posted", { exact: true }),
+  ).toHaveCount(0);
+  failed = false;
+  await receiptCosts
+    .getByRole("button", { name: "Reload receipt costs" })
+    .click();
+  await expect(
+    receiptCosts.getByRole("button", { name: "Repair historical cost origin" }),
+  ).toBeVisible();
   expect(failures).toEqual([]);
 });
 test("read-only user sees the actual admin requirement", async ({ page }) => {
