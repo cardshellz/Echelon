@@ -208,6 +208,10 @@ async function install(page: Page, admin = true, loseResponse = false) {
       return route.fulfill({ json: postedHealth() });
     if (path === "/api/purchasing/dashboard")
       return route.fulfill({ json: emptyDashboard });
+    // Unrelated dashboard reads must not inherit the generic [] fixture shape.
+    if (["/api/procurement/health", "/api/purchasing/pipeline", "/api/purchasing/supplier-setup-gaps",
+      "/api/purchasing/forecast-input-gaps", "/api/purchasing/auto-draft/stale-pos"].includes(path))
+      return route.fulfill({ status: 503, json: { error: "Unrelated synthetic widget unavailable" } });
     return route.fallback();
   });
   await page.goto("/purchase-orders/17?tab=lifecycle");
@@ -220,6 +224,9 @@ async function install(page: Page, admin = true, loseResponse = false) {
 test("admin repairs origin with visible before/after and sees the approval across PO, both shipments and receipt history", async ({
   page,
 }, info) => {
+  // This single approval journey reloads seven screens. Keep each assertion's
+  // timeout unchanged while allowing the full journey to finish on CI workers.
+  test.slow();
   const { failures, commands } = await install(page);
   const dialog = page.getByRole("dialog");
   await expect(page.getByLabel("Pieces per case")).toHaveValue("50");
@@ -313,7 +320,12 @@ test("admin repairs origin with visible before/after and sees the approval acros
   await expect(
     receiptCosts.getByText("Product: Posted", { exact: true }),
   ).toHaveCount(0);
+  const healthLoaded = page.waitForResponse(response =>
+    new URL(response.url()).pathname === "/api/procurement/landed-cost-health",
+  );
   await page.goto("/purchasing");
+  expect(await (await healthLoaded).json()).toEqual(postedHealth());
+  await expect(page.getByRole("heading", { name: "Purchasing Dashboard", exact: true })).toBeVisible();
   await expect(
     page.getByText("Receipt cost origin is missing.", { exact: true }),
   ).toHaveCount(0);

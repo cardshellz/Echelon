@@ -213,8 +213,7 @@ export class PostgresInventoryPublicationOutboxRepository {
         await supersedeStaleClaim(client, claim, ownsLease);
         return { status: "superseded" };
       }
-      if (claim.publicationPhase === "full" && claim.providerKey === "ebay"
-        && claim.destinationKind === "channel_connection"
+      if (claim.publicationPhase === "full"
         && await supersedeStaleClaim(client, claim, true, true)) return { status: "superseded" };
       return { status: "current", value: await work() };
     } catch (error) {
@@ -437,14 +436,21 @@ async function supersedeStaleClaim(
       }, { productId: product.product_id, productVariantIds: [claim.productVariantId] });
       const selected = selection.variants[0];
       const evidence = selected?.retirementEvidence;
-      if (selected?.action !== "none" || selected.blockers.length || !evidence
-        || claim.providerScopeType !== "account" || evidence.externalAccountId !== claim.externalScopeId
-        || evidence.externalSku !== claim.externalInventoryItemId
+      if (selected?.action === "none" && selected.catalogArchived && selected.blockers.length === 0) {
+        // Supersede the old quantity intent, never ACK a provider write. The
+        // listing lifecycle independently owns removal and its durable proof.
+        errorClass = "SUPERSEDED_BY_CATALOG_ARCHIVE";
+        errorMessage = "Catalog archived this variant. Its obsolete stock request was cancelled; listing removal is tracked separately.";
+      } else {
+        if (selected?.action !== "none" || selected.blockers.length || !evidence
+        || (claim.providerScopeType === "account" && evidence.externalAccountId !== claim.externalScopeId)
+        || (evidence.externalInventoryItemId ?? evidence.externalSku) !== claim.externalInventoryItemId
         || (claim.externalSku !== null && evidence.externalSku !== claim.externalSku)) {
         await client.query("ROLLBACK"); return false;
       }
-      errorClass = "SUPERSEDED_BY_VERIFIED_WITHDRAWAL";
-      errorMessage = `Withdrawal ${evidence.operationId} verified removal of offer ${evidence.externalOfferId} from listing ${evidence.externalListingId}; no provider request was made for this attempt.`;
+        errorClass = "SUPERSEDED_BY_VERIFIED_WITHDRAWAL";
+        errorMessage = `Listing lifecycle ${evidence.operationId} verified retirement of SKU ${evidence.externalSku}; no provider request was made for this attempt.`;
+      }
     }
     await client.query(
       `INSERT INTO inventory.inventory_publication_attempts (

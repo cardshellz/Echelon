@@ -86,11 +86,24 @@ const disposable = process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true";
     expect(await latest()).toMatchObject({ desired_quantity: "0" });
   });
 
-  it("saves current zero duty for a selected variant that becomes inactive", async () => {
+  it("hands archived removal to Listings without creating another quantity write, and blocks stale positive admission", async () => {
     await worker().processDue();
     await database.pool.query("UPDATE catalog.product_variants SET is_active=false WHERE id=101");
     expect(await worker().processDue()).toEqual({ planned: 1, blocked: 0, skipped: 0 });
-    expect(await latest()).toMatchObject({ desired_quantity: "0" });
+    expect(await latest()).toMatchObject({ desired_quantity: "17" });
+    now = (await database.pool.query<{ now: Date }>("SELECT clock_timestamp() AS now")).rows[0].now;
+    const outbox = new PostgresInventoryPublicationOutboxRepository(database.pool);
+    const claim = (await outbox.claimDue({ batchSize: 25, leaseSeconds: 120, leaseToken: "archived-positive", now }))
+      .find(row => row.publicationTargetId === 2)!;
+    const send = vi.fn(async () => undefined);
+    await expect(new PostgresQuantityPublicationAdmission(database.pool, () => now).runOutbox(claim, send))
+      .rejects.toMatchObject({ code: "PUBLICATION_SELECTION_CHANGED" });
+    expect(send).not.toHaveBeenCalled();
+    expect(await outbox.runIfCurrent(claim, send)).toEqual({ status: "superseded" });
+    expect(send).not.toHaveBeenCalled();
+    expect((await database.pool.query(`SELECT state,last_error_class FROM inventory.inventory_publication_outbox WHERE id=$1`, [claim.outboxId])).rows[0])
+      .toEqual({ state: "superseded", last_error_class: "SUPERSEDED_BY_CATALOG_ARCHIVE" });
+    expect((await database.pool.query(`SELECT count(*)::int AS count FROM inventory.inventory_publication_readbacks WHERE outbox_id=$1`, [claim.outboxId])).rows[0].count).toBe(0);
   });
 
   it("does not silently authorize or omit a selected feed whose exact canonical mapping is missing", async () => {

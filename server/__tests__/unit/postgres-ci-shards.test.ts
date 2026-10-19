@@ -160,6 +160,7 @@ describe("PostgreSQL CI coverage and isolation", () => {
       "server/modules/channels/__tests__/integration/ebay-publication-stock.integration.test.ts",
       "server/modules/inventory-planning/__tests__/integration/ebay-publication-readiness.integration.test.ts",
       "server/modules/inventory-planning/__tests__/integration/ebay-listing-preparation-scope.integration.test.ts",
+      "server/modules/inventory-planning/__tests__/integration/ebay-archived-group-admission.integration.test.ts",
       "server/modules/inventory-planning/__tests__/integration/ebay-listing-preparation-scope-authority.integration.test.ts",
       "server/modules/inventory-planning/__tests__/integration/ebay-publication-preflight.integration.test.ts",
       "server/modules/inventory-planning/__tests__/integration/ebay-publication-rejection.integration.test.ts",
@@ -170,6 +171,7 @@ describe("PostgreSQL CI coverage and isolation", () => {
       "server/modules/dropship/__tests__/integration/dropship-ebay-category-rules.integration.test.ts",
       "server/modules/procurement/__tests__/integration/supplier-po-document.integration.test.ts",
       "server/modules/marketplace-listings/__tests__/integration/listing-lifecycle.integration.test.ts",
+      "server/modules/marketplace-listings/__tests__/integration/listing-member-lifecycle.integration.test.ts",
       "server/modules/marketplace-listings/__tests__/integration/listing-presence.integration.test.ts",
       "server/modules/dropship/__tests__/integration/dropship-listing-setting-writes.integration.test.ts",
     ];

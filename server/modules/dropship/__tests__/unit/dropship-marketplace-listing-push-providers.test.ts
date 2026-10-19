@@ -425,7 +425,9 @@ describe("dropship marketplace listing push providers", () => {
       "GET", "GET", "GET", "GET", "GET", "POST", "GET", "GET", "DELETE",
       "GET", "GET", "PUT", "PUT", "PUT", "PUT", "PUT", "GET", "GET", "POST",
     ]);
-    expect(quantityAdmission.group).toHaveBeenLastCalledWith("CATALOG-GROUP", ["CATALOG-KEEP", "CATALOG-NEW"], expect.any(Function));
+    // Publishing the rebuilt group cannot use the unchanged-group maintenance
+    // exception: every member still requires canonical quantity admission.
+    expect(quantityAdmission.group).toHaveBeenLastCalledWith("CATALOG-GROUP", ["CATALOG-KEEP", "CATALOG-NEW"], expect.any(Function), undefined);
     expect(quantityAdmission.reducing.mock.calls).toEqual([
       ["group:CATALOG-GROUP", expect.any(Function), ["CATALOG-KEEP", "CATALOG-STALE"]],
       ["group:CATALOG-GROUP", expect.any(Function), ["CATALOG-KEEP", "CATALOG-STALE"]],

@@ -142,7 +142,7 @@ export class PgDropshipMarketplaceCredentialRepository implements DropshipMarket
   private readonly ebayRefreshLockTimeoutMs: number;
 
   constructor(
-    private readonly dbPool: Pool = defaultPool,
+    private readonly dbPool: Pick<Pool, "connect"> = defaultPool,
     options: DropshipMarketplaceCredentialRepositoryOptions = {},
   ) {
     this.tokenCipher = options.tokenCipher ?? new LazyEnvDropshipMarketplaceTokenCipher();

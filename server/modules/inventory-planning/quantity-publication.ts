@@ -2,6 +2,7 @@
 // existing inventory owner; they do not write inventory's request journal.
 export {
   createChannelEbayQuantityRequestAdmission,
+  createDropshipEbayQuantityRequestAdmission,
   quantityProviderResponseRecovery,
   ebayPublicationRejectionReader,
   automaticEbayPublicationRecovery,

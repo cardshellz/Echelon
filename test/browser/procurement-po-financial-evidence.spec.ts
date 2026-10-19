@@ -93,7 +93,7 @@ test("shared partial settlement stays unknown and directs review even when cache
   await expect(amountField(page, "Paid for this PO")).toHaveText("Paid for this POUnknown");
   await expect(amountField(page, "Outstanding for this PO")).toHaveText("Outstanding for this POUnknown");
   await expect(financialCard(page)).not.toContainText("$0.00");
-  await expect(page.getByText("All done — PO fully received and paid.", { exact: true })).toHaveCount(0);
+  await expect(page.getByText("PO fully received and paid. Review the cost summary for any remaining cost follow-ups.", { exact: true })).toHaveCount(0);
   await expect(page.getByRole("heading", { name: "Review linked invoices", exact: true })).toBeVisible();
   await expect(page.getByText("Invoice and payment are complete.", { exact: true })).toHaveCount(0);
   await financialCard(page).screenshot({ path: info.outputPath("po-shared-payment-unknown.png") });
@@ -144,7 +144,7 @@ test("loading never falls back to cached totals", async ({ page }) => {
   await expect(page.getByText("$9,900.00", { exact: false })).toHaveCount(0);
   await expect(page.getByRole("heading", { name: "Loading financial evidence…", exact: true })).toBeVisible();
   await expect(page.getByText("Invoice and payment are complete.", { exact: true })).toHaveCount(0);
-  await expect(page.getByText("All done — PO fully received and paid.", { exact: true })).toHaveCount(0);
+  await expect(page.getByText("PO fully received and paid. Review the cost summary for any remaining cost follow-ups.", { exact: true })).toHaveCount(0);
   release();
   await expect(amountField(page, "Paid for this PO")).toContainText("$40.00");
   expect(failures).toEqual([]);
@@ -161,7 +161,7 @@ test("failed evidence read offers a retry without displaying stale cached money"
   await expect(financialCard(page).locator("dd")).toHaveCount(0);
   await expect(page.getByRole("heading", { name: "Reload financial evidence", exact: true })).toBeVisible();
   await expect(page.getByText("Invoice and payment are complete.", { exact: true })).toHaveCount(0);
-  await expect(page.getByText("All done — PO fully received and paid.", { exact: true })).toHaveCount(0);
+  await expect(page.getByText("PO fully received and paid. Review the cost summary for any remaining cost follow-ups.", { exact: true })).toHaveCount(0);
   available = true;
   await financialCard(page).getByRole("button", { name: "Reload financial evidence", exact: true }).click();
   await expect(amountField(page, "Paid for this PO")).toContainText("$40.00");
@@ -290,7 +290,7 @@ for (const scenario of [
     await page.goto("/purchase-orders/17?tab=lines");
     await expect(page.getByRole("heading", { name: scenario.label, exact: true })).toBeVisible();
     await expect(page.getByText(scenario.detail, { exact: true }).first()).toBeVisible();
-    await expect(page.getByText("All done — PO fully received and paid.", { exact: true })).toHaveCount(0);
+    await expect(page.getByText("PO fully received and paid. Review the cost summary for any remaining cost follow-ups.", { exact: true })).toHaveCount(0);
     await page.getByRole("region", { name: "Auto-draft next action", exact: true }).getByRole("button", { name: scenario.label, exact: true }).click();
     await expect(page.getByRole("tab", { name: "Invoices", exact: true })).toHaveAttribute("data-state", "active");
     await expect(page.getByRole("dialog", { name: "Record invoice payment", exact: true })).toHaveCount(0);
@@ -314,7 +314,7 @@ test("a zero-balance unapproved invoice cannot claim completion", async ({ page 
   await page.goto("/purchase-orders/17?tab=lines");
   await expect(amountField(page, "Outstanding for this PO")).toHaveText("Outstanding for this PO$0.00");
   await expect(page.getByRole("heading", { name: "Review invoice approval", exact: true })).toBeVisible();
-  await expect(page.getByText("All done — PO fully received and paid.", { exact: true })).toHaveCount(0);
+  await expect(page.getByText("PO fully received and paid. Review the cost summary for any remaining cost follow-ups.", { exact: true })).toHaveCount(0);
   expect(failures).toEqual([]);
 });
 
@@ -323,7 +323,7 @@ test("verified settled workflow permits completion independently of the cached s
   const failures = await installFinancialFixtures(page, workflow.evidence, { autoDraft: true, workflow });
   await page.goto("/purchase-orders/17?tab=lines");
   await expect(page.getByRole("heading", { name: "No next action", exact: true })).toBeVisible();
-  await expect(page.getByText("All done — PO fully received and paid.", { exact: true })).toBeVisible();
+  await expect(page.getByText("PO fully received and paid. Review the cost summary for any remaining cost follow-ups.", { exact: true })).toBeVisible();
   expect(failures).toEqual([]);
 });
 
@@ -333,7 +333,7 @@ for (const currentState of ["payment_due", "unbilled"] as const) {
     const failures = await installFinancialFixtures(page, financialWorkflowFixture(17, currentState).evidence, { paidStatus: true, autoDraft: true, workflow });
     await page.goto("/purchase-orders/17?tab=lines");
     await expect(page.getByRole("heading", { name: "Reload financial evidence", exact: true })).toBeVisible();
-    await expect(page.getByText("All done — PO fully received and paid.", { exact: true })).toHaveCount(0);
+    await expect(page.getByText("PO fully received and paid. Review the cost summary for any remaining cost follow-ups.", { exact: true })).toHaveCount(0);
     await expect(page.getByText("Invoice and payment are complete.", { exact: true })).toHaveCount(0);
     expect(failures).toEqual([]);
   });
@@ -369,11 +369,11 @@ test("a refreshed amount read cannot revive a stale completed workflow when the 
   });
   await page.goBack();
   await expect(page.getByRole("heading", { name: "Loading financial evidence…", exact: true })).toBeVisible();
-  await expect(page.getByText("All done — PO fully received and paid.", { exact: true })).toHaveCount(0);
+  await expect(page.getByText("PO fully received and paid. Review the cost summary for any remaining cost follow-ups.", { exact: true })).toHaveCount(0);
   release();
   const guidance = page.getByRole("region", { name: "Auto-draft next action", exact: true });
   await expect(guidance.getByRole("heading", { name: "Reload financial evidence", exact: true })).toBeVisible();
-  await expect(page.getByText("All done — PO fully received and paid.", { exact: true })).toHaveCount(0);
+  await expect(page.getByText("PO fully received and paid. Review the cost summary for any remaining cost follow-ups.", { exact: true })).toHaveCount(0);
   unavailable = false;
   await guidance.getByRole("button", { name: "Reload financial evidence", exact: true }).click();
   await expect(guidance.getByRole("heading", { name: "No next action", exact: true })).toBeVisible();

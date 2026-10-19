@@ -8,6 +8,17 @@ import { ebayReconciliationCommandKey } from "../domain/ebay-automatic-publicati
 import { quantityPublicationScopeSchema } from "../domain/quantity-publication-admission";
 import { createTransactionScopedInventoryPublicationService, LATEST_PUBLICATION_ROW_SQL } from "./inventory-availability-runtime-publication.repository";
 import { reconciliationFailure, withReconciliationTransaction } from "./ebay-publication-reconciliation.persistence";
+import { readChannelStockSelection } from "../../channels/channel-stock-selection";
+
+// Only known archived catalog members suspend a saved watch. A missing catalog
+// identity remains actionable, and reactivation makes this same watch due again.
+const WATCH_MEMBERS_ARCHIVED_SQL = `EXISTS(SELECT 1 FROM jsonb_array_elements(watch.scopes) member
+    WHERE member->>'productVariantId' IS NOT NULL)
+  AND NOT EXISTS(SELECT 1 FROM jsonb_array_elements(watch.scopes) member
+    WHERE member->>'productVariantId' IS NOT NULL AND NOT EXISTS(
+      SELECT 1 FROM catalog.product_variants v JOIN catalog.products p ON p.id=v.product_id
+      WHERE v.id=(member->>'productVariantId')::integer AND v.product_id=watch.product_id
+        AND (NOT v.is_active OR NOT p.is_active OR p.status='archived')))`;
 
 const BACKOFF_BASE_MS = 60_000;
 // These conditions are retried by the saved watch; they require no user decision.
@@ -29,8 +40,9 @@ export class PostgresEbayPublicationReconciliationRepository implements EbayPubl
     z.number().int().min(1).max(100).parse(limit); z.string().uuid().parse(leaseToken); z.date().parse(now);
     return withReconciliationTransaction(this.pool, async client => {
       const rows = (await client.query<WatchRow>(`WITH due AS (
-        SELECT id FROM inventory.ebay_publication_reconciliation_watches WHERE next_check_at<=$1
-          AND (lease_token IS NULL OR lease_expires_at<=$1) ORDER BY next_check_at,id FOR UPDATE SKIP LOCKED LIMIT $2)
+        SELECT id FROM inventory.ebay_publication_reconciliation_watches watch WHERE next_check_at<=$1
+          AND (lease_token IS NULL OR lease_expires_at<=$1) AND NOT (${WATCH_MEMBERS_ARCHIVED_SQL})
+          ORDER BY next_check_at,id FOR UPDATE SKIP LOCKED LIMIT $2)
         UPDATE inventory.ebay_publication_reconciliation_watches watch SET lease_token=$3,lease_expires_at=$4,
           attempts=watch.attempts+1,updated_at=$1 FROM due WHERE watch.id=due.id
         RETURNING watch.id::text,watch.revision::text,watch.cycle::text,watch.attempts,watch.lease_token,
@@ -135,11 +147,12 @@ export class PostgresEbayPublicationReconciliationRepository implements EbayPubl
     if (ids.length === 0) return Promise.resolve({});
     return withReconciliationTransaction(this.pool, async client => {
       const rows = (await client.query<{ job_id: string; state: EbayPublicationReconciliationStatus["state"]; checked_at: Date | null;
-        next_check_at: Date; last_error_code: string | null; last_error_message: string | null; still_current: boolean }>(
+        next_check_at: Date; last_error_code: string | null; last_error_message: string | null; still_current: boolean; members_archived: boolean }>(
         `WITH associations AS (
            SELECT sync_job_id AS job_id,watch_id FROM inventory.ebay_automatic_publication_recoveries WHERE sync_job_id=ANY($1::uuid[])
            UNION SELECT content_job_id AS job_id,watch_id FROM inventory.ebay_publication_reconciliation_cycles WHERE content_job_id=ANY($1::uuid[])
          ) SELECT association.job_id::text,watch.state,watch.checked_at,watch.next_check_at,watch.last_error_code,watch.last_error_message,
+          (${WATCH_MEMBERS_ARCHIVED_SQL}) AS members_archived,
           (cardinality(watch.verified_outbox_ids)>0 AND NOT EXISTS(
             SELECT 1 FROM unnest(watch.verified_outbox_ids) saved(outbox_id)
             LEFT JOIN inventory.inventory_publication_outbox o ON o.id=saved.outbox_id
@@ -160,22 +173,28 @@ export class PostgresEbayPublicationReconciliationRepository implements EbayPubl
          FROM associations association JOIN inventory.ebay_publication_reconciliation_watches watch ON watch.id=association.watch_id
          ORDER BY association.job_id,watch.id`, [ids])).rows;
       const statuses: Record<string, EbayPublicationReconciliationStatus> = {};
-      const priority = { verified: 0, pending: 1, needs_attention: 2 } as const;
+      const priority = { inactive: -1, verified: 0, pending: 1, needs_attention: 2 } as const;
       for (const row of rows) {
         const stale = row.state === "verified" && !row.still_current;
         const retrying = row.state === "needs_attention" && row.last_error_code !== null && RETRYABLE_RECONCILIATION_CODES.has(row.last_error_code);
-        const status: EbayPublicationReconciliationStatus = { state: stale || retrying ? "pending" : row.state, checkedAt: row.checked_at?.toISOString() ?? null,
+        const status: EbayPublicationReconciliationStatus = row.members_archived ? {
+          state: "inactive", checkedAt: null, nextCheckAt: null, code: null,
+          message: "All variants in this saved stock check are archived. Listing removal is tracked separately.",
+        } : { state: stale || retrying ? "pending" : row.state, checkedAt: row.checked_at?.toISOString() ?? null,
           nextCheckAt: row.next_check_at.toISOString(), code: stale ? "PUBLICATION_RECONCILIATION_PLAN_CHANGED" : row.last_error_code,
           message: stale ? "Current inventory changed after the last stock check. The saved recurring check will verify its new quantity." : row.last_error_message };
         const previous = statuses[row.job_id];
         if (!previous) { statuses[row.job_id] = status; continue; }
+        if (previous.state === "inactive") { statuses[row.job_id] = status; continue; }
+        if (status.state === "inactive") continue;
         // One saved job may carry multiple exact membership revisions. Keep
         // every obligation visible; ties use the oldest watch's diagnostic.
         const decisive = priority[status.state] > priority[previous.state] ? status : previous;
         statuses[row.job_id] = { ...decisive,
           checkedAt: previous.checkedAt === null || status.checkedAt === null ? null
             : previous.checkedAt < status.checkedAt ? previous.checkedAt : status.checkedAt,
-          nextCheckAt: previous.nextCheckAt < status.nextCheckAt ? previous.nextCheckAt : status.nextCheckAt };
+          nextCheckAt: previous.nextCheckAt === null ? status.nextCheckAt : status.nextCheckAt === null ? previous.nextCheckAt
+            : previous.nextCheckAt < status.nextCheckAt ? previous.nextCheckAt : status.nextCheckAt };
       }
       return statuses;
     });
@@ -190,20 +209,29 @@ export class PostgresEbayPublicationReconciliationRepository implements EbayPubl
   }
 
   private async currentPlan(client: PoolClient, claim: EbayReconciliationClaim, reconciliationObservationIds: readonly string[] = []): Promise<EbayReconciliationTarget[]> {
-    const channels = (await client.query<{ channel_id: number }>(`SELECT DISTINCT channel_id
+    const channels = (await client.query<{ channel_id: number; id: number }>(`SELECT channel_id,id
       FROM inventory.inventory_publication_targets WHERE channel_connection_id=$1 AND external_scope_id=$2
         AND provider_scope_type='account' AND state='live' AND publication_authority='echelon'`,
     [claim.connectionId, claim.accountId])).rows;
     if (channels.length !== 1) throw reconciliationFailure("PUBLICATION_RECONCILIATION_SCOPE_CHANGED",
       "The saved recovery's exact eBay connection is no longer an active canonical publication target.");
+    const memberScopes = claim.scopes.filter(scope => scope.productVariantId !== null);
+    const selection = await readChannelStockSelection(client, { channelId: channels[0]!.channel_id,
+      channelConnectionId: claim.connectionId, productId: claim.productId,
+      productVariantIds: [...new Set(memberScopes.map(scope => scope.productVariantId!))] });
+    const activeScopes = memberScopes.filter(scope => !selection.variants.find(member => member.productVariantId === scope.productVariantId)?.catalogArchived);
+    if (!activeScopes.length) throw reconciliationFailure("PUBLICATION_RECONCILIATION_SCOPE_CHANGED",
+      "All members of this stock check are archived. Their listing removal is tracked separately.");
     const result = await createTransactionScopedInventoryPublicationService(client, {
       channelId: channels[0]!.channel_id, reconciliationObservationIds,
     }).publishProduct({
       productId: claim.productId, dryRun: false, triggeredBy: "ebay_unknown_request_reconciliation",
+      publicationTargetId: channels[0]!.id,
+      productVariantIds: [...new Set(activeScopes.map(scope => scope.productVariantId!))],
     }, async () => { throw reconciliationFailure("PUBLICATION_AUTHORITY_CHANGED", "This stock check requires the current canonical inventory owner."); });
     if (result.authority !== "canonical") throw reconciliationFailure("PUBLICATION_AUTHORITY_CHANGED", "This stock check requires the current canonical inventory owner.");
     const targets: EbayReconciliationTarget[] = [];
-    for (const scope of claim.scopes.filter(scope => scope.productVariantId !== null)) {
+    for (const scope of activeScopes) {
       const candidates = result.publication.rows.filter(row => row.productVariantId === scope.productVariantId
         && row.destinationKind === "channel_connection" && row.channelConnectionId === claim.connectionId
         && row.providerKey === "ebay" && row.providerScopeType === "account" && row.externalScopeId === claim.accountId

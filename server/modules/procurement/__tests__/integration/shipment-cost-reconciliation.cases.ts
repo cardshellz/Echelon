@@ -18,6 +18,8 @@ import { readPoShipmentCosts } from "../../po-shipment-cost-summary.repository";
 import { inventoryCostReportEventSchema } from "@shared/procurement/cost-report-delivery";
 import { reconciliationPreview, reconciliationResultSchema, type ReconciliationRequest } from "@shared/procurement/cost-reconciliation";
 import { readUnallocatedLotCosts } from "../../../inventory/infrastructure/cost-quantity.repository";
+import { prepareShipmentCostRevisions, recordShipmentCostRevisions } from "../../shipment-cost-application.service";
+import { recordCostRevision } from "../../cost-source-revision.repository";
 
 /** Runs inside the real receiving/AP/freight fixture with synthetic records. */
 export function registerShipmentReconciliationCases(fixture: {
@@ -73,6 +75,69 @@ export function registerShipmentReconciliationCases(fixture: {
     };
   }
   const postings = async () => (await query("SELECT * FROM inventory.cost_reconciliation_postings ORDER BY id")).rows;
+
+  it.each([false, true])("keeps pre-link-field approvals posted across every reader and retry (missing origin: %s)", async missing => {
+    const amount = missing ? 5000 : 335007;
+    await query(`INSERT INTO procurement.vendor_invoices(id,invoice_number,vendor_id,inbound_shipment_id,status,invoiced_amount_cents,balance_cents)
+      VALUES(73,'SYNTHETIC-FREIGHT-INVOICE',5,1,'approved',$1,$1)`, [amount]);
+    await query(`INSERT INTO procurement.vendor_invoice_lines(id,vendor_invoice_id,line_number,freight_cost_id,qty_invoiced,unit_cost_cents,line_total_cents)
+      VALUES(74,73,1,31,1,$1,$1)`, [amount]);
+    await query("UPDATE procurement.inbound_freight_costs SET vendor_id=5,vendor_invoice_id=73 WHERE id=31");
+    await prepare(missing);
+    // Reproduce the immutable source format that existed before the reader
+    // selected the two nullable product-link columns. Do not modify old rows.
+    const legacyRevision = await fixture.database().transaction(async tx => {
+      const { proposals } = await prepareShipmentCostRevisions(tx, 1);
+      const proposal = structuredClone(proposals[0]);
+      const evidence = proposal.sourceEvidence as { invoices: Array<Record<string, unknown>> };
+      for (const invoice of evidence.invoices) {
+        delete invoice.purchase_order_line_id;
+        delete invoice.product_variant_id;
+      }
+      proposal.input.sources = proposal.input.sources.map(source => source.kind === "vendor_invoice_line"
+        ? { ...source, version: costFingerprint(evidence.invoices.find(row => row.id === source.lineId && row.vendor_invoice_id === source.documentId)) }
+        : source);
+      return recordCostRevision(tx, proposal.input, "admin-user", fixture.at, proposal.sourceEvidence);
+    });
+    await fixture.updateCosts();
+    const review = await context();
+    const request = { sourceVersion: review.sourceVersion, destination: "historical_cogs" as const,
+      reason: "Supplier evidence and historical sold goods checked by administrator." };
+    expect(await post(request)).toMatchObject({ httpStatus: 200, body: { state: { status: "posted" } } });
+    await query("UPDATE procurement.purchase_orders SET status='closed' WHERE id=10");
+    const physical = await fixture.physicalSnapshot(), approvedPostings = await postings();
+    const approvals = (await query("SELECT * FROM inventory.cost_reconciliation_approvals ORDER BY id")).rows;
+    const revisions = (await query("SELECT * FROM procurement.cost_source_revisions ORDER BY id")).rows;
+    const currentContext = await context();
+    expect(currentContext).toMatchObject({ blockedReason: null, state: { status: "posted", unassignedMills: 0 } });
+    expect(await shipmentLinePosted()).toBe(true);
+    expect((await readPoShipmentCosts(fixture.database(), 10))?.summary).toMatchObject({ reviewLines: 0, inventoryCosting: "applied" });
+    expect((await fixture.costHealth()).items.filter(item => item.shipmentId === 1).every(item =>
+      item.action !== "push_costs_to_lots" && !["posting_review_required", "finalized_not_pushed", "stale_provisional_lots"].includes(item.type))).toBe(true);
+    expect((await history()).revisions.find(revision => revision.id === legacyRevision.id)?.currentResolution)
+      .toMatchObject({ destination: "historical_cogs", postings: [expect.objectContaining({ reason: request.reason })] });
+    // Reads and repeated owner commands preserve the revision, approval and
+    // money. No second approval or compensating posting clears this regression.
+    expect(await fixture.database().transaction(tx => recordShipmentCostRevisions(tx, 1, "admin-user", fixture.at)))
+      .toMatchObject({ revisions: [{ id: legacyRevision.id }] });
+    await fixture.updateCosts();
+    await fixture.updateCosts();
+    expect(await postings()).toEqual(approvedPostings);
+    expect((await query("SELECT * FROM inventory.cost_reconciliation_approvals ORDER BY id")).rows).toEqual(approvals);
+    expect((await query("SELECT * FROM procurement.cost_source_revisions ORDER BY id")).rows).toEqual(revisions);
+    expect(await fixture.physicalSnapshot()).toEqual(physical);
+    expect((await query("SELECT status FROM procurement.purchase_orders WHERE id=10")).rows[0].status).toBe("closed");
+
+    // An actual product link is not equivalent to an absent/null link. Every
+    // consumer must still surface the conflicting billing ownership.
+    await query("UPDATE procurement.vendor_invoice_lines SET purchase_order_line_id=21 WHERE id=74");
+    expect((await readPoShipmentCosts(fixture.database(), 10))?.summary.reviewLines).toBe(1);
+    expect(await shipmentLinePosted()).toBe(false);
+    expect((await context()).state.status).toBe("review_required");
+    expect((await history()).revisions.every(revision => revision.currentResolution == null)).toBe(true);
+    expect((await fixture.costHealth()).items.some(item => item.shipmentId === 1 && item.action === "review_cost_evidence")).toBe(true);
+    expect(await postings()).toEqual(approvedPostings);
+  });
 
   it.each([false, true])(
     "posts actual balanced costs, preserves stock, and replays approval (missing receipt links: %s)",

@@ -251,7 +251,8 @@ export class EbayApiClient {
   }
 
   /**
-   * Delete an unpublished offer. Published offers must be withdrawn first.
+   * Delete this exact offer; for a published variation eBay removes that
+   * variation without withdrawing its siblings or the whole inventory group.
    * DELETE /sell/inventory/v1/offer/{offerId}
    */
   async deleteOffer(offerId: string): Promise<void> {
@@ -260,6 +261,16 @@ export class EbayApiClient {
       path: `/sell/inventory/v1/offer/${encodeURIComponent(offerId)}`,
       expectNoContent: true,
     });
+  }
+
+  /** Exact retained offer read. Authentication/rate-limit failures are not absence. */
+  async getOffer(offerId: string): Promise<unknown | null> {
+    try {
+      return await this.request({ method: "GET", path: `/sell/inventory/v1/offer/${encodeURIComponent(offerId)}` });
+    } catch (error) {
+      if (isMissingEbayInventoryResource(error)) return null;
+      throw error;
+    }
   }
 
   /**
@@ -1096,15 +1107,17 @@ export function createEbayApiClient(
   channelId: number,
   environment?: "sandbox" | "production",
 ): EbayApiClient {
+  const providerEnvironment = environment ?? authService.getEnvironment();
   return new EbayApiClient(
     authService,
     channelId,
-    environment || (process.env.EBAY_ENVIRONMENT as any) || "production",
+    providerEnvironment,
     { quantityAdmission: async () => {
       const account = await authService.getVerifiedProviderAccount(channelId);
       if (!account) throw new Error("Provider-verified eBay account identity is required for quantity publication.");
       const { createChannelEbayQuantityRequestAdmission } = await import("../../../inventory-planning/infrastructure/quantity-publication-runtime");
-      return createChannelEbayQuantityRequestAdmission({ channelId, externalAccountId: account.externalAccountId });
+      return createChannelEbayQuantityRequestAdmission({ channelId, externalAccountId: account.externalAccountId,
+        environment: providerEnvironment });
     } },
   );
 }

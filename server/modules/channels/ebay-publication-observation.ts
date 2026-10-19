@@ -12,6 +12,14 @@ export function assertEbayPublicationObservation(identity: EbayListingSyncIdenti
     throw new EbayListingSyncError("EBAY_SYNC_PROVIDER_IDENTITY_CHANGED", "The saved eBay observation has an unsupported account environment.");
   const namespace = (role: "listing" | "inventory_item_group" | "offer" | "inventory_item") =>
     buildEbayRegistrationIdentityNamespace({ environment, marketplaceId: identity.marketplaceId, role });
+  const retained = identity.retainedGroupSkus ?? [];
+  const groupSkus = observation.evidence.groupVariantSkus;
+  if (retained.length && (!Array.isArray(groupSkus) || identity.groupKey === null
+    || groupSkus.length !== identity.variants.length + retained.length
+    || new Set(groupSkus).size !== groupSkus.length
+    || [...identity.variants.map(member => member.sku), ...retained].some(sku => !groupSkus.includes(sku)))) {
+    throw new EbayListingSyncError("EBAY_SYNC_PROVIDER_IDENTITY_CHANGED", "The retained group membership differs from the exact saved eBay observation.");
+  }
   if (observation.providerAccount.provider !== "ebay"
     || observation.providerAccount.externalAccountId !== identity.accountId || observation.marketplaceId !== identity.marketplaceId
     || !observation.isPublished || observation.listingIdentity.identityNamespace !== namespace("listing")

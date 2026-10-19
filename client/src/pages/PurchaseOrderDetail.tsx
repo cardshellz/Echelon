@@ -2906,6 +2906,18 @@ export default function PurchaseOrderDetail() {
         </div>
       </div>
 
+      {po.status === "closed" && (
+        <div className="rounded-md border border-green-600/30 bg-green-50 p-3 dark:bg-green-950/20" data-testid="po-closed-summary">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div>
+              <p className="font-semibold">This purchase order is closed</p>
+              <p className="text-sm text-muted-foreground">Any remaining invoice or cost reviews are follow-up work. They do not reopen this PO.</p>
+            </div>
+            <Button size="sm" variant="outline" onClick={() => setActiveTab("history")}>View closure history</Button>
+          </div>
+        </div>
+      )}
+
       {/* Exception pill (Phase 1) — only when there are open exceptions.
           Click jumps to the Exceptions tab below. Severity drives color. */}
       {openExceptionCount > 0 && (
@@ -4131,9 +4143,11 @@ export default function PurchaseOrderDetail() {
             )}
 
             {/* Fallback: no actions available */}
-            {po.physicalStatus === "received" && financialCompletionSupported && (
+            {po.status === "closed" ? (
+              <p className="text-xs text-muted-foreground py-2">PO closed. Any remaining cost follow-ups are listed in the cost summary.</p>
+            ) : po.physicalStatus === "received" && financialCompletionSupported && (
               <p className="text-xs text-muted-foreground text-center py-2">
-                All done — PO fully received and paid.
+                PO fully received and paid. Review the cost summary for any remaining cost follow-ups.
               </p>
             )}
           </CardContent>
