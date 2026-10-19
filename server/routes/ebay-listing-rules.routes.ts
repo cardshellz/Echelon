@@ -1,4 +1,13 @@
-import { requireAuth } from "./middleware";
+import { requireAuth, requirePermission } from "./middleware";
+import { assertEbayStorePolicyMetadataWriteOwned, EbayBusinessPolicyError, EBAY_BUSINESS_POLICY_CHANNEL_ID } from "@shared/ebay-business-policies";
+import { ebayBusinessPolicies } from "../modules/channels/ebay-business-policies";
+import { sendEbayPolicyError } from "./ebay/ebay-business-policy-http";
+
+/** Historical listing-rule policy columns are no longer a policy authority. */
+function listingRuleView(rule: Record<string, unknown>): Record<string, unknown> {
+  const { fulfillmentPolicyId, returnPolicyId, paymentPolicyId, ...view } = rule;
+  return { ...view, policySettingsUrl: "/channels/ebay#business-policies" };
+}
 /**
  * eBay Listing Rules Routes
  *
@@ -38,7 +47,7 @@ import {
 // Constants
 // ---------------------------------------------------------------------------
 
-const EBAY_CHANNEL_ID = 67;
+const EBAY_CHANNEL_ID = EBAY_BUSINESS_POLICY_CHANNEL_ID;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -217,7 +226,7 @@ export function registerEbayListingRulesRoutes(app: Express): void {
         .from(ebayListingRules)
         .where(eq(ebayListingRules.channelId, EBAY_CHANNEL_ID))
         .orderBy(asc(ebayListingRules.sortOrder));
-      res.json(rules);
+      res.json(rules.map(listingRuleView));
     } catch (err: any) {
       console.error("[eBay Listing Rules] Error fetching:", err.message);
       res.status(500).json({ error: err.message });
@@ -227,16 +236,14 @@ export function registerEbayListingRulesRoutes(app: Express): void {
   // -----------------------------------------------------------------------
   // POST /api/ebay/listing-rules — Create rule
   // -----------------------------------------------------------------------
-  app.post("/api/ebay/listing-rules", requireAuth, async (req: Request, res: Response) => {
+  app.post("/api/ebay/listing-rules", requireAuth, requirePermission("channels", "edit"), async (req: Request, res: Response) => {
     try {
+      assertEbayStorePolicyMetadataWriteOwned(req.body);
       const {
         scopeType,
         scopeValue,
         ebayCategoryId,
         ebayStoreCategoryId,
-        fulfillmentPolicyId,
-        returnPolicyId,
-        paymentPolicyId,
       } = req.body;
 
       if (!scopeType || !["default", "product_type", "sku"].includes(scopeType)) {
@@ -257,14 +264,12 @@ export function registerEbayListingRulesRoutes(app: Express): void {
           scopeValue: scopeType === "default" ? null : scopeValue,
           ebayCategoryId: ebayCategoryId || null,
           ebayStoreCategoryId: ebayStoreCategoryId || null,
-          fulfillmentPolicyId: fulfillmentPolicyId || null,
-          returnPolicyId: returnPolicyId || null,
-          paymentPolicyId: paymentPolicyId || null,
         })
         .returning();
 
-      res.json(rule);
+      res.json(listingRuleView(rule));
     } catch (err: any) {
+      if (err instanceof EbayBusinessPolicyError) { sendEbayPolicyError(res, err); return; }
       if (err.message?.includes("unique") || err.code === "23505") {
         res.status(409).json({ error: "A rule with this scope already exists" });
         return;
@@ -277,7 +282,7 @@ export function registerEbayListingRulesRoutes(app: Express): void {
   // -----------------------------------------------------------------------
   // PUT /api/ebay/listing-rules/:id — Update rule
   // -----------------------------------------------------------------------
-  app.put("/api/ebay/listing-rules/:id", requireAuth, async (req: Request, res: Response) => {
+  app.put("/api/ebay/listing-rules/:id", requireAuth, requirePermission("channels", "edit"), async (req: Request, res: Response) => {
     try {
       const ruleId = parseInt(req.params.id, 10);
       if (isNaN(ruleId)) {
@@ -285,21 +290,16 @@ export function registerEbayListingRulesRoutes(app: Express): void {
         return;
       }
 
+      assertEbayStorePolicyMetadataWriteOwned(req.body);
       const {
         ebayCategoryId,
         ebayStoreCategoryId,
-        fulfillmentPolicyId,
-        returnPolicyId,
-        paymentPolicyId,
         enabled,
       } = req.body;
 
       const updateData: any = { updatedAt: new Date() };
       if (ebayCategoryId !== undefined) updateData.ebayCategoryId = ebayCategoryId || null;
       if (ebayStoreCategoryId !== undefined) updateData.ebayStoreCategoryId = ebayStoreCategoryId || null;
-      if (fulfillmentPolicyId !== undefined) updateData.fulfillmentPolicyId = fulfillmentPolicyId || null;
-      if (returnPolicyId !== undefined) updateData.returnPolicyId = returnPolicyId || null;
-      if (paymentPolicyId !== undefined) updateData.paymentPolicyId = paymentPolicyId || null;
       if (enabled !== undefined) updateData.enabled = enabled;
 
       const [updated] = await (db as any)
@@ -318,8 +318,9 @@ export function registerEbayListingRulesRoutes(app: Express): void {
         return;
       }
 
-      res.json(updated);
+      res.json(listingRuleView(updated));
     } catch (err: any) {
+      if (err instanceof EbayBusinessPolicyError) { sendEbayPolicyError(res, err); return; }
       console.error("[eBay Listing Rules] Error updating:", err.message);
       res.status(500).json({ error: err.message });
     }
@@ -328,7 +329,7 @@ export function registerEbayListingRulesRoutes(app: Express): void {
   // -----------------------------------------------------------------------
   // DELETE /api/ebay/listing-rules/:id — Delete rule
   // -----------------------------------------------------------------------
-  app.delete("/api/ebay/listing-rules/:id", requireAuth, async (req: Request, res: Response) => {
+  app.delete("/api/ebay/listing-rules/:id", requireAuth, requirePermission("channels", "edit"), async (req: Request, res: Response) => {
     try {
       const ruleId = parseInt(req.params.id, 10);
       if (isNaN(ruleId)) {
@@ -417,9 +418,6 @@ export function registerEbayListingRulesRoutes(app: Express): void {
       const fields = [
         "ebayCategoryId",
         "ebayStoreCategoryId",
-        "fulfillmentPolicyId",
-        "returnPolicyId",
-        "paymentPolicyId",
       ] as const;
 
       const resolved: Record<string, any> = {};
@@ -441,6 +439,17 @@ export function registerEbayListingRulesRoutes(app: Express): void {
         }
       }
 
+      // The legacy category rules remain readable; policy selection always uses
+      // the same owner as publishing, including variant inheritance and validity.
+      const policies = await ebayBusinessPolicies.resolveProductPolicies({
+        productId: variant.productId,
+        variantIds: [variant.variantId],
+      });
+      const selected = policies.byVariantId.get(variant.variantId);
+      if (!selected) throw new EbayBusinessPolicyError("EBAY_POLICY_SCOPE_CHANGED", "The listing's variants changed. Refresh before continuing.", 409);
+      Object.assign(resolved, selected);
+      for (const field of Object.keys(selected)) sources[field] = "eBay channel policy settings";
+
       res.json({
         sku,
         productId: variant.productId,
@@ -450,6 +459,7 @@ export function registerEbayListingRulesRoutes(app: Express): void {
         sources,
       });
     } catch (err: any) {
+      if (err instanceof EbayBusinessPolicyError) { sendEbayPolicyError(res, err); return; }
       console.error("[eBay Listing Rules] Error resolving:", err.message);
       res.status(500).json({ error: err.message });
     }

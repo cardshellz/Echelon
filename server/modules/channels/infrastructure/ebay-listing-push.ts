@@ -1,3 +1,4 @@
+import { ebayBusinessPolicies } from "../ebay-business-policies";
 import { z } from "zod";
 import { db, pool, getDatabasePoolSnapshot } from "../../../db";
 import { EBAY_CHANNEL_ID, atpService, ebayListingPhotoResolver, getAuthService } from "./ebay-api-runtime";
@@ -26,9 +27,6 @@ const repository = new PostgresEbayListingPushRepository(pool, EBAY_CHANNEL_ID, 
 const connector = new EbayMarketplaceListingConnector();
 const metadataSchema = z.object({
   marketplaceId: z.string().trim().min(1).optional().default("EBAY_US"),
-  fulfillmentPolicyId: z.string().trim().min(1).nullable().optional().default(null),
-  returnPolicyId: z.string().trim().min(1).nullable().optional().default(null),
-  paymentPolicyId: z.string().trim().min(1).nullable().optional().default(null),
   merchantLocationKey: z.string().trim().min(1).optional().default("card-shellz-hq"),
 }).passthrough();
 
@@ -72,11 +70,9 @@ async function preparePushDraft(input: { ctx: Awaited<ReturnType<typeof context>
   const productId = product.id;
   const browseCategoryId = product.ebay_browse_category_id || category?.ebay_browse_category_id;
   if (!browseCategoryId) throw new EbayListingSyncError("EBAY_LISTING_PREFLIGHT_FAILED", "Choose an eBay browse category for this product or its product type before publishing.");
-  const effectivePolicies = {
-    fulfillmentPolicyId: product.ebay_fulfillment_policy_override || category?.fulfillment_policy_override || ctx.metadata.fulfillmentPolicyId,
-    returnPolicyId: product.ebay_return_policy_override || category?.return_policy_override || ctx.metadata.returnPolicyId,
-    paymentPolicyId: product.ebay_payment_policy_override || category?.payment_policy_override || ctx.metadata.paymentPolicyId,
-  };
+  const resolvedPolicies = await ebayBusinessPolicies.resolveProductPolicies({ productId, variantIds: variants.map(variant => variant.id),
+    expectedScope: { channelId: EBAY_CHANNEL_ID, connectionId: ctx.connectionId, accountId: ctx.account.externalAccountId,
+      environment: ctx.auth.getEnvironment(), marketplaceId: ctx.metadata.marketplaceId } });
   const accessToken = await ctx.auth.getAccessToken(EBAY_CHANNEL_ID);
   const photoVariants = variants.map(variant => ({ variantId: variant.id, sku: variant.catalog_sku }));
   const providerPhotoVariants = variants.map(variant => ({ variantId: variant.id, sku: variant.sku }));
@@ -93,7 +89,7 @@ async function preparePushDraft(input: { ctx: Awaited<ReturnType<typeof context>
       aspects: await repository.readAspects(product), isMultiVariant,
       variationAspectName: isMultiVariant ? determineVariationAspectName(variants) : "",
       variantPrices: prices, atpByVariantId: new Map(quantities.map(row => [row.productVariantId, row.atpUnits])),
-      marketplaceId: ctx.metadata.marketplaceId, ebayBrowseCategoryId: browseCategoryId, effectivePolicies,
+      marketplaceId: ctx.metadata.marketplaceId, ebayBrowseCategoryId: browseCategoryId, resolvedPoliciesByVariantId: resolvedPolicies.byVariantId,
       storeCategoryNames: category?.ebay_store_category_name ? [category.ebay_store_category_name] : [],
       merchantLocationKey: ctx.metadata.merchantLocationKey,
       ...(existingGroupKey === undefined ? {} : { existingGroupKey }),

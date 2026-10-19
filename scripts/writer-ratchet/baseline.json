@@ -25,16 +25,14 @@
     "modules/channels",
     "modules/inventory",
     "modules/shipping-engine",
-    "server/routes/ebay/ebay-listing-state.ts",
-    "server/routes/ebay/ebay-policies.routes.ts"
+    "server/routes/ebay/ebay-listing-state.ts"
   ],
   "catalog.products": [
     "modules/catalog",
     "modules/channels",
     "modules/procurement",
     "server/routes/ebay-listing-rules.routes.ts",
-    "server/routes/ebay/ebay-config.routes.ts",
-    "server/routes/ebay/ebay-policies.routes.ts"
+    "server/routes/ebay/ebay-config.routes.ts"
   ],
   "catalog.shipping_groups": [
     "modules/catalog"
@@ -439,6 +437,7 @@
     "server/routes/ebay/ebay-taxonomy.routes.ts"
   ],
   "ebay.ebay_category_mappings": [
+    "modules/channels",
     "server/routes/ebay/ebay-config.routes.ts"
   ],
   "ebay.ebay_listing_rules": [

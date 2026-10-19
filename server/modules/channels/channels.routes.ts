@@ -1,3 +1,4 @@
+import { EbayBusinessPolicyError } from "@shared/ebay-business-policies";
 import type { Express } from "express";
 import { z } from "zod";
 import { CountryCodeValidationError, parseCountryCode } from "@shared/country-code";
@@ -718,6 +719,7 @@ export function registerChannelRoutes(app: Express) {
 
       res.json(toPublicChannelConnection(connection));
     } catch (error) {
+      if (error instanceof EbayBusinessPolicyError) return res.status(error.statusCode).json({ code: error.code, error: error.message, context: error.context });
       console.error("Error updating channel connection:", error);
       res.status(500).json({ error: "Failed to update channel connection" });
     }

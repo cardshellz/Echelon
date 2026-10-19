@@ -2,13 +2,13 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const fixture = vi.hoisted(() => ({
   query: vi.fn(),
-  auth: { getVerifiedProviderAccount: vi.fn(), getAccessToken: vi.fn() },
+  auth: { getVerifiedProviderAccount: vi.fn(), getAccessToken: vi.fn(), getEnvironment: vi.fn() },
   repository: {
     withProductLock: vi.fn(), readProduct: vi.fn(), readCategory: vi.fn(), readVariants: vi.fn(),
     currentListingIds: vi.fn(), readAspects: vi.fn(), projectSuccess: vi.fn(), recordFailure: vi.fn(),
   },
   connector: { pushListing: vi.fn(), previewListingRebuild: vi.fn(), updateExistingListing: vi.fn(), executeListingRebuild: vi.fn() },
-  photos: vi.fn(), prices: vi.fn(), quantities: vi.fn(), build: vi.fn(), identity: vi.fn(),
+  photos: vi.fn(), prices: vi.fn(), quantities: vi.fn(), policies: vi.fn(), build: vi.fn(), identity: vi.fn(),
   inspect: vi.fn(), jobs: { getByCommand: vi.fn(), getAdmission: vi.fn(), enqueue: vi.fn(), recordAdmissionFailure: vi.fn() },
 }));
 vi.mock("../../../../db", () => ({ db: {}, pool: { query: fixture.query }, getDatabasePoolSnapshot: () => ({ maximumConnections: 20 }) }));
@@ -20,6 +20,9 @@ vi.mock("../../infrastructure/ebay-listing-client", () => ({
   createEbayRouteListingClient: () => ({}), createEbayRouteListingLifecycleClient: () => ({}), getExistingEbayListingPhotos: vi.fn(),
 }));
 vi.mock("../../infrastructure/ebay-listing-helpers", () => ({ determineVariationAspectName: () => "Pack Size", resolveChannelPrice: fixture.prices }));
+// The full writer, catalog adapter and saved-publication gate are exercised in
+// ebay-business-policies.integration and ebay-policy-publication.integration.
+vi.mock("../../ebay-business-policies", () => ({ ebayBusinessPolicies: { resolveProductPolicies: fixture.policies } }));
 vi.mock("../../ebay-listing-draft", () => ({ buildEbayRouteListingDraft: fixture.build }));
 vi.mock("../../ebay-listing-sync", () => ({ readExistingEbayListingIdentityForProduct: fixture.identity }));
 vi.mock("../../adapters/ebay/ebay-marketplace-registration.factory", () => ({ createEbayMarketplaceRegistrationAdapters: () => ({ observer: {}, inspector: { inspectExistingPublication: fixture.inspect } }) }));
@@ -41,6 +44,11 @@ describe("eBay publication application composition", () => {
     fixture.query.mockResolvedValue({ rows: [{ id: 34, metadata: { marketplaceId: "EBAY_US" } }] });
     fixture.auth.getVerifiedProviderAccount.mockResolvedValue({ externalAccountId: "seller-1" });
     fixture.auth.getAccessToken.mockResolvedValue("test-only-token");
+    fixture.auth.getEnvironment.mockReturnValue("production");
+    fixture.policies.mockImplementation(async (input: { expectedScope: unknown; variantIds: number[] }) => {
+      const policies = { fulfillmentPolicyId: "shipping", returnPolicyId: "returns", paymentPolicyId: "payment" };
+      return { scope: input.expectedScope, product: policies, byVariantId: new Map(input.variantIds.map(id => [id, { ...policies }])) };
+    });
     fixture.repository.readProduct.mockImplementation(async (id: number) => ({ id, name: `Product ${id}`, sku: "CATALOG-GROUP", product_type: "pack", ebay_browse_category_id: "123" }));
     fixture.repository.readCategory.mockResolvedValue(null);
     fixture.repository.readVariants.mockResolvedValue([{ id: 101, sku: "PROVIDER-PACK", catalog_sku: "CATALOG-PACK", price_cents: 999, external_variant_id: "offer-101", external_product_id: null, external_sku: "PROVIDER-PACK", mapping_exists: true }]);
@@ -80,6 +88,9 @@ describe("eBay publication application composition", () => {
     expect(fixture.photos.mock.calls[0][0].variants).toEqual([{ variantId: 101, sku: "CATALOG-PACK" }]);
     expect(fixture.photos.mock.calls[0][0].mode).toBe("catalog");
     expect(fixture.build.mock.calls[0][0].variants[0].sku).toBe("PROVIDER-PACK");
+    expect(fixture.policies).toHaveBeenCalledWith({ productId: 20, variantIds: [101], expectedScope: {
+      channelId: 67, connectionId: 34, accountId: "seller-1", environment: "production", marketplaceId: "EBAY_US",
+    } });
     expect(fixture.repository.projectSuccess).not.toHaveBeenCalled();
     expect(fixture.connector.executeListingRebuild).not.toHaveBeenCalled();
     expect(fixture.repository.recordFailure).not.toHaveBeenCalled();
