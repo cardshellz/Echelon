@@ -143,6 +143,7 @@ export async function getOmsOpsHealth(db: any): Promise<OmsOpsHealthSummary> {
     heldLineAging,
     allLinesHeldOrders,
     dropshipTrackingNotSent,
+    channelListingPublicationBlocked,
   ] = await Promise.all([
     collectOmsFlowReconciliationIssues(db),
     countAndSample(
@@ -847,6 +848,26 @@ export async function getOmsOpsHealth(db: any): Promise<OmsOpsHealthSummary> {
       dropshipTrackingNotSentCountSql(sql`NOW() - INTERVAL '14 days'`),
       dropshipTrackingNotSentSampleSql(sql`NOW() - INTERVAL '14 days'`, 10),
     ),
+    // A destination the publication worker isolated: its listing data is not
+    // safe to publish, so that channel's quantity is frozen until it is fixed.
+    // Other channels and warehouse operations are unaffected.
+    countAndSample(
+      db,
+      sql`
+        SELECT COUNT(*)::int AS count
+        FROM inventory.publication_selection_work
+        WHERE last_error_code IS NOT NULL
+      `,
+      sql`
+        SELECT w.product_id, p.sku AS product_sku, p.name AS product_name,
+               w.last_error_code AS error_code, w.attempt_count, w.updated_at
+        FROM inventory.publication_selection_work w
+        LEFT JOIN catalog.products p ON p.id = w.product_id
+        WHERE w.last_error_code IS NOT NULL
+        ORDER BY w.updated_at DESC, w.product_id
+        LIMIT 10
+      `,
+    ),
   ]);
   const channelWriteback = await getChannelWritebackHealth(db, {
     windowDays: 14,
@@ -1068,6 +1089,13 @@ export async function getOmsOpsHealth(db: any): Promise<OmsOpsHealthSummary> {
       count: dropshipTrackingNotSent.count,
       message: "Shipped dropship packages have no tracking in the vendor's store.",
       sample: dropshipTrackingNotSent.sample,
+    }),
+    issue({
+      code: "CHANNEL_LISTING_PUBLICATION_BLOCKED",
+      severity: "warning",
+      count: channelListingPublicationBlocked.count,
+      message: "A channel listing is not safe to publish, so its stock is not updating. Fix the listing mapping; other channels still update.",
+      sample: channelListingPublicationBlocked.sample,
     }),
     issue({
       code: "CHANNEL_WRITEBACK_MASKED_SPLIT",

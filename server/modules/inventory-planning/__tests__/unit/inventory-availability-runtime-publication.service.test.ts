@@ -447,6 +447,66 @@ describe("AuthorityAwareInventoryPublicationService", () => {
     await expect(legacyService.listProductIds(legacyReader)).resolves.toEqual([7, 8]);
     expect(legacy.listActivePublicationProductIds).not.toHaveBeenCalled();
   });
+  // #64414: one live destination with no listing mapping made the whole
+  // product unpublishable, which failed the pick and froze every other channel.
+  describe("isolating an unsafe destination during fan-out", () => {
+    const walmart = (): ActiveInventoryPublicationTarget => ({ ...target(), publicationTargetId: 34, channelId: 104,
+      channelName: "Walmart", providerKey: "walmart", channelConnectionId: 44, externalScopeId: "walmart-1", mappings: [] });
+
+    it("publishes every safe destination and reports the unsafe one instead of throwing", async () => {
+      const context = runtimeContext("canonical", [target(), walmart()]);
+      const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+      const service = new AuthorityAwareInventoryPublicationService(executor(context), undefined, logger);
+
+      const routed = await service.publishProduct({ productId: 10, dryRun: false, triggeredBy: "inventory_change:pick",
+        blockedTargets: "isolate" }, vi.fn());
+
+      expect(routed).toMatchObject({ authority: "canonical", publication: {
+        rows: [{ publicationTargetId: 5, productVariantId: 101, desiredQuantity: "4" }],
+        blockedTargets: [{ publicationTargetId: 34, channelId: 104, channelName: "Walmart",
+          errorCode: "CANONICAL_PUBLICATION_MAPPING_MISSING",
+          blockerCodes: ["PUBLICATION_TARGET_VARIANT_MAPPING_MISSING"], productVariantIds: [101] }],
+      } });
+      expect(context.enqueueFullPublications).toHaveBeenCalledExactlyOnceWith("44",
+        [expect.objectContaining({ publicationTargetId: 5 })]);
+      expect(logger.error).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+        event: "canonical_inventory_publication_target_isolated", error_code: "CANONICAL_PUBLICATION_MAPPING_MISSING",
+        publicationTargetId: 34, productId: 10 }));
+    });
+
+    it("sends nothing to an isolated destination, including its retained zero obligations", async () => {
+      const context = runtimeContext("canonical", [target(), walmart()]);
+      context.listUnmanagedPublicationVariantIds = vi.fn(async () => [102]);
+      const service = new AuthorityAwareInventoryPublicationService(executor(context), undefined,
+        { info: vi.fn(), warn: vi.fn(), error: vi.fn() });
+
+      const routed = await service.publishProduct({ productId: 10, dryRun: false, blockedTargets: "isolate" }, vi.fn());
+
+      if (routed.authority !== "canonical") throw new Error("Expected canonical publication");
+      // 102 has no mapping on either target: both are blocked for it, and
+      // target 5 withholds its whole projection rather than a partial one.
+      expect(routed.publication.rows).toEqual([]);
+      expect(routed.publication.blockedTargets?.map(entry => [entry.publicationTargetId, entry.productVariantIds]))
+        .toEqual([[5, [102]], [34, [101, 102]]]);
+    });
+
+    it("keeps rejecting by default so listing setup still gets its exact answer", async () => {
+      const context = runtimeContext("canonical", [target(), walmart()]);
+      const service = new AuthorityAwareInventoryPublicationService(executor(context));
+      await expect(service.publishProduct({ productId: 10, dryRun: false }, vi.fn()))
+        .rejects.toMatchObject({ code: "CANONICAL_PUBLICATION_MAPPING_MISSING", context: { publicationTargetId: 34 } });
+      expect(context.enqueueFullPublications).not.toHaveBeenCalled();
+    });
+
+    it("refuses isolation for an exact-target request", async () => {
+      const context = runtimeContext("canonical", [target(), walmart()]);
+      const service = new AuthorityAwareInventoryPublicationService(executor(context));
+      await expect(service.publishProduct({ productId: 10, dryRun: false, publicationTargetId: 34,
+        blockedTargets: "isolate" }, vi.fn())).rejects.toMatchObject({ code: "INVALID_INVENTORY_PUBLICATION_SCOPE" });
+      expect(context.planProduct).not.toHaveBeenCalled();
+    });
+  });
+
 });
 
 function executor(

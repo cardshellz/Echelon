@@ -3,6 +3,7 @@ import { InventoryShipmentRuntimeError } from "../application/inventory-availabi
 import { createTransactionScopedInventoryPublicationService } from "./inventory-availability-runtime-publication.repository";
 import type { OperationalShipmentBeforeCommit } from "../../inventory/application/operational-shipment-dispatch.port";
 import type { InventoryAvailabilityTransactionQueryClient } from "../application/inventory-availability-transaction-query.port";
+import { markPublicationProductChanged } from "./publication-product-change";
 
 /** Durable desired quantities are committed with custody, never sent to a provider here. */
 export const publishCanonicalDispatchInsideTransaction: CanonicalClaimDispatchBeforeCommit = async ({ client, receipt }) => {
@@ -23,10 +24,17 @@ async function publishShipmentProduct(client: InventoryAvailabilityTransactionQu
     throw new InventoryShipmentRuntimeError("CLAIM_DISPATCH_PUBLICATION_PRODUCT_INVALID",
       "Dispatch publication requires the exact catalog product identity.");
   }
-  await createTransactionScopedInventoryPublicationService(client).publishProduct({
-    productId, dryRun: false, triggeredBy,
+  // Shipment custody must never fail because one channel listing is broken.
+  // Safe destinations still commit their desired quantity with custody; an
+  // unsafe one is skipped and handed to the durable publication work row, which
+  // records it for review and replans when its listing data changes.
+  const routed = await createTransactionScopedInventoryPublicationService(client).publishProduct({
+    productId, dryRun: false, triggeredBy, blockedTargets: "isolate",
   }, async () => {
     throw new InventoryShipmentRuntimeError("CLAIM_DISPATCH_PUBLICATION_AUTHORITY_INVALID",
       "Canonical dispatch cannot publish through legacy authority.");
   });
+  if (routed.authority === "canonical" && (routed.publication.blockedTargets?.length ?? 0) > 0) {
+    await markPublicationProductChanged(client, productId);
+  }
 }

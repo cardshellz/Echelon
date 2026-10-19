@@ -9,7 +9,9 @@ const batchSchema = z.number().int().min(1).max(100);
 const workSchema = z.object({ product_id: z.number().int().positive(), revision: z.string().regex(/^[1-9][0-9]*$/),
   acknowledged_revision: z.string().regex(/^[0-9]+$/), attempt_count: z.number().int().nonnegative(), boundary_due: z.boolean() });
 export interface PublicationSelectionWorkResult { planned: number; blocked: number; skipped: number }
-type Planner = (client: InventoryAvailabilityTransactionQueryClient, productId: number) => Promise<void>;
+/** Returns the code of an isolated (skipped) destination, or null when every
+ * destination planned. A throw means nothing for the product was planned. */
+type Planner = (client: InventoryAvailabilityTransactionQueryClient, productId: number) => Promise<{ blockedErrorCode: string | null } | void>;
 
 /** One transaction owns both current desired/outbox quantities and the work ACK.
  * Crash or rollback leaves the revision pending. No provider I/O occurs here. */
@@ -56,19 +58,27 @@ export class PostgresPublicationSelectionWork {
       await client.query("SAVEPOINT selection_plan");
       let outcome: "planned" | "blocked" = "planned";
       let errorCode: string | null = null;
-      try { await this.plan(client, productId); }
-      catch (error) {
+      // A thrown plan committed nothing: retry with backoff. An isolated
+      // destination is a terminal data problem instead: its safe siblings commit,
+      // the revision is ACKed (no hot retry), and its code stays on the work row
+      // for review until a listing-data change re-marks the product.
+      let acknowledged = true;
+      try {
+        const isolated = (await this.plan(client, productId))?.blockedErrorCode ?? null;
+        if (isolated) { outcome = "blocked"; errorCode = safeFailureCode({ code: isolated }); }
+      } catch (error) {
         await client.query("ROLLBACK TO SAVEPOINT selection_plan");
         outcome = "blocked";
         errorCode = safeFailureCode(error);
+        acknowledged = false;
       }
       await client.query(`INSERT INTO inventory.publication_selection_attempts(product_id,revision,outcome,error_code,occurred_at)
         VALUES($1,$2,$3,$4,$5)`, [productId, revision, outcome, errorCode, now]);
-      if (outcome === "planned") {
+      if (acknowledged) {
         await client.query(`UPDATE inventory.publication_selection_work SET acknowledged_revision=$2,
-          attempt_count=0,last_error_code=NULL,next_attempt_at=$3,
+          attempt_count=0,last_error_code=$4,next_attempt_at=$3,
           next_boundary_at=inventory.next_publication_selection_boundary($3),updated_at=$3 WHERE product_id=$1`,
-        [productId, revision, now]);
+        [productId, revision, now, errorCode]);
       } else {
         const delay = Math.min(MAX_RETRY_DELAY_MS, RETRY_DELAY_MS * 2 ** Math.min(work.attempt_count, 10));
         await client.query(`UPDATE inventory.publication_selection_work SET attempt_count=attempt_count+1,last_error_code=$2,
@@ -88,12 +98,14 @@ export class PostgresPublicationSelectionWork {
   }
 }
 
-async function planCurrentSelection(client: InventoryAvailabilityTransactionQueryClient, productId: number): Promise<void> {
+async function planCurrentSelection(client: InventoryAvailabilityTransactionQueryClient, productId: number): Promise<{ blockedErrorCode: string | null }> {
   const { createTransactionScopedInventoryPublicationService } = await import("./inventory-availability-runtime-publication.repository");
-  await createTransactionScopedInventoryPublicationService(client).publishProduct({ productId, dryRun: false,
-    triggeredBy: "listing_selection_changed" }, async () => {
+  const routed = await createTransactionScopedInventoryPublicationService(client).publishProduct({ productId, dryRun: false,
+    triggeredBy: "publication_work", blockedTargets: "isolate" }, async () => {
     throw Object.assign(new Error("Selection replanning requires canonical publication authority."), { code: "PUBLICATION_SELECTION_AUTHORITY_CHANGED" });
   });
+  const blocked = routed.authority === "canonical" ? routed.publication.blockedTargets ?? [] : [];
+  return { blockedErrorCode: blocked[0]?.errorCode ?? null };
 }
 
 function safeFailureCode(error: unknown): string {
