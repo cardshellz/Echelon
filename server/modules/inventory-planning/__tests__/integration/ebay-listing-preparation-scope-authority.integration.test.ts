@@ -24,7 +24,9 @@ dbDescribe.sequential("verified listing preparation scope authority through Post
   const prepare = (verifiedListing: VerifiedEbayListingPreparation, source: InventoryEbayPublicationReadinessInput = ebayListingScopeSource(), commandKey = randomUUID()) =>
     ensureEbayPublicationReady(database.pool, source, { commandKey, actor: "authority-test", now, verifiedListing });
 
-  async function proofFixture() {
+  async function proofFixture(excludedActiveMember = false) {
+    if (excludedActiveMember) await database.pool.query(
+      "UPDATE catalog.product_variants SET is_active=true,ebay_listing_excluded=true WHERE id=103");
     const fixture = await createEbayListingScopeObservation(database.pool);
     const observed = await fixture.observe();
     return { ...fixture, proof: { sourceIdentity: fixture.source, observation: observed.observation } satisfies VerifiedEbayListingPreparation };
@@ -93,21 +95,29 @@ dbDescribe.sequential("verified listing preparation scope authority through Post
     expect(await publicationState()).toEqual(before);
   });
 
-  it("revalidates membership evidence even when a preparation receipt already exists", async () => {
-    const { proof } = await proofFixture(), commandKey = randomUUID();
+  it.each(["excluded active nonmember", "omitted active member"] as const)("revalidates %s evidence even when a preparation receipt already exists", async scenario => {
+    const { proof } = await proofFixture(scenario === "excluded active nonmember"), commandKey = randomUUID();
     await prepare(proof, ebayListingScopeSource(), commandKey);
-    const tampered = { ...proof, observation: { ...proof.observation, evidence: { ...proof.observation.evidence, nonMemberCandidates: [] } } };
+    // An archived source intentionally has no nonmember offer proof. Exercise
+    // the still-required proof for a channel-excluded active member separately.
+    if (scenario === "excluded active nonmember") expect(proof.observation.evidence.nonMemberCandidates).toHaveLength(1);
+    const tampered = { ...proof, observation: { ...proof.observation,
+      ...(scenario === "excluded active nonmember" ? { evidence: { ...proof.observation.evidence, nonMemberCandidates: [] } }
+        : { members: proof.observation.members.slice(1) }) } };
     const before = await publicationState();
     await expect(prepare(tampered, ebayListingScopeSource(), commandKey)).rejects.toMatchObject({ code: "EBAY_SYNC_MEMBERSHIP_CHANGED" });
     expect(await publicationState()).toEqual(before);
   });
 
-  it("rejects tampered proof on direct receipt replay before invoking its transactional follow-up", async () => {
-    const { proof } = await proofFixture(), commandKey = randomUUID();
+  it.each(["excluded active nonmember", "omitted active member"] as const)("rejects %s tampering on direct receipt replay before invoking its transactional follow-up", async scenario => {
+    const { proof } = await proofFixture(scenario === "excluded active nonmember"), commandKey = randomUUID();
     await prepare(proof, ebayListingScopeSource(), commandKey);
     const saved = (await database.pool.query<{ receipt: { reviewHash: string; contextHash: string } }>(
       "SELECT receipt FROM inventory.ebay_publication_readiness_applications WHERE command_key=$1", [commandKey])).rows[0].receipt;
-    const tampered = { ...proof, observation: { ...proof.observation, evidence: { ...proof.observation.evidence, nonMemberCandidates: [] } } };
+    if (scenario === "excluded active nonmember") expect(proof.observation.evidence.nonMemberCandidates).toHaveLength(1);
+    const tampered = { ...proof, observation: { ...proof.observation,
+      ...(scenario === "excluded active nonmember" ? { evidence: { ...proof.observation.evidence, nonMemberCandidates: [] } }
+        : { members: proof.observation.members.slice(1) }) } };
     const followUp = vi.fn(async () => undefined), before = await publicationState();
     await expect(withEbayPublicationReadinessApplied(database.pool, { source: ebayListingScopeSource(), commandKey,
       expectedReviewHash: saved.reviewHash, contextHash: saved.contextHash }, "authority-test", now, followUp, undefined, tampered))
@@ -134,9 +144,13 @@ dbDescribe.sequential("verified listing preparation scope authority through Post
       if (scenario === "all observed members") {
         await database.pool.query("DELETE FROM channels.channel_listings WHERE channel_id=67 AND product_variant_id=103");
       } else {
+        // Historical mapping was admitted while this member was active. The
+        // current owner must never manufacture stock enrollment after archival.
+        await database.pool.query("UPDATE catalog.product_variants SET is_active=true WHERE id=103");
         await ensureEbayPublicationReady(database.pool,
           { ...ebayListingScopeSource(), variants: [...ebayListingScopeSource().variants, { productVariantId: 103, sku: ebayListingScopeSku("C200") }] },
           { commandKey: randomUUID(), actor: "authority-test", now });
+        await database.pool.query("UPDATE catalog.product_variants SET is_active=false WHERE id=103");
       }
       const commandKey = randomUUID();
       await ensureEbayPublicationReady(database.pool, ebayListingScopeSource(), { commandKey, actor: "authority-test", now });

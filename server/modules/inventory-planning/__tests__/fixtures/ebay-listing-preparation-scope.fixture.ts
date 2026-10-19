@@ -5,7 +5,7 @@ import type { Pool } from "pg";
 import { vi } from "vitest";
 import { installEbayPublicationInventoryFixture } from "./ebay-publication-inventory.fixture";
 import { WALMART_INVENTORY_NOW } from "./walmart-publication-inventory.fixture";
-import { captureExistingEbayListingIdentity, resolveExistingEbayListingIdentity } from "../../../channels/ebay-existing-listing-identity";
+import { captureEbayListingSourceIdentity, resolveExistingEbayListingIdentity } from "../../../channels/ebay-existing-listing-identity";
 import { EbayMarketplaceRegistrationObserver } from "../../../marketplace-listings/infrastructure/providers/ebay/ebay-registration-observer";
 import type { EbayRegistrationReadTransport } from "../../../marketplace-listings/infrastructure/providers/ebay/ebay-registration-contracts";
 import { ensureEbayPublicationReady } from "../../infrastructure/ebay-publication-readiness.repository";
@@ -47,10 +47,13 @@ export async function installEbayListingScopeFixture(pool: Pool): Promise<void> 
  * provider responses. Tests may vary the retired evidence and observation time. */
 export async function createEbayListingScopeObservation(pool: Pool) {
   const rows = (await pool.query(`SELECT v.product_id,v.id AS variant_id,v.sku AS variant_sku,
-    l.external_sku,l.external_variant_id,l.external_product_id,v.is_active AS content_sync_enabled,NOT v.is_active AS catalog_archived
-    FROM catalog.product_variants v JOIN channels.channel_listings l ON l.product_variant_id=v.id AND l.channel_id=67
+    l.external_sku,l.external_variant_id,l.external_product_id,p.is_active AS product_is_active,p.status AS product_status,
+    v.is_active AS variant_is_active,v.sales_eligibility AS variant_sales_eligibility,
+    p.ebay_listing_excluded AS product_excluded,v.ebay_listing_excluded AS variant_excluded
+    FROM catalog.product_variants v JOIN catalog.products p ON p.id=v.product_id
+    JOIN channels.channel_listings l ON l.product_variant_id=v.id AND l.channel_id=67
     WHERE v.product_id=20 ORDER BY v.id`)).rows;
-  const source = captureExistingEbayListingIdentity(rows, ebayListingScopeAccount);
+  const source = captureEbayListingSourceIdentity(rows, ebayListingScopeAccount);
   const retired = { groups: [] as string[], status: 200, itemExists: true,
     offers: [{ sku: ebayListingScopeSku("C200"), offerId: "offer-C200", marketplaceId: "EBAY_US", status: "UNPUBLISHED" } as Record<string, unknown>],
   };

@@ -84,8 +84,8 @@ dbDescribe.sequential("exact canonical listing refresh through provider admissio
     runtime.pool = database.pool;
     runtime.http.mockReset().mockResolvedValue(undefined);
     await installEbayListingScopeFixture(database.pool);
-    // This is the omitted production composition: Shopify and eBay are both
-    // live, while the retired C200 has no active clearing mapping on Shopify.
+    // Shopify and eBay are both live. The archived member has a retained
+    // Shopify identity but no active inventory mapping; Listings owns removal.
     await database.pool.query(`UPDATE inventory.inventory_publication_targets SET state='live',revision=revision+1 WHERE id=1;
       INSERT INTO channels.channel_feeds(channel_id,product_variant_id,channel_variant_id,channel_inventory_item_id,channel_sku)
         VALUES(35,101,'shopify-P10','test-item','P5'),(35,103,'shopify-retired-C200',NULL,'SHLZ-TOP-260PT-C200')`);
@@ -116,9 +116,18 @@ dbDescribe.sequential("exact canonical listing refresh through provider admissio
       .toEqual(["P10", "C500"].map(suffix => expect.objectContaining({ state: "succeeded",
         scope: expect.objectContaining({ providerKey: "ebay", externalInventoryItemId: sku(suffix) }), planned_outbox_id: expect.any(String) })));
     expect((await database.pool.query("SELECT count(*)::int AS n FROM inventory.quantity_provider_requests")).rows[0].n).toBe(2);
-    await expect(publisher().publishProduct({ productId: 20, dryRun: false }, async () => null))
-      .rejects.toMatchObject({ code: "CANONICAL_PUBLICATION_MAPPING_MISSING", context: { productVariantId: 103, publicationTargetId: 1 } });
-    expect(await rows()).toEqual(before);
+  });
+
+  it("excludes archived members from a full product refresh across both live channels", async () => {
+    const result = await publisher().publishProduct({ productId: 20, dryRun: false }, async () => null);
+    expect(result.authority).toBe("canonical");
+    if (result.authority !== "canonical") throw new Error("Fixture must use canonical publication.");
+    expect(result.publication.rows.map(row => [row.publicationTargetId, row.productVariantId]).sort())
+      .toEqual([[1, 101], [3, 101], [3, 102]]);
+    expect((await rows()).some(row => row.product_variant_id === 103)).toBe(false);
+    expect((await database.pool.query(`SELECT publication_target_id FROM inventory.publication_variant_mapping_heads
+      WHERE product_variant_id=103`)).rows).toEqual([]);
+    expect(runtime.http).not.toHaveBeenCalled();
   });
 
   it.each([
