@@ -434,12 +434,35 @@ describe("EchelonSyncOrchestrator", () => {
         })],
       })]);
       expect(inventoryPublication.publishProduct).toHaveBeenCalledWith(
-        { productId: 1, dryRun: false, triggeredBy: "test" },
+        { productId: 1, dryRun: false, triggeredBy: "test", blockedTargets: "isolate" },
         expect.any(Function),
       );
       expect(allocationEngine.allocateProduct).not.toHaveBeenCalled();
       expect(mockAdapter.pushInventory).not.toHaveBeenCalled();
       expect(db.update).not.toHaveBeenCalled();
+    });
+
+    it("reports an isolated destination as errored while its sibling channel still queues (#64414)", async () => {
+      const inventoryPublication = {
+        publishProduct: vi.fn(async () => ({
+          authority: "canonical" as const,
+          publication: { ...canonicalPublication(1), blockedTargets: [{ publicationTargetId: 34, channelId: 104,
+            channelName: "Walmart", errorCode: "CANONICAL_PUBLICATION_MAPPING_MISSING",
+            blockerCodes: ["PUBLICATION_TARGET_VARIANT_MAPPING_MISSING"], productVariantIds: [100] }] },
+        })),
+        listProductIds: vi.fn(),
+      };
+      orchestrator = createEchelonSyncOrchestrator(db as any, allocationEngine as any, sourceLockService as any,
+        adapterRegistry, productPushService, atpService as any, inventoryPublication as any);
+
+      const results = await orchestrator.syncInventoryForProduct(1, { dryRun: false }, "test");
+
+      expect(results).toEqual([
+        expect.objectContaining({ channelId: 1, variantsQueued: 1, variantsErrored: 0 }),
+        expect.objectContaining({ channelId: 104, channelName: "Walmart", variantsErrored: 1,
+          details: [expect.objectContaining({ variantId: 100, status: "error",
+            error: expect.stringContaining("CANONICAL_PUBLICATION_MAPPING_MISSING") })] }),
+      ]);
     });
 
     it("should run allocation and push to channel", async () => {
@@ -943,7 +966,7 @@ describe("EchelonSyncOrchestrator", () => {
 
       expect(inventoryPublication.listProductIds).toHaveBeenCalledWith(expect.any(Function), undefined);
       expect(inventoryPublication.publishProduct).toHaveBeenCalledWith(
-        { productId: 91, dryRun: false, triggeredBy: "manual" },
+        { productId: 91, dryRun: false, triggeredBy: "manual", blockedTargets: "isolate" },
         expect.any(Function),
       );
       expect(results[0]).toMatchObject({ products: 1, variantsQueued: 1 });

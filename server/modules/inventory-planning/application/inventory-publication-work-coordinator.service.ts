@@ -33,6 +33,15 @@ interface InventoryPublicationOrchestrator {
   ): Promise<InventorySyncResult[]>;
 }
 
+/** Durable "this product's stock changed" marker; the publication worker drains it. */
+export interface InventoryPublicationChangeMarker {
+  markProductsChanged(productIds: readonly number[]): Promise<void>;
+}
+
+export type InventoryChangeRecordResult =
+  | { mode: "marked"; productIds: number[] }
+  | { mode: "published"; productIds: number[]; results: InventoryPublicationWorkResult[] };
+
 export interface InventoryPublicationWorkResult {
   authority: InventoryAvailabilityRuntimeAuthority | null;
   inventory: InventorySyncResult[];
@@ -49,7 +58,27 @@ export class InventoryPublicationWorkCoordinator {
     private readonly authority: RuntimeAuthorityReader,
     private readonly effectiveState: EffectiveStateReader,
     private readonly orchestrator: InventoryPublicationOrchestrator,
+    private readonly changeMarker?: InventoryPublicationChangeMarker,
   ) {}
+
+  /**
+   * Inventory-change entry point for every warehouse operation. Under canonical
+   * authority it only records the change durably and returns: the publication
+   * worker plans, isolates broken listings and retries, so channel trouble can
+   * never fail or slow the custody operation that changed stock. Legacy
+   * authority has no worker-owned planner, so it keeps publishing inline.
+   */
+  async recordInventoryChange(productIds: readonly number[], triggeredBy: string): Promise<InventoryChangeRecordResult> {
+    const ids = [...new Set(productIds.map(id => positiveInteger(id, "productId")))].sort((a, b) => a - b);
+    if (ids.length === 0) return { mode: "marked", productIds: [] };
+    if (this.changeMarker && await this.authority.readAuthority() === "canonical") {
+      await this.changeMarker.markProductsChanged(ids);
+      return { mode: "marked", productIds: ids };
+    }
+    const results: InventoryPublicationWorkResult[] = [];
+    for (const productId of ids) results.push(await this.syncProduct(productId, triggeredBy));
+    return { mode: "published", productIds: ids, results };
+  }
 
   async syncProduct(productId: number, triggeredBy: string): Promise<InventoryPublicationWorkResult> {
     positiveInteger(productId, "productId");

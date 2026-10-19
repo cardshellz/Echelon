@@ -169,6 +169,7 @@ import { createVariantAvailabilitySyncService } from "../modules/channels/varian
 import { InventoryPublicationOutboxService } from "../modules/inventory-planning/application/inventory-publication-outbox.service";
 import { PostgresInventoryPublicationOutboxRepository } from "../modules/inventory-planning/infrastructure/inventory-publication-outbox.repository";
 import { PostgresPublicationSelectionWork } from "../modules/inventory-planning/infrastructure/publication-selection-work.repository";
+import { markPublicationProductsChanged } from "../modules/inventory-planning/infrastructure/publication-product-change";
 import { quantityPublicationAdmission, createQuantityPublicationCatchupService } from "../modules/inventory-planning/infrastructure/quantity-publication-runtime";
 import { EbayPublicationReconciliationService, ebayPublicationReconciliationRepository } from "../modules/inventory-planning/quantity-publication";
 import { refreshRecoveredEbayListing } from "../modules/channels/ebay-listing-sync";
@@ -464,6 +465,7 @@ export function createServices(
     inventoryPublicationRuntime,
     syncSettings,
     echelonOrchestrator,
+    { markProductsChanged: productIds => markPublicationProductsChanged(databasePool, productIds) },
   );
   const variantAvailabilitySync = createVariantAvailabilitySyncService({
     allocationEngine,
@@ -496,13 +498,18 @@ export function createServices(
   // methods. Inventory-change work uses inventoryPublicationWork below.
   channelSync.setOrchestrator(echelonOrchestrator);
 
-  // Await publication work creation. The warehouse command outboxes retain failures.
+  // Warehouse operations only mark affected products changed (canonical); the
+  // publication worker publishes. A failed mark still throws so the warehouse
+  // command outboxes retain it; the scheduled sweep is the final backstop.
   const pendingReplenChecks = new Set<number>();
   const queueVariantInventorySync = async (productVariantId: number, triggeredBy: string): Promise<void> => {
     const productIds = await inventorySupplyDependencies.getAffectedProductIds(productVariantId);
+    const recorded = await inventoryPublicationWork.recordInventoryChange(productIds, `inventory_change:${triggeredBy}`);
+    if (recorded.mode === "published") {
+      const failed = recorded.results.findIndex(result => result.inventory.some(work => work.variantsErrored > 0));
+      if (failed >= 0) throw new Error(`Inventory publication work failed for product ${recorded.productIds[failed]}`);
+    }
     for (const productId of productIds) {
-      const result = await inventoryPublicationWork.syncProduct(productId, `inventory_change:${triggeredBy}`);
-      if (result.inventory.some(work => work.variantsErrored > 0)) throw new Error(`Inventory publication work failed for product ${productId}`);
       // Preserve the existing debounce for general product re-evaluation. Exact
       // transfer source checks and task dependencies have durable owners below.
       if (pendingReplenChecks.has(productId)) continue;

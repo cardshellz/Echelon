@@ -2548,18 +2548,16 @@ export class PickingUseCases {
         }
 
         // The pick and required replenishment have committed. Channel publication
-        // is a downstream side-channel, never a gate on physical picking: a
-        // blocked or offline target (#64414, CANONICAL_PUBLICATION_TARGET_*) must
-        // not fail this follow-up, or the WMS line stays pending and every replay
-        // hits the same permanent blocker. The scheduled publication sweep
-        // (startEchelonSyncScheduler -> syncAllProducts) republishes current
-        // quantities, so a skipped event publish self-heals once the target is fixed.
+        // is downstream and never gates a physical pick (#64414): this call only
+        // marks the product changed for the publication worker, which isolates
+        // broken listings. If even the mark fails, log it; the scheduled sweep
+        // republishes current quantities.
         if (this.channelSync) {
           try {
             await this.channelSync.queueSyncAfterInventoryChange(deductResult.productVariantId);
           } catch (publicationError) {
             platformLogger.error("pick_channel_publication_deferred", {
-              outcome: "deferred_to_scheduled_sweep",
+              outcome: "deferred_to_publication_sweep",
               error_code: (publicationError as { code?: unknown })?.code ?? "PICK_CHANNEL_PUBLICATION_FAILED",
               error_class: "transient",
               wms_order_id: item.orderId,

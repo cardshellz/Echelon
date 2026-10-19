@@ -1399,7 +1399,7 @@ describe("post-commit replenishment before publication", () => {
       expect(inventoryCore.pickItem).not.toHaveBeenCalled();
       const logged = stderr.mock.calls.map(([line]) => String(line)).find(line => line.includes("pick_channel_publication_deferred"));
       expect(JSON.parse(logged!)).toMatchObject({ level: "error", product_variant_id: 100,
-        error_code: (failure as { code?: string }).code ?? "PICK_CHANNEL_PUBLICATION_FAILED", outcome: "deferred_to_scheduled_sweep" });
+        error_code: (failure as { code?: string }).code ?? "PICK_CHANNEL_PUBLICATION_FAILED", outcome: "deferred_to_publication_sweep" });
     } finally {
       stderr.mockRestore();
     }
