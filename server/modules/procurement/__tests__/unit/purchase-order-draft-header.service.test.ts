@@ -1,4 +1,4 @@
-import { costGraphLockExecute } from "./cost-graph.fixture";
+import { costGraphAndPoInvoiceHistoryExecute } from "./cost-graph.fixture";
 import { describe, expect, it, vi } from "vitest";
 
 vi.mock("../../po-exceptions.service", () => ({
@@ -17,6 +17,7 @@ function buildDb(
     updateResult?: Record<string, unknown>[];
     eventError?: Error;
     recommendationHandoff?: Record<string, unknown> | null;
+    invoiceHistory?: { hasInvoiceLinks: boolean; hasInvoiceLines: boolean };
   } = {},
 ) {
   const updates: Record<string, unknown>[] = [];
@@ -39,7 +40,7 @@ function buildDb(
   });
 
   const tx: any = {
-    execute: costGraphLockExecute(),
+    execute: costGraphAndPoInvoiceHistoryExecute(options.invoiceHistory),
     select,
     update: vi.fn(() => ({
       set: vi.fn((patch: Record<string, unknown>) => {
@@ -184,7 +185,9 @@ describe("draft purchase order header updates", () => {
   });
 
   it("rejects draft header edits after financial activity exists", async () => {
-    const harness = buildDb(draftPo({ invoicedTotalCents: 100 }));
+    const harness = buildDb(draftPo({ invoicedTotalCents: 0, paidTotalCents: 0 }), {
+      invoiceHistory: { hasInvoiceLinks: true, hasInvoiceLines: false },
+    });
     const service = createPurchasingService(harness.db, {} as any);
 
     await expect(service.updatePO(42, { priority: "rush" }, "user-9")).rejects.toMatchObject({
@@ -193,6 +196,21 @@ describe("draft purchase order header updates", () => {
     } satisfies Partial<PurchasingError>);
     expect(harness.updates).toEqual([]);
     expect(harness.events).toEqual([]);
+  });
+
+  it("uses source history rather than stale nonzero compatibility totals", async () => {
+    const harness = buildDb(draftPo({ financialStatus: "paid", invoicedTotalCents: 100, paidTotalCents: 100 }));
+    const service = createPurchasingService(harness.db, {} as any);
+    await expect(service.updatePO(42, { priority: "rush" }, "user-9")).resolves.toMatchObject({ priority: "rush" });
+  });
+
+  it("rejects a surviving invoice line even without its header relationship", async () => {
+    const harness = buildDb(draftPo(), { invoiceHistory: { hasInvoiceLinks: false, hasInvoiceLines: true } });
+    const service = createPurchasingService(harness.db, {} as any);
+    await expect(service.updatePO(42, { priority: "rush" }, "user-9")).rejects.toMatchObject({
+      statusCode: 409, details: { code: "PO_DRAFT_HAS_FINANCIAL_ACTIVITY" },
+    });
+    expect(harness.updates).toEqual([]);
   });
 
   it("returns not found without writing when the locked row does not exist", async () => {

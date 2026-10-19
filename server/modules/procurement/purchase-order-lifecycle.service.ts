@@ -36,12 +36,10 @@ export const PO_PHYSICAL_TRANSITIONS: Record<PoPhysicalStatus, PoPhysicalStatus[
   cancelled: [],
 };
 
+/** Compatibility shape only. Financial changes are commands on invoices/payments,
+ * never manual transitions on a purchase order. */
 export const PO_FINANCIAL_TRANSITIONS: Record<PoFinancialStatus, PoFinancialStatus[]> = {
-  unbilled: ["invoiced"],
-  invoiced: ["partially_paid", "paid", "disputed"],
-  partially_paid: ["paid", "disputed"],
-  paid: [],
-  disputed: ["partially_paid", "paid"],
+  unbilled: [], invoiced: [], partially_paid: [], paid: [], disputed: [],
 };
 
 // Maps physical movement to the legacy single-track status used by older callers.
@@ -212,6 +210,9 @@ export function buildPoLifecycleSummary(po: Record<string, any>): PoLifecycleSum
   const allowedLegacyTransitions = getAllowedLegacyTransitions(legacyStatus);
   const allowedPhysicalTransitions = getAllowedPhysicalTransitions(physicalStatus);
   const allowedFinancialTransitions = getAllowedFinancialTransitions(financialStatus);
+  const workflow = poFinancialWorkflowSchema.safeParse(po.financialWorkflow);
+  const financialComplete = workflow.success && workflow.data.purchaseOrderId === po.id &&
+    (workflow.data.state === "settled" || (physicalStatus === "cancelled" && workflow.data.state === "unbilled"));
   const nextActions: PoNextAction[] = [];
 
   if (legacyStatus === "draft") {
@@ -384,7 +385,7 @@ export function buildPoLifecycleSummary(po: Record<string, any>): PoLifecycleSum
     isTerminal:
       allowedLegacyTransitions.length === 0 &&
       allowedPhysicalTransitions.length === 0 &&
-      allowedFinancialTransitions.length === 0,
+      financialComplete,
     nextActions,
   };
 }
@@ -721,7 +722,8 @@ export function buildPhysicalTransitionChange(params: {
   };
 }
 
-export function buildFinancialTransitionChange(params: {
+/** @deprecated Retained only to reject older direct callers explicitly. */
+export function buildFinancialTransitionChange(_params: {
   po: Record<string, any>;
   target: PoFinancialStatus;
   userId?: string;
@@ -729,43 +731,9 @@ export function buildFinancialTransitionChange(params: {
   now?: Date;
   extraPatch?: Record<string, unknown>;
 }): LifecycleChange {
-  const { po, target, userId, notes, extraPatch } = params;
-  const current = (po.financialStatus ?? "unbilled") as PoFinancialStatus;
-  const allowed = getAllowedFinancialTransitions(current);
-
-  if (!allowed.includes(target)) {
-    throw new PoLifecycleError(
-      `Cannot transition financial status from '${current}' to '${target}'`,
-      400,
-      { current, target, allowed },
-    );
-  }
-
-  const now = params.now ?? new Date();
-  const patch: Record<string, unknown> = {
-    financialStatus: target,
-    updatedBy: userId,
-  };
-
-  if (target === "invoiced" && !po.firstInvoicedAt) {
-    patch.firstInvoicedAt = now;
-  }
-  if ((target === "partially_paid" || target === "paid") && !po.firstPaidAt) {
-    patch.firstPaidAt = now;
-  }
-  if (target === "paid" && !po.fullyPaidAt) {
-    patch.fullyPaidAt = now;
-  }
-
-  Object.assign(patch, extraPatch ?? {});
-
-  return {
-    patch,
-    history: {
-      fromStatus: po.status,
-      toStatus: po.status,
-      changedBy: userId,
-      notes: notes ?? `Financial status: ${current} -> ${target}`,
-    },
-  };
+  throw new PoLifecycleError(
+    "Purchase order financial state is derived from invoice and payment evidence. Update the source invoice or payment instead.",
+    409,
+    { code: "PO_FINANCIAL_LEDGER_OWNED" },
+  );
 }

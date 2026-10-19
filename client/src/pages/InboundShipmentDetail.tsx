@@ -44,6 +44,8 @@ import {
   type ShipmentCostEditor,
   type ShipmentCostForm,
 } from "@/lib/shipment-cost-command";
+import { parseShipmentInvoices } from "@/lib/shipment-invoice-reads";
+import { shipmentCostBillingOwnershipSchema } from "@shared/procurement/shipment-billing-ownership";
 import { AddInvoiceFromCostsModal } from "@/components/shipment/AddInvoiceFromCostsModal";
 import { ShipmentCostVendorSelect } from "@/components/shipment/ShipmentCostVendorSelect";
 import { shipmentCostVendorListSchema, type ShipmentCostVendorOption } from "@/lib/shipment-cost-vendors";
@@ -470,6 +472,7 @@ export default function InboundShipmentDetail() {
   const {
     data: shipment,
     isLoading,
+    isFetching: shipmentRefreshing,
     error: shipmentError,
     refetch: refetchShipment,
   } = useQuery<any>({
@@ -496,9 +499,13 @@ export default function InboundShipmentDetail() {
     },
     enabled: showAddCostDialog || !!editingCost,
   });
-  const { data: invoicesData } = useQuery<any>({
+  const { data: invoicesData, isPending: invoicesLoading, isFetching: invoicesRefreshing, isError: invoicesError, refetch: refetchInvoices } = useQuery({
     queryKey: [`/api/inbound-shipments/${shipmentId}/invoices`],
     enabled: !!shipmentId,
+    queryFn: async () => {
+      const response = await apiRequest("GET", `/api/inbound-shipments/${shipmentId}/invoices`);
+      return parseShipmentInvoices(await response.json(), Number(shipmentId));
+    },
   });
 
   const lines = useMemo(
@@ -513,21 +520,32 @@ export default function InboundShipmentDetail() {
     [shipment?.purchaseOrderId, lines],
   );
   const costs = shipment?.costs ?? [];
+  const shipmentBillingReadVerified = !shipmentRefreshing && !shipmentError && shipment?.id === shipmentId;
   const canReplaceShipmentInvoice = hasPermission("purchasing", "create") && hasPermission("purchasing", "edit");
-  function costInvoiceStatus(cost: { derivedStatus?: string; vendorInvoiceId?: number | null; linkedInvoice?: { status?: string } | null }) {
-    if (cost.linkedInvoice?.status === "voided" || cost.derivedStatus === "voided") return "Voided invoice — replacement required";
-    if (cost.derivedStatus === "paid") return "Paid";
-    if (cost.derivedStatus === "invoiced") return "Invoiced";
-    if (cost.derivedStatus === "unbilled" && cost.vendorInvoiceId == null) return "Unbilled";
-    return "Invoice status unavailable";
+  function costInvoiceStatus(cost: { billingOwnership?: unknown; derivedStatus?: string }) {
+    if (!shipmentBillingReadVerified) return "Invoice ownership unavailable";
+    const parsed = shipmentCostBillingOwnershipSchema.safeParse(cost.billingOwnership);
+    if (!parsed.success) return "Invoice ownership unavailable";
+    if (parsed.data.state === "review_required") return "Invoice ownership needs review";
+    if (parsed.data.state === "voided") return "Voided invoice — replacement required";
+    if (parsed.data.state === "unbilled") return "Unbilled";
+    return cost.derivedStatus === "paid" ? "Paid" : "Invoiced";
   }
-  function invoiceRecoveryLink(cost: { linkedInvoice?: { id: number; status?: string } | null }) {
-    if (cost.linkedInvoice?.status !== "voided") return null;
+  function invoiceRecoveryLink(cost: { billingOwnership?: unknown; linkedInvoice?: { id: number; status?: string } | null }) {
+    if (!shipmentBillingReadVerified) return null;
+    const parsed = shipmentCostBillingOwnershipSchema.safeParse(cost.billingOwnership);
+    if (!parsed.success) return <p className="text-xs text-amber-700 mt-1">Reload the shipment to verify invoice ownership.</p>;
+    if (parsed.data.state === "review_required") return <div className="text-xs text-amber-700 mt-1"><p>{parsed.data.message}</p>{parsed.data.referencedInvoiceIds.map(id => <Link key={id} href={procurementNavigation.childHref(`/ap-invoices/${id}`)} className="text-primary underline mr-2">Review invoice #{id}</Link>)}</div>;
+    if (parsed.data.state !== "voided" || !cost.linkedInvoice || !parsed.data.referencedInvoiceIds.includes(cost.linkedInvoice.id)) return null;
     return <p className="text-xs mt-1">{canReplaceShipmentInvoice
       ? <Link href={procurementNavigation.childHref(`/ap-invoices/${cost.linkedInvoice.id}`)} className="text-primary underline">Review invoice replacement</Link>
       : "A user with purchasing create and edit permissions can review replacement of this voided invoice."}</p>;
   }
-  const paymentStatus = shipment?.paymentStatus ?? null;
+  const costBillingVerified = shipmentBillingReadVerified && costs.every((cost: { billingOwnership?: unknown }) => {
+    const parsed = shipmentCostBillingOwnershipSchema.safeParse(cost.billingOwnership);
+    return parsed.success && parsed.data.state !== "review_required";
+  });
+  const paymentStatus = costBillingVerified ? shipment?.paymentStatus ?? null : null;
   const statusHistory = shipment?.statusHistory ?? [];
 
 
@@ -1576,7 +1594,10 @@ export default function InboundShipmentDetail() {
                 Add Cost
               </Button>
             )}
-            {costs.length > 0 && costs.some((c: any) => !c.vendorInvoiceId && c.vendorId) && (
+            {shipmentBillingReadVerified && hasPermission("purchasing", "edit") && shipment.status !== "cancelled" && costs.some((cost: any) => {
+              const ownership = shipmentCostBillingOwnershipSchema.safeParse(cost.billingOwnership);
+              return ownership.success && ownership.data.canCreateInvoice && Number.isInteger(cost.vendorId) && cost.vendorId > 0 && cost.vendorId <= 2_147_483_647;
+            }) && (
               <Button variant="outline" onClick={() => setShowAddInvoiceModal(true)} className="min-h-[44px]">
                 <FileText className="h-4 w-4 mr-2" />
                 Add Invoice
@@ -1599,7 +1620,12 @@ export default function InboundShipmentDetail() {
             </div>
           )}
 
+          {!shipmentBillingReadVerified && <div role="alert" className="rounded-md border p-3 text-sm space-y-2">
+            <p>{shipmentRefreshing ? "Refreshing shipment ownership. Billing actions and totals are unavailable until verification completes." : "Shipment ownership could not be refreshed. Displayed charge records may be stale; billing actions and totals are unavailable."}</p>
+            <Button variant="outline" disabled={shipmentRefreshing} onClick={() => void refetchShipment()}>Reload shipment ownership</Button>
+          </div>}
           {/* Payment summary bar */}
+          {!costBillingVerified && costs.length > 0 && <p role="alert" className="text-sm text-amber-700">Shipment billing totals are unavailable until charge ownership is verified.</p>}
           {paymentStatus?.summary && costs.length > 0 && (
             <div className="flex flex-wrap gap-4 text-sm px-1">
               <span>Total: <strong className="font-mono">{formatCents(paymentStatus.summary.totalCents)}</strong></span>
@@ -1732,13 +1758,7 @@ export default function InboundShipmentDetail() {
                             >
                               {cost.linkedInvoice.invoiceNumber}
                             </Link>
-                          ) : cost.vendorInvoiceId ? (
-                            <span className="text-xs text-muted-foreground">Invoice link unavailable</span>
-                          ) : cost.vendorId ? (
-                            <span className="text-xs text-muted-foreground">Unbilled</span>
-                          ) : (
-                            <span className="text-xs text-muted-foreground">Set vendor first</span>
-                          )}
+                          ) : <span className="text-xs text-muted-foreground">{costInvoiceStatus(cost)}</span>}
                           {invoiceRecoveryLink(cost)}
                         </TableCell>
                         <TableCell className="text-xs">
@@ -1956,7 +1976,7 @@ export default function InboundShipmentDetail() {
         {/* ══ Tab 4: Invoices ══ */}
         <TabsContent value="invoices" className="space-y-4">
           {/* Summary bar */}
-          {invoicesData?.summary && (
+          {!invoicesLoading && !invoicesRefreshing && !invoicesError && invoicesData?.summary && (
             <div className="flex flex-wrap gap-6 text-sm px-1">
               <span>Total Invoiced: <strong className="font-mono">{formatCents(invoicesData.summary.totalInvoicedCents)}</strong></span>
               <span>Total Paid: <strong className="font-mono">{formatCents(invoicesData.summary.totalPaidCents)}</strong></span>
@@ -1964,12 +1984,19 @@ export default function InboundShipmentDetail() {
             </div>
           )}
 
-          {!invoicesData?.invoices?.length ? (
+          {invoicesLoading || invoicesRefreshing ? (
+            <p role="status" className="text-sm text-muted-foreground">{invoicesData ? "Refreshing shipment invoices…" : "Loading shipment invoices…"}</p>
+          ) : invoicesError || !invoicesData ? (
+            <div role="alert" className="rounded-md border p-4 space-y-2">
+              <p>Shipment invoices could not be loaded. Their amounts and payment status are unavailable.</p>
+              <Button variant="outline" onClick={() => void refetchInvoices()}>Reload shipment invoices</Button>
+            </div>
+          ) : invoicesData.invoices.length === 0 ? (
             <Card>
               <CardContent className="p-8 text-center text-muted-foreground">
                 <FileText className="h-8 w-8 mx-auto mb-2 opacity-30" />
                 <p className="text-sm">No invoices linked to this shipment yet.</p>
-                <p className="text-xs mt-1">Add invoices from the AP Invoices page and link them to this shipment.</p>
+                <p className="text-xs mt-1">Create an invoice from verified unbilled charges in the Costs tab.</p>
               </CardContent>
             </Card>
           ) : (
@@ -2626,9 +2653,12 @@ export default function InboundShipmentDetail() {
 
       {/* ═══════ Add Invoice Modal (vendor picker → invoice preview) ═══════ */}
       <AddInvoiceFromCostsModal
+        key={`${user?.id ?? "signed-out"}:${shipmentId}`}
         open={showAddInvoiceModal}
         onOpenChange={setShowAddInvoiceModal}
         shipmentId={shipmentId!}
+        sourceVerified={shipmentBillingReadVerified}
+        invoiceHref={invoiceId => procurementNavigation.childHref(`/ap-invoices/${invoiceId}`)}
       />
 
       {/* ═══════ Quick Add Vendor Dialog ═══════ */}

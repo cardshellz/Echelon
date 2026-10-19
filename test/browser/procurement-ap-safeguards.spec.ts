@@ -1,3 +1,4 @@
+import { invoiceSourceFixture, unbilledOwnershipFixture } from "../fixtures/invoice-source";
 import { invoiceListItem, paymentListItem, workListPage } from "./procurement-ap-work-list-fixtures";
 import { expect, test, type Page } from "@playwright/test";
 import { installFixtures } from "./procurement-fixtures";
@@ -9,7 +10,7 @@ async function setup(page: Page, canEdit = true) {
   await page.route("**/api/auth/me", route => route.fulfill({ json: { user: { id: "ap-reviewer", role: "admin", username: "test" }, permissions: canEdit ? ["purchasing:view", "purchasing:edit", "purchasing:approve"] : ["purchasing:view"], roles: ["admin"] } }));
   return failures;
 }
-const invoice = (edit = locked) => ({ id: 71, invoiceNumber: "AP-SAFE-71", vendorId: 2, vendorName: "Test vendor", status: "disputed", currency: "USD", invoicedAmountCents: 10000, paidAmountCents: 8000, balanceCents: 2000,
+const invoice = (edit = locked) => ({ sourceCapabilities: invoiceSourceFixture(), id: 71, invoiceNumber: "AP-SAFE-71", vendorId: 2, vendorName: "Test vendor", status: "disputed", currency: "USD", invoicedAmountCents: 10000, paidAmountCents: 8000, balanceCents: 2000,
   capabilities: { edit }, paymentReviewRequired: false, lines: [{ id: 72, lineNumber: 1, purchaseOrderLineId: 18, qtyInvoiced: 1, unitCostCents: 10000, unitCostMills: 1000000, lineTotalCents: 10000, productName: "Test item", matchStatus: "qty_discrepancy" }], poLinks: [], attachments: [], payments: [] });
 
 test("recognized disputed bill hides generic edits and retains the reviewed correction and attachments", async ({ page }) => {

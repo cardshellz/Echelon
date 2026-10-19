@@ -1,4 +1,5 @@
 import { getPurchaseOrderWorkList } from "./purchase-order-work-list.service";
+import { getPurchaseOrderList, PurchaseOrderListQueryError } from "./purchase-order-list.service";
 import { procurementSettingsCommands, PROCUREMENT_SETTINGS_COMMAND_SCOPE } from "./procurement-settings.commands";
 import type { Express, Request, Response } from "express";
 import { registerPoVarianceApprovalRoutes } from './po-variance-approval.routes';
@@ -350,37 +351,30 @@ export function registerPurchaseOrderRoutes(app: Express, financialEvidence: Pic
 
   app.get("/api/purchase-orders", requirePermission("purchasing", "view"), async (req, res) => {
     try {
+      const statusFilter = (value: unknown): string | string[] | undefined => {
+        if (value === undefined) return undefined;
+        const values = typeof value === "string" ? value.split(",")
+          : Array.isArray(value) && value.every(entry => typeof entry === "string") ? value.flatMap(entry => entry.split(","))
+            : null;
+        if (!values || values.length === 0 || values.some(value => value.length === 0)) throw new PurchaseOrderListQueryError();
+        return values.length === 1 ? values[0] : values;
+      };
       // Support ?status=sent&status=acknowledged or ?status=sent,acknowledged
-      let statusFilter: string | string[] | undefined;
-      if (req.query.status) {
-        const raw = Array.isArray(req.query.status) ? req.query.status as string[] : (req.query.status as string).split(",");
-        statusFilter = raw.length === 1 ? raw[0] : raw;
-      }
-      // Phase 2: dual-track physical/financial status filters
-      let physicalStatusFilter: string | string[] | undefined;
-      if (req.query.physical_status) {
-        const raw = Array.isArray(req.query.physical_status) ? req.query.physical_status as string[] : (req.query.physical_status as string).split(",");
-        physicalStatusFilter = raw.length === 1 ? raw[0] : raw;
-      }
-      let financialStatusFilter: string | string[] | undefined;
-      if (req.query.financial_status) {
-        const raw = Array.isArray(req.query.financial_status) ? req.query.financial_status as string[] : (req.query.financial_status as string).split(",");
-        financialStatusFilter = raw.length === 1 ? raw[0] : raw;
-      }
       const filters = {
-        status: statusFilter,
-        physicalStatus: physicalStatusFilter,
-        financialStatus: financialStatusFilter,
+        status: statusFilter(req.query.status),
+        physicalStatus: statusFilter(req.query.physical_status),
+        financialStatus: statusFilter(req.query.financial_status),
+        financialWorkflow: req.query.financial_workflow,
         vendorId: req.query.vendorId ? Number(req.query.vendorId) : undefined,
         search: req.query.search as string | undefined,
         limit: req.query.limit ? Number(req.query.limit) : 50,
         offset: req.query.offset ? Number(req.query.offset) : 0,
       };
-      const [pos, count, allVendors] = await Promise.all([
-        purchasing.getPurchaseOrders(filters),
-        purchasing.getPurchaseOrdersCount(filters),
+      const [page, allVendors] = await Promise.all([
+        getPurchaseOrderList(filters),
         storage.getAllVendors(),
       ]);
+      const { purchaseOrders: pos, total: count } = page;
       const vendorMap = new Map(allVendors.map((v: any) => [v.id, v]));
 
       // Attach open exception counts to each PO (parallel, no N+1).
@@ -396,7 +390,9 @@ export function registerPurchaseOrderRoutes(app: Express, financialEvidence: Pic
       }));
       res.json({ purchaseOrders: enriched, total: count });
     } catch (error: any) {
-      res.status(500).json({ error: error.message });
+      if (error instanceof PurchaseOrderListQueryError) return res.status(400).json({ error: "Invalid purchase order list filters or page", code: "PO_LIST_QUERY_INVALID" });
+      logger.error("procurement.purchase_order_list", { error_class: error instanceof Error ? error.name : typeof error });
+      res.status(503).json({ error: "Purchase order financial evidence could not be verified. Retry the list.", code: "PURCHASE_ORDER_LIST_UNAVAILABLE" });
     }
   });
 
@@ -553,7 +549,7 @@ export function registerPurchaseOrderRoutes(app: Express, financialEvidence: Pic
       }
 
       res.json({
-        ...withLifecycle(po),
+        ...withLifecycle({ ...po, financialWorkflow }),
         lines,
         vendor,
         openExceptionCount: exceptionCount.count,

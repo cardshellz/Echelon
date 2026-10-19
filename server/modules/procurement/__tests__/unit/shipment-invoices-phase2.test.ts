@@ -41,7 +41,8 @@ vi.mock("../../../../db", () => ({
     transaction: vi.fn().mockImplementation(async (fn: any) => {
       mockDbTransactionCallCount.value++;
       const tx = {
-        execute: mockTxExecute,
+        execute: (query: { strings?: readonly string[] }) => query.strings?.join("").includes('AS "headerId"')
+          ? Promise.resolve({ rows: [] }) : mockTxExecute(query),
         select: vi.fn().mockImplementation(() => {
           const result = mockSelectResults.results.shift() || [];
           const chain: any = {};
@@ -155,7 +156,7 @@ vi.mock("drizzle-orm", () => ({
       strings,
       values,
     })),
-    { join: vi.fn((arr: any[], sep: any) => ({ type: "join", arr, sep })) },
+    { join: vi.fn((arr: any[], sep: any) => ({ type: "join", arr, sep })), param: (value: unknown) => value },
   ),
   desc: vi.fn((x: any) => ({ type: "desc", value: x })),
   ne: vi.fn((a: any, b: any) => ({ type: "ne", left: a, right: b })),
@@ -200,7 +201,7 @@ describe("createInvoiceFromShipmentCosts", () => {
           actual_cents: 50000,
           estimated_cents: 45000,
           performed_by_name: "ExFreight Zeta",
-          vendor_id: 42,
+          vendor_id: 42, currency: "USD", inbound_shipment_id: 1,
           vendor_invoice_id: null,
           cost_status: "estimated",
         },
@@ -211,7 +212,7 @@ describe("createInvoiceFromShipmentCosts", () => {
           actual_cents: null,
           estimated_cents: 12000,
           performed_by_name: "Clearit USA",
-          vendor_id: 42,
+          vendor_id: 42, currency: "USD", inbound_shipment_id: 1,
           vendor_invoice_id: null,
           cost_status: "estimated",
         },
@@ -315,7 +316,7 @@ describe("createInvoiceFromShipmentCosts", () => {
           actual_cents: 50000,
           estimated_cents: 45000,
           performed_by_name: "ExFreight Zeta",
-          vendor_id: 42,
+          vendor_id: 42, currency: "USD", inbound_shipment_id: 1,
           vendor_invoice_id: null,
           cost_status: "estimated",
         },
@@ -357,7 +358,7 @@ describe("createInvoiceFromShipmentCosts", () => {
           cost_type: "freight",
           actual_cents: 50000,
           estimated_cents: 45000,
-          vendor_id: 42,
+          vendor_id: 42, currency: "USD", inbound_shipment_id: 1,
           vendor_invoice_id: 777,
           cost_status: "invoiced",
         },

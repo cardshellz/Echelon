@@ -1,3 +1,4 @@
+import { resolveShipmentBillingOwnership } from "./shipment-billing-ownership";
 import { z } from "zod";
 import type { CostIssue } from "@shared/procurement/cost-source-contracts";
 
@@ -11,6 +12,7 @@ const chargeSchema = z.object({
 });
 const invoiceLineSchema = z.object({
   id: id.nullable(), invoiceId: id, freightCostId: id.nullable(), vendorId: id,
+  purchaseOrderLineId: id.nullable().optional().default(null), productVariantId: id.nullable().optional().default(null),
   invoiceNumber: z.string().min(1).nullable().optional().default(null),
   replacesInvoiceId: id.nullable().optional().default(null),
   shipmentId: id.nullable(), currency: z.string(), status: z.string(),
@@ -113,6 +115,17 @@ export function resolveShipmentChargeEvidence(value: unknown): ShipmentChargeEvi
     if (sourcedLines.some((line) => !["draft", "received", "approved", "partially_paid", "paid"].includes(line.status))) {
       return review("LANDED_INVOICE_STATUS_REVIEW", `Shipment charge ${charge.id} references disputed, voided, or unsupported invoice evidence.`);
     }
+    const ownershipHeaders = new Map(invoices.map(line => [line.invoiceId, {
+      id: line.invoiceId, vendorId: line.vendorId, shipmentId: line.shipmentId, currency: line.currency,
+      status: line.status, invoiceNumber: line.invoiceNumber ?? "", replacesInvoiceId: line.replacesInvoiceId,
+      hasProductSources: invoices.some(source => source.invoiceId === line.invoiceId && (source.purchaseOrderLineId !== null || source.productVariantId !== null)),
+    }]));
+    const ownership = resolveShipmentBillingOwnership({ cost: charge, invoices: [...ownershipHeaders.values()],
+      lines: invoices.filter(line => line.freightCostId !== null && line.id !== null).map(line => ({
+        id: line.id, invoiceId: line.invoiceId, freightCostId: line.freightCostId,
+        purchaseOrderLineId: line.purchaseOrderLineId, productVariantId: line.productVariantId,
+      })) });
+    if (ownership.state === "review_required") return review("LANDED_INVOICE_SOURCE_MISMATCH", ownership.message);
     if (sourcedLines.some((line) => line.id === null || line.quantity === null || line.lineTotalCents === null
       || line.lineTotalCents < 0 || line.invoiceTotalCents < 0 || line.documentLinesTotalCents !== line.invoiceTotalCents
       || (line.unitCostMills === null && line.unitCostCents === null))) {

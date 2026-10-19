@@ -1,3 +1,4 @@
+import { hasPoInvoiceHistory, readPoInvoiceHistory } from "./po-invoice-history.repository";
 import { lockInventoryCostGraph } from "../inventory/infrastructure/cost-evidence.repository";
 import { and, eq, ne, sql } from "drizzle-orm";
 import { z } from "zod";
@@ -569,25 +570,19 @@ function normalizePricing(pricing: PoLinePricingInput): NormalizedPoLinePricing 
   }
 }
 
-function assertDraftHeader(header: any): void {
+async function assertDraftHeader(tx: any, header: any): Promise<void> {
   const physicalStatus = header.physicalStatus ?? header.status;
-  const financialStatus = header.financialStatus ?? "unbilled";
   if (
     header.status !== "draft" ||
-    physicalStatus !== "draft" ||
-    financialStatus !== "unbilled"
+    physicalStatus !== "draft"
   ) {
     throw new PurchaseOrderLineCommandError("Purchase-order lines can only be changed in a clean draft", 409, {
       code: "PO_LINE_COMMAND_NOT_DRAFT",
       status: header.status,
       physicalStatus,
-      financialStatus,
     });
   }
-  if (
-    storedInteger(header.invoicedTotalCents, "invoiced_total_cents") !== 0 ||
-    storedInteger(header.paidTotalCents, "paid_total_cents") !== 0
-  ) {
+  if (hasPoInvoiceHistory(await readPoInvoiceHistory(tx, header.id))) {
     throw new PurchaseOrderLineCommandError("Purchase-order lines cannot change after financial activity", 409, {
       code: "PO_LINE_COMMAND_FINANCIAL_ACTIVITY",
     });
@@ -925,7 +920,6 @@ async function updateHeaderTotals(tx: any, header: any, userId?: string) {
       eq(purchaseOrders.id, header.id),
       eq(purchaseOrders.status, "draft"),
       eq(purchaseOrders.physicalStatus, "draft"),
-      eq(purchaseOrders.financialStatus, "unbilled"),
     ))
     .returning();
   if (!updatedRows[0]) {
@@ -967,7 +961,7 @@ export function createPurchaseOrderLineCommands(
   ) {
     await lockInventoryCostGraph(tx);
     const header = await lockHeader(tx, purchaseOrderId);
-    assertDraftHeader(header);
+    await assertDraftHeader(tx, header);
     assertExpectedVersion("purchase_order", header.updatedAt, input.expectedPoUpdatedAt);
     await assertNoRecommendationOwnership(tx, purchaseOrderId);
 
@@ -1030,7 +1024,7 @@ export function createPurchaseOrderLineCommands(
   ) {
     await lockInventoryCostGraph(tx);
     const header = await lockHeader(tx, purchaseOrderId);
-    assertDraftHeader(header);
+    await assertDraftHeader(tx, header);
     assertExpectedVersion("purchase_order", header.updatedAt, input.expectedPoUpdatedAt);
     await assertNoRecommendationOwnership(tx, purchaseOrderId);
     const maxRows = await tx
@@ -1096,7 +1090,7 @@ export function createPurchaseOrderLineCommands(
       if (!parentRows[0]) throw new PurchaseOrderLineCommandError("PO line not found", 404);
       const purchaseOrderId = parentRows[0].purchaseOrderId;
       const header = await lockHeader(tx, purchaseOrderId);
-      assertDraftHeader(header);
+      await assertDraftHeader(tx, header);
       assertExpectedVersion("purchase_order", header.updatedAt, input.expectedPoUpdatedAt);
       await assertNoRecommendationOwnership(tx, purchaseOrderId);
       const lineRows = await tx
@@ -1346,7 +1340,7 @@ export function createPurchaseOrderLineCommands(
       if (!parentRows[0]) throw new PurchaseOrderLineCommandError("PO line not found", 404);
       const purchaseOrderId = parentRows[0].purchaseOrderId;
       const header = await lockHeader(tx, purchaseOrderId);
-      assertDraftHeader(header);
+      await assertDraftHeader(tx, header);
       assertExpectedVersion("purchase_order", header.updatedAt, input.expectedPoUpdatedAt);
       await assertNoRecommendationOwnership(tx, purchaseOrderId);
       const lineRows = await tx

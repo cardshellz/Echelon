@@ -1,3 +1,4 @@
+import { registerShipmentInvoiceRoutes } from "./shipment-invoice.routes";
 import { createShipmentCreateCommands, shipmentCreateCommandScope, SHIPMENT_CREATE_COMMAND_PRINCIPAL } from "./shipment-create.commands";
 import { shipmentLineResourceIdSchema } from "@shared/procurement/shipment-line-command";
 import { createShipmentLineCommands, shipmentLineCommandScope, SHIPMENT_LINE_COMMAND_PRINCIPAL, type ShipmentLineCommand } from "./shipment-line-commands";
@@ -7,7 +8,7 @@ import { financialCommandFromRequest } from "../../platform/commands/http-comman
 import { FinancialCommandError } from "../../platform/commands/transactional-command.service";
 import { z } from "zod";
 import { shipmentCostResourceIdSchema } from "@shared/procurement/shipment-cost-command";
-import { requirePermission } from "../../routes/middleware";
+import { requireAuth, requirePermission } from "../../routes/middleware";
 import { requireIdempotency } from "../../middleware/idempotency";
 import { ShipmentTrackingError } from "./shipment-tracking.service";
 import * as apLedger from "./ap-ledger.service";
@@ -22,6 +23,7 @@ function getActorId(req: any): string | undefined {
 
 export function registerInboundShipmentRoutes(app: Express) {
   registerShipmentCostExceptionRoutes(app);
+  registerShipmentInvoiceRoutes(app);
   const { shipmentTracking } = app.locals.services;
   const shipmentCostCommands = createShipmentCostCommands(shipmentTracking);
   const shipmentCreateCommands = createShipmentCreateCommands(shipmentTracking);
@@ -129,7 +131,14 @@ export function registerInboundShipmentRoutes(app: Express) {
         shipmentTracking.getEnrichedLines(shipment.id),
         apLedger.enrichCostsWithInvoiceInfo(shipment.id).then((costs) => shipmentTracking.versionCosts(costs)),
         shipmentTracking.getStatusHistory(shipment.id),
-        apLedger.getShipmentCostPaymentStatus(shipment.id),
+        apLedger.getShipmentCostPaymentStatus(shipment.id).catch(error => {
+          // Keep original charge/invoice evidence inspectable when only the
+          // derived totals require ownership review. Infrastructure errors still
+          // fail the read instead of being presented as empty financial data.
+          if (error instanceof apLedger.ApLedgerError && error.statusCode === 409
+            && error.details?.code === "AP_SHIPMENT_BILLING_REVIEW_REQUIRED") return null;
+          throw error;
+        }),
         shipmentTracking.getShipmentPurchaseOrders(shipment.id),
       ]);
       res.json({ ...shipment, lines, costs, statusHistory: history, paymentStatus, purchaseOrders });
@@ -310,31 +319,6 @@ export function registerInboundShipmentRoutes(app: Express) {
 
   // Shipment cost to AP bridge
 
-  app.post("/api/inbound-shipments/:id/create-invoice", requirePermission("purchasing", "edit"), requireIdempotency(), async (req, res) => {
-    try {
-      const { vendorId, invoiceNumber, invoiceDate, dueDate, costRowIds, lineOverrides, notes } = req.body;
-      if (!vendorId) return res.status(400).json({ error: "vendorId is required" });
-      if (!invoiceNumber) return res.status(400).json({ error: "invoiceNumber is required" });
-      const invoice = await apLedger.createInvoiceFromShipmentCosts(
-        Number(req.params.id),
-        {
-          vendorId,
-          invoiceNumber,
-          invoiceDate: invoiceDate ? new Date(invoiceDate) : undefined,
-          dueDate: dueDate ? new Date(dueDate) : undefined,
-          costRowIds,
-          lineOverrides,
-          notes,
-        },
-        getActorId(req),
-      );
-      res.json(invoice);
-    } catch (error: any) {
-      if (error instanceof apLedger.ApLedgerError) return res.status(error.statusCode).json({ error: error.message });
-      res.status(500).json({ error: error.message });
-    }
-  });
-
   app.get("/api/inbound-shipments/:id/cost-vendors", requirePermission("purchasing", "view"), async (req, res) => {
     try {
       const result = await apLedger.getCostVendorsForShipment(Number(req.params.id));
@@ -374,34 +358,31 @@ export function registerInboundShipmentRoutes(app: Express) {
     }
   });
 
-  app.post("/api/inbound-shipments/costs/:costId/link-invoice", requirePermission("purchasing", "edit"), async (req, res) => {
+  const invoiceLinkInput = z.object({ vendorInvoiceId: shipmentCostResourceIdSchema, invoiceLineId: shipmentCostResourceIdSchema.optional() }).strict();
+  const invoiceLinkId = z.string().regex(/^[1-9]\d*$/).transform(Number).pipe(shipmentCostResourceIdSchema);
+  async function handleInvoiceOwnership(req: Request, res: Response, action: "link" | "unlink") {
     try {
-      const { vendorInvoiceId } = req.body;
-      if (!vendorInvoiceId) return res.status(400).json({ error: "vendorInvoiceId required" });
-      const result = await apLedger.linkCostToInvoice(
-        Number(req.params.costId),
-        vendorInvoiceId,
-        getActorId(req),
-      );
-      res.json(result);
-    } catch (error: any) {
-      if (error instanceof apLedger.ApLedgerError) return res.status(error.statusCode).json({ error: error.message });
-      res.status(500).json({ error: error.message });
+      const costId = invoiceLinkId.parse(req.params.costId);
+      const actorId = req.session?.user?.id;
+      if (!actorId) throw new FinancialCommandError("An authenticated operator is required", 401, "SHIPMENT_INVOICE_ACTOR_REQUIRED");
+      if (Object.keys(req.query).length) throw new FinancialCommandError("Invoice ownership commands do not accept query parameters", 400, "AP_INVOICE_LINK_INPUT_INVALID");
+      if (action === "link") {
+        const input = invoiceLinkInput.parse(req.body);
+        return res.json(await apLedger.linkCostToInvoice(costId, input.vendorInvoiceId, actorId, input.invoiceLineId));
+      }
+      z.object({}).strict().parse(req.body ?? {});
+      return res.json({ success: true, ...await apLedger.unlinkCostFromInvoice(costId, actorId) });
+    } catch (error) {
+      if (error instanceof z.ZodError) return res.status(400).json({ code: "AP_INVOICE_LINK_INPUT_INVALID", error: "Choose a valid charge, invoice and explicit invoice line." });
+      if (error instanceof apLedger.ApLedgerError) return res.status(error.statusCode).json({ code: error.details?.code, error: error.message, details: error.details });
+      if (error instanceof FinancialCommandError) return res.status(error.statusCode).json({ code: error.code, error: error.message });
+      console.error(JSON.stringify({ event: "procurement.shipment_invoice.ownership_failed", action, costId: req.params.costId,
+        actorId: req.session?.user?.id ?? null, code: "AP_INVOICE_OWNERSHIP_UNAVAILABLE", errorType: error instanceof Error ? error.name : typeof error }));
+      return res.status(503).json({ code: "AP_INVOICE_OWNERSHIP_UNAVAILABLE", error: "Invoice ownership could not be confirmed. Reload the shipment before retrying." });
     }
-  });
-
-  app.post("/api/inbound-shipments/costs/:costId/unlink-invoice", requirePermission("purchasing", "edit"), async (req, res) => {
-    try {
-      const result = await apLedger.unlinkCostFromInvoice(
-        Number(req.params.costId),
-        getActorId(req),
-      );
-      res.json({ success: true, ...result });
-    } catch (error: any) {
-      if (error instanceof apLedger.ApLedgerError) return res.status(error.statusCode).json({ error: error.message });
-      res.status(500).json({ error: error.message });
-    }
-  });
+  }
+  app.post("/api/inbound-shipments/costs/:costId/link-invoice", requireAuth, requirePermission("purchasing", "edit"), (req, res) => handleInvoiceOwnership(req, res, "link"));
+  app.post("/api/inbound-shipments/costs/:costId/unlink-invoice", requireAuth, requirePermission("purchasing", "edit"), (req, res) => handleInvoiceOwnership(req, res, "unlink"));
 
   // Allocation
 

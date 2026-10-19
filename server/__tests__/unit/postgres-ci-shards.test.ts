@@ -179,6 +179,8 @@ describe("PostgreSQL CI coverage and isolation", () => {
       "server/modules/procurement/__tests__/integration/po-financial-exceptions.integration.test.ts",
       "server/modules/procurement/__tests__/integration/po-financial-refresh.integration.test.ts",
       "server/modules/procurement/__tests__/integration/invoice-replacement.integration.test.ts",
+      "server/modules/procurement/__tests__/integration/shipment-invoice-ownership-guard.integration.test.ts",
+      "server/modules/procurement/__tests__/integration/shipment-billing-ownership.integration.test.ts",
       "server/modules/procurement/__tests__/integration/shipment-value-allocation.integration.test.ts",
       "server/modules/procurement/__tests__/integration/receiving-quarantine.integration.test.ts",
       "server/modules/inventory/__tests__/integration/receiving-custody-count-guard.integration.test.ts",
