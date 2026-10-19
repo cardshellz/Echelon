@@ -1,6 +1,7 @@
 import { Link } from "wouter";
 import { useState } from "react";
 import type { SupplyTransformationsAdminView, TransformationAdminModel } from "@shared/types/inventory-availability-admin";
+import { archivedTransformationVariantIds, recipeHasArchivedVariant } from "@shared/inventory/transformation-draft-lifecycle";
 import { recipeEquation } from "@/pages/supply-transformations-model";
 import { Button } from "@/components/ui/button";
 import { useAuth } from "@/lib/auth";
@@ -22,6 +23,7 @@ export function ProductRecipeRules({ view, model, edit, disabled, onChange }: {
   };
   const bindings = edit?.recipeBindings ?? model?.bindings ?? [];
   const selected = new Set(bindings.map(binding => binding.recipeId));
+  const archivedIds = archivedTransformationVariantIds(view);
   const missing = bindings.filter(binding => !view.recipes.some(recipe => recipe.id === binding.recipeId));
   const canAuthor = hasPermission("inventory", "adjust");
   const authoringBlocked = disabled || Boolean(edit && packageConversionHasChanges(edit));
@@ -41,7 +43,7 @@ export function ProductRecipeRules({ view, model, edit, disabled, onChange }: {
     {view.recipes.map(recipe => <div key={recipe.id} className="rounded-md border p-3">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <label className="flex items-center gap-2 text-sm font-medium">
-          <input type="checkbox" checked={selected.has(recipe.id)} disabled={!edit || disabled}
+          <input type="checkbox" checked={selected.has(recipe.id)} disabled={!edit || disabled || (!selected.has(recipe.id) && recipeHasArchivedVariant(recipe, archivedIds))}
             onChange={event => chooseRecipe(recipe.id, event.target.checked)} />
           {recipe.name} · v{recipe.version}
         </label>
@@ -50,6 +52,7 @@ export function ProductRecipeRules({ view, model, edit, disabled, onChange }: {
         </Link>}
       </div>
       <p className="mt-2 break-words font-mono text-xs">{recipeEquation(recipe, view.variants)}</p>
+      {recipeHasArchivedVariant(recipe, archivedIds) && <p className="mt-1 text-xs text-amber-800">This recipe uses an archived SKU. Update it before selecting it for a new draft.</p>}
       <p className="mt-1 text-xs text-muted-foreground">{selected.has(recipe.id)
         ? edit ? "Selected for this draft — not live" : "Included in the active rules"
         : "Not included in these rules"}</p>
