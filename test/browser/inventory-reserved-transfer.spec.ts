@@ -21,9 +21,9 @@ async function setup(page: Page, lostResponse = false, frozenFirst = false) {
         const failure = {
           code: frozen ? "LOCATION_FROZEN" : "TRANSFER_BLOCKED_BY_RESERVATION",
           error: frozen ? "Source bin is frozen for cycle counting" : "One case is reserved for order #64431",
-          context: {            
+          context: {
 needed: 1, onHandAtSource: 1, availableAtSource: 0, reservedAtSource: 1, sourceCode: "F-07", destCode: "F-06",
-            transferCommandReceipt: { contractVersion: "inventory_transfer_v1", commandKey: body.commandKey, outcome: "rejected" }          
+            transferCommandReceipt: { contractVersion: "inventory_transfer_v1", commandKey: body.commandKey, outcome: "rejected" }
 },
         };
         rejections.set(body.commandKey, failure);

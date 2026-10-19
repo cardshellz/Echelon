@@ -170,9 +170,9 @@ describe("persisted transfer rejection receipts", () => {
     expect(fetchMock.mock.calls.map(call => JSON.parse(call[1].body).commandKey)).toEqual(["first", "second"]);
   });
   it.each(["missing", "wrong-key", "wrong-version", "wrong-outcome", "other-route", "server-error"])("retains the exact key for %s rejection evidence", async scenario => {
-    const proof = scenario === "missing" ? undefined : {      
+    const proof = scenario === "missing" ? undefined : {
 ...receipt(scenario === "wrong-key" ? "other" : "first"),
-      ...(scenario === "wrong-version" ? { contractVersion: "unknown" } : {}), ...(scenario === "wrong-outcome" ? { outcome: "succeeded" } : {})    
+      ...(scenario === "wrong-version" ? { contractVersion: "unknown" } : {}), ...(scenario === "wrong-outcome" ? { outcome: "succeeded" } : {})
 };
     const fetchMock = vi.fn().mockResolvedValueOnce(new Response(JSON.stringify({ error: "Blocked", context: { transferCommandReceipt: proof } }), { status: scenario === "server-error" ? 503 : 409 })).mockResolvedValueOnce(ok());
     vi.stubGlobal("fetch", fetchMock);
