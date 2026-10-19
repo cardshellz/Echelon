@@ -17,7 +17,7 @@ const tables = [schema.users, schema.authRoles, schema.authPermissions, schema.a
 databaseTests.sequential("AP financial safeguards with actual0620 and status constraint (real PostgreSQL)", () => {
   let pool: pg.Pool; let modulePool: pg.Pool; let db: any;
   let service: typeof import("../../ap-ledger.service");
-  let ownsSchema = false; let ownsIdentitySchema = false;
+  let ownsSchema = false; let ownsIdentitySchema = false; let ownsAuditTable = false;
   const actor = "review-ap-unhappy-path";
   beforeAll(async () => {
     if (!url || !["localhost", "127.0.0.1"].includes(new URL(url).hostname)
@@ -29,7 +29,7 @@ databaseTests.sequential("AP financial safeguards with actual0620 and status con
     await pool.query("CREATE SCHEMA procurement"); ownsSchema = true;
     for (const table of tables) await pool.query(fixtureTable(table));
     for (const statement of fixtureForeignKeys(tables)) await pool.query(statement);
-    await pool.query(fixtureTable(schema.auditEvents));
+    await pool.query(fixtureTable(schema.auditEvents)); ownsAuditTable = true;
     // Relevant actual constraints (schema's status columns have no enum/check).
     await pool.query(`
       CREATE UNIQUE INDEX vendor_invoices_vendor_invoice_idx ON procurement.vendor_invoices(vendor_id,invoice_number);
@@ -66,9 +66,18 @@ databaseTests.sequential("AP financial safeguards with actual0620 and status con
         VALUES(71,'AP-PROBE-INV',5,'approved',10000,10000,'2026-09-01')`);
   });
   afterAll(async () => {
-    if (ownsSchema) { await pool.query("DROP SCHEMA procurement CASCADE"); await pool.query("DROP TABLE public.audit_events"); }
-    if (ownsIdentitySchema) await pool.query("DROP SCHEMA identity CASCADE");
-    await pool?.end(); await modulePool?.end();
+    // Attempt every owned cleanup even when setup stopped partway through.
+    const failures: unknown[] = [];
+    for (const cleanup of [
+      async () => { if (ownsSchema) await pool.query("DROP SCHEMA procurement CASCADE"); },
+      async () => { if (ownsAuditTable) await pool.query("DROP TABLE public.audit_events"); },
+      async () => { if (ownsIdentitySchema) await pool.query("DROP SCHEMA identity CASCADE"); },
+      async () => { await pool?.end(); },
+      async () => { await modulePool?.end(); },
+    ]) {
+      try { await cleanup(); } catch (error) { failures.push(error); }
+    }
+    if (failures.length) throw new AggregateError(failures, "AP safeguards fixture cleanup failed");
   });
   const pay = (amount: number, status = "completed") => db.transaction((tx: any) =>
     service.executeApPaymentCommandInTransaction("record_payment", { userId: actor, payment: {
