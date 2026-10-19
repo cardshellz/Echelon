@@ -4331,9 +4331,17 @@ describe("ShopifyOrderEditProvider", () => {
     });
   });
 
-  it.each(["SUCCESS", "PENDING", "FAILURE"])(
-    "proves refund transaction outcome %s without treating record creation as payment",
-    async (status) => {
+  it.each([
+    ["SUCCESS", "10.00"],
+    ["PENDING", "10.00"],
+    ["PENDING", "0.00"],
+    ["AWAITING_RESPONSE", "0.00"],
+    ["UNKNOWN", "0.00"],
+    ["FAILURE", "0.00"],
+    ["ERROR", "0.00"],
+  ])(
+    "proves refund transaction outcome %s with settled amount %s without treating record creation as payment",
+    async (status, settledAmount) => {
       const raw = rawOrder({
         lineItems: {
           nodes: [line(1, 10, 1)],
@@ -4346,7 +4354,7 @@ describe("ShopifyOrderEditProvider", () => {
       const result = {
         id: id("Refund", 9),
         note: "Echelon order edit edit-1",
-        totalRefundedSet: bag("10.00"),
+        totalRefundedSet: bag(settledAmount),
         transactions: {
           nodes: [tx(2, "10.00", "REFUND", status, 1)],
           pageInfo: { hasNextPage: false },
@@ -4360,7 +4368,7 @@ describe("ShopifyOrderEditProvider", () => {
       const snapshot = await h.provider.readOrder(4, "100");
       const intent = refundIntent(snapshot);
       const execution = h.provider.refund(4, intent, NOW.toISOString());
-      if (status === "FAILURE")
+      if (["FAILURE", "ERROR"].includes(status))
         await expect(execution).rejects.toMatchObject({
           code: "REFUND_FAILED",
           outcome: "unknown",
@@ -4376,6 +4384,127 @@ describe("ShopifyOrderEditProvider", () => {
       expect(input).toMatchObject({ notify: false, allowOverRefunding: false });
       expect(input).not.toHaveProperty("refundLineItems");
       expect(h.requests.at(-1)?.variables.idempotencyKey).toBe("refund-key");
+    },
+  );
+
+  it.each(["PENDING", "AWAITING_RESPONSE", "UNKNOWN"])(
+    "reads an existing %s refund with no settled money without sending it again",
+    async (status) => {
+      const h = harness([
+        rawOrder(),
+        rawOrder({
+          refunds: [
+            {
+              id: id("Refund", 9),
+              note: "Echelon order edit edit-1",
+              totalRefundedSet: bag("0.00"),
+              transactions: {
+                nodes: [tx(2, "10.00", "REFUND", status, 1)],
+                pageInfo: { hasNextPage: false },
+              },
+            },
+          ],
+        }),
+      ]);
+      const snapshot = await h.provider.readOrder(4, "100");
+      expect(
+        await h.provider.refund(
+          4,
+          refundIntent(snapshot),
+          "2026-10-01T00:00:00.000Z",
+        ),
+      ).toMatchObject({ status: "pending", refundId: id("Refund", 9) });
+      expect(h.requests).toHaveLength(2);
+      expect(
+        h.requests.every((request) => !request.query.includes("refundCreate")),
+      ).toBe(true);
+    },
+  );
+
+  it.each([
+    {
+      status: "SUCCESS",
+      settled: "0.00",
+      requested: "10.00",
+      parent: 1,
+      gateway: "shopify_payments",
+    },
+    {
+      status: "PENDING",
+      settled: "1.00",
+      requested: "10.00",
+      parent: 1,
+      gateway: "shopify_payments",
+    },
+    {
+      status: "PENDING",
+      settled: "0.00",
+      requested: "9.00",
+      parent: 1,
+      gateway: "shopify_payments",
+    },
+    {
+      status: "PENDING",
+      settled: "0.00",
+      requested: "10.00",
+      parent: 3,
+      gateway: "shopify_payments",
+    },
+    {
+      status: "PENDING",
+      settled: "0.00",
+      requested: "10.00",
+      parent: 1,
+      gateway: "manual",
+    },
+    {
+      status: "UNRECOGNIZED",
+      settled: "0.00",
+      requested: "10.00",
+      parent: 1,
+      gateway: "shopify_payments",
+    },
+  ])(
+    "rejects inconsistent pending or settled refund evidence: %j",
+    async (fixture) => {
+      const h = harness([
+        rawOrder(),
+        rawOrder({
+          refunds: [
+            {
+              id: id("Refund", 9),
+              note: "Echelon order edit edit-1",
+              totalRefundedSet: bag(fixture.settled),
+              transactions: {
+                nodes: [
+                  {
+                    ...tx(
+                      2,
+                      fixture.requested,
+                      "REFUND",
+                      fixture.status,
+                      fixture.parent,
+                    ),
+                    gateway: fixture.gateway,
+                  },
+                ],
+                pageInfo: { hasNextPage: false },
+              },
+            },
+          ],
+        }),
+      ]);
+      const snapshot = await h.provider.readOrder(4, "100");
+      await expect(
+        h.provider.refund(4, refundIntent(snapshot), NOW.toISOString()),
+      ).rejects.toMatchObject(
+        fixture.status === "UNRECOGNIZED"
+          ? { code: "SHOPIFY_RESPONSE_INVALID", outcome: "rejected" }
+          : { code: "REFUND_UNCONFIRMED", outcome: "unknown" },
+      );
+      expect(
+        h.requests.every((request) => !request.query.includes("refundCreate")),
+      ).toBe(true);
     },
   );
 

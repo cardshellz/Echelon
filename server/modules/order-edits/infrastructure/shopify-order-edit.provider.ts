@@ -4009,11 +4009,7 @@ function proveRefund(
   actual: OrderEditRefund,
   intent: OrderEditRefundIntent,
 ): OrderEditRefundResult {
-  if (
-    actual.note !== intent.note ||
-    actual.amountCents !== intent.amountCents ||
-    actual.transactions.length !== 1
-  )
+  if (actual.note !== intent.note || actual.transactions.length !== 1)
     fail(
       "REFUND_UNCONFIRMED",
       "The refund record does not match the saved request.",
@@ -4038,8 +4034,26 @@ function proveRefund(
       "unknown",
       { refundId: actual.id, transactionId: entry.id },
     );
+  const pending = ["PENDING", "AWAITING_RESPONSE", "UNKNOWN"].includes(
+    entry.status,
+  );
+  // Shopify can report zero in totalRefundedSet while the matching, full-value
+  // transaction is pending. That aggregate measures settled money, not the
+  // requested refund. Never resend it or report success before settlement.
+  if (
+    (entry.status !== "SUCCESS" && !pending) ||
+    (entry.status === "SUCCESS" && actual.amountCents !== intent.amountCents) ||
+    (pending &&
+      actual.amountCents !== 0 &&
+      actual.amountCents !== intent.amountCents)
+  )
+    fail(
+      "REFUND_UNCONFIRMED",
+      "The refund settlement does not match the saved payment evidence.",
+      "unknown",
+    );
   return {
-    status: entry.status === "SUCCESS" ? "succeeded" : "pending",
+    status: pending ? "pending" : "succeeded",
     refundId: actual.id,
     evidence: actual,
   };
