@@ -227,8 +227,7 @@ describe("production existing-listing prepare through verified completion", () =
     expect(result).toMatchObject({ synced: 1, errors: 0 });
     expect(binding).toHaveBeenCalledWith(expect.objectContaining({ variants: [
       expect.objectContaining({ sku: "SHLZ-TOP-TOB-P25", contentSyncEnabled: true }),
-      expect.objectContaining({ sku: "SHLZ-TOP-TOB-C1000", contentSyncEnabled: false }),
-    ] }), expect.any(Object), expect.any(Object));
+    ], retainedGroupSkus: ["SHLZ-TOP-TOB-C1000"] }), expect.any(Object), expect.any(Object));
     const [, observation, sourceIdentity] = binding.mock.calls[0];
     expect(sourceIdentity).toEqual({ ...f.source, variants: f.source.variants.map((member, index) => ({
       ...member, contentSyncEnabled: index === 0, catalogArchived: index !== 0, mappingExists: true,
@@ -237,7 +236,7 @@ describe("production existing-listing prepare through verified completion", () =
       providerAccount: { provider: "ebay", accountNamespace: "production", externalAccountId: "seller" },
       marketplaceId: "EBAY_US", isPublished: true, observedAt: new Date("2026-10-09T20:00:00Z"),
       listingIdentity: { externalId: example.listing }, publicationKeyIdentity: { externalId: example.group },
-      members: [1, 0].map(index => ({ sku: f.source.variants[index].sku,
+      members: [0].map(index => ({ sku: f.source.variants[index].sku,
         inventoryItemIdentity: { externalId: f.source.variants[index].sku },
         offerIdentity: { externalId: example.offers[index] } })),
     });
@@ -256,6 +255,8 @@ describe("production existing-listing prepare through verified completion", () =
       variesBy: expect.objectContaining({ specifications: [{ name: "Style", values: styles }] }),
     }));
     expect(f.items.get("SHLZ-TOP-TOB-C1000")).toEqual(retainedBefore);
+    expect(f.client.getInventoryItem).not.toHaveBeenCalledWith("SHLZ-TOP-TOB-C1000");
+    expect(f.client.getOffers).not.toHaveBeenCalledWith("SHLZ-TOP-TOB-C1000", "EBAY_US");
     expect(stages).toContain("verification");
     expect(f.client.createOffer).not.toHaveBeenCalled();
     expect(f.client.publishOffer).not.toHaveBeenCalled();
@@ -284,14 +285,13 @@ describe("production existing-listing prepare through verified completion", () =
     expect(fixture.transport!.get).not.toHaveBeenCalled();
     expect(client.createOrReplaceInventoryItem).not.toHaveBeenCalled();
   });
-  it.each(cases)("uses the same provider identity reader for product $productId preview, including disabled members", async example => {
+  it.each(cases)("uses the same provider identity reader for product $productId preview, retaining archived group topology", async example => {
     const { source, client } = provider(example);
     fixture.rows[1].variant_is_active = false;
     const identity = await readExistingEbayListingIdentityForProduct(example.productId);
     expect(identity).toMatchObject({ groupKey: example.group, variants: [
       expect.objectContaining({ variantId: example.ids[0], sku: source.variants[0].sku }),
-      expect.objectContaining({ variantId: example.ids[1], sku: source.variants[1].sku, contentSyncEnabled: false }),
-    ] });
+    ], retainedGroupSkus: [source.variants[1].sku] });
     expect(fixture.photoRequests).toEqual([]);
     expect(client.createOrReplaceInventoryItem).not.toHaveBeenCalled();
     expect(client.updateOffer).not.toHaveBeenCalled();

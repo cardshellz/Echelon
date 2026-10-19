@@ -122,6 +122,31 @@ const disposable = process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true";
     expect((await database.pool.query("SELECT state FROM inventory.quantity_publication_attempts")).rows).toEqual([{ state: "not_sent" }]);
   });
 
+  it("admits one active member while preserving its archived group siblings and historical stock records", async () => {
+    await database.pool.query("UPDATE catalog.product_variants SET is_active=false WHERE id=102");
+    const observed = await createEbayListingScopeObservation(database.pool);
+    observed.groupSkus.push(sku("C200"));
+    const bound = await observed.observe();
+    expect(bound.identity.variants.map(member => member.variantId)).toEqual([101]);
+    expect(bound.identity.retainedGroupSkus).toEqual([sku("C200"),sku("C500")]);
+    const source = { ...ebayListingScopeSource(), variants: [{ productVariantId: 101, sku: sku("P10") }] };
+    const historical = async () => (await database.pool.query(`SELECT
+      (SELECT jsonb_agg(to_jsonb(m) ORDER BY m.id) FROM inventory.publication_variant_mapping_versions m WHERE product_variant_id IN (102,103)) AS mappings,
+      (SELECT jsonb_agg(to_jsonb(o) ORDER BY o.id) FROM inventory.inventory_publication_outbox o WHERE product_variant_id IN (102,103)) AS publications`)).rows[0];
+    const before = await historical();
+    await ensureEbayPublicationReady(database.pool, source, { commandKey: randomUUID(), actor: "single-active-group-test",
+      now: new Date(), verifiedListing: { sourceIdentity: observed.source, observation: bound.observation } });
+    await update();
+    expect(writes.map(write => write.path)).toEqual(["/sell/inventory/v1/bulk_update_price_quantity",
+      `/sell/inventory/v1/inventory_item_group/${groupKey}`]);
+    expect(writes[0].body).toMatchObject({ requests: [{ sku: sku("P10") }] });
+    expect(group.variantSKUs).toEqual(groupBody().variantSKUs);
+    expect(await historical()).toEqual(before);
+    expect(reads.some(path => path.includes(encodeURIComponent(sku("C500"))) || path.includes(encodeURIComponent(sku("C200"))))).toBe(false);
+    expect((await database.pool.query("SELECT state,cardinality(planned_outbox_ids) AS planned FROM inventory.quantity_publication_attempts")).rows)
+      .toEqual([{ state: "succeeded", planned: 1 }]);
+  });
+
   it("rechecks topology after active quantity refresh before replacing the group", async () => {
     afterQuantityWrite = () => { group.variantSKUs = [sku("P10"),sku("C500")]; };
     await expect(update()).rejects.toThrow("Provider group membership changed");

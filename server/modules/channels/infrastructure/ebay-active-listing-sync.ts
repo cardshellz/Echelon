@@ -355,7 +355,9 @@ async function prepareActiveEbayListingSync(
     .where(eq(ebayProductAspectOverrides.productId, productId));
   for (const po of prodOverrides) aspects[po.aspectName] = [po.aspectValue];
 
-  const isMultiVariant = variants.length > 1;
+  // A verified group keeps its variation schema even when only one member is
+  // still maintained; archived siblings remain topology until lifecycle removal.
+  const isMultiVariant = boundIdentity.groupKey !== null || variants.length > 1;
   const variationAspectName = isMultiVariant
     ? determineVariationAspectName(variants)
     : "";
