@@ -21,6 +21,7 @@ import { createInventoryLotService } from "../../lots.service";
 import { creditTransferToReplenishment } from "../../infrastructure/replenishment-transfer-credit.repository";
 import { InventoryQuantityError } from "../../domain/quantity-ledger";
 import { AppError } from "@shared/errors";
+import { FinancialCommandError } from "../../../../platform/commands/transactional-command.service";
 
 vi.mock("../../../../db", () => ({ db: {}, pool: {} }));
 const url = process.env.ECHELON_TEST_DATABASE_URL;
@@ -594,10 +595,60 @@ suite(
       const input = {
         ...request(), quantity: 1, moveReserved: true
       };
-      const results = await Promise.all([service.transfer(input, "operator"), service.transfer(input, "operator")]);
-      expect(results[1]).toEqual(results[0]);
+      const before = await context.state();
+      const claimsBefore = await reservationState();
+      let announceReservation!: () => void;
+      let continueExecution!: () => void;
+      const reservationCommitted = new Promise<void>(resolve => { announceReservation = resolve; });
+      const executionAllowed = new Promise<void>(resolve => { continueExecution = resolve; });
+      const originalTransaction = orm.transaction.bind(orm);
+      // Pause after the first lease commits, before executeClaim can lock its
+      // row. The duplicate must observe the live lease, independent of timing.
+      const pauseAfterReservation: typeof orm.transaction = async (work, config) => {
+        const result = await originalTransaction(work, config);
+        announceReservation();
+        await executionAllowed;
+        return result;
+      };
+      const transactionSpy = vi.spyOn(orm, "transaction").mockImplementationOnce(pauseAfterReservation);
+      const first = service.transfer(input, "operator");
+      // Attach a rejection handler immediately and drain the request in finally
+      // so assertion failures cannot leave execution running during DB cleanup.
+      const firstSettled = first.then(() => undefined, () => undefined);
+      try {
+        await Promise.race([
+          reservationCommitted,
+          first.then(() => { throw new Error("The command completed before the reservation barrier"); }),
+        ]);
+        const duplicateError = await service.transfer(input, "operator").then(
+          () => { throw new Error("A duplicate executed while the original command still owned its lease"); },
+          (error: unknown) => error,
+        );
+        expect(duplicateError).toBeInstanceOf(FinancialCommandError);
+        expect(duplicateError).toMatchObject({
+          code: "FINANCIAL_COMMAND_IN_PROGRESS", statusCode: 409,
+          responseHeaders: { "Retry-After": expect.stringMatching(/^[1-9][0-9]*$/) },
+        });
+        expect(await context.state()).toEqual(before);
+        expect(await reservationState()).toEqual(claimsBefore);
+        expect(await receipts()).toHaveLength(0);
+        expect((await context.pool.query("SELECT status,attempt_count FROM public.financial_command_results")).rows)
+          .toEqual([{ status: "claimed", attempt_count: 1 }]);
+      } finally {
+        continueExecution();
+        await firstSettled;
+        transactionSpy.mockRestore();
+      }
+      const result = await first;
+      const committed = await context.state();
+      const claimsCommitted = await reservationState();
+      expect(await service.transfer(input, "operator")).toEqual(result);
+      expect(await context.state()).toEqual(committed);
+      expect(await reservationState()).toEqual(claimsCommitted);
       expect(await receipts()).toHaveLength(1);
       expect((await context.pool.query("SELECT id FROM inventory.availability_claim_events WHERE event_type='claim_stock_transferred'")).rows).toHaveLength(1);
+      expect((await context.pool.query("SELECT status,attempt_count FROM public.financial_command_results")).rows)
+        .toEqual([{ status: "succeeded", attempt_count: 1 }]);
       await expect(pick(200)).resolves.toMatchObject({
         outcome: "picked"
       });
