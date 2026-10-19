@@ -290,6 +290,7 @@ export function buildPoShipmentCostSummary(
 const lineDetailSchema = z
   .object({
     lineId: id,
+    purchaseOrderLineId: id.nullable().optional(),
     shipmentId: id,
     shipmentNumber: z.string().nullable(),
     shipmentStatus: z.string(),
@@ -416,6 +417,7 @@ export function buildPoShipmentCosts(
       const detail = detailsById.get(line.lineId)!;
       return {
         lineId: line.lineId,
+        purchaseOrderLineId: detail.purchaseOrderLineId,
         exceptionReview: detail.exceptionReview ?? null,
         shipmentId: detail.shipmentId,
         shipmentNumber: detail.shipmentNumber,

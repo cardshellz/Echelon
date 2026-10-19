@@ -1,4 +1,5 @@
 import { parseReceivingImportCsv, parseReceivingImportResult, receivingImportError } from "@/lib/receiving-import";
+import { ReceiptSupplierCosts } from "@/features/purchasing/ReceiptSupplierCosts";
 import type { ReceivingImportRowInput } from "@shared/procurement/receiving-import";
 import { useState, useRef, useEffect, useLayoutEffect, useCallback } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
@@ -2468,6 +2469,13 @@ DEF-456,25,,,5.00,,Location TBD`;
                   </CardContent>
                 </Card>
 
+                {selectedReceipt.status === "closed" && <ReceiptSupplierCosts
+                  key={selectedReceipt.id}
+                  receiptId={selectedReceipt.id}
+                  purchaseOrderId={selectedReceipt.purchaseOrderId ?? null}
+                  shipmentId={selectedReceipt.inboundShipmentId ?? null}
+                  navigation={procurementNavigation}
+                />}
                 <ReceivingQuarantinePanel
                   key={`${selectedReceipt.id}:${location}?${searchStr}`}
                   receipt={selectedReceipt}
