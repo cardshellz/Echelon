@@ -3,7 +3,7 @@ import { SHIPMENT_LINE_INTEGER_MAX, shipmentLineEditableSchema } from "@shared/p
 import { ShipmentTrackingError } from "./shipment-tracking.service";
 
 type PhysicalLine = {
-  qtyShipped: number; cartonCount?: number | null;
+  qtyShipped: number; cartonCount?: number | null; dimensionBasis?: string | null;
   weightKg?: string | null; lengthCm?: string | null; widthCm?: string | null; heightCm?: string | null;
 };
 
@@ -17,7 +17,7 @@ function numericColumn(value: Decimal, precision: number, scale: number): string
 
 function validatePhysicalLine(line: PhysicalLine) {
   const fields = {
-    qtyShipped: line.qtyShipped, cartonCount: line.cartonCount,
+    qtyShipped: line.qtyShipped, cartonCount: line.cartonCount, dimensionBasis: line.dimensionBasis,
     weightKg: line.weightKg, lengthCm: line.lengthCm, widthCm: line.widthCm, heightCm: line.heightCm,
   };
   const parsed = shipmentLineEditableSchema.safeParse(fields);
@@ -29,8 +29,16 @@ function validatePhysicalLine(line: PhysicalLine) {
 
 export function computeShipmentLinePhysicalTotals(line: PhysicalLine) {
   validatePhysicalLine(line);
-  // Cartons describe physical packaging independently of the base-piece count.
-  const multiplier = line.cartonCount ?? line.qtyShipped;
+  // Older rows retain their recorded calculation basis until explicitly reviewed.
+  // Selecting a receive unit never changes the physical measurement basis.
+  const basis = line.dimensionBasis ?? (line.cartonCount == null ? "piece" : "carton");
+  if (basis === "carton" && line.cartonCount == null) {
+    throw new ShipmentTrackingError(
+      "Enter the number of shipping cartons for measurements per carton, or select measurements per piece.",
+      422, { code: "SHIPMENT_LINE_CARTON_COUNT_REQUIRED" },
+    );
+  }
+  const multiplier = basis === "carton" ? line.cartonCount! : line.qtyShipped;
   const weight = new Decimal(line.weightKg ?? "0");
   const cubicCm = new Decimal(line.lengthCm ?? "0").mul(line.widthCm ?? "0").mul(line.heightCm ?? "0");
   return {

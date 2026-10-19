@@ -106,8 +106,8 @@ test("empty draft lost response survives reload and recovers one shipment with t
 test("PO creation sends selected pieces in one command and recovers without an append or duplicate", async ({ page }, testInfo) => {
   const { state, failures } = await setup(page, { lost: true });
   await openPoCreate(page);
-  await expect(page.getByRole("dialog").getByRole("spinbutton")).toHaveValue("501");
-  await page.getByRole("dialog").getByRole("spinbutton").fill("125");
+  await expect(page.getByRole("dialog").getByLabel("Pieces shipped", { exact: true })).toHaveValue("501");
+  await page.getByRole("dialog").getByLabel("Pieces shipped", { exact: true }).fill("125");
   await page.getByRole("dialog").getByRole("button", { name: "Create Shipment", exact: true }).click();
   await expect(page.getByText("Shipment creation needs confirmation", { exact: true })).toBeVisible();
   expect(state.requests).toHaveLength(1);
@@ -142,7 +142,7 @@ test("failed PO source loading blocks creation until explicit successful reload"
   expect(state.requests).toEqual([]); expect(await savedRecovery(page)).toBeNull();
   state.sourceFailure = false;
   await page.getByRole("button", { name: "Retry purchase lines", exact: true }).click();
-  await expect(page.getByRole("dialog").getByRole("spinbutton")).toHaveValue("501");
+  await expect(page.getByRole("dialog").getByLabel("Pieces shipped", { exact: true })).toHaveValue("501");
   await expect(page.getByRole("dialog").getByRole("button", { name: "Create Shipment", exact: true })).toBeEnabled();
   expect(state.sourceReads).toBeGreaterThanOrEqual(2); expect(failures).toEqual([]);
 });
@@ -183,9 +183,9 @@ test("PO creation requires an explicit nonempty selection of positive reviewed p
   await page.getByRole("button", { name: "Deselect all", exact: true }).click();
   await expect(page.getByRole("dialog").getByRole("button", { name: "Create Shipment", exact: true })).toBeDisabled();
   await page.getByRole("button", { name: "Select all", exact: true }).click();
-  await page.getByRole("dialog").getByRole("spinbutton").fill("0");
+  await page.getByRole("dialog").getByLabel("Pieces shipped", { exact: true }).fill("0");
   await expect(page.getByRole("dialog").getByRole("button", { name: "Create Shipment", exact: true })).toBeDisabled();
-  await page.getByRole("dialog").getByRole("spinbutton").fill("502");
+  await page.getByRole("dialog").getByLabel("Pieces shipped", { exact: true }).fill("502");
   await expect(page.getByRole("dialog").getByRole("button", { name: "Create Shipment", exact: true })).toBeDisabled();
   expect(state.requests).toEqual([]); expect(failures).toEqual([]);
 });
@@ -195,9 +195,9 @@ test("durable rejection clears only its own saved intent and a reviewed correcti
   await openPoCreate(page);
   await page.getByRole("dialog").getByRole("button", { name: "Create Shipment", exact: true }).click();
   await expect(page.getByText("Purchase quantities changed; review this selection.", { exact: true }).first()).toBeVisible();
-  await expect(page.getByRole("dialog").getByRole("spinbutton")).toBeEnabled();
+  await expect(page.getByRole("dialog").getByLabel("Pieces shipped", { exact: true })).toBeEnabled();
   expect(await savedRecovery(page)).toBeNull(); expect(state.creations).toBe(0);
-  await page.getByRole("dialog").getByRole("spinbutton").fill("100");
+  await page.getByRole("dialog").getByLabel("Pieces shipped", { exact: true }).fill("100");
   await page.getByRole("dialog").getByRole("button", { name: "Create Shipment", exact: true }).click();
   await expect(page.getByRole("heading", { name: "RECOVERED-SHIPMENT", exact: true })).toBeVisible();
   expect(state.requests[1].key).not.toBe(state.requests[0].key); expect(state.requests[1].body.purchaseOrder.lineSelections).toEqual([{ poLineId: 15, qty: 100 }]);
@@ -287,7 +287,7 @@ for (const [name, sourcePayload] of [
     expect(state.requests).toEqual([]); expect(failures).toEqual([]);
     state.sourcePayload = undefined;
     await page.getByRole("button", { name: "Retry purchase lines", exact: true }).click();
-    await expect(page.getByRole("dialog").getByRole("spinbutton")).toHaveValue("501");
+    await expect(page.getByRole("dialog").getByLabel("Pieces shipped", { exact: true })).toHaveValue("501");
     await expect(page.getByRole("dialog").getByRole("button", { name: "Create Shipment", exact: true })).toBeEnabled();
     expect(state.requests).toEqual([]); expect(failures).toEqual([]);
   });
@@ -310,3 +310,23 @@ for (const [name, warehousePayload] of [
     expect(state.creations).toBe(1); expect(failures).toEqual([]);
   });
 }
+
+test("PO creation sends configured case evidence and preserves it through recovery", async ({ page }, testInfo) => {
+  const sourcePayload = { lines: [{ id: 15, purchaseOrderId: 17, sku: "REVIEWED-ITEM", productName: "Reviewed product", description: null,
+    orderQty: 525000, alreadyShippedQty: 0, directReceivedQty: 0, remainingQty: 525000,
+    shipmentUnits: { productId: 100, selectedVariantId: null, unitsPerVariantSnapshot: null, issue: null,
+      variants: [{ id: 9, sku: "PIECE", name: "Piece", unitsPerVariant: 1 }, { id: 10, sku: "CASE1000", name: "Case of 1000", unitsPerVariant: 1000 }] } }], reviewRequiredLines: [] };
+  const { state, failures } = await setup(page, { lost: true, sourcePayload }); await openPoCreate(page);
+  await page.getByLabel("Count unit create-shipment-line-15", { exact: true }).selectOption("10");
+  await expect(page.getByLabel("Number of receive units", { exact: true })).toHaveValue("525");
+  await expect(page.getByText("525 × 1,000 pieces = 525,000 pieces shipped", { exact: true })).toBeVisible();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  await page.screenshot({ path: testInfo.outputPath("configured-case-create.png"), fullPage: true, animations: "disabled" });
+  await page.getByRole("dialog").getByRole("button", { name: "Create Shipment", exact: true }).click();
+  await expect(page.getByText("Shipment creation needs confirmation", { exact: true })).toBeVisible();
+  expect(state.requests[0].body.purchaseOrder.lineSelections).toEqual([{ poLineId: 15, qty: 525000, unitSelection: { productVariantId: 10, unitsPerVariant: 1000, quantity: 525 } }]);
+  await page.reload(); await page.getByRole("button", { name: "Create Shipment", exact: true }).click();
+  await page.getByRole("button", { name: "Recover shipment creation", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "RECOVERED-SHIPMENT", exact: true })).toBeVisible();
+  expect(state.requests[1]).toEqual(state.requests[0]); expect(state.creations).toBe(1); expect(failures).toEqual([]);
+});

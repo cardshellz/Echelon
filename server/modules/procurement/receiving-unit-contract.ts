@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { convertUnitQuantity, UnitQuantityError } from "@shared/procurement/unit-quantity";
 import { canonicalJson } from "@shared/utils/canonical-json";
 
 export const MAX_RECEIVING_QUANTITY = 2_147_483_647;
@@ -117,17 +118,16 @@ export function convertReceiptCounts(line: Pick<ReceiptUnitLine, "expectedQty" |
   receiptInteger(newUnits, "Selected receive pack size", true);
   const result = { expectedQty: 0, receivedQty: 0, damagedQty: 0 };
   for (const field of ["expectedQty", "receivedQty", "damagedQty"] as const) {
-    const base = BigInt(receiptInteger(line[field], field)) * BigInt(oldUnits);
-    if (base % BigInt(newUnits) !== BigInt(0)) {
-      throw new ReceivingUnitError(`The selected pack cannot represent ${field} exactly. Select a piece variant or a pack that preserves the recorded pieces.`, 409, {
-        code: "RECEIVING_UNIT_CONVERSION_INEXACT", field,
-      });
+    try {
+      result[field] = convertUnitQuantity(receiptInteger(line[field], field), oldUnits, newUnits);
+    } catch (error) {
+      if (!(error instanceof UnitQuantityError)) throw error;
+      if (error.code === "UNIT_QUANTITY_INEXACT") throw new ReceivingUnitError(
+        `The selected pack cannot represent ${field} exactly. Select a piece variant or a pack that preserves the recorded pieces.`, 409,
+        { code: "RECEIVING_UNIT_CONVERSION_INEXACT", field });
+      throw new ReceivingUnitError("The converted receipt count exceeds the supported quantity range.", 409,
+        { code: "RECEIVING_UNIT_CONVERSION_OVERFLOW", field });
     }
-    const count = base / BigInt(newUnits);
-    if (count > BigInt(MAX_RECEIVING_QUANTITY)) {
-      throw new ReceivingUnitError("The converted receipt count exceeds the supported quantity range.", 409, { code: "RECEIVING_UNIT_CONVERSION_OVERFLOW", field });
-    }
-    result[field] = Number(count);
   }
   return result;
 }

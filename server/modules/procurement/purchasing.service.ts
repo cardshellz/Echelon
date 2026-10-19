@@ -3619,8 +3619,8 @@ export function createPurchasingService(
 
   function receiptPlanFromVariants(poLine: any, baseQty: number, shipmentLine: any | null, variants: ReceiptVariant[]): ReceiptUnitPlan {
     const preferredVariantId = parsePositiveInteger(shipmentLine?.productVariantId ?? poLine.expectedReceiveVariantId ?? poLine.productVariantId);
-    const recordedPreferredUnits = preferredVariantId !== null && preferredVariantId === poLine.expectedReceiveVariantId
-      ? poLine.expectedReceiveUnitsPerVariant : null;
+    const recordedPreferredUnits = shipmentLine?.unitsPerVariantSnapshot
+      ?? (preferredVariantId !== null && preferredVariantId === poLine.expectedReceiveVariantId ? poLine.expectedReceiveUnitsPerVariant : null);
     return planReceiptUnits({ baseQty, productId: poLine.productId, preferredVariantId, recordedPreferredUnits, variants });
   }
 

@@ -1,4 +1,6 @@
 import { z } from "zod";
+import { shipmentDimensionBasisSchema, shipmentUnitSelectionSchema, type ShipmentUnitSelection } from "./shipment-unit-selection";
+import { toBasePieces } from "./unit-quantity";
 
 export const SHIPMENT_LINE_INTEGER_MAX = 2_147_483_647;
 export const SHIPMENT_LINE_IMPORT_LIMIT = 500;
@@ -20,6 +22,7 @@ function dimension(integerDigits: number, scale: number) {
 export const shipmentLineEditableShape = {
   qtyShipped: shipmentLineResourceIdSchema,
   cartonCount: shipmentLineResourceIdSchema.nullable(),
+  dimensionBasis: shipmentDimensionBasisSchema.nullable(),
   weightKg: dimension(7, SHIPMENT_LINE_WEIGHT_KG_SCALE),
   lengthCm: dimension(6, SHIPMENT_LINE_DIMENSION_CM_SCALE),
   widthCm: dimension(6, SHIPMENT_LINE_DIMENSION_CM_SCALE),
@@ -28,17 +31,33 @@ export const shipmentLineEditableShape = {
 };
 export const SHIPMENT_LINE_EDITABLE_FIELDS = Object.freeze(Object.keys(shipmentLineEditableShape)) as readonly (keyof typeof shipmentLineEditableShape)[];
 
+function checkReviewedPieces(selection: ShipmentUnitSelection | undefined, pieces: number | undefined, field: string, context: z.RefinementCtx): void {
+  if (!selection || pieces === undefined) return;
+  // The nested schema reports malformed counts/factors. Do not throw outside Zod
+  // when a continuable numeric issue also reaches this cross-field refinement.
+  let converted: number;
+  try { converted = toBasePieces(selection.quantity, selection.unitsPerVariant); }
+  catch { return; }
+  if (pieces !== converted) context.addIssue({ code: "custom", path: [field], message: "Reviewed pieces must equal the selected unit count multiplied by its recorded factor" });
+}
+
 export const shipmentLineEditableSchema = z.object(shipmentLineEditableShape).partial().strict();
 export const shipmentLinePatchSchema = shipmentLineEditableSchema.extend({
   expectedVersion: shipmentLineVersionSchema,
-}).strict().refine((body) => SHIPMENT_LINE_EDITABLE_FIELDS.some((field) => body[field] !== undefined), {
+  unitSelection: shipmentUnitSelectionSchema.optional(),
+}).strict().superRefine((body, context) => {
+  checkReviewedPieces(body.unitSelection, body.qtyShipped, "qtyShipped", context);
+  if (body.dimensionBasis === null) context.addIssue({ code: "custom", path: ["dimensionBasis"], message: "Choose measurements per piece or per carton; an explicit basis cannot be cleared" });
+}).refine((body) => body.unitSelection !== undefined || SHIPMENT_LINE_EDITABLE_FIELDS.some((field) => body[field] !== undefined), {
   message: "At least one editable shipment line field is required",
 });
 export const shipmentLineDeleteSchema = z.object({ expectedVersion: shipmentLineVersionSchema }).strict();
 export const shipmentLineFromPoSchema = z.object({
   purchaseOrderId: shipmentLineResourceIdSchema,
   lineIds: z.array(shipmentLineResourceIdSchema).min(1).max(SHIPMENT_LINE_IMPORT_LIMIT).optional(),
-  lineSelections: z.array(z.object({ poLineId: shipmentLineResourceIdSchema, qty: shipmentLineResourceIdSchema }).strict()).min(1).max(SHIPMENT_LINE_IMPORT_LIMIT).optional(),
+  lineSelections: z.array(z.object({ poLineId: shipmentLineResourceIdSchema, qty: shipmentLineResourceIdSchema, unitSelection: shipmentUnitSelectionSchema.optional() }).strict().superRefine((value, context) => {
+    checkReviewedPieces(value.unitSelection, value.qty, "qty", context);
+  })).min(1).max(SHIPMENT_LINE_IMPORT_LIMIT).optional(),
 }).strict().superRefine((body, context) => {
   if (body.lineIds && body.lineSelections) context.addIssue({ code: "custom", message: "Use either lineIds or lineSelections" });
   const ids = body.lineSelections?.map((line) => line.poLineId) ?? body.lineIds ?? [];
@@ -49,8 +68,15 @@ export const shipmentPackingListRowSchema = z.object({
   sku: z.string().trim().min(1).max(100),
   purchaseOrderLineId: shipmentLineResourceIdSchema,
   productVariantId: shipmentLineResourceIdSchema,
-}).partial().extend({ qtyShipped: shipmentLineResourceIdSchema }).strict().refine(
-  (row) => row.sku !== undefined || row.purchaseOrderLineId !== undefined || row.productVariantId !== undefined,
+  unitSelection: shipmentUnitSelectionSchema,
+}).partial().extend({ qtyShipped: shipmentLineResourceIdSchema }).strict().superRefine((value, context) => {
+  checkReviewedPieces(value.unitSelection, value.qtyShipped, "qtyShipped", context);
+  if (value.dimensionBasis === null) context.addIssue({ code: "custom", path: ["dimensionBasis"], message: "Choose measurements per piece or per carton; an explicit basis cannot be cleared" });
+  if (value.unitSelection && value.dimensionBasis == null && [value.weightKg, value.lengthCm, value.widthCm, value.heightCm].some((measurement) => measurement != null)) {
+    context.addIssue({ code: "custom", path: ["dimensionBasis"], message: "Choose whether the imported measurements describe one piece or one physical carton" });
+  }
+}).refine(
+  (row) => row.sku !== undefined || row.purchaseOrderLineId !== undefined || row.productVariantId !== undefined || row.unitSelection !== undefined,
   { message: "A SKU, product variant, or purchase order line is required" },
 );
 // Row validation is deliberately separate: valid rows in an import retain the

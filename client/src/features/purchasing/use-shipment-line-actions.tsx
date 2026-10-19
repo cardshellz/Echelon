@@ -1,3 +1,6 @@
+import { shipmentUnitOptionsRequestSchema, shipmentUnitOptionsResultSchema } from "@shared/procurement/shipment-unit-options";
+import { ShipmentQuantityControl } from "@/components/purchasing/ShipmentQuantityControl";
+import { parseShipmentUnits, shipmentQuantityDraft, shipmentQuantityPayload, type ShipmentQuantityDraft } from "@/lib/shipment-unit-entry";
 import { purchaseOrderWorkListPageSchema } from "@shared/procurement/purchase-order-work-list";
 import { WorkListPagination } from "./WorkListPagination";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -14,7 +17,7 @@ import { FinancialCommandRequestError } from "@/lib/financial-command";
 import { createShipmentLineCommandClient, createShipmentLineRecoveryStore, shipmentLineEditorFromRecord,
   updateShipmentLinePayload, refreshShipmentLineDraftVersion, shipmentLineNeedsRefresh, type ShipmentLineCommand, type ShipmentLineEditor,
   type ShipmentLineRecovery, type ShipmentLineCommandResult, type ShipmentLineForm } from "@/lib/shipment-line-command";
-import { autoMapPackingList, mapPackingListRows, updatePackingListCell, PACKING_LIST_FIELDS, type PackingListRow } from "@/lib/shipment-packing-list";
+import { autoMapPackingList, mapPackingListRows, updatePackingListCell, updatePackingListQuantity, packingListUnitOptionRows, PACKING_LIST_FIELDS, type PackingListRow } from "@/lib/shipment-packing-list";
 import { SHIPMENT_LINE_IMPORT_LIMIT } from "@shared/procurement/shipment-line-command";
 import { z } from "zod";
 
@@ -24,9 +27,10 @@ const shippableSchema = z.object({ lines: z.array(z.object({ id: z.number().int(
 type Modal = "add" | "import" | "edit" | "dimensions" | "recovery" | null;
 type DimensionRow = { editor: ShipmentLineEditor; status: "ready" | "saved" | "conflict" | "uncertain"; error?: string };
 type UncertainLine = { operation: "update"; editor: ShipmentLineEditor } | { operation: "delete"; editor: ShipmentLineEditor };
-const fieldLabels: Record<keyof ShipmentLineForm, string> = { qtyShipped: "Pieces shipped", cartonCount: "Cartons",
+const fieldLabels: Record<keyof ShipmentLineForm, string> = { qtyShipped: "Pieces shipped", cartonCount: "Shipping cartons", dimensionBasis: "Dimensions measured per",
   weightKg: "Weight per carton (kg)", lengthCm: "Length (cm)", widthCm: "Width (cm)", heightCm: "Height (cm)", notes: "Notes" };
 const dimensionFields = ["weightKg", "lengthCm", "widthCm", "heightCm"] as const;
+const packingFields = ["cartonCount", "dimensionBasis", ...dimensionFields] as const;
 const message = (error: unknown) => error instanceof Error ? error.message : "The shipment line command failed.";
 const ambiguous = (error: unknown) => error instanceof FinancialCommandRequestError && error.ambiguous;
 
@@ -55,11 +59,12 @@ export function useShipmentLineActions({ shipmentId, navigationIdentity, lines, 
   const [editor, setEditor] = useState<ShipmentLineEditor | null>(null);
   const [editConflict, setEditConflict] = useState(false);
   const [dimensionRows, setDimensionRows] = useState<DimensionRow[]>([]);
+  const [dimensionReview, setDimensionReview] = useState<Array<{ lineId: number; message: string }>>([]);
   const [poId, setPoId] = useState<number | null>(null);
   const [poSearch, setPoSearch] = useState("");
   const [poOffset, setPoOffset] = useState(0);
   const [selectedPo, setSelectedPo] = useState<{ id: number; poNumber: string } | null>(null);
-  const [selections, setSelections] = useState<Record<number, string>>({});
+  const [selections, setSelections] = useState<Record<number, ShipmentQuantityDraft>>({});
   const [rawRows, setRawRows] = useState<PackingListRow[]>([]);
   const [headers, setHeaders] = useState<string[]>([]);
   const [mapping, setMapping] = useState<Record<string, string>>({});
@@ -74,7 +79,7 @@ export function useShipmentLineActions({ shipmentId, navigationIdentity, lines, 
   };
   useEffect(() => {
     // Drafts cannot cross shipment visits. Durable collection recovery never auto-executes.
-    setModal(null); setEditor(null); setEditConflict(false); setDimensionRows([]); setPoId(null); setSelectedPo(null); setPoSearch(""); setPoOffset(0); setSelections({});
+    setModal(null); setEditor(null); setEditConflict(false); setDimensionRows([]); setDimensionReview([]); setPoId(null); setSelectedPo(null); setPoSearch(""); setPoOffset(0); setSelections({});
     setRawRows([]); setHeaders([]); setMapping({}); setImportRows(null); setRowErrors([]); setImportSummary(null);
     setError(null); setRecovery(null); setRecoveryError(null); setUncertainLine(null); uncertainRef.current = null;
     parseGeneration.current += 1;
@@ -101,6 +106,22 @@ export function useShipmentLineActions({ shipmentId, navigationIdentity, lines, 
       if (!response.ok) throw new Error("Remaining purchase quantities could not be loaded. Refresh and try again.");
       return shippableSchema.parse(await response.json()); }, staleTime: 0, refetchOnMount: "always" });
   const purchaseOrders = poList.data?.items ?? [];
+  const packingOptionRows = packingListUnitOptionRows(importRows ?? []);
+  const packingCatalog = useQuery({
+    queryKey: ["/api/inbound-shipments", shipmentId, "line-unit-options", packingOptionRows],
+    enabled: modal === "import" && shipmentId !== null && packingOptionRows.length > 0, retry: false, staleTime: 0,
+    queryFn: async ({ signal }) => {
+      const body = shipmentUnitOptionsRequestSchema.parse({ rows: packingOptionRows });
+      const response = await fetch(`/api/inbound-shipments/${shipmentId}/lines/unit-options`, {
+        method: "POST", credentials: "include", signal, headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+      });
+      if (!response.ok) throw new Error("Configured receive units could not be loaded.");
+      const result = shipmentUnitOptionsResultSchema.parse(await response.json());
+      if (result.shipmentId !== shipmentId || result.rows.length !== body.rows.length
+        || result.rows.some((row, index) => row.row !== index + 1)) throw new Error("Receive-unit evidence does not match the preview rows. Retry the lookup.");
+      return result;
+    },
+  });
 
   async function refresh(originId: number): Promise<boolean> {
     try {
@@ -152,7 +173,8 @@ export function useShipmentLineActions({ shipmentId, navigationIdentity, lines, 
       setRawRows([]); setHeaders([]); setMapping({}); setModal("import");
       notifySaved(summary, fresh);
     } else if (result.operation === "resolve-dimensions") {
-      setModal(null); notifySaved(`${result.updated} of ${result.total} lines updated from product data`, fresh);
+      setModal(null); setDimensionReview(result.reviewRequiredLines);
+      notifySaved(`${result.updated} of ${result.total} lines updated from product data${result.reviewRequiredLines.length ? `; ${result.reviewRequiredLines.length} need packing measurements` : ""}`, fresh);
     } else if (result.operation === "update" || result.operation === "delete") {
       setModal(null); setEditor(null); setEditConflict(false); setDimensionRows([]); notifySaved(result.operation === "update" ? "Line updated" : "Line removed", fresh);
     } else if (result.operation === "add-from-po") {
@@ -244,7 +266,7 @@ export function useShipmentLineActions({ shipmentId, navigationIdentity, lines, 
       for (const row of submitted) {
         if (row.status === "saved" || row.status === "conflict") continue;
         try {
-          if (dimensionFields.every((field) => row.editor.form[field] === row.editor.original[field])) continue;
+          if (packingFields.every((field) => row.editor.form[field] === row.editor.original[field])) continue;
           const executable = earlierRowSaved && row.status !== "uncertain"
             ? refreshShipmentLineDraftVersion(row.editor, await loadLatest(row.editor.id)) : row.editor;
           if (isCurrent()) setDimensionRows((current) => current.map((item) => item.editor.id === row.editor.id ? { ...item, editor: executable } : item));
@@ -284,24 +306,29 @@ export function useShipmentLineActions({ shipmentId, navigationIdentity, lines, 
   function submitPo() {
     if (!poId) return;
     try {
-      const selected = Object.entries(selections).map(([id, qty]) => ({ poLineId: Number(id), qty: /^\d+$/.test(qty) ? Number(qty) : NaN }));
-      if (!selected.length || selected.some((line) => !Number.isSafeInteger(line.qty) || line.qty <= 0 || line.qty > (shippable.data?.lines.find((item) => item.id === line.poLineId)?.remainingQty ?? 0))) throw new Error("Select lines and enter a positive whole number of pieces within each remaining quantity.");
+      const selected = Object.entries(selections).map(([id, draft]) => {
+        const source = shippable.data?.lines.find((line) => line.id === Number(id));
+        if (!source) throw new Error("Refresh and review the selected purchase line.");
+        const { qtyShipped, ...unit } = shipmentQuantityPayload(draft, parseShipmentUnits(source.shipmentUnits), source.remainingQty);
+        return { poLineId: Number(id), qty: qtyShipped, ...unit };
+      });
+      if (!selected.length) throw new Error("Select at least one purchase line.");
       void runCommand({ operation: "add-from-po", body: { purchaseOrderId: poId, lineSelections: selected } });
     } catch (cause) { report(cause); }
   }
   const changeField = (field: keyof ShipmentLineForm, value: string) => setEditor((current) => current ? { ...current, form: { ...current.form, [field]: value } } : current);
   const editorLocked = busy || editConflict || !!uncertainLine;
   const collectionLocked = busy || !!recovery || !!recoveryError || !!uncertainLine || !editable;
-  const recoveryBanner = (recovery || recoveryError || uncertainLine) && <div role="status" className="rounded-md border border-amber-500/50 bg-amber-50/50 p-3 text-sm space-y-2 dark:bg-amber-950/20">
+  const recoveryBanner = <>{dimensionReview.length > 0 && <div role="status" className="rounded border border-amber-500/50 p-3 text-sm space-y-2"><p className="font-medium">Packing measurements still needed</p>{dimensionReview.map((line) => <p key={line.lineId}>Line #{line.lineId}: {line.message}</p>)}<Button variant="outline" disabled={busy} onClick={openDimensions}>Enter packing measurements</Button></div>}{(recovery || recoveryError || uncertainLine) && <div role="status" className="rounded-md border border-amber-500/50 bg-amber-50/50 p-3 text-sm space-y-2 dark:bg-amber-950/20">
     <p className="font-medium">Shipment line change needs review</p>
     <p>{recoveryError ?? (recovery ? "An earlier line command has an unknown outcome. Its original request is saved in this browser tab; review and retry it before changing shipment lines." : "An earlier line edit or removal has an unknown outcome. Retry its original request before changing another line.")}</p>
     {recovery && <Button size="sm" variant="outline" onClick={() => { setError(null); setModal("recovery"); }}>Review pending line command</Button>}
     {uncertainLine && <Button size="sm" variant="outline" disabled={busy} onClick={() => void saveEditor(uncertainLine.editor, uncertainLine.operation === "delete")}>Retry original {uncertainLine.operation === "delete" ? "removal" : "edit"}</Button>}
-  </div>;
+  </div>}</>;
   const dialogs = <Dialog open={modal !== null} onOpenChange={(open) => { if (!open) setModal(null); }}>
     <DialogContent className="max-w-3xl max-h-[90dvh] min-w-0 overflow-y-auto">
       <DialogHeader><DialogTitle>{modal === "add" ? "Add Lines from Purchase Order" : modal === "import" ? "Import Packing List" : modal === "edit" ? `Edit Line — ${editor?.sku ?? ""}` : modal === "dimensions" ? "Enter missing dimensions" : "Review pending line command"}</DialogTitle>
-        <DialogDescription>{modal === "edit" ? "Pieces are the shipped quantity. Cartons are an independent physical count; editing dimensions does not change pieces." : modal === "import" ? "Import up to 500 data rows. Valid rows are saved; rejected rows stay here for correction." : modal === "dimensions" ? "Each line saves separately. Completed rows remain saved if a later row fails." : modal === "recovery" ? "Retry sends the exact original request and key. It does not start a second command." : "Choose remaining purchase quantities in pieces."}</DialogDescription></DialogHeader>
+        <DialogDescription>{modal === "edit" ? "Choose a configured receive unit and quantity. Review the exact piece total before saving. Shipping cartons describe physical packing separately." : modal === "import" ? "Import up to 500 data rows. Valid rows are saved; rejected rows stay here for correction." : modal === "dimensions" ? "Each line saves separately. Completed rows remain saved if a later row fails." : modal === "recovery" ? "Retry sends the exact original request and key. It does not start a second command." : "Choose the unit and quantity shipped from each purchase line. The exact piece total is checked against the remaining purchase quantity."}</DialogDescription></DialogHeader>
       {error && <p role="alert" className="text-sm text-destructive break-words">{error}</p>}
       {modal === "recovery" && recovery && <div className="min-w-0 space-y-3">
         <p className="font-medium">{recovery.command.operation}</p>
@@ -328,9 +355,9 @@ export function useShipmentLineActions({ shipmentId, navigationIdentity, lines, 
           {shippable.error && <p role="alert">{message(shippable.error)}</p>}
           {shippable.data?.reviewRequiredLines.map((line) => <p key={line.id} role="alert" className="rounded border border-amber-500/50 p-2 text-sm">{line.sku ?? `PO line ${line.id}`}: {line.error}</p>)}
           {poId && shippable.data?.lines.filter((line) => line.remainingQty > 0).map((line) => <div key={line.id} className="rounded border p-3 space-y-2">
-            <label className="flex items-center gap-2"><input type="checkbox" checked={selections[line.id] !== undefined} onChange={(event) => setSelections((current) => { const next = { ...current }; if (event.target.checked) next[line.id] = String(line.remainingQty); else delete next[line.id]; return next; })} />{line.sku ?? `PO line ${line.id}`}</label>
+            <label className="flex items-center gap-2"><input type="checkbox" checked={selections[line.id] !== undefined} onChange={(event) => setSelections((current) => { const next = { ...current }; if (event.target.checked) next[line.id] = shipmentQuantityDraft(line.remainingQty, parseShipmentUnits(line.shipmentUnits)); else delete next[line.id]; return next; })} />{line.sku ?? `PO line ${line.id}`}</label>
             <p className="text-xs text-muted-foreground">Remaining to ship: {line.remainingQty} pieces</p>
-            {selections[line.id] !== undefined && <><Label htmlFor={`po-line-${line.id}`}>Pieces for {line.sku ?? line.id}</Label><Input id={`po-line-${line.id}`} inputMode="numeric" value={selections[line.id]} onChange={(event) => setSelections((current) => ({ ...current, [line.id]: event.target.value }))} /></>}
+            {selections[line.id] !== undefined && <ShipmentQuantityControl id={`po-line-${line.id}`} value={selections[line.id]} units={parseShipmentUnits(line.shipmentUnits)} maximumPieces={line.remainingQty} quantityLabel={`Pieces for ${line.sku ?? line.id}`} onChange={(draft) => setSelections((current) => ({ ...current, [line.id]: draft }))} />}
           </div>)}
           {poId && shippable.data && !shippable.data.lines.some((line) => line.remainingQty > 0) && <p>No remaining quantities are available to ship.</p>}
         </fieldset>
@@ -338,32 +365,52 @@ export function useShipmentLineActions({ shipmentId, navigationIdentity, lines, 
       </div>}
       {modal === "import" && <div className="min-w-0 space-y-4">
         {importSummary && <p role="status" className="font-medium">{importSummary}</p>}
+        {packingCatalog.isError && <p role="alert" className="text-sm">Configured receive units could not be loaded. Existing piece entries remain visible. <Button variant="link" onClick={() => void packingCatalog.refetch()}>Retry receive units</Button></p>}
+        <p className="text-xs text-muted-foreground">For case or pack CSV quantities, map Receive variant ID, Receive unit count and Pieces per receive unit together. The catalog is checked before saving; shipping carton counts never supply a conversion factor.</p>
         <fieldset disabled={collectionLocked} className="min-w-0 space-y-3">
           {!importRows && <><Label htmlFor="packing-list-file">Packing list CSV</Label><Input id="packing-list-file" type="file" accept=".csv" onChange={(event) => { const file = event.target.files?.[0]; if (file) parseFile(file); }} />
             {rawRows.length > 0 && <><p>{rawRows.length} data rows found</p><div className="grid grid-cols-1 sm:grid-cols-2 gap-3">{PACKING_LIST_FIELDS.map(({ field, label }) => <div key={field} className="space-y-1"><Label htmlFor={`mapping-${field}`}>{label}</Label><select id={`mapping-${field}`} className="w-full rounded border bg-background p-2" value={mapping[field] ?? "__skip__"} onChange={(event) => setMapping((current) => ({ ...current, [field]: event.target.value }))}><option value="__skip__">Skip</option>{headers.map((header) => <option key={header} value={header}>{header}</option>)}</select></div>)}</div><Button onClick={previewImport}>Preview rows</Button></>}
           </>}
-          {importRows && importRows.length > 0 && <><p className="text-xs text-muted-foreground">Review or correct values below. Quantities are pieces; cartons do not replace them. Errors refer to the submitted data row, excluding the CSV header.</p><PackingListPreview rows={importRows} errors={rowErrors} onChange={(index, field, value) => setImportRows((current) => current?.map((row, rowIndex) => rowIndex === index ? updatePackingListCell(row, field, value) : row) ?? null)} />
+          {importRows && importRows.length > 0 && <><p className="text-xs text-muted-foreground">Review the configured count unit and exact piece total for each row. Shipping cartons describe physical packing. Errors refer to data rows, excluding the CSV header.</p><PackingListPreview rows={importRows} errors={rowErrors} unitOptions={packingCatalog.isError ? [] : packingCatalog.data?.rows ?? []} onChange={(index, field, value) => setImportRows((current) => current?.map((row, rowIndex) => rowIndex === index ? updatePackingListCell(row, field, value) : row) ?? null)} onQuantityChange={(index, draft, units) => setImportRows((current) => current?.map((row, rowIndex) => rowIndex === index ? updatePackingListQuantity(row, draft, units) : row) ?? null)} />
             <div className="flex flex-wrap gap-2"><Button onClick={() => void runCommand({ operation: "import", body: { rows: importRows } })}>{busy ? "Importing…" : `Import ${importRows.length} rows`}</Button>{rawRows.length > 0 && <Button variant="outline" onClick={() => setImportRows(null)}>Change column mapping</Button>}</div></>}
           {importRows?.length === 0 && <p>All submitted rows were imported.</p>}
           {importRows && <Button variant="outline" onClick={() => { setImportRows(null); setRawRows([]); setRowErrors([]); setImportSummary(null); }}>Choose another CSV</Button>}
         </fieldset>
       </div>}
       {modal === "edit" && editor && <div className="min-w-0 space-y-4">
-        <p className="text-xs text-muted-foreground">Line #{editor.id}. {editor.livePackReference ? `Live catalog pack reference: ${editor.livePackReference} pieces per variant. This reference does not recalculate shipped pieces.` : "No live pack reference recorded."}</p>
+        <p className="text-xs text-muted-foreground">Line #{editor.id}</p>
         {editor.physicalReviewRequired && <p role="status" className="rounded border border-amber-500/50 p-3 text-sm">This line has recorded physical values that need review. Correcting notes preserves those values; physical changes must pass current validation.</p>}
         {editConflict && <div role="alert" className="rounded border p-3 text-sm">This line changed or is no longer available. Load its latest values and review them before saving.<Button className="mt-2 block" variant="outline" disabled={busy} onClick={() => void reloadEditor()}>Load latest line</Button></div>}
-        <fieldset disabled={editorLocked} className="grid grid-cols-1 sm:grid-cols-2 gap-3">{(Object.keys(fieldLabels) as Array<keyof ShipmentLineForm>).map((field) => <div key={field} className="space-y-1"><Label htmlFor={`line-edit-${field}`}>{fieldLabels[field]}</Label><Input id={`line-edit-${field}`} inputMode={field === "notes" ? "text" : "decimal"} value={editor.form[field]} onChange={(event) => changeField(field, event.target.value)} /></div>)}</fieldset>
-        <p className="text-sm">Recorded draft: {editor.form.qtyShipped} pieces; {editor.form.cartonCount || "unspecified"} cartons.</p>
+        <ShipmentQuantityControl id={`line-edit-${editor.id}`} value={editor.quantity} units={editor.units} disabled={editorLocked}
+          onChange={(quantity) => setEditor((current) => current ? { ...current, quantity } : current)} />
+        <fieldset disabled={editorLocked} className="space-y-3 rounded border p-3">
+          <legend className="px-1 text-sm font-medium">Physical packing</legend>
+          <p className="text-xs text-muted-foreground">Shipping cartons can contain partial packs. They are never calculated from the selected receive unit.</p>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <div className="space-y-1"><Label htmlFor="line-edit-cartonCount">Shipping cartons</Label><Input id="line-edit-cartonCount" inputMode="numeric" value={editor.form.cartonCount} onChange={(event) => changeField("cartonCount", event.target.value)} /></div>
+            <div className="space-y-1"><Label htmlFor="line-edit-dimensionBasis">Dimensions measured per</Label><select id="line-edit-dimensionBasis" className="h-10 w-full rounded border bg-background px-2" value={editor.form.dimensionBasis} onChange={(event) => changeField("dimensionBasis", event.target.value)}>
+              {editor.original.dimensionBasis === "" && <option value="">Existing basis: {editor.original.cartonCount ? "shipping carton" : "piece"}</option>}
+              <option value="piece">Piece</option><option value="carton">Shipping carton</option>
+            </select></div>
+            {dimensionFields.map((field) => <div key={field} className="space-y-1"><Label htmlFor={`line-edit-${field}`}>{field === "weightKg" ? `Weight per ${(editor.form.dimensionBasis || (editor.original.cartonCount ? "carton" : "piece")) === "carton" ? "shipping carton" : "piece"} (kg)` : fieldLabels[field]}</Label><Input id={`line-edit-${field}`} inputMode="decimal" value={editor.form[field]} onChange={(event) => changeField(field, event.target.value)} /></div>)}
+          </div>
+          <p className="text-xs text-muted-foreground">Weight and volume use {editor.form.dimensionBasis || (editor.original.cartonCount ? "carton" : "piece")} measurements × {(editor.form.dimensionBasis || (editor.original.cartonCount ? "carton" : "piece")) === "carton" ? (editor.form.cartonCount || "the required shipping carton count") : "shipped pieces"}. Changing count units does not change these measurements.</p>
+        </fieldset>
+        <div className="space-y-1"><Label htmlFor="line-edit-notes">Notes</Label><Input id="line-edit-notes" disabled={editorLocked} value={editor.form.notes} onChange={(event) => changeField("notes", event.target.value)} /></div>
         <Button disabled={busy || editConflict || uncertainLine?.operation === "delete"} onClick={() => void saveEditor(uncertainLine?.editor ?? editor)}>{busy ? "Saving…" : uncertainLine ? "Retry original edit" : "Save line"}</Button>
       </div>}
       {modal === "dimensions" && <div className="min-w-0 space-y-4">
         {!dimensionRows.length && <p>No lines with missing dimensions were found. Review allocation status for any remaining blockers.</p>}
         {dimensionRows.map((row) => <div key={row.editor.id} className="rounded border p-3 space-y-2"><p className="font-medium">{row.editor.sku} — {row.status === "saved" ? "Saved" : row.status === "uncertain" ? "Outcome unknown; retry original values" : row.status === "conflict" ? "Changed; load latest" : "Not saved"}</p>
           {row.error && <p role="alert" className="text-sm text-destructive">{row.error}</p>}
-          <fieldset disabled={busy || row.status !== "ready"} className="grid grid-cols-2 gap-2">{dimensionFields.map((field) => <div key={field}><Label htmlFor={`dimension-${row.editor.id}-${field}`}>{fieldLabels[field]}</Label><Input id={`dimension-${row.editor.id}-${field}`} inputMode="decimal" value={row.editor.form[field]} onChange={(event) => setDimensionRows((current) => current.map((item) => item.editor.id === row.editor.id ? { ...item, editor: { ...item.editor, form: { ...item.editor.form, [field]: event.target.value } } } : item))} /></div>)}</fieldset>
+          <fieldset disabled={busy || row.status !== "ready"} className="grid grid-cols-1 sm:grid-cols-2 gap-2">{packingFields.map((field) => <div key={field}><Label htmlFor={`dimension-${row.editor.id}-${field}`}>{field === "weightKg" ? `Weight per ${(row.editor.form.dimensionBasis || (row.editor.original.cartonCount ? "carton" : "piece")) === "carton" ? "shipping carton" : "piece"} (kg)` : fieldLabels[field]}</Label>
+            {field === "dimensionBasis" ? <select id={`dimension-${row.editor.id}-${field}`} className="h-10 w-full rounded border bg-background px-2" value={row.editor.form[field]} onChange={(event) => setDimensionRows((current) => current.map((item) => item.editor.id === row.editor.id ? { ...item, editor: { ...item.editor, form: { ...item.editor.form, dimensionBasis: event.target.value } } } : item))}>
+              {row.editor.original.dimensionBasis === "" && <option value="">Existing basis: {row.editor.original.cartonCount ? "shipping carton" : "piece"}</option>}<option value="piece">Piece</option><option value="carton">Shipping carton</option>
+            </select> : <Input id={`dimension-${row.editor.id}-${field}`} inputMode="decimal" value={row.editor.form[field]} onChange={(event) => setDimensionRows((current) => current.map((item) => item.editor.id === row.editor.id ? { ...item, editor: { ...item.editor, form: { ...item.editor.form, [field]: event.target.value } } } : item))} />}</div>)}</fieldset>
+          <p className="text-xs text-muted-foreground">Measurements are per {row.editor.form.dimensionBasis || (row.editor.original.cartonCount ? "carton" : "piece")}. Enter actual shipping carton counts when using carton measurements.</p>
           {row.status === "conflict" && <Button variant="outline" disabled={busy} onClick={() => void reloadDimension(row.editor.id)}>Load latest for {row.editor.sku}</Button>}
         </div>)}
-        <Button disabled={busy || !dimensionRows.some((row) => row.status === "uncertain" || row.status === "ready" && dimensionFields.some((field) => row.editor.form[field] !== row.editor.original[field]))} onClick={() => void saveDimensions()}>{busy ? "Saving…" : "Save remaining dimensions"}</Button>
+        <Button disabled={busy || !dimensionRows.some((row) => row.status === "uncertain" || row.status === "ready" && packingFields.some((field) => row.editor.form[field] !== row.editor.original[field]))} onClick={() => void saveDimensions()}>{busy ? "Saving…" : "Save remaining dimensions"}</Button>
       </div>}
       <div className="flex justify-end"><Button variant="outline" onClick={() => setModal(null)}>Close</Button></div>
     </DialogContent>

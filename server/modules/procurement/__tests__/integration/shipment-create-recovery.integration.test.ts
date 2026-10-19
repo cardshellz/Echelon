@@ -165,6 +165,28 @@ databaseTests.sequential("shipment creation recovery PostgreSQL guarantees", () 
     expect(await counts()).toEqual({ shipments: 1, histories: 1, lines: 1, audits: 2 });
   });
 
+  it("creates and recovers a shipment with the same explicit unit conversion used by Add from PO", async () => {
+    const body = { ...fromPo(500), purchaseOrder: { purchaseOrderId: 10, lineSelections: [{ poLineId: 21, qty: 500,
+      unitSelection: { productVariantId: 200, unitsPerVariant: 250, quantity: 2 } }] } };
+    const result = await execute("selected-unit", body);
+    expect(result).toMatchObject({ httpStatus: 201, body: { lineCount: 1, totalPieces: 500 } });
+    expect((await pool.query(`SELECT purchase_order_line_id,product_variant_id,qty_shipped,units_per_variant_snapshot
+      FROM procurement.inbound_shipment_lines`)).rows)
+      .toEqual([{ purchase_order_line_id: 21, product_variant_id: 200, qty_shipped: 500, units_per_variant_snapshot: 250 }]);
+    await pool.query("UPDATE catalog.product_variants SET units_per_variant=500 WHERE id=200");
+    expect(await execute("selected-unit", body, delegateId)).toEqual({ ...result, replayed: true });
+    expect(await counts()).toEqual({ shipments: 1, histories: 1, lines: 1, audits: 2 });
+  });
+
+  it("leaves no shipment, selected units or history when catalog conversion changed before creation", async () => {
+    const body = { ...fromPo(500), purchaseOrder: { purchaseOrderId: 10, lineSelections: [{ poLineId: 21, qty: 500,
+      unitSelection: { productVariantId: 200, unitsPerVariant: 250, quantity: 2 } }] } };
+    await pool.query("UPDATE catalog.product_variants SET units_per_variant=500 WHERE id=200");
+    const rejected = await execute("stale-selected-unit", body);
+    expect(rejected).toMatchObject({ httpStatus: 409, terminalState: "rejected", body: { code: "SHIPMENT_UNIT_SOURCE_CHANGED" } });
+    expect(await counts()).toEqual({ shipments: 0, histories: 0, lines: 0, audits: 0 });
+  });
+
   it("returns exactly the original response after loss, delegate retry and later shipment changes", async () => {
     const body = fromPo();
     const original = await execute("lost-response", body);

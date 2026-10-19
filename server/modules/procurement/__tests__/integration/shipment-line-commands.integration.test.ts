@@ -256,6 +256,315 @@ databaseTests.sequential("shipment line command PostgreSQL guarantees", () => {
     expect((await pool.query("SELECT timestamp,actor FROM public.audit_events WHERE actor=$1", [actorId])).rows).toEqual([{ timestamp: NOW, actor: actorId }]);
   });
 
+  it("migrates legacy shipment rows without guessing units or dimensions and safely replays the migration", async () => {
+    // Reconstruct the old shape only inside this suite-owned disposable schema.
+    // New columns from fixtureTable would otherwise hide a broken upgrade path.
+    await pool.query("ALTER TABLE procurement.inbound_shipment_lines DROP COLUMN units_per_variant_snapshot, DROP COLUMN dimension_basis");
+    const before = (await pool.query("SELECT * FROM procurement.inbound_shipment_lines WHERE id=11")).rows[0];
+    const migration = readFileSync(resolve(process.cwd(), "migrations/900000015000018550001_shipment_unit_selection.sql"), "utf8");
+    try {
+      await pool.query(migration);
+      const migrated = (await pool.query("SELECT * FROM procurement.inbound_shipment_lines WHERE id=11")).rows[0];
+      expect(migrated).toEqual({ ...before, units_per_variant_snapshot: null, dimension_basis: null });
+      await pool.query(migration);
+      expect((await pool.query("SELECT * FROM procurement.inbound_shipment_lines WHERE id=11")).rows[0]).toEqual(migrated);
+      await expect(pool.query("UPDATE procurement.inbound_shipment_lines SET units_per_variant_snapshot=0 WHERE id=11"))
+        .rejects.toMatchObject({ code: "23514" });
+      await expect(pool.query("UPDATE procurement.inbound_shipment_lines SET dimension_basis='guess' WHERE id=11"))
+        .rejects.toMatchObject({ code: "23514" });
+      await expect(pool.query("UPDATE procurement.inbound_shipment_lines SET units_per_variant_snapshot=250,product_variant_id=NULL WHERE id=11"))
+        .rejects.toMatchObject({ code: "23514" });
+      await expect(pool.query("UPDATE procurement.inbound_shipment_lines SET dimension_basis='carton',carton_count=NULL WHERE id=11"))
+        .rejects.toMatchObject({ code: "23514" });
+      expect((await pool.query("SELECT * FROM procurement.inbound_shipment_lines WHERE id=11")).rows[0]).toEqual(migrated);
+    } finally {
+      // Restore the columns even on assertion failure so subsequent cases retain
+      // their actual schema; no user or pre-existing schemas are ever targeted.
+      await pool.query(migration);
+    }
+  });
+
+  it("records selected packs across multiple POs while keeping shipping cartons independent", async () => {
+    const first: ShipmentLineCommand = { operation: "add-from-po", resourceId: 2, body: {
+      purchaseOrderId: 10, lineSelections: [{ poLineId: 21, qty: 500,
+        unitSelection: { productVariantId: 200, unitsPerVariant: 250, quantity: 2 } }],
+    } };
+    const second: ShipmentLineCommand = { operation: "add-from-po", resourceId: 2, body: {
+      purchaseOrderId: 19, lineSelections: [{ poLineId: 29, qty: 30,
+        unitSelection: { productVariantId: 300, unitsPerVariant: 10, quantity: 3 } }],
+    } };
+    expect(await execute(first)).toMatchObject([{ purchaseOrderId: 10, purchaseOrderLineId: 21,
+      productVariantId: 200, qtyShipped: 500, unitsPerVariantSnapshot: 250 }]);
+    expect(await execute(second)).toMatchObject([{ purchaseOrderId: 19, purchaseOrderLineId: 29,
+      productVariantId: 300, qtyShipped: 30, unitsPerVariantSnapshot: 10 }]);
+    expect((await pool.query("SELECT total_pieces FROM procurement.inbound_shipments WHERE id=2")).rows)
+      .toEqual([{ total_pieces: 530 }]);
+    expect(await execute(await patch({ unitSelection: { productVariantId: 200, unitsPerVariant: 250, quantity: 2 },
+      cartonCount: 7, dimensionBasis: "carton", weightKg: "2" })))
+      .toMatchObject({ qtyShipped: 500, cartonCount: 7, totalWeightKg: "14.000", unitsPerVariantSnapshot: 250 });
+  });
+
+  it("returns only active same-product units to the PO chooser and reports catalog drift without changing its recorded factor", async () => {
+    const { getShippablePurchaseOrderLines } = await import("../../shipment-source-capacity");
+    await pool.query(`INSERT INTO catalog.product_variants(id,product_id,sku,name,units_per_variant,is_active)
+      VALUES(202,100,'TEST-RETIRED','Retired pack',25,false)`);
+    const choices = await getShippablePurchaseOrderLines(database, 10);
+    expect(choices.lines.find((line: { id: number }) => line.id === 21)).toMatchObject({ shipmentUnits: {
+      productId: 100, selectedVariantId: 200, unitsPerVariantSnapshot: 250, issue: null,
+      variants: [{ id: 201, unitsPerVariant: 1 }, { id: 200, unitsPerVariant: 250 }],
+    } });
+    await pool.query("UPDATE catalog.product_variants SET units_per_variant=500 WHERE id=200");
+    const before = await state();
+    const changed = await getShippablePurchaseOrderLines(database, 10);
+    expect(changed.lines.find((line: { id: number }) => line.id === 21)).toMatchObject({ shipmentUnits: {
+      unitsPerVariantSnapshot: 250, issue: { code: "SHIPMENT_UNIT_SOURCE_CHANGED" },
+      variants: [{ id: 201, unitsPerVariant: 1 }, { id: 200, unitsPerVariant: 500 }],
+    } });
+    expect(await state()).toEqual(before);
+  });
+
+  it("resolves CSV unit options from each exact PO, variant or SKU identity without writing or crossing products", async () => {
+    const { readShipmentPackingUnitOptions } = await import("../../shipment-unit-options.service");
+    await pool.query(`INSERT INTO catalog.product_variants(id,product_id,sku,name,units_per_variant,is_active)
+      VALUES(202,100,'TEST-RETIRED','Retired pack',25,false)`);
+    const before = await state();
+    const result = await readShipmentPackingUnitOptions(database, 1, { rows: [
+      { purchaseOrderLineId: 21 }, { sku: "test-each" }, { productVariantId: 300 },
+      { purchaseOrderLineId: 21, selectedVariantId: 201, sku: "TEST-EACH" },
+    ] });
+    expect(result).toMatchObject({ shipmentId: 1, rows: [
+      { row: 1, units: { productId: 100, selectedVariantId: 200, unitsPerVariantSnapshot: 250, issue: null,
+        variants: [{ id: 201, unitsPerVariant: 1 }, { id: 200, unitsPerVariant: 250 }] } },
+      { row: 2, units: { productId: 100, selectedVariantId: 201, unitsPerVariantSnapshot: null, issue: null,
+        variants: [{ id: 201, unitsPerVariant: 1 }, { id: 200, unitsPerVariant: 250 }] } },
+      { row: 3, units: { productId: 101, selectedVariantId: 300, unitsPerVariantSnapshot: null, issue: null,
+        variants: [{ id: 300, unitsPerVariant: 10 }] } },
+      { row: 4, units: { productId: 100, selectedVariantId: 201, unitsPerVariantSnapshot: null, issue: null,
+        variants: [{ id: 201, unitsPerVariant: 1 }, { id: 200, unitsPerVariant: 250 }] } },
+    ] });
+    expect(await state()).toEqual(before);
+  });
+
+  it("retains CSV identity conflicts and malformed rows as explicit per-row review evidence", async () => {
+    const { readShipmentPackingUnitOptions } = await import("../../shipment-unit-options.service");
+    const before = await state();
+    const result = await readShipmentPackingUnitOptions(database, 1, { rows: [
+      { purchaseOrderLineId: 21, productVariantId: 300 },
+      { purchaseOrderLineId: 29, sku: "TEST-EACH" },
+      { productVariantId: 201, selectedVariantId: 300 },
+      { sku: "MISSING-SKU" }, { purchaseOrderLineId: 999 },
+      { productVariantId: "200" }, null, { productVariantId: 201, qtyShipped: 1 },
+    ] });
+    expect(result.rows.map(({ row, units }) => ({ row, code: units.issue?.code }))).toEqual([
+      { row: 1, code: "SHIPMENT_UNIT_IDENTITY_CONFLICT" },
+      { row: 2, code: "SHIPMENT_UNIT_IDENTITY_CONFLICT" },
+      { row: 3, code: "SHIPMENT_UNIT_IDENTITY_CONFLICT" },
+      { row: 4, code: "SHIPMENT_UNIT_PRODUCT_REQUIRED" },
+      { row: 5, code: "SHIPMENT_UNIT_PRODUCT_REQUIRED" },
+      { row: 6, code: "SHIPMENT_UNIT_IDENTITY_INVALID" },
+      { row: 7, code: "SHIPMENT_UNIT_IDENTITY_INVALID" },
+      { row: 8, code: "SHIPMENT_UNIT_IDENTITY_INVALID" },
+    ]);
+    expect(await state()).toEqual(before);
+  });
+
+  it("refuses CSV options for missing products, charge-only PO lines and ambiguous SKU ownership", async () => {
+    const { readShipmentPackingUnitOptions } = await import("../../shipment-unit-options.service");
+    await pool.query(`UPDATE procurement.purchase_order_lines SET product_id=NULL WHERE id=21;
+      UPDATE procurement.purchase_order_lines SET line_type='charge' WHERE id=22;
+      INSERT INTO catalog.product_variants(id,product_id,sku,name,units_per_variant)
+        VALUES(301,101,'test-each','Conflicting case-insensitive SKU',10)`);
+    const before = await state();
+    const result = await readShipmentPackingUnitOptions(database, 1, { rows: [
+      { purchaseOrderLineId: 21, selectedVariantId: 200 },
+      { purchaseOrderLineId: 22 }, { sku: "TEST-EACH" },
+    ] });
+    expect(result.rows).toMatchObject([
+      { row: 1, units: { productId: null, variants: [], issue: { code: "SHIPMENT_UNIT_PRODUCT_REQUIRED" } } },
+      { row: 2, units: { productId: null, variants: [], issue: { code: "SHIPMENT_UNIT_PRODUCT_REQUIRED" } } },
+      { row: 3, units: { productId: null, variants: [], issue: { code: "SHIPMENT_UNIT_PRODUCT_REQUIRED" } } },
+    ]);
+    expect(await state()).toEqual(before);
+  });
+
+  it("enforces bounded CSV option requests and a real shipment before returning catalog evidence", async () => {
+    const { readShipmentPackingUnitOptions } = await import("../../shipment-unit-options.service");
+    const before = await state();
+    await expect(readShipmentPackingUnitOptions(database, 1, { rows: Array.from({ length: 501 }, () => ({ productVariantId: 201 })) }))
+      .rejects.toMatchObject({ name: "ZodError" });
+    await expect(readShipmentPackingUnitOptions(database, 999, { rows: [{ productVariantId: 201 }] }))
+      .rejects.toMatchObject({ statusCode: 404, code: "SHIPMENT_LINE_NOT_FOUND" });
+    expect(await state()).toEqual(before);
+  });
+
+  it("requires physical packing evidence instead of using a selected case or piece count as shipping cartons", async () => {
+    await pool.query("UPDATE catalog.product_variants SET weight_grams=1000,length_mm=200,width_mm=100,height_mm=100 WHERE id=200");
+    const created = await execute({ operation: "add-from-po", resourceId: 2, body: {
+      purchaseOrderId: 10, lineSelections: [{ poLineId: 21, qty: 500,
+        unitSelection: { productVariantId: 200, unitsPerVariant: 250, quantity: 2 } }],
+    } }) as Array<{ id: number }>;
+    const id = created[0].id;
+    const before = await readLine(id);
+    expect(before).toMatchObject({ qtyShipped: 500, cartonCount: null, dimensionBasis: "piece",
+      weightKg: null, lengthCm: null, widthCm: null, heightCm: null, totalWeightKg: "0.000" });
+    expect(await execute({ operation: "resolve-dimensions", resourceId: 2, body: {} })).toMatchObject({
+      updated: 0, total: 1, reviewRequiredLines: [{ lineId: id, code: "SHIPMENT_DIMENSIONS_REQUIRE_PACKING_EVIDENCE" }],
+    });
+    expect(await readLine(id)).toEqual(before);
+    const reviewed = await state();
+    await expect(execute(await patch({ dimensionBasis: "carton", weightKg: "1" }, id))).rejects.toThrow();
+    expect(await state()).toEqual(reviewed);
+  });
+
+  it("uses exact selected units for editing and rejects an old review without rewriting source history", async () => {
+    const stale = await patch({ unitSelection: { productVariantId: 200, unitsPerVariant: 250, quantity: 3 } });
+    expect(await execute(await patch({ unitSelection: { productVariantId: 201, unitsPerVariant: 1, quantity: 501 } })))
+      .toMatchObject({ productVariantId: 201, qtyShipped: 501, unitsPerVariantSnapshot: 1, cartonCount: 2 });
+    const before = await state();
+    await expect(execute(stale)).rejects.toMatchObject({ details: { code: "SHIPMENT_LINE_VERSION_CONFLICT" } });
+    expect(await state()).toEqual(before);
+    expect((await pool.query("SELECT expected_receive_variant_id,expected_receive_units_per_variant FROM procurement.purchase_order_lines WHERE id=21")).rows)
+      .toEqual([{ expected_receive_variant_id: 200, expected_receive_units_per_variant: 250 }]);
+  });
+
+  it.each([
+    { name: "cross-product", selection: { productVariantId: 300, unitsPerVariant: 10, quantity: 50 }, qty: 500,
+      rejection: { details: { code: "SHIPMENT_UNIT_VARIANT_REVIEW_REQUIRED" } } },
+    { name: "changed factor", selection: { productVariantId: 200, unitsPerVariant: 100, quantity: 5 }, qty: 500,
+      rejection: { details: { code: "SHIPMENT_UNIT_SOURCE_CHANGED" } } },
+    { name: "contradictory pieces", selection: { productVariantId: 200, unitsPerVariant: 250, quantity: 2 }, qty: 501,
+      rejection: { name: "ZodError" } },
+    { name: "fractional pack", selection: { productVariantId: 200, unitsPerVariant: 250, quantity: 2.004 }, qty: 501,
+      rejection: { name: "ZodError" } },
+    { name: "capacity exceeded", selection: { productVariantId: 200, unitsPerVariant: 250, quantity: 5 }, qty: 1250,
+      rejection: { details: { code: "SHIPMENT_LINE_QUANTITY_EXCEEDED" } } },
+  ])("rejects $name unit input atomically in Add from PO and editing", async ({ selection, qty, rejection }) => {
+    const before = await state();
+    await expect(execute({ operation: "add-from-po", resourceId: 2, body: {
+      purchaseOrderId: 10, lineSelections: [{ poLineId: 21, qty, unitSelection: selection }],
+    } })).rejects.toMatchObject(rejection);
+    expect(await state()).toEqual(before);
+    await expect(execute(await patch({ qtyShipped: qty, unitSelection: selection }))).rejects.toMatchObject(rejection);
+    expect(await state()).toEqual(before);
+  });
+
+  it("rechecks the selected catalog pack after its shared lock waits for a factor change", async () => {
+    const command: ShipmentLineCommand = { operation: "add-from-po", resourceId: 2, body: {
+      purchaseOrderId: 10, lineSelections: [{ poLineId: 21, qty: 500,
+        unitSelection: { productVariantId: 200, unitsPerVariant: 250, quantity: 2 } }],
+    } };
+    const before = await state();
+    const result = await contend(command, (client) => client.query("UPDATE catalog.product_variants SET units_per_variant=500 WHERE id=200"));
+    expect(result).toMatchObject({ ok: false, error: { details: { code: "SHIPMENT_UNIT_SOURCE_CHANGED" } } });
+    const after = await state();
+    // The concurrent catalog change commits; the shipment command writes no rows.
+    const catalogIndex = TABLES.indexOf(schema.productVariants);
+    expect(after.filter((_, index) => index !== catalogIndex)).toEqual(before.filter((_, index) => index !== catalogIndex));
+  });
+
+  it("durably imports explicit units with per-row errors and preserves the selected factor on replay", async () => {
+    const command: ShipmentLineCommand = { operation: "import", resourceId: 2, body: { rows: [
+      { purchaseOrderLineId: 21, qtyShipped: 500,
+        unitSelection: { productVariantId: 200, unitsPerVariant: 250, quantity: 2 }, cartonCount: 7 },
+      { purchaseOrderLineId: 22, qtyShipped: 10,
+        unitSelection: { productVariantId: 300, unitsPerVariant: 10, quantity: 1 } },
+      { purchaseOrderLineId: 22, qtyShipped: 11,
+        unitSelection: { productVariantId: 201, unitsPerVariant: 1, quantity: 10 } },
+      { purchaseOrderLineId: 29, qtyShipped: 30,
+        unitSelection: { productVariantId: 300, unitsPerVariant: 10, quantity: 3 } },
+    ] } };
+    const request = descriptor("unit-import-replay", command);
+    const commands = durableCommands();
+    const result = await commands.execute(command, actorId, request);
+    expect(result).toMatchObject({ httpStatus: 200, terminalState: "succeeded", body: {
+      imported: 2, errors: [{ row: 2, code: "SHIPMENT_UNIT_VARIANT_REVIEW_REQUIRED" },
+        { row: 3, code: "SHIPMENT_LINE_INPUT_INVALID" }], lines: [
+        { purchaseOrderLineId: 21, qtyShipped: 500, cartonCount: 7, unitsPerVariantSnapshot: 250 },
+        { purchaseOrderLineId: 29, qtyShipped: 30, unitsPerVariantSnapshot: 10 },
+      ],
+    } });
+    await pool.query("UPDATE catalog.product_variants SET units_per_variant=500 WHERE id=200");
+    const beforeReplay = await state();
+    expect(await commands.execute(command, delegateId, request)).toMatchObject({
+      replayed: true, body: JSON.parse(JSON.stringify(result.body)),
+    });
+    expect(await state()).toEqual(beforeReplay);
+  });
+
+  it("rejects selected import units when a PO source has no verified product instead of treating it as standalone", async () => {
+    await pool.query("UPDATE procurement.purchase_order_lines SET product_id=NULL WHERE id=21");
+    const before = await state();
+    await expect(execute({ operation: "import", resourceId: 2, body: { rows: [{
+      purchaseOrderLineId: 21, qtyShipped: 10,
+      unitSelection: { productVariantId: 300, unitsPerVariant: 10, quantity: 1 },
+    }] } })).rejects.toMatchObject({ details: { code: "SHIPMENT_LINE_SOURCE_REVIEW_REQUIRED" } });
+    // The locked PO capacity owner rejects untrusted product identity before any row is applied.
+    expect(await state()).toEqual(before);
+  });
+
+  it("persists a unit-review rejection under its exact command scope and replays it after catalog repair", async () => {
+    const command: ShipmentLineCommand = { operation: "add-from-po", resourceId: 2, body: {
+      purchaseOrderId: 10, lineSelections: [{ poLineId: 21, qty: 500,
+        unitSelection: { productVariantId: 200, unitsPerVariant: 250, quantity: 2 } }],
+    } };
+    const commands = durableCommands();
+    const request = descriptor("unit-rejection", command);
+    await pool.query("UPDATE catalog.product_variants SET units_per_variant=500 WHERE id=200");
+    const before = await state();
+    const rejected = await commands.execute(command, actorId, request);
+    expect(rejected).toMatchObject({ httpStatus: 409, terminalState: "rejected", replayed: false,
+      body: { code: "SHIPMENT_UNIT_SOURCE_CHANGED" } });
+    expect(await state()).toEqual(before);
+    const persisted = (await pool.query(`SELECT actor_type,actor_id,method,route_template,resource_key,idempotency_key,
+      request_hash,command_name,status,http_status,response_body,attempt_count
+      FROM public.financial_command_results WHERE actor_id=$1 AND idempotency_key=$2`,
+      [request.actorId, request.idempotencyKey])).rows;
+    expect(persisted).toEqual([{ actor_type: request.actorType, actor_id: request.actorId, method: request.method,
+      route_template: request.routeTemplate, resource_key: request.resourceKey, idempotency_key: request.idempotencyKey,
+      request_hash: request.requestHash, command_name: request.commandName, status: "rejected", http_status: 409,
+      response_body: rejected.body, attempt_count: 1 }]);
+
+    await pool.query("UPDATE catalog.product_variants SET units_per_variant=250 WHERE id=200");
+    const repaired = await state();
+    expect(await commands.execute(command, delegateId, request)).toEqual({ ...rejected, replayed: true });
+    expect(await state()).toEqual(repaired);
+    expect((await pool.query(`SELECT status,response_body,attempt_count FROM public.financial_command_results
+      WHERE actor_id=$1 AND idempotency_key=$2`, [request.actorId, request.idempotencyKey])).rows)
+      .toEqual([{ status: "rejected", response_body: rejected.body, attempt_count: 1 }]);
+    expect(await commands.execute(command, actorId, descriptor("unit-rejection-new-review", command)))
+      .toMatchObject({ httpStatus: 201, terminalState: "succeeded", replayed: false,
+        body: [{ qtyShipped: 500, unitsPerVariantSnapshot: 250 }] });
+  });
+
+  it("durably rejects an explicit duplicate PO selection rather than silently discarding a different reviewed unit", async () => {
+    const command: ShipmentLineCommand = { operation: "add-from-po", resourceId: 1, body: {
+      purchaseOrderId: 10, lineSelections: [{ poLineId: 21, qty: 400,
+        unitSelection: { productVariantId: 201, unitsPerVariant: 1, quantity: 400 } }],
+    } };
+    const commands = durableCommands();
+    const request = descriptor("duplicate-unit-review", command);
+    const before = await state();
+    const rejected = await commands.execute(command, actorId, request);
+    expect(rejected).toMatchObject({ httpStatus: 409, terminalState: "rejected", replayed: false,
+      body: { code: "SHIPMENT_LINE_ALREADY_PRESENT" } });
+    expect(await state()).toEqual(before);
+    expect(await commands.execute(command, delegateId, request)).toEqual({ ...rejected, replayed: true });
+    expect(await state()).toEqual(before);
+    expect(await readLine()).toMatchObject({ productVariantId: 200, qtyShipped: 500, unitsPerVariantSnapshot: null });
+  });
+
+  it("rolls back selected unit, pieces, physical totals and audit after an allocation write fails", async () => {
+    const failingStorage = { ...storage, async bulkCreateInboundFreightCostAllocations(...args: Parameters<typeof storage.bulkCreateInboundFreightCostAllocations>) {
+      await storage.bulkCreateInboundFreightCostAllocations(...args);
+      throw new Error("Injected failure after selected-unit allocation insert");
+    } };
+    const failingService = createService(database, failingStorage as Parameters<typeof createService>[1], undefined, () => NOW);
+    const before = await state();
+    await expect(execute(await patch({ unitSelection: { productVariantId: 201, unitsPerVariant: 1, quantity: 501 } }), failingService))
+      .rejects.toThrow("Injected failure after selected-unit allocation insert");
+    expect(await state()).toEqual(before);
+  });
+
   it("allows only one of two shipments competing for the same remaining PO pieces", async () => {
     const holder = await pool.connect();
     let locked = false;
@@ -558,7 +867,7 @@ databaseTests.sequential("shipment line command PostgreSQL guarantees", () => {
   it("resolves only missing dimensions from real catalog data while preserving existing dimensions and pieces", async () => {
     await pool.query("UPDATE catalog.product_variants SET weight_grams=2000,length_mm=200,width_mm=100,height_mm=100 WHERE id=200");
     await pool.query("UPDATE procurement.inbound_shipment_lines SET weight_kg=7 WHERE id=11");
-    expect(await execute({ operation: "resolve-dimensions", resourceId: 1, body: {} })).toEqual({ updated: 1, total: 1 });
+    expect(await execute({ operation: "resolve-dimensions", resourceId: 1, body: {} })).toEqual({ updated: 1, total: 1, reviewRequiredLines: [] });
     expect(await readLine()).toMatchObject({ weightKg: "7.000", lengthCm: "20.00", widthCm: "10.00", heightCm: "10.00", qtyShipped: 500, cartonCount: 2, totalWeightKg: "14.000", updatedAt: NOW });
   });
 
@@ -725,7 +1034,7 @@ databaseTests.sequential("shipment line command PostgreSQL guarantees", () => {
       statusCode: 409, details: { code: "SHIPMENT_LINE_TOTALS_REVIEW_REQUIRED", lineId: 11, field: "totalWeightKg" },
     });
     expect(await state()).toEqual(before);
-    expect(await execute({ operation: "resolve-dimensions", resourceId: 1, body: {} })).toEqual({ updated: 1, total: 1 });
+    expect(await execute({ operation: "resolve-dimensions", resourceId: 1, body: {} })).toEqual({ updated: 1, total: 1, reviewRequiredLines: [] });
     expect(await readLine()).toMatchObject({
       qtyShipped: 500, cartonCount: 2, weightKg: "2.000", lengthCm: "20.00", widthCm: "10.00", heightCm: "10.00",
       totalWeightKg: "4.000", totalVolumeCbm: "0.004000", chargeableWeightKg: "4.000", updatedAt: NOW,

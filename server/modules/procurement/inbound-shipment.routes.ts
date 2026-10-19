@@ -1,3 +1,5 @@
+import { readShipmentPackingUnitOptions, ShipmentUnitOptionsError } from "./shipment-unit-options.service";
+import { db } from "../../db";
 import { registerShipmentInvoiceRoutes } from "./shipment-invoice.routes";
 import { createShipmentCreateCommands, shipmentCreateCommandScope, SHIPMENT_CREATE_COMMAND_PRINCIPAL } from "./shipment-create.commands";
 import { shipmentLineResourceIdSchema } from "@shared/procurement/shipment-line-command";
@@ -74,7 +76,14 @@ export function registerInboundShipmentRoutes(app: Express) {
       });
       const result = await shipmentLineCommands.execute({ operation, resourceId, body: req.body }, actorId, descriptor);
       res.setHeader("Idempotency-Replayed", result.replayed ? "true" : "false");
-      return res.status(result.httpStatus).json(result.body);
+      // Only the command ledger's terminal rejection proves that an earlier
+      // attempt cannot have applied. Authentication, proxy and key errors do not.
+      const rejected = result.body as { details?: Record<string, unknown> };
+      const body = result.terminalState === "rejected"
+        ? { ...(result.body as Record<string, unknown>), details: { ...rejected.details,
+          shipmentLineOutcome: "rejected", idempotencyKey: descriptor.idempotencyKey } }
+        : result.body;
+      return res.status(result.httpStatus).json(body);
     } catch (error) {
       if (error instanceof FinancialCommandError) {
         for (const [name, value] of Object.entries(error.responseHeaders ?? {})) res.setHeader(name, value);
@@ -295,6 +304,19 @@ export function registerInboundShipmentRoutes(app: Express) {
   });
 
   // Shipment lines
+
+  app.post("/api/inbound-shipments/:id/lines/unit-options", requirePermission("purchasing", "view"), async (req, res) => {
+    try {
+      const id = z.string().regex(/^[1-9]\d*$/).transform(Number).pipe(shipmentLineResourceIdSchema).parse(req.params.id);
+      if (Object.keys(req.query).length) return res.status(400).json({ code: "SHIPMENT_UNIT_OPTIONS_INPUT_INVALID", error: "Unit preview does not accept query parameters." });
+      return res.json(await readShipmentPackingUnitOptions(db, id, req.body));
+    } catch (error) {
+      if (error instanceof z.ZodError) return res.status(400).json({ code: "SHIPMENT_UNIT_OPTIONS_INPUT_INVALID", error: "Provide a valid shipment ID and between 1 and 500 source rows." });
+      if (error instanceof ShipmentUnitOptionsError) return res.status(error.statusCode).json({ code: error.code, error: error.message });
+      console.error(JSON.stringify({ event: "procurement.shipment_unit_options.failed", shipmentId: req.params.id, actorId: getActorId(req) ?? null, errorType: error instanceof Error ? error.name : typeof error }));
+      return res.status(503).json({ code: "SHIPMENT_UNIT_OPTIONS_UNAVAILABLE", error: "Receive units could not be verified. Retry the preview." });
+    }
+  });
 
   app.post("/api/inbound-shipments/:id/lines/from-po", requirePermission("purchasing", "edit"), (req, res) => handleLineCommand(req, res, "add-from-po"));
   app.post("/api/inbound-shipments/:id/lines/import-packing-list", requirePermission("purchasing", "edit"), (req, res) => handleLineCommand(req, res, "import"));

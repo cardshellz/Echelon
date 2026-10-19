@@ -4,7 +4,7 @@ import type { InboundShipmentLine } from "@shared/schema";
 
 const VERSION_FIELDS = [
   "id", "inboundShipmentId", "purchaseOrderId", "purchaseOrderLineId", "productVariantId", "sku",
-  "qtyShipped", "weightKg", "lengthCm", "widthCm", "heightCm", "totalWeightKg", "totalVolumeCbm",
+  "qtyShipped", "unitsPerVariantSnapshot", "dimensionBasis", "weightKg", "lengthCm", "widthCm", "heightCm", "totalWeightKg", "totalVolumeCbm",
   "chargeableWeightKg", "grossVolumeCbm", "cartonCount", "palletCount", "allocatedCostCents",
   "landedUnitCostCents", "notes", "createdAt", "updatedAt",
 ] as const satisfies readonly (keyof InboundShipmentLine)[];
