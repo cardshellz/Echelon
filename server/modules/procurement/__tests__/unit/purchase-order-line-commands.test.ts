@@ -539,6 +539,7 @@ describe("vendor catalog pricing provenance", () => {
         if (text.includes("pg_advisory_xact_lock")) {
           expect(text).toContain("inventory.cost_graph"); return { rows: [] };
         }
+        if (text.includes('AS "hasInvoiceLinks"')) return { rows: [{ hasInvoiceLinks: false, hasInvoiceLines: false }] };
         expect(text).toContain("procurement.inbound_shipment_lines"); return { rows: [{}] };
       }),
       update: vi.fn(),

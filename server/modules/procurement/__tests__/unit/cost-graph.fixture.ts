@@ -13,3 +13,15 @@ export function costGraphLockExecute() {
     return { rows: [] };
   });
 }
+
+/** Draft mutation fixtures explicitly supply the current invoice relationships. */
+export function costGraphAndPoInvoiceHistoryExecute(history = { hasInvoiceLinks: false, hasInvoiceLines: false }) {
+  const lock = costGraphLockExecute();
+  return vi.fn(async (query: SQL) => {
+    const statement = new PgDialect().sqlToQuery(query).sql;
+    if (statement.includes('AS "hasInvoiceLinks"') && statement.includes('AS "hasInvoiceLines"')) {
+      return { rows: [history] };
+    }
+    return lock(query);
+  });
+}

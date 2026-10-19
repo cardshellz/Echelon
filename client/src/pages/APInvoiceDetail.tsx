@@ -3,6 +3,7 @@ import { invalidateApInvoiceQueries, invalidateApPaymentQueries } from "@/featur
 import { InvoiceLineCostReview } from "@/features/purchasing/InvoiceLineCostReview";
 import { invalidatePurchaseCosts } from "@/lib/invalidate-purchase-costs";
 import { InvoiceShipmentReplacement } from "@/features/purchasing/InvoiceShipmentReplacement";
+import { invoiceSourceCapabilitiesSchema } from "@shared/procurement/shipment-billing-ownership";
 import { apInvoiceEditCapabilitySchema } from "@shared/procurement/ap-invoice-capabilities";
 import { useAuth } from "@/lib/auth";
 import { InvoiceQuantityCorrection } from "@/features/purchasing/InvoiceQuantityCorrection";
@@ -204,17 +205,35 @@ export default function APInvoiceDetail() {
   });
 
   // Queries
-  const { data: invoice, isLoading, error: invoiceError, refetch: refetchInvoice } = useQuery<any>({
+  const { data: invoice, isLoading, isFetching: invoiceRefreshing, error: invoiceError, refetch: refetchInvoice } = useQuery<any>({
     queryKey: [`/api/vendor-invoices/${invoiceId}`],
     enabled: !!invoiceId,
   });
 
+  const sourceCapabilities = invoiceSourceCapabilitiesSchema.safeParse(!invoiceRefreshing && !invoiceError && invoice?.id === invoiceId ? invoice.sourceCapabilities : undefined);
+  const sourceUnavailableReason = "Invoice source ownership could not be verified. Reload the invoice before changing its financial records.";
+  const poLinkCapability = sourceCapabilities.success ? sourceCapabilities.data.purchaseOrderLinks : null;
   const editCapability = apInvoiceEditCapabilitySchema.safeParse(invoice?.capabilities?.edit);
   const canEdit = hasPermission("purchasing", "edit") && editCapability.success && editCapability.data.allowed;
   const editUnavailableReason = !hasPermission("purchasing", "edit") ? "You have read-only access to invoice edits."
     : editCapability.success ? editCapability.data.reason : "Invoice editing availability could not be verified. Reload the invoice before editing.";
+  const canEditPoLinks = canEdit && poLinkCapability?.allowed === true;
+  const poLinkUnavailableReason = !canEdit ? editUnavailableReason : poLinkCapability?.reason ?? sourceUnavailableReason;
+  function requireEditablePoLinks(): void {
+    if (!canEditPoLinks) throw new Error(poLinkUnavailableReason);
+  }
   function requireEditableInvoice(): void {
     if (!canEdit) throw new Error(editUnavailableReason);
+  }
+  function lineDeletionUnavailableReason(line: { id: number; freightCostId?: number | null }): string | null {
+    if (!canEdit) return editUnavailableReason;
+    if (!sourceCapabilities.success) return sourceUnavailableReason;
+    if (!sourceCapabilities.data.approval.allowed) return sourceCapabilities.data.approval.reason;
+    if (!sourceCapabilities.data.payment.allowed) return sourceCapabilities.data.payment.reason;
+    if (line.freightCostId != null || sourceCapabilities.data.freightSourceLineIds.includes(line.id)) {
+      return "Shipment source lines are retained for audit history. Review voiding and replacing the invoice to correct its source.";
+    }
+    return null;
   }
 
   const invalidate = () => {
@@ -226,6 +245,9 @@ export default function APInvoiceDetail() {
   };
 
   async function action(endpoint: string, body?: any) {
+    if (endpoint === "approve" && (!sourceCapabilities.success || !sourceCapabilities.data.approval.allowed)) {
+      throw new Error(sourceCapabilities.success ? sourceCapabilities.data.approval.reason : sourceUnavailableReason);
+    }
     const url = `/api/vendor-invoices/${invoiceId}/${endpoint}`;
     const effectiveBody = body ?? null;
     const idempotencyKey = invoiceLifecycleIntent.acquire({
@@ -293,7 +315,7 @@ export default function APInvoiceDetail() {
 
   const linkPoMutation = useMutation({
     mutationFn: () => {
-      requireEditableInvoice();
+      requireEditablePoLinks();
       const idempotencyKey = createApCommandIdempotencyKey("ap-invoice-link-po");
       return fetch(`/api/vendor-invoices/${invoiceId}/po-links`, {
         method: "POST",
@@ -310,7 +332,7 @@ export default function APInvoiceDetail() {
 
   const unlinkPoMutation = useMutation({
     mutationFn: (poId: number) => {
-      requireEditableInvoice();
+      requireEditablePoLinks();
       return fetch(`/api/vendor-invoices/${invoiceId}/po-links/${poId}`, { method: "DELETE" })
         .then(async (r) => { if (!r.ok) throw new Error((await r.json()).error); return r.json(); });
     },
@@ -342,6 +364,8 @@ export default function APInvoiceDetail() {
 
   const paymentMutation = useMutation({
     mutationFn: async () => {
+      if (!canPay) throw new Error("Payment recording is unavailable. Reload the invoice and verify approval permission before continuing.");
+      if (!sourceCapabilities.success || !sourceCapabilities.data.payment.allowed) throw new Error(sourceCapabilities.success ? sourceCapabilities.data.payment.reason : sourceUnavailableReason);
       const body = {
         vendorId: invoice?.vendorId,
         paymentDate: payment.paymentDate,
@@ -418,6 +442,10 @@ export default function APInvoiceDetail() {
   const deleteLineMutation = useMutation({
     mutationFn: (lineId: number) => {
       requireEditableInvoice();
+      const line = invoice?.lines?.find((candidate: { id: number }) => candidate.id === lineId);
+      if (!line) throw new Error("Invoice line could not be verified. Reload the invoice before removing a line.");
+      const unavailableReason = lineDeletionUnavailableReason(line);
+      if (unavailableReason) throw new Error(unavailableReason);
       return fetch(`/api/vendor-invoice-lines/${lineId}`, { method: "DELETE" })
         .then(async (r) => { if (!r.ok) throw new Error((await r.json()).error); return r.json(); });
     },
@@ -515,10 +543,10 @@ export default function APInvoiceDetail() {
   }
 
   const status = invoice.status;
-  const canApprove = hasPermission("purchasing", "approve") && ["received", "disputed"].includes(status);
+  const canApprove = hasPermission("purchasing", "approve") && sourceCapabilities.success && sourceCapabilities.data.approval.allowed && ["received", "disputed"].includes(status);
   const canDispute = hasPermission("purchasing", "edit") && ["received", "approved", "partially_paid"].includes(status);
   const canVoid = hasPermission("purchasing", "approve") && status !== "voided" && invoice.paidAmountCents === 0;
-  const canPay = hasPermission("purchasing", "approve") && !invoice.paymentReviewRequired && ["approved", "partially_paid"].includes(status);
+  const canPay = hasPermission("purchasing", "approve") && sourceCapabilities.success && sourceCapabilities.data.payment.allowed && !invoice.paymentReviewRequired && ["approved", "partially_paid"].includes(status);
   // Evidence attachments and reviewed quantity corrections retain their own owners.
   const canManageAttachments = hasPermission("purchasing", "edit") && status !== "voided";
   const canRunMatch = hasPermission("purchasing", "edit") && status !== "voided";
@@ -556,6 +584,12 @@ export default function APInvoiceDetail() {
           if (refreshed.error) throw refreshed.error;
         }} />
 
+      {(!sourceCapabilities.success || !sourceCapabilities.data.approval.allowed || !sourceCapabilities.data.payment.allowed) && !isVoided && (
+        <div role="alert" className="rounded-lg border border-amber-300 p-4 text-sm space-y-2">
+          <p>{!sourceCapabilities.success ? sourceUnavailableReason : !sourceCapabilities.data.approval.allowed ? sourceCapabilities.data.approval.reason : sourceCapabilities.data.payment.reason}</p>
+          <Button variant="outline" onClick={() => void refetchInvoice()}>Reload invoice ownership</Button>
+        </div>
+      )}
       {/* ── Header ── */}
       <div className="flex flex-col sm:flex-row items-start justify-between gap-3">
         <div className="flex items-center gap-3">
@@ -658,11 +692,11 @@ export default function APInvoiceDetail() {
             <CardTitle className="text-sm">Invoice Line Items</CardTitle>
             {(canEdit || (canRunMatch && lines.length > 0)) && (
               <div className="flex gap-2">
-                {canEdit && <>
-                <Button size="sm" variant="outline" onClick={() => setShowLinkPoDialog(true)}>
+                {canEditPoLinks && <Button size="sm" variant="outline" onClick={() => setShowLinkPoDialog(true)}>
                   <Link2 className="h-4 w-4 mr-1" />
                   Link PO
-                </Button>
+                </Button>}
+                {canEdit && <>
                 <Button size="sm" variant="outline" onClick={() => setShowAddLineDialog(true)}>
                   <Plus className="h-4 w-4 mr-1" />
                   Add Line
@@ -677,6 +711,7 @@ export default function APInvoiceDetail() {
               </div>
             )}
           </CardHeader>
+          {!canEditPoLinks && canEdit && <p role="status" className="px-6 pb-3 text-sm text-muted-foreground">{poLinkUnavailableReason}</p>}
           {/* Linked POs */}
           {invoice.poLinks?.length > 0 && (
             <div className="px-6 pb-2 flex flex-wrap items-center gap-2">
@@ -689,12 +724,14 @@ export default function APInvoiceDetail() {
                   <Button asChild variant="outline" size="sm" className="ml-1 min-h-[44px]">
                     <Link href={procurementNavigation.childHref(`/purchase-orders/${link.purchaseOrderId}`, { editPo: true })} aria-label={`Edit PO ${link.poNumber}`}>Edit PO</Link>
                   </Button>
-                  {canEdit && (
+                  {canEditPoLinks && (
                     <button
                       type="button"
-                      className="text-muted-foreground hover:text-red-500 ml-0.5"
+                      className="text-muted-foreground hover:text-red-500 ml-0.5 min-h-[44px] min-w-[44px] inline-flex items-center justify-center"
+                      disabled={unlinkPoMutation.isPending || linkPoMutation.isPending}
                       onClick={() => unlinkPoMutation.mutate(link.purchaseOrderId)}
                       title="Unlink PO"
+                      aria-label={`Unlink PO ${link.poNumber}`}
                     >
                       <XCircle className="h-3 w-3" />
                     </button>
@@ -729,6 +766,8 @@ export default function APInvoiceDetail() {
                   <TableBody>
                     {lines.map((line: any) => {
                       const match = MATCH_COLORS[line.matchStatus] ?? MATCH_COLORS.pending;
+                      const deletionUnavailableReason = lineDeletionUnavailableReason(line);
+                      const isShipmentSource = line.freightCostId != null || (sourceCapabilities.success && sourceCapabilities.data.freightSourceLineIds.includes(line.id));
                       return (
                         <TableRow key={line.id}>
                           <TableCell className="text-muted-foreground text-xs">{line.lineNumber}</TableCell>
@@ -756,12 +795,15 @@ export default function APInvoiceDetail() {
                           <TableCell><InvoiceLineCostReview line={line} currency={invoice.currency} invoiceStatus={invoice.status} onSaved={invalidate} /></TableCell>
                           {canEdit && (
                             <TableCell>
-                              <Button size="sm" variant="ghost" className="h-7 text-muted-foreground"
+                              <Button size="sm" variant="ghost" className="min-h-[44px] min-w-[44px] text-muted-foreground"
+                                aria-label={`Remove invoice line ${line.lineNumber}`}
+                                title={deletionUnavailableReason ?? "Remove invoice line"}
                                 onClick={() => deleteLineMutation.mutate(line.id)}
-                                disabled={deleteLineMutation.isPending}
+                                disabled={deleteLineMutation.isPending || deletionUnavailableReason !== null}
                               >
                                 <Trash2 className="h-3.5 w-3.5" />
                               </Button>
+                              {isShipmentSource && <p className="min-w-[150px] text-xs text-muted-foreground">Shipment source retained. Review voiding and replacing the invoice to correct its source.</p>}
                             </TableCell>
                           )}
                         </TableRow>
@@ -1028,8 +1070,8 @@ export default function APInvoiceDetail() {
             linkPoId={linkPoId}
             setLinkPoId={setLinkPoId}
             linkPoMutation={linkPoMutation}
-            canEdit={canEdit}
-            editUnavailableReason={editUnavailableReason}
+            canEdit={canEditPoLinks}
+            editUnavailableReason={poLinkUnavailableReason}
             onClose={() => setShowLinkPoDialog(false)}
           />
         </DialogContent>
@@ -1125,9 +1167,10 @@ export default function APInvoiceDetail() {
               <Input placeholder="Optional" value={payment.notes} onChange={(e) => setPayment(p => ({ ...p, notes: e.target.value }))} />
             </div>
 
+            {!canPay && <p role="alert" className="text-sm text-destructive">Payment recording is unavailable. Reload the invoice and verify approval permission before continuing.</p>}
             <div className="flex gap-2 justify-end">
               <Button variant="outline" onClick={() => setShowPaymentDialog(false)}>Cancel</Button>
-              <Button onClick={() => paymentMutation.mutate()} disabled={!payment.amountDollars || paymentMutation.isPending}>
+              <Button onClick={() => paymentMutation.mutate()} disabled={!canPay || !payment.amountDollars || paymentMutation.isPending}>
                 {paymentMutation.isPending ? "Recording..." : "Record Payment"}
               </Button>
             </div>

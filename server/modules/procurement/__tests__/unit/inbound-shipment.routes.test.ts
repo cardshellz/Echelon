@@ -33,6 +33,7 @@ vi.mock("../../../../routes/middleware", () => {
   };
   return {
     requirePermission: () => pass,
+    requireAuth: pass,
   };
 });
 
@@ -56,7 +57,7 @@ vi.mock("../../ap-ledger.service", () => ({
   ApLedgerError: class ApLedgerError extends Error {
     statusCode: number;
 
-    constructor(message: string, statusCode = 400) {
+    constructor(message: string, statusCode = 400, public details?: Record<string, unknown>) {
       super(message);
       this.statusCode = statusCode;
     }
@@ -65,6 +66,7 @@ vi.mock("../../ap-ledger.service", () => ({
 
 vi.mock("../../../notifications/notifications.service", () => mocks.notifications);
 
+import { ApLedgerError } from "../../ap-ledger.service";
 import { registerInboundShipmentRoutes } from "../../inbound-shipment.routes";
 
 function buildShipmentTrackingMock(overrides: Record<string, any> = {}) {
@@ -145,10 +147,10 @@ describe("inbound shipment routes", () => {
     server = undefined;
   });
 
-  it("requires idempotency for shipment cost invoice creation", () => {
+  it("does not wrap durable shipment invoice creation in legacy idempotency", () => {
     buildApp(buildShipmentTrackingMock());
 
-    expect(mocks.requireIdempotency).toHaveBeenCalledTimes(1);
+    expect(mocks.requireIdempotency).not.toHaveBeenCalled();
   });
 
   it("routes every list filter to one snapshot-owned page projection", async () => {
@@ -226,6 +228,16 @@ describe("inbound shipment routes", () => {
     expect(mocks.apLedger.enrichCostsWithInvoiceInfo).toHaveBeenCalledExactlyOnceWith(42);
     expect(shipmentTracking.versionCosts).toHaveBeenCalledExactlyOnceWith(costs);
     expect(shipmentTracking.getCosts).not.toHaveBeenCalled();
+  });
+
+  it("keeps original charge ownership visible when its payment totals need review", async () => {
+    const costs = [{ id: 9, vendorInvoiceId: 71, billingOwnership: { state: "review_required", referencedInvoiceIds: [71,72] } }];
+    mocks.apLedger.enrichCostsWithInvoiceInfo.mockResolvedValue(costs);
+    mocks.apLedger.getShipmentCostPaymentStatus.mockRejectedValue(new ApLedgerError("Review ownership",409,{code:"AP_SHIPMENT_BILLING_REVIEW_REQUIRED"}));
+    const shipmentTracking = buildShipmentTrackingMock({ getShipment: vi.fn().mockResolvedValue({id:42}), getEnrichedLines:vi.fn().mockResolvedValue([]), getStatusHistory:vi.fn().mockResolvedValue([]) });
+    server = await startServer(buildApp(shipmentTracking));
+    const response = await requestJson(server.url,"GET","/api/inbound-shipments/42");
+    expect(response.status).toBe(200); expect(response.body).toMatchObject({ paymentStatus:null, costs });
   });
 
   it("does not report unbilled costs when invoice enrichment fails", async () => {

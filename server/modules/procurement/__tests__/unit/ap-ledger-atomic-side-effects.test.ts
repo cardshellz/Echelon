@@ -1,4 +1,14 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { PoFinancialEvidenceInput } from "../../domain/po-financial-evidence";
+
+// These orchestration fixtures contain ordinary goods invoices. PostgreSQL
+// shipment-billing-ownership tests exercise the real capability read and rejection.
+vi.mock("../../shipment-billing-ownership.repository", () => ({
+  readInvoiceSourceCapabilities: vi.fn(async () => {
+    const verified = { allowed: true, code: "AP_INVOICE_SOURCE_VERIFIED", reason: "Fixture has ordinary invoice source ownership." };
+    return { purchaseOrderLinks: verified, approval: verified, payment: verified, freightSourceLineIds: [] };
+  }),
+}));
 
 // These owner fixtures isolate financial state changes. The real PostgreSQL
 // cost suites verify the shared graph lock and its transaction ordering.
@@ -82,11 +92,17 @@ const mocks = vi.hoisted(() => ({
     insert: vi.fn(),
     transaction: vi.fn(),
   },
+  readPoFinancialEvidenceSourcesWithClient: vi.fn(),
   detectFinancialExceptions: vi.fn(),
   reconcilePurchaseCostEvidence: vi.fn(),
 }));
 
 vi.mock("../../../../db", () => ({ db: mocks.db }));
+// Supply source evidence while retaining the actual financial workflow and
+// milestone evaluators. The adapter is exercised against PostgreSQL separately.
+vi.mock("../../po-financial-evidence.repository", () => ({
+  readPoFinancialEvidenceSourcesWithClient: mocks.readPoFinancialEvidenceSourcesWithClient,
+}));
 vi.mock("@shared/schema", () => tables);
 vi.mock("../../po-exceptions.service", () => ({
   detectMatchMismatch: vi.fn(),
@@ -96,6 +112,24 @@ vi.mock("../../../inventory/cogs.service", () => ({ COGSService: class {} }));
 vi.mock("../../purchase-cost-application.service", () => ({
   reconcilePurchaseCostEvidence: mocks.reconcilePurchaseCostEvidence,
 }));
+
+function financialSource(paid = 0, status = paid === 2500 ? "paid" : "approved", paymentStatus = "completed"): PoFinancialEvidenceInput {
+  return {
+    purchaseOrderId: 7, vendorId: 4, currency: "USD",
+    invoices: [{
+      id: 12, vendorId: 4, currency: "USD", status,
+      invoicedAmountCents: 2500, paidAmountCents: paid, balanceCents: 2500 - paid,
+      links: [{ purchaseOrderId: 7, purchaseOrderVendorId: 4, purchaseOrderCurrency: "USD" }],
+      lines: [{ id: 70, purchaseOrderLineId: 50, purchaseOrderId: 7, freightCostId: null, lineTotalCents: 2500 }],
+      payments: paid > 0 || paymentStatus === "voided" ? [{ allocationId: 31, paymentId: 21,
+        paymentVendorId: 4, paymentCurrency: "USD", paymentStatus, appliedAmountCents: 2500 }] : [],
+    }],
+  };
+}
+
+function useFinancialSource(source: PoFinancialEvidenceInput) {
+  mocks.readPoFinancialEvidenceSourcesWithClient.mockResolvedValue(new Map([[source.purchaseOrderId, source]]));
+}
 
 function makeSelectChain(result: unknown[]) {
   const chain: any = {};
@@ -141,6 +175,7 @@ function buildTx(selectResults: unknown[][]) {
 describe("AP ledger atomic side effects", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    useFinancialSource(financialSource());
     mocks.detectFinancialExceptions.mockResolvedValue(undefined);
     mocks.reconcilePurchaseCostEvidence.mockResolvedValue({
       lotsUpdated: 0,
@@ -152,6 +187,7 @@ describe("AP ledger atomic side effects", () => {
   });
 
   it("records payment, allocations, invoice balance, and PO aggregate inside one transaction", async () => {
+    useFinancialSource(financialSource(2500));
     const { recordPayment } = await import("../../ap-ledger.service");
     const tx = buildTx([
       [{ id: 12, vendorId: 4, status: "approved", balanceCents: 2500 }],
@@ -205,6 +241,7 @@ describe("AP ledger atomic side effects", () => {
     } as any);
 
     expect(tx.update).toHaveBeenCalledWith(tables.purchaseOrders);
+    expect(mocks.readPoFinancialEvidenceSourcesWithClient).toHaveBeenCalledWith(tx, [7]);
     expect(tx.insert).toHaveBeenCalledWith(tables.poStatusHistory);
     const historyInsert = tx.insert.mock.results.find(
       (result: any, index: number) => tx.insert.mock.calls[index][0] === tables.poStatusHistory,
@@ -239,6 +276,7 @@ describe("AP ledger atomic side effects", () => {
   });
 
   it("derives disputed PO state from an active disputed invoice", async () => {
+    useFinancialSource(financialSource(0, "disputed"));
     const { recomputePoFinancialAggregates } = await import("../../ap-ledger.service");
     const tx = buildTx([
       [{
@@ -407,6 +445,7 @@ describe("AP ledger atomic side effects", () => {
   });
 
   it("requires AP command audit persistence inside the caller-owned payment transaction", async () => {
+    useFinancialSource(financialSource(2500));
     const { executeApPaymentCommandInTransaction } = await import("../../ap-ledger.service");
     const tx = buildTx([
       [{ id: 12, vendorId: 4, status: "approved", balanceCents: 2500 }],
@@ -446,8 +485,8 @@ describe("AP ledger atomic side effects", () => {
     const tx = buildTx([
       [{ id: 12, status: "received", paidAmountCents: 0 }],
       [{ purchaseOrderId: 7 }],
-      [{ invoicedAmountCents: 2500, paidAmountCents: 0 }],
-      [{ financialStatus: "unbilled", firstInvoicedAt: null, firstPaidAt: null, fullyPaidAt: null }],
+      [{ status: "received", financialStatus: "unbilled", firstInvoicedAt: null, firstPaidAt: null, fullyPaidAt: null }],
+      [{ invoicedAmountCents: 2500, paidAmountCents: 0, status: "approved" }],
     ]);
     tx.update = vi.fn((table) => {
       if (table === tables.vendorInvoices) {
@@ -580,6 +619,7 @@ describe("AP ledger atomic side effects", () => {
   });
 
   it("returns operator-visible AP command outcome metadata", async () => {
+    useFinancialSource(financialSource(2500));
     const { executeApPaymentCommandInTransaction } = await import("../../ap-ledger.service");
     const tx = buildTx([
       [{ id: 12, vendorId: 4, status: "approved", balanceCents: 2500 }],
@@ -613,6 +653,7 @@ describe("AP ledger atomic side effects", () => {
   });
 
   it("voids payment, reverses invoice balance, and recomputes PO aggregate inside one transaction", async () => {
+    useFinancialSource(financialSource(0, "approved", "voided"));
     const { voidPayment } = await import("../../ap-ledger.service");
     const tx = buildTx([
       [{ id: 21, status: "completed" }],

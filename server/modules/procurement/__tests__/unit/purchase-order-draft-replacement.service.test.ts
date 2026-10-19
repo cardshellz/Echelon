@@ -1,3 +1,4 @@
+import { PgDialect } from "drizzle-orm/pg-core";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
@@ -162,6 +163,7 @@ type HarnessOptions = {
   vendorProductRows?: Record<string, unknown>[];
   eventError?: Error;
   downstreamRows?: Array<{ line_id: number; blocker: string }>;
+  invoiceHistory?: { hasInvoiceLinks: boolean; hasInvoiceLines: boolean };
 };
 
 function buildDb(options: HarnessOptions = {}) {
@@ -203,7 +205,11 @@ function buildDb(options: HarnessOptions = {}) {
   };
 
   const tx: any = {
-    execute: vi.fn().mockResolvedValue({ rows: options.downstreamRows ?? [] }),
+    execute: vi.fn(async query => {
+      const text = new PgDialect().sqlToQuery(query).sql;
+      if (text.includes('AS "hasInvoiceLinks"')) return { rows: [options.invoiceHistory ?? { hasInvoiceLinks: false, hasInvoiceLines: false }] };
+      return { rows: options.downstreamRows ?? [] };
+    }),
     select: vi.fn(() => {
       let table: unknown;
       const builder: any = {
@@ -391,7 +397,8 @@ describe("draft PO full replacement", () => {
 
   it("rejects a nominal draft after financial activity exists", async () => {
     const harness = buildDb({
-      currentPo: draftPo({ invoicedTotalCents: 500 }),
+      currentPo: draftPo({ invoicedTotalCents: 0 }),
+      invoiceHistory: { hasInvoiceLinks: true, hasInvoiceLines: false },
     });
     const service = createPurchasingService(harness.db, storage);
 
