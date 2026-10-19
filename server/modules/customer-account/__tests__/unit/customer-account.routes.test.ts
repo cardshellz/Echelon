@@ -130,6 +130,23 @@ describe("customer account signed storefront HTTP boundary", () => {
     expect((await request({ ...command, commandKey: requestKey, sessionKey: undefined })).status).toBe(401);
     expect(issueReward).toHaveBeenCalledTimes(1);
   });
+  it("authenticates saved reward management and cancellation without accepting another customer's scope", async () => {
+    const bootstrap = await (await request()).json();
+    const manageRewards = vi.fn(async () => ({ version: "v2", balance: "590.00", minimumPoints: 100,
+      pointsPerDollar: "100.00", currencyName: "points", rewards: [], pending: [] }));
+    const cancelReward = vi.fn(async () => ({ points: "366.00", balance: "956.00", ledgerEntryId: "refund-1" }));
+    services.mockImplementation(() => ({ edits: { connection, manageRewards, cancelReward }, returns: vi.fn() }));
+    const scope = { path: "/order-edits/orders/9/rewards/manage", query: { connectionId: "4" }, sessionKey: bootstrap.session.sessionKey };
+    expect((await request(scope)).status).toBe(200);
+    expect(manageRewards).toHaveBeenCalledWith(4, 9);
+    const requestKey = "22222222-2222-4222-8222-222222222222";
+    const command = { ...scope, path: "/order-edits/orders/9/rewards/cancel", method: "POST", body: { requestKey, rewardId: requestKey } };
+    expect((await request(command)).status).toBe(400);
+    expect((await request({ ...command, commandKey: requestKey, sessionKey: undefined })).status).toBe(401);
+    expect(cancelReward).not.toHaveBeenCalled();
+    expect((await request({ ...command, commandKey: requestKey })).status).toBe(200);
+    expect(cancelReward).toHaveBeenCalledWith(4, 9, command.body, requestKey);
+  });
   it.each([undefined, "v1", "v2"])("negotiates pricing display through the signed customer bridge, opt-in=%s", async (optIn) => {
     const bootstrap = await (await request()).json();
     const calculation = previewCalculation();
