@@ -17,3 +17,12 @@ export const inventoryTransferRequestSchema = z.object({
 }).refine((input) => input.fromLocationId !== input.toLocationId, {
   message: "Source and destination must be different", path: ["toLocationId"],
 });
+
+/** Emitted only after the transactional command owner returns its persisted
+ * rejection. Clients may retire this exact intent; an ordinary HTTP error is
+ * insufficient evidence that physical movement did not commit. */
+export const inventoryTransferRejectionReceiptSchema = z.object({
+  contractVersion: z.literal("inventory_transfer_v1"),
+  commandKey: z.string().min(1).max(120),
+  outcome: z.literal("rejected"),
+}).strict();
