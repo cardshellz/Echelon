@@ -152,10 +152,19 @@ export function createReservedInventoryTransferOwner(): ReservedInventoryTransfe
           || resource.warehouse_id !== warehouseId || resource.warehouse_location_id !== plan.toLocationId)) {
           throw new IntegrityError("Destination reservation identity is ambiguous or inconsistent");
         }
-        const destinationId = existing.length === 1 ? String(existing[0].id) : String((await client.query(`INSERT INTO inventory.availability_claim_resources(claim_id,claim_line_id,warehouse_id,warehouse_location_id,inventory_level_id,source_variant_id,claimed_qty,created_at,updated_at)
-           VALUES($1,$2,$3,$4,$5,$6,$7,$8,$8) RETURNING id::text`, [first.claimId, first.claimLineId, warehouseId, plan.toLocationId, destinationLevelId, plan.productVariantId, amount, occurredAt])).rows[0].id);
-        if (existing.length)
-          await changed(client, `UPDATE inventory.availability_claim_resources SET claimed_qty=claimed_qty+$1,updated_at=$2 WHERE id=$3 AND picked_qty=0 RETURNING id`, [amount, occurredAt, destinationId]);
+        let destinationId: string;
+        if (existing.length === 1) {
+          destinationId = String(existing[0].id);
+          await changed(client, `UPDATE inventory.availability_claim_resources SET claimed_qty=claimed_qty+$1,updated_at=$2
+            WHERE id=$3 AND picked_qty=0 RETURNING id`, [amount, occurredAt, destinationId]);
+        } else {
+          const inserted = await client.query(`INSERT INTO inventory.availability_claim_resources
+            (claim_id,claim_line_id,warehouse_id,warehouse_location_id,inventory_level_id,source_variant_id,claimed_qty,created_at,updated_at)
+            VALUES($1,$2,$3,$4,$5,$6,$7,$8,$8) RETURNING id::text`,
+            [first.claimId, first.claimLineId, warehouseId, plan.toLocationId, destinationLevelId, plan.productVariantId, amount, occurredAt]);
+          if (inserted.rows.length !== 1) throw new IntegrityError("A destination reservation resource was not created");
+          destinationId = String(inserted.rows[0].id);
+        }
         const evidence: Array<Record<string, unknown>> = [];
         for (const a of allocations) {
           const destinationLotId = destinationBySourceLot.get(a.sourceLotId)!;

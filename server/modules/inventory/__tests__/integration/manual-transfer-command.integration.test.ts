@@ -138,7 +138,7 @@ suite(
       for (let attempt = 0; attempt < 2; attempt++) {
         await expect(service.transfer(input, "picker")).rejects.toMatchObject({
           statusCode: 409,
-          code: "TRANSFER_ARRIVAL_CONFIRMATION_REQUIRED", context: { fromWarehouseId: 2, toWarehouseId: 1 }
+          code: "TRANSFER_ARRIVAL_CONFIRMATION_REQUIRED", context: { fromWarehouseId: 2, toWarehouseId: 1, transferCommandReceipt: {contractVersion:"inventory_transfer_v1",commandKey:input.commandKey,outcome:"rejected"} }
         });
       }
       expect(transfer).toHaveBeenCalledTimes(1);

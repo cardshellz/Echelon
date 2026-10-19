@@ -67,3 +67,9 @@ describe("whole-line combinations", () => {
     expect(() => selectReservedTransferGroups(groups, 200001, 0)).toThrow("too many whole-line combinations");
   });
 });
+
+it("moves a full bin without enumerating its many whole-line combinations", () => {
+  const groups = Array.from({ length: 17 }, (_, index) => ({ orderItemId: index + 1, quantity: 2 ** (index + 1) }));
+  const total = groups.reduce((sum, group) => sum + group.quantity, 0);
+  expect(selectReservedTransferGroups(groups, total, 0)).toEqual(groups);
+});

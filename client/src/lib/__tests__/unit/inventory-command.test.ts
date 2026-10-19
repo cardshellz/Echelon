@@ -7,8 +7,10 @@ const payload = { productVariantId: 10, warehouseLocationId: 20, qtyDelta: 5, re
 const ok = () => new Response(JSON.stringify({ success: true }), { status: 200 });
 function retainedStore() {
   const data = new Map<string, string>();
-  return { data, getItem: vi.fn((key: string) => data.get(key) ?? null),
-    setItem: vi.fn((key: string, value: string) => { data.set(key, value); }) };
+  return {
+    data, getItem: vi.fn((key: string) => data.get(key) ?? null),
+    setItem: vi.fn((key: string, value: string) => { data.set(key, value); })
+  };
 }
 
 describe("inventory command client intent", () => {
@@ -17,16 +19,16 @@ describe("inventory command client intent", () => {
     const persistence = { actorId: "operator-1", storage: () => store };
     const fetchMock = vi.fn().mockRejectedValueOnce(new Error("Lost response"))
       .mockResolvedValueOnce(new Response(JSON.stringify({ orderId: 200 }), { status: 200 }));
-    vi.stubGlobal("fetch",fetchMock);
-    await expect(createInventoryCommandRequester(()=>"return-intent",undefined,persistence)("/return",payload)).rejects.toThrow();
-    const neverGenerate = vi.fn(()=>"replacement");
-    const requester = createInventoryCommandRequester(neverGenerate,undefined,persistence);
-    const bodySchema = z.object({ productVariantId: z.number(),warehouseLocationId: z.number(),qtyDelta: z.number(),reason: z.string() }).strict();
-    expect(requester.pending("/return",bodySchema)).toEqual([{ commandKey: "return-intent",body: payload }]);
-    await expect(requester.resume("/return","return-intent",z.object({ orderId: z.number() }).strict())).resolves.toEqual({ orderId: 200 });
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(createInventoryCommandRequester(() => "return-intent", undefined, persistence)("/return", payload)).rejects.toThrow();
+    const neverGenerate = vi.fn(() => "replacement");
+    const requester = createInventoryCommandRequester(neverGenerate, undefined, persistence);
+    const bodySchema = z.object({ productVariantId: z.number(), warehouseLocationId: z.number(), qtyDelta: z.number(), reason: z.string() }).strict();
+    expect(requester.pending("/return", bodySchema)).toEqual([{ commandKey: "return-intent", body: payload }]);
+    await expect(requester.resume("/return", "return-intent", z.object({ orderId: z.number() }).strict())).resolves.toEqual({ orderId: 200 });
     expect(fetchMock.mock.calls[1][1].body).toBe(fetchMock.mock.calls[0][1].body);
     expect(neverGenerate).not.toHaveBeenCalled();
-    await expect(requester.resume("/return","return-intent",z.object({ orderId: z.number() }))).rejects.toBeInstanceOf(InventoryIntentRecoveryError);
+    await expect(requester.resume("/return", "return-intent", z.object({ orderId: z.number() }))).rejects.toBeInstanceOf(InventoryIntentRecoveryError);
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
   it("retains a return command across reload when a successful response violates its contract", async () => {
@@ -78,7 +80,7 @@ describe("inventory command client intent", () => {
     let sequence = 0;
     const request = createInventoryCommandRequester(() => `intent-${++sequence}`);
     for (const [url, body] of [["/adjust", payload], ["/receive", payload], ["/adjust", payload],
-      ["/adjust", { ...payload, qtyDelta: 6 }]] as const) {
+    ["/adjust", { ...payload, qtyDelta: 6 }]] as const) {
       await expect(request(url, body)).rejects.toThrow();
     }
     expect(fetchMock.mock.calls.map(call => JSON.parse(call[1].body).commandKey)).toEqual(["intent-1", "intent-2", "intent-1", "intent-3"]);
@@ -100,8 +102,10 @@ describe("inventory command client intent", () => {
     await expect(firstPage("/adjust", payload)).rejects.toThrow();
     await expect(firstPage("/adjust", { ...payload, qtyDelta: 9 })).rejects.toThrow();
     const reloadedPage = createInventoryCommandRequester(generate, undefined, persistence);
-    await expect(reloadedPage("/adjust", { reason: payload.reason, qtyDelta: 5,
-      warehouseLocationId: 20, productVariantId: 10 })).rejects.toThrow();
+    await expect(reloadedPage("/adjust", {
+      reason: payload.reason, qtyDelta: 5,
+      warehouseLocationId: 20, productVariantId: 10
+    })).rejects.toThrow();
     expect(generate).toHaveBeenCalledTimes(2);
     expect(fetchMock.mock.calls[2][1].body).toBe(fetchMock.mock.calls[0][1].body);
     expect(JSON.parse([...store.data.values()][0]).pending).toHaveLength(2);
@@ -150,5 +154,34 @@ describe("inventory command client intent", () => {
     await createInventoryCommandRequester(neverGenerate, undefined, persistence)("/adjust", payload);
     expect(neverGenerate).not.toHaveBeenCalled();
     expect(fetchMock.mock.calls.map(call => JSON.parse(call[1].body).commandKey)).toEqual(["first", "first"]);
+  });
+});
+
+describe("persisted transfer rejection receipts", () => {
+  const transfer = { fromLocationId: 1, toLocationId: 2, variantId: 3, quantity: 1 };
+  const receipt = (commandKey: string) => ({ contractVersion: "inventory_transfer_v1", commandKey, outcome: "rejected" });
+  it("starts a new intent after a proven rejection, including across reload", async () => {
+    const store = retainedStore();
+    const persistence = { actorId: "operator-1", storage: () => store };
+    const fetchMock = vi.fn().mockResolvedValueOnce(new Response(JSON.stringify({ code: "LOCATION_FROZEN", error: "Frozen", context: { transferCommandReceipt: receipt("first") } }), { status: 409 })).mockResolvedValueOnce(ok());
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(createInventoryCommandRequester(() => "first", undefined, persistence)("/api/inventory/transfer", transfer)).rejects.toThrow("Frozen");
+    await createInventoryCommandRequester(() => "second", undefined, persistence)("/api/inventory/transfer", transfer);
+    expect(fetchMock.mock.calls.map(call => JSON.parse(call[1].body).commandKey)).toEqual(["first", "second"]);
+  });
+  it.each(["missing", "wrong-key", "wrong-version", "wrong-outcome", "other-route", "server-error"])("retains the exact key for %s rejection evidence", async scenario => {
+    const proof = scenario === "missing" ? undefined : {      
+...receipt(scenario === "wrong-key" ? "other" : "first"),
+      ...(scenario === "wrong-version" ? { contractVersion: "unknown" } : {}), ...(scenario === "wrong-outcome" ? { outcome: "succeeded" } : {})    
+};
+    const fetchMock = vi.fn().mockResolvedValueOnce(new Response(JSON.stringify({ error: "Blocked", context: { transferCommandReceipt: proof } }), { status: scenario === "server-error" ? 503 : 409 })).mockResolvedValueOnce(ok());
+    vi.stubGlobal("fetch", fetchMock);
+    const generate = vi.fn(() => "first");
+    const requester = createInventoryCommandRequester(generate);
+    const url = scenario === "other-route" ? "/api/inventory/adjust" : "/api/inventory/transfer";
+    await expect(requester(url, transfer)).rejects.toThrow("Blocked");
+    await requester(url, transfer);
+    expect(generate).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls[1][1].body).toBe(fetchMock.mock.calls[0][1].body);
   });
 });

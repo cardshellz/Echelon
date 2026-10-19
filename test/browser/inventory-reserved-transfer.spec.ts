@@ -1,10 +1,11 @@
 import { resolve } from "node:path";
 import { expect, test, type Page } from "@playwright/test";
-async function setup(page: Page, lostResponse = false) {
+async function setup(page: Page, lostResponse = false, frozenFirst = false) {
   const state = {
     writes: [] as Record<string, unknown>[], moves: 0, errors: [] as string[]
   };
   const receipts = new Map<string, unknown>();
+  const rejections = new Map<string, unknown>();
   let lost = false;
   page.on("pageerror", e => state.errors.push(e.message));
   await page.route("**/api/**", async (route) => {
@@ -13,14 +14,21 @@ async function setup(page: Page, lostResponse = false) {
     if (request.method() === "POST" && url.pathname === "/api/inventory/transfer") {
       const body = request.postDataJSON();
       state.writes.push(body);
-      if (body.moveReserved !== true)
-        return route.fulfill({
-          status: 409, json: {
-            code: "TRANSFER_BLOCKED_BY_RESERVATION", error: "One case is reserved for order #64431", context: {
-              needed: 1, onHandAtSource: 1, availableAtSource: 0, reservedAtSource: 1, sourceCode: "F-07", destCode: "F-06"
-            }
-          }
-        });
+      const priorRejection = rejections.get(body.commandKey);
+      if (priorRejection) return route.fulfill({ status: 409, json: priorRejection });
+      if (body.moveReserved !== true) {
+        const frozen = frozenFirst && state.writes.length === 1;
+        const failure = {
+          code: frozen ? "LOCATION_FROZEN" : "TRANSFER_BLOCKED_BY_RESERVATION",
+          error: frozen ? "Source bin is frozen for cycle counting" : "One case is reserved for order #64431",
+          context: {            
+needed: 1, onHandAtSource: 1, availableAtSource: 0, reservedAtSource: 1, sourceCode: "F-07", destCode: "F-06",
+            transferCommandReceipt: { contractVersion: "inventory_transfer_v1", commandKey: body.commandKey, outcome: "rejected" }          
+},
+        };
+        rejections.set(body.commandKey, failure);
+        return route.fulfill({ status: 409, json: failure });
+      }
       const previous = receipts.get(body.commandKey);
       if (previous)
         return route.fulfill({
@@ -141,6 +149,19 @@ test("retries a lost reserved-move response with the original confirmed command 
   const confirmed = state.writes.filter(w => w.moveReserved === true);
   expect(confirmed).toHaveLength(2);
   expect(confirmed[1]).toEqual(confirmed[0]);
+  expect(state.moves).toBe(1);
+  expect(state.errors).toEqual([]);
+});
+
+test("starts a fresh command after the server proves a frozen-bin request was rejected", async ({ page }, info) => {
+  const state = await setup(page, false, true);
+  await prepare(page, info.project.name === "mobile");
+  await page.getByRole("button", { name: /^(Move Inventory|Confirm Transfer)$/ }).click();
+  await expect(page.getByText("Source bin is frozen for cycle counting", { exact: true })).toBeVisible();
+  await confirm(page);
+  await expect(page.getByText("Inventory moved. 1 reserved unit(s) followed the stock; 1 pending order line(s) re-pointed to the new bin.", { exact: true })).toBeVisible();
+  expect(state.writes).toHaveLength(3);
+  expect(state.writes[1].commandKey).not.toBe(state.writes[0].commandKey);
   expect(state.moves).toBe(1);
   expect(state.errors).toEqual([]);
 });

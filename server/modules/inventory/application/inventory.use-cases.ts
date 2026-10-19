@@ -2016,7 +2016,7 @@ export class InventoryUseCases {
       let reservedPlan: ReservedTransferPlan | null = null;
       if (quantityPosting && params.moveReserved) {
         if (!this.reservedTransferOwner) throw new AppError("The canonical reserved-transfer owner is unavailable", "TRANSFER_OWNER_UNAVAILABLE", 503);
-        await this.reservedTransferOwner.lockSource(quantityTransactionFromDrizzle(tx),params);
+        await this.reservedTransferOwner.lockSource(quantityTransactionFromDrizzle(tx), params);
       }
       await tx.execute(sql`SELECT id FROM catalog.product_variants WHERE id=${params.productVariantId} FOR SHARE`);
       const [transferVariant] = await tx.select().from(productVariants).where(eq(productVariants.id, params.productVariantId)).limit(1);
@@ -2072,7 +2072,7 @@ export class InventoryUseCases {
       );
 
       if (!sourceLevel || sourceLevel.variantQty < params.qty) {
-        throw new AppError(`Insufficient on-hand at source: need ${params.qty}, have ${sourceLevel?.variantQty || 0}`,"TRANSFER_SOURCE_QUANTITY_SHORTFALL",409);
+        throw new AppError(`Insufficient on-hand at source: need ${params.qty}, have ${sourceLevel?.variantQty || 0}`, "TRANSFER_SOURCE_QUANTITY_SHORTFALL", 409);
       }
 
       // Available = on-hand minus reserved. Moving more than `available` would
@@ -2088,7 +2088,7 @@ export class InventoryUseCases {
         if (!params.moveReserved) {
           const err = new AppError(
             `Insufficient available at source: need ${params.qty}, have ${available} available (${reserved} reserved)`,
-            "TRANSFER_BLOCKED_BY_RESERVATION",409,
+            "TRANSFER_BLOCKED_BY_RESERVATION", 409,
           );
           err.context = {
             needed: params.qty,
@@ -2111,18 +2111,18 @@ export class InventoryUseCases {
       // cancel that pick first.
       if (reservedToMove > 0) {
         if (quantityPosting) {
-          if (fromLoc.warehouseId!==toLoc.warehouseId) throw new AppError("Reserved order stock must remain in its order's warehouse.","TRANSFER_RESERVED_WAREHOUSE_MISMATCH",409);
+          if (fromLoc.warehouseId !== toLoc.warehouseId) throw new AppError("Reserved order stock must remain in its order's warehouse.", "TRANSFER_RESERVED_WAREHOUSE_MISMATCH", 409);
           if (toLoc.isPickable !== 1) {
             throw new AppError("Reserved order stock must move to a pickable destination bin.", "TRANSFER_RESERVED_DESTINATION_UNAVAILABLE", 409);
           }
-          reservedPlan=await this.reservedTransferOwner!.plan(quantityTransactionFromDrizzle(tx),{
-            productVariantId:params.productVariantId,fromLocationId:params.fromLocationId,toLocationId:params.toLocationId,sourceLevelId:sourceLevel.id,warehouseId:fromLoc.warehouseId,
-            quantity:params.qty,onHand:sourceLevel.variantQty,reserved,
+          reservedPlan = await this.reservedTransferOwner!.plan(quantityTransactionFromDrizzle(tx), {
+            productVariantId: params.productVariantId, fromLocationId: params.fromLocationId, toLocationId: params.toLocationId, sourceLevelId: sourceLevel.id, warehouseId: fromLoc.warehouseId,
+            quantity: params.qty, onHand: sourceLevel.variantQty, reserved,
           });
-          reservedToMove=reservedPlan.reservedQuantity;
+          reservedToMove = reservedPlan.reservedQuantity;
         }
       }
-      if (reservedToMove>0 && !quantityPosting) {
+      if (reservedToMove > 0 && !quantityPosting) {
         // order_items has no variant FK; it links to a variant by SKU
         // (catalog.product_variants.sku). Match through that.
         const conflict = await tx.execute(sql`
@@ -2206,12 +2206,12 @@ export class InventoryUseCases {
           reservedLots: [...reservedByLot].map(([inventoryLotId, quantity]) => ({ inventoryLotId, quantity })),
         });
         if (reservedPlan) {
-          await this.reservedTransferOwner!.relocate(quantityTransactionFromDrizzle(tx),{
-            plan:reservedPlan,lots:lotMovements,destinationLevelId:targetLevel.id,warehouseId:toLoc.warehouseId,
-            commandKey:quantityKey!,actor:params.userId || "system:inventory_transfer",occurredAt,
+          await this.reservedTransferOwner!.relocate(quantityTransactionFromDrizzle(tx), {
+            plan: reservedPlan, lots: lotMovements, destinationLevelId: targetLevel.id, warehouseId: toLoc.warehouseId,
+            commandKey: quantityKey!, actor: params.userId || "system:inventory_transfer", occurredAt,
           });
-          orderItemsRepointed=await repointCanonicalTransferPickLines(tx,{
-            orderItemIds:reservedPlan.orderItemIds,destinationCode:toLoc.code,destinationZone:toLoc.zone ?? "U",
+          orderItemsRepointed = await repointCanonicalTransferPickLines(tx, {
+            orderItemIds: reservedPlan.orderItemIds, destinationCode: toLoc.code, destinationZone: toLoc.zone ?? "U",
           });
         }
       }

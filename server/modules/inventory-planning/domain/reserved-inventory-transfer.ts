@@ -27,6 +27,9 @@ export function selectReservedTransferGroups(groups: readonly ReservedTransferGr
   const minimum = Math.max(0, quantity - available);
   if (minimum === 0)
     return [];
+  // Moving every reserved unit is common ("All on hand"). It requires no
+  // combination search even when individual line quantities vary widely.
+  if (groups.reduce((sum, group) => sum + group.quantity, 0) === minimum) return [...groups];
   const selections = new Map<number, Selection | null>([[0, null]]);
   for (const group of groups) {
     // Snapshot the prior states so this line is never selected twice.
