@@ -1,6 +1,6 @@
 import { sql } from "drizzle-orm";
 import { z } from "zod";
-import { inventoryTransferRequestSchema } from "@shared/types/inventory-transfer";
+import { inventoryTransferRequestSchema, inventoryTransferRejectionReceiptSchema } from "@shared/types/inventory-transfer";
 import { AppError, IntegrityError } from "@shared/errors";
 import { InventoryQuantityError } from "../domain/quantity-ledger";
 import { inventoryQuantityErrorStatus } from "./inventory-quantity-error-status";
@@ -134,7 +134,9 @@ export class ManualInventoryTransferService {
         rejection.error,
         rejection.code,
         command.httpStatus,
-        rejection.context,
+        { ...rejection.context, transferCommandReceipt: inventoryTransferRejectionReceiptSchema.parse({
+          contractVersion: "inventory_transfer_v1", commandKey, outcome: "rejected",
+        }) },
       );
     }
     const result = transferResultSchema.parse(command.body);

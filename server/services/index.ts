@@ -1,3 +1,4 @@
+import { createReservedInventoryTransferOwner } from "../modules/inventory-planning/infrastructure/reserved-inventory-transfer.repository";
 /**
  * Service wiring module for Echelon WMS.
  *
@@ -209,7 +210,7 @@ export function createServices(
   // Foundation
   const inventoryLots = createInventoryLotService(db);
   const cogs = createCOGSService(db);
-  const inventoryCore = new InventoryUseCases(db, inventoryStorage, inventoryLots, cogs); // Temporary mapping
+  const inventoryCore = new InventoryUseCases(db, inventoryStorage, inventoryLots, cogs,systemCanonicalClaimClock,createReservedInventoryTransferOwner());
   const inventoryUseCases = inventoryCore;
   const recipeCapacity = createRecipeCapacityService(db);
   const transformationExecutionAuthority = createTransformationExecutionAuthorityRepository(db);
