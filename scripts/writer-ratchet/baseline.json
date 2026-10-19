@@ -944,6 +944,12 @@
   "marketplace.dropship_listing_scopes": [
     "modules/marketplace-listings"
   ],
+  "marketplace.listing_member_retirement_events": [
+    "modules/marketplace-listings"
+  ],
+  "marketplace.listing_member_retirements": [
+    "modules/marketplace-listings"
+  ],
   "marketplace.listing_publication_members": [
     "modules/marketplace-listings"
   ],

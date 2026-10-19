@@ -23,16 +23,17 @@ export function validateEbayListingPreparationScope(input: InventoryEbayPublicat
   const source = ebayListingSyncIdentitySchema.parse(proof.sourceIdentity);
   const identity = bindObservedEbayListingMembers(source, proof.observation);
   const observation = assertEbayPublicationObservation(identity, proof.observation);
+  const stockMembers = identity.variants.filter(member => !member.catalogArchived);
   if (input.purpose !== "sync" || source.channelId !== input.channelId || source.connectionId !== input.connectionId
     || source.accountId !== input.accountId || source.productId !== input.productId
     || observation.providerAccount.accountNamespace !== input.environment
-    || input.variants.length !== identity.variants.length || input.variants.some(member =>
-      !identity.variants.some(bound => bound.variantId === member.productVariantId && bound.sku === member.sku))) changed();
+    || input.variants.length !== stockMembers.length || input.variants.some(member =>
+      !stockMembers.some(bound => bound.variantId === member.productVariantId && bound.sku === member.sku))) changed();
   // Observation timestamps and quantities are not command identity. Every retry
   // must validate fresh evidence, but unchanged membership replays one receipt.
   const ordered = (value: EbayListingSyncIdentity) => ({ ...value, variants: [...value.variants].sort((a, b) => a.variantId - b.variantId) });
   return { source, identity, observation, fingerprint: syncStageHash({ source: ordered(source), identity: ordered(identity),
-    environment: input.environment }), productVariantIds: identity.variants.map(member => member.variantId).sort((a, b) => a - b) };
+    environment: input.environment }), productVariantIds: stockMembers.map(member => member.variantId).sort((a, b) => a - b) };
 }
 
 /** Acquire the established registration-account prefix and source fence before
@@ -70,13 +71,15 @@ export async function readEbayListingPreparationScope(client: PoolClient, input:
     return { product_id: input.productId, variant_id: listing.product_variant_id, variant_sku: variant.sku,
       external_sku: listing.external_sku, external_variant_id: listing.external_variant_id, external_product_id: listing.external_product_id,
       product_is_active: facts.catalog.product.isActive, variant_is_active: variant.isActive, variant_sales_eligibility: variant.salesEligibility,
+      product_status: facts.catalog.product.status,
       product_excluded: facts.catalog.product.ebayListingExcluded, variant_excluded: variant.ebayListingExcluded,
       product_override_is_listed: facts.productIsListed, type_listing_enabled: facts.typeListingEnabled,
       variant_override_is_listed: facts.variants.find(row => row.productVariantId === variant.id)?.variantIsListed };
   }), verified.source);
   assertEbayListingSourceIdentityUnchanged(verified.source, current);
   for (const member of verified.source.variants.filter(member => !verified.productVariantIds.includes(member.variantId))) {
-    if (selection.variants.find(row => row.productVariantId === member.variantId)?.action !== "zero") changed();
+    const expected = member.catalogArchived ? "none" : "zero";
+    if (selection.variants.find(row => row.productVariantId === member.variantId)?.action !== expected) changed();
   }
   return { ...verified, selectionFingerprint: selection.fingerprint };
 }

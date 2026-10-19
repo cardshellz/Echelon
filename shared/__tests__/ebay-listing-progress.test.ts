@@ -146,6 +146,15 @@ describe("independent stock reconciliation evidence", () => {
       expect(ebayInventoryReconciliationSchema.safeParse({ ...inventoryReconciliation, ...invalid }).success).toBe(false);
     }
   });
+  it("describes archived monitoring as inactive without claiming stock or removal verification", () => {
+    const status = { ...inventoryReconciliation, state: "inactive" as const, nextCheckAt: null };
+    expect(ebayInventoryReconciliationSchema.safeParse(status).success).toBe(true);
+    expect(presentEbayListingJob({ ...job, inventoryReconciliation: status }).inventory).toEqual({
+      summary: "Stock monitoring is inactive for archived variants.",
+      detail: "These variants are excluded from stock updates. Their removal from the sales channel is tracked separately.",
+      code: null, times: [],
+    });
+  });
 });
 
 describe("actionable saved eBay failures", () => {

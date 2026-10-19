@@ -35,13 +35,14 @@ dbDescribe.sequential("260PT observed listing scope through real Inventory prepa
     return { ...f, run: async (commandKey = randomUUID()) => {
       const observed = await f.observe();
       await ensureEbayPublicationReady(database.pool,
-        { ...current(), variants: observed.identity.variants.map(member => ({ productVariantId: member.variantId, sku: member.sku })) },
+        { ...current(), variants: observed.identity.variants.filter(member => !member.catalogArchived)
+          .map(member => ({ productVariantId: member.variantId, sku: member.sku })) },
         { commandKey, actor: "scope-test", now, verifiedListing: { sourceIdentity: f.source, observation: observed.observation } });
       return observed;
     } };
   }
 
-  it.each([false, true])("prepares only bound P10/C500 and preserves unpublished C200 cleanup (draft=%s)", async hasDraft => {
+  it.each([false, true])("prepares and publishes only active members without rebuilding an archived mapping (draft=%s)", async hasDraft => {
     if (hasDraft) await database.pool.query(`BEGIN;
       INSERT INTO inventory.publication_variant_mapping_versions(publication_target_id,product_variant_id,version,external_inventory_item_id,external_sku,
         definition_hash,change_reason,idempotency_key,request_hash,created_by)
@@ -52,21 +53,20 @@ dbDescribe.sequential("260PT observed listing scope through real Inventory prepa
     const before = await retainedState(), f = await observationFixture(), commandKey = randomUUID();
     const observed = await f.run(commandKey);
     expect(observed.identity.variants.map(member => member.variantId)).toEqual([101, 102]);
-    expect(observed.observation.evidence.nonMemberCandidates).toEqual([expect.objectContaining({ sku: sku("C200"), groupIds: [],
-      offers: [expect.objectContaining({ status: "UNPUBLISHED", listingId: null })] })]);
+    expect(observed.observation.evidence.nonMemberCandidates).toBeUndefined();
     expect(await retainedState()).toEqual(before);
     f.setObservedAt(new Date(now.getTime() + 60_000));
     await f.run(commandKey);
     expect((await database.pool.query("SELECT count(*)::int AS n FROM inventory.ebay_publication_readiness_applications WHERE command_key=$1", [commandKey])).rows[0].n).toBe(1);
     expect(await retainedState()).toEqual(before);
-    // A listing-scoped preparation is not evidence that the older stock duty
-    // disappeared: the ordinary product publisher still fails closed on it.
-    await expect(publishProduct()).rejects.toMatchObject({ code: "CANONICAL_PUBLICATION_MAPPING_MISSING",
-      context: { productId: 20, productVariantId: 103, publicationTargetId: 3 } });
+    const result = await publishProduct();
+    expect(result.authority).toBe("canonical");
+    if (result.authority === "canonical") expect(result.publication.rows.map(row => row.productVariantId)).toEqual([101,102]);
+    expect(await retainedState()).toEqual(before);
   });
 
   it.each(["unknown", "published elsewhere", "group related", "missing offer", "missing item"])(
-    "cannot omit a retired member with %s provider evidence before Inventory preparation", async scenario => {
+    "keeps active preparation independent of an archived SKU with %s provider evidence", async scenario => {
       const f = await observationFixture();
       if (scenario === "unknown") f.retired.status = 503;
       if (scenario === "published elsewhere") { f.retired.offers[0].status = "PUBLISHED"; f.retired.offers[0].listing = { listingId: "other-listing", listingStatus: "ACTIVE" }; }
@@ -74,13 +74,32 @@ dbDescribe.sequential("260PT observed listing scope through real Inventory prepa
       if (scenario === "missing offer") f.retired.offers = [];
       if (scenario === "missing item") f.retired.itemExists = false;
       const commandKey = randomUUID(), before = await retainedState();
-      await expect(f.run(commandKey)).rejects.toThrow();
-      expect((await database.pool.query("SELECT count(*)::int AS n FROM inventory.ebay_publication_readiness_applications WHERE command_key=$1", [commandKey])).rows[0].n).toBe(0);
+      await expect(f.run(commandKey)).resolves.toBeDefined();
+      expect((await database.pool.query("SELECT count(*)::int AS n FROM inventory.ebay_publication_readiness_applications WHERE command_key=$1", [commandKey])).rows[0].n).toBe(1);
       expect(await retainedState()).toEqual(before);
-      await expect(publishProduct()).rejects.toMatchObject({ code: "CANONICAL_PUBLICATION_MAPPING_MISSING" });
+      const result = await publishProduct();
+      if (result.authority === "canonical") expect(result.publication.rows.map(row => row.productVariantId)).toEqual([101,102]);
     });
 
+  it.each(["PUBLISHED", "UNPUBLISHED"])("preserves archived %s provider topology without including it in inventory preparation", async status => {
+    const f = await observationFixture();
+    f.groupSkus.push(sku("C200"));
+    f.retired.groups = ["SHLZ-TOP-260PT"];
+    f.retired.offers[0].status = status;
+    if (status === "PUBLISHED") f.retired.offers[0].listing = { listingId: "listing-260", listingStatus: "ACTIVE" };
+    const before = await retainedState();
+    const observed = await f.run();
+    expect(observed.observation.evidence.groupVariantSkus).toContain(sku("C200"));
+    expect(await retainedState()).toEqual(before);
+    const result = await publishProduct();
+    if (result.authority === "canonical") expect(result.publication.rows.map(row => row.productVariantId)).toEqual([101,102]);
+  });
+
   it("preserves an independently queued retired-zero obligation across exact content preparation", async () => {
+    // Model an old obligation created before archival. Current publication must
+    // leave its request evidence intact without creating another archived write.
+    await database.pool.query(`UPDATE catalog.product_variants SET is_active=true WHERE id=103;
+      INSERT INTO channels.channel_variant_overrides(channel_id,product_variant_id,is_listed) VALUES(67,103,0)`);
     await prepare({ ...current(), variants: [...current().variants, { productVariantId: 103, sku: sku("C200") }] });
     await publishProduct();
     const scope = { destinationKind: "channel_connection" as const, connectionId: 9, providerKey: "ebay" as const,
@@ -100,12 +119,12 @@ dbDescribe.sequential("260PT observed listing scope through real Inventory prepa
     expect(before.publications).toEqual([expect.objectContaining({ desired_quantity: 0, state: "queued", external_inventory_item_id_snapshot: sku("C200") })]);
     expect(before.attempts).toEqual([expect.objectContaining({ state: "uncertain" })]);
     expect(before.requests).toHaveLength(1);
+    await database.pool.query("UPDATE catalog.product_variants SET is_active=false WHERE id=103");
     await (await observationFixture()).run();
     expect(await retainedState()).toEqual(before);
     const result = await publishProduct();
-    expect(result).toMatchObject({ authority: "canonical", publication: { rows: expect.arrayContaining([
-      expect.objectContaining({ productVariantId: 103, desiredQuantity: "0" }),
-    ]) } });
+    expect(result.authority).toBe("canonical");
+    if (result.authority === "canonical") expect(result.publication.rows.map(row => row.productVariantId)).toEqual([101,102]);
     expect(await retainedState()).toEqual(before);
   });
 });

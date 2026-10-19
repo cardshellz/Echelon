@@ -1,4 +1,6 @@
 import type { StockPublicationSelection } from "@shared/types/stock-publication-selection";
+import type { ListingMemberRetirement } from "@shared/types/listing-member-lifecycle";
+import { archivedListingMemberSelection, isArchivedCatalogMember } from "../../marketplace-listings/listing-member-lifecycle";
 import { isCustomerSellableVariant, type VariantSalesEligibility } from "@shared/catalog/variant-sales-eligibility";
 import {
   evaluateDropshipCatalogExposure,
@@ -37,6 +39,7 @@ export function decideDropshipStockPublicationSelection(input: {
     requiresShipping: boolean | null;
     trackInventory: boolean | null;
     salesEligibility: VariantSalesEligibility | null;
+    productStatus?: string | null;
   }) | null;
   rules: readonly DropshipCatalogExposureRule[];
   vendorRules: readonly DropshipVendorSelectionRule[];
@@ -45,12 +48,17 @@ export function decideDropshipStockPublicationSelection(input: {
   config: DropshipStockSelectionConfig | null;
   storePaused: boolean;
   now: Date;
+  retirement?: ListingMemberRetirement | null;
 }): VariantSelection {
   const result = (action: VariantSelection["action"], reason: string,
     blockers: VariantSelection["blockers"] = []): VariantSelection => ({
     productVariantId: input.productVariantId, action, reason, blockers,
   });
   const listing = input.listing;
+  const archived = archivedListingMemberSelection({ productVariantId: input.productVariantId,
+    archived: Boolean(input.candidate && isArchivedCatalogMember({ productActive: input.candidate.productIsActive,
+      variantActive: input.candidate.variantIsActive, productStatus: input.candidate.productStatus })), retirement: input.retirement });
+  if (archived) return archived;
   const retainedIdentity = Boolean(listing?.externalListingId || listing?.externalOfferId);
   const savedLivePush = listing?.livePushItemId != null;
   // An ended projection retires older intents. A genuinely newer saved push is

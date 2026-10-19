@@ -40,7 +40,7 @@ afterEach(() => {
 });
 
 function expectQuantityAdmission(externalInventoryItemId: string, kind: "item" | "reducing" = "item", memberSkus?: string[]) {
-  expect(admission.createChannelEbayQuantityRequestAdmission).toHaveBeenCalledExactlyOnceWith({ channelId: 67, externalAccountId: "verified-account-67" });
+  expect(admission.createChannelEbayQuantityRequestAdmission).toHaveBeenCalledExactlyOnceWith({ channelId: 67, externalAccountId: "verified-account-67", environment: "production" });
   expect(admission.owner[kind]).toHaveBeenCalledExactlyOnceWith(externalInventoryItemId, expect.any(Function), ...(memberSkus ? [memberSkus] : []));
   expect(admission.owner[kind === "item" ? "reducing" : "item"]).not.toHaveBeenCalled();
   expect(admission.owner.group).not.toHaveBeenCalled();

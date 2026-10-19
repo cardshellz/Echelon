@@ -27,7 +27,7 @@ describe("Channels stock publication selection", () => {
     if (reason === "internal") input.catalog.variants[0].salesEligibility = "internal_only";
     if (reason === "digital") input.catalog.variants[0].requiresShipping = false;
     if (reason === "untracked") input.catalog.variants[0].trackInventory = false;
-    expect(action(input)).toBe("zero");
+    expect(action(input)).toBe(reason === "product inactive" || reason === "variant inactive" ? "none" : "zero");
   });
   it("does not invent a clearing target for an excluded unmapped variant", () => {
     const input = facts(); input.productIsListed = 0; input.variants = [];

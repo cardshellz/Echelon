@@ -777,7 +777,7 @@ export class EbayMarketplaceListingConnector {
   }): void {
     if (input.identity) {
       const identity = input.identity,
-        skus = new Set(identity.variants.map((member) => member.sku));
+        skus = new Set([...identity.variants.map((member) => member.sku), ...identity.retainedGroupSkus ?? []]);
       const writableMembers = identity.variants.filter(member => member.contentSyncEnabled !== false);
       const writableSkus = new Set(writableMembers.map(member => member.sku));
       if (
@@ -825,12 +825,23 @@ export class EbayMarketplaceListingConnector {
     identity: EbayListingSyncIdentity;
     draft: Pick<EbayListingConnectorDraft, "productId" | "marketplaceId" | "inventoryItems" | "offers" | "itemGroup">;
   }): Promise<typeof input.draft> {
+    // Preserve only archived SKUs observed in this actual group. They carry no
+    // item/offer update or stock preparation; cleanup has a separate owner.
+    if (input.identity.retainedGroupSkus?.length && input.draft.itemGroup) {
+      input = { ...input, draft: { ...input.draft, itemGroup: { ...input.draft.itemGroup,
+        payload: { ...input.draft.itemGroup.payload, variantSKUs: normalizedSkus([
+          ...input.draft.itemGroup.payload.variantSKUs ?? [], ...input.identity.retainedGroupSkus,
+        ]) } } } };
+    }
     this.validateExistingListingSyncDraft(input);
-    const retained = input.identity.variants.filter(member => member.contentSyncEnabled === false);
-    if (!retained.length || !input.draft.itemGroup) return input.draft;
+    const retainedSkus = [...input.identity.variants.filter(member => member.contentSyncEnabled === false).map(member => member.sku),
+      ...input.identity.retainedGroupSkus ?? []];
+    if (!retainedSkus.length || !input.draft.itemGroup) return input.draft;
     const current = await input.client.getInventoryItemGroup(input.draft.itemGroup.groupKey);
     if (!current || (current.inventoryItemGroupKey !== undefined && current.inventoryItemGroupKey !== input.identity.groupKey)
-      || !sameStrings(normalizedSkus(current.variantSKUs), normalizedSkus(input.identity.variants.map(member => member.sku)))) {
+      || !sameStrings(normalizedSkus(current.variantSKUs), normalizedSkus([
+        ...input.identity.variants.map(member => member.sku), ...input.identity.retainedGroupSkus ?? [],
+      ]))) {
       throw new EbayListingSyncError("EBAY_SYNC_MEMBERSHIP_CHANGED", "The existing eBay group changed while preparing retained variation content.");
     }
     const aligned = alignDraftVariationSchemaToLiveGroup({ draft: { ...input.draft, itemGroup: input.draft.itemGroup,
@@ -845,7 +856,7 @@ export class EbayMarketplaceListingConnector {
     return { ...input.draft, inventoryItems: aligned.inventoryItems,
       itemGroup: { ...aligned.itemGroup, payload: buildRetainedVariationGroupPayload({
         desiredGroup: { ...desiredGroup, variesBy: { ...desiredGroup.variesBy, specifications: enabledSpecifications } },
-        currentGroup: current, retainedSkus: retained.map(member => member.sku),
+        currentGroup: current, retainedSkus,
       }) } };
   }
 

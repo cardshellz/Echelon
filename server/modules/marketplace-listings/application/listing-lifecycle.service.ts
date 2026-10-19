@@ -1,4 +1,6 @@
 import { z } from "zod";
+import type { ListingMemberLifecycleDependencies } from "./listing-member-lifecycle.port";
+import { processListingMemberRetirement } from "./process-listing-member-retirement";
 import {
   listingLifecycleCommandSchema,
   listingLifecycleListSchema,
@@ -52,11 +54,17 @@ export class ListingLifecycleService {
       provider: ListingLifecycleProvider;
       now(): Date;
       uuid(): string;
+      members?: ListingMemberLifecycleDependencies;
       checkPresence?(account: ListingAccount, sku: string): Promise<unknown>;
     },
   ) {}
   private now(): Date {
     return z.date().parse(this.dependencies.now());
+  }
+  async memberHistory(channelId: number, input: unknown) {
+    const request = z.object({ productId: channelIdSchema, limit: z.number().int().min(1).max(250).default(100) }).strict().parse(input);
+    if (!this.dependencies.members) throw new ListingPublicationError("LISTING_LIFECYCLE_UNAVAILABLE", "Listing retirement history is unavailable.", 503);
+    return { items: await this.dependencies.members.store.listForChannel(channelIdSchema.parse(channelId), request.productId, request.limit) };
   }
   async list(channelId: number, rawSkus: unknown) {
     const skus = z.array(listingLifecycleSkuSchema).max(250).parse(rawSkus);
@@ -163,6 +171,20 @@ export class ListingLifecycleService {
     z.number().int().min(1).max(100).parse(limit);
     let processed = 0,
       failed = 0;
+    const members = this.dependencies.members;
+    if (members) {
+      await members.store.discover(this.now(), limit);
+      for (const id of await members.store.due(this.now(), limit)) {
+        try {
+          const result = await members.store.withMember(id, session => processListingMemberRetirement(session, members, () => this.now()));
+          if (result?.state === "failed") failed++;
+          else if (result) processed++;
+        } catch (error) {
+          failed++;
+          console.error(JSON.stringify({ operation: "listing_member_worker", operationId: id, code: "LISTING_MEMBER_WORKER_FAILED" }));
+        }
+      }
+    }
     for (const candidate of await this.dependencies.store.due(
       this.now(),
       limit,

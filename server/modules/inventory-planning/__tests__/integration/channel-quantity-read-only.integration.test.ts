@@ -47,7 +47,7 @@ dbDescribe.sequential("channel quantity reads do not construct publication clean
     }, { commandKey: "00000000-0000-4000-8000-000000000099", actor: "test", now: NOW });
   }
 
-  async function retainUnmappedInactiveSibling(): Promise<void> {
+  async function retainUnmappedSibling(): Promise<void> {
     await database.pool.query(`INSERT INTO channels.channel_listings
       (id,channel_id,product_variant_id,external_sku,external_variant_id,external_product_id,sync_status)
       VALUES(2,67,102,'NEW','retained-offer','retained-listing','synced')`);
@@ -73,9 +73,9 @@ dbDescribe.sequential("channel quantity reads do not construct publication clean
     return snapshot;
   }
 
-  it("reads the healthy SKU despite an inactive retained sibling lacking a clearing mapping, without any writes", async () => {
+  it("reads the healthy SKU despite an archived retained sibling lacking a clearing mapping, without any writes", async () => {
     await prepareHealthyMapping();
-    await retainUnmappedInactiveSibling();
+    await retainUnmappedSibling();
     const before = await savedRows();
     const expected = { authority: "canonical", productId: 20,
       rows: [{ productVariantId: 101, quantity: 17, publicationTargetIds: [3] }] };
@@ -86,13 +86,36 @@ dbDescribe.sequential("channel quantity reads do not construct publication clean
     expect(await savedRows()).toEqual(before);
   });
 
-  it.each([true, false])("keeps the missing clearing-identity guard on publication (dryRun=%s), with no partial writes", async dryRun => {
+  it.each([true, false])("publishes only the active sibling without inventing a stock-clearing duty for a Catalog archive (dryRun=%s)", async dryRun => {
     await prepareHealthyMapping();
-    await retainUnmappedInactiveSibling();
+    await retainUnmappedSibling();
+    const listingBefore = (await database.pool.query("SELECT * FROM channels.channel_listings WHERE id=2")).rows;
+    await expect(publisher().publishProduct({ productId: 20, dryRun, triggeredBy: "actual_publication" }, legacy))
+      .resolves.toMatchObject({ authority: "canonical", publication: { dryRun,
+        rows: [{ productVariantId: 101, publicationTargetId: 3, desiredQuantity: "17" }] } });
+    expect(legacy).not.toHaveBeenCalled();
+    expect((await database.pool.query("SELECT * FROM channels.channel_listings WHERE id=2")).rows).toEqual(listingBefore);
+    expect((await database.pool.query(`SELECT active_mapping_id FROM inventory.publication_variant_mapping_heads
+      WHERE publication_target_id=3 AND product_variant_id=102`)).rows).toEqual([]);
+    expect((await database.pool.query(`SELECT id FROM inventory.inventory_publication_outbox
+      WHERE publication_target_id=3 AND product_variant_id=102`)).rows).toEqual([]);
+  });
+
+  it.each([true, false])("keeps the missing clearing-identity guard when only the channel selection is disabled (dryRun=%s), with no partial writes", async dryRun => {
+    await prepareHealthyMapping();
+    await retainUnmappedSibling();
+    // Catalog archival belongs to the listing lifecycle. An active Catalog SKU
+    // excluded only from this channel still requires an exact stock-clearing mapping.
+    await database.pool.query("UPDATE catalog.product_variants SET is_active=true,ebay_listing_excluded=true WHERE id=102");
     const before = await savedRows();
+    const executor = new PostgresInventoryAvailabilityRuntimePublicationExecutor(database.pool, logger);
+    const plan = await executor.execute(context => context.planProduct(20, 67, "publication"));
+    expect(plan.targets.find(target => target.publicationTargetId === 3)?.rows.find(row => row.productVariantId === 102))
+      .toMatchObject({ publishedUnits: "0", mapping: null,
+        blockers: [{ code: "PUBLICATION_TARGET_VARIANT_MAPPING_MISSING" }] });
     await expect(publisher().publishProduct({ productId: 20, dryRun, triggeredBy: "actual_publication" }, legacy))
       .rejects.toMatchObject({ code: "CANONICAL_PUBLICATION_MAPPING_MISSING",
-        context: { productId: 20, productVariantId: 102, publicationTargetId: 3 } });
+        context: { productId: 20, publicationTargetId: 3, blockerCodes: ["PUBLICATION_TARGET_VARIANT_MAPPING_MISSING"] } });
     expect(legacy).not.toHaveBeenCalled();
     expect(await savedRows()).toEqual(before);
   });

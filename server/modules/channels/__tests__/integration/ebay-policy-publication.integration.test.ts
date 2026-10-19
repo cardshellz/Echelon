@@ -6,6 +6,7 @@ import type { Pool } from "pg";
 import { createInventoryCutoverTestDatabase, type InventoryCutoverTestDatabase } from "../../../inventory/__tests__/fixtures/inventory-cutover-database";
 import { cutoverCompositionBaseSql } from "../../../inventory-planning/__tests__/fixtures/inventory-cutover-composition-database.fixture";
 import { installEbayPublicationInventoryFixture } from "../../../inventory-planning/__tests__/fixtures/ebay-publication-inventory.fixture";
+import { installPublicationSelectionWorkFixture } from "../../../inventory-planning/__tests__/fixtures/publication-selection-work.fixture";
 import { AutomaticSyncEbayProvider, automaticSyncPhotos } from "../fixtures/ebay-automatic-sync-provider.fixture";
 import { EbayPolicyCatalogHttp } from "../fixtures/ebay-business-policies.fixture";
 
@@ -66,6 +67,7 @@ const disposable = process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true";
       "0736_ebay_listing_mapping_repairs.sql", "0737_ebay_publication_completion.sql", "0741_ebay_durable_withdrawal.sql",
       "900000010000018170001_ebay_saved_publication_continuation.sql"])
       await database.pool.query(readFileSync(resolve("migrations", file), "utf8"));
+    await installPublicationSelectionWorkFixture(database.pool);
     await database.pool.query(`
       ALTER TABLE channels.channel_connections ADD COLUMN IF NOT EXISTS metadata jsonb,ADD COLUMN IF NOT EXISTS updated_at timestamptz DEFAULT now();
       -- The admission prerequisite installer supplies the current Catalog and
@@ -100,6 +102,15 @@ const disposable = process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true";
       UPDATE channels.channel_listings SET external_sku='P5',external_product_id=NULL,sync_status='pending' WHERE channel_id=67;
       INSERT INTO ebay.ebay_category_mappings(channel_id,product_type_slug,ebay_browse_category_id,listing_enabled) VALUES(67,'packs','183454',true);
     `);
+    // Group admission reads the shared archived-member source even when this
+    // particular publication contains only active members. Install its actual
+    // view and evidence guards, with the reduced owner's missing source columns.
+    await database.pool.query(`ALTER TABLE catalog.products ADD COLUMN IF NOT EXISTS updated_at timestamptz DEFAULT now();
+      ALTER TABLE catalog.product_variants ADD COLUMN IF NOT EXISTS updated_at timestamptz DEFAULT now();
+      ALTER TABLE channels.channel_connections ADD COLUMN IF NOT EXISTS shop_domain text;
+      ALTER TABLE channels.walmart_connections ADD COLUMN IF NOT EXISTS market text;`);
+    for (const file of ["0707_channel_listing_publication.sql", "900000013000018480001_shared_listing_member_lifecycle.sql"])
+      await database.pool.query(readFileSync(resolve("migrations", file), "utf8"));
     await ensureEbayPublicationReady(database.pool, { channelId: 67, connectionId: 9, accountId: "seller-36", environment: "production",
       productId: 20, purpose: "publish", variants: [{ productVariantId: 101, sku: "P5" }] },
     { commandKey: randomUUID(), actor: "test-stock-setup", now: new Date() });

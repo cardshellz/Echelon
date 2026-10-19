@@ -42,7 +42,13 @@ describe("Dropship listing intent owns stock selection", () => {
       .toBe("read_only");
   });
 
-  it.each(["vendor_rule", "vendor_override", "admin_rule", "inactive_variant", "internal_variant", "untracked_variant"])(
+  it("excludes archived members immediately while the shared listing lifecycle owns removal", () => {
+    const value = input();
+    value.candidate!.variantIsActive = false;
+    expect(decideDropshipStockPublicationSelection(value)).toMatchObject({ action: "none", blockers: [] });
+  });
+
+  it.each(["vendor_rule", "vendor_override", "admin_rule", "internal_variant", "untracked_variant"])(
     "retains zero duty for %s deselection", reason => {
       const value = input();
       if (reason === "vendor_rule") value.vendorRules = [...value.vendorRules,
@@ -50,7 +56,6 @@ describe("Dropship listing intent owns stock selection", () => {
       if (reason === "vendor_override") value.override = { productVariantId: 101, enabledOverride: false };
       if (reason === "admin_rule") value.rules = [...value.rules,
         { id: 4, scopeType: "product", action: "exclude", productId: 20 }];
-      if (reason === "inactive_variant") value.candidate!.variantIsActive = false;
       if (reason === "internal_variant") value.candidate!.salesEligibility = "internal_only";
       if (reason === "untracked_variant") value.candidate!.trackInventory = false;
       expect(decideDropshipStockPublicationSelection(value).action).toBe("zero");
