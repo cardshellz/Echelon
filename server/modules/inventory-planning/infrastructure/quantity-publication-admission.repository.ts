@@ -1,3 +1,4 @@
+import { settleArchivedCatchupInsideTransaction } from "./archived-quantity-catchup-settlement";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { assertRecreatedListingStockReady } from "./listing-recreation-stock.repository";
 import { createHash, randomUUID } from "node:crypto";
@@ -804,6 +805,42 @@ export class PostgresQuantityPublicationAdmission implements QuantityPublication
       throw error;
     } finally { client.release(discard); }
   }
+  async settleArchived(claim: QuantityPublicationCatchup): Promise<boolean> {
+    id(claim.catchupId); id(claim.revision);
+    if (!/^(0|[1-9][0-9]{0,18})$/.test(claim.attemptBoundaryId)
+      || BigInt(claim.attemptBoundaryId) > BigInt("9223372036854775807")) {
+      fail("PUBLICATION_ID_INVALID", "Expected a nonnegative database attempt boundary.");
+    }
+    const scope = quantityPublicationScopeSchema.parse(claim.scope);
+    const scopeKey = key(scope);
+    const occurredAt = now(this.clock());
+    const client = await this.pool.connect();
+    let transactionOpen = false; let discard: Error | undefined;
+    try {
+      await client.query("BEGIN"); transactionOpen = true;
+      await client.query("SET LOCAL lock_timeout='2s'");
+      await client.query("SET LOCAL statement_timeout='10s'");
+      await client.query("SET LOCAL idle_in_transaction_session_timeout='15s'");
+      // Same gate and exact item lock as provider admission/completion. Catalog
+      // reactivation takes the gate exclusively; contention must not replan.
+      const gate = (await client.query<{ acquired: boolean }>(
+        "SELECT pg_try_advisory_xact_lock_shared($1,0) AS acquired", [QUANTITY_PUBLICATION_LOCK_NAMESPACE])).rows[0]?.acquired;
+      const scoped = gate && (await client.query<{ acquired: boolean }>(
+        "SELECT pg_try_advisory_xact_lock(hashtextextended($1,918420)) AS acquired", [scopeKey])).rows[0]?.acquired;
+      if (!scoped) fail("PUBLICATION_CATCHUP_SETTLEMENT_BUSY", "Another publication or selection owner is active; retry this catch-up request.");
+      const settled = await settleArchivedCatchupInsideTransaction(client, { ...claim, scope }, scopeKey, occurredAt);
+      await client.query("COMMIT"); transactionOpen = false;
+      return settled;
+    } catch (error) {
+      if (transactionOpen) try { await client.query("ROLLBACK"); }
+      catch (rollbackError) { discard = rollbackError instanceof Error ? rollbackError : new Error(String(rollbackError)); }
+      if (error instanceof Error && "code" in error && error.code === "55P03") {
+        fail("PUBLICATION_CATCHUP_SETTLEMENT_BUSY", "Publication configuration is changing; retry this catch-up request.");
+      }
+      throw error;
+    } finally { client.release(discard); }
+  }
+
   async fail(claim: QuantityPublicationCatchup, errorCode: string, message: string): Promise<void> {
     const catchupId = id(claim.catchupId);
     const revision = id(claim.revision);

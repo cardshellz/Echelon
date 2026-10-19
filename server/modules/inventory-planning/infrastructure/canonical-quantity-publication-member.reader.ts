@@ -19,8 +19,9 @@ export async function readCanonicalQuantityPublicationMember(client: StockSelect
   const scope = quantityPublicationScopeSchema.parse(raw);
   const channelDestination = scope.destinationKind === "channel_connection";
   const providerOwner = channelDestination
-    ? "JOIN channels.channels provider_owner ON provider_owner.id=t.channel_id"
+    ? "JOIN channels.channels provider_owner ON provider_owner.id=t.channel_id JOIN channels.channel_connections connection ON connection.id=t.channel_connection_id AND connection.channel_id=t.channel_id"
     : "JOIN dropship.dropship_store_connections provider_owner ON provider_owner.id=t.dropship_store_connection_id";
+  const connectionLock = channelDestination ? ",connection" : "";
   const providerColumn = channelDestination ? "provider_owner.provider" : "provider_owner.platform";
   const mappings = (await client.query<CanonicalQuantityPublicationMember>(
     `SELECT v.product_id,m.product_variant_id,t.id AS target_id,
@@ -38,7 +39,7 @@ export async function readCanonicalQuantityPublicationMember(client: StockSelect
      AND t.destination_kind=$1 AND COALESCE(t.channel_connection_id,t.dropship_store_connection_id)=$2
      AND t.provider_scope_type=$3 AND t.external_scope_id=$4 AND m.external_inventory_item_id=$5
      AND lower(${providerColumn})=$6
-     ORDER BY t.id,m.product_variant_id LIMIT 2 FOR SHARE OF t,h,m,v,p,provider_owner`,
+     ORDER BY t.id,m.product_variant_id LIMIT 2 FOR SHARE OF t,h,m,v,p,provider_owner${connectionLock}`,
     [scope.destinationKind,scope.connectionId,scope.providerScopeType,scope.externalScopeId,scope.externalInventoryItemId,
       scope.providerKey],
   )).rows;

@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "migration": "900000016000018560001_quantity_publication_archived_catchup_settlement.sql",
+  "generation": 16,
+  "pr": 1856,
+  "ordinal": 1,
+  "after": [
+    "0743_publication_selection_work.sql",
+    "900000013000018480001_shared_listing_member_lifecycle.sql",
+    "900000015000018550001_shipment_unit_selection.sql"
+  ]
+}

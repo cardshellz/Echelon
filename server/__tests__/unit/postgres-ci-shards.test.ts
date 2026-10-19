@@ -69,6 +69,7 @@ describe("PostgreSQL CI coverage and isolation", () => {
       "server/modules/channels/__tests__/integration/channel-stock-selection.integration.test.ts",
       "server/modules/dropship/__tests__/integration/dropship-stock-publication-selection.integration.test.ts",
       "server/modules/inventory-planning/__tests__/integration/publication-selection-work.integration.test.ts",
+      "server/modules/inventory-planning/__tests__/integration/quantity-publication-catchup-archive.integration.test.ts",
       "server/modules/inventory-planning/__tests__/integration/stock-selection-publication-flow.integration.test.ts",
       "server/modules/inventory-planning/__tests__/integration/inventory-publication-readback-selection.integration.test.ts",
       "server/modules/procurement/__tests__/integration/po-quantity-amendment.integration.test.ts",
