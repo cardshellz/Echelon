@@ -1,3 +1,5 @@
+import { archivedTransformationVariantIds, prepareTransformationDraft } from "@shared/inventory/transformation-draft-lifecycle";
+import { InventoryAvailabilityMasterDataService } from "../../application/inventory-availability-master-data.service";
 import { readFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { resolve } from "node:path";
@@ -1630,6 +1632,115 @@ describeWithDisposableDb.sequential("inventory availability Slice 1 PostgreSQL g
     );
     await markModelValid(modelId);
     await sealModel(modelId);
+  });
+
+  it.each([0, 1, 2])("creates an idempotent successor after archiving any package variant (index %i), preserving the sealed model", async archivedIndex => {
+    const scope = await seedProductAndWarehouse([2, 14, 70]);
+    const store = new PostgresInventoryAvailabilityMasterDataStore(drizzle(pool, { schema: databaseSchema }));
+    const service = new InventoryAvailabilityMasterDataService(store, { now: () => new Date(FIXED_TIME) });
+    const [small, middle, large] = scope.variantIds as [number, number, number];
+    const original = await service.createTransformationModelDraft({
+      productId: scope.productId, inventoryBehavior: "package_hierarchy", expectedHeadRevision: "0",
+      buildToPromiseEnabled: false, recipeBindings: [], paths: [
+        { sourceVariantId: small, destinationVariantId: middle, inputQty: 7, outputQty: 1,
+          operationType: "assemble_pack", authorityState: "allowed", transformationRecipeBindingKey: null },
+        { sourceVariantId: middle, destinationVariantId: large, inputQty: 5, outputQty: 1,
+          operationType: "assemble_pack", authorityState: "allowed", transformationRecipeBindingKey: null },
+        { sourceVariantId: small, destinationVariantId: large, inputQty: 35, outputQty: 1,
+          operationType: "assemble_pack", authorityState: "blocked", transformationRecipeBindingKey: null },
+      ], changeReason: "Original package rules", idempotencyKey: "archive-lifecycle:original",
+    }, "integration-test");
+    const sealing = await pool.connect();
+    try {
+      await sealing.query("BEGIN");
+      await sealing.query("UPDATE inventory.transformation_model_versions SET lifecycle_status='sealed', sealed_by='integration-test', sealed_at=$2 WHERE id=$1", [original.modelId, FIXED_TIME]);
+      await sealing.query("UPDATE inventory.transformation_model_heads SET active_model_id=$2, draft_model_id=NULL, revision=1 WHERE product_id=$1", [scope.productId, original.modelId]);
+      await sealing.query("COMMIT");
+    } catch (error) {
+      await sealing.query("ROLLBACK");
+      throw error;
+    } finally { sealing.release(); }
+    const before = (await pool.query("SELECT * FROM inventory.transformation_model_paths WHERE model_id=$1 ORDER BY id", [original.modelId])).rows;
+    const archivedId = scope.variantIds[archivedIndex]!;
+    // Same durable catalog lifecycle flag written by archive and merge commands.
+    await pool.query("UPDATE catalog.product_variants SET is_active=false WHERE id=$1", [archivedId]);
+    const view = await service.getSupplyTransformationsAdminView(scope.productId);
+    expect(view.archivedVariantIds).toEqual([archivedId]);
+    const projected = prepareTransformationDraft(view.activeModel!, archivedTransformationVariantIds(view));
+    expect(projected.removedPaths).toHaveLength(2);
+    const request = {
+      productId: scope.productId, inventoryBehavior: "package_hierarchy" as const, expectedHeadRevision: view.head!.revision,
+      buildToPromiseEnabled: projected.definition.buildToPromiseEnabled, recipeBindings: [],
+      paths: projected.definition.paths.map(({ sourceUnitsPerVariant: _source, destinationUnitsPerVariant: _destination, ...path }) => path),
+      changeReason: "Exclude archived SKU references", idempotencyKey: "archive-lifecycle:successor",
+    };
+    const successor = await service.createTransformationModelDraft(request, "integration-test");
+    expect(await service.createTransformationModelDraft(request, "integration-test")).toEqual({ ...successor, alreadyApplied: true });
+    expect((await service.getSupplyTransformationsAdminView(scope.productId))).toMatchObject({
+      activeModel: { id: original.modelId, paths: view.activeModel!.paths },
+      draftModel: { id: successor.modelId, paths: projected.definition.paths },
+    });
+    expect((await pool.query("SELECT * FROM inventory.transformation_model_paths WHERE model_id=$1 ORDER BY id", [original.modelId])).rows).toEqual(before);
+    const retained = projected.definition.paths[0]!;
+    await pool.query("UPDATE catalog.product_variants SET is_active=false WHERE id=$1", [retained.sourceVariantId]);
+    const draftView = await service.getSupplyTransformationsAdminView(scope.productId);
+    const edit = {
+      inventoryBehavior: "package_hierarchy" as const, expectedVersion: successor.version,
+      expectedDefinitionHash: successor.definitionHash, expectedHeadRevision: draftView.head!.revision,
+      buildToPromiseEnabled: false, recipeBindings: [], paths: request.paths,
+      changeReason: "Stale editor cannot save newly archived authority", idempotencyKey: "archive-lifecycle:stale",
+    };
+    await expect(service.updateTransformationModelDraft(scope.productId, successor.modelId, edit, "integration-test"))
+      .rejects.toMatchObject({ code: "INVENTORY_AVAILABILITY_REFERENCE_INVALID" });
+    const repaired = await service.updateTransformationModelDraft(scope.productId, successor.modelId,
+      { ...edit, paths: [], idempotencyKey: "archive-lifecycle:edit", changeReason: "Exclude second archived SKU" }, "integration-test");
+    expect((await service.getSupplyTransformationsAdminView(scope.productId)).draftModel).toMatchObject({ id: repaired.modelId, paths: [] });
+    expect((await pool.query("SELECT count(*)::int AS n FROM inventory.inventory_levels")).rows[0].n).toBe(0);
+  });
+
+  it("reports archived references from selectable recipes even without a saved model or inventory-managed catalog rows", async () => {
+    const scope = await seedProductAndWarehouse([1, 5]);
+    const recipe = (await pool.query<{ id: number }>(
+      "INSERT INTO inventory.build_recipes (code,version,status,output_product_id,output_variant_id,output_units_per_variant,output_qty) VALUES ('UNBOUND-ARCHIVE',1,'active',$1,$2,5,1) RETURNING id",
+      [scope.productId, scope.variantIds[1]],
+    )).rows[0]!;
+    await pool.query("INSERT INTO inventory.build_recipe_components (recipe_id,component_product_id,component_variant_id,component_units_per_variant,qty) VALUES ($1,$2,$3,1,5)",
+      [recipe.id, scope.productId, scope.variantIds[0]]);
+    await pool.query("UPDATE catalog.product_variants SET is_active=false,track_inventory=false WHERE product_id=$1", [scope.productId]);
+    const store = new PostgresInventoryAvailabilityMasterDataStore(drizzle(pool, { schema: databaseSchema }));
+    const view = await store.getSupplyTransformationsAdminView(scope.productId);
+    expect(view).toMatchObject({ variants: [], activeModel: null, draftModel: null, archivedVariantIds: scope.variantIds });
+  });
+
+  it("reports archived external recipe components and removes their whole binding in a successor draft", async () => {
+    const output = await seedProductAndWarehouse([5]);
+    const input = await seedProductAndWarehouse([1, 1]);
+    const recipe = (await pool.query<{ id: number }>(
+      "INSERT INTO inventory.build_recipes (code,version,status,recipe_type,output_product_id,output_variant_id,output_units_per_variant,output_qty) VALUES ('BUILD-ARCHIVE',1,'active','assembly',$1,$2,5,1) RETURNING id",
+      [output.productId, output.variantIds[0]],
+    )).rows[0]!;
+    for (const id of input.variantIds) await pool.query(
+      "INSERT INTO inventory.build_recipe_components (recipe_id,component_product_id,component_variant_id,component_units_per_variant,qty) VALUES ($1,$2,$3,1,5)",
+      [recipe.id, input.productId, id]);
+    const service = new InventoryAvailabilityMasterDataService(new PostgresInventoryAvailabilityMasterDataStore(drizzle(pool, { schema: databaseSchema })), { now: () => new Date(FIXED_TIME) });
+    const original = await service.createTransformationModelDraft({ productId: output.productId, inventoryBehavior: "build_managed",
+      expectedHeadRevision: "0", buildToPromiseEnabled: true, paths: [],
+      recipeBindings: [{ bindingKey: "external-build", recipeId: recipe.id, relationshipRole: "component_build", warehouseId: null }],
+      changeReason: "Build from two external components", idempotencyKey: "external-archive:create" }, "integration-test");
+    await pool.query("UPDATE catalog.product_variants SET is_active=false,track_inventory=false WHERE id=$1", [input.variantIds[1]]);
+    const view = await service.getSupplyTransformationsAdminView(output.productId);
+    expect(view.variants.map(variant => variant.id)).toEqual(output.variantIds);
+    expect(view.archivedVariantIds).toEqual([input.variantIds[1]]);
+    expect(view.draftModel!.bindings[0]!.components).toHaveLength(2);
+    const lifecycle = prepareTransformationDraft(view.draftModel!, archivedTransformationVariantIds(view));
+    expect(lifecycle.definition).toEqual({ paths: [], bindings: [], buildToPromiseEnabled: false });
+    const next = await service.updateTransformationModelDraft(output.productId, original.modelId, {
+      inventoryBehavior: "build_managed", expectedVersion: original.version, expectedDefinitionHash: original.definitionHash,
+      expectedHeadRevision: view.head!.revision, paths: [], recipeBindings: [], buildToPromiseEnabled: false,
+      changeReason: "Exclude recipe with an archived component", idempotencyKey: "external-archive:successor",
+    }, "integration-test");
+    expect((await service.getSupplyTransformationsAdminView(output.productId)).draftModel).toMatchObject({ id: next.modelId, bindings: [], buildToPromiseEnabled: false });
+    expect((await pool.query("SELECT count(*)::int AS n FROM inventory.transformation_recipe_component_snapshots WHERE model_id=$1", [original.modelId])).rows[0].n).toBe(2);
   });
 
   it("creates a validated draft graph, head, and audit atomically with idempotent replay", async () => {
