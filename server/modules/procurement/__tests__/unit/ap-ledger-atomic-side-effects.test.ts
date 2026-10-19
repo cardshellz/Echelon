@@ -17,6 +17,13 @@ vi.mock("../../../inventory/infrastructure/cost-evidence.repository", async (imp
   lockInventoryCostGraph: vi.fn(async () => undefined),
 }));
 
+// These financial orchestration fixtures supply current approval evidence. The
+// real PostgreSQL command suite covers inactive actors and revocation while queued.
+vi.mock("../../../identity/infrastructure/command-authority.repository", () => ({
+  readCommandAuthorityActor: vi.fn(async (_tx, userId: string) => ({ userId, active: true,
+    permissions: ["purchasing:approve"], scopedPermissions: [] })),
+}));
+
 const tables = vi.hoisted(() => ({
   apPayments: {
     id: "ap_payments.id",
@@ -153,7 +160,7 @@ function makeUpdateChain() {
   };
 }
 
-function buildTx(selectResults: unknown[][]) {
+function buildTx(selectResults: unknown[][], returnedPayment = { id: 21, paymentNumber: "PAY-20260518-001" } as Record<string, unknown>) {
   const tx: any = {
     select: vi.fn(() => makeSelectChain(selectResults.shift() ?? [])),
     execute: vi.fn(() => Promise.resolve()),
@@ -161,7 +168,7 @@ function buildTx(selectResults: unknown[][]) {
       values: vi.fn(() => {
         if (table === tables.apPayments) {
           return {
-            returning: vi.fn(() => Promise.resolve([{ id: 21, paymentNumber: "PAY-20260518-001" }])),
+            returning: vi.fn(() => Promise.resolve([returnedPayment])),
           };
         }
         return Promise.resolve([]);
@@ -629,7 +636,9 @@ describe("AP ledger atomic side effects", () => {
       [{ purchaseOrderId: 7 }],
       [{ status: "received", financialStatus: "invoiced", firstInvoicedAt: new Date(), firstPaidAt: null, fullyPaidAt: null }],
       [{ invoicedAmountCents: 2500, paidAmountCents: 2500, status: "paid" }],
-    ]);
+      [{ allocationId: 31, vendorInvoiceId: 12, appliedAmountCents: 2500 }],
+      [{ id: 31, apPaymentId: 21, vendorInvoiceId: 12, appliedAmountCents: 2500, invoiceVendorId: 4, invoiceCurrency: "USD", invoiceStatus: "paid" }],
+    ], { id: 21, paymentNumber: "PAY-20260518-001", vendorId: 4, currency: "USD", status: "completed", totalAmountCents: 2500, paymentCalendarDate: null });
     const result = await executeApPaymentCommandInTransaction("record_payment", {
       payment: {
         vendorId: 4,
@@ -649,6 +658,8 @@ describe("AP ledger atomic side effects", () => {
       affectedPaymentIds: [21],
       affectedPurchaseOrderIds: [7],
     });
+    expect(result).toMatchObject({ applications: [{ allocationId: 31, vendorInvoiceId: 12, appliedAmountCents: 2500 }],
+      paymentBalance: { state: "fully_applied", appliedAmountCents: 2500, unappliedAmountCents: 0 } });
     expect(tx.insert).toHaveBeenCalledWith(tables.auditEvents);
   });
 

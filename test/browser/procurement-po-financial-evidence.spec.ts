@@ -4,7 +4,7 @@ import type { PoFinancialEvidence } from "../../shared/procurement/po-financial-
 import type { PoFinancialWorkflow } from "../../shared/procurement/po-financial-workflow";
 import { financialWorkflowFixture } from "../fixtures/po-financial-workflow";
 import { installFixtures, po } from "./procurement-fixtures";
-import { expectFinancialRetryBoundaries, installFinancialRetryClock } from "./procurement-retry-clock";
+import { recordedPaymentReply } from "./procurement-payment-fixtures";
 
 const complete = (): PoFinancialEvidence => ({
   purchaseOrderId: 17, currency: "USD", state: "complete", invoiceCount: 1,
@@ -229,7 +229,7 @@ test("recording an invoice payment reloads the PO evidence on return from its in
     });
     expect(route.request().headers()["idempotency-key"]).toBeTruthy();
     settled = true;
-    return route.fulfill({ json: { id: 91, apLedgerOutcome: { affectedPurchaseOrderIds: [17, 99] } } });
+    return route.fulfill({ json: { ...recordedPaymentReply(route.request().postDataJSON(), route.request().headers()["idempotency-key"], "test-financial-reviewer", 91), apLedgerOutcome: { affectedPurchaseOrderIds: [17, 99] } } });
   });
   await page.goto("/purchase-orders/17?tab=lines");
   await expect(amountField(page, "Paid for this PO")).toHaveText("Paid for this POUnknown");
@@ -246,8 +246,7 @@ test("recording an invoice payment reloads the PO evidence on return from its in
   expect(failures).toEqual([]);
 });
 
-test("a lost payment response reloads committed evidence after bounded retries", async ({ page }) => {
-  await installFinancialRetryClock(page);
+test("a lost payment response retains its exact request while PO evidence refreshes", async ({ page }) => {
   const failures = await installFinancialFixtures(page, sharedPartial());
   let settled = false;
   const keys: string[] = [];
@@ -262,11 +261,14 @@ test("a lost payment response reloads committed evidence after bounded retries",
   await page.goto("/purchase-orders/17?tab=lines");
   await expect(amountField(page, "Paid for this PO")).toHaveText("Paid for this POUnknown");
   const dialog = await openInvoicePayment(page);
-  await expectFinancialRetryBoundaries(page,
-    () => dialog.getByRole("button", { name: "Record Payment", exact: true }).click(),
-    () => keys.length);
-  await expect(dialog.getByRole("button", { name: "Record Payment", exact: true })).toBeEnabled();
-  await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
+  await dialog.getByRole("button", { name: "Record Payment", exact: true }).click();
+  await expect(dialog.getByRole("button", { name: "Record Payment", exact: true })).toBeDisabled();
+  for (let attempt = 2; attempt <= 4; attempt += 1) {
+    const retry = dialog.getByRole("button", { name: "Recover saved payment request", exact: true });
+    await expect(retry).toBeEnabled(); await retry.click(); await expect.poll(() => keys.length).toBe(attempt);
+  }
+  await expect(dialog.getByRole("button", { name: "Recover saved payment request", exact: true })).toBeEnabled();
+  await dialog.getByRole("button", { name: "Close", exact: true }).click();
   await page.goBack();
   await expect(amountField(page, "Paid for this PO")).toHaveText("Paid for this PO$100.00");
   await expect(amountField(page, "Outstanding for this PO")).toHaveText("Outstanding for this PO$0.00");
@@ -397,7 +399,14 @@ test("cancelled physical work still exposes linked invoice payment review", asyn
   const workflow = financialWorkflowFixture(17, "payment_due");
   const failures = await installFinancialFixtures(page, workflow.evidence, { cancelled: true, paidStatus: true, autoDraft: true, workflow,
     primaryAction: { id: "record_payment", label: "Review invoice payment", detail: "Cancelled receiving does not settle this invoice.", severity: "info", tab: "invoices" } });
+  await page.route("**/api/purchase-orders/17/payments", route => route.fulfill({ json: { payments: [81, 82].map(allocationId => ({
+    allocationId, apPaymentId: 91, appliedAmountCents: 5000, invoiceNumber: "TEST-SHARED-71", paymentMethod: "ach", paymentNumber: "TEST-PAY-91",
+    paymentCalendarDate: "2026-10-19", paymentDateSource: "recorded_calendar_date",
+  })) } }));
   await page.goto("/purchase-orders/17?tab=lines");
+  await page.getByRole("tab", { name: "Payments", exact: true }).click();
+  await expect(page.getByRole("button", { name: "2 payment applications recorded", exact: true })).toBeVisible();
+  await expect(page.getByText("2 payments recorded", { exact: true })).toHaveCount(0);
   await expect(page.getByRole("heading", { name: "Review invoice payment", exact: true })).toBeVisible();
   await page.getByRole("region", { name: "Auto-draft next action", exact: true }).getByRole("button", { name: "Review invoice payment", exact: true }).click();
   await openLinkedInvoice(page);

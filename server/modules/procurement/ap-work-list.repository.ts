@@ -1,3 +1,4 @@
+import { readPaymentBalances } from "./ap-payment-balance.repository";
 import { and, desc, eq, ilike, inArray, lt, or, sql, type SQL } from "drizzle-orm";
 import { db } from "../../db";
 import { apPayments, purchaseOrders, vendorInvoicePoLinks, vendorInvoices, vendors } from "@shared/schema";
@@ -57,12 +58,14 @@ export async function readPaymentWorkList(query: PaymentWorkListQuery): Promise<
   return db.transaction(async tx => {
     const [count] = await tx.select({ total: sql<number>`count(*)::int` }).from(apPayments).leftJoin(vendors, eq(vendors.id, apPayments.vendorId)).where(predicate);
     const rows = await tx.select({ id: apPayments.id, vendorId: apPayments.vendorId, paymentNumber: apPayments.paymentNumber,
-      vendorName: vendors.name, vendorCode: vendors.code, paymentDate: apPayments.paymentDate, paymentMethod: apPayments.paymentMethod,
+      vendorName: vendors.name, vendorCode: vendors.code, paymentDate: apPayments.paymentDate, paymentCalendarDate: apPayments.paymentCalendarDate, paymentMethod: apPayments.paymentMethod,
       referenceNumber: apPayments.referenceNumber, checkNumber: apPayments.checkNumber, totalAmountCents: apPayments.totalAmountCents,
       currency: apPayments.currency, status: apPayments.status,
     }).from(apPayments).leftJoin(vendors, eq(vendors.id, apPayments.vendorId)).where(predicate)
       .orderBy(desc(apPayments.paymentDate), desc(apPayments.id)).limit(query.limit).offset(query.offset);
-    const items = rows.map(row => ({ ...row, paymentDate: row.paymentDate.toISOString() }));
+    const balances = await readPaymentBalances(tx, rows);
+    const items = rows.map(row => ({ ...row, paymentDate: row.paymentDate.toISOString(),
+      paymentDateSource: row.paymentCalendarDate === null ? "legacy_timestamp" : "recorded_calendar_date", paymentBalance: balances.get(row.id)! }));
     return paymentWorkListPageSchema.parse({ items, ...pageMetadata(count.total, query, items.length) });
   }, { isolationLevel: "repeatable read", accessMode: "read only" });
 }

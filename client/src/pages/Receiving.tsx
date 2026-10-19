@@ -16,6 +16,7 @@ import { RECEIPT_REVERSAL_MAX_REASON_LENGTH } from "@shared/procurement/receipt-
 import { parseReceivingHeaderResult, parseReceivingCloseResult, receivingIssueMessages, receivingCostOutcomeMessage } from "@/lib/receiving-outcomes";
 import { ReceivingUnitControl } from "@/components/purchasing/ReceivingUnitControl";
 import { ReceivingCountControl } from "@/components/purchasing/ReceivingCountControl";
+import { ReceivingQuarantineRecoveryNotice } from "@/components/purchasing/ReceivingQuarantineRecoveryNotice";
 import { ReceivingQuarantinePanel } from "@/components/purchasing/ReceivingQuarantinePanel";
 import { hasReceivingUnitVersion, ReceivingUnitVersionError, parseReceivingUnitRefresh, parseReceivingLineMutation, receivingSelectedFactor, receivingVariantChange, receivingCompleteAllCommand, receivingCountChange, receivingAddQuantity, recordedReceivingFactor, type ReceivingUnitLine } from "@/lib/receiving-units";
 import { ProcurementContext } from "@/components/procurement-context";
@@ -1891,6 +1892,7 @@ DEF-456,25,,,5.00,,Location TBD`;
                   {requestedReceiptId !== null ? `Receipt #${requestedReceiptId}` : "Receipt details"}
                 </DialogDescription>
               </DialogHeader>
+              {requestedReceiptId !== null && <ReceivingQuarantineRecoveryNotice key={requestedReceiptId} receiptId={requestedReceiptId} />}
               {receiptLoading && <p role="status" className="text-sm text-muted-foreground">Loading receipt details…</p>}
               {receiptLoadError && (
                 <div className="space-y-3">

@@ -87,8 +87,8 @@ function settlement(
     balance = cents(invoice.balanceCents);
   if (invoiced === null || paid === null || balance === null) return null;
   let completed = BigInt(0);
-  const allocations = new Set<number>(),
-    payments = new Set<number>();
+  // Repeated applications retain the same cash payment and distinct allocation IDs.
+  const allocations = new Set<number>();
   for (const payment of invoice.payments) {
     if (
       payment === null ||
@@ -103,7 +103,6 @@ function settlement(
       !Number.isSafeInteger(payment.paymentId) ||
       payment.paymentId <= 0 ||
       allocations.has(payment.allocationId) ||
-      payments.has(payment.paymentId) ||
       amount === null ||
       amount === BigInt(0) ||
       payment.paymentVendorId !== invoice.vendorId ||
@@ -112,7 +111,6 @@ function settlement(
     )
       return null;
     allocations.add(payment.allocationId);
-    payments.add(payment.paymentId);
     if (payment.paymentStatus === "completed") completed += amount;
   }
   if (completed !== paid) return null;

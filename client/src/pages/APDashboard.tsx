@@ -1,3 +1,4 @@
+import { formatPaymentCalendarDate } from "@shared/procurement/ap-payment-contract";
 import React from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "wouter";
@@ -228,7 +229,7 @@ export default function APDashboard() {
                   <TableRow key={p.id}>
                     <TableCell className="font-mono text-sm">{p.paymentNumber}</TableCell>
                     <TableCell>{p.vendorName ?? "—"}</TableCell>
-                    <TableCell className="text-sm">{formatDate(p.paymentDate)}</TableCell>
+                    <TableCell className="text-sm">{formatPaymentCalendarDate(p)}</TableCell>
                     <TableCell className="text-sm">{PAYMENT_METHOD_LABELS[p.paymentMethod] ?? p.paymentMethod}</TableCell>
                     <TableCell className="text-right font-mono font-medium">{formatCents(p.totalAmountCents)}</TableCell>
                     <TableCell>

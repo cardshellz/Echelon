@@ -224,13 +224,11 @@ function readCompletedPayments(
     return null;
   }
   const allocationIds = new Set<number>();
-  const paymentIds = new Set<number>();
   let completed = BigInt(0);
   for (const payment of payments.data) {
-    if (
-      allocationIds.has(payment.allocationId) ||
-      paymentIds.has(payment.paymentId)
-    ) {
+    // One recorded payment can be applied repeatedly. Allocation identity,
+    // rather than payment identity, identifies each immutable settlement event.
+    if (allocationIds.has(payment.allocationId)) {
       addReason(
         "PO_PAYMENT_EVIDENCE_INVALID",
         "A payment allocation appears more than once for this invoice.",
@@ -238,7 +236,6 @@ function readCompletedPayments(
       return null;
     }
     allocationIds.add(payment.allocationId);
-    paymentIds.add(payment.paymentId);
     if (
       payment.paymentStatus !== "completed" &&
       payment.paymentStatus !== "voided"

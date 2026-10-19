@@ -80,6 +80,29 @@ function pay(input: PoFinancialEvidenceInput, amount: number) {
 }
 
 describe("financial exceptions use validated whole invoice evidence", () => {
+  it("uses all distinct completed allocations from the same payment for overdue evidence", () => {
+    const input = pay(source(), 2000);
+    const first = input.invoices[0].payments[0];
+    input.invoices[0].payments = [{ ...first, appliedAmountCents: 1000 }, { ...first, allocationId: 2, appliedAmountCents: 1000 }];
+    const result = run(input);
+    expect(result.unknownKinds).toEqual([]);
+    expect(result.alerts).toEqual([expect.objectContaining({ kind: "past_due", payload: expect.objectContaining({ outstandingCents: 1000 }) })]);
+    expect(result.invoiceEvidence[0].completedAllocationIds).toEqual([1, 2]);
+  });
+  it("retains repeated voided allocations without treating the invoice as paid", () => {
+    const input = source();
+    input.invoices[0].payments = [1, 2].map(allocationId => ({ allocationId, paymentId: 1, paymentVendorId: 5, paymentCurrency: "USD", paymentStatus: "voided", appliedAmountCents: 1000 }));
+    const result = run(input);
+    expect(result.unknownKinds).toEqual([]);
+    expect(result.alerts).toEqual([expect.objectContaining({ kind: "past_due", payload: expect.objectContaining({ outstandingCents: 3000 }) })]);
+    expect(result.invoiceEvidence[0].completedAllocationIds).toEqual([]);
+  });
+  it.each(["completed", "voided"])("rejects duplicated allocation identity for %s history", paymentStatus => {
+    const input = paymentStatus === "completed" ? pay(source(), 2000) : source();
+    const allocation = { allocationId: 1, paymentId: 1, paymentVendorId: 5, paymentCurrency: "USD", paymentStatus, appliedAmountCents: 1000 };
+    input.invoices[0].payments = [allocation, { ...allocation }];
+    expect(run(input).unknownKinds).toEqual(["overpaid", "past_due"]);
+  });
   it("labels shared partial payment debt as invoice scope without allocating it to a PO", () => {
     expect(run(pay(source(), 1000)).alerts).toEqual([
       expect.objectContaining({

@@ -1,8 +1,8 @@
-import { createHash, randomUUID } from "node:crypto";
+import { verifiedCustodyResultSchema } from "@shared/procurement/receiving-quarantine-command";
+import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import * as schema from "@shared/schema";
-import { canonicalJson } from "@shared/utils/canonical-json";
-import { receivingQuarantineCommandResultSchema, type ReceivingQuarantineCommandResult } from "@shared/procurement/receiving-quarantine";
+import { type ReceivingQuarantineCommandResult } from "@shared/procurement/receiving-quarantine";
 import type { FinancialCommandDescriptor } from "../../../../platform/commands/transactional-command.service";
 import { fixtureTable, fixtureForeignKeys } from "./shipment-line-fixture";
 import { createFlowCostHarness, seedFlowMasterData, FLOW_AT, type FlowCostHarness } from "./procurement-flow-cost.fixture";
@@ -16,6 +16,7 @@ const REFERENCE = "Inspected physical goods, photo evidence 42";
 run.sequential("real receiving custody commands and normal inventory recognition", () => {
   let harness: FlowCostHarness;
   let commands: ReturnType<typeof import("../../receiving-quarantine.commands").createReceivingCustodyCommands>;
+  let identityHash: typeof import("../../receiving-quarantine.commands").hashCustodyCommandIdentity;
   let scope: typeof import("../../receiving-quarantine.commands").custodyCommandScope;
   let options: typeof import("../../receiving-quarantine-options.repository").readQuarantineAcceptanceOptions;
   let readView: typeof import("../../receiving-quarantine.service").readReceivingQuarantineView;
@@ -39,6 +40,7 @@ run.sequential("real receiving custody commands and normal inventory recognition
     const repository = await import("../../../../platform/commands/command-results.repository");
     commands = commandModule.createReceivingCustodyCommands(harness.receiving, repository.createDrizzleFinancialCommandRepository(harness.database), () => FLOW_AT);
     scope = commandModule.custodyCommandScope;
+    identityHash = commandModule.hashCustodyCommandIdentity;
     options = (await import("../../receiving-quarantine-options.repository")).readQuarantineAcceptanceOptions;
     readView = (await import("../../receiving-quarantine.service")).readReceivingQuarantineView;
   });
@@ -47,8 +49,8 @@ run.sequential("real receiving custody commands and normal inventory recognition
     finally { await harness?.dispose(); }
   });
   function descriptor(command: ReceivingCustodyCommand, id: number, body: unknown, key: string, actorId: string): FinancialCommandDescriptor {
-    return { ...scope(command, id), actorType: "user", actorId, idempotencyKey: key,
-      requestHash: createHash("sha256").update(canonicalJson(body)).digest("hex"), contractVersion: 1 };
+    return { ...scope(), actorType: "service", actorId: "procurement.receiving-custody", idempotencyKey: key,
+      requestHash: identityHash({ command, resourceId: id, body, actorId }), contractVersion: 1 };
   }
   async function execute(command: ReceivingCustodyCommand, id: number, body: unknown, key: string = randomUUID(), actorId = ACTOR) {
     return commands.execute(command, id, body, actorId, descriptor(command, id, body, key, actorId));
@@ -56,7 +58,7 @@ run.sequential("real receiving custody commands and normal inventory recognition
   async function success(command: ReceivingCustodyCommand, id: number, body: unknown, key?: string): Promise<ReceivingQuarantineCommandResult> {
     const result = await execute(command, id, body, key);
     expect(result, JSON.stringify(result.body)).toMatchObject({ httpStatus: 200, terminalState: "succeeded" });
-    return receivingQuarantineCommandResultSchema.parse(result.body);
+    return verifiedCustodyResultSchema.parse(result.body);
   }
   async function receipt() {
     const created = await harness.receiving.createOrder({ sourceType: "blind", warehouseId: 1 }, ACTOR);
@@ -115,6 +117,23 @@ run.sequential("real receiving custody commands and normal inventory recognition
     const replay = await execute("intake", source.order.id, body, key);
     expect(replay).toMatchObject({ replayed: true, body: first.body });
     await expect(execute("intake", source.order.id, unknownBody(6), key)).rejects.toMatchObject({ code: "FINANCIAL_COMMAND_IDEMPOTENCY_KEY_REUSED" });
+    expect((await harness.pool.query("SELECT count(*)::int AS n FROM procurement.receiving_quarantine_observations WHERE receiving_order_id=$1", [source.order.id])).rows[0].n).toBe(1);
+  });
+  it("prevents another authorized actor from executing the same unidentified-intake key", async () => {
+    const source = await receipt(); const key = randomUUID(); const body = unknownBody();
+    const before = await stock();
+    const first = await execute("intake", source.order.id, body, key, ACTOR);
+    await expect(execute("intake", source.order.id, body, key, "custody-inventory")).rejects.toMatchObject({ code: "FINANCIAL_COMMAND_IDEMPOTENCY_KEY_REUSED" });
+    expect(await execute("intake", source.order.id, body, key, ACTOR)).toMatchObject({ replayed: true, body: first.body });
+    expect((await harness.pool.query("SELECT count(*)::int AS n FROM procurement.receiving_quarantine_observations WHERE receiving_order_id=$1", [source.order.id])).rows[0].n).toBe(1);
+    expect(await stock()).toEqual(before);
+  });
+  it("rejects legacy observation evidence under a reused key without another intake", async () => {
+    const source = await receipt(); const key = randomUUID(); const body = unknownBody();
+    const { executeReceivingCustodyCommand } = await import("../../receiving-quarantine.service");
+    await harness.database.transaction(tx => executeReceivingCustodyCommand(tx, harness.receiving, { command: "intake", resourceId: source.order.id, body,
+      actorId: ACTOR, at: FLOW_AT, commandKey: key }));
+    await expect(execute("intake", source.order.id, body, key, "custody-inventory")).rejects.toMatchObject({ code: "RECEIVING_CUSTODY_LEGACY_RECOVERY_REQUIRED" });
     expect((await harness.pool.query("SELECT count(*)::int AS n FROM procurement.receiving_quarantine_observations WHERE receiving_order_id=$1", [source.order.id])).rows[0].n).toBe(1);
   });
   it("prepares partial unidentified acceptance without stock, then cancels it without deleting its source", async () => {

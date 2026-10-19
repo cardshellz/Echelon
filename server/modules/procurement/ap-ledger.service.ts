@@ -1,3 +1,6 @@
+import { paymentApplicationInputSchema, paymentCalendarDateSchema, type PaymentApplicationInput } from "@shared/procurement/ap-payment-contract";
+import { readPaymentBalances } from "./ap-payment-balance.repository";
+import { readCommandAuthorityActor } from "../identity/infrastructure/command-authority.repository";
 import { readShipmentBillingOwnership, readInvoiceSourceCapabilities } from "./shipment-billing-ownership.repository";
 import { readPoFinancialEvidenceSourcesWithClient } from "./po-financial-evidence.repository";
 import { buildPoFinancialWorkflow } from "./domain/po-financial-workflow";
@@ -33,7 +36,7 @@ import {
   auditEvents,
   poStatusHistory,
 } from "@shared/schema";
-import { eq, and, inArray, sql, desc, lt, lte, gte, ne, asc, like } from "drizzle-orm";
+import { eq, and, inArray, sql, desc, lt, lte, gte, ne, asc, like, type SQL } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
 import { format } from "date-fns";
 import {
@@ -380,11 +383,13 @@ export type ApLedgerCommand =
   | "dispute_invoice"
   | "void_invoice"
   | "record_payment"
+  | "apply_payment"
   | "void_payment";
 
 export type RecordApPaymentInput = {
   vendorId: number;
   paymentDate: Date;
+  paymentCalendarDate?: string | null;
   paymentMethod: string;
   referenceNumber?: string;
   checkNumber?: string;
@@ -403,6 +408,8 @@ export type ApLedgerCommandInput = {
   reason?: string;
   userId?: string;
   payment?: RecordApPaymentInput;
+  application?: PaymentApplicationInput;
+  now?: Date;
 };
 
 export type ApLedgerCommandOutcome = {
@@ -1178,6 +1185,8 @@ export async function getInvoiceById(id: number) {
         appliedAmountCents: apPaymentAllocations.appliedAmountCents,
         paymentNumber: apPayments.paymentNumber,
         paymentDate: apPayments.paymentDate,
+        paymentCalendarDate: apPayments.paymentCalendarDate,
+        paymentDateSource: sql<"recorded_calendar_date" | "legacy_timestamp">`CASE WHEN ${apPayments.paymentCalendarDate} IS NULL THEN 'legacy_timestamp' ELSE 'recorded_calendar_date' END`,
         paymentMethod: apPayments.paymentMethod,
         paymentStatus: apPayments.status,
         referenceNumber: apPayments.referenceNumber,
@@ -1825,6 +1834,8 @@ export async function getPaymentsForPo(purchaseOrderId: number) {
       vendorInvoiceId: apPaymentAllocations.vendorInvoiceId,
       invoiceNumber: vendorInvoices.invoiceNumber,
       paymentDate: apPayments.paymentDate,
+        paymentCalendarDate: apPayments.paymentCalendarDate,
+        paymentDateSource: sql<"recorded_calendar_date" | "legacy_timestamp">`CASE WHEN ${apPayments.paymentCalendarDate} IS NULL THEN 'legacy_timestamp' ELSE 'recorded_calendar_date' END`,
       paymentMethod: apPayments.paymentMethod,
       paymentStatus: apPayments.status,
       referenceNumber: apPayments.referenceNumber,
@@ -1868,7 +1879,13 @@ function validateRecordPaymentInput(data: RecordApPaymentInput): void {
       code: "AP_PAYMENT_DATE_INVALID",
     });
   }
-  if (!data.paymentMethod?.trim() || data.paymentMethod.length > 20) {
+  if (data.paymentCalendarDate != null) {
+    const date = paymentCalendarDateSchema.safeParse(data.paymentCalendarDate);
+    if (!date.success || data.paymentDate.toISOString() !== `${date.data}T00:00:00.000Z`) {
+      throw new ApLedgerError("paymentCalendarDate must agree with its canonical payment date", 400, { code: "AP_PAYMENT_DATE_INVALID" });
+    }
+  }
+  if (typeof data.paymentMethod !== "string" || !data.paymentMethod.trim() || data.paymentMethod.length > 20) {
     throw new ApLedgerError("paymentMethod must be between 1 and 20 characters", 400, {
       code: "AP_PAYMENT_METHOD_INVALID",
     });
@@ -1879,8 +1896,17 @@ function validateRecordPaymentInput(data: RecordApPaymentInput): void {
     });
   }
 
+  for (const [field, maximum] of [["referenceNumber", 100], ["checkNumber", 50], ["bankAccountLabel", 100]] as const) {
+    const value = data[field];
+    if (value != null && (typeof value !== "string" || value.length > maximum))
+      throw new ApLedgerError(`${field} must be text with no more than ${maximum} characters`, 400, { code: "AP_PAYMENT_METADATA_INVALID", field });
+  }
+  if (data.notes != null && typeof data.notes !== "string") throw new ApLedgerError("notes must be text", 400, { code: "AP_PAYMENT_METADATA_INVALID", field: "notes" });
+  if (!Array.isArray(data.allocations)) throw new ApLedgerError("allocations must be an array", 400, { code: "AP_PAYMENT_ALLOCATION_INVALID" });
   const seenInvoiceIds = new Set<number>();
   for (const allocation of data.allocations) {
+    if (!allocation || typeof allocation !== "object") throw new ApLedgerError("Every allocation must identify an invoice and amount", 400, { code: "AP_PAYMENT_ALLOCATION_INVALID" });
+    if (allocation.notes != null && typeof allocation.notes !== "string") throw new ApLedgerError("Allocation notes must be text", 400, { code: "AP_PAYMENT_METADATA_INVALID", field: "allocations.notes" });
     if (!Number.isSafeInteger(allocation.vendorInvoiceId) || allocation.vendorInvoiceId <= 0) {
       throw new ApLedgerError("Each allocation must reference a valid vendor invoice", 400, {
         code: "AP_PAYMENT_ALLOCATION_INVOICE_INVALID",
@@ -1912,7 +1938,7 @@ function validateRecordPaymentInput(data: RecordApPaymentInput): void {
 
 async function lockAndValidatePaymentInvoices(
   tx: ApLedgerDbClient,
-  data: RecordApPaymentInput,
+  data: Pick<RecordApPaymentInput, "vendorId" | "allocations">,
   paymentCurrency: string,
 ): Promise<void> {
   if (data.allocations.length === 0) return;
@@ -1991,6 +2017,8 @@ async function recordPaymentInTransaction(
         paymentNumber,
         vendorId: data.vendorId,
         paymentDate: data.paymentDate,
+        // Legacy Date callers remain explicitly unverified; only date-only input supplies this field.
+        paymentCalendarDate: data.paymentCalendarDate ?? null,
         paymentMethod: data.paymentMethod,
         referenceNumber: data.referenceNumber,
         checkNumber: data.checkNumber,
@@ -2057,34 +2085,20 @@ export async function recordPayment(data: RecordApPaymentInput) {
 }
 
 export async function getPaymentById(id: number) {
-  const [payment] = await db
-    .select({
-      payment: apPayments,
-      vendorName: vendors.name,
-      vendorCode: vendors.code,
-    })
-    .from(apPayments)
-    .leftJoin(vendors, eq(apPayments.vendorId, vendors.id))
-    .where(eq(apPayments.id, id));
-
-  if (!payment) return null;
-
-  const allocations = await db
-    .select({
-      id: apPaymentAllocations.id,
-      vendorInvoiceId: apPaymentAllocations.vendorInvoiceId,
-      appliedAmountCents: apPaymentAllocations.appliedAmountCents,
-      notes: apPaymentAllocations.notes,
-      invoiceNumber: vendorInvoices.invoiceNumber,
-      invoiceDate: vendorInvoices.invoiceDate,
-      invoicedAmountCents: vendorInvoices.invoicedAmountCents,
-      balanceCents: vendorInvoices.balanceCents,
-    })
-    .from(apPaymentAllocations)
-    .innerJoin(vendorInvoices, eq(apPaymentAllocations.vendorInvoiceId, vendorInvoices.id))
-    .where(eq(apPaymentAllocations.apPaymentId, id));
-
-  return { ...payment.payment, vendorName: payment.vendorName, vendorCode: payment.vendorCode, allocations };
+  return db.transaction(async tx => {
+    const [record] = await tx.select({ payment: apPayments, vendorName: vendors.name, vendorCode: vendors.code })
+      .from(apPayments).leftJoin(vendors, eq(apPayments.vendorId, vendors.id)).where(eq(apPayments.id, id));
+    if (!record) return null;
+    const allocations = await tx.select({ id: apPaymentAllocations.id, vendorInvoiceId: apPaymentAllocations.vendorInvoiceId,
+      appliedAmountCents: apPaymentAllocations.appliedAmountCents, notes: apPaymentAllocations.notes,
+      invoiceNumber: vendorInvoices.invoiceNumber, invoiceDate: vendorInvoices.invoiceDate,
+      invoicedAmountCents: vendorInvoices.invoicedAmountCents, balanceCents: vendorInvoices.balanceCents,
+    }).from(apPaymentAllocations).leftJoin(vendorInvoices, eq(apPaymentAllocations.vendorInvoiceId, vendorInvoices.id))
+      .where(eq(apPaymentAllocations.apPaymentId, id)).orderBy(apPaymentAllocations.id);
+    const paymentBalance = (await readPaymentBalances(tx, [record.payment])).get(id)!;
+    return { ...record.payment, vendorName: record.vendorName, vendorCode: record.vendorCode, allocations, paymentBalance,
+      paymentDateSource: record.payment.paymentCalendarDate === null ? "legacy_timestamp" : "recorded_calendar_date" };
+  }, { isolationLevel: "repeatable read", accessMode: "read only" });
 }
 
 export function listPaymentWorkList(query: PaymentWorkListQuery): Promise<PaymentWorkListPage> {
@@ -2100,7 +2114,7 @@ export async function listPayments(filters: {
   limit?: number;
   offset?: number;
 }) {
-  const conditions = [];
+  const conditions: SQL[] = [];
 
   if (filters.vendorId) conditions.push(eq(apPayments.vendorId, filters.vendorId));
   if (filters.status) {
@@ -2111,8 +2125,8 @@ export async function listPayments(filters: {
   if (filters.dateFrom) conditions.push(gte(apPayments.paymentDate, filters.dateFrom));
   if (filters.dateTo) conditions.push(lte(apPayments.paymentDate, filters.dateTo));
 
-  return db
-    .select({
+  return db.transaction(async tx => {
+    const rows = await tx.select({
       payment: apPayments,
       vendorName: vendors.name,
       vendorCode: vendors.code,
@@ -2123,6 +2137,10 @@ export async function listPayments(filters: {
     .orderBy(desc(apPayments.paymentDate))
     .limit(filters.limit ?? 200)
     .offset(filters.offset ?? 0);
+    const balances = await readPaymentBalances(tx, rows.map(row => row.payment));
+    return rows.map(row => ({ ...row, payment: { ...row.payment,
+      paymentBalance: balances.get(row.payment.id)!, paymentDateSource: row.payment.paymentCalendarDate === null ? "legacy_timestamp" : "recorded_calendar_date" } }));
+  }, { isolationLevel: "repeatable read", accessMode: "read only" });
 }
 
 async function voidPaymentInTransaction(
@@ -2188,10 +2206,10 @@ function requireCommandId(value: number | undefined, field: string): number {
 }
 
 function requireCommandReason(reason: string | undefined): string {
-  if (!reason?.trim()) {
-    throw new ApLedgerError("reason is required");
+  if (typeof reason !== "string" || !reason.trim() || reason.length > 2000) {
+    throw new ApLedgerError("reason must contain between 1 and 2000 characters", 400, { code: "AP_COMMAND_REASON_INVALID" });
   }
-  return reason;
+  return reason.trim();
 }
 
 export type ApInvoiceFinancialCommand =
@@ -2245,7 +2263,74 @@ export async function runApInvoiceCommandPostCommit(
   await runPoFinancialDetectionHooksForMany(outcome.affectedPurchaseOrderIds);
 }
 
-export type ApPaymentFinancialCommand = "record_payment" | "void_payment";
+/** Apply already-recorded cash. Application rows are append-only, including repeated invoice targets. */
+async function applyRecordedPaymentInTransaction(tx: ApLedgerDbClient, paymentId: number, input: ApLedgerCommandInput) {
+  const parsed = paymentApplicationInputSchema.safeParse(input.application);
+  if (!parsed.success) throw new ApLedgerError("Review the payment application amounts and reason.", 400,
+    { code: "AP_PAYMENT_APPLICATION_INVALID", issues: parsed.error.issues });
+  const application = parsed.data;
+  const at = input.now;
+  if (!(at instanceof Date) || !Number.isFinite(at.getTime())) throw new Error("Payment application requires an injected valid command time.");
+  const actorId = input.userId;
+  if (!actorId) throw new ApLedgerError("An authenticated operator is required.", 403, { code: "AP_PAYMENT_AUTHORITY_REQUIRED" });
+  const [payment] = await tx.select().from(apPayments).where(eq(apPayments.id, paymentId)).for("update");
+  if (!payment) throw new ApLedgerError("Payment not found.", 404, { code: "AP_PAYMENT_NOT_FOUND" });
+  const before = (await readPaymentBalances(tx, [payment])).get(paymentId)!;
+  if (before.state === "review_required") throw new ApLedgerError(before.issue!.message, 409, { code: before.issue!.code });
+  if (before.version !== application.expectedVersion) throw new ApLedgerError("Payment evidence changed. Reload its balance and review the application.", 409, { code: "AP_PAYMENT_VERSION_CONFLICT" });
+  if (before.state !== "available") throw new ApLedgerError("This payment has no available funds to apply.", 409, { code: "AP_PAYMENT_NO_AVAILABLE_FUNDS" });
+  const requestedTotal = application.allocations.reduce((sum, row) => sum + BigInt(row.appliedAmountCents), BigInt(0));
+  if (requestedTotal > BigInt(before.unappliedAmountCents!)) throw new ApLedgerError("Applications exceed the payment's remaining funds.", 409, { code: "AP_PAYMENT_APPLICATION_EXCEEDS_REMAINDER" });
+  const allocations = [...application.allocations].sort((a, b) => a.vendorInvoiceId - b.vendorInvoiceId);
+  await lockAndValidatePaymentInvoices(tx, { vendorId: payment.vendorId, allocations }, payment.currency);
+  // Cached balances are not spending authority. Check them against immutable settlement evidence while invoice locks are held.
+  const targetIds = allocations.map(row => row.vendorInvoiceId);
+  const targets = await tx.select().from(vendorInvoices).where(inArray(vendorInvoices.id, targetIds)).orderBy(vendorInvoices.id);
+  for (const invoice of targets) {
+    const evidence = await tx.select({ payment: apPayments, appliedAmountCents: apPaymentAllocations.appliedAmountCents })
+      .from(apPaymentAllocations).leftJoin(apPayments, eq(apPayments.id, apPaymentAllocations.apPaymentId))
+      .where(eq(apPaymentAllocations.vendorInvoiceId, invoice.id)).orderBy(apPaymentAllocations.id);
+    let effectivePaid = BigInt(0);
+    for (const row of evidence) {
+      if (!row.payment || !["completed", "voided"].includes(row.payment.status) || row.payment.vendorId !== invoice.vendorId
+        || row.payment.currency !== invoice.currency || !Number.isSafeInteger(row.appliedAmountCents) || row.appliedAmountCents <= 0)
+        throw new ApLedgerError("Invoice settlement evidence requires review before applying funds.", 409, { code: "AP_INVOICE_PAYMENT_EVIDENCE_REVIEW", invoiceId: invoice.id });
+      if (row.payment.status === "completed") effectivePaid += BigInt(row.appliedAmountCents);
+    }
+    const sourcePayments = [...new Map(evidence.filter(row => row.payment).map(row => [row.payment!.id, row.payment!])).values()];
+    const sourceBalances = await readPaymentBalances(tx, sourcePayments);
+    if ([...sourceBalances.values()].some(balance => balance.state === "review_required"))
+      throw new ApLedgerError("Invoice settlement relies on a payment that requires review.", 409, { code: "AP_INVOICE_PAYMENT_EVIDENCE_REVIEW", invoiceId: invoice.id });
+    if (![invoice.invoicedAmountCents, invoice.paidAmountCents, invoice.balanceCents].every(value => Number.isSafeInteger(value) && value >= 0))
+      throw new ApLedgerError("Invoice amounts require review before applying funds.", 409, { code: "AP_INVOICE_PAYMENT_EVIDENCE_REVIEW", invoiceId: invoice.id });
+    const amount = BigInt(invoice.invoicedAmountCents);
+    const cachedPaid = BigInt(invoice.paidAmountCents);
+    const cachedBalance = BigInt(invoice.balanceCents);
+    if (effectivePaid > amount) throw new ApLedgerError("Invoice applications exceed its amount.", 409, { code: "AP_INVOICE_PAYMENT_EVIDENCE_REVIEW", invoiceId: invoice.id });
+    const projectedStatus = deriveInvoiceFinancialState({ status: invoice.status, invoiceAmountCents: invoice.invoicedAmountCents, paidAmountCents: Number(effectivePaid) }).status;
+    if (effectivePaid > amount || cachedPaid !== effectivePaid || cachedBalance !== amount - effectivePaid || projectedStatus !== invoice.status)
+      throw new ApLedgerError("Invoice balance does not agree with recorded applications. Review its evidence before applying funds.", 409,
+        { code: "AP_INVOICE_PAYMENT_EVIDENCE_REVIEW", invoiceId: invoice.id });
+  }
+  const applications = await tx.insert(apPaymentAllocations).values(allocations.map(row => ({ apPaymentId: paymentId,
+    vendorInvoiceId: row.vendorInvoiceId, appliedAmountCents: row.appliedAmountCents, notes: application.reason, createdAt: at })))
+    .returning({ allocationId: apPaymentAllocations.id, vendorInvoiceId: apPaymentAllocations.vendorInvoiceId, appliedAmountCents: apPaymentAllocations.appliedAmountCents });
+  const poIds = new Set<number>();
+  for (const row of allocations) {
+    await recalculateInvoiceBalance(row.vendorInvoiceId, tx, at);
+    for (const poId of await getPoIdsForInvoice(row.vendorInvoiceId, tx)) poIds.add(poId);
+  }
+  await recomputePoFinancialAggregatesForMany(poIds, tx, { actorId, reason: `Existing payment ${paymentId} applied. ${application.reason}`, now: at });
+  const after = (await readPaymentBalances(tx, [payment])).get(paymentId)!;
+  if (after.state === "review_required") throw new Error("Payment application produced inconsistent balance evidence.");
+  const apLedgerOutcome = buildApLedgerOutcome({ command: "apply_payment", entityType: "payment", entityId: paymentId,
+    affectedInvoiceIds: targetIds, affectedPaymentIds: [paymentId], affectedPurchaseOrderIds: [...poIds] });
+  await appendApMutationAudit("apply_payment", `payment:${paymentId}`, actorId,
+    { ...apLedgerOutcome, reason: application.reason, before, after, applications }, tx, at);
+  return { applications, paymentBalance: after, apLedgerOutcome };
+}
+
+export type ApPaymentFinancialCommand = "record_payment" | "apply_payment" | "void_payment";
 
 /**
  * Apply a cash-moving AP command using the caller's transaction. The payment,
@@ -2259,6 +2344,10 @@ export async function executeApPaymentCommandInTransaction(
 ) {
   await lockInventoryCostGraph(tx as any);
   const actor = input.userId ?? input.payment?.createdBy;
+  if (!actor) throw new ApLedgerError("An authenticated operator is required.", 403, { code: "AP_PAYMENT_AUTHORITY_REQUIRED" });
+  const authority = await readCommandAuthorityActor(tx, actor);
+  if (!authority.active || !authority.permissions.includes("purchasing:approve"))
+    throw new ApLedgerError("Current purchasing approval permission is required for payment commands.", 403, { code: "AP_PAYMENT_AUTHORITY_REQUIRED" });
 
   if (command === "record_payment") {
     if (!input.payment) throw new ApLedgerError("payment is required");
@@ -2275,10 +2364,16 @@ export async function executeApPaymentCommandInTransaction(
       affectedPurchaseOrderIds: mutation.affectedPoIds,
     });
     await appendApLedgerCommandAudit(outcome, actor, tx);
-    return attachApLedgerOutcome(mutation.value, outcome);
+    const applications = await tx.select({ allocationId: apPaymentAllocations.id, vendorInvoiceId: apPaymentAllocations.vendorInvoiceId,
+      appliedAmountCents: apPaymentAllocations.appliedAmountCents }).from(apPaymentAllocations)
+      .where(eq(apPaymentAllocations.apPaymentId, mutation.value.id)).orderBy(apPaymentAllocations.id);
+    const paymentBalance = (await readPaymentBalances(tx, [mutation.value])).get(mutation.value.id)!;
+    return attachApLedgerOutcome({ ...mutation.value, applications, paymentBalance,
+      paymentDateSource: mutation.value.paymentCalendarDate == null ? "legacy_timestamp" : "recorded_calendar_date" }, outcome);
   }
 
   const paymentId = requireCommandId(input.paymentId, "paymentId");
+  if (command === "apply_payment") return applyRecordedPaymentInTransaction(tx, paymentId, input);
   const affectedInvoiceIds = await getInvoiceIdsForPayment(paymentId, tx);
   const mutation = await voidPaymentInTransaction(
     tx,
@@ -2295,7 +2390,7 @@ export async function executeApPaymentCommandInTransaction(
     affectedPurchaseOrderIds: mutation.affectedPoIds,
   });
   await appendApLedgerCommandAudit(outcome, actor, tx);
-  return { ok: true, apLedgerOutcome: outcome };
+  return { ok: true, status: "voided" as const, apLedgerOutcome: outcome };
 }
 
 export async function runApPaymentCommandPostCommit(
@@ -2417,6 +2512,8 @@ export async function getApSummary(options: { now?: Date } = {}) {
       paymentNumber: apPayments.paymentNumber,
       vendorName: vendors.name,
       paymentDate: apPayments.paymentDate,
+        paymentCalendarDate: apPayments.paymentCalendarDate,
+        paymentDateSource: sql<"recorded_calendar_date" | "legacy_timestamp">`CASE WHEN ${apPayments.paymentCalendarDate} IS NULL THEN 'legacy_timestamp' ELSE 'recorded_calendar_date' END`,
       paymentMethod: apPayments.paymentMethod,
       totalAmountCents: apPayments.totalAmountCents,
       status: apPayments.status,

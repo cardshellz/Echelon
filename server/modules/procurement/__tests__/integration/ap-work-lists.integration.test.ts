@@ -6,7 +6,7 @@ import { fixtureForeignKeys, fixtureTable, qualifiedTable } from "./shipment-lin
 
 const url = process.env.ECHELON_TEST_DATABASE_URL;
 const databaseTests = url && process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true" ? describe : describe.skip;
-const tables = [schema.vendors, schema.vendorInvoices, schema.purchaseOrders, schema.vendorInvoicePoLinks, schema.apPayments];
+const tables = [schema.vendors, schema.vendorInvoices, schema.purchaseOrders, schema.vendorInvoicePoLinks, schema.apPayments, schema.apPaymentAllocations];
 databaseTests.sequential("AP work lists with real PostgreSQL", () => {
   let pool: pg.Pool; let modulePool: pg.Pool; let ownsSchema = false;
   let repository: typeof import("../../ap-work-list.repository");
@@ -129,6 +129,45 @@ databaseTests.sequential("AP work lists with real PostgreSQL", () => {
       expect(deleted).toBe(true); expect(page.total).toBe(265); expect(page.items[0].id).toBe(265);
       expect((await pool.query("SELECT count(*)::int AS count FROM procurement.vendor_invoices")).rows[0].count).toBe(264);
     } finally { modulePool.connect = connect; }
+  });
+
+  it("shows exact remaining funds from repeated applications and preserves unverified legacy dates", async () => {
+    await pool.query(`INSERT INTO procurement.ap_payment_allocations(ap_payment_id,vendor_invoice_id,applied_amount_cents)
+      VALUES(265,265,2000),(265,265,3000);
+      UPDATE procurement.ap_payments SET payment_calendar_date='2026-10-01' WHERE id=265`);
+    const page = await payments();
+    expect(page.items[0]).toMatchObject({ id: 265, paymentCalendarDate: "2026-10-01", paymentDateSource: "recorded_calendar_date",
+      paymentBalance: { state: "available", appliedAmountCents: 5000, unappliedAmountCents: 5000 } });
+    expect(page.items[1]).toMatchObject({ paymentCalendarDate: null, paymentDateSource: "legacy_timestamp",
+      paymentBalance: { state: "available", appliedAmountCents: 0, unappliedAmountCents: 10000 } });
+    await pool.query("INSERT INTO procurement.ap_payment_allocations(ap_payment_id,vendor_invoice_id,applied_amount_cents) VALUES(265,1,1)");
+    expect((await payments()).items[0].paymentBalance).toMatchObject({ state: "review_required", appliedAmountCents: null, unappliedAmountCents: null });
+  });
+
+  it("reads payment headers and allocation balances from one snapshot during a concurrent application", async () => {
+    const connect = modulePool.connect;
+    let applied = false;
+    modulePool.connect = (async () => {
+      const client = await pool.connect();
+      const query = client.query.bind(client), release = client.release.bind(client);
+      client.query = (async (...args: any[]) => {
+        const result = await (query as any)(...args);
+        const text = typeof args[0] === "string" ? args[0] : args[0]?.text;
+        if (!applied && text?.includes("count(*)") && text.includes("ap_payments")) {
+          applied = true;
+          await pool.query("INSERT INTO procurement.ap_payment_allocations(ap_payment_id,vendor_invoice_id,applied_amount_cents) VALUES(265,265,4000)");
+        }
+        return result;
+      }) as any;
+      client.release = (...args: any[]) => { client.query = query as any; release(...args); };
+      return client;
+    }) as any;
+    try {
+      const page = await payments();
+      expect(applied).toBe(true);
+      expect(page.items[0].paymentBalance).toMatchObject({ appliedAmountCents: 0, unappliedAmountCents: 10000 });
+    } finally { modulePool.connect = connect; }
+    expect((await payments()).items[0].paymentBalance).toMatchObject({ appliedAmountCents: 4000, unappliedAmountCents: 6000 });
   });
 
 });

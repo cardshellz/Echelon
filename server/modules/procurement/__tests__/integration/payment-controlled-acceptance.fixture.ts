@@ -126,6 +126,10 @@ export class PaymentAcceptanceFixture {
       await this.pool.query(readFileSync(resolve(process.cwd(), "migrations", migration), "utf8"));
     }
 
+    // Start from the pre-upgrade shape so ADD COLUMN is exercised, not skipped.
+    await this.pool.query("ALTER TABLE procurement.ap_payments DROP COLUMN payment_calendar_date");
+    await this.pool.query(readFileSync(resolve(process.cwd(), "docs/procurement/payment-balance-completion.pending.sql"), "utf8"));
+
     const priorDatabase = process.env.DATABASE_URL;
     const priorExternal = process.env.EXTERNAL_DATABASE_URL;
     delete process.env.DATABASE_URL;
@@ -167,8 +171,20 @@ export class PaymentAcceptanceFixture {
 
   async reset(): Promise<void> {
     if (this.ownedSchemas.length !== SCHEMAS.length || !this.ownsPublicTables) throw new Error("Payment fixture ownership is incomplete");
-    await this.pool.query(`TRUNCATE ${TABLES.map(qualifiedTable).join(",")},
-      public.audit_events,public.financial_command_recoveries,public.financial_command_results RESTART IDENTITY CASCADE`);
+    // These tables belong solely to this disposable fixture. Production guards
+    // remain enabled during every command; reset is one atomic fixture operation.
+    const reset = await this.pool.connect();
+    try {
+      await reset.query("BEGIN");
+      await reset.query("ALTER TABLE procurement.ap_payments DISABLE TRIGGER USER; ALTER TABLE procurement.ap_payment_allocations DISABLE TRIGGER USER");
+      await reset.query(`TRUNCATE ${TABLES.map(qualifiedTable).join(",")},
+        public.audit_events,public.financial_command_recoveries,public.financial_command_results RESTART IDENTITY CASCADE`);
+      await reset.query("ALTER TABLE procurement.ap_payments ENABLE TRIGGER USER; ALTER TABLE procurement.ap_payment_allocations ENABLE TRIGGER USER");
+      await reset.query("COMMIT");
+    } catch (error) {
+      await reset.query("ROLLBACK");
+      throw error;
+    } finally { reset.release(); }
     await new Promise<void>((done, reject) => this.sessionStore.clear((error) => error ? reject(error) : done()));
     await this.pool.query(`
       INSERT INTO identity.users(id,username,password,role,active) VALUES

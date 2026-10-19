@@ -1965,6 +1965,8 @@ export const apPayments = procurementSchema.table("ap_payments", {
   vendorId: integer("vendor_id").notNull().references(() => vendors.id),
 
   paymentDate: timestamp("payment_date").notNull(),
+  // New date-only input is authoritative; historical timestamps are not reinterpreted.
+  paymentCalendarDate: date("payment_calendar_date"),
   paymentMethod: varchar("payment_method", { length: 20 }).notNull(), // ach, check, wire, credit_card, other
   referenceNumber: varchar("reference_number", { length: 100 }), // ACH trace, wire ref, etc.
   checkNumber: varchar("check_number", { length: 50 }),
@@ -1989,6 +1991,7 @@ export const apPayments = procurementSchema.table("ap_payments", {
   uniqueIndex("ap_payments_payment_number_active_uidx").on(table.paymentNumber).where(sql`voided_at IS NULL`),
   check("ap_payments_currency_usd_chk", sql`${table.currency} = 'USD'`),
   check("ap_payments_recorded_status_check", sql`${table.status} IN ('completed', 'voided')`),
+  check("ap_payment_calendar_date_matches_timestamp", sql`${table.paymentCalendarDate} IS NULL OR ${table.paymentDate} = ${table.paymentCalendarDate}::timestamp`),
 ]);
 
 export const insertApPaymentSchema = createInsertSchema(apPayments).omit({
@@ -2014,7 +2017,7 @@ export const apPaymentAllocations = procurementSchema.table("ap_payment_allocati
   notes: text("notes"),
   createdAt: timestamp("created_at").defaultNow().notNull(),
 }, (table) => [
-  uniqueIndex("ap_payment_allocations_pay_inv_idx").on(table.apPaymentId, table.vendorInvoiceId),
+  index("ap_payment_allocations_pay_inv_lookup_idx").on(table.apPaymentId, table.vendorInvoiceId),
 ]);
 
 export const insertApPaymentAllocationSchema = createInsertSchema(apPaymentAllocations).omit({

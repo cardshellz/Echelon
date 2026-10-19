@@ -1,3 +1,4 @@
+import { paymentBalanceSchema, paymentCalendarDateSchema, paymentDateSourceSchema } from "./ap-payment-contract";
 import { z } from "zod";
 
 const id = z.number().int().positive().max(2_147_483_647);
@@ -31,7 +32,7 @@ export const invoiceWorkListItemSchema = z.object({
 }).strict();
 export const paymentWorkListItemSchema = z.object({
   id, vendorId: id, paymentNumber: z.string(), vendorName: z.string().nullable(), vendorCode: z.string().nullable(),
-  paymentDate: z.string().datetime(), paymentMethod: z.string(), referenceNumber: z.string().nullable(),
+  paymentDate: z.string().datetime(), paymentCalendarDate: paymentCalendarDateSchema.nullable(), paymentDateSource: paymentDateSourceSchema, paymentBalance: paymentBalanceSchema, paymentMethod: z.string(), referenceNumber: z.string().nullable(),
   checkNumber: z.string().nullable(), totalAmountCents: cents, currency: z.string(), status: z.string(),
 }).strict();
 const pageFields = { total: z.number().int().nonnegative().safe(), limit: z.number().int().min(1).max(100), offset: z.number().int().nonnegative().safe(), nextOffset: z.number().int().nonnegative().safe().nullable() };

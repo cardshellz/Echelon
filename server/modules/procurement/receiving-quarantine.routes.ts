@@ -6,7 +6,7 @@ import { financialCommandFromRequest } from "../../platform/commands/http-comman
 import { FinancialCommandError } from "../../platform/commands/transactional-command.service";
 import { logger } from "../../platform/observability";
 import { ReceivingQuarantineError } from "./domain/receiving-quarantine";
-import { createReceivingCustodyCommands, custodyCommandScope } from "./receiving-quarantine.commands";
+import { createReceivingCustodyCommands, custodyCommandScope, custodyCommandRoute, CUSTODY_COMMAND_PRINCIPAL, hashCustodyCommandIdentity } from "./receiving-quarantine.commands";
 import { readReceivingQuarantineView, type ReceivingCustodyCommand } from "./receiving-quarantine.service";
 import { custodyOptionsQuerySchema, readQuarantineAcceptanceOptions } from "./receiving-quarantine-options.repository";
 
@@ -55,13 +55,16 @@ export function registerReceivingQuarantineRoutes(app: Express): void {
     } catch (error) { return sendCustodyError(res, error); }
   });
   for (const command of ["intake", "prepare-acceptance", "return", "cancel-acceptance"] as const satisfies readonly ReceivingCustodyCommand[]) {
-    const route = custodyCommandScope(command, 1).routeTemplate;
+    const route = custodyCommandRoute(command);
     app.post(route, requireAuth, async (req, res) => {
       try {
         const id = requestId(command === "intake" ? req.params.orderId : req.params.observationId);
-        const descriptor = financialCommandFromRequest(req, custodyCommandScope(command, id));
+        const actorId = requestActor(req);
+        if (Object.keys(req.query).length) throw new ReceivingQuarantineError("RECEIVING_CUSTODY_INPUT_INVALID", "Quarantine commands do not accept query parameters.", 400);
+        const original = financialCommandFromRequest(req, { ...custodyCommandScope(), actorType: "service", actorId: CUSTODY_COMMAND_PRINCIPAL });
+        const descriptor = { ...original, requestHash: hashCustodyCommandIdentity({ command, resourceId: id, body: req.body, actorId }) };
         const commands = createReceivingCustodyCommands(req.app.locals.services.receiving);
-        const result = await commands.execute(command, id, req.body, descriptor.actorId, descriptor);
+        const result = await commands.execute(command, id, req.body, actorId, descriptor);
         res.setHeader("Idempotency-Replayed", result.replayed ? "true" : "false");
         return res.status(result.httpStatus).json(result.body);
       } catch (error) { return sendCustodyError(res, error); }
