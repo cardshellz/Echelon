@@ -177,6 +177,70 @@ test.describe("Procurement safety controls", () => {
 });
 
 test.describe("catalog conversion controls", () => {
+  test("an unchanged saved direction can be reviewed and applied without cancelling the editor", async ({ page }) => {
+    const state = await setup(page, { permission: "activate" });
+    state.view.draftModel!.paths = [...state.view.draftModel!.paths, { sourceVariantId: 3, destinationVariantId: 2,
+      sourceUnitsPerVariant: 800, destinationUnitsPerVariant: 20, inputQty: 1, outputQty: 40,
+      operationType: "break_pack", authorityState: "allowed", transformationRecipeBindingKey: null }];
+    await page.getByRole("button", { name: "Refresh test data" }).click();
+    const pair = page.getByRole("region", { name: "Conversion P20 to C800", exact: true });
+    await expect(pair.getByLabel("None", { exact: true })).toBeChecked();
+    await page.getByRole("button", { name: "Continue editing draft" }).click();
+    await expect(pair.getByLabel("Break down", { exact: true })).toBeChecked();
+    await expect(page.getByRole("button", { name: "Save draft", exact: true })).toBeDisabled();
+    await expect(page.getByRole("status")).toContainText("already saved in draft v2");
+
+    await page.route("**/api/inventory-planning/admin/product-definitions/review", route => route.fulfill({ json: {
+      selection: { productId: 17, draftModelId: 61, expectedHeadRevision: "4", expectedDefinitionHash: "a".repeat(64) },
+      reviewHash: "c".repeat(64), ready: true, authorityRevision: "2", activationRunId: "1",
+      previousModel: null, affectedProductIds: [17], blockers: [], atp: [], channels: [],
+    } }));
+    const applies: unknown[] = [];
+    let finishApply!: () => void;
+    const waitForApply = new Promise<void>(resolve => { finishApply = resolve; });
+    await page.route("**/api/inventory-planning/admin/product-definitions/apply", async route => {
+      applies.push(route.request().postDataJSON());
+      await waitForApply;
+      const receipt = { productId: 17, modelId: 61, appliedAt: "2026-10-19T12:00:00.000Z", appliedBy: "operator",
+        reviewHash: "c".repeat(64), publicationIds: [], alreadyApplied: false };
+      state.view.activeModel = { ...state.view.draftModel!, lifecycleStatus: "sealed" };
+      state.view.draftModel = null;
+      state.view.head = { revision: "5", activeModelId: 61, draftModelId: null };
+      await page.route("**/api/inventory-planning/admin/product-definitions/17/progress", progress => progress.fulfill({ json: { receipt, publications: [] } }));
+      await route.fulfill({ json: receipt });
+    });
+    await page.getByRole("button", { name: "Review draft changes" }).click();
+    await page.getByRole("button", { name: "Apply reviewed changes" }).click();
+    await expect(pair.getByLabel("None", { exact: true })).toBeDisabled();
+    await expect(page.getByRole("button", { name: "Cancel", exact: true })).toBeDisabled();
+    finishApply();
+    await expect(page.getByText("Rules applied", { exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Save draft", exact: true })).toHaveCount(0);
+    await expect(pair.getByLabel("Break down", { exact: true })).toBeChecked();
+    expect(applies).toHaveLength(1);
+    expect(state.writes).toEqual([]);
+    expect(state.errors).toEqual([]);
+  });
+
+  test("unsaved edits hide review, while saving explains how to activate the saved changes", async ({ page }) => {
+    const state = await setup(page, { permission: "activate" });
+    await page.getByRole("button", { name: "Continue editing draft" }).click();
+    await expect(page.getByRole("button", { name: "Review draft changes" })).toBeVisible();
+    const pair = page.getByRole("region", { name: "Conversion P20 to C800", exact: true });
+    await pair.getByLabel("Break down", { exact: true }).check();
+    await expect(page.getByRole("button", { name: "Save draft", exact: true })).toBeEnabled();
+    await expect(page.getByRole("button", { name: "Review draft changes" })).toHaveCount(0);
+    await page.getByRole("button", { name: "Save draft", exact: true }).click();
+    await expect(page.getByRole("status")).toContainText("Review and apply the saved draft below");
+    await expect(page.getByRole("button", { name: "Review draft changes" })).toBeVisible();
+    await page.getByRole("button", { name: "Continue editing draft" }).click();
+    await expect(pair.getByLabel("Break down", { exact: true })).toBeChecked();
+    await expect(page.getByRole("button", { name: "Save draft", exact: true })).toBeDisabled();
+    await expect(page.getByRole("button", { name: "Review draft changes" })).toBeVisible();
+    expect(state.writes).toHaveLength(1);
+    expect(state.errors).toEqual([]);
+  });
+
   test("reviews warehouse and channel quantities, then retries an uncertain Apply with the identical command", async ({ page }) => {
     const state = await setup(page, { permission: "activate" });
     const commands: unknown[] = [];
