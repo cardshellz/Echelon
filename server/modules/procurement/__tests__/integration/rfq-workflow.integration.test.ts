@@ -15,7 +15,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import * as schema from "@shared/schema";
 import { rfqConversionResultSchema, rfqWorkflowDetailSchema } from "@shared/procurement/rfq-workflow";
 import { hashHttpFinancialCommand } from "../../../../platform/commands/http-command";
-import type { FinancialCommandDescriptor } from "../../../../platform/commands/transactional-command.service";
+import { FinancialCommandError, type FinancialCommandDescriptor } from "../../../../platform/commands/transactional-command.service";
 import type { AutomaticRecommendationPoHandoffCommand } from "../../recommendation-po-handoff.service";
 import type { RfqWorkflowCommand } from "../../rfq-workflow.service";
 import { fixtureForeignKeys, fixtureTable, qualifiedTable } from "./shipment-line-fixture";
@@ -213,8 +213,22 @@ integration.sequential("RFQ quote revisions and real purchase-owner transaction"
     const workflow = await service.getDetail(10);
     const command: RfqWorkflowCommand = { operation: "release", rfqId: 10, body: { expectedVersion: workflow.version, reason: "Same operator request retried" } };
     const identity = descriptor(command);
-    const results = await Promise.all([commands.execute(command, actorId, identity), commands.execute(command, actorId, identity)]);
+    const attempts = await Promise.allSettled([
+      commands.execute(command, actorId, identity),
+      commands.execute(command, actorId, identity),
+    ]);
+    expect(attempts.some((attempt) => attempt.status === "fulfilled")).toBe(true);
+    // The duplicate may observe the durable reservation before its owner commits.
+    // That is an explicit retry response, not a second release or a failed replay.
+    // Wait for both attempts to settle before retrying the same completed intent.
+    const results = await Promise.all(attempts.map(async (attempt) => {
+      if (attempt.status === "fulfilled") return attempt.value;
+      expect(attempt.reason).toBeInstanceOf(FinancialCommandError);
+      expect(attempt.reason).toMatchObject({ code: "FINANCIAL_COMMAND_IN_PROGRESS", statusCode: 409 });
+      return commands.execute(command, actorId, identity);
+    }));
     expect(results.map((result) => result.httpStatus)).toEqual([200, 200]);
+    expect(results[0].commandId).toBe(results[1].commandId);
     expect(results[0].body).toEqual(results[1].body);
     expect(results.filter((result) => result.replayed)).toHaveLength(1);
     expect((await pool.query("SELECT count(*)::int AS count FROM public.audit_events WHERE actor=$1 AND action='purchase_rfq.reservation_released'", [actorId])).rows[0].count).toBe(1);

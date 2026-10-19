@@ -13,6 +13,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import * as schema from "@shared/schema";
 import { lockInventoryCostGraph } from "../../../inventory/infrastructure/cost-evidence.repository";
 import { isShipmentCostLinePosted } from "@shared/procurement/shipment-cost-workflow";
+import { projectPoLineLandedCosts } from "@shared/procurement/po-line-landed-cost";
 import { readPoShipmentCostSummary, readPoShipmentCosts } from "../../po-shipment-cost-summary.repository";
 import { installPreOpeningQuantityAuthorityFixture } from "../../../inventory/__tests__/fixtures/pre-opening-quantity-authority.fixture";
 import { receivingUnitVersion } from "../../receiving-unit-contract";
@@ -1279,8 +1280,14 @@ audit.sequential("receipt/AP/freight cost revisions with real owners", () => {
     expect(costs).toMatchObject({ supplier: { freightCents: 300, dutyCents: 200 },
       totals: { freightCents: 5300, dutyCents: 200, combinedCostCents: 27500 },
       summary: { reviewLines: 1, inventoryCosting: "review_required" },
-      lines: [{ lineId: recordedLine?.lineId, shipmentId: 1, status: "review_required", issues: [issue] }],
+      lines: [{ lineId: recordedLine?.lineId, purchaseOrderLineId: 21, shipmentId: 1, status: "review_required", issues: [issue] }],
     });
+    expect(projectPoLineLandedCosts({
+      poHeader: { totalCents: 22500, taxCents: 200, shippingCostCents: 300 },
+      poLines: [{ id: 21, orderQty: 200, lineTotalCents: 22000 }], costs,
+    })).toEqual({ status: "complete", poLevelAdjustmentCents: 500, lines: [
+      { purchaseOrderLineId: 21, pieces: 200, supplierCents: 22000, shipmentCents: 5000, totalCents: 27000 },
+    ] });
     expect(costs?.lines[0].applicationId).toBeGreaterThan(0);
     expect(costs?.lines[0].recordedAt).toBeTruthy();
     expect(await state()).toEqual(before);
