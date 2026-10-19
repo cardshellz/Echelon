@@ -114,7 +114,8 @@ export function mapOrderEditCodeLines(
     if (!matches.length) return null;
     const matched = matches.sort((a, b) => a.id.localeCompare(b.id))[0];
     used.add(matched.id);
-    lines.push({ ...evidence, id: matched.id });
+    const { replacesAutomaticDiscount: _replacement, ...price } = evidence;
+    lines.push({ ...price, id: matched.id });
   }
   return snapshot.lines.filter((line) => line.quantity > 0).length === used.size
     ? lines

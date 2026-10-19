@@ -546,6 +546,18 @@ export const orderEditQuoteSchema: z.ZodType<OrderEditQuote> = z
                 native.variantId === line.variantId &&
                 native.quantity === line.quantity &&
                 native.originalUnitPriceCents === line.retailCents &&
+                (!line.replacesAutomaticDiscount ||
+                  (native.originalLineId === null &&
+                    value.baseline.previewProductDiscounts?.some(
+                      (entry) =>
+                        entry.lineId === line.sourceId &&
+                        entry.automaticCents > 0,
+                    ) &&
+                    value.lines.some(
+                      (entry) =>
+                        entry.originalLineId === line.sourceId &&
+                        entry.quantity === 0,
+                    ))) &&
                 (line.preserveAutomaticDiscount
                   ? preservesAutomaticQuotePrice(value.baseline, line, native)
                   : native.totalCents === line.netCents) &&
@@ -628,7 +640,13 @@ export const orderEditQuoteSchema: z.ZodType<OrderEditQuote> = z
                   line.originalUnitPriceCents ===
                     original.originalUnitPriceCents &&
                   (line.quantity === 0
-                    ? sources.get(original.id)?.quantity === 0
+                    ? sources.get(original.id)?.quantity === 0 ||
+                      (proof.lines.some(
+                        (priced) => priced.sourceId === original.id,
+                      ) &&
+                        proof.lines
+                          .filter((priced) => priced.sourceId === original.id)
+                          .every((priced) => priced.replacesAutomaticDiscount))
                     : proof.lines.some(
                         (priced) =>
                           priced.id === line.calculatedLineId &&

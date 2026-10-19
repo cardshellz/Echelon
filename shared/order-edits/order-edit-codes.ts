@@ -104,6 +104,8 @@ export const orderEditCodePricingLineSchema = z
     netCents: z.number().int().nonnegative().safe(),
     /** The original automatic discount remains native; no manual adjustment may target this line. */
     preserveAutomaticDiscount: z.literal(true).optional(),
+    /** The same real variant replaces an original automatic-price line. */
+    replacesAutomaticDiscount: z.literal(true).optional(),
   })
   .strict()
   .refine(
@@ -115,6 +117,7 @@ export const orderEditCodePricingLineSchema = z
         line.quantity,
       ].every(Number.isSafeInteger) &&
       line.netCents <= line.productNetCents &&
+      !(line.preserveAutomaticDiscount && line.replacesAutomaticDiscount) &&
       (!line.preserveAutomaticDiscount ||
         line.netCents === line.productNetCents) &&
       BigInt(line.productNetCents) <=

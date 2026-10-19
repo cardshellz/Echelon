@@ -149,6 +149,17 @@ export class CustomerOrderEditService {
     await this.ownedScope(connectionId, omsOrderId);
     return this.rewardService().state(this.rewardScope());
   }
+  async manageRewards(connectionId: number, omsOrderId: number) {
+    await this.ownedScope(connectionId, omsOrderId);
+    return this.rewardService().manage(this.rewardScope());
+  }
+  async cancelReward(connectionId: number, omsOrderId: number, raw: unknown, commandKey: string) {
+    const input = z.object({ rewardId: z.string().uuid(), requestKey: z.string().uuid() }).strict().parse(raw);
+    if (input.requestKey !== z.string().uuid().parse(commandKey))
+      throw new OrderEditError("REWARD_KEY_MISMATCH", "The saved reward request does not match.", 400);
+    await this.ownedScope(connectionId, omsOrderId);
+    return this.rewardService().cancel({ ...this.rewardScope(), rewardId: input.rewardId });
+  }
   async issueReward(connectionId: number, omsOrderId: number, raw: unknown, commandKey: string) {
     const input = z.object({ points: z.number().int().positive().max(99_999_999), requestKey: z.string().uuid() }).strict().parse(raw);
     if (input.requestKey !== z.string().uuid().parse(commandKey))

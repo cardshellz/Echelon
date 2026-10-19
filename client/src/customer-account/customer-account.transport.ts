@@ -6,7 +6,7 @@ import { PreviewAccessError } from "@/lib/customer-return-preview";
 import { createOrderEditTransport } from "@/lib/order-edits";
 import { createCustomerReturnTransport } from "@/lib/customer-return-customer";
 import { ORDER_EDIT_PRICING_DISPLAY_HEADER, ORDER_EDIT_PRICING_DISPLAY_VERSION } from "@shared/order-edits/order-edit-financials";
-import { rewardWidgetStateSchema, rewardWidgetIssueResultSchema } from "@shared/customer-account/reward-widget";
+import { rewardWidgetStateSchema, rewardWidgetIssueResultSchema, rewardWidgetManagementStateSchema, rewardWidgetCancelResultSchema } from "@shared/customer-account/reward-widget";
 
 export const customerAccountPageConfigSchema = z.object({
   themeId: z.string().max(30).regex(/^[1-9][0-9]*$/),
@@ -90,6 +90,13 @@ export function createCustomerAccountTransport(raw: CustomerAccountPageConfig, r
     resolve: async (raw: unknown, signal?: AbortSignal) => json(await call({ method: "POST", path: "/account/resolve", body: customerAccountOrderIdentityInputSchema.parse(raw) }, signal), customerAccountOrderIdentitySchema),
     edits: createOrderEditTransport(bridge),
     rewards: {
+      manage: async (connectionId: number, omsOrderId: number, signal?: AbortSignal) => json(await call({
+        method: "GET", path: `/order-edits/orders/${omsOrderId}/rewards/manage`, query: { connectionId: String(connectionId) },
+      }, signal), rewardWidgetManagementStateSchema),
+      cancel: async (connectionId: number, omsOrderId: number, input: { rewardId: string; requestKey: string }) => json(await call({
+        method: "POST", path: `/order-edits/orders/${omsOrderId}/rewards/cancel`, query: { connectionId: String(connectionId) },
+        body: input, commandKey: input.requestKey,
+      }), rewardWidgetCancelResultSchema),
       state: async (connectionId: number, omsOrderId: number, signal?: AbortSignal) => json(await call({
         method: "GET", path: `/order-edits/orders/${omsOrderId}/rewards`, query: { connectionId: String(connectionId) },
       }, signal), rewardWidgetStateSchema),

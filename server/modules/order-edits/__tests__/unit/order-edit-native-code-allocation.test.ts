@@ -146,15 +146,20 @@ describe("native order-discount allocation around automatic prices", () => {
     { lines: [original, { ...added, grossCents: 99, productNetCents: 99 }] },
     { lines: [original, { ...added, grossCents: 0, productNetCents: 0 }] },
   ])(
-    "rejects insufficient editable capacity before creating a native edit",
+    "explicitly replaces original variants when editable capacity cannot carry the full reward",
     ({ lines }) => {
-      expect(() =>
-        allocateOrderEditNativeCodePricing(price(lines), ["original"]),
-      ).toThrow(
-        expect.objectContaining({
-          code: "ORDER_EDIT_CODE_AUTOMATIC_DISCOUNT_CAPACITY",
-        }),
+      const input = price(lines);
+      const result = allocateOrderEditNativeCodePricing(input, ["original"]);
+      expect(result.lines[0]).toMatchObject({
+        replacesAutomaticDiscount: true,
+      });
+      expect(result.lines[0].preserveAutomaticDiscount).toBeUndefined();
+      expect(result.lines.map((line) => line.netCents)).toEqual(
+        input.lines.map((line) => line.netCents),
       );
+      expect(result.applications).toEqual([
+        { code: reward.code, amountCents: 100 },
+      ]);
     },
   );
 
@@ -164,6 +169,28 @@ describe("native order-discount allocation around automatic prices", () => {
       ["original"],
     );
     expect(result.lines.map((line) => line.netCents)).toEqual([233, 0]);
+  });
+  it("keeps both saved rewards at full value when merchandise covers their combined amount", () => {
+    const other = {
+      ...reward,
+      code: "OTHER-REWARD",
+      discountId: "gid://shopify/DiscountCodeNode/2",
+      value: { type: "fixed" as const, amountCents: 366 },
+    };
+    const input = price(
+      [{ ...original, quantity: 2, grossCents: 558, productNetCents: 466 }],
+      [reward, other],
+    );
+    const result = allocateOrderEditNativeCodePricing(input, ["original"]);
+    expect(result.applications).toEqual(
+      expect.arrayContaining([
+        { code: reward.code, amountCents: 100 },
+        { code: other.code, amountCents: 366 },
+      ]),
+    );
+    expect(result.lines).toMatchObject([
+      { productNetCents: 466, netCents: 0, replacesAutomaticDiscount: true },
+    ]);
   });
 
   it("keeps penny distribution deterministic regardless of input order", () => {
