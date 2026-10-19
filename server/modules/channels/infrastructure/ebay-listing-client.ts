@@ -186,6 +186,7 @@ function createEbayRouteRequest(input: EbayRouteClientInput) {
             channelId: EBAY_CHANNEL_ID,
             externalAccountId: account.externalAccountId,
             expectedConnectionId: input.expectedConnectionId,
+            environment: getAuthService()?.getEnvironment(),
           });
         })();
     return executeAdmittedEbayQuantityRequest<T>(

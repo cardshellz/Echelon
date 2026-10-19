@@ -17,18 +17,18 @@ describe("PostgresInventoryPublicationOutboxRepository full publication phase", 
       return { rows: [] };
     });
     const repository = new PostgresInventoryPublicationOutboxRepository(fakePool(client));
-    const work = vi.fn(async () => "published");
+    const work = vi.fn(async () => {
+      expect(client.queries[0].sql).toContain("pg_advisory_lock");
+      expect(client.queries.some(({ sql }) => sql.includes("pg_advisory_unlock"))).toBe(false);
+      return "published";
+    });
 
     await expect(repository.runIfCurrent(claim(), work)).resolves.toEqual({
       status: "current",
       value: "published",
     });
     expect(work).toHaveBeenCalledOnce();
-    expect(client.queries.map(({ sql }) => sql)).toEqual([
-      expect.stringContaining("pg_advisory_lock"),
-      expect.stringContaining("AS newer_exists"),
-      expect.stringContaining("pg_advisory_unlock"),
-    ]);
+    expect(client.queries.at(-1)?.sql).toContain("pg_advisory_unlock");
   });
 
   it("records and skips a stale claim before any provider operation", async () => {

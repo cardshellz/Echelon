@@ -129,6 +129,7 @@ async function readActiveEbaySyncRows(filter: SyncFilter | null, allSavedMembers
       product_description: products.description,
       product_brand: products.brand,
       product_is_active: products.isActive,
+      product_status: products.status,
       product_excluded: products.ebayListingExcluded,
       product_override_is_listed: channelProductOverrides.isListed,
       type_listing_enabled: ebayCategoryMappings.listingEnabled,
@@ -460,7 +461,8 @@ async function prepareActiveEbayListingSync(
       channelId: boundIdentity.channelId, connectionId: boundIdentity.connectionId,
       accountId: boundIdentity.accountId, environment: ctx.authService.getEnvironment(),
       productId, purpose: "sync",
-      variants: boundIdentity.variants.map(member => ({ productVariantId: member.variantId, sku: member.sku })),
+      variants: boundIdentity.variants.filter(member => !member.catalogArchived)
+        .map(member => ({ productVariantId: member.variantId, sku: member.sku })),
     }, execution, new Date(), { sourceIdentity, observation: providerObservation }),
     variants: variants
       .filter((variant) =>

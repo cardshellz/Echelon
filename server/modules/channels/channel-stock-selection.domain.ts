@@ -4,6 +4,8 @@ import { isInventoryManagedVariant } from "@shared/catalog/variant-inventory-eli
 import { stockPublicationSelectionSchema, type StockPublicationSelection } from "@shared/types/stock-publication-selection";
 import type { CatalogStockSelectionFacts } from "../catalog/catalog-stock-selection.reader";
 import { isVariantSellable } from "./ebay-listing-eligibility";
+import { archivedListingMemberSelection, isArchivedCatalogMember } from "../marketplace-listings/listing-member-lifecycle";
+import type { ListingMemberRetirement } from "@shared/types/listing-member-lifecycle";
 
 export interface ChannelStockSelectionFacts {
   channelId: number;
@@ -16,6 +18,7 @@ export interface ChannelStockSelectionFacts {
   typeListingEnabled: boolean | null;
   variants: readonly {
     productVariantId: number;
+    retirement?: ListingMemberRetirement | null;
     variantIsListed: number | null;
     feed: { active: boolean; quarantined: boolean; externalVariantId: string | null; externalInventoryItemId: string | null; externalSku: string | null } | null;
     listing: { status: string | null; externalProductId: string | null; externalVariantId: string | null; externalSku: string | null } | null;
@@ -45,6 +48,9 @@ export function resolveChannelStockSelection(facts: ChannelStockSelectionFacts):
     }
     const feed = known?.feed;
     const listing = known?.listing;
+    const archived = archivedListingMemberSelection({ productVariantId,
+      archived: isArchivedCatalogMember({ productActive: product.isActive, variantActive: catalog.isActive, productStatus: product.status }), retirement: known?.retirement });
+    if (archived) return archived;
     if (feed?.quarantined) blockers.push({ code: "CHANNEL_SELECTION_MAPPING_QUARANTINED", message: "This channel mapping is quarantined. Review or repair its provider identity before publishing stock." });
     const hasSavedIdentity = Boolean(feed && (feed.externalInventoryItemId || feed.externalVariantId || feed.externalSku))
       || Boolean(listing && (listing.externalProductId || listing.externalVariantId || listing.externalSku))

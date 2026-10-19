@@ -142,6 +142,7 @@ import { createShopifyAdapter } from "../modules/channels/adapters/shopify.adapt
 import { WalmartChannelService } from "../modules/channels/adapters/walmart/walmart-channel.service";
 import { PostgresListingLifecycleRepository } from "../modules/marketplace-listings/infrastructure/pg-listing-lifecycle.repository";
 import { createListingLifecycleService } from "../listing-lifecycle.composition";
+import { assertArchivedMemberPublicationAllowed } from "../modules/marketplace-listings/infrastructure/pg-listing-member-lifecycle.repository";
 import { WalmartCatalogAdapter } from "../modules/channels/adapters/walmart/walmart-catalog.adapter";
 import { ChannelCatalogService } from "../modules/channels/channel-catalog.service";
 import { PostgresChannelCatalogRepository } from "../modules/channels/channel-catalog.repository";
@@ -402,7 +403,7 @@ export function createServices(
   const sourceLockService = createSourceLockService(db);
   const shopifyAdapter = createShopifyAdapter(db, quantityPublicationAdmission);
   const ebayAdapter = createEbayAdapter(db, new ChannelEbayListingPhotoResolver(databasePool, createCatalogPublicImageUrl(process.env)));
-  const listingLifecycleStore = new PostgresListingLifecycleRepository(databasePool);
+  const listingLifecycleStore = new PostgresListingLifecycleRepository(databasePool, assertArchivedMemberPublicationAllowed);
   const walmart = new WalmartChannelService(new WalmartConnectionRepository(databasePool),
     AesGcmFulfillmentProviderCredentialCipher.fromEnvOrNull({
       SHIPPING_PROVIDER_CREDENTIAL_ENCRYPTION_KEY: process.env.WALMART_CREDENTIAL_ENCRYPTION_KEY,
@@ -423,7 +424,7 @@ export function createServices(
   const walmartVerifiedStock = new VerifiedListingStockService(new PostgresVerifiedListingStockStore(databasePool));
   const listingPublication = createListingPublicationService({pool: databasePool, walmart, channelCatalog, quantityAdmission: quantityPublicationAdmission, verifiedStock: walmartVerifiedStock});
   const listingUpdates = createListingUpdateService(databasePool, walmart);
-  const listingLifecycle = createListingLifecycleService(databasePool, walmart, listingLifecycleStore);
+  const listingLifecycle = createListingLifecycleService(databasePool, walmart, listingLifecycleStore, db);
   const walmartStockConnection = new WalmartStockConnectionService(walmart,
     walmartVerifiedStock);
   const inventoryPublicationInitialScope = new InventoryPublicationInitialScopeService(new PostgresInitialPublicationScopeStore(databasePool));

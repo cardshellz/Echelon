@@ -13,6 +13,7 @@ import { InventoryPublicationNotSentError } from "../application/inventory-publi
 import { PostgresQuantityProviderRequestEvidenceStore } from "./quantity-provider-request-evidence.repository";
 import { QuantityPublicationAdmissionError, quantityPublicationScopeSchema, quantityPublicationRecoverySchema,
   type QuantityPublicationScope, type QuantityPublicationDrainProof, type QuantityPublicationRecovery } from "../domain/quantity-publication-admission";
+import { readArchivedListingMember, lockArchivedListingMember, type ArchivedListingMemberSource } from "../../marketplace-listings/listing-member-lifecycle";
 
 // Separate namespace from authority, inventory-admission, and target/variant locks.
 export const QUANTITY_PUBLICATION_LOCK_NAMESPACE = 918419;
@@ -290,9 +291,10 @@ export class PostgresQuantityPublicationAdmission implements QuantityPublication
     });
   }
 
-  runListingGroup<T>(raw: QuantityPublicationScope, rawMembers: readonly QuantityPublicationScope[],
+  async runListingGroup<T>(raw: QuantityPublicationScope, rawMembers: readonly QuantityPublicationScope[],
     resolveCurrentPlan: (scope: QuantityPublicationScope) => Promise<{ outboxId: string; quantity: number }>,
-    work: (canonicalQuantities: ReadonlyMap<string, number> | null) => Promise<T>): Promise<T> {
+    work: (canonicalQuantities: ReadonlyMap<string, number> | null, retainedSkus?: readonly string[]) => Promise<T>,
+    archivedMemberScope?: { environment: "production" | "sandbox"; market: string }): Promise<T> {
     const scope = quantityPublicationScopeSchema.parse(raw);
     const members = rawMembers.map(member => quantityPublicationScopeSchema.parse(member));
     if (members.length < 1 || members.length > 250 || new Set(members.map(key)).size !== members.length
@@ -303,15 +305,56 @@ export class PostgresQuantityPublicationAdmission implements QuantityPublication
     }
     if (session.getStore()) fail("PUBLICATION_GROUP_NESTING_INVALID", "A listing group cannot expand another provider capability.");
     let quantities: Map<string, number> | null = null;
-    return this.execute(scope, null, () => work(quantities), async () => {
+    const retained = new Map<string, ArchivedListingMemberSource>();
+    let sourceFence: PoolClient | undefined;
+    let sourceFenceBegun = false;
+    let failure: unknown;
+    const retainedScope = (member: QuantityPublicationScope) => ({ destinationKind: member.destinationKind,
+      connectionId: member.connectionId, provider: member.providerKey, accountId: member.externalScopeId,
+      environment: archivedMemberScope!.environment, market: archivedMemberScope!.market, externalSku: member.externalInventoryItemId });
+    try { return await this.execute(scope, null, () => work(quantities, [...retained.keys()]), async reader => {
       const plans = [];
       quantities = new Map();
+      if (archivedMemberScope) {
+        if (scope.providerKey !== "ebay" || scope.providerScopeType !== "account" || !scope.externalInventoryItemId.startsWith("group:"))
+          fail("PUBLICATION_GROUP_SCOPE_INVALID", "Archived-member preservation requires an exact eBay account group.");
+        for (const member of members) {
+          const source = await readArchivedListingMember(reader, retainedScope(member));
+          if (!source) continue;
+          if ((member.productId !== null && member.productId !== source.identity.productId)
+            || (member.productVariantId !== null && member.productVariantId !== source.identity.productVariantId))
+            fail("PUBLICATION_GROUP_SCOPE_INVALID", "The archived member does not match the requested local identity.");
+          retained.set(member.externalInventoryItemId, source);
+        }
+      }
       for (const member of members) {
+        if (retained.has(member.externalInventoryItemId)) continue;
         const plan = await resolveCurrentPlan(member);
         quantities.set(member.externalInventoryItemId, plan.quantity); plans.push({ ...plan, scope: member });
       }
+      if (retained.size === members.length)
+        fail("PUBLICATION_GROUP_SCOPE_INVALID", "An entirely archived group has no active content maintenance to admit.");
       return plans;
-    }, members);
+    }, members, undefined, undefined, async () => {
+      // Catalog/source changes during planning must not turn an unowned member
+      // into an implicit omission. The full group still holds exact scope locks.
+      if (!retained.size) return;
+      sourceFence = await this.pool.connect();
+      await sourceFence.query("BEGIN");
+      sourceFenceBegun = true;
+      for (const member of [...members].sort((a,b) => a.externalInventoryItemId.localeCompare(b.externalInventoryItemId))) {
+        const source = retained.get(member.externalInventoryItemId);
+        if (source) await lockArchivedListingMember(sourceFence, retainedScope(member), source);
+      }
+    }); } catch (error) { failure = error; throw error; }
+    finally {
+      if (sourceFence) {
+        let cleanupError: Error | undefined;
+        try { await sourceFence.query("ROLLBACK"); } catch (error) { cleanupError = error instanceof Error ? error : new Error(String(error)); }
+        sourceFence.release(cleanupError ?? !sourceFenceBegun);
+        if (cleanupError) throw failure ? new AggregateError([failure, cleanupError], "Group admission and archived-source fence release failed.") : cleanupError;
+      }
+    }
   }
 
   runQuantityReducingLifecycle<T>(raw: QuantityPublicationScope, work: () => Promise<T>, rawMembers: readonly QuantityPublicationScope[] = []): Promise<T> {
@@ -328,9 +371,10 @@ export class PostgresQuantityPublicationAdmission implements QuantityPublication
   }
 
   private async execute<T>(scope: QuantityPublicationScope, claim: QuantityPublicationOutboxClaim | null,
-    work: () => Promise<T>, resolveCurrentPlan?: () => Promise<Array<{ outboxId: string; quantity: number; scope: QuantityPublicationScope }>>,
+    work: () => Promise<T>, resolveCurrentPlan?: (client: Client) => Promise<Array<{ outboxId: string; quantity: number; scope: QuantityPublicationScope }>>,
     memberScopes: readonly QuantityPublicationScope[] = [], setupRequest?: Readonly<ListingSetupIntent>,
-    receiveSetup?: (intent: Readonly<ListingSetupIntent>) => void): Promise<T> {
+    receiveSetup?: (intent: Readonly<ListingSetupIntent>) => void,
+    validatePlanning?: (client: Client) => Promise<void>): Promise<T> {
     const requestJournalContract = currentEbayQuantityRequestJournal();
     if (requestJournalContract && scope.providerKey !== "ebay") {
       fail("PUBLICATION_REQUEST_JOURNAL_SCOPE_INVALID", "An eBay request journal cannot authorize another provider.");
@@ -468,7 +512,7 @@ export class PostgresQuantityPublicationAdmission implements QuantityPublication
           }
           // Shared gate/scope SESSION locks remain held; planning owns its own bounded transaction.
           await client.query("COMMIT"); inTransaction = false;
-          planned = await resolveCurrentPlan!();
+          planned = await resolveCurrentPlan!(client);
           await client.query("BEGIN"); inTransaction = true;
           for (const selectedPlan of planned) {
           const selectedScope = selectedPlan.scope;
@@ -494,6 +538,7 @@ export class PostgresQuantityPublicationAdmission implements QuantityPublication
           }
         }
       }
+      await validatePlanning?.(client);
       const unresolved = (await client.query<{ id: string }>(`SELECT id::text FROM inventory.quantity_publication_attempts
         WHERE affected_scope_keys && $1::text[] AND state IN ('running','uncertain') LIMIT 1`, [lockedScopeKeys])).rows[0];
       if (unresolved) {

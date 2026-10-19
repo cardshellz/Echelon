@@ -19,17 +19,19 @@ export const ebayPublicationRejectionReader = new PostgresEbayPublicationRejecti
 export const automaticEbayPublicationRecovery = new EbayAutomaticPublicationRecoveryService(new PostgresEbayAutomaticPublicationRecoveryRepository(pool));
 export const ebayPublicationReconciliationRepository = new PostgresEbayPublicationReconciliationRepository(pool);
 
-function ebayRequestAdmission(base: Omit<QuantityPublicationScope, "externalInventoryItemId">): EbayQuantityRequestAdmission {
+function ebayRequestAdmission(base: Omit<QuantityPublicationScope, "externalInventoryItemId">,
+  environment?: "production" | "sandbox"): EbayQuantityRequestAdmission {
   const scope = (identity: string): QuantityPublicationScope => ({ ...base, externalInventoryItemId: identity });
   return {
     item: (sku, work) => quantityPublicationAdmission.runListing(scope(sku), () => planCurrentCanonicalListingQuantity(scope(sku)), work),
-    group: (groupKey, skus, work) => quantityPublicationAdmission.runListingGroup(scope(`group:${groupKey}`), skus.map(scope), planCurrentCanonicalListingQuantity, work),
+    group: (groupKey, skus, work, maintenance) => quantityPublicationAdmission.runListingGroup(scope(`group:${groupKey}`), skus.map(scope),
+      planCurrentCanonicalListingQuantity, work, maintenance && environment ? { environment, market: maintenance.marketplaceId } : undefined),
     reducing: (identity, work, memberSkus) => quantityPublicationAdmission.runQuantityReducingLifecycle(scope(identity), work, memberSkus?.map(scope)),
   };
 }
 
 export async function createChannelEbayQuantityRequestAdmission(input: {
-  channelId: number; externalAccountId: string; expectedConnectionId?: number;
+  channelId: number; externalAccountId: string; expectedConnectionId?: number; environment?: "production" | "sandbox";
 }): Promise<EbayQuantityRequestAdmission> {
   const connections = (await pool.query<{ id: number }>(
     "SELECT id FROM channels.channel_connections WHERE channel_id=$1 ORDER BY id LIMIT 2", [input.channelId],
@@ -39,16 +41,17 @@ export async function createChannelEbayQuantityRequestAdmission(input: {
   if(input.expectedConnectionId!==undefined && connections[0].id!==input.expectedConnectionId) throw new QuantityPublicationAdmissionError(
     "EBAY_SYNC_IDENTITY_CHANGED","The listing sync credential connection changed before publication.");
   return ebayRequestAdmission({ destinationKind: "channel_connection", connectionId: connections[0].id,
-    providerKey: "ebay", providerScopeType: "account", externalScopeId: input.externalAccountId, productId: null, productVariantId: null });
+    providerKey: "ebay", providerScopeType: "account", externalScopeId: input.externalAccountId, productId: null, productVariantId: null }, input.environment);
 }
 
 export function createDropshipEbayQuantityRequestAdmission(input: {
-  storeConnectionId: number; externalAccountId: string | null; externalAccountVerifiedAt: Date | null;
+  storeConnectionId: number; externalAccountId: string | null; externalAccountVerifiedAt: Date | null; providerEnvironment?: string | null;
 }): EbayQuantityRequestAdmission {
   if (!input.externalAccountId || !input.externalAccountVerifiedAt) throw new QuantityPublicationAdmissionError(
     "PUBLICATION_PROVIDER_ACCOUNT_UNVERIFIED", "Provider-verified eBay store identity is required before publishing quantity.");
   return ebayRequestAdmission({ destinationKind: "dropship_store_connection", connectionId: input.storeConnectionId,
-    providerKey: "ebay", providerScopeType: "account", externalScopeId: input.externalAccountId, productId: null, productVariantId: null });
+    providerKey: "ebay", providerScopeType: "account", externalScopeId: input.externalAccountId, productId: null, productVariantId: null },
+    input.providerEnvironment === "production" || input.providerEnvironment === "sandbox" ? input.providerEnvironment : undefined);
 }
 
 export async function planCurrentCanonicalListingQuantity(raw: QuantityPublicationScope): Promise<{ outboxId: string; quantity: number }> {

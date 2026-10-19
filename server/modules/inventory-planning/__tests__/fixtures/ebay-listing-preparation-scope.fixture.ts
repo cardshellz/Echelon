@@ -47,7 +47,7 @@ export async function installEbayListingScopeFixture(pool: Pool): Promise<void> 
  * provider responses. Tests may vary the retired evidence and observation time. */
 export async function createEbayListingScopeObservation(pool: Pool) {
   const rows = (await pool.query(`SELECT v.product_id,v.id AS variant_id,v.sku AS variant_sku,
-    l.external_sku,l.external_variant_id,l.external_product_id,v.is_active AS content_sync_enabled
+    l.external_sku,l.external_variant_id,l.external_product_id,v.is_active AS content_sync_enabled,NOT v.is_active AS catalog_archived
     FROM catalog.product_variants v JOIN channels.channel_listings l ON l.product_variant_id=v.id AND l.channel_id=67
     WHERE v.product_id=20 ORDER BY v.id`)).rows;
   const source = captureExistingEbayListingIdentity(rows, ebayListingScopeAccount);
@@ -55,10 +55,11 @@ export async function createEbayListingScopeObservation(pool: Pool) {
     offers: [{ sku: ebayListingScopeSku("C200"), offerId: "offer-C200", marketplaceId: "EBAY_US", status: "UNPUBLISHED" } as Record<string, unknown>],
   };
   let observedAt = new Date(WALMART_INVENTORY_NOW);
+  const groupSkus = [ebayListingScopeSku("P10"), ebayListingScopeSku("C500")];
   const get: EbayRegistrationReadTransport["get"] = vi.fn(async request => {
     const path = new URL(request.path, "https://example.test");
     if (path.pathname === "/commerce/identity/v1/user/") return { status: 200, body: { userId: ebayListingScopeAccount.accountId, username: "fixture" } };
-    if (path.pathname.includes("/inventory_item_group/")) return { status: 200, body: { variantSKUs: [ebayListingScopeSku("P10"), ebayListingScopeSku("C500")] } };
+    if (path.pathname.includes("/inventory_item_group/")) return { status: 200, body: { variantSKUs: [...groupSkus] } };
     if (path.pathname.includes("/inventory_item/")) {
       const requestedSku = decodeURIComponent(path.pathname.split("/").at(-1)!);
       return { status: requestedSku === ebayListingScopeSku("C200") && !retired.itemExists ? 404 : 200,
@@ -80,5 +81,5 @@ export async function createEbayListingScopeObservation(pool: Pool) {
   const observe = () => resolveExistingEbayListingIdentity(source, observer, source.variants.map(member => ({
     productVariantId: member.variantId, sku: member.sku, isActive: member.contentSyncEnabled !== false, availableQuantity: 0,
   })));
-  return { source, retired, observe, setObservedAt: (value: Date): void => { observedAt = new Date(value); } };
+  return { source, retired, groupSkus, observe, setObservedAt: (value: Date): void => { observedAt = new Date(value); } };
 }

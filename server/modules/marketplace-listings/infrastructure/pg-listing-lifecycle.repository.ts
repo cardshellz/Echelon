@@ -89,7 +89,12 @@ async function audit(
 }
 
 export class PostgresListingLifecycleRepository implements ListingLifecycleStore {
-  constructor(private readonly pool: Pick<Pool, "connect">) {}
+  constructor(
+    private readonly pool: Pick<Pool, "connect">,
+    private readonly assertCatalogPublicationAllowed?: (
+      client: PoolClient, account: ListingAccount, skus: readonly string[],
+    ) => Promise<void>,
+  ) {}
   private async read<T>(work: (client: PoolClient) => Promise<T>): Promise<T> {
     const client = await this.pool.connect();
     try {
@@ -182,7 +187,8 @@ export class PostgresListingLifecycleRepository implements ListingLifecycleStore
       account,
       [listingLifecycleSkuSchema.parse(sku)],
       true,
-      async (session) => {
+      async (session, client) => {
+        await this.assertCatalogPublicationAllowed?.(client, account, [sku]);
         if (await session.find(sku))
           throw new ListingPublicationError(
             "LISTING_PUBLICATION_STOPPED",
@@ -226,6 +232,7 @@ export class PostgresListingLifecycleRepository implements ListingLifecycleStore
   ): Promise<T> {
     const skus = z.array(listingLifecycleSkuSchema).max(500).parse(input);
     return this.withLocks(account, skus, true, async (session, client) => {
+      await this.assertCatalogPublicationAllowed?.(client, account, skus);
       if (initialStock) {
         assertListingSetupAdmission(initialStock);
         if (

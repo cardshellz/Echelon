@@ -103,7 +103,7 @@ export async function readDropshipListingStockSelection(client: StockSelectionQu
       productVariantId,
       candidate: product && variant ? {
         productId: product.id, productVariantId, productLineIds: product.productLineIds,
-        category: product.category, productIsActive: product.isActive, variantIsActive: variant.isActive,
+        category: product.category, productIsActive: product.isActive, productStatus: product.status, variantIsActive: variant.isActive,
         variantUomType: parseCatalogVariantUomType(variant.uomType, { productVariantId }),
         requiresShipping: variant.requiresShipping, trackInventory: variant.trackInventory,
         salesEligibility: variant.salesEligibility,
