@@ -822,6 +822,9 @@
   "inventory.quantity_publication_catchup": [
     "modules/inventory-planning"
   ],
+  "inventory.quantity_publication_catchup_settlements": [
+    "modules/inventory-planning"
+  ],
   "inventory.quantity_publication_cooldowns": [
     "modules/inventory-planning"
   ],

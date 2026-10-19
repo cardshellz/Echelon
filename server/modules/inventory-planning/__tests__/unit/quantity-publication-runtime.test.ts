@@ -31,7 +31,7 @@ describe("current canonical listing quantity handoff", () => {
     expect(f.publish).toHaveBeenCalledWith({ productId: 20, publicationTargetId: 1, productVariantIds: [101],
       dryRun: false, triggeredBy: "canonical_listing_quantity_refresh" }, expect.any(Function));
     expect(f.query.mock.calls[0][1]).toEqual(["channel_connection", 7, "account", "verified", "P5", "ebay"]);
-    expect(f.query.mock.calls[0][0]).toContain("FOR SHARE OF t,h,m,v,provider_owner");
+    expect(f.query.mock.calls[0][0]).toContain("FOR SHARE OF t,h,m,v,p,provider_owner,connection");
     expect(f.query.mock.calls[1][1]).toEqual([1, 101, "4", "3", "14", "channel_connection", 7, "ebay", "account", "verified", "P5"]);
     expect(f.execute).toHaveBeenCalledOnce();
   });
@@ -85,6 +85,7 @@ describe("legacy channel catch-up runtime boundary", () => {
     installTransaction();
     vi.spyOn(quantityProviderResponseRecovery, "reconcile").mockResolvedValue({busy:false,resolved:[],unresolved:[]});
     vi.spyOn(quantityPublicationAdmission, "listDue").mockResolvedValue([claim]);
+    vi.spyOn(quantityPublicationAdmission, "settleArchived").mockResolvedValue(false);
     vi.spyOn(quantityPublicationAdmission, "complete").mockResolvedValueOnce(false).mockResolvedValue(true);
     vi.spyOn(quantityPublicationAdmission, "fail").mockResolvedValue();
   });
