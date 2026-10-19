@@ -2,6 +2,20 @@ import { describe, expect, it } from "vitest";
 import { buildEbayRouteListingDraft } from "../../ebay-listing-draft-builder";
 
 describe("buildEbayRouteListingDraft", () => {
+  it("requires the owner's resolved selection instead of accepting a legacy fallback", () => {
+    const input = {
+      ...fixturePolicyInput(),
+      resolvedPoliciesByVariantId: new Map(),
+      effectivePolicies: fixturePolicies([463]).get(463)!,
+    };
+    expect(() => buildEbayRouteListingDraft(input)).toThrow("A validated eBay policy selection is required");
+  });
+
+  it("rejects a resolved map that omits a published variant instead of borrowing another variant's policy", () => {
+    expect(() => buildEbayRouteListingDraft({ ...fixturePolicyInput(), resolvedPoliciesByVariantId: fixturePolicies([999]) }))
+      .toThrow("The resolved eBay policy scope is missing variant 463");
+  });
+
   it("keeps shared required item specifics on each multi-variant inventory item", () => {
     const draft = buildEbayRouteListingDraft({
       productId: 107,
@@ -26,7 +40,6 @@ describe("buildEbayRouteListingDraft", () => {
           option1_value: "Case of 500 (50 packs of 10)",
           price_cents: 49999,
           weight_grams: 4200,
-          ebay_return_policy_override: "variant-return-policy",
         },
       ],
       photoPlan: fixturePhotoPlan([215, 216], ["https://cdn.example.test/toploader.jpg"]),
@@ -46,11 +59,7 @@ describe("buildEbayRouteListingDraft", () => {
       ]),
       marketplaceId: "EBAY_US",
       ebayBrowseCategoryId: "183438",
-      effectivePolicies: {
-        fulfillmentPolicyId: "fulfillment-policy",
-        returnPolicyId: "return-policy",
-        paymentPolicyId: "payment-policy",
-      },
+      resolvedPoliciesByVariantId: fixturePolicies([215, 216], 216),
       storeCategoryNames: ["Toploaders"],
       merchantLocationKey: "card-shellz-hq",
     });
@@ -140,11 +149,7 @@ describe("buildEbayRouteListingDraft", () => {
       ]),
       marketplaceId: "EBAY_US",
       ebayBrowseCategoryId: "183438",
-      effectivePolicies: {
-        fulfillmentPolicyId: "fulfillment-policy",
-        returnPolicyId: "return-policy",
-        paymentPolicyId: "payment-policy",
-      },
+      resolvedPoliciesByVariantId: fixturePolicies([66, 438]),
       storeCategoryNames: ["Armalopes"],
       merchantLocationKey: "card-shellz-hq",
       retainUnlistedVariantsInGroup: true,
@@ -199,11 +204,7 @@ describe("buildEbayRouteListingDraft", () => {
       atpByVariantId: new Map([[463, 1]]),
       marketplaceId: "EBAY_US",
       ebayBrowseCategoryId: "183438",
-      effectivePolicies: {
-        fulfillmentPolicyId: "fulfillment-policy",
-        returnPolicyId: "return-policy",
-        paymentPolicyId: "payment-policy",
-      },
+      resolvedPoliciesByVariantId: fixturePolicies([463]),
       storeCategoryNames: ["Toploaders"],
       merchantLocationKey: "card-shellz-hq",
     })).toThrow("eBay listing price is required and must be at least $0.99 for SKU SHLZ-TOP-180PT-BLU-P10.");
@@ -238,11 +239,7 @@ describe("buildEbayRouteListingDraft", () => {
       atpByVariantId: new Map([[463, 1]]),
       marketplaceId: "EBAY_US",
       ebayBrowseCategoryId: "183438",
-      effectivePolicies: {
-        fulfillmentPolicyId: "fulfillment-policy",
-        returnPolicyId: "return-policy",
-        paymentPolicyId: "payment-policy",
-      },
+      resolvedPoliciesByVariantId: fixturePolicies([463]),
       storeCategoryNames: ["Toploaders"],
       merchantLocationKey: "card-shellz-hq",
     })).toThrow(/eBay package weight is required for SKU SHLZ-TOP-180PT-BLU-P10/);
@@ -251,4 +248,24 @@ describe("buildEbayRouteListingDraft", () => {
 
 function fixturePhotoPlan(variantIds: number[], urls: string[]) {
   return { byVariantId: new Map(variantIds.map(id => [id, urls])), groupImageUrls: urls };
+}
+
+function fixturePolicies(variantIds: number[], returnOverrideVariant?: number) {
+  return new Map(variantIds.map(id => [id, {
+    fulfillmentPolicyId: "fulfillment-policy",
+    returnPolicyId: id === returnOverrideVariant ? "variant-return-policy" : "return-policy",
+    paymentPolicyId: "payment-policy",
+  }]));
+}
+
+function fixturePolicyInput(): Parameters<typeof buildEbayRouteListingDraft>[0] {
+  return {
+    productId: 232, product: { name: "Toploader", sku: "TOP" },
+    variants: [{ id: 463, sku: "TOP-P10", price_cents: 1000, weight_grams: 100 }],
+    photoPlan: fixturePhotoPlan([463], ["https://cdn.example.test/toploader.jpg"]),
+    aspects: {}, isMultiVariant: false, variationAspectName: "",
+    variantPrices: new Map([[463, 1000]]), atpByVariantId: new Map([[463, 1]]),
+    marketplaceId: "EBAY_US", ebayBrowseCategoryId: "183438",
+    resolvedPoliciesByVariantId: fixturePolicies([463]), storeCategoryNames: [], merchantLocationKey: "hq",
+  };
 }

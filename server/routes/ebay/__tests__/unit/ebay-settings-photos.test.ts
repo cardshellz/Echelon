@@ -1,3 +1,4 @@
+import { EbayBusinessPolicyError } from "@shared/ebay-business-policies";
 import type { Express, Request, Response } from "express";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -5,6 +6,7 @@ const fixture = vi.hoisted(() => ({
   reads: [] as Record<string, unknown>[][],
   resolvePhotos: vi.fn(),
   quantityRead: vi.fn(),
+  resolvePolicies: vi.fn(),
   client: {
     getInventoryItem: vi.fn(), getInventoryItemGroup: vi.fn(),
     createOrReplaceInventoryItem: vi.fn(), createOffer: vi.fn(), publishOffer: vi.fn(),
@@ -19,7 +21,10 @@ vi.mock("../../../../db", () => ({ db: { select: vi.fn(() => {
   return query;
 }) } }));
 vi.mock("../../../../modules/channels/adapters/ebay/ebay-auth.service", () => ({
-  createEbayAuthConfig: vi.fn(() => ({})), EbayAuthService: class {},
+  createEbayAuthConfig: vi.fn(() => ({})), EbayAuthService: class {
+    getVerifiedProviderAccount = async () => ({ externalAccountId: "seller-13" });
+    getEnvironment = () => "production";
+  },
 }));
 vi.mock("../../../../modules/channels/adapters/ebay/ebay-api.client", () => ({
   createEbayApiClient: vi.fn(() => fixture.client),
@@ -28,6 +33,7 @@ vi.mock("../../ebay-utils", () => ({
   atpService: { getAtpPerVariant: fixture.quantityRead },
   ebayListingPhotoResolver: { resolve: fixture.resolvePhotos },
 }));
+vi.mock("../../../../modules/channels/ebay-business-policies", () => ({ ebayBusinessPolicies: { resolveProductPolicies: fixture.resolvePolicies } }));
 import { registerEbaySettingsRoutes } from "../../../ebay-settings.routes";
 
 type Handler = (request: Request, response: Response) => Promise<void>;
@@ -59,12 +65,15 @@ describe("eBay settings photo consumers", () => {
     fixture.reads = [];
     fixture.resolvePhotos.mockResolvedValue(photoPlan);
     fixture.quantityRead.mockResolvedValue([{ productVariantId: 101, atpUnits: 4 }]);
+    fixture.resolvePolicies.mockResolvedValue({ scope: { channelId: 67, connectionId: 9, accountId: "seller-13",
+      environment: "production", marketplaceId: "EBAY_US" },
+      byVariantId: new Map([[101, { fulfillmentPolicyId: "f", returnPolicyId: "r", paymentPolicyId: "p" }]]) });
     fixture.client.createOffer.mockResolvedValue("offer-101");
     fixture.client.publishOffer.mockResolvedValue({ listingId: "listing-101" });
   });
 
   function testListingReads() {
-    fixture.reads = [[{ metadata: { merchantLocationKey: "hq", fulfillmentPolicyId: "f", returnPolicyId: "r", paymentPolicyId: "p" } }],
+    fixture.reads = [[{ id: 9, metadata: { merchantLocationKey: "hq", fulfillmentPolicyId: "f", returnPolicyId: "r", paymentPolicyId: "p" } }],
       [product], [variant]];
   }
 
@@ -118,6 +127,17 @@ describe("eBay settings photo consumers", () => {
     }));
   });
 
+  it("rejects unavailable policies before any test-listing mutation", async () => {
+    testListingReads();
+    fixture.resolvePolicies.mockRejectedValueOnce(new EbayBusinessPolicyError("EBAY_POLICY_UNAVAILABLE", "Unavailable saved shipping policy", 422));
+    const response = await invoke("post", "/api/ebay/listings/test", { productId: 13 });
+    expect(response.status).toHaveBeenCalledWith(422);
+    expect(response.json).toHaveBeenCalledWith(expect.objectContaining({ code: "EBAY_POLICY_UNAVAILABLE" }));
+    expect(fixture.resolvePhotos).not.toHaveBeenCalled();
+    expect(fixture.client.createOrReplaceInventoryItem).not.toHaveBeenCalled();
+    expect(fixture.client.createOffer).not.toHaveBeenCalled();
+    expect(fixture.client.publishOffer).not.toHaveBeenCalled();
+  });
   it("rejects a test variant without a SKU before photo resolution or provider writes", async () => {
     testListingReads();
     fixture.reads[2] = [{ ...variant, sku: null }];

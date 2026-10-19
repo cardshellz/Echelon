@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "migration": "900000012000018420001_ebay_category_policy_identity_capacity.sql",
+  "generation": 12,
+  "pr": 1842,
+  "ordinal": 1,
+  "after": [
+    "900000011000018230001_ebay_publication_preflight_recovery.sql"
+  ]
+}

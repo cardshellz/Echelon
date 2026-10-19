@@ -1,3 +1,4 @@
+import { ebayAvailablePolicyValuesSchema, type EbayAvailablePolicyValues } from "@shared/ebay-business-policies";
 import {
   EbayListingBuilder,
   type BuiltEbayListingDraft,
@@ -31,16 +32,7 @@ interface EbayRouteVariantInput {
   weight_override?: unknown;
   weight_grams?: unknown;
   weightGrams?: unknown;
-  ebay_fulfillment_policy_override?: string | null;
-  ebay_return_policy_override?: string | null;
-  ebay_payment_policy_override?: string | null;
   isListed?: boolean;
-}
-
-interface EbayRoutePoliciesInput {
-  fulfillmentPolicyId: string | null;
-  returnPolicyId: string | null;
-  paymentPolicyId: string | null;
 }
 
 interface EbayRouteListingDraftInput {
@@ -55,7 +47,8 @@ interface EbayRouteListingDraftInput {
   atpByVariantId: Map<number, number>;
   marketplaceId: string;
   ebayBrowseCategoryId: string;
-  effectivePolicies: EbayRoutePoliciesInput;
+  /** Resolved and catalog-validated by the channel policy owner before transport. */
+  resolvedPoliciesByVariantId: ReadonlyMap<number, EbayAvailablePolicyValues>;
   storeCategoryNames: string[];
   merchantLocationKey: string;
   retainUnlistedVariantsInGroup?: boolean;
@@ -68,7 +61,9 @@ const ebayListingBuilder = new EbayListingBuilder();
 export function buildEbayRouteListingDraft(
   input: EbayRouteListingDraftInput,
 ): BuiltEbayListingDraft {
-  const listingPolicies = resolveRequiredPolicies(input.effectivePolicies);
+  const firstPolicies = input.resolvedPoliciesByVariantId?.values().next().value;
+  if (!firstPolicies) throw new Error("A validated eBay policy selection is required before building a listing draft.");
+  const listingPolicies = ebayAvailablePolicyValuesSchema.parse(firstPolicies);
   const groupKey = input.existingGroupKey === undefined
     ? input.product.sku || `PROD-${input.productId}` : input.existingGroupKey;
   if (input.existingGroupKey !== undefined && input.isMultiVariant && groupKey === null) {
@@ -100,9 +95,10 @@ export function buildEbayRouteListingDraft(
     availableQuantityByVariantId.set(variantId, availableQty);
     variationValueByVariantId.set(variantId, variationValue);
 
-    const variantPolicies = resolveVariantPolicies(routeVariant);
-    if (variantPolicies) {
-      variantListingPoliciesByVariantId.set(variantId, variantPolicies);
+    const resolvedPolicies = input.resolvedPoliciesByVariantId.get(variantId);
+    if (isListed && !resolvedPolicies) throw new Error(`The resolved eBay policy scope is missing variant ${variantId}.`);
+    if (resolvedPolicies) {
+      variantListingPoliciesByVariantId.set(variantId, ebayAvailablePolicyValuesSchema.parse(resolvedPolicies));
     }
 
     variants.push({
@@ -167,40 +163,6 @@ export function buildEbayRouteListingDraft(
     includeOfferListingDescription: false,
     includeOfferTax: false,
   });
-}
-
-function resolveRequiredPolicies(policies: EbayRoutePoliciesInput): EbayListingPolicies {
-  const resolved = {
-    fulfillmentPolicyId: normalizePolicyId(policies.fulfillmentPolicyId),
-    returnPolicyId: normalizePolicyId(policies.returnPolicyId),
-    paymentPolicyId: normalizePolicyId(policies.paymentPolicyId),
-  };
-  const missing = Object.entries(resolved)
-    .filter(([, value]) => !value)
-    .map(([key]) => key);
-  if (missing.length > 0) {
-    throw new Error(`eBay listing policies are required before pushing listings. Missing: ${missing.join(", ")}.`);
-  }
-  return resolved as EbayListingPolicies;
-}
-
-function resolveVariantPolicies(
-  variant: EbayRouteVariantInput,
-): Partial<EbayListingPolicies> | null {
-  const policies: Partial<EbayListingPolicies> = {};
-  const fulfillmentPolicyId = normalizePolicyId(variant.ebay_fulfillment_policy_override);
-  const returnPolicyId = normalizePolicyId(variant.ebay_return_policy_override);
-  const paymentPolicyId = normalizePolicyId(variant.ebay_payment_policy_override);
-  if (fulfillmentPolicyId) policies.fulfillmentPolicyId = fulfillmentPolicyId;
-  if (returnPolicyId) policies.returnPolicyId = returnPolicyId;
-  if (paymentPolicyId) policies.paymentPolicyId = paymentPolicyId;
-  return Object.keys(policies).length > 0 ? policies : null;
-}
-
-function normalizePolicyId(value: string | null | undefined): string | null {
-  if (typeof value !== "string") return null;
-  const trimmed = value.trim();
-  return trimmed || null;
 }
 
 function normalizeRequiredPositiveInteger(value: unknown, errorMessage: string): number {

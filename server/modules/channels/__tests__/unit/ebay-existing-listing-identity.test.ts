@@ -89,7 +89,7 @@ function draft(source: EbayListingSyncIdentity, catalogGroup: string) {
     aspects: { Brand: ["Card Shellz"] }, isMultiVariant: source.variants.length > 1, variationAspectName: "Pack size",
     variantPrices: new Map(source.variants.map(member => [member.variantId, 1000])),
     atpByVariantId: new Map(source.variants.map(member => [member.variantId, 17])), marketplaceId: "EBAY_US", ebayBrowseCategoryId: "183454",
-    effectivePolicies: { fulfillmentPolicyId: "shipping", paymentPolicyId: "payment", returnPolicyId: "returns" },
+    resolvedPoliciesByVariantId: new Map(source.variants.map(member => [member.variantId, { fulfillmentPolicyId: "shipping", paymentPolicyId: "payment", returnPolicyId: "returns" }])),
     merchantLocationKey: "warehouse", storeCategoryNames: [], retainUnlistedVariantsInGroup: true, existingGroupKey: source.groupKey });
 }
 

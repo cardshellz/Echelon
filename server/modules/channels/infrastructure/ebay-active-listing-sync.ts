@@ -1,3 +1,4 @@
+import { ebayBusinessPolicies } from "../ebay-business-policies";
 import { db } from "../../../db";
 import {
   EBAY_CHANNEL_ID,
@@ -280,11 +281,6 @@ async function prepareActiveEbayListingSync(
     await readExistingEbayIdentitySnapshot(identity.productId, identity);
   const { metadata, marketplaceId } = ctx,
     accessToken = await ctx.authService.getAccessToken(EBAY_CHANNEL_ID);
-  const defaultPolicies = {
-    fulfillmentPolicyId: metadata.fulfillmentPolicyId || null,
-    returnPolicyId: metadata.returnPolicyId || null,
-    paymentPolicyId: metadata.paymentPolicyId || null,
-  };
   const merchantLocationKey = metadata.merchantLocationKey || "card-shellz-hq";
   const ebayClient = createEbayRouteListingLifecycleClient({
     accessToken,
@@ -305,7 +301,6 @@ async function prepareActiveEbayListingSync(
   const product = variants[0];
   // Get effective eBay category
   let ebayBrowseCategoryId = product.ebay_browse_category_id;
-  let effectivePolicies = { ...defaultPolicies };
   let storeCategoryNames: string[] = [];
 
   // Category-level overrides
@@ -330,26 +325,10 @@ async function prepareActiveEbayListingSync(
       const catRow = catResult[0];
       if (!ebayBrowseCategoryId)
         ebayBrowseCategoryId = catRow.ebayBrowseCategoryId;
-      if (catRow.fulfillmentPolicyOverride)
-        effectivePolicies.fulfillmentPolicyId =
-          catRow.fulfillmentPolicyOverride;
-      if (catRow.returnPolicyOverride)
-        effectivePolicies.returnPolicyId = catRow.returnPolicyOverride;
-      if (catRow.paymentPolicyOverride)
-        effectivePolicies.paymentPolicyId = catRow.paymentPolicyOverride;
       if (catRow.ebayStoreCategoryName)
         storeCategoryNames = [catRow.ebayStoreCategoryName];
     }
   }
-
-  // Product-level policy overrides
-  if (product.product_fulfillment_override)
-    effectivePolicies.fulfillmentPolicyId =
-      product.product_fulfillment_override;
-  if (product.product_return_override)
-    effectivePolicies.returnPolicyId = product.product_return_override;
-  if (product.product_payment_override)
-    effectivePolicies.paymentPolicyId = product.product_payment_override;
 
   // Build product-level aspects
   const aspects: Record<string, string[]> = {};
@@ -393,9 +372,6 @@ async function prepareActiveEbayListingSync(
     price_cents: variant.price_cents,
     ebay_weight_grams:
       variant.variant_weight_override ?? variant.variant_weight_grams,
-    ebay_fulfillment_policy_override: variant.variant_fulfillment_override,
-    ebay_return_policy_override: variant.variant_return_override,
-    ebay_payment_policy_override: variant.variant_payment_override,
     isListed: boundIdentity.variants.find(member => member.variantId === variant.variant_id)!.contentSyncEnabled !== false,
   }));
   const sellableVariantIds = new Set(
@@ -406,6 +382,11 @@ async function prepareActiveEbayListingSync(
   if (sellableVariantIds.size === 0) {
     throw new EbayListingSyncError("EBAY_SYNC_CONTENT_SCOPE_EMPTY", "This existing listing has no included variants to update. Its retained eBay variations are unchanged.");
   }
+
+  const resolvedPolicies = await ebayBusinessPolicies.resolveProductPolicies({ productId,
+    variantIds: [...sellableVariantIds], expectedScope: { channelId: EBAY_CHANNEL_ID,
+      connectionId: identity.connectionId, accountId: identity.accountId,
+      environment: ctx.authService.getEnvironment(), marketplaceId } });
 
   // Catalog photo ownership remains keyed by local variant identity. The final
   // byVariantId plan is then addressed to the separately verified provider SKU.
@@ -458,7 +439,7 @@ async function prepareActiveEbayListingSync(
     atpByVariantId: syncAtpByVariantId,
     marketplaceId,
     ebayBrowseCategoryId,
-    effectivePolicies,
+    resolvedPoliciesByVariantId: resolvedPolicies.byVariantId,
     storeCategoryNames,
     merchantLocationKey,
     retainUnlistedVariantsInGroup: true,

@@ -156,6 +156,7 @@ function makeHarness(opts: {
     }
     const t = text.replace(/\s+/g, " ").trim();
     if (t.startsWith("SELECT")) reads.push(t);
+    if (t.includes("pg_advisory_xact_lock")) return { rows: [] };
     if (t.startsWith("SELECT receiving_order_id FROM procurement.receiving_lines")) return { rows: [{ receiving_order_id: line.receiving_order_id }] };
     if (t.includes("FROM procurement.po_receipts")) return { rows: postedReceipts };
 
@@ -167,17 +168,10 @@ function makeHarness(opts: {
         invalidRows: 0,
       }] };
     }
-    // Idempotency pre-check (order-scoped LIKE first, then exact key).
-    if (t.includes("FROM procurement.receipt_reversals") && t.includes("idempotency_key LIKE")) {
-      // Params: receiving_order_id, prefix-with-%.
-      const prefix = String(params[params.length - 1]).replace(/%$/, "");
-      const rows = state.insertedReversals.filter((r) => String(r.idempotency_key).startsWith(prefix));
-      return { rows };
-    }
     if (t.includes("FROM procurement.receipt_reversals") && t.includes("idempotency_key =")) {
-      const key = params[0];
-      const rows = state.insertedReversals.filter((r) => r.idempotency_key === key);
-      return { rows: rows.length ? rows : existingReversals.filter((r) => r.idempotency_key === key) };
+      const key = String(params[0]);
+      const prefix = `${key}:line:`;
+      return { rows: [...state.insertedReversals, ...existingReversals].filter((row) => row.idempotency_key === key || String(row.idempotency_key).startsWith(prefix)) };
     }
 
     // Order lock (reverseReceivingOrder).
@@ -311,6 +305,35 @@ function makeHarness(opts: {
 // ── Tests ───────────────────────────────────────────────────────────────────
 
 describe("ReceiptReversalService.reverseReceivingLine", () => {
+  it.each([undefined, null, NaN, true, "1", 0, -1, 1.5, 2147483648])("rejects runtime invalid quantity %j before any DB operation", async (qty) => {
+    const { service, db, inventoryCore } = makeHarness({});
+    await expect(service.reverseReceivingLine({ receivingLineId: 1001, qty: qty as number, reason: "Correction", idempotencyKey: "invalid-qty" })).rejects.toMatchObject({ statusCode: 400, details: { code: "INVALID_REVERSAL_QTY" } });
+    expect(db.transaction).not.toHaveBeenCalled();
+    expect(db.execute).not.toHaveBeenCalled();
+    expect(inventoryCore.reverseReceiptInventory).not.toHaveBeenCalled();
+  });
+
+  it.each([{ receivingLineId: 1002 }, { qty: 101 }, { reason: "Changed" }, { userId: "another-operator" }, { allowNegative: true }])("does not replay the same legacy key for changed intent %j", async (changed) => {
+    const { service, state } = makeHarness({});
+    const input = { receivingLineId: 1001, qty: 100, reason: "Original", idempotencyKey: "legacy-identity", userId: "operator" };
+    await service.reverseReceivingLine(input);
+    const before = structuredClone(state);
+    await expect(service.reverseReceivingLine({ ...input, ...changed })).rejects.toMatchObject({ statusCode: 409, details: { code: "RECEIPT_REVERSAL_EVIDENCE_REVIEW_REQUIRED" } });
+    expect(state).toEqual(before);
+  });
+
+  it("classifies a frozen location as a confirmed inventory rejection", async () => {
+    const { service, inventoryCore } = makeHarness({});
+    inventoryCore.reverseReceiptInventory.mockRejectedValue(Object.assign(new Error("Location 7 is frozen for cycle counting"), { code: "LOCATION_FROZEN" }));
+    await expect(service.reverseReceivingLine({ receivingLineId: 1001, qty: 1, reason: "Correction", idempotencyKey: "frozen-location" })).rejects.toMatchObject({ statusCode: 409, details: { code: "LOCATION_FROZEN", receivingLineId: 1001 } });
+  });
+
+  it("rejects overlong reasons before compensation without truncating the journal reason", async () => {
+    const { service, db } = makeHarness({});
+    await expect(service.reverseReceivingLine({ receivingLineId: 1001, qty: 1, reason: "x".repeat(901), idempotencyKey: "long-reason" })).rejects.toMatchObject({ statusCode: 400, details: { code: "REVERSAL_REASON_REQUIRED" } });
+    expect(db.transaction).not.toHaveBeenCalled();
+  });
+
   it("reverses a partial quantity and decrements PO received_qty by qty × units_per_variant", async () => {
     // Dogfood shape: PO line orderQty 270,000 pieces, UOM 750/case; receipt
     // posted 360 "cases" credited as 360 pieces (variant upv=1 — the bug).
@@ -560,7 +583,7 @@ describe("ReceiptReversalService.reverseReceivingOrder", () => {
     expect(state.insertedReversals[0].reversal_scope).toBe("order");
   });
 
-  it("is idempotent at the order level", async () => {
+  it("blocks legacy order replay without a saved complete response", async () => {
     const { service, state } = makeHarness({});
 
     const first = await service.reverseReceivingOrder({
@@ -570,12 +593,9 @@ describe("ReceiptReversalService.reverseReceivingOrder", () => {
     });
     expect(first.reversals[0].idempotentReplay).toBe(false);
 
-    const replay = await service.reverseReceivingOrder({
-      receivingOrderId: 100,
-      reason: "Whole-order correction",
-      idempotencyKey: "rev-order-idem",
-    });
-    expect(replay.reversals[0].idempotentReplay).toBe(true);
+    await expect(service.reverseReceivingOrder({
+      receivingOrderId: 100, reason: "Whole-order correction", idempotencyKey: "rev-order-idem",
+    })).rejects.toMatchObject({ statusCode: 409, details: { code: "RECEIPT_REVERSAL_EVIDENCE_REVIEW_REQUIRED" } });
     expect(state.insertedReversals).toHaveLength(1);
     expect(state.lineReversedQty).toBe(360);
   });
@@ -677,7 +697,9 @@ describe("Receipt reversal frozen units and source locks", () => {
     const po = harness.reads.findIndex((query) => query.startsWith("SELECT po.id FROM procurement.purchase_orders"));
     const poLine = harness.reads.findIndex((query) => query.startsWith("SELECT pol.id FROM procurement.purchase_order_lines"));
     const receiptLine = harness.reads.findIndex((query) => query.includes("FOR UPDATE OF rl"));
-    expect(parent).toBeGreaterThanOrEqual(0);
+    const graph = harness.reads.findIndex((query) => query.includes("pg_advisory_xact_lock"));
+    expect(graph).toBeGreaterThanOrEqual(0);
+    expect(parent).toBeGreaterThan(graph);
     expect(po).toBeGreaterThan(parent);
     expect(poLine).toBeGreaterThan(po);
     expect(receiptLine).toBeGreaterThan(poLine);

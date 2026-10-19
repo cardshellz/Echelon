@@ -1,3 +1,4 @@
+import { EBAY_BUSINESS_POLICY_CHANNEL_ID } from "@shared/ebay-business-policies";
 import { eq } from "drizzle-orm";
 import { EbayApiRequestError } from "../adapters/ebay/ebay-api-error";
 import { ChannelEbayListingPhotoResolver } from "../ebay-listing-photos.service";
@@ -21,7 +22,7 @@ import {
 // Constants
 // ---------------------------------------------------------------------------
 
-export const EBAY_CHANNEL_ID = 67;
+export const EBAY_CHANNEL_ID = EBAY_BUSINESS_POLICY_CHANNEL_ID;
 export const ebayListingPhotoResolver = new ChannelEbayListingPhotoResolver(
   pool,
   createCatalogPublicImageUrl(process.env),
