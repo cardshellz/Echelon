@@ -55,15 +55,21 @@ export async function createQuantityLedgerTestContext(connectionString: string |
     finally { client.release(); }
   }
 
-  async function open(switchAuthority = true) {
+  async function open(switchAuthority = true, custody?: { onHand: number; reserved: number; picked: number; ordered: number }) {
+    if (custody) {
+      await pool.query("UPDATE inventory.inventory_levels SET variant_qty=$1,reserved_qty=$2,picked_qty=$3 WHERE id=10",[custody.onHand,custody.reserved,custody.picked]);
+      await pool.query("UPDATE inventory.inventory_lots SET qty_on_hand=$1,qty_reserved=$2,qty_picked=$3,qty_received=$4 WHERE id=4",[custody.onHand,custody.reserved,custody.picked,custody.onHand+custody.picked]);
+      await pool.query("UPDATE wms.order_items SET quantity=$1,picked_quantity=$2 WHERE id=11",[custody.ordered,custody.picked]);
+      if(custody.picked===0) await pool.query("DELETE FROM oms.order_item_costs WHERE id=9");
+    }
     const openingService = new InventoryCutoverOpeningService(new PostgresInventoryCutoverOpeningRepository(pool), { now: () => new Date(QUANTITY_TEST_TIME) });
     const source = await openingService.capture("operator");
     const verification: OpeningVerification = { contractVersion: "inventory_cutover_opening_v1",
       expectedEvidenceHash: source.evidenceHash, expectedAuthorityRevision: source.authorityRevision, expectedConfigurationRunId: source.configurationRunId,
       verificationReference: "Independent warehouse observation", verificationEvidenceHash: "e".repeat(64),
       verifiedAt: QUANTITY_TEST_TIME, historicalDisposition: "preserve_unresolved", levels: source.evidence.levels, lots: source.evidence.lots,
-      owners: [{ orderId: 1, orderItemId: 11, remainingQty: "6", reservedQty: "3", pickedQty: "2",
-        allocations: [{ inventoryLevelId: 10, lots: [{ inventoryLotId: 4, reservedQty: "3", pickedQty: "2", originalCostIds: [9] }] }] }] };
+      owners: [{ orderId: 1, orderItemId: 11, remainingQty: String(custody ? custody.ordered-custody.picked : 6), reservedQty: String(custody?.reserved ?? 3), pickedQty: String(custody?.picked ?? 2),
+        allocations: [{ inventoryLevelId: 10, lots: [{ inventoryLotId: 4, reservedQty: String(custody?.reserved ?? 3), pickedQty: String(custody?.picked ?? 2), originalCostIds: custody?.picked===0 ? [] : [9] }] }] }] };
     const saved = await openingService.save({ verification, reason: "Verified opening", idempotencyKey: "quantity-opening-verification" }, "operator");
     const dryRun = await seedCompositionReviewedDryRun(pool);
     // The reviewed snapshot uses the database clock. Keep all activation
@@ -79,7 +85,7 @@ export async function createQuantityLedgerTestContext(connectionString: string |
         actor: "operator", reason: "Exact custody test", occurredAt: QUANTITY_TEST_TIME,
         reference: { type: "quantity_test", id: "opening" }, reversesCommandId: null,
         movements: [{ inventoryLotId: 4, inventoryLevelId: 10, productVariantId: 101, warehouseLocationId: 100,
-          warehouseId: 1, delta: { onHand: 20, reserved: 3, picked: 2, packed: 0 } }] };
+          warehouseId: 1, delta: { onHand: custody?.onHand ?? 20, reserved: custody?.reserved ?? 3, picked: custody?.picked ?? 2, packed: 0 } }] };
       const posted = await ledger.openInsideTransaction(client, command, {
         verifiedOpeningId: saved.id, authorityRevision: "2", sourceEvidenceHash: saved.sourceEvidenceHash,
       });

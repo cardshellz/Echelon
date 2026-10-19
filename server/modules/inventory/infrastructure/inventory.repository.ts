@@ -769,7 +769,9 @@ export function createInventoryMethods(
         pv.sku as sku,
         pv.name as name,
         pv.id as "variantId",
-        il.variant_qty as available,
+        GREATEST(il.variant_qty - COALESCE(il.reserved_qty,0),0) as available,
+        il.variant_qty as "onHand",
+        COALESCE(il.reserved_qty,0) as reserved,
         wl.id as "locationId",
         wl.code as location
       FROM inventory.inventory_levels il
@@ -818,7 +820,9 @@ export function createInventoryMethods(
         wl.code as location,
         wl.zone,
         wl.location_type as "locationType",
-        il.variant_qty as available,
+        GREATEST(il.variant_qty - COALESCE(il.reserved_qty,0),0) as available,
+        il.variant_qty as "onHand",
+        COALESCE(il.reserved_qty,0) as reserved,
         il.warehouse_location_id as "locationId",
         w.code as "warehouseCode"
       FROM inventory.inventory_levels il

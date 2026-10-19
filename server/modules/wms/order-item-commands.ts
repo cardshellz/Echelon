@@ -993,3 +993,21 @@ export async function applyRefundAuthorityToWmsOrderItem(
     changed,
   };
 }
+
+/** Claim ownership identifies the exact pending lines. The cached old location
+ * can already be stale after a claim replan, so never infer ownership from SKU/bin. */
+export async function repointCanonicalTransferPickLines(
+  executor: WmsOrderItemExecutor,
+  input: { orderItemIds: readonly number[]; destinationCode: string; destinationZone: string },
+): Promise<number> {
+  if (input.orderItemIds.length === 0) return 0;
+  for (const id of input.orderItemIds) assertPositiveInteger(id, "orderItemId");
+  if (new Set(input.orderItemIds).size !== input.orderItemIds.length || !input.destinationCode.trim()) throw new WmsOrderItemCommandError("WMS_TRANSFER_IDENTITY_INVALID", "Invalid transfer pick-line identities");
+  const result = await executor.execute(sql`UPDATE wms.order_items item SET location=${input.destinationCode},zone=${input.destinationZone}
+    FROM wms.orders parent WHERE parent.id=item.order_id AND item.id=ANY(${sql.param([...input.orderItemIds])}::int[])
+      AND item.status='pending' AND item.picked_quantity=0 AND item.requires_shipping=1
+      AND parent.warehouse_status NOT IN ('shipped','cancelled','completed') RETURNING item.id`);
+  const count = affectedRowCount(result);
+  if (count !== input.orderItemIds.length) throw new WmsOrderItemCommandError("WMS_TRANSFER_PICK_PROGRESS_CHANGED", "A reserved transfer pick line changed before its location was updated", { orderItemIds: input.orderItemIds });
+  return count;
+}
