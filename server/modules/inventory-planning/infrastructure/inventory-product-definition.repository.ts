@@ -98,7 +98,7 @@ async function captureReview(client: PoolClient, selection: ProductDefinitionSel
      FROM inventory.transformation_model_heads head JOIN inventory.transformation_model_versions model
      ON model.id=head.draft_model_id AND model.product_id=head.product_id
      LEFT JOIN inventory.transformation_model_versions active ON active.id=head.active_model_id AND active.product_id=head.product_id
-     WHERE head.product_id=$1`, [selection.productId],
+     WHERE head.product_id=$1 FOR SHARE OF head, model`, [selection.productId],
   )).rows[0];
   if (!head || head.revision !== selection.expectedHeadRevision || head.draft_model_id !== selection.draftModelId
     || head.definition_hash !== selection.expectedDefinitionHash || head.lifecycle_status !== "draft") {
@@ -115,13 +115,39 @@ async function captureReview(client: PoolClient, selection: ProductDefinitionSel
   )).rows.map(row => row.product_id);
   if (affectedProductIds.length > 1000) throw new ProductDefinitionError("DEFINITION_REVIEW_TOO_LARGE", "The affected build graph exceeds the review limit. No partial apply is allowed.", 422);
   const blockers: string[] = head.validation_state === "valid" ? [] : ["The saved model has validation errors."];
-  const impact = await captureDefinitionImpact(client, affectedProductIds,
-    productId => captureProductDraftReviewSnapshotInsideTransaction(client, productId, selection.productId));
+  const archivedVariantIds = await lockDraftVariantLifecycle(client, selection.draftModelId);
+  const impact = archivedVariantIds.length > 0
+    ? { atp: [], channels: [], fingerprints: [], blockers: archivedVariantIds.map(id =>
+        `Variant #${id} was archived after this draft was saved. Edit and save the draft to exclude its rules before applying.`) }
+    : await captureDefinitionImpact(client, affectedProductIds,
+        productId => captureProductDraftReviewSnapshotInsideTransaction(client, productId, selection.productId));
   blockers.push(...impact.blockers);
   const content = { selection, ready: blockers.length === 0, authorityRevision: authority.revision,
     previousModel: head.active_model_id === null ? null : { id: head.active_model_id, definitionHash: head.active_definition_hash },
     activationRunId: authority.activation_run_id, affectedProductIds, blockers: [...new Set(blockers)], atp: impact.atp, channels: impact.channels };
   return productDefinitionReviewSchema.parse({ ...content, reviewHash: inventoryCutoverEvidenceHash({ content, fingerprints: impact.fingerprints }) });
+}
+
+/** Preserve the master-data writer lock order: model owner -> products ->
+ * variants, stable IDs within each class. The caller already holds the head and
+ * draft model. These SHARE locks fence lifecycle changes through promotion;
+ * archive commands do not need to rewrite immutable model history. */
+async function lockDraftVariantLifecycle(client: PoolClient, modelId: number): Promise<number[]> {
+  const references = (await client.query<{ id: number; product_id: number }>(
+    `WITH refs(id) AS (
+       SELECT source_variant_id FROM inventory.transformation_model_paths WHERE model_id=$1
+       UNION SELECT destination_variant_id FROM inventory.transformation_model_paths WHERE model_id=$1
+       UNION SELECT output_variant_id_snapshot FROM inventory.transformation_recipe_bindings WHERE model_id=$1
+       UNION SELECT component_variant_id FROM inventory.transformation_recipe_component_snapshots WHERE model_id=$1
+     ) SELECT variant.id, variant.product_id FROM refs JOIN catalog.product_variants variant ON variant.id=refs.id ORDER BY variant.id`, [modelId],
+  )).rows;
+  if (references.length === 0) return [];
+  const productIds = [...new Set(references.map(row => row.product_id))].sort((left, right) => left - right);
+  await client.query("SELECT id FROM catalog.products WHERE id=ANY($1::integer[]) ORDER BY id FOR SHARE", [productIds]);
+  const variants = (await client.query<{ id: number; is_active: boolean }>(
+    "SELECT id,is_active FROM catalog.product_variants WHERE id=ANY($1::integer[]) ORDER BY id FOR SHARE", [references.map(row => row.id)],
+  )).rows;
+  return variants.filter(row => !row.is_active).map(row => row.id);
 }
 
 /** Shared routine-definition impact evaluation. It never writes or recomputes

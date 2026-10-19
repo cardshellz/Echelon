@@ -228,6 +228,9 @@ export const supplyTransformationsAdminViewSchema = z.object({
   }).strict(),
   variants: z.array(transformationAdminVariantSchema),
   recipes: z.array(transformationAdminRecipeSchema),
+  // Includes archived external recipe components and variants omitted from the
+  // inventory-managed list. Absence from that list alone never means archived.
+  archivedVariantIds: z.array(positiveInteger).optional(),
   head: z.object({
     revision: postgresBigintStringSchema,
     activeModelId: positiveInteger.nullable(),

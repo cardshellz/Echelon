@@ -1,4 +1,6 @@
 import React, { useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
+import { archivedTransformationVariantIds, prepareTransformationDraft, recipeHasArchivedVariant, type TransformationDraftLifecycle } from "@shared/inventory/transformation-draft-lifecycle";
+import { ArchivedTransformationNotice } from "@/features/inventory-builds/ArchivedTransformationNotice";
 import { Link, useLocation, useSearch } from "wouter";
 import { fetchJson, HttpResponseError } from "./inventory-planning-http";
 import { inventoryPlanningProductHref, parseInventoryPlanningProductId } from "./inventory-planning-navigation";
@@ -90,6 +92,7 @@ export default function SupplyTransformations() {
     inventoryPlanningProductHref("/inventory/supply-transformations", selectedId),
   );
   const [editingCurrentDraft, setEditingCurrentDraft] = useState(false);
+  const [editingLifecycle, setEditingLifecycle] = useState<TransformationDraftLifecycle | null>(null);
   const [buildToPromiseEnabled, setBuildToPromiseEnabled] = useState(false);
   const [selectedBuildRecipeIds, setSelectedBuildRecipeIds] = useState<number[]>([]);
   const [buildAuthorityResolutionConfirmed, setBuildAuthorityResolutionConfirmed] = useState(false);
@@ -149,6 +152,7 @@ export default function SupplyTransformations() {
 
   useEffect(() => {
     setEditingCurrentDraft(false);
+    setEditingLifecycle(null);
     setBuildToPromiseEnabled(false);
     setSelectedBuildRecipeIds([]);
     setBuildAuthorityResolutionConfirmed(false);
@@ -188,6 +192,7 @@ export default function SupplyTransformations() {
     onSuccess: async (result, input) => {
       idempotencyKey.current = null;
       setEditingCurrentDraft(false);
+      setEditingLifecycle(null);
       await queryClient.invalidateQueries({
         queryKey: ["/api/inventory-planning/admin/supply-transformations", productId],
       });
@@ -209,6 +214,7 @@ export default function SupplyTransformations() {
       ) {
         idempotencyKey.current = null;
         setEditingCurrentDraft(false);
+        setEditingLifecycle(null);
         setBuildToPromiseEnabled(false);
         setSelectedBuildRecipeIds([]);
         setBuildAuthorityResolutionConfirmed(false);
@@ -279,13 +285,19 @@ export default function SupplyTransformations() {
 
   const isEditing = Boolean(view && (view.draftModel === null || editingCurrentDraft));
   const activeVariants = view?.variants.filter((variant) => variant.isActive) ?? [];
+  const archivedIds = view ? archivedTransformationVariantIds(view) : [];
   const activeAssemblyRecipes = view?.recipes.filter((recipe) =>
-    recipe.recipeType === "assembly" && recipe.status === "active") ?? [];
-  const draftEditIsUnsupported = Boolean(
-    view?.draftModel && draftHasUnsupportedBindings(view.draftModel),
-  );
-  const unavailableBuildBindings = view?.draftModel
-    ? unavailableBuildBindingsForEdit(view.draftModel, view.recipes)
+    recipe.recipeType === "assembly" && recipe.status === "active"
+    && !recipeHasArchivedVariant(recipe, archivedIds)) ?? [];
+  const draftLifecycle = view?.draftModel
+    ? prepareTransformationDraft(view.draftModel, archivedIds) : null;
+  // This is a prospective definition only; concurrency tokens continue to use
+  // the original saved model and head, never this local projection.
+  const editableDraft = view?.draftModel && draftLifecycle
+    ? { ...view.draftModel, ...draftLifecycle.definition } : null;
+  const draftEditIsUnsupported = Boolean(editableDraft && draftHasUnsupportedBindings(editableDraft));
+  const unavailableBuildBindings = view && editableDraft
+    ? unavailableBuildBindingsForEdit(editableDraft, activeAssemblyRecipes)
     : [];
   const unresolvedUnavailableBuildAuthority = editingCurrentDraft
     && unavailableBuildBindings.length > 0
@@ -446,15 +458,16 @@ export default function SupplyTransformations() {
   };
 
   const beginDraftEdit = () => {
-    if (!view?.draftModel || draftHasUnsupportedBindings(view.draftModel)) return;
-    const prefill = prefillPathsFromModel(view.draftModel, nextRowId.current);
+    if (!view || !editableDraft || draftHasUnsupportedBindings(editableDraft)) return;
+    const prefill = prefillPathsFromModel(editableDraft, nextRowId.current);
     nextRowId.current = prefill.nextRowId;
-    setBuildToPromiseEnabled(view.draftModel.buildToPromiseEnabled);
-    setSelectedBuildRecipeIds(activeBuildRecipeIdsFromModel(view.draftModel, view.recipes));
+    setBuildToPromiseEnabled(editableDraft.buildToPromiseEnabled);
+    setSelectedBuildRecipeIds(activeBuildRecipeIdsFromModel(editableDraft, activeAssemblyRecipes));
     setBuildAuthorityResolutionConfirmed(
-      unavailableBuildBindingsForEdit(view.draftModel, view.recipes).length === 0,
+      unavailableBuildBindingsForEdit(editableDraft, activeAssemblyRecipes).length === 0,
     );
     setPaths(prefill.paths);
+    setEditingLifecycle(draftLifecycle);
     setChangeReason("");
     idempotencyKey.current = null;
     setEditingCurrentDraft(true);
@@ -462,6 +475,7 @@ export default function SupplyTransformations() {
 
   const cancelDraftEdit = () => {
     setEditingCurrentDraft(false);
+    setEditingLifecycle(null);
     setBuildToPromiseEnabled(false);
     setSelectedBuildRecipeIds([]);
     setBuildAuthorityResolutionConfirmed(false);
@@ -603,6 +617,8 @@ export default function SupplyTransformations() {
             isLoading={channelPreviewQuery.isLoading}
             error={channelPreviewQuery.error as Error | null}
           />
+
+          {editingCurrentDraft && <ArchivedTransformationNotice view={view} lifecycle={editingLifecycle} />}
 
           <DestinationColumns
             view={view}

@@ -71,6 +71,15 @@ async function proveRoutineDefinitionApply(database: InventoryCutoverTestDatabas
     (product_id,version,build_to_promise_enabled,definition_hash,validation_state,validation_errors,change_reason,idempotency_key,request_hash,created_by,supersedes_model_id)
     VALUES(20,2,false,repeat('e',64),'valid','[]','Routine test draft','routine-draft',repeat('e',64),'operator',
       (SELECT active_model_id FROM inventory.transformation_model_heads WHERE product_id=20)) RETURNING id`)).rows[0];
+  // An additional package's explicit blocked direction has no ATP effect, but
+  // its lifecycle must still be checked before the saved draft can be applied.
+  const archivedPackageId = (await database.pool.query<{ id: number }>(
+    "INSERT INTO catalog.product_variants(id,product_id,sku,units_per_variant) SELECT COALESCE(max(id),0)+1,20,'ARCHIVE-TEST',1 FROM catalog.product_variants RETURNING id",
+  )).rows[0].id;
+  await database.pool.query(`INSERT INTO inventory.transformation_model_paths
+    (model_id,source_variant_id,destination_variant_id,input_qty,output_qty,source_units_per_variant,destination_units_per_variant,operation_type,authority_state,validation_state,validation_errors)
+    VALUES($1,$2,101,5,1,1,5,'assemble_pack','blocked','valid','[]')`, [model.id, archivedPackageId]);
+  await database.pool.query("UPDATE inventory.transformation_model_versions SET validation_state='valid',validation_errors='[]' WHERE id=$1", [model.id]);
   await database.pool.query("UPDATE inventory.transformation_model_heads SET draft_model_id=$1,revision=revision+1 WHERE product_id=20", [model.id]);
   const head = (await database.pool.query<{ revision: string; active_model_id: number }>("SELECT revision::text,active_model_id FROM inventory.transformation_model_heads WHERE product_id=20")).rows[0];
   const service = new ProductDefinitionService(new PostgresProductDefinitionStore(database.pool));
@@ -82,6 +91,16 @@ async function proveRoutineDefinitionApply(database: InventoryCutoverTestDatabas
   const command = { ...selection, expectedReviewHash: review.reviewHash, idempotencyKey: "routine-apply" };
   await expect(service.apply({ ...command, expectedReviewHash: "0".repeat(64) }, "operator"))
     .rejects.toMatchObject({ code: "DEFINITION_REVIEW_STALE" });
+  await database.pool.query("UPDATE catalog.product_variants SET is_active=false WHERE id=$1", [archivedPackageId]);
+  const archivedReview = await service.review(selection);
+  expect(archivedReview.ready).toBe(false);
+  expect(archivedReview.blockers).toContain(`Variant #${archivedPackageId} was archived after this draft was saved. Edit and save the draft to exclude its rules before applying.`);
+  await expect(service.apply(command, "operator")).rejects.toMatchObject({ code: "DEFINITION_REVIEW_STALE" });
+  await expect(service.apply({ ...command, expectedReviewHash: archivedReview.reviewHash }, "operator"))
+    .rejects.toMatchObject({ code: "DEFINITION_REVIEW_BLOCKED" });
+  expect((await database.pool.query("SELECT active_model_id FROM inventory.transformation_model_heads WHERE product_id=20")).rows[0].active_model_id).toBe(head.active_model_id);
+  expect((await database.pool.query("SELECT count(*)::int AS count FROM inventory.product_definition_applications")).rows[0].count).toBe(0);
+  await database.pool.query("UPDATE catalog.product_variants SET is_active=true WHERE id=$1", [archivedPackageId]);
   const outboxBefore = (await database.pool.query("SELECT * FROM inventory.inventory_publication_outbox ORDER BY id")).rows;
   await database.pool.query(`CREATE FUNCTION inventory.test_definition_receipt_failure() RETURNS trigger LANGUAGE plpgsql AS $$
     BEGIN RAISE EXCEPTION 'synthetic definition receipt failure'; END $$;
