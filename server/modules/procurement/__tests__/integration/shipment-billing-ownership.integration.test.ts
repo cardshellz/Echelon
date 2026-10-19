@@ -202,7 +202,7 @@ integration.sequential("shipment charge billing ownership through real PostgreSQ
     expect((await harness.pool.query("SELECT id FROM procurement.vendor_invoice_lines WHERE freight_cost_id=31")).rows).toHaveLength(1);
   });
   it("replaces a valid split-line invoice under the ownership guard while preserving every historical line", async () => {
-    await harness.pool.query(readFileSync(resolve(process.cwd(), "docs/procurement/shipment-invoice-ownership-guard.pending.sql"), "utf8"));
+    await harness.pool.query(readFileSync(resolve(process.cwd(), "migrations/900000013000018460001_shipment_invoice_ownership_guard.sql"), "utf8"));
     const original = await bill();
     await harness.pool.query("UPDATE procurement.vendor_invoice_lines SET unit_cost_cents=400,unit_cost_mills=40000,line_total_cents=400 WHERE vendor_invoice_id=$1", [original.id]);
     await harness.pool.query(`INSERT INTO procurement.vendor_invoice_lines(vendor_invoice_id,freight_cost_id,line_number,qty_invoiced,unit_cost_cents,unit_cost_mills,line_total_cents)
@@ -223,7 +223,7 @@ integration.sequential("shipment charge billing ownership through real PostgreSQ
     await expect(harness.ap.approveInvoice(replacement.invoiceId, FLOW_ACTOR)).resolves.toMatchObject({ status: "approved" });
   });
   it("keeps voided source evidence and transfers authority only through explicit replacement", async () => {
-    await harness.pool.query(readFileSync(resolve(process.cwd(), "docs/procurement/shipment-invoice-ownership-guard.pending.sql"), "utf8"));
+    await harness.pool.query(readFileSync(resolve(process.cwd(), "migrations/900000013000018460001_shipment_invoice_ownership_guard.sql"), "utf8"));
     const original = await bill();
     await harness.ap.voidInvoice(original.id, "Supplier correction", FLOW_ACTOR);
     expect((await harness.ap.enrichCostsWithInvoiceInfo(1))[0].billingOwnership.state).toBe("voided");

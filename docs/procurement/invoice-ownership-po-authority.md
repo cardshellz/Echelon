@@ -15,7 +15,7 @@ Generic unlinking and source-line deletion cannot erase a recorded liability ass
 
 `readInvoiceSourceCapabilities` prevents approval/payment on ambiguous ownership and prevents PO link/import/unlink operations from changing a shipment invoice's economic source. Voiding remains subject to the existing payment-history and eligibility checks; it retains the source evidence. An unresolved historical association may need a separately reviewed data correction; this change does not perform one.
 
-The pending SQL in `shipment-invoice-ownership-guard.pending.sql` adds statement-level graph locks, immutable source and association guards, and deferred final-graph checks. Deferred checks permit atomic creation and replacement intermediate states. The migration performs no data rewrite and does not reject deployment merely because existing records need review. It prevents new inconsistent owners, source deletion, association erasure and truncation. Pricing updates remain separate from ownership validation.
+The migration `900000013000018460001_shipment_invoice_ownership_guard.sql` adds statement-level graph locks, immutable source and association guards, and deferred final-graph checks. Deferred checks permit atomic creation and replacement intermediate states. The migration performs no data rewrite and does not reject deployment merely because existing records need review. It prevents new inconsistent owners, source deletion, association erasure and truncation. Pricing updates remain separate from ownership validation.
 
 ## Creation and recovery
 
@@ -41,7 +41,7 @@ The focused suites cover malformed input/results, exact-key replay, actor/resour
 
 Local validation passed 4,024 distinct unit/guard cases (seven existing skips), 293 PostgreSQL cases across 14 fresh-database suites, and 220 distinct desktop/mobile cases. The full procurement unit run passed 3,777 cases; the final replacement refinement then passed all 88 selected domain cases, including six added cases. The three required typechecks, changed-browser typecheck, build, migration policy and diff checks also passed. Exact commands and logs are retained in outputs/procurement-invoice-po-authority-2026-10-19/validation.json. Browser cases use mocked HTTP. Local tests do not establish hosted CI, merge, migration application or production acceptance.
 
-Before release, allocate this pending SQL under the draft PR's generated migration identity, preserve its exact SQL bytes, update both integration-suite references, and rerun migration guards plus the actual SQL suites. Deploy application and migration together. Readbacks should confirm that affected historical records show review, valid same-owner bills remain usable, creation recovery retains one invoice, and canonical PO decisions agree across list/detail/workspace. Any production repair requires its own concrete reviewed payload.
+Draft PR1846 allocates the exact reviewed SQL bytes under the generated migration identity above. Its sidecar declares the invoice replacement lineage and current latest migration as dependencies. Both integration suites load the allocated file; all 44 actual-SQL database cases and 68 migration guards passed again after allocation. Deploy application and migration together. Readbacks should confirm that affected historical records show review, valid same-owner bills remain usable, creation recovery retains one invoice, and canonical PO decisions agree across list/detail/workspace. Any production repair requires its own concrete reviewed payload.
 
 ## Assumptions and remaining work
 

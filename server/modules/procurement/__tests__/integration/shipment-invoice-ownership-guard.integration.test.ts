@@ -10,7 +10,7 @@ import { createFlowCostHarness, seedFlowMasterData, FLOW_ACTOR, FLOW_AT, type Fl
 
 const url = process.env.ECHELON_TEST_DATABASE_URL;
 const integration = url && process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true" ? describe : describe.skip;
-const ownershipSql = readFileSync(resolve(process.cwd(), "docs/procurement/shipment-invoice-ownership-guard.pending.sql"), "utf8");
+const ownershipSql = readFileSync(resolve(process.cwd(), "migrations/900000013000018460001_shipment_invoice_ownership_guard.sql"), "utf8");
 const input = { vendorId: 6, invoiceNumber: "FREIGHT-OWNERSHIP-1", costRowIds: [31], invoiceDate: "2026-09-10" };
 
 integration.sequential("freight invoice command recovery and SQL ownership guard", () => {
