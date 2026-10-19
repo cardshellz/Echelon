@@ -49,7 +49,9 @@ describe("shared eBay absolute inventory quantity protocol", () => {
   it("does not turn a failed convergence read into a success or a fallback mutation", async () => {
     const client = fixture(); const error = new Error("provider read failed");
     client.getInventoryItem.mockRejectedValue(error);
-    await expect(publishEbayInventoryQuantity(client, sku, market, 38)).rejects.toBe(error);
+    await expect(publishEbayInventoryQuantity(client, sku, market, 38)).rejects.toMatchObject({
+      code: "EBAY_INVENTORY_PREFLIGHT_FAILED", effect: "not_sent", cause: error,
+    });
     expect(client.bulkUpdatePriceQuantity).not.toHaveBeenCalled();
   });
   it.each([[50, 38, 38], [12, 50, 12], [0, 40, 0], [30, 0, 0]])(

@@ -4,7 +4,7 @@ import { executeEbayQuantityHttpResponse, EbayQuantityResponseUncertainError } f
 import { PROVIDER_REQUEST_TIMEOUT_MS } from "../../channels/provider-request-limits";
 import {
   EbayInventoryQuantityError, ebayInventoryMarketplace, ebayInventoryOffersPath,
-  publishEbayInventoryQuantity, readEbayInventoryQuantity, type EbayInventoryQuantityClient,
+  publishEbayInventoryQuantity, readEbayInventoryQuantity, EbayInventoryQuantityPreflightError, type EbayInventoryQuantityClient,
 } from "../../channels/adapters/ebay/ebay-inventory-quantity";
 import { observeEbayQuantityRequest } from "../../inventory-planning/application/quantity-provider-request-evidence";
 
@@ -12,6 +12,7 @@ import { pool as defaultPool } from "../../../db";
 import {
   InventoryPublicationTransportConfigurationError,
   InventoryPublicationTransportError,
+  InventoryPublicationNotSentError,
   type AbsoluteInventoryPublicationRequest,
   type AbsoluteInventoryPublicationResult,
   type AbsoluteInventoryReadRequest,
@@ -103,12 +104,17 @@ export class EbayDropshipInventoryPublicationTransportAdapter
   async publishAbsolute(
     request: AbsoluteInventoryPublicationRequest,
   ): Promise<AbsoluteInventoryPublicationResult> {
+    let client: EbayInventoryQuantityClient;
+    let sku: string;
+    let marketplace: string;
     try {
       const context = await this.loadContext(request);
-      const response = await publishEbayInventoryQuantity(
-        this.quantityClient(context), exactEbayInventoryItemKey(request),
-        ebayInventoryMarketplace(context.credential.config.marketplaceId), request.desiredQuantity,
-      );
+      sku = exactEbayInventoryItemKey(request);
+      marketplace = ebayInventoryMarketplace(context.credential.config.marketplaceId);
+      client = this.quantityClient(context);
+    } catch (error) { throw translateQuantityError(new EbayInventoryQuantityPreflightError(error)); }
+    try {
+      const response = await publishEbayInventoryQuantity(client, sku, marketplace, request.desiredQuantity);
       return { publishedQuantity: request.desiredQuantity, providerResponse: response };
     } catch (error) { throw translateQuantityError(error); }
   }
@@ -367,6 +373,11 @@ function inventoryItemPath(sku: string): string {
 }
 
 function translateQuantityError(error: unknown): unknown {
+  if (error instanceof EbayInventoryQuantityPreflightError) {
+    const transport = error.cause instanceof InventoryPublicationTransportError ? error.cause : null;
+    return new InventoryPublicationNotSentError(transport?.code ?? error.code, error.message,
+      transport?.retryable ?? error.retryable, transport?.context, { cause: error });
+  }
   if (error instanceof EbayInventoryQuantityError) {
     return new InventoryPublicationTransportError(error.code, error.message, error.retryable, undefined, { cause: error });
   }

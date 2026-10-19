@@ -43,7 +43,7 @@ import { QuantityPublicationAdmissionError } from "../../inventory-planning/doma
 
 import { EbayAuthService, createEbayAuthConfig } from "./ebay/ebay-auth.service";
 import { EbayApiClient, createEbayApiClient } from "./ebay/ebay-api.client";
-import { EbayInventoryQuantityError, ebayInventoryMarketplace, publishEbayInventoryQuantity, readEbayInventoryQuantity } from "./ebay/ebay-inventory-quantity";
+import { EbayInventoryQuantityError, EbayInventoryQuantityPreflightError, ebayInventoryMarketplace, publishEbayInventoryQuantity, readEbayInventoryQuantity } from "./ebay/ebay-inventory-quantity";
 import { EBAY_QUANTITY_BATCH_LIMIT, EbayQuantityUpdateInputError, sendEbayQuantityUpdates } from "./ebay/ebay-quantity-update";
 import { EbayListingBuilder, createEbayListingBuilder } from "./ebay/ebay-listing-builder";
 import { mapCarrierToEbay } from "./ebay/ebay-category-map";
@@ -274,6 +274,7 @@ export class EbayAdapter implements IChannelAdapter {
         error: "eBay canonical inventory publication requires an exact account scope",
         errorCode: "EBAY_INVENTORY_SCOPE_UNSUPPORTED",
         retryable: false,
+        effect: "not_sent" as const,
       }));
     }
     // Canonical targets identify the inventory SKU, not an offer ID. Resolve the
@@ -481,20 +482,23 @@ export class EbayAdapter implements IChannelAdapter {
   private async pushCanonicalInventory(
     channelId: number, items: InventoryPushItem[], context: InventoryPublicationContext,
   ): Promise<InventoryPushResult[]> {
-    const client = await this.getApiClient(channelId, context.channelConnectionId, context.externalScopeId);
-    const metadata = await this.getConnectionMetadata(channelId, context.channelConnectionId);
+    let client: EbayApiClient;
+    let marketplace: string;
+    try {
+      client = await this.getApiClient(channelId, context.channelConnectionId, context.externalScopeId);
+      const metadata = await this.getConnectionMetadata(channelId, context.channelConnectionId);
+      marketplace = ebayInventoryMarketplace(metadata.siteId);
+    } catch (error) { return items.map(item => canonicalEbayInventoryFailure(item, error, true)); }
     const results: InventoryPushResult[] = [];
     for (const item of items) {
+      let sku: string;
+      try { sku = exactEbayInventoryItemKey(item); }
+      catch (error) { results.push(canonicalEbayInventoryFailure(item, error, true)); continue; }
       try {
-        const providerResponse = await publishEbayInventoryQuantity(client, exactEbayInventoryItemKey(item), ebayInventoryMarketplace(metadata.siteId), item.allocatedQty);
+        const providerResponse = await publishEbayInventoryQuantity(client, sku, marketplace, item.allocatedQty);
         results.push({ variantId: item.variantId, pushedQty: item.allocatedQty, status: "success", providerResponse });
       } catch (error) {
-        results.push({
-          variantId: item.variantId, pushedQty: 0, status: "error",
-          error: error instanceof Error ? error.message : String(error),
-          ...(error instanceof EbayInventoryQuantityError ? { errorCode: error.code, retryable: error.retryable }
-            : error instanceof InventoryPublicationConfigurationError ? { errorCode: error.code, retryable: false } : {}),
-        });
+        results.push(canonicalEbayInventoryFailure(item, error, error instanceof EbayInventoryQuantityPreflightError));
       }
     }
     return results;
@@ -1114,6 +1118,16 @@ export class EbayAdapter implements IChannelAdapter {
   private delay(ms: number): Promise<void> {
     return new Promise((resolve) => setTimeout(resolve, ms));
   }
+}
+
+function canonicalEbayInventoryFailure(item: InventoryPushItem, error: unknown, preflight: boolean): InventoryPushResult {
+  return { variantId: item.variantId, pushedQty: 0, status: "error",
+    error: error instanceof Error ? error.message : String(error),
+    ...(preflight ? { effect: "not_sent" as const } : {}),
+    ...(error instanceof EbayInventoryQuantityError ? { errorCode: error.code, retryable: error.retryable }
+      : error instanceof InventoryPublicationConfigurationError ? { errorCode: error.code, retryable: false }
+      : preflight ? { errorCode: "EBAY_INVENTORY_PREFLIGHT_FAILED", retryable: true } : {}),
+  };
 }
 
 function exactEbayInventoryItemKey(

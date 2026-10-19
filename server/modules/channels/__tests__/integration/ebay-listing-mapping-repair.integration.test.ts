@@ -42,15 +42,28 @@ const enabled = process.env.ECHELON_TEST_DATABASE_URL && process.env.ECHELON_TES
       CREATE SCHEMA catalog; CREATE SCHEMA channels; CREATE SCHEMA ebay; CREATE SCHEMA inventory; CREATE SCHEMA marketplace;
       CREATE FUNCTION inventory.reject_availability_claim_evidence_mutation() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
         RAISE EXCEPTION 'immutable evidence' USING ERRCODE='23514'; END $$;
-      -- Read-model fixture for the inventory-owned evidence reader. The separate
-      -- response-recovery integration suite installs all journal constraints.
+      -- Read-model fixture for the inventory-owned evidence reader, including its
+      -- immutable outbox/replacement/watch joins. These proof tables stay empty:
+      -- Inventory's dedicated recovery suites install and exercise their actual
+      -- migrations and constraints; this suite verifies Channels' read composition.
+      CREATE TABLE inventory.inventory_publication_outbox(id bigserial PRIMARY KEY,activation_run_id bigint,
+        publication_target_id integer,publication_target_revision_snapshot bigint,desired_revision bigint,payload_hash text,
+        provider_key_snapshot text,provider_scope_type_snapshot text,destination_kind_snapshot text,
+        channel_connection_id_snapshot integer,dropship_store_connection_id_snapshot integer,external_scope_id_snapshot text,
+        external_inventory_item_id_snapshot text,product_variant_id integer);
       CREATE TABLE inventory.quantity_publication_attempts(id bigserial PRIMARY KEY,scope jsonb NOT NULL,affected_scope_keys text[] NOT NULL,
         started_at timestamptz NOT NULL DEFAULT '2026-10-10T15:00:00Z',state text NOT NULL DEFAULT 'uncertain',
-        owner_kind text NOT NULL DEFAULT 'legacy',affected_scopes jsonb NOT NULL DEFAULT '[]',request_journal_contract jsonb);
+        owner_kind text NOT NULL DEFAULT 'legacy',affected_scopes jsonb NOT NULL DEFAULT '[]',request_journal_contract jsonb,
+        scope_key text,outbox_id bigint REFERENCES inventory.inventory_publication_outbox);
       CREATE TABLE inventory.quantity_provider_requests(id bigserial PRIMARY KEY,attempt_id bigint REFERENCES inventory.quantity_publication_attempts,
         ordinal integer,method text,path text,request_hash text,started_at timestamptz);
       CREATE TABLE inventory.quantity_provider_request_results(request_id bigint PRIMARY KEY REFERENCES inventory.quantity_provider_requests,
         outcome text,http_status integer,response_hash text,error_codes text[],request_terminated boolean,recorded_at timestamptz);
+      CREATE TABLE inventory.ebay_publication_reconciliation_watches(id bigserial PRIMARY KEY,connection_id integer,
+        external_scope_id text,scope_hash text,scopes jsonb);
+      CREATE TABLE inventory.ebay_automatic_publication_recoveries(attempt_id bigint PRIMARY KEY REFERENCES inventory.quantity_publication_attempts,
+        watch_id bigint REFERENCES inventory.ebay_publication_reconciliation_watches,scope_hash text,scope_keys text[],
+        before_record jsonb,request_evidence jsonb);
       CREATE TABLE channels.channels(id integer PRIMARY KEY,provider text NOT NULL);
       CREATE TABLE channels.channel_connections(id integer PRIMARY KEY,channel_id integer REFERENCES channels.channels,metadata jsonb);
       CREATE TABLE ebay.ebay_oauth_tokens(channel_id integer REFERENCES channels.channels,environment text,external_account_id text,

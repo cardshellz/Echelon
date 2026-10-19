@@ -116,23 +116,36 @@ implements InventoryAvailabilityRuntimePublicationExecutor {
   async execute<T>(
     work: (context: InventoryAvailabilityRuntimePublicationContext) => Promise<T>,
   ): Promise<T> {
+    return this.executeWithClient((_client, context) => work(context));
+  }
+
+  /** Infrastructure composition may resolve exact identities and validate its
+   * durable handoff inside this same pinned, local-only publication transaction. */
+  async executeWithClient<T>(
+    work: (client: PoolClient, context: InventoryAvailabilityRuntimePublicationContext) => Promise<T>,
+  ): Promise<T> {
     const releaseRoutingSlot = await this.routingSlots.acquire();
     let client: PoolClient | null = null;
     let began = false;
+    let committing = false;
+    let discard: Error | undefined;
     try {
       client = await this.connectionPool.connect();
       const connectedClient = client;
       await connectedClient.query("BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE");
       began = true;
-      const result = await work(await createPublicationContext(connectedClient, this.logger, false));
+      const result = await work(connectedClient, await createPublicationContext(connectedClient, this.logger, false));
+      committing = true;
       await connectedClient.query("COMMIT");
       began = false;
       return result;
     } catch (error) {
+      if (client && (!began || committing)) discard = error instanceof Error ? error : new Error(String(error));
       if (began && client) {
         try {
           await client.query("ROLLBACK");
         } catch (rollbackError) {
+          discard = rollbackError instanceof Error ? rollbackError : new Error(String(rollbackError));
           throw new AggregateError(
             [error, rollbackError],
             "Inventory publication routing and authority-lock rollback both failed.",
@@ -142,7 +155,7 @@ implements InventoryAvailabilityRuntimePublicationExecutor {
       throw error;
     } finally {
       try {
-        client?.release();
+        client?.release(discard);
       } finally {
         releaseRoutingSlot();
       }

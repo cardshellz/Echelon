@@ -7,7 +7,7 @@ import { createInventoryCutoverTestDatabase, type InventoryCutoverTestDatabase }
 import { cutoverCompositionBaseSql } from "../../../inventory-planning/__tests__/fixtures/inventory-cutover-composition-database.fixture";
 import { installEbayPublicationInventoryFixture } from "../../../inventory-planning/__tests__/fixtures/ebay-publication-inventory.fixture";
 import { ensureEbayPublicationReady } from "../../../inventory-planning/infrastructure/ebay-publication-readiness.repository";
-import { PostgresQuantityPublicationAdmission } from "../../../inventory-planning/infrastructure/quantity-publication-admission.repository";
+import { PostgresQuantityPublicationAdmission, quantityPublicationScopeLockKey } from "../../../inventory-planning/infrastructure/quantity-publication-admission.repository";
 import { PostgresQuantityProviderResponseRecovery } from "../../../inventory-planning/infrastructure/quantity-provider-response-recovery.repository";
 import { planCurrentCanonicalListingQuantity } from "../../../inventory-planning/infrastructure/quantity-publication-runtime";
 import { observeEbayQuantityRequest } from "../../../inventory-planning/application/quantity-provider-request-evidence";
@@ -19,6 +19,7 @@ import { InventoryPublicationOutboxService } from "../../../inventory-planning/a
 import { InventoryPublicationTransportRegistry, type InventoryPublicationTransportAdapter } from "../../../inventory-planning/application/inventory-publication-transport";
 import { PostgresInventoryPublicationOutboxRepository } from "../../../inventory-planning/infrastructure/inventory-publication-outbox.repository";
 import type { QuantityPublicationScope } from "../../../inventory-planning/domain/quantity-publication-admission";
+import { preflightEvidenceHash } from "../../../inventory-planning/domain/ebay-publication-preflight";
 import { PostgresEbayListingSyncRepository } from "../../infrastructure/ebay-listing-sync.repository";
 import { PostgresEbayPublicationRejectionReader } from "../../../inventory-planning/infrastructure/ebay-publication-rejection.reader";
 import { EbayPublicationCompletionExecution, type PreparedEbayPublication } from "../../ebay-publication-completion.service";
@@ -714,14 +715,44 @@ dbDescribe.sequential("automatic existing eBay Sync recovery through PostgreSQL 
       expect((await database.pool.query("SELECT id,event,evidence FROM channels.ebay_listing_sync_events WHERE job_id=$1 AND id=ANY($2::bigint[]) ORDER BY id", [job.id, oldEvents.map(event => event.id)])).rows).toEqual(oldEvents);
     });
 
-    it("recovers a lost stage acknowledgement before the first publication read or inventory admission", async () => {
+    it.each(["empty", "attributed stock"] as const)("recovers a lost stage acknowledgement with %s history before publication admission", async history => {
       const f = fixture({ publication: true });
       const job = await f.service.enqueue(f.sourceIdentity, "operator", randomUUID(), "publish");
+      type StockSnapshot = { attempt: string; receipt: string; watch: string };
+      const retainedStock: { id: string | null; snapshot: StockSnapshot | null } = { id: null, snapshot: null };
+      const readStockSnapshot = async (attemptId: string): Promise<StockSnapshot> => {
+        const rows = (await database.pool.query<StockSnapshot>(`SELECT to_jsonb(a)::text AS attempt,
+          to_jsonb(r)::text AS receipt,to_jsonb(w)::text AS watch FROM inventory.quantity_publication_attempts a
+          JOIN inventory.ebay_automatic_publication_recoveries r ON r.attempt_id=a.id
+          JOIN inventory.ebay_publication_reconciliation_watches w ON w.id=r.watch_id WHERE a.id=$1`, [attemptId])).rows;
+        expect(rows).toHaveLength(1);
+        return rows[0]!;
+      };
       const recordStage = f.store.stage.bind(f.store);
       const interruptedStage = vi.spyOn(f.store, "stage").mockImplementation(async (...args) => {
         await recordStage(...args);
         if (args[1] === "publish" && args[3] === "started") {
           interruptedStage.mockRestore();
+          if (history === "attributed stock") {
+            // Model an older stock worker's process loss after this saved stage.
+            // The real recovery owner, not a fabricated receipt, retains its
+            // unknown effect and creates the recurring reconciliation duty.
+            const member = scope("P5");
+            const rows = (await database.pool.query<{ id: string }>(`INSERT INTO inventory.quantity_publication_attempts
+              (owner_token,owner_kind,gate_epoch,scope_key,scope,outbox_id,affected_scope_keys,affected_scopes,state,started_at)
+              SELECT $1,'outbox',0,$2,$3::jsonb,o.id,ARRAY[$2],$4::jsonb,'running',$5
+              FROM (SELECT id FROM inventory.inventory_publication_outbox WHERE publication_target_id=3 AND product_variant_id=101
+                ORDER BY desired_revision DESC LIMIT 1) o RETURNING id::text`,
+            [randomUUID(), quantityPublicationScopeLockKey(member), JSON.stringify(member), JSON.stringify([member]), clock()])).rows;
+            expect(rows).toHaveLength(1);
+            retainedStock.id = rows[0]!.id;
+            expect(await f.automaticRecovery.recover({ syncJobId: job.id,
+              syncRevision: args[0].claimedRevision ?? args[0].revision, scopes: [scope("group:PACK"), member] }))
+              .toMatchObject({ superseded: [retainedStock.id], unresolved: [], busy: false, watchId: expect.any(String) });
+            retainedStock.snapshot = await readStockSnapshot(retainedStock.id);
+            expect(JSON.parse(retainedStock.snapshot.attempt)).toMatchObject({ state: "superseded_unknown", error_code: null,
+              completed_at: null, outcome_hash: null, resolution_basis: null });
+          }
           // The stage's durable contract committed, but control never returned
           // to the connector callback. There is no failed-GET event to infer.
           throw new Error("Injected process loss after the publish-stage commit.");
@@ -738,6 +769,19 @@ dbDescribe.sequential("automatic existing eBay Sync recovery through PostgreSQL 
       expect(stages).toEqual([{ evidence: expect.objectContaining({ requestJournalContract: expect.objectContaining({
         version: 1, provider: "ebay", method: "POST", path: PUBLISH_PATH,
       }) }) }]);
+      const checkpoints = (await database.pool.query(`SELECT evidence FROM channels.ebay_listing_sync_events
+        WHERE job_id=$1 AND event='stage_completed' AND evidence->>'key'='publication_not_sent'`, [job.id])).rows;
+      expect(checkpoints).toHaveLength(1);
+      const checkpoint = checkpoints[0]!.evidence;
+      const { hash, ...responseEvidence } = checkpoint.responseEvidence;
+      expect(checkpoint.preparedIntentHash).toBe(hash);
+      expect(hash).toBe(preflightEvidenceHash(responseEvidence));
+      expect(responseEvidence.attemptIds).toEqual([]);
+      if (history === "attributed stock") {
+        expect(responseEvidence.excludedStockHistory).toEqual({ count: 1, preflightNotSentCount: 0, supersededUnknownCount: 1,
+          firstAttemptId: retainedStock.id, lastAttemptId: retainedStock.id, evidenceHash: expect.stringMatching(/^[a-f0-9]{64}$/) });
+        expect(await readStockSnapshot(retainedStock.id!)).toEqual(retainedStock.snapshot);
+      } else expect(responseEvidence.excludedStockHistory).toBeUndefined();
       advance();
       const restarted = fixture({ publication: true, provider: f.provider });
       await restarted.service.processDue(1, job.id);
@@ -745,6 +789,12 @@ dbDescribe.sequential("automatic existing eBay Sync recovery through PostgreSQL 
       expect((await database.pool.query(`SELECT evidence->'responseEvidence'->'attemptIds' AS attempts
         FROM channels.ebay_listing_sync_events WHERE job_id=$1 AND event='stage_completed' AND evidence->>'key'='publication_not_sent'`, [job.id])).rows)
         .toEqual([{ attempts: [] }]);
+      if (retainedStock.id) expect(await readStockSnapshot(retainedStock.id)).toEqual(retainedStock.snapshot);
+      const writes = f.provider.writes.length;
+      await restarted.service.processDue(1, job.id);
+      expect(f.provider.writes).toHaveLength(writes);
+      expect(publishCount(f.provider)).toBe(1);
+      expect((await database.pool.query("SELECT id FROM channels.ebay_listing_sync_jobs")).rows).toEqual([{ id: job.id }]);
     });
 
     it("fences a delayed publication callback after its channel session dies and another worker recovers the zero-attempt stage", async () => {

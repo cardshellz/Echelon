@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { canonicalJson } from "@shared/utils/canonical-json";
 import { createHash } from "node:crypto";
+import { supportsAutomaticEbayReplacement } from "./ebay-automatic-publication-recovery";
 import { isEbayPublicationRequest, terminalEbayResponseEvidence, type TerminalRequestReceipt } from "./quantity-provider-terminal-response";
 
 const databaseId = z.string().regex(/^[1-9][0-9]{0,18}$/)
@@ -44,6 +45,30 @@ export type EbayNoRequestProof =
 
 export const preflightEvidenceHash = (value: unknown): string =>
   createHash("sha256").update(canonicalJson(value)).digest("hex");
+
+/** Attribute stock-only purpose without changing the historical stock outcome.
+ * In particular, an immutable replacement receipt is NOT proof of no send: its
+ * unresolved stock effect remains owned by the existing reconciliation watch. */
+export function attributeEbayOutboxStockHistory(input: {
+  state: unknown; journalContract: unknown; outboxScopeProven: boolean;
+  replacementReceiptProven: boolean; resolutionBasis: unknown; outcomeHash: unknown; completedAt: unknown;
+}, requests: readonly TerminalRequestReceipt[]): "owner_preflight_not_sent" | "superseded_stock_intent" | null {
+  if (!input.outboxScopeProven) return null;
+  // Stock purpose can be implicit in the immutable outbox or explicit in the
+  // original journal contract. Never reinterpret publication/content intent.
+  if (input.journalContract !== null && input.journalContract !== undefined) {
+    const original = ebayRequestJournalContractSchema.safeParse(input.journalContract);
+    if (!original.success || original.data.method !== "POST"
+      || original.data.path !== "/sell/inventory/v1/bulk_update_price_quantity") return null;
+  }
+  if (input.state === "not_sent" && requests.length === 0 && input.resolutionBasis === "owner_preflight_no_request"
+    && hash.safeParse(input.outcomeHash).success && typeof input.completedAt === "string"
+    && Number.isFinite(Date.parse(input.completedAt))) return "owner_preflight_not_sent";
+  return input.state === "superseded_unknown" && input.replacementReceiptProven
+    && supportsAutomaticEbayReplacement({ owner: "outbox", outboxScopeProven: true, requests })
+    && requests.every(request => request.method === "POST" && request.path === "/sell/inventory/v1/bulk_update_price_quantity")
+    ? "superseded_stock_intent" : null;
+}
 
 /** A finished stock/content request is not evidence that a publish was sent.
  * Require an explicit original intent and its complete final mutation history;
