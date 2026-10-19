@@ -45,7 +45,7 @@ export async function prepareShipmentCostRevisions(tx: CostEvidenceTransaction, 
       JOIN procurement.inbound_freight_costs charge ON charge.id=invoice_line.freight_cost_id
       WHERE charge.inbound_shipment_id=${shipmentId}
     )
-    SELECT invoice_line.id,invoice.id AS vendor_invoice_id,invoice_line.freight_cost_id,
+    SELECT invoice_line.id,invoice.id AS vendor_invoice_id,invoice_line.freight_cost_id,invoice_line.purchase_order_line_id,invoice_line.product_variant_id,
       invoice_line.qty_invoiced,invoice_line.unit_cost_mills,invoice_line.unit_cost_cents,invoice_line.line_total_cents,
       invoice.vendor_id,invoice.inbound_shipment_id,invoice.currency,invoice.status,invoice.invoiced_amount_cents,
       invoice.invoice_number,invoice.replaces_invoice_id,
@@ -56,6 +56,7 @@ export async function prepareShipmentCostRevisions(tx: CostEvidenceTransaction, 
   `);
   const invoiceEvidence = invoiceRows.rows.map((line) => ({
     id: line.id, invoiceId: line.vendor_invoice_id, freightCostId: line.freight_cost_id,
+    purchaseOrderLineId: line.purchase_order_line_id, productVariantId: line.product_variant_id,
     vendorId: line.vendor_id, shipmentId: line.inbound_shipment_id, currency: line.currency, status: line.status,
     invoiceNumber: line.invoice_number ?? null, replacesInvoiceId: line.replaces_invoice_id ?? null,
     invoiceTotalCents: line.invoiced_amount_cents, documentLinesTotalCents: line.document_lines_total_cents,

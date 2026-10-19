@@ -94,32 +94,9 @@ describe("purchase-order-lifecycle.service", () => {
     }
   });
 
-  it("builds a financial transition patch without mutating legacy status", () => {
-    const now = new Date("2026-05-16T12:00:00.000Z");
-
-    const change = buildFinancialTransitionChange({
-      po: {
-        status: "received",
-        financialStatus: "invoiced",
-        firstPaidAt: null,
-        fullyPaidAt: null,
-      },
-      target: "paid",
-      userId: "user-2",
-      now,
-    });
-
-    expect(change.patch).toMatchObject({
-      financialStatus: "paid",
-      firstPaidAt: now,
-      fullyPaidAt: now,
-      updatedBy: "user-2",
-    });
-    expect(change.patch).not.toHaveProperty("status");
-    expect(change.history).toMatchObject({
-      fromStatus: "received",
-      toStatus: "received",
-    });
+  it.each(["unbilled", "invoiced", "partially_paid", "paid", "disputed"] as const)("rejects a manual financial patch for %s", target => {
+    expect(() => buildFinancialTransitionChange({ po: { id: 1, financialStatus: "unbilled" }, target }))
+      .toThrow(expect.objectContaining({ statusCode: 409, details: { code: "PO_FINANCIAL_LEDGER_OWNED" } }));
   });
 
   it("exposes legacy transition allowances for current compatibility gates", () => {
@@ -194,7 +171,7 @@ describe("purchase-order-lifecycle.service", () => {
 
     expect(lifecycle.allowedLegacyTransitions).toEqual(["closed"]);
     expect(lifecycle.allowedPhysicalTransitions).toEqual([]);
-    expect(lifecycle.allowedFinancialTransitions).toEqual(["invoiced"]);
+    expect(lifecycle.allowedFinancialTransitions).toEqual([]);
     expect(lifecycle.isTerminal).toBe(false);
     expect(lifecycle.nextActions.map((action) => action.id)).toContain("close");
   });

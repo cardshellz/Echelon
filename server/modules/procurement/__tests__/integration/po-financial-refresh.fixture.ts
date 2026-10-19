@@ -5,6 +5,7 @@ import { fixtureForeignKeys, fixtureTable, qualifiedTable } from "./shipment-lin
 
 const TABLES = [schema.vendors, schema.purchaseOrders, schema.purchaseOrderLines,
   schema.vendorInvoices, schema.vendorInvoiceLines, schema.vendorInvoicePoLinks,
+  schema.inboundFreightCosts,
   schema.apPayments, schema.apPaymentAllocations, schema.poStatusHistory, schema.poExceptions];
 const LEASE = "echelon.procurement.po-financial-refresh";
 export const REFRESH_ACTOR = "po-financial-refresh-reviewer";

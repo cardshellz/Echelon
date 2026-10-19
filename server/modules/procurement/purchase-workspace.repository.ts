@@ -110,6 +110,11 @@ export function createPurchaseWorkspaceRepository(database: Database = defaultDa
             SELECT vendor_invoice_id AS "invoiceId", inbound_shipment_id AS "shipmentId"
             FROM procurement.inbound_freight_costs
             WHERE inbound_shipment_id = ANY(${sql.param(shipmentIds)}::int[]) AND vendor_invoice_id IS NOT NULL
+            UNION
+            SELECT invoice_line.vendor_invoice_id AS "invoiceId", cost.inbound_shipment_id AS "shipmentId"
+            FROM procurement.vendor_invoice_lines invoice_line
+            JOIN procurement.inbound_freight_costs cost ON cost.id=invoice_line.freight_cost_id
+            WHERE cost.inbound_shipment_id = ANY(${sql.param(shipmentIds)}::int[])
             ORDER BY "invoiceId", "shipmentId" LIMIT ${PURCHASE_WORKSPACE_LINE_LIMIT + 1}
           `, "shipment invoice links", PURCHASE_WORKSPACE_LINE_LIMIT),
           await readRows(tx, sql`

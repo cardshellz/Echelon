@@ -1,5 +1,16 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
+// Arithmetic fixtures supply a verified source adapter. Real PostgreSQL ownership
+// regressions separately cover contradictory rows across these projections.
+vi.mock("../../shipment-billing-ownership.repository", () => ({
+  readShipmentBillingOwnership: vi.fn(async (_client: unknown, costs: Array<{ id: number; vendorInvoiceId: number | null }>) => new Map(costs.map(cost => [cost.id, {
+    state: cost.vendorInvoiceId == null ? "unbilled" : "billed", activeInvoiceId: cost.vendorInvoiceId,
+    activeInvoiceLineId: cost.vendorInvoiceId == null ? null : cost.id, activeInvoiceLineIds: cost.vendorInvoiceId == null ? [] : [cost.id],
+    referencedInvoiceIds: cost.vendorInvoiceId == null ? [] : [cost.vendorInvoiceId], issueCode: null,
+    message: "Verified source fixture", canCreateInvoice: cost.vendorInvoiceId == null, canUnlink: false, canLinkExistingLine: cost.vendorInvoiceId == null,
+  }]))),
+}));
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Unit tests for Spec D Phase 1 — shipment invoices read-only.
 //
@@ -23,11 +34,14 @@ const mockSelectChain: any = {
   offset: vi.fn().mockReturnThis(),
 };
 
-vi.mock("../../../../db", () => ({
-  db: {
-    select: vi.fn().mockReturnValue(mockSelectChain),
-  },
-}));
+vi.mock("../../../../db", () => {
+  const db = { select: vi.fn().mockReturnValue(mockSelectChain), transaction: vi.fn() };
+  db.transaction.mockImplementation(async (work: (tx: unknown) => Promise<unknown>) => work({
+    select: (projection?: unknown) => projection === undefined
+      ? { from: () => ({ where: async () => [] }) } : db.select(projection),
+  }));
+  return { db };
+});
 
 // ── Mock schema tables ──
 vi.mock("@shared/schema", () => ({

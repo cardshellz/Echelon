@@ -1,3 +1,7 @@
+import { readShipmentBillingOwnership, readInvoiceSourceCapabilities } from "./shipment-billing-ownership.repository";
+import { readPoFinancialEvidenceSourcesWithClient } from "./po-financial-evidence.repository";
+import { buildPoFinancialWorkflow } from "./domain/po-financial-workflow";
+import { buildPoFinancialMilestonePatch } from "./domain/po-financial-milestones";
 import { readInvoiceWorkList, readPaymentWorkList } from "./ap-work-list.repository";
 import type { InvoiceWorkListQuery, PaymentWorkListQuery, InvoiceWorkListPage, PaymentWorkListPage } from "@shared/procurement/ap-work-list";
 
@@ -524,8 +528,10 @@ async function appendApMutationAudit(
   actor: string | undefined,
   context: Record<string, unknown>,
   client: ApLedgerDbClient,
+  recordedAt?: Date,
 ): Promise<void> {
   await client.insert(auditEvents).values({
+    ...(recordedAt ? { timestamp: recordedAt } : {}),
     level: "AUDIT",
     actor: actor ?? "system",
     action: `ap_ledger.${action}`,
@@ -582,6 +588,12 @@ async function lockEditableInvoice(
   }
 
   return invoice;
+}
+
+async function assertInvoiceSourceCapability(client: ApLedgerDbClient, invoiceId: number,
+  action: "purchaseOrderLinks" | "approval" | "payment"): Promise<void> {
+  const capability = (await readInvoiceSourceCapabilities(client, invoiceId))[action];
+  if (!capability.allowed) throw new ApLedgerError(capability.reason, 409, { code: capability.code, invoiceId });
 }
 
 async function lockInvoiceForMatch(
@@ -858,20 +870,12 @@ export async function recomputePoFinancialAggregates(
     updatedAt: now,
   };
 
-  // Stamp lifecycle timestamps on first occurrence only.
-  if (currentFinancial === "unbilled" && newFinancial !== "unbilled" && !po.firstInvoicedAt) {
-    patch.firstInvoicedAt = now;
-  }
-  if (
-    (currentFinancial === "unbilled" || currentFinancial === "invoiced") &&
-    (newFinancial === "partially_paid" || newFinancial === "paid") &&
-    !po.firstPaidAt
-  ) {
-    patch.firstPaidAt = now;
-  }
-  if (newFinancial === "paid" && !po.fullyPaidAt) {
-    patch.fullyPaidAt = now;
-  }
+  // Legacy whole-invoice sums above remain compatibility caches. Only exact
+  // attributed evidence can establish a new financial milestone.
+  const source = (await readPoFinancialEvidenceSourcesWithClient(client, [poId])).get(poId);
+  if (!source) throw new ApLedgerError("Purchase order financial source is unavailable", 409,
+    { code: "PO_FINANCIAL_EVIDENCE_SOURCE_MISSING", purchaseOrderId: poId });
+  Object.assign(patch, buildPoFinancialMilestonePatch({ workflow: buildPoFinancialWorkflow(source), existing: po, now }));
 
   await client.update(purchaseOrders).set(patch).where(eq(purchaseOrders.id, poId));
 
@@ -1193,7 +1197,8 @@ export async function getInvoiceById(id: number) {
 
     const { readInvoiceReplacementDetail } = await import("./ap-invoice-replacement.service");
     const replacementDetail = await readInvoiceReplacementDetail(tx, id);
-    return { ...invoice, ...replacementDetail, capabilities: { edit: invoiceEditCapability({ ...invoice, hasPaymentHistory: payments.length > 0 }) },
+    const sourceCapabilities = await readInvoiceSourceCapabilities(tx, id);
+    return { ...invoice, ...replacementDetail, sourceCapabilities, capabilities: { edit: invoiceEditCapability({ ...invoice, hasPaymentHistory: payments.length > 0 }) },
       paymentReviewRequired: payments.some((payment) => classifyApPaymentState(payment.paymentStatus) === "review_required"),
       poLinks, payments, lines: lines.map((line) => ({ ...line, costReviewVersion: invoiceCostReviewVersion(line) })), attachments };
   }, { isolationLevel: "repeatable read", accessMode: "read only" });
@@ -1420,6 +1425,7 @@ async function approveInvoiceInTransaction(
   if (!inv) {
     throw new ApLedgerError("Invoice not found", 404, { code: "AP_INVOICE_NOT_FOUND" });
   }
+  await assertInvoiceSourceCapability(tx, id, "approval");
   if (["approved", "partially_paid", "paid"].includes(inv.status)) {
     await reconcileApprovedInvoiceVariance(id, tx, userId);
     return {
@@ -1656,6 +1662,7 @@ export async function linkPoToInvoice(
 
   const result = await runApCostTransaction(async (tx: ApLedgerDbClient) => {
     const invoice = await lockEditableInvoice(tx, normalizedInvoiceId);
+    await assertInvoiceSourceCapability(tx, normalizedInvoiceId, "purchaseOrderLinks");
     await lockMatchingPurchaseOrder(tx, normalizedPoId, invoice.vendorId, invoice.currency);
 
     // The invoice lock serializes this relationship owner. An existing link
@@ -1719,6 +1726,7 @@ export async function unlinkPoFromInvoice(
   const normalizedPoId = requireCommandId(purchaseOrderId, "purchaseOrderId");
   const result = await runApCostTransaction(async (tx: ApLedgerDbClient) => {
     const invoice = await lockEditableInvoice(tx, normalizedInvoiceId);
+    await assertInvoiceSourceCapability(tx, normalizedInvoiceId, "purchaseOrderLinks");
     await lockMatchingPurchaseOrder(tx, normalizedPoId, invoice.vendorId, invoice.currency);
     const [existingLink] = await tx
       .select({ id: vendorInvoicePoLinks.id })
@@ -1952,6 +1960,7 @@ async function lockAndValidatePaymentInvoices(
         code: "AP_PAYMENT_ALLOCATION_INVOICE_NOT_PAYABLE",
       });
     }
+    await assertInvoiceSourceCapability(tx, invoice.id, "payment");
     const balanceCents = databaseMoneyToBigInt(
       invoice.balanceCents,
       `invoice[${invoice.id}].balanceCents`,
@@ -2593,6 +2602,7 @@ export async function importLinesFromPO(
   const normalizedPoId = requireCommandId(purchaseOrderId, "purchaseOrderId");
   const result = await runApCostTransaction(async (tx: ApLedgerDbClient) => {
     const invoice = await lockEditableInvoice(tx, normalizedInvoiceId);
+    await assertInvoiceSourceCapability(tx, normalizedInvoiceId, "purchaseOrderLinks");
     await lockMatchingPurchaseOrder(tx, normalizedPoId, invoice.vendorId, invoice.currency);
 
     const [link] = await tx
@@ -2675,6 +2685,7 @@ export async function addInvoiceLine(invoiceId: number, data: {
 
   const result = await runApCostTransaction(async (tx: ApLedgerDbClient) => {
     await lockEditableInvoice(tx, normalizedInvoiceId);
+    if (purchaseOrderLineId !== undefined || productVariantId !== undefined) await assertInvoiceSourceCapability(tx, normalizedInvoiceId, "purchaseOrderLinks");
     if (purchaseOrderLineId !== undefined) {
       await requireLinkedPoLine(tx, normalizedInvoiceId, purchaseOrderLineId);
     }
@@ -2905,6 +2916,7 @@ export async function removeInvoiceLine(lineId: number, actorId?: string) {
     const [lineReference] = await tx
       .select({
         vendorInvoiceId: vendorInvoiceLines.vendorInvoiceId,
+        freightCostId: vendorInvoiceLines.freightCostId,
         purchaseOrderLineId: vendorInvoiceLines.purchaseOrderLineId,
       })
       .from(vendorInvoiceLines)
@@ -2917,6 +2929,9 @@ export async function removeInvoiceLine(lineId: number, actorId?: string) {
     }
 
     await lockEditableInvoice(tx, lineReference.vendorInvoiceId);
+    if (lineReference.freightCostId !== null) throw new ApLedgerError(
+      "Shipment source lines are retained billing evidence. Void the invoice and use its reviewed replacement workflow.",
+      409, { code: "AP_SHIPMENT_INVOICE_SOURCE_IMMUTABLE", lineId: normalizedLineId });
     if (lineReference.purchaseOrderLineId != null) {
       await requireLinkedPoLine(
         tx,
@@ -3389,61 +3404,41 @@ export async function removeAttachment(id: number, actorId?: string) {
  * Get vendors with unbilled cost rows on a shipment.
  * Used by the vendor picker in the Add Invoice flow.
  */
-export async function getCostVendorsForShipment(shipmentId: number) {
-  const rows = await db
-    .select({
-      vendorId: inboundFreightCosts.vendorId,
-      vendorName: vendors.name,
-      unbilledCostCount: sql<number>`COUNT(*)::int`,
-      unbilledTotalCents: sql<number>`COALESCE(SUM(COALESCE(${inboundFreightCosts.actualCents}, ${inboundFreightCosts.estimatedCents}, 0)), 0)::int`,
-    })
-    .from(inboundFreightCosts)
-    .innerJoin(vendors, eq(inboundFreightCosts.vendorId, vendors.id))
-    .where(
-      and(
-        eq(inboundFreightCosts.inboundShipmentId, shipmentId),
-        sql`${inboundFreightCosts.vendorInvoiceId} IS NULL`,
-        sql`${inboundFreightCosts.vendorId} IS NOT NULL`,
-      ),
-    )
-    .groupBy(inboundFreightCosts.vendorId, vendors.name)
-    .orderBy(vendors.name);
-
-  return {
-    vendors: rows.map((r) => ({
-      vendorId: r.vendorId!,
-      vendorName: r.vendorName,
-      unbilledCostCount: r.unbilledCostCount,
-      unbilledTotalCents: r.unbilledTotalCents,
-    })),
-  };
+async function readUnbilledShipmentCosts(client: ApLedgerDbClient, shipmentId: number, vendorId?: number) {
+  const rows = await client.select({ cost: inboundFreightCosts, vendorDisplayName: vendors.name })
+    .from(inboundFreightCosts).leftJoin(vendors, eq(vendors.id, inboundFreightCosts.vendorId))
+    .where(and(eq(inboundFreightCosts.inboundShipmentId, shipmentId),
+      ...(vendorId === undefined ? [] : [eq(inboundFreightCosts.vendorId, vendorId)])))
+    .orderBy(asc(inboundFreightCosts.id));
+  const ownership = await readShipmentBillingOwnership(client, rows.map(row => row.cost));
+  return rows.flatMap(row => {
+    const billingOwnership = ownership.get(row.cost.id)!;
+    return billingOwnership.canCreateInvoice ? [{ ...row.cost, vendorDisplayName: row.vendorDisplayName, billingOwnership }] : [];
+  });
 }
 
-/**
- * List unbilled cost rows for a (shipmentId, vendorId) pair.
- * Used by the Add Invoice modal for line preview.
- */
-export async function listCostsForInvoiceCreation(shipmentId: number, vendorId: number) {
-  const rows = await db
-    .select({
-      cost: inboundFreightCosts,
-      vendorName: vendors.name,
-    })
-    .from(inboundFreightCosts)
-    .leftJoin(vendors, eq(vendors.id, inboundFreightCosts.vendorId))
-    .where(
-      and(
-        eq(inboundFreightCosts.inboundShipmentId, shipmentId),
-        eq(inboundFreightCosts.vendorId, vendorId),
-        sql`${inboundFreightCosts.vendorInvoiceId} IS NULL`,
-      ),
-    )
-    .orderBy(inboundFreightCosts.costType);
+export async function getCostVendorsForShipment(shipmentId: number) {
+  return db.transaction(async tx => {
+    const costs = await readUnbilledShipmentCosts(tx, requireCommandId(shipmentId, "shipmentId"));
+    const groups = new Map<number, { vendorId: number; vendorName: string; unbilledCostCount: number; total: bigint }>();
+    for (const cost of costs) {
+      if (cost.vendorId === null || cost.vendorDisplayName === null) continue;
+      const group = groups.get(cost.vendorId) ?? { vendorId: cost.vendorId, vendorName: cost.vendorDisplayName, unbilledCostCount: 0, total: BigInt(0) };
+      group.unbilledCostCount++;
+      group.total += databaseMoneyToBigInt(cost.actualCents ?? cost.estimatedCents ?? 0, "shipmentCost.amountCents");
+      groups.set(cost.vendorId, group);
+    }
+    return { vendors: [...groups.values()].sort((a, b) => a.vendorName.localeCompare(b.vendorName)).map(({ total, ...group }) => ({
+      ...group, unbilledTotalCents: bigintMoneyToNumber(total, "shipmentCosts.unbilledTotalCents"),
+    })) };
+  }, { isolationLevel: "repeatable read", accessMode: "read only" });
+}
 
-  return rows.map((r) => ({
-    ...r.cost,
-    vendorDisplayName: r.vendorName,
-  }));
+/** Candidate availability is the same source ownership decision used by writes. */
+export async function listCostsForInvoiceCreation(shipmentId: number, vendorId: number) {
+  return db.transaction(tx => readUnbilledShipmentCosts(tx,
+    requireCommandId(shipmentId, "shipmentId"), requireCommandId(vendorId, "vendorId")),
+  { isolationLevel: "repeatable read", accessMode: "read only" });
 }
 
 /**
@@ -3452,9 +3447,7 @@ export async function listCostsForInvoiceCreation(shipmentId: number, vendorId: 
  *
  * Mirrors the addLinesFromPO pattern from shipment-tracking.service.ts.
  */
-export async function createInvoiceFromShipmentCosts(
-  shipmentId: number,
-  data: {
+export type CreateShipmentCostInvoiceInput = {
     vendorId: number;
     invoiceNumber: string;
     invoiceDate?: Date;
@@ -3468,10 +3461,17 @@ export async function createInvoiceFromShipmentCosts(
       description?: string;
     }>;
     notes?: string;
-  },
-  actorId?: string,
-) {
-  // ── 1. Pre-flight validation (non-locked reads) ──
+  };
+
+export async function createInvoiceFromShipmentCosts(shipmentId: number, data: CreateShipmentCostInvoiceInput, actorId?: string) {
+  const now = new Date();
+  return runApCostTransaction(tx => createInvoiceFromShipmentCostsInTransaction(tx, shipmentId, data, actorId, now));
+}
+
+export async function createInvoiceFromShipmentCostsInTransaction(tx: ApLedgerDbClient, shipmentId: number,
+  data: CreateShipmentCostInvoiceInput, actorId: string | undefined, now: Date) {
+  if (!(now instanceof Date) || !Number.isFinite(now.getTime())) throw new ApLedgerError("A valid invoice command clock is required", 500);
+  await lockInventoryCostGraph(tx);
   rejectUnexpectedFields(data as Record<string, unknown>, new Set([
     "vendorId",
     "invoiceNumber",
@@ -3481,15 +3481,17 @@ export async function createInvoiceFromShipmentCosts(
     "lineOverrides",
     "notes",
   ]), "shipment cost invoice create");
-  const normalizedShipmentId = requirePositiveInteger(shipmentId, "shipmentId");
-  const vendorId = requirePositiveInteger(data.vendorId, "vendorId");
+  const normalizedShipmentId = requireCommandId(shipmentId, "shipmentId");
+  const vendorId = requireCommandId(data.vendorId, "vendorId");
   const invoiceNumber = normalizeRequiredText(data.invoiceNumber, "invoiceNumber", 100);
   const invoiceDateInput = normalizeOptionalDate(data.invoiceDate, "invoiceDate");
   const dueDateInput = normalizeOptionalDate(data.dueDate, "dueDate");
   const notes = normalizeOptionalText(data.notes, "notes", 10_000);
+  if (data.costRowIds !== undefined && !Array.isArray(data.costRowIds)) throw new ApLedgerError("costRowIds must be an array", 400);
+  if (data.lineOverrides !== undefined && !Array.isArray(data.lineOverrides)) throw new ApLedgerError("lineOverrides must be an array", 400);
   const requestedCostIds = data.costRowIds === undefined
     ? undefined
-    : [...new Set(data.costRowIds.map((id) => requirePositiveInteger(id, "costRowIds[]")))]
+    : [...new Set(data.costRowIds.map((id) => requireCommandId(id, "costRowIds[]")))]
       .sort((left, right) => left - right);
   if (requestedCostIds && requestedCostIds.length === 0) {
     throw new ApLedgerError("costRowIds must contain at least one ID when provided", 400, {
@@ -3537,7 +3539,7 @@ export async function createInvoiceFromShipmentCosts(
   }
 
   // ── 2. Transaction: lock, validate, insert ──
-  const result = await runApCostTransaction(async (tx: ApLedgerDbClient) => {
+
     const [shipment] = await tx
       .select({ shipmentNumber: inboundShipments.shipmentNumber, status: inboundShipments.status })
       .from(inboundShipments)
@@ -3561,11 +3563,12 @@ export async function createInvoiceFromShipmentCosts(
     if (requestedCostIds) {
       lockedRows = await tx.execute(sql`
         SELECT id, cost_type, description, actual_cents, estimated_cents,
-               performed_by_name, vendor_id, vendor_invoice_id, cost_status
+               performed_by_name, vendor_id, vendor_invoice_id, cost_status, currency, inbound_shipment_id
         FROM procurement.inbound_freight_costs
         WHERE inbound_shipment_id = ${normalizedShipmentId}
           AND vendor_id = ${vendorId}
           AND vendor_invoice_id IS NULL
+          AND NOT EXISTS(SELECT 1 FROM procurement.vendor_invoice_lines source WHERE source.freight_cost_id=procurement.inbound_freight_costs.id)
           AND id = ANY(ARRAY[${sql.join(requestedCostIds, sql`, `)}]::integer[])
         ORDER BY id
         FOR UPDATE
@@ -3573,20 +3576,29 @@ export async function createInvoiceFromShipmentCosts(
     } else {
       lockedRows = await tx.execute(sql`
         SELECT id, cost_type, description, actual_cents, estimated_cents,
-               performed_by_name, vendor_id, vendor_invoice_id, cost_status
+               performed_by_name, vendor_id, vendor_invoice_id, cost_status, currency, inbound_shipment_id
         FROM procurement.inbound_freight_costs
         WHERE inbound_shipment_id = ${normalizedShipmentId}
           AND vendor_id = ${vendorId}
           AND vendor_invoice_id IS NULL
+          AND NOT EXISTS(SELECT 1 FROM procurement.vendor_invoice_lines source WHERE source.freight_cost_id=procurement.inbound_freight_costs.id)
         ORDER BY id
         FOR UPDATE
       `);
     }
 
     const costs = lockedRows.rows as any[];
+    const ownership = await readShipmentBillingOwnership(tx, costs.map(cost => ({ id: cost.id,
+      inboundShipmentId: cost.inbound_shipment_id, vendorId: cost.vendor_id,
+      vendorInvoiceId: cost.vendor_invoice_id, currency: cost.currency })));
+    const blocked = costs.filter(cost => !ownership.get(cost.id)?.canCreateInvoice);
+    if (blocked.length) throw new ApLedgerError("Selected charges have existing or ambiguous invoice ownership. Review their source invoices.", 409,
+      { code: "AP_SHIPMENT_BILLING_REVIEW_REQUIRED", costIds: blocked.map(cost => cost.id) });
+
 
     if (costs.length === 0) {
-      throw new ApLedgerError("No unbilled cost rows found for this vendor on this shipment", 400);
+      throw new ApLedgerError("No available unbilled cost rows found for this vendor on this shipment", requestedCostIds ? 409 : 400,
+        { code: requestedCostIds ? "AP_SHIPMENT_COST_SELECTION_STALE" : "AP_SHIPMENT_COST_SELECTION_EMPTY" });
     }
 
     if (requestedCostIds) {
@@ -3642,18 +3654,18 @@ export async function createInvoiceFromShipmentCosts(
     for (const cost of costs) {
       lineNum++;
       const costId = Number(cost.id);
-      const costAmount = requireNonnegativeInteger(
-        cost.actual_cents !== null && cost.actual_cents !== undefined
-          ? cost.actual_cents
-          : cost.estimated_cents ?? 0,
-        `shipmentCost[${cost.id}].amountCents`,
-      );
+      const override = overrideMap.get(costId);
+      const recordedAmount = cost.actual_cents ?? cost.estimated_cents;
+      if (override === undefined && (recordedAmount === null || recordedAmount === undefined)) {
+        throw new ApLedgerError("This charge has no recorded amount. Enter an explicit invoice line amount before creating the invoice.", 422,
+          { code: "AP_SHIPMENT_COST_AMOUNT_REQUIRED", shipmentCostId: costId });
+      }
       const label = String(cost.cost_type).replace(/_/g, " ");
       const defaultDescription = `${label}: ${cost.performed_by_name || vendor.name}`;
-      const override = overrideMap.get(costId);
 
       const qtyInvoiced = override?.qtyInvoiced ?? 1;
-      const unitCostMills = override?.unitCostMills ?? centsToMills(costAmount);
+      const unitCostMills = override?.unitCostMills ?? centsToMills(
+        requireNonnegativeInteger(recordedAmount, `shipmentCost[${cost.id}].amountCents`));
       const unitCostCents = millsToCents(unitCostMills);
       const description = override?.description ?? defaultDescription;
       const lineTotalCents = computeLineTotalCentsFromMills(unitCostMills, qtyInvoiced);
@@ -3682,7 +3694,7 @@ export async function createInvoiceFromShipmentCosts(
     const totalCents = Number(totalCentsBigInt);
 
     // ── 5. Insert vendor_invoices row ──
-    const invoiceDate = invoiceDateInput ?? new Date();
+    const invoiceDate = invoiceDateInput ?? now;
     const dueDate = dueDateInput ?? (vendor.paymentTermsDays
       ? new Date(invoiceDate.getTime() + vendor.paymentTermsDays * 86400000)
       : undefined);
@@ -3697,7 +3709,7 @@ export async function createInvoiceFromShipmentCosts(
           inboundShipmentId: normalizedShipmentId,
           status: "received",
           invoiceDate,
-          receivedDate: new Date(),
+          receivedDate: now,
           dueDate: dueDate ?? null,
           invoicedAmountCents: totalCents,
           balanceCents: totalCents,
@@ -3705,7 +3717,7 @@ export async function createInvoiceFromShipmentCosts(
           currency: "USD",
           notes: notes ?? null,
           createdBy: actorId,
-          updatedBy: actorId,
+          updatedBy: actorId, createdAt: now, updatedAt: now,
         })
         .returning();
     } catch (error: any) {
@@ -3729,7 +3741,7 @@ export async function createInvoiceFromShipmentCosts(
         unitCostCents: line.unitCostCents,
         unitCostMills: line.unitCostMills,
         lineTotalCents: line.lineTotalCents,
-        matchStatus: "matched",
+        matchStatus: "matched", createdAt: now, updatedAt: now,
       });
     }
 
@@ -3742,7 +3754,7 @@ export async function createInvoiceFromShipmentCosts(
           invoice_date = ${invoiceDate.toISOString()},
           due_date = ${dueDate ? dueDate.toISOString() : null},
           cost_status = 'invoiced',
-          updated_at = NOW()
+          updated_at = ${now}
       WHERE id = ANY(ARRAY[${sql.join(costIds, sql`, `)}]::integer[])
     `);
 
@@ -3757,7 +3769,7 @@ export async function createInvoiceFromShipmentCosts(
         freightCostIds: costIds,
         totalCents,
       },
-      tx,
+      tx, now,
     );
 
     return {
@@ -3765,9 +3777,6 @@ export async function createInvoiceFromShipmentCosts(
       lines,
       inboundShipmentId: normalizedShipmentId,
     };
-  });
-
-  return result;
 }
 
 
@@ -3775,9 +3784,12 @@ export async function createInvoiceFromShipmentCosts(
  * Get payment status for each shipment cost + summary totals.
  */
 export async function getShipmentCostPaymentStatus(shipmentId: number) {
-  const costs = await db
+  return db.transaction(async tx => {
+  const costs = await tx
     .select({
       costId: inboundFreightCosts.id,
+      vendorId: inboundFreightCosts.vendorId, currency: inboundFreightCosts.currency,
+      inboundShipmentId: inboundFreightCosts.inboundShipmentId,
       costType: inboundFreightCosts.costType,
       description: inboundFreightCosts.description,
       performedByName: inboundFreightCosts.performedByName,
@@ -3800,6 +3812,11 @@ export async function getShipmentCostPaymentStatus(shipmentId: number) {
     .leftJoin(vendorInvoices, eq(inboundFreightCosts.vendorInvoiceId, vendorInvoices.id))
     .where(eq(inboundFreightCosts.inboundShipmentId, shipmentId));
 
+  const ownership = await readShipmentBillingOwnership(tx, costs.map(cost => ({ ...cost, id: cost.costId })));
+  if (costs.some(cost => ownership.get(cost.costId)?.state === "review_required")) {
+    throw new ApLedgerError("Shipment payment totals are unavailable until conflicting invoice ownership is reviewed.", 409,
+      { code: "AP_SHIPMENT_BILLING_REVIEW_REQUIRED", shipmentId });
+  }
   let totalCents = 0;
   let linkedCents = 0;
   let paidCents = 0;
@@ -3881,6 +3898,7 @@ export async function getShipmentCostPaymentStatus(shipmentId: number) {
 
     return {
       costId: c.costId,
+      billingOwnership: ownership.get(c.costId)!,
       costType: c.costType,
       description: c.description,
       performedByName: c.performedByName,
@@ -3914,6 +3932,7 @@ export async function getShipmentCostPaymentStatus(shipmentId: number) {
       outstandingCents,
     },
   };
+  }, { isolationLevel: "repeatable read", accessMode: "read only" });
 }
 
 /**
@@ -3921,7 +3940,13 @@ export async function getShipmentCostPaymentStatus(shipmentId: number) {
  * Uses vendor_invoices.inbound_shipment_id direct FK.
  */
 export async function getShipmentInvoicesSummary(shipmentId: number) {
-  const rows = await db
+  return db.transaction(async tx => {
+  const costs = await tx.select().from(inboundFreightCosts).where(eq(inboundFreightCosts.inboundShipmentId, shipmentId));
+  const ownership = await readShipmentBillingOwnership(tx, costs);
+  if ([...ownership.values()].some(owner => owner.state === "review_required")) throw new ApLedgerError(
+    "Shipment invoice totals are unavailable until conflicting billing ownership is reviewed.", 409,
+    { code: "AP_SHIPMENT_BILLING_REVIEW_REQUIRED", shipmentId });
+  const rows = await tx
     .select({
       invoice: vendorInvoices,
       vendorName: vendors.name,
@@ -3929,7 +3954,10 @@ export async function getShipmentInvoicesSummary(shipmentId: number) {
     })
     .from(vendorInvoices)
     .leftJoin(vendors, eq(vendorInvoices.vendorId, vendors.id))
-    .where(eq(vendorInvoices.inboundShipmentId, shipmentId))
+    .where(sql`${vendorInvoices.inboundShipmentId}=${shipmentId}
+      OR EXISTS(SELECT 1 FROM procurement.inbound_freight_costs cost WHERE cost.inbound_shipment_id=${shipmentId}
+        AND (cost.vendor_invoice_id=${vendorInvoices.id} OR EXISTS(SELECT 1 FROM procurement.vendor_invoice_lines line
+          WHERE line.vendor_invoice_id=${vendorInvoices.id} AND line.freight_cost_id=cost.id)))`)
     .orderBy(desc(vendorInvoices.invoiceDate));
 
   let totalInvoiced = BigInt(0);
@@ -3969,6 +3997,7 @@ export async function getShipmentInvoicesSummary(shipmentId: number) {
       activeInvoiceCount,
     },
   };
+  }, { isolationLevel: "repeatable read", accessMode: "read only" });
 }
 
 /**
@@ -3976,8 +4005,9 @@ export async function getShipmentInvoicesSummary(shipmentId: number) {
  * Returns enriched cost array with linkedInvoice and derivedStatus fields.
  */
 export async function enrichCostsWithInvoiceInfo(shipmentId: number) {
+  return db.transaction(async tx => {
   const costVendor = alias(vendors, "shipment_cost_vendor");
-  const costs = await db
+  const costs = await tx
     .select({
       cost: inboundFreightCosts,
       vendorName: costVendor.name,
@@ -3996,7 +4026,9 @@ export async function enrichCostsWithInvoiceInfo(shipmentId: number) {
     .leftJoin(costVendor, eq(inboundFreightCosts.vendorId, costVendor.id))
     .where(eq(inboundFreightCosts.inboundShipmentId, shipmentId));
 
+  const ownership = await readShipmentBillingOwnership(tx, costs.map(row => row.cost));
   return costs.map((c) => {
+    const billingOwnership = ownership.get(c.cost.id)!;
     const linkedInvoice = c.invoiceId
       ? {
           id: c.invoiceId,
@@ -4007,8 +4039,10 @@ export async function enrichCostsWithInvoiceInfo(shipmentId: number) {
         }
       : null;
 
-    let derivedStatus: "unbilled" | "invoiced" | "paid" | "voided" = "unbilled";
-    if (c.invoiceId && c.invoiceStatus) {
+    let derivedStatus: "unbilled" | "invoiced" | "paid" | "voided" | "review_required" = "unbilled";
+    if (billingOwnership.state === "review_required") {
+      derivedStatus = "review_required";
+    } else if (c.invoiceId && c.invoiceStatus) {
       if (c.invoiceStatus === "voided") {
         derivedStatus = "voided";
       } else {
@@ -4019,156 +4053,97 @@ export async function enrichCostsWithInvoiceInfo(shipmentId: number) {
 
     return {
       ...c.cost,
+      billingOwnership,
       vendorName: c.vendorName,
       linkedInvoice,
       derivedStatus,
     };
   });
+  }, { isolationLevel: "repeatable read", accessMode: "read only" });
 }
 
 /**
  * Link a single shipment cost to an existing vendor invoice.
  */
-export async function linkCostToInvoice(
-  costId: number,
-  vendorInvoiceId: number,
-  actorId?: string,
-) {
-  const normalizedCostId = requirePositiveInteger(costId, "costId");
-  const normalizedInvoiceId = requirePositiveInteger(vendorInvoiceId, "vendorInvoiceId");
-  return runApCostTransaction(async (tx: ApLedgerDbClient) => {
-    const [cost] = await tx
-      .select()
-      .from(inboundFreightCosts)
-      .where(eq(inboundFreightCosts.id, normalizedCostId))
-      .for("update");
-    if (!cost) {
-      throw new ApLedgerError("Shipment cost not found", 404, {
-        code: "AP_SHIPMENT_COST_NOT_FOUND",
-        costId: normalizedCostId,
-      });
+export async function linkCostToInvoice(costId: number, vendorInvoiceId: number, actorId?: string, invoiceLineId?: number) {
+  const normalizedCostId = requireCommandId(costId, "costId");
+  const normalizedInvoiceId = requireCommandId(vendorInvoiceId, "vendorInvoiceId");
+  const normalizedLineId = invoiceLineId === undefined ? undefined : requireCommandId(invoiceLineId, "invoiceLineId");
+  const now = new Date();
+  return runApCostTransaction(async tx => {
+    const [cost] = await tx.select().from(inboundFreightCosts).where(eq(inboundFreightCosts.id, normalizedCostId)).for("update");
+    if (!cost) throw new ApLedgerError("Shipment cost not found", 404, { code: "AP_SHIPMENT_COST_NOT_FOUND", costId });
+    const owner = (await readShipmentBillingOwnership(tx, [cost])).get(cost.id)!;
+    if (owner.state === "billed" && owner.activeInvoiceId === normalizedInvoiceId
+      && (normalizedLineId === undefined || owner.activeInvoiceLineIds.includes(normalizedLineId))) {
+      return { costId: cost.id, vendorInvoiceId: normalizedInvoiceId, invoiceLineId: normalizedLineId ?? owner.activeInvoiceLineId, changed: false };
     }
-    if (cost.vendorInvoiceId && cost.vendorInvoiceId !== normalizedInvoiceId) {
-      throw new ApLedgerError("Shipment cost is already linked to another invoice", 409, {
-        code: "AP_SHIPMENT_COST_ALREADY_LINKED",
-        costId: normalizedCostId,
-        vendorInvoiceId: cost.vendorInvoiceId,
-      });
+    if (!owner.canLinkExistingLine || (cost.vendorInvoiceId !== null && cost.vendorInvoiceId !== normalizedInvoiceId)) {
+      throw new ApLedgerError("This charge already has invoice source evidence. Review the original invoice; billing ownership cannot be reassigned.", 409,
+        { code: "AP_SHIPMENT_BILLING_REVIEW_REQUIRED", costId, billingOwnership: owner });
     }
-
-    const invoice = await lockEditableInvoice(tx, normalizedInvoiceId);
-    const [invoiceDetails] = await tx
-      .select({
-        inboundShipmentId: vendorInvoices.inboundShipmentId,
-        invoiceNumber: vendorInvoices.invoiceNumber,
-        invoiceDate: vendorInvoices.invoiceDate,
-        dueDate: vendorInvoices.dueDate,
-      })
-      .from(vendorInvoices)
-      .where(eq(vendorInvoices.id, normalizedInvoiceId));
-    if (cost.vendorId !== null && cost.vendorId !== invoice.vendorId) {
-      throw new ApLedgerError("Shipment cost and invoice must belong to the same vendor", 422, {
-        code: "AP_SHIPMENT_COST_VENDOR_MISMATCH",
-        costId: normalizedCostId,
-        costVendorId: cost.vendorId,
-        invoiceVendorId: invoice.vendorId,
-      });
+    await lockEditableInvoice(tx, normalizedInvoiceId);
+    if (normalizedLineId === undefined) throw new ApLedgerError("Select the exact existing invoice line that bills this charge.", 422,
+      { code: "AP_SHIPMENT_INVOICE_LINE_REQUIRED", costId });
+    const [invoice] = await tx.select().from(vendorInvoices).where(eq(vendorInvoices.id, normalizedInvoiceId));
+    if (!invoice || invoice.vendorId !== cost.vendorId || invoice.currency !== cost.currency || invoice.currency !== "USD"
+      || (invoice.inboundShipmentId !== null && invoice.inboundShipmentId !== cost.inboundShipmentId)) {
+      throw new ApLedgerError("The charge and invoice must have the same supplier, shipment and USD currency.", 422,
+        { code: "AP_SHIPMENT_COST_VENDOR_MISMATCH", costId, invoiceId: normalizedInvoiceId });
     }
-    if (
-      invoiceDetails?.inboundShipmentId !== null &&
-      invoiceDetails?.inboundShipmentId !== undefined &&
-      invoiceDetails.inboundShipmentId !== cost.inboundShipmentId
-    ) {
-      throw new ApLedgerError("Invoice is already assigned to a different shipment", 422, {
-        code: "AP_INVOICE_SHIPMENT_MISMATCH",
-        invoiceId: normalizedInvoiceId,
-        invoiceShipmentId: invoiceDetails.inboundShipmentId,
-        costShipmentId: cost.inboundShipmentId,
-      });
+    const [shipment] = await tx.select({ status: inboundShipments.status }).from(inboundShipments)
+      .where(eq(inboundShipments.id, cost.inboundShipmentId)).for("update");
+    if (!shipment || shipment.status === "cancelled") throw new ApLedgerError("A cancelled or missing shipment cannot acquire new billing ownership.", 409,
+      { code: "AP_SHIPMENT_CANCELLED", costId });
+    const lines = await tx.select().from(vendorInvoiceLines).where(eq(vendorInvoiceLines.vendorInvoiceId, normalizedInvoiceId)).orderBy(asc(vendorInvoiceLines.id)).for("update");
+    const line = lines.find(candidate => candidate.id === normalizedLineId);
+    const poLinks = await tx.select({ id: vendorInvoicePoLinks.id }).from(vendorInvoicePoLinks)
+      .where(eq(vendorInvoicePoLinks.vendorInvoiceId, normalizedInvoiceId));
+    if (!line || line.freightCostId !== null || poLinks.length > 0
+      || lines.some(candidate => candidate.purchaseOrderLineId !== null || candidate.productVariantId !== null)) {
+      throw new ApLedgerError("Select an unassigned shipment charge line on an invoice without product or purchase-order sources.", 409,
+        { code: "AP_SHIPMENT_INVOICE_LINE_SOURCE_INVALID", invoiceId: normalizedInvoiceId, invoiceLineId: normalizedLineId });
     }
-
-    await tx
-      .update(inboundFreightCosts)
-      .set({
-        vendorInvoiceId: normalizedInvoiceId,
-        vendorId: invoice.vendorId,
-        invoiceNumber: invoiceDetails?.invoiceNumber ?? null,
-        invoiceDate: invoiceDetails?.invoiceDate ?? null,
-        dueDate: invoiceDetails?.dueDate ?? null,
-        costStatus: "invoiced",
-        updatedAt: new Date(),
-      })
-      .where(eq(inboundFreightCosts.id, normalizedCostId));
-
-    if (!invoiceDetails?.inboundShipmentId) {
-      await tx
-        .update(vendorInvoices)
-        .set({
-          inboundShipmentId: cost.inboundShipmentId,
-          updatedBy: actorId,
-          updatedAt: new Date(),
-        })
-        .where(eq(vendorInvoices.id, normalizedInvoiceId));
+    const chargeAmount = cost.actualCents ?? cost.estimatedCents;
+    if (chargeAmount === null || chargeAmount === undefined) {
+      throw new ApLedgerError("The shipment charge has no recorded amount to verify against the selected invoice line.", 422,
+        { code: "AP_SHIPMENT_COST_AMOUNT_REQUIRED", shipmentCostId: costId });
     }
-    await appendApMutationAudit(
-      "shipment_cost_invoice_linked",
-      `shipment_cost:${normalizedCostId}`,
-      actorId,
-      {
-        costId: normalizedCostId,
-        vendorInvoiceId: normalizedInvoiceId,
-        inboundShipmentId: cost.inboundShipmentId,
-      },
-      tx,
-    );
-
-    return { costId: normalizedCostId, vendorInvoiceId: normalizedInvoiceId };
+    const amount = requireNonnegativeInteger(chargeAmount, "shipmentCost.amountCents");
+    const unitCost = normalizeUnitCost({ unitCostCents: line.unitCostCents, unitCostMills: line.unitCostMills ?? undefined });
+    if (!Number.isSafeInteger(line.qtyInvoiced) || line.qtyInvoiced <= 0 || line.lineTotalCents !== amount
+      || computeLineTotalCentsFromMills(unitCost.unitCostMills, line.qtyInvoiced) !== amount
+      || lines.reduce((sum, candidate) => sum + BigInt(requireNonnegativeInteger(candidate.lineTotalCents, "invoiceLine.lineTotalCents")), BigInt(0)) !== BigInt(invoice.invoicedAmountCents)) {
+      throw new ApLedgerError("The selected invoice line must account for this entire charge and its invoice total must reconcile. No amount split is inferred.", 422,
+        { code: "AP_SHIPMENT_INVOICE_LINE_AMOUNT_MISMATCH", costId, invoiceLineId: normalizedLineId });
+    }
+    await tx.update(vendorInvoiceLines).set({ freightCostId: cost.id, updatedAt: now }).where(eq(vendorInvoiceLines.id, line.id));
+    await tx.update(inboundFreightCosts).set({ vendorInvoiceId: invoice.id, invoiceNumber: invoice.invoiceNumber,
+      invoiceDate: invoice.invoiceDate, dueDate: invoice.dueDate, costStatus: "invoiced", updatedAt: now }).where(eq(inboundFreightCosts.id, cost.id));
+    if (invoice.inboundShipmentId === null) await tx.update(vendorInvoices).set({ inboundShipmentId: cost.inboundShipmentId,
+      updatedBy: actorId, updatedAt: now }).where(eq(vendorInvoices.id, invoice.id));
+    await appendApMutationAudit("shipment_cost_invoice_linked", `shipment_cost:${cost.id}`, actorId,
+      { costId: cost.id, vendorInvoiceId: invoice.id, invoiceLineId: line.id, inboundShipmentId: cost.inboundShipmentId,
+        before: { vendorInvoiceId: cost.vendorInvoiceId, freightCostId: line.freightCostId },
+        after: { vendorInvoiceId: invoice.id, freightCostId: cost.id } }, tx, now);
+    return { costId: cost.id, vendorInvoiceId: invoice.id, invoiceLineId: line.id, changed: true };
   });
 }
 
-/**
- * Unlink a shipment cost from its vendor invoice.
- */
-export async function unlinkCostFromInvoice(costId: number, actorId?: string) {
-  const normalizedCostId = requirePositiveInteger(costId, "costId");
-  return runApCostTransaction(async (tx: ApLedgerDbClient) => {
-    const [cost] = await tx
-      .select()
-      .from(inboundFreightCosts)
-      .where(eq(inboundFreightCosts.id, normalizedCostId))
-      .for("update");
-    if (!cost) {
-      throw new ApLedgerError("Shipment cost not found", 404, {
-        code: "AP_SHIPMENT_COST_NOT_FOUND",
-        costId: normalizedCostId,
-      });
-    }
-    if (!cost.vendorInvoiceId) return { ok: true, changed: false };
-
-    await lockEditableInvoice(tx, cost.vendorInvoiceId);
-    await tx
-      .update(inboundFreightCosts)
-      .set({
-        vendorInvoiceId: null,
-        invoiceNumber: null,
-        invoiceDate: null,
-        dueDate: null,
-        costStatus: cost.actualCents === null ? "estimated" : "finalized",
-        updatedAt: new Date(),
-      })
-      .where(eq(inboundFreightCosts.id, normalizedCostId));
-    await appendApMutationAudit(
-      "shipment_cost_invoice_unlinked",
-      `shipment_cost:${normalizedCostId}`,
-      actorId,
-      {
-        costId: normalizedCostId,
-        vendorInvoiceId: cost.vendorInvoiceId,
-        inboundShipmentId: cost.inboundShipmentId,
-      },
-      tx,
-    );
-    return { ok: true, changed: true };
+/** A pointer alone still records an invoice liability association. Never discard
+ * its last source evidence and expose the charge for another bill. */
+export async function unlinkCostFromInvoice(costId: number, _actorId?: string) {
+  const normalizedCostId = requireCommandId(costId, "costId");
+  return runApCostTransaction(async tx => {
+    const [cost] = await tx.select().from(inboundFreightCosts).where(eq(inboundFreightCosts.id, normalizedCostId)).for("update");
+    if (!cost) throw new ApLedgerError("Shipment cost not found", 404, { code: "AP_SHIPMENT_COST_NOT_FOUND", costId });
+    const owner = (await readShipmentBillingOwnership(tx, [cost])).get(cost.id)!;
+    if (owner.state === "unbilled") return { ok: true, changed: false };
+    // Preserve the established financial-history rejection before the stronger
+    // source immutability rejection for a document that was already recognized.
+    if (cost.vendorInvoiceId !== null) await lockEditableInvoice(tx, cost.vendorInvoiceId);
+    throw new ApLedgerError("The invoice association is retained billing evidence. Resolve its exact source line, then use invoice void or reviewed replacement.", 409,
+      { code: "AP_SHIPMENT_INVOICE_SOURCE_IMMUTABLE", costId, billingOwnership: owner });
   });
 }
 
