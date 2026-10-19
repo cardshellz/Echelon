@@ -8,6 +8,7 @@ import {
   type UpdateTransformationModelDraftRequest,
 } from "@shared/types/inventory-availability-admin";
 import { deriveRecipePath, isCompatibleConversionRecipe, prefillPathsFromModel, type PathDraft } from "@/pages/supply-transformations-model";
+import { archivedTransformationVariantIds, prepareTransformationDraft, recipeHasArchivedVariant } from "@shared/inventory/transformation-draft-lifecycle";
 import { packageLadderModelEditIssues } from "./package-conversion-ladder";
 import { describeInventoryBehavior, inventoryBehaviorDefinitionIssues, type InventoryBehavior } from "@shared/inventory/inventory-behavior";
 import { fetchJson } from "@/pages/inventory-planning-http";
@@ -58,9 +59,10 @@ export function beginPackageConversionEdit(view: SupplyTransformationsAdminView)
   const issues = packageConversionEditIssues(baseline);
   if (issues.length) throw new Error(issues.join(" "));
   const model = baseline.draftModel ?? baseline.activeModel;
-  return { baseline, ...(model ? prefillPathsFromModel(model, 1) : { paths: [], nextRowId: 1 }),
-    inventoryBehavior: modelInventoryBehavior(model), buildToPromiseEnabled: model?.buildToPromiseEnabled ?? false,
-    recipeBindings: (model?.bindings ?? []).map(binding => ({ bindingKey: binding.bindingKey,
+  const lifecycle = model ? prepareTransformationDraft(model, archivedTransformationVariantIds(baseline)) : null;
+  return { baseline, ...(model && lifecycle ? prefillPathsFromModel({ ...model, ...lifecycle.definition }, 1) : { paths: [], nextRowId: 1 }),
+    inventoryBehavior: modelInventoryBehavior(model), buildToPromiseEnabled: lifecycle?.definition.buildToPromiseEnabled ?? false,
+    recipeBindings: (lifecycle?.definition.bindings ?? []).map(binding => ({ bindingKey: binding.bindingKey,
       recipeId: binding.recipeId, relationshipRole: binding.relationshipRole, warehouseId: binding.warehouseId })),
   };
 }
@@ -84,6 +86,9 @@ export function selectBuildRecipe(edit: PackageConversionEdit, recipeId: number,
   if (existing.length > 0) return edit;
   const recipe = edit.baseline.recipes.find(candidate => candidate.id === recipeId);
   if (!recipe) throw new Error("This recipe is no longer selectable. Reload the product.");
+  if (recipeHasArchivedVariant(recipe, archivedTransformationVariantIds(edit.baseline))) {
+    throw new Error("This recipe uses an archived SKU. Update the recipe before selecting it for a new draft.");
+  }
   const binding = { bindingKey: `recipe:${recipe.id}:network`, recipeId: recipe.id,
     relationshipRole: recipe.recipeType === "assembly" ? "component_build" as const : "directional_conversion" as const,
     warehouseId: null };
@@ -120,9 +125,12 @@ export function buildPackageConversionCommand(edit: PackageConversionEdit, idemp
   if (!packageConversionHasChanges(edit)) throw new Error("Change the inventory behavior, directions or recipes before saving.");
   const model = baseline.draftModel ?? baseline.activeModel;
   if (edit.inventoryBehavior === "package_hierarchy") {
-    // Preserve the existing ladder's exact-unit and unsupported-path safeguards.
+    // Validate retained baseline snapshots, not the retired paths or freshly
+    // derived ratios. Active-unit drift and unsupported authority still block.
+    const lifecycle = model ? prepareTransformationDraft(model, archivedTransformationVariantIds(baseline)) : null;
     const ladderIssues = packageLadderModelEditIssues(baseline.variants,
-      model && modelInventoryBehavior(model) === "package_hierarchy" ? model : null);
+      model && lifecycle && modelInventoryBehavior(model) === "package_hierarchy"
+        ? { ...model, ...lifecycle.definition } : null);
     if (ladderIssues.length) throw new Error(ladderIssues.join(" "));
   }
   const definition = {

@@ -26,11 +26,12 @@ function viewFixture(strategy: ProductInventoryStrategy): SupplyTransformationsA
   };
 }
 
-async function setup(page: Page, options: { strategy?: ProductInventoryStrategy; permission?: "none" | "view" | "edit" | "activate"; empty?: boolean } = {}) {
+async function setup(page: Page, options: { strategy?: ProductInventoryStrategy; permission?: "none" | "view" | "edit" | "activate"; empty?: boolean; detailed?: boolean; configureView?: (view: SupplyTransformationsAdminView) => void } = {}) {
   const strategy = options.strategy ?? "physical_fungible";
   const state = { view: viewFixture(strategy), reads: 0, writes: [] as Array<{ method: string; body: Record<string, unknown> }>,
     errors: [] as string[], failure: 0 };
   if (options.empty) { state.view.draftModel = null; state.view.activeModel = null; state.view.head = null; }
+  options.configureView?.(state.view);
   page.on("pageerror", error => state.errors.push(error.message));
   await page.route("**/api/**", async route => {
     const request = route.request();
@@ -40,6 +41,9 @@ async function setup(page: Page, options: { strategy?: ProductInventoryStrategy;
       permissions: options.permission === "none" ? [] : options.permission === "view"
         ? ["inventory_planning:view"] : ["inventory_planning:view", "inventory_planning:edit", "inventory:adjust", ...(options.permission === "activate" ? ["inventory_planning:activate"] : [])], roles: [],
     } });
+    if (path === "/api/inventory-planning/admin/products") return route.fulfill({ json: { products: [{ id: 17, sku: "SLEEVE", name: "Sleeves" }] } });
+    if (path === "/api/inventory-planning/admin/supply-transformations/17/shadow-runs/latest"
+      || path === "/api/inventory-planning/admin/migration-queue/17/channel-preview") return route.fulfill({ status: 404, json: {} });
     if (path === "/api/inventory/build-relationships/products/17") return route.fulfill({ json: [] });
     if (path === "/api/inventory-planning/admin/product-definitions/17/progress") return route.fulfill({ json: null });
     if (path === "/api/inventory-planning/admin/supply-transformations/17" && request.method() === "GET") {
@@ -51,6 +55,7 @@ async function setup(page: Page, options: { strategy?: ProductInventoryStrategy;
       const existing = state.view.draftModel ?? viewFixture(strategy).draftModel!;
       state.view.draftModel = { ...existing, id: existing.id + 1, version: existing.version + 1,
         inventoryBehavior: body.inventoryBehavior, buildToPromiseEnabled: body.buildToPromiseEnabled,
+        bindings: existing.bindings.filter(binding => body.recipeBindings.some((input: { bindingKey: string }) => input.bindingKey === binding.bindingKey)),
         paths: body.paths.map((path: { sourceVariantId: number; destinationVariantId: number }) => ({ ...path,
           sourceUnitsPerVariant: state.view.variants.find(v => v.id === path.sourceVariantId)!.unitsPerVariant,
           destinationUnitsPerVariant: state.view.variants.find(v => v.id === path.destinationVariantId)!.unitsPerVariant,
@@ -65,7 +70,7 @@ async function setup(page: Page, options: { strategy?: ProductInventoryStrategy;
   await page.route("**/__catalog-conversion-test*", route => route.fulfill({ contentType: "text/html", body: `<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1" />
     <script type="module">import RefreshRuntime from '/@react-refresh'; RefreshRuntime.injectIntoGlobalHook(window); window.$RefreshReg$=()=>{}; window.$RefreshSig$=()=>type=>type; window.__vite_plugin_react_preamble_installed__=true;</script></head><body><main id="root" style="max-width:1000px;margin:20px auto;padding:12px"></main><script type="module" src="/@fs/${resolve("test/browser/fixtures/catalog-conversion-harness.tsx").replaceAll("\\", "/")}"></script></body></html>` }));
   const authentication = page.waitForResponse(response => new URL(response.url()).pathname === "/api/auth/me");
-  await page.goto(`/__catalog-conversion-test?strategy=${strategy}`);
+  await page.goto(`/__catalog-conversion-test?strategy=${strategy}${options.detailed ? "&detailed=1&productId=17" : ""}`);
   await authentication;
   return state;
 }
@@ -241,6 +246,76 @@ test.describe("catalog conversion controls", () => {
     expect(state.errors).toEqual([]);
   });
 
+  for (const archivedId of [1, 2, 3]) {
+    test("excludes archived variant " + archivedId + " from a successor and preserves unrelated rules", async ({ page }) => {
+      const state = await setup(page, { configureView: view => {
+        view.variants.find(variant => variant.id === archivedId)!.isActive = false;
+        view.archivedVariantIds = [archivedId];
+        view.draftModel!.paths.push({ sourceVariantId: 2, destinationVariantId: 1, inputQty: 1, outputQty: 20,
+          sourceUnitsPerVariant: 20, destinationUnitsPerVariant: 1, operationType: "break_pack", authorityState: "allowed", transformationRecipeBindingKey: null });
+      } });
+      const oldPaths = structuredClone(state.view.draftModel!.paths);
+      await page.getByRole("button", { name: "Continue editing draft" }).click();
+      await expect(page.getByRole("note", { name: "Archived SKU rules excluded from draft" })).toBeVisible();
+      await page.getByRole("button", { name: "Save draft", exact: true }).click();
+      await expect.poll(() => state.writes.length).toBe(1);
+      const retained = oldPaths.filter(path => path.sourceVariantId !== archivedId && path.destinationVariantId !== archivedId);
+      expect(state.writes[0]!.body.paths).toEqual(retained.map(({ sourceUnitsPerVariant: _s, destinationUnitsPerVariant: _d, ...path }) => path));
+      expect(state.writes[0]!.body.expectedHeadRevision).toBe("4");
+      expect(state.errors).toEqual([]);
+    });
+  }
+
+  for (const archivedSnapshot of [true, false]) {
+    test("handles an archived recipe component with frozen snapshot archived=" + archivedSnapshot, async ({ page }) => {
+      const state = await setup(page, { strategy: "recipe_managed", configureView: view => {
+        view.archivedVariantIds = [927];
+        view.recipes = [{ id: 71, code: "EXTERNAL", name: "External component build", version: 1, status: "active",
+          recipeType: "assembly", outputProductId: 17, outputVariantId: 2, outputUnitsPerVariant: 20, outputQty: 1,
+          components: [{ componentVariantId: 927, componentProductId: 88, componentUnitsPerVariant: 1,
+            componentQty: 20, sku: "ARCHIVED-COMPONENT", name: "Archived component", isActive: false }] }];
+        view.draftModel!.buildToPromiseEnabled = true;
+        view.draftModel!.bindings = [{ bindingKey: "recipe:71", recipeId: 71, relationshipRole: "component_build", warehouseId: null,
+          recipeCodeSnapshot: "EXTERNAL", recipeVersionSnapshot: 1, recipeDefinitionHash: "b".repeat(64),
+          outputProductIdSnapshot: 17, outputVariantIdSnapshot: 2, outputUnitsPerVariantSnapshot: 20, outputQtySnapshot: 1,
+          components: [{ componentVariantId: archivedSnapshot ? 927 : 928, componentProductId: 88, componentUnitsPerVariant: 1, componentQty: 20 }] }];
+      } });
+      await page.getByRole("button", { name: "Continue editing draft" }).click();
+      const choice = page.getByRole("checkbox", { name: "External component build · v1" });
+      if (archivedSnapshot) {
+        await expect(page.getByRole("note", { name: "Archived SKU rules excluded from draft" })).toContainText("1 recipe binding(s)");
+        await expect(choice).toBeDisabled();
+      } else {
+        // A changed current recipe must not trap an older retained snapshot in
+        // the draft: removing a selected binding is always allowed.
+        await expect(choice).toBeEnabled();
+        await choice.uncheck();
+        await expect(choice).toBeDisabled();
+      }
+      await expect(page.getByText("This recipe uses an archived SKU. Update it before selecting it for a new draft.")).toBeVisible();
+      await page.getByRole("button", { name: "Save draft", exact: true }).click();
+      await expect.poll(() => state.writes.length).toBe(1);
+      expect(state.writes[0]!.body).toMatchObject({ recipeBindings: [], buildToPromiseEnabled: false, paths: [] });
+      expect(state.errors).toEqual([]);
+    });
+
+  }
+
+  test("the detailed editor uses the same archived rule policy and keeps the sealed model intact", async ({ page }) => {
+    const state = await setup(page, { detailed: true, configureView: view => {
+      view.variants.find(variant => variant.id === 3)!.isActive = false;
+      view.archivedVariantIds = [3];
+    } });
+    const sealed = structuredClone(state.view.activeModel);
+    await page.getByRole("button", { name: "Edit current draft", exact: true }).click();
+    await expect(page.getByRole("note", { name: "Archived SKU rules excluded from draft" })).toBeVisible();
+    await page.getByLabel("Change reason", { exact: true }).fill("Exclude archived package directions");
+    await page.getByRole("button", { name: "Save draft updates", exact: true }).click();
+    await expect.poll(() => state.writes.length).toBe(1);
+    expect(state.writes[0]).toMatchObject({ method: "PUT", body: { paths: [], expectedHeadRevision: "4", expectedVersion: 2 } });
+    expect(state.view.activeModel).toEqual(sealed);
+    expect(state.errors).toEqual([]);
+  });
   test("reviews warehouse and channel quantities, then retries an uncertain Apply with the identical command", async ({ page }) => {
     const state = await setup(page, { permission: "activate" });
     const commands: unknown[] = [];

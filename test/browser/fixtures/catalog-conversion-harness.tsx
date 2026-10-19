@@ -5,6 +5,7 @@ import { AuthProvider, useAuth } from "../../../client/src/lib/auth";
 import { PromiseSafetyPolicyPanel } from "../../../client/src/pages/promise-safety-policy-panel";
 import { ProductSafetySummary } from "../../../client/src/features/inventory-builds/ProductSafetySummary";
 import { ProductConversionCard, ProductConversionSummary } from "../../../client/src/features/inventory-builds/ProductConversionCard";
+import SupplyTransformations from "../../../client/src/pages/SupplyTransformations";
 import { BuildVariantSelector } from "../../../client/src/features/inventory-builds/BuildVariantSelector";
 import type { BuildVariantResult } from "../../../client/src/features/inventory-builds/build-recipe-model";
 import "../../../client/src/index.css";
@@ -27,7 +28,7 @@ function SafetyHarness() {
 }
 createRoot(document.getElementById("root")!).render(
   <QueryClientProvider client={client}><AuthProvider>
-    {new URLSearchParams(location.search).has("variant") ? <VariantHarness /> : new URLSearchParams(location.search).has("safety") ? <SafetyHarness /> : <><h1 className="mb-4 text-xl font-semibold">Product variants</h1>
+    {new URLSearchParams(location.search).has("detailed") ? <SupplyTransformations /> : new URLSearchParams(location.search).has("variant") ? <VariantHarness /> : new URLSearchParams(location.search).has("safety") ? <SafetyHarness /> : <><h1 className="mb-4 text-xl font-semibold">Product variants</h1>
     <div className="mb-4"><ProductConversionSummary productId={17} enabled /></div>
     <ProductConversionCard productId={17} enabled /></>}
     <button className="mt-6 text-sm underline" onClick={() => client.invalidateQueries()}>Refresh test data</button>
