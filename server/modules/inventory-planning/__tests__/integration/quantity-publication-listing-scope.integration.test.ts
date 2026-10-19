@@ -307,14 +307,16 @@ dbDescribe.sequential("exact canonical listing refresh through provider admissio
     expect(runtime.http).not.toHaveBeenCalled();
   });
 
-  it("holds the resolved mapping and target stable until its local planning transaction completes", async () => {
-    const barrier = pauseAfterSql("FOR SHARE OF t,h,m,v,provider_owner");
+  it("holds the mapping, target, Catalog parent and connection stable until local planning completes", async () => {
+    const barrier = pauseAfterSql("LIMIT 2 FOR SHARE OF t,h,m,v");
     const pending = planCurrentCanonicalListingQuantity(scope());
     const other = await database.pool.connect();
     try {
       await barrier.reached;
       for (const statement of ["UPDATE inventory.inventory_publication_targets SET revision=revision+1 WHERE id=3",
-        "UPDATE inventory.publication_variant_mapping_heads SET active_mapping_id=NULL,revision=revision+1 WHERE publication_target_id=3 AND product_variant_id=101"]) {
+        "UPDATE inventory.publication_variant_mapping_heads SET active_mapping_id=NULL,revision=revision+1 WHERE publication_target_id=3 AND product_variant_id=101",
+        "SELECT id FROM catalog.products WHERE id=20 FOR UPDATE",
+        "SELECT id FROM channels.channel_connections WHERE id=9 FOR UPDATE"]) {
         await other.query("BEGIN");
         await other.query("SET LOCAL lock_timeout='100ms'");
         await expect(other.query(statement)).rejects.toMatchObject({ code: "55P03" });

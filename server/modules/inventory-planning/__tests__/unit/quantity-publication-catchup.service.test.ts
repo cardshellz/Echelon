@@ -5,7 +5,7 @@ const claim: QuantityPublicationCatchup = { catchupId: "10", revision: "2", atte
   scope: { destinationKind: "channel_connection", connectionId: 1, providerKey: "ebay", providerScopeType: "account",
     externalScopeId: "account", externalInventoryItemId: "SKU-A", productId: 20, productVariantId: 101 } };
 function fixture() {
-  const store = { listDue: vi.fn(async () => [claim]), complete: vi.fn<QuantityPublicationCatchupStore["complete"]>(),
+  const store = { settleArchived: vi.fn<QuantityPublicationCatchupStore["settleArchived"]>().mockResolvedValue(false), listDue: vi.fn(async () => [claim]), complete: vi.fn<QuantityPublicationCatchupStore["complete"]>(),
     fail: vi.fn<QuantityPublicationCatchupStore["fail"]>().mockResolvedValue(undefined) };
   const replan = vi.fn<ConstructorParameters<typeof QuantityPublicationCatchupService>[1]>();
   return { store, replan, service: new QuantityPublicationCatchupService(store, replan) };
@@ -18,6 +18,34 @@ describe("exact-scope catch-up completion before replan", () => {
     await expect(f.service.processDue()).resolves.toEqual({ completed: 1, failed: 0 });
     expect(f.store.complete).toHaveBeenCalledExactlyOnceWith(claim);
     expect(f.replan).not.toHaveBeenCalled(); expect(f.store.fail).not.toHaveBeenCalled();
+    expect(f.store.settleArchived).not.toHaveBeenCalled();
+  });
+  it("settles proven Catalog archival before replanning", async () => {
+    const f = fixture(); f.store.complete.mockResolvedValue(false);
+    f.store.settleArchived.mockResolvedValue(true);
+    await expect(f.service.processDue()).resolves.toEqual({ completed: 1, failed: 0 });
+    expect(f.store.settleArchived).toHaveBeenCalledExactlyOnceWith(claim);
+    expect(f.store.complete).toHaveBeenCalledExactlyOnceWith(claim);
+    expect(f.replan).not.toHaveBeenCalled();
+    expect(f.store.fail).not.toHaveBeenCalled();
+  });
+  it("retains the request when archive proof is busy instead of replanning through the conflict", async () => {
+    const f = fixture(); f.store.complete.mockResolvedValue(false);
+    f.store.settleArchived.mockRejectedValue(Object.assign(new Error("Selection changed"), {
+      code: "PUBLICATION_CATCHUP_SETTLEMENT_BUSY",
+    }));
+    await expect(f.service.processDue()).resolves.toEqual({ completed: 0, failed: 1 });
+    expect(f.replan).not.toHaveBeenCalled();
+    expect(f.store.fail).toHaveBeenCalledExactlyOnceWith(claim, "PUBLICATION_CATCHUP_SETTLEMENT_BUSY", "Selection changed");
+  });
+  it("does not treat generic variant ineligibility as proven archival", async () => {
+    const f = fixture(); f.store.complete.mockResolvedValue(false);
+    f.replan.mockRejectedValue(Object.assign(new Error("Current publication scope omits the member"), {
+      code: "CANONICAL_PUBLICATION_VARIANT_NOT_ELIGIBLE",
+    }));
+    await expect(f.service.processDue()).resolves.toEqual({ completed: 0, failed: 1 });
+    expect(f.store.settleArchived).toHaveBeenCalledExactlyOnceWith(claim);
+    expect(f.store.fail).toHaveBeenCalledWith(claim, "CANONICAL_PUBLICATION_VARIANT_NOT_ELIGIBLE", expect.any(String));
   });
   it("replans unproven work and passes its exact canonical handoff to the second completion check", async () => {
     const f = fixture(); f.store.complete.mockResolvedValueOnce(false).mockResolvedValueOnce(true);

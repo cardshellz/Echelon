@@ -35,6 +35,7 @@ export interface QuantityPublicationCatchup {
 export interface QuantityPublicationCatchupStore {
   listDue(limit: number): Promise<QuantityPublicationCatchup[]>;
   complete(claim: QuantityPublicationCatchup, evidence?: { outboxId: string }): Promise<boolean>;
+  settleArchived(claim: QuantityPublicationCatchup): Promise<boolean>;
   fail(claim: QuantityPublicationCatchup, errorCode: string, message: string): Promise<void>;
 }
 
@@ -56,6 +57,12 @@ export class QuantityPublicationCatchupService {
         // worker lost its acknowledgement. Prove that exact revision first:
         // unrelated planning failures must not repeatedly retry delivered work.
         if (await this.store.complete(claim)) {
+          result.completed += 1;
+          continue;
+        }
+        // An exact Catalog archive can end local stock duty without claiming
+        // provider success. The store proves and audits that disposition.
+        if (await this.store.settleArchived(claim)) {
           result.completed += 1;
           continue;
         }
