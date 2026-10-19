@@ -1,4 +1,5 @@
 import { ReceivingError } from "./receiving.service";
+import { registerReceiptReversalRoutes } from "./receipt-reversal.routes";
 import { registerReceivingQuarantineRoutes } from "./receiving-quarantine.routes";
 import { withReceivingUnitVersion } from "./receiving-unit-contract";
 import type { Express } from "express";
@@ -64,6 +65,7 @@ function resolveUnitCostPair(
 
 export function registerReceivingRoutes(app: Express) {
   registerReceivingQuarantineRoutes(app);
+  registerReceiptReversalRoutes(app);
   // ===== RECEIVING ORDERS API =====
   
   app.get("/api/receiving", requireAuth, async (req, res) => {
@@ -420,62 +422,7 @@ export function registerReceivingRoutes(app: Express) {
     }
   });
 
-  // ===== RECEIPT REVERSALS (Spec D) =====
-  //
-  // Posted (closed) receipts are immutable; corrections happen via reversal.
-  // Elevated gate: purchasing:approve (same as PO void — a financial
-  // correction permission). Idempotency-Key header is required so a retried
-  // reversal cannot double-apply.
-
-  app.post(
-    "/api/procurement/receiving-lines/:id/reverse",
-    requirePermission("purchasing", "approve"),
-    requireIdempotency(),
-    async (req, res) => {
-      try {
-        const { receiptReversal } = req.app.locals.services;
-        const headerKey = req.headers["idempotency-key"] || req.headers["x-idempotency-key"];
-        const result = await receiptReversal.reverseReceivingLine({
-          receivingLineId: Number(req.params.id),
-          qty: Number(req.body?.qty),
-          reason: String(req.body?.reason ?? ""),
-          idempotencyKey: typeof headerKey === "string" ? headerKey : String(req.body?.idempotencyKey ?? ""),
-          allowNegative: req.body?.allowNegative === true,
-          userId: req.session.user?.id ?? null,
-        });
-        res.json(result);
-      } catch (error: any) {
-        if (error.statusCode) return res.status(error.statusCode).json({ error: error.message, ...error.details });
-        console.error("[Receiving] Error reversing receiving line:", error);
-        res.status(500).json({ error: "Failed to reverse receiving line" });
-      }
-    },
-  );
-
-  app.post(
-    "/api/procurement/receiving-orders/:id/reverse",
-    requirePermission("purchasing", "approve"),
-    requireIdempotency(),
-    async (req, res) => {
-      try {
-        const { receiptReversal } = req.app.locals.services;
-        const headerKey = req.headers["idempotency-key"] || req.headers["x-idempotency-key"];
-        const result = await receiptReversal.reverseReceivingOrder({
-          receivingOrderId: Number(req.params.id),
-          reason: String(req.body?.reason ?? ""),
-          idempotencyKey: typeof headerKey === "string" ? headerKey : String(req.body?.idempotencyKey ?? ""),
-          allowNegative: req.body?.allowNegative === true,
-          userId: req.session.user?.id ?? null,
-        });
-        res.json(result);
-      } catch (error: any) {
-        if (error.statusCode) return res.status(error.statusCode).json({ error: error.message, ...error.details });
-        console.error("[Receiving] Error reversing receiving order:", error);
-        res.status(500).json({ error: "Failed to reverse receiving order" });
-      }
-    },
-  );
-
+  // Immutable reversal history; writes use the durable reversal command routes.
   app.get(
     "/api/procurement/receiving-orders/:id/reversals",
     requireAuth,
