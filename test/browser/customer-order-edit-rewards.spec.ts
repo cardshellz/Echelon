@@ -29,6 +29,7 @@ async function setup(
     quantity?: number;
     failReturn?: boolean;
     loseReturnResponse?: boolean;
+    failReturnRefresh?: boolean;
     failPricing?: boolean;
   } = {},
 ) {
@@ -40,7 +41,8 @@ async function setup(
   const errors: string[] = [];
   let rewards = structuredClone(initialRewards),
     balance = "590.00",
-    cancellations = 0;
+    cancellations = 0,
+    refreshFailed = false;
   const quantity = options.quantity ?? 1;
   const discount = (key: string, label: string, amountCents: number) => ({
     key,
@@ -175,7 +177,19 @@ async function setup(
           ],
         },
       });
-    if (input.path.endsWith("/rewards/manage"))
+    if (input.path.endsWith("/rewards/manage")) {
+      if (options.failReturnRefresh && cancellations && !refreshFailed) {
+        refreshFailed = true;
+        return route.fulfill({
+          status: 503,
+          json: {
+            error: {
+              code: "UNAVAILABLE",
+              message: "Rewards could not be loaded.",
+            },
+          },
+        });
+      }
       return route.fulfill({
         json: {
           version: "v2",
@@ -187,6 +201,7 @@ async function setup(
           pending: [],
         },
       });
+    }
     if (input.path.endsWith("/rewards/cancel")) {
       expect(input.body.rewardId).toBe(secondId);
       expect(input.commandKey).toBe(input.body.requestKey);
@@ -386,4 +401,28 @@ test("leaves rewards unused and returnable when pricing rejects the selection", 
   await expect(
     one.getByRole("button", { name: "Return to points" }),
   ).toBeEnabled();
+});
+
+test("hides stale rewards after a completed return until Club can reload", async ({
+  page,
+}) => {
+  const h = await setup(page, { failReturnRefresh: true });
+  await page
+    .getByRole("group", { name: "$3.66 saved reward" })
+    .getByRole("button", { name: "Return to points" })
+    .click();
+  await expect(page.getByTestId("club-canonical-balance")).toHaveCount(0);
+  await expect(
+    page.getByRole("group", { name: "$3.66 saved reward" }),
+  ).toHaveCount(0);
+  await page.getByRole("button", { name: "Retry loading rewards" }).click();
+  await expect(page.getByTestId("club-canonical-balance")).toHaveText(
+    "956.00 SHELLZ Rewards",
+  );
+  await expect(
+    page.getByRole("group", { name: "$3.66 saved reward" }),
+  ).toHaveCount(0);
+  expect(
+    h.requests.filter((input) => input.path.endsWith("/cancel")),
+  ).toHaveLength(1);
 });

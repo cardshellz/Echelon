@@ -92,9 +92,16 @@ export function ClubRewardsWidget({
   const [points, setPoints] = useState(0);
   const storageKey = `cardshellz:editor-reward:${actorKey}`;
   const refresh = async (signal?: AbortSignal) => {
-    const result = await api.rewards.manage(connectionId, omsOrderId, signal);
-    if (!signal?.aborted) setData(result);
-    return result;
+    try {
+      const result = await api.rewards.manage(connectionId, omsOrderId, signal);
+      if (!signal?.aborted) setData(result);
+      return result;
+    } catch (cause) {
+      // Every refresh may follow a successful balance mutation, including one
+      // whose response was lost. Never leave the previous balance spendable.
+      if (!signal?.aborted) setData(null);
+      throw cause;
+    }
   };
   useEffect(() => {
     const abort = new AbortController();
@@ -149,7 +156,6 @@ export function ClubRewardsWidget({
         try {
           await refresh();
         } catch (cause) {
-          setData(null);
           throw new Error(
             `Your latest rewards balance could not be loaded. ${issueMessage(cause)}`,
           );
@@ -197,7 +203,6 @@ export function ClubRewardsWidget({
         try {
           await refresh();
         } catch (refreshCause) {
-          setData(null);
           throw new Error(
             `${issueMessage(cause)} Your latest rewards balance could not be loaded: ${issueMessage(refreshCause)}`,
           );
