@@ -1378,14 +1378,30 @@ describe("PickingUseCases shipment blocker cleanup", () => {
 
 
 describe("post-commit replenishment before publication", () => {
-  it("refills the bin before channel publication rejects the durable follow-up", async () => {
+  // #64414: a channel-exposure target that was not safe to publish failed the
+  // pick follow-up, so the line stayed pending and every replay hit the same
+  // permanent blocker. Publication is downstream; the scheduled sweep re-sends it.
+  it.each([
+    ["an offline channel", Object.assign(new Error("publication offline"), {})],
+    ["a target that is not safe to publish", Object.assign(new Error("The canonical channel-exposure plan contains a target that is not safe to publish."),
+      { code: "CANONICAL_PUBLICATION_TARGET_BLOCKED" })],
+  ])("completes the pick after replenishment when publication fails for %s", async (_case, failure) => {
     const {service,replenishment,inventoryCore} = makePickItemHarness({task:{id:300,status:"completed",replenMethod:"full_case",qtySourceUnits:2,qtyTargetUnits:10},moved:10});
     const effects:string[]=[];
     replenishment.createAndExecuteReplen.mockImplementation(async()=>{effects.push("replen");return {task:{id:300,status:"completed",replenMethod:"full_case",qtySourceUnits:2},moved:10};});
-    (service as any).channelSync={queueSyncAfterInventoryChange:vi.fn(async()=>{effects.push("publication");throw new Error("publication offline");})};
-    await expect((service as any).finishCommittedPick({beforeItem:makeItem({pickedQuantity:0}),item:makeItem({pickedQuantity:1,status:"completed"}),
-      pickDeductResult:{success:true,productVariantId:100,locationId:1,locationCode:"A-01",systemQtyAfter:0},params:{userId:"picker-1"}})).rejects.toThrow("publication offline");
-    expect(effects).toEqual(["replen","publication"]);
-    expect(inventoryCore.pickItem).not.toHaveBeenCalled();
+    (service as any).channelSync={queueSyncAfterInventoryChange:vi.fn(async()=>{effects.push("publication");throw failure;})};
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      await expect((service as any).finishCommittedPick({beforeItem:makeItem({pickedQuantity:0}),item:makeItem({pickedQuantity:1,status:"completed"}),
+        pickDeductResult:{success:true,productVariantId:100,locationId:1,locationCode:"A-01",systemQtyAfter:0},params:{userId:"picker-1"}}))
+        .resolves.toMatchObject({ success: true });
+      expect(effects).toEqual(["replen","publication"]);
+      expect(inventoryCore.pickItem).not.toHaveBeenCalled();
+      const logged = stderr.mock.calls.map(([line]) => String(line)).find(line => line.includes("pick_channel_publication_deferred"));
+      expect(JSON.parse(logged!)).toMatchObject({ level: "error", product_variant_id: 100,
+        error_code: (failure as { code?: string }).code ?? "PICK_CHANNEL_PUBLICATION_FAILED", outcome: "deferred_to_scheduled_sweep" });
+    } finally {
+      stderr.mockRestore();
+    }
   });
 });
