@@ -2015,7 +2015,7 @@ export class InventoryUseCases {
       await lockInventoryCostGraph(tx);
       let reservedPlan: ReservedTransferPlan | null = null;
       if (quantityPosting && params.moveReserved) {
-        if (!this.reservedTransferOwner) throw new IntegrityError("The canonical reserved-transfer owner is unavailable");
+        if (!this.reservedTransferOwner) throw new AppError("The canonical reserved-transfer owner is unavailable", "TRANSFER_OWNER_UNAVAILABLE", 503);
         await this.reservedTransferOwner.lockSource(quantityTransactionFromDrizzle(tx),params);
       }
       await tx.execute(sql`SELECT id FROM catalog.product_variants WHERE id=${params.productVariantId} FOR SHARE`);

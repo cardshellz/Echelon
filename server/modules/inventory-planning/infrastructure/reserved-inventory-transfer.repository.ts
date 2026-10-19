@@ -145,11 +145,13 @@ export function createReservedInventoryTransferOwner(): ReservedInventoryTransfe
         const amount = allocations.reduce((sum, a) => sum + a.quantity, 0);
         await changed(client, `UPDATE inventory.availability_claim_resources SET released_qty=released_qty+$1,updated_at=$2
           WHERE id=$3 AND claimed_qty-released_qty-consumed_qty-picked_qty=$1 RETURNING id`, [amount, occurredAt, resourceId]);
-        const existing = (await client.query(`SELECT id::text FROM inventory.availability_claim_resources
+        const existing = (await client.query(`SELECT id::text,claim_id::text,warehouse_id,warehouse_location_id FROM inventory.availability_claim_resources
           WHERE claim_line_id=$1 AND inventory_level_id=$2 AND source_variant_id=$3
             AND consumer_operation_key IS NULL AND producer_operation_key IS NULL FOR UPDATE`, [first.claimLineId, destinationLevelId, plan.productVariantId])).rows;
-        if (existing.length > 1)
-          throw new IntegrityError("Destination reservation identity is ambiguous");
+        if (existing.length > 1 || existing.some(resource => String(resource.claim_id) !== first.claimId
+          || resource.warehouse_id !== warehouseId || resource.warehouse_location_id !== plan.toLocationId)) {
+          throw new IntegrityError("Destination reservation identity is ambiguous or inconsistent");
+        }
         const destinationId = existing.length === 1 ? String(existing[0].id) : String((await client.query(`INSERT INTO inventory.availability_claim_resources(claim_id,claim_line_id,warehouse_id,warehouse_location_id,inventory_level_id,source_variant_id,claimed_qty,created_at,updated_at)
            VALUES($1,$2,$3,$4,$5,$6,$7,$8,$8) RETURNING id::text`, [first.claimId, first.claimLineId, warehouseId, plan.toLocationId, destinationLevelId, plan.productVariantId, amount, occurredAt])).rows[0].id);
         if (existing.length)
