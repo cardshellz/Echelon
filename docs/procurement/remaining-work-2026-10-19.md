@@ -10,7 +10,7 @@ Verified source baseline: `8bd0a464101233ec664131dcbf6e13b18f524ee5` (`origin/ma
 | AP-A7: payment calendar date | `ap-ledger.routes.ts` converted the form date with `new Date`; payment screens formatted the timestamp in the browser timezone. An October 1 UTC midnight value displays September 30 in New York. | Explicit validated calendar date across request, storage, reads and all payment screens. Preserve legacy timestamps without inventing their intended calendar date. |
 | Quarantine retry identity | The baseline `receiving-quarantine-client.ts` stored receipt-scoped attempts without actor identity and treated authorization failures as definitive. Unknown-goods intake has no source-line version; old durable keys were scoped to actors. | Keep the original request through auth/read/storage failures. Bind command/key/operator/resource and verify result content. Prevent a second operator from reusing an unknown-intake key to create a second observation; protect legacy keys. |
 
-This batch is implemented and locally validated. Its runbook records the final evidence separately. Publication, hosted CI, migration allocation and deployment remain separate; this ledger does not claim they have occurred.
+This batch is implemented and locally validated. Its runbook records the final evidence separately. Draft PR1857 publishes this batch, with unchanged SQL allocated under its generated identity. Hosted CI, deployment and production acceptance remain separate; this ledger does not claim they have occurred.
 
 ## Remaining implementation batches
 

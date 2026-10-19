@@ -646,7 +646,7 @@ acceptance.sequential("procurement payment controlled acceptance", () => {
     const key = randomUUID();
     paymentId(await pay(1, key));
     const before = await fixture.graph(), saved = await command(key), projected = await balance(id);
-    await fixture.pool.query(readFileSync(resolve(process.cwd(), "docs/procurement/payment-balance-completion.pending.sql"), "utf8"));
+    await fixture.pool.query(readFileSync(resolve(process.cwd(), "migrations/900000016000018570001_ap_payment_balance_completion.sql"), "utf8"));
     expect(await fixture.graph()).toEqual(before);
     expect(await command(key)).toEqual(saved);
     expect(await balance(id)).toEqual(projected);

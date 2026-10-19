@@ -128,7 +128,7 @@ export class PaymentAcceptanceFixture {
 
     // Start from the pre-upgrade shape so ADD COLUMN is exercised, not skipped.
     await this.pool.query("ALTER TABLE procurement.ap_payments DROP COLUMN payment_calendar_date");
-    await this.pool.query(readFileSync(resolve(process.cwd(), "docs/procurement/payment-balance-completion.pending.sql"), "utf8"));
+    await this.pool.query(readFileSync(resolve(process.cwd(), "migrations/900000016000018570001_ap_payment_balance_completion.sql"), "utf8"));
 
     const priorDatabase = process.env.DATABASE_URL;
     const priorExternal = process.env.EXTERNAL_DATABASE_URL;

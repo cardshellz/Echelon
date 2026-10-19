@@ -22,7 +22,7 @@ Quarantine uses the existing persistent-intent infrastructure with the original 
 
 ## Migration and release
 
-Reviewed SQL is staged in `docs/procurement/payment-balance-completion.pending.sql` until a draft PR exists. Allocate it unchanged with the repository migration generator, update fixture/runbook references, then rerun the actual-SQL acceptance and migration guards. Do not choose another free sequential number.
+PR1857 allocates the reviewed SQL as `migrations/900000016000018570001_ap_payment_balance_completion.sql` using the repository generator and declared schema dependencies. Its Git-blob SHA256 is `05b4f90b2ff0dc4be148853b4199f349f86de983f79bc187d2cb3cacb03314ed`, identical to the approved pending SQL. The allocator also preserves working-file bytes (CRLF SHA256 `cff5b2738ee47bdc84d24827d72f96aa7cf6e4dc801fa274c967dcde9ff40799`); Git stores the LF representation. Fixture references use this allocated path; actual-SQL acceptance and migration guards must pass before merge.
 
 The migration adds the nullable date without backfill, replaces the payment/invoice unique-pair index with a lookup index, protects immutable application/payment history, enforces application bounds and adds AP-family-only request-key protection. Existing source amounts, allocations, balances, dates and saved responses are not rewritten. Deploy the migration before or with the application. Old instances may fail closed on a conflicting key during a rolling release. Reverting to an old binary is not a complete rollback plan after new repeated applications exist; preserve evidence and use a forward correction.
 
