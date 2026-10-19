@@ -469,6 +469,24 @@ suite(
       await expect(pick(100)).resolves.toMatchObject({ outcome: "picked", quantity: "1" });
     });
 
+    it("reserved transfer: rolls back physical movement when historical destination ownership is inconsistent", async () => {
+      await context.pool.query("INSERT INTO warehouse.warehouses(id,code,name,is_active) VALUES(2,'OTHER','Other',1)");
+      await initialize({});
+      // A closed destination resource claims the wrong warehouse. Keep that
+      // history intact and refuse to attach a new reservation to its identity.
+      const destinationLevel = (await context.pool.query(`INSERT INTO inventory.inventory_levels(product_variant_id,warehouse_location_id)
+        VALUES(101,200) RETURNING id`)).rows[0].id;
+      await context.pool.query(`INSERT INTO inventory.availability_claim_resources(claim_id,claim_line_id,warehouse_id,warehouse_location_id,inventory_level_id,source_variant_id,claimed_qty,released_qty)
+        SELECT claim_id,id,2,200,$1,101,1,1 FROM inventory.availability_claim_lines WHERE order_item_id=11`,[destinationLevel]);
+      const before = await context.state();
+      const claims = await reservationState();
+      const service = new ManualInventoryTransferService(orm,inventory,{deliver:vi.fn()},clock);
+      await expect(service.transfer({...request(),quantity:1,moveReserved:true},"operator"))
+        .rejects.toMatchObject({code:"DATA_INTEGRITY_VIOLATION",statusCode:409});
+      expect(await context.state()).toEqual(before);
+      expect(await reservationState()).toEqual(claims);
+    });
+
     async function pick(locationId: number, quantity = 1) {
       const claimId = String((await context.pool.query("SELECT id FROM inventory.availability_claims WHERE status='active'")).rows[0].id);
       const owner = new PostgresInventoryAvailabilityClaimRepository(new PostgresCanonicalClaimInventoryRepository(), context.pool, clock);
