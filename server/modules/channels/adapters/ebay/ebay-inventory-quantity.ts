@@ -22,9 +22,21 @@ export interface EbayInventoryQuantityClient {
 }
 
 export class EbayInventoryQuantityError extends Error {
-  constructor(readonly code: string, message: string, readonly retryable = false) {
-    super(message);
+  constructor(readonly code: string, message: string, readonly retryable = false, options?: ErrorOptions) {
+    super(message, options);
     this.name = "EbayInventoryQuantityError";
+  }
+}
+
+/** The read/validation phase has no mutation callback. Admission still checks
+ * its independent request journal before accepting this no-send classification. */
+export class EbayInventoryQuantityPreflightError extends EbayInventoryQuantityError {
+  readonly effect = "not_sent" as const;
+  constructor(cause: unknown) {
+    super(cause instanceof EbayInventoryQuantityError ? cause.code : "EBAY_INVENTORY_PREFLIGHT_FAILED",
+      cause instanceof Error ? cause.message : String(cause),
+      cause instanceof EbayInventoryQuantityError ? cause.retryable : true, { cause });
+    this.name = "EbayInventoryQuantityPreflightError";
   }
 }
 
@@ -121,19 +133,25 @@ export type EbayInventoryQuantityPublication = {
 export async function publishEbayInventoryQuantity(
   client: EbayInventoryQuantityClient, sku: string, marketplaceId: string, quantity: number,
 ): Promise<EbayInventoryQuantityPublication> {
-  if (!quantitySchema.safeParse(quantity).success) {
-    throw new EbayInventoryQuantityError("EBAY_INVENTORY_QUANTITY_INVALID", "The desired eBay quantity must be a nonnegative safe integer.");
-  }
-  const offer = await publishedOffer(client, sku, marketplaceId);
-  if (offer.availableQuantity === quantity) {
-    const observation = await observeQuantity(client, sku, marketplaceId, offer);
-    // Matching min(item, offer) is insufficient: the other limit must not be
-    // left above or below the requested absolute quantity.
-    if (observation.inventoryItemQuantity === quantity) {
-      return { sku, marketplaceId, offerId: offer.offerId, quantity,
-        effect: "already_current", providerWriteAttempted: false, observation };
+  let offer: z.infer<typeof offerSchema>;
+  try {
+    if (!quantitySchema.safeParse(quantity).success) {
+      throw new EbayInventoryQuantityError("EBAY_INVENTORY_QUANTITY_INVALID", "The desired eBay quantity must be a nonnegative safe integer.");
     }
+    offer = await publishedOffer(client, sku, marketplaceId);
+    if (offer.availableQuantity === quantity) {
+      const observation = await observeQuantity(client, sku, marketplaceId, offer);
+      // Matching min(item, offer) is insufficient: the other limit must not be
+      // left above or below the requested absolute quantity.
+      if (observation.inventoryItemQuantity === quantity) {
+        return { sku, marketplaceId, offerId: offer.offerId, quantity,
+          effect: "already_current", providerWriteAttempted: false, observation };
+      }
+    }
+  } catch (error) {
+    throw new EbayInventoryQuantityPreflightError(error);
   }
+  // Once dispatch begins, an exception must preserve its original uncertainty.
   const [result] = await sendEbayQuantityUpdates(
     request => client.bulkUpdatePriceQuantity(request, marketplaceId),
     [{ sku, offerId: offer.offerId, quantity }],

@@ -7,6 +7,50 @@ import type { DropshipMarketplaceStoreCredentials } from "../../infrastructure/d
 import { QuantityProviderEvidenceCollector, type QuantityProviderResponseEvidence } from "../../../inventory-planning/application/quantity-provider-request-evidence";
 
 describe("EbayDropshipInventoryPublicationTransportAdapter", () => {
+  it.each([
+    { changed: { externalInventoryItemId: "" }, code: "DROPSHIP_EBAY_INVENTORY_ID_REQUIRED" },
+    { changed: { externalSku: "OTHER" }, code: "DROPSHIP_EBAY_INVENTORY_IDENTITY_MISMATCH" },
+    { changed: { providerScopeType: "location" as const }, code: "DROPSHIP_EBAY_INVENTORY_SCOPE_UNSUPPORTED" },
+  ])("classifies local publication preparation as no-send: $code", async ({ changed, code }) => {
+    const fetchFn = vi.fn();
+    const { adapter } = fixture(fetchFn);
+    await expect(adapter.publishAbsolute({ ...request(), ...changed, desiredQuantity: 7 }))
+      .rejects.toMatchObject({ code, effect: "not_sent", retryable: false });
+    expect(fetchFn).not.toHaveBeenCalled();
+  });
+  it("preserves exact credential identity context and classifies invalid marketplace before sending", async () => {
+    const fetchFn = vi.fn();
+    const wrongAccount = fixture(fetchFn, { externalAccountId: "OTHER" });
+    await expect(wrongAccount.adapter.publishAbsolute({ ...request(), desiredQuantity: 7 }))
+      .rejects.toMatchObject({ code: "DROPSHIP_INVENTORY_ACCOUNT_IDENTITY_MISMATCH", effect: "not_sent", retryable: false,
+        context: { storeConnectionId: 77, targetExternalScopeId: "seller-account-1" } });
+    const invalidMarket = fixture(fetchFn, { config: { marketplaceId: "INVALID" } });
+    await expect(invalidMarket.adapter.publishAbsolute({ ...request(), desiredQuantity: 7 }))
+      .rejects.toMatchObject({ code: "EBAY_INVENTORY_MARKETPLACE_INVALID", effect: "not_sent", retryable: false });
+    expect(fetchFn).not.toHaveBeenCalled();
+  });
+  it("classifies a failed offer GET as not sent without creating mutation evidence", async () => {
+    const fetchFn = vi.fn().mockRejectedValue(new Error("GET connection failed"));
+    const { adapter } = fixture(fetchFn);
+    const start = vi.fn(async () => "1");
+    const collector = new QuantityProviderEvidenceCollector({ start, finish: vi.fn() }, () => new Date("2026-09-04T12:00:00.000Z"));
+    await expect(collector.run(() => adapter.publishAbsolute({ ...request(), desiredQuantity: 7 })))
+      .rejects.toMatchObject({ effect: "not_sent", code: "DROPSHIP_EBAY_INVENTORY_NETWORK_ERROR", retryable: true });
+    expect(collector.provesNoRequestsStarted()).toBe(true);
+    expect(start).not.toHaveBeenCalled();
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+  });
+  it("retains a terminal preflight HTTP classification and context while proving no mutation started", async () => {
+    const fetchFn = vi.fn().mockResolvedValue(new Response("Invalid offer lookup", { status: 400 }));
+    const { adapter } = fixture(fetchFn);
+    const start = vi.fn(async () => "1");
+    const collector = new QuantityProviderEvidenceCollector({ start, finish: vi.fn() }, () => new Date("2026-09-04T12:00:00.000Z"));
+    await expect(collector.run(() => adapter.publishAbsolute({ ...request(), desiredQuantity: 7 })))
+      .rejects.toMatchObject({ effect: "not_sent", code: "DROPSHIP_EBAY_INVENTORY_HTTP_ERROR", retryable: false,
+        context: { status: 400, body: "Invalid offer lookup" } });
+    expect(collector.provesNoRequestsStarted()).toBe(true);
+    expect(start).not.toHaveBeenCalled();
+  });
   it("preserves the retryable transport contract for an ambiguous write failure", async () => {
     const fetchFn = vi.fn().mockResolvedValueOnce(jsonResponse(offerPage(2))).mockRejectedValueOnce(new Error("fetch failed"));
     const { adapter } = fixture(fetchFn);
