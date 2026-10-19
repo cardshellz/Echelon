@@ -261,7 +261,7 @@ databaseTests.sequential("shipment line command PostgreSQL guarantees", () => {
     // New columns from fixtureTable would otherwise hide a broken upgrade path.
     await pool.query("ALTER TABLE procurement.inbound_shipment_lines DROP COLUMN units_per_variant_snapshot, DROP COLUMN dimension_basis");
     const before = (await pool.query("SELECT * FROM procurement.inbound_shipment_lines WHERE id=11")).rows[0];
-    const migration = readFileSync(resolve(process.cwd(), "docs/procurement/shipment-unit-selection.pending.sql"), "utf8");
+    const migration = readFileSync(resolve(process.cwd(), "migrations/900000015000018550001_shipment_unit_selection.sql"), "utf8");
     try {
       await pool.query(migration);
       const migrated = (await pool.query("SELECT * FROM procurement.inbound_shipment_lines WHERE id=11")).rows[0];

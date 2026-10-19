@@ -40,7 +40,7 @@ Physical measurements have an explicit `dimensionBasis`: `piece` or `carton`. A 
 
 ## Migration and compatibility
 
-The additive migration adds nullable shipment unit-factor and measurement-basis columns and constraints. It does not backfill quantities, infer historical factors or rewrite receipts. Deploy the migration before application code that reads the new columns. The initial SQL is prepared under `docs/procurement/shipment-unit-selection.pending.sql`; publication allocates its migration ID without changing its SQL.
+The additive migration adds nullable shipment unit-factor and measurement-basis columns and constraints. It does not backfill quantities, infer historical factors or rewrite receipts. Deploy the migration before application code that reads the new columns. Migration `migrations/900000015000018550001_shipment_unit_selection.sql` is allocated to PR #1855. Its SQL is byte-identical to the approved SQL in commit `9b5718920`.
 
 Raw-piece commands remain valid for existing integrations. An explicit Add from PO selection for an already attached line returns actionable conflict guidance to edit that line; an exact retry of an applied command still replays its saved success. New unit-aware controls explicitly carry their reviewed factor. Existing receipts, cost history, terminal shipment restrictions, source-capacity protections and exact saved-request replay remain in force.
 
