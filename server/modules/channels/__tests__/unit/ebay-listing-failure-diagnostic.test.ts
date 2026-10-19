@@ -3,6 +3,27 @@ import { ebayListingFailureDiagnostic } from "../../ebay-listing-failure-diagnos
 import { syncFailure } from "../../ebay-listing-sync.domain";
 
 describe("saved listing failure diagnostics", () => {
+  it.each([
+    { scope: "store" },
+    { scope: "category", productTypeSlug: "toploaders" },
+    { scope: "product", productId: 232 },
+    { scope: "variant", productId: 232, variantId: 208 },
+  ])("retains exact policy provenance for $scope without copying unrelated context", policySource => {
+    const error = Object.assign(new Error("Unavailable saved policy"), { code: "EBAY_POLICY_UNAVAILABLE",
+      context: { policySource, policyKind: "fulfillment", policyId: "", accountToken: "private", providerBody: { secret: true } } });
+    expect(ebayListingFailureDiagnostic(error)).toEqual({ code: "EBAY_POLICY_UNAVAILABLE",
+      context: { policySource, policyKind: "fulfillment", policyId: "" } });
+    expect(syncFailure(error, 1, new Date("2026-10-15T12:00:00Z"))).toMatchObject({ state: "needs_attention", code: "EBAY_POLICY_UNAVAILABLE" });
+  });
+  it("does not accept incomplete or additional policy provenance fields", () => {
+    const error = Object.assign(new Error("Unavailable saved policy"), { code: "EBAY_POLICY_UNAVAILABLE",
+      context: { policySource: { scope: "variant", password: "private" }, policyKind: "fulfillment", policyId: "1" } });
+    expect(ebayListingFailureDiagnostic(error)).toEqual({ code: "EBAY_POLICY_UNAVAILABLE", context: {} });
+  });
+  it("retains automatic retry for policy catalog outages without treating the catalog as empty", () => {
+    const error = Object.assign(new Error("Catalog unavailable"), { code: "EBAY_POLICY_CATALOG_UNAVAILABLE" });
+    expect(syncFailure(error, 99, new Date("2026-10-15T12:00:00Z"))).toMatchObject({ state: "recovering", code: "EBAY_POLICY_CATALOG_UNAVAILABLE" });
+  });
   it("retains exact inventory scope while excluding provider, SQL and credential context", () => {
     const error = Object.assign(new Error("SQL password=private"), {
       code: "CANONICAL_PUBLICATION_MAPPING_MISSING",

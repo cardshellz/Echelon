@@ -166,9 +166,9 @@ interface ListingFeedVariant {
               explicitlyExcluded: v.ebay_listing_excluded === true || v.variant_override_is_listed === 0,
               excludedByProduct: false,
               effectivelyListed: true,
-              fulfillmentPolicyOverride: v.variant_fulfillment_override || null,
-              returnPolicyOverride: v.variant_return_override || null,
-              paymentPolicyOverride: v.variant_payment_override || null,
+              fulfillmentPolicyOverride: v.variant_fulfillment_override ?? null,
+              returnPolicyOverride: v.variant_return_override ?? null,
+              paymentPolicyOverride: v.variant_payment_override ?? null,
             });
           }
         }
@@ -382,9 +382,9 @@ interface ListingFeedVariant {
               .map((variant: { id: number; sku: string }) => ({ id: variant.id, sku: variant.sku })),
             imageCount: parseInt(row.image_count) || 0,
             variants,
-            fulfillmentPolicyOverride: row.product_fulfillment_override || null,
-            returnPolicyOverride: row.product_return_override || null,
-            paymentPolicyOverride: row.product_payment_override || null,
+            fulfillmentPolicyOverride: row.product_fulfillment_override ?? null,
+            returnPolicyOverride: row.product_return_override ?? null,
+            paymentPolicyOverride: row.product_payment_override ?? null,
           });
         }
 

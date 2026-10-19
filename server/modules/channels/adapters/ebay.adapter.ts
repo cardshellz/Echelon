@@ -1,3 +1,5 @@
+import { ebayBusinessPolicies } from "../ebay-business-policies";
+import { EbayBusinessPolicyError } from "@shared/ebay-business-policies";
 /**
  * eBay Channel Adapter
  *
@@ -80,11 +82,6 @@ interface EbayConnectionMetadata {
   ruName?: string;
   environment?: "sandbox" | "production";
   siteId?: string;
-  businessPolicies?: {
-    paymentPolicyId: string;
-    returnPolicyId: string;
-    fulfillmentPolicyId: string;
-  };
   merchantLocationKey?: string;
   notificationVerificationToken?: string;
 }
@@ -125,7 +122,8 @@ export class EbayAdapter implements IChannelAdapter {
   private readonly listingBuilder: EbayListingBuilder;
   private readonly listingConnector: EbayMarketplaceListingConnector;
 
-  constructor(private readonly db: DrizzleDb, private readonly photos: EbayListingPhotoResolver) {
+  constructor(private readonly db: DrizzleDb, private readonly photos: EbayListingPhotoResolver,
+    private readonly policies: Pick<typeof ebayBusinessPolicies, "resolveProductPolicies"> = ebayBusinessPolicies) {
     this.listingBuilder = createEbayListingBuilder();
     this.listingConnector = new EbayMarketplaceListingConnector({
       delay: (ms) => this.delay(ms),
@@ -179,14 +177,6 @@ export class EbayAdapter implements IChannelAdapter {
     channelId: number,
     metadata: EbayConnectionMetadata,
   ): Promise<ListingPushResult> {
-    if (!metadata.businessPolicies) {
-      return {
-        productId: listing.productId,
-        status: "error",
-        error: "No eBay business policies configured. Set paymentPolicyId, returnPolicyId, and fulfillmentPolicyId in channel connection metadata.",
-      };
-    }
-
     if (!metadata.merchantLocationKey) {
       return {
         productId: listing.productId,
@@ -195,23 +185,31 @@ export class EbayAdapter implements IChannelAdapter {
       };
     }
 
-    // Load channel-level overrides
-    const overrides = await this.getChannelOverrides(channelId, listing.productId);
-
-    const config = {
-      merchantLocationKey: metadata.merchantLocationKey,
-      listingPolicies: {
-        paymentPolicyId: metadata.businessPolicies.paymentPolicyId,
-        returnPolicyId: metadata.businessPolicies.returnPolicyId,
-        fulfillmentPolicyId: metadata.businessPolicies.fulfillmentPolicyId,
-      },
-      marketplaceId: metadata.siteId || DEFAULT_MARKETPLACE,
-      channelOverrides: overrides || undefined,
-    };
-
     const photoVariants = listing.variants.filter(variant => variant.isListed && variant.sku)
       .map(variant => ({ variantId: variant.variantId, sku: variant.sku! }));
     if (photoVariants.length === 0) return { productId: listing.productId, status: "skipped" };
+    const selectedPolicies = await this.policies.resolveProductPolicies({ productId: listing.productId,
+      variantIds: photoVariants.map(variant => variant.variantId) });
+    // The generic adapter consumes the same validated selections as durable
+    // publication. Legacy metadata.businessPolicies is no longer an authority.
+    if (selectedPolicies.scope.channelId !== channelId) {
+      throw new EbayBusinessPolicyError("EBAY_POLICY_SCOPE_CHANGED", "The resolved business policies belong to another eBay channel.", 409);
+    }
+    await this.getConnectionMetadata(channelId, selectedPolicies.scope.connectionId);
+    const auth = await this.getAuthService(channelId, selectedPolicies.scope.connectionId);
+    const account = await auth.getVerifiedProviderAccount(channelId);
+    if (auth.getEnvironment() !== selectedPolicies.scope.environment || account?.externalAccountId !== selectedPolicies.scope.accountId) {
+      throw new EbayBusinessPolicyError("EBAY_POLICY_SCOPE_CHANGED", "The eBay account changed while preparing listing policies. Refresh the connection before retrying.", 409);
+    }
+    const listingPolicies = selectedPolicies.byVariantId.values().next().value;
+    if (!listingPolicies) throw new EbayBusinessPolicyError("EBAY_POLICY_REQUIRED", "No validated business policies were returned for this listing.", 422);
+    const overrides = await this.getChannelOverrides(channelId, listing.productId);
+    const config = {
+      merchantLocationKey: metadata.merchantLocationKey,
+      listingPolicies,
+      marketplaceId: selectedPolicies.scope.marketplaceId,
+      channelOverrides: overrides || undefined,
+    };
     const photoPlan = await this.photos.resolve({
       productId: listing.productId, channelId, variants: photoVariants,
       mode: listing.imageSyncMode === "preserve" ? "preserve" : "catalog",
@@ -220,7 +218,7 @@ export class EbayAdapter implements IChannelAdapter {
         variants: photoVariants,
       }),
     });
-    const { inventoryItems, offers, itemGroup } = this.listingBuilder.buildListingDraft(listing, config, { photoPlan });
+    const { inventoryItems, offers, itemGroup } = this.listingBuilder.buildListingDraft(listing, config, { photoPlan, variantListingPoliciesByVariantId: selectedPolicies.byVariantId });
     const hasExistingIds = listing.variants.some(
       (v) => v.externalVariantId,
     );

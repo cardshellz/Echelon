@@ -37,6 +37,14 @@ vi.mock("../../infrastructure/ebay-listing-push.repository", () => ({ PostgresEb
 } }));
 vi.mock("../../infrastructure/ebay-listing-client", () => ({ createEbayRouteListingClient: () => state.client,
   createEbayRouteListingLifecycleClient: () => state.client, getExistingEbayListingPhotos: vi.fn() }));
+// This identity-rediscovery suite consumes the policy owner's validated result.
+// Real catalog lookup, persistence and publication gating have PG composition coverage.
+vi.mock("../../ebay-business-policies", () => ({ ebayBusinessPolicies: {
+  resolveProductPolicies: async (input: { variantIds: number[]; expectedScope: unknown }) => {
+    const policies = { fulfillmentPolicyId: "shipping", paymentPolicyId: "payment", returnPolicyId: "returns" };
+    return { scope: input.expectedScope, product: policies, byVariantId: new Map(input.variantIds.map(id => [id, { ...policies }])) };
+  },
+} }));
 vi.mock("../../infrastructure/ebay-listing-helpers", async importOriginal => ({
   ...await importOriginal<typeof import("../../infrastructure/ebay-listing-helpers")>(), resolveChannelPrice: async () => 1000,
 }));

@@ -1,3 +1,6 @@
+import { EbayBusinessPolicyError, ebayPolicyWriteSchema } from "@shared/ebay-business-policies";
+import { ebayBusinessPolicies } from "../modules/channels/ebay-business-policies";
+import { ebayPolicyActor, sendEbayPolicyError } from "./ebay/ebay-business-policy-http";
 import { z } from "zod";
 
 import { requireAuth, requirePermission } from "./middleware";
@@ -16,7 +19,7 @@ import { requireAuth, requirePermission } from "./middleware";
  */
 
 import type { Express, Request, Response } from "express";
-import { eq, and, desc } from "drizzle-orm";
+import { eq, and, desc, sql } from "drizzle-orm";
 import { db } from "../db";
 import {
   channels,
@@ -172,9 +175,9 @@ export function registerEbaySettingsRoutes(app: Express): void {
           : null,
         config: {
           merchantLocationKey: metadata.merchantLocationKey || null,
-          fulfillmentPolicyId: metadata.fulfillmentPolicyId || null,
-          returnPolicyId: metadata.returnPolicyId || null,
-          paymentPolicyId: metadata.paymentPolicyId || null,
+          fulfillmentPolicyId: metadata.fulfillmentPolicyId ?? null,
+          returnPolicyId: metadata.returnPolicyId ?? null,
+          paymentPolicyId: metadata.paymentPolicyId ?? null,
           merchantLocation: metadata.merchantLocation || null,
         },
         lastSyncAt: conn?.lastSyncAt || null,
@@ -190,62 +193,8 @@ export function registerEbaySettingsRoutes(app: Express): void {
   // GET /api/ebay/policies — Fetch business policies from eBay API
   // -----------------------------------------------------------------------
   app.get("/api/ebay/policies", requireAuth, async (_req: Request, res: Response) => {
-    try {
-      const authService = getAuthService();
-      if (!authService) {
-        res.status(500).json({ error: "eBay OAuth not configured" });
-        return;
-      }
-
-      const accessToken = await authService.getAccessToken(EBAY_CHANNEL_ID);
-      const environment = process.env.EBAY_ENVIRONMENT || "production";
-      const baseUrl = environment === "sandbox"
-        ? "https://api.sandbox.ebay.com"
-        : "https://api.ebay.com";
-
-      // Fetch all three policy types in parallel
-      const [fulfillmentResp, returnResp, paymentResp] = await Promise.all([
-        fetch(`${baseUrl}/sell/account/v1/fulfillment_policy?marketplace_id=EBAY_US`, {
-          headers: { Authorization: `Bearer ${accessToken}`, Accept: "application/json" },
-        }),
-        fetch(`${baseUrl}/sell/account/v1/return_policy?marketplace_id=EBAY_US`, {
-          headers: { Authorization: `Bearer ${accessToken}`, Accept: "application/json" },
-        }),
-        fetch(`${baseUrl}/sell/account/v1/payment_policy?marketplace_id=EBAY_US`, {
-          headers: { Authorization: `Bearer ${accessToken}`, Accept: "application/json" },
-        }),
-      ]);
-
-      const [fulfillmentData, returnData, paymentData] = await Promise.all([
-        fulfillmentResp.ok ? fulfillmentResp.json() : { fulfillmentPolicies: [] },
-        returnResp.ok ? returnResp.json() : { returnPolicies: [] },
-        paymentResp.ok ? paymentResp.json() : { paymentPolicies: [] },
-      ]);
-
-      res.json({
-        fulfillmentPolicies: (fulfillmentData.fulfillmentPolicies || []).map((p: any) => ({
-          id: p.fulfillmentPolicyId,
-          name: p.name,
-          description: p.description,
-          marketplaceId: p.marketplaceId,
-        })),
-        returnPolicies: (returnData.returnPolicies || []).map((p: any) => ({
-          id: p.returnPolicyId,
-          name: p.name,
-          description: p.description,
-          marketplaceId: p.marketplaceId,
-        })),
-        paymentPolicies: (paymentData.paymentPolicies || []).map((p: any) => ({
-          id: p.paymentPolicyId,
-          name: p.name,
-          description: p.description,
-          marketplaceId: p.marketplaceId,
-        })),
-      });
-    } catch (err: any) {
-      console.error("[eBay Settings] Error fetching policies:", err.message);
-      res.status(500).json({ error: err.message });
-    }
+    try { res.json(await ebayBusinessPolicies.readCatalog()); }
+    catch (error) { sendEbayPolicyError(res, error); }
   });
 
   // -----------------------------------------------------------------------
@@ -319,12 +268,10 @@ export function registerEbaySettingsRoutes(app: Express): void {
 
       // Save location key to channel connection metadata
       const conn = await getOrCreateChannelConnection();
-      const existingMetadata = (conn.metadata as Record<string, any>) || {};
       await (db as any)
         .update(channelConnections)
         .set({
-          metadata: {
-            ...existingMetadata,
+          metadata: sql`COALESCE(${channelConnections.metadata}, '{}'::jsonb) || ${JSON.stringify({
             merchantLocationKey: locationKey,
             merchantLocation: {
               name,
@@ -335,7 +282,7 @@ export function registerEbaySettingsRoutes(app: Express): void {
               postalCode,
               country: country || "US",
             },
-          },
+          })}::jsonb`,
           updatedAt: new Date(),
         })
         .where(eq(channelConnections.id, conn.id));
@@ -354,31 +301,12 @@ export function registerEbaySettingsRoutes(app: Express): void {
   // -----------------------------------------------------------------------
   // PUT /api/ebay/settings — Save policy selections & config
   // -----------------------------------------------------------------------
-  app.put("/api/ebay/settings", requireAuth, async (req: Request, res: Response) => {
+  app.put("/api/ebay/settings", requireAuth, requirePermission("channels", "edit"), async (req: Request, res: Response) => {
     try {
-      const { fulfillmentPolicyId, returnPolicyId, paymentPolicyId } = req.body;
-
-      const conn = await getOrCreateChannelConnection();
-      const existingMetadata = (conn.metadata as Record<string, any>) || {};
-
-      await (db as any)
-        .update(channelConnections)
-        .set({
-          metadata: {
-            ...existingMetadata,
-            fulfillmentPolicyId: fulfillmentPolicyId || existingMetadata.fulfillmentPolicyId,
-            returnPolicyId: returnPolicyId || existingMetadata.returnPolicyId,
-            paymentPolicyId: paymentPolicyId || existingMetadata.paymentPolicyId,
-          },
-          updatedAt: new Date(),
-        })
-        .where(eq(channelConnections.id, conn.id));
-
-      res.json({ success: true, message: "eBay settings saved" });
-    } catch (err: any) {
-      console.error("[eBay Settings] Error saving settings:", err.message);
-      res.status(500).json({ error: err.message });
-    }
+      const { expectedPolicies, expectedScope, ...patch } = ebayPolicyWriteSchema.parse(req.body);
+      const policies = await ebayBusinessPolicies.patchPolicies({ target: { kind: "store" }, patch, expectedPolicies, expectedScope, actor: ebayPolicyActor(req) });
+      res.json({ success: true, message: "eBay settings saved", ...policies });
+    } catch (error) { sendEbayPolicyError(res, error); }
   });
 
   // -----------------------------------------------------------------------
@@ -485,11 +413,6 @@ export function registerEbaySettingsRoutes(app: Express): void {
         res.status(400).json({ error: "Merchant location not configured. Create a location first." });
         return;
       }
-      if (!metadata.fulfillmentPolicyId || !metadata.returnPolicyId || !metadata.paymentPolicyId) {
-        res.status(400).json({ error: "Business policies not configured. Select policies first." });
-        return;
-      }
-
       // Get product, variants, images
       const [product] = await (db as any)
         .select()
@@ -519,6 +442,12 @@ export function registerEbaySettingsRoutes(app: Express): void {
         return;
       }
 
+      const account = await authService.getVerifiedProviderAccount(EBAY_CHANNEL_ID);
+      const resolvedPolicies = await ebayBusinessPolicies.resolveProductPolicies({ productId,
+        variantIds: [testVariant.id], expectedScope: { channelId: EBAY_CHANNEL_ID, connectionId: conn.id,
+          accountId: account?.externalAccountId ?? "", environment: authService.getEnvironment(),
+          marketplaceId: metadata.marketplaceId ?? "EBAY_US" } });
+      const policies = resolvedPolicies.byVariantId.get(testVariant.id)!;
       const builder = createEbayListingBuilder();
       // The factory installs the shared authority-aware global/exact-scope
       // admission boundary in the low-level client for every quantity-bearing
@@ -534,12 +463,8 @@ export function registerEbaySettingsRoutes(app: Express): void {
 
       const listingConfig = {
         merchantLocationKey: metadata.merchantLocationKey,
-        listingPolicies: {
-          fulfillmentPolicyId: metadata.fulfillmentPolicyId,
-          returnPolicyId: metadata.returnPolicyId,
-          paymentPolicyId: metadata.paymentPolicyId,
-        },
-        marketplaceId: "EBAY_US",
+        listingPolicies: { fulfillmentPolicyId: policies.fulfillmentPolicyId!, returnPolicyId: policies.returnPolicyId!, paymentPolicyId: policies.paymentPolicyId! },
+        marketplaceId: resolvedPolicies.scope.marketplaceId,
       };
 
       // Build channel listing payload
@@ -626,6 +551,7 @@ export function registerEbaySettingsRoutes(app: Express): void {
           : null,
       });
     } catch (err: any) {
+      if (err instanceof EbayBusinessPolicyError) { sendEbayPolicyError(res, err); return; }
       console.error("[eBay Settings] Error creating test listing:", err.message);
       res.status(500).json({ error: err.message });
     }

@@ -1,3 +1,4 @@
+import { assertEbayStorePolicyMetadataWriteOwned, EBAY_BUSINESS_POLICY_CHANNEL_ID } from "@shared/ebay-business-policies";
 import {
   db,
   type Channel,
@@ -181,10 +182,18 @@ export const channelMethods: IChannelStorage = {
   },
 
   async upsertChannelConnection(connection: InsertChannelConnection): Promise<ChannelConnection> {
+    const protectsEbayPolicies = connection.channelId === EBAY_BUSINESS_POLICY_CHANNEL_ID;
+    if (protectsEbayPolicies) assertEbayStorePolicyMetadataWriteOwned(connection.metadata);
     const existing = await this.getChannelConnection(connection.channelId);
     if (existing) {
       const result = await db.update(channelConnections)
-        .set({ ...connection, updatedAt: new Date() })
+        .set({ ...connection,
+          // Preserve owner-managed policies atomically; a general connection edit
+          // must not clear them or replay a stale read over a concurrent policy save.
+          ...(protectsEbayPolicies && connection.metadata !== undefined ? {
+            metadata: sql`COALESCE(${channelConnections.metadata}, '{}'::jsonb) || ${JSON.stringify(connection.metadata)}::jsonb`,
+          } : {}),
+          updatedAt: new Date() })
         .where(eq(channelConnections.channelId, connection.channelId))
         .returning();
       return result[0];

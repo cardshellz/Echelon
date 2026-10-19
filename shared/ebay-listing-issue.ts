@@ -1,4 +1,5 @@
 import { ebayListingIssueSchema, type EbayListingIssue } from "./types/ebay-listing-issue";
+import type { EbayPolicySource } from "./ebay-business-policies";
 import type { EbayListingSyncJob } from "./types/ebay-listing-sync";
 
 function isAutomaticResponseRecovery(code: string | null | undefined, state: string | undefined): boolean {
@@ -36,6 +37,7 @@ export interface EbayListingIssueInput {
   state?: string;
   operation?: EbayListingSyncJob["operation"];
   quantityBlockerCodes?: readonly string[];
+  policySource?: EbayPolicySource;
 }
 
 /** One presentation contract for API results, saved work, and older server responses.
@@ -348,10 +350,22 @@ export function resolveEbayListingIssue(input: EbayListingIssueInput): EbayListi
     return issue("Review which variants are included", "This product has no eligible existing listing update.",
       "Check the product and variant inclusion switches in the eBay listing feed. Enable the intended sellable variants; use Publish for a product without an existing eBay listing.",
       false, "edit_listing", "Open listing feed", "/channels/ebay");
-  if (code === "EBAY_SHIPPING_POLICY_REJECTED")
-    return issue("eBay rejected the shipping policy", "eBay rejected this listing's selected shipping policy. This update did not complete.",
-      "Open business policies and check Shipping. A product type, product or variant Fulfillment override may supply a different policy. Correct the rejected policy, save, then Sync this product to continue with its current inventory and pictures.",
-      false, "edit_listing", "Open business policies", "/channels/ebay#business-policies");
+  if (["EBAY_SHIPPING_POLICY_REJECTED", "EBAY_POLICY_UNAVAILABLE", "EBAY_POLICY_REQUIRED"].includes(code)) {
+    const source = input.policySource;
+    const productId = source?.productId ?? input.productId;
+    const href = source?.scope === "store" ? "/channels/ebay#business-policies"
+      : source?.scope === "category" && source.productTypeSlug ? `/channels/ebay#ebay-category-policies-${encodeURIComponent(source.productTypeSlug)}`
+      : source?.scope === "variant" && source.variantId ? `/channels/ebay#ebay-variant-policies-${source.variantId}`
+      : productId ? `/channels/ebay#ebay-product-policies-${productId}` : "/channels/ebay#business-policies";
+    return issue(code === "EBAY_SHIPPING_POLICY_REJECTED" ? "eBay rejected the shipping policy" : "Review the saved eBay policy",
+      "The selected business policy is unavailable or was rejected by eBay. This update did not complete.",
+      "Open policy settings and review the saved selection. An unavailable saved policy remains active until you change it. Choose an available policy or inherit the default, save, then Sync this product.",
+      false, "edit_listing", "Open policy settings", href);
+  }
+  if (["EBAY_POLICY_CATALOG_UNAVAILABLE", "EBAY_POLICY_SCOPE_CHANGED", "EBAY_POLICY_STALE_EDIT"].includes(code))
+    return issue("Policy settings need a fresh check", "Echelon could not verify the current policy settings.",
+      "Refresh the available policies and saved settings, review your changes, then save again. Your saved policies have not been replaced.",
+      false, "edit_listing", "Open policy settings", "/channels/ebay#business-policies");
   if (["EBAY_QUANTITY_REJECTED", "EBAY_LISTING_VALIDATION_FAILED", "EBAY_LISTING_PREFLIGHT_FAILED"].includes(code))
     return issue("Listing details need attention", "The listing does not meet a required eBay or inventory condition.",
       "Review the specific requirement above. Open this product's listing settings to correct its category, item specifics, policies or availability, then retry.",

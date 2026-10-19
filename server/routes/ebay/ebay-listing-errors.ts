@@ -1,3 +1,4 @@
+import { EbayBusinessPolicyError, ebayPolicySourceSchema } from "@shared/ebay-business-policies";
 import { z } from 'zod';
 import { resolveEbayListingIssue, safeListingDiagnostic } from '@shared/ebay-listing-issue';
 import { publicationSelectionBusyIssue } from '../../modules/inventory-planning/publication-selection-work';
@@ -13,10 +14,12 @@ export function listingFailure(error: unknown, productId?: number, jobId?: strin
   const message = error instanceof z.ZodError ? 'The request is invalid. Refresh this page and select the product again.'
     : error instanceof Error && code !== 'EBAY_LISTING_SYNC_FAILED' ? safeListingDiagnostic(error.message)
       : 'The listing operation could not finish. Refresh its saved status before retrying.';
+  const policySource = error instanceof EbayBusinessPolicyError ? ebayPolicySourceSchema.safeParse(error.context.policySource) : undefined;
   console.error(JSON.stringify({ event: 'ebay_listing_request_failed', code, productId }));
-  return { code, error: message, issue: resolveEbayListingIssue({ code, message, productId, jobId: savedJob.success ? savedJob.data : undefined }) };
+  return { code, error: message, issue: resolveEbayListingIssue({ code, message, productId, jobId: savedJob.success ? savedJob.data : undefined, ...(policySource?.success ? { policySource: policySource.data } : {}) }) };
 }
 export function listingFailureStatus(error: unknown): number {
+  if (error instanceof EbayBusinessPolicyError) return error.statusCode;
   if (publicationSelectionBusyIssue(error)) return 409;
   if (error instanceof z.ZodError) return 400;
   const code = error instanceof Error && 'code' in error ? error.code : null;

@@ -115,16 +115,61 @@ test("a real shipping-policy refusal displays eBay's reason and the existing cor
   await page.clock.install();
   await expect(page.getByRole("status", { name: statusName })).toContainText("eBay rejected the shipping policy");
   await expect(page.getByText(message, { exact: true })).toBeVisible();
-  await expect(page.getByRole("link", { name: "Open business policies", exact: true })).toHaveAttribute("href", "/channels/ebay#business-policies");
+  await expect(page.getByRole("link", { name: "Open policy settings", exact: true })).toHaveAttribute("href", "/channels/ebay#ebay-product-policies-1");
   await expect(page.locator("#business-policies")).toContainText("Default Business Policies");
   await expect(page.locator("#business-policies")).toContainText("Shipping");
-  await expect(page.getByText(/A product type, product or variant Fulfillment override/)).toBeVisible();
+  await expect(page.getByText(/An unavailable saved policy remains active until you change it/)).toBeVisible();
   await expect(page.getByRole("button", { name: "Errors (1)", exact: true })).toBeVisible();
   await expect(page.getByTitle("Sync this listing", { exact: true }).filter({ visible: true })).toBeEnabled();
   await expect(page.getByRole("button", { name: /Copy support|Review blocked/ })).toHaveCount(0);
   await page.clock.fastForward(30_100);
   await expect(page.getByRole("status", { name: statusName })).not.toContainText("Published.");
   await page.screenshot({ path: info.outputPath("ebay-shipping-policy-rejection.png"), fullPage: true });
+  expect(state.requests).toEqual([]); expect(state.commands).toEqual([]);
+  expect(state.errors).toEqual([]); expect(state.unexpected).toEqual([]);
+});
+
+test("the same policy issue link reopens its editor after collapse, including keyboard activation", async ({ page }) => {
+  const state = await setupEbayChannelPage(page);
+  await page.route("**/api/ebay/category-aspects/183438", route => route.fulfill({ json: { categoryId: "183438", aspects: [] } }));
+  await page.route("**/api/ebay/product-aspects/1", route => route.fulfill({ json: { overrides: {} } }));
+  await page.route("**/api/ebay/type-aspect-defaults/toploaders", route => route.fulfill({ json: { defaults: {} } }));
+  state.feedStatus = "publication_incomplete";
+  state.externalListingId = null;
+  state.jobs = [{ ...job, operation: "publish", state: "needs_attention", code: "EBAY_SHIPPING_POLICY_REJECTED",
+    message: "The shipping policy was rejected.", progress: { ...recordedProgress, phase: "publish", phaseState: "started", queuedAhead: null } }];
+  await page.reload();
+  // Give the isolated page its production pathname so the href is genuinely a
+  // same-document link, rather than loading the full app outside this fixture.
+  await page.evaluate(() => history.replaceState(null, "", "/channels/ebay"));
+  const initialFeed = await page.evaluate(async () => (await fetch("/api/ebay/listing-feed")).json());
+  // No polling refresh may reopen the row and mask a broken repeat activation.
+  await page.clock.install();
+  const link = page.getByRole("link", { name: "Open policy settings", exact: true });
+  const editor = page.locator("#ebay-product-policies-1");
+  const toggle = page.getByRole("button", { name: /^Policy and variant settings for 55PT Toploader Combo Pack/ }).filter({ visible: true });
+  await link.click();
+  await expect(editor).toBeVisible();
+  await expect(page).toHaveURL(/#ebay-product-policies-1$/);
+  await toggle.click();
+  await expect(editor).toHaveCount(0);
+  state.feedProducts = [{ ...initialFeed.feed[0], name: "55PT Toploader Combo Pack refreshed" }];
+  await page.clock.fastForward(10_100);
+  await expect(page.getByText("55PT Toploader Combo Pack refreshed", { exact: true })).toBeVisible();
+  await expect(editor).toHaveCount(0);
+  await link.click();
+  await expect(editor).toBeVisible();
+  await toggle.click();
+  await expect(editor).toHaveCount(0);
+  await link.focus();
+  await page.keyboard.press("Enter");
+  await expect(editor).toBeVisible();
+  await toggle.click();
+  await page.evaluate(() => { window.location.hash = "connection"; });
+  await expect(page).toHaveURL(/#connection$/);
+  await link.click();
+  await expect(editor).toBeVisible();
+  await expect(link).toHaveAttribute("href", "/channels/ebay#ebay-product-policies-1");
   expect(state.requests).toEqual([]); expect(state.commands).toEqual([]);
   expect(state.errors).toEqual([]); expect(state.unexpected).toEqual([]);
 });
