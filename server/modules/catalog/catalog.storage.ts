@@ -1,3 +1,4 @@
+import { assertEbayPolicyWriteOwned } from "@shared/ebay-business-policies";
 import {
   db,
   products,
@@ -152,6 +153,7 @@ export const productMethods: IProductStorage = {
   },
 
   async createProduct(product: InsertProduct, executor: any = db): Promise<Product> {
+    assertEbayPolicyWriteOwned(product, { operation: "create" });
     if (product.inventoryTrackingDefault !== undefined && typeof product.inventoryTrackingDefault !== "boolean") {
       throw new InventoryTrackingPolicyError("INVENTORY_POLICY_INVALID", "Product inventory tracking must be a boolean", 400);
     }
@@ -160,6 +162,7 @@ export const productMethods: IProductStorage = {
   },
 
   async updateProduct(id: number, updates: Partial<InsertProduct>, executor: any = db): Promise<Product | null> {
+    assertEbayPolicyWriteOwned(updates, { operation: "update" });
     if (updates.inventoryTrackingDefault !== undefined) {
       if (executor === db) return db.transaction(tx => productMethods.updateProduct(id, updates, tx));
       await updateProductInventoryTracking(executor, id, updates.inventoryTrackingDefault, "catalog.storage", new Date());
@@ -218,6 +221,7 @@ export const productMethods: IProductStorage = {
   },
 
   async createProductVariant(variant: InsertProductVariant, executor: any = db): Promise<ProductVariant> {
+    assertEbayPolicyWriteOwned(variant, { operation: "create" });
     if (executor === db) return db.transaction(tx => productMethods.createProductVariant(variant, tx));
     const policy = await prepareVariantInventoryTracking(executor, variant);
     const result = await executor.insert(productVariants).values({ ...variant, ...policy }).returning();
@@ -225,6 +229,7 @@ export const productMethods: IProductStorage = {
   },
 
   async updateProductVariant(id: number, updates: Partial<InsertProductVariant>, executor: any = db): Promise<ProductVariant | null> {
+    assertEbayPolicyWriteOwned(updates, { operation: "update" });
     const policyChanged = ["trackInventory", "inventoryTrackingOverride", "requiresShipping"].some(key => Object.prototype.hasOwnProperty.call(updates, key));
     let policy: Partial<InsertProductVariant> = {};
     if (policyChanged) {

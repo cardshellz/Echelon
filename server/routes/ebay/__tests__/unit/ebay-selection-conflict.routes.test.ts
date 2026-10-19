@@ -1,9 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Request, Response } from "express";
-const ports = vi.hoisted(() => ({ query: vi.fn(), release: vi.fn(), setIntent: vi.fn(), remote: vi.fn() }));
+const ports = vi.hoisted(() => ({ query: vi.fn(), release: vi.fn(), setIntent: vi.fn(), saveMappings: vi.fn(), remote: vi.fn() }));
 vi.mock("../../../../db", () => ({ db: {}, pool: { connect: async () => ({ query: ports.query, release: ports.release }) } }));
 vi.mock("../../../../modules/channels/ebay-connection-health", () => ({ readEbayConnectionHealth: vi.fn() }));
 vi.mock("../../../../modules/channels/ebay-listing-sync", () => ({ syncActiveListings: vi.fn(), triggerPricingRuleSync: vi.fn() }));
+vi.mock("../../../../modules/channels/ebay-business-policies", () => ({ ebayBusinessPolicies: { saveCategoryMappings: ports.saveMappings } }));
 vi.mock("../../../middleware", () => ({ requireAuth: vi.fn(), requirePermission: () => vi.fn(), requireInternalApiKey: vi.fn() }));
 vi.mock("../../ebay-utils", () => ({ EBAY_CHANNEL_ID: 36 }));
 vi.mock("../../ebay-listing-state", () => ({ setEbayVariantListingIntent: ports.setIntent,
@@ -33,10 +34,16 @@ describe("eBay selection mutation conflicts", () => {
       throw busy;
     });
     ports.setIntent.mockRejectedValue(busy);
-    const res = response(); await handler(path as string)({ params, body } as Request, res as unknown as Response);
+    ports.saveMappings.mockRejectedValue(busy);
+    const res = response(); await handler(path as string)({ params, body, session: { user: { id: 42 } } } as unknown as Request, res as unknown as Response);
     expect(res.status).toHaveBeenCalledWith(409);
     expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ code: "PUBLICATION_SELECTION_BUSY", retryable: true }));
     expect(ports.remote).not.toHaveBeenCalled();
-    if (path === "/api/ebay/category-mapping") expect(ports.query).toHaveBeenCalledWith("ROLLBACK");
+    if (path === "/api/ebay/category-mapping") {
+      // The policy owner owns rollback; its real PG suite proves batch atomicity.
+      expect(ports.saveMappings).toHaveBeenCalledWith({ mappings: [{ productTypeSlug: "toploaders", listingEnabled: false }],
+        expectedScope: undefined, actor: "user:42" });
+      expect(ports.query).not.toHaveBeenCalled();
+    }
   });
 });

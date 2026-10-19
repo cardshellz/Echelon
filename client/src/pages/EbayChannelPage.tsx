@@ -15,9 +15,11 @@ import { EbayProductListingIntentControl } from "@/components/ebay/EbayProductLi
 import { EbayWithdrawalIssueCard } from "@/components/ebay/EbayWithdrawalIssueCard";
 import { ebayListingIssueSchema, type EbayListingIssue } from "@shared/types/ebay-listing-issue";
 import { resolveEbayListingIssue, resolveEbayListingJobIssue } from "@shared/ebay-listing-issue";
-import { listingFeedIssueFromError, listingSyncIssueFromError } from "@/lib/ebay-listing-issue";
+import { listingFeedIssueFromError, listingIssueFromError, listingSyncIssueFromError } from "@/lib/ebay-listing-issue";
 import { z } from "zod";
-import React, { useState, useEffect, useCallback, useMemo } from "react";
+import React, { useState, useEffect, useCallback, useMemo, useRef } from "react";
+import type { EbayPolicyValues, EbayPolicyPatch, EbayPolicyScope } from "@shared/ebay-business-policies";
+import { EbayPolicyFields, PolicyDraftConflict, policyChanges, useEbayPolicyDraft, type PolicyCatalogStatus } from "@/features/channels/EbayPolicyFields";
 import { useQuery, useQueries, useMutation, useQueryClient } from "@tanstack/react-query";
 import { ChannelWorkspaceHeader } from "@/components/channels/ChannelWorkspaceHeader";
 import { apiRequest } from "@/lib/queryClient";
@@ -157,6 +159,7 @@ interface Policy {
 }
 
 interface PoliciesResponse {
+  scope?: EbayPolicyScope;
   fulfillmentPolicies: Policy[];
   returnPolicies: Policy[];
   paymentPolicies: Policy[];
@@ -269,108 +272,39 @@ function ProductAspectEditorWithDefaults({
 // Helper: Policy Override Dropdowns (product or variant level)
 // ============================================================================
 
-function PolicyOverrideRow({
-  label,
-  fulfillmentPolicyId,
-  returnPolicyId,
-  paymentPolicyId,
-  policies,
-  onSave,
-  isPending,
-}: {
-  label: string;
-  fulfillmentPolicyId: string | null;
-  returnPolicyId: string | null;
-  paymentPolicyId: string | null;
-  policies: PoliciesResponse | undefined;
-  onSave: (fp: string | null, rp: string | null, pp: string | null) => void;
-  isPending: boolean;
+function categoryPolicyValues(mapping: Partial<CategoryMapping>): EbayPolicyValues {
+  return { fulfillmentPolicyId: mapping.fulfillmentPolicyOverride ?? null,
+    returnPolicyId: mapping.returnPolicyOverride ?? null, paymentPolicyId: mapping.paymentPolicyOverride ?? null };
+}
+function categoryPolicyPatch(patch: EbayPolicyPatch): Partial<CategoryMapping> {
+  return { ...("fulfillmentPolicyId" in patch ? { fulfillmentPolicyOverride: patch.fulfillmentPolicyId } : {}),
+    ...("returnPolicyId" in patch ? { returnPolicyOverride: patch.returnPolicyId } : {}),
+    ...("paymentPolicyId" in patch ? { paymentPolicyOverride: patch.paymentPolicyId } : {}) };
+}
+function PolicyOverrideRow({ label, fulfillmentPolicyId, returnPolicyId, paymentPolicyId, policies,
+  catalogStatus, onSave, isPending, inheritLabel, id }: {
+  label: string; fulfillmentPolicyId: string | null; returnPolicyId: string | null; paymentPolicyId: string | null;
+  policies: PoliciesResponse | undefined; catalogStatus: PolicyCatalogStatus; isPending: boolean;
+  inheritLabel: string; id: string;
+  onSave: (patch: EbayPolicyPatch, expectedPolicies: EbayPolicyValues, expectedScope?: EbayPolicyScope) => Promise<unknown>;
 }) {
-  const [fp, setFp] = useState(fulfillmentPolicyId || "__default__");
-  const [rp, setRp] = useState(returnPolicyId || "__default__");
-  const [pp, setPp] = useState(paymentPolicyId || "__default__");
-  const [dirty, setDirty] = useState(false);
-
-  // Sync from props
-  useEffect(() => {
-    setFp(fulfillmentPolicyId || "__default__");
-    setRp(returnPolicyId || "__default__");
-    setPp(paymentPolicyId || "__default__");
-    setDirty(false);
-  }, [fulfillmentPolicyId, returnPolicyId, paymentPolicyId]);
-
-  const handleChange = (setter: (v: string) => void) => (val: string) => {
-    setter(val);
-    setDirty(true);
-  };
-
-  return (
-    <div className="space-y-2">
-      <p className="text-xs font-medium text-muted-foreground">{label}</p>
-      <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
-        <div>
-          <Label className="text-[11px] text-muted-foreground">Fulfillment</Label>
-          <Select value={fp} onValueChange={handleChange(setFp)}>
-            <SelectTrigger className="min-h-[44px] sm:h-8 text-xs">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="__default__">Use default</SelectItem>
-              {(policies?.fulfillmentPolicies || []).map((p) => (
-                <SelectItem key={p.id} value={p.id}>{p.name}</SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        </div>
-        <div>
-          <Label className="text-[11px] text-muted-foreground">Return</Label>
-          <Select value={rp} onValueChange={handleChange(setRp)}>
-            <SelectTrigger className="min-h-[44px] sm:h-8 text-xs">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="__default__">Use default</SelectItem>
-              {(policies?.returnPolicies || []).map((p) => (
-                <SelectItem key={p.id} value={p.id}>{p.name}</SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        </div>
-        <div>
-          <Label className="text-[11px] text-muted-foreground">Payment</Label>
-          <Select value={pp} onValueChange={handleChange(setPp)}>
-            <SelectTrigger className="min-h-[44px] sm:h-8 text-xs">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="__default__">Use default</SelectItem>
-              {(policies?.paymentPolicies || []).map((p) => (
-                <SelectItem key={p.id} value={p.id}>{p.name}</SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        </div>
-      </div>
-      {dirty && (
-        <Button
-          size="sm"
-          className="min-h-[44px] sm:h-7 text-xs"
-          disabled={isPending}
-          onClick={() => {
-            onSave(
-              fp === "__default__" ? null : fp,
-              rp === "__default__" ? null : rp,
-              pp === "__default__" ? null : pp,
-            );
-            setDirty(false);
-          }}
-        >
-          {isPending ? <Loader2 className="h-3 w-3 animate-spin mr-1" /> : <Save className="h-3 w-3 mr-1" />}
-          Save Policies
-        </Button>
-      )}
-    </div>
-  );
+  const draft = useEbayPolicyDraft({ fulfillmentPolicyId: fulfillmentPolicyId ?? null,
+    returnPolicyId: returnPolicyId ?? null, paymentPolicyId: paymentPolicyId ?? null }, policies?.scope);
+  const [error, setError] = useState<string | null>(null);
+  return <section id={id} aria-label={label} className="space-y-2 scroll-mt-4">
+    <p className="text-xs font-medium text-muted-foreground">{label}</p>
+    <EbayPolicyFields values={draft.values} catalog={policies} status={catalogStatus} labelPrefix={label}
+      inheritLabel={inheritLabel} disabled={isPending} onChange={patch => { draft.change(patch); setError(null); }} />
+    {draft.dirty && draft.changedElsewhere && <PolicyDraftConflict onReload={() => { draft.reload(); setError(null); }} />}
+    {error && <p role="alert" className="text-sm text-destructive">{error}</p>}
+    {draft.dirty && <Button size="sm" className="min-h-11 text-xs"
+      disabled={isPending || catalogStatus !== "ready" || draft.changedElsewhere}
+      onClick={async () => {
+        setError(null);
+        try { await onSave(draft.patch, draft.base, draft.scope); draft.saved(); }
+        catch (failure) { setError(listingIssueFromError(failure).message); }
+      }}>{isPending ? "Saving…" : "Save Policies"}</Button>}
+  </section>;
 }
 
 // ============================================================================
@@ -499,17 +433,16 @@ export default function EbayChannelPage() {
   });
 
   // ---- Local state ----
-  const [policySelections, setPolicySelections] = useState({
-    fulfillmentPolicyId: "",
-    returnPolicyId: "",
-    paymentPolicyId: "",
-  });
-  const [policySynced, setPolicySynced] = useState(false);
+  const storePolicyDraft = useEbayPolicyDraft({ fulfillmentPolicyId: config?.config?.fulfillmentPolicyId ?? null,
+    returnPolicyId: config?.config?.returnPolicyId ?? null, paymentPolicyId: config?.config?.paymentPolicyId ?? null }, policies?.scope);
+  const policyCatalogStatus: PolicyCatalogStatus = policiesLoading ? "loading" : policiesError || !policies ? "unavailable" : "ready";
   const [productTypeManagerOpen, setProductTypeManagerOpen] = useState(false);
 
   // Category mapping local state
   const [localMappings, setLocalMappings] = useState<Map<string, CategoryMapping>>(new Map());
   const [mappingsDirty, setMappingsDirty] = useState(false);
+  const [mappingPolicyBaselines, setMappingPolicyBaselines] = useState<Map<string, EbayPolicyValues>>(new Map());
+  const [mappingPolicyScope, setMappingPolicyScope] = useState<EbayPolicyScope | undefined>();
   const [expandedOverrides, setExpandedOverrides] = useState<Set<string>>(new Set());
   const [expandedSpecifics, setExpandedSpecifics] = useState<Set<string>>(new Set());
 
@@ -530,6 +463,74 @@ export default function EbayChannelPage() {
   const [feedFilter, setFeedFilter] = useState<"all" | "ready" | "missing_config" | "missing_specifics" | "listed" | "excluded" | "ended" | "errors">("all");
   const [feedSearch, setFeedSearch] = useState("");
   const [expandedProducts, setExpandedProducts] = useState<Set<number>>(new Set());
+  const [policyAnchor, setPolicyAnchor] = useState(() => window.location.hash);
+  const [policyAnchorActivation, setPolicyAnchorActivation] = useState(0);
+  const consumedPolicyAnchor = useRef<string | null>(null);
+  const [policyScrollRequest, setPolicyScrollRequest] = useState<{ anchor: string } | null>(null);
+  const handlePolicyAnchorClick = (event: React.MouseEvent<HTMLDivElement>) => {
+    if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+    const link = event.target instanceof Element ? event.target.closest("a[href]") : null;
+    if (!(link instanceof HTMLAnchorElement) || link.hasAttribute("download") || (link.target && link.target !== "_self")) return;
+    if (link.origin !== window.location.origin || link.pathname !== window.location.pathname || link.search !== window.location.search) return;
+    if (link.hash !== "#business-policies" && !/^#ebay-(?:product|variant|category)-policies-/.test(link.hash)) return;
+    // Re-activating the same fragment does not fire hashchange. Keep the real
+    // link's navigation and keyboard behavior, while reopening its editor.
+    if (link.hash === window.location.hash) {
+      setPolicyAnchor(link.hash);
+      setPolicyAnchorActivation(previous => previous + 1);
+    }
+  };
+  useEffect(() => {
+    const changed = () => {
+      setPolicyAnchor(window.location.hash);
+      setPolicyAnchorActivation(previous => previous + 1);
+    };
+    window.addEventListener("hashchange", changed);
+    return () => window.removeEventListener("hashchange", changed);
+  }, []);
+  useEffect(() => {
+    const activationKey = `${policyAnchorActivation}:${policyAnchor}`;
+    if (consumedPolicyAnchor.current === activationKey) return;
+    const product = /^#ebay-product-policies-([1-9][0-9]*)$/.exec(policyAnchor);
+    const variant = /^#ebay-variant-policies-([1-9][0-9]*)$/.exec(policyAnchor);
+    const category = /^#ebay-category-policies-(.+)$/.exec(policyAnchor);
+    if (product) {
+      const id = Number(product[1]);
+      if (!feedData?.feed.some(item => item.id === id)) return;
+      setExpandedProducts(previous => new Set(previous).add(id));
+    } else if (variant) {
+      const id = Number(variant[1]);
+      const owner = feedData?.feed.find(item => item.variants.some(member => member.id === id));
+      if (!owner) return;
+      setExpandedProducts(previous => new Set(previous).add(owner.id));
+      setExpandedVariantPolicies(previous => new Set(previous).add(id));
+    } else if (category) {
+      try {
+        const slug = decodeURIComponent(category[1]);
+        if (!config?.productTypes?.some(type => type.slug === slug)) return;
+        setExpandedOverrides(previous => new Set(previous).add(slug));
+      } catch { return; /* A malformed location fragment cannot select a category. */ }
+    } else if (policyAnchor !== "#business-policies" || !config?.connected) return;
+    // Consume only after the requested owner is available. Later feed reads
+    // must not reopen a manually collapsed editor or steal the user's scroll.
+    consumedPolicyAnchor.current = activationKey;
+    setPolicyScrollRequest({ anchor: policyAnchor });
+  }, [policyAnchor, policyAnchorActivation, feedData, config?.productTypes, config?.connected]);
+  useEffect(() => {
+    if (!policyScrollRequest) return;
+    const anchor = policyScrollRequest.anchor;
+    const frame = requestAnimationFrame(() => {
+      const category = /^#ebay-category-policies-(.+)$/.exec(anchor);
+      let target: HTMLElement | null = null;
+      if (category) {
+        try { target = [...document.querySelectorAll<HTMLElement>("[data-policy-category]")]
+          .find(element => element.dataset.policyCategory === decodeURIComponent(category[1]) && element.getClientRects().length > 0) ?? null; }
+        catch { return; }
+      } else target = document.getElementById(anchor.slice(1));
+      target?.scrollIntoView({ block: "center" });
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [policyScrollRequest]);
   const [registrationTarget, setRegistrationTarget] = useState<FeedItem | null>(null);
   const [listingChangesTarget, setListingChangesTarget] = useState<FeedItem | null>(null);
   const activeListingChangeVariants = useMemo(
@@ -605,21 +606,6 @@ export default function EbayChannelPage() {
     merchantLocationKey: "CARDSHELLZ_HQ",
   });
 
-  // Sync policies from config
-  useEffect(() => {
-    if (config?.config && !policySynced) {
-      const c = config.config;
-      if (c.fulfillmentPolicyId || c.returnPolicyId || c.paymentPolicyId) {
-        setPolicySelections({
-          fulfillmentPolicyId: c.fulfillmentPolicyId || "",
-          returnPolicyId: c.returnPolicyId || "",
-          paymentPolicyId: c.paymentPolicyId || "",
-        });
-        setPolicySynced(true);
-      }
-    }
-  }, [config, policySynced]);
-
   // Sync category mappings from config
   useEffect(() => {
     if (config?.categoryMappings && !mappingsDirty) {
@@ -628,22 +614,40 @@ export default function EbayChannelPage() {
         map.set(m.productTypeSlug, m);
       }
       setLocalMappings(map);
+      setMappingPolicyBaselines(new Map([...map].map(([slug, mapping]) => [slug, categoryPolicyValues(mapping)])));
+      setMappingPolicyScope(policies?.scope);
     }
-  }, [config?.categoryMappings, mappingsDirty]);
+  }, [config?.categoryMappings, mappingsDirty, policies?.scope]);
+
+  const categoryPoliciesChangedElsewhere = mappingsDirty && (JSON.stringify(mappingPolicyScope) !== JSON.stringify(policies?.scope)
+    || [...new Set([...mappingPolicyBaselines.keys(), ...(config?.categoryMappings ?? []).map(mapping => mapping.productTypeSlug)])].some(slug =>
+      JSON.stringify(mappingPolicyBaselines.get(slug) ?? categoryPolicyValues({}))
+        !== JSON.stringify(categoryPolicyValues(config?.categoryMappings?.find(mapping => mapping.productTypeSlug === slug) ?? {}))));
+  const reloadCategoryPolicies = () => {
+    const current = new Map((config?.categoryMappings ?? []).map(mapping => [mapping.productTypeSlug, categoryPolicyValues(mapping)]));
+    setLocalMappings(previous => new Map([...previous].map(([slug, mapping]) => [slug, { ...mapping,
+      ...categoryPolicyPatch(current.get(slug) ?? categoryPolicyValues({})) }])));
+    setMappingPolicyBaselines(current);
+    setMappingPolicyScope(policies?.scope);
+  };
 
   // ---- Mutations ----
 
   const savePoliciesMutation = useMutation({
     mutationFn: async () => {
-      const resp = await apiRequest("PUT", "/api/ebay/settings", policySelections);
+      const resp = await apiRequest("PUT", "/api/ebay/settings", { ...storePolicyDraft.patch, expectedPolicies: storePolicyDraft.base, expectedScope: storePolicyDraft.scope });
       return resp.json();
     },
     onSuccess: () => {
+      storePolicyDraft.saved();
       toast({ title: "Settings Saved", description: "Default business policies updated." });
       queryClient.invalidateQueries({ queryKey: ["/api/ebay/channel-config"] });
     },
     onError: (err: Error) => {
-      toast({ title: "Error", description: err.message, variant: "destructive" });
+      void queryClient.invalidateQueries({ queryKey: ["/api/ebay/channel-config"] });
+      void queryClient.invalidateQueries({ queryKey: ["/api/ebay/listing-feed"] });
+      void refetchPolicies();
+      toast({ title: "Error", description: listingIssueFromError(err).message, variant: "destructive" });
     },
   });
 
@@ -663,21 +667,33 @@ export default function EbayChannelPage() {
 
   const saveMappingsMutation = useMutation({
     mutationFn: async () => {
-      // Include any mapping that has category data OR has listing_enabled explicitly set
+      // A first policy override is a mapping even before a browse/store category
+      // or listing flag has been saved for the product type.
       const mappingsArray = Array.from(localMappings.values()).filter(
         (m) => m.ebayBrowseCategoryId || m.ebayStoreCategoryId || m.listingEnabled !== undefined
+          || Object.keys(policyChanges(mappingPolicyBaselines.get(m.productTypeSlug) ?? categoryPolicyValues({}), categoryPolicyValues(m))).length > 0
       );
-      const resp = await apiRequest("PUT", "/api/ebay/category-mapping", { mappings: mappingsArray });
+      const mappings = mappingsArray.map(mapping => {
+        const { fulfillmentPolicyOverride, returnPolicyOverride, paymentPolicyOverride, ...otherFields } = mapping;
+        const expectedPolicies = mappingPolicyBaselines.get(mapping.productTypeSlug) ?? categoryPolicyValues({});
+        const patch = policyChanges(expectedPolicies, categoryPolicyValues(mapping));
+        return { ...otherFields, ...categoryPolicyPatch(patch),
+          ...(Object.keys(patch).length ? { expectedPolicies } : {}) };
+      });
+      const resp = await apiRequest("PUT", "/api/ebay/category-mapping", { mappings, expectedScope: mappingPolicyScope });
       return resp.json();
     },
-    onSuccess: (data: any) => {
+    onSuccess: async (data: { message?: string }) => {
       toast({ title: "Mappings Saved", description: data.message });
+      await queryClient.invalidateQueries({ queryKey: ["/api/ebay/channel-config"] });
       setMappingsDirty(false);
-      queryClient.invalidateQueries({ queryKey: ["/api/ebay/channel-config"] });
-      queryClient.invalidateQueries({ queryKey: ["/api/ebay/listing-feed"] });
+      void queryClient.invalidateQueries({ queryKey: ["/api/ebay/listing-feed"] });
     },
     onError: (err: Error) => {
-      toast({ title: "Error", description: err.message, variant: "destructive" });
+      void queryClient.invalidateQueries({ queryKey: ["/api/ebay/channel-config"] });
+      void queryClient.invalidateQueries({ queryKey: ["/api/ebay/listing-feed"] });
+      void refetchPolicies();
+      toast({ title: "Error", description: listingIssueFromError(err).message, variant: "destructive" });
     },
   });
 
@@ -932,10 +948,8 @@ export default function EbayChannelPage() {
   });
 
   const saveProductPoliciesMutation = useMutation({
-    mutationFn: async ({ productId, fulfillmentPolicyId, returnPolicyId, paymentPolicyId }: {
-      productId: number; fulfillmentPolicyId: string | null; returnPolicyId: string | null; paymentPolicyId: string | null;
-    }) => {
-      const resp = await apiRequest("PUT", `/api/ebay/product-policies/${productId}`, { fulfillmentPolicyId, returnPolicyId, paymentPolicyId });
+    mutationFn: async ({ productId, patch, expectedPolicies, expectedScope }: { productId: number; patch: EbayPolicyPatch; expectedPolicies: EbayPolicyValues; expectedScope?: EbayPolicyScope }) => {
+      const resp = await apiRequest("PUT", `/api/ebay/product-policies/${productId}`, { ...patch, expectedPolicies, expectedScope });
       return resp.json();
     },
     onSuccess: () => {
@@ -943,15 +957,16 @@ export default function EbayChannelPage() {
       toast({ title: "Product Policies Updated" });
     },
     onError: (err: Error) => {
-      toast({ title: "Error", description: err.message, variant: "destructive" });
+      void queryClient.invalidateQueries({ queryKey: ["/api/ebay/channel-config"] });
+      void queryClient.invalidateQueries({ queryKey: ["/api/ebay/listing-feed"] });
+      void refetchPolicies();
+      toast({ title: "Error", description: listingIssueFromError(err).message, variant: "destructive" });
     },
   });
 
   const saveVariantPoliciesMutation = useMutation({
-    mutationFn: async ({ variantId, fulfillmentPolicyId, returnPolicyId, paymentPolicyId }: {
-      variantId: number; fulfillmentPolicyId: string | null; returnPolicyId: string | null; paymentPolicyId: string | null;
-    }) => {
-      const resp = await apiRequest("PUT", `/api/ebay/variant-policies/${variantId}`, { fulfillmentPolicyId, returnPolicyId, paymentPolicyId });
+    mutationFn: async ({ variantId, patch, expectedPolicies, expectedScope }: { variantId: number; patch: EbayPolicyPatch; expectedPolicies: EbayPolicyValues; expectedScope?: EbayPolicyScope }) => {
+      const resp = await apiRequest("PUT", `/api/ebay/variant-policies/${variantId}`, { ...patch, expectedPolicies, expectedScope });
       return resp.json();
     },
     onSuccess: () => {
@@ -959,7 +974,10 @@ export default function EbayChannelPage() {
       toast({ title: "Variant Policies Updated" });
     },
     onError: (err: Error) => {
-      toast({ title: "Error", description: err.message, variant: "destructive" });
+      void queryClient.invalidateQueries({ queryKey: ["/api/ebay/channel-config"] });
+      void queryClient.invalidateQueries({ queryKey: ["/api/ebay/listing-feed"] });
+      void refetchPolicies();
+      toast({ title: "Error", description: listingIssueFromError(err).message, variant: "destructive" });
     },
   });
 
@@ -1173,7 +1191,7 @@ export default function EbayChannelPage() {
   }
 
   return (
-    <div className="p-2 sm:p-4 md:p-6 space-y-4 sm:space-y-6 max-w-6xl mx-auto">
+    <div className="p-2 sm:p-4 md:p-6 space-y-4 sm:space-y-6 max-w-6xl mx-auto" onClickCapture={handlePolicyAnchorClick}>
       {/* Page Header */}
       <ChannelWorkspaceHeader name="eBay" description="Store setup, category mapping, and listing feed" />
 
@@ -1338,86 +1356,15 @@ export default function EbayChannelPage() {
             <Label className="text-xs uppercase tracking-wider text-muted-foreground font-medium">Default Business Policies</Label>
             {!config?.connected ? (
               <p className="text-sm text-muted-foreground mt-2">Connect to eBay to load policies.</p>
-            ) : policiesLoading ? (
-              <div className="flex items-center gap-2 text-sm text-muted-foreground mt-2">
-                <Loader2 className="h-4 w-4 animate-spin" />
-                Loading policies...
-              </div>
             ) : (
               <div className="mt-2 space-y-3">
-                <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-                  <div>
-                    <Label className="text-xs">Shipping</Label>
-                    <Select
-                      value={policySelections.fulfillmentPolicyId}
-                      onValueChange={(v) => setPolicySelections({ ...policySelections, fulfillmentPolicyId: v })}
-                    >
-                      <SelectTrigger className="mt-1">
-                        <SelectValue placeholder="Select shipping..." />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {(policies?.fulfillmentPolicies || []).map((p) => (
-                          <SelectItem key={p.id} value={p.id}>{p.name}</SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-                  </div>
-                  <div>
-                    <Label className="text-xs">Returns</Label>
-                    <Select
-                      value={policySelections.returnPolicyId}
-                      onValueChange={(v) => setPolicySelections({ ...policySelections, returnPolicyId: v })}
-                    >
-                      <SelectTrigger className="mt-1">
-                        <SelectValue placeholder="Select returns..." />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {(policies?.returnPolicies || []).map((p) => (
-                          <SelectItem key={p.id} value={p.id}>{p.name}</SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-                  </div>
-                  <div>
-                    <Label className="text-xs">Payment</Label>
-                    <Select
-                      value={policySelections.paymentPolicyId}
-                      onValueChange={(v) => setPolicySelections({ ...policySelections, paymentPolicyId: v })}
-                    >
-                      <SelectTrigger className="mt-1">
-                        <SelectValue placeholder="Select payment..." />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {(policies?.paymentPolicies || []).map((p) => (
-                          <SelectItem key={p.id} value={p.id}>{p.name}</SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-                  </div>
-                </div>
-                <div className="flex items-center gap-3">
-                  <Button
-                    size="sm"
-                    onClick={() => savePoliciesMutation.mutate()}
-                    disabled={
-                      savePoliciesMutation.isPending ||
-                      !!policiesError ||
-                      !policySelections.fulfillmentPolicyId ||
-                      !policySelections.returnPolicyId ||
-                      !policySelections.paymentPolicyId
-                    }
-                  >
-                    {savePoliciesMutation.isPending && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
-                    <Save className="h-4 w-4 mr-2" />
-                    Save Policies
-                  </Button>
-                  {hasPolicies && !policiesError && (
-                    <Badge variant="default" className="bg-green-600 hover:bg-green-600 gap-1.5">
-                      <CheckCircle2 className="h-3.5 w-3.5" />
-                      All configured
-                    </Badge>
-                  )}
-                </div>
+                <EbayPolicyFields values={storePolicyDraft.values} catalog={policies} status={policyCatalogStatus}
+                  labelPrefix="Store defaults" disabled={savePoliciesMutation.isPending} onChange={storePolicyDraft.change} />
+                {storePolicyDraft.dirty && storePolicyDraft.changedElsewhere && <PolicyDraftConflict onReload={storePolicyDraft.reload} />}
+                <Button size="sm" onClick={() => savePoliciesMutation.mutate()} disabled={savePoliciesMutation.isPending
+                  || policyCatalogStatus !== "ready" || !storePolicyDraft.dirty || storePolicyDraft.changedElsewhere}>
+                  {savePoliciesMutation.isPending ? "Saving…" : "Save Policies"}
+                </Button>
               </div>
             )}
           </div>
@@ -1630,67 +1577,11 @@ export default function EbayChannelPage() {
                                   <div className="py-2 px-4 space-y-4">
                                     <div>
                                       <p className="text-xs text-muted-foreground mb-2 font-medium">
-                                        Policy overrides for {pt.name} (leave blank to use store defaults)
+                                        Policy overrides for {pt.name} (inherit store defaults when unset)
                                       </p>
-                                      <div className="grid grid-cols-3 gap-3">
-                                        <div>
-                                          <Label className="text-xs">Shipping Override</Label>
-                                          <Select
-                                            value={mapping.fulfillmentPolicyOverride || "__default__"}
-                                            onValueChange={(v) =>
-                                              updateMapping(pt.slug, { fulfillmentPolicyOverride: v === "__default__" ? null : v })
-                                            }
-                                          >
-                                            <SelectTrigger className="mt-1 h-8 text-xs">
-                                              <SelectValue placeholder="Use default" />
-                                            </SelectTrigger>
-                                            <SelectContent>
-                                              <SelectItem value="__default__" className="text-xs">Use default</SelectItem>
-                                              {(policies?.fulfillmentPolicies || []).map((p) => (
-                                                <SelectItem key={p.id} value={p.id} className="text-xs">{p.name}</SelectItem>
-                                              ))}
-                                            </SelectContent>
-                                          </Select>
-                                        </div>
-                                        <div>
-                                          <Label className="text-xs">Returns Override</Label>
-                                          <Select
-                                            value={mapping.returnPolicyOverride || "__default__"}
-                                            onValueChange={(v) =>
-                                              updateMapping(pt.slug, { returnPolicyOverride: v === "__default__" ? null : v })
-                                            }
-                                          >
-                                            <SelectTrigger className="mt-1 h-8 text-xs">
-                                              <SelectValue placeholder="Use default" />
-                                            </SelectTrigger>
-                                            <SelectContent>
-                                              <SelectItem value="__default__" className="text-xs">Use default</SelectItem>
-                                              {(policies?.returnPolicies || []).map((p) => (
-                                                <SelectItem key={p.id} value={p.id} className="text-xs">{p.name}</SelectItem>
-                                              ))}
-                                            </SelectContent>
-                                          </Select>
-                                        </div>
-                                        <div>
-                                          <Label className="text-xs">Payment Override</Label>
-                                          <Select
-                                            value={mapping.paymentPolicyOverride || "__default__"}
-                                            onValueChange={(v) =>
-                                              updateMapping(pt.slug, { paymentPolicyOverride: v === "__default__" ? null : v })
-                                            }
-                                          >
-                                            <SelectTrigger className="mt-1 h-8 text-xs">
-                                              <SelectValue placeholder="Use default" />
-                                            </SelectTrigger>
-                                            <SelectContent>
-                                              <SelectItem value="__default__" className="text-xs">Use default</SelectItem>
-                                              {(policies?.paymentPolicies || []).map((p) => (
-                                                <SelectItem key={p.id} value={p.id} className="text-xs">{p.name}</SelectItem>
-                                              ))}
-                                            </SelectContent>
-                                          </Select>
-                                        </div>
-                                      </div>
+                                      <div data-policy-category={pt.slug}><EbayPolicyFields values={categoryPolicyValues(mapping)} catalog={policies} status={policyCatalogStatus}
+                                        labelPrefix={`${pt.name} category`} inheritLabel="Use store default"
+                                        disabled={saveMappingsMutation.isPending || policyCatalogStatus !== "ready"} onChange={patch => updateMapping(pt.slug, categoryPolicyPatch(patch))} /></div>
                                     </div>
                                   </div>
                                 </TableCell>
@@ -1851,65 +1742,11 @@ export default function EbayChannelPage() {
                       {isOverrideExpanded && (
                         <div className="border-t pt-3 space-y-3">
                           <p className="text-xs text-muted-foreground font-medium">
-                            Policy overrides (leave blank for store defaults)
+                            Policy overrides (inherit store defaults when unset)
                           </p>
-                          <div>
-                            <Label className="text-xs">Shipping Override</Label>
-                            <Select
-                              value={mapping.fulfillmentPolicyOverride || "__default__"}
-                              onValueChange={(v) =>
-                                updateMapping(pt.slug, { fulfillmentPolicyOverride: v === "__default__" ? null : v })
-                              }
-                            >
-                              <SelectTrigger className="mt-1 min-h-[44px] text-sm">
-                                <SelectValue placeholder="Use default" />
-                              </SelectTrigger>
-                              <SelectContent>
-                                <SelectItem value="__default__">Use default</SelectItem>
-                                {(policies?.fulfillmentPolicies || []).map((p) => (
-                                  <SelectItem key={p.id} value={p.id}>{p.name}</SelectItem>
-                                ))}
-                              </SelectContent>
-                            </Select>
-                          </div>
-                          <div>
-                            <Label className="text-xs">Returns Override</Label>
-                            <Select
-                              value={mapping.returnPolicyOverride || "__default__"}
-                              onValueChange={(v) =>
-                                updateMapping(pt.slug, { returnPolicyOverride: v === "__default__" ? null : v })
-                              }
-                            >
-                              <SelectTrigger className="mt-1 min-h-[44px] text-sm">
-                                <SelectValue placeholder="Use default" />
-                              </SelectTrigger>
-                              <SelectContent>
-                                <SelectItem value="__default__">Use default</SelectItem>
-                                {(policies?.returnPolicies || []).map((p) => (
-                                  <SelectItem key={p.id} value={p.id}>{p.name}</SelectItem>
-                                ))}
-                              </SelectContent>
-                            </Select>
-                          </div>
-                          <div>
-                            <Label className="text-xs">Payment Override</Label>
-                            <Select
-                              value={mapping.paymentPolicyOverride || "__default__"}
-                              onValueChange={(v) =>
-                                updateMapping(pt.slug, { paymentPolicyOverride: v === "__default__" ? null : v })
-                              }
-                            >
-                              <SelectTrigger className="mt-1 min-h-[44px] text-sm">
-                                <SelectValue placeholder="Use default" />
-                              </SelectTrigger>
-                              <SelectContent>
-                                <SelectItem value="__default__">Use default</SelectItem>
-                                {(policies?.paymentPolicies || []).map((p) => (
-                                  <SelectItem key={p.id} value={p.id}>{p.name}</SelectItem>
-                                ))}
-                              </SelectContent>
-                            </Select>
-                          </div>
+                          <div data-policy-category={pt.slug}><EbayPolicyFields values={categoryPolicyValues(mapping)} catalog={policies} status={policyCatalogStatus}
+                                        labelPrefix={`${pt.name} category`} inheritLabel="Use store default"
+                                        disabled={saveMappingsMutation.isPending || policyCatalogStatus !== "ready"} onChange={patch => updateMapping(pt.slug, categoryPolicyPatch(patch))} /></div>
                         </div>
                       )}
                     </div>
@@ -1921,11 +1758,12 @@ export default function EbayChannelPage() {
                   </p>
                 )}
               </div>
+              {categoryPoliciesChangedElsewhere && <PolicyDraftConflict onReload={reloadCategoryPolicies} />}
               {mappingsDirty && (
                 <div className="flex items-center gap-3 mt-4">
                   <Button
                     onClick={() => saveMappingsMutation.mutate()}
-                    disabled={saveMappingsMutation.isPending}
+                    disabled={saveMappingsMutation.isPending || policyCatalogStatus !== "ready" || categoryPoliciesChangedElsewhere}
                   >
                     {saveMappingsMutation.isPending && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
                     <Save className="h-4 w-4 mr-2" />
@@ -2144,24 +1982,21 @@ export default function EbayChannelPage() {
                         <TableRow
                           id={`ebay-product-${item.id}`}
                           className={`sm:table-row flex flex-col p-3 sm:p-0 gap-2 sm:gap-0 ${isExcluded ? "opacity-50" : ""} cursor-pointer hover:bg-muted/50`}
-                          onClick={() => hasVariants && toggleProductExpanded(item.id)}
+                          onClick={() => toggleProductExpanded(item.id)}
                         >
                           {/* Expand chevron + Exclude toggle */}
                           <TableCell className="sm:table-cell flex items-center sm:w-[40px] py-0 sm:py-2">
                             <div className="flex items-center gap-2 min-h-[44px] sm:min-h-0" onClick={(e) => e.stopPropagation()}>
                               <button
                                 className="p-1 hover:bg-muted rounded min-w-[28px] min-h-[28px] flex items-center justify-center"
-                                onClick={() => hasVariants && toggleProductExpanded(item.id)}
+                                onClick={() => toggleProductExpanded(item.id)}
+                                aria-label={`Policy and variant settings for ${item.name}`} aria-expanded={isExpanded}
                               >
-                                {hasVariants ? (
-                                  isExpanded ? (
+                                {isExpanded ? (
                                     <ChevronDown className="h-4 w-4 text-muted-foreground" />
                                   ) : (
                                     <ChevronRight className="h-4 w-4 text-muted-foreground" />
-                                  )
-                                ) : (
-                                  <span className="inline-block w-4" />
-                                )}
+                                  )}
                               </button>
                               <EbayProductListingIntentControl productId={item.id} productName={item.name} excluded={isExcluded} currentJob={syncJob}
                                 disabled={syncJobsQuery.isError || syncJobsQuery.isPending} retryRequested={withdrawalRetryRequests.get(item.id)} onRetryHandled={withdrawalRetryHandled} onIssueAction={handleIssueAction} />
@@ -2578,7 +2413,7 @@ export default function EbayChannelPage() {
                             <TableCell className="hidden sm:table-cell py-1.5">
                               <button
                                 className={`p-1 rounded hover:bg-muted min-w-[28px] min-h-[28px] flex items-center justify-center ${
-                                  (variant.fulfillmentPolicyOverride || variant.returnPolicyOverride || variant.paymentPolicyOverride)
+                                  [variant.fulfillmentPolicyOverride, variant.returnPolicyOverride, variant.paymentPolicyOverride].some(value => value !== null && value !== undefined)
                                     ? "text-blue-500" : "text-muted-foreground"
                                 }`}
                                 onClick={(e) => { e.stopPropagation(); toggleVariantPolicies(variant.id); }}
@@ -2606,7 +2441,7 @@ export default function EbayChannelPage() {
                                 <span>{variant.inventoryQuantity === null ? "Unavailable" : `${variant.inventoryQuantity} qty`}</span>
                                 <button
                                   className={`p-1 rounded hover:bg-muted min-w-[44px] min-h-[44px] flex items-center justify-center ${
-                                    (variant.fulfillmentPolicyOverride || variant.returnPolicyOverride || variant.paymentPolicyOverride)
+                                    [variant.fulfillmentPolicyOverride, variant.returnPolicyOverride, variant.paymentPolicyOverride].some(value => value !== null && value !== undefined)
                                       ? "text-blue-500" : "text-muted-foreground"
                                   }`}
                                   onClick={(e) => { e.stopPropagation(); toggleVariantPolicies(variant.id); }}
@@ -2628,12 +2463,9 @@ export default function EbayChannelPage() {
                                   paymentPolicyId={variant.paymentPolicyOverride}
                                   policies={policies}
                                   isPending={saveVariantPoliciesMutation.isPending}
-                                  onSave={(fp, rp, pp) => saveVariantPoliciesMutation.mutate({
-                                    variantId: variant.id,
-                                    fulfillmentPolicyId: fp,
-                                    returnPolicyId: rp,
-                                    paymentPolicyId: pp,
-                                  })}
+                                  id={`ebay-variant-policies-${variant.id}`} catalogStatus={policyCatalogStatus}
+                                  inheritLabel="Use product, category or store default"
+                                  onSave={(patch, expectedPolicies, expectedScope) => saveVariantPoliciesMutation.mutateAsync({ variantId: variant.id, patch, expectedPolicies, expectedScope })}
                                 />
                               </TableCell>
                             </TableRow>
@@ -2663,12 +2495,9 @@ export default function EbayChannelPage() {
                                 paymentPolicyId={item.paymentPolicyOverride}
                                 policies={policies}
                                 isPending={saveProductPoliciesMutation.isPending}
-                                onSave={(fp, rp, pp) => saveProductPoliciesMutation.mutate({
-                                  productId: item.id,
-                                  fulfillmentPolicyId: fp,
-                                  returnPolicyId: rp,
-                                  paymentPolicyId: pp,
-                                })}
+                                id={`ebay-product-policies-${item.id}`} catalogStatus={policyCatalogStatus}
+                                inheritLabel="Use category or store default"
+                                onSave={(patch, expectedPolicies, expectedScope) => saveProductPoliciesMutation.mutateAsync({ productId: item.id, patch, expectedPolicies, expectedScope })}
                               />
                             </TableCell>
                           </TableRow>

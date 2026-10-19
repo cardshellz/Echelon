@@ -1,3 +1,4 @@
+import { protectEbayPolicyWriteBoundary } from "../channels/interfaces/ebay-policy-write-boundary";
 import type { Express, Response } from "express";
 import { sendInventoryQuantityError, validateInventoryCommandKey } from "../inventory/interfaces/quantity-command.middleware";
 import { CatalogInventoryCommandError } from "./application/catalog-inventory-command.service";
@@ -991,7 +992,7 @@ const HAS_SHIPPABLE_VARIANT = sql`EXISTS (
     }
   });
 
-  app.post("/api/products", requirePermission("inventory", "create"), async (req, res) => {
+  app.post("/api/products", requirePermission("inventory", "create"), protectEbayPolicyWriteBoundary("create"), async (req, res) => {
     try {
       const { variants, ...productData } = req.body;
       const requestedLegacyInventoryStrategy = Object.prototype.hasOwnProperty.call(
@@ -1049,7 +1050,7 @@ const HAS_SHIPPABLE_VARIANT = sql`EXISTS (
   // Duplicate an existing product into a NEW draft product with fresh SKUs.
   // Copies base fields, active variants, and images; resets identity + all
   // Shopify sync keys so the copy is unlinked. See product-duplicate.service.
-  app.post("/api/products/:id/duplicate", requirePermission("inventory", "create"), async (req, res) => {
+  app.post("/api/products/:id/duplicate", requirePermission("inventory", "create"), protectEbayPolicyWriteBoundary("create"), async (req, res) => {
     try {
       const sourceId = parseInt(req.params.id);
       if (Number.isNaN(sourceId)) return res.status(400).json({ error: "Invalid product id" });
@@ -1065,7 +1066,7 @@ const HAS_SHIPPABLE_VARIANT = sql`EXISTS (
     }
   });
 
-  app.put("/api/products/:id", requirePermission("inventory", "edit"), async (req, res) => {
+  app.put("/api/products/:id", requirePermission("inventory", "edit"), protectEbayPolicyWriteBoundary("update"), async (req, res) => {
     try {
       const id = parseInt(req.params.id);
       const { variants, ...updates } = req.body;
@@ -1628,7 +1629,7 @@ const HAS_SHIPPABLE_VARIANT = sql`EXISTS (
     }
   });
 
-  app.post("/api/products/:productId/variants", requirePermission("inventory", "create"), async (req, res) => {
+  app.post("/api/products/:productId/variants", requirePermission("inventory", "create"), protectEbayPolicyWriteBoundary("create"), async (req, res) => {
     try {
       const productId = parseInt(req.params.productId);
       if (!Number.isInteger(productId) || productId <= 0) {
@@ -1681,7 +1682,7 @@ const HAS_SHIPPABLE_VARIANT = sql`EXISTS (
     }
   });
 
-  app.put("/api/product-variants/:id", requirePermission("inventory", "edit"), async (req, res) => {
+  app.put("/api/product-variants/:id", requirePermission("inventory", "edit"), protectEbayPolicyWriteBoundary("update"), async (req, res) => {
     try {
       const id = parseInt(req.params.id);
       if (!Number.isInteger(id) || id <= 0) {
