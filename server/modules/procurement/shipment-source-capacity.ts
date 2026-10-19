@@ -1,3 +1,4 @@
+import { readShipmentUnitOptions } from "./shipment-unit-selection.repository";
 import { and, inArray, sql } from "drizzle-orm";
 import { purchaseOrderLines, purchaseOrders } from "@shared/schema";
 import type { PurchaseOrder, PurchaseOrderLine } from "@shared/schema";
@@ -386,17 +387,21 @@ export async function getShippablePurchaseOrderLines(db: any, purchaseOrderId: n
     const projection = await readShipmentSourceCapacities(tx, {
       purchaseOrderIds: [purchaseOrderId], purchaseOrderLineIds: candidates.map((line) => line.id),
     });
+    const unitOptions = await readShipmentUnitOptions(tx, candidates.map((line) => ({
+      key: line.id, productId: line.productId, selectedVariantId: line.expectedReceiveVariantId ?? line.productVariantId,
+      unitsPerVariantSnapshot: line.expectedReceiveUnitsPerVariant ?? null,
+    })));
     return {
       lines: candidates.flatMap((line) => {
         const capacity = projection.capacities.get(line.id);
         return capacity && capacity.remainingQty > 0 ? [{
-          ...capacity.line, alreadyShippedQty: capacity.committedShipmentQty,
+          ...capacity.line, shipmentUnits: unitOptions.get(line.id)!, alreadyShippedQty: capacity.committedShipmentQty,
           directReceivedQty: capacity.directReceivedQty, remainingQty: capacity.remainingQty,
         }] : [];
       }),
       reviewRequiredLines: candidates.flatMap((line) => {
         const error = projection.reviewRequired.get(line.id);
-        return error ? [{ ...line, remainingQty: null, code: String(error.details.code), error: error.message }] : [];
+        return error ? [{ ...line, shipmentUnits: unitOptions.get(line.id)!, remainingQty: null, code: String(error.details.code), error: error.message }] : [];
       }),
     };
   }, { isolationLevel: "repeatable read", accessMode: "read only" });

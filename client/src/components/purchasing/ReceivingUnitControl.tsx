@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from "react";
+import { ReceiveUnitSelect } from "./ReceiveUnitSelect";
 import { Button } from "@/components/ui/button";
 import { recordedReceivingFactor, receivingBaseQuantity, receivingUnitDescription, type ReceivingUnitLine } from "@/lib/receiving-units";
 
@@ -36,20 +37,10 @@ export function ReceivingUnitControl({ line, variants, mutable, pending, onChang
       </div>
       {line.inboundShipmentLineId && <div className="text-muted-foreground">Shipment line #{line.inboundShipmentLineId}</div>}
       {mutable && available.length > 0 && (
-        <select
-          aria-label={`Receive variant for line ${line.id}`}
-          className="h-10 w-full max-w-64 rounded border bg-background px-2 text-sm"
-          value={legacy ? candidate ?? "" : line.productVariantId ?? ""}
+        <ReceiveUnitSelect label={`Receive variant for line ${line.id}`}
+          value={legacy ? candidate : line.productVariantId} options={available}
           disabled={pending || legacy && line.productVariantId !== null}
-          onChange={(event) => {
-            const id = Number(event.target.value);
-            if (!id) return;
-            if (legacy) setCandidate(id); else onChange(id, false);
-          }}
-        >
-          <option value="">Select a receive variant</option>
-          {available.map((variant) => <option key={variant.id} value={variant.id}>{variant.name} ({variant.unitsPerVariant} pieces)</option>)}
-        </select>
+          onChange={(id) => { if (id === null) return; if (legacy) setCandidate(id); else onChange(id, false); }} />
       )}
       {legacy && (
         <div className="rounded border border-amber-400/50 p-2 text-amber-800 dark:text-amber-200">

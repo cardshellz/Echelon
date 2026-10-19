@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { shipmentUnitsSchema } from "./shipment-unit-selection";
 import { shipmentLineResourceIdSchema } from "./shipment-line-command";
 
 const quantity = z.number().int().nonnegative().safe();
@@ -6,12 +7,12 @@ const sourceIdentity = { id: shipmentLineResourceIdSchema, purchaseOrderId: ship
 // getShippablePurchaseOrderLines returns full PO records. Project only fields the
 // chooser consumes; quantity authority remains in shipment-source-capacity.ts.
 const selectableLineSchema = z.object({
-  ...sourceIdentity, productName: z.string().nullable(), description: z.string().nullable(),
+  ...sourceIdentity, shipmentUnits: shipmentUnitsSchema.optional(), productName: z.string().nullable(), description: z.string().nullable(),
   orderQty: shipmentLineResourceIdSchema, alreadyShippedQty: quantity, directReceivedQty: quantity,
   remainingQty: shipmentLineResourceIdSchema,
 });
 const reviewLineSchema = z.object({
-  ...sourceIdentity, remainingQty: z.null(), code: z.string().min(1), error: z.string().min(1),
+  ...sourceIdentity, shipmentUnits: shipmentUnitsSchema.optional(), remainingQty: z.null(), code: z.string().min(1), error: z.string().min(1),
 });
 export const shipmentCreateSourcesSchema = z.object({
   lines: z.array(selectableLineSchema), reviewRequiredLines: z.array(reviewLineSchema),

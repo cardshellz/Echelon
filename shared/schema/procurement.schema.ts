@@ -1557,6 +1557,9 @@ export const inboundShipmentLines = procurementSchema.table("inbound_shipment_li
   productVariantId: integer("product_variant_id").references(() => productVariants.id, { onDelete: "set null" }),
   sku: varchar("sku", { length: 100 }),
   qtyShipped: integer("qty_shipped").notNull(),
+  // Frozen only after an explicit reviewed catalog-unit selection. Legacy rows stay null.
+  unitsPerVariantSnapshot: integer("units_per_variant_snapshot"),
+  dimensionBasis: varchar("dimension_basis", { length: 10 }),
   // Per-unit dimensions
   weightKg: numeric("weight_kg", { precision: 10, scale: 3 }),
   lengthCm: numeric("length_cm", { precision: 8, scale: 2 }),
@@ -1576,7 +1579,12 @@ export const inboundShipmentLines = procurementSchema.table("inbound_shipment_li
   notes: text("notes"),
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
-});
+}, (table) => [
+  check("inbound_shipment_line_unit_snapshot_positive", sql`${table.unitsPerVariantSnapshot} IS NULL OR ${table.unitsPerVariantSnapshot} > 0`),
+  check("inbound_shipment_line_unit_snapshot_identity", sql`${table.unitsPerVariantSnapshot} IS NULL OR ${table.productVariantId} IS NOT NULL`),
+  check("inbound_shipment_line_carton_basis_count", sql`${table.dimensionBasis} IS DISTINCT FROM 'carton' OR (${table.cartonCount} IS NOT NULL AND ${table.cartonCount} > 0)`),
+  check("inbound_shipment_line_dimension_basis_valid", sql`${table.dimensionBasis} IS NULL OR ${table.dimensionBasis} IN ('piece', 'carton')`),
+]);
 
 export const insertInboundShipmentLineSchema = createInsertSchema(inboundShipmentLines).omit({
   id: true,

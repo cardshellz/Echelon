@@ -1,3 +1,4 @@
+import { shipmentRecordedUnitSummary, shipmentDimensionBasisLabel } from "@/lib/shipment-unit-entry";
 import { InboundShipmentTracking } from "@/components/purchasing/InboundShipmentTracking";
 import { parseShipmentReceiptResolution, requiresReceiptUnitReview, shipmentReceiveCoverageLabel } from "@/lib/shipment-receipt-units";
 import { formatMills } from "@shared/utils/money";
@@ -1456,7 +1457,6 @@ export default function InboundShipmentDetail() {
               </Card>
             ) : (
               lines.map((line: any) => {
-                const upc = line.unitsPerVariant ?? 1;
                 return (
                   <Card key={line.id} className={isEditable ? "cursor-pointer hover:border-primary/50 transition-colors" : ""} onClick={() => isEditable && lineActions.openEditor(line)}>
                     <CardContent className="p-3">
@@ -1465,11 +1465,13 @@ export default function InboundShipmentDetail() {
                           <div className="font-mono text-sm">{line.sku || "—"}</div>
                           {line.productName && <div className="text-xs text-muted-foreground truncate">{line.productName}</div>}
                           <div className="flex gap-3 mt-1 text-xs text-muted-foreground">
-                            {upc > 1 && <span>{line.cartonCount ?? "—"} cases</span>}
-                            <span>{line.qtyShipped} pcs</span>
+                            <span>{line.cartonCount ?? "—"} shipping cartons</span>
+                            <span>{line.qtyShipped} pieces</span>
                             <span>{formatNumber(line.totalWeightKg, 1)} kg</span>
                             <span>{formatNumber(line.totalVolumeCbm, 4)} CBM</span>
                           </div>
+                          <p className="mt-1 text-xs text-muted-foreground">{shipmentRecordedUnitSummary(line)}</p>
+                          <p className="text-xs text-muted-foreground">Measurements per {shipmentDimensionBasisLabel(line) === "carton" ? "shipping carton" : "piece"}</p>
                           {line.allocatedCostCents != null && (
                             <div className="text-xs mt-1">
                               Allocated: {formatCents(line.allocatedCostCents)} ({formatMillsPerUnit(line.totalAllocatedMillsPerUnit)}) | Landed: {formatMillsOrDash(line.landedUnitCostMills)}
@@ -1502,9 +1504,9 @@ export default function InboundShipmentDetail() {
                 <TableRow>
                   <TableHead>SKU</TableHead>
                   <TableHead>Product</TableHead>
-                  <TableHead className="text-right">Cases</TableHead>
+                  <TableHead className="text-right">Shipping cartons</TableHead>
                   <TableHead className="text-right">Pieces</TableHead>
-                  <TableHead className="text-right">Wt/Carton</TableHead>
+                  <TableHead className="text-right">Weight / measurement unit</TableHead>
                   <TableHead className="text-right">Net Weight</TableHead>
                   <TableHead className="text-right">Net CBM</TableHead>
                   <TableHead className="text-right">Alloc. Cost</TableHead>
@@ -1521,14 +1523,13 @@ export default function InboundShipmentDetail() {
                   </TableRow>
                 ) : (
                   lines.map((line: any) => {
-                    const upc = line.unitsPerVariant ?? 1;
                     return (
                       <TableRow key={line.id}>
                         <TableCell className="font-mono">{line.sku || "—"}</TableCell>
                         <TableCell className="max-w-[180px] truncate">{line.productName || line.sku || "—"}</TableCell>
                         <TableCell className="text-right">{line.cartonCount ? line.cartonCount : "—"}</TableCell>
-                        <TableCell className="text-right">{line.qtyShipped}</TableCell>
-                        <TableCell className="text-right">{formatNumber(line.weightKg, 2)}</TableCell>
+                        <TableCell className="text-right">{line.qtyShipped}<div className="max-w-56 text-xs text-muted-foreground">{shipmentRecordedUnitSummary(line)}</div></TableCell>
+                        <TableCell className="text-right">{formatNumber(line.weightKg, 2)}<div className="text-xs text-muted-foreground">per {shipmentDimensionBasisLabel(line) === "carton" ? "shipping carton" : "piece"}</div></TableCell>
                         <TableCell className="text-right">{formatNumber(line.totalWeightKg, 1)}</TableCell>
                         <TableCell className="text-right">{formatNumber(line.totalVolumeCbm, 4)}</TableCell>
                         <TableCell className="text-right">

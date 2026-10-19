@@ -1,3 +1,4 @@
+import { readShipmentUnitOptions } from "./shipment-unit-selection.repository";
 import { executeCreateShipmentInTransaction as createShipmentInTransaction, assertShipmentCreateActor } from "./shipment-create.service";
 import { shipmentDefaultAllocation } from "./domain/shipment-create";
 import type { ShipmentCreateTransaction } from "./shipment-create.repository";
@@ -486,6 +487,11 @@ export function createShipmentTrackingService(
       if (purchaseOrder) purchaseOrderMap.set(id, purchaseOrder);
     }));
 
+    const shipmentUnitOptions = await readShipmentUnitOptions(db, lines.map((line) => ({
+      key: line.id, productId: (line.purchaseOrderLineId ? poLineMap.get(line.purchaseOrderLineId)?.productId : null)
+        ?? (line.productVariantId ? variantMap.get(line.productVariantId)?.productId : null) ?? null,
+      selectedVariantId: line.productVariantId, unitsPerVariantSnapshot: line.unitsPerVariantSnapshot ?? null,
+    })));
     return lines.map(line => {
       const pv = line.productVariantId ? variantMap.get(line.productVariantId) : null;
       const product = pv?.productId ? productMap.get(pv.productId) : null;
@@ -526,7 +532,8 @@ export function createShipmentTrackingService(
         ...versionShipmentLine(line),
         allocatedCostCents,
         sku: line.sku || pol?.sku || pv?.sku || product?.sku || null,
-        unitsPerVariant: pv?.unitsPerVariant ?? 1,
+        unitsPerVariant: pv?.unitsPerVariant ?? null,
+        shipmentUnits: shipmentUnitOptions.get(line.id)!,
         productName: product?.title || product?.name || pol?.productName || pv?.name || line.sku || null,
         poQtyOrdered: pol?.orderQty ?? null,
         poUnitCostCents: productValue?.poUnitCostCents ?? null,

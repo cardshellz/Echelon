@@ -1,3 +1,6 @@
+import { type ShipmentUnitSelection } from "@shared/procurement/shipment-unit-selection";
+import { toBasePieces } from "@shared/procurement/unit-quantity";
+import { lockShipmentCatalogUnit } from "./shipment-unit-selection.repository";
 import { Decimal } from "decimal.js";
 import { sql } from "drizzle-orm";
 import { auditEvents, type InboundShipment, type InboundShipmentLine, type InsertInboundShipmentLine, type PurchaseOrderLine } from "@shared/schema";
@@ -51,7 +54,7 @@ function physicalChange(before: InboundShipmentLine, patch: Partial<InsertInboun
     const previous = before[field];
     const next = patch[field];
     if (previous == null || next == null) return previous !== next;
-    return !new Decimal(String(previous)).eq(String(next));
+    return field === "dimensionBasis" ? previous !== next : !new Decimal(String(previous)).eq(String(next));
   });
 }
 
@@ -97,20 +100,38 @@ export function createShipmentLineMutationOwner(dependencies: Dependencies) {
     });
   }
 
-  async function createFromSource(tx: any, shipmentId: number, source: PurchaseOrderLine, qty: number): Promise<InsertInboundShipmentLine> {
-    const variantId = receiveVariant(source);
+  async function resolveSelection(tx: any, selection: ShipmentUnitSelection, productId: number | null, reviewedPieces?: number) {
+    const variant = await lockShipmentCatalogUnit(tx, selection.productVariantId);
+    if (!variant || variant.isActive !== true || (productId !== null && variant.productId !== productId)) {
+      reject("The selected shipment unit is missing, inactive, or belongs to another product. Refresh the available units.", "SHIPMENT_UNIT_VARIANT_REVIEW_REQUIRED");
+    }
+    if (variant.unitsPerVariant !== selection.unitsPerVariant) {
+      reject("The selected unit's pack factor changed after review. Refresh the available units and review the converted pieces.", "SHIPMENT_UNIT_SOURCE_CHANGED");
+    }
+    const pieces = toBasePieces(selection.quantity, selection.unitsPerVariant);
+    if (reviewedPieces !== undefined && pieces !== reviewedPieces) reject("The selected unit quantity does not match the reviewed piece count.", "SHIPMENT_UNIT_QUANTITY_MISMATCH", 422);
+    return { variant, pieces, snapshot: selection.unitsPerVariant };
+  }
+
+  async function createFromSource(tx: any, shipmentId: number, source: PurchaseOrderLine, qty: number, selection?: ShipmentUnitSelection): Promise<InsertInboundShipmentLine> {
+    if (selection && (!Number.isSafeInteger(source.productId) || Number(source.productId) <= 0)) reject("The purchase line needs a verified product before selecting a shipment unit.", "SHIPMENT_UNIT_PRODUCT_REQUIRED");
+    const selected = selection ? await resolveSelection(tx, selection, source.productId, qty) : null;
+    const variantId = selected?.variant.id ?? receiveVariant(source);
     const po = await storage.getPurchaseOrderById(source.purchaseOrderId, tx);
-    const dimensions = variantId ? await dependencies.resolveDimensions(variantId, po?.vendorId, tx)
-      : { weightKg: null, lengthCm: null, widthCm: null, heightCm: null };
-    // Prefer the PO's recorded receive factor. Legacy catalog fallback preserves
-    // prior create behavior only; later edits never rederive pieces from packs.
-    const variant = variantId ? await storage.getProductVariantById(variantId, tx) : undefined;
-    const pack = source.expectedReceiveUnitsPerVariant ?? source.unitsPerUom ?? variant?.unitsPerVariant ?? 1;
+    const variant = selected?.variant ?? (variantId ? await storage.getProductVariantById(variantId, tx) : undefined);
+    const pack = selected?.snapshot ?? source.expectedReceiveUnitsPerVariant ?? source.unitsPerUom ?? variant?.unitsPerVariant ?? 1;
     if (!Number.isSafeInteger(pack) || pack < 1) reject("The recorded receive pack is invalid. Review the PO line.", "SHIPMENT_LINE_SOURCE_REVIEW_REQUIRED");
-    const cartonCount = pack > 1 ? Math.ceil(qty / pack) : null;
+    // New reviewed unit entry records contents only. A selected case is not evidence
+    // of the physical outer-carton count. Legacy piece-only requests retain their
+    // existing initial packaging behavior without changing already stored rows.
+    const cartonCount = selected ? null : pack > 1 ? Math.ceil(qty / pack) : null;
+    const dimensions = variantId && (!selected || pack === 1)
+      ? await dependencies.resolveDimensions(variantId, po?.vendorId, tx)
+      : { weightKg: null, lengthCm: null, widthCm: null, heightCm: null };
     const line = { inboundShipmentId: shipmentId, purchaseOrderId: source.purchaseOrderId, purchaseOrderLineId: source.id,
-      productVariantId: variantId, sku: variant?.sku ?? source.sku, qtyShipped: qty, cartonCount, ...dimensions };
-    const validated = shipmentLineEditableSchema.safeParse({ ...dimensions, qtyShipped: qty, cartonCount });
+      productVariantId: variantId, sku: variant?.sku ?? source.sku, qtyShipped: qty, cartonCount,
+      unitsPerVariantSnapshot: selected?.snapshot ?? null, dimensionBasis: selected ? "piece" as const : null, ...dimensions };
+    const validated = shipmentLineEditableSchema.safeParse({ ...dimensions, qtyShipped: qty, cartonCount, dimensionBasis: line.dimensionBasis });
     if (!validated.success) reject("Stored supplier or catalog dimensions cannot be represented on a shipment line. Review their precision and range.", "SHIPMENT_LINE_SOURCE_REVIEW_REQUIRED");
     return { ...line, ...computeShipmentLinePhysicalTotals(line) };
   }
@@ -124,15 +145,20 @@ export function createShipmentLineMutationOwner(dependencies: Dependencies) {
     if (ids.some((id) => !candidates.some((line) => line.id === id))) reject("A selected line does not belong to this purchase order.", "SHIPMENT_LINE_REFERENCE_INVALID", 422);
     const capacities = await sourceCapacity(tx, ids);
     const existing = await storage.getInboundShipmentLines(shipmentId, tx);
-    const selectionQty = new Map(data.lineSelections?.map((selection) => [selection.poLineId, selection.qty]));
+    const selections = new Map(data.lineSelections?.map((selection) => [selection.poLineId, selection]));
     const lines: InsertInboundShipmentLine[] = [];
     for (const id of ids) {
-      if (existing.some((line) => line.purchaseOrderLineId === id)) continue;
+      const existingLine = existing.find((line) => line.purchaseOrderLineId === id);
+      if (existingLine) {
+        if (data.lineSelections) reject(`This PO line is already in the shipment. Edit shipment line #${existingLine.id} to change its quantity or receive unit.`, "SHIPMENT_LINE_ALREADY_PRESENT");
+        continue;
+      }
       const capacity = capacities.get(id)!;
-      const qty = selectionQty.get(id) ?? capacity.remainingQty;
+      const selected = selections.get(id);
+      const qty = selected?.qty ?? capacity.remainingQty;
       if (!data.lineSelections && !data.lineIds && qty === 0) continue;
       if (qty <= 0 || qty > capacity.remainingQty) reject(`PO line ${id} has ${capacity.remainingQty} pieces available for shipment; requested ${qty}.`, "SHIPMENT_LINE_QUANTITY_EXCEEDED");
-      lines.push(await createFromSource(tx, shipmentId, capacity.line, qty));
+      lines.push(await createFromSource(tx, shipmentId, capacity.line, qty, selected?.unitSelection));
     }
     return lines;
   }
@@ -149,12 +175,8 @@ export function createShipmentLineMutationOwner(dependencies: Dependencies) {
       }
       const value = parsed.data;
       const source = value.purchaseOrderLineId ? await storage.getPurchaseOrderLineById(value.purchaseOrderLineId, tx) : undefined;
-      const variantId = source ? receiveVariant(source) : value.productVariantId;
-      const variant = variantId ? await storage.getProductVariantById(variantId, tx) : undefined;
-      if ((value.purchaseOrderLineId && !source) || (variantId && !variant)
-        || (source && value.productVariantId && value.productVariantId !== variantId)
-        || ((variant?.sku ?? source?.sku) && value.sku && value.sku !== (variant?.sku ?? source?.sku))) {
-        errors.push({ row: index + 1, error: "The supplied PO line, receive variant, and SKU do not identify the same available item.", code: "SHIPMENT_LINE_REFERENCE_INVALID" });
+      if (value.purchaseOrderLineId && !source) {
+        errors.push({ row: index + 1, error: "The supplied purchase order line was not found.", code: "SHIPMENT_LINE_REFERENCE_INVALID" });
         continue;
       }
       valid.push({ row: index + 1, value });
@@ -169,11 +191,13 @@ export function createShipmentLineMutationOwner(dependencies: Dependencies) {
         if (source && value.qtyShipped > source.remainingQty - (consumed.get(source.line.id) ?? 0)) {
           reject(`PO line ${source.line.id} does not have enough remaining pieces for this row.`, "SHIPMENT_LINE_QUANTITY_EXCEEDED");
         }
-        const variantId = source ? receiveVariant(source.line) : value.productVariantId ?? null;
-        const variant = variantId ? await storage.getProductVariantById(variantId, tx) : undefined;
-        // Revalidate source identities after acquiring the PO locks: an
-        // amendment may have changed the receive variant since preflight.
-        if ((variantId && !variant) || (source && value.productVariantId && value.productVariantId !== variantId)
+        if (value.unitSelection && source && (!Number.isSafeInteger(source.line.productId) || Number(source.line.productId) <= 0)) {
+          reject("The purchase line needs a verified product before selecting a shipment unit.", "SHIPMENT_UNIT_PRODUCT_REQUIRED");
+        }
+        const selected = value.unitSelection ? await resolveSelection(tx, value.unitSelection, source?.line.productId ?? null, value.qtyShipped) : null;
+        const variantId = selected?.variant.id ?? (source ? receiveVariant(source.line) : value.productVariantId ?? null);
+        const variant = selected?.variant ?? (variantId ? await storage.getProductVariantById(variantId, tx) : undefined);
+        if ((variantId && !variant) || (value.productVariantId && value.productVariantId !== variantId)
           || ((variant?.sku ?? source?.line.sku) && value.sku && value.sku !== (variant?.sku ?? source?.line.sku))) {
           reject("The purchase receive variant or SKU changed. Review this packing-list row.", "SHIPMENT_LINE_REFERENCE_INVALID", 422);
         }
@@ -181,7 +205,8 @@ export function createShipmentLineMutationOwner(dependencies: Dependencies) {
           ...editableValues(value), inboundShipmentId: shipmentId, purchaseOrderId: source?.line.purchaseOrderId ?? null,
           purchaseOrderLineId: value.purchaseOrderLineId ?? null, productVariantId: variantId,
           sku: value.sku ?? variant?.sku ?? source?.line.sku ?? null, qtyShipped: value.qtyShipped,
-          cartonCount: value.cartonCount ?? null,
+          cartonCount: value.cartonCount ?? null, unitsPerVariantSnapshot: selected?.snapshot ?? null,
+          dimensionBasis: value.dimensionBasis ?? (selected ? "piece" : null),
         };
         lines.push({ ...line, ...computeShipmentLinePhysicalTotals(line) });
         if (source) consumed.set(source.line.id, (consumed.get(source.line.id) ?? 0) + value.qtyShipped);
@@ -213,10 +238,22 @@ export function createShipmentLineMutationOwner(dependencies: Dependencies) {
     let result: unknown;
     let affectsPhysical = true;
     if (command.operation === "update" || command.operation === "delete") {
-      const data = command.operation === "update" ? shipmentLinePatchSchema.parse(command.body) : shipmentLineDeleteSchema.parse(command.body);
+      const updateData = command.operation === "update" ? shipmentLinePatchSchema.parse(command.body) : null;
+      const data = updateData ?? shipmentLineDeleteSchema.parse(command.body);
       if (shipmentLineVersion(current!) !== data.expectedVersion) reject("This shipment line changed since you opened it. Refresh and review the current quantities and dimensions.", "SHIPMENT_LINE_VERSION_CONFLICT");
-      const patch = command.operation === "update" ? editableValues(data) : {};
-      affectsPhysical = command.operation === "delete" || physicalChange(current!, patch);
+      const patch: Partial<InsertInboundShipmentLine> = updateData ? editableValues(updateData) : {};
+      const selection = updateData?.unitSelection;
+      if (selection) {
+        const capacity = current!.purchaseOrderLineId ? (await sourceCapacity(tx, [current!.purchaseOrderLineId], current!.id)).get(current!.purchaseOrderLineId)! : null;
+        const originalVariant = !capacity && current!.productVariantId ? await lockShipmentCatalogUnit(tx, current!.productVariantId) : null;
+        const productId = capacity?.line.productId ?? originalVariant?.productId ?? null;
+        if (productId === null) reject("The shipment line has no verified product identity. Review its source before changing its unit.", "SHIPMENT_UNIT_PRODUCT_REQUIRED");
+        const selected = await resolveSelection(tx, selection, productId, patch.qtyShipped);
+        if (capacity && selected.pieces > capacity.remainingQty) reject(`This PO line has ${capacity.remainingQty} pieces available for this shipment line.`, "SHIPMENT_LINE_QUANTITY_EXCEEDED");
+        Object.assign(patch, { qtyShipped: selected.pieces, productVariantId: selected.variant.id,
+          unitsPerVariantSnapshot: selected.snapshot, sku: selected.variant.sku ?? current!.sku });
+      }
+      affectsPhysical = command.operation === "delete" || selection !== undefined || physicalChange(current!, patch);
       if (affectsPhysical) await assertShipmentLineHistoryMutable(tx, shipmentId);
       if (command.operation === "delete") {
         await lockSourceForRemoval(tx, current!);
@@ -250,9 +287,17 @@ export function createShipmentLineMutationOwner(dependencies: Dependencies) {
       } else if (command.operation === "resolve-dimensions") {
         shipmentLineResolveSchema.parse(command.body);
         let updated = 0;
+        const reviewRequiredLines: Array<{ lineId: number; code: string; message: string }> = [];
         for (const line of before) {
           const po = line.purchaseOrderId ? await storage.getPurchaseOrderById(line.purchaseOrderId, tx) : undefined;
-          const dimensions = line.productVariantId ? await dependencies.resolveDimensions(line.productVariantId, po?.vendorId, tx) : null;
+          const explicitBasis = line.dimensionBasis != null || line.unitsPerVariantSnapshot != null;
+          const variant = line.productVariantId ? await lockShipmentCatalogUnit(tx, line.productVariantId) : null;
+          const mayFill = !explicitBasis || (line.dimensionBasis === "piece" && variant?.isActive === true && variant.unitsPerVariant === 1);
+          if (!mayFill && [line.weightKg, line.lengthCm, line.widthCm, line.heightCm].some((value) => value == null || new Decimal(value).isZero())) {
+            reviewRequiredLines.push({ lineId: line.id, code: "SHIPMENT_DIMENSIONS_REQUIRE_PACKING_EVIDENCE",
+              message: "Catalog pack dimensions do not establish your shipping-carton dimensions. Enter the measured dimensions and physical carton count on this line." });
+          }
+          const dimensions = mayFill && line.productVariantId ? await dependencies.resolveDimensions(line.productVariantId, po?.vendorId, tx) : null;
           const patch: Partial<Dimensions> = {};
           for (const field of ["weightKg", "lengthCm", "widthCm", "heightCm"] as const) {
             if ((line[field] == null || new Decimal(line[field]!).isZero()) && dimensions?.[field] != null && new Decimal(dimensions[field]!).isPositive()) patch[field] = dimensions[field];
@@ -266,7 +311,7 @@ export function createShipmentLineMutationOwner(dependencies: Dependencies) {
           updated++;
         }
         affectsPhysical = updated > 0;
-        result = { updated, total: before.length };
+        result = { updated, total: before.length, reviewRequiredLines };
       } else reject("Unsupported shipment line command.", "SHIPMENT_LINE_OPERATION_INVALID", 400);
     }
     if (affectsPhysical) {

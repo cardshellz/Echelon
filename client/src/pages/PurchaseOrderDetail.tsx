@@ -1,3 +1,5 @@
+import { ShipmentQuantityControl } from "@/components/purchasing/ShipmentQuantityControl";
+import { parseShipmentUnits, shipmentQuantityDraft, shipmentQuantityPayload, shipmentQuantityPreview, type ShipmentQuantityDraft } from "@/lib/shipment-unit-entry";
 import { parseShipmentCreateSources } from "@shared/procurement/shipment-create-source";
 import { parseSupplierDispatchResult, parseSupplierPreparationResult, supplierDispatchReviewedVersion } from "@/lib/supplier-dispatch";
 import { PoVarianceApproval, hasPendingPoVarianceApproval } from "@/features/purchasing/PoVarianceApproval";
@@ -1079,9 +1081,9 @@ export default function PurchaseOrderDetail() {
   const [shipperSearch, setShipperSearch] = useState("");
 
   // Shippable lines state for Create Shipment dialog
-  // Map of poLineId → { checked, qty }. qty = 0 means unchecked.
-  const [lineSelections, setLineSelections] = useState<Record<number, { checked: boolean; qty: number }>>({});
-  const [lineQtyErrors, setLineQtyErrors] = useState<Record<number, string>>({});
+  // Keep the exact reviewed count unit with each selected purchase source.
+  const [lineSelections, setLineSelections] = useState<Record<number, { checked: boolean; quantity: ShipmentQuantityDraft }>>({});
+
 
   const shippableLinesQuery = useQuery({
     queryKey: [`/api/purchase-orders/${poId}/shippable-lines`, "shipment-create"],
@@ -1100,10 +1102,10 @@ export default function PurchaseOrderDetail() {
   // Initialize line selections when shippable lines load
   useEffect(() => {
     if (shippableLinesData?.lines && showCreateShipmentDialog) {
-      const selections: Record<number, { checked: boolean; qty: number }> = {};
+      const selections: Record<number, { checked: boolean; quantity: ShipmentQuantityDraft }> = {};
       for (const line of shippableLinesData.lines) {
         if (!(line.id in lineSelections)) {
-          selections[line.id] = { checked: true, qty: line.remainingQty };
+          selections[line.id] = { checked: true, quantity: shipmentQuantityDraft(line.remainingQty, parseShipmentUnits(line.shipmentUnits)) };
         }
       }
       if (Object.keys(selections).length > 0) {
@@ -2480,7 +2482,10 @@ export default function PurchaseOrderDetail() {
     try {
       if (!poId || shippableLinesError || !shippableLinesData) throw new Error("Load and review the available purchase lines before creating a shipment.");
       const lineSelectionsForCreate = shippableLinesData.lines.filter((line: any) => lineSelections[line.id]?.checked)
-        .map((line: any) => ({ poLineId: line.id, qty: lineSelections[line.id].qty }));
+        .map((line) => {
+          const { qtyShipped, ...unit } = shipmentQuantityPayload(lineSelections[line.id].quantity, parseShipmentUnits(line.shipmentUnits), line.remainingQty);
+          return { poLineId: line.id, qty: qtyShipped, ...unit };
+        });
       if (!lineSelectionsForCreate.length) throw new Error("Select at least one purchase line for this shipment.");
       const body = shipmentCreateSchema.parse({
         mode: newShipmentForm.mode || undefined, shipmentNumber: newShipmentForm.shipmentNumber || undefined,
@@ -5374,7 +5379,7 @@ export default function PurchaseOrderDetail() {
       {/* ═══════ Create Shipment Dialog ═══════ */}
       <Dialog open={showCreateShipmentDialog} onOpenChange={(open) => {
         setShowCreateShipmentDialog(open);
-        if (!open) { setLineSelections({}); setLineQtyErrors({}); }
+        if (!open) { setLineSelections({}); }
       }}>
         <DialogContent className="max-h-[calc(100dvh-2rem)] overflow-y-auto min-w-0 max-w-2xl relative">
           <DialogHeader>
@@ -5523,12 +5528,12 @@ export default function PurchaseOrderDetail() {
                     className="text-xs h-7"
                     onClick={() => {
                       const allChecked = shippableLinesData.lines.every((l: any) => lineSelections[l.id]?.checked);
-                      const next: Record<number, { checked: boolean; qty: number }> = {};
+                      const next: Record<number, { checked: boolean; quantity: ShipmentQuantityDraft }> = {};
                       for (const line of shippableLinesData.lines) {
                         const prev = lineSelections[line.id];
                         next[line.id] = {
                           checked: !allChecked,
-                          qty: prev?.qty ?? line.remainingQty,
+                          quantity: prev?.quantity ?? shipmentQuantityDraft(line.remainingQty, parseShipmentUnits(line.shipmentUnits)),
                         };
                       }
                       setLineSelections(next);
@@ -5546,73 +5551,22 @@ export default function PurchaseOrderDetail() {
                 </div>
               )}
               {shippableLinesData?.lines && shippableLinesData.lines.length > 0 ? (
-                <div className="max-h-[300px] overflow-y-auto">
-                  <Table>
-                    <TableHeader>
-                      <TableRow>
-                        <TableHead className="w-[40px]"></TableHead>
-                        <TableHead>SKU</TableHead>
-                        <TableHead>Description</TableHead>
-                        <TableHead className="text-right">Ordered</TableHead>
-                        <TableHead className="text-right">Shipped</TableHead>
-                        <TableHead className="text-right">Remaining</TableHead>
-                        <TableHead className="text-right w-[100px]">Qty to ship</TableHead>
-                      </TableRow>
-                    </TableHeader>
-                    <TableBody>
-                      {shippableLinesData.lines.map((line: any) => {
-                        const sel = lineSelections[line.id] ?? { checked: true, qty: line.remainingQty };
-                        const error = lineQtyErrors[line.id];
-                        return (
-                          <TableRow key={line.id}>
-                            <TableCell>
-                              <Checkbox
-                                checked={sel.checked}
-                                onCheckedChange={(checked) => {
-                                  setLineSelections(prev => ({
-                                    ...prev,
-                                    [line.id]: { ...prev[line.id], checked: !!checked },
-                                  }));
-                                }}
-                              />
-                            </TableCell>
-                            <TableCell className="font-mono text-xs">{line.sku || "—"}</TableCell>
-                            <TableCell className="text-xs text-muted-foreground truncate max-w-[150px]">
-                              {line.productName || line.description || "—"}
-                            </TableCell>
-                            <TableCell className="text-right text-xs">{line.orderQty}</TableCell>
-                            <TableCell className="text-right text-xs">{line.alreadyShippedQty}</TableCell>
-                            <TableCell className="text-right text-xs">{line.remainingQty}</TableCell>
-                            <TableCell>
-                              <Input
-                                type="number"
-                                min={1}
-                                max={line.remainingQty}
-                                value={sel.qty}
-                                disabled={!sel.checked}
-                                className={`h-8 text-xs text-right ${error ? "border-destructive" : ""}`}
-                                onChange={(e) => {
-                                  const val = /^\d+$/.test(e.target.value) ? Number(e.target.value) : 0;
-                                  setLineSelections(prev => ({
-                                    ...prev,
-                                    [line.id]: { ...prev[line.id], qty: val },
-                                  }));
-                                  if (val <= 0) {
-                                    setLineQtyErrors(prev => ({ ...prev, [line.id]: "Must be > 0" }));
-                                  } else if (val > line.remainingQty) {
-                                    setLineQtyErrors(prev => ({ ...prev, [line.id]: `Max ${line.remainingQty}` }));
-                                  } else {
-                                    setLineQtyErrors(prev => { const next = { ...prev }; delete next[line.id]; return next; });
-                                  }
-                                }}
-                              />
-                              {error && <p className="text-[10px] text-destructive mt-0.5">{error}</p>}
-                            </TableCell>
-                          </TableRow>
-                        );
-                      })}
-                    </TableBody>
-                  </Table>
+                <div className="max-h-[50dvh] min-w-0 overflow-y-auto space-y-3">
+                  {shippableLinesData.lines.map((line) => {
+                    const selected = lineSelections[line.id] ?? { checked: true, quantity: shipmentQuantityDraft(line.remainingQty, parseShipmentUnits(line.shipmentUnits)) };
+                    return <div key={line.id} className="min-w-0 rounded border p-3 space-y-3">
+                      <label className="flex gap-2 items-center text-sm font-medium">
+                        <Checkbox checked={selected.checked} onCheckedChange={(checked) => setLineSelections((previous) => ({
+                          ...previous, [line.id]: { ...selected, checked: !!checked },
+                        }))} />
+                        <span className="break-all">{line.sku ?? `PO line ${line.id}`}</span>
+                      </label>
+                      <p className="text-xs text-muted-foreground">{line.productName || line.description || "Product"} · Ordered {line.orderQty.toLocaleString("en-US")} pieces · Shipped {line.alreadyShippedQty.toLocaleString("en-US")} pieces</p>
+                      <ShipmentQuantityControl id={`create-shipment-line-${line.id}`} value={selected.quantity}
+                        units={parseShipmentUnits(line.shipmentUnits)} maximumPieces={line.remainingQty} disabled={!selected.checked}
+                        onChange={(quantity) => setLineSelections((previous) => ({ ...previous, [line.id]: { ...selected, quantity } }))} />
+                    </div>;
+                  })}
                 </div>
               ) : showCreateShipmentDialog && shippableLinesData ? (
                 <p className="text-sm text-muted-foreground py-4 text-center">
@@ -5622,7 +5576,7 @@ export default function PurchaseOrderDetail() {
             </div>
 
             <div className="flex gap-2 justify-end">
-              <Button variant="outline" onClick={() => { setShowCreateShipmentDialog(false); setLineSelections({}); setLineQtyErrors({}); }}>Cancel</Button>
+              <Button variant="outline" onClick={() => { setShowCreateShipmentDialog(false); setLineSelections({}); }}>Cancel</Button>
               <Button
                 onClick={submitShipmentCreation}
                 disabled={
@@ -5630,7 +5584,7 @@ export default function PurchaseOrderDetail() {
                   !Object.values(lineSelections).some(selection => selection.checked) ||
                   !newShipmentForm.shipperName.trim() ||
                   (shippableLinesData !== undefined && shippableLinesData.lines.length === 0) ||
-                  Object.keys(lineQtyErrors).length > 0
+                  shippableLinesData?.lines.some((line) => lineSelections[line.id]?.checked && shipmentQuantityPreview(lineSelections[line.id].quantity, parseShipmentUnits(line.shipmentUnits), line.remainingQty).error !== null)
                 }
               >
                 {createShipmentMutation.isPending ? "Creating..." : "Create Shipment"}

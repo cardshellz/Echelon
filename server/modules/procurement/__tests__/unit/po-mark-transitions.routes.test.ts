@@ -4,7 +4,6 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import express from "express";
 import type { Express, Request, Response, NextFunction } from "express";
 import http from "http";
-import { AddressInfo } from "net";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Route-level tests for Phase 3 physical-status transition endpoints:
@@ -104,38 +103,68 @@ function buildApp(purchasing: any): Express {
 }
 
 function startServer(app: Express): Promise<{ url: string; close: () => Promise<void> }> {
-  return new Promise((resolve) => {
-    const server = http.createServer(app).listen(0, () => {
-      const { port } = server.address() as AddressInfo;
+  return new Promise((resolve, reject) => {
+    const server = http.createServer(app);
+    server.once("error", (error) => reject(new Error(`Test HTTP server could not listen on loopback: ${error.message}`)));
+    server.listen(0, "127.0.0.1", () => {
+      const address = server.address();
+      if (address === null || typeof address === "string") {
+        server.close();
+        reject(new Error("Test HTTP server did not expose its loopback address"));
+        return;
+      }
+      const url = `http://127.0.0.1:${address.port}`;
       resolve({
-        url: `http://127.0.0.1:${port}`,
-        close: () => new Promise<void>((r) => server.close(() => r())),
+        url,
+        close: () => new Promise<void>((done, fail) => server.close((error) => {
+          if (error) fail(new Error(`Test HTTP server at ${url} could not close: ${error.message}`));
+          else done();
+        })),
       });
     });
   });
 }
 
-async function post(baseUrl: string, path: string, body: any = {}): Promise<{ status: number; body: any }> {
-  const res = await fetch(`${baseUrl}${path}`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(body),
+async function requestJson(baseUrl: string, method: string, path: string, body?: unknown): Promise<{ status: number; body: any }> {
+  const url = new URL(path, baseUrl);
+  const payload = body === undefined ? undefined : JSON.stringify(body);
+  // Exercise Express over real HTTP on every OS-assigned port. Fetch can reject
+  // an ephemeral port through its browser blocked-port policy before sending.
+  return new Promise((resolve, reject) => {
+    const request = http.request(url, {
+      method,
+      agent: false,
+      headers: payload === undefined ? undefined : {
+        "content-type": "application/json",
+        "content-length": Buffer.byteLength(payload),
+      },
+    }, (response) => {
+      let text = "";
+      response.setEncoding("utf8");
+      response.on("data", (chunk: string) => { text += chunk; });
+      response.on("error", (error) => reject(new Error(`Test HTTP response for ${method} ${url} failed: ${error.message}`)));
+      response.on("end", () => {
+        try {
+          if (response.statusCode === undefined) throw new Error("Response has no HTTP status code");
+          resolve({ status: response.statusCode, body: text ? JSON.parse(text) : null });
+        } catch (error) {
+          reject(new Error(`Invalid test HTTP response for ${method} ${url}: ${error instanceof Error ? error.message : String(error)}`));
+        }
+      });
+    });
+    request.on("error", (error) => reject(new Error(`Test HTTP request ${method} ${url} failed: ${error.message}`)));
+    request.setTimeout(5_000, () => request.destroy(new Error("Test HTTP request timed out after 5000 ms")));
+    request.end(payload);
   });
-  const text = await res.text();
-  return { status: res.status, body: text ? JSON.parse(text) : null };
 }
 
-async function patch(baseUrl: string, path: string, body: any = {}): Promise<{ status: number; body: any }> {
-  const res = await fetch(`${baseUrl}${path}`, {
-    method: "PATCH",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  const text = await res.text();
-  return { status: res.status, body: text ? JSON.parse(text) : null };
+function post(baseUrl: string, path: string, body: unknown = {}) {
+  return requestJson(baseUrl, "POST", path, body);
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
+function patch(baseUrl: string, path: string, body: unknown = {}) {
+  return requestJson(baseUrl, "PATCH", path, body);
+}
 
 describe("POST /api/purchase-orders/:id/mark-shipped", () => {
   let server: { url: string; close: () => Promise<void> };
