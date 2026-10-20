@@ -1,3 +1,5 @@
+import { ChannelPricingError } from "../../../channels/channel-pricing.domain";
+import { sendChannelPricingError } from "../../../channels/interfaces/http/channel-pricing.error";
 import type { Express, Request, Response } from "express";
 import { z } from "zod";
 import { requirePermission } from "../../../../routes/middleware";
@@ -93,6 +95,10 @@ export function registerListingPublicationRoutes(app: Express): void {
 }
 
 export function sendError(response: Response, error: unknown): void {
+  if (error instanceof ChannelPricingError) {
+    sendChannelPricingError(response, error, "listing_publication_pricing");
+    return;
+  }
   const known =
     error instanceof ListingPublicationError ||
     error instanceof ChannelIdentityError ||

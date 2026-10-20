@@ -1,5 +1,8 @@
 import { productMethods } from "../catalog/catalog.storage";
 import { createSharedProductPhotoImporter } from "../catalog";
+import { parseDollarPriceToCents } from "./channel-pricing-resolver";
+import { createChannelPricingService } from "./channel-pricing.service";
+import { ChannelPricingError } from "./channel-pricing.domain";
 /**
  * Catalog Backfill Service
  *
@@ -31,7 +34,6 @@ import {
   channels,
   channelFeeds,
   channelListings,
-  channelPricing,
   channelConnections,
   inventoryLevels,
   inventoryTransactions,
@@ -513,10 +515,28 @@ class CatalogBackfillService {
     const shopifyVariantId = String(shopifyVariant.id);
     const shopifyInventoryItemId = String(shopifyVariant.inventory_item_id);
     const sku = shopifyVariant.sku?.trim()?.toUpperCase() || `SHOPIFY-${shopifyVariant.id}`;
-    const priceCents = Math.round(parseFloat(shopifyVariant.price || "0") * 100);
-    const compareAtPriceCents = shopifyVariant.compare_at_price
-      ? Math.round(parseFloat(shopifyVariant.compare_at_price) * 100)
-      : null;
+    const priceCents = parseDollarPriceToCents(shopifyVariant.price);
+    if (priceCents === null) {
+      throw new ChannelPricingError(
+        "CHANNEL_PRICING_VALUE_INVALID",
+        `Shopify variant ${shopifyVariantId} (${sku}) has an invalid price. ` +
+        "Provide a non-negative decimal price with at most two decimal places.",
+        400,
+        { shopifyVariantId, sku, field: "price" },
+      );
+    }
+    const compareAtPriceCents = shopifyVariant.compare_at_price === null
+      ? null
+      : parseDollarPriceToCents(shopifyVariant.compare_at_price);
+    if (shopifyVariant.compare_at_price !== null && compareAtPriceCents === null) {
+      throw new ChannelPricingError(
+        "CHANNEL_PRICING_VALUE_INVALID",
+        `Shopify variant ${shopifyVariantId} (${sku}) has an invalid compare-at price. ` +
+        "Provide a non-negative decimal price with at most two decimal places, or null.",
+        400,
+        { shopifyVariantId, sku, field: "compare_at_price" },
+      );
+    }
     const requiresShipping = shopifyVariant.requires_shipping !== false;
 
     // Variant name from title
@@ -714,37 +734,15 @@ class CatalogBackfillService {
 
       // --- Backfill channel_pricing ---
       if (backfillPricing) {
-        const [existingPricing] = await this.db
-          .select()
-          .from(channelPricing)
-          .where(
-            and(
-              eq(channelPricing.channelId, channelId),
-              eq(channelPricing.productVariantId, echelonVariant.id),
-            ),
-          )
-          .limit(1);
-
-        if (existingPricing) {
-          await this.db
-            .update(channelPricing)
-            .set({
-              price: priceCents,
-              compareAtPrice: compareAtPriceCents,
-              updatedAt: new Date(),
-            })
-            .where(eq(channelPricing.id, existingPricing.id));
-          result.pricing.updated++;
-        } else {
-          await this.db.insert(channelPricing).values({
-            channelId,
-            productVariantId: echelonVariant.id,
-            price: priceCents,
-            compareAtPrice: compareAtPriceCents,
-            currency: "USD",
-          });
-          result.pricing.created++;
-        }
+        const saved = await createChannelPricingService(this.db).savePrice(
+          channelId,
+          echelonVariant.id,
+          { price: priceCents, compareAtPrice: compareAtPriceCents },
+          "service:shopify_catalog_backfill",
+          new Date(),
+        );
+        if (saved.created) result.pricing.created++;
+        else result.pricing.updated++;
       }
     }
 
