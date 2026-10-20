@@ -16,6 +16,8 @@ import type {
   DropshipMarketplaceStoreAuthFailureRecord,
   DropshipMarketplaceStoreCredentials,
 } from "../../infrastructure/dropship-marketplace-credentials";
+import { DropshipError } from "../../domain/errors";
+import type { DropshipEbayFulfillmentPolicyPreflight } from "../../application/dropship-ebay-fulfillment-policy-guard";
 
 describe("dropship marketplace listing push providers", () => {
   beforeEach(() => { quantityAdmission = createAdmittedEbayQuantityTestOwner(); });
@@ -305,6 +307,109 @@ describe("dropship marketplace listing push providers", () => {
     query.mockResolvedValueOnce({ rows:[] });
     await expect(reader.resolveRebuild({ vendorId:10,storeConnectionId:22,draft:rebuildDraft },credential,
       { listingId:"listing-101",members:[{ variantId:101,sku:"SKU-101",offerId:"offer-101" }] })).rejects.toMatchObject({ code:"DROPSHIP_EBAY_PUBLICATION_MAPPING_CHANGED" });
+  });
+
+  // Production stores provider_user_id (migration 0609's CHECK admits nothing else). With that
+  // credential the adoption must reach eBay's identity read, and the shared connector's refusals
+  // must reach the worker as DropshipErrors with the right retry class.
+  describe("shared connector refusals on a published SKU", () => {
+    const observedOffer = { offerId:"offer-101",sku:"SKU-101",marketplaceId:"EBAY_US",format:"FIXED_PRICE",status:"PUBLISHED",
+      listing:{ listingId:"listing-101",listingStatus:"ACTIVE" } };
+    function adoptionProvider(identity: { status: number; body: unknown }, writes: Response[] = [],
+      credentials: FakeCredentialRepository = new FakeCredentialRepository(ebayCredential())) {
+      const credential = ebayCredential();
+      const readCalls: string[] = [];
+      const observer = new EbayMarketplaceRegistrationObserver(new DropshipEbayRegistrationCredentialAdapter({
+        loadStoreConnection: async () => ({ id:22,vendorId:10,platform:"ebay",status:"connected",marketplaceIds:["EBAY_US"] }),
+      }, { loadFreshForStoreConnection: async () => credential }), {
+        get: async input => {
+          readCalls.push(input.path);
+          if (input.path.includes("/identity/")) return identity;
+          if (input.path.includes("/inventory_item/")) return { status:200,body:{ sku:"SKU-101",groupIds:[] } };
+          return { status:200,body:{ total:1,offers:[observedOffer] } };
+        },
+      });
+      const query = vi.fn(async () => ({ rows: [{ product_id: 20,product_variant_id:101,is_active:true }] }));
+      const reader = new PostgresDropshipEbayPushPublicationReader({ query } as unknown as Pick<Pool,"query">,observer);
+      const fetcher = new FakeFetch([jsonResponse({ offers:[observedOffer] }),...writes]);
+      const provider = createEbayProvider(credentials,fetcher.fetch,reader);
+      return { provider, fetcher, readCalls, query, credentials };
+    }
+    const liveRequest = () => makeRequest({ platform:"ebay",listingMode:"live",marketplaceConfig:ebayMarketplaceConfig() });
+
+    it("reaches eBay's identity read with the stored provider_user_id credential", async () => {
+      const { provider, fetcher, readCalls, query } = adoptionProvider({ status:200,body:{ userId:"seller-1",username:"seller" } },
+        [emptyResponse(),emptyResponse()]);
+      await expect(provider.pushListing(liveRequest())).resolves.toMatchObject({ externalListingId:"listing-101" });
+      expect(query).toHaveBeenCalledTimes(1);
+      expect(fetcher.calls.map(call => call.init.method)).toEqual(["GET","PUT","PUT"]);
+      expect(readCalls.some(path => path.includes("/identity/"))).toBe(true);
+    });
+
+    it("files a published listing owned by a different seller as permanent, before any eBay write", async () => {
+      const { provider, fetcher, credentials } = adoptionProvider({ status:200,body:{ userId:"different-seller",username:"other" } });
+      const error = await provider.pushListing(liveRequest()).catch((value: unknown) => value);
+      expect(error).toBeInstanceOf(DropshipError);
+      expect(error).toMatchObject({ code:"EBAY_SYNC_IDENTITY_CHANGED",context:{ retryable:false,source:"ebay_listing_connector" } });
+      expect(fetcher.calls.map(call => call.init.method)).toEqual(["GET"]);
+      expect(credentials.authFailures).toEqual([]);
+    });
+
+    it("keeps an eBay 503 on the identity read retryable, before any eBay write", async () => {
+      const { provider, fetcher, credentials } = adoptionProvider({ status:503,body:{} });
+      await expect(provider.pushListing(liveRequest())).rejects.toMatchObject({
+        code:"EBAY_REGISTRATION_READ_FAILED",context:{ retryable:true,source:"ebay_listing_connector" },
+      });
+      expect(fetcher.calls.map(call => call.init.method)).toEqual(["GET"]);
+      expect(credentials.authFailures).toEqual([]);
+    });
+
+    // The identity read borrows the stored token right after the provider's own GET succeeded
+    // with it. A 401 there is the same token rejection the provider records for its own calls
+    // (throwListingHttpError): record it so the next attempt refreshes, and keep it retryable.
+    it("records an eBay 401 on the identity read as a token rejection and keeps it retryable", async () => {
+      const { provider, fetcher, credentials } = adoptionProvider({ status:401,body:{ errors:[{ message:"Invalid token" }] } });
+      const error = await provider.pushListing(liveRequest()).catch((value: unknown) => value);
+      expect(error).toBeInstanceOf(DropshipError);
+      expect(error).toMatchObject({ code:"EBAY_AUTH_REQUIRED",context:{ retryable:true,source:"ebay_listing_connector" } });
+      expect(fetcher.calls.map(call => call.init.method)).toEqual(["GET"]);
+      expect(credentials.authFailures).toEqual([{
+        vendorId:10,storeConnectionId:22,platform:"ebay",
+        expectedCredential:{ accessTokenRef:"access-ref",refreshTokenRef:"refresh-ref" },
+        status:"refresh_failed",failureCode:"EBAY_AUTH_REQUIRED",message:(error as DropshipError).message,
+        retryable:true,statusCode:401,invalidateAccessToken:true,now:new Date("2026-09-01T12:00:00.000Z"),
+      }]);
+    });
+
+    it("surfaces a failed token-rejection record instead of the 401, as the provider's own HTTP path does", async () => {
+      const changed = new DropshipError("DROPSHIP_CREDENTIAL_CHANGED","Store authorization changed while the request was in flight.",
+        { retryable:true });
+      const credentials = new FakeCredentialRepository(ebayCredential());
+      credentials.recordAuthFailure = async (input) => { credentials.authFailures.push(input); throw changed; };
+      const { provider, fetcher } = adoptionProvider({ status:401,body:{} },[],credentials);
+      await expect(provider.pushListing(liveRequest())).rejects.toBe(changed);
+      expect(fetcher.calls.map(call => call.init.method)).toEqual(["GET"]);
+      expect(credentials.authFailures).toHaveLength(1);
+    });
+
+    it("files an eBay 403 on the identity read as permanent without touching the token", async () => {
+      const { provider, fetcher, credentials } = adoptionProvider({ status:403,body:{} });
+      await expect(provider.pushListing(liveRequest())).rejects.toMatchObject({
+        code:"EBAY_PROVIDER_ACCESS_DENIED",context:{ retryable:false,source:"ebay_listing_connector" },
+      });
+      expect(fetcher.calls.map(call => call.init.method)).toEqual(["GET"]);
+      expect(credentials.authFailures).toEqual([]);
+    });
+
+    it("files two eBay offers for one SKU as a permanent mapping refusal after one read", async () => {
+      const second = { ...observedOffer,offerId:"offer-202" };
+      const fetcher = new FakeFetch([jsonResponse({ offers:[observedOffer,second] })]);
+      const provider = createEbayProvider(new FakeCredentialRepository(ebayCredential()),fetcher.fetch);
+      await expect(provider.pushListing(liveRequest())).rejects.toMatchObject({
+        code:"EBAY_SYNC_MAPPING_INVALID",context:{ retryable:false,source:"ebay_listing_connector" },
+      });
+      expect(fetcher.calls.map(call => call.init.method)).toEqual(["GET"]);
+    });
   });
 
   it("creates an authenticated eBay replacement lifecycle client for a Dropship store", async () => {
@@ -627,13 +732,13 @@ describe("dropship marketplace listing push providers", () => {
   it("blocks before any listing mutation when setup does not reference the managed warehouse", async () => {
     const credentials = new FakeCredentialRepository(ebayCredential());
     const fetcher = new FakeFetch([]);
-    const compatiblePreflight = {
+    const compatiblePreflight: DropshipEbayFulfillmentPolicyPreflight = {
       compatible: true,
       fulfillmentPolicyId: "fulfillment-policy",
       capabilityEvidenceHash: "capability-hash",
       originWarehouseId: 1,
       issues: [],
-    } as const;
+    };
     const provider = new EbayDropshipListingPushProvider(
       credentials,
       fetcher.fetch,
@@ -669,13 +774,13 @@ function createEbayProvider(
   fetchFn: typeof fetch,
   existingPublication?: DropshipEbayPushPublicationReader,
 ): EbayDropshipListingPushProvider {
-  const compatiblePreflight = {
+  const compatiblePreflight: DropshipEbayFulfillmentPolicyPreflight = {
     compatible: true,
     fulfillmentPolicyId: "fulfillment-policy",
     capabilityEvidenceHash: "capability-hash",
     originWarehouseId: 1,
     issues: [],
-  } as const;
+  };
   return new EbayDropshipListingPushProvider(
     credentials,
     fetchFn,
@@ -884,6 +989,10 @@ function shopifyCredential(): DropshipMarketplaceStoreCredentials {
     status: "connected",
     shopDomain: "vendor-shop.myshopify.com",
     externalAccountId: "vendor-shop.myshopify.com",
+    // Migration 0609's columns, as a Shopify row without a verified stable identity holds them.
+    providerEnvironment: null,
+    externalAccountIdentityScheme: null,
+    externalAccountVerifiedAt: null,
     externalDisplayName: "Vendor Shop",
     config: {},
     accessToken: "shopify-token",
@@ -904,7 +1013,7 @@ function ebayCredential(): DropshipMarketplaceStoreCredentials {
     shopDomain: null,
     externalAccountId: "seller-1",
     providerEnvironment: "production",
-    externalAccountIdentityScheme: "ebay_user_id",
+    externalAccountIdentityScheme: "provider_user_id",
     externalAccountVerifiedAt: new Date("2026-05-01T00:00:00.000Z"),
     externalDisplayName: "seller-1",
     config: {},

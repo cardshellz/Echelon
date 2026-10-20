@@ -137,7 +137,7 @@ class CoordinatedCredentialRepository implements DropshipMarketplaceCredentialRe
   current: DropshipMarketplaceStoreCredentials = {
     ...identity, platform: "ebay", status: "connected", shopDomain: null,
     externalAccountId: "seller", externalDisplayName: "Seller",
-    providerEnvironment: "production", externalAccountIdentityScheme: "ebay_user_id",
+    providerEnvironment: "production", externalAccountIdentityScheme: "provider_user_id",
     externalAccountVerifiedAt: new Date("2026-09-01T00:00:00.000Z"),
     config: { ...policyConfig, cancellation: { cancelReason: "BuyerCancelOrder", buyerPaid: false } },
     accessToken: "expired-token", accessTokenRef: "expired-ref",
