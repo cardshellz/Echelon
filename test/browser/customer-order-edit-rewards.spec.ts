@@ -32,6 +32,8 @@ async function setup(
     failReturnRefresh?: boolean;
     failPricing?: boolean;
     pendingIssuance?: boolean;
+    originalReward?: boolean;
+    pausePreview?: boolean;
   } = {},
 ) {
   const requests: Array<{
@@ -51,6 +53,7 @@ async function setup(
     refreshFailed = false;
   let issuing = options.pendingIssuance ?? false;
   let issuanceAttempts = 0;
+  let resumePreview: (() => void) | undefined;
   if (issuing) rewards = rewards.filter((reward) => reward.id !== firstId);
   const quantity = options.quantity ?? 1;
   const discount = (key: string, label: string, amountCents: number) => ({
@@ -63,24 +66,36 @@ async function setup(
     const saving =
       (codes.includes("SHELLZ-ONE") ? 100 : 0) +
       (codes.includes("SHELLZ-TWO") ? 366 : 0);
-    const net = 233 * count - saving;
+    const originalDiscount = options.originalReward ? 233 : 0;
+    const original = originalDiscount
+      ? [discount("code:ORIGINAL", "ORIGINAL", originalDiscount)]
+      : [];
+    const net = 233 * count - saving - originalDiscount;
     const tax = Number(
       (BigInt(net + 549) * BigInt(6) + BigInt(50)) / BigInt(100),
     );
     return {
       itemsGrossCents: 279 * count,
-      itemsDiscountCents: 46 * count + saving,
+      itemsDiscountCents: 46 * count + saving + originalDiscount,
       itemsNetCents: net,
-      orderDiscounts: codes.map((code) =>
-        discount(`code:${code}`, code, code === "SHELLZ-ONE" ? 100 : 366),
-      ),
+      orderDiscounts: [
+        ...original,
+        ...codes.map((code) =>
+          discount(`code:${code}`, code, code === "SHELLZ-ONE" ? 100 : 366),
+        ),
+      ],
       itemDiscounts: [
+        ...original,
         discount("club", "Club", 46 * count),
         ...codes.map((code) =>
           discount(`code:${code}`, code, code === "SHELLZ-ONE" ? 100 : 366),
         ),
       ],
-      itemDiscountLabels: ["Club", ...codes],
+      itemDiscountLabels: [
+        ...(originalDiscount ? ["ORIGINAL"] : []),
+        "Club",
+        ...codes,
+      ],
       shippingGrossCents: 549,
       shippingDiscountCents: 0,
       shippingCents: 549,
@@ -92,7 +107,7 @@ async function setup(
         {
           id: lineId,
           grossCents: 279 * count,
-          discountCents: 46 * count + saving,
+          discountCents: 46 * count + saving + originalDiscount,
           netCents: net,
           productNetCents: 233 * count,
         },
@@ -266,6 +281,10 @@ async function setup(
         },
       });
     if (input.path === "/order-edits/previews") {
+      if (options.pausePreview)
+        await new Promise<void>((resolve) => {
+          resumePreview = resolve;
+        });
       const codes = input.body.discountCodes ?? [],
         count = input.body.changes[0]?.quantity ?? quantity;
       if (options.failPricing && codes.length)
@@ -330,8 +349,46 @@ async function setup(
   await expect(page.getByTestId("club-canonical-balance")).toHaveText(
     "590.00 SHELLZ Rewards",
   );
-  return { requests, errors };
+  return {
+    requests,
+    errors,
+    releasePreview: () => {
+      options.pausePreview = false;
+      resumePreview?.();
+    },
+  };
 }
+
+test("explains zero remaining merchandise and enables saved rewards after more items are priced", async ({
+  page,
+}) => {
+  const h = await setup(page, { originalReward: true, pausePreview: true });
+  const hint = page.getByText(
+    "Your items are fully discounted. Rewards can’t be used for shipping or tax.",
+  );
+  const saved = page
+    .getByRole("group", { name: "$1.00 saved reward" })
+    .getByRole("button", { name: "Use reward", exact: true });
+  await expect(hint).toBeVisible();
+  await expect(saved).toBeDisabled();
+  await page.getByRole("spinbutton").fill("2");
+  await expect
+    .poll(() =>
+      h.requests.some((request) => request.path === "/order-edits/previews"),
+    )
+    .toBe(true);
+  await expect(hint).toHaveCount(0);
+  await expect(saved).toBeDisabled();
+  h.releasePreview();
+  await expect(saved).toBeEnabled();
+  await saved.click();
+  await expect(
+    page
+      .getByRole("group", { name: "$1.00 saved reward" })
+      .getByText("Applied", { exact: true }),
+  ).toBeVisible();
+  expect(h.errors).toEqual([]);
+});
 test("selects the $1 reward independently and returns the unused $3.66 through Club", async ({
   page,
 }) => {

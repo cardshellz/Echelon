@@ -40,13 +40,16 @@ export function presentOrderEditCodeBreakdown(
   const byId = new Map(pricing.lines.map((line) => [line.id, line]));
   const presented = orderEditFinancialsSchema.safeParse({
     ...financials,
-    orderDiscounts: pricing.applications.map((application) => ({
-      key: `code:${application.code}`,
-      label: application.code,
-      amountCents: application.amountCents,
-      value: pricing.rules.find((rule) => rule.code === application.code)
-        ?.value,
-    })),
+    orderDiscounts: [
+      ...(pricing.retainedNativeDiscounts ?? []),
+      ...pricing.applications.map((application) => ({
+        key: `code:${application.code}`,
+        label: application.code,
+        amountCents: application.amountCents,
+        value: pricing.rules.find((rule) => rule.code === application.code)
+          ?.value,
+      })),
+    ],
     lines: financials.lines.map((line) => {
       const priced = byId.get(line.id);
       return {

@@ -5715,3 +5715,479 @@ describe("calculation-only background order previews", () => {
     ).toBe(false);
   });
 });
+
+describe("saved Club reward on an order with a used checkout reward", () => {
+  const oldCode = "USED-CLUB-REWARD";
+  const savedCode = "SAVED-233";
+  const allow = {
+    productDiscounts: true,
+    orderDiscounts: true,
+    shippingDiscounts: true,
+  };
+  function setup(rewardCents = 233) {
+    let savedQuote: OrderEditQuote | null = null;
+    let description = "";
+    let extra = false;
+    let extraNet = 279;
+    let committed = false;
+    let publishedExtra = false;
+    let publishedNet = 279;
+    const nativeAllocation: DiscountAllocationFixture = {
+      allocatedAmountSet: bag("2.79"),
+      discountApplication: {
+        __typename: "CalculatedDiscountCodeApplication",
+        id: id("CalculatedDiscountApplication", 50),
+        code: oldCode,
+        allocationMethod: "ACROSS",
+        appliedTo: "ORDER",
+        targetType: "LINE_ITEM",
+        targetSelection: "ALL",
+        description: oldCode,
+        value: { __typename: "MoneyV2", amount: "7.23", currencyCode: "USD" },
+      },
+    };
+    const originalRule = {
+      __typename: "DiscountCodeApplication",
+      index: 0,
+      code: oldCode,
+      targetType: "LINE_ITEM",
+      targetSelection: "ALL",
+      allocationMethod: "ACROSS",
+      value: nativeAllocation.discountApplication.value,
+    };
+    const nativeLine = () => ({
+      ...calcLine(1, 10, 1, "2.79"),
+      calculatedDiscountAllocations: [structuredClone(nativeAllocation)],
+    });
+    function nativeCalculation() {
+      const subtotal = extra ? BigInt(extraNet) : BigInt(0);
+      const tax =
+        ((subtotal + BigInt(549)) * BigInt(6) + BigInt(50)) / BigInt(100);
+      const added = calcLine(
+        2,
+        10,
+        extra ? 1 : 0,
+        "2.79",
+        decimal(BigInt(extraNet)),
+      );
+      for (const allocation of added.calculatedDiscountAllocations)
+        allocation.discountApplication.description = description;
+      return shippingCalculated(
+        decimal(subtotal + BigInt(549) + tax),
+        "5.49",
+        decimal(tax),
+        decimal(subtotal),
+        decimal(subtotal + tax - BigInt(33)),
+        [nativeLine(), ...(committed ? [added] : [])],
+        committed ? [] : extra ? [added] : [],
+      );
+    }
+    function nativeOrder() {
+      const net =
+        committed && publishedExtra ? BigInt(publishedNet) : BigInt(0);
+      const tax = ((net + BigInt(549)) * BigInt(6) + BigInt(50)) / BigInt(100);
+      const total = decimal(net + BigInt(549) + tax);
+      const base = shippingOrder(
+        total,
+        "5.49",
+        decimal(tax),
+        decimal(net),
+        decimal(net + tax - BigInt(33)),
+      );
+      const added = {
+        ...line(2, 10, publishedExtra ? 1 : 0, "2.79"),
+        discountedUnitPriceSet: bag(decimal(BigInt(publishedNet))),
+        unfulfilledDiscountedTotalSet: bag(
+          publishedExtra ? decimal(BigInt(publishedNet)) : "0.00",
+        ),
+        priceAfterAllDiscountsBeforeTaxesSet: bag(
+          publishedExtra ? decimal(BigInt(publishedNet)) : "0.00",
+        ),
+        discountAllocations: [
+          {
+            allocatedAmountSet: bag(
+              decimal(BigInt(279) - BigInt(publishedNet)),
+            ),
+            discountApplication: { index: 0 },
+          },
+        ],
+      };
+      return {
+        ...base,
+        order: {
+          ...base.order,
+          netPaymentSet: bag("5.82"),
+          transactions: [tx(1, "5.82")],
+          customer: {
+            id: id("Customer", 1),
+            tags: [],
+            membershipPlan: { value: "test-plan" },
+          },
+          lineItems: {
+            nodes: [
+              {
+                ...line(1, 10, 1, "2.79"),
+                priceAfterAllDiscountsBeforeTaxesSet: bag("0.00"),
+                discountAllocations: [
+                  {
+                    allocatedAmountSet: bag("2.79"),
+                    discountApplication: { index: committed ? 1 : 0 },
+                  },
+                ],
+              },
+              ...(committed ? [added] : []),
+            ],
+            pageInfo: { hasNextPage: false },
+          },
+          discountApplications: {
+            nodes: [
+              { ...originalRule, index: committed ? 1 : 0 },
+              ...(committed
+                ? [
+                    {
+                      __typename: "ManualDiscountApplication",
+                      index: 0,
+                      targetType: "LINE_ITEM",
+                      allocationMethod: "EACH",
+                      targetSelection: "EXPLICIT",
+                      title: description,
+                      value: {
+                        __typename: "MoneyV2",
+                        amount: decimal(BigInt(279) - BigInt(publishedNet)),
+                        currencyCode: "USD",
+                      },
+                    },
+                  ]
+                : []),
+            ],
+            pageInfo: { hasNextPage: false },
+          },
+        },
+      };
+    }
+    const lookup = (code: string) => {
+      const value = newCodeLookup();
+      const prior = code === oldCode;
+      value.codeDiscountNodeByCode.id = id("DiscountCodeNode", prior ? 1 : 2);
+      return {
+        codeDiscountNodeByCode: {
+          ...value.codeDiscountNodeByCode,
+          codeDiscount: {
+            ...value.codeDiscountNodeByCode.codeDiscount,
+            title: code,
+            usageLimit: 1,
+            appliesOncePerCustomer: true,
+            codes: { nodes: [{ code }], pageInfo: { hasNextPage: false } },
+            customerGets: {
+              items: { __typename: "AllDiscountItems", allItems: true },
+              value: {
+                __typename: "DiscountAmount",
+                amount: {
+                  amount: prior ? "7.23" : decimal(BigInt(rewardCents)),
+                  currencyCode: "USD",
+                },
+                appliesOnEachItem: false,
+              },
+            },
+          },
+        },
+      };
+    };
+    const rewards = {
+      available: () => true,
+      identify: vi.fn(async ({ codes }: { codes: string[] }) => codes),
+      verify: vi.fn(async () => {}),
+    };
+    const shipping = {
+      title: "Standard Shipping",
+      code: "standard",
+      source: "Echelon Shipping",
+      grossCents: 549,
+      netCents: 549,
+      discountCents: 0,
+      discountLabels: [],
+    };
+    const calculator: OrderEditShippingCalculator = {
+      calculate: async () => shipping,
+      calculatePreview: async (_snapshot, items) => {
+        const subtotal = items.reduce(
+          (sum, item) => sum + BigInt(item.netCents),
+          BigInt(0),
+        );
+        const tax =
+          ((subtotal + BigInt(549)) * BigInt(6) + BigInt(50)) / BigInt(100);
+        return {
+          shippingRepricing: shipping,
+          taxCents: Number(tax),
+          taxLines: [
+            { title: "State tax", ratePercentage: 6, amountCents: Number(tax) },
+          ],
+          totalCents: Number(subtotal + BigInt(549) + tax),
+        };
+      },
+    };
+    function respond({
+      query,
+      variables,
+    }: {
+      query: string;
+      variables: Record<string, unknown>;
+    }): unknown {
+      if (query.includes("query EchelonEditOrder(")) return nativeOrder();
+      if (query.includes("EchelonEditVariantPrices"))
+        return {
+          nodes: (variables.ids as string[]).map(() =>
+            variant(10, "2.79", '{"test-plan":{"cents":233}}'),
+          ),
+        };
+      if (query.includes("query EchelonEditCode("))
+        return lookup(String(variables.code));
+      if (query.includes("EchelonEditCodeCalculate"))
+        return {
+          draftOrderCalculate: {
+            userErrors: [],
+            calculatedDraftOrder: {
+              subtotalPriceSet: bag(decimal(BigInt(233) - BigInt(rewardCents))),
+              lineItemsSubtotalPrice: bag("2.33"),
+              lineItems: [
+                {
+                  variant: { id: id("ProductVariant", 10) },
+                  quantity: 1,
+                  discountedTotalSet: bag("2.33"),
+                },
+              ],
+              platformDiscounts: [
+                {
+                  code: savedCode,
+                  discountClasses: ["ORDER"],
+                  totalAmountPriceSet: bag(decimal(BigInt(rewardCents))),
+                },
+              ],
+            },
+          },
+        };
+      if (query.includes("EchelonEditCombinationRules")) {
+        const result = memberProvenance();
+        return {
+          ...result,
+          discountNodes: {
+            ...result.discountNodes,
+            nodes: result.discountNodes.nodes.map((node) => ({
+              ...node,
+              discount: { ...node.discount, combinesWith: allow },
+            })),
+          },
+        };
+      }
+      if (query.includes("orderEditBegin")) return begin(nativeCalculation());
+      if (query.includes("orderEditAddVariant")) {
+        extra = true;
+        return {
+          orderEditAddVariant: {
+            userErrors: [],
+            calculatedLineItem: { id: id("CalculatedLineItem", 2) },
+            calculatedOrder: nativeCalculation(),
+          },
+        };
+      }
+      if (query.includes("orderEditAddLineItemDiscount")) {
+        const discount = variables.discount as {
+          fixedValue: { amount: string };
+          description: string;
+        };
+        expect(variables.lineItemId).toBe(id("CalculatedLineItem", 2));
+        extraNet = Number(BigInt(279) - cents(discount.fixedValue.amount));
+        description = discount.description;
+        return {
+          orderEditAddLineItemDiscount: {
+            userErrors: [],
+            calculatedOrder: nativeCalculation(),
+          },
+        };
+      }
+      if (query.includes("orderEditSetQuantity")) {
+        expect(variables.lineItemId).toBe(id("CalculatedLineItem", 2));
+        expect(variables.quantity).toBe(0);
+        extra = false;
+        return quantity(nativeCalculation());
+      }
+      if (query.includes("orderEditCommit")) {
+        committed = true;
+        publishedExtra = extra;
+        publishedNet = extraNet;
+        return {
+          orderEditCommit: { userErrors: [], order: { id: id("Order", 100) } },
+        };
+      }
+      throw new Error(`Unexpected test request: ${query.slice(0, 100)}`);
+    }
+    const history = new PostgresOrderEditCodeHistory({
+      query: async () => ({ rows: savedQuote ? [{ quote: savedQuote }] : [] }),
+    } as unknown as import("pg").Pool);
+    const h = harness(
+      Array.from({ length: 100 }, () => respond),
+      {},
+      calculator,
+      { rewards, codeHistory: history },
+    );
+    return {
+      ...h,
+      rewards,
+      save: (quote: OrderEditQuote) => {
+        savedQuote = quote;
+      },
+    };
+  }
+  const plan = {
+    changes: [{ lineItemId: id("LineItem", 1), quantity: 2 }],
+    additions: [],
+    discountCodes: [savedCode],
+  };
+
+  it("previews, submits and reconciles the saved $2.33 without touching the original $2.79", async () => {
+    const h = setup();
+    const baseline = await h.provider.readOrder(4, "100");
+    const preview = await h.provider.preview(
+      await h.provider.preparePreview(baseline),
+      plan,
+    );
+    expect(preview.financials).toMatchObject({
+      itemsNetCents: 0,
+      totalCents: 582,
+      orderDiscounts: [
+        { label: oldCode, amountCents: 279 },
+        { label: savedCode, amountCents: 233 },
+      ],
+    });
+    const quote = await h.provider.quote(4, baseline, plan, "stacked-reward");
+    h.save(quote);
+    expect(quote.lines[0]).toMatchObject({
+      originalLineId: id("LineItem", 1),
+      quantity: 1,
+      totalCents: 279,
+    });
+    expect(quote.lines[1]).toMatchObject({
+      originalLineId: null,
+      quantityIncreaseOfLineId: id("LineItem", 1),
+      quantity: 1,
+      totalCents: 0,
+    });
+    const reserve = vi.fn(async () => {});
+    const observed = await h.provider.commit(
+      4,
+      quote,
+      "stacked-reward",
+      reserve,
+    );
+    expect(reserve).toHaveBeenCalledOnce();
+    expect(observed.codePricing?.applications).toEqual([
+      { code: savedCode, amountCents: 233 },
+    ]);
+    expect(observed.nativeDiscountAllocations).toEqual(
+      baseline.nativeDiscountAllocations,
+    );
+    expect(
+      (await h.provider.reconcileCommit(4, baseline, quote, "stacked-reward"))
+        .status,
+    ).toBe("applied");
+    expect(
+      h.requests.filter((request) => request.query.includes("orderEditCommit")),
+    ).toHaveLength(1);
+  });
+
+  it("does not submit if the canonical reward reservation fails", async () => {
+    const h = setup();
+    const baseline = await h.provider.readOrder(4, "100");
+    const quote = await h.provider.quote(4, baseline, plan, "reserve-failure");
+    h.save(quote);
+    await expect(
+      h.provider.commit(4, quote, "reserve-failure", async () => {
+        throw new Error("Reward claim rejected");
+      }),
+    ).rejects.toThrow();
+    expect(
+      h.requests.some((request) => request.query.includes("orderEditCommit")),
+    ).toBe(false);
+    expect((await h.provider.readOrder(4, "100")).fingerprint).toBe(
+      baseline.fingerprint,
+    );
+  });
+
+  it("rejects a forged retained-code label even when all money still adds up", async () => {
+    const h = setup();
+    const baseline = await h.provider.readOrder(4, "100");
+    const quote = await h.provider.quote(
+      4,
+      baseline,
+      plan,
+      "native-label-proof",
+    );
+    const retained = quote.codePricing!.retainedNativeDiscounts![0];
+    const amount = quote.financials!.itemDiscounts!.find(
+      (discount) => discount.key === retained.key,
+    )!;
+    retained.key = amount.key = "code:UNRELATED";
+    retained.label = amount.label = "UNRELATED";
+    expect(orderEditQuoteSchema.safeParse(quote).success).toBe(false);
+  });
+
+  it("keeps readback uncertainty and its cause, then reconciles without submitting twice", async () => {
+    const h = setup();
+    const baseline = await h.provider.readOrder(4, "100");
+    const quote = await h.provider.quote(4, baseline, plan, "lost-readback");
+    h.save(quote);
+    const originalFetch = h.fetchImpl.getMockImplementation()!;
+    let sent = false;
+    h.fetchImpl.mockImplementation(async (url, init) => {
+      const query = JSON.parse(String(init?.body)).query as string;
+      if (query.includes("orderEditCommit")) sent = true;
+      if (sent && query.includes("query EchelonEditOrder("))
+        throw new Error("Synthetic readback outage");
+      return originalFetch(url, init);
+    });
+    await expect(
+      h.provider.commit(4, quote, "lost-readback", async () => {}),
+    ).rejects.toMatchObject({
+      code: "COMMIT_READBACK_UNAVAILABLE",
+      outcome: "unknown",
+      cause: expect.objectContaining({ code: "SHOPIFY_UNAVAILABLE" }),
+    });
+    h.fetchImpl.mockImplementation(originalFetch);
+    expect(
+      (await h.provider.reconcileCommit(4, baseline, quote, "lost-readback"))
+        .status,
+    ).toBe("applied");
+    expect(
+      h.requests.filter((request) => request.query.includes("orderEditCommit")),
+    ).toHaveLength(1);
+  });
+
+  it("restores an unpaid change without replacing or redeeming the original reward again", async () => {
+    const h = setup(100);
+    const baseline = await h.provider.readOrder(4, "100");
+    const quote = await h.provider.quote(4, baseline, plan, "unpaid-stack");
+    h.save(quote);
+    const observed = await h.provider.commit(
+      4,
+      quote,
+      "unpaid-stack",
+      async () => {},
+    );
+    expect(observed.outstandingCents).toBe(141);
+    const restored = await h.provider.recoverUnpaid(
+      4,
+      baseline,
+      quote,
+      "recover-stack",
+    );
+    expect(isUnpaidRecoveryRestored(restored, baseline, quote)).toBe(true);
+    expect(restored.nativeDiscountAllocations).toEqual(
+      baseline.nativeDiscountAllocations,
+    );
+    expect(
+      h.requests.filter((request) =>
+        request.query.includes("orderEditAddLineItemDiscount"),
+      ),
+    ).toHaveLength(1);
+  });
+});

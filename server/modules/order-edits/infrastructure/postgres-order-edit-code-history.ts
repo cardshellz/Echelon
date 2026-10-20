@@ -7,7 +7,10 @@ import type {
 import { OrderEditProviderError } from "../application/order-edit-provider";
 import { orderEditQuoteSchema } from "../application/order-edit-provider.schema";
 import { withOrderEditCodePricing } from "../application/order-edit-code-presentation";
-import { preservesAutomaticOrderEditLine } from "../application/order-edit-evidence";
+import {
+  preservesAutomaticOrderEditLine,
+  preservesNativeOrderEditLine,
+} from "../application/order-edit-evidence";
 
 export class PostgresOrderEditCodeHistory implements OrderEditCodeHistory {
   constructor(private readonly pool: Pool) {}
@@ -81,6 +84,54 @@ export function mapOrderEditCodeLines(
       (line) => line.calculatedLineId === evidence.id,
     );
     if (!expected) return null;
+    const carriesVerifiedDiscount = (
+      line: OrderEditSnapshot["lines"][number],
+    ): boolean => {
+      if (evidence.nativeDiscountCents) {
+        const nativeCents = snapshot.nativeDiscountAllocations
+          ?.filter((allocation) => allocation.lineId === line.id)
+          .reduce(
+            (sum, allocation) => sum + BigInt(allocation.amountCents),
+            BigInt(0),
+          );
+        return Boolean(
+          expected.originalLineId &&
+            nativeCents === BigInt(evidence.nativeDiscountCents) &&
+            preservesNativeOrderEditLine(
+              snapshot,
+              quote.baseline,
+              expected.originalLineId,
+              evidence.quantity,
+            ) &&
+            (!evidence.preserveAutomaticDiscount ||
+              preservesAutomaticOrderEditLine(
+                snapshot,
+                quote.baseline,
+                expected.originalLineId,
+                evidence.quantity,
+              )),
+        );
+      }
+      if (
+        BigInt(evidence.netCents) ===
+        BigInt(evidence.retailCents) * BigInt(evidence.quantity)
+      )
+        return true;
+      if (evidence.preserveAutomaticDiscount)
+        return Boolean(
+          expected.originalLineId &&
+            preservesAutomaticOrderEditLine(
+              snapshot,
+              quote.baseline,
+              expected.originalLineId,
+              evidence.quantity,
+            ),
+        );
+      return (
+        descriptions.get(line.id)?.includes(quote.codePricing!.description) ??
+        false
+      );
+    };
     const matches = snapshot.lines.filter(
       (line) =>
         !used.has(line.id) &&
@@ -95,21 +146,7 @@ export function mapOrderEditCodeLines(
         line.originalUnitPriceCents === evidence.retailCents &&
         snapshot.financials?.lines.find((financial) => financial.id === line.id)
           ?.netCents === evidence.netCents &&
-        (BigInt(evidence.netCents) ===
-          BigInt(evidence.retailCents) * BigInt(evidence.quantity) ||
-          (evidence.preserveAutomaticDiscount
-            ? Boolean(
-                expected.originalLineId &&
-                  preservesAutomaticOrderEditLine(
-                    snapshot,
-                    quote.baseline,
-                    expected.originalLineId,
-                    evidence.quantity,
-                  ),
-              )
-            : descriptions
-                .get(line.id)
-                ?.includes(quote.codePricing!.description))),
+        carriesVerifiedDiscount(line),
     );
     if (!matches.length) return null;
     const matched = matches.sort((a, b) => a.id.localeCompare(b.id))[0];

@@ -36,7 +36,10 @@ import { buildOrderEditFinancials } from "../domain/order-edit-financials";
 import { presentOrderEditCodeBreakdown } from "../application/order-edit-code-presentation";
 import { priceOrderEditDiscounts } from "../domain/order-edit-discount-engine";
 import { priceRetainedOrderDiscounts } from "../domain/order-edit-preserved-discounts";
-import { resolveOrderEditLinePlan } from "../domain/order-edit-line-plan";
+import {
+  resolveOrderEditLinePlan,
+  orderEditAdditionSourceKey,
+} from "../domain/order-edit-line-plan";
 import { priceOrderEditPreviewItems } from "../domain/order-edit-preview-pricing";
 import { supportedVariant, stockAvailable } from "../domain/order-edit-variant";
 import { shopifyOrderEditVariantSchema as VARIANT } from "./shopify-order-edit-variant";
@@ -601,6 +604,7 @@ export class ShopifyOrderEditProvider
       context.snapshot,
       plan,
       pricing.lines,
+      pricing.discounts,
     );
     const previewLines = codePricing
       ? pricing.lines.map((line) => ({
@@ -697,11 +701,17 @@ export class ShopifyOrderEditProvider
     snapshot: OrderEditSnapshot,
     plan: OrderEditPlan,
     lines: Parameters<typeof priceOrderEditCodes>[0],
+    discounts: OrderEditDiscount[],
   ): Promise<OrderEditCodePricing | undefined> {
     const newCodes = plan.discountCodes ?? [];
     const retained = snapshot.codePricing?.rules ?? [];
     if (!newCodes.length && !retained.length) return undefined;
-    if (newCodes.length + retained.length > MAX_ORDER_EDIT_CODES)
+    const nativeCount = (snapshot.discountRules ?? []).filter(
+      (rule) =>
+        rule.type === "DiscountCodeApplication" &&
+        rule.targetType === "LINE_ITEM",
+    ).length;
+    if (newCodes.length + retained.length + nativeCount > MAX_ORDER_EDIT_CODES)
       fail(
         "ORDER_EDIT_CODES_LIMIT",
         `An order can have up to ${MAX_ORDER_EDIT_CODES} discount codes.`,
@@ -713,11 +723,19 @@ export class ShopifyOrderEditProvider
     // Reject unsupported usage restrictions before calculating or opening an
     // edit. A manual adjustment cannot consume a native Shopify redemption.
     assertCouponAdjustmentSupported(rules, retained);
+    if (retained.length)
+      await gateway.retainedNativeRewards(snapshot, [...retained, ...rules]);
     const approved = rules.length
       ? await gateway.verifyNativeCalculation(snapshot, lines, rules)
       : undefined;
     const pricing = allocateOrderEditNativeCodePricing(
-      priceOrderEditCodes(lines, [...retained, ...rules], newCodes, approved),
+      priceOrderEditCodes(
+        lines,
+        [...retained, ...rules],
+        newCodes,
+        approved,
+        discounts.filter((discount) => discount.key.startsWith("code:")),
+      ),
       (snapshot.previewProductDiscounts ?? [])
         .filter((line) => line.automaticCents > 0)
         .map((line) => line.lineId),
@@ -734,7 +752,9 @@ export class ShopifyOrderEditProvider
     if (
       !pricing.lines.some(
         (line) =>
-          line.preserveAutomaticDiscount || line.replacesAutomaticDiscount,
+          line.preserveAutomaticDiscount ||
+          line.replacesAutomaticDiscount ||
+          line.nativeDiscountCents,
       )
     )
       return undefined;
@@ -1049,17 +1069,6 @@ export class ShopifyOrderEditProvider
     setPhase: (phase: string) => void,
   ): Promise<OrderEditQuote> {
     setPhase("coupon_pricing");
-    if (
-      (baseline.discountRules ?? []).some(
-        (rule) =>
-          rule.type === "DiscountCodeApplication" &&
-          rule.targetType === "LINE_ITEM",
-      )
-    )
-      fail(
-        "ORDER_EDIT_CODE_EXISTING_NATIVE_UNSUPPORTED",
-        "Adding a code to this order requires our help verifying the existing code.",
-      );
     const credentials = await this.credentials(connectionId);
     const variants = await this.previewVariants(baseline, [
       ...new Set([
@@ -1073,7 +1082,35 @@ export class ShopifyOrderEditProvider
       toOrderEditPreviewPricingInput({ snapshot: baseline, variants }),
       plan,
     );
-    const pricing = (await this.codePricing(baseline, plan, basis.lines))!;
+    const pricing = (await this.codePricing(
+      baseline,
+      plan,
+      basis.lines,
+      basis.discounts,
+    ))!;
+    const stagedPlan = resolveOrderEditLinePlan({
+      originals: baseline.lines
+        .filter((line) => line.quantity > 0)
+        .map(({ id, variantId, quantity }) => ({ id, variantId, quantity })),
+      changes: plan.changes.map((change) => ({
+        ...change,
+        lineItemId: gid("LineItem", change.lineItemId),
+      })),
+      additions: plan.additions,
+      protectedLineIds: baseline.lines
+        .filter(
+          (line) =>
+            baseline.nativeDiscountAllocations?.some(
+              (allocation) =>
+                allocation.lineId === line.id && allocation.amountCents > 0,
+            ) ||
+            baseline.previewProductDiscounts?.some(
+              (discount) =>
+                discount.lineId === line.id && discount.automaticCents > 0,
+            ),
+        )
+        .map((line) => line.id),
+    });
     setPhase("coupon_allocation_verification");
     const protectedTotals = await this.protectedCodeTotals(baseline, pricing);
     setPhase("shopify_begin");
@@ -1085,6 +1122,7 @@ export class ShopifyOrderEditProvider
     );
     setPhase("coupon_item_changes");
     let calculated = readCalculated(begin.calculatedOrder, baseline.orderId);
+    const nativeDiscounts = verifyNativeOrderDiscounts(calculated, baseline);
     const initial = verifyCalculatedFinancials(calculated, baseline);
     if (
       !initial ||
@@ -1217,7 +1255,7 @@ export class ShopifyOrderEditProvider
             allocation.discountApplication.__typename ===
             "CalculatedAutomaticDiscountApplication",
         );
-        if (priced.preserveAutomaticDiscount) {
+        if (priced.preserveAutomaticDiscount || priced.nativeDiscountCents) {
           // Shopify's unit/subtotal fields exclude order-allocated automatic
           // discounts. Compare the reconciled net, while preserving those raw
           // native fields separately for identity and payment recovery.
@@ -1228,7 +1266,7 @@ export class ShopifyOrderEditProvider
           )?.lines.find((line) => line.id === calcId)?.netCents;
           if (
             !native ||
-            !automatic ||
+            (priced.preserveAutomaticDiscount && !automatic) ||
             groups.length !== 1 ||
             net !== group.netCents
           )
@@ -1299,16 +1337,32 @@ export class ShopifyOrderEditProvider
           title: original?.title ?? actual.title,
           variantTitle: original?.variantTitle ?? actual.variantTitle,
           originalLineId: native ? original!.id : null,
+          ...(!native &&
+          stagedPlan.additions.find(
+            (addition) =>
+              orderEditAdditionSourceKey(addition.variantId) ===
+              priced.sourceId,
+          )?.quantityIncreaseOfLineId
+            ? {
+                quantityIncreaseOfLineId: stagedPlan.additions.find(
+                  (addition) =>
+                    orderEditAdditionSourceKey(addition.variantId) ===
+                    priced.sourceId,
+                )!.quantityIncreaseOfLineId,
+              }
+            : {}),
           calculatedLineId: calcId,
           variantId: priced.variantId,
           quantity: group.quantity,
           originalUnitPriceCents: priced.retailCents,
-          discountedUnitPriceCents: priced.preserveAutomaticDiscount
-            ? money(actual.discountedUnitPriceSet)
-            : group.unitCents,
-          totalCents: priced.preserveAutomaticDiscount
-            ? money(actual.editableSubtotalSet)
-            : group.netCents,
+          discountedUnitPriceCents:
+            priced.preserveAutomaticDiscount || priced.nativeDiscountCents
+              ? money(actual.discountedUnitPriceSet)
+              : group.unitCents,
+          totalCents:
+            priced.preserveAutomaticDiscount || priced.nativeDiscountCents
+              ? money(actual.editableSubtotalSet)
+              : group.netCents,
         });
         proofLines.push({
           ...priced,
@@ -1320,6 +1374,7 @@ export class ShopifyOrderEditProvider
       }
     }
     const codePricing = { ...pricing, lines: proofLines };
+    verifyNativeOrderDiscounts(calculated, baseline, nativeDiscounts);
     verifyPreservedMemberAllocations(calculated, originalCalculated, expected);
     // Verify item amounts before asking the current checkout shipping/tax calculator.
     const nativeItems = verifyCalculatedFinancials(calculated, baseline, true);
@@ -1377,6 +1432,7 @@ export class ShopifyOrderEditProvider
       baseline,
       shippingFinancials.grossCents,
     );
+    verifyNativeOrderDiscounts(calculated, baseline, nativeDiscounts);
     const rawFinancials = verifyCalculatedFinancials(
       calculated,
       baseline,
@@ -2715,7 +2771,11 @@ export class ShopifyOrderEditProvider
         originalQuote.codePricing &&
         original &&
         change.quantity > 0 &&
-        !preservedAutomatic
+        !preservedAutomatic &&
+        !baseline.nativeDiscountAllocations?.some(
+          (allocation) =>
+            allocation.lineId === original.id && allocation.amountCents > 0,
+        )
       ) {
         const net = baseline.financials?.lines.find(
           (line) => line.id === original.id,
@@ -3036,12 +3096,14 @@ export class ShopifyOrderEditProvider
   private async readAfterMutation(connectionId: number, orderId: string) {
     try {
       return await this.readOrder(connectionId, orderId);
-    } catch {
-      fail(
+    } catch (error) {
+      const failure = new OrderEditProviderError(
         "COMMIT_READBACK_UNAVAILABLE",
         "The edit may be saved, but its state could not be read back. Reconcile before any retry.",
         "unknown",
       );
+      failure.cause = error;
+      throw failure;
     }
   }
   private now(): Date {

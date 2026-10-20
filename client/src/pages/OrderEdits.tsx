@@ -282,8 +282,14 @@ export function OrderDraft({
   onDiscountCodesChange?: (codes: string[]) => void;
   /** Hydrate an existing review from its persisted plan, never from baseline quantities. */
   initialOperation?: OrderEditOperation | null;
-  renderRewards?: (input: { disabled: boolean; maxDiscountCents: number; appliedCodes: string[];
-    onApply(code: string): Promise<void>; onRemove(code: string): void; onBusy(busy: boolean): void }) => React.ReactNode;
+  renderRewards?: (input: {
+    disabled: boolean;
+    maxDiscountCents: number | null;
+    appliedCodes: string[];
+    onApply(code: string): Promise<void>;
+    onRemove(code: string): void;
+    onBusy(busy: boolean): void;
+  }) => React.ReactNode;
   /** Customer confirmation stays in the editable form; staff retain their existing review. */
   inline?: {
     operation: OrderEditOperation | null;
@@ -969,10 +975,18 @@ export function OrderDraft({
               onApply={applyCode}
               onRemove={removeCode}
             />
-            {renderRewards?.({ disabled: !mutable || reviewBlocked || codeEditing,
-              maxDiscountCents: (verified?.financials?.quoted ?? currentPreview?.financials)?.itemsNetCents ??
-                (changes.length === 0 && additions.length === 0 && discountCodes.length === 0 ? order.financials?.itemsNetCents ?? 0 : 0),
-              appliedCodes: discountCodes, onApply: applyCode, onRemove: removeCode, onBusy: setRewardBusy })}
+            {renderRewards?.({
+              disabled: !mutable || reviewBlocked || codeEditing,
+              maxDiscountCents:
+                (verified?.financials?.quoted ?? currentPreview?.financials)?.itemsNetCents ??
+                (changes.length === 0 && additions.length === 0 && discountCodes.length === 0
+                  ? order.financials?.itemsNetCents ?? null
+                  : null),
+              appliedCodes: discountCodes,
+              onApply: applyCode,
+              onRemove: removeCode,
+              onBusy: setRewardBusy,
+            })}
             {audience === "staff" && <p className="text-xs text-muted-foreground">
               Shipping address changes are not supported in this pilot.
             </p>}
