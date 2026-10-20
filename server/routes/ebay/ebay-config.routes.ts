@@ -5,7 +5,7 @@ import { ebayCategoryMappingPatchSchema } from "../../modules/channels/ebay-busi
 import { ebayPolicyActor, sendEbayPolicyError } from "./ebay-business-policy-http";
 import { readEbayConnectionHealth } from "../../modules/channels/ebay-connection-health";
 import { publicationSelectionBusyIssue } from "../../modules/inventory-planning/publication-selection-work";
-import { syncActiveListings, triggerPricingRuleSync } from "../../modules/channels/ebay-listing-sync";
+import { syncActiveListings } from "../../modules/channels/ebay-listing-sync";
 import express, { type Request, type Response } from "express";
 import { eq, and, sql, asc, isNotNull, inArray, isNull, desc } from "drizzle-orm";
 import { db, pool } from "../../db";

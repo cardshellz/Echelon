@@ -43,6 +43,10 @@ export class EbayPublicationCompletionExecution implements EbayListingSyncExecut
     assertEbayPublicationTargetUnchanged(target, observed);
     await context.bindPublicationTarget(target);
     await this.assertCompatible(source, prepared.inspection, target);
+    if (prepared.draft.preparedIntent) {
+      if (!context.persistPreparedIntent) throw new EbayListingSyncError("EBAY_PUBLICATION_OWNER_REQUIRED", "The prepared listing requires its saved-job evidence owner.");
+      await context.persistPreparedIntent(prepared.draft.preparedIntent);
+    }
 
     // A retained start is a delivery barrier, not proof that eBay accepted it.
     // Inventory can prove rejection or that publication was never sent, even

@@ -18,13 +18,21 @@ export async function resolveChannelPrice(
   variantId: number,
   basePriceCents: number | null | undefined,
 ): Promise<number> {
-  const resolution = await resolveChannelListingPrice(dbArg, {
+  const resolution = await resolveChannelPriceResolution(dbArg, channelId, productId, variantId, basePriceCents);
+  return resolution.priceCents ?? 0;
+}
+
+/** Preserve the existing resolver's source identity for prepared listing evidence. */
+export async function resolveChannelPriceResolution(
+  dbArg: EchelonDb, channelId: number, productId: number, variantId: number,
+  basePriceCents: number | null | undefined,
+) {
+  return resolveChannelListingPrice(dbArg, {
     channelId,
     productId,
     variantId,
     fallbackCatalogPriceCents: basePriceCents,
   });
-  return resolution.priceCents ?? 0;
 }
 // ---------------------------------------------------------------------------
 // Variation Aspect Name Detection

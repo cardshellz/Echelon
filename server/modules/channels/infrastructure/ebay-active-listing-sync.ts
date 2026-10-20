@@ -1,3 +1,4 @@
+import { ebayIntentAccount, prepareEbayChannelIntent } from "../ebay-prepared-intent";
 import { ebayBusinessPolicies } from "../ebay-business-policies";
 import { db } from "../../../db";
 import {
@@ -53,7 +54,7 @@ import {
 } from "@shared/types/ebay-listing-sync";
 import {
   determineVariationAspectName,
-  resolveChannelPrice,
+  resolveChannelPriceResolution,
   delay,
 } from "./ebay-listing-helpers";
 import type { EbayListingMappingSource } from "../ebay-listing-mapping.service";
@@ -409,16 +410,19 @@ async function prepareActiveEbayListingSync(
   });
 
   const variantPrices: Map<number, number> = new Map();
+  const priceResolutions = new Map<number, Awaited<ReturnType<typeof resolveChannelPriceResolution>>>();
   const variantChangeState = new Map<number, { priceChanged: boolean }>();
   for (const variant of variants) {
     if (!sellableVariantIds.has(variant.variant_id)) continue;
-    const newPriceCents = await resolveChannelPrice(
+    const resolution = await resolveChannelPriceResolution(
       db,
       EBAY_CHANNEL_ID,
       productId,
       variant.variant_id,
       variant.price_cents,
     );
+    const newPriceCents = resolution.priceCents ?? 0;
+    priceResolutions.set(variant.variant_id, resolution);
     variantPrices.set(variant.variant_id, newPriceCents);
     variantChangeState.set(variant.variant_id, {
       priceChanged: newPriceCents !== (variant.last_synced_price || 0),
@@ -458,7 +462,14 @@ async function prepareActiveEbayListingSync(
     sourceIdentity,
     providerObservation,
     client: ebayClient,
-    draft: preparedDraft,
+    draft: { ...preparedDraft, preparedIntent: prepareEbayChannelIntent({
+      account: ebayIntentAccount({ channelId: EBAY_CHANNEL_ID, connectionId: identity.connectionId, accountId: identity.accountId,
+        environment: ctx.authService.getEnvironment(), marketplaceId, merchantLocationKey }),
+      draft: preparedDraft, operation: "maintenance", mediaPlan: photoPlan.mediaPlan, prices: priceResolutions,
+      settings: { policyScope: resolvedPolicies.scope, policies: [...resolvedPolicies.byVariantId].sort(([a], [b]) => a-b),
+      policySources: [...resolvedPolicies.provenanceByVariantId ?? []].sort(([a], [b]) => a-b),
+        ebayBrowseCategoryId, storeCategoryNames },
+    }) },
     assertInventoryReady: execution => ensureEbayListingInventoryReady({
       channelId: boundIdentity.channelId, connectionId: boundIdentity.connectionId,
       accountId: boundIdentity.accountId, environment: ctx.authService.getEnvironment(),
@@ -506,7 +517,7 @@ export async function syncActiveListings(
   filter: SyncFilter | null,
   actor = "ebay-listing-sync",
   commandKey?: string,
-  expectedDestination?: { connectionId: number; accountId: string },
+  expectedDestination?: { connectionId: number; accountId: string; environment?: "production" | "sandbox"; marketplaceId?: string },
 ): Promise<EbayProductSyncResult> {
   filter = filterSchema.parse(filter);
   const validatedActor = z.string().trim().min(1).max(200).parse(actor);
@@ -514,8 +525,11 @@ export async function syncActiveListings(
   const ctx = await context();
   if (expectedDestination) {
     const expected = z.object({ connectionId: z.number().int().positive().max(2147483647),
-      accountId: z.string().trim().min(1).max(240) }).strict().parse(expectedDestination);
-    if (ctx.conn.id !== expected.connectionId || ctx.account.externalAccountId !== expected.accountId)
+      accountId: z.string().trim().min(1).max(240), environment: z.enum(["production","sandbox"]).optional(),
+      marketplaceId: z.string().trim().min(1).optional() }).strict().parse(expectedDestination);
+    if (ctx.conn.id !== expected.connectionId || ctx.account.externalAccountId !== expected.accountId
+      || (expected.environment !== undefined && ctx.authService.getEnvironment() !== expected.environment)
+      || (expected.marketplaceId !== undefined && ctx.marketplaceId !== expected.marketplaceId))
       throw new EbayListingSyncError("EBAY_SYNC_IDENTITY_CHANGED", "The eBay connection changed. The earlier recovery cannot update a different account.");
   }
   const selected = await readActiveEbaySyncRows(filter);
@@ -606,43 +620,4 @@ export async function refreshRecoveredEbayListing(input: {
     job.code ?? "EBAY_SYNC_PRODUCT_NOT_ELIGIBLE", job.message ?? "This listing needs its saved selection or catalog issue corrected.");
   if (!job) throw new EbayListingSyncError("EBAY_SYNC_PERSISTENCE_FAILED", "The current listing refresh has not been durably queued.");
   return { jobId: job.id };
-}
-
-export async function triggerPricingRuleSync(
-  scope: string,
-  scopeId: string | null,
-): Promise<void> {
-  console.log(
-    `[eBay Pricing Rule Sync] Triggered: scope=${scope} scopeId=${scopeId}`,
-  );
-
-  let filter: SyncFilter | null = null;
-
-  switch (scope) {
-    case "channel":
-      // Sync ALL active listings
-      filter = null;
-      break;
-    case "category":
-      if (scopeId) {
-        // Sync all listings in this product type
-        filter = { productTypeSlugs: [scopeId] };
-      }
-      break;
-    case "product":
-      if (scopeId) {
-        filter = { productIds: [parseInt(scopeId)] };
-      }
-      break;
-    case "variant":
-      if (scopeId) {
-        filter = { variantIds: [parseInt(scopeId)] };
-      }
-      break;
-  }
-
-  const result = await syncActiveListings(filter, "ebay-pricing-rule");
-  console.log(
-    `[eBay Pricing Rule Sync] Saved: pending=${result.pending} errors=${result.errors}`,
-  );
 }

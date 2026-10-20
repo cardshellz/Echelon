@@ -11,7 +11,7 @@ import {
 import { resolveChannelListingPrice } from "./channel-pricing-resolver";
 import { persistAuditEvent } from "../../infrastructure/auditLogger";
 import type { CatalogPublicImageUrl } from "../catalog/catalog-public-image";
-import { readCatalogPublicationImages, resolveCatalogPublicationImages } from "../catalog/catalog-publication-images.reader";
+import { PgCatalogVariantPublicationPhotoReader, readCatalogPublicationImageIds } from "../catalog/catalog-publication-images.reader";
 import {
   ListingPublicationError,
   listingHash,
@@ -83,26 +83,28 @@ export class ChannelListingCatalogRepository {
           ],
         )
       ).rows;
-      const images = await readCatalogPublicationImages(client, [...new Set<number>(rows.map(row => row.product_id))]);
-      const overrides = images.length ? (await client.query<{
+      const assetIds = await readCatalogPublicationImageIds(client, [...new Set<number>(rows.map(row => row.product_id))]);
+      const overrides = assetIds.length ? (await client.query<{
         product_asset_id: number; url_override: string | null; position_override: number | null; is_included: number;
       }>(`SELECT product_asset_id, url_override, position_override, is_included
         FROM channels.channel_asset_overrides WHERE channel_id=$1 AND product_asset_id=ANY($2::int[])`,
-      [channelId, images.map(image => image.id)])).rows : [];
-      const overridesByAsset = new Map(overrides.map(override => [override.product_asset_id, override]));
+      [channelId, assetIds])).rows : [];
+      if (overrides.some(override => override.is_included !== 0 && override.is_included !== 1)) {
+        throw new ListingPublicationError("LISTING_IMAGE_OVERRIDE_INVALID", "Correct the image inclusion settings before publishing.", 409);
+      }
+      const mediaPlans = await new PgCatalogVariantPublicationPhotoReader(client, this.publicImageUrl).listPublicationPlansByVariant({
+        productVariantIds: rows.map(row => row.variant_id), maxPhotosPerVariant: 20, maxGroupPhotos: 20,
+        overrides: overrides.map(override => ({ assetId: override.product_asset_id, included: override.is_included === 1,
+          urlOverride: override.url_override, positionOverride: override.position_override })),
+      });
       const items: ListingCatalogItem[] = [];
       const database = drizzle(client, { schema });
       for (const row of rows) {
-        const publicationImages = resolveCatalogPublicationImages(
-          images
-            .filter(image => image.productId === row.product_id
-              && (image.productVariantId === null || image.productVariantId === row.variant_id)
-              && (overridesByAsset.get(image.id)?.is_included ?? 1) === 1)
-            .sort((a, b) => (overridesByAsset.get(a.id)?.position_override ?? a.position)
-              - (overridesByAsset.get(b.id)?.position_override ?? b.position) || a.id - b.id)
-            .map(image => ({ ...image, url: overridesByAsset.get(image.id)?.url_override ?? image.url })),
-          this.publicImageUrl,
-        );
+        const mediaPlan = mediaPlans.get(row.variant_id)!;
+        const publicationImages = { images: mediaPlan.group.selected.map(photo => photo.url),
+          issues: mediaPlan.group.omissions.filter(omission => omission.blocking).map(omission => ({
+            assetId: omission.assetId, code: omission.code!, message: omission.message!,
+          })) };
         if (publicationImages.issues.length) {
           console.warn(JSON.stringify({ event: "channel_listing.catalog_image_unavailable", channelId,
             variantId: row.variant_id, images: publicationImages.issues.map(({ assetId, code }) => ({ assetId, code })) }));
@@ -138,6 +140,7 @@ export class ChannelListingCatalogRepository {
           description: row.description,
           brand: row.brand,
           images: publicationImages.images,
+          mediaPlan,
           // Omit empty issues to preserve hashes of existing healthy catalog snapshots.
           ...(publicationImages.issues.length ? { imageIssues: publicationImages.issues.map(issue => ({
             code: issue.code, message: issue.message, field: "images",
@@ -156,6 +159,7 @@ export class ChannelListingCatalogRepository {
           priceCents: resolved.priceCents,
           basePriceCents: resolved.basePriceCents,
           priceSource: resolved.source,
+          priceProvenance: resolved.provenance,
           appliedRule: resolved.appliedRule
             ? listingPriceRuleSchema.parse({
                 type: resolved.appliedRule.ruleType,

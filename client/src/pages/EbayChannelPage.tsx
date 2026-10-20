@@ -7,6 +7,8 @@
  * 3. Listing Feed (products ready to list)
  */
 
+import { ListingIntentChanges } from "@/features/channel-listing-publication/ListingIntentChanges";
+import { useAuth } from "@/lib/auth";
 import { ebayProductSyncResultSchema, ebayListingSyncJobSchema } from "@shared/types/ebay-listing-sync";
 import { EbayListingJobStatusDialog } from "@/components/ebay/EbayListingJobStatusDialog";
 import { EbayListingJobProgress } from "@/components/ebay/EbayListingJobProgress";
@@ -204,6 +206,7 @@ interface FeedItem {
   isExcluded: boolean;
   syncError: string | null;
   inventoryIssue?: EbayListingIssue | null;
+  priceIssue?: EbayListingIssue | null;
   externalListingId: string | null;
   externalListingIdentityConflict: boolean;
   variantCount: number;
@@ -217,7 +220,7 @@ interface FeedItem {
 }
 
 function listingNeedsAttention(item: FeedItem, job: z.infer<typeof ebayListingSyncJobSchema> | undefined, hasLocalIssue: boolean): boolean {
-  if (item.inventoryIssue || hasLocalIssue || job?.inventoryReconciliation?.state === "needs_attention"
+  if (item.priceIssue || item.inventoryIssue || hasLocalIssue || job?.inventoryReconciliation?.state === "needs_attention"
     || (job && ["needs_attention", "awaiting_evidence"].includes(job.state))) return true;
   if (job && ["queued", "running", "recovering"].includes(job.state)) return false;
   return item.status === "error" || item.status === "publication_incomplete";
@@ -236,7 +239,7 @@ interface PricingRule {
 }
 
 interface EffectivePrices {
-  [variantId: number]: { basePriceCents: number; effectivePriceCents: number };
+  [variantId: number]: { basePriceCents: number | null; effectivePriceCents: number | null; missingPrice?: boolean; resolutionIssue?: { code: string; message: string } };
 }
 
 // ============================================================================
@@ -312,6 +315,7 @@ function PolicyOverrideRow({ label, fulfillmentPolicyId, returnPolicyId, payment
 // ============================================================================
 
 export default function EbayChannelPage() {
+  const { hasPermission } = useAuth();
   const { toast } = useToast();
   const queryClient = useQueryClient();
 
@@ -427,7 +431,7 @@ export default function EbayChannelPage() {
   });
 
   // ---- Effective prices (bulk) ----
-  const { data: effectivePricesData } = useQuery<{ prices: EffectivePrices }>({
+  const { data: effectivePricesData, isError: effectivePricesUnavailable } = useQuery<{ prices: EffectivePrices }>({
     queryKey: ["/api/ebay/effective-prices"],
     enabled: !!config?.connected,
   });
@@ -1194,6 +1198,19 @@ export default function EbayChannelPage() {
     <div className="p-2 sm:p-4 md:p-6 space-y-4 sm:space-y-6 max-w-6xl mx-auto" onClickCapture={handlePolicyAnchorClick}>
       {/* Page Header */}
       <ChannelWorkspaceHeader name="eBay" description="Store setup, category mapping, and listing feed" />
+      {config?.channel?.id && <ListingIntentChanges scope={{ kind: "channel", channelId: config.channel.id }}
+        canEdit={hasPermission("channels", "edit")}
+        onReview={row => {
+          const product = feedData?.feed.find(item => item.id === row.product_id);
+          if (product) setListingChangesTarget(product);
+          else window.location.assign(`/products/${row.product_id}`);
+        }}
+        onOpenOperation={row => {
+          if (row.receipt?.owner === "ebay_listing_sync") setPublicationStatusTarget({
+            jobId: row.receipt.operationId, productId: row.product_id,
+            name: feedData?.feed.find(item => item.id === row.product_id)?.name ?? `Product ${row.product_id}`,
+          });
+        }} />}
 
       {/* ================================================================== */}
       {/* SECTION 1: Store Setup                                             */}
@@ -1917,7 +1934,7 @@ export default function EbayChannelPage() {
                       const withdrawalJob = syncJob?.operation === "withdraw" ? syncJob : null;
                       const withdrawalUnfinished = withdrawalJob != null && withdrawalJob.state !== "completed";
                       const savedSyncIssue = syncJob ? resolveEbayListingJobIssue(syncJob) : null;
-                      const syncIssue = localSyncIssues.get(item.id)?.issue ?? (syncJob && ["awaiting_evidence", "needs_attention"].includes(syncJob.state)
+                      const syncIssue = item.priceIssue ?? localSyncIssues.get(item.id)?.issue ?? (syncJob && ["awaiting_evidence", "needs_attention"].includes(syncJob.state)
                         ? savedSyncIssue
                         : item.status === "error" && item.syncError && !syncPending
                           ? resolveEbayListingIssue({ message: item.syncError, productId: item.id }) : null);
@@ -2392,17 +2409,20 @@ export default function EbayChannelPage() {
                             <TableCell className="hidden sm:table-cell py-1.5">
                               {(() => {
                                 const ep = effectivePricesData?.prices?.[variant.id];
+                                  if (ep?.resolutionIssue) return <a className="text-xs text-destructive underline" href={ep.resolutionIssue.code.startsWith("RETAIL_") ? "/catalog/variants" : "/channels/ebay"} title={ep.resolutionIssue.message}>Price needs review</a>;
+                                  if (effectivePricesUnavailable || !ep || ep.missingPrice || ep.basePriceCents === null || ep.effectivePriceCents === null)
+                                    return <span className="text-xs text-muted-foreground">Price unavailable</span>;
                                 if (ep && ep.effectivePriceCents !== ep.basePriceCents) {
-                                  const pctDiff = ((ep.effectivePriceCents - ep.basePriceCents) / ep.basePriceCents * 100).toFixed(0);
+                                  const pctDiff = ep.basePriceCents > 0 ? ((ep.effectivePriceCents - ep.basePriceCents) / ep.basePriceCents * 100).toFixed(0) : null;
                                   return (
                                     <span className="text-xs">
                                       <span className="text-muted-foreground line-through mr-1">{formatPrice(ep.basePriceCents)}</span>
                                       <span className="font-medium text-blue-600">{formatPrice(ep.effectivePriceCents)}</span>
-                                      <span className="text-muted-foreground ml-1">(+{pctDiff}%)</span>
+                                      {pctDiff !== null && <span className="text-muted-foreground ml-1">(+{pctDiff}%)</span>}
                                     </span>
                                   );
                                 }
-                                return <span className="text-xs">{formatPrice(variant.priceCents)}</span>;
+                                return <span className="text-xs">{formatPrice(ep.effectivePriceCents)}</span>;
                               })()}
                             </TableCell>
                             {/* Qty — desktop */}
@@ -2427,6 +2447,9 @@ export default function EbayChannelPage() {
                               <div className="flex items-center gap-3 text-xs text-muted-foreground pl-1">
                                 {(() => {
                                   const ep = effectivePricesData?.prices?.[variant.id];
+                                  if (ep?.resolutionIssue) return <a className="text-xs text-destructive underline" href={ep.resolutionIssue.code.startsWith("RETAIL_") ? "/catalog/variants" : "/channels/ebay"} title={ep.resolutionIssue.message}>Price needs review</a>;
+                                  if (effectivePricesUnavailable || !ep || ep.missingPrice || ep.basePriceCents === null || ep.effectivePriceCents === null)
+                                    return <span className="text-xs text-muted-foreground">Price unavailable</span>;
                                   if (ep && ep.effectivePriceCents !== ep.basePriceCents) {
                                     return (
                                       <>
@@ -2435,7 +2458,7 @@ export default function EbayChannelPage() {
                                       </>
                                     );
                                   }
-                                  return <span>{formatPrice(variant.priceCents)}</span>;
+                                  return <span>{formatPrice(ep.effectivePriceCents)}</span>;
                                 })()}
                                 <span>·</span>
                                 <span>{variant.inventoryQuantity === null ? "Unavailable" : `${variant.inventoryQuantity} qty`}</span>

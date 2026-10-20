@@ -1,4 +1,6 @@
 import { z } from "zod";
+import { catalogPublicationMediaPlanSchema } from "./catalog-publication-media";
+import { channelPriceProvenanceSchema } from "./channel-listing-price";
 
 export const publicationIdSchema = z
   .number()
@@ -165,10 +167,12 @@ export const listingCatalogItemSchema = z.object({
   images: z.array(z.string()),
   // Optional for persisted reviews and older clients. Issues block inherited-image publication, not catalog reads.
   imageIssues: z.array(listingIssueSchema).optional(),
+  mediaPlan: catalogPublicationMediaPlanSchema.optional(),
   identifier: listingDraftItemSchema.shape.identifier,
   priceCents: z.number().int().nonnegative().nullable(),
   basePriceCents: z.number().int().nonnegative().nullable(),
   priceSource: z.string().nullable(),
+  priceProvenance: channelPriceProvenanceSchema.nullable().optional(),
   appliedRule: listingPriceRuleSchema.nullable(),
   appliedRuleScope: z
     .enum(["channel", "category", "product", "variant"])
@@ -284,6 +288,7 @@ export const listingReviewItemSchema = z.object({
   productType: z.string(),
   priceCents: z.number().int().nonnegative().nullable(),
   priceSource: z.string().nullable(),
+  priceProvenance: channelPriceProvenanceSchema.nullable().optional(),
   issues: z.array(listingIssueSchema),
   schemaVersion: z.string().nullable(),
   recreating: z.boolean().optional(),
@@ -330,6 +335,9 @@ export const listingOperationItemSchema = z.object({
   error: z.string().nullable(),
   stockState: z.enum(["waiting_for_item", "setup_required", "queued", "blocked", "ready"]),
   stockErrorCode: z.string().min(1).max(200).optional(),
+  // Listing identity/price success is distinct from provider media evidence.
+  mediaVerification: z.object({ state: z.literal("unavailable"), message: z.string().min(1).max(500),
+    intentHash: z.string().regex(/^[a-f0-9]{64}$/) }).strict().optional(),
   canRetry: z.boolean().default(false),
   title: z.string().max(1000).optional(),
   missingOnProvider: z.boolean().optional(),

@@ -13,5 +13,7 @@ export const channelPriceProvenanceSchema = z.discriminatedUnion("kind", [
     selection: z.enum(["catalog_retail_link", "unique_retail_sku"]),
   }).strict(),
   z.object({ kind: z.literal("catalog_variant"), variantId }).strict(),
+  // An explicit price approved by the existing Marketplace draft owner.
+  z.object({ kind: z.literal("reviewed_draft"), variantId }).strict(),
 ]);
 export type ChannelPriceProvenance = z.infer<typeof channelPriceProvenanceSchema>;

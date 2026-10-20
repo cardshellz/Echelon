@@ -63,6 +63,14 @@ export function resolveEbayListingIssue(input: EbayListingIssueInput): EbayListi
       action: { kind, label, ...(href ? { href } : {}) }, ...(reference ? { reference } : {}),
       ...(input.productId ? { details: [{ label: "Product ID", value: String(input.productId) }] } : {}) });
 
+  if (code === "RETAIL_PRICE_SOURCE_REQUIRED" || code === "RETAIL_PRICE_IDENTITY_MISSING")
+    return issue("Choose the retail price source", "More than one retail variant matches this SKU, so Echelon cannot safely choose its price.",
+      "Open Catalog variants, find this SKU and use Link Shopify variant to select the exact retail variant. Then retry Sync.",
+      false, "edit_listing", "Open Catalog variants", "/catalog/variants");
+  if (["CHANNEL_PRICE_AMBIGUOUS", "CHANNEL_PRICE_INVALID", "CHANNEL_PRICING_RULE_AMBIGUOUS", "CHANNEL_PRICING_RULE_INVALID", "RETAIL_PRICE_INVALID", "CATALOG_PRICE_INVALID"].includes(code))
+    return issue("Correct the listing price source", "The selected channel, retail or Catalog price is invalid or has conflicting rules.",
+      "Correct the price source named in this message or remove the conflicting channel pricing rule. Then retry Sync; no price was guessed.",
+      false, "edit_listing", "Review product pricing", productPath);
   if (code === "EBAY_LISTING_FEED_UNAVAILABLE")
     return issue("Listings could not be loaded", "Echelon could not read the listing feed. Listing status and quantities are unavailable.",
       "Use Reload listings to try the read again. If it still fails, copy the diagnostic reference for an administrator to investigate the failed read.",

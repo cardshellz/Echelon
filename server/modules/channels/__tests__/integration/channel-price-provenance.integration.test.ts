@@ -92,6 +92,11 @@ const fixture = `
     await expect(resolvePrice()).rejects.toMatchObject({ code: "CHANNEL_PRICING_RULE_INVALID" });
   });
 
+  it.each(["percentage", "fixed", "override"])("classifies an invalid saved %s rule as an actionable source error", async ruleType => {
+    await database.pool.query("INSERT INTO channels.channel_pricing_rules(channel_id,scope,rule_type,value) VALUES(17,'channel',$1,-1)", [ruleType]);
+    await expect(resolvePrice()).rejects.toMatchObject({ code: "CHANNEL_PRICING_RULE_INVALID", status: 409 });
+  });
+
   it("keeps one source snapshot during concurrent price changes and sees the new source on the next review", async () => {
     await database.pool.query("INSERT INTO public.shopify_variants VALUES('retail-1','PACK',5.49)");
     const client = await database.pool.connect();

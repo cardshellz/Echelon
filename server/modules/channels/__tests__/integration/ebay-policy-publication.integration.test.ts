@@ -30,7 +30,7 @@ vi.mock("../../infrastructure/ebay-api-runtime", () => ({ EBAY_CHANNEL_ID: 67,
   ebayApiRequestWithRateNotify: (method: string, path: string, _token: string, body: unknown) => runtime.provider!.request({ method, path, body }),
 }));
 vi.mock("../../infrastructure/ebay-listing-helpers", async importOriginal => ({
-  ...await importOriginal<typeof import("../../infrastructure/ebay-listing-helpers")>(), resolveChannelPrice: async () => 1149,
+  ...await importOriginal<typeof import("../../infrastructure/ebay-listing-helpers")>(), resolveChannelPriceResolution: async (_db: unknown, _channelId: number, _productId: number, variantId: number) => ({ priceCents: 1149, basePriceCents: 1149, source: "catalog_variant", provenance: { kind: "catalog_variant", variantId }, appliedRule: null }),
 }));
 vi.mock("../../ebay-listing-sync", () => ({ readExistingEbayListingIdentityForProduct: vi.fn(() => {
   throw new Error("Unpublished policy test must use the publication owner");

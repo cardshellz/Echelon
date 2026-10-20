@@ -277,7 +277,7 @@ export function applyPricingRule(basePriceCents: number, ruleType: string, value
     case "percentage": {
       const basisPoints = parsePercentageToBasisPoints(value);
       if (basisPoints === null) {
-        throw new Error(`Invalid channel pricing percentage value: ${value}`);
+        throw new ChannelPricingResolutionError("CHANNEL_PRICING_RULE_INVALID", "The saved percentage pricing rule is invalid. Correct it before publishing.", { ruleType });
       }
       // Integer half-up rounding preserves cents even when the intermediate
       // product exceeds JavaScript's exact Number range.
@@ -287,14 +287,14 @@ export function applyPricingRule(basePriceCents: number, ruleType: string, value
     case "fixed": {
       const fixedDeltaCents = parseDollarPriceToCents(value);
       if (fixedDeltaCents === null) {
-        throw new Error(`Invalid channel pricing fixed value: ${value}`);
+        throw new ChannelPricingResolutionError("CHANNEL_PRICING_RULE_INVALID", "The saved fixed pricing rule is invalid. Correct it before publishing.", { ruleType });
       }
       return checkedCents(BigInt(basePriceCents) + BigInt(fixedDeltaCents));
     }
     case "override": {
       const overrideCents = parseDollarPriceToCents(value);
       if (overrideCents === null) {
-        throw new Error(`Invalid channel pricing override value: ${value}`);
+        throw new ChannelPricingResolutionError("CHANNEL_PRICING_RULE_INVALID", "The saved override pricing rule is invalid. Correct it before publishing.", { ruleType });
       }
       return overrideCents;
     }
@@ -304,7 +304,7 @@ export function applyPricingRule(basePriceCents: number, ruleType: string, value
 }
 
 function checkedCents(value: bigint): number {
-  if (value < BigInt(0) || value > BigInt(Number.MAX_SAFE_INTEGER)) throw new Error("Channel selling price exceeds safe integer cents");
+  if (value < BigInt(0) || value > BigInt(Number.MAX_SAFE_INTEGER)) throw new ChannelPricingResolutionError("CHANNEL_PRICING_RULE_INVALID", "Channel selling price exceeds safe integer cents. Correct the pricing rule before publishing.", {});
   return Number(value);
 }
 

@@ -1,3 +1,7 @@
+import { channelPreparedIntentSchema, type ChannelPreparedIntent } from "@shared/types/channel-prepared-intent";
+import { assertPreparedChannelIntent } from "../../marketplace-listings/prepared-channel-intent";
+import { ebayIntentAccount, EBAY_PREPARED_INTENT_CAPABILITY } from "../ebay-prepared-intent";
+import { pinCatalogPublicationMediaVersions } from "../../catalog/catalog-publication-media-versions";
 import type { Pool, PoolClient } from "pg";
 import { z } from "zod";
 import { canonicalJson } from "@shared/utils/canonical-json";
@@ -492,6 +496,48 @@ export class PostgresEbayListingSyncRepository implements EbayListingSyncStore {
         ...(sourceIdentity ? { sourceIdentity: currentSource } : {}),
         ...(observation ? { observation: { ...observation, observedAt: observation.observedAt.toISOString() } } : {}) }, now);
       await client.query("UPDATE channels.ebay_listing_sync_jobs SET provider_identity=$3::jsonb,provider_identity_hash=$4 WHERE id=$1 AND owner_token=$2", [job.id,job.ownerToken,canonicalJson(identity),hash]);
+    });
+  }
+  /** Persist the exact preparation and retain uploaded bytes in the existing
+   * claimed-job transaction. A later source correction may produce a new hash;
+   * earlier preparations remain immutable evidence, never overwritten. */
+  async persistPreparedIntent(job: StoredEbayListingSyncJob, value: ChannelPreparedIntent, now: Date): Promise<void> {
+    const intent = channelPreparedIntentSchema.parse(value);
+    const client = this.client(job);
+    await this.transaction(client, async () => {
+      await this.assertOwner(client, job);
+      const row = (await client.query("SELECT provider_identity,publication_target FROM channels.ebay_listing_sync_jobs WHERE id=$1", [job.id])).rows[0];
+      const identity = ebayListingSyncIdentitySchema.parse(job.operation === "publish" ? row.publication_target : row.provider_identity);
+      if (job.operation === "withdraw") throw new EbayListingSyncError("EBAY_SYNC_OPERATION_INVALID", "Withdrawal does not prepare listing content.");
+      const connections = await client.query<{ id: number; metadata: { marketplaceId?: string; merchantLocationKey?: string } }>(
+        "SELECT id,metadata FROM channels.channel_connections WHERE channel_id=$1 ORDER BY id FOR SHARE", [identity.channelId]);
+      const tokens = await client.query<{ external_account_id: string; external_account_identity_scheme: string; external_account_verified_at: Date | null }>(
+        "SELECT external_account_id,external_account_identity_scheme,external_account_verified_at FROM ebay.ebay_oauth_tokens WHERE channel_id=$1 AND environment=$2 FOR SHARE",
+        [identity.channelId, intent.input.account.environment]);
+      const connection = connections.rows[0], token = tokens.rows[0];
+      if (connections.rows.length !== 1 || connection.id !== identity.connectionId || tokens.rows.length !== 1
+        || token.external_account_id !== identity.accountId || token.external_account_identity_scheme !== "provider_user_id" || !token.external_account_verified_at)
+        throw new EbayListingSyncError("EBAY_SYNC_IDENTITY_CHANGED", "The prepared listing connection or verified provider account changed.");
+      try {
+        assertPreparedChannelIntent(intent, {
+          account: ebayIntentAccount({ channelId: identity.channelId, connectionId: connection.id, accountId: token.external_account_id,
+            environment: intent.input.account.environment, marketplaceId: connection.metadata?.marketplaceId || "EBAY_US",
+            merchantLocationKey: connection.metadata?.merchantLocationKey || "card-shellz-hq" }),
+          capabilityRevision: EBAY_PREPARED_INTENT_CAPABILITY, contentHash: intent.input.contentHash,
+          members: identity.variants.filter(member => member.contentSyncEnabled !== false && !member.catalogArchived)
+            .map(member => ({ productId: identity.productId, variantId: member.variantId, sku: member.sku })),
+        });
+      } catch (cause) {
+        throw new EbayListingSyncError("EBAY_SYNC_DRAFT_SCOPE_INVALID", "The prepared listing does not match this saved request's exact account and member scope.", { cause });
+      }
+      const prior = await client.query(`SELECT id FROM channels.ebay_listing_sync_events WHERE job_id=$1 AND revision=$2
+        AND event='stage_completed' AND evidence->>'key'='prepared_intent' AND evidence->>'preparedIntentHash'=$3 LIMIT 1`,
+        [job.id, job.claimedRevision, intent.intentHash]);
+      if (prior.rowCount) return;
+      if (intent.input.mediaPlan) await pinCatalogPublicationMediaVersions(client, {
+        owner: "channels", referenceKey: `${job.id}:${job.claimedRevision}:${intent.intentHash}`, kind: "pending", plan: intent.input.mediaPlan, now,
+      });
+      await this.event(client, job, "stage_completed", { key: "prepared_intent", preparedIntentHash: intent.intentHash, intent }, now);
     });
   }
   async bindPublicationTarget(job: StoredEbayListingSyncJob, input: EbayListingSyncIdentity, now: Date): Promise<void> {

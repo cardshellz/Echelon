@@ -1,3 +1,4 @@
+import { pinCatalogPublicationMediaVersions } from "../../catalog/catalog-publication-media-versions";
 import type { Pool, PoolClient, QueryResult, QueryResultRow } from "pg";
 import {
   listingDraftSchema,
@@ -257,6 +258,16 @@ export class PostgresListingPublicationRepository
           "LISTING_REVIEW_USED",
           "This review already has a publication operation",
         );
+      // Retain exactly the reviewed uploaded bytes in the same acceptance
+      // transaction. A failed claim or stale review rolls back both the command
+      // and its media references; replay above reuses the accepted snapshot.
+      for (const item of snapshot.prepared) {
+        const plan = item.preparedIntent?.input.mediaPlan;
+        if (plan) await pinCatalogPublicationMediaVersions(client, {
+          owner: "marketplace-listings", referenceKey: `publication:${input.id}:${item.variantId}`,
+          kind: "pending", plan, now,
+        });
+      }
       const row = (
         await client.query<OperationRow>(
           `INSERT INTO marketplace.channel_listing_operations(id,channel_id,account_key,command_key,request_hash,review_id,state,snapshot,progress,next_attempt_at,created_by,created_at,updated_at)
