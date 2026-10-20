@@ -1901,16 +1901,6 @@ export interface DropshipVendorSelectionRuleInput {
   metadata?: Record<string, unknown>;
 }
 
-export interface DropshipSelectionRulesResponse {
-  rules: DropshipVendorSelectionRule[];
-}
-
-export interface DropshipSelectionRulesReplaceResponse {
-  revisionId: number;
-  idempotentReplay: boolean;
-  rules: DropshipVendorSelectionRule[];
-}
-
 export type DropshipVendorSelectionScopeTarget =
   | { scopeType: "catalog" }
   | { scopeType: "product_line"; productLineId: number }
@@ -4774,35 +4764,6 @@ function parseNullableDollarInputToCents(
   return normalized ? parseDollarInputToCents(normalized, field) : null;
 }
 
-export function buildVariantSelectionReplacement(input: {
-  existingRules: readonly DropshipVendorSelectionRule[];
-  rows: readonly DropshipCatalogRow[];
-  action: DropshipVendorSelectionAction;
-}): DropshipVendorSelectionRuleInput[] {
-  const variantIds = uniquePositiveVariantIds(input.rows);
-  const activeRules = input.existingRules
-    .filter((rule) => rule.isActive !== false)
-    .map(toReplaceableSelectionRule)
-    .filter((rule) => !isTargetedVariantRule(rule, variantIds));
-
-  const actionRules = Array.from(variantIds).map((productVariantId) => ({
-    scopeType: "variant" as const,
-    action: input.action,
-    productLineId: null,
-    productId: null,
-    productVariantId,
-    category: null,
-    autoConnectNewSkus: input.action === "include",
-    autoListNewSkus: false,
-    priority: input.action === "include" ? 100 : 200,
-    metadata: {
-      source: "portal_catalog",
-    },
-  }));
-
-  return [...activeRules, ...actionRules];
-}
-
 export function buildScopedSelectionReplacement(input: {
   existingRules: readonly DropshipVendorSelectionRule[];
   target: DropshipVendorSelectionScopeTarget;
@@ -4921,17 +4882,6 @@ function isSameSelectionTarget(
     (left.productVariantId ?? null) === (right.productVariantId ?? null) &&
     (left.category?.trim().toLowerCase() ?? null) ===
       (right.category?.trim().toLowerCase() ?? null)
-  );
-}
-
-function isTargetedVariantRule(
-  rule: DropshipVendorSelectionRuleInput,
-  variantIds: ReadonlySet<number>,
-): boolean {
-  return (
-    rule.scopeType === "variant" &&
-    typeof rule.productVariantId === "number" &&
-    variantIds.has(rule.productVariantId)
   );
 }
 

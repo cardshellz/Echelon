@@ -22,12 +22,33 @@ export interface UnsavedDraft {
    * did not change is kept as it is, with the first `discard` it was given.
    */
   discard?: () => void;
+  /**
+   * The editor's save is running (catalog step 1 stage 1, review MC6). Leaving can't stop it, so "Discard and leave"
+   * would discard changes the server may then save: the question asks the vendor to wait instead.
+   */
+  saving?: boolean;
 }
 
 /** What an editor adds to its entry when it counts its changes. */
 export interface UnsavedDraftExtra {
   changes: number;
   discard: () => void;
+  saving?: boolean;
+}
+
+/** The leave question while an asked draft's save is running (review MC6). */
+export const LEAVE_WHILE_SAVING_WORDS = Object.freeze({
+  // Interim (step 1 PROPOSAL).
+  title: "Your changes are still saving",
+  // Interim (step 1 PROPOSAL).
+  text: "Wait for the save to finish, then leave. Leaving now can't stop it.",
+  // Interim (step 1 PROPOSAL).
+  stay: "OK",
+});
+
+/** True when any of these drafts is being saved right now. */
+export function anyDraftSaving(drafts: readonly UnsavedDraft[]): boolean {
+  return drafts.some((draft) => draft.saving === true);
 }
 
 /**
@@ -53,6 +74,7 @@ export function updateUnsavedDrafts(
 function sameEntry(current: UnsavedDraft, next: UnsavedDraft): boolean {
   return current.label === next.label
     && current.changes === next.changes
+    && (current.saving === true) === (next.saving === true)
     && (current.discard === undefined) === (next.discard === undefined);
 }
 

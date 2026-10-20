@@ -279,6 +279,10 @@ describe("fast CI preserves coverage and required checks", () => {
       "client/src/lib/__tests__/dropship-pricing-rules.test.ts",
       "client/src/pages/dropship/__tests__/DropshipListingPreview.test.ts",
       "client/src/lib/__tests__/dropship-catalog-steps.test.ts",
+      "client/src/lib/__tests__/dropship-catalog-choose.test.ts",
+      "client/src/lib/__tests__/dropship-catalog-choose-requests.test.ts",
+      "client/src/lib/__tests__/dropship-catalog-choose-words.test.ts",
+      "client/src/pages/dropship/__tests__/DropshipCatalogChoose.test.ts",
       "client/src/lib/__tests__/dropship-listing-settings.test.ts",
       "client/src/pages/dropship/__tests__/DropshipCatalogFrame.test.ts",
       "client/src/lib/__tests__/dropship-ebay-category-rules.test.ts",
@@ -351,11 +355,14 @@ describe("fast CI preserves coverage and required checks", () => {
 
   // test:unit is `vitest run unit`, which matches none of these paths, so they
   // run in CI only because this step names them.
-  it("runs every Listing settings client test in the dropship listing UI step", () => {
+  it("runs every Listing settings and Catalog client test in the dropship listing UI step", () => {
     const registered = new Set(vitestStepFiles(job(workflow, "contracts"), "Dropship listing policy UI contracts"));
     const onDisk = [
       ...testFilesIn("client/src/lib/__tests__/", /^dropship-listing-settings(?:-[a-z]+)*\.test\.ts$/),
       ...testFilesIn("client/src/pages/dropship/__tests__/", /^ListingSettings[A-Za-z]*\.test\.ts$/),
+      // Catalog step 1 stage 1 (review CT9): the Catalog families, so a new step-1 test file can't run nowhere.
+      ...testFilesIn("client/src/lib/__tests__/", /^dropship-catalog(?:-[a-z]+)*\.test\.ts$/),
+      ...testFilesIn("client/src/pages/dropship/__tests__/", /^DropshipCatalog[A-Za-z]*\.test\.ts$/),
     ];
     expect(onDisk.length).toBeGreaterThan(0);
     for (const file of onDisk) expect(registered.has(file), "Not run in CI: " + file).toBe(true);
