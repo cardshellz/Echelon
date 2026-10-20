@@ -1,3 +1,4 @@
+import { createListingIntentChangesMock, handleListingIntentChangesRequest } from "./listing-intent-changes.fixture";
 import { expect, type Page } from "@playwright/test";
 import { resolve } from "node:path";
 import type { EbayListingIssue } from "../../../shared/types/ebay-listing-issue";
@@ -11,8 +12,9 @@ const success = {
   errors: 0,
   details: [{ success: true }, { success: true }],
 };
-export async function setupEbayChannelPage(page: Page) {
+export async function setupEbayChannelPage(page: Page, options: { readOnly?: boolean } = {}) {
   const state = {
+    intentChanges: createListingIntentChangesMock(67, !options.readOnly),
     response: {
       ...success,
       synced: 0,
@@ -44,12 +46,13 @@ export async function setupEbayChannelPage(page: Page) {
   await page.route("**/api/**", async (route) => {
     const req = route.request(),
       path = new URL(req.url()).pathname;
+    if (await handleListingIntentChangesRequest(route, state.intentChanges)) return;
     if (path === "/api/auth/me")
       return route.fulfill({
         json: {
           user: { id: "operator", role: "lead", username: "operator" },
           roles: ["lead"],
-          permissions: ["channels:view", "channels:edit"],
+          permissions: options.readOnly ? ["channels:view"] : ["channels:view", "channels:edit"],
         },
       });
     if (path === "/api/ebay/channel-config")

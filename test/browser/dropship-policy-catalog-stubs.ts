@@ -2,6 +2,7 @@ import type { Page, Route, TestInfo } from "@playwright/test";
 import { createHash } from "node:crypto";
 import { join, resolve } from "node:path";
 import { z } from "zod";
+import { listingIntentChangePage } from "./fixtures/listing-intent-changes.fixture";
 import {
   ebayCategoryRulesStateSchema,
   saveEbayCategoryRulesInputSchema,
@@ -2579,6 +2580,10 @@ async function answerApi(state: StubState, route: Route) {
   if (path === "/api/dropship/catalog/selection-rules" && method === "GET") {
     return route.fulfill({ json: { rules: state.selected
       ? [{ id: 1, scopeType: "variant", action: "include", productVariantId: 101, isActive: true }] : [] } });
+  }
+  if (storeId !== null && method === "GET" && path === `${listings}/listing-intent-changes`
+    && state.stores.some((store) => store.storeConnectionId === storeId)) {
+    return route.fulfill({ json: listingIntentChangePage(url, []) });
   }
   if (storeId !== null && ((method === "PUT" && path === `/api/dropship/ebay/listing-setup/${storeId}`)
     || (method === "POST" && path === `/api/dropship/ebay/listing-setup/${storeId}/ship-from/repair`))) {
