@@ -1,7 +1,3 @@
-import {
-  DROPSHIP_LISTING_ACCESS_BLOCK_CODES,
-  DROPSHIP_LISTING_ACCESS_RESOLUTIONS,
-} from "../../../../shared/dropship/listing-access";
 import { z } from "zod";
 import {
   intentNeedsReview,
@@ -108,52 +104,12 @@ export class ListingIntentPropagationService {
           typeof raw === "string" && /^[A-Z][A-Z0-9_]{0,99}$/.test(raw)
             ? raw
             : "LISTING_INTENT_HANDOFF_RETRY";
-        const permanent = new Set<string>([
-          ...DROPSHIP_LISTING_ACCESS_BLOCK_CODES,
-          "EBAY_SYNC_IDENTITY_CHANGED",
-          "EBAY_SYNC_ACCOUNT_UNVERIFIED",
-          "EBAY_SYNC_AUTH_REQUIRED",
-          "DROPSHIP_LISTING_ACCOUNT_CHANGED",
-          "DROPSHIP_LISTING_MANAGED_SCOPE_CHANGED",
-          "DROPSHIP_IDEMPOTENCY_CONFLICT",
-          "EBAY_POLICY_UNAVAILABLE",
-          "EBAY_POLICY_REQUIRED",
-          "EBAY_POLICY_SCOPE_CHANGED",
-        ]);
-        if (permanent.has(code)) {
-          const accessBlock = DROPSHIP_LISTING_ACCESS_BLOCK_CODES.some(
-            (value) => value === code,
-          );
-          const resolution = z
-            .enum(DROPSHIP_LISTING_ACCESS_RESOLUTIONS)
-            .safeParse(
-              error && typeof error === "object"
-                ? (error as { context?: { resolution?: unknown } }).context
-                    ?.resolution
-                : undefined,
-            );
-          const safeMessage =
-            accessBlock && error instanceof Error && error.message.trim()
-              ? error.message.slice(0, 1000)
-              : "The change is saved, but its account, listing identity or required policy needs review in the listing workspace before an update can be accepted.";
-          await this.deps.store.finish(
-            delivery,
-            {
-              state: "blocked",
-              code,
-              message: safeMessage,
-              ...(accessBlock && resolution.success
-                ? { resolution: resolution.data }
-                : {}),
-            },
-            this.deps.now(),
-          );
-        } else await this.deps.store.defer(delivery, code, this.deps.now());
+        // Adapters return normalized attention outcomes. A thrown error has no
+        // confirmed handoff outcome, so retain the command for receipt-first retry.
+        await this.deps.store.defer(delivery, code, this.deps.now());
         console.error(
           JSON.stringify({
-            event: permanent.has(code)
-              ? "listing_intent_handoff_blocked"
-              : "listing_intent_handoff_deferred",
+            event: "listing_intent_handoff_deferred",
             deliveryId: delivery.id,
             code,
           }),

@@ -1,3 +1,7 @@
+import {
+  DROPSHIP_LISTING_ACCESS_BLOCK_CODES,
+  DROPSHIP_LISTING_ACCESS_RESOLUTIONS,
+} from "../../../../shared/dropship/listing-access";
 import { z } from "zod";
 import type { Pool } from "pg";
 import type { ListingIntentHandoffPort } from "../application/listing-intent-propagation.service";
@@ -16,6 +20,54 @@ const blocked = (code: string, message: string): IntentHandoff => ({
   code,
   message,
 });
+/** These existing owner errors confirm a refusal, rather than an unknown
+ * admission outcome. Transport and persistence failures must keep their command
+ * for receipt-first replay. Access decisions remain with the Dropship owner. */
+const ADMISSION_REFUSAL_CODES = new Set<string>([
+  ...DROPSHIP_LISTING_ACCESS_BLOCK_CODES,
+  "EBAY_SYNC_IDENTITY_CHANGED",
+  "EBAY_SYNC_ACCOUNT_UNVERIFIED",
+  "EBAY_SYNC_AUTH_REQUIRED",
+  "DROPSHIP_LISTING_ACCOUNT_CHANGED",
+  "DROPSHIP_LISTING_MANAGED_SCOPE_CHANGED",
+  "DROPSHIP_IDEMPOTENCY_CONFLICT",
+  "EBAY_POLICY_UNAVAILABLE",
+  "EBAY_POLICY_REQUIRED",
+  "EBAY_POLICY_SCOPE_CHANGED",
+]);
+
+function admissionRefusal(
+  error: unknown,
+): (IntentHandoff & { state: "blocked" }) | null {
+  const code =
+    error && typeof error === "object"
+      ? (error as { code?: unknown }).code
+      : null;
+  if (typeof code !== "string" || !ADMISSION_REFUSAL_CODES.has(code))
+    return null;
+  const accessBlock = DROPSHIP_LISTING_ACCESS_BLOCK_CODES.some(
+    (value) => value === code,
+  );
+  const resolution = z
+    .enum(DROPSHIP_LISTING_ACCESS_RESOLUTIONS)
+    .safeParse(
+      error && typeof error === "object"
+        ? (error as { context?: { resolution?: unknown } }).context?.resolution
+        : undefined,
+    );
+  return {
+    state: "blocked",
+    code,
+    message:
+      accessBlock && error instanceof Error && error.message.trim()
+        ? error.message.slice(0, 1000)
+        : "The change is saved, but its account, listing identity or required policy needs review in the listing workspace before an update can be accepted.",
+    ...(accessBlock && resolution.success
+      ? { resolution: resolution.data }
+      : {}),
+  };
+}
+
 /** Adapts only durable admission. Provider preparation and execution continue in
  * the existing owner. Reading an accepted command precedes fresh intent. */
 export class ExistingListingIntentHandoff implements ListingIntentHandoffPort {
@@ -33,6 +85,23 @@ export class ExistingListingIntentHandoff implements ListingIntentHandoffPort {
   ) {}
 
   async handoff(delivery: IntentDelivery): Promise<IntentHandoff> {
+    try {
+      return await this.admit(delivery);
+    } catch (error) {
+      const refusal = admissionRefusal(error);
+      if (!refusal) throw error;
+      console.error(
+        JSON.stringify({
+          event: "listing_intent_handoff_blocked",
+          deliveryId: delivery.id,
+          code: refusal.code,
+        }),
+      );
+      return refusal;
+    }
+  }
+
+  private async admit(delivery: IntentDelivery): Promise<IntentHandoff> {
     const d = delivery.destination;
     if (
       d.kind === "channel" &&

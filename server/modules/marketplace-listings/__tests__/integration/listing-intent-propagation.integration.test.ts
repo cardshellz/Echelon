@@ -1,3 +1,4 @@
+import pg from "pg";
 import { PostgresEbayListingSyncRepository } from "../../../channels/infrastructure/ebay-listing-sync.repository";
 import { EbayListingSyncService } from "../../../channels/ebay-listing-sync.service";
 import { PgDropshipListingPreviewRepository } from "../../../dropship/infrastructure/dropship-listing-preview.repository";
@@ -477,12 +478,15 @@ INSERT INTO dropship.dropship_vendor_listings VALUES(1,10,40,101,'vendor-listing
           )
         ).rows[0].n,
       ).toBe(1);
-      await expect(
-        handoff.handoff({
+      expect(
+        await handoff.handoff({
           ...claim,
           destination: { ...claim.destination, accountId: "new-account" },
         }),
-      ).rejects.toMatchObject({ code: "DROPSHIP_IDEMPOTENCY_CONFLICT" });
+      ).toMatchObject({
+        state: "blocked",
+        code: "DROPSHIP_IDEMPOTENCY_CONFLICT",
+      });
     });
     it("serializes concurrent real Dropship acceptance and refuses changed account or unmanaged sizes before insertion", async () => {
       const owner = await installDropshipJobs();
@@ -700,20 +704,24 @@ INSERT INTO dropship.dropship_vendor_listings VALUES(1,10,40,101,'vendor-listing
       await database.pool.query(
         "UPDATE channels.channel_pricing_rules SET value=12 WHERE id=1",
       );
-      const handoff = vi.fn(async () => {
+      const sync = vi.fn(async () => {
         throw Object.assign(new Error("Account changed"), {
           code: "EBAY_SYNC_IDENTITY_CHANGED",
         });
       });
       const service = new ListingIntentPropagationService({
         store: repository,
-        handoff: { handoff },
+        handoff: new ExistingListingIntentHandoff(
+          database.pool,
+          { createListingPushJob: vi.fn() },
+          { channelId: 34, service: await installEbayJobs(), sync },
+        ),
         now: () => now,
         uuid: randomUUID,
       });
-      expect(await service.processDue()).toEqual({ processed: 0, failed: 1 });
+      expect(await service.processDue()).toEqual({ processed: 1, failed: 0 });
       expect(await service.processDue()).toEqual({ processed: 0, failed: 0 });
-      expect(handoff).toHaveBeenCalledTimes(1);
+      expect(sync).toHaveBeenCalledTimes(1);
       const page = await repository.list({ channelId: 34 });
       expect(page.items[0]).toMatchObject({
         state: "blocked",
@@ -921,7 +929,7 @@ INSERT INTO dropship.dropship_vendor_listings VALUES(1,10,40,101,'vendor-listing
       await database.pool.query(
         "INSERT INTO dropship.dropship_product_listing_settings VALUES(40,10,20,1)",
       );
-      const handoff = vi.fn(async () => {
+      const createListingPushJob = vi.fn(async () => {
         throw Object.assign(
           new Error(
             "Your store needs authorization again. Reconnect it on the Store page.",
@@ -934,13 +942,21 @@ INSERT INTO dropship.dropship_vendor_listings VALUES(1,10,40,101,'vendor-listing
       });
       const service = new ListingIntentPropagationService({
         store: repository,
-        handoff: { handoff },
+        handoff: new ExistingListingIntentHandoff(
+          database.pool,
+          { createListingPushJob },
+          {
+            channelId: 34,
+            service: { getByCommand: vi.fn(), getAdmission: vi.fn() },
+            sync: vi.fn(),
+          },
+        ),
         now: () => now,
         uuid: randomUUID,
       });
       await service.processDue();
       await service.processDue();
-      expect(handoff).toHaveBeenCalledTimes(1);
+      expect(createListingPushJob).toHaveBeenCalledTimes(1);
       const page = await repository.list({
         vendorId: 10,
         storeConnectionId: 40,
@@ -964,6 +980,112 @@ INSERT INTO dropship.dropship_vendor_listings VALUES(1,10,40,101,'vendor-listing
         }),
       ).toBe(true);
     });
+    it("rethrows an actual PostgreSQL receipt-read lock timeout before fresh admission", async () => {
+      await installEbayJobs();
+      await database.pool.query(
+        "UPDATE channels.channel_pricing_rules SET value=12 WHERE id=1",
+      );
+      await repository.expand(20, now);
+      const claim = (await repository.claim(randomUUID(), now))!;
+      const receiptPool = new pg.Pool({
+        connectionString: database.connectionString,
+        max: 1,
+        options: "-c lock_timeout=100ms",
+      });
+      const receiptOwner = new EbayListingSyncService(
+        new PostgresEbayListingSyncRepository(receiptPool),
+        { execute: vi.fn() },
+        () => now,
+        randomUUID,
+      );
+      const sync = vi.fn();
+      const handoff = new ExistingListingIntentHandoff(
+        database.pool,
+        { createListingPushJob: vi.fn() },
+        { channelId: 34, service: receiptOwner, sync },
+      );
+      const blocker = await database.pool.connect();
+      try {
+        await blocker.query("BEGIN");
+        await blocker.query(
+          "LOCK TABLE channels.ebay_listing_sync_commands IN ACCESS EXCLUSIVE MODE",
+        );
+        await expect(handoff.handoff(claim)).rejects.toMatchObject({
+          code: "55P03",
+        });
+        expect(sync).not.toHaveBeenCalled();
+        expect((await deliveries())[0]).toMatchObject({
+          state: "pending",
+          receipt: null,
+        });
+      } finally {
+        await blocker.query("ROLLBACK");
+        blocker.release();
+        await receiptPool.end();
+      }
+    });
+    it("rethrows an unknown admission transport error without manufacturing a refusal", async () => {
+      const owner = await installEbayJobs();
+      await database.pool.query(
+        "UPDATE channels.channel_pricing_rules SET value=12 WHERE id=1",
+      );
+      await repository.expand(20, now);
+      const claim = (await repository.claim(randomUUID(), now))!;
+      const failure = Object.assign(new Error("Lost admission connection"), {
+        code: "ECONNRESET",
+      });
+      const sync = vi.fn(async () => {
+        throw failure;
+      });
+      const handoff = new ExistingListingIntentHandoff(
+        database.pool,
+        { createListingPushJob: vi.fn() },
+        { channelId: 34, service: owner, sync },
+      );
+      await expect(handoff.handoff(claim)).rejects.toBe(failure);
+      expect(sync).toHaveBeenCalledTimes(1);
+      expect((await deliveries())[0]).toMatchObject({
+        state: "pending",
+        receipt: null,
+      });
+    });
+    it.each(["EBAY_SYNC_IDENTITY_CHANGED", "FUTURE_CHANNEL_ACCESS_DENIED"])(
+      "keeps unnormalized %s failures opaque to the shared propagation owner",
+      async (code) => {
+        await database.pool.query(
+          "UPDATE channels.channel_pricing_rules SET value=12 WHERE id=1",
+        );
+        const handoff = vi.fn(async () => {
+          throw Object.assign(new Error("Private upstream diagnostic"), {
+            code,
+          });
+        });
+        const service = new ListingIntentPropagationService({
+          store: repository,
+          handoff: { handoff },
+          now: () => now,
+          uuid: randomUUID,
+        });
+        expect(await service.processDue()).toEqual({ processed: 0, failed: 1 });
+        expect(await service.processDue()).toEqual({ processed: 0, failed: 0 });
+        expect(handoff).toHaveBeenCalledTimes(1);
+        const rows = await deliveries();
+        expect(rows).toHaveLength(1);
+        expect(rows[0]).toMatchObject({
+          state: "pending",
+          attempt_count: 1,
+          last_error_code: code,
+          receipt: null,
+          last_error_resolution: null,
+        });
+        expect(rows[0].last_error_message).not.toContain(
+          "Private upstream diagnostic",
+        );
+        expect(new Date(rows[0].next_attempt_at).getTime()).toBeGreaterThan(
+          now.getTime(),
+        );
+      },
+    );
     it("ignores timestamp-only account re-verification but records revocation", async () => {
       await database.pool.query(
         "UPDATE ebay.ebay_oauth_tokens SET external_account_verified_at='2027-01-01T00:00:00Z'",
