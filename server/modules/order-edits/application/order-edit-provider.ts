@@ -43,6 +43,12 @@ export interface OrderEditRefund {
 
 /** JSON-safe persisted evidence. Amounts are exact USD integer cents. */
 export interface OrderEditSnapshot {
+  /** Native checkout allocations; face value is not reusable order-edit credit. */
+  nativeDiscountAllocations?: Array<{
+    lineId: string;
+    ruleKey: string;
+    amountCents: number;
+  }>;
   codePricing?: import("@shared/order-edits/order-edit-codes").OrderEditCodePricing;
   /** Optional read-only pricing evidence for provisional previews; excluded from legacy fingerprints. */
   previewProductDiscounts?: Array<{

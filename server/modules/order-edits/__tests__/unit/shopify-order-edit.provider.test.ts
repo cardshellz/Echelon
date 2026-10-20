@@ -1811,9 +1811,9 @@ function fixedOrder(
       lineItems: {
         nodes: [
           {
-            ...line(1, 10, firstQuantity, "50.00"),
+            ...line(1, 10, Math.min(firstQuantity, 1), "50.00"),
             priceAfterAllDiscountsBeforeTaxesSet: bag(
-              decimal(firstGross - cents(firstDiscount)),
+              decimal(cents("50.00") * BigInt(Math.min(firstQuantity, 1)) - cents(firstDiscount)),
             ),
             discountAllocations: [
               {
@@ -1834,6 +1834,7 @@ function fixedOrder(
               },
             ],
           },
+          ...(firstQuantity > 1 ? [line(3, 10, firstQuantity - 1, "50.00")] : []),
         ],
         pageInfo: { hasNextPage: false },
       },
@@ -1861,9 +1862,9 @@ function fixedCalculated(
       cents(firstDiscount) -
       cents(secondDiscount),
   );
-  return calculated(total, decimal(cents(total) - cents("80.00")), [
+  const result = calculated(total, decimal(cents(total) - cents("80.00")), [
     {
-      ...calcLine(1, 10, firstQuantity, "50.00"),
+      ...calcLine(1, 10, Math.min(firstQuantity, 1), "50.00"),
       calculatedDiscountAllocations: [
         {
           allocatedAmountSet: bag(firstDiscount),
@@ -1881,6 +1882,20 @@ function fixedCalculated(
       ],
     },
   ]);
+  if (firstQuantity > 1)
+    result.addedLineItems.nodes.push(calcLine(3, 10, firstQuantity - 1, "50.00"));
+  return result;
+}
+function fixedAddition(result = fixedCalculated(2)) {
+  return { orderEditAddVariant: {
+    userErrors: [], calculatedLineItem: { id: id("CalculatedLineItem", 3) }, calculatedOrder: result,
+  } };
+}
+function fixedCommittedCalculated() {
+  const result = fixedCalculated(2);
+  result.lineItems.nodes.push(...result.addedLineItems.nodes);
+  result.addedLineItems.nodes = [];
+  return result;
 }
 async function fixedIncrease() {
   const h = harness([
@@ -1888,7 +1903,7 @@ async function fixedIncrease() {
     fixedOrder(),
     { nodes: [variant(10, "50.00")] },
     begin(fixedCalculated()),
-    quantity(fixedCalculated(2)),
+    fixedAddition(),
   ]);
   const snapshot = await h.provider.readOrder(4, "100");
   const quote = await h.provider.quote(
@@ -2629,12 +2644,12 @@ describe("ShopifyOrderEditProvider", () => {
     expect(snapshot.financials?.itemDiscountLabels).toEqual(["REWARD20"]);
   });
 
-  it("allows removal when Shopify preserves the full fixed credit on the remaining eligible item", async () => {
+  it("removes only the original item's fixed allocation without transferring it to remaining merchandise", async () => {
     const h = harness([
       fixedOrder(),
       fixedOrder(),
       begin(fixedCalculated()),
-      quantity(fixedCalculated(0, "0.00", "20.00")),
+      quantity(fixedCalculated(0, "0.00", "10.00")),
       refundCapacity("80.00"),
     ]);
     const snapshot = await h.provider.readOrder(4, "100");
@@ -2648,15 +2663,15 @@ describe("ShopifyOrderEditProvider", () => {
       "fixed-edit",
     );
     expect(quote).toMatchObject({
-      totalCents: 3000,
-      deltaCents: -5000,
-      outstandingCents: -5000,
+      totalCents: 4000,
+      deltaCents: -4000,
+      outstandingCents: -4000,
       financials: {
         itemsGrossCents: 5000,
-        itemsDiscountCents: 2000,
-        itemsNetCents: 3000,
+        itemsDiscountCents: 1000,
+        itemsNetCents: 4000,
       },
-      evidence: { refundPreflight: { amountCents: 5000 } },
+      evidence: { refundPreflight: { amountCents: 4000 } },
     });
     expect(
       h.requests.some((request) =>
@@ -2738,7 +2753,7 @@ describe("ShopifyOrderEditProvider", () => {
           entry.calculatedDiscountAllocations[0].discountApplication;
         entry.calculatedDiscountAllocations.push({
           allocatedAmountSet: bag(
-            index === 0 && firstQuantity === 2 ? "10.00" : "5.00",
+            "5.00",
           ),
           discountApplication: {
             ...fixedApplication,
@@ -2749,6 +2764,12 @@ describe("ShopifyOrderEditProvider", () => {
           },
         });
       });
+      for (const added of result.addedLineItems.nodes) {
+        added.calculatedDiscountAllocations.push({
+          allocatedAmountSet: bag("5.00"),
+          discountApplication: result.lineItems.nodes[0].calculatedDiscountAllocations[1].discountApplication,
+        });
+      }
       const total = firstQuantity === 1 ? "70.00" : "115.00";
       Object.assign(result, {
         subtotalPriceSet: bag(total),
@@ -2762,7 +2783,7 @@ describe("ShopifyOrderEditProvider", () => {
       order,
       { nodes: [variant(10, "50.00")] },
       begin(calculatedOrder(1)),
-      quantity(calculatedOrder(2)),
+      fixedAddition(calculatedOrder(2)),
     ]);
     const snapshot = await h.provider.readOrder(4, "100");
     const quote = await h.provider.quote(
@@ -2792,12 +2813,11 @@ describe("ShopifyOrderEditProvider", () => {
       },
     });
     const after = structuredClone(order);
-    const first = after.order.lineItems.nodes[0];
-    first.currentQuantity = 2;
-    first.unfulfilledQuantity = 2;
-    first.unfulfilledDiscountedTotalSet = bag("100.00");
-    first.priceAfterAllDiscountsBeforeTaxesSet = bag("80.00");
-    first.discountAllocations[1].allocatedAmountSet = bag("10.00");
+    after.order.lineItems.nodes.push({
+      ...line(3, 10, 1, "50.00"),
+      priceAfterAllDiscountsBeforeTaxesSet: bag("45.00"),
+      discountAllocations: [{ allocatedAmountSet: bag("5.00"), discountApplication: { index: 1 } }],
+    });
     Object.assign(after.order, {
       fullyPaid: false,
       currentSubtotalPriceSet: bag("115.00"),
@@ -2820,7 +2840,7 @@ describe("ShopifyOrderEditProvider", () => {
     shifted.order.lineItems.nodes[0].discountAllocations[0].allocatedAmountSet =
       bag("15.00");
     shifted.order.lineItems.nodes[0].discountAllocations[1].allocatedAmountSet =
-      bag("5.00");
+      bag("0.00");
     const bad = harness([
       order,
       { nodes: [variant(10, "50.00")] },
@@ -2837,20 +2857,17 @@ describe("ShopifyOrderEditProvider", () => {
     ).toHaveLength(1);
   });
 
-  it.each(["lost on removal", "multiplied on growth"])(
+  it.each(["transferred on removal", "multiplied on growth"])(
     "blocks a fixed credit %s before commit or financial settlement",
     async (change) => {
-      const removal = change === "lost on removal";
+      const removal = change === "transferred on removal";
       const h = harness([
         fixedOrder(),
         fixedOrder(),
         ...(!removal ? [{ nodes: [variant(10, "50.00")] }] : []),
         begin(fixedCalculated()),
-        quantity(
-          removal
-            ? fixedCalculated(0, "0.00", "10.00")
-            : fixedCalculated(2, "30.00", "10.00"),
-        ),
+        removal ? quantity(fixedCalculated(0, "0.00", "20.00"))
+          : fixedAddition(fixedCalculated(2, "30.00", "10.00")),
       ]);
       const snapshot = await h.provider.readOrder(4, "100");
       await expect(
@@ -2863,7 +2880,7 @@ describe("ShopifyOrderEditProvider", () => {
           },
           "fixed-edit",
         ),
-      ).rejects.toMatchObject({ code: "ORDER_EDIT_FIXED_DISCOUNT_MISMATCH" });
+      ).rejects.toMatchObject({ code: "ORDER_EDIT_PRESERVED_DISCOUNT_MISMATCH" });
       expect(
         h.requests.some((request) =>
           /orderEditCommit|refundCreate|orderEditAddLineItemDiscount|suggestedRefund/.test(
@@ -2889,7 +2906,7 @@ describe("ShopifyOrderEditProvider", () => {
         fixedOrder(),
         { nodes: [variant(10, "50.00")] },
         begin(fixedCalculated()),
-        quantity(result),
+        fixedAddition(result),
       ]);
       const snapshot = await h.provider.readOrder(4, "100");
       await expect(
@@ -2906,13 +2923,17 @@ describe("ShopifyOrderEditProvider", () => {
   it("restores the original fixed credit and quantities after wholly unpaid payment expiry", async () => {
     const { snapshot, quote } = await fixedIncrease();
     const pending = fixedOrder(2);
+    const restoredCalculation = fixedCalculated();
+    restoredCalculation.lineItems.nodes.push(calcLine(3, 10, 0, "50.00"));
+    const restoredOrder = fixedOrder();
+    restoredOrder.order.lineItems.nodes.push(line(3, 10, 0, "50.00"));
     const h = harness([
       pending,
-      begin(fixedCalculated(2)),
-      quantity(fixedCalculated()),
+      begin(fixedCommittedCalculated()),
+      quantity(restoredCalculation),
       pending,
       { orderEditCommit: { order: { id: id("Order", 100) }, userErrors: [] } },
-      fixedOrder(),
+      restoredOrder,
     ]);
     const restored = await h.provider.recoverUnpaid(
       4,
@@ -2920,7 +2941,9 @@ describe("ShopifyOrderEditProvider", () => {
       quote,
       "fixed-expire",
     );
-    expect(restored.financials).toEqual(snapshot.financials);
+    expect(restored.financials?.itemsNetCents).toBe(snapshot.financials?.itemsNetCents);
+    expect(restored.financials?.itemDiscounts).toEqual(snapshot.financials?.itemDiscounts);
+    expect(isUnpaidRecoveryRestored(restored, snapshot, quote)).toBe(true);
     expect(restored.outstandingCents).toBe(0);
     expect(
       h.requests.some((request) =>
@@ -2931,7 +2954,7 @@ describe("ShopifyOrderEditProvider", () => {
     ).toBe(false);
   });
 
-  it("blocks unused fixed credit before applying an edit instead of silently forfeiting or redeeming it again", async () => {
+  it("rejects redistribution of a fixed reward from removed merchandise", async () => {
     const order = fixedOrder();
     const initial = fixedCalculated();
     // Original credit exceeds the remaining $50 item after removal.
@@ -2982,7 +3005,7 @@ describe("ShopifyOrderEditProvider", () => {
         "fixed-edit",
       ),
     ).rejects.toMatchObject({
-      code: "ORDER_EDIT_FIXED_CREDIT_SETTLEMENT_REQUIRED",
+      code: "ORDER_EDIT_PRESERVED_DISCOUNT_MISMATCH",
     });
     expect(
       h.requests.some((request) =>

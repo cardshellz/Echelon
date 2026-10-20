@@ -4,6 +4,8 @@ import {
   unchangedOrderEditSnapshot,
   recoveryFinancials,
   shippingWasReplaced,
+  unchangedOrderEditRefundPayments,
+  financialsForQuotedLines,
 } from "../application/order-edit-evidence";
 export { isUnpaidRecoveryRestored } from "../application/order-edit-evidence";
 import { createHash } from "node:crypto";
@@ -33,6 +35,7 @@ import {
 import { buildOrderEditFinancials } from "../domain/order-edit-financials";
 import { presentOrderEditCodeBreakdown } from "../application/order-edit-code-presentation";
 import { priceOrderEditDiscounts } from "../domain/order-edit-discount-engine";
+import { priceRetainedOrderDiscounts } from "../domain/order-edit-preserved-discounts";
 import { resolveOrderEditLinePlan } from "../domain/order-edit-line-plan";
 import { priceOrderEditPreviewItems } from "../domain/order-edit-preview-pricing";
 import { supportedVariant, stockAvailable } from "../domain/order-edit-variant";
@@ -484,6 +487,7 @@ export class ShopifyOrderEditProvider
       fingerprint: "",
       evidence,
       previewProductDiscounts: readPreviewProductDiscounts(order),
+      nativeDiscountAllocations: readNativeDiscountAllocations(order),
       financials: readOrderFinancials(order),
       discountRules: order.discountApplications.nodes.map((entry) => ({
         index: entry.index,
@@ -658,7 +662,14 @@ export class ShopifyOrderEditProvider
       ...(plan.discountCodes !== undefined
         ? { appliedCodes: codePricing?.applications ?? [] }
         : {}),
-      financials: presentOrderEditCodeBreakdown(financials, codePricing)!,
+      financials: presentOrderEditCodeBreakdown(
+        financials,
+        codePricing,
+        pricing.lines.map((line) => ({
+          id: line.id,
+          productNetCents: line.productNetCents,
+        })),
+      )!,
       shippingRepricing,
       lines: previewLines.map((line) => ({
         id: line.id,
@@ -930,7 +941,7 @@ export class ShopifyOrderEditProvider
           "The pilot requires a fully paid order with no payment in progress.",
         );
       }
-      if (fresh.refunds.length > 0)
+      if (!unchangedOrderEditRefundPayments(fresh.refunds, []))
         fail(
           "EXISTING_REFUND_UNSUPPORTED",
           "Orders with previous refunds require staff review before editing.",
@@ -965,7 +976,7 @@ export class ShopifyOrderEditProvider
         throw variantCheck.reason;
       }
       const pricingProvenance = promotionCheck.value;
-      const quote =
+      const stagedQuote =
         plan.discountCodes?.length || fresh.codePricing
           ? await this.stageCodes(
               connectionId,
@@ -982,6 +993,13 @@ export class ShopifyOrderEditProvider
               variantCheck.value,
               setPhase,
             );
+      const quote = {
+        ...stagedQuote,
+        financials: financialsForQuotedLines(
+          stagedQuote.financials,
+          stagedQuote.lines,
+        ),
+      };
       phase = "verify_recovery_lineage";
       assertRecoveryLineage(quote);
       // Establish financial eligibility while the order is still unchanged. A
@@ -1439,6 +1457,7 @@ export class ShopifyOrderEditProvider
             line.quantity,
             line.originalUnitPriceCents,
             line.discountedUnitPriceCents,
+            line.discountFingerprint,
           ]),
         ),
       "original line identities",
@@ -1495,7 +1514,8 @@ export class ShopifyOrderEditProvider
           money(candidate.originalUnitPriceSet) ===
             line.originalUnitPriceCents &&
           money(candidate.discountedUnitPriceSet) ===
-            line.discountedUnitPriceCents,
+            line.discountedUnitPriceCents &&
+          matchesOriginalFixedAllocations(candidate, line, baseline),
       );
       if (
         matches.length !== 1 ||
@@ -1549,8 +1569,12 @@ export class ShopifyOrderEditProvider
         .filter(([, line]) =>
           line.calculatedDiscountAllocations.some(
             (allocation) =>
-              allocation.discountApplication.__typename ===
-                "CalculatedAutomaticDiscountApplication" &&
+              (allocation.discountApplication.__typename ===
+                "CalculatedAutomaticDiscountApplication" ||
+                (allocation.discountApplication.__typename ===
+                  "CalculatedDiscountCodeApplication" &&
+                  allocation.discountApplication.value.__typename ===
+                    "MoneyV2")) &&
               allocation.discountApplication.targetType === "LINE_ITEM",
           ),
         )
@@ -1633,11 +1657,12 @@ export class ShopifyOrderEditProvider
             .map((allocation) => money(allocation.allocatedAmountSet)),
         );
         if (
-          !baseline.memberPricingEnabled ||
-          !baseline.memberPlan ||
-          member >= retail ||
-          multiply(retail - member, original.quantity) !==
-            existingMemberDiscount
+          existingMemberDiscount > 0 &&
+          (!baseline.memberPricingEnabled ||
+            !baseline.memberPlan ||
+            member >= retail ||
+            multiply(retail - member, original.quantity) !==
+              existingMemberDiscount)
         ) {
           fail(
             "MEMBER_PRICE_CHANGED",
@@ -2501,7 +2526,7 @@ export class ShopifyOrderEditProvider
       hash(current.transactions) !== hash(baseline.transactions) ||
       unresolved(current.transactions) ||
       current.capturableCents !== 0 ||
-      hash(current.refunds) !== hash(baseline.refunds)
+      !unchangedOrderEditRefundPayments(current.refunds, baseline.refunds)
     )
       fail(
         "EXPIRY_CONFLICT",
@@ -2633,7 +2658,8 @@ export class ShopifyOrderEditProvider
           line.quantity === before.quantity &&
           money(line.originalUnitPriceSet) === before.originalUnitPriceCents &&
           money(line.discountedUnitPriceSet) ===
-            before.discountedUnitPriceCents,
+            before.discountedUnitPriceCents &&
+          matchesOriginalFixedAllocations(line, before, current),
       );
       if (matches.length !== 1)
         fail(
@@ -2892,7 +2918,7 @@ export class ShopifyOrderEditProvider
             },
           }
         : {}),
-      financials,
+      financials: financialsForQuotedLines(financials, expected),
       ...(restoredCodePricing ? { codePricing: restoredCodePricing } : {}),
       createdAt: this.now().toISOString(),
       evidence: {
@@ -3557,7 +3583,9 @@ function readOrderItemDiscounts(
                 type: "percentage",
                 percentage: new Decimal(application.value.percentage).toFixed(),
               }
-            : { type: "fixed", amountCents: cents(application.value.amount) },
+            : amountCents === cents(application.value.amount)
+              ? { type: "fixed", amountCents }
+              : { type: "allocated" },
       });
     } else productCents = sum([productCents, amountCents]);
   }
@@ -3570,6 +3598,40 @@ function readOrderItemDiscounts(
 }
 
 /** Display-only enrichment. Old/removal allocations that do not reconcile cannot seed a preview. */
+function readNativeDiscountAllocations(
+  order: z.infer<typeof ORDER>,
+): OrderEditSnapshot["nativeDiscountAllocations"] {
+  // The same reconciliation used for product evidence prevents stale, pre-edit
+  // allocations from being presented as current money.
+  if (!readPreviewProductDiscounts(order)) return undefined;
+  const applications = new Map(
+    order.discountApplications.nodes.map((entry) => [entry.index, entry]),
+  );
+  return order.lineItems.nodes
+    .filter((line) => line.currentQuantity > 0)
+    .flatMap((line) =>
+      line.discountAllocations.flatMap((allocation) => {
+        const application = applications.get(
+          allocation.discountApplication.index,
+        )!;
+        if (application.__typename !== "DiscountCodeApplication") return [];
+        if (application.value.__typename !== "MoneyV2") return [];
+        if (!application.code || application.targetType !== "LINE_ITEM")
+          fail(
+            "DISCOUNT_EVIDENCE_CONFLICT",
+            "The original code allocation is incomplete.",
+          );
+        return [
+          {
+            lineId: line.id,
+            ruleKey: discountKey(application.code),
+            amountCents: money(allocation.allocatedAmountSet),
+          },
+        ];
+      }),
+    );
+}
+
 function readPreviewProductDiscounts(
   order: z.infer<typeof ORDER>,
 ): OrderEditSnapshot["previewProductDiscounts"] {
@@ -3713,6 +3775,44 @@ function verifyPreservedMemberAllocations(
   }
 }
 
+/** Distinguishes same-variant additions from discounted originals without
+ * inventing Shopify line identifiers or relying on response array order. */
+function matchesOriginalFixedAllocations(
+  calculated: z.infer<typeof CALCULATED_LINE>,
+  original: OrderEditSnapshot["lines"][number],
+  snapshot: OrderEditSnapshot,
+): boolean {
+  if (!snapshot.nativeDiscountAllocations) return true;
+  const expected = snapshot.nativeDiscountAllocations
+    .filter((entry) => entry.lineId === original.id)
+    .map((entry) => ({
+      key: entry.ruleKey,
+      amount: prorateExact(
+        entry.amountCents,
+        original.quantity,
+        calculated.quantity,
+      ),
+    }))
+    .filter((entry) => entry.amount > 0);
+  const actual = calculated.calculatedDiscountAllocations
+    .filter(
+      (entry) =>
+        entry.discountApplication.__typename ===
+          "CalculatedDiscountCodeApplication" &&
+        entry.discountApplication.value.__typename === "MoneyV2",
+    )
+    .map((entry) => ({
+      key: discountKey(entry.discountApplication.code ?? ""),
+      amount: money(entry.allocatedAmountSet),
+    }))
+    .filter((entry) => entry.amount > 0);
+  const sorted = (entries: Array<{ key: string; amount: number }>) =>
+    [...entries].sort((left, right) =>
+      left.key < right.key ? -1 : left.key > right.key ? 1 : 0,
+    );
+  return canonicalJson(sorted(expected)) === canonicalJson(sorted(actual));
+}
+
 function priceCalculatedOrderDiscounts(
   calculated: Calculated,
   baseline: OrderEditSnapshot,
@@ -3752,27 +3852,85 @@ function priceCalculatedOrderDiscounts(
         };
       }),
   );
-  const result = priceOrderEditDiscounts({
-    rules: rules.map((rule) => ({
-      key: discountKey(rule.label),
-      label: rule.label,
-      value:
-        rule.value.type === "percentage"
-          ? {
-              type: "percentage" as const,
-              percentage: new Decimal(rule.value.percentage).toFixed(),
-            }
-          : { type: "fixed" as const, amountCents: rule.value.amountCents },
-    })),
-    lines: lines.map((line) => ({
-      id: line.id,
-      subtotalCents: subtract(
-        money(line.editableSubtotalSet),
-        automaticProducts.get(line.id) ?? 0,
-      ),
-    })),
-    observations,
-  });
+  const result =
+    baseline.nativeDiscountAllocations &&
+    rules.some((rule) => rule.value.type === "fixed")
+      ? priceRetainedOrderDiscounts({
+          rules: rules.map((rule) => ({
+            key: discountKey(rule.label),
+            label: rule.label,
+            value:
+              rule.value.type === "percentage"
+                ? {
+                    type: "percentage" as const,
+                    percentage: new Decimal(rule.value.percentage).toFixed(),
+                  }
+                : rule.value,
+          })),
+          originals: baseline.lines
+            .filter((line) => line.quantity > 0)
+            .map((line) => ({ id: line.id, quantity: line.quantity })),
+          allocations: baseline.nativeDiscountAllocations,
+          lines: lines.map((line) => {
+            const added = calculated.addedLineItems.nodes.some(
+              (entry) => entry.id === line.id,
+            );
+            let matches = added
+              ? []
+              : baseline.lines.filter(
+                  (original) =>
+                    original.quantity > 0 &&
+                    original.variantId === line.variant?.id &&
+                    original.originalUnitPriceCents ===
+                      money(line.originalUnitPriceSet) &&
+                    original.discountedUnitPriceCents ===
+                      money(line.discountedUnitPriceSet),
+                );
+            if (matches.length > 1)
+              matches = matches.filter((original) =>
+                matchesOriginalFixedAllocations(line, original, baseline),
+              );
+            if (!added && matches.length !== 1)
+              fail(
+                "LINE_IDENTITY_UNPROVEN",
+                "The original discount's item cannot be matched safely.",
+              );
+            return {
+              id: line.id,
+              originalLineId: added ? null : matches[0].id,
+              quantity: line.quantity,
+              subtotalCents: subtract(
+                money(line.editableSubtotalSet),
+                automaticProducts.get(line.id) ?? 0,
+              ),
+            };
+          }),
+          observations,
+        })
+      : priceOrderEditDiscounts({
+          rules: rules.map((rule) => ({
+            key: discountKey(rule.label),
+            label: rule.label,
+            value:
+              rule.value.type === "percentage"
+                ? {
+                    type: "percentage" as const,
+                    percentage: new Decimal(rule.value.percentage).toFixed(),
+                  }
+                : {
+                    type: "fixed" as const,
+                    amountCents: rule.value.amountCents,
+                  },
+          })),
+          lines: lines.map((line) => ({
+            id: line.id,
+            subtotalCents: subtract(
+              money(line.editableSubtotalSet),
+              automaticProducts.get(line.id) ?? 0,
+            ),
+          })),
+          observations,
+        });
   if (
     !calculated.subtotalPriceSet ||
     result.subtotalAfterOrderDiscountsCents !==
@@ -3996,6 +4154,9 @@ function assertRecoveryLineage(quote: OrderEditQuote): void {
       line.quantity,
       line.originalUnitPriceCents,
       line.discountedUnitPriceCents,
+      quote.financials?.lines.find(
+        (entry) => entry.id === line.calculatedLineId,
+      )?.netCents ?? null,
     ]),
   );
   if (new Set(keys).size !== keys.length) {

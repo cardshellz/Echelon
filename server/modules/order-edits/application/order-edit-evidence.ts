@@ -1,6 +1,11 @@
 import { createHash } from "node:crypto";
 import { canonicalJson } from "@shared/utils/canonical-json";
 import {
+  orderEditFinancialsSchema,
+  type OrderEditFinancials,
+} from "@shared/order-edits/order-edit-financials";
+import { OrderEditError } from "../domain/order-edit-error";
+import {
   matchesOrderEditFinancials,
   equivalentOrderEditFinancialEvidence,
 } from "../domain/order-edit-financials";
@@ -8,9 +13,42 @@ import type {
   OrderEditSnapshot,
   OrderEditQuote,
   OrderEditTransaction,
+  OrderEditRefund,
 } from "./order-edit-provider";
 function hash(value: unknown): string {
   return createHash("sha256").update(canonicalJson(value)).digest("hex");
+}
+/** A previous edit's removed rows remain in Shopify. They are not part of a
+ * new quote; omit only rows proven to carry no gross, discount or net amount.
+ * The provider separately verifies that every active native row is expected. */
+export function financialsForQuotedLines(
+  financials: OrderEditFinancials | undefined,
+  lines: OrderEditQuote["lines"],
+): OrderEditFinancials | undefined {
+  if (!financials) return undefined;
+  const expected = new Set(lines.map((line) => line.calculatedLineId));
+  if (
+    expected.size !== lines.length ||
+    financials.lines.some(
+      (line) =>
+        !expected.has(line.id) &&
+        (line.grossCents !== 0 ||
+          line.discountCents !== 0 ||
+          line.netCents !== 0),
+    ) ||
+    lines.some(
+      (line) =>
+        !financials.lines.some((entry) => entry.id === line.calculatedLineId),
+    )
+  )
+    throw new OrderEditError(
+      "QUOTE_FINANCIAL_LINE_MISMATCH",
+      "The quote contains unexpected item amounts.",
+    );
+  return orderEditFinancialsSchema.parse({
+    ...financials,
+    lines: financials.lines.filter((line) => expected.has(line.id)),
+  });
 }
 function matchesShippingService(
   snapshot: OrderEditSnapshot,
@@ -52,6 +90,34 @@ export function shippingWasReplaced(quote?: OrderEditQuote): boolean {
 function unresolved(transactions: OrderEditTransaction[]): boolean {
   return transactions.some((entry) =>
     ["PENDING", "AWAITING_RESPONSE", "UNKNOWN"].includes(entry.status),
+  );
+}
+/** Shopify creates zero-value, transaction-free refund records for an order
+ * edit's bookkeeping (observed with shipping replacement). Keep those records
+ * in the snapshot/audit, but do not mistake them for payment movement.
+ * Existing records must remain identical. New refund intents, any amount, or
+ * any transaction (including zero/pending) still prevent unpaid recovery. */
+export function unchangedOrderEditRefundPayments(
+  actual: OrderEditRefund[],
+  baseline: OrderEditRefund[],
+): boolean {
+  const before = new Map(baseline.map((refund) => [refund.id, refund]));
+  const after = new Map(actual.map((refund) => [refund.id, refund]));
+  if (before.size !== baseline.length || after.size !== actual.length)
+    return false;
+  return (
+    baseline.every(
+      (refund) =>
+        after.has(refund.id) &&
+        canonicalJson(after.get(refund.id)) === canonicalJson(refund),
+    ) &&
+    actual.every(
+      (refund) =>
+        before.has(refund.id) ||
+        (refund.note === null &&
+          refund.amountCents === 0 &&
+          refund.transactions.length === 0),
+    )
   );
 }
 /** Extra pricing evidence stays outside the legacy identity hash, but new operations must still compare it. */
@@ -424,7 +490,7 @@ export function isUnpaidRecoveryRestored(
     observed.closed ||
     unresolved(observed.transactions) ||
     hash(observed.transactions) !== hash(baseline.transactions) ||
-    hash(observed.refunds) !== hash(baseline.refunds) ||
+    !unchangedOrderEditRefundPayments(observed.refunds, baseline.refunds) ||
     observed.evidence.shippingAddressFingerprint !==
       baseline.evidence.shippingAddressFingerprint
   )

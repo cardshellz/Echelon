@@ -1,7 +1,10 @@
-import Decimal from "decimal.js";
 import { z } from "zod";
+import Decimal from "decimal.js";
 import { orderEditPlanInputSchema } from "@shared/order-edits/order-edit.contract";
-import { priceOrderEditDiscounts } from "./order-edit-discount-engine";
+import {
+  priceRetainedOrderDiscounts,
+  preservedDiscountAllocationSchema,
+} from "./order-edit-preserved-discounts";
 import {
   resolveOrderEditLinePlan,
   orderEditAdditionSourceKey,
@@ -37,6 +40,10 @@ export const orderEditPreviewPricingContextSchema = z
       .object({
         memberPricingEnabled: z.boolean(),
         memberPlan: z.string().min(1).nullable(),
+        nativeDiscountAllocations: z
+          .array(preservedDiscountAllocationSchema)
+          .max(62500)
+          .optional(),
         lines: z
           .array(
             z
@@ -165,7 +172,13 @@ export function priceOrderEditPreviewItems(
     changes: parsed.changes,
     additions: parsed.additions,
     protectedLineIds: originals
-      .filter((line) => evidence.get(line.id)!.automaticCents > 0)
+      .filter(
+        (line) =>
+          evidence.get(line.id)!.automaticCents > 0 ||
+          snapshot.nativeDiscountAllocations?.some(
+            (a) => a.lineId === line.id && a.amountCents > 0,
+          ),
+      )
       .map((line) => line.id),
   });
   const demand = new Map<string, number>();
@@ -211,7 +224,10 @@ export function priceOrderEditPreviewItems(
   for (const addition of staged.additions) {
     const variant = byVariant.get(addition.variantId);
     if (!variant) fail("Current pricing is missing for an added product.");
-    if (addition.quantityIncreaseOfLineId) {
+    if (
+      addition.quantityIncreaseOfLineId &&
+      evidence.get(addition.quantityIncreaseOfLineId)!.automaticCents > 0
+    ) {
       const original = originals.find(
         (line) => line.id === addition.quantityIncreaseOfLineId,
       )!;
@@ -240,7 +256,17 @@ export function priceOrderEditPreviewItems(
     });
   }
   if (!lines.length) fail("An order must retain at least one physical item.");
-  const priced = priceOrderEditDiscounts({
+  const nativeRules = itemRules.filter(
+    (rule) => rule.type === "DiscountCodeApplication",
+  );
+  if (
+    nativeRules.some((rule) => rule.value.type === "fixed") &&
+    !snapshot.nativeDiscountAllocations
+  )
+    fail(
+      "Original checkout discount allocations are required before this order can be priced.",
+    );
+  const priced = priceRetainedOrderDiscounts({
     rules: itemRules
       .filter((rule) => rule.type === "DiscountCodeApplication")
       .map((rule) => ({
@@ -254,15 +280,20 @@ export function priceOrderEditPreviewItems(
               }
             : rule.value,
       })),
+    originals: originals.map((line) => ({
+      id: line.id,
+      quantity: line.quantity,
+    })),
+    allocations: snapshot.nativeDiscountAllocations ?? [],
     lines: lines.map((line) => ({
       id: line.id,
+      originalLineId: originals.some((original) => original.id === line.id)
+        ? line.id
+        : null,
+      quantity: line.quantity,
       subtotalCents: line.productNetCents,
     })),
   });
-  if (priced.unusedFixedCredits.length)
-    fail(
-      "Unused reward credit requires settlement review before this edit can be applied.",
-    );
   const productCents = sumOrderEditCents(
     lines.map((line) => line.grossCents - line.productNetCents),
   );
