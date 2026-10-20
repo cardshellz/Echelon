@@ -154,6 +154,9 @@ test("approved dependency impact remains visible in history and connected reads 
   await history.locator("summary").filter({ hasText: "Revision 1 · approved by Approving Admin" }).click();
   await expect(history.getByRole("region", { name: "Dependent quantity and cost changes" })).toBeVisible();
   await expect(history.getByText("Supplier confirmed the revised PO line values")).toBeVisible();
+  await expect(history.getByText("Cost work recorded at approval", { exact: true })).toBeVisible();
+  await expect(history.getByText("These issues were recorded with this approval. Open the current cost review to see what remains outstanding.")).toBeVisible();
+  await expect(history.getByRole("table", { name: "PO change summary" }).getByRole("columnheader", { name: "Before", exact: true })).toBeVisible();
   const historyBounds = await history.boundingBox();
   expect(historyBounds && historyBounds.x >= 0 && historyBounds.x + historyBounds.width <= page.viewportSize()!.width).toBeTruthy();
   await history.screenshot({ path: test.info().outputPath("po-edit-approval-history.png") });

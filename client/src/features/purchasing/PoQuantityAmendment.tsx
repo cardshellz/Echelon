@@ -76,7 +76,7 @@ function pendingIntent(key: string): ApprovalIntent | null {
   // possibly committed request and issuing a different idempotency key.
   return savedIntentSchema.parse(JSON.parse(raw));
 }
-export function PoAmendmentSummary({ preview }: { preview: PoQuantityAmendmentPreview }) {
+export function PoAmendmentSummary({ preview, approved = false }: { preview: PoQuantityAmendmentPreview; approved?: boolean }) {
   const rows = preview.lines.flatMap(({ before, after }) => {
     const fields: [string, string, string][] = [
       ["Quantity", before.orderQty.toLocaleString(), after.orderQty.toLocaleString()],
@@ -93,8 +93,8 @@ export function PoAmendmentSummary({ preview }: { preview: PoQuantityAmendmentPr
   const fieldCounts = new Map<number, number>();
   for (const row of rows) fieldCounts.set(row.lineId, (fieldCounts.get(row.lineId) ?? 0) + 1);
   return <div className="space-y-3">
-    <p className="text-sm font-semibold">Review {preview.lines.length} changed line{preview.lines.length === 1 ? "" : "s"}</p>
-    <CompactPoLineTable aria-label="PO change summary" className="min-w-[520px]"><TableHeader><TableRow className="bg-slate-50"><TableHead>Line</TableHead><TableHead>What changes</TableHead><TableHead className="text-right">Current</TableHead><TableHead className="text-right">After editing</TableHead></TableRow></TableHeader>
+    <p className="text-sm font-semibold">{approved ? "Approved" : "Review"} {preview.lines.length} line change{preview.lines.length === 1 ? "" : "s"}</p>
+    <CompactPoLineTable aria-label="PO change summary" className="min-w-[520px]"><TableHeader><TableRow className="bg-slate-50"><TableHead>Line</TableHead><TableHead>{approved ? "What changed" : "What changes"}</TableHead><TableHead className="text-right">Before</TableHead><TableHead className="text-right">After</TableHead></TableRow></TableHeader>
       <TableBody>{rows.map((row, index) => <TableRow key={`${row.lineId}:${row.name}`}>
         {(index === 0 || rows[index - 1].lineId !== row.lineId) && <TableCell rowSpan={fieldCounts.get(row.lineId)} className="max-w-[240px] py-2 align-top"><span className="line-clamp-2" title={row.product}>{row.lineNumber} · {row.product}</span></TableCell>}
         <TableCell className="py-2">{row.name}</TableCell><TableCell className="py-2 text-right font-mono">{row.oldValue}</TableCell><TableCell className="py-2 text-right font-mono font-semibold text-green-800 dark:text-green-300">{row.newValue}</TableCell>
@@ -103,7 +103,7 @@ export function PoAmendmentSummary({ preview }: { preview: PoQuantityAmendmentPr
     <p className="font-semibold">PO total: {exactMoneyAsInput(preview.beforeTotalCents, 2)} → {exactMoneyAsInput(preview.afterTotalCents, 2)} {preview.currency}</p>
     {preview.beforeStatus !== preview.afterStatus && <p className="text-sm">Receiving status: {preview.beforeStatus} → {preview.afterStatus}</p>}
     <p className="text-sm text-muted-foreground">Actual received, shipped and invoiced quantities stay unchanged. The PO determines ordered quantity and remaining balances.</p>
-    {preview.impact && <PoAmendmentImpact impact={preview.impact} currency={preview.currency} purchaseOrderId={preview.purchaseOrderId} />}
+    {preview.impact && <PoAmendmentImpact impact={preview.impact} currency={preview.currency} purchaseOrderId={preview.purchaseOrderId} approved={approved} />}
     {preview.warnings.filter(warning => warning.startsWith("Line ")).map(warning => <p key={warning} className="text-sm text-amber-800 dark:text-amber-300">{warning}</p>)}
     <details className="rounded border p-3 text-sm"><summary className="cursor-pointer">Invoice and inventory details</summary>
       <ul className="mt-2 list-disc space-y-1 pl-5">{preview.warnings.filter(warning => !warning.startsWith("Line ")).map(warning => <li key={warning}>{warning}</li>)}</ul>
@@ -224,7 +224,7 @@ function Editor({ context: loadedContext, storageKey, setBusy, onSaved, onReload
       <p className="text-xs text-muted-foreground">Enter product price and packaging separately.</p>
       <PoAmendmentLineTable disabled={locked} lines={context.lines} drafts={drafts} currency={context.currency} onChange={updateDraft} totalLabel={newTotalLabel} />
     </fieldset>}
-    {impact && <PoAmendmentSummary preview={impact} />}
+    {impact && <PoAmendmentSummary preview={impact} approved={saved !== null} />}
     {saved && <p role="status" className="rounded bg-green-50 p-3 font-semibold text-green-800">PO edit approved and saved as revision {saved.revisionNumber}.</p>}
     </div><div className="mt-4 shrink-0 space-y-3 border-t pt-3">
       {(validationError || previewMutation.error || approveMutation.error) && <p role="alert" className="text-sm text-destructive">{validationError ?? approveMutation.error?.message ?? previewMutation.error?.message}</p>}

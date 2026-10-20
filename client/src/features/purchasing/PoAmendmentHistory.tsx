@@ -43,7 +43,11 @@ export function PoAmendmentHistory({
               {new Date(entry.approvedAt).toLocaleString()}
             </summary>
             <p className="my-2 text-sm">{entry.preview.reason}</p>
-            <PoAmendmentSummary preview={entry.preview} />
+            <p className="my-2 text-xs text-muted-foreground">
+              Saved before-and-after review at approval. Current balances and
+              review status may have changed since then.
+            </p>
+            <PoAmendmentSummary preview={entry.preview} approved />
           </details>
         ))}
       {query.data?.pages[0].entries.length === 0 && (

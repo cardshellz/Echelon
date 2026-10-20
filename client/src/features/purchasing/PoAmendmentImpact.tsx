@@ -55,10 +55,12 @@ export function PoAmendmentImpact({
   impact,
   currency,
   purchaseOrderId,
+  approved = false,
 }: {
   impact: Impact;
   currency: string;
   purchaseOrderId: number;
+  approved?: boolean;
 }) {
   const navigation = useProcurementNavigation();
   const amount = (value: number | null, places: 2 | 4 = 2) =>
@@ -203,10 +205,15 @@ export function PoAmendmentImpact({
       )}
       {issues.length > 0 && (
         <div className="rounded border border-amber-300 p-3">
-          <p className="font-semibold">Remaining cost work</p>
+          <p className="font-semibold">
+            {approved
+              ? "Cost work recorded at approval"
+              : "Remaining cost work"}
+          </p>
           <p className="my-1">
-            The PO edit can be saved. These costs still require the evidence
-            described below.
+            {approved
+              ? "These issues were recorded with this approval. Open the current cost review to see what remains outstanding."
+              : "These costs still require the evidence described below after the PO edit."}
           </p>
           {issues.map((application, index) => (
             <div className="mt-2" key={index}>
