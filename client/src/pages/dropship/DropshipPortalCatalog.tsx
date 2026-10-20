@@ -1,3 +1,4 @@
+import { ListingIntentChanges } from "@/features/channel-listing-publication/ListingIntentChanges";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useLocation } from "wouter";
@@ -172,6 +173,7 @@ export default function DropshipPortalCatalog() {
 }
 
 function DropshipPortalCatalogPage() {
+  const [intentJob, setIntentJob] = useState<{ storeConnectionId: number; jobId: number } | null>(null);
   const queryClient = useQueryClient();
   const leaveGuard = useLeaveGuard();
   const {
@@ -678,6 +680,26 @@ function DropshipPortalCatalogPage() {
           // Another store drops the Listing settings draft, so a save in flight would never show its answer: the store waits for it.
           storeDisabled={pendingPriceSaves > 0}
         />
+
+        {storeReady && <div className="mt-4">
+          <ListingIntentChanges scope={{ kind: "dropship", storeConnectionId: selectedStoreConnectionIdNumber }}
+            canEdit={pushAccessNotice === null}
+            onReview={row => {
+              const link = row.last_error_resolution ? listingAccessLink(row.last_error_resolution) : null;
+              if (link) {
+                if (link.external) window.open(link.href, "_blank", "noopener,noreferrer");
+                else leaveGuard(() => navigate(dropshipPortalPath(link.href)));
+              } else leaveGuard(() => navigate(stepHref("setup")));
+            }}
+            onOpenOperation={row => {
+              if (row.receipt?.owner !== "dropship_listing_push" || !/^[1-9][0-9]*$/.test(row.receipt.operationId)) return;
+              const jobId = Number(row.receipt.operationId);
+              if (Number.isSafeInteger(jobId)) setIntentJob({ storeConnectionId: selectedStoreConnectionIdNumber, jobId });
+            }} />
+          {intentJob?.storeConnectionId === selectedStoreConnectionIdNumber && <ListingPushOutcomeNotice
+            key={intentJob.jobId} jobId={intentJob.jobId} storeName={selectedStoreName}
+            queuedMessage="The saved listing workflow is loading. Provider completion is not yet confirmed." />}
+        </div>}
 
         {error && (
           <Alert variant="destructive" className="mt-5">

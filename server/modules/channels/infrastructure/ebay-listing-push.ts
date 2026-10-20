@@ -1,11 +1,12 @@
+import { ebayIntentAccount, prepareEbayChannelIntent } from "../ebay-prepared-intent";
 import { ebayBusinessPolicies } from "../ebay-business-policies";
 import { z } from "zod";
 import { db, pool, getDatabasePoolSnapshot } from "../../../db";
 import { EBAY_CHANNEL_ID, atpService, ebayListingPhotoResolver, getAuthService } from "./ebay-api-runtime";
 import { createEbayRouteListingLifecycleClient, getExistingEbayListingPhotos } from "./ebay-listing-client";
-import { determineVariationAspectName, resolveChannelPrice } from "./ebay-listing-helpers";
+import { determineVariationAspectName, resolveChannelPriceResolution } from "./ebay-listing-helpers";
 import { buildEbayRouteListingDraft } from "../ebay-listing-draft";
-import { EbayMarketplaceListingConnector, type EbayListingConnectorDraft, type EbayListingConnectorResult, type EbayPublishedListingIdentityResolver } from "../listing-connectors/ebay-listing.connector";
+import { EbayMarketplaceListingConnector, alignDraftVariationSchemaToLiveGroup, type EbayListingConnectorDraft, type EbayListingConnectorResult, type EbayPublishedListingIdentityResolver } from "../listing-connectors/ebay-listing.connector";
 import { EbayListingSyncError, ebayListingSyncIdentitySchema, type EbayListingSyncIdentity } from "../ebay-listing-sync.domain";
 import { EbayListingPushService, EbayListingPushSkipped, ebayListingPushFailure, type EbayListingPushRequest, type EbayListingPushResult } from "../ebay-listing-push.service";
 import { PostgresEbayListingPushRepository, type EbayPushProduct, type EbayPushVariant } from "./ebay-listing-push.repository";
@@ -64,6 +65,7 @@ export async function readEbayPublicationSource(productId: number, client?: Pool
 async function preparePushDraft(input: { ctx: Awaited<ReturnType<typeof context>>; product: EbayPushProduct;
   category: Awaited<ReturnType<typeof repository.readCategory>>; variants: EbayPushVariant[];
   listingIds: string[]; groupKey: string | null; existingGroupKey?: string | null;
+  alignExistingVariationSchema?: boolean;
   quantities?: Awaited<ReturnType<typeof atpService.getAtpPerVariant>>;
   onRateLimit?: (seconds: number) => void }) {
   const { ctx, product, category, variants, listingIds, groupKey, existingGroupKey, onRateLimit } = input;
@@ -79,8 +81,12 @@ async function preparePushDraft(input: { ctx: Awaited<ReturnType<typeof context>
   const photoPlan = await ebayListingPhotoResolver.resolve({ productId, channelId: EBAY_CHANNEL_ID, variants: photoVariants, mode: "catalog",
     readExistingPhotos: () => getExistingEbayListingPhotos({ accessToken, groupKey, variants: providerPhotoVariants }) });
   const prices = new Map<number, number>();
-  for (const variant of variants)
-    prices.set(variant.id, await resolveChannelPrice(db, EBAY_CHANNEL_ID, productId, variant.id, variant.price_cents));
+  const priceResolutions = new Map<number, Awaited<ReturnType<typeof resolveChannelPriceResolution>>>();
+  for (const variant of variants) {
+    const resolution = await resolveChannelPriceResolution(db, EBAY_CHANNEL_ID, productId, variant.id, variant.price_cents);
+    prices.set(variant.id, resolution.priceCents ?? 0);
+    priceResolutions.set(variant.id, resolution);
+  }
   const quantities = input.quantities ?? await atpService.getAtpPerVariant(productId);
   let routeDraft: ReturnType<typeof buildEbayRouteListingDraft>;
   const isMultiVariant = existingGroupKey === undefined ? variants.length > 1 : existingGroupKey !== null;
@@ -99,12 +105,28 @@ async function preparePushDraft(input: { ctx: Awaited<ReturnType<typeof context>
     throw new EbayListingSyncError("EBAY_LISTING_VALIDATION_FAILED", error instanceof Error ? error.message : "The listing payload is invalid.", { cause: error });
   }
   const clientInput = { accessToken, onRateLimit, expectedAccountId: ctx.account.externalAccountId, expectedConnectionId: ctx.connectionId };
-  const draft: EbayListingConnectorDraft = { productId, marketplaceId: ctx.metadata.marketplaceId,
+  let draft: EbayListingConnectorDraft = { productId, marketplaceId: ctx.metadata.marketplaceId,
     inventoryItems: routeDraft.inventoryItems, offers: routeDraft.offers, itemGroup: routeDraft.itemGroup,
     publishMode: "publish", hasExistingExternalIds: listingIds.length > 0,
     existingExternalProductId: listingIds.length === 1 ? listingIds[0] : undefined,
     existingOfferIdsByVariantId: Object.fromEntries(variants.map(variant => [variant.id, variant.external_variant_id])),
   };
+  if (input.alignExistingVariationSchema && draft.itemGroup) {
+    const liveGroup = await createEbayRouteListingLifecycleClient(clientInput).getInventoryItemGroup(draft.itemGroup.groupKey);
+    if (!liveGroup || (liveGroup.inventoryItemGroupKey !== undefined && liveGroup.inventoryItemGroupKey !== draft.itemGroup.groupKey))
+      throw new EbayListingSyncError("EBAY_SYNC_MAPPING_INVALID", "The reviewed eBay variation group could not be verified while preparing its update.");
+    // Provider axis compatibility is part of the final preparation. The
+    // connector rechecks this content contract before any subsequent write.
+    draft = alignDraftVariationSchemaToLiveGroup({ draft: { ...draft, itemGroup: draft.itemGroup }, liveGroup });
+  }
+  draft.preparedIntent = prepareEbayChannelIntent({
+    account: ebayIntentAccount({ channelId: EBAY_CHANNEL_ID, connectionId: ctx.connectionId, accountId: ctx.account.externalAccountId,
+      environment: ctx.auth.getEnvironment(), marketplaceId: ctx.metadata.marketplaceId, merchantLocationKey: ctx.metadata.merchantLocationKey }),
+    draft, operation: listingIds.length ? "maintenance" : "publication", mediaPlan: photoPlan.mediaPlan,
+    prices: priceResolutions, settings: { policyScope: resolvedPolicies.scope,
+      policies: [...resolvedPolicies.byVariantId].sort(([a], [b]) => a-b),
+      policySources: [...resolvedPolicies.provenanceByVariantId ?? []].sort(([a], [b]) => a-b), browseCategoryId, storeCategoryName: category?.ebay_store_category_name ?? null },
+  });
   const resolvePublishedIdentity: EbayPublishedListingIdentityResolver = discovered => observeExistingEbayPublication({
     owner: { kind: "channel", channelId: EBAY_CHANNEL_ID, productId, provider: "ebay", marketplaceId: ctx.metadata.marketplaceId },
     locator: { externalListingId: discovered.listingId, providerPublicationKey: null },
@@ -189,7 +211,8 @@ async function executeProduct(productId: number, command: EbayListingPushRequest
       if (reviewedPreview && existingIdentity && existingIdentity.groupKey !== reviewedPreview.groupKey)
         throw new EbayListingSyncError("EBAY_SYNC_IDENTITY_CHANGED", "The eBay group changed after this listing review. Analyze the listing again before applying a change.");
       const { draft, clientInput, prices, resolvePublishedIdentity } = await preparePushDraft({ ctx, product, category, variants,
-        listingIds, groupKey, existingGroupKey: existingIdentity?.groupKey ?? reviewedPreview?.groupKey, onRateLimit });
+        listingIds, groupKey, existingGroupKey: existingIdentity?.groupKey ?? reviewedPreview?.groupKey,
+        alignExistingVariationSchema: command.updateExisting !== undefined, onRateLimit });
       let result: EbayListingConnectorResult;
       if (listingIds.length !== 1) throw new EbayListingSyncError("EBAY_SYNC_MAPPING_INVALID", "A reviewed listing change requires exactly one saved eBay listing. Review the product's listing mapping.");
       const client = createEbayRouteListingLifecycleClient(clientInput);

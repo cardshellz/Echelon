@@ -52,7 +52,7 @@ describe("channel pricing resolver", () => {
     const db = createMockDb([
       [],
       [{ sku: "SHLZ-TOP-180PT-BLU-P10", shopifyVariantId: "62745849495711", catalogPriceCents: null }],
-      [{ price: "5.49" }],
+      [{ id: "62745849495711", price: "5.49" }],
       [],
       [],
       [{ productType: "toploaders" }],

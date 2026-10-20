@@ -1,3 +1,5 @@
+import { createListingIntentPropagationService } from "./listing-intent-propagation.composition";
+import { registerListingIntentPropagationRoutes } from "./modules/marketplace-listings/infrastructure/listing-intent-propagation.routes";
 import { ebayListingSyncService } from './modules/channels/ebay-listing-sync';
 import { startWalmartOrderPolling } from "./modules/channels/adapters/walmart/walmart-order-poll.service";
 import { startWalmartStockConnectionWorker } from "./modules/channels/adapters/walmart/walmart-stock-connection.service";
@@ -499,6 +501,9 @@ function startEchelonSyncScheduler(
   });
   setDropshipFulfillmentSync(services.wmsSync);
   setDropshipInventoryRuntimeAuthorityGate(services.dropshipInventoryRuntimeAuthority);
+  const listingIntentPropagation=createListingIntentPropagationService();
+  registerListingIntentPropagationRoutes(app,listingIntentPropagation);
+  startListingPublicationWorker(listingIntentPropagation, "listing_intent_propagation_worker");
   startListingPublicationWorker(ebayListingSyncService, "ebay_listing_sync_worker");
   startListingPublicationWorker(services.listingPublication);
   startListingPublicationWorker(services.listingUpdates, "listing_update_worker");

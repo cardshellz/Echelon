@@ -1,24 +1,33 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Pool } from "pg";
+import { drizzle } from "drizzle-orm/node-postgres";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { createInventoryCutoverTestDatabase, type InventoryCutoverTestDatabase } from "../../../inventory/__tests__/fixtures/inventory-cutover-database";
 import { AutomaticSyncEbayProvider } from "../fixtures/ebay-automatic-sync-provider.fixture";
 import { EbayPolicyCatalogHttp, providerPolicyCatalog } from "../fixtures/ebay-business-policies.fixture";
 
-const runtime = vi.hoisted(() => ({ pool: null as Pool | null, provider: null as AutomaticSyncEbayProvider | null }));
+const runtime = vi.hoisted(() => ({ pool: null as Pool | null,
+  db: null as ReturnType<typeof drizzle> | null, provider: null as AutomaticSyncEbayProvider | null }));
 vi.mock("../../../../db", () => ({
   pool: new Proxy({} as Pool, { get(_target, key) {
     if (!runtime.pool) throw new Error("Disposable policy-source database is not initialized.");
     const value = Reflect.get(runtime.pool, key);
     return typeof value === "function" ? value.bind(runtime.pool) : value;
   } }),
-  db: {}, getDatabasePoolSnapshot: () => ({ maximumConnections: 10 }),
+  db: new Proxy({} as ReturnType<typeof drizzle>, { get(_target, key) {
+    if (!runtime.db) throw new Error("Disposable policy-source Drizzle database is not initialized.");
+    const value = Reflect.get(runtime.db, key);
+    return typeof value === "function" ? value.bind(runtime.db) : value;
+  } }), getDatabasePoolSnapshot: () => ({ maximumConnections: 10 }),
 }));
 // Policy/configuration reads, source capture, provider observation, draft building
-// and hashing are production code. Unrelated ATP, media and pricing inputs are
-// deterministic fixtures; durable job/journal recovery has its own PG suite.
-vi.mock("../../infrastructure/ebay-api-runtime", () => ({
+// and pricing resolve against PostgreSQL through production code. Unrelated ATP
+// is deterministic; media uses Catalog's canonical selector over fixture URLs.
+// Durable job/journal recovery has its own PostgreSQL composition suite.
+vi.mock("../../infrastructure/ebay-api-runtime", async () => {
+  const { resolveExplicitPublicationMediaPlan } = await import("../../../catalog/catalog-publication-media");
+  return {
   EBAY_CHANNEL_ID: 67,
   getAuthService: () => ({
     getVerifiedProviderAccount: async () => ({ externalAccountId: "seller-36" }),
@@ -27,17 +36,18 @@ vi.mock("../../infrastructure/ebay-api-runtime", () => ({
   atpService: { getAtpPerVariant: async () => [
     { productVariantId: 101, atpUnits: 17 }, { productVariantId: 102, atpUnits: 23 },
   ] },
-  ebayListingPhotoResolver: { resolve: async () => ({
-    byVariantId: new Map([[101, ["https://example.test/current.jpg"]], [102, ["https://example.test/current.jpg"]]]),
-    groupImageUrls: ["https://example.test/current.jpg"],
-  }) },
+  ebayListingPhotoResolver: { resolve: async (input: { variants: readonly { variantId: number }[] }) => {
+    const mediaPlan = resolveExplicitPublicationMediaPlan({ variantIds:input.variants.map(variant=>variant.variantId),
+      urls:["https://example.test/current.jpg"],maxPhotosPerVariant:12,maxGroupPhotos:12 });
+    return { mediaPlan,
+      byVariantId:new Map(mediaPlan.variants.map(variant=>[variant.variantId,variant.gallery.selected.map(photo=>photo.url)])),
+      groupImageUrls:mediaPlan.group.selected.map(photo=>photo.url),
+    };
+  } },
   ebayApiRequest: (method: string, path: string, _token: string, body: unknown) => runtime.provider!.request({ method, path, body }),
   ebayApiRequestWithRateNotify: (method: string, path: string, _token: string, body: unknown) => runtime.provider!.request({ method, path, body }),
-}));
-vi.mock("../../infrastructure/ebay-listing-helpers", async importOriginal => ({
-  ...await importOriginal<typeof import("../../infrastructure/ebay-listing-helpers")>(),
-  resolveChannelPrice: async () => 1149,
-}));
+  };
+});
 vi.mock("../../ebay-listing-sync", () => ({ readExistingEbayListingIdentityForProduct: vi.fn(() => {
   throw new Error("Unpublished preparation must not use the published-listing reader.");
 }) }));
@@ -56,6 +66,28 @@ import { prepareEbayPublicationCompletion, readEbayPublicationSource } from "../
 import { assertEbayListingSourceIdentityUnchanged } from "../../ebay-existing-listing-identity";
 import { syncContentIntentHash } from "../../ebay-listing-sync-content";
 import { ebayBusinessPolicies } from "../../ebay-business-policies";
+import { assertEbayPreparedIntent } from "../../ebay-prepared-intent";
+
+function expectPreparedOwnerContract(draft: Awaited<ReturnType<typeof prepareEbayPublicationCompletion>>["draft"]): void {
+  expect(draft.preparedIntent).toBeDefined();
+  expect(()=>assertEbayPreparedIntent(draft)).not.toThrow();
+  expect(draft.preparedIntent!.input).toMatchObject({
+    account:{owner:{kind:"channel",channelId:67},connectionId:9,accountId:"seller-36",environment:"production",marketplaceId:"EBAY_US"},
+    mediaAction:"replace",
+    prices:[
+      {variantId:101,cents:1275,provenance:{kind:"channel_price",channelId:67,variantId:101}},
+      {variantId:102,cents:1149,provenance:{kind:"catalog_variant",variantId:102}},
+    ],
+  });
+  const plan = draft.preparedIntent!.input.mediaPlan!;
+  expect(plan).not.toBeNull();
+  expect(plan.group.selected.map(photo=>photo.url)).toEqual(draft.itemGroup!.payload.imageUrls);
+  for (const item of draft.inventoryItems) {
+    const variantId = draft.offers.find(offer=>offer.sku===item.sku)!.variantId;
+    expect(plan.variants.find(variant=>variant.variantId===variantId)!.gallery.selected.map(photo=>photo.url))
+      .toEqual(item.payload.product.imageUrls);
+  }
+}
 
 const databaseUrl = process.env.ECHELON_TEST_DATABASE_URL;
 const disposable = process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true";
@@ -75,12 +107,16 @@ const disposable = process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true";
         ebay_payment_policy_override text,ebay_listing_excluded boolean,is_active boolean,updated_at timestamptz DEFAULT now());
       CREATE TABLE channels.channel_product_overrides(product_id integer,channel_id integer,is_listed integer);
       CREATE TABLE catalog.product_variants(id integer PRIMARY KEY,product_id integer REFERENCES catalog.products,sku text,name text,
-        option1_name text,option1_value text,option2_name text,option2_value text,price_cents integer,compare_at_price_cents integer,
+        option1_name text,option1_value text,option2_name text,option2_value text,price_cents integer,compare_at_price_cents integer,shopify_variant_id text,
         weight_grams numeric,barcode text,ebay_fulfillment_policy_override text,ebay_return_policy_override text,
         ebay_payment_policy_override text,is_active boolean,sales_eligibility text,ebay_listing_excluded boolean,position integer,updated_at timestamptz DEFAULT now());
       CREATE TABLE channels.channel_variant_overrides(product_variant_id integer,channel_id integer,weight_override numeric,is_listed integer);
       CREATE TABLE channels.channel_listings(channel_id integer,product_variant_id integer REFERENCES catalog.product_variants,
         external_product_id text,external_variant_id text,external_sku text,PRIMARY KEY(channel_id,product_variant_id));
+      CREATE TABLE channels.channel_pricing(id integer PRIMARY KEY,channel_id integer,product_variant_id integer,price bigint);
+      CREATE TABLE channels.channel_pricing_rules(id integer PRIMARY KEY,channel_id integer,scope text,scope_id text,
+        rule_type text,value numeric(10,2),created_at timestamp,updated_at timestamp);
+      CREATE TABLE public.shopify_variants(id text PRIMARY KEY,sku text,price numeric(10,2));
       CREATE TABLE ebay.ebay_category_mappings(channel_id integer,product_type_slug text,ebay_browse_category_id text,
         ebay_store_category_name text,listing_enabled boolean,fulfillment_policy_override text,return_policy_override text,payment_policy_override text,
         ebay_browse_category_name text,ebay_store_category_id text,created_at timestamptz DEFAULT now(),updated_at timestamptz DEFAULT now(),
@@ -96,14 +132,16 @@ const disposable = process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true";
         VALUES(101,20,'CATALOG-P5','Pack 5','Pack Size','5',1149,100,true,'sellable',1),
               (102,20,'CATALOG-P6','Pack 6','Pack Size','6',1149,120,true,'sellable',2);
       INSERT INTO channels.channel_listings VALUES(67,101,NULL,'offer-P5','P5'),(67,102,NULL,'offer-P6','P6');
+      INSERT INTO channels.channel_pricing VALUES(1,67,101,1275);
       INSERT INTO ebay.ebay_category_mappings(channel_id,product_type_slug,ebay_browse_category_id,listing_enabled)
         VALUES(67,'packs','183454',true);
     `);
     await database.pool.query(readFileSync(resolve("migrations/0107_audit_events.sql"), "utf8"));
     runtime.pool = database.pool;
+    runtime.db = drizzle(database.pool);
     runtime.provider = new AutomaticSyncEbayProvider(() => new Date("2026-10-18T12:00:00Z"), true, ["P5", "P6"]);
   }, 60_000);
-  afterEach(async () => { await database?.close(); runtime.pool = null; runtime.provider = null; vi.unstubAllGlobals(); });
+  afterEach(async () => { await database?.close(); runtime.pool = null; runtime.db = null; runtime.provider = null; vi.unstubAllGlobals(); });
 
   it("clears only the product shipping override and rebuilds both exact offers with a fresh content hash", async () => {
     const available = providerPolicyCatalog("fulfillment");
@@ -111,6 +149,7 @@ const disposable = process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true";
       { fulfillmentPolicyId: "unavailable-product-shipping", name: "Former product shipping", marketplaceId: "EBAY_US" }] });
     const source = await readEbayPublicationSource(20);
     const before = await prepareEbayPublicationCompletion(source, null);
+    expectPreparedOwnerContract(before.draft);
     const mappings = (await database.pool.query("SELECT * FROM channels.channel_listings ORDER BY product_variant_id")).rows;
     expect(before.draft.offers.map(offer => ({ variantId: offer.variantId, sku: offer.sku, policies: offer.payload.listingPolicies })))
       .toEqual([101, 102].map((variantId, index) => ({ variantId, sku: index === 0 ? "P5" : "P6", policies: {
@@ -128,6 +167,10 @@ const disposable = process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true";
     expect(currentSource).toEqual(source);
     expect(() => assertEbayListingSourceIdentityUnchanged(source, currentSource)).not.toThrow();
     const corrected = await prepareEbayPublicationCompletion(source, before.identity);
+    expectPreparedOwnerContract(corrected.draft);
+    expect(corrected.draft.preparedIntent!.input.mediaPlan).toEqual(before.draft.preparedIntent!.input.mediaPlan);
+    expect(corrected.draft.preparedIntent!.input.prices).toEqual(before.draft.preparedIntent!.input.prices);
+    expect(corrected.draft.preparedIntent!.input.settings.sourceRevision).not.toBe(before.draft.preparedIntent!.input.settings.sourceRevision);
     expect(corrected.identity).toEqual(before.identity);
     expect(corrected.draft.existingOfferIdsByVariantId).toEqual({ 101: "offer-P5", 102: "offer-P6" });
     expect(corrected.draft.offers.map(offer => offer.payload.listingPolicies)).toEqual([101, 102].map(() => ({
@@ -152,6 +195,7 @@ const disposable = process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true";
       .toEqual(["variant-shipping", "product-shipping"]);
     await ebayBusinessPolicies.patchPolicies({ target: { kind: "product", productId: 20 }, patch: { fulfillmentPolicyId: null }, actor: "user:policy-reviewer" });
     const corrected = await prepareEbayPublicationCompletion(source, before.identity);
+    expectPreparedOwnerContract(corrected.draft);
     expect(corrected.draft.offers.map(offer => offer.payload.listingPolicies.fulfillmentPolicyId))
       .toEqual(["variant-shipping", "type-shipping"]);
     expect(corrected.identity).toEqual(before.identity);
@@ -177,6 +221,7 @@ const disposable = process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true";
     });
     await ebayBusinessPolicies.patchPolicies({ target: { kind: "store" }, patch: { fulfillmentPolicyId: "store-shipping" }, actor: "user:policy-reviewer" });
     const corrected = await prepareEbayPublicationCompletion(source, null);
+    expectPreparedOwnerContract(corrected.draft);
     expect(corrected.draft.offers.map(offer => offer.payload.listingPolicies.fulfillmentPolicyId)).toEqual(["store-shipping", "store-shipping"]);
     expect(runtime.provider!.writes).toEqual([]);
     expect((await database.pool.query("SELECT changes FROM public.audit_events WHERE target='channels.channel_connections:9' ORDER BY id")).rows)

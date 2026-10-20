@@ -637,6 +637,59 @@ export class PgDropshipListingPreviewRepository implements DropshipListingPrevie
     }
   }
 
+  /** Receipt lookup precedes a fresh preview after acknowledgement loss. The
+   * immutable requested scope binds the original managed account and sizes. */
+  async findManagedIntentReceipt(input: {
+    vendorId: number;
+    storeConnectionId: number;
+    idempotencyKey: string;
+    productVariantIds: number[];
+    accountId: string;
+    environment: string;
+  }): Promise<{ jobId: number; admitted: boolean } | null> {
+    const result = await this.dbPool.query<{
+      id: number;
+      store_connection_id: number;
+      requested_scope: {
+        previewSummary?: { ready?: number; warning?: number };
+        productVariantIds?: number[];
+        managedIntentScope?: {
+          accountId?: string;
+          environment?: string;
+          managedOnly?: boolean;
+        };
+      };
+    }>(
+      "SELECT id,store_connection_id,requested_scope FROM dropship.dropship_listing_push_jobs WHERE vendor_id=$1 AND idempotency_key=$2",
+      [input.vendorId, input.idempotencyKey],
+    );
+    const row = result.rows[0];
+    if (!row) return null;
+    const scope = row.requested_scope.managedIntentScope;
+    if (
+      row.store_connection_id !== input.storeConnectionId ||
+      scope?.accountId !== input.accountId ||
+      scope.environment !== input.environment ||
+      scope.managedOnly !== true ||
+      JSON.stringify(
+        [...(row.requested_scope.productVariantIds ?? [])].sort(
+          (a, b) => a - b,
+        ),
+      ) !== JSON.stringify([...input.productVariantIds].sort((a, b) => a - b))
+    )
+      throw new DropshipError(
+        "DROPSHIP_IDEMPOTENCY_CONFLICT",
+        "The saved listing update belongs to another managed account or size set.",
+      );
+    return {
+      jobId: row.id,
+      admitted:
+        (row.requested_scope.previewSummary?.ready ?? 0) +
+          (row.requested_scope.previewSummary?.warning ?? 0) >
+        0,
+    };
+  }
+
   async createListingPushJob(
     input: CreateDropshipListingPushJobRepositoryInput,
   ): Promise<CreateDropshipListingPushJobRepositoryResult> {
@@ -646,6 +699,45 @@ export class PgDropshipListingPreviewRepository implements DropshipListingPrevie
       await client.query("SELECT pg_advisory_xact_lock(hashtext('dropship_listing_push_job'), $1::integer)", [
         input.storeConnectionId,
       ]);
+
+      if (input.managedIntentScope) {
+        const account = await client.query<{
+          external_account_id: string | null;
+          provider_environment: string | null;
+          platform: string;
+          verified: boolean;
+        }>(
+          `SELECT external_account_id,provider_environment,platform,external_account_verified_at IS NOT NULL verified
+               FROM dropship.dropship_store_connections WHERE id=$1 AND vendor_id=$2 FOR SHARE`,
+          [input.storeConnectionId, input.vendorId],
+        );
+        const actual = account.rows[0];
+        if (
+          !actual ||
+          !actual.verified ||
+          actual.platform !== input.platform ||
+          actual.external_account_id !== input.managedIntentScope.accountId ||
+          actual.provider_environment !== input.managedIntentScope.environment
+        )
+          throw new DropshipError(
+            "DROPSHIP_LISTING_ACCOUNT_CHANGED",
+            "The store account changed. Review the listing before applying this saved change.",
+          );
+        const managed = await client.query<{ product_variant_id: number }>(
+          `SELECT product_variant_id FROM dropship.dropship_vendor_listings
+               WHERE vendor_id=$1 AND store_connection_id=$2 AND product_variant_id=ANY($3::int[])
+                 AND (nullif(external_listing_id,'') IS NOT NULL OR nullif(external_offer_id,'') IS NOT NULL) FOR SHARE`,
+          [input.vendorId, input.storeConnectionId, input.productVariantIds],
+        );
+        if (
+          new Set(managed.rows.map((row) => row.product_variant_id)).size !==
+          new Set(input.productVariantIds).size
+        )
+          throw new DropshipError(
+            "DROPSHIP_LISTING_MANAGED_SCOPE_CHANGED",
+            "A saved listing identity changed. Review this product before applying its change.",
+          );
+      }
 
       const existingJob = await findJobByIdempotencyKeyForUpdate(client, {
         vendorId: input.vendorId,
@@ -722,6 +814,7 @@ export class PgDropshipListingPreviewRepository implements DropshipListingPrevie
           jobStatus,
           JSON.stringify({
             productVariantIds: input.productVariantIds,
+            ...(input.managedIntentScope ? { managedIntentScope: input.managedIntentScope } : {}),
             requestedRetailPricesByVariantId: input.requestedRetailPricesByVariantId,
             previewSummary: input.preview.summary,
           }),

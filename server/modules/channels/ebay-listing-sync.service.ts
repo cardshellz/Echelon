@@ -1,3 +1,4 @@
+import type { ChannelPreparedIntent } from "@shared/types/channel-prepared-intent";
 import { z } from "zod";
 import type { MarketplaceObservedListingPublication } from "../marketplace-listings";
 import type {
@@ -36,7 +37,7 @@ export interface PreparedEbayListingSync {
   client: EbayListingLifecycleClient;
   draft: Pick<
     EbayListingConnectorDraft,
-    "productId" | "marketplaceId" | "inventoryItems" | "offers" | "itemGroup"
+    "productId" | "marketplaceId" | "inventoryItems" | "offers" | "itemGroup" | "preparedIntent"
   >;
   variants: Array<{
     variantId: number;
@@ -80,6 +81,10 @@ export class EbayExistingListingSyncExecution
     // A later retry cannot silently switch this job to another group or offer.
     if (prepared.providerObservation) await bindProviderIdentity?.(resolvedIdentity, prepared.providerObservation, prepared.sourceIdentity);
     else await bindProviderIdentity?.(resolvedIdentity);
+    if (prepared.draft.preparedIntent) {
+      if (!context?.persistPreparedIntent) throw new EbayListingSyncError("EBAY_PUBLICATION_OWNER_REQUIRED", "The prepared listing requires its saved-job evidence owner.");
+      await context.persistPreparedIntent(prepared.draft.preparedIntent);
+    }
     let hasRecurringRecovery = false;
     await stage("recover_prior_requests", syncIdentityHash(resolvedIdentity), async () => {
       ({ hasRecurringRecovery } = await recoverPriorEbayListingRequests({ identity: resolvedIdentity,
@@ -183,6 +188,7 @@ export interface EbayListingSyncClaim {
   release(): Promise<void>;
 }
 export interface EbayListingSyncStore {
+  persistPreparedIntent?(job: StoredEbayListingSyncJob, intent: ChannelPreparedIntent, now: Date): Promise<void>;
   assertPublicationOwner?(job: StoredEbayListingSyncJob): Promise<void>;
   recoverTerminalPublicationWrite?(job: StoredEbayListingSyncJob, identity: EbayListingSyncIdentity, now: Date): Promise<"rejected" | "not_sent" | null>;
   authorizePublicationRetry(input: EbayPublicationRetryAuthorization, now: Date): Promise<{ job: StoredEbayListingSyncJob; replayed: boolean }>;
@@ -247,6 +253,7 @@ export interface EbayListingSyncExecution {
   ): Promise<EbayProductSyncResult>;
 }
 export interface EbayListingExecutionContext {
+  persistPreparedIntent?: (intent: ChannelPreparedIntent) => Promise<void>;
   recoverTerminalPublicationWrite?: (identity: EbayListingSyncIdentity) => Promise<"rejected" | "not_sent" | null>;
   jobId?: string;
   requestedBy?: string;
@@ -377,6 +384,7 @@ export class EbayListingSyncService {
                   if (recovered) publicationProgress.started = false;
                   return recovered;
                 } } : {}),
+                ...(this.store.persistPreparedIntent ? { persistPreparedIntent: (intent: ChannelPreparedIntent) => this.store.persistPreparedIntent!(job, intent, this.now()) } : {}),
                 bindPublicationTarget: target => this.store.bindPublicationTarget(job, target, this.now()),
                 bindPublicationAccepted: async accepted => { await this.store.bindPublicationAccepted(job, accepted, this.now()); publicationProgress.accepted = accepted; } },
             ),

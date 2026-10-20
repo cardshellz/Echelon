@@ -826,6 +826,11 @@ export class ListingPublicationService {
           }
           item.externalProductId = observed.item.externalProductId;
           item.state = "verified";
+          const preparedIntent = operation.snapshot.prepared.find(prepared => prepared.variantId === item.variantId)?.preparedIntent;
+          if (preparedIntent?.input.capability.mediaVerification === "unavailable" && preparedIntent.input.mediaAction === "replace") item.mediaVerification = {
+            state: "unavailable", intentHash: preparedIntent.intentHash,
+            message: "Walmart accepted the listing content. Its item readback confirms identity, price and status; this connection cannot yet verify stored listing images.",
+          };
           item.error = null;
           item.stockState = recreation ? "ready" : "setup_required";
           await persist();

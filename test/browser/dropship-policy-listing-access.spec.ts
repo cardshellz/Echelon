@@ -1,5 +1,7 @@
 import { expect, test, type Locator, type Page, type TestInfo } from "@playwright/test";
 import { join, resolve } from "node:path";
+import { listingIntentChangeStatusSchema, type ListingIntentChangeStatus } from "../../shared/listing-intent-propagation";
+import { listingIntentChangePage } from "./fixtures/listing-intent-changes.fixture";
 
 // Playwright's serviceWorkers:block init script reads navigator.serviceWorker in
 // every frame, which throws in an opaque sandbox. This local-only harness
@@ -48,6 +50,9 @@ interface StubState {
   authReads: number;
   unexpected: string[];
   errors: string[];
+  history: ListingIntentChangeStatus[];
+  historyRetryStatuses: number[];
+  historyRetryPaths: string[];
 }
 
 function onboardingJson(state: StubState) {
@@ -101,7 +106,8 @@ function settingsJson(state: StubState) {
 
 async function setup(page: Page, initial: Partial<StubState> = {}) {
   const state: StubState = { vendorStatus: "active", storeReady: true, proofs: {}, pushReplies: [], pushBodies: [], codesSent: [], pushCalls: 0, statusCalls: 0,
-    previewCalls: 0, onboardingReads: 0, authReads: 0, unexpected: [], errors: [], ...initial };
+    previewCalls: 0, onboardingReads: 0, authReads: 0, unexpected: [], errors: [],
+    history: [], historyRetryStatuses: [], historyRetryPaths: [], ...initial };
   page.on("pageerror", (error) => state.errors.push(error.message));
   await page.route("**/*", (route) => new URL(route.request().url()).hostname === "127.0.0.1" ? route.continue() : route.abort());
   await page.route("**/api/**", async (route) => {
@@ -118,6 +124,22 @@ async function setup(page: Page, initial: Partial<StubState> = {}) {
       return route.fulfill({ json: onboardingJson(state) });
     }
     if (path === "/api/dropship/settings" && method === "GET") return route.fulfill({ json: settingsJson(state) });
+    const historyPath = `/api/dropship/listings/stores/${STORE_ID}/listing-intent-changes`;
+    if (path === historyPath && method === "GET") {
+      return route.fulfill({ json: listingIntentChangePage(url, state.history) });
+    }
+    const historyRow = state.history.find((row) => path === `${historyPath}/${row.id}/retry`);
+    if (historyRow && method === "POST" && state.historyRetryStatuses.length > 0) {
+      state.historyRetryPaths.push(path);
+      const status = state.historyRetryStatuses.shift()!;
+      if (status !== 200) return route.fulfill({ status, json: { message: "The retry could not be requested. Try again." } });
+      historyRow.state = "pending";
+      historyRow.can_retry = false;
+      historyRow.last_error_code = null;
+      historyRow.last_error_message = null;
+      historyRow.last_error_resolution = null;
+      return route.fulfill({ json: { retried: true } });
+    }
     // The step rail's line under Listing settings comes from the saved-settings summary, on every step.
     if (path === `/api/dropship/listings/stores/${STORE_ID}/listing-settings/summary` && method === "GET") {
       return route.fulfill({ json: listingSettingsSummary() });
@@ -353,4 +375,58 @@ test("says plainly when nothing selected was ready to queue", async ({ page }) =
   await expect(card.getByTestId("listing-row-issues-101")).toHaveText("Card Shellz hasn't added this size's package size yet. Contact support.");
   expect(state.pushCalls).toBe(1);
   expect(state.unexpected).toEqual([]); expect(state.errors).toEqual([]);
+});
+
+
+function blockedListingChange(overrides: Partial<ListingIntentChangeStatus> = {}): ListingIntentChangeStatus {
+  return listingIntentChangeStatusSchema.parse({
+    id: "9007199254740993", change_id: "9007199254740995",
+    destination: { kind: "dropship", provider: "ebay", connectionId: STORE_ID, channelId: null,
+      vendorId: 1, accountId: "test-ebay-seller", environment: "production", marketplaceId: "EBAY_US", ambiguousConnection: false },
+    product_id: 11, variant_ids: [101], state: "blocked", receipt: null, can_retry: true,
+    last_error_code: "DROPSHIP_LISTING_STORE_BLOCKED",
+    last_error_message: "Your store needs authorization again. Reconnect it on the Onboarding page.",
+    last_error_resolution: "reconnect_store", attempt_count: 1, created_at: STAMP, updated_at: STAMP,
+    source_relation: "dropship.dropship_product_listing_settings", changed_fields: ["current_revision_id"],
+    operation: "UPDATE", before_scope: { store_connection_id: STORE_ID, product_id: 11 },
+    after_scope: { store_connection_id: STORE_ID, product_id: 11 }, actor_provenance: { source: "browser_fixture" },
+    ...overrides,
+  });
+}
+
+test("saved listing attention uses the supported connection remedy and never offers an ineligible retry", async ({ page }) => {
+  const state = await setup(page, { history: [blockedListingChange({ can_retry: false })] });
+  const history = page.getByTestId("listing-intent-changes");
+  await expect(history.locator("summary")).toHaveText("Listing updates (1) - 1 on this page need attention");
+  await history.locator("summary").click();
+  await expect(history.getByText("Your store needs authorization again. Reconnect it on the Onboarding page.")).toBeVisible();
+  await expect(history.getByRole("button", { name: "Retry update" })).toHaveCount(0);
+  await history.getByRole("button", { name: "Resolve issue" }).click();
+  await expect(page).toHaveURL(/\/dropship-portal\/onboarding$/);
+  expect(state.historyRetryPaths).toEqual([]);
+  expect(state.pushCalls).toBe(0);
+  expect(state.codesSent).toEqual([]);
+  expect(state.unexpected).toEqual([]);
+  expect(state.errors).toEqual([]);
+});
+
+test("saved listing retry retains attention on failure and sends only the exact saved command route", async ({ page }) => {
+  const state = await setup(page, { history: [blockedListingChange()], historyRetryStatuses: [503, 200] });
+  const history = page.getByTestId("listing-intent-changes");
+  await expect(history.locator("summary")).toContainText("Listing updates (1)");
+  await history.locator("summary").click();
+  await history.getByRole("button", { name: "Retry update" }).click();
+  await expect(history.getByRole("status")).toContainText("The retry could not be requested. Try again.");
+  await expect(history.getByText("Product 11 - Needs attention")).toBeVisible();
+  await expect(history.getByRole("button", { name: "Retry update" })).toBeEnabled();
+  await history.getByRole("button", { name: "Retry update" }).click();
+  await expect(history.getByText("Product 11 - Update pending")).toBeVisible();
+  await expect(history.getByRole("status")).toHaveText("Another update attempt has been requested. Check update status for its result.");
+  await expect(history.getByRole("button", { name: "Retry update" })).toHaveCount(0);
+  expect(state.historyRetryPaths).toEqual(Array(2).fill(`/api/dropship/listings/stores/${STORE_ID}/listing-intent-changes/9007199254740993/retry`));
+  expect(state.pushCalls).toBe(0);
+  expect(state.previewCalls).toBe(0);
+  expect(state.codesSent).toEqual([]);
+  expect(state.unexpected).toEqual([]);
+  expect(state.errors).toEqual([]);
 });

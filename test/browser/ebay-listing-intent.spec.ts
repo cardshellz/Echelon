@@ -1,3 +1,4 @@
+import { channelIntentChange } from "./fixtures/listing-intent-changes.fixture";
 import { expect, test, type Page } from "@playwright/test";
 import { setupEbayChannelPage } from "./fixtures/ebay-channel-page.fixture";
 import { resolveEbayListingIssue } from "../../shared/ebay-listing-issue";
@@ -204,3 +205,45 @@ test("an older referenced recovery verifies its operation before offering withdr
   await expect(dialog.getByRole("heading", { name: "Resolve listing removal" })).toBeVisible();
   expect(state.commands).toEqual([]); expect(state.errors).toEqual([]); expect(state.unexpected).toEqual([]);
 });
+
+
+for (const readOnly of [false, true]) {
+  test(`automatic update history on eBay respects retry authority and saved status (${readOnly ? "viewer" : "editor"})`, async ({ page }) => {
+    const state = await setupEbayChannelPage(page, { readOnly });
+    const jobId = "6e4d8e03-3197-4d21-a6d7-aa1ddaecc775";
+    state.jobs = [{ id: jobId, productId: 1, operation: "sync", state: "queued", code: null, message: null,
+      nextAttemptAt: "2026-10-19T12:00:00.000Z", updatedAt: "2026-10-19T12:00:00.000Z" }];
+    state.intentChanges.items = [
+      channelIntentChange(67, {}),
+      channelIntentChange(67, { id: "2", state: "blocked", can_retry: false, last_error_message: "The original account must be reviewed." }),
+      channelIntentChange(67, { id: "9007199254740993", state: "blocked", can_retry: true, last_error_message: "A corrected update can be retried." }),
+      channelIntentChange(67, { id: "4", state: "delivered", last_error_code: null, last_error_message: null,
+        receipt: { owner: "ebay_listing_sync", operationId: jobId, commandKey: "41d4a5c3-bb5c-4ffc-8af8-df70d70ce6b8" } }),
+    ];
+    await page.reload();
+    const panel = page.getByTestId("listing-intent-changes");
+    await expect(panel.locator("summary")).toContainText("Listing updates (4)");
+    await panel.locator("summary").click();
+    const review = panel.locator("li").filter({ hasText: "Review the changed product category." });
+    await expect(review.getByRole("button", { name: "Review listing", exact: true })).toBeVisible();
+    await expect(review.getByRole("button", { name: "Retry update", exact: true })).toHaveCount(0);
+    const account = panel.locator("li").filter({ hasText: "The original account must be reviewed." });
+    await expect(account.getByRole("button", { name: "Retry update", exact: true })).toHaveCount(0);
+    await expect(panel.getByText("Product 1 - Update requested", { exact: true })).toBeVisible();
+    await expect(panel.getByText(/Provider completion has not been confirmed/)).toBeVisible();
+    await expect(panel.getByText(/Later manual actions do not clear these records/)).toBeVisible();
+    if (readOnly) await expect(panel.getByRole("button", { name: "Retry update", exact: true })).toHaveCount(0);
+    else {
+      await panel.getByRole("button", { name: "Retry update", exact: true }).click();
+      await expect(panel.getByText("Product 1 - Update pending", { exact: true })).toBeVisible();
+      expect(state.intentChanges.retries).toEqual(["/api/channels/67/listing-intent-changes/9007199254740993/retry"]);
+    }
+    await panel.getByRole("button", { name: "View update status", exact: true }).click();
+    const dialog = page.getByRole("dialog");
+    await expect(dialog.getByRole("heading", { name: "Listing update status", exact: true })).toBeVisible();
+    await expect(dialog).toContainText(jobId);
+    await expect(dialog).toContainText("Queued for eBay");
+    expect(state.commands).toEqual([]); expect(state.requests).toEqual([]);
+    expect(state.errors).toEqual([]); expect(state.unexpected).toEqual([]);
+  });
+}
