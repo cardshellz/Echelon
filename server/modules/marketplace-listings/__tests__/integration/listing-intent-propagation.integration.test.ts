@@ -18,6 +18,17 @@ import {
 import { PostgresListingIntentPropagationRepository } from "../../infrastructure/pg-listing-intent-propagation.repository";
 import { ListingIntentPropagationService } from "../../application/listing-intent-propagation.service";
 
+class AdmissionOnlyHandoff extends ExistingListingIntentHandoff {
+  constructor(
+    ...args: [
+      ConstructorParameters<typeof ExistingListingIntentHandoff>[0],
+      ConstructorParameters<typeof ExistingListingIntentHandoff>[1],
+      ConstructorParameters<typeof ExistingListingIntentHandoff>[2],
+    ]
+  ) {
+    super(...args, { assess: async () => null });
+  }
+}
 const url = process.env.ECHELON_TEST_DATABASE_URL;
 const disposable = process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true";
 const migration =
@@ -25,53 +36,7 @@ const migration =
 // Reduced source-owner tables retain the production names, identity types and
 // desired fields. The installed capture migration and repository SQL are real;
 // handoff acknowledgement is an injected boundary, not a provider execution test.
-const base = `
-CREATE SCHEMA catalog;CREATE SCHEMA channels;CREATE SCHEMA ebay;CREATE SCHEMA dropship;CREATE SCHEMA marketplace;
-CREATE TABLE catalog.products(id int PRIMARY KEY,name text,product_type text,category text,category_id int,price_cents bigint,ebay_fulfillment_policy_override text);
-CREATE TABLE catalog.product_variants(id int PRIMARY KEY,product_id int,sku text,name text,price_cents bigint,shopify_variant_id text,option1_name text,option1_value text);
-CREATE TABLE catalog.product_assets(id int PRIMARY KEY,product_id int,product_variant_id int,url text,position int,file_data bytea);
-CREATE TABLE public.shopify_variants(id text PRIMARY KEY,sku text,price numeric);
-CREATE TABLE channels.channels(id int PRIMARY KEY,provider text);
-CREATE TABLE channels.channel_connections(id int PRIMARY KEY,channel_id int,shop_domain text,metadata jsonb);
-CREATE TABLE channels.channel_listings(id int PRIMARY KEY,channel_id int,product_variant_id int,external_product_id text,external_variant_id text);
-CREATE TABLE channels.channel_product_overrides(id int PRIMARY KEY,channel_id int,product_id int,title_override text);
-CREATE TABLE channels.channel_variant_overrides(id int PRIMARY KEY,channel_id int,product_variant_id int,name_override text);
-CREATE TABLE channels.channel_pricing(id int PRIMARY KEY,channel_id int,product_variant_id int,price bigint,currency text);
-CREATE TABLE channels.channel_asset_overrides(id int PRIMARY KEY,channel_id int,product_asset_id int,is_included int,position_override int);
-CREATE TABLE channels.channel_pricing_rules(id int PRIMARY KEY,channel_id int,scope text,scope_id text,rule_type text,value numeric);
-CREATE TABLE channels.walmart_connections(channel_id int,connection_id int,partner_id text,environment text,ship_node_id text,warehouse_id int,revision int);
-CREATE TABLE ebay.ebay_oauth_tokens(channel_id int,environment text,external_account_id text,external_account_verified_at timestamptz);
-CREATE TABLE ebay.ebay_category_mappings(id int PRIMARY KEY,channel_id int,product_type_slug text,fulfillment_policy_override text);
-CREATE TABLE ebay.ebay_type_aspect_defaults(id int PRIMARY KEY,product_type_slug text,aspect_name text,aspect_value text);
-CREATE TABLE ebay.ebay_product_aspect_overrides(id int PRIMARY KEY,product_id int,aspect_name text,aspect_value text);
-CREATE TABLE dropship.dropship_vendors(id int PRIMARY KEY,member_id text);
-CREATE TABLE dropship.dropship_store_connections(id int PRIMARY KEY,vendor_id int,platform text,external_account_id text,provider_environment text,external_account_verified_at timestamptz,config jsonb);
-CREATE TABLE dropship.dropship_vendor_listings(id int PRIMARY KEY,vendor_id int,store_connection_id int,product_variant_id int,external_listing_id text,external_offer_id text);
-CREATE TABLE dropship.dropship_product_listing_settings(store_connection_id int,vendor_id int,product_id int,revision_id int);
-CREATE TABLE dropship.dropship_category_listing_settings(store_connection_id int,vendor_id int,category_id int,revision_id int);
-CREATE TABLE dropship.dropship_listing_price_settings(store_connection_id int,vendor_id int,product_variant_id int,revision_id int,override_price_cents bigint,pricing_mode text);
-CREATE TABLE dropship.dropship_listing_content_settings(store_connection_id int,vendor_id int,product_variant_id int,revision_id int);
-CREATE TABLE dropship.dropship_pricing_profiles(store_connection_id int,vendor_id int,revision_id int);
-CREATE TABLE dropship.dropship_content_profiles(store_connection_id int,vendor_id int,revision_id int);
-CREATE TABLE dropship.dropship_ebay_category_rule_profiles(store_connection_id int,vendor_id int,revision_id int);
-CREATE TABLE dropship.dropship_store_listing_configs(id int PRIMARY KEY,store_connection_id int,revision int,listing_mode text,marketplace_config jsonb);
-   CREATE TABLE dropship.dropship_listing_push_jobs(id int GENERATED ALWAYS AS IDENTITY PRIMARY KEY,vendor_id int,store_connection_id int,
-    job_type text,status text,requested_scope jsonb,requested_by text,idempotency_key text,request_hash text,error_message text,created_at timestamptz,updated_at timestamptz,
-    UNIQUE(vendor_id,idempotency_key));
-INSERT INTO catalog.products VALUES (20,'Product A','sleeves','Sleeves',7,1000,NULL),(21,'Product B','boxes','Boxes',8,2000,NULL);
-INSERT INTO catalog.product_variants VALUES(101,20,'SKU-A','A',1000,'remote-a',NULL,NULL),(102,20,'SKU-B','B',1200,NULL,NULL,NULL),(103,21,'SKU-C','C',2000,NULL,NULL,NULL);
-INSERT INTO channels.channels VALUES(34,'ebay'),(35,'shopify'),(36,'walmart');
-INSERT INTO channels.channel_connections VALUES(4,34,NULL,'{"environment":"production","marketplaceId":"EBAY_US"}'),(5,35,'shop.example',NULL),(6,36,NULL,NULL);
-INSERT INTO ebay.ebay_oauth_tokens VALUES(34,'production','seller-a',now());
-INSERT INTO channels.walmart_connections VALUES(36,6,'partner-a','production','node-a',1,1);
-INSERT INTO channels.channel_listings VALUES(1,34,101,'listing-a','offer-a'),(2,34,102,'listing-a','offer-b'),(3,34,103,'listing-c','offer-c'),(4,35,101,'shop-product','shop-a'),(5,36,101,'wm-product','wm-a');
-INSERT INTO catalog.product_assets VALUES(1,20,NULL,'https://example.com/a.jpg',0,NULL);
-INSERT INTO public.shopify_variants VALUES('remote-a','SKU-A',10);
-INSERT INTO channels.channel_pricing_rules VALUES(1,34,'product','20','fixed',10);
-INSERT INTO dropship.dropship_vendors VALUES(10,'member-a'),(11,'member-b');
-INSERT INTO dropship.dropship_store_connections VALUES(40,10,'ebay','vendor-seller','production',now(),'{"marketplaceId":"EBAY_US"}'),(41,11,'ebay','other-seller','production',now(),NULL);
-INSERT INTO dropship.dropship_vendor_listings VALUES(1,10,40,101,'vendor-listing',NULL),(2,10,40,102,'vendor-listing',NULL);
-`;
+import { listingIntentBase } from "../fixtures/listing-intent.fixture";
 
 (url && disposable ? describe : describe.skip).sequential(
   "Listing intent durable propagation PostgreSQL",
@@ -83,9 +48,15 @@ INSERT INTO dropship.dropship_vendor_listings VALUES(1,10,40,101,'vendor-listing
       database = await createInventoryCutoverTestDatabase(
         url,
         disposable,
-        base,
+        listingIntentBase,
       );
       await database.pool.query(await readFile(migration, "utf8"));
+      await database.pool.query(
+        await readFile(
+          "migrations/900000019000018700001_listing_intent_lifecycle_disposition.sql",
+          "utf8",
+        ),
+      );
       repository = new PostgresListingIntentPropagationRepository(
         database.pool,
       );
@@ -191,7 +162,7 @@ INSERT INTO dropship.dropship_vendor_listings VALUES(1,10,40,101,'vendor-listing
       };
     }
     async function installEbayJobs(): Promise<EbayListingSyncService> {
-      await database.pool.query(`CREATE SCHEMA inventory;
+      await database.pool.query(`CREATE SCHEMA IF NOT EXISTS inventory;
    CREATE FUNCTION inventory.reject_availability_claim_evidence_mutation() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
     RAISE EXCEPTION 'immutable evidence' USING ERRCODE='23514'; END $$;`);
       const initial = await readFile(
@@ -451,7 +422,7 @@ INSERT INTO dropship.dropship_vendor_listings VALUES(1,10,40,101,'vendor-listing
         service: { getByCommand: vi.fn(), getAdmission: vi.fn() },
         sync: vi.fn(),
       };
-      const handoff = new ExistingListingIntentHandoff(
+      const handoff = new AdmissionOnlyHandoff(
         database.pool,
         { createListingPushJob: prepare },
         ebay,
@@ -658,7 +629,7 @@ INSERT INTO dropship.dropship_vendor_listings VALUES(1,10,40,101,'vendor-listing
           throw new Error("eBay admission acknowledgement lost");
         },
       );
-      const handoff = new ExistingListingIntentHandoff(
+      const handoff = new AdmissionOnlyHandoff(
         database.pool,
         { createListingPushJob: vi.fn() },
         { channelId: 34, service: owner, sync: fresh },
@@ -711,7 +682,7 @@ INSERT INTO dropship.dropship_vendor_listings VALUES(1,10,40,101,'vendor-listing
       });
       const service = new ListingIntentPropagationService({
         store: repository,
-        handoff: new ExistingListingIntentHandoff(
+        handoff: new AdmissionOnlyHandoff(
           database.pool,
           { createListingPushJob: vi.fn() },
           { channelId: 34, service: await installEbayJobs(), sync },
@@ -789,7 +760,7 @@ INSERT INTO dropship.dropship_vendor_listings VALUES(1,10,40,101,'vendor-listing
       const accepted = await owner.createListingPushJob(prepared);
       expect(accepted.job.status).toBe("failed");
       const prepare = vi.fn();
-      const handoff = new ExistingListingIntentHandoff(
+      const handoff = new AdmissionOnlyHandoff(
         database.pool,
         { createListingPushJob: prepare },
         {
@@ -893,7 +864,7 @@ INSERT INTO dropship.dropship_vendor_listings VALUES(1,10,40,101,'vendor-listing
       database = await createInventoryCutoverTestDatabase(
         url,
         disposable,
-        base +
+        listingIntentBase +
           `
         INSERT INTO catalog.products(id,name,product_type,category_id,price_cents)
           SELECT n,'Page product','page',7,1000 FROM generate_series(1000,1100)n;
@@ -904,6 +875,12 @@ INSERT INTO dropship.dropship_vendor_listings VALUES(1,10,40,101,'vendor-listing
       `,
       );
       await database.pool.query(await readFile(migration, "utf8"));
+      await database.pool.query(
+        await readFile(
+          "migrations/900000019000018700001_listing_intent_lifecycle_disposition.sql",
+          "utf8",
+        ),
+      );
       repository = new PostgresListingIntentPropagationRepository(
         database.pool,
       );
@@ -942,7 +919,7 @@ INSERT INTO dropship.dropship_vendor_listings VALUES(1,10,40,101,'vendor-listing
       });
       const service = new ListingIntentPropagationService({
         store: repository,
-        handoff: new ExistingListingIntentHandoff(
+        handoff: new AdmissionOnlyHandoff(
           database.pool,
           { createListingPushJob },
           {
@@ -999,7 +976,7 @@ INSERT INTO dropship.dropship_vendor_listings VALUES(1,10,40,101,'vendor-listing
         randomUUID,
       );
       const sync = vi.fn();
-      const handoff = new ExistingListingIntentHandoff(
+      const handoff = new AdmissionOnlyHandoff(
         database.pool,
         { createListingPushJob: vi.fn() },
         { channelId: 34, service: receiptOwner, sync },
@@ -1037,7 +1014,7 @@ INSERT INTO dropship.dropship_vendor_listings VALUES(1,10,40,101,'vendor-listing
       const sync = vi.fn(async () => {
         throw failure;
       });
-      const handoff = new ExistingListingIntentHandoff(
+      const handoff = new AdmissionOnlyHandoff(
         database.pool,
         { createListingPushJob: vi.fn() },
         { channelId: 34, service: owner, sync },

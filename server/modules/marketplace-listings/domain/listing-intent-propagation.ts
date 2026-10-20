@@ -1,3 +1,4 @@
+import type { ListingIntentLifecycleEvidence } from "@shared/listing-intent-lifecycle";
 import type { DropshipListingAccessResolution } from "../../../../shared/dropship/listing-access";
 import { createHash } from "node:crypto";
 import { z } from "zod";
@@ -27,6 +28,13 @@ export interface IntentDelivery {
   changes: IntentChange[];
 }
 export type IntentHandoff =
+  | {
+      state: "waiting_lifecycle" | "not_applicable";
+      code: string;
+      message: string;
+      lifecycle: ListingIntentLifecycleEvidence;
+      resolution?: never;
+    }
   | {
       state: "delivered";
       receipt: {

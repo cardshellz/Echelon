@@ -78,3 +78,12 @@ export async function readChannelStockSelectionFacts(client: StockSelectionQuery
     }) };
   return facts;
 }
+
+/** The sync owner explicitly supersedes only idle jobs without a publication
+ * barrier. Those retained historical refusals carry no remaining execution duty. */
+export async function hasOutstandingEbayListingWork(client: StockSelectionQueryClient,
+  input: {channelId:number;connectionId:number;productId:number}):Promise<boolean> {
+  const rows=await client.query("SELECT 1 FROM channels.ebay_listing_sync_jobs WHERE channel_id=$1 AND connection_id=$2 AND product_id=$3 AND state<>'completed' AND error_code IS DISTINCT FROM 'EBAY_SYNC_SOURCE_SUPERSEDED' LIMIT 1",
+    [id.parse(input.channelId),id.parse(input.connectionId),id.parse(input.productId)]);
+  return rows.rows.length>0;
+}

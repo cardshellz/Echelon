@@ -1,3 +1,5 @@
+import { ListingIntentLifecycleService } from "./modules/marketplace-listings/application/listing-intent-lifecycle.service";
+import { PostgresListingIntentLifecycleReader } from "./modules/marketplace-listings/infrastructure/pg-listing-intent-lifecycle.reader";
 import {
   ebayListingSyncService,
   syncActiveListings,
@@ -23,6 +25,10 @@ export function createListingIntentPropagationService(): ListingIntentPropagatio
         service: ebayListingSyncService,
         sync: syncActiveListings,
       },
+      new ListingIntentLifecycleService(
+        new PostgresListingIntentLifecycleReader(pool),
+        () => new Date(),
+      ),
     ),
     now: () => new Date(),
     uuid: randomUUID,

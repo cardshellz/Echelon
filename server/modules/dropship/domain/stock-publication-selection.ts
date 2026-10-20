@@ -50,9 +50,10 @@ export function decideDropshipStockPublicationSelection(input: {
   now: Date;
   retirement?: ListingMemberRetirement | null;
 }): VariantSelection {
+  let listingSelected: boolean | undefined;
   const result = (action: VariantSelection["action"], reason: string,
     blockers: VariantSelection["blockers"] = []): VariantSelection => ({
-    productVariantId: input.productVariantId, action, reason, blockers,
+    productVariantId: input.productVariantId, action, reason, blockers, listingSelected,
   });
   const listing = input.listing;
   const archived = archivedListingMemberSelection({ productVariantId: input.productVariantId,
@@ -78,6 +79,7 @@ export function decideDropshipStockPublicationSelection(input: {
     // the same selection-only invocation used by catalog preview before ATP.
     rawAtpUnits: 0, applyMarketplaceQuantityCap: false,
   });
+  listingSelected = selection.selected && isCustomerSellableVariant(input.candidate);
   const stockEligible = input.candidate.requiresShipping === true
     && input.candidate.trackInventory !== false
     && isCustomerSellableVariant(input.candidate);

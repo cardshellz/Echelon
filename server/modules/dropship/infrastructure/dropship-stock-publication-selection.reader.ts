@@ -117,7 +117,9 @@ export async function readDropshipListingStockSelection(client: StockSelectionQu
   // preview happened or a changing stock balance. Scheduled rules affect it when
   // their effective decision changes.
   const fingerprint = createHash("sha256").update(JSON.stringify({
-    productId: input.productId, store, catalog, listings, variants,
+    productId: input.productId, store, catalog, listings,
+    // Additive listing status metadata must not invalidate existing stock proofs.
+    variants: variants.map(({ listingSelected: _listingSelected, ...stockDecision }) => stockDecision),
   })).digest("hex");
   return stockPublicationSelectionSchema.parse({ productId: input.productId, fingerprint, variants });
 }
