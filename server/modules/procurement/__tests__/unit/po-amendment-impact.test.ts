@@ -2,7 +2,10 @@ import { describe, expect, it } from "vitest";
 import type { PoQuantityAmendmentPreview } from "@shared/procurement/po-quantity-amendment";
 import { buildPoAmendmentImpact } from "../../po-amendment-impact.policy";
 import type { PoAmendmentDependencies } from "../../po-amendment-dependencies.repository";
-import { planPurchaseOrderQuantityExceptions } from "../../purchase-order-quantity-exceptions.policy";
+import {
+  planPurchaseOrderQuantityExceptions,
+  quantityVarianceLineLabel,
+} from "../../purchase-order-quantity-exceptions.policy";
 
 const line = {
   id: 11,
@@ -148,6 +151,9 @@ describe("measured PO dependency impact", () => {
 });
 
 describe("quantity exception evidence after an approved PO edit", () => {
+  const identities = [
+    { id: 11, sku: "PURCHASE-SKU", description: "Supplier description" },
+  ];
   const shortage = {
     id: 5,
     kind: "qty_short",
@@ -156,14 +162,14 @@ describe("quantity exception evidence after an approved PO edit", () => {
   };
   it("retains the original evidence while superseding a shortage corrected by the new order", () => {
     const original = structuredClone(shortage);
-    expect(planPurchaseOrderQuantityExceptions([shortage], plan(10))).toEqual([
-      { supersededIds: [5], replacement: null },
-    ]);
+    expect(
+      planPurchaseOrderQuantityExceptions([shortage], plan(10), identities),
+    ).toEqual([{ supersededIds: [5], replacement: null }]);
     expect(shortage).toEqual(original);
   });
   it("requires a new review if a changed order still has a previously raised shortage", () => {
     expect(
-      planPurchaseOrderQuantityExceptions([shortage], plan(30))[0],
+      planPurchaseOrderQuantityExceptions([shortage], plan(30), identities)[0],
     ).toMatchObject({
       supersededIds: [5],
       replacement: {
@@ -171,26 +177,35 @@ describe("quantity exception evidence after an approved PO edit", () => {
         payload: { orderedQty: 30, receivedQty: 10, shortageQty: 20 },
       },
     });
-    expect(planPurchaseOrderQuantityExceptions([], plan(30))).toEqual([
-      { supersededIds: [], replacement: null },
-    ]);
     expect(
-      planPurchaseOrderQuantityExceptions([shortage], plan(30, true))[0]
-        .replacement,
+      planPurchaseOrderQuantityExceptions([], plan(30), identities),
+    ).toEqual([{ supersededIds: [], replacement: null }]);
+    expect(
+      planPurchaseOrderQuantityExceptions(
+        [shortage],
+        plan(30, true),
+        identities,
+      )[0].replacement,
     ).toBeNull();
   });
   it("surfaces an actual overreceipt without changing the received count", () => {
     expect(
-      planPurchaseOrderQuantityExceptions([], plan(5))[0].replacement,
+      planPurchaseOrderQuantityExceptions([], plan(5), identities)[0]
+        .replacement,
     ).toMatchObject({
       kind: "qty_over",
-      payload: { orderedQty: 5, receivedQty: 10, overageQty: 5 },
+      payload: {
+        orderedQty: 5,
+        receivedQty: 10,
+        overageQty: 5,
+        sku: quantityVarianceLineLabel(identities[0]),
+      },
     });
   });
   it("leaves unrelated, dismissed, and unchanged source decisions alone", () => {
-    expect(planPurchaseOrderQuantityExceptions([shortage], plan(20))).toEqual(
-      [],
-    );
+    expect(
+      planPurchaseOrderQuantityExceptions([shortage], plan(20), identities),
+    ).toEqual([]);
     expect(
       planPurchaseOrderQuantityExceptions(
         [
@@ -199,7 +214,20 @@ describe("quantity exception evidence after an approved PO edit", () => {
           { ...shortage, id: 7, payload: { lineId: 12 } },
         ],
         plan(30),
+        identities,
       ),
     ).toEqual([{ supersededIds: [], replacement: null }]);
+  });
+  it("keeps receipt detection and PO edits on the same variance identity", () => {
+    expect(quantityVarianceLineLabel(identities[0])).toBe("PURCHASE-SKU");
+    expect(quantityVarianceLineLabel({ ...identities[0], sku: null })).toBe(
+      "Supplier description",
+    );
+    expect(
+      quantityVarianceLineLabel({ id: 11, sku: null, description: null }),
+    ).toBe("Line #11");
+    expect(() => planPurchaseOrderQuantityExceptions([], plan(5), [])).toThrow(
+      "no current PO line identity",
+    );
   });
 });

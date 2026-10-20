@@ -127,7 +127,7 @@ export async function persistQuantityAmendment(
     actorId, at: approvedAt, supersessionNote: `Superseded by admin-approved ${actionName}, revision ${revisionNumber}.`,
     messagePrefix: `PO revision ${revisionNumber}`, revisionNumber });
   const afterLines = await tx.select().from(purchaseOrderLines).where(eq(purchaseOrderLines.purchaseOrderId, header.id)).orderBy(asc(purchaseOrderLines.id));
-  const quantityExceptions = await replacePurchaseOrderQuantityExceptions(tx, source.exceptions, plan, actorId, approvedAt);
+  const quantityExceptions = await replacePurchaseOrderQuantityExceptions(tx, source.exceptions, plan, actorId, approvedAt, afterLines);
   return { revisionNumber, afterHeader, afterLines, superseded, quantityExceptions, resultingMatchSourceFingerprint: match.sourceFingerprint };
 }
 

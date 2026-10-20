@@ -14,6 +14,7 @@
  */
 
 import { createHash } from "crypto";
+import { quantityVarianceLineLabel } from "./purchase-order-quantity-exceptions.policy";
 import { synchronizePoFinancialExceptions } from "./po-financial-exceptions.service";
 import { db } from "../../db";
 import {
@@ -490,7 +491,7 @@ export async function detectQtyVariance(poId: number): Promise<void> {
   for (const line of lines) {
     const ordered = Number(line.orderQty ?? 0);
     const received = Number(line.receivedQty ?? 0);
-    const label = line.sku ?? line.description ?? `Line #${line.id}`;
+    const label = quantityVarianceLineLabel(line);
 
     if (received < ordered) {
       const shortage = ordered - received;

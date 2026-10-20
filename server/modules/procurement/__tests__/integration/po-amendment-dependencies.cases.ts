@@ -17,6 +17,7 @@ import {
 } from "../../shipment-cost-reconciliation.service";
 import { createPurchasePipelineRepository } from "../../purchase-pipeline.repository";
 import { projectPurchasePipeline } from "../../purchase-pipeline.service";
+import { computePayloadHash } from "../../po-exceptions.service";
 
 export function registerPoAmendmentDependencyCases(fixture: {
   pool: () => pg.Pool;
@@ -566,5 +567,31 @@ export function registerPoAmendmentDependencyCases(fixture: {
         )
       ).rows[0],
     ).toEqual({ status: "received", order_qty: 100, received_qty: 100 });
+  });
+  it("PO edit retains the receiving detector's identity for a remaining quantity exception", async () => {
+    await prepare();
+    await query(`INSERT INTO procurement.po_exceptions(po_id,kind,severity,status,payload,payload_hash,title)
+      VALUES(10,'qty_short','warn','open','{"lineId":21,"orderedQty":200,"receivedQty":100}','old-shortage','Old shortage')`);
+    const body = await reviewed(draft(300));
+    expect(
+      (await service().approve(10, body, "admin-user", descriptor(body)))
+        .httpStatus,
+    ).toBe(200);
+    const payload = {
+      lineId: 21,
+      orderedQty: 300,
+      receivedQty: 100,
+      shortageQty: 200,
+      sku: "AUDIT-PRODUCT",
+    };
+    expect(
+      (
+        await query(
+          "SELECT payload,payload_hash FROM procurement.po_exceptions WHERE kind='qty_short' AND status='open'",
+        )
+      ).rows,
+    ).toEqual([
+      { payload, payload_hash: computePayloadHash(10, "qty_short", payload) },
+    ]);
   });
 }
