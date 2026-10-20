@@ -2,7 +2,7 @@ import { normalizeLotCosts, lotCostNeedsReview, lotCostTotals, hasExactLotCostTo
 import { costForQuantityIntervals, validateCostQuantityIntervals, type CostQuantityInterval } from "../domain/cost-quantity-intervals";
 import { ensureLotCostQuantityBasis } from "../infrastructure/cost-quantity.repository";
 import { readCostQuantityReview } from "./cost-quantity-review";
-import { postCostReconciliation } from "../infrastructure/cost-reconciliation.repository";
+import { postCostReconciliation, readReconciliationLedger, reconciliationScope } from "../infrastructure/cost-reconciliation.repository";
 import { planCostReconciliation } from "./plan-cost-reconciliation";
 import { sql } from "drizzle-orm";
 import { canonicalJson } from "@shared/utils/canonical-json";
@@ -34,12 +34,22 @@ export interface CostComponentWriter {
     reason: string, actorId: string, tx: CostEvidenceTransaction, recordedAt?: Date, sourceRevisionId?: number): Promise<{ cogsRowsUpdated: number; totalCogsDeltaCents: number; supplierReturnAdjustments?: SupplierReturnCostAdjustment[] } | null>;
 }
 
+export interface CostApplicationOptions {
+  /** Quantity edits may update proven stock/order costs, but are not a new
+   * approval to create, reverse, or reclassify a historical expense. */
+  historicalReconciliation?: "apply" | "preserve";
+}
+
 /** One inventory owner applies a source revision through the recorded graph.
  * It owns no physical balances. Missing roots, source intervals or descendants
  * are a durable review result; partial applications are never called complete. */
 export async function applyCostRevision(
   tx: CostEvidenceTransaction, revision: RecordedCostRevision, writer: CostComponentWriter, actorId: string, now: Date,
+  options: CostApplicationOptions = {},
 ): Promise<CostRevisionApplicationResult> {
+  const historicalReconciliation = options.historicalReconciliation ?? "apply";
+  if (!["apply", "preserve"].includes(historicalReconciliation))
+    throw new CostEvidenceError("COST_APPLICATION_POLICY_INVALID", "Unsupported historical cost policy.");
   if (!actorId?.trim() || !(now instanceof Date) || !Number.isFinite(now.getTime())) throw new CostEvidenceError("COST_AUDIT_IDENTITY_REQUIRED", "Cost application requires an actor and valid clock.");
   await lockInventoryCostGraph(tx);
   const source = revision.contract;
@@ -57,6 +67,16 @@ export async function applyCostRevision(
   const roots = rootsResult.rows;
   const rootIds = roots.map((root) => costInteger(root.inventory_lot_id, "root.inventoryLotId", 1));
   const issues: CostIssue[] = [];
+  if (historicalReconciliation === "preserve") {
+    const ledger = await readReconciliationLedger(tx, reconciliationScope(source));
+    if (ledger.balances.historical_cogs > 0 || ledger.balances.inventory_variance > 0) {
+      // Do not duplicate an existing expense by adding the same amount to
+      // inventory/order costs. The quantity correction can still be saved;
+      // replacing that posting belongs to the explicit reconciliation owner.
+      issues.push({ code: "COST_EXISTING_POSTING_PRESERVED", message:
+        "An earlier approved cost adjustment is preserved. Review its stock links before applying this cost again." });
+    }
+  }
   if (source.evidence === "unknown" || source.evidence === "review_required") issues.push(source.issue!);
   if (source.currency !== "USD") issues.push({ code: "COST_CURRENCY_REVIEW", message: "The current inventory posting owner requires explicit USD source evidence." });
   if (source.totalMills === null || source.basePieces === null || source.totalMills < 0) issues.push({ code: "COST_SOURCE_NOT_APPLICABLE", message: "The source needs an explicit amount, quantity basis and supported signed-credit disposition." });
@@ -226,10 +246,11 @@ export async function applyCostRevision(
   }
   const allIssues = [...issues, ...quantityReviews];
   const receivedBasePieces = roots.reduce((sum,root) => sum + BigInt(String(root.received_variant_qty))*BigInt(String(root.units_per_variant_snapshot)),BigInt(0));
-  const reconciliation = await planCostReconciliation(tx,revision,allIssues,
+  const reconciliation = historicalReconciliation === "preserve" ? null : await planCostReconciliation(tx,revision,allIssues,
     issues.length===0 && source.basePieces!==null && receivedBasePieces===BigInt(source.basePieces));
   const identity = { costAllocationVersion: writer.revalueExactComponent ? 3 : 1, sourceRevisionId: revision.id, lotIds, graph: edgeResult.rows, issues: allIssues,
     ...(reconciliation ? { reconciliation:reconciliation.identity } : {}),
+    ...(historicalReconciliation === "preserve" ? { historicalReconciliation } : {}),
     targets: targets.map((target) => ({ id: target.lot.id, unitMills: target.unitMills, remainderMills: target.remainderMills,
       allocatedMills: target.allocatedMills, quantity: target.quantity })) };
   const planFingerprint = costFingerprint(identity);

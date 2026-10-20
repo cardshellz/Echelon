@@ -10,6 +10,7 @@ import { lockInventoryCostGraph } from "../inventory/infrastructure/cost-evidenc
 import { deriveShipmentCostAdjustment } from "./domain/shipment-cost-adjustment";
 import { recordShipmentCostRevisions, applyShipmentCostRevisions } from "./shipment-cost-application.service";
 import { COGSService } from "../inventory/cogs.service";
+import type { CostApplicationOptions } from "../inventory/application/apply-cost-revision";
 /**
  * Inbound Shipment Tracking + Landed Cost Allocation Service
  *
@@ -1535,7 +1536,7 @@ export function createShipmentTrackingService(
 
   /** The operator's single cost update: fresh allocation, audited snapshots and
    * downstream revaluation share the financial command's transaction and clock. */
-  async function updateCostsInTransaction(tx: any, shipmentId: number, body: unknown, actorId: string, now: Date) {
+  async function updateCostsInTransaction(tx: any, shipmentId: number, body: unknown, actorId: string, now: Date, options: CostApplicationOptions = {}) {
     shipmentCostWorkflowIdSchema.parse(shipmentId);
     shipmentCostUpdateInputSchema.parse(body);
     if (!tx || typeof tx.execute !== "function" || typeof tx.insert !== "function") {
@@ -1551,7 +1552,7 @@ export function createShipmentTrackingService(
     await lockInventoryCostGraph(tx);
     const shipment = await lockShipment(tx, shipmentId);
     const finalization = await finalizeAllocationsInTransaction(tx, shipment, actorId, now);
-    const application = await applyShipmentCostRevisions(tx, shipmentId, new COGSService(tx), actorId, now);
+    const application = await applyShipmentCostRevisions(tx, shipmentId, new COGSService(tx), actorId, now, options);
     return { ...shipmentCostUpdateResultSchema.parse({ ...application, shipmentId,
       finalizedLines: finalization.finalized, adjustments: finalization.adjustments }),
       costApplications: application.costApplications };
@@ -1559,11 +1560,11 @@ export function createShipmentTrackingService(
 
   /** A quantity amendment refreshes open shipment allocations without pretending
    * that an unfinalized shipment has posted inventory costs. */
-  async function refreshQuantityAllocationInTransaction(tx: any, shipmentId: number, actorId: string, now: Date) {
+  async function refreshQuantityAllocationInTransaction(tx: any, shipmentId: number, actorId: string, now: Date, options: CostApplicationOptions = {}) {
     await lockInventoryCostGraph(tx);
     const shipment = await lockShipment(tx, shipmentId);
     await recomputeShipmentTotals(shipmentId, tx, now);
-    if (["costing", "closed"].includes(shipment.status)) return updateCostsInTransaction(tx, shipmentId, {}, actorId, now);
+    if (["costing", "closed"].includes(shipment.status)) return updateCostsInTransaction(tx, shipmentId, {}, actorId, now, options);
     if (shipment.status === "cancelled") throw new ShipmentTrackingError("Cancelled shipment quantities cannot be corrected.", 409);
     await runAllocationInTransaction(tx, shipmentId, shipment, now);
     return { costApplications: [] };

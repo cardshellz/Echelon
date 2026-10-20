@@ -1,3 +1,7 @@
+import {
+  createShipmentCostReconciliationService,
+  shipmentReconciliationScope,
+} from "../../shipment-cost-reconciliation.service";
 import { randomUUID } from "node:crypto";
 import { sql } from "drizzle-orm";
 import { expect, it } from "vitest";
@@ -824,26 +828,158 @@ export function registerQuantityCorrectionCases(fixture: {
       expect(await snapshot()).toEqual(before);
     }
   });
-  it("quantity correction can post explicitly approved historical freight without inventing stock or sales", async () => {
+  it.each([false, true])(
+    "saves 200,000 shipment and receipt pieces without expensing missing cost links (unlinked sales: %s)",
+    async (unlinkedSales) => {
+      await prepare(false, 20000, 20);
+      await query(`UPDATE procurement.purchase_order_lines SET order_qty=200000 WHERE id=21;
+      UPDATE procurement.inbound_shipment_lines SET qty_shipped=20000,carton_count=20,dimension_basis='carton',units_per_variant_snapshot=NULL WHERE id=11;
+      UPDATE procurement.receiving_lines SET units_per_variant_snapshot=NULL,inbound_shipment_line_id=NULL,cost_source_kind=NULL WHERE id=62;
+      UPDATE procurement.inbound_freight_costs SET actual_cents=129838 WHERE id=31;
+      INSERT INTO inventory.inventory_lots(id,lot_number,product_variant_id,warehouse_location_id,qty_received,qty_on_hand,receiving_order_id,inbound_shipment_id,notes,received_at)
+        VALUES(502,'HISTORICAL-TRANSFER',200,99,20,0,60,1,'Transfer','2026-09-01');
+      INSERT INTO inventory.inventory_transactions(transaction_type,product_variant_id,from_location_id,to_location_id,variant_qty_delta,variant_qty_before,variant_qty_after,reference_type)
+        VALUES('transfer',200,99,99,20,20,0,'internal');`);
+      if (unlinkedSales)
+        await query(`INSERT INTO oms.order_item_costs(order_id,order_item_id,inventory_lot_id,product_variant_id,qty,
+      unit_cost_cents,total_cost_cents,unit_cost_mills,total_cost_mills,cost_precision_version)
+      VALUES(1,1,502,200,1,123,123,12300,12300,1)`);
+      const soldBefore = (
+        await query("SELECT * FROM oms.order_item_costs ORDER BY id")
+      ).rows;
+      await fixture
+        .database()
+        .transaction((tx) =>
+          fixture
+            .shipments()
+            .updateCostsInTransaction(tx, 1, {}, "admin-user", fixture.at),
+        );
+      const body = {
+        ...(await request()),
+        shippedPieces: 200000,
+        receipts: [{ receiptLineId: 62, receivedPieces: 200000 }],
+      };
+      const before = await snapshot();
+      const preview = await service().preview(11, body, "admin-user");
+      expect(await snapshot()).toEqual(before);
+      expect(preview.summary).toMatchObject({
+        shipmentPieces: { before: 20000, after: 200000 },
+        shipmentChargeCents: { before: 129838, after: 129838 },
+        chargePerPiece: { before: "0.064919", after: "0.006492" },
+        historicalCost: {
+          requiresDecision: false,
+          beforeMills: 0,
+          afterMills: 0,
+        },
+        shipmentCostReview: {
+          beforeUnassignedMills: 12983800,
+          afterUnassignedMills: 12983800,
+          needsHistoryReview: true,
+          affectedLots: [
+            {
+              lotId: 501,
+              lotNumber: "CORRECTION-LOT",
+              receiptId: 60,
+              receivedUnits: 20,
+              onHandUnits: 0,
+            },
+          ],
+        },
+      });
+      const input = { ...body, previewVersion: preview.previewVersion },
+        command = descriptor(input);
+      const result = await service().approve(11, input, "admin-user", command);
+      expect(result.httpStatus, JSON.stringify(result.body)).toBe(200);
+      expect(
+        quantityCorrectionContextSchema.parse(result.body).receipts[0],
+      ).toMatchObject({
+        receivedPieces: 200000,
+        piecesPerUnit: 10000,
+        receivedUnits: 20,
+      });
+      const after = await snapshot();
+      expect(after.shipment[0].qty_shipped).toBe(200000);
+      expect(after.transactions).toEqual(before.transactions);
+      expect(after.lots).toEqual(before.lots);
+      expect(after.ledger).toEqual([]);
+      // A real sale on another lot with the same SKU is not sufficient evidence
+      // to assign this receipt's charge without its immutable transfer link.
+      expect(
+        (await query("SELECT * FROM oms.order_item_costs ORDER BY id")).rows,
+      ).toEqual(soldBefore);
+      expect(
+        (
+          await query(
+            "SELECT count(*)::int AS count FROM inventory.cost_reconciliation_approvals",
+          )
+        ).rows[0].count,
+      ).toBe(0);
+      expect(after.audit).toHaveLength(1);
+      expect(
+        (await service().approve(11, input, "admin-user", command)).httpStatus,
+      ).toBe(200);
+      expect(await snapshot()).toEqual(after);
+      const outcome = (
+        await query(
+          "SELECT status,evidence FROM inventory.cost_applications WHERE source_revision_id IN (SELECT id FROM procurement.cost_source_revisions WHERE inbound_shipment_line_id=11) ORDER BY id DESC LIMIT 1",
+        )
+      ).rows[0];
+      expect(outcome.status).toBe("review_required");
+      expect(outcome.evidence.result.issues).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ code: "COST_HISTORICAL_LINEAGE_MISSING" }),
+        ]),
+      );
+    },
+  );
+  it.each(["historical_cogs", "inventory_variance"])(
+    "rejects an expense destination on quantity correction: %s",
+    async (destination) => {
+      await prepare(false);
+      const before = await snapshot(),
+        body = { ...(await request()), historicalCostDestination: destination };
+      await expect(service().preview(11, body, "admin-user")).rejects.toThrow();
+      const input = { ...body, previewVersion: "a".repeat(64) };
+      await expect(
+        service().approve(11, input, "admin-user", descriptor(input)),
+      ).rejects.toThrow();
+      expect(await snapshot()).toEqual(before);
+    },
+  );
+  it("preserves existing historical approvals and postings instead of reusing them as quantity-edit authority", async () => {
     await prepare(false);
-    // Historical receipt and manifest links can be incomplete. The saved PO
-    // receipt posting proves the prior pieces; today's catalog is not authority.
-    await query(`UPDATE procurement.receiving_lines SET units_per_variant_snapshot=NULL,inbound_shipment_line_id=NULL WHERE id=62;
-      UPDATE procurement.inbound_shipment_lines SET product_variant_id=NULL,units_per_variant_snapshot=NULL WHERE id=11;
-      UPDATE catalog.product_variants SET units_per_variant=5000 WHERE id=200;`);
-    const body = {
-      ...(await request()),
-      historicalCostDestination: "historical_cogs" as const,
+    const reconciliation = createShipmentCostReconciliationService(
+      fixture.database(),
+      () => fixture.at,
+    );
+    const current = await reconciliation.context(11, "admin-user");
+    const approval = {
+      sourceVersion: current.sourceVersion,
+      destination: "historical_cogs" as const,
+      reason: "Historical sale separately confirmed by the administrator",
     };
-    const before = await snapshot(),
+    const posted = await reconciliation.reconcile(11, approval, "admin-user", {
+      ...shipmentReconciliationScope(11),
+      actorType: "user",
+      actorId: "admin-user",
+      contractVersion: 1,
+      idempotencyKey: randomUUID(),
+      requestHash: costFingerprint(approval),
+    });
+    expect(posted.httpStatus, JSON.stringify(posted.body)).toBe(200);
+    const ledger = (await snapshot()).ledger;
+    const approvals = (
+      await query(
+        "SELECT * FROM inventory.cost_reconciliation_approvals ORDER BY id",
+      )
+    ).rows;
+    const body = await request(),
       preview = await service().preview(11, body, "admin-user");
     expect(preview.summary.historicalCost).toMatchObject({
       requiresDecision: false,
-      beforeMills: 0,
+      beforeMills: 500000,
       afterMills: 500000,
-      destination: "historical_cogs",
     });
-    expect(await snapshot()).toEqual(before);
     const input = { ...body, previewVersion: preview.previewVersion };
     const result = await service().approve(
       11,
@@ -852,80 +988,14 @@ export function registerQuantityCorrectionCases(fixture: {
       descriptor(input),
     );
     expect(result.httpStatus, JSON.stringify(result.body)).toBe(200);
-    expect(
-      quantityCorrectionContextSchema.parse(result.body).receipts[0],
-    ).toMatchObject({
-      receivedPieces: 1000,
-      piecesPerUnit: 500,
-      receivedUnits: 2,
-      unitWasRecorded: true,
-    });
-    expect((await snapshot()).transactions).toEqual(before.transactions);
+    expect((await snapshot()).ledger).toEqual(ledger);
     expect(
       (
         await query(
-          "SELECT count(*)::int AS count FROM inventory.cost_reconciliation_postings WHERE destination='historical_cogs'",
-        )
-      ).rows[0].count,
-    ).toBe(1);
-    expect(
-      (
-        await query(
-          "SELECT count(*)::int AS count FROM inventory.lot_cost_origins",
-        )
-      ).rows[0].count,
-    ).toBe(0);
-    const ledger = (await snapshot()).ledger;
-    const next = {
-      ...(await request()),
-      shippedPieces: 2000,
-      receipts: [{ receiptLineId: 62, receivedPieces: 2000 }],
-    };
-    const repeated = await service().preview(11, next, "admin-user");
-    expect(repeated.summary.historicalCost).toMatchObject({
-      requiresDecision: false,
-      beforeMills: 500000,
-      afterMills: 500000,
-      destination: "historical_cogs",
-    });
-    const nextInput = { ...next, previewVersion: repeated.previewVersion };
-    expect(
-      (
-        await service().approve(
-          11,
-          nextInput,
-          "admin-user",
-          descriptor(nextInput),
-        )
-      ).httpStatus,
-    ).toBe(200);
-    expect(
-      (await snapshot()).ledger.filter((row) =>
-        ledger.some((original) => original.id === row.id),
-      ),
-    ).toEqual(ledger);
-    expect(
-      (
-        await query(
-          "SELECT sum(delta_mills)::text AS amount FROM inventory.cost_reconciliation_postings WHERE destination='historical_cogs'",
+          "SELECT * FROM inventory.cost_reconciliation_approvals ORDER BY id",
         )
       ).rows,
-    ).toEqual([{ amount: "500000" }]);
-  });
-  it("quantity correction requires the historical accounting decision on the server", async () => {
-    await prepare(false);
-    const body = await request(),
-      before = await snapshot();
-    const preview = await service().preview(11, body, "admin-user");
-    expect(preview.summary.historicalCost.requiresDecision).toBe(true);
-    const input = { ...body, previewVersion: preview.previewVersion };
-    expect(
-      await service().approve(11, input, "admin-user", descriptor(input)),
-    ).toMatchObject({
-      httpStatus: 409,
-      body: { code: "QUANTITY_CORRECTION_DESTINATION_REQUIRED" },
-    });
-    expect(await snapshot()).toEqual(before);
+    ).toEqual(approvals);
   });
   it("quantity correction refreshes open shipment allocation without posting its stale cost snapshot", async () => {
     await prepare();
@@ -940,6 +1010,7 @@ export function registerQuantityCorrectionCases(fixture: {
     ).rows;
     const preview = await service().preview(11, body, "admin-user");
     expect(preview.summary.landedCostCents.after).toBeNull();
+    expect(preview.summary.shipmentCostReview?.afterUnassignedMills).toBeNull();
     expect(preview.summary.costResults).toContainEqual(
       expect.objectContaining({
         component: "landed",

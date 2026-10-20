@@ -212,7 +212,8 @@ export function registerSupplierCreditCostCases(fixture: {
     // The count writer must wait behind the same graph fence used by the cost proof.
     // Observe PostgreSQL's actual blocker relationship rather than relying on elapsed time.
     const graphLease = await fixture.pool().connect();
-    let countEdit: Promise<unknown> | undefined;
+    let countEdit: ReturnType<ReceivingService["updateLine"]> | undefined;
+    let refreshedVersion: string | undefined;
     try {
       await graphLease.query("BEGIN");
       const blocker = (await graphLease.query("SELECT pg_backend_pid() AS pid")).rows[0].pid;
@@ -221,24 +222,25 @@ export function registerSupplierCreditCostCases(fixture: {
         receivedQty: 0, expectedUnitVersion: receivingUnitVersion(fullReceipt.line),
       }, fixture.actorId);
       // Attach rejection handling immediately while observing the waiting connection.
-      const observedEdit = countEdit.then(() => ({ ok: true as const }), error => ({ ok: false as const, error }));
+      const observedEdit = countEdit.then(line => ({ ok: true as const, line }), error => ({ ok: false as const, error }));
       await expect.poll(async () => (await query(
         "SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE $1::int=ANY(pg_blocking_pids(pid)) AND wait_event_type='Lock') AS waiting", [blocker],
       )).rows[0].waiting, { timeout: 5000 }).toBe(true);
       await graphLease.query("COMMIT");
       const outcome = await observedEdit;
       if (!outcome.ok) throw outcome.error;
+      refreshedVersion = outcome.line.unitVersion;
     } finally {
       await graphLease.query("ROLLBACK");
       graphLease.release();
       await countEdit?.catch(() => undefined);
     }
-    // Use the saved post-edit timestamp when rebuilding the reviewed unit fingerprint.
-    const refreshedUnit = (await query("SELECT updated_at FROM procurement.receiving_lines WHERE id=$1", [Number(fullReceipt.line.id)])).rows[0];
-    const refreshedLine = { ...fullReceipt.line, receivedQty: 0, updatedAt: refreshedUnit.updated_at };
+    // Use the owner's returned fingerprint, just as the UI does. Reading a
+    // timestamp without time zone through raw pg can change its interpretation.
+    expect(refreshedVersion).toMatch(/^[a-f0-9]{64}$/);
     const fullIntake = await fixture.database().transaction(tx => executeReceivingCustodyCommand(tx, fixture.receiving(), {
       command: "intake", resourceId: fullReceipt.receiptId, actorId: "admin-user", at: fixture.at, commandKey: randomUUID(),
-      body: { kind: "receipt_line", receivingLineId: Number(fullReceipt.line.id), expectedUnitVersion: receivingUnitVersion(refreshedLine),
+      body: { kind: "receipt_line", receivingLineId: Number(fullReceipt.line.id), expectedUnitVersion: refreshedVersion,
         acceptedQty: 0, heldQty: 2, countsReviewed: true, holdingLocationId: 100, condition: "damaged", reason: "All cases damaged", evidenceReference: "INSPECT-FULL" },
     }));
     await fixture.database().transaction(tx => executeReceivingCustodyCommand(tx, fixture.receiving(), {
