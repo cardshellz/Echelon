@@ -4,7 +4,7 @@ A posted receipt can contain a mistaken pieces-per-receiving-unit conversion eve
 
 ## Scope
 
-- One shared review opened from a receipt, shipment or purchase order.
+- **Edit shipment** on the shipment page changes shipped pieces. **Correct received quantities** is available on the receipt page only.
 - Explicit correction of shipped pieces and the piece quantities of linked posted receipt lines.
 - Preserve physical receiving-unit counts, stock movements, ordered quantities, invoices and supplier charges.
 - Show document identities, current and proposed piece conversions, PO received balance, charge allocation and downstream cost results before approval.
@@ -20,13 +20,21 @@ This corrects the piece meaning of already handled receiving units. Changing phy
 
 ## Implementation and authority
 
-`ReceiptShipmentQuantityCorrection` is the same editor on the PO, shipment and closed receipt. The server resolves receipt links using persisted relationships; a historical unlinked receipt must identify exactly one shipment line. It never copies today's catalog conversion into old receipts without an explicit reviewed correction.
+`ShipmentQuantityEditor` and `ReceiptShipmentQuantityCorrection` share the review and approval UI, with separate shipment and receipt inputs. A shipment edit accepts no received quantities: the server loads them under lock and preserves posted receipt rows, PO receipt postings, received totals, cost origins, and stock movements. The shipment page shows saved receipt quantities with links to their owning receipts.
+
+The shipment input is available for any non-cancelled shipment. Before receiving, new receipts use its current quantity. When one linked receipt is still open, the same transaction refreshes its expected units from shipped pieces minus posted receipts, using that receipt's saved unit conversion. Entered received/damaged counts stay unchanged. Multiple open receipts or missing/ambiguous unit evidence require resolving the named receipt first; the editor links directly to it rather than guessing a split.
+
+The server resolves receipt links using persisted relationships; a historical unlinked receipt must identify exactly one shipment line. It never copies today's catalog conversion into old receipts without an explicit reviewed correction.
 
 `planQuantityCorrection` validates receipt coverage, whole-unit conversions, PO capacity and existing origin intervals. It preserves interval gaps and computes the corrected received balance. `correctedReceiptLifecycle` preserves an already closed PO and updates the receiving progress of an open PO.
 
 `createReceiptShipmentQuantityCorrectionService` orchestrates the existing purchase, shipment and COGS owners under the inventory cost-graph lock and source row locks. Preview runs those owners in a savepoint and rolls it back. Approval requires the same source and impact fingerprints, current Administrator authority, a reason and source confirmation. Financial-command identity makes retries replay the saved response; concurrent different commands cannot approve the same source twice. Unexpected failures roll back all document and cost writes.
 
 The transaction recomputes invoice matching against the corrected receipts without changing invoice amounts, ordered quantities or payment records. Closed and costing shipments refresh finalized costs; earlier shipment stages refresh allocations and explicitly retain the finalization action. The workflow does not publish an obsolete snapshot as newly posted costs.
+
+Shipment edits recompute physical totals for measurements per piece and preserve measurements per carton. Shipment header totals, allocation bases, exact landed costs, inventory and sold-order costs use their existing owners. The preview shows receiving expectations, actual receipt counts, physical totals, cost totals and downstream postings. Shared purchasing invalidation refreshes the shipment, receipts, PO, inventory, finance and dashboard reads after approval or an ambiguous response.
+
+`/api/shipment-lines/:id/shipment-edit` has a separate financial-command scope from receipt corrections. Both endpoints require current Administrator membership and purchasing approval. They share the locked preview/apply transaction, immutable amendment records, stale-preview checks and idempotent command results. Existing receipt APIs and historical approval payloads remain readable.
 
 When historical stock has no provable destination, the existing reconciliation policy determines whether an explicit historical COGS or inventory-expense decision is eligible. An eligible unresolved decision is required on the server before approval. An existing approved destination is carried forward, preserving its original immutable records. Other missing supplier evidence or protected costs stay visible with the existing cost-resolution actions inside the same review.
 
@@ -43,4 +51,4 @@ The migration is additive and must deploy before the application uses the effect
 
 Domain and HTTP tests cover invalid quantities, conflicting ownership, capacity, partial receipts, closed PO status, permissions and command scope. Disposable PostgreSQL tests use the real receiving, supplier-cost, shipment-cost, inventory transfer and sold-COGS owners. Cases cover preview rollback, exact posting, duplicate submission, concurrency, stale evidence, revoked authority, downstream failure, retained historical approval, explicit accounting decisions, unfinalized shipments and later receipts after interval amendments.
 
-Desktop and mobile browser tests exercise the shared editor from PO, shipment and receipt, before/after review, saved approval details, non-admin access, and retry after a lost response. These browser cases use fictional API fixtures; they do not constitute production acceptance.
+Desktop and mobile browser tests exercise the shipment and receipt entry points, read-only posted receipts on shipment edits, before/after review, saved approval details, non-admin access, and retry after a lost response. PostgreSQL cases include a 20,000-to-200,000 manifest correction with an already-correct receipt, pending receipt expectations, physical totals, transferred stock and sold COGS. These cases use fictional data; they do not constitute production acceptance.

@@ -1,8 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { quantityCorrectionInputSchema } from "@shared/procurement/receipt-shipment-quantity-correction";
+import {
+  quantityCorrectionInputSchema,
+  shipmentQuantityEditInputSchema,
+} from "@shared/procurement/receipt-shipment-quantity-correction";
 import {
   planQuantityCorrection,
   correctedReceiptLifecycle,
+  planShipmentReceiptExpectations,
   type QuantityCorrectionFacts,
 } from "../../domain/receipt-shipment-quantity-correction";
 
@@ -55,6 +59,69 @@ const input = () =>
     evidenceConfirmed: true,
   });
 describe("receipt/shipment quantity correction plan", () => {
+  it("shipment edits preserve posted receipts, their conversions and cost origins", () => {
+    const source = facts();
+    const request = {
+      ...input(),
+      receipts: [{ receiptLineId: 21, receivedPieces: 200 }],
+    };
+    const plan = planQuantityCorrection(source, request, "shipment");
+    expect(plan.poReceivedPieces).toBe(source.poReceivedPieces);
+    expect(plan.origins).toEqual(source.origins);
+    expect(plan.receipts[0]).toMatchObject({
+      afterPieces: 200,
+      afterPiecesPerUnit: 100,
+    });
+    expect(() => planQuantityCorrection(source, input(), "shipment")).toThrow(
+      "cannot change received quantities",
+    );
+    expect(shipmentQuantityEditInputSchema.safeParse(request).success).toBe(
+      false,
+    );
+    const { receipts: _, ...shipmentInput } = request;
+    expect(shipmentQuantityEditInputSchema.parse(shipmentInput)).toEqual(
+      shipmentInput,
+    );
+  });
+  it("a shipment edit supports unreceived goods without creating stock or receipt evidence", () => {
+    const source = {
+      ...facts(),
+      receipts: [],
+      origins: [],
+      poReceivedPieces: 0,
+    };
+    const plan = planQuantityCorrection(
+      source,
+      { ...input(), receipts: [] },
+      "shipment",
+    );
+    expect(plan.receipts).toEqual([]);
+    expect(plan.origins).toEqual([]);
+    expect(plan.poReceivedPieces).toBe(0);
+  });
+  it("only refreshes expected units on an open receipt, preserving its count and unit", () => {
+    const pending = {
+      receiptId: 70,
+      receiptLineId: 71,
+      receiptNumber: "RCV-OPEN",
+      expectedUnits: 2,
+      receivedUnits: 1,
+      piecesPerUnit: 100,
+    };
+    expect(
+      planShipmentReceiptExpectations([pending], 2000, BigInt(200)),
+    ).toEqual([{ ...pending, afterExpectedUnits: 18 }]);
+    expect(() =>
+      planShipmentReceiptExpectations([pending], 2001, BigInt(200)),
+    ).toThrow("receiving unit");
+    expect(() =>
+      planShipmentReceiptExpectations(
+        [pending, { ...pending, receiptLineId: 72 }],
+        2000,
+        BigInt(200),
+      ),
+    ).toThrow("More than one");
+  });
   it("changes the base-piece meaning, preserves handled units and shifts later purchase intervals", () => {
     const source = facts(),
       before = structuredClone(source);

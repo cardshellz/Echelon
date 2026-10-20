@@ -30,6 +30,7 @@ export function registerInboundShipmentRoutes(app: Express) {
   registerShipmentInvoiceRoutes(app);
   const { shipmentTracking } = app.locals.services;
   registerReceiptShipmentQuantityCorrectionRoutes(app, createReceiptShipmentQuantityCorrectionService(db, shipmentTracking, () => new Date()));
+  registerReceiptShipmentQuantityCorrectionRoutes(app, createReceiptShipmentQuantityCorrectionService(db, shipmentTracking, () => new Date(), "shipment"), "shipment");
   const shipmentCostCommands = createShipmentCostCommands(shipmentTracking);
   const shipmentCreateCommands = createShipmentCreateCommands(shipmentTracking);
   const shipmentLineCommands = createShipmentLineCommands(shipmentTracking);

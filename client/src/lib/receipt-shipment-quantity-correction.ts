@@ -3,6 +3,8 @@ import {
   quantityCorrectionApprovalSchema,
   quantityCorrectionContextSchema,
   quantityCorrectionId,
+  shipmentQuantityEditApprovalSchema,
+  type QuantityCorrectionPurpose,
 } from "@shared/procurement/receipt-shipment-quantity-correction";
 import {
   createFinancialCommandIntentStore,
@@ -10,13 +12,21 @@ import {
   FinancialCommandRequestError,
 } from "./financial-command";
 
-export function createQuantityCorrectionClient(generateKey: () => string) {
+export function createQuantityCorrectionClient(
+  generateKey: () => string,
+  purpose: QuantityCorrectionPurpose = "receipt",
+) {
   const intent = createFinancialCommandIntentStore(generateKey);
   let pending: string | null = null;
   return {
     async approve(lineId: number, input: unknown) {
       quantityCorrectionId.parse(lineId);
-      const body = quantityCorrectionApprovalSchema.parse(input),
+      const receiptInput =
+        purpose === "receipt"
+          ? quantityCorrectionApprovalSchema.parse(input)
+          : null;
+      const body =
+          receiptInput ?? shipmentQuantityEditApprovalSchema.parse(input),
         fingerprint = canonicalJson({ lineId, body });
       if (pending !== null && pending !== fingerprint)
         throw new FinancialCommandRequestError(
@@ -32,7 +42,7 @@ export function createQuantityCorrectionClient(generateKey: () => string) {
       pending = fingerprint;
       try {
         const raw = await financialCommandFetchJson(
-          `/api/shipment-lines/${lineId}/quantity-correction`,
+          `/api/shipment-lines/${lineId}/${purpose === "shipment" ? "shipment-edit" : "quantity-correction"}`,
           {
             method: "POST",
             credentials: "include",
@@ -52,12 +62,20 @@ export function createQuantityCorrectionClient(generateKey: () => string) {
           saved.sourceVersion !== body.sourceVersion ||
           saved.reason !== body.reason ||
           saved.summary.shipmentPieces.after !== body.shippedPieces ||
-          body.receipts.some(
-            (receipt) =>
-              saved.summary.receipts.find(
-                (row) => row.receiptLineId === receipt.receiptLineId,
-              )?.afterPieces !== receipt.receivedPieces,
-          )
+          (receiptInput !== null &&
+            receiptInput.receipts.some(
+              (receipt) =>
+                saved.summary.receipts.find(
+                  (row) => row.receiptLineId === receipt.receiptLineId,
+                )?.afterPieces !== receipt.receivedPieces,
+            )) ||
+          (purpose === "shipment" &&
+            (saved.summary.purpose !== "shipment" ||
+              saved.summary.receipts.some(
+                (receipt) =>
+                  receipt.afterPieces !== receipt.receivedPieces ||
+                  receipt.afterPiecesPerUnit !== receipt.piecesPerUnit,
+              )))
         )
           throw new FinancialCommandRequestError(
             "The saved correction could not be verified. Retry the same approval.",

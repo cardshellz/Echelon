@@ -4,6 +4,9 @@ import {
   quantityCorrectionId,
   quantityCorrectionInputSchema,
   quantityCorrectionApprovalSchema,
+  shipmentQuantityEditInputSchema,
+  shipmentQuantityEditApprovalSchema,
+  type QuantityCorrectionPurpose,
 } from "@shared/procurement/receipt-shipment-quantity-correction";
 import { requirePermission } from "../../routes/middleware";
 import { financialCommandFromRequest } from "../../platform/commands/http-command";
@@ -28,8 +31,9 @@ type Service = ReturnType<
 export function registerReceiptShipmentQuantityCorrectionRoutes(
   app: Express,
   service: Service,
+  purpose: QuantityCorrectionPurpose = "receipt",
 ) {
-  const root = "/api/shipment-lines/:id/quantity-correction";
+  const root = quantityCorrectionScope(1, purpose).routeTemplate;
   const identity = (req: Request) => {
     if (!req.session.user?.id)
       throw new FinancialCommandError(
@@ -66,9 +70,13 @@ export function registerReceiptShipmentQuantityCorrectionRoutes(
       // Database exceptions may contain source values or connection details.
       // Keep the diagnostic code and request context without logging that text.
       error_code:
-        error && typeof error === "object" && "code" in error &&
-        typeof error.code === "string" && /^[A-Z0-9_]{1,64}$/.test(error.code)
-          ? error.code : undefined,
+        error &&
+        typeof error === "object" &&
+        "code" in error &&
+        typeof error.code === "string" &&
+        /^[A-Z0-9_]{1,64}$/.test(error.code)
+          ? error.code
+          : undefined,
     });
     if (error instanceof FinancialCommandError)
       res.set(error.responseHeaders ?? {});
@@ -100,30 +108,32 @@ export function registerReceiptShipmentQuantityCorrectionRoutes(
       failure(error, req, res);
     }
   });
-  app.get(
-    "/api/receiving-lines/:id/quantity-correction",
-    requirePermission("purchasing", "view"),
-    async (req, res) => {
-      try {
-        const { id, actorId } = identity(req);
-        res.json(await service.receiptContext(id, actorId));
-      } catch (error) {
-        failure(error, req, res);
-      }
-    },
-  );
-  app.get(
-    "/api/purchase-orders/:id/quantity-corrections",
-    requirePermission("purchasing", "view"),
-    async (req, res) => {
-      try {
-        const { id } = identity(req);
-        res.json(await service.options(id));
-      } catch (error) {
-        failure(error, req, res);
-      }
-    },
-  );
+  if (purpose === "receipt")
+    app.get(
+      "/api/receiving-lines/:id/quantity-correction",
+      requirePermission("purchasing", "view"),
+      async (req, res) => {
+        try {
+          const { id, actorId } = identity(req);
+          res.json(await service.receiptContext(id, actorId));
+        } catch (error) {
+          failure(error, req, res);
+        }
+      },
+    );
+  if (purpose === "receipt")
+    app.get(
+      "/api/purchase-orders/:id/quantity-corrections",
+      requirePermission("purchasing", "view"),
+      async (req, res) => {
+        try {
+          const { id } = identity(req);
+          res.json(await service.options(id));
+        } catch (error) {
+          failure(error, req, res);
+        }
+      },
+    );
   app.post(
     `${root}/preview`,
     requirePermission("purchasing", "approve"),
@@ -133,7 +143,10 @@ export function registerReceiptShipmentQuantityCorrectionRoutes(
         res.json(
           await service.preview(
             id,
-            quantityCorrectionInputSchema.parse(req.body),
+            (purpose === "shipment"
+              ? shipmentQuantityEditInputSchema
+              : quantityCorrectionInputSchema
+            ).parse(req.body),
             actorId,
           ),
         );
@@ -148,10 +161,14 @@ export function registerReceiptShipmentQuantityCorrectionRoutes(
     async (req, res) => {
       try {
         const { id, actorId } = identity(req),
-          input = quantityCorrectionApprovalSchema.parse(req.body);
+          input = (
+            purpose === "shipment"
+              ? shipmentQuantityEditApprovalSchema
+              : quantityCorrectionApprovalSchema
+          ).parse(req.body);
         const descriptor = financialCommandFromRequest(req, {
           actorId,
-          ...quantityCorrectionScope(id),
+          ...quantityCorrectionScope(id, purpose),
         });
         const result = await service.approve(id, input, actorId, descriptor);
         logger.info("procurement.receipt_shipment_quantity_correction", {
