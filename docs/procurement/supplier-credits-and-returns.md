@@ -31,7 +31,7 @@ Unknown responses retain the submitted request and operator identity across relo
 
 ## Deployment and recovery
 
-The pending SQL is an allocation artifact for the repository's PR-based migration numbering. It must be moved into `migrations/` using the repository allocation tool before publication is complete; SQL content must remain identical and test/runbook references must follow the final filename. Apply the migration before the code reads the new tables or invoice credit column. This is an additive forward migration; it does not infer historical credits or rewrite invoice/cash amounts.
+PR1861 allocates the approved SQL as `migrations/900000017000018610001_supplier_credit_completion.sql` using the repository allocation tool, with PR1857's graph-lock migration declared as its dependency. SQL content is unchanged, and the integration fixture uses the allocated filename. Apply the migration before the code reads the new tables or invoice credit column. This is an additive forward migration; it does not infer historical credits or rewrite invoice/cash amounts.
 
 Credit source snapshots and original credited invoice economics are protected. A current source mismatch remains review-required. Original invoice metadata can remain descriptive; original quantities, prices, source links and component evidence cannot be silently repurposed to explain a credit.
 
@@ -61,7 +61,7 @@ Repeated runs are not added to the case totals. The PostgreSQL and browser ledge
 
 Independent financial, cost-source and client reviews were completed. Confirmed issues corrected during validation included legacy payment error compatibility, immutable invoice source history, invoice-to-credit navigation, actor-bound recovery, historical settlement display and full-return review guidance. No historical credit, loss, refund or cost attribution was inferred.
 
-The tested pending SQL SHA-256 (Git-normalized LF content) is `592aa570b14b6160894b9968e1ee4a5c6f12adb720c76aa5faee56e5b4e707ab`. Its allocation into the PR migration identity must preserve those bytes. It depends on PR1857's `900000016000018570001_ap_payment_balance_completion.sql` graph-lock owner. Migration allocation and hosted CI remain publication steps.
+The allocated SQL SHA-256 (Git-normalized LF content) is `592aa570b14b6160894b9968e1ee4a5c6f12adb720c76aa5faee56e5b4e707ab`, identical to the approved pending SQL. Allocation also preserves the working-file bytes (CRLF SHA-256 `9c8de61aae0ee0c182069b24c9d66618789ee080569a930aef65d086bfff7c64`). The metadata declares PR1857's `900000016000018570001_ap_payment_balance_completion.sql` graph-lock owner. Hosted CI and production acceptance remain separate from local validation.
 
 Local evidence reports are `verified-unit.json`, `verified-guards.json`, `pg-case-ledger.json`, `client-validation.json` and `browser-case-ledger.json` in the task's supplier-credit output directory. They are validation artifacts, not production data or repository migrations.
 

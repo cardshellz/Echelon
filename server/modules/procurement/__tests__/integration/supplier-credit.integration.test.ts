@@ -8,7 +8,7 @@ import { PaymentAcceptanceFixture, PAYMENT_ACTORS, PAYMENT_FLOW, flowPayment,
 
 const url = process.env.ECHELON_TEST_DATABASE_URL;
 const databaseTests = url && process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true" ? describe : describe.skip;
-const migrationPath = "docs/procurement/supplier-credit-completion.pending.sql";
+const migrationPath = "migrations/900000017000018610001_supplier_credit_completion.sql";
 
 // Real HTTP + current PostgreSQL RBAC + command owner + migrations. Existing lots
 // intentionally lack immutable receipt origins: credit settlement must work while
