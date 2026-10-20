@@ -14,6 +14,10 @@ export interface ListingIntentRetryCommand {
   now: Date;
 }
 export interface ListingIntentPropagationStore {
+  withDelivery(
+    delivery: IntentDelivery,
+    work: () => Promise<void>,
+  ): Promise<boolean>;
   retry(input: ListingIntentRetryCommand): Promise<boolean>;
   expand(limit: number, now: Date): Promise<number>;
   claim(token: string, now: Date): Promise<IntentDelivery | null>;
@@ -76,25 +80,30 @@ export class ListingIntentPropagationService {
       );
       if (!delivery) break;
       try {
-        const destination = delivery.destination;
-        const outcome: IntentHandoff =
-          destination.ambiguousConnection || !destination.accountId
-            ? {
-                state: "blocked",
-                code: "LISTING_INTENT_ACCOUNT_UNRESOLVED",
-                message:
-                  "The saved publication needs one verified account connection. Reconnect the account, then review the listing in its workspace. This saved change cannot be redirected to another account.",
-              }
-            : delivery.changes.some(intentNeedsReview)
-              ? {
-                  state: "needs_review",
-                  code: "LISTING_INTENT_STRUCTURE_REVIEW",
-                  message:
-                    "The product identity or category changed. Review this existing listing before applying the change.",
-                }
-              : await this.deps.handoff.handoff(delivery);
-        await this.deps.store.finish(delivery, outcome, this.deps.now());
-        result.processed++;
+        const processed = await this.deps.store.withDelivery(
+          delivery,
+          async () => {
+            const destination = delivery.destination;
+            const outcome: IntentHandoff =
+              destination.ambiguousConnection || !destination.accountId
+                ? {
+                    state: "blocked",
+                    code: "LISTING_INTENT_ACCOUNT_UNRESOLVED",
+                    message:
+                      "The saved publication needs one verified account connection. Reconnect the account, then review the listing in its workspace. This saved change cannot be redirected to another account.",
+                  }
+                : delivery.changes.some(intentNeedsReview)
+                  ? {
+                      state: "needs_review",
+                      code: "LISTING_INTENT_STRUCTURE_REVIEW",
+                      message:
+                        "The product identity or category changed. Review this existing listing before applying the change.",
+                    }
+                  : await this.deps.handoff.handoff(delivery);
+            await this.deps.store.finish(delivery, outcome, this.deps.now());
+          },
+        );
+        if (processed) result.processed++;
       } catch (error) {
         const raw =
           error && typeof error === "object"

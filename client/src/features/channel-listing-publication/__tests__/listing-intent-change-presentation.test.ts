@@ -2,6 +2,12 @@ import { describe, expect, it } from "vitest";
 import { listingIntentChangePresentation, listingIntentChangesUrl } from "../listing-intent-change-presentation";
 
 describe("saved listing change status", () => {
+  it("keeps outstanding exclusion work visible and never offers content retry", () => {
+    expect(listingIntentChangePresentation({state:"waiting_lifecycle",can_retry:true,last_error_message:"Clearing is unverified."}))
+      .toMatchObject({attention:true,retry:false,label:"Excluded - channel work pending",message:"Clearing is unverified."});
+    expect(listingIntentChangePresentation({state:"not_applicable",can_retry:true,last_error_message:null}))
+      .toMatchObject({attention:false,retry:false,label:"No update required"});
+  });
   it("does not present queue acceptance as provider completion", () => {
     const status = listingIntentChangePresentation({ state: "delivered", can_retry: false, last_error_message: null });
     expect(status.label).toBe("Update requested");
