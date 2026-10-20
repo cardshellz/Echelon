@@ -157,7 +157,10 @@ export class CustomerReturnCustomerAuthService {
    * every storefront request instead of trusting the Liquid page or a staff session. */
   async storefrontPrincipal(rawQuery: string): Promise<CustomerReturnCustomerSession> {
     const proof = this.verifyProof(rawQuery, this.now());
-    if (!proof.customerId) throw customerAuthenticationRequired();
+    // Only a valid Shopify-signed guest request proves that sign-in is needed.
+    // Invalid signatures, shop mappings and expired proofs are different failures.
+    if (!proof.customerId) throw new CustomerReturnCustomerAccessError(
+      "RETURN_STOREFRONT_CUSTOMER_MISSING", "The signed storefront request does not identify a customer.", 401);
     const shop = await this.requireShop(proof.shop);
     const acceptedAt = this.now();
     this.verifyProof(rawQuery, acceptedAt);

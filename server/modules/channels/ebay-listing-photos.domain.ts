@@ -1,5 +1,6 @@
 import { isIP } from "node:net";
 import type { ChannelImagePayload, ChannelVariantPayload } from "./channel-adapter.interface";
+import type { CatalogPublicationMediaPlan } from "@shared/types/catalog-publication-media";
 
 /** Preserve the existing eBay publication limit for direct and Dropship listing replacements. */
 export const EBAY_LISTING_MAX_PHOTOS = 12;
@@ -53,6 +54,8 @@ export function resolveEbayListingPhotoUrls(urls: readonly string[]): string[] {
 export interface EbayListingPhotoPlan {
   byVariantId: ReadonlyMap<number, readonly string[]>;
   groupImageUrls: readonly string[];
+  /** Present for Catalog-owned selection; provider-preserved media remains an explicit external observation. */
+  mediaPlan?: CatalogPublicationMediaPlan;
 }
 
 /** Validate a resolved plan without reselecting, reordering or shortening its approved photos. */

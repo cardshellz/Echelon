@@ -1,3 +1,4 @@
+import { prepareChannelIntent } from "../../../marketplace-listings/prepared-channel-intent";
 import { describe, expect, it, vi } from "vitest";
 import {
   listingDraftItemSchema,
@@ -945,4 +946,49 @@ describe("Walmart listing response validation", () => {
       }),
     ).toBe(true);
   });
+  it("serializes the canonical reviewed URL plan and explicit draft price source without Catalog asset claims", async () => {
+    const { provider } = setup();
+    const edited = { ...draft(), images: ["https://example.com/reviewed.jpg", "https://example.com/reviewed.jpg"], priceOverrideCents: 1500 };
+    const prepared = await provider.prepare(account, { catalog, draft: edited, priceCents: 1500 });
+    expect(prepared.issues).toEqual([]);
+    const intent = prepared.preparedIntent!;
+    expect(intent.input).toMatchObject({ account: { owner: { kind: "channel", channelId: 104 }, connectionId: 5,
+      accountId: "12345", environment: "production", marketplaceId: "us", inventoryScope: { kind: "location", locationId: "12345" }, configurationRevision: "2" },
+      capability: { protocol: "feed", mediaVerification: "unavailable" }, mediaAction: "replace",
+      prices: [{ variantId: 10, cents: 1500, currency: "USD", provenance: { kind: "reviewed_draft", variantId: 10 } }] });
+    expect(intent.input.mediaPlan!.group).toMatchObject({ expected: 2,
+      selected: [{ assetId: null, sourceIndex: 0, url: edited.images[0] }],
+      omissions: [{ assetId: null, sourceIndex: 1, reason: "duplicate" }] });
+    expect(jsonObject(jsonObject(prepared.payload.Visible)[type]).mainImageUrl).toBe(intent.input.mediaPlan!.group.selected[0].url);
+    const again = await provider.prepare(account, { catalog, draft: edited, priceCents: 1500 });
+    expect(again.preparedIntent!.intentHash).toBe(intent.intentHash);
+  });
+
+  it.each(["account", "connection", "environment", "marketplace", "revision"])("rejects a recomputed prepared %s scope without provider mutation", async scope => {
+    const { provider, api } = setup();
+    const prepared = await provider.prepare(account, { catalog, draft: draft(), priceCents: 1299 });
+    const changed = structuredClone(prepared.preparedIntent!.input);
+    if (scope === "account") changed.account.accountId = "another-seller";
+    if (scope === "connection") changed.account.connectionId = 6;
+    if (scope === "environment") changed.account.environment = "sandbox";
+    if (scope === "marketplace") changed.account.marketplaceId = "ca";
+    if (scope === "revision") changed.account.configurationRevision = "3";
+    prepared.preparedIntent = prepareChannelIntent(changed);
+    await expect(runWithListingSetupAdmission(intent(), () => provider.submit(account, {
+      operationId, correlationId, items: [prepared], stockAdmission: intent(), beforeSubmit: async () => {},
+    }))).rejects.toMatchObject({ code: "WALMART_LISTING_REVIEW_STALE", effect: "not_sent" });
+    expect(api.submitFeed).not.toHaveBeenCalled();
+  });
+
+  it("keeps an immutable legacy review executable without inventing new source evidence", async () => {
+    const { provider, api } = setup();
+    const prepared = await provider.prepare(account, { catalog, draft: draft(), priceCents: 1299 });
+    delete prepared.preparedIntent;
+    await runWithListingSetupAdmission(intent(), () => provider.submit(account, {
+      operationId, correlationId, items: [prepared], stockAdmission: intent(), beforeSubmit: async () => {},
+    }));
+    expect(api.submitFeed).toHaveBeenCalledOnce();
+    expect(prepared.preparedIntent).toBeUndefined();
+  });
+
 });

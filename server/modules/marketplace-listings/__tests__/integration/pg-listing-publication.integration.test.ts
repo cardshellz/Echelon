@@ -1,3 +1,6 @@
+import { PgCatalogVariantPublicationPhotoReader, readPublicCatalogImage } from "../../../catalog/catalog-publication-images.reader";
+import { createCatalogPublicImageUrl } from "../../../catalog/catalog-public-image";
+import { prepareWalmartChannelIntent } from "../../../channels/adapters/walmart/walmart-prepared-intent";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
@@ -27,6 +30,9 @@ CREATE TABLE channels.channel_connections(id integer PRIMARY KEY, channel_id int
 CREATE TABLE catalog.products(id integer PRIMARY KEY, is_active boolean NOT NULL, status text NOT NULL);
 CREATE TABLE catalog.product_variants(id integer PRIMARY KEY, product_id integer NOT NULL REFERENCES catalog.products(id), sku text NOT NULL,
  is_active boolean NOT NULL, sales_eligibility text NOT NULL, requires_shipping boolean NOT NULL, track_inventory boolean NOT NULL);
+CREATE TABLE catalog.product_assets(id integer PRIMARY KEY,product_id integer NOT NULL,product_variant_id integer,
+ asset_type text NOT NULL,url text,position integer NOT NULL DEFAULT 0,is_primary integer NOT NULL DEFAULT 0,
+ storage_type text NOT NULL,mime_type text,file_data bytea);
 `;
 
 // Only the supporting owners are reduced fixtures. The entire publication migration
@@ -48,6 +54,7 @@ CREATE TABLE catalog.product_variants(id integer PRIMARY KEY, product_id integer
           "utf8",
         ),
       );
+      await database.pool.query(readFileSync(resolve("migrations/900000017000018580001_catalog_publication_media_versions.sql"), "utf8"));
       repository = new PostgresListingPublicationRepository(database.pool);
       await database.pool.query(readFileSync(resolve("migrations/260_channel_listing_recreation.sql"), "utf8"));
       await database.pool.query(readFileSync(resolve("migrations/900000002000017820001_walmart_match_recreation.sql"), "utf8"));
@@ -58,7 +65,7 @@ CREATE TABLE catalog.product_variants(id integer PRIMARY KEY, product_id integer
     beforeEach(async () => {
       await database.pool
         .query(`DROP TRIGGER IF EXISTS test_reject_event ON marketplace.channel_listing_publication_events;
-      TRUNCATE marketplace.channel_listing_publication_events, marketplace.channel_listing_item_claims, marketplace.channel_listing_operations,
+      TRUNCATE catalog.publication_media_version_pins,catalog.publication_media_references,catalog.product_assets,marketplace.channel_listing_publication_events, marketplace.channel_listing_item_claims, marketplace.channel_listing_operations,
       marketplace.channel_listing_reviews, marketplace.channel_listing_drafts, channels.channel_connections, channels.channels, catalog.product_variants, catalog.products;
       INSERT INTO channels.channels VALUES (104,'walmart'),(105,'walmart'); INSERT INTO channels.channel_connections VALUES (5,104),(6,105);
       INSERT INTO catalog.products VALUES (20,true,'active');
@@ -688,6 +695,49 @@ CREATE TABLE catalog.product_variants(id integer PRIMARY KEY, product_id integer
       expect((await database.pool.query("SELECT operation_id FROM marketplace.channel_listing_item_claims")).rows[0].operation_id).toBe(prior.id);
       expect((await counts()).operations).toBe(1);
     });
+    async function mediaReview() {
+      const bytes = Buffer.from("89504e470d0a1a0a0000000d49484452", "hex");
+      await database.pool.query(`INSERT INTO catalog.product_assets
+        (id,product_id,asset_type,storage_type,mime_type,file_data,position,is_primary)
+        VALUES(501,20,'image','file','image/png',$1,0,1)`, [bytes]);
+      const reader = new PgCatalogVariantPublicationPhotoReader(database.pool,
+        createCatalogPublicImageUrl({ CATALOG_PUBLIC_BASE_URL: "https://catalog.example.com" }));
+      const plan = await reader.listPublicationPlan({ productId: 20, productVariantIds: [10], maxPhotosPerVariant: 20 });
+      const snapshot = publicationSnapshot();
+      snapshot.catalog[0].mediaPlan = plan;
+      snapshot.catalog[0].images = plan.variants[0].gallery.selected.map(photo => photo.url);
+      snapshot.prepared[0].preparedIntent = prepareWalmartChannelIntent(snapshot.account,
+        { catalog: snapshot.catalog[0], draft: snapshot.draft.items[0], priceCents: 1299 }, snapshot.prepared[0],
+        { mediaPlan: plan, mediaAction: "replace" });
+      return { snapshot: await saveReview(snapshot), bytes, plan };
+    }
+
+    it("atomically pins the reviewed uploaded version and replays after the current Catalog image is deleted", async () => {
+      const { snapshot, bytes, plan } = await mediaReview();
+      const command = input(snapshot);
+      const [first, replayed] = await Promise.all([repository.createOperation(command), repository.createOperation(command)]);
+      expect(first.id).toBe(replayed.id);
+      await database.pool.query("DELETE FROM catalog.product_assets WHERE id=501");
+      expect((await repository.createOperation(command)).snapshot.prepared[0].preparedIntent?.input.mediaPlan).toEqual(plan);
+      const version = plan.variants[0].gallery.selected[0].versionHash!;
+      expect((await readPublicCatalogImage(database.pool, 501, version))?.data).toEqual(bytes);
+      expect((await database.pool.query("SELECT count(*)::int n FROM catalog.publication_media_version_pins")).rows[0].n).toBe(1);
+      expect((await counts()).operations).toBe(1);
+    });
+
+    it("rolls media references back with the command if its final evidence cannot be saved", async () => {
+      const { snapshot } = await mediaReview();
+      await database.pool.query(`CREATE OR REPLACE FUNCTION marketplace.reject_media_pin_audit() RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN IF NEW.action='publication_queued' THEN RAISE EXCEPTION 'forced media audit failure'; END IF; RETURN NEW; END; $$;
+        CREATE TRIGGER test_reject_event BEFORE INSERT ON marketplace.channel_listing_publication_events
+          FOR EACH ROW EXECUTE FUNCTION marketplace.reject_media_pin_audit();`);
+      await expect(repository.createOperation(input(snapshot))).rejects.toThrow("forced media audit failure");
+      expect((await database.pool.query("SELECT count(*)::int n FROM catalog.publication_media_references")).rows[0].n).toBe(0);
+      expect((await database.pool.query("SELECT count(*)::int n FROM catalog.publication_media_version_pins")).rows[0].n).toBe(0);
+      expect((await counts()).operations).toBe(0);
+      expect((await repository.draft(104)).items).toEqual(snapshot.draft.items);
+    });
+
     it("protects immutable review, operation intent, claims and audit evidence in PostgreSQL", async () => {
       const snapshot = await saveReview();
       await repository.createOperation(input(snapshot));

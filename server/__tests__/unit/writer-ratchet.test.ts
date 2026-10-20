@@ -50,6 +50,38 @@ describe("writer-ratchet (P2.1)", () => {
     expect(baseline[table]).toEqual([owner]);
   });
 
+  it.each([
+    [
+        "catalog.publication_media_references",
+        "modules/catalog"
+    ],
+    [
+        "catalog.publication_media_version_pins",
+        "modules/catalog"
+    ],
+    [
+        "marketplace.listing_intent_changes",
+        "modules/marketplace-listings"
+    ],
+    [
+        "marketplace.listing_intent_deliveries",
+        "modules/marketplace-listings"
+    ],
+    [
+        "marketplace.listing_intent_delivery_sources",
+        "modules/marketplace-listings"
+    ],
+    [
+        "marketplace.listing_intent_delivery_events",
+        "modules/marketplace-listings"
+    ]
+])
+    ("phase 2 %s has only its declared publication owner, including scripts", (table, owner) => {
+      expect(current[table]).toEqual([owner]);
+      expect(currentIncludingScripts[table]).toEqual([owner]);
+      expect(baseline[table]).toEqual([owner]);
+    });
+
   it("wms.order_items has exactly one owning writer across runtime and operational scripts", () => {
     expect(current["wms.order_items"]).toEqual(["modules/wms"]);
     expect(currentIncludingScripts["wms.order_items"]).toEqual(["modules/wms"]);

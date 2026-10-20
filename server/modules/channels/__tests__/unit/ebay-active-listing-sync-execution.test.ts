@@ -52,7 +52,7 @@ vi.mock("../../ebay-business-policies", () => ({ ebayBusinessPolicies: {
 } }));
 vi.mock("../../infrastructure/ebay-listing-helpers", async importOriginal => ({
   ...await importOriginal<typeof import("../../infrastructure/ebay-listing-helpers")>(),
-  resolveChannelPrice: async () => 1000, delay: async () => {},
+  resolveChannelPriceResolution: async (_db: unknown, _channelId: number, _productId: number, variantId: number) => ({ priceCents: 1000, basePriceCents: 1000, source: "catalog_variant", provenance: { kind: "catalog_variant", variantId }, appliedRule: null }), delay: async () => {},
 }));
 vi.mock("../../adapters/ebay/ebay-marketplace-registration.factory", async () => {
   const { EbayMarketplaceRegistrationObserver } = await import("../../../marketplace-listings/infrastructure/providers/ebay/ebay-registration-observer");
@@ -124,7 +124,7 @@ beforeEach(() => {
   fixture.inventoryReady.mockClear();
 });
 function executionContext(): EbayListingExecutionContext {
-  return { jobId: "a949682e-6690-4749-a6f7-c0bba463cd20", requestedBy: "operator", operation: "sync",
+  return { persistPreparedIntent: async () => {}, jobId: "a949682e-6690-4749-a6f7-c0bba463cd20", requestedBy: "operator", operation: "sync",
     publicationTarget: null, bindPublicationTarget: async () => {}, publicationAccepted: null,
     publicationWriteCompleted: false, publicationWriteStarted: false, publicationAcceptedRevision: null,
     publicationIntentHash: null, claimedRevision: "1", bindPublicationAccepted: async () => {} };

@@ -109,6 +109,7 @@ export function ListingFeedDetails({
         )}
       </dl>
       {lifecycle?.message && <p>{lifecycle.message}</p>}
+      {operation?.item.mediaVerification && <p className="text-muted-foreground">{operation.item.mediaVerification.message}</p>}
       {operation?.item.error && (
         <p className={operation.item.stockState === "queued" ? "text-muted-foreground" : "text-destructive"}>{operation.item.error}</p>
       )}

@@ -34,6 +34,12 @@
     "server/routes/ebay-listing-rules.routes.ts",
     "server/routes/ebay/ebay-config.routes.ts"
   ],
+  "catalog.publication_media_references": [
+    "modules/catalog"
+  ],
+  "catalog.publication_media_version_pins": [
+    "modules/catalog"
+  ],
   "catalog.shipping_groups": [
     "modules/catalog"
   ],
@@ -948,6 +954,18 @@
     "modules/marketplace-listings"
   ],
   "marketplace.dropship_listing_scopes": [
+    "modules/marketplace-listings"
+  ],
+  "marketplace.listing_intent_changes": [
+    "modules/marketplace-listings"
+  ],
+  "marketplace.listing_intent_deliveries": [
+    "modules/marketplace-listings"
+  ],
+  "marketplace.listing_intent_delivery_events": [
+    "modules/marketplace-listings"
+  ],
+  "marketplace.listing_intent_delivery_sources": [
     "modules/marketplace-listings"
   ],
   "marketplace.listing_member_retirement_events": [

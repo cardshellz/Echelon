@@ -987,6 +987,11 @@ describe("eBay listing photo ownership", () => {
       byVariantId: new Map(SAMPLE_LISTING.variants.map(variant => [variant.variantId, {
         fulfillmentPolicyId: `owner-shipping-${variant.variantId}`, returnPolicyId: "owner-returns", paymentPolicyId: "owner-payment",
       }])),
+      provenanceByVariantId: new Map(SAMPLE_LISTING.variants.map(variant => [variant.variantId, {
+        fulfillment: { id:`owner-shipping-${variant.variantId}`, source:{scope:"variant" as const, productId:SAMPLE_LISTING.productId, variantId:variant.variantId} },
+        return: { id:"owner-returns", source:{scope:"store" as const} },
+        payment: { id:"owner-payment", source:{scope:"store" as const} },
+      }])),
     }));
     const adapter = new EbayAdapter(createMockDb() as any, { resolve }, { resolveProductPolicies: resolvePolicies });
     vi.spyOn(adapter as any, "getAuthService").mockResolvedValue({
