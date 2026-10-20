@@ -2,6 +2,7 @@ import { receiptReversalSourceCapability } from "@/lib/receipt-reversal-capabili
 import { SupplierReturnLink } from "@/features/purchasing/SupplierReturnLink";
 import { parseReceivingImportCsv, parseReceivingImportResult, receivingImportError } from "@/lib/receiving-import";
 import { ReceiptSupplierCosts } from "@/features/purchasing/ReceiptSupplierCosts";
+import { ReceiptShipmentQuantityCorrection } from "@/features/purchasing/ReceiptShipmentQuantityCorrection";
 import type { ReceivingImportRowInput } from "@shared/procurement/receiving-import";
 import { useState, useRef, useEffect, useLayoutEffect, useCallback } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
@@ -253,13 +254,13 @@ export default function Receiving() {
     if (requestedReceiptId === null) throw new Error("The receipt is no longer open.");
     const context = captureReceiptNavigation();
     const response = await fetch(`/api/receiving/${requestedReceiptId}`);
-    if (!response.ok) throw new Error("The quarantine command needs receipt readback. Retry the saved command to verify its result.");
+    if (!response.ok) throw new Error("The saved change needs receipt readback. Reload the receipt to verify its current values.");
     const current: unknown = await response.json();
     parseReceivingHeaderResult(current, requestedReceiptId);
     if (!current || typeof current !== "object" || !("lines" in current) || !Array.isArray(current.lines) ||
         !("status" in current) || typeof current.status !== "string" || !("receiptNumber" in current) || typeof current.receiptNumber !== "string" ||
         current.lines.some((line: ReceivingLine) => line.receivingOrderId !== requestedReceiptId || !hasReceivingUnitVersion(line))) {
-      throw new Error("The receipt readback was incomplete. Retry the saved quarantine command before further changes.");
+      throw new Error("The receipt readback was incomplete. Reload the receipt before further changes.");
     }
     if (!isCurrentReceiptNavigation(context)) return;
     setSelectedReceipt(current as ReceivingOrder);
@@ -966,6 +967,10 @@ DEF-456,25,,,5.00,,Location TBD`;
         pending={quarantineCommandPending || updateReceiptMutation.isPending || !!receiptSettingsError || updateLineMutation.isPending || completeAllMutation.isPending || reloadingUnits || !!countDrafts[line.id] || !!unitErrors[line.id]?.needsRefresh}
         onChange={(variantId, confirm, factor) => applyVariant(line, variantId, confirm, factor)}
       />
+      {selectedReceipt?.status === "closed" && selectedReceipt.inboundShipmentId && <ReceiptShipmentQuantityCorrection receiptLineId={line.id}
+        onSaved={() => { void refreshReceiptAfterQuarantine().catch((error: Error) => {
+          setReceiptSettingsError(error.message);
+        }); }}/>}
       {error && <div role="alert" className="rounded border border-destructive/40 p-2 text-xs text-destructive">
         <p>{error.message}</p>
         {error.needsRefresh && <Button size="sm" variant="outline" className="mt-2 h-auto min-h-10 whitespace-normal" disabled={quarantineCommandPending || reloadingUnits || updateLineMutation.isPending} onClick={() => void reloadReceiptUnits(line.id)}>Load latest line and discard count draft</Button>}

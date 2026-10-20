@@ -1,4 +1,5 @@
 import { supplierReturnReadFixtureTables } from "./supplier-return-fixture";
+import { resetQuantityAmendmentFixture } from "./quantity-amendment-fixture";
 import { createHash, randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
@@ -170,6 +171,7 @@ databaseTests.sequential("shipment cost command PostgreSQL guarantees", () => {
     }
     await pool.query(readFileSync(resolve(process.cwd(), "migrations/0722_shipment_cost_performer_vendor.sql"), "utf8"));
     await pool.query(readFileSync(resolve(process.cwd(), "migrations/222_procurement_cost_evidence.sql"), "utf8"));
+    await pool.query(readFileSync(resolve(process.cwd(), "migrations/900000017000018590001_receipt_shipment_quantity_amendments.sql"), "utf8"));
     commandTablesReady = true;
     database = drizzle(pool, { schema });
 
@@ -201,7 +203,7 @@ databaseTests.sequential("shipment cost command PostgreSQL guarantees", () => {
 
   beforeEach(async () => {
     if (!ownsProcurement) throw new Error("Fixture schema ownership was not established");
-    await pool.query(`TRUNCATE procurement.receiving_lines, procurement.receiving_orders, procurement.landed_cost_adjustments,
+    await resetQuantityAmendmentFixture(pool, `TRUNCATE procurement.receiving_lines, procurement.receiving_orders, procurement.landed_cost_adjustments,
       procurement.landed_cost_snapshots, procurement.inbound_shipment_status_history,
       procurement.vendor_invoice_lines, procurement.inbound_freight_allocations,
       procurement.inbound_freight_costs, procurement.inbound_shipment_lines, procurement.vendor_invoices,

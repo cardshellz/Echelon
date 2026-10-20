@@ -48,7 +48,7 @@ export async function applyCostRevision(
   const rootsResult = await tx.execute(sql`
     SELECT origin.*, line.cost_source_kind, line.cost_source_evidence,
       EXISTS(SELECT 1 FROM procurement.receipt_reversals reversal WHERE reversal.receiving_line_id = origin.receiving_line_id) AS has_reversal
-    FROM inventory.lot_cost_origins origin
+    FROM inventory.effective_lot_cost_origins origin
     JOIN procurement.receiving_lines line ON line.id = origin.receiving_line_id
     WHERE origin.purchase_order_line_id = ${source.scope.purchaseOrderLineId}
       AND (${shipmentLineId}::integer IS NULL OR origin.inbound_shipment_line_id = ${shipmentLineId})
@@ -66,7 +66,7 @@ export async function applyCostRevision(
     SELECT lot.id FROM inventory.inventory_lots lot
     WHERE lot.po_line_id = ${source.scope.purchaseOrderLineId}
       AND (${shipmentLineId}::integer IS NULL OR lot.inbound_shipment_id = ${source.scope.kind === "shipment_line" ? source.scope.inboundShipmentId : null})
-      AND NOT EXISTS(SELECT 1 FROM inventory.lot_cost_origins origin WHERE origin.inventory_lot_id = lot.id)
+      AND NOT EXISTS(SELECT 1 FROM inventory.effective_lot_cost_origins origin WHERE origin.inventory_lot_id = lot.id)
       AND NOT EXISTS(SELECT 1 FROM inventory.lot_cost_contributions edge WHERE edge.output_lot_id = lot.id)
     ORDER BY lot.id LIMIT 1
   `);

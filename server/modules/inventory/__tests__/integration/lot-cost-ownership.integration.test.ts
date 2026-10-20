@@ -84,7 +84,7 @@ suite.sequential("physical return and cost-only recovery ownership on PostgreSQL
         product_variant_id integer,sku text,old_cost_cents bigint,new_cost_cents bigint,delta_cents bigint,
         reason text,created_at timestamp NOT NULL);`);
     await installPreOpeningQuantityAuthorityFixture(pool);
-    for (const name of ["222_procurement_cost_evidence.sql","0751_exact_inventory_cost_totals.sql","0725_inventory_cost_admission_evidence.sql","0726_inventory_return_cost_allocations.sql",
+    for (const name of ["222_procurement_cost_evidence.sql", "900000017000018590001_receipt_shipment_quantity_amendments.sql","0751_exact_inventory_cost_totals.sql","0725_inventory_cost_admission_evidence.sql","0726_inventory_return_cost_allocations.sql",
       "900000007000018030001_shipment_cost_exception_decisions.sql",
       "900000008000018110001_shipment_cost_reconciliation.sql",
       "900000009000018290001_historical_cost_origin_repairs.sql"]) {

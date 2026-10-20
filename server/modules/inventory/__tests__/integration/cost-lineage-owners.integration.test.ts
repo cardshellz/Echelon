@@ -1,3 +1,4 @@
+import { resetQuantityAmendmentFixture } from "../../../procurement/__tests__/integration/quantity-amendment-fixture";
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { getTableColumns, SQL, sql, type Table } from "drizzle-orm";
@@ -66,13 +67,14 @@ databaseTests.sequential("cost contribution physical owners on PostgreSQL", () =
       CREATE UNIQUE INDEX build_run_replay_identity ON inventory.build_runs(idempotency_key);
     `);
     await pool.query(await readFile(resolve(process.cwd(), "migrations/222_procurement_cost_evidence.sql"), "utf8"));
+    await pool.query(await readFile(resolve(process.cwd(), "migrations/900000017000018590001_receipt_shipment_quantity_amendments.sql"), "utf8"));
     await pool.query(await readFile(resolve(process.cwd(), "migrations/0751_exact_inventory_cost_totals.sql"), "utf8"));
     await pool.query(await readFile(resolve(process.cwd(), "migrations/0725_inventory_cost_admission_evidence.sql"), "utf8"));
     database = drizzle(pool, { schema });
   });
 
   beforeEach(async () => {
-    await pool.query(`TRUNCATE inventory.lot_cost_contributions, inventory.inventory_transactions,
+    await resetQuantityAmendmentFixture(pool, `TRUNCATE inventory.lot_cost_contributions, inventory.inventory_transactions,
       inventory.inventory_lots, inventory.inventory_levels, inventory.build_run_consumptions,
       inventory.build_component_reservations, inventory.build_runs, inventory.build_run_reversals, inventory.build_order_components,
       inventory.build_orders RESTART IDENTITY CASCADE`);

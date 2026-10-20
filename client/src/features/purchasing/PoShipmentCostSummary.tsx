@@ -1,5 +1,6 @@
 import { noInventoryEffectLabel } from "./cost-inventory-effect-presentation";
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { useSearch } from "wouter";
 import { formatIntegerCents } from "@shared/utils/format-integer-cents";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -17,6 +18,10 @@ export function PoShipmentCostSummary({
   onViewShipments: () => void;
 }) {
   const [showReview, setShowReview] = useState(false);
+  const search = useSearch();
+  useEffect(() => {
+    if (new URLSearchParams(search).get("costReview") === "1") setShowReview(true);
+  }, [search]);
   if (query.isPending)
     return (
       <p className="text-sm text-muted-foreground" role="status">

@@ -56,11 +56,11 @@ export async function recordReceiptCostOrigin(
   // Freeze the original source interval once. Later transfers are contribution
   // edges, never new purchase quantities. Reversals retain these original facts.
   const offsets = await tx.execute(sql`
-    SELECT COALESCE(SUM(received_variant_qty::bigint * units_per_variant_snapshot)
+    SELECT COALESCE(MAX(purchase_start_base_piece + received_variant_qty::bigint * units_per_variant_snapshot)
       FILTER (WHERE purchase_order_line_id = ${input.purchaseOrderLineId}),0) AS purchase_start,
-      COALESCE(SUM(received_variant_qty::bigint * units_per_variant_snapshot)
+      COALESCE(MAX(shipment_start_base_piece + received_variant_qty::bigint * units_per_variant_snapshot)
       FILTER (WHERE inbound_shipment_line_id = ${input.inboundShipmentLineId}),0) AS shipment_start
-    FROM inventory.lot_cost_origins
+    FROM inventory.effective_lot_cost_origins
     WHERE purchase_order_line_id = ${input.purchaseOrderLineId}
        OR inbound_shipment_line_id = ${input.inboundShipmentLineId}
   `);

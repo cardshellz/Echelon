@@ -1,4 +1,5 @@
 import { supplierReturnReadFixtureTables } from "./supplier-return-fixture";
+import { resetQuantityAmendmentFixture } from "./quantity-amendment-fixture";
 import { createHash, randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
@@ -174,6 +175,7 @@ databaseTests.sequential("shipment line command PostgreSQL guarantees", () => {
       await pool.query(readFileSync(resolve(process.cwd(), "migrations", migration), "utf8"));
     }
     await pool.query(readFileSync(resolve(process.cwd(), "migrations/222_procurement_cost_evidence.sql"), "utf8"));
+    await pool.query(readFileSync(resolve(process.cwd(), "migrations/900000017000018590001_receipt_shipment_quantity_amendments.sql"), "utf8"));
     commandTablesReady = true;
     database = drizzle(pool, { schema });
 
@@ -204,7 +206,7 @@ databaseTests.sequential("shipment line command PostgreSQL guarantees", () => {
 
   beforeEach(async () => {
     if (ownedSchemas.length !== 3) throw new Error("Fixture schema ownership was not established");
-    await pool.query(`TRUNCATE ${TABLES.map(qualifiedTable).join(", ")} RESTART IDENTITY CASCADE`);
+    await resetQuantityAmendmentFixture(pool, `TRUNCATE ${TABLES.map(qualifiedTable).join(", ")} RESTART IDENTITY CASCADE`);
     await pool.query("DELETE FROM public.audit_events WHERE actor = ANY($1::text[])", [[actorId, delegateId]]);
     await pool.query(`
       INSERT INTO catalog.products(id,sku,name) VALUES(100,'TEST-PRODUCT','Fixture product'),(101,'TEST-OTHER','Other product');

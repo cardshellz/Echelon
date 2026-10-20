@@ -1552,8 +1552,20 @@ export function createShipmentTrackingService(
     const shipment = await lockShipment(tx, shipmentId);
     const finalization = await finalizeAllocationsInTransaction(tx, shipment, actorId, now);
     const application = await applyShipmentCostRevisions(tx, shipmentId, new COGSService(tx), actorId, now);
-    return shipmentCostUpdateResultSchema.parse({ ...application, shipmentId,
-      finalizedLines: finalization.finalized, adjustments: finalization.adjustments });
+    return { ...shipmentCostUpdateResultSchema.parse({ ...application, shipmentId,
+      finalizedLines: finalization.finalized, adjustments: finalization.adjustments }),
+      costApplications: application.costApplications };
+  }
+
+  /** A quantity amendment refreshes open shipment allocations without pretending
+   * that an unfinalized shipment has posted inventory costs. */
+  async function refreshQuantityAllocationInTransaction(tx: any, shipmentId: number, actorId: string, now: Date) {
+    await lockInventoryCostGraph(tx);
+    const shipment = await lockShipment(tx, shipmentId);
+    if (["costing", "closed"].includes(shipment.status)) return updateCostsInTransaction(tx, shipmentId, {}, actorId, now);
+    if (shipment.status === "cancelled") throw new ShipmentTrackingError("Cancelled shipment quantities cannot be corrected.", 409);
+    await runAllocationInTransaction(tx, shipmentId, shipment, now);
+    return { costApplications: [] };
   }
 
   async function finalizeAllocationsInTransaction(
@@ -1844,6 +1856,7 @@ export function createShipmentTrackingService(
     getLandedCostHealth,
     finalizeAllocations,
     updateCostsInTransaction,
+    refreshQuantityAllocationInTransaction,
     getCostReview: (shipmentId: number) => readShipmentCostReview(db, shipmentId),
 
     // Receiving integration

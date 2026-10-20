@@ -30,7 +30,7 @@ const tables=[schema.purchaseOrders,schema.purchaseOrderLines,schema.inboundShip
     for (const name of ["procurement","inventory","oms"]) {await pool.query(`CREATE SCHEMA ${name}`);owned.push(name);}
     for (const table of tables) await pool.query(fixtureTable(table));
     for (const statement of fixtureForeignKeys(tables)) await pool.query(statement);
-    for (const name of ["222_procurement_cost_evidence.sql","0725_inventory_cost_admission_evidence.sql","230_procurement_cost_reporting_delivery.sql",
+    for (const name of ["222_procurement_cost_evidence.sql","900000017000018590001_receipt_shipment_quantity_amendments.sql","0725_inventory_cost_admission_evidence.sql","230_procurement_cost_reporting_delivery.sql",
       "900000007000018030001_shipment_cost_exception_decisions.sql","0751_exact_inventory_cost_totals.sql",
       "900000008000018110001_shipment_cost_reconciliation.sql",
       "900000009000018290001_historical_cost_origin_repairs.sql"]) await pool.query(readFileSync(resolve(process.cwd(),"migrations",name),"utf8"));

@@ -10,6 +10,7 @@ import { PoVarianceApproval, hasPendingPoVarianceApproval } from "@/features/pur
 import { PoShipmentCostSummary } from "@/features/purchasing/PoShipmentCostSummary";
 import { PoFinancialEvidence, usePoFinancialEvidence } from "@/features/purchasing/PoFinancialEvidence";
 import { usePoShipmentCosts } from "@/features/purchasing/use-po-shipment-costs";
+import { PoAmendmentHistory } from "@/features/purchasing/PoAmendmentHistory";
 import { formatIntegerCents } from "@shared/utils/format-integer-cents";
 import { projectPoLineLandedCosts } from "@shared/procurement/po-line-landed-cost";
 import { PoLineLandedCost } from "@/features/purchasing/PoLineLandedCost";
@@ -20,6 +21,7 @@ import { parseShipmentReceiptResolution, requiresReceiptUnitReview } from "@/lib
 import React from "react";
 import { poEmailDeliveryPresentation } from "@/lib/po-email-delivery";
 import { PoQuantityAmendment } from '@/features/purchasing/PoQuantityAmendment';
+import { ReceiptShipmentQuantityCorrection } from "@/features/purchasing/ReceiptShipmentQuantityCorrection";
 import { useAuth } from "@/lib/auth";
 import { useShipmentCreation } from "@/hooks/use-shipment-creation";
 import { ShipmentCreateRecovery } from "@/features/purchasing/ShipmentCreateRecovery";
@@ -2857,6 +2859,7 @@ export default function PurchaseOrderDetail() {
             </Button>
           )}
           {poId !== null && <PoQuantityAmendment key={poId} purchaseOrderId={poId} status={po.status} />}
+          {poId !== null && ["partially_received", "received", "closed"].includes(po.status) && <ReceiptShipmentQuantityCorrection purchaseOrderId={poId}/>}
           {canClosePo && (
             <Button onClick={() => closeMutation.mutate()} disabled={closeMutation.isPending} className="flex-1 sm:flex-none min-h-[44px]">
               <Archive className="h-4 w-4 mr-2" />
@@ -3304,7 +3307,7 @@ export default function PurchaseOrderDetail() {
 
       {/* Phase 2: Tabs + Quick Actions side rail */}
       <div className="flex flex-col md:flex-row gap-4 items-start">
-      <div className="flex-1 min-w-0">
+      <div className="flex-1 min-w-0 w-full">
       {/* Tabs: Lines, Receipts, History */}
       <Tabs value={activeTab} onValueChange={setActiveTab}>
         <TabsList className="flex h-auto max-w-full flex-wrap justify-start">
@@ -3971,6 +3974,7 @@ export default function PurchaseOrderDetail() {
         </TabsContent>
 
         <TabsContent value="history" className="space-y-4">
+          {poId !== null && <PoAmendmentHistory purchaseOrderId={poId} />}
           {shipmentCosts.isPending && <p role="status">Loading cost approval history…</p>}
           {shipmentCosts.isError && <p role="alert">Cost approval history could not be loaded. <Button variant="outline" onClick={() => void shipmentCosts.refetch()}>Reload cost history</Button></p>}
           {shipmentCosts.data?.supplierCosts && <PurchaseCostOriginHistory status={shipmentCosts.data.supplierCosts} />}
