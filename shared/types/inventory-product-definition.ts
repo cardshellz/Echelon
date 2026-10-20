@@ -13,6 +13,9 @@ export const productDefinitionReviewSchema = z.object({
   previousModel: z.object({ id, definitionHash: hash }).strict().nullable(),
   affectedProductIds: z.array(id).min(1).max(1000),
   blockers: z.array(z.string()),
+  /** Destinations whose listing is not safe to publish. They do not block the
+   * change; their stock stays frozen until the listing is fixed. */
+  skippedDestinations: z.array(z.string()).optional(),
   atp: z.array(z.object({ productId: id, variantId: id, sku: z.string().nullable(),
     warehouseId: id, warehouseName: z.string(), current: quantity, proposed: quantity,
   }).strict()).max(100000),
