@@ -96,6 +96,8 @@ import APDashboard from "@/pages/APDashboard";
 import APInvoices from "@/pages/APInvoices";
 import APInvoiceDetail from "@/pages/APInvoiceDetail";
 import APPayments from "@/pages/APPayments";
+import SupplierCredits from "@/pages/SupplierCredits";
+import SupplierReturns from "@/pages/SupplierReturns";
 import Login from "@/pages/Login";
 import Settings from "@/pages/Settings";
 import ProcurementSettings from "@/pages/ProcurementSettings";
@@ -593,6 +595,18 @@ function Router() {
         </Route>
         <Route path="/ap-invoices">
           <ProtectedRoute component={APInvoices} allowedRoles={["admin", "lead"]} />
+        </Route>
+        <Route path="/supplier-returns/:id">
+          {(params) => <ProtectedRoute key={params.id} component={SupplierReturns} allowedRoles={["admin", "lead"]} />}
+        </Route>
+        <Route path="/supplier-returns">
+          <ProtectedRoute component={SupplierReturns} allowedRoles={["admin", "lead"]} />
+        </Route>
+        <Route path="/supplier-credits/:id">
+          {(params) => <ProtectedRoute key={params.id} component={SupplierCredits} allowedRoles={["admin", "lead"]} />}
+        </Route>
+        <Route path="/supplier-credits">
+          <ProtectedRoute component={SupplierCredits} allowedRoles={["admin", "lead"]} />
         </Route>
         <Route path="/ap-payments">
           <ProtectedRoute component={APPayments} allowedRoles={["admin", "lead"]} />

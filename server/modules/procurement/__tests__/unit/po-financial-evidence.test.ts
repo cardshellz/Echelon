@@ -127,7 +127,7 @@ describe("PO financial evidence", () => {
       currency: "USD",
       state: "complete",
       invoicedAmountCents: 10000,
-      paidAmountCents: 0,
+      paidAmountCents: 0, creditedAmountCents:0,settledAmountCents:0,
       outstandingAmountCents: 10000,
       invoiceCount: 1,
       reviewReasons: [],
@@ -595,11 +595,25 @@ describe("PO financial evidence", () => {
     expectReview(input([first, second]), "PO_FINANCIAL_SOURCE_DUPLICATE");
     expectReview(
       input([
-        invoice({ payments: [payment(), payment({ allocationId: 71 })] }),
+        invoice({ payments: [payment(), payment({ paymentId: 81 })] }),
       ]),
-      "PO_PAYMENT_EVIDENCE_INVALID",
-      10000,
+      "PO_FINANCIAL_SOURCE_DUPLICATE",
     );
+  });
+  it("counts repeated completed applications of one payment to one invoice exactly once each", () => {
+    const source = withPayment(10000, soleOwner());
+    source.payments = [payment({ appliedAmountCents: 4000 }), payment({ allocationId: 71, appliedAmountCents: 6000 })];
+    expect(buildPoFinancialEvidence(input([source]))).toMatchObject({ state: "complete", invoicedAmountCents: 10000, paidAmountCents: 10000, outstandingAmountCents: 0 });
+  });
+  it("retains repeated voided applications without counting any of them as settlement", () => {
+    const source = soleOwner();
+    source.payments = [payment({ paymentStatus: "voided", appliedAmountCents: 4000 }), payment({ allocationId: 71, paymentStatus: "voided", appliedAmountCents: 6000 })];
+    expect(buildPoFinancialEvidence(input([source]))).toMatchObject({ state: "complete", invoicedAmountCents: 10000, paidAmountCents: 0, outstandingAmountCents: 10000 });
+  });
+  it("still rejects duplicate allocation identity when payment history is voided", () => {
+    const source = soleOwner();
+    source.payments = [payment({ paymentStatus: "voided" }), payment({ paymentStatus: "voided" })];
+    expectReview(input([source]), "PO_FINANCIAL_SOURCE_DUPLICATE");
   });
   it("supports one payment allocated to multiple invoices using distinct allocation IDs", () => {
     const first = withPayment(10000, soleOwner());

@@ -109,7 +109,13 @@ export function registerReceivingRoutes(app: Express) {
       const vendor = order.vendorId ? await storage.getVendorById(order.vendorId) : null;
       console.log("[RECEIVING] Vendor:", vendor ? vendor.name : "none");
       
-      res.json({ ...order, lines: lines.map(withReceivingUnitVersion), vendor });
+      const capabilities = await req.app.locals.services.receiptReversal.getReturnReversalCapabilities(id);
+      const enrichedLines = lines.map(line => {
+        const reversalCapability = capabilities.lines.get(line.id);
+        if (!reversalCapability) throw new Error("Receipt lines changed while loading return history; reload the receipt");
+        return { ...withReceivingUnitVersion(line), reversalCapability };
+      });
+      res.json({ ...order, lines: enrichedLines, vendor, reversalCapability: capabilities.order });
     } catch (error: any) {
       console.error("[RECEIVING] Error fetching receiving order:", error?.message || error);
       console.error("[RECEIVING] Stack:", error?.stack);

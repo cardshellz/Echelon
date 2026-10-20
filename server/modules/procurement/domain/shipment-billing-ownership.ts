@@ -3,7 +3,7 @@ import type { ShipmentCostBillingOwnership } from "@shared/procurement/shipment-
 
 const id = z.number().int().positive().max(2_147_483_647);
 export const billingCostEvidenceSchema = z.object({
-  id, shipmentId: id, vendorId: id.nullable(), invoiceId: id.nullable(), currency: z.string().nullable(),
+  id, shipmentId: id, vendorId: id.nullable(), invoiceId: id.nullable(), currency: z.string().nullable(),amountCents:z.number().int().safe().optional(),
 });
 export const billingInvoiceEvidenceSchema = z.object({
   id, vendorId: id, shipmentId: id.nullable(), currency: z.string(), status: z.string(),
@@ -35,6 +35,7 @@ export function resolveShipmentBillingOwnership(input: unknown): ShipmentCostBil
   // currency cannot be silently relabeled USD when the invoice is created.
   if (cost.currency !== "USD") return review("AP_SHIPMENT_BILLING_CURRENCY_UNSUPPORTED", "This charge does not have supported USD billing evidence. Review its recorded currency before invoicing or payment.");
   const lines = parsed.data.lines.filter(line => line.freightCostId === cost.id);
+  if (lines.length === 0 && cost.invoiceId === null && cost.amountCents !== undefined && cost.amountCents < 0) return review("AP_SUPPLIER_CREDIT_DOCUMENT_REQUIRED","A negative charge requires an explicit supplier credit against its original invoice; it cannot create a negative payable.");
   if (lines.length === 0 && cost.invoiceId === null) return { ...base, state: "unbilled", issueCode: null,
     message: "This charge has no recorded invoice ownership.", canCreateInvoice: true, canLinkExistingLine: true };
   if (lines.length === 0) return { ...review("AP_SHIPMENT_BILLING_LINE_REQUIRED", "The invoice association has no recorded charge line. Select its exact invoice line before approval or payment."),

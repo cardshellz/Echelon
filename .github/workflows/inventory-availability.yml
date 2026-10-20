@@ -13,6 +13,9 @@ concurrency:
 
 jobs:
   preflight:
+    permissions:
+      contents: read
+      pull-requests: read
     name: Inventory migration preflight
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -23,6 +26,8 @@ jobs:
           persist-credentials: false
       - name: Validate migration identities before dependency setup
         run: node scripts/migrations/check-migrations.mjs --ci
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
 
   browser-shard:
     name: Inventory availability browser journeys (${{ matrix.shard }}/4)

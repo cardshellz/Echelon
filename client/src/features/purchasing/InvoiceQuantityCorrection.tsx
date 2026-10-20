@@ -38,7 +38,7 @@ export function InvoiceQuantityImpact({ preview, currency }: { preview: InvoiceQ
     ["Invoice line amount", amount(preview.invoiceLineAmountCents, currency), amount(afterLineAmount, currency)],
     ["Line amount per piece", perPiece(preview.beforeAmountPerPiece), perPiece(preview.afterAmountPerPiece)],
     ["Invoice total", amount(preview.invoiceAmountCents, currency), amount(afterInvoiceAmount, currency)],
-    ["Paid", amount(preview.paidAmountCents, currency), amount(preview.paidAmountCents, currency)],
+    ["Cash paid", amount(preview.paidAmountCents, currency), amount(preview.paidAmountCents, currency)],
     ["Balance", amount(preview.balanceCents, currency), amount(afterBalance, currency)],
     ["Match result", matchNames[preview.beforeMatch], matchNames[preview.afterMatch]],
   ];

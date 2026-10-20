@@ -1,3 +1,4 @@
+import { projectPoAmendmentReturnedCosts } from "./po-amendment-return-impact";
 import type { PoAmendmentImpact } from "@shared/procurement/po-amendment-impact";
 import { COGSService } from "../inventory/cogs.service";
 import { reconcilePurchaseCostEvidence } from "./purchase-cost-application.service";
@@ -58,6 +59,7 @@ export async function refreshPoAmendmentCosts(
         orderCostDeltaCents: application.replayed
           ? 0
           : application.totalCogsDeltaCents,
+        ...projectPoAmendmentReturnedCosts(application),
         issues: application.issues,
       }),
     );
@@ -133,6 +135,7 @@ export async function refreshPoAmendmentCosts(
         orderCostDeltaCents: application.replayed
           ? 0
           : application.totalCogsDeltaCents,
+        ...projectPoAmendmentReturnedCosts(application),
         issues: posted
           ? []
           : [

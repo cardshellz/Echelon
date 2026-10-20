@@ -4,6 +4,21 @@ const id = z.number().int().positive().safe();
 const quantity = z.number().int().nonnegative().safe();
 const money = z.number().int().safe();
 const pair = z.object({ before: money, after: money }).strict();
+/** Stable stock-return identities survive the rolled-back preview. Newly
+ * generated posting/revision IDs remain only in the durable owner evidence. */
+export const poAmendmentReturnedCostSchema = z.object({
+  returnId: id, returnLineId: id, returnAllocationId: id,
+  costQuantityAllocationId: id, inventoryLotId: id, quantity: id,
+  component: z.enum(["product", "packaging", "landed"]),
+  beforeMills: money.nonnegative(), afterMills: money.nonnegative(), deltaMills: money,
+}).strict().superRefine((value, context) => {
+  if (![value.beforeMills, value.afterMills, value.deltaMills].every(Number.isSafeInteger)) return;
+  if (BigInt(value.beforeMills) + BigInt(value.deltaMills) !== BigInt(value.afterMills)) {
+    context.addIssue({ code: "custom", message: "Returned value does not reconcile exactly." });
+  }
+});
+export type PoAmendmentReturnedCost = z.infer<typeof poAmendmentReturnedCostSchema>;
+
 export const poAmendmentImpactSchema = z
   .object({
     quantities: z.array(
@@ -98,12 +113,27 @@ export const poAmendmentImpactSchema = z
           lotsUpdated: quantity,
           orderCostsUpdated: quantity,
           orderCostDeltaCents: money,
+          returnedCosts: z.array(poAmendmentReturnedCostSchema).min(1).max(10_000).optional(),
+          returnedCostDeltaMills: money.optional(),
           // Approval binds the displayed issue, not allocation/application IDs
           // created inside a rolled-back preview. Full evidence remains in the
           // immutable cost application written by the owning service on commit.
           issues: z.array(z.object({ code: z.string(), message: z.string() })),
         })
-        .strict(),
+        .strict().superRefine((value, context) => {
+          if ((value.returnedCosts === undefined) !== (value.returnedCostDeltaMills === undefined)) {
+            context.addIssue({ code: "custom", message: "Returned value rows and their exact total must be supplied together." });
+            return;
+          }
+          if (!value.returnedCosts || !Number.isSafeInteger(value.returnedCostDeltaMills)
+            || value.returnedCosts.some(row => !Number.isSafeInteger(row.deltaMills))) return;
+          const identities = value.returnedCosts.map(row => `${row.returnAllocationId}:${row.component}`);
+          const total = value.returnedCosts.reduce((sum, row) => sum + BigInt(row.deltaMills), BigInt(0));
+          if (new Set(identities).size !== identities.length || value.returnedCosts.some(row => row.component !== value.component)
+            || total !== BigInt(value.returnedCostDeltaMills!)) {
+            context.addIssue({ code: "custom", message: "Returned value identities, component and total must match this cost application." });
+          }
+        }),
     ),
   })
   .strict();

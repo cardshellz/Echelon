@@ -272,3 +272,72 @@ describe("receipt cost request history projection", () => {
     expect(result.state).toBe("review_required"); expect(result.attempts[0].evidenceState).toBe("review_required");
   });
 });
+
+
+function fullQuarantineReturnHistory(): PurchaseCostApplicationRead {
+  const input = applicationReadFixture();
+  const inventoryEffect = { kind: "none", reason: "full_quarantine_return", returnedBasePieces: 10,
+    returns: [{ supplierCreditLineId: 811, returnDispositionId: 41, observationId: 31,
+      receivingLineId: 311, quantity: 2, unitsPerVariant: 5 }] };
+  const contract = withFingerprint({ ...(input.revisions[0].contract as object), totalMills: 0, basePieces: 0, inventoryEffect,
+    sources: [{ kind: "vendor_invoice_line", documentId: 71, lineId: 711, version: "a".repeat(64) },
+      { kind: "supplier_credit_line", documentId: 81, lineId: 811, version: "b".repeat(64) }] });
+  const noInventoryEffectEvidence = { purchaseOrderLineId: 171, recognizedQuantity: false, inventoryHistory: false,
+    costHistory: false, outstandingCustody: false, invoices: [{ documentId: 71, lineId: 711, version: "a".repeat(64) }],
+    returns: [{ supplierCreditLineId: 811, supplierCreditId: 81, creditVersion: "b".repeat(64), returnDispositionId: 41,
+      observationId: 31, receivingLineId: 311, purchaseOrderLineId: 171, quantity: 2, unitsPerVariant: 5,
+      dispositionQuantity: 2, returnedQuantity: 2, observedQuantity: 2, receivedQuantity: 0, pendingQuantity: 0,
+      sourceMatches: true, receiptClosed: true }] };
+  input.applications[0].noInventoryEffectEvidence = noInventoryEffectEvidence;
+  const inventoryEffectProof = { contractVersion: 1, purchaseOrderLineId: 171, inventoryEffect,
+    evidenceFingerprint: createHash("sha256").update(canonicalJson(noInventoryEffectEvidence)).digest("hex") };
+  Object.assign(input.revisions[0], { contract, fingerprint: contract.fingerprint });
+  input.applications[0].result = { status: "applied", lotsUpdated: 0, cogsRowsUpdated: 0, totalCogsDeltaCents: 0,
+    issues: [], inventoryEffectProof: structuredClone(inventoryEffectProof) };
+  input.lotChanges = []; input.contributions = [];
+  Object.assign(input.reportingEvents[0], { sourceFingerprint: contract.fingerprint, cogsDeltaCents: 0, changeCount: 0,
+    inventoryEffectProof: structuredClone(inventoryEffectProof) });
+  return input;
+}
+
+describe("full quarantine return application history", () => {
+  it("preserves a verified zero-effect disposition without fabricating a quantity denominator", () => {
+    const input = fullQuarantineReturnHistory(), before = structuredClone(input);
+    const revision = projectPurchaseCostApplications(input, 17).revisions[0];
+    expect(revision.source).toMatchObject({ totalMills: 0, basePieces: 0 });
+    expect(revision.applications[0]).toMatchObject({ status: "applied", evidenceState: "verified_record", issues: [],
+      inventoryEffect: { kind: "none", reason: "full_quarantine_return", returnedBasePieces: 10 },
+      outcome: { lotsUpdated: 0, cogsRowsUpdated: 0, totalCogsDeltaCents: 0 }, lotChanges: [] });
+    expect(input).toEqual(before);
+  });
+
+  it.each(["missing_result_proof", "missing_event_proof", "different_event_proof", "wrong_po_line", "wrong_effect",
+    "cogs_changed", "sold_rows_changed", "lots_changed", "missing_event", "missing_snapshot", "accepted_stock_snapshot"])("does not claim completion with %s", kind => {
+    const input = fullQuarantineReturnHistory();
+    const result = input.applications[0].result as Record<string, unknown>;
+    const proof = result.inventoryEffectProof as Record<string, unknown>;
+    if (kind === "missing_snapshot") delete input.applications[0].noInventoryEffectEvidence;
+    if (kind === "accepted_stock_snapshot") (input.applications[0].noInventoryEffectEvidence as Record<string, unknown>).recognizedQuantity = true;
+    if (kind === "missing_result_proof") delete result.inventoryEffectProof;
+    if (kind === "missing_event_proof") delete input.reportingEvents[0].inventoryEffectProof;
+    if (kind === "different_event_proof") (input.reportingEvents[0].inventoryEffectProof as Record<string, unknown>).evidenceFingerprint = "d".repeat(64);
+    if (kind === "wrong_po_line") proof.purchaseOrderLineId = 172;
+    if (kind === "wrong_effect") (proof.inventoryEffect as Record<string, unknown>).returnedBasePieces = 11;
+    if (kind === "cogs_changed") { result.totalCogsDeltaCents = 1; input.reportingEvents[0].cogsDeltaCents = 1; }
+    if (kind === "sold_rows_changed") result.cogsRowsUpdated = 1;
+    if (kind === "lots_changed") result.lotsUpdated = 1;
+    if (kind === "missing_event") input.reportingEvents = [];
+    const application = projectPurchaseCostApplications(input, 17).revisions[0].applications[0];
+    expect(application.status).toBe("applied");
+    expect(application.evidenceState).toBe("review_required");
+    expect(application.inventoryEffect).toBeUndefined();
+    expect(application.issues.some(row => row.code === "COST_INVENTORY_EFFECT_UNVERIFIED")).toBe(true);
+  });
+
+  it("rejects a response that adds a return-completion claim to an ordinary lot application", () => {
+    const history = projectPurchaseCostApplications(applicationReadFixture(), 17);
+    const noEffect = projectPurchaseCostApplications(fullQuarantineReturnHistory(), 17).revisions[0].applications[0].inventoryEffect;
+    history.revisions[0].applications[0].inventoryEffect = noEffect;
+    expect(purchaseCostApplicationHistorySchema.safeParse(history).success).toBe(false);
+  });
+});

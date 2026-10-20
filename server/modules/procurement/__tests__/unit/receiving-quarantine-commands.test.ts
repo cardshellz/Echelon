@@ -1,5 +1,6 @@
+import { custodyTestResult } from "@shared/procurement/__tests__/receiving-quarantine.fixture";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { createReceivingCustodyCommands, custodyCommandScope } from "../../receiving-quarantine.commands";
+import { createReceivingCustodyCommands, custodyCommandScope, hashCustodyCommandIdentity, CUSTODY_COMMAND_PRINCIPAL } from "../../receiving-quarantine.commands";
 import { ReceivingQuarantineError } from "../../domain/receiving-quarantine";
 import type { CustodyTransaction } from "../../receiving-quarantine.repository";
 import type { ReceivingQuarantineReceivingPort } from "../../receiving-quarantine-receiving.port";
@@ -7,7 +8,8 @@ import type {
   FinancialCommandDescriptor, FinancialCommandRepository, FinancialCommandResult,
 } from "../../../../platform/commands/transactional-command.service";
 
-const mocks = vi.hoisted(() => ({ execute: vi.fn(), logError: vi.fn() }));
+const mocks = vi.hoisted(() => ({ legacy: vi.fn(), execute: vi.fn(), logError: vi.fn() }));
+vi.mock("../../receiving-quarantine-command-evidence.repository", () => ({ assertNoLegacyCustodyCommand: mocks.legacy }));
 vi.mock("../../../../platform/commands/command-results.repository", () => ({ financialCommandRepository: {} }));
 vi.mock("../../../../platform/observability", () => ({ logger: { error: mocks.logError } }));
 vi.mock("../../receiving-quarantine.service", async importOriginal => ({
@@ -18,8 +20,8 @@ vi.mock("../../receiving-quarantine.service", async importOriginal => ({
 const body = { kind: "unidentified", quantity: 2, unitLabel: "box", description: "Unexpected cartons",
   observedSku: null, condition: "unexpected", holdingLocationId: 3, reason: "Inspected delivery", evidenceReference: "photo:42" };
 const descriptor: FinancialCommandDescriptor = {
-  ...custodyCommandScope("intake", 7), actorType: "user", actorId: "operator",
-  idempotencyKey: "custody-command-42", requestHash: "a".repeat(64), contractVersion: 1,
+  ...custodyCommandScope(), actorType: "service", actorId: CUSTODY_COMMAND_PRINCIPAL,
+  idempotencyKey: "custody-command-42", requestHash: hashCustodyCommandIdentity({ command: "intake", resourceId: 7, body, actorId: "operator" }), contractVersion: 1,
 };
 const at = new Date("2026-10-14T12:00:00Z");
 
@@ -64,7 +66,7 @@ describe("receiving custody command recovery", () => {
   it("recovers a repaired fence with the same key and replays the subsequent success", async () => {
     const { execute, reserve, reject, retry, tx, receiving } = fixture();
     const failure = new ReceivingQuarantineError("RECEIVING_CUSTODY_FENCE_MISSING", "Receiving custody protection is unavailable. Contact an administrator.", 503);
-    const completed = { observation: { id: 9 }, acceptance: null };
+    const completed = custodyTestResult("intake", 7, body, "operator");
     mocks.execute.mockRejectedValueOnce(failure).mockResolvedValue(completed);
 
     await expect(execute()).rejects.toBe(failure);
@@ -95,4 +97,15 @@ describe("receiving custody command recovery", () => {
     expect(retry).not.toHaveBeenCalled();
     expect(mocks.execute).toHaveBeenCalledOnce();
   });
+  it("does not publish a false success when returned intake quantity differs", async () => {
+    const f = fixture(); const result = custodyTestResult("intake", 7, body, "operator"); result.observation.observedQty++;
+    mocks.execute.mockResolvedValue(result);
+    await expect(f.execute()).rejects.toMatchObject({ code: "RECEIVING_CUSTODY_RESULT_INVALID" });
+    expect(f.retry).toHaveBeenCalledOnce(); expect(f.reject).not.toHaveBeenCalled();
+  });
+  it("retains unknown legacy evidence as retryable without a terminal rejection proof", async () => {
+    const f = fixture(); mocks.legacy.mockRejectedValueOnce(new Error("legacy evidence"));
+    await expect(f.execute()).rejects.toThrow("legacy evidence"); expect(mocks.execute).not.toHaveBeenCalled(); expect(f.reject).not.toHaveBeenCalled();
+  });
+
 });

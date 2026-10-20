@@ -29,7 +29,7 @@ export const quantityCommandSchema = z.object({
   contractVersion: z.literal("inventory_quantity_v1"),
   idempotencyKey: text(200),
   kind: z.enum(["opening", "receive", "receipt_reversal", "reserve", "release", "pick",
-    "unpick", "pack", "unpack", "ship", "transfer", "transform", "return", "adjust"]),
+    "unpick", "pack", "unpack", "ship", "transfer", "transform", "return", "supplier_return", "adjust"]),
   actor: text(100), reason: text(1000), occurredAt: z.string().datetime(),
   reference: z.object({ type: text(100), id: text(200) }).strict(),
   // Reversal is another posting, never mutation/deletion of a prior event.
@@ -73,7 +73,7 @@ export function normalizeQuantityCommand(input: unknown): QuantityCommand {
     switch (command.kind) {
       case "opening": valid = Object.values(d).every(value => value >= 0) && d.reserved <= d.onHand; break;
       case "receive": case "return": valid = onlyOnHand && d.onHand > 0; break;
-      case "receipt_reversal": valid = onlyOnHand && d.onHand < 0; break;
+      case "receipt_reversal": case "supplier_return": valid = onlyOnHand && d.onHand < 0; break;
       case "reserve": valid = d.onHand === 0 && d.reserved > 0 && d.picked === 0 && d.packed === 0; break;
       case "release": valid = d.onHand === 0 && d.reserved < 0 && d.picked === 0 && d.packed === 0; break;
       case "pick": valid = d.onHand < 0 && d.picked === -d.onHand && d.packed === 0

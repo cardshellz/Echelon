@@ -22,8 +22,9 @@ const databaseTests = DATABASE_URL && DISPOSABLE ? describe : describe.skip;
 const NOW = new Date("2026-09-06T12:00:00.000Z");
 const TABLES = [schema.products, schema.productVariants, schema.vendors,
   schema.purchaseOrders, schema.purchaseOrderLines, schema.inboundShipments, schema.inboundShipmentLines,
-  schema.receivingOrders, schema.receivingLines, schema.poReceipts, schema.receiptReversals,
-  schema.vendorInvoices, schema.vendorInvoiceLines, schema.poStatusHistory,
+  schema.receivingOrders, schema.receivingLines, schema.poReceipts, schema.supplierReturnLines, schema.receiptReversals,
+  schema.vendorInvoices, schema.supplierCredits, schema.supplierCreditLines,
+  schema.supplierCreditApplications, schema.supplierCreditApplicationReversals, schema.vendorInvoiceLines, schema.poStatusHistory,
   schema.warehouses, schema.warehouseLocations, schema.inventoryLevels, schema.inventoryLots, schema.inventoryTransactions] as const;
 type ReceivingService = import("../../receiving.service").ReceivingService;
 type Outcome = { ok: true; value: unknown } | { ok: false; error: unknown };

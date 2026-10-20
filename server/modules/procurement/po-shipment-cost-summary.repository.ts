@@ -7,6 +7,8 @@ import { resolveShipmentChargeEvidence } from "./domain/shipment-charge-evidence
 import { dateValues } from "./purchase-workspace-read";
 import { readShipmentCostPostingEvidence } from "./shipment-cost-posting-read.repository";
 import { readPurchaseCostStatus } from "./purchase-cost-status.repository";
+import { readSupplierCreditCostRows } from "./supplier-credit-source.repository";
+import { resolveShipmentSupplierCredits } from "./domain/shipment-supplier-credits";
 
 type SummaryReader = {
   execute(query: SQL): Promise<{ rows: Record<string, unknown>[] }>;
@@ -134,6 +136,9 @@ export async function readPoShipmentCosts(
         if (!linkedLine) throw new Error("Shipment costing review refers to an unlinked line.");
         return { lineId, shipmentId: costInteger(linkedLine.inbound_shipment_id, "shipmentId", 1), contract: row.contract };
       }));
+      const supplierCredits = await readSupplierCreditCostRows(tx, { freightCostIds: charges.rows.map(row => Number(row.id)) });
+      const creditAdjustment = resolveShipmentSupplierCredits({ charges: charges.rows, allocations: allocations.rows,
+        invoices: invoices.rows.map(row => ({ ...row, vendor_invoice_id: row.invoice_id })), credits: supplierCredits });
       const costs = buildPoShipmentCosts(
         {
           poId,
@@ -168,12 +173,12 @@ export async function readPoShipmentCosts(
                   : signed(
                       row.actual_cents ?? row.estimated_cents,
                       "charge.amountCents",
-                    ),
+                    ) - (creditAdjustment.creditedCentsByCharge.get(Number(row.id)) ?? 0),
               confirmed: authority.evidence === "confirmed",
-              issue: authority.issue?.code ?? null,
+              issue: authority.issue?.code ?? creditAdjustment.issues[0]?.code ?? null,
             };
           }),
-          allocations: allocations.rows.map((row) => ({
+          allocations: creditAdjustment.allocations.map((row) => ({
             costId: costInteger(row.shipment_cost_id, "costId", 1),
             poId:
               row.purchase_order_id == null

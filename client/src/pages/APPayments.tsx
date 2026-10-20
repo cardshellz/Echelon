@@ -1,9 +1,15 @@
-import { invoiceWorkListQuery, paymentWorkListQuery, invalidateApPaymentQueries, apVendorOptionsQuery } from "@/features/purchasing/ap-work-list-query";
+import { SupplierCreditLink } from "@/features/purchasing/SupplierCreditLink";
+import { useLocation, useSearch } from "wouter";
+import { ApPaymentApplications, PaymentBalanceSummary } from "@/features/purchasing/ApPaymentApplications";
+import { ApPaymentRecovery } from "@/features/purchasing/ApPaymentRecovery";
+import { useApPaymentCommands } from "@/features/purchasing/use-ap-payment-commands";
+import { formatPaymentAmount, parsePaymentAmount, paymentAllocationInputs, recordPaymentInputSchema, sumPaymentCents } from "@/lib/ap-payment-command";
+import { formatPaymentCalendarDate } from "@shared/procurement/ap-payment-contract";
+import { invoiceWorkListQuery, paymentWorkListQuery, apVendorOptionsQuery } from "@/features/purchasing/ap-work-list-query";
 import { WorkListPagination } from "@/features/purchasing/WorkListPagination";
-import { dollarsToCents } from "@shared/utils/money";
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import { useAuth } from "@/lib/auth";
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { useQuery, useMutation } from "@tanstack/react-query";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -26,35 +32,11 @@ import {
 import { useToast } from "@/hooks/use-toast";
 import { Plus, Search, CreditCard, XCircle } from "lucide-react";
 import { format, parseISO } from "date-fns";
-import {
-  createFinancialCommandIntentStore,
-  financialCommandFetchJson,
-  financialCommandRetryDelay,
-  shouldRetryFinancialCommand,
-} from "@/lib/financial-command";
-
-function createApPaymentIdempotencyKey(): string {
-  return typeof crypto !== "undefined" && "randomUUID" in crypto
-    ? (crypto as any).randomUUID()
-    : `ap-payment-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-}
-
-function formatCents(cents: number | null | undefined): string {
-  if (!cents && cents !== 0) return "$0.00";
-  return `$${(Number(cents) / 100).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-}
+const formatCents = formatPaymentAmount;
 
 function formatDate(d: string | null | undefined) {
   if (!d) return "—";
   try { return format(parseISO(d), "MMM d, yyyy"); } catch { return d; }
-}
-
-function apLedgerOutcomeDescription(result: any): string | undefined {
-  const outcome = result?.apLedgerOutcome;
-  if (!outcome) return undefined;
-  const poIds = Array.isArray(outcome.affectedPurchaseOrderIds) ? outcome.affectedPurchaseOrderIds : [];
-  if (poIds.length) return `Updated linked POs: ${poIds.join(", ")}`;
-  return outcome.message;
 }
 
 const METHOD_LABELS: Record<string, string> = {
@@ -76,18 +58,20 @@ const COMMAND_LABELS: Record<string, string> = {
   void_invoice: "Invoice voided",
   record_payment: "Payment recorded",
   void_payment: "Payment voided",
+  apply_payment: "Existing payment applied",
 };
 
 export default function APPayments() {
   const { hasPermission } = useAuth();
   const { toast } = useToast();
-  const queryClient = useQueryClient();
-  const [recordPaymentIntent] = useState(() =>
-    createFinancialCommandIntentStore(createApPaymentIdempotencyKey),
-  );
-  const [voidPaymentIntent] = useState(() =>
-    createFinancialCommandIntentStore(createApPaymentIdempotencyKey),
-  );
+  const paymentCommands = useApPaymentCommands();
+  const [, navigate] = useLocation();
+  const locationSearch = useSearch();
+  const requestedId = new URLSearchParams(locationSearch).get("paymentId");
+  const parsedPaymentId = requestedId && /^[1-9]\d*$/.test(requestedId) && Number(requestedId) <= 2_147_483_647 ? Number(requestedId) : null;
+  const [reviewPaymentId, setReviewPaymentId] = useState<number | null>(parsedPaymentId);
+  useEffect(() => setReviewPaymentId(parsedPaymentId), [parsedPaymentId]);
+  const openPayment = (id: number | null) => { setReviewPaymentId(id); navigate(id === null ? "/ap-payments" : `/ap-payments?paymentId=${id}`); };
   const [search, setSearch] = useState("");
   const [offset, setOffset] = useState(0);
   const [invoiceOffset, setInvoiceOffset] = useState(0);
@@ -127,110 +111,53 @@ export default function APPayments() {
   const [allocations, setAllocations] = useState<Record<number, string>>({});
 
   const createMutation = useMutation({
-    mutationFn: async () => {
-      const body = {
-        vendorId: parseInt(newPayment.vendorId),
-        paymentDate: newPayment.paymentDate,
-        paymentMethod: newPayment.paymentMethod,
-        referenceNumber: newPayment.referenceNumber || undefined,
-        checkNumber: newPayment.checkNumber || undefined,
-        bankAccountLabel: newPayment.bankAccountLabel || undefined,
-        totalAmountCents: dollarsToCents(newPayment.totalAmountDollars || "0"),
-        notes: newPayment.notes || undefined,
-        allocations: Object.entries(allocations)
-          .filter(([, val]) => parseFloat(val) > 0)
-          .map(([invId, val]) => ({
-            vendorInvoiceId: parseInt(invId),
-            appliedAmountCents: dollarsToCents(val),
-          })),
-      };
-      // Server requires Idempotency-Key on payment writes (Rule #6 — payments
-      // must never double-apply on retry). The intent store retains one key for
-      // this exact payload across transport failures and automatic retries.
-      const idempotencyKey = recordPaymentIntent.acquire({
-        method: "POST",
-        url: "/api/ap-payments",
-        body,
-      });
-      try {
-        const result = await financialCommandFetchJson<any>("/api/ap-payments", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "Idempotency-Key": idempotencyKey,
-          },
-          body: JSON.stringify(body),
-        });
-        return { result, idempotencyKey };
-      } catch (error) {
-        recordPaymentIntent.fail(idempotencyKey, error);
-        throw error;
-      }
-    },
-    retry: shouldRetryFinancialCommand,
-    retryDelay: financialCommandRetryDelay,
-    onSuccess: ({ result, idempotencyKey }) => {
-      recordPaymentIntent.complete(idempotencyKey);
-      void invalidateApPaymentQueries(queryClient);
-      setShowPaymentDialog(false);
-      setNewPayment({ vendorId: "", paymentDate: format(new Date(), "yyyy-MM-dd"), paymentMethod: "ach", referenceNumber: "", checkNumber: "", bankAccountLabel: "", totalAmountDollars: "", notes: "" });
-      setAllocations({});
-      toast({ title: "Payment recorded", description: apLedgerOutcomeDescription(result) });
-    },
-    onError: (e: Error) => toast({ title: "Error", description: e.message, variant: "destructive" }),
+    mutationFn: async () => paymentCommands.execute({ operation: "record_payment", originInvoiceId: null, payload: recordPaymentInputSchema.parse({
+      vendorId: Number(newPayment.vendorId), paymentDate: newPayment.paymentDate, paymentMethod: newPayment.paymentMethod,
+      referenceNumber: newPayment.referenceNumber || undefined, checkNumber: newPayment.checkNumber || undefined,
+      bankAccountLabel: newPayment.bankAccountLabel || undefined, totalAmountCents: parsePaymentAmount(newPayment.totalAmountDollars),
+      notes: newPayment.notes || undefined, allocations: paymentAllocationInputs(allocations),
+    }) }),
+    onError: (error: Error) => toast({ title: "Payment request requires attention", description: error.message, variant: "destructive" }),
+  });
+  const voidMutation = useMutation({
+    mutationFn: (paymentId: number) => paymentCommands.execute({ operation: "void_payment", paymentId, payload: { reason: voidReason } }),
+    onError: (error: Error) => toast({ title: "Payment request requires attention", description: error.message, variant: "destructive" }),
   });
 
-  const voidMutation = useMutation({
-    mutationFn: async (id: number) => {
-      const url = `/api/ap-payments/${id}/void`;
-      const body = { reason: voidReason };
-      const idempotencyKey = voidPaymentIntent.acquire({ method: "POST", url, body });
-      try {
-        const result = await financialCommandFetchJson<any>(url, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "Idempotency-Key": idempotencyKey,
-          },
-          body: JSON.stringify(body),
-        });
-        return { result, idempotencyKey };
-      } catch (error) {
-        voidPaymentIntent.fail(idempotencyKey, error);
-        throw error;
-      }
-    },
-    retry: shouldRetryFinancialCommand,
-    retryDelay: financialCommandRetryDelay,
-    onSuccess: ({ result, idempotencyKey }) => {
-      voidPaymentIntent.complete(idempotencyKey);
-      void invalidateApPaymentQueries(queryClient);
-      setShowVoidDialog(null);
-      setVoidReason("");
-      toast({ title: "Payment voided", description: apLedgerOutcomeDescription(result) });
-    },
-    onError: (e: Error) => toast({ title: "Error", description: e.message, variant: "destructive" }),
-  });
+  useEffect(() => {
+    if (paymentCommands.confirmed?.operation === "record_payment") {
+      setShowPaymentDialog(false); setAllocations({});
+      setNewPayment({ vendorId: "", paymentDate: format(new Date(), "yyyy-MM-dd"), paymentMethod: "ach", referenceNumber: "", checkNumber: "", bankAccountLabel: "", totalAmountDollars: "", notes: "" });
+    } else if (paymentCommands.confirmed?.operation === "void_payment") { setShowVoidDialog(null); setVoidReason(""); }
+  }, [paymentCommands.confirmed]);
+
+  useEffect(() => {
+    setShowPaymentDialog(false); setShowVoidDialog(null); setVoidReason(""); setAllocations({}); setInvoiceOffset(0); setInvoiceSearch("");
+    setNewPayment({ vendorId: "", paymentDate: format(new Date(), "yyyy-MM-dd"), paymentMethod: "ach", referenceNumber: "", checkNumber: "", bankAccountLabel: "", totalAmountDollars: "", notes: "" });
+  }, [paymentCommands.userId]);
 
   const payments = data?.items ?? [];
   const auditEvents = auditData?.events ?? [];
 
-  const allocTotal = Object.values(allocations).reduce((s, v) => s + (parseFloat(v) || 0), 0);
+  let allocTotal: number | null = null;
+  let recordedTotal: number | null = null;
+  try { allocTotal = sumPaymentCents(paymentAllocationInputs(allocations).map(row => row.appliedAmountCents)); recordedTotal = parsePaymentAmount(newPayment.totalAmountDollars || "0"); } catch { /* Preserve invalid drafts for explicit correction. */ }
 
   return (
     <div className="p-6 max-w-7xl mx-auto space-y-4">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold">AP Payments</h1>
+          <h1 className="text-2xl font-bold">AP Payments</h1><SupplierCreditLink />
           <p className="text-muted-foreground text-sm">Payment disbursement ledger</p>
         </div>
-        {hasPermission("purchasing", "approve") && <Button size="sm" onClick={() => setShowPaymentDialog(true)}>
+        {hasPermission("purchasing", "approve") && <Button size="sm" disabled={paymentCommands.blocked} onClick={() => setShowPaymentDialog(true)}>
           <Plus className="h-4 w-4 mr-2" />
           Record Payment
         </Button>}
       </div>
 
-      <div className="relative w-72">
+      <ApPaymentRecovery commands={paymentCommands} />
+      <div className="relative w-72 max-w-full">
         <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
         <Input
           placeholder="Search payments..."
@@ -270,14 +197,14 @@ export default function APPayments() {
               <TableBody>
                 {payments.map((p: any) => (
                   <TableRow key={p.id} className={p.status === "voided" ? "opacity-50" : ""}>
-                    <TableCell className="font-mono font-medium">{p.paymentNumber}</TableCell>
+                    <TableCell className="font-mono font-medium"><Button variant="link" className="h-auto p-0" aria-label={`Review payment ${p.paymentNumber}`} onClick={() => openPayment(p.id)}>{p.paymentNumber}</Button></TableCell>
                     <TableCell>{p.vendorName ?? "—"}</TableCell>
-                    <TableCell className="text-sm">{formatDate(p.paymentDate)}</TableCell>
+                    <TableCell className="text-sm">{formatPaymentCalendarDate(p)}</TableCell>
                     <TableCell className="text-sm">{METHOD_LABELS[p.paymentMethod] ?? p.paymentMethod}</TableCell>
                     <TableCell className="text-sm font-mono text-muted-foreground">
                       {p.referenceNumber || p.checkNumber || "—"}
                     </TableCell>
-                    <TableCell className="text-right font-mono font-medium">{formatCents(p.totalAmountCents)}</TableCell>
+                    <TableCell className="text-right font-mono font-medium">{formatCents(p.totalAmountCents)}<PaymentBalanceSummary value={p.paymentBalance} /></TableCell>
                     <TableCell>
                       <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${STATUS_COLORS[p.status] ?? ""}`}>
                         {p.status}
@@ -287,7 +214,7 @@ export default function APPayments() {
                       {p.status !== "voided" && p.status !== "completed" && <span className="text-xs text-amber-700">Historical status requires review</span>}
                       {p.status === "completed" && hasPermission("purchasing", "approve") && (
                         <Button size="sm" variant="ghost" className="h-7 text-muted-foreground" aria-label={`Void payment ${p.paymentNumber}`}
-                          onClick={() => setShowVoidDialog(p.id)}>
+                          disabled={paymentCommands.blocked} onClick={() => setShowVoidDialog(p.id)}>
                           <XCircle className="h-3.5 w-3.5" />
                         </Button>
                       )}
@@ -344,11 +271,14 @@ export default function APPayments() {
         </CardContent>
       </Card>
 
+      {reviewPaymentId !== null && <ApPaymentApplications key={reviewPaymentId} paymentId={reviewPaymentId} onClose={() => openPayment(null)} commands={paymentCommands} />}
+
       {/* Record Payment Dialog */}
       <Dialog open={showPaymentDialog} onOpenChange={setShowPaymentDialog}>
         <DialogContent className="max-w-lg max-h-[90vh] overflow-y-auto">
-          <DialogHeader><DialogTitle>Record Payment</DialogTitle></DialogHeader>
-          <div className="space-y-4">
+          <DialogHeader><DialogTitle>Record Payment</DialogTitle><DialogDescription>Record cash already paid to a supplier. To allocate an existing payment, open that payment instead.</DialogDescription></DialogHeader>
+          <ApPaymentRecovery commands={paymentCommands} />
+          <fieldset disabled={paymentCommands.blocked} className="space-y-4">
             <div className="space-y-2">
               <Label>Vendor *</Label>
               <select className="w-full border rounded-md h-10 px-3 text-sm bg-background"
@@ -366,7 +296,7 @@ export default function APPayments() {
             <div className="grid grid-cols-2 gap-4">
               <div className="space-y-2">
                 <Label>Payment Date *</Label>
-                <Input type="date" value={newPayment.paymentDate} onChange={(e) => setNewPayment(p => ({ ...p, paymentDate: e.target.value }))} />
+                <Input aria-label="Payment date" type="date" value={newPayment.paymentDate} onChange={(e) => setNewPayment(p => ({ ...p, paymentDate: e.target.value }))} />
               </div>
               <div className="space-y-2">
                 <Label>Method *</Label>
@@ -432,11 +362,7 @@ export default function APPayments() {
                 </div>}
                 {!invoicesError && <WorkListPagination page={openInvoicesData} busy={invoicesFetching} onOffset={setInvoiceOffset} label="vendor invoices" />}
                 {Object.keys(allocations).length > 0 && <p className="text-xs text-muted-foreground">Allocations are retained across invoice pages and searches. <button type="button" className="underline" onClick={() => setAllocations({})}>Clear allocations</button></p>}
-                {allocTotal > 0 && (
-                  <p className={`text-xs ${allocTotal > parseFloat(newPayment.totalAmountDollars || "0") ? "text-red-500" : "text-muted-foreground"}`}>
-                    Allocated: ${allocTotal.toFixed(2)} of ${parseFloat(newPayment.totalAmountDollars || "0").toFixed(2)}
-                  </p>
-                )}
+                {allocTotal === null || recordedTotal === null ? <p role="alert" className="text-sm text-destructive">Review the payment amounts. Use at most two decimal places.</p> : allocTotal > 0 && <p className={`text-xs ${allocTotal > recordedTotal ? "text-red-500" : "text-muted-foreground"}`}>Allocated: {formatCents(allocTotal)} of {formatCents(recordedTotal)}</p>}
               </div>
             )}
 
@@ -446,13 +372,13 @@ export default function APPayments() {
             </div>
 
 
+          </fieldset>
             <div className="flex gap-2 justify-end">
               <Button variant="outline" onClick={() => setShowPaymentDialog(false)}>Cancel</Button>
-              <Button onClick={() => createMutation.mutate()} disabled={!newPayment.vendorId || !newPayment.totalAmountDollars || createMutation.isPending}>
+              <Button onClick={() => createMutation.mutate()} disabled={paymentCommands.blocked || !newPayment.vendorId || !newPayment.totalAmountDollars || allocTotal === null || recordedTotal === null || allocTotal > recordedTotal || createMutation.isPending}>
                 {createMutation.isPending ? "Recording..." : "Record Payment"}
               </Button>
             </div>
-          </div>
         </DialogContent>
       </Dialog>
 
@@ -463,11 +389,12 @@ export default function APPayments() {
             <DialogTitle>Void Payment</DialogTitle>
             <DialogDescription>This will reverse any invoice allocations. Provide a reason.</DialogDescription>
           </DialogHeader>
+          <ApPaymentRecovery commands={paymentCommands} />
           <div className="space-y-4">
-            <Input placeholder="Void reason..." value={voidReason} onChange={(e) => setVoidReason(e.target.value)} />
+            <Input disabled={paymentCommands.blocked} placeholder="Void reason..." value={voidReason} onChange={(e) => setVoidReason(e.target.value)} />
             <div className="flex gap-2 justify-end">
               <Button variant="outline" onClick={() => setShowVoidDialog(null)}>Cancel</Button>
-              <Button variant="destructive" onClick={() => showVoidDialog && voidMutation.mutate(showVoidDialog)} disabled={!voidReason || voidMutation.isPending}>
+              <Button variant="destructive" onClick={() => showVoidDialog && voidMutation.mutate(showVoidDialog)} disabled={paymentCommands.blocked || !voidReason || voidMutation.isPending}>
                 {voidMutation.isPending ? "Voiding..." : "Void Payment"}
               </Button>
             </div>

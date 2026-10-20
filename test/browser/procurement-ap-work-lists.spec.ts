@@ -1,3 +1,4 @@
+import { recordedPaymentReply } from "./procurement-payment-fixtures";
 import { invoiceSourceFixture, unbilledOwnershipFixture } from "../fixtures/invoice-source";
 import { resolve } from "node:path";
 import { expect, test, type Page } from "@playwright/test";
@@ -54,8 +55,8 @@ test("payment selection scopes the vendor before paging, preserves page allocati
     return route.fulfill({ json: workListPage(params.get("vendorId") === "2" ? invoices() : [], route.request().url()) });
   });
   await page.route("**/api/ap-payments/work-list?*", route => route.fulfill({ json: workListPage(recorded ? [paymentListItem({ id: 90, paymentNumber: "PAY-90", status: paid ? "completed" : "voided" })] : [], route.request().url()) }));
-  await page.route("**/api/ap-payments", route => { body = route.request().postDataJSON(); paid = true; recorded = true; return route.fulfill({ json: { id: 90 } }); });
-  await page.route("**/api/ap-payments/90/void", route => { paid = false; return route.fulfill({ json: { ok: true } }); });
+  await page.route("**/api/ap-payments", route => { body = route.request().postDataJSON(); paid = true; recorded = true; return route.fulfill({ json: recordedPaymentReply(body, route.request().headers()["idempotency-key"]) }); });
+  await page.route("**/api/ap-payments/90/void", route => { paid = false; return route.fulfill({ json: { ok: true, status: "voided", command: "void_payment", paymentId: 90, actorId: "ap-reader", idempotencyKey: route.request().headers()["idempotency-key"] } }); });
   await page.goto("/ap-payments"); await page.getByRole("button", { name: "Record Payment", exact: true }).click();
   let dialog = page.getByRole("dialog"); await dialog.getByRole("combobox", { name: "Payment vendor" }).selectOption("2");
   await expect(dialog.getByText("#OLD-201", { exact: true })).toBeVisible();

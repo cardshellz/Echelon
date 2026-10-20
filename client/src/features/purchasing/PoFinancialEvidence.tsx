@@ -1,3 +1,4 @@
+import { SupplierCreditLink } from "@/features/purchasing/SupplierCreditLink";
 import { useQuery } from "@tanstack/react-query";
 import { poFinancialEvidenceSchema } from "@shared/procurement/po-financial-evidence";
 import { formatIntegerCents } from "@shared/utils/format-integer-cents";
@@ -26,7 +27,7 @@ export function PoFinancialEvidence({ query, onViewInvoices, invoiceHref }: {
   invoiceHref: (invoiceId: number) => string;
 }) {
   const evidence = query.data;
-  const amount = (cents: number | null, currency: string) => cents === null ? "Unknown" : formatIntegerCents(cents, currency);
+  const amount = (cents: number | null | undefined, currency: string) => cents == null ? "Unknown" : formatIntegerCents(cents, currency);
   return <Card role="region" aria-label="Purchase order financial evidence">
     <CardHeader className="pb-3"><CardTitle className="text-base">This purchase order's finances</CardTitle></CardHeader>
     <CardContent className="space-y-3 text-sm">
@@ -36,11 +37,13 @@ export function PoFinancialEvidence({ query, onViewInvoices, invoiceHref }: {
         <Button variant="outline" onClick={() => void query.refetch()}>Reload financial evidence</Button>
       </div>}
       {query.isSuccess && !query.isFetching && evidence && <>
-        <dl className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+        <dl className="grid grid-cols-1 gap-3 sm:grid-cols-4">
           <div><dt className="text-muted-foreground">Invoiced to this PO</dt><dd className="mt-1 font-mono font-medium">{amount(evidence.invoicedAmountCents, evidence.currency)}</dd></div>
-          <div><dt className="text-muted-foreground">Paid for this PO</dt><dd className="mt-1 font-mono font-medium">{amount(evidence.paidAmountCents, evidence.currency)}</dd></div>
+          <div><dt className="text-muted-foreground">Cash paid for this PO</dt><dd className="mt-1 font-mono font-medium">{amount(evidence.paidAmountCents, evidence.currency)}</dd></div>
+          <div><dt className="text-muted-foreground">Credits applied to this PO</dt><dd className="mt-1 font-mono font-medium">{amount(evidence.creditedAmountCents, evidence.currency)}</dd></div>
           <div><dt className="text-muted-foreground">Outstanding for this PO</dt><dd className="mt-1 font-mono font-medium">{amount(evidence.outstandingAmountCents, evidence.currency)}</dd></div>
         </dl>
+        <SupplierCreditLink purchaseOrderId={evidence.purchaseOrderId} />
         {evidence.invoiceCount === 0 && <p className="text-muted-foreground">No active linked invoices recorded.</p>}
         {evidence.state === "review_required" && <div className="space-y-2 rounded-md border border-amber-400/60 p-3">
           <p className="font-medium">Financial attribution needs review</p>

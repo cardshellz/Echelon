@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "migration": "900000017000018610001_supplier_credit_completion.sql",
+  "generation": 17,
+  "pr": 1861,
+  "ordinal": 1,
+  "after": [
+    "900000016000018570001_ap_payment_balance_completion.sql"
+  ]
+}

@@ -1,3 +1,4 @@
+import { noInventoryEffectLabel } from "./cost-inventory-effect-presentation";
 import React from "react";
 import { Link } from "wouter";
 import type { PurchaseWorkspace } from "@shared/procurement/purchase-workspace";
@@ -5,7 +6,7 @@ import { reconciliationDestinations } from "@shared/procurement/cost-reconciliat
 import type { PurchaseCostApplicationHistory } from "@shared/procurement/purchase-cost-applications";
 import type { ReceiptCostRequestHistory } from "@shared/procurement/receipt-cost-queue";
 import { describeReceiptCostRecovery } from "@shared/procurement/receipt-cost-recovery";
-import { purchaseCostNextAction } from "@shared/procurement/purchase-cost-status";
+import { purchaseCostNextAction, purchaseLineInventoryEffect } from "@shared/procurement/purchase-cost-status";
 import { PurchaseSupplierCostLine } from "./PurchaseSupplierCostReview";
 import type { ProcurementNavigation } from "@/hooks/use-procurement-navigation";
 import { Badge } from "@/components/ui/badge";
@@ -31,6 +32,7 @@ function applicationLabel(application: Revision["applications"][number], source:
   }
   if (application.evidenceState === "review_required") return application.status === "retry_required" ? "Retry required" : "Review required";
   if (application.status !== "applied") return formatWorkspaceStatus(application.status);
+  if (application.inventoryEffect) return noInventoryEffectLabel;
   if (application.outcome?.lotsUpdated === 0) return "Processed · no lots changed";
   return source?.evidence === "estimated" ? "Estimate applied to captured lots" : "Applied to captured lots";
 }
@@ -40,11 +42,12 @@ function RevisionDetails({ revision, navigation }: { revision: Revision; navigat
   return <details className="rounded-lg border p-3" data-testid={`cost-revision-${revision.id}`} open={revision.latestRecordedSourceRevision}>
     <summary className="cursor-pointer text-sm font-medium"><span className="break-words">{formatWorkspaceStatus(revision.component)} · PO line #{revision.purchaseOrderLineId}{revision.shipmentLineId ? ` · Shipment line #${revision.shipmentLineId}` : ""}</span><span className="mt-1 block text-xs font-normal text-muted-foreground">Revision {revision.revision} · {revision.latestRecordedSourceRevision ? "Latest recorded source" : "Historical source"} · {source ? formatWorkspaceStatus(source.evidence) : "Source requires review"}</span></summary>
     <div className="mt-3 space-y-3">
-      <p className="break-words font-mono text-sm">{formatWorkspaceMills(source?.totalMills ?? null, source?.currency ?? null)}{source?.basePieces ? ` across ${source.basePieces.toLocaleString()} base pieces` : " · Quantity basis unknown"}</p>
+      <p className="break-words font-mono text-sm">{formatWorkspaceMills(source?.totalMills ?? null, source?.currency ?? null)}{source?.inventoryEffect ? ` - All ${source.inventoryEffect.returnedBasePieces.toLocaleString()} base pieces returned before acceptance; zero remaining source quantity` : source?.basePieces ? ` across ${source.basePieces.toLocaleString()} base pieces` : " - Quantity basis unknown"}</p>
       <p className="text-xs text-muted-foreground">Source #{revision.id} · {formatWorkspaceDate(revision.recordedAt)} · Recorded by {revision.recordedBy}. Packaging: {source ? formatWorkspaceStatus(source.packagingTreatment) : "Unknown"}.</p>
       {source && <div className="flex flex-wrap gap-2">{source.sources.map((reference) => {
         const kind = reference.kind === "purchase_order_line" ? "purchase" : reference.kind === "vendor_invoice_line" ? "invoice" : reference.kind === "shipment_cost" ? "shipment" : null;
         const label = `${formatWorkspaceStatus(reference.kind)} #${reference.lineId}`;
+        if (reference.kind === "supplier_credit_line") return <Link key={`${reference.kind}:${reference.lineId}`} href={navigation.childHref(`/supplier-credits/${reference.documentId}`)} className="break-words text-xs text-primary underline underline-offset-4">{label}</Link>;
         return kind ? <Link key={`${reference.kind}:${reference.lineId}`} href={navigation.inspectHref({ kind, id: reference.documentId })} className="break-words text-xs text-primary underline underline-offset-4">{label}</Link> : <span key={`${reference.kind}:${reference.lineId}`} className="text-xs">{label} · Document #{reference.documentId}</span>;
       })}</div>}
       {source?.manualOverride && <p className="text-xs">Manual source review: {source.manualOverride.reason} · {source.manualOverride.actorId} · {formatWorkspaceDate(source.manualOverride.recordedAt)}</p>}
@@ -57,7 +60,7 @@ function RevisionDetails({ revision, navigation }: { revision: Revision; navigat
       {revision.applications.length === 0 ? <p className="rounded-md bg-muted/40 p-3 text-xs">No application has been recorded for this source revision.</p> : revision.applications.map((application) => <details key={application.id} id={`cost-application-${application.id}`} className="rounded-md bg-muted/30 p-3" data-testid={`cost-application-${application.id}`}>
         <summary className="cursor-pointer text-xs font-semibold">{applicationLabel(application, source)} · Application #{application.id}<span className="mt-1 block font-normal text-muted-foreground">{formatWorkspaceDate(application.recordedAt)}{application.latestRecordedApplication ? " · Latest attempt for this revision" : " · Historical attempt"}</span></summary>
         <div className="mt-3 space-y-3">
-          <p className="text-xs text-muted-foreground">Original result: {formatWorkspaceStatus(application.status)}. Recorded by {application.recordedBy}. These snapshots describe the lots captured by this application.</p>
+          <p className="text-xs text-muted-foreground">Original result: {formatWorkspaceStatus(application.status)}. Recorded by {application.recordedBy}. {application.inventoryEffect ? "The verified return disposition required no inventory or sold-cost changes." : "These snapshots describe the lots captured by this application."}</p>
           {application.outcome && <dl className="grid grid-cols-2 gap-3 text-xs"><div><dt className="text-muted-foreground">Lots updated</dt><dd>{application.outcome.lotsUpdated.toLocaleString()}</dd></div><div><dt className="text-muted-foreground">Sold-cost rows updated</dt><dd>{application.outcome.cogsRowsUpdated.toLocaleString()}</dd></div><div className="col-span-2"><dt className="text-muted-foreground">Recorded COGS adjustment</dt><dd className="break-words font-mono">{formatWorkspaceMoney(application.outcome.totalCogsDeltaCents, source?.currency ?? null)}</dd></div></dl>}
           <EvidenceIssues issues={application.issues} />
           {application.reportingEvent && <p className="rounded-md border p-2 text-xs">Internal reporting event #{application.reportingEvent.id} · {formatWorkspaceDate(application.reportingEvent.recordedAt)} · {application.reportingEvent.evidenceState === "verified_record" ? "Recorded" : "Needs review"}. Delivery to Archon or another external system is not verified.</p>}
@@ -84,12 +87,13 @@ export function PurchaseCostApplications({ history, data, navigation }: { histor
 export function PurchaseReceiptCostQueue({ requests, data, navigation, actions }: { requests: ReceiptCostRequestHistory; data: PurchaseWorkspace; navigation: ProcurementNavigation; actions?: ReceiptCostActions }) {
   return <section className="space-y-2" aria-label="Receipt cost processing"><h4 className="text-sm font-semibold">Receipt cost processing</h4>{actions?.error && <p role="alert" className="rounded-md border border-destructive/30 p-3 text-xs">{actions.error} The physical receipt is separate; refresh to check the recorded cost outcome.</p>}{actions?.message && <p role="status" className="rounded-md border p-3 text-xs">{actions.message}</p>}{requests.length === 0 ? <p className="text-xs text-muted-foreground">No durable receipt cost requests are recorded for this purchase. This does not establish that historical costs were processed.</p> : requests.map((request) => {
     const receipt = data.receipts.find((row) => row.id === request.receiptId);
+    const inventoryEffect = request.currentCosts ? purchaseLineInventoryEffect(request.currentCosts) : null;
     return <div key={request.id} className="space-y-2 rounded-lg border p-3" data-testid={`receipt-cost-request-${request.id}`}>
-      <div className="flex flex-wrap items-center justify-between gap-2"><Link href={navigation.inspectHref({ kind: "receipt", id: request.receiptId })} className="text-xs font-semibold text-primary underline underline-offset-4">{receipt?.receiptNumber ?? `Receipt #${request.receiptId}`}</Link><Badge variant="outline">{request.state === "pending" ? "Costs pending" : request.state === "applied" ? request.currentCosts ? "Current supplier costs posted" : "Receipt cost attempt completed" : formatWorkspaceStatus(request.state)}</Badge></div>
+      <div className="flex flex-wrap items-center justify-between gap-2"><Link href={navigation.inspectHref({ kind: "receipt", id: request.receiptId })} className="text-xs font-semibold text-primary underline underline-offset-4">{receipt?.receiptNumber ?? `Receipt #${request.receiptId}`}</Link><Badge variant="outline">{request.state === "pending" ? "Costs pending" : request.state === "applied" ? inventoryEffect ? "Return cost review completed" : request.currentCosts ? "Current supplier costs posted" : "Receipt cost attempt completed" : formatWorkspaceStatus(request.state)}</Badge></div>
       <p className="text-xs">PO line #{request.purchaseOrderLineId} · Request #{request.id} · Physical receipt: {formatWorkspaceStatus(request.receiptStatus)}.</p>
       <p className="text-xs text-muted-foreground">Requested {formatWorkspaceDate(request.requestedAt)} by {request.requestedBy}. The stock receipt is recorded separately from its costs.</p>
       {request.currentCosts ? <PurchaseSupplierCostLine line={request.currentCosts} navigation={navigation} /> : request.attempts[0] && <EvidenceIssues issues={request.attempts[0].issues} />}
-      {request.currentCosts && request.state === "applied" && request.recordedState !== "applied" && <p className="text-xs">A later supplier-cost application completed this receipt's costs. The earlier attempt remains below as history.</p>}
+      {request.currentCosts && request.state === "applied" && request.recordedState !== "applied" && <p className="text-xs">{inventoryEffect ? "A later verified return disposition completed this receipt's cost review without changing inventory or sold costs." : "A later supplier-cost application completed this receipt's costs."} The earlier attempt remains below as history.</p>}
       {request.automaticRecovery && request.state !== "applied" && (!request.currentCosts || purchaseCostNextAction(request.currentCosts) === "apply") && <div className="space-y-1 rounded-md bg-muted/40 p-3 text-xs" data-testid={`receipt-cost-recovery-${request.id}`}>
         <p>{describeReceiptCostRecovery(request.automaticRecovery, request.state)}</p>
         {request.automaticRecovery.state === "queued" && ["pending", "retry_required"].includes(request.state) && <p>Next scheduled attempt: {formatWorkspaceDate(request.automaticRecovery.nextAttemptAt)}.</p>}

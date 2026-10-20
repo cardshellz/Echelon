@@ -143,7 +143,7 @@ function importSelectResults(poLines: any[], existingLines: any[], totalCents: n
     existingLines,
     [{ maxLine: 3 }],
     [{ total: totalCents }],
-    [{ id: 55, paidAmountCents: 0 }],
+    [{ id: 55, paidAmountCents: 0, creditedAmountCents: 0 }],
     [{ purchaseOrderId: 7 }],
     [{
       status: "sent",
@@ -152,13 +152,14 @@ function importSelectResults(poLines: any[], existingLines: any[], totalCents: n
       firstPaidAt: null,
       fullyPaidAt: null,
     }],
-    [{ invoicedAmountCents: totalCents, paidAmountCents: 0 }],
+    [{ invoicedAmountCents: totalCents, paidAmountCents: 0, creditedAmountCents: 0 }],
   ];
 }
 
 describe("AP ledger invoice line imports", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mocks.db.execute.mockResolvedValue({ rows: [{ present: false }] });
     mocks.detectFinancialExceptions.mockResolvedValue(undefined);
   });
 

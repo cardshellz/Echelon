@@ -37,6 +37,7 @@ function makeHarness(opts: {
   apMatchedRows?: Row[];
   postedReceipts?: Row[];
   priorReversalTotals?: Row;
+  supplierReturnHistory?: boolean;
 }) {
   const line = {
     id: 1001,
@@ -156,6 +157,7 @@ function makeHarness(opts: {
     }
     const t = text.replace(/\s+/g, " ").trim();
     if (t.startsWith("SELECT")) reads.push(t);
+    if (t.includes("FROM procurement.supplier_return_lines")) return { rows: [{ id: line.id, has_return: opts.supplierReturnHistory === true }] };
     if (t.includes("pg_advisory_xact_lock")) return { rows: [] };
     if (t.startsWith("SELECT receiving_order_id FROM procurement.receiving_lines")) return { rows: [{ receiving_order_id: line.receiving_order_id }] };
     if (t.includes("FROM procurement.po_receipts")) return { rows: postedReceipts };
@@ -703,5 +705,18 @@ describe("Receipt reversal frozen units and source locks", () => {
     expect(po).toBeGreaterThan(parent);
     expect(poLine).toBeGreaterThan(po);
     expect(receiptLine).toBeGreaterThan(poLine);
+  });
+});
+
+describe("recorded supplier return receipt protection", () => {
+  it.each(["line", "order"] as const)("rejects a new %s reversal before inventory compensation or receipt edits", async action => {
+    const h = makeHarness({ supplierReturnHistory: true });
+    const before = structuredClone(h.state);
+    const command = action === "line"
+      ? h.service.reverseReceivingLine({ receivingLineId: 1001, qty: 1, reason: "Correct receipt", idempotencyKey: "return-history-reversal" })
+      : h.service.reverseReceivingOrder({ receivingOrderId: 100, reason: "Correct receipt", idempotencyKey: "return-history-reversal" });
+    await expect(command).rejects.toMatchObject({ statusCode: 409, details: { code: "RECEIPT_REVERSAL_SUPPLIER_RETURN_HISTORY" } });
+    expect(h.inventoryCore.reverseReceiptInventory).not.toHaveBeenCalled();
+    expect(h.state).toEqual(before);
   });
 });

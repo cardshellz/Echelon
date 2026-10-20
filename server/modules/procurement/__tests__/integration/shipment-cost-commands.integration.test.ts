@@ -1,3 +1,4 @@
+import { supplierReturnReadFixtureTables } from "./supplier-return-fixture";
 import { resetQuantityAmendmentFixture } from "./quantity-amendment-fixture";
 import { createHash, randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
@@ -129,7 +130,8 @@ databaseTests.sequential("shipment cost command PostgreSQL guarantees", () => {
     ownsProcurement = true;
     await pool.query("CREATE SCHEMA inventory");
     ownsInventory = true;
-    for (const table of [schema.vendors, schema.inboundShipments, schema.inboundShipmentLines, schema.vendorInvoices, schema.inboundFreightCosts, schema.inboundFreightAllocations, schema.vendorInvoiceLines, schema.landedCostSnapshots, schema.landedCostAdjustments, schema.receivingOrders, schema.inboundShipmentStatusHistory, schema.purchaseOrders, schema.purchaseOrderLines, schema.receivingLines, schema.inventoryLots]) {
+    for (const table of [schema.vendors, schema.inboundShipments, schema.inboundShipmentLines, schema.vendorInvoices, schema.supplierCredits, schema.supplierCreditLines,
+  ...supplierReturnReadFixtureTables, schema.supplierCreditApplications, schema.supplierCreditApplicationReversals, schema.inboundFreightCosts, schema.inboundFreightAllocations, schema.vendorInvoiceLines, schema.landedCostSnapshots, schema.landedCostAdjustments, schema.receivingOrders, schema.inboundShipmentStatusHistory, schema.purchaseOrders, schema.purchaseOrderLines, schema.receivingLines, schema.inventoryLots]) {
       await pool.query(fixtureTable(table));
     }
     for (const foreignKey of [

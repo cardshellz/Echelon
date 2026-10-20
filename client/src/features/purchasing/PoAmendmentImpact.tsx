@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import React, { type ReactNode } from "react";
 import type { PoAmendmentImpact as Impact } from "@shared/procurement/po-amendment-impact";
 import { exactMoneyAsInput } from "@/lib/exact-money-input";
 import { CompactPoLineTable } from "@/features/po-edit/CompactPoLineTable";
@@ -72,6 +72,9 @@ export function PoAmendmentImpact({
   );
   const changedOrders = impact.orderCosts.filter(
     (cost) => cost.totalMills.before !== cost.totalMills.after,
+  );
+  const returnedCosts = impact.applications.flatMap((application, applicationIndex) =>
+    (application.returnedCosts ?? []).map(cost => ({ ...cost, applicationIndex })),
   );
   const issues = impact.applications.filter(
     (application) => application.status !== "applied",
@@ -181,6 +184,44 @@ export function PoAmendmentImpact({
             ))}
           </Comparison>
         </details>
+      )}
+      {returnedCosts.length > 0 && (
+        <section aria-label="Supplier-return value changes" className="rounded border p-3 space-y-3">
+          <h4 className="font-semibold">
+            {approved ? "Returned value recorded at approval" : "Returned stock value changes"}
+          </h4>
+          <p>
+            These adjustments change the recorded value of goods already returned.
+            They do not record a new physical return or supplier credit.
+          </p>
+          {returnedCosts.map(cost => (
+            <article
+              key={`${cost.applicationIndex}:${cost.returnAllocationId}:${cost.component}`}
+              className="space-y-2 border-t pt-3"
+            >
+              <p className="font-medium">
+                <a className="underline" href={navigation.childHref(`/supplier-returns/${cost.returnId}`)}>
+                  Return #{cost.returnId}
+                </a>
+                {` · line #${cost.returnLineId} · ${cost.component} · ${cost.quantity.toLocaleString()} returned units`}
+              </p>
+              <p className="font-mono">Change: {amount(cost.deltaMills, 4)}</p>
+              <dl className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                <div className="min-w-0 rounded bg-muted/40 p-2">
+                  <dt className="text-xs text-muted-foreground">Before</dt>
+                  <dd className="font-mono break-words">{amount(cost.beforeMills, 4)}</dd>
+                </div>
+                <div className="min-w-0 rounded bg-muted/40 p-2">
+                  <dt className="text-xs text-muted-foreground">After</dt>
+                  <dd className="font-mono break-words">{amount(cost.afterMills, 4)}</dd>
+                </div>
+              </dl>
+              <p className="text-xs text-muted-foreground">
+                Lot #{cost.inventoryLotId} · return allocation #{cost.returnAllocationId}
+              </p>
+            </article>
+          ))}
+        </section>
       )}
       {impact.historicalCosts.length > 0 && (
         <details className="rounded border p-2">

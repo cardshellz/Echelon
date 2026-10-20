@@ -45,6 +45,11 @@ export async function resolveReceiptCostEvidence(
   const revisions = await recordPurchaseCostRevisions(tx, input.purchaseOrderLineId, actorId, now);
   const productSource = revisions.find((revision) => revision.contract.component === "product")?.contract;
   const packagingSource = revisions.find((revision) => revision.contract.component === "packaging")?.contract;
+  if (productSource?.inventoryEffect || packagingSource?.inventoryEffect) {
+    throw new CostEvidenceError("RECEIPT_FULL_RETURN_SOURCE_CONFLICT",
+      "These invoice quantities were fully returned and credited. Review the replacement invoice and return source before accepting new stock.",
+      { receivingLineId: input.receivingLineId });
+  }
   const actual = productSource?.evidence === "confirmed" && packagingSource?.evidence === "confirmed"
     && productSource.currency === "USD" && packagingSource.currency === "USD"
     && productSource.totalMills !== null && packagingSource.totalMills !== null && productSource.basePieces !== null;
