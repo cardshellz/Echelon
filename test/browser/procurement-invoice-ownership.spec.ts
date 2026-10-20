@@ -111,7 +111,7 @@ for (const kind of ["ordinary", "shipment", "review", "malformed"] as const) tes
   const failures = await installFixtures(page);
   await page.route("**/api/auth/me", route => route.fulfill({ json: { user: { id: "source-reviewer", username: "source-reviewer", role: "admin" }, roles: ["admin"], permissions: ["purchasing:view", "purchasing:edit", "purchasing:approve"] } }));
   await page.route("**/api/vendor-invoices/71", route => route.fulfill({ json: {
-    id: 71, invoiceNumber: "SOURCE-71", vendorId: 2, vendorName: "Carrier", status: "received", currency: "USD", invoicedAmountCents: 10000, paidAmountCents: 0, balanceCents: 10000, lines: [], attachments: [], payments: [], poLinks: [{ id: 1, purchaseOrderId: 17, poNumber: "PO-17" }],
+    id: 71, invoiceNumber: "SOURCE-71", vendorId: 2, vendorName: "Carrier", status: "received", currency: "USD", invoicedAmountCents: 10000, hasSupplierCreditHistory: false, creditedAmountCents: 0, paidAmountCents: 0, balanceCents: 10000, lines: [], attachments: [], payments: [], poLinks: [{ id: 1, purchaseOrderId: 17, poNumber: "PO-17" }],
     capabilities: { edit: { allowed: true, requiredPermission: "purchasing:edit", code: "AP_INVOICE_EDITABLE", reason: "This invoice is editable." } }, sourceCapabilities: kind === "malformed" ? {} : invoiceSourceFixture(kind),
   } }));
   await page.goto("/ap-invoices/71");
@@ -148,7 +148,7 @@ for (const source of ["freight-id", "capability-id", "unverified"] as const) tes
   const commands: string[] = [];
   const line = { id: 51, lineNumber: 1, qtyInvoiced: 1, unitCostCents: 10000, unitCostMills: 1000000, lineTotalCents: 10000, productName: "Freight source", matchStatus: "pending", freightCostId: source === "freight-id" ? 9 : null };
   await page.route("**/api/vendor-invoices/71", route => route.fulfill({ json: {
-    id: 71, invoiceNumber: "SOURCE-71", vendorId: 2, vendorName: "Carrier", status: "received", currency: "USD", invoicedAmountCents: 10100, paidAmountCents: 0, balanceCents: 10100,
+    id: 71, invoiceNumber: "SOURCE-71", vendorId: 2, vendorName: "Carrier", status: "received", currency: "USD", invoicedAmountCents: 10100, hasSupplierCreditHistory: false, creditedAmountCents: 0, paidAmountCents: 0, balanceCents: 10100,
     lines: [line, { ...line, id: 52, lineNumber: 2, productName: "Manual fee", freightCostId: null, unitCostCents: 100, lineTotalCents: 100 }], poLinks: [], attachments: [], payments: [],
     capabilities: { edit: { allowed: true, requiredPermission: "purchasing:edit", code: "AP_INVOICE_EDITABLE", reason: "This invoice is editable." } },
     sourceCapabilities: source === "unverified" ? {} : invoiceSourceFixture(source === "freight-id" ? "ordinary" : "shipment"),
@@ -202,7 +202,7 @@ test("negative invoice amounts are explained before any command is saved or sent
 test("valid draft shipment invoices remain visible with their financial summary", async ({ page }) => {
   const { failures } = await shipmentSetup(page);
   await page.route("**/api/inbound-shipments/42/invoices", route => route.fulfill({ json: {
-    invoices: [{ id: 71, inboundShipmentId: 42, invoiceNumber: "DRAFT-71", vendorName: "Carrier", status: "draft", currency: "USD", invoiceDate: null, invoicedAmountCents: 10000, paidAmountCents: 0 }],
+    invoices: [{ id: 71, inboundShipmentId: 42, invoiceNumber: "DRAFT-71", vendorName: "Carrier", status: "draft", currency: "USD", invoiceDate: null, invoicedAmountCents: 10000, hasSupplierCreditHistory: false, creditedAmountCents: 0, paidAmountCents: 0 }],
     summary: { totalInvoicedCents: 10000, totalPaidCents: 0, outstandingCents: 10000, invoiceCount: 1, activeInvoiceCount: 1 },
   } }));
   await page.reload(); await page.getByRole("tab", { name: /^Invoices/ }).click();
@@ -248,7 +248,7 @@ test("revoked approval permission disables an already open payment dialog", asyn
   const failures = await installFixtures(page); let allowed = true; const payments: unknown[] = [];
   await page.route("**/api/auth/me", route => route.fulfill({ json: { user: { id: "source-reviewer", username: "source-reviewer", role: "admin" }, roles: ["admin"], permissions: ["purchasing:view", "purchasing:edit", ...(allowed ? ["purchasing:approve"] : [])] } }));
   await page.route("**/api/vendor-invoices/71", route => route.fulfill({ json: {
-    id: 71, invoiceNumber: "SOURCE-71", vendorId: 2, vendorName: "Carrier", status: "approved", currency: "USD", invoicedAmountCents: 10000, paidAmountCents: 0, balanceCents: 10000, lines: [], poLinks: [], attachments: [], payments: [], sourceCapabilities: invoiceSourceFixture("shipment"),
+    id: 71, invoiceNumber: "SOURCE-71", vendorId: 2, vendorName: "Carrier", status: "approved", currency: "USD", invoicedAmountCents: 10000, hasSupplierCreditHistory: false, creditedAmountCents: 0, paidAmountCents: 0, balanceCents: 10000, lines: [], poLinks: [], attachments: [], payments: [], sourceCapabilities: invoiceSourceFixture("shipment"),
   } }));
   await page.route("**/api/vendor-payments", route => { payments.push(route.request().postDataJSON()); return route.fulfill({ json: {} }); });
   await ownershipRefreshHarness(page, "invoice"); await page.getByRole("button", { name: "Record Payment", exact: true }).first().click();

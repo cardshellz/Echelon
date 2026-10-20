@@ -1,3 +1,4 @@
+import { SupplierCreditLink } from "@/features/purchasing/SupplierCreditLink";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "wouter";
 import { useAuth } from "@/lib/auth";
@@ -193,6 +194,7 @@ export function ReceivingQuarantinePanel({ receipt, locations, disabled, onComma
             {acceptance.status === "awaiting_receipt" && <><p className="text-xs text-muted-foreground">Still held and unavailable until this receipt is finalized.</p>{observation.receivingOrderId === scope && <Button type="button" size="sm" variant="outline" disabled={locked || !acceptance.canCancel.allowed || showIntake || resolution !== null} onClick={() => setResolution({ observation, kind: "cancel-acceptance", acceptanceId: acceptance.id })}>Cancel pending acceptance</Button>}{!acceptance.canCancel.allowed && <p className="text-xs text-muted-foreground">{acceptance.canCancel.reason}</p>}</>}
           </div>)}
           {resolution?.observation.id === observation.id && observation.receivingOrderId === scope && <QuarantineResolutionForm key={`${observation.id}:${resolution.kind}:${resolution.acceptanceId ?? ""}`} receiptId={scope} selection={resolution} locations={putawayLocations} disabled={locked} onSubmit={submit} onCancel={() => setResolution(null)} />}
+          {observation.dispositions.filter(item => item.kind === "return").map(item => <div key={`credit-${item.id}`} className="text-sm"><SupplierCreditLink returnDispositionId={item.id} create>Review supplier credit for return #{item.id}</SupplierCreditLink><p className="text-xs text-muted-foreground">Physical return is recorded. Select its original invoice and supplier credit document to review financial settlement separately.</p></div>)}
           <details className="text-xs"><summary className="cursor-pointer">Custody history</summary><ol className="mt-2 space-y-1">
             <li>Observed {observation.observedQty} {observation.unitLabel} by {observation.actorId} at {observation.recordedAt}</li>
             {observation.dispositions.map((item) => <li key={item.id} className="break-words">{item.kind.replaceAll("_", " ")} · {item.observationQty} {observation.unitLabel} · {item.actorId} · {item.recordedAt} · {item.reason}{item.evidenceReference ? ` · ${item.evidenceReference}` : ""}</li>)}

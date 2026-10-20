@@ -1,3 +1,5 @@
+import { SupplierCreditEvidenceError } from "./supplier-credit-settlement.repository";
+import { registerSupplierCreditRoutes } from "./supplier-credit.routes";
 import { paymentCalendarDateSchema, paymentCalendarDateToUtc } from "@shared/procurement/ap-payment-contract";
 import { z } from "zod";
 import { invoiceWorkListQuerySchema, paymentWorkListQuerySchema } from "@shared/procurement/ap-work-list";
@@ -19,7 +21,7 @@ import { apInvoiceReplacementCommands } from "./ap-invoice-replacement.commands"
 import { invoiceReplacementInputSchema } from "@shared/procurement/invoice-replacement";
 
 function handleApLedgerError(res: any, err: any, fallbackStatus = 400) {
-  if (err?.name === "ApLedgerError") {
+  if (err?.name === "ApLedgerError" || err instanceof SupplierCreditEvidenceError) {
     return res.status(err.statusCode).json({ error: err.message, details: err.details });
   }
   return res.status(err?.statusCode ?? fallbackStatus).json({ error: err.message });
@@ -45,6 +47,7 @@ function sendFinancialCommandError(res: any, error: FinancialCommandError): any 
 }
 
 export function registerApLedgerRoutes(app: Express) {
+  registerSupplierCreditRoutes(app);
   registerInvoiceQuantityCorrectionRoutes(app);
   registerPoFinancialEvidenceRoutes(app);
   // ============================================================

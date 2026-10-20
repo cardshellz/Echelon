@@ -27,7 +27,8 @@ export const invoiceWorkListItemSchema = z.object({
   id, vendorId: id, invoiceNumber: z.string(), ourReference: z.string().nullable(),
   vendorName: z.string().nullable(), vendorCode: z.string().nullable(), status: z.string(),
   invoiceDate: z.string().datetime().nullable(), dueDate: z.string().datetime().nullable(),
-  invoicedAmountCents: cents, paidAmountCents: cents, balanceCents: cents,
+  invoicedAmountCents: cents, paidAmountCents: cents, creditedAmountCents:cents.nonnegative().optional(), settledAmountCents:cents.nonnegative().optional(), balanceCents: cents,
+  overpaidAmountCents: cents.nonnegative().optional(), settlementReviewRequired: z.boolean().optional(),
   inboundShipmentId: id.nullable(), currency: z.string(), poNumbers: z.array(z.string()),
 }).strict();
 export const paymentWorkListItemSchema = z.object({

@@ -1,3 +1,5 @@
+import { formatPaymentAmount } from "@/lib/ap-payment-command";
+import { SupplierCreditLink } from "@/features/purchasing/SupplierCreditLink";
 import { formatPaymentCalendarDate } from "@shared/procurement/ap-payment-contract";
 import React from "react";
 import { useQuery } from "@tanstack/react-query";
@@ -57,7 +59,7 @@ export default function APDashboard() {
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold">Accounts Payable</h1>
+          <h1 className="text-2xl font-bold">Accounts Payable</h1><SupplierCreditLink />
           <p className="text-muted-foreground text-sm">Outstanding invoices and payment overview</p>
         </div>
         <div className="flex gap-2">
@@ -128,7 +130,7 @@ export default function APDashboard() {
           <CardContent className="pt-6">
             <div className="flex items-start justify-between">
               <div>
-                <p className="text-sm text-muted-foreground">Total Paid</p>
+                <p className="text-sm text-muted-foreground">Cash paid</p>
                 <p className="text-2xl font-bold mt-1 text-green-600">{formatCents(summary?.paidAllTimeCents)}</p>
                 {summary?.paidThisMonthCents > 0 && (
                   <p className="text-xs text-muted-foreground mt-1">{formatCents(summary.paidThisMonthCents)} this month</p>
@@ -140,6 +142,7 @@ export default function APDashboard() {
         </Card>
       </div>
 
+      <Card><CardContent className="pt-4"><p className="text-sm text-muted-foreground">Supplier credits applied</p><p className="text-2xl font-bold">{formatPaymentAmount(summary?.creditedAllTimeCents)}</p><p className="text-xs text-muted-foreground">Recorded separately from cash paid.</p></CardContent></Card>
       {/* Aging Buckets — only show if there's outstanding balance */}
       {hasOutstanding && (
         <Card>
@@ -253,7 +256,7 @@ export default function APDashboard() {
       {recentlyPaid.length > 0 && (
         <Card>
           <CardHeader>
-            <CardTitle className="text-base">Recently Paid Invoices</CardTitle>
+            <CardTitle className="text-base">Recently Settled Invoices</CardTitle>
           </CardHeader>
           <CardContent className="p-0">
             <Table>
@@ -262,7 +265,7 @@ export default function APDashboard() {
                   <TableHead>Invoice #</TableHead>
                   <TableHead>Vendor</TableHead>
                   <TableHead className="text-right">Invoice Amount</TableHead>
-                  <TableHead className="text-right">Paid</TableHead>
+                  <TableHead className="text-right">Cash paid / credits</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -275,7 +278,7 @@ export default function APDashboard() {
                     </TableCell>
                     <TableCell>{inv.vendorName ?? "—"}</TableCell>
                     <TableCell className="text-right font-mono text-sm">{formatCents(inv.invoicedAmountCents)}</TableCell>
-                    <TableCell className="text-right font-mono text-sm text-green-600">{formatCents(inv.paidAmountCents)}</TableCell>
+                    <TableCell className="text-right font-mono text-sm text-green-600">{formatCents(inv.paidAmountCents)}<div className="text-xs">Credits {formatPaymentAmount(inv.creditedAmountCents)}</div></TableCell>
                   </TableRow>
                 ))}
               </TableBody>

@@ -30,7 +30,8 @@ const SCHEMAS = ["identity", "catalog", "procurement", "warehouse", "inventory",
 const TABLES = [
   schema.users, schema.authRoles, schema.authPermissions, schema.authUserRoles, schema.authRolePermissions,
   schema.products, schema.productVariants, schema.vendors, schema.purchaseOrders, schema.purchaseOrderLines,
-  schema.vendorInvoices, schema.vendorInvoiceLines, schema.vendorInvoicePoLinks, schema.vendorInvoiceAttachments,
+  schema.vendorInvoices, schema.supplierCredits, schema.supplierCreditLines,
+  schema.supplierCreditApplications, schema.supplierCreditApplicationReversals, schema.vendorInvoiceLines, schema.vendorInvoicePoLinks, schema.vendorInvoiceAttachments,
   // Invoice detail reads the freight footprint for replacement eligibility even
   // when this payment fixture's product invoice has no shipment or freight rows.
   schema.inboundFreightCosts,
@@ -38,6 +39,18 @@ const TABLES = [
   schema.warehouses, schema.warehouseLocations, schema.inventoryLevels, schema.inventoryLots,
   schema.orders, schema.orderItems, schema.orderItemCosts,
 ];
+const CREDIT_DOCUMENT_TABLES = new Set<unknown>([schema.supplierCredits, schema.supplierCreditLines,
+  schema.supplierCreditApplications, schema.supplierCreditApplicationReversals]);
+const CREDIT_TABLES = [schema.inboundShipments, schema.inboundShipmentLines, schema.receivingOrders,
+  schema.receivingLines, schema.poReceipts, schema.receiptReversals, schema.inboundFreightAllocations,
+  schema.landedCostSnapshots, schema.landedCostAdjustments, schema.inboundShipmentStatusHistory,
+  schema.purchasingRecommendationPoHandoffs, schema.poApprovalTiers, schema.warehouseSettings,
+] as const;
+const CREDIT_HISTORY_TABLES = ["procurement.supplier_credits", "procurement.supplier_credit_lines",
+  "procurement.supplier_credit_applications", "procurement.supplier_credit_application_reversals",
+  "procurement.receiving_quarantine_observations", "procurement.receiving_quarantine_acceptances",
+  "procurement.receiving_quarantine_dispositions", "inventory.cost_reconciliation_approvals",
+  "inventory.cost_reconciliation_postings", "inventory.cost_origin_repairs"] as const;
 const FIXTURE_LEASE = "echelon.procurement.payment-controlled-acceptance";
 const DELEGATE_PASSWORD = "local-payment-acceptance-only";
 
@@ -78,6 +91,14 @@ export interface PaymentHttpResult<T = PaymentHttpBody> {
  * this fixture does not claim to create receipts or execute a bank transfer.
  */
 export class PaymentAcceptanceFixture {
+  /** Credit acceptance opts into the real source/custody and credit migrations.
+   * Existing payment-only coverage keeps its original independently tested setup. */
+  constructor(private readonly creditMigration?: string) {}
+  private get tables() {
+    // In credit mode, CREATE TABLE must execute in the actual migration so its
+    // constraints are tested instead of skipped over schema-generated tables.
+    return this.creditMigration ? [...TABLES.filter(table => !CREDIT_DOCUMENT_TABLES.has(table)), ...CREDIT_TABLES] : TABLES;
+  }
   pool!: pg.Pool;
   private server?: Server;
   private baseUrl = "";
@@ -109,8 +130,9 @@ export class PaymentAcceptanceFixture {
       to_regclass('public.financial_command_recoveries') AS recoveries,
       to_regprocedure('public.guard_financial_command_result_update()') AS command_guard`);
     if (Object.values(publicTables.rows[0]).some(Boolean)) throw new Error("Payment fixture public ledgers already exist");
-    for (const table of TABLES) await this.pool.query(fixtureTable(table));
-    for (const statement of fixtureForeignKeys(TABLES)) await this.pool.query(statement);
+    for (const table of this.tables) await this.pool.query(fixtureTable(table));
+    if (this.creditMigration) await this.pool.query("CREATE UNIQUE INDEX purchase_order_lines_po_id_line_id_uidx ON procurement.purchase_order_lines(purchase_order_id,id)");
+    for (const statement of fixtureForeignKeys(this.tables)) await this.pool.query(statement);
     await this.pool.query(`
       CREATE UNIQUE INDEX ap_payments_payment_number_active_uidx ON procurement.ap_payments(payment_number) WHERE voided_at IS NULL;
       CREATE UNIQUE INDEX ap_payment_allocations_pay_inv_idx ON procurement.ap_payment_allocations(ap_payment_id,vendor_invoice_id);
@@ -129,6 +151,18 @@ export class PaymentAcceptanceFixture {
     // Start from the pre-upgrade shape so ADD COLUMN is exercised, not skipped.
     await this.pool.query("ALTER TABLE procurement.ap_payments DROP COLUMN payment_calendar_date");
     await this.pool.query(readFileSync(resolve(process.cwd(), "migrations/900000016000018570001_ap_payment_balance_completion.sql"), "utf8"));
+
+    if (this.creditMigration) {
+      for (const migration of ["222_procurement_cost_evidence.sql", "0751_exact_inventory_cost_totals.sql",
+        "900000007000018030001_shipment_cost_exception_decisions.sql",
+        "900000008000018110001_shipment_cost_reconciliation.sql",
+        "900000009000018290001_historical_cost_origin_repairs.sql",
+        "900000004000017890001_receiving_quarantine.sql"]) {
+        await this.pool.query(readFileSync(resolve(process.cwd(), "migrations", migration), "utf8"));
+      }
+      await this.pool.query("ALTER TABLE procurement.vendor_invoices DROP COLUMN credited_amount_cents");
+      await this.pool.query(readFileSync(resolve(process.cwd(), this.creditMigration), "utf8"));
+    }
 
     const priorDatabase = process.env.DATABASE_URL;
     const priorExternal = process.env.EXTERNAL_DATABASE_URL;
@@ -177,9 +211,11 @@ export class PaymentAcceptanceFixture {
     try {
       await reset.query("BEGIN");
       await reset.query("ALTER TABLE procurement.ap_payments DISABLE TRIGGER USER; ALTER TABLE procurement.ap_payment_allocations DISABLE TRIGGER USER");
-      await reset.query(`TRUNCATE ${TABLES.map(qualifiedTable).join(",")},
+      if (this.creditMigration) for (const table of CREDIT_HISTORY_TABLES) await reset.query(`ALTER TABLE ${table} DISABLE TRIGGER USER`);
+      await reset.query(`TRUNCATE ${this.tables.map(qualifiedTable).join(",")},
         public.audit_events,public.financial_command_recoveries,public.financial_command_results RESTART IDENTITY CASCADE`);
       await reset.query("ALTER TABLE procurement.ap_payments ENABLE TRIGGER USER; ALTER TABLE procurement.ap_payment_allocations ENABLE TRIGGER USER");
+      if (this.creditMigration) for (const table of CREDIT_HISTORY_TABLES) await reset.query(`ALTER TABLE ${table} ENABLE TRIGGER USER`);
       await reset.query("COMMIT");
     } catch (error) {
       await reset.query("ROLLBACK");
@@ -193,10 +229,10 @@ export class PaymentAcceptanceFixture {
         ('${PAYMENT_ACTORS.viewer}','payment-viewer','unused','admin',1);
       INSERT INTO identity.auth_roles(id,name) VALUES(1,'UAT owner'),(2,'UAT payment delegate'),(3,'UAT view only');
       INSERT INTO identity.auth_permissions(id,resource,action,category) VALUES
-        (1,'purchasing','view','purchasing'),(2,'purchasing','approve','purchasing');
+        (1,'purchasing','view','purchasing'),(2,'purchasing','approve','purchasing'),(3,'purchasing','edit','purchasing');
       INSERT INTO identity.auth_user_roles(user_id,role_id) VALUES
         ('${PAYMENT_ACTORS.owner}',1),('${PAYMENT_ACTORS.delegate}',2),('${PAYMENT_ACTORS.viewer}',3);
-      INSERT INTO identity.auth_role_permissions(role_id,permission_id) VALUES(1,1),(1,2),(2,1),(2,2),(3,1);
+      INSERT INTO identity.auth_role_permissions(role_id,permission_id) VALUES(1,1),(1,2),(1,3),(2,1),(2,2),(2,3),(3,1);
       INSERT INTO procurement.vendors(id,code,name) VALUES(5,'FLOW-VENDOR','Synthetic FLOW vendor'),(6,'OTHER-VENDOR','Synthetic other vendor');
       INSERT INTO catalog.products(id,sku,name) VALUES(21,'FLOW-A','FLOW product A'),(22,'FLOW-B','FLOW product B');
       INSERT INTO catalog.product_variants(id,product_id,sku,name,uom_type,units_per_variant) VALUES

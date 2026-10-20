@@ -1,3 +1,4 @@
+import { SupplierCreditLink } from "@/features/purchasing/SupplierCreditLink";
 import { useLocation, useSearch } from "wouter";
 import { ApPaymentApplications, PaymentBalanceSummary } from "@/features/purchasing/ApPaymentApplications";
 import { ApPaymentRecovery } from "@/features/purchasing/ApPaymentRecovery";
@@ -146,7 +147,7 @@ export default function APPayments() {
     <div className="p-6 max-w-7xl mx-auto space-y-4">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold">AP Payments</h1>
+          <h1 className="text-2xl font-bold">AP Payments</h1><SupplierCreditLink />
           <p className="text-muted-foreground text-sm">Payment disbursement ledger</p>
         </div>
         {hasPermission("purchasing", "approve") && <Button size="sm" disabled={paymentCommands.blocked} onClick={() => setShowPaymentDialog(true)}>

@@ -1,3 +1,4 @@
+import { SupplierCreditEvidenceError } from "./supplier-credit-settlement.repository";
 import { readLegacyPaymentCommandIdentities, resolveApPaymentCommandIdentity, type LegacyPaymentCommandLookup } from "./ap-payment-command-identity";
 import { paymentApplicationResultSchema, recordPaymentResultSchema, voidPaymentResultSchema } from "@shared/procurement/ap-payment-contract";
 import { financialCommandRepository } from "../../platform/commands/command-results.repository";
@@ -35,7 +36,7 @@ function rejection(
 export function classifyApPaymentCommandFailure(
   error: unknown,
 ): FinancialCommandFailureDisposition {
-  if (error instanceof ApLedgerError && error.statusCode >= 400 && error.statusCode <= 499) {
+  if ((error instanceof ApLedgerError || error instanceof SupplierCreditEvidenceError) && error.statusCode >= 400 && error.statusCode <= 499) {
     return rejection(
       error.statusCode,
       error.message,

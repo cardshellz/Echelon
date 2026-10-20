@@ -1,3 +1,4 @@
+import { SupplierCreditLink } from "@/features/purchasing/SupplierCreditLink";
 import { isShipmentCostLinePosted } from "@shared/procurement/shipment-cost-workflow";
 import { shipmentCostReviewGuidance } from "@shared/procurement/po-shipment-costs";
 import { useShipmentCostReview } from "./use-shipment-cost-review";
@@ -42,7 +43,7 @@ export function ShipmentCostApplicationReview({ shipmentId }: { shipmentId: numb
             {line.exceptionReview ? <ShipmentCostExceptionReview lineId={line.lineId} review={line.exceptionReview} /> : <>
             {guidance.explanation ? <p>{guidance.explanation}</p> : unique.map(issue => <p key={`${issue.code}:${issue.message}`}>{issue.message}</p>)}
             {!line.application && unique.length === 0 && <p>No inventory cost update has been recorded for this line.</p>}
-            <p><strong>Next step:</strong> {guidance.nextStep}</p>
+            <p><strong>Next step:</strong> {guidance.nextStep}</p>{unique.some(issue => issue.code === "SIGNED_LANDED_CREDIT_REVIEW" || issue.code.startsWith("SUPPLIER_CREDIT")) && <SupplierCreditLink inboundShipmentId={shipmentId} />}
             </>}
             {line.application && <p className="text-xs text-muted-foreground">Last saved update: {new Date(line.application.recordedAt).toLocaleString()}. {line.application.lotsUpdated} stock lots and {line.application.cogsRowsUpdated} sold-order cost records updated.</p>}
           </div>;

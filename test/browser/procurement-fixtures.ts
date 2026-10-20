@@ -5,7 +5,7 @@ import type { Page } from "@playwright/test";
 // is independent of list pagination/filtering. Mutations fail every test.
 export const po = (id: number) => ({ id, poNumber: `TEST-PO-${id}`, status: "acknowledged", physicalStatus: "acknowledged", financialStatus: "unpaid", vendorId: 2, vendor: { name: "Test vendor" }, lines: [], subtotalCents: 10000, totalCents: 10000 });
 const shipment = { id: 42, shipmentNumber: "TEST-SHIP-42", status: "booked", mode: "sea_fcl", purchaseOrderId: 17, lines: [{ id: 1, purchaseOrderId: 99, purchaseOrderLineId: 1, sku: "TEST-SKU", productName: "Test product", qtyShipped: 10, cartonCount: 1 }], costs: [{ billingOwnership: { ...unbilledOwnershipFixture(), state: "billed", activeInvoiceId: 71, activeInvoiceLineId: 51, activeInvoiceLineIds: [51], referencedInvoiceIds: [71], canCreateInvoice: false, canLinkExistingLine: false }, derivedStatus: "paid", id: 1, costType: "freight", description: "Test freight", estimatedCents: 10000, actualCents: 10000, linkedInvoice: { id: 71, invoiceNumber: "TEST-INV-71", status: "paid" } }], statusHistory: [] };
-const invoice = { sourceCapabilities: invoiceSourceFixture("shipment"), currency: "USD", invoiceDate: "2026-10-19T00:00:00.000Z", id: 71, invoiceNumber: "TEST-INV-71", vendorId: 2, vendorName: "Test vendor", inboundShipmentId: 42, shipmentNumber: "TEST-SHIP-42", status: "paid", invoicedAmountCents: 10000, balanceCents: 0, paidAmountCents: 10000, lines: [], poLinks: [{ id: 1, purchaseOrderId: 99, poNumber: "TEST-PO-99" }], attachments: [], payments: [] };
+const invoice = { sourceCapabilities: invoiceSourceFixture("shipment"), currency: "USD", invoiceDate: "2026-10-19T00:00:00.000Z", id: 71, invoiceNumber: "TEST-INV-71", vendorId: 2, vendorName: "Test vendor", inboundShipmentId: 42, shipmentNumber: "TEST-SHIP-42", status: "paid", invoicedAmountCents: 10000, balanceCents: 0, hasSupplierCreditHistory: false, paidAmountCents: 10000, creditedAmountCents: 0, settledAmountCents: 10000, lines: [], poLinks: [{ id: 1, purchaseOrderId: 99, poNumber: "TEST-PO-99" }], attachments: [], payments: [] };
 export const receipt = (id: number) => ({ id, receiptNumber: `TEST-RECEIPT-${id}`, createdAt: "2026-09-01T12:00:00Z", status: "closed", purchaseOrderId: 99, inboundShipmentId: 42, lines: [], vendorId: 2, vendorName: "Test vendor" });
 
 export async function installFixtures(page: Page) {
@@ -23,7 +23,7 @@ export async function installFixtures(page: Page) {
     else if (path === "/api/settings/procurement") json = { useNewPoEditor: true };
     else if (/^\/api\/purchase-orders\/\d+\/financial-evidence$/.test(path)) json = {
       purchaseOrderId: Number(path.split("/")[3]), currency: "USD", state: "complete",
-      invoicedAmountCents: 0, paidAmountCents: 0, outstandingAmountCents: 0,
+      invoicedAmountCents: 0, paidAmountCents: 0, creditedAmountCents: 0, settledAmountCents: 0, outstandingAmountCents: 0,
       invoiceCount: 0, reviewReasons: [],
     };
     else if (/^\/api\/purchase-orders\/\d+\/cost-reporting$/.test(path)) json = {

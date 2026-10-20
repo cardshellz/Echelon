@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   parseProcurementJourney, parseProcurementRecord, procurementBackHref,
-  procurementChildHref, procurementRecordHref, procurementTabHref,
+  procurementChildHref, procurementListChildHref, procurementRecordHref, procurementTabHref,
 } from "../../procurement-navigation";
 
 function parts(href: string): [string, string] {
@@ -133,5 +133,23 @@ describe("direct invoice line correction navigation", () => {
   it("rejects correction requests for other document types or simultaneous PO editing", () => {
     expect(() => procurementChildHref("/purchase-orders/17", "", "/purchase-orders/17", { invoiceLineCorrectionId: 72 })).toThrow();
     expect(() => procurementChildHref("/purchase-orders/17", "", "/purchase-orders/17", { editPo: true, invoiceLineCorrectionId: 72 })).toThrow();
+  });
+});
+
+
+describe("supplier credit journeys", () => {
+  it("retains the invoice and PO source through credit selection and its document", () => {
+    const invoice = procurementChildHref("/purchase-orders/17", "tab=invoices", "/ap-invoices/71");
+    const list = procurementListChildHref(...parts(invoice), "/supplier-credits?sourceInvoiceId=71&new=1");
+    const credit = procurementChildHref(...parts(list), "/supplier-credits/9");
+    expect(parseProcurementRecord(...parts(credit))).toEqual({ kind:"credit",id:9,tab:"details" });
+    expect(procurementBackHref(parts(credit)[1],"/supplier-credits")).toBe(invoice);
+    expect(parseProcurementJourney(parts(credit)[1]).purchase?.id).toBe(17);
+  });
+  it("preserves a physical return receipt without inferring its invoice", () => {
+    const list = procurementListChildHref("/receiving","open=31","/supplier-credits?returnDispositionId=5&new=1");
+    expect(new URLSearchParams(parts(list)[1]).has("sourceInvoiceId")).toBe(false);
+    expect(procurementBackHref(parts(list)[1],"/supplier-credits")).toBe("/receiving?open=31");
+    expect(() => procurementListChildHref("/receiving","open=31","https://evil.invalid")).toThrow();
   });
 });

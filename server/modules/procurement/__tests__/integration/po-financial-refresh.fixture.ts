@@ -4,7 +4,8 @@ import * as schema from "@shared/schema";
 import { fixtureForeignKeys, fixtureTable, qualifiedTable } from "./shipment-line-fixture";
 
 const TABLES = [schema.vendors, schema.purchaseOrders, schema.purchaseOrderLines,
-  schema.vendorInvoices, schema.vendorInvoiceLines, schema.vendorInvoicePoLinks,
+  schema.vendorInvoices, schema.supplierCredits, schema.supplierCreditLines,
+  schema.supplierCreditApplications, schema.supplierCreditApplicationReversals, schema.vendorInvoiceLines, schema.vendorInvoicePoLinks,
   schema.inboundFreightCosts,
   schema.apPayments, schema.apPaymentAllocations, schema.poStatusHistory, schema.poExceptions];
 const LEASE = "echelon.procurement.po-financial-refresh";

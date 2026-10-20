@@ -4,10 +4,13 @@ import {
   CostEvidenceError,
   type CostEvidenceTransaction,
 } from "../inventory/infrastructure/cost-evidence.repository";
+import { readSupplierCreditCostRows } from "./supplier-credit-source.repository";
+import type { SupplierCreditCostRow } from "./domain/supplier-credit-source";
 
 export interface PurchaseCostSource {
   purchaseOrderLine: Record<string, unknown>;
   approvedInvoices: Record<string, unknown>[];
+  supplierCredits?: SupplierCreditCostRow[];
 }
 
 /** These selected fields are part of the persisted source fingerprint contract.
@@ -72,6 +75,11 @@ export async function readPurchaseCostSources(
     result
       .get(costInteger(source_line_id, "purchaseOrderLineId", 1))!
       .approvedInvoices.push(invoice);
+  }
+  const credits = await readSupplierCreditCostRows(tx, { purchaseOrderLineIds: [...result.keys()] });
+  for (const row of credits) {
+    const source = result.get(costInteger(row.purchase_order_line_id, "purchaseOrderLineId", 1));
+    if (source) (source.supplierCredits ??= []).push(row);
   }
   return result;
 }

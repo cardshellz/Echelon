@@ -6,7 +6,8 @@ import { fixtureForeignKeys, fixtureTable, qualifiedTable } from "./shipment-lin
 
 const url = process.env.ECHELON_TEST_DATABASE_URL;
 const databaseTests = url && process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true" ? describe : describe.skip;
-const tables = [schema.vendors, schema.vendorInvoices, schema.purchaseOrders, schema.vendorInvoicePoLinks, schema.apPayments, schema.apPaymentAllocations];
+const tables = [schema.vendors, schema.vendorInvoices, schema.supplierCredits, schema.supplierCreditLines,
+  schema.supplierCreditApplications, schema.supplierCreditApplicationReversals, schema.purchaseOrders, schema.vendorInvoicePoLinks, schema.apPayments, schema.apPaymentAllocations];
 databaseTests.sequential("AP work lists with real PostgreSQL", () => {
   let pool: pg.Pool; let modulePool: pg.Pool; let ownsSchema = false;
   let repository: typeof import("../../ap-work-list.repository");

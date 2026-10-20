@@ -23,7 +23,8 @@ const TABLES = [
   schema.products, schema.productVariants, schema.vendors, schema.vendorProducts,
   schema.purchaseOrders, schema.purchaseOrderLines, schema.inboundShipments, schema.inboundShipmentLines,
   schema.receivingOrders, schema.receivingLines, schema.poReceipts, schema.receiptReversals,
-  schema.vendorInvoices, schema.vendorInvoiceLines, schema.inboundFreightCosts, schema.inboundFreightAllocations,
+  schema.vendorInvoices, schema.supplierCredits, schema.supplierCreditLines,
+  schema.supplierCreditApplications, schema.supplierCreditApplicationReversals, schema.vendorInvoiceLines, schema.inboundFreightCosts, schema.inboundFreightAllocations,
   schema.landedCostSnapshots, schema.landedCostAdjustments, schema.inboundShipmentStatusHistory, schema.inventoryLots,
 ] as const;
 

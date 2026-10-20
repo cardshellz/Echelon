@@ -1,6 +1,7 @@
+import { SupplierCreditLink } from "@/features/purchasing/SupplierCreditLink";
 import { ApPaymentRecovery } from "@/features/purchasing/ApPaymentRecovery";
 import { useApPaymentCommands } from "@/features/purchasing/use-ap-payment-commands";
-import { parsePaymentAmount, recordPaymentInputSchema } from "@/lib/ap-payment-command";
+import { formatPaymentAmount, parsePaymentAmount, recordPaymentInputSchema } from "@/lib/ap-payment-command";
 import { formatPaymentCalendarDate } from "@shared/procurement/ap-payment-contract";
 import { InvoicePurchaseOrderSelector } from "@/features/purchasing/InvoicePurchaseOrderSelector";
 import { invalidateApInvoiceQueries, invalidateApPaymentQueries } from "@/features/purchasing/ap-work-list-query";
@@ -527,8 +528,8 @@ export default function APInvoiceDetail() {
   const status = invoice.status;
   const canApprove = hasPermission("purchasing", "approve") && sourceCapabilities.success && sourceCapabilities.data.approval.allowed && ["received", "disputed"].includes(status);
   const canDispute = hasPermission("purchasing", "edit") && ["received", "approved", "partially_paid"].includes(status);
-  const canVoid = hasPermission("purchasing", "approve") && status !== "voided" && invoice.paidAmountCents === 0;
-  const canPay = !invoiceError && !invoiceRefreshing && hasPermission("purchasing", "approve") && sourceCapabilities.success && sourceCapabilities.data.payment.allowed && !invoice.paymentReviewRequired && ["approved", "partially_paid"].includes(status);
+  const canVoid = hasPermission("purchasing", "approve") && status !== "voided" && invoice.paidAmountCents === 0 && invoice.creditedAmountCents === 0 && invoice.hasSupplierCreditHistory === false;
+  const canPay = !invoiceError && !invoiceRefreshing && hasPermission("purchasing", "approve") && sourceCapabilities.success && sourceCapabilities.data.payment.allowed && !invoice.paymentReviewRequired && !invoice.settlementReviewRequired && ["approved", "partially_paid"].includes(status);
   // Evidence attachments and reviewed quantity corrections retain their own owners.
   const canManageAttachments = hasPermission("purchasing", "edit") && status !== "voided";
   const canRunMatch = hasPermission("purchasing", "edit") && status !== "voided";
@@ -550,6 +551,13 @@ export default function APInvoiceDetail() {
       {invoice.paymentReviewRequired && (
         <p role="alert" className="rounded-lg border border-amber-300 bg-amber-50 px-4 py-3 text-sm">
           A payment has an unsupported historical status. Review its recorded evidence before changing the invoice balance; existing balances have been preserved.
+        </p>
+      )}
+      {invoice.settlementReviewRequired && (
+        <p role="alert" className="rounded-lg border border-amber-300 bg-amber-50 px-4 py-3 text-sm">
+          {invoice.overpaidAmountCents > 0
+            ? <>Recorded cash exceeds this invoice by {formatPaymentAmount(invoice.overpaidAmountCents)}. Review the retained payment applications before applying further settlement; the original invoice and cash history are preserved.</>
+            : "Historical settlement requires review. The original invoice and recorded settlements are preserved."}
         </p>
       )}
       {isVoided && (
@@ -581,7 +589,7 @@ export default function APInvoiceDetail() {
             <div className="flex items-center gap-3">
               <h1 className={`text-lg md:text-xl font-bold ${isVoided ? "line-through" : ""}`}>Invoice #{invoice.invoiceNumber}</h1>
               <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${STATUS_COLORS[status] ?? ""}`}>
-                {status.replace("_", " ")}
+                {status === "paid" && invoice.creditedAmountCents > 0 ? "settled" : status.replace("_", " ")}
               </span>
             </div>
             <p className="text-sm text-muted-foreground">{invoice.vendorName}</p>
@@ -627,8 +635,10 @@ export default function APInvoiceDetail() {
         )}
       </div>
 
+      <div className="flex flex-wrap gap-4"><SupplierCreditLink sourceInvoiceId={invoice.id} />{hasPermission("purchasing", "edit") && ["approved", "partially_paid", "paid"].includes(status) && <SupplierCreditLink sourceInvoiceId={invoice.id} create>Record supplier credit</SupplierCreditLink>}</div>
+      {invoice.hasSupplierCreditHistory === true && <p className="text-sm text-muted-foreground">This invoice retains supplier credit history. Review its original credit documents and applications; voiding or replacing the original invoice is unavailable.</p>}
       {/* ── Amount Cards ── */}
-      <div className="grid grid-cols-3 gap-3 md:gap-4">
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 md:gap-4">
         <Card>
           <CardContent className="pt-4 pb-3 text-center">
             <p className="text-xs text-muted-foreground mb-1">Invoiced</p>
@@ -637,10 +647,11 @@ export default function APInvoiceDetail() {
         </Card>
         <Card>
           <CardContent className="pt-4 pb-3 text-center">
-            <p className="text-xs text-muted-foreground mb-1">Paid</p>
+            <p className="text-xs text-muted-foreground mb-1">Cash paid</p>
             <p className="text-xl md:text-2xl font-bold text-green-600">{formatCents(invoice.paidAmountCents)}</p>
           </CardContent>
         </Card>
+        <Card><CardContent className="pt-4 pb-3 text-center"><p className="text-xs text-muted-foreground mb-1">Credits applied</p><p className="text-xl md:text-2xl font-bold">{formatPaymentAmount(invoice.creditedAmountCents)}</p></CardContent></Card>
         <Card className={invoice.balanceCents > 0 ? "border-amber-200" : ""}>
           <CardContent className="pt-4 pb-3 text-center">
             <p className="text-xs text-muted-foreground mb-1">Balance</p>
@@ -775,7 +786,7 @@ export default function APInvoiceDetail() {
                             <span className={`text-xs px-1.5 py-0.5 rounded ${match.className}`}>{match.label}</span>
                             <InvoiceQuantityCorrection lineId={line.id} lineNumber={line.lineNumber} needsCorrection={["qty_discrepancy", "over_billed", "price_discrepancy"].includes(line.matchStatus)} allowMatched={line.purchaseOrderLineId != null && invoice.status !== "voided"} onSaved={invalidate} />
                           </TableCell>
-                          <TableCell><InvoiceLineCostReview line={line} currency={invoice.currency} invoiceStatus={invoice.status} onSaved={invalidate} /></TableCell>
+                          <TableCell><InvoiceLineCostReview line={line} invoiceId={invoice.id} currency={invoice.currency} invoiceStatus={invoice.status} onSaved={invalidate} /></TableCell>
                           {canEdit && (
                             <TableCell>
                               <Button size="sm" variant="ghost" className="min-h-[44px] min-w-[44px] text-muted-foreground"

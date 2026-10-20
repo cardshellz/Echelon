@@ -2,11 +2,13 @@ import { buildShipmentAllocationBasis, resolveShipmentAllocationMethod, shipment
   allocateShipmentCents, shipmentAllocationEvidenceMatches, type ShipmentAllocationBasis } from "./domain/shipment-allocation-basis";
 import { recordCostRevision } from "./cost-source-revision.repository";
 import { sql } from "drizzle-orm";
-import type { CostIssue } from "@shared/procurement/cost-source-contracts";
+import type { CostIssue, CostSourceReference } from "@shared/procurement/cost-source-contracts";
 import { costFingerprint, costInteger, lockInventoryCostGraph, type CostEvidenceTransaction, type RecordedCostRevision } from "../inventory/infrastructure/cost-evidence.repository";
 import { applyCostRevision, type CostComponentWriter } from "../inventory/application/apply-cost-revision";
 import { resolveShipmentChargeEvidence } from "./domain/shipment-charge-evidence";
 import { retainEquivalentShipmentCostSource, type ShipmentCostProposal } from "./shipment-cost-source-identity";
+import { readSupplierCreditCostRows } from "./supplier-credit-source.repository";
+import { resolveShipmentSupplierCredits } from "./domain/shipment-supplier-credits";
 
 type ShipmentRevisionOptions = { allocationJustFinalized?: boolean; inboundShipmentLineId?: number };
 type ShipmentRevisionProposal = ShipmentCostProposal;
@@ -74,6 +76,9 @@ export async function prepareShipmentCostRevisions(tx: CostEvidenceTransaction, 
     JOIN procurement.inbound_freight_costs charge ON charge.id=allocation.shipment_cost_id
     WHERE charge.inbound_shipment_id=${shipmentId} ORDER BY allocation.id
   `);
+  const supplierCredits = await readSupplierCreditCostRows(tx, { freightCostIds: charges.rows.map(charge => Number(charge.id)) });
+  const creditAdjustment = resolveShipmentSupplierCredits({ charges: charges.rows, allocations: allocationRows.rows,
+    invoices: invoiceRows.rows, credits: supplierCredits });
   const previous = await tx.execute(sql`
     WITH latest AS (
       SELECT DISTINCT ON (revision.inbound_shipment_line_id)
@@ -154,7 +159,7 @@ export async function prepareShipmentCostRevisions(tx: CostEvidenceTransaction, 
       return { chargeId: Number(charge.id), ...resolveShipmentChargeEvidence({ charge: chargeEvidence(charge), invoices: invoiceEvidence,
         priorConfirmedCharge: saved?.confirmedCharge ?? (previousCharge ? chargeEvidence(previousCharge) : null) }) };
     });
-    const sources = charges.rows.map((charge) => ({ kind: "shipment_cost" as "shipment_cost" | "vendor_invoice_line", documentId: shipmentId,
+    const sources: CostSourceReference[] = charges.rows.map((charge) => ({ kind: "shipment_cost", documentId: shipmentId,
       lineId: costInteger(charge.id, "charge.id", 1), version: costFingerprint({ charge, allocationBasis: currentBasis,
         allocations: allocationRows.rows.filter((allocation) => Number(allocation.shipment_cost_id) === Number(charge.id) && Number(allocation.inbound_shipment_line_id) === Number(line.id)), snapshot: line }) }));
     const approvedInvoiceLineIds = new Set(chargeAuthorities.flatMap((authority) => authority.approvedInvoiceLineIds));
@@ -163,6 +168,7 @@ export async function prepareShipmentCostRevisions(tx: CostEvidenceTransaction, 
         documentId: costInteger(invoiceLine.vendor_invoice_id, "invoiceId", 1), lineId: costInteger(invoiceLine.id, "invoiceLineId", 1),
         version: costFingerprint(invoiceLine) });
     }
+    sources.push(...creditAdjustment.sources);
     const amount = line.qty == null ? null : costInteger((["freight_allocated_cents","duty_allocated_cents","insurance_allocated_cents","other_allocated_cents"]
       .reduce((sum, field) => sum + BigInt(costInteger(line[field], field, -Number.MAX_SAFE_INTEGER)), BigInt(0)) * BigInt(100)).toString(), "allocatedMills", -Number.MAX_SAFE_INTEGER);
     const actual = chargeAuthorities.length > 0 && chargeAuthorities.every((authority) => authority.evidence === "confirmed");
@@ -179,20 +185,23 @@ export async function prepareShipmentCostRevisions(tx: CostEvidenceTransaction, 
     }));
     const allocationStale = basisStale || !allocationsComplete || (amount !== null && lineAllocatedMills !== BigInt(amount))
       || (line.qty != null && Number(line.qty) !== Number(line.qty_shipped)) || ((allocationPolicyChanged || effectiveMethodChanged) && !options.allocationJustFinalized);
+    const netAmount = amount === null ? null : costInteger((BigInt(amount) - BigInt(creditAdjustment.creditedCentsByLine.get(Number(line.id)) ?? 0) * BigInt(100)).toString(), "netAllocatedMills", -Number.MAX_SAFE_INTEGER);
     const issue = amount === null ? { code: "LANDED_ALLOCATION_MISSING", message: `Shipment line ${line.id} has no saved allocation.` }
       : amount < 0 ? { code: "SIGNED_LANDED_CREDIT_REVIEW", message: "Preserved signed freight credits need an explicit supported inventory disposition." }
       : sources.length === 0 ? { code: "LANDED_SOURCE_MISSING", message: "A zero allocation without charge evidence does not establish a confirmed zero freight cost." }
       : allocationStale ? { code: "LANDED_ALLOCATION_STALE", message: "The saved allocation no longer reconciles to the current charge, allocation basis, method or shipment quantity. Finalize allocation again before applying it." }
-      : chargeAuthorities.find((authority) => authority.issue !== null)?.issue ?? null;
+      : creditAdjustment.issues[0] ?? (netAmount !== null && netAmount < 0 ? { code: "CREDIT_LANDED_ALLOCATION_REVIEW", message: "Supplier credits exceed the original allocated shipment cost." } : null)
+        ?? chargeAuthorities.find((authority) => authority.issue !== null)?.issue ?? null;
     proposals.push(retainEquivalentShipmentCostSource({ input: {
       contractVersion: 1, component: "landed",
       scope: { kind: "shipment_line", purchaseOrderId: costInteger(line.purchase_order_id, "purchaseOrderId", 1), purchaseOrderLineId: costInteger(line.purchase_order_line_id, "purchaseOrderLineId", 1), inboundShipmentId: shipmentId, inboundShipmentLineId: costInteger(line.id, "shipmentLineId", 1) },
       sources: sources.length > 0 ? sources : [{ kind: "purchase_order_line", documentId: Number(line.purchase_order_id), lineId: Number(line.purchase_order_line_id), version: costFingerprint(line) }],
       currency: charges.rows.length > 0 && charges.rows.every((charge) => charge.currency === "USD") ? "USD" : null,
-      totalMills: amount === null ? null : costInteger(amount, "totalMills", -Number.MAX_SAFE_INTEGER), basePieces: line.qty == null ? null : costInteger(line.qty, "snapshot.qty", 1),
+      totalMills: netAmount, basePieces: line.qty == null ? null : costInteger(line.qty, "snapshot.qty", 1),
       evidence: issue ? "review_required" : actual ? "confirmed" : "estimated", packagingTreatment: "not_applicable", issue, manualOverride: null,
     }, sourceEvidence: { shipmentLineSnapshot: line, allocationBasis: currentBasis, charges: charges.rows, chargeAuthorities,
-      invoices: invoiceRows.rows, allocations: allocationRows.rows.filter((allocation) => Number(allocation.inbound_shipment_line_id) === Number(line.id)) } }, saved));
+      invoices: invoiceRows.rows, allocations: allocationRows.rows.filter((allocation) => Number(allocation.inbound_shipment_line_id) === Number(line.id)),
+      ...(supplierCredits.length ? { supplierCredits, creditedCents: creditAdjustment.creditedCentsByLine.get(Number(line.id)) ?? 0 } : {}) } }, saved));
   }
   return { proposals, issues };
 }

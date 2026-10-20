@@ -26,7 +26,7 @@ export function buildPoFinancialMilestonePatch(input: {
   if (evidence.paidAmountCents !== null && evidence.paidAmountCents > 0 && input.existing.firstPaidAt == null) {
     patch.firstPaidAt = new Date(now.getTime());
   }
-  if (workflow.state === "settled" && input.existing.fullyPaidAt == null) {
+  if (workflow.state === "settled" && (workflow.evidence.creditedAmountCents ?? 0) === 0 && input.existing.fullyPaidAt == null) {
     patch.fullyPaidAt = new Date(now.getTime());
   }
   return patch;

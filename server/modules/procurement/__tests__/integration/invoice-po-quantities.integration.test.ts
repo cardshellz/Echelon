@@ -17,7 +17,8 @@ import { getInvoiceById } from "../../ap-ledger.service";
 const TEST_URL = process.env.ECHELON_TEST_DATABASE_URL;
 const databaseTests = TEST_URL && process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true" ? describe : describe.skip;
 const POSTGRES_INTEGER_MAX = 2_147_483_647;
-const TABLES = [schema.vendors, schema.purchaseOrders, schema.purchaseOrderLines, schema.vendorInvoices, schema.inboundFreightCosts,
+const TABLES = [schema.vendors, schema.purchaseOrders, schema.purchaseOrderLines, schema.vendorInvoices, schema.supplierCredits, schema.supplierCreditLines,
+  schema.supplierCreditApplications, schema.supplierCreditApplicationReversals, schema.inboundFreightCosts,
   schema.vendorInvoiceLines, schema.vendorInvoicePoLinks, schema.vendorInvoiceAttachments, schema.apPayments, schema.apPaymentAllocations];
 
 databaseTests.sequential("invoice current PO comparison PostgreSQL guarantees", () => {

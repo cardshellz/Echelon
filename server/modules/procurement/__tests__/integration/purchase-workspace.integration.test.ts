@@ -57,7 +57,11 @@ databaseTests.sequential("purchase workspace PostgreSQL read model", () => {
       fixtureTable(schema.poReceipts, ["id", "receivingOrderId", "purchaseOrderId"]),
       fixtureTable(schema.inboundShipments, ["id", "shipmentNumber", "status", "mode", "containerNumber", "eta", "deliveredDate", "estimatedTotalCostCents", "actualTotalCostCents", "createdAt"]),
       fixtureTable(schema.inboundShipmentLines, ["id", "inboundShipmentId", "purchaseOrderId", "purchaseOrderLineId", "sku", "qtyShipped", "allocatedCostCents"]),
-      fixtureTable(schema.vendorInvoices, ["id", "invoiceNumber", "status", "currency", "invoiceDate", "dueDate", "inboundShipmentId", "invoicedAmountCents", "paidAmountCents", "balanceCents"]),
+      fixtureTable(schema.vendorInvoices, ["id", "vendorId", "invoiceNumber", "status", "currency", "invoiceDate", "dueDate", "inboundShipmentId", "invoicedAmountCents", "paidAmountCents", "creditedAmountCents", "balanceCents"]),
+      fixtureTable(schema.supplierCredits, Object.keys(getTableColumns(schema.supplierCredits))),
+      fixtureTable(schema.supplierCreditLines, Object.keys(getTableColumns(schema.supplierCreditLines))),
+      fixtureTable(schema.supplierCreditApplications, Object.keys(getTableColumns(schema.supplierCreditApplications))),
+      fixtureTable(schema.supplierCreditApplicationReversals, Object.keys(getTableColumns(schema.supplierCreditApplicationReversals))),
       fixtureTable(schema.vendorInvoicePoLinks, ["id", "vendorInvoiceId", "purchaseOrderId", "allocatedAmountCents"]),
       fixtureTable(schema.inboundFreightCosts, Object.keys(getTableColumns(schema.inboundFreightCosts))),
       fixtureTable(schema.vendorInvoiceLines, Object.keys(getTableColumns(schema.vendorInvoiceLines))),
@@ -107,11 +111,11 @@ databaseTests.sequential("purchase workspace PostgreSQL read model", () => {
       INSERT INTO procurement.po_receipts (id,receiving_order_id,purchase_order_id) VALUES (331,33,1);
       INSERT INTO procurement.receiving_lines (id,receiving_order_id,purchase_order_line_id) VALUES (341,34,11);
       INSERT INTO procurement.vendor_invoices
-        (id,invoice_number,status,currency,invoice_date,inbound_shipment_id,invoiced_amount_cents,paid_amount_cents,balance_cents)
-        VALUES (41,'INV-SHARED','partially_paid','USD','2026-09-01',7,100000,50000,50000),
-               (42,'INV-FREIGHT','received','USD','2026-09-02',NULL,9000,0,9000),
-               (43,'INV-VOID','voided','USD','2026-09-03',NULL,-1000,0,0),
-               (99,'INV-UNRELATED','received','USD','2026-09-04',9,9999,0,9999);
+        (id,vendor_id,invoice_number,status,currency,invoice_date,inbound_shipment_id,invoiced_amount_cents,paid_amount_cents,credited_amount_cents,balance_cents)
+        VALUES (41,1,'INV-SHARED','partially_paid','USD','2026-09-01',7,100000,50000,0,50000),
+               (42,1,'INV-FREIGHT','received','USD','2026-09-02',NULL,9000,0,0,9000),
+               (43,1,'INV-VOID','voided','USD','2026-09-03',NULL,-1000,0,0,0),
+               (99,1,'INV-UNRELATED','received','USD','2026-09-04',9,9999,0,0,9999);
       INSERT INTO procurement.vendor_invoice_po_links (id,vendor_invoice_id,purchase_order_id,allocated_amount_cents)
         VALUES (411,41,1,40000),(412,41,2,60000),(431,43,1,NULL);
       INSERT INTO procurement.inbound_freight_costs (id,inbound_shipment_id,vendor_invoice_id) VALUES (421,7,42),(422,7,41);
@@ -167,7 +171,8 @@ databaseTests.sequential("purchase workspace PostgreSQL read model", () => {
     expect(result.invoices.map((invoice) => invoice.id)).toEqual([41, 42, 43]);
     expect(result.invoices[0]).toMatchObject({ invoicedAmountCents: 100000, paidAmountCents: 50000, allocatedToPurchaseCents: 40000, amountScope: "whole_invoice", purchaseOrderIds: [1, 2] });
     expect(result.invoices[1].allocatedToPurchaseCents).toBeNull();
-    expect(result.invoices[2]).toMatchObject({ status: "voided", invoicedAmountCents: -1000 });
+    expect(result.invoices[2]).toMatchObject({ status: "voided", invoicedAmountCents: -1000,
+      creditedAmountCents: 0, settledAmountCents: 0, overpaidAmountCents: 0, settlementReviewRequired: true });
     expect(result.edges.filter((edge) => edge.relationship === "shipment_invoice" && edge.to.id === 41)).toHaveLength(1);
     expect(result.edges.some((edge) => edge.relationship === "purchase_invoice" && edge.to.id === 42)).toBe(false);
     expect(result.purchase.paidTotalCents).toBe(20000);

@@ -10,7 +10,7 @@ async function setup(page: Page, canEdit = true) {
   await page.route("**/api/auth/me", route => route.fulfill({ json: { user: { id: "ap-reviewer", role: "admin", username: "test" }, permissions: canEdit ? ["purchasing:view", "purchasing:edit", "purchasing:approve"] : ["purchasing:view"], roles: ["admin"] } }));
   return failures;
 }
-const invoice = (edit = locked) => ({ sourceCapabilities: invoiceSourceFixture(), id: 71, invoiceNumber: "AP-SAFE-71", vendorId: 2, vendorName: "Test vendor", status: "disputed", currency: "USD", invoicedAmountCents: 10000, paidAmountCents: 8000, balanceCents: 2000,
+const invoice = (edit = locked) => ({ sourceCapabilities: invoiceSourceFixture(), id: 71, invoiceNumber: "AP-SAFE-71", vendorId: 2, vendorName: "Test vendor", status: "disputed", currency: "USD", invoicedAmountCents: 10000, hasSupplierCreditHistory: false, creditedAmountCents: 0, paidAmountCents: 8000, balanceCents: 2000,
   capabilities: { edit }, paymentReviewRequired: false, lines: [{ id: 72, lineNumber: 1, purchaseOrderLineId: 18, qtyInvoiced: 1, unitCostCents: 10000, unitCostMills: 1000000, lineTotalCents: 10000, productName: "Test item", matchStatus: "qty_discrepancy" }], poLinks: [], attachments: [], payments: [] });
 
 test("recognized disputed bill hides generic edits and retains the reviewed correction and attachments", async ({ page }) => {
@@ -31,7 +31,7 @@ test("stale edit rejection refreshes the server capability and disables resubmis
   const failures = await setup(page); let protectedHistory = false; let attempts = 0;
   await page.route("**/api/vendor-invoices/71", route => {
     if (route.request().method() === "PATCH") { protectedHistory = true; attempts += 1; return route.fulfill({ status: 409, json: { error: locked.reason, details: { code: locked.code } } }); }
-    return route.fulfill({ json: { ...invoice(protectedHistory ? locked : editable), status: "received", paidAmountCents: 0, balanceCents: 10000 } });
+    return route.fulfill({ json: { ...invoice(protectedHistory ? locked : editable), status: "received", hasSupplierCreditHistory: false, creditedAmountCents: 0, paidAmountCents: 0, balanceCents: 10000 } });
   });
   await page.goto("/ap-invoices/71?tab=details");
   await page.getByRole("button", { name: "Details", exact: true }).click();
@@ -45,7 +45,7 @@ test("stale edit rejection refreshes the server capability and disables resubmis
 for (const action of ["add-line", "link-po"] as const) {
   test(`already-open ${action} dialog retains its draft and blocks resubmission after a history rejection`, async ({ page }) => {
     const failures = await setup(page); let protectedHistory = false; let attempts = 0;
-    await page.route("**/api/vendor-invoices/71", route => route.fulfill({ json: { ...invoice(protectedHistory ? locked : editable), status: "received", paidAmountCents: 0, balanceCents: 10000 } }));
+    await page.route("**/api/vendor-invoices/71", route => route.fulfill({ json: { ...invoice(protectedHistory ? locked : editable), status: "received", hasSupplierCreditHistory: false, creditedAmountCents: 0, paidAmountCents: 0, balanceCents: 10000 } }));
     await page.route("**/api/purchase-orders/work-list?*", route => route.fulfill({ json: workListPage([{ id: 17, poNumber: "TEST-PO-17", totalCents: 10000, vendorId: 2, status: "received" }], route.request().url()) }));
     await page.route(`**/api/vendor-invoices/71/${action === "add-line" ? "lines" : "po-links"}`, route => {
       protectedHistory = true; attempts += 1;

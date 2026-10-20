@@ -80,6 +80,48 @@ function pay(input: PoFinancialEvidenceInput, amount: number) {
 }
 
 describe("financial exceptions use validated whole invoice evidence", () => {
+  function withCredit(input: PoFinancialEvidenceInput, amount: number) {
+    const invoice = input.invoices[0];
+    const paid = Number(invoice.paidAmountCents);
+    Object.assign(invoice, { creditedAmountCents: amount, balanceCents: Math.max(3000 - paid - amount, 0),
+      status: paid + amount >= 3000 ? "paid" : "partially_paid", credits: [{
+        allocationId: 1, creditId: 10, creditVendorId: 5, creditCurrency: "USD", creditStatus: "approved",
+        creditTotalAmountCents: amount, creditAppliedAmountCents: amount, appliedAmountCents: amount,
+        reversalId: null, evidenceValid: true,
+      }] });
+    return input;
+  }
+  it("clears debt settled by verified credit while preserving cash separately", () => {
+    const result = run(withCredit(source(), 3000));
+    expect(result).toMatchObject({ alerts: [], unknownKinds: [], invoiceEvidence: [{
+      paidCents: 0, creditedCents: 3000, outstandingCents: 0, completedAllocationIds: [], activeCreditAllocationIds: [1],
+    }] });
+  });
+  it("uses the credit-adjusted whole-invoice balance without inventing a shared PO payment allocation", () => {
+    const result = run(withCredit(pay(source(), 1000), 500));
+    expect(result.unknownKinds).toEqual([]);
+    expect(result.alerts).toEqual([expect.objectContaining({ kind: "past_due", payload: expect.objectContaining({
+      paidCents: 1000, creditedCents: 500, outstandingCents: 1500,
+    }) })]);
+  });
+  it("preserves alerts when a credit header lacks verified application history", () => {
+    const input = withCredit(source(), 3000);
+    input.invoices[0].credits = [];
+    expect(run(input).unknownKinds).toEqual(["overpaid", "past_due"]);
+  });
+  it("restores the full outstanding balance after an explicit credit reversal", () => {
+    const input = withCredit(source(), 1000);
+    Object.assign(input.invoices[0], { creditedAmountCents: 0, balanceCents: 3000, status: "approved" });
+    input.invoices[0].credits = input.invoices[0].credits!.map(row => ({ ...row, reversalId: 20, creditAppliedAmountCents: 0 }));
+    expect(run(input)).toMatchObject({ unknownKinds: [], invoiceEvidence: [{ creditedCents: 0, activeCreditAllocationIds: [] }],
+      alerts: [{ kind: "past_due", payload: { outstandingCents: 3000 } }] });
+  });
+  it("changes alert fingerprint when credit application identity changes at the same balance", () => {
+    const first = withCredit(source(), 1000), second = withCredit(source(), 1000);
+    second.invoices[0].credits = second.invoices[0].credits!.map(row => ({ ...row, allocationId: 2 }));
+    expect(run(first).alerts[0].identity).toBe(run(second).alerts[0].identity);
+    expect(run(first).alerts[0].sourceFingerprint).not.toBe(run(second).alerts[0].sourceFingerprint);
+  });
   it("uses all distinct completed allocations from the same payment for overdue evidence", () => {
     const input = pay(source(), 2000);
     const first = input.invoices[0].payments[0];

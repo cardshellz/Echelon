@@ -1,3 +1,4 @@
+import { SupplierCreditLink } from "@/features/purchasing/SupplierCreditLink";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Link } from "wouter";
@@ -72,7 +73,7 @@ function ShipmentInvoiceForm({ open, onOpenChange, shipmentId, userId, sourceVer
     setLines(costs.data.costs.map(cost => ({
       costId: cost.id, costType: cost.costType.replaceAll("_", " "),
       description: cost.description ?? `${cost.costType.replaceAll("_", " ")}: ${cost.performedByName ?? selectedVendor?.vendorName ?? ""}`,
-      costAmountCents: cost.actualCents ?? cost.estimatedCents!, amount: shipmentInvoiceAmountInput(cost.actualCents ?? cost.estimatedCents!), included: true,
+      costAmountCents: cost.actualCents ?? cost.estimatedCents!, amount: shipmentInvoiceAmountInput(cost.actualCents ?? cost.estimatedCents!), included: (cost.actualCents ?? cost.estimatedCents!) >= 0,
     })));
   }, [costs.data, intent, selectedVendor]);
 
@@ -183,8 +184,8 @@ function ShipmentInvoiceForm({ open, onOpenChange, shipmentId, userId, sourceVer
               </div>
               <div className="overflow-x-auto rounded-lg border"><Table><TableHeader><TableRow><TableHead>Include</TableHead><TableHead>Charge</TableHead><TableHead>Recorded</TableHead><TableHead>Invoice amount</TableHead></TableRow></TableHeader><TableBody>
                 {lines.length === 0 ? <TableRow><TableCell colSpan={4}>No verified unbilled charges remain for this supplier.</TableCell></TableRow> : lines.map(line => <TableRow key={line.costId}>
-                  <TableCell><Checkbox aria-label={`Include charge ${line.costId}`} checked={line.included} onCheckedChange={checked => setLines(current => current.map(row => row.costId === line.costId ? { ...row, included: checked === true } : row))} /></TableCell>
-                  <TableCell className="min-w-[130px]"><p className="capitalize">{line.costType}</p><p className="text-xs text-muted-foreground">{line.description}</p></TableCell>
+                  <TableCell><Checkbox aria-label={`Include charge ${line.costId}`} checked={line.included} disabled={line.costAmountCents < 0} onCheckedChange={checked => setLines(current => current.map(row => row.costId === line.costId ? { ...row, included: checked === true } : row))} /></TableCell>
+                  <TableCell className="min-w-[130px]"><p className="capitalize">{line.costType}</p><p className="text-xs text-muted-foreground">{line.description}</p>{line.costAmountCents < 0 && <div className="text-xs"><p>Negative charges require supplier credit review.</p><SupplierCreditLink inboundShipmentId={shipmentId} create /></div>}</TableCell>
                   <TableCell className="font-mono">{formatIntegerCents(line.costAmountCents, "USD")}</TableCell>
                   <TableCell><Input aria-label={`Invoice amount for charge ${line.costId}`} inputMode="decimal" value={line.amount} disabled={!line.included} className="w-28" onChange={event => setLines(current => current.map(row => row.costId === line.costId ? { ...row, amount: event.target.value } : row))} /></TableCell>
                 </TableRow>)}

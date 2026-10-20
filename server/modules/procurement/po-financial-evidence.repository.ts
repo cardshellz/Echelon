@@ -1,3 +1,4 @@
+import { readInvoiceCreditEvidence } from "./supplier-credit-settlement.repository";
 import { asc, eq, inArray } from "drizzle-orm";
 import { poFinancialEvidenceIdSchema } from "@shared/procurement/po-financial-evidence";
 import {
@@ -14,7 +15,7 @@ import type { PoFinancialEvidenceInput } from "./domain/po-financial-evidence";
 
 export type PoFinancialEvidenceDatabase = Pick<typeof db, "transaction">;
 type TransactionClient = Parameters<Parameters<typeof db.transaction>[0]>[0];
-export type PoFinancialEvidenceReadClient = Pick<TransactionClient, "select">;
+export type PoFinancialEvidenceReadClient = Pick<TransactionClient, "select" | "execute">;
 
 export class PoFinancialEvidenceSourceError extends Error {
   readonly code = "PO_FINANCIAL_EVIDENCE_SOURCE_MISSING";
@@ -187,6 +188,7 @@ export async function readPoFinancialEvidenceSourcesWithClient(
     .leftJoin(apPayments, eq(apPaymentAllocations.apPaymentId, apPayments.id))
     .where(inArray(apPaymentAllocations.vendorInvoiceId, linkedInvoiceIds))
     .orderBy(asc(apPaymentAllocations.id));
+  const creditsByInvoice = await readInvoiceCreditEvidence(client, linkedInvoiceIds);
   const linksByInvoice = groupByInvoice(links);
   const linesByInvoice = groupByInvoice(lines);
   const paymentsByInvoice = groupByInvoice(payments);
@@ -202,6 +204,7 @@ export async function readPoFinancialEvidenceSourcesWithClient(
         status: invoice.status,
         invoicedAmountCents: invoice.invoicedAmountCents,
         paidAmountCents: invoice.paidAmountCents,
+        creditedAmountCents: invoice.creditedAmountCents, credits: creditsByInvoice.get(invoice.id) ?? [],
         balanceCents: invoice.balanceCents,
         links: linksByInvoice.get(invoice.id) ?? [],
         lines: linesByInvoice.get(invoice.id) ?? [],

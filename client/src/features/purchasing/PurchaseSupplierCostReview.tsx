@@ -78,6 +78,12 @@ export function PurchaseSupplierCostLine({
           cost processing section to retry and review its saved result.
         </p>
       )}
+      {action === "review" && (
+        <p>
+          The recorded source needs an accounting review. See the current reasons
+          below; there is no automatic cost retry for this case.
+        </p>
+      )}
       {action === "none" && (
         <p className="text-green-700 dark:text-green-400">
           Product and packaging costs are posted for the current source and lot
@@ -88,7 +94,7 @@ export function PurchaseSupplierCostLine({
         {line.invoices.map((invoice) => {
           const href = navigation.childHref(
             `/ap-invoices/${invoice.invoiceId}?tab=lines`,
-            { invoiceCostLineId: invoice.lineId },
+            action === "review" ? undefined : { invoiceCostLineId: invoice.lineId },
           );
           return (
             <Link
@@ -96,7 +102,7 @@ export function PurchaseSupplierCostLine({
               href={href}
               className="text-primary underline underline-offset-4"
             >
-              {action === "none" ? "View" : "Review"} invoice{" "}
+              {action === "none" || action === "review" ? "View" : "Review"} invoice{" "}
               {invoice.invoiceNumber} · line {invoice.lineNumber}
             </Link>
           );

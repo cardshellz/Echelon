@@ -1,3 +1,4 @@
+import { sumInvoiceCredits, type InvoiceCreditEvidence } from "./invoice-credit-evidence";
 import { z } from "zod";
 import {
   poFinancialEvidenceIdSchema as id,
@@ -32,6 +33,8 @@ export interface PoFinancialInvoiceEvidence {
   status: string;
   invoicedAmountCents: unknown;
   paidAmountCents: unknown;
+  creditedAmountCents?: unknown;
+  credits?: readonly InvoiceCreditEvidence[];
   balanceCents: unknown;
   links: readonly PoFinancialInvoiceLinkEvidence[];
   lines: readonly PoFinancialInvoiceLineEvidence[];
@@ -49,11 +52,13 @@ type AddReason = (code: string, message: string) => void;
 type Amounts = {
   invoiced: bigint | null;
   paid: bigint | null;
+  credited: bigint | null;
+  settled: bigint | null;
   outstanding: bigint | null;
 };
 const unknownAmounts: Amounts = {
   invoiced: null,
-  paid: null,
+  paid: null, credited: null, settled: null,
   outstanding: null,
 };
 const maximumCents = BigInt(Number.MAX_SAFE_INTEGER);
@@ -106,6 +111,8 @@ const invoiceSchema = z
     ]),
     invoicedAmountCents: z.unknown(),
     paidAmountCents: z.unknown(),
+    creditedAmountCents: z.unknown().default(0),
+    credits: z.array(z.unknown()).default([]),
     balanceCents: z.unknown(),
     links: z.array(z.unknown()),
     lines: z.array(z.unknown()),
@@ -224,6 +231,7 @@ function readCompletedPayments(
     return null;
   }
   const allocationIds = new Set<number>();
+  const creditAllocationIds = new Set<number>();
   let completed = BigInt(0);
   for (const payment of payments.data) {
     // One recorded payment can be applied repeatedly. Allocation identity,
@@ -273,11 +281,13 @@ function readSettlement(
   invoice: Invoice,
   invoiceAmount: bigint,
   addReason: AddReason,
-): bigint | null {
+): {paid:bigint;credited:bigint;settled:bigint} | null {
   const paid = money(invoice.paidAmountCents);
+  const credited = money(invoice.creditedAmountCents);
+  const actualCredit = sumInvoiceCredits(invoice.credits,invoice.vendorId!,invoice.currency!);
   const balance = money(invoice.balanceCents);
   const completed = readCompletedPayments(invoice, addReason);
-  if (paid === null || balance === null) {
+  if (paid === null || balance === null || credited === null || actualCredit === null) {
     addReason(
       "PO_INVOICE_SETTLEMENT_INVALID",
       "Invoice settlement totals are missing or outside the supported exact integer range.",
@@ -286,9 +296,9 @@ function readSettlement(
   }
   if (completed === null) return null;
   if (
-    paid > invoiceAmount ||
-    completed !== paid ||
-    balance !== invoiceAmount - paid
+    paid + credited > invoiceAmount ||
+    completed !== paid || BigInt(actualCredit) !== credited ||
+    balance !== invoiceAmount - paid - credited
   ) {
     addReason(
       "PO_INVOICE_SETTLEMENT_MISMATCH",
@@ -297,10 +307,10 @@ function readSettlement(
     return null;
   }
   const inconsistentStatus =
-    (invoice.status === "paid" && paid !== invoiceAmount) ||
+    (invoice.status === "paid" && paid + credited !== invoiceAmount) ||
     (invoice.status === "partially_paid" &&
-      (paid === BigInt(0) || paid >= invoiceAmount)) ||
-    (["received", "approved"].includes(invoice.status) && paid !== BigInt(0));
+      (paid + credited === BigInt(0) || paid + credited >= invoiceAmount)) ||
+    (["received", "approved"].includes(invoice.status) && paid + credited !== BigInt(0));
   if (inconsistentStatus) {
     addReason(
       "PO_INVOICE_STATUS_MISMATCH",
@@ -308,7 +318,7 @@ function readSettlement(
     );
     return null;
   }
-  return paid;
+  return {paid,credited,settled:paid+credited};
 }
 
 function readInvoiceFootprint(
@@ -393,37 +403,27 @@ function evaluateInvoice(
   if (footprint === null) return unknownAmounts;
   const { invoice, invoiceAmount, buckets } = footprint;
   const invoiced = buckets.get(input.purchaseOrderId)!;
-  const paid = readSettlement(invoice, invoiceAmount, addReason);
-  if (paid === null) return { invoiced, paid: null, outstanding: null };
+  const settlement = readSettlement(invoice, invoiceAmount, addReason);
+  if (settlement === null) return { invoiced, paid: null, credited: null, settled: null, outstanding: null };
   if ([...buckets.values()].some((amount) => amount < BigInt(0))) {
     addReason(
       "PO_SIGNED_SETTLEMENT_REVIEW_REQUIRED",
       "A purchase order has a net invoice credit; its settlement attribution requires review.",
     );
-    return { invoiced, paid: null, outstanding: null };
+    return { invoiced, paid: null, credited: null, settled: null, outstanding: null };
   }
-  // Zero payment and complete settlement are exact boundaries. For partial
-  // settlement, only one nonzero owner can identify the PO share without a
-  // remittance split. Invoice-level payment history is never reconstructed.
-  let attributedPaid: bigint;
-  if (paid === BigInt(0)) attributedPaid = BigInt(0);
-  else if (paid === invoiceAmount) attributedPaid = invoiced;
-  else if (
-    [...buckets.values()].filter((amount) => amount > BigInt(0)).length === 1
-  ) {
-    attributedPaid = invoiced > BigInt(0) ? paid : BigInt(0);
-  } else {
-    addReason(
-      "PO_SHARED_INVOICE_PARTIAL_PAYMENT",
-      "This invoice covers multiple purchase orders and is partially paid; no purchase order payment split was recorded.",
-    );
-    return { invoiced, paid: null, outstanding: null };
+  const {paid,credited,settled}=settlement;
+  const singleOwner=[...buckets.values()].filter(amount=>amount>BigInt(0)).length<=1;
+  let attributedPaid:bigint,attributedCredit:bigint;
+  if(singleOwner){attributedPaid=invoiced>BigInt(0)?paid:BigInt(0);attributedCredit=invoiced>BigInt(0)?credited:BigInt(0);}
+  else if(settled===BigInt(0)){attributedPaid=BigInt(0);attributedCredit=BigInt(0);}
+  else if(paid===invoiceAmount){attributedPaid=invoiced;attributedCredit=BigInt(0);}
+  else if(credited===invoiceAmount){attributedPaid=BigInt(0);attributedCredit=invoiced;}
+  else {
+    addReason("PO_SHARED_INVOICE_PARTIAL_PAYMENT","This invoice covers multiple purchase orders; its cash and supplier credit shares have no recorded purchase order split.");
+    return {invoiced,paid:null,credited:null,settled:null,outstanding:null};
   }
-  return {
-    invoiced,
-    paid: attributedPaid,
-    outstanding: invoiced - attributedPaid,
-  };
+  return {invoiced,paid:attributedPaid,credited:attributedCredit,settled:attributedPaid+attributedCredit,outstanding:invoiced-attributedPaid-attributedCredit};
 }
 
 function aggregateAmounts(
@@ -458,6 +458,7 @@ function invoiceIdFromEvidence(value: unknown): number | null {
 function hasRepeatedSourceIdentities(invoices: readonly unknown[]): boolean {
   const lineIds = new Set<number>();
   const allocationIds = new Set<number>();
+  const creditAllocationIds = new Set<number>();
   for (const invoice of invoices) {
     if (!isRecord(invoice)) continue;
     if (Array.isArray(invoice.lines)) {
@@ -467,6 +468,10 @@ function hasRepeatedSourceIdentities(invoices: readonly unknown[]): boolean {
         if (lineIds.has(lineId.data)) return true;
         lineIds.add(lineId.data);
       }
+    }
+    if(Array.isArray(invoice.credits)){
+      for(const credit of invoice.credits){const allocationId=id.safeParse(isRecord(credit)?credit.allocationId:undefined);
+        if(!allocationId.success)continue;if(creditAllocationIds.has(allocationId.data))return true;creditAllocationIds.add(allocationId.data);}
     }
     if (Array.isArray(invoice.payments)) {
       for (const payment of invoice.payments) {
@@ -540,6 +545,8 @@ export function buildPoFinancialEvidence(
     results.map((result) => result.paid),
     reasons,
   );
+  const creditedAmountCents = aggregateAmounts(results.map(result=>result.credited),reasons);
+  const settledAmountCents = aggregateAmounts(results.map(result=>result.settled),reasons);
   const outstandingAmountCents = aggregateAmounts(
     results.map((result) => result.outstanding),
     reasons,
@@ -561,7 +568,7 @@ export function buildPoFinancialEvidence(
     currency: input.currency,
     state: reviewReasons.length ? "review_required" : "complete",
     invoicedAmountCents,
-    paidAmountCents,
+    paidAmountCents, creditedAmountCents, settledAmountCents,
     outstandingAmountCents,
     invoiceCount: invoiceIds.size + unidentifiedCount,
     reviewReasons,

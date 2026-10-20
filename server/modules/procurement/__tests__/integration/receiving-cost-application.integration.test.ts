@@ -24,6 +24,7 @@ import { costFingerprint } from "../../../inventory/infrastructure/cost-evidence
 import type { ShipmentExceptionRequest } from "@shared/procurement/shipment-cost-exception";
 import { registerShipmentReconciliationCases } from "./shipment-cost-reconciliation.cases";
 import { registerOriginRepairCases } from "./cost-origin-repair.cases";
+import { registerSupplierCreditCostCases } from "./supplier-credit-cost.cases";
 import { readPurchaseCostStatus } from "../../purchase-cost-status.repository";
 import { readReceiptCostQueue } from "../../receipt-cost-queue-read.repository";
 import { projectReceiptCostQueue } from "../../receipt-cost-queue-read.service";
@@ -39,7 +40,8 @@ const TABLES = [
   schema.products, schema.productVariants, schema.vendors, schema.purchaseOrders,
   schema.purchaseOrderLines, schema.inboundShipments, schema.inboundShipmentLines,
   schema.receivingOrders, schema.receivingLines, schema.poReceipts, schema.receiptReversals,
-  schema.vendorInvoices, schema.vendorInvoiceLines, schema.poStatusHistory,
+  schema.vendorInvoices, schema.supplierCredits, schema.supplierCreditLines,
+  schema.supplierCreditApplications, schema.supplierCreditApplicationReversals, schema.vendorInvoiceLines, schema.poStatusHistory, schema.poEvents,
   schema.inboundFreightCosts, schema.inboundFreightAllocations,
   schema.landedCostSnapshots, schema.landedCostAdjustments, schema.inboundShipmentStatusHistory,
   schema.warehouses, schema.warehouseLocations, schema.productLocations, schema.inventoryLevels,
@@ -1411,4 +1413,25 @@ audit.sequential("receipt/AP/freight cost revisions with real owners", () => {
     await failAudit(async () => { await expect(approveEvidence()).rejects.toThrow(/cost audit injected AP audit failure/); });
     expect(await state()).toEqual(before);
   });
+  // Custody history is intentionally retained; register its case last so the
+  // legacy empty-custody fixture reset never erases immutable return evidence.
+  registerSupplierCreditCostCases({ pool: () => pool, database: () => database, at: NOW, actorId,
+    receive, approveInvoice: approveEvidence, physicalSnapshot: costQuantityPhysicalSnapshot, receiving: () => receiving,
+    closeShort: () => purchasing.closeShort(10, "Returned damaged case will not be replaced", actorId),
+    updateFreight: async () => { await shipment.finalizeAllocations(1, actorId); return shipment.pushLandedCostsToLots(1, actorId); },
+    prepareQuarantineReceipt: async (scope = { shipmentId: 1, purchaseOrderId: 10 }) => {
+      const receipt = await purchasing.createReceiptFromShipment(scope.shipmentId, actorId, { purchaseOrderId: scope.purchaseOrderId });
+      await receiving.open(receipt.id, actorId);
+      const [line] = await storage.getReceivingLines(receipt.id);
+      await receiving.updateLine(line.id, { putawayLocationId: 99, expectedUnitVersion: receivingUnitVersion(line) }, actorId);
+      return { receiptId: receipt.id, line: (await storage.getReceivingLines(receipt.id))[0] };
+    },
+    transferAndSell: async () => {
+      await pool.query("INSERT INTO warehouse.warehouse_locations(id,warehouse_id,code) VALUES(100,1,'CREDIT-PICK')");
+      await inventory.transfer({ productVariantId: 200, fromLocationId: 99, toLocationId: 100, qty: 1, userId: actorId });
+      const { InventoryLotService } = await import("../../../inventory/lots.service");
+      await database.transaction(tx => new InventoryLotService(tx, () => NOW).pickFromLots({ productVariantId: 200,
+        warehouseLocationId: 100, qty: 1, orderId: 1, orderItemId: 1 }));
+    } });
+
 });

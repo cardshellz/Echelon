@@ -8,10 +8,10 @@ import { recordedPaymentReply } from "./procurement-payment-fixtures";
 
 const complete = (): PoFinancialEvidence => ({
   purchaseOrderId: 17, currency: "USD", state: "complete", invoiceCount: 1,
-  invoicedAmountCents: 10000, paidAmountCents: 4000, outstandingAmountCents: 6000, reviewReasons: [],
+  invoicedAmountCents: 10000, paidAmountCents: 4000, creditedAmountCents: 0, settledAmountCents: 4000, outstandingAmountCents: 6000, reviewReasons: [],
 });
 const sharedPartial = (): PoFinancialEvidence => ({
-  ...complete(), state: "review_required", paidAmountCents: null, outstandingAmountCents: null,
+  ...complete(), state: "review_required", paidAmountCents: null, creditedAmountCents: null, settledAmountCents: null, outstandingAmountCents: null,
   reviewReasons: [{ code: "PO_SHARED_INVOICE_PARTIAL_PAYMENT", invoiceId: 71,
     message: "This invoice includes multiple purchases and its partial payment has no recorded PO split." }],
 });
@@ -47,7 +47,7 @@ async function installFinancialFixtures(page: Page, evidence: unknown, options: 
     invoicedAmountCents: 30000, paidAmountCents: 10000, balanceCents: 20000,
   }] } }));
   await page.route("**/api/vendor-invoices/71", route => route.fulfill({ json: {
-    sourceCapabilities: invoiceSourceFixture(), id: 71, invoiceNumber: "TEST-SHARED-71", vendorId: 2, vendorName: "Test vendor", status: options.invoiceStatus ?? "partially_paid", currency: "USD",
+    hasSupplierCreditHistory: false, creditedAmountCents: 0, sourceCapabilities: invoiceSourceFixture(), id: 71, invoiceNumber: "TEST-SHARED-71", vendorId: 2, vendorName: "Test vendor", status: options.invoiceStatus ?? "partially_paid", currency: "USD",
     invoicedAmountCents: 30000, paidAmountCents: 10000, balanceCents: 20000, paymentReviewRequired: false,
     lines: [], poLinks: [{ id: 1, purchaseOrderId: 17, poNumber: "TEST-PO-17" }], attachments: [], payments: [],
   } }));
@@ -77,7 +77,7 @@ test("shows supported PO amounts separately from recorded whole-invoice status",
   const failures = await installFinancialFixtures(page, complete());
   await page.goto("/purchase-orders/17?tab=lines");
   await expect(amountField(page, "Invoiced to this PO")).toHaveText("Invoiced to this PO$100.00");
-  await expect(amountField(page, "Paid for this PO")).toHaveText("Paid for this PO$40.00");
+  await expect(amountField(page, "Cash paid for this PO")).toHaveText("Cash paid for this PO$40.00");
   await expect(amountField(page, "Outstanding for this PO")).toHaveText("Outstanding for this PO$60.00");
   await expect(page.getByText("Linked invoice status describes whole invoices", { exact: false })).toBeVisible();
   await expect(page.getByText("$9,900.00", { exact: false })).toHaveCount(0);
@@ -90,7 +90,7 @@ test("shared partial settlement stays unknown and directs review even when cache
   const failures = await installFinancialFixtures(page, sharedPartial(), { paidStatus: true, autoDraft: true });
   await page.goto("/purchase-orders/17?tab=lines");
   await expect(amountField(page, "Invoiced to this PO")).toHaveText("Invoiced to this PO$100.00");
-  await expect(amountField(page, "Paid for this PO")).toHaveText("Paid for this POUnknown");
+  await expect(amountField(page, "Cash paid for this PO")).toHaveText("Cash paid for this POUnknown");
   await expect(amountField(page, "Outstanding for this PO")).toHaveText("Outstanding for this POUnknown");
   await expect(financialCard(page)).not.toContainText("$0.00");
   await expect(page.getByText("PO fully received and paid. Review the cost summary for any remaining cost follow-ups.", { exact: true })).toHaveCount(0);
@@ -113,7 +113,7 @@ test("unmapped invoice evidence displays unknown amounts rather than zero", asyn
     reviewReasons: [{ code: "PO_INVOICE_UNASSIGNED_LINES", invoiceId: 71, message: "Invoice lines need a verified purchase source." }],
   });
   await page.goto("/purchase-orders/17?tab=lines");
-  await expect(financialCard(page).getByText("Unknown", { exact: true })).toHaveCount(3);
+  await expect(financialCard(page).getByText("Unknown", { exact: true })).toHaveCount(4);
   await expect(financialCard(page)).toContainText("Invoice lines need a verified purchase source.");
   await expect(financialCard(page)).not.toContainText("$0.00");
   expect(failures).toEqual([]);
@@ -121,10 +121,10 @@ test("unmapped invoice evidence displays unknown amounts rather than zero", asyn
 
 test("confirmed zero amounts remain distinguishable from unknown evidence", async ({ page }) => {
   const failures = await installFinancialFixtures(page, {
-    ...complete(), invoiceCount: 0, invoicedAmountCents: 0, paidAmountCents: 0, outstandingAmountCents: 0,
+    ...complete(), invoiceCount: 0, invoicedAmountCents: 0, paidAmountCents: 0, settledAmountCents: 0, outstandingAmountCents: 0,
   });
   await page.goto("/purchase-orders/17?tab=lines");
-  await expect(financialCard(page).getByText("$0.00", { exact: true })).toHaveCount(3);
+  await expect(financialCard(page).getByText("$0.00", { exact: true })).toHaveCount(4);
   await expect(financialCard(page)).toContainText("No active linked invoices recorded.");
   await expect(financialCard(page).getByText("Unknown", { exact: true })).toHaveCount(0);
   expect(failures).toEqual([]);
@@ -146,7 +146,7 @@ test("loading never falls back to cached totals", async ({ page }) => {
   await expect(page.getByText("Invoice and payment are complete.", { exact: true })).toHaveCount(0);
   await expect(page.getByText("PO fully received and paid. Review the cost summary for any remaining cost follow-ups.", { exact: true })).toHaveCount(0);
   release();
-  await expect(amountField(page, "Paid for this PO")).toContainText("$40.00");
+  await expect(amountField(page, "Cash paid for this PO")).toContainText("$40.00");
   expect(failures).toEqual([]);
 });
 
@@ -164,7 +164,7 @@ test("failed evidence read offers a retry without displaying stale cached money"
   await expect(page.getByText("PO fully received and paid. Review the cost summary for any remaining cost follow-ups.", { exact: true })).toHaveCount(0);
   available = true;
   await financialCard(page).getByRole("button", { name: "Reload financial evidence", exact: true }).click();
-  await expect(amountField(page, "Paid for this PO")).toContainText("$40.00");
+  await expect(amountField(page, "Cash paid for this PO")).toContainText("$40.00");
   await expect(page.getByRole("heading", { name: "Review linked invoices", exact: true })).toBeVisible();
   expect(failures).toEqual([]);
 });
@@ -198,15 +198,15 @@ test("shared invoice payment remains available from its invoice owner with the w
 test("returning from a linked invoice reloads the PO financial evidence", async ({ page }) => {
   const failures = await installFinancialFixtures(page, sharedPartial());
   await page.goto("/purchase-orders/17?tab=invoices");
-  await expect(amountField(page, "Paid for this PO")).toHaveText("Paid for this POUnknown");
+  await expect(amountField(page, "Cash paid for this PO")).toHaveText("Cash paid for this POUnknown");
   await page.getByRole("link", { name: "View →", exact: true }).click();
   await expect(page).toHaveURL(/\/ap-invoices\/71/);
   // Simulate an invoice settlement completed while the PO screen is unmounted.
   await page.route("**/api/purchase-orders/17/financial-evidence", route => route.fulfill({ json: {
-    ...complete(), paidAmountCents: 10000, outstandingAmountCents: 0,
+    ...complete(), paidAmountCents: 10000, settledAmountCents: 10000, outstandingAmountCents: 0,
   } }));
   await page.goBack();
-  await expect(amountField(page, "Paid for this PO")).toHaveText("Paid for this PO$100.00");
+  await expect(amountField(page, "Cash paid for this PO")).toHaveText("Cash paid for this PO$100.00");
   await expect(amountField(page, "Outstanding for this PO")).toHaveText("Outstanding for this PO$0.00");
   expect(failures).toEqual([]);
 });
@@ -220,7 +220,7 @@ test("recording an invoice payment reloads the PO evidence on return from its in
   await page.route("**/api/purchase-orders/17/financial-evidence", async route => {
     reads += 1;
     if (settled) await pending;
-    return route.fulfill({ json: settled ? { ...complete(), paidAmountCents: 10000, outstandingAmountCents: 0 } : sharedPartial() });
+    return route.fulfill({ json: settled ? { ...complete(), paidAmountCents: 10000, settledAmountCents: 10000, outstandingAmountCents: 0 } : sharedPartial() });
   });
   await page.route("**/api/ap-payments", route => {
     expect(route.request().method()).toBe("POST");
@@ -232,7 +232,7 @@ test("recording an invoice payment reloads the PO evidence on return from its in
     return route.fulfill({ json: { ...recordedPaymentReply(route.request().postDataJSON(), route.request().headers()["idempotency-key"], "test-financial-reviewer", 91), apLedgerOutcome: { affectedPurchaseOrderIds: [17, 99] } } });
   });
   await page.goto("/purchase-orders/17?tab=lines");
-  await expect(amountField(page, "Paid for this PO")).toHaveText("Paid for this POUnknown");
+  await expect(amountField(page, "Cash paid for this PO")).toHaveText("Cash paid for this POUnknown");
   const dialog = await openInvoicePayment(page);
   await dialog.getByRole("button", { name: "Record Payment", exact: true }).click();
   await expect(dialog).not.toBeVisible();
@@ -240,7 +240,7 @@ test("recording an invoice payment reloads the PO evidence on return from its in
   await expect(financialCard(page)).toContainText("Refreshing purchase order financial evidence…");
   await expect(financialCard(page).locator("dd")).toHaveCount(0);
   release();
-  await expect(amountField(page, "Paid for this PO")).toHaveText("Paid for this PO$100.00");
+  await expect(amountField(page, "Cash paid for this PO")).toHaveText("Cash paid for this PO$100.00");
   await expect(amountField(page, "Outstanding for this PO")).toHaveText("Outstanding for this PO$0.00");
   expect(reads).toBeGreaterThanOrEqual(2);
   expect(failures).toEqual([]);
@@ -251,7 +251,7 @@ test("a lost payment response retains its exact request while PO evidence refres
   let settled = false;
   const keys: string[] = [];
   await page.route("**/api/purchase-orders/17/financial-evidence", route => route.fulfill({ json:
-    settled ? { ...complete(), paidAmountCents: 10000, outstandingAmountCents: 0 } : sharedPartial(),
+    settled ? { ...complete(), paidAmountCents: 10000, settledAmountCents: 10000, outstandingAmountCents: 0 } : sharedPartial(),
   }));
   await page.route("**/api/ap-payments", route => {
     keys.push(route.request().headers()["idempotency-key"]);
@@ -259,7 +259,7 @@ test("a lost payment response retains its exact request while PO evidence refres
     return route.abort("connectionreset");
   });
   await page.goto("/purchase-orders/17?tab=lines");
-  await expect(amountField(page, "Paid for this PO")).toHaveText("Paid for this POUnknown");
+  await expect(amountField(page, "Cash paid for this PO")).toHaveText("Cash paid for this POUnknown");
   const dialog = await openInvoicePayment(page);
   await dialog.getByRole("button", { name: "Record Payment", exact: true }).click();
   await expect(dialog.getByRole("button", { name: "Record Payment", exact: true })).toBeDisabled();
@@ -270,7 +270,7 @@ test("a lost payment response retains its exact request while PO evidence refres
   await expect(dialog.getByRole("button", { name: "Recover saved payment request", exact: true })).toBeEnabled();
   await dialog.getByRole("button", { name: "Close", exact: true }).click();
   await page.goBack();
-  await expect(amountField(page, "Paid for this PO")).toHaveText("Paid for this PO$100.00");
+  await expect(amountField(page, "Cash paid for this PO")).toHaveText("Cash paid for this PO$100.00");
   await expect(amountField(page, "Outstanding for this PO")).toHaveText("Outstanding for this PO$0.00");
   expect(keys).toHaveLength(4);
   expect(new Set(keys).size).toBe(1);

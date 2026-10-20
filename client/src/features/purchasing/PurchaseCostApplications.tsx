@@ -45,6 +45,7 @@ function RevisionDetails({ revision, navigation }: { revision: Revision; navigat
       {source && <div className="flex flex-wrap gap-2">{source.sources.map((reference) => {
         const kind = reference.kind === "purchase_order_line" ? "purchase" : reference.kind === "vendor_invoice_line" ? "invoice" : reference.kind === "shipment_cost" ? "shipment" : null;
         const label = `${formatWorkspaceStatus(reference.kind)} #${reference.lineId}`;
+        if (reference.kind === "supplier_credit_line") return <Link key={`${reference.kind}:${reference.lineId}`} href={navigation.childHref(`/supplier-credits/${reference.documentId}`)} className="break-words text-xs text-primary underline underline-offset-4">{label}</Link>;
         return kind ? <Link key={`${reference.kind}:${reference.lineId}`} href={navigation.inspectHref({ kind, id: reference.documentId })} className="break-words text-xs text-primary underline underline-offset-4">{label}</Link> : <span key={`${reference.kind}:${reference.lineId}`} className="text-xs">{label} · Document #{reference.documentId}</span>;
       })}</div>}
       {source?.manualOverride && <p className="text-xs">Manual source review: {source.manualOverride.reason} · {source.manualOverride.actorId} · {formatWorkspaceDate(source.manualOverride.recordedAt)}</p>}

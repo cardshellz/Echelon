@@ -14,7 +14,7 @@ const tables = vi.hoisted(() => ({
   auditEvents: { id: "audit.id" },
 }));
 const mocks = vi.hoisted(() => ({
-  db: { select: vi.fn(), update: vi.fn(), insert: vi.fn(), transaction: vi.fn() },
+  db: { select: vi.fn(), update: vi.fn(), insert: vi.fn(), execute: vi.fn(), transaction: vi.fn() },
   detectFinancialExceptions: vi.fn(),
 }));
 vi.mock("../../../../db", () => ({ db: mocks.db }));
@@ -87,6 +87,7 @@ function configure(record: RecordedLine, invoiceStatus = "received", financialRe
 describe("invoice line metadata preserves recorded economics", () => {
   beforeEach(() => {
     vi.resetAllMocks();
+    mocks.db.execute.mockResolvedValue({ rows: [{ present: false }] });
     vi.useFakeTimers();
     vi.setSystemTime(fixedTime);
   });
@@ -173,7 +174,7 @@ describe("invoice line metadata preserves recorded economics", () => {
 
   it("uses the explicitly reviewed extended total for an actual quantity change", async () => {
     const record = fixture();
-    const state = configure(record, "received", [[{ total: 6_667 }], [{ id: 12, paidAmountCents: 0 }], []]);
+    const state = configure(record, "received", [[{ total: 6_667 }], [{ id: 12, paidAmountCents: 0, creditedAmountCents: 0 }], []]);
     const { updateInvoiceLine } = await import("../../ap-ledger.service");
     const updated = await updateInvoiceLine(33, { qtyInvoiced: 100, lineTotalCents: 6_667 });
     expect(state.writes[0].values).toMatchObject({ costComponentEvidence: null });

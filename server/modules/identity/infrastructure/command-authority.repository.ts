@@ -7,19 +7,22 @@ import type { PurchaseApprovalIdentityTransaction } from "./purchase-approval-ac
  * Read within the command transaction, after its global command locks. Use the existing
  * approval reader's account -> role/membership -> grant/permission lock order so
  * revocation cannot invalidate authority before that transaction commits.
+ * Read-only snapshot consumers may disable locks; this option never grants command authority.
  */
 export async function readCommandAuthorityActor(
   tx: PurchaseApprovalIdentityTransaction,
   userId: string,
+  options: { lock?: boolean } = {},
 ): Promise<CommandAuthorityActor> {
   const actorId = commandAuthorityActorSchema.shape.userId.parse(userId);
-  const userResult = await tx.execute(sql`SELECT id,active FROM identity.users WHERE id=${actorId} FOR SHARE`);
+  const lock = options.lock !== false;
+  const userResult = await tx.execute(sql`SELECT id,active FROM identity.users WHERE id=${actorId} ${lock ? sql`FOR SHARE` : sql``}`);
   const user = z.object({ id: z.string(), active: z.number().int() }).optional().parse(userResult.rows[0]);
   if (!user || user.active !== 1) {
     return { userId: actorId, active: false, permissions: [], scopedPermissions: [] };
   }
 
-  await tx.execute(sql`
+  if (lock) await tx.execute(sql`
     SELECT role.id
     FROM identity.auth_user_roles assignment
     JOIN identity.auth_roles role ON role.id=assignment.role_id
@@ -33,7 +36,7 @@ export async function readCommandAuthorityActor(
     JOIN identity.auth_permissions permission ON permission.id=grant_row.permission_id
     WHERE assignment.user_id=${actorId}
     ORDER BY assignment.id,grant_row.id,permission.id
-    FOR SHARE OF assignment,grant_row,permission
+    ${lock ? sql`FOR SHARE OF assignment,grant_row,permission` : sql``}
   `);
   const grants = z.array(z.object({
     resource: z.string().min(1), action: z.string().min(1), constraints: z.unknown(),

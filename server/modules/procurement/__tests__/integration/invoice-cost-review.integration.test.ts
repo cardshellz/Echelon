@@ -15,7 +15,8 @@ config({ path: resolve(process.cwd(), ".env.test") });
 const url = process.env.ECHELON_TEST_DATABASE_URL;
 const integration = url && process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true" ? describe : describe.skip;
 const NOW = new Date("2026-09-07T12:00:00Z");
-const TABLES = [schema.vendors, schema.vendorInvoices, schema.vendorInvoiceLines];
+const TABLES = [schema.vendors, schema.vendorInvoices, schema.supplierCredits, schema.supplierCreditLines,
+  schema.supplierCreditApplications, schema.supplierCreditApplicationReversals, schema.vendorInvoiceLines];
 
 // The command, advisory lock, version check, audit and durable command repository
 // execute against real PostgreSQL. Linked component/COGS application is covered

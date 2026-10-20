@@ -28,7 +28,8 @@ const TABLES = [schema.products, schema.productVariants, schema.vendors, schema.
   schema.users, schema.authRoles, schema.authPermissions, schema.authUserRoles, schema.authRolePermissions,
   schema.purchaseOrders, schema.purchaseOrderLines, schema.poStatusHistory, schema.poEvents, schema.purchasingRecommendationPoHandoffs,
   schema.inboundShipments, schema.inboundShipmentLines, schema.receivingOrders, schema.receivingLines, schema.poReceipts,
-  schema.vendorInvoices, schema.vendorInvoiceLines, schema.vendorInvoicePoLinks, schema.landedCostSnapshots, schema.landedCostAdjustments, schema.inventoryLots];
+  schema.vendorInvoices, schema.supplierCredits, schema.supplierCreditLines,
+  schema.supplierCreditApplications, schema.supplierCreditApplicationReversals, schema.vendorInvoiceLines, schema.vendorInvoicePoLinks, schema.landedCostSnapshots, schema.landedCostAdjustments, schema.inventoryLots];
 
 integration.sequential("supplier document from real saved purchase orders", () => {
   let pool: pg.Pool;
