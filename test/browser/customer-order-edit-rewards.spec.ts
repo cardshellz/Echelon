@@ -31,11 +31,17 @@ async function setup(
     loseReturnResponse?: boolean;
     failReturnRefresh?: boolean;
     failPricing?: boolean;
+    pendingIssuance?: boolean;
   } = {},
 ) {
   const requests: Array<{
     path: string;
-    body?: { rewardId?: string; discountCodes?: string[] };
+    body?: {
+      rewardId?: string;
+      discountCodes?: string[];
+      requestKey?: string;
+      points?: number;
+    };
     commandKey?: string;
   }> = [];
   const errors: string[] = [];
@@ -43,6 +49,9 @@ async function setup(
     balance = "590.00",
     cancellations = 0,
     refreshFailed = false;
+  let issuing = options.pendingIssuance ?? false;
+  let issuanceAttempts = 0;
+  if (issuing) rewards = rewards.filter((reward) => reward.id !== firstId);
   const quantity = options.quantity ?? 1;
   const discount = (key: string, label: string, amountCents: number) => ({
     key,
@@ -198,7 +207,31 @@ async function setup(
           pointsPerDollar: "100.00",
           currencyName: "SHELLZ Rewards",
           rewards,
-          pending: [],
+          pending: issuing ? [{ requestKey: firstId, points: 100 }] : [],
+        },
+      });
+    }
+    if (input.path.endsWith("/rewards/issue")) {
+      expect(input.body).toEqual({ requestKey: firstId, points: 100 });
+      issuanceAttempts++;
+      if (issuanceAttempts === 1)
+        return route.fulfill({
+          status: 503,
+          json: {
+            error: {
+              code: "REWARD_ISSUANCE_PENDING",
+              message: "Your reward is still being confirmed.",
+            },
+          },
+        });
+      issuing = false;
+      rewards.push(structuredClone(initialRewards[0]));
+      return route.fulfill({
+        json: {
+          code: "SHELLZ-ONE",
+          value: "1.00",
+          expiresAt: initialRewards[0].expiresAt,
+          balance,
         },
       });
     }
@@ -334,6 +367,47 @@ test("selects the $1 reward independently and returns the unused $3.66 through C
       .locator(".oe-rewards")
       .evaluate((el) => el.scrollWidth <= el.clientWidth),
   ).toBe(true);
+});
+
+test("recovers an unfinished issuance once without automatically applying it to another order", async ({
+  page,
+}) => {
+  const h = await setup(page, { pendingIssuance: true });
+  const finish = page.getByRole("button", {
+    name: "Finish creating 100 point reward",
+  });
+  await expect(page.getByText("Retry saved", { exact: false })).toHaveCount(0);
+  await finish.click();
+  await expect(
+    page.getByText("Your reward is still being confirmed."),
+  ).toBeVisible();
+  await page.reload();
+  await finish.click();
+  await expect(finish).toHaveCount(0);
+  const reward = page.getByRole("group", { name: "$1.00 saved reward" });
+  await expect(reward.getByText("Unused", { exact: true })).toBeVisible();
+  await expect(
+    reward.getByRole("button", { name: "Return to points" }),
+  ).toBeEnabled();
+  await expect(page.getByTestId("club-canonical-balance")).toHaveText(
+    "590.00 SHELLZ Rewards",
+  );
+  expect(
+    h.requests
+      .filter((input) => input.path.endsWith("/rewards/issue"))
+      .map((input) => input.body),
+  ).toEqual([
+    { requestKey: firstId, points: 100 },
+    { requestKey: firstId, points: 100 },
+  ]);
+  expect(
+    h.requests.some((input) =>
+      input.body?.discountCodes?.includes("SHELLZ-ONE"),
+    ),
+  ).toBe(false);
+  await reward.getByRole("button", { name: "Use reward" }).click();
+  await expect(reward.getByText("Applied", { exact: true })).toBeVisible();
+  expect(h.errors).toEqual([]);
 });
 test("keeps both selected when the merchandise covers their full value", async ({
   page,
